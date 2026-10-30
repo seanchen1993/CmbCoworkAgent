@@ -1,5 +1,6 @@
 import { parentPort } from "node:worker_threads"
 import type {
+  DashboardEsWorkerErrorCause,
   DashboardEsWorkerQueryRequest,
   DashboardEsWorkerRequest,
   DashboardEsWorkerResponse
@@ -27,6 +28,37 @@ function finishShutdownIfIdle(): void {
   }
 }
 
+/** 单个 cause 节点的消息上限。queryNode 已把 ES 报错体截到 200 字，这里只防异常长的 fetch 报错。 */
+const CAUSE_MESSAGE_LIMIT = 512
+/** cause 链深度上限。实际最深是 UNAVAILABLE → NODE_UNAVAILABLE → fetch 原生错误。 */
+const CAUSE_CHAIN_DEPTH = 4
+
+/**
+ * 把 Error 的 cause 链摊平成可结构化克隆的普通对象。
+ *
+ * 只取 code / message，不带 stack：worker 内的栈对主进程排查没有价值，且体积不可控。
+ * 自引用的 cause（`e.cause = e`）由 seen 集合挡住，深度上限是第二道保险。
+ */
+function describeCause(error: unknown): DashboardEsWorkerErrorCause | undefined {
+  const seen = new Set<unknown>()
+  const visit = (value: unknown, depth: number): DashboardEsWorkerErrorCause | undefined => {
+    if (!value || typeof value !== "object" || depth > CAUSE_CHAIN_DEPTH || seen.has(value)) {
+      return undefined
+    }
+    seen.add(value)
+    const record = value as { code?: unknown; message?: unknown; cause?: unknown }
+    const message = typeof record.message === "string" ? record.message : ""
+    if (!message) return visit(record.cause, depth + 1)
+    const nested = visit(record.cause, depth + 1)
+    return {
+      message: message.slice(0, CAUSE_MESSAGE_LIMIT),
+      ...(typeof record.code === "string" && record.code ? { code: record.code } : {}),
+      ...(nested ? { cause: nested } : {})
+    }
+  }
+  return visit(error, 0)
+}
+
 async function handleQuery(request: DashboardEsWorkerQueryRequest): Promise<void> {
   const cancellation = new Int32Array(request.cancellationBuffer)
   activeCancellations.add(cancellation)
@@ -42,11 +74,17 @@ async function handleQuery(request: DashboardEsWorkerQueryRequest): Promise<void
             error instanceof Error ? error.message : String(error),
             { cause: error }
           )
+    const cause = describeCause(normalized.cause)
     post({
       type: "query-result",
       requestId: request.requestId,
       ok: false,
-      error: { code: normalized.code, message: normalized.message, stack: normalized.stack }
+      error: {
+        code: normalized.code,
+        message: normalized.message,
+        stack: normalized.stack,
+        ...(cause ? { cause } : {})
+      }
     })
   } finally {
     activeCancellations.delete(cancellation)

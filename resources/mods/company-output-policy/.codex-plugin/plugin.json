@@ -1,0 +1,6 @@
+{
+  "name": "输出保护摘要",
+  "version": "1.0.0",
+  "description": "显示宿主输出保护的处理摘要，过滤规则由宿主负责执行。",
+  "mods": "mods/manifest.json"
+}

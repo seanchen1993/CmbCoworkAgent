@@ -742,9 +742,11 @@ async function main(): Promise<void> {
     "workflowProgressBufferRef.current.has(threadId)",
     "subagentTranscriptDirtyIdsRef.current[threadId]",
     "subagentTranscriptPendingMessagesRef.current[threadId]",
-    "subagentTranscriptPersistChainsRef.current[threadId]",
-    "workflowNotificationRetryOnIdleRef.current[threadId]",
-    "coordinatorNotificationRetryOnIdleRef.current[threadId]"
+    "subagentTranscriptPersistChainsRef.current[threadId]"
+    // A pending summary is deliberately absent from this list. It used to be
+    // renderer state, so dehydrating the thread would have dropped it; the
+    // main-process scheduler now holds it, keyed by threadId, and survives the
+    // page forgetting the thread entirely.
   ]) {
     assert.ok(
       safeDehydrateSource.includes(requiredGuard),

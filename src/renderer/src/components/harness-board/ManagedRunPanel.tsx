@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useMemo, useState } from "react"
+import { useHarnessNotifications } from "@/lib/harness-notifications"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import {
   ChevronDown,
   ChevronRight,
@@ -22,6 +23,8 @@ import type {
 } from "../../../../shared/harness-board-types"
 
 const EVENT_LABELS: Record<string, string> = {
+  decision_notification_created: "托管运行决策等待中",
+  decision_notification_ended: "托管运行决策已结束",
   run_started: "启动托管运行",
   managed_agent_turn_ended: "托管模式会话轮次结束",
   provider_retry_timer_elapsed: "模型服务重试时间已到",
@@ -77,8 +80,8 @@ const DECISION_LABELS: Record<string, string> = {
 
 const DECISION_SOURCE_LABELS: Record<string, string> = {
   "controller:system": "自动推进",
-  "user:desktop": "APP 操作",
-  "user:im": "招乎消息推进",
+  "user:desktop": "桌面端操作",
+  "user:im": "招乎远程操作",
   "system:system": "系统推进"
 }
 
@@ -195,11 +198,6 @@ function DecisionDetailsTooltip({
                   <div>会话结果：{facts.terminalOutcome === "success" ? "成功" : "失败"}</div>
                 )}
                 {facts.terminalReason && <div>会话说明：{facts.terminalReason}</div>}
-                {policyType === "biz_retry" ? (
-                  <div>本次当前任务重试：{Math.min(facts.bizRetryCount + 1, 3)}/3</div>
-                ) : (
-                  facts.bizRetryCount > 0 && <div>当前任务已重试：{facts.bizRetryCount}/3</div>
-                )}
                 {policyType === "provider_retry" ? (
                   <div>本次模型服务重试：{Math.min(facts.providerRetryCount + 1, 3)}/3</div>
                 ) : (
@@ -309,11 +307,6 @@ export function ManagedRunPanel({
           托管模型服务重试中 {run.providerRetryCount}/3 · {run.nextRetryAt}
         </div>
       )}
-      {run.status === "running" && run.bizRetryCount > 0 && (
-        <div className="mt-2 rounded-lg border border-status-warning/25 bg-status-warning/5 px-2.5 py-2 text-[11px] text-status-warning">
-          托管当前任务重试中 {run.bizRetryCount}/3
-        </div>
-      )}
       {run.status === "corrupt" && (
         <div className="mt-2 rounded-lg border border-status-warning/25 bg-status-warning/5 px-2.5 py-2 text-[11px] text-status-warning">
           损坏记录已隔离；重新开始将创建新的托管 Run，不会读取该记录的状态。
@@ -352,6 +345,17 @@ function EventRow({
   sessionTitles?: Map<string, string>
   onSelectThread?: (threadId: string) => void
 }): React.JSX.Element {
+  const notificationEvent =
+    event.type === "decision_notification_created" || event.type === "decision_notification_ended"
+  const notificationAction = event.notificationAction
+    ? {
+        stop: "stop_managed_run",
+        continue: "continue_current_thread",
+        new_thread: "start_new_thread",
+        approve: "approve_human_gate",
+        reject: "reject_human_gate"
+      }[event.notificationAction]
+    : undefined
   const threadIds = [event.threadId, event.sourceThreadId, event.targetThreadId].filter(
     (threadId, index, values): threadId is string =>
       Boolean(threadId) && values.indexOf(threadId) === index
@@ -372,19 +376,25 @@ function EventRow({
           <span className="font-semibold text-foreground">
             {EVENT_LABELS[event.type] || event.type}
           </span>
-          {event.type === "managed_run_decision" && (
+          {(event.type === "managed_run_decision" || notificationEvent) && (
             <DecisionDetailsTooltip
               summary={event.summary}
               policyType={event.policyResult?.type}
               proposedAction={event.policyResult?.proposedAction}
-              decisionAction={event.decisionAction}
-              showFinalAction={event.decisionActor === "user"}
+              decisionAction={event.decisionAction ?? notificationAction}
+              showFinalAction={event.decisionActor === "user" || Boolean(notificationAction)}
               facts={event.policyResult?.facts}
               rule={event.policyResult?.rule}
               stageLabels={stageLabels}
             >
-              {DECISION_SOURCE_LABELS[`${event.decisionActor}:${event.decisionChannel}`] ||
-                "未知决策"}
+              {notificationEvent
+                ? event.notificationStatus === "pending"
+                  ? "等待人工决策"
+                  : event.notificationStatus === "invalidated"
+                    ? "已失效"
+                    : DECISION_SOURCE_LABELS[`user:${event.decisionChannel}`] || "系统处理"
+                : DECISION_SOURCE_LABELS[`${event.decisionActor}:${event.decisionChannel}`] ||
+                  "未知决策"}
             </DecisionDetailsTooltip>
           )}
         </div>
@@ -477,6 +487,13 @@ export function ManagedRunTimeline({
   onSelectNode,
   onSelectThread
 }: ManagedRunTimelineProps): React.JSX.Element | null {
+  const notifications = useHarnessNotifications()
+  const notificationRevision = notifications
+    .filter((item) => item.runId === run?.runId)
+    .map((item) => `${item.notificationId}:${item.updatedAt}:${Boolean(item.disabledTargets?.im)}`)
+    .join("|")
+  const requestVersion = useRef(0)
+  const loadedRange = useRef<{ runId?: string; oldestEventId?: string }>({})
   const [events, setEvents] = useState<ManagedRunEvent[]>([])
   const [nextCursor, setNextCursor] = useState<ManagedRunEventCursor | undefined>()
   const [hasMore, setHasMore] = useState(false)
@@ -488,26 +505,41 @@ export function ManagedRunTimeline({
   const loadEvents = useCallback(
     async (cursor?: ManagedRunEventCursor, append = false): Promise<void> => {
       if (!run) return
+      const version = ++requestVersion.current
       if (append) setLoadingMore(true)
       else setLoading(true)
       setLoadError(null)
       try {
-        const page: ManagedRunEventsPage = await window.api.harnessBoard.getManagedRunEvents({
+        let page: ManagedRunEventsPage = await window.api.harnessBoard.getManagedRunEvents({
           projectId,
           featureId,
           runId: run.runId,
           cursor,
           limit: 200
         })
-        setEvents((current) => (append ? [...page.events, ...current] : page.events))
+        if (version !== requestVersion.current) return
+        let refreshed = page.events
+        const retainedBoundary = loadedRange.current.runId === run.runId ? loadedRange.current.oldestEventId : undefined
+        while (!append && page.hasMore && page.nextCursor && retainedBoundary && !refreshed.some((event) => event.eventId === retainedBoundary)) {
+          page = await window.api.harnessBoard.getManagedRunEvents({
+            projectId, featureId, runId: run.runId, cursor: page.nextCursor, limit: 200
+          })
+          if (version !== requestVersion.current) return
+          refreshed = [...page.events, ...refreshed]
+        }
+        loadedRange.current = { runId: run.runId, oldestEventId: refreshed[0]?.eventId }
+        setEvents((current) => (append ? [...refreshed, ...current] : refreshed))
         setNextCursor(page.nextCursor)
         setHasMore(page.hasMore)
       } catch (error) {
+        if (version !== requestVersion.current) return
         setHasMore(false)
         setLoadError(error instanceof Error ? error.message : String(error))
       } finally {
-        if (append) setLoadingMore(false)
-        else setLoading(false)
+        if (version === requestVersion.current) {
+          setLoadingMore(false)
+          setLoading(false)
+        }
       }
     },
     [featureId, projectId, run]
@@ -515,7 +547,10 @@ export function ManagedRunTimeline({
 
   useEffect(() => {
     if (run) void loadEvents()
-  }, [loadEvents, run])
+    return () => {
+      requestVersion.current += 1
+    }
+  }, [loadEvents, run, notificationRevision])
 
   useEffect(() => {
     setExpandedGroups(new Set(["global"]))
@@ -533,6 +568,28 @@ export function ManagedRunTimeline({
         .filter((eventId): eventId is string => Boolean(eventId))
     )
     return [...events].reverse().filter((event) => {
+      if (event.type === "decision_notification_created") {
+        return !events.some(
+          (candidate) =>
+            (candidate.type === "decision_notification_ended" ||
+              candidate.type === "managed_run_decision") &&
+            candidate.notificationId === event.notificationId
+        )
+      }
+      if (event.type === "decision_notification_ended") {
+        return !events.some(
+          (candidate) =>
+            candidate.type === "managed_run_decision" &&
+            candidate.notificationId === event.notificationId
+        )
+      }
+      if (event.type === "managed_run_decision" && event.notificationId) return true
+      if (
+        event.type === "human_gate_invoked" &&
+        event.gateId &&
+        events.some((candidate) => candidate !== event && candidate.gateId === event.gateId)
+      )
+        return false
       if (GLOBAL_LIFECYCLE_EVENT_TYPES.has(event.type)) return true
       if (ACTION_RESULT_EVENT_TYPES.has(event.type)) return false
       if (consumedSourceEventIds.has(event.eventId)) return false
@@ -713,7 +770,7 @@ export function ManagedRunTimeline({
                 size="sm"
                 className="w-full text-xs"
                 onClick={() => nextCursor !== undefined && void loadEvents(nextCursor, true)}
-                disabled={loadingMore || nextCursor === undefined}
+                disabled={loading || loadingMore || nextCursor === undefined}
               >
                 {loadingMore && <Loader2 className="mr-2 size-3.5 animate-spin" />}
                 加载更早事件

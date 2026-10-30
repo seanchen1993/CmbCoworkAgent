@@ -114,6 +114,8 @@ export interface HookContext {
    * so they surface in 项目运营概览. Empty for non-project-mode conversations.
    */
   harnessProjectId?: string
+  /** Stable ID of the adapter bound to the current Harness project session. */
+  harnessAdapterId?: string
   /**
    * Bound adapter name / version (= `properties.harnessAdapterName` /
    * `properties.harnessAdapterVersion` on code-adoption events). Exposed to hooks

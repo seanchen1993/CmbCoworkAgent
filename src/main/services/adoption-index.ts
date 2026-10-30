@@ -222,7 +222,9 @@ function fsyncCurrentPrimarySnapshot(path: string): boolean {
   try {
     // FlushFileBuffers requires a writable descriptor on Windows.
     fileDescriptor = openSync(path, "r+")
-    if (!sameSnapshotIdentity(snapshotIdentityFromDescriptor(fileDescriptor), primarySnapshotIdentity)) {
+    if (
+      !sameSnapshotIdentity(snapshotIdentityFromDescriptor(fileDescriptor), primarySnapshotIdentity)
+    ) {
       return false
     }
     fsyncFileBestEffort(fileDescriptor)
@@ -275,7 +277,8 @@ function saveRetryDelay(attempt: number): number {
 
 function warnSaveFailure(message: string, error: unknown): void {
   const now = Date.now()
-  if (lastSaveFailureLogAt !== 0 && now - lastSaveFailureLogAt < SAVE_FAILURE_LOG_INTERVAL_MS) return
+  if (lastSaveFailureLogAt !== 0 && now - lastSaveFailureLogAt < SAVE_FAILURE_LOG_INTERVAL_MS)
+    return
   lastSaveFailureLogAt = now
   console.warn(message, error)
 }
@@ -322,7 +325,7 @@ function scheduleSave(): void {
 export interface GenIndexRow {
   event_id: string
   file_path: string
-  /** Tool that produced this generation ("write_file" | "edit_file"); null on legacy rows. */
+  /** Tool that produced this generation ("write_file" | "edit_file" | "execute"); null on legacy rows. */
   tool: string | null
   content_fingerprint: string | null
   shard_file: string
@@ -482,6 +485,17 @@ export interface AdoptionMeasurementWrite {
   details?: AdoptLineDetailsInput | null
   /** Optional storage bounds applied before the transaction is flushed to disk. */
   detailsLimits?: AdoptLineDetailsLimits
+}
+
+/** A per-file rollup event (`code_commit_file`) derived from several measurement writes. */
+export interface AdoptionFileEventWrite {
+  /**
+   * Every generation the rollup was computed from. The event is enqueued only
+   * when all of them close in the same transaction; otherwise the transaction
+   * fails so the job re-measures without the generations measured elsewhere.
+   */
+  genEventIds: string[]
+  outboxEvent: EventOutboxInput
 }
 
 export interface AdoptionMeasurementCommitResult {
@@ -738,6 +752,25 @@ export async function initializeAdoptionIndex(): Promise<boolean> {
          ON commit_jobs(status, next_attempt_at, created_at)`
     )
 
+    // Sticky per-thread active skills for code-generation attribution. Lives
+    // here rather than in memory alone because a thread routinely spans an app
+    // restart (work stops for the night, resumes the next morning): with an
+    // in-memory-only set, every generation between the restart and the next
+    // SKILL.md read lost its skill attribution and was misfiled as vibecoding.
+    // See proposal-window.ts for the supersede/merge policy this table stores.
+    db.run(`
+      CREATE TABLE IF NOT EXISTS thread_active_skills (
+        thread_id TEXT PRIMARY KEY,
+        skills_json TEXT NOT NULL,
+        skill_source_json TEXT NOT NULL,
+        updated_at INTEGER NOT NULL
+      )
+    `)
+    db.run(
+      `CREATE INDEX IF NOT EXISTS idx_thread_active_skills_updated_at
+         ON thread_active_skills(updated_at)`
+    )
+
     scheduleSave()
     console.log("[AdoptionIndex] initialized at", dbPath)
     return true
@@ -981,6 +1014,78 @@ export function getGenRowByEventId(eventId: string): GenIndexRow | null {
   }
 }
 
+/** A thread's persisted sticky active-skill set. */
+export interface ThreadActiveSkillsRow {
+  skills: string[]
+  skillSource: string[]
+}
+
+function parseStringArray(value: unknown): string[] {
+  if (typeof value !== "string" || !value) return []
+  try {
+    const parsed = JSON.parse(value) as unknown
+    if (!Array.isArray(parsed)) return []
+    return parsed.filter((entry): entry is string => typeof entry === "string" && entry.length > 0)
+  } catch {
+    return []
+  }
+}
+
+/**
+ * Persist a thread's active-skill set, replacing any prior row. Callers own the
+ * supersede-vs-merge decision (see proposal-window.ts); this only stores it.
+ */
+export function upsertThreadActiveSkills(
+  threadId: string,
+  skills: string[],
+  skillSource: string[]
+): void {
+  if (!db || !threadId) return
+  try {
+    db.run(
+      `INSERT OR REPLACE INTO thread_active_skills
+         (thread_id, skills_json, skill_source_json, updated_at)
+       VALUES (?, ?, ?, ?)`,
+      [threadId, JSON.stringify(skills), JSON.stringify(skillSource), Date.now()]
+    )
+    scheduleSave()
+  } catch (e) {
+    console.warn("[AdoptionIndex] upsertThreadActiveSkills failed:", e)
+  }
+}
+
+/** Read back a thread's persisted active-skill set, or null when it has none. */
+export function getThreadActiveSkillsRow(threadId: string): ThreadActiveSkillsRow | null {
+  if (!db || !threadId) return null
+  const stmt = db.prepare(
+    `SELECT skills_json, skill_source_json FROM thread_active_skills WHERE thread_id = ?`
+  )
+  stmt.bind([threadId])
+  try {
+    if (!stmt.step()) return null
+    const row = stmt.getAsObject() as { skills_json?: unknown; skill_source_json?: unknown }
+    const skills = parseStringArray(row.skills_json)
+    if (skills.length === 0) return null
+    return { skills, skillSource: parseStringArray(row.skill_source_json) }
+  } catch (e) {
+    console.warn("[AdoptionIndex] getThreadActiveSkillsRow failed:", e)
+    return null
+  } finally {
+    stmt.free()
+  }
+}
+
+/** Retention for the sticky-skill table: drop rows untouched since `cutoff`. */
+export function deleteThreadActiveSkillsOlderThan(cutoff: number): void {
+  if (!db) return
+  try {
+    db.run(`DELETE FROM thread_active_skills WHERE updated_at < ?`, [cutoff])
+    scheduleSave()
+  } catch (e) {
+    console.warn("[AdoptionIndex] deleteThreadActiveSkillsOlderThan failed:", e)
+  }
+}
+
 /**
  * Lightweight listing of all *pending* (unmeasured) generations within the
  * window: just `event_id` + `file_path`, no BLOBs. Used by the agent shell-op
@@ -1153,7 +1258,8 @@ export function enqueueEventOutbox(event: EventOutboxInput, flushNow = true): bo
  */
 export function commitAdoptionMeasurements(
   writes: AdoptionMeasurementWrite[],
-  commitJobId?: string
+  commitJobId?: string,
+  fileEvents: AdoptionFileEventWrite[] = []
 ): AdoptionMeasurementCommitResult {
   if (!db) return { success: false, measuredCount: 0, enqueuedCount: 0 }
   let measuredCount = 0
@@ -1161,6 +1267,7 @@ export function commitAdoptionMeasurements(
   let detailsLimits: AdoptLineDetailsLimits | undefined
   try {
     db.run("BEGIN TRANSACTION")
+    const closedGenEventIds = new Set<string>()
     for (const write of writes) {
       db.run(
         `UPDATE gen_events
@@ -1170,12 +1277,20 @@ export function commitAdoptionMeasurements(
         [write.genEventId]
       )
       if (db.getRowsModified() <= 0) continue
+      closedGenEventIds.add(write.genEventId)
       measuredCount += 1
       if (write.details) insertAdoptLineDetailsRow(write.genEventId, write.details)
       if (write.detailsLimits) detailsLimits = write.detailsLimits
       if (write.outboxEvent) {
         if (insertOutboxEventUnsafe(write.outboxEvent)) enqueuedCount += 1
       }
+    }
+    for (const fileEvent of fileEvents) {
+      const stale = fileEvent.genEventIds.find((id) => !closedGenEventIds.has(id))
+      if (stale !== undefined) {
+        throw new Error(`file rollup is stale: generation ${stale} was measured concurrently`)
+      }
+      if (insertOutboxEventUnsafe(fileEvent.outboxEvent)) enqueuedCount += 1
     }
     if (commitJobId) {
       const now = Date.now()

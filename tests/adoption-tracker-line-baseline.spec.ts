@@ -12,6 +12,7 @@ import {
   isCodeFile,
   evaluateAdoptionLineBaselines
 } from "../src/main/services/adoption-tracker.ts"
+import { shellEditLineFragments } from "../src/main/services/adoption-lines.ts"
 import { attributeChangeKind } from "../src/main/services/change-kind-classifier.ts"
 
 function assert(condition: unknown, message: string): void {
@@ -151,6 +152,50 @@ function testAgentAppendDoesNotSupersedePreviousGeneration(): void {
   assertCounts(olderResult, { generated: 2, effective: 2, adopted: 2 }, "append older row")
 }
 
+function shellBaseline(before: string, after: string) {
+  const fragments = shellEditLineFragments(before, after)
+  assert(fragments !== null, "shell edit should produce fragments")
+  return buildAdoptionLineBaseline({ tool: "execute", ...fragments! })
+}
+
+function testShellEditKeepsOnlyChangedLines(): void {
+  const before = ["import a from 'a'", "", "export function f() {", "  return 1", "}"].join("\n")
+  const after = [
+    "import a from 'a'",
+    "",
+    "export function f() {",
+    "  return 2",
+    "}",
+    "export const g = 3"
+  ].join("\n")
+  const fragments = shellEditLineFragments(before, after)
+  assertStringArray(
+    fragments!.generatedContent.split("\n"),
+    ["  return 2", "export const g = 3"],
+    "shell edit generated lines"
+  )
+  assertStringArray(fragments!.oldString.split("\n"), ["  return 1"], "shell edit old lines")
+  assert(
+    shellEditLineFragments(before, before.replace("return 1", "return   1")) === null,
+    "a whitespace-only shell edit should record nothing"
+  )
+}
+
+function testShellReplacementSupersedesPreviousGeneration(): void {
+  const older = writeBaseline(["line A", "line B", "line C"].join("\n"))
+  const newer = shellBaseline(
+    ["line A", "line B", "line C"].join("\n"),
+    ["line A", "line D", "line C"].join("\n")
+  )
+  const [newerResult, olderResult] = evaluateAdoptionLineBaselines(
+    [newer, older],
+    ["line A", "line D", "line C"].join("\n")
+  )
+
+  assertCounts(newerResult, { generated: 1, effective: 1, adopted: 1 }, "shell newer row")
+  assertCounts(olderResult, { generated: 3, effective: 2, adopted: 2 }, "shell older row")
+}
+
 function testAgentReplacementSupersedesPreviousGeneration(): void {
   const older = writeBaseline(["line A", "line B", "line C"].join("\n"))
   const newer = editBaseline("line B", "line D")
@@ -262,6 +307,10 @@ function run(): void {
   console.log("PASS agent append does not supersede previous generation")
   testAgentReplacementSupersedesPreviousGeneration()
   console.log("PASS agent replacement supersedes previous generation")
+  testShellEditKeepsOnlyChangedLines()
+  console.log("PASS shell edit records only changed lines")
+  testShellReplacementSupersedesPreviousGeneration()
+  console.log("PASS shell replacement supersedes previous generation")
   testHumanModificationKeepsEffectiveButNotAdoptedLine()
   console.log("PASS human modification preserves effective denominator")
   testAgentDeletionSupersedesPreviousGeneration()

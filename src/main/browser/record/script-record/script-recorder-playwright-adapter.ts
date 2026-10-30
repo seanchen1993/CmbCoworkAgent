@@ -348,6 +348,27 @@ export function parsePlaywrightScriptRecorderEvent(
   }
 }
 
+export function preferExactRecordedTextSelector<T>(
+  selector: string,
+  queryAll: (selector: string) => T[]
+): string {
+  if (!/^internal:text="(?:\\.|[^"\\])*"i$/u.test(selector)) return selector
+  const exactSelector = `${selector.slice(0, -1)}s`
+  try {
+    const original = queryAll(selector)
+    const exact = queryAll(exactSelector)
+    return exact.length === 1 && original[0] === exact[0] ? exactSelector : selector
+  } catch {
+    return selector
+  }
+}
+
+export function isDynamicOverlaySelector(selector: string): boolean {
+  return /(?:#|\bid\s*=\s*["']?)(?:(?:[a-z][\w-]*-)?(?:popover|tooltip|dropdown|popper)-)\d+\b/iu.test(
+    selector
+  )
+}
+
 export function buildPlaywrightScriptRecorderInjectionScript(frameChannelId = ""): string {
   const { injectedScriptSource, pollingRecorderSource } = getPlaywrightRecorderSourceBundle()
   const injectedScriptConstructor = buildPlaywrightModuleConstructorExpression(
@@ -603,6 +624,29 @@ export function buildPlaywrightScriptRecorderInjectionScript(frameChannelId = ""
       return generatedSelectorForElement(element);
     }
 
+    function stableCheckableLabelSelector(element) {
+      if (!(element instanceof Element)) return "";
+      const label = element.closest("label");
+      if (!(label instanceof HTMLLabelElement)) return "";
+      const control = label.control;
+      if (!(control instanceof HTMLInputElement)) return "";
+      const inputType = text(control.type).toLowerCase();
+      if (inputType !== "radio" && inputType !== "checkbox") return "";
+
+      const attributes = ['type="' + cssAttributeValue(inputType) + '"'];
+      const name = text(control.name);
+      const value = text(control.value);
+      if (name) attributes.push('name="' + cssAttributeValue(name) + '"');
+      if (value) attributes.push('value="' + cssAttributeValue(value) + '"');
+      const selector = "label:has(input[" + attributes.join("][") + "])";
+      try {
+        const matches = Array.from(document.querySelectorAll(selector));
+        return matches.length === 1 && matches[0] === label ? selector : "";
+      } catch {
+        return "";
+      }
+    }
+
     function selectorForFrameElementAtIndex(index) {
       const numericIndex = Number(index);
       if (!Number.isInteger(numericIndex) || numericIndex < 0) return "";
@@ -626,6 +670,29 @@ export function buildPlaywrightScriptRecorderInjectionScript(frameChannelId = ""
       if (name) return 'input[name="' + cssAttributeValue(name) + '"]';
 
       return 'input[type="file"]';
+    }
+
+    function isTransientActionSelector(selector) {
+      return /(?:^|[.#\s>+~:[\]'"])(?:ant-(?:tooltip|popover|dropdown)-open|[\w-]*(?:hover|active|focus|focused|open|opened|expanded)[\w-]*)(?:$|[.#\s>+~:[\]'"])/i.test(selector);
+    }
+
+    function stableExactTextSelectorForElement(element) {
+      if (!(element instanceof Element)) return "";
+      const visibleText = safeText(element.innerText || element.textContent, 80);
+      if (!visibleText) return "";
+      const candidate = "internal:text=" + JSON.stringify(visibleText) + "s";
+      try {
+        const matches = injectedScript.querySelectorAll(
+          injectedScript.parseSelector(candidate),
+          injectedScript.document
+        );
+        return matches.length === 1 &&
+          (matches[0] === element || matches[0].contains(element) || element.contains(matches[0]))
+          ? candidate
+          : "";
+      } catch {
+        return "";
+      }
     }
 
     function fallbackFileUploadLocator(locator) {
@@ -704,12 +771,81 @@ export function buildPlaywrightScriptRecorderInjectionScript(frameChannelId = ""
     window.__pw_resume = async () => {};
 
     const injectedScript = new InjectedScriptConstructor(globalThis, RECORDER_OPTIONS);
+    const preferExactRecordedTextSelector = ${preferExactRecordedTextSelector.toString()};
+    const isDynamicOverlaySelector = ${isDynamicOverlaySelector.toString()};
+
+    function normalizeRecordedSelector(selector) {
+      return preferExactRecordedTextSelector(selector, (candidate) =>
+        injectedScript.querySelectorAll(injectedScript.parseSelector(candidate), injectedScript.document)
+      );
+    }
 
     window[FRAME_SELECTOR_HELPER] = (index) => selectorForFrameElementAtIndex(index);
 
-    window.__pw_recorderRecordAction = async (action) => {
+    let lastHoveredActionSelector = "";
+
+    function rememberHoveredActionSelector(event) {
+      try {
+        const target = recorder._recorder.deepEventTarget(event);
+        if (!(target instanceof Element) || !target.isConnected) return;
+        const generated = injectedScript.generateSelector(target, {
+          testIdAttributeName: RECORDER_OPTIONS.testIdAttributeName,
+          multiple: false
+        });
+        const selector = normalizeRecordedSelector(text(generated?.selector));
+        if (selector) lastHoveredActionSelector = selector;
+      } catch {}
+    }
+
+    function selectorForRecorderAction(action) {
       const selector = typeof action?.selector === "string" ? action.selector : "";
-      const element = resolveElement(selector);
+      const actionName = typeof action?.name === "string" ? action.name : "";
+      const hoveredElement = resolveElement(lastHoveredActionSelector);
+      let selectorMatches = [];
+      try {
+        selectorMatches = selector
+          ? injectedScript.querySelectorAll(
+              injectedScript.parseSelector(selector),
+              injectedScript.document
+            )
+          : [];
+      } catch {}
+      const hoveredElementMatchesAction =
+        hoveredElement && selectorMatches.includes(hoveredElement);
+      const hoveredElementBelongsToAction =
+        hoveredElement &&
+        selectorMatches.some((match) =>
+          match === hoveredElement || match.contains(hoveredElement) || hoveredElement.contains(match)
+        );
+      if (
+        (actionName === "click" || actionName === "check" || actionName === "uncheck") &&
+        selector &&
+        hoveredElementBelongsToAction &&
+        isDynamicOverlaySelector(selector)
+      ) {
+        const stableTextSelector = stableExactTextSelectorForElement(hoveredElement);
+        if (stableTextSelector) return stableTextSelector;
+      }
+      if (
+        (actionName === "click" || actionName === "check" || actionName === "uncheck") &&
+        selector &&
+        lastHoveredActionSelector &&
+        hoveredElement &&
+        (isTransientActionSelector(selector) ||
+          (selectorMatches.length > 1 && hoveredElementMatchesAction))
+      ) {
+        return lastHoveredActionSelector;
+      }
+      return selector;
+    }
+
+    window.__pw_recorderRecordAction = async (action) => {
+      const recordedSelector = normalizeRecordedSelector(selectorForRecorderAction(action));
+      const recordedElement = resolveElement(recordedSelector);
+      const checkableLabelSelector =
+        action?.name === "click" ? stableCheckableLabelSelector(recordedElement) : "";
+      const selector = checkableLabelSelector || recordedSelector;
+      const element = checkableLabelSelector ? resolveElement(checkableLabelSelector) : recordedElement;
       const locator = locatorForElement(element, selector || undefined);
       const selectedFileName =
         action?.name === "fill" ? fakePathFileName(action?.text) : "";
@@ -734,6 +870,7 @@ export function buildPlaywrightScriptRecorderInjectionScript(frameChannelId = ""
       }
       const normalizedAction = {
         ...action,
+        selector,
         files:
           action?.name === "setInputFiles"
             ? resolveFileUploadPaths(element, action?.files)
@@ -756,6 +893,9 @@ export function buildPlaywrightScriptRecorderInjectionScript(frameChannelId = ""
     // 会以 clickCount=0 的 click 动作上报，由宿主的 parse 层丢弃（与 codegen
     // 的 detail===0 过滤一致），避免 checkbox/radio/switch 被重复记录。
     const recorder = new PollingRecorder(injectedScript, { recorderMode: "api" });
+    try {
+      document.addEventListener("mousemove", rememberHoveredActionSelector, true);
+    } catch {}
     try {
       const style = document.createElement("style");
       style.textContent = "x-pw-overlay { display: none !important; }";

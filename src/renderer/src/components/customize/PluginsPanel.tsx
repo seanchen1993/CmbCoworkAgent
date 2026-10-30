@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { notifyMarketPublished } from "@/lib/market-change-events"
 import {
   ExternalLink,
   FileEdit,
@@ -426,7 +427,7 @@ export function PluginsPanel(): React.JSX.Element {
   // "not market" so offline users still see their local plugins' internals.
   const [marketPluginsLoaded, setMarketPluginsLoaded] = useState(false)
   const [marketPluginsLoadFailed, setMarketPluginsLoadFailed] = useState(false)
-  const [uploadedPluginNames, setUploadedPluginNames] = useState<Set<string>>(() =>
+  const [uploadedPluginNames] = useState<Set<string>>(() =>
     readUploadedItemNamesFromStorage("plugin")
   )
   const [localUploadedPluginNames, setLocalUploadedPluginNames] = useState<Set<string>>(() =>
@@ -1003,13 +1004,17 @@ export function PluginsPanel(): React.JSX.Element {
           if (!open) setPublishTarget(null)
         }}
         onSuccess={({ name, mode }) => {
-          setUploadedPluginNames(readUploadedItemNamesFromStorage("plugin"))
-          void loadMarketPlugins()
+          notifyMarketPublished("plugin")
           toast.success(
             mode === "update"
               ? `Plugin「${name}」更新发布成功，已跳转到应用市场。`
               : `Plugin「${name}」发布成功，已跳转到应用市场。`
           )
+          useAppStore.setState({
+            marketInitialTab: "plugin",
+            marketInitialSkillSearchQuery: name.trim(),
+            marketInitialSkillDetailName: null
+          })
           setShowCustomizeView(true, "market")
         }}
       />
@@ -1057,6 +1062,7 @@ export function PluginDetailPanel(props: {
               <p className="mt-1 text-sm text-muted-foreground leading-relaxed">
                 插件是一个可分发的功能包，可以把技能、MCP 服务、Hooks 和静态资源放在一起安装、启用、禁用和卸载。
                 适合把一套完整工作流交给团队复用，而不是让每个人分别添加技能、连接器和 Hook 规则。
+                如果插件包含 Function Mods，安装完成后请到“Function Mods”页面单独授权和控制其运行能力。
               </p>
             </div>
           </div>

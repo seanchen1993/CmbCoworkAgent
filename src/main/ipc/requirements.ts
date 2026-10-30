@@ -435,8 +435,13 @@ async function updateRequirementFunctionHtml(
     : {}
   const existingHtmlFile = manifestResult.manifest.functions[match.index].htmlFile
   const htmlFile = payload.htmlFile?.trim() ? path.resolve(payload.htmlFile) : existingHtmlFile
-  if (payload.htmlFile?.trim() && !(await fs.stat(htmlFile)).isFile()) {
-    throw new Error("HTML 文件无效")
+  if (payload.htmlFile?.trim()) {
+    try {
+      if (!(await fs.stat(htmlFile)).isFile()) throw new Error("HTML 文件无效")
+    } catch (error) {
+      if (error instanceof Error && error.message === "HTML 文件无效") throw error
+      throw new Error("HTML 文件不存在或无法访问")
+    }
   }
   const updatedRaw = {
     ...manifestResult.raw,

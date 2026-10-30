@@ -23,6 +23,12 @@ import {
   DASHBOARD_ES_RESPONSE_TOO_LARGE,
   DASHBOARD_HOME_QUERY_OUTPUT_BYTE_LIMIT
 } from "./dashboard-es-protocol"
+import { prepareDashboardFieldCapsRequest } from "./dashboard-es-field-caps-request"
+import { fetchCompleteProjectDevMetrics } from "../ipc/project-mode-dev-metrics"
+import {
+  fetchRecentConstraintFiles,
+  resolveRecentConstraintFields
+} from "../ipc/dashboard-recent-constraint-files"
 
 const clients: DashboardEsWorkerClient[] = []
 let workerBuildDirectory = ""
@@ -32,7 +38,7 @@ let serverUrl = ""
 let overlapSlowActiveRequests = 0
 let overlapSlowPeakRequests = 0
 
-const tickerPayload = `${JSON.stringify({ value: "ticker" })}${" ".repeat(7 * 1024 * 1024)}`
+const tickerPayload = `${JSON.stringify({ value: "ticker" })}${" ".repeat(15 * 1024 * 1024)}`
 const projectedHomePayload = JSON.stringify({
   aggregations: {
     by_model: {
@@ -49,8 +55,10 @@ const projectedHomePayload = JSON.stringify({
     by_layer: { buckets: [] },
     smart_by_tier: { by_tier: { buckets: [{ key: "smart", doc_count: 4 }] } }
   },
-  ignored: "p".repeat(7 * 1024 * 1024)
+  ignored: "p".repeat(15 * 1024 * 1024)
 })
+const expandedBudgetValue = "e".repeat(9 * 1024 * 1024)
+const expandedBudgetPayload = JSON.stringify({ value: expandedBudgetValue })
 const oversizedOutputPayload = JSON.stringify({
   value: "x".repeat(DASHBOARD_ES_OUTPUT_BYTE_LIMIT + 64 * 1024)
 })
@@ -70,6 +78,104 @@ beforeAll(async () => {
   server = createServer((request, response) => {
     const index = request.url?.split("/").filter(Boolean)[0]
     request.resume()
+    if (index === "project-dev-cursor") {
+      let text = ""
+      request.setEncoding("utf8")
+      request.on("data", (chunk) => {
+        text += chunk
+      })
+      request.on("end", () => {
+        // Model a null-dropping intermediary on the outbound request as well
+        // as the response, not just a direct client -> ES connection.
+        const body = JSON.parse(text, (_key, value) => (value === null ? undefined : value))
+        const composite = body.aggs.dev_metrics.composite
+        const names = composite.sources.map(
+          (source: Record<string, unknown>) => Object.keys(source)[0]
+        )
+        const after = composite.after
+        if (after && Object.keys(after).length !== names.length) {
+          response.writeHead(400, { "content-type": "application/json" })
+          response.end(
+            JSON.stringify({
+              error: {
+                reason: `[after] has ${Object.keys(after).length} value(s) but [sources] has ${names.length}`
+              }
+            })
+          )
+          return
+        }
+        const key = names.includes("feature")
+          ? { project: "p", feature: "late", node: "Dev-实现" }
+          : { project: "p", node: "Dev-实现" }
+        response.writeHead(200, { "content-type": "application/json" })
+        response.end(
+          JSON.stringify({
+            aggregations: {
+              dev_metrics: after
+                ? { buckets: [] }
+                : {
+                    buckets: [{ key, doc_count: names.includes("feature") ? 3 : 2 }],
+                    after_key: key
+                  }
+            }
+          })
+        )
+      })
+      return
+    }
+    if (index === "field-caps-native" || index === "field-caps-legacy") {
+      const url = new URL(request.url!, serverUrl)
+      if (url.pathname.endsWith("/_field_caps")) {
+        const fields = url.searchParams.get("fields")
+        if (!fields) {
+          response.writeHead(400, { "content-type": "application/json" })
+          response.end(
+            JSON.stringify({ error: { reason: "specified fields can't be null or empty" } })
+          )
+          return
+        }
+        const legacy = index.endsWith("legacy")
+        const keyword = { keyword: { type: "keyword", searchable: true, aggregatable: true } }
+        response.writeHead(200, { "content-type": "application/json" })
+        response.end(
+          JSON.stringify({
+            fields: {
+              [legacy ? "properties.constraintFiles.keyword" : "properties.constraintFiles"]:
+                keyword,
+              ...(legacy
+                ? {
+                    "properties.constraintFiles": {
+                      text: { type: "text", searchable: true, aggregatable: false }
+                    }
+                  }
+                : {}),
+              "properties.pluginId": keyword,
+              "properties.lastReadAt": legacy
+                ? keyword
+                : {
+                    date: { type: "date", searchable: true, aggregatable: true }
+                  }
+            }
+          })
+        )
+        return
+      }
+      response.writeHead(200, { "content-type": "application/json" })
+      response.end(
+        JSON.stringify({
+          aggregations: {
+            files: {
+              buckets: [
+                { key: { pluginId: "p", file: "sys/project.md" } },
+                { key: { pluginId: "p", file: "sys/rules.md" } }
+              ]
+            },
+            truncated_files: { doc_count: 0 }
+          }
+        })
+      )
+      return
+    }
     if (index === "ticker") {
       response.writeHead(200, { "content-type": "application/json" })
       response.end(tickerPayload)
@@ -92,6 +198,34 @@ beforeAll(async () => {
     if (index === "oversized-output") {
       response.writeHead(200, { "content-type": "application/json" })
       response.end(oversizedOutputPayload)
+      return
+    }
+    if (index === "expanded-budget") {
+      response.writeHead(200, { "content-type": "application/json" })
+      response.end(expandedBudgetPayload)
+      return
+    }
+    if (index === "bad-request") {
+      response.writeHead(400, { "content-type": "application/json" })
+      response.end(
+        JSON.stringify({
+          error: { type: "search_phase_execution_exception", reason: "all shards failed" }
+        })
+      )
+      return
+    }
+    if (index === "large-bad-request") {
+      const payload = JSON.stringify({
+        error: {
+          root_cause: [{ type: "too_many_clauses", reason: "maxClauseCount is set to 1024" }]
+        },
+        failed_query: "x".repeat(20 * 1024)
+      })
+      response.writeHead(400, {
+        "content-type": "application/json",
+        "content-length": Buffer.byteLength(payload)
+      })
+      response.end(payload)
       return
     }
     if (index === "slow") {
@@ -136,7 +270,10 @@ afterAll(async () => {
 function createClient(onStart?: () => void): DashboardEsWorkerClient {
   const client = new DashboardEsWorkerClient(async () => {
     onStart?.()
-    return new Worker(workerBundlePath, { name: "dashboard-es-test" })
+    return new Worker(workerBundlePath, {
+      name: "dashboard-es-test",
+      resourceLimits: DASHBOARD_ES_WORKER_RESOURCE_LIMITS
+    })
   })
   clients.push(client)
   return client
@@ -155,6 +292,86 @@ function query(client: DashboardEsWorkerClient, index: string, signal?: AbortSig
 }
 
 describe("Dashboard ES worker", () => {
+  it("exports bound and unbound Dev metrics through a null-dropping HTTP intermediary", async () => {
+    const client = createClient()
+    const execute = (body: Record<string, unknown>) =>
+      client.query({
+        nodes: [serverUrl],
+        method: "POST",
+        path: "/project-dev-cursor/_search",
+        headers: { "content-type": "application/json" },
+        bodyText: JSON.stringify(body),
+        timeoutMs: 5000
+      })
+    await expect(
+      execute({
+        aggs: {
+          dev_metrics: {
+            composite: {
+              sources: [{ project: {} }, { feature: {} }, { node: {} }],
+              after: { project: "p", feature: null, node: "Dev-实现" }
+            }
+          }
+        }
+      })
+    ).rejects.toMatchObject({
+      cause: { message: expect.stringContaining("[after] has 2 value(s) but [sources] has 3") }
+    })
+    await expect(fetchCompleteProjectDevMetrics(["p"], [], execute)).resolves.toEqual(
+      new Map([["p", { conversations: 5, features: 1 }]])
+    )
+  })
+
+  it.each(["native", "legacy"])(
+    "runs field_caps and recent-file aggregation over HTTP with %s mappings",
+    async (mapping) => {
+      const client = createClient()
+      const index = `field-caps-${mapping}`
+      const common = {
+        nodes: [serverUrl],
+        headers: { "content-type": "application/json" },
+        timeoutMs: 5_000
+      }
+      // This is the production bug: a populated JSON body still leaves ES 7.x fields empty.
+      await expect(
+        client.query({
+          ...common,
+          method: "POST",
+          path: `/${index}/_field_caps`,
+          bodyText: JSON.stringify({ fields: ["properties.constraintFiles"] })
+        })
+      ).rejects.toMatchObject({
+        cause: { message: expect.stringContaining("specified fields can't be null or empty") }
+      })
+      const caps = await client.query({
+        ...common,
+        ...prepareDashboardFieldCapsRequest(index, {
+          fields: [
+            "properties.constraintFiles",
+            "properties.constraintFiles.keyword",
+            "properties.pluginId",
+            "properties.lastReadAt"
+          ]
+        })
+      })
+      const fields = resolveRecentConstraintFields(caps)
+      expect(fields.file).toBe(
+        `properties.constraintFiles${mapping === "legacy" ? ".keyword" : ""}`
+      )
+      expect(Boolean(fields.lastReadAt)).toBe(mapping === "native")
+      await expect(
+        fetchRecentConstraintFiles(fields, [], (body) =>
+          client.query({
+            ...common,
+            method: "POST",
+            path: `/${index}/_search`,
+            bodyText: JSON.stringify(body)
+          })
+        )
+      ).resolves.toEqual({ fileCount: 2, complete: true })
+    }
+  )
+
   it("keeps the main ticker moving while parsing and normalizing a near-limit response", async () => {
     const client = createClient()
     await query(client, "warmup")
@@ -208,6 +425,16 @@ describe("Dashboard ES worker", () => {
       clearInterval(ticker)
     }
     expect(ticks).toBeGreaterThan(0)
+  }, 30_000)
+
+  it("accepts responses above the previous raw and normalized byte limits", async () => {
+    const client = createClient()
+    const result = await query(client, "expanded-budget")
+    expect(result).toEqual({ value: expandedBudgetValue })
+    expect(client.getDiagnostics().lastStats).toMatchObject({
+      sourceBytes: expandedBudgetPayload.length,
+      outputBytes: expect.any(Number)
+    })
   }, 30_000)
 
   it("enforces hard limits before raw or normalized payloads cross into main", async () => {
@@ -407,6 +634,74 @@ describe("Dashboard ES worker", () => {
     await client.close()
 
     await expect(pending).resolves.toBeInstanceOf(DashboardEsRequestCancelledError)
+  })
+})
+
+/**
+ * 这组用例钉的是一次排查断头：日志打出来是
+ * 「All 2 ES nodes failed. Last error: 请检查网络连接后重试」——"原因"栏里躺着的
+ * 是面向用户的提示语本身，真实原因不知去向。
+ *
+ * runDashboardEsQuery 其实把每个节点的失败原因挂在了 cause 上，但 worker 回传时
+ * 只 post 了 {code, message, stack}，cause 在结构化克隆边界上整条丢掉，客户端再
+ * `new Error(message)` 重建，于是 getErrorDetail 沿 cause 什么也找不到。
+ */
+describe("失败原因跨 worker 边界", () => {
+  it("keeps the ES error reason when its response body exceeds 4 KB", async () => {
+    const client = createClient()
+    const error = await query(client, "large-bad-request").catch((e: unknown) => e)
+    expect(error).toBeInstanceOf(Error)
+    const cause = (error as Error).cause as { code?: string; message?: string }
+    expect(cause.code).toBe("DASHBOARD_ES_HTTP_ERROR")
+    expect(cause.message).toContain("too_many_clauses")
+    expect(cause.message).toContain("maxClauseCount is set to 1024")
+    expect(cause.message!.length).toBeLessThanOrEqual(1032)
+  })
+
+  it("HTTP 失败把 ES 自己的报错带回主进程", async () => {
+    const client = createClient()
+    const error = await query(client, "bad-request").catch((e: unknown) => e)
+
+    expect(error).toBeInstanceOf(Error)
+    // 对外仍是那句提示语，它是给用户看的，不该变。
+    expect((error as Error).message).toBe("请检查网络连接后重试")
+    // 但排查需要的东西必须在 cause 上，而不是只存在于 worker 内部。
+    const cause = (error as Error).cause as { code?: string; message?: string } | undefined
+    expect(cause?.code).toBe("DASHBOARD_ES_HTTP_ERROR")
+    expect(cause?.message).toContain("ES 400")
+    expect(cause?.message).toContain("search_phase_execution_exception")
+  })
+
+  it("节点不可达时带回 fetch 层的原生原因", async () => {
+    const client = createClient()
+    // 没有监听者的端口：fetch 直接失败，原因在它自己的 cause 里。
+    const error = await client
+      .query({
+        nodes: ["http://127.0.0.1:1"],
+        method: "POST",
+        path: "/unreachable/_search",
+        headers: { "content-type": "application/json" },
+        bodyText: JSON.stringify({ size: 0 }),
+        timeoutMs: 5_000
+      })
+      .catch((e: unknown) => e)
+
+    const cause = (error as Error).cause as
+      | { code?: string; message?: string; cause?: { message?: string } }
+      | undefined
+    expect(cause?.code).toBe("DASHBOARD_ES_NODE_UNAVAILABLE")
+    // 「fetch failed」这一层还是泛化的，真正能定位的是它下面那层，所以链要留住。
+    expect(cause?.cause?.message).toBeTruthy()
+  })
+
+  it("回传的 cause 是可克隆的普通对象，不是 Error", async () => {
+    // Error 实例过不了结构化克隆的 cause 语义，所以 worker 侧必须先摊平。
+    // 这条同时挡住"直接 post 一个 Error 就完事"的改法。
+    const client = createClient()
+    const error = (await query(client, "bad-request").catch((e: unknown) => e)) as Error
+    expect(error.cause).toBeTruthy()
+    expect(error.cause).not.toBeInstanceOf(Error)
+    expect(() => structuredClone(error.cause)).not.toThrow()
   })
 })
 

@@ -25,6 +25,7 @@ import type {
   SkillPluginCatalogPageStats
 } from "../types"
 import type { SkillPreviewGrantRequest } from "../../shared/skill-preview"
+import { isProjectModePluginRoot } from "../harness-board/plugin-mode"
 import {
   SKILL_PLUGIN_CATALOG_CANCELLED,
   SKILL_PLUGIN_CATALOG_CURSOR_EXPIRED,
@@ -96,6 +97,7 @@ interface SkillSource {
   maxDepth?: number
   pluginId?: string
   pluginName?: string
+  isProjectModePlugin?: boolean
 }
 
 interface SkillPreviewCandidate {
@@ -399,6 +401,7 @@ function readPluginManifest(pluginRoot: string, context: BuildContext): Record<s
 function pluginSkillSources(plugin: PluginMetadata, context: BuildContext): SkillSource[] {
   if (!plugin.enabled) return []
   const sources: SkillSource[] = []
+  const isProjectModePlugin = isProjectModePluginRoot(plugin.path)
   const seen = new Set<string>()
   const add = (relativePath: string, maxDepth?: number): void => {
     if (sources.length >= MAX_PLUGIN_SKILL_SOURCES) {
@@ -424,7 +427,8 @@ function pluginSkillSources(plugin: PluginMetadata, context: BuildContext): Skil
       kind: "plugin",
       maxDepth,
       pluginId: plugin.id,
-      pluginName: plugin.name
+      pluginName: plugin.name,
+      isProjectModePlugin
     })
   }
   const manifest = readPluginManifest(plugin.path, context)
@@ -616,7 +620,8 @@ function toSkillMetadata(
     metadata: frontmatter,
     ...(allowedTools && allowedTools.length > 0 ? { allowedTools } : {}),
     ...(source.pluginId ? { pluginId: source.pluginId } : {}),
-    ...(source.pluginName ? { pluginName: source.pluginName } : {})
+    ...(source.pluginName ? { pluginName: source.pluginName } : {}),
+    ...(source.isProjectModePlugin ? { isProjectModePlugin: true } : {})
   }
 }
 

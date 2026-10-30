@@ -6,6 +6,7 @@ export const IN_APP_BROWSER_TOOL_LABELS: Record<string, string> = {
   mcp__inAppBrowser__browser_evaluate: "内置浏览器-执行 JavaScript",
   mcp__inAppBrowser__browser_file_upload: "内置浏览器-上传文件",
   mcp__inAppBrowser__browser_fill_form: "内置浏览器-填写表单",
+  mcp__inAppBrowser__browser_find: "内置浏览器-查找页面内容",
   mcp__inAppBrowser__browser_install: "内置浏览器-安装浏览器",
   mcp__inAppBrowser__browser_press_key: "内置浏览器-按键",
   mcp__inAppBrowser__browser_press_sequentially: "内置浏览器-逐字输入",
@@ -19,6 +20,7 @@ export const IN_APP_BROWSER_TOOL_LABELS: Record<string, string> = {
   mcp__inAppBrowser__browser_open: "内置浏览器-打开网址",
   mcp__inAppBrowser__browser_pdf_save: "内置浏览器-保存为 PDF",
   mcp__inAppBrowser__browser_run_code: "内置浏览器-运行 Playwright 代码",
+  mcp__inAppBrowser__browser_run_code_unsafe: "内置浏览器-运行 Playwright 代码（非安全模式）",
   mcp__inAppBrowser__browser_take_screenshot: "内置浏览器-截图",
   mcp__inAppBrowser__browser_snapshot: "内置浏览器-获取页面快照",
   mcp__inAppBrowser__browser_click: "内置浏览器-点击",
@@ -56,6 +58,10 @@ const TOOL_LABELS: Record<string, string> = {
   invoke_deferred_tool: "调用延迟加载的工具",
   inspect_tool: "查看工具定义",
   search_tool: "搜索工具",
+  inAppBrowser_extract_iframes: "内置浏览器-提取 iframe 内容",
+  inAppBrowser_read_wps_document: "内置浏览器-读取 WPS 文档全文",
+  inAppBrowser_list_recordings: "内置浏览器-检索可复用操作",
+  inAppBrowser_execute_recording: "内置浏览器-执行可复用操作",
   ...IN_APP_BROWSER_TOOL_LABELS
 }
 

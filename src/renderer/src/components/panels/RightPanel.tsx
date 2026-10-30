@@ -3226,6 +3226,7 @@ export function ResourcePreview({
   useEffect(() => {
     if (!isFullscreen) return
     const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.defaultPrevented || useAppStore.getState().showCustomizeView) return
       if (event.key === "Escape") {
         setIsFullscreen(false)
       }

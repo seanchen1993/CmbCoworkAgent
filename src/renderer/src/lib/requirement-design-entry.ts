@@ -13,6 +13,7 @@ export type RequirementDesignEntry = {
   previewThreadId?: string
   requirementOverviewFilePath?: string
   requirementFilePath: string
+  designSystemId?: string
   prompt: string
   htmlId: string
   htmlFile?: string
@@ -36,20 +37,9 @@ export function buildRequirementDesignPrompt(
   const target = functionName.trim() || "当前功能"
   const coreRequirementFile = requirementFile.trim() || "当前功能需求文档"
   return [
-    `请以已附加的核心需求文件「${coreRequirementFile}」为主要依据，为「${target}」完成高保真交互原型设计。`,
+    `请根据已附加的需求文件「${coreRequirementFile}」，为「${target}」设计高保真交互原型。`,
     "",
-    "资料使用原则：",
-    `- 「${coreRequirementFile}」是本功能的核心需求文件，业务目标、功能范围、流程规则和验收边界均以该文件为准；`,
-    "- 其他附件属于补充参考资料，可用于理解业务背景、产品约束、上下游关系及视觉偏好；",
-    "- 当补充资料与核心需求文件存在冲突时，以核心需求文件为准，并明确指出冲突内容；",
-    "",
-    "设计要求：",
-    "- 准确覆盖核心需求文件定义的业务目标、核心流程与功能规则；",
-    "- 完整覆盖关键使用场景，以及必要的异常状态和空状态；",
-    "- 建立清晰的信息架构，并提供符合实际使用场景的操作反馈；",
-    "- 输出完整、可独立运行的单页 HTML，确保主要流程可交互，并适配常见桌面视口。",
-    "",
-    "请综合核心需求文件与补充资料进行设计；若核心需求中的关键信息存在歧义或缺失，请先提出必要的澄清问题，避免自行假设业务规则。"
+    "需求文件是业务范围、流程和规则的主要依据；其他资料仅作补充，冲突时以需求文件为准。请覆盖核心流程及必要的空状态、异常状态，输出可独立运行、主要流程可交互的单页 HTML。关键信息缺失时先提问确认。"
   ].join("\n")
 }
 

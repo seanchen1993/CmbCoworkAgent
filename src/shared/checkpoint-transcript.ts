@@ -430,18 +430,15 @@ export function mergeCheckpointAuthorityTranscriptMessages<
     const effectiveIncomingOccurrence =
       incomingOccurrence ??
       (incoming.provider_source_id?.trim() &&
-      providerIdentityCandidates.filter(
-        ({ effectiveOccurrence }) => effectiveOccurrence === 1
-      ).length === 1
+      providerIdentityCandidates.filter(({ effectiveOccurrence }) => effectiveOccurrence === 1)
+        .length === 1
         ? 1
         : undefined)
     const occurrenceMatches =
       effectiveIncomingOccurrence === undefined
         ? []
         : providerIdentityCandidates.flatMap(({ candidateIndex, effectiveOccurrence }) =>
-            effectiveOccurrence === effectiveIncomingOccurrence
-              ? [candidateIndex]
-              : []
+            effectiveOccurrence === effectiveIncomingOccurrence ? [candidateIndex] : []
           )
     const occurrenceExistingIndex =
       occurrenceMatches.length === 1 ? occurrenceMatches[0] : undefined
@@ -467,11 +464,9 @@ export function mergeCheckpointAuthorityTranscriptMessages<
       exactExistingOccurrence !== undefined &&
       incomingOccurrence !== undefined &&
       exactExistingOccurrence !== incomingOccurrence
-    const exactIdHasIdentityConflict =
-      exactIdHasSourceConflict || exactIdHasOccurrenceConflict
+    const exactIdHasIdentityConflict = exactIdHasSourceConflict || exactIdHasOccurrenceConflict
     const existingIndex =
-      (exactIdHasIdentityConflict ? undefined : exactExistingIndex) ??
-      occurrenceExistingIndex
+      (exactIdHasIdentityConflict ? undefined : exactExistingIndex) ?? occurrenceExistingIndex
     if (incoming.role === "user") incomingSegmentStartsNewTurn = existingIndex === undefined
     if (existingIndex !== undefined) {
       const existing = merged[existingIndex]
@@ -547,6 +542,21 @@ function getAdditionalKwargs(
   const kwargs = isRecord(message.kwargs) ? message.kwargs : undefined
   const additional = message.additional_kwargs ?? kwargs?.additional_kwargs
   return isRecord(additional) ? additional : undefined
+}
+
+/**
+ * Whether a serialized message is the plumbing prompt of an internal
+ * notification turn rather than something a reader sent or should see.
+ *
+ * The marker is checked in eight places by hand, which is how the live view and
+ * the restored view came to disagree: history hydration dropped it and the live
+ * stream did not, so folding a background result into a thread flashed
+ * "[[CMB_COORDINATOR_WORKER_NOTIFICATION]] [SYSTEM NOTIFICATION - NOT USER
+ * INPUT]…" as a user bubble that vanished when the transcript reloaded.
+ */
+export function isInternalNotificationMessage(message: unknown): boolean {
+  if (!isRecord(message)) return false
+  return getAdditionalKwargs(message)?.cmb_internal_coordinator_notification === true
 }
 
 function collectToolCallIds(value: unknown, ids: Set<string>): void {
@@ -646,10 +656,7 @@ export function isVisibleTranscriptMessage(role: string, content: unknown): bool
  * persisted yet. Mutation guards therefore count it as conversation state
  * while display filtering continues to hide the raw prompt itself.
  */
-export function isRestorableConversationTranscriptMessage(
-  role: string,
-  content: unknown
-): boolean {
+export function isRestorableConversationTranscriptMessage(role: string, content: unknown): boolean {
   if (isVisibleTranscriptMessage(role, content)) return true
   return (
     isInternalGoalPrompt(role, content) &&
@@ -726,9 +733,8 @@ export function deriveCheckpointTranscriptIndex(checkpoint: unknown): Checkpoint
     if (role === "assistant") {
       const kwargs = isRecord(raw.kwargs) ? raw.kwargs : undefined
       const parentMessageId = readString(kwargs?.id) ?? readString(raw.id)
-      const providerOccurrence = getMessageProviderTupleFromMetadata(
-        additionalKwargs
-      )?.provider_occurrence
+      const providerOccurrence =
+        getMessageProviderTupleFromMetadata(additionalKwargs)?.provider_occurrence
       let parentOccurrence: number
       if (providerOccurrence) {
         parentOccurrence = providerOccurrence
@@ -773,9 +779,7 @@ export function deriveCheckpointTranscriptIndex(checkpoint: unknown): Checkpoint
 
     if (isVisibleTranscriptMessage(role, effectiveContent)) {
       const providerTuple =
-        role === "assistant"
-          ? getMessageProviderTupleFromMetadata(additionalKwargs)
-          : undefined
+        role === "assistant" ? getMessageProviderTupleFromMetadata(additionalKwargs) : undefined
       visibleMessageIds.push(messageId)
       visibleMessages.push({
         id: messageId,
@@ -936,9 +940,7 @@ export function findMessagesAfterCheckpointVisibleIds<
     if (
       excludedIdentities.size > 0 &&
       (message.role || message.type) &&
-      excludedIdentities.has(
-        getMessageProviderOccurrenceIdentity(message as RoleCollisionMessage)
-      )
+      excludedIdentities.has(getMessageProviderOccurrenceIdentity(message as RoleCollisionMessage))
     ) {
       return false
     }
@@ -1018,10 +1020,7 @@ function filterSubagentTranscripts(
         typeof message.subagent_invocation_scope === "string"
     )
     if (isRecord(prompt)) {
-      const key = JSON.stringify([
-        prompt.subagent_tool_call_id,
-        prompt.subagent_invocation_scope
-      ])
+      const key = JSON.stringify([prompt.subagent_tool_call_id, prompt.subagent_invocation_scope])
       if (invocationKeys.has(key)) {
         next[executionId] = cloneJsonValue(transcript)
         continue

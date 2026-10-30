@@ -357,7 +357,9 @@ try {
   runLock = await acquireRunLock()
   installSignalHandlers()
 
-  await runNpm(["run", "build"], safeBuildEnv)
+  if (process.env.CMB_SESSION_RECOVERY_E2E_REUSE_BUILD !== "1") {
+    await runNpm(["run", "build"], safeBuildEnv)
+  }
   throwIfInterrupted()
 
   const builtMainPath = join(projectRoot, "out", "main", "index.js")

@@ -18,6 +18,36 @@ import {
 
 type UnknownRecord = Record<string, unknown>
 
+export function getSubagentTextSnapshotFields(message: UnknownRecord): ("content" | "reasoning")[] {
+  const fields = message.subagent_text_snapshots
+  return (["content", "reasoning"] as const).filter(
+    (field) => Array.isArray(fields) && fields.includes(field) && typeof message[field] === "string"
+  )
+}
+
+export function mergeSubagentTextSnapshots(
+  existing: UnknownRecord,
+  incoming: UnknownRecord
+): UnknownRecord {
+  const next = { ...existing, ...incoming }
+  for (const field of getSubagentTextSnapshotFields(incoming)) {
+    for (const key of [
+      `${field}_ref`,
+      `${field}_is_projection`,
+      `${field}_full_length`,
+      `subagent_${field}_fingerprint`,
+      `subagent_${field}_delta_journal`,
+      `subagent_${field}_delta_journal_length`,
+      `subagent_${field}_delta_journal_omitted`
+    ]) {
+      delete next[key]
+      if (Object.prototype.hasOwnProperty.call(incoming, key)) next[key] = incoming[key]
+    }
+  }
+  delete next.subagent_text_snapshots
+  return next
+}
+
 type StoredBlobEnvelope = {
   v: 1
   kind: SubagentTranscriptBlobKind
@@ -349,6 +379,19 @@ async function writeBlob(
 async function compactMessage(rawMessage: unknown): Promise<{ value: unknown; changed: boolean }> {
   if (!isRecord(rawMessage)) return { value: rawMessage, changed: false }
   const message: UnknownRecord = { ...rawMessage }
+  for (const field of getSubagentTextSnapshotFields(message)) {
+    for (const key of [
+      `${field}_ref`,
+      `${field}_is_projection`,
+      `${field}_full_length`,
+      `subagent_${field}_fingerprint`,
+      `subagent_${field}_delta_journal`,
+      `subagent_${field}_delta_journal_length`,
+      `subagent_${field}_delta_journal_omitted`
+    ]) {
+      delete message[key]
+    }
+  }
   const forceLiveTextSidecars = message.subagent_live_text_bootstrap === true
   const preserveTextJournal = message.subagent_preserve_text_journal === true
   delete message.subagent_live_text_bootstrap
@@ -1131,11 +1174,11 @@ export function mergeSubagentTranscriptManifestMessages(
         : sameBaselineIndex !== undefined && isRecord(baseline[sameBaselineIndex])
           ? (baseline[sameBaselineIndex] as UnknownRecord)
           : undefined
-    const persistedIncoming: UnknownRecord = { ...incoming }
-    if (
-      incoming.subagent_startup_projection === true &&
-      existingSame
-    ) {
+    const persistedIncoming: UnknownRecord =
+      getSubagentTextSnapshotFields(incoming).length > 0
+        ? mergeSubagentTextSnapshots(existingSame ?? {}, incoming)
+        : { ...incoming }
+    if (incoming.subagent_startup_projection === true && existingSame) {
       Object.assign(persistedIncoming, existingSame, incoming)
       const preserveExistingFields = (fields: string[]): void => {
         for (const field of fields) {

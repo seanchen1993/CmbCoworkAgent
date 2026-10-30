@@ -47,6 +47,7 @@ import {
   getRequirementSessionCapabilities
 } from "./requirement-session-capabilities"
 import { RequirementStepsPanel } from "./RequirementStepsPanel"
+import { getSelectedRequirementSystem } from "./requirement-store"
 
 const REQUIREMENT_SPACE_PUBLISH_MESSAGE = "发布到需求空间"
 const LEANSTAR_TOKEN_MESSAGE_PREFIX = "精益之星身份令牌-Token："
@@ -208,7 +209,7 @@ function buildRequirementInitializationMessage(requirement: RequirementRecord): 
 
   if (requirement.sourceType !== "link") return prdInstruction
 
-  return `请先使用内置浏览器访问以下需求线上链接：\n${requirement.link}\n\n完整读取并逐字输出页面中看到的全部需求内容。不要总结、改写、压缩或遗漏，必须与页面原文一模一样。完成上述内容读取后，再继续执行以下任务：\n\n${prdInstruction}`
+  return `请先使用内置浏览器打开以下 WPS Office 在线需求文档：\n${requirement.link}\n\n完整读取并逐字输出全部需求内容，不得总结、改写、压缩或遗漏。然后继续执行以下任务：\n\n${prdInstruction}`
 }
 
 function RequirementConversationSession({
@@ -492,6 +493,7 @@ function RequirementConversationSession({
       ).replace(/^\/+/, "")
       const separator = workspacePath.includes("\\") ? "\\" : "/"
       const requirementFilePath = `${workspaceRoot}${separator}${relativeFile.replace(/\//g, separator)}`
+      const designSystem = getSelectedRequirementSystem(requirement.systemId)
       return {
         requirementId: requirement.id,
         requirementName: requirement.title,
@@ -502,6 +504,7 @@ function RequirementConversationSession({
           ? `${workspaceRoot}${separator}${relativeOverviewFile.replace(/\//g, separator)}`
           : undefined,
         requirementFilePath,
+        designSystemId: designSystem?.id,
         prompt: buildRequirementDesignPrompt(
           `${functionInfo.fr} ${functionInfo.name}`,
           relativeFile
@@ -513,6 +516,7 @@ function RequirementConversationSession({
     [
       requirement.id,
       requirement.requirementPath,
+      requirement.systemId,
       requirement.title,
       requirementSpaceManifest?.prd.file,
       threadId,

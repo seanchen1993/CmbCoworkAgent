@@ -2,6 +2,7 @@
  * Real Electron UI / preload / transport / persistence regression.
  * Only the agent producer is replaced at its IPC boundary with controlled frames.
  * Run: npm run test:subagent-order:e2e
+ * Optional: SUBAGENT_E2E_PACKAGED_EXE and SUBAGENT_E2E_ARTIFACT_DIR.
  */
 import assert from "node:assert/strict"
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs"
@@ -28,7 +29,13 @@ interface TestApi {
       threadId: string,
       subagentId: string
     ): Promise<{
-      messages: Array<{ role?: string; tool_calls?: typeof calls; content?: unknown }>
+      messages: Array<{
+        id?: string
+        role?: string
+        tool_calls?: typeof calls
+        content?: unknown
+        reasoning?: string
+      }>
     }>
   }
   workspace: { set(threadId: string, path: string): Promise<unknown> }
@@ -138,7 +145,10 @@ async function waitForToolStatus(page: Page, file: string, status: string): Prom
 
 async function main(): Promise<void> {
   const isolated = mkdtempSync(join(tmpdir(), "cmb-subagent-order-e2e-"))
-  const artifacts = join(root, "output", "subagent-tool-order")
+  const artifacts = process.env.SUBAGENT_E2E_ARTIFACT_DIR
+    ? resolve(process.env.SUBAGENT_E2E_ARTIFACT_DIR)
+    : join(root, "output", "e2e-comprehensive", "subagent")
+  const packaged = process.env.SUBAGENT_E2E_PACKAGED_EXE
   mkdirSync(artifacts, { recursive: true })
   const workspace = join(isolated, "workspace")
   mkdirSync(workspace)
@@ -183,11 +193,23 @@ async function main(): Promise<void> {
   try {
     app = await _electron.launch({
       executablePath:
-        process.platform === "win32" ? join(root, "tests/support/electron-launcher.cmd") : binary,
-      args: [join(root, "out/main/index.js"), `--user-data-dir=${join(isolated, "electron")}`],
+        packaged ||
+        (process.platform === "win32" ? join(root, "tests/support/electron-launcher.cmd") : binary),
+      args: [
+        ...(packaged ? [] : [join(root, "out/main/index.js")]),
+        `--user-data-dir=${join(isolated, "electron")}`
+      ],
       cwd: root,
       env: environment,
       timeout: 60_000
+    })
+    await app.context().route(/^https?:/, (route) => route.abort())
+    await app.evaluate(async ({ app, BrowserWindow, ipcMain }) => {
+      // Packaged mode starts SSO for an empty profile. Keep this isolated fixture local.
+      ipcMain.removeHandler("open-login-page")
+      ipcMain.handle("open-login-page", () => undefined)
+      const window = BrowserWindow.getAllWindows()[0]
+      await window.loadFile(`${app.getAppPath()}/out/renderer/index.html`)
     })
     page = await appPage(app)
     page.on("pageerror", (error) => errors.push(error.message))
@@ -336,9 +358,205 @@ async function main(): Promise<void> {
       )
     }
     await page.screenshot({ path: join(artifacts, "parallel-after-reload.png"), fullPage: true })
+    // Exercise the standing scheduler listener through the real renderer,
+    // preload, IPC handler and SQLite sidecar path. Only the producer is synthetic.
+    const sendInterior = async (events: Array<Record<string, unknown>>) => {
+      await app!.evaluate(
+        ({ BrowserWindow }, { threadId, events }) => {
+          for (const event of events)
+            BrowserWindow.getAllWindows()[0].webContents.send(`scheduler:stream:${threadId}`, event)
+        },
+        { threadId, events }
+      )
+    }
+    const textFrame = (content: string, reasoning?: string, snapshot = false) => ({
+      type: "message-delta",
+      subagentId: taskId,
+      id: "snapshot-inner",
+      content,
+      contentMode: snapshot ? "snapshot" : "delta",
+      ...(reasoning !== undefined && { reasoning, reasoningMode: snapshot ? "snapshot" : "delta" })
+    })
+    const persisted = async () =>
+      page!.evaluate(
+        async ({ threadId, taskId }) =>
+          (window as unknown as { api: TestApi }).api.threads.getSubagentTranscript(
+            threadId,
+            taskId
+          ),
+        { threadId, taskId }
+      )
+    const expectStored = async (content: string, reasoning: string, label: string) => {
+      await until(
+        async () =>
+          (await persisted()).messages.some(
+            (message) =>
+              message.role === "assistant" &&
+              message.content === content &&
+              message.reasoning === reasoning
+          ),
+        label
+      )
+      console.log(`PASS ${label}`)
+    }
+    await sendInterior([textFrame("LONG_DRAFT_BODY", "LONG_DRAFT_REASONING", true)])
+    await expectStored(
+      "LONG_DRAFT_BODY",
+      "LONG_DRAFT_REASONING",
+      "initial scheduler snapshot reaches SQLite"
+    )
+    await sendInterior([textFrame("SHORT_BODY", undefined, true)])
+    await expectStored("SHORT_BODY", "LONG_DRAFT_REASONING", "shorter body keeps omitted reasoning")
+    await sendInterior([
+      {
+        type: "message-delta",
+        subagentId: taskId,
+        id: "snapshot-inner",
+        content: "",
+        contentMode: "delta",
+        reasoning: "SHORT_REASONING",
+        reasoningMode: "snapshot"
+      }
+    ])
+    await expectStored("SHORT_BODY", "SHORT_REASONING", "reasoning-only rewrite keeps body")
+    await sendInterior([textFrame("", "", true)])
+    await expectStored("", "", "explicit empty snapshots clear both persisted fields")
+    await sendInterior([textFrame("RESTORED_BODY", "RESTORED_REASONING")])
+    await expectStored("RESTORED_BODY", "RESTORED_REASONING", "deltas continue after empty clear")
+    await until(
+      async () => (await page!.locator("body").innerText()).includes("RESTORED_BODY"),
+      "live subagent corrected body visible"
+    )
+    for (const cycle of [1, 2]) {
+      await sendInterior([
+        {
+          type: "message-delta",
+          subagentId: taskId,
+          id: "reused-cycle",
+          content: `CYCLE_${cycle}`,
+          contentMode: "snapshot",
+          toolCalls: [
+            { id: `cycle-call-${cycle}`, name: "read_file", args: { path: `cycle-${cycle}.txt` } }
+          ]
+        },
+        {
+          type: "tool-message",
+          subagentId: taskId,
+          id: "reused-cycle",
+          content: `CYCLE_RESULT_${cycle}`,
+          toolCallId: `cycle-call-${cycle}`,
+          name: "read_file"
+        }
+      ])
+    }
+    await until(async () => {
+      const rows = (await persisted()).messages
+      const cycleRows = rows.filter(
+        (message) => typeof message.content === "string" && /^CYCLE_/.test(message.content)
+      )
+      return (
+        cycleRows.map((message) => message.content).join(",") ===
+          "CYCLE_1,CYCLE_RESULT_1,CYCLE_2,CYCLE_RESULT_2" &&
+        new Set(cycleRows.map((message) => message.id)).size === 4
+      )
+    }, "same raw ID assistant/tool cycles persist separately in order")
+    // Delay only the reply, after the real IPC handler has committed SQLite.
+    // A newer rewrite must survive the old sidecar acknowledgement.
+    await app.evaluate(({ ipcMain }) => {
+      const handlers = (
+        ipcMain as unknown as {
+          _invokeHandlers: Map<string, (...args: unknown[]) => Promise<unknown>>
+        }
+      )._invokeHandlers
+      const original = handlers.get("threads:persistSubagentTranscripts")!
+      const fixture = globalThis as unknown as { heldAck?: boolean; releaseAck?: () => void }
+      ipcMain.removeHandler("threads:persistSubagentTranscripts")
+      let holdNext = true
+      ipcMain.handle("threads:persistSubagentTranscripts", async (...args) => {
+        const result = await original(...args)
+        if (holdNext) {
+          holdNext = false
+          fixture.heldAck = true
+          await new Promise<void>((resolveAck) => {
+            fixture.releaseAck = resolveAck
+          })
+        }
+        return result
+      })
+    })
+    const oldAck = "OLD_ACK_" + "x".repeat(4_000)
+    const newAck = "NEW_ACK_" + "y".repeat(4_000)
+    await sendInterior([{ ...textFrame(oldAck, "OLD_ACK_REASONING", true), id: "ack-inner" }])
+    await until(
+      () => app!.evaluate(() => Boolean((globalThis as unknown as { heldAck?: boolean }).heldAck)),
+      "real SQLite write waits before ACK"
+    )
+    await sendInterior([
+      { ...textFrame(newAck, "NEW_ACK_REASONING", true), id: "ack-inner" },
+      { ...textFrame("_TAIL", "_TAIL"), id: "ack-inner" }
+    ])
+    await app.evaluate(() => (globalThis as unknown as { releaseAck: () => void }).releaseAck())
+    await expectStored(
+      newAck + "_TAIL",
+      "NEW_ACK_REASONING_TAIL",
+      "old ACK cannot erase newer snapshot and in-flight continuation"
+    )
+    await sendInterior([{ type: "done" }])
+    await page.reload({ waitUntil: "domcontentloaded" })
+    await page.getByText(title, { exact: true }).first().click({ timeout: 30_000 })
+    await openTranscript(page)
+    await until(
+      async () => (await page!.locator("body").innerText()).includes("RESTORED_BODY"),
+      "done and reload preserve subagent body"
+    )
+    for (const button of await page.getByRole("button", { name: "思考", exact: true }).all()) {
+      if ((await button.getAttribute("aria-expanded")) !== "true") await button.click()
+    }
+    await until(
+      async () => (await page!.locator("body").innerText()).includes("RESTORED_REASONING"),
+      "done and reload preserve subagent reasoning"
+    )
+    await page.screenshot({ path: join(artifacts, "snapshots-after-reload.png"), fullPage: true })
+    writeFileSync(
+      join(artifacts, "persisted-transcript.json"),
+      JSON.stringify(await persisted(), null, 2)
+    )
+    writeFileSync(
+      join(artifacts, "result.json"),
+      JSON.stringify(
+        {
+          status: "passed",
+          isolated,
+          coverage: [
+            "tool argument ordering",
+            "out-of-order results",
+            "live scheduler snapshots",
+            "shorter rewrite",
+            "field omission",
+            "empty clear",
+            "delta after clear",
+            "same raw ID assistant/tool cycles",
+            "old sidecar ACK after newer snapshot and delta",
+            "SQLite readback",
+            "done and reload"
+          ],
+          notCovered: [
+            "real model or IM transport",
+            "renderer crash during sidecar commit",
+            "filesystem failure"
+          ]
+        },
+        null,
+        2
+      )
+    )
     assert.deepEqual(errors, [], "no renderer errors")
     console.log("ALL PASS subagent tool order Electron E2E")
   } catch (error) {
+    writeFileSync(
+      join(artifacts, "result.json"),
+      JSON.stringify({ status: "failed", isolated, error: String(error) }, null, 2)
+    )
     if (page) {
       await page
         .screenshot({ path: join(artifacts, "failure.png"), fullPage: true })

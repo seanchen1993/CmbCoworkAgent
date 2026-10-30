@@ -1,0 +1,151 @@
+import assert from "node:assert/strict"
+import { chromium } from "playwright"
+import {
+  buildPlaywrightScriptRecorderInjectionScript,
+  PLAYWRIGHT_SCRIPT_RECORDER_EVENT_PREFIX
+} from "../../../../src/main/browser/record/script-record/script-recorder-playwright-adapter"
+import { formatPlaywrightSelector } from "../../../../src/main/browser/record/common/playwright-codegen/projectLocatorAdapter"
+
+interface RecorderTestWindow extends Window {
+  __pw_recorderRecordAction: (action: { name: string; selector: string }) => Promise<void>
+  editClicks?: number
+  mergeClicks?: number
+}
+
+async function main(): Promise<void> {
+  const browser = await chromium.launch({ headless: true })
+  try {
+    const page = await browser.newPage()
+    await page.setContent(`
+      <div class="operator-item-normal___3vtIs" onclick="window.editClicks = (window.editClicks || 0) + 1">
+        <span role="img"><svg width="16" height="16"><path d="M0 0" /></svg></span>
+        <span>编辑</span>
+      </div>
+      <span>编辑流水线配置</span>
+      <button>保存</button>
+      <section aria-label="计划发送"><button>发送</button></section>
+      <section aria-label="缺少主题"><button>发送</button></section>
+      <table><tbody><tr><td>首面进企</td></tr></tbody></table>
+      <div class="ant-radio-group">
+        <label class="ant-radio-button-wrapper">
+          <span><input name="leaveBankType" type="radio" value="LB_01_01"><span></span></span>
+          <span class="ant-radio-button-label">首面进企</span>
+        </label>
+      </div>
+      <div id="el-popover-3396" role="tooltip" class="el-popover el-popper merge-popver">
+        <div class="merge_list">
+          <h4><span onclick="window.mergeClicks = (window.mergeClicks || 0) + 1">Merge（推荐）</span></h4>
+          <p>总是创建一个合并节点，记录合并信息</p>
+        </div>
+      </div>
+      <iframe srcdoc="<span>编辑</span>"></iframe>
+    `)
+    await page.evaluate(buildPlaywrightScriptRecorderInjectionScript())
+    const record = async (selector: string): Promise<string> => {
+      const message = page.waitForEvent("console", {
+        predicate: (entry) => entry.text().startsWith(PLAYWRIGHT_SCRIPT_RECORDER_EVENT_PREFIX)
+      })
+      await page.evaluate(async (value) => {
+        await (window as RecorderTestWindow).__pw_recorderRecordAction({
+          name: "click",
+          selector: value
+        })
+      }, selector)
+      const payload = JSON.parse(
+        (await message).text().slice(PLAYWRIGHT_SCRIPT_RECORDER_EVENT_PREFIX.length)
+      )
+      return payload.locator.selector
+    }
+    // A unique exact match remains stable even when another element contains the same text.
+    assert.equal(await record('internal:text="编辑"i'), 'internal:text="编辑"s')
+    await page.getByText("编辑流水线配置", { exact: true }).evaluate((node) => node.remove())
+    const recorded = await record('internal:text="编辑"i')
+    assert.equal(recorded, 'internal:text="编辑"s')
+    assert.equal(formatPlaywrightSelector(recorded), 'getByText("编辑", { exact: true })')
+    await page.getByText("编辑", { exact: true }).evaluate((node) => {
+      node.dispatchEvent(new MouseEvent("mousemove", { bubbles: true, composed: true }))
+      node.classList.add("ant-tooltip-open")
+    })
+    await page.evaluate(() => {
+      const tooltip = document.createElement("div")
+      tooltip.setAttribute("role", "tooltip")
+      tooltip.textContent = "您不是系统LQ13.11的CI_OWNER，无法编辑"
+      document.body.append(tooltip)
+    })
+    assert.equal(await page.getByText("编辑").count(), 2)
+    const hoverFallback = await record(".ant-tooltip-open")
+    assert.equal(hoverFallback, 'internal:text="编辑"s')
+    await page.locator(recorded).click()
+    assert.equal(await page.evaluate(() => (window as RecorderTestWindow).editClicks), 1)
+    assert.equal(await record('internal:text="CI_OWNER"i'), 'internal:text="CI_OWNER"i')
+    assert.equal(
+      await record('internal:role=button[name="保存"i]'),
+      'internal:role=button[name="保存"i]'
+    )
+    await page
+      .getByLabel("缺少主题")
+      .getByRole("button", { name: "发送" })
+      .evaluate((node) => {
+        node.dispatchEvent(new MouseEvent("mousemove", { bubbles: true, composed: true }))
+      })
+    const duplicateButton = await record('internal:role=button[name="发送"s]')
+    assert.equal(
+      duplicateButton,
+      'internal:label="缺少主题"i >> internal:role=button[name="发送"i]'
+    )
+    assert.equal(
+      formatPlaywrightSelector(duplicateButton),
+      'getByLabel("缺少主题").getByRole("button", { name: "发送" })'
+    )
+    await page.getByText("Merge（推荐）", { exact: true }).evaluate((node) => {
+      node.dispatchEvent(new MouseEvent("mousemove", { bubbles: true, composed: true }))
+    })
+    const dynamicPopoverTarget = await record('#el-popover-3396 >> internal:text="Merge（推荐）"s')
+    assert.equal(dynamicPopoverTarget, 'internal:text="Merge（推荐）"s')
+    await page.locator("#el-popover-3396").evaluate((node) => {
+      node.id = "el-popover-7965"
+    })
+    await page.locator(dynamicPopoverTarget).click()
+    assert.equal(await page.evaluate(() => (window as RecorderTestWindow).mergeClicks), 1)
+    const radioLabel = await record('internal:text="首面进企"s >> nth=1')
+    assert.equal(
+      radioLabel,
+      'label:has(input[type="radio"][name="leaveBankType"][value="LB_01_01"])'
+    )
+    await page.locator(radioLabel).click()
+    assert.equal(await page.locator('input[value="LB_01_01"]').isChecked(), true)
+    await page
+      .locator(".ant-tooltip-open")
+      .evaluate((node) => node.classList.remove("ant-tooltip-open"))
+    await page
+      .getByRole("tooltip", { name: "您不是系统LQ13.11的CI_OWNER，无法编辑" })
+      .evaluate((node) => node.remove())
+    await page.locator(hoverFallback).click()
+    assert.equal(await page.evaluate(() => (window as RecorderTestWindow).editClicks), 2)
+    const frame = page.frames()[1]
+    await frame.evaluate(buildPlaywrightScriptRecorderInjectionScript("child"))
+    const frameMessage = page.waitForEvent("console", {
+      predicate: (entry) => entry.text().startsWith(PLAYWRIGHT_SCRIPT_RECORDER_EVENT_PREFIX)
+    })
+    await frame.evaluate(async () => {
+      await (window as RecorderTestWindow).__pw_recorderRecordAction({
+        name: "click",
+        selector: 'internal:text="编辑"i'
+      })
+    })
+    const framePayload = JSON.parse(
+      (await frameMessage).text().slice(PLAYWRIGHT_SCRIPT_RECORDER_EVENT_PREFIX.length)
+    )
+    assert.equal(framePayload.locator.selector, 'internal:text="编辑"s')
+    console.log(
+      "PASS real recorder injection: exact text, tooltip replay, partial text, roles and iframe"
+    )
+  } finally {
+    await browser.close()
+  }
+}
+
+void main().catch((error) => {
+  console.error(error)
+  process.exitCode = 1
+})

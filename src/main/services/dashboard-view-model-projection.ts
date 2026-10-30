@@ -1,3 +1,4 @@
+import { parseToolUsageAggs } from "../../shared/dashboard-tool-usage"
 import {
   makeDashboardCodeStats,
   normalizeCodeStatsFromAggs,
@@ -246,9 +247,7 @@ function projectOverviewTrace(
     inputTokens: aggValue(aggs.total_input_tokens),
     outputTokens: aggValue(aggs.total_output_tokens),
     totalSkills: aggValue(aggs.total_skills),
-    totalTools: aggValue(aggs.total_tools),
     totalSkillCalls: aggValue(aggs.total_skill_calls),
-    totalToolCalls: aggValue(aggs.total_tool_calls),
     trend: buckets(aggs.trend).map((entry, index) => {
       checkIndex(index, checkCancelled)
       const bucket = asRecord(entry)
@@ -261,22 +260,7 @@ function projectOverviewTrace(
     }),
     bySkill: combinedSkills.slice(0, 20),
     bySkillAll: combinedSkills,
-    byTool: buckets(aggs.by_tool).map((entry) => {
-      const bucket = asRecord(entry)
-      return { tool: asString(bucket.key) || "unknown", count: asNumber(bucket.doc_count) }
-    }),
-    byToolAll: buckets(aggs.by_tool_all).map((entry) => {
-      const bucket = asRecord(entry)
-      return { tool: asString(bucket.key) || "unknown", count: asNumber(bucket.doc_count) }
-    }),
-    byToolFilteredAll: buckets(aggs.by_tool_filtered_all ?? aggs.by_tool).map((entry) => {
-      const bucket = asRecord(entry)
-      return { tool: asString(bucket.key) || "unknown", count: asNumber(bucket.doc_count) }
-    }),
-    byToolAllFull: buckets(aggs.by_tool_all_full ?? aggs.by_tool_all).map((entry) => {
-      const bucket = asRecord(entry)
-      return { tool: asString(bucket.key) || "unknown", count: asNumber(bucket.doc_count) }
-    })
+    ...parseToolUsageAggs(aggs)
   }
 }
 
@@ -528,6 +512,7 @@ function projectAdvancedEvent(raw: unknown): Record<string, unknown> {
   const heartbeat = asRecord(aggs.heartbeat)
   const evolution = asRecord(aggs.evo_run)
   const im = asRecord(aggs.im)
+  const imOut = asRecord(aggs.im_out)
   const hooks = asRecord(aggs.hooks)
   return {
     hbActionable: countByKey(heartbeat.by_outcome, "actionable"),
@@ -547,6 +532,13 @@ function projectAdvancedEvent(raw: unknown): Record<string, unknown> {
     imCompleted: countByKey(im.by_outcome, "completed"),
     imCancelled: countByKey(im.by_outcome, "cancelled"),
     imError: countByKey(im.by_outcome, "error") + countByKey(im.by_outcome, "outcome_unknown"),
+    imReplied: countByKey(imOut.by_kind, "reply"),
+    imPushed: countByKey(imOut.by_kind, "push"),
+    imCards: countByKey(imOut.by_kind, "card"),
+    // "unknown" is a send the gateway may well have delivered, so it is grouped
+    // with the failures rather than the successes — the card reads it as "did
+    // not confirm", which is what is actually known.
+    imSendFailed: countByKey(imOut.by_outcome, "failed") + countByKey(imOut.by_outcome, "unknown"),
     hookTotal: asNumber(hooks.doc_count),
     hookBlocked: asNumber(asRecord(hooks.blocked).doc_count)
   }
@@ -574,6 +566,10 @@ function projectUserDirectory(
   raw: unknown,
   checkCancelled: CheckCancelled
 ): Record<string, unknown> {
+  const response = asRecord(raw)
+  if (response.timed_out || asNumber(asRecord(response._shards).failed) > 0) {
+    throw new Error("用户资料查询未完整返回，请重试")
+  }
   const aggs = asRecord(asRecord(raw).aggregations)
   const bySap = asRecord(aggs.by_sap)
   const items = buckets(bySap).flatMap((entry, index) => {

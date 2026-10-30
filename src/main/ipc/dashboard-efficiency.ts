@@ -1,3 +1,8 @@
+import type {
+  EfficiencyDevComputeResult,
+  EfficiencyPluginFilter,
+  EfficiencyStage
+} from "../../shared/dashboard-efficiency-compute"
 /**
  * 研发效能面板 — query shaping and response normalization.
  *
@@ -111,10 +116,9 @@ export interface EfficiencyScalabilityData {
   pendingReason: string
 }
 
-export interface DashboardEfficiencyData {
+export interface DashboardEfficiencyData extends EfficiencyDevComputeResult {
   scalability: EfficiencyScalabilityData
   adoption: EfficiencyAdoptionData
-  compute: EfficiencyComputeData
   meta: {
     /** Distinct `projectCode` values behind these numbers. */
     projectCount: number
@@ -361,7 +365,9 @@ export function buildPendingScalability(): EfficiencyScalabilityData {
  * 85%, a high unmeasured share, a large per-line token figure) so the warning
  * states get exercised during development rather than only in production.
  */
-export function makeMockEfficiency(): DashboardEfficiencyData {
+export function makeMockEfficiency(
+  selection: EfficiencyPluginFilter = {}
+): DashboardEfficiencyData {
   const newBucket = makeDashboardCodeStats({
     generatedLines: 128_400,
     deletedLines: 9_200,
@@ -399,6 +405,60 @@ export function makeMockEfficiency(): DashboardEfficiencyData {
     620, 210, 140, 110, 95, 88, 80, 76, 70, 68, 66, 71, 84, 120, 210, 380, 640, 980, 1_460, 2_310
   ]
 
+  const entries = [
+    { adapterName: "需求开发工作流", version: "1.0.0", weight: 5 },
+    { adapterName: "需求开发工作流", version: "1.1.0", weight: 3 },
+    { adapterName: "数据开发工作流", version: "1.2.0", weight: 2 }
+  ]
+  const selected = entries.filter(
+    (entry) =>
+      (!selection.adapterName || entry.adapterName === selection.adapterName) &&
+      (!selection.adapterName ||
+        !selection.adapterVersion ||
+        entry.version === selection.adapterVersion)
+  )
+  const metrics = (weight: number, legacy = false, share = selection.scope === "all" ? 1 : 0.7) => {
+    // Dev and stage distribution are partitions of the same full-flow mock.
+    if (!legacy) weight *= 1.4 * share
+    const totalTokens = legacy ? weight * 10000 : weight * 223600000
+    const generatedLines = legacy ? weight * 80 : weight * 19020
+    const pushedAdoptedLines = legacy ? weight * 60 : weight * 12010
+    const base = buildComputeEfficiency({
+      totalInputTokens: legacy ? weight * 9000 : weight * 214000000,
+      totalOutputTokens: legacy ? weight * 1000 : weight * 9600000,
+      totalTokens,
+      cacheReadTokens: legacy ? 0 : weight * 178000000,
+      pushedAdoptedLines,
+      traceCount: legacy ? weight * 30 : weight * 1840,
+      codeProducingTraceCount: legacy ? weight * 10 : weight * 712
+    })
+    return {
+      ...base,
+      generatedLines,
+      tokensPerGeneratedLine: generatedLines ? totalTokens / generatedLines : null,
+      modelCalls: weight * 3000,
+      tokenUsageIncomplete: false,
+      tokenUsageReportedCalls: legacy ? 0 : weight * 3000,
+      cacheUsageReportedCalls: legacy ? 0 : weight * 3000
+    }
+  }
+  const weight = selected.reduce((sum, item) => sum + item.weight, 0)
+  const compute = metrics(weight)
+  const legacyCompute = metrics(selection.scope === "all" ? 0 : weight, true)
+  const names = [...new Set(entries.map((entry) => entry.adapterName))]
+  const computeByPlugin = names.flatMap((adapterName) => {
+    const matches = selected.filter((entry) => entry.adapterName === adapterName)
+    if (!matches.length) return []
+    const pluginWeight = matches.reduce((sum, entry) => sum + entry.weight, 0)
+    return [
+      {
+        adapterName,
+        versions: matches.map((entry) => entry.version),
+        compute: metrics(pluginWeight),
+        legacyCompute: metrics(selection.scope === "all" ? 0 : pluginWeight, true)
+      }
+    ]
+  })
   return {
     scalability: buildPendingScalability(),
     adoption: {
@@ -413,16 +473,39 @@ export function makeMockEfficiency(): DashboardEfficiencyData {
       })),
       unmeasuredRatio: computeUnmeasuredRatio(overall)
     },
-    compute: buildComputeEfficiency({
-      totalInputTokens: 2_140_000_000,
-      totalOutputTokens: 96_000_000,
-      // 输入 + 输出 = 总数，让本地预览走到自检通过的分支。
-      totalTokens: 2_236_000_000,
-      cacheReadTokens: 1_780_000_000,
-      pushedAdoptedLines: overall.pushedAdoptedLines,
-      traceCount: 18_400,
-      codeProducingTraceCount: 7_120
+    computeScope: selection.scope === "all" ? "all" : "dev",
+    compute,
+    legacyCompute,
+    computeByPlugin,
+    stageDistribution: (
+      [
+        ["biz", 0.15],
+        ["dev", 0.7],
+        ["ops", 0.1],
+        ["unattributed", 0.05]
+      ] as [EfficiencyStage, number][]
+    ).map(([stage, share]) => {
+      const data = metrics(weight, false, share)
+      return {
+        stage,
+        totalTokens: data.totalTokens,
+        generatedLines: data.generatedLines,
+        pushedAdoptedLines: data.pushedAdoptedLines
+      }
     }),
+    pluginOptions: names.map((adapterName) => ({
+      adapterName,
+      versions: entries
+        .filter((entry) => entry.adapterName === adapterName)
+        .map((entry) => entry.version)
+    })),
+    computeCoverage: {
+      scopeTraces: compute.traceCount,
+      preciseDevTraces:
+        selection.scope === "all" ? 0 : compute.traceCount - legacyCompute.traceCount,
+      legacyDevTraces: legacyCompute.traceCount,
+      unattributedTraces: 0
+    },
     meta: { projectCount: 23, truncated: false }
   }
 }

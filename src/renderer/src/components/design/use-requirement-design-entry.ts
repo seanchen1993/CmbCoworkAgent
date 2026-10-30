@@ -20,6 +20,7 @@ const REQUIREMENT_ATTACHMENT_MAX_CHARS = 24_000
 type CreateRequirementSession = (
   meta?: Partial<SessionMeta>,
   options?: {
+    designSystemId?: string | null
     initialInputValue?: string
     initialAttachedFiles?: FileAttachment[]
     workspacePath?: string
@@ -89,6 +90,7 @@ export function useRequirementDesignEntry({
             const sessionId = createSession(
               { title: entry.functionName?.trim() || "需求原型" },
               {
+                designSystemId: entry.designSystemId ?? null,
                 initialInputValue: entry.prompt,
                 initialAttachedFiles: [requirementAttachment],
                 workspacePath: entry.workspacePath

@@ -1,5 +1,6 @@
 import os from "os"
 import type { AgentShellAccess } from "../agent-registry"
+import type { BackgroundNotificationOwner } from "../../../shared/internal-notification-turn"
 
 /**
  * Dynamic Workflows — shared types and limits.
@@ -491,7 +492,23 @@ export interface PersistedWorkflowRun {
    * fresh run's journal also grows as agents execute.
    */
   resumed?: boolean
+  /**
+   * Which side owns the completion summary for THIS run.
+   *
+   * Bound to the run, not to the thread: the same conversation can be driven
+   * from the desktop one turn and from Zhaohu the next, so "is this thread
+   * connected to IM" answers the wrong question. Recorded at launch from the
+   * run body that started it and persisted, so a renderer that reopens the
+   * thread days later reaches the same conclusion.
+   *
+   * Absent on runs persisted before this field existed; those are treated as
+   * desktop-owned, which is what they were.
+   */
+  notificationOwner?: WorkflowNotificationOwner
 }
+
+/** See BackgroundNotificationOwner; a workflow run is one such background task. */
+export type WorkflowNotificationOwner = BackgroundNotificationOwner
 
 /**
  * Resume arg/journal policy (pure, unit-tested). Lives here (no electron deps) so

@@ -24,6 +24,7 @@ const resourcePanelOverlay = readFileSync(
   new URL("../panels/ResourcePanelOverlay.tsx", import.meta.url),
   "utf8"
 )
+const overlayDrawer = readFileSync(new URL("../panels/OverlayDrawer.tsx", import.meta.url), "utf8")
 const latestCompletedResource = readFileSync(
   new URL("../../lib/latest-completed-resource.ts", import.meta.url),
   "utf8"
@@ -43,7 +44,10 @@ const trustedToolPreview = readFileSync(
   "utf8"
 )
 const messageBubble = readFileSync(new URL("../chat/MessageBubble.tsx", import.meta.url), "utf8")
-const htmlPreview = readFileSync(new URL("../chat/previews/HtmlPreview.tsx", import.meta.url), "utf8")
+const htmlPreview = readFileSync(
+  new URL("../chat/previews/HtmlPreview.tsx", import.meta.url),
+  "utf8"
+)
 const htmlSrcDoc = readFileSync(new URL("../../lib/html-srcdoc.ts", import.meta.url), "utf8")
 const agentRuntime = readFileSync(
   new URL("../../../../main/agent/runtime.ts", import.meta.url),
@@ -85,6 +89,8 @@ describe("persisted active file preview isolation", () => {
     expect(fileViewer).toContain("MAX_HTML_DEPENDENCY_REQUESTS")
     expect(fileViewer).toContain("MAX_HTML_DEPENDENCY_BYTES")
     expect(fileViewer).toContain("readHtmlDependencyFile")
+    expect(fileViewer).toContain("budget.htmlReads.get(resolvedPath)")
+    expect(fileViewer).toContain("budget.htmlReads.set(resolvedPath, pending)")
     expect(fileViewer).toContain("MAX_MARKDOWN_IMAGE_SOURCE_BYTES")
   })
 
@@ -105,11 +111,11 @@ describe("persisted active file preview isolation", () => {
     expect(rendererStyles).toContain(".shiki-content.shiki-content-soft-wrap .line")
   })
 
-  it("renders workspace-tab HTML as static UI while resource previews stay source-only", () => {
+  it("renders workspace-tab HTML in isolation while resource previews stay source-only", () => {
     expect(tabbedPanel).toContain("workspaceFilePreviewModeForPath(activeFile.path)")
     expect(tabbedPanel).toContain("previewMode={activeFilePreviewMode}")
-    expect(tabbedPanel).toContain('activeFilePreviewMode === "preview" ? "workspace-static"')
-    expect(fileViewer).toContain('htmlPreviewPolicy === "workspace-static"')
+    expect(tabbedPanel).toContain('activeFilePreviewMode === "preview" ? "workspace-scripted"')
+    expect(fileViewer).toContain('htmlPreviewPolicy === "workspace-scripted"')
     expect(fileViewer).toContain("!externalFullPath")
     expect(fileViewer).toContain('workspacePathKind === "relative"')
     expect(fileViewer).toContain('previewKind === "html"')
@@ -121,17 +127,14 @@ describe("persisted active file preview isolation", () => {
     expect(rightPanel).not.toContain("onRequestBrowserMode")
     expect(rightPanel).not.toContain("browserPreviewUrl")
     expect(resourcePanelOverlay).not.toContain('setMode("browser")')
-    expect(htmlPreview).toContain("buildStaticHtmlPreviewDocument")
-    // Visual annotations inspect the static DOM; page scripts remain disabled.
-    expect(htmlPreview).toContain('sandbox="allow-same-origin"')
-    expect(htmlPreview).not.toContain('setSrcDocContent(content)')
-    expect(htmlPreview).not.toContain("allow-scripts")
+    expect(htmlPreview).toContain("buildHtmlPreviewDocument")
+    expect(htmlPreview).toContain('visualEditEnabled ? "allow-same-origin" : "allow-scripts"')
+    expect(htmlPreview).not.toContain("setSrcDocContent(content)")
     expect(htmlPreview).not.toContain("allow-modals")
-    expect(htmlSrcDoc).toContain('"default-src \'none\'"')
-    expect(htmlSrcDoc).toContain("script, iframe, frame, fencedframe, object, embed")
+    expect(htmlSrcDoc).toContain("\"default-src 'none'\"")
+    expect(htmlSrcDoc).toContain("iframe, frame, fencedframe, object, embed")
     expect(htmlSrcDoc).toContain('content.replace(/<\\/style/gi, "\\\\3C /style")')
     expect(htmlSrcDoc).toContain("serialization fixed point")
-    expect(htmlSrcDoc).not.toContain("scriptTags")
   })
 
   it("lets the file viewer own scrolling inside the available right-panel height", () => {
@@ -191,6 +194,27 @@ describe("persisted active file preview isolation", () => {
       expect(modelsIpc).not.toContain(removedChannel)
       expect(preload).not.toContain(removedChannel)
     }
+  })
+
+  it("keeps collapsed resource drawers from inheriting standard right-panel state", () => {
+    expect(resourcePanelOverlay).toContain("if (!standardRightPanelMounted) return")
+    expect(resourcePanelOverlay).toContain("setOpen(false)")
+    expect(resourcePanelOverlay).toContain("clearPreviewRequest()")
+    expect(resourcePanelOverlay).toMatch(
+      /if \(standardRightPanelMounted\) \{\s*setOpen\(false\)\s*setRightModule\(nextMode\)/
+    )
+  })
+
+  it("keeps the resource drawer resizable from its left border", () => {
+    expect(overlayDrawer).toContain('role="separator"')
+    expect(overlayDrawer).toContain('aria-orientation="vertical"')
+    expect(overlayDrawer).toContain('document.body.style.cursor = "col-resize"')
+    expect(overlayDrawer).toContain(
+      "setWidth(clampWidth(start.width - (latestClientX - start.clientX)))"
+    )
+    expect(overlayDrawer).toContain("suppressBackdropCloseRef.current = true")
+    expect(overlayDrawer).toContain("if (suppressBackdropCloseRef.current)")
+    expect(overlayDrawer).toContain("onClick={handleBackdropClick}")
   })
 
   it("defers ambiguous POSIX path intent until main applies the authoritative boundary", () => {

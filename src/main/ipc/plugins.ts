@@ -29,7 +29,11 @@ import type {
 } from "../types"
 import { invalidateGlobalMcpCapabilityService } from "../mcp/capability-service"
 import { notifyHooksChanged } from "../hooks/notifications"
+import { getModsManager } from "../mods/manager"
 import { discoverSkills } from "../skills/discovery"
+import { parseModManifest } from "../../shared/mods/validation"
+import { resolveModFile } from "../mods/loader"
+import { compileFunctionPlugin } from "../mods/v2/loader"
 import { decodeArchiveEntryName } from "../skills/archive"
 import {
   DEFAULT_PLUGIN_HOOKS_PATH,
@@ -50,6 +54,7 @@ interface ParsedPlugin {
   mcpServerDetails: PluginMcpServerDetail[]
   hookCount: number
   hookPath: string
+  modCount: number
   name: string
 }
 
@@ -215,6 +220,7 @@ async function parsePluginDir(dirPath: string, fallbackName?: string): Promise<P
 
   // Count hooks — supports our flat array and CC formats
   let hookCount = 0
+  let hasFunctionModules = false
   const hookPath = normalizePluginRelativePath(manifest?.hooks) ?? DEFAULT_PLUGIN_HOOKS_PATH
   const hooksFilePath = path.join(dirPath, hookPath)
   if (existsSync(hooksFilePath)) {
@@ -223,6 +229,7 @@ async function parsePluginDir(dirPath: string, fallbackName?: string): Promise<P
       if (Array.isArray(raw)) {
         hookCount = raw.length
       } else if (raw && typeof raw === "object") {
+        hasFunctionModules = Array.isArray(raw.modules) && raw.modules.length > 0
         // CC plugin wrapper { description?, hooks: {...} } or CC settings { EventName: [...] }
         const settingsObj =
           typeof (raw as Record<string, unknown>).hooks === "object" &&
@@ -247,6 +254,24 @@ async function parsePluginDir(dirPath: string, fallbackName?: string): Promise<P
     }
   }
 
+  let modCount = 0
+  if (hasFunctionModules) {
+    await compileFunctionPlugin(dirPath)
+    modCount++
+  }
+  if (manifest?.mods) {
+    const moduleManifest = resolveModFile(dirPath, manifest.mods)
+    if ((await fs.stat(moduleManifest)).size > 32_768) throw new Error("MODS_MANIFEST_SIZE")
+    const moduleText = await fs.readFile(moduleManifest, "utf8")
+    const moduleConfig = JSON.parse(moduleText)
+    if (moduleConfig.apiVersion === "cmb.mods/v2") await compileFunctionPlugin(dirPath)
+    else parseModManifest(moduleConfig)
+    modCount++
+  } else if (!hasFunctionModules && existsSync(path.join(dirPath, "mods/manifest.json"))) {
+    await compileFunctionPlugin(dirPath)
+    modCount++
+  }
+
   return {
     manifest,
     manifestRelPath,
@@ -255,6 +280,7 @@ async function parsePluginDir(dirPath: string, fallbackName?: string): Promise<P
     mcpServerDetails,
     hookCount,
     hookPath,
+    modCount,
     name
   }
 }
@@ -265,20 +291,28 @@ function formatAuthor(author: PluginManifest["author"]): string {
   return author.name || ""
 }
 
-async function installPluginFromDir(
+export async function installPluginFromDir(
   dirPath: string,
   fallbackName?: string,
   origin?: "market" | "local",
-  versionOverride?: string
+  versionOverride?: string,
+  requireMods = false
 ): Promise<{ success: boolean; pluginName?: string; error?: string }> {
   try {
     const parsed = await parsePluginDir(dirPath, fallbackName)
+    if (requireMods && parsed.modCount === 0) {
+      return {
+        success: false,
+        error: "未检测到 Mods 模块，请选择包含 Mods 的插件包。普通插件请在“插件”页面安装。"
+      }
+    }
     if (
       parsed.skillNames.length === 0 &&
       Object.keys(parsed.mcpConfigs).length === 0 &&
-      parsed.hookCount === 0
+      parsed.hookCount === 0 &&
+      parsed.modCount === 0
     ) {
-      return { success: false, error: "未检测到有效的 skills、MCP 配置或 hooks" }
+      return { success: false, error: "未检测到有效的 skills、MCP 配置、hooks 或 CMB Mods 清单" }
     }
 
     const pluginsDir = getPluginsDir()
@@ -374,6 +408,7 @@ async function installPluginFromDir(
       mcpServerCount: Object.keys(parsed.mcpConfigs).length,
       hookCount: parsed.hookCount,
       hookPath: parsed.hookPath,
+      ...(parsed.modCount ? { modCount: parsed.modCount } : {}),
       origin: resolvedOrigin,
       createdAt: existing?.createdAt ?? now,
       updatedAt: now
@@ -383,6 +418,7 @@ async function installPluginFromDir(
     invalidateEnabledSkillsCache()
     await invalidateGlobalMcpCapabilityService("plugin:update")
     notifyHooksChanged("plugin-installed")
+    getModsManager()?.pluginsChanged()
 
     return { success: true, pluginName: parsed.name }
   } catch (e) {
@@ -429,7 +465,8 @@ async function selectExtractedPluginRoot(tempDir: string): Promise<string> {
     if (
       parsed.skillNames.length > 0 ||
       Object.keys(parsed.mcpConfigs).length > 0 ||
-      parsed.hookCount > 0
+      parsed.hookCount > 0 ||
+      parsed.modCount > 0
     ) {
       validCandidates.push(candidate)
     }
@@ -593,6 +630,7 @@ export async function inspectPluginZip(buffer: ArrayBuffer): Promise<PluginDetai
       mcpServers: Object.keys(parsed.mcpConfigs),
       mcpServerDetails: parsed.mcpServerDetails,
       hookCount: parsed.hookCount,
+      modCount: parsed.modCount,
       // Uninstalled plugins have no per-hook enable metadata; only the count
       // is meaningful here. The detail panel reads hookCount for the summary.
       hooks: [],
@@ -612,7 +650,8 @@ async function installPluginFromZip(
   buffer: ArrayBuffer,
   fileName?: string,
   origin?: "market" | "local",
-  versionOverride?: string
+  versionOverride?: string,
+  requireMods = false
 ): Promise<{ success: boolean; pluginName?: string; error?: string }> {
   try {
     const extracted = await extractZipToTemp(buffer, getPluginsDir(), "_temp_")
@@ -630,7 +669,9 @@ async function installPluginFromZip(
           : rootName
 
       // Parse and install (the real copy lands in getPluginsDir() via installPluginFromDir)
-      return await installPluginFromDir(pluginRoot, fallbackName, origin, versionOverride)
+      return await installPluginFromDir(
+        pluginRoot, fallbackName, origin, versionOverride, requireMods
+      )
     } finally {
       // Clean up temp directory regardless of install outcome
       if (existsSync(tempDir)) {
@@ -710,6 +751,7 @@ export function registerPluginHandlers(ipcMain: IpcMain): void {
         fileName: string
         origin?: "market" | "local"
         version?: string
+        requireMods?: boolean
       }
     ): Promise<{ success: boolean; pluginName?: string; error?: string }> => {
       const { buffer, fileName, origin, version } = payload
@@ -728,7 +770,9 @@ export function registerPluginHandlers(ipcMain: IpcMain): void {
         origin === "market" || origin === "local" ? origin : "local"
       await pluginMutex.acquire()
       try {
-        return await installPluginFromZip(buffer, fileName, sanitizedOrigin, version)
+        return await installPluginFromZip(
+          buffer, fileName, sanitizedOrigin, version, payload.requireMods === true
+        )
       } finally {
         pluginMutex.release()
       }
@@ -737,21 +781,24 @@ export function registerPluginHandlers(ipcMain: IpcMain): void {
 
   ipcMain.handle(
     "plugins:installFromDir",
-    async (): Promise<{ success: boolean; pluginName?: string; error?: string }> => {
+    async (
+      _event, requireMods?: boolean
+    ): Promise<{ success: boolean; pluginName?: string; error?: string }> => {
       const result = await dialog.showOpenDialog({
         properties: ["openDirectory"],
-        title: "选择 Plugin 目录"
+        title: requireMods === true ? "选择 Mods 插件目录" : "选择 Plugin 目录"
       })
       if (result.canceled || result.filePaths.length === 0) {
         return { success: false, error: "已取消" }
       }
       await pluginMutex.acquire()
       try {
-        // This IPC is only reached through the PluginsPanel "选择文件夹"
-        // button — an unambiguously local action. Pass "local" explicitly so
+        // Both settings pages select a local folder. Pass "local" explicitly so
         // it can override any sticky "market" tag from a prior install of
         // the same plugin.
-        return await installPluginFromDir(result.filePaths[0], undefined, "local")
+        return await installPluginFromDir(
+          result.filePaths[0], undefined, "local", undefined, requireMods === true
+        )
       } finally {
         pluginMutex.release()
       }
@@ -776,6 +823,7 @@ export function registerPluginHandlers(ipcMain: IpcMain): void {
             rmSync(plugin.path, { recursive: true, force: true })
           }
           deletePluginStorage(id)
+          getModsManager()?.pluginsChanged()
           invalidateEnabledSkillsCache()
           await invalidateGlobalMcpCapabilityService("plugin:delete")
           notifyHooksChanged("plugin-deleted")
@@ -799,6 +847,7 @@ export function registerPluginHandlers(ipcMain: IpcMain): void {
       try {
         const { id, enabled } = payload
         setPluginEnabled(id, enabled)
+        getModsManager()?.pluginsChanged()
         invalidateEnabledSkillsCache()
         await invalidateGlobalMcpCapabilityService("plugin:setEnabled")
         notifyHooksChanged("plugin-enabled-changed")

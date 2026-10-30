@@ -1,3 +1,4 @@
+import { SubagentSessionExportButton } from "./SubagentSessionExportButton"
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
 import { ArrowLeft, Sparkles } from "lucide-react"
 import { MessageBubble } from "./MessageBubble"
@@ -13,6 +14,7 @@ import {
 } from "@/lib/message-display-visibility"
 import { buildToolResultAssociations } from "@/lib/worker-tool-result-key"
 import {
+  applySubagentTranscriptStartTime,
   getSubagentTranscriptsFromThreadValues,
   mergeSubagentTranscriptPages,
   reconcileTranscriptToolCallsWithResults,
@@ -177,10 +179,13 @@ export function SubagentStreamPanel({
     [fullMessages, messageWindowEnd, transcriptProjection.contentVersion]
   )
   const isTailWindow = messageWindow.end >= fullMessages.length
-  const messages = useMemo(
-    () => reconcileTranscriptToolCallsWithResults(messageWindow.messages),
-    [messageWindow.messages]
-  )
+  const messages = useMemo(() => {
+    const reconciled = reconcileTranscriptToolCallsWithResults(messageWindow.messages)
+    return applySubagentTranscriptStartTime(
+      reconciled,
+      currentSubagent?.startedAt ?? subagentFocusView?.startedAt
+    )
+  }, [currentSubagent?.startedAt, messageWindow.messages, subagentFocusView?.startedAt])
   const loadEarlier = useCallback(async (): Promise<void> => {
     if (
       loadingEarlier ||
@@ -488,6 +493,13 @@ export function SubagentStreamPanel({
             </span>
           </div>
         </div>
+        <SubagentSessionExportButton
+          target={{
+            kind: "multi",
+            threadId: subagentFocusView.threadId,
+            subagentId: subagentFocusView.subagentId
+          }}
+        />
         <span
           className={cn(
             "shrink-0 rounded-full border px-2 py-0.5 text-[11px] leading-none",

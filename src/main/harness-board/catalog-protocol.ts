@@ -80,7 +80,6 @@ export interface HarnessProjectContextReadRequest {
   projectIds: string[]
   featureSlug?: string
   featureBindingStorePath?: string
-  deployUnitMappingStorePath?: string
   maxResponseBytes: number
   cancelBuffer: SharedArrayBuffer
 }

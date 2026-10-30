@@ -1,3 +1,4 @@
+import { resolveWorkerSnapshotContent } from "./worker-message-content"
 import { create } from "zustand"
 import type { EvolutionCandidate } from "@/api/evolution"
 // Relative, not "@/": store.ts is loaded by tsx-run specs (via electron-transport)
@@ -574,11 +575,10 @@ function workerTurnKeys(
 }
 
 function relativeWorkerTurnKeys(messages: readonly Message[], turnOffset: number): string[] {
-  let currentTurn = turnOffset
-  return messages.map((message) => {
-    if (message.role === "user") currentTurn += 1
-    return currentTurn > 0 ? `__cmb-worker-turn-${currentTurn}__` : WORKER_PRE_USER_TURN_KEY
-  })
+  return workerTurnKeys(
+    messages,
+    turnOffset > 0 ? `__cmb-worker-turn-${turnOffset}__` : WORKER_PRE_USER_TURN_KEY
+  )
 }
 
 function workerTurnSignatureKey(
@@ -722,6 +722,8 @@ function resolveWorkerFocusContent(
   incomingIsOrderedSnapshot: boolean = false,
   incomingDefinesRepeatedOccurrence: boolean = false
 ): Message["content"] {
+  const snapshotContent = resolveWorkerSnapshotContent(existingMessage, incomingMessage)
+  if (snapshotContent !== undefined) return snapshotContent
   if (incomingIsOrderedSnapshot && incomingDefinesRepeatedOccurrence) {
     return incomingMessage.content ?? ""
   }
@@ -855,6 +857,8 @@ type MainView =
   | "thread"
   | "customize"
   | "evolution"
+  | "scheduled"
+  | "market"
   | "kanban"
   | "design"
   | "harness"
@@ -903,6 +907,7 @@ export interface SubagentFocusView {
   subagentId: string
   name: string
   description: string
+  startedAt?: Date
   status?: "pending" | "running" | "completed" | "failed" | "cancelled"
 }
 
@@ -1004,6 +1009,7 @@ interface AppState {
 
   // Customize view state
   showCustomizeView: boolean
+  accountRevision: number
   customizeInitialTab: string | null
   customizeInitialSection: string | null
   marketInitialSkillCategory: string | null
@@ -1182,6 +1188,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   dashboardAllowed: null,
   previousThreadId: null,
   showCustomizeView: false,
+  accountRevision: 0,
   customizeInitialTab: null,
   customizeInitialSection: null,
   marketInitialSkillCategory: null,
@@ -2129,15 +2136,23 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   // Dashboard actions
   loadDashboardAllowed: async () => {
+    const accountRevision = get().accountRevision
     const allowed = await window.api.dashboard.isAllowed().catch(() => false)
     const state = get()
+    if (state.accountRevision !== accountRevision) return
     set({
       dashboardAllowed: allowed,
       ...(allowed
         ? {}
         : {
             showDashboardView: false,
-            mainView: state.mainView === "dashboard" ? ("thread" as const) : state.mainView
+            ...(state.mainView === "dashboard"
+              ? {
+                  mainView: "thread" as const,
+                  currentThreadId: resolveChatThreadId(state.threads, state.previousThreadId),
+                  previousThreadId: null
+                }
+              : {})
           })
     })
   },
@@ -2276,35 +2291,17 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   setShowCustomizeView: (show: boolean, tab?: string, section?: string) => {
-    if (show) {
-      set({
-        showCustomizeView: true,
-        showDesignView: false,
-        showKanbanView: false,
-        showHarnessBoardView: false,
-        showClaudeCodeView: false,
-        showDashboardView: false,
-        customizeInitialTab: tab ?? null,
-        customizeInitialSection: section ?? null,
-        mainView: "customize",
-        workerFocusView: null,
-        workerFocusMessagesThreadId: null,
-        workerFocusMessages: [],
-        subagentFocusView: null,
-        workflowAgentFocusView: null
-      })
-    } else {
-      const restored = get().previousThreadId
-      const currentThreadId = resolveChatThreadId(get().threads, restored)
-      set({
-        showCustomizeView: false,
-        customizeInitialTab: null,
-        customizeInitialSection: null,
-        mainView: "thread",
-        currentThreadId,
-        previousThreadId: null
-      })
+    // Keep legacy callers working after these panels moved out of settings.
+    if (show && (tab === "scheduled" || tab === "market")) {
+      get().setMainView(tab)
+      return
     }
+    // Settings covers the current workspace; closing it does not navigate.
+    set({
+      showCustomizeView: show,
+      customizeInitialTab: show ? (tab ?? null) : null,
+      customizeInitialSection: show ? (section ?? null) : null
+    })
   },
 
   setMarketInitialSkillCategory: (category) => {
@@ -2328,6 +2325,25 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   setMainView: (view) => {
+    if (view === "scheduled" || view === "market") {
+      set({
+        mainView: view,
+        showCustomizeView: false,
+        showKanbanView: false,
+        showHarnessBoardView: false,
+        showClaudeCodeView: false,
+        showDashboardView: false,
+        customizeInitialTab: null,
+        customizeInitialSection: null,
+        workerFocusView: null,
+        workerFocusMessagesThreadId: null,
+        workerFocusMessages: [],
+        subagentFocusView: null,
+        workflowAgentFocusView: null
+      })
+      return
+    }
+
     if (view === "kanban") {
       set({
         mainView: "kanban",
@@ -2348,39 +2364,12 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
 
     if (view === "customize") {
-      set({
-        mainView: "customize",
-        showCustomizeView: true,
-        showDesignView: false,
-        showKanbanView: false,
-        showHarnessBoardView: false,
-        showClaudeCodeView: false,
-        showDashboardView: false,
-        workerFocusView: null,
-        workerFocusMessagesThreadId: null,
-        workerFocusMessages: [],
-        subagentFocusView: null,
-        workflowAgentFocusView: null
-      })
+      get().setShowCustomizeView(true)
       return
     }
 
     if (view === "evolution") {
-      set({
-        mainView: "customize",
-        showCustomizeView: true,
-        showKanbanView: false,
-        showDesignView: false,
-        showHarnessBoardView: false,
-        showClaudeCodeView: false,
-        customizeInitialTab: "evolution",
-        showDashboardView: false,
-        workerFocusView: null,
-        workerFocusMessagesThreadId: null,
-        workerFocusMessages: [],
-        subagentFocusView: null,
-        workflowAgentFocusView: null
-      })
+      get().setShowCustomizeView(true, "evolution")
       return
     }
 

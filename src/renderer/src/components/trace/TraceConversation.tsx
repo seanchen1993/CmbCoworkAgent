@@ -1,7 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from "react"
 import { Bot, ChevronDown, ChevronRight, Info, Route, User, Wrench } from "lucide-react"
 import { cn } from "@/lib/utils"
-import { parseSkillUseBlock } from "@/features/slash-commands/skill-marker"
+import { BuiltinBrowserChip } from "@/features/builtin-browser/BuiltinBrowserChip"
+import { parseUserVisibleBuiltinBrowserContent } from "@/features/builtin-browser/chat-integration"
+import {
+  parseSkillUseBlock,
+  skillUseDisplayLabel,
+  stripSkillUseBlockForDisplay
+} from "@/features/slash-commands/skill-marker"
 import {
   classifyInternalNotificationTurn,
   type InternalNotificationTurnKind
@@ -108,6 +114,8 @@ export interface TraceConversationMessage {
   occurredAt?: string
   /** Which trace this message was reconstructed from (thread view only). */
   traceId?: string
+  /** The user explicitly selected the /browser slash command for this turn. */
+  builtinBrowserSelected?: boolean
 }
 
 export interface TraceConversationSummary {
@@ -176,15 +184,43 @@ function textFromUnknown(value: unknown): string {
  * (read-instructions + name + path) to the end of the user message. That block
  * is plumbing meant for the model, not something a human wants to read back in
  * the conversation reconstruction. Strip it: keep the user's own prose, and if
- * the prose is empty, fall back to a short "使用 /skill 技能" label.
+ * the prose is empty, fall back to the short label naming the skill — the same
+ * one the upload sanitizer now writes in the block's place, so a trace list
+ * does not mix two spellings of the same event.
+ *
+ * parseSkillUseBlock refuses a block whose `<name>`/`<path>` pairs are not both
+ * intact, which is the right call where it also drives skill activation and the
+ * composer's edit round-trip. Here the payload has been through the upload
+ * sanitizer, whose compressed userMessage budget elides the middle of a long
+ * message and routinely takes `</name>` and the opening `<path>` with it. So a
+ * refusal is not evidence that this is user prose, and the looser display-only
+ * strip takes over rather than rendering the raw block.
  */
-function cleanUserText(raw: string): string {
+function stripTraceSkillUseBlock(raw: string): string {
   const text = raw.trim()
   if (!text) return text
   const parsed = parseSkillUseBlock(text)
-  if (!parsed) return text
-  const prose = parsed.rest.trim()
-  return prose || `使用 /${parsed.skillName} 技能`
+  if (parsed) {
+    return parsed.rest.trim() || skillUseDisplayLabel(parsed.skillName)
+  }
+  const salvaged = stripSkillUseBlockForDisplay(text)
+  if (!salvaged) return text
+  return salvaged.rest.trim() || skillUseDisplayLabel(salvaged.skillName)
+}
+
+function parseTraceUserContent(raw: string): {
+  visibleText: string
+  builtinBrowserSelected: boolean
+} {
+  const browserContent = parseUserVisibleBuiltinBrowserContent(stripTraceSkillUseBlock(raw))
+  return {
+    visibleText: browserContent.visibleText,
+    builtinBrowserSelected: browserContent.browserSelected
+  }
+}
+
+function cleanUserText(raw: string): string {
+  return parseTraceUserContent(raw).visibleText
 }
 
 function uniqueToolNames(names: string[]): string[] {
@@ -474,7 +510,10 @@ export function buildTraceConversation(
     executionMode: trace.executionMode,
     triggerSource: trace.triggerSource
   })
-  const userText = internalNotificationKind ? "" : cleanUserText(rawUserText)
+  const userContent = internalNotificationKind
+    ? { visibleText: "", builtinBrowserSelected: false }
+    : parseTraceUserContent(rawUserText)
+  const userText = userContent.visibleText
 
   const timeline = sortTimeline(buildTraceTimeline(trace, 0))
   const messages = timeline.map((entry) => entry.message)
@@ -521,9 +560,20 @@ function buildTraceTimeline(trace: TraceConversationSource, traceOrder: number):
     executionMode: trace.executionMode,
     triggerSource: trace.triggerSource
   })
-  const userText = internalNotificationKind ? "" : cleanUserText(rawUserText)
-  if (userText) {
-    add({ role: "user", label: instructionLabel(trace), content: userText }, trace.startedAt)
+  const userContent = internalNotificationKind
+    ? { visibleText: "", builtinBrowserSelected: false }
+    : parseTraceUserContent(rawUserText)
+  const userText = userContent.visibleText
+  if (userText || userContent.builtinBrowserSelected) {
+    add(
+      {
+        role: "user",
+        label: instructionLabel(trace),
+        content: userText,
+        ...(userContent.builtinBrowserSelected ? { builtinBrowserSelected: true } : {})
+      },
+      trace.startedAt
+    )
   }
 
   const llmNodes = (trace.nodes ?? []).filter((node) => node.type === "llm")
@@ -1072,8 +1122,11 @@ function TimelineMessageRow({
           </div>
         )}
         {message.reasoning ? <ReasoningDetails text={message.reasoning} /> : null}
+        {message.builtinBrowserSelected ? (
+          <BuiltinBrowserChip compact className={cn(message.content && "mr-2")} />
+        ) : null}
         {message.content ? (
-          <div className="whitespace-pre-wrap break-words">{message.content}</div>
+          <span className="whitespace-pre-wrap break-words">{message.content}</span>
         ) : null}
       </div>
       {isUser && (
@@ -1138,6 +1191,7 @@ export function TraceConversation({
  * trace」，读起来像内容就这么多。所以这里不渲染半张脸的时间线，直接给占位。
  * 混合状态（部分已加载）不算——那说明数据已经在陆续到位了。
  */
+// eslint-disable-next-line react-refresh/only-export-components
 export function isThreadAwaitingFullLoad(traces: readonly TraceConversationSource[]): boolean {
   return traces.length > 0 && traces.every((trace) => trace.rawPending === true)
 }

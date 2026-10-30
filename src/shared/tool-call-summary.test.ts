@@ -33,8 +33,26 @@ describe("collapsed tool-call search summary", () => {
   })
 
   it("preserves the localized in-app browser titles", () => {
+    expect(getCollapsedToolCallSummary({ name: "inAppBrowser_extract_iframes" })).toBe(
+      "内置浏览器-提取 iframe 内容"
+    )
+    expect(getCollapsedToolCallSummary({ name: "inAppBrowser_read_wps_document" })).toBe(
+      "内置浏览器-读取 WPS 文档全文"
+    )
+    expect(getCollapsedToolCallSummary({ name: "inAppBrowser_list_recordings" })).toBe(
+      "内置浏览器-检索可复用操作"
+    )
+    expect(getCollapsedToolCallSummary({ name: "inAppBrowser_execute_recording" })).toBe(
+      "内置浏览器-执行可复用操作"
+    )
+    expect(getCollapsedToolCallSummary({ name: "mcp__inAppBrowser__browser_navigate" })).toBe(
+      "内置浏览器-导航"
+    )
     expect(
-      getCollapsedToolCallSummary({ name: "mcp__inAppBrowser__browser_navigate" })
-    ).toBe("内置浏览器-导航")
+      getCollapsedToolCallSummary({ name: "mcp__inAppBrowser__browser_run_code_unsafe" })
+    ).toBe("内置浏览器-运行 Playwright 代码（非安全模式）")
+    expect(getCollapsedToolCallSummary({ name: "mcp__inAppBrowser__browser_find" })).toBe(
+      "内置浏览器-查找页面内容"
+    )
   })
 })

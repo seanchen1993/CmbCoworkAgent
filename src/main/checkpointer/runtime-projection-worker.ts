@@ -1,4 +1,5 @@
 import { parentPort } from "node:worker_threads"
+import { readFunctionSessionCheckpoint } from "../mods/v2/session-checkpoint"
 import type {
   CheckpointRuntimeProjectionWorkerRequest,
   CheckpointRuntimeProjectionWorkerResponse
@@ -25,15 +26,17 @@ function failureResponse(
   const normalized = error instanceof Error ? error : new Error(String(error))
   return {
     type:
-      request.type === "read-latest-runtime-tuple"
-        ? "read-latest-runtime-tuple-result"
-        : request.type === "read-latest-tuple"
-          ? "read-latest-tuple-result"
-          : request.type === "bootstrap-legacy-transcript"
-            ? "bootstrap-legacy-transcript-result"
-            : request.type === "inspect-transcript-presence"
-              ? "inspect-transcript-presence-result"
-              : "ensure-runtime-projection-result",
+      request.type === "read-session-transcript"
+        ? "read-session-transcript-result"
+        : request.type === "read-latest-runtime-tuple"
+          ? "read-latest-runtime-tuple-result"
+          : request.type === "read-latest-tuple"
+            ? "read-latest-tuple-result"
+            : request.type === "bootstrap-legacy-transcript"
+              ? "bootstrap-legacy-transcript-result"
+              : request.type === "inspect-transcript-presence"
+                ? "inspect-transcript-presence-result"
+                : "ensure-runtime-projection-result",
     requestId: request.requestId,
     ok: false,
     error: {
@@ -57,6 +60,21 @@ workerPort.on("message", (request: CheckpointRuntimeProjectionWorkerRequest) => 
     return
   }
   try {
+    if (request.type === "read-session-transcript") {
+      workerPort.postMessage({
+        type: "read-session-transcript-result",
+        requestId: request.requestId,
+        ok: true,
+        transcript: readFunctionSessionCheckpoint(
+          request.databasePath,
+          request.threadId,
+          request.checkpointNs,
+          request.cancellationBuffer,
+          request.projection
+        )
+      } satisfies CheckpointRuntimeProjectionWorkerResponse)
+      return
+    }
     if (request.type === "inspect-transcript-presence") {
       workerPort.postMessage({
         type: "inspect-transcript-presence-result",
