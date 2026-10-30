@@ -25,7 +25,6 @@ export function OverlayDrawer({
   const [leaving, setLeaving] = useState(false)
   const [width, setWidth] = useState(DEFAULT_DRAWER_WIDTH)
   const dragStartRef = useRef<{ clientX: number; width: number } | null>(null)
-  const suppressBackdropCloseRef = useRef(false)
 
   const clampWidth = useCallback((nextWidth: number): number => {
     const viewportMax = Math.max(MIN_DRAWER_WIDTH, window.innerWidth * MAX_VIEWPORT_WIDTH_RATIO)
@@ -36,7 +35,6 @@ export function OverlayDrawer({
     (event: React.MouseEvent<HTMLDivElement>) => {
       event.preventDefault()
       event.stopPropagation()
-      suppressBackdropCloseRef.current = true
       dragStartRef.current = { clientX: event.clientX, width: clampWidth(width) }
 
       let frame: number | null = null
@@ -64,11 +62,6 @@ export function OverlayDrawer({
         document.removeEventListener("mouseup", handleMouseUp)
         document.body.style.cursor = ""
         document.body.style.userSelect = ""
-        // A drag released over the backdrop can synthesize a click on the
-        // overlay. Keep the guard through that click's event cycle.
-        window.setTimeout(() => {
-          suppressBackdropCloseRef.current = false
-        }, 0)
       }
 
       document.addEventListener("mousemove", handleMouseMove)
@@ -77,18 +70,6 @@ export function OverlayDrawer({
       document.body.style.userSelect = "none"
     },
     [clampWidth, width]
-  )
-
-  const handleBackdropClick = useCallback(
-    (event: React.MouseEvent<HTMLDivElement>) => {
-      if (suppressBackdropCloseRef.current) {
-        event.preventDefault()
-        event.stopPropagation()
-        return
-      }
-      onClose()
-    },
-    [onClose]
   )
 
   useEffect(() => {
@@ -107,22 +88,17 @@ export function OverlayDrawer({
 
   return (
     <div
-      className={`absolute inset-0 z-50 flex justify-end bg-black/10 ${
-        leaving ? "pointer-events-none" : "pointer-events-auto"
-      }`}
+      className="pointer-events-none absolute inset-0 z-50 flex justify-end"
       role="dialog"
-      aria-modal="true"
       aria-label={ariaLabel ?? title}
-      onClick={handleBackdropClick}
     >
       <aside
-        className={`relative flex h-full min-w-0 flex-col border-l border-border bg-background-elevated shadow-[-12px_0_32px_rgba(0,0,0,0.14)] motion-reduce:animate-none ${
+        className={`pointer-events-auto relative flex h-full min-w-0 flex-col border-l border-border bg-background-elevated shadow-[-12px_0_32px_rgba(0,0,0,0.14)] motion-reduce:animate-none ${
           leaving
             ? "animate-out slide-out-to-right-8 duration-150"
             : "animate-in slide-in-from-right-8 duration-200"
         }`}
         style={{ width: clampWidth(width) }}
-        onClick={(event) => event.stopPropagation()}
       >
         <div
           role="separator"

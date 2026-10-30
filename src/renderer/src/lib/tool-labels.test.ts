@@ -42,6 +42,12 @@ describe("in-app browser tool labels", () => {
   })
 
   it("uses reusable-operation wording for recording tools", () => {
+    expect(getToolLabel("inAppBrowser_extract_iframes", { showToolName: false })).toBe(
+      "内置浏览器-提取 iframe 内容"
+    )
+    expect(getToolLabel("inAppBrowser_read_wps_document", { showToolName: false })).toBe(
+      "内置浏览器-读取 WPS 文档全文"
+    )
     expect(getToolLabel("inAppBrowser_list_recordings", { showToolName: false })).toBe(
       "内置浏览器-检索可复用操作"
     )

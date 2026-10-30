@@ -174,7 +174,27 @@ const PET_HOVER_MESSAGES = [
   "今天也要给自己一个大大的赞！",
   "放心往前写，我在这里给你撑腰",
   "小小的 bug，根本难不倒我的主人",
-  "休息一下也是很重要的进度哦"
+  "休息一下也是很重要的进度哦",
+  "(｡･ω･｡)ﾉ♡ 今天也喜欢主人",
+  "(ง •_•)ง 一起把 bug 打跑！",
+  "(๑•̀ㅂ•́)و✧ 主人加油！",
+  "(づ｡◕‿‿◕｡)づ 给你一个抱抱",
+  "(≧▽≦) 好耶，灵感来啦！",
+  "(￣▽￣)ゞ 代码守护中",
+  "(。・∀・)ノ 我来陪你啦",
+  "( ´･･)ﾉ(._.`) 不怕，我在呢",
+  "(⌐■_■) 今天也稳稳拿下",
+  "(－_－) zzZ 记得休息呀",
+  "✨ 灵感正在闪闪发光",
+  "⭐ 主人今天也是满分！",
+  "☕ 喝口水，思路会更清晰哦",
+  "💡 叮！好点子出现啦",
+  "💪 再试一次，一定可以！",
+  "🚀 准备发射，目标是零 bug！",
+  "🎉 又向完成迈进了一步！",
+  "🐾 我的小脚印会陪你到终点",
+  "😊 看见主人就开心",
+  "👍 这个思路很不错哦！"
 ]
 const DEFAULT_PET_SETTINGS: PetSettings = {
   enabled: false,
@@ -917,7 +937,8 @@ export function createPetWindow(): void {
       width: 236px;
       box-sizing: border-box;
       padding: 3px 7px 8px;
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Segoe UI Emoji",
+        "Segoe UI Symbol", sans-serif;
       cursor: default;
     }
     #bubbleLayer.show {
