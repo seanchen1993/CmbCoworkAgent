@@ -1,5 +1,21 @@
 # 原生组合源首批实现
 
+创造者的 `project-dependencies` 目录也会读取可信内置根中明确声明的 source-set 依赖，
+可单独发现其中的提供器，不要求目录名为 `providers`。新增依赖使用稳定的 Host sourceId，
+已有顶层 sourceId 不变。发现只读声明、manifest 与有界文件元数据；请求准备时才读取完整源码并固定摘要。
+
+目录的 `availability: authoring-prepare` 表示可走既有 `dependency_prepare` 保存与预检链，
+仍可能收到实际预检诊断，安装与授权另需原生确认。超过 Function 作者源预算或使用旧隐式注册的包
+明确返回 `native-source-set-required` 及原作者源码目录入口，不给出不可执行的 `dependency_prepare` 下一步。
+该回退会快照整个源码集合并建立项目草稿；可以只选择其中一个依赖完成原生安装/授权，
+不点击项目推进。集合已结算后可取消准备，已安装依赖保留；结果不明时须先核对。
+这条回退不是独立提供器的一键准备，也不会扩大原 Function 作者源预算。
+
+当前五阶段精简方案另见 [`autobiz-lean/README.md`](autobiz-lean/README.md)，其唯一作者源为
+`autobiz-lean/project/composition/source.json`，依赖 knowledge、rules、delivery 三个独立提供器。
+其中 knowledge/delivery 可独立准备；大 rules 源需上述完整 source-set 导入回退。
+下面的八阶段、两个依赖及旧产物说明专指原 `autobiz` 示例，不是 Lean 的当前流程。
+
 `autobiz/composition/source.json` 是需求转换 → PRD → 规格 → 设计确认 → Plan → Code → CI/CD准备 → 归档 的唯一作者源。
 这是部分业务语义迁移，不是完整 AutoBiz 替代版。逐条旧 Hook 归属、实际证据和缺项见
 `docs/autobiz-native-migration-evidence-2026-10-23.md`。

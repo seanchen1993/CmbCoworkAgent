@@ -53,6 +53,7 @@ import { readPureFunctionSource } from "../../mods/devtools/authoring-install-so
 import { getProjectStageDebugSessions } from "../../mods/devtools/project-stage-debug"
 import { HARNESS_SOURCE_PATH } from "../../mods/devtools/project-harness"
 import { projectAuthoringReadView } from "../../mods/devtools/project-authoring-view"
+import { projectFromInstalledPlugin } from "../../mods/devtools/project-from-plugin"
 import { ProjectContractError } from "../../mods/devtools/project-contract"
 import {
   ProjectCompileDiagnosticError,
@@ -86,6 +87,7 @@ const schema = z
       "inspect_plugin",
       "read_plugin_asset",
       "project_scaffold",
+      "project_from_plugin",
       "project_compile",
       "project_read",
       "project_save",
@@ -375,9 +377,8 @@ export function createModAuthoringTool(input: {
               throw Error("PROJECT_DRAFT_REVISION_CHANGED")
             const native = draft?.source.files.find((file) => file.path === NATIVE_COMPOSITION_PATH)
             if (draft && !native) throw Error("NATIVE_COMPOSITION_SOURCE_REQUIRED")
-            const requirements = native
-              ? nativeCompositionActionRequirements(nativeCompositionSchema.parse(JSON.parse(native.text)))
-              : []
+            const nativeSource = native ? nativeCompositionSchema.parse(JSON.parse(native.text)) : undefined
+            const requirements = nativeSource ? nativeCompositionActionRequirements(nativeSource) : []
             if (draft && !args.localActionId) {
               if (start > requirements.length) throw Error("DEVELOPMENT_CATALOG_CURSOR")
               result = {
@@ -403,7 +404,11 @@ export function createModAuthoringTool(input: {
             while (cursor < matchingCatalog.length && actions.length < (requirement ? 1 : 4)) {
               const action = matchingCatalog[cursor]
               const candidate = { ...action, ...(requirement ? {
-                compositionCompatibility: evaluateNativeCompositionAction(requirement, action)
+                compositionCompatibility: evaluateNativeCompositionAction(requirement, action,
+                  nativeSource && draft ? { requirements, catalog, resources: nativeSource.resources,
+                    files: draft.source.files.map((file) => ({
+                      path: file.path, bytes: Buffer.from(file.text, "utf8")
+                    })) } : undefined)
               } : {}) }
               if (Buffer.byteLength(JSON.stringify([...actions, candidate])) > 64 * 1024) {
                 if (!actions.length) throw Error("PROJECT_ACTION_CATALOG_ENTRY_LIMIT")
@@ -452,6 +457,27 @@ export function createModAuthoringTool(input: {
               },
               context.guard
             )
+            break
+          }
+          case "project_from_plugin": {
+            if (!args.pluginId) throw Error("DEVELOPMENT_INPUT")
+            const context = project()
+            const prepared = await projectFromInstalledPlugin({
+              scope: context.scope,
+              pluginId: args.pluginId,
+              id: id(),
+              name: args.name,
+              sourceDigest: args.sourceDigest,
+              plugins: getPlugins,
+              sessions: projectAuthoringSessions,
+              guard: context.guard
+            })
+            const { draft, ...provenance } = prepared
+            result = {
+              ...projectAuthoringReadView(draft, undefined),
+              sourceDigest: draft.source.digest,
+              ...provenance
+            }
             break
           }
           case "project_scaffold": {
@@ -749,7 +775,15 @@ export function createModAuthoringTool(input: {
             result = {
               report: pluginMigrationReport(plugins, args.pluginId),
               ...(args.pluginId
-                ? { assets: await listMigrationAssets(plugins, args.pluginId) }
+                ? {
+                    assets: await listMigrationAssets(plugins, args.pluginId),
+                    nativeProjectDraft: {
+                      action: "project_from_plugin",
+                      pluginId: args.pluginId,
+                      requires: "A new draft id and complete retained composition/source.json resources",
+                      behavior: "Copies exact native author source; unsupported sources return diagnostics. No execution or grants."
+                    }
+                  }
                 : {})
             }
             break
@@ -772,7 +806,9 @@ export function createModAuthoringTool(input: {
           ? rawCode
           : "DEVELOPMENT_OPERATION_FAILED"
         const requiredFields =
-          args.action === "scaffold"
+          args.action === "project_from_plugin"
+            ? ["id", "pluginId"]
+            : args.action === "scaffold"
             ? ["id", "name", "instruction", "kind"]
             : args.action === "project_continue"
               ? ["id", "revision", "sourceDigest", "newId"]
@@ -816,6 +852,9 @@ export function createModAuthoringTool(input: {
         return JSON.stringify({
           ok: false,
           error: code,
+          ...(args.action === "project_from_plugin"
+            ? { executed: false, grantsAuthority: false, originalPreserved: true }
+            : {}),
           ...(currentDraft ? { currentDraft } : {}),
           ...(error instanceof ProjectSourcePatchError ? {
             sourcePatch: { operationIndex: error.operationIndex, path: error.path },
@@ -890,7 +929,25 @@ export function createModAuthoringTool(input: {
             : {}),
           ...(error instanceof ProjectDraftLimitError ? { limit: error.reason } : {}),
           hint:
-            error instanceof ProjectCompileDiagnosticError || error instanceof ProjectCompilePatchDiagnosticError
+            args.action === "project_from_plugin" && code === "PROJECT_PLUGIN_NATIVE_SOURCE_REQUIRED"
+              ? "此安装包没有原生 composition/source.json，不能还原为原生项目作者草稿。保留原插件；有业务 Mods 清单时用 mod_business.inspect，否则 inspect_plugin/read_plugin_asset 核对实际来源，不能宣称已自动转换。"
+            : args.action === "project_from_plugin" && ["PROJECT_PLUGIN_SOURCE_UNSUPPORTED", "NATIVE_COMPOSITION_MULTIPLE_SOURCES"].includes(code)
+              ? "来源包含未声明资源或额外注册，无法保证重新编译完整保留原行为。原插件与已有草稿保留；请核对原作者资源声明，不删除知识、Hooks、配置或检查来绕过。"
+            : args.action === "project_from_plugin" && code === "PROJECT_PLUGIN_SOURCE_INVALID"
+              ? "安装包保留的原生源码或清单无效。原插件与已有草稿保留；请恢复可核对的原始源码，不能把损坏包重新解释为另一种插件或自动转换。"
+            : args.action === "project_from_plugin" && code === "PROJECT_PLUGIN_SOURCE_CHANGED"
+              ? "已安装插件或源码在读取期间发生变化。先重新核对安装身份；已有草稿保留，用 project_list/project_read 检查后决定续作，不覆盖旧草稿或继承旧批准。"
+            : args.action === "project_from_plugin" && code === "PROJECT_PLUGIN_SOURCE_PROTECTED"
+              ? "此安装包受原内容保护，不能复制为作者草稿。请使用有编辑权限的原始源码，原插件继续保留。"
+            : args.action === "project_from_plugin" && code === "PROJECT_PLUGIN_NOT_INSTALLED"
+              ? "找不到这一安装身份。先 inspect_plugin 读取真实 pluginId，不能用插件名称或磁盘路径代替。"
+            : args.action === "project_from_plugin" && code === "PROJECT_DRAFT_REVISION_CHANGED"
+              ? "这个草稿 id 已存在，未覆盖。用 project_list/project_read 继续修改已有草稿，或明确选择新的草稿 id。"
+            : args.action === "project_from_plugin" && code === "PROJECT_RESOURCE_MISSING"
+              ? "已安装插件缺少声明的作者资源，未建立草稿。请恢复完整来源；保留知识、Hooks、配置和检查，不用空文件或删除声明代替原资源。"
+            : args.action === "project_from_plugin" && ["DEVELOPMENT_INPUT", "DEVELOPMENT_ID_REQUIRED"].includes(code)
+              ? "使用 project_from_plugin(pluginId,id,name?)：pluginId 来自 inspect_plugin，id 是独立的新草稿标识。无需文件路径、files 或 source-set；已有草稿先 project_list/read 续作。"
+            : error instanceof ProjectCompileDiagnosticError || error instanceof ProjectCompilePatchDiagnosticError
               ? "按 diagnostics.file 和 path（相对该文件的 JSON Pointer，空字符串为根）读取当前作者源并修正 JSON 或 schema；先 project_read 核对真实 revision，再保存必要修改并用最新 revision project_compile。保留 runtime、动作锁、产物校验、Skills、Hooks、知识与配置，不得删除要求或用 execute 绕过编译。"
             : error instanceof AuthoringStructureError
               ? "这是清单结构错误。先 read 核对当前完整作者源，按 diagnostics.path 和 message 修正清单，用实际最新 revision 保存并重新检查；保留组件源码、知识、Hooks、配置与权限边界。不要盲目重试、删除必要能力或代用户批准。"
@@ -981,7 +1038,7 @@ export function createModAuthoringTool(input: {
         "Project_list and project_read return a matching trial request with trial.journey when a native project is linked. Read that exact creator/candidate/stage/check/session journal before discussing trial success. Model completion is not validation; checks-passed still needs native transition, missing or truncated receipts are unknown, and an edited candidate needs its own trial. Historical observation survives restart but restores no approval or execution. " +
         "Prefer submit(id,name,revision,files) to save, check and request the trial in one preparation; inspect result.check and repair diagnostics. A no-effect candidate startup preflight returns exact event/source diagnostics before this turn ends. Repair known code errors in this same request, using target.revision as the next expected revision; at most two repairs after the initial candidate. Never retry an unknown outcome or perform external actions to test startup. session.start must return next(event); a void startup handler fails even if syntax compiles. resume_trial(id,revision) re-prepares a persisted current-chat draft after restart and requests fresh consent, without installing. undo_trial stops the first active trial after the turn, or restores the immediately preceding source as a new revision through the same checks and permission envelope. request_reuse(id,revision) only prepares a reviewable formal installation and named combination for reuse in other chats; it does not install, approve, stop or apply before explicit UI confirmation. Do not use formal reuse merely to preserve this chat across restart. " +
         "For executable state-policy extensions use scaffold(kind:state-extension). This generates an ordinary Function Mod with on.capability, a decision command, references/state-migration-plan.json and tests/state-decision-cases.json. Save and check the exact generated files, then request_trial and wait for native confirmation. It is an executable decision scaffold, NOT migrated business state: default hold until the author confirms the real graph; even a configured edge is only a proposal until the original writer, Hooks, knowledge/config bindings and business checks are preserved, bound and actually tested. For full business packages use actual mod_business inspect, save(extensions,files), preview, request_trial and request_review with an inspected kernel and namespaced mods/business/<extensionId>/ implementation; references/business-assembly.md gives the actual route. A pure-function trial is not original-business migration validation. Never introduce a new state SDK or infer unknown legacy edges. Existing Host authority stays Host. " +
-        "Create or modify a Mod in this creator session. Read catalog for this build's SDK/types/examples; write actual TypeScript with save (revision=0 for new, latest revision for updates), check diagnostics and repair, then request_trial. Trials apply only after this turn settles and the person approves the capability envelope. Never claim active from queued. For project packages use project_scaffold(id,name,template?) with native-modular for new composable projects, project-lite (compatible default), harness-lite, harness-fullstack or harness-data. native-modular provides a complete composition/source.json, two Skills, actual input/output contracts, artifact tests and result approval; edit its source and compile rather than guessing a runtime manifest. Harness templates need only devclaw.harness.json ordered nodes (id,title,skill,artifacts[{id,path,example,schema?}],approval none/human) and skills. For native reusable business modules author a single composition/source.json (devclaw.native-composition/v1) with versioned modules, typed prior-artifact inputs, checked outputs and optional resultApproval:human. Do not coexist with devclaw.harness.json or a business catalog. Retain declared resources, real skills and tests/project-contract.json; project_compile resolves public check actions only from the current authorized catalogue, generates Host runtime/action locks and runs doctor/artifact tests. A successful compile does not execute business check actions or prove migration equivalence; inspect validation limitations and use the original authorized project trial. After editing node definitions call project_compile(id,revision) to generate a new immutable runtime/contract revision and run isolated artifact contracts; existing public action bindings are preserved. Use project_list to recover the current chat source drafts. Then use project_read, project_save(files,name,revision), project_doctor, project_test, project_dev and project_pack (id,revision). project_request_trial(id,revision,goal) prepares an exact-version native preview card in this chat; the user confirms creation and starts the original project runner to execute real stages and validate actual artifacts. A needs-approval result is not execution. This path supports standard host project packages; it does not convert legacy Python business plugins or run them in the pure-function compiler. project_actions() or project_actions(query,cursor) lists real installed authorized public actions and schemas. project_actions(id) only lists requirements already declared by that source; query selects actual catalog discovery even with id. Omit id to discover an additional action, optionally filtering query by plugin/actionId/name before paging. project_bind_action(id,revision,stageId,localActionId,provider,actionInput,actionConfig?,inputFrom?) reads the catalogue again and locks the chosen identity/schema into a new draft version. Never invent provider IDs/digests. InputFrom is a prior-stage artifact JSON object or an earlier action output object plus JSON pointer; actionInput constants override matching fields. No expressions or internal file imports. Project drafts can include bounded same-package mods/hooks/skills source resources and .mcp.json. The original native exact-source card grants package Mods only in the selected private project workspace; fill required settings in its original native editor first. MCP resolves ${CLAUDE_PLUGIN_ROOT} against that pinned package; never use an author-machine absolute path or a changed live installation. These are not automatic grants or global installation. Project drafts use separate immutable versions; project_test runs isolated production artifact validators, project_dev only prepares an isolated package and empty workspace, project_pack returns a ZIP for the original user installation entry. These do not run a model, action, install, approve or advance a project. inspect_plugin reports original sources to preserve in an independent adapter; it neither executes nor converts the original plugin. Each project draft retains at most 8 revisions; scaffold/save/compile/bind consume revisions. PROJECT_DRAFT_LIMIT includes limit revision/drafts/sessions and a recovery hint. At revision capacity, project_read to verify revision/sourceDigest, then project_continue(id,revision,sourceDigest,newId) copies the exact latest source without retranscribing files; plugin identity/resources and old previews stay pinned. Use project_versions/project_compare to inspect retained changes. At 4 active drafts, project_list then explicitly project_archive(id,revision,sourceDigest) for a source draft whose original Host trial has a confirmed terminal outcome and no active lease, or which has no retained trial; pending, running, unknown or unverifiable trials remain blocked. Archive releases only an editing slot, preserving source history and trial evidence. Continuation inherits no preview authority, grants or execution: compile, validate and request a new native trial. The original 2MiB total history budget, 16 retained draft identities and 16 creator sessions remain bounded; archival does not free historical bytes or creator-session capacity, and no history is silently evicted. If those bounds prevent safe continuation, preserve full source and export only checked packages for external editing; do not retry or claim renewed authority. Restart restores persisted source in the same chat, without automatically restoring preview authority, grants or execution; the person may use the original native review-and-recover card to recheck an exact retained project before preparing and approving new work. Another chat has a separate source scope. Approval and promotion are user UI actions, unavailable to this tool.",
+        "Create or modify a Mod in this creator session. Read catalog for this build's SDK/types/examples; write actual TypeScript with save (revision=0 for new, latest revision for updates), check diagnostics and repair, then request_trial. Trials apply only after this turn settles and the person approves the capability envelope. Never claim active from queued. For project packages use project_scaffold(id,name,template?) with native-modular for new composable projects, project-lite (compatible default), harness-lite, harness-fullstack or harness-data. native-modular provides a complete composition/source.json, two Skills, actual input/output contracts, artifact tests and result approval; edit its source and compile rather than guessing a runtime manifest. Harness templates need only devclaw.harness.json ordered nodes (id,title,skill,artifacts[{id,path,example,schema?}],approval none/human) and skills. For native reusable business modules author a single composition/source.json (devclaw.native-composition/v1) with versioned modules, typed prior-artifact inputs, checked outputs and optional resultApproval:human. Do not coexist with devclaw.harness.json or a business catalog. Retain declared resources, real skills and tests/project-contract.json; project_compile resolves public check actions only from the current authorized catalogue, generates Host runtime/action locks and runs doctor/artifact tests. A successful compile does not execute business check actions or prove migration equivalence; inspect validation limitations and use the original authorized project trial. After editing node definitions call project_compile(id,revision) to generate a new immutable runtime/contract revision and run isolated artifact contracts; existing public action bindings are preserved. Use project_list to recover the current chat source drafts. Then use project_read, project_save(files,name,revision), project_doctor, project_test, project_dev and project_pack (id,revision). project_request_trial(id,revision,goal) prepares an exact-version native preview card in this chat; the user confirms creation and starts the original project runner to execute real stages and validate actual artifacts. A needs-approval result is not execution. This path supports standard host project packages; it does not convert legacy Python business plugins or run them in the pure-function compiler. project_actions() or project_actions(query,cursor) lists real installed authorized public actions and schemas. project_actions(id) only lists requirements already declared by that source; query selects actual catalog discovery even with id. Omit id to discover an additional action, optionally filtering query by plugin/actionId/name before paging. project_bind_action(id,revision,stageId,localActionId,provider,actionInput,actionConfig?,inputFrom?) reads the catalogue again and locks the chosen identity/schema into a new draft version. Never invent provider IDs/digests. InputFrom is a prior-stage artifact JSON object or an earlier action output object plus JSON pointer; actionInput constants override matching fields. No expressions or internal file imports. Project drafts can include bounded same-package mods/hooks/skills source resources and .mcp.json. The original native exact-source card grants package Mods only in the selected private project workspace; fill required settings in its original native editor first. MCP resolves ${CLAUDE_PLUGIN_ROOT} against that pinned package; never use an author-machine absolute path or a changed live installation. These are not automatic grants or global installation. Project drafts use separate immutable versions; project_test runs isolated production artifact validators, project_dev only prepares an isolated package and empty workspace, project_pack returns a ZIP for the original user installation entry. These do not run a model, action, install, approve or advance a project. project_from_plugin(pluginId,id,name?,sourceDigest?) copies an installed native composition and its exact retained resources into a new independent project author draft. Discover actual installed IDs with inspect_plugin; use a new id, never a path or guessed identity. This uses the native installed package, not a user-authored source-set descriptor. It preserves original source and checks installation/content identity through draft persistence. Unsupported, protected, missing or changing sources return diagnostics; it does not convert legacy packages. Continue project_read/patch/compile/request_trial with fresh native trial approval. No installation, execution, granted permissions or old trial evidence is inherited. inspect_plugin reports original sources to preserve in an independent adapter; it neither executes nor converts the original plugin. Each project draft retains at most 8 revisions; scaffold/save/compile/bind consume revisions. PROJECT_DRAFT_LIMIT includes limit revision/drafts/sessions and a recovery hint. At revision capacity, project_read to verify revision/sourceDigest, then project_continue(id,revision,sourceDigest,newId) copies the exact latest source without retranscribing files; plugin identity/resources and old previews stay pinned. Use project_versions/project_compare to inspect retained changes. At 4 active drafts, project_list then explicitly project_archive(id,revision,sourceDigest) for a source draft whose original Host trial has a confirmed terminal outcome and no active lease, or which has no retained trial; pending, running, unknown or unverifiable trials remain blocked. Archive releases only an editing slot, preserving source history and trial evidence. Continuation inherits no preview authority, grants or execution: compile, validate and request a new native trial. The original 2MiB total history budget, 16 retained draft identities and 16 creator sessions remain bounded; archival does not free historical bytes or creator-session capacity, and no history is silently evicted. If those bounds prevent safe continuation, preserve full source and export only checked packages for external editing; do not retry or claim renewed authority. Restart restores persisted source in the same chat, without automatically restoring preview authority, grants or execution; the person may use the original native review-and-recover card to recheck an exact retained project before preparing and approving new work. Another chat has a separate source scope. Approval and promotion are user UI actions, unavailable to this tool.",
       schema
     }
   )

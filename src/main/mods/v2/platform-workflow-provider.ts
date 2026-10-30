@@ -50,6 +50,8 @@ export function createWorkflowPlatformProvider(
   }
   return {
     provider: "native.workflow",
+    queryRead: true,
+    queryActions: ["inspect"],
     digest: "native.workflow/runs/1.0.0",
     descriptor: {
       apiVersion: "devclaw.capability/v1",

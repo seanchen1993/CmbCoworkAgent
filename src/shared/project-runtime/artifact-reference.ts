@@ -6,6 +6,17 @@ export const PROJECT_ARTIFACT_REFERENCE_MAX_BYTES = 512 * 1024
 export const PROJECT_ARTIFACT_REFERENCE_TOTAL_BYTES = 1024 * 1024
 export const PROJECT_ARTIFACT_REFERENCE_INPUT_BYTES = 8 * 1024
 export const PROJECT_ARTIFACT_REFERENCE_MAX_FILES = 8
+export const PROJECT_REQUEST_PROVENANCE_SOURCE = "project-goal/v1"
+export const PROJECT_REQUEST_PROVENANCE_PROTOCOL = "devclaw.project-goal/v1"
+export const PROJECT_REQUEST_PROVENANCE_MAX_BYTES = 32 * 1024
+
+/** Host goal identity only. Validators compare the original text in their actual artifact. */
+export interface ProjectRequestProvenance {
+  protocol: typeof PROJECT_REQUEST_PROVENANCE_PROTOCOL
+  projectId: string
+  bytes: number
+  sha256: string
+}
 
 export interface ProjectArtifactReference {
   artifactId: string
@@ -24,4 +35,5 @@ export interface ProjectArtifactReferenceInput {
   workspaceIdentity: string
   current: ProjectArtifactReference
   sources: ProjectArtifactReference[]
+  requestProvenance?: ProjectRequestProvenance
 }

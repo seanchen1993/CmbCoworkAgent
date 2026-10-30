@@ -1,6 +1,12 @@
 import { lstatSync, readdirSync } from "node:fs"
+import {
+  assertDependencyDirectory,
+  dependencySourceIndex,
+  type DependencySourceLocation
+} from "./dependency-source-index"
 import { join } from "node:path"
 import { parseClawActionExports } from "../../../shared/mods/claw-actions"
+import { parseClawComponentExports } from "../../../shared/mods/claw-components"
 import {
   readRuntimeScopedFile,
   runtimeDigest
@@ -15,9 +21,16 @@ export const PROJECT_DEPENDENCY_SOURCE_PAGE_BYTES = 24000
 
 export const PROJECT_DEPENDENCY_AUTHORING = Object.freeze({
   scope: "bundled-source-data-not-installed-or-authorized",
-  discovery: { action: "project_actions", id: "current project draft", localActionId: "check id" },
+  discovery: {
+    appliesTo: "declared-actions",
+    action: "project_actions",
+    id: "current project draft",
+    localActionId: "check id"
+  },
+  componentDiscovery:
+    "Inspect actual installed components and runtime readiness; Surface components are discovered through the extension-view catalog after preparation.",
   source:
-    "Select a real catalog sourceId and call dependency_prepare(sourceId). The Host pins every file, saves, checks and prepares original native reuse in one bounded operation. Read catalog assetPath pages only when reviewing/editing source; project_read addresses saved project drafts, not catalog assets.",
+    "Inspect availability and nextStep for the real catalog sourceId. For authoring-prepare, call dependency_prepare(sourceId): the Host pins every file, saves, checks and prepares original native reuse in one bounded operation. Native-source-set-required entries use their explicit original source-set import route; do not retry dependency_prepare past its budget. Read catalog assetPath pages only when reviewing/editing source; project_read addresses saved project drafts, not catalog assets.",
   prepare: [
     "dependency_prepare(sourceId) for unchanged bundled source",
     "end the turn for original native confirmation"
@@ -25,17 +38,22 @@ export const PROJECT_DEPENDENCY_AUTHORING = Object.freeze({
   confirmation:
     "End this turn and wait for original native installation/permission confirmation. A Function trial is optional; it is not needed before request_reuse.",
   resume:
-    "Re-read project_actions after confirmation. Inspect the actual schemas/identity; patch composition/source.json provider plugin/actionId, preserve Hooks/knowledge/config/checks, then project_compile with the actual latest revision. Execution actions can be separately bound with project_bind_action; config is not input. Companion files used by project Skills/workflows must also be copied into the current project source and declared in resources. Installing a provider does not supply project-relative files.",
+    "After confirmation, follow the source's declared actions/components. For actions, re-read project_actions and inspect actual schemas/identity; patch composition/source.json provider plugin/actionId, preserve Hooks/knowledge/config/checks, then project_compile with the actual latest revision. Execution actions can be separately bound with project_bind_action; config is not input. For components, verify installed selection/runtime readiness and prepare/open any declared Surface through the extension-view catalog. Component-only sources require no project action binding or project compilation. Companion files used by project Skills/workflows must also be copied into the current project source and declared in resources. Installing a provider does not supply project-relative files.",
   unavailable:
-    "If no actual source/action fits, author an ordinary Function Mod with public claw.actions and on.capability using the catalog types. Do not invent a provider, bypass consent or weaken checks.",
+    "If no actual source fits, author an ordinary Function Mod with the required public claw.actions and/or claw.components and on.capability using catalog types. Do not invent a provider, bypass consent or weaken checks.",
   businessValidation: {
     discoverInstalled: { action: "project_actions", query: "evidence-validation" },
     bundledSourceId: "evidence-validation",
-    scope: "Exact source quotations and unchanged upstream summary/citations; no truth, entailment or causality claim.",
-    contracts: "sources={sources:[{id,text}]}; summary/report={summary,citations:[{sourceId,quote}]}. Read source README and actual installed schemas before binding.",
-    checks: "Use native composition action checks with artifact-reference-v1 and maxBytes:28000. Declare the source artifact in summary inputs, and both source+summary artifacts in report inputs. config.sourceArtifactId selects the real source artifact; check-report also needs config.summaryArtifactId. These are artifact IDs, not filesystem paths.",
-    confirmation: "Discover installed once; if unavailable prepare this bundled source once and end the turn for native confirmation. Resume by rereading project_actions after confirmation. Do not poll discovery, invent a provider or repeatedly prepare installation.",
-    proof: "The independent Mod reads actual Host-declared files through authorized fs.read. Run the original project trial: bad quotes/changed report fields must block its native gate. Schema tests or a model-supplied passed:true do not prove business validation."
+    scope:
+      "Exact source quotations and unchanged upstream summary/citations; no truth, entailment or causality claim.",
+    contracts:
+      "sources={sources:[{id,text}]}; summary/report={summary,citations:[{sourceId,quote}]}. Read source README and actual installed schemas before binding.",
+    checks:
+      "Use native composition action checks with artifact-reference-v1 and maxBytes:28000. Declare the source artifact in summary inputs, and both source+summary artifacts in report inputs. config.sourceArtifactId selects the real source artifact; check-report also needs config.summaryArtifactId. These are artifact IDs, not filesystem paths.",
+    confirmation:
+      "Discover installed once; if unavailable prepare this bundled source once and end the turn for native confirmation. Resume by rereading project_actions after confirmation. Do not poll discovery, invent a provider or repeatedly prepare installation.",
+    proof:
+      "The independent Mod reads actual Host-declared files through authorized fs.read. Run the original project trial: bad quotes/changed report fields must block its native gate. Schema tests or a model-supplied passed:true do not prove business validation."
   }
 })
 
@@ -47,26 +65,80 @@ export function bundledDependencySourcesRoot(mainDirectory: string) {
   )
 }
 
-function sourceDirectories(root: string) {
-  try {
-    return readdirSync(root, { withFileTypes: true })
-      .filter(
-        (entry) =>
-          entry.isDirectory() &&
-          !entry.isSymbolicLink() &&
-          /^[a-z][a-z0-9-]{0,47}$/.test(entry.name)
-      )
-      .map((entry) => entry.name)
-      .sort()
-      .slice(0, 64)
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return []
-    throw error
-  }
+function assertLocationCurrent(root: string, location: DependencySourceLocation) {
+  const current = dependencySourceIndex(root).find((entry) => entry.sourceId === location.sourceId)
+  if (JSON.stringify(current) !== JSON.stringify(location))
+    throw Error("DEVELOPMENT_DEPENDENCY_SOURCE_CHANGED")
+  assertDependencyDirectory(root, location.relative)
 }
 
-function descriptor(root: string, sourceId: string) {
-  const directory = join(root, sourceId)
+/** Directory metadata only; source bytes are read when preparation is actually requested. */
+function sourcePreparation(
+  directory: string,
+  location: DependencySourceLocation,
+  explicitMods: boolean
+) {
+  let files = 0
+  let bytes = 0
+  let oversized = false
+  let visited = 0
+  const scan = (relative: string, depth: number) => {
+    if (depth > 8) {
+      oversized = true
+      return
+    }
+    for (const entry of readdirSync(join(directory, relative), { withFileTypes: true })) {
+      if (++visited > 512) {
+        oversized = true
+        return
+      }
+      if (entry.name === ".git" || entry.name === "node_modules") continue
+      if (entry.isSymbolicLink()) throw Error("DEVELOPMENT_DEPENDENCY_SOURCE_UNSAFE")
+      const path = relative ? `${relative}/${entry.name}` : entry.name
+      if (entry.isDirectory()) scan(path, depth + 1)
+      else {
+        const size = lstatSync(join(directory, path)).size
+        files++
+        bytes += size
+        if (
+          size > AUTHORING_BUNDLE_LIMITS.fileBytes ||
+          files > AUTHORING_BUNDLE_LIMITS.files ||
+          bytes > AUTHORING_BUNDLE_LIMITS.totalBytes
+        )
+          oversized = true
+      }
+      if (oversized) return
+    }
+  }
+  scan("", 0)
+  return oversized || !explicitMods
+    ? {
+        availability: "native-source-set-required" as const,
+        preparationReason: oversized
+          ? "Source exceeds the bounded Function authoring bundle; dependency_prepare is unavailable."
+          : "This package uses implicit Mod registration; use its original source-set installation, or explicitly author a Function package before dependency_prepare.",
+        ...(location.sourceSet
+          ? {
+              nextStep: {
+                kind: "native" as const,
+                entry: "创造者 → 保存为插件并复用 → 选择作者源码目录",
+                sourceSet: location.sourceSet,
+                selection:
+                  "Import the declared source-set, then select this dependency's original install/permission confirmation. Project advancement is separate."
+              }
+            }
+          : {}),
+        sourceBudget: AUTHORING_BUNDLE_LIMITS
+      }
+    : {
+        availability: "authoring-prepare" as const,
+        nextStep: { action: "dependency_prepare" as const, sourceId: location.sourceId }
+      }
+}
+
+function descriptor(root: string, location: DependencySourceLocation) {
+  const { sourceId } = location
+  const directory = assertDependencyDirectory(root, location.relative)
   const pluginFile = readRuntimeScopedFile(directory, "plugin.json", 16000)
   const manifestFile = readRuntimeScopedFile(directory, "mods/manifest.json", 64 * 1024)
   if (!pluginFile.bytes || !manifestFile.bytes) return
@@ -74,24 +146,31 @@ function descriptor(root: string, sourceId: string) {
   if (
     typeof plugin.name !== "string" ||
     typeof plugin.version !== "string" ||
-    plugin.mods !== "mods/manifest.json"
+    (plugin.mods !== undefined && plugin.mods !== "mods/manifest.json")
   )
     return
   const manifest = JSON.parse(manifestFile.bytes.toString("utf8"))
   if (manifest.apiVersion !== "cmb.mods/v2") return
   const actions = parseClawActionExports(manifest.claw)
-  if (!actions.length) return
+  const components = parseClawComponentExports(manifest.claw)
+  if (!actions.length && !components.length) return
+  const preparation = sourcePreparation(directory, location, plugin.mods === "mods/manifest.json")
   return {
     sourceId,
+    ...preparation,
     plugin: plugin.name,
     version: plugin.version,
     description: typeof plugin.description === "string" ? plugin.description.slice(0, 300) : "",
     actions: actions.map((action) => ({ actionId: action.id, name: action.name.slice(0, 96) })),
+    components: components.map((component) => ({
+      id: component.id,
+      name: component.name.slice(0, 96),
+      description: component.description?.slice(0, 300)
+    })),
     assetPath: sourceId,
     installed: false,
     grantsAuthority: false,
-    schemaAssetPath: `${sourceId}/mods/manifest.json`,
-    nextStep: { action: "dependency_prepare", sourceId }
+    schemaAssetPath: `${sourceId}/mods/manifest.json`
   }
 }
 
@@ -131,9 +210,13 @@ export function readDevelopmentDependencySource(input: {
   if (input.expectedDigest !== undefined && !/^[a-f0-9]{64}$/.test(input.expectedDigest))
     throw Error("DEVELOPMENT_DEPENDENCY_DIGEST_REQUIRED")
   const root = bundledDependencySourcesRoot(input.mainDirectory)
-  if (!sourceDirectories(root).includes(input.sourceId) || !descriptor(root, input.sourceId))
-    throw Error("DEVELOPMENT_DEPENDENCY_SOURCE_UNAVAILABLE")
-  const source = sourceBundle(join(root, input.sourceId))
+  const location = dependencySourceIndex(root).find((entry) => entry.sourceId === input.sourceId)
+  const entry = location && descriptor(root, location)
+  if (!location || !entry) throw Error("DEVELOPMENT_DEPENDENCY_SOURCE_UNAVAILABLE")
+  if (entry.availability !== "authoring-prepare")
+    throw Error("DEVELOPMENT_DEPENDENCY_SOURCE_NATIVE_IMPORT_REQUIRED")
+  const source = sourceBundle(assertDependencyDirectory(root, location.relative))
+  assertLocationCurrent(root, location)
   if (input.expectedDigest !== undefined && source.digest !== input.expectedDigest)
     throw Error("DEVELOPMENT_DEPENDENCY_SOURCE_CHANGED")
   return source
@@ -147,12 +230,12 @@ export function developmentDependencyCatalogPage(input: {
   expectedDigest?: string
 }) {
   const root = bundledDependencySourcesRoot(input.mainDirectory)
-  const directories = sourceDirectories(root)
+  const locations = dependencySourceIndex(root)
   const cursor = input.cursor ?? 0
   if (!Number.isSafeInteger(cursor) || cursor < 0) throw Error("DEVELOPMENT_CATALOG_CURSOR")
   if (!input.assetPath) {
-    const sources = directories.flatMap((sourceId) => {
-      const item = descriptor(root, sourceId)
+    const sources = locations.flatMap((location) => {
+      const item = descriptor(root, location)
       return item ? [item] : []
     })
     if (cursor > sources.length) throw Error("DEVELOPMENT_CATALOG_CURSOR")
@@ -165,9 +248,13 @@ export function developmentDependencyCatalogPage(input: {
     }
   }
   const [sourceId, ...segments] = input.assetPath.split("/")
-  if (!directories.includes(sourceId) || !descriptor(root, sourceId))
-    throw Error("DEVELOPMENT_DEPENDENCY_SOURCE_UNAVAILABLE")
-  const bundle = sourceBundle(join(root, sourceId))
+  const location = locations.find((entry) => entry.sourceId === sourceId)
+  const entry = location && descriptor(root, location)
+  if (!location || !entry) throw Error("DEVELOPMENT_DEPENDENCY_SOURCE_UNAVAILABLE")
+  if (entry.availability !== "authoring-prepare")
+    return { section: "project-dependencies", ...entry }
+  const bundle = sourceBundle(assertDependencyDirectory(root, location.relative))
+  assertLocationCurrent(root, location)
   if (input.expectedDigest !== undefined && input.expectedDigest !== bundle.digest)
     throw Error("DEVELOPMENT_DEPENDENCY_SOURCE_CHANGED")
   const base = {

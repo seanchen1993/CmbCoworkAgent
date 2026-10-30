@@ -187,7 +187,7 @@ async function main() {
     if (await advancedGroup.getAttribute("aria-expanded") !== "true") await advancedGroup.click()
     await page.getByRole("button",{name:"任务画布",exact:true}).click()
     await page.getByRole("region",{name:"TaskMmdPanel",exact:true}).getByText("目标 a -").waitFor()
-    await page.getByRole("navigation").filter({has:page.getByRole("button",{name:"基础功能",exact:true})}).getByRole("button",{name:"插件",exact:true}).click()
+    await page.getByRole("navigation").filter({has:page.getByRole("button",{name:"创造者模式",exact:true})}).getByRole("button",{name:"灵件",exact:true}).click()
     const mods=page.getByRole("region",{name:"ModsPanel",exact:true})
     await mods.getByText("目标 b C:/new-beta").waitFor()
     await page.evaluate(()=>{(window as unknown as ConfigurationWindow).holdLoad=true})

@@ -23,6 +23,8 @@ export type FunctionRequest = {
       registration: string
       event: ModObject
       metadata: Omit<FunctionInvocation, "signal">
+      /** Main-created authority restriction, never supplied through the plugin SDK. */
+      query?: true
       uiDrawing?: FunctionUiResolveWireDrawing
     }
   | { type: "trusted-wait"; requestId: string; callId: string; ticket: string;

@@ -8,6 +8,7 @@ import { isModObject, ModFunctionError } from "./contracts"
 import { encodeModJson } from "../validation"
 
 export const PLATFORM_SURFACE_API = "devclaw.surface/v1" as const
+export const PLATFORM_QUERY_SURFACE_API = "devclaw.surface/v2" as const
 export const PLATFORM_SURFACE_PLACEMENTS = [
   "page",
   "navigation",
@@ -18,7 +19,9 @@ export const PLATFORM_SURFACE_PLACEMENTS = [
 export type PlatformSurfacePlacement = (typeof PLATFORM_SURFACE_PLACEMENTS)[number]
 export interface PlatformSurfaceDescriptor {
   type: "surface"
-  apiVersion: typeof PLATFORM_SURFACE_API
+  apiVersion: typeof PLATFORM_SURFACE_API | typeof PLATFORM_QUERY_SURFACE_API
+  /** v2 rejects effects in every interactive callback; v1 retains its original queue. */
+  interaction?: "query"
   id: string
   title: string
   placement: PlatformSurfacePlacement
@@ -38,6 +41,7 @@ export interface PlatformSurfaceCatalog {
   revision: number
   entries: PlatformSurfaceEntry[]
   errors: string[]
+  canPrepare?: boolean
 }
 export interface PlatformSurfaceAddress {
   key: string
@@ -68,12 +72,16 @@ export function parsePlatformSurface(value: unknown): PlatformSurfaceDescriptor 
     "openAction",
     "closeAction",
     "order",
-    "description"
+    "description",
+    "interaction"
   ]
   if (
     Object.keys(value).some((key) => !keys.includes(key)) ||
     value.type !== "surface" ||
-    value.apiVersion !== PLATFORM_SURFACE_API ||
+    ![PLATFORM_SURFACE_API, PLATFORM_QUERY_SURFACE_API].includes(value.apiVersion as never) ||
+    (value.apiVersion === PLATFORM_QUERY_SURFACE_API
+      ? value.interaction !== "query"
+      : value.interaction !== undefined) ||
     ![value.id, value.paneId, value.openAction].every(
       (v) => typeof v === "string" && /^[a-z][a-z0-9._-]{0,79}$/.test(v)
     ) ||

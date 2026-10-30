@@ -171,6 +171,28 @@ afterEach(() => {
 })
 
 describe("original agent run bridge", () => {
+  it("prepares the declared initial reading list without bypassing the original stage check", async () => {
+    const f = await fixture(false, false, false, {}, root => {
+      const path = join(root, "devclaw.project-runtime.json")
+      const manifest = JSON.parse(readFileSync(path, "utf8"))
+      manifest.stages[0].contextArtifactIds = []
+      writeFileSync(path, JSON.stringify(manifest))
+    })
+    registerAgentRunImplementation(async (_request, _delivery, context) => {
+      const source = currentRuntimePluginSource()!
+      expect(source.stagePrompt).toContain('"initialReadingArtifacts":[]')
+      expect(source.subagentContextPrompt).toContain('"initialReadingArtifacts":[]')
+      expect(source.stagePrompt).toContain('"checks":[')
+      // A model claiming success with no artifact must still fail the real Host check.
+      context.onRunTerminated?.({ outcome: "success", code: "normal" })
+    })
+    const operation = f.service.prepare({ projectId: "local-docs", expectedVersion: 1,
+      idempotencyKey: "initial-reading-only" })
+    const result = await f.service.start(operation.operationId)
+    expect(result.status).not.toBe("succeeded")
+    expect(result.receipts.some(receipt => receipt.result === "failed")).toBe(true)
+  })
+
   it("passes explicit stage instructions only to the original main Skill and retains real checks", async () => {
     const f = await fixture()
     registerAgentRunImplementation(async (_request, _delivery, context) => {

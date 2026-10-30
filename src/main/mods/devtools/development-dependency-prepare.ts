@@ -6,6 +6,8 @@ import {
   readDevelopmentDependencySource
 } from "./development-dependency-catalog"
 import { runtimeDigest } from "../../harness-board/project-runtime/safe-files"
+import { parseClawActionExports } from "../../../shared/mods/claw-actions"
+import { parseClawComponentExports } from "../../../shared/mods/claw-components"
 
 type Service = Pick<ModDevelopmentService, "read" | "save" | "check" | "requestReuse" | "status">
 type Check = Awaited<ReturnType<Service["check"]>>
@@ -200,6 +202,33 @@ function dependencyPreparationView(
   check: Check,
   reuse?: DevelopmentReuseStatus
 ) {
+  const manifestFile = draft.source.files.find((file) => file.path === "mods/manifest.json")
+  // Failed checks still return their diagnostics; only validated declarations guide activation.
+  const claw =
+    check.valid && check.digest === draft.source.digest && manifestFile
+      ? JSON.parse(manifestFile.text).claw
+      : undefined
+  const exports = {
+    actions: parseClawActionExports(claw).length,
+    components: parseClawComponentExports(claw).length
+  }
+  const resume = [
+    ...(exports.actions
+      ? [
+          "Re-read project_actions for actual authorized provider identity and schemas. Bind only declared actions, then patch/compile the actual project provider when needed."
+        ]
+      : []),
+    ...(exports.components
+      ? [
+          "Inspect the installed component selection and native runtime readiness. For components declaring a Surface, prepare/open the extension view and discover its actual registered presentation."
+        ]
+      : []),
+    ...(!exports.actions && exports.components
+      ? [
+          "This source declares no project actions. Do not search for or invent project_actions bindings, project provider patches or project compilation for this component-only installation."
+        ]
+      : [])
+  ].join(" ")
   const companions = draft.source.files.filter(
     (file) =>
       /^modules\/[A-Za-z0-9._/-]+\/SKILL\.md$/.test(file.path) ||
@@ -207,6 +236,7 @@ function dependencyPreparationView(
   )
   const result = {
     sourceId,
+    exports,
     draft: draftView(draft),
     check: {
       digest: check.digest,
@@ -239,9 +269,9 @@ function dependencyPreparationView(
     trialRequested: false,
     nextStep:
       reuse?.phase === "needs-approval"
-        ? "End this turn now. Wait for the original native installation/permission confirmation. Then re-read project_actions and patch/compile the actual project provider."
+        ? `End this turn now. Wait for the original native installation/permission confirmation. ${resume}`
         : reuse?.phase === "active"
-          ? "Existing native reuse is active. Re-read project_actions for actual authorized provider identity."
+          ? `Existing native reuse is active. ${resume}`
           : "Preparation did not pass. Inspect diagnostics/current native reuse status; do not replay an unknown outcome or claim installed/authorized."
   }
   const bytes = (value: unknown) => Buffer.byteLength(JSON.stringify({ ok: true, result: value }))

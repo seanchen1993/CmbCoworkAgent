@@ -1,0 +1,132 @@
+{
+  "apiVersion": "cmb.mods/v2",
+  "id": "autobiz-lean-rules",
+  "claw": {
+    "componentsVersion": 1,
+    "components": [
+      {
+        "id": "main",
+        "name": "业务规则",
+        "kind": "module",
+        "entry": "main.ts",
+        "dependsOn": [],
+        "actionIds": [
+          "baseline.verify",
+          "definition.verify",
+          "solution.verify",
+          "delivery.documents",
+          "solution.inspect"
+        ]
+      }
+    ],
+    "actions": [
+      {
+        "id": "baseline.verify",
+        "name": "baseline.verify",
+        "platform": {
+          "id": "business",
+          "version": "1.0.0",
+          "action": "baseline.verify"
+        },
+        "inputSchema": {
+          "type": "object"
+        },
+        "outputSchema": {
+          "type": "object"
+        }
+      },
+      {
+        "id": "definition.verify",
+        "name": "definition.verify",
+        "platform": {
+          "id": "business",
+          "version": "1.0.0",
+          "action": "definition.verify"
+        },
+        "inputSchema": {
+          "type": "object"
+        },
+        "outputSchema": {
+          "type": "object"
+        }
+      },
+      {
+        "id": "solution.verify",
+        "name": "solution.verify",
+        "platform": {
+          "id": "business",
+          "version": "1.0.0",
+          "action": "solution.verify"
+        },
+        "inputSchema": {
+          "type": "object"
+        },
+        "outputSchema": {
+          "type": "object"
+        }
+      },
+      {
+        "id": "delivery.documents",
+        "name": "delivery.documents",
+        "platform": {
+          "id": "business",
+          "version": "1.0.0",
+          "action": "delivery.documents"
+        },
+        "inputSchema": {
+          "type": "object"
+        },
+        "outputSchema": {
+          "type": "object"
+        }
+      },
+      {
+        "id": "solution.inspect",
+        "name": "核查当前方案供原生工作流使用",
+        "platform": {
+          "id": "business",
+          "version": "1.0.0",
+          "action": "solution.inspect"
+        },
+        "inputSchema": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "artifactPaths"
+          ],
+          "properties": {
+            "artifactPaths": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "baseline",
+                "definition",
+                "solution"
+              ],
+              "properties": {
+                "baseline": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 240
+                },
+                "definition": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 240
+                },
+                "solution": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 240
+                }
+              }
+            }
+          }
+        },
+        "outputSchema": {
+          "type": "object"
+        }
+      }
+    ]
+  }
+}

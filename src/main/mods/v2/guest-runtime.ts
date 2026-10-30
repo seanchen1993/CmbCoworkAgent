@@ -7,6 +7,7 @@ import { PLATFORM_VIEW_OPEN_METHODS, PLATFORM_VIEW_CLEANUP_METHODS } from "../..
 import { encodeFunctionNextReply } from "./next-reply-wire"
 import { randomUUID } from "node:crypto"
 import { AsyncResource } from "node:async_hooks"
+import { assertPlatformQueryMethod, platformQuerySignal } from "./platform-query-scope"
 import { observeRunCancellationEffect } from "../../agent/run-cancellation-settlement"
 import {
   getQuickJS,
@@ -66,6 +67,7 @@ interface InvocationFrame {
   cleanupOnly?: boolean
   platformCleanup?: boolean
   platformUiOpen?: boolean
+  queryMethod?: (method: string) => void
   enteredVm?: boolean
   uiDrawing?: Readonly<{
     drawing: Readonly<FunctionUiResolveWireDrawing>
@@ -170,6 +172,7 @@ export class FunctionGuestRuntime implements FunctionUiConstructorGuest {
       if (!frame || frame.controller.signal.aborted) throw Error("MODS_STALE_INVOCATION")
       if (guest.rpcSize >= 128) throw Error("MODS_RPC_LIMIT")
       const op = context.getString(method)
+      frame.queryMethod?.(op)
       if ((frame.platformCleanup && !PLATFORM_VIEW_CLEANUP_METHODS.includes(op)) ||
         (frame.platformUiOpen && !PLATFORM_VIEW_OPEN_METHODS.includes(op)))
         throw Error("MODS_PLATFORM_CLEANUP_ONLY")
@@ -287,6 +290,12 @@ export class FunctionGuestRuntime implements FunctionUiConstructorGuest {
       if (token && guest.closedCuts.has(token) && !cleanup)
         throw Error("MODS_STALE_INVOCATION")
       const frame = token ? guest.frames.get(token) : undefined
+      // The module host is bound to the session's context, so enforce the caller's
+      // query authority before entering it. Retired query frames cannot become
+      // unrestricted background resources; the private token needs no tombstone map.
+      if (token?.startsWith("query:") && !frame)
+        throw Error("MODS_QUERY_EXPIRED")
+      frame?.queryMethod?.(op)
       if ((frame?.platformCleanup || frame?.platformUiOpen) && !cleanup) throw Error("MODS_PLATFORM_CLEANUP_ONLY")
       let receipt: (() => void) | undefined
       if (frame && !frame.controller.signal.aborted) {
@@ -967,13 +976,15 @@ export class FunctionGuestRuntime implements FunctionUiConstructorGuest {
     if (options.signal?.aborted) return Promise.reject(new ModFunctionError("MODS_CANCELLED"))
     if (this.frames.size >= 32) return Promise.reject(new ModFunctionError("MODS_FRAME_LIMIT"))
     const { signal, admission, ownBudgetMs, dispatchCutNs, ...metadata } = options
-    const token = randomUUID()
+    const queryMethod = platformQuerySignal() ? AsyncResource.bind(assertPlatformQueryMethod) : undefined
+    const token = (queryMethod ? "query:" : "") + randomUUID()
     const waitClock = externalWaitClock ?? new FunctionTrustedWaitClock(functionInvocationTimeoutMs(options))
     const run = () => new Promise<{ value?: ModJson; absent?: boolean }>((resolve, reject) => {
       const cancel = (): void => this.cancel(token,
         signal?.reason instanceof ModFunctionError ? signal.reason.code : "MODS_CANCELLED")
       const frame: InvocationFrame = {
         id: token,
+        queryMethod,
         host: AsyncResource.bind(observeRunCancellationEffect(host)),
         controller: new AbortController(),
         get expiresAt() { return waitClock.expiresAt },
@@ -1070,12 +1081,14 @@ export class FunctionGuestRuntime implements FunctionUiConstructorGuest {
     if (this.frames.size >= 32) return Promise.reject(new ModFunctionError("MODS_FRAME_LIMIT"))
     const { signal, admission: _admission, ownBudgetMs, dispatchCutNs, ...metadata } = options
     void _admission
-    const token = randomUUID()
+    const queryMethod = platformQuerySignal() ? AsyncResource.bind(assertPlatformQueryMethod) : undefined
+    const token = (queryMethod ? "query:" : "") + randomUUID()
     return new Promise((resolve, reject) => {
       const cancel = () => this.cancel(token,
         signal?.reason instanceof ModFunctionError ? signal.reason.code : "MODS_CANCELLED")
       const frame: InvocationFrame = {
-        id: token, host: AsyncResource.bind(observeRunCancellationEffect(host)), controller: new AbortController(),
+        id: token, queryMethod,
+        host: AsyncResource.bind(observeRunCancellationEffect(host)), controller: new AbortController(),
         expiresAt: Math.min(absoluteExpiresAt,
           performance.now() + functionInvocationTimeoutMs(options)),
         ...(ownBudgetMs === undefined ? {} : { budget: new FunctionHookBudget(ownBudgetMs) }),
@@ -1271,7 +1284,7 @@ export class FunctionGuestRuntime implements FunctionUiConstructorGuest {
       error ?? new ModFunctionError("MODS_INVOCATION_ENDED"))
     for (const [pending, id] of this.replies) {
       if (id === frame.id)
-        this.reply(pending, { error: { message: "MODS_STALE_INVOCATION", downstream: false } })
+        this.reply(pending, { error: wireError(error ?? new ModFunctionError("MODS_STALE_INVOCATION")) })
     }
     for (const [pending, id] of this.resolverReplies)
       if (id === frame.id) this.settleResolverReply(pending, undefined,

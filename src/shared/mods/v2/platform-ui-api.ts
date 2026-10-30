@@ -8,6 +8,7 @@ import type { FunctionUiAction } from "./ui"
 
 /** Trusted desktop controls. These methods are not part of the guest SDK. */
 export interface PlatformUiApi {
+  platformSurfacePrepare?(threadId: string): Promise<PlatformSurfaceCatalog>
   platformSurfaceList(threadId: string): Promise<PlatformSurfaceCatalog>
   platformSurfaceOpen(
     threadId: string,

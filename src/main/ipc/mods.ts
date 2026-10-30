@@ -1,4 +1,5 @@
 import { projectDependencyImpact, summarizeProjectDependencyImpact } from "../mods/devtools/project-dependency-impact"
+import { createDesktopGitInspectionProvider } from "../mods/v2/platform-git-desktop"
 import { withTrustedFunctionWait } from "../mods/v2/trusted-function-wait"
 import { setProjectRuntimeFunctions } from "../harness-board/project-runtime-function-source"
 import { ApplicationCompletionPolicies } from "../mods/v2/application-completion-policy"
@@ -430,7 +431,7 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
   const functions = new FunctionModsManager(
     manager.store,
     {
-      platformNativeProviders: () => [...nativePlatformProviders(async (context, runId) => {
+      platformNativeProviders: () => [createDesktopGitInspectionProvider(manager, window), ...nativePlatformProviders(async (context, runId) => {
         context.assertCurrent()
         const owner = window()
         if (!owner || owner.isDestroyed()) return false

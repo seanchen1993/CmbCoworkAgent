@@ -4,6 +4,10 @@ export function createPlatformBridge(
   invoke: (channel: string, input: unknown) => Promise<unknown>
 ): PlatformUiApi {
   return {
+    platformSurfacePrepare: (threadId) =>
+      invoke("mods:platform-surface-prepare", { threadId }) as Promise<
+        import("../shared/mods/v2/platform-surfaces").PlatformSurfaceCatalog
+      >,
     platformSurfaceList: (threadId) =>
       invoke("mods:platform-surface-list", { threadId }) as ReturnType<
         PlatformUiApi["platformSurfaceList"]

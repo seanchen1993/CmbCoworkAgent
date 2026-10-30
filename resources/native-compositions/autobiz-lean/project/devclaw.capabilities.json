@@ -1,0 +1,13 @@
+{
+  "apiVersion": "devclaw.capabilities/v1",
+  "capabilities": [
+    {
+      "id": "native-code",
+      "title": "AutoBiz原生Code与必需写入检查",
+      "kind": "skill",
+      "usage": "project",
+      "entry": "skills/native-code/SKILL.md",
+      "requiredHooks": ["PreToolUse:0:0"]
+    }
+  ]
+}

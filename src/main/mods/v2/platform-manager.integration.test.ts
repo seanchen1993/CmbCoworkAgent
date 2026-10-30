@@ -107,11 +107,12 @@ it("cold desktop discovery never loads/registers/starts a guest and reports unkn
   expect(f.manager.runtimeSessions().sessions).toEqual([])
 })
 
-it("does not extend a real v91 package grant with the v92 SDK and keeps old native fallback", async () => {
+it("does not extend an older package grant with the v93 SDK and keeps old native fallback", async () => {
   const f = await fixture(`on("session.start",async($,e,next)=>{
     await $.command.register({name:"old",description:"old API"});return next(e)
   });on("command.run",{command:"old"},()=>({text:"legacy still works"}));`)
-  expect(f.digest("claude-295-tools-v92")).toBe(f.compiled.digest)
+  expect(f.digest("devclaw-mods-v93")).toBe(f.compiled.digest)
+  expect(f.digest("claude-295-tools-v92")).not.toBe(f.compiled.digest)
   const oldDigest = f.digest("claude-295-tools-v91")
   expect(oldDigest).not.toBe(f.compiled.digest)
   f.store.grant(f.workspace, "function:platform-demo", oldDigest, true)
@@ -129,4 +130,18 @@ it("does not extend a real v91 package grant with the v92 SDK and keeps old nati
   f.manager.invalidate(f.workspace)
   expect(await f.manager.runtimeReady(f.workspace, "plain")).toBe(false)
   expect(await f.manager.commands(f.workspace, "plain")).toEqual([])
+})
+
+it("prepares cold view registrations only after explicit entry without dispatching session.start", async () => {
+  const f = await fixture(`on("session.start",()=>{throw Error("startup must not execute")});`)
+  f.store.grant(f.workspace, "function:platform-demo", f.compiled.digest, true)
+  expect(f.manager.platformSurfaceList(f.workspace, "t").canPrepare).toBe(true)
+  expect(f.loads()).toBe(0)
+  const catalog = await f.manager.platformSurfacePrepare(f.workspace, "t",
+    new AbortController().signal, () => {})
+  expect(catalog.entries).toEqual([])
+  expect(f.loads()).toBe(1)
+  expect(f.manager.platformSurfaceList(f.workspace, "t").canPrepare).toBeUndefined()
+  await f.manager.platformSurfacePrepare(f.workspace, "t", new AbortController().signal, () => {})
+  expect(f.loads()).toBe(1)
 })

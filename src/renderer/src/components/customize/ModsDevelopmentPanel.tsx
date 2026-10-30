@@ -1794,25 +1794,33 @@ function ScopedDevelopment({
         }}
       />
     )
-  const importSourceEntry = creatorMode && !workspaceVisible && api.importSourceSet && (
-    <button
-      type="button"
-      title="选择含 devclaw.source-set.json 的作者源码目录"
-      className={button}
-      disabled={busy || !status}
-      onClick={() => void operate(
-        (expectedWorkspace) => api.importSourceSet!({ threadId, expectedWorkspace }),
-        (value) => {
-          accept(value)
-          if (value.sourceSet && value.sourceSet.phase !== "cancelled") {
-            setWorkspaceTab("delivery")
-            setOpen(true)
+  const advancedCreatorEntry = creatorMode && !workspaceVisible && api.importSourceSet && (
+    <details className="text-xs text-muted-foreground">
+      <summary className="cursor-pointer rounded px-2 py-1 hover:bg-accent">高级开发</summary>
+      <div className="mt-2 space-y-2 rounded-lg border bg-background p-3">
+        <p>已有完整的作者源码目录时，可从这里导入并核对依赖。</p>
+        <button
+          type="button"
+          title="选择完整的插件作者源码目录"
+          className={button}
+          disabled={busy || !status}
+          onClick={() =>
+            void operate(
+              (expectedWorkspace) => api.importSourceSet!({ threadId, expectedWorkspace }),
+              (value) => {
+                accept(value)
+                if (value.sourceSet && value.sourceSet.phase !== "cancelled") {
+                  setWorkspaceTab("delivery")
+                  setOpen(true)
+                }
+              }
+            )
           }
-        }
-      )}
-    >
-      导入插件源码
-    </button>
+        >
+          导入插件源码
+        </button>
+      </div>
+    </details>
   )
   if (mode === "entry")
     return workspaceVisible ? (
@@ -1827,7 +1835,6 @@ function ScopedDevelopment({
             ? "已进入创造者模式，请回到原聊天描述要制作、修改或组合的插件。"
             : "在原聊天直接切换创造者模式，再描述插件需求。"}
         </p>
-        {importSourceEntry}
         {!creatorMode && (
           <button
             type="button"
@@ -1843,6 +1850,7 @@ function ScopedDevelopment({
             返回原聊天
           </button>
         )}
+        {advancedCreatorEntry}
         {operationFeedback}
       </section>
     )
@@ -1891,7 +1899,12 @@ function ScopedDevelopment({
           使用指引
         </button>
       )}
-      {importSourceEntry}
+      {creatorMode && !workspaceVisible && (
+        <span className="text-xs text-muted-foreground">
+          直接在聊天描述要制作、修改或组合的插件。
+        </span>
+      )}
+      {advancedCreatorEntry}
       {workspaceVisible && (
         <Dialog open={open} onOpenChange={setOpen}>
           <DialogTrigger asChild>

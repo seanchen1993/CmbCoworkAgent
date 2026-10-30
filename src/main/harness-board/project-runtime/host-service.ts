@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks"
 import { captureSettledProjectSkill } from "../project-action-scope"
 import { readPackageExtensionContract } from "../../plugins/extension-contract"
 import { measureHostRuntimeSync, withHostRuntimeTiming } from "../../services/host-runtime-timing"
@@ -20,7 +21,7 @@ import type { HostCheckDiagnostic, HostExecutionTerminal } from "../../../shared
 import { HostProjectCoordinator } from "./host-coordinator"
 import { previousHostCheckOperation } from "./host-check-diagnostics"
 import { readHostResultFeedback } from "./host-result-feedback"
-import { HostPackageSnapshots, capturePackageMetadataGuard } from "./package-snapshots"
+import { HostPackageSnapshots, capturePackageMetadataGuard, type HostPackageSnapshot } from "./package-snapshots"
 import {
   derivationContentIdentity,
   snapshotDerivationSource
@@ -51,6 +52,7 @@ import { assertHostPackageSupported } from "./package-preflight"
 import { withSnapshotRetention } from "./snapshot-retention"
 import { readHostActionCheckEvidence, readHistoricalHostCheckDiagnostics } from "./action-check-evidence"
 import { inspectHostPlanMigration } from "./plan-migration"
+import { captureHostBranchInputs } from "./host-branch-inputs"
 import type { HostPlanMigrationReview } from "../../../shared/project-runtime/host-types"
 import {
   prepareProjectRuntimeInputIdentity,
@@ -183,6 +185,14 @@ export interface HostProjectServiceDependencies {
 
 /** Main-process service. IPC must derive/authorize project scope before invoking these methods. */
 export class HostProjectService {
+  // This is an operation-local source observation, never an authority or input cache. The
+  // original action executor still reads all package bytes at every dispatch/content boundary.
+  private readonly admittedSnapshot = new AsyncLocalStorage<{
+    projectId: string
+    snapshot: HostPackageSnapshot
+    assertCurrent(): void
+    active: boolean
+  }>()
   private readonly coordinator: HostProjectCoordinator
   private readonly operationInputs = new Map<string, () => void>()
   private readonly continuations = new Set<string>()
@@ -307,7 +317,19 @@ export class HostProjectService {
             })
             assertInputsCurrent()
           }
-          const outcome = await withHostRuntimeTiming(() => deps.executeSkill(context))
+          const admission = {
+            projectId: project.projectId,
+            snapshot: this.snapshot(project),
+            assertCurrent: this.snapshots.captureGuard(project.pluginDigest),
+            active: true
+          }
+          let outcome: HostActionResult["outcome"]
+          try {
+            outcome = await withHostRuntimeTiming(() =>
+              this.admittedSnapshot.run(admission, () => deps.executeSkill(context)))
+          } finally {
+            admission.active = false
+          }
           // Recheck the native policy after physical work, before producing an operation
           // result. Recovery Hook uncertainty must not be laundered by an executor label.
           this.assertCommand(project, "validate")
@@ -639,6 +661,8 @@ export class HostProjectService {
       })
       if (!admission || typeof admission.assertCurrent !== "function")
         hostStateError("BRANCH_ADMISSION_INVALID")
+      admission.assertCurrent()
+      const acceptedInputs = captureHostBranchInputs(candidate, source)
       await (this.deps.prepareInputIdentity?.(candidate, snapshot.root) ??
         prepareProjectRuntimeInputIdentity(candidate, snapshot.root))
       const current = await this.deps.resolveInstalledPlugin(input.installedPluginId)
@@ -657,6 +681,9 @@ export class HostProjectService {
       this.snapshots.read(source.pluginDigest)
       this.snapshots.read(snapshot.digest)
       admission.assertCurrent()
+      if (JSON.stringify(captureHostBranchInputs(candidate, source)) !== JSON.stringify(acceptedInputs))
+        hostStateError("BRANCH_INPUT_CHANGED")
+      admission.assertCurrent()
       return this.store.createBranch(
         {
           projectId: candidate.projectId,
@@ -670,7 +697,8 @@ export class HostProjectService {
           manifest: candidate.manifest
         },
         input.stageId,
-        { projectId: source.projectId, expectedVersion: source.version }
+        { projectId: source.projectId, expectedVersion: source.version },
+        acceptedInputs
       )
     })
   }
@@ -861,6 +889,7 @@ export class HostProjectService {
     this.snapshot(project)
     const stage = project.manifest.stages[project.stageIndex]
     if (!stage) hostStateError("PROJECT_COMPLETED")
+    this.assertAcceptedInputsCurrent(project)
     return this.store.prepare({
       ...input,
       ...(stageInstructions ? { stageInstructions } : {}),
@@ -868,6 +897,43 @@ export class HostProjectService {
       inputFingerprint: this.fingerprint(project),
       ...this.contextProviderRequest(project)
     })
+  }
+
+  /** A new operation cannot silently adopt edited bytes as an already accepted baseline. */
+  private assertAcceptedInputsCurrent(project: HostProjectState): void {
+    const stage = project.manifest.stages[project.stageIndex]
+    const paths = new Map(project.manifest.artifacts.map((artifact) => [artifact.id, artifact.path]))
+    const revised = new Set(project.manifest.checks.filter((check) =>
+      stage.checkIds.includes(check.id) && stage.artifactIds.includes(check.artifactId))
+      .map((check) => paths.get(check.artifactId)!))
+    const owners = new Map<string, typeof stage>()
+    for (const prior of project.manifest.stages.slice(0, project.stageIndex)) {
+      for (const id of prior.artifactIds) {
+        const artifact = project.manifest.artifacts.find((item) => item.id === id)!
+        if (artifact.required && !revised.has(artifact.path)) owners.set(artifact.path, prior)
+      }
+    }
+    for (const prior of new Set(owners.values())) {
+      const checkIds = project.manifest.checks.filter((check) => prior.checkIds.includes(check.id) &&
+        owners.get(paths.get(check.artifactId)!) === prior).map((check) => check.id)
+      if ([...owners].some(([path, owner]) => owner === prior &&
+        !project.manifest.checks.some((check) => checkIds.includes(check.id) &&
+          paths.get(check.artifactId) === path))) hostStateError("EVIDENCE_STALE")
+      const accepted = this.store.findStageTransition(project.projectId, prior.id)
+      if (accepted) this.assertStageEvidenceCurrent(accepted.project, accepted.operation, checkIds)
+      else {
+        const baseline = this.store.branchInputs(project.projectId)
+        const index = project.manifest.stages.indexOf(prior)
+        if (!baseline || baseline.pluginDigest !== project.pluginDigest || index >= baseline.stageIndex)
+          hostStateError("EVIDENCE_STALE")
+        for (const [path, owner] of owners) {
+          if (owner !== prior) continue
+          const expected = baseline.inputs.find(item => item.path === path)
+          if (!expected || readRuntimeScopedFile(project.workspace, path).fingerprint !== expected.fingerprint)
+            hostStateError("EVIDENCE_STALE")
+        }
+      }
+    }
   }
 
   approve(
@@ -892,6 +958,9 @@ export class HostProjectService {
     operationId: string,
     options?: { assertInputsCurrent: () => void }
   ): Promise<HostProjectOperation> {
+    // A nested continuation/start is a new admission even when it inherits the caller's ALS.
+    if (this.admittedSnapshot.getStore())
+      return this.admittedSnapshot.exit(() => this.start(operationId, options))
     const operation = this.operation(operationId)
     const imported = this.store.importedSource(operation.projectId)
     if (imported?.review.prefixStageIds.includes(operation.stageId) &&
@@ -1388,7 +1457,15 @@ export class HostProjectService {
       readHostResultFeedback(operation, this.store.getOperation(operation.resultFeedbackSource.operationId))
   }
   private snapshot(project: HostProjectState) {
-    const snapshot = this.snapshots.read(project.pluginDigest)
+    const admitted = this.admittedSnapshot.getStore()
+    let snapshot: HostPackageSnapshot
+    if (admitted?.active && admitted.projectId === project.projectId &&
+      admitted.snapshot.digest === project.pluginDigest) {
+      // Every call re-observes paths, inode, links, permissions, size and ns mtime/ctime.
+      // A mismatch is terminal for this admission; it never silently refreshes the baseline.
+      admitted.assertCurrent()
+      snapshot = admitted.snapshot
+    } else snapshot = this.snapshots.read(project.pluginDigest)
     if (
       snapshot.manifest.plugin.id !== project.packageId ||
       snapshot.manifest.plugin.version !== project.packageVersion ||

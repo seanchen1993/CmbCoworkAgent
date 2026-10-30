@@ -40,6 +40,8 @@ import { HostProjectStore } from "./host-store"
 import { hostResultReview } from "./host-state-protocol"
 import { parseProjectRuntimeManifest } from "../../../shared/project-runtime/manifest"
 import { getProjectActionRuntime, setProjectActionRuntime } from "../project-action-runtime"
+import { prepareProjectActionSelection } from "../project-action-selection"
+import { ClawStore } from "../../mods/claw-store"
 import type { ModObject } from "../../../shared/mods/types"
 import {
   attachFlowActionExecutionFacts,
@@ -49,6 +51,7 @@ import {
   requiresNativeFlowActionFacts
 } from "../../mods/flows/action-execution-facts"
 import { validateRegisteredToolInput } from "../../mods/v2/tool-schema"
+import { executeProjectActionPhase } from "../project-action-phase"
 
 const roots: string[] = []
 afterEach(() => {
@@ -196,6 +199,138 @@ function originalEvidence(f: ReturnType<typeof fixture>, originalTicket?: HostEx
 }
 
 describe("Host-bound artifact references", () => {
+  it.each(["中".repeat(8000), "😀".repeat(4000), "x\n".repeat(4000)])(
+    "binds the complete 8000 UTF-16 goal identity through the actual Flow schema",
+    (goal) => {
+      const f = fixture("current", 28000)
+      f.project.goal = goal
+      f.binding.requestProvenance = "project-goal/v1"
+      const captured = f.capture()
+      expect(captured.bindings[0].input.requestProvenance).toEqual({
+        protocol: "devclaw.project-goal/v1", projectId: f.project.projectId,
+        bytes: Buffer.byteLength(goal), sha256: runtimeDigest(Buffer.from(goal))
+      })
+      const flow = createProjectActionFlow(f.project, "request-check", captured, "checks")
+      const step = flow.steps[0]
+      if (step.kind !== "plugin-action") throw Error("fixture")
+      const envelope = { version: 1, input: step.input, config: step.config, task: flow.goal,
+        runId: "flow_" + "0".repeat(36), stepId: step.id, executionId: "0".repeat(36) }
+      expect(Buffer.byteLength(JSON.stringify(envelope))).toBeLessThan(16000)
+      expect(flow.goal).not.toContain(goal)
+      validateRegisteredToolInput(provider.inputSchema, step.input)
+      f.project.goal = goal.slice(0, -1) + "z"
+      expect(() => captured.assertScope(f.project)).toThrow("PROJECT_ACTION_SCOPE_CHANGED")
+      expect(f.capture().fingerprint).not.toBe(captured.fingerprint)
+    }
+  )
+
+  it("keeps undeclared and mixed check task semantics and budgets unchanged", () => {
+    const f = fixture("current", 28000)
+    f.project.goal = "中".repeat(8000)
+    expect(f.capture().bindings[0].input).not.toHaveProperty("requestProvenance")
+    expect(() => createProjectActionFlow(f.project, "legacy", f.capture(), "checks"))
+      .toThrow("PROJECT_ARTIFACT_REFERENCE_ENVELOPE_LIMIT")
+    f.binding.requestProvenance = "project-goal/v1"
+    const other = { ...f.binding, id: "other" }
+    delete other.requestProvenance
+    f.lock.bindings.push(other)
+    f.project.manifest.actions.push({ id: "other", ref: other.ref })
+    f.project.manifest.checks.push({ id: "other", artifactId: "result", kind: "action",
+      actionId: "other", sideEffect: "read" })
+    f.project.manifest.stages[1].checkIds.push("other")
+    f.phase.actionIds.push("other")
+    expect(() => createProjectActionFlow(f.project, "mixed", f.capture(), "checks"))
+      .toThrow("PROJECT_ARTIFACT_REFERENCE_ENVELOPE_LIMIT")
+    // Historical evidence may select just one check; the original mixed batch still owns its task.
+    const subset = captureProjectActionInputs(f.project, f.lock,
+      { ...f.phase, actionIds: ["business"] })
+    expect(() => createProjectActionFlow(f.project, "mixed-subset", subset, "checks"))
+      .toThrow("PROJECT_ARTIFACT_REFERENCE_ENVELOPE_LIMIT")
+    f.project.goal = "Original ordinary task"
+    expect(createProjectActionFlow(f.project, "mixed", f.capture(), "checks").goal)
+      .toBe(f.project.goal)
+  })
+
+  it("dispatches the short task to the original Flow owner instead of restoring the large goal", async () => {
+    const f = fixture("current", 28000)
+    f.project.goal = "中".repeat(8000)
+    f.binding.requestProvenance = "project-goal/v1"
+    const original = originalEvidence(f)
+    const captured = f.capture()
+    const runtime = getProjectActionRuntime()
+    const startSaved = vi.fn(async (_workspace, _threadId, saved, task) => {
+      expect(task.goal).toBe(saved.definition.goal)
+      expect(task.goal).not.toBe(f.project.goal)
+      const step = saved.definition.steps[0]
+      const envelope = { version: 1, input: step.input, config: step.config, task: task.goal,
+        runId: "flow_" + "0".repeat(36), stepId: step.id, executionId: "0".repeat(36) }
+      expect(Buffer.byteLength(JSON.stringify(envelope))).toBeLessThan(16000)
+      return original.run
+    })
+    setProjectActionRuntime({ ...runtime, flows: { ...runtime.flows, startSaved,
+      waitForSettlement: async () => {}, run: () => original.run } })
+    try {
+      await executeProjectActionPhase({ project: f.project, operation: original.operation,
+        ticket: original.ticket, snapshotRoot: f.root, skillPath: "skills/review/SKILL.md",
+        goal: f.project.goal, signal: new AbortController().signal,
+        bindThread: () => {}, recordTerminal: () => {} },
+      "original-thread", captured, "checks", () => {})
+      expect(startSaved).toHaveBeenCalledOnce()
+    } finally {
+      setProjectActionRuntime(runtime)
+    }
+  })
+
+  it("admits captured provenance through real provider selection without relaxing authored locks", async () => {
+    const f = fixture("current", 28000)
+    f.project.goal = "中".repeat(8000)
+    f.binding.requestProvenance = "project-goal/v1"
+    const captured = f.capture()
+    expect(captured.bindings[0]).not.toHaveProperty("inputFrom")
+    expect(captured.bindings[0]).not.toHaveProperty("requestProvenance")
+    expect(captured.bindings[0].input.requestProvenance).toMatchObject({
+      bytes: 24000, sha256: runtimeDigest(Buffer.from(f.project.goal))
+    })
+    const values = new Map<string, string>()
+    const store = new ClawStore({
+      getSetting: (key, fallback = "") => values.get(key) ?? fallback,
+      setSetting: (key, value) => { values.set(key, value) }
+    })
+    const identity = JSON.stringify([f.root, "provenance-thread"])
+    const closeThread = vi.fn()
+    await prepareProjectActionSelection(f.root, "provenance-thread", captured.bindings, {
+      store, assertScope: () => identity, catalog: async () => [provider], closeThread
+    })
+    expect(closeThread).toHaveBeenCalledWith("provenance-thread")
+    expect(store.selection(f.root, identity).profile?.capabilities).toEqual([{
+      pluginId: provider.pluginId, name: provider.plugin, digest: provider.digest
+    }])
+    const forged = structuredClone(f.lock)
+    delete forged.bindings[0].inputFrom
+    expect(() => parseProjectActionLock(forged)).toThrow("PROJECT_REQUEST_PROVENANCE_CHECK_ONLY")
+    const fingerprint = captured.fingerprint
+    delete f.binding.requestProvenance
+    expect(f.capture().fingerprint).not.toBe(fingerprint)
+  })
+
+  it("rejects provenance overrides and use outside mandatory artifact reference checks", () => {
+    const f = fixture("current", 28000)
+    f.binding.requestProvenance = "project-goal/v1"
+    f.binding.input.requestProvenance = { sha256: "forged" }
+    expect(() => f.capture()).toThrow("PROJECT_REQUEST_PROVENANCE_INPUT_CONFLICT")
+    f.binding.input = {}
+    f.binding.config.requestProvenance = { sha256: "forged" }
+    expect(() => f.capture()).toThrow("PROJECT_REQUEST_PROVENANCE_INPUT_CONFLICT")
+    f.binding.config = {}
+    expect(() => captureProjectActionInputs(f.project, f.lock, { actionIds: ["business"] }))
+      .toThrow("PROJECT_REQUEST_PROVENANCE_CHECK_ONLY")
+    const raw = structuredClone(f.lock)
+    raw.bindings[0].inputFrom = { kind: "artifact", artifactId: "result", pointer: "", format: "json" }
+    expect(() => parseProjectActionLock(raw)).toThrow("PROJECT_REQUEST_PROVENANCE_CHECK_ONLY")
+    f.project.goal = "x".repeat(8001)
+    expect(() => f.capture()).toThrow("PROJECT_REQUEST_PROVENANCE_INVALID")
+  })
+
   function configurationFixture() {
     const f = fixture("current", 28000)
     f.binding.configurationKeys = ["audience", "timeout"]

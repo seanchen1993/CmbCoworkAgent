@@ -20,7 +20,8 @@ import { validateClawActionConfig } from "../../mods/v2/action-config"
 import { readRuntimeScopedFile, runtimeDigest, runtimeDirectoryIdentity } from "./safe-files"
 import {
   PROJECT_ARTIFACT_REFERENCE_FORMAT,
-  PROJECT_ARTIFACT_REFERENCE_TOTAL_BYTES
+  PROJECT_ARTIFACT_REFERENCE_TOTAL_BYTES,
+  PROJECT_REQUEST_PROVENANCE_SOURCE
 } from "../../../shared/project-runtime/artifact-reference"
 import { captureProjectArtifactReference } from "./artifact-reference"
 import type { ModObject } from "../../../shared/mods/types"
@@ -60,7 +61,8 @@ export function createProjectActionBinding(
   input: ProjectActionBinding["input"],
   config: ProjectActionBinding["config"] = {},
   inputFrom?: ProjectActionBinding["inputFrom"],
-  configurationKeys?: readonly string[]
+  configurationKeys?: readonly string[],
+  requestProvenance?: typeof PROJECT_REQUEST_PROVENANCE_SOURCE
 ): ProjectActionBinding {
   const binding = parseProjectActionLock({
     apiVersion: "devclaw.project-actions-lock/v1",
@@ -78,6 +80,7 @@ export function createProjectActionBinding(
         config,
         ...(inputFrom ? { inputFrom } : {}),
         ...(configurationKeys === undefined ? {} : { configurationKeys }),
+        ...(requestProvenance === undefined ? {} : { requestProvenance }),
         inputSchema: action.inputSchema,
         configSchema: action.configSchema ?? null,
         outputSchema: action.outputSchema ?? null
@@ -164,6 +167,7 @@ export function assertProjectActionLock(
       const binding = lock.bindings.find((item) => item.id === id)
       if (!binding) throw Error("PROJECT_ACTION_LOCK_MISMATCH")
       if (binding.configurationKeys) throw Error("PROJECT_CHECK_CONFIGURATION_CHECK_ONLY")
+      if (binding.requestProvenance) throw Error("PROJECT_REQUEST_PROVENANCE_CHECK_ONLY")
       const from = binding.inputFrom
       if (from?.kind === "artifact" && from.format === PROJECT_ARTIFACT_REFERENCE_FORMAT)
         throw Error("PROJECT_ACTION_REFERENCE_CHECK_ONLY")
@@ -197,6 +201,9 @@ export function assertProjectActionLock(
     }
   }
   for (const binding of lock.bindings) {
+    if (binding.requestProvenance && !manifest.checks.some((check) =>
+      check.kind === "action" && check.actionId === binding.id && check.sideEffect === "read"))
+      throw Error("PROJECT_REQUEST_PROVENANCE_CHECK_ONLY")
     if (binding.configurationKeys && (
       binding.inputFrom?.kind !== "artifact" ||
       binding.inputFrom.format !== PROJECT_ARTIFACT_REFERENCE_FORMAT ||
@@ -211,6 +218,8 @@ export interface CapturedProjectActionInputs {
   bindings: ProjectActionBinding[]
   fingerprint: string
   referenceActionIds?: readonly string[]
+  /** Based on the whole original check phase, including when inspecting a receipt subset. */
+  requestProvenanceTask?: boolean
   assertScope(state: HostProjectState): void
   /** Re-read the exact approved artifact inputs before starting an external action. */
   assertCurrent(): void
@@ -276,6 +285,15 @@ export function captureProjectActionInputs(
       validateBinding(binding)
       const next = structuredClone(binding)
       const from = binding.inputFrom
+      if (binding.requestProvenance) {
+        if (!phase?.allowCheckArtifacts || from?.kind !== "artifact" ||
+          from.format !== PROJECT_ARTIFACT_REFERENCE_FORMAT ||
+          checkArtifacts.get(id) !== from.artifactId)
+          throw Error("PROJECT_REQUEST_PROVENANCE_CHECK_ONLY")
+        if (Object.hasOwn(binding.input, "requestProvenance") ||
+          Object.hasOwn(binding.config, "requestProvenance"))
+          throw Error("PROJECT_REQUEST_PROVENANCE_INPUT_CONFLICT")
+      }
       if (binding.configurationKeys && (
         !phase?.allowCheckArtifacts || from?.kind !== "artifact" ||
         from.format !== PROJECT_ARTIFACT_REFERENCE_FORMAT ||
@@ -311,7 +329,8 @@ export function captureProjectActionInputs(
             project,
             lock,
             from.artifactId,
-            from.maxBytes
+            from.maxBytes,
+            binding.requestProvenance
           )
           bytes += reference.bytes
           if (bytes > PROJECT_ARTIFACT_REFERENCE_TOTAL_BYTES)
@@ -325,6 +344,9 @@ export function captureProjectActionInputs(
             )
           }
           delete next.inputFrom
+          // The Host source instruction is consumed with inputFrom. Only the captured metadata
+          // is executable input; the public lock parser must still reject unbound declarations.
+          delete next.requestProvenance
           validateRegisteredToolInput(binding.inputSchema, next.input)
           files.push(...reference.files)
           seen.add(id)
@@ -371,6 +393,11 @@ export function captureProjectActionInputs(
         pluginDigest: project.pluginDigest,
         stage: stage.id,
         goal: project.goal,
+        ...(lock.bindings.some((binding) => (phase?.actionIds ?? stage.actionIds).includes(binding.id) &&
+          binding.requestProvenance) ? {
+            requestProvenanceDeclarations: (phase?.actionIds ?? stage.actionIds).map((id) =>
+              [id, lock.bindings.find((binding) => binding.id === id)?.requestProvenance ?? null])
+          } : {}),
         bindings,
         files
       })
@@ -382,6 +409,9 @@ export function captureProjectActionInputs(
   return {
     stageId: stage.id,
     ...captured,
+    ...(phase?.allowCheckArtifacts && checkArtifacts.size && [...checkArtifacts.keys()].every((id) =>
+      lock.bindings.find((binding) => binding.id === id)?.requestProvenance === PROJECT_REQUEST_PROVENANCE_SOURCE)
+      ? { requestProvenanceTask: true } : {}),
     referenceActionIds: lock.bindings
       .filter(
         (binding) =>

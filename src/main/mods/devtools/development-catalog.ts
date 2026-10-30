@@ -142,7 +142,7 @@ export function developmentCatalog() {
       "技能生命周期用 classic.PreSkillUse/PostSkillUse（本应用扩展），matcher 用 skill_name；从 events/types 读取宿主固定身份与结果。Pre block 阻止激活，Post block 请求修订、preventContinuation 才终止。普通 Mod 不能吞掉必需业务 Hooks，原脚本不自动迁移；真实试用须新确认。",
       "状态扩展用 scaffold(kind:state-extension) 生成真实 Function Mod、迁移计划与未执行测试入口，再 save/check/request_trial。默认只 hold；未确认原图、绑定原 writer 并实际验证前必须显示‘可执行决策骨架，未迁移状态’。inspect_raw.stateControl 保留原状态工具、Hooks、配置及知识来源；已有 Host authority 无需强制迁移。",
       "创造者模式按自然语言需求选择复用、组合或编写；不要让用户先配置添加功能、常用搭配或执行步骤。连续修改先 list/read 更新当前开发组件，保留已有功能。",
-      "使用闭合的 SDK 路径和 literal 事件；SDK 对象或方法不能传给辅助函数、动态索引或外部代码。纯辅助函数只接收普通数据；SDK 调用直接写在有明确 $ 参数的事件处理器中，否则检查会报告 MODS_SDK_UNVERIFIED，保留草稿后按诊断修复。",
+      "SDK路径须确定，事件literal。包内唯一具名/const函数可直接接SDK/on，形参不可写；局部闭包须不逃逸。原生ui.render根保留词法回调；helper不继承。逐方法检查；动态/外部调用、方法传递、SDK返回/存储未验证。32轮/256边，不新增授权。",
       "组合用 mod_composition list 搜索摘要，details 按需读取配置 schema；stage 同轮累积并深合并配置，可引用真实模型、技能、MCP 和已保存步骤。save/apply_saved 保存套用命名组合，undo/cancel 撤销选择或取消排队。提交后结束本轮，再核对真实回执。",
       "用户参数在灵件清单 userConfig 声明，由原生参数表单绑定；缺必填项不批准执行。升级重命名或删除字段可在同份声明加入 userConfigSchema:{version:1,migrations:[{fromVersion:0,toVersion:1,changes:[{kind:'rename',from:'oldLabel',to:'label'}]}]}，并声明 cmbCompatibility:{modelProtocol:'result-v1',userConfigMigrations:'v1'}；后续版本逐一连续迁移，删除用 {kind:'remove',key:'字段名'}，不运行迁移脚本。迁移须原生确认，失败保留旧配置；导出不携带本机保存值、凭据或授权。",
       "公共快捷指令应采用灵件专属名称，避免与已启用灵件重名。出现 MODS_COMMAND_CONFLICT 时修改本草稿的指令名称及使用说明，再重新请求试用；不要替用户关闭其他插件来绕开冲突。",
@@ -225,21 +225,27 @@ export function developmentCatalogPage(
     const capabilities = catalog.support.conditionalCapabilities
     if (!Number.isSafeInteger(cursor) || cursor < 0 || cursor > capabilities.length)
       throw Error("DEVELOPMENT_CATALOG_CURSOR")
-      const page = (size: number) => ({
+    const page = (size: number) => ({
       contract: catalog.contract,
       section,
       cursor,
       content: {
         ...catalog.support,
+        // Shared authoring contracts appear once, with an explicit discoverable reference on
+        // later pages. Repeating them beside every growing capability breaks bounded discovery.
+        authoringConstraints: cursor === 0 ? catalog.support.authoringConstraints : undefined,
+        ...(cursor === 0 ? {} : {
+          authoringConstraintsDiscovery: { section: "support" as const, cursor: 0 }
+        }),
         conditionalCapabilities: capabilities.slice(cursor, cursor + size)
       },
       ...(cursor + size < capabilities.length ? { nextCursor: cursor + size } : {})
-      })
-      let size = Math.min(2, capabilities.length - cursor)
-      while (size > 1 && JSON.stringify(page(size)).length >= 8000) size--
-      const result = page(size)
-      if (JSON.stringify(result).length >= 8000) throw Error("DEVELOPMENT_SUPPORT_PAGE_LIMIT")
-      return result
+    })
+    let size = Math.min(2, capabilities.length - cursor)
+    while (size > 1 && JSON.stringify(page(size)).length >= 7980) size--
+    const result = page(size)
+    if (JSON.stringify(result).length >= 7980) throw Error("DEVELOPMENT_SUPPORT_PAGE_LIMIT")
+    return result
   }
   if (section === "overview")
     return {

@@ -1,0 +1,6 @@
+{
+  "name": "autobiz-lean-rules",
+  "version": "1.0.0",
+  "description": "需求基线与五阶段纯业务规则：可信原请求、固定需求/来源/场景、方案/计划、准备交付与逐字节归档。",
+  "mods": "mods/manifest.json"
+}

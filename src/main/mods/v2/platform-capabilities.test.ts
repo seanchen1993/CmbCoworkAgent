@@ -1,4 +1,4 @@
-import { afterEach, expect, it } from "vitest"
+import { afterEach, expect, it, vi } from "vitest"
 import type { ModJson, ModObject } from "../../../shared/mods/types"
 import { FunctionGuestRuntime } from "./guest-runtime"
 import { FunctionSession, SESSION_CAPABILITIES, type FunctionSessionHost } from "./session"
@@ -322,7 +322,7 @@ it("strictly validates semantic version, permission declarations and object sche
       actions: [{ ...descriptor.actions[0], requiredPermissions: ["arbitrary.ipc"] }]
     })
   ).toThrow()
-  expect(FUNCTION_HOST_REVISION).toBe("claude-295-tools-v92")
+  expect(FUNCTION_HOST_REVISION).toBe("devclaw-mods-v93")
 })
 
 it("native cleanup frame denies new effects while still awaiting real timer cleanup ACK", async () => {
@@ -352,6 +352,52 @@ it("native cleanup frame denies new effects while still awaiting real timer clea
     error: expect.stringContaining("MODS_PLATFORM_CLEANUP_ONLY")
   })
   expect(f.session.ownedResourceCount).toBe(0)
+})
+
+it("reserves bounded cleanup slots at action saturation without expanding ordinary effects", async () => {
+  const declaration = {
+    ...descriptor,
+    actions: [{ ...descriptor.actions[0], requiredPermissions: ["clock.every", "platform.publish"] }]
+  }
+  const f = await fixture(
+    `if(e.input.wait)return new Promise(()=>{});
+     if(e.input.close){await globalThis.watcher.cancel();return {closed:true}}
+     if(e.input.done)return {done:true};
+     globalThis.watcher=$.clock.every(1000,()=>{});return {opened:true}`,
+    {}, undefined, declaration
+  )
+  const pending: Promise<unknown>[] = []
+  const cleanupControllers = Array.from({ length: 4 }, () => new AbortController())
+  try {
+    expect(await f.act("open")).toMatchObject({ status: "succeeded" })
+    expect(f.session.ownedResourceCount).toBe(1)
+    for (let i = 0; i < 16; i++) pending.push(f.act(`busy-${i}`, { wait: true }))
+    await vi.waitFor(() => expect((f.provider.guest as FunctionGuestRuntime).stats.frames).toBe(16))
+    await expect(f.act("ordinary-overflow")).rejects.toThrow("MODS_PLATFORM_ACTION_LIMIT")
+    expect(await f.session.platform.nativeCleanupAct(ref, "increment", { close: true }, "close-full", f.signal))
+      .toMatchObject({ status: "succeeded", value: { closed: true } })
+    expect(f.session.ownedResourceCount).toBe(0)
+    expect(await f.session.platform.nativeCleanupAct(ref, "increment", {}, "effect-full", f.signal))
+      .toMatchObject({ status: "unknown", error: expect.stringContaining("MODS_PLATFORM_CLEANUP_ONLY") })
+    expect(f.session.ownedResourceCount).toBe(0)
+    const cleanups = cleanupControllers.map((controller, index) => f.session.platform.nativeCleanupAct(
+      ref, "increment", { wait: true }, `cleanup-busy-${index}`, controller.signal
+    ))
+    pending.push(...cleanups)
+    await vi.waitFor(() => expect((f.provider.guest as FunctionGuestRuntime).stats.frames).toBe(20))
+    await expect(f.session.platform.nativeCleanupAct(ref, "increment", { done: true }, "cleanup-overflow", f.signal))
+      .rejects.toThrow("MODS_PLATFORM_ACTION_LIMIT")
+    await expect(f.act("ordinary-still-full", { done: true })).rejects.toThrow("MODS_PLATFORM_ACTION_LIMIT")
+    cleanupControllers[0].abort()
+    await cleanups[0]
+    expect(await f.session.platform.nativeCleanupAct(ref, "increment", { done: true }, "cleanup-reused", f.signal))
+      .toMatchObject({ status: "succeeded", value: { done: true } })
+    await expect(f.act("ordinary-not-expanded", { done: true })).rejects.toThrow("MODS_PLATFORM_ACTION_LIMIT")
+  } finally {
+    cleanupControllers.forEach(controller => controller.abort())
+    await f.session.close(true)
+    await Promise.allSettled(pending)
+  }
 })
 
 it("background callbacks retain original consumer grants and close instead of retrying revoked work", async () => {

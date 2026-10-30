@@ -1,0 +1,19 @@
+{
+  "apiVersion": "cmb.mods/v2",
+  "id": "worktree-changes",
+  "claw": {
+    "componentsVersion": 1,
+    "components": [
+      {
+        "id": "main",
+        "name": "代码变更导航",
+        "description": "只读查看已授权目录相对固定起点的累计变更；可选择当前工作流中的工作树。",
+        "kind": "module",
+        "entry": "main.ts",
+        "dependsOn": [],
+        "actionIds": []
+      }
+    ],
+    "actions": []
+  }
+}

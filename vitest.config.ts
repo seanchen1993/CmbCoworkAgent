@@ -83,6 +83,8 @@ export const NATIVE_INTEGRATION_TESTS = [
   "src/main/mods/devtools/creator-source-set.integration.test.ts",
   "src/main/plugins/autobiz-native-host.integration.test.ts",
   "src/main/plugins/autobiz-native-code.integration.test.ts",
+  "src/main/plugins/autobiz-lean-host.integration.test.ts",
+  "src/main/plugins/autobiz-lean-code.integration.test.ts",
   "src/main/plugins/autobiz-native-performance.integration.test.ts",
   "src/main/plugins/autobiz-native-multirepo.integration.test.ts"
 ]

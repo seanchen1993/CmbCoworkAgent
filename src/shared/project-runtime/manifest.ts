@@ -154,7 +154,7 @@ export function parseProjectRuntimeManifestV1(value: unknown): ProjectRuntimeMan
           const stage = record(
             value,
             ["id", "title", "actionIds", "artifactIds", "checkIds", "approval"],
-            ["skill", "resultApproval", "executionMode", "inputArtifactIds"]
+            ["skill", "resultApproval", "executionMode", "inputArtifactIds", "contextArtifactIds"]
           )
           if (stage.approval !== "none" && stage.approval !== "human") return invalid()
           if (
@@ -165,6 +165,7 @@ export function parseProjectRuntimeManifestV1(value: unknown): ProjectRuntimeMan
             return invalid()
           if (raw.mode !== "host" && stage.resultApproval !== undefined) return invalid()
           if (raw.mode !== "host" && stage.inputArtifactIds !== undefined) return invalid()
+          if (raw.mode !== "host" && stage.contextArtifactIds !== undefined) return invalid()
           if (stage.executionMode !== undefined) {
             if (
               raw.mode !== "host" ||
@@ -185,6 +186,9 @@ export function parseProjectRuntimeManifestV1(value: unknown): ProjectRuntimeMan
                   inputArtifactIds: refs(stage.inputArtifactIds)
                 }),
             checkIds: refs(stage.checkIds),
+            ...(stage.contextArtifactIds === undefined
+              ? {}
+              : { contextArtifactIds: refs(stage.contextArtifactIds) }),
             approval: stage.approval,
             ...(stage.executionMode === undefined
               ? {}
@@ -277,6 +281,12 @@ export function parseProjectRuntimeManifestV1(value: unknown): ProjectRuntimeMan
       )
         return invalid()
       if (stage.inputArtifactIds?.some((ref) => !precedingArtifacts.has(ref))) return invalid()
+      if (
+        stage.contextArtifactIds?.some(
+          (ref) => !(stage.inputArtifactIds ?? [...precedingArtifacts]).includes(ref)
+        )
+      )
+        return invalid()
       if (
         stage.checkIds.some(
           (ref) =>

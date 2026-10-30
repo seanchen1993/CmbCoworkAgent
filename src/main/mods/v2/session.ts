@@ -1,4 +1,5 @@
 import { assertWorkflowResourceAdmission } from "../../agent/workflow/resource-deadline"
+import { assertPlatformQueryMethod } from "./platform-query-scope"
 import { isFunctionContentBoundary } from "./content-boundary"
 import { validateFunctionModelResult, type FunctionModelProtocol, type FunctionModelResult, type FunctionForkResult } from "../../../shared/mods/v2/model-protocol"
 import {
@@ -2882,9 +2883,11 @@ export class FunctionSession {
     candidateInvalidation = false
   ): Promise<ModJson | undefined> {
     return retainComposerPreparationWork(async () => {
+      assertPlatformQueryMethod(method)
       const boundary = isFunctionContentBoundary(method)
       if (boundary) this.host.assertContent?.(plugin)
       const value = await this.capabilityWithin(plugin, method, raw, callSignal, source, depth, turnHeld, logSignal, scope, candidateInvalidation)
+      assertPlatformQueryMethod(method)
       if (boundary) this.host.assertContent?.(plugin)
       return value
     }, method)

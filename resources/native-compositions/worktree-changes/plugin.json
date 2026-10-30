@@ -1,0 +1,6 @@
+{
+  "name": "worktree-changes",
+  "version": "1.0.0",
+  "description": "任务运行期间按固定提交查看已授权仓库与工作树的真实变更。",
+  "mods": "mods/manifest.json"
+}

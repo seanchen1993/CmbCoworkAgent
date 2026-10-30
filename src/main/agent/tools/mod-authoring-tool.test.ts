@@ -31,6 +31,7 @@ import { assertProjectAuthoringSkillMetadata } from "../../mods/devtools/project
 import { AuthoringStructureError } from "../../mods/devtools/authoring-structure-diagnostics"
 import { compileProjectHarness } from "../../mods/devtools/project-harness"
 import { createProjectTemplate } from "../../mods/devtools/project-template"
+import * as installedProjectSource from "../../mods/devtools/project-from-plugin"
 
 vi.mock("../../storage", () => ({ getPlugins: vi.fn(() => []) }))
 
@@ -81,6 +82,114 @@ afterEach(() => {
 })
 
 describe("conversation Mod tool", () => {
+  it("routes installed native source into the original creator scope without granting or trial", async () => {
+    const service = fixture()
+    const source = (await readProjectSource(resolve("tests/fixtures/native-compositions/vendor")))
+      .bundle
+    const prepare = vi
+      .spyOn(installedProjectSource, "projectFromInstalledPlugin")
+      .mockResolvedValue({
+        draft: {
+          id: "my-installed",
+          name: "My installed plugin",
+          revision: 1,
+          directory: "private-draft",
+          source
+        },
+        origin: {
+          pluginId: "actual-installed-id",
+          name: "original",
+          version: "1.0.0",
+          installedIdentity: "a".repeat(64),
+          sourceDigest: source.digest
+        },
+        originalPreserved: true,
+        executed: false,
+        grantsAuthority: false,
+        requiresFreshTrial: true
+      })
+    const author = createModAuthoringTool({ threadId, workspace })
+    expect(author.description).toContain("project_from_plugin(pluginId,id,name?,sourceDigest?)")
+    const result = JSON.parse(
+      await author.invoke({
+        action: "project_from_plugin",
+        pluginId: "actual-installed-id",
+        id: "my-installed",
+        sourceDigest: source.digest
+      })
+    )
+    expect(result).toMatchObject({
+      ok: true,
+      result: {
+        id: "my-installed",
+        revision: 1,
+        sourceDigest: source.digest,
+        originalPreserved: true,
+        executed: false,
+        grantsAuthority: false,
+        requiresFreshTrial: true,
+        authoring: { nextStep: { action: "project_read", assetPath: "composition/source.json" } }
+      }
+    })
+    expect(prepare.mock.calls[0][0]).toMatchObject({
+      scope: { threadId, workspace },
+      pluginId: "actual-installed-id",
+      id: "my-installed",
+      sourceDigest: source.digest,
+      sessions: projectAuthoringSessions
+    })
+    const guard = prepare.mock.calls[0][0].guard
+    expect(guard).not.toThrow()
+    releaseLocalThreadRunLease(threadId, "desktop", "first")
+    expect(guard).toThrow("DEVELOPMENT_TURN_CHANGED")
+    expect(service.requestTrial).not.toHaveBeenCalled()
+    expect(service.requestReuse).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ["PROJECT_PLUGIN_NATIVE_SOURCE_REQUIRED", "不能还原"],
+    ["PROJECT_PLUGIN_SOURCE_CHANGED", "重新核对安装身份"],
+    ["PROJECT_PLUGIN_SOURCE_UNSUPPORTED", "未声明资源"],
+    ["PROJECT_PLUGIN_SOURCE_INVALID", "原生源码或清单无效"],
+    ["PROJECT_PLUGIN_SOURCE_PROTECTED", "受原内容保护"],
+    ["PROJECT_PLUGIN_NOT_INSTALLED", "真实 pluginId"],
+    ["PROJECT_RESOURCE_MISSING", "缺少声明的作者资源"],
+    ["PROJECT_DRAFT_REVISION_CHANGED", "未覆盖"]
+  ])("returns an actionable installed source diagnostic for %s", async (code, hint) => {
+    fixture()
+    vi.spyOn(installedProjectSource, "projectFromInstalledPlugin").mockRejectedValue(Error(code))
+    const result = JSON.parse(
+      await createModAuthoringTool({ threadId, workspace }).invoke({
+        action: "project_from_plugin",
+        pluginId: "installed",
+        id: "new-native"
+      })
+    )
+    expect(result).toMatchObject({
+      ok: false,
+      error: code,
+      executed: false,
+      grantsAuthority: false,
+      originalPreserved: true
+    })
+    expect(result.hint).toContain(hint)
+  })
+
+  it("requires real installed identity and independent draft id", async () => {
+    fixture()
+    const result = JSON.parse(
+      await createModAuthoringTool({ threadId, workspace }).invoke({
+        action: "project_from_plugin"
+      })
+    )
+    expect(result).toMatchObject({
+      ok: false,
+      error: "DEVELOPMENT_INPUT",
+      missingFields: ["id", "pluginId"]
+    })
+    expect(result.hint).toContain("无需文件路径")
+  })
+
   it("guides source-only creation and cross-Mod discovery without workspace side effects", async () => {
     fixture()
     const author = createModAuthoringTool({ threadId, workspace })

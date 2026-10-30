@@ -3,6 +3,7 @@ import { FunctionTrustedWaitClock, withTrustedFunctionWaitScope,
 import { FunctionDisplayPreparationChannel } from "./display-preparation"
 import { randomUUID } from "node:crypto"
 import { AsyncLocalStorage, AsyncResource } from "node:async_hooks"
+import { platformQuerySignal } from "./platform-query-scope"
 import {
   markRunCancellationEffectDispatched,
   observeRunCancellationEffect
@@ -575,12 +576,14 @@ export class FunctionRuntimeClient {
         // Guest code may consume resources whose module host predates this run's scope.
         markRunCancellationEffectDispatched()
         const { signal, ...metadata } = invocation
+        const query = platformQuerySignal()
         const uiDrawing = metadata.event === "ui.render" ? draw() : undefined
         return (await request(
           { type: "invoke", runtimeId, registration, event, metadata,
+            ...(query ? { query: true as const } : {}),
             ...(uiDrawing ? { uiDrawing } : {}) },
           host,
-          signal,
+          query ? AbortSignal.any([query, ...(signal ? [signal] : [])]) : signal,
           functionInvocationTimeoutMs(metadata) + 3000
         )) as { value?: ModJson; absent?: boolean }
       },

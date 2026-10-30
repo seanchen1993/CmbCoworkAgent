@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto"
+import { platformQuerySignal } from "./platform-query-scope"
 import type { ModJson, ModObject, ModUiChangeScope } from "../../../shared/mods/types"
 import { encodeModJson, parseModJson } from "../../../shared/mods/validation"
 import { normalizeFunctionLinks } from "../../../shared/mods/v2/link-fallback"
@@ -764,6 +765,7 @@ export class FunctionPanes {
 
   act(action: FunctionUiAction): Promise<void | FunctionFocusResult> {
     this.host.assertLive()
+    const query = platformQuerySignal()
     if (isModObject(action) && Object.hasOwn(action, "link") && !this.markdownActions.has(action))
       return Promise.reject(new ModFunctionError("MODS_UI_MARKDOWN_ACTION_INVALID"))
     if (
@@ -801,6 +803,7 @@ export class FunctionPanes {
       return Promise.reject(new ModFunctionError("MODS_UI_INTENT_LIMIT"))
     const perform = async (): Promise<void | FunctionFocusResult> => {
       this.host.assertLive()
+      query?.throwIfAborted()
       const pane = this.panes.get(action.pane)
       // Reopening the same id can retain its generation until redraw, but replaces its owner object.
       if (
@@ -864,10 +867,13 @@ export class FunctionPanes {
         let focusResult: FunctionFocusResult = { focused: false }
         let focusApplied = false
         const controller = new AbortController()
+        const actionSignal = query
+          ? AbortSignal.any([controller.signal, query])
+          : controller.signal
         const focusEpoch = pane.focusEpoch
         const assertLifecycleCurrent = () => {
           this.host.assertLive()
-          controller.signal.throwIfAborted()
+          actionSignal.throwIfAborted()
           // The already admitted root focus event records Pane state, not an old control action.
           // Control/Client focus and scroll remain pinned to their exact drawing generation.
           const rootFocus = action.kind === "focus" && !target && !focusResult.target
@@ -902,7 +908,7 @@ export class FunctionPanes {
                 : { value })
             },
             {
-              signal: controller.signal,
+              signal: actionSignal,
               generation: action.generation,
               core: async (input): Promise<ModJson> => {
                 assertLifecycleCurrent()
@@ -915,7 +921,7 @@ export class FunctionPanes {
                   )?.target
                   if (input.element !== pane.id && !selected)
                     return { deny: "Element is not drawn" }
-                  controller.signal.throwIfAborted()
+                  actionSignal.throwIfAborted()
                   focusResult = {
                     focused: input.focused as boolean,
                     ...(selected ? { target: selected } : {})
@@ -1006,11 +1012,14 @@ export class FunctionPanes {
         ...(event === "ui.input" ? { kind: action.kind } : {})
       }
       const controller = new AbortController()
+      const actionSignal = query
+        ? AbortSignal.any([controller.signal, query])
+        : controller.signal
       this.active.set(controller, pane.key)
       this.retained.set(action.generation, (this.retained.get(action.generation) ?? 0) + 1)
       try {
         await this.host.dispatch(event, e, {
-          signal: controller.signal,
+          signal: actionSignal,
           core: async (input, signal): Promise<ModJson> => {
             signal.throwIfAborted()
             if (node.type === "Form") platformFormValues(node.props, String(input.value ?? ""))
@@ -1031,6 +1040,7 @@ export class FunctionPanes {
               : { element: input.element, value: input.value }
           }
         })
+        actionSignal.throwIfAborted()
         this.host.assertLive()
       } finally {
         this.active.delete(controller)
@@ -1044,8 +1054,8 @@ export class FunctionPanes {
     }
     // Rendering and closing remain responsive while a callback waits for a queued command.
     // Mutating callbacks stay serial so read/modify/write closures do not lose updates.
-    const result = action.kind === "close" ? perform() : this.actions.then(perform)
-    if (action.kind !== "close") this.actions = result.catch(() => {})
+    const result = action.kind === "close" || query ? perform() : this.actions.then(perform)
+    if (action.kind !== "close" && !query) this.actions = result.catch(() => {})
     this.intents.set(action.intentId, { input, result })
     return result
   }

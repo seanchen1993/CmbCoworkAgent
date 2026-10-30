@@ -191,7 +191,17 @@ it.each(
     throw Error("expected support page")
   expect(JSON.stringify(page).length).toBeLessThan(8000)
   expect(page.content.conditionalCapabilities[0]).toEqual(capability)
-  expect(page.content.authoringConstraints).toEqual(CREATOR_S1_SUPPORT.authoringConstraints)
+  if (cursor === 0) {
+    expect(page.content.authoringConstraints).toEqual(CREATOR_S1_SUPPORT.authoringConstraints)
+  } else {
+    expect(page.content.authoringConstraints).toBeUndefined()
+    expect(page.content.authoringConstraintsDiscovery).toEqual({ section: "support", cursor: 0 })
+    const first = developmentCatalogPage("support", page.content.authoringConstraintsDiscovery!.cursor)
+    if (!("content" in first) || typeof first.content !== "object" || Array.isArray(first.content))
+      throw Error("expected common authoring contracts")
+    expect(first.content.authoringConstraints).toEqual(CREATOR_S1_SUPPORT.authoringConstraints)
+  }
+  expect(JSON.stringify({ ok: true, result: page }).length).toBeLessThan(8000)
 })
 
 afterEach(async () => {

@@ -373,6 +373,15 @@ export const CREATOR_S1_SUPPORT = Object.freeze({
   },
   conditionalCapabilities: CREATOR_CONDITIONAL_CAPABILITIES,
   authoringConstraints: {
+    readOnlyViews: {
+      sourceId: "worktree-changes",
+      preparation: "project-dependencies → dependency_prepare；结束本轮等原生确认。",
+      capability: "platform.list 核实 native.git/inspection@1.0.0；不以应用版本推断能力。",
+      operations: "bind确认目录；list用固定baseCommit；file用comparisonId/path；不猜基准。",
+      surface: "devclaw.surface/v2 + interaction:query；v1保留原动作队列。",
+      boundary: "只读文件、局部UI及原生查询；禁模型、进程、网络、写入及任务控制。",
+      results: "查询失败不等于无变更；partial只代表获准范围，保留未检查提示。"
+    },
     nativeComposition: {
       protocol: "devclaw.native-composition/v1",
       source: "composition/source.json",
@@ -381,6 +390,14 @@ export const CREATOR_S1_SUPPORT = Object.freeze({
       compilation: { tool: "mod_authoring", action: "project_compile" },
       runtime: { provider: "native.project-runtime", discovery: "platform.catalog" },
       stateOwner: "host",
+      initialContext: {
+        field: "modules[].contextArtifactIds",
+        optional: true,
+        values: "unique-subset-of-declared-input-artifactIds",
+        omitted: "all-declared-inputs",
+        affects: "initial-reading-only",
+        preserves: ["required-inputs", "artifact-checks", "input-fingerprints", "invalidation"]
+      },
       stageExecutionModes: {
         default: "normal",
         explicit: ["normal", "workflow"],
@@ -397,6 +414,7 @@ export const CREATOR_S1_SUPPORT = Object.freeze({
       requirements: [
         "仅维护单source及真实Skill/资源；编译生成Host计划/检查/动作锁，不手写成功凭据。",
         "输入须前序真实输出及契约；输出须实检。",
+        "contextArtifactIds只选择本阶段初始阅读输入；不删除其余inputs、校验、知识或追踪关系，也不压缩既有会话历史。",
         "project_actions选已安装检查提供器；编译不授权。",
         "知识读声明文件或native.project-context；选择器仅platform.read/act，材料/目录/公开配置由Host绑定签发。",
         "执行批准/成果批准/提交独立；仅请求平台，禁造完成。",

@@ -68,6 +68,7 @@ it("routes native source edits and dependency reuse before legacy modularization
   const prompt = modAuthoringRuntimePrompt([{ name: "mod_business" }, { name: "mod_authoring" }])!
   expect(prompt.indexOf("先按真实源码选择创作入口")).toBeLessThan(prompt.indexOf("inspect_raw(pluginId)"))
   for (const text of ["composition/source.json", "dependency_prepare", "project-dependencies",
+    "project_from_plugin(pluginId,id,name?)", "不需要用户提供 devclaw.source-set.json", "新草稿没有旧权限",
     "sourcePatch", "add /modules/-", "test 目标模块的 id",
     "不能按插件名称", "不再 inspect_raw", "由项目使用入口填写",
     'project_scaffold(template:"native-modular")', "用户不需要选择内部模板", "当前 JSON Schema 子集要求对象根",

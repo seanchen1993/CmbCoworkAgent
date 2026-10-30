@@ -7030,8 +7030,30 @@ export class FunctionModsManager {
       capabilities: session?.platform.list() ?? [] }
   }
   platformSurfaceList(workspace: string, threadId: string) {
-    return this.platformResident(workspace, threadId)?.platformSurfaces.list() ??
-      { revision: 0, entries: [], errors: ["能力尚未登记；仅打开扩展列表不会启动组件。"] }
+    return this.platformResident(workspace, threadId)?.platformSurfaces.list() ?? {
+      revision: 0,
+      entries: [],
+      errors: [],
+      canPrepare: !this.closed && this.host.enabled(workspace) && this.hasSources(workspace, threadId)
+    }
+  }
+  async platformSurfacePrepare(
+    workspace: string,
+    threadId: string,
+    signal: AbortSignal,
+    assertCurrent: () => void
+  ) {
+    return this.withOperation(workspace, threadId, "platformSurfacePrepare", false, async () => {
+      assertCurrent()
+      signal.throwIfAborted()
+      // Explicit user entry only: compile/register authorized sources, never dispatch session.start.
+      const entry = await this.session(workspace, threadId, true)
+      assertCurrent()
+      signal.throwIfAborted()
+      if (this.platformResident(workspace, threadId) !== entry.session)
+        throw new ModFunctionError("MODS_SCOPE_CHANGED")
+      return entry.session!.platformSurfaces.list()
+    }) as Promise<import("../../../shared/mods/v2/platform-surfaces").PlatformSurfaceCatalog>
   }
   platformBehaviorList(workspace: string, threadId: string) {
     return this.platformResident(workspace, threadId)?.platformBehaviors.list() ??

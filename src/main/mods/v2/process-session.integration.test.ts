@@ -6,6 +6,7 @@ import type { ModJson } from "../../../shared/mods/types"
 import { FunctionSessionActivity } from "./session-activity"
 import { FunctionProcessHost } from "./process-sdk"
 import { FunctionDispatchDeadline } from "./dispatch-deadline"
+import { withPlatformQuery } from "./platform-query-scope"
 
 const sessions: FunctionSession[] = []
 
@@ -101,6 +102,38 @@ async function fixture(body: string, hooks = "", extra: Partial<FunctionSessionH
   return { session, authorize, guest, moduleHost }
 }
 const command = (body: string) => JSON.stringify([process.execPath, "-e", body])
+
+it("denies query module calls against an existing process while retaining normal cleanup", async () => {
+  const actual = FunctionProcessHost.prototype.spawn
+  let closed = 0
+  const spawn = vi.spyOn(FunctionProcessHost.prototype, "spawn").mockImplementation(function (
+    this: FunctionProcessHost, ...args
+  ) {
+    const process = actual.apply(this, args)
+    return { ...process, close: async () => { closed++; await process.close() } }
+  })
+  const { session, guest } = await fixture(`
+    globalThis.retained=$.process.spawn({argv:${command("process.stdout.write('ready');setInterval(()=>process.stdout.write('tick'),40)")}});
+    retained.result.catch(()=>{});await retained.next();return {started:true};`, `
+    on("query",async($,e)=>{
+      try{await(e.close?retained.return():retained.next());return {escaped:true}}
+      catch(error){return {error:String(error)}}
+    });`)
+  const invoke = (close: boolean) => guest.invoke("2", { close }, async () => {
+    throw Error("Unexpected frame SDK call")
+  }, { event: "query", origin: { plugin: "engine", tier: "core" },
+    capabilities: [...SESSION_CAPABILITIES], plugin: { name: "process", root: "/plugin" } })
+  try {
+    expect(await session.run("test", "")).toEqual({ started: true })
+    for (const close of [false, true]) {
+      const value = await withPlatformQuery(new AbortController().signal, () => invoke(close))
+      expect(value).toMatchObject({ value: { error: expect.stringContaining("MODS_QUERY_EFFECT_DENIED") } })
+      expect(closed).toBe(0)
+    }
+    await session.close()
+    expect(closed).toBe(1)
+  } finally { spawn.mockRestore() }
+})
 
 it("keeps sleep inside process middleware and the effect policy without OS approval", async () => {
   const effect = vi.fn<NonNullable<FunctionSessionHost["runEffect"]>>(async (_plugin, method, _input, _signal, run) => {

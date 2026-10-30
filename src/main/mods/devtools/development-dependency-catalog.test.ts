@@ -95,6 +95,47 @@ it("discovers uninstalled public source separately from installed identities and
   expect(overview.discovery).toContain("project-dependencies")
 })
 
+it("discovers a standalone view Mod without inventing a business stage action", async () => {
+  const f = await fixture()
+  await writeFile(
+    join(f.directory, "mods/manifest.json"),
+    JSON.stringify({
+      apiVersion: "cmb.mods/v2",
+      id: "record-validator",
+      claw: {
+        componentsVersion: 1,
+        components: [
+          {
+            id: "viewer",
+            name: "只读查看",
+            kind: "module",
+            entry: "main.ts",
+            dependsOn: [],
+            actionIds: []
+          }
+        ],
+        actions: []
+      }
+    })
+  )
+  const page = developmentDependencyCatalogPage({ mainDirectory: f.mainDirectory })
+  expect(page).toMatchObject({
+    sources: [
+      {
+        sourceId: "record-validator",
+        actions: [],
+        components: [{ id: "viewer", name: "只读查看" }]
+      }
+    ]
+  })
+  expect(
+    readDevelopmentDependencySource({
+      mainDirectory: f.mainDirectory,
+      sourceId: "record-validator"
+    }).files.some((file) => file.path === "mods/main.ts")
+  ).toBe(true)
+})
+
 it("round trips all real source bytes with pinned digest and bounded file pages", async () => {
   const f = await fixture()
   const index = developmentDependencyCatalogPage({
@@ -190,9 +231,12 @@ it("reads an entire pinned source unchanged in one operation and rejects stale o
       expectedDigest: expected.digest
     })
   ).toEqual(expected)
-  expect(readDevelopmentDependencySource({
-    mainDirectory: f.mainDirectory, sourceId: "record-validator"
-  })).toEqual(expected)
+  expect(
+    readDevelopmentDependencySource({
+      mainDirectory: f.mainDirectory,
+      sourceId: "record-validator"
+    })
+  ).toEqual(expected)
   for (const sourceId of ["missing", "../record-validator", "record-validator/mods/main.ts"])
     expect(() =>
       readDevelopmentDependencySource({

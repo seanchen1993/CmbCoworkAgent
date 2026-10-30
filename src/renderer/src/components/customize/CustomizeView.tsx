@@ -130,17 +130,20 @@ const MENU_GROUPS: MenuGroup[] = [
   {
     id: "creator",
     label: "创造者模式",
-    items: [{ tab: "assistant", label: "对话创作", icon: Sparkles }]
+    items: [
+      { tab: "assistant", label: "对话创作", icon: Sparkles },
+      { tab: "mods", label: "灵件", icon: Puzzle }
+    ]
   },
   {
     id: "basic",
     label: "基础功能",
     items: [
-      { tab: "mods", label: "插件", icon: Puzzle },
       { tab: "general", label: "通用", icon: Settings2 },
       { tab: "appearance", label: "外观", icon: Palette },
       { tab: "skills", label: "技能", icon: Sparkles },
       { tab: "connectors", label: "连接工具", icon: Plug },
+      { tab: "plugins", label: "插件", icon: Puzzle },
       { tab: "sandbox", label: "沙盒环境", icon: Shield }
     ]
   },
@@ -314,7 +317,7 @@ export function CustomizeView(): React.JSX.Element {
   useEffect(() => {
     let cancelled = false
     const group = MENU_GROUPS.find((entry) =>
-      entry.items.some((item) => item.tab === (activeTab === "plugins" ? "mods" : activeTab))
+      entry.items.some((item) => item.tab === activeTab)
     )
     queueMicrotask(() => {
       if (group && !cancelled) {
@@ -439,7 +442,7 @@ export function CustomizeView(): React.JSX.Element {
 
   const renderMenuItem = (item: MenuItem): React.JSX.Element => {
     const Icon = item.icon
-    const isActive = activeTab === item.tab || (item.tab === "mods" && activeTab === "plugins")
+    const isActive = activeTab === item.tab
 
     return (
       <button
@@ -658,30 +661,11 @@ export function CustomizeView(): React.JSX.Element {
             ) : activeTab === "connectors" ? (
               <McpPanel />
             ) : activeTab === "plugins" ? (
-              <div className="flex flex-1 min-w-0 min-h-0 flex-col overflow-hidden">
-                <div className="flex shrink-0 items-center gap-3 border-b px-4 py-3">
-                  <button
-                    type="button"
-                    className="text-sm text-muted-foreground hover:text-foreground"
-                    onClick={() => {
-                      setActiveTab("mods")
-                      setModsNavigation((previous) => ({
-                        id: (previous?.id ?? 0) + 1,
-                        scope: JSON.stringify([currentThreadId, currentWorkspacePath]),
-                        section: "installed"
-                      }))
-                    }}
-                  >
-                    返回插件
-                  </button>
-                  <h2 className="text-sm font-medium">导入与发布</h2>
-                </div>
-                <div
-                  className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden sm:flex-row"
-                  data-plugin-source-layout
-                >
-                  <PluginsPanel />
-                </div>
+              <div
+                className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden sm:flex-row"
+                data-plugin-source-layout
+              >
+                <PluginsPanel />
               </div>
             ) : activeTab === "heartbeat" ? (
               <HeartbeatPanel />

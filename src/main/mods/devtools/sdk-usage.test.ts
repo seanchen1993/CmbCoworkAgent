@@ -10,6 +10,157 @@ const scan = (body: string, modelProtocol: "legacy-v1" | "result-v1" = "legacy-v
   })
 
 describe("static SDK compatibility", () => {
+  const scanHelpers = (helper: string, call = "readInputs($, event)", extra = "") =>
+    analyzeFunctionSdk({
+      digest: "captured-helper-source", modelProtocol: "result-v1",
+      authoringEntries: ["mods/main.ts"],
+      authoringSources: {
+        "mods/main.ts": `import { registerEvidence, readInputs } from "./helpers"
+          export function register(on) { registerEvidence(on); ${extra}
+            on("command.run", ($, event) => ${call}) }`,
+        "mods/helpers.ts": `export function registerEvidence(on) {
+          on("session.start", sdk => sdk.ui.log("ready"))
+        }
+        ${helper}`
+      }
+    })
+  it("follows captured relative helpers and registrars without executing source or granting authority", async () => {
+    const report = await scanHelpers(`export async function readInputs(sdk, data) {
+      throw Error("DO NOT EXECUTE")
+      return readFile(sdk, data.path)
+    }
+    const readFile = (sdk, path) => sdk.fs.read(path)`)
+    expect(report.strictCompatible).toBe(true)
+    expect(report.registrationEvents).toEqual(["command.run", "session.start"])
+    expect(report.registrationEventsVerified).toBe(true)
+    expect(report.runtimeVerified).toBe(false)
+    expect(report.usages.map(row => row.method).sort()).toEqual(["fs.read", "ui.log"])
+    expect(report.usages.every(row => row.file === "mods/helpers.ts")).toBe(true)
+  })
+  it("preserves unsupported-method and protocol diagnostics inside resolved helpers", async () => {
+    const report = await scanHelpers(`export function readInputs(sdk) { return sdk.audio.speak("x") }`)
+    expect(report.strictCompatible).toBe(false)
+    expect(report.diagnostics).toEqual(expect.arrayContaining([expect.objectContaining({
+      file: "mods/helpers.ts", code: "MODS_SDK_UNSUPPORTED"
+    })]))
+    const protocol = await scan(`function helper(sdk) {
+      return sdk.model.complete({model:"x",prompt:"x",timeoutMs:10})
+    } on("command.run", sdk => helper(sdk))`)
+    expect(protocol.diagnostics.some(row => row.code === "MODS_SDK_PROTOCOL")).toBe(true)
+  })
+  it.each([
+    'export function readInputs(sdk) { return sdk }',
+    'export function readInputs(sdk) { return {sdk} }',
+    'export function readInputs(sdk) { external(sdk) }',
+    'export function readInputs(sdk) { sdk = {}; sdk.ui.log("x") }',
+    'export function readInputs(sdk = fallback) { sdk.ui.log("x") }',
+    'export function readInputs(...sdk) { sdk[0].ui.log("x") }',
+    'export function readInputs(this: unknown, sdk) { sdk.audio.speak("x") }',
+    'export function readInputs(sdk) { return () => sdk.ui.log("x") }',
+    'export function readInputs(sdk) { return {call: () => sdk.ui.log("x")} }',
+    'export function readInputs(sdk) { external(() => sdk.ui.log("x")) }',
+    'export function readInputs(sdk) { return arguments[0].ui.log("x") }',
+    'export let readInputs = sdk => sdk.ui.log("x")',
+    'export function readInputs(sdk) {} readInputs = sdk => sdk.ui.log("x")',
+    'export function readInputs(sdk) { return readInputs(sdk) }',
+    'export function readInputs(sdk) { return other(sdk) } function other(sdk) { return readInputs(sdk) }',
+    'export function readInputs(sdk) { sdk.ui.log("x") } export function readInputs(sdk) {}'
+  ])("rejects unsafe helper parameter flow: %s", async helper => {
+    const report = await scanHelpers(helper)
+    expect(report.strictCompatible).toBe(false)
+    expect(report.diagnostics.some(row => row.code === "MODS_SDK_UNVERIFIED")).toBe(true)
+  })
+  it.each(["readInputs?.($)", "({readInputs}).readInputs($)", "readInputs(...[$])",
+    "readInputs($.ui.log)", "readInputs($[event.key])", "external($)"])(
+    "does not resolve dynamic or method transfers: %s", async call => {
+      const report = await scanHelpers('export function readInputs(sdk) { sdk.ui.log("x") }', call)
+      expect(report.strictCompatible).toBe(false)
+    })
+  it("rejects conflicting helper identities and unresolved third-party imports", async () => {
+    const conflict = await scanHelpers('export function readInputs(sdk) {}', "readInputs($)",
+      "readInputs(on);")
+    expect(conflict.strictCompatible).toBe(false)
+    const external = await analyzeFunctionSdk({ digest: "x", modelProtocol: "result-v1",
+      authoringEntries: ["main.ts"], authoringSources: {
+        "main.ts": 'import { helper } from "vendor"; export function register(on) { on("command.run", sdk => helper(sdk)) }',
+        "vendor.ts": 'export function helper(sdk) { sdk.ui.log("x") }'
+      } })
+    expect(external.strictCompatible).toBe(false)
+  })
+  it("does not launder a captured SDK by also calling the closure as a direct helper", async () => {
+    const report = await scan(`on("command.run", sdk => {
+      function helper(unused) { return sdk.ui.log("x") }
+      helper(sdk)
+      return helper
+    })`)
+    expect(report.strictCompatible).toBe(false)
+    expect(report.diagnostics.some(row => row.message.includes("外层闭包"))).toBe(true)
+  })
+  it("checks local nonescaping direct closures without requiring redundant SDK parameters", async () => {
+    const report = await scan(`on("command.run", sdk => {
+      const redraw = () => sdk.ui.log("ready")
+      function read() { return sdk.fs.read("input.json") }
+      redraw(); return read()
+    })`)
+    expect(report.diagnostics).toEqual([])
+    expect(report.usages.map(row => row.method).sort()).toEqual(["fs.read", "ui.log"])
+  })
+  it.each([
+    'return helper', 'return {helper}', 'external(helper)', 'const alias = helper; alias()',
+    'helper?.()', 'helper.call(null)', 'const box = [helper]',
+    'return () => helper()', 'function nested() { helper() } return nested'
+  ])("does not trust a local SDK closure with an escaping or dynamic reference: %s", async tail => {
+    const report = await scan(`on("command.run", sdk => {
+      const helper = () => sdk.ui.log("x")
+      helper(); ${tail}
+    })`)
+    expect(report.strictCompatible).toBe(false)
+  })
+  it("checks methods and cycles in local closures", async () => {
+    expect((await scan(`on("command.run", sdk => {
+      const helper = () => sdk.audio.speak("x"); helper()
+    })`)).strictCompatible).toBe(false)
+    expect((await scan(`on("command.run", sdk => {
+      function helper() { sdk.ui.log("x"); helper() }; helper()
+    })`)).strictCompatible).toBe(false)
+  })
+  it("preserves native ui.render lexical callbacks with static calls and immutable aliases", async () => {
+    const report = await scan(`on("ui.render", sdk => {
+      const alias = sdk; const {ui} = alias
+      const load = () => run(async () => { await alias.platform.list(); ui.log("ready") })
+      return {onPress: () => load()}
+    })`)
+    expect(report.diagnostics).toEqual([])
+    expect(report.usages.map(row => row.method).sort()).toEqual(["platform.list", "ui.log"])
+    expect(report.runtimeVerified).toBe(false)
+  })
+  it.each([
+    'return {onPress: () => sdk}', 'return {onPress: () => ({sdk})}',
+    'return {onPress: () => sdk.ui}', 'return {onPress: () => sdk.ui.log}',
+    'return {onPress: () => sdk[event.method]()}',
+    'return {onPress: () => sdk.audio.speak("x")}',
+    'return {onPress: () => external(sdk)}',
+    'let alias = sdk; return {onPress: () => alias.ui.log("x")}',
+    'function helper(value) { return () => value.ui.log("x") }; return helper(sdk)'
+  ])("preserves UI escape, dynamic and helper-parameter restrictions: %s", async body => {
+    expect((await scan(`on("ui.render", (sdk, event) => { ${body} })`)).strictCompatible).toBe(false)
+  })
+  it("does not give ordinary hooks the native UI lexical compatibility exception", async () => {
+    expect((await scan(`on("command.run", sdk => external(() => sdk.ui.log("x")))`))
+      .strictCompatible).toBe(false)
+    expect((await scan(`function handle(sdk) { return () => sdk.ui.log("x") }
+      on("ui.render", handle); on("command.run", handle)`)).strictCompatible).toBe(false)
+    expect((await scan(`function handle(sdk) { return () => sdk.ui.log("x") }
+      on("ui.render", handle); on("command.run", sdk => handle(sdk))`)).strictCompatible).toBe(false)
+  })
+  it("bounds the captured helper call graph", async () => {
+    const calls = Array.from({ length: 257 }, (_, index) => `helper${index}($);`).join("\n")
+    const helpers = Array.from({ length: 257 }, (_, index) =>
+      `function helper${index}(sdk) { sdk.ui.log("x") }`).join("\n")
+    const report = await scan(`${helpers} on("command.run", $ => { ${calls} })`)
+    expect(report.strictCompatible).toBe(false)
+    expect(report.truncated).toBe(true)
+  })
   it.each(["检查文本", "text review", "", "a".repeat(65)])(
     "rejects an invalid literal command name before native startup: %s", async (name) => {
       const report = await scan(`on("session.start", async ($, event, next) => {

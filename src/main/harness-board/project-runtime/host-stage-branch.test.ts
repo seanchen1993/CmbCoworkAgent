@@ -18,7 +18,8 @@ afterEach(() => cleanup.splice(0).forEach((close) => close()))
 
 async function fixture(
   overrides: Partial<HostProjectServiceDependencies> = {},
-  finishSource = true
+  finishSource = true,
+  preservePrefix: boolean | "revise-prefix" = false
 ) {
   const root = mkdtempSync(join(tmpdir(), "host-stage-branch-"))
   const workspace = join(root, "original")
@@ -27,6 +28,16 @@ async function fixture(
   const candidateRoot = join(root, "candidate")
   for (const directory of [workspace, branchWorkspace, sourceRoot]) mkdirSync(directory)
   const manifest = hostProjectFixture(workspace).manifest
+  if (preservePrefix) {
+    manifest.artifacts.push({ id: "reviewed", path: "reviewed.md", required: true })
+    manifest.checks.push({ id: "reviewed-exists", artifactId: "reviewed", kind: "file-exists", sideEffect: "read" })
+    if (preservePrefix === true) {
+      manifest.stages[1].artifactIds = ["reviewed"]
+      manifest.stages[1].checkIds = ["reviewed-exists"]
+    }
+    manifest.stages.push({ ...manifest.stages[1], id: "finish", title: "finish", skill: "skills/finish/SKILL.md",
+      artifactIds: ["reviewed"], checkIds: ["reviewed-exists"] })
+  }
   writeFileSync(join(sourceRoot, "plugin.json"), JSON.stringify({ name: "docs", version: "1.0.0" }))
   writeFileSync(join(sourceRoot, "devclaw.project-runtime.json"), JSON.stringify(manifest))
   for (const stage of manifest.stages) {
@@ -49,7 +60,9 @@ async function fixture(
   const executeSkill = vi.fn<HostProjectServiceDependencies["executeSkill"]>(async (context) => {
     context.bindThread(`native-${context.operation.operationId}`)
     writeFileSync(
-      join(context.project.workspace, "document.md"),
+      join(context.project.workspace, preservePrefix === true && context.operation.stageId !== "draft" ||
+        context.operation.stageId === "finish"
+        ? "reviewed.md" : "document.md"),
       context.operation.stageId === "draft" ? "Actual upstream output" : "Actual revised output"
     )
     const failed = !finishSource && context.operation.stageId === "review"
@@ -241,6 +254,63 @@ describe("native host stage branch admission", () => {
     expect(setup.service.get(setup.source.projectId)).toEqual(original)
     expect(readFileSync(join(setup.workspace, "document.md"), "utf8")).toBe("Actual revised output")
     expect(setup.service.operations(branch.projectId)).toHaveLength(1)
+  })
+
+  it("persists admitted prefix bytes across restart without fabricating upstream operations", async () => {
+    const setup = await fixture({}, true, true)
+    const branch = await setup.service.createBranchAtStage(setup.input)
+    expect(setup.store.branchInputs(branch.projectId)?.inputs.map(item => item.path)).toEqual(["document.md"])
+    const reopened = new HostProjectStore(join(setup.root, "projects.sqlite"))
+    try {
+      const service = new HostProjectService(reopened,
+        new HostPackageSnapshots(join(setup.root, "packages")), setup.dependencies)
+      expect(service.operations(branch.projectId)).toEqual([])
+      expect(service.prepare({ projectId: branch.projectId, expectedVersion: 1,
+        idempotencyKey: "reopened-prefix" }).status).toBe("prepared")
+      expect(service.operations(branch.projectId)).toHaveLength(1)
+    } finally { reopened.close() }
+  })
+
+  it("rejects changed admitted prefix bytes and legacy branches without baseline evidence", async () => {
+    const setup = await fixture({}, true, true)
+    const branch = await setup.service.createBranchAtStage(setup.input)
+    writeFileSync(join(setup.branchWorkspace, "document.md"), "changed after admission")
+    const prepare = () => setup.service.prepare({ projectId: branch.projectId,
+      expectedVersion: 1, idempotencyKey: "tampered-prefix" })
+    expect(prepare).toThrow("EVIDENCE_STALE")
+    writeFileSync(join(setup.branchWorkspace, "document.md"), "Actual upstream output")
+    const db = new DatabaseSync(join(setup.root, "projects.sqlite"))
+    try { db.prepare("DELETE FROM host_branch_inputs WHERE project_id=?").run(branch.projectId) }
+    finally { db.close() }
+    expect(prepare).toThrow("EVIDENCE_STALE")
+    expect(setup.service.operations(branch.projectId)).toEqual([])
+  })
+
+  it("does not persist a branch baseline changed during native admission preparation", async () => {
+    const setup = await fixture({}, true, true)
+    setup.dependencies.prepareInputIdentity = async (project) => {
+      if (project.projectId === setup.input.projectId)
+        writeFileSync(join(setup.branchWorkspace, "document.md"), "changed during creation")
+    }
+    await expect(setup.service.createBranchAtStage(setup.input)).rejects.toThrow("BRANCH_INPUT_CHANGED")
+    expect(setup.service.get(setup.input.projectId)).toBeUndefined()
+    expect(setup.store.branchInputs(setup.input.projectId)).toBeUndefined()
+  })
+
+  it.each([false, true])("prefers the branch's accepted revision over its admitted prefix (tampered=%s)", async tampered => {
+    const setup = await fixture({}, true, "revise-prefix")
+    const branch = await setup.service.createBranchAtStage(setup.input)
+    const operation = setup.service.prepare({ projectId: branch.projectId,
+      expectedVersion: 1, idempotencyKey: "branch-revision" })
+    setup.service.approve(operation.operationId, { expectedVersion: 1,
+      inputFingerprint: operation.inputFingerprint, decision: "approved", actorId: "user" })
+    expect((await setup.service.start(operation.operationId)).status).toBe("succeeded")
+    setup.service.transition(operation.operationId)
+    if (tampered) writeFileSync(join(setup.branchWorkspace, "document.md"), "Actual upstream output")
+    const prepare = () => setup.service.prepare({ projectId: branch.projectId,
+      expectedVersion: 2, idempotencyKey: "after-branch-revision" })
+    if (tampered) expect(prepare).toThrow("EVIDENCE_STALE")
+    else expect(prepare().status).toBe("prepared")
   })
 
   it.each(["upstream", "shared-hook", "new-file", "contract"])(

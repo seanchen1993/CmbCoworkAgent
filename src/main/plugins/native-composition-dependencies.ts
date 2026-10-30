@@ -1,11 +1,17 @@
 import type { ClawActionDescriptor } from "../../shared/mods/claw-actions"
-import { clawActionObject } from "../../shared/mods/claw-actions"
+import { clawActionObject, parseClawActionIdentity } from "../../shared/mods/claw-actions"
 import type { ModObject } from "../../shared/mods/types"
 import { isModObject } from "../../shared/mods/v2/contracts"
-import { PROJECT_ARTIFACT_REFERENCE_PROTOCOL } from "../../shared/project-runtime/artifact-reference"
+import {
+  PROJECT_ARTIFACT_REFERENCE_PROTOCOL,
+  PROJECT_REQUEST_PROVENANCE_PROTOCOL,
+  PROJECT_REQUEST_PROVENANCE_SOURCE
+} from "../../shared/project-runtime/artifact-reference"
+import { projectActionTarget } from "../../shared/project-runtime/action-bindings"
 import { createProjectActionBinding } from "../harness-board/project-runtime/action-input"
-import { validateRegisteredToolInput } from "../mods/v2/tool-schema"
-import type { NativeComposition } from "./native-composition"
+import { validateRegisteredToolInput, validateToolSchema } from "../mods/v2/tool-schema"
+import { runtimeDigest } from "../harness-board/project-runtime/safe-files"
+import type { NativeComposition, NativeCompositionFile } from "./native-composition"
 
 export interface NativeCompositionActionRequirement {
   plugin: string
@@ -21,6 +27,87 @@ export interface NativeCompositionActionRequirement {
   inputSchema?: ModObject
   config: ModObject
   bindProviderIdentity?: string
+  bindCheckProviderIdentities?: Record<string, { checkId: string; actionId: string }>
+  bindResourceDigests?: Record<string, string>
+  requestProvenance?: typeof PROJECT_REQUEST_PROVENANCE_SOURCE
+}
+
+export interface NativeCompositionBindingContext {
+  requirements: readonly NativeCompositionActionRequirement[]
+  catalog: readonly ClawActionDescriptor[]
+  resources: readonly string[]
+  files: readonly NativeCompositionFile[]
+}
+
+/** Contract snapshots support deterministic source replay only; they are never a live catalog. */
+export function nativeCompositionProviderContract(action: ClawActionDescriptor): ClawActionDescriptor {
+  const identity = parseClawActionIdentity({ pluginId: action.pluginId, plugin: action.plugin,
+    digest: action.digest, actionId: action.actionId })
+  validateToolSchema(action.inputSchema)
+  if (action.configSchema) validateToolSchema(action.configSchema)
+  if (action.outputSchema) validateToolSchema(action.outputSchema)
+  return { ...identity, name: identity.actionId, ...projectActionTarget(action),
+    inputSchema: clawActionObject(action.inputSchema),
+    ...(action.configSchema ? { configSchema: clawActionObject(action.configSchema) } : {}),
+    ...(action.outputSchema ? { outputSchema: clawActionObject(action.outputSchema) } : {}) }
+}
+
+export function readNativeCompositionProviderContracts(value: unknown): ClawActionDescriptor[] {
+  if (value === undefined) return []
+  if (!Array.isArray(value) || value.length > 256)
+    throw Error("NATIVE_COMPOSITION_RETAINED_CONTRACT_INVALID")
+  return value.map((item) => {
+    const raw = clawActionObject(item)
+    if (Object.keys(raw).some((key) => !["pluginId", "plugin", "digest", "actionId", "name",
+      "platform", "command", "inputSchema", "configSchema", "outputSchema"].includes(key)) ||
+      raw.name !== raw.actionId)
+      throw Error("NATIVE_COMPOSITION_RETAINED_CONTRACT_INVALID")
+    return nativeCompositionProviderContract(raw as unknown as ClawActionDescriptor)
+  })
+}
+
+/** Resolve only catalog identities and declared bytes, never another check's result/config. */
+export function nativeCompositionBoundConfig(
+  requirement: NativeCompositionActionRequirement,
+  action: ClawActionDescriptor,
+  context?: NativeCompositionBindingContext
+): ModObject {
+  const config = clawActionObject(requirement.config)
+  const assign = (key: string, value: ModObject | string) => {
+    if (Object.hasOwn(config, key) || ["constructor", "prototype", "__proto__"].includes(key))
+      throw Error("NATIVE_COMPOSITION_PROVIDER_IDENTITY_CONFLICT")
+    config[key] = value
+  }
+  if (requirement.bindProviderIdentity)
+    assign(requirement.bindProviderIdentity, {
+      pluginId: action.pluginId, plugin: action.plugin, digest: action.digest, actionId: action.actionId
+    })
+  for (const [key, binding] of Object.entries(requirement.bindCheckProviderIdentities ?? {})) {
+    if (!context) throw Error("NATIVE_COMPOSITION_BINDING_CONTEXT_REQUIRED")
+    const checks = context.requirements.filter((item) => item.usedBy === binding.checkId &&
+      item.role === "artifact-check")
+    if (checks.length !== 1) throw Error("NATIVE_COMPOSITION_BOUND_CHECK_INVALID")
+    const matches = context.catalog.filter((item) => item.plugin === checks[0].plugin &&
+      item.actionId === checks[0].actionId)
+    if (matches.length !== 1) throw Error("NATIVE_COMPOSITION_BOUND_CHECK_UNRESOLVED")
+    const owner = matches[0]
+    const siblings = context.catalog.filter((item) => item.pluginId === owner.pluginId &&
+      item.plugin === owner.plugin && item.digest === owner.digest && item.actionId === binding.actionId)
+    if (siblings.length !== 1) throw Error("NATIVE_COMPOSITION_BOUND_ACTION_UNRESOLVED")
+    const sibling = nativeCompositionProviderContract(siblings[0])
+    assign(key, { pluginId: sibling.pluginId, plugin: sibling.plugin,
+      digest: sibling.digest, actionId: sibling.actionId })
+  }
+  for (const [key, path] of Object.entries(requirement.bindResourceDigests ?? {})) {
+    if (!context) throw Error("NATIVE_COMPOSITION_BINDING_CONTEXT_REQUIRED")
+    const files = context.files.filter((file) => file.path === path)
+    if (!context.resources.includes(path) || files.length !== 1 || files[0].bytes.length > 1024 * 1024)
+      throw Error("NATIVE_COMPOSITION_BOUND_RESOURCE_INVALID")
+    assign(key, runtimeDigest(files[0].bytes))
+  }
+  if (requirement.requestProvenance && Object.hasOwn(config, "requestProvenance"))
+    throw Error("NATIVE_COMPOSITION_REQUEST_PROVENANCE_CONFLICT")
+  return clawActionObject(config)
 }
 
 export interface NativeCompositionActionIssue {
@@ -77,6 +164,11 @@ export function nativeCompositionActionRequirements(source: NativeComposition) {
           ? { inputSchema: schemas.length === 1 ? schemas[0] : { allOf: schemas } }
           : {}),
         config: clawActionObject(check.config ?? {}),
+        ...(check.bindCheckProviderIdentities ? {
+          bindCheckProviderIdentities: structuredClone(check.bindCheckProviderIdentities)
+        } : {}),
+        ...(check.bindResourceDigests ? { bindResourceDigests: { ...check.bindResourceDigests } } : {}),
+        ...(check.requestProvenance ? { requestProvenance: check.requestProvenance } : {}),
         ...(check.bindProviderIdentity ? { bindProviderIdentity: check.bindProviderIdentity } : {})
       })
     }
@@ -104,7 +196,8 @@ function suppliedSchema(requirement: NativeCompositionActionRequirement): ModObj
         "workspaceIdentity",
         "current",
         "sources",
-        ...(requirement.configurationKeys ? ["configuration"] : [])
+        ...(requirement.configurationKeys ? ["configuration"] : []),
+        ...(requirement.requestProvenance ? ["requestProvenance"] : [])
       ],
       properties: {
         protocol: { type: "string", const: PROJECT_ARTIFACT_REFERENCE_PROTOCOL },
@@ -115,6 +208,16 @@ function suppliedSchema(requirement: NativeCompositionActionRequirement): ModObj
         workspaceIdentity: { type: "string" },
         current: { type: "object" },
         sources: { type: "array" },
+        ...(requirement.requestProvenance ? {
+          requestProvenance: {
+            type: "object", additionalProperties: false,
+            required: ["protocol", "projectId", "bytes", "sha256"],
+            properties: {
+              protocol: { type: "string", const: PROJECT_REQUEST_PROVENANCE_PROTOCOL },
+              projectId: { type: "string" }, bytes: { type: "integer" }, sha256: { type: "string" }
+            }
+          }
+        } : {}),
         ...(requirement.configurationKeys ? {
           configuration: { type: "object", required: requirement.configurationKeys }
         } : {})
@@ -198,7 +301,8 @@ function inputIssues(
 
 export function evaluateNativeCompositionAction(
   requirement: NativeCompositionActionRequirement,
-  action: ClawActionDescriptor
+  action: ClawActionDescriptor,
+  context?: NativeCompositionBindingContext
 ) {
   const issues: NativeCompositionActionIssue[] = []
   if (requirement.format === "artifact-reference-v1" && !action.platform)
@@ -206,18 +310,8 @@ export function evaluateNativeCompositionAction(
       code: "ARTIFACT_REFERENCE_PLATFORM_REQUIRED",
       detail: "artifact-reference-v1 is supplied only to a public platform action, not a command."
     })
-  const config = clawActionObject(requirement.config)
-  if (requirement.bindProviderIdentity) {
-    if (Object.hasOwn(config, requirement.bindProviderIdentity))
-      throw Error("NATIVE_COMPOSITION_PROVIDER_IDENTITY_CONFLICT")
-    config[requirement.bindProviderIdentity] = {
-      pluginId: action.pluginId,
-      plugin: action.plugin,
-      digest: action.digest,
-      actionId: action.actionId
-    }
-  }
   try {
+    const config = nativeCompositionBoundConfig(requirement, action, context)
     // The production validator checks provider schemas/config; mapped input remains a runtime check.
     createProjectActionBinding(
       requirement.usedBy,
@@ -257,10 +351,13 @@ export function evaluateNativeCompositionAction(
 
 export function assertNativeCompositionDependencies(
   source: NativeComposition,
-  catalog: readonly ClawActionDescriptor[]
+  catalog: readonly ClawActionDescriptor[],
+  files: readonly NativeCompositionFile[] = []
 ) {
   const dependencies: NativeCompositionDependencyDiagnostic[] = []
-  for (const requirement of nativeCompositionActionRequirements(source)) {
+  const requirements = nativeCompositionActionRequirements(source)
+  const context = { requirements, catalog, resources: source.resources, files }
+  for (const requirement of requirements) {
     const matches = catalog.filter(
       (action) => action.plugin === requirement.plugin && action.actionId === requirement.actionId
     )
@@ -274,7 +371,7 @@ export function assertNativeCompositionDependencies(
           : "project_actions(id,localActionId=usedBy) 检查真实动作及契约；catalog(project-dependencies) 读取未安装依赖源码。用 save/check/request_reuse 准备依赖，结束本轮等原生安装/授权确认，再重读 project_actions 并修正 source provider 后 compile。缺失不能区分未安装和未授权，禁止猜身份或自动授权。"
       })
     else {
-      const evaluation = evaluateNativeCompositionAction(requirement, matches[0])
+      const evaluation = evaluateNativeCompositionAction(requirement, matches[0], context)
       if (evaluation.status === "incompatible")
         dependencies.push({
           ...requirement,

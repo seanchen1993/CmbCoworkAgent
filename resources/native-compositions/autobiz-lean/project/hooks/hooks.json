@@ -1,0 +1,15 @@
+{
+  "PreToolUse": [
+    {
+      "matcher": "^(?:write_file|edit_file|apply_patch|Write|Edit)$",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "python -I -B -X utf8 hooks/check-secrets.py",
+          "timeout": 15,
+          "persistAfterInterrupt": true
+        }
+      ]
+    }
+  ]
+}

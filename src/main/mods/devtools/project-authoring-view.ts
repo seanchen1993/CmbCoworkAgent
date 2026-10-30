@@ -82,6 +82,10 @@ export function projectAuthoringReadView(
             } satisfies FunctionUserConfig
           },
           constants: "check.config is package-authored action configuration, not saved userConfig.",
+          trustedBindings:
+            "bindCheckProviderIdentities maps config keys to {checkId,actionId}: the compiler binds an exported action from that check's same installed provider and source digest. bindResourceDigests maps config keys to declared resource paths and binds their actual byte digests. Neither accepts model-supplied identities or hashes; generated keys cannot override config.",
+          requestProvenance:
+            "artifact-reference-v1 checks may opt into requestProvenance: project-goal/v1. Host adds input.requestProvenance with protocol devclaw.project-goal/v1, projectId, UTF-8 bytes and sha256 of the complete original project goal. Compare the original request text in the actual artifact against this identity. It does not prove extraction completeness. When every action check opts in, the check Flow uses a short validation task; mixed and undeclared checks retain their original task and limits.",
           checkedValues:
             "An action check may select configurationKeys from declared public userConfig. Host supplies their actual resolved values in input.configuration and includes them in input freshness. Sensitive, file and directory fields cannot be selected.",
           execution:

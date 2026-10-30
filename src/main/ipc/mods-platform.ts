@@ -17,6 +17,12 @@ interface Scope {
   assertCurrent(): void
 }
 interface Controller {
+  platformSurfacePrepare?(
+    workspace: string,
+    threadId: string,
+    signal: AbortSignal,
+    assertCurrent: () => void
+  ): Promise<PlatformSurfaceCatalog>
   platformSurfaceList(workspace: string, threadId: string): PlatformSurfaceCatalog
   platformSurfaceRead(
     workspace: string,
@@ -154,6 +160,15 @@ export function registerPlatformHandlers(
       scope = capture(event, input, false)
     return controller.platformSurfaceList(scope.workspace, scope.threadId)
   })
+  ipc.handle("mods:platform-surface-prepare", (event, value: unknown) => {
+    const input = record(value, ["threadId"]),
+      scope = capture(event, input, true)
+    if (!controller.platformSurfacePrepare)
+      throw new ModFunctionError("MODS_PLATFORM_CAPABILITY_UNKNOWN")
+    return action(event, scope, false, (signal, guard) =>
+      controller.platformSurfacePrepare!(scope.workspace, scope.threadId, signal, guard)
+    )
+  })
   ipc.handle("mods:platform-surface-read", async (event, value: unknown) => {
     const input = record(value, ["threadId", "address"]),
       scope = capture(event, input, false)
@@ -188,7 +203,10 @@ export function registerPlatformHandlers(
     if (!isModObject(input.action) || encodeModJson(input.action).length > 256 * 1024)
       return invalid()
     const uiAction = parseModJson(encodeModJson(input.action)) as unknown as FunctionUiAction
-    return action(event, scope, true, (signal, guard) =>
+    const catalog = controller.platformSurfaceList(scope.workspace, scope.threadId)
+    const entry = catalog.entries.find((item) => item.key === target.key)
+    const query = catalog.revision === target.revision && entry?.interaction === "query"
+    return action(event, scope, !query, (signal, guard) =>
       controller.platformSurfaceAct(
         scope.workspace,
         scope.threadId,

@@ -1,0 +1,73 @@
+{
+  "apiVersion": "cmb.mods/v2",
+  "id": "autobiz-lean-knowledge",
+  "claw": {
+    "componentsVersion": 1,
+    "components": [
+      {
+        "id": "main",
+        "name": "AutoBiz组织知识",
+        "kind": "module",
+        "entry": "main.ts",
+        "dependsOn": [],
+        "actionIds": [
+          "context"
+        ]
+      }
+    ],
+    "actions": [
+      {
+        "id": "context",
+        "name": "读取本阶段所选组织知识",
+        "platform": {
+          "id": "knowledge",
+          "version": "1.0.0",
+          "action": "context"
+        },
+        "inputSchema": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {}
+        },
+        "outputSchema": {
+          "type": "object"
+        },
+        "configSchema": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "stageTags"
+          ],
+          "properties": {
+            "stageTags": {
+              "type": "object",
+              "minProperties": 1,
+              "maxProperties": 64,
+              "additionalProperties": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 32,
+                "uniqueItems": true,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 64
+                }
+              }
+            },
+            "knowledgeRoots": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 32,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "maxLength": 256
+              }
+            }
+          }
+        }
+      }
+    ]
+  }
+}

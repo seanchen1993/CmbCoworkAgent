@@ -9,6 +9,9 @@ import {
   PROJECT_ARTIFACT_REFERENCE_MAX_FILES,
   PROJECT_ARTIFACT_REFERENCE_PROTOCOL,
   PROJECT_ARTIFACT_REFERENCE_TOTAL_BYTES,
+  PROJECT_REQUEST_PROVENANCE_MAX_BYTES,
+  PROJECT_REQUEST_PROVENANCE_PROTOCOL,
+  PROJECT_REQUEST_PROVENANCE_SOURCE,
   type ProjectArtifactReference,
   type ProjectArtifactReferenceInput
 } from "../../../shared/project-runtime/artifact-reference"
@@ -46,7 +49,8 @@ export function captureProjectArtifactReference(
   project: HostProjectState,
   lock: ProjectActionLock,
   currentId: string,
-  maxBytes: number
+  maxBytes: number,
+  requestProvenance?: typeof PROJECT_REQUEST_PROVENANCE_SOURCE
 ): { input: ModObject; files: Array<[string, string]>; bytes: number } {
   const stage = project.manifest.stages[project.stageIndex]
   if (!stage?.artifactIds.includes(currentId)) throw Error("PROJECT_ACTION_CHECK_INPUT_INVALID")
@@ -98,5 +102,17 @@ export function captureProjectArtifactReference(
   }
   if (Buffer.byteLength(JSON.stringify(reference)) > PROJECT_ARTIFACT_REFERENCE_INPUT_BYTES)
     throw Error("PROJECT_ARTIFACT_REFERENCE_LIMIT")
+  if (requestProvenance !== undefined) {
+    if (requestProvenance !== PROJECT_REQUEST_PROVENANCE_SOURCE ||
+      typeof project.goal !== "string" || !project.goal.trim() || project.goal.length > 8000 ||
+      Buffer.byteLength(project.goal, "utf8") > PROJECT_REQUEST_PROVENANCE_MAX_BYTES)
+      throw Error("PROJECT_REQUEST_PROVENANCE_INVALID")
+    reference.requestProvenance = {
+      protocol: PROJECT_REQUEST_PROVENANCE_PROTOCOL,
+      projectId: project.projectId,
+      bytes: Buffer.byteLength(project.goal, "utf8"),
+      sha256: runtimeDigest(Buffer.from(project.goal, "utf8"))
+    }
+  }
   return { input: clawActionObject(reference), files, bytes }
 }

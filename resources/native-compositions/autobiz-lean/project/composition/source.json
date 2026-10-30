@@ -1,0 +1,421 @@
+{
+  "apiVersion": "devclaw.native-composition/v1",
+  "plugin": {
+    "id": "autobiz-lean",
+    "version": "1.0.0",
+    "title": "AutoBiz精简业务流程",
+    "description": "固定需求基线与五步原生业务流程：需求基线、验收定义、方案、真实代码验证合并、交付准备归档。"
+  },
+  "resources": [
+    "knowledge/method.md",
+    "contracts/baseline.md",
+    "contracts/definition.md",
+    "contracts/solution.md",
+    "contracts/execution-provider.md",
+    "tools/design-lock.py",
+    "tools/solution-pipeline.py",
+    "tools/archive-delivery.py",
+    "workflows/lean-code.workflow.js",
+    "agents/native-implementer.md",
+    "agents/native-reviewer.md",
+    "agents/native-test-author.md",
+    "devclaw.capabilities.json",
+    "hooks/hooks.json",
+    "hooks/check-secrets.py",
+    "hooks/secret_rules.py",
+    "tests/project-contract.json"
+  ],
+  "environment": [],
+  "modules": [
+    {
+      "id": "baseline",
+      "version": "1.0.0",
+      "title": "确认需求基线",
+      "skill": "modules/baseline/SKILL.md",
+      "inputs": [],
+      "contextArtifactIds": [],
+      "outputs": [
+        {
+          "id": "baseline",
+          "path": "RequestBaseline.json",
+          "contract": "autobiz.lean.baseline/v1"
+        }
+      ],
+      "checks": [
+        {
+          "id": "baseline.business",
+          "kind": "action",
+          "artifactId": "baseline",
+          "provider": {
+            "plugin": "autobiz-lean-rules",
+            "actionId": "baseline.verify"
+          },
+          "format": "artifact-reference-v1",
+          "maxBytes": 131072,
+          "config": {
+            "artifactRoles": {
+              "baseline": "baseline"
+            }
+          },
+          "requestProvenance": "project-goal/v1"
+        }
+      ],
+      "approval": "none",
+      "resultApproval": "human"
+    },
+    {
+      "id": "definition",
+      "version": "1.0.0",
+      "title": "需求与验收定义",
+      "skill": "modules/definition/SKILL.md",
+      "inputs": [
+        {
+          "artifactId": "baseline",
+          "contract": "autobiz.lean.baseline/v1"
+        }
+      ],
+      "contextArtifactIds": [
+        "baseline"
+      ],
+      "outputs": [
+        {
+          "id": "definition",
+          "path": "Definition.json",
+          "contract": "autobiz.lean.definition/v1"
+        }
+      ],
+      "checks": [
+        {
+          "id": "definition.business",
+          "kind": "action",
+          "artifactId": "definition",
+          "provider": {
+            "plugin": "autobiz-lean-rules",
+            "actionId": "definition.verify"
+          },
+          "format": "artifact-reference-v1",
+          "maxBytes": 131072,
+          "config": {
+            "artifactRoles": {
+              "baseline": "baseline",
+              "definition": "definition"
+            }
+          },
+          "requestProvenance": "project-goal/v1"
+        }
+      ],
+      "approval": "none",
+      "resultApproval": "none"
+    },
+    {
+      "id": "solution",
+      "version": "1.0.0",
+      "title": "设计与实施方案",
+      "skill": "modules/solution/SKILL.md",
+      "inputs": [
+        {
+          "artifactId": "baseline",
+          "contract": "autobiz.lean.baseline/v1"
+        },
+        {
+          "artifactId": "definition",
+          "contract": "autobiz.lean.definition/v1"
+        }
+      ],
+      "contextArtifactIds": [
+        "definition"
+      ],
+      "outputs": [
+        {
+          "id": "solution",
+          "path": "Solution.json",
+          "contract": "autobiz.lean.solution/v1"
+        }
+      ],
+      "checks": [
+        {
+          "id": "solution.business",
+          "kind": "action",
+          "artifactId": "solution",
+          "provider": {
+            "plugin": "autobiz-lean-rules",
+            "actionId": "solution.verify"
+          },
+          "format": "artifact-reference-v1",
+          "maxBytes": 131072,
+          "config": {
+            "artifactRoles": {
+              "baseline": "baseline",
+              "definition": "definition",
+              "solution": "solution"
+            }
+          },
+          "requestProvenance": "project-goal/v1"
+        }
+      ],
+      "approval": "none",
+      "resultApproval": "human"
+    },
+    {
+      "id": "code",
+      "version": "1.0.0",
+      "title": "代码验证与合并",
+      "skill": "modules/code/SKILL.md",
+      "inputs": [
+        {
+          "artifactId": "baseline",
+          "contract": "autobiz.lean.baseline/v1"
+        },
+        {
+          "artifactId": "definition",
+          "contract": "autobiz.lean.definition/v1"
+        },
+        {
+          "artifactId": "solution",
+          "contract": "autobiz.lean.solution/v1"
+        }
+      ],
+      "contextArtifactIds": [
+        "solution"
+      ],
+      "outputs": [
+        {
+          "id": "code",
+          "path": "Code.json",
+          "contract": "autobiz.lean.code/v1"
+        }
+      ],
+      "checks": [
+        {
+          "id": "code.evidence",
+          "kind": "action",
+          "artifactId": "code",
+          "provider": {
+            "plugin": "autobiz-lean-delivery",
+            "actionId": "code.verify"
+          },
+          "format": "artifact-reference-v1",
+          "maxBytes": 28000,
+          "bindProviderIdentity": "nativeCompositionProvider",
+          "configurationKeys": [
+            "executionAdapter"
+          ],
+          "config": {
+            "artifactRoles": {
+              "baseline": "baseline",
+              "definition": "definition",
+              "solution": "solution",
+              "code": "code"
+            }
+          },
+          "requestProvenance": "project-goal/v1",
+          "bindCheckProviderIdentities": {
+            "rulesProvider": {
+              "checkId": "solution.business",
+              "actionId": "solution.inspect"
+            }
+          },
+          "bindResourceDigests": {
+            "workflowSha256": "workflows/lean-code.workflow.js"
+          }
+        }
+      ],
+      "approval": "none",
+      "resultApproval": "human",
+      "executionMode": "workflow"
+    },
+    {
+      "id": "delivery",
+      "version": "1.0.0",
+      "title": "交付准备与归档",
+      "skill": "modules/delivery/SKILL.md",
+      "inputs": [
+        {
+          "artifactId": "baseline",
+          "contract": "autobiz.lean.baseline/v1"
+        },
+        {
+          "artifactId": "definition",
+          "contract": "autobiz.lean.definition/v1"
+        },
+        {
+          "artifactId": "solution",
+          "contract": "autobiz.lean.solution/v1"
+        },
+        {
+          "artifactId": "code",
+          "contract": "autobiz.lean.code/v1"
+        }
+      ],
+      "contextArtifactIds": [
+        "code"
+      ],
+      "outputs": [
+        {
+          "id": "delivery",
+          "path": "Delivery.json",
+          "contract": "autobiz.lean.delivery/v1"
+        }
+      ],
+      "checks": [
+        {
+          "id": "delivery.business",
+          "kind": "action",
+          "artifactId": "delivery",
+          "provider": {
+            "plugin": "autobiz-lean-rules",
+            "actionId": "delivery.documents"
+          },
+          "format": "artifact-reference-v1",
+          "maxBytes": 524288,
+          "config": {
+            "artifactRoles": {
+              "baseline": "baseline",
+              "definition": "definition",
+              "solution": "solution",
+              "code": "code",
+              "delivery": "delivery"
+            }
+          },
+          "requestProvenance": "project-goal/v1"
+        },
+        {
+          "id": "delivery.evidence",
+          "kind": "action",
+          "artifactId": "delivery",
+          "provider": {
+            "plugin": "autobiz-lean-delivery",
+            "actionId": "delivery.verify"
+          },
+          "format": "artifact-reference-v1",
+          "maxBytes": 524288,
+          "bindProviderIdentity": "nativeCompositionProvider",
+          "configurationKeys": [
+            "executionAdapter"
+          ],
+          "config": {
+            "artifactRoles": {
+              "baseline": "baseline",
+              "definition": "definition",
+              "solution": "solution",
+              "code": "code",
+              "delivery": "delivery"
+            }
+          },
+          "requestProvenance": "project-goal/v1",
+          "bindCheckProviderIdentities": {
+            "rulesProvider": {
+              "checkId": "solution.business",
+              "actionId": "solution.inspect"
+            }
+          },
+          "bindResourceDigests": {
+            "workflowSha256": "workflows/lean-code.workflow.js"
+          }
+        }
+      ],
+      "approval": "none",
+      "resultApproval": "human"
+    }
+  ],
+  "configuration": {
+    "userConfig": {
+      "knowledgeRoot": {
+        "type": "directory",
+        "title": "本次任务知识目录",
+        "description": "绑定已确认的组织知识根；按所选部署单元frontmatter及最近AGENTS.md选择知识。",
+        "required": true
+      },
+      "selectedDeployUnits": {
+        "type": "string",
+        "title": "所选部署单元（JSON）",
+        "description": "必须提供非空JSON数组，每项为deployUnitId及appType(frontend/backend)；使用实际元数据或人工确认，不含凭据。",
+        "required": true
+      },
+      "executionAdapter": {
+        "type": "string",
+        "title": "执行适配器（Node 或 Java/Maven）",
+        "description": "node-test/v1：Node 内置测试；python-unittest/v1：Maven 编译 Java，Python unittest 调用编译后 Java。更换后旧执行证据失效。",
+        "required": true,
+        "default": "node-test/v1",
+        "options": [
+          "node-test/v1",
+          "python-unittest/v1"
+        ]
+      }
+    }
+  },
+  "context": {
+    "sourceAccess": "read-only",
+    "mutableData": "host",
+    "configuration": "host-resolved",
+    "knowledge": {
+      "required": true,
+      "binding": "knowledgeRoot"
+    },
+    "provider": {
+      "actionId": "knowledge.context",
+      "operations": [
+        "session-context"
+      ],
+      "materials": {
+        "roots": [
+          {
+            "id": "knowledge",
+            "source": "knowledge"
+          },
+          {
+            "id": "package",
+            "source": "package",
+            "path": "knowledge"
+          }
+        ],
+        "configuration": [
+          "selectedDeployUnits"
+        ]
+      }
+    }
+  },
+  "contextAction": {
+    "id": "knowledge.context",
+    "provider": {
+      "plugin": "autobiz-lean-knowledge",
+      "actionId": "context"
+    },
+    "input": {},
+    "config": {
+      "stageTags": {
+        "baseline": [
+          "baseline"
+        ],
+        "definition": [
+          "definition",
+          "convert",
+          "prd",
+          "specs"
+        ],
+        "solution": [
+          "solution",
+          "design",
+          "plan"
+        ],
+        "code": [
+          "code"
+        ],
+        "delivery": [
+          "delivery",
+          "cicd",
+          "archive"
+        ]
+      }
+    }
+  },
+  "executionResources": {
+    "profiles": [
+      "agents/native-implementer.md",
+      "agents/native-reviewer.md",
+      "agents/native-test-author.md"
+    ],
+    "workspaces": []
+  }
+}

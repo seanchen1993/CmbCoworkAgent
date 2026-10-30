@@ -1,0 +1,6 @@
+{
+  "name": "autobiz-lean-knowledge",
+  "version": "1.0.0",
+  "mods": "mods/manifest.json",
+  "description": "显式按阶段知识选择，未标阶段的组织规则始终保留。"
+}

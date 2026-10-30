@@ -12,10 +12,10 @@ import {
 
 afterEach(() => vi.restoreAllMocks())
 
-function fixture() {
+function fixture(sourceId = "test-verification") {
   const source = catalog.readDevelopmentDependencySource({
     mainDirectory: resolve("main"),
-    sourceId: "test-verification"
+    sourceId
   })
   let document: AuthoringDocument | undefined
   let reuse: DevelopmentReuseStatus | undefined
@@ -69,7 +69,7 @@ function fixture() {
   const input = {
     service: { read, save, check, status, requestReuse } as unknown as ModDevelopmentService,
     mainDirectory: resolve("main"),
-    sourceId: "test-verification",
+    sourceId,
     threadId: "creator",
     turnId: "turn",
     signal: new AbortController().signal,
@@ -124,6 +124,31 @@ it("pins exact source once, defaults identity and returns the same pending plan 
   expect(f.check).toHaveBeenCalledTimes(2)
   expect(f.requestReuse).toHaveBeenCalledOnce()
   expect(result.nextStep).toContain("End this turn now")
+  expect(result.exports).toEqual({ actions: 2, components: 1 })
+  expect(result.nextStep).toContain("Re-read project_actions")
+  expect(result.nextStep).toContain("installed component selection")
+})
+
+it("guides a component-only dependency toward actual Surface discovery without inventing project actions", async () => {
+  const f = fixture("worktree-changes")
+  const result = await prepareDevelopmentDependency(f.input)
+  expect(result.exports).toEqual({ actions: 0, components: 1 })
+  expect(result.nextStep).toContain("End this turn now")
+  expect(result.nextStep).toContain("prepare/open the extension view")
+  expect(result.nextStep).not.toContain("Re-read project_actions")
+  f.setReuse({
+    ...result.reuse!,
+    capabilities: [],
+    phase: "active",
+    sourceDigest: f.source.digest,
+    draftId: f.document.id,
+    revision: f.document.revision,
+    name: f.document.name
+  } as DevelopmentReuseStatus)
+  const active = await prepareDevelopmentDependency(f.input)
+  expect(active.nextStep).toContain("Existing native reuse is active")
+  expect(active.nextStep).not.toContain("Re-read project_actions")
+  expect(f.requestReuse).toHaveBeenCalledOnce()
 })
 
 it("allows explicit draft identity/display without rewriting plugin identity or source bytes", async () => {

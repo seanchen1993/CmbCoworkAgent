@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto"
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, readFile, rm, unlink, writeFile } from "node:fs/promises"
 import { basename, dirname, join, resolve } from "node:path"
 import { tmpdir } from "node:os"
 import { afterEach, expect, it, vi } from "vitest"
@@ -514,6 +514,7 @@ async function fixture(
     })
   return {
     root,
+    store,
     debug,
     service,
     registry,
@@ -535,6 +536,50 @@ async function fixture(
     userConfig
   }
 }
+
+it.each(["same-length replacement", "different-length replacement", "missing file"])(
+  "rejects %s during registration before Host captures branch inputs",
+  async (mutation) => {
+    const f = await fixture()
+    const plan = await f.prepare()
+    const executions = structuredClone(f.observed)
+    const register = f.registry.register.bind(f.registry)
+    let candidateId = ""
+    vi.spyOn(f.registry, "register").mockImplementationOnce(async (input) => {
+      candidateId = input.projectId
+      const path = join(input.snapshot.workspace, "draft.md")
+      // The real native materializer has finished, but Host admission has not begun.
+      const original = await readFile(path)
+      expect(original.toString()).toBe("original-upstream-bytes")
+      if (mutation === "missing file") await unlink(path)
+      else {
+        const replacement =
+          mutation === "same-length replacement"
+            ? Buffer.alloc(original.length, "x")
+            : Buffer.from("ordinary unapproved workspace material")
+        await writeFile(path, replacement)
+      }
+      return register(input)
+    })
+    await expect(
+      f.debug.create(f.context, {
+        threadId: f.scope.threadId,
+        preparationId: plan.id,
+        expectedDigest: plan.candidateDigest
+      })
+    ).rejects.toThrow("PROJECT_STAGE_DEBUG_UPSTREAM_SNAPSHOT_CHANGED")
+    expect(candidateId).not.toBe("")
+    expect(f.service.get(candidateId)).toBeUndefined()
+    expect(f.store.branchInputs(candidateId)).toBeUndefined()
+    expect(f.service.operations(candidateId)).toEqual([])
+    expect(f.observed).toEqual(executions)
+    expect(f.service.get(f.original.projectId)).toEqual(f.original)
+    expect(await readFile(join(f.original.workspace, "draft.md"), "utf8")).toBe(
+      "original-upstream-bytes"
+    )
+  },
+  15000
+)
 
 it("requires the original baseline for child branches while preserving repeated original-baseline iteration", async () => {
   const f = await fixture()

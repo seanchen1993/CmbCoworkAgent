@@ -19,6 +19,17 @@ it("retains exact inert project companion paths without adding registration decl
   expect(readPureFunctionSource(source)).toEqual(source)
 })
 
+it("preserves vendored JS modules, provenance and license notices as exact package bytes", () => {
+  const source = createAuthoringSourceBundle([
+    ...base.files,
+    { path: "mods/parser.cjs", text: "module.exports = {}" },
+    { path: "mods/helper.mjs", text: "export const version = 1" },
+    { path: "provenance.json", text: '{"source":"vendor"}' },
+    { path: "THIRD-PARTY-NOTICES.md", text: "Retained notice" }
+  ])
+  expect(readPureFunctionSource(source)).toEqual(source)
+})
+
 it.each([
   "SKILL.md",
   "skills/review/SKILL.md",
@@ -29,7 +40,10 @@ it.each([
   "commands/review.md",
   "modules/review/main.ts",
   "workflows/register.ts",
-  "workflows/review.js"
+  "workflows/review.js",
+  "settings.json",
+  "setup.cjs",
+  "hooks/loader.cjs"
 ])("keeps auto-load and undeclared paths rejected: %s", (path) => {
   expect(() =>
     readPureFunctionSource(createAuthoringSourceBundle([...base.files, { path, text: "{}" }]))

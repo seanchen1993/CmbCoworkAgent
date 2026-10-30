@@ -219,6 +219,8 @@ async function analyzeSnapshot(snapshot: Snapshot) {
       )
     if (ts.isIdentifier(name)) {
       const symbol = symbols(name)
+      if (symbol && bindings.has(symbol) && bindings.get(symbol) !== value)
+        unknown(name, "同一参数收到不同 SDK/注册来源，无法唯一验证。")
       if (symbol && !bindings.has(symbol)) {
         bindings.set(symbol, value)
         changed = true
@@ -307,6 +309,134 @@ async function analyzeSnapshot(snapshot: Snapshot) {
     }
     return undefined
   }
+  const verifiedFunctions = new Set<FunctionNode>()
+  const uiRoots = new Map<TS.Symbol, FunctionNode>()
+  const nonUiCallbacks = new Set<FunctionNode>()
+  const helperArguments = new Map<TS.CallExpression, Set<TS.Node>>()
+  const helperTargets = new Map<TS.CallExpression, FunctionNode>()
+  const localClosures = new Set<FunctionNode>()
+  const references = new Map<TS.Symbol, TS.Identifier[]>()
+  for (const node of nodes) {
+    if (!ts.isIdentifier(node)) continue
+    const symbol = symbols(node)
+    if (!symbol) continue
+    const items = references.get(symbol) ?? []
+    items.push(node)
+    references.set(symbol, items)
+  }
+  let helperEdges = 0
+  function functionOwner(node: TS.Node): FunctionNode | undefined {
+    let owner = node.parent
+    while (owner && !ts.isFunctionDeclaration(owner) && !ts.isFunctionExpression(owner) &&
+      !ts.isArrowFunction(owner) && !ts.isMethodDeclaration(owner)) {
+      budget()
+      owner = owner.parent
+    }
+    return owner as FunctionNode | undefined
+  }
+  function markUiRoot(name: TS.BindingName, owner: FunctionNode) {
+    if (ts.isIdentifier(name)) {
+      const symbol = symbols(name)
+      if (symbol) uiRoots.set(symbol, owner)
+    } else for (const item of name.elements) {
+      if (ts.isBindingElement(item)) markUiRoot(item.name, owner)
+    }
+  }
+  function uiOrigin(node: TS.Node, seen = new Set<TS.Symbol>()): FunctionNode | undefined {
+    budget(seen.size)
+    node = unwrap(node)
+    if (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node))
+      return uiOrigin(node.expression, seen)
+    if (!ts.isIdentifier(node)) return undefined
+    const symbol = symbols(node)
+    if (!symbol || seen.has(symbol) || written.has(symbol)) return undefined
+    seen.add(symbol)
+    if (uiRoots.has(symbol)) return uiRoots.get(symbol)
+    let declaration: TS.Node | undefined = symbol.valueDeclaration
+    while (declaration && ts.isBindingElement(declaration)) declaration = declaration.parent.parent
+    return declaration && ts.isVariableDeclaration(declaration) && declaration.initializer &&
+      ts.getCombinedNodeFlags(declaration) & ts.NodeFlags.Const
+      ? uiOrigin(declaration.initializer, seen) : undefined
+  }
+  function nativeUiClosure(node: TS.Node): boolean {
+    const root = uiOrigin(node)
+    if (!root || nonUiCallbacks.has(root)) return false
+    let owner = functionOwner(node)
+    while (owner) {
+      budget()
+      if (owner === root) return true
+      owner = functionOwner(owner)
+    }
+    return false
+  }
+  function directHelper(call: TS.CallExpression): FunctionNode | undefined {
+    // No property dispatch, optional call, spread, external resolution or overload selection.
+    if (!ts.isIdentifier(call.expression) || call.questionDotToken ||
+      call.arguments.some((argument) => ts.isSpreadElement(argument))) return undefined
+    let symbol = symbols(call.expression)
+    if (symbol && symbol.flags & ts.SymbolFlags.Alias) symbol = checker.getAliasedSymbol(symbol)
+    if (!symbol || symbol.declarations?.length !== 1 || written.has(symbol)) return undefined
+    const fn = functionValue(call.expression)
+    return fn?.body && sources.get(fn.getSourceFile().fileName) === fn.getSourceFile() &&
+      !fn.getSourceFile().fileName.split("/").includes("node_modules") &&
+      !fn.parameters.some(parameter => ts.isIdentifier(parameter.name) && parameter.name.text === "this")
+      ? fn : undefined
+  }
+  function propagateHelper(call: TS.CallExpression) {
+    const argumentsWithIdentity = call.arguments.map((argument, index) =>
+      ({ argument, index, value: path(argument) })).filter(({ value }) =>
+      value === "" || value === "@on")
+    if (!argumentsWithIdentity.length) return
+    const fn = directHelper(call)
+    if (!fn) return // The ordinary escape diagnostics below retain rejection.
+    nonUiCallbacks.add(fn)
+    for (const { argument, index, value } of argumentsWithIdentity) {
+      const parameter = fn.parameters[index]
+      if (!parameter || !ts.isIdentifier(parameter.name) || parameter.initializer ||
+          parameter.dotDotDotToken || written.has(symbols(parameter.name)!)) continue
+      const accepted = helperArguments.get(call) ?? new Set<TS.Node>()
+      if (!accepted.has(argument)) {
+        if (++helperEdges > 256) throw Error("MODS_SDK_ANALYSIS_LIMIT")
+        accepted.add(argument)
+        helperArguments.set(call, accepted)
+        helperTargets.set(call, fn)
+      }
+      if (!verifiedFunctions.has(fn)) {
+        implicitArguments(fn)
+        verifiedFunctions.add(fn)
+      }
+      bind(parameter.name, value!)
+    }
+  }
+  function localClosure(call: TS.CallExpression) {
+    const fn = directHelper(call)
+    if (!fn || localClosures.has(fn)) return
+    const declaration = ts.isVariableDeclaration(fn.parent) ? fn.parent : fn
+    const name = declaration.name
+    const symbol = name && ts.isIdentifier(name) ? symbols(name) : undefined
+    const enclosing = functionOwner(declaration)
+    if (!symbol || !enclosing || !verifiedFunctions.has(enclosing)) return
+    const uses = (references.get(symbol) ?? []).filter(node => node !== name)
+    if (!uses.length) return
+    // Every reference must be a direct call from an already checked lexical scope.
+    // Returning, aliasing, storing or passing the function rejects its captured SDK.
+    const calls: TS.CallExpression[] = []
+    for (const use of uses) {
+      budget()
+      const parent = use.parent
+      if (!ts.isCallExpression(parent) || parent.expression !== use ||
+        directHelper(parent) !== fn || !verifiedFunctions.has(functionOwner(parent)!)) return
+      calls.push(parent)
+    }
+    for (const item of calls) {
+      if (!helperTargets.has(item) && ++helperEdges > 256) throw Error("MODS_SDK_ANALYSIS_LIMIT")
+      helperTargets.set(item, fn)
+    }
+    implicitArguments(fn)
+    localClosures.add(fn)
+    verifiedFunctions.add(fn)
+    changed = true
+  }
   for (const entry of snapshot.authoringEntries ?? []) {
     const source = sources.get(posix.resolve("/", entry.replace(/\\/g, "/")))
     const module = source && symbols(source)
@@ -324,6 +454,7 @@ async function analyzeSnapshot(snapshot: Snapshot) {
       continue
     }
     implicitArguments(fn)
+    verifiedFunctions.add(fn)
     if (fn.parameters[0]) bind(fn.parameters[0].name, "@on")
   }
   if (!snapshot.authoringEntries?.length) unknown(undefined, "缺少不可变入口快照。")
@@ -343,7 +474,11 @@ async function analyzeSnapshot(snapshot: Snapshot) {
       }
       if (!ts.isCallExpression(node)) continue
       const value = path(node.expression)
-      if (value !== "@on" && value !== "@registration.catch" && value !== "@on.capability") continue
+      if (value !== "@on" && value !== "@registration.catch" && value !== "@on.capability") {
+        propagateHelper(node)
+        localClosure(node)
+        continue
+      }
       const handler = node.arguments.at(-1)
       const act = value === "@on.capability" && handler && ts.isObjectLiteralExpression(unwrap(handler))
         ? (unwrap(handler) as TS.ObjectLiteralExpression).properties.find(part =>
@@ -358,10 +493,19 @@ async function analyzeSnapshot(snapshot: Snapshot) {
       if (!inspectedCallbacks.has(fn)) {
         implicitArguments(fn)
         inspectedCallbacks.add(fn)
+        verifiedFunctions.add(fn)
       }
       if (fn.parameters[0]) bind(fn.parameters[0].name, "")
+      const registeredEvent = value === "@on" ? node.arguments[0] : undefined
+      if (!registeredEvent || !ts.isStringLiteralLike(registeredEvent) || registeredEvent.text !== "ui.render")
+        nonUiCallbacks.add(fn)
       if (value === "@on") {
         const event = node.arguments[0]
+        // Native UI handlers already retain their render SDK lexical context. This only
+        // preserves static inspection; runtime query custody and lifecycle remain mandatory.
+        // A new helper parameter deliberately does not inherit this root-only exception.
+        if (event && ts.isStringLiteralLike(event) && event.text === "ui.render" && fn.parameters[0])
+          markUiRoot(fn.parameters[0].name, fn)
         if (!event || !ts.isStringLiteralLike(event)) {
           registrationEventsVerified = false
           unknown(node, "动态事件表达式的 SDK 上下文未验证。")
@@ -388,6 +532,29 @@ async function analyzeSnapshot(snapshot: Snapshot) {
       unknown(undefined, "SDK 别名超过静态分析深度。")
     }
   }
+  // Reject recursive transfer rather than relying on source execution to discover a cycle.
+  const helperGraph = new Map<FunctionNode, Set<FunctionNode>>()
+  for (const [call, target] of helperTargets) {
+    const owner = functionOwner(call)
+    if (!owner) continue
+    const edges = helperGraph.get(owner) ?? new Set<FunctionNode>()
+    edges.add(target)
+    helperGraph.set(owner, edges)
+  }
+  const visiting = new Set<FunctionNode>(), visited = new Set<FunctionNode>()
+  function inspectHelperGraph(fn: FunctionNode, depth = 0) {
+    budget(depth)
+    if (visiting.has(fn)) {
+      unknown(fn, "SDK/注册参数的辅助函数调用包含循环，无法有界验证。")
+      return
+    }
+    if (visited.has(fn)) return
+    visiting.add(fn)
+    for (const target of helperGraph.get(fn) ?? []) inspectHelperGraph(target, depth + 1)
+    visiting.delete(fn)
+    visited.add(fn)
+  }
+  for (const fn of helperGraph.keys()) inspectHelperGraph(fn)
   function immutableValue(node: TS.Node, seen = new Set<TS.Symbol>()): TS.Node {
     budget(seen.size)
     const value = unwrap(node)
@@ -602,6 +769,17 @@ async function analyzeSnapshot(snapshot: Snapshot) {
     const value = path(node)
     if (value === undefined) continue
     const parent = node.parent
+    // A returned/stored callback can hide an SDK capture even without returning `$` itself.
+    // Only the known registration callback or a directly verified helper may use an identity.
+    const owner = functionOwner(node)
+    const nativeUi = nativeUiClosure(node)
+    if (owner && !verifiedFunctions.has(owner) && !nativeUi)
+      unknown(node, "SDK/注册来源被未验证的闭包捕获；请通过包内直接函数参数传递。")
+    if (owner && ts.isIdentifier(node)) {
+      const declaration = symbols(node)?.valueDeclaration
+      if (declaration && functionOwner(declaration) !== owner && !localClosures.has(owner) && !nativeUi)
+        unknown(node, "SDK/注册来源来自外层闭包；helper 必须显式接收来源参数。")
+    }
     if (
       ts.isIdentifier(node) &&
       restrictedParameters.has(symbols(node)!) &&
@@ -622,6 +800,7 @@ async function analyzeSnapshot(snapshot: Snapshot) {
     if (ts.isBindingElement(parent) && parent.propertyName === node) continue
     if (ts.isTypeNode(parent)) continue
     if (ts.isVariableDeclaration(parent) && parent.initializer === node) continue
+    if (ts.isCallExpression(parent) && helperArguments.get(parent)?.has(node)) continue
     if (
       ts.isParenthesizedExpression(parent) ||
       ts.isAsExpression(parent) ||

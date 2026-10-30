@@ -80,6 +80,10 @@ const fields = new Set([
   "format",
   "maxBytes",
   "bindProviderIdentity",
+  "bindCheckProviderIdentities",
+  "checkId",
+  "bindResourceDigests",
+  "requestProvenance",
   "configurationKeys",
   "resultApproval",
   "type"

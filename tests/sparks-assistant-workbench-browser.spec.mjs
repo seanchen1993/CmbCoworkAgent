@@ -239,7 +239,7 @@ try {
     await page
       .getByRole("navigation")
       .filter({ has: page.getByRole("button", { name: "基础功能", exact: true }) })
-      .getByRole("button", { name: "插件", exact: true })
+      .getByRole("button", { name: "灵件", exact: true })
       .click()
     await page.getByText("聊天保存的灵件", { exact: true }).waitFor()
     assert.equal(

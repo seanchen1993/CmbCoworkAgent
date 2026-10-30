@@ -15,6 +15,12 @@ describe("creator support scopes", () => {
     expect(native.requirements.join(" ")).toContain("不手写成功凭据")
     expect(native.limitations.join(" ")).toContain("恢复适配")
     expect(native.limitations.join(" ")).toContain("静态转换")
+    expect(native.initialContext).toMatchObject({
+      field: "modules[].contextArtifactIds",
+      omitted: "all-declared-inputs",
+      affects: "initial-reading-only",
+      preserves: expect.arrayContaining(["artifact-checks", "input-fingerprints", "invalidation"])
+    })
   })
   it("separates the function S1 promise from conditional Host project capabilities", () => {
     expect(CREATOR_S1_SUPPORT.scope.id).toBe("function-authoring-s1")

@@ -1,0 +1,6 @@
+{
+  "name": "autobiz-lean-delivery",
+  "version": "1.0.0",
+  "mods": "mods/manifest.json",
+  "description": "真实编译、独立测试统计、Git合并与交付原始回执校验；业务政策由独立规则Mod负责。"
+}

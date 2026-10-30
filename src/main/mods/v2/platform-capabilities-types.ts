@@ -34,6 +34,9 @@ export interface NativePlatformActionAccess {
   assertContentCurrent?(): void
 }
 export interface NativePlatformCapabilityProvider {
+  /** Main-only allowlist; guest declarations cannot make native effects into queries. */
+  readonly queryActions?: readonly string[]
+  readonly queryRead?: boolean
   readonly provider: string
   readonly descriptor: PlatformCapabilityDescriptor
   /** Stable implementation identity, supplied only by the main process. */
@@ -44,7 +47,9 @@ export interface NativePlatformCapabilityProvider {
   actionSelector?(action: string, input: ModObject): ModObject | undefined
   /** Revalidates exact read evidence before new dispatch, cached receipt and publication. */
   prepareActionAccess?(
-    context: NativePlatformCallContext, action: string, selector: unknown
+    context: NativePlatformCallContext,
+    action: string,
+    selector: unknown
   ): Promise<NativePlatformActionAccess | undefined>
   read?(context: NativePlatformCallContext): Promise<ModJson> | ModJson
   /** Attach to original business events; no timer or observer is started by discovery. */

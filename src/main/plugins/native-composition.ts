@@ -6,7 +6,10 @@ import {
   PROJECT_ACTION_LOCK_PATH,
   parseProjectCheckConfigurationKeys
 } from "../../shared/project-runtime/action-bindings"
-import { PROJECT_ARTIFACT_REFERENCE_MAX_FILES } from "../../shared/project-runtime/artifact-reference"
+import {
+  PROJECT_ARTIFACT_REFERENCE_MAX_FILES,
+  PROJECT_REQUEST_PROVENANCE_SOURCE
+} from "../../shared/project-runtime/artifact-reference"
 import {
   wrapProjectRuntimeManifest,
   parseExtensionContract,
@@ -32,7 +35,12 @@ import { parseSkillNameFromFrontmatterYaml } from "../skills/frontmatter"
 import { businessModExtensionContract } from "./business-mod-assembly-contract"
 import { parsePortableBusinessModUserConfig } from "./business-mod-user-config"
 import { parseFunctionUserConfigSchema } from "../../shared/mods/v2/user-config-schema"
-import { assertNativeCompositionDependencies } from "./native-composition-dependencies"
+import {
+  assertNativeCompositionDependencies,
+  nativeCompositionActionRequirements,
+  nativeCompositionBoundConfig,
+  nativeCompositionProviderContract
+} from "./native-composition-dependencies"
 import {
   parseProjectAuthorSchema,
   validateProjectAuthorJsonSchema
@@ -54,6 +62,11 @@ const configurationKeys = z.array(z.string()).refine((keys) => {
     return false
   }
 }, "PROJECT_CHECK_CONFIGURATION_KEYS_INVALID")
+const bindingKey = id.refine((key) => !["constructor", "prototype", "__proto__"].includes(key))
+const checkProviderBindings = z.record(bindingKey, z.object({ checkId: id, actionId: id }).strict())
+  .refine((value) => Object.keys(value).length > 0 && Object.keys(value).length <= 16)
+const resourceDigestBindings = z.record(bindingKey, path)
+  .refine((value) => Object.keys(value).length > 0 && Object.keys(value).length <= 16)
 
 /** Author source is deliberately smaller than a runtime manifest, with no self-issued grants. */
 export const nativeCompositionSchema = z
@@ -91,6 +104,7 @@ export const nativeCompositionSchema = z
             skill: path,
             executionMode: z.enum(["normal", "workflow"]).optional(),
             inputs: z.array(z.object({ artifactId: id, contract: text }).strict()).max(32),
+            contextArtifactIds: z.array(id).max(32).optional(),
             outputs: z.array(artifact).min(1).max(16),
             checks: z
               .array(
@@ -110,6 +124,9 @@ export const nativeCompositionSchema = z
                         .max(512 * 1024)
                         .optional(),
                       bindProviderIdentity: id.optional(),
+                      bindCheckProviderIdentities: checkProviderBindings.optional(),
+                      bindResourceDigests: resourceDigestBindings.optional(),
+                      requestProvenance: z.literal(PROJECT_REQUEST_PROVENANCE_SOURCE).optional(),
                       configurationKeys: configurationKeys.optional(),
                       config: schema.optional()
                     })
@@ -187,7 +204,10 @@ export function compileNativeComposition(
     ]
     if (selected.length) parseProjectCheckConfigurationKeys(selected)
     for (const check of module.checks) {
-      if (check.kind !== "action" || !check.configurationKeys) continue
+      if (check.kind !== "action") continue
+      if (check.requestProvenance && check.format !== "artifact-reference-v1")
+        throw Error("NATIVE_COMPOSITION_REQUEST_PROVENANCE_CHECK_ONLY")
+      if (!check.configurationKeys) continue
       if (check.format !== "artifact-reference-v1")
         throw Error("NATIVE_COMPOSITION_CHECK_CONFIGURATION_INVALID")
       for (const key of check.configurationKeys) {
@@ -197,7 +217,10 @@ export function compileNativeComposition(
       }
     }
   }
-  assertNativeCompositionDependencies(source, options.actionCatalog)
+  assertNativeCompositionDependencies(source, options.actionCatalog, options.files)
+  const requirements = nativeCompositionActionRequirements(source)
+  const bindingContext = { requirements, catalog: options.actionCatalog,
+    resources: source.resources, files: options.files }
   const userConfigSchema = parseFunctionUserConfigSchema(
     source.configuration?.userConfigSchema,
     userConfig
@@ -350,6 +373,15 @@ export function compileNativeComposition(
       module.inputs.map((input) => input.artifactId),
       "NATIVE_COMPOSITION_INPUT_DUPLICATE"
     )
+    if (module.contextArtifactIds !== undefined) {
+      unique(module.contextArtifactIds, "NATIVE_COMPOSITION_CONTEXT_INPUT_DUPLICATE")
+      if (
+        module.contextArtifactIds.some(
+          (id) => !module.inputs.some((input) => input.artifactId === id)
+        )
+      )
+        throw Error("NATIVE_COMPOSITION_CONTEXT_INPUT_UNDECLARED")
+    }
     for (const input of module.inputs) {
       const output = produced.get(input.artifactId)
       if (!output) throw Error("NATIVE_COMPOSITION_INPUT_NOT_PRIOR")
@@ -393,17 +425,8 @@ export function compileNativeComposition(
         )
         if (providers.length !== 1) throw Error("NATIVE_COMPOSITION_PROVIDER_UNRESOLVED")
         const provider = providers[0]
-        const config = clawActionObject(check.config ?? {})
-        if (check.bindProviderIdentity) {
-          if (Object.hasOwn(config, check.bindProviderIdentity))
-            throw Error("NATIVE_COMPOSITION_PROVIDER_IDENTITY_CONFLICT")
-          config[check.bindProviderIdentity] = {
-            pluginId: provider.pluginId,
-            plugin: provider.plugin,
-            digest: provider.digest,
-            actionId: provider.actionId
-          }
-        }
+        const config = nativeCompositionBoundConfig(
+          requirements.find((item) => item.usedBy === check.id)!, provider, bindingContext)
         const actionId = check.id
         bindings.push(
           createProjectActionBinding(
@@ -416,7 +439,8 @@ export function compileNativeComposition(
                 ? { format: check.format, maxBytes: check.maxBytes! }
                 : { format: check.format })
             },
-            check.configurationKeys
+            check.configurationKeys,
+            check.requestProvenance
           )
         )
         checks.push({
@@ -434,7 +458,21 @@ export function compileNativeComposition(
     const context = [
       "\n\n## Compiled stage contract",
       "The Host owns execution, validation and stage advancement. Produce the declared outputs; request missing user input through the current task. Only the Host can approve and commit this operation.",
-      "Inputs: " + JSON.stringify(module.inputs.map((input) => produced.get(input.artifactId))),
+      "Inputs: " +
+        JSON.stringify(
+          module.inputs
+            .filter(
+              (input) =>
+                module.contextArtifactIds === undefined ||
+                module.contextArtifactIds.includes(input.artifactId)
+            )
+            .map((input) => produced.get(input.artifactId))
+        ),
+      ...(module.contextArtifactIds === undefined
+        ? []
+        : [
+            "These are the initial reading inputs. All declared validation inputs remain checked; read other original artifacts on demand when needed for provenance or a business decision."
+          ]),
       "Outputs: " + JSON.stringify(module.outputs),
       "Package resources: " + JSON.stringify(source.resources),
       "Required configuration: " +
@@ -447,6 +485,9 @@ export function compileNativeComposition(
       title: module.title,
       skill: compiledSkill,
       ...(module.executionMode === undefined ? {} : { executionMode: module.executionMode }),
+      ...(module.contextArtifactIds === undefined
+        ? {}
+        : { contextArtifactIds: module.contextArtifactIds }),
       actionIds: [],
       ...(module.inputs.length === produced.size || legacyInputProjection
         ? {}
@@ -482,13 +523,24 @@ export function compileNativeComposition(
     bindings
   })
   const envelope = wrapProjectRuntimeManifest(runtime, extension)
+  const retainedProviders = new Map<string, ClawActionDescriptor>()
+  for (const requirement of requirements) {
+    const binding = bindings.find((item) => item.id === requirement.usedBy)
+    for (const key of Object.keys(requirement.bindCheckProviderIdentities ?? {})) {
+      const identity = binding!.config[key] as { pluginId: string; plugin: string; digest: string; actionId: string }
+      const action = options.actionCatalog.find((item) => item.pluginId === identity.pluginId &&
+        item.plugin === identity.plugin && item.digest === identity.digest && item.actionId === identity.actionId)!
+      retainedProviders.set(JSON.stringify(identity), nativeCompositionProviderContract(action))
+    }
+  }
   const lock = {
     apiVersion: "devclaw.native-composition-lock/v1",
     sourceDigest: runtimeDigest(JSON.stringify(source)),
     modules: source.modules.map(({ id, version }) => ({ id, version })),
     resources: [...retained].map(([path, bytes]) => ({ path, digest: runtimeDigest(bytes) })),
     runtimeDigest: runtimeDigest(JSON.stringify(envelope)),
-    actionLockDigest: runtimeDigest(JSON.stringify(actionLock))
+    actionLockDigest: runtimeDigest(JSON.stringify(actionLock)),
+    ...(retainedProviders.size ? { providerContracts: [...retainedProviders.values()] } : {})
   }
   for (const [path, value] of [
     [NATIVE_COMPOSITION_PATH, source],

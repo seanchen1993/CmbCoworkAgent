@@ -64,11 +64,11 @@ export function AssistantWorkbench({
         </section>
         <details className="rounded-xl border p-4 text-sm">
           <summary className="cursor-pointer font-medium">高级：手动管理与效果测试</summary>
-          <p className="my-3 leading-6 text-muted-foreground">管理插件、聊天搭配和测试任务。</p>
+          <p className="my-3 leading-6 text-muted-foreground">管理灵件、聊天搭配和测试任务。</p>
           <div className="flex flex-wrap gap-2">
             {(
               [
-                ["mods", "管理插件"],
+                ["mods", "管理灵件"],
                 ["claw", "管理常用搭配"],
                 ["flows", "聊天任务模板"],
                 ["evaluation", "查看效果测试"]

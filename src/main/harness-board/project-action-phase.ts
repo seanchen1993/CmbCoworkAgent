@@ -106,7 +106,7 @@ export async function executeProjectActionPhase(
     workspace,
     threadId,
     saved,
-    { workspace, goal: context.project.goal },
+    { workspace, goal: definition.goal },
     assertCurrent
   )
   const cancel = () => {

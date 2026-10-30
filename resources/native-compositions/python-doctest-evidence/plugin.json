@@ -1,0 +1,6 @@
+{
+  "name": "python-doctest-evidence",
+  "version": "1.0.0",
+  "mods": "mods/manifest.json",
+  "description": "独立Python py_compile与doctest执行及原始回执验证提供器。"
+}

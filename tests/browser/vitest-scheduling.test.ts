@@ -53,6 +53,12 @@ it("collects the unchanged suite exactly once and schedules native graphs before
       "src/main/plugins/autobiz-native-host.integration.test.ts"
     )
     expect(NATIVE_INTEGRATION_TESTS).toContain(
+      "src/main/plugins/autobiz-lean-host.integration.test.ts"
+    )
+    expect(NATIVE_INTEGRATION_TESTS).toContain(
+      "src/main/plugins/autobiz-lean-code.integration.test.ts"
+    )
+    expect(NATIVE_INTEGRATION_TESTS).toContain(
       "src/main/plugins/autobiz-native-multirepo.integration.test.ts"
     )
     expect(NATIVE_INTEGRATION_TESTS).toContain(

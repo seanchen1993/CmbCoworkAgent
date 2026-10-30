@@ -29,7 +29,7 @@ async function main() {
       const settings={globalEnabled:async()=>true,status:async()=>({workspace:"C:/creator",enabled:true,outputPolicy:true,mods:[],diagnostics:[]})};
       window.api={mods:{development:api,...settings,stageDebugReview:{current:async()=>{if(reviewIntent?.expiresAt<=Date.now())calls.push(["review-current-expired"]);return structuredClone(reviewIntent)},onRequested:fn=>{reviewListeners.add(fn);return()=>reviewListeners.delete(fn)}}}};
       const root=createRoot(document.getElementById("root"));
-      const renderMain=()=>root.render(<ModsDevelopmentPanel threadId="creator" workspaceHint="C:/creator" mode="chat" api={api} onReturnToChat={()=>document.getElementById("composer").focus()} onRequestRepair={async message=>{calls.push(["repair",message])}}/>);
+      const renderMain=(mode="chat")=>root.render(<ModsDevelopmentPanel threadId="creator" workspaceHint="C:/creator" mode={mode} api={api} onReturnToChat={()=>document.getElementById("composer").focus()} onRequestRepair={async message=>{calls.push(["repair",message])}}/>);
       renderMain();
       const request={id:"request",draftId:"draft",name:"host-source",revision:3,digest:"b".repeat(64),goal:"验收"};
       let delivery;let persistentColdTrial;
@@ -93,11 +93,11 @@ async function main() {
         renderMain();listeners.forEach(fn=>fn({threadId:"creator"}));
       };
       window.fixture={calls,cold: coldCreator,host:renderHost,journey:renderJourney,hostRoute:renderHostRoute,nativeReview:requestNativeReview,
-        emptySource:()=>{
+        emptySource:(mode="chat",cancel=false)=>{
           persistentColdTrial=undefined;reviewIntent=undefined;
           current={threadId:"creator",workspace:"C:/creator",enabled:true,mode:"normal",drafts:[],trials:[],business:{drafts:[]}};
-          api.importSourceSet=async input=>{calls.push(["import-source",input]);current.sourceSet={id:"imported-source",title:"本次导入的源码",phase:"dependencies",dependencies:[{id:"dependency",name:"待确认依赖",version:"1.0.0",digest:"7".repeat(64),phase:"prepared"}]};return structuredClone(current)};
-          renderMain();listeners.forEach(fn=>fn({threadId:"creator"}));reviewListeners.forEach(fn=>fn(undefined));
+          api.importSourceSet=async input=>{calls.push(["import-source",input]);if(!cancel)current.sourceSet={id:"imported-source",title:"本次导入的源码",phase:"dependencies",dependencies:[{id:"dependency",name:"待确认依赖",version:"1.0.0",digest:"7".repeat(64),phase:"prepared"}]};return structuredClone(current)};
+          renderMain(mode);listeners.forEach(fn=>fn({threadId:"creator"}));reviewListeners.forEach(fn=>fn({threadId:"creator"}));
         },
         deliveryAttention:phase=>{current.projectDelivery=phase?{id:'retained-delivery',requestId:'historical-request',sourceDigest:'9'.repeat(64),name:'retained-copy',version:'1.0.0',digest:'8'.repeat(64),phase,canInstall:false,canExport:false,canReconcile:true,error:phase==='failed'?'PROJECT_DELIVERY_NAME_ALREADY_INSTALLED':undefined}:undefined;listeners.forEach(fn=>fn({threadId:'creator'}))},
         sourceSetReady:()=>{current.sourceSet={id:"native-source-set",title:"导入的作者源码",phase:"ready",dependencies:[]};listeners.forEach(fn=>fn({threadId:"creator"}))},
@@ -527,13 +527,75 @@ async function main() {
     await rail.getByRole("button", { name: "创造者模式", exact: true }).click()
     await workspace.waitFor({ state: "hidden" })
     const importStart = await page.evaluate("window.fixture.calls.length")
+    await rail.getByText("直接在聊天描述要制作、修改或组合的插件。", { exact: true }).waitFor()
+    assert.equal(
+      await rail.getByRole("button", { name: "导入插件源码", exact: true }).count(),
+      0,
+      "Source import must stay hidden from the default creator chat entry"
+    )
+    assert.equal(await rail.locator('[title*="devclaw.source-set.json"]').count(), 0)
+    await page.screenshot({ path: join(output, "empty-creator-chat-entry.png") })
+    const advancedEntry = rail.getByText("高级开发", { exact: true })
+    await advancedEntry.focus()
+    await page.keyboard.press("Enter")
+    assert.equal(
+      await page.evaluate("window.fixture.calls.length"),
+      importStart,
+      "Opening advanced development must not import or authorize sources"
+    )
+    await page.screenshot({ path: join(output, "empty-creator-advanced-entry.png") })
     await rail.getByRole("button", { name: "导入插件源码", exact: true }).click()
     const importedSource = workspace.getByRole("region", { name: "导入项目作者源码", exact: true })
     await importedSource.getByText("本次导入的源码", { exact: true }).waitFor()
-    assert.deepEqual(await page.evaluate("window.fixture.calls.slice(" + importStart + ").filter(row=>row[0]!=='cold-history-list')"), [
-      ["import-source", { threadId: "creator", expectedWorkspace: "C:/creator" }]
-    ], "Importing an author source opens its dependency review without installing or authorizing anything")
+    assert.deepEqual(
+      await page.evaluate(
+        "window.fixture.calls.slice(" + importStart + ").filter(row=>row[0]!=='cold-history-list')"
+      ),
+      [["import-source", { threadId: "creator", expectedWorkspace: "C:/creator" }]],
+      "Importing an author source opens its dependency review without installing or authorizing anything"
+    )
     await page.screenshot({ path: join(output, "empty-creator-source-import.png") })
+
+    await page.evaluate("window.fixture.emptySource('entry')")
+    const entry = page.getByRole("region", { name: "会话创作入口", exact: true })
+    await entry.getByRole("button", { name: "进入创造者模式", exact: true }).click()
+    await entry
+      .getByText("已进入创造者模式，请回到原聊天描述要制作、修改或组合的插件。", { exact: true })
+      .waitFor()
+    assert.equal(
+      await entry.getByRole("button", { name: "导入插件源码", exact: true }).count(),
+      0,
+      "The separate creator entry must also collapse advanced source import"
+    )
+    await entry.getByRole("button", { name: "返回原聊天", exact: true }).click()
+    assert.equal(
+      await page.locator("#composer").evaluate((element) => element === document.activeElement),
+      true
+    )
+    await entry.getByText("高级开发", { exact: true }).click()
+    await entry.getByRole("button", { name: "导入插件源码", exact: true }).click()
+    await page
+      .getByRole("region", { name: "导入项目作者源码", exact: true })
+      .getByText("本次导入的源码", { exact: true })
+      .waitFor()
+
+    await page.evaluate("window.fixture.emptySource('chat',true)")
+    await rail.getByRole("button", { name: "创造者模式", exact: true }).click()
+    await rail.getByText("高级开发", { exact: true }).click()
+    const beforeCancel = await page.evaluate("window.fixture.calls.length")
+    await rail.getByRole("button", { name: "导入插件源码", exact: true }).click()
+    await page.waitForFunction(
+      (start) =>
+        (window as unknown as { fixture: { calls: unknown[][] } }).fixture.calls.length > start,
+      beforeCancel
+    )
+    assert.equal(
+      await workspace.count(),
+      0,
+      "Cancelling source selection must keep the chat entry usable"
+    )
+    await rail.getByRole("button", { name: "普通模式", exact: true }).click()
+    assert.equal(await rail.getByText("高级开发", { exact: true }).count(), 0)
     assert.deepEqual(errors, [])
     console.log(
       "PASS creator workspace navigation, long-flow disclosure, delivery, chat return, mobile bounds and 18-stage native-status aggregate verdicts"

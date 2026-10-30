@@ -1,0 +1,25 @@
+{
+  "workflow": "../../project/workflows/lean-code.workflow.js",
+  "workflowVersion": 1,
+  "executionRulesSource": "autobiz-rules/mods/rules-bundle.ts",
+  "testAdapterSource": "test-verification/mods/runner.ts",
+  "scope": "Explicit Node or Java/Maven + Python unittest adapters; configuration is bound to original workflow and Host evidence.",
+  "upstreamRulesSha256": "07f2553ce74506b13d3b9843125a6e45f9cf3cdb45a102948a26b1c872ba9b36",
+  "upstreamRunnerSha256": "12a261236cd4800337a8c84178881e55ad874bee3b3755d417e25509bcbf777c",
+  "executionPolicySha256": "d35f813a6219b0c8395f9b61c198fbdafd1379ba59dfe8a410d8d6a9e67e435e",
+  "adaptations": [
+    "Explicit versioned lean_execution policy replaces the legacy argv recognition policy; no runtime source rewriting.",
+    "Policy checks adapter command shape and write ownership; actual runner statistics and stable test/subject hashes decide test success.",
+    "Protect Definition.json, Solution.json, Code.json and Delivery.json in addition to retained legacy artifact names.",
+    "Node syntax compilation enumerates all tracked production JS modules (bounded to 8), executes node --check on each, and reports per-file results; original non-Node compile policies remain unchanged.",
+    "Reject unsupported or unknown production source extensions, including declared expectedFiles, instead of treating Node entry-point syntax as their compilation.",
+    "Retained repair rules accept an explicit command-validator callback (legacy default unchanged); lean policy binds the original failed adapter argv, files, subjects, timeout, fingerprints and nonzero real test counts before all original task/spec/AC/evidence checks.",
+    "Java adapter admits root-project Maven compile with only quiet/offline/batch/no-transfer-progress flags; rejects skip, alternate pom and partial module options. Every successful Python batch/rerun/E2E binds its latest same-workspace/task compilation source list and SHA.",
+    "Remove duplicate business verdicts; retain only command/ownership/performance and original failed-test repair policies. Extract unchanged safe_path into safe_paths.py. Workflow identity is injected by the compiler."
+  ],
+  "nodeCompileAdapterSha256": "63b409baaa12e16fa62c9f6bdc6c64805ca70bd3f115c253ae14a525c4e89465",
+  "adaptedRulesSha256": "025eb3235161b8d82e1970583fb62a78aa2bb80b3a5085a54bdfd091279a623c",
+  "pythonTestAdapterSha256": "b6aaaeafd91ce00d63b23b14607f8ab4586d894df89a54eb4b48fe2107b8479e",
+  "javaCompileAdapterSha256": "7a0b97bd7dd25bd77f842ba1f035d6d27cbe31ff88fb036ededbb60a2d18744e",
+  "workflowIdentity": "Compiler bindResourceDigests.workflowSha256 over declared resource bytes"
+}

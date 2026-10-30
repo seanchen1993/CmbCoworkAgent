@@ -1,0 +1,5 @@
+{
+  "source": "resources/native-compositions/autobiz-rules/mods/rules-bundle.ts",
+  "sha256": "07f2553ce74506b13d3b9843125a6e45f9cf3cdb45a102948a26b1c872ba9b36",
+  "purpose": "Retained read-only business algorithms only; no legacy stage runner, writer, checkpoint or workflow checker."
+}

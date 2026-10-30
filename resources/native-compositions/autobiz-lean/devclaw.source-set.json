@@ -1,0 +1,7 @@
+{
+  "protocol": "devclaw.project-source-set/v1",
+  "title": "AutoBiz 五阶段项目插件",
+  "goal": "完成需求基线确认、需求与验收定义、设计与实施方案、真实代码验证及交付准备归档。组织知识需用户绑定，默认测试适配器使用Node内置测试；其他测试栈须替换适配器，外部发布另需授权能力。",
+  "project": "project",
+  "dependencies": ["providers/knowledge", "providers/rules", "providers/delivery"]
+}

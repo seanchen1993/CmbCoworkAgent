@@ -14,6 +14,7 @@ import {
 import type { FunctionPaneSnapshot, FunctionUiAction } from "../../../shared/mods/v2/ui"
 import type { ModObject } from "../../../shared/mods/types"
 import { ModFunctionError } from "../../../shared/mods/v2/contracts"
+import { withPlatformQuery } from "./platform-query-scope"
 
 export interface PlatformSurfacesHost {
   /** Resident native descriptors only. Listing never loads a guest, runs a matcher or starts a session. */
@@ -54,6 +55,7 @@ export class PlatformSurfaces {
   private readonly retirements = new Map<string, Promise<void>>()
   private readonly openings = new Map<string, Promise<void>>()
   private readonly openIds = new Map<string, string>()
+  private readonly queries = new Map<string, AbortController>()
   private closed = false
   constructor(private readonly host: PlatformSurfacesHost) {}
 
@@ -137,13 +139,11 @@ export class PlatformSurfaces {
     this.openIds.set(key, openId)
     try {
       signal.throwIfAborted()
-      const result = await this.host.invoke(
-        entry.ref,
-        entry.openAction,
-        { surfaceId: entry.id },
-        `surface:${intent}`,
-        signal
-      )
+      const invoke = () =>
+        this.host.invoke(entry.ref, entry.openAction, { surfaceId: entry.id }, `surface:${intent}`, signal)
+      const result = entry.interaction === "query"
+        ? await withPlatformQuery(signal, invoke)
+        : await invoke()
       this.current(address)
       signal.throwIfAborted()
       if (result.status !== "succeeded")
@@ -190,7 +190,20 @@ export class PlatformSurfaces {
     if (action.pane !== expected || action.kind === "close")
       throw new ModFunctionError("MODS_PLATFORM_SURFACE_ACTION_DENIED")
     signal?.throwIfAborted()
-    await this.host.panes.act(action)
+    if (entry.interaction === "query") {
+      const key = this.paneKey(entry),
+        controller = new AbortController()
+      this.queries.get(key)?.abort(new ModFunctionError("MODS_QUERY_SUPERSEDED"))
+      this.queries.set(key, controller)
+      const active = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal
+      try {
+        await withPlatformQuery(active, async () => {
+          await this.host.panes.act(action)
+        })
+      } finally {
+        if (this.queries.get(key) === controller) this.queries.delete(key)
+      }
+    } else await this.host.panes.act(action)
     this.current(address)
     this.assertCustody(entry, address)
     signal?.throwIfAborted()
@@ -226,6 +239,8 @@ export class PlatformSurfaces {
   private retirePage(entry: PlatformSurfaceEntry): Promise<void> {
     const key = this.paneKey(entry),
       existing = this.retirements.get(key)
+    this.queries.get(key)?.abort(new ModFunctionError("MODS_UI_PANE_CLOSED"))
+    this.queries.delete(key)
     if (existing) return existing
     const pending = Promise.resolve()
       .then(() => this.retirePageNow(entry))
@@ -279,6 +294,8 @@ export class PlatformSurfaces {
 
   close(): void {
     this.closed = true
+    for (const query of this.queries.values()) query.abort(new ModFunctionError("MODS_PLATFORM_CLOSED"))
+    this.queries.clear()
     this.disabled.clear()
     this.cleanupFailures.clear()
     this.openIds.clear()

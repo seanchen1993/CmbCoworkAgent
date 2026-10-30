@@ -175,6 +175,13 @@ export async function executeHostProjectSkill(
       stageId: stage.id,
       stageTitle: stage.title,
       actionIds: stage.actionIds,
+      ...(stage.contextArtifactIds === undefined
+        ? {}
+        : {
+            initialReadingArtifacts: project.manifest.artifacts.filter((item) =>
+              stage.contextArtifactIds!.includes(item.id)
+            )
+          }),
       artifacts: project.manifest.artifacts.filter((item) => stage.artifactIds.includes(item.id)),
       checks: project.manifest.checks.filter((item) => stage.checkIds.includes(item.id))
     })

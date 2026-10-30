@@ -15,7 +15,11 @@ import type {
 } from "../../../shared/project-runtime/host-types"
 import type { DevelopmentScope } from "../v2/development-session"
 import type { AuthoringAtomicSettings } from "./authoring-config-snapshot"
-import { ProjectStageSnapshots, type StageInputSnapshot } from "./project-stage-snapshots"
+import {
+  PROJECT_STAGE_SNAPSHOT_LIMITS,
+  ProjectStageSnapshots,
+  type StageInputSnapshot
+} from "./project-stage-snapshots"
 import type { ProjectAuthoringSessions } from "./project-authoring-session"
 import type { ProjectPreviewRegistry } from "./project-preview-registry"
 import type {
@@ -23,7 +27,10 @@ import type {
   HostSkillExecutionContext,
   HostStageBranchAdmissionContext
 } from "../../harness-board/project-runtime/host-service"
-import { runtimeDigest } from "../../harness-board/project-runtime/safe-files"
+import {
+  readRuntimeScopedFile,
+  runtimeDigest
+} from "../../harness-board/project-runtime/safe-files"
 import { assertStageDebugPackageSupported } from "./project-stage-debug-admission"
 import { assertStageBranchSourceCompatible } from "../../harness-board/project-runtime/stage-branch-compatibility"
 import { readProjectSource } from "./project-source"
@@ -829,9 +836,39 @@ export class ProjectStageDebugSessions {
       context.candidate,
       !!snapshot.recoveryInputs
     )
+    const prefix = new Set(
+      context.candidate.manifest.stages
+        .slice(0, context.candidate.stageIndex)
+        .flatMap((stage) => stage.artifactIds)
+    )
+    const requiredPaths = new Set(
+      context.candidate.manifest.artifacts
+        .filter((artifact) => artifact.required && prefix.has(artifact.id))
+        .map((artifact) => artifact.path)
+    )
+    const acceptedFiles = [...requiredPaths].map((path) => {
+      const files = snapshot.files.filter((file) => file.path === path)
+      if (files.length !== 1) fail("UPSTREAM_SNAPSHOT_MISSING")
+      return files[0]
+    })
     const assertCurrent = () => {
       admission.check()
       assertOriginalBaseline()
+      // Materialization precedes asynchronous provider registration. Bind accepted prefix
+      // bytes to the fixed native snapshot, never to whatever files are present at capture.
+      for (const expected of acceptedFiles) {
+        const actual = readRuntimeScopedFile(
+          context.candidate.workspace,
+          expected.path,
+          PROJECT_STAGE_SNAPSHOT_LIMITS.fileBytes
+        )
+        if (
+          !actual.bytes ||
+          actual.bytes.length !== expected.bytes ||
+          runtimeDigest(actual.bytes) !== expected.digest
+        )
+          fail("UPSTREAM_SNAPSHOT_CHANGED")
+      }
     }
     assertCurrent()
     return { assertCurrent }

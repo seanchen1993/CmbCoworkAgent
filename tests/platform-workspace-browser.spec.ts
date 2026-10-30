@@ -44,6 +44,7 @@ async function main() {
       let mounts=0,unmounts=0,seq=0,drawing=0,failTree=false,failClose=false,deferOpen=false,finishOpen,deferSurfaceRead=false,rejectRead,resolveRead,deferDisable=false,finishDisable,activeReads=0,maxActiveReads=0,completedReads=0,readFailures=[],persistentReadError='',actionError='';
       const lateFramesSeen=[];
       let deferAction=false,finishAction,catalogFailure=false;
+      let queryMode=false,cold=false,queryResult='初始查询',queryRequests=[],queryCompleted=0;
       let formKey='settings',formProvider='author';
       new MutationObserver(records=>{if(records.some(record=>[...record.addedNodes].some(node=>node.textContent?.includes('LATE frame '))))lateFramesSeen.push(true)}).observe(document.body,{subtree:true,childList:true});
       let present={version:1,presentable:true},nativePages=new Map(),activeThread='a',visible=true;
@@ -51,16 +52,18 @@ async function main() {
       window.api.mods.onCardsChanged=fn=>{pcards.add(fn);return()=>pcards.delete(fn)};
       window.api.mods.onPlatformChanged=fn=>{pchanges.add(fn);return()=>pchanges.delete(fn)};
       window.api.mods.onConfigurationChanged=fn=>{pconfig.add(fn);return()=>pconfig.delete(fn)};
-      const row=(t,side=false)=>({type:'surface',apiVersion:'devclaw.surface/v1',id:side?'sidebar':'board',title:side?'作者侧栏':'通用作者页面',placement:side?'sidebar':'page',paneId:'board',openAction:'open',key:'key-'+t+(side?'-side':''),ref:{provider:'author',id:'board',version:'1.0.0'},source:{provider:'author',digest:'a'.repeat(64),generation:t},enabled:true});
+      const row=(t,side=false)=>({type:'surface',apiVersion:queryMode?'devclaw.surface/v2':'devclaw.surface/v1',...(queryMode?{interaction:'query'}:{}),id:side?'sidebar':'board',title:side?'作者侧栏':'通用作者页面',placement:side?'sidebar':'page',paneId:'board',openAction:'open',key:'key-'+t+(side?'-side':''),ref:{provider:'author',id:'board',version:'1.0.0'},source:{provider:'author',digest:'a'.repeat(64),generation:t},enabled:true});
       const tree=marker=>failTree?{type:'Table',props:{columns:[],rows:[]}}:{type:'Box',props:{},children:[...(marker?[{type:'Text',props:{},children:[marker]}]:[]),{type:'Table',props:{label:'实际任务表',columns:[{key:'name',label:'任务'}],rows:[{name:'真实任务'}]}},{type:'Form',props:{key:formKey,label:'页面表单',fields:[{name:'title',label:'页面标题',type:'text',required:true}],values:{title:'原值'}},press:{plugin:formProvider,handle:1}}]};
-      const frame=(t,id)=>({openId:id,entry:row(t),pane:{key:'author:board',id:'board',plugin:'author',title:'通用作者页面',generation:'12345678-1234-1234-1234-123456789012',openRequestId:id,tree:tree(),closeOnEscape:true,rows:12}});
+      const queryDrawing=()=>queryMode?{type:'Box',props:{},children:[{type:'Text',props:{},children:[queryResult]},...[1,2,3].map(handle=>({type:'Button',props:{key:'query-'+handle,label:'查询文件'+handle},press:{plugin:'author',handle}}))]}:tree();
+      const frame=(t,id)=>({openId:id,entry:row(t),pane:{key:'author:board',id:'board',plugin:'author',title:'通用作者页面',generation:'12345678-1234-1234-1234-123456789012',openRequestId:id,tree:queryDrawing(),closeOnEscape:true,rows:12}});
       const api={
-        platformSurfaceList:async t=>{ops.push(['list',t]);if(catalogFailure)throw Error('CATALOG_UNAVAILABLE');return{revision:1,entries:[row(t),row(t,true),{...row(t),id:'navigation',key:'key-'+t+'-navigation',title:'切换作者页面',placement:'navigation'}],errors:[]}},
+        platformSurfaceList:async t=>{ops.push(['list',t]);if(catalogFailure)throw Error('CATALOG_UNAVAILABLE');return{revision:1,canPrepare:cold,entries:cold?[]:[row(t),row(t,true),{...row(t),id:'navigation',key:'key-'+t+'-navigation',title:'切换作者页面',placement:'navigation'}],errors:[]}},
+        platformSurfacePrepare:async t=>{ops.push(['prepare',t]);cold=false},
         platformBehaviorList:async t=>({revision:1,bindings:[{key:'author/format',title:'作者替换',point:'ui.toast',phase:'replace',available:true}],active:[],errors:[]}),
         platformSurfaceOpen:async(t,a,intent)=>{const id='open-'+(++seq);ops.push(['open',t,id]);const result=frame(t,id);if(deferOpen){deferOpen=false;await new Promise(r=>finishOpen=r)}nativePages.set(t,result);return result},
-        platformSurfaceRead:async(t,a)=>{ops.push(['read',t,a.openId]);activeReads++;maxActiveReads=Math.max(maxActiveReads,activeReads);const captured=nativePages.get(t);try{let resumed;if(deferSurfaceRead){deferSurfaceRead=false;resumed=await new Promise((r,j)=>{resolveRead=r;rejectRead=j})}if(readFailures.length)throw Error(readFailures.shift());if(persistentReadError)throw Error(persistentReadError);const result=resumed==='old'?captured:nativePages.get(t);if(!result||result.openId!==a.openId)throw Error('stale');return{...result,pane:{...result.pane,generation:'12345678-1234-1234-1234-'+String(++drawing).padStart(12,'0'),tree:tree(resumed==='old'?'LATE frame '+a.openId:undefined)}}}finally{activeReads--;completedReads++}},
+        platformSurfaceRead:async(t,a)=>{ops.push(['read',t,a.openId]);activeReads++;maxActiveReads=Math.max(maxActiveReads,activeReads);const captured=nativePages.get(t);try{let resumed;if(deferSurfaceRead){deferSurfaceRead=false;resumed=await new Promise((r,j)=>{resolveRead=r;rejectRead=j})}if(readFailures.length)throw Error(readFailures.shift());if(persistentReadError)throw Error(persistentReadError);const result=resumed==='old'?captured:nativePages.get(t);if(!result||result.openId!==a.openId)throw Error('stale');return{...result,pane:{...result.pane,generation:'12345678-1234-1234-1234-'+String(++drawing).padStart(12,'0'),tree:queryMode?queryDrawing():tree(resumed==='old'?'LATE frame '+a.openId:undefined)}}}finally{activeReads--;completedReads++}},
         platformSurfaceClose:async(t,a)=>{ops.push(['close',t,a.openId]);if(failClose)throw Error('physical cleanup unknown');if(nativePages.get(t)?.openId===a.openId)nativePages.delete(t)},
-        platformSurfaceAct:async(t,a,action)=>{ops.push(['act',t,a.openId,action.value,action.intentId]);if(deferAction){deferAction=false;await new Promise(r=>finishAction=r)}if(actionError){const message=actionError;actionError='';throw Error(message)}},
+        platformSurfaceAct:async(t,a,action)=>{ops.push(['act',t,a.openId,action.value,action.intentId]);if(queryMode){try{await new Promise((resolve,reject)=>queryRequests.push({resolve,reject,handle:action.handle,time:performance.now()}))}finally{queryCompleted++}return}if(deferAction){deferAction=false;await new Promise(r=>finishAction=r)}if(actionError){const message=actionError;actionError='';throw Error(message)}},
         platformSurfaceDisable:async(t,a)=>{ops.push(['disable',t,a.openId]);if(deferDisable){deferDisable=false;await new Promise(r=>finishDisable=r)}if(!a.openId||nativePages.get(t)?.openId===a.openId)nativePages.delete(t)},platformSurfaceEnable:async()=>{},
         platformBehaviorPreview:async(t,s)=>({previewId:'preview',revision:1,selected:s,order:s,conflicts:[],missing:[],canApply:true}),
         platformBehaviorApply:async()=>{ops.push(['apply'])},platformBehaviorDisable:async()=>{ops.push(['restore'])}
@@ -70,6 +73,9 @@ async function main() {
       function Harness({id,shown}){return <main style={{position:'relative',width:'100%',height:760}}><ChatProbe/>{shown&&<PlatformWorkspace threadId={id} active api={api}/>}</main>}
       const draw=()=>host.render(<Harness id={activeThread} shown={visible}/>);
       window.platformFixture={ops,counts:()=>({mounts,unmounts,sends,cards:pcards.size,platform:pchanges.size,activeReads,maxActiveReads,completedReads,lateFramesSeen:lateFramesSeen.length}),
+        queryCold:()=>{queryMode=true;cold=true;activeThread='query';draw()},
+        queryStats:()=>({pending:queryRequests.length,completed:queryCompleted,times:queryRequests.map(row=>row.time)}),
+        queryFinish:(index,fail=false)=>{const request=queryRequests[index];if(fail)request.reject(Error('MODS_QUERY_SUPERSEDED'));else{queryResult='查询结果'+request.handle;request.resolve()}},
         catalogFail:value=>{catalogFailure=value;for(const fn of pchanges)fn({threadId:activeThread})},
         formIdentity:(key,provider)=>{formKey=key;formProvider=provider;for(const fn of pchanges)fn({threadId:activeThread})},
         actionDefer:()=>deferAction=true,actionFinish:()=>finishAction(),
@@ -117,7 +123,9 @@ async function main() {
     const region = page.getByRole("region", { name: "通用作者页面", exact: true })
     await page.getByRole("button", { name: "作者侧栏", exact: true }).waitFor()
     await page.evaluate("window.platformFixture.catalogFail(true)")
-    const catalogueError = page.getByRole("alert").filter({ hasText: "扩展暂时不可用，聊天仍可继续" })
+    const catalogueError = page
+      .getByRole("alert")
+      .filter({ hasText: "扩展暂时不可用，聊天仍可继续" })
     await catalogueError.waitFor()
     await page.evaluate("window.platformFixture.catalogFail(false)")
     await catalogueError.waitFor({ state: "hidden" })
@@ -754,11 +762,115 @@ async function main() {
     )
     await page.keyboard.press("Escape")
     await region.waitFor({ state: "detached" })
+    // These are actual React controls with deferred IPC promises. Native cancellation and
+    // capability dispatch are independently exercised by platform-surfaces-query.test.ts.
+    await page.evaluate("window.platformFixture.queryCold()")
+    const prepare = page.getByRole("button", { name: "打开扩展视图", exact: true })
+    await prepare.waitFor()
+    await settle()
+    assert.equal(
+      await page.evaluate("window.platformFixture.ops.filter(x=>x[0]==='prepare').length"),
+      0
+    )
+    const beforePrepare = await stats()
+    await page.getByLabel("原聊天输入").fill("冷启动仍能输入")
+    await prepare.click()
+    await prepare.waitFor({ state: "detached" })
+    assert.equal(
+      await page.evaluate("window.platformFixture.ops.filter(x=>x[0]==='prepare').length"),
+      1
+    )
+    assert.equal((await stats()).opens, beforePrepare.opens)
+    assert.equal(await page.getByLabel("原聊天输入").inputValue(), "冷启动仍能输入")
+    checks.push(
+      "cold catalog prepares only after an explicit click; discovery preserves chat draft"
+    )
+
+    await open()
+    await region.waitFor()
+    for (const handle of [1, 2, 3]) {
+      const control = page.getByRole("button", { name: `查询文件${handle}`, exact: true })
+      assert(await control.isEnabled(), "A pending query must leave the next selection available")
+      await control.click()
+    }
+    assert.equal(await page.evaluate("window.platformFixture.queryStats().pending"), 3)
+    assert(await page.getByRole("button", { name: "切换作者页面", exact: true }).isEnabled())
+    await page.evaluate("window.platformFixture.queryFinish(2)")
+    await page.getByText("查询结果3", { exact: true }).waitFor()
+    await page.evaluate(
+      "window.platformFixture.queryFinish(0,true);window.platformFixture.queryFinish(1,true)"
+    )
+    await page.waitForFunction("window.platformFixture.queryStats().completed===3")
+    await settle()
+    assert(await page.getByText("查询结果3", { exact: true }).isVisible())
+    assert.equal(await page.getByRole("alert").count(), 0)
+    await page.screenshot({ path: join(output, "query-latest-375.png"), fullPage: true })
+    checks.push(
+      "three pending query clicks remain interactive; superseded rejections preserve latest result"
+    )
+
+    await page.getByRole("button", { name: "查询文件1", exact: true }).click()
+    await page.getByRole("button", { name: "切换作者页面", exact: true }).click()
+    await region.waitFor()
+    await page.evaluate("window.platformFixture.queryFinish(3,true)")
+    await page.waitForFunction("window.platformFixture.queryStats().completed===4")
+    await settle()
+    assert.equal(
+      await page.getByRole("alert").count(),
+      0,
+      "Retired query cannot report into a new page"
+    )
+    checks.push("switching surfaces while a query is pending ignores its late rejection")
+
+    for (const fail of [true, false]) {
+      const index = await page.evaluate<number>("window.platformFixture.queryStats().pending")
+      await page.getByRole("button", { name: "查询文件2", exact: true }).click()
+      const closingQuery = await stats()
+      await page.keyboard.press("Escape")
+      await region.waitFor({ state: "detached" })
+      await page.evaluate(
+        ({ index, fail }) => {
+          ;(
+            window as unknown as {
+              platformFixture: { queryFinish(index: number, fail: boolean): void }
+            }
+          ).platformFixture.queryFinish(index, fail)
+        },
+        { index, fail }
+      )
+      await page.waitForFunction(
+        (expected) =>
+          (
+            window as unknown as {
+              platformFixture: { queryStats(): { completed: number } }
+            }
+          ).platformFixture.queryStats().completed === expected,
+        index + 1
+      )
+      await settle()
+      assert.equal(await region.count(), 0)
+      assert.equal(await page.getByRole("alert").count(), 0)
+      assert.equal((await stats()).reads, closingQuery.reads)
+      assert.equal((await stats()).closes, closingQuery.closes + 1)
+      await open()
+      await region.waitFor()
+    }
+    checks.push(
+      "close discards late query success and rejection without reread, alert or resurrection"
+    )
+    await page.keyboard.press("Escape")
+    await region.waitFor({ state: "detached" })
     await page.screenshot({ path: join(output, "workspace-375.png"), fullPage: true })
     writeFileSync(
       join(output, "result.json"),
       JSON.stringify(
-        { passed: true, checks, calls: await page.evaluate("window.platformFixture.ops") },
+        {
+          passed: true,
+          checks,
+          evidence: "React browser with bounded native IPC fixture; not Electron IPC or live Git",
+          queryTiming: await page.evaluate("window.platformFixture.queryStats()"),
+          calls: await page.evaluate("window.platformFixture.ops")
+        },
         null,
         2
       )

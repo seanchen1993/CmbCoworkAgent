@@ -1,6 +1,7 @@
 import { IterableReadableStream } from "@langchain/core/utils/stream"
 import { types } from "node:util"
-import { setTimeout as yieldToEventLoop } from "node:timers/promises"
+import { createNativeStreamScheduler } from "./native-stream-scheduling"
+import { measureHostRuntimeAsync, measureHostRuntimeSync } from "../services/host-runtime-timing"
 import type { RunnableConfig } from "@langchain/core/runnables"
 import type { FunctionNativeConversationRuntime } from "../mods/manager"
 import { FUNCTION_STREAM_TERMINAL } from "../mods/v2/host-stream-lifetime"
@@ -195,13 +196,13 @@ export function wrapFunctionConversationNativeInvocation<T extends object>(
         ...(config.signal ? [config.signal] : [])])
     }
     const signal = installation ? derivation!.resolveCancellation(originalSignal) : originalSignal
-    const assertCurrent = () => {
+    const assertCurrent = () => measureHostRuntimeSync("streamGuard", () => {
       assertFunctionConversationNativeHostInstallation(host, nativeGraph, runtime)
       if (installation) Reflect.apply(throwIfAborted, signal, [])
       else signal.throwIfAborted()
       runtime.assertCurrent()
       assertFunctionConversationNativeHostInstallation(host, nativeGraph, runtime)
-    }
+    })
     assertCurrent()
     const lifetime = createFunctionConversationNativeSourceLifetime(nativeGraph, assertCurrent,
       { runtime, signal })
@@ -403,6 +404,7 @@ export function wrapFunctionConversationNativeInvocation<T extends object>(
               if (report) controller?.error(captured.signal.reason)
             }, () => { if (report) controller?.error(captured.signal.reason) })
           }
+          const schedule = createNativeStreamScheduler()
           class NativeStream extends IterableReadableStream<unknown> {
             readonly signal = captured.signal
             readonly [FUNCTION_STREAM_TERMINAL] = captured.terminal
@@ -416,13 +418,11 @@ export function wrapFunctionConversationNativeInvocation<T extends object>(
                 async pull(output) {
                   try {
                     while (!closed) {
-                      // Buffered graph frames otherwise chain fulfilled promises without an
-                      // event-loop turn, starving input/cancellation while terminal guards run.
-                      // A timer turn allows pending event-loop work to compete between frames.
-                      // Electron input latency is also covered by the packaged regression.
-                      // Yield before any frame check; every original authority/data check still
-                      // runs after resumption and validation through publication stays atomic.
-                      await yieldToEventLoop(0)
+                      // Bound uninterrupted work, not tokens per timer tick: Windows timers
+                      // can cost 15ms even with delay 0. Every original guard still runs on
+                      // every frame, after any scheduling gap and before atomic publication.
+                      const scheduled = schedule()
+                      if (scheduled) await scheduled
                       if (closed) return
                       captured.assertCurrent()
                       if (frames.length) {
@@ -431,7 +431,7 @@ export function wrapFunctionConversationNativeInvocation<T extends object>(
                         const shape = captured.lifetime.shape()
                         if (!shape) fail()
                         const queued = decode(frame.value, shape)
-                        host.validate(queued.mode, queued.payload)
+                        measureHostRuntimeSync("streamFrame", () => host.validate(queued.mode, queued.payload))
                         captured.assertCurrent()
                         const prepared = await prepareDiagnostic(frame)
                         if (prepared.kind === "deferred") continue
@@ -442,11 +442,11 @@ export function wrapFunctionConversationNativeInvocation<T extends object>(
                         output.enqueue(encoded)
                         return
                       }
-                      const item = await inner.next()
+                      const item = await measureHostRuntimeAsync("streamPull", () => inner.next())
                       if (closed) return
                       if (item.done) {
                         ended = true
-                        await captured.terminal
+                        await measureHostRuntimeAsync("streamTerminal", () => captured.terminal)
                         captured.assertCurrent()
                         confirmOmissions(true)
                         const source = captured.lifetime.sseSource()
@@ -461,7 +461,7 @@ export function wrapFunctionConversationNativeInvocation<T extends object>(
                         // Graph computation/checkpoint work and projection must not monopolize
                         // one microtask. Classify only; route re-decodes and fully validates
                         // after resumption. Raw message partials keep their immediate capture.
-                        await yieldToEventLoop(0)
+                        await schedule(true)
                         if (closed) return
                       }
                       captured.assertCurrent()
@@ -470,7 +470,8 @@ export function wrapFunctionConversationNativeInvocation<T extends object>(
                         const originalDiagnostic = captured.lifetime.diagnostic(item.value)
                         if (originalDiagnostic && deferPartial(originalDiagnostic)) continue
                       }
-                      const projected = route(item.value, captured.lifetime, host)
+                      const projected = measureHostRuntimeSync("streamFrame", () =>
+                        route(item.value, captured.lifetime, host))
                       captured.assertCurrent()
                       const frame = projected.shift()
                       if (!frame) continue

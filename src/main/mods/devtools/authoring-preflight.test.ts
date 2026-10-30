@@ -52,6 +52,59 @@ it("compiles once and checks both SDK and actual strict TypeScript from that cap
   expect(result.sdk.digest).toBe(result.compiled.digest)
 })
 
+it("checks the actual Input, Select and Code authoring contract without permitting arbitrary props", async () => {
+  const source = (body: string) => `import type { Register } from "devclaw-mods"
+export const register: Register = on => {
+  on("ui.render", {component:"Pane",requestId:"view"}, ($, event) => {
+    const {Box,Input,Select,Code} = $.ui.resolve(event)
+    ${body}
+    return Box({children:[]})
+  })
+}`
+  const valid = await analyzeAuthoringPreview(
+    await fixture(
+      source(`
+    Input({key:"path",label:"Path",placeholder:"Directory",value:"",submitLabel:"Select",
+      autoFocus:true,onSubmit:value=>value.toUpperCase(),onInput:value=>value.trim()})
+    Select({key:"choice",label:"Choice",options:[{value:"one",label:"One"}],value:"one",
+      autoFocus:true,onSelect:value=>value.toUpperCase()})
+    Code({source:"+line",language:"diff",path:"file.txt",startLine:1,format:"diff",wrap:"wrap"})
+  `)
+    )
+  )
+  expect(valid.typecheck.valid, JSON.stringify(valid.typecheck.diagnostics)).toBe(true)
+  expect(valid.sdk.strictCompatible).toBe(true)
+  const invalid = await analyzeAuthoringPreview(
+    await fixture(
+      source(`
+    Input({key:"bad-prop",onSubmit:value=>value,style:"unsafe"})
+    Input({key:"bad-event",onSubmit:(value:number)=>value})
+    Input({key:"missing-submit",onInput:value=>value})
+    Input({key:"false-focus",autoFocus:false,onSubmit:value=>value})
+    Select({key:"bad-select",options:[{value:"one",label:"One"}],onChange:(value:string)=>value})
+    Select({key:"bad-option",options:[{value:1,label:"One"}],onSelect:value=>value})
+    Select({key:"false-focus",options:[{value:"one",label:"One"}],autoFocus:false,onSelect:value=>value})
+    Code({source:"line",format:"html"})
+    Code({source:"line",wrap:"scroll"})
+    Code({source:"line",onPress:()=>"unexpected"})
+  `)
+    )
+  )
+  expect(invalid.typecheck.valid).toBe(false)
+  const diagnostics = invalid.typecheck.diagnostics.map((item) => item.message).join("\n")
+  for (const rejected of [
+    "style",
+    "number",
+    "onSubmit",
+    "onChange",
+    "html",
+    "scroll",
+    "onPress",
+    "false"
+  ])
+    expect(diagnostics).toContain(rejected)
+})
+
 it("still reports real type errors after the single compile and never reuses a prior candidate", async () => {
   const root = await fixture()
   const compile = vi.spyOn(loader, "compileFunctionPlugin")
@@ -76,7 +129,7 @@ it("does not admit a type-correct SDK escape through the shared source snapshot"
   const root = await fixture(
     validSource.replace(
       'await $.store.get("preview.value")',
-      'const relay = (sdk: typeof $) => sdk.store.get("preview.value"); await relay($)'
+      'const relay = (sdk: typeof $) => ({ sdk }); await relay($)'
     )
   )
   const compile = vi.spyOn(loader, "compileFunctionPlugin")
@@ -102,6 +155,25 @@ it("does not admit a type-correct SDK escape through the shared source snapshot"
       expect.objectContaining({ file: "mods/main.ts", code: "MODS_SDK_UNVERIFIED" })
     ])
   )
+})
+
+it("admits a type-correct captured helper while retaining the exact compile identity", async () => {
+  const root = await fixture('import { install } from "./helpers"\nexport const register = install')
+  await writeFile(join(root, "mods/helpers.ts"), `import type { Register, SDK } from "devclaw-mods"
+    export const install: Register = on => {
+      on("command.run", async sdk => { await readValue(sdk, "preview.value"); return {text:"checked"} })
+    }
+    async function readValue(sdk: Pick<SDK, "store">, key: string) { return sdk.store.get(key) }
+  `)
+  const compile = vi.spyOn(loader, "compileFunctionPlugin")
+  const result = await analyzeAuthoringPreview(root)
+  expect(compile).toHaveBeenCalledTimes(1)
+  expect(result.typecheck.valid, JSON.stringify(result.typecheck.diagnostics)).toBe(true)
+  expect(result.sdk.strictCompatible, JSON.stringify(result.sdk.diagnostics)).toBe(true)
+  expect(result.sdk.digest).toBe(result.compiled.digest)
+  expect(authoringValidationResult(result.compiled.digest, result)).toMatchObject({
+    valid: true, runtimeVerified: false, capabilities: ["store.get"]
+  })
 })
 
 it("checks the captured candidate without reading later edits from its source directory", async () => {

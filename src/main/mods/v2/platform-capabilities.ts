@@ -1,9 +1,20 @@
 import { AsyncLocalStorage } from "node:async_hooks"
-import { assertWorkflowResourceAdmission, workflowResourceDeadlineSignal } from "../../agent/workflow/resource-deadline"
-import { assertWorkflowActionDispatchAllowed, assertWorkflowVerificationCurrent,
-  verifyWorkflowVerificationCurrent, activeWorkflowVerificationAccessScope } from "../../agent/workflow/worktree-action-scope"
-import { assertNativeProjectContextDispatch, assertNativeProjectContextMethod,
-  activeNativeProjectContextAccessScope } from "./project-context-scope"
+import { assertPlatformQueryMethod, platformQuerySignal } from "./platform-query-scope"
+import {
+  assertWorkflowResourceAdmission,
+  workflowResourceDeadlineSignal
+} from "../../agent/workflow/resource-deadline"
+import {
+  assertWorkflowActionDispatchAllowed,
+  assertWorkflowVerificationCurrent,
+  verifyWorkflowVerificationCurrent,
+  activeWorkflowVerificationAccessScope
+} from "../../agent/workflow/worktree-action-scope"
+import {
+  assertNativeProjectContextDispatch,
+  assertNativeProjectContextMethod,
+  activeNativeProjectContextAccessScope
+} from "./project-context-scope"
 import { createHash } from "node:crypto"
 import type { ModJson, ModObject } from "../../../shared/mods/types"
 import type { FunctionRegistration } from "../../../shared/mods/v2/contracts"
@@ -124,6 +135,8 @@ export class PlatformCapabilities {
       promise: Promise<PlatformCapabilityActionResult>
       caller: FunctionPlugin
       ref: PlatformCapabilityRef
+      fingerprint: string
+      cleanup: boolean
     }
   >()
   private readonly outcomes = {
@@ -231,6 +244,7 @@ export class PlatformCapabilities {
   }
   /** Every nested SDK effect checks both provider and the original, host-captured callers. */
   assertDelegates(method: string): void {
+    assertPlatformQueryMethod(method)
     assertNativeProjectContextMethod(method)
     const mode =
       this.scopes.getStore()?.nativeMode ?? (this.cleanupScopes.getStore() ? "cleanup" : undefined)
@@ -250,6 +264,7 @@ export class PlatformCapabilities {
     for (const plugin of scope.plugins) this.current(plugin, method)
   }
   assertResourceMethod(method: string): void {
+    assertPlatformQueryMethod(method)
     if (
       (this.cleanupScopes.getStore() || this.scopes.getStore()?.nativeMode) &&
       !["resource.close", "resource.cancel-open", "resource.release-open"].includes(method)
@@ -360,12 +375,15 @@ export class PlatformCapabilities {
     signal: AbortSignal,
     method: string
   ): NativePlatformCallContext {
+    const querySignal = platformQuerySignal()
+    if (querySignal) signal = AbortSignal.any([signal, querySignal])
     const ref = {
       provider: provider.plugin.name,
       id: provider.descriptor.id,
       version: provider.descriptor.version
     }
     const assertCurrent = () => {
+      assertPlatformQueryMethod(method)
       signal.throwIfAborted()
       this.current(caller, method)
       this.assertInfo(ref, provider.source)
@@ -432,6 +450,9 @@ export class PlatformCapabilities {
     args: ModJson[],
     signal: AbortSignal
   ): Promise<ModJson | undefined> {
+    assertPlatformQueryMethod(method)
+    const querySignal = platformQuerySignal()
+    if (querySignal) signal = AbortSignal.any([signal, querySignal])
     this.current(plugin, method)
     signal.throwIfAborted()
     if (method === "platform.list") {
@@ -441,9 +462,19 @@ export class PlatformCapabilities {
     if (args.length !== 1) platformError("MODS_PLATFORM_ARGUMENTS")
     if (method === "platform.read" || method === "platform.subscribe") {
       const { provider, ref } = this.query(args[0])
+      if (platformQuerySignal() && provider.native && !provider.native.queryRead)
+        platformError("MODS_QUERY_NATIVE_DENIED")
       assertNativeProjectContextMethod(method)
-      assertNativeProjectContextDispatch(plugin.name, this.source(plugin).digest, ref, undefined, this.scopes.getStore()?.depth ?? 0)
+      assertNativeProjectContextDispatch(
+        plugin.name,
+        this.source(plugin).digest,
+        ref,
+        undefined,
+        this.scopes.getStore()?.depth ?? 0
+      )
       await this.refreshNative(provider, plugin, signal, method)
+      assertPlatformQueryMethod(method)
+      signal.throwIfAborted()
       if (method === "platform.read") return platformJson(this.read(provider, ref))
       const subscription = this.host.hub.subscribe(
         this.ownerFor(plugin),
@@ -510,6 +541,8 @@ export class PlatformCapabilities {
       }
       // A source revoked after subscribe must never publish a stale packet to its observer.
       const provider = this.subscriptions.get(row.subscriptionId)?.provider
+      if (platformQuerySignal() && provider?.native && !provider.native.queryRead)
+        platformError("MODS_QUERY_NATIVE_DENIED")
       if (provider) this.current(provider.plugin)
       return platformJson(
         this.host.hub.poll(this.ownerFor(plugin), row.subscriptionId, row.afterRevision as number)
@@ -587,23 +620,39 @@ export class PlatformCapabilities {
     if (!saved || JSON.stringify(saved.ref) !== JSON.stringify(ref))
       platformError("MODS_PLATFORM_REQUEST_UNKNOWN")
     const native = this.assertInfo(ref)
-    const accessScope = native.native?.accessScope?.(this.nativeContext(native, caller, this.host.lifetime, "platform.read"))
-      ?? activeNativeProjectContextAccessScope() ?? activeWorkflowVerificationAccessScope()
-    if (accessScope !== saved.nativeAccessScope && (accessScope !== undefined || saved.nativeAccessScope !== undefined))
+    const accessScope =
+      native.native?.accessScope?.(
+        this.nativeContext(native, caller, this.host.lifetime, "platform.read")
+      ) ??
+      activeNativeProjectContextAccessScope() ??
+      activeWorkflowVerificationAccessScope()
+    if (
+      accessScope !== saved.nativeAccessScope &&
+      (accessScope !== undefined || saved.nativeAccessScope !== undefined)
+    )
       platformError("MODS_PLATFORM_ACCESS_SCOPE_CHANGED")
-    const accessContext = this.nativeContext(native, caller,
-      AbortSignal.any([signal, this.host.lifetime]), "platform.read")
+    const accessContext = this.nativeContext(
+      native,
+      caller,
+      AbortSignal.any([signal, this.host.lifetime]),
+      "platform.read"
+    )
     let actionAccess: NativePlatformActionAccess | undefined
     const recheck = async () => {
-      const next = await native.native!.prepareActionAccess!(accessContext,
-        String(saved.action), saved.nativeActionSelector)
+      const next = await native.native!.prepareActionAccess!(
+        accessContext,
+        String(saved.action),
+        saved.nativeActionSelector
+      )
       accessContext.assertCurrent()
       accessContext.signal.throwIfAborted()
       this.assertInfo(ref, native.source)
       actionAccess?.assertCurrent()
       next?.assertCurrent()
-      if (next?.identity !== saved.nativeActionAccessScope ||
-        (actionAccess && next?.identity !== actionAccess.identity))
+      if (
+        next?.identity !== saved.nativeActionAccessScope ||
+        (actionAccess && next?.identity !== actionAccess.identity)
+      )
         platformError("MODS_PLATFORM_ACCESS_SCOPE_CHANGED")
       actionAccess = next
     }
@@ -650,6 +699,15 @@ export class PlatformCapabilities {
   ): Promise<PlatformCapabilityActionResult> {
     const row = platformRecord(value, ["ref", "target", "action", "input", "requestKey"])
     const { provider, ref } = this.query({ ref: row.ref, target: row.target })
+    const querySignal = platformQuerySignal()
+    if (
+      querySignal &&
+      provider.native &&
+      !provider.native.queryActions?.includes(String(row.action))
+    )
+      platformError("MODS_QUERY_NATIVE_DENIED")
+    if (querySignal) signal = AbortSignal.any([signal, querySignal])
+    const ephemeral = Boolean(nativeMode || querySignal)
     this.current(caller, "platform.act")
     signal.throwIfAborted()
     const action = provider.descriptor.actions.find((action) => action.id === row.action)
@@ -660,14 +718,24 @@ export class PlatformCapabilities {
       platformError("MODS_PLATFORM_INPUT_LIMIT")
     validateRegisteredToolInput(action.inputSchema, row.input)
     const parent = this.scopes.getStore()
-    assertNativeProjectContextDispatch(caller.name, this.source(caller).digest, ref, action.id, parent?.depth ?? 0)
+    assertNativeProjectContextDispatch(
+      caller.name,
+      this.source(caller).digest,
+      ref,
+      action.id,
+      parent?.depth ?? 0
+    )
     if ((parent?.depth ?? 0) >= 8) platformError("MODS_PLATFORM_CALL_DEPTH")
     const plugins = [...new Set([...(parent?.plugins ?? []), caller, provider.plugin])]
     const rawSelector = provider.native?.actionSelector?.(action.id, row.input as ModObject)
     const nativeActionSelector = rawSelector === undefined ? undefined : platformCopy(rawSelector)
-    if (nativeActionSelector !== undefined &&
-      (!nativeActionSelector || typeof nativeActionSelector !== "object" || Array.isArray(nativeActionSelector) ||
-        Buffer.byteLength(JSON.stringify(nativeActionSelector)) > 1024))
+    if (
+      nativeActionSelector !== undefined &&
+      (!nativeActionSelector ||
+        typeof nativeActionSelector !== "object" ||
+        Array.isArray(nativeActionSelector) ||
+        Buffer.byteLength(JSON.stringify(nativeActionSelector)) > 1024)
+    )
       platformError("MODS_PLATFORM_NATIVE_SELECTOR_INVALID")
     let actionAccess: NativePlatformActionAccess | undefined
     let actionAccessPrepared = false
@@ -682,6 +750,7 @@ export class PlatformCapabilities {
       actionAccess?.assertCurrent()
     }
     const assertCurrent = () => {
+      assertPlatformQueryMethod("platform.act")
       assertWorkflowResourceAdmission()
       parent?.assertCurrent()
       signal.throwIfAborted()
@@ -691,7 +760,10 @@ export class PlatformCapabilities {
     assertCurrent()
     const prepareActionAccess = async () => {
       const next = await provider.native!.prepareActionAccess!(
-        this.nativeContext(provider, caller, signal, "platform.act"), action.id, nativeActionSelector)
+        this.nativeContext(provider, caller, signal, "platform.act"),
+        action.id,
+        nativeActionSelector
+      )
       assertCurrent()
       next?.assertCurrent()
       if (actionAccessPrepared && next?.identity !== actionAccess?.identity)
@@ -705,27 +777,42 @@ export class PlatformCapabilities {
     }
     const nativeActionAccessScope = actionAccess?.identity
     const requestId = this.requestId(caller, row.requestKey)
-    const key = nativeMode ? `native:${nativeMode}:${requestId}` : requestId
+    const key = ephemeral ? `native:${nativeMode ?? "query"}:${requestId}` : requestId
     if (parent?.requests?.has(key) && this.running.has(key))
       platformError("MODS_PLATFORM_REQUEST_REENTRANT")
     const callerDigest = this.source(caller).digest
     const providerDigest = provider.source.digest
-    const nativeAccessScope = provider.native?.accessScope?.(this.nativeContext(provider, caller, signal, "platform.act"))
-      ?? activeNativeProjectContextAccessScope() ?? activeWorkflowVerificationAccessScope()
+    const nativeAccessScope =
+      provider.native?.accessScope?.(
+        this.nativeContext(provider, caller, signal, "platform.act")
+      ) ??
+      activeNativeProjectContextAccessScope() ??
+      activeWorkflowVerificationAccessScope()
     const fingerprint = createHash("sha256")
-      .update(JSON.stringify([ref, row.action, row.input, callerDigest, providerDigest,
-        ...(nativeAccessScope === undefined ? [] : [nativeAccessScope]),
-        ...(nativeActionAccessScope === undefined ? [] : [nativeActionAccessScope, nativeActionSelector])]))
+      .update(
+        JSON.stringify([
+          ref,
+          row.action,
+          row.input,
+          callerDigest,
+          providerDigest,
+          ...(nativeAccessScope === undefined ? [] : [nativeAccessScope]),
+          ...(nativeActionAccessScope === undefined
+            ? []
+            : [nativeActionAccessScope, nativeActionSelector])
+        ])
+      )
       .digest("hex")
-    const saved = nativeMode
+    const saved = ephemeral
       ? undefined
       : (this.host.hub.record(this.namespace(), key) as ModObject | undefined)
-    if (nativeMode && this.running.has(key)) {
-      const pending = this.running.get(key)!.promise
-      if (!provider.native?.prepareActionAccess) return pending
+    if (ephemeral && this.running.has(key)) {
+      const active = this.running.get(key)!
+      if (active.fingerprint !== fingerprint) platformError("MODS_PLATFORM_REQUEST_CONFLICT")
+      const pending = active.promise
       const result = await pending
       assertCurrent()
-      await prepareActionAccess()
+      if (provider.native?.prepareActionAccess) await prepareActionAccess()
       actionAccess?.assertContentCurrent?.()
       assertCurrent()
       return result
@@ -743,16 +830,24 @@ export class PlatformCapabilities {
       return result
     }
     assertWorkflowActionDispatchAllowed()
-    if (!nativeMode && this.running.size >= 16) platformError("MODS_PLATFORM_ACTION_LIMIT")
+    // Cleanup must remain available when ordinary/query actions occupy all admission slots.
+    // Its own bounded reserve cannot admit new effects or increase ordinary concurrency.
+    const cleanup = nativeMode === "cleanup"
+    const activeCount = [...this.running.values()].filter((active) => active.cleanup === cleanup).length
+    if (activeCount >= (cleanup ? 4 : 16)) platformError("MODS_PLATFORM_ACTION_LIMIT")
     const controller = new AbortController()
-    const lifetime = AbortSignal.any([signal, this.host.lifetime, controller.signal,
-      ...(workflowResourceDeadlineSignal() ? [workflowResourceDeadlineSignal()!] : [])])
+    const lifetime = AbortSignal.any([
+      signal,
+      this.host.lifetime,
+      controller.signal,
+      ...(workflowResourceDeadlineSignal() ? [workflowResourceDeadlineSignal()!] : [])
+    ])
     const initial: PlatformCapabilityActionResult = {
       requestKey: row.requestKey as string,
       status: "running"
     }
     const save = (result: PlatformCapabilityActionResult) => {
-      if (!nativeMode)
+      if (!ephemeral)
         this.host.hub.save(
           this.namespace(),
           key,
@@ -771,7 +866,7 @@ export class PlatformCapabilities {
     }
     // Durable intent precedes guest entry. A crash at either side is conservatively unknown.
     save(initial)
-    const invocationOwner = owner ?? (nativeMode ? undefined : {})
+    const invocationOwner = owner ?? (ephemeral ? undefined : {})
     const scope: Invocation = {
       depth: (parent?.depth ?? 0) + 1,
       nativeMode,
@@ -862,10 +957,10 @@ export class PlatformCapabilities {
       })
     const promise = Promise.resolve()
       .then(() =>
-        nativeMode ? execute() : this.host.runAction(lifetime, invocationOwner!, execute)
+        ephemeral ? execute() : this.host.runAction(lifetime, invocationOwner!, execute)
       )
       .finally(() => this.running.delete(key))
-    this.running.set(key, { controller, promise, caller, ref })
+    this.running.set(key, { controller, promise, caller, ref, fingerprint, cleanup })
     return promise
   }
   async nativeAct(

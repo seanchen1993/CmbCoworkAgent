@@ -117,6 +117,74 @@ function hostFor(agent: ReturnType<typeof createAgent>,
 }
 
 describe("actual native invocation and source terminal", () => {
+  it.each(["complete", "cancel", "revoke"] as const)(
+    "preserves buffered token authority and event-loop scheduling: %s", async outcome => {
+      const f = fixture()
+      const count = 128
+      class BufferedModel extends LocalModel {
+        override async *_streamResponseChunks(_messages: BaseMessage[], _options: this["ParsedCallOptions"],
+          manager?: CallbackManagerForLLMRun): AsyncGenerator<ChatGenerationChunk> {
+          for (let index = 0; index < count; index++) {
+            const text = String(index)
+            const chunk = new ChatGenerationChunk({ text,
+              message: new AIMessageChunk({ id: "buffered-tokens", content: text }) })
+            await manager?.handleLLMNewToken(text, undefined, undefined, undefined, undefined, { chunk })
+            yield chunk
+          }
+        }
+      }
+      const agent = createAgent({ model: new BufferedModel(() => { throw Error("STREAM_REQUIRED") }),
+        checkpointer: f.saver }), h = hostFor(agent)
+      const captured: string[] = []
+      h.host.message = value => {
+        if (!Array.isArray(value)) throw Error("TOKEN_TUPLE_REQUIRED")
+        if (AIMessageChunk.isInstance(value[0])) captured.push(String(value[0].content))
+        return value
+      }
+      const cut = new AbortController(), reason = Error("BUFFERED_TOKEN_AUTHORITY_CHANGED")
+      let revoked = false
+      const runtime = { signal: cut.signal, assertCurrent() {
+        cut.signal.throwIfAborted()
+        if (revoked) throw reason
+      } }
+      const wrapped = wrapFunctionConversationNativeInvocation(agent, h.host, runtime)
+      const started = performance.now()
+      let pulses = 0
+      const timer = setInterval(() => { pulses++ }, 0)
+      let change: NodeJS.Timeout | undefined
+      try {
+        const delivered: string[] = []
+        const consume = async () => {
+          for await (const frame of await wrapped.stream(input(), { ...f.config, streamMode: "messages" })) {
+            if (!Array.isArray(frame)) throw Error("TOKEN_TUPLE_REQUIRED")
+            if (AIMessageChunk.isInstance(frame[0])) delivered.push(String(frame[0].content))
+            if (delivered.length === 1 && outcome !== "complete") {
+              change = setTimeout(() => {
+                if (outcome === "cancel") cut.abort(reason)
+                else revoked = true
+              }, 0)
+              // Real consumer work exhausts this slice; the next demand must service the
+              // pending cancellation/revocation and recheck before publishing another token.
+              const until = performance.now() + 10
+              while (performance.now() < until) { /* Intentional bounded CPU work. */ }
+            }
+          }
+        }
+        if (outcome === "complete") {
+          await consume()
+          expect(delivered).toEqual(Array.from({ length: count }, (_, index) => String(index)))
+        } else {
+          await expect(consume()).rejects.toThrow(reason.message)
+          expect(delivered).toEqual(["0"])
+        }
+        expect(captured).toEqual(delivered)
+        expect(pulses).toBeGreaterThan(0)
+        if (process.env.CMB_SHARED_STREAM_DIAGNOSTIC === "1")
+          console.info("Buffered native stream timing", JSON.stringify({ frames: delivered.length, outcome,
+            elapsedMs: Math.round(performance.now() - started), timerPulses: pulses }))
+      } finally { clearInterval(timer); if (change) clearTimeout(change) }
+    })
+
   it.each(["values", "updates"] as const)(
     "services a timer after actual %s graph delivery before routing", async mode => {
       const f = fixture(), provider = new LocalModel(() => new AIMessage("actual response"))

@@ -1,0 +1,2 @@
+// Retained execution policy source; see provenance.json.
+export default "import re\n\ndef safe_path(name):\n    if (not isinstance(name, str) or len(name) > 240 or \"\\\\\" in name or \":\" in name\n        or any(part in {\"\", \".\", \"..\"} or re.search(r'[<>\"|?*\\x00-\\x1f]|[. ]$', part)\n               or re.match(r'^(con|prn|aux|nul|com[0-9]|lpt[0-9])(?:\\.|$)', part, re.I)\n               for part in name.split(\"/\"))):\n        raise ValueError(\"ARTIFACT_BUNDLE_PATH_INVALID\")\n    return name\n\n\n"

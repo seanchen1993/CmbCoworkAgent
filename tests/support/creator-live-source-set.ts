@@ -24,7 +24,12 @@ export async function importLiveCreatorSourceSet(input: {
     }) as typeof original
   }, directory)
   const visibleEntry = await page.locator('[data-app-guide="workspace"]').count()
-  if (!visibleEntry) await page.getByRole("button", { name: "导入插件源码", exact: true }).click()
+  if (!visibleEntry) {
+    const advanced = page.getByText("高级开发", { exact: true })
+    if (!(await advanced.evaluate((element) => (element.parentElement as HTMLDetailsElement).open)))
+      await advanced.click()
+    await page.getByRole("button", { name: "导入插件源码", exact: true }).click()
+  }
   if (!visibleEntry)
     await page.getByRole("dialog", { name: "插件创作工作区", exact: true }).waitFor()
   const panel = await openCreatorStep(page, "delivery")

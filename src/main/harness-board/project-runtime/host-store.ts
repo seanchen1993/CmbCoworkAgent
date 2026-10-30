@@ -5,6 +5,7 @@ import { DatabaseSync, type StatementSync } from "node:sqlite"
 import type { ProjectWorkspaceModeGuard } from "./workspace-mode-guard"
 import { parseHostLegacyImportReceipt } from "./legacy-import-protocol"
 import { effectiveHostResultApproval } from "../../../shared/project-runtime/import-approval-policy"
+import { parseHostBranchInputs, type HostBranchInputs } from "./host-branch-inputs"
 import { LOCAL_PROJECT_SEARCH_MAX_CHARS } from "../../../shared/project-runtime/platform-api"
 import type {
   HostActionPrepareInput,
@@ -82,6 +83,9 @@ export class HostProjectStore {
             data TEXT NOT NULL, PRIMARY KEY(project_id,version)
           );
           CREATE TABLE IF NOT EXISTS host_legacy_imports (
+            project_id TEXT PRIMARY KEY REFERENCES host_projects(id), data TEXT NOT NULL
+          );
+          CREATE TABLE IF NOT EXISTS host_branch_inputs (
             project_id TEXT PRIMARY KEY REFERENCES host_projects(id), data TEXT NOT NULL
           );
         `)
@@ -215,10 +219,17 @@ export class HostProjectStore {
   }
 
   lastStageTransition(projectId: string, stageId: string) {
+    const transition = this.findStageTransition(projectId, stageId)
+    if (!transition) hostStateError("PLAN_MIGRATION_HISTORY_MISSING")
+    return transition
+  }
+
+  findStageTransition(projectId: string, stageId: string) {
     const row = this.db.prepare(`SELECT id,transition_result FROM host_operations
       WHERE project_id=? AND status='transitioned' AND json_extract(data,'$.stageId')=?
       ORDER BY rowid DESC LIMIT 1`).get(hostText(projectId), hostText(stageId))
-    if (!row || typeof row.transition_result !== "string") hostStateError("PLAN_MIGRATION_HISTORY_MISSING")
+    if (!row) return undefined
+    if (typeof row.transition_result !== "string") hostStateError("PLAN_MIGRATION_HISTORY_MISSING")
     return { operation: this.requireOperation(String(row.id)),
       project: parseHostProjectState(JSON.parse(row.transition_result)) }
   }
@@ -248,13 +259,27 @@ export class HostProjectStore {
 
   /** Main-only branch construction after service-owned baseline admission, never a stage advance. */
   createBranch(input: HostProjectCreateInput, stageId: string,
-    source: { projectId: string; expectedVersion: number }): HostProjectState {
+    source: { projectId: string; expectedVersion: number }, inputs?: HostBranchInputs): HostProjectState {
     hostText(stageId)
+    if (inputs) {
+      inputs = parseHostBranchInputs(inputs)
+      if (inputs.projectId !== input.projectId || inputs.sourceProjectId !== source.projectId ||
+        inputs.sourceVersion !== source.expectedVersion || inputs.pluginDigest !== input.pluginDigest ||
+        input.manifest.stages[inputs.stageIndex]?.id !== stageId)
+        hostStateError("BRANCH_INPUT_BASELINE_INVALID")
+    }
     return this.createAtStage(input, stageId, undefined, () => {
       const project = this.requireProject(hostText(source.projectId))
       if (project.version !== source.expectedVersion) hostStateError("BRANCH_SOURCE_CHANGED")
       this.assertImportPrefixComplete(project.projectId, stageId)
-    })
+    }, inputs)
+  }
+  branchInputs(projectId: string): HostBranchInputs | undefined {
+    const row = this.db.prepare("SELECT data FROM host_branch_inputs WHERE project_id=?").get(hostText(projectId))
+    if (!row) return undefined
+    const inputs = parseHostBranchInputs(JSON.parse(String(row.data)))
+    if (inputs.projectId !== projectId) hostStateError("BRANCH_INPUT_BASELINE_INVALID")
+    return inputs
   }
   /** Import review remains mandatory until every original prefix stage has crossed its new gates. */
   assertImportPrefixComplete(projectId: string, branchStageId?: string): void {
@@ -282,7 +307,7 @@ export class HostProjectStore {
   }
 
   private createAtStage(input: HostProjectCreateInput, stageId?: string, receipt?: HostLegacyImportReceipt,
-    assertSource?: () => void): HostProjectState {
+    assertSource?: () => void, branchInputs?: HostBranchInputs): HostProjectState {
     hostRecord(input, [
       "projectId",
       "name",
@@ -320,6 +345,8 @@ export class HostProjectStore {
         .run(state.projectId, state.version, JSON.stringify(state))
       if (receipt) this.db.prepare("INSERT INTO host_legacy_imports VALUES (?,?)")
         .run(state.projectId, JSON.stringify(receipt))
+      if (branchInputs) this.db.prepare("INSERT INTO host_branch_inputs VALUES (?,?)")
+        .run(state.projectId, JSON.stringify(branchInputs))
       return state
     }, state.workspace)
   }

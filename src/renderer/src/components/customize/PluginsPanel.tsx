@@ -835,7 +835,7 @@ export function PluginsPanel(): React.JSX.Element {
       >
         <div className="p-3 border-b border-border space-y-2">
           <div className="flex items-center justify-between gap-2">
-            <h2 className="text-base font-bold">插件来源</h2>
+            <h2 className="text-base font-bold">Plugins</h2>
             <div className="flex items-center gap-1">
               <div className="relative flex-1 min-w-[120px] max-w-[160px]">
                 <Search className="absolute left-2 top-1/2 -translate-y-1/2 size-3.5 text-muted-foreground pointer-events-none" />
@@ -1111,7 +1111,6 @@ export function PluginDetailPanel(props: {
                 插件是一个可分发的功能包，可以把技能、MCP 服务、Hooks
                 和静态资源放在一起安装、启用、禁用和卸载。
                 适合把一套完整工作流交给团队复用，而不是让每个人分别添加技能、连接器和 Hook 规则。
-                安装后返回“插件”，点击“启用”或“去使用”。
               </p>
             </div>
           </div>

@@ -11,23 +11,8 @@ import {
 import { readAuthoringProjectSource } from "./project-source"
 import { nativeCompositionSchema } from "../../plugins/native-composition"
 
-const path = z
-  .string()
-  .min(1)
-  .max(160)
-  .refine(
-    (value) => /^[A-Za-z0-9_-]+(?:\/[A-Za-z0-9_-]+)*$/.test(value),
-    "controlled relative directory required"
-  )
-export const projectSourceSetSchema = z
-  .object({
-    protocol: z.literal("devclaw.project-source-set/v1"),
-    title: z.string().trim().min(1).max(100),
-    goal: z.string().trim().min(1).max(8000),
-    project: path,
-    dependencies: z.array(path).max(8)
-  })
-  .strict()
+import { projectSourceSetSchema } from "./project-source-set-declaration"
+export { projectSourceSetSchema } from "./project-source-set-declaration"
 
 /** A user-selected local root is the only path authority. No downloads or installed-source lookup. */
 export async function readProjectSourceSet(root: string, guard: () => void) {

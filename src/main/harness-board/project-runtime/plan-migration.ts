@@ -20,6 +20,7 @@ import {
   parseProjectActionLock
 } from "../../../shared/project-runtime/action-bindings"
 import type { ClawActionDescriptor } from "../../../shared/mods/claw-actions"
+import { readNativeCompositionProviderContracts } from "../../plugins/native-composition-dependencies"
 
 /** Author source paths are editable only after checking their actual generated runtime projection. */
 function nativeFutureSkills(files: Map<string, Buffer>, completed: number): string[] {
@@ -49,6 +50,19 @@ function nativeFutureSkills(files: Map<string, Buffer>, completed: number): stri
           throw Error("inconsistent retained provider contract")
         catalog.set(key, descriptor)
       }
+    // These retained contracts only reconstruct compiler bytes. Live execution still resolves
+    // its authorized catalog; a snapshot never installs or enables an action.
+    const compositionLock = files.get("composition/lock.json")
+    const contracts = compositionLock
+      ? readNativeCompositionProviderContracts(JSON.parse(compositionLock.toString("utf8")).providerContracts)
+      : []
+    for (const descriptor of contracts) {
+      const { pluginId, plugin, digest, actionId } = descriptor
+      const key = JSON.stringify({ pluginId, plugin, digest, actionId })
+      if (catalog.has(key) && !isDeepStrictEqual(catalog.get(key), descriptor))
+        throw Error("inconsistent retained provider contract")
+      catalog.set(key, descriptor)
+    }
     const inputs = [
       ...new Set([...source.resources, ...source.modules.map((module) => module.skill)])
     ]

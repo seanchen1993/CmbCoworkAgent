@@ -102,6 +102,7 @@ export function PlatformWorkspace({
   const [busy, setBusy] = useState(false)
   const [reading, setReading] = useState<FrameRead>()
   const actionPending = useRef(new Set<string>())
+  const querySequence = useRef(0)
   const [error, setError] = useState("")
   const [showBehaviors, setShowBehaviors] = useState(false)
   const [cleanup, setCleanup] = useState<{ threadId: string; address: PlatformSurfaceAddress }>()
@@ -393,15 +394,20 @@ export function PlatformWorkspace({
     kind: FunctionUiAction["kind"],
     value?: ModJson
   ) => {
-    if (!shown?.value.pane || busy || !current()) return
+    const query = shown?.value.entry.interaction === "query"
+    if (!shown?.value.pane || (busy && !query) || !current()) return
     const actionKey = JSON.stringify([threadId, epoch, shown.openId])
-    if (actionPending.current.has(actionKey)) return
+    if (!query && actionPending.current.has(actionKey)) return
     const pane = shown.value.pane
     const read = frameRead.current
     if (read?.frame.openId === shown.openId && (read.running || !read.interactive)) return
     if (!node || node.type === "engine" || node.type === "fragment" || !node.press) return
-    actionPending.current.add(actionKey)
-    setBusy(true)
+    const sequence = query ? ++querySequence.current : 0
+    const latest = () => current() && (!query || (
+      sequence === querySequence.current && frameRef.current?.openId === shown.openId &&
+      !retirements.current.has(JSON.stringify([shown.threadId, shown.openId]))
+    ))
+    if (!query) { actionPending.current.add(actionKey); setBusy(true) }
     let succeeded = false
     try {
       await api.platformSurfaceAct(threadId, shown.address, {
@@ -415,17 +421,17 @@ export function PlatformWorkspace({
       })
       succeeded = true
     } catch {
-      if (current()) setError("操作未完成，请核对结果；没有自动重试")
+      if (latest()) setError("操作未完成，请核对结果；没有自动重试")
     } finally {
-      actionPending.current.delete(actionKey)
-      if (current()) {
-        if (!frameRef.current || frameRef.current.openId === shown.openId) setBusy(false)
+      if (!query) actionPending.current.delete(actionKey)
+      if (latest()) {
+        if (!query && (!frameRef.current || frameRef.current.openId === shown.openId)) setBusy(false)
         if (frameRef.current?.openId === shown.openId && (succeeded || frameRead.current?.dirty))
           await refreshFrame.current()
       }
     }
   }
-  if (!active || (!rows?.entries.length && !policy?.bindings.length && !error)) return null
+  if (!active || (!rows?.entries.length && !rows?.canPrepare && !policy?.bindings.length && !error)) return null
   const button = (entry: PlatformSurfaceEntry) => (
     <span key={entry.key} className="inline-flex shrink-0 items-center">
       <button
@@ -459,6 +465,16 @@ export function PlatformWorkspace({
         aria-label="扩展工作区"
         className="pointer-events-auto absolute left-2 right-2 top-1 flex items-center gap-1 overflow-x-auto whitespace-nowrap rounded border bg-background/95 p-1 shadow-sm"
       >
+        {rows?.canPrepare && api.platformSurfacePrepare && (
+          <button className="rounded px-2 py-1 text-sm hover:bg-muted disabled:opacity-50"
+            disabled={busy} onClick={() => {
+              setBusy(true)
+              void api.platformSurfacePrepare!(threadId).then(async () => {
+                if (current()) await refresh()
+              }, () => { if (current()) setError("扩展视图未准备好，请核对插件状态") })
+                .finally(() => { if (current()) setBusy(false) })
+            }}>打开扩展视图</button>
+        )}
         {rows?.entries
           .filter((entry) =>
             ["page", "navigation", "toolbar", "settings"].includes(entry.placement)

@@ -1,0 +1,14 @@
+{
+  "source": "resources/native-compositions/autobiz-knowledge",
+  "files": {
+    "mods/selector.ts": "7d1115adc6ba7d46d86ea1296698fdff8df28519cb24104d4dffca7039539c43",
+    "mods/frontmatter.cjs": "d5e0adc0bfad0eff284db69445ae6f70edbb668619b0ee3afd1c4fc443739a10",
+    "THIRD-PARTY-NOTICES.md": "2bd6662b4ecd587835cf373d792834820b352d99cc037aad566f4818972906b7"
+  },
+  "adaptations": {
+    "mods/frontmatter.cjs": {
+      "description": "Only prepend a type-check directive to generated third-party JavaScript; preserve all upstream executable bytes. First-party callers remain strictly type-checked.",
+      "sha256": "715850ab67483ea3eb0c9a4b6fae36eed5d883ad4a927093081bb2b871472d0f"
+    }
+  }
+}

@@ -162,11 +162,11 @@ export function ModsPanel({
   return (
     <div className="mx-auto w-full max-w-5xl space-y-5 p-4 sm:p-6">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <h1 className="text-xl font-semibold">插件</h1>
+        <h1 className="text-xl font-semibold">灵件</h1>
         <div className="flex items-center gap-2">
           {onManageSources && (
             <Button size="sm" variant="ghost" onClick={onManageSources}>
-              导入与发布
+              插件管理
             </Button>
           )}
           <SparksDocumentationLink />

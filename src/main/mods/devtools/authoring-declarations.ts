@@ -62,6 +62,9 @@ declare namespace DevClawMods {
     Box(props:{children?:UiTree[];flexDirection?:"row"|"column";gap?:number;[key:string]:unknown}):UiTree
     Text(props:{children:string|string[];[key:string]:unknown}):UiTree
     Button(props:{label:string;onPress:()=>unknown;key?:string;hotkey?:string;[key:string]:unknown}):UiTree
+    Input(props:{key:string;label?:string;placeholder?:string;value?:string;submitLabel?:string;autoFocus?:true;onSubmit:(value:string)=>unknown;onInput?:(value:string)=>unknown}):UiTree
+    Select(props:{key:string;label?:string;options:{value:string;label:string}[];value?:string;autoFocus?:true;onSelect:(value:string)=>unknown}):UiTree
+    Code(props:{source:string;language?:string;path?:string;startLine?:number;format?:"source"|"diff";wrap?:"wrap"|"truncate-start"|"truncate-end"}):UiTree
     TextInput(props:{value:string;onChange:(value:string)=>unknown;key?:string;[key:string]:unknown}):UiTree
     Markdown(props:{text:string;[key:string]:unknown}):UiTree
     List(props:JsonObject):UiTree

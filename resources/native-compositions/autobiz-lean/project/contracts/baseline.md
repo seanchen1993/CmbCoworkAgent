@@ -1,0 +1,11 @@
+# 需求基线契约
+
+RequestBaseline.json是需求整理成果，经Host真实resultApproval接受后作为后续固定输入。它不是由模型自报的确认凭据。整个文件≤131072 UTF-8字节。
+
+对象只有feature、request、requirements、decisions四个字段。
+
+- request={protocol:"devclaw.project-goal/v1",projectId,text,bytes,sha256}。projectId为当前Host项目ID，text为当前项目原始任务的完整正文，保留换行和空白；bytes和sha256按其真实UTF-8字节计算。Host只向检查器注入独立的protocol/projectId/bytes/sha256，检查器据此验证全文真实性。不得使用模型改写摘要、截断文本或工作区自造request文件作为原始来源。
+- requirements是1—128项对象数组，每项{id:"USR-001",text:"完整、可理解的需求",sourceQuote:"原始请求中的真实原文片段"}。ID全局唯一，text非空且≤4000 UTF-8字节，sourceQuote必须是request.text中非空的逐字片段。按稳定顺序保留已确认要求，不为了可实现性删掉性能、权限、失败路径等困难约束。引用真实只证明来源存在，不能证明提炼完整。
+- decisions是对象数组，可为空。每项{id:"DECISION-001",text:"实际范围/澄清决定及未决情况",requirementIds:["USR-001"]}。ID唯一，引用实际需求ID；不得用这张表伪造用户回答。需要裁定时先取得真实反馈，供用户在Host接受界面复核。
+
+不增加confirmed/approved字段。原始目标与基线需要修改时，通过明确的基线修订和真实接受处理，保留来源；后续阶段不能在检查失败时顺便重写它。基线确认后Definition.requirementIds和requirements须逐项等于本文件的ID和text，baselineDecisions完整镜像decisions，并以decisionCoverage映射关联需求的真实REQ/SCN，同时绑定本文件原始字节SHA。语义遗漏依靠用户基线接受及后续业务审查，不能声称结构检查已证明任意需求完整性。

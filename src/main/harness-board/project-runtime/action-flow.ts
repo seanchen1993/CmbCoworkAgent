@@ -22,6 +22,10 @@ export function createProjectActionFlow(
     throw Error("PROJECT_ACTION_FLOW_INVALID")
   captured.assertCurrent()
   captured.assertScope(state)
+  // Only unanimously opted-in checks replace duplicated task text with its Host identity.
+  const task = phase === "checks" && captured.requestProvenanceTask === true
+    ? "Validate the declared artifacts against the Host-bound original request identity."
+    : state.goal
   for (const binding of captured.bindings) {
     if (!captured.referenceActionIds?.includes(binding.id)) continue
     // Native Flow uses a UUID run/execution identity. Reserve their full sizes before dispatch.
@@ -29,7 +33,7 @@ export function createProjectActionFlow(
       version: 1,
       input: binding.input,
       config: binding.config,
-      task: state.goal,
+      task,
       runId: "flow_" + "0".repeat(36),
       stepId: binding.id,
       executionId: "0".repeat(36)
@@ -42,7 +46,7 @@ export function createProjectActionFlow(
     execution: { kind: "host" },
     id: projectActionPhaseId(operationId, phase),
     name: `${state.name} 路 ${stage.title}`.slice(0, 100),
-    goal: state.goal,
+    goal: task,
     timeoutMs: 300_000,
     // Native Flow records final verification and optional mandatory-rule evidence as executions.
     maxExecutions: captured.bindings.length + 2,

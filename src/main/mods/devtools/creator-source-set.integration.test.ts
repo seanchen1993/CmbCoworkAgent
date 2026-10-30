@@ -14,6 +14,8 @@ import { ModControlStore } from "../control-store"
 import { createAuthoringTemplate } from "./authoring-templates"
 import { sourceSetBrowser } from "./source-set-browser.test-helper"
 import type { PluginStartUseInput } from "../../../shared/plugin-start-use"
+import { readHarnessCatalogPage } from "../../harness-board/catalog-reader"
+import { parseProjectRuntimeManifest } from "../../../shared/project-runtime"
 
 vi.mock("electron", () => ({
   app: { getPath: () => tmpdir(), getName: () => "source-set-test", getVersion: () => "2.0.0" },
@@ -232,99 +234,137 @@ it("holds its original admission until the first installation settles and never 
   expect(f.deps.install).toHaveBeenCalledOnce()
 })
 
-it("imports actual AutoBiz packages, independently installs and grants them, compiles real catalog identities and reaches original start-use", async () => {
-  const f = await fixture()
-  await f.sourceSets.import(f.threadId, f.workspace, resolve("resources/native-compositions"))
-  const set = f.sourceSets.status(f.threadId)!
-  expect(set.dependencies).toHaveLength(2)
-  expect(f.installed).not.toHaveBeenCalled()
-  await expect(f.sourceSets.advance(f.threadId, f.workspace, set.id)).rejects.toThrow(
-    "DEPENDENCIES_PENDING"
-  )
-  for (const dep of set.dependencies) {
-    await f.sourceSets.install(f.threadId, f.workspace, set.id, dep.id)
-    const current = f.sourceSets.status(f.threadId)!.dependencies.find((row) => row.id === dep.id)!
-    const identity = {
-      threadId: f.threadId,
-      expectedWorkspace: f.workspace,
-      pluginId: current.pluginId!,
-      expected: { name: dep.name, version: dep.version, digest: dep.digest }
+it.each([
+  { source: "resources/native-compositions", dependencies: 2 },
+  { source: "resources/native-compositions/autobiz-lean", dependencies: 3 }
+])(
+  "imports $source, installs and grants its dependencies and reaches the original project entry",
+  async ({ source, dependencies }) => {
+    const f = await fixture()
+    await f.sourceSets.import(f.threadId, f.workspace, resolve(source))
+    const set = f.sourceSets.status(f.threadId)!
+    expect(set.dependencies).toHaveLength(dependencies)
+    expect(f.installed).not.toHaveBeenCalled()
+    await expect(f.sourceSets.advance(f.threadId, f.workspace, set.id)).rejects.toThrow(
+      "DEPENDENCIES_PENDING"
+    )
+    for (const dep of set.dependencies) {
+      await f.sourceSets.install(f.threadId, f.workspace, set.id, dep.id)
+      const current = f.sourceSets
+        .status(f.threadId)!
+        .dependencies.find((row) => row.id === dep.id)!
+      const identity = {
+        threadId: f.threadId,
+        expectedWorkspace: f.workspace,
+        pluginId: current.pluginId!,
+        expected: { name: dep.name, version: dep.version, digest: dep.digest }
+      }
+      const use = await f.startUse.prepare(identity, () => {})
+      if (use.activationRequired) await f.startUse.enable(identity, () => {})
+      const status = (await f.functions.status(f.workspace)).find(
+        (row) => row.pluginId === current.pluginId
+      )!
+      expect(status.state).toBe("needs-approval")
+      await expect(f.sourceSets.advance(f.threadId, f.workspace, set.id)).rejects.toThrow()
+      await f.functions.approve(f.workspace, current.pluginId!, status.digest!)
     }
-    const use = await f.startUse.prepare(identity, () => {})
-    if (use.activationRequired) await f.startUse.enable(identity, () => {})
-    const status = (await f.functions.status(f.workspace)).find(
-      (row) => row.pluginId === current.pluginId
+    const first = f.sourceSets.status(f.threadId)!.dependencies[0]
+    const originalStatus = f.deps.functions
+    f.deps.functions = async (space) => {
+      const rows = await originalStatus(space)
+      f.functions.revoke(space, first.name)
+      return rows // Simulate revoke after an early ready row was already collected.
+    }
+    await expect(f.sourceSets.advance(f.threadId, f.workspace, set.id)).rejects.toThrow(
+      "AUTHORIZATION_CHANGED"
+    )
+    f.deps.functions = originalStatus
+    let firstStatus = (await f.functions.status(f.workspace)).find(
+      (row) => row.pluginId === first.pluginId
     )!
-    expect(status.state).toBe("needs-approval")
-    await expect(f.sourceSets.advance(f.threadId, f.workspace, set.id)).rejects.toThrow()
-    await f.functions.approve(f.workspace, current.pluginId!, status.digest!)
-  }
-  const first = f.sourceSets.status(f.threadId)!.dependencies[0]
-  const originalStatus = f.deps.functions
-  f.deps.functions = async (space) => {
-    const rows = await originalStatus(space)
-    f.functions.revoke(space, first.name)
-    return rows // Simulate revoke after an early ready row was already collected.
-  }
-  await expect(f.sourceSets.advance(f.threadId, f.workspace, set.id)).rejects.toThrow(
-    "AUTHORIZATION_CHANGED"
-  )
-  f.deps.functions = originalStatus
-  let firstStatus = (await f.functions.status(f.workspace)).find(
-    (row) => row.pluginId === first.pluginId
-  )!
-  await f.functions.approve(f.workspace, first.pluginId!, firstStatus.digest!)
-  const originalPrepare = f.deliveries.prepare.bind(f.deliveries)
-  const preparing = vi.spyOn(f.deliveries, "prepare").mockImplementationOnce(async (...args) => {
-    const result = await originalPrepare(...args)
-    f.functions.revoke(f.workspace, first.name)
-    return result
-  })
-  await expect(f.sourceSets.advance(f.threadId, f.workspace, set.id)).rejects.toThrow(
-    "AUTHORIZATION"
-  )
-  expect(f.sourceSets.status(f.threadId)?.phase).not.toBe("ready")
-  expect(f.installed).toHaveBeenCalledTimes(2)
-  preparing.mockRestore()
-  firstStatus = (await f.functions.status(f.workspace)).find(
-    (row) => row.pluginId === first.pluginId
-  )!
-  await f.functions.approve(f.workspace, first.pluginId!, firstStatus.digest!)
-  await f.sourceSets.advance(f.threadId, f.workspace, set.id)
-  expect(f.sourceSets.status(f.threadId)?.phase).toBe("ready")
-  const delivery = f.deliveries.status(f.threadId)!
-  expect(delivery.phase).toBe("needs-confirmation")
-  const authorPlugin = JSON.parse(
-    f.sessions
-      .list(f.scope)[0]
-      .source.files.find((file) => file.path === "composition/source.json")!.text
-  ).plugin
-  expect(delivery.name).not.toBe(authorPlugin.id)
-  expect(delivery.name).toMatch(/^[a-z][a-z0-9-]{0,47}$/)
-  expect(f.installed).toHaveBeenCalledTimes(2)
-  await f.deliveries.install(f.threadId, f.workspace, {
-    deliveryId: delivery.id,
-    digest: delivery.digest
-  })
-  const saved = f.deliveries.status(f.threadId)!
-  const report = await f.startUse.prepare(
-    {
-      threadId: f.threadId,
-      expectedWorkspace: f.workspace,
-      pluginId: saved.pluginId!,
-      expected: { name: saved.name, version: saved.version, digest: saved.digest }
-    },
-    () => {}
-  )
-  expect(report.kind).toBe("host-project")
-  const compiled = f.sessions.list(f.scope)[0]
-  const lock = compiled.source.files.find(
-    (file) => file.path === "devclaw.project-actions.lock.json"
-  )!.text
-  for (const dep of f.sourceSets.status(f.threadId)!.dependencies)
-    expect(lock).toContain(dep.pluginId)
-  expect(f.installed).toHaveBeenCalledTimes(3)
-}, 120_000)
+    await f.functions.approve(f.workspace, first.pluginId!, firstStatus.digest!)
+    const originalPrepare = f.deliveries.prepare.bind(f.deliveries)
+    const preparing = vi.spyOn(f.deliveries, "prepare").mockImplementationOnce(async (...args) => {
+      const result = await originalPrepare(...args)
+      f.functions.revoke(f.workspace, first.name)
+      return result
+    })
+    await expect(f.sourceSets.advance(f.threadId, f.workspace, set.id)).rejects.toThrow(
+      "AUTHORIZATION"
+    )
+    expect(f.sourceSets.status(f.threadId)?.phase).not.toBe("ready")
+    expect(f.installed).toHaveBeenCalledTimes(dependencies)
+    preparing.mockRestore()
+    firstStatus = (await f.functions.status(f.workspace)).find(
+      (row) => row.pluginId === first.pluginId
+    )!
+    await f.functions.approve(f.workspace, first.pluginId!, firstStatus.digest!)
+    await f.sourceSets.advance(f.threadId, f.workspace, set.id)
+    expect(f.sourceSets.status(f.threadId)?.phase).toBe("ready")
+    const delivery = f.deliveries.status(f.threadId)!
+    expect(delivery.phase).toBe("needs-confirmation")
+    const authorPlugin = JSON.parse(
+      f.sessions
+        .list(f.scope)[0]
+        .source.files.find((file) => file.path === "composition/source.json")!.text
+    ).plugin
+    expect(delivery.name).not.toBe(authorPlugin.id)
+    expect(delivery.name).toMatch(/^[a-z][a-z0-9-]{0,47}$/)
+    expect(f.installed).toHaveBeenCalledTimes(dependencies)
+    await f.deliveries.install(f.threadId, f.workspace, {
+      deliveryId: delivery.id,
+      digest: delivery.digest
+    })
+    const saved = f.deliveries.status(f.threadId)!
+    const report = await f.startUse.prepare(
+      {
+        threadId: f.threadId,
+        expectedWorkspace: f.workspace,
+        pluginId: saved.pluginId!,
+        expected: { name: saved.name, version: saved.version, digest: saved.digest }
+      },
+      () => {}
+    )
+    expect(report.kind).toBe("host-project")
+    if (report.activationRequired)
+      await f.startUse.enable(
+        {
+          threadId: f.threadId,
+          expectedWorkspace: f.workspace,
+          pluginId: saved.pluginId!,
+          expected: { name: saved.name, version: saved.version, digest: saved.digest }
+        },
+        () => {}
+      )
+    const compiled = f.sessions.list(f.scope)[0]
+    const lock = compiled.source.files.find(
+      (file) => file.path === "devclaw.project-actions.lock.json"
+    )!.text
+    for (const dep of f.sourceSets.status(f.threadId)!.dependencies)
+      expect(lock).toContain(dep.pluginId)
+    expect(f.installed).toHaveBeenCalledTimes(dependencies + 1)
+    const registry = join(f.workspace, "installed-catalog.json")
+    await writeFile(registry, JSON.stringify(storage.getPlugins()))
+    const catalog = readHarnessCatalogPage(join(f.workspace, "projects.json"), registry, {})
+    expect(
+      catalog.registry.some((row) => row.id === saved.pluginId && row.runtimeMode === "host")
+    ).toBe(true)
+    if (source.endsWith("autobiz-lean")) {
+      const runtime = parseProjectRuntimeManifest(
+        JSON.parse(
+          compiled.source.files.find((file) => file.path === "devclaw.project-runtime.json")!.text
+        )
+      )
+      expect(runtime.stages.map((stage: { id: string }) => stage.id)).toEqual([
+        "definition",
+        "solution",
+        "code",
+        "delivery"
+      ])
+    }
+  },
+  120_000
+)
 
 it("drives real vendor import, compile, install and start-use services through the actual browser cards", async () => {
   const f = await fixture()
@@ -377,7 +417,9 @@ it("drives real vendor import, compile, install and start-use services through t
           digest: input.digest
         })
       else if (method === "prepareStartUse")
-        return observeStartUse(f.startUse.prepare(input as unknown as PluginStartUseInput, () => {}))
+        return observeStartUse(
+          f.startUse.prepare(input as unknown as PluginStartUseInput, () => {})
+        )
       else if (method === "enableStartUse")
         return observeStartUse(f.startUse.enable(input as unknown as PluginStartUseInput, () => {}))
       else if (method !== "status") throw Error("UNEXPECTED_TEST_TRANSPORT")

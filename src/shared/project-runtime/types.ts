@@ -18,6 +18,8 @@ export interface ProjectRuntimeManifest {
     actionIds: string[]
     /** Explicit prior inputs for artifact-reference checks; absent retains all-preceding v1 behavior. */
     inputArtifactIds?: string[]
+    /** Initial model reading list only; never narrows validation inputs or workspace access. */
+    contextArtifactIds?: string[]
     artifactIds: string[]
     checkIds: string[]
     approval: "none" | "human"

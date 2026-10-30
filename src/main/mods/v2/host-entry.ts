@@ -6,6 +6,7 @@ import { encodeModJson, parseModJson } from "../../../shared/mods/validation"
 import { ModFunctionError, functionInvocationTimeoutMs, type FunctionHostReply } from "../../../shared/mods/v2/contracts"
 import type { FunctionRequest, FunctionResponse } from "../../../shared/mods/v2/protocol"
 import { FunctionGuestRuntime } from "./guest-runtime"
+import { withPlatformQuery } from "./platform-query-scope"
 import { fromWireError, wireError } from "./wire"
 import { functionGuestLoad, isFunctionGuestLoadFailure } from "./client-load-failure"
 import { isFunctionGuestInvokeFailure } from "./guest-invoke-failure"
@@ -236,12 +237,13 @@ async function handle(request: FunctionRequest): Promise<ModJson> {
   const waitClock = new FunctionTrustedWaitClock(functionInvocationTimeoutMs(request.metadata))
   frames.set(request.id, { runtimeId: request.runtimeId, controller, waitClock })
   try {
-    return await guest.invoke(
+    const invoke = () => guest.invoke(
       request.registration,
       request.event,
       (method, args, signal) => forwardCall(request.runtimeId, request.id, method, args, signal),
       { ...request.metadata, signal: controller.signal }, request.uiDrawing, waitClock
     )
+    return await (request.query ? withPlatformQuery(controller.signal, invoke) : invoke())
   } finally {
     frames.delete(request.id)
     if (guest.stats.disposed && runtimes.get(request.runtimeId) === guest) {

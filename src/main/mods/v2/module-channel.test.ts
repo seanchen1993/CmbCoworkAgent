@@ -1,8 +1,30 @@
 import { afterEach, expect, it, vi } from "vitest"
 import type { FunctionHostReply, FunctionInvocation } from "../../../shared/mods/v2/contracts"
 import { FunctionGuestRuntime } from "./guest-runtime"
+import { withPlatformQuery } from "./platform-query-scope"
 
 const guests: FunctionGuestRuntime[] = []
+
+it("keeps detached query continuations fenced after frame removal without changing ordinary resources", async () => {
+  const guest = await FunctionGuestRuntime.create(`var __cmbFunctionMod={register(on){
+    let first,second,release;
+    on("start",$=>{first=$.clock.after(100,()=>{});second=$.clock.after(100,()=>{});return {}});
+    on("query",()=>{new Promise(resolve=>{release=resolve}).then(()=>first.cancel());return {}});
+    on("resume",()=>{release();return {}});
+    on("ordinary",()=>{second.cancel();return {}});
+  }}`)
+  guests.push(guest)
+  const moduleHost = vi.fn(async () => ({}))
+  guest.bindModuleHost(moduleHost)
+  await guest.invoke("0", {}, host, options)
+  await withPlatformQuery(new AbortController().signal, () => guest.invoke("1", {}, host, options))
+  expect(guest.stats.frames).toBe(0)
+  await guest.invoke("2", {}, host, options)
+  expect(moduleHost).not.toHaveBeenCalled()
+  await guest.invoke("3", {}, host, options)
+  await vi.waitFor(() => expect(moduleHost).toHaveBeenCalledOnce())
+  expect(guest.stats.disposed).toBe(false)
+})
 const options: FunctionInvocation = {
   event: "command.run",
   origin: { plugin: "engine", tier: "core" },

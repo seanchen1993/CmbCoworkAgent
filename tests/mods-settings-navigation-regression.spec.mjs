@@ -42,7 +42,7 @@ createRoot(document.getElementById('root')).render(<CustomizeView/>);`
       name: "fixture",
       setup(b) {
         // The child has independent native/browser coverage; this verifies only parent selection/laziness/scope.
-        b.onResolve({ filter: /^\.\/NativeNodeComposer$/ }, (a) =>
+        b.onResolve({ filter: /^\.\/InstalledPluginFlowDefinition$/ }, (a) =>
           a.importer.endsWith("ModsPanel.tsx")
             ? { path: "native-selection", namespace: "selection-probe" }
             : undefined
@@ -50,7 +50,7 @@ createRoot(document.getElementById('root')).render(<CustomizeView/>);`
         b.onLoad({ filter: /.*/, namespace: "selection-probe" }, () => ({
           loader: "tsx",
           resolveDir: root,
-          contents: `import React,{useEffect}from'react';export function NativeNodeComposer({threadId,workspace,pluginId}){useEffect(()=>{window.projectMounts.push(['mount',threadId,workspace,pluginId]);return()=>window.projectMounts.push(['unmount',threadId,workspace,pluginId])},[threadId,workspace,pluginId]);return <section aria-label="selected-native-project">{pluginId} {workspace}</section>}`
+          contents: `import React,{useEffect}from'react';export function InstalledPluginFlowDefinition({pluginId,name,version}){useEffect(()=>{window.projectMounts.push(['mount',pluginId,name,version]);return()=>window.projectMounts.push(['unmount',pluginId,name,version])},[pluginId,name,version]);return <section aria-label="selected-native-project">{pluginId}</section>}`
         }))
         // Full chat rendering is unrelated to Settings retention; the real panel remains under test.
         b.onResolve({ filter: /(?:ChatContainer|TabbedPanel)$/ }, () => ({
@@ -125,14 +125,15 @@ async function dismissTour(page) {
 }
 async function navigate(page, name) {
   const group = page.getByRole("button", {
-    name: name === "插件" ? "基础功能" : "高级特性",
+    name:
+      name === "插件"
+        ? "基础功能"
+        : ["灵件", "对话创作"].includes(name)
+          ? "创造者模式"
+          : "高级特性",
     exact: true
   })
-  if (
-    ["搭配管理", "聊天任务模板", "插件"].includes(name) &&
-    (await group.getAttribute("aria-expanded")) === "false"
-  )
-    await group.click()
+  if ((await group.getAttribute("aria-expanded")) === "false") await group.click()
   await page
     .locator("nav")
     .filter({ has: page.getByRole("button", { name: "高级特性", exact: true }) })
@@ -164,24 +165,33 @@ async function assertInert(page, locator) {
 try {
   {
     const { page, errors } = await open("mods")
-    const entry = page
+    const navigation = page
       .locator("nav")
       .filter({ has: page.getByRole("button", { name: "基础功能", exact: true }) })
-      .getByRole("button", { name: "插件", exact: true })
+    const entry = navigation.getByRole("button", { name: "插件", exact: true })
+    const modsEntry = navigation.getByRole("button", { name: "灵件", exact: true })
     assert.equal(await entry.count(), 1, "Plugin management has one main menu entry")
-    await page.getByRole("button", { name: "导入与发布", exact: true }).click()
-    await page.getByRole("heading", { name: "导入与发布", exact: true }).waitFor()
-    assert.equal(
-      await entry.getAttribute("aria-current"),
-      "page",
-      "The plugin entry remains active on its source management subpage"
-    )
-    await page.getByRole("button", { name: "返回插件", exact: true }).click()
-    await page.getByRole("heading", { name: "插件", exact: true }).waitFor()
+    await page.getByRole("heading", { name: "灵件", exact: true }).waitFor()
+    assert.equal(await modsEntry.getAttribute("aria-current"), "page")
+    assert.equal(await entry.getAttribute("aria-current"), null)
+    await navigate(page, "插件")
     assert.equal(await entry.getAttribute("aria-current"), "page")
+    assert.equal(await modsEntry.getAttribute("aria-current"), null)
+    assert.equal(
+      await page.getByRole("navigation", { name: "灵件工作区", exact: true }).isVisible(),
+      false
+    )
+    assert.equal(await page.getByRole("button", { name: "返回插件", exact: true }).count(), 0)
+    await navigate(page, "灵件")
+    await page.getByRole("heading", { name: "灵件", exact: true }).waitFor()
+    assert.equal(await modsEntry.getAttribute("aria-current"), "page")
+    assert.equal(await entry.getAttribute("aria-current"), null)
     assert.deepEqual(await page.evaluate(() => window.fixture.calls), [])
     assert.deepEqual(errors, [])
-    result.unifiedPluginEntry = { singleEntry: true, sourceSubpageHighlighted: true }
+    result.separatePluginAndModsEntries = {
+      pluginHighlightedIndependently: true,
+      modsHighlightedIndependently: true
+    }
     await page.close()
   }
   {
@@ -198,24 +208,27 @@ try {
     await page.evaluate(() => window.fixture.projectPlugins())
     const first = page.getByRole("article", { name: "project-a", exact: true })
     await first.getByRole("button", { name: "管理", exact: true }).click()
-    await first.getByRole("button", { name: "查看项目流程", exact: true }).click()
+    await first.getByRole("button", { name: "查看流程定义", exact: true }).click()
     await first.getByRole("region", { name: "selected-native-project", exact: true }).waitFor()
     const second = page.getByRole("article", { name: "project-b", exact: true })
     await second.getByRole("button", { name: "管理", exact: true }).click()
-    await second.getByRole("button", { name: "查看项目流程", exact: true }).click()
+    await second.getByRole("button", { name: "查看流程定义", exact: true }).click()
     await second.getByRole("region", { name: "selected-native-project", exact: true }).waitFor()
     assert.equal(
       await page.getByRole("region", { name: "selected-native-project", exact: true }).count(),
       1
     )
     assert.deepEqual(await page.evaluate(() => window.projectMounts), [
-      ["mount", "t", "C:/isolated/A", "project-a"],
-      ["unmount", "t", "C:/isolated/A", "project-a"],
-      ["mount", "t", "C:/isolated/A", "project-b"]
+      ["mount", "project-a", "project-a", "1.0.0"],
+      ["unmount", "project-a", "project-a", "1.0.0"],
+      ["mount", "project-b", "project-b", "1.0.0"]
     ])
     await page.evaluate(() => window.fixture.replaceSource())
     await page.waitForFunction(() => window.projectMounts.length === 5)
-    assert.equal(await page.getByRole("region", { name: "selected-native-project", exact: true }).count(), 1)
+    assert.equal(
+      await page.getByRole("region", { name: "selected-native-project", exact: true }).count(),
+      1
+    )
     await page.evaluate(() => window.fixture.account())
     await page
       .getByRole("region", { name: "selected-native-project", exact: true })
@@ -226,7 +239,7 @@ try {
       .click()
     await page
       .getByRole("article", { name: "project-b", exact: true })
-      .getByRole("button", { name: "查看项目流程", exact: true })
+      .getByRole("button", { name: "查看流程定义", exact: true })
       .click()
     await page.getByRole("region", { name: "selected-native-project", exact: true }).waitFor()
     await chooseB(page)
@@ -310,15 +323,15 @@ try {
     await name.fill("Unsaved authoring title")
     await navigate(page, "聊天任务模板")
     await assertInert(page, name)
-    await navigate(page, "插件")
+    await navigate(page, "灵件")
     assert.equal(await name.inputValue(), "Unsaved authoring title")
     await navigate(page, "对话创作")
     await assertInert(page, name)
-    await navigate(page, "插件")
+    await navigate(page, "灵件")
     assert.equal(await name.inputValue(), "Unsaved authoring title")
     await navigate(page, "聊天任务模板")
     await chooseB(page)
-    await navigate(page, "插件")
+    await navigate(page, "灵件")
     await page
       .getByRole("navigation", { name: "灵件工作区", exact: true })
       .getByRole("button", { name: "对话创作", exact: true })

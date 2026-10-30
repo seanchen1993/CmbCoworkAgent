@@ -1,0 +1,132 @@
+{
+  "apiVersion": "cmb.mods/v2",
+  "id": "python-doctest-evidence",
+  "claw": {
+    "componentsVersion": 1,
+    "components": [
+      {
+        "id": "main",
+        "name": "真实执行与交付证据",
+        "kind": "module",
+        "entry": "main.ts",
+        "dependsOn": [],
+        "actionIds": [
+          "code.verify",
+          "delivery.verify",
+          "execute-command",
+          "inspect-workspace",
+          "repair-evidence",
+          "test.contract",
+          "prepare-test"
+        ]
+      }
+    ],
+    "actions": [
+      {
+        "id": "code.verify",
+        "name": "code.verify",
+        "platform": {
+          "id": "delivery-evidence",
+          "version": "1.0.0",
+          "action": "code.verify"
+        },
+        "inputSchema": {
+          "type": "object"
+        },
+        "outputSchema": {
+          "type": "object"
+        }
+      },
+      {
+        "id": "delivery.verify",
+        "name": "delivery.verify",
+        "platform": {
+          "id": "delivery-evidence",
+          "version": "1.0.0",
+          "action": "delivery.verify"
+        },
+        "inputSchema": {
+          "type": "object"
+        },
+        "outputSchema": {
+          "type": "object"
+        }
+      },
+      {
+        "id": "execute-command",
+        "name": "execute-command",
+        "platform": {
+          "id": "delivery-proof",
+          "version": "1.0.0",
+          "action": "execute-command"
+        },
+        "inputSchema": {
+          "type": "object"
+        },
+        "outputSchema": {
+          "type": "object"
+        }
+      },
+      {
+        "id": "inspect-workspace",
+        "name": "inspect-workspace",
+        "platform": {
+          "id": "delivery-proof",
+          "version": "1.0.0",
+          "action": "inspect-workspace"
+        },
+        "inputSchema": {
+          "type": "object"
+        },
+        "outputSchema": {
+          "type": "object"
+        }
+      },
+      {
+        "id": "repair-evidence",
+        "name": "repair-evidence",
+        "platform": {
+          "id": "delivery-proof",
+          "version": "1.0.0",
+          "action": "repair-evidence"
+        },
+        "inputSchema": {
+          "type": "object"
+        },
+        "outputSchema": {
+          "type": "object"
+        }
+      },
+      {
+        "id": "test.contract",
+        "name": "test.contract",
+        "platform": {
+          "id": "delivery-proof",
+          "version": "1.0.0",
+          "action": "test.contract"
+        },
+        "inputSchema": {
+          "type": "object"
+        },
+        "outputSchema": {
+          "type": "object"
+        }
+      },
+      {
+        "id": "prepare-test",
+        "name": "prepare-test",
+        "platform": {
+          "id": "delivery-proof",
+          "version": "1.0.0",
+          "action": "prepare-test"
+        },
+        "inputSchema": {
+          "type": "object"
+        },
+        "outputSchema": {
+          "type": "object"
+        }
+      }
+    ]
+  }
+}

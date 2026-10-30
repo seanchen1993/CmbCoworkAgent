@@ -1,0 +1,39 @@
+{
+  "derivedFrom": "../autobiz-lean/providers/delivery",
+  "scope": "Independent Python py_compile + doctest provider; retained original receipts, ownership, bounded source repair, production/test hashes and code.verify. No generic semantic correctness claim.",
+  "executionAdapter": "python-doctest/v1",
+  "workflow": "../autobiz-lean/project/workflows/lean-code.workflow.js",
+  "workflowIdentity": "Compiler bindResourceDigests.workflowSha256; no framework-specific workflow branch.",
+  "adaptations": [
+    "Admit only src/**/*.py production and tests/**/*.doctest tests.",
+    "Compile every tracked production module through real py_compile with bytecode in an external temporary directory.",
+    "Consume actual doctest examples and attempted/failed counts; reject empty files and SKIP.",
+    "Before and after tests verify both files and production subjects; bind the latest compile source hash to each test and E2E.",
+    "Business verdict remains in independently locked rules provider."
+  ],
+  "files": {
+    "mods/code-budget.ts": "aa494c16601093726cba5e317491234abe5b5efe69a3e6e85b0fa3d42bc34475",
+    "mods/code-evidence-reader.ts": "e87b1b8f046dfe2b1b2e361671cb862eb1bf70232c673536a1bcd85969841b9a",
+    "mods/code-result.ts": "1f29f78eb5ddd143735b6a0cb3f55b7b46013215b78bd93e0cf03ab61dc232ae",
+    "mods/code-worktrees.ts": "37c0ef93b6dfccb92db6a1380ea97b25a00083225b2cc979838616dfba360d92",
+    "mods/doctest-adapter.ts": "ad5510e0916e896a69645e5fe47f19a2677a66ded149e865cf5888d2ebf17778",
+    "mods/evidence.ts": "8783f1030836ab1027e834cfd6675258da162c59099c2f98b96483c01196a7f5",
+    "mods/execution-policy.ts": "6c984905f0f00ccb3a7aa69eb433b0f911f1aa41f5b2f3fb28b7b9393261497a",
+    "mods/inputs.ts": "0f8cf171540646bf78a4301317763d99f15bcbb7de33dafead0f6a8bbcfd66d3",
+    "mods/main.ts": "64b40969a4a1c46559e817522bb801581baf02f863c66bd7eda98119fd81aa40",
+    "mods/policy-sources/hooks-command_executable.ts": "3d2cbfe7126c670edd139949c5ecb170c30c92320f1c059b732ee8edb3b2fe58",
+    "mods/policy-sources/hooks-compile_command_policy.ts": "7b3983e285727340f9b887dca15d176e306231ebfdc40217d9b3d5f199a51a0f",
+    "mods/policy-sources/hooks-performance_rules.ts": "13ab1884790c113d53714ddf477e8d40a56109b51275fe22a93aae68b0999c87",
+    "mods/policy-sources/hooks-plan_write_ownership.ts": "781391fee8445201b98bae7f5a7e492e32a0a7098511748e365524a750320e19",
+    "mods/policy-sources/hooks-utest_repair_contract.ts": "d29c04cadb4b1a6c8f3f1a9ca13cfd307ae3e57c0714b3925f13b0bf8dee7af5",
+    "mods/policy-sources/performance.ts": "710ec4510be9e257f1bd956d99a77c0568198e9873b27fb3a511487bfa64e5ca",
+    "mods/policy-sources/repair.ts": "82b509b181dd46a7a75934c680ae51f649cb33829e3c435b789199aa742f71b9",
+    "mods/policy-sources/safe_paths.ts": "5aabbb797f68bc18aab90ad81631bb107e93e8177a76ab5961537801426bd864",
+    "mods/python-compile.ts": "584c05075441766a2e551ff8e1853418b12020bd776598706e8616756059cf07",
+    "mods/python-evidence.ts": "d0696c8fdbc19e62c49e2462c8b7868b21cb69e85338ae0067517bd10204ed7c",
+    "mods/repair-evidence.ts": "2bde20351240f984cd2a0c34e6114975a5cca9d5e7f9a5b6765115c5bc8ef3a0",
+    "mods/rules-bundle.ts": "025eb3235161b8d82e1970583fb62a78aa2bb80b3a5085a54bdfd091279a623c",
+    "mods/runner.ts": "bc4ad502ebb2d90d2f3b46300b82aa98af3fd5070a8fb5b7c654286edad85c50",
+    "mods/test-adapter.ts": "191aa969a2b1244f5dbbdd4aec27cdb204217163ed039940227f2605f4985689"
+  }
+}

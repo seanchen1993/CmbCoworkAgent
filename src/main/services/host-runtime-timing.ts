@@ -3,7 +3,8 @@ import { performance } from "node:perf_hooks"
 
 const buckets = [
   "authority", "threadRead", "hostFacts", "snapshot", "inputs",
-  "describeTools", "composePrompt", "policyQueue", "streamGuard", "streamFrame", "streamPull"
+  "describeTools", "composePrompt", "policyQueue", "streamGuard", "streamFrame", "streamPull",
+  "streamSchedule", "streamTerminal"
 ] as const
 type Bucket = typeof buckets[number]
 type Metric = { calls: number; ms: number }

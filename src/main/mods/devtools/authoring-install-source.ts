@@ -8,7 +8,13 @@ export function readPureFunctionSource(input: unknown) {
   if (!plugin || !manifest) throw Error("AUTHORING_INSTALL_PURE_SOURCE_REQUIRED")
   for (const file of source.files) {
     if (
-      !["plugin.json", "README.md", "mods/manifest.json"].includes(file.path) &&
+      ![
+        "plugin.json",
+        "README.md",
+        "THIRD-PARTY-NOTICES.md",
+        "provenance.json",
+        "mods/manifest.json"
+      ].includes(file.path) &&
       // Inert author notes, test vectors and project companions retain the exact source bundle.
       // modules/ is not skills/ or root SKILL.md; workflows/ is not a plugin auto-load entry.
       // Plugin metadata below still rejects skills/hooks/MCP/agents and extra registration fields.
@@ -17,7 +23,7 @@ export function readPureFunctionSource(input: unknown) {
       ) &&
       !/^modules\/(?:[A-Za-z0-9_-]+\/)+SKILL\.md$/.test(file.path) &&
       !/^workflows\/(?:[A-Za-z0-9_-]+\/)*[A-Za-z0-9_-]+\.workflow\.js$/.test(file.path) &&
-      !/^mods\/(?:[A-Za-z0-9_-]+\/)*[A-Za-z0-9_-]+\.(?:ts|tsx|js|jsx|css)$/.test(file.path)
+      !/^mods\/(?:[A-Za-z0-9_-]+\/)*[A-Za-z0-9_-]+\.(?:ts|tsx|js|jsx|cjs|mjs|css)$/.test(file.path)
     )
       throw Error("AUTHORING_INSTALL_PURE_SOURCE_REQUIRED")
   }
@@ -46,9 +52,17 @@ export function readPureFunctionSource(input: unknown) {
     definition.apiVersion !== "cmb.mods/v2" ||
     Object.keys(definition).some(
       (key) =>
-        !["apiVersion", "id", "claw", "entry", "userConfig", "userConfigSchema", "cmbCompatibility", "options", "modelProtocol"].includes(
-          key
-        )
+        ![
+          "apiVersion",
+          "id",
+          "claw",
+          "entry",
+          "userConfig",
+          "userConfigSchema",
+          "cmbCompatibility",
+          "options",
+          "modelProtocol"
+        ].includes(key)
     )
   )
     throw Error("AUTHORING_INSTALL_PURE_SOURCE_REQUIRED")

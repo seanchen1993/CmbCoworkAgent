@@ -10,7 +10,8 @@ import { encodeModJson } from "../mods/validation"
 import type { ModObject } from "../mods/types"
 import {
   PROJECT_ARTIFACT_REFERENCE_FORMAT,
-  PROJECT_ARTIFACT_REFERENCE_MAX_BYTES
+  PROJECT_ARTIFACT_REFERENCE_MAX_BYTES,
+  PROJECT_REQUEST_PROVENANCE_SOURCE
 } from "./artifact-reference"
 
 export const PROJECT_ACTION_LOCK_PATH = "devclaw.project-actions.lock.json"
@@ -22,6 +23,7 @@ export type ProjectActionBinding = ClawActionBinding & {
   config: ModObject
   /** Public project userConfig keys selected by the author, never their values. */
   configurationKeys?: string[]
+  requestProvenance?: typeof PROJECT_REQUEST_PROVENANCE_SOURCE
   inputFrom?:
     | { kind: "artifact"; artifactId: string; pointer: string; format?: "json" | "text" }
     | {
@@ -89,11 +91,11 @@ export function parseProjectActionLock(value: unknown): ProjectActionLock {
     raw.bindings.length > 16
   )
     throw Error("PROJECT_ACTION_LOCK_INVALID")
-  const bindings = raw.bindings.map((value) => {
+  const bindings = raw.bindings.map((value): ProjectActionBinding => {
     const item = record(
       value,
       ["id", "ref", "input", "inputSchema", "outputSchema"],
-      ["command", "platform", "config", "configSchema", "inputFrom", "configurationKeys"]
+      ["command", "platform", "config", "configSchema", "inputFrom", "configurationKeys", "requestProvenance"]
     )
     record(item.ref, ["pluginId", "plugin", "digest", "actionId"])
     const target = projectActionTarget({ command: item.command, platform: item.platform })
@@ -134,6 +136,11 @@ export function parseProjectActionLock(value: unknown): ProjectActionLock {
       else throw Error("PROJECT_ACTION_SOURCE_INVALID")
     }
     const bindingId = id(item.id)
+    if (item.requestProvenance !== undefined && (
+      item.requestProvenance !== PROJECT_REQUEST_PROVENANCE_SOURCE ||
+      inputFrom?.kind !== "artifact" ||
+      inputFrom.format !== PROJECT_ARTIFACT_REFERENCE_FORMAT
+    )) throw Error("PROJECT_REQUEST_PROVENANCE_CHECK_ONLY")
     if (bindingId.length > 64) throw Error("PROJECT_ACTION_ID_INVALID")
     return {
       id: bindingId,
@@ -143,6 +150,9 @@ export function parseProjectActionLock(value: unknown): ProjectActionLock {
       config: clawActionObject(item.config ?? {}),
       ...(item.configurationKeys === undefined ? {} : {
         configurationKeys: parseProjectCheckConfigurationKeys(item.configurationKeys)
+      }),
+      ...(item.requestProvenance === undefined ? {} : {
+        requestProvenance: PROJECT_REQUEST_PROVENANCE_SOURCE
       }),
       ...(inputFrom ? { inputFrom } : {}),
       inputSchema: clawActionObject(item.inputSchema),
