@@ -792,7 +792,10 @@ async function testBotGroupCardRoundtripAndRouteRevocation(): Promise<void> {
       /不存在|不再/
     )
     assert.equal(context.responses.length, 1)
+    context.cardSends.accept = false
     await context.publish(userInputRequest({ requestId: "bot-question-revoked" }))
+    assert.match(context.deliveryText("bot-question-revoked"), /群内 @当前机器人/)
+    assert.match(context.deliveryText("bot-question-revoked"), /\/回答 D4E5F6/)
     active = false
     assert.match(
       await context.service.resolveAnswer({

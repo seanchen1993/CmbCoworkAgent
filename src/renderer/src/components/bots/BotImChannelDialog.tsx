@@ -306,7 +306,7 @@ export function BotImChannelDialog({
       >
         <header className="bot-im-connect-header">
           <DialogTitle ref={titleRef} tabIndex={-1}>
-            IM 接入 · {bot.name}
+            招乎接入 · {bot.name}
           </DialogTitle>
           <DialogDescription>将此 Bot 连接到招乎私聊或群聊。</DialogDescription>
         </header>
@@ -360,9 +360,9 @@ export function BotImChannelDialog({
             </button>
           </div>
 
-          <section className="bot-im-connect-setup" aria-label="新增 IM 接入">
+          <section className="bot-im-connect-setup" aria-label="新增招乎接入">
             <h3>接入方式</h3>
-            <div className="bot-im-connect-choices" role="radiogroup" aria-label="IM 绑定类型">
+            <div className="bot-im-connect-choices" role="radiogroup" aria-label="招乎绑定类型">
               {(["dm", "group"] as const).map((value) => (
                 <label key={value} className="bot-im-connect-choice" data-selected={kind === value}>
                   <input
