@@ -91,9 +91,9 @@ describe("active requirement design entry", () => {
     storeRequirementDesignEntries([entry, newer], storage)
 
     expect(listRequirementDesignEntries(entry.requirementId, storage)).toEqual([newer])
-    expect(
-      listRequirementDesignEntries(entry.requirementId, storage, entry.htmlId)
-    ).toEqual([entry])
+    expect(listRequirementDesignEntries(entry.requirementId, storage, entry.htmlId)).toEqual([
+      entry
+    ])
   })
 
   it("only initializes the requirement attachment for a new design session", () => {
@@ -109,10 +109,10 @@ describe("requirement design prompt", () => {
   it("describes the attached requirement as the source of truth", () => {
     const prompt = buildRequirementDesignPrompt("FR2 待办总结", "prd/fr-2-doc.md")
 
-    expect(prompt).toContain("核心需求文件「prd/fr-2-doc.md」")
-    expect(prompt).toContain("为「FR2 待办总结」完成高保真交互原型设计")
-    expect(prompt).toContain("其他附件属于补充参考资料")
-    expect(prompt).toContain("以核心需求文件为准")
-    expect(prompt).toContain("完整、可独立运行的单页 HTML")
+    expect(prompt).toContain("需求文件「prd/fr-2-doc.md」")
+    expect(prompt).toContain("为「FR2 待办总结」设计高保真交互原型")
+    expect(prompt).toContain("其他资料仅作补充")
+    expect(prompt).toContain("以需求文件为准")
+    expect(prompt).toContain("可独立运行")
   })
 })

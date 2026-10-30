@@ -47,6 +47,7 @@ import {
   getRequirementSessionCapabilities
 } from "./requirement-session-capabilities"
 import { RequirementStepsPanel } from "./RequirementStepsPanel"
+import { getSelectedRequirementSystem } from "./requirement-store"
 
 const REQUIREMENT_SPACE_PUBLISH_MESSAGE = "发布到需求空间"
 const LEANSTAR_TOKEN_MESSAGE_PREFIX = "精益之星身份令牌-Token："
@@ -492,6 +493,7 @@ function RequirementConversationSession({
       ).replace(/^\/+/, "")
       const separator = workspacePath.includes("\\") ? "\\" : "/"
       const requirementFilePath = `${workspaceRoot}${separator}${relativeFile.replace(/\//g, separator)}`
+      const designSystem = getSelectedRequirementSystem(requirement.systemId)
       return {
         requirementId: requirement.id,
         requirementName: requirement.title,
@@ -502,6 +504,7 @@ function RequirementConversationSession({
           ? `${workspaceRoot}${separator}${relativeOverviewFile.replace(/\//g, separator)}`
           : undefined,
         requirementFilePath,
+        designSystemId: designSystem?.id,
         prompt: buildRequirementDesignPrompt(
           `${functionInfo.fr} ${functionInfo.name}`,
           relativeFile
@@ -513,6 +516,7 @@ function RequirementConversationSession({
     [
       requirement.id,
       requirement.requirementPath,
+      requirement.systemId,
       requirement.title,
       requirementSpaceManifest?.prd.file,
       threadId,
