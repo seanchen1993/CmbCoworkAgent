@@ -36,6 +36,9 @@ describe("collapsed tool-call search summary", () => {
     expect(getCollapsedToolCallSummary({ name: "inAppBrowser_extract_iframes" })).toBe(
       "内置浏览器-提取 iframe 内容"
     )
+    expect(getCollapsedToolCallSummary({ name: "inAppBrowser_read_wps_document" })).toBe(
+      "内置浏览器-读取 WPS 文档全文"
+    )
     expect(getCollapsedToolCallSummary({ name: "inAppBrowser_list_recordings" })).toBe(
       "内置浏览器-检索可复用操作"
     )

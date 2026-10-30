@@ -71,9 +71,9 @@ describe("built-in browser prefixes", () => {
     expect(BUILTIN_BROWSER_PROMPT_PREFIX).not.toContain("匹配的录制脚本")
   })
 
-  it("uses the iframe extractor after snapshots discover iframes", () => {
-    expect(BUILTIN_BROWSER_PROMPT_PREFIX).toContain("页面读取先用 browser_snapshot")
-    expect(BUILTIN_BROWSER_PROMPT_PREFIX).toContain("发现 iframe")
+  it("uses the iframe extractor when iframe content cannot be read", () => {
+    expect(BUILTIN_BROWSER_PROMPT_PREFIX).not.toContain("页面读取先用 browser_snapshot")
+    expect(BUILTIN_BROWSER_PROMPT_PREFIX).toContain("iframe 内容无法读取时")
     expect(BUILTIN_BROWSER_PROMPT_PREFIX).toContain("inAppBrowser_extract_iframes")
     expect(BUILTIN_BROWSER_PROMPT_PREFIX).toContain("支持跨域")
   })
