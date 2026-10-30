@@ -324,6 +324,7 @@ export function CustomModelDialog({
   const [defaultModelDraftId, setDefaultModelDraftId] = useState("")
   const [visionModelId, setVisionModelId] = useState("")
   const [savingVision, setSavingVision] = useState(false)
+  const [visionEditor, setVisionEditor] = useState(false)
 
   useEffect(() => {
     let cancelled = false
@@ -332,6 +333,7 @@ export function CustomModelDialog({
       setShowKey(false)
       setFormError(null)
       setTestResult(null)
+      setVisionEditor(false)
 
       const selectedSource = selectedModelId?.startsWith("builtin:")
         ? "builtin"
@@ -363,6 +365,9 @@ export function CustomModelDialog({
 
           if (resolvedExisting) {
             setConfig(configFromItem(resolvedExisting, limits))
+            setVisionEditor(
+              `${resolvedExisting.source}:${resolvedExisting.id}` === savedVisionModelId
+            )
             setHasExisting(true)
             setHasExistingKey(resolvedExisting.hasApiKey)
           } else {
@@ -401,13 +406,27 @@ export function CustomModelDialog({
     const picked = allConfigs.find((item) => item.id === id && item.source === source)
     if (!picked) return
     setConfig(configFromItem(picked, tokenLimits))
+    setVisionEditor(`${source}:${id}` === visionModelId)
     setHasExisting(true)
     setHasExistingKey(picked.hasApiKey)
     setShowKey(false)
     setDefaultModelDraftId(defaultModelId)
   }
 
+  function startNewModel(forVision: boolean): void {
+    setConfig(emptyConfig(tokenLimits))
+    setVisionEditor(forVision)
+    setHasExisting(false)
+    setHasExistingKey(false)
+    setDefaultModelDraftId(defaultModelId)
+    setFormError(null)
+    setTestResult(null)
+    setShowKey(false)
+  }
+
   const currentModelStorageId = config.id ? `${config.source}:${config.id}` : ""
+  const isVisionModelEditor =
+    visionEditor || (currentModelStorageId !== "" && currentModelStorageId === visionModelId)
   const isDefaultModel =
     currentModelStorageId !== "" && currentModelStorageId === defaultModelDraftId
   const isPersistedDefaultModel =
@@ -509,6 +528,7 @@ export function CustomModelDialog({
   }
 
   async function handleSave(): Promise<void> {
+    if (saving || savingVision || deleting || testing) return
     if (!canSave) {
       if (maxTokensError) setFormError(maxTokensError)
       else if (maxOutputTokensError) setFormError(maxOutputTokensError)
@@ -586,15 +606,19 @@ export function CustomModelDialog({
         savedId = result.id
       }
       const savedModelId = `${config.source}:${savedId}`
-      const nextDefaultModelId =
-        allConfigs.length === 0
-          ? savedModelId
-          : defaultModelDraftId === currentModelStorageId
+      if (!isVisionModelEditor) {
+        const nextDefaultModelId =
+          allConfigs.length === 0
             ? savedModelId
-            : defaultModelDraftId
-      await window.api.models.setDefault(nextDefaultModelId)
-      setDefaultModelId(nextDefaultModelId)
-      setDefaultModelDraftId(nextDefaultModelId)
+            : defaultModelDraftId === currentModelStorageId
+              ? savedModelId
+              : defaultModelDraftId
+        if (nextDefaultModelId !== defaultModelId) {
+          await window.api.models.setDefault(nextDefaultModelId)
+        }
+        setDefaultModelId(nextDefaultModelId)
+        setDefaultModelDraftId(nextDefaultModelId)
+      }
       const refreshed = await loadModelItems()
       setAllConfigs(refreshed)
       const updated = refreshed.find((item) => item.id === savedId && item.source === config.source)
@@ -603,7 +627,13 @@ export function CustomModelDialog({
         setHasExisting(true)
         setHasExistingKey(updated.hasApiKey)
       }
-      onModelSaved?.(savedModelId)
+      if (isVisionModelEditor) {
+        // Saving image analysis configuration must never select a chat model,
+        // including when this is the first custom model or role saving fails.
+        setVisionModelId(await window.api.models.setVision(savedModelId))
+      } else {
+        onModelSaved?.(savedModelId)
+      }
       setFormError(null)
       onOpenChange(false)
     } catch (e) {
@@ -642,7 +672,7 @@ export function CustomModelDialog({
         setConfig(configFromItem(fallback, tokenLimits))
         setHasExisting(true)
         setHasExistingKey(fallback.hasApiKey)
-        onModelSaved?.(fallbackModelId)
+        if (!isVisionModelEditor) onModelSaved?.(fallbackModelId)
       } else {
         if (isPersistedDefaultModel) {
           await window.api.models.setDefault("")
@@ -653,6 +683,7 @@ export function CustomModelDialog({
         setHasExisting(false)
         setHasExistingKey(false)
       }
+      setVisionEditor(false)
       setFormError(null)
     } catch (e) {
       console.error("[CustomModelDialog] Failed to delete:", e)
@@ -686,7 +717,11 @@ export function CustomModelDialog({
       <DialogContent className="sm:max-w-[760px] max-h-[85vh] flex flex-col gap-3 p-4">
         <DialogHeader className="space-y-1">
           <DialogTitle>
-            {config.source === "builtin" ? "编辑内置模型参数" : "编辑模型配置"}
+            {isVisionModelEditor
+              ? "编辑多模态模型"
+              : config.source === "builtin"
+                ? "编辑内置模型参数"
+                : "编辑模型配置"}
           </DialogTitle>
           <DialogDescription>
             {config.source === "builtin"
@@ -719,9 +754,35 @@ export function CustomModelDialog({
             ))}
           </select>
           <p className="text-xs leading-tight text-muted-foreground">
-            先新增并保存支持图片输入的模型，再在此选择；选择立即生效。图片以 base64
-            发送，分析结果供当前会话模型使用。
+            选择立即生效。图片以 base64 发送，分析结果供当前会话模型使用。
           </p>
+          <div className="flex gap-2 pt-1">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              disabled={savingVision || saving || deleting || testing}
+              onClick={() => startNewModel(true)}
+            >
+              新增多模态模型
+            </Button>
+            {visionModelId && (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={savingVision || saving || deleting || testing}
+                onClick={() => {
+                  const picked = allConfigs.find(
+                    (item) => `${item.source}:${item.id}` === visionModelId
+                  )
+                  if (picked) void selectConfigToEdit(picked.id, picked.source)
+                }}
+              >
+                编辑多模态模型
+              </Button>
+            )}
+          </div>
         </div>
 
         <div className="min-h-0 flex-1 grid grid-cols-[220px_1fr] gap-4">
@@ -733,15 +794,8 @@ export function CustomModelDialog({
                 variant="ghost"
                 size="sm"
                 className="h-7 px-2"
-                onClick={() => {
-                  setConfig(emptyConfig(tokenLimits))
-                  setHasExisting(false)
-                  setHasExistingKey(false)
-                  setDefaultModelDraftId(defaultModelId)
-                  setFormError(null)
-                  setTestResult(null)
-                  setShowKey(false)
-                }}
+                disabled={saving || savingVision || deleting || testing}
+                onClick={() => startNewModel(false)}
               >
                 <Plus className="size-4" />
                 新增
@@ -761,6 +815,7 @@ export function CustomModelDialog({
                       <button
                         key={`${item.source}:${item.id}`}
                         type="button"
+                        disabled={saving || savingVision || deleting || testing}
                         onClick={() => {
                           void selectConfigToEdit(item.id, item.source)
                         }}
@@ -1154,49 +1209,57 @@ export function CustomModelDialog({
                 </p>
               </div>
 
-              <div className="space-y-1">
-                <label className="text-xs font-medium text-muted-foreground">默认使用</label>
-                <div className="flex items-center justify-between rounded-md border border-border px-3 py-1.5">
-                  <div>
-                    <div className="text-sm text-foreground">
-                      {isDefaultModel ? "已设为默认" : "未设为默认"}
+              {isVisionModelEditor ? (
+                <p className="rounded-md border border-border px-3 py-2 text-xs text-muted-foreground">
+                  保存后用于图片分析；保留当前聊天模型和默认使用配置。
+                </p>
+              ) : (
+                <div className="space-y-1">
+                  <label className="text-xs font-medium text-muted-foreground">默认使用</label>
+                  <div className="flex items-center justify-between rounded-md border border-border px-3 py-1.5">
+                    <div>
+                      <div className="text-sm text-foreground">
+                        {isDefaultModel ? "已设为默认" : "未设为默认"}
+                      </div>
+                      <p className="text-xs leading-tight text-muted-foreground">
+                        新开的会话会优先选择这个模型
+                      </p>
                     </div>
-                    <p className="text-xs leading-tight text-muted-foreground">
-                      新开的会话会优先选择这个模型
-                    </p>
-                  </div>
-                  <button
-                    type="button"
-                    role="switch"
-                    aria-checked={isDefaultModel}
-                    disabled={!config.id}
-                    onClick={() => {
-                      if (!config.id) return
-                      setDefaultModelDraftId(isDefaultModel ? "" : `${config.source}:${config.id}`)
-                    }}
-                    className={cn(
-                      "relative inline-flex h-5 w-9 shrink-0 rounded-full border-2 border-transparent transition-colors",
-                      !config.id
-                        ? "cursor-not-allowed bg-muted-foreground/20"
-                        : isDefaultModel
-                          ? "cursor-pointer bg-primary"
-                          : "cursor-pointer bg-muted-foreground/30"
-                    )}
-                  >
-                    <ToggleThumb
+                    <button
+                      type="button"
+                      role="switch"
+                      aria-checked={isDefaultModel}
+                      disabled={!config.id}
+                      onClick={() => {
+                        if (!config.id) return
+                        setDefaultModelDraftId(
+                          isDefaultModel ? "" : `${config.source}:${config.id}`
+                        )
+                      }}
                       className={cn(
-                        "inline-block size-4",
-                        isDefaultModel ? "translate-x-4" : "translate-x-0"
+                        "relative inline-flex h-5 w-9 shrink-0 rounded-full border-2 border-transparent transition-colors",
+                        !config.id
+                          ? "cursor-not-allowed bg-muted-foreground/20"
+                          : isDefaultModel
+                            ? "cursor-pointer bg-primary"
+                            : "cursor-pointer bg-muted-foreground/30"
                       )}
-                    />
-                  </button>
+                    >
+                      <ToggleThumb
+                        className={cn(
+                          "inline-block size-4",
+                          isDefaultModel ? "translate-x-4" : "translate-x-0"
+                        )}
+                      />
+                    </button>
+                  </div>
+                  {!config.id && (
+                    <p className="text-xs leading-tight text-muted-foreground">
+                      先保存模型配置，才能把它设为默认。
+                    </p>
+                  )}
                 </div>
-                {!config.id && (
-                  <p className="text-xs leading-tight text-muted-foreground">
-                    先保存模型配置，才能把它设为默认。
-                  </p>
-                )}
-              </div>
+              )}
 
               <div className="space-y-1">
                 <label className="text-xs font-medium text-muted-foreground">API 密钥</label>
@@ -1312,8 +1375,18 @@ export function CustomModelDialog({
                 <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
                   取消
                 </Button>
-                <Button type="button" onClick={handleSave} disabled={!canSave || saving || testing}>
-                  {saving ? <Loader2 className="size-4 animate-spin" /> : "保存"}
+                <Button
+                  type="button"
+                  onClick={handleSave}
+                  disabled={!canSave || saving || savingVision || deleting || testing}
+                >
+                  {saving ? (
+                    <Loader2 className="size-4 animate-spin" />
+                  ) : isVisionModelEditor ? (
+                    "保存并用于图片分析"
+                  ) : (
+                    "保存"
+                  )}
                 </Button>
               </div>
             </div>
