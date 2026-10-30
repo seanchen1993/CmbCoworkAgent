@@ -16,7 +16,7 @@ export const LEGACY_BUILTIN_BROWSER_PROMPT_PREFIX = "使用内置浏览器 brows
 export const LEGACY_BUILTIN_BROWSER_NO_SCREENSHOT_PROMPT_PREFIX =
   "使用内置浏览器 browser_*工具（不允许使用截图功能）："
 const BROWSER_TASK_ROUTING_PROMPT =
-  "先用 inAppBrowser_list_recordings 查找匹配的可复用操作，匹配时优先执行；否则使用普通浏览器工具。页面读取先用 browser_snapshot；发现 iframe 时再用 inAppBrowser_extract_iframes（支持跨域）。按返回的 nextTextOffset 或 nextLinkOffset 继续读取截断内容。"
+  "先用 inAppBrowser_list_recordings 查找匹配的可复用操作，匹配时优先执行；否则使用普通浏览器工具。iframe 内容无法读取时，调用 inAppBrowser_extract_iframes（支持跨域）。WPS 在线文档正文无法读取时，调用 inAppBrowser_read_wps_document。按返回的 nextTextOffset 或 nextLinkOffset 继续读取截断内容。"
 export const BUILTIN_BROWSER_INSTRUCTIONS_OPEN = "<builtin-browser-instructions>"
 export const BUILTIN_BROWSER_INSTRUCTIONS_CLOSE = "</builtin-browser-instructions>"
 

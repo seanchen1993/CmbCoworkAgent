@@ -10,13 +10,17 @@ const mocks = vi.hoisted(() => ({
   cancel: vi.fn(),
   state: vi.fn(),
   prepare: vi.fn(),
-  extractIframes: vi.fn()
+  extractIframes: vi.fn(),
+  readWpsDocument: vi.fn()
 }))
 vi.mock("../../browser/cdp/playwright-mcp-bridge", () => ({
   preparePlaywrightInAppBrowser: mocks.prepare
 }))
 vi.mock("../../browser/core/browser-service-registry", () => ({
-  getGlobalBrowserService: () => ({ extractIframeInformation: mocks.extractIframes })
+  getGlobalBrowserService: () => ({
+    extractIframeInformation: mocks.extractIframes,
+    readWpsDocumentText: mocks.readWpsDocument
+  })
 }))
 vi.mock("../../browser/record/common/browser-script-library-service", () => ({
   listBrowserScriptLibraryEntries: mocks.list,
@@ -47,6 +51,7 @@ beforeEach(() => {
   mocks.execute.mockResolvedValue(undefined)
   mocks.prepare.mockResolvedValue(undefined)
   mocks.extractIframes.mockResolvedValue({ frames: [] })
+  mocks.readWpsDocument.mockResolvedValue({ text: "第一段\n第二段" })
 })
 describe("in-app browser agent tools", () => {
   it.each([false, undefined])(
@@ -65,7 +70,8 @@ describe("in-app browser agent tools", () => {
       [
         "inAppBrowser_list_recordings",
         "inAppBrowser_execute_recording",
-        "inAppBrowser_extract_iframes"
+        "inAppBrowser_extract_iframes",
+        "inAppBrowser_read_wps_document"
       ]
     )
   })
@@ -86,11 +92,21 @@ describe("in-app browser agent tools", () => {
       linkOffset: 100
     })
   })
+  it("reads the complete WPS document through the browser service", async () => {
+    const readWpsTool = (await createInAppBrowserTools(capabilities, context))[3]
+
+    expect(JSON.parse((await readWpsTool.invoke({})) as string)).toEqual({
+      text: "第一段\n第二段"
+    })
+    expect(mocks.prepare).toHaveBeenCalledWith(expect.objectContaining(context))
+    expect(mocks.readWpsDocument).toHaveBeenCalledOnce()
+  })
   it("rejects existing tools after browser control is disabled", async () => {
     const tools = await createInAppBrowserTools(capabilities, context)
     browserConfig.config.mockReturnValue({ enabled: false })
     await expect(tools[0].invoke({})).rejects.toThrow("开启内置浏览器")
     await expect(tools[1].invoke(input)).rejects.toThrow("开启内置浏览器")
+    await expect(tools[3].invoke({})).rejects.toThrow("开启内置浏览器")
     expect(mocks.list).not.toHaveBeenCalled()
     expect(mocks.execute).not.toHaveBeenCalled()
   })
