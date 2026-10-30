@@ -32,19 +32,26 @@ export function RequirementPrototypeMenu({
   const needsDesign = needDesign === "1"
   return (
     <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <button
-          type="button"
-          disabled={disabled}
-          aria-label="更改原型设计选项"
-          className={cn(
-            "inline-flex size-8 cursor-pointer items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-white/90 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/25 disabled:cursor-not-allowed disabled:opacity-50",
-            className
-          )}
-        >
-          <EllipsisVertical className="size-3.5" />
-        </button>
-      </DropdownMenuTrigger>
+      <TooltipProvider delayDuration={200}>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <DropdownMenuTrigger asChild>
+              <button
+                type="button"
+                disabled={disabled}
+                aria-label="更改原型设计选项"
+                className={cn(
+                  "inline-flex size-8 cursor-pointer items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-white/90 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/25 disabled:cursor-not-allowed disabled:opacity-50",
+                  className
+                )}
+              >
+                <EllipsisVertical className="size-3.5" />
+              </button>
+            </DropdownMenuTrigger>
+          </TooltipTrigger>
+          <TooltipContent side="top">更改此功能的原型设计选项</TooltipContent>
+        </Tooltip>
+      </TooltipProvider>
       <DropdownMenuContent
         align="end"
         className="w-40"
@@ -82,27 +89,47 @@ export function RequirementPrototypeAction({
   if (!choiceMade) {
     return (
       <div className="flex w-full flex-wrap items-center justify-center gap-1.5 px-3 py-2">
-        <Button
-          type="button"
-          size="sm"
-          className="h-7 gap-1 rounded-md px-2.5 text-[11px] shadow-none"
-          disabled={disabled}
-          onClick={onDesign}
-        >
-          <Palette className="size-3" />
-          去设计
-        </Button>
-        <Button
-          type="button"
-          size="sm"
-          variant="outline"
-          className="h-7 gap-1 rounded-md border-border/80 bg-white/90 px-2.5 text-[11px] text-muted-foreground shadow-none"
-          disabled={disabled}
-          onClick={() => onChange("0")}
-        >
-          <CheckCircle2 className="size-3" />
-          无需设计
-        </Button>
+        <TooltipProvider delayDuration={200}>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <span className="inline-flex">
+                <Button
+                  type="button"
+                  size="sm"
+                  className="h-7 gap-1 rounded-md px-2.5 text-[11px] shadow-none"
+                  disabled={disabled}
+                  onClick={onDesign}
+                >
+                  <Palette className="size-3" />
+                  去设计
+                </Button>
+              </span>
+            </TooltipTrigger>
+            <TooltipContent side="top" className="max-w-64">
+              创建并进入设计会话，为此功能补充原型设计
+            </TooltipContent>
+          </Tooltip>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <span className="inline-flex">
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  className="h-7 gap-1 rounded-md border-border/80 bg-white/90 px-2.5 text-[11px] text-muted-foreground shadow-none"
+                  disabled={disabled}
+                  onClick={() => onChange("0")}
+                >
+                  <CheckCircle2 className="size-3" />
+                  无需设计
+                </Button>
+              </span>
+            </TooltipTrigger>
+            <TooltipContent side="top" className="max-w-64">
+              标记此功能无需原型设计，之后仍可重新修改
+            </TooltipContent>
+          </Tooltip>
+        </TooltipProvider>
       </div>
     )
   }
@@ -126,16 +153,27 @@ export function RequirementPrototypeAction({
       />
 
       {needsDesign ? (
-        <Button
-          type="button"
-          size="sm"
-          disabled={disabled}
-          onClick={onDesign}
-          className="h-7 gap-1 rounded-md px-2.5 text-[11px] shadow-none"
-        >
-          <Palette className="size-3" />
-          继续设计
-        </Button>
+        <TooltipProvider delayDuration={200}>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <span className="inline-flex">
+                <Button
+                  type="button"
+                  size="sm"
+                  disabled={disabled}
+                  onClick={onDesign}
+                  className="h-7 gap-1 rounded-md px-2.5 text-[11px] shadow-none"
+                >
+                  <Palette className="size-3" />
+                  继续设计
+                </Button>
+              </span>
+            </TooltipTrigger>
+            <TooltipContent side="top" className="max-w-64">
+              已创建设计会话，暂未生成可预览的原型 HTML，点击可跳转到会话继续设计
+            </TooltipContent>
+          </Tooltip>
+        </TooltipProvider>
       ) : (
         <div className="inline-flex items-center gap-1.5 rounded-md border border-status-nominal/20 bg-status-nominal/10 px-2.5 py-1.5 text-status-nominal">
           <span className="inline-flex items-center justify-center">

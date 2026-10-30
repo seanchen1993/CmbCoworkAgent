@@ -4,6 +4,7 @@ import { toast } from "sonner"
 
 import { Button } from "@/components/ui/button"
 import { MarkdownPreview } from "@/components/ui/MarkdownPreview/MarkdownPreview"
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { assembleBoundedTextPreview } from "@/lib/text-preview-pages"
 import type { WorkspaceFilePreviewReadResult } from "../../../../shared/workspace-file-preview"
 import type { RequirementPrdManifest, RequirementRecord } from "./requirement-data"
@@ -43,6 +44,7 @@ export function RequirementFunctionWorkspace({
   filePath,
   threadId,
   prototypeGenerated,
+  hasPrototypeDesignSession,
   prototypeSkipped,
   prototypePreview,
   conversationLoading,
@@ -55,6 +57,7 @@ export function RequirementFunctionWorkspace({
   filePath: string
   threadId: string | null
   prototypeGenerated: boolean
+  hasPrototypeDesignSession: boolean
   prototypeSkipped: boolean
   prototypePreview?: ReactNode
   conversationLoading: boolean
@@ -226,17 +229,28 @@ export function RequirementFunctionWorkspace({
           <header className="flex h-10 shrink-0 items-center justify-between border-b border-border/80 bg-slate-100/80 px-3.5">
             <span className="text-xs font-semibold text-foreground/75">原型预览</span>
             {prototypeGenerated ? (
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                className="h-7 gap-1 px-2 text-xs text-primary hover:text-primary"
-                disabled={conversationLoading}
-                onClick={onRequestPrototypeDesign}
-              >
-                <ExternalLink className="size-3" />
-                继续完善设计
-              </Button>
+              <TooltipProvider delayDuration={200}>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <span className="inline-flex">
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        className="h-7 gap-1 px-2 text-xs text-primary hover:text-primary"
+                        disabled={conversationLoading}
+                        onClick={onRequestPrototypeDesign}
+                      >
+                        <ExternalLink className="size-3" />
+                        继续完善设计
+                      </Button>
+                    </span>
+                  </TooltipTrigger>
+                  <TooltipContent side="bottom" className="max-w-64">
+                    已关联设计会话，点击可跳转并继续完善原型
+                  </TooltipContent>
+                </Tooltip>
+              </TooltipProvider>
             ) : null}
           </header>
           <div className="relative min-h-0 flex-1 bg-slate-50/70">
@@ -259,22 +273,40 @@ export function RequirementFunctionWorkspace({
                   <FileText className="size-5" />
                 </div>
                 <p className="text-base font-semibold text-foreground">
-                  {prototypeSkipped ? "已选择无需设计，尚未生成原型" : "尚未生成原型"}
+                  {prototypeSkipped
+                    ? "已选择无需设计，尚未生成原型"
+                    : hasPrototypeDesignSession
+                      ? "尚未生成可预览原型"
+                      : "尚未开始原型设计"}
                 </p>
                 <p className="mt-2 text-xs leading-5 text-muted-foreground">
                   {prototypeSkipped
                     ? "如需补充原型，可随时点击下方按钮重新进入原型设计。"
-                    : "此阶段仅确认需求，原型将在「原型设计」步骤生成"}
+                    : hasPrototypeDesignSession
+                      ? "设计会话已创建，当前尚未生成原型 HTML，可返回会话继续沟通和设计。"
+                      : "尚未创建设计会话，点击下方按钮开始设计原型。"}
                 </p>
-                <Button
-                  type="button"
-                  size="sm"
-                  className="mt-5"
-                  disabled={conversationLoading}
-                  onClick={onRequestPrototypeDesign}
-                >
-                  去设计原型
-                </Button>
+                <TooltipProvider delayDuration={200}>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <span className="mt-5 inline-flex">
+                        <Button
+                          type="button"
+                          size="sm"
+                          disabled={conversationLoading}
+                          onClick={onRequestPrototypeDesign}
+                        >
+                          {prototypeSkipped || !hasPrototypeDesignSession ? "去设计" : "继续设计"}
+                        </Button>
+                      </span>
+                    </TooltipTrigger>
+                    <TooltipContent side="top" className="max-w-72">
+                      {prototypeSkipped || !hasPrototypeDesignSession
+                        ? "尚未关联设计会话，点击可创建设计会话并开始原型设计"
+                        : "已创建设计会话，暂未生成可预览的原型 HTML，点击可跳转到会话继续设计"}
+                    </TooltipContent>
+                  </Tooltip>
+                </TooltipProvider>
               </div>
             )}
           </div>

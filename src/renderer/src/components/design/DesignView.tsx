@@ -4335,7 +4335,7 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
               : isGenerating
                 ? "设计正在生成中，完成后才能同步到需求"
                 : !getCurrentDesignHtml(ts).trim()
-                  ? "尚未生成设计内容，无法同步到需求"
+                  ? "当前设计会话尚未生成可同步的原型 HTML，暂时无法同步到关联需求"
                   : undefined
           }
           onEntryChange={setRequirementEntry}
