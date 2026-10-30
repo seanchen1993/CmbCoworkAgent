@@ -1,6 +1,11 @@
 import { createHash } from "node:crypto"
 import type { NativeSqliteAdapter } from "../db/native-sqlite-adapter"
-import type { BotImBinding, BotImEvent, BotImConversation } from "../../shared/bots/im-channel"
+import type {
+  BotImBinding,
+  BotImEvent,
+  BotImConversation,
+  BotImReplacement
+} from "../../shared/bots/im-channel"
 import { BotError } from "../../shared/bots/contracts"
 
 export interface StoredBotImEvent {
@@ -27,6 +32,7 @@ export class BotImGatewayStore {
     db.run(`CREATE TABLE IF NOT EXISTS bot_im_routes (
       id TEXT PRIMARY KEY,realm TEXT NOT NULL,principal TEXT NOT NULL,bot_id TEXT NOT NULL,binding_json TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS bot_im_routes_owner ON bot_im_routes(realm,principal,bot_id);
+      CREATE TABLE IF NOT EXISTS bot_im_replacements (binding_id TEXT PRIMARY KEY,target_json TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS bot_im_removed_bindings (binding_id TEXT PRIMARY KEY);
       CREATE TABLE IF NOT EXISTS bot_im_ingress (
       id TEXT PRIMARY KEY,binding_id TEXT NOT NULL,payload_json TEXT NOT NULL,fingerprint TEXT NOT NULL,
@@ -82,13 +88,15 @@ export class BotImGatewayStore {
       const owner = this.rows("SELECT realm,principal FROM bot_im_personal_owners WHERE bot_id=?", [
         binding.botId
       ])[0]
-      if (owner && (owner.realm !== realm || owner.principal !== principal))
+      // A locally created binding proves that the user chose this Bot in the new
+      // environment. Listing an unknown remote binding alone cannot migrate it.
+      if (owner && (owner.realm === realm ? owner.principal !== principal : !old))
         throw new BotError("CONFLICT", "此 Bot 的个人主会话已关联另一登录身份，请使用该身份连接。")
-      this.db.run("INSERT OR IGNORE INTO bot_im_personal_owners VALUES(?,?,?)", [
-        binding.botId,
-        realm,
-        principal
-      ])
+      this.db.run(
+        `INSERT INTO bot_im_personal_owners VALUES(?,?,?)
+        ON CONFLICT(bot_id) DO UPDATE SET realm=excluded.realm,principal=excluded.principal`,
+        [binding.botId, realm, principal]
+      )
       this.db.run("INSERT OR IGNORE INTO bot_im_personal_links VALUES(?,?,?)", [
         id,
         binding.botId,
@@ -125,11 +133,12 @@ export class BotImGatewayStore {
         !["revoked", "expired"].includes(binding.state) || !removed.has(ids[index])
     )
   }
+  // Historical proofs remain valid across environments; outbound delivery still
+  // requires the current owner below and the original binding's active grant.
   isPersonalBinding(id: string): boolean {
     return (
       this.rows(
         `SELECT 1 FROM bot_im_personal_links l JOIN bot_im_routes r ON r.id=l.binding_id
-      JOIN bot_im_personal_owners o ON o.bot_id=r.bot_id AND o.realm=r.realm AND o.principal=r.principal
       WHERE l.binding_id=? AND json_extract(r.binding_json,'$.kind')='dm'`,
         [id]
       ).length > 0
@@ -204,6 +213,27 @@ export class BotImGatewayStore {
       "SELECT DISTINCT bot_id FROM bot_im_routes WHERE realm=? AND principal=? ORDER BY bot_id",
       [realm, principal]
     ).map((row) => String(row.bot_id))
+  }
+  replacement(bindingId: string): BotImReplacement | undefined {
+    const row = this.rows("SELECT target_json FROM bot_im_replacements WHERE binding_id=?", [
+      bindingId
+    ])[0]
+    return row ? JSON.parse(String(row.target_json)) : undefined
+  }
+  rememberReplacement(bindingId: string, target: BotImReplacement): void {
+    const value = JSON.stringify({
+      botId: target.botId,
+      bindingId: target.bindingId,
+      version: target.version
+    })
+    this.db.run("INSERT OR IGNORE INTO bot_im_replacements VALUES(?,?)", [bindingId, value])
+    const saved = this.replacement(bindingId)!
+    if (
+      saved.botId !== target.botId ||
+      saved.bindingId !== target.bindingId ||
+      saved.version !== target.version
+    )
+      throw new BotError("CONFLICT", "同一绑定指令的替换目标已确定，请重新生成指令。")
   }
   hasRoute(realm: string, principal: string, conversation: string): boolean {
     return (
@@ -302,6 +332,10 @@ export class BotImGatewayStore {
     )
   }
   removeBot(botId: string): void {
+    this.db.run(
+      "DELETE FROM bot_im_replacements WHERE binding_id IN (SELECT id FROM bot_im_routes WHERE bot_id=?)",
+      [botId]
+    )
     this.db.run(
       "DELETE FROM bot_im_continuations WHERE owner_bot_id=? OR task_id IN (SELECT id FROM bot_tasks WHERE bot_id=?)",
       [botId, botId]

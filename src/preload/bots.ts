@@ -23,8 +23,10 @@ export const localBotsApi: BotClient = {
       ipcRenderer.invoke("bots:im:history", LOCAL_BOT_HOST_ID, botId, id, before),
     status: () => ipcRenderer.invoke("bots:im:status", LOCAL_BOT_HOST_ID),
     list: (botId, before) => ipcRenderer.invoke("bots:im:list", LOCAL_BOT_HOST_ID, botId, before),
-    create: (botId, kind, operationId) =>
-      ipcRenderer.invoke("bots:im:create", LOCAL_BOT_HOST_ID, botId, kind, operationId),
+    replacementTargets: (kind) =>
+      ipcRenderer.invoke("bots:im:replacement-targets", LOCAL_BOT_HOST_ID, kind),
+    create: (botId, kind, operationId, replace) =>
+      ipcRenderer.invoke("bots:im:create", LOCAL_BOT_HOST_ID, botId, kind, operationId, replace),
     remove: (botId, bindingId) =>
       ipcRenderer.invoke("bots:im:remove", LOCAL_BOT_HOST_ID, botId, bindingId),
     revoke: (botId, bindingId, version) =>

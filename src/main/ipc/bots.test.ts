@@ -251,6 +251,26 @@ describe("Bot IPC boundaries", () => {
         expect(() => call("bots:im:create", "local", bot.id, "group", "operation:invalid")).toThrow(
           "标识"
         )
+        for (const replace of [
+          null,
+          {},
+          [],
+          { botId: bot.id, bindingId, version: 0 },
+          { botId: bot.id, bindingId, version: 1, realm: "untrusted" }
+        ]) {
+          expect(() =>
+            call("bots:im:create", "local", other.id, "group", "replace", replace)
+          ).toThrow("换绑目标无效")
+        }
+        expect(() =>
+          call("bots:im:create", "local", other.id, "group", "replace", {
+            botId: bot.id,
+            bindingId: "../invalid",
+            version: 1
+          })
+        ).toThrow("标识")
+        expect(() => call("bots:im:replacement-targets", "remote", "dm")).toThrow("本机")
+        expect(() => call("bots:im:replacement-targets", "local", "invalid")).toThrow("受众")
         expect(() => call("bots:im:revoke", "local", bot.id, bindingId, 0)).toThrow("版本")
         expect(() => call("bots:im:history", "local", bot.id, bindingId, "x".repeat(1025))).toThrow(
           "游标"
@@ -440,9 +460,9 @@ describe("Bot IPC boundaries", () => {
     fixture.windowFor.mockReturnValueOnce(null as any)
     expect(() => call("bots:im:status", "local")).toThrow("桌面")
     expect(() => call("bots:im:status", "remote")).toThrow("本机")
-    expect(() =>
-      call("bots:im:conversation-history", "local", "a", "b", "x".repeat(1025))
-    ).toThrow("游标")
+    expect(() => call("bots:im:conversation-history", "local", "a", "b", "x".repeat(1025))).toThrow(
+      "游标"
+    )
   })
   it("accepts only bounded local work controls and never renderer authority or conversation paths", () => {
     const call = register(),

@@ -85,10 +85,11 @@ export class BuiltinRobotManager {
   setBotHostResolver(resolver: () => LocalBotHost): void {
     this.getBotHost = resolver
   }
-  botChannelStatus() {
+  botChannelStatus(): { connected: boolean; available: boolean; scope?: string } {
     return {
       connected: this.client?.isAuthenticated() ?? false,
-      available: this.client?.supportsBotChannel() ?? false
+      available: this.client?.supportsBotChannel() ?? false,
+      scope: botImScopeId(configuredGatewayUrl() ?? "", this.gatewayStatus.principalId ?? "")
     }
   }
   requireBotChannel(): BotImChannelService {

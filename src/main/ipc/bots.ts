@@ -181,10 +181,34 @@ export function registerBotHandlers(
       query
     )
   })
-  ipcMain.handle("bots:im:create", (event, hostId, botId, kind, operationId) => {
-    desktopHost(event, hostId).getBot(botIdentifier(botId))
+  ipcMain.handle("bots:im:replacement-targets", (event, hostId, kind) => {
+    desktopHost(event, hostId)
     if (kind !== "dm" && kind !== "group") throw new BotError("INVALID_INPUT", "IM 受众无效")
-    return imChannel().create(botId, kind, botIdentifier(operationId))
+    return imChannel().replacementTargets(kind)
+  })
+  ipcMain.handle("bots:im:create", (event, hostId, botId, kind, operationId, replace) => {
+    const host = desktopHost(event, hostId)
+    host.getBot(botIdentifier(botId))
+    if (kind !== "dm" && kind !== "group") throw new BotError("INVALID_INPUT", "IM 受众无效")
+    let target: import("../../shared/bots/im-channel").BotImReplacement | undefined
+    if (replace !== undefined) {
+      if (
+        !replace ||
+        typeof replace !== "object" ||
+        Array.isArray(replace) ||
+        Object.keys(replace).some((key) => !["botId", "bindingId", "version"].includes(key)) ||
+        !Number.isSafeInteger(replace.version) ||
+        replace.version < 1
+      )
+        throw new BotError("INVALID_INPUT", "换绑目标无效")
+      target = {
+        botId: botIdentifier(replace.botId),
+        bindingId: botImExternalId(replace.bindingId),
+        version: replace.version
+      }
+      host.getBot(target.botId)
+    }
+    return imChannel().create(botId, kind, botIdentifier(operationId), target)
   })
   ipcMain.handle("bots:im:remove", (event, hostId, botId, id) => {
     desktopHost(event, hostId).getBot(botIdentifier(botId))

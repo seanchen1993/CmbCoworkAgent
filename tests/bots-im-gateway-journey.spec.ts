@@ -141,7 +141,8 @@ async function main() {
     client,
     "local-mysql-verification",
     () => host,
-    (error) => errors.push(error)
+    (error) => errors.push(error),
+    () => false
   )
   const bind = async (kind: "dm" | "group"): Promise<BotImBinding> => {
     const pending = await service.create(bot.id, kind, randomUUID())
@@ -166,6 +167,79 @@ async function main() {
     client.start()
     await wait(() => client.supportsBotChannel(), "authenticated Bot negotiation")
     assert.equal(client.getStatus().principalId, "local-bot-owner")
+    if (process.env.BOT_IM_REBIND_ONLY === "1") {
+      const original = await bind("dm"),
+        group = await bind("group")
+      const next = store.create({
+        name: "新私聊 Bot",
+        instructions: "Reply",
+        color: "#123456",
+        modelRef: null
+      })
+      const operationId = randomUUID()
+      // Reproduce an older/retried App request with no replacement metadata.
+      const pending = await client.botBindingCommand(
+        { action: "create", botId: next.id, kind: "dm", label: next.name },
+        operationId
+      )
+      assert(!("items" in pending) && pending.instruction)
+      const failuresBefore = (await messages()).filter((m) =>
+        m.content.startsWith("绑定未成功")
+      ).length
+      await post("dm", pending.instruction)
+      await wait(
+        async () =>
+          (await messages()).filter((m) => m.content.startsWith("绑定未成功")).length >
+          failuresBefore,
+        "real gateway rejects the occupied private route"
+      )
+      assert.equal(
+        (await service.list(next.id)).items.find((b) => b.id === pending.id)?.state,
+        "pending"
+      )
+      // The normal App create API must repair that route without a UI-only flag.
+      const retried = await service.create(next.id, "dm", operationId)
+      assert.equal(retried.id, pending.id)
+      assert(retried.instruction)
+      await post("dm", retried.instruction)
+      assert.equal(
+        (await service.list(next.id)).items.find((b) => b.id === pending.id)?.state,
+        "active",
+        "new Bot should replace the occupied DM through existing gateway APIs"
+      )
+      assert.equal(
+        (await service.list(bot.id)).items.find((b) => b.id === original.id)?.state,
+        "revoked"
+      )
+      assert.equal(
+        (await service.list(bot.id)).items.find((b) => b.id === group.id)?.state,
+        "active"
+      )
+      await post("dm", "replacement bot reply")
+      await wait(
+        async () => (await messages()).some((m) => m.content === "已处理：replacement bot reply"),
+        "new Bot replies through the real callback/WSS route"
+      )
+      assert.equal(runs.at(-1)?.botId, next.id)
+      assert.equal(runs.at(-1)?.threadId, next.threadId)
+      await post("group", "original group still works")
+      await wait(
+        async () =>
+          (await messages()).some((m) => m.content === "已处理：original group still works"),
+        "existing group retained"
+      )
+      await post("dm", "legacy after replacement", randomUUID(), "local-owner-open", "legacy")
+      await wait(
+        async () =>
+          (await messages()).some((m) => m.content === "原机器人回复：legacy after replacement"),
+        "legacy robot retained"
+      )
+      assert.deepEqual(errors, [])
+      console.log(
+        "PASS: unchanged Java gateway rejects an occupied DM; App repairs a stale create retry, new Bot binds and replies, group and legacy robot remain live"
+      )
+      return
+    }
     const group = await bind("group")
     assert.equal(group.peerLabel, "本地验收群")
     const first = randomUUID()

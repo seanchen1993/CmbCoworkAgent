@@ -26,6 +26,10 @@ export interface BotImBinding {
   createdAt: string
   instruction?: string
   peerLabel?: string
+  /** App-only import failure; never part of the gateway protocol. */
+  localError?: string
+  /** App-only receipt of automatic replacement, not a gateway protocol field. */
+  replacedBindingId?: string
 }
 export type BotImCommand =
   | { action: "create"; botId: string; kind: "dm" | "group"; label: string }
@@ -149,6 +153,12 @@ export function assertBotImBindingResult(
   } else assertBotImBinding(value)
 }
 
+export interface BotImReplacement {
+  botId: string
+  bindingId: string
+  version: number
+}
+
 export interface BotImClient {
   stopConversation(botId: string, conversationId: string): Promise<void>
   conversationWorks?(
@@ -168,9 +178,15 @@ export interface BotImClient {
     bindingId: string,
     before?: string
   ): Promise<{ items: import("./mock-channel").BotMockFeedEntry[]; before: string | null }>
-  status(): Promise<{ connected: boolean; available: boolean }>
+  status(): Promise<{ connected: boolean; available: boolean; scope?: string }>
   list(botId: string, before?: string): Promise<BotImBindingPage>
-  create(botId: string, kind: "dm" | "group", operationId: string): Promise<BotImBinding>
+  replacementTargets?(kind: "dm" | "group"): Promise<BotImBinding[]>
+  create(
+    botId: string,
+    kind: "dm" | "group",
+    operationId: string,
+    replace?: BotImReplacement
+  ): Promise<BotImBinding>
   revoke(botId: string, bindingId: string, version: number): Promise<BotImBinding>
   /** Remove an inactive record from this device's configuration list, retaining history. */
   remove(botId: string, bindingId: string): Promise<void>

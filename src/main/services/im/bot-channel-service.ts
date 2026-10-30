@@ -3,7 +3,12 @@ import { submitFormattedImReply } from "./submit-formatted-reply"
 import { conversationSwitchedToText } from "./withheld-text-notices"
 import type { LocalBotHost } from "../../bots/host"
 import { botImScopeId, type StoredBotImEvent } from "../../bots/im-gateway-store"
-import type { BotImBinding, BotImBindingPage, BotImEvent } from "../../../shared/bots/im-channel"
+import type {
+  BotImBinding,
+  BotImBindingPage,
+  BotImEvent,
+  BotImReplacement
+} from "../../../shared/bots/im-channel"
 import type { ImGatewayWsClient } from "./gateway-ws-client"
 import { ImGatewayCommandError } from "./gateway-ws-client"
 import { buildImProactiveReplies } from "./reply-segmentation"
@@ -101,18 +106,131 @@ export class BotImChannelService {
     }
     return binding
   }
-  async create(botId: string, kind: "dm" | "group", operationId: string): Promise<BotImBinding> {
+  async replacementTargets(kind: "dm" | "group"): Promise<BotImBinding[]> {
+    const epoch = this.epoch,
+      principal = this.identity(),
+      host = this.getHost()
+    const targets: BotImBinding[] = []
+    // Only locally known Bots can be managed. Bound concurrency avoids flooding
+    // the gateway when an account has many Bots; every page is read.
+    const ids = host.listBotIds()
+    for (let offset = 0; offset < ids.length; offset += 4) {
+      const results = await Promise.all(
+        ids.slice(offset, offset + 4).map(async (id) => {
+          const items: BotImBinding[] = [],
+            seen = new Set<string>()
+          let before: string | undefined
+          do {
+            const page = await this.list(id, before)
+            items.push(
+              ...page.items.filter((binding) => binding.kind === kind && binding.state === "active")
+            )
+            before = page.before ?? undefined
+            if (before && seen.has(before)) throw new Error("IM 绑定分页游标重复")
+            if (before) seen.add(before)
+          } while (before)
+          return items
+        })
+      )
+      if (epoch !== this.epoch || principal !== this.identity())
+        throw new Error("连接已变化，请刷新绑定")
+      targets.push(...results.flat())
+    }
+    return targets
+  }
+  async create(
+    botId: string,
+    kind: "dm" | "group",
+    operationId: string,
+    replace?: BotImReplacement
+  ): Promise<BotImBinding> {
     const epoch = this.epoch,
       principal = this.identity(),
       bot = this.getHost().getBot(botId)
     if (bot.archived || bot.deleting) throw new Error("请先恢复 Bot")
+    if (replace) {
+      await this.checkReplacement(kind, replace)
+      if (epoch !== this.epoch || principal !== this.identity())
+        throw new Error("连接已变化，请刷新绑定")
+    }
     const value = await this.client.botBindingCommand(
       { action: "create", botId, kind, label: bot.name.slice(0, 100) },
       operationId
     )
     if ("items" in value || principal !== this.identity()) throw new Error("IM 身份已变化，请刷新")
     if (epoch !== this.epoch) throw new Error("连接已变化，请刷新绑定")
-    return this.register(value, principal)
+    if (value.state !== "active" && (kind === "dm" || replace)) {
+      // Generate the new proof first so a create failure leaves the old route intact.
+      // Retrying uses the same create operation and the gateway's idempotent revoke.
+      if (value.state !== "pending" || Date.parse(value.expiresAt) <= Date.now())
+        throw new Error("换绑指令已失效，请刷新后重新生成")
+      const host = this.getHost()
+      this.register(value, principal)
+      const localId = botImScopeId(this.realm, principal, value.id)
+      const saved = host.imGateway.replacement(localId)
+      if (
+        saved &&
+        replace &&
+        (saved.botId !== replace.botId ||
+          saved.bindingId !== replace.bindingId ||
+          saved.version !== replace.version)
+      )
+        throw new Error("同一绑定指令的替换目标已确定，请重新生成指令。")
+      replace = saved ?? replace
+      if (kind === "dm") {
+        // All callers (including retries from older renderers) get the same
+        // replacement behaviour. Never rely on optional renderer metadata.
+        const current = await this.replacementTargets("dm")
+        if (
+          current.length > 1 ||
+          (replace && current.some((binding) => binding.id !== replace!.bindingId))
+        )
+          throw new Error("私聊接入已变化，请重新生成绑定指令。")
+        if (!replace && current[0]) {
+          const binding = current[0]
+          replace = { botId: binding.botId, bindingId: binding.id, version: binding.version }
+        }
+      }
+      if (replace) {
+        await this.checkReplacement(kind, replace)
+        if (epoch !== this.epoch || principal !== this.identity())
+          throw new Error("连接已变化，请刷新绑定")
+        // The generated binding ID is stable across lost replies and restarts.
+        host.imGateway.rememberReplacement(localId, replace)
+        await this.revoke(replace.botId, replace.bindingId, replace.version)
+      }
+      if (epoch !== this.epoch || principal !== this.identity())
+        throw new Error("连接已变化，请刷新绑定")
+    }
+    return {
+      ...this.register(value, principal),
+      ...(replace && value.state === "pending" ? { replacedBindingId: replace.bindingId } : {})
+    }
+  }
+  private async checkReplacement(kind: "dm" | "group", replace: BotImReplacement): Promise<void> {
+    const target = await this.remoteBinding(replace.botId, replace.bindingId)
+    if (
+      target.kind !== kind ||
+      !(
+        (target.state === "active" && target.version === replace.version) ||
+        (target.state === "revoked" && target.version === replace.version + 1)
+      )
+    )
+      throw new Error("原接入已变化，请重新生成绑定指令。")
+  }
+  private async remoteBinding(botId: string, bindingId: string): Promise<BotImBinding> {
+    this.getHost().getBot(botId)
+    let before: string | undefined
+    const seen = new Set<string>()
+    do {
+      const page = await this.list(botId, before)
+      const binding = page.items.find((item) => item.id === bindingId)
+      if (binding) return binding
+      before = page.before ?? undefined
+      if (before && seen.has(before)) throw new Error("IM 绑定分页游标重复")
+      if (before) seen.add(before)
+    } while (before)
+    throw new Error("绑定不属于当前 Bot")
   }
   async list(botId: string, before?: string): Promise<BotImBindingPage> {
     const epoch = this.epoch,
@@ -126,7 +244,17 @@ export class BotImChannelService {
     if (!("items" in value) || principal !== this.identity())
       throw new Error("IM 身份已变化，请刷新")
     if (epoch !== this.epoch) throw new Error("连接已变化，请刷新绑定")
-    const items = value.items.map((binding) => this.register(binding, principal))
+    const items = value.items.map((binding) => {
+      if (binding.botId !== botId) throw new Error("网关返回了其他 Bot 的绑定")
+      try {
+        return this.register(binding, principal)
+      } catch (error) {
+        // Keep management/revocation available even when local execution import fails.
+        if (error instanceof Error && "code" in error && error.code === "CONFLICT")
+          return { ...binding, localError: error.message }
+        throw error
+      }
+    })
     return {
       ...value,
       items: this.getHost().imGateway.visibleBindings(this.realm, principal, items)
@@ -135,8 +263,9 @@ export class BotImChannelService {
   async revoke(botId: string, bindingId: string, expectedVersion: number): Promise<BotImBinding> {
     const epoch = this.epoch,
       principal = this.identity()
-    const known = this.getHost().imGateway.binding(botImScopeId(this.realm, principal, bindingId))
-    if (!known || known.binding.botId !== botId) throw new Error("绑定不属于当前 Bot")
+    await this.remoteBinding(botId, bindingId)
+    if (epoch !== this.epoch || principal !== this.identity())
+      throw new Error("连接已变化，请刷新绑定")
     const value = await this.client.botBindingCommand({
       action: "revoke",
       bindingId,
@@ -276,6 +405,17 @@ export class BotImChannelService {
       })
     } catch (error) {
       this.cancel(receipt)
+      if (
+        error instanceof Error &&
+        "code" in error &&
+        error.code === "CONFLICT" &&
+        epoch === this.epoch &&
+        !this.stopped
+      ) {
+        this.reportError(error)
+        await this.ackTerminal(host.imGateway.event(receipt.id)!)
+        return
+      }
       throw error
     }
   }
