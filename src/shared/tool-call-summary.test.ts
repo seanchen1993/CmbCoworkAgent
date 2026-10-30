@@ -54,5 +54,11 @@ describe("collapsed tool-call search summary", () => {
     expect(getCollapsedToolCallSummary({ name: "mcp__inAppBrowser__browser_find" })).toBe(
       "内置浏览器-查找页面内容"
     )
+    expect(
+      getCollapsedToolCallSummary({ name: "mcp__inAppBrowser__browser_network_request" })
+    ).toBe("内置浏览器-获取网络请求")
+    expect(
+      getCollapsedToolCallSummary({ name: "mcp__inAppBrowser__browser_network_requests" })
+    ).toBe("内置浏览器-列出网络请求")
   })
 })
