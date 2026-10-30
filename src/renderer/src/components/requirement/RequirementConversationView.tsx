@@ -1155,18 +1155,24 @@ function RequirementConversationSession({
       return
     }
 
-    conversationLoadingObservedRef.current = false
     let cancelled = false
 
     const checkPrdCompletion = async (): Promise<void> => {
       const manifest = await loadRequirementSpaceManifest()
       if (cancelled || !manifest || currentThreadIdRef.current !== threadId) return
+      // Only consume the loading -> idle transition after the manifest for the
+      // active conversation has been handled. This effect can be cleaned up by
+      // ordinary thread-state updates while the manifest read is in flight; if
+      // we clear the marker before awaiting, that cancelled read is never
+      // retried and the UI can remain on step 2 even though the manifest has
+      // already advanced to generated/currentStep 3.
+      conversationLoadingObservedRef.current = false
+      if (isRequirementPrdGenerationCompleted(manifest)) {
+        setPreviewTab(isRequirementSpacePublished(manifest) ? "requirement-space" : "prd")
+      }
       const workspaceResult = await window.api.workspace.loadFromDisk(threadId)
       if (!cancelled && workspaceResult.success) {
         threadState.setWorkspaceFiles(workspaceResult.files)
-      }
-      if (isRequirementPrdGenerationCompleted(manifest)) {
-        setPreviewTab(isRequirementSpacePublished(manifest) ? "requirement-space" : "prd")
       }
       // Reset publish queue when the conversation ended without a successful publish
       if (!isRequirementSpacePublished(manifest)) {
