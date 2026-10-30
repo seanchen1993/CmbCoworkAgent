@@ -957,6 +957,50 @@ try {
   }
   assert.equal(requests.length, directRunsBefore, "direct edits never invoke the model")
   console.log("PASS: direct double-click/IME text, icon retention, nested selection/deletion, history, persistence and real React rerender")
+
+  manager.create({
+    id: "ds_stream_questions",
+    meta: { id: "ds_stream_questions", title: "逐题刷新", createdAt: 1, updatedAt: 1 },
+    state: { ...createDesignState(), selectedModelId: "custom:test", selectedDesignSystemId: "neutral-modern" },
+    workspacePath: "/workspace"
+  })
+  await page.evaluate(() => localStorage.setItem("design_last_session", "ds_stream_questions"))
+  await page.reload()
+  await page.locator("textarea").first().waitFor()
+  manager.start({ requestId: "stream-questions", designSessionId: "ds_stream_questions", kind: "questions", prompt: "创建销售看板" })
+  await page.getByText("正在生成问题...", { exact: true }).waitFor()
+  const questionEmit = emitters.at(-1)!
+  const questionFinish = completions.at(-1)!
+  const nameQuestion = { id: "product_name", type: "text", label: "看板名称" }
+  const scopeQuestion = { id: "scope", type: "chips", label: "主要指标", options: ["收入", "客户"] }
+  questionEmit({ type: "question", question: nameQuestion })
+  await page.getByText("看板名称", { exact: true }).waitFor()
+  await page.getByPlaceholder("输入你的回答...", { exact: true }).fill("华东销售中心")
+  assert.equal(await page.getByRole("button", { name: "继续 →", exact: true }).isDisabled(), true)
+  await page.waitForFunction(async () => {
+    const snapshot = await (window as unknown as { designRpc: (method: string, id: string) => Promise<{ state: { answers: Record<string, string> } }> }).designRpc("open", "ds_stream_questions")
+    return snapshot.state.answers.product_name === "华东销售中心"
+  })
+  // Reopening mid-stream must restore editable questions and their saved answers.
+  await page.reload()
+  await page.getByText("看板名称", { exact: true }).waitFor()
+  assert.equal(await page.getByPlaceholder("输入你的回答...", { exact: true }).inputValue(), "华东销售中心")
+  questionEmit({ type: "question", question: scopeQuestion })
+  await page.getByRole("button", { name: "收入", exact: true }).click()
+  questionEmit({ type: "done", questions: [nameQuestion, scopeQuestion] })
+  questionFinish()
+  await page.waitForFunction(() => {
+    const button = [...document.querySelectorAll("button")].find((el) => el.textContent?.includes("继续 →"))
+    return button && !button.disabled
+  })
+  assert.equal(await page.getByPlaceholder("输入你的回答...", { exact: true }).inputValue(), "华东销售中心")
+  await page.getByRole("button", { name: "继续 →", exact: true }).click()
+  await page.getByRole("button", { name: "■ 停止", exact: true }).waitFor()
+  assert.equal(requests.at(-1)!.kind, "agent")
+  assert.match(requests.at(-1)!.prompt, /华东销售中心/)
+  manager.stop("ds_stream_questions")
+  completions.at(-1)!()
+  console.log("PASS: questions appear before completion, accept answers while streaming, and preserve them across refresh and submission")
   assert.deepEqual(errors, [])
   console.log(
     "PASS: progressive previews, bounded chat/comment patches, live node/listener preservation, durable undo/redo, background recovery, full-page creation, template/requirement persistence and URL/HTML/ZIP imports"

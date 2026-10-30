@@ -18,7 +18,12 @@ export interface DesignDraftPreview {
 export interface DesignGenerationMetrics {
   startedAt?: number
   firstTokenAt?: number
+  firstQuestionAt?: number
+  questionsReadyAt?: number
+  runtimeReadyAt?: number
+  firstModelChunkAt?: number
   firstWriteAt?: number
+  firstWriteBytes?: number
   scaffoldVisibleAt?: number
   firstSectionVisibleAt?: number
   lastSectionVisibleAt?: number
@@ -42,8 +47,8 @@ export function inspectDesignDocument(html: string, expected: string[] = []) {
     completedSections: string[] = []
   for (const el of all.filter((node) => attribute(node, "data-design-section") !== undefined)) {
     const id = attribute(el, "data-design-section")!
-    if (!/^[a-zA-Z][\w.-]{0,79}$/.test(id) || sections.includes(id))
-      issues.push("区块 ID 为空、重复或无效")
+    if (!/^[a-zA-Z][\w.-]{0,79}$/.test(id)) issues.push(`区块 ID 为空或无效：${id}`)
+    else if (sections.includes(id)) issues.push(`区块 ID 重复：${id}；不同方案请使用独立前缀`)
     sections.push(id)
     if (!el.sourceCodeLocation?.endTag) issues.push(`区块 ${id} 尚未闭合`)
     if (attribute(el, "data-design-pending") === undefined) completedSections.push(id)

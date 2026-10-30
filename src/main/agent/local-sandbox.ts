@@ -409,6 +409,7 @@ export interface LocalSandboxOptions {
   internalArtifactRoots?: string[]
   /** Records successful agent-owned file mutations for post-run automation. */
   onFileMutation?: (filePath: string, kind: AgentFileMutationKind) => void
+  validateFileWrite?: (filePath: string, content: string) => string | undefined
   /** Detects reads of skill files so skill lifecycle hooks can wrap the load. */
   skillLifecycleRegistry?: SkillLifecycleRegistry
   /** Shared run-scoped set used to avoid firing skill lifecycle hooks twice. */
@@ -730,6 +731,7 @@ export class LocalSandbox
   /** mtime recorded after each successful read/write, for external-modification detection */
   private readonly _fileReadTimes = new Map<string, number>()
   private readonly _onFileMutation?: (filePath: string, kind: AgentFileMutationKind) => void
+  private readonly _validateFileWrite?: (filePath: string, content: string) => string | undefined
   private _skillLifecycleRegistry?: SkillLifecycleRegistry
   private readonly _skillHooksFired: Set<string>
   private readonly _skillUseTracker?: SkillUseTracker
@@ -2064,6 +2066,7 @@ export class LocalSandbox
     this._humanGateThreadId = options.humanGateThreadId?.trim() || this.runId
     this._hookTurnId = options.hookTurnId
     this._onFileMutation = options.onFileMutation
+    this._validateFileWrite = options.validateFileWrite
     this._skillLifecycleRegistry = options.skillLifecycleRegistry
     this._skillHooksFired = options.skillHookKeys ?? new Set<string>()
     this._skillUseTracker = options.skillUseTracker
@@ -4780,6 +4783,8 @@ export class LocalSandbox
         ? updatedArgs.filePath
         : filePath
     const effectiveContent = typeof updatedArgs.content === "string" ? updatedArgs.content : content
+    const domainError = this._validateFileWrite?.(this._resolvePath(effectiveFilePath), effectiveContent)
+    if (domainError) return { error: domainError }
     if (this.isBlockedBySandbox(effectiveFilePath)) {
       return {
         error: `Access denied — '${effectiveFilePath}' is restricted by sandbox policy.`

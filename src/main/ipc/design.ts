@@ -1,3 +1,4 @@
+import { isSingleDesignVariant, designVariantPolicyIssue, SINGLE_DESIGN_VARIANT_PROMPT } from "../../shared/design-variation-policy"
 /**
  * Design IPC Handlers
  *
@@ -13,6 +14,9 @@ import { ipcMain, BrowserWindow, app, net, dialog, type WebContents } from "elec
 import { DesignTemplatePackages, buildTemplatePackageContext } from "../services/design/template-packages"
 import { DesignTemplatePreview } from "../services/design/template-preview"
 import { createDesignArtifactZip } from "../services/design/artifact-package"
+import { writeDesignFilesAtomically } from "../services/design/artifact-storage"
+import { runBoundedDesignValidation, validateDesignBrowserWithRetry, isDesignValidationRepairable } from "../services/design/browser-validation-runner"
+import { designGenerationBrowserProbe } from "../services/design/generation-browser-probe"
 import type { DesignTemplateReference, DesignTemplateImportResult } from "../../shared/design-template"
 import Store from "electron-store"
 import { getDb } from "../db"
@@ -25,8 +29,22 @@ import { decorateDesignNodes } from "../../shared/design-node-ids"
 import { installDesignEditDataRuntime } from "../../shared/design-edit-data"
 import type { DesignPatchMetrics } from "../../shared/design-patch"
 import { designPatchLayoutProbe, inspectDesignPatchStyles, compareDesignPatchLayouts, withDesignValidationDeadline, type DesignLayoutProbe } from "../services/design/artifact-validator"
-import { DESIGN_PROGRESSIVE_PROMPT, DESIGN_DECLARATIVE_TWEAKS_PROMPT } from "../services/design/generation-prompt"
-import { isFinalizableDesignDraft } from "../../shared/design-progressive"
+import {
+  DESIGN_PROGRESSIVE_PROMPT, DESIGN_DECLARATIVE_TWEAKS_PROMPT,
+  DESIGN_QUESTIONS_PROMPT, DESIGN_CREATION_SYSTEM_PROMPT, DESIGN_FRAMEWORK_EDITING_PROMPT,
+  buildDesignCreationBasePrompt, buildDesignCreationArtifactInstruction, validateFirstDesignWrite,
+  buildDesignContinuationPrompt, hasDesignContinuationProgress,
+  DESIGN_ARTIFACT_CONTINUATION_MAX_ATTEMPTS, DESIGN_ARTIFACT_CONTINUATION_STALL_ATTEMPTS
+} from "../services/design/generation-prompt"
+import { DesignQuestionStream } from "../services/design/question-stream"
+import {
+  formatDesignBrowserValidation, injectDesignBrowserValidationProbe, parseDesignBrowserRuntimeIssue,
+  buildDesignValidationRepairPrompt, DESIGN_VALIDATION_REPAIR_SYSTEM_PROMPT,
+  type DesignBrowserValidationIssue, type DesignBrowserValidationResult
+} from "../services/design/browser-validation-feedback"
+import { designStreamWithArtifactRecovery, isDesignGraphRecursionLimit } from "../services/design/generation-stream"
+import { getAgentGraphRecursionLimit } from "../../shared/agent-runtime-limits"
+import { inspectDesignDocument, isFinalizableDesignDraft } from "../../shared/design-progressive"
 import { materializeTweaks, readTweakDeclaration, reconcileTweaks, tweakSourceIssues, type DesignTweakCommand, type DesignTweaksState } from "../../shared/design-tweaks"
 import { approvalDecisionBroker } from "../agent/approval-decision-broker"
 import { asDesignApprovalRequest, type DesignRunEvent, type DesignSessionChange, type DesignSessionSeed, type DesignRunRequest, type TabState, type SessionMeta } from "../../shared/managed-design-session"
@@ -59,8 +77,6 @@ const DESIGN_MODEL_MAX_RETRY_ATTEMPTS = 11 // 1 initial request + 10 retries
 const DESIGN_BROWSER_VALIDATION_TIMEOUT_MS = 8000
 const DESIGN_BROWSER_VALIDATION_SETTLE_MS = 800
 const DESIGN_BROWSER_AUTO_FIX_ATTEMPTS = 1
-const DESIGN_ARTIFACT_CONTINUATION_MAX_ATTEMPTS = 30
-const DESIGN_ARTIFACT_CONTINUATION_STALL_ATTEMPTS = 2
 const DESIGN_ARTIFACT_WRITE_RECOVERY_ATTEMPTS = 2
 const DESIGN_DRAFT_FRESHNESS_SKEW_MS = 5000
 const DESIGN_ARTIFACT_VERSION_MIN_INTERVAL_MS = 2000
@@ -71,60 +87,7 @@ const DESIGN_CHINESE_RESPONSE_INSTRUCTION = `\n\n## Response language\n\n- 始�
 // System Prompt — Dynamic Questions Generation
 // ─────────────────────────────────────────────────────────
 
-const QUESTIONS_SYSTEM_PROMPT = `You are a design strategist. Analyze the user's design request carefully and generate 4–6 highly targeted clarifying questions that are SPECIFIC to what they asked — not generic design questions.
-
-Return ONLY one valid <question-form id="discovery" title="告诉我更多关于这个设计">...</question-form> block. No markdown fences, no explanation, no preamble.
-
-The body inside <question-form> must be a valid JSON object with a "questions" array. The host is backward-compatible with raw JSON arrays, but you should use the <question-form> protocol.
-
-## Question object schema
-
-Each question object must have:
-- "id": unique snake_case identifier
-- "type": "text" | "textarea" | "chips" | "direction-cards"
-- "label": question label in Chinese (specific to the request)
-- "hint": optional helper text in Chinese — only include when genuinely useful
-- "options": array of Chinese strings — required only for type "chips"
-- "multi": boolean — for chips questions, set true if multiple selections make sense (e.g. features, sections, platforms), set false if only one answer is valid (e.g. product category, tone)
-- For "direction-cards", use stable option ids and include a "cards" array with {id,label,mood,references,palette,displayFont,bodyFont}. Only ask this when no clear brand, design system, screenshot, or reference direction is supplied.
-
-## Critical rules
-
-1. **Read the request carefully** — if the user asks for a dashboard, ask about data types and KPIs, not generic style. If they ask for a mobile app, ask about key screens. If they ask for a landing page, ask about CTAs and sections. Never ask questions irrelevant to the task.
-2. **No redundant questions** — don't ask for "brand name" if the request already contains one. Don't ask for "product type" if they clearly said it's a SaaS.
-3. **Mix question types thoughtfully** — use "chips" for categorical choices, "multi:true chips" for features/sections (user may want several), "text" for names/short facts, "textarea" for descriptions or content.
-4. **Options must be relevant and non-obvious** — tailor chip options to the domain, not generic catch-all lists.
-5. **Direction cards** — if needed, choose from these ids: neutral-modern, warm-editorial, brand-vercel, brand-claude, brand-linear-app. Include OKLCH palettes so the UI can render swatches.
-6. **Active design system exception** — when the user has selected an active DESIGN.md, the visual system is already fixed. Do NOT ask about brand, theme color, palette, typography mood, visual direction, style direction, tone, or direction cards. Ask only product, content, scope, data, navigation, feature, audience, workflow, and fidelity questions needed to build the requested artifact.
-
-## Examples of differentiated questions by request type
-
-For "设计一个数据分析 dashboard":
-[
-  {"id":"metrics","type":"chips","label":"需要展示哪些核心指标？","options":["用户增长","收入趋势","转化率","留存率","活跃用户","漏斗分析","地域分布"],"multi":true},
-  {"id":"data_period","type":"chips","label":"数据时间维度","options":["实时","日","周","月","季度","自定义范围"],"multi":false},
-  {"id":"audience","type":"chips","label":"谁会看这个 dashboard？","options":["CEO/高管","产品经理","运营团队","技术团队","外部客户"],"multi":true},
-  {"id":"chart_style","type":"chips","label":"图表风格偏好","options":["简洁线图","面积图","柱状图","混合多图","卡片数字为主"],"multi":false},
-  {"id":"color_scheme","type":"chips","label":"配色方向","options":["深色主题","浅色商务","品牌色主导","中性灰调"],"multi":false}
-]
-
-For "设计一个移动 App 登录和注册流程":
-[
-  {"id":"app_name","type":"text","label":"App 名称是什么？","hint":"将显示在页面 logo 处"},
-  {"id":"auth_methods","type":"chips","label":"支持哪些登录方式？","options":["手机号+验证码","邮箱+密码","微信一键登录","Apple 登录","Google 登录","人脸/指纹"],"multi":true},
-  {"id":"app_tone","type":"chips","label":"App 的整体调性","options":["专业商务","年轻活泼","温暖治愈","极简高冷","科技感强"],"multi":false},
-  {"id":"brand_color","type":"text","label":"品牌主色是什么？","hint":"如"#FF5C00"或"靛蓝色"，无品牌色可留空"},
-  {"id":"extra_fields","type":"chips","label":"注册时需要收集哪些信息？","options":["昵称","头像","生日","性别","职业","兴趣标签","推荐码"],"multi":true}
-]
-
-For "帮我做一个产品宣传落地页":
-[
-  {"id":"product_name","type":"text","label":"产品或品牌名称","hint":"将作为页面标题展示"},
-  {"id":"core_value","type":"textarea","label":"用一两句话描述产品核心价值","hint":"它解决什么痛点？为谁解决？"},
-  {"id":"sections","type":"chips","label":"落地页需要包含哪些模块？","options":["Hero 大图","功能介绍","用户评价","定价方案","FAQ","团队介绍","合作品牌"],"multi":true},
-  {"id":"cta","type":"text","label":"主要行动按钮的文案是什么？","hint":"如"免费试用"、"立即下载""},
-  {"id":"style","type":"chips","label":"视觉风格方向","options":["极简留白","科技深色","插画轻松","商务稳重","大胆撞色"],"multi":false}
-]`
+const QUESTIONS_SYSTEM_PROMPT = DESIGN_QUESTIONS_PROMPT
 
 function buildQuestionsSystemPrompt(designSystemId: string | undefined): string {
   const selected = getDesignSystemById(designSystemId)
@@ -257,7 +220,7 @@ If the user's prompt contains "CURRENT DESIGN HTML (iterate on this", you are in
 - Apply the user's follow-up instruction precisely. Change only what is asked; preserve everything else (colors, fonts, spacing, overall structure, content).
 - **Do NOT regenerate from scratch.** The existing design is the baseline — iterate on it.
 - If the instruction is a targeted tweak (e.g. "change button color", "add a footer"), output **one refined version** — no A/B/C labels needed.
-- If the instruction is broad or exploratory (e.g. "make it bolder", "try a dark theme"), output **2 variations** as usual, each iterating from the existing base in a different direction.
+- Broad or exploratory edits still update the current artifact. Create multiple directions only when explicitly requested and the host's conversation policy permits it. A single-variant conversation always produces one page.
 - Either way, output a complete, self-contained HTML file.
 
 ## Output format
@@ -880,15 +843,19 @@ function resolveDesignArtifactPath(tabId: string, workspacePath?: string): { fil
   }
 }
 
-function saveDesignArtifact(tabId: string, html: string, workspacePath?: string): { success: boolean; filePath?: string; error?: string } {
+function saveDesignArtifact(tabId: string, html: string, workspacePath?: string, metadataPatch?: Partial<DesignArtifactMetadata>): { success: boolean; filePath?: string; metadata?: DesignArtifactMetadata; error?: string } {
   const resolved = resolveDesignArtifactPath(tabId, workspacePath)
   if (!resolved.filePath) return { success: false, error: resolved.error ?? "Failed to resolve design artifact path" }
 
   try {
     fs.mkdirSync(path.dirname(resolved.filePath), { recursive: true })
     backupExistingDesignArtifact(resolved.filePath)
-    fs.writeFileSync(resolved.filePath, html, "utf-8")
-    return { success: true, filePath: resolved.filePath }
+    const metadata = metadataPatch ? buildDesignArtifactMetadata(resolved.filePath, metadataPatch) : undefined
+    writeDesignFilesAtomically([
+      ...(metadata ? [{ filePath: makeDesignArtifactMetadataPath(resolved.filePath), content: JSON.stringify(metadata, null, 2) }] : []),
+      { filePath: resolved.filePath, content: html }
+    ])
+    return { success: true, filePath: resolved.filePath, metadata }
   } catch (err) {
     return { success: false, filePath: resolved.filePath, error: err instanceof Error ? err.message : String(err) }
   }
@@ -909,7 +876,7 @@ function readDesignArtifactMetadata(htmlPath: string | undefined): DesignArtifac
   }
 }
 
-function writeDesignArtifactMetadata(htmlPath: string, patch: Partial<DesignArtifactMetadata>): DesignArtifactMetadata {
+function buildDesignArtifactMetadata(htmlPath: string, patch: Partial<DesignArtifactMetadata>): DesignArtifactMetadata {
   const now = new Date().toISOString()
   const previous = readDesignArtifactMetadata(htmlPath)
   const next: DesignArtifactMetadata = {
@@ -920,8 +887,12 @@ function writeDesignArtifactMetadata(htmlPath: string, patch: Partial<DesignArti
     htmlPath,
     updatedAt: now,
   }
-  fs.mkdirSync(path.dirname(htmlPath), { recursive: true })
-  fs.writeFileSync(makeDesignArtifactMetadataPath(htmlPath), JSON.stringify(next, null, 2), "utf-8")
+  return next
+}
+
+function writeDesignArtifactMetadata(htmlPath: string, patch: Partial<DesignArtifactMetadata>): DesignArtifactMetadata {
+  const next = buildDesignArtifactMetadata(htmlPath, patch)
+  writeDesignFilesAtomically([{ filePath: makeDesignArtifactMetadataPath(htmlPath), content: JSON.stringify(next, null, 2) }])
   return next
 }
 
@@ -987,7 +958,7 @@ function resolveDesignArtifactFilePath(filePath: string, workspacePath?: string)
   }
 }
 
-function saveDesignArtifactFile(filePath: string, html: string, workspacePath?: string): { success: boolean; filePath?: string; error?: string } {
+function saveDesignArtifactFile(filePath: string, html: string, workspacePath?: string, metadataPatch?: Partial<DesignArtifactMetadata>): { success: boolean; filePath?: string; metadata?: DesignArtifactMetadata; error?: string } {
   const resolved = resolveDesignArtifactFilePath(filePath, workspacePath)
   if (!resolved.filePath) return { success: false, error: resolved.error ?? "Failed to resolve design artifact file" }
 
@@ -997,8 +968,12 @@ function saveDesignArtifactFile(filePath: string, html: string, workspacePath?: 
     if (!base.startsWith(".draft-") && !base.startsWith(".source-")) {
       backupExistingDesignArtifact(resolved.filePath)
     }
-    fs.writeFileSync(resolved.filePath, html, "utf-8")
-    return { success: true, filePath: resolved.filePath }
+    const metadata = metadataPatch ? buildDesignArtifactMetadata(resolved.filePath, metadataPatch) : undefined
+    writeDesignFilesAtomically([
+      ...(metadata ? [{ filePath: makeDesignArtifactMetadataPath(resolved.filePath), content: JSON.stringify(metadata, null, 2) }] : []),
+      { filePath: resolved.filePath, content: html }
+    ])
+    return { success: true, filePath: resolved.filePath, metadata }
   } catch (err) {
     return { success: false, filePath: resolved.filePath, error: err instanceof Error ? err.message : String(err) }
   }
@@ -1218,20 +1193,6 @@ function exportDesignArtifactPackage(
   }
 }
 
-interface DesignBrowserValidationIssue {
-  type: "console" | "load" | "crash" | "timeout" | "structure"
-  message: string
-  source?: string
-  line?: number
-}
-
-interface DesignBrowserValidationResult {
-  ok: boolean
-  issues: DesignBrowserValidationIssue[]
-}
-
-const DESIGN_BROWSER_RUNTIME_ERROR_RE =
-  /^\[DesignValidation(?:Error|UnhandledRejection)\]\s*(.*)$/i
 const DESIGN_CONTROL_TOKEN_PATTERN = String.raw`<\s*[|｜][^<>|｜\s][^<>]{0,80}[|｜]\s*>`
 const DESIGN_CONTROL_TOKEN_RE = new RegExp(DESIGN_CONTROL_TOKEN_PATTERN, "gi")
 const DESIGN_VARIATION_STRUCTURE_CHECK_JS = `(() => {
@@ -1283,43 +1244,6 @@ function normalizeDesignValidationMessages(value: unknown): string[] {
   return value.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
 }
 
-function hasDesignStructureValidationIssue(message: string): boolean {
-  return /variation-[ab]|控制 token|模型控制 token/i.test(message)
-}
-
-function formatDesignBrowserValidation(result: DesignBrowserValidationResult): string {
-  if (result.issues.length === 0) return "浏览器运行校验通过"
-  return result.issues
-    .slice(0, 8)
-    .map((issue, index) => {
-      const location = issue.source
-        ? ` (${issue.source}${typeof issue.line === "number" ? `:${issue.line}` : ""})`
-        : ""
-      return `${index + 1}. [${issue.type}] ${issue.message}${location}`
-    })
-    .join("\n")
-}
-
-function injectDesignBrowserValidationProbe(html: string): string {
-  const probe = `<script>
-window.addEventListener('error', function(event) {
-  var message = event && event.message ? event.message : 'Unknown runtime error';
-  var source = event && event.filename ? event.filename : '';
-  var line = event && event.lineno ? ':' + event.lineno : '';
-  console.error('[DesignValidationError] ' + message + (source ? ' @ ' + source + line : ''));
-});
-window.addEventListener('unhandledrejection', function(event) {
-  var reason = event && event.reason;
-  var message = reason && reason.stack ? reason.stack : reason && reason.message ? reason.message : String(reason || 'Unhandled promise rejection');
-  console.error('[DesignValidationUnhandledRejection] ' + message);
-});
-</script>`
-
-  if (/<head[^>]*>/i.test(html)) return html.replace(/<head([^>]*)>/i, `<head$1>\n${probe}`)
-  if (/<html[^>]*>/i.test(html)) return html.replace(/<html([^>]*)>/i, `<html$1>\n<head>\n${probe}\n</head>`)
-  return `${probe}\n${html}`
-}
-
 function waitForDesignBrowserValidation(ms: number, signal: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
     if (signal.aborted) {
@@ -1342,15 +1266,29 @@ function waitForDesignBrowserValidation(ms: number, signal: AbortSignal): Promis
 
 async function validateDesignArtifactInHiddenBrowser(
   filePath: string,
-  signal: AbortSignal
+  signal: AbortSignal,
+  options: { onRetry?: () => void; originalSource?: string; fullChecks?: boolean } = {}
+): Promise<DesignBrowserValidationResult> {
+  return validateDesignBrowserWithRetry(
+    () => validateDesignArtifactBrowserAttempt(filePath, signal, options.originalSource, options.fullChecks),
+    signal, options.onRetry
+  )
+}
+
+async function validateDesignArtifactBrowserAttempt(
+  filePath: string,
+  signal: AbortSignal,
+  originalSource?: string,
+  fullChecks = false
 ): Promise<DesignBrowserValidationResult> {
   const sourceHtml = fs.existsSync(filePath) && fs.statSync(filePath).isFile()
     ? fs.readFileSync(filePath, "utf-8")
     : ""
-  const issues: DesignBrowserValidationIssue[] = validateDesignArtifactSourceStructure(sourceHtml)
+  const issues: DesignBrowserValidationIssue[] = validateDesignArtifactSourceStructure(originalSource ?? sourceHtml)
   let validationWindow: BrowserWindow | null = null
 
   try {
+    if (signal.aborted) throw createDesignAbortError()
     validationWindow = new BrowserWindow({
       width: 1440,
       height: 1000,
@@ -1359,10 +1297,13 @@ async function validateDesignArtifactInHiddenBrowser(
         contextIsolation: true,
         nodeIntegration: false,
         sandbox: true,
+        backgroundThrottling: false,
       },
     })
 
     const webContents = validationWindow.webContents
+    webContents.on("will-navigate", (event) => event.preventDefault())
+    webContents.setWindowOpenHandler(() => ({ action: "deny" }))
     webContents.on("console-message", (details, legacyLevel, legacyMessage, legacyLine, legacySourceId) => {
       const eventDetails = details as unknown as {
         level?: unknown
@@ -1374,14 +1315,11 @@ async function validateDesignArtifactInHiddenBrowser(
       if (level !== "error") return
       const message = typeof eventDetails.message === "string" ? eventDetails.message : legacyMessage
       if (!message) return
-      const runtimeError = message.match(DESIGN_BROWSER_RUNTIME_ERROR_RE)
-      if (!runtimeError) return
-      issues.push({
-        type: "console",
-        message: runtimeError[1]?.trim() || message,
+      const runtimeIssue = parseDesignBrowserRuntimeIssue(message, {
         source: typeof eventDetails.sourceId === "string" ? eventDetails.sourceId : legacySourceId,
         line: typeof eventDetails.lineNumber === "number" ? eventDetails.lineNumber : legacyLine,
       })
+      if (runtimeIssue) issues.push(runtimeIssue)
     })
     webContents.on("did-fail-load", (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
       if (isMainFrame === false) return
@@ -1399,35 +1337,28 @@ async function validateDesignArtifactInHiddenBrowser(
       })
     })
 
-    const loadPromise = validationWindow.loadFile(filePath)
-    const timeoutPromise = new Promise<never>((_resolve, reject) => {
-      const timeout = setTimeout(() => {
-        reject(new Error("Browser validation timed out"))
-      }, DESIGN_BROWSER_VALIDATION_TIMEOUT_MS)
-      loadPromise.finally(() => clearTimeout(timeout)).catch(() => clearTimeout(timeout))
-    })
-
-    try {
-      await Promise.race([loadPromise, timeoutPromise])
-      await waitForDesignBrowserValidation(DESIGN_BROWSER_VALIDATION_SETTLE_MS, signal)
-      const structureMessages = await validationWindow.webContents.executeJavaScript(
-        DESIGN_VARIATION_STRUCTURE_CHECK_JS,
-        true
-      )
-      const tweakMessages = await validationWindow.webContents.executeJavaScript(readTweakDeclaration(sourceHtml) ? "typeof window.__designValidateTweaks === 'function' ? window.__designValidateTweaks() : ['Tweaks runtime 未成功初始化']" : "[]", true)
-      for (const message of normalizeDesignValidationMessages(tweakMessages)) issues.push({ type: "structure", message })
-      for (const message of normalizeDesignValidationMessages(structureMessages)) {
-        issues.push({ type: "structure", message })
+    return await runBoundedDesignValidation({
+      signal, issues, timeoutMs: DESIGN_BROWSER_VALIDATION_TIMEOUT_MS,
+      load: () => validationWindow!.loadFile(filePath),
+      close: () => { if (validationWindow && !validationWindow.isDestroyed()) validationWindow.destroy() },
+      inspect: async () => {
+        await waitForDesignBrowserValidation(DESIGN_BROWSER_VALIDATION_SETTLE_MS, signal)
+        const structureMessages = await webContents.executeJavaScript(DESIGN_VARIATION_STRUCTURE_CHECK_JS, true)
+        const tweakMessages = await webContents.executeJavaScript(readTweakDeclaration(sourceHtml) ? "typeof window.__designValidateTweaks === 'function' ? window.__designValidateTweaks() : ['Tweaks runtime 未成功初始化']" : "[]", true)
+        for (const message of normalizeDesignValidationMessages(tweakMessages)) issues.push({ type: "structure", message })
+        for (const message of normalizeDesignValidationMessages(structureMessages)) {
+          issues.push({ type: "structure", message })
+        }
+        if (fullChecks) {
+          const probeIssues = await webContents.executeJavaScript(`(${designGenerationBrowserProbe.toString()})()`, true) as DesignBrowserValidationIssue[]
+          issues.push(...probeIssues)
+        }
       }
-    } catch (err) {
-      if (signal.aborted) throw err
-      issues.push({
-        type: err instanceof Error && err.message === "Browser validation timed out" ? "timeout" : "load",
-        message: err instanceof Error ? err.message : String(err),
-      })
-    }
-
-    return { ok: issues.length === 0, issues }
+    })
+  } catch (error) {
+    if (signal.aborted) throw error
+    issues.push({ type: "load", message: `无法启动浏览器校验：${error instanceof Error ? error.message : String(error)}` })
+    return { ok: false, issues }
   } finally {
     if (validationWindow && !validationWindow.isDestroyed()) {
       validationWindow.destroy()
@@ -2812,6 +2743,8 @@ export function registerDesignHandlers(): void {
         let nativeTools = true
         try {
           if (process.env.DESIGN_LOCAL_PATCH === "0") throw new DesignPatchScopeError("局部补丁通道已通过配置关闭")
+          if (designVariantPolicyIssue(snapshot.state.html, isSingleDesignVariant(snapshot.state, snapshot.meta)))
+            throw new DesignPatchScopeError("该对话需先将历史多方案合并为一个完整页面")
           const { candidate } = await executeDesignPatch({
             html: snapshot.state.html,
             artifactPath: snapshot.state.artifactPath,
@@ -2838,6 +2771,8 @@ export function registerDesignHandlers(): void {
             },
             validate: async (candidate) => {
               if (controller.signal.aborted) throw createDesignAbortError()
+              const policyIssue = designVariantPolicyIssue(candidate.html, isSingleDesignVariant(snapshot.state, snapshot.meta))
+              if (policyIssue) return [policyIssue]
               fs.mkdirSync(path.dirname(candidateFile), { recursive: true })
               fs.writeFileSync(candidateFile, decorateDesignNodes(materializeTweaks(candidate.html, candidate.tweaks)), "utf8")
               if (candidate.validationLevel === "interaction") {
@@ -2916,6 +2851,7 @@ export function registerDesignHandlers(): void {
               : request.currentHtml || snapshot.state.html
             : undefined,
           designSystemId: snapshot.state.selectedDesignSystemId ?? undefined,
+          singleVariant: isSingleDesignVariant(snapshot.state, snapshot.meta),
           templatePackage: snapshot.state.creationSelection?.template.package,
         })
       } finally {
@@ -2935,17 +2871,18 @@ export function registerDesignHandlers(): void {
         artifactId,
         event.html,
         snapshot.workspacePath ?? undefined,
+        {
+          artifactId,
+          prompt: request.prompt,
+          modelId: request.modelId ?? null,
+          designSystemId: snapshot.state.selectedDesignSystemId,
+          preview: { thumbnailText: makeDesignThumbnailText(event.html) },
+          variations: extractDesignVariationMetadata(event.html),
+        }
       )
       if (!result.success || !result.filePath)
         throw new Error(result.error ?? "设计产物保存失败")
-      const metadata = writeDesignArtifactMetadata(result.filePath, {
-        artifactId,
-        prompt: request.prompt,
-        modelId: request.modelId ?? null,
-        designSystemId: snapshot.state.selectedDesignSystemId,
-        preview: { thumbnailText: makeDesignThumbnailText(event.html) },
-        variations: extractDesignVariationMetadata(event.html),
-      })
+      const metadata = result.metadata
       storeDesignHtml(artifactId, event.html)
       return {
         ...event,
@@ -3184,6 +3121,8 @@ export function registerDesignHandlers(): void {
       }
 
       let fullText = ""
+      const questionStream = new DesignQuestionStream()
+      let firstChunk = true
 
       try {
         send({ type: "start" })
@@ -3196,11 +3135,28 @@ export function registerDesignHandlers(): void {
         for await (const chunk of stream) {
           if (controller.signal.aborted) break
           const token = typeof chunk.content === "string" ? chunk.content : ""
-          if (token) fullText += token
+          if (token) {
+            if (firstChunk) {
+              firstChunk = false
+              send({ type: "metrics", metrics: { firstModelChunkAt: Date.now() } })
+            }
+            fullText += token
+            for (const question of questionStream.push(token)) {
+              if (filterActiveDesignSystemQuestions([question], designSystemId).length)
+                send({ type: "question", question })
+            }
+          }
         }
 
-        // Parse JSON questions from model output
-        const questions = filterActiveDesignSystemQuestions(parseQuestionsJson(fullText), designSystemId)
+        if (controller.signal.aborted) {
+          send({ type: "cancelled" })
+          return
+        }
+        // Keep streamed objects when a provider ends with malformed closing JSON.
+        const parsed = parseQuestionsJson(fullText)
+        const questions = filterActiveDesignSystemQuestions(
+          parsed.length ? parsed : questionStream.questions, designSystemId
+        )
         send({ type: "done", questions })
       } catch (err) {
         if (controller.signal.aborted) {
@@ -3476,14 +3432,13 @@ export function registerDesignHandlers(): void {
       if (!tabId || !html) {
         return { success: false, error: "tabId and html are required" }
       }
-      const result = saveDesignArtifact(tabId, html, workspacePath)
-      if (result.success && result.filePath) {
-        writeDesignArtifactMetadata(result.filePath, {
+      const result = saveDesignArtifact(tabId, html, workspacePath, {
           ...(metadata ?? {}),
           artifactId: metadata?.artifactId || tabId,
           preview: metadata?.preview ?? { thumbnailText: makeDesignThumbnailText(html) },
           variations: metadata?.variations ?? extractDesignVariationMetadata(html),
-        })
+      })
+      if (result.success && result.filePath) {
         storeDesignHtml(tabId, html)
         console.log(`[Design] Saved artifact for tabId=${tabId} -> ${result.filePath}`)
       }
@@ -3497,14 +3452,12 @@ export function registerDesignHandlers(): void {
       if (!filePath || !html) {
         return { success: false, error: "filePath and html are required" }
       }
-      const result = saveDesignArtifactFile(filePath, html, workspacePath)
-      if (result.success && result.filePath) {
-        writeDesignArtifactMetadata(result.filePath, {
+      const result = saveDesignArtifactFile(filePath, html, workspacePath, {
           ...(metadata ?? {}),
-          artifactId: metadata?.artifactId || path.basename(path.dirname(result.filePath)),
           preview: metadata?.preview ?? { thumbnailText: makeDesignThumbnailText(html) },
           variations: metadata?.variations ?? extractDesignVariationMetadata(html),
-        })
+      })
+      if (result.success && result.filePath) {
         storeDesignHtml(result.filePath, html)
         console.log(`[Design] Saved artifact file -> ${result.filePath}`)
       }
@@ -3552,7 +3505,7 @@ export function registerDesignHandlers(): void {
   registerDesignExecutor(
     "design:agent-generate",
     async (event, {
-      sessionId, prompt, modelId, tabId, imageData, mimeType, currentHtml, skill, workspacePath: requestedWorkspacePath, artifactId, sourceArtifactPath, designSessionId, designSystemId, templatePackage,
+      sessionId, prompt, modelId, tabId, imageData, mimeType, currentHtml, skill, workspacePath: requestedWorkspacePath, artifactId, sourceArtifactPath, designSessionId, designSystemId, templatePackage, singleVariant,
     }: {
       sessionId: string
       prompt: string
@@ -3568,6 +3521,7 @@ export function registerDesignHandlers(): void {
       designSessionId?: string
       designSystemId?: string
       templatePackage?: DesignTemplateReference
+      singleVariant?: boolean
     }) => {
       const channel = `design:stream:${sessionId}`
       const win = event.sender ? BrowserWindow.fromWebContents(event.sender) : null
@@ -3736,17 +3690,12 @@ export function registerDesignHandlers(): void {
         ) || Boolean(
           existingOutputArtifact.success && existingOutputArtifact.html?.trim() && sourceArtifactPath
         )
-        const artifactInstruction = buildDesignArtifactInstruction(
-          draftArtifactPath,
-          false,
-          sourceFilePathForPrompt
-        )
 
         const makeStreamConfig = (runtimeThreadId: string) => ({
           configurable: { thread_id: runtimeThreadId },
           signal: controller.signal,
           streamMode: ["messages", "values"] as ("messages" | "values")[],
-          recursionLimit: 200,
+          recursionLimit: getAgentGraphRecursionLimit(),
         })
 
         const shouldUseStoredHtmlFallback =
@@ -3760,6 +3709,11 @@ export function registerDesignHandlers(): void {
           !hasExistingArtifactHtml && typeof currentHtml === "string" && currentHtml.trim()
             ? currentHtml
             : storedHtml
+        const isNewDesign = !hasExistingArtifactHtml && !htmlForIteration
+        const enforceSingleVariant = !!singleVariant || !!designSystemId
+        const artifactInstruction = isNewDesign
+          ? buildDesignCreationArtifactInstruction(draftArtifactPath)
+          : buildDesignArtifactInstruction(draftArtifactPath, false, sourceFilePathForPrompt)
         const promptWithCurrentHtml = htmlForIteration
           ? `${prompt}\n\n---\nCURRENT DESIGN HTML (iterate on this — do NOT ignore it):\n${htmlForIteration}`
           : prompt
@@ -3774,9 +3728,13 @@ export function registerDesignHandlers(): void {
         let candidateDraftPath = draftArtifactPath
         let wroteCandidateDraft = false
         let recordedFirstWrite = false
+        let recordedFirstModelChunk = false
+        let recordedRuntimeReady = false
         draftPublisher = new DesignDraftPublisher({
           runId: sessionId, workspacePath, draftPath: candidateDraftPath, signal: controller.signal,
-          publish: (preview) => send({ type: "preview", preview }),
+          publish: (preview) => {
+            if (!designVariantPolicyIssue(preview.html, enforceSingleVariant)) send({ type: "preview", preview })
+          },
         })
         const isFinalizableCandidate = (candidate: string) => isCompleteHtmlDocument(candidate) && isFinalizableDesignDraft(candidate, draftPublisher?.expectedSections)
         const shouldResetInitialCheckpoint = !hasExistingArtifactHtml && !htmlForIteration
@@ -3794,21 +3752,35 @@ export function registerDesignHandlers(): void {
               })
             : new HumanMessage(messageText)
 
-        const createDesignAgentRuntimeForThread = (runtimeThreadId: string) => createAgentRuntime({
+        const createDesignAgentRuntimeForThread = (runtimeThreadId: string, validationRepair = false) => createAgentRuntime({
           threadId: runtimeThreadId,
           workspacePath,
           modelId,
-          extraSystemPrompt: DESIGN_SYSTEM_PROMPT + (templatePackage ? "\n\n## Selected template package\nUse the selected local template's framework, component library and theme. Its dependencies have already been copied by the host. Keep relative local script/style references instead of inlining vendor bundles or switching to remote CDNs. Produce exactly one complete HTML page, preserving React/Vue and JSX/Babel where present. These template rules override generic inline-only and variation instructions.\n" : ""),
+          baseSystemPrompt: isNewDesign || validationRepair ? buildDesignCreationBasePrompt(workspacePath) : undefined,
+          extraSystemPrompt: (validationRepair ? DESIGN_VALIDATION_REPAIR_SYSTEM_PROMPT : isNewDesign ? DESIGN_CREATION_SYSTEM_PROMPT + (templatePackage ? DESIGN_FRAMEWORK_EDITING_PROMPT : "") : DESIGN_SYSTEM_PROMPT) + (enforceSingleVariant ? "\n\n" + SINGLE_DESIGN_VARIANT_PROMPT : "") + (templatePackage ? "\n\n## Selected template package\nUse the selected local template's framework, component library and theme. Its dependencies have already been copied by the host. Keep relative local script/style references instead of inlining vendor bundles or switching to remote CDNs. Produce exactly one complete HTML page, preserving React/Vue and JSX/Babel where present. These template rules override generic inline-only and variation instructions.\n" : ""),
           noSchedulerTool: true,
           noSkillEvolutionTool: true,
+          disableSubagents: validationRepair || (isNewDesign && !selectedSkill),
+          allowedSkillNames: validationRepair ? [] : isNewDesign ? (selectedSkill ? [selectedSkill.name] : []) : undefined,
+          disableMcpTools: validationRepair || (isNewDesign && !selectedSkill && !/https?:\/\//i.test(prompt)),
+          blockedToolNames: validationRepair || (isNewDesign && !selectedSkill) ? ["execute", "task_output", "code_exec", "write_todos"] : [],
           enableAgentsPrompt: false,
           abortSignal: controller.signal,
           retryHooks: buildDesignModelRetryHooks(send),
           maxRetryAttempts: DESIGN_MODEL_MAX_RETRY_ATTEMPTS,
+          validateFileWrite: (filePath, content) =>
+            isNewDesign && !recordedFirstWrite && sameResolvedFilePath(filePath, candidateDraftPath)
+              ? validateFirstDesignWrite(content)
+              : undefined,
           onFileMutation: (filePath) => {
             if (sameResolvedFilePath(path.resolve(workspacePath, filePath), candidateDraftPath)) {
               wroteCandidateDraft = true
-              if (!recordedFirstWrite) { recordedFirstWrite = true; send({ type: "metrics", metrics: { firstWriteAt: Date.now() } }) }
+              if (!recordedFirstWrite) {
+                recordedFirstWrite = true
+                let firstWriteBytes: number | undefined
+                try { firstWriteBytes = fs.statSync(candidateDraftPath).size } catch { /* Preview reports any later read failure. */ }
+                send({ type: "metrics", metrics: { firstWriteAt: Date.now(), firstWriteBytes } })
+              }
               draftPublisher?.notify(filePath)
             }
           },
@@ -3929,7 +3901,8 @@ export function registerDesignHandlers(): void {
         const createInitialDesignStream = async (
           runtimeThreadId: string,
           runtimeAgent: Awaited<ReturnType<typeof createDesignAgentRuntimeForThread>>,
-          humanMessage: HumanMessage
+          humanMessage: HumanMessage,
+          validationRepair = false
         ): Promise<AsyncIterable<unknown>> => {
           let initialStreamRetriesLeft = 2
           let currentAgent = runtimeAgent
@@ -3954,22 +3927,37 @@ export function registerDesignHandlers(): void {
                 await closeCheckpointer(runtimeThreadId)
                 deleteThreadCheckpoint(runtimeThreadId)
               }
-              currentAgent = await createDesignAgentRuntimeForThread(runtimeThreadId)
+              currentAgent = await createDesignAgentRuntimeForThread(runtimeThreadId, validationRepair)
             }
           }
         }
 
         const runDesignAgentOnce = async (
           messageText: string,
-          runtimeThreadId: string
+          runtimeThreadId: string,
+          validationRepair = false
         ): Promise<{ html?: string; fullText: string }> => {
-          let runtimeAgent = await createDesignAgentRuntimeForThread(runtimeThreadId)
-          const humanMessage = makeHumanMessage(messageText)
-          let stream = await createInitialDesignStream(runtimeThreadId, runtimeAgent, humanMessage)
+          let runtimeAgent = await createDesignAgentRuntimeForThread(runtimeThreadId, validationRepair)
+          if (!recordedRuntimeReady) {
+            recordedRuntimeReady = true
+            send({ type: "metrics", metrics: { runtimeReadyAt: Date.now() } })
+          }
+          const humanMessage = validationRepair ? new HumanMessage(messageText) : makeHumanMessage(messageText)
+          let stream = await createInitialDesignStream(runtimeThreadId, runtimeAgent, humanMessage, validationRepair)
           const runtimeStreamConfig = makeStreamConfig(runtimeThreadId)
           let midStreamRetriesLeft = 2
           let streamedText = ""
           let finalMessageText = ""
+          let completedDraftHtml: string | undefined
+          const readCompletedDraft = async (): Promise<string | undefined> => {
+            if (!wroteCandidateDraft) return undefined
+            await draftPublisher?.flush()
+            const candidate = readFreshDesignArtifactDraftFile(
+              candidateDraftPath, workspacePath, generationStartedAtMs, wroteCandidateDraft, true
+            )
+            return candidate.success && candidate.html && isFinalizableCandidate(candidate.html)
+              ? candidate.html : undefined
+          }
 
           // Mid-stream retry loop mirrors chat module (ipc/agent.ts). Retryable
           // stream interruptions rebuild the runtime and resume from checkpoint;
@@ -3977,7 +3965,11 @@ export function registerDesignHandlers(): void {
           // eslint-disable-next-line no-constant-condition
           while (true) {
             try {
-              for await (const rawChunk of stream) {
+              for await (const rawChunk of designStreamWithArtifactRecovery(stream, {
+                signal: controller.signal,
+                readCompletedArtifact: readCompletedDraft,
+                completed: (html) => { completedDraftHtml = html }
+              })) {
                 if (controller.signal.aborted) break
 
                 const [mode, data] = rawChunk as [string, unknown]
@@ -4079,6 +4071,10 @@ export function registerDesignHandlers(): void {
                 const className = getSerializedClassName(msgChunk)
 
                 if (className.includes("AI")) {
+                  if (!recordedFirstModelChunk) {
+                    recordedFirstModelChunk = true
+                    send({ type: "metrics", metrics: { firstModelChunkAt: Date.now() } })
+                  }
                   const emitToolCall = (toolCall: NormalizedDesignToolCall) => {
                     if (!toolCall.id) return
                     emittedToolCallIds.add(toolCall.id)
@@ -4168,13 +4164,13 @@ export function registerDesignHandlers(): void {
               if (resetCheckpoint) {
                 await closeCheckpointer(runtimeThreadId)
                 deleteThreadCheckpoint(runtimeThreadId)
-                runtimeAgent = await createDesignAgentRuntimeForThread(runtimeThreadId)
+                runtimeAgent = await createDesignAgentRuntimeForThread(runtimeThreadId, validationRepair)
                 streamedText = ""
                 finalMessageText = ""
                 stream = await runtimeAgent.stream({ messages: [humanMessage] }, runtimeStreamConfig)
               } else {
                 // null input = resume from LangGraph checkpoint, do not re-send the human message
-                runtimeAgent = await createDesignAgentRuntimeForThread(runtimeThreadId)
+                runtimeAgent = await createDesignAgentRuntimeForThread(runtimeThreadId, validationRepair)
                 stream = await runtimeAgent.stream(null, runtimeStreamConfig)
               }
             }
@@ -4190,7 +4186,7 @@ export function registerDesignHandlers(): void {
           await draftPublisher?.flush()
           const fullText = finalMessageText || streamedText
           const html = extractHtml(fullText)
-          return { html: html && isFinalizableCandidate(html) ? html : undefined, fullText }
+          return { html: completedDraftHtml ?? (html && isFinalizableCandidate(html) ? html : undefined), fullText }
         }
 
         if (shouldResetInitialCheckpoint) {
@@ -4222,16 +4218,19 @@ export function registerDesignHandlers(): void {
             } satisfies DesignExecutionEvent,
           })
         }
-        let lastValidationFailureMessage = ""
         const sendValidatedArtifact = async (
           artifactHtml: string,
           showFailureResult: boolean
         ): Promise<{ ok: true } | { ok: false; repairable: boolean; message: string }> => {
+          const policyIssue = designVariantPolicyIssue(artifactHtml, enforceSingleVariant)
+          if (policyIssue) {
+            sendValidationEvent(showFailureResult ? "error" : "running", policyIssue)
+            return { ok: false, repairable: true, message: policyIssue }
+          }
           if (requiresFreshEditArtifact && isSameDesignHtml(artifactHtml, currentHtmlSource)) {
             const message = "本次编辑没有产生有效 HTML 变更，请根据用户的批注或绘制标记修改当前设计后重新写入完整 artifact。"
             if (showFailureResult) sendValidationEvent("error", message, true)
             else sendValidationEvent("running", "本次编辑未产生页面变更，正在自动修复...")
-            lastValidationFailureMessage = message
             return { ok: false, repairable: true, message }
           }
 
@@ -4239,13 +4238,15 @@ export function registerDesignHandlers(): void {
           draftPublisher?.validating()
           const liveState = managedDesignStateReaders.get(sessionId)?.()
           const tweaks = reconcileTweaks(readTweakDeclaration(artifactHtml), liveState?.draftPreview?.tweaks ?? liveState?.tweaks, true)
+          const sourceHtmlForReport = artifactHtml
           artifactHtml = installDesignEditDataRuntime(materializeTweaks(artifactHtml, tweaks))
           const validationStartedAt = Date.now()
           send({ type: "metrics", metrics: { validationStartedAt } })
           const validationDraftPath = makeDesignArtifactDraftPath(outputArtifactPath)
+          const validationHtml = injectDesignBrowserValidationProbe(artifactHtml)
           const draftSave = saveDesignArtifactFile(
             validationDraftPath,
-            injectDesignBrowserValidationProbe(artifactHtml),
+            validationHtml,
             workspacePath
           )
           if (!draftSave.success || !draftSave.filePath) {
@@ -4254,28 +4255,29 @@ export function registerDesignHandlers(): void {
               `浏览器运行校验前写入临时文件失败：${draftSave.error ?? "未知错误"}`,
               true
             )
-            lastValidationFailureMessage = `浏览器运行校验前写入临时文件失败：${draftSave.error ?? "未知错误"}`
-            return { ok: false, repairable: false, message: lastValidationFailureMessage }
+            return { ok: false, repairable: false, message: `浏览器运行校验前写入临时文件失败：${draftSave.error ?? "未知错误"}` }
           }
 
           sendValidationEvent("running", "浏览器校验中...")
-          const browserValidation = await validateDesignArtifactInHiddenBrowser(draftSave.filePath, controller.signal)
+          const browserValidation = await validateDesignArtifactInHiddenBrowser(draftSave.filePath, controller.signal, {
+            onRetry: () => sendValidationEvent("running", "浏览器加载或环境检查失败，正在用新窗口复查一次..."),
+            originalSource: sourceHtmlForReport, fullChecks: true,
+          })
           send({ type: "metrics", metrics: { validationFinishedAt: Date.now() } })
-          const browserValidationMessage = formatDesignBrowserValidation(browserValidation)
-          lastValidationFailureMessage = browserValidationMessage
+          const browserValidationMessage = formatDesignBrowserValidation(browserValidation, {
+            html: sourceHtmlForReport, filePath: candidateDraftPath,
+            validationHtml, validationPath: draftSave.filePath,
+          })
           if (!browserValidation.ok) {
-            if (showFailureResult) sendValidationEvent("error", browserValidationMessage, true)
-            else sendValidationEvent("running", "浏览器校验未通过，正在自动修复...")
-            return { ok: false, repairable: true, message: browserValidationMessage }
+            const repairable = isDesignValidationRepairable(browserValidation)
+            if (showFailureResult || !repairable) sendValidationEvent("error", browserValidationMessage, true)
+            else sendValidationEvent("running", `浏览器校验未通过，已将以下问题交给模型修复：\n${browserValidationMessage}`)
+            return { ok: false, repairable, message: browserValidationMessage }
           }
 
           sendValidationEvent("success", browserValidationMessage, false)
           if (controller.signal.aborted) throw createDesignAbortError()
-          storeDesignHtml(htmlStoreKey, artifactHtml)
-          const saved = tabId ? saveDesignArtifact(resolvedArtifactId, artifactHtml, workspacePath) : null
-          let metadata: DesignArtifactMetadata | null = null
-          if (saved?.filePath) {
-            metadata = writeDesignArtifactMetadata(saved.filePath, {
+          const saved = saveDesignArtifact(resolvedArtifactId, artifactHtml, workspacePath, {
               artifactId: resolvedArtifactId,
               prompt,
               modelId: modelId ?? null,
@@ -4288,8 +4290,14 @@ export function registerDesignHandlers(): void {
               variations: extractDesignVariationMetadata(artifactHtml),
               templatePackage,
               tweaks,
-            })
+          })
+          if (!saved.success || !saved.filePath) {
+            const message = `设计校验通过，但正式保存失败：${saved.error ?? "未知错误"}。已保留验证草稿。`
+            sendValidationEvent("error", message, true)
+            return { ok: false, repairable: false, message }
           }
+          const metadata = saved.metadata
+          storeDesignHtml(htmlStoreKey, artifactHtml)
           send({
             type: "done",
             html: artifactHtml,
@@ -4321,19 +4329,11 @@ export function registerDesignHandlers(): void {
           stalledContinuationAttempts < DESIGN_ARTIFACT_CONTINUATION_STALL_ATTEMPTS
         ) {
           continuationAttempt++
-          wroteCandidateDraft = false
           const continuationArtifactPath = candidateDraftPath
-          const beforePreviewRevision = draftPublisher?.latest?.revision ?? 0
-          const continuationInstruction = buildDesignArtifactInstruction(
-            continuationArtifactPath,
-            fs.existsSync(continuationArtifactPath),
-            sourceFilePathForPrompt
-          )
-          const continuationPrompt =
-            `继续上一轮 Design 生成流程。已有骨架或区块可能仍未完成；请保留已完成部分，补齐剩余 data-design-pending 区块，移除 data-design-build 后再结束。不要从头重做读取、分析或已完成的区块。当前已完成 ${draftPublisher?.latest?.completedSections.length ?? 0}/${draftPublisher?.latest?.totalSections ?? 0} 区块。\n\n` +
-            `你现在必须基于当前线程里已经读取/提取到的 PRD、技能和上下文继续执行。若还缺少必要信息，可以继续调用 read_file 等工具；但如果没有明确的绝对路径，跳过该读取，绝不能调用 file_path 为空或 undefined 的 read_file。\n\n` +
-            `本轮结束前必须把完整、可独立运行的 HTML artifact 写入指定文件。不要只说明下一步计划。\n\n` +
-            continuationInstruction
+          const beforeDraft = readFreshDesignArtifactDraftFile(candidateDraftPath, workspacePath, generationStartedAtMs, wroteCandidateDraft)
+          const beforeInspection = beforeDraft.html ? inspectDesignDocument(beforeDraft.html, draftPublisher?.expectedSections) : undefined
+          wroteCandidateDraft = false
+          const continuationPrompt = buildDesignContinuationPrompt(continuationArtifactPath, beforeInspection, fs.existsSync(continuationArtifactPath))
           sendValidationEvent("running", "继续生成 artifact...", false)
           const continuationResult = await runDesignAgentOnce(continuationPrompt, threadId)
           html = continuationResult.html
@@ -4353,7 +4353,9 @@ export function registerDesignHandlers(): void {
             }
           }
           const hasCompleteArtifact = Boolean(html && isFinalizableCandidate(html))
-          const madeProgress = hasCompleteArtifact || (draftPublisher?.latest?.revision ?? 0) > beforePreviewRevision
+          const afterDraft = readFreshDesignArtifactDraftFile(candidateDraftPath, workspacePath, generationStartedAtMs, wroteCandidateDraft)
+          const afterInspection = afterDraft.html ? inspectDesignDocument(afterDraft.html, draftPublisher?.expectedSections) : undefined
+          const madeProgress = hasCompleteArtifact || hasDesignContinuationProgress(beforeInspection, afterInspection)
           stalledContinuationAttempts = madeProgress ? 0 : stalledContinuationAttempts + 1
         }
 
@@ -4410,7 +4412,7 @@ export function registerDesignHandlers(): void {
             if (!validationOutcome.repairable || repairAttempt >= DESIGN_BROWSER_AUTO_FIX_ATTEMPTS) {
               send({
                 type: "error",
-                error: `生成的 HTML 未通过校验，已停止自动修复。\n${validationOutcome.message}`,
+                error: validationOutcome.repairable ? `修复后仍未通过校验，已停止自动修复。\n${validationOutcome.message}` : validationOutcome.message,
               })
               abortAgentSession()
               return
@@ -4418,33 +4420,18 @@ export function registerDesignHandlers(): void {
 
             const repairThreadId = makeDesignAgentRepairThreadId(threadId, repairAttempt + 1)
             const repairArtifactPath = makeDesignArtifactDraftPath(outputArtifactPath)
+            const repairDraft = saveDesignArtifactFile(repairArtifactPath, html, workspacePath)
+            if (!repairDraft.success) {
+              send({ type: "error", error: `准备修复草稿失败：${repairDraft.error ?? "未知错误"}\n${validationOutcome.message}` })
+              return
+            }
             candidateDraftPath = repairArtifactPath
             draftPublisher?.setCandidate(candidateDraftPath)
             wroteCandidateDraft = false
             await closeCheckpointer(repairThreadId)
             deleteThreadCheckpoint(repairThreadId)
-            const failedSnapshot = writeDesignArtifactSourceSnapshot(outputArtifactPath, html)
-            const repairSourcePath = failedSnapshot.success && failedSnapshot.filePath
-              ? failedSnapshot.filePath
-              : sourceFilePathForPrompt
-            const repairArtifactInstruction = buildDesignArtifactInstruction(
-              repairArtifactPath,
-              false,
-              repairSourcePath
-            )
-            const structureRepairInstruction = hasDesignStructureValidationIssue(lastValidationFailureMessage)
-              ? `必须保证 #variation-a 和 #variation-b 都是 body 的直接子元素，两个方案不能互相嵌套，并且 Variation A 必须完整闭合后才能开始 Variation B。移除任何 <|...|> 或 <｜...｜> 模型控制 token。\n\n`
-              : ""
-            const repairPrompt =
-              `${promptWithSkill}\n\n---\n[Design validation failed]\n` +
-              `生成的 HTML 没有通过宿主应用校验。请先读取失败的 HTML，再修复问题，并写出完整、可独立运行的 HTML artifact。\n\n` +
-              structureRepairInstruction +
-              `校验错误：\n${lastValidationFailureMessage || "隐藏浏览器运行校验失败。"}\n\n` +
-              (repairSourcePath
-                ? `修复前必须先用 read_file 读取这个失败的 HTML 文件：\n${repairSourcePath}\n\n`
-                : `当前失败 HTML 片段：\n\`\`\`html\n${html.slice(0, 12000)}\n\`\`\`\n\n`) +
-              repairArtifactInstruction
-            const repairResult = await runDesignAgentOnce(repairPrompt, repairThreadId)
+            const repairPrompt = buildDesignValidationRepairPrompt(validationOutcome.message, repairArtifactPath)
+            const repairResult = await runDesignAgentOnce(repairPrompt, repairThreadId, true)
             html = repairResult.html
             if (repairResult.fullText && !isLikelyDesignProgressOnlyText(repairResult.fullText)) {
               fullText = repairResult.fullText
@@ -4494,7 +4481,9 @@ export function registerDesignHandlers(): void {
           const msg = err instanceof Error ? err.message : String(err)
           console.error("[Design:Agent] Generation error:", msg)
           abortAgentSession()
-          send({ type: "error", error: msg })
+          send({ type: "error", error: isDesignGraphRecursionLimit(err)
+            ? "设计生成达到当前执行步数上限，草稿已保留。页面尚未完成或结构检查未通过，请缩小本次范围后重试；也可在设置中调整 Agent 执行步数。"
+            : msg })
         }
       } finally {
         draftPublisher?.dispose()

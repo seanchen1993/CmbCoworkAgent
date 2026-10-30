@@ -2341,7 +2341,7 @@ interface CustomAPI {
     askQuestions: (
       sessionId: string,
       prompt: string,
-      onEvent: (event: { type: string; questions?: unknown[]; error?: string }) => void,
+      onEvent: (event: { type: string; question?: unknown; questions?: unknown[]; error?: string }) => void,
       modelId?: string,
       designSystemId?: string
     ) => () => void

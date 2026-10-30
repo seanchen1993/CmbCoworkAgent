@@ -63,6 +63,67 @@ function harness(options: Partial<DesignRunDependencies> = {}) {
 }
 
 describe("background design conversations", () => {
+  it("keeps the last page and reports an error when the formal artifact cannot be committed", async () => {
+    const h = harness({
+      finalize: () => {
+        throw new Error("正式保存失败：磁盘已满")
+      }
+    })
+    h.create()
+    h.manager.patch("ds_a", { html: "<!doctype html><html><body>上一版</body></html>" })
+    const emit = await h.start()
+    emit({ type: "done", html: "<!doctype html><html><body>新页面</body></html>" })
+    expect(h.manager.get("ds_a").state.html).toContain("上一版")
+    expect(h.manager.get("ds_a").state.generationState).toBe("error")
+    expect(h.manager.get("ds_a").state.lastCompletedRunId).toBeNull()
+    h.finishes.get("request-a")!()
+  })
+  it("persists the DESIGN.md single-variant lock through deselection, reopen and later generation kinds", async () => {
+    const h = harness()
+    h.create()
+    h.manager.patch("ds_a", { selectedDesignSystemId: "brand" })
+    h.manager.patch("ds_a", { selectedDesignSystemId: null, singleVariant: false })
+    expect(h.store.get("ds_a")!.state.singleVariant).toBe(true)
+    const reopened = new DesignRunManager(h.store, h.deps)
+    expect(reopened.get("ds_a").state.singleVariant).toBe(true)
+    for (const kind of ["agent", "image"] as const) {
+      const emit = await h.start("ds_a", kind, kind)
+      expect(h.execute.mock.calls.at(-1)![0].prompt).toContain("permanently single-variant")
+      emit({ type: "done", html: "<!doctype html><html><body><main>单版</main></body></html>" })
+      h.finishes.get(kind)!()
+    }
+    h.create("ds_other")
+    expect(h.manager.get("ds_other").state.singleVariant).toBe(false)
+  })
+
+  it("backfills old conversations from persisted artifact metadata", () => {
+    const h = harness()
+    const seed = h.create()
+    seed.state.artifactMetadata = { designSystemId: "brand" } as typeof seed.state.artifactMetadata
+    delete seed.state.singleVariant
+    h.store.save(seed, [])
+    const restored = new DesignRunManager(h.store, h.deps)
+    expect(restored.get("ds_a").state.singleVariant).toBe(true)
+  })
+
+  it("rejects multi-variant previews and final artifacts without replacing the last valid page", async () => {
+    const h = harness()
+    h.create()
+    const baseline = "<!doctype html><html><body><main>已保存版本</main></body></html>"
+    h.manager.patch("ds_a", { selectedDesignSystemId: "brand", html: baseline })
+    const emit = await h.start()
+    const runId = h.manager.get("ds_a").activeRunId!
+    const variants =
+      '<!doctype html><html><body><div id="variation-a">A</div><div id="variation-b">B</div></body></html>'
+    emit({ type: "preview", preview: { ...preview(runId, 1), html: variants } })
+    expect(h.manager.get("ds_a").state.draftPreview).toBeNull()
+    emit({ type: "done", html: variants })
+    expect(h.manager.get("ds_a").state.html).toBe(baseline)
+    expect(h.manager.get("ds_a").state.generationState).toBe("error")
+    expect(() => h.manager.patch("ds_a", { html: variants })).toThrow("只允许单一方案")
+    h.finishes.get("request-a")!()
+  })
+
   const html = (pending = false) =>
     `<!doctype html><html><head><style>section{color:var(--primary)}</style><script type="application/design-tweaks+json">{"defaults":{"primary":"#123456"},"schema":{"primary":{"type":"color","label":"主色"}},"bindings":{"primary":[{"type":"css-var","name":"--primary"}]}}</script></head><body ${pending ? 'data-design-build="building"' : ""}><section data-design-section="main" ${pending ? "data-design-pending" : ""}>页面</section></body></html>`
   const preview = (runId: string, revision: number, pending = false): DesignDraftPreview => ({
@@ -291,6 +352,56 @@ describe("background design conversations", () => {
     h.manager.approvalRemoved("approval-1")
     expect(h.store.get("ds_a")!.state.pendingApproval).toBeNull()
     expect(h.manager.get("ds_a").state.generationState).toBe("generating")
+  })
+
+  it("streams questions immediately and preserves answers through duplicates, completion and reopen", async () => {
+    const h = harness()
+    h.create()
+    const emit = await h.start("ds_a", "questions", "questions")
+    const first = { id: "name", type: "text", label: "产品名称" }
+    const second = { id: "scope", type: "chips", label: "功能范围", options: ["概览", "详情"] }
+    emit({ type: "question", question: first })
+    expect(h.store.get("ds_a")!.state.questions.map((q) => q.id)).toEqual(["name"])
+    expect(h.manager.get("ds_a").state.generationState).toBe("asking")
+    h.manager.patch("ds_a", { answers: { name: "销售中心" } })
+    emit({ type: "question", question: second })
+    emit({ type: "question", question: { ...first, label: "模型重发的名称" } })
+    emit({ type: "done", questions: [second, first] })
+    h.finishes.get("questions")!()
+    const state = h.manager.get("ds_a").state
+    expect(state.questions.map((q) => q.label)).toEqual(["产品名称", "功能范围"])
+    expect(state.answers).toEqual({ name: "销售中心" })
+    expect(state.generationState).toBe("questions_ready")
+    expect(state.generationMetrics?.firstQuestionAt).toBeDefined()
+    const recovered = new DesignRunManager(h.store, h.deps)
+    expect(recovered.get("ds_a").state.answers).toEqual({ name: "销售中心" })
+  })
+
+  it("keeps a single necessary question even when a design system is selected", async () => {
+    const h = harness()
+    h.create()
+    h.manager.patch("ds_a", { selectedDesignSystemId: "system" })
+    const emit = await h.start("ds_a", "questions", "questions")
+    emit({ type: "done", questions: [{ id: "scope", type: "text", label: "页面范围" }] })
+    expect(h.manager.get("ds_a").state.generationState).toBe("questions_ready")
+    expect(h.execute).toHaveBeenCalledTimes(1)
+    h.finishes.get("questions")!()
+  })
+
+  it("ignores questions from cancelled runs and clears old answers when asking again", async () => {
+    const h = harness()
+    h.create()
+    const old = await h.start("ds_a", "old", "questions")
+    old({ type: "question", question: { id: "old", label: "旧问题" } })
+    h.manager.patch("ds_a", { answers: { old: "旧答案" } })
+    h.manager.stop("ds_a")
+    h.finishes.get("old")!()
+    const emit = await h.start("ds_a", "new", "questions")
+    old({ type: "question", question: { id: "late", label: "过期事件" } })
+    expect(h.manager.get("ds_a").state.questions).toEqual([])
+    expect(h.manager.get("ds_a").state.answers).toEqual({})
+    emit({ type: "done", questions: [] })
+    h.finishes.get("new")!()
   })
 
   it("persists questions and automatically continues a design-system run without renderer callbacks", async () => {

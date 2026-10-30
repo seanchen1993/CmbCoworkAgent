@@ -31,6 +31,7 @@ import {
 } from "../../../shared/design-edit"
 import { sourceHash, verifyDesignPatchDependencies } from "./document-index"
 import { inspectDesignDocument } from "../../../shared/design-progressive"
+import { isSingleDesignVariant, designVariantPolicyIssue, SINGLE_DESIGN_VARIANT_PROMPT } from "../../../shared/design-variation-policy"
 import {
   readTweakDeclaration,
   reconcileTweaks,
@@ -89,6 +90,7 @@ export class DesignRunManager {
     private readonly deps: DesignRunDependencies
   ) {
     for (const snapshot of store.list()) {
+      snapshot.state.singleVariant = isSingleDesignVariant(snapshot.state, snapshot.meta)
       snapshot.state.artifactRevision ??= 0
       snapshot.state.patchStatus = null
       snapshot.state.draftPreview ??= null
@@ -275,6 +277,7 @@ export class DesignRunManager {
     delete updates.tweaks
     delete updates.generationMetrics
     delete updates.lastCompletedRunId
+    delete updates.singleVariant
     for (const key of [
       "artifactRevision",
       "appliedPatch",
@@ -287,6 +290,8 @@ export class DesignRunManager {
     if (updates.generationState === "generating" || updates.generationState === "asking")
       delete updates.generationState
     if (updates.html !== undefined && updates.html !== next.state.html) {
+      const issue = designVariantPolicyIssue(updates.html, isSingleDesignVariant(next.state, next.meta))
+      if (issue) throw new Error(issue)
       next.state.artifactRevision = (next.state.artifactRevision ?? 0) + 1
       next.state.appliedPatch = null
       next.state.patchStatus = null
@@ -380,6 +385,7 @@ export class DesignRunManager {
       return this.get(previous.sessionId)
     }
     const next = this.get(request.designSessionId)
+    next.state.singleVariant = isSingleDesignVariant(next.state, next.meta)
     if (next.activeRunId) throw new Error("当前设计仍在运行，请先停止或等待完成")
     if (
       request.kind === "patch" &&
@@ -392,6 +398,8 @@ export class DesignRunManager {
       normalize: createDesignProgressNormalizer(),
       pending: []
     }
+    if (next.state.singleVariant && request.kind !== "questions" && !run.request.prompt.includes(SINGLE_DESIGN_VARIANT_PROMPT))
+      run.request.prompt += `\n\n${SINGLE_DESIGN_VARIANT_PROMPT}`
     next.activeRunId = run.id
     next.state.lastCompletedRunId = null
     next.state.draftPreview = null
@@ -428,6 +436,10 @@ export class DesignRunManager {
     next.state.rightTab = request.kind === "questions" ? "questions" : "design"
     next.state.originalPrompt =
       request.kind === "questions" ? request.prompt : next.state.originalPrompt
+    if (request.kind === "questions") {
+      next.state.questions = []
+      next.state.answers = {}
+    }
     next.state.retryPrompt = request.prompt
     next.state.retryIsIteration = !!request.isIteration
     next.state.retryCleanMsg = request.cleanUserMsg ?? null
@@ -494,6 +506,7 @@ export class DesignRunManager {
         "approval",
         "approval_resolved",
         "preview",
+        "question",
         "patch_status"
       ].includes(event.type)
     ) {
@@ -555,6 +568,7 @@ export class DesignRunManager {
       if (terminal) break
       if (event.type === "preview" && event.preview) {
         const preview = event.preview
+        if (designVariantPolicyIssue(preview.html, !!state.singleVariant)) continue
         const previous = state.draftPreview
         if (preview.runId !== run.id || (previous && preview.revision <= previous.revision))
           continue
@@ -595,6 +609,15 @@ export class DesignRunManager {
           assistant.executionEvents ?? [],
           event.event as NonNullable<typeof assistant.executionEvents>[number]
         )
+      } else if (event.type === "question" && run.request.kind === "questions") {
+        const question = normalizeQuestionDef(event.question)
+        if (question && !state.questions.some((q) => q.id === question.id)) {
+          state.questions.push(question)
+          state.generationMetrics = {
+            ...state.generationMetrics,
+            firstQuestionAt: state.generationMetrics?.firstQuestionAt ?? Date.now()
+          }
+        }
       } else if (event.type === "model_retry") {
         assistant.modelRetry = asDesignModelRetryState(event)
       } else if (event.type === "model_retry_clear") {
@@ -605,14 +628,18 @@ export class DesignRunManager {
         state.pendingApproval = null
       } else if (event.type === "done") {
         if (run.request.kind === "questions") {
-          state.questions = (event.questions ?? [])
-            .map(normalizeQuestionDef)
-            .filter((q) => q !== null)
-          state.answers = {}
+          // Streamed definitions stay stable so later snapshots cannot reset an
+          // input's options or overwrite an answer entered while streaming.
+          for (const raw of event.questions ?? []) {
+            const question = normalizeQuestionDef(raw)
+            if (question && !state.questions.some((q) => q.id === question.id))
+              state.questions.push(question)
+          }
+          state.generationMetrics = { ...state.generationMetrics, questionsReadyAt: Date.now() }
           state.generationState = "questions_ready"
           assistant.role = "questions-prompt"
           assistant.content = "请补充相关问题 →"
-          continueGenerating = !!state.selectedDesignSystemId && state.questions.length <= 1
+          continueGenerating = !!state.selectedDesignSystemId && state.questions.length === 0
           if (continueGenerating) {
             assistant.role = "assistant"
             assistant.content = "需求已整理，正在生成设计。"
@@ -620,6 +647,8 @@ export class DesignRunManager {
           }
         } else {
           try {
+            const variantIssue = designVariantPolicyIssue(event.html ?? "", !!state.singleVariant)
+            if (variantIssue) throw new Error(variantIssue)
             if (event.patchResult) {
               const result = event.patchResult
               verifyDesignPatchDependencies(result.externalFiles ?? {})
@@ -669,6 +698,8 @@ export class DesignRunManager {
             )
               throw new Error("页面还有未完成区块，已保留草稿")
             event = this.deps.finalize(event, run.request, run.snapshot!)
+            const finalizedVariantIssue = designVariantPolicyIssue(event.html ?? "", !!state.singleVariant)
+            if (finalizedVariantIssue) throw new Error(finalizedVariantIssue)
             if (!event.html?.trim()) throw new Error("生成没有返回有效设计")
             if (
               state.draftPreview &&
@@ -762,7 +793,7 @@ export class DesignRunManager {
           kind: "agent",
           prompt: buildNewDesignPrompt(
             `${run.request.prompt}\n\n---\nNo clarifying answers were collected because the active design system already fixes visual direction.`,
-            { designSystemId: state.selectedDesignSystemId }
+            { designSystemId: state.selectedDesignSystemId, singleVariant: state.singleVariant }
           ),
           cleanUserMsg: run.request.prompt
         })
@@ -935,6 +966,7 @@ export class DesignRunManager {
     editReceipt?: DesignEditReceipt
   ): DesignSessionSnapshot {
     const previousDraft = this.sessions.get(next.id)?.state.draftPreview
+    next.state.singleVariant = !!this.sessions.get(next.id)?.state.singleVariant || isSingleDesignVariant(next.state, next.meta)
     next.seq++
     next.meta.updatedAt = Date.now()
     next.meta.title =

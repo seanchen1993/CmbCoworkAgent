@@ -336,6 +336,7 @@ export interface DesignApprovalRequest {
 }
 
 export interface TabState {
+  singleVariant?: boolean
   creationSelection?: DesignCreationSelection | null
   artifactRevision?: number
   appliedPatch?: DesignAppliedPatch | null

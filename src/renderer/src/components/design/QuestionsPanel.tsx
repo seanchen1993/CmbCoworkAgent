@@ -49,7 +49,7 @@ export function QuestionsPanel({
     return v === opt
   }
 
-  if (isLoading) {
+  if (isLoading && questions.length === 0) {
     return (
       <div style={{ ...S.canvasEmpty, flexDirection: "column", gap: 12 }}>
         <PulsingDot />
@@ -180,21 +180,26 @@ export function QuestionsPanel({
             </div>
           )
         })}
+        {isLoading && (
+          <div role="status" style={{ display: "flex", alignItems: "center", gap: 8, color: "#8a8a8a", fontSize: 13 }}>
+            <PulsingDot /> 正在补充问题，可以先填写已显示的问题
+          </div>
+        )}
       </div>
 
       <div style={S.questionsFooter}>
         <span style={{ fontSize: 13, color: "#8a8a8a" }}>
-          {allAnswered
+          {isLoading ? `已回答 ${answeredCount} 题，正在补充问题` : allAnswered
             ? "可以生成"
             : `已回答 ${answeredCount} / ${questions.length}`}
         </span>
         <button
           onClick={onContinue}
-          disabled={!allAnswered}
+          disabled={isLoading || !allAnswered}
           style={{
             ...S.continueBtn,
-            background: allAnswered ? "#1a1a1a" : "#d4d2cc",
-            cursor: allAnswered ? "pointer" : "default",
+            background: !isLoading && allAnswered ? "#1a1a1a" : "#d4d2cc",
+            cursor: !isLoading && allAnswered ? "pointer" : "default",
           }}
         >
           继续 →

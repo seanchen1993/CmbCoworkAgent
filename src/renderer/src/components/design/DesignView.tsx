@@ -1,3 +1,4 @@
+import { isSingleDesignVariant } from "../../../../shared/design-variation-policy"
 import React, { useState, useRef, useCallback, useEffect } from "react"
 import { v4 as uuid } from "uuid"
 import { Redo2, Undo2 } from "lucide-react"
@@ -325,7 +326,7 @@ function makeIterationRollbackSnapshot(
 
 function hydrateTabStateHtml(state: TabState, html: string): TabState {
   const baseHtml = ensureEditMode(html)
-  const hasDesignSystem = Boolean(state.selectedDesignSystemId)
+  const hasDesignSystem = isSingleDesignVariant(state)
   const patchedHtml = hasDesignSystem ? collapseVariationsToSingleArtifact(baseHtml) : baseHtml
   const variations = hasDesignSystem ? [] : parseVariations(patchedHtml)
   return {
@@ -3648,7 +3649,7 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
       if (selectedSkill || shouldSkipDesignQuestions(prompt)) {
         const generationPrompt = selectedSkill
           ? prompt + contextSuffix
-          : buildNewDesignPrompt(prompt + contextSuffix, { designSystemId: activeDesignSystemId })
+          : buildNewDesignPrompt(prompt + contextSuffix, { designSystemId: activeDesignSystemId, singleVariant: isSingleDesignVariant(stateBeforeSend) })
         startGeneration(
           generationPrompt,
           tabId,
@@ -3730,10 +3731,11 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
     const enrichedPrompt = answerLines
       ? buildNewDesignPrompt(
           `${originalPrompt}\n\n---\nUser's answers to clarifying questions:\n${answerLines}`,
-          { designSystemId: state.selectedDesignSystemId }
+          { designSystemId: state.selectedDesignSystemId, singleVariant: isSingleDesignVariant(state) }
         )
       : buildNewDesignPrompt(`${originalPrompt}\n\n---\nNo clarifying answers were provided.`, {
-          designSystemId: state.selectedDesignSystemId
+          designSystemId: state.selectedDesignSystemId,
+          singleVariant: isSingleDesignVariant(state)
         })
 
     // Build pill tags for the user message update

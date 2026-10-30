@@ -4800,14 +4800,14 @@ const api = {
     askQuestions: (
       sessionId: string,
       prompt: string,
-      onEvent: (event: { type: string; questions?: unknown[]; error?: string }) => void,
+      onEvent: (event: { type: string; question?: unknown; questions?: unknown[]; error?: string }) => void,
       modelId?: string,
       designSystemId?: string
     ): (() => void) => {
       const channel = `design:questions:${sessionId}`
       const handler = (
         _: unknown,
-        data: { type: string; questions?: unknown[]; error?: string }
+        data: { type: string; question?: unknown; questions?: unknown[]; error?: string }
       ): void => {
         onEvent(data)
         if (data.type === "done" || data.type === "error" || data.type === "cancelled") {

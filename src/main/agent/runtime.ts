@@ -4388,6 +4388,8 @@ export interface CreateAgentRuntimeOptions {
   worktreeIsolation?: WorkflowWorktreeIsolationBoundary
   /** Extra content appended to the system prompt (e.g. HEARTBEAT.md context) */
   extraSystemPrompt?: string
+  /** Domain-owned base instructions, replacing generic coding guidance only. */
+  baseSystemPrompt?: string
   /** Plugin-provided runtime context for skill artifact paths and feature bindings. */
   pluginPromptInject?: string
   /** Optional plugin output directory exposed to hook commands as PLUGIN_OUTPUT_DIR. */
@@ -4539,6 +4541,8 @@ export interface CreateAgentRuntimeOptions {
   skillUseTracker?: SkillUseTracker
   /** Callback invoked after successful write/edit/upload filesystem operations. */
   onFileMutation?: (filePath: string, kind: AgentFileMutationKind) => void
+  /** Optional domain check on effective write_file content before any write. */
+  validateFileWrite?: (filePath: string, content: string) => string | undefined
   /** Extra tools appended to the runtime tool list (e.g. a workflow subagent's structured_output). */
   additionalTools?: DynamicStructuredTool[]
   /**
@@ -4902,6 +4906,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     projectCode,
     projectDir,
     onFileMutation,
+    validateFileWrite: options.validateFileWrite,
     abortSignal: options.abortSignal,
     runId: threadId,
     // Foreground turns on the same thread can overlap briefly during bounded
@@ -5129,7 +5134,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   // The prompt must name the directory the agent actually works in, or an isolated
   // agent would be told the host workspace is its root and write outside its
   // worktree (the sandbox would refuse, so it would just fail confusingly).
-  let systemPrompt = getSystemPrompt(fileRoot, windowsSandbox, {
+  let systemPrompt = options.baseSystemPrompt ?? getSystemPrompt(fileRoot, windowsSandbox, {
     includeBackgroundExec: executeToolAvailable && !isReadOnlyRuntime,
     managedForegroundExec: managedExecution,
     includeSubagents: mainSubagentsEnabled,

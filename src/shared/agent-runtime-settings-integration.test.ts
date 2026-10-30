@@ -136,6 +136,7 @@ describe("agent runtime settings integration", () => {
       "src/main/agent/runtime.ts",
       "src/main/agent/workflow/subagent.ts",
       "src/main/ipc/agent.ts",
+      "src/main/ipc/design.ts",
       "src/main/services/im/remote-runner.ts",
       "src/main/services/heartbeat.ts",
       "src/main/services/scheduler.ts"

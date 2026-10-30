@@ -20,6 +20,7 @@ import type {
 } from "./design-patch"
 import type { DesignTweakValue } from "./design-protocol"
 import type { DesignEditCommand, DesignEditableDocument } from "./design-edit"
+import { SINGLE_DESIGN_VARIANT_PROMPT } from "./design-variation-policy"
 
 export type { TabState, Message, SessionMeta }
 export type DesignRunKind = "questions" | "agent" | "image" | "patch"
@@ -48,6 +49,7 @@ export interface DesignRunEvent {
   token?: string
   html?: string
   questions?: unknown[]
+  question?: unknown
   error?: string
   event?: unknown
   attempt?: number
@@ -170,17 +172,18 @@ export function shouldSkipDesignQuestions(prompt: string): boolean {
 const MULTI_VARIATION_INSTRUCTION =
   "Generate 2 distinct variations (A / B) within one HTML file for exploration. " +
   "Variation A should be conventional and safe; Variation B should be more distinctive. " +
-  'Use direct body children with id="variation-a" and id="variation-b" plus concise Chinese data-label values.'
+  'Use direct body children with id="variation-a" and id="variation-b" plus concise Chinese data-label values. ' +
+  'All data-design-section IDs must be globally unique: prefix Variation A sections with a- and Variation B sections with b-.'
 
 const CANONICAL_ARTIFACT_INSTRUCTION =
   'Generate exactly ONE canonical design artifact. Do NOT generate A/B variations, do NOT create elements with id="variation-a" or id="variation-b", and do NOT present alternative versions.'
 
 export function buildNewDesignPrompt(
   basePrompt: string,
-  options: { designSystemId?: string | null; forceVariations?: boolean } = {}
+  options: { designSystemId?: string | null; singleVariant?: boolean; forceVariations?: boolean } = {}
 ): string {
-  const instruction = options.designSystemId
-    ? CANONICAL_ARTIFACT_INSTRUCTION
+  const instruction = options.singleVariant || options.designSystemId
+    ? CANONICAL_ARTIFACT_INSTRUCTION + " " + SINGLE_DESIGN_VARIANT_PROMPT
     : MULTI_VARIATION_INSTRUCTION
   return `${basePrompt}\n\n---\n${instruction}\n\n始终使用中文回答。`
 }
@@ -534,6 +537,7 @@ export function createDesignState(): TabState {
     reloadKey: 0,
     selectedSkill: null,
     selectedDesignSystemId: null,
+    singleVariant: false,
     codeContext: null,
     designLink: null,
     attachedFiles: null,

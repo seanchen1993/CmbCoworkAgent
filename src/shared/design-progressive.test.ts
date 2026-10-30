@@ -26,6 +26,12 @@ const page = (attrs = "", content = '<span id="label">开始</span>') =>
   `<!doctype html><html><head><style>.card{color:var(--primary);border-radius:var(--radius)}</style><script type="application/design-tweaks+json">${JSON.stringify(declaration)}</script></head><body ${attrs}><section data-design-section="main">${content}</section></body></html>`
 
 describe("progressive artifact contract", () => {
+  it("identifies duplicate section markers across A/B variations with actionable feedback", () => {
+    const variation = (id: string, section: string) => `<div id="variation-${id}"><section data-design-section="${section}">内容</section></div>`
+    const duplicate = `<!doctype html><html><body>${variation("a", "shell")}${variation("b", "shell")}</body></html>`
+    expect(inspectDesignDocument(duplicate).issues).toContain("区块 ID 重复：shell；不同方案请使用独立前缀")
+    expect(isFinalizableDesignDraft(`<!doctype html><html><body>${variation("a", "a-shell")}${variation("b", "b-shell")}</body></html>`)).toBe(true)
+  })
   it("accepts closed scaffolds for preview but never for final delivery", () => {
     const scaffold = page('data-design-build="building"').replace(
       '<section data-design-section="main">',
