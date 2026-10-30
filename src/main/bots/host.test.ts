@@ -660,7 +660,80 @@ describe("Bot control state", () => {
     expect(db.getTask(peerTask.id).state).toBe("queued")
     expect(cancelBackground.mock.calls).toEqual([[a.threadId]])
   })
-  it("withdraws only a paused source's exact foreground command after its real stop receipt", async () => {
+  it("cleans only the failed direct Bot task's silent service", async () => {
+    const db = store(), a = db.create(input)
+    const cancelCommands = vi.fn(async (threadId: string, ids: readonly string[]) => {
+      for (const id of ids) db.settleCommand({ id, threadId, output: "Stopped", exitCode: 130, cancelled: true, truncated: false })
+    })
+    const host = new LocalBotHost(db, {
+      onAvailable: () => () => {}, cancelCommands,
+      acquire: (_bot, task) => ({
+        release() {},
+        async execute() {
+          const lifecycle = host.commandLifecycle(task.id)
+          expect(lifecycle.allowSilentServices).toBe(true)
+          expect(lifecycle.retainSource).toBeUndefined()
+          lifecycle.accepted({ id: "direct-service", threadId: task.threadId, command: "node server", cwd: "/test", startedAt: 1, notifyOnComplete: false })
+          throw new Error("Model failed after launch")
+        }
+      })
+    })
+    hosts.push(host)
+    const other = db.enqueue({ botId: a.id, requestId: "previous", message: "Finite job" })
+    db.transition(other.id, "running")
+    db.acceptCommand(other.id, { id: "previous-job", threadId: a.threadId, command: "node build", cwd: "/test", startedAt: 1 })
+    db.settle(other.id, "completed", null, "Waiting")
+    const direct = db.enqueue({ botId: a.id, requestId: "new-direct", message: "Start service and verify" })
+    host.resume()
+    await vi.waitFor(() => expect(db.getTask(direct.id).state).toBe("failed"))
+    expect(cancelCommands.mock.calls).toEqual([[a.threadId, ["direct-service"]]])
+    expect(db.activeCommandThreads()).toEqual([a.threadId])
+    expect(db.recentTasks().filter(t => t.origin.kind === "notification")).toHaveLength(0)
+  })
+  it.each(["failed", "cancelled"] as const)(
+    "cleans the notification's own service when %s, preserving the original task's service",
+    async (outcome) => {
+      const db = store(), bot = db.create(input)
+      let launched = false
+      const cancelCommands = vi.fn(async (threadId: string, ids: readonly string[]) => {
+        for (const id of ids)
+          db.settleCommand({ id, threadId, output: "Stopped", exitCode: 130, cancelled: true, truncated: false })
+      })
+      const host = new LocalBotHost(db, {
+        onAvailable: () => () => {}, cancelCommands,
+        acquire: (_bot, task) => ({
+          release() {},
+          async execute(signal) {
+            expect(db.commandUserRequest(task.id)?.id).toBe(source.id)
+            const lifecycle = host.commandLifecycle(task.id)
+            lifecycle.accepted({ id: "notification-service", threadId: task.threadId, command: "node server", cwd: "/test", startedAt: 2, notifyOnComplete: false })
+            launched = true
+            if (outcome === "cancelled")
+              await new Promise<void>(resolve => signal.addEventListener("abort", () => resolve(), { once: true }))
+            throw new Error("Execution ended after service launch")
+          }
+        })
+      })
+      hosts.push(host)
+      const source = db.enqueue({ botId: bot.id, requestId: "build-service", message: "Build then verify" })
+      db.transition(source.id, "running")
+      for (const [id, notifyOnComplete] of [["build", true], ["existing-service", false]] as const)
+        db.acceptCommand(source.id, { id, threadId: bot.threadId, command: "node fixture", cwd: "/test", startedAt: 1, notifyOnComplete })
+      db.settle(source.id, "completed", null, "Build started")
+      db.settleCommand({ id: "build", threadId: bot.threadId, exitCode: 0, output: "Built", cancelled: false, truncated: false })
+      const notification = db.recentTasks().find(t => t.origin.kind === "notification")!
+      host.resume()
+      await vi.waitFor(() => expect(launched).toBe(true))
+      if (outcome === "cancelled") host.cancel(notification.id)
+      await vi.waitFor(() => expect(db.getTask(notification.id).state).toBe(outcome))
+      expect(cancelCommands.mock.calls).toEqual([[bot.threadId, ["notification-service"]]])
+      expect(db.continuationCommandIds(source.id, true)).toEqual(["existing-service"])
+      expect(db.continuationCommandIds(notification.id, true)).toEqual([])
+      expect(db.activeCommandThreads()).toEqual([bot.threadId])
+      expect(db.recentTasks().filter(t => t.origin.kind === "notification")).toHaveLength(1)
+    }
+  )
+  it("cleans a failed peer's jobs and services before returning failure, preserving another task's command", async () => {
     const db = store(),
       a = db.create(input),
       b = db.create(input)
@@ -672,54 +745,143 @@ describe("Bot control state", () => {
         })
     )
     const host = new LocalBotHost(db, {
-      acquire: () => null,
       onAvailable: () => () => {},
-      cancelCommands
+      cancelCommands,
+      acquire: (_bot, task) => ({
+        release() {},
+        async execute() {
+          if (task.origin.kind === "bot" && task.origin.expectsReply) {
+            for (const [id, notifyOnComplete] of [
+              ["owned-job", true],
+              ["owned-service", false]
+            ] as const)
+              db.acceptCommand(
+                task.id,
+                {
+                  id,
+                  threadId: task.threadId,
+                  command: "node fixture",
+                  cwd: "/test",
+                  startedAt: 1,
+                  notifyOnComplete
+                },
+                true
+              )
+            throw new Error("Model failed after launch")
+          }
+          return { state: "completed", result: "Read failure" }
+        }
+      })
     })
     hosts.push(host)
-    const root = db.enqueue({ botId: a.id, requestId: "cancel-root", message: "Delegate once" })
+    const unrelated = db.enqueue({
+      botId: b.id,
+      requestId: "unrelated",
+      message: "Independent service"
+    })
+    db.transition(unrelated.id, "running")
+    db.acceptCommand(unrelated.id, {
+      id: "unrelated-command",
+      threadId: b.threadId,
+      command: "node other",
+      cwd: "/test",
+      startedAt: 1
+    })
+    db.settle(unrelated.id, "completed", null, "Started")
+    const root = db.enqueue({ botId: a.id, requestId: "root-failure", message: "Delegate" })
     db.transition(root.id, "running")
-    const peer = db.delegate(root.id, b.id, "Command", "foreground")
-    db.settle(root.id, "completed", null, "Assigned")
-    db.transition(peer.id, "running")
-    db.acceptCommand(
-      peer.id,
-      {
+    const peer = db.delegate(root.id, b.id, "Build", "failure-child")
+    db.settle(root.id, "completed", null, "Waiting")
+    host.resume()
+    await vi.waitFor(() => expect(cancelCommands).toHaveBeenCalledOnce())
+    expect(cancelCommands.mock.calls[0]).toEqual([b.threadId, ["owned-job", "owned-service"]])
+    expect(db.getTask(peer.id).state).toBe("running")
+    for (const id of ["owned-job", "owned-service"])
+      db.settleCommand({
+        id,
+        threadId: b.threadId,
+        output: "Stopped",
+        exitCode: 130,
+        cancelled: true,
+        truncated: false
+      })
+    release()
+    await vi.waitFor(() => expect(db.getTask(peer.id).state).toBe("failed"))
+    expect(db.activeCommandThreads()).toEqual([b.threadId])
+    await vi.waitFor(() =>
+      expect(
+        db.recentTasks().filter((t) => t.botId === a.id && t.origin.kind === "bot")
+      ).toHaveLength(1)
+    )
+  })
+  it.each([true, false])(
+    "withdraws only a paused source's command after its real stop receipt (notify=%s)",
+    async (notifyOnComplete) => {
+      const db = store(),
+        a = db.create(input),
+        b = db.create(input)
+      let release!: () => void
+      const cancelCommands = vi.fn(
+        () =>
+          new Promise<void>((resolve) => {
+            release = resolve
+          })
+      )
+      const host = new LocalBotHost(db, {
+        acquire: () => null,
+        onAvailable: () => () => {},
+        cancelCommands
+      })
+      hosts.push(host)
+      const root = db.enqueue({ botId: a.id, requestId: "cancel-root", message: "Delegate once" })
+      db.transition(root.id, "running")
+      const peer = db.delegate(root.id, b.id, "Command", "foreground")
+      db.settle(root.id, "completed", null, "Assigned")
+      db.transition(peer.id, "running")
+      db.acceptCommand(
+        peer.id,
+        {
+          id: "owned-command",
+          threadId: b.threadId,
+          command: "node job",
+          cwd: "/test",
+          startedAt: 1,
+          notifyOnComplete
+        },
+        true
+      )
+      db.deferTask(peer.id, "saved")
+      const direct = db.enqueue({ botId: b.id, requestId: "new-private", message: "Private" })
+      host.cancel(peer.id)
+      host.cancel(peer.id)
+      await vi.waitFor(() => expect(cancelCommands).toHaveBeenCalledOnce())
+      expect(db.getTask(peer.id).state).toBe("queued")
+      expect(db.getTask(direct.id).state).toBe("queued")
+      expect(cancelCommands.mock.calls).toEqual([[b.threadId, ["owned-command"]]])
+      db.settleCommand({
         id: "owned-command",
         threadId: b.threadId,
-        command: "node job",
-        cwd: "/test",
-        startedAt: 1
-      },
-      true
-    )
-    db.deferTask(peer.id, "saved")
-    const direct = db.enqueue({ botId: b.id, requestId: "new-private", message: "Private" })
-    host.cancel(peer.id)
-    host.cancel(peer.id)
-    await vi.waitFor(() => expect(cancelCommands).toHaveBeenCalledOnce())
-    expect(db.getTask(peer.id).state).toBe("queued")
-    expect(db.getTask(direct.id).state).toBe("queued")
-    expect(cancelCommands.mock.calls).toEqual([[b.threadId, ["owned-command"]]])
-    db.settleCommand({
-      id: "owned-command",
-      threadId: b.threadId,
-      output: "Stopped",
-      exitCode: 130,
-      cancelled: true,
-      truncated: false
-    })
-    expect(db.getTask(peer.id).state).toBe("queued")
-    release()
-    await vi.waitFor(() => expect(db.getTask(peer.id).state).toBe("cancelled"))
-    db.flushReplies()
-    const reply = db.recentTasks().find((task) => task.requestId === `reply-${peer.id}`)!
-    expect(reply.message).toContain("以下命令已实际启动")
-    expect(reply.message).toContain('"state":"cancelled"')
-    expect(reply.message).not.toContain("Private")
-    expect(db.activities().find((activity) => activity.id === b.id)?.preview).toBe("已停止")
-    expect(db.recentTasks().filter((t) => t.origin.kind === "notification")).toEqual([])
-  })
+        output: "Stopped",
+        exitCode: 130,
+        cancelled: true,
+        truncated: false
+      })
+      expect(db.getTask(peer.id).state).toBe("queued")
+      release()
+      await vi.waitFor(() => expect(db.getTask(peer.id).state).toBe("cancelled"))
+      db.flushReplies()
+      const reply = db.recentTasks().find((task) => task.requestId === `reply-${peer.id}`)!
+      if (notifyOnComplete) {
+        expect(reply.message).toContain("以下命令已实际启动")
+        expect(reply.message).toContain('"state":"cancelled"')
+      } else {
+        expect(reply.message).toContain("已停止")
+      }
+      expect(reply.message).not.toContain("Private")
+      expect(db.activities().find((activity) => activity.id === b.id)?.preview).toBe("已停止")
+      expect(db.recentTasks().filter((t) => t.origin.kind === "notification")).toEqual([])
+    }
+  )
   it("stops detached work even after its launching inbox task completed", () => {
     const db = store(),
       bot = db.create(input)

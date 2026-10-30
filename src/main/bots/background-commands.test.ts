@@ -33,6 +33,41 @@ function fixture() {
 
 describe("Bot native command receipts", () => {
   it.each([
+    ["completed", false],
+    ["superseded", false],
+    ["completed", true],
+    ["superseded", true]
+  ] as const)(
+    "preserves command ownership after %s while only silent services allow peer review (notify=%s)",
+    (state, notifyOnComplete) => {
+      const { store, bot, task, command, result } = fixture()
+      store.settle(task.id, "completed", null, "Done")
+      const peer = store.create({ name: "Reviewer", instructions: "", color: "#123456", modelRef: null })
+      const group = store.saveGroup({ name: "Service review", memberIds: [bot.id, peer.id] })
+      store.sendGroup({ groupId: group.id, requestId: "service", text: "Start the preview", targetBotIds: [bot.id] })
+      const source = store.nextQueued([])!
+      store.transition(source.id, "running")
+      store.acceptCommand(source.id, { ...command, threadId: source.threadId, notifyOnComplete })
+      store.transition(source.id, "waiting_user")
+      store.sendGroup({ groupId: group.id, requestId: "review", text: "Review the preview", targetBotIds: [peer.id] })
+      store.transition(source.id, "running")
+      store.settle(source.id, state, null, "", undefined, true)
+      const review = store.nextQueued([])!
+      expect(review.botId).toBe(peer.id)
+      store.transition(review.id, "running")
+      store.publishGroupMessage(review.id, "feedback", "@Local Please apply this review.")
+      store.settle(review.id, "completed", null, "", undefined, true)
+      store.advanceGroupDiscussions()
+      expect(store.nextQueued([])?.botId ?? null).toBe(notifyOnComplete ? null : bot.id)
+      expect(store.activeCommandThreads()).toEqual([source.threadId])
+      expect(store.continuationCommandIds(source.id, true)).toEqual(notifyOnComplete ? [] : [command.id])
+      expect(() => store.update({ ...bot, archived: true, expectedVersion: bot.version })).toThrow()
+      store.settleCommand({ ...result, threadId: source.threadId })
+      expect(store.activeCommandThreads()).toEqual([])
+      expect(store.recentTasks().filter(t => t.origin.kind === "notification")).toHaveLength(notifyOnComplete ? 1 : 0)
+    }
+  )
+  it.each([
     [0, false, true],
     [7, false, false],
     [null, false, false],

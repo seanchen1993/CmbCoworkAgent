@@ -85,7 +85,12 @@ const fixture = vi.hoisted(() => ({
   cancelWorkflow: vi.fn(),
   cancelCommands: vi.fn(),
   cancelCommandIds: vi.fn(),
-  commandLifecycle: vi.fn(() => ({ accepted: vi.fn(), settled: vi.fn() })),
+  commandLifecycle: vi.fn((_id: string, retainSource = false) => ({
+    retainSource,
+    accepted: vi.fn(),
+    settled: vi.fn()
+  })),
+  commandIds: vi.fn<() => string[]>(() => []),
   profileContinuation: vi.fn<() => string | null>(() => null),
   commandUserRequest: vi.fn<() => BotTask | null>(() => null),
   groupCheckpoint: vi.fn<() => string | undefined>(() => undefined),
@@ -273,6 +278,7 @@ function port(
         taskCheckpoint: fixture.groupCheckpoint,
         continuationFiles: fixture.continuationFiles,
         continuationCommandResults: fixture.commandResults,
+        continuationCommandIds: fixture.commandIds,
         stoppedTaskContext: fixture.stoppedTasks,
         associatedWorks: () => ({ items: [], hasMore: false }),
         publishGroupFiles: fixture.publishFiles,
@@ -342,6 +348,7 @@ beforeEach(() => {
   fixture.profileContinuation.mockReturnValue(null)
   fixture.commandUserRequest.mockReset().mockReturnValue(null)
   fixture.groupCheckpoint.mockReset().mockReturnValue(undefined)
+  fixture.commandIds.mockReset().mockReturnValue([])
   fixture.commandResults.mockReset().mockReturnValue([])
   fixture.continuationFiles.mockReset().mockReturnValue([])
   fixture.stoppedTasks.mockReset().mockReturnValue([])
@@ -2402,7 +2409,7 @@ describe("Bot Runtime integration", () => {
       .rejects.toThrow("Report not ready")
     expect(fixture.verifyFiles).toHaveBeenCalledWith("/synthetic/workspaces/group-g", ["report.json"], expect.any(AbortSignal))
     expect(fixture.start.mock.calls.at(-1)![2].foregroundCommandLifecycle).toHaveProperty("settled")
-    expect(fixture.start.mock.calls.at(-1)![2].backgroundCommandLifecycle).toBeUndefined()
+    expect(fixture.start.mock.calls.at(-1)![2].backgroundCommandLifecycle).toHaveProperty("retainSource", true)
   })
 
   it("enforces the original report contract when the private result turn actually integrates it", async () => {
@@ -2656,7 +2663,10 @@ describe("Bot Runtime integration", () => {
         .acquire(bot, routed)!
         .execute(new AbortController().signal, vi.fn())
       expect(result).toMatchObject({ state: "completed", files: files.slice(-8) })
-      expect(fixture.start.mock.calls.at(-1)![2].backgroundCommandLifecycle).toBeUndefined()
+      expect(fixture.start.mock.calls.at(-1)![2].backgroundCommandLifecycle).toHaveProperty(
+        "retainSource",
+        true
+      )
       expect(fixture.start.mock.calls.at(-1)![2].foregroundCommandLifecycle).toHaveProperty(
         "settled"
       )
@@ -2876,7 +2886,7 @@ describe("Bot Runtime integration", () => {
               (entry) => entry.name === "bot_deliver_files"
             )!
             expect(delivery).toBeDefined()
-            expect(context.backgroundCommandLifecycle).toBeUndefined()
+            expect(context.backgroundCommandLifecycle).toHaveProperty("retainSource", true)
             expect(context.foregroundCommandLifecycle).toHaveProperty("settled")
             const input = context.continueBotTaskCheckpointId
               ? store.continuationFiles(active.id)[0].filePath
@@ -3068,6 +3078,77 @@ describe("Bot Runtime integration", () => {
       expect(context.backgroundCommandLifecycle).toHaveProperty("settled")
     }
   })
+  it("defers a launch-only peer result until its owned command settles", async () => {
+    const peer: BotTask = {
+      ...task,
+      origin: { kind: "bot", fromBotId: "peer", rootTaskId: "root", depth: 1, expectsReply: true }
+    }
+    fixture.commandIds.mockReturnValue(["pending-build"])
+    fixture.checkpointTuple.mockResolvedValue({ checkpoint: { id: "after-launch" } })
+    fixture.start.mockImplementation(async (_request, _delivery, context) => {
+      expect(context.backgroundCommandLifecycle).toHaveProperty("retainSource", true)
+      context.onFinalAssistant?.({ messageId: "launch", finalText: "Started" })
+      context.onRunTerminated?.({ outcome: "success", code: "done" })
+      return { completion: Promise.resolve() }
+    })
+    expect(await port().acquire(bot, peer)!.execute(new AbortController().signal, vi.fn())).toEqual(
+      { state: "deferred", checkpointId: "after-launch" }
+    )
+    fixture.commandIds.mockReturnValue([])
+    fixture.groupCheckpoint.mockReturnValue("after-launch")
+    fixture.commandResults.mockReturnValue([
+      { task_id: "pending-build", output: "verified build", exitCode: 0 }
+    ])
+    fixture.start.mockImplementation(async (_request, _delivery, context) => {
+      expect(context.extraSystemPrompt).toContain("verified build")
+      context.onFinalAssistant?.({ messageId: "done", finalText: "Verified actual output" })
+      context.onRunTerminated?.({ outcome: "success", code: "done" })
+      return { completion: Promise.resolve() }
+    })
+    expect(
+      await port().acquire(bot, peer)!.execute(new AbortController().signal, vi.fn())
+    ).toMatchObject({ state: "completed", result: "Verified actual output" })
+  })
+  it("does not fabricate a peer checkpoint when a pending build cannot be resumed", async () => {
+    fixture.commandIds.mockReturnValue(["pending-build"])
+    fixture.checkpointTuple.mockResolvedValue(undefined)
+    await expect(
+      port()
+        .acquire(bot, {
+          ...task,
+          origin: {
+            kind: "bot",
+            fromBotId: "peer",
+            rootTaskId: "root",
+            depth: 1,
+            expectsReply: true
+          }
+        })!
+        .execute(new AbortController().signal, vi.fn())
+    ).rejects.toThrow("检查点未确认")
+  })
+  it("delivers a fast command receipt once even when the process finished before the turn ended", async () => {
+    const peer: BotTask = {
+      ...task,
+      origin: { kind: "bot", fromBotId: "peer", rootTaskId: "root", depth: 1, expectsReply: true }
+    }
+    fixture.checkpointTuple.mockResolvedValue({ checkpoint: { id: "fast-command" } })
+    fixture.start.mockImplementation(async (_request, _delivery, context) => {
+      fixture.commandResults.mockReturnValue([
+        { task_id: "fast", output: "ACTUAL_FAST_RESULT", exitCode: 0 }
+      ])
+      context.onFinalAssistant?.({ messageId: "start", finalText: "Started" })
+      context.onRunTerminated?.({ outcome: "success", code: "done" })
+      return { completion: Promise.resolve() }
+    })
+    expect(
+      await port().acquire(bot, peer)!.execute(new AbortController().signal, vi.fn())
+    ).toMatchObject({ state: "deferred", checkpointId: "fast-command" })
+    fixture.groupCheckpoint.mockReturnValue("fast-command")
+    expect(
+      await port().acquire(bot, peer)!.execute(new AbortController().signal, vi.fn())
+    ).toMatchObject({ state: "completed" })
+  })
   it("retains the original managed result owner for delegated replies and routine silence", async () => {
     for (const origin of [
       { kind: "schedule", scheduleId: "routine" },
@@ -3076,7 +3157,13 @@ describe("Bot Runtime integration", () => {
       await port()
         .acquire(bot, { ...task, origin })!
         .execute(new AbortController().signal, vi.fn())
-      expect(fixture.start.mock.calls.at(-1)![2].backgroundCommandLifecycle).toBeUndefined()
+      if (origin.kind === "schedule")
+        expect(fixture.start.mock.calls.at(-1)![2].backgroundCommandLifecycle).toBeUndefined()
+      else
+        expect(fixture.start.mock.calls.at(-1)![2].backgroundCommandLifecycle).toHaveProperty(
+          "retainSource",
+          true
+        )
       expect(fixture.start.mock.calls.at(-1)![2].foregroundCommandLifecycle).toHaveProperty(
         "settled"
       )
@@ -3125,7 +3212,7 @@ describe("Bot Runtime integration", () => {
     expect(resumed.extraSystemPrompt).toContain("untrusted command data")
     expect(resumed.extraSystemPrompt).toContain("not proof that every requested step is complete")
     expect(resumed.extraSystemPrompt).toContain("its own actual tool result")
-    expect(resumed.backgroundCommandLifecycle).toBeUndefined()
+    expect(resumed.backgroundCommandLifecycle).toHaveProperty("retainSource", true)
   })
   it.each([true, false])(
     "retains the command result owner after private input is withdrawn (accepted=%s)",
@@ -3147,6 +3234,7 @@ describe("Bot Runtime integration", () => {
       })
       if (!accepted)
         fixture.commandLifecycle.mockImplementationOnce(() => ({
+          retainSource: true,
           accepted: vi.fn(() => {
             throw new Error("receipt unavailable")
           }),

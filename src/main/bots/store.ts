@@ -3039,13 +3039,20 @@ export class BotStore {
           command.cwd,
           command.startedAt,
           this.now(),
-          this.commandProfileSource(source)?.id ??
-            (source.origin.kind === "introduction" ? this.injectedUserRequestId(source) : null) ??
-            source.id,
+          // Silent services have no future notification; cleanup belongs to their actual launcher.
+          command.notifyOnComplete === false
+            ? source.id
+            : this.commandProfileSource(source)?.id ??
+              (source.origin.kind === "introduction" ? this.injectedUserRequestId(source) : null) ??
+              source.id,
           // Non-null reserves the existing receipt for its original task; state distinguishes pending/result.
-          continueSource ? "{}" : null
+          continueSource && command.notifyOnComplete !== false ? "{}" : null
         ]
       )
+      if (command.notifyOnComplete === false) {
+        // A service remains tracked for stopping/deletion, but its exit is not a new task.
+        this.db.run("UPDATE bot_commands SET suppressed=1 WHERE id=?", [command.id])
+      }
       // Bound receipts even while the host continuously handles queued work and never becomes idle.
       this.pruneCommandReceipts()
       this.changed()
@@ -3074,23 +3081,44 @@ export class BotStore {
   }
 
   private readContinuationCommands(task: BotTask): Record<string, unknown>[] {
-    return this.rows(
+    const results = this.rows(
       `SELECT continuation_result_json FROM bot_commands WHERE source_task_id=? AND bot_id=?
        AND thread_id=? AND COALESCE(group_id,'')=?
        AND state!='accepted' AND continuation_result_json IS NOT NULL
-       ORDER BY started_at DESC,id DESC LIMIT 8`,
+       ORDER BY started_at DESC,id DESC`,
       [task.id, task.botId, task.threadId, botTaskGroupId(task) ?? ""]
     )
       .reverse()
       .map((row) => JSON.parse(String(row.continuation_result_json)) as Record<string, unknown>)
+    if (results.length <= 8) return results
+    // A task can finish more than eight jobs over time without exceeding the
+    // concurrent-process limit. Keep every outcome; bound text, not receipt identity.
+    const outputLimit = Math.floor((8 * 16_000) / results.length)
+    const contextLimit = Math.floor((8 * 8_000) / results.length)
+    return results.map((result) => {
+      const output = String(result.output ?? "")
+      const command = String(result.command ?? "")
+      const cwd = String(result.cwd ?? "")
+      return {
+        ...result,
+        output: output.slice(Math.max(0, output.length - outputLimit)),
+        command: command.slice(0, contextLimit),
+        cwd: cwd.slice(0, contextLimit),
+        truncated:
+          result.truncated === true ||
+          output.length > outputLimit ||
+          command.length > contextLimit ||
+          cwd.length > contextLimit
+      }
+    })
   }
 
-  continuationCommandIds(taskId: string): string[] {
+  continuationCommandIds(taskId: string, includeServices = false): string[] {
     const task = this.getTask(taskId)
     return this.rows(
       `SELECT id FROM bot_commands WHERE source_task_id=? AND bot_id=? AND thread_id=?
-       AND state='accepted' AND continuation_result_json IS NOT NULL`,
-      [task.id, task.botId, task.threadId]
+       AND state='accepted' AND (continuation_result_json IS NOT NULL OR (?=1 AND suppressed=1))`,
+      [task.id, task.botId, task.threadId, includeServices ? 1 : 0]
     ).map((row) => String(row.id))
   }
 
@@ -4321,6 +4349,19 @@ export class BotStore {
       .sort((a, b) => a.message.ordinal - b.message.ordinal)
   }
 
+  private groupCommandOwners(groupId: string): Set<string> {
+    // A completed or superseded turn may leave a silent service alive. Keep its
+    // process ownership fence, but do not treat that service as unfinished work.
+    return new Set(
+      this.rows(
+        `SELECT c.bot_id FROM bot_commands c LEFT JOIN bot_tasks t ON t.id=c.source_task_id
+       WHERE c.group_id=? AND c.state='accepted' AND COALESCE(
+         c.suppressed=1 AND c.continuation_result_json IS NULL AND t.state IN ('completed','superseded'),0)=0`,
+        [groupId]
+      ).map((row) => String(row.bot_id))
+    )
+  }
+
   private activateGroupPosts(posts: ReturnType<BotStore["pendingGroupPosts"]>): void {
     const held = posts.map(({ seed }) => seed.id)
     for (const { seed, message, targets } of posts) {
@@ -4343,9 +4384,7 @@ export class BotStore {
           AND state IN ('queued','running','waiting_user') AND id NOT IN (${held.map(() => "?").join(",")}) LIMIT 1`,
           [group.id, ...held]
         ).length ||
-        this.rows("SELECT 1 FROM bot_commands WHERE group_id=? AND state='accepted' LIMIT 1", [
-          group.id
-        ]).length
+        this.groupCommandOwners(group.id).size
       )
         continue
       const prepared = this.prepareGroupPost(group, message, targets)
@@ -4881,11 +4920,7 @@ export class BotStore {
         )
           return
         const recent = botPost ? postMessages : recentMessages.filter((m) => !independent.has(m.id))
-        const commandOwners = new Set(
-          this.rows("SELECT bot_id FROM bot_commands WHERE group_id=? AND state='accepted'", [
-            groupId
-          ]).map((command) => String(command.bot_id))
-        )
+        const commandOwners = this.groupCommandOwners(groupId)
         if (initialRunning || commandOwners.size) {
           // Active work need not hold up a direct handoff to an idle peer. Keep
           // other discussion deferred until the original work or result completes.

@@ -979,6 +979,8 @@ export class LocalBotHost {
 
   commandLifecycle(sourceTaskId: string, continueSource = false): BackgroundCommandLifecycle {
     return {
+      allowSilentServices: true,
+      ...(continueSource ? { retainSource: true } : {}),
       accepted: (command) => {
         this.requireRunning()
         this.store.acceptCommand(sourceTaskId, command, continueSource)
@@ -1144,6 +1146,11 @@ export class LocalBotHost {
     return this.store.continuationCommandResults(taskId)
   }
 
+  continuationCommandIds(taskId: string, includeServices = false): string[] {
+    this.requireRunning()
+    return this.store.continuationCommandIds(taskId, includeServices)
+  }
+
   stoppedTaskContext(taskId: string) {
     this.requireRunning()
     return this.store.stoppedTaskContext(taskId)
@@ -1196,7 +1203,7 @@ export class LocalBotHost {
       // Durable cancellation only after runtime cleanup, never while tools are still unwinding.
       active.controller.abort()
     } else if (task.state === "queued") {
-      const commands = this.store.continuationCommandIds(task.id)
+      const commands = this.store.continuationCommandIds(task.id, true)
       if (commands.length && this.runtime.cancelCommands) {
         // Keep the source pending and excluded from dispatch until physical cleanup and its receipt settle.
         const done = Promise.resolve()
@@ -1204,8 +1211,7 @@ export class LocalBotHost {
             try {
               await this.runtime.cancelCommands!(task.threadId, commands)
               if (this.store.getTask(task.id).state !== "queued") return
-              const results = this.store.continuationCommandResults(task.id)
-              if (!commands.every((id) => results.some((result) => result.task_id === id)))
+              if (this.store.continuationCommandIds(task.id, true).length)
                 throw new Error("原命令的停止回执未确认，请检查进程及结果。")
               this.store.settle(task.id, this.stopping ? "interrupted" : "cancelled", null)
             } catch (error) {
@@ -1432,7 +1438,14 @@ export class LocalBotHost {
         deferredCheckpoint = undefined
         state = this.stopping ? "interrupted" : "cancelled"
         reason = this.stopping ? "应用退出，任务已中断；请检查已有结果后继续。" : null
-        const commands = this.store.continuationCommandIds(task.id)
+      }
+      if (
+        controller.signal.aborted ||
+        (!deferredCheckpoint &&
+          task.origin.kind !== "schedule" &&
+          (state === "failed" || state === "outcome_unknown"))
+      ) {
+        const commands = this.store.continuationCommandIds(task.id, true)
         if (commands.length) {
           try {
             await this.runtime.cancelCommands?.(task.threadId, commands)

@@ -1029,8 +1029,10 @@ export function createLocalBotRunPort(
                 // until the result/silence decision is available. Do not settle them with "started"
                 // and lose the original reply outbox or routine notification policy.
                 backgroundCommandLifecycle:
-                  simulated || keepCommandSource ? undefined : getHost().commandLifecycle(task.id),
-                // Opt in only to foreground wait transfer; explicit background semantics stay unchanged.
+                  simulated || task.origin.kind === "schedule"
+                    ? undefined
+                    : getHost().commandLifecycle(task.id, peerResultOwner),
+                // Foreground waits still transfer through the existing source checkpoint.
                 foregroundCommandLifecycle: foregroundLifecycle
                   ? {
                       accepted(command) {
@@ -1383,7 +1385,16 @@ export function createLocalBotRunPort(
             yieldForegroundCommands = undefined
           }
           if (superseded) return { state: "superseded" }
-          if (yielded) {
+          // A fast job can finish before this turn ends. Its accepted ID still isn't
+          // its result: deliver the durable receipt through the original continuation once.
+          const awaitingCommandResult =
+            terminal?.outcome === "success" &&
+            peerResultOwner &&
+            (getHost().continuationCommandIds(task.id).length > 0 ||
+              getHost()
+                .continuationCommandResults(task.id)
+                .some((result) => !commandResults.some((seen) => seen.task_id === result.task_id)))
+          if (yielded || awaitingCommandResult) {
             signal.throwIfAborted()
             const checkpointId = await withCheckpointer(task.threadId, async (saver) => {
               const tuple = await saver.getTuple({ configurable: { thread_id: task.threadId } })

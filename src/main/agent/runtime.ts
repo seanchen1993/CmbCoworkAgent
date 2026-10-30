@@ -2422,6 +2422,8 @@ function assembleDeepAgent(
     mainAllowedToolNames,
     managedExecution = false,
     notifiedBackgroundCommands = false,
+    retainedBackgroundCommands = false,
+    silentBackgroundServices = false,
     backgroundCommandShellSyntax = "posix",
     backgroundCommandCwd = "",
     registrySubagentSpecs = [],
@@ -2667,6 +2669,7 @@ function assembleDeepAgent(
         command: string
         cwd?: string
         run_in_background?: boolean
+        notify_on_complete?: boolean
       }): Promise<string> => {
         const sandbox = filesystemBackend as LocalSandbox
         // Read-only runtimes keep execute but may only run PROVABLY read-only
@@ -2701,7 +2704,13 @@ function assembleDeepAgent(
           if (managedExecution && !notifiedBackgroundCommands) {
             return formatExecuteResponse(await sandbox.execute(input.command, input.cwd))
           }
-          return sandbox.executeBackground(input.command, input.cwd)
+          return sandbox.executeBackground(
+            input.command,
+            input.cwd,
+            silentBackgroundServices || retainedBackgroundCommands
+              ? input.notify_on_complete
+              : undefined
+          )
         }
         if (input.cwd?.trim()) {
           return formatExecuteResponse(await sandbox.execute(input.command, input.cwd))
@@ -2718,7 +2727,12 @@ function assembleDeepAgent(
       }
       const customExecute = lcTool(
         async (
-          input: { command: string; cwd?: string; run_in_background?: boolean },
+          input: {
+            command: string
+            cwd?: string
+            run_in_background?: boolean
+            notify_on_complete?: boolean
+          },
           config?: unknown
         ): Promise<string> => {
           // Task subagents share this sandbox: their shell reads report to their
@@ -2738,6 +2752,16 @@ function assembleDeepAgent(
           description: (oldExecute as any).description,
           schema: z.object({
             command: z.string().describe("The shell command to execute"),
+            ...(silentBackgroundServices || retainedBackgroundCommands
+              ? {
+                  notify_on_complete: z
+                    .boolean()
+                    .optional()
+                    .describe(
+                      "Only with run_in_background. Default true for finite jobs: receive the actual exit result before claiming completion. Set false for a server/daemon: continue readiness checks and other authorized work while it runs, and stop it when no longer needed."
+                    )
+                }
+              : {}),
             cwd: z
               .string()
               .optional()
@@ -3599,6 +3623,8 @@ export function getSystemPrompt(
     includeBackgroundExec?: boolean
     managedForegroundExec?: boolean
     notifiedBackgroundCommands?: boolean
+    retainedBackgroundCommands?: boolean
+    silentBackgroundServices?: boolean
     includeSubagents?: boolean
     includeMemory?: boolean
     includeCurrentTime?: boolean
@@ -3665,16 +3691,24 @@ ${effectiveToolStrategy !== "standard" ? "- Inspect the workspace root with tool
   // execute is present, but isReadOnlyShellCommand rejects builds/installs/tests.
   const backgroundExecSection = !includeBackgroundExec
     ? ""
-    : options.notifiedBackgroundCommands
+    : options.notifiedBackgroundCommands && options.retainedBackgroundCommands
       ? `
+### Long-running commands
+
+Use execute with run_in_background: true to keep working while a command runs. For finite builds/tests, leave notify_on_complete true: when waiting for the result, end the turn; the host resumes this same task with the real result before returning to its requester. Do not poll, restart, or claim completion at launch.
+For a server/daemon needed during this task, set notify_on_complete: false. Continue with readiness checks and authorized tests while it runs; stop it when no longer needed. Its exit does not trigger another turn. Both modes remain host-tracked; do not detach the shell yourself.
+`
+      : options.notifiedBackgroundCommands
+        ? `
 ### Long-running commands
 
 Keep this Bot conversation available for new messages. Use execute with run_in_background: true for long-running commands. It returns a tracked task ID after acceptance; the host persists completion and wakes this conversation automatically. Do not use shell detachment, poll task_output or create another agent just to wait for a command.
 
 After acceptance, briefly report what is pending and end this turn. New user messages can be handled while the command runs. When its result arrives, verify the actual output and deliver files or a concrete failure. A task ID is not a PID or proof of success; do not claim completion at launch. Short inspections may use foreground execute.
+${options.silentBackgroundServices ? "For a server/daemon needed during this task, set notify_on_complete: false instead. Continue with readiness checks and authorized work while it runs; stop it when no longer needed. Its exit does not trigger another turn. Keep finite builds/tests on the default notification path; a service launch is not proof of readiness." : ""}
 `
-      : managedForegroundExec
-      ? `
+        : managedForegroundExec
+          ? `
 ### 长时间命令执行
 
 **重要提示：** 当前是托管会话，execute 始终以前台方式运行，最长等待 20 分钟。即使传入 \`run_in_background: true\`，命令也不会返回 task_id，而是等待成功、失败、取消或超时后直接返回结果。
@@ -5309,6 +5343,8 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     !runtimeBlockedToolNames.has("workflow") &&
     (isWorkflowMode || (options.workflowEnabled === true && !isCoordinatorMode && !disableSubagents))
   const notifiedBackgroundCommands = Boolean(options.backgroundCommandLifecycle)
+  const retainedBackgroundCommands = options.backgroundCommandLifecycle?.retainSource === true
+  const silentBackgroundServices = options.backgroundCommandLifecycle?.allowSilentServices === true
   const outputStyle =
     agentMode === "normal"
       ? resolveAgentOutputStyle(options.outputStyle, options.conciseModeEnabled === true)
@@ -5849,6 +5885,8 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     includeBackgroundExec: executeToolAvailable && !isReadOnlyRuntime,
     managedForegroundExec: managedExecution,
     notifiedBackgroundCommands,
+    retainedBackgroundCommands,
+    silentBackgroundServices,
     includeSubagents: mainSubagentsEnabled,
     includeMemory: runtimePolicy.includeMemory,
     includeCurrentTime: runtimePolicy.includeCurrentTime
@@ -7627,6 +7665,8 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
     // Background command ownership is a trusted host capability, not a mode
     // chosen by the model. Never inherit it into the actual workflow executor.
     notifiedBackgroundCommands,
+    retainedBackgroundCommands,
+    silentBackgroundServices,
     backgroundCommandCwd: fileRoot,
     backgroundCommandShellSyntax: isPowerShell
       ? "powershell"
