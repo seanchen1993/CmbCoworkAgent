@@ -8,9 +8,11 @@ function normalizeProviderName(value: string): string {
 export function shouldSuppressInAppBrowserMcpTool(options: {
   providerDisplayName: string
   toolName: string
+  visionConfigured?: boolean
 }): boolean {
   return (
     normalizeProviderName(options.providerDisplayName) === IN_APP_BROWSER_PROVIDER_NAME &&
-    options.toolName === IN_APP_BROWSER_SCREENSHOT_TOOL_NAME
+    options.toolName === IN_APP_BROWSER_SCREENSHOT_TOOL_NAME &&
+    !options.visionConfigured
   )
 }

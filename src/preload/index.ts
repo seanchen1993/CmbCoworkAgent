@@ -1386,6 +1386,12 @@ const api = {
     setDefault: (modelId: string): Promise<void> => {
       return ipcRenderer.invoke("models:setDefault", modelId)
     },
+    getVision: (): Promise<string> => {
+      return ipcRenderer.invoke("models:getVision")
+    },
+    setVision: (modelRef: string): Promise<string> => {
+      return ipcRenderer.invoke("models:setVision", modelRef)
+    },
     getGoalSettings: (): Promise<{ evaluatorModelId?: string }> => {
       return ipcRenderer.invoke("models:getGoalSettings") as Promise<{ evaluatorModelId?: string }>
     },

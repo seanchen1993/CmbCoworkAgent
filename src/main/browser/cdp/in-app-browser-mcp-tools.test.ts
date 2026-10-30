@@ -22,4 +22,14 @@ describe("in-app browser MCP tool filtering", () => {
       })
     ).toBe(false)
   })
+
+  it("allows rendered browser screenshots when shared vision is configured", () => {
+    expect(
+      shouldSuppressInAppBrowserMcpTool({
+        providerDisplayName: "In-app-browser",
+        toolName: "browser_take_screenshot",
+        visionConfigured: true
+      })
+    ).toBe(false)
+  })
 })

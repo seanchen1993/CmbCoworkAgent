@@ -1,0 +1,53 @@
+# 共享图片分析工具
+
+文字主模型通过 `analyze_images` 使用独立的多模态模型；不会切换主模型，也不创建视觉子 Agent。模型名称没有写死，可以替换任何支持下述 OpenAI-compatible 图文协议的模型。
+
+## 配置
+
+1. 打开现有模型配置界面，新增并保存支持图片输入的自定义模型。凭据继续使用现有模型密钥存储。
+2. 服务地址填写完整的 API base URL，例如 `https://HOST/llm/MODEL/v1`；客户端只追加 `/chat/completions`，不额外拼接 `/v1`。模型名填写推理平台要求的 `model` 值。
+3. 在顶部“多模态模型（共享图片分析）”选择已保存的模型。选择立即保存，不改变默认聊天模型。选择“未配置”会禁用图片分析。
+
+只有选中的模型具有有效 HTTP(S) 地址、模型名和 API Key，才注册工具。每次模型调用和工具执行都会重新读取配置；删除模型、清空角色或移除凭据后，已建立的运行也会隐藏并拒绝该工具。连接测试的结果不作为永久有效性的依据；实际认证和服务错误由工具明确返回。
+
+## 图片与调用
+
+通过聊天附件选择器或拖拽上传 PNG、JPEG、GIF、WebP。现有文本附件继续使用原解析流程。图片保存在应用数据目录的 `image-assets` 中，聊天历史只保存会话专属的 `image_id`，支持在同一会话后续追问。删除会话时清理其图片。不同会话的引用不可互用。
+
+配置多模态模型后，内置浏览器的截图工具可用。截图返回的图像块在 MCP 公共调用边界转换成图片引用，覆盖直接工具、延迟工具和 `code_exec`；文字主模型收到引用文本，不会收到图片块或 base64。旧历史中的图片块在发给文字模型时投影为引用，不修改原历史。
+
+工具参数仅为：
+
+```json
+{ "image_ids": ["img_会话提供的引用"], "question": "比较这几张图，并分别标明来源" }
+```
+
+模型不能指定文件路径、远端图片 URL、服务地址或密钥。工具读取授权图片，依据实际文件头确认 MIME，发送 `data:image/...;base64,...`。每次最多 8 张、单张最多 5 MiB、编码后合计最多 20 MiB；不接受 SVG 源码作为图片输入。
+
+请求使用 `stream: true`、`temperature: 0`、`top_p: 0.9`；按已配置输出上限请求。视觉 SSE 在独立 SDK 客户端中聚合，最终以带 `image_id`、来源及顺序的文字证据返回原模型。取消、120 秒超时、断流、空结果和输出截断均返回明确错误，不能当成完整分析或主模型最终回答。
+
+生成 SVG 后检查视觉效果时，应先在浏览器渲染，再截图，随后用截图的 `image_id` 调用工具。只写出图片文件路径、没有返回图像块的第三方工具，不会自动获得任意路径读取权限。
+
+## 验证
+
+针对性单测：
+
+```sh
+npx vitest run src/main/vision src/main/agent/image-analysis-middleware.test.ts src/main/agent/tools/analyze-images-tool.test.ts src/main/models/registry.test.ts src/main/storage-vision-model.test.ts src/main/browser/cdp/in-app-browser-mcp-tools.test.ts
+node tests/vision-model-config-browser.spec.mjs
+```
+
+浏览器配置测试使用真实 React 配置组件和 mock IPC，可通过 `VISION_TEST_CHROMIUM` 指定 Chromium 路径，默认 `/usr/bin/chromium`。视觉集成测试在存在系统 Chromium 时执行真实 SVG 渲染及 PNG 截图，经过 MCP 结果投影、图片持久化和本地 mock SSE 请求，核对完整图片字节、多图顺序及同图追问；无系统 Chromium 时明确跳过。
+
+未调用真实内网模型，也未验证真实 Electron 主进程中的整个交互。实际 OCR、中文小字、图表与“鹈鹕骑自行车 SVG”的视觉判断质量，需要在内网配置模型后验证；上述测试只证明传输和工具链路。
+
+### 本次验证记录（2026-10-30）
+
+基线为远端 `codex/uat-without-mods` 的 `721e9c04c5182ac5258a70d5298d53471c4927c4`，未混入其他分支的模式整合。
+
+- 针对性配置、工具、图片资产、SSE、真实浏览器截图测试：72 个用例通过；现有附件安全、解析及上传测试：12 个用例通过。
+- 配置界面真实 Chromium 验证通过（mock IPC）；`typecheck`、`build`、`test:messages`、`test:hooks` 通过；新模块及 runtime 定向 lint 无错误或警告。
+- Node 22、独立应用数据目录执行 `npm test`：501 个测试文件通过、14 失败、2 跳过；4482 个用例通过、20 失败、21 跳过。相同环境的未修改基线为 493 个文件通过、15 失败、2 跳过，4430 个用例通过、21 失败、21 跳过。功能分支全部失败项均在基线出现，没有新增失败。基线额外出现线程元数据性能计时失败及 telemetry EPIPE。
+- 全量 lint 有 95 个既有错误，按相对文件及规则比较与基线一致。全量测试和 lint **并未全绿**；`npm test` 在 Vitest 阶段停止，messages/hooks 为单独执行。`test:desktop-agent-baseline` 的旧源码断言失败也在基线复现。
+
+现有聚合失败涉及主题/工作区策略、Harness/trace 源码断言、IDE 平台行为和未随仓库提供的浏览器扩展文件等，留在原任务范围内处理。

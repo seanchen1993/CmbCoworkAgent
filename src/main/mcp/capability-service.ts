@@ -17,6 +17,7 @@ import type {
 import { resolveMcpHeaders } from "./headers"
 import { normalizeMcpInvocationResult } from "./result-utils"
 import { SchemaCache } from "./schema-cache"
+import { getVisionModelConfig } from "../models/registry"
 import { recordSuccessfulToolExample } from "./tool-example-store"
 
 interface CapabilitySource {
@@ -143,21 +144,23 @@ function toConnectorSources(): CapabilitySource[] {
 }
 
 function buildFingerprint(sources: CapabilitySource[]): string {
-  const payload = JSON.stringify(
-    [...sources]
-      .sort((left, right) => left.providerKey.localeCompare(right.providerKey))
-      .map((source) => ({
-        kind: source.kind,
-        providerKey: source.providerKey,
-        providerDisplayName: source.providerDisplayName,
-        visibility: source.visibility,
-        priority: source.priority,
-        scope: source.scope,
-        pluginId: source.pluginId,
-        fallback: source.fallback,
-        serverConfig: source.serverConfig
-      }))
-  )
+  const payload =
+    `${Boolean(getVisionModelConfig())}:` +
+    JSON.stringify(
+      [...sources]
+        .sort((left, right) => left.providerKey.localeCompare(right.providerKey))
+        .map((source) => ({
+          kind: source.kind,
+          providerKey: source.providerKey,
+          providerDisplayName: source.providerDisplayName,
+          visibility: source.visibility,
+          priority: source.priority,
+          scope: source.scope,
+          pluginId: source.pluginId,
+          fallback: source.fallback,
+          serverConfig: source.serverConfig
+        }))
+    )
 
   return createHash("sha256").update(payload).digest("hex")
 }
@@ -369,7 +372,8 @@ class ManagedMcpCapabilityService implements McpCapabilityService {
           if (
             shouldSuppressInAppBrowserMcpTool({
               providerDisplayName: source.providerDisplayName,
-              toolName
+              toolName,
+              visionConfigured: Boolean(getVisionModelConfig())
             })
           ) {
             continue

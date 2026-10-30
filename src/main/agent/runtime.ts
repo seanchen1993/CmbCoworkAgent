@@ -34,7 +34,15 @@ import {
   getDisabledSkillDirs,
   getGlobalRoutingMode
 } from "../storage"
-import { getAvailableModelConfigOrDefault, getModelConfigByRef } from "../models/registry"
+import {
+  getAvailableModelConfigOrDefault,
+  getModelConfigByRef,
+  getVisionModelConfig
+} from "../models/registry"
+import { createAnalyzeImagesTool } from "./tools/analyze-images-tool"
+import { createImageAnalysisMiddleware } from "./image-analysis-middleware"
+import { resolveImages } from "../vision/image-assets"
+import { projectMcpImageResult } from "../vision/mcp-image-result"
 import { samplingFields, topKModelKwargs } from "../models/sampling-params"
 import { createCmbSummarizationMiddleware } from "./context-summarization-middleware"
 import {
@@ -1062,14 +1070,18 @@ function createEagerMcpTools(
         listTools: capabilityService.listTools.bind(capabilityService),
         getSnapshot: capabilityService.getSnapshot?.bind(capabilityService),
         getTool: capabilityService.getTool.bind(capabilityService),
-        invoke: async (_idOrAlias, args) =>
-          invokeMcpToolWithPlaywrightInAppBrowserSupport({
+        invoke: async (_idOrAlias, args) => {
+          const result = await invokeMcpToolWithPlaywrightInAppBrowserSupport({
             tool,
             workspacePath: context.workspacePath,
             threadId: context.threadId,
             args,
             invoke: () => capabilityService.invoke(tool.capabilityId, args)
-          }),
+          })
+          return context.threadId
+            ? projectMcpImageResult(context.threadId, result, `tool:${tool.toolId}`)
+            : result
+        },
         invalidate: capabilityService.invalidate.bind(capabilityService),
         close: capabilityService.close.bind(capabilityService)
       },
@@ -1424,7 +1436,7 @@ export function createScopedMcpCapabilityService(
       })
 
       if (pluginId) hookScope.activatePlugin(pluginId)
-      const result = await invokeMcpToolWithPlaywrightInAppBrowserSupport({
+      const rawResult = await invokeMcpToolWithPlaywrightInAppBrowserSupport({
         tool,
         workspacePath: baseContext.workspacePath,
         threadId: baseContext.threadId,
@@ -1446,6 +1458,11 @@ export function createScopedMcpCapabilityService(
           }
         }
       })
+      const result = await projectMcpImageResult(
+        baseContext.threadId,
+        rawResult,
+        `tool:${tool.toolId}`
+      )
       const postContext: HookContext = {
         ...hookContext,
         toolArgs: effectiveArgs,
@@ -2699,7 +2716,8 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
     // Same malformed tool-call recovery as the main agent — task subagents call
     // the same OpenAI-compatible endpoint and can be handed truncated JSON too.
     createMalformedToolCallRecoveryMiddleware(),
-    createPatchToolCallsMiddleware()
+    createPatchToolCallsMiddleware(),
+    ...(threadId ? [createImageAnalysisMiddleware(threadId)] : [])
   ]
 
   // Manual general-purpose subagent so AGENTS.md can be injected into its
@@ -2986,6 +3004,7 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
       ...(toolStrategy !== "standard"
         ? [createToolStrategyTurnReminderMiddleware(toolStrategy, filesystemAccess)]
         : []),
+      ...(threadId ? [createImageAnalysisMiddleware(threadId)] : []),
       ...systemPromptPreviewCaptureMiddleware
     ],
     ...(responseFormat != null && { responseFormat }),
@@ -5478,6 +5497,15 @@ The workspace root is: ${fileRoot}`
     invoke?: unknown
   }
   const extraTools: RuntimeTool[] = []
+  if (getVisionModelConfig()) {
+    extraTools.push(
+      createAnalyzeImagesTool({
+        threadId: options.threadId,
+        abortSignal: options.abortSignal,
+        resolveImages: (imageIds) => resolveImages(options.threadId, imageIds)
+      })
+    )
+  }
   if (options.enableRequestUserInput) {
     extraTools.push(
       createRequestUserInputTool({
@@ -6741,7 +6769,12 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
   )
 
   backend.setGitWorkflowCommitOnly(false)
-  const mainTools = isCoordinatorMode ? coordinatorWorkerToolsForMain : finalTools
+  const mainTools = isCoordinatorMode
+    ? [
+        ...coordinatorWorkerToolsForMain,
+        ...finalTools.filter((entry) => (entry as { name?: string }).name === "analyze_images")
+      ]
+    : finalTools
   // Task-tool subagents must not orchestrate workflows of their own.
   const workerTools = finalTools.filter(
     (runtimeTool) => (runtimeTool as { name?: string }).name !== "workflow"

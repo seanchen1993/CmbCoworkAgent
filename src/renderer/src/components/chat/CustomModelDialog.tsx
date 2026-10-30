@@ -322,6 +322,8 @@ export function CustomModelDialog({
   const [allConfigs, setAllConfigs] = useState<CustomModelItem[]>([])
   const [defaultModelId, setDefaultModelId] = useState("")
   const [defaultModelDraftId, setDefaultModelDraftId] = useState("")
+  const [visionModelId, setVisionModelId] = useState("")
+  const [savingVision, setSavingVision] = useState(false)
 
   useEffect(() => {
     let cancelled = false
@@ -340,14 +342,16 @@ export function CustomModelDialog({
       void Promise.all([
         window.api.models.getTokenLimits(),
         loadModelItems(),
-        window.api.models.getDefault()
+        window.api.models.getDefault(),
+        window.api.models.getVision()
       ])
-        .then(([limits, all, savedDefaultModelId]) => {
+        .then(([limits, all, savedDefaultModelId, savedVisionModelId]) => {
           if (cancelled) return
           setTokenLimits(limits)
           setAllConfigs(all)
           setDefaultModelId(savedDefaultModelId || "")
           setDefaultModelDraftId(savedDefaultModelId || "")
+          setVisionModelId(savedVisionModelId)
 
           const resolvedExisting = normalizedSelectedId
             ? all.find(
@@ -378,6 +382,18 @@ export function CustomModelDialog({
   }, [open, selectedModelId])
 
   const selectedConfigKey = config.id ? `${config.source}:${config.id}` : ""
+
+  async function selectVisionModel(modelRef: string): Promise<void> {
+    setSavingVision(true)
+    setFormError(null)
+    try {
+      setVisionModelId(await window.api.models.setVision(modelRef))
+    } catch (error) {
+      setFormError(error instanceof Error ? error.message : "保存多模态模型失败")
+    } finally {
+      setSavingVision(false)
+    }
+  }
 
   async function selectConfigToEdit(id: string, source: "builtin" | "custom"): Promise<void> {
     setFormError(null)
@@ -612,6 +628,7 @@ export function CustomModelDialog({
         return
       }
       await window.api.models.deleteCustomConfig(config.id)
+      setVisionModelId(await window.api.models.getVision())
       const refreshed = await loadModelItems()
       setAllConfigs(refreshed)
       if (refreshed.length > 0) {
@@ -677,6 +694,35 @@ export function CustomModelDialog({
               : "配置兼容 OpenAI 接口格式的模型服务。"}
           </DialogDescription>
         </DialogHeader>
+
+        <div className="space-y-1 rounded-md border border-border p-3">
+          <label htmlFor="vision-model-role" className="text-xs font-medium text-muted-foreground">
+            多模态模型（共享图片分析）
+          </label>
+          <select
+            id="vision-model-role"
+            className="h-8 w-full rounded-md border border-border bg-background px-2 text-sm"
+            value={visionModelId}
+            disabled={savingVision || saving || deleting}
+            onChange={(event) => void selectVisionModel(event.target.value)}
+          >
+            <option value="">未配置 · 禁用 analyze_images</option>
+            {allConfigs.map((item) => (
+              <option
+                key={`${item.source}:${item.id}`}
+                value={`${item.source}:${item.id}`}
+                disabled={!item.hasApiKey}
+              >
+                {item.name}
+                {!item.hasApiKey ? "（缺少 API Key）" : ""}
+              </option>
+            ))}
+          </select>
+          <p className="text-xs leading-tight text-muted-foreground">
+            先新增并保存支持图片输入的模型，再在此选择；选择立即生效。图片以 base64
+            发送，分析结果供当前会话模型使用。
+          </p>
+        </div>
 
         <div className="min-h-0 flex-1 grid grid-cols-[220px_1fr] gap-4">
           <div className="rounded-md border border-border p-2">

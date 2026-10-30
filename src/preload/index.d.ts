@@ -1313,6 +1313,8 @@ interface CustomAPI {
     listProviders: () => Promise<Provider[]>
     getDefault: () => Promise<string>
     setDefault: (modelId: string) => Promise<void>
+    getVision: () => Promise<string>
+    setVision: (modelRef: string) => Promise<string>
     getGoalSettings: () => Promise<{ evaluatorModelId?: string }>
     setGoalSettings: (settings: { evaluatorModelId?: string }) => Promise<void>
     getTokenLimits: () => Promise<{

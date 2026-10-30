@@ -3853,6 +3853,9 @@ import {
   getModelConfigByRef,
   getModelConfigs,
   normalizeModelRef,
+  getVisionModelRef,
+  setVisionModelRef,
+  notifyModelChanges,
   refreshBuiltinModelCatalog,
   resetBuiltinModelOverride,
   setDefaultModelRef,
@@ -3960,12 +3963,14 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
 
   ipcMain.handle("models:setCustomConfig", async (_event, config: CustomModelConfig) => {
     setCustomModelConfig(config)
+    notifyModelChanges()
   })
 
   ipcMain.handle(
     "models:upsertCustomConfig",
     async (_event, config: Omit<CustomModelConfig, "id"> & { id?: string }) => {
       const id = upsertCustomModelConfig(config)
+      notifyModelChanges()
       return { id }
     }
   )
@@ -3998,6 +4003,7 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
   ipcMain.handle("models:deleteCustomConfig", async (_event, id: string) => {
     if (!id) throw new Error("Model id is required for deletion")
     deleteCustomModelConfig(id)
+    notifyModelChanges()
   })
 
   // Get default model
@@ -4009,6 +4015,15 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
   // Set default model
   ipcMain.handle("models:setDefault", async (_event, modelId: string) => {
     setDefaultModelRef(modelId)
+  })
+
+  ipcMain.handle("models:getVision", async () => {
+    await refreshBuiltinModelCatalog()
+    return getVisionModelRef()
+  })
+
+  ipcMain.handle("models:setVision", async (_event, modelRef: string) => {
+    return setVisionModelRef(modelRef)
   })
 
   // List providers with whether any model has a key configured.
@@ -5987,8 +6002,31 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
       getFileAttachmentParserClient().cancelLatest(attachmentParseLatestKey(senderId))
     })
   }
+  const imageAttachmentExtension = (fileName: string): boolean =>
+    [".png", ".jpg", ".jpeg", ".gif", ".webp"].includes(path.extname(fileName).toLowerCase())
   const supportedAttachmentExtension = (fileName: string): boolean =>
-    [".txt", ".md", ".csv", ".docx", ".xlsx", ".xls"].includes(path.extname(fileName).toLowerCase())
+    [".txt", ".md", ".csv", ".docx", ".xlsx", ".xls"].includes(
+      path.extname(fileName).toLowerCase()
+    ) || imageAttachmentExtension(fileName)
+  const parseImageAttachment = async (
+    threadId: unknown,
+    fileName: string,
+    data: Buffer
+  ): Promise<ParsedAttachment> => {
+    if (typeof threadId !== "string" || !getThreadCoreSync(threadId)) {
+      throw new Error("请先创建会话，再上传图片")
+    }
+    const { registerImage, imageReferenceText } = await import("../vision/image-assets")
+    const image = await registerImage(threadId, data, fileName)
+    return {
+      filename: fileName,
+      filePath: fileName,
+      content: imageReferenceText(image),
+      mimeType: image.mimeType,
+      size: image.size,
+      truncated: false
+    }
+  }
   const validAttachmentMaxLength = (maxLength: unknown): maxLength is number | undefined =>
     maxLength === undefined ||
     (Number.isSafeInteger(maxLength) &&
@@ -6024,7 +6062,10 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
         )
         if ("error" in resolved) return { success: false, error: resolved.error }
         if (!supportedAttachmentExtension(resolved.filePath)) {
-          return { success: false, error: "不支持的文件类型，仅支持 txt、md、csv、docx、xlsx、xls" }
+          return {
+            success: false,
+            error: "不支持的文件类型，仅支持 txt、md、csv、docx、xlsx、xls、png、jpg、gif、webp"
+          }
         }
         const opened = await openStableFileHandle(resolved.rootPath, resolved.filePath)
         try {
@@ -6035,6 +6076,15 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
           const { bytesRead } = await opened.handle.read(buffer, 0, buffer.byteLength, 0)
           if (bytesRead > MAX_ATTACHMENT_FILE_BYTES) {
             return { success: false, error: "文件过大，单文件不超过 5MB" }
+          }
+          if (imageAttachmentExtension(opened.filePath)) {
+            const attachment = await parseImageAttachment(
+              request.threadId,
+              path.basename(opened.filePath),
+              buffer.subarray(0, bytesRead)
+            )
+            attachment.filePath = opened.filePath
+            return { success: true, attachment }
           }
           const payload = Uint8Array.from(buffer.subarray(0, bytesRead)).buffer
           attachAttachmentParserCleanup(event)
@@ -6082,6 +6132,16 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
         ) {
           return { success: false, error: "无效或过大的拖拽附件" }
         }
+        if (imageAttachmentExtension(request.fileName)) {
+          return {
+            success: true,
+            attachment: await parseImageAttachment(
+              request.threadId,
+              path.basename(request.fileName),
+              Buffer.from(request.bytes)
+            )
+          }
+        }
         attachAttachmentParserCleanup(event)
         const attachment = await getFileAttachmentParserClient().parse(
           { kind: "bytes", fileName: path.basename(request.fileName), bytes: request.bytes },
@@ -6105,7 +6165,24 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
     const result = await dialog.showOpenDialog(win, {
       properties: ["openFile", "multiSelections"],
       title: "选择附件",
-      filters: [{ name: "支持的文件", extensions: ["txt", "md", "csv", "docx", "xlsx", "xls"] }]
+      filters: [
+        {
+          name: "支持的文件",
+          extensions: [
+            "txt",
+            "md",
+            "csv",
+            "docx",
+            "xlsx",
+            "xls",
+            "png",
+            "jpg",
+            "jpeg",
+            "gif",
+            "webp"
+          ]
+        }
+      ]
     })
     if (result.canceled || result.filePaths.length === 0) {
       return { canceled: true, files: [] }
@@ -6134,7 +6211,7 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
   // Get supported file extensions
   ipcMain.handle("file:supportedExtensions", async () => {
     const { getSupportedExtensions } = await import("../file-parser")
-    return getSupportedExtensions()
+    return [...getSupportedExtensions(), ".png", ".jpg", ".jpeg", ".gif", ".webp"]
   })
 }
 

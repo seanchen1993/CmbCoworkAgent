@@ -14,12 +14,15 @@ export interface AttachmentFileSelectionResult {
 }
 
 export interface AttachmentGrantParseRequest {
+  /** Required for image attachments, whose references belong to this conversation. */
+  threadId?: string
   grant: string
   filePath: string
   maxLength?: number
 }
 
 export interface AttachmentBytesParseRequest {
+  threadId?: string
   fileName: string
   bytes: ArrayBuffer
   maxLength?: number

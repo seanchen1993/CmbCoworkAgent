@@ -5,6 +5,7 @@ const state = vi.hoisted(() => ({
   overrides: {} as Record<string, Record<string, unknown>>,
   customConfigs: [] as Array<Record<string, unknown>>,
   storedDefault: "",
+  storedVision: "",
   sourceBaseUrl: "https://updates.example.com",
   localApiKey: "local-test-key",
   bundledApiKey: "bundled-test-key",
@@ -41,7 +42,11 @@ vi.mock("../storage", () => ({
     delete state.overrides[id]
   },
   getCustomModelConfigs: () => state.customConfigs,
-  getStoredDefaultModelId: () => state.storedDefault
+  getStoredDefaultModelId: () => state.storedDefault,
+  getStoredVisionModelRef: () => state.storedVision,
+  setStoredVisionModelRef: (value: string) => {
+    state.storedVision = value
+  }
 }))
 
 vi.mock("../updater/checker", () => ({
@@ -66,6 +71,9 @@ import {
   getDefaultModelConfig,
   getModelConfigByRef,
   getModelConfigs,
+  getVisionModelConfig,
+  getVisionModelRef,
+  setVisionModelRef,
   refreshBuiltinModelCatalog,
   startBuiltinModelCatalogRefresh,
   stopBuiltinModelCatalogRefresh,
@@ -78,6 +86,7 @@ beforeEach(() => {
   state.overrides = {}
   state.customConfigs = []
   state.storedDefault = ""
+  state.storedVision = ""
   state.sourceBaseUrl = "https://updates.example.com"
   state.localApiKey = "local-test-key"
   state.bundledApiKey = "bundled-test-key"
@@ -168,8 +177,7 @@ describe("builtin model registry", () => {
           },
           {
             id: "deepseek-v4-flash-284b-a13b-w8a8",
-            baseUrl:
-              "https://llm.example.test/deepseek/v1",
+            baseUrl: "https://llm.example.test/deepseek/v1",
             model: "deepseek-v4-flash-284b-a13b-w8a8"
           }
         ]
@@ -395,5 +403,88 @@ describe("builtin model registry", () => {
     await refreshBuiltinModelCatalog(true)
 
     expect(getBuiltinModelConfigs().map((item) => item.origin)).toEqual(["fallback"])
+  })
+})
+
+describe("shared vision model role", () => {
+  function addVisionConfig(): Record<string, unknown> {
+    const config = {
+      id: "vision",
+      name: "Image analysis",
+      baseUrl: "https://llm.example.test/llm/image-model/v1",
+      model: "image-model",
+      apiKey: "vision-test-key"
+    }
+    state.customConfigs.push(config)
+    return config
+  }
+
+  it("leaves the tool disabled for old configurations even when a default model exists", () => {
+    addVisionConfig()
+    state.storedDefault = "custom:vision"
+    expect(getVisionModelConfig()).toBeNull()
+    expect(getVisionModelRef()).toBe("")
+  })
+
+  it("uses only the explicitly selected model and keeps the main model selection", () => {
+    addVisionConfig()
+    state.storedDefault = "builtin:chat-model"
+    expect(setVisionModelRef("custom:vision")).toBe("custom:vision")
+    expect(getVisionModelConfig()).toMatchObject({
+      ref: "custom:vision",
+      model: "image-model",
+      apiKey: "vision-test-key"
+    })
+    expect(state.storedDefault).toBe("builtin:chat-model")
+  })
+
+  it("reflects edits, credential removal, switching and disabling without a cached health check", () => {
+    const config = addVisionConfig()
+    setVisionModelRef("custom:vision")
+    config.model = "replacement-image-model"
+    expect(getVisionModelConfig()?.model).toBe("replacement-image-model")
+    config.apiKey = ""
+    expect(getVisionModelConfig()).toBeNull()
+    expect(getVisionModelRef()).toBe("")
+    config.apiKey = "restored-key"
+    expect(getVisionModelConfig()?.apiKey).toBe("restored-key")
+    const second = { ...config, id: "second" }
+    state.customConfigs.push(second)
+    setVisionModelRef("custom:second")
+    expect(getVisionModelConfig()?.id).toBe("second")
+    setVisionModelRef("")
+    expect(getVisionModelConfig()).toBeNull()
+  })
+
+  it.each([
+    { apiKey: "" },
+    { apiKey: "   " },
+    { model: "" },
+    { baseUrl: "" },
+    { baseUrl: "invalid-url" },
+    { baseUrl: "file:///tmp/model" },
+    { baseUrl: "https://username:password@llm.example.test/v1" }
+  ])("rejects incomplete or invalid model configuration: %j", (patch) => {
+    Object.assign(addVisionConfig(), patch)
+    expect(() => setVisionModelRef("custom:vision")).toThrow("请先配置完整的多模态模型")
+    expect(state.storedVision).toBe("")
+    state.storedVision = "custom:vision"
+    expect(getVisionModelConfig()).toBeNull()
+  })
+
+  it("does not resolve a deleted ref as another model's legacy alias", () => {
+    addVisionConfig()
+    setVisionModelRef("custom:vision")
+    state.customConfigs = [{ ...state.customConfigs[0], id: "other", model: "vision" }]
+    expect(getVisionModelConfig()).toBeNull()
+    expect(() => setVisionModelRef("custom:vision")).toThrow()
+  })
+
+  it("does not accept an unscoped or unknown model ref", () => {
+    addVisionConfig()
+    for (const ref of ["vision", "unknown:vision", "custom:missing"]) {
+      expect(() => setVisionModelRef(ref)).toThrow("请先配置完整的多模态模型")
+    }
+    expect(() => setVisionModelRef(null as unknown as string)).toThrow("引用必须是字符串")
   })
 })

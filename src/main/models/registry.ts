@@ -19,8 +19,10 @@ import {
   getBuiltinModelOverrides,
   getCustomModelConfigs,
   getStoredDefaultModelId,
+  getStoredVisionModelRef,
   resetBuiltinModelOverride as resetStoredBuiltinModelOverride,
   setStoredDefaultModelId,
+  setStoredVisionModelRef,
   setBuiltinModelOverride as setStoredBuiltinModelOverride,
   type BuiltinModelOverride,
   type CustomModelConfig
@@ -69,7 +71,7 @@ let catalogLoaded = false
 let catalogRequest: Promise<void> | null = null
 let refreshTimer: ReturnType<typeof setInterval> | null = null
 
-function notifyModelChanges(): void {
+export function notifyModelChanges(): void {
   for (const win of BrowserWindow.getAllWindows()) {
     if (!win.isDestroyed() && !win.webContents.isDestroyed()) {
       win.webContents.send("models:changed")
@@ -388,6 +390,48 @@ export function toModelRef(config: Pick<ResolvedModelConfig, "id" | "source">): 
 
 export function getModelConfigByRef(value: string | undefined | null): ResolvedModelConfig | null {
   return resolveModelConfigFromList(collectModelConfigs(), value)
+}
+
+function isCompleteVisionConfig(config: ResolvedModelConfig | null): config is ResolvedModelConfig {
+  if (!config?.model?.trim() || !config.apiKey?.trim() || !config.baseUrl?.trim()) return false
+  try {
+    const url = new URL(config.baseUrl)
+    return (url.protocol === "https:" || url.protocol === "http:") && !url.username && !url.password
+  } catch {
+    return false
+  }
+}
+
+/** Resolve afresh so edits, credential removal and catalog changes take effect immediately. */
+export function getVisionModelConfig(): ResolvedModelConfig | null {
+  const selected = getStoredVisionModelRef()
+  if (!selected || !/^(builtin|custom):/.test(selected)) return null
+  const config = collectModelConfigs().find((item) => toModelRef(item) === selected) ?? null
+  return isCompleteVisionConfig(config) ? config : null
+}
+
+export function getVisionModelRef(): ModelRef | "" {
+  return getVisionModelConfig()?.ref ?? ""
+}
+
+export function setVisionModelRef(value: string): ModelRef | "" {
+  if (typeof value !== "string") throw new Error("多模态模型引用必须是字符串")
+  const selected = value.trim()
+  if (!selected) {
+    setStoredVisionModelRef("")
+    notifyModelChanges()
+    return ""
+  }
+  const config = /^(builtin|custom):/.test(selected)
+    ? (collectModelConfigs().find((item) => toModelRef(item) === selected) ?? null)
+    : null
+  if (!isCompleteVisionConfig(config)) {
+    throw new Error("请先配置完整的多模态模型：有效的 HTTP/HTTPS 服务地址、模型名称和 API Key")
+  }
+  const ref = toModelRef(config)
+  setStoredVisionModelRef(ref)
+  notifyModelChanges()
+  return ref
 }
 
 export function normalizeModelRef(value: string): ModelRef | "" {

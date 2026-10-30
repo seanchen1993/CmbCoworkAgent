@@ -954,10 +954,22 @@ const THINKING_MESSAGES = [
   "就快好了..."
 ]
 
-const SUPPORTED_EXTS = new Set([".txt", ".md", ".csv", ".docx", ".xlsx", ".xls"])
+const SUPPORTED_EXTS = new Set([
+  ".txt",
+  ".md",
+  ".csv",
+  ".docx",
+  ".xlsx",
+  ".xls",
+  ".png",
+  ".jpg",
+  ".jpeg",
+  ".gif",
+  ".webp"
+])
 const ATTACH_FILE_POPOVER_CONTENT = (
   <div className="space-y-1">
-    <div>1. 添加文件 (txt, md, csv, docx, xlsx)</div>
+    <div>1. 添加文件或图片 (txt, md, csv, docx, xlsx, png, jpg, gif, webp)</div>
     <div>2. doc文件：不要直接改后缀，在文件系统“另存为”docx之后，再选择上传。</div>
   </div>
 )
@@ -2671,7 +2683,9 @@ export function ChatContainer({
             if (ext === ".doc") {
               setError(`不支持的文件类型"${fileName}"；${DOC_SAVE_AS_DOCX_HINT}`)
             } else {
-              setError(`不支持的文件类型"${fileName}"，仅支持 txt、md、csv、docx、xlsx、xls`)
+              setError(
+                `不支持的文件类型"${fileName}"，仅支持 txt、md、csv、docx、xlsx、xls、png、jpg、gif、webp`
+              )
             }
             continue
           }
@@ -2689,11 +2703,13 @@ export function ChatContainer({
           const result =
             input.kind === "selected"
               ? await window.api.file.parseSelected({
+                  threadId,
                   grant: input.grant,
                   filePath: input.filePath,
                   maxLength: remaining
                 })
               : await window.api.file.parseBytes({
+                  threadId,
                   fileName: input.fileName,
                   bytes: input.bytes,
                   maxLength: remaining
@@ -2724,7 +2740,7 @@ export function ChatContainer({
         setAttachmentLoading(false)
       }
     },
-    [setError, clearError, attachmentLoading]
+    [setError, clearError, attachmentLoading, threadId]
   )
 
   const handleAttachClick = useCallback(async () => {
@@ -2767,7 +2783,9 @@ export function ChatContainer({
           const lastDot = file.name.lastIndexOf(".")
           const ext = lastDot >= 0 ? file.name.substring(lastDot).toLowerCase() : ""
           if (!SUPPORTED_EXTS.has(ext)) {
-            setError(`不支持的文件类型"${file.name}"，仅支持 txt、md、csv、docx、xlsx、xls`)
+            setError(
+              `不支持的文件类型"${file.name}"，仅支持 txt、md、csv、docx、xlsx、xls、png、jpg、gif、webp`
+            )
             continue
           }
           if (file.size > MAX_ATTACHMENT_FILE_BYTES) {

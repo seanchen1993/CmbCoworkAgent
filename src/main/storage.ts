@@ -2021,6 +2021,21 @@ export function setStoredDefaultModelId(modelId: string): void {
   getSettingsStore().set("defaultModel", modelId.trim())
 }
 
+/** Optional shared image-analysis role; never falls back to the chat model. */
+export function getStoredVisionModelRef(): string {
+  try {
+    const value = getSettingsStore().get("visionModelRef", "")
+    return typeof value === "string" ? value.trim() : ""
+  } catch {
+    return ""
+  }
+}
+
+export function setStoredVisionModelRef(modelRef: string): void {
+  if (typeof modelRef !== "string") throw new Error("多模态模型引用必须是字符串")
+  getSettingsStore().set("visionModelRef", modelRef.trim())
+}
+
 const WINDOW_CLOSE_BEHAVIOR_KEY = "windowCloseBehavior"
 const GIT_CHANGE_NOTICE_ENABLED_KEY = "gitChangeNoticeEnabled"
 
@@ -2486,6 +2501,7 @@ export function deleteCustomModelConfig(id: string): void {
   if (existed) {
     deleteCustomModelApiKey(id)
   }
+  if (getStoredVisionModelRef() === `custom:${id}`) setStoredVisionModelRef("")
 }
 
 export function deleteAllCustomModelConfigs(): void {
@@ -2498,6 +2514,7 @@ export function deleteAllCustomModelConfigs(): void {
   }
   customModelsRawCache = []
   deleteAllCustomModelApiKeys()
+  if (getStoredVisionModelRef().startsWith("custom:")) setStoredVisionModelRef("")
 }
 
 // MCP Connectors

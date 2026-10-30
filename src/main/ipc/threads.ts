@@ -3810,6 +3810,12 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
       console.warn("[Threads] Failed to delete workflow checkpoints:", e)
     }
 
+    try {
+      const { deleteThreadImages } = await import("../vision/image-assets")
+      await deleteThreadImages(threadId)
+    } catch {
+      console.warn("[Threads] Failed to delete conversation image assets")
+    }
     forgetCoordinatorThreadState(threadId)
     if (workspacePath) {
       // Fence and sweep workflow runs BEFORE deleting the parent app-managed
