@@ -91,6 +91,8 @@ export function OverlayDrawer({
       className="pointer-events-none absolute inset-0 z-50 flex justify-end"
       role="dialog"
       aria-label={ariaLabel ?? title}
+      aria-hidden={!open}
+      inert={!open}
     >
       <aside
         className={`pointer-events-auto relative flex h-full min-w-0 flex-col border-l border-border bg-background-elevated shadow-[-12px_0_32px_rgba(0,0,0,0.14)] motion-reduce:animate-none ${

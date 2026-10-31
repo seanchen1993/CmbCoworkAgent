@@ -1,5 +1,6 @@
 import { runInNewContext } from "node:vm"
 import { describe, expect, it } from "vitest"
+import { tweakSourceDiagnostics } from "../../../shared/design-tweaks"
 import {
   buildDesignValidationRepairPrompt,
   formatDesignBrowserValidation,
@@ -27,8 +28,88 @@ describe("actionable Design validation feedback", () => {
     expect(report).toContain("定位：/source.html")
     const prompt = buildDesignValidationRepairPrompt(report, "/repair.html")
     expect(prompt).toContain(report)
-    expect(prompt).toContain("文件已存在。只用 edit_file")
+    expect(prompt).toContain("唯一修复目标（文件已存在）")
+    expect(prompt).toContain("只对上述唯一目标使用 edit_file")
     expect(prompt).not.toContain("先读取失败的 HTML")
+  })
+
+  it("keeps the invalid raw parameter and tells the model exactly which field to fix", () => {
+    const source = html.replace('"type":"color"', '"type":"integer"')
+    const report = formatDesignBrowserValidation(
+      {
+        ok: false,
+        issues: tweakSourceDiagnostics(source).map((issue) => ({ type: "structure", ...issue }))
+      },
+      { html: source, filePath: "/old.html", repairTargetPath: "/repair.html" }
+    )
+    expect(report).toContain('schema["accent"].type')
+    expect(report).toContain('"default":"#b45309"')
+    expect(report).toContain('"type":"integer"')
+    expect(report).toContain("整数也使用 number")
+    expect(report).toContain("新增 DOM 节点不能修复")
+    expect(report).not.toContain("/old.html")
+  })
+
+  it("shows business JS reads without pretending they implement live visual bindings", () => {
+    const source = html
+      .replaceAll("accent-b", "max-quick")
+      .replaceAll("#b45309", "10")
+      .replaceAll('"accent"', '"maxQuick"')
+      .replace('"type":"color"', '"type":"number"')
+      .replace(
+        "</body>",
+        "<script>const max = Number(getComputedStyle(document.documentElement).getPropertyValue('--max-quick'));</script></body>"
+      )
+    const report = formatDesignBrowserValidation(
+      {
+        ok: false,
+        issues: [{ type: "structure", message: "maxQuick 未引用 CSS 变量 --max-quick" }]
+      },
+      { html: source, filePath: "/repair.html" }
+    )
+    expect(report).toContain("getPropertyValue('--max-quick')")
+    expect(report).toContain("defaults、schema、bindings 三处同时移除")
+    expect(report).toContain("保留原 CSS 变量值与业务 JS")
+    expect(report).toContain("无关样式")
+  })
+
+  it("maps Windows validation URLs to the single repair target, retaining external errors", () => {
+    const original = "<html>\n<script>missing();</script>\n</html>"
+    const checked = "<html>\n<script>injected();</script>\n<script>missing();</script>\n</html>"
+    const report = formatDesignBrowserValidation(
+      {
+        ok: false,
+        issues: [
+          {
+            type: "console",
+            message: "missing",
+            source: "file:///d:/design/checked%20draft.html",
+            line: 3,
+            stack:
+              "Error: missing\n at file:///d:/design/checked%20draft.html:3:1\n at https://cdn.example/lib.js:8:4"
+          },
+          {
+            type: "console",
+            message: "injected",
+            source: "file:///D:/design/checked%20draft.html",
+            line: 2
+          },
+          { type: "console", message: "external", source: "https://cdn.example/lib.js", line: 8 }
+        ]
+      },
+      {
+        html: original,
+        filePath: "D:\\design\\old.html",
+        validationHtml: checked,
+        validationPath: "D:\\design\\checked draft.html",
+        repairTargetPath: "D:\\design\\repair.html"
+      }
+    )
+    expect(report).toContain("原始源码定位：D:\\design\\repair.html:2")
+    expect(report).toContain("校验时源码片段:2")
+    expect(report).toContain("不能直接用作修复草稿行号")
+    expect(report).toContain("https://cdn.example/lib.js:8")
+    expect(report).not.toMatch(/old\.html|checked(?:%20| )draft\.html/)
   })
 
   it("captures runtime line, column and stack from the error event, rather than the logging probe", () => {

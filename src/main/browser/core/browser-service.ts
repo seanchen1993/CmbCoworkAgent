@@ -1,7 +1,6 @@
 import {
   BrowserWindow,
   WebContentsView,
-  session as electronSession,
   type CookiesSetDetails,
   type Rectangle,
   type WebContents
@@ -38,12 +37,12 @@ import type {
   BrowserSessionData,
   BrowserSessionImportCounts
 } from "./browser-session-data"
+import { getBuiltinBrowserSession } from "./browser-profile-session"
 
 const MAX_BROWSER_CONSOLE_ENTRIES = 200
 const MAX_BROWSER_CONSOLE_MESSAGE_CHARS = 4_000
 const MIN_BROWSER_ZOOM_FACTOR = 0.25
 const MAX_BROWSER_ZOOM_FACTOR = 5
-const BROWSER_PROFILE_PARTITION = "persist:cmbdevclaw-browser-profile"
 const BROWSER_SERVICE_LOG_PREFIX = `${BUILTIN_BROWSER_LOG_PREFIX}[BrowserService]`
 const MAX_EXTRACTED_IFRAME_LINKS = 100
 
@@ -659,7 +658,7 @@ export class BrowserService {
   }
 
   async importProfileData(data: BrowserSessionData): Promise<BrowserSessionImportCounts> {
-    const browserSession = electronSession.fromPartition(BROWSER_PROFILE_PARTITION)
+    const browserSession = getBuiltinBrowserSession()
     const skippedWebsites = new Map<string, BrowserProfileImportSkippedWebsite>()
     let importedCookies = 0
     let skippedCookies = 0
@@ -770,7 +769,7 @@ export class BrowserService {
 
     const view = new WebContentsView({
       webPreferences: {
-        partition: BROWSER_PROFILE_PARTITION,
+        session: getBuiltinBrowserSession(),
         nodeIntegration: false,
         contextIsolation: true,
         sandbox: true,

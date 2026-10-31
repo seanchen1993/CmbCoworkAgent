@@ -158,33 +158,211 @@ export function readTweakDeclaration(html: string): DesignTweakDeclaration | nul
   }
 }
 
-export function tweakSourceIssues(html: string): string[] {
-  const blocks = elements(parse(html)).filter(
+function tweakSourceBlocks(html: string) {
+  return elements(parse(html, { sourceCodeLocationInfo: true })).filter(
     (el) => el.tagName === "script" && attribute(el, "type") === "application/design-tweaks+json"
   )
-  if (!blocks.length) return [] // Legacy v1 has its own adapter.
-  if (blocks.length !== 1) return ["Tweaks 声明必须只有一个"]
+}
+
+function parseTweakBlock(block: Tree.Element): unknown {
+  return JSON.parse(
+    block.childNodes
+      .map((node) => ("value" in node ? node.value : ""))
+      .join("")
+      .replace(/\/\*DESIGN_TWEAKS-(?:BEGIN|END)\*\//g, "")
+  )
+}
+
+/** Raw declarations retain invalid keys that normalization intentionally drops. */
+export function readRawTweakDeclaration(html: string): unknown {
+  const blocks = tweakSourceBlocks(html)
+  if (blocks.length !== 1) return undefined
   try {
-    const raw = JSON.parse(
-      blocks[0].childNodes
-        .map((node) => ("value" in node ? node.value : ""))
-        .join("")
-        .replace(/\/\*DESIGN_TWEAKS-(?:BEGIN|END)\*\//g, "")
-    )
-    const normalized = normalizeTweakDeclaration(raw)
-    if (
-      !normalized ||
-      Object.keys(raw.defaults ?? {}).length !== Object.keys(normalized.defaults).length
-    )
-      return ["Tweaks 参数、类型、范围或绑定无效"]
-    for (const key of Object.keys(normalized.defaults)) {
-      if (raw.bindings[key]?.length !== normalized.bindings[key].length)
-        return [`Tweaks 参数 ${key} 含有不支持的绑定`]
-    }
-    return []
+    return parseTweakBlock(blocks[0])
   } catch {
-    return ["Tweaks 声明不是有效 JSON"]
+    return undefined
   }
+}
+
+export interface TweakSourceDiagnostic {
+  message: string
+  tweakKey?: string
+  fieldPath?: string
+  actual?: string
+  expected?: string
+  line?: number
+}
+
+/** Validate the original JSON, before normalization can discard the failing field. */
+export function tweakSourceDiagnostics(html: string): TweakSourceDiagnostic[] {
+  const blocks = tweakSourceBlocks(html)
+  if (!blocks.length) return [] // Legacy v1 has its own adapter.
+  if (blocks.length !== 1) return [{ message: "Tweaks 声明必须只有一个" }]
+  const line = blocks[0].sourceCodeLocation?.startLine
+  let raw: unknown
+  try {
+    raw = parseTweakBlock(blocks[0])
+  } catch {
+    return [{ message: "Tweaks 声明不是有效 JSON，请修正声明块的 JSON 语法", line }]
+  }
+  const issues: TweakSourceDiagnostic[] = []
+  const add = (fieldPath: string, value: unknown, expected: string, tweakKey?: string) => {
+    const actual = JSON.stringify(value) ?? "缺失"
+    issues.push({
+      message: `Tweaks ${tweakKey ? `参数 ${tweakKey}：` : ""}${fieldPath} = ${actual.slice(0, 300)}；要求${expected}`,
+      tweakKey,
+      fieldPath,
+      actual: actual.slice(0, 1000),
+      expected,
+      line
+    })
+  }
+  if (!object(raw)) {
+    add("declaration", raw, "包含 defaults、schema、bindings 的 JSON 对象")
+    return issues
+  }
+  for (const field of ["defaults", "schema", "bindings"] as const) {
+    if (!object(raw[field])) add(field, raw[field], "JSON 对象")
+  }
+  if (!object(raw.defaults) || !object(raw.schema) || !object(raw.bindings)) return issues
+  const keys = Object.keys(raw.defaults)
+  if (!keys.length || keys.length > 128) add("defaults", keys.length, "包含 1–128 个有效参数")
+  for (const key of keys) {
+    const suffix = `[${JSON.stringify(key)}]`
+    const initial = raw.defaults[key]
+    const schema = raw.schema[key]
+    const bindings = raw.bindings[key]
+    if (!safeKey(key))
+      add(
+        `defaults${suffix}`,
+        initial,
+        "参数名以英文字母开头，只含字母、数字、_、.、-，最长 80 字符且不能是原型保留名",
+        key
+      )
+    if (!primitive(initial))
+      add(`defaults${suffix}`, initial, "有限数字、布尔值或不超过 4000 字符的字符串", key)
+    if (!object(schema)) {
+      add(`schema${suffix}`, schema, "为该参数声明 schema 对象", key)
+    } else {
+      const supportedType =
+        typeof schema.type === "string" &&
+        ["color", "number", "text", "select", "boolean"].includes(schema.type)
+      if (!supportedType)
+        add(
+          `schema${suffix}.type`,
+          schema.type,
+          "color、number、text、select、boolean 之一（整数也使用 number）",
+          key
+        )
+      for (const field of ["min", "max", "step", "maxLength"] as const) {
+        if (
+          schema[field] !== undefined &&
+          (typeof schema[field] !== "number" || !Number.isFinite(schema[field]))
+        )
+          add(`schema${suffix}.${field}`, schema[field], "有限数字", key)
+      }
+      if (
+        typeof schema.min === "number" &&
+        typeof schema.max === "number" &&
+        schema.min > schema.max
+      )
+        add(`schema${suffix}.min`, schema.min, `不大于 max (${schema.max})`, key)
+      if (typeof schema.step === "number" && schema.step <= 0)
+        add(`schema${suffix}.step`, schema.step, "大于 0", key)
+      if (
+        typeof schema.maxLength === "number" &&
+        (!Number.isInteger(schema.maxLength) || schema.maxLength < 0)
+      )
+        add(`schema${suffix}.maxLength`, schema.maxLength, "非负整数", key)
+      if (
+        schema.type === "select" &&
+        (!Array.isArray(schema.options) ||
+          !schema.options.length ||
+          schema.options.length > 100 ||
+          !schema.options.every((option) => typeof option === "string"))
+      )
+        add(
+          `schema${suffix}.options`,
+          schema.options,
+          "1–100 个字符串选项，默认值必须在选项内",
+          key
+        )
+      // Diagnose defaults independently of binding validity.
+      const defaultSchema: DesignTweakSchemaEntry = {
+        type: schema.type as DesignTweakSchemaEntry["type"],
+        label: key
+      }
+      for (const field of ["min", "max", "maxLength"] as const) {
+        if (typeof schema[field] === "number" && Number.isFinite(schema[field]))
+          defaultSchema[field] = schema[field]
+      }
+      if (Array.isArray(schema.options))
+        defaultSchema.options = schema.options.filter(
+          (option): option is string => typeof option === "string"
+        )
+      const cssBinding: DesignTweakBinding[] =
+        Array.isArray(bindings) &&
+        bindings.some((binding) => object(binding) && binding.type === "css-var")
+          ? [{ type: "css-var", name: "--diagnostic" }]
+          : []
+      const declaration: DesignTweakDeclaration = {
+        defaults: { [key]: initial as DesignTweakValue },
+        schema: { [key]: defaultSchema },
+        bindings: { [key]: cssBinding }
+      }
+      if (
+        supportedType &&
+        safeKey(key) &&
+        primitive(initial) &&
+        !isTweakValueValid(declaration, key, initial)
+      )
+        add(
+          `defaults${suffix}`,
+          initial,
+          `符合 schema${suffix} 的 ${schema.type} 类型、范围、长度或 options；schema=${JSON.stringify(schema)}`,
+          key
+        )
+    }
+    if (!Array.isArray(bindings) || !bindings.length || bindings.length > 32) {
+      add(`bindings${suffix}`, bindings, "1–32 个实际生效的绑定", key)
+      continue
+    }
+    bindings.forEach((binding: unknown, index: number) => {
+      const field = `bindings${suffix}[${index}]`
+      if (
+        !object(binding) ||
+        typeof binding.type !== "string" ||
+        !["css-var", "text", "visibility"].includes(binding.type)
+      ) {
+        add(
+          `${field}.type`,
+          object(binding) ? binding.type : binding,
+          "css-var、text、visibility 之一",
+          key
+        )
+      } else if (binding.type === "css-var") {
+        if (typeof binding.name !== "string" || !/^--[a-zA-Z][\w-]*$/.test(binding.name))
+          add(`${field}.name`, binding.name, "形如 --accent 的 CSS 自定义属性名", key)
+        if (
+          binding.unit !== undefined &&
+          !["", "px", "rem", "em", "%", "vw", "vh"].includes(binding.unit as string)
+        )
+          add(`${field}.unit`, binding.unit, '""、px、rem、em、%、vw、vh 之一', key)
+      } else if (typeof binding.selector !== "string" || !tweakTarget(binding.selector)) {
+        add(
+          `${field}.selector`,
+          binding.selector,
+          "简单 #id 或 [data-design-tweak='key']，不支持组合、后代、类选择器",
+          key
+        )
+      }
+    })
+  }
+  return issues
+}
+
+export function tweakSourceIssues(html: string): string[] {
+  return tweakSourceDiagnostics(html).map((issue) => issue.message)
 }
 
 export function readyTweakKeys(html: string, declaration: DesignTweakDeclaration): Set<string> {

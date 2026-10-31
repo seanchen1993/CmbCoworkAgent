@@ -3,8 +3,10 @@ import { RightPanel } from "@/components/panels/RightPanel"
 import { OverlayDrawer } from "@/components/panels/OverlayDrawer"
 import { useBrowserViewLifecycle } from "@/components/browser/useBrowserViewLifecycle"
 import { useAppStore } from "@/lib/store"
+import { getBrowserPageConfirmation } from "@/lib/browser-page-confirmation"
 import {
   onOpenResourcePanelOverlay,
+  onCloseResourcePanelOverlay,
   type ResourcePanelInlinePreview,
   type ResourcePanelOverlayMode
 } from "@/lib/resource-panel-overlay-events"
@@ -60,10 +62,22 @@ export function ResourcePanelOverlay({
     setOpen(false)
     clearPreviewRequest()
   }, [clearPreviewRequest])
+  const closeFromUser = useCallback(() => {
+    if (mode === "browser") getBrowserPageConfirmation()?.onCancel()
+    close()
+  }, [close, mode])
   const clearHandledPreviewRequest = useCallback(() => {
     setFilePreview(null)
     clearPreviewRequest()
   }, [clearPreviewRequest])
+
+  useEffect(
+    () =>
+      onCloseResourcePanelOverlay((requestedMode) => {
+        if (!requestedMode || requestedMode === mode) close()
+      }),
+    [close, mode]
+  )
 
   useEffect(() => {
     if (!standardRightPanelMounted) return
@@ -133,7 +147,7 @@ export function ResourcePanelOverlay({
     <OverlayDrawer
       open={open}
       title={mode === "git" ? "Git 面板" : mode === "browser" ? "内置浏览器" : "文件预览"}
-      onClose={close}
+      onClose={closeFromUser}
     >
       <RightPanel
         threadId={overlayThreadId}
@@ -147,7 +161,7 @@ export function ResourcePanelOverlay({
         onResourcePreviewRequestHandled={clearHandledPreviewRequest}
         listenForResourcePreview={false}
         onRequestPreviewMode={() => setMode("preview")}
-        onRequestWorkMode={close}
+        onRequestWorkMode={closeFromUser}
       />
     </OverlayDrawer>
   )

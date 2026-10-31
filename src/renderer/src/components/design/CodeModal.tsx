@@ -101,6 +101,7 @@ export function CodeModal({
 
   return (
     <div
+      data-cmb-modal-dialog="true"
       style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.4)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000 }}
       onClick={onClose}
       onDragOver={(e) => { e.preventDefault(); setDragging(true) }}

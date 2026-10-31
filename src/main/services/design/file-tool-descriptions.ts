@@ -1,0 +1,13 @@
+const REUSE_KNOWN_CONTENT =
+  "Reuse exact current content from this turn's successful writes, edits or reads, or the host's source excerpts. Do not read or search the same draft again before each section. If an anchor is unknown, an exact replacement fails, needed source was lost during context compaction, or the file changed externally, inspect only the affected range before retrying. Never guess stale content or bypass a tool error, Hook, approval or file protection."
+
+/** Design main-agent guidance only; tool schemas and backend protections are unchanged. */
+export const DESIGN_FILE_TOOL_DESCRIPTIONS: Record<string, string> = {
+  ls: "Lists a directory when its contents or an input path are unknown. An exact supplied artifact path does not need a directory listing before reading or editing.",
+  read_file: `Reads source or references with a nonempty absolute file_path and bounded numeric offset/limit. Read unfamiliar existing content before changing it, and read an explicitly selected SKILL.md before using it. ${REUSE_KNOWN_CONTENT} Results have line-number prefixes; do not copy those prefixes into edits. Pagination headers indicate more lines, not a broken file. Use one bounded final source check after generation, not a full-file check after every section.`,
+  write_file:
+    "Creates a new file with absolute file_path and complete content. For a new Design artifact, write a small closed framework with stable section IDs and unique pending-section comments first. After success, reuse that known content and continue with edit_file; write_file does not overwrite existing files.",
+  edit_file: `Replaces an exact, unique old_string with new_string in an existing file; use replace_all only for intentional repeated replacements. ${REUSE_KNOWN_CONTENT} A file just created or edited by this agent can be edited again directly using its known current text. Replace a known pending-section wrapper or marker without a preliminary grep/read. Preserve unrelated content and stable IDs; keep HTML closed and clear that section's pending flag in the same edit. Batch independent known replacements in one response.`,
+  grep: "Searches literal text when a needed location or exact anchor is unknown. Use the known draft path and a specific pattern. Skip routine searches for section markers or content already present in the current context; edit those anchors directly. Search results may include line-number prefixes, which are not source text.",
+  glob: "Finds paths only when a required reference path is unknown. Do not rediscover an artifact or selected reference whose exact path is already supplied."
+}

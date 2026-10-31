@@ -4,7 +4,11 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { pathToFileURL } from "node:url"
 import { chromium } from "playwright"
-import { materializeTweaks } from "../src/shared/design-tweaks"
+import {
+  materializeTweaks,
+  tweakSourceDiagnostics,
+  tweakSourceIssues
+} from "../src/shared/design-tweaks"
 import { designGenerationBrowserProbe } from "../src/main/services/design/generation-browser-probe"
 import { runBoundedDesignValidation } from "../src/main/services/design/browser-validation-runner"
 import {
@@ -64,6 +68,84 @@ try {
   )
   await page.getByRole("button", { name: "撤销", exact: true }).click()
   assert.equal(await page.getByRole("button").textContent(), "已撤销")
+
+  // Business JS reads the CSS setting correctly, but does not implement a live
+  // visual binding. Remove only its unsupported Tweaks entry, keeping behavior.
+  const businessConfig = {
+    defaults: { accent: "#b45309", maxQuick: 10 },
+    schema: { accent: { type: "color" }, maxQuick: { type: "number", min: 1, max: 12 } },
+    bindings: {
+      accent: [{ type: "css-var", name: "--accent" }],
+      maxQuick: [{ type: "css-var", name: "--max-quick" }]
+    }
+  }
+  const businessPage = (config: unknown) =>
+    `<!doctype html><html><head><style>:root{--max-quick:10}.action{background:var(--accent)}</style></head><body><button class="action">快捷问题</button><script type="application/design-tweaks+json">${JSON.stringify(config)}</script><script>window.quickCount=Number(getComputedStyle(document.documentElement).getPropertyValue('--max-quick'));</script></body></html>`
+  const businessHtml = businessPage(businessConfig)
+  await writeFile(checked, materializeTweaks(businessHtml))
+  await page.reload()
+  assert.equal(
+    await page.evaluate(() => (window as unknown as { quickCount: number }).quickCount),
+    10
+  )
+  const businessFailures = await page.evaluate(() =>
+    (window as unknown as { __designValidateTweaks(): string[] }).__designValidateTweaks()
+  )
+  assert.deepEqual(businessFailures, ["maxQuick 未引用 CSS 变量 --max-quick"])
+  const businessReport = formatDesignBrowserValidation(
+    { ok: false, issues: businessFailures.map((message) => ({ type: "structure", message })) },
+    { html: businessHtml, filePath: source, repairTargetPath: repair }
+  )
+  assert.ok(businessReport.includes("getPropertyValue('--max-quick')"))
+  assert.ok(businessReport.includes("defaults、schema、bindings 三处同时移除"))
+  const withoutBusiness = (values: Record<string, unknown>) =>
+    Object.fromEntries(Object.entries(values).filter(([key]) => key !== "maxQuick"))
+  const businessFixed = businessPage({
+    defaults: withoutBusiness(businessConfig.defaults),
+    schema: withoutBusiness(businessConfig.schema),
+    bindings: withoutBusiness(businessConfig.bindings)
+  })
+  assert.deepEqual(tweakSourceIssues(businessFixed), [])
+  await writeFile(checked, materializeTweaks(businessFixed))
+  await page.reload()
+  assert.deepEqual(
+    await page.evaluate(() =>
+      (window as unknown as { __designValidateTweaks(): string[] }).__designValidateTweaks()
+    ),
+    []
+  )
+  assert.equal(
+    await page.evaluate(() => (window as unknown as { quickCount: number }).quickCount),
+    10
+  )
+
+  // A real popup target survives repeated opening and live text updates.
+  const popupConfig = {
+    defaults: { failText: "系统繁忙" },
+    schema: { failText: { type: "text", maxLength: 50 } },
+    bindings: { failText: [{ type: "text", selector: "#leaf-fail-text" }] }
+  }
+  const popupHtml = `<!doctype html><html><body><button onclick="document.getElementById('modal-body').hidden=false">显示失败</button><div id="modal-body" hidden><span id="leaf-fail-text">系统繁忙</span></div><script type="application/design-tweaks+json">${JSON.stringify(popupConfig)}</script></body></html>`
+  const invalidPopup = popupHtml.replace('"type":"text","maxLength":50', '"type":"integer"')
+  const popupDiagnostics = tweakSourceDiagnostics(invalidPopup)
+  assert.ok(popupDiagnostics.some((issue) => issue.fieldPath === 'schema["failText"].type'))
+  await writeFile(checked, materializeTweaks(popupHtml))
+  await page.reload()
+  assert.deepEqual(
+    await page.evaluate(() =>
+      (window as unknown as { __designValidateTweaks(): string[] }).__designValidateTweaks()
+    ),
+    []
+  )
+  await page.getByRole("button", { name: "显示失败" }).click()
+  await page.evaluate(() =>
+    (
+      window as unknown as { __designApplyTweaks(values: Record<string, string>): void }
+    ).__designApplyTweaks({ failText: "稍后重试" })
+  )
+  await page.getByRole("button", { name: "显示失败" }).click()
+  assert.equal(await page.locator("#leaf-fail-text").textContent(), "稍后重试")
+  assert.equal(await page.locator("#leaf-fail-text").isVisible(), true)
 
   const issues: DesignBrowserValidationIssue[] = []
   page.on("console", (message) => {

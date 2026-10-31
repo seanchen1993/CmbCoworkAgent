@@ -1,3 +1,4 @@
+import type { DesignUrlImportApi } from "../shared/design-url-import"
 import type { DesignSessionApi, DesignSessionChange } from "../shared/managed-design-session"
 import type { DesignTemplateApi } from "../shared/design-template"
 import type {
@@ -4818,22 +4819,15 @@ const api = {
         filePath?: string
         error?: string
       }>,
-    importFromUrl: (
-      url: string
-    ): Promise<{
-      success: boolean
-      html?: string
-      finalUrl?: string
-      title?: string
-      error?: string
-    }> =>
-      ipcRenderer.invoke("design:import-url", { url }) as Promise<{
-        success: boolean
-        html?: string
-        finalUrl?: string
-        title?: string
-        error?: string
-      }>,
+    importFromUrl: ((request) => ipcRenderer.invoke("design:import-url", request)) satisfies DesignUrlImportApi["importFromUrl"],
+    cancelUrlImport: ((requestId) => ipcRenderer.invoke("design:cancel-url-import", requestId)) satisfies DesignUrlImportApi["cancelUrlImport"],
+    finishUrlImport: ((requestId, keep) => ipcRenderer.invoke("design:finish-url-import", requestId, keep)) satisfies DesignUrlImportApi["finishUrlImport"],
+    openImportBrowser: ((url) => ipcRenderer.invoke("design:open-import-browser", url)) satisfies DesignUrlImportApi["openImportBrowser"],
+    onUrlImportProgress: ((callback) => {
+      const listener = (_event: unknown, progress: Parameters<typeof callback>[0]) => callback(progress)
+      ipcRenderer.on("design:import-url-progress", listener)
+      return () => ipcRenderer.removeListener("design:import-url-progress", listener)
+    }) satisfies DesignUrlImportApi["onUrlImportProgress"],
     importPrototypeZip: (
       filePath: string
     ): Promise<{

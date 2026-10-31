@@ -1,3 +1,12 @@
+import { useDesignUrlImport } from "./use-design-url-import"
+import type { DesignImportResult } from "../../../../shared/design-url-import"
+import { closeResourcePanelOverlay, openResourcePanelOverlay } from "@/lib/resource-panel-overlay-events"
+import {
+  clearBrowserPageConfirmation,
+  getBrowserPageConfirmation,
+  setBrowserPageConfirmation,
+  updateBrowserPageConfirmation
+} from "@/lib/browser-page-confirmation"
 import { isSingleDesignVariant } from "../../../../shared/design-variation-policy"
 import React, { useState, useRef, useCallback, useEffect } from "react"
 import { v4 as uuid } from "uuid"
@@ -1429,6 +1438,20 @@ export function DesignView(): React.JSX.Element {
   const [linkModalOpen, setLinkModalOpen] = useState(false)
   const [linkModalMode, setLinkModalMode] = useState<"reference" | "import">("reference")
   const [linkModalText, setLinkModalText] = useState("")
+  const urlImport = useDesignUrlImport()
+  const browserConfirmationIdRef = useRef<string | null>(null)
+  useEffect(() => () => {
+    if (browserConfirmationIdRef.current) {
+      clearBrowserPageConfirmation(browserConfirmationIdRef.current)
+      closeResourcePanelOverlay("browser")
+    }
+  }, [])
+  useEffect(() => {
+    const id = browserConfirmationIdRef.current
+    if (id && urlImport.progress && getBrowserPageConfirmation()?.phase === "capturing") {
+      updateBrowserPageConfirmation(id, { message: urlImport.progress.message })
+    }
+  }, [urlImport.progress])
   const [importingSource, setImportingSource] = useState<null | "url" | "html" | "prototype_zip">(
     null
   )
@@ -2043,14 +2066,22 @@ export function DesignView(): React.JSX.Element {
   )
 
   const applyImportedDesign = useCallback(
-    (options: {
+    async (options: {
       sessionId: string
       html: string
+      artifactPath?: string
+      assertCurrent?: () => void
+      onBeforeCommit?: () => Promise<void>
+      createNew?: boolean
+      workspacePath?: string
+      warnings?: string[]
       sourceInfo: DesignSourceInfo
       userMessage: string
       designSystemId?: string | null
     }) => {
       const tabId = SINGLE_DESIGN_TAB_ID
+      const sessionAtStart = currentSessionIdRef.current
+      const importWorkspace = options.workspacePath ?? workspacePath
       const storeKey = makeDesignArtifactId(options.sessionId, tabId)
       const baseImportedHtml = ensureEditMode(options.html)
       const importedHtml = options.designSystemId
@@ -2072,27 +2103,40 @@ export function DesignView(): React.JSX.Element {
         variations
       })
 
-      window.api.design.storeHtml(storeKey, importedHtml).catch((err) => {
-        console.warn("[Design] storeHtml failed", err)
-      })
-      if (!loadActiveRequirementDesignEntry(options.sessionId)) {
-        saveDesignArtifactForTab(
-          storeKey,
-          importedHtml,
-          workspacePath,
-          tabId,
-          updateTs,
-          undefined,
-          artifactMetadata
-        )
+      let artifactPath = options.artifactPath ?? null
+      if (
+        importWorkspace &&
+        (artifactPath || !loadActiveRequirementDesignEntry(options.sessionId))
+      ) {
+        const saved = artifactPath
+          ? await window.api.design.saveArtifactFile(
+              artifactPath,
+              importedHtml,
+              importWorkspace,
+              artifactMetadata as unknown as Record<string, unknown>
+            )
+          : await window.api.design.saveArtifact(
+              storeKey,
+              importedHtml,
+              importWorkspace,
+              artifactMetadata as unknown as Record<string, unknown>
+            )
+        if (!saved.success || !saved.filePath) throw new Error(saved.error || "保存导入页面失败")
+        artifactPath = saved.filePath
       }
-
-      updateTs(tabId, (prev) => ({
+      const previewHtml = await prepareHtmlForSrcDoc(importedHtml, artifactPath)
+      options.assertCurrent?.()
+      await window.api.design.storeHtml(storeKey, importedHtml)
+      options.assertCurrent?.()
+      await options.onBeforeCommit?.()
+      const prev = tabStatesRef.current[tabId] ?? makeTabState()
+      const importedState: Partial<TabState> = {
         messages: [
           { role: "user" as const, content: options.userMessage },
           {
             role: "assistant" as const,
-            content: "✓ 页面已还原，可直接用 Tweaks 编辑，后续追问会基于当前 HTML 继续迭代。"
+            content: "✓ 页面已还原，可直接用 Tweaks 编辑，后续追问会基于当前 HTML 继续迭代。" +
+              (options.warnings?.length ? `\n\n抓取提示：\n${options.warnings.map((message) => `- ${message}`).join("\n")}` : "")
           }
         ],
         html: importedHtml,
@@ -2131,33 +2175,54 @@ export function DesignView(): React.JSX.Element {
         retryIsIteration: false,
         retryCleanMsg: null,
         retrySkill: null,
-        artifactPath: null,
+        artifactPath,
         artifactMetadata,
         apiHistory: [
           { role: "user" as const, content: options.userMessage },
           { role: "assistant" as const, content: "页面已还原，可继续编辑" }
         ],
         pendingApproval: null
-      }))
+      }
 
-      void getDesignSessionClient()
-        .patch(
+      const importedMeta = {
+        title: options.sourceInfo.label,
+        kind: options.sourceInfo.kind,
+        sourceLabel: options.sourceInfo.label,
+        updatedAt: Date.now(),
+        designSystemId: importedDesignSystem?.id ?? null,
+        designSystemName: importedDesignSystem?.name ?? null,
+        designSystemCategory: importedDesignSystem?.category ?? null
+      }
+      let committed
+      if (options.createNew) {
+        committed = await getDesignSessionClient().create({
+          id: options.sessionId,
+          meta: { ...importedMeta, id: options.sessionId, createdAt: Date.now() },
+          state: { ...makeTabState(), ...importedState },
+          workspacePath: importWorkspace
+        })
+        if (currentSessionIdRef.current === sessionAtStart) {
+          currentSessionIdRef.current = options.sessionId
+          setCurrentSessionId(options.sessionId)
+          localStorage.setItem(SESSION_LAST_KEY, options.sessionId)
+        }
+      } else {
+        committed = await getDesignSessionClient().patch(
           options.sessionId,
-          {},
-          {
-            title: options.sourceInfo.label,
-            kind: options.sourceInfo.kind,
-            sourceLabel: options.sourceInfo.label,
-            updatedAt: Date.now(),
-            designSystemId: importedDesignSystem?.id ?? null,
-            designSystemName: importedDesignSystem?.name ?? null,
-            designSystemCategory: importedDesignSystem?.category ?? null
-          }
+          importedState,
+          importedMeta
         )
-        .catch((error) => showToast(`保存导入信息失败：${String(error)}`))
+      }
+      if (currentSessionIdRef.current === options.sessionId) {
+        tabStatesRef.current = {
+          ...tabStatesRef.current,
+          [tabId]: { ...prev, ...committed.state, html: previewHtml }
+        }
+        setTabStates(tabStatesRef.current)
+      }
       setSessionIndex(getDesignSessionClient().list())
     },
-    [designSystems, workspacePath, updateTs, showToast]
+    [designSystems, workspacePath]
   )
 
   const loadImportedHtmlFromFile = useCallback(
@@ -2190,38 +2255,6 @@ export function DesignView(): React.JSX.Element {
     [readDependencyTextFile]
   )
 
-  const loadImportedHtmlFromUrl = useCallback(
-    async (
-      url: string
-    ): Promise<{
-      html: string
-      label: string
-      detail: string
-    }> => {
-      const result = await window.api.design.importFromUrl(url)
-      if (!result.success || !result.html) {
-        throw new Error(result.error || "抓取页面失败")
-      }
-
-      const displayUrl = result.finalUrl || url
-      let label = result.title?.trim() || ""
-      if (!label) {
-        try {
-          label = new URL(displayUrl).hostname
-        } catch {
-          label = displayUrl
-        }
-      }
-
-      return {
-        html: result.html,
-        label,
-        detail: displayUrl
-      }
-    },
-    []
-  )
-
   const openReferenceLinkModal = useCallback(() => {
     setLinkModalMode("reference")
     setLinkModalText(ts.designLink ?? "")
@@ -2229,12 +2262,18 @@ export function DesignView(): React.JSX.Element {
   }, [ts.designLink])
 
   const openImportUrlModal = useCallback(async () => {
+    if (importingSource) return
     const ready = await ensureWorkspaceSelected("导入链接页面")
     if (!ready) return
+    if (browserConfirmationIdRef.current) {
+      clearBrowserPageConfirmation(browserConfirmationIdRef.current)
+      browserConfirmationIdRef.current = null
+    }
+    urlImport.reset()
     setLinkModalMode("import")
     setLinkModalText("")
     setLinkModalOpen(true)
-  }, [ensureWorkspaceSelected])
+  }, [ensureWorkspaceSelected, importingSource, urlImport])
 
   const handleImportHtmlFile = useCallback(
     async (source: "gallery" | "session") => {
@@ -2273,7 +2312,7 @@ export function DesignView(): React.JSX.Element {
                 { designSystemId: createDesignSystemId }
               ))
 
-        applyImportedDesign({
+        await applyImportedDesign({
           sessionId,
           html: imported.html,
           sourceInfo: { kind: "import_html", label: imported.label, detail: imported.detail },
@@ -2343,7 +2382,7 @@ export function DesignView(): React.JSX.Element {
                 { designSystemId: createDesignSystemId }
               ))
 
-        applyImportedDesign({
+        await applyImportedDesign({
           sessionId,
           html: imported.html,
           sourceInfo: {
@@ -2376,65 +2415,92 @@ export function DesignView(): React.JSX.Element {
   )
 
   const handleImportUrl = useCallback(
-    async (rawUrl: string, source: "gallery" | "session") => {
+    async (
+      rawUrl: string,
+      source: "gallery" | "session",
+      allowRestrictedPage = false
+    ): Promise<{ success: boolean; error?: string; restricted?: boolean }> => {
+      if (importingSource) return { success: false, error: "请等待当前导入完成" }
       const ready = await ensureWorkspaceSelected("导入链接页面")
-      if (!ready) return false
-
-      const url = rawUrl.trim()
-      if (!url) {
-        showToast("请输入有效的页面链接")
-        return false
+      if (!ready) return { success: false, error: "请先选择工作目录" }
+      const workspace = workspacePath || (await window.api.workspace.get())
+      if (!workspace) {
+        showToast("请先选择工作目录")
+        return { success: false, error: "请先选择工作目录" }
       }
-
       setImportingSource("url")
+      let captured: DesignImportResult | null = null
+      let applied = false
+      const expectedSession = currentSessionIdRef.current
       try {
-        const imported = await loadImportedHtmlFromUrl(url)
-        const sessionId =
-          source === "gallery"
-            ? createSession(
-                {
-                  title: imported.label,
-                  kind: "import_url",
-                  sourceLabel: imported.label
-                },
-                { designSystemId: createDesignSystemId }
-              )
-            : (currentSessionId ??
-              createSession(
-                {
-                  title: imported.label,
-                  kind: "import_url",
-                  sourceLabel: imported.label
-                },
-                { designSystemId: createDesignSystemId }
-              ))
-
-        applyImportedDesign({
+        captured = await urlImport.capture({
+          source: "current-browser",
+          url: rawUrl.trim(),
+          workspacePath: workspace,
+          allowRestrictedPage
+        })
+        if (!captured) return { success: false, error: "页面还原已取消" }
+        if (!captured.success || !captured.html || !captured.artifactPath) {
+          if (captured.status !== "needs_user_action" && captured.status !== "cancelled")
+            showToast(captured.error || "抓取页面失败")
+          return {
+            success: false,
+            error: captured.error || "抓取页面失败",
+            restricted: captured.status === "needs_user_action"
+          }
+        }
+        const requestId = captured.requestId
+        const assertCurrent = () => {
+          if (!urlImport.isCurrent(requestId) || currentSessionIdRef.current !== expectedSession)
+            throw new Error("页面还原已取消或会话已切换")
+        }
+        const html = captured.html
+        assertCurrent()
+        const label = captured.title || new URL(captured.finalUrl || rawUrl).hostname
+        const createNew = source === "gallery" || !currentSessionId
+        const sessionId = createNew ? `ds_${uuid().slice(0, 8)}` : currentSessionId!
+        const warnings = captured.warnings.map((item) => item.message)
+        await applyImportedDesign({
           sessionId,
-          html: imported.html,
-          sourceInfo: { kind: "import_url", label: imported.label, detail: imported.detail },
-          userMessage: `通过链接还原页面：${imported.detail}`,
+          html,
+          artifactPath: captured.artifactPath,
+          assertCurrent,
+          createNew,
+          workspacePath: workspace,
+          onBeforeCommit: () => urlImport.finish(requestId, true),
+          warnings,
+          sourceInfo: { kind: "import_url", label, detail: captured.finalUrl || rawUrl },
+          userMessage: `通过链接还原页面：${captured.finalUrl || rawUrl}`,
           designSystemId:
             source === "gallery"
               ? createDesignSystemId
               : tabStatesRef.current[SINGLE_DESIGN_TAB_ID]?.selectedDesignSystemId
         })
+        applied = true
         setCreationPageOpen(false)
-        return true
-      } catch (err) {
-        showToast(err instanceof Error ? err.message : "导入链接页面失败")
-        return false
+        if (warnings.length) showToast(`页面已还原：${warnings.slice(0, 2).join("；")}`)
+        return { success: true }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "导入链接页面失败"
+        urlImport.fail(message)
+        showToast(message)
+        return { success: false, error: message }
       } finally {
-        setImportingSource(null)
+        try {
+          if (captured) await urlImport.finish(captured.requestId, applied)
+        } finally {
+          setImportingSource(null)
+        }
       }
     },
     [
       ensureWorkspaceSelected,
+      workspacePath,
+      importingSource,
+      urlImport,
       showToast,
-      loadImportedHtmlFromUrl,
-      createSession,
-      createDesignSystemId,
       currentSessionId,
+      createDesignSystemId,
       applyImportedDesign
     ]
   )
@@ -3902,13 +3968,94 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
       return
     }
 
-    const imported = await handleImportUrl(
-      linkModalText,
-      creationPageOpen || currentSessionId === null ? "gallery" : "session"
-    )
-    if (imported) {
-      setLinkModalOpen(false)
-      setLinkModalText("")
+    if (importingSource || browserConfirmationIdRef.current) return
+    const url = linkModalText.trim()
+    try {
+      const parsed = new URL(url)
+      if (!["http:", "https:"].includes(parsed.protocol)) return
+    } catch {
+      return
+    }
+    const id = uuid()
+    const expectedSession = currentSessionIdRef.current
+    const source = creationPageOpen || expectedSession === null ? "gallery" : "session"
+    browserConfirmationIdRef.current = id
+    urlImport.reset()
+    setLinkModalOpen(false)
+    const clearConfirmation = () => {
+      if (browserConfirmationIdRef.current !== id) return
+      browserConfirmationIdRef.current = null
+      clearBrowserPageConfirmation(id)
+    }
+    const cancel = () => {
+      if (browserConfirmationIdRef.current !== id) return
+      urlImport.cancel()
+      clearConfirmation()
+      closeResourcePanelOverlay("browser")
+    }
+    const confirm = async (allowRestrictedPage = false) => {
+      if (browserConfirmationIdRef.current !== id || getBrowserPageConfirmation()?.phase !== "ready") return
+      if (currentSessionIdRef.current !== expectedSession) {
+        cancel()
+        showToast("设计会话已切换，请重新选择要还原的链接")
+        return
+      }
+      updateBrowserPageConfirmation(id, {
+        phase: "capturing", message: "正在抓取内置浏览器当前页面…", error: undefined, restricted: false
+      })
+      try {
+        const imported = await handleImportUrl(url, source, allowRestrictedPage)
+        if (browserConfirmationIdRef.current !== id) return
+        if (imported.success) {
+          clearConfirmation()
+          closeResourcePanelOverlay("browser")
+          setLinkModalText("")
+        } else {
+          updateBrowserPageConfirmation(id, {
+            phase: "ready",
+            message: "请在下方完成登录或调整页面，确认后重新抓取。",
+            error: imported.error,
+            restricted: imported.restricted
+          })
+        }
+      } catch (error) {
+        updateBrowserPageConfirmation(id, {
+          phase: "ready",
+          message: "请确认当前页面后重试。",
+          error: error instanceof Error ? error.message : "页面还原失败"
+        })
+      }
+    }
+    setBrowserPageConfirmation({
+      id,
+      phase: "opening",
+      message: "正在打开链接，请稍候…",
+      onConfirm: () => void confirm(),
+      onConfirmRestricted: () => void confirm(true),
+      onCancel: cancel,
+      onEditUrl: () => {
+        clearConfirmation()
+        setLinkModalMode("import")
+        setLinkModalOpen(true)
+      }
+    })
+    openResourcePanelOverlay("browser")
+    try {
+      const opened = await window.api.design.openImportBrowser(url)
+      updateBrowserPageConfirmation(id, opened.success ? {
+        phase: "ready",
+        message: "请在下方完成登录并进入目标页面，确认内容无误后点击「确认页面并还原」。"
+      } : {
+        phase: "ready",
+        message: "请在地址栏重新打开目标页面，或修改链接；确认当前页面后再还原。",
+        error: opened.error || "打开内置浏览器失败"
+      })
+    } catch (error) {
+      updateBrowserPageConfirmation(id, {
+        phase: "ready",
+        message: "请在地址栏重新打开目标页面，或修改链接；确认当前页面后再还原。",
+        error: error instanceof Error ? error.message : "打开内置浏览器失败"
+      })
     }
   }, [
     linkModalMode,
@@ -3916,8 +4063,10 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
     activeTabId,
     linkModalText,
     handleImportUrl,
-    currentSessionId,
-    creationPageOpen
+    creationPageOpen,
+    importingSource,
+    urlImport,
+    showToast
   ])
 
   const downloadCurrentDesignHtml = useCallback(
@@ -4011,6 +4160,10 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
       </div>
     )
 
+  const closeLinkModal = () => {
+    setLinkModalOpen(false)
+  }
+
   if (creationPageOpen) {
     return (
       <>
@@ -4041,7 +4194,7 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
           loading={importingSource === "url"}
           onUrlChange={setLinkModalText}
           onConfirm={() => void handleLinkModalConfirm()}
-          onClose={() => setLinkModalOpen(false)}
+          onClose={closeLinkModal}
         />
         {toast && (
           <div
@@ -4078,7 +4231,7 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
           onConfirm={() => {
             void handleLinkModalConfirm()
           }}
-          onClose={() => setLinkModalOpen(false)}
+          onClose={closeLinkModal}
         />
         {toast && (
           <div
@@ -4129,7 +4282,7 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
         onConfirm={() => {
           void handleLinkModalConfirm()
         }}
-        onClose={() => setLinkModalOpen(false)}
+        onClose={closeLinkModal}
       />
       <ExportDesignModal
         key={

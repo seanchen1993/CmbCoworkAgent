@@ -80,6 +80,8 @@ export function patchRuntimeReadFileTool(params: {
     | ReadableFilesystemBackend
     | ((config: { state: unknown; store?: unknown }) => ReadableFilesystemBackend)
   toolTokenLimitBeforeEvict?: number
+  /** Optional domain guidance; output limits, schemas and read protections stay unchanged. */
+  description?: string
   resolveTraceContextForAgent?: ReadFileTraceContextResolver
 }): void {
   const {
@@ -134,7 +136,7 @@ export function patchRuntimeReadFileTool(params: {
     },
     {
       name: "read_file",
-      description: createReadFileDescription(),
+      description: params.description ?? createReadFileDescription(),
       schema: readFileSchema
     }
   )

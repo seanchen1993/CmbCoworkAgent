@@ -10,8 +10,9 @@ import { isSingleDesignVariant, designVariantPolicyIssue, SINGLE_DESIGN_VARIANT_
 
 import fs from "fs"
 import path from "path"
-import { ipcMain, BrowserWindow, app, net, dialog, type WebContents } from "electron"
+import { ipcMain, BrowserWindow, app, dialog, type WebContents } from "electron"
 import { DesignTemplatePackages, buildTemplatePackageContext } from "../services/design/template-packages"
+import { registerDesignUrlImportHandlers } from "./design-url-import"
 import { DesignTemplatePreview } from "../services/design/template-preview"
 import { createDesignArtifactZip } from "../services/design/artifact-package"
 import { writeDesignFilesAtomically } from "../services/design/artifact-storage"
@@ -37,6 +38,8 @@ import {
   DESIGN_ARTIFACT_CONTINUATION_MAX_ATTEMPTS, DESIGN_ARTIFACT_CONTINUATION_STALL_ATTEMPTS
 } from "../services/design/generation-prompt"
 import { DesignQuestionStream } from "../services/design/question-stream"
+import { DESIGN_FILE_TOOL_DESCRIPTIONS } from "../services/design/file-tool-descriptions"
+import { createDesignRepairProgress } from "../services/design/repair-progress"
 import {
   formatDesignBrowserValidation, injectDesignBrowserValidationProbe, parseDesignBrowserRuntimeIssue,
   buildDesignValidationRepairPrompt, DESIGN_VALIDATION_REPAIR_SYSTEM_PROMPT,
@@ -45,7 +48,7 @@ import {
 import { designStreamWithArtifactRecovery, isDesignGraphRecursionLimit } from "../services/design/generation-stream"
 import { getAgentGraphRecursionLimit } from "../../shared/agent-runtime-limits"
 import { inspectDesignDocument, isFinalizableDesignDraft } from "../../shared/design-progressive"
-import { materializeTweaks, readTweakDeclaration, reconcileTweaks, tweakSourceIssues, type DesignTweakCommand, type DesignTweaksState } from "../../shared/design-tweaks"
+import { materializeTweaks, readTweakDeclaration, reconcileTweaks, tweakSourceDiagnostics, type DesignTweakCommand, type DesignTweaksState } from "../../shared/design-tweaks"
 import { approvalDecisionBroker } from "../agent/approval-decision-broker"
 import { asDesignApprovalRequest, type DesignRunEvent, type DesignSessionChange, type DesignSessionSeed, type DesignRunRequest, type TabState, type SessionMeta } from "../../shared/managed-design-session"
 
@@ -523,10 +526,6 @@ interface DesignArtifactFileReadResult {
   html?: string
   metadata?: DesignArtifactMetadata | null
   error?: string
-}
-
-interface DesignImportUrlParams {
-  url: string
 }
 
 interface DesignImportPrototypeZipParams {
@@ -1215,7 +1214,7 @@ function countDesignVariationOpenTags(html: string, id: "a" | "b"): number {
 }
 
 function validateDesignArtifactSourceStructure(html: string): DesignBrowserValidationIssue[] {
-  const issues: DesignBrowserValidationIssue[] = tweakSourceIssues(html).map((message) => ({ type: "structure", message }))
+  const issues: DesignBrowserValidationIssue[] = tweakSourceDiagnostics(html).map((issue) => ({ type: "structure", ...issue }))
   const tokens = Array.from(html.matchAll(DESIGN_CONTROL_TOKEN_RE))
     .map((match) => match[0])
     .slice(0, 5)
@@ -1489,74 +1488,6 @@ function syncDesignContextFiles(params: DesignContextFilesSyncParams): {
   } catch (err) {
     return { success: false, dirPath: resolvedDir.dirPath, error: err instanceof Error ? err.message : String(err) }
   }
-}
-
-function stripContentSecurityPolicyMeta(html: string): string {
-  return html.replace(
-    /<meta\b[^>]*http-equiv\s*=\s*["']content-security-policy["'][^>]*>/gi,
-    ""
-  )
-}
-
-function ensureImportedHtmlDocument(html: string): string {
-  const trimmed = html.trim()
-  if (!trimmed) return ""
-  if (/<html[\s>]/i.test(trimmed)) return trimmed
-  if (/<head[\s>]/i.test(trimmed) || /<body[\s>]/i.test(trimmed)) {
-    return `<!DOCTYPE html>\n<html>\n${trimmed}\n</html>`
-  }
-  return `<!DOCTYPE html>
-<html>
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-</head>
-<body>
-${trimmed}
-</body>
-</html>`
-}
-
-function injectBaseHref(html: string, baseHref: string): string {
-  if (!baseHref.trim()) return html
-  if (/<base\b/i.test(html)) return html
-  const safeHref = baseHref.replace(/"/g, "&quot;")
-  const baseTag = `<base href="${safeHref}">`
-
-  if (/<head[\s>]/i.test(html)) {
-    return html.replace(/<head([^>]*)>/i, `<head$1>\n${baseTag}`)
-  }
-  if (/<html[\s>]/i.test(html)) {
-    return html.replace(
-      /<html([^>]*)>/i,
-      `<html$1>\n<head>\n${baseTag}\n<meta charset="UTF-8">\n<meta name="viewport" content="width=device-width, initial-scale=1.0">\n</head>`
-    )
-  }
-  return `<!DOCTYPE html>
-<html>
-<head>
-${baseTag}
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-</head>
-<body>
-${html}
-</body>
-</html>`
-}
-
-function prepareImportedRemoteHtml(html: string, finalUrl: string): string {
-  const normalized = ensureImportedHtmlDocument(stripContentSecurityPolicyMeta(html))
-  return injectBaseHref(normalized, finalUrl)
-}
-
-function extractHtmlTitle(html: string): string | undefined {
-  const match = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)
-  const rawTitle = match?.[1]
-    ?.replace(/\s+/g, " ")
-    .replace(/&nbsp;/gi, " ")
-    .trim()
-  return rawTitle || undefined
 }
 
 function escapeHtmlText(value: unknown): string {
@@ -2986,80 +2917,10 @@ export function registerDesignHandlers(): void {
       manager.markRead(id, seq),
   )
 
-  ipcMain.handle(
-    "design:import-url",
-    async (_event, { url }: DesignImportUrlParams): Promise<{
-      success: boolean
-      html?: string
-      finalUrl?: string
-      title?: string
-      error?: string
-    }> => {
-      const rawUrl = typeof url === "string" ? url.trim() : ""
-      if (!rawUrl) {
-        return { success: false, error: "URL 不能为空" }
-      }
-
-      let parsedUrl: URL
-      try {
-        parsedUrl = new URL(rawUrl)
-      } catch {
-        return { success: false, error: "URL 格式无效" }
-      }
-
-      if (!["http:", "https:"].includes(parsedUrl.protocol)) {
-        return { success: false, error: "仅支持 http:// 或 https:// 链接" }
-      }
-
-      const controller = new AbortController()
-      const timeout = setTimeout(() => controller.abort(), 20_000)
-
-      try {
-        const response = await net.fetch(parsedUrl.toString(), {
-          signal: controller.signal,
-          headers: {
-            "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"
-          }
-        })
-
-        if (!response.ok) {
-          return { success: false, error: `抓取页面失败：HTTP ${response.status}` }
-        }
-
-        const contentLength = response.headers.get("content-length")
-        const parsedLength = contentLength ? Number.parseInt(contentLength, 10) : NaN
-        if (Number.isFinite(parsedLength) && parsedLength > 5 * 1024 * 1024) {
-          return { success: false, error: "页面内容超过 5MB 限制" }
-        }
-
-        const contentType = response.headers.get("content-type")?.toLowerCase() ?? ""
-        if (contentType && !contentType.includes("html") && !contentType.includes("xml") && !contentType.startsWith("text/")) {
-          return { success: false, error: `链接返回的不是可导入的 HTML 页面：${contentType}` }
-        }
-
-        const rawHtml = await response.text()
-        if (Buffer.byteLength(rawHtml, "utf-8") > 5 * 1024 * 1024) {
-          return { success: false, error: "页面内容超过 5MB 限制" }
-        }
-        if (!rawHtml.trim()) {
-          return { success: false, error: "页面内容为空" }
-        }
-
-        const finalUrl = response.url || parsedUrl.toString()
-        return {
-          success: true,
-          html: prepareImportedRemoteHtml(rawHtml, finalUrl),
-          finalUrl,
-          title: extractHtmlTitle(rawHtml),
-        }
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err)
-        return { success: false, error: message || "抓取页面失败" }
-      } finally {
-        clearTimeout(timeout)
-      }
-    }
-  )
+  registerDesignUrlImportHandlers(() => {
+    const stored = designAgentStore.get("workspacePath", null)
+    return typeof stored === "string" && stored ? stored : app.getPath("userData")
+  })
 
   ipcMain.handle(
     "design:import-prototype-zip",
@@ -3752,39 +3613,50 @@ export function registerDesignHandlers(): void {
               })
             : new HumanMessage(messageText)
 
-        const createDesignAgentRuntimeForThread = (runtimeThreadId: string, validationRepair = false) => createAgentRuntime({
-          threadId: runtimeThreadId,
-          workspacePath,
-          modelId,
-          baseSystemPrompt: isNewDesign || validationRepair ? buildDesignCreationBasePrompt(workspacePath) : undefined,
-          extraSystemPrompt: (validationRepair ? DESIGN_VALIDATION_REPAIR_SYSTEM_PROMPT : isNewDesign ? DESIGN_CREATION_SYSTEM_PROMPT + (templatePackage ? DESIGN_FRAMEWORK_EDITING_PROMPT : "") : DESIGN_SYSTEM_PROMPT) + (enforceSingleVariant ? "\n\n" + SINGLE_DESIGN_VARIANT_PROMPT : "") + (templatePackage ? "\n\n## Selected template package\nUse the selected local template's framework, component library and theme. Its dependencies have already been copied by the host. Keep relative local script/style references instead of inlining vendor bundles or switching to remote CDNs. Produce exactly one complete HTML page, preserving React/Vue and JSX/Babel where present. These template rules override generic inline-only and variation instructions.\n" : ""),
-          noSchedulerTool: true,
-          noSkillEvolutionTool: true,
-          disableSubagents: validationRepair || (isNewDesign && !selectedSkill),
-          allowedSkillNames: validationRepair ? [] : isNewDesign ? (selectedSkill ? [selectedSkill.name] : []) : undefined,
-          disableMcpTools: validationRepair || (isNewDesign && !selectedSkill && !/https?:\/\//i.test(prompt)),
-          blockedToolNames: validationRepair || (isNewDesign && !selectedSkill) ? ["execute", "task_output", "code_exec", "write_todos"] : [],
-          enableAgentsPrompt: false,
-          abortSignal: controller.signal,
-          retryHooks: buildDesignModelRetryHooks(send),
-          maxRetryAttempts: DESIGN_MODEL_MAX_RETRY_ATTEMPTS,
-          validateFileWrite: (filePath, content) =>
-            isNewDesign && !recordedFirstWrite && sameResolvedFilePath(filePath, candidateDraftPath)
-              ? validateFirstDesignWrite(content)
-              : undefined,
-          onFileMutation: (filePath) => {
-            if (sameResolvedFilePath(path.resolve(workspacePath, filePath), candidateDraftPath)) {
-              wroteCandidateDraft = true
-              if (!recordedFirstWrite) {
-                recordedFirstWrite = true
-                let firstWriteBytes: number | undefined
-                try { firstWriteBytes = fs.statSync(candidateDraftPath).size } catch { /* Preview reports any later read failure. */ }
-                send({ type: "metrics", metrics: { firstWriteAt: Date.now(), firstWriteBytes } })
+        const repairProgressByThread = new Map<string, ReturnType<typeof createDesignRepairProgress>>()
+        const createDesignAgentRuntimeForThread = (runtimeThreadId: string, validationRepair = false) => {
+          let repairProgress = repairProgressByThread.get(runtimeThreadId)
+          if (validationRepair && !repairProgress) {
+            repairProgress = createDesignRepairProgress(candidateDraftPath, workspacePath)
+            repairProgressByThread.set(runtimeThreadId, repairProgress)
+          }
+          return createAgentRuntime({
+            threadId: runtimeThreadId,
+            workspacePath,
+            modelId,
+            baseSystemPrompt: isNewDesign || validationRepair ? buildDesignCreationBasePrompt(workspacePath) : undefined,
+            mainFilesystemToolDescriptions: DESIGN_FILE_TOOL_DESCRIPTIONS,
+            mainMiddleware: repairProgress ? [repairProgress.middleware] : undefined,
+            extraSystemPrompt: (validationRepair ? DESIGN_VALIDATION_REPAIR_SYSTEM_PROMPT : isNewDesign ? DESIGN_CREATION_SYSTEM_PROMPT + (templatePackage ? DESIGN_FRAMEWORK_EDITING_PROMPT : "") : DESIGN_SYSTEM_PROMPT) + (enforceSingleVariant ? "\n\n" + SINGLE_DESIGN_VARIANT_PROMPT : "") + (templatePackage ? "\n\n## Selected template package\nUse the selected local template's framework, component library and theme. Its dependencies have already been copied by the host. Keep relative local script/style references instead of inlining vendor bundles or switching to remote CDNs. Produce exactly one complete HTML page, preserving React/Vue and JSX/Babel where present. These template rules override generic inline-only and variation instructions.\n" : ""),
+            noSchedulerTool: true,
+            noSkillEvolutionTool: true,
+            disableSubagents: validationRepair || (isNewDesign && !selectedSkill),
+            allowedSkillNames: validationRepair ? [] : isNewDesign ? (selectedSkill ? [selectedSkill.name] : []) : undefined,
+            disableMcpTools: validationRepair || (isNewDesign && !selectedSkill && !/https?:\/\//i.test(prompt)),
+            blockedToolNames: validationRepair ? ["execute", "task_output", "code_exec", "write_todos", "write_file", "ls", "glob"] : (isNewDesign && !selectedSkill) ? ["execute", "task_output", "code_exec", "write_todos"] : [],
+            enableAgentsPrompt: false,
+            abortSignal: controller.signal,
+            retryHooks: buildDesignModelRetryHooks(send),
+            maxRetryAttempts: DESIGN_MODEL_MAX_RETRY_ATTEMPTS,
+            validateFileWrite: (filePath, content) =>
+              isNewDesign && !recordedFirstWrite && sameResolvedFilePath(filePath, candidateDraftPath)
+                ? validateFirstDesignWrite(content)
+                : undefined,
+            onFileMutation: (filePath) => {
+              if (sameResolvedFilePath(path.resolve(workspacePath, filePath), candidateDraftPath)) {
+                wroteCandidateDraft = true
+                repairProgress?.noteWrite()
+                if (!recordedFirstWrite) {
+                  recordedFirstWrite = true
+                  let firstWriteBytes: number | undefined
+                  try { firstWriteBytes = fs.statSync(candidateDraftPath).size } catch { /* Preview reports any later read failure. */ }
+                  send({ type: "metrics", metrics: { firstWriteAt: Date.now(), firstWriteBytes } })
+                }
+                draftPublisher?.notify(filePath)
               }
-              draftPublisher?.notify(filePath)
-            }
-          },
-        })
+            },
+          })
+        }
 
         const skillUsageDetector = new SkillUsageDetector()
         const skillToolCallIds = new Map<string, string>()
@@ -4221,7 +4093,7 @@ export function registerDesignHandlers(): void {
         const sendValidatedArtifact = async (
           artifactHtml: string,
           showFailureResult: boolean
-        ): Promise<{ ok: true } | { ok: false; repairable: boolean; message: string }> => {
+        ): Promise<{ ok: true } | { ok: false; repairable: boolean; message: string; repairReport?: (target: string) => string }> => {
           const policyIssue = designVariantPolicyIssue(artifactHtml, enforceSingleVariant)
           if (policyIssue) {
             sendValidationEvent(showFailureResult ? "error" : "running", policyIssue)
@@ -4264,15 +4136,18 @@ export function registerDesignHandlers(): void {
             originalSource: sourceHtmlForReport, fullChecks: true,
           })
           send({ type: "metrics", metrics: { validationFinishedAt: Date.now() } })
-          const browserValidationMessage = formatDesignBrowserValidation(browserValidation, {
+          const reportSource = {
             html: sourceHtmlForReport, filePath: candidateDraftPath,
             validationHtml, validationPath: draftSave.filePath,
-          })
+          }
+          const browserValidationMessage = formatDesignBrowserValidation(browserValidation, reportSource)
           if (!browserValidation.ok) {
             const repairable = isDesignValidationRepairable(browserValidation)
             if (showFailureResult || !repairable) sendValidationEvent("error", browserValidationMessage, true)
             else sendValidationEvent("running", `浏览器校验未通过，已将以下问题交给模型修复：\n${browserValidationMessage}`)
-            return { ok: false, repairable, message: browserValidationMessage }
+            return { ok: false, repairable, message: browserValidationMessage,
+              repairReport: (target) => formatDesignBrowserValidation(browserValidation, { ...reportSource, repairTargetPath: target }),
+            }
           }
 
           sendValidationEvent("success", browserValidationMessage, false)
@@ -4420,6 +4295,7 @@ export function registerDesignHandlers(): void {
 
             const repairThreadId = makeDesignAgentRepairThreadId(threadId, repairAttempt + 1)
             const repairArtifactPath = makeDesignArtifactDraftPath(outputArtifactPath)
+            const repairSourceHtml = html
             const repairDraft = saveDesignArtifactFile(repairArtifactPath, html, workspacePath)
             if (!repairDraft.success) {
               send({ type: "error", error: `准备修复草稿失败：${repairDraft.error ?? "未知错误"}\n${validationOutcome.message}` })
@@ -4430,23 +4306,34 @@ export function registerDesignHandlers(): void {
             wroteCandidateDraft = false
             await closeCheckpointer(repairThreadId)
             deleteThreadCheckpoint(repairThreadId)
-            const repairPrompt = buildDesignValidationRepairPrompt(validationOutcome.message, repairArtifactPath)
+            const repairPrompt = buildDesignValidationRepairPrompt(validationOutcome.repairReport?.(repairArtifactPath) ?? validationOutcome.message, repairArtifactPath)
             const repairResult = await runDesignAgentOnce(repairPrompt, repairThreadId, true)
-            html = repairResult.html
+            if (!wroteCandidateDraft) {
+              send({ type: "error", error: `模型未实际修改修复草稿，已停止自动修复并保留页面。\n${validationOutcome.message}` })
+              abortAgentSession()
+              return
+            }
             if (repairResult.fullText && !isLikelyDesignProgressOnlyText(repairResult.fullText)) {
               fullText = repairResult.fullText
             }
-            if (!html || !isFinalizableCandidate(html)) {
-              const repairDraftArtifact = readFreshDesignArtifactDraftFile(
-                repairArtifactPath,
-                workspacePath,
-                generationStartedAtMs,
-                wroteCandidateDraft,
-                requiresFreshEditArtifact
-              )
-              if (repairDraftArtifact.success && repairDraftArtifact.html && isFinalizableCandidate(repairDraftArtifact.html)) {
-                html = repairDraftArtifact.html
-              }
+            // A model summary or HTML in chat cannot stand in for the repaired file.
+            const repairDraftArtifact = readFreshDesignArtifactDraftFile(
+              repairArtifactPath,
+              workspacePath,
+              generationStartedAtMs,
+              wroteCandidateDraft,
+              requiresFreshEditArtifact
+            )
+            if (!repairDraftArtifact.success || !repairDraftArtifact.html || !isFinalizableCandidate(repairDraftArtifact.html)) {
+              send({ type: "error", error: "自动修复未写出完整且结构有效的 HTML，已停止并保留草稿。" })
+              abortAgentSession()
+              return
+            }
+            html = repairDraftArtifact.html
+            if (isSameDesignHtml(html, repairSourceHtml)) {
+              send({ type: "error", error: `修复草稿没有有效内容变更，已停止自动修复并保留页面。\n${validationOutcome.message}` })
+              abortAgentSession()
+              return
             }
             continue
           }

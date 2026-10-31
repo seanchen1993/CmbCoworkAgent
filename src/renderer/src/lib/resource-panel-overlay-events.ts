@@ -26,6 +26,20 @@ export interface ResourcePanelOverlayOpenDetail {
 }
 
 const RESOURCE_PANEL_OVERLAY_OPEN_EVENT = "resource-panel-overlay:open"
+const RESOURCE_PANEL_OVERLAY_CLOSE_EVENT = "resource-panel-overlay:close"
+
+export function closeResourcePanelOverlay(mode?: ResourcePanelOverlayMode): void {
+  window.dispatchEvent(new CustomEvent(RESOURCE_PANEL_OVERLAY_CLOSE_EVENT, { detail: mode }))
+}
+
+export function onCloseResourcePanelOverlay(
+  callback: (mode?: ResourcePanelOverlayMode) => void
+): () => void {
+  const listener = (event: Event) =>
+    callback((event as CustomEvent<ResourcePanelOverlayMode | undefined>).detail)
+  window.addEventListener(RESOURCE_PANEL_OVERLAY_CLOSE_EVENT, listener)
+  return () => window.removeEventListener(RESOURCE_PANEL_OVERLAY_CLOSE_EVENT, listener)
+}
 
 export function openResourcePanelOverlay(
   mode: ResourcePanelOverlayMode,

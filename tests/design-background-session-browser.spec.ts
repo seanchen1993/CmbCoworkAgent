@@ -26,12 +26,21 @@ import {
 const bundle = await build({
   stdin: {
     contents: `
-    import React, { useState } from 'react';
+    import React, { useEffect, useState } from 'react';
     import { createRoot } from 'react-dom/client';
     import { DesignView } from './src/renderer/src/components/design/DesignView';
+    import { BrowserPageConfirmationBar } from './src/renderer/src/components/browser/BrowserPageConfirmationBar';
+    import { useBrowserViewLifecycle } from './src/renderer/src/components/browser/useBrowserViewLifecycle';
+    import { onOpenResourcePanelOverlay, onCloseResourcePanelOverlay } from './src/renderer/src/lib/resource-panel-overlay-events';
     function Fixture() {
       const [show, setShow] = useState(true);
+      const [browserOpen, setBrowserOpen] = useState(false);
+      useEffect(() => onOpenResourcePanelOverlay(({mode}) => { if(mode==='browser') setBrowserOpen(true); }), []);
+      useEffect(() => onCloseResourcePanelOverlay((mode) => { if(!mode||mode==='browser') setBrowserOpen(false); }), []);
+      useBrowserViewLifecycle({currentThreadId:null,harnessSessionThreadId:null,mainView:'design',
+        rightPanelCollapsed:true,isAgentFocusActive:false,overlayModule:browserOpen?'browser':null,onRequestBrowserPanel:()=>{}});
       return <><button id="toggle-mode" onClick={() => setShow(!show)}>切换模式</button>
+        {browserOpen && <BrowserPageConfirmationBar loading={false} url="https://example.com/design"/>}
         <div style={{height:'900px'}}>{show ? <DesignView/> : <div>其他模式</div>}</div></>;
     }
     createRoot(document.getElementById('root')).render(<Fixture/>);
@@ -171,6 +180,10 @@ try {
         (window as unknown as { businessRuns: number }).businessRuns++
     })
     const listeners = new Set<(event: unknown) => void>()
+    const importListeners = new Set<(event: unknown) => void>()
+    const importFixture = { mode: "success", requests: [] as Array<{ requestId: string; source: string }>,
+      pending: null as null | ((value: unknown) => void), opened: false, hiddenCount: 0 }
+    ;(window as unknown as { importFixture: typeof importFixture }).importFixture = importFixture
     ;(window as unknown as { deliver: (event: unknown) => void }).deliver = (event) => {
       for (const callback of listeners) callback(event)
     }
@@ -205,6 +218,11 @@ try {
       return () => listeners.delete(callback)
     }
     ;(window as unknown as { api: unknown }).api = {
+      browser: {
+        onPanelRequest: () => () => {},
+        setBounds: async (_bounds: unknown, visible: boolean) => { if (!visible) importFixture.hiddenCount++ },
+        disposeAllForRendererUnload: () => {}
+      },
       design: {
         sessions,
         listImportedTemplates: async () => [],
@@ -229,11 +247,41 @@ try {
         storeHtml: async () => ({ ok: true }),
         getArtifactPackageInfo: async () => ({ success: true, filePath: "/workspace/design.html", relatedFileCount: 0 }),
         saveArtifact: async (id: string) => ({ success: true, filePath: `/workspace/${id}.html` }),
-        importFromUrl: async () => ({
+        saveArtifactFile: async (filePath: string) => importFixture.mode === "save-fail"
+          ? { success: false, error: "磁盘写入失败" } : { success: true, filePath },
+        cancelUrlImport: async (requestId: string) => {
+          importFixture.pending?.({ success: false, requestId, status: "cancelled", warnings: [] })
+          importFixture.pending = null
+          return true
+        },
+        finishUrlImport: async () => true,
+        onUrlImportProgress: (callback: (event: unknown) => void) => {
+          importListeners.add(callback)
+          return () => importListeners.delete(callback)
+        },
+        openImportBrowser: async () => {
+          importFixture.opened = true
+          return importFixture.mode === "open-fail" ? { success: false, error: "打开失败测试" } : { success: true }
+        },
+        importFromUrl: async (request: { requestId: string; source: string }) => {
+          importFixture.requests.push(request)
+          if (importFixture.mode === "login") return { success: false, requestId: request.requestId,
+            status: "needs_user_action", warnings: [], finalUrl: "https://example.com/design", error: "请先完成登录" }
+          if (importFixture.mode === "waiting") {
+            for (const callback of importListeners) callback({ requestId: request.requestId, stage: "waiting_render", message: "等待测试页面渲染" })
+            return new Promise((resolve) => { importFixture.pending = resolve })
+          }
+          return {
           success: true,
+          requestId: request.requestId,
+          status: "completed",
+          warnings: [],
+          artifactPath: "/workspace/capture/index.html",
+          finalUrl: "https://example.com/design",
           title: "链接导入",
           html: "<h1>链接页面</h1>"
-        }),
+          }
+        },
         importPrototypeZip: async () => ({
           success: true,
           title: "原型导入",
@@ -725,7 +773,7 @@ try {
   await page.getByRole("button", { name: "上一页模板" }).click()
   await page.getByRole("button", { name: "通过链接还原", exact: false }).click()
   await page.getByPlaceholder("https://example.com/page").fill("invalid-url")
-  assert.equal(await page.getByRole("button", { name: "开始还原", exact: true }).isDisabled(), true)
+  assert.equal(await page.getByRole("button", { name: "在内置浏览器中打开", exact: true }).isDisabled(), true)
   await page.getByRole("button", { name: "×", exact: true }).click()
   assert.equal(
     await page.getByText("模板：模板 5", { exact: false }).count(),
@@ -759,6 +807,61 @@ try {
   completions.at(-1)!()
   await page.getByText(/测试结束/).waitFor()
 
+  // Opening a URL requires a separate confirmation of the live browser page before capture.
+  await page.getByTitle("返回历史记录").click()
+  await page.getByRole("button", { name: "新建设计" }).first().click()
+  await page.getByRole("button", { name: "通过链接还原", exact: false }).click()
+  await page.getByPlaceholder("https://example.com/page").fill("https://example.com/private")
+  await page.evaluate(() => { (window as any).importFixture.mode = "waiting" })
+  const beforeCancelledImport = manager.list().length
+  const requestCountBeforeOpen = await page.evaluate(() => (window as any).importFixture.requests.length)
+  await page.getByRole("button", { name: "在内置浏览器中打开", exact: true }).click()
+  await page.getByRole("dialog", { name: "通过链接还原页面" }).waitFor({ state: "detached" })
+  assert.equal(await page.evaluate(() => (window as any).importFixture.requests.length), requestCountBeforeOpen,
+    "opening the browser must never start a background capture")
+  await page.getByRole("button", { name: "确认页面并还原", exact: true }).click()
+  await page.getByText("等待测试页面渲染", { exact: true }).waitFor()
+  await page.getByRole("button", { name: "取消还原", exact: true }).click()
+  await page.waitForFunction(() => !(window as any).importFixture.pending)
+  assert.equal(manager.list().length, beforeCancelledImport, "cancelled capture creates no design")
+  await page.getByRole("button", { name: "通过链接还原", exact: false }).click()
+  await page.getByPlaceholder("https://example.com/page").fill("https://example.com/private")
+  await page.evaluate(() => { (window as any).importFixture.mode = "save-fail" })
+  await page.getByRole("button", { name: "在内置浏览器中打开", exact: true }).click()
+  await page.getByRole("button", { name: "确认页面并还原", exact: true }).click()
+  await page.getByRole("alert").filter({ hasText: "磁盘写入失败" }).waitFor()
+  assert.equal(manager.list().length, beforeCancelledImport, "failed persistence creates no empty design")
+  await page.getByRole("region", { name: "确认页面并还原" }).getByRole("button", { name: "取消", exact: true }).click()
+  // Editing the URL while the browser is open hides its native view using the modal marker.
+  await page.getByRole("button", { name: "通过链接还原", exact: false }).click()
+  await page.getByPlaceholder("https://example.com/page").fill("https://example.com/private")
+  await page.evaluate(() => { (window as any).importFixture.mode = "open-fail" })
+  await page.getByRole("button", { name: "在内置浏览器中打开", exact: true }).click()
+  await page.getByRole("alert").filter({ hasText: "打开失败测试" }).waitFor()
+  assert.equal(await page.getByRole("button", { name: "确认页面并还原", exact: true }).isEnabled(), true,
+    "the user can correct navigation in the browser after an initial open error")
+  const hiddenBeforeEdit = await page.evaluate(() => (window as any).importFixture.hiddenCount)
+  await page.getByRole("button", { name: "修改链接", exact: true }).click()
+  await page.waitForFunction((previous) => (window as any).importFixture.hiddenCount > previous, hiddenBeforeEdit)
+  assert.equal(await page.getByRole("dialog", { name: "通过链接还原页面" }).getAttribute("data-cmb-modal-dialog"), "true")
+  await page.getByRole("button", { name: "×", exact: true }).click()
+  await page.getByRole("button", { name: "通过链接还原", exact: false }).click()
+  await page.getByPlaceholder("https://example.com/page").fill("https://example.com/private")
+  await page.evaluate(() => { (window as any).importFixture.mode = "login" })
+  await page.getByRole("button", { name: "在内置浏览器中打开", exact: true }).click()
+  await page.getByRole("button", { name: "确认页面并还原", exact: true }).click()
+  await page.getByRole("alert").filter({ hasText: "请先完成登录" }).waitFor()
+  assert.equal(await page.getByRole("dialog", { name: "通过链接还原页面" }).count(), 0)
+  assert.equal(await page.evaluate(() => (window as any).importFixture.opened), true)
+  await page.evaluate(() => { (window as any).importFixture.mode = "success" })
+  await page.getByRole("button", { name: "确认页面并还原", exact: true }).click()
+  await page.frameLocator('iframe[title="Design Preview"]').getByText("链接页面", { exact: true }).waitFor()
+  assert.equal(await page.evaluate(() => (window as any).importFixture.requests.at(-1).source), "current-browser")
+  assert.equal(await page.evaluate(() => (window as any).importFixture.requests.every((request: any) => request.source === "current-browser")), true)
+  assert.equal(await page.getByRole("button", { name: "确认页面并还原", exact: true }).count(), 0,
+    "successful capture closes the browser confirmation surface")
+  console.log("PASS URL import progress, cancellation and login/current-page recovery")
+
   for (const entry of [
     { button: "导入 HTML", heading: "HTML 导入页面", kind: "import_html" },
     { button: "原型压缩包", heading: "原型页面", kind: "prototype_zip" },
@@ -770,9 +873,10 @@ try {
     await page.getByRole("button", { name: entry.button, exact: false }).click()
     if (entry.kind === "import_url") {
       await page.getByPlaceholder("https://example.com/page").fill("https://example.com/design")
-      await page.getByRole("button", { name: "开始还原", exact: true }).click()
+      await page.getByRole("button", { name: "在内置浏览器中打开", exact: true }).click()
+      await page.getByRole("button", { name: "确认页面并还原", exact: true }).click()
     }
-    await page.frameLocator("iframe").getByText(entry.heading, { exact: true }).waitFor()
+    await page.frameLocator('iframe[title="Design Preview"]').getByText(entry.heading, { exact: true }).waitFor()
     const id = (await page.evaluate(() => localStorage.getItem("design_last_session")))!
     await page.waitForFunction(async (sessionId) => {
       const snapshot = await (

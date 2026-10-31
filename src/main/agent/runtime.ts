@@ -2225,6 +2225,7 @@ function assembleDeepAgent(
     skills,
     allowedSkillRootDirs,
     filesystemSystemPrompt,
+    mainFilesystemToolDescriptions,
     summarizationTrigger,
     summarizationKeep,
     toolTokenLimitBeforeEvict,
@@ -2410,7 +2411,8 @@ function assembleDeepAgent(
   // Create filesystem middleware and patch upstream tool defaults/descriptions.
   const createFsMiddleware = (
     fsSystemPrompt = filesystemSystemPrompt,
-    fsToolStrategy = toolStrategy
+    fsToolStrategy = toolStrategy,
+    toolDescriptions?: Record<string, string>
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
   ): any => {
     // For any restricted leaf runtime — coordinator worker (workload) OR registry
@@ -2428,8 +2430,11 @@ function assembleDeepAgent(
         : fsSystemPrompt
     const mw = createFilesystemMiddleware({
       backend: filesystemBackend,
-      ...(fsToolStrategy !== "standard" && {
-        customToolDescriptions: SHELL_FIRST_TOOL_DESCRIPTIONS
+      ...((fsToolStrategy !== "standard" || toolDescriptions) && {
+        customToolDescriptions: {
+          ...(fsToolStrategy !== "standard" ? SHELL_FIRST_TOOL_DESCRIPTIONS : {}),
+          ...toolDescriptions
+        }
       }),
       ...(effectiveFsPrompt && { systemPrompt: effectiveFsPrompt }),
       ...(toolTokenLimitBeforeEvict != null && { toolTokenLimitBeforeEvict })
@@ -2439,6 +2444,7 @@ function assembleDeepAgent(
       middleware: mw,
       filesystemBackend,
       toolTokenLimitBeforeEvict,
+      description: toolDescriptions?.read_file,
       ...(soloTaskTraceManager
         ? {
             resolveTraceContextForAgent: (agentId: string) =>
@@ -3127,7 +3133,9 @@ function assembleDeepAgent(
         : []),
       ...(threadId ? [createTrustedToolFilePreviewContextMiddleware(threadId)] : []),
       ...(mainTodosEnabled ? [todoListMiddleware()] : []),
-      ...(mainFilesystemEnabled ? [createFsMiddleware("\n", mainToolStrategy)] : []),
+      ...(mainFilesystemEnabled
+        ? [createFsMiddleware("\n", mainToolStrategy, mainFilesystemToolDescriptions)]
+        : []),
       ...postFsToolDocStripMiddleware,
       // The filesystem middleware appends execute documentation dynamically;
       // run the transport denylist after it so the docs and tool disappear
@@ -4659,6 +4667,10 @@ export interface CreateAgentRuntimeOptions {
   extraSystemPrompt?: string
   /** Domain-owned base instructions, replacing generic coding guidance only. */
   baseSystemPrompt?: string
+  /** Domain-specific guidance for main-agent file tools; never inherited by Task subagents. */
+  mainFilesystemToolDescriptions?: Record<string, string>
+  /** Domain-specific middleware for the main agent only. */
+  mainMiddleware?: Array<ReturnType<typeof createMiddleware>>
   /** Plugin-provided runtime context for skill artifact paths and feature bindings. */
   pluginPromptInject?: string
   /** Optional plugin output directory exposed to hook commands as PLUGIN_OUTPUT_DIR. */
@@ -7331,7 +7343,10 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
   }
 
   const agent = createDeepAgent({
-    middleware: traceContext?.harnessFeature ? [createStageUsageMiddleware(traceContext)] : [],
+    middleware: [
+      ...(traceContext?.harnessFeature ? [createStageUsageMiddleware(traceContext)] : []),
+      ...(options.mainMiddleware ?? [])
+    ],
     model,
     summarizationModel: contextCompactionModel,
     tools: mainTools,
@@ -7344,6 +7359,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
     toolStrategy: windowsSandbox === "readonly" ? "standard" : toolStrategy,
     onFinalSystemPrompt,
     filesystemSystemPrompt,
+    mainFilesystemToolDescriptions: options.mainFilesystemToolDescriptions,
     subagentExtraSystemPrompt: taskSubagentExtraSystemPrompt,
     subagentExtraSystemPromptForRestrictedRoles: projectModeTaskSubagentsInheritFullContext,
     mainTodosEnabled: !isCoordinatorMode,

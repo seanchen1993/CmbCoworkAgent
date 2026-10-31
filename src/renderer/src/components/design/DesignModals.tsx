@@ -39,6 +39,7 @@ export function CreateDesignModal({
       .find((system) => system.id === selectedDesignSystemId) ?? null
   return (
     <div
+      data-cmb-modal-dialog="true"
       style={{
         position: "fixed",
         inset: 0,
@@ -237,7 +238,7 @@ export function CreateDesignModal({
             <span style={{ fontSize: 20 }}>{loadingKind === "url" ? "⏳" : "🌐"}</span>
             <span style={{ fontSize: 14, fontWeight: 700, color: "#1a1a1a" }}>通过链接还原</span>
             <span style={{ fontSize: 12, color: "#8a8a8a", lineHeight: 1.6 }}>
-              抓取页面 HTML，直接变成当前 design 的可编辑画布。
+              复用内置浏览器登录态，将渲染后的页面还原为可编辑画布。
             </span>
           </button>
           <button
@@ -323,12 +324,17 @@ export function LinkModal({
   const title = mode === "import" ? "🌐 通过链接还原页面" : "🔗 通过链接关联设计图"
   const description =
     mode === "import"
-      ? "输入网页链接后，design 会先抓取页面 HTML，还原成当前会话里的可编辑设计。"
+      ? "输入链接，在内置浏览器中完成登录并确认页面，再抓取当前页面还原为可编辑设计。"
       : "输入 Figma、Sketch、设计图或参考页面的链接，模型将把它作为视觉参考。"
-  const confirmLabel = mode === "import" ? (loading ? "导入中..." : "开始还原") : "确认关联"
+  const confirmLabel = mode === "import" ? (loading ? "打开中..." : "在内置浏览器中打开") : "确认关联"
 
   return (
     <div
+      data-cmb-modal-dialog="true"
+      role="dialog"
+      aria-modal="true"
+      aria-label={mode === "import" ? "通过链接还原页面" : "通过链接关联设计图"}
+      onKeyDown={(event) => { if (event.key === "Escape") onClose() }}
       style={{
         position: "fixed",
         inset: 0,
@@ -345,7 +351,10 @@ export function LinkModal({
           background: "#fff",
           borderRadius: 14,
           padding: 24,
-          width: 480,
+          width: 540,
+          maxWidth: "calc(100vw - 32px)",
+          maxHeight: "90vh",
+          overflowY: "auto",
           display: "flex",
           flexDirection: "column",
           gap: 14,
@@ -372,6 +381,7 @@ export function LinkModal({
         <p style={{ margin: 0, fontSize: 13, color: "#6a6a6a" }}>{description}</p>
         <input
           value={url}
+          disabled={loading}
           onChange={(e) => onUrlChange(e.target.value)}
           placeholder={
             mode === "import"
@@ -467,6 +477,7 @@ export function ExportDesignModal({
 
   return (
     <div
+      data-cmb-modal-dialog="true"
       style={{
         position: "fixed",
         inset: 0,

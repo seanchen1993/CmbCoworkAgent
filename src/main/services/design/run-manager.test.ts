@@ -63,6 +63,42 @@ function harness(options: Partial<DesignRunDependencies> = {}) {
 }
 
 describe("background design conversations", () => {
+  it("imports a captured page with fresh runtime state and refuses to replace an active run", async () => {
+    const h = harness()
+    // A failed generation may leave a recoverable draft. Import must replace it.
+    const initial = h.manager.create({
+      id: "ds_import",
+      meta: { id: "ds_import", title: "Previous", createdAt: 1, updatedAt: 1 },
+      state: {
+        ...createDesignState(),
+        html: "previous",
+        draftPreview: {
+          runId: "old", revision: 1, html: "old draft", draftPath: "/workspace/.draft.html",
+          phase: "sections", status: "incomplete", sections: [], completedSections: [],
+          totalSections: 0, tweaks: null, createdAt: 1, updatedAt: 1
+        },
+        lastCompletedRunId: "previous",
+        canUndoPatch: true
+      },
+      workspacePath: "/workspace"
+    })
+    const markup = "<html><head></head><body><h1>Captured</h1></body></html>"
+    const patch = {
+      html: markup,
+      sourceInfo: { kind: "import_url" as const, label: "Captured" },
+      generationState: "done" as const
+    }
+    const replaced = h.manager.patch(initial.id, patch)
+    expect(replaced.state.html).toBe(markup)
+    expect(replaced.state.draftPreview).toBeNull()
+    expect(replaced.state.lastCompletedRunId).toBeNull()
+    expect(replaced.state.canUndoPatch).toBe(false)
+    expect(replaced.state.tweaks).toBeNull()
+    await h.start(initial.id)
+    expect(() => h.manager.patch(initial.id, patch)).toThrow("请先停止")
+    h.manager.stop(initial.id)
+    h.finishes.get("request-a")!()
+  })
   it("keeps the last page and reports an error when the formal artifact cannot be committed", async () => {
     const h = harness({
       finalize: () => {

@@ -118,7 +118,7 @@ export function useBrowserViewLifecycle({
       childList: true,
       subtree: true,
       attributes: true,
-      attributeFilter: ["aria-hidden", "data-state", "role"]
+      attributeFilter: ["aria-hidden", "data-state", "role", "data-cmb-modal-dialog"]
     })
     scheduleModalDialogStateSync()
 

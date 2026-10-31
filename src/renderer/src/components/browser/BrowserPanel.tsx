@@ -29,6 +29,7 @@ import { IconPopoverButton } from "@/components/ui/icon-popover-button"
 import { hasOpenModalDialog, MODAL_DIALOG_CHANGE_EVENT } from "@/lib/modal-dialog"
 import { BrowserScriptRecordingControls } from "./BrowserScriptRecordingControls"
 import { BrowserCdpConfigCard } from "./BrowserCdpConfigCard"
+import { BrowserPageConfirmationBar } from "./BrowserPageConfirmationBar"
 import {
   BrowserOptionsMenu,
   MAX_BROWSER_ZOOM_FACTOR,
@@ -264,7 +265,6 @@ export function BrowserPanel({
   const viewportRef = useRef<HTMLDivElement>(null)
   const lastBoundsRef = useRef<BrowserBounds | null>(null)
   const lastBrowserViewVisibleRef = useRef<boolean | null>(null)
-  const hasVisibleBoundsRef = useRef(false)
   const isSessionCreatedRef = useRef(false)
   const isInitialBrowserPageRef = useRef(true)
   const isUrlFocusedRef = useRef(false)
@@ -426,12 +426,12 @@ export function BrowserPanel({
         height: Math.max(0, Math.ceil(scaledBottom) - Math.floor(scaledTop))
       }
       const layoutVisible = rect.width >= 8 && rect.height >= 8
+      // Drawers keep their children mounted during exit animations. A late
+      // resize/state update must not show their native view again after close.
+      const panelHidden = Boolean(element.closest('[aria-hidden="true"], [inert]'))
       const modalDialogOpen = hasOpenModalDialog()
       const initialBrowserPage = isInitialBrowserPageRef.current
-      const visible = layoutVisible && !modalDialogOpen && !initialBrowserPage
-      if (!layoutVisible && hasVisibleBoundsRef.current) {
-        return
-      }
+      const visible = layoutVisible && !panelHidden && !modalDialogOpen && !initialBrowserPage
       if (
         isSameBounds(lastBoundsRef.current, bounds) &&
         lastBrowserViewVisibleRef.current === visible
@@ -440,7 +440,6 @@ export function BrowserPanel({
       }
       lastBoundsRef.current = bounds
       lastBrowserViewVisibleRef.current = visible
-      if (layoutVisible) hasVisibleBoundsRef.current = true
       void window.api.browser
         .setBounds(bounds, visible)
         .then(applyBrowserState)
@@ -450,6 +449,21 @@ export function BrowserPanel({
         })
     },
     [applyBrowserState, reportBrowserError]
+  )
+
+  useEffect(
+    () => () => {
+      // WebContentsView outlives React so switching modules or removing a panel
+      // must explicitly hide it even when the host lifecycle also unmounts.
+      void window.api.browser
+        .setBounds({ x: 0, y: 0, width: 0, height: 0 }, false)
+        .catch((error) => {
+          console.error(
+            `${BROWSER_PANEL_LOG_PREFIX} Browser unmount hide failed: ${formatError(error)}.`
+          )
+        })
+    },
+    []
   )
 
   useEffect(() => {
@@ -943,6 +957,8 @@ export function BrowserPanel({
           onClick={toggleFullscreen}
         />
       </div>
+
+      <BrowserPageConfirmationBar loading={state.isLoading} url={state.url} />
 
       {visibleError && (
         <div className="flex shrink-0 items-center gap-2 border-b border-destructive/20 bg-destructive/10 px-3 py-2 text-xs text-destructive">

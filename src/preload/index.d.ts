@@ -1,3 +1,4 @@
+import type { DesignUrlImportApi } from "../shared/design-url-import"
 import type { DesignSessionApi } from "../shared/managed-design-session"
 import type { DesignTemplateApi } from "../shared/design-template"
 import type {
@@ -2342,13 +2343,11 @@ interface CustomAPI {
       workspacePath?: string,
       metadata?: Record<string, unknown>
     ) => Promise<{ success: boolean; filePath?: string; error?: string }>
-    importFromUrl: (url: string) => Promise<{
-      success: boolean
-      html?: string
-      finalUrl?: string
-      title?: string
-      error?: string
-    }>
+    importFromUrl: DesignUrlImportApi["importFromUrl"]
+    cancelUrlImport: DesignUrlImportApi["cancelUrlImport"]
+    finishUrlImport: DesignUrlImportApi["finishUrlImport"]
+    onUrlImportProgress: DesignUrlImportApi["onUrlImportProgress"]
+    openImportBrowser: DesignUrlImportApi["openImportBrowser"]
     importPrototypeZip: (filePath: string) => Promise<{
       success: boolean
       html?: string

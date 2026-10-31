@@ -266,6 +266,11 @@ export class DesignRunManager {
     if (this.editing.has(id) && patch.html !== undefined) throw new Error("直接编辑正在保存")
     const next = this.get(id)
     const updates = clone(patch)
+    const importingPage =
+      updates.sourceInfo?.kind === "import_url" &&
+      updates.generationState === "done" &&
+      typeof updates.html === "string"
+    if (importingPage && next.activeRunId) throw new Error("请先停止当前设计生成，再导入页面")
     if (next.activeRunId) {
       for (const key of Object.keys(updates) as Array<keyof TabState>) {
         if (!(DESIGN_UI_FIELDS as readonly string[]).includes(key)) delete updates[key]
@@ -299,8 +304,20 @@ export class DesignRunManager {
       next.state.canRedoPatch = false
     }
     next.state = { ...next.state, ...updates }
-    if (updates.html !== undefined)
-      next.state.tweaks = reconcileTweaks(readTweakDeclaration(updates.html), next.state.tweaks)
+    if (updates.html !== undefined) {
+      next.state.tweaks = reconcileTweaks(
+        readTweakDeclaration(updates.html), importingPage ? null : next.state.tweaks
+      )
+    }
+    if (importingPage) {
+      next.state.draftPreview = null
+      next.state.generationMetrics = {}
+      next.state.lastCompletedRunId = null
+      next.state.appliedPatch = null
+      next.state.patchStatus = null
+      next.state.canUndoPatch = false
+      next.state.canRedoPatch = false
+    }
     next.state.messages = next.state.messages.map((message) => ({
       ...message,
       id: message.id || randomUUID()
