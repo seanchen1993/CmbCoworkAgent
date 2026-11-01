@@ -327,6 +327,50 @@ async function main() {
       await page.getByRole("button", { name: "返回应用", exact: true }).click()
     await chat.waitFor({ state: "visible" })
     assert.equal(await composer.inputValue(), draft, "WORKBENCH_PREINSTALL_DRAFT_RETAINED")
+    await composer.evaluate((node, expectedText) => {
+      const textarea = node as HTMLTextAreaElement
+      const state = {
+        offers: [] as unknown[],
+        broadcasts: [] as unknown[],
+        cursorTrace: [] as unknown[],
+        cursorOverflow: 0
+      }
+      const target = window as unknown as {
+        workbenchNativeProbe: typeof state
+        workbenchCursorStop?: () => void
+      }
+      target.workbenchNativeProbe = state
+      const observe = (kind: string) => {
+        if (state.cursorTrace.length >= 128) {
+          state.cursorOverflow++
+          return
+        }
+        state.cursorTrace.push({
+          kind,
+          at: Date.now(),
+          start: textarea.selectionStart,
+          end: textarea.selectionEnd,
+          direction: textarea.selectionDirection,
+          sameDraft: textarea.value === expectedText,
+          disabled: textarea.disabled,
+          readOnly: textarea.readOnly,
+          focused: document.activeElement === textarea,
+          connected: textarea.isConnected
+        })
+      }
+      const event = (value: Event) => observe(value.type)
+      for (const kind of ["select", "focus", "blur"])
+        textarea.addEventListener(kind, event, { passive: true })
+      document.addEventListener("selectionchange", event, { passive: true })
+      const attributes = new MutationObserver(() => observe("owned-attributes"))
+      attributes.observe(textarea, { attributes: true, attributeFilter: ["disabled", "readonly"] })
+      target.workbenchCursorStop = () => {
+        for (const kind of ["select", "focus", "blur"]) textarea.removeEventListener(kind, event)
+        document.removeEventListener("selectionchange", event)
+        attributes.disconnect()
+      }
+      observe("before-baseline")
+    }, draft)
     await composer.evaluate((node) => (node as HTMLTextAreaElement).setSelectionRange(5, 8))
     const composerHandle = await composer.elementHandle()
     assert(composerHandle)
@@ -350,14 +394,33 @@ async function main() {
         { start: 5, end: 8 }
       )
     }
+    const cursorCheckpoint = async (label: string) =>
+      record("composer-cursor-checkpoint", {
+        label,
+        ...(await composer.evaluate((node, expectedText) => {
+          const textarea = node as HTMLTextAreaElement
+          return {
+            start: textarea.selectionStart,
+            end: textarea.selectionEnd,
+            direction: textarea.selectionDirection,
+            sameDraft: textarea.value === expectedText,
+            disabled: textarea.disabled,
+            readOnly: textarea.readOnly,
+            focused: document.activeElement === textarea,
+            connected: textarea.isConnected
+          }
+        }, draft))
+      })
+    await cursorCheckpoint("initial-baseline")
     await assertDraft()
     await app.evaluate(installLiveNativeProcessApprovals, {
       isolated: fixture.isolated,
       workspace: fixture.workspace
     })
     await page.evaluate(() => {
-      const state = { offers: [] as unknown[], broadcasts: [] as unknown[] }
-      ;(window as unknown as { workbenchNativeProbe: typeof state }).workbenchNativeProbe = state
+      const state = (
+        window as unknown as { workbenchNativeProbe: { offers: unknown[]; broadcasts: unknown[] } }
+      ).workbenchNativeProbe
       window.api.mods.onEditorNavigation((event) => {
         if (event.kind === "offer") state.offers.push(event.intent)
       })
@@ -395,6 +458,7 @@ async function main() {
     )
     record("actual-native-surface-catalog", catalog)
     const open = async (placement: "page" | "settings"): Promise<Locator> => {
+      await cursorCheckpoint(`before-surface-${placement}`)
       const current = await page!.evaluate(
         (id) => window.api.mods.platformSurfaceList(id),
         threadId
@@ -409,6 +473,7 @@ async function main() {
       await nav.getByRole("button", { name: "开发工作台", exact: true }).nth(index).click()
       const surface = page!.getByRole("region", { name: "开发工作台", exact: true })
       await surface.waitFor()
+      await cursorCheckpoint(`after-surface-${placement}`)
       return surface
     }
     let surface = await open("page")
@@ -487,6 +552,7 @@ async function main() {
     assert(await surface.getByText("工作流：无活动运行", { exact: true }).isVisible())
     record("visible-native-states", { states, javaLabel, visible: await surface.innerText() })
     await capture("native-expanded-status")
+    await cursorCheckpoint("after-status-refresh")
     await surface.getByRole("button", { name: "查询所选 Java 文件诊断", exact: true }).click()
     if (!javaBefore) await surface.getByText(/MODS_CODE_UNAVAILABLE/).waitFor()
     else
@@ -511,7 +577,9 @@ async function main() {
       notStartedByMod: true,
       visible: await surface.innerText()
     })
+    await cursorCheckpoint("after-java-query")
     surface = await open("settings")
+    await cursorCheckpoint("before-settings-edit")
     for (const [label, value] of [
       ["检查 argv JSON", JSON.stringify([node, "--version"])],
       ["工作区相对源码路径", "preview.html"],
@@ -528,7 +596,9 @@ async function main() {
       column: 7,
       modelRequests
     })
+    await cursorCheckpoint("after-settings-save")
     surface = await open("page")
+    await cursorCheckpoint("before-preview")
     await surface.getByRole("button", { name: "原生安全源码定位", exact: true }).click()
     const preview = page.getByRole("region", { name: "安全源文件预览", exact: true })
     await preview.waitFor()
@@ -596,10 +666,12 @@ async function main() {
       DOMIntent: intent,
       executableHtml: false
     })
+    await cursorCheckpoint("after-preview-ACK")
     const ordinary = (await page.evaluate((id) => window.api.mods.commands(id), threadId)).find(
       (command) => command.command === "dev-workbench" && command.digest === prepared.digest
     )
     assert(ordinary, "WORKBENCH_REAL_ORDINARY_COMMAND_REQUIRED")
+    await cursorCheckpoint("before-ordinary-command")
     const queued = await page.evaluate(
       ({ id, command }) => window.api.mods.enqueue(id, command, { text: "" }),
       { id: threadId, command: ordinary }
@@ -632,8 +704,11 @@ async function main() {
       proofBoundary:
         "Preview created by the actual ui.resolve callback; a subsequent ordinary command completed. Original RPC-signal retirement is covered by the native core integration separately."
     })
+    await cursorCheckpoint("after-ordinary-command")
     await capture("native-file-line-ACK")
+    await cursorCheckpoint("before-preview-close")
     await preview.getByRole("button", { name: "关闭预览", exact: true }).click()
+    await cursorCheckpoint("after-preview-close")
     await assertDraft()
     assert.equal(modelRequests, 0)
     assert.equal(previewResourceRequests + otherRequests, 0)
@@ -964,6 +1039,19 @@ async function main() {
     }
   } finally {
     clearTimeout(watchdog)
+    if (page)
+      await clean("owned-cursor-observer", async () => {
+        const observed = await page!.evaluate(() => {
+          const target = window as unknown as {
+            workbenchNativeProbe?: unknown
+            workbenchCursorStop?: () => void
+          }
+          target.workbenchCursorStop?.()
+          delete target.workbenchCursorStop
+          return target.workbenchNativeProbe ?? null
+        })
+        record("owned-composer-passive-trace", observed)
+      })
     if (page && threadId) {
       if (runtimeName)
         await clean("revoke-owned-source", () =>
