@@ -413,10 +413,13 @@ async function main() {
       })
     await cursorCheckpoint("initial-baseline")
     await assertDraft()
+    await cursorCheckpoint("before-native-approval-bridge")
     await app.evaluate(installLiveNativeProcessApprovals, {
       isolated: fixture.isolated,
       workspace: fixture.workspace
     })
+    await cursorCheckpoint("after-native-approval-bridge")
+    await cursorCheckpoint("before-passive-subscriptions")
     await page.evaluate(() => {
       const state = (
         window as unknown as { workbenchNativeProbe: { offers: unknown[]; broadcasts: unknown[] } }
@@ -426,7 +429,9 @@ async function main() {
       })
       window.api.workspace.onFilesChanged((event) => state.broadcasts.push(event))
     })
+    await cursorCheckpoint("after-passive-subscriptions")
     const nav = page.getByRole("navigation", { name: "扩展工作区", exact: true })
+    await cursorCheckpoint("before-first-surface-catalog")
     const firstCatalog = await until(
       () => page!.evaluate((id) => window.api.mods.platformSurfaceList(id), threadId),
       (value) =>
@@ -439,8 +444,22 @@ async function main() {
         ).length === 5,
       "WORKBENCH_SURFACES_ORIGINAL_PREPARATION_AVAILABLE"
     )
-    if (firstCatalog.canPrepare)
+    record("first-surface-catalog-preparation", {
+      canPrepare: firstCatalog.canPrepare === true,
+      revision: firstCatalog.revision,
+      currentSourceSurfaces: firstCatalog.entries.filter(
+        (entry) =>
+          entry.ref.provider === runtimeName &&
+          entry.source.provider === runtimeName &&
+          entry.source.digest === prepared.digest
+      ).length
+    })
+    await cursorCheckpoint("after-first-surface-catalog")
+    if (firstCatalog.canPrepare) {
+      await cursorCheckpoint("before-original-surface-prepare")
       await nav.getByRole("button", { name: "查找可用插件界面", exact: true }).click()
+      await cursorCheckpoint("after-original-surface-prepare")
+    }
     const catalog = await until(
       () => page!.evaluate((id) => window.api.mods.platformSurfaceList(id), threadId),
       (value) =>
@@ -452,6 +471,7 @@ async function main() {
         ).length === 5,
       "WORKBENCH_CURRENT_SOURCE_SURFACES_PREPARED"
     )
+    await cursorCheckpoint("after-current-source-catalog-ready")
     assert.equal(
       catalog.entries.filter((entry) => entry.ref.provider === "developer-workbench").length,
       5
