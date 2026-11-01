@@ -28,9 +28,11 @@ async function main() {
       import React,{useState} from 'react';
       import {createRoot} from 'react-dom/client';
       import {NativeEditorIntentHost} from ${JSON.stringify(resolve("src/renderer/src/lib/native-editor-intent.tsx"))};
+      import {editorNavigationScopeKey} from ${JSON.stringify(resolve("src/shared/mods/v2/developer-editor.ts"))};
       const calls=[], listeners=new Set(), presenters=new Set(), offers=new Map();let late,resolveLate,hold=false,mounts=0,version=1,clock=Date.now();Date.now=()=>clock;
       window.api={windowPresentation:{read:async()=>({version,presentable:true}),onChanged:fn=>{presenters.add(fn);return()=>presenters.delete(fn)}}};
-      const base={id:'one',threadId:'thread',workspace:'C:/owned',scopeKey:'birth',path:'safe.html',line:120,column:3,expiresAt:Date.now()+30000,externalAvailable:true,source:{provider:'author',digest:'digest',generation:'one'}};
+      const birthEpoch=1793541870927,birthToken='native-token';
+      const base={id:'one',threadId:'thread',workspace:'C:/owned',scopeKey:editorNavigationScopeKey(birthEpoch,birthToken),path:'safe.html',line:120,column:3,expiresAt:Date.now()+30000,externalAvailable:true,source:{provider:'author',digest:'digest',generation:'one'}};
       const text=Array.from({length:160},(_,i)=>i===119?'abTARGET<script>window.BAD=true</script>':'line '+(i+1)).join('\\n');
       const api={onEditorNavigation:fn=>{listeners.add(fn);return()=>listeners.delete(fn)},
         editorNavigationAccept:async id=>{calls.push(['accept',id]);if(hold)await new Promise(r=>resolveLate=r);return {...(offers.get(id)||base),id,text,fingerprint:'sha'}},
@@ -41,9 +43,11 @@ async function main() {
         retire:id=>{for(const fn of listeners)fn({kind:'retire',id})},
         hold:()=>{hold=true},finish:()=>{hold=false;resolveLate?.()},mounts:()=>mounts,
         presentation:presentable=>{for(const fn of presenters)fn({version:++version,presentable})}};
-      function Parent(){const [thread,setThread]=useState('thread'),[bridge,setBridge]=useState(api),[,redraw]=useState(0);window.fixture.switch=()=>setThread('other');window.fixture.redraw=()=>redraw(n=>n+1);window.fixture.bridge=missing=>setBridge(missing==='all'?{}:missing?{...api,[missing]:undefined}:api);
+      function Parent(){const [thread,setThread]=useState('thread'),[bridge,setBridge]=useState(api),[birth,setBirth]=useState(new Date(birthEpoch)),[token,setToken]=useState(birthToken),[,redraw]=useState(0);window.fixture.switch=()=>setThread('other');window.fixture.redraw=()=>redraw(n=>n+1);window.fixture.bridge=missing=>setBridge(missing==='all'?{}:missing?{...api,[missing]:undefined}:api);
+        window.fixture.birth=(kind)=>setBirth(kind==='date'?new Date(birthEpoch):kind==='number'?birthEpoch:kind==='iso'?new Date(birthEpoch).toISOString():kind==='changed'?birthEpoch+1:new Date(NaN));window.fixture.token=value=>setToken(value);
+        const editorBirth=editorNavigationScopeKey(birth,token);window.fixture.currentScope=()=>editorBirth;
         React.useEffect(()=>{mounts++},[]);
-        return <><textarea aria-label="原草稿" defaultValue="保留草稿"/><NativeEditorIntentHost threadId={thread} workspace="C:/owned" scopeKey={thread==='thread'?'birth':'other-birth'} active api={bridge}/></>}
+        return <><textarea aria-label="原草稿" defaultValue="保留草稿"/>{editorBirth!==null&&<NativeEditorIntentHost threadId={thread} workspace="C:/owned" scopeKey={editorBirth} active api={bridge}/>}</>}
       createRoot(document.getElementById('root')).render(<Parent/>);
     `
       },
@@ -99,6 +103,57 @@ async function main() {
     assert(await page.getByRole("button", { name: "在已配置的 IDE 打开" }).isDisabled())
     await fixture("window.fixture.retire('one')")
     assert.equal(await page.locator("[data-native-editor-source]").count(), 0)
+    const numericScope = JSON.stringify([1793541870927, "native-token"])
+    for (const kind of ["number", "iso", "date"]) {
+      await fixture(`window.fixture.birth('${kind}')`)
+      await page.waitForFunction(
+        (scope) =>
+          (window as unknown as { fixture: { currentScope(): string } }).fixture.currentScope() ===
+          scope,
+        numericScope
+      )
+      await fixture(`window.fixture.emit({id:'birth-${kind}'})`)
+      await page.locator(`[data-native-editor-intent='birth-${kind}']`).waitFor()
+      await fixture(`window.fixture.retire('birth-${kind}')`)
+    }
+    for (const change of [
+      "window.fixture.birth('changed')",
+      "window.fixture.token('replacement')"
+    ]) {
+      await fixture(change)
+      await page.waitForFunction(
+        (scope) =>
+          (window as unknown as { fixture: { currentScope(): string } }).fixture.currentScope() !==
+          scope,
+        numericScope
+      )
+      const before = await fixture("window.fixture.calls.length")
+      await fixture("window.fixture.emit({id:'old-birth'})")
+      assert.equal(await page.locator("[data-native-editor-source]").count(), 0)
+      assert.equal(await fixture("window.fixture.calls.length"), before)
+      await fixture("window.fixture.birth('date');window.fixture.token('native-token')")
+      await page.waitForFunction(
+        (scope) =>
+          (window as unknown as { fixture: { currentScope(): string } }).fixture.currentScope() ===
+          scope,
+        numericScope
+      )
+    }
+    await fixture("window.fixture.birth('invalid')")
+    await page.waitForFunction(
+      () =>
+        (window as unknown as { fixture: { listenerCount(): number } }).fixture.listenerCount() ===
+        0
+    )
+    const invalidBefore = await fixture("window.fixture.calls.length")
+    await fixture("window.fixture.emit({id:'invalid-birth'})")
+    assert.equal(await fixture("window.fixture.calls.length"), invalidBefore)
+    await fixture("window.fixture.birth('date')")
+    await page.waitForFunction(
+      () =>
+        (window as unknown as { fixture: { listenerCount(): number } }).fixture.listenerCount() ===
+        1
+    )
     await fixture("window.fixture.emit({id:'visibility'})")
     await page.locator("[data-native-editor-intent='visibility']").waitFor()
     await fixture("window.fixture.presentation(false)")
@@ -196,7 +251,10 @@ async function main() {
           "draft-preserved",
           "loaded-over-31s",
           "missing-five-bridge",
-          "bridge-false-true-false"
+          "bridge-false-true-false",
+          "date-number-iso-birth",
+          "changed-birth-token-rejected",
+          "invalid-birth-no-host"
         ],
         output
       })

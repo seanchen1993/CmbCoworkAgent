@@ -25,6 +25,7 @@ import { modsSourceDriverHashes } from "./support/mods-source-driver-hashes"
 import { openModsSettings } from "./support/mods-sidebar-navigation"
 import { pollPublicState } from "./support/poll-public-state"
 import { installLiveNativeProcessApprovals } from "./support/live-native-process-approvals"
+import { isSameWorkspacePath } from "../src/shared/workspace-path"
 import {
   verifyWorkbenchNodeVersionApproval,
   workbenchVisibleJson,
@@ -77,7 +78,8 @@ async function main() {
     page: Page | undefined,
     threadId = "",
     pluginId = "",
-    runtimeName = ""
+    runtimeName = "",
+    nativeWorkspace = ""
   let passed = false,
     error: string | undefined,
     monitorStopped = false,
@@ -172,6 +174,15 @@ async function main() {
       await work()
     } catch (cause) {
       cleanupFailures.push({ label, error: String(cause) })
+    }
+  }
+  const capture = async (label: string) => {
+    const path = join(fixture.isolated, `${label}.png`)
+    try {
+      await page!.screenshot({ path, timeout: 3000 })
+      record("readonly-screenshot", { label, path })
+    } catch (cause) {
+      record("readonly-screenshot-unavailable", { label, error: String(cause) })
     }
   }
   const watchdog = setTimeout(() => {
@@ -296,6 +307,8 @@ async function main() {
     const consent = card.getByRole("button", { name: "确认并进入使用", exact: true })
     await consent.waitFor()
     const beforeConsent = await page.evaluate((id) => window.api.mods.status(id), threadId)
+    assert(isSameWorkspacePath(beforeConsent.workspace, fixture.workspace))
+    nativeWorkspace = beforeConsent.workspace
     const prepared = beforeConsent.functionMods?.find((item) => item.pluginId === pluginId)
     assert(prepared?.digest && prepared.state !== "ready")
     await consent.click()
@@ -422,6 +435,7 @@ async function main() {
     const developerInfo = surface.getByRole("button", { name: "查看开发信息", exact: true })
     assert(await developerInfo.isVisible())
     record("default-human-status-with-debug-collapsed", { ordinaryLabels, developerDetails: 0 })
+    await capture("native-default-status")
     await developerInfo.click()
     await surface.getByRole("button", { name: "收起开发信息", exact: true }).waitFor()
     const expectedNativeProviders = [
@@ -472,6 +486,7 @@ async function main() {
     assert.equal(workflowState.observation.activeRunId, null)
     assert(await surface.getByText("工作流：无活动运行", { exact: true }).isVisible())
     record("visible-native-states", { states, javaLabel, visible: await surface.innerText() })
+    await capture("native-expanded-status")
     await surface.getByRole("button", { name: "查询所选 Java 文件诊断", exact: true }).click()
     if (!javaBefore) await surface.getByText(/MODS_CODE_UNAVAILABLE/).waitFor()
     else
@@ -616,6 +631,7 @@ async function main() {
       proofBoundary:
         "Preview created by the actual ui.resolve callback; a subsequent ordinary command completed. Original RPC-signal retirement is covered by the native core integration separately."
     })
+    await capture("native-file-line-ACK")
     await preview.getByRole("button", { name: "关闭预览", exact: true }).click()
     await assertDraft()
     assert.equal(modelRequests, 0)
@@ -849,6 +865,7 @@ async function main() {
     assert.equal(approvedDigests.size, 1)
     assert.equal(unexpectedApproval, false)
     record("actual-Node-exit-and-close", task)
+    await capture("native-Node-result")
     monitorStopped = true
     await monitor
     await nav.getByRole("button", { name: "返回聊天", exact: true }).click()
@@ -857,7 +874,7 @@ async function main() {
     await composerHandle.dispose()
     await page.evaluate(
       ({ id, name, workspace }) => window.api.mods.revokeFunction(id, name, workspace),
-      { id: threadId, name: runtimeName, workspace: fixture.workspace }
+      { id: threadId, name: runtimeName, workspace: nativeWorkspace }
     )
     const revoked = await until(
       () => page!.evaluate((id) => window.api.mods.status(id), threadId),
@@ -900,6 +917,20 @@ async function main() {
   } catch (cause) {
     error = cause instanceof Error ? cause.message : String(cause)
     if (page) {
+      const observed = await page
+        .evaluate(() => ({
+          passive:
+            (window as unknown as { workbenchNativeProbe?: unknown }).workbenchNativeProbe ?? null,
+          visibility: document.visibilityState,
+          editorIntents: [...document.querySelectorAll("[data-native-editor-intent]")].map(
+            (node) => ({
+              id: node.getAttribute("data-native-editor-intent"),
+              visible: node.getClientRects().length > 0
+            })
+          )
+        }))
+        .catch((cause) => ({ unavailable: String(cause) }))
+      record("failure-readonly-observations", observed)
       await page
         .screenshot({
           path: join(fixture.isolated, "workbench-failure.png"),
@@ -922,7 +953,7 @@ async function main() {
         await clean("revoke-owned-source", () =>
           page!.evaluate(
             ({ id, name, workspace }) => window.api.mods.revokeFunction(id, name, workspace),
-            { id: threadId, name: runtimeName, workspace: fixture.workspace }
+            { id: threadId, name: runtimeName, workspace: nativeWorkspace }
           )
         )
       await clean("cancel-owned-run", () =>

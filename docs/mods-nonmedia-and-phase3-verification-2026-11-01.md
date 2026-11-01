@@ -116,6 +116,16 @@ AutoBiz 派生与装配候选验收 `output/phase3-source-autobiz-derived-9cdadc
 
 市场推广另有 [双审产品规划](mods-workbench-market-product-plan-2026-11-01.md)，尚未开发或发布市场新功能。当前原生/真实模型四个最小续验和正式性能随后进行。
 
+提交0c23446da后，当前源码的无模型原生补验发现测试导航仍走旧分类，首次记录 `output/phase3-source-developer-workbench-52cdc3d7/journey/run-hCwtYs` 退出1；未触达节点不算通过。仅测试导航调整提交为202637f69、64ce9aea4，并用真实CustomizeView与同名父聊天模式按钮反例回归，未改产品导航。
+
+第二次原生补验 `output/phase3-source-developer-workbench-0dc15373/journey/run-xZKNqr` 仍退出1，0模型请求。真实ZIP上传、当前来源确认、五项简明状态、主动展开开发信息、Java未启动状态与设置保存通过；源码定位20秒未出现预览，后续工作区变更和Node检查尚未执行。只读数据库与生产序列化代码确认真实产品断点：main用数据库数字毫秒构造scopeKey，公开Thread经IPC成为Date，App直接JSON序列化为ISO字符串，严格scope比较因此不一致。修复方案经两位非作者评审：共享严格时间规范化、保留token与全部来源/会话/权限门禁，并补Date、数字、ISO及实际Host定位ACK回归；修复后需重新验收，不能用静态测试代替真实补验。
+
+同次清理的 `MODS_SCOPE_CHANGED` 单独定位为测试传入原大小写目录，而原生返回的是canonical目录；严格expectedWorkspace校验在撤权前拒绝。只调整测试使用公开返回值，不放宽平台目录门禁。正常关闭与源码/driver结束围栏完成，清理拒绝不冒称撤权成功。
+
+上述身份修复已实现并经中等强度非作者源码回检：main与App共用纯身份函数，Date、数据库数字和规范ISO缓存表示统一成有效毫秒；非法值停止预览，token逐字保留。App只增加独立editorBirth，不改变原PlatformWorkspace的scope。相关22项单测、真实Host浏览器14项检查通过，原DOM行列ACK、安全文本、旧preload降级、31秒已加载快照与草稿保留断言继续通过。记录 `output/native-editor-browser-4bedb543-8b5f-4f92-9dc8-0846007bcdfc`。这是修复回归证据，新的真实桌面补验仍待执行。
+
+修复后的官方 `npm run typecheck`（Node和Web）退出0，记录 `output/mods-workbench-editor-birth-typecheck.log`；原生editor IPC两项回归、driver选定TypeScript检查及改动代码ESLint quiet均退出0。测试新增的canonical目录、失败现场快照和限时截图经非作者复核，未削弱原定位、模型零请求、进程结果及资源回收断言。
+
 示例关闭竞争曾被误判为core漏取消。实际gate未释放时原生read signal已aborted；Guest取消先返回，原生await尚未结算。最终测试先等待实际取消信号，再释放gate，并限时硬核订阅0、stop计数、资源0且无批准；9项通过。没有为该误判修改Session信号传播。另行保留并验证真实owner和post-await撤权保护。
 
 历史来源适配只引用旧artifact，不返回可启动entry，也不放宽当前candidate。8个测试文件的20项、selected语义类型和medium非作者回检通过；dirty工作区的recorded HEAD仅作元信息，来源依当时manifest/compiled artifacts/wrapper首尾围栏及旧材料哈希。当前v96执行必须另编译并核完整当前源与driver。

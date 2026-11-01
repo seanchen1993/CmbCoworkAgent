@@ -1,3 +1,25 @@
+const nativeDateTime = Date.prototype.getTime
+
+/** One representation for DB epochs and renderer Date values; never coerces arbitrary objects. */
+export function editorNavigationScopeKey(createdAt: unknown, token: unknown): string | null {
+  if (token !== null && (typeof token !== "string" || token.length === 0)) return null
+  let epoch: number
+  if (typeof createdAt === "number") epoch = createdAt
+  else if (typeof createdAt === "string") {
+    const date = new Date(createdAt)
+    epoch = Reflect.apply(nativeDateTime, date, [])
+    if (!Number.isFinite(epoch) || date.toISOString() !== createdAt) return null
+  } else {
+    try {
+      epoch = Reflect.apply(nativeDateTime, createdAt, [])
+    } catch {
+      return null
+    }
+  }
+  if (!Number.isSafeInteger(epoch) || epoch < 0 || epoch > 8_640_000_000_000_000) return null
+  return JSON.stringify([epoch, token])
+}
+
 /** Native-only navigation transport. Never accepted from a guest as authority. */
 export interface DeveloperEditorIntent {
   id: string

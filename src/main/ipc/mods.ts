@@ -7,6 +7,7 @@ import { createDesktopEditorPlatformProvider } from "../mods/v2/platform-editor-
 import { EditorNavigationBroker } from "../mods/v2/platform-editor-navigation"
 import type { NativePlatformCallContext } from "../mods/v2/platform-capabilities-types"
 import { registerEditorNavigationHandlers } from "./mods-editor-navigation"
+import { editorNavigationScopeKey } from "../../shared/mods/v2/developer-editor"
 import { withTrustedFunctionWait } from "../mods/v2/trusted-function-wait"
 import { setProjectRuntimeFunctions } from "../harness-board/project-runtime-function-source"
 import { ApplicationCompletionPolicies } from "../mods/v2/application-completion-policy"
@@ -457,7 +458,9 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
     const incarnation = captureThreadIncarnation(thread)
     if (JSON.stringify(incarnation) !== context.incarnation)
       throw Error("EDITOR_NAVIGATION_SCOPE_CHANGED")
-    return JSON.stringify([thread.created_at, incarnation.token])
+    const key = editorNavigationScopeKey(thread.created_at, incarnation.token)
+    if (key === null) throw Error("EDITOR_NAVIGATION_SCOPE_CHANGED")
+    return key
   }
   const stopEditorDesktop = desktopBroker.subscribe(change => {
     if (change.event === "session.detach") editorNavigation.invalidateThread(change.binding.threadId)

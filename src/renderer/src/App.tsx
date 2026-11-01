@@ -1,5 +1,6 @@
 import { openClawSidebar } from "@/lib/claw-sidebar"
 import { ClawSidebarHost } from "@/components/panels/ClawSidebarHost"
+import { editorNavigationScopeKey } from "../../shared/mods/v2/developer-editor"
 import {
   useCallback,
   useDeferredValue,
@@ -440,6 +441,10 @@ function App(): React.JSX.Element {
   const platformWorkspaceBirth = useAppStore(state => {
     const thread = state.threads.find(row => row.thread_id === renderedThreadId)
     return JSON.stringify([thread?.created_at, thread?.metadata?.cmb_thread_incarnation ?? null])
+  })
+  const editorBirth = useAppStore(state => {
+    const thread = state.threads.find(row => row.thread_id === renderedThreadId)
+    return editorNavigationScopeKey(thread?.created_at, thread?.metadata?.cmb_thread_incarnation ?? null)
   })
   const platformWorkspaceScope = JSON.stringify([
     accountRevision, renderedThreadId, platformWorkspacePath, platformWorkspaceBirth
@@ -1380,10 +1385,10 @@ function App(): React.JSX.Element {
                               <PlatformWorkspace key={platformWorkspaceScope} scopeKey={platformWorkspaceScope}
                                 threadId={renderedThreadId}
                                 active={!showCustomizeView && !renderRoutePending && !browserFullscreen} />
-                              <NativeEditorIntentHost key={`editor:${platformWorkspaceScope}`}
+                              {editorBirth !== null && <NativeEditorIntentHost key={`editor:${platformWorkspaceScope}:${editorBirth}`}
                                 threadId={renderedThreadId} workspace={platformWorkspacePath}
-                                scopeKey={platformWorkspaceBirth} api={window.api.mods}
-                                active={!showCustomizeView && !renderRoutePending && !browserFullscreen} />
+                                scopeKey={editorBirth} api={window.api.mods}
+                                active={!showCustomizeView && !renderRoutePending && !browserFullscreen} />}
                             </Suspense>
                           )}
                         </section>
