@@ -89,18 +89,19 @@ export async function openModsAdvancedSettings(
   page: Page,
   section: "灵件与使用设置" | "搭配管理" | "聊天任务模板"
 ): Promise<void> {
-  const group = page.getByRole("button", {
-    name: section === "灵件与使用设置" ? "创造者模式" : "高级特性",
-    exact: true
+  const groupName = section === "灵件与使用设置" ? "创造者模式" : "高级特性"
+  const menu = page.getByRole("navigation").filter({
+    has: page
+      .getByRole("button", { name: groupName, exact: true })
+      .and(page.locator("button[aria-expanded]"))
   })
+  const group = menu.getByRole("button", { name: groupName, exact: true })
   if (!(await group.isVisible()))
     await page.getByRole("button", { name: "自定义设置", exact: true }).click()
   await group.waitFor({ state: "visible" })
   await dismissModsTour(page)
   if ((await group.getAttribute("aria-expanded")) === "false") await group.click()
-  await page
-    .getByRole("navigation")
-    .filter({ has: group })
+  await menu
     .getByRole("button", {
       name: section === "灵件与使用设置" ? "灵件" : section,
       exact: true

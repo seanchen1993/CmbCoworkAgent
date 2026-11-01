@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, writeFileSync } from "node:fs"
 import { resolve, join } from "node:path"
 import { build } from "esbuild"
 import { chromium } from "playwright"
+import { openModsAdvancedSettings } from "./support/mods-sidebar-navigation"
 
 interface ConfigurationFixtureState {
   customizeInitialTab?: string
@@ -43,7 +44,10 @@ async function main() {
       import {prepareSimpleAuthoringTask} from ${source("lib/simple-authoring-composer.ts")};
       window.readTarget=readConfigurationTarget;window.capture=captureConfigurationScope;
       window.prepare=prepareSimpleAuthoringTask;
-      createRoot(document.getElementById('root')).render(<CustomizeView/>);
+      createRoot(document.getElementById('root')).render(<>
+        <button aria-pressed='true' style={{position:'fixed',right:0,bottom:0}} onClick={()=>window.calls.push(['wrong-parent-mode-click'])}>创造者模式</button>
+        <CustomizeView/>
+      </>);
     ` }, bundle: true, write: false, platform: "browser", format: "iife", jsx: "automatic",
     alias: { "@": renderer }, plugins: [{ name: "isolated-settings", setup(builder) {
       builder.onResolve({filter: /(?:^@\/lib\/store$|^\.\/store$)/}, () => ({path:"store",namespace:"fixture"}))
@@ -52,6 +56,7 @@ async function main() {
         const name = args.path.slice(2)
         if (panels.includes(name) || ["SparksTour", "settings-return-focus"].includes(name))
           return {path:name,namespace:"fixture"}
+        return undefined
       })
       builder.onLoad({filter:/.*/,namespace:"fixture"}, (args) => {
         if (args.path === "store") return {loader:"tsx",resolveDir:root,contents:`
@@ -187,7 +192,8 @@ async function main() {
     if (await advancedGroup.getAttribute("aria-expanded") !== "true") await advancedGroup.click()
     await page.getByRole("button",{name:"任务画布",exact:true}).click()
     await page.getByRole("region",{name:"TaskMmdPanel",exact:true}).getByText("目标 a -").waitFor()
-    await page.getByRole("navigation").filter({has:page.getByRole("button",{name:"创造者模式",exact:true})}).getByRole("button",{name:"灵件",exact:true}).click()
+    await openModsAdvancedSettings(page, "灵件与使用设置")
+    assert.equal(await page.evaluate(()=> (window as unknown as ConfigurationWindow).calls.some(item=>item[0]==='wrong-parent-mode-click')),false)
     const mods=page.getByRole("region",{name:"ModsPanel",exact:true})
     await mods.getByText("目标 b C:/new-beta").waitFor()
     await page.evaluate(()=>{(window as unknown as ConfigurationWindow).holdLoad=true})
