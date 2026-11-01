@@ -39,6 +39,7 @@ const registrationDigest = (guest: Pick<FunctionGuest, "registrations">) =>
     JSON.stringify(
       guest.registrations.map((row) => [
         row.id,
+        row.module ?? null,
         row.pattern,
         row.hasMatcher ?? null,
         row.hasCatch,
@@ -131,7 +132,10 @@ export function prepareFunctionDisplayEnvelope(
  */
 export class FunctionDisplayPreparationChannel {
   constructor(
-    private readonly owner: { client: object; physical: FunctionUiResolveHostLifetime },
+    private readonly owner: {
+      client: object
+      physical: FunctionUiResolveHostLifetime
+    },
     private readonly assertPhysicalCurrent: () => void
   ) {}
 

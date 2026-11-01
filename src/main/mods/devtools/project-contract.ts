@@ -228,6 +228,18 @@ export interface ProjectContractReport {
   diagnostics?: ProjectContractDiagnostic[]
 }
 
+/** Declaration-only summaries for package provenance; never executes validators or fixtures. */
+export function projectContractCaseSummaries(
+  bundle: AuthoringSourceBundle,
+  manifest: ProjectRuntimeManifest
+) {
+  return parseCases(bundle, manifest).map(({ id, stageId, expected }) => ({
+    id,
+    stageId,
+    expected
+  }))
+}
+
 export function assertProjectContractPassed(report: ProjectContractReport): void {
   if (!report.valid)
     throw new ProjectContractError(

@@ -24,11 +24,18 @@ const source = ts.createSourceFile(
 // the guard formula. Derived names and inline/parenthesized expressions are unrestricted.
 // The rest of ChatContainer (streams, history, tools) is outside this composer contract.
 function renderComposer(overrides: Record<string, unknown> = {}): string {
+  const appState = { accountRevision: 0, threads: [] }
+  const appStore = Object.assign(
+    (selector: (state: typeof appState) => unknown) => selector(appState),
+    { getState: () => appState }
+  )
   const bindings: Record<string, unknown> = {
     React,
     IconPopoverButton,
     Plus: () => null,
     useHarnessNotifications: () => [],
+    useAppStore: appStore,
+    useModsAgentInputTarget: () => undefined,
     threadId: "thread",
     inputDisabled: false,
     composerControlsDisabled: false,
@@ -41,7 +48,7 @@ function renderComposer(overrides: Record<string, unknown> = {}): string {
     functionHint: null,
     modsChatState: { ready: true, enabled: false },
     modsChatEnabled: false,
-    promptComposer: {suggestion:null,decorations:[]},
+    promptComposer: { suggestion: null, decorations: [] },
     flowIntent: { threadId: "thread", mode: "chat" },
     inputRef: { current: null },
     handleKeyDown: () => undefined,
@@ -131,17 +138,54 @@ function expectAvailability(markup: string, blocked: boolean): void {
 }
 
 describe("Chat composer rendered decision guards", () => {
+  it.each(["waiting", "active"])(
+    "pauses parent input for a resolved %s sub-session target in the current account",
+    (phase) => {
+      const state = { accountRevision: 19, threads: [] }
+      const store = Object.assign((selector: (value: typeof state) => unknown) => selector(state), {
+        getState: () => state
+      })
+      const target = vi.fn(() => ({
+        account: 19,
+        phase,
+        intent: {
+          id: "owned-target",
+          threadId: "thread",
+          workspace: "c:/composer",
+          parentIncarnation: "birth",
+          sourceDigest: "digest",
+          agentId: "owned-agent"
+        }
+      }))
+      expectAvailability(
+        renderComposer({ useAppStore: store, useModsAgentInputTarget: target }),
+        true
+      )
+      expect(target).toHaveBeenCalledWith("thread", 19)
+      expectAvailability(renderComposer(), false)
+    }
+  )
+
   it("keeps the disabled reason visible when Mods suggestions or hints are active", () => {
-    const markup = renderComposer({ readOnly: true, modsChatEnabled: true,
+    const markup = renderComposer({
+      readOnly: true,
+      modsChatEnabled: true,
       modsChatState: { ready: true, enabled: true },
       promptComposer: { suggestion: "继续任务", decorations: [] },
       functionHint: { threadId: "thread", text: "输入需求" },
-      inputPlaceholder: "此会话由项目阶段创建，请返回项目任务执行下一步。" })
+      inputPlaceholder: "此会话由项目阶段创建，请返回项目任务执行下一步。"
+    })
     expect(markup).toContain('placeholder="此会话由项目阶段创建，请返回项目任务执行下一步。"')
     expectAvailability(markup, true)
   })
-  it("keeps decision guards while a suggestion and decorations are displayed",()=>{
-    expectAvailability(renderComposer({readOnly:true,promptComposer:{suggestion:"Next",decorations:[{start:0,end:1}]}}),true)
+  it("keeps decision guards while a suggestion and decorations are displayed", () => {
+    expectAvailability(
+      renderComposer({
+        readOnly: true,
+        promptComposer: { suggestion: "Next", decorations: [{ start: 0, end: 1 }] }
+      }),
+      true
+    )
   })
   it("disables both controls for a pending Biz Retry and releases them when it disappears", () => {
     const notifications = [{ type: "biz_retry", status: "pending", sourceThreadId: "thread" }]
@@ -190,11 +234,15 @@ describe("Chat composer rendered decision guards", () => {
     for (const guard of ["readOnly", "contextReminderPending"]) {
       expectAvailability(renderComposer({ ...creator, [guard]: true }), true)
     }
-    expectAvailability(renderComposer({ ...creator,
-      useHarnessNotifications: () => [
-        { type: "biz_retry", status: "pending", sourceThreadId: "thread" }
-      ]
-    }), true)
+    expectAvailability(
+      renderComposer({
+        ...creator,
+        useHarnessNotifications: () => [
+          { type: "biz_retry", status: "pending", sourceThreadId: "thread" }
+        ]
+      }),
+      true
+    )
     const input = renderComposer({ ...creator, inputDisabled: true })
     expect(input.match(/<textarea\b[^>]*>/u)?.[0]).toContain('disabled=""')
     expect(input.match(/<button\b[^>]*aria-label="添加文件"[^>]*>/u)?.[0]).toContain(

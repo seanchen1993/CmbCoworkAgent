@@ -86,6 +86,6 @@ export const SURFACE_BOOTSTRAP = String.raw`
       return {tree,dirty,...(message===undefined?{}:{message}),
         timers:[...timers].map(([id,t])=>({id,ms:t.ms}))};
     });
-  }}});
+  }},writable:true});
 })();
 `

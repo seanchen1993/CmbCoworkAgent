@@ -116,6 +116,17 @@ export const PLATFORM_EXAMPLES: readonly CommunityExample[] = [
     origin: "devclaw",
     sourcePath: "examples/sparks-stage-debugger",
     version: "1.0.0"
+  },
+  {
+    id: "developer-workbench",
+    pluginName: "developer-workbench",
+    title: "开发工作台",
+    description: "组合安全源码定位、Java 诊断、工作区观察与明确启动的本地检查，保留原生策略。",
+    usage:
+      "在当前聊天核对来源、授权并应用后，从页面、导航、侧栏、工具栏、设置或 /dev-workbench 打开。先保存 argv 与源码位置，再明确点击诊断、预览或检查；默认 node --version 不扫仓库。Java 不可用时到原自定义设置配置启动。取消请求不等于退出，历史记录不会重放。",
+    origin: "devclaw",
+    sourcePath: "examples/developer-workbench",
+    version: "1.0.0"
   }
 ]
 
@@ -126,6 +137,14 @@ export const BUNDLED_EXAMPLES: readonly CommunityExample[] = [
 
 // Fixed executable bytes from the canonical directories copied by the build resource mirror.
 const platformFiles: Record<string, Record<string, string>> = {
+  "developer-workbench": {
+    "hooks/hooks.json": "4430bf8c3fc36d2d74bf3144a7c1e09e359b351169bab16a3cf7f6e9366abc43",
+    "hooks/register.ts": "b750a77e880371c357126283037fec4a4ac91900555897400fee2b265f7d6ead",
+    "hooks/settings.ts": "8302a2d7ef72a1872e2142cd45a256a41d1913aeebbea10e2cdab7ed63c05332",
+    "hooks/status-summary.ts": "bec9062809faf8568e1ca19c2626ab3011e10b91edad348da1854cda1d2eb675",
+    "plugin.json": "d50c075d1ee65154ec6026fd145668b58a25ba41b9b7f4e00ea71363f18ef1be",
+    "README.md": "89e867771213be442d8583f1aa36e8ceb011e0a2ac331e2e8b97030bebbaa406"
+  },
   "stage-debugger": {
     "hooks/hooks.json": "1c3cfc433b9383b0f6d714b7599d81bbc585d104ae2dffe321a190d81010ce5b",
     "hooks/register.ts": "a2b64e1c7a5e91eea7f2ddb0230908101695c064f09a8ba5b1738a370e1912c7",

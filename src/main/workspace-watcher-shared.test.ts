@@ -32,18 +32,22 @@ const watcherMocks = vi.hoisted(() => {
   const send = vi.fn()
   const windowSends = [send]
   const statSync = vi.fn(() => ({ isDirectory: () => true }))
-  const lstat = vi.fn(async (): Promise<{ isDirectory: () => boolean }> => ({
-    isDirectory: () => true
-  }))
-  const stat = vi.fn(async (): Promise<{
-    isDirectory: () => boolean
-    size: number
-    mtime: Date
-  }> => ({
-    isDirectory: () => false,
-    size: 42,
-    mtime: new Date("2026-08-21T00:00:00.000Z")
-  }))
+  const lstat = vi.fn(
+    async (): Promise<{ isDirectory: () => boolean }> => ({
+      isDirectory: () => true
+    })
+  )
+  const stat = vi.fn(
+    async (): Promise<{
+      isDirectory: () => boolean
+      size: number
+      mtime: Date
+    }> => ({
+      isDirectory: () => false,
+      size: 42,
+      mtime: new Date("2026-08-21T00:00:00.000Z")
+    })
+  )
   const gitignore = { content: "" }
   const gitignoreReadLengths: number[] = []
   const open = vi.fn(async () => ({
@@ -94,8 +98,17 @@ vi.mock("./workspace-watcher-worker/client", () => ({
   isWorkspaceWatcherCancelled: (error: unknown) =>
     error instanceof Error && error.name === "WORKSPACE_WATCHER_CANCELLED",
   WorkspaceWatcherWorkerClient: class {
-    private nativeWatcher: { close: () => void; on: (event: string, handler: (error: Error) => void) => void } | null = null
+    private nativeWatcher: {
+      close: () => void
+      on: (event: string, handler: (error: Error) => void) => void
+    } | null = null
     private closed = false
+    private started = false
+    get observation() {
+      return this.started && !this.closed
+        ? { canonicalPath: path.resolve(this.workspacePath), rootIdentity: "1:1" }
+        : undefined
+    }
     readonly close = vi.fn(() => {
       this.closed = true
       this.nativeWatcher?.close()
@@ -132,6 +145,7 @@ vi.mock("./workspace-watcher-worker/client", () => ({
         }
       )
       this.nativeWatcher.on("error", this.onError)
+      this.started = true
     }
   }
 }))
@@ -145,8 +159,7 @@ vi.mock("fs", () => ({
 
 vi.mock("electron", () => ({
   BrowserWindow: {
-    getAllWindows: () =>
-      watcherMocks.windowSends.map((send) => ({ webContents: { send } }))
+    getAllWindows: () => watcherMocks.windowSends.map((send) => ({ webContents: { send } }))
   }
 }))
 
@@ -180,6 +193,9 @@ describe("shared workspace watcher", () => {
 
   it("uses one physical watcher and sends one batched change per window", async () => {
     const watcher = await import("./services/workspace-watcher")
+    const events = await import("./services/workspace-change-events")
+    const lifecycle = vi.fn()
+    const stopEvents = events.onWorkspaceWatchStateChanged(lifecycle)
     const workspacePath = path.resolve("shared-workspace")
     const alternateSpelling = `${workspacePath}${path.sep}`
 
@@ -188,6 +204,13 @@ describe("shared workspace watcher", () => {
     expect(watcherMocks.watch).toHaveBeenCalledTimes(1)
     expect(watcher.isWatching("thread-1")).toBe(true)
     expect(watcher.isWatching("thread-2")).toBe(true)
+    const state = watcher.workspaceWatchState("thread-1")
+    expect(state).toMatchObject({
+      workspacePath,
+      canonicalPath: workspacePath,
+      rootIdentity: "1:1"
+    })
+    expect(watcher.workspaceWatchState("thread-2")?.observationId).toBe(state?.observationId)
 
     const secondWindowSend = vi.fn()
     watcherMocks.windowSends.push(secondWindowSend)
@@ -234,12 +257,16 @@ describe("shared workspace watcher", () => {
     })
 
     watcher.stopWatching("thread-1")
+    expect(watcher.workspaceWatchState("thread-1")).toBeUndefined()
     expect(watcherMocks.watchers[0].close).not.toHaveBeenCalled()
     expect(watcher.isWatching("thread-2")).toBe(true)
 
     watcher.stopWatching("thread-2")
     expect(watcherMocks.watchers[0].close).toHaveBeenCalledTimes(1)
     expect(watcher.isWatching("thread-2")).toBe(false)
+    expect(watcher.workspaceWatchState("thread-2")).toBeUndefined()
+    expect(lifecycle.mock.calls.flatMap(([change]) => change.threadIds)).toContain("thread-1")
+    stopEvents()
   })
 
   it("bounds historical task subscribers while preserving the foreground task", async () => {
@@ -255,14 +282,14 @@ describe("shared workspace watcher", () => {
     expect(watcherMocks.watch).toHaveBeenCalledTimes(1)
     expect(watcher.isWatching("thread-1")).toBe(true)
     expect(watcher.isWatching("thread-2")).toBe(false)
+    expect(watcher.workspaceWatchState("thread-2")).toBeUndefined()
+    expect(watcher.workspaceWatchState("thread-1")).toBeDefined()
     expect(watcher.isWatching("thread-40")).toBe(true)
 
     watcherMocks.watchers[0].callback("change", "bounded.txt")
     await vi.advanceTimersByTimeAsync(500)
 
-    const payload = watcherMocks.send.mock.calls.at(-1)?.[1] as
-      | { threadIds?: string[] }
-      | undefined
+    const payload = watcherMocks.send.mock.calls.at(-1)?.[1] as { threadIds?: string[] } | undefined
     expect(payload?.threadIds).toHaveLength(16)
     expect(payload?.threadIds).toContain("thread-1")
     expect(payload?.threadIds).toContain("thread-40")
@@ -416,6 +443,8 @@ describe("shared workspace watcher", () => {
     expect(watcher.isWatching("thread-1")).toBe(true)
     expect(watcher.isWatching("thread-2")).toBe(false)
     expect(watcher.isWatching("thread-7")).toBe(true)
+    expect(watcher.workspaceWatchState("thread-2")).toBeUndefined()
+    expect(watcher.workspaceWatchState("thread-1")).toBeDefined()
     expect(watcherMocks.watchers[0].close).not.toHaveBeenCalled()
     expect(watcherMocks.watchers[1].close).toHaveBeenCalledTimes(1)
 
@@ -436,9 +465,7 @@ describe("shared workspace watcher", () => {
 
     expect(watcherMocks.gitignoreReadLengths).toEqual([WORKSPACE_GITIGNORE_MAX_BYTES])
     expect(watcherMocks.stat).toHaveBeenCalledTimes(1)
-    expect(watcherMocks.stat).toHaveBeenCalledWith(
-      path.join(workspacePath, "after-byte-limit.txt")
-    )
+    expect(watcherMocks.stat).toHaveBeenCalledWith(path.join(workspacePath, "after-byte-limit.txt"))
     watcher.stopAllWatching()
   })
 
@@ -479,9 +506,7 @@ describe("shared workspace watcher", () => {
     await vi.runAllTimersAsync()
 
     expect(watcherMocks.stat).toHaveBeenCalledTimes(1)
-    expect(watcherMocks.stat).toHaveBeenCalledWith(
-      path.join(workspacePath, "after-rule-limit.txt")
-    )
+    expect(watcherMocks.stat).toHaveBeenCalledWith(path.join(workspacePath, "after-rule-limit.txt"))
     watcher.stopAllWatching()
   })
 
@@ -611,21 +636,24 @@ describe("shared workspace watcher", () => {
   it("closes a failed watcher worker and restarts it on the next association", async () => {
     const watcher = await import("./services/workspace-watcher")
     const workspacePath = path.resolve("worker-restart-workspace")
-    await expect(watcher.startWatching("thread-restart", workspacePath)).resolves.toBe(
-      "started"
-    )
+    await expect(watcher.startWatching("thread-restart", workspacePath)).resolves.toBe("started")
     expect(watcherMocks.watchers[0].errorCallback).toBeTypeOf("function")
+    const originalObservation = watcher.workspaceWatchState("thread-restart")
+    expect(originalObservation).toBeDefined()
 
     watcherMocks.watchers[0].errorCallback?.(new Error("watch worker disconnected"))
     expect(watcherMocks.workerClients[0].close).toHaveBeenCalledTimes(1)
     expect(watcher.isWatching("thread-restart")).toBe(false)
+    expect(watcher.workspaceWatchState("thread-restart")).toBeUndefined()
 
-    await expect(watcher.startWatching("thread-restart", workspacePath)).resolves.toBe(
-      "started"
-    )
+    await expect(watcher.startWatching("thread-restart", workspacePath)).resolves.toBe("started")
     expect(watcherMocks.watch).toHaveBeenCalledTimes(2)
     expect(watcher.isWatching("thread-restart")).toBe(true)
+    expect(watcher.workspaceWatchState("thread-restart")?.observationId).not.toBe(
+      originalObservation?.observationId
+    )
     watcher.stopAllWatching()
+    expect(watcher.workspaceWatchState("thread-restart")).toBeUndefined()
     expect(watcherMocks.workerClients[1].close).toHaveBeenCalledTimes(1)
   })
 })

@@ -1,5 +1,6 @@
 import * as fs from "fs"
 import * as path from "path"
+import { randomUUID } from "node:crypto"
 import { BrowserWindow } from "electron"
 import micromatch from "micromatch"
 import { scheduleGitHookEventSync } from "./git-hook-service"
@@ -19,7 +20,10 @@ import {
   type WorkspaceWatcherWorkerEvent
 } from "../workspace-watcher-worker/client"
 import { bumpHookCatalogWorkspaceRevision } from "../hook-catalog/revision"
-import { emitWorkspaceFilesChanged } from "./workspace-change-events"
+import {
+  emitWorkspaceFilesChanged,
+  emitWorkspaceWatchStateChanged
+} from "./workspace-change-events"
 
 /**
  * Files directly under .git/ that signal meta-relevant changes:
@@ -31,6 +35,7 @@ function isGitMetaPath(relativePath: string): boolean {
 }
 
 interface ActiveWorkspaceWatcher {
+  observationId: string
   watcher: WorkspaceWatcherWorkerClient
   workspacePath: string
   // Keep the path spelling used by each thread. The physical watcher is shared
@@ -89,10 +94,7 @@ interface GitignoreRule {
   matchDescendants?: (input: string) => boolean
 }
 
-const gitignoreRulesByWorkspace = new Map<
-  string,
-  { generation: number; rules: GitignoreRule[] }
->()
+const gitignoreRulesByWorkspace = new Map<string, { generation: number; rules: GitignoreRule[] }>()
 const gitignoreRuleLoadsByWorkspace = new Map<
   string,
   { generation: number; promise: Promise<GitignoreRule[] | null> }
@@ -277,10 +279,7 @@ async function loadGitignoreRules(
   })().finally(() => {
     if (gitignoreRuleLoadsByWorkspace.get(workspaceKey)?.generation === generation) {
       gitignoreRuleLoadsByWorkspace.delete(workspaceKey)
-      if (
-        !activeWatchersByPath.has(workspaceKey) &&
-        !gitignoreRulesByWorkspace.has(workspaceKey)
-      ) {
+      if (!activeWatchersByPath.has(workspaceKey) && !gitignoreRulesByWorkspace.has(workspaceKey)) {
         gitignoreGenerationsByWorkspace.delete(workspaceKey)
       }
     }
@@ -297,10 +296,7 @@ function invalidateGitignoreRules(workspacePath: string): void {
     (gitignoreGenerationsByWorkspace.get(workspaceKey) ?? 0) + 1
   )
   gitignoreRulesByWorkspace.delete(workspaceKey)
-  if (
-    !activeWatchersByPath.has(workspaceKey) &&
-    !gitignoreRuleLoadsByWorkspace.has(workspaceKey)
-  ) {
+  if (!activeWatchersByPath.has(workspaceKey) && !gitignoreRuleLoadsByWorkspace.has(workspaceKey)) {
     gitignoreGenerationsByWorkspace.delete(workspaceKey)
   }
 }
@@ -331,9 +327,7 @@ function matchesGitignoreRule(relativePath: string, rule: GitignoreRule): boolea
     if (rule.anchored) {
       return rule.matchPattern(normalizedPath)
     }
-    return (
-      rule.matchPattern(normalizedPath) || rule.matchAnywhere?.(normalizedPath) === true
-    )
+    return rule.matchPattern(normalizedPath) || rule.matchAnywhere?.(normalizedPath) === true
   }
 
   const segments = normalizedPath.split("/")
@@ -365,6 +359,8 @@ function attachThreadToWorkspaceWatcher(
   threadId: string,
   workspacePath: string
 ): void {
+  const changed =
+    watcherPathByThread.get(threadId) !== workspaceKey || !entry.threadPaths.has(threadId)
   // Refresh the subscriber's recency without changing the physical watcher
   // recency (touchWatcher handles that separately).
   entry.threadPaths.delete(threadId)
@@ -378,12 +374,17 @@ function attachThreadToWorkspaceWatcher(
       entry.threadPaths.delete(candidateThreadId)
       if (watcherPathByThread.get(candidateThreadId) === workspaceKey) {
         watcherPathByThread.delete(candidateThreadId)
+        emitWorkspaceWatchStateChanged({
+          threadIds: [candidateThreadId],
+          workspacePath: entry.workspacePath
+        })
       }
       removed = true
       break
     }
     if (!removed) break
   }
+  if (changed) emitWorkspaceWatchStateChanged({ threadIds: [threadId], workspacePath })
 }
 
 /**
@@ -422,6 +423,10 @@ function closeWorkspaceWatcher(workspaceKey: string): void {
       watcherPathByThread.delete(threadId)
     }
   }
+  emitWorkspaceWatchStateChanged({
+    threadIds: [...entry.threadPaths.keys()],
+    workspacePath: entry.workspacePath
+  })
   clearWorkspaceTimer(debounceTimers, workspaceKey)
   clearWorkspaceTimer(hookDebounceTimers, workspaceKey)
   clearWorkspaceTimer(metaDebounceTimers, workspaceKey)
@@ -544,7 +549,10 @@ function scheduleFileUpdate(entry: ActiveWorkspaceWatcher, workspaceKey: string)
           notifyRenderer(entry.threadPaths, workspaceKey, "file", update)
         })
         .catch((error) => {
-          console.warn(`[WorkspaceWatcher] Failed to resolve file update for ${workspaceKey}:`, error)
+          console.warn(
+            `[WorkspaceWatcher] Failed to resolve file update for ${workspaceKey}:`,
+            error
+          )
           if (activeWatchersByPath.get(workspaceKey) === entry) {
             notifyRenderer(entry.threadPaths, workspaceKey, "file", { kind: "rescan" })
           }
@@ -610,9 +618,7 @@ function handleWorkspaceWatcherEvent(
     }
   }
 
-  console.debug(
-    `[WorkspaceWatcher] ${eventType}: ${filename} in ${entry.workspacePath}`
-  )
+  console.debug(`[WorkspaceWatcher] ${eventType}: ${filename} in ${entry.workspacePath}`)
   if (!relativePath) {
     requestFullRescan(entry)
   } else if (relativePath.split("/").some((part) => part === "." || part === "..")) {
@@ -696,6 +702,7 @@ export async function startWatching(
   try {
     const threadPaths = new Map([[threadId, workspacePath]])
     const entry: ActiveWorkspaceWatcher = {
+      observationId: randomUUID(),
       watcher: undefined as unknown as WorkspaceWatcherWorkerClient,
       workspacePath,
       threadPaths,
@@ -735,12 +742,7 @@ export async function startWatching(
     const sharedAfterInstall = activeWatchersByPath.get(workspaceKey)
     if (sharedAfterInstall) {
       watcher.close()
-      attachThreadToWorkspaceWatcher(
-        workspaceKey,
-        sharedAfterInstall,
-        threadId,
-        workspacePath
-      )
+      attachThreadToWorkspaceWatcher(workspaceKey, sharedAfterInstall, threadId, workspacePath)
       touchWatcher(workspaceKey)
       return "existing"
     }
@@ -748,6 +750,7 @@ export async function startWatching(
     activeWatchersByPath.set(workspaceKey, entry)
     watcherPathByThread.set(threadId, workspaceKey)
     evictStaleWatchers(workspaceKey)
+    emitWorkspaceWatchStateChanged({ threadIds: [threadId], workspacePath })
     console.log(`[WorkspaceWatcher] Started watching ${workspacePath}`)
     scheduleGitHookEventSync(workspacePath, 100)
     return "started"
@@ -780,7 +783,10 @@ export function recordWorkspaceDirectorySnapshotSet(
  * Stop watching the workspace for a specific thread.
  */
 export function stopWatching(threadId: string): void {
-  watchStartGenerationsByThread.set(threadId, (watchStartGenerationsByThread.get(threadId) ?? 0) + 1)
+  watchStartGenerationsByThread.set(
+    threadId,
+    (watchStartGenerationsByThread.get(threadId) ?? 0) + 1
+  )
   const pending = pendingWatcherStartsByThread.get(threadId)
   if (pending) {
     pendingWatcherStartsByThread.delete(threadId)
@@ -790,6 +796,7 @@ export function stopWatching(threadId: string): void {
   if (!workspaceKey) return
 
   watcherPathByThread.delete(threadId)
+  emitWorkspaceWatchStateChanged({ threadIds: [threadId], workspacePath: workspaceKey })
   const entry = activeWatchersByPath.get(workspaceKey)
   if (!entry) return
   entry.threadPaths.delete(threadId)
@@ -863,4 +870,18 @@ function notifyWorkspaceHooksChanged(threadPaths: ReadonlyMap<string, string>): 
 export function isWatching(threadId: string): boolean {
   const workspaceKey = watcherPathByThread.get(threadId)
   return Boolean(workspaceKey && activeWatchersByPath.has(workspaceKey))
+}
+
+/** The actual current binding, including worker identity; no start, scan or LRU touch. */
+export function workspaceWatchState(
+  threadId: string
+):
+  | { workspacePath: string; observationId: string; canonicalPath: string; rootIdentity: string }
+  | undefined {
+  const key = watcherPathByThread.get(threadId)
+  const entry = key ? activeWatchersByPath.get(key) : undefined
+  if (!entry?.threadPaths.has(threadId)) return undefined
+  const observation = entry.watcher.observation
+  if (!observation) return undefined
+  return { workspacePath: entry.workspacePath, observationId: entry.observationId, ...observation }
 }

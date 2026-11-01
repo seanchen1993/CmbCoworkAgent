@@ -3,11 +3,21 @@ import assert from "node:assert/strict"
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { resolve } from "node:path"
 import { chromium } from "playwright"
+import { compile } from "@tailwindcss/node"
+import { Scanner } from "@tailwindcss/oxide"
 import { THEME_DEFINITIONS } from "../src/renderer/src/lib/theme-registry"
 import { mount } from "./mods-flow-browser.spec"
 import { browserWorkerPlugin } from "./support/browser-worker-plugin.mjs"
 
 async function main() {
+  const renderer = resolve("src/renderer/src")
+  const stylesheet = await compile(readFileSync(resolve(renderer,"index.css"),"utf8"), {
+    base:renderer,onDependency:()=>undefined
+  })
+  const classes = new Scanner({}).scanFiles([
+    "components/chat/FunctionPanes.tsx","components/chat/FunctionTruncatedText.tsx",
+    "components/chat/FunctionSite.tsx","components/ui/button.tsx"
+  ].map(file=>({content:readFileSync(resolve(renderer,file),"utf8"),extension:"tsx"})))
   const output = resolve("output/mods-button-hotkey-browser")
   mkdirSync(output,{recursive:true})
   const browser = await chromium.launch({headless:true,
@@ -69,7 +79,7 @@ async function main() {
         <FunctionSite threadId='a' component='AbovePrompt' facts={{isWorking:false}}/>
       </ModsChatScope.Provider>);
     `,[browserWorkerPlugin()])
-    await page.addStyleTag({ content: readFileSync(resolve("src/renderer/src/assets/mods-ansi-colors.css"), "utf8") })
+    await page.addStyleTag({content:stylesheet.build(classes)})
     // tsx keepNames helpers are outside Playwright-serialized callbacks.
     // Match the existing browser fixtures; this only returns the supplied function.
     await page.addScriptTag({ content: "window.__name = (value) => value" })
@@ -179,25 +189,36 @@ async function main() {
           return color
         }
         const inverse=box.children[0], start=box.children[1], end=box.children[2], wrapped=box.children[3]
-        const text=start.firstElementChild!.firstChild!
+        const truncated=start.querySelector("[data-function-text-truncate='truncate-start']")
+        const visible=truncated?.querySelector("[data-function-text-visible]")
+        if(!truncated||!visible||truncated.getAttribute("aria-label")!=="/prefix/".repeat(12)+"TAIL.ts")
+          throw Error("ACTUAL_TRUNCATED_SOURCE_TEXT_REQUIRED")
+        const walker=document.createTreeWalker(visible,NodeFilter.SHOW_TEXT)
+        let text:Node|null=null,leaf:Node|null
+        while((leaf=walker.nextNode())) text=leaf
+        if(!(text instanceof Text)||!text.data.endsWith("TAIL.ts"))
+          throw Error("ACTUAL_VISIBLE_PATH_TAIL_REQUIRED")
         const tail=document.createRange();tail.setStart(text,text.textContent!.length-7);tail.setEnd(text,text.textContent!.length)
-        const prefix=document.createRange();prefix.setStart(text,0);prefix.setEnd(text,1)
         const bounds=start.getBoundingClientRect(), tailBounds=tail.getBoundingClientRect()
         return {expectedBorder:expected("--mods-ansi-magenta"),expectedBackground:"rgb(0, 255, 255)",border:getComputedStyle(box).borderTopColor,radius:getComputedStyle(box).borderTopLeftRadius,
           margin:getComputedStyle(box).marginTop,color:getComputedStyle(inverse).color,
           background:getComputedStyle(inverse).backgroundColor,startDirection:getComputedStyle(start).direction,
           innerDirection:getComputedStyle(start.firstElementChild!).direction,
+          bounds:{left:bounds.left,right:bounds.right,width:bounds.width},
+          tailBounds:{left:tailBounds.left,right:tailBounds.right,width:tailBounds.width},
+          visibleText:visible.textContent,
           tailVisible:tailBounds.left>=bounds.left&&tailBounds.right<=bounds.right+1,
-          prefixClipped:prefix.getBoundingClientRect().right<bounds.left,
+          prefixOmitted:visible.textContent!.startsWith("…")&&
+            visible.textContent!.length<truncated.getAttribute("aria-label")!.length,
           endOverflow:getComputedStyle(end).textOverflow,wrap:getComputedStyle(wrapped).whiteSpace,
           wrappedHeight:wrapped.getBoundingClientRect().height}
       })
       assert.deepEqual({border:drawing.border,radius:drawing.radius,margin:drawing.margin,
         color:drawing.color,background:drawing.background},
         {border:drawing.expectedBorder,radius:"6px",margin:"8px",color:"rgb(0, 0, 128)",background:drawing.expectedBackground})
-      assert.equal(drawing.startDirection,"rtl")
+      assert.equal(drawing.startDirection,"ltr")
       assert.equal(drawing.innerDirection,"ltr")
-      assert(drawing.tailVisible&&drawing.prefixClipped,JSON.stringify(drawing))
+      assert(drawing.tailVisible&&drawing.prefixOmitted,JSON.stringify(drawing))
       assert.equal(drawing.endOverflow,"ellipsis")
       assert.equal(drawing.wrap,"pre-wrap")
       assert(drawing.wrappedHeight>20)

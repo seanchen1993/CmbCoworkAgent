@@ -8,6 +8,7 @@ export type CommunityExampleId =
   | "task-behavior-compact"
   | "edit-reminder"
   | "stage-debugger"
+  | "developer-workbench"
 
 interface CommunityExampleBase {
   id: CommunityExampleId

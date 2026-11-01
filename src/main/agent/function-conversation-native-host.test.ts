@@ -2281,6 +2281,8 @@ import { getMessageProviderOccurrence, getMessageProviderSourceId } from
   "../../shared/message-role-collision"
 import { bindNativePartialQueuedMessage, reconcileNativePartialQueuedMessages } from
   "./native-partial-persistence"
+import { forgetFunctionPlacedCursor, rememberFunctionPlacedMessage } from
+  "../mods/v2/placed-anchor-host"
 import type { QueuedStreamTranscriptMessage } from "../ipc/stream-transcript-flush"
 
 function actualPartialDebounce(f: Awaited<ReturnType<typeof fixture>>) {
@@ -2301,6 +2303,7 @@ function actualPartialDebounce(f: Awaited<ReturnType<typeof fixture>>) {
   cleanups.push(() => {
     for (const item of pending.values()) if (item.timer) clearTimeout(item.timer)
     clearCurrentRunMessageQueue(f.threadId)
+    forgetFunctionPlacedCursor(f.threadId)
   })
   const api = runInNewContext(code, { exports: {}, console, setTimeout, clearTimeout,
     STREAM_TRANSCRIPT_FLUSH_DEBOUNCE_MS: 250, pendingStreamTranscriptMessages: pending,
@@ -2308,7 +2311,7 @@ function actualPartialDebounce(f: Awaited<ReturnType<typeof fixture>>) {
     streamAssistantRevision: 0, getMessageProviderSourceId, getMessageProviderOccurrence,
     captureLocalThreadRunLease, captureThreadIncarnation, matchesThreadIncarnation,
     getLocalThreadRunLease, captureCurrentRunMessageQueueOwner, isCurrentRunMessageQueueOwner,
-    resolveStreamTranscriptFlush, reconcileNativePartialQueuedMessages,
+    resolveStreamTranscriptFlush, reconcileNativePartialQueuedMessages, rememberFunctionPlacedMessage,
     getDb: appDb.getDb, getThreadCore: appDb.getThreadCore,
     getThreadRuntimeScope: appDb.getThreadRuntimeScope,
     getThreadMessageIdentityContext: appDb.getThreadMessageIdentityContext,

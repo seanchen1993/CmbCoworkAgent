@@ -18,6 +18,13 @@ import type { ClawActionDescriptor } from "../../../shared/mods/claw-actions"
 import { compileFunctionPlugin } from "../v2/loader"
 import { readPluginManifest } from "../../plugins/manifest"
 import { packageUsesSharedMods } from "../../harness-board/project-runtime/package-preflight"
+import {
+  assertProjectPackageReportUnchanged,
+  createProjectPackageReport,
+  projectPackageActualExcluded,
+  PROJECT_PACKAGE_REPORT_PATH,
+  readProjectPackageReport
+} from "./project-package-report"
 
 async function checkProjectExtensions(directory: string) {
   const metadata = readPluginManifest(directory)?.manifest
@@ -62,17 +69,30 @@ export async function initProjectPlugin(
 }
 
 /** Compilation publishes a new directory, never edits an installed or source package in place. */
-export async function compileProjectPlugin(directory: string, outputDirectory: string,
-  availableActions: readonly ClawActionDescriptor[] = []) {
+export async function compileProjectPlugin(
+  directory: string,
+  outputDirectory: string,
+  availableActions: readonly ClawActionDescriptor[] = []
+) {
   const source = await readAuthoringProjectSource(directory)
-  const native = source.bundle.files.find(file => file.path === NATIVE_COMPOSITION_PATH)
-  if (native && source.bundle.files.some(file =>
-    file.path === "devclaw.harness.json" || file.path === "mods/business/manifest.json"))
+  const native = source.bundle.files.find((file) => file.path === NATIVE_COMPOSITION_PATH)
+  if (
+    native &&
+    source.bundle.files.some(
+      (file) => file.path === "devclaw.harness.json" || file.path === "mods/business/manifest.json"
+    )
+  )
     throw Error("NATIVE_COMPOSITION_MULTIPLE_SOURCES")
-  const bundle = native ? createAuthoringSourceBundle(compileNativeComposition(JSON.parse(native.text), {
-    files: source.bundle.files.map(file => ({ path: file.path, bytes: Buffer.from(file.text) })),
-    actionCatalog: availableActions
-  }).files.map(file => ({ path: file.path, text: file.bytes.toString("utf8") })))
+  const bundle = native
+    ? createAuthoringSourceBundle(
+        compileNativeComposition(JSON.parse(native.text), {
+          files: source.bundle.files.map((file) => ({
+            path: file.path,
+            bytes: Buffer.from(file.text)
+          })),
+          actionCatalog: availableActions
+        }).files.map((file) => ({ path: file.path, text: file.bytes.toString("utf8") }))
+      )
     : compileProjectHarness(source.bundle)
   const manifest = parseProjectRuntimeManifest(
     JSON.parse(bundle.files.find((file) => file.path === "devclaw.project-runtime.json")!.text)
@@ -117,13 +137,11 @@ export async function packProjectPlugin(
   guard()
   const source = await readAuthoringProjectSource(directory, resourcePaths)
   guard()
+  const previousReport = readProjectPackageReport(source.root, source.bundle)
+  const excluded = projectPackageActualExcluded(source.excluded, previousReport)
   if (expectedDigest !== undefined && source.bundle.digest !== expectedDigest)
     throw Error("PROJECT_SOURCE_CHANGED")
-  const { report, manifest } = inspectProjectSource(
-    source.bundle,
-    source.excluded,
-    availableActions
-  )
+  const { report, manifest } = inspectProjectSource(source.bundle, excluded, availableActions)
   if (!report.valid || !manifest) throw Error("PROJECT_PACK_DOCTOR_FAILED")
   await checkProjectExtensions(source.root)
   guard()
@@ -134,19 +152,14 @@ export async function packProjectPlugin(
   if (!output.toLowerCase().endsWith(".zip")) throw Error("PROJECT_PACK_ZIP_REQUIRED")
   const zip = new AdmZip()
   for (const file of source.bundle.files) zip.addFile(file.path, Buffer.from(file.text, "utf8"))
-  const packageReport = {
-    schemaVersion: 1,
-    packageId: manifest.plugin.id,
-    version: manifest.plugin.version,
-    sourceDigest: source.bundle.digest,
-    files: source.bundle.files.map((file) => file.path),
-    excluded: source.excluded,
-    dependencies: manifest.actions.map((action) => action.ref),
-    tests,
-    install: "通过原插件页面的 ZIP 安装入口；创建项目时由宿主绑定真实安装 UUID。"
+  if (previousReport) {
+    assertProjectPackageReportUnchanged(source.root, previousReport)
+    const current = readProjectPackageReport(source.root, source.bundle, manifest)
+    if (current?.sha256 !== previousReport.sha256) throw Error("PROJECT_SOURCE_CHANGED")
   }
+  const packageReport = createProjectPackageReport(source.bundle, manifest, excluded, tests)
   zip.addFile(
-    "devclaw.package-report.json",
+    PROJECT_PACKAGE_REPORT_PATH,
     Buffer.from(`${JSON.stringify(packageReport, null, 2)}\n`)
   )
   guard()

@@ -47,6 +47,7 @@ export class FunctionDisplayRouting {
       const registrations = JSON.stringify(
         plugin.guest.registrations.map((row) => [
           row.id,
+          row.module ?? null,
           row.pattern,
           row.hasMatcher,
           row.hasCatch,

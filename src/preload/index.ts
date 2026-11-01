@@ -9,6 +9,7 @@ import { createNodeCompositionBridge } from "./node-composition"
 import { createDevelopmentBridge } from "./development"
 import { createHarnessKnowledgeApi } from "./harness-knowledge"
 import { createPlatformBridge } from "./mods-platform"
+import { createEditorNavigationBridge } from "./developer-editor"
 import { createSkillEvaluationBridge } from "./skill-evaluation"
 import { createEvaluationBridge } from "./evaluation"
 import { createAuthoringInstallBridge } from "./authoring-install"
@@ -3143,6 +3144,11 @@ const api = {
     }
   },
   mods: {
+    ...createEditorNavigationBridge((channel, input) => ipcRenderer.invoke(channel, input), (callback) => {
+      const listener = (_event: unknown, value: import("../shared/mods/v2/developer-editor").DeveloperEditorEvent) => callback(value)
+      ipcRenderer.on("mods:editor-navigation", listener)
+      return () => ipcRenderer.removeListener("mods:editor-navigation", listener)
+    }),
     agentViewPending: (threadId: string): Promise<import("../shared/mods/v2/agent-tasks").AgentViewIntent | null> =>
       ipcRenderer.invoke("mods:agent-view-pending", threadId),
     agentViewRead: (input: { threadId: string; intentId: string; cursor?: string }): Promise<{

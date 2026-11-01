@@ -29,9 +29,31 @@ beforeEach(() => {
 
 it("lists offline Chinese cards without project scope or installation effects", async () => {
   const value = (await handlers.get("mods:community-examples:list")!(event)) as {
-    examples: unknown[]
+    examples: Array<{ id: string }>
   }
-  expect(value.examples).toHaveLength(9)
+  expect(value.examples).toHaveLength(10)
+  expect(value.examples.map((example) => example.id).sort()).toEqual([
+    "blast-radius",
+    "developer-workbench",
+    "edit-reminder",
+    "replay-theater",
+    "stage-debugger",
+    "task-behavior-compact",
+    "task-behavior-prefix",
+    "task-workbench-consumer",
+    "task-workbench-provider",
+    "token-weather"
+  ])
+  expect(value.examples).toContainEqual(
+    expect.objectContaining({
+      id: "developer-workbench",
+      pluginName: "developer-workbench",
+      title: "开发工作台",
+      origin: "devclaw",
+      sourcePath: "examples/developer-workbench",
+      version: "1.0.0"
+    })
+  )
   expect(value.examples).toContainEqual(
     expect.objectContaining({
       id: "stage-debugger",

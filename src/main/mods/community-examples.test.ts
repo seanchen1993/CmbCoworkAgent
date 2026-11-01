@@ -105,9 +105,10 @@ it("ships every named local package including the independent stage debugger wit
     "task-behavior-prefix",
     "task-behavior-compact",
     "edit-reminder",
-    "stage-debugger"
+    "stage-debugger",
+    "developer-workbench"
   ])
-  expect(new Set(BUNDLED_EXAMPLES.map((example) => example.id)).size).toBe(9)
+  expect(new Set(BUNDLED_EXAMPLES.map((example) => example.id)).size).toBe(10)
   expect(PLATFORM_EXAMPLES.find((example) => example.id === "stage-debugger")).toMatchObject({
     pluginName: "stage-debugger",
     title: "阶段调试工作台",

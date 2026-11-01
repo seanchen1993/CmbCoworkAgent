@@ -1,10 +1,10 @@
 # 非媒体补齐、第三阶段与性能验收
 
-状态：主要实现及追加的模块准入、本机生命周期已完成双审、定向回归和全新 medium 独立复审。最终 Node/Web 类型、改动文件 lint 及原流程/第二阶段浏览器检查通过。真实模型续验与正式性能尚未完成，本文尚不是整轮完成声明。
+状态：v96开发者工作台补齐和后续实际缺陷已修复，经双审及中等强度非作者回检。整体Node/Web退出0，改动代码ESLint quiet错误0；首次全量失败的22个文件已按实际断点修正复验，相关独立功能链通过。原始全量失败及worker RPC异常保留，不称全量重跑全绿。当前源码原生/真实模型补验与最终性能尚未完成，本文不是整轮完成声明。
 
 ## 交付范围
 
-按 [双审方案](mods-nonmedia-completion-and-phase3-plan-2026-11-01.md) 实施。应用保持 2.0.0，宿主权限摘要升到 v95，防止 v94 及更早的旧确认自动取得新增能力。本轮没有新增业务名分支，也没有替换项目创建、配置、需求管理或执行运行器。
+前一轮按 [双审方案](mods-nonmedia-completion-and-phase3-plan-2026-11-01.md) 实施，宿主权限摘要升到 v95；本文下方的开发者工作台追加升到 v96。应用保持 2.0.0，旧确认不能自动取得后续新增能力。没有新增业务名分支，也没有替换项目创建、配置、需求管理或执行运行器。
 
 固定官方 2.1.316 的 Core 清单含 85 个可调用方法及 2 个 plugin 只读字段。本机方法目录包含其中 82 个方法名称；缺少 audio.play/audio.speak/prompt.media 属于本轮排除项。**方法存在不代表底层完全等价**：终端 blit、托管身份、通知通道和遥测有明确条件；无生产者的生命周期和 classic metadata 仍未开放，不混入“全部已完成”统计。
 
@@ -83,7 +83,44 @@ AutoBiz 派生与装配候选验收 `output/phase3-source-autobiz-derived-9cdadc
 
 非 AutoBiz 报告插件首代派生 `output/phase3-source-report-derived-eaf7e545/journey/run-Dggxy8` 已实际完成13次作者请求与13次三阶段试用请求（均200）、completed、ZIP导出及原面板fresh安装；普通项目创建前，测试编号 `LIVE` 加12位十六进制共16字，超过原界面15字限制，脚本退出1。首handoff和第二次派生因此尚未到达；保留首代结果，只对合法短编号、原表单衔接及以实际交付ZIP继续派生做续验。平台没有放宽原项目限制。
 
+短编号及完整原表单参数前置校验冻结到 `ea44d360c53850e223eb900ddf8dd161a7c00e66` 后，首代报告插件续验 `output/phase3-installed-report-continuation-52c12dd6` 退出0：6个真实请求均200，原项目创建、配置、Feature、当前来源确认和首阶段原生执行/校验/衔接通过，created/handoff截图及完整性检查通过。没有重做首代作者、三阶段试用或ZIP；随后自动阶段只取得公开取消请求回执，停止终态不纳入通过范围。
+
 待填写：真实作者从零/派生/调整其余场景、各商业场景普通项目衔接及未验证节点。Git/审批环境单列，不算平台失败，也不把未到达节点写成通过。
+
+## 开发者工作台追加：v96
+
+依据 [最终双审方案](mods-developer-workbench-foundation-plan-2026-11-01.md)，补齐软件开发真实宿主桥。两路medium先做producer审计，再评审具体方案，3项P1和2项P2写入方案后，二人确认无阻断才开发。复杂业务留在插件；原项目四个关键文件未修改，版本保持2.0.0。新增能力实际进入host revision及loader摘要，v95旧grant不能冷启动v96，新确认后仍沿原权限运行。
+
+| 追加项 | 实际验证与边界 |
+| --- | --- |
+| 自家ZIP再次派生协议 | 共享严格v1非执行报告协议，producer/consumer两域摘要、完整refs、报告原字节SHA+身份pin及双读保持；未知资源/Hook/MCP仍拒。4套76/76通过，两位medium非作者通过，其中一位独立40/40及真实旧安装包只读验证通过。不把AdmZip单测当成真实原UI全链 |
+| 原生代码观察 | 10项现有Java服务只读查询，异步有界快照、原文件策略、client/document/source围栏及未结算限额；诊断cached/versionUnknown。31项通过、非作者回检通过；无默认启动、下载或关闭服务，不宣称新增多语言后端 |
+| 原生安全文件导航 | sender/来源/物理会话/TTL与原文件策略绑定；64KiB源文本、真实行列ACK、外IDE仅原生按钮且display未知；Windows空白/元字符路径保留内置预览。36项通过、1项Windows symlink环境跳过，真实浏览器8checks通过；非作者回检通过。App/preload已接，整体native链另验 |
+| 工作区变化观察 | 既有watcher实际安装canonical根及dev/ino身份、6/16上限与失效通知；不start/scan，caller过滤、有界队列与cached poll重新授权。最终7套54/54通过；独立52项及最后两项只读增量回检通过，不将重复计数相加 |
+| 原生能力状态与缓存 | main-only callerScopedState隔离授权过滤状态；poll核实际待返快照，历史代码结果重核每个文件位置；post-await重核caller/provider和原owner。core/旧授权4套59项通过，之后core/IPC/定向发现4套39项通过，存在重叠，不能相加作总数 |
+| 通用示例与发现 | 新developer-workbench用公开协议组合任务、代码、导航、文件观察、Git/workflow和持久设置；5placement及命令有真实入口。5个服务状态逐行显示，开发信息默认不生成，主动展开才显示同批有界事实，不新增读取或授权。最终Guest/摘要/目录32项通过，作者审计、实际非作者回检及6文件SHA核对通过 |
+
+整体类型初轮发现两处`const fail`未触发TypeScript控制流收窄和新增catalog返回union缺旧空数组字段，均保留实际运行时校验修正；最终Node/Web退出0。记录 `output/mods-workbench-v96-typecheck-node-final.log`、`output/mods-workbench-v96-typecheck-web.log`、`output/mods-workbench-v96-changed-lint.log`。全套 `npm test` 的实际结果另填，不能以窄回归代称全绿。
+
+追加全量回归首次结果：1904个文件，1863通过、22失败、19跳过；19460项测试中19290通过、77失败、93跳过，并有一次Vitest worker `onTaskUpdate` RPC超时。`npm test` 因此退出1，后续 `&&` standalone链未执行，不能称全套通过。日志 `output/mods-workbench-v96-npm-test.log` 保留。
+
+其中23项属于两处真实实现问题：编译包装新增模块元数据与静态显示证明器脱节17项；独立Surface的只读模块导出与严格模式入口清空冲突6项。前者补精确AST/module及缓存身份绑定，后者只给模块导出增加writable，不放宽共享JSX或注册权限，均先双审再改。另修普通RPC结束后的预览只读lease、旧preload接口缺失降级、5个真实服务状态的有界可见摘要，以及流式游标不读取完整文件历史的热点。
+
+其余54项为测试夹具未跟上实际依赖、示例目录、原有导航、显示样式或Host项目分类；另3个suite初始化缺少原生事实模块读取的DB导出。夹具使用真实helper或明确拒绝越界的DB sentinel，保留原权限和失败清理断言。Host状态应为 `host-runtime` 且可用，不宣传旧看板命令；未知/不安全声明仍不可用。源码导入测试走现有“保存插件”与折叠开发者入口，不为测试改变产品导航。
+
+集中复验首轮26文件572通过、4失败，继续修复瞬时游标提前执行getter、idle回收未先核外层authority两处实际断点，并保留已知busy的“尚未开始”提示及空assistant原可见语义。三项措施先双审再改，实际非作者回检通过。最终相关5文件191/191通过，真实native partial8/8通过（同文件其余79项本次过滤跳过，已在前次集中复验执行），原先失败项均已覆盖；几轮重叠数量不能相加。日志 `output/mods-workbench-v96-failed-files-recheck.log`、`output/mods-workbench-v96-last-boundaries.log`、`output/mods-workbench-native-partial-final.log`。
+
+最终 `npm run typecheck` 退出0，见 `output/mods-workbench-v96-typecheck-release.log`。改动代码ESLint quiet错误0；严格warning0尝试报告原有CRLF/排版警告，未整文件重排旧代码。已改代码行尾统一LF，新增游标与小型测试正常格式化，不声称全仓库格式警告清零。
+
+独立功能链补验：项目入口、创造者完整界面、使用体验及第二阶段浏览器四组退出0；插件ZIP/版本、作者预览/安装、虚拟文件/恢复、评估和Skill真实受控桥通过。ANSI有2464项浏览器对比通过；旧hotkey夹具缺生产Tailwind且仍假定RTL裁剪，改为编译实际index.css与组件候选，核真正visible尾部Range和完整aria后，剩余五个UI脚本全部退出0。保留真实几何/快捷键/焦点/配色断言，未改产品CSS。见 `output/mods-workbench-standalone-core-final.log`（首次UI夹具失败保留）、`output/mods-workbench-standalone-browser-final.log`、`output/mods-workbench-standalone-ui-production-css.log`。
+
+市场推广另有 [双审产品规划](mods-workbench-market-product-plan-2026-11-01.md)，尚未开发或发布市场新功能。当前原生/真实模型四个最小续验和正式性能随后进行。
+
+示例关闭竞争曾被误判为core漏取消。实际gate未释放时原生read signal已aborted；Guest取消先返回，原生await尚未结算。最终测试先等待实际取消信号，再释放gate，并限时硬核订阅0、stop计数、资源0且无批准；9项通过。没有为该误判修改Session信号传播。另行保留并验证真实owner和post-await撤权保护。
+
+历史来源适配只引用旧artifact，不返回可启动entry，也不放宽当前candidate。8个测试文件的20项、selected语义类型和medium非作者回检通过；dirty工作区的recorded HEAD仅作元信息，来源依当时manifest/compiled artifacts/wrapper首尾围栏及旧材料哈希。当前v96执行必须另编译并核完整当前源与driver。
+
+用户扩大范围后，最终性能明确延后到上述能力、可见入口和真实补验完成并冻结之后。没有把开发中并发样本或旧短测替代最终回归。
 
 ## 性能
 

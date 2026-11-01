@@ -56,7 +56,8 @@ it("reobserves protocols on every page even when the board config bytes remain c
   expect(first.registryNextCursor).toBe(1)
   fs.writeFileSync(join(f.plugin, "devclaw.project-runtime.json"), f.host)
   expect(read(first.registryNextCursor!).registry).toMatchObject([
-    { runtimeMode: "host", boardCompatibility: { compatible: false } }
+    { runtimeMode: "host", boardCompatibility: { status: "host-runtime", compatible: true },
+      pullKnowledgeAvailable: false }
   ])
   fs.rmSync(join(f.plugin, "devclaw.project-runtime.json"))
   expect(read(first.registryNextCursor!).registry[0].boardCompatibility.compatible).toBe(true)
@@ -155,7 +156,12 @@ it.each(["host", "unknown"])(
     const result = readHarnessCatalogPage(f.projects, f.plugins, { includeProjects: false })
     // A canonical Host uses its own runtime; a platform-level case/identity rejection remains a
     // diagnostic row. Neither may fall back to a compatible runtime-less board package.
-    expect(result.registry.every((row) => !row.boardCompatibility.compatible)).toBe(true)
+    expect(result.registry.every((row) =>
+      kind === "host" && row.runtimeMode === "host"
+        ? row.boardCompatibility.status === "host-runtime" &&
+          row.boardCompatibility.compatible && !row.pullKnowledgeAvailable
+        : !row.boardCompatibility.compatible
+    )).toBe(true)
   }
 )
 
@@ -182,8 +188,10 @@ it("bounds root enumeration and falls back to exact safe reads instead of inferr
   expect(
     readHarnessCatalogPage(f.projects, f.plugins, { includeProjects: false }).registry
   ).toMatchObject([
-    { runtimeMode: "host", boardCompatibility: { compatible: false } },
-    { runtimeMode: "host", boardCompatibility: { compatible: false } }
+    { runtimeMode: "host", boardCompatibility: { status: "host-runtime", compatible: true },
+      pullKnowledgeAvailable: false },
+    { runtimeMode: "host", boardCompatibility: { status: "host-runtime", compatible: true },
+      pullKnowledgeAvailable: false }
   ])
   expect(reads).toBe(HOST_PACKAGE_LIMITS.files + HOST_PACKAGE_LIMITS.directories + 1)
 })

@@ -51,14 +51,18 @@ async function fixture(failedExample = "") {
   let canonicalWorkspace = ""
   const api = {
     threads: { create: async () => ({ thread_id: "community-thread" }), delete: removeThread },
-    workspace: { set: async (_id: string, path: string) => {
-      canonicalWorkspace = path.toLowerCase()
-    } },
+    workspace: {
+      set: async (_id: string, path: string) => {
+        canonicalWorkspace = path.toLowerCase()
+      }
+    },
     mods: {
       globalEnabled: async () => true,
-      configure: vi.fn(async (_id: string, _enabled: boolean, _policy: boolean, expected: string) => {
-        expect(expected).toBe(canonicalWorkspace)
-      }),
+      configure: vi.fn(
+        async (_id: string, _enabled: boolean, _policy: boolean, expected: string) => {
+          expect(expected).toBe(canonicalWorkspace)
+        }
+      ),
       approveFunction: approve,
       status: async () => ({
         workspace: canonicalWorkspace,
@@ -163,14 +167,26 @@ async function fixture(failedExample = "") {
   return { api, artifacts, run, baseline, rows: () => rows }
 }
 
-it("uses public IPC for nine installs, unapproved idempotence and a preserved personal ZIP conflict", async () => {
+it("uses public IPC for ten installs, unapproved idempotence and a preserved personal ZIP conflict", async () => {
+  expect(PACKAGED_COMMUNITY_EXAMPLE_IDS).toEqual([
+    "task-workbench-provider",
+    "task-workbench-consumer",
+    "task-behavior-prefix",
+    "task-behavior-compact",
+    "edit-reminder",
+    "stage-debugger",
+    "token-weather",
+    "replay-theater",
+    "blast-radius",
+    "developer-workbench"
+  ])
   const f = await fixture()
   await f.run()
-  expect(f.api.mods.communityExamples.install).toHaveBeenCalledTimes(19)
+  expect(f.api.mods.communityExamples.install).toHaveBeenCalledTimes(21)
   expect(f.api.plugins.install).toHaveBeenCalledOnce()
   expect(f.api.mods.approveFunction).not.toHaveBeenCalled()
   expect(f.api.mods.configure).toHaveBeenCalledOnce()
-  expect(f.api.plugins.delete).toHaveBeenCalledTimes(9)
+  expect(f.api.plugins.delete).toHaveBeenCalledTimes(10)
   expect(f.api.threads.delete).toHaveBeenCalledWith("community-thread")
   expect(f.rows()).toEqual([f.baseline])
   const evidence = JSON.parse(
@@ -182,6 +198,23 @@ it("uses public IPC for nine installs, unapproved idempotence and a preserved pe
     exampleIds: PACKAGED_COMMUNITY_EXAMPLE_IDS
   })
   expect(evidence.checks).toHaveLength(3)
+  expect(Object.keys(evidence.materialized).sort()).toEqual(
+    [...PACKAGED_COMMUNITY_EXAMPLE_IDS].sort()
+  )
+  const workbench = evidence.materialized["developer-workbench"]
+  expect(workbench.pluginId).toBe("created-10")
+  expect(Object.keys(workbench.files).sort()).toEqual([
+    "README.md",
+    "hooks/hooks.json",
+    "hooks/register.ts",
+    "hooks/settings.ts",
+    "hooks/status-summary.ts",
+    "plugin.json"
+  ])
+  for (const [file, actual] of Object.entries(workbench.files)) {
+    const canonical = await readFile(resolve("examples/developer-workbench", file))
+    expect(actual).toBe(createHash("sha256").update(canonical).digest("hex"))
+  }
 })
 
 it("fails on real installation failure and cleans only the packages it successfully created", async () => {

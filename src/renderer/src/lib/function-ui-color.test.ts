@@ -85,6 +85,9 @@ describe("Function UI color names", () => {
       color: "var(--status-critical)",
       backgroundColor: "var(--foreground)",
       fontWeight: "bold",
+      fontSize: undefined,
+      fontFamily: undefined,
+      fontVariantNumeric: undefined,
       fontStyle: "italic",
       textDecoration: "underline line-through",
       opacity: 0.65,
@@ -94,6 +97,8 @@ describe("Function UI color names", () => {
       display: "block",
       minWidth: 0,
       maxWidth: "100%",
+      direction: undefined,
+      unicodeBidi: "plaintext",
       overflowWrap: "anywhere"
     })
     expect(JSON.stringify(node)).toBe(before)
@@ -111,10 +116,13 @@ it("maps ANSI hues and bright aliases without changing explicit colors", () => {
   expect(functionUiColor("grey")).toBe(functionUiColor("gray"))
   for (const raw of ["#ffff00", "#FFFF00", "rgb(255, 255, 0)", "var(--custom-yellow)", "navy"])
     expect(functionUiColor(raw)).toBe(raw)
-  expect(functionUiStyle({ type: "Text", props: { color: "yellow" } }).color)
-    .toBe("var(--mods-ansi-yellow)")
-  expect(functionUiStyle({ type: "Box", props: { borderStyle: "round", borderColor: "cyan" } }).borderColor)
-    .toBe("var(--mods-ansi-cyan)")
+  expect(functionUiStyle({ type: "Text", props: { color: "yellow" } }).color).toBe(
+    "var(--mods-ansi-yellow)"
+  )
+  expect(
+    functionUiStyle({ type: "Box", props: { borderStyle: "round", borderColor: "cyan" } })
+      .borderColor
+  ).toBe("var(--mods-ansi-cyan)")
 })
 
 it("preserves ANSI pair literals without changing semantic roles or custom colors", () => {

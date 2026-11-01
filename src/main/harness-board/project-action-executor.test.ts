@@ -40,6 +40,7 @@ const mock = vi.hoisted(() => ({
   skill: vi.fn()
 }))
 vi.mock("../db", () => ({
+  getDb: () => { throw Error("NATIVE_DATABASE_OUTSIDE_UNIT_SCOPE") },
   createThread: (_id: string, metadata: Record<string, unknown>) => {
     mock.metadata = metadata
     return { created_at: 1, metadata: JSON.stringify(metadata) }

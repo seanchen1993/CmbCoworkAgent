@@ -438,7 +438,9 @@ it.each(["resource", "resource-opening", "nativeSelection", "unloaded"])(
 )
 
 // Exercise the installed IPC lifecycle adapter itself, not a copied callback fixture.
-function originalIdleRetirementBridge(functions: FunctionModsManager, queue: { closeThread(thread: string): void }) {
+function originalIdleRetirementBridge(functions: FunctionModsManager,
+  queue: { closeThread(thread: string): void },
+  editorNavigation: { invalidateThread(thread: string): void }) {
   const path = join(import.meta.dirname, "../../ipc/mods.ts")
   const source = ts.createSourceFile(path, readFileSync(path, "utf8"), ts.ScriptTarget.Latest, true)
   const matches: ts.PropertyAssignment[] = []
@@ -451,7 +453,8 @@ function originalIdleRetirementBridge(functions: FunctionModsManager, queue: { c
   expect(matches).toHaveLength(1)
   const output = ts.transpile(`const bridge = ${matches[0].initializer.getText(source)}`,
     { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS })
-  return new Function("functions", "queue", `${output}; return bridge`)(functions, queue) as
+  return new Function("functions", "queue", "editorNavigation", `${output}; return bridge`)(
+    functions, queue, editorNavigation) as
     (workspace: string, thread: string) => ReturnType<FunctionModsManager["captureIdleThreadRetirement"]>
 }
 
@@ -463,8 +466,10 @@ it.each([false, true])("keeps the real IPC queue and outer owner alive until rea
   const reading = f.manager.logs(f.root, "bridged")
   await vi.waitFor(() => expect(f.state.publishing).toBe(true))
   const queue = { closeThread: vi.fn() }
+  const editorNavigation = { invalidateThread: vi.fn() }
   const invalidate = vi.fn()
-  const lifecycle = { captureIdleThreadRetirement: originalIdleRetirementBridge(f.manager, queue) }
+  const lifecycle = { captureIdleThreadRetirement:
+    originalIdleRetirementBridge(f.manager, queue, editorNavigation) }
   const outer = {
     functionLifecycle: lifecycle,
     workspaceKey: (value: string) => value,
@@ -475,6 +480,7 @@ it.each([false, true])("keeps the real IPC queue and outer owner alive until rea
   const retiring = captured.retire().catch(error => error)
   await Promise.resolve()
   expect(queue.closeThread).not.toHaveBeenCalled()
+  expect(editorNavigation.invalidateThread).not.toHaveBeenCalled()
   expect(invalidate).not.toHaveBeenCalled()
   expect(f.state.drains).toBe(0)
   if (replace) outer.functionLifecycle = { ...lifecycle }
@@ -484,12 +490,18 @@ it.each([false, true])("keeps the real IPC queue and outer owner alive until rea
   if (replace) {
     expect(result).toBeInstanceOf(Error)
     expect(queue.closeThread).not.toHaveBeenCalled()
+    expect(editorNavigation.invalidateThread).not.toHaveBeenCalled()
     expect(invalidate).not.toHaveBeenCalled()
     expect(f.state.drains).toBe(0)
   } else {
     expect(result).toBeUndefined()
     expect(invalidate).toHaveBeenCalledExactlyOnceWith("bridged")
     expect(queue.closeThread).toHaveBeenCalledExactlyOnceWith("bridged")
+    expect(editorNavigation.invalidateThread).toHaveBeenCalledExactlyOnceWith("bridged")
+    expect(invalidate.mock.invocationCallOrder[0])
+      .toBeLessThan(editorNavigation.invalidateThread.mock.invocationCallOrder[0])
+    expect(editorNavigation.invalidateThread.mock.invocationCallOrder[0])
+      .toBeLessThan(queue.closeThread.mock.invocationCallOrder[0])
     expect(invalidate.mock.invocationCallOrder[0]).toBeLessThan(queue.closeThread.mock.invocationCallOrder[0])
     expect(f.state.drains).toBe(1)
   }

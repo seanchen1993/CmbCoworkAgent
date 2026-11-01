@@ -33,6 +33,7 @@ import { setProjectActionRuntime } from "../project-action-runtime"
 
 const mock = vi.hoisted(() => ({ metadata: {} as Record<string, unknown>, skill: vi.fn() }))
 vi.mock("../../db", () => ({
+  getDb: () => { throw Error("NATIVE_DATABASE_OUTSIDE_UNIT_SCOPE") },
   getThreadCore: () => ({ created_at: 1, metadata: JSON.stringify(mock.metadata) })
 }))
 vi.mock("../host-skill-executor", () => ({ executeHostProjectSkill: mock.skill }))

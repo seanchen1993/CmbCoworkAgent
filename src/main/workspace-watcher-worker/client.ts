@@ -1,5 +1,8 @@
 import type { ResourceLimits, Worker } from "node:worker_threads"
-import type { WorkspaceWatcherWorkerResponse } from "./protocol"
+import type {
+  WorkspaceWatcherWorkerResponse,
+  WorkspaceWatcherDirectoryObservation
+} from "./protocol"
 import { WORKSPACE_WATCHER_CANCELLED } from "./protocol"
 
 export interface WorkspaceWatcherWorkerEvent {
@@ -32,6 +35,14 @@ export class WorkspaceWatcherWorkerClient {
   private startReject: ((error: Error) => void) | null = null
   private started = false
   private closed = false
+  private directoryObservation: WorkspaceWatcherDirectoryObservation | undefined
+
+  /** A copy of actual worker installation evidence, never a filesystem probe. */
+  get observation(): WorkspaceWatcherDirectoryObservation | undefined {
+    return this.started && !this.closed && this.worker && this.directoryObservation
+      ? { ...this.directoryObservation }
+      : undefined
+  }
 
   constructor(
     readonly workspacePath: string,
@@ -62,6 +73,7 @@ export class WorkspaceWatcherWorkerClient {
       return
     }
     if (response.type === "watch-error") {
+      this.directoryObservation = undefined
       const error = new Error(response.error.message)
       error.name = response.error.code
       if (!this.started) {
@@ -81,6 +93,16 @@ export class WorkspaceWatcherWorkerClient {
       return
     }
     this.started = true
+    const observation = response.observation
+    this.directoryObservation =
+      observation &&
+      typeof observation.canonicalPath === "string" &&
+      observation.canonicalPath.length > 0 &&
+      observation.canonicalPath.length <= WORKSPACE_WATCHER_MAX_PATH_LENGTH &&
+      typeof observation.rootIdentity === "string" &&
+      /^\d+:\d+$/.test(observation.rootIdentity)
+        ? { ...observation }
+        : undefined
     const resolve = this.startResolve
     this.startResolve = null
     this.startReject = null
@@ -91,6 +113,7 @@ export class WorkspaceWatcherWorkerClient {
     if (this.worker !== worker || this.closed) return
     this.worker = null
     this.workerPromise = null
+    this.directoryObservation = undefined
     if (this.started) this.onWatchError(error)
     else this.rejectStart(error)
   }
@@ -105,14 +128,13 @@ export class WorkspaceWatcherWorkerClient {
         throw this.cancelledError()
       }
       this.worker = worker
-      worker.on("message", this.handleMessage)
+      worker.on("message", (response: WorkspaceWatcherWorkerResponse) => {
+        if (this.worker === worker && !this.closed) this.handleMessage(response)
+      })
       worker.on("error", (error) => this.failWorker(worker, error))
       worker.on("exit", (code) => {
         if (!this.closed) {
-          this.failWorker(
-            worker,
-            new Error(`Workspace watcher worker exited with code ${code}`)
-          )
+          this.failWorker(worker, new Error(`Workspace watcher worker exited with code ${code}`))
         }
       })
       worker.unref()
@@ -150,6 +172,7 @@ export class WorkspaceWatcherWorkerClient {
   close(): void {
     if (this.closed) return
     this.closed = true
+    this.directoryObservation = undefined
     this.rejectStart(this.cancelledError())
     const terminate = (worker: Worker): void => {
       try {

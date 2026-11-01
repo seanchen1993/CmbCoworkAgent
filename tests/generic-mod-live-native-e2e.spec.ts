@@ -8,6 +8,7 @@ import type { DevelopmentStatus } from "../src/shared/mods/development"
 import { enterModsCreatorChat } from "./support/mods-sidebar-navigation"
 import { genericModLiveRelay } from "./support/generic-mod-live-relay"
 import { readGenericLiveSourceContinuation } from "./support/generic-live-source-continuation"
+import { readHistoricalSourceWrapper } from "./support/mods-historical-source-reference"
 import {
   createHeadlessProjectCompositionLaunch,
   assertCreatorLiveCandidate,
@@ -20,7 +21,11 @@ const build = assertCreatorLiveCandidate(root)
 process.env.COMPOSITION_E2E_ARTIFACT_ROOT ??= join(root, "output/generic-mod-live-20261028")
 const fixture = projectCompositionEnvironment(root)
 const sourceContinuation = process.env.GENERIC_MOD_LIVE_REUSE_SOURCE_RUN
-  ? readGenericLiveSourceContinuation(root, process.env.GENERIC_MOD_LIVE_REUSE_SOURCE_RUN)
+  ? readGenericLiveSourceContinuation(
+      root,
+      process.env.GENERIC_MOD_LIVE_REUSE_SOURCE_RUN,
+      process.env.GENERIC_MOD_LIVE_FEEDBACK_EVIDENCE
+    )
   : undefined
 const resumeProfile = process.env.GENERIC_MOD_LIVE_RESUME_PROFILE
 assert(!(sourceContinuation && resumeProfile), "SOURCE_CONTINUATION_CANNOT_REUSE_OLD_PROFILE")
@@ -94,6 +99,21 @@ const artifactDirectory = sourceContinuation
   ? join(fixture.isolated, `continuation-${randomUUID()}`)
   : fixture.isolated
 if (sourceContinuation) mkdirSync(artifactDirectory)
+if (sourceContinuation)
+  writeFileSync(
+    join(artifactDirectory, "retained-origin-source.json"),
+    JSON.stringify(
+      {
+        sourceDigest: sourceContinuation.sourceDigest,
+        originalEvidence: sourceContinuation.evidencePath,
+        compileReceiptEvidence: feedbackPath ?? sourceContinuation.evidencePath,
+        files: sourceContinuation.files
+      },
+      null,
+      2
+    ),
+    { flag: "wx" }
+  )
 const evidencePath = join(
   artifactDirectory,
   resumeProfile ? `continuation-${label}.json` : "evidence.json"
@@ -147,6 +167,7 @@ let threadId = "",
   passed = false,
   error: string | undefined
 let diagnostic: unknown
+let additionalIntegrityFailure: string | undefined
 let retained:
   | {
       draftId: string
@@ -164,6 +185,7 @@ const save = () =>
       {
         passed,
         error,
+        additionalIntegrityFailure,
         threadId,
         build,
         ...(resumeProfile
@@ -176,7 +198,8 @@ const save = () =>
           sourceDigest: sourceContinuation.sourceDigest,
           oldAuthorityCopied: false,
           mode: "verified-real-model-source-in-same-owned-profile",
-          consentBoundary: "native-confirmation-or-native-same-scope-reuse"
+          consentBoundary: "native-confirmation-or-native-same-scope-reuse",
+          historicalNativeReceipt: sourceContinuation.receiptProof
         },
         realRuntimeModel: true,
         ...(feedbackPath
@@ -642,27 +665,44 @@ async function main() {
         .catch(() => {})
     await app?.close().catch(() => {})
     await relay.close()
-    if (sourceContinuation)
-      assert.equal(
-        createHash("sha256").update(readFileSync(sourceContinuation.evidencePath)).digest("hex"),
-        originalEvidenceDigest,
-        "CONTINUATION_ORIGINAL_EVIDENCE_CHANGED"
-      )
-    if (feedbackPath)
-      assert.equal(
-        createHash("sha256").update(readFileSync(feedbackPath)).digest("hex"),
-        feedbackDigest,
-        "FEEDBACK_ORIGINAL_EVIDENCE_CHANGED"
-      )
-    if (protectedPictures)
-      for (const [name, digest] of Object.entries(protectedPictures))
+    try {
+      if (sourceContinuation)
         assert.equal(
-          createHash("sha256")
-            .update(readFileSync(join(fixture.isolated, name)))
-            .digest("hex"),
-          digest,
-          "CONTINUATION_PREVIOUS_PICTURE_CHANGED"
+          createHash("sha256").update(readFileSync(sourceContinuation.evidencePath)).digest("hex"),
+          originalEvidenceDigest,
+          "CONTINUATION_ORIGINAL_EVIDENCE_CHANGED"
         )
+      if (feedbackPath)
+        assert.equal(
+          createHash("sha256").update(readFileSync(feedbackPath)).digest("hex"),
+          feedbackDigest,
+          "FEEDBACK_ORIGINAL_EVIDENCE_CHANGED"
+        )
+      if (sourceContinuation?.receiptProof) {
+        for (const [path, digest] of Object.entries(sourceContinuation.receiptProof.hashes))
+          assert.equal(
+            createHash("sha256").update(readFileSync(path)).digest("hex"),
+            digest,
+            "CONTINUATION_PRIOR_NATIVE_RECEIPT_CHANGED"
+          )
+        readHistoricalSourceWrapper(sourceContinuation.receiptProof.manifestPath, root)
+      }
+      if (protectedPictures)
+        for (const [name, digest] of Object.entries(protectedPictures))
+          assert.equal(
+            createHash("sha256")
+              .update(readFileSync(join(fixture.isolated, name)))
+              .digest("hex"),
+            digest,
+            "CONTINUATION_PREVIOUS_PICTURE_CHANGED"
+          )
+    } catch (cause) {
+      passed = false
+      additionalIntegrityFailure = relay.redact(
+        cause instanceof Error ? cause.message : String(cause)
+      )
+      error ??= "GENERIC_LIVE_PREVIOUS_EVIDENCE_CHANGED"
+    }
     save()
     console.log(JSON.stringify({ passed, error, evidence: evidencePath }))
     if (!passed) process.exitCode = 1

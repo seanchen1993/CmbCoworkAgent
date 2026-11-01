@@ -1050,7 +1050,7 @@ interface CustomAPI {
     acknowledge(config: UiGuideConfig): Promise<void>
   }
   // Presentation receipts are native renderer-only and cannot be called through the Mods SDK.
-  mods: import("../shared/mods/v2/platform-ui-api").PlatformUiApi & import("../shared/mods/v2/agent-tasks").AgentViewApi & {
+  mods: import("../shared/mods/v2/developer-editor").DeveloperEditorApi & import("../shared/mods/v2/platform-ui-api").PlatformUiApi & import("../shared/mods/v2/agent-tasks").AgentViewApi & {
     onPlatformChanged: (callback: (event: { threadId: string }) => void) => () => void
     runtimeSessions: import("../shared/mods/v2/runtime-sessions").FunctionRuntimeSessionsApi["runtimeSessions"]
     previewSnapshotMaintenance: import("../shared/project-runtime/snapshot-maintenance").SnapshotMaintenanceApi["previewSnapshotMaintenance"]

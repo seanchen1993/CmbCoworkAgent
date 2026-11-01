@@ -10,7 +10,7 @@ import {
   writeFileSync
 } from "node:fs"
 import { dirname, join, relative, resolve } from "node:path"
-import { readModsSourceCandidate } from "./support/mods-source-candidate"
+import { readHistoricalSourceWrapper } from "./support/mods-historical-source-reference"
 import type { ElectronApplication, Page } from "playwright"
 import { enterModsCreatorChat } from "./support/mods-sidebar-navigation"
 import { genericModLiveRelay } from "./support/generic-mod-live-relay"
@@ -36,6 +36,7 @@ const fixture = projectCompositionEnvironment(root)
 const resume = process.env.GENERIC_MOD_PAIR_RESUME_PROFILE
 const previousEvidence = resume ? resolve(resume, "evidence.json") : undefined
 const previous = previousEvidence ? JSON.parse(readFileSync(previousEvidence, "utf8")) : undefined
+let historicalReference: ReturnType<typeof readHistoricalSourceWrapper> | undefined
 if (resume) {
   const owned = realpathSync(resume)
   const currentSourceProfile =
@@ -49,13 +50,17 @@ if (resume) {
   )
   if (currentSourceProfile) {
     assert.equal(previous.build.execution, "source-isolated")
-    readModsSourceCandidate(previous.build.sourceManifest)
+    const historical = readHistoricalSourceWrapper(previous.build.sourceManifest, root)
+    historicalReference = historical
+    assert.equal(historical.mainSha256, previous.build.sha256)
     assert(
       previous.requests.length > 0 &&
         previous.requests.every((row: { status: number }) => row.status === 200)
     )
   }
-  assert.equal(previous.build.sha256, process.env.GENERIC_MOD_PAIR_RESUME_SHA256 ?? build.sha256)
+  // Historical build signatures prove prior evidence; current execution has its own strict source fence.
+  if (!currentSourceProfile || process.env.GENERIC_MOD_PAIR_RESUME_SHA256)
+    assert.equal(previous.build.sha256, process.env.GENERIC_MOD_PAIR_RESUME_SHA256 ?? build.sha256)
   assert.match(previous.threadId, /^[a-f0-9-]{36}$/)
   const generated = fixture.isolated
   for (const key of Object.keys(fixture.env))
@@ -72,6 +77,7 @@ let app: ElectronApplication | undefined,
   threadId = ""
 let passed = false,
   error: string | undefined
+let additionalIntegrityFailure: string | undefined
 const observations: unknown[] = []
 const artifacts = resume ? join(fixture.isolated, `continuation-${randomUUID()}`) : fixture.isolated
 if (resume) mkdirSync(artifacts)
@@ -82,6 +88,12 @@ const protectedFiles =
   Object.fromEntries(
     [
       previousEvidence!,
+      ...(historicalReference
+        ? [
+            historicalReference.manifestPath,
+            join(dirname(dirname(historicalReference.manifestPath)), "run.json")
+          ]
+        : []),
       ...readdirSync(fixture.isolated)
         .filter((name) => name.endsWith(".png"))
         .map((name) => join(fixture.isolated, name))
@@ -94,13 +106,24 @@ const save = () =>
       {
         passed,
         error,
+        additionalIntegrityFailure,
         build,
         threadId,
         realAuthoring: !resume,
         runtimeUsesModel: false,
         ...(previousEvidence ? { resumedFrom: previousEvidence } : {}),
         ...(resume
-          ? { authoringReplayed: false, grantsCopied: false, ordinaryChatUsesModel: true }
+          ? {
+              authoringReplayed: false,
+              grantsCopied: false,
+              ordinaryChatUsesModel: true,
+              historicalSource: historicalReference && {
+                head: historicalReference.head,
+                headBasis: historicalReference.headBasis,
+                sourceBasis: historicalReference.sourceBasis,
+                manifestSha256: historicalReference.manifestSha256
+              }
+            }
           : {}),
         observations,
         requests: relay.metrics
@@ -349,13 +372,22 @@ async function main() {
         .catch(() => {})
     await app?.close().catch(() => {})
     await relay.close()
-    if (protectedFiles)
-      for (const [path, digest] of Object.entries(protectedFiles))
-        assert.equal(
-          createHash("sha256").update(readFileSync(path)).digest("hex"),
-          digest,
-          "COMPOSITION_PREVIOUS_EVIDENCE_CHANGED"
-        )
+    try {
+      if (protectedFiles)
+        for (const [path, digest] of Object.entries(protectedFiles))
+          assert.equal(
+            createHash("sha256").update(readFileSync(path)).digest("hex"),
+            digest,
+            "COMPOSITION_PREVIOUS_EVIDENCE_CHANGED"
+          )
+      if (historicalReference) readHistoricalSourceWrapper(historicalReference.manifestPath, root)
+    } catch (cause) {
+      passed = false
+      additionalIntegrityFailure = relay.redact(
+        cause instanceof Error ? cause.message : String(cause)
+      )
+      error ??= "COMPOSITION_PREVIOUS_EVIDENCE_CHANGED"
+    }
     save()
     console.log(JSON.stringify({ passed, error, evidence: evidencePath }))
     if (!passed) process.exitCode = 1

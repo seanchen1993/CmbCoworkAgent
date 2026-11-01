@@ -3,7 +3,7 @@
   "status": "implementation-in-progress-not-full-parity",
   "currentDesktopReference": {
     "version": "2.1.316",
-    "hostRevision": "devclaw-mods-v95",
+    "hostRevision": "devclaw-mods-v96",
     "report": "docs/mods-nonmedia-and-phase3-verification-2026-11-01.md",
     "inventory": "docs/mods-nonmedia-sdk-inventory-2026-11-01.json",
     "scope": "Current bounded desktop adapters. Historical version references below keep their original scope; method presence is not provider equivalence."
@@ -5193,7 +5193,13 @@
             "src/main/mods/v2/session.ts",
             "src/main/mods/v2/guest-bootstrap.ts"
           ],
-          "note": "Literal declared name; source/session-isolated set/unset enters later owned process.run/spawn, explicit process env wins. Protected names denied. Does not mutate Electron or global/model-tool environments."
+          "note": "Literal declared name; source/session-isolated set/unset enters later owned process.run/spawn, explicit process env wins. Protected names denied. Does not mutate Electron or global/model-tool environments.",
+          "evidence": [
+            "src/main/mods/v2/nonmedia-session.test.ts",
+            "src/main/mods/v2/environment-sdk.test.ts",
+            "src/main/mods/v2/process-sdk.test.ts"
+          ],
+          "evidenceScope": "QuickJS source-scoped set/get/unset reaches actual run/spawn children while another source is denied and host process.env remains unchanged. Literal-name and protected-name checks, frozen process approval arguments, explicit environment forwarding and ambient-secret exclusion have separate source tests. This is bounded session/process evidence, not unrestricted inherited-environment or native UI approval equivalence."
         }
       ]
     }

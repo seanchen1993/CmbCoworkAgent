@@ -43,6 +43,8 @@ import { setCurrentRunMessageQueueOwner, clearCurrentRunMessageQueue,
   isCurrentRunMessageQueueOwner, captureCurrentRunMessageQueueOwner } from
   "./current-run-message-queue"
 import type { QueuedStreamTranscriptMessage } from "../ipc/stream-transcript-flush"
+import { captureFunctionPlacedAnchor, forgetFunctionPlacedCursor,
+  rememberFunctionPlacedMessage } from "../mods/v2/placed-anchor-host"
 
 const paths = vi.hoisted(() => ({ database: "" }))
 vi.mock("../storage", () => ({ getDbPath: () => paths.database,
@@ -1093,7 +1095,10 @@ describe("private native stream projection (real SQLite, foundation scope)", () 
   it("actual IPC early branch consumes the private canonical snapshot before old route/queue/hydration", () => {
     const f = fixture(), runToken = randomUUID()
     setCurrentRunMessageQueueOwner(f.threadId, runToken)
-    cleanups.push(() => clearCurrentRunMessageQueue(f.threadId))
+    cleanups.push(() => {
+      clearCurrentRunMessageQueue(f.threadId)
+      forgetFunctionPlacedCursor(f.threadId)
+    })
     const source = ts.createSourceFile("agent.ts", readFileSync(resolve("src/main/ipc/agent.ts"), "utf8"),
       ts.ScriptTarget.Latest, true)
     const declaration = source.statements.find(node => ts.isFunctionDeclaration(node) &&
@@ -1112,12 +1117,14 @@ describe("private native stream projection (real SQLite, foundation scope)", () 
       runInNewContext(code, { exports: {}, isCurrentRunMessageQueueOwner,
         shouldSkipMainTranscriptStreamPayload: () => false, readNativeConversationStreamProjection,
         captureCurrentRunMessageQueueOwner,
+        rememberFunctionPlacedMessage,
         partitionCanonicalThreadMessageEchoes: appDb.partitionCanonicalThreadMessageEchoes,
         persistedMessageFromStreamPayload, routeCurrentRunCompletedAssistantMessage: route,
         queueStreamTranscriptMessage: queue,
         hydrateStreamTranscriptToolCalls: () => { throw Error("OLD_HYDRATE_MUST_NOT_RUN") } })
     const wire = serializeStreamData("messages", [f.message, {}]).data
     expect(call(f.threadId, runToken, "messages", wire)).toBe(f.uuid)
+    expect(captureFunctionPlacedAnchor(f.threadId)).toMatchObject({ id: f.uuid, role: "assistant" })
     expect(route).not.toHaveBeenCalled()
     expect(queue).not.toHaveBeenCalled()
   })

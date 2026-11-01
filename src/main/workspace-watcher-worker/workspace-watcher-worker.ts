@@ -2,7 +2,8 @@ import * as fs from "node:fs"
 import { parentPort } from "node:worker_threads"
 import type {
   WorkspaceWatcherWorkerRequest,
-  WorkspaceWatcherWorkerResponse
+  WorkspaceWatcherWorkerResponse,
+  WorkspaceWatcherDirectoryObservation
 } from "./protocol"
 import {
   WORKSPACE_WATCHER_EVENT_BATCH_MAX_BYTES,
@@ -47,6 +48,19 @@ function closeWatcher(): void {
     // The native watcher may already be closed after an error.
   }
   watcher = null
+}
+
+function directoryObservation(workspacePath: string): WorkspaceWatcherDirectoryObservation {
+  const stats = fs.lstatSync(workspacePath, { bigint: true })
+  if (!stats.isDirectory() || stats.isSymbolicLink()) {
+    const error = new Error(`Workspace path is not an ordinary directory: ${workspacePath}`)
+    error.name = "ENOTDIR"
+    throw error
+  }
+  return {
+    canonicalPath: fs.realpathSync.native(workspacePath),
+    rootIdentity: `${stats.dev}:${stats.ino}`
+  }
 }
 
 function flushEvents(): void {
@@ -101,25 +115,25 @@ parentPort?.on("message", (request: WorkspaceWatcherWorkerRequest) => {
     // Both validation and watcher installation are intentionally synchronous
     // inside this dedicated worker. A disconnected UNC path cannot consume an
     // Electron-main libuv filesystem slot or freeze the app event loop.
-    const stats = fs.lstatSync(request.workspacePath)
-    if (!stats.isDirectory()) {
-      const error = new Error(`Workspace path is not a directory: ${request.workspacePath}`)
-      error.name = "ENOTDIR"
-      throw error
-    }
-    watcher = fs.watch(
-      request.workspacePath,
-      { recursive: true },
-      (eventType, filename) => {
-        queueEvent(eventType, filename)
-      }
-    )
+    const observation = directoryObservation(request.workspacePath)
+    watcher = fs.watch(request.workspacePath, { recursive: true }, (eventType, filename) => {
+      queueEvent(eventType, filename)
+    })
     watcher.on("error", (error) => {
       flushEvents()
       closeWatcher()
       post({ type: "watch-error", error: serializeError(error) })
     })
-    post({ type: "start-result", requestId: request.requestId, ok: true })
+    const installed = directoryObservation(request.workspacePath)
+    if (
+      installed.canonicalPath !== observation.canonicalPath ||
+      installed.rootIdentity !== observation.rootIdentity
+    ) {
+      const error = new Error("Workspace directory changed during watcher installation")
+      error.name = "WORKSPACE_WATCHER_ROOT_CHANGED"
+      throw error
+    }
+    post({ type: "start-result", requestId: request.requestId, ok: true, observation })
   } catch (error) {
     closeWatcher()
     post({

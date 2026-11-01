@@ -1,4 +1,4 @@
-import { useEffect, useState, useMemo } from "react"
+import { useEffect, useState, useMemo, useRef } from "react"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { VirtualList } from "@/components/ui/virtual-list"
 import { shouldSoftWrapCodePreview } from "@/lib/code-preview-layout"
@@ -7,6 +7,9 @@ import { requestCodeHighlight } from "./code-highlight-client"
 interface CodeViewerProps {
   filePath: string
   content: string
+  /** Native source-only navigation. No HTML/Markdown rendering or external dependency reads. */
+  target?: { id: string; line: number; column: number }
+  onTargetLocated?(located: boolean): void
 }
 
 const VIRTUAL_SCROLL_LINE_THRESHOLD = 100
@@ -57,8 +60,16 @@ function getLanguage(ext: string | undefined): string | null {
   return lang && SUPPORTED_LANGS.has(lang) ? lang : null
 }
 
-export function CodeViewer({ filePath, content }: CodeViewerProps) {
+export function CodeViewer({ filePath, content, target, onTargetLocated }: CodeViewerProps) {
   const [highlighted, setHighlighted] = useState<{ key: string; html: string } | null>(null)
+  const targetElement = useRef<HTMLElement | null>(null)
+  const located = useRef(onTargetLocated)
+  useEffect(() => {
+    located.current = onTargetLocated
+  }, [onTargetLocated])
+  const targetId = target?.id,
+    targetLine = target?.line,
+    targetColumn = target?.column
 
   // Get file extension for syntax highlighting
   const fileName = filePath.split("/").pop() || filePath
@@ -69,7 +80,10 @@ export function CodeViewer({ filePath, content }: CodeViewerProps) {
   const shouldVirtualize = lines.length > VIRTUAL_SCROLL_LINE_THRESHOLD
   const lineCount = lines.length
   const highlightKey =
-    language !== null && !shouldVirtualize && content.length <= MAX_HIGHLIGHT_CONTENT_CHARS
+    !target &&
+    language !== null &&
+    !shouldVirtualize &&
+    content.length <= MAX_HIGHLIGHT_CONTENT_CHARS
       ? `${language}\u0000${content}`
       : null
   const highlightedHtml = highlighted?.key === highlightKey ? highlighted.html : null
@@ -83,6 +97,80 @@ export function CodeViewer({ filePath, content }: CodeViewerProps) {
       .catch(() => undefined)
     return request.cancel
   }, [content, highlightKey, language])
+
+  useEffect(() => {
+    if (!targetId) return
+    let second = 0
+    const first = requestAnimationFrame(() => {
+      const element = targetElement.current
+      if (!element) {
+        located.current?.(false)
+        return
+      }
+      element.scrollIntoView({ block: "center", inline: "center" })
+      element.focus({ preventScroll: true })
+      second = requestAnimationFrame(() => {
+        const rect = element.getBoundingClientRect()
+        located.current?.(
+          document.visibilityState === "visible" &&
+            element.isConnected &&
+            rect.height > 0 &&
+            rect.width > 0 &&
+            rect.bottom > 0 &&
+            rect.top < window.innerHeight &&
+            rect.right > 0 &&
+            rect.left < window.innerWidth
+        )
+      })
+    })
+    return () => {
+      cancelAnimationFrame(first)
+      cancelAnimationFrame(second)
+    }
+  }, [targetId, targetLine, targetColumn, content])
+
+  if (target) {
+    const line = lines[target.line - 1]?.replace(/\r$/, "")
+    const valid = line !== undefined && target.column >= 1 && target.column <= line.length + 1
+    const start = Math.max(0, target.line - 41),
+      end = Math.min(lines.length, target.line + 40)
+    return (
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+        <p className="shrink-0 border-b p-2">
+          {filePath} · 源文本片段 {start + 1}–{end} / {lines.length}
+        </p>
+        <div className="min-h-0 flex-1 overflow-auto" data-native-editor-source>
+          <pre className="p-4 font-mono text-sm leading-[22px]">
+            {lines.slice(start, end).map((text, index) => {
+              const number = start + index + 1
+              return (
+                <div key={number} data-native-editor-line={number}>
+                  <span aria-hidden className="mr-4 inline-block w-12 text-right">
+                    {number}
+                  </span>
+                  {number === target.line && valid ? (
+                    <>
+                      {line.slice(0, target.column - 1)}
+                      <mark
+                        ref={targetElement}
+                        tabIndex={-1}
+                        data-native-editor-column={target.column}
+                      >
+                        {line.slice(target.column - 1, target.column) || "\u200b"}
+                      </mark>
+                      {line.slice(target.column)}
+                    </>
+                  ) : (
+                    text.replace(/\r$/, "") || " "
+                  )}
+                </div>
+              )
+            })}
+          </pre>
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div className="flex h-full flex-1 flex-col min-h-0 overflow-hidden">

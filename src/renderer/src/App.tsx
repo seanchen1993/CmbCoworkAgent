@@ -52,6 +52,9 @@ const CustomizeView = lazy(() =>
 const PlatformWorkspace = lazy(() =>
   import("@/components/platform/PlatformWorkspace").then((m) => ({ default: m.PlatformWorkspace }))
 )
+const NativeEditorIntentHost = lazy(() =>
+  import("@/lib/native-editor-intent").then((m) => ({ default: m.NativeEditorIntentHost }))
+)
 const ScheduledPanel = lazy(() =>
   import("@/components/customize/ScheduledPanel").then((m) => ({ default: m.ScheduledPanel }))
 )
@@ -1376,6 +1379,10 @@ function App(): React.JSX.Element {
                             <Suspense fallback={null}>
                               <PlatformWorkspace key={platformWorkspaceScope} scopeKey={platformWorkspaceScope}
                                 threadId={renderedThreadId}
+                                active={!showCustomizeView && !renderRoutePending && !browserFullscreen} />
+                              <NativeEditorIntentHost key={`editor:${platformWorkspaceScope}`}
+                                threadId={renderedThreadId} workspace={platformWorkspacePath}
+                                scopeKey={platformWorkspaceBirth} api={window.api.mods}
                                 active={!showCustomizeView && !renderRoutePending && !browserFullscreen} />
                             </Suspense>
                           )}

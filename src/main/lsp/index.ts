@@ -4,6 +4,7 @@ import { BrowserWindow } from "electron"
 import { spawnJdtls, checkJdtlsAvailable, getVsixStatus } from "./server"
 import { buildGlobalRuntimeContext, buildProjectRuntimeContext } from "./runtimes"
 import { LspClient } from "./client"
+import { normalizeWorkspacePathKey } from "../../shared/workspace-path"
 import { getLspConfig, saveLspConfig } from "../storage"
 import type {
   LspDiagnostic, LspLocation, LspHoverResult, LspSymbol,
@@ -268,6 +269,18 @@ export function getLspState(projectRoot: string): LspServerState | null {
 export function getClient(projectRoot: string): LspClient | null {
   const entry = servers.get(projectRoot)
   return entry?.state === "running" ? entry.client : null
+}
+
+/** Read-only native capability lookup. Ambiguous aliases never select an arbitrary server. */
+export function getRunningClientForWorkspace(workspace: string): LspClient | null {
+  const key = normalizeWorkspacePathKey(workspace)
+  let found: LspClient | null = null
+  for (const [root, entry] of servers) {
+    if (normalizeWorkspacePathKey(root) !== key || entry.state !== "running") continue
+    if (found && found !== entry.client) return null
+    found = entry.client
+  }
+  return found
 }
 
 export async function getLspStatus(projectRoot: string | null): Promise<LspStatus> {

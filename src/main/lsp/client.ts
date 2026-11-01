@@ -216,6 +216,7 @@ export class LspClient {
   private initialized = false
   /** Map of file URI → version. File stays "open" for the LSP session lifetime. */
   private openFiles = new Map<string, number>()
+  private observedDocumentGeneration = 0
   private diagnosticsMap = new Map<string, LspDiagnostic[]>()
   private onDiagnosticsChange: DiagnosticsCallback | null = null
   private diagnosticsDebounceTimer: ReturnType<typeof setTimeout> | null = null
@@ -559,6 +560,7 @@ export class LspClient {
     }
 
     const uri = pathToUri(filePath)
+    this.observedDocumentGeneration++
 
     if (this.openFiles.has(uri)) {
       // File already open — notify file watcher, then send didChange
@@ -593,6 +595,16 @@ export class LspClient {
         params
       )
     }
+  }
+
+  /** Observation only. Does not open a document or claim a diagnostic version. */
+  getObservedDocumentVersion(filePath: string): number | null {
+    return this.openFiles.get(pathToUri(filePath)) ?? null
+  }
+
+  /** Also fences concurrent UI updates through another spelling of the same file URI. */
+  getObservedDocumentGeneration(): number {
+    return this.observedDocumentGeneration
   }
 
   /** Invalidate call hierarchy cache entries for a file (after didChange). */

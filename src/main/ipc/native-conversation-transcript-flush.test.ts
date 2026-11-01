@@ -20,6 +20,8 @@ import { resolveStreamTranscriptFlush, type QueuedStreamTranscriptMessage } from
 import { FunctionConversationStore } from "../db/function-conversation-store"
 import { createFunctionConversationTranscriptAccess } from "../db/function-conversation-transcript"
 import { serializeFunctionConversationNativeMessage } from "../agent/function-conversation-native-message"
+import { forgetFunctionPlacedCursor, rememberFunctionPlacedMessage } from
+  "../mods/v2/placed-anchor-host"
 
 const paths = vi.hoisted(() => ({ database: "" }))
 vi.mock("../storage", () => ({ getDbPath: () => paths.database,
@@ -55,6 +57,7 @@ afterEach(() => {
   for (const { threadId, runToken } of owners.splice(0)) {
     releaseLocalThreadRunLease(threadId, "desktop", runToken)
     clearCurrentRunMessageQueue(threadId)
+    forgetFunctionPlacedCursor(threadId)
   }
   vi.restoreAllMocks()
   vi.clearAllTimers()
@@ -86,7 +89,7 @@ function actualFunctions(pending: Map<string, Pending>) {
     captureLocalThreadRunLease, captureThreadIncarnation, matchesThreadIncarnation,
     getLocalThreadRunLease,
     captureCurrentRunMessageQueueOwner, isCurrentRunMessageQueueOwner, resolveStreamTranscriptFlush,
-    reconcileNativePartialQueuedMessages,
+    reconcileNativePartialQueuedMessages, rememberFunctionPlacedMessage,
     getDb: appDb.getDb, getThreadCore: (...args: Parameters<typeof appDb.getThreadCore>) =>
       appDb.getThreadCore(...args),
     getThreadRuntimeScope: (...args: Parameters<typeof appDb.getThreadRuntimeScope>) =>

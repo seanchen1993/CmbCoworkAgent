@@ -11,6 +11,12 @@ import { readAuthoringProjectSource } from "./project-source"
 import type { ProjectAuthoringSessions } from "./project-authoring-session"
 import { parsePortableBusinessModUserConfig } from "../../plugins/business-mod-user-config"
 import { parseFunctionUserConfigSchema } from "../../../shared/mods/v2/user-config-schema"
+import {
+  assertProjectPackageReportUnchanged,
+  projectPackageActualExcluded,
+  PROJECT_PACKAGE_REPORT_PATH,
+  readProjectPackageReport
+} from "./project-package-report"
 
 const identity = (plugin: PluginMetadata) =>
   createHash("sha256")
@@ -121,6 +127,7 @@ export async function projectFromInstalledPlugin(input: {
       )
         throw Error("PROJECT_PLUGIN_SOURCE_UNSUPPORTED")
     }
+    const packageReport = readProjectPackageReport(root, source.bundle)
     const retained = new Set([
       NATIVE_COMPOSITION_PATH,
       ...declaration.resources,
@@ -136,7 +143,7 @@ export async function projectFromInstalledPlugin(input: {
       declaration.modules.map((module) => `skills/native-${module.id}/SKILL.md`)
     )
     if (
-      source.excluded.length ||
+      projectPackageActualExcluded(source.excluded, packageReport).length ||
       source.bundle.files.some(
         (file) => !retained.has(file.path) && !generatedSkills.has(file.path)
       )
@@ -144,19 +151,26 @@ export async function projectFromInstalledPlugin(input: {
       throw Error("PROJECT_PLUGIN_SOURCE_UNSUPPORTED")
     if (input.sourceDigest && input.sourceDigest !== source.bundle.digest)
       throw Error("PROJECT_PLUGIN_SOURCE_CHANGED")
-    const pinned = pinSource(
-      root,
-      source.bundle.files.map((file) => file.path)
-    )
+    if (packageReport) assertProjectPackageReportUnchanged(root, packageReport)
+    const pinned = pinSource(root, [
+      ...source.bundle.files.map((file) => file.path),
+      ...(packageReport ? [PROJECT_PACKAGE_REPORT_PATH] : [])
+    ])
     const currentGuard = () => {
       guard()
       assertOriginalContent(root)
       pinned()
+      if (packageReport) assertProjectPackageReportUnchanged(root, packageReport)
     }
     // A second bounded read binds the bytes read before pinning to the pinned file identities.
     const checked = await readAuthoringProjectSource(root)
+    const checkedReport = readProjectPackageReport(root, checked.bundle)
     currentGuard()
-    if (checked.bundle.digest !== source.bundle.digest || checked.excluded.length)
+    if (
+      checked.bundle.digest !== source.bundle.digest ||
+      projectPackageActualExcluded(checked.excluded, checkedReport).length ||
+      checkedReport?.sha256 !== packageReport?.sha256
+    )
       throw Error("PROJECT_PLUGIN_SOURCE_CHANGED")
     const draft = await input.sessions.save(
       input.scope,
@@ -176,7 +190,18 @@ export async function projectFromInstalledPlugin(input: {
         name: plugin.name,
         version: plugin.version,
         installedIdentity,
-        sourceDigest: source.bundle.digest
+        sourceDigest: source.bundle.digest,
+        ...(packageReport
+          ? {
+              packageReport: {
+                path: PROJECT_PACKAGE_REPORT_PATH,
+                sha256: packageReport.sha256,
+                sourceDigest: packageReport.report.sourceDigest,
+                schemaVersion: 1,
+                executing: false
+              }
+            }
+          : {})
       },
       originalPreserved: true,
       executed: false,
@@ -184,6 +209,8 @@ export async function projectFromInstalledPlugin(input: {
       requiresFreshTrial: true
     }
   } catch (error) {
+    if (error instanceof Error && error.message === "PROJECT_PACKAGE_REPORT_INVALID")
+      throw Error("PROJECT_PLUGIN_SOURCE_UNSUPPORTED")
     if (error instanceof Error && error.message === MARKET_CONTENT_DENIED)
       throw Error("PROJECT_PLUGIN_SOURCE_PROTECTED")
     if (error instanceof SyntaxError || error instanceof ZodError)

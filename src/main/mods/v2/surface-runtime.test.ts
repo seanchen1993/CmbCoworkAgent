@@ -12,6 +12,27 @@ async function create(body: string) {
 afterEach(() => instances.splice(0).forEach((instance) => instance.dispose()))
 
 describe("isolated Client surface", () => {
+  it("clears the real registration export while preserving the shared readonly JSX factories", async () => {
+    const client = await create(`const {Text}=surface.elements;
+      const names=["h","Fragment","__functionJsx","__functionFragment"];
+      let rejected=0;
+      for(const name of names) {
+        const descriptor=Object.getOwnPropertyDescriptor(globalThis,name);
+        if(!descriptor||typeof descriptor.get!=="function"||descriptor.set||descriptor.configurable)
+          throw Error("SHARED_FACTORY_NOT_READONLY");
+        try { Object.defineProperty(globalThis,name,{value:()=>null}); }
+        catch { rejected++; }
+      }
+      return h(Text,null,JSON.stringify({cleared:globalThis.__cmbFunctionMod===undefined,
+        shared:h===__functionJsx&&Fragment===__functionFragment,rejected}));`)
+    const snapshot = await client.update({ kind: "render", props: {}, columns: 10, rows: 5 })
+    expect(snapshot.tree).toEqual({
+      type: "Text",
+      props: {},
+      children: [JSON.stringify({ cleared: true, shared: true, rejected: 4 })]
+    })
+  })
+
   it("reuses the shared public factories without replacing their readonly bindings", async () => {
     const client = await create(`const {Text}=surface.elements;
       return h(Fragment,null,h(Text,null,String(h===__functionJsx&&Fragment===__functionFragment)));`)
@@ -29,13 +50,15 @@ describe("isolated Client surface", () => {
     expect(snapshot.tree).toEqual({
       type: "Box",
       props: { flexDirection: "column" },
-      children: [{
-        type: "fragment",
-        children: [
-          { type: "Text", props: {}, children: ["first"] },
-          { type: "Text", props: {}, children: ["second"] }
-        ]
-      }]
+      children: [
+        {
+          type: "fragment",
+          children: [
+            { type: "Text", props: {}, children: ["first"] },
+            { type: "Text", props: {}, children: ["second"] }
+          ]
+        }
+      ]
     })
   })
   it("keeps state across props/resize and accepts repeated fresh actions", async () => {

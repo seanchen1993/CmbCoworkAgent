@@ -1,4 +1,5 @@
 import { creatorNextStep } from "./creator-next-step"
+import { sourceSetError, sourceSetFailureCode } from "./source-set-view"
 import type { StageDebugReviewIntent } from "../../../../shared/mods/v2/project-stage-debug-review"
 import { developmentCapabilityLabel } from "./development-capability-label"
 import {
@@ -65,6 +66,7 @@ function publicError(
   fallback = "暂时无法确认操作结果。请刷新状态，查看是否已完成。"
 ): string {
   const message = error instanceof Error ? error.message : ""
+  if (sourceSetFailureCode(error) === "SOURCE_SET_BUSY") return sourceSetError("SOURCE_SET_BUSY")
   if (message.includes("CREATOR_REPAIR_QUEUE_NOT_EMPTY"))
     return "还有待发送的消息，请先处理后再修复灵件。原输入和待发送消息都已保留。"
   if (message.includes("CREATOR_REPAIR_BUSY")) return "请先处理当前任务或待确认事项，再修复灵件。"

@@ -322,7 +322,7 @@ it("strictly validates semantic version, permission declarations and object sche
       actions: [{ ...descriptor.actions[0], requiredPermissions: ["arbitrary.ipc"] }]
     })
   ).toThrow()
-  expect(FUNCTION_HOST_REVISION).toBe("devclaw-mods-v95")
+  expect(FUNCTION_HOST_REVISION).toBe("devclaw-mods-v96")
 })
 
 it("native cleanup frame denies new effects while still awaiting real timer cleanup ACK", async () => {

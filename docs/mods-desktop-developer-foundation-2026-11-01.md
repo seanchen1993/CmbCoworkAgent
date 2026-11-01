@@ -1,6 +1,6 @@
 # 桌面 Mods 开发者入口
 
-本说明对应 `codex/mods-v2` 的桌面适配，应用版本 2.0.0，宿主契约修订 v95。
+本说明对应 `codex/mods-v2` 的桌面适配，应用版本 2.0.0，宿主契约修订 v96。
 面向用户的能力范围见 [可自定义说明](mods-user-customization-2026-11-01.md)；阶段业务留在插件中，原项目模式入口和运行器继续沿用。
 
 ## 最小插件和 ZIP
@@ -81,6 +81,7 @@ export const register: Register = (on) => {
 | 参数与状态 | `config.list/set`、`state.get/set`、`store.get/set` 及五个 helper |
 | 本机执行与诊断 | `process.run/spawn`、`http.fetch`、`env.set`、`ui.notify`、`telemetry.records` |
 | 模块准入与本机生命周期 | `plugin.register`、`session.attach/detach`、`classic.WorktreeRemove` |
+| 开发者工作台原生桥 | 精查 `native.code`、`native.editor`、`native.workspace`，通过 `platform` 公共协议调用 |
 
 以实际查询的签名为准。项目插件可以组合公共能力，但普通聊天 MCP/子会话接口不自动具有项目运行上下文。跨插件 action、任意 keybinding、任意 DOM/Node 和全局 CSS 没有因类型可见而开放。
 
@@ -95,7 +96,23 @@ export const register: Register = (on) => {
 - `env.set` 静态声明 literal 名称；只影响本插件当前会话之后的 process.run/spawn，显式进程 env 优先，不更改宿主进程或模型工具环境。
 - `ui.notify(text,{surface:"desktop"})` 是明确桌面扩展。默认上游终端通道在桌面返回 no-surface；不要把系统接收展示当作用户已看见。
 - `telemetry.log/mark` 可被实际 Hook 消费，当前落本插件有界本地诊断；`records` 不是上传服务。身份、终端面和无提供者的生命周期事件的完整限制见用户说明。
-- v95 扩大了宿主能力摘要，v94 及更早的旧确认不会默许新权限。当前版本集中核对一次，源码或权限改变后仍需重新确认；不会在重新启动时偷偷继承旧试用授权。
+- v96 的代码观察、导航与工作区观察进入实际宿主摘要，v95及更早的旧确认不会默许新权限。当前版本集中核对一次，源码或权限改变后仍需重新确认；不会在重新启动时偷偷继承旧试用授权。
+
+## 开发者工作台公共协议
+
+这些是原生 capability，不是新增 `$.native` 命名空间。授权后先 `platform.list/read` 核实际状态；创造者可以在未执行时精查上述三个名称或 `native.code.diagnostics` 的有界schema，使用原 `platform.act/subscribe/poll`。
+
+| ref | 能力与限制 |
+| --- | --- |
+| `native.code/java@1.0.0` | 当前已运行Java服务的10项只读查询；文件512KiB、结果14KB及64项上限。行从1开始、列为UTF-16；核文件快照/client实例和文档变化。诊断明确cached/versionUnknown；停止等待不证明服务请求停止，未结算请求保留额度 |
+| `native.editor/navigation@1.0.0` | `preview({path,line?,column?})` 打开64KiB安全源文本；原生renderer实际定位后才返回preview-loaded。外部IDE仅预览里的用户按钮，固定本机配置，display始终unknown；Windows不安全argv路径只提供内置预览 |
+| `native.workspace/changes@1.0.0` | read/watch现有观察器；状态含observing和不透明observationId，事件为有界patch/invalidate。实际安装根目录身份、线程、来源、背压和权限均复核；不主动startWatching或扫描，不伪造classic文件事件 |
+
+上述原生状态按精确caller来源分域；旧事件在poll前重新核权限，代码查询的历史回执也重核其中各文件位置。相同requestKey返回历史事实，不重新查询或再次导航；刷新用新的requestKey，unknown不重放。
+
+通用示例位于 `examples/developer-workbench`，通过原示例目录安装或导入其ZIP。包内任务提供者、页面和配置用公开协议组合；发现/渲染不执行命令。默认检查命令为 `node --version`，开发者可配置argv并沿原审批启动；实际result、close、取消请求和unknown分开。现有独立Claude Code终端不会被此插件隐式启动。
+
+普通状态逐行显示；“查看开发信息”只展开已读取的有界详情，不增加SDK调用或授权。导航的30秒期限只约束加载握手；真实定位ACK后可以继续阅读同窗只读快照（非实时），普通RPC结束不关闭它，撤权/切换/重载仍失效。外部IDE按钮每次重新核路径、字节和完整来源链。
 
 ## 模块准入与生命周期
 

@@ -9,6 +9,12 @@ import type {
 export interface NativePlatformCaller extends PlatformCapabilitySource {
   name: string
 }
+/** Main-only authority for a read-only presentation, never a guest resource or an SDK. */
+export interface NativePlatformReadLease {
+  readonly context: NativePlatformCallContext
+  validate(): Promise<void>
+  close(): void
+}
 /** Main-only native context. Never serialized to or accepted from a guest. */
 export interface NativePlatformCallContext {
   readonly workspace: string
@@ -17,6 +23,8 @@ export interface NativePlatformCallContext {
   readonly generation: string
   readonly caller: NativePlatformCaller
   readonly signal: AbortSignal
+  /** Capture only during admitted act; a lease never inherits the transient RPC lifetime. */
+  captureReadLease?(): NativePlatformReadLease
   assertCurrent(): void
   publish(value: ModJson): void
   /** Retains the original caller chain for every nested effect and native permission check. */
@@ -34,6 +42,20 @@ export interface NativePlatformActionAccess {
   assertContentCurrent?(): void
 }
 export interface NativePlatformCapabilityProvider {
+  /** Main-only opt-in for state filtered by the exact caller's authority. */
+  readonly callerScopedState?: boolean
+  /** Revalidate the exact cached event snapshot before it leaves the native boundary. */
+  validateStateAccess?(
+    context: NativePlatformCallContext,
+    values: readonly ModJson[]
+  ): Promise<void>
+  /** Cached receipts remain historical, but may no longer expose newly denied resources. */
+  validateActionResultAccess?(
+    context: NativePlatformCallContext,
+    action: string,
+    selector: unknown,
+    value: ModJson
+  ): Promise<void>
   /** Main-only allowlist; guest declarations cannot make native effects into queries. */
   readonly queryActions?: readonly string[]
   readonly queryRead?: boolean

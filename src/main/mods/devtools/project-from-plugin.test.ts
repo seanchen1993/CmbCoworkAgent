@@ -3,6 +3,8 @@ import { tmpdir } from "node:os"
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { writeFileSync } from "node:fs"
 import { afterEach, describe, expect, it, vi } from "vitest"
+import AdmZip from "adm-zip"
+import { createHash } from "node:crypto"
 import type { PluginMetadata } from "../../types"
 import type { DevelopmentScope } from "../v2/development-session"
 import { compileNativeComposition } from "../../plugins/native-composition"
@@ -11,6 +13,8 @@ import { ModControlStore } from "../control-store"
 import { ProjectAuthoringSessions } from "./project-authoring-session"
 import { readProjectSource } from "./project-source"
 import { projectFromInstalledPlugin } from "./project-from-plugin"
+import { packProjectPlugin } from "./project-tooling"
+import { PROJECT_PACKAGE_REPORT_PATH, readProjectPackageReport } from "./project-package-report"
 
 const scope: DevelopmentScope = {
   threadId: "installed-project-author",
@@ -87,6 +91,109 @@ async function fixture() {
 }
 
 describe("installed native project author source", () => {
+  it("derives a real packed ZIP and recompiles/repackages without recursive reports or inherited authority", async () => {
+    const f = await fixture()
+    const original = (await readProjectSource(f.installed)).bundle
+    const zip = join(f.root, "first.zip")
+    await packProjectPlugin(f.installed, zip)
+    const installed = join(f.root, "installed-zip")
+    new AdmZip(zip).extractAllTo(installed, false)
+    const reportFile = join(installed, PROJECT_PACKAGE_REPORT_PATH)
+    const reportBytes = await readFile(reportFile)
+    const reportHash = createHash("sha256").update(reportBytes).digest("hex")
+    expect((await readProjectSource(installed)).excluded).toEqual([PROJECT_PACKAGE_REPORT_PATH])
+    const selected = { ...f.plugin, id: "packed-installation", path: installed }
+    const derived = await projectFromInstalledPlugin({
+      ...f.input,
+      pluginId: selected.id,
+      plugins: () => [selected],
+      sourceDigest: original.digest
+    })
+    expect(derived.origin).toMatchObject({
+      sourceDigest: original.digest,
+      packageReport: {
+        path: PROJECT_PACKAGE_REPORT_PATH,
+        sha256: reportHash,
+        sourceDigest: original.digest,
+        executing: false
+      }
+    })
+    expect(derived.draft.source).toEqual(original)
+    expect(
+      derived.draft.source.files.some((file) => file.path === PROJECT_PACKAGE_REPORT_PATH)
+    ).toBe(false)
+    expect(derived).toMatchObject({
+      grantsAuthority: false,
+      requiresFreshTrial: true,
+      executed: false
+    })
+    expect(f.sessions.trialRequest(scope)).toBeUndefined()
+    const compiled = await f.sessions.compile(
+      scope,
+      derived.draft.id,
+      derived.draft.revision,
+      () => {}
+    )
+    const repacked = join(f.root, "derived.zip")
+    await packProjectPlugin(compiled.directory, repacked)
+    const next = JSON.parse(new AdmZip(repacked).readAsText(PROJECT_PACKAGE_REPORT_PATH))
+    expect(next.files).not.toContain(PROJECT_PACKAGE_REPORT_PATH)
+    expect(next.sourceDigest).toBe(compiled.source.digest)
+    expect(next.tests.digest).toBe(compiled.source.digest)
+    expect(await readFile(reportFile)).toEqual(reportBytes)
+
+    const historical = JSON.parse(reportBytes.toString("utf8"))
+    historical.excluded = ["old-development.log"]
+    await writeFile(reportFile, JSON.stringify(historical))
+    const oldReport = await readFile(reportFile)
+    const direct = join(f.root, "repacked-installation.zip")
+    await packProjectPlugin(installed, direct)
+    const current = JSON.parse(new AdmZip(direct).readAsText(PROJECT_PACKAGE_REPORT_PATH))
+    expect(current.excluded).toEqual([])
+    expect(current.files).not.toContain(PROJECT_PACKAGE_REPORT_PATH)
+    expect(current.sourceDigest).toBe(original.digest)
+    expect(await readFile(reportFile)).toEqual(oldReport)
+    expect(readProjectPackageReport(installed, original)?.report.excluded).toEqual([
+      "old-development.log"
+    ])
+  })
+
+  it("never uses historical exclusions to discard an actual undeclared resource", async () => {
+    const f = await fixture()
+    const zip = join(f.root, "first.zip")
+    await packProjectPlugin(f.installed, zip)
+    const report = JSON.parse(new AdmZip(zip).readAsText(PROJECT_PACKAGE_REPORT_PATH))
+    report.excluded = ["scripts/extra.py"]
+    await writeFile(join(f.installed, PROJECT_PACKAGE_REPORT_PATH), JSON.stringify(report))
+    await mkdir(join(f.installed, "scripts"))
+    await writeFile(join(f.installed, "scripts/extra.py"), "NEVER_EXECUTE")
+    await expect(projectFromInstalledPlugin(f.input)).rejects.toThrow(
+      "PROJECT_PLUGIN_SOURCE_UNSUPPORTED"
+    )
+    expect(f.sessions.list(scope)).toEqual([])
+  })
+
+  it("pins report raw bytes through draft save even if equivalent metadata is rewritten", async () => {
+    const f = await fixture()
+    const zip = join(f.root, "first.zip")
+    await packProjectPlugin(f.installed, zip)
+    const reportFile = join(f.installed, PROJECT_PACKAGE_REPORT_PATH)
+    const raw = new AdmZip(zip).readAsText(PROJECT_PACKAGE_REPORT_PATH)
+    await writeFile(reportFile, raw)
+    const save = f.sessions.save.bind(f.sessions)
+    const sessions = {
+      save: (...args: Parameters<typeof save>) => {
+        writeFileSync(reportFile, raw + " ")
+        return save(...args)
+      }
+    }
+    await expect(projectFromInstalledPlugin({ ...f.input, sessions })).rejects.toThrow(
+      "PROJECT_PLUGIN_SOURCE_CHANGED"
+    )
+    expect(f.sessions.list(scope)).toEqual([])
+    expect(f.make().list(scope)).toEqual([])
+  })
+
   it("copies the exact installed package into a persistent independent draft, then uses ordinary authoring", async () => {
     const f = await fixture()
     const original = (await readProjectSource(f.installed)).bundle

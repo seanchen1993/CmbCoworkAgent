@@ -2,6 +2,14 @@ import { expect, it } from "vitest"
 import { sourceSetBrowser } from "../../src/main/mods/devtools/source-set-browser.test-helper"
 import { parseClawProfile, type ClawMutation, type ClawProfile } from "../../src/shared/mods/claw"
 
+async function openSourcePreparation(h: Awaited<ReturnType<typeof sourceSetBrowser>>) {
+  await h.page.getByRole("button", { name: "3 · 保存插件", exact: true }).click()
+}
+
+async function openSourceImport(h: Awaited<ReturnType<typeof sourceSetBrowser>>) {
+  await h.page.getByText("导入开发文件夹（开发者）", { exact: true }).click()
+}
+
 it("keeps original dependency authorization in place without navigation away from preparation", async () => {
   const seed = { threadId: "a", workspace: "C:/a" }
   let approved = 0
@@ -94,6 +102,7 @@ it("keeps original dependency authorization in place without navigation away fro
         }
       }
     )
+    await openSourcePreparation(h)
     await h.page.getByRole("button", { name: "准备此依赖", exact: true }).click()
     await h.page.getByRole("button", { name: "确认准备依赖", exact: true }).click()
     await h.page.getByText("依赖已就绪，可以继续制作。", { exact: true }).waitFor()
@@ -116,22 +125,38 @@ it("keeps original dependency authorization in place without navigation away fro
 
 it("drops late source-set results and finally across thread/account changes", async () => {
   const pending = new Map<string, (value: unknown) => void>()
-  const h = await sourceSetBrowser(
-    { threadId: "a", workspace: "C:/a" },
-    async (_method, input) => new Promise((resolve) => pending.set(input.threadId, resolve))
-  )
+  const h = await sourceSetBrowser({ threadId: "a", workspace: "C:/a" }, async (method, input) => {
+    if (method === "status")
+      return {
+        threadId: input.threadId,
+        workspace: `C:/${input.threadId}`,
+        enabled: true,
+        drafts: [],
+        trials: []
+      }
+    if (method === "importSourceSet")
+      return new Promise((resolve) => pending.set(input.threadId, resolve))
+    throw Error("UNEXPECTED_TRANSPORT")
+  })
   const status = (threadId: string) => ({
     threadId,
     workspace: `C:/${threadId}`,
     enabled: true,
     drafts: [],
     trials: [],
-    sourceSet: { id: threadId, title: threadId, phase: "dependencies", dependencies: [] }
+    sourceSet: {
+      id: threadId,
+      title: `STALE_SOURCE_${threadId}`,
+      phase: "dependencies",
+      dependencies: []
+    }
   })
   try {
+    await openSourceImport(h)
     await h.page.getByRole("button", { name: "选择插件源码文件夹", exact: true }).click()
     await expect.poll(() => pending.has("a")).toBe(true)
     await h.page.evaluate("window.fixture.switchTarget({threadId:'b',workspace:'C:/b'})")
+    await openSourceImport(h)
     await h.page.getByRole("button", { name: "选择插件源码文件夹", exact: true }).click()
     await expect.poll(() => pending.has("b")).toBe(true)
     pending.get("a")!(status("a"))
@@ -141,13 +166,32 @@ it("drops late source-set results and finally across thread/account changes", as
     expect(
       await h.page.getByRole("button", { name: "选择插件源码文件夹", exact: true }).isDisabled()
     ).toBe(true)
-    expect(await h.page.evaluate("window.fixture.accepted.length")).toBe(0)
+    await expect
+      .poll(() =>
+        h.page.evaluate(
+          "window.fixture.calls.find(call=>call.method==='importSourceSet'&&call.input.threadId==='a')?.pending"
+        )
+      )
+      .toBe(false)
+    expect(await h.page.getByText("STALE_SOURCE_a", { exact: true }).count()).toBe(0)
     await h.page.evaluate("window.fixture.changeAccount()")
     pending.get("b")!(status("b"))
     await h.page.evaluate(
       "new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))"
     )
-    expect(await h.page.evaluate("window.fixture.accepted.length")).toBe(0)
+    await expect
+      .poll(() =>
+        h.page.evaluate(
+          "window.fixture.calls.find(call=>call.method==='importSourceSet'&&call.input.threadId==='b')?.pending"
+        )
+      )
+      .toBe(false)
+    expect(await h.page.getByText("STALE_SOURCE_b", { exact: true }).count()).toBe(0)
+    expect(
+      await h.page.evaluate(
+        "window.fixture.calls.filter(call=>call.method==='importSourceSet').length"
+      )
+    ).toBe(2)
     expect(h.errors).toEqual([])
   } finally {
     await h.browser.close()
@@ -211,6 +255,7 @@ it("locks sibling dependency installation and preparation while the active child
         value
       )
     }, status())
+    await openSourcePreparation(h)
     await h.page.getByRole("button", { name: "准备此依赖", exact: true }).nth(0).click()
     await entered.promise
     expect(await h.page.getByRole("button", { name: "安装此依赖", exact: true }).isDisabled()).toBe(
@@ -270,6 +315,7 @@ it("waits only for known not-started busy and stops retrying when the account ch
         value
       )
     }, status())
+    await openSourcePreparation(h)
     await h.page.getByRole("button", { name: "安装此依赖", exact: true }).click()
     await expect.poll(() => effects).toBe(1)
     expect(attempts).toBe(3)
@@ -304,9 +350,10 @@ it("does not reopen the native directory picker after a busy import admission", 
     return { ...seed, enabled: true, drafts: [], trials: [] }
   })
   try {
+    await openSourceImport(h)
     await h.page.getByRole("button", { name: "选择插件源码文件夹", exact: true }).click()
     await h.page
-      .getByRole("alert")
+      .getByRole("status")
       .getByText(/本次操作尚未开始/)
       .waitFor()
     await h.page.evaluate("new Promise(resolve=>setTimeout(resolve,250))")
@@ -350,6 +397,7 @@ it("shows cold review and unknown reconciliation without automatic installation 
         value
       )
     }, status())
+    await openSourcePreparation(h)
     await h.page.getByText(/旧批准不会自动恢复/).waitFor()
     await h.page.evaluate("window.fixture.notify()")
     expect(installed).toBe(0)

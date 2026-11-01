@@ -18,7 +18,8 @@ vi.mock("../managed-run-store", () => ({}))
 vi.mock("../human-gate-service", () => ({}))
 vi.mock("../notifications", () => ({}))
 vi.mock("../biz-retry-service", () => ({}))
-vi.mock("../../db", () => ({ getThreadCore: () => boundary.thread }))
+vi.mock("../../db", () => ({ getThreadCore: () => boundary.thread,
+  getDb: () => { throw Error("NATIVE_DATABASE_OUTSIDE_UNIT_SCOPE") } }))
 vi.mock("../../mcp/capability-service", () => ({
   closeProjectCapabilityMcpService: boundary.close
 }))

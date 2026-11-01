@@ -80,6 +80,7 @@ it("passes only known schema notifications through the original configuration IP
   let listener: ((event: object, value?: unknown) => void) | undefined
   const received = vi.fn()
   const reconcileComposition = vi.fn(), reconcileCreatorReuse = vi.fn()
+  const invalidateEditorNavigation = vi.fn()
   const subscribe = productionExpression("src/preload/index.ts", node =>
     ts.isPropertyAssignment(node) && node.name.getText() === "onConfigurationChanged", {
       ipcRenderer: { on: (_channel: string, handler: typeof listener) => { listener = handler }, removeListener: vi.fn() }
@@ -89,6 +90,7 @@ it("passes only known schema notifications through the original configuration IP
     ts.isPropertyAssignment(node) && node.name.getText() === "configChanged", {
       getCreatorCompositionService: () => ({ reconcile: reconcileComposition }),
       reconcileCreatorReuse,
+      editorNavigation: { invalidate: invalidateEditorNavigation },
       window: () => ({webContents: {send: (_channel: string, payload?: unknown) => listener!({}, payload)}})
     })
   changed("schema")
@@ -97,6 +99,7 @@ it("passes only known schema notifications through the original configuration IP
   expect(received).toHaveBeenLastCalledWith(undefined)
   expect(reconcileComposition.mock.calls).toEqual([[], []])
   expect(reconcileCreatorReuse.mock.calls).toEqual([[], []])
+  expect(invalidateEditorNavigation).toHaveBeenCalledTimes(2)
   for (const value of [null, "schema", {scope:"unknown"}, {}]) {
     listener!({}, value)
     expect(received).toHaveBeenLastCalledWith(undefined)

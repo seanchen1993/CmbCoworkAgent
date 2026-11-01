@@ -32,14 +32,12 @@ export async function sourceSetBrowser(
       import{ModsDevelopmentPanel}from"./src/renderer/src/components/customize/ModsDevelopmentPanel";
       import{useAppStore}from"./src/renderer/src/lib/store";
       import{readHostPluginStartUseIntent}from"./src/renderer/src/lib/plugin-start-use-intent";
-      const listeners=new Set(),developmentListeners=new Set(),accepted=[],calls=[];
+      const listeners=new Set(),developmentListeners=new Set(),calls=[];
       let scope=window.fixtureSeed,pushedStatus;
       const call=(method,input)=>{
         const record={method,input,pending:true};calls.push(record);
         if(method!=='status')pushedStatus=undefined;
-        return window.sourceSetNative(method,input).then(value=>{
-          if(value?.threadId&&value?.workspace)accepted.push(value);return value;
-        }).finally(()=>{record.pending=false});
+        return window.sourceSetNative(method,input).finally(()=>{record.pending=false});
       };
       const api=Object.fromEntries(["importSourceSet","advanceSourceSet","cancelSourceSet",
         "installSourceSetDependency","reconcileSourceSetDependency","installProjectDelivery",
@@ -61,7 +59,7 @@ export async function sourceSetBrowser(
         workspaceHint={scope.workspace} api={api} mode="entry"/>);
       const activate=()=>useAppStore.setState({currentThreadId:scope.threadId,showCustomizeView:false,
         threads:[{thread_id:scope.threadId,title:"Source set",metadata:{workspacePath:scope.workspace}}]});
-      window.fixture={accepted,calls,notify:()=>{for(const listener of listeners)listener();changed()},
+      window.fixture={calls,notify:()=>{for(const listener of listeners)listener();changed()},
         pendingStartUse:()=>calls.some(call=>call.pending&&["prepareStartUse","enableStartUse"].includes(call.method)),
         startUseIntent:()=>readHostPluginStartUseIntent(),
         setStatus:next=>{pushedStatus=next;changed()},

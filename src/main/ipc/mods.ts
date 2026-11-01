@@ -1,5 +1,12 @@
 import { projectDependencyImpact, summarizeProjectDependencyImpact } from "../mods/devtools/project-dependency-impact"
 import { createDesktopGitInspectionProvider } from "../mods/v2/platform-git-desktop"
+import { createNativeCodePlatformProvider } from "../mods/v2/platform-code-native"
+import { createDesktopWorkspacePlatformProvider } from "../mods/v2/platform-workspace-desktop"
+import { createWorkspaceReadPolicy } from "../mods/v2/platform-workspace-policy"
+import { createDesktopEditorPlatformProvider } from "../mods/v2/platform-editor-desktop"
+import { EditorNavigationBroker } from "../mods/v2/platform-editor-navigation"
+import type { NativePlatformCallContext } from "../mods/v2/platform-capabilities-types"
+import { registerEditorNavigationHandlers } from "./mods-editor-navigation"
 import { withTrustedFunctionWait } from "../mods/v2/trusted-function-wait"
 import { setProjectRuntimeFunctions } from "../harness-board/project-runtime-function-source"
 import { ApplicationCompletionPolicies } from "../mods/v2/application-completion-policy"
@@ -420,6 +427,43 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
   })
   const promptBroker = new FunctionPromptBroker()
   const desktopBroker = new FunctionDesktopBroker(text => writeFunctionClipboard(clipboard, text))
+  const editorWindows = new WeakSet<BrowserWindow>()
+  const editorNavigation = new EditorNavigationBroker(threadId => {
+    const owner = window()
+    if (!owner || owner.isDestroyed() || owner.webContents.isDestroyed() ||
+      !desktopBroker.bindings(threadId).some(binding => binding.senderId === owner.webContents.id))
+      return undefined
+    const senderId = owner.webContents.id
+    if (!editorWindows.has(owner)) {
+      editorWindows.add(owner)
+      owner.once("closed", () => editorNavigation.invalidate(senderId))
+      owner.webContents.on("render-process-gone", () => editorNavigation.invalidate(senderId))
+      owner.webContents.on("did-start-navigation", details => {
+        if (details.isMainFrame) editorNavigation.invalidate(senderId)
+      })
+    }
+    return senderId
+  }, (senderId, event) => {
+    const owner = window()
+    if (!owner || owner.isDestroyed() || owner.webContents.isDestroyed() ||
+      owner.webContents.id !== senderId) throw Error("EDITOR_NAVIGATION_RENDERER_UNAVAILABLE")
+    owner.webContents.send("mods:editor-navigation", event)
+  })
+  const editorRendererScope = (context: NativePlatformCallContext) => {
+    context.assertCurrent()
+    const thread = getThreadCore(context.threadId)
+    if (!thread || writableThreadScope(context.threadId) !== manager.workspaceKey(context.workspace))
+      throw Error("EDITOR_NAVIGATION_SCOPE_CHANGED")
+    const incarnation = captureThreadIncarnation(thread)
+    if (JSON.stringify(incarnation) !== context.incarnation)
+      throw Error("EDITOR_NAVIGATION_SCOPE_CHANGED")
+    return JSON.stringify([thread.created_at, incarnation.token])
+  }
+  const stopEditorDesktop = desktopBroker.subscribe(change => {
+    if (change.event === "session.detach") editorNavigation.invalidateThread(change.binding.threadId)
+  })
+  registerEditorNavigationHandlers(ipcMain, editorNavigation, trusted)
+  const workspaceReadPolicy = createWorkspaceReadPolicy(manager)
   registerDesktopHandlers(ipcMain, desktopBroker, writableScope)
   registerPromptComposerHandlers(ipcMain, promptBroker, writableScope, {
     support: (workspace, threadId) => manager.hasFunctionEvent(workspace, threadId, "prompt.edit"),
@@ -491,7 +535,11 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
   const functions = new FunctionModsManager(
     manager.store,
     {
-      platformNativeProviders: () => [createDesktopGitInspectionProvider(manager, window), ...nativePlatformProviders(async (context, runId) => {
+      platformNativeProviders: () => [createDesktopGitInspectionProvider(manager, window),
+        createNativeCodePlatformProvider({ authorizePath: workspaceReadPolicy }),
+        createDesktopWorkspacePlatformProvider(manager),
+        createDesktopEditorPlatformProvider(manager, editorNavigation, editorRendererScope),
+        ...nativePlatformProviders(async (context, runId) => {
         context.assertCurrent()
         const owner = window()
         if (!owner || owner.isDestroyed()) return false
@@ -576,6 +624,7 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
         return () => { physical(); logical() }
       },
       configChanged: (scope) => {
+        editorNavigation.invalidate()
         getCreatorCompositionService()?.reconcile()
         reconcileCreatorReuse?.()
         if (scope === "schema") window()?.webContents.send("mods:configuration-changed", { scope })
@@ -1989,16 +2038,21 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
     classicEvent: (...args) => functions.classicEvent(...args),
     captureWorktreeRemovalObserver: (...args) => functions.captureWorktreeRemovalObserver(...args),
     presentationEvent: (...args) => functions.presentationEvent(...args),
-    invalidate: (workspace) => functions.invalidate(workspace),
-    pluginsChanged: (workspace, ids) => functions.pluginsChanged(workspace, ids),
-    invalidateAll: () => functions.invalidateAll(),
+    invalidate: (workspace) => { editorNavigation.invalidate(); functions.invalidate(workspace) },
+    pluginsChanged: (workspace, ids) => {
+      editorNavigation.invalidate()
+      functions.pluginsChanged(workspace, ids)
+    },
+    invalidateAll: () => { editorNavigation.invalidate(); functions.invalidateAll() },
     prepareEnd: (reason, threadId) => functions.prepareEnd(reason, threadId),
     closeThread: (threadId) => {
+      editorNavigation.invalidateThread(threadId)
       if (!getThreadCore(threadId)) functions.forgetReleasedThread(threadId)
       functions.closeThread(threadId)
       queue.closeThread(threadId)
     },
     closeThreadAndWait: async (threadId) => {
+      editorNavigation.invalidateThread(threadId)
       if (!getThreadCore(threadId)) functions.forgetReleasedThread(threadId)
       queue.closeThread(threadId)
       await functions.closeThreadAndWait(threadId)
@@ -2007,6 +2061,7 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
       const captured = functions.captureThreadRetirement(threadId)
       return { ...captured, retire: async () => {
         captured.assertCurrent()
+        editorNavigation.invalidateThread(threadId)
         queue.closeThread(threadId)
         await captured.retire()
       } }
@@ -2018,13 +2073,19 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
         await captured.retire(() => {
           captured.assertCurrent()
           beforeRetire?.()
+          editorNavigation.invalidateThread(threadId)
           queue.closeThread(threadId)
         })
       } }
     },
-    close: () => { functions.close(); desktopBroker.close(); promptBroker.close() }
+    close: () => {
+      editorNavigation.invalidate()
+      functions.close(); desktopBroker.close(); promptBroker.close()
+    }
   })
   app.once("will-quit", () => {
+    editorNavigation.invalidate()
+    stopEditorDesktop()
     stopPlatformFileEdits()
     stopPolicyObservations()
     setModDevelopmentService(undefined)

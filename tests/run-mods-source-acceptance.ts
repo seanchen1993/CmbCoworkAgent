@@ -20,7 +20,7 @@ async function main() {
   assert.equal(
     option.length,
     1,
-    "Usage: tsx tests/run-mods-source-acceptance.ts --scenario=smoke|original-feature-completion|generic-mod|composition|project|report-derived|autobiz-from-zero|autobiz-derived|desktop-smoke|desktop-performance|desktop-soak"
+    "Usage: tsx tests/run-mods-source-acceptance.ts --scenario=smoke|original-feature-completion|developer-workbench|generic-mod|composition|project|report-derived|autobiz-from-zero|autobiz-derived|desktop-smoke|desktop-performance|desktop-soak"
   )
   assert(option[0].startsWith("--scenario="), "SOURCE_SCENARIO_FLAG_REQUIRED")
   const scenario = option[0].replace(/^--scenario=/, "")
@@ -34,9 +34,11 @@ async function main() {
   }
   const realModel = Object.hasOwn(live, scenario)
   const originalCompletion = scenario === "original-feature-completion"
+  const developerWorkbench = scenario === "developer-workbench"
   assert(
     scenario === "smoke" ||
       originalCompletion ||
+      developerWorkbench ||
       realModel ||
       ["desktop-smoke", "desktop-performance", "desktop-soak"].includes(scenario),
     "UNKNOWN_SOURCE_SCENARIO"
@@ -53,7 +55,9 @@ async function main() {
             ? "tests/mods-e2e.spec.ts"
             : originalCompletion
               ? "tests/original-feature-source-e2e.spec.ts"
-              : `tests/${live[scenario as keyof typeof live]}`
+              : developerWorkbench
+                ? "tests/developer-workbench-source-e2e.spec.ts"
+                : `tests/${live[scenario as keyof typeof live]}`
         ]
   const driverHashes = await modsSourceDriverHashes(root, [
     "tests/run-mods-source-acceptance.ts",
@@ -213,6 +217,7 @@ async function main() {
       delete env.COMPOSITION_E2E_PACKAGED_DIR
       delete env.CMB_MODS_SOAK_SMOKE
       delete env.CMB_MODS_SOAK_GC_DIAGNOSTIC
+      if (developerWorkbench) env.DEVELOPER_WORKBENCH_NATIVE = "1"
       if (["report-derived", "autobiz-from-zero", "autobiz-derived"].includes(scenario))
         env.CREATOR_LIVE_PROJECT_MATRIX = scenario
       if (desktop)
@@ -228,7 +233,9 @@ async function main() {
         ? "mods-e2e.spec.ts"
         : originalCompletion
           ? "original-feature-source-e2e.spec.ts"
-          : live[scenario as keyof typeof live]
+          : developerWorkbench
+            ? "developer-workbench-source-e2e.spec.ts"
+            : live[scenario as keyof typeof live]
       const code = await new Promise<number>((done, fail) => {
         const child = spawn(
           process.execPath,

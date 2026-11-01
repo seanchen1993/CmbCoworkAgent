@@ -48,6 +48,7 @@ import type {
   NativeHostFileEdit,
   NativePlatformActionAccess,
   NativePlatformCallContext,
+  NativePlatformReadLease,
   NativePlatformCapabilityProvider
 } from "./platform-capabilities-types"
 
@@ -58,6 +59,22 @@ interface Provider {
   source: PlatformCapabilitySource
   native?: NativePlatformCapabilityProvider
 }
+interface ReadAuthority {
+  readonly plugin: FunctionPlugin
+  readonly source: PlatformCapabilitySource
+  readonly methods: readonly string[]
+  readonly action?: {
+    readonly provider: Provider
+    readonly ref: PlatformCapabilityRef
+    readonly source: PlatformCapabilitySource
+    readonly caller: FunctionPlugin
+    readonly id: string
+    readonly selector: ModObject | undefined
+    readonly accessScope: string | undefined
+    readonly accessIdentity: string | undefined
+    readonly hasAccess: boolean
+  }
+}
 interface Invocation {
   depth: number
   requests?: ReadonlySet<string>
@@ -65,6 +82,8 @@ interface Invocation {
   owner?: object
   plugins: readonly FunctionPlugin[]
   permissions: ReadonlySet<string>
+  readAuthorities: readonly ReadAuthority[]
+  readLeaseForbidden: boolean
   assertCurrent(): void
   assertAuthority(): void
 }
@@ -117,6 +136,7 @@ export class PlatformCapabilities {
   private readonly providers: Provider[] = []
   private readonly nativeSources = new Map<FunctionPlugin, PlatformCapabilitySource>()
   private readonly nativeWatches = new Map<string, () => void>()
+  private readonly readLeases = new Set<AbortController>()
   private nativeCleanupFailure: unknown
   private readonly owners = new Map<FunctionPlugin, object>()
   private readonly subscriptionGroups = new Map<object, Set<string>>()
@@ -160,7 +180,11 @@ export class PlatformCapabilities {
     this.owners.set(this.nativePlugin, owner)
     this.providers.push({
       plugin: this.nativePlugin,
-      registration: { id: "native", pattern: "platform.action", hasCatch: false },
+      registration: {
+        id: "native",
+        pattern: "platform.action",
+        hasCatch: false
+      },
       source: this.nativeSource,
       descriptor: {
         apiVersion: "devclaw.capability/v1",
@@ -186,7 +210,10 @@ export class PlatformCapabilities {
         )
       )
         platformError("MODS_PLATFORM_DUPLICATE")
-      const plugin: FunctionPlugin = { ...this.nativePlugin, name: native.provider }
+      const plugin: FunctionPlugin = {
+        ...this.nativePlugin,
+        name: native.provider
+      }
       const source = {
         provider: native.provider,
         digest:
@@ -200,7 +227,11 @@ export class PlatformCapabilities {
         descriptor,
         source,
         native,
-        registration: { id: "native", pattern: "platform.action", hasCatch: false }
+        registration: {
+          id: "native",
+          pattern: "platform.action",
+          hasCatch: false
+        }
       })
     }
   }
@@ -211,11 +242,22 @@ export class PlatformCapabilities {
     if (!this.owners.has(plugin)) this.owners.set(plugin, {})
     const source = platformCopy(this.host.source(plugin))
     for (const registration of plugin.guest.registrations) {
-      if (!registration.platformCapability || this.providers.some(item =>
-        item.plugin === plugin && item.registration.id === registration.id)) continue
+      if (
+        !registration.platformCapability ||
+        this.providers.some(
+          (item) => item.plugin === plugin && item.registration.id === registration.id
+        )
+      )
+        continue
       const descriptor = platformDescriptor(registration.platformCapability)
-      if (this.providers.some(item => item.plugin === plugin &&
-          item.descriptor.id === descriptor.id && item.descriptor.version === descriptor.version))
+      if (
+        this.providers.some(
+          (item) =>
+            item.plugin === plugin &&
+            item.descriptor.id === descriptor.id &&
+            item.descriptor.version === descriptor.version
+        )
+      )
         platformError("MODS_PLATFORM_DUPLICATE")
       this.providers.push({ plugin, registration, descriptor, source })
     }
@@ -278,6 +320,11 @@ export class PlatformCapabilities {
         depth: parent?.depth ?? 0,
         plugins: [...new Set([...(parent?.plugins ?? []), plugin])],
         permissions: parent?.permissions ?? new Set(plugin.capabilities),
+        readAuthorities: [
+          ...(parent?.readAuthorities ?? []),
+          { plugin, source: platformCopy(this.source(plugin)), methods: [] }
+        ],
+        readLeaseForbidden: parent?.readLeaseForbidden ?? false,
         assertCurrent: () => {
           parent?.assertCurrent()
           this.current(plugin)
@@ -350,7 +397,10 @@ export class PlatformCapabilities {
       platformError("MODS_PLATFORM_SOURCE_CHANGED")
     return provider
   }
-  private query(value: unknown): { provider: Provider; ref: PlatformCapabilityRef } {
+  private query(value: unknown): {
+    provider: Provider
+    ref: PlatformCapabilityRef
+  } {
     const row = platformRecord(value, ["ref", "target"])
     platformCurrent(row.target)
     const ref = platformRef(row.ref)
@@ -361,11 +411,23 @@ export class PlatformCapabilities {
       ? this.host.hub.namespace(this.host.workspace, "workspace", "workspace")
       : this.host.hub.namespace(this.host.workspace, this.host.threadId, this.host.incarnation)
   }
-  private stateScope(ref: PlatformCapabilityRef): string {
+  private stateScope(
+    ref: PlatformCapabilityRef,
+    provider?: Provider,
+    caller?: FunctionPlugin
+  ): string {
+    if (provider?.native?.callerScopedState) {
+      if (!caller) platformError("MODS_PLATFORM_CALLER_REQUIRED")
+      return JSON.stringify([ref, { name: caller.name, ...this.source(caller) }])
+    }
     return JSON.stringify(ref)
   }
-  private read(provider: Provider, ref: PlatformCapabilityRef) {
-    return this.host.hub.read(this.namespace(provider), this.stateScope(ref), provider.source)
+  private read(provider: Provider, ref: PlatformCapabilityRef, caller?: FunctionPlugin) {
+    return this.host.hub.read(
+      this.namespace(provider),
+      this.stateScope(ref, provider, caller),
+      provider.source
+    )
   }
   private nativeContext(
     provider: Provider,
@@ -375,6 +437,18 @@ export class PlatformCapabilities {
   ): NativePlatformCallContext {
     const querySignal = platformQuerySignal()
     if (querySignal) signal = AbortSignal.any([signal, querySignal])
+    // Capture at construction: ACK arrives on a different IPC/ALS invocation.
+    const readScope = this.scopes.getStore()
+    const readAuthorities = readScope?.readAuthorities
+    const cannotRetain = Boolean(
+      querySignal ||
+      readScope?.nativeMode ||
+      readScope?.readLeaseForbidden ||
+      this.cleanupScopes.getStore() ||
+      activeNativeProjectContextAccessScope() !== undefined ||
+      activeWorkflowVerificationAccessScope() !== undefined ||
+      workflowResourceDeadlineSignal()
+    )
     const ref = {
       provider: provider.plugin.name,
       id: provider.descriptor.id,
@@ -394,6 +468,15 @@ export class PlatformCapabilities {
       caller: { ...this.source(caller), name: caller.name },
       signal,
       assertCurrent,
+      captureReadLease: () => {
+        assertCurrent()
+        if (method !== "platform.act" || !readScope || !readAuthorities?.length || cannotRetain)
+          platformError("MODS_PLATFORM_READ_LEASE_UNAVAILABLE")
+        if (readScope.owner && this.closedOwners.has(readScope.owner))
+          platformError("MODS_PLATFORM_OWNER_CLOSED")
+        readScope.assertCurrent()
+        return this.readLease(provider, caller, readAuthorities)
+      },
       publish: (value) => {
         assertCurrent()
         const safe = platformJson(value)
@@ -402,10 +485,15 @@ export class PlatformCapabilities {
         if (Buffer.byteLength(JSON.stringify(safe)) > 16000)
           platformError("MODS_PLATFORM_STATE_LIMIT")
         validateRegisteredToolInput(provider.descriptor.stateSchema, safe)
-        const previous = this.read(provider, ref)
+        const previous = this.read(provider, ref, caller)
         if (previous.status === "ready" && JSON.stringify(previous.value) === JSON.stringify(safe))
           return
-        this.host.hub.publish(this.namespace(provider), this.stateScope(ref), provider.source, safe)
+        this.host.hub.publish(
+          this.namespace(provider),
+          this.stateScope(ref, provider, caller),
+          provider.source,
+          safe
+        )
         this.host.changed()
       },
       invoke: (nested, action, input, requestKey) => {
@@ -414,7 +502,13 @@ export class PlatformCapabilities {
         this.assertDelegates("platform.act")
         return this.act(
           caller,
-          { ref: nested, action, input, requestKey, target: { kind: "current" } },
+          {
+            ref: nested,
+            action,
+            input,
+            requestKey,
+            target: { kind: "current" }
+          },
           signal
         )
       }
@@ -432,6 +526,125 @@ export class PlatformCapabilities {
     provider.native.accessScope?.(context)
     const value = await provider.native.read(context)
     context.publish(value)
+  }
+  /** No invocation, RPC signal, old access object or old authority closure survives capture. */
+  private readLease(
+    provider: Provider,
+    caller: FunctionPlugin,
+    authorities: readonly ReadAuthority[]
+  ): NativePlatformReadLease {
+    const controller = new AbortController()
+    const signal = AbortSignal.any([this.host.lifetime, controller.signal])
+    const source = platformCopy(this.source(caller))
+    const generation = provider.source.generation
+    // Arrays/selectors/sources are independent snapshots; plugin/provider objects are host identities.
+    const records = authorities.map((record) => ({
+      ...record,
+      source: platformCopy(record.source),
+      methods: [...record.methods],
+      action: record.action && {
+        ...record.action,
+        ref: platformCopy(record.action.ref),
+        source: platformCopy(record.action.source),
+        selector:
+          record.action.selector === undefined ? undefined : platformCopy(record.action.selector)
+      }
+    }))
+    const close = () => {
+      this.readLeases.delete(controller)
+      controller.abort(new Error("MODS_PLATFORM_READ_LEASE_CLOSED"))
+    }
+    const check = () => {
+      try {
+        signal.throwIfAborted()
+        if (this.closed) platformError("MODS_PLATFORM_CLOSED")
+        for (const record of records) {
+          this.current(record.plugin)
+          if (JSON.stringify(this.source(record.plugin)) !== JSON.stringify(record.source))
+            platformError("MODS_PLATFORM_READ_LEASE_SOURCE_CHANGED")
+          for (const method of record.methods) this.current(record.plugin, method)
+          if (record.action) this.assertInfo(record.action.ref, record.action.source)
+        }
+      } catch (error) {
+        close()
+        throw error
+      }
+    }
+    const sourceOf = (plugin: FunctionPlugin) => {
+      const record = records.find((record) => record.plugin === plugin)
+      if (!record) platformError("MODS_PLATFORM_READ_LEASE_SOURCE_REQUIRED")
+      return record.source
+    }
+    const readonly = (
+      owner: FunctionPlugin,
+      ownerProvider: Provider
+    ): NativePlatformCallContext => ({
+      workspace: this.host.workspace,
+      threadId: this.host.threadId,
+      incarnation: this.host.incarnation,
+      generation: ownerProvider.source.generation,
+      caller: { ...platformCopy(sourceOf(owner)), name: owner.name },
+      signal,
+      assertCurrent: check,
+      publish: () => platformError("MODS_PLATFORM_READ_ONLY"),
+      invoke: () => platformError("MODS_PLATFORM_READ_ONLY"),
+      captureReadLease: () => platformError("MODS_PLATFORM_READ_ONLY")
+    })
+    const context: NativePlatformCallContext = {
+      ...readonly(caller, provider),
+      generation,
+      caller: { ...source, name: caller.name }
+    }
+    this.readLeases.add(controller)
+    check()
+    return {
+      context,
+      close,
+      validate: async () => {
+        try {
+          check()
+          const nativeChecks: Array<() => void> = []
+          const checkNative = () => {
+            for (const current of nativeChecks) current()
+            check()
+          }
+          for (const record of records) {
+            const action = record.action
+            if (!action) continue
+            const native = action.provider.native
+            if (!native) continue
+            const current = readonly(action.caller, action.provider)
+            const scope = () => {
+              if (native.accessScope?.(current) !== action.accessScope)
+                platformError("MODS_PLATFORM_ACCESS_SCOPE_CHANGED")
+            }
+            nativeChecks.push(scope)
+            scope()
+            const access = await native.prepareActionAccess?.(
+              current,
+              action.id,
+              action.selector === undefined ? undefined : platformCopy(action.selector)
+            )
+            check()
+            checkNative()
+            if (Boolean(access) !== action.hasAccess || access?.identity !== action.accessIdentity)
+              platformError("MODS_PLATFORM_ACCESS_SCOPE_CHANGED")
+            access?.assertCurrent()
+            access?.assertContentCurrent?.()
+            if (access)
+              nativeChecks.push(() => {
+                access.assertCurrent()
+                access.assertContentCurrent?.()
+              })
+            checkNative()
+          }
+          checkNative()
+        } catch (error) {
+          close()
+          throw error
+        }
+      }
+    }
   }
   private closeNativeWatch(id: string): void {
     const close = this.nativeWatches.get(id)
@@ -473,12 +686,15 @@ export class PlatformCapabilities {
       await this.refreshNative(provider, plugin, signal, method)
       assertPlatformQueryMethod(method)
       signal.throwIfAborted()
-      if (method === "platform.read") return platformJson(this.read(provider, ref))
+      this.assertDelegates(method)
+      this.current(plugin, method)
+      this.assertInfo(ref, provider.source)
+      if (method === "platform.read") return platformJson(this.read(provider, ref, plugin))
       const subscription = this.host.hub.subscribe(
         this.ownerFor(plugin),
         this.namespace(provider),
-        this.stateScope(ref),
-        this.read(provider, ref)
+        this.stateScope(ref, provider, plugin),
+        this.read(provider, ref, plugin)
       )
       const group = this.scopes.getStore()?.owner
       this.subscriptions.set(subscription.subscriptionId, {
@@ -505,8 +721,15 @@ export class PlatformCapabilities {
             lifetime.abort()
             stop()
           })
+          this.assertDelegates(method)
           // Attach before rereading so a change between read and subscribe is not lost.
           await this.refreshNative(provider, plugin, signal, method)
+          this.assertDelegates(method)
+          this.current(plugin, method)
+          signal.throwIfAborted()
+          this.assertInfo(ref, provider.source)
+          if (!this.subscriptions.has(subscription.subscriptionId))
+            platformError("MODS_PLATFORM_SUBSCRIPTION_EXPIRED")
         } catch (error) {
           lifetime.abort()
           this.closeNativeWatch(subscription.subscriptionId)
@@ -538,13 +761,35 @@ export class PlatformCapabilities {
         return
       }
       // A source revoked after subscribe must never publish a stale packet to its observer.
-      const provider = this.subscriptions.get(row.subscriptionId)?.provider
+      const subscription = this.subscriptions.get(row.subscriptionId)
+      const provider = subscription?.provider
       if (platformQuerySignal() && provider?.native && !provider.native.queryRead)
         platformError("MODS_QUERY_NATIVE_DENIED")
       if (provider) this.current(provider.plugin)
-      return platformJson(
-        this.host.hub.poll(this.ownerFor(plugin), row.subscriptionId, row.afterRevision as number)
+      const packet = this.host.hub.poll(
+        this.ownerFor(plugin),
+        row.subscriptionId,
+        row.afterRevision as number
       )
+      if (provider?.native?.validateStateAccess) {
+        const context = this.nativeContext(provider, plugin, signal, method)
+        await provider.native.validateStateAccess(
+          context,
+          platformCopy(packet.events.map((event) => event.value))
+        )
+        context.assertCurrent()
+        this.assertInfo(
+          {
+            provider: provider.plugin.name,
+            id: provider.descriptor.id,
+            version: provider.descriptor.version
+          },
+          provider.source
+        )
+        if (this.subscriptions.get(row.subscriptionId) !== subscription)
+          platformError("MODS_PLATFORM_SUBSCRIPTION_EXPIRED")
+      }
+      return platformJson(packet)
     }
     if (method === "platform.publish") {
       const row = platformRecord(args[0], ["id", "version", "target", "value", "expectedRevision"])
@@ -658,7 +903,7 @@ export class PlatformCapabilities {
       await recheck()
       actionAccess?.assertContentCurrent?.()
     }
-    const result = saved.result as unknown as PlatformCapabilityActionResult
+    const result = platformCopy(saved.result) as unknown as PlatformCapabilityActionResult
     // A new implementation may inspect the old request, but cannot adopt its result as
     // its own success or cancel work from another source. Session generations can change.
     const callerDigest = this.source(caller).digest
@@ -676,6 +921,26 @@ export class PlatformCapabilities {
     if (native.native?.prepareActionAccess) {
       await recheck()
       actionAccess?.assertContentCurrent?.()
+    }
+    if (native.native?.validateActionResultAccess && result.value !== undefined) {
+      const record = JSON.stringify(saved)
+      await native.native.validateActionResultAccess(
+        accessContext,
+        String(saved.action),
+        saved.nativeActionSelector === undefined
+          ? undefined
+          : platformCopy(saved.nativeActionSelector),
+        platformCopy(result.value)
+      )
+      accessContext.assertCurrent()
+      this.assertInfo(ref, native.source)
+      if (native.native.prepareActionAccess) {
+        await recheck()
+        actionAccess?.assertContentCurrent?.()
+      }
+      if (JSON.stringify(this.host.hub.record(this.namespace(), key)) !== record)
+        platformError("MODS_PLATFORM_RECEIPT_CHANGED")
+      accessContext.assertCurrent()
     }
     return platformCopy(
       result.status === "running" && !this.running.has(key)
@@ -831,7 +1096,9 @@ export class PlatformCapabilities {
     // Cleanup must remain available when ordinary/query actions occupy all admission slots.
     // Its own bounded reserve cannot admit new effects or increase ordinary concurrency.
     const cleanup = nativeMode === "cleanup"
-    const activeCount = [...this.running.values()].filter((active) => active.cleanup === cleanup).length
+    const activeCount = [...this.running.values()].filter(
+      (active) => active.cleanup === cleanup
+    ).length
     if (activeCount >= (cleanup ? 4 : 16)) platformError("MODS_PLATFORM_ACTION_LIMIT")
     const controller = new AbortController()
     const lifetime = AbortSignal.any([
@@ -872,6 +1139,42 @@ export class PlatformCapabilities {
       requests: new Set([...(parent?.requests ?? []), key]),
       plugins,
       permissions: new Set(action.requiredPermissions),
+      readAuthorities: [
+        ...(parent?.readAuthorities ?? []),
+        ...plugins.map((plugin) => ({
+          plugin,
+          source: platformCopy(this.source(plugin)),
+          methods: ["platform.act", ...action.requiredPermissions],
+          ...(plugin === caller
+            ? {
+                action: {
+                  provider,
+                  ref: platformCopy(ref),
+                  source: platformCopy(provider.source),
+                  caller,
+                  id: action.id,
+                  selector:
+                    nativeActionSelector === undefined
+                      ? undefined
+                      : platformCopy(nativeActionSelector),
+                  accessScope: nativeAccessScope,
+                  accessIdentity: nativeActionAccessScope,
+                  hasAccess: Boolean(actionAccess)
+                }
+              }
+            : {})
+        }))
+      ],
+      readLeaseForbidden: Boolean(
+        parent?.readLeaseForbidden ||
+        parent?.nativeMode ||
+        nativeMode ||
+        querySignal ||
+        this.cleanupScopes.getStore() ||
+        activeNativeProjectContextAccessScope() !== undefined ||
+        activeWorkflowVerificationAccessScope() !== undefined ||
+        workflowResourceDeadlineSignal()
+      ),
       assertCurrent,
       assertAuthority
     }
@@ -958,7 +1261,14 @@ export class PlatformCapabilities {
         ephemeral ? execute() : this.host.runAction(lifetime, invocationOwner!, execute)
       )
       .finally(() => this.running.delete(key))
-    this.running.set(key, { controller, promise, caller, ref, fingerprint, cleanup })
+    this.running.set(key, {
+      controller,
+      promise,
+      caller,
+      ref,
+      fingerprint,
+      cleanup
+    })
     return promise
   }
   async nativeAct(
@@ -1054,7 +1364,11 @@ export class PlatformCapabilities {
     if (!facts.path || facts.path.length > 4096 || !facts.requestId || facts.requestId.length > 200)
       return
     this.current(this.nativePlugin)
-    const ref = { provider: this.nativePlugin.name, id: "changes", version: "1.0.0" }
+    const ref = {
+      provider: this.nativePlugin.name,
+      id: "changes",
+      version: "1.0.0"
+    }
     this.host.hub.publish(this.namespace(), this.stateScope(ref), this.nativeSource, {
       path: facts.path,
       operation: facts.operation,
@@ -1064,6 +1378,8 @@ export class PlatformCapabilities {
   }
   async close(): Promise<void> {
     this.closed = true
+    for (const controller of this.readLeases) controller.abort(new Error("MODS_PLATFORM_CLOSED"))
+    this.readLeases.clear()
     for (const id of [...this.nativeWatches.keys()]) this.closeNativeWatch(id)
     for (const active of this.running.values())
       active.controller.abort(new Error("MODS_PLATFORM_CLOSED"))

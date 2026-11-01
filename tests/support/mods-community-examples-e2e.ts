@@ -22,7 +22,8 @@ export const PACKAGED_COMMUNITY_EXAMPLE_IDS: readonly CommunityExampleId[] = [
   "stage-debugger",
   "token-weather",
   "replay-theater",
-  "blast-radius"
+  "blast-radius",
+  "developer-workbench"
 ]
 
 function ownedPluginDirectory(dataRoot: string, directory: string): string {
@@ -76,6 +77,7 @@ export async function verifyPackagedCommunityExamples(
   const created: string[] = [],
     checks: string[] = [],
     failures: unknown[] = []
+  const materialized: Record<string, { pluginId: string; files: Record<string, string> }> = {}
   let threadId: string | undefined
   const checked = (label: string) => {
     checks.push(label)
@@ -122,9 +124,9 @@ export async function verifyPackagedCommunityExamples(
       assert(!installed.has(exampleId))
       installed.set(exampleId, result.pluginId)
     }
-    assert.equal(new Set(created).size, 9)
+    assert.equal(new Set(created).size, PACKAGED_COMMUNITY_EXAMPLE_IDS.length)
     const after = await list()
-    assert.equal(after.length, before.length + 9)
+    assert.equal(after.length, before.length + PACKAGED_COMMUNITY_EXAMPLE_IDS.length)
     const approvedCatalogue = await catalogue()
     for (const example of approvedCatalogue.examples) {
       assert.equal(example.installation?.state, "installed", example.id)
@@ -136,14 +138,18 @@ export async function verifyPackagedCommunityExamples(
       return created.every((id) =>
         rows.some((row) => row.pluginId === id && row.state === "needs-approval" && row.digest)
       )
-    }, "all nine materialized packages compile without receiving approval")
+    }, "all ten materialized packages compile without receiving approval")
     checked(
-      "Packaged ASAR catalogue installs and verifies all nine real packages; each starts unapproved"
+      "Packaged ASAR catalogue installs and verifies all ten real packages; each starts unapproved"
     )
 
     const snapshots = new Map<string, Record<string, string>>()
-    for (const row of after.filter((row) => created.includes(row.id))) {
-      snapshots.set(row.id, digests(ownedPluginDirectory(isolatedDataRoot, row.path)))
+    for (const [exampleId, pluginId] of installed) {
+      const row = after.find((row) => row.id === pluginId)
+      assert(row, `Installed community example is missing: ${exampleId}`)
+      const files = digests(ownedPluginDirectory(isolatedDataRoot, row.path))
+      snapshots.set(row.id, files)
+      materialized[exampleId] = { pluginId, files }
     }
     for (const exampleId of PACKAGED_COMMUNITY_EXAMPLE_IDS) {
       const result = await page.evaluate(
@@ -165,7 +171,7 @@ export async function verifyPackagedCommunityExamples(
         snapshots.get(row.id)
       )
     checked(
-      "Reinstalling all nine examples reuses their original IDs, catalogue metadata and exact installed bytes"
+      "Reinstalling all ten examples reuses their original IDs, catalogue metadata and exact installed bytes"
     )
 
     // Create a harmless personal same-name revision through the ordinary public ZIP importer.
@@ -246,6 +252,7 @@ export async function verifyPackagedCommunityExamples(
           {
             complete: failures.length === 0,
             exampleIds: PACKAGED_COMMUNITY_EXAMPLE_IDS,
+            materialized,
             checks,
             errorCount: failures.length
           },

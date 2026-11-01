@@ -14,6 +14,7 @@ import { analyzeUiCallback, type StaticNamedStateRead } from "./ui-render-purity
 export type StaticNamedStateReads = Readonly<Record<string, readonly StaticNamedStateRead[]>>
 
 interface StaticRegistration {
+  readonly module?: string
   readonly pattern: string
   readonly hasMatcher: boolean
 }
@@ -219,6 +220,134 @@ function summary(
   return result
 }
 
+/** Literal JSON only, preserving JSON.parse semantics: no prototype setters or coercion. */
+function metadataJson(node: AnyNode): unknown {
+  if (scalar(node)) return node.value
+  if (
+    node.type === "UnaryExpression" &&
+    node.operator === "-" &&
+    node.prefix === true &&
+    scalar(node.argument) &&
+    typeof node.argument.value === "number"
+  ) {
+    const value = -node.argument.value
+    if (!Number.isFinite(value)) return fail("metadata-number")
+    return value
+  }
+  if (node.type === "ArrayExpression")
+    return node.elements.map((item: AnyNode | null) => {
+      if (!item || item.type === "SpreadElement") return fail("metadata-array")
+      return metadataJson(item)
+    })
+  if (node.type !== "ObjectExpression") return fail("metadata-json")
+  const value: Record<string, unknown> = Object.create(null)
+  for (const property of node.properties as AnyNode[]) {
+    if (
+      property.type !== "Property" ||
+      property.kind !== "init" ||
+      property.computed ||
+      property.method ||
+      property.shorthand
+    )
+      return fail("metadata-property")
+    const key = identifier(property.key)
+      ? property.key.name
+      : scalar(property.key)
+        ? property.key.value
+        : undefined
+    if (typeof key !== "string" || key === "__proto__" || Object.hasOwn(value, key))
+      return fail("metadata-key")
+    value[key] = metadataJson(property.value)
+  }
+  return value
+}
+function metadataProperties(node: AnyNode, keys: readonly string[]): Map<string, AnyNode> {
+  if (node.type !== "ObjectExpression" || node.properties.length !== keys.length)
+    return fail("metadata-shape")
+  const values = new Map<string, AnyNode>()
+  for (const property of node.properties as AnyNode[]) {
+    // esbuild emits { register } when the compiler's local helper has that exact name.
+    // It remains an own data property, not a getter or an arbitrary initializer.
+    if (
+      property.type !== "Property" ||
+      property.kind !== "init" ||
+      property.computed ||
+      property.method ||
+      !identifier(property.key) ||
+      (property.shorthand &&
+        !(property.key.name === "register" && identifier(property.value, "register"))) ||
+      !keys.includes(property.key.name) ||
+      values.has(property.key.name)
+    )
+      return fail("metadata-shape")
+    values.set(property.key.name, property.value)
+  }
+  return values
+}
+function metadataId(node: AnyNode, seen: Set<string>): string {
+  if (
+    !scalar(node) ||
+    typeof node.value !== "string" ||
+    !node.value ||
+    node.value.length > 4096 ||
+    /[\\:\0]/.test(node.value) ||
+    node.value.split("/").some((part) => !part || part === "." || part === "..") ||
+    seen.has(node.value)
+  )
+    return fail("metadata-id")
+  seen.add(node.value)
+  return node.value
+}
+/** Verify exact native hook order against the ordinary fallback register wrapper. */
+function directHookMetadata(
+  metadata: AnyNode,
+  register: FunctionDeclaration,
+  functions: Map<string, FunctionDeclaration>
+): Map<string, string> {
+  if (
+    metadata.type !== "ArrayExpression" ||
+    !metadata.elements.length ||
+    metadata.elements.length > 32 ||
+    register.params.length !== 2
+  )
+    return fail("hook-metadata")
+  const on = named(register.params[0]),
+    options = named(register.params[1])
+  const ids = new Set<string>(),
+    body = register.body.body
+  const modules = new Map<string, string>()
+  if (body.length !== metadata.elements.length * 2) return fail("hook-register-shape")
+  for (let index = 0; index < metadata.elements.length; index++) {
+    const node = metadata.elements[index]
+    if (!node) return fail("hook-metadata")
+    const values = metadataProperties(node, ["id", "register"])
+    const id = metadataId(values.get("id")!, ids)
+    const name = named(values.get("register"))
+    if (!functions.has(name) || name === register.id?.name || modules.has(name))
+      return fail("hook-register-reference")
+    modules.set(name, id)
+    const declaration = body[index * 2]
+    if (
+      declaration.type !== "VariableDeclaration" ||
+      declaration.declarations.length !== 1 ||
+      !["var", "const"].includes(declaration.kind)
+    )
+      return fail("hook-register-shape")
+    const local = named(declaration.declarations[0].id)
+    const expected = parse(
+      `${declaration.kind} ${local} = ${name}(${on}, ${options});
+      if (${local} && typeof ${local}.then === "function") throw Error("MODS_ASYNC_REGISTER");`,
+      { ecmaVersion: "latest" }
+    ).body as AnyNode[]
+    if (
+      signature(declaration) !== signature(expected[0]) ||
+      signature(body[index * 2 + 1]) !== signature(expected[1])
+    )
+      return fail("hook-register-order")
+  }
+  return modules
+}
+
 /** Only the existing assembleFunctionComponents wrapper is accepted, byte AST exact. */
 function aggregateSummary(
   code: string,
@@ -271,8 +400,50 @@ function aggregateSummary(
   const wrapper = body[body.length - 1]
   collectConfig(wrapper)
   if (configs.length !== names.length) return fail("aggregate-config-count")
+  let metadataSource = ""
+  const metadataIds: string[] = []
+  if (wrapper.type !== "VariableDeclaration" || wrapper.declarations.length !== 1)
+    return fail("aggregate-wrapper-changed")
+  const initializer = wrapper.declarations[0].init
+  if (initializer?.type === "ObjectExpression" && initializer.properties.length === 2) {
+    const properties = metadataProperties(initializer, ["hookModules", "register"])
+    const entries = properties.get("hookModules")!
+    if (
+      entries.type !== "ArrayExpression" ||
+      entries.elements.length !== names.length ||
+      entries.elements.length > 32
+    )
+      return fail("aggregate-hook-count")
+    const ids = new Set<string>()
+    metadataSource =
+      "hookModules: [" +
+      entries.elements
+        .map((entry: AnyNode | null, index: number) => {
+          if (!entry) return fail("aggregate-hook-shape")
+          const values = metadataProperties(entry, ["id", "register", "options"])
+          const id = metadataId(values.get("id")!, ids)
+          metadataIds.push(id)
+          const register = values.get("register")!
+          if (
+            register.type !== "MemberExpression" ||
+            register.computed ||
+            register.optional ||
+            !identifier(register.object, names[index]) ||
+            !identifier(register.property, "register")
+          )
+            return fail("aggregate-hook-reference")
+          const options = metadataJson(values.get("options")!)
+          const decoded: unknown = JSON.parse(configs[index])
+          // Signature also checks property order; values must have exactly equal safe JSON semantics.
+          if (JSON.stringify(options) !== JSON.stringify(decoded))
+            return fail("aggregate-hook-config")
+          return `{id:${JSON.stringify(id)},register:${names[index]}.register,options:${JSON.stringify(options)}}`
+        })
+        .join(",") +
+      "], "
+  }
   const expected = parse(
-    `var __cmbFunctionMod = { register: function(on, options) {
+    `var __cmbFunctionMod = { ${metadataSource}register: function(on, options) {
     ${names.map((name, index) => `var r${index} = ${name}.register(on, Object.assign({}, options, JSON.parse(${JSON.stringify(configs[index])}))); if (r${index} && typeof r${index}.then === "function") throw Error("MODS_ASYNC_REGISTER");`).join("\n")}
   } };`,
     { ecmaVersion: "latest" }
@@ -282,9 +453,15 @@ function aggregateSummary(
   const sites = new Set<string>()
   const blocked = new Set<string>()
   const stateReads: Record<string, StaticNamedStateRead[]> = {}
-  for (const part of parts) {
+  for (const [index, part] of parts.entries()) {
     if (part.kind !== "static") return fail("aggregate-module-unknown")
-    rows.push(...part.registrations)
+    rows.push(
+      ...part.registrations.map((row) => ({
+        pattern: row.pattern,
+        hasMatcher: row.hasMatcher,
+        ...(metadataIds[index] === undefined ? {} : { module: metadataIds[index] })
+      }))
+    )
     part.components.forEach((site) => sites.add(site))
     for (const site of part.components)
       if (!part.reusableComponents.includes(site)) blocked.add(site)
@@ -317,7 +494,10 @@ export function analyzeStaticUiRenderSummary(
 ): StaticUiRenderSummary {
   try {
     if (code.length > 2 * 1024 * 1024) return fail("source-limit")
-    const program = parse(code, { ecmaVersion: "latest", sourceType: "script" })
+    const program = parse(code, {
+      ecmaVersion: "latest",
+      sourceType: "script"
+    })
     if (program.body.length !== 1)
       return aggregateSummary(code, program.body as AnyNode[], globalName)
     const statement = program.body[0] as AnyNode
@@ -344,6 +524,9 @@ export function analyzeStaticUiRenderSummary(
     const bindings = new Set<string>()
     let exportsName: string | undefined
     let registerName: string | undefined
+    let hookName: string | undefined
+    let hookMetadata: AnyNode | undefined
+    let hookModules = new Map<string, string>()
     let returned = false
     const declare = (name: string): void => {
       if (
@@ -373,6 +556,9 @@ export function analyzeStaticUiRenderSummary(
           !exportsName
         ) {
           exportsName = name
+        } else if (name === hookName && variable.init?.type === "ArrayExpression") {
+          if (hookMetadata) return fail("hook-metadata-duplicate")
+          hookMetadata = variable.init
         } else if (!scalar(variable.init) && variable.init !== null) {
           return fail("top-level-initializer")
         }
@@ -389,10 +575,32 @@ export function analyzeStaticUiRenderSummary(
           return fail("top-level-effect")
         const exportObject = call.arguments[1]
         if (exportObject?.type !== "ObjectExpression") return fail("exports-shape")
-        const properties = exportObject.properties
-        const property = properties[0]
+        const properties = exportObject.properties as AnyNode[]
+        let property: AnyNode | undefined
+        const exported = new Set<string>()
+        for (const entry of properties) {
+          if (
+            entry.type !== "Property" ||
+            entry.computed ||
+            entry.kind !== "init" ||
+            entry.method ||
+            entry.shorthand ||
+            !identifier(entry.key) ||
+            !["register", "hookModules"].includes(entry.key.name) ||
+            exported.has(entry.key.name) ||
+            entry.value.type !== "ArrowFunctionExpression" ||
+            entry.value.async ||
+            entry.value.params.length ||
+            !identifier(entry.value.body)
+          )
+            return fail("exports-shape")
+          exported.add(entry.key.name)
+          if (entry.key.name === "hookModules") hookName = entry.value.body.name
+          else property = entry
+        }
         if (
-          properties.length !== 1 ||
+          ![1, 2].includes(properties.length) ||
+          !exported.has("register") ||
           property?.type !== "Property" ||
           property.computed ||
           property.kind !== "init" ||
@@ -440,13 +648,14 @@ export function analyzeStaticUiRenderSummary(
     const visited = new Set<string>()
     const forbiddenCallbackNames = new Set([
       ...functions.keys(),
+      ...(hookName ? [hookName] : []),
       ...[...helpers.keys()].filter((name) => name !== "__async"),
       globalName,
       exportsName!,
       "eval",
       "Function"
     ])
-    const visit = (name: string, depth: number): void => {
+    const visit = (name: string, depth: number, module?: string): void => {
       if (depth > 16 || visited.has(name)) return fail("registration-cycle")
       visited.add(name)
       const fn = functions.get(name)
@@ -481,7 +690,7 @@ export function analyzeStaticUiRenderSummary(
               ).body[0] as AnyNode
               if (!next || signature(next) !== signature(expected))
                 return fail("registration-wrapper")
-              visit(target, depth + 1)
+              visit(target, depth + 1, name === registerName ? hookModules.get(target) : module)
             } else if (variable.init !== null && !scalar(variable.init))
               return fail("local-initializer")
           }
@@ -525,9 +734,21 @@ export function analyzeStaticUiRenderSummary(
               if (!refs.some((item) => JSON.stringify(item) === JSON.stringify(ref))) refs.push(ref)
           }
           if (rows.length >= 128) return fail("registration-limit")
-          rows.push(Object.freeze({ pattern: event.value, hasMatcher: third !== undefined }))
+          rows.push(
+            Object.freeze({
+              pattern: event.value,
+              hasMatcher: third !== undefined,
+              ...(module === undefined ? {} : { module })
+            })
+          )
         } else return fail("registration-control-flow")
       }
+    }
+    if (hookName) {
+      if (!hookMetadata) return fail("hook-metadata-missing")
+      const register = functions.get(registerName)
+      if (!register) return fail("hook-register-missing")
+      hookModules = directHookMetadata(hookMetadata, register, functions)
     }
     visit(registerName, 0)
     return summary(
@@ -564,6 +785,7 @@ export function bindStaticUiRenderSummary(
     const actual = registrations[index]
     if (
       actual.id !== String(index) ||
+      actual.module !== expected.module ||
       actual.pattern !== expected.pattern ||
       actual.hasMatcher !== expected.hasMatcher ||
       actual.hasCatch ||

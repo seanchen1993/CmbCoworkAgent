@@ -3,6 +3,8 @@ import { readFileSync } from "node:fs"
 import { dirname, resolve } from "node:path"
 import type { Page } from "playwright"
 import type { genericModNativeJourney } from "./generic-mod-live-native-helpers"
+import { rebindGenericCompositionCurrentSources } from "./generic-mod-current-source-rebind"
+import { openModsProgress } from "./mods-sidebar-navigation"
 
 /** Continues an actual persisted failed negative case; never manufactures prior authoring receipts. */
 export async function verifyGenericCompositionRecovery(
@@ -40,7 +42,15 @@ export async function verifyGenericCompositionRecovery(
     (item) => item.pluginId === consumerReceipt.installationId
   )
   assert(provider?.digest && ["needs-approval", "ready"].includes(provider.state))
-  assert(consumer?.state === "ready" && consumer.digest === consumerReceipt.compiledDigest)
+  assert(consumer?.digest && ["needs-approval", "ready"].includes(consumer.state))
+  record({
+    phase: "current-native-source-boundary",
+    provider,
+    consumer,
+    priorConsumerDigest: consumerReceipt.compiledDigest,
+    inheritedAuthority: false,
+    sourceIdentity: "current-native-installation-and-compiled-version"
+  })
   if (provider.state === "ready") {
     const args = [threadId, provider.name, native.workspace] satisfies Parameters<
       Window["api"]["mods"]["revokeFunction"]
@@ -63,7 +73,19 @@ export async function verifyGenericCompositionRecovery(
   } catch (error) {
     catalogError = String(error)
   }
-  assert(catalogError.includes("ModFunctionError") && catalogError.includes(provider.name))
+  const denied =
+    revoked.functionMods?.filter(
+      (item) =>
+        [provider.pluginId, consumer.pluginId].includes(item.pluginId) && item.state !== "ready"
+    ) ?? []
+  assert(
+    denied.length > 0 &&
+      catalogError.includes("ModFunctionError") &&
+      denied.some(
+        (item) => catalogError.includes(item.name) || catalogError.includes(item.pluginId)
+      ),
+    "CURRENT_SELECTED_SOURCE_MUST_BLOCK_UNAUTHORIZED_CATALOG"
+  )
   assert.deepEqual(await page.evaluate((id) => window.api.mods.jobs(id), threadId), before)
   record({
     phase: "revocation-observed",
@@ -115,33 +137,69 @@ export async function verifyGenericCompositionRecovery(
     modelRequestsAdded: 0,
     recoveryEntryOpened: true
   })
-  const approval = recovery
-    .locator(`[data-claw-recovery-plugin=${JSON.stringify(provider.pluginId)}]`)
-    .locator(`[data-native-function-approval=${JSON.stringify(provider.pluginId)}]`)
-  await approval
-    .getByText(`授权范围：${native.workspace}，同目录聊天共用。`, { exact: true })
-    .waitFor()
-  await approval.getByText("权限与版本详情", { exact: true }).click()
-  await approval.getByText(`版本摘要：${provider.digest}`, { exact: true }).waitFor()
-  await approval.getByRole("button", { name: "授权以上能力", exact: true }).click()
-  await journey.until("NATIVE_REAPPROVAL", async () => {
-    const approved = await page.evaluate((id) => window.api.mods.status(id), threadId)
-    return approved.functionMods?.some(
-      (item) =>
-        item.pluginId === provider.pluginId &&
-        item.digest === provider.digest &&
-        item.state === "ready"
+  const rebound = await rebindGenericCompositionCurrentSources(
+    page,
+    threadId,
+    native.workspace,
+    [provider, consumer],
+    journey.until,
+    record
+  )
+  if (rebound) {
+    assert.equal(await composer.inputValue(), input)
+    assert.deepEqual(relayState(), modelBefore)
+    assert.deepEqual(await page.evaluate((id) => window.api.mods.jobs(id), threadId), before)
+    await openModsProgress(page, "高级设置")
+  }
+  // The original recovery UI has one review per selected source, not a group approval button.
+  for (const expected of [provider, consumer]) {
+    const current = (
+      await page.evaluate((id) => window.api.mods.status(id), threadId)
+    ).functionMods?.find((item) => item.pluginId === expected.pluginId)
+    assert(
+      current && expected.digest && current.digest === expected.digest,
+      "CURRENT_NATIVE_SOURCE_CHANGED_BEFORE_REVIEW"
     )
-      ? true
-      : undefined
-  })
-  record({
-    phase: "native-reapproval",
-    source: "selected-composition-exact-source-ui",
-    pluginId: provider.pluginId,
-    digest: provider.digest,
-    workspace: native.workspace
-  })
+    if (current.state === "ready") continue
+    assert.equal(current.state, "needs-approval")
+    const approval = recovery
+      .locator(`[data-claw-recovery-plugin=${JSON.stringify(expected.pluginId)}]`)
+      .locator(`[data-native-function-approval=${JSON.stringify(expected.pluginId)}]`)
+    const binding = await page.evaluate((id) => window.api.mods.clawView(id), threadId)
+    const selected = binding.active?.capabilities.find(
+      (item) => item.pluginId === expected.pluginId
+    )
+    assert(
+      selected?.digest === expected.digest,
+      "GENERIC_COMPOSITION_CURRENT_SOURCE_REBIND_REQUIRED"
+    )
+    await approval.waitFor()
+    await approval
+      .getByText(`授权范围：${native.workspace}，同目录聊天共用。`, { exact: true })
+      .waitFor()
+    await approval.getByText("权限与版本详情", { exact: true }).click()
+    await approval.getByText(`版本摘要：${expected.digest}`, { exact: true }).waitFor()
+    await approval.getByRole("button", { name: "授权以上能力", exact: true }).click()
+    await journey.until("NATIVE_REAPPROVAL", async () => {
+      const approved = await page.evaluate((id) => window.api.mods.status(id), threadId)
+      return approved.functionMods?.some(
+        (item) =>
+          item.pluginId === expected.pluginId &&
+          item.digest === expected.digest &&
+          item.state === "ready"
+      )
+        ? true
+        : undefined
+    })
+    record({
+      phase: "native-reapproval",
+      source: "selected-composition-exact-current-source-ui",
+      pluginId: expected.pluginId,
+      currentSourceDigest: expected.digest,
+      workspace: native.workspace,
+      inheritedAuthority: false
+    })
+  }
   const descriptor = (await page.evaluate((id) => window.api.mods.commands(id), threadId)).find(
     (command) => command.command === "review-text"
   )

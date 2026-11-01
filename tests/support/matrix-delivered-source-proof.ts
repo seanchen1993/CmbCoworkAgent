@@ -3,7 +3,7 @@ import assert from "node:assert/strict"
 import { createHash } from "node:crypto"
 import { readFileSync, realpathSync, statSync } from "node:fs"
 import { dirname, isAbsolute, join, relative, resolve } from "node:path"
-import { readModsSourceCandidate } from "./mods-source-candidate"
+import { readHistoricalSourceWrapper } from "./mods-historical-source-reference"
 import { verifyLiveProjectZipIdentity } from "./live-project-zip-identity"
 import { assertMatrixAssembly } from "./creator-project-matrix"
 
@@ -168,7 +168,7 @@ export async function readDeliveredMatrixSourceProof(
     return actual
   }
   Object.values(files).forEach((path) => remember(path))
-  const candidate = readModsSourceCandidate(files.manifest)
+  const candidate = readHistoricalSourceWrapper(files.manifest, repository)
   assert.equal(realpathSync(candidate.repository), root)
   const caseRun = read(files.caseRun)
   assert.equal(caseRun.head, candidate.head)
@@ -255,6 +255,6 @@ export async function readDeliveredMatrixSourceProof(
     packageIdentity
   }
   await verifyDeliveredMatrixSourceProof(proof)
-  readModsSourceCandidate(files.manifest)
+  readHistoricalSourceWrapper(files.manifest, repository)
   return proof
 }

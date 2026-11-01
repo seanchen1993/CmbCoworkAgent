@@ -74,8 +74,16 @@ describe("WorkspaceWatcherWorkerClient", () => {
         workspacePath: "//server/workspace"
       })
     )
-    worker.emitMessage({ type: "start-result", requestId: 1, ok: true })
+    const observation = {
+      canonicalPath: "//server/workspace",
+      rootIdentity: "999999999999999999:777777777777777777"
+    }
+    worker.emitMessage({ type: "start-result", requestId: 1, ok: true, observation })
     await expect(start).resolves.toBeUndefined()
+    expect(client.observation).toEqual(observation)
+    const copy = client.observation!
+    copy.rootIdentity = "0:0"
+    expect(client.observation?.rootIdentity).toBe(observation.rootIdentity)
     worker.emitMessage({
       type: "event-batch",
       events: [{ eventType: "change", filename: "src/file.ts" }]
@@ -86,6 +94,8 @@ describe("WorkspaceWatcherWorkerClient", () => {
     })
 
     client.close()
+    worker.emitMessage({ type: "start-result", requestId: 1, ok: true, observation })
+    expect(client.observation).toBeUndefined()
     expect(worker.postMessage).toHaveBeenLastCalledWith({ type: "shutdown" })
     expect(worker.terminate).toHaveBeenCalledTimes(1)
     expect(onError).not.toHaveBeenCalled()
@@ -107,9 +117,7 @@ describe("WorkspaceWatcherWorkerClient", () => {
 
     await expect(start).rejects.toSatisfy(isWorkspaceWatcherCancelled)
     await vi.waitFor(() => expect(worker.terminate).toHaveBeenCalledTimes(1))
-    expect(worker.postMessage).not.toHaveBeenCalledWith(
-      expect.objectContaining({ type: "start" })
-    )
+    expect(worker.postMessage).not.toHaveBeenCalledWith(expect.objectContaining({ type: "start" }))
   })
 
   it("surfaces a worker failure after the watcher has started", async () => {
@@ -123,11 +131,43 @@ describe("WorkspaceWatcherWorkerClient", () => {
     )
     const start = client.start()
     await vi.waitFor(() => expect(worker.postMessage).toHaveBeenCalled())
-    worker.emitMessage({ type: "start-result", requestId: 1, ok: true })
+    worker.emitMessage({
+      type: "start-result",
+      requestId: 1,
+      ok: true,
+      observation: { canonicalPath: "/workspace-restart", rootIdentity: "1:2" }
+    })
     await start
+    expect(client.observation?.rootIdentity).toBe("1:2")
 
     worker.emitError(new Error("worker disconnected"))
-    expect(onError).toHaveBeenCalledWith(expect.objectContaining({ message: "worker disconnected" }))
+    expect(client.observation).toBeUndefined()
+    worker.emitMessage({
+      type: "start-result",
+      requestId: 1,
+      ok: true,
+      observation: { canonicalPath: "/workspace-restart", rootIdentity: "1:2" }
+    })
+    expect(client.observation).toBeUndefined()
+    expect(onError).toHaveBeenCalledWith(
+      expect.objectContaining({ message: "worker disconnected" })
+    )
+    client.close()
+  })
+
+  it("keeps legacy startup working but provides no invented directory evidence", async () => {
+    const worker = new FakeWorker()
+    const client = new WorkspaceWatcherWorkerClient(
+      "/workspace",
+      vi.fn(),
+      vi.fn(),
+      async () => worker as unknown as Worker
+    )
+    const start = client.start()
+    await vi.waitFor(() => expect(worker.postMessage).toHaveBeenCalled())
+    worker.emitMessage({ type: "start-result", requestId: 1, ok: true })
+    await expect(start).resolves.toBeUndefined()
+    expect(client.observation).toBeUndefined()
     client.close()
   })
 })

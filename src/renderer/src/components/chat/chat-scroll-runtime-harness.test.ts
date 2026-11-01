@@ -33,10 +33,13 @@ vi.mock("./MessageBubble", () => ({
   MessageBubble: () => null
 }))
 
-import {
-  ChatMessageVirtualList,
-  type ChatMessageVirtualListProps
-} from "./ChatMessageVirtualList"
+// This SSR-only scroll harness has no native Mods desktop owner. The real owner hook is
+// client-only; keep its external binding absent without changing React or scroll producers.
+vi.mock("@/lib/function-desktop-owner", () => ({
+  useFunctionDesktopOwner: () => undefined
+}))
+
+import { ChatMessageVirtualList, type ChatMessageVirtualListProps } from "./ChatMessageVirtualList"
 import { ChatScrollToBottomButton } from "./ChatScrollToBottomButton"
 import {
   createChatScrollState,

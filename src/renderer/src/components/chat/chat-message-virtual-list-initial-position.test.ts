@@ -47,7 +47,9 @@ describe("chat message virtual list initial location", () => {
     expect(source).toMatch(/key=\{virtualWindow\.key\}/)
     expect(source).toMatch(/firstItemIndex=\{virtualWindow\.firstItemIndex\}/)
     expect(source).toMatch(/initialTopMostItemIndex=\{resolvedInitialTopMostItemIndex\}/)
-    expect(source).toMatch(/context=\{\{\s*header: historyHeader,\s*footer: footerContent,/)
+    expect(source).toMatch(
+      /context=\{\{\s*header:\s*<>\{historyHeader\}\s*<FunctionPlacedRows\s+threadId=\{threadId\}\s+rows=\{placedRows\.start\}\s*\/>\s*<\/>,\s*footer: footerContent,/
+    )
     expect(source).toMatch(
       /windowKey: virtualWindow\.key,\s*firstItemIndex: virtualWindow\.firstItemIndex,/
     )

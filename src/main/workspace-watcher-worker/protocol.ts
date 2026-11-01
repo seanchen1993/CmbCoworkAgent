@@ -2,8 +2,19 @@ export type WorkspaceWatcherWorkerRequest =
   | { type: "start"; requestId: number; workspacePath: string }
   | { type: "shutdown" }
 
+/** Installation evidence only. Directory timestamps are deliberately excluded. */
+export interface WorkspaceWatcherDirectoryObservation {
+  canonicalPath: string
+  rootIdentity: string
+}
+
 export type WorkspaceWatcherWorkerResponse =
-  | { type: "start-result"; requestId: number; ok: true }
+  | {
+      type: "start-result"
+      requestId: number
+      ok: true
+      observation?: WorkspaceWatcherDirectoryObservation
+    }
   | {
       type: "start-result"
       requestId: number

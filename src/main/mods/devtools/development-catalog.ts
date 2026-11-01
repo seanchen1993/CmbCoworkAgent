@@ -14,6 +14,7 @@ import { CREATOR_S1_SUPPORT } from "./creator-support"
 import { AUTHORING_TEMPLATE_KINDS } from "../../../shared/mods/authoring"
 import { PROJECT_DEPENDENCY_AUTHORING } from "./development-dependency-catalog"
 import ts from "typescript"
+import { developerWorkbenchDiscovery } from "./developer-workbench-discovery"
 
 /** Extract exact fragments from the same declarations used by the isolated compiler. */
 function targetedDeclarations(source: string, events: string[], methods: string[], exports: string[] = []) {
@@ -241,6 +242,8 @@ export function developmentCatalogPage(
     if (!["overview", "types", "events", "sdk"].includes(section))
       throw Error("DEVELOPMENT_CATALOG_QUERY_SECTION")
     const exact = query.trim()
+    const workbench = section === "events" ? undefined : developerWorkbenchDiscovery(exact, cursor)
+    if (workbench) return { contract: catalog.contract, section, ...workbench }
     const registration = exact === "on.capability"
     const events = section === "sdk" && !registration ? [] : catalog.events.filter((event) =>
       event.name === (registration ? "platform.action" : exact))
@@ -343,7 +346,7 @@ export function developmentCatalogPage(
       deliveryGuidance: catalog.deliveryGuidance,
       limitations: catalog.limitations,
       discovery:
-        "query精查；types按nextCursor分页。project-dependencies查未安装执行/校验Mod；sourceId→dependency_prepare，assetPath读源码，project_read仅草稿。"
+        "query精查；types按nextCursor分页。native.code/native.editor/native.workspace查工作台公共协议，非新SDK命名空间。project-dependencies查未安装执行/校验Mod；sourceId→dependency_prepare，assetPath读源码，project_read仅草稿。"
     }
   const value =
     section === "types" ? catalog.types : section === "events" ? catalog.events : catalog.sdkMethods
