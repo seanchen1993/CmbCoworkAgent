@@ -87,9 +87,17 @@ async function main() {
     monitor: Promise<void> | undefined
   let stopCursorCdpDiagnostic: (() => Promise<void>) | undefined
   const cursorCdpDiagnostic = process.env.DEVELOPER_WORKBENCH_CURSOR_CDP === "1"
-  const cursorKeyboardDiagnostic = process.env.DEVELOPER_WORKBENCH_CURSOR_KEYBOARD === "1"
+  const cursorKeyboardControl = process.env.DEVELOPER_WORKBENCH_CURSOR_KEYBOARD
   assert(
-    !(cursorCdpDiagnostic && cursorKeyboardDiagnostic),
+    cursorKeyboardControl === undefined ||
+      cursorKeyboardControl === "0" ||
+      cursorKeyboardControl === "1",
+    "WORKBENCH_CURSOR_KEYBOARD_CONTROL_INVALID"
+  )
+  const keyboardBaseline = cursorKeyboardControl !== "0"
+  const cursorKeyboardDiagnostic = cursorKeyboardControl !== undefined
+  assert(
+    !(cursorCdpDiagnostic && cursorKeyboardControl === "1"),
     "WORKBENCH_ONE_CURSOR_DIAGNOSTIC_AT_A_TIME"
   )
   let modelRequests = 0,
@@ -114,7 +122,8 @@ async function main() {
         {
           scenario: "developer-workbench",
           diagnosticOnly: cursorCdpDiagnostic || cursorKeyboardDiagnostic,
-          cursorBaseline: cursorKeyboardDiagnostic
+          cursorKeyboardControl: cursorKeyboardControl ?? null,
+          cursorBaseline: keyboardBaseline
             ? "focused-real-keyboard"
             : "programmatic-setSelectionRange",
           passed,
@@ -383,7 +392,7 @@ async function main() {
       }
       observe("before-baseline")
     }, draft)
-    if (cursorKeyboardDiagnostic) {
+    if (keyboardBaseline) {
       await composer.focus()
       await composer.press("Control+Home")
       for (let index = 0; index < 5; index++) await composer.press("ArrowRight")
