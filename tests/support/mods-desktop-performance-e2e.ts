@@ -12,6 +12,7 @@ import {
 } from "./mods-desktop-performance"
 import {
   DESKTOP_STREAM_DIAGNOSTIC_MARKER,
+  desktopStreamCanonicalTarget,
   desktopStreamDiagnostic,
   parseDesktopStreamDiagnostic,
   rethrowAfterDesktopStreamEvidence
@@ -166,47 +167,103 @@ export async function verifyDesktopPerformance(input: {
       },
       { id, url: `http://127.0.0.1:${address.port}/v1` }
     )
-    const captureDom = async () => {
-      const read = await page.evaluate(async (threadId) => {
-        const roots = Array.from(
-          document.querySelectorAll<HTMLElement>("[data-chat-thread-id]")
-        ).filter((root) => root.getAttribute("data-chat-thread-id") === threadId)
-        if (roots.length !== 1) throw Error(`STREAM_DIAGNOSTIC_OWNED_CHAT_ROOT:${roots.length}`)
-        const root = roots[0]
-        const snapshot = () =>
-          Array.from(
-            root.querySelectorAll<HTMLElement>(
-              '[data-chat-message-scroll-area] [data-chat-message-row][data-message-role="assistant"]'
+    const captureDom = async (messageId: string) => {
+      const deadline = performance.now() + 5000
+      let found = false
+      let rootCount = 0
+      while (performance.now() < deadline) {
+        stop()
+        const current = await page.evaluate(
+          ({ threadId, messageId }) => {
+            const roots = Array.from(
+              document.querySelectorAll<HTMLElement>("[data-chat-thread-id]")
+            ).filter((root) => root.getAttribute("data-chat-thread-id") === threadId)
+            const root = roots.length === 1 ? roots[0] : undefined
+            const rows = root
+              ? Array.from(
+                  root.querySelectorAll<HTMLElement>(
+                    '[data-chat-message-row][data-message-role="assistant"]'
+                  )
+                ).filter(
+                  (row) =>
+                    row.closest("[data-chat-thread-id]") === root &&
+                    row.getAttribute("data-chat-message-id") === messageId
+                )
+              : []
+            return { roots: roots.length, found: rows.length > 0 }
+          },
+          { threadId: id, messageId }
+        )
+        rootCount = current.roots
+        if (current.found) {
+          found = true
+          break
+        }
+        await pause(Math.min(50, Math.max(0, deadline - performance.now())))
+      }
+      stop()
+      if (!found)
+        return {
+          state: "unknown",
+          reason: "exact-canonical-row-not-observed",
+          messageId,
+          rootCount
+        }
+      const read = await page.evaluate(
+        async ({ threadId, messageId }) => {
+          const roots = Array.from(
+            document.querySelectorAll<HTMLElement>("[data-chat-thread-id]")
+          ).filter((root) => root.getAttribute("data-chat-thread-id") === threadId)
+          if (roots.length !== 1) throw Error(`STREAM_DIAGNOSTIC_OWNED_CHAT_ROOT:${roots.length}`)
+          const root = roots[0]
+          const rowValue = (row: HTMLElement, limit: number) => {
+            const segments = Array.from(
+              row.querySelectorAll<HTMLElement>("[data-chat-search-text]")
             )
-          )
-            .filter((row) => row.closest("[data-chat-thread-id]") === root)
-            .slice(-3)
-            .map((row) => ({
+            return {
               messageId: row.getAttribute("data-chat-message-id"),
               role: row.getAttribute("data-message-role"),
-              segments: Array.from(row.querySelectorAll<HTMLElement>("[data-chat-search-text]"))
-                .slice(0, 4)
-                .map((segment) => ({
-                  length: (segment.textContent ?? "").length,
-                  text: (segment.textContent ?? "").slice(0, 1024),
-                  visible: segment.getClientRects().length > 0
-                }))
-            }))
-        const before = snapshot()
-        const twoFrames = await new Promise<boolean>((resolve) => {
-          const timer = setTimeout(() => resolve(false), 1500)
-          requestAnimationFrame(() =>
-            requestAnimationFrame(() => {
-              clearTimeout(timer)
-              resolve(true)
-            })
-          )
-        })
-        return { threadId, before, twoFrames, after: twoFrames ? snapshot() : null }
-      }, id)
-      return {
-        ...read,
-        before: read.before.map((row) => ({
+              segmentCount: segments.length,
+              segmentsTruncated: segments.length > limit,
+              segments: segments.slice(0, limit).map((segment) => ({
+                length: (segment.textContent ?? "").length,
+                text: (segment.textContent ?? "").slice(0, 1024),
+                visible: segment.getClientRects().length > 0
+              }))
+            }
+          }
+          const snapshot = () => {
+            const rows = Array.from(
+              root.querySelectorAll<HTMLElement>(
+                '[data-chat-message-scroll-area] [data-chat-message-row][data-message-role="assistant"]'
+              )
+            ).filter((row) => row.closest("[data-chat-thread-id]") === root)
+            const targets = rows.filter(
+              (row) => row.getAttribute("data-chat-message-id") === messageId
+            )
+            return {
+              targetCount: targets.length,
+              targetRows: targets.slice(0, 4).map((row) => rowValue(row, 16)),
+              targetRowsTruncated: targets.length > 4,
+              neighbors: rows.slice(-3).map((row) => rowValue(row, 4))
+            }
+          }
+          const before = snapshot()
+          const twoFrames = await new Promise<boolean>((resolve) => {
+            const timer = setTimeout(() => resolve(false), 1500)
+            requestAnimationFrame(() =>
+              requestAnimationFrame(() => {
+                clearTimeout(timer)
+                resolve(true)
+              })
+            )
+          })
+          return { threadId, messageId, before, twoFrames, after: twoFrames ? snapshot() : null }
+        },
+        { threadId: id, messageId }
+      )
+      const hashRows = (rows: typeof read.before.targetRows) =>
+        rows.map((row) => ({
           ...row,
           segments: row.segments.map(({ text, length, visible }) => ({
             length,
@@ -215,19 +272,17 @@ export async function verifyDesktopPerformance(input: {
             sha256: length === text.length ? createHash("sha256").update(text).digest("hex") : null,
             shaUnavailable: length !== text.length
           }))
-        })),
-        after:
-          read.after?.map((row) => ({
-            ...row,
-            segments: row.segments.map(({ text, length, visible }) => ({
-              length,
-              capturedLength: text.length,
-              visible,
-              sha256:
-                length === text.length ? createHash("sha256").update(text).digest("hex") : null,
-              shaUnavailable: length !== text.length
-            }))
-          })) ?? null
+        }))
+      const hashSnapshot = (value: typeof read.before) => ({
+        ...value,
+        targetRows: hashRows(value.targetRows),
+        neighbors: hashRows(value.neighbors)
+      })
+      return {
+        ...read,
+        state: read.before.targetCount > 0 && read.after?.targetCount ? "observed" : "unknown",
+        before: hashSnapshot(read.before),
+        after: read.after ? hashSnapshot(read.after) : null
       }
     }
     const recordDiagnostic = async (callKey: string, value: Record<string, unknown> | null) => {
@@ -244,10 +299,25 @@ export async function verifyDesktopPerformance(input: {
       diagnosticCalls.push(observation)
       saveDiagnostic()
       try {
+        const target = value
+          ? desktopStreamCanonicalTarget(
+              value,
+              serverReceipts
+                .filter((receipt) => receipt.callKey === callKey)
+                .map((receipt) => receipt.responseId)
+            )
+          : { state: "unknown" as const, reason: "no-callback-diagnostic" }
+        observation.canonicalTarget = target
+        saveDiagnostic()
+        if (target.state !== "matched") {
+          observation.dom = { state: "unknown", reason: target.reason }
+          saveDiagnostic()
+          return
+        }
         const dom = await Promise.race([
-          captureDom(),
+          captureDom(target.messageId),
           new Promise<never>((_resolve, reject) => {
-            timer = setTimeout(() => reject(Error("STREAM_DIAGNOSTIC_DOM_TIMEOUT")), 2500)
+            timer = setTimeout(() => reject(Error("STREAM_DIAGNOSTIC_DOM_TIMEOUT")), 8000)
           })
         ])
         observation.dom = dom
@@ -393,6 +463,9 @@ export async function verifyDesktopPerformance(input: {
                           : chunk?.additional_kwargs
                             ? "plain"
                             : null,
+                        langgraphNode: scalar(metadata?.langgraph_node),
+                        langgraphCheckpointNs: scalar(metadata?.langgraph_checkpoint_ns),
+                        checkpointNs: scalar(metadata?.checkpoint_ns),
                         wire: {
                           content: scalar(metadata?.cmb_stream_message_content_mode, 16),
                           reasoning: scalar(metadata?.cmb_stream_message_reasoning_mode, 16),

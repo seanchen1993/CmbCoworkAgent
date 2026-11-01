@@ -9,6 +9,90 @@ export interface DesktopStreamDiagnosticRecord extends Record<string, unknown> {
   actualText: string
 }
 
+export type DesktopStreamCanonicalTarget =
+  | { state: "matched"; messageId: string; providerSourceId: string; providerOccurrence: number }
+  | { state: "unknown"; reason: string }
+
+/** Select an observed identity, never a text match or a guessed last assistant row. */
+export function desktopStreamCanonicalTarget(
+  value: unknown,
+  responseIds: readonly string[]
+): DesktopStreamCanonicalTarget {
+  const unknown = (reason: string): DesktopStreamCanonicalTarget => ({ state: "unknown", reason })
+  if (
+    responseIds.length !== 1 ||
+    typeof responseIds[0] !== "string" ||
+    !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(responseIds[0])
+  )
+    return unknown("server-response-not-unique-or-invalid")
+  if (
+    !record(value) ||
+    value.schemaVersion !== 1 ||
+    typeof value.callKey !== "string" ||
+    value.callKey.length === 0 ||
+    value.callKey.length > 128 ||
+    typeof value.actualText !== "string" ||
+    value.actualText.length > 4096 ||
+    !record(value.events)
+  )
+    return unknown("invalid-diagnostic-record")
+  const { head, tail, overflow, byteBudgetTruncated } = value.events
+  if (
+    !Array.isArray(head) ||
+    head.length > 128 ||
+    !Array.isArray(tail) ||
+    tail.length > 16 ||
+    !Number.isSafeInteger(value.eventCount) ||
+    Number(value.eventCount) < 0 ||
+    value.eventCount !== head.length + tail.length ||
+    !Number.isSafeInteger(overflow) ||
+    Number(overflow) < 0 ||
+    Number(overflow) > tail.length ||
+    byteBudgetTruncated === true ||
+    (byteBudgetTruncated !== undefined && typeof byteBudgetTruncated !== "boolean")
+  )
+    return unknown("incomplete-or-truncated-trace")
+  const identities = new Map<string, Extract<DesktopStreamCanonicalTarget, { state: "matched" }>>()
+  for (const event of [...head, ...tail]) {
+    if (!record(event)) return unknown("invalid-trace-event")
+    if (event.type !== "stream" || event.mode !== "messages" || event.className !== "AIMessage")
+      continue
+    if (
+      !record(event.wire) ||
+      event.wire.content !== "snapshot" ||
+      event.wire.reasoning !== "snapshot" ||
+      event.wire.tool !== "snapshot"
+    )
+      return unknown("canonical-wire-not-snapshot")
+    if (
+      typeof event.kwargsId !== "string" ||
+      !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(event.kwargsId)
+    )
+      return unknown("canonical-message-id-invalid")
+    if (
+      event.providerSourceId !== responseIds[0] ||
+      !Number.isSafeInteger(event.providerOccurrence) ||
+      Number(event.providerOccurrence) < 1
+    )
+      return unknown("canonical-provider-identity-conflict")
+    const target: Extract<DesktopStreamCanonicalTarget, { state: "matched" }> = {
+      state: "matched",
+      messageId: event.kwargsId,
+      providerSourceId: responseIds[0],
+      providerOccurrence: Number(event.providerOccurrence)
+    }
+    identities.set(
+      JSON.stringify([target.messageId, target.providerSourceId, target.providerOccurrence]),
+      target
+    )
+  }
+  if (identities.size !== 1)
+    return unknown(
+      identities.size ? "canonical-identity-ambiguous" : "canonical-identity-not-observed"
+    )
+  return identities.values().next().value!
+}
+
 export function desktopStreamDiagnostic(value: string | undefined): boolean {
   assert(value === undefined || value === "1", "DESKTOP_STREAM_DIAGNOSTIC_FLAG_INVALID")
   return value === "1"

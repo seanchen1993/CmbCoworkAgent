@@ -1,6 +1,7 @@
 import assert from "node:assert/strict"
 import {
   DESKTOP_STREAM_DIAGNOSTIC_MARKER,
+  desktopStreamCanonicalTarget,
   desktopStreamDiagnostic,
   parseDesktopStreamDiagnostic,
   rethrowAfterDesktopStreamEvidence
@@ -29,6 +30,78 @@ async function main() {
     new Error("DESKTOP_STREAM_CONTENT:8" + DESKTOP_STREAM_DIAGNOSTIC_MARKER + JSON.stringify(value))
   const parsed = parseDesktopStreamDiagnostic(error(base))
   assert.deepEqual(parsed, base, "Parsing must preserve the failed lengths, flags and timestamps")
+  const canonical = {
+    type: "stream",
+    mode: "messages",
+    className: "AIMessage",
+    kwargsId: "ea7230b7-3f28-45ac-be30-f7c0e070d12a",
+    providerSourceId: "desktop-stream-2",
+    providerOccurrence: 1,
+    wire: { content: "snapshot", reasoning: "snapshot", tool: "snapshot" }
+  }
+  const trace = (events: unknown[], extras: Record<string, unknown> = {}) => {
+    const result = parseDesktopStreamDiagnostic(
+      error({
+        ...base,
+        eventCount: events.length,
+        events: { head: events, tail: [], overflow: 0, byteBudgetTruncated: false },
+        ...extras
+      })
+    )
+    assert(result)
+    return result
+  }
+  const matched = {
+    state: "matched",
+    messageId: canonical.kwargsId,
+    providerSourceId: canonical.providerSourceId,
+    providerOccurrence: 1
+  }
+  assert.deepEqual(desktopStreamCanonicalTarget(trace([canonical]), ["desktop-stream-2"]), matched)
+  assert.deepEqual(
+    desktopStreamCanonicalTarget(trace([canonical, canonical]), ["desktop-stream-2"]),
+    matched
+  )
+  const inTail = trace([], {
+    eventCount: 1,
+    events: { head: [], tail: [canonical], overflow: 1, byteBudgetTruncated: false }
+  })
+  assert.deepEqual(desktopStreamCanonicalTarget(inTail, ["desktop-stream-2"]), matched)
+  for (const value of [null, [], {}, { ...base, schemaVersion: 2 }])
+    assert.equal(desktopStreamCanonicalTarget(value, ["desktop-stream-2"]).state, "unknown")
+  for (const events of [
+    [],
+    [{ ...canonical, className: "AIMessageChunk" }],
+    [{ ...canonical, kwargsId: "not-a-uuid" }],
+    [{ ...canonical, providerOccurrence: 0 }],
+    [{ ...canonical, providerOccurrence: 1.5 }],
+    [{ ...canonical, providerSourceId: "other" }],
+    [{ ...canonical, wire: { ...canonical.wire, content: "delta" } }],
+    [canonical, { ...canonical, kwargsId: "aa7230b7-3f28-45ac-be30-f7c0e070d12a" }],
+    [canonical, { ...canonical, providerOccurrence: 2 }],
+    [canonical, { ...canonical, providerSourceId: "other" }]
+  ])
+    assert.equal(desktopStreamCanonicalTarget(trace(events), ["desktop-stream-2"]).state, "unknown")
+  for (const responseIds of [
+    [],
+    ["desktop-stream-2", "desktop-stream-2"],
+    [""],
+    ["bad id"],
+    ["x".repeat(129)]
+  ])
+    assert.equal(desktopStreamCanonicalTarget(trace([canonical]), responseIds).state, "unknown")
+  for (const extras of [
+    { eventCount: 2 },
+    { eventCount: -1 },
+    { eventCount: 1.5 },
+    { events: { head: [canonical], tail: [], overflow: 1, byteBudgetTruncated: false } },
+    { events: { head: [canonical], tail: [], overflow: 0, byteBudgetTruncated: true } },
+    { events: { head: [canonical], tail: [], byteBudgetTruncated: false } }
+  ])
+    assert.equal(
+      desktopStreamCanonicalTarget(trace([canonical], extras), ["desktop-stream-2"]).state,
+      "unknown"
+    )
   for (const newline of ["\n", "\r\n"]) {
     const transported = new Error(
       "page.evaluate: Error: DESKTOP_STREAM_CONTENT:8" +
@@ -133,8 +206,14 @@ async function main() {
   }
   console.log(
     JSON.stringify({
-      passed: 4,
-      checks: ["strict flag", "bounded DTO", "no getter", "original throw identity"]
+      passed: 5,
+      checks: [
+        "strict flag",
+        "bounded DTO",
+        "canonical observed identity",
+        "no getter",
+        "original throw identity"
+      ]
     })
   )
 }
