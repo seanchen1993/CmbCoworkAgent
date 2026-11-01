@@ -8,6 +8,14 @@ import { join, relative, resolve } from "node:path"
 import { modsGitTree } from "./support/mods-git-tree"
 import { modsSourceNodeWorkers } from "./support/mods-source-node-workers"
 import { captureModsSourceSnapshot, verifyModsSourceSnapshot } from "./support/mods-source-snapshot"
+import {
+  collectMcpPerformanceChild,
+  MCP_PERFORMANCE_BOOTSTRAP_SOURCE,
+  MCP_PERFORMANCE_ESM_EXTERNAL,
+  mcpPerformanceEsmExternal,
+  mcpPerformanceSamples,
+  type McpPerformanceChildOutput
+} from "./support/mods-mcp-performance-harness"
 import { parsePerformanceOptions, summarizeSamples } from "./support/mods-v2-performance"
 
 /** Same fixed fixture, full historical source tree, same installed dependency lock, fresh profiles. */
@@ -66,7 +74,8 @@ async function main() {
       "tests/run-mods-phase3-performance.ts",
       "tests/support/mods-git-tree.ts",
       "tests/support/mods-source-node-workers.ts",
-      "tests/support/mods-source-snapshot.ts"
+      "tests/support/mods-source-snapshot.ts",
+      "tests/support/mods-mcp-performance-harness.ts"
     ].map((file) => [
       file,
       createHash("sha256")
@@ -118,6 +127,7 @@ async function main() {
         __MODS_MATCHED_PUBLICATION__: "true"
       },
       plugins: [
+        mcpPerformanceEsmExternal(suite),
         workers.plugin,
         {
           name: "fixed-fixture-inputs",
@@ -180,6 +190,13 @@ async function main() {
           .digest("hex")
       ])
     )
+    if (suite === "mcp") {
+      const bootstrap = join(folder, "mcp-bootstrap.cjs")
+      writeFileSync(bootstrap, MCP_PERFORMANCE_BOOTSTRAP_SOURCE)
+      hashes[variant]["mcp-bootstrap.cjs"] = createHash("sha256")
+        .update(readFileSync(bootstrap))
+        .digest("hex")
+    }
   }
   if (currentSnapshot) verifyModsSourceSnapshot(root, ["src"], currentSnapshot)
   const manifest = {
@@ -199,6 +216,16 @@ async function main() {
     diagnosticOnly: diagnosticDispose,
     timingEligible: !diagnosticDispose,
     compiledGuestDisposeObserver: diagnosticDispose,
+    ...(suite === "mcp"
+      ? {
+          esmExternalNormalization: MCP_PERFORMANCE_ESM_EXTERNAL,
+          carrier:
+            "Real installed Electron main, private profile, no full App; same bootstrap in both variants",
+          bootstrapSha256: createHash("sha256")
+            .update(MCP_PERFORMANCE_BOOTSTRAP_SOURCE)
+            .digest("hex")
+        }
+      : {}),
     baseline: tree.commit,
     dependencyHash,
     fixture,
@@ -214,7 +241,7 @@ async function main() {
     scope: diagnosticDispose
       ? "Diagnostic only: historical baseline single-plugin burst, original dispose reason; no formal samples or comparison."
       : suite === "mcp"
-        ? "Same named MCP resolver + instance authority + SQLite, 1000 tools, real host; passthrough transport, no VM/network/model"
+        ? "Same named MCP resolver + instance authority + SQLite, 1000 tools, complete source graph in real Electron main; original empty guest source fixture, passthrough transport, no network/model. Native windows/guest utility observations are recorded before/after each run."
         : suite === "runtime"
           ? "Paired 0/1/8 plugin matrix and disabled reads; real QuickJS/SQLite; excludes 2h soak/idle qualification"
           : "Paired actual LocalSandbox + Mods ingress, 0/1/8 plugins, project/global off; no renderer/model",
@@ -297,12 +324,12 @@ async function main() {
       env[key] = join(run, name)
       mkdirSync(env[key]!, { recursive: true })
     }
-    let stdout = ""
+    let mcpOutput: McpPerformanceChildOutput | undefined
     const code = await new Promise<number>((done, fail) => {
       const child = spawn(
-        suite === "mcp" ? process.execPath : require("electron"),
+        require("electron"),
         [
-          join(run, `performance-entry.${suite === "mcp" ? "mjs" : "cjs"}`),
+          join(run, suite === "mcp" ? "mcp-bootstrap.cjs" : "performance-entry.cjs"),
           ...(suite === "mcp" ? [] : [run])
         ],
         { cwd: root, env, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] }
@@ -311,24 +338,63 @@ async function main() {
         child.kill()
         fail(Error("OWNED_PERFORMANCE_TIMEOUT"))
       }, 1800000)
-      child.stdout.on("data", (bytes) => {
-        stdout += bytes.toString()
-        process.stdout.write(bytes)
-      })
-      child.stderr.on("data", (bytes) => process.stderr.write(bytes))
-      child.once("error", (error) => {
-        clearTimeout(timer)
-        fail(error)
-      })
-      child.once("exit", (value) => {
-        clearTimeout(timer)
-        done(value ?? 1)
-      })
+      if (suite === "mcp") {
+        void collectMcpPerformanceChild(child, {
+          stdout: (bytes) => process.stdout.write(bytes),
+          stderr: (bytes) => process.stderr.write(bytes)
+        }).then(
+          (value) => {
+            clearTimeout(timer)
+            mcpOutput = value
+            done(value.code ?? 1)
+          },
+          (error) => {
+            clearTimeout(timer)
+            fail(error)
+          }
+        )
+      } else {
+        child.stdout.on("data", (bytes) => {
+          process.stdout.write(bytes)
+        })
+        child.stderr.on("data", (bytes) => process.stderr.write(bytes))
+        child.once("error", (error) => {
+          clearTimeout(timer)
+          fail(error)
+        })
+        child.once("exit", (value) => {
+          clearTimeout(timer)
+          done(value ?? 1)
+        })
+      }
     })
-    if (suite === "mcp") writeFileSync(join(run, "timings.json"), stdout)
+    let mcpTimings: number[] | undefined
+    if (suite === "mcp") {
+      assert(mcpOutput, "MCP_CHILD_OUTPUT_UNAVAILABLE")
+      writeFileSync(join(run, "raw-stdout.txt"), mcpOutput.stdout)
+      writeFileSync(join(run, "stderr.txt"), mcpOutput.stderr)
+      writeFileSync(
+        join(run, "child-exit.json"),
+        JSON.stringify(
+          {
+            code: mcpOutput.code,
+            signal: mcpOutput.signal,
+            closeCode: mcpOutput.closeCode,
+            closeSignal: mcpOutput.closeSignal,
+            exitObserved: mcpOutput.exitObserved,
+            stdoutBytes: mcpOutput.stdout.length,
+            stderrBytes: mcpOutput.stderr.length
+          },
+          null,
+          2
+        )
+      )
+      mcpTimings = mcpPerformanceSamples(mcpOutput)
+      writeFileSync(join(run, "timings.json"), JSON.stringify(mcpTimings))
+    }
     const result =
       suite === "mcp"
-        ? summarizeSamples(JSON.parse(stdout))
+        ? summarizeSamples(mcpTimings!)
         : JSON.parse(readFileSync(join(run, "result.json"), "utf8"))
     reports.push({ variant, path: run, code, result })
     writeFileSync(
