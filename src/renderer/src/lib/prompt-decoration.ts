@@ -26,13 +26,13 @@ export function clampPromptDecorationGraphemes(
     return edges[low]
   }
   return decorations
-    .filter((span) => span.end > span.start)
+    .filter((span) => span.end > span.start || !!span.virtualText)
     .map((span) => ({
       ...span,
       start: floor(Math.max(0, Math.min(text.length, span.start))),
       end: floor(Math.max(0, Math.min(text.length, span.end)))
     }))
-    .filter((span) => span.end > span.start)
+    .filter((span) => span.end > span.start || !!span.virtualText)
 }
 
 /** Existing paint follows surviving characters; newly typed text receives no old paint. */

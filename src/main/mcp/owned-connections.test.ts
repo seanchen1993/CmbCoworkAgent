@@ -145,9 +145,9 @@ it("retains unknown cleanup and refuses reconnect, while retired successful leas
   await expect(unknown.registry.connect("connector-one", signal())).rejects.toThrow("UNCONFIRMED")
 })
 
-it("refuses remote policy and missing selections without starting a transport", async () => {
+it("refuses unsupported transport policy and missing selections without starting a transport", async () => {
   const remote = fixture()
-  remote.source.serverConfig = { transport: "http", url: "https://private.invalid/secret" }
+  remote.source.serverConfig = { transport: "websocket", url: "https://private.invalid/secret" }
   expect((await remote.registry.connect("connector-one", signal())).value)
     .toMatchObject({ isConnected: false, reason: "policy" })
   remote.deselect()
@@ -185,4 +185,18 @@ it("does not project an old account/incarnation's tombstones into a replacement 
   f.replaceOwner()
   expect(f.registry.inspect()).toEqual([])
   expect(() => f.registry.status(server)).toThrow("OWNER_CHANGED")
+})
+
+it("retires a failed tool call and preserves an unconfirmed cleanup tombstone", async () => {
+  const call = vi.fn(async () => { throw Error("MODS_CANCELLED") })
+  const close = vi.fn(async () => false)
+  const f = fixture({}, () => ({ initialize: async () => [{ name: "echo", inputSchema: {} }],
+    call, close }))
+  const server = await connect(f.registry)
+  const [tool] = await f.registry.service(server).listTools()
+  await expect(f.registry.service(server).invoke(tool.capabilityId, {})).rejects.toThrow("CANCELLED")
+  expect(f.registry.status(server).state).toBe("unknown")
+  await expect(f.registry.connect("connector-one", signal())).rejects.toThrow("UNCONFIRMED")
+  expect(call).toHaveBeenCalledTimes(1)
+  expect(close).toHaveBeenCalledTimes(1)
 })

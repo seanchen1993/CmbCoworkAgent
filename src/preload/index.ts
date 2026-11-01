@@ -3275,6 +3275,10 @@ const api = {
       return () => ipcRenderer.removeListener("mods:desktop-request", listener)
     },
     promptAttach: (threadId: string, owner: string): Promise<void> => ipcRenderer.invoke("mods:prompt-attach", { threadId, owner }),
+    agentViewActivate: (input: { threadId: string; intentId: string }) =>
+      ipcRenderer.invoke("mods:agent-view-activate", input),
+    agentViewSend: (input: { threadId: string; intentId: string; sequence: number; text: string }) =>
+      ipcRenderer.invoke("mods:agent-view-send", input),
     promptEditSupport: (threadId: string, owner: string): Promise<boolean> => ipcRenderer.invoke("mods:prompt-edit-support", { threadId, owner }),
     promptEdit: (request: import("../shared/mods/v2/prompt-composer").PromptEditRequest): Promise<import("../shared/mods/v2/prompt-edit").FunctionPromptEditResult> => ipcRenderer.invoke("mods:prompt-edit", request),
     promptEditCancel: (threadId: string, owner: string, sequence: number): Promise<void> => ipcRenderer.invoke("mods:prompt-edit-cancel", { threadId, owner, sequence }),
@@ -3365,6 +3369,8 @@ const api = {
       ipcRenderer.invoke("mods:function-panes", threadId),
     placedRows: (threadId: string, owner: string): Promise<import("../shared/mods/v2/placed").FunctionPlacedEntry[]> =>
       ipcRenderer.invoke("mods:function-placed-rows", { threadId, owner }),
+    placedRevealAck: (threadId: string, owner: string, ack: import("../shared/mods/v2/placed").FunctionPlacedRevealAck): Promise<void> =>
+      ipcRenderer.invoke("mods:function-placed-reveal-ack", { threadId, owner, ack }),
     placedRead: (threadId: string, owner: string, requestId: string, lease: string): Promise<import("../shared/mods/v2/ui").FunctionPaneSnapshot> =>
       ipcRenderer.invoke("mods:function-placed-read", { threadId, owner, requestId, lease }),
     placedAct: (threadId: string, owner: string, requestId: string, lease: string, action: import("../shared/mods/v2/ui").FunctionUiAction): Promise<void | import("../shared/mods/v2/ui").FunctionFocusResult> =>

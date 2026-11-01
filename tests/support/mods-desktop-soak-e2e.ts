@@ -12,6 +12,7 @@ import {
   readDesktopLatency
 } from "./mods-desktop-latency"
 import { verifyDesktopPerformance } from "./mods-desktop-performance-e2e"
+import { desktopHeapAssessment, type DesktopHeapSample } from "./mods-desktop-heap"
 
 /** Whole application workload. No test IPC bridge, direct guest dispatcher or fake store. */
 export async function verifyDesktopSoak(
@@ -104,6 +105,9 @@ export async function verifyDesktopSoak(
     clickAcknowledgementMs: number
   }> = []
   const memory: unknown[] = []
+  const naturalHeap: DesktopHeapSample[] = []
+  const heapErrors: string[] = []
+  const forcedGc = process.env.CMB_MODS_SOAK_GC_DIAGNOSTIC === "1"
   const processes = () => app.evaluate(({ app }) => app.getAppMetrics())
   const modProcesses = async () => (await processes()).filter((p) => p.name === "CMB Function Mods")
   const select = async () => {
@@ -151,13 +155,16 @@ export async function verifyDesktopSoak(
   const snapshot = async (event: number, phase: string) => {
     const cdp = await page.context().newCDPSession(page)
     try {
-      await cdp.send("HeapProfiler.collectGarbage")
+      if (forcedGc) await cdp.send("HeapProfiler.collectGarbage")
       const heap = await cdp.send("Runtime.getHeapUsage")
       memory.push({
         event,
         phase,
         at: new Date().toISOString(),
-        rendererAfterGc: heap,
+        statistic: forcedGc
+          ? "diagnostic-post-gc-renderer-heap"
+          : "renderer-used-heap-not-live-heap",
+        rendererHeap: heap,
         processes: await processes()
       })
     } finally {
@@ -221,8 +228,73 @@ export async function verifyDesktopSoak(
     })
     return
   }
+  // Equal bounded history/cache state in the first and last natural-heap windows.
+  // This is setup, outside the fixed two-hour/10,000-event timed workload.
+  if (!options.smoke) {
+    for (let cycle = 0; cycle < 6; cycle++) await open()
+    assert.equal((await page.evaluate((id) => window.api.mods.jobs(id), id)).length, 50)
+  }
   const startedAt = new Date().toISOString()
   const started = performance.now()
+  let replacing = false
+  let sampling: Promise<void> | undefined
+  const sampleHeap = () => {
+    if (sampling) return sampling
+    sampling = (async () => {
+      // Do not compare the intentionally closed/half-replaced view to the four-pane warm view.
+      const waitEnd = performance.now() + 15000
+      while (replacing && performance.now() < waitEnd)
+        await new Promise((done) => setTimeout(done, 50))
+      assert(!replacing, "DESKTOP_HEAP_REPLACEMENT_NOT_SETTLED")
+      const cdp = await page.context().newCDPSession(page)
+      try {
+        const heap = await cdp.send("Runtime.getHeapUsage")
+        const browserWindow = await app.browserWindow(page)
+        let rendererPid: number
+        try {
+          rendererPid = await browserWindow.evaluate((window) =>
+            window.webContents.getOSProcessId()
+          )
+        } finally {
+          await browserWindow.dispose()
+        }
+        const rendererCreatedAt = await app.evaluate(
+          ({ app }, pid) => app.getAppMetrics().find((metric) => metric.pid === pid)?.creationTime,
+          rendererPid
+        )
+        assert(
+          typeof rendererCreatedAt === "number" && Number.isFinite(rendererCreatedAt),
+          "DESKTOP_HEAP_RENDERER_IDENTITY_UNAVAILABLE"
+        )
+        const state = await page.evaluate(
+          async (id) => ({
+            jobs: (await window.api.mods.jobs(id)).length,
+            panes: (await window.api.mods.panes(id)).length
+          }),
+          id
+        )
+        naturalHeap.push({
+          atMs: performance.now() - started,
+          bytes: heap.usedSize,
+          rendererPid,
+          rendererCreatedAt,
+          ...state
+        })
+      } finally {
+        await cdp.detach()
+      }
+    })()
+      .catch((error) => {
+        heapErrors.push(error instanceof Error ? error.message : String(error))
+      })
+      .finally(() => {
+        sampling = undefined
+      })
+    return sampling
+  }
+  const heapTimer = setInterval(() => {
+    void sampleHeap()
+  }, 30000)
   const save = () =>
     writeFileSync(
       join(artifacts, "desktop-soak-progress.json"),
@@ -237,13 +309,16 @@ export async function verifyDesktopSoak(
           counts,
           samples,
           memory,
+          naturalHeap,
+          heapErrors,
+          heapAssessment: desktopHeapAssessment(naturalHeap, forcedGc),
           qualified:
             status === "completed" &&
             qualifiesDesktopSoak(options, performance.now() - started, completed),
           limits: [
             "Acknowledgement and input timings include Playwright IPC and scheduling.",
             "Separate DOM metrics measure trusted input to the second animation frame, and trusted click to the host acknowledgement DOM update; these exclude automation waits.",
-            "Only renderer heap is measured after forced GC; process RSS is not post-GC heap proof.",
+            "Formal mode samples natural renderer used heap every 30 seconds, with matched fifty-job/four-pane warm windows. Forced-GC mode is diagnostic and timing-ineligible.",
             "This workload does not measure model TTFT/throughput or five-minute idle CPU.",
             "Qualification confirms workload duration/count, not absence of memory growth or every performance budget."
           ]
@@ -253,6 +328,7 @@ export async function verifyDesktopSoak(
       )
     )
   try {
+    await sampleHeap()
     await snapshot(0, "loaded")
     for (let event = 1; event <= options.events; event++) {
       if (existsSync(join(artifacts, "STOP"))) throw Error("DESKTOP_SOAK_STOP_REQUESTED")
@@ -278,12 +354,15 @@ export async function verifyDesktopSoak(
       if (event % Math.max(1, Math.floor(options.reloadEvery / 5)) === 0)
         await snapshot(event, "live")
       if (event % options.reloadEvery === 0) {
+        await sampling
+        replacing = true
         await off()
         await snapshot(event, "off")
         cycles++
         await page.evaluate(() => window.api.mods.configureGlobal(true))
         await select()
         await open()
+        replacing = false
         await snapshot(event, "reloaded")
       }
       if (event % 100 === 0 || options.smoke) {
@@ -291,6 +370,10 @@ export async function verifyDesktopSoak(
         console.log(JSON.stringify({ completed, cycles, elapsedMs: performance.now() - started }))
       }
     }
+    await sampling
+    await sampleHeap()
+    clearInterval(heapTimer)
+    const heapAssessment = desktopHeapAssessment(naturalHeap, forcedGc)
     await off()
     await snapshot(completed, "final-off")
     await page.screenshot({ path: join(artifacts, "desktop-soak-off.png") })
@@ -309,8 +392,11 @@ export async function verifyDesktopSoak(
           clickEventToHostAcknowledgement: summarizeSamples(
             samples.map((s) => s.clickAcknowledgementMs)
           ),
+          heapAssessment,
+          heapErrors,
+          timingEligible: !forcedGc,
           memoryAssessment:
-            "Raw repeated GC windows retained; review separately. No automatic memory acceptance."
+            "Natural renderer used heap only; process RSS and whole-application live heap are not inferred."
         },
         null,
         2
@@ -319,6 +405,11 @@ export async function verifyDesktopSoak(
     pass(
       `${options.smoke ? "smoke" : "two-hour"} desktop workload retains acknowledged state across runtime replacement and leaves no Mods utility or pane after off`
     )
+    if (!options.smoke && !forcedGc) {
+      assert.equal(heapErrors.length, 0, "DESKTOP_HEAP_SAMPLING_FAILED")
+      assert(heapAssessment.qualified, "DESKTOP_NATURAL_HEAP_EVIDENCE_INCOMPLETE")
+      assert(heapAssessment.passed, "DESKTOP_NATURAL_HEAP_BUDGET_FAILED")
+    }
   } catch (error) {
     status = "failed"
     save()
@@ -329,5 +420,8 @@ export async function verifyDesktopSoak(
       JSON.stringify({ completed, counts, latency }, null, 2)
     )
     throw error
+  } finally {
+    clearInterval(heapTimer)
+    await sampling
   }
 }

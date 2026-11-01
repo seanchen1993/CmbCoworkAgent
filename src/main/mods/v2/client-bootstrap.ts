@@ -55,6 +55,13 @@ export const CLIENT_BOOTSTRAP = String.raw`
     return out;
   }
   const elements=Object.create(null);
+  function buttonText(values){
+    return values.map(value=>{
+      if(typeof value==="string")return value;
+      if(value?.type!=="Text"||!Array.isArray(value.children))throw Error("MODS_UI_BUTTON_CHILDREN");
+      return buttonText(value.children);
+    }).join("");
+  }
   for(const type of ["Box","Text","Button","Input","Select","Link","Code","Svg"]) {
     elements[type]=raw=>{
       const props={...raw}, nested=children(props.children), handlers={};
@@ -67,11 +74,11 @@ export const CLIENT_BOOTSTRAP = String.raw`
         }
       }
       if(type==="Button"){
-        if(props.label===undefined&&nested.length===1&&typeof nested[0]==="string")props.label=nested[0];
+        if(nested.length){const label=buttonText(nested);if(props.label===undefined)props.label=label;}
         if(props.key===undefined)props.key=props.label;
       }
       const node={type,props};
-      if(["Box","Text","Link"].includes(type))node.children=nested;
+      if(["Box","Text","Link"].includes(type)||(type==="Button"&&nested.length))node.children=nested;
       if(["Button","Input","Select"].includes(type)){
         const primary=type==="Button"?"onPress":type==="Input"?"onSubmit":"onSelect";
         if(!handlers[primary]||callbacks.size>=256)throw Error("MODS_UI_CALLBACK");

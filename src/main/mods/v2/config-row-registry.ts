@@ -19,6 +19,8 @@ export interface FunctionConfigHandle extends Omit<FunctionConfigRow, "value" | 
   cell: FunctionConfigCell
   locked(): boolean
   validate(value: FunctionConfigValue): boolean
+  /** Host policy rows may be changed only from a trusted native settings action. */
+  allow?(origin: FunctionConfigOrigin): boolean
 }
 
 /** Actual host rows, including hidden ones. This registry never takes guest-supplied providers. */
@@ -79,6 +81,7 @@ export class FunctionConfigRows {
       if (proof) return structuredClone(proof)
       if (attempted) throw new ModFunctionError("MODS_CONFIG_COMMIT_UNCONFIRMED")
       if (handle.locked()) return { deny: "This setting is locked" }
+      if (handle.allow && !handle.allow(origin)) return { deny: "Change this setting in the native settings panel" }
       const fitsKind =
         handle.kind === "boolean"
           ? typeof received === "boolean"

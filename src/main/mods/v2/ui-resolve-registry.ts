@@ -311,9 +311,21 @@ const COPY_BOOTSTRAP = String.raw`(() => {
       const data = copy(input, 0, new SetType(), true, saved, {nodes:0,text:0});
       const original = descriptors(input);
       const d = apply(own, original, ["children"]) ? original.children : null;
+      // Native Button derives its address from a text-only label. Derive the same
+      // address from the already copied data, without reading foreign callbacks.
+      const label = (value, depth = 0) => {
+        if (depth > 24) return undefined;
+        if (typeof value === "string" || typeof value === "number") return text(value);
+        if (value === undefined || value === null || typeof value === "boolean") return "";
+        if (array(value)) {
+          const parts = value.map(item => label(item, depth + 1));
+          return parts.some(part => part === undefined) ? undefined : parts.join("");
+        }
+        return value?.type === "Text" ? label(value.children, depth + 1) : undefined;
+      };
       return { json: bounded(data), callbacks: saved, children: d ? d.value : undefined,
         key: typeof data.key === "string" ? data.key :
-          typeof data.label === "string" ? data.label : undefined };
+          typeof data.label === "string" ? data.label : label(data.children) || undefined };
     }
     const result = copy(input, 0, new SetType(), false, null, {nodes:0,text:0});
     const encoded = bounded(result);

@@ -341,6 +341,17 @@ it("keeps real Guest peer and completion after parent lease release with child t
     await vi.waitFor(() => expect(requests).toHaveLength(1), { timeout: 5000 })
     expect(releaseLocalThreadRunLease("parent", "desktop", "parent-turn")).toBe(true)
     expect(JSON.parse((await command("send")).text!)).toEqual({ isDelivered: true })
+    const viewGrant = manager.store.getGrant(canonical, `function:${compiled.name}`)!
+    manager.ownedAgentTasks.requestView("parent", canonical, viewGrant, started.agentId,
+      () => manager.store.assertGrant(viewGrant), undefined, "interactive")
+    const intent = manager.ownedAgentTasks.view("parent", canonical,
+      grant => manager.store.assertGrant(grant))!
+    manager.ownedAgentTasks.activateView("parent", canonical, intent.id,
+      grant => manager.store.assertGrant(grant))
+    expect(await manager.sendOwnedAgentView(canonical, "parent", intent.id, 1,
+      "NATIVE_VIEW_FEEDBACK", () => {})).toEqual({ isDelivered: true })
+    await expect(manager.sendOwnedAgentView(canonical, "parent", intent.id, 1,
+      "NATIVE_VIEW_FEEDBACK", () => {})).rejects.toThrow("SEND_REPLAY")
     continueChild.resolve()
     await vi.waitFor(async () => {
       const text = (await command("inspect")).text
@@ -368,6 +379,7 @@ it("keeps real Guest peer and completion after parent lease release with child t
     expect(approvals).toHaveLength(1)
     expect(requests).toHaveLength(2)
     expect(JSON.stringify(requests[1])).toContain("native-tool-proof")
+    expect(JSON.stringify(requests[1])).toContain("NATIVE_VIEW_FEEDBACK")
     await vi.waitFor(async () => {
       await flushTraceWriteQueue()
       const traces = await readThreadTraces(childThread)

@@ -1,6 +1,21 @@
 import { expect, it } from "vitest"
-import { functionUiStyle } from "./function-ui-style"
+import { functionUiStyle, functionUiHoverStyle } from "./function-ui-style"
 import { functionUiColor } from "./function-ui-color"
+
+it("maps native position, direction and style-only hover without widening CSS access", () => {
+  expect(functionUiStyle({ type: "Box", props: { position: "absolute", left: -2, top: 1,
+    display: "none", borderStyle: "round", borderDimColor: true, borderColor: "red" } }))
+    .toMatchObject({ position: "absolute", left: "-2ch", top: "1lh", display: "none",
+      borderColor: `color-mix(in srgb, ${functionUiColor("red")} 65%, transparent)` })
+  expect(functionUiStyle({ type: "Text", props: { dir: "rtl", wrap: "middle" } }))
+    .toMatchObject({ direction: "rtl", whiteSpace: "nowrap" })
+  expect(functionUiHoverStyle({ type: "Box", props: { position: "relative", display: "none",
+    hover: { display: "flex", left: 99, backgroundColor: "black" } } }))
+    .toEqual({ display: "flex", backgroundColor: "black" })
+  expect(functionUiHoverStyle({ type: "Button", props: { dimColor: true,
+    hover: { dimColor: false, bold: true, underline: true } } }))
+    .toEqual({ opacity: 1, fontWeight: "bold", textDecoration: "underline" })
+})
 
 it("maps bounded layout props into the same desktop renderer with existing units", () => {
   expect(
@@ -110,7 +125,7 @@ it("renders the original example border, margin and inverse colors", () => {
 
 it("gives original truncation and wrapping modes real clipping/layout semantics", () => {
   expect(functionUiStyle({ type: "Text", props: { wrap: "truncate-start" } })).toMatchObject({
-    direction: "rtl",
+    direction: undefined,
     whiteSpace: "nowrap",
     textOverflow: "ellipsis",
     overflow: "hidden",

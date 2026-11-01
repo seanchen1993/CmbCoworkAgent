@@ -1351,14 +1351,19 @@ function App(): React.JSX.Element {
                 ) : (
                   <>
                     {/* Center - Content Panel */}
-                    {isAgentFocusActive ? (
+                    {(isAgentFocusActive || !previewFullscreen) && (
                       <main
                         ref={workerSplitRef}
-                        className="relative flex flex-1 min-w-0 overflow-hidden bg-grid-subtle"
+                        className={isAgentFocusActive
+                          ? "relative flex flex-1 min-w-0 overflow-hidden bg-grid-subtle"
+                          : fullscreenMainClassName}
+                        style={isAgentFocusActive ? undefined : fullscreenMainStyle}
                       >
                         <section
-                          className="flex min-w-0 flex-col overflow-hidden"
-                          style={{ width: `${workerSplitLeftPercent}%` }}
+                          className={isAgentFocusActive
+                            ? "flex min-w-0 flex-col overflow-hidden"
+                            : "relative flex min-w-0 flex-1 flex-col overflow-hidden"}
+                          style={isAgentFocusActive ? { width: `${workerSplitLeftPercent}%` } : undefined}
                         >
                           {renderedThreadId ? (
                             <TabbedPanel threadId={renderedThreadId} showTabBar={false} />
@@ -1367,8 +1372,16 @@ function App(): React.JSX.Element {
                               选择或创建一个任务开始
                             </div>
                           )}
+                          {!isAgentFocusActive && renderedMainView === "thread" && renderedThreadId && platformWorkspaceReady && (
+                            <Suspense fallback={null}>
+                              <PlatformWorkspace key={platformWorkspaceScope} scopeKey={platformWorkspaceScope}
+                                threadId={renderedThreadId}
+                                active={!showCustomizeView && !renderRoutePending && !browserFullscreen} />
+                            </Suspense>
+                          )}
                         </section>
-                        <WorkerSplitHandle onDrag={handleWorkerSplitResize} />
+                        {isAgentFocusActive && <WorkerSplitHandle onDrag={handleWorkerSplitResize} />}
+                        {isAgentFocusActive && (
                         <section className="flex min-w-0 flex-1 flex-col overflow-hidden">
                           {isWorkflowAgentFocusActive ? (
                             <WorkflowAgentStreamPanel />
@@ -1378,29 +1391,8 @@ function App(): React.JSX.Element {
                             <SubagentStreamPanel />
                           )}
                         </section>
+                        )}
                       </main>
-                    ) : (
-                      !previewFullscreen && (
-                        <main className={fullscreenMainClassName} style={fullscreenMainStyle}>
-                          {renderedThreadId ? (
-                            <TabbedPanel threadId={renderedThreadId} showTabBar={false} />
-                          ) : (
-                            <div className="flex flex-1 items-center justify-center text-muted-foreground">
-                              选择或创建一个任务开始
-                            </div>
-                          )}
-                          {renderedMainView === "thread" && renderedThreadId && platformWorkspaceReady && (
-                            <Suspense fallback={null}>
-                              <PlatformWorkspace
-                                key={platformWorkspaceScope}
-                                scopeKey={platformWorkspaceScope}
-                                threadId={renderedThreadId}
-                                active={!showCustomizeView && !renderRoutePending && !browserFullscreen}
-                              />
-                            </Suspense>
-                          )}
-                        </main>
-                      )
                     )}
                   </>
                 )}

@@ -35,9 +35,10 @@ async function main() {
       `
       import {AgentViewReceiver} from ${JSON.stringify(resolve(renderer, "components/chat/ModsAgentTranscriptPanel.tsx"))};
       import {SubagentStreamPanel} from ${JSON.stringify(resolve(renderer, "components/chat/SubagentStreamPanel.tsx"))};
+      import {useModsAgentInputTarget} from ${JSON.stringify(resolve(renderer, "lib/mods-agent-input-target.ts"))};
       useAppStore.setState({accountRevision:1,currentThreadId:'a',mainView:'thread',threads:[{thread_id:'a',created_at:1,metadata:{workspacePath:'a',cmb_thread_incarnation:'birth'}}]});
       let pending=null, serial=0, status='running', defer=false, finish, broken=false;const viewAgents=new Map();
-      const childCalls=[]; window.childFixture={calls:childCalls,open:(id='child')=>{pending={id:'intent-'+(++serial),threadId:'a',workspace:'a',agentId:id,parentIncarnation:'birth',sourceDigest:'digest'};viewAgents.set(pending.id,id)},
+      const childCalls=[]; window.childFixture={calls:childCalls,open:(id='child',mode='readonly')=>{status='running';pending={id:'intent-'+(++serial),threadId:'a',workspace:'a',agentId:id,parentIncarnation:'birth',sourceDigest:'digest',mode};viewAgents.set(pending.id,id)},
         defer:()=>{defer=true},finish:()=>finish?.(),broken:()=>{broken=true},account:()=>useAppStore.setState({accountRevision:2}),
         replace:()=>useAppStore.setState({threads:[{thread_id:'a',created_at:2,metadata:{workspacePath:'a',cmb_thread_incarnation:'new'}}]})};
       window.api.mods.agentViewPending=async()=>{const value=pending;pending=null;return value};
@@ -45,8 +46,17 @@ async function main() {
         messages:{agentId,messages:[{role:'assistant',text:agentId==='other'?'另一任务原文':input.cursor?'后续原文':'已有原文',toolUses:[],toolResults:[]}],history:'partial',truncated:!input.cursor,skippedMessages:input.cursor?0:1,...(input.cursor?{}:{nextCursor:'page-two'})}}};
       window.api.mods.agentViewStop=async input=>{childCalls.push(['stop',input]);status='stopping';return {agentId:'child',stopRequested:true,status}};
       window.api.mods.agentViewClose=async input=>{childCalls.push(['close',input])};
-      function Fixture(){const focused=useAppStore(s=>s.subagentFocusView);const[text,setText]=useState('未发送的父聊天草稿');return <div className='flex h-screen flex-col p-4'>
-        <AgentViewReceiver threadId='a' workspace='a'/><textarea aria-label='父聊天输入' value={text} onChange={e=>setText(e.target.value)}/>
+      window.api.mods.agentViewActivate=async input=>{childCalls.push(['activate',input]);return {active:true}};
+      window.api.mods.agentViewSend=async input=>{childCalls.push(['send',input]);return {isDelivered:true}};
+      window.api.mods.promptAttach=async(t,o)=>childCalls.push(['promptAttach',o]);
+      window.api.mods.promptDetach=async(t,o)=>childCalls.push(['promptDetach',o]);
+      window.api.mods.onPromptRequest=()=>()=>{};window.api.mods.promptEditSupport=async()=>false;
+      function ParentComposer(){const[text,setText]=useState('未发送的父聊天草稿'),node=useRef(null),draft=useRef({text:'未发送的父聊天草稿',revision:0});
+        const account=useAppStore(s=>s.accountRevision),paused=!!useModsAgentInputTarget('a',account);
+        usePromptComposer({threadId:'a',enabled:!paused,textarea:node,read:()=>draft.current,apply:()=>false});
+        return <textarea aria-label='父聊天输入' ref={node} disabled={paused} value={text} onChange={e=>{draft.current={text:e.target.value,revision:draft.current.revision+1};setText(e.target.value)}}/>}
+      function Fixture(){const focused=useAppStore(s=>s.subagentFocusView);return <div className='flex h-screen flex-col p-4'>
+        <AgentViewReceiver threadId='a' workspace='a'/><ParentComposer/>
         <button onClick={()=>window.childFixture.open()}>模拟已验证的原生查看意图</button>
         {focused?.modsView&&<div className='min-h-0 flex-1'><SubagentStreamPanel/></div>}
       </div>} host.render(<Fixture/>);
@@ -120,6 +130,33 @@ async function main() {
     await page.evaluate("window.childFixture.finish()")
     await page.waitForFunction("window.childFixture.waiting===false")
     assert.equal(await panel.getByText("已有原文", { exact: true }).count(), 0)
+    await panel.getByRole("button", { name: "返回父聊天" }).click()
+    await page.evaluate("window.parentComposerNode=document.querySelector('textarea[aria-label=\"父聊天输入\"]');window.childFixture.open('child','interactive')")
+    const interactive = page.getByRole("region", { name: "插件子会话", exact: true })
+    await interactive.waitFor()
+    await page.screenshot({ path: resolve(output, "interactive-task-wide.png") })
+    assert.equal(await page.getByLabel("父聊天输入").isDisabled(), true)
+    assert.equal(await page.evaluate("document.querySelector('textarea[aria-label=\"父聊天输入\"]')===window.parentComposerNode"), true)
+    assert.ok(await page.evaluate("window.childFixture.calls.some(x=>x[0]==='promptDetach')"))
+    const childDraft = interactive.getByRole("textbox")
+    await childDraft.fill("只发送给此子任务")
+    await childDraft.press("Enter")
+    await interactive.getByText(/已排队，等待子任务/).waitFor()
+    assert.equal(await page.evaluate("window.childFixture.calls.filter(x=>x[0]==='send').length"), 1)
+    assert.equal(await page.getByLabel("父聊天输入").inputValue(), "未发送的父聊天草稿")
+    await childDraft.fill("未发送的独立子草稿")
+    await interactive.getByRole("button", { name: "请求停止子任务" }).click()
+    await interactive.waitFor({ state: "detached" })
+    assert.equal(await page.getByLabel("父聊天输入").isEnabled(), true)
+    const ended = page.getByRole("region", { name: "插件子任务只读记录", exact: true })
+    await ended.getByRole("button", { name: "返回父聊天" }).click()
+    await page.evaluate("window.childFixture.open('child','interactive')")
+    await interactive.waitFor()
+    assert.equal(await interactive.getByRole("textbox").inputValue(), "未发送的独立子草稿")
+    await interactive.getByRole("button", { name: "返回父聊天" }).click()
+    assert.equal(await page.getByLabel("父聊天输入").isEnabled(), true)
+    assert.equal(await page.getByLabel("父聊天输入").inputValue(), "未发送的父聊天草稿")
+    assert.equal(await page.evaluate("document.querySelector('textarea[aria-label=\"父聊天输入\"]')===window.parentComposerNode"), true)
     await page.evaluate("window.childFixture.open()")
     await panel.getByText("已有原文", { exact: true }).waitFor()
     await page.evaluate("window.childFixture.broken()")
@@ -137,7 +174,7 @@ async function main() {
     )
     assert.deepEqual(errors, [])
     console.log(
-      "PASS child readonly view: native intent, pagination/partial, stop once, return, main, source error, late account fence; " +
+      "PASS child view: readonly history; interactive target/parent draft+broker isolation, enqueue once, terminal return, child draft retained; source/account fence; " +
         output
     )
   } catch (error) {

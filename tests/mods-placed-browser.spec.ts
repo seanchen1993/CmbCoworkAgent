@@ -25,6 +25,7 @@ declare global {
       replace(): string
       history(): void
       jump(index: number): void
+      reveal(): void
       permission(enabled: boolean): void
       restart(): void
     }
@@ -72,6 +73,8 @@ async function main() {
         onCardsChanged:fn=>{listeners.add(fn);return()=>listeners.delete(fn)},
         desktopAttach:async(t,o)=>{ops.push(['attach',o])},desktopDetach:async()=>{},onDesktopRequest:()=>()=>{},desktopFeedback:undefined,
         placedRows:async()=>[...rows.values()],
+        placedRevealAck:async(t,o,ack)=>{const row=rows.get(ack.requestId);if(!row||row.reveal?.id!==ack.receipt)throw Error('stale reveal');
+          if(ack.allowed&&(!leases.has(row.requestId)||leases.get(row.requestId)!==ack.lease))throw Error('stale lease');ops.push(['revealAck',ack]);delete row.reveal;emit()},
         placedRead:async(t,o,id,lease)=>{const row=rows.get(id);if(!row)throw Error('stale');leases.set(id,lease);const result=drawing(row);ops.push(['read',id,lease]);
           if(holdRead){holdRead=false;await new Promise(resolve=>resolveRead=resolve)}return result},
         placedAct:async(t,o,id,lease,action)=>{if(!rows.has(id)||leases.get(id)!==lease)throw Error('stale');ops.push(['act',id,action.kind]);
@@ -109,6 +112,7 @@ async function main() {
         replace:()=>{rows.clear();leases.clear();return place('replacement',{kind:'after-message',id:'native-first',role:'user'})},
         history:()=>setMessages([...Array.from({length:70},(_,i)=>native('before-'+i,'更早消息 '+i+' 历史内容。'.repeat(80))),native('native-first','第一条原生消息'),
           ...Array.from({length:70},(_,i)=>native('after-'+i,'稍后消息 '+i+' 历史内容。'.repeat(80)))]),
+        reveal:()=>{const row=[...rows.values()][0];row.reveal={id:'reveal-'+(++sequence),block:'center'};emit()},
         jump:index=>jump(index),permission:value=>{enabled=value;for(const fn of configuration)fn()},restart:()=>{rows.clear();leases.clear();emit()}};
       host.render(<Fixture/>);}
     `,
@@ -246,8 +250,11 @@ async function main() {
     )
     await page.locator("[data-test-viewport]").hover()
     await page.mouse.wheel(0, -1)
-    await page.evaluate(() => window.placedFixture.jump(70))
+    await page.evaluate(() => window.placedFixture.reveal())
+    await page.waitForFunction(() => window.placedFixture.ops.some(op =>
+      op[0] === "revealAck" && (op[1] as { allowed: boolean }).allowed))
     await page.getByText("卡片 replacement：0", { exact: true }).waitFor()
+    pass("own requestId reveals an offscreen resident row and returns a real mounted lease/generation acknowledgement")
     await page.locator("[data-function-placed]").getByRole("button", { name: "卡片加一" }).click()
     await page.getByText("卡片 replacement：1", { exact: true }).waitFor()
     pass("real Virtuoso recycles and redraws the original row; its new lease remains interactive")

@@ -5,7 +5,9 @@ import { creatorProjectMatrixMode } from "./support/creator-project-matrix"
 
 const mode = creatorProjectMatrixMode(process.env.CREATOR_LIVE_PROJECT_MATRIX)
 assert(mode, "LIVE_PROJECT_MATRIX_MODE_REQUIRED")
-assert.equal(process.env.CREATOR_E2E_BUILT_PREVIEW, "1", "LIVE_MATRIX_BUILT_PREVIEW_REQUIRED")
+assert.equal(process.env.COMPOSITION_E2E_SOURCE_CANDIDATE
+  ? process.env.CREATOR_E2E_SOURCE_PREVIEW : process.env.CREATOR_E2E_BUILT_PREVIEW, "1",
+"LIVE_MATRIX_EXPLICIT_CANDIDATE_REQUIRED")
 assert.match(process.env.CREATOR_E2E_EXPECTED_SHA256 ?? "", /^[a-f0-9]{64}$/)
 assert(process.env.CMB_CREATOR_LIVE_MODEL_ID, "LIVE_MATRIX_REAL_MODEL_REQUIRED")
 for (const key of ["CREATOR_LIVE_SOURCE_SET", "GENERIC_PROJECT_CREATOR", "CREATOR_LIVE_PROMPT_FILE",

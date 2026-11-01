@@ -236,8 +236,16 @@ export class OwnedMcpConnections {
             current(); assertCurrent?.(); getModCallContext()?.assertMcpTool?.(tool)
           })
           const signal = getModCallContext()?.signal
-          const raw = await lease.transport.call(tool.toolName, input,
-            signal ? AbortSignal.any([signal, lease.controller.signal]) : lease.controller.signal)
+          let raw: unknown
+          try {
+            raw = await lease.transport.call(tool.toolName, input,
+              signal ? AbortSignal.any([signal, lease.controller.signal]) : lease.controller.signal)
+          } catch (error) {
+            // SDK request cancellation is not proof that its HTTP body or stdio child
+            // stopped. Retire this owned lease and retain unknown cleanup if necessary.
+            await this.closeLease(lease)
+            throw error
+          }
           current(); assertCurrent?.()
           const value = await publishCurrentModResult(normalizeMcpInvocationResult(tool.capabilityId, raw))
           current(); assertCurrent?.()

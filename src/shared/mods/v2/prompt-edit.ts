@@ -7,6 +7,7 @@ export type FunctionPromptKey = { key: string; ctrl?: true; shift?: true; meta?:
 export type FunctionPromptDecoration = {
   start: number
   end: number
+  virtualText?: string
   color?: string
   backgroundColor?: string
   dimColor?: boolean
@@ -75,9 +76,13 @@ export function validatePromptDecorations(value: ModJson, text: string): void {
       !Number.isSafeInteger(span.start) ||
       !Number.isSafeInteger(span.end) ||
       Object.keys(span).some(
-        (key) => !["start", "end", "color", "backgroundColor", ...boolean].includes(key)
+        (key) => !["start", "end", "virtualText", "color", "backgroundColor", ...boolean].includes(key)
       ) ||
       boolean.some((key) => span[key] !== undefined && typeof span[key] !== "boolean") ||
+      (span.virtualText !== undefined && (typeof span.virtualText !== "string" ||
+        new TextEncoder().encode(span.virtualText).length > 4096 ||
+        // eslint-disable-next-line no-control-regex -- Virtual text is a printable single line.
+        /[\r\n\u0000-\u001f\u007f]/.test(span.virtualText))) ||
       ["color", "backgroundColor"].some(
         (key) => span[key] !== undefined && (typeof span[key] !== "string" || span[key].length > 80)
       )

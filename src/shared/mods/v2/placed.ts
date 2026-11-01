@@ -21,6 +21,14 @@ export interface FunctionPlacedEntry {
   plugin: string
   anchor: FunctionPlacedAnchor
   sequence: number
+  reveal?: { id: string; block: "start" | "center" | "end" | "nearest" }
+}
+export interface FunctionPlacedRevealAck {
+  requestId: string
+  receipt: string
+  allowed: boolean
+  lease?: string
+  generation?: string
 }
 export interface FunctionPlacedSnapshot extends FunctionPlacedEntry {
   drawing: FunctionPaneSnapshot

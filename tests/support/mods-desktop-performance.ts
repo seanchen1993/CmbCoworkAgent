@@ -2,6 +2,7 @@ import { summarizeSamples } from "./mods-v2-performance"
 
 interface CpuSample {
   pid: number
+  creationTime?: number
   cpu: { cumulativeCPUUsage?: number }
 }
 export function desktopCpuPoints(
@@ -17,10 +18,12 @@ export function desktopCpuPoints(
   )
     return null
   const previous = new Map(before.map((p) => [p.pid, p.cpu.cumulativeCPUUsage]))
+  const identities = new Map(before.map((p) => [p.pid, p.creationTime]))
   if (previous.size !== before.length || new Set(after.map((p) => p.pid)).size !== after.length)
     return null
   let seconds = 0
   for (const p of after) {
+    if (identities.get(p.pid) !== p.creationTime) return null
     const from = previous.get(p.pid),
       to = p.cpu.cumulativeCPUUsage
     if (

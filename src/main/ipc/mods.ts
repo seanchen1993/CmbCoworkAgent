@@ -316,6 +316,30 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
     const entry = manager.ownedAgentTasks.viewRead(input.threadId, workspace, input.intentId, grant => manager.store.assertGrant(grant))
     return manager.ownedAgentTasks.stop(input.threadId, workspace, entry.grant, entry.value.agentId)
   })
+  ipcMain.handle("mods:agent-view-activate", (event, input: { threadId: string; intentId: string }) => {
+    agentViewInput(input)
+    const workspace = writableScope(event, input.threadId)
+    return manager.ownedAgentTasks.activateView(input.threadId, workspace, input.intentId,
+      grant => manager.store.assertGrant(grant))
+  })
+  ipcMain.handle("mods:agent-view-send", (event, input: {
+    threadId: string; intentId: string; sequence: number; text: string
+  }) => {
+    if (!isModObject(input) || Object.keys(input).some(key =>
+      !["threadId", "intentId", "sequence", "text"].includes(key)) ||
+      typeof input.threadId !== "string" || !input.threadId || input.threadId.length > 512 ||
+      typeof input.intentId !== "string" || !input.intentId || input.intentId.length > 256 ||
+      !Number.isSafeInteger(input.sequence) || input.sequence < 1 ||
+      typeof input.text !== "string" || Buffer.byteLength(input.text) > 32 * 1024)
+      throw new ModError("MODS_AGENT_VIEW_ARGUMENTS")
+    const workspace = writableScope(event, input.threadId)
+    const frame = event.sender.mainFrame
+    return manager.sendOwnedAgentView(workspace, input.threadId, input.intentId,
+      input.sequence, input.text, () => {
+        if (event.sender.mainFrame !== frame || writableScope(event, input.threadId) !== workspace)
+          throw new ModError("MODS_CALL_SCOPE_CHANGED")
+      })
+  })
   ipcMain.handle("mods:agent-view-close", (event, input: { threadId: string; intentId: string }) => {
     agentViewInput(input)
     writableScope(event, input.threadId)
@@ -2531,6 +2555,16 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
   ipcMain.handle("mods:function-placed-release", (event, input: PlacedInput) => {
     const { workspace, check } = placedOwner(event, input)
     check(); functions.placedRelease(workspace, input.threadId, input.requestId!, input.lease!)
+  })
+  ipcMain.handle("mods:function-placed-reveal-ack", (event, input: PlacedInput & {
+    ack: import("../../shared/mods/v2/placed").FunctionPlacedRevealAck
+  }) => {
+    const { workspace, check } = placedOwner(event, input)
+    check()
+    const ack = parseModJson(encodeModJson(input.ack)) as unknown as
+      import("../../shared/mods/v2/placed").FunctionPlacedRevealAck
+    functions.placedRevealAck(workspace, input.threadId, ack)
+    check()
   })
   ipcMain.handle(
     "mods:function-site-mount",

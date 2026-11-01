@@ -137,6 +137,20 @@ it("grants readonly view only to the actual Client control message, never backgr
   await expect.poll(()=>f.state.get("click")).toEqual({requested:true,readOnly:true,inputTarget:"parent",agentId:"child"})
 })
 
+it("preserves a Client Button's text runs, derived address and actual closure", async () => {
+  const f = await fixture(`var __cmbSurfaceMod={default(_,s){
+    const {Button,Text}=s.elements;
+    return Button({children:["Save ",Text({dimColor:true,children:["draft"]})],variant:"primary",
+      onPress:()=>s.post({saved:true})});
+  }}`)
+  const { client } = await f.snapshot()
+  expect(client.error).toBeUndefined()
+  expect(client.tree).toMatchObject({ type: "Button", props: { key: "Save draft", label: "Save draft",
+    variant: "primary" }, children: ["Save ", { type: "Text", children: ["draft"] }] })
+  await f.session.clients.act(action(client, "press", undefined, "Save draft"))
+  await expect.poll(() => f.state.get("client-message")).toEqual({ saved: true })
+})
+
 it("matches the upstream Client descriptor and preserves local state across parent redraws", async () => {
   const f = await fixture()
   let { pane, client } = await f.snapshot()

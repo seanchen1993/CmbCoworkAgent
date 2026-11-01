@@ -1,5 +1,9 @@
 import { expect, it } from "vitest"
-import { discoverFunctionEnvironment, readFunctionEnvironment } from "./environment-sdk"
+import {
+  discoverFunctionEnvironment,
+  readFunctionEnvironment,
+  FunctionEnvironmentOverlay
+} from "./environment-sdk"
 
 const context = (declared: string[]) => ({
   declared,
@@ -9,6 +13,32 @@ const context = (declared: string[]) => ({
   },
   publish: async (value: import("../../../shared/mods/types").ModJson) => value
 })
+
+it.each([
+  "TOKEN",
+  "PASSWORD",
+  "SECRET",
+  "API_KEY",
+  "CREDENTIAL",
+  "TOKEN_VALUE",
+  "MY_API_KEY",
+  "NODE_OPTIONS",
+  "JAVA_TOOL_OPTIONS",
+  "DOTNET_STARTUP_HOOKS",
+  "PYTHONSTARTUP",
+  "LD_PRELOAD",
+  "DYLD_INSERT_LIBRARIES",
+  "PSModulePath",
+  "PATH",
+  "GIT_CONFIG_COUNT"
+])(
+  "rejects protected process injection or credential name %s without changing the overlay",
+  (name) => {
+    const overlay = new FunctionEnvironmentOverlay()
+    expect(overlay.set(name, "unsafe", [name])).toEqual({ deny: expect.any(String) })
+    expect(overlay.snapshot()).toEqual({})
+  }
+)
 
 it("discovers only literal env names, including computed property spelling, ignoring comments", () => {
   expect(

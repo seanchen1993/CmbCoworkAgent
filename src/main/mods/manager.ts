@@ -81,7 +81,7 @@ import type {
   ModWorkspaceStatus
 } from "../../shared/mods/types"
 import { encodeModJson, parseModUi } from "../../shared/mods/validation"
-import { ModFunctionError } from "../../shared/mods/v2/contracts"
+import { isModObject, ModFunctionError } from "../../shared/mods/v2/contracts"
 import { readPluginManifest } from "../plugins/manifest"
 import { ModControlStore, type ModGrant } from "./control-store"
 import { compileMod, readModApiVersion, type CompiledMod } from "./loader"
@@ -512,7 +512,8 @@ export class ModsManager {
       const retainedGrant = grant.modId.startsWith("development:")
         ? captureDevelopmentNativeResourceGuard(this.store, grant)
         : undefined
-      return this.ownedAgentTasks.requestView(threadId, workspace, grant, id, sourceCurrent, retainedGrant)
+      return this.ownedAgentTasks.requestView(threadId, workspace, grant, id, sourceCurrent,
+        retainedGrant, input.mode === "interactive" ? "interactive" : "readonly")
     }
     if (method === "agent.stop") return this.ownedAgentTasks.stop(threadId, workspace, grant, id)
     const value = method === "agent.messages"
@@ -522,6 +523,33 @@ export class ModsManager {
     const published = await this.publish(workspace, value as unknown as ModJson, undefined, signal)
     check()
     return published as ModJson
+  }
+
+  async sendOwnedAgentView(workspace: string, threadId: string, intentId: string,
+    sequence: number, text: string, assertScope: () => void) {
+    workspace = this.workspaceKey(workspace)
+    if (typeof text !== "string" || !text.trim() || Buffer.byteLength(text) > 32 * 1024)
+      throw new ModError("MODS_AGENT_VIEW_SEND_TEXT")
+    const row = getThreadCore(threadId)
+    if (!row || !isOrdinaryFlowMetadata(JSON.parse(row.metadata ?? "{}")))
+      throw new ModError("MODS_AGENT_TASK_SCOPE_UNSUPPORTED")
+    return this.ownedAgentTasks.sendView(threadId, workspace, intentId, sequence,
+      grant => this.store.assertGrant(grant), async (entry, assertOwner, signal) => {
+        const assertLive = () => { assertScope(); assertOwner(); signal.throwIfAborted() }
+        assertLive()
+        return this.peerInbox.send({ to: { agentId: entry.value.agentId }, text }, {
+          workspace, sessionId: threadId, agentId: "main",
+          plugin: entry.grant.modId.replace(/^(function:|development:)/, ""), signal, assertLive,
+          publish: async (body, active) => {
+            assertLive()
+            const safe = await this.publish(workspace, { text: body }, undefined, active)
+            assertLive()
+            if (!isModObject(safe) || typeof safe.text !== "string")
+              throw new ModError("MODS_PEER_TEXT")
+            return safe.text
+          }
+        })
+      })
   }
 
   functionAgentRuntimeAuthority(

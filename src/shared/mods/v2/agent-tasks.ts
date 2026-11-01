@@ -41,12 +41,16 @@ export interface AgentViewIntent {
   agentId: string
   parentIncarnation: string
   sourceDigest: string
+  mode?: "readonly" | "interactive"
 }
 export interface AgentViewApi {
   agentViewPending(threadId: string): Promise<AgentViewIntent | null>
   agentViewRead(input: { threadId: string; intentId: string; cursor?: string }): Promise<{ status: AgentTaskStatus; messages: AgentTaskMessages }>
   agentViewStop(input: { threadId: string; intentId: string }): Promise<{ agentId: string; stopRequested: boolean; status: string }>
   agentViewClose(input: { threadId: string; intentId: string }): Promise<void>
+  agentViewActivate(input: { threadId: string; intentId: string }): Promise<{ active: boolean }>
+  agentViewSend(input: { threadId: string; intentId: string; sequence: number; text: string }):
+    Promise<{ isDelivered: boolean; reason?: string }>
 }
 export function agentTaskInput(method: string, input: unknown): ModObject {
   if (
@@ -55,9 +59,10 @@ export function agentTaskInput(method: string, input: unknown): ModObject {
     !input.agentId ||
     input.agentId.length > 256 ||
     Object.keys(input).some(
-      (key) =>
-        !(method === "agent.messages" ? ["agentId", "cursor", "limit"] : ["agentId"]).includes(key)
+      (key) => !(method === "agent.messages" ? ["agentId", "cursor", "limit"] :
+        method === "ui.view" ? ["agentId", "mode"] : ["agentId"]).includes(key)
     ) ||
+    (input.mode !== undefined && !["readonly", "interactive"].includes(String(input.mode))) ||
     (input.cursor !== undefined &&
       (typeof input.cursor !== "string" || input.cursor.length > 512)) ||
     (input.limit !== undefined &&

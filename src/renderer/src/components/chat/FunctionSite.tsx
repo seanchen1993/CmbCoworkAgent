@@ -86,7 +86,7 @@ function FunctionSitePending({ component, slow = false, quiet = false, cache, pr
 
 type Act = (
   node: FunctionUiElement | undefined,
-  kind: FunctionUiAction["kind"],
+  kind: Exclude<FunctionUiAction["kind"], "measure">,
   value?: ModJson
 ) => Promise<void>
 
@@ -1011,7 +1011,8 @@ function FunctionSiteSurface({
           : undefined
       }
       className={className ?? DEFAULT_SITE_CLASS_NAME}
-      style={component === "AbovePrompt" ? { maxHeight: geometry.maxRows * 24 } : undefined}
+      style={{ position: "relative", isolation: "isolate", contain: "layout paint",
+        ...(component === "AbovePrompt" ? { maxHeight: geometry.maxRows * 24 } : {}) }}
       onFocus={(event) => {
         if (
           component === "AbovePrompt" &&

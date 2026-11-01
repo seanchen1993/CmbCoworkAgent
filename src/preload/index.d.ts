@@ -1114,6 +1114,7 @@ interface CustomAPI {
     panes(threadId: string): Promise<import("../shared/mods/v2/ui").FunctionPaneSnapshot[]>
     placedRows(threadId: string, owner: string): Promise<import("../shared/mods/v2/placed").FunctionPlacedEntry[]>
     placedRead(threadId: string, owner: string, requestId: string, lease: string): Promise<import("../shared/mods/v2/ui").FunctionPaneSnapshot>
+    placedRevealAck(threadId: string, owner: string, ack: import("../shared/mods/v2/placed").FunctionPlacedRevealAck): Promise<void>
     placedAct(threadId: string, owner: string, requestId: string, lease: string, action: import("../shared/mods/v2/ui").FunctionUiAction): Promise<void | import("../shared/mods/v2/ui").FunctionFocusResult>
     placedDismiss(threadId: string, owner: string, requestId: string): Promise<void>
     placedRelease(threadId: string, owner: string, requestId: string, lease: string): Promise<void>

@@ -10,10 +10,18 @@ import {
 } from "../../../shared/mods/v2/prompt-composer"
 import type { PromptEditRequest } from "../../../shared/mods/v2/prompt-composer"
 import {
-  validatePromptEditInput, validatePromptEditResult, validatePromptDecorations,
-  type FunctionPromptEditInput, type FunctionPromptEditResult
+  validatePromptEditInput,
+  validatePromptEditResult,
+  validatePromptDecorations,
+  type FunctionPromptEditInput,
+  type FunctionPromptEditResult
 } from "../../../shared/mods/v2/prompt-edit"
 import { isModObject } from "../../../shared/mods/v2/contracts"
+import type {
+  FunctionPromptPaintArgs,
+  FunctionPromptPaintResult
+} from "../../../shared/mods/v2/prompt-paint"
+import { validatePromptPaintArgs } from "../../../shared/mods/v2/prompt-paint"
 
 export interface FunctionPromptScope {
   threadId: string
@@ -22,12 +30,17 @@ export interface FunctionPromptScope {
   signal: AbortSignal
   assertLive(): void
 }
-type Owner = { id: string; senderId: number; editSequence: number; send(request: PromptComposerRequest): void }
+type Owner = {
+  id: string
+  senderId: number
+  editSequence: number
+  send(request: PromptComposerRequest): void
+}
 type Lease = PromptComposerSnapshot & { threadId: string; owner: string }
 type Pending = {
   scope: FunctionPromptScope
   owner: Owner
-  kind: "read" | "fill" | "suggest"
+  kind: PromptComposerRequest["kind"]
   authorized?: boolean
   resolve(response: PromptComposerResponse): void
   reject(error: Error): void
@@ -47,41 +60,71 @@ export class FunctionPromptBroker {
   }
   assertEditor(senderId: number, threadId: string, id: string): void {
     const owner = this.owners.get(threadId)
-    if (!owner || owner.id !== id || owner.senderId !== senderId) throw Error("MODS_PROMPT_EDITOR_OWNER")
+    if (!owner || owner.id !== id || owner.senderId !== senderId)
+      throw Error("MODS_PROMPT_EDITOR_OWNER")
   }
   cancelEdit(senderId: number, threadId: string, id: string, sequence: number): void {
     this.assertEditor(senderId, threadId, id)
     const edit = this.edits.get(threadId)
     if (edit?.sequence === sequence) edit.controller.abort(Error("MODS_PROMPT_EDIT_CANCELLED"))
   }
-  async edit(senderId: number, request: PromptEditRequest, run: (
-    input: FunctionPromptEditInput, signal: AbortSignal, assertOwner: () => void,
-    nativeCursor?: number
-  ) => Promise<FunctionPromptEditResult>): Promise<FunctionPromptEditResult> {
-    if (!request || typeof request.threadId !== "string" || typeof request.owner !== "string" ||
-      !Number.isSafeInteger(request.sequence) || request.sequence < 1 || !isModObject(request.input) ||
-      Object.keys(request).some(key => !["threadId", "owner", "sequence", "input", "nativeCursor"].includes(key)))
+  async edit(
+    senderId: number,
+    request: PromptEditRequest,
+    run: (
+      input: FunctionPromptEditInput,
+      signal: AbortSignal,
+      assertOwner: () => void,
+      nativeCursor?: number
+    ) => Promise<FunctionPromptEditResult>
+  ): Promise<FunctionPromptEditResult> {
+    if (
+      !request ||
+      typeof request.threadId !== "string" ||
+      typeof request.owner !== "string" ||
+      !Number.isSafeInteger(request.sequence) ||
+      request.sequence < 1 ||
+      !isModObject(request.input) ||
+      Object.keys(request).some(
+        (key) => !["threadId", "owner", "sequence", "input", "nativeCursor"].includes(key)
+      )
+    )
       throw Error("MODS_PROMPT_EDIT_REQUEST")
     this.assertEditor(senderId, request.threadId, request.owner)
     const owner = this.owners.get(request.threadId)!
     if (request.sequence <= owner.editSequence) throw Error("MODS_PROMPT_EDIT_STALE")
     validatePromptEditInput(request.input)
-    const nativeLength = request.input.text.length - (request.input.end - request.input.start) + request.input.inputText.length
-    if (request.nativeCursor !== undefined && (!Number.isSafeInteger(request.nativeCursor) ||
-      request.nativeCursor < 0 || request.nativeCursor > nativeLength)) throw Error("MODS_PROMPT_EDIT_REQUEST")
+    const nativeLength =
+      request.input.text.length -
+      (request.input.end - request.input.start) +
+      request.input.inputText.length
+    if (
+      request.nativeCursor !== undefined &&
+      (!Number.isSafeInteger(request.nativeCursor) ||
+        request.nativeCursor < 0 ||
+        request.nativeCursor > nativeLength)
+    )
+      throw Error("MODS_PROMPT_EDIT_REQUEST")
     owner.editSequence = request.sequence
     this.edits.get(request.threadId)?.controller.abort(Error("MODS_PROMPT_EDIT_SUPERSEDED"))
     const current = { owner, sequence: request.sequence, controller: new AbortController() }
     this.edits.set(request.threadId, current)
     const assertOwner = () => {
       current.controller.signal.throwIfAborted()
-      if (this.owners.get(request.threadId) !== owner || this.edits.get(request.threadId) !== current)
+      if (
+        this.owners.get(request.threadId) !== owner ||
+        this.edits.get(request.threadId) !== current
+      )
         throw Error("MODS_PROMPT_EDITOR_OWNER")
     }
     try {
       assertOwner()
-      const result = await run(structuredClone(request.input), current.controller.signal, assertOwner,
-        request.nativeCursor)
+      const result = await run(
+        structuredClone(request.input),
+        current.controller.signal,
+        assertOwner,
+        request.nativeCursor
+      )
       assertOwner()
       validatePromptEditResult(result)
       return structuredClone(result)
@@ -126,8 +169,12 @@ export class FunctionPromptBroker {
       !validPromptSnapshot(response) ||
       !["ok", "no_composer", "dialog", "conflict"].includes(response.status) ||
       (pending.kind !== "read" && response.status === "ok" && !pending.authorized) ||
-      (pending.kind === "suggest" && (typeof response.isShown !== "boolean" ||
-        (response.isShown && response.status !== "ok")))
+      (pending.kind === "suggest" &&
+        (typeof response.isShown !== "boolean" ||
+          (response.isShown && response.status !== "ok"))) ||
+      (pending.kind === "paint" &&
+        (typeof response.isPainted !== "boolean" ||
+          (response.isPainted && response.status !== "ok")))
     ) {
       pending.reject(Error("MODS_PROMPT_RESPONSE_INVALID"))
       pending.cleanup()
@@ -144,7 +191,7 @@ export class FunctionPromptBroker {
   }
   private request(
     scope: FunctionPromptScope,
-    kind: "read" | "fill" | "suggest",
+    kind: PromptComposerRequest["kind"],
     input: Partial<PromptComposerRequest> = {}
   ): Promise<PromptComposerResponse | undefined> {
     scope.assertLive()
@@ -179,6 +226,36 @@ export class FunctionPromptBroker {
   async read(scope: FunctionPromptScope): Promise<{ text: string; cursor: number }> {
     return this.snapshot(scope, true)
   }
+  async preparePaint(
+    scope: FunctionPromptScope
+  ): Promise<
+    (input: FunctionPromptPaintArgs, signal: AbortSignal) => Promise<FunctionPromptPaintResult>
+  > {
+    const owner = this.owners.get(scope.threadId)
+    const before = await this.request(scope, "read")
+    scope.assertLive()
+    scope.signal.throwIfAborted()
+    return async (input, signal) => {
+      validatePromptPaintArgs(input)
+      scope.assertLive()
+      signal.throwIfAborted()
+      if (!owner || !before || before.status !== "ok" || this.owners.get(scope.threadId) !== owner)
+        return { isPainted: false, text: "", cursor: 0 }
+      if (input.decorations.length && input.text !== before.text)
+        return { isPainted: false, text: before.text, cursor: before.cursor }
+      const response = await this.request({ ...scope, signal }, "paint", {
+        expectedRevision: before.revision,
+        text: input.text,
+        decorations: input.decorations,
+        paintSource: scope.sessionId
+      })
+      return {
+        isPainted: response?.status === "ok" && response.isPainted === true,
+        text: response?.text ?? "",
+        cursor: response?.cursor ?? 0
+      }
+    }
+  }
   /** SDK readback must never refresh the lease captured before a fill hook awaited. */
   async peek(scope: FunctionPromptScope): Promise<{ text: string; cursor: number }> {
     return this.snapshot(scope, false)
@@ -189,9 +266,9 @@ export class FunctionPromptBroker {
     if (!this.reads.has(scope.sessionId)) await this.read(scope)
   }
   /** A per-call private capture; nested hooks cannot replace another suggestion's owner. */
-  async prepareSuggestion(scope: FunctionPromptScope): Promise<(
-    input: { text: string }, signal: AbortSignal
-  ) => Promise<{ isShown: boolean }>> {
+  async prepareSuggestion(
+    scope: FunctionPromptScope
+  ): Promise<(input: { text: string }, signal: AbortSignal) => Promise<{ isShown: boolean }>> {
     const owner = this.owners.get(scope.threadId)
     const before = await this.request(scope, "read")
     scope.assertLive()
@@ -199,12 +276,22 @@ export class FunctionPromptBroker {
     return async (input, signal) => {
       scope.assertLive()
       signal.throwIfAborted()
-      if (typeof input.text !== "string" || Buffer.byteLength(input.text) > PROMPT_COMPOSER_MAX_BYTES)
+      if (
+        typeof input.text !== "string" ||
+        Buffer.byteLength(input.text) > PROMPT_COMPOSER_MAX_BYTES
+      )
         throw Error("MODS_PROMPT_INPUT_INVALID")
-      if (!owner || !before || !["ok", "dialog"].includes(before.status) ||
-        this.owners.get(scope.threadId) !== owner) return { isShown: false }
+      if (
+        !owner ||
+        !before ||
+        !["ok", "dialog"].includes(before.status) ||
+        this.owners.get(scope.threadId) !== owner
+      )
+        return { isShown: false }
       const answer = await this.request({ ...scope, signal }, "suggest", {
-        text: input.text, expectedRevision: before.revision })
+        text: input.text,
+        expectedRevision: before.revision
+      })
       return { isShown: answer?.status === "ok" && answer.isShown === true }
     }
   }
@@ -244,7 +331,11 @@ export class FunctionPromptBroker {
   }
   async fill(
     scope: FunctionPromptScope,
-    input: { text: string; mode?: PromptFillMode; decorations?: import("../../../shared/mods/v2/prompt-edit").FunctionPromptDecoration[] }
+    input: {
+      text: string
+      mode?: PromptFillMode
+      decorations?: import("../../../shared/mods/v2/prompt-edit").FunctionPromptDecoration[]
+    }
   ): Promise<PromptFillResult> {
     scope.assertLive()
     if (scope.signal.aborted) throw Error("MODS_CANCELLED")
@@ -293,6 +384,19 @@ export class FunctionPromptBroker {
   }
   closeSession(sessionId: string): void {
     this.reads.delete(sessionId)
+    for (const [threadId, owner] of this.owners) {
+      try {
+        owner.send({
+          requestId: randomUUID(),
+          threadId,
+          owner: owner.id,
+          kind: "clear_paint",
+          paintSource: sessionId
+        })
+      } catch {
+        /* A destroyed surface cannot retain a visible decoration. */
+      }
+    }
     for (const item of this.pending.values())
       if (item.scope.sessionId === sessionId) {
         item.cleanup()

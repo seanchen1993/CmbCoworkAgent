@@ -127,22 +127,26 @@ describe("production event compatibility", () => {
     })
   })
 
-  it("reports missing SDK-operation providers without suggesting real dispatch", () => {
+  it("reports the actual isolated environment operation as bounded", () => {
     const report = assess("env.set")
-    expect(report.strictCompatible).toBe(false)
-    expect(report.diagnostics[0].code).toBe("MODS_EVENT_UNAVAILABLE")
+    expect(report).toMatchObject({ status: "bounded", strictCompatible: true, diagnostics: [] })
+    expect(getFunctionEventSupport("env.set")!.note).toContain("不改Electron全局环境")
+  })
+  it("does not infer arbitrary telemetry providers from a noun prefix", () => {
+    expect(getFunctionEventSupport("telemetry.not-a-provider")).toBeUndefined()
   })
 
   it.each([
     "telemetry.log",
     "telemetry.mark"
-  ])("records the pinned 286 inventory gap %s as unavailable", (event) => {
+  ])("records the local-only telemetry adapter %s without claiming upstream upload", (event) => {
     expect(CLAUDE_EVENT_NAMES).toContain(event)
     expect(assess(event)).toMatchObject({
-      status: "unsupported",
-      strictCompatible: false,
-      diagnostics: [{ code: "MODS_EVENT_UNAVAILABLE", events: [event] }]
+      status: "bounded",
+      strictCompatible: true,
+      diagnostics: []
     })
+    expect(getFunctionEventSupport(event)!.note).toContain("不上传Anthropic或企业collector")
   })
 
   it("recognizes the actual bounded session end adapter", () => {

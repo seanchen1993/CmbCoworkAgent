@@ -228,3 +228,36 @@ it("returns only official refusal literals and validates untrusted cursor data",
   f.broker.respond(1, { ...f.requests.at(-1)!, status: "ok", text: "a", cursor: 2, revision: 1 })
   await expect(reading).rejects.toThrow("RESPONSE_INVALID")
 })
+it("pins paint to its pre-hook composer revision and requires a real authorized receipt", async () => {
+  const f = fixture(), preparing = f.broker.preparePaint(f.scope)
+  f.answer()
+  const paint = await preparing
+  const result = paint({ text: "old", decorations: [{ start: 0, end: 1, bold: true }] }, f.scope.signal)
+  const request = f.requests.at(-1)!
+  expect(request).toMatchObject({ kind: "paint", paintSource: "s", expectedRevision: 1 })
+  f.edit()
+  expect(f.broker.authorize(1, request.requestId, "t", "owner")).toBe(true)
+  f.broker.respond(1, { ...request, text: "user edit", cursor: 1, revision: 2,
+    status: "conflict", isPainted: false })
+  expect(await result).toEqual({ isPainted: false, text: "user edit", cursor: 1 })
+})
+it("does not migrate paint to a replacement surface and clears only the closing source", async () => {
+  const f = fixture(), preparing = f.broker.preparePaint(f.scope)
+  f.answer()
+  const paint = await preparing
+  f.attach("replacement")
+  expect(await paint({ text: "old", decorations: [{ start: 0, end: 1 }] }, f.scope.signal))
+    .toEqual({ isPainted: false, text: "", cursor: 0 })
+  f.broker.closeSession("s")
+  expect(f.requests.at(-1)).toMatchObject({ kind: "clear_paint", paintSource: "s", owner: "replacement" })
+})
+it("rejects forged paint success without a precommit permit", async () => {
+  const f = fixture(), preparing = f.broker.preparePaint(f.scope)
+  f.answer()
+  const paint = await preparing
+  const result = paint({ decorations: [] }, f.scope.signal)
+  const rejected = expect(result).rejects.toThrow("MODS_PROMPT_RESPONSE_INVALID")
+  f.broker.respond(1, { ...f.requests.at(-1)!, text: "old", cursor: 1, revision: 1,
+    status: "ok", isPainted: true })
+  await rejected
+})

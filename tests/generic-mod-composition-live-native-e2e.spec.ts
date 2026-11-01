@@ -12,16 +12,14 @@ import {
   genericProviderRevisionPrompt
 } from "./support/generic-mod-composition-prompts"
 import {
-  createHeadlessProjectCompositionLaunch, projectCompositionCandidate,
+  createHeadlessProjectCompositionLaunch,
+  assertCreatorLiveCandidate,
   projectCompositionEnvironment
 } from "./support/project-composition-e2e-fixtures"
 
 const root = resolve(__dirname, "..")
-assert.equal(process.env.CREATOR_E2E_BUILT_PREVIEW, "1")
-assert.equal(process.env.COMPOSITION_E2E_PACKAGED_DIR, undefined)
 assert.equal(JSON.parse(readFileSync(join(root, "package.json"), "utf8")).version, "2.0.0")
-const build = projectCompositionCandidate(root)
-assert.equal(build.sha256, process.env.CREATOR_E2E_EXPECTED_SHA256)
+const build = assertCreatorLiveCandidate(root)
 process.env.COMPOSITION_E2E_ARTIFACT_ROOT ??= join(root, "output/generic-mod-composition-20261028")
 const fixture = projectCompositionEnvironment(root)
 const resume = process.env.GENERIC_MOD_PAIR_RESUME_PROFILE

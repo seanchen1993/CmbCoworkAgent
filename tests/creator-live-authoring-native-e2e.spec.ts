@@ -20,6 +20,7 @@ import type { ServerResponse } from "node:http"
 import type { DevelopmentStatus } from "../src/shared/mods/development"
 import { enterModsCreatorChat } from "./support/mods-sidebar-navigation"
 import { hasLiveCreatorCandidate } from "./support/creator-live-candidate"
+import { creatorLiveBudgetObservation } from "./support/creator-live-budget-observation"
 import { rejectCreatorLiveRelay } from "./support/creator-live-transport"
 import { allowCreatorWorkspaceInteraction } from "./support/project-unified-native-journey"
 import {
@@ -37,16 +38,12 @@ import {
 } from "./support/generic-project-creator-scenario"
 import {
   createHeadlessProjectCompositionLaunch,
-  projectCompositionCandidate,
+  assertCreatorLiveCandidate,
   projectCompositionEnvironment
 } from "./support/project-composition-e2e-fixtures"
 
 const root = resolve(__dirname, "..")
-assert.equal(process.env.COMPOSITION_E2E_PACKAGED_DIR, undefined, "LIVE_NO_ASAR")
-assert.equal(process.env.CREATOR_E2E_BUILT_PREVIEW, "1", "LIVE_BUILT_PREVIEW_REQUIRED")
-const candidate = projectCompositionCandidate(root)
-assert.equal(candidate.execution, "built-output")
-assert.equal(candidate.sha256, process.env.CREATOR_E2E_EXPECTED_SHA256, "LIVE_MAIN_SHA_CHANGED")
+const candidate = assertCreatorLiveCandidate(root)
 assert.equal(JSON.parse(readFileSync(join(root, "package.json"), "utf8")).version, "2.0.0")
 process.env.COMPOSITION_E2E_ARTIFACT_ROOT ??= join(
   root,
@@ -179,6 +176,7 @@ interface RequestMetric {
   code?: string
   offeredTools?: string[]
   toolCalls?: Array<{ name: string; argumentKeys: string[] }>
+  budget?: ReturnType<typeof creatorLiveBudgetObservation> & { sentOutputTokens: number }
 }
 interface StageMetric {
   label: string
@@ -643,6 +641,7 @@ const relay = createServer(async (request, response) => {
       if (raw.length > 5_000_000) return reject("LIVE_REQUEST_SIZE_LIMIT")
     }
     const body = JSON.parse(raw)
+    const budget = creatorLiveBudgetObservation(body)
     inspectToolMessages(body.messages ?? [])
     if (capturedRuntime?.kind === "counter") {
       controlledCounter(body, response)
@@ -660,6 +659,7 @@ const relay = createServer(async (request, response) => {
     body.model = provider.model
     body.max_tokens = Math.min(8192, Number(body.max_tokens ?? body.max_completion_tokens ?? 8192))
     delete body.max_completion_tokens
+    metric.budget = { ...budget, sentOutputTokens: body.max_tokens }
     const upstream = await fetch(provider.url, {
       method: "POST",
       headers: { "content-type": "application/json", authorization: `Bearer ${provider.key}` },

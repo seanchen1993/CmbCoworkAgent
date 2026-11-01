@@ -7,7 +7,7 @@ import type {
 import { validateFunctionPlacedArgs } from "../../../shared/mods/v2/placed"
 import type { FunctionUiAction } from "../../../shared/mods/v2/ui"
 import type { ModObject } from "../../../shared/mods/types"
-import { ModFunctionError } from "../../../shared/mods/v2/contracts"
+import { isModObject, ModFunctionError } from "../../../shared/mods/v2/contracts"
 import type { FunctionPlugin } from "./dispatcher"
 import { FunctionPanes, type PaneHost } from "./panes"
 
@@ -16,6 +16,7 @@ interface Row extends FunctionPlacedEntry {
   drawings: FunctionPanes
   lease?: string
   displayCheck?: () => void
+  revealPending?: { resolve(value: { deny?: string }): void; cleanup(): void }
 }
 /** Ephemeral transcript display. It never appends a message or opens a public Pane. */
 export class FunctionPlacedRows {
@@ -100,13 +101,99 @@ export class FunctionPlacedRows {
   list(): FunctionPlacedEntry[] {
     this.host.assertLive()
     if (this.closed) return []
-    return [...this.rows.values()].map(({ requestId, id, plugin, anchor, sequence }) => ({
+    return [...this.rows.values()].map(({ requestId, id, plugin, anchor, sequence, reveal }) => ({
       requestId,
       id,
       plugin,
       anchor: { ...anchor },
-      sequence
+      sequence,
+      ...(reveal ? { reveal: { ...reveal } } : {})
     }))
+  }
+  owns(source: FunctionPlugin, requestId: string): boolean {
+    return this.rows.get(requestId)?.source === source
+  }
+  reveal(
+    source: FunctionPlugin,
+    requestId: string,
+    block: "start" | "center" | "end" | "nearest",
+    signal: AbortSignal,
+    assertIntent: () => void
+  ): Promise<{ deny?: string }> {
+    const row = this.get(requestId)
+    if (row.source !== source) throw new ModFunctionError("MODS_UI_PLACED_STALE")
+    if (row.revealPending) return Promise.resolve({ deny: "A reveal request is already pending" })
+    if (!this.host.isAttached()) return Promise.resolve({ deny: "No attached desktop surface" })
+    assertIntent()
+    signal.throwIfAborted()
+    return new Promise((resolve, reject) => {
+      const cleanup = () => {
+        clearTimeout(timer)
+        signal.removeEventListener("abort", abort)
+        row.revealPending = undefined
+        row.reveal = undefined
+        this.host.changed("placed")
+      }
+      const abort = () => {
+        cleanup()
+        reject(signal.reason)
+      }
+      const timer = setTimeout(() => {
+        cleanup()
+        resolve({ deny: "The owned transcript row could not be shown in time" })
+      }, 5000)
+      timer.unref()
+      row.reveal = { id: randomUUID(), block }
+      row.revealPending = {
+        cleanup,
+        resolve: (value) => {
+          try {
+            this.current(row)
+            assertIntent()
+            signal.throwIfAborted()
+            cleanup()
+            resolve(value)
+          } catch (cause) {
+            cleanup()
+            reject(cause)
+          }
+        }
+      }
+      signal.addEventListener("abort", abort, { once: true })
+      this.host.changed("placed")
+    })
+  }
+  revealAck(input: import("../../../shared/mods/v2/placed").FunctionPlacedRevealAck): void {
+    if (!isModObject(input) || typeof input.requestId !== "string" ||
+      typeof input.receipt !== "string" || typeof input.allowed !== "boolean" ||
+      (!input.allowed && (input.lease !== undefined || input.generation !== undefined)))
+      throw new ModFunctionError("MODS_UI_PLACED_STALE")
+    const row = this.get(input.requestId),
+      pending = row.revealPending
+    if (
+      !pending ||
+      row.reveal?.id !== input.receipt ||
+      typeof input.allowed !== "boolean" ||
+      Object.keys(input).some(
+        (key) => !["requestId", "receipt", "allowed", "lease", "generation"].includes(key)
+      )
+    )
+      throw new ModFunctionError("MODS_UI_PLACED_STALE")
+    if (input.allowed) {
+      if (!row.lease || input.lease !== row.lease || typeof input.generation !== "string")
+        throw new ModFunctionError("MODS_UI_PLACED_STALE")
+      this.drawingCurrent(row)
+      const drawing = row.drawings.captureClientDrawing(`engine:${row.requestId}`, input.generation)
+      if (!drawing) throw new ModFunctionError("MODS_UI_PLACED_STALE")
+      try {
+        drawing.assertCurrent()
+      } finally {
+        drawing.release()
+      }
+    }
+    pending.resolve(
+      input.allowed ? {} : { deny: "The exact resident transcript anchor is unavailable" }
+    )
   }
   assertReceipt(source: FunctionPlugin, id: string, requestId: string): void {
     const row = this.get(requestId)
@@ -162,6 +249,7 @@ export class FunctionPlacedRows {
   }
   dismiss(id: string): void {
     const row = this.get(id)
+    row.revealPending?.resolve({ deny: "The transcript row was dismissed" })
     this.rows.delete(id)
     row.drawings.close()
     this.host.changed("placed")
@@ -203,7 +291,10 @@ export class FunctionPlacedRows {
   }
   clear(): void {
     if (!this.rows.size) return
-    for (const row of this.rows.values()) row.drawings.close()
+    for (const row of this.rows.values()) {
+      row.revealPending?.resolve({ deny: "The transcript rows were released" })
+      row.drawings.close()
+    }
     this.rows.clear()
     this.host.changed("placed")
   }

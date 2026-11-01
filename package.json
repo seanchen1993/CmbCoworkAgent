@@ -131,7 +131,7 @@
     "test:simple-authoring:browser": "tsx tests/plugin-derivation-browser.spec.ts && tsx tests/simple-claw-builder-browser.spec.ts && tsx tests/sparks-tour-preview-browser.spec.ts",
     "test:mods:experience": "tsx tests/model-input-budget-browser.spec.ts && tsx tests/mods-sidebar-clarity-browser.spec.ts && tsx tests/application-usage-guide-browser.spec.ts && tsx tests/mods-creator-sidebar-browser.spec.ts && tsx tests/mods-task-sidebar-browser.spec.ts && tsx tests/mods-sidebar-navigation-browser.spec.ts && tsx tests/mods-usage-entry-browser.spec.ts",
     "test:mods:continuity": "tsx tests/plugin-start-use-browser.spec.ts && tsx tests/creator-workspace-browser.spec.ts && tsx tests/platform-workspace-browser.spec.ts && tsx tests/platform-surface-continuity-browser.spec.ts && tsx tests/project-unified-entry-browser.spec.ts && tsx tests/native-feature-original-flow-browser.spec.ts",
-    "test:mods:phase2:browser": "tsx tests/mods-placed-browser.spec.ts && tsx tests/mods-mcp-connections-browser.spec.ts && tsx tests/mods-agent-view-browser.spec.ts"
+    "test:mods:phase2:browser": "tsx tests/mods-placed-browser.spec.ts && tsx tests/mods-mcp-connections-browser.spec.ts && tsx tests/mods-agent-view-browser.spec.ts && tsx tests/mods-prompt-paint-browser.spec.ts && tsx tests/mods-nonmedia-primitives-browser.spec.ts && tsx tests/mods-chatcontainer-input-target-browser.spec.ts"
   },
   "build": {
     "appId": "com.cmbdevclaw.com",

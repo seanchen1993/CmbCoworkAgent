@@ -20,6 +20,14 @@ export const FUNCTION_UI_BOOTSTRAP = String.raw`
     visit(input, depth);
     return result;
   }
+  function uiButtonText(children) {
+    return children.map(child => {
+      if (typeof child === "string") return child;
+      if (child?.type !== "Text" || !Array.isArray(child.children))
+        throw Error("MODS_UI_BUTTON_CHILDREN");
+      return uiButtonText(child.children);
+    }).join("");
+  }
   const uiJsx = (tag, props, ...children) => {
     if (typeof tag !== "function") throw Error("MODS_UI_TAG");
     return tag({ ...props, ...(children.length ? { children } : {}) });
@@ -95,8 +103,10 @@ export const FUNCTION_UI_BOOTSTRAP = String.raw`
         }
         if (name === "Markdown") for (const key of ["key", "dimColor", "pressableLinks"])
           if (props[key] === undefined) delete props[key];
-        if (name === "Button" && props.label === undefined && children.length === 1 &&
-            typeof children[0] === "string") props.label = children[0];
+        if (name === "Button" && children.length) {
+          const label = uiButtonText(children);
+          if (props.label === undefined) props.label = label;
+        }
         if (name === "Button" && props.key === undefined) props.key = props.label;
         if (name === "Button" && props.hotkey !== undefined &&
             (typeof props.hotkey !== "string" || !/^[a-z0-9]$/.test(props.hotkey)))
@@ -119,7 +129,8 @@ export const FUNCTION_UI_BOOTSTRAP = String.raw`
           return frozen(tree);
         }
         if (name === "Client") tree.client = { plugin: scope.plugin };
-        if (name === "Box" || name === "Text" || name === "Link") tree.children = children;
+        if (name === "Box" || name === "Text" || name === "Link" ||
+            (name === "Button" && children.length)) tree.children = children;
         if (["Button", "Input", "Select", "Form"].includes(name)) {
           const primary = name === "Button" ? "onPress" : name === "Select" ? "onSelect" : name === "Form" ? "onSubmit" : "onInput";
           if (name === "Input" ? !callbacks.onSubmit : !callbacks[primary])

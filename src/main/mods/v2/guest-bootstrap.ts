@@ -584,6 +584,7 @@ export const FUNCTION_GUEST_BOOTSTRAP = String.raw`
         continue;
       }
       sdk[noun][method] = async (...args) => {
+        if (capability === "env.set" && args.length === 2 && args[1] === undefined) args = [args[0]];
         if (capability === "state.set") {
           args[1] = parse(pack(args[1]));
           if (args.length === 3 && args[2] === undefined) args = args.slice(0, 2);

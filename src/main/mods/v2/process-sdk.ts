@@ -43,6 +43,7 @@ export interface FunctionProcessRequest {
   argv: readonly string[]
   cwd: string
   env: Readonly<Record<string, string>>
+  unsetEnv?: readonly string[]
   input?: string
   timeoutMs?: number
 }
@@ -50,6 +51,7 @@ export interface FunctionProcessRequest {
 export interface FunctionProcessContext {
   cwd: string
   signal: AbortSignal
+  environment?: Readonly<Record<string, string | null>>
   assertLive(): void
   authorize(request: Readonly<FunctionProcessRequest>, signal: AbortSignal): Promise<void>
   publish(value: ModObject, signal: AbortSignal): Promise<ModObject>
@@ -66,7 +68,8 @@ export interface FunctionProcessStream {
 export async function functionProcessRequest(
   input: ModObject,
   cwd: string,
-  streaming: boolean
+  streaming: boolean,
+  overlay: Readonly<Record<string, string | null>> = {}
 ): Promise<Readonly<FunctionProcessRequest>> {
   const init = input.init === undefined ? {} : input.init
   if (
@@ -98,6 +101,11 @@ export async function functionProcessRequest(
     throw failure("MODS_PROCESS_INPUT_LIMIT")
   if (init.env !== undefined && !isModObject(init.env)) throw failure("MODS_PROCESS_ENV")
   const env: Record<string, string> = Object.create(null)
+  const unset = new Set<string>()
+  for (const [key, value] of Object.entries(overlay)) {
+    if (value === null) unset.add(key)
+    else env[key] = value
+  }
   let envBytes = 0
   if (Object.keys(init.env ?? {}).length > 128) throw failure("MODS_PROCESS_ENV")
   for (const [key, value] of Object.entries(init.env ?? {})) {
@@ -111,11 +119,20 @@ export async function functionProcessRequest(
       throw failure("MODS_PROCESS_ENV")
     if (
       process.platform === "win32" &&
-      Object.keys(env).some((name) => name.toLowerCase() === key.toLowerCase())
+      Object.keys(init.env ?? {}).some((name) => name !== key && name.toLowerCase() === key.toLowerCase())
     )
       throw failure("MODS_PROCESS_ENV")
+    for (const previous of Object.keys(env))
+      if (process.platform === "win32" ? previous.toLowerCase() === key.toLowerCase() : previous === key)
+        delete env[previous]
+    for (const previous of unset)
+      if (process.platform === "win32" ? previous.toLowerCase() === key.toLowerCase() : previous === key)
+        unset.delete(previous)
     env[key] = value
   }
+  if (Object.keys(env).length + unset.size > 128 ||
+    Object.entries(env).reduce((n, [key, value]) => n + Buffer.byteLength(key) +
+      Buffer.byteLength(value), 0) > 32 * 1024) throw failure("MODS_PROCESS_ENV")
   const timeoutMs = streaming ? undefined : (init.timeoutMs ?? 30_000)
   if (
     timeoutMs !== undefined &&
@@ -129,15 +146,17 @@ export async function functionProcessRequest(
     argv: Object.freeze([...argv]),
     cwd: directory,
     env: Object.freeze(env),
+    ...(unset.size ? { unsetEnv: Object.freeze([...unset]) } : {}),
     ...(stdin === undefined ? {} : { input: stdin as string }),
     ...(timeoutMs === undefined ? {} : { timeoutMs: timeoutMs as number })
   })
 }
 
-function environment(overrides: Readonly<Record<string, string>>): NodeJS.ProcessEnv {
+function environment(overrides: Readonly<Record<string, string>>, unset: readonly string[] = []): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = Object.create(null)
   for (const [key, value] of Object.entries(process.env))
-    if (BASE_ENV.has(key.toLowerCase()) && value !== undefined) env[key] = value
+    if (BASE_ENV.has(key.toLowerCase()) && value !== undefined &&
+      !unset.some(name => process.platform === "win32" ? name.toLowerCase() === key.toLowerCase() : name === key)) env[key] = value
   for (const [key, value] of Object.entries(overrides)) {
     if (process.platform === "win32")
       for (const name of Object.keys(env))
@@ -203,7 +222,7 @@ function launch(
       : request.argv.slice(1),
     {
       cwd: request.cwd,
-      env: environment(request.env),
+      env: environment(request.env, request.unsetEnv),
       shell: false,
       windowsHide: true,
       detached: !windows,
@@ -422,7 +441,7 @@ export class FunctionProcessHost {
     const iterator = (async function* (): AsyncGenerator<ModObject, ModObject> {
       try {
         active(context, signal)
-        const request = await functionProcessRequest(input, context.cwd, true)
+        const request = await functionProcessRequest(input, context.cwd, true, context.environment)
         active(context, signal)
         await abortable(context.authorize(request, signal), signal)
         if (activeWorkflowVerificationAccessScope() !== undefined)
@@ -494,7 +513,7 @@ export class FunctionProcessHost {
     if (workflowResourceDeadlineSignal()) context = { ...context,
       signal: AbortSignal.any([context.signal, workflowResourceDeadlineSignal()!]) }
     active(context, context.signal)
-    const request = await functionProcessRequest(input, context.cwd, false)
+    const request = await functionProcessRequest(input, context.cwd, false, context.environment)
     observeFunctionProcess(
       "prepared",
       createHash("sha256").update(JSON.stringify(request)).digest("hex")

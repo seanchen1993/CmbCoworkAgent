@@ -21,8 +21,9 @@ const workspace = join(output, "project")
 mkdirSync(workspace)
 app.setPath("userData", join(output, "electron-profile"))
 app.commandLine.appendSwitch("disable-gpu")
-setFlagsFromString("--expose_gc")
-const collect = runInNewContext("gc") as () => void
+const diagnosticGc = process.env.CMB_MODS_PERFORMANCE_GC === "diagnostic"
+if (diagnosticGc) setFlagsFromString("--expose_gc")
+const collect = diagnosticGc ? (runInNewContext("gc") as () => void) : undefined
 const active = new Set<FunctionRuntimeClient>()
 const ownedPids = new Set<number>()
 let manager: FunctionModsManager | undefined
@@ -41,7 +42,8 @@ const report: Record<string, unknown> = {
   electronPid: process.pid,
   versions: process.versions,
   workloadComplete: false,
-  qualificationRequested: qualifiesPerformanceRun(options),
+  qualificationRequested: qualifiesPerformanceRun(options) && !diagnosticGc,
+  timingEligible: !diagnosticGc,
   scope:
     "Production FunctionModsManager -> FunctionSession -> utilityProcess QuickJS, real grants/digests and SQLite; host fixture publication passthrough and controlled file core. Not full ModsManager/LocalSandbox/renderer/model/permission I/O.",
   missingGates: [
@@ -51,7 +53,9 @@ const report: Record<string, unknown> = {
     "whole application idle CPU",
     "UI/Client timer and callback resource stress"
   ],
-  gc: "Test-only wrapper requests main and utility host GC every 30 seconds; sample includes post-GC heap/RSS; no production source change.",
+  gc: diagnosticGc
+    ? "Diagnostic-only wrapper requests main and utility host GC every 30 seconds; not timing-eligible."
+    : "Natural collection only; no test-requested main/utility GC.",
   thresholds: { singlePluginP95Ms: 15, disabledReadP95DeltaPercent: 5, hostIdleCpuDeltaPoints: 0.5 }
 }
 
@@ -387,8 +391,8 @@ void app.whenReady().then(async () => {
     memory()
     let observations = 0
     observer = setInterval(() => {
-      const postGc = ++observations % 3 === 0
-      if (postGc) collect()
+      const postGc = diagnosticGc && ++observations % 3 === 0
+      if (postGc) collect?.()
       memory(postGc)
       save()
     }, 10000)

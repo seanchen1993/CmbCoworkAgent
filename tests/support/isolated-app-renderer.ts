@@ -1,5 +1,5 @@
 import assert from "node:assert/strict"
-import { readFileSync } from "node:fs"
+import { existsSync, readFileSync } from "node:fs"
 import { createServer as reservePort } from "node:net"
 import { dirname, join, resolve } from "node:path"
 import react from "@vitejs/plugin-react"
@@ -46,6 +46,21 @@ export async function startIsolatedAppRenderer(root: string, isolated: string) {
       }
     },
     plugins: [
+      {
+        name: "isolated-optional-mmj-module",
+        resolveId(source, importer) {
+          if (
+            source === "./mmj.js" &&
+            importer?.replaceAll("\\", "/").endsWith("/src/renderer/js/mmjUtils.ts") &&
+            !existsSync(join(root, "src/renderer/js/mmj.js"))
+          )
+            return "\0isolated:mmj-empty"
+          return null
+        },
+        load(id) {
+          return id === "\0isolated:mmj-empty" ? "export {}" : null
+        }
+      },
       react(),
       tailwindcss(),
       {

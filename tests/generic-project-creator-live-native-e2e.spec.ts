@@ -2,7 +2,9 @@
 import assert from "node:assert/strict"
 import { resolve } from "node:path"
 
-assert.equal(process.env.CREATOR_E2E_BUILT_PREVIEW, "1", "GENERIC_PROJECT_BUILT_PREVIEW_REQUIRED")
+assert.equal(process.env.COMPOSITION_E2E_SOURCE_CANDIDATE
+  ? process.env.CREATOR_E2E_SOURCE_PREVIEW : process.env.CREATOR_E2E_BUILT_PREVIEW, "1",
+"GENERIC_PROJECT_EXPLICIT_CANDIDATE_REQUIRED")
 assert.match(process.env.CREATOR_E2E_EXPECTED_SHA256 ?? "", /^[a-f0-9]{64}$/)
 assert(process.env.CMB_CREATOR_LIVE_MODEL_ID, "GENERIC_PROJECT_REAL_MODEL_REQUIRED")
 assert(!process.env.CREATOR_LIVE_SOURCE_SET, "GENERIC_PROJECT_MUST_START_FROM_EMPTY_TEMPLATE")

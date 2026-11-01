@@ -12,8 +12,21 @@ import { createRequire } from "node:module"
 import { dirname, join, resolve } from "node:path"
 import AdmZip from "adm-zip"
 import { _electron } from "playwright"
+import { readModsSourceCandidate } from "./mods-source-candidate"
 
 export function projectCompositionCandidate(root: string) {
+  const sourcePath = process.env.COMPOSITION_E2E_SOURCE_CANDIDATE
+  if (sourcePath) {
+    assert(!process.env.COMPOSITION_E2E_PACKAGED_DIR, "SOURCE_PACKAGE_MODES_ARE_EXCLUSIVE")
+    const source = readModsSourceCandidate(sourcePath)
+    assert.equal(realpathSync(source.repository), realpathSync(root))
+    return {
+      execution: "source-isolated",
+      path: source.entry,
+      sha256: createHash("sha256").update(readFileSync(source.entry)).digest("hex"),
+      sourceManifest: sourcePath
+    }
+  }
   const directory = process.env.COMPOSITION_E2E_PACKAGED_DIR
   const archive = directory && resolve(root, directory, "resources/app.asar")
   const path = archive || join(root, "out/main/index.js")
@@ -22,6 +35,19 @@ export function projectCompositionCandidate(root: string) {
     path,
     sha256: createHash("sha256").update(readFileSync(path)).digest("hex")
   }
+}
+
+export function assertCreatorLiveCandidate(root: string) {
+  const candidate = projectCompositionCandidate(root)
+  assert.equal(process.env.COMPOSITION_E2E_PACKAGED_DIR, undefined, "LIVE_NO_ASAR")
+  if (candidate.execution === "source-isolated")
+    assert.equal(process.env.CREATOR_E2E_SOURCE_PREVIEW, "1", "LIVE_SOURCE_OPT_IN_REQUIRED")
+  else {
+    assert.equal(process.env.CREATOR_E2E_BUILT_PREVIEW, "1", "LIVE_BUILT_PREVIEW_REQUIRED")
+    assert.equal(candidate.execution, "built-output")
+  }
+  assert.equal(candidate.sha256, process.env.CREATOR_E2E_EXPECTED_SHA256, "LIVE_MAIN_SHA_CHANGED")
+  return candidate
 }
 
 /** No inherited user configuration, credentials, profiles or large package copies. */
@@ -71,6 +97,10 @@ export function existingProjectCompositionEnvironment(root: string, isolated: st
     HTTPS_PROXY: "http://127.0.0.1:9",
     NO_PROXY: "127.0.0.1,localhost"
   })
+  if (process.env.COMPOSITION_E2E_SOURCE_CANDIDATE)
+    env.ELECTRON_RENDERER_URL = readModsSourceCandidate(
+      process.env.COMPOSITION_E2E_SOURCE_CANDIDATE
+    ).rendererUrl
   return { isolated, workspace, env, artifactRoot: dirname(isolated) }
 }
 
@@ -92,7 +122,12 @@ export function createHeadlessProjectCompositionLaunch(
       "Packaged approval tests require registered native windows; only the chat-only performance fixture may render offscreen"
     )
   }
-  const entry = archive ? join(archive, "out/main/index.js") : resolve(root, "out/main/index.js")
+  const candidate = projectCompositionCandidate(root)
+  const source =
+    candidate.execution === "source-isolated"
+      ? readModsSourceCandidate(process.env.COMPOSITION_E2E_SOURCE_CANDIDATE!)
+      : undefined
+  const entry = archive ? join(archive, "out/main/index.js") : candidate.path
   if (archive) {
     const asar = createRequire(join(root, "package.json"))("@electron/asar") as {
       listPackage(path: string): string[]
@@ -103,11 +138,23 @@ export function createHeadlessProjectCompositionLaunch(
   } else assert(existsSync(entry), "Build the final candidate before running the real IPC journey")
   assert.equal(dirname(fixture.isolated), fixture.artifactRoot)
   const bootstrap = join(fixture.isolated, "headless-main.cjs")
+  if (source) {
+    const metadata = JSON.parse(readFileSync(join(source.root, "package.json"), "utf8"))
+    writeFileSync(
+      join(fixture.isolated, "package.json"),
+      JSON.stringify({
+        name: metadata.name,
+        version: metadata.version,
+        main: "headless-main.cjs"
+      })
+    )
+  }
   writeFileSync(
     bootstrap,
     `
 const electron=require('electron');
 const {app,BrowserWindow,ipcMain}=electron;
+${source ? `app.setAppPath(${JSON.stringify(source.root)});` : ""}
 ${
   packaged
     ? `// Do not pause product workers on the test launcher's break-on-start flag.
@@ -164,7 +211,10 @@ app.once('browser-window-created',()=>{ipcMain.removeHandler('open-login-page');
         : join(root, "tests/support/electron-launcher.cmd"),
       args: packaged
         ? [`--user-data-dir=${join(fixture.isolated, "electron")}`]
-        : [bootstrap, `--user-data-dir=${join(fixture.isolated, "electron")}`],
+        : [
+            source ? fixture.isolated : bootstrap,
+            `--user-data-dir=${join(fixture.isolated, "electron")}`
+          ],
       cwd: root,
       env: packaged
         ? {

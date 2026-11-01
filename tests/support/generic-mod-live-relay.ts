@@ -5,6 +5,7 @@ import { createServer } from "node:http"
 import { homedir } from "node:os"
 import { join } from "node:path"
 import { rejectCreatorLiveRelay } from "./creator-live-transport"
+import { creatorLiveBudgetObservation } from "./creator-live-budget-observation"
 
 /** Only this parent process sees credentials; Electron receives a localhost dummy key. */
 export function genericModLiveRelay() {
@@ -30,9 +31,10 @@ export function genericModLiveRelay() {
     number: number
     status?: number
     elapsedMs: number
-    tools: Array<{ name: string; action?: string }>
+    tools: Array<{ name: string; action?: string; sdkQuery?: string }>
     failures?: Array<{ code: string }>
     error?: string
+    budget?: ReturnType<typeof creatorLiveBudgetObservation> & { sentOutputTokens: number }
   }> = []
   const aborts = new Set<AbortController>()
   let round = "setup",
@@ -63,15 +65,24 @@ export function genericModLiveRelay() {
         assert(raw.length < 5_000_000, "GENERIC_LIVE_REQUEST_SIZE")
       }
       const body = JSON.parse(raw)
+      const budget = creatorLiveBudgetObservation(body)
       for (const message of body.messages ?? [])
         for (const call of message.tool_calls ?? []) {
           let action: string | undefined
+          let sdkQuery: string | undefined
           try {
-            action = JSON.parse(call.function.arguments).action
+            const args = JSON.parse(call.function.arguments)
+            action = args.action
+            if (["prompt.paint", "prompt.read", "command.register"].includes(args.query))
+              sdkQuery = args.query
           } catch {
             /* partial arguments */
           }
-          metric.tools.push({ name: String(call.function.name), ...(action ? { action } : {}) })
+          metric.tools.push({
+            name: String(call.function.name),
+            ...(action ? { action } : {}),
+            ...(sdkQuery ? { sdkQuery } : {})
+          })
         }
       metric.failures = (body.messages ?? []).flatMap(
         (message: { role: string; content: unknown }) => {
@@ -94,6 +105,7 @@ export function genericModLiveRelay() {
         Number(body.max_tokens ?? body.max_completion_tokens ?? 8192)
       )
       delete body.max_completion_tokens
+      metric.budget = { ...budget, sentOutputTokens: body.max_tokens }
       const upstream = await fetch(url, {
         method: "POST",
         body: JSON.stringify(body),

@@ -70,6 +70,10 @@ export interface FunctionPaneSnapshot {
   /** Native fixed metadata; only true actively holds this thread's transient notifications. */
   holdToasts?: boolean
   rows: number
+  columns?: number
+  backgroundColor?: string
+  /** Actual mounted body measurement; absent until the native renderer reports it. */
+  bodyColumns?: number
   /** Set by the host after publication when the site exactly preserves its native default. */
   nativeFallback?: boolean
   /** Host-derived ToolGroup expansion, only when the final tree retains native rendering. */
@@ -121,7 +125,7 @@ export interface FunctionUiAction {
   intentId: string
   plugin: string
   handle: number
-  kind: "press" | "change" | "submit" | "select" | "close" | "focus" | "scroll"
+  kind: "press" | "change" | "submit" | "select" | "close" | "focus" | "scroll" | "measure"
   value?: ModJson
   link?: FunctionUiPressedLink
 }
@@ -234,6 +238,7 @@ const props: Record<FunctionUiNode["type"], readonly string[]> = {
   Form: ["key", "label", "fields", "values", "submitLabel"],
   Box: [
     "key",
+    "position", "top", "left", "right", "bottom", "display", "borderDimColor", "hover",
     "flexDirection",
     "gap",
     "rowGap",
@@ -277,10 +282,10 @@ const props: Record<FunctionUiNode["type"], readonly string[]> = {
     "strikethrough",
     "inverse",
     "dimColor",
-    "wrap", "size", "weight", "mono", "tabular"
+    "wrap", "size", "weight", "mono", "tabular", "dir", "hover"
   ],
-  Button: ["key", "label", "plain", "dimColor", "autoFocus", "hotkey"],
-  Input: ["key", "label", "placeholder", "value", "submitLabel", "autoFocus"],
+  Button: ["key", "label", "plain", "dimColor", "autoFocus", "hotkey", "variant", "role", "hover"],
+  Input: ["key", "label", "placeholder", "value", "submitLabel", "autoFocus", "rows"],
   Select: ["key", "label", "options", "value", "autoFocus"],
   Link: ["href", "label"],
   Code: ["source", "language", "path", "startLine", "format", "wrap"],
@@ -319,7 +324,7 @@ export function validateFunctionTree(value: unknown): asserts value is FunctionU
   const fail = (): never => {
     throw new ModFunctionError("MODS_UI_TREE_INVALID")
   }
-  const visit = (node: unknown, depth: number): void => {
+  const visit = (node: unknown, depth: number, hoverScope = false): void => {
     if (++count > 1000 || depth > 24) fail()
     if (typeof node === "string") {
       if (!text(node)) fail()
@@ -344,7 +349,7 @@ export function validateFunctionTree(value: unknown): asserts value is FunctionU
       ) fail()
       const childList: unknown = children?.value
       if (!Array.isArray(childList)) return fail()
-      for (const child of childList) visit(child, depth + 1)
+      for (const child of childList) visit(child, depth + 1, hoverScope)
       return
     }
     if (isModObject(node) && node.type === "Markdown") {
@@ -368,6 +373,7 @@ export function validateFunctionTree(value: unknown): asserts value is FunctionU
       fail()
     const item = node as unknown as FunctionUiNode
     const p = item.props
+    const keyedBox = item.type === "Box" && typeof p.key === "string" && p.key.length > 0
     if (isPlatformWidget(item.type)) {
       validatePlatformWidget(item.type, p)
       if (item.children !== undefined || item.client !== undefined) fail()
@@ -390,6 +396,38 @@ export function validateFunctionTree(value: unknown): asserts value is FunctionU
       fail()
     for (const [key, value] of Object.entries(p)) {
       if (!props[item.type].includes(key)) fail()
+      if (key === "hover") {
+        // Cross-site scope groups require a real per-node author receipt. Until then
+        // only the nearest keyed Box is supported, with no guest callbacks on hover.
+        if ((!hoverScope && !keyedBox) || !isModObject(value)) fail()
+        const allowed = item.type === "Box"
+          ? ["borderStyle", "borderColor", "borderDimColor", "backgroundColor", "display",
+            "top", "left", "right", "bottom"]
+          : ["color", "backgroundColor", "dimColor", "bold", "italic", "underline",
+            "strikethrough", "inverse"]
+        for (const [property, override] of Object.entries(value as ModObject)) {
+          if (!allowed.includes(property)) fail()
+          if (["top", "left", "right", "bottom"].includes(property)) {
+            if (!Number.isSafeInteger(override) || Math.abs(override as number) > 10000) fail()
+          } else if (property === "display") {
+            if (override !== "flex") fail()
+          } else if (["borderStyle", "borderColor", "color", "backgroundColor"].includes(property)) {
+            if (!text(override, 256)) fail()
+          } else if (typeof override !== "boolean") fail()
+        }
+        continue
+      }
+      if (["top", "left", "right", "bottom"].includes(key)) {
+        if (!Number.isSafeInteger(value) || Math.abs(value as number) > 10000) fail()
+        continue
+      }
+      if (key === "position" && !["relative", "absolute"].includes(String(value))) fail()
+      if (key === "display" && !["flex", "none"].includes(String(value))) fail()
+      if (key === "dir" && !["ltr", "rtl"].includes(String(value))) fail()
+      if (key === "variant" && !["primary", "secondary"].includes(String(value))) fail()
+      if (key === "role" && value !== "dismiss") fail()
+      if (key === "rows" && (!Number.isSafeInteger(value) || (value as number) < 1 ||
+          (value as number) > 1000)) fail()
       if (FUNCTION_UI_SPACE_PROPERTIES.some(property => property === key) &&
         typeof value === "string" && Object.hasOwn(FUNCTION_UI_SPACE_PIXELS, value)) continue
       if (key === "size" &&
@@ -418,7 +456,7 @@ export function validateFunctionTree(value: unknown): asserts value is FunctionU
       if (key === "options") continue
       if (key === "props" && item.type === "Client") continue
       if (
-        ["bold", "italic", "underline", "strikethrough", "inverse", "dimColor"].includes(key) &&
+        ["bold", "italic", "underline", "strikethrough", "inverse", "dimColor", "borderDimColor"].includes(key) &&
         typeof value !== "boolean"
       )
         fail()
@@ -474,7 +512,7 @@ export function validateFunctionTree(value: unknown): asserts value is FunctionU
       !["row", "column", "row-reverse", "column-reverse"].includes(String(p.flexDirection)))
       fail()
     if (p.wrap !== undefined &&
-      !["wrap", "truncate", "truncate-start", "truncate-end"].includes(String(p.wrap))) fail()
+      !["wrap", "end", "middle", "truncate", "truncate-start", "truncate-middle", "truncate-end"].includes(String(p.wrap))) fail()
     if (["Button", "Input", "Select"].includes(item.type)) {
       if (
         !text(p.key, 256) ||
@@ -508,6 +546,12 @@ export function validateFunctionTree(value: unknown): asserts value is FunctionU
       keys.add(address)
     } else if (item.client) fail()
     if (item.type === "Button" && !text(p.label, 1000)) fail()
+    if (item.type === "Button" && item.children !== undefined) {
+      const buttonText = (child: FunctionUiElement | string): boolean =>
+        typeof child === "string" || (child.type === "Text" &&
+          Array.isArray(child.children) && child.children.every(buttonText))
+      if (!Array.isArray(item.children) || !item.children.every(buttonText)) fail()
+    }
     if (item.type === "Button" && p.hotkey !== undefined &&
       (typeof p.hotkey !== "string" || !/^[a-z0-9]$/.test(p.hotkey))) fail()
     if (item.type === "Select") {
@@ -535,10 +579,11 @@ export function validateFunctionTree(value: unknown): asserts value is FunctionU
     )
       fail()
     if (item.type === "Code") functionCodeRows(p)
-    if (["Box", "Text", "Link"].includes(item.type)) {
+    if (["Box", "Text", "Link", "Button"].includes(item.type)) {
+      if (item.type === "Button" && item.children === undefined) return
       if (item.type === "Link" && item.children === undefined) return
       if (!Array.isArray(item.children)) fail()
-      for (const child of item.children!) visit(child, depth + 1)
+      for (const child of item.children!) visit(child, depth + 1, keyedBox || hoverScope)
     } else if (item.children !== undefined) fail()
   }
   if (typeof value === "string") fail()
@@ -547,13 +592,18 @@ export function validateFunctionTree(value: unknown): asserts value is FunctionU
 
 export function validatePaneArgs(value: ModObject): void {
   if (
+    Object.keys(value).some(key => !["id", "title", "focus", "closeOnEscape", "holdToasts",
+      "rows", "columns", "backgroundColor"].includes(key)) ||
     typeof value.id !== "string" ||
     !/^[\w-]{1,64}$/.test(value.id) ||
     (value.title !== undefined && !text(value.title, 256)) ||
     ["focus", "closeOnEscape", "holdToasts"].some(
       (key) => value[key] !== undefined && value[key] !== true
     ) ||
-    (value.rows !== undefined && (!Number.isInteger(value.rows) || (value.rows as number) < 1))
+    ["rows", "columns"].some(key => value[key] !== undefined &&
+      (!Number.isSafeInteger(value[key]) || (value[key] as number) < 1 ||
+        (value[key] as number) > 10000)) ||
+    (value.backgroundColor !== undefined && !text(value.backgroundColor, 256))
   )
     throw new ModFunctionError("MODS_UI_PANE_ARGUMENTS")
 }

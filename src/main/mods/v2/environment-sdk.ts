@@ -86,6 +86,7 @@ export async function readFunctionEnvironment(
     signal: AbortSignal
     assertLive(): void
     publish(value: ModJson, signal: AbortSignal): Promise<ModJson>
+    overlay?: ReadonlyMap<string, string | undefined>
   }
 ): Promise<string | undefined> {
   const requested = name(value)
@@ -97,10 +98,15 @@ export async function readFunctionEnvironment(
   check()
   if (!context.declared.some((item) => key(item) === normalized))
     throw new ModFunctionError("MODS_ENV_UNDECLARED")
-  if (!FUNCTION_ENVIRONMENT_READ_NAMES.some((item) => key(item) === normalized))
+  const own = context.overlay?.has(normalized) === true
+  if (!own && !FUNCTION_ENVIRONMENT_READ_NAMES.some((item) => key(item) === normalized))
     throw new ModFunctionError("MODS_ENV_READ_DENIED")
   const actualName = Object.keys(process.env).find((item) => key(item) === normalized)
-  const raw = actualName === undefined ? undefined : process.env[actualName]
+  const raw = own
+    ? context.overlay!.get(normalized)
+    : actualName === undefined
+      ? undefined
+      : process.env[actualName]
   if (raw === undefined) return undefined
   if (Buffer.byteLength(raw) > 32 * 1024) throw new ModFunctionError("MODS_ENV_VALUE_LIMIT")
   const published = await context.publish(raw, context.signal)
@@ -108,4 +114,43 @@ export async function readFunctionEnvironment(
   if (typeof published !== "string" || Buffer.byteLength(published) > 32 * 1024)
     throw new ModFunctionError("MODS_ENV_RESULT")
   return published
+}
+
+/** Per-source session overlay. Never changes the Electron host or another plugin's children. */
+export class FunctionEnvironmentOverlay {
+  readonly values = new Map<string, string | undefined>()
+
+  set(requested: unknown, value: unknown, declared: readonly string[]): { deny?: string } {
+    const normalized = key(name(requested))
+    if (!declared.some((item) => key(item) === normalized))
+      throw new ModFunctionError("MODS_ENV_UNDECLARED")
+    if (
+      !/^[A-Za-z_][A-Za-z0-9_]{0,127}$/.test(normalized) ||
+      /^(?:PATH|PATHEXT|COMSPEC|SHELL|SYSTEMROOT|WINDIR|HOME|USERPROFILE|HOMEDRIVE|HOMEPATH|NODE_.+|ELECTRON_.+|LD_.+|DYLD_.+|BASH_ENV|ENV|BASH_FUNC_.+|PROMPT_COMMAND|JAVA_.+|_JAVA_OPTIONS|JDK_JAVA_OPTIONS|MAVEN_OPTS|GRADLE_OPTS|DOTNET_.+|CORECLR_.+|COR_.+|PYTHON.+|RUBY.+|PERL.+|CLASSPATH|PSMODULEPATH|PSEXECUTIONPOLICYPREFERENCE|GCONV_PATH|GLIBC_TUNABLES|OPENSSL_CONF|OPENSSL_MODULES|GIT_CONFIG.*|GIT_EXEC_PATH|GIT_SSH.*|GIT_ASKPASS|SSH_ASKPASS|.*(?:TOKEN|PASSWORD|SECRET|API_KEY|CREDENTIAL).*)$/i.test(
+        normalized
+      )
+    )
+      return { deny: "此环境变量由宿主管理，不能通过插件修改。" }
+    if (
+      value !== undefined &&
+      (typeof value !== "string" || value.includes("\0") || Buffer.byteLength(value) > 32 * 1024)
+    )
+      throw new ModFunctionError("MODS_ENV_VALUE_LIMIT")
+    const proposed = new Map(this.values).set(normalized, value as string | undefined)
+    if (
+      proposed.size > 128 ||
+      [...proposed].reduce(
+        (n, [k, v]) => n + Buffer.byteLength(k) + Buffer.byteLength(v ?? ""),
+        0
+      ) >
+        32 * 1024
+    )
+      throw new ModFunctionError("MODS_ENV_VALUE_LIMIT")
+    this.values.set(normalized, value as string | undefined)
+    return {}
+  }
+
+  snapshot(): Readonly<Record<string, string | null>> {
+    return Object.freeze(Object.fromEntries([...this.values].map(([k, v]) => [k, v ?? null])))
+  }
 }

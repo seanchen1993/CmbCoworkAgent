@@ -155,8 +155,11 @@ function FunctionPlacedRow({
   return (
     <section
       data-function-placed={entry.requestId}
+      data-function-placed-lease={snapshot ? lease : undefined}
+      data-function-placed-generation={snapshot?.generation}
       aria-label={`${entry.plugin} 插件卡片`}
       className="my-3 min-w-0 rounded-lg border border-border bg-background"
+      style={{ position: "relative", isolation: "isolate", contain: "layout paint" }}
     >
       <div className="flex items-center justify-between gap-2 border-b px-3 py-2 text-xs text-muted-foreground">
         <span className="min-w-0 break-all">{entry.plugin} · 插件卡片</span>

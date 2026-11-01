@@ -35,6 +35,40 @@ function fixture(cell?: FunctionConfigCell) {
   }
 }
 
+it("keeps a native-only policy row writable by the user but not by plugins", () => {
+  let value = true,
+    revision = 0
+  const rows = new FunctionConfigRows()
+  const write = vi.fn((next: unknown) => {
+    value = next as boolean
+    revision++
+  })
+  rows.add({
+    key: "mods.desktopNotifications",
+    storageKey: "native-notifications",
+    label: "Notifications",
+    kind: "boolean",
+    provider: { plugin: "engine", tier: "core" },
+    cell: { read: () => ({ value, revision: String(revision) }), write },
+    locked: () => false,
+    allow: (origin) => origin.kind !== "plugin",
+    validate: (next) => typeof next === "boolean"
+  })
+  const live = () => {
+    /* Real authority is retained for this synchronous fixture. */
+  }
+  expect(
+    rows
+      .prepare("mods.desktopNotifications", { kind: "plugin", name: "owner" }, false, live)
+      .commit(false)
+  ).toEqual({ deny: expect.any(String) })
+  expect(write).not.toHaveBeenCalled()
+  expect(
+    rows.prepare("mods.desktopNotifications", { kind: "composer" }, false, live).commit(false)
+  ).toEqual({ value: false })
+  expect(write).toHaveBeenCalledOnce()
+})
+
 it("acknowledges only actual commits, writes once and cannot hide a saved change", () => {
   const f = fixture(),
     receipt = f.prepare()

@@ -16,6 +16,7 @@ const localOrReadOnly = new Set([
   "fs.ancestors",
   "fs.cwd",
   "env.get",
+  "session.identity", "telemetry.records",
   "clock.time",
   "clock.now",
   "config.list",

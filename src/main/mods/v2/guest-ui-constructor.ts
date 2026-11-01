@@ -190,8 +190,10 @@ export const FUNCTION_UI_CONSTRUCTOR_BOOTSTRAP = String.raw`
             delete props.children;
             for(const key of constructorCallbackNames)delete props[key];
             if(name==="Link"&&typeof props.href!=="string")throw Error("MODS_UI_LINK_HREF");
-            if(name==="Button"&&props.label===undefined&&children.length===1&&
-                typeof children[0]==="string")props.label=children[0];
+            if(name==="Button"&&children.length){
+              const label=uiButtonText(children);
+              if(props.label===undefined)props.label=label;
+            }
             if(name==="Button"&&props.key===undefined)props.key=props.label;
             const tree={type:name,props};
             if(name==="Markdown"){
@@ -199,7 +201,8 @@ export const FUNCTION_UI_CONSTRUCTOR_BOOTSTRAP = String.raw`
               uiMarkdownProps(props,false,true);
               return frozen(tree);
             }
-            if(name==="Box"||name==="Text"||name==="Link")tree.children=children;
+            if(name==="Box"||name==="Text"||name==="Link"||
+                (name==="Button"&&children.length))tree.children=children;
             return frozen(tree);
           }
           if(!scope||scope.event!=="ui.render"||scope.component!==component)

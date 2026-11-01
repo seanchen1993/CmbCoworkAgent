@@ -107,6 +107,8 @@ import { verifyPendingMentionReload } from "./support/mods-pending-mention-reloa
 import { verifyGuideBoundaries } from "./support/mods-guide-boundary-e2e"
 import { verifyToolSites } from "./support/mods-tool-sites-e2e"
 import AdmZip from "adm-zip"
+import { readModsSourceCandidate } from "./support/mods-source-candidate"
+import { createHeadlessProjectCompositionLaunch } from "./support/project-composition-e2e-fixtures"
 
 const root = resolve(__dirname, "..")
 const localRequire = createRequire(join(root, "package.json"))
@@ -267,12 +269,27 @@ Object.assign(env, {
   HTTPS_PROXY: "http://127.0.0.1:9",
   NO_PROXY: "127.0.0.1,localhost"
 })
+if (process.env.COMPOSITION_E2E_SOURCE_CANDIDATE) {
+  const source = readModsSourceCandidate(process.env.COMPOSITION_E2E_SOURCE_CANDIDATE)
+  assert.equal(packagedDir, undefined, "SOURCE_SOAK_CANNOT_USE_PACKAGE")
+  assert(["desktop-soak", "desktop-performance"].includes(focus ?? ""), "SOURCE_FOCUS_UNSUPPORTED")
+  assert.equal(process.env.CMB_MODS_E2E_APP_DIR, source.root,
+    "SOURCE_SOAK_REQUIRES_EXACT_CANDIDATE")
+  env.ELECTRON_RENDERER_URL = source.rendererUrl
+}
 if (focus === "agent-spawn" && process.env.GIT_BASH_PATH)
   env.GIT_BASH_PATH = process.env.GIT_BASH_PATH
 const launchPackaged =
   packagedDir === undefined
     ? undefined
     : createModsCoreLauncher(root, isolated, env, artifacts)
+const launchSource = process.env.COMPOSITION_E2E_SOURCE_CANDIDATE
+  ? createHeadlessProjectCompositionLaunch(
+      root,
+      { isolated, workspace, env, artifactRoot: resolve(isolated, "..") },
+      { unobtrusivePresentation: true }
+    )
+  : undefined
 const checks: string[] = []
 const startedAt = Date.now()
 const timings: Record<string, unknown> = {}
@@ -355,7 +372,9 @@ async function runMain(failures: unknown[]): Promise<void> {
     console.log("STEP launch")
     app = launchPackaged
       ? await launchPackaged(60_000)
-      : await _electron.launch({
+      : launchSource
+        ? await launchSource()
+        : await _electron.launch({
           executablePath: join(root, "tests/support/electron-launcher.cmd"),
           args: [
             ...(packagedDir ? [] : [process.env.CMB_MODS_E2E_APP_DIR ?? join(root, "out/main/index.js")]),

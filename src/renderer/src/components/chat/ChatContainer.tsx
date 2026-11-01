@@ -14,6 +14,7 @@ import { enqueueCreatorRepair } from "@/lib/creator-repair-submission"
 import { ChatTaskOverview } from "./ChatTaskOverview"
 import { usePromptComposer } from "@/lib/use-prompt-composer"
 import { useFunctionDesktop } from "@/lib/use-function-desktop"
+import { beginParentInputPreparation, modsAgentInputActive, useModsAgentInputTarget } from "@/lib/mods-agent-input-target"
 import { useChatTransientToasts } from "@/lib/use-chat-transient-toasts"
 import { submitAfterPromptEdit } from "@/lib/prompt-edit-submission"
 import { isPromptSubmissionReady } from "@/lib/prompt-submission-readiness"
@@ -1739,6 +1740,10 @@ export function ChatContainer({
   const chatScrollSessionLeaseRef = useRef(initialChatScrollView.lease)
   const initialPendingDurableRevealMessageId = initialChatScrollView.pendingRevealMessageId
   const readOnly = Boolean(resolvedReadOnlyReason)
+  const accountRevision = useAppStore(state => state.accountRevision)
+  const modsInputTarget = useModsAgentInputTarget(threadId, accountRevision)
+  const wasModsInputPaused = useRef(false)
+  const parentInputPaused = !!modsInputTarget
   const shouldShowWelcomeHeadline = surfaceConfig.showWelcomeHeadline
   const shouldShowWelcomeSkillTabs = surfaceConfig.showWelcomeSkillTabs && !hideWelcomeSkillTabs
   const shouldShowHarnessDialogTips = surfaceConfig.showHarnessDialogTips && !readOnly
@@ -2746,6 +2751,7 @@ export function ChatContainer({
 
   const handleAttachmentInputs = useCallback(
     async (inputs: PendingAttachmentInput[]) => {
+      if (modsAgentInputActive(threadId, useAppStore.getState().accountRevision)) return
       if (inputs.length === 0 || attachmentLoading) return
       setAttachmentLoading(true)
       clearError()
@@ -2802,6 +2808,7 @@ export function ChatContainer({
                   bytes: input.bytes,
                   maxLength: remaining
                 })
+          if (modsAgentInputActive(threadId, useAppStore.getState().accountRevision)) return
           if (result.success && result.attachment) {
             // #12: skip empty files
             if (!result.attachment.content.trim()) {
@@ -2828,10 +2835,11 @@ export function ChatContainer({
         setAttachmentLoading(false)
       }
     },
-    [setError, clearError, attachmentLoading]
+    [setError, clearError, attachmentLoading, threadId]
   )
 
   const handleAttachClick = useCallback(async () => {
+    if (modsAgentInputActive(threadId, useAppStore.getState().accountRevision)) return
     if (attachmentsRef.current.length + mentionedFilesRef.current.length >= MAX_ATTACHMENTS) {
       setError(`最多只能添加 ${MAX_ATTACHMENTS} 个文件`)
       return
@@ -2843,7 +2851,7 @@ export function ChatContainer({
         result.files.map((file) => ({ kind: "selected" as const, ...file }))
       )
     }
-  }, [handleAttachmentInputs, setError])
+  }, [handleAttachmentInputs, setError, threadId])
 
   const removeAttachment = useCallback((index: number) => {
     setAttachments((prev) => prev.filter((_, i) => i !== index))
@@ -2859,6 +2867,7 @@ export function ChatContainer({
       e.preventDefault()
       e.stopPropagation()
       setDragOver(false)
+      if (modsAgentInputActive(threadId, useAppStore.getState().accountRevision)) return
       if (attachmentLoading) return
       const files = e.dataTransfer.files
       if (files.length > 0) {
@@ -2885,7 +2894,7 @@ export function ChatContainer({
         }
       }
     },
-    [handleAttachmentInputs, attachmentLoading, setError]
+    [handleAttachmentInputs, attachmentLoading, setError, threadId]
   )
 
   const handleDragOver = useCallback((e: React.DragEvent) => {
@@ -5391,9 +5400,14 @@ export function ChatContainer({
   )
   // 项目已删除时，会话仅可查看历史：禁用输入框与编辑器控件。
   const effectiveInputDisabled =
-    inputDisabled || contextReminderPending || readOnly || bizRetryPending
+    inputDisabled || contextReminderPending || readOnly || bizRetryPending || parentInputPaused
   const effectiveComposerControlsDisabled =
-    composerControlsDisabled || contextReminderPending || readOnly || bizRetryPending
+    composerControlsDisabled || contextReminderPending || readOnly || bizRetryPending || parentInputPaused
+  useEffect(() => {
+    if (wasModsInputPaused.current && !parentInputPaused)
+      inputRef.current?.focus({ preventScroll: true })
+    wasModsInputPaused.current = parentInputPaused
+  }, [parentInputPaused])
   const promptComposer = usePromptComposer({ threadId,
     enabled: modsChatEnabled && !effectiveInputDisabled, textarea: inputRef,
     read: readPromptDraft, apply: applyPromptDraft, onError: setError,
@@ -5406,6 +5420,9 @@ export function ChatContainer({
   useFunctionDesktop(threadId, modsChatEnabled && !readOnly, chatRootRef,
     isLoading || chatFlow.active || chatFlow.busy)
   const inputPlaceholder = useMemo(() => {
+    if (parentInputPaused) return modsInputTarget?.phase === "waiting"
+      ? "正在准备切换子会话，先完成父聊天本次发送准备；原草稿已保留。"
+      : "当前输入发送到右侧子会话。返回父聊天后可继续编辑原草稿。"
     if (bizRetryPending) return "请在决策入口操作"
     if (resolvedReadOnlyReason) return resolvedReadOnlyReason
     if (contextReminderPending) return "请先处理上下文提醒"
@@ -5431,6 +5448,8 @@ export function ChatContainer({
     return "输入新问题，或用 /goal <目标> 开始新的长期任务"
   }, [
     creatorMode,
+    parentInputPaused,
+    modsInputTarget,
     bizRetryPending,
     contextReminderPending,
     goalUi.goal,
@@ -5456,15 +5475,17 @@ export function ChatContainer({
   const slashResetSelection = slash.resetSelection
   const applySkillSelection = useCallback(
     (s: SkillMetadata) => {
+      if (modsAgentInputActive(threadId, useAppStore.getState().accountRevision)) return
       setSelectedSkill(s)
       setSelectedBuiltinBrowser(false)
       setInput("")
       slashResetSelection()
     },
-    [setInput, setSelectedBuiltinBrowser, setSelectedSkill, slashResetSelection]
+    [setInput, setSelectedBuiltinBrowser, setSelectedSkill, slashResetSelection, threadId]
   )
 
   const dispatchBuiltinCommand = useCallback((target: NonNullable<ReturnType<typeof parseBuiltinNavigation>>) => {
+    if (modsAgentInputActive(threadId, useAppStore.getState().accountRevision)) return
     const draft = readPromptDraft()
     openBuiltinNavigation(target, { threadId, workspace: currentForkWorkspacePath ?? null })
     // Selecting a menu entry may consume a slash query, but never a sentence or attachments.
@@ -5474,6 +5495,7 @@ export function ChatContainer({
 
   const applySlashCommand = useCallback(
     (command: SlashCommandItem) => {
+      if (modsAgentInputActive(threadId, useAppStore.getState().accountRevision)) return
       const localTarget = builtinTargetFromItem(command)
       if (localTarget) { dispatchBuiltinCommand(localTarget); return }
       explicitPluginCommand.current = command.id.startsWith("mod:") ? command.command : null
@@ -5495,11 +5517,12 @@ export function ChatContainer({
         textarea.setSelectionRange(cursor, cursor)
       })
     },
-    [dispatchBuiltinCommand, setInput, setSelectedBuiltinBrowser, setSelectedSkill, slashResetSelection]
+    [dispatchBuiltinCommand, setInput, setSelectedBuiltinBrowser, setSelectedSkill, slashResetSelection, threadId]
   )
 
   const applyAtFileMention = useCallback(
     (file: AtFileSuggestion) => {
+      if (modsAgentInputActive(threadId, useAppStore.getState().accountRevision)) return
       if (atFileMentions.mode.kind !== "at-file" || !workspacePath) return
 
       try {
@@ -5553,7 +5576,7 @@ export function ChatContainer({
         setError("@文件暂时不可用，请直接发送消息或改用普通附件。")
       }
     },
-    [atFileMentions.mode, clearError, input, setError, setInput, workspacePath]
+    [atFileMentions.mode, clearError, input, setError, setInput, workspacePath, threadId]
   )
 
   const appendVisibleUserMessageWithTime = useCallback(
@@ -5592,9 +5615,11 @@ export function ChatContainer({
   }, [toast])
 
   const submitGoalResumeCommand = useCallback(async (): Promise<void> => {
+    if (modsAgentInputActive(threadId, useAppStore.getState().accountRevision)) return
     if (!stream || historyLoading || isLoading || scheduledTaskLoading) return
     if (!tryAcquireSubmitInFlightLock(submitInFlightRef, true, threadId)) return
     const modelSelectionIntent = captureModelSelectionIntent()
+    let inputPreparation: ReturnType<typeof beginParentInputPreparation>
     try {
       const pendingApprovalRecord = pendingApproval as unknown as Record<string, unknown> | null
       if (pendingApproval && !pendingApprovalRecord?._orchestratorRequestId) {
@@ -5621,13 +5646,15 @@ export function ChatContainer({
         setError("请先选择一个工作区文件夹再继续 goal。")
         return
       }
+      inputPreparation = beginParentInputPreparation(threadId, useAppStore.getState().accountRevision)
+      if (!inputPreparation) return
       setInput("")
       setAttachments([])
       setMentionedFiles([])
       setSelectedSkill(null)
       insertLog("send: /goal resume")
       await appendVisibleUserMessageWithTime("/goal resume")
-      await stream.submit(
+      const submitted = stream.submit(
         {
           messages: [{ type: "human", content: "/goal resume" }]
         },
@@ -5638,7 +5665,10 @@ export function ChatContainer({
           }
         }
       )
+      inputPreparation.release()
+      await submitted
     } finally {
+      inputPreparation?.release()
       releaseSubmitInFlightLock(submitInFlightRef, true, threadId)
     }
   }, [
@@ -5773,6 +5803,7 @@ export function ChatContainer({
   submissionStateRef.current = submissionState
   const handleSubmit = async (e: React.FormEvent, defaultText = ""): Promise<void> => {
     e.preventDefault()
+    if (modsAgentInputActive(threadId, useAppStore.getState().accountRevision)) return
     if (isComposingRef.current) return
     if (!defaultText && !isPromptSubmissionReady(promptSubmissionReadiness)) return
     const selectedFlow = !defaultText && chatFlow.choice
@@ -5845,12 +5876,15 @@ export function ChatContainer({
     const submitModelId = admittedState.currentModel
     const modelSelectionIntent = captureModelSelectionIntent()
     const assertSubmissionState = () => {
+      if (modsAgentInputActive(threadId, useAppStore.getState().accountRevision))
+        throw Error("当前输入目标已切换到子会话，父聊天草稿已保留。")
       const latest = submissionStateRef.current
       if (hasComposerSubmissionStateChanged(admittedState, latest) ||
         !isModelSelectionIntentCurrent(modelSelectionIntent))
         throw Error("准备发送期间会话、附件、技能或任务状态已变化，请重新发送；当前输入已保留。")
     }
     const trimmedInput = defaultText || submittedDraft.text.trim()
+    if (modsAgentInputActive(threadId, useAppStore.getState().accountRevision)) return
     const isGoalSlashInput = /^\/goal(?:\s|$)/i.test(trimmedInput)
     const shouldOpenGoalDetailsForStatus = /^\/goal(?:\s+status)?\s*$/i.test(trimmedInput)
     // Defense-in-depth: every current trigger already short-circuits while the
@@ -5992,6 +6026,7 @@ export function ChatContainer({
       return
     }
     if (shouldLockQueuedDraftPreparation) queuedDraftPreparingThreads.add(threadId)
+    let inputPreparation: ReturnType<typeof beginParentInputPreparation>
 
     try {
       const pendingApprovalRecord = pendingApproval as unknown as Record<string, unknown> | null
@@ -6086,6 +6121,8 @@ export function ChatContainer({
       // Claim the current composer payload before @file IO. A second Enter sees
       // the preparation guard, while text typed during the await goes into a
       // fresh composer and is not cleared when this draft is enqueued.
+      inputPreparation = beginParentInputPreparation(threadId, useAppStore.getState().accountRevision)
+      if (!inputPreparation) return
       const skill = selectedSkill
       const browser = selectedBuiltinBrowser
       const claimedAttachments = attachments
@@ -6386,7 +6423,7 @@ export function ChatContainer({
       // before useStream propagates isLoading.
       if (shouldLockSubmit) liveSubmitPreparingThreads.delete(threadId)
       try {
-        await stream.submit(
+        const submitted = stream.submit(
           {
             messages: [{ type: "human", content: fullMessage }]
           },
@@ -6404,10 +6441,13 @@ export function ChatContainer({
             }
           }
         )
+        inputPreparation.release()
+        await submitted
       } finally {
         setActiveTurnStartTime(null)
       }
     } finally {
+      inputPreparation?.release()
       if (shouldLockSubmit) liveSubmitPreparingThreads.delete(threadId)
       if (shouldLockQueuedDraftPreparation) queuedDraftPreparingThreads.delete(threadId)
       // `done` can flip isLoading to false before stream.submit's promise
@@ -6603,6 +6643,7 @@ export function ChatContainer({
 
   const handleGuideQueuedMessage = useCallback(
     async (message: QueuedMessage): Promise<void> => {
+      if (modsAgentInputActive(threadId, useAppStore.getState().accountRevision)) return
       if (hasActiveGoalRunning) {
         toast.message("Active Goal 运行中，请先暂停 Goal 再引导消息")
         return
@@ -6722,6 +6763,7 @@ export function ChatContainer({
 
   const submitQueuedMessage = useCallback(
     async (queued: QueuedMessage): Promise<void> => {
+      if (modsAgentInputActive(threadId, useAppStore.getState().accountRevision)) return
       if (!stream) return
       const modelSelectionIntent = captureModelSelectionIntent()
       const fullMessage = getQueuedModelContent(queued)
@@ -6837,12 +6879,16 @@ export function ChatContainer({
       // has not been handed to the active run. No await occurs between this
       // check and deletion, so the claim is atomic on the renderer event loop.
       const currentQueued = getQueuedMessage(queued.id)
+      if (modsAgentInputActive(threadId, useAppStore.getState().accountRevision)) return
       if (!canClaimQueuedMessage(queued, currentQueued)) return
       try { assertQueuedComposerMentionWorkspace(queued, workspacePathRef.current) }
       catch (error) {
         setError(error instanceof Error ? error.message : "文件提及草稿无法提交")
         return
       }
+      const inputPreparation = beginParentInputPreparation(threadId, useAppStore.getState().accountRevision)
+      if (!inputPreparation) return
+      try {
       const isFirstMessage = threadMessages.length === 0
       deleteQueuedMessage(queued.id)
       // Reuse the draft's own id for the optimistic bubble. If stream.submit below
@@ -6865,7 +6911,7 @@ export function ChatContainer({
       setActiveTurnStartTime(startTime)
       clearFinishedWorkflowRun()
       try {
-        await stream.submit(
+        const submitted = stream.submit(
           {
             messages: [{ type: "human", content: fullMessage }]
           },
@@ -6883,9 +6929,12 @@ export function ChatContainer({
             }
           }
         )
+        inputPreparation.release()
+        await submitted
       } finally {
         setActiveTurnStartTime(null)
       }
+      } finally { inputPreparation.release() }
     },
     [
       agentMode,
@@ -7023,7 +7072,7 @@ export function ChatContainer({
   // sits there looking "sent." Failing fast here avoids that. The shared release
   // version forces a re-check after each settle, including across component remounts.
   useEffect(() => {
-    if (queueAutoDrainSuppressed || chatFlow.active || chatFlow.busy) return
+    if (parentInputPaused || queueAutoDrainSuppressed || chatFlow.active || chatFlow.busy) return
     if (submitInFlightRef.current.has(threadId)) return
     if (isLoading || pendingApproval || threadError || !stream) return
     if (historyLoading || readOnly || contextReminderPending || bizRetryPending) return
@@ -7094,6 +7143,7 @@ export function ChatContainer({
     chatFlow.active,
     chatFlow.busy,
     queueAutoDrainSuppressed,
+    parentInputPaused,
     queuePumpTick,
     queuedMessages,
     readOnly,
@@ -7108,6 +7158,7 @@ export function ChatContainer({
   ])
 
   const handleKeyDown = (e: React.KeyboardEvent): void => {
+    if (modsAgentInputActive(threadId, useAppStore.getState().accountRevision)) { e.preventDefault(); return }
     // IME composing (Chinese/Japanese/Korean) should not trigger submit on Enter
     const isComposing = e.nativeEvent.isComposing || isComposingRef.current
     if (isComposing) return
@@ -9014,7 +9065,8 @@ export function ChatContainer({
               {isOrdinaryFlowMetadata(currentThread?.metadata) ? <ClawSidebar key={`claw:${threadId}`} threadId={threadId} flow={chatFlow}
                 workspace={currentForkWorkspacePath}
                 onRequestCreator={enterCreatorFromChat}
-                onStart={startChatFlow}
+                onStart={goal => modsAgentInputActive(threadId, useAppStore.getState().accountRevision)
+                  ? Promise.resolve(false) : startChatFlow(goal)}
                 taskWorking={isLoading}
                 taskOverview={!chatFlow.active ? <ChatTaskOverview
                   working={isLoading}
@@ -9038,7 +9090,7 @@ export function ChatContainer({
                   })}
                   onContinue={() => void applyGoalPanelCommand("/goal resume")}
                 /> : undefined}
-                disabled={readOnly || isLoading || historyLoading || hasActiveGoalRunning || Boolean(pendingApproval)}
+                disabled={readOnly || parentInputPaused || isLoading || historyLoading || hasActiveGoalRunning || Boolean(pendingApproval)}
                 records={<>
                   <ModCommandJobs key={threadId} threadId={threadId} />
                   <FunctionCompletionEvidence key={`evidence:${threadId}`} threadId={threadId} isWorking={isLoading} />
@@ -9091,7 +9143,7 @@ export function ChatContainer({
                   )}
                 </ClawComposerBar>
                 <SlashCommandPopover
-                  mode={chatFlow.choice ? { kind: "closed" } : slash.mode}
+                  mode={parentInputPaused || chatFlow.choice ? { kind: "closed" } : slash.mode}
                   selectedIdx={slash.selectedIdx}
                   onHoverIdx={slash.setSelectedIdx}
                   onSelectCommand={applySlashCommand}
@@ -9099,7 +9151,7 @@ export function ChatContainer({
                   skillsLoading={skillsLoading}
                 />
                 <AtFileMentionPopover
-                  mode={atFileMentions.mode}
+                  mode={parentInputPaused ? { kind: "closed" } : atFileMentions.mode}
                   selectedIdx={atFileMentions.selectedIdx}
                   onHoverIdx={atFileMentions.setSelectedIdx}
                   onSelectFile={applyAtFileMention}
@@ -9517,6 +9569,7 @@ export function ChatContainer({
                   <div className="relative z-10 flex items-end gap-2">
                     <div
                       ref={dropZoneRef}
+                      inert={parentInputPaused}
                       className={cn(
                         "relative flex-1 min-w-0 flex flex-col overflow-hidden rounded-[28px] border border-border/80 shadow-sm transition-colors duration-300",
                         pendingUserInput

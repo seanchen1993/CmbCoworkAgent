@@ -57,6 +57,9 @@ export class OwnedAgentTasks {
       claimed: boolean
       sourceCurrent(): void
       retainedGrant?: () => void
+      active?: boolean
+      sequence: number
+      controller: AbortController
     }
   >()
   private database() {
@@ -248,9 +251,11 @@ export class OwnedAgentTasks {
     grant: ModGrant,
     agentId: string,
     sourceCurrent: () => void,
-    retainedGrant?: () => void
+    retainedGrant?: () => void,
+    mode: "readonly" | "interactive" = "readonly"
   ) {
     sourceCurrent()
+    if (agentId === "main") mode = "readonly"
     for (const [key, entry] of this.views) {
       if (entry.db !== getDb() || (!entry.claimed && Date.now() > entry.expires))
         this.views.delete(key)
@@ -264,8 +269,10 @@ export class OwnedAgentTasks {
       workspace,
       agentId,
       parentIncarnation: incarnation(parent),
-      sourceDigest: grant.digest
+      sourceDigest: grant.digest,
+      mode
     }
+    this.views.get(parent)?.controller.abort(new Error("MODS_AGENT_VIEW_CHANGED"))
     this.views.set(parent, {
       value,
       grant,
@@ -273,9 +280,17 @@ export class OwnedAgentTasks {
       expires: Date.now() + 15_000,
       claimed: false,
       sourceCurrent,
-      retainedGrant
+      retainedGrant,
+      sequence: 0,
+      controller: new AbortController()
     })
-    return { requested: true, agentId, readOnly: true, inputTarget: "parent" }
+    return {
+      requested: true,
+      agentId,
+      mode,
+      readOnly: mode !== "interactive",
+      inputTarget: mode === "interactive" ? "owned-child" : "parent"
+    }
   }
   view(parent: string, workspace: string, assertGrant: (grant: ModGrant) => void) {
     const entry = this.views.get(parent)
@@ -320,10 +335,72 @@ export class OwnedAgentTasks {
     return entry
   }
   closeView(parent: string, id: string) {
-    if (this.views.get(parent)?.value.id === id) this.views.delete(parent)
+    const entry = this.views.get(parent)
+    if (entry?.value.id === id) {
+      entry.controller.abort(new Error("MODS_AGENT_VIEW_CHANGED"))
+      this.views.delete(parent)
+    }
+  }
+  activateView(
+    parent: string,
+    workspace: string,
+    id: string,
+    assertGrant: (grant: ModGrant) => void
+  ) {
+    const entry = this.viewRead(parent, workspace, id, assertGrant)
+    this.assertInteractive(parent, workspace, entry)
+    entry.active = true
+    return { active: true }
+  }
+  private assertInteractive(
+    parent: string,
+    workspace: string,
+    entry: NonNullable<ReturnType<OwnedAgentTasks["viewRead"]>>
+  ) {
+    entry.controller.signal.throwIfAborted()
+    const value = entry.value
+    if (value.mode !== "interactive" || value.agentId === "main")
+      throw new ModFunctionError("MODS_AGENT_VIEW_READONLY")
+    const record = this.owned(parent, workspace, entry.grant, value.agentId)
+    const live = this.live.get(value.agentId)
+    if (
+      record.status !== "running" ||
+      !live ||
+      live.controller.signal.aborted ||
+      live.db !== getDb() ||
+      live.epoch !== entry.grant.epoch
+    )
+      throw new ModFunctionError("MODS_AGENT_VIEW_NOT_RUNNING")
+  }
+  async sendView(
+    parent: string,
+    workspace: string,
+    id: string,
+    sequence: number,
+    assertGrant: (grant: ModGrant) => void,
+    send: (
+      entry: NonNullable<ReturnType<OwnedAgentTasks["viewRead"]>>,
+      assertLive: () => void,
+      signal: AbortSignal
+    ) => Promise<{ isDelivered: boolean; reason?: string }>
+  ) {
+    const entry = this.viewRead(parent, workspace, id, assertGrant)
+    const check = () => {
+      if (this.viewRead(parent, workspace, id, assertGrant) !== entry || !entry.active)
+        throw new ModFunctionError("MODS_AGENT_VIEW_CHANGED")
+      this.assertInteractive(parent, workspace, entry)
+    }
+    check()
+    if (!Number.isSafeInteger(sequence) || sequence <= entry.sequence)
+      throw new ModFunctionError("MODS_AGENT_VIEW_SEND_REPLAY")
+    entry.sequence = sequence
+    return send(entry, check, entry.controller.signal)
   }
   retireViews(parent?: string) {
-    if (parent === undefined) this.views.clear()
-    else this.views.delete(parent)
+    for (const [key, entry] of this.views)
+      if (parent === undefined || parent === key) {
+        entry.controller.abort(new Error("MODS_AGENT_VIEW_CHANGED"))
+        this.views.delete(key)
+      }
   }
 }

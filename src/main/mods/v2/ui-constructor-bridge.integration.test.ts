@@ -375,6 +375,24 @@ describe("actual peer constructor bridge", () => {
     expect(f.writes).toHaveLength(0)
   })
 
+  it("reconnects a text-run Button's derived address to the original author callback", async () => {
+    const f = await fixture(
+      `const lower=await next(e);return {...lower,Button:props=>lower.Button(props)};`,
+      `const ui=$.ui.resolve(e);return ui.Button({children:["Save ",ui.Text({dimColor:true,children:["draft"]})],
+        onPress:()=>$.store.set("Q-derived",1)});`
+    )
+    const result = await f.render()
+    expect(result.value).toMatchObject({ type: "Button", props: { key: "Save draft", label: "Save draft" },
+      children: ["Save ", { type: "Text", children: ["draft"] }], press: { plugin: "Q" } })
+    const press = (result.value as ModObject).press as ModObject
+    await f.q.invoke("0", { surface: "desktop", component: "Pane", requestId: "R1", plugin: "Q",
+      element: "Save draft" }, f.ordinary, { event: "ui.press", plugin: { name: "Q", root: "/actual/Q" },
+      origin: { plugin: "host", tier: "core" }, capabilities: ["store.set"],
+      callback: { handle: press.handle as number, generation: "Q:1", kind: "onPress" } })
+    expect(f.ordinary).toHaveBeenCalledWith("store.set", ["Q-derived", 1], expect.any(AbortSignal))
+    expect(f.writes).toHaveLength(0)
+  })
+
   it("the installed table preserves the old actual-event Client envelope and owner", async () => {
     const f = await fixture(
       `return await next(e);`,

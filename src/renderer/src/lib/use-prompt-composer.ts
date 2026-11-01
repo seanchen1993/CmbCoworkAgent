@@ -88,6 +88,9 @@ export function usePromptComposer(options: {
     decorations: []
   })
   const [suggestion, setSuggestion] = useState("")
+  const [sourcePaint, setSourcePaint] = useState<{ text: string; decorations: FunctionPromptDecoration[] }>({
+    text: "", decorations: []
+  })
   useEffect(() => {
     const installation = committedGeneration.current
     if (!installation || installation.scope !== generation) return
@@ -122,6 +125,14 @@ export function usePromptComposer(options: {
       | { text: string; cursor: number; start: number; end: number; inputType: string }
       | undefined
     let ready: Promise<void>
+    const paints = new Map<string, { text: string; decorations: FunctionPromptDecoration[] }>()
+    const clearPaints = () => {
+      paints.clear()
+      setSourcePaint({ text: "", decorations: [] })
+    }
+    const publishPaints = (text: string) => setSourcePaint({ text,
+      decorations: [...paints.values()].filter(paint => paint.text === text)
+        .flatMap(paint => paint.decorations) })
     const ownsComposer = () =>
       alive &&
       editor.current === handle &&
@@ -239,6 +250,7 @@ export function usePromptComposer(options: {
       controller = undefined
       validated = undefined
       setPaint({ text: "", decorations: [] })
+      clearPaints()
       // Old test/client builds have no edit endpoint. Current preload always exposes it.
       if (!window.api.mods.promptEditSupport) return
       let required: boolean
@@ -293,6 +305,7 @@ export function usePromptComposer(options: {
       generation: installation,
       changed() {
         validated = undefined
+        clearPaints()
         handle.clearSuggestion()
         observedRevision = current.current.read().revision
         if (submissionSnapshot) {
@@ -362,6 +375,7 @@ export function usePromptComposer(options: {
       },
       reset() {
         validated = undefined
+        clearPaints()
         handle.clearSuggestion()
         const draft = current.current.read(),
           node = textarea.current
@@ -586,6 +600,11 @@ export function usePromptComposer(options: {
     node?.addEventListener("blur", onPointer)
     const stop = window.api.mods.onPromptRequest(async (request) => {
       if (request.threadId !== threadId || request.owner !== owner) return
+      if (request.kind === "clear_paint") {
+        if (request.paintSource) paints.delete(request.paintSource)
+        publishPaints(current.current.read().text)
+        return
+      }
       const generation = queryGeneration
       if (request.kind !== "read") {
         const authorized = await window.api.mods
@@ -612,6 +631,20 @@ export function usePromptComposer(options: {
       let status = state.status,
         value = state.value
       let isShown: boolean | undefined
+      let isPainted: boolean | undefined
+      if (request.kind === "paint") {
+        isPainted = false
+        if (status === "ok" && !composing && request.paintSource &&
+          request.expectedRevision === state.value.revision &&
+          (!request.decorations?.length || request.text === state.value.text)) {
+          paints.delete(request.paintSource)
+          if (request.decorations?.length) paints.set(request.paintSource, {
+            text: state.value.text, decorations: request.decorations
+          })
+          publishPaints(state.value.text)
+          isPainted = true
+        } else if (status === "ok") status = "conflict"
+      }
       if (request.kind === "suggest") {
         isShown = false
         const edit = editSnapshot()
@@ -677,7 +710,8 @@ export function usePromptComposer(options: {
           owner,
           status,
           ...visible,
-          ...(isShown === undefined ? {} : { isShown })
+          ...(isShown === undefined ? {} : { isShown }),
+          ...(isPainted === undefined ? {} : { isPainted })
         })
         .catch(() => undefined)
     })
@@ -741,7 +775,8 @@ export function usePromptComposer(options: {
   }, [options.working])
   return {
     isReady,
-    decorations: enabled ? paint.decorations : [],
+    decorations: enabled ? [...paint.decorations,
+      ...(sourcePaint.text === options.read().text ? sourcePaint.decorations : [])] : [],
     suggestion: enabled && !options.working ? suggestion : "",
     acceptSuggestion: () => editor.current?.acceptSuggestion() ?? false,
     changed: () => editor.current?.changed(),

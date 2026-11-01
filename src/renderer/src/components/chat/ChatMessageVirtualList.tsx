@@ -20,6 +20,7 @@ import { HookLogChip } from "./HookLogViews"
 import { MessageBubble } from "./MessageBubble"
 import { FunctionTurnNotices } from "./FunctionTurnNotices"
 import { FunctionPlacedRows } from "./FunctionPlaced"
+import { useFunctionPlacedReveal } from "@/lib/use-function-placed-reveal"
 import { placeFunctionRows, type FunctionPlacedEntry } from "../../../../shared/mods/v2/placed"
 import type { FunctionTurnNotice } from "../../../../shared/mods/v2/turn"
 import { placeFunctionTurnNotices } from "../../../../shared/mods/v2/turn-notice-placement"
@@ -450,6 +451,9 @@ export const ChatMessageVirtualList = React.memo(function ChatMessageVirtualList
     return claimVirtualizedChatScrollAnchor(customScrollParent)
   }, [customScrollParent, shouldVirtualize])
   const presentationRoot = useRef<HTMLDivElement>(null)
+  useFunctionPlacedReveal({ threadId, rows: functionPlacedRows ?? [], placements: placedRows,
+    visibleIndexes: visibleMessageIndexes, firstItemIndex: virtualWindow.firstItemIndex,
+    root: presentationRoot, viewport: customScrollParent, virtuoso: virtuosoRef })
   useEffect(() => {
     const root = presentationRoot.current
     if (!shouldVirtualize || !root) return

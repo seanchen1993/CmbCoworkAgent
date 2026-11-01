@@ -58,10 +58,13 @@ export async function verifyDesktopPerformance(input: {
     await pause(smoke ? 1000 : 300000)
     const after = await app.evaluate(({ app }) => app.getAppMetrics())
     const elapsedMs = performance.now() - begin
+    const identitiesObserved = [...before, ...after].every(
+      (process) => typeof process.creationTime === "number" && Number.isFinite(process.creationTime)
+    )
     idle.push({
       enabled,
       elapsedMs,
-      cpuPoints: desktopCpuPoints(before, after, elapsedMs),
+      cpuPoints: identitiesObserved ? desktopCpuPoints(before, after, elapsedMs) : null,
       before,
       after
     })

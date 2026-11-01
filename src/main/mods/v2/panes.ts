@@ -328,6 +328,8 @@ export class FunctionPanes {
       closeOnEscape: input.closeOnEscape === true,
       holdToasts: input.holdToasts === true,
       rows: typeof input.rows === "number" ? Math.min(50, input.rows) : 12,
+      ...(typeof input.columns === "number" ? { columns: input.columns } : {}),
+      ...(typeof input.backgroundColor === "string" ? { backgroundColor: input.backgroundColor } : {}),
       dirty: true,
       faultEpoch: {},
       focused: prior?.focused ?? false,
@@ -539,7 +541,8 @@ export class FunctionPanes {
             const input: ModObject = {
               surface: "desktop", component: site?.component ?? "Pane", requestId: pane.id,
               props: site?.props ?? {
-                title: pane.title, isFocused: pane.focused, placement: "inline", bodyColumns: 80
+                title: pane.title, isFocused: pane.focused, placement: "inline",
+                ...(pane.bodyColumns !== undefined ? { bodyColumns: pane.bodyColumns } : {})
               }
             }
             candidate.drawing = new FunctionNativeDrawing(input, () => assertCurrent(candidate),
@@ -574,6 +577,9 @@ export class FunctionPanes {
             key: pane.key, id: pane.id, plugin: pane.plugin, title: pane.title, generation, tree,
             closeOnEscape: pane.closeOnEscape, ...(pane.holdToasts ? { holdToasts: true } : {}),
             rows: pane.rows,
+            ...(pane.columns !== undefined ? { columns: pane.columns } : {}),
+            ...(pane.backgroundColor !== undefined ? { backgroundColor: pane.backgroundColor } : {}),
+            ...(pane.bodyColumns !== undefined ? { bodyColumns: pane.bodyColumns } : {}),
             ...(pane.openRequestId ? { openRequestId: pane.openRequestId } : {}),
             ...(pane.focusRequest ? { focusRequest: pane.focusRequest } : {}),
             ...(pane.scrollFollowToken ? { scrollFollowToken: pane.scrollFollowToken } : {}),
@@ -780,16 +786,35 @@ export class FunctionPanes {
       !/^[a-f0-9-]{36}$/.test(action.generation) ||
       typeof action.plugin !== "string" ||
       action.plugin.length > 100 ||
-      !(action.kind === "focus" || action.kind === "scroll"
+      !(action.kind === "focus" || action.kind === "scroll" || action.kind === "measure"
         ? action.handle === undefined || action.handle === 0
         : Number.isSafeInteger(action.handle) && action.handle >= 0) ||
-      !["press", "change", "submit", "select", "close", "focus", "scroll"].includes(action.kind) ||
-      (action.kind === "focus" || action.kind === "scroll"
+      !["press", "change", "submit", "select", "close", "focus", "scroll", "measure"].includes(action.kind) ||
+      (action.kind === "focus" || action.kind === "scroll" || action.kind === "measure"
         ? !isModObject(action.value)
         : action.value !== undefined &&
           (typeof action.value !== "string" || action.value.length > 10000))
     )
       return Promise.reject(new ModFunctionError("MODS_UI_ACTION_INVALID"))
+    if (action.kind === "measure") {
+      validateFunctionUiActionLink(action, false)
+      const pane = this.panes.get(action.pane), value = action.value
+      if (!pane || pane.generation !== action.generation || pane.actionsInvalidated ||
+          pane.plugin !== action.plugin || action.handle !== 0 || !isModObject(value) ||
+          Object.keys(value).some(key => !["bodyColumns", "openRequestId"].includes(key)) ||
+          value.openRequestId !== pane.openRequestId ||
+          !Number.isSafeInteger(value.bodyColumns) || (value.bodyColumns as number) < 1 ||
+          (value.bodyColumns as number) > 10000)
+        return Promise.reject(new ModFunctionError("MODS_UI_STALE_ACTION"))
+      if (pane.bodyColumns !== value.bodyColumns) {
+        pane.bodyColumns = value.bodyColumns as number
+        pane.stateEpoch = {}
+        pane.dirty = true
+        this.paneDataChanged(16)
+      }
+      // Geometry is native observation, never a user action or a guest Hook.
+      return Promise.resolve()
+    }
     const input = createHash("sha256").update(encodeModJson(action)).digest("hex")
     const prior = this.intents.get(action.intentId)
     if (prior)

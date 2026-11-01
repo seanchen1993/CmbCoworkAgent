@@ -145,19 +145,18 @@ describe("explicit native Ask structure", () => {
     expect(() => validateFunctionAskTree({
       type: "Box", props: { overflow: "hidden" }, children: [native]
     })).toThrow("MODS_UI_ASK_TREE_INVALID")
-    for (const props of [
-      { display: "none" },
-      { position: "absolute" },
-      {
-        hover: "hidden"
-      }
-    ])
+    for (const props of [{ display: "none" }, { position: "absolute" }])
       expect(() =>
         validateFunctionAskTree({
           type: "Box",
           props,
           children: [native]
         })
-      ).toThrow("MODS_UI_TREE_INVALID")
+      ).toThrow("MODS_UI_ASK_TREE_INVALID")
+    expect(() => validateFunctionAskTree({ type: "Box", props: { hover: "hidden" }, children: [native] }))
+      .toThrow("MODS_UI_TREE_INVALID")
+    expect(() => validateFunctionAskTree(box({ type: "Box",
+      props: { position: "absolute", top: 0, left: 0, width: "100%", height: 100 },
+      children: [text("cannot cover controls")] }, native))).toThrow("MODS_UI_ASK_TREE_INVALID")
   })
 })

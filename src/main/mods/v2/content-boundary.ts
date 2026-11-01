@@ -8,6 +8,7 @@ export function isFunctionContentBoundary(method: string): boolean {
       "agent.spawn",
       "agent.status", "agent.messages", "agent.stop", "ui.view",
       "ui.place",
+      "ui.notify", "env.set", "telemetry.log", "telemetry.mark",
       "session.append",
       "session.send",
       "session.compact",

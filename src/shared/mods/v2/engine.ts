@@ -146,6 +146,9 @@ export function validateFunctionAskTree(value: unknown): asserts value is Functi
     if (seenEngine) fail()
     if (typeof node === "string") return
     if (node.type === "Markdown") return
+    // A decorative sibling must not cover the actual answer/authorization controls.
+    // Dimension-limited descriptions may precede them, but all Ask content stays in flow.
+    if (node.type === "Box" && node.props.position === "absolute") fail()
     if (node.type === "engine") {
       if (
         ancestors.some(

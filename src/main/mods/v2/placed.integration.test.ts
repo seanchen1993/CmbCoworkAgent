@@ -25,7 +25,7 @@ function button(tree: FunctionUiElement): FunctionUiNode | undefined {
   }
   return undefined
 }
-async function fixture(extra = "", attached = true, name = "cards", view = false) {
+async function fixture(extra = "", attached = true, name = "cards", view = false, reveal = false) {
   let live = true,
     anchor: FunctionPlacedAnchor | undefined = {
       kind: "after-message",
@@ -34,14 +34,14 @@ async function fixture(extra = "", attached = true, name = "cards", view = false
     }
   const state = new Map()
   const program = `var __cmbFunctionMod={register(on){
-    let n=0;
+    let n=0,placed;
     on("session.start",async($,e,next)=>{await $.command.register({name:"place-card",description:"Card"});return next(e)});
-    on("command.run",{command:"place-card"},async($,e)=>{try{return {text:JSON.stringify(await $.ui.place({id:e.args||"card"}))}}catch(error){return {text:JSON.stringify({error:error.code||error.message})}}});
+    on("command.run",{command:"place-card"},async($,e)=>{try{placed=await $.ui.place({id:e.args||"card"});return {text:JSON.stringify(placed)}}catch(error){return {text:JSON.stringify({error:error.code||error.message})}}});
     ${extra}
     on("ui.render",{component:"Placed"},($,e,next)=>{
       if(e.props.plugin!==$.plugin.name)return next(e);
       const {Box,Text,Button}=$.ui.resolve(e);
-      return Box({children:[Text({children:e.props.id+":"+n}),Button({key:"add",label:"Add",onPress:async()=>{${view ? 'await $.ui.view({agentId:"child"});' : ""}n++;await $.store.set("count",n);$.ui.invalidate("ui.render")}})]})
+      return Box({children:[Text({children:e.props.id+":"+n}),Button({key:"add",label:"Add",onPress:async()=>{${view ? 'await $.ui.view({agentId:"child"});' : ""}${reveal ? 'await $.ui.scroll({to:{requestId:placed.requestId},block:"center"});' : ""}n++;await $.store.set("count",n);$.ui.invalidate("ui.render")}})]})
     });
   }}`
   const guest = await FunctionGuestRuntime.create(program)
@@ -141,6 +141,41 @@ it("returns an honest pending/no-conversation result and rejects bad ids and cap
   f.anchor({ kind: "start" })
   for (let i = 1; i < 16; i++) await f.place("row" + i)
   expect(await f.place("over-limit")).toEqual({ isPlaced: false, reason: "placed-row-limit" })
+})
+it("reveals only the exact owned row after a live mounted drawing acknowledgement", async () => {
+  const f = await fixture(), placed = await f.place()
+  const pending = f.session.placed.reveal(f.plugin, placed.requestId, "center",
+    new AbortController().signal, () => {})
+  const row = f.session.placed.list()[0]
+  expect(row.reveal).toMatchObject({ block: "center" })
+  const lease = randomUUID(), drawing = await f.session.placed.read(row.requestId, lease)
+  expect(() => f.session.placed.revealAck({ requestId: row.requestId,
+    receipt: "old", allowed: true, lease, generation: drawing.generation })).toThrow("STALE")
+  f.session.placed.revealAck({ requestId: row.requestId, receipt: row.reveal!.id,
+    allowed: true, lease, generation: drawing.generation })
+  expect(await pending).toEqual({})
+  expect(f.session.placed.list()[0].reveal).toBeUndefined()
+  const missing = f.session.placed.reveal(f.plugin, row.requestId, "nearest",
+    new AbortController().signal, () => {})
+  const receipt = f.session.placed.list()[0].reveal!.id
+  f.session.placed.revealAck({ requestId: row.requestId, receipt, allowed: false })
+  expect(await missing).toMatchObject({ deny: expect.any(String) })
+})
+it("routes the real Guest ui.scroll to its owned Placed row under one native user action", async () => {
+  const f = await fixture('on("ui.scroll",async($,e,next)=>{await $.store.set("wrong-scroll-event",true);return next(e)})',
+    true, "scroll-cards", false, true)
+  const row = await f.place(), lease = randomUUID()
+  const drawing = await f.session.placed.read(row.requestId, lease), control = button(drawing.tree)!
+  const action = f.session.placed.act(row.requestId, lease, { pane: drawing.key,
+    generation: drawing.generation, intentId: randomUUID(), plugin: control.press!.plugin,
+    handle: control.press!.handle, kind: "press" })
+  await expect.poll(() => f.session.placed.list()[0].reveal?.id).toBeTruthy()
+  const receipt = f.session.placed.list()[0].reveal!.id
+  f.session.placed.revealAck({ requestId: row.requestId, receipt, allowed: true,
+    lease, generation: drawing.generation })
+  await action
+  expect(f.state.get("count")).toBe(1)
+  expect(f.state.get("wrong-scroll-event")).toBeUndefined()
 })
 it("revokes old view leases and old close cannot invalidate a replacement lease", async () => {
   const f = await fixture(),

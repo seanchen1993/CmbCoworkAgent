@@ -26,6 +26,7 @@ const bounded = new Set([
   "prompt.read",
   "prompt.fill",
   "prompt.edit",
+  "prompt.paint",
   "prompt.suggest",
   "prompt.compose",
   "prompt.section",
@@ -42,6 +43,10 @@ const bounded = new Set([
   "process.spawn",
   "settings.read",
   "env.get",
+  "env.set",
+  "ui.notify",
+  "telemetry.log",
+  "telemetry.mark",
   "http.fetch",
   "clock.after",
   "clock.every",
@@ -156,8 +161,7 @@ const metadata = new Set([
 ])
 
 const unavailable = new Set([
-  "telemetry.log",
-  "telemetry.mark",
+  "prompt.media",
   "attribution.text",
   "session.attach",
   "session.detach",
@@ -165,7 +169,6 @@ const unavailable = new Set([
   "audio.play",
   "audio.speak",
   "ui.blit",
-  "env.set",
   "classic.TeammateIdle"
 ])
 
@@ -204,8 +207,16 @@ export function getFunctionEventSupport(
   }
   if (name === "mcp.connect") return {
     availability: "bounded",
-    note: "仅普通聊天中当前 Claw 明确选择且配置摘要一致的宿管 stdio 来源；独立连接句柄，不接收命令、URL或凭证。list/status/disconnect为桌面扩展。HTTP/SSE和没有等价选择证明的项目/子会话尚未开放。旧mcp.call保持原行为。"
+    note: "普通聊天中当前 Claw 明确选择且配置摘要一致的宿管 stdio/Streamable HTTP/SSE 来源；独立句柄，不接收命令、URL或凭证，认证留在宿主。固定协议、同源且不重定向，不自动重放。取消关闭本机连接，无法确认回收时保留unknown；不代表远程任务停止。list/status/disconnect为桌面扩展；无选择证明的项目/子会话不开放。"
   }
+  if (name === "env.set") return { availability: "bounded", note:
+    "静态literal声明、插件/会话隔离的环境覆盖，实际进入本插件之后的process.run/spawn；undefined删除。显式进程env优先，危险宿主变量拒绝。不改Electron全局环境或其他插件/模型工具环境。重载和撤权丢弃。" }
+  if (name === "ui.notify") return { availability: "bounded", note:
+    "默认终端通知契约在desktop返回no-surface。显式surface:desktop是本应用扩展，沿原配置面板的插件桌面通知开关，真实OS show后返回channel:desktop；拒绝/失败/超时有回执，撤权关闭，show不证明用户已看见。" }
+  if (name === "session.identity") return { availability: "bounded", note:
+    "本机普通来源返回deny，禁止公开登录令牌或伪造组织/邮箱/isVerified。尚无对应可信组织托管身份提供者，不能依靠本接口取得账户身份。" }
+  if (["telemetry.log", "telemetry.mark", "telemetry.records"].includes(name)) return { availability: "bounded", note:
+    "log/mark可经过真实Hooks消费；目的地不可改写。当前Core仅保留本插件有界、已保护的本地诊断，records是桌面查询扩展，不上传Anthropic或企业collector。上游遥测传输无等价提供者。" }
   if (["turn.step", "process.spawn"].includes(name)) return {
     availability: "bounded",
     note: "实际输出逐段传递，回答自身时间累计、进程输出逐段重新计时；等待实际下游和SDK不扣自身时间。恢复保留未交付输出，不重复模型或进程；总期限、用户取消和真实清理继续有效。"

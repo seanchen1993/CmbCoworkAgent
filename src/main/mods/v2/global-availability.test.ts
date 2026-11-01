@@ -63,7 +63,8 @@ it("does not expose SDK members explicitly declared unavailable", async () => {
         .map((row) => [row.name, row])
     ).values()
   ]
-  expect(claims.map((row) => row.name)).toContain("env.set")
+  expect(claims.map((row) => row.name)).toContain("audio.play")
+  expect(claims.map((row) => row.name)).not.toContain("env.set")
   const guest = await FunctionGuestRuntime.create(`var __cmbFunctionMod={register(on){
     on("command.run",$=>${JSON.stringify(claims.map((row) => row.name))}.map(name=>{
       const [noun,member]=name.split(".");return [name,typeof $[noun]?.[member]]

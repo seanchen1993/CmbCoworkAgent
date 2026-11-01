@@ -388,7 +388,7 @@ it.each(["legacy-v1", "result-v1"])("requires fresh approval for an unchanged ex
     name: "loader-probe", cmbCompatibility: { modelProtocol }
   }))
   const current = await compileFunctionPlugin(root, { captureSources: true })
-  expect(FUNCTION_HOST_REVISION).toBe("devclaw-mods-v93")
+  expect(FUNCTION_HOST_REVISION).toBe("devclaw-mods-v94")
   for (const hostRevision of [
     "module-resources-v89", "claude-295-tools-v90", "claude-295-tools-v91"
   ]) {

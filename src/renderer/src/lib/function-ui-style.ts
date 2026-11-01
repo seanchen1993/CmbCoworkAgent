@@ -11,7 +11,7 @@ export function functionUiStyle(node: FunctionUiNode, inheritedBackground?: stri
   const p = node.props
   if (node.type === "Text") {
     const truncated =
-      p.wrap === "truncate-start" || p.wrap === "truncate-end" || p.wrap === "truncate"
+      p.wrap !== undefined && p.wrap !== "wrap"
     // Explicit backgrounds form an author-controlled color pair, including inverse.
     const ansiMode =
       p.backgroundColor !== undefined || inheritedBackground !== undefined ? "literal" : "adaptive"
@@ -49,8 +49,8 @@ export function functionUiStyle(node: FunctionUiNode, inheritedBackground?: stri
       display: truncated ? "block" : undefined,
       minWidth: truncated ? 0 : undefined,
       maxWidth: truncated ? "100%" : undefined,
-      direction: p.wrap === "truncate-start" ? "rtl" : undefined,
-      textAlign: p.wrap === "truncate-start" ? "left" : undefined,
+      direction: p.dir === "ltr" || p.dir === "rtl" ? p.dir : undefined,
+      unicodeBidi: "plaintext",
       overflowWrap: "anywhere"
     }
   }
@@ -67,7 +67,14 @@ export function functionUiStyle(node: FunctionUiNode, inheritedBackground?: stri
         ? (p[key] as string)
         : undefined
   return {
-    display: "flex",
+    boxSizing: "border-box",
+    maxWidth: "100%",
+    display: p.display === "none" ? "none" : "flex",
+    position: p.position === "absolute" ? "absolute" : "relative",
+    top: p.position === "absolute" ? size("top", "lh") : undefined,
+    bottom: p.position === "absolute" ? size("bottom", "lh") : undefined,
+    left: p.position === "absolute" ? size("left", "ch") : undefined,
+    right: p.position === "absolute" ? size("right", "ch") : undefined,
     flexDirection: ["row", "column", "row-reverse", "column-reverse"].includes(
       String(p.flexDirection)
     )
@@ -112,7 +119,9 @@ export function functionUiStyle(node: FunctionUiNode, inheritedBackground?: stri
       ? String(p.justifyContent)
       : undefined,
     border: p.borderStyle ? "1px solid var(--border)" : undefined,
-    borderColor: p.borderStyle ? functionUiColor(p.borderColor) : undefined,
+    borderColor: p.borderStyle
+      ? p.borderDimColor ? `color-mix(in srgb, ${functionUiColor(p.borderColor) ?? "var(--border)"} 65%, transparent)`
+        : functionUiColor(p.borderColor) : undefined,
     borderRadius: p.borderStyle === "round" ? 6 : undefined,
     backgroundColor: functionUiColor(p.backgroundColor, "literal"),
     overflow: p.overflow === "hidden" || p.overflow === "visible" ? p.overflow : undefined,
@@ -121,4 +130,36 @@ export function functionUiStyle(node: FunctionUiNode, inheritedBackground?: stri
     minWidth: size("minWidth", "ch"),
     minHeight: size("minHeight", "lh")
   }
+}
+
+/** Native style-only hover. Cross-site author groups are intentionally not inferred. */
+export function functionUiHoverStyle(node: FunctionUiNode, background?: string): CSSProperties {
+  const hover = node.props.hover
+  if (!hover || typeof hover !== "object" || Array.isArray(hover)) return {}
+  const props = { ...node.props, ...hover }
+  if (node.type !== "Box" && typeof hover.bold === "boolean") delete props.weight
+  const style = functionUiStyle({ ...node, type: node.type === "Button" ? "Text" : node.type, props }, background)
+  const result: CSSProperties = {}
+  if (node.type === "Box") {
+    if (hover.backgroundColor !== undefined) result.backgroundColor = style.backgroundColor
+    if (node.props.borderStyle) {
+      if (hover.borderColor !== undefined || hover.borderDimColor !== undefined)
+        result.borderColor = style.borderColor
+      if (hover.borderStyle !== undefined) result.borderRadius = style.borderRadius ?? 0
+    }
+    if (hover.display === "flex" && node.props.display === "none") result.display = "flex"
+    if (node.props.position === "absolute")
+      for (const key of ["top", "left", "right", "bottom"] as const)
+        if (hover[key] !== undefined) result[key] = style[key]
+  } else {
+    if (hover.color !== undefined || hover.inverse !== undefined) result.color = style.color
+    if (hover.backgroundColor !== undefined || hover.inverse !== undefined)
+      result.backgroundColor = style.backgroundColor
+    if (hover.dimColor !== undefined) result.opacity = hover.dimColor ? 0.65 : 1
+    if (hover.bold !== undefined) result.fontWeight = hover.bold ? "bold" : "normal"
+    if (hover.italic !== undefined) result.fontStyle = hover.italic ? "italic" : "normal"
+    if (hover.underline !== undefined || hover.strikethrough !== undefined)
+      result.textDecoration = style.textDecoration || "none"
+  }
+  return result
 }

@@ -367,7 +367,7 @@ it.each([
   120_000
 )
 
-it("drives real vendor import, compile, install and start-use services through the actual browser cards", async () => {
+it("drives real vendor import, compile, install and start-use through the actual creator parent and cards", async () => {
   const f = await fixture()
   const selected = await vendorSource(f.workspace)
   let sets = f.sourceSets,
@@ -391,7 +391,7 @@ it("drives real vendor import, compile, install and start-use services through t
     drafts: [],
     trials: [],
     sourceSet: sets.status(f.threadId),
-    projectRequest: sessions.trialRequest(f.scope),
+    projectTrial: sessions.trialRequest(f.scope),
     projectDelivery: deliveries.status(f.threadId)
   })
   const h = await sourceSetBrowser(
@@ -428,9 +428,12 @@ it("drives real vendor import, compile, install and start-use services through t
     }
   )
   try {
-    await h.page.getByRole("button", { name: "选择作者源码目录", exact: true }).click()
+    await h.page.getByText("导入开发文件夹（开发者）", { exact: true }).click()
+    await h.page.getByRole("button", { name: "选择插件源码文件夹", exact: true }).click()
     await h.page.getByRole("button", { name: "核对权限并准备模板", exact: true }).click()
     await settlePreparation(1)
+    await h.page.getByText("项目候选已准备", { exact: true }).waitFor()
+    await h.page.getByRole("button", { name: "3 · 保存插件", exact: true }).click()
     await h.page.getByRole("button", { name: "保存插件", exact: true }).waitFor()
     expect(status().projectDelivery!.name).not.toBe(
       JSON.parse(
@@ -451,12 +454,16 @@ it("drives real vendor import, compile, install and start-use services through t
       Object.assign(window, { coldStatus: value })
     }, status())
     await h.page.evaluate("window.fixture.setStatus(window.coldStatus)")
+    await expect.poll(() => h.page.getByText(/已恢复来源记录。未安装项请重新点击/).count()).toBe(1)
+    await h.page.getByRole("button", { name: "3 · 保存插件", exact: true }).click()
     await h.page.getByRole("button", { name: "核对实际交付结果", exact: true }).click()
     await h.page.getByText(/已核实：未发现本次交付的执行结果/).waitFor()
     expect(status().sourceSet?.phase).toBe("needs-review")
     expect(f.installed).not.toHaveBeenCalled()
     await h.page.getByRole("button", { name: "核对权限并准备模板", exact: true }).click()
     await settlePreparation(2)
+    await h.page.getByText("项目候选已准备", { exact: true }).waitFor()
+    await h.page.getByRole("button", { name: "3 · 保存插件", exact: true }).click()
     await expect.poll(() => status().sourceSet?.phase).toBe("ready")
     expect(sessions.list(f.scope)[0].revision).toBe(revision)
     const exported = deliveries.status(f.threadId)!
@@ -476,8 +483,12 @@ it("drives real vendor import, compile, install and start-use services through t
       Object.assign(window, { coldStatus: value })
     }, status())
     await h.page.evaluate("window.fixture.setStatus(window.coldStatus)")
+    await expect.poll(() => h.page.getByText(/已恢复来源记录。未安装项请重新点击/).count()).toBe(1)
+    await h.page.getByRole("button", { name: "3 · 保存插件", exact: true }).click()
     await h.page.getByRole("button", { name: "核对权限并准备模板", exact: true }).click()
     await settlePreparation(3)
+    await h.page.getByText("项目候选已准备", { exact: true }).waitFor()
+    await h.page.getByRole("button", { name: "3 · 保存插件", exact: true }).click()
     await expect.poll(() => status().sourceSet?.phase).toBe("ready")
     expect(f.installed).not.toHaveBeenCalled()
     expect(sessions.list(f.scope)[0].revision).toBe(revision)
@@ -490,6 +501,7 @@ it("drives real vendor import, compile, install and start-use services through t
       Object.assign(window, { coldStatus: value })
     }, status())
     await h.page.evaluate("window.fixture.setStatus(window.coldStatus)")
+    await h.page.getByRole("button", { name: "3 · 保存插件", exact: true }).click()
     await h.page.getByRole("button", { name: "开始使用", exact: true }).click()
     await expect.poll(() => startUseWork.length).toBeGreaterThan(0)
     // Await actual native work and its browser reply, including a subsequent enable request.

@@ -1,6 +1,13 @@
 {
   "schemaVersion": 1,
   "status": "implementation-in-progress-not-full-parity",
+  "currentDesktopReference": {
+    "version": "2.1.316",
+    "hostRevision": "devclaw-mods-v94",
+    "report": "docs/mods-nonmedia-and-phase3-verification-2026-11-01.md",
+    "inventory": "docs/mods-nonmedia-sdk-inventory-2026-11-01.json",
+    "scope": "Current bounded desktop adapters. Historical version references below keep their original scope; method presence is not provider equivalence."
+  },
   "evidenceScope": "Executable source tests describe the checked compatibility boundary. Dated documentation records its original implementation scope and is not proof of a current regression run. Local output reports are transient and are not required compatibility evidence.",
   "applicationExtensions": [
     {
@@ -2491,7 +2498,7 @@
         "D06"
       ],
       "availability": "bounded",
-      "note": "V6 hookable protected read requires literal source declaration plus safe host allowlist. No arbitrary secrets, dynamic env names or env.set mutation.",
+      "note": "Literal source declaration and protected host read allowlist; own declared session-overlay values are readable after env.set. No arbitrary inherited secrets or dynamic names.",
       "implementation": [
         "src/main/mods/v2/session.ts",
         "src/main/mods/v2/basic-sdk.ts",
@@ -2504,8 +2511,8 @@
     },
     {
       "name": "env.set",
-      "target": "reviewed-unavailable-desktop-contract",
-      "implementationStatus": "unsupported",
+      "target": "bounded-session-overlay",
+      "implementationStatus": "adapted",
       "batch": "B3",
       "acceptance": [
         "A03",
@@ -2514,8 +2521,8 @@
       "differences": [
         "D06"
       ],
-      "availability": "unavailable",
-      "note": "No built-in production Function SDK capability or operation dispatch for env.set. The catalog name is metadata; plugin-defined engine nouns are not this host adapter. Native tools or Client.every are separate explicit interfaces, not compatibility evidence for this operation. Availability tests verify absent built-in SDK methods; no production hook-trigger conformance is claimed.",
+      "availability": "bounded",
+      "note": "Real hookable literal-name write/unset in the caller source/session overlay, consumed by subsequent process.run/spawn. Never mutates host process.env or other plugins. Protected injection/credential names are denied; reload discards the overlay.",
       "implementation": [
         "src/main/mods/v2/session.ts",
         "src/main/mods/v2/basic-sdk.ts",
@@ -2523,7 +2530,8 @@
         "src/shared/mods/v2/event-catalog.ts"
       ],
       "evidence": [
-        "src/main/mods/v2/global-availability.test.ts"
+        "src/main/mods/v2/global-availability.test.ts",
+        "src/main/mods/v2/nonmedia-session.test.ts"
       ]
     },
     {
@@ -5157,12 +5165,12 @@
             "src/main/mods/v2/session.ts",
             "src/main/mods/v2/guest-bootstrap.ts"
           ],
-          "note": "V6 hookable protected read requires literal source declaration plus safe host allowlist. No arbitrary secrets, dynamic env names or env.set mutation."
+          "note": "Literal declaration plus safe inherited-read allowlist; own source/session overlay values are readable after env.set. No inherited secrets or dynamic names."
         },
         {
           "name": "env.set",
-          "target": "reviewed-unavailable-sdk",
-          "implementationStatus": "partial",
+          "target": "bounded-session-overlay",
+          "implementationStatus": "adapted",
           "batch": "B3",
           "acceptance": [
             "A03",
@@ -5171,12 +5179,12 @@
           "differences": [
             "D06"
           ],
-          "availability": "unavailable",
+          "availability": "bounded",
           "implementation": [
             "src/main/mods/v2/session.ts",
             "src/main/mods/v2/guest-bootstrap.ts"
           ],
-          "note": "No host settings/environment SDK is exposed. The guest cannot inspect model credentials or mutate process.env through these names."
+          "note": "Literal declared name; source/session-isolated set/unset enters later owned process.run/spawn, explicit process env wins. Protected names denied. Does not mutate Electron or global/model-tool environments."
         }
       ]
     }

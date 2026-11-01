@@ -67,8 +67,9 @@ it("keeps overlapping event and SDK names explicit and unsupported declarations 
       content: "", events: [], sdkMethods: [], complete: true, grantsAuthority: false })
     expect(JSON.stringify(missing)).not.toContain("pluginId")
   }
-  const runtimeOnly = developmentCatalogPage("sdk", 0, "fs.ancestors")
-  expect(runtimeOnly).toMatchObject({ matched: true, declarationAvailable: false, content: "" })
+  const ancestors = developmentCatalogPage("sdk", 0, "fs.ancestors")
+  expect(ancestors).toMatchObject({ matched: true, declarationAvailable: true })
+  expect("content" in ancestors && ancestors.content).toContain("names:string[]")
 })
 
 it("retains unfiltered events and SDK pages and rejects ambiguous query sections/cursors", () => {

@@ -1,4 +1,5 @@
 import { currentNativeConfigurationScope } from "./native-configuration-scope"
+import { FunctionDesktopNotifications } from "./desktop-notify"
 import { OwnedMcpConnections } from "../../mcp/owned-connections"
 import { resolveSelectedMcpSource } from "../../mcp/capability-service"
 import { OWNED_MCP_SERVER_PREFIX } from "../../../shared/mods/v2/mcp-connections"
@@ -554,6 +555,14 @@ export type PreparedClawAction =
     }
 
 export class FunctionModsManager {
+  private readonly desktopNotifiers = new Map<string, FunctionDesktopNotifications>()
+
+  private notificationPreference(workspace: string): { enabled: boolean; revision: number } {
+    const value = this.store.functionState.get(JSON.stringify(["host-notification", workspace]), "enabled")
+    return isModObject(value) && typeof value.enabled === "boolean" &&
+      Number.isSafeInteger(value.revision) ?
+      { enabled: value.enabled, revision: Number(value.revision) } : { enabled: true, revision: 0 }
+  }
   private readonly userConfigValues: FunctionUserConfigValues
   private readonly configurationSourceCache = new FunctionConfigurationSourceCache(16, (path) =>
     isConfigurationOnlyPackage(path)
@@ -1492,6 +1501,21 @@ export class FunctionModsManager {
 
   private configurationRows(workspace: string, snapshots: Map<string, Snapshot>): FunctionConfigRows {
     const rows = new FunctionConfigRows()
+    rows.add({
+      key: "mods.desktopNotifications", storageKey: JSON.stringify(["host-notification", workspace]),
+      label: "插件桌面通知", description: "允许已批准的插件发送系统通知；关闭会立即收回现有通知。系统勿扰仍由操作系统控制。",
+      kind: "boolean", provider: { plugin: "engine", tier: "core" }, locked: () => false,
+      allow: origin => origin.kind !== "plugin", validate: value => typeof value === "boolean",
+      cell: {
+        read: () => { const p = this.notificationPreference(workspace); return { value: p.enabled, revision: String(p.revision) } },
+        write: value => {
+          const p = this.notificationPreference(workspace)
+          this.store.functionState.set(JSON.stringify(["host-notification", workspace]), "enabled",
+            { enabled: value, revision: p.revision + 1 })
+          if (!value) this.desktopNotifiers.get(workspace)?.close()
+        }
+      }
+    })
     for (const handle of this.host.configRows?.() ?? []) rows.add(handle)
     for (const [plugin, snapshot] of snapshots) {
       const schema = snapshot.compiled.userConfig
@@ -4664,6 +4688,7 @@ export class FunctionModsManager {
             localDevelopment.assertCapabilities(
               platformRegistrationCapabilities(guest.registrations))
             const plugin: FunctionPlugin = { name: compiled.name, root: compiled.root, tier: "user",
+              environment: compiled.environment,
               modelProtocol: compiled.modelProtocol,
               guest, capabilities: localDevelopment.revision.capabilities.filter(value => !value.startsWith("event:")) }
             current.developmentPlugins.set(plugin, localDevelopment)
@@ -4904,6 +4929,20 @@ export class FunctionModsManager {
                 return result
               }
             },
+            preparePromptPaint: async (plugin, signal) => {
+              assertLive(plugin)
+              if (!this.host.prompt) throw new ModFunctionError("MODS_PROMPT_UNAVAILABLE")
+              const guard = this.host.capturePromptGuard?.(workspace, threadId)
+              const scope = promptScope(plugin, signal)
+              const paint = await this.host.prompt.preparePaint({ ...scope,
+                assertLive: () => { scope.assertLive(); guard?.() } })
+              return async (input, active) => {
+                assertLive(plugin); guard?.(); active.throwIfAborted()
+                const result = await paint(input, active)
+                assertLive(plugin); guard?.(); active.throwIfAborted()
+                return result
+              }
+            },
             preparePromptFill: async (plugin, signal) => {
               assertLive(plugin)
               if (!this.host.prompt) throw new ModFunctionError("MODS_PROMPT_UNAVAILABLE")
@@ -4938,6 +4977,29 @@ export class FunctionModsManager {
                   return value
                 }
               : undefined,
+            notifyDesktop: async (plugin, input, signal, lifetime) => {
+              assertLive(plugin)
+              assertContent(plugin)
+              return withNativeGrant(plugin, "ui.notify", async () => {
+                let notifier = this.desktopNotifiers.get(workspace)
+                if (!notifier) {
+                  const { Notification } = await import("electron")
+                  assertLive(plugin)
+                  signal.throwIfAborted()
+                  notifier = this.desktopNotifiers.get(workspace)
+                  if (!notifier) {
+                    notifier = new FunctionDesktopNotifications({
+                      isSupported: () => Notification.isSupported(),
+                      create: (title, text) => new Notification({ title, body: text })
+                    })
+                    this.desktopNotifiers.set(workspace, notifier)
+                  }
+                }
+                return notifier.show(plugin.name, input, { signal, lifetime,
+                  enabled: () => this.notificationPreference(workspace).enabled,
+                  assertLive: () => { assertLive(plugin); assertContent(plugin) } })
+              })
+            },
             workspace,
             threadId,
             cwd: () => this.host.fileScope?.(workspace, threadId).workspace ?? workspace,
@@ -7113,6 +7175,12 @@ export class FunctionModsManager {
   placedRelease(workspace: string, threadId: string, requestId: string, lease: string) {
     this.platformResident(workspace, threadId)?.placed.release(requestId, lease)
   }
+  placedRevealAck(workspace: string, threadId: string,
+    input: import("../../../shared/mods/v2/placed").FunctionPlacedRevealAck) {
+    const session = this.platformResident(workspace, threadId)
+    if (!session) throw new ModFunctionError("MODS_UI_PLACED_STALE")
+    session.placed.revealAck(input)
+  }
   clearPlacedRows(workspace: string, threadId: string): void {
     this.platformResident(workspace, threadId)?.placed.clear()
   }
@@ -8123,6 +8191,8 @@ export class FunctionModsManager {
     for (const quota of this.uiResolveQuotas.values()) quota.close()
     this.uiResolveQuotas.clear()
     this.closed = true
+    for (const notifier of this.desktopNotifiers.values()) notifier.close()
+    this.desktopNotifiers.clear()
     this.displayProjection.close()
     this.hostOnlySites.close()
     this.siteOwners.clear()

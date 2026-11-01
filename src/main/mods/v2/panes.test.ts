@@ -121,6 +121,39 @@ function action(
 }
 
 describe("desktop function panes through the production session", () => {
+  it("keeps styled button closures and uses only the current native Pane measurement", async () => {
+    const { session, state } = await fixture(`
+      on("ui.render",{component:"Pane",requestId:"rich"},async($,e)=>{
+        const {Box,Text,Button,Input}=await $.ui.resolve(e);
+        return Box({key:"scope",children:[
+          Text({children:[String(e.props.bodyColumns??"unmeasured")]}),
+          Button({key:"styled",variant:"primary",role:"dismiss",children:[
+            Text({dimColor:true,children:["Styled"]})," button"],
+            onPress:async()=>{await $.store.set("styled-click",true)}}),
+          Input({key:"notes",rows:3,onSubmit:async value=>{await $.store.set("submitted",value)}})
+        ]});
+      });
+      on("ui.scroll",()=>{throw Error("MEASUREMENT_MUST_NOT_EMIT_SCROLL")});
+    `)
+    session.panes.open("function-commands", { id: "rich", columns: 44, backgroundColor: "transparent" })
+    let pane = (await session.panes.snapshot()).find(row => row.id === "rich")!
+    expect(pane).toMatchObject({ columns: 44, backgroundColor: "transparent" })
+    expect(pane.bodyColumns).toBeUndefined()
+    expect((pane.tree as FunctionUiNode).children?.[0]).toMatchObject({ children: ["unmeasured"] })
+    await session.panes.act({ pane: pane.key, generation: pane.generation, plugin: pane.plugin,
+      handle: 0, intentId: randomUUID(), kind: "measure",
+      value: { openRequestId: pane.openRequestId!, bodyColumns: 39 } })
+    pane = (await session.panes.snapshot()).find(row => row.id === "rich")!
+    expect(pane.bodyColumns).toBe(39)
+    expect((pane.tree as FunctionUiNode).children?.[0]).toMatchObject({ children: ["39"] })
+    await expect(session.panes.act({ pane: pane.key, generation: pane.generation, plugin: pane.plugin,
+      handle: 0, intentId: randomUUID(), kind: "measure",
+      value: { openRequestId: "old-open", bodyColumns: 10 } })).rejects.toThrow("STALE")
+    await session.panes.act(action(pane, "styled"))
+    expect(state.get("styled-click")).toBe(true)
+    await session.panes.act(action(pane, "notes", "submit", "line1\nline2"))
+    expect(state.get("submitted")).toBe("line1\nline2")
+  })
   it("publishes pane collection changes without revoking unrelated native drawings", async () => {
     const changed = vi.fn()
     const { session, state } = await fixture("", undefined, changed)

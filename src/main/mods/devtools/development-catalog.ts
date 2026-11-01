@@ -16,16 +16,21 @@ import { PROJECT_DEPENDENCY_AUTHORING } from "./development-dependency-catalog"
 import ts from "typescript"
 
 /** Extract exact fragments from the same declarations used by the isolated compiler. */
-function targetedDeclarations(source: string, events: string[], methods: string[]) {
+function targetedDeclarations(source: string, events: string[], methods: string[], exports: string[] = []) {
   const file = ts.createSourceFile("devclaw-mods.d.ts", source, ts.ScriptTarget.Latest, true)
-  const named = new Map<string, ts.InterfaceDeclaration | ts.TypeAliasDeclaration>()
+  const named = new Map<string, ts.InterfaceDeclaration | ts.TypeAliasDeclaration | ts.FunctionDeclaration>()
   const index = (node: ts.Node) => {
-    if (ts.isInterfaceDeclaration(node) || ts.isTypeAliasDeclaration(node))
-      named.set(node.name.text, node)
+    if (ts.isInterfaceDeclaration(node) || ts.isTypeAliasDeclaration(node) ||
+      ts.isFunctionDeclaration(node) && node.name)
+      named.set(node.name!.text, node)
     ts.forEachChild(node, index)
   }
   index(file)
   const snippets: ts.Node[] = []
+  for (const name of exports) {
+    const declaration = named.get(name)
+    if (declaration && ts.isFunctionDeclaration(declaration)) snippets.push(declaration)
+  }
   const on = named.get("On")
   if (on && ts.isInterfaceDeclaration(on)) {
     for (const member of on.members) {
@@ -164,6 +169,7 @@ export function developmentCatalog() {
       ...getFunctionEventSupport(name)
     })),
     sdkMethods: [...FUNCTION_SDK_METHODS],
+    runtimeExports: ["atom", "derive", "memberOf", "read", "update"],
     trialCapabilities: [...DEVELOPMENT_CAPABILITIES],
     authorizedTrialCapabilities: DEVELOPMENT_REAL_CAPABILITIES.filter(
       (value) => !value.startsWith("event:")
@@ -184,7 +190,7 @@ export function developmentCatalog() {
       "创造者模式按自然语言需求选择复用、组合或编写；不要让用户先配置添加功能、常用搭配或执行步骤。连续修改先 list/read 更新当前开发组件，保留已有功能。",
       "SDK路径确定、事件literal。包内唯一具名/const函数可接SDK/on，形参只读、闭包不逃逸。原生ui.render根保留词法回调，helper不继承。逐方法检查；动态/外部调用、方法传递、SDK返回/存储未验证。32轮/256边，不增授权。",
       "组合用 mod_composition list 搜索摘要，details 按需读取配置 schema；stage 同轮累积并深合并配置，可引用真实模型、技能、MCP 和已保存步骤。save/apply_saved 保存套用命名组合，undo/cancel 撤销选择或取消排队。提交后结束本轮，再核对真实回执。",
-      "用户参数在灵件清单 userConfig 声明，由原生参数表单绑定；缺必填项不批准执行。升级重命名或删除字段可在同份声明加入 userConfigSchema:{version:1,migrations:[{fromVersion:0,toVersion:1,changes:[{kind:'rename',from:'oldLabel',to:'label'}]}]}，并声明 cmbCompatibility:{modelProtocol:'result-v1',userConfigMigrations:'v1'}；后续版本逐一连续迁移，删除用 {kind:'remove',key:'字段名'}，不运行迁移脚本。迁移须原生确认，失败保留旧配置；导出不携带本机保存值、凭据或授权。",
+      "用户参数用userConfig及原生表单，缺必填项不能执行。升级可用userConfigSchema连续rename/remove迁移，须原生确认、失败保旧值；精确声明查询config.set。导出不含本机保存值、凭据或授权。",
       "快捷指令用灵件专属名称。MODS_COMMAND_CONFLICT须改本草稿指令名和说明再试用，不得关闭其他插件绕过。",
       "先list，按最新trials.phase/error回答；needs-approval仅快照，failed是加载失败。先读原因、修复再申请，勿循环轮询/重试。",
       "优先 submit；失败按诊断修复，有效即结束本轮等确认。当前聊天恢复用 resume_trial，跨聊天复用用 request_reuse；安装仍须原生确认。",
@@ -194,7 +200,7 @@ export function developmentCatalog() {
       "文件/网络/模型/进程/业务能力可直接申请真实试用，无需先安装。确认绑定当前源码和目标，执行沿原权限；静态检查、隔离预览和批准不是实际结果。",
       "session.start仅登记指令/无副作用界面；文件/网络/模型/长期任务放生效后的用户动作。候选禁止外部效果，失败保留旧可用版。",
       "动作后读取或platform.read/status核实，不凭模型说明标完成。未知结果先读、不重放；新增权限须确认。",
-      "工作流用platform.list发现native.workflow/runs@1.0.0，再read/subscribe/poll/unsubscribe观察原运行器，target仅{kind:'current'}。无提示词/完整日志；截断用inspect页偏移。agentIndex空表示无明确关联，禁按名猜。cancel沿原确认，等待真实清理；请求成功不等于已清理。",
+      "工作流发现native.workflow/runs@1.0.0；read/subscribe/poll观察原运行器，target仅current。截断用inspect偏移；agentIndex空禁猜；cancel沿原确认并等真实清理。",
       "result-v1 tool.call返回{result}，保留next的ref以保原结果；追加说明用context字符串数组，通知await $.ui.toast(text)。",
       "制作轮中断后可在新的制作轮对未修改的草稿重新 request_trial；仍须等待新轮完成，不能报告已经生效。"
     ],
@@ -213,12 +219,12 @@ export function developmentCatalog() {
       "mods/main.ts": DEVELOPMENT_COUNTER_EXAMPLE
     },
     limitations: [
-      "当前构建的桌面子集；事件支持不代表全部作者重载都已声明。",
+      "桌面适配子集；条件与宿主边界见定向查询，非全上游等价。",
       "旧本地试用接受 trialCapabilities；超出该范围且属于 authorizedTrialCapabilities 时，需用户批准精确源码摘要和当前目标后真实验证。其他方法不可用，不得绕过宿主授权。",
       "关闭制作面板不会停止已生效任务；停止试用、撤权、删除和退出应用会清理所属资源。普通定时器退出后不运行，重启不恢复试用授权或自动重放动作。",
       "轮次结束并且真实任务结算后才应用；request_trial 返回排队状态，不是生效证明。",
       "模块局部变量在重新加载后重置；状态需显式使用宿主接口。",
-      "不得从其他会话或全局插件目录直接覆盖源码。"
+      "仅改当前草稿。"
     ]
   }
 }
@@ -240,7 +246,9 @@ export function developmentCatalogPage(
       event.name === (registration ? "platform.action" : exact))
     const methods = section === "events" || registration ? []
       : catalog.sdkMethods.filter((method) => method === exact)
-    const declarations = targetedDeclarations(catalog.types, events.map((event) => event.name), methods)
+    const exports = section === "events" || registration ? [] :
+      catalog.runtimeExports.filter(name => name === exact)
+    const declarations = targetedDeclarations(catalog.types, events.map((event) => event.name), methods, exports)
     const text = [...declarations.signatures, ...declarations.types].join("\n\n")
     if (!Number.isSafeInteger(cursor) || cursor < 0 || cursor > text.length)
       throw Error("DEVELOPMENT_CATALOG_CURSOR")
@@ -250,27 +258,30 @@ export function developmentCatalogPage(
       scope: "static-authoring-contract", grantsAuthority: false,
       ...((exact.startsWith("agent.") || exact === "ui.view") && cursor === 0 ? {
         usageExample: "const task=await $.agent.spawn({prompt:'核对指定任务',description:'核对'}); const status=await $.agent.status({agentId:task.agentId}); const page=await $.agent.messages({agentId:task.agentId,limit:50}); /* nextCursor 只用于同一任务；记录变化时从第一页重新读取。真实按钮回调中 await $.ui.view({agentId:task.agentId})；停止用 $.agent.stop。 */",
-        agentScope: "新增status/messages/stop/view仅普通本地父聊天、本源码摘要创建的真实子任务；模型/工具/目录仍由spawn原权限核对。messages是保留checkpoint原文分页，非完整审计转录：压缩前历史可能缺失，skippedMessages明确无法显示项。重启无活跃控制器标unknown，不自动重跑。ui.view仅真实按钮/提交/选择动作一次可请求；requested不是已显示，不改变父输入草稿/目标。agent.list仍保留原列表语义，列出项不等于有权读取。"
+        agentScope: "status/messages/stop/view仅普通本地父聊天、本源码摘要创建的真实子任务；spawn原权限核模型/工具/目录。messages按保留checkpoint分页，非完整转录，skippedMessages标缺项。重启无活跃控制器为unknown，不重跑。ui.view仅真实用户控件动作；默认只读，显式mode:interactive经原生激活ack后暂停父输入，向目标子任务入队，返回恢复父草稿。requested非已激活，isDelivered非已处理。agent.list列出不授予读取权。"
       } : {}),
       ...(exact.startsWith("mcp.") && cursor === 0 ? {
         usageExample: "const catalog=await $.mcp.list(); const source=catalog.sources[0]; if(source){const connection=await $.mcp.connect(source.sourceId); if(connection.isConnected){const state=await $.mcp.status({server:connection.server}); /* Use only this lease's advertised real tool name with $.mcp.call. */ await $.mcp.disconnect({server:connection.server});}}",
-        mcpScope: "仅当前普通聊天Claw明确选中的id+配置摘要；先到搭配管理选择来源并保存应用。宿主管理命令、环境、凭证，作者不可传URL/command。connect暂仅stdio；HTTP/SSE、项目与子会话返回policy/范围拒绝。server是本组件独占opaque句柄；跨来源/过期不回退全局。list/status/disconnect为桌面扩展，读取不初始化。unknown表示清理未确认，不能重连；任务结束不自动断开，撤权/来源或选择变更/重载会清理。"
+        mcpScope: "仅当前普通聊天Claw明确选择的id+配置摘要。宿主管理stdio/Streamable HTTP/SSE命令、URL和认证，插件只传sourceId；远程同源、禁重定向/自动协议回退/工具重放。项目或子会话缺等价选择证明仍拒绝。server是本组件独占opaque句柄；跨来源/过期不回退全局。list/status/disconnect为桌面扩展，读取不初始化。取消关闭该连接；unknown表示本机回收未确认，不代表远程任务停止，不能自动重连。撤权/来源或选择变更/重载清理。"
+      } : {}),
+      ...(exact === "config.set" && cursor === 0 ? {
+        migrationExample: "userConfigSchema:{version:1,migrations:[{fromVersion:0,toVersion:1,changes:[{kind:'rename',from:'oldLabel',to:'label'}]}]}, cmbCompatibility:{modelProtocol:'result-v1',userConfigMigrations:'v1'}。删除用{kind:'remove',key:'字段名'}；后续逐版本连续迁移，原生确认，失败保留旧值，不执行迁移脚本。"
       } : {}),
       ...(exact === "ui.resolve" && cursor === 0 ? {
         usageExample: DEVELOPMENT_LAYOUT_EXAMPLE,
-        layoutScope: "同一桌面声明树用于面板、页面、侧栏和工具栏；只影响插件内容，不替换外层授权/关闭控件。数字间距为8px单位，尺寸为字符/行或0..100%。无raw CSS/DOM/定位覆盖；精确属性见UiBoxProps/UiTextProps。"
+        layoutScope: "同一桌面声明树用于面板、页面、侧栏和工具栏；只影响插件内容，外层授权/关闭控件保留。间距8px单位，尺寸为字符/行或0..100%。仅白名单样式、有界局部定位和hover，无raw CSS/DOM。精确属性与条件见UiBoxProps/UiTextProps。"
       } : {}),
       ...(exact === "ui.place" && cursor === 0 ? {
         usageExample: DEVELOPMENT_PLACED_EXAMPLE,
-        placedScope: "启动时只登记专属显示命令，用户在试用生效后运行show-checklist才放卡；候选预检查不能给活跃聊天放卡。id为1..64位字母数字_-，同来源id更新原位置。仅普通父聊天。props.id/plugin只读，pass画空。不入模型/转录，重启不恢复；真实压缩提交、关闭、撤权或来源替换清理。isPlaced仅表示surface已附着；false带requestId等待本进程界面，无requestId表示未登记。ui.scroll暂不支持Placed。"
+        placedScope: "启动只登记显示命令，试用生效后运行show-checklist才放卡；候选不能改活跃聊天。id为1..64字母数字_-，同来源id更新原位置；仅普通父聊天。props.id/plugin只读，pass画空。不入模型/转录，重启不恢复；真实压缩提交、关闭、撤权/来源替换清理。isPlaced表示surface附着；false带requestId等待本进程界面，无requestId未登记。真实用户动作可ui.scroll到自己有效requestId，虚拟列表实际挂载可见才回执。"
       } : {}),
-      events, sdkMethods: methods,
+      events, sdkMethods: methods, runtimeExports: exports,
       ...(registration ? { registration: "on.capability", event: "platform.action" } : {}),
       ...(registration && cursor === 0 ? {
         usageExample: DEVELOPMENT_SURFACE_EXAMPLE,
         surfaceScope: "登记不等于打开。来源批准后，在原聊天的插件界面入口显式打开；openAction只初始化自己的Pane，关闭由宿主清理。v2交互仅允许只读查询与局部UI，不执行模型/网络/进程/写入或任务控制；有业务动作使用原v1队列及真实权限。placement仍在当前聊天内，不替换项目模式或全局设置。"
       } : {}),
-      matched: events.length + methods.length > 0,
+      matched: events.length + methods.length + exports.length > 0,
       declarationAvailable: declarations.signatures.length > 0,
       content: text.slice(cursor, end), totalCharacters: text.length,
       complete: end === text.length,
@@ -320,6 +331,7 @@ export function developmentCatalogPage(
         )
       },
       trialCapabilities: catalog.trialCapabilities,
+      runtimeExports: catalog.runtimeExports,
       authorizedTrialCapabilities: catalog.authorizedTrialCapabilities,
       trialEventEnvelope: catalog.trialEventEnvelope,
       trialEventConsent: catalog.trialEventConsent,

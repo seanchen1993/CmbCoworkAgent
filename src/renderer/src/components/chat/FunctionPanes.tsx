@@ -2,9 +2,11 @@ import { publishClawNotice, revealClawPanes, ClawResultsVisibility } from "@/lib
 import { withModsChatScope } from "../../lib/mods-chat-scope"
 import { isModSiteChangeScope } from "../../../../shared/mods/types"
 import { useFunctionPaneScroll } from "../../lib/function-pane-scroll"
-import { createContext, useContext, Fragment, useCallback, useEffect, useRef, useState } from "react"
+import { createContext, useContext, Fragment, useCallback, useEffect, useId, useRef, useState,
+  type CSSProperties } from "react"
 import { pressFunctionHotkey } from "../../lib/function-ui-hotkey"
-import { functionUiStyle } from "../../lib/function-ui-style"
+import { functionUiStyle, functionUiHoverStyle } from "../../lib/function-ui-style"
+import { functionUiColor } from "../../lib/function-ui-color"
 import { Button } from "@/components/ui/button"
 import {
   validateFunctionTree,
@@ -20,6 +22,8 @@ import { FunctionClient } from "./FunctionClient"
 import { FunctionCode } from "./FunctionCode"
 import { functionCodeDrawing } from "../../lib/function-code-drawing"
 import { FunctionSvg } from "./FunctionSvg"
+import { FunctionTruncatedText } from "./FunctionTruncatedText"
+import { functionTextContent } from "../../lib/function-text-content"
 import { isPlatformWidget } from "../../../../shared/mods/v2/platform-surfaces-widgets"
 import { PlatformWidget } from "../platform/PlatformWidget"
 import { FunctionMarkdown, type FunctionMarkdownContext } from "./FunctionMarkdown"
@@ -31,7 +35,7 @@ import {
 
 type Act = (
   node: FunctionUiElement | undefined,
-  kind: FunctionUiAction["kind"],
+  kind: Exclude<FunctionUiAction["kind"], "measure">,
   value?: ModJson
 ) => Promise<void>
 
@@ -52,6 +56,15 @@ function Field({
   const value = field.source === source ? field.value : source
   const setValue = (value: string): void => setField({ source, value })
   const label = String(node.props.label ?? node.props.key)
+  const composing = useRef(false)
+  const published = useRef(source)
+  useEffect(() => { published.current = source }, [source])
+  const publish = (next: string): void => {
+    if (busy || published.current === next) return
+    published.current = next
+    void act(node, "change", next)
+  }
+  const InputControl = Number(node.props.rows ?? 1) > 1 ? "textarea" : "input"
   if (node.type === "Select")
     return (
       <label className="flex items-center gap-2 text-sm">
@@ -93,28 +106,44 @@ function Field({
       className="flex flex-wrap items-center gap-2"
       onSubmit={(event) => {
         event.preventDefault()
-        if (busy) return
+        if (busy || composing.current) return
         void act(node, "submit", value)
       }}
     >
       <label className="flex min-w-0 flex-1 items-center gap-2 text-sm">
         {label}
-        <input
+        <InputControl
           data-function-control={String(node.props.key)}
           data-function-plugin={node.press?.plugin}
           data-function-handle={node.press?.handle}
           aria-label={label}
           value={value}
           maxLength={10000}
+          rows={InputControl === "textarea" ? Math.min(50, Number(node.props.rows)) : undefined}
           disabled={busy && !retainFocusWhileBusy}
           readOnly={busy && retainFocusWhileBusy}
           aria-disabled={busy || undefined}
           placeholder={String(node.props.placeholder ?? "")}
-          className="min-w-0 flex-1 rounded border bg-background px-2 py-1"
+          className="min-w-0 max-w-full flex-1 rounded border bg-background px-2 py-1"
+          style={{ maxHeight: "min(60vh, 100%)", resize: "vertical" }}
+          onCompositionStart={() => { composing.current = true }}
+          onCompositionEnd={(event) => {
+            composing.current = false
+            if (busy) return
+            setValue(event.currentTarget.value)
+            publish(event.currentTarget.value)
+          }}
+          onKeyDown={(event) => {
+            if (event.key !== "Enter" || event.shiftKey || composing.current ||
+                event.nativeEvent.isComposing || event.keyCode === 229) return
+            event.preventDefault()
+            if (!busy) event.currentTarget.form?.requestSubmit()
+          }}
           onChange={(event) => {
             if (busy) return
             setValue(event.target.value)
-            void act(node, "change", event.target.value)
+            if (!composing.current && !(event.nativeEvent as InputEvent).isComposing)
+              publish(event.target.value)
           }}
         />
       </label>
@@ -136,6 +165,26 @@ function Field({
 
 // Local text backgrounds also apply across fragments, boxes and client subtrees.
 const FunctionTextBackground = createContext<string | undefined>(undefined)
+const FunctionHoverBox = createContext<string | undefined>(undefined)
+
+function nativeHover(node: FunctionUiNode, id: string, scope: string | undefined,
+  background?: string): { style: CSSProperties; rules: string } {
+  if (!scope) return { style: {}, rules: "" }
+  const declarations: string[] = []
+  const values: Record<string, string | number> = {}
+  for (const [property, value] of Object.entries(functionUiHoverStyle(node, background))) {
+    if (value === undefined) continue
+    const css = property.replace(/[A-Z]/g, letter => `-${letter.toLowerCase()}`)
+    const variable = `--mods-hover-${id}-${css}`
+    values[variable] = typeof value === "number" && !["opacity", "fontWeight"].includes(property)
+      ? `${value}px` : value
+    declarations.push(`${css}:var(${variable})!important`)
+  }
+  const target = `[data-function-hover-target="${id}"]`
+  const box = `[data-function-hover-box="${scope}"]:hover`
+  return { style: values as CSSProperties, rules: declarations.length
+    ? `${box}${target},${box} ${target}{${declarations.join(";")}}` : "" }
+}
 
 export function Element({
   node,
@@ -161,6 +210,8 @@ export function Element({
   codeDrawing?: ReadonlyMap<string, string>
 }): React.ReactNode {
   const inheritedBackground = useContext(FunctionTextBackground)
+  const inheritedHover = useContext(FunctionHoverBox)
+  const hoverId = useId().replace(/[^a-zA-Z0-9_-]/g, "")
   const drawing = codeDrawing ?? functionCodeDrawing(node, nodePath)
   if (typeof node === "string") return node
   if (node.type === "engine") return renderEngine?.(node.ref) ?? null
@@ -216,19 +267,31 @@ export function Element({
       />
     ))
     const style = functionUiStyle(node, inheritedBackground)
+    const hoverBox = node.type === "Box" && typeof p.key === "string" ? hoverId : inheritedHover
+    const hover = nativeHover(node, hoverId, hoverBox, inheritedBackground)
     const background = node.type === "Text" || node.type === "Box" ? style.backgroundColor : undefined
     return (
       <FunctionTextBackground.Provider value={background ?? inheritedBackground}>
-        <Tag style={style}>
-          {node.type === "Text" && p.wrap === "truncate-start"
-            ? <span dir="ltr" style={{ unicodeBidi: "isolate" }}>{content}</span>
-            : content}
-        </Tag>
+        <FunctionHoverBox.Provider value={hoverBox}>
+          {hover.rules && <style>{hover.rules}</style>}
+          <Tag style={{ ...style, ...hover.style }} dir={p.dir === "rtl" || p.dir === "ltr" ? p.dir : undefined}
+            data-function-hover-box={node.type === "Box" && typeof p.key === "string" ? hoverId : undefined}
+            data-function-hover-target={hoverId}>
+            {node.type === "Text" && ["middle", "truncate-middle", "truncate-start"].includes(String(p.wrap)) &&
+              functionTextContent(node.children ?? []) !== undefined
+              ? <FunctionTruncatedText runs={node.children ?? []} mode={String(p.wrap)}
+                  render={(child, index) => <Element key={index} node={child} busy={busy} act={act} />} />
+              : content}
+          </Tag>
+        </FunctionHoverBox.Provider>
       </FunctionTextBackground.Provider>
     )
   }
-  if (node.type === "Button")
+  if (node.type === "Button") {
+    const hover = nativeHover(node, hoverId, inheritedHover, inheritedBackground)
     return (
+      <>
+      {hover.rules && <style>{hover.rules}</style>}
       <Button
         data-function-control={String(node.props.key)}
         data-function-plugin={node.press?.plugin}
@@ -236,17 +299,25 @@ export function Element({
         data-function-hotkey={typeof p.hotkey === "string" ? p.hotkey : undefined}
         aria-keyshortcuts={typeof p.hotkey === "string" ? p.hotkey : undefined}
         size="sm"
-        variant="outline"
+        variant={p.plain ? "ghost" : p.variant === "primary" ? "default" : "outline"}
         disabled={busy && !retainFocusWhileBusy}
         aria-disabled={busy || undefined}
         className={p.dimColor || busy ? "opacity-65" : undefined}
+        data-function-hover-target={hoverId}
+        data-function-dismiss={p.role === "dismiss" ? "true" : undefined}
+        aria-label={p.role === "dismiss" ? String(p.label) : undefined}
+        style={{ ...hover.style, ...(p.role === "dismiss" ? { marginInlineStart: "auto" } : {}) }}
         onClick={() => {
           if (!busy) void act(node, "press")
         }}
       >
-        {String(p.label)}
+        {p.plain && typeof p.hotkey === "string" && <span aria-hidden className="text-primary">{p.hotkey}: </span>}
+        {node.children?.length ? node.children.map((child, index) =>
+          <Element key={index} node={child} busy={busy} act={act} />) : String(p.label)}
       </Button>
+      </>
     )
+  }
   if (node.type === "Input" || node.type === "Select")
     return (
       <Field
@@ -308,6 +379,43 @@ function FunctionPanesSurface({ threadId }: { threadId: string }): React.JSX.Ele
   }, [threadId, panes.length])
   const refreshRef = useRef<() => void>(() => {})
   const panesRef = useRef(panes)
+  const measurements = useRef(new Map<string, { open: string; columns: number }>())
+  useEffect(() => {
+    if (!resultsVisible) return
+    let stopped = false
+    const measure = (): void => {
+      if (stopped || loadedThread.current !== threadId) return
+      const active = new Set(panesRef.current.map(pane => pane.key))
+      for (const key of measurements.current.keys()) if (!active.has(key)) measurements.current.delete(key)
+      for (const pane of panesRef.current) {
+        const body = sections.current.get(pane.key)?.querySelector<HTMLElement>("[data-function-pane-body]")
+        if (!body?.isConnected || body.clientWidth <= 0 || !pane.openRequestId) continue
+        const probe = document.createElement("span")
+        probe.textContent = "0000000000"
+        probe.style.cssText = "position:absolute;visibility:hidden;white-space:pre;font:inherit;pointer-events:none"
+        body.append(probe)
+        const unit = probe.getBoundingClientRect().width / 10
+        probe.remove()
+        if (!Number.isFinite(unit) || unit <= 0) continue
+        const columns = Math.max(1, Math.min(10000, Math.floor(body.clientWidth / unit)))
+        const prior = measurements.current.get(pane.key)
+        if (prior?.open === pane.openRequestId && prior.columns === columns) continue
+        void window.api.mods.paneAct(threadId, { pane: pane.key, generation: pane.generation,
+          plugin: pane.plugin, handle: 0, kind: "measure", intentId: crypto.randomUUID(),
+          value: { bodyColumns: columns, openRequestId: pane.openRequestId } }).then(() => {
+          if (!stopped) measurements.current.set(pane.key, { open: pane.openRequestId!, columns })
+        }).catch(() => {})
+      }
+    }
+    const observer = new ResizeObserver(measure)
+    for (const section of sections.current.values()) {
+      const body = section.querySelector<HTMLElement>("[data-function-pane-body]")
+      if (body) observer.observe(body)
+    }
+    measure()
+    void document.fonts.ready.then(measure)
+    return () => { stopped = true; observer.disconnect() }
+  }, [threadId, panes, resultsVisible])
   panesRef.current = panes
   const sections = useRef(new Map<string, HTMLElement>())
   const attemptedFocus = useRef(new Set<string>())
@@ -675,7 +783,10 @@ function FunctionPanesSurface({ threadId }: { threadId: string }): React.JSX.Ele
           <div
             data-function-pane-body
             className="overflow-auto text-sm"
-            style={{ maxHeight: Math.min(pane.rows * 24, 480) }}
+            style={{ maxHeight: Math.min(pane.rows * 24, 480), maxWidth: "100%",
+              ...(pane.columns ? { width: `${pane.columns}ch` } : {}),
+              backgroundColor: functionUiColor(pane.backgroundColor, "literal"),
+              position: "relative", isolation: "isolate", contain: "layout paint" }}
             onWheel={(event) => {
               const clamp = (value: number): number =>
                 Number.isFinite(value) ? Math.max(-100000, Math.min(100000, value)) : 0

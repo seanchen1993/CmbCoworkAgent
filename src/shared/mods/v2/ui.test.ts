@@ -10,6 +10,41 @@ import type { ModObject } from "../types"
 import { functionFocusHandle, functionFocusTargets } from "./focus"
 
 describe("function UI data boundary", () => {
+  it("admits native text controls and bounded layout while refusing unsupported author groups/actions", () => {
+    const button = { type: "Button", props: { key: "save", label: "Save", variant: "primary",
+      role: "dismiss", hover: { bold: true, color: "success" } },
+      press: { plugin: "p", handle: 1 },
+      children: ["Save ", { type: "Text", props: { dimColor: true }, children: ["changes"] }] }
+    expect(() => validateFunctionTree({ type: "Box", props: { key: "group", position: "relative",
+      borderDimColor: true, hover: { backgroundColor: "subtle" } }, children: [button,
+      { type: "Box", props: { position: "absolute", left: -2, top: 1, display: "none",
+        hover: { display: "flex", left: 0 } }, children: [
+        { type: "Text", props: { dir: "rtl", wrap: "truncate-middle" }, children: ["abc中文שלום"] }
+      ] }, { type: "Input", props: { key: "notes", rows: 4 }, press: { plugin: "p", handle: 2 } }
+    ] })).not.toThrow()
+    for (const props of [{ position: "fixed" }, { top: 0.5 }, { left: -10001 },
+      { hover: { scope: "cross-site", display: "flex" } }, { display: "contents" }])
+      expect(() => validateFunctionTree({ type: "Box", props, children: [] })).toThrow()
+    for (const rows of [0, 1.5, 1001, Infinity])
+      expect(() => validateFunctionTree({ type: "Input", props: { key: "notes", rows },
+        press: { plugin: "p", handle: 2 } })).toThrow()
+    for (const children of [[{ type: "engine", ref: 0 }], [{ type: "Box", props: {}, children: [] }]])
+      expect(() => validateFunctionTree({ ...button, props: { key: "save", label: "Save" }, children }))
+        .toThrow()
+    expect(() => validateFunctionTree({ ...button, props: { key: "save", label: "Save",
+      action: "app:invented" } })).toThrow()
+    expect(() => validateFunctionTree({ type: "Text", props: { hover: { bold: true } }, children: ["no scope"] }))
+      .toThrow()
+  })
+
+  it("validates all Pane arguments instead of accepting ignored fields", () => {
+    expect(() => validatePaneArgs({ id: "wide", columns: 60, rows: 20, backgroundColor: "transparent" }))
+      .not.toThrow()
+    const invalid: ModObject[] = [{ id: "wide", columns: 0 }, { id: "wide", columns: 1.5 },
+      { id: "wide", backgroundColor: 1 }, { id: "wide", arbitrary: true }, { id: "wide", rows: 10001 }]
+    for (const input of invalid)
+      expect(() => validatePaneArgs(input)).toThrow("MODS_UI_PANE_ARGUMENTS")
+  })
   it("admits bounded responsive Box layout and text truncation without DOM styles", () => {
     expect(() => validateFunctionTree({ type: "Box", props: {
       minWidth: 0, minHeight: "100%", flexGrow: 1, flexShrink: 0, flexWrap: "wrap",
@@ -27,7 +62,7 @@ describe("function UI data boundary", () => {
       { minWidth: "10px" }, { minHeight: -1 }, { minWidth: Infinity }, { rowGap: 129 },
       { columnGap: NaN }, { paddingLeft: -1 }, { flexGrow: 101 }, { flexShrink: "1" },
       { flexWrap: "anything" }, { alignSelf: "safe center" }, { overflow: "scroll" },
-      { style: "position:fixed" }, { position: "absolute" }, { display: "none" }, { padding: "3px" }
+      { style: "position:fixed" }, { position: "fixed" }, { display: "grid" }, { padding: "3px" }
     ]) expect(() => validateFunctionTree({ type: "Box", props })).toThrow()
     for (const props of [{size:"huge"},{weight:500},{mono:"true"},{tabular:1},{size:"16px"}])
       expect(() => validateFunctionTree({type:"Text",props,children:["text"]})).toThrow()

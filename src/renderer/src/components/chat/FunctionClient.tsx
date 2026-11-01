@@ -13,7 +13,7 @@ import { flowDraftId } from "../../lib/flow-draft-id"
 
 type Control = (
   node: FunctionUiElement | undefined,
-  kind: FunctionUiAction["kind"],
+  kind: Exclude<FunctionUiAction["kind"], "measure">,
   value?: ModJson
 ) => Promise<void>
 
@@ -151,7 +151,7 @@ export function FunctionClient({
   const pointer = (event: React.PointerEvent<HTMLDivElement>, type: string): void => {
     if (
       snapshot.error ||
-      (event.target instanceof HTMLElement && event.target.closest("button,input,select,a"))
+      (event.target instanceof HTMLElement && event.target.closest("button,input,textarea,select,a"))
     )
       return
     if (type === "down") {
@@ -213,6 +213,10 @@ export function FunctionClient({
       }}
       className="min-w-0 rounded outline-none focus-visible:ring-2 focus-visible:ring-ring"
       style={{
+        position: "relative",
+        isolation: "isolate",
+        contain: "layout paint",
+        maxWidth: "100%",
         width: dimension(node.props.width, "ch"),
         height: dimension(node.props.height, "lh"),
         flexGrow: typeof node.props.flexGrow === "number" ? node.props.flexGrow : undefined

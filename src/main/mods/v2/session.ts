@@ -14,6 +14,8 @@ import {
   assertFunctionFileWriteResult
 } from "./file-write"
 import { functionScrollInput } from "../../../shared/mods/v2/ui-scroll"
+import { validatePromptPaintArgs, validatePromptPaintResult } from "../../../shared/mods/v2/prompt-paint"
+import { consumeUserViewAction } from "./user-view-action"
 import { PlatformCapabilities } from "./platform-capabilities"
 import { PlatformCapabilityHub } from "./platform-capabilities-hub"
 import type { PlatformCapabilitySource, PlatformCapabilityRef, PlatformCapabilityActionResult } from "../../../shared/mods/v2/platform-capabilities"
@@ -90,7 +92,9 @@ import {
 } from "./process-sdk"
 import { isDeepStrictEqual } from "node:util"
 import { dispatchFunctionPullStream } from "./pull-stream-dispatcher"
-import { readFunctionEnvironment } from "./environment-sdk"
+import { readFunctionEnvironment, FunctionEnvironmentOverlay } from "./environment-sdk"
+import { FUNCTION_NONMEDIA_METHODS, functionNonmediaInput,
+  validateFunctionNonmediaInput, validateFunctionNonmediaResult } from "../../../shared/mods/v2/nonmedia"
 import {
   validatePresentationInput,
   validatePresentationResult,
@@ -137,6 +141,7 @@ export const SESSION_CAPABILITIES = [
   "platform.publish", "platform.act", "platform.cancel", "platform.status",
   "prompt.read",
   "prompt.fill",
+  "prompt.paint",
   "prompt.suggest",
   "prompt.compose",
   "prompt.context",
@@ -155,6 +160,8 @@ export const SESSION_CAPABILITIES = [
   "config.list",
   "config.set",
   "env.get",
+  "env.set",
+  ...FUNCTION_NONMEDIA_METHODS,
   "process.run",
   "process.spawn",
   "clock.after",
@@ -299,6 +306,10 @@ export interface FunctionSessionHost {
   creatorHook?(): import("./dispatcher").FunctionHookSource | undefined
   preparePromptFill?(plugin: FunctionPlugin, signal: AbortSignal): Promise<void>
   peekPrompt?(plugin: FunctionPlugin, signal: AbortSignal): Promise<ModObject>
+  preparePromptPaint?(plugin: FunctionPlugin, signal: AbortSignal): Promise<(
+    input: import("../../../shared/mods/v2/prompt-paint").FunctionPromptPaintArgs,
+    signal: AbortSignal
+  ) => Promise<import("../../../shared/mods/v2/prompt-paint").FunctionPromptPaintResult>>
   prompt?(plugin: FunctionPlugin, method: "prompt.read" | "prompt.fill", input: ModObject, signal: AbortSignal): Promise<ModObject>
   preparePromptSuggest?(plugin: FunctionPlugin, signal: AbortSignal): Promise<(
     input: ModObject, signal: AbortSignal
@@ -312,6 +323,8 @@ export interface FunctionSessionHost {
     creator?: import("./dispatcher").FunctionHookSource
   ): Promise<{ value: ModObject; completion: Promise<FunctionTurnComplete> }>
   readSettings?(): Promise<ModObject>
+  notifyDesktop?(plugin: FunctionPlugin, input: ModObject, signal: AbortSignal,
+    lifetime: AbortSignal): Promise<ModObject>
   agentTask?(plugin: FunctionPlugin, method: string, input: ModObject, signal: AbortSignal): Promise<ModJson>
   sendPeer?(
     plugin: FunctionPlugin,
@@ -520,6 +533,14 @@ export class FunctionSession {
   private readonly abortBudget = new FunctionTurnAbortBudget()
   private readonly http = new FunctionHttpHost()
   private readonly processHost = new FunctionProcessHost()
+  private readonly environments = new WeakMap<FunctionPlugin, FunctionEnvironmentOverlay>()
+  private readonly telemetryRecords = new WeakMap<FunctionPlugin, ModObject[]>()
+
+  private environment(plugin: FunctionPlugin): FunctionEnvironmentOverlay {
+    let overlay = this.environments.get(plugin)
+    if (!overlay) this.environments.set(plugin, overlay = new FunctionEnvironmentOverlay())
+    return overlay
+  }
   private readonly agentReadiness = new Map<
     string,
     { owner: FunctionPlugin; acknowledge(): void }
@@ -1101,6 +1122,7 @@ export class FunctionSession {
         callSignal.throwIfAborted()
         const processContext = {
           cwd: this.host.cwd?.() ?? this.host.workspace,
+          environment: this.environment(plugin).snapshot(),
           signal: resource.signal,
           assertLive: () => this.assertLive(plugin),
           authorize: async (request: Readonly<FunctionProcessRequest>, signal: AbortSignal) => {
@@ -2445,7 +2467,7 @@ export class FunctionSession {
       ...(event === "tool.call" || event === "prompt.attachment" ? {
         additionalSkip: presentation?.creatorSkip ?? this.host.creatorHook?.()
       } : {}),
-      ...(["prompt.compose", "prompt.section", "prompt.context", "prompt.attachment", "prompt.mention", "prompt.submit", "prompt.edit", "prompt.suggest", "ui.copy", "ui.selection", "ui.panes", "session.measure", "session.append", "session.messages", "config.describe", "config.set", "config.list"].includes(event) ||
+      ...(["prompt.compose", "prompt.section", "prompt.context", "prompt.attachment", "prompt.mention", "prompt.submit", "prompt.edit", "prompt.suggest", "prompt.paint", "ui.copy", "ui.selection", "ui.panes", "session.measure", "session.append", "session.messages", "config.describe", "config.set", "config.list"].includes(event) ||
         (this.startupModelScopes.getStore() && ["model.complete", "model.classify", "model.fork"].includes(event)) ? {
         propagateDownstreamFailures: true,
         protectInput: async (value: ModObject): Promise<ModObject> => {
@@ -2540,6 +2562,7 @@ export class FunctionSession {
       ...(event === "prompt.mention" ? { normalizeResult: (_name: string, value: ModJson,
         baseline: ModJson) => synchronizePromptMentionResult(value, baseline) } : {}),
       validateInput: (name, value) => {
+        validateFunctionNonmediaInput(name, value)
         if (name === "session.append") validateFunctionSessionAppendInput(value)
         if (name === "config.set") validateFunctionConfigSetInput(value)
         if (name === "ui.press") {
@@ -2556,6 +2579,7 @@ export class FunctionSession {
         if (name === "prompt.context") validatePromptContext(value)
         if (name === "prompt.edit") validatePromptEditInput(value)
         if (name === "prompt.suggest") validatePromptSuggestInput(value)
+        if (name === "prompt.paint") validatePromptPaintArgs(value)
         if (name === "ui.copy") validateCopyInput(value)
         if (["ui.selection", "ui.panes"].includes(name) && Object.keys(value).length)
           throw new ModFunctionError("MODS_UI_QUERY_ARGUMENTS")
@@ -2673,6 +2697,7 @@ export class FunctionSession {
           throw new ModFunctionError("MODS_COMMAND_ARGS")
       },
       validateResult: (name, value) => {
+        validateFunctionNonmediaResult(name, value)
         if (name === "session.append" && presentation?.appendTicket) {
           presentation.appendTicket.acceptResult(value)
           return
@@ -2684,6 +2709,7 @@ export class FunctionSession {
         if (name === "prompt.context") validatePromptContext(value)
         if (name === "prompt.edit") validatePromptEditResult(value)
         if (name === "prompt.suggest") validatePromptSuggestResult(value)
+        if (name === "prompt.paint") validatePromptPaintResult(value)
         if (name === "prompt.submit") validatePromptSubmissionResult(value, input)
         validatePromptCompositionResult(name, value)
         validatePresentationResult(name, value, input)
@@ -2951,6 +2977,60 @@ export class FunctionSession {
     this.nouns.assertAccess(plugin, method)
     if (!Array.isArray(raw)) throw new ModFunctionError("MODS_SDK_ARGUMENTS")
     const args = raw
+    if (FUNCTION_NONMEDIA_METHODS.some(name => name === method)) {
+      const input = functionNonmediaInput(method, args)
+      if (method === "session.identity") return {
+        deny: "本来源不是可信组织托管插件；本机登录资料不会作为组织认证身份公开。"
+      }
+      if (method === "ui.blit") return { deny: "当前桌面没有终端 Raster 或 Image 绘制面。" }
+      if (method === "telemetry.records") {
+        const result = await this.host.publish({ delivery: "local-only",
+          records: structuredClone(this.telemetryRecords.get(plugin) ?? []) }, callSignal)
+        this.assertLive(plugin)
+        callSignal.throwIfAborted()
+        return result
+      }
+      let sent = false
+      const answer = await this.dispatch(method, input, callSignal,
+        { plugin: plugin.name, registration: source.registration }, depth + 1, {
+          plugin, core: async (received, signal) => {
+            const safe = await this.host.publish(received, signal)
+            if (!isModObject(safe)) throw new ModFunctionError("MODS_NONMEDIA_ARGUMENTS")
+            validateFunctionNonmediaInput(method, safe)
+            if (method === "telemetry.log" && safe.to !== input.to ||
+              method === "ui.notify" && safe.surface !== input.surface)
+              throw new ModFunctionError("MODS_PINNED_INPUT")
+            signal.throwIfAborted()
+            this.assertLive(plugin)
+            if (method === "ui.notify") {
+              const result = safe.surface === "desktop" && this.host.notifyDesktop
+                ? await this.host.notifyDesktop(plugin, safe, signal, this.lifecycleSignal)
+                : { isSent: false, reason: "no-surface" }
+              this.assertLive(plugin)
+              signal.throwIfAborted()
+              sent ||= result.isSent === true
+              return result
+            }
+            const record: ModObject = { method, at: Date.now(), input: safe }
+            const records = this.telemetryRecords.get(plugin) ?? []
+            records.push(record)
+            while (records.length > 32 || Buffer.byteLength(JSON.stringify(records)) > 32768)
+              records.shift()
+            this.telemetryRecords.set(plugin, records)
+            return undefined
+          }
+        }, turnHeld)
+      if (!isModObject(answer)) throw new ModFunctionError("MODS_OPERATION_RESULT")
+      if (typeof answer.deny === "string") {
+        if (method === "ui.notify") return { isSent: false, reason: "refused" }
+        throw new ModFunctionError("MODS_OPERATION_DENIED", answer.deny)
+      }
+      if (method !== "ui.notify") return undefined
+      if (!isModObject(answer.value) || typeof answer.value.isSent !== "boolean")
+        throw new ModFunctionError("MODS_NOTIFY_RESULT")
+      // A middleware result cannot manufacture an OS receipt.
+      return answer.value.isSent && !sent ? { isSent: false, reason: "refused" } : answer.value
+    }
     if (method.startsWith("platform.")) return this.platform.call(plugin, method, args, callSignal)
     if (method === "session.append") {
       if (args.length !== 1) throw new ModFunctionError("MODS_SESSION_APPEND_INVALID")
@@ -3192,6 +3272,35 @@ export class FunctionSession {
       callSignal.throwIfAborted()
       return { isShown: (answer as ModObject).isShown === true && proof.isShown }
       })
+    }
+    if (method === "prompt.paint") {
+      if (args.length !== 1) throw new ModFunctionError("MODS_PROMPT_PAINT_ARGUMENTS")
+      validatePromptPaintArgs(args[0])
+      if (!this.host.preparePromptPaint) throw new ModFunctionError("MODS_PROMPT_UNAVAILABLE")
+      const paint = await this.host.preparePromptPaint(plugin, callSignal)
+      this.assertLive(plugin)
+      let actual: import("../../../shared/mods/v2/prompt-paint").FunctionPromptPaintResult | undefined
+      const answer = await this.dispatch(method, args[0] as unknown as ModObject, callSignal,
+        { plugin: plugin.name, registration: source.registration }, depth + 1, undefined, turnHeld, {
+          core: async (input, signal) => {
+            this.assertLive(plugin)
+            validatePromptPaintArgs(input)
+            actual = await paint(input, signal)
+            this.assertLive(plugin)
+            signal.throwIfAborted()
+            return this.nouns.capabilities(plugin).includes("prompt.read")
+              ? { ...actual } : { isPainted: actual.isPainted, text: "", cursor: 0 }
+          }
+        })
+      validatePromptPaintResult(answer)
+      this.assertLive(plugin)
+      callSignal.throwIfAborted()
+      const box = this.nouns.capabilities(plugin).includes("prompt.read") && this.host.peekPrompt
+        ? await this.host.peekPrompt(plugin, callSignal) : { text: "", cursor: 0 }
+      const result = await this.host.publish({ ...box,
+        isPainted: answer.isPainted === true && actual?.isPainted === true }, callSignal)
+      validatePromptPaintResult(result)
+      return result
     }
     if (method === "prompt.fill") {
       if (args.length !== 1 || !isModObject(args[0])) throw new ModFunctionError("MODS_PROMPT_INPUT_INVALID")
@@ -3440,6 +3549,7 @@ export class FunctionSession {
             if (method === "env.get")
               return readFunctionEnvironment(value.name, {
                 ...context,
+                overlay: this.environment(plugin).values,
                 declared: plugin.environment?.read ?? []
               })
             if (!this.host.readSettings) throw new ModFunctionError("MODS_SETTINGS_UNAVAILABLE")
@@ -3451,6 +3561,30 @@ export class FunctionSession {
       if (!isModObject(answer)) throw new ModFunctionError("MODS_OPERATION_RESULT")
       if (typeof answer.deny === "string")
         throw new ModFunctionError("MODS_OPERATION_DENIED", answer.deny)
+      return answer.value
+    }
+    if (method === "env.set") {
+      if (args.length < 1 || args.length > 2 || typeof args[0] !== "string" ||
+        (args[1] !== undefined && typeof args[1] !== "string"))
+        throw new ModFunctionError("MODS_ENV_ARGUMENTS")
+      const input: ModObject = { name: args[0], ...(args.length === 2 ? { value: args[1] } : {}) }
+      const answer = await this.dispatch(method, input, callSignal,
+        { plugin: plugin.name, registration: source.registration }, depth + 1, {
+          plugin, core: async (value, signal) => {
+            const safe = await this.host.publish(value, signal)
+            if (!isModObject(safe) || safe.name !== input.name ||
+              (safe.value !== undefined && typeof safe.value !== "string"))
+              throw new ModFunctionError("MODS_ENV_ARGUMENTS")
+            this.assertLive(plugin)
+            signal.throwIfAborted()
+            return this.environment(plugin).set(safe.name, safe.value, plugin.environment?.write ?? [])
+          }
+        }, turnHeld)
+      if (!isModObject(answer)) throw new ModFunctionError("MODS_OPERATION_RESULT")
+      if (typeof answer.deny === "string") throw new ModFunctionError("MODS_OPERATION_DENIED", answer.deny)
+      if (!isModObject(answer.value) || Object.keys(answer.value).some(key => key !== "deny") ||
+        (answer.value.deny !== undefined && typeof answer.value.deny !== "string"))
+        throw new ModFunctionError("MODS_ENV_RESULT")
       return answer.value
     }
     if (method === "session.send") {
@@ -3528,8 +3662,9 @@ export class FunctionSession {
         input.init = init
       }
       const processCwd = nativeIntegrity ? this.host.cwd?.() ?? this.host.workspace : undefined
+      const processEnvironment = this.environment(plugin).snapshot()
       const expected = nativeIntegrity
-        ? await functionProcessRequest(input, processCwd!, false) : undefined
+        ? await functionProcessRequest(input, processCwd!, false, processEnvironment) : undefined
       let coreCalls = 0
       let authorizations = 0
       let publications = 0
@@ -3554,6 +3689,7 @@ export class FunctionSession {
             const run = () =>
               this.processHost.run(request, {
                 cwd: nativeIntegrity ? processCwd! : this.host.cwd?.() ?? this.host.workspace,
+                environment: processEnvironment,
                 signal,
                 assertLive: () => this.assertLive(plugin),
                 authorize: async (finalRequest, approvalSignal) => {
@@ -4369,6 +4505,13 @@ export class FunctionSession {
     if (method === "ui.scroll") {
       if (args.length !== 1) throw new ModFunctionError("MODS_UI_SCROLL_ARGUMENTS")
       const input = functionScrollInput(args[0])
+      if (typeof input.to === "object" && "requestId" in input.to &&
+        this.placed.owns(plugin, input.to.requestId)) {
+        if (input.in !== undefined) throw new ModFunctionError("MODS_UI_SCROLL_ARGUMENTS")
+        const intent = consumeUserViewAction(plugin.name)
+        return { ...(await this.placed.reveal(plugin, input.to.requestId,
+          input.block ?? "nearest", callSignal, intent)) }
+      }
       return {
         ...(await this.panes.requestScroll(
           plugin.name,

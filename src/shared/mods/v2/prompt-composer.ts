@@ -8,7 +8,9 @@ export interface PromptComposerRequest {
   requestId: string
   threadId: string
   owner: string
-  kind: "read" | "fill" | "suggest"
+  kind: "read" | "fill" | "suggest" | "paint" | "clear_paint"
+  /** Main-issued source identity; never supplied by a guest or a hook. */
+  paintSource?: string
   expectedRevision?: number
   text?: string
   mode?: PromptFillMode
@@ -20,6 +22,7 @@ export interface PromptComposerResponse extends PromptComposerSnapshot {
   owner: string
   status: "ok" | "no_composer" | "dialog" | "conflict"
   isShown?: boolean
+  isPainted?: boolean
 }
 export interface PromptFillResult {
   isFilled: boolean

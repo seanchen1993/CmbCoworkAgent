@@ -139,13 +139,14 @@ it("reports unsupported APIs and wrong declared state values without an any fall
   const root = await fixture(`import type {Register} from "claude-code";
     export const register:Register<"author">=on=>{on("command.run",async $=>{
       await $.state.set({plugin:"author",key:"count"},"wrong");await $.audio.play("x");
-      await $.env.set("NAME","unsupported");return {};
+      await $.env.set("NAME",123);return {};
     })}`)
   const result = await checkFunctionAuthorTypes(root)
   expect(result.valid).toBe(false)
   expect(result.diagnostics.some((row) => row.message.includes("number"))).toBe(true)
   expect(result.diagnostics.some((row) => row.message.includes("audio"))).toBe(true)
-  expect(result.diagnostics.some((row) => row.message.includes("'set'"))).toBe(true)
+  expect(result.diagnostics.some((row) => row.message.includes("string"))).toBe(true)
+  expect(result.diagnostics.some((row) => row.message.includes("'set' does not exist"))).toBe(false)
 })
 
 it("includes closed declaration changes in the authorization digest", async () => {

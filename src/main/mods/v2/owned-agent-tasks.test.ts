@@ -219,6 +219,48 @@ it("accepts only a claimed intent with current source, parent incarnation and wo
   expect(getDb()).toBeDefined()
 })
 
+it("requires native activation, deduplicates sends and rechecks live child/source across awaits", async () => {
+  const t = task()
+  let sourceLive = true
+  t.registry.requestView(t.parent, fixture.root, t.grant, t.agentId, () => {
+    if (!sourceLive) throw Error("SOURCE_CHANGED")
+  }, undefined, "interactive")
+  const intent = t.registry.view(t.parent, fixture.root, () => {})!
+  const send = vi.fn(async (_entry, check) => { check(); return { isDelivered: true } })
+  await expect(t.registry.sendView(t.parent, fixture.root, intent.id, 1, () => {}, send))
+    .rejects.toThrow("VIEW_CHANGED")
+  expect(t.registry.activateView(t.parent, fixture.root, intent.id, () => {})).toEqual({ active: true })
+  expect(await t.registry.sendView(t.parent, fixture.root, intent.id, 1, () => {}, send))
+    .toEqual({ isDelivered: true })
+  await expect(t.registry.sendView(t.parent, fixture.root, intent.id, 1, () => {}, send))
+    .rejects.toThrow("SEND_REPLAY")
+  sourceLive = false
+  await expect(t.registry.sendView(t.parent, fixture.root, intent.id, 2, () => {}, send))
+    .rejects.toThrow("SOURCE_CHANGED")
+  sourceLive = true
+  t.registry.stop(t.parent, fixture.root, t.grant, t.agentId)
+  await expect(t.registry.sendView(t.parent, fixture.root, intent.id, 3, () => {}, send))
+    .rejects.toThrow("NOT_RUNNING")
+  expect(send).toHaveBeenCalledTimes(1)
+  t.finish(); deleteThread(t.parent)
+})
+it("closing the interactive target aborts an uncommitted native send and never reopens a runner", async () => {
+  const t = task()
+  t.registry.requestView(t.parent, fixture.root, t.grant, t.agentId, () => {}, undefined, "interactive")
+  const intent = t.registry.view(t.parent, fixture.root, () => {})!
+  t.registry.activateView(t.parent, fixture.root, intent.id, () => {})
+  const pending = t.registry.sendView(t.parent, fixture.root, intent.id, 1, () => {},
+    async (_entry, check, signal) => {
+      await new Promise<void>(resolve => signal.addEventListener("abort", () => resolve(), { once: true }))
+      check()
+      return { isDelivered: true }
+    })
+  t.registry.closeView(t.parent, intent.id)
+  await expect(pending).rejects.toThrow("VIEW_CHANGED")
+  expect(t.registry.status(t.parent, fixture.root, t.grant, t.agentId).status).toBe("running")
+  t.finish(); deleteThread(t.parent)
+})
+
 it.each(["stop", "source", "narrowing"] as const)(
   "keeps an authorized-real trial's native viewer usable after SDK admission ends, then rejects %s",
   async (kind) => {

@@ -75,10 +75,24 @@ export function PromptDecorations({
           }
           return (
             <span key={start} style={style}>
+              {spans.filter(span => span.start === start && span.virtualText).map((span, index) => (
+                <span key={index} style={{ display: "inline-block", position: "relative", width: 0 }}>
+                  <span data-prompt-virtual style={{ position: "absolute", left: 0, top: "-1em",
+                    whiteSpace: "nowrap", fontSize: "0.75em", background: "var(--color-background)",
+                    maxWidth: "40ch", overflow: "hidden", textOverflow: "ellipsis" }}>
+                    {span.virtualText}
+                  </span>
+                </span>
+              ))}
               {text.slice(start, end)}
             </span>
           )
         })}
+        {spans.filter(span => span.start === text.length && span.virtualText).map((span, index) => (
+          <span key={`tail-${index}`} data-prompt-virtual style={{ display: "inline-block",
+            position: "absolute", whiteSpace: "nowrap", fontSize: "0.75em",
+            background: "var(--color-background)" }}>{span.virtualText}</span>
+        ))}
         {text.endsWith("\n") ? " " : ""}
       </pre>
     </div>

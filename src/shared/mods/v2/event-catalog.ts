@@ -1,4 +1,6 @@
-/** Names checked against the v2.1.287 embedded declarations; presence does not mean an adapter exists. */
+/** Fixed upstream evidence; presence never means a native provider exists. */
+export const CLAUDE_MODS_DECLARATIONS_VERSION = "2.1.316"
+export const CLAUDE_MODS_DECLARATIONS_SHA256 = "88e84a587572f4fe97df0f378d29d441ef267142b1ea8394aa95eb80ef08a14d"
 export const CLAUDE_EVENT_NAMES = [
   "session.root",
   "session.version",
@@ -13,6 +15,7 @@ export const CLAUDE_EVENT_NAMES = [
   "ui.select",
   "ui.message",
   "ui.fault",
+  "ui.notify",
   "ui.scroll",
   "ui.focus",
   "agent.offer",
@@ -20,10 +23,12 @@ export const CLAUDE_EVENT_NAMES = [
   "agent.register",
   "prompt.submit",
   "prompt.read",
+  "prompt.media",
   "prompt.edit",
   "prompt.attachment",
   "prompt.mention",
   "prompt.fill",
+  "prompt.paint",
   "prompt.suggest",
   "prompt.section",
   "prompt.context",
@@ -157,6 +162,10 @@ export function isFunctionClassicEventName(value: string): boolean {
     FUNCTION_CLASSIC_EXTENSION_EVENT_NAMES.some((name) => name === value)
 }
 export const CLAUDE_CORE_MEMBERS = [
+  "session.identity",
+  "ui.notify",
+  "ui.view",
+  "prompt.media",
   "prompt.compose",
   "prompt.read",
   "ui.panes",
@@ -205,6 +214,7 @@ export const CLAUDE_CORE_MEMBERS = [
   "turn.abort",
   "prompt.submit",
   "prompt.fill",
+  "prompt.paint",
   "prompt.suggest",
   "tool.list",
   "tool.call",

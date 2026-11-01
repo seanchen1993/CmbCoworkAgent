@@ -9,16 +9,13 @@ import { enterModsCreatorChat } from "./support/mods-sidebar-navigation"
 import { genericModLiveRelay } from "./support/generic-mod-live-relay"
 import {
   createHeadlessProjectCompositionLaunch,
-  projectCompositionCandidate,
+  assertCreatorLiveCandidate,
   projectCompositionEnvironment
 } from "./support/project-composition-e2e-fixtures"
 
 const root = resolve(__dirname, "..")
-assert.equal(process.env.CREATOR_E2E_BUILT_PREVIEW, "1")
-assert.equal(process.env.COMPOSITION_E2E_PACKAGED_DIR, undefined)
 assert.equal(JSON.parse(readFileSync(join(root, "package.json"), "utf8")).version, "2.0.0")
-const build = projectCompositionCandidate(root)
-assert.equal(build.sha256, process.env.CREATOR_E2E_EXPECTED_SHA256)
+const build = assertCreatorLiveCandidate(root)
 process.env.COMPOSITION_E2E_ARTIFACT_ROOT ??= join(root, "output/generic-mod-live-20261028")
 const fixture = projectCompositionEnvironment(root)
 const resumeProfile = process.env.GENERIC_MOD_LIVE_RESUME_PROFILE
@@ -32,6 +29,14 @@ type RoundObservation = {
   text?: string
   nativeReadCount?: number
   nativeReadReceipt?: { messageId: string; toolCallId?: string }
+  paint?: {
+    jobId: string
+    sdkQueryObserved: true
+    originalText: string
+    textUnchanged: true
+    cursorUnchanged: true
+    virtualTextVisible: true
+  }
 }
 let prior:
   | {
@@ -72,6 +77,7 @@ const observations: Array<{
   nativeReadReceipt?: { messageId: string; toolCallId?: string }
   sourceFiles?: Array<{ path: string; sha256: string }>
   activeTrials?: DevelopmentStatus["trials"]
+  paint?: RoundObservation["paint"]
 }> = []
 if (prior) observations.push(prior.observations[0])
 let app: ElectronApplication | undefined, page: Page | undefined
@@ -334,6 +340,56 @@ async function trigger(round: number) {
     path: join(fixture.isolated, `${label ? label + "-" : ""}round-${round}-verified.png`)
   })
 }
+async function verifyPaint(round: number) {
+  relay.phase(`paint-${round}`)
+  assert(
+    relay.metrics.some((metric) =>
+      metric.tools.some((tool) => tool.action === "catalog" && tool.sdkQuery === "prompt.paint")
+    ),
+    "REAL_AUTHOR_MUST_QUERY_NEW_PROMPT_PAINT_SDK"
+  )
+  const chat = page!.locator(`[data-chat-thread-id=${JSON.stringify(threadId)}]`)
+  const composer = chat.locator("textarea.composer-textarea")
+  const text = "TODO 核对一条资料"
+  await composer.fill(text)
+  const before = await composer.evaluate((node) => ({
+    start: node.selectionStart,
+    end: node.selectionEnd
+  }))
+  const descriptor = (await page!.evaluate((id) => window.api.mods.commands(id), threadId)).find(
+    (command) => command.command === "paint-note"
+  )
+  assert(descriptor?.immediate, "REAL_AUTHOR_PAINT_COMMAND_REQUIRED")
+  const queued = await page!.evaluate(
+    ({ id, descriptor }) => window.api.mods.enqueue(id, descriptor, { text: "" }),
+    { id: threadId, descriptor }
+  )
+  await until("PAINT_JOB", async () => {
+    const job = (await page!.evaluate((id) => window.api.mods.jobs(id), threadId)).find(
+      (job) => job.id === queued.id
+    )
+    assert(!job || !["failed", "unknown", "cancelled"].includes(job.state), JSON.stringify(job))
+    return job?.state === "succeeded" ? job : undefined
+  })
+  await chat.locator("[data-prompt-virtual]").filter({ hasText: "待核对" }).waitFor()
+  assert.equal(await composer.inputValue(), text, "PAINT_CANNOT_REWRITE_DRAFT")
+  const after = await composer.evaluate((node) => ({
+    start: node.selectionStart,
+    end: node.selectionEnd
+  }))
+  assert.deepEqual(after, before, "PAINT_CANNOT_MOVE_CURSOR")
+  observations.at(-1)!.paint = {
+    jobId: queued.id,
+    sdkQueryObserved: true,
+    originalText: text,
+    textUnchanged: true,
+    cursorUnchanged: true,
+    virtualTextVisible: true
+  }
+  save()
+  await page!.screenshot({ path: join(fixture.isolated, `round-${round}-paint-verified.png`) })
+  await composer.fill("")
+}
 async function main() {
   const watchdog = setTimeout(() => {
     error = "GENERIC_LIVE_TOTAL_TIMEOUT"
@@ -425,21 +481,23 @@ async function main() {
     if (!resumeProfile) {
       await author(
         1,
-        "请制作一个通用的工具次数计数 Mod，独立于项目模式和业务插件：只在当前聊天每个 read_file 工具执行完成后累计一次，其他工具不计数。在输入框上方显示‘工具调用次数：N’，初始0。不访问文件，不执行命令，不调用模型。请使用原生创作工具生成、检查并准备本聊天可确认的隔离试用候选，不要代我批准或安装。"
+        "请制作一个通用的工具次数计数与输入框标记 Mod，独立于项目模式和业务插件。先用 catalog(query:prompt.paint)、catalog(query:prompt.read) 定向查询新公开方法签名，不猜接口。只在当前聊天每个 read_file 工具执行完成后累计一次，其他工具不计数，在输入框上方显示‘工具调用次数：N’，初始0。另外注册 immediate:true 的 paint-note 命令：执行时通过 prompt.read 取得原输入，以原 text 调用 prompt.paint，对开头TODO四个字符添加 bold:true 和 virtualText:待核对；没有TODO开头则返回明确未标记。这个命令只绘制，不更改正文和光标，不填入新文本，不调用 prompt.fill，不自动执行。命令返回实际 isPainted 结果。不访问文件，不执行命令进程，不调用模型。请使用原生创作工具生成、检查并准备本聊天可确认的隔离试用候选，不要代我批准或安装。"
       )
       await activate()
       await trigger(1)
+      await verifyPaint(1)
       await enterModsCreatorChat(page, threadId, fixture.workspace)
     }
     await author(
       2,
       resumeProfile
         ? "应用刚才重启了，请读取并核对上次已保存的同一个 Mod 最新草稿，保留已实现的 read_file 计数和最近工具显示，不另建、不手工重写已正确源码。用原生创作工具重新检查并恢复当前确切版本的试用候选，交给我重新确认；不要代我批准或安装，也不要执行文件或命令。"
-        : "请修改刚才的同一个 Mod，不另建：保留 read_file 完成后累计次数的能力以及‘工具调用次数：N’显示，并在后面增加‘最近工具：工具名称’；执行 read_file 后必须显示‘最近工具：read_file’。沿用当前草稿身份，准备新的可确认试用候选。不访问文件，不执行命令，不调用模型，不代我批准或安装。",
+        : "请修改刚才的同一个 Mod，不另建：保留 paint-note 的 prompt.paint 纯显示行为与 read_file 完成后累计次数的能力以及‘工具调用次数：N’显示，并在后面增加‘最近工具：工具名称’；执行 read_file 后必须显示‘最近工具：read_file’。沿用当前草稿身份，准备新的可确认试用候选。不访问文件，不执行命令，不调用模型，不代我批准或安装。",
       !!resumeProfile
     )
     await activate()
     await trigger(2)
+    if (!resumeProfile) await verifyPaint(2)
     assert.equal(observations[0].drafts[0].id, observations[1].drafts[0].id)
     assert.notEqual(observations[0].drafts[0].digest, observations[1].drafts[0].digest)
     passed = true
