@@ -13,7 +13,7 @@ import {
 } from "./support/project-composition-e2e-fixtures"
 import { enterModsCreatorChat } from "./support/mods-sidebar-navigation"
 import { modsSourceDriverHashes } from "./support/mods-source-driver-hashes"
-import { desktopStreamDiagnostic } from "./support/mods-desktop-stream-diagnostic"
+import { desktopStreamDiagnosticMode } from "./support/mods-desktop-stream-diagnostic"
 
 async function main() {
   const root = resolve(__dirname, "..")
@@ -25,7 +25,11 @@ async function main() {
   )
   assert(option[0].startsWith("--scenario="), "SOURCE_SCENARIO_FLAG_REQUIRED")
   const scenario = option[0].replace(/^--scenario=/, "")
-  const streamDiagnostic = desktopStreamDiagnostic(process.env.CMB_MODS_DESKTOP_STREAM_DIAGNOSTIC)
+  const streamDiagnosticMode = desktopStreamDiagnosticMode(
+    process.env.CMB_MODS_DESKTOP_STREAM_DIAGNOSTIC,
+    process.env.CMB_MODS_DESKTOP_STREAM_USER_UI
+  )
+  const streamDiagnostic = streamDiagnosticMode !== "off"
   assert(!streamDiagnostic || scenario === "desktop-performance", "STREAM_DIAGNOSTIC_SCENARIO")
   assert(
     !streamDiagnostic ||
@@ -80,7 +84,9 @@ async function main() {
     manifestSha256: digest(candidate.path),
     head: candidate.manifest.head,
     realModel,
-    ...(streamDiagnostic ? { diagnosticOnly: true, timingEligible: false } : {}),
+    ...(streamDiagnostic
+      ? { diagnosticOnly: true, timingEligible: false, diagnosticMode: streamDiagnosticMode }
+      : {}),
     startedAt: new Date().toISOString(),
     driverHashes
   }

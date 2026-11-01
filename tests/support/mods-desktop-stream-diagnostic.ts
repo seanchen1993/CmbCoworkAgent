@@ -1,4 +1,5 @@
 import assert from "node:assert/strict"
+import { createHash } from "node:crypto"
 
 export const DESKTOP_STREAM_DIAGNOSTIC_MARKER = "\nCMB_DESKTOP_STREAM_DIAGNOSTIC:"
 
@@ -96,6 +97,92 @@ export function desktopStreamCanonicalTarget(
 export function desktopStreamDiagnostic(value: string | undefined): boolean {
   assert(value === undefined || value === "1", "DESKTOP_STREAM_DIAGNOSTIC_FLAG_INVALID")
   return value === "1"
+}
+
+export type DesktopStreamDiagnosticMode = "off" | "api" | "user-ui"
+
+/** Existing API diagnostics and real composer/send diagnostics are separate opt-in runs. */
+export function desktopStreamDiagnosticMode(
+  apiValue: string | undefined,
+  uiValue: string | undefined
+): DesktopStreamDiagnosticMode {
+  const api = desktopStreamDiagnostic(apiValue)
+  const ui = desktopStreamDiagnostic(uiValue)
+  assert(!(api && ui), "DESKTOP_STREAM_DIAGNOSTIC_MODES_CONFLICT")
+  return api ? "api" : ui ? "user-ui" : "off"
+}
+
+export type DesktopStreamUiBody =
+  | {
+      state: "matched"
+      expectedDbLength: number
+      expectedDomLength: number
+      expectedDomSha256: string
+    }
+  | { state: "unknown" | "mismatch"; reason: string }
+
+/** The controlled fixture has one final ASCII space that Markdown omits. No general trim/dedup. */
+export function desktopStreamUiBody(expected: string, row: unknown): DesktopStreamUiBody {
+  const unknown = (reason: string): DesktopStreamUiBody => ({ state: "unknown", reason })
+  const fixture = Array.from(
+    { length: 40 },
+    (_, index) => `word${String(index).padStart(3, "0")} `
+  ).join("")
+  if (expected !== fixture) return unknown("unsupported-body-fixture")
+  if (
+    !record(row) ||
+    !Number.isSafeInteger(row.segmentCount) ||
+    Number(row.segmentCount) < 1 ||
+    row.segmentsTruncated !== false ||
+    !Array.isArray(row.segments) ||
+    row.segments.length !== row.segmentCount ||
+    row.segments.length > 16
+  )
+    return unknown("incomplete-body-tree")
+  const outer: Record<string, unknown>[] = []
+  for (const [index, segment] of row.segments.entries()) {
+    if (
+      !record(segment) ||
+      segment.index !== index ||
+      typeof segment.tagName !== "string" ||
+      !/^[A-Za-z][A-Za-z0-9-]{0,31}$/.test(segment.tagName) ||
+      !Number.isSafeInteger(segment.length) ||
+      Number(segment.length) < 0 ||
+      segment.capturedLength !== segment.length ||
+      segment.shaUnavailable !== false ||
+      typeof segment.sha256 !== "string" ||
+      !/^[a-f0-9]{64}$/.test(segment.sha256) ||
+      segment.visible !== true
+    )
+      return unknown("invalid-incomplete-or-hidden-body-segment")
+    if (segment.parentIndex === null) outer.push(segment)
+    else {
+      if (
+        !Number.isSafeInteger(segment.parentIndex) ||
+        Number(segment.parentIndex) < 0 ||
+        Number(segment.parentIndex) >= index
+      )
+        return unknown("invalid-body-parent")
+      const parent: unknown = row.segments[Number(segment.parentIndex)]
+      if (
+        !record(parent) ||
+        Number(segment.length) > Number(parent.length) ||
+        (segment.length === parent.length && segment.sha256 !== parent.sha256)
+      )
+        return unknown("inconsistent-body-tree")
+    }
+  }
+  if (outer.length !== 1) return { state: "mismatch", reason: "multiple-body-roots" }
+  const dom = expected.slice(0, -1)
+  const sha256 = createHash("sha256").update(dom).digest("hex")
+  if (outer[0].length !== dom.length || outer[0].sha256 !== sha256)
+    return { state: "mismatch", reason: "body-content-mismatch" }
+  return {
+    state: "matched",
+    expectedDbLength: expected.length,
+    expectedDomLength: dom.length,
+    expectedDomSha256: sha256
+  }
 }
 
 function record(value: unknown): value is Record<string, unknown> {

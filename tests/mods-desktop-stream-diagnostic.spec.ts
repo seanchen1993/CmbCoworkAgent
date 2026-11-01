@@ -1,8 +1,11 @@
 import assert from "node:assert/strict"
+import { createHash } from "node:crypto"
 import {
   DESKTOP_STREAM_DIAGNOSTIC_MARKER,
   desktopStreamCanonicalTarget,
   desktopStreamDiagnostic,
+  desktopStreamDiagnosticMode,
+  desktopStreamUiBody,
   parseDesktopStreamDiagnostic,
   rethrowAfterDesktopStreamEvidence
 } from "./support/mods-desktop-stream-diagnostic"
@@ -12,6 +15,72 @@ async function main() {
   assert.equal(desktopStreamDiagnostic("1"), true)
   for (const value of ["", "0", "true", "false", " 1", "1 ", "2"])
     assert.throws(() => desktopStreamDiagnostic(value), /FLAG_INVALID/)
+  assert.equal(desktopStreamDiagnosticMode(undefined, undefined), "off")
+  assert.equal(desktopStreamDiagnosticMode("1", undefined), "api")
+  assert.equal(desktopStreamDiagnosticMode(undefined, "1"), "user-ui")
+  assert.throws(() => desktopStreamDiagnosticMode("1", "1"), /MODES_CONFLICT/)
+  for (const value of ["", "0", "true", "false", " 1", "1 ", "2"])
+    for (const valid of [undefined, "1"])
+      for (const args of [
+        [value, valid],
+        [valid, value]
+      ] as const)
+        assert.throws(() => desktopStreamDiagnosticMode(args[0], args[1]), /FLAG_INVALID/)
+
+  const expected = Array.from(
+    { length: 40 },
+    (_, index) => `word${String(index).padStart(3, "0")} `
+  ).join("")
+  const shown = expected.slice(0, -1)
+  const digest = (value: string) => createHash("sha256").update(value).digest("hex")
+  const segment = (index: number, parentIndex: number | null, text = shown) => ({
+    index,
+    parentIndex,
+    tagName: "DIV",
+    length: text.length,
+    capturedLength: text.length,
+    sha256: digest(text),
+    shaUnavailable: false,
+    visible: true
+  })
+  const row = (segments: unknown[]) => ({
+    segmentCount: segments.length,
+    segmentsTruncated: false,
+    segments
+  })
+  const body = {
+    state: "matched",
+    expectedDbLength: 320,
+    expectedDomLength: 319,
+    expectedDomSha256: digest(shown)
+  }
+  assert.deepEqual(desktopStreamUiBody(expected, row([segment(0, null)])), body)
+  assert.deepEqual(
+    desktopStreamUiBody(expected, row([segment(0, null), segment(1, 0)])),
+    body,
+    "Nested search wrappers must never be summed as duplicate text"
+  )
+  for (const value of [
+    row([segment(0, null), segment(1, null)]),
+    row([segment(0, null, shown + shown)])
+  ])
+    assert.equal(desktopStreamUiBody(expected, value).state, "mismatch")
+  for (const value of [
+    null,
+    {},
+    row([]),
+    { ...row([segment(0, null)]), segmentsTruncated: true },
+    { ...row([segment(0, null)]), segmentCount: 2 },
+    row([{ ...segment(0, null), visible: false }]),
+    row([{ ...segment(0, null), capturedLength: 1 }]),
+    row([{ ...segment(0, null), shaUnavailable: true }]),
+    row([segment(0, null), segment(1, 1)]),
+    row([segment(0, 1)]),
+    row([segment(0, null), segment(1, -1)]),
+    row([segment(0, null), segment(1, 0, shown + shown)])
+  ])
+    assert.equal(desktopStreamUiBody(expected, value).state, "unknown")
+  assert.equal(desktopStreamUiBody(expected.trimEnd(), row([segment(0, null)])).state, "unknown")
 
   const base = {
     schemaVersion: 1,
@@ -206,11 +275,12 @@ async function main() {
   }
   console.log(
     JSON.stringify({
-      passed: 5,
+      passed: 6,
       checks: [
         "strict flag",
         "bounded DTO",
         "canonical observed identity",
+        "outer body tree without text deduplication",
         "no getter",
         "original throw identity"
       ]

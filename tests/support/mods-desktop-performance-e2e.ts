@@ -13,7 +13,8 @@ import {
 import {
   DESKTOP_STREAM_DIAGNOSTIC_MARKER,
   desktopStreamCanonicalTarget,
-  desktopStreamDiagnostic,
+  desktopStreamDiagnosticMode,
+  desktopStreamUiBody,
   parseDesktopStreamDiagnostic,
   rethrowAfterDesktopStreamEvidence
 } from "./mods-desktop-stream-diagnostic"
@@ -30,7 +31,12 @@ export async function verifyDesktopPerformance(input: {
   pass(label: string): void
 }): Promise<void> {
   const { app, page, id, artifacts, smoke } = input
-  const diagnostic = desktopStreamDiagnostic(process.env.CMB_MODS_DESKTOP_STREAM_DIAGNOSTIC)
+  const diagnosticMode = desktopStreamDiagnosticMode(
+    process.env.CMB_MODS_DESKTOP_STREAM_DIAGNOSTIC,
+    process.env.CMB_MODS_DESKTOP_STREAM_USER_UI
+  )
+  const diagnostic = diagnosticMode !== "off"
+  const userUi = diagnosticMode === "user-ui"
   assert(!diagnostic || !smoke, "STREAM_DIAGNOSTIC_SMOKE_CONFLICT")
   const stop = () => {
     if (existsSync(join(artifacts, "STOP"))) throw Error("DESKTOP_PERFORMANCE_STOP_REQUESTED")
@@ -93,6 +99,7 @@ export async function verifyDesktopPerformance(input: {
   let diagnosticCallSequence = 0
   let activeCallKey: string | null = null
   const diagnosticCalls: unknown[] = []
+  const uiPhases: unknown[] | undefined = userUi ? [] : undefined
   const serverReceipts: Array<{
     callKey: string | null
     responseId: string
@@ -107,8 +114,10 @@ export async function verifyDesktopPerformance(input: {
         {
           diagnosticOnly: true,
           timingEligible: false,
+          diagnosticMode,
           requests,
           calls: diagnosticCalls,
+          ...(uiPhases ? { uiPhases } : {}),
           serverReceipts
         },
         null,
@@ -149,7 +158,7 @@ export async function verifyDesktopPerformance(input: {
   assert(address && typeof address !== "string")
   try {
     await page.evaluate(
-      async ({ id, url }) => {
+      async ({ id, url, userUi }) => {
         await window.api.models.setCustomConfig({
           id: "desktop-perf",
           name: "Desktop performance protocol",
@@ -162,10 +171,15 @@ export async function verifyDesktopPerformance(input: {
           maxOutputTokens: 1024
         })
         await window.api.threads.patchMetadata(id, {
-          set: { model: "custom:desktop-perf", subagentsEnabled: false }
+          set: {
+            model: "custom:desktop-perf",
+            subagentsEnabled: false,
+            ...(userUi ? { modelId: "custom:desktop-perf" } : {})
+          }
         })
+        if (userUi) await window.api.models.setDefault("custom:desktop-perf")
       },
-      { id, url: `http://127.0.0.1:${address.port}/v1` }
+      { id, url: `http://127.0.0.1:${address.port}/v1`, userUi }
     )
     const captureDom = async (messageId: string) => {
       const deadline = performance.now() + 5000
@@ -225,7 +239,15 @@ export async function verifyDesktopPerformance(input: {
               role: row.getAttribute("data-message-role"),
               segmentCount: segments.length,
               segmentsTruncated: segments.length > limit,
-              segments: segments.slice(0, limit).map((segment) => ({
+              segments: segments.slice(0, limit).map((segment, index) => ({
+                index,
+                parentIndex: (() => {
+                  const parent =
+                    segment.parentElement?.closest<HTMLElement>("[data-chat-search-text]")
+                  const parentIndex = parent ? segments.indexOf(parent) : -1
+                  return parentIndex < 0 ? null : parentIndex
+                })(),
+                tagName: segment.tagName,
                 length: (segment.textContent ?? "").length,
                 text: (segment.textContent ?? "").slice(0, 1024),
                 visible: segment.getClientRects().length > 0
@@ -265,12 +287,14 @@ export async function verifyDesktopPerformance(input: {
       const hashRows = (rows: typeof read.before.targetRows) =>
         rows.map((row) => ({
           ...row,
-          segments: row.segments.map(({ text, length, visible }) => ({
-            length,
+          segments: row.segments.map(({ text, ...segment }) => ({
+            ...segment,
             capturedLength: text.length,
-            visible,
-            sha256: length === text.length ? createHash("sha256").update(text).digest("hex") : null,
-            shaUnavailable: length !== text.length
+            sha256:
+              segment.length === text.length
+                ? createHash("sha256").update(text).digest("hex")
+                : null,
+            shaUnavailable: segment.length !== text.length
           }))
         }))
       const hashSnapshot = (value: typeof read.before) => ({
@@ -534,6 +558,239 @@ export async function verifyDesktopPerformance(input: {
       )
       await pause(200)
       return sample
+    }
+    if (userUi) {
+      const captureUiDom = async (messageId: string) => {
+        let timer: ReturnType<typeof setTimeout> | undefined
+        try {
+          return await Promise.race([
+            captureDom(messageId),
+            new Promise<never>((_resolve, reject) => {
+              timer = setTimeout(() => reject(Error("UI_STREAM_DOM_TIMEOUT")), 8000)
+            })
+          ])
+        } finally {
+          if (timer) clearTimeout(timer)
+        }
+      }
+      const accepted: Array<{
+        id: string
+        providerSourceId: string
+        providerOccurrence: number | null
+      }> = []
+      const verifyAcceptedDom = async (phase: string) => {
+        const result: { phase: string; entries: Array<Record<string, unknown>> } = {
+          phase,
+          entries: []
+        }
+        uiPhases!.push(result)
+        saveDiagnostic()
+        for (const identity of accepted) {
+          const entry: Record<string, unknown> = { identity }
+          result.entries.push(entry)
+          try {
+            const dom = await captureUiDom(identity.id)
+            entry.dom = dom
+            saveDiagnostic()
+            assert.equal(dom.state, "observed", "UI_STREAM_FINAL_EXACT_ROW_UNKNOWN")
+            assert("after" in dom && dom.after, "UI_STREAM_FINAL_TWO_FRAMES_UNKNOWN")
+            assert.equal(dom.after.targetCount, 1, "UI_STREAM_FINAL_MULTIPLE_EXACT_ROWS")
+            const body = desktopStreamUiBody(expected, dom.after.targetRows[0])
+            entry.body = body
+            saveDiagnostic()
+            assert.equal(body.state, "matched", "UI_STREAM_FINAL_BODY_NOT_SINGLE")
+          } catch (error) {
+            entry.failure = error instanceof Error ? error.message : String(error)
+            saveDiagnostic()
+            throw error
+          }
+        }
+      }
+      const originalAssistantIds = new Set(
+        (await page.evaluate((threadId) => window.api.threads.getMessages(threadId), id))
+          .filter((message) => message.role === "assistant")
+          .map((message) => message.id)
+      )
+      for (const enabled of [false, true]) {
+        if (enabled) await enable()
+        else {
+          await input.off()
+          await input.select()
+        }
+        const owned = page.locator(`[data-chat-thread-id="${id}"]`)
+        assert.equal(await owned.count(), 1, "UI_STREAM_OWNED_CHAT_ROOT")
+        const fixtureModel = owned
+          .getByRole("button")
+          .filter({ hasText: "Desktop performance protocol" })
+        await fixtureModel.waitFor()
+        assert.equal(await fixtureModel.count(), 1, "UI_STREAM_LOCAL_MODEL_NOT_VISIBLE")
+        const selected = await page.evaluate(async (threadId) => {
+          const thread = await window.api.threads.get(threadId)
+          const raw = thread?.metadata
+          const metadata = typeof raw === "string" ? JSON.parse(raw) : raw
+          return metadata?.modelId
+        }, id)
+        assert.equal(selected, "custom:desktop-perf", "UI_STREAM_LOCAL_MODEL_NOT_PERSISTED")
+        const before = await page.evaluate(
+          (threadId) => window.api.threads.getMessages(threadId),
+          id
+        )
+        const previousIds = new Set(before.map((message) => message.id))
+        const prior = requests
+        const callKey = `desktop-ui-${enabled ? "on" : "off"}`
+        activeCallKey = callKey
+        const observation: Record<string, unknown> = {
+          callKey,
+          enabled,
+          threadId: id,
+          path: "original ChatContainer composer/send",
+          localModelVisible: true,
+          persistedModelId: selected
+        }
+        diagnosticCalls.push(observation)
+        saveDiagnostic()
+        const composer = owned.locator("textarea.composer-textarea")
+        const send = owned.getByRole("button", { name: "发送消息", exact: true })
+        await composer.fill("Return the deterministic benchmark stream.")
+        assert(await send.isEnabled(), "UI_STREAM_ORIGINAL_SEND_DISABLED")
+        await send.click()
+        const deadline = performance.now() + 45000
+        let finished = false
+        let messages = before
+        while (performance.now() < deadline) {
+          stop()
+          messages = await page.evaluate((threadId) => window.api.threads.getMessages(threadId), id)
+          const newAssistant = messages.some(
+            (message) => message.role === "assistant" && !previousIds.has(message.id)
+          )
+          if (
+            requests === prior + 1 &&
+            newAssistant &&
+            (await send.count()) === 1 &&
+            (await send.isVisible()) &&
+            (await composer.isEnabled()) &&
+            (await owned.getByRole("button", { name: "停止生成", exact: true }).count()) === 0
+          ) {
+            finished = true
+            break
+          }
+          await pause(50)
+        }
+        observation.finished = finished
+        observation.providerRequestsAdded = requests - prior
+        saveDiagnostic()
+        assert(finished, "UI_STREAM_COMPLETION_UNKNOWN")
+        assert.equal(requests, prior + 1, "UI_STREAM_EXPECTS_ONE_PHYSICAL_LOCAL_REQUEST")
+        const newMessages = messages.filter((message) => !previousIds.has(message.id))
+        const answers = newMessages.filter((message) => message.role === "assistant")
+        assert.equal(answers.length, 1, "UI_STREAM_NEW_ASSISTANT_IDENTITY_COUNT")
+        assert.equal(newMessages.filter((message) => message.role === "tool").length, 0)
+        const answer = answers[0]
+        const receipts = serverReceipts.filter((receipt) => receipt.callKey === callKey)
+        assert.equal(receipts.length, 1, "UI_STREAM_LOCAL_RESPONSE_AMBIGUOUS")
+        assert.equal(receipts[0].writes.length, 40)
+        assert.equal(receipts[0].finished, true)
+        assert.equal(answer.content, expected, "UI_STREAM_PERSISTED_TEXT_CHANGED")
+        assert.equal(answer.tool_calls?.length ?? 0, 0, "UI_STREAM_UNEXPECTED_TOOL")
+        const providerSourceId = answer.provider_source_id ?? answer.id
+        assert.equal(providerSourceId, receipts[0].responseId, "UI_STREAM_PROVIDER_ID_CHANGED")
+        if (enabled) {
+          assert(
+            /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(answer.id),
+            "UI_STREAM_CANONICAL_UUID_MISSING"
+          )
+          assert.equal(answer.function_row?.uuid, answer.id, "UI_STREAM_CANONICAL_ROW_MISSING")
+          assert(
+            Number.isSafeInteger(answer.provider_occurrence) && answer.provider_occurrence! > 0,
+            "UI_STREAM_CANONICAL_OCCURRENCE_MISSING"
+          )
+        }
+        const identity = {
+          id: answer.id,
+          providerSourceId,
+          providerOccurrence: answer.provider_occurrence ?? null
+        }
+        accepted.push(identity)
+        observation.identity = identity
+        observation.databaseLength = answer.content.length
+        observation.databaseSha256 = createHash("sha256").update(answer.content).digest("hex")
+        let dom: Awaited<ReturnType<typeof captureDom>>
+        try {
+          dom = await captureUiDom(answer.id)
+        } catch (error) {
+          observation.domUnavailable = error instanceof Error ? error.message : String(error)
+          saveDiagnostic()
+          throw error
+        }
+        observation.dom = dom
+        saveDiagnostic()
+        assert.equal(dom.state, "observed", "UI_STREAM_EXACT_ROW_UNKNOWN")
+        assert("after" in dom && dom.after, "UI_STREAM_TWO_FRAMES_UNKNOWN")
+        assert.equal(dom.after.targetCount, 1, "UI_STREAM_MULTIPLE_EXACT_ROWS")
+        const body = desktopStreamUiBody(expected, dom.after.targetRows[0])
+        observation.body = body
+        saveDiagnostic()
+        assert.equal(body.state, "matched", "UI_STREAM_BODY_NOT_EXACT_SINGLE_ANSWER")
+        const neighbors = dom.after.neighbors
+        for (const earlier of accepted)
+          assert.equal(
+            neighbors.filter((row) => row.messageId === earlier.id).length,
+            1,
+            "UI_STREAM_SAME_TEXT_IDENTITIES_MUST_STAY_DISTINCT"
+          )
+      }
+      const finalMessages = await page.evaluate(
+        (threadId) => window.api.threads.getMessages(threadId),
+        id
+      )
+      const added = finalMessages.filter(
+        (message) => message.role === "assistant" && !originalAssistantIds.has(message.id)
+      )
+      assert.equal(added.length, 2)
+      assert.notEqual(accepted[0].id, accepted[1].id)
+      assert.notEqual(accepted[0].providerSourceId, accepted[1].providerSourceId)
+      await verifyAcceptedDom("after-two-real-ui-calls")
+      assert.equal(requests, 2)
+      await input.select()
+      const reloadedOwned = page.locator(`[data-chat-thread-id="${id}"]`)
+      await reloadedOwned
+        .getByRole("button")
+        .filter({ hasText: "Desktop performance protocol" })
+        .waitFor()
+      const reloaded = await page.evaluate(async (threadId) => {
+        const thread = await window.api.threads.get(threadId)
+        const raw = thread?.metadata
+        return {
+          metadata: typeof raw === "string" ? JSON.parse(raw) : raw,
+          messages: await window.api.threads.getMessages(threadId)
+        }
+      }, id)
+      assert.equal(reloaded.metadata?.modelId, "custom:desktop-perf")
+      assert.equal(
+        reloaded.messages.filter(
+          (message) => message.role === "assistant" && !originalAssistantIds.has(message.id)
+        ).length,
+        2
+      )
+      for (const identity of accepted) {
+        const matching = reloaded.messages.filter((message) => message.id === identity.id)
+        assert.equal(matching.length, 1)
+        const message = matching[0]
+        assert.equal(message.role, "assistant")
+        assert.equal(message.provider_source_id ?? message.id, identity.providerSourceId)
+        assert.equal(message.provider_occurrence ?? null, identity.providerOccurrence)
+        assert.equal(message.content, expected)
+      }
+      await verifyAcceptedDom("after-original-reload-and-selection")
+      await pause(200)
+      assert.equal(requests, 2, "UI_STREAM_RELOAD_MUST_NOT_SEND_ANOTHER_REQUEST")
+      saveDiagnostic()
+      await page.screenshot({ path: join(artifacts, "desktop-real-composer-two-answers.png") })
+      await input.off()
+      input.pass(
+        "diagnostic-only original composer off/on preserves two distinct single answers; no streaming performance qualification"
+      )
+      return
     }
     if (diagnostic) {
       for (const enabled of [false, true]) {
