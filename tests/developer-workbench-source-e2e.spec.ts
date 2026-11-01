@@ -584,7 +584,8 @@ async function main() {
     assert(
       offer &&
         offer.threadId === threadId &&
-        realpathSync(offer.workspace) === realpathSync(fixture.workspace)
+        isSameWorkspacePath(realpathSync(offer.workspace), realpathSync(fixture.workspace)),
+      "WORKBENCH_OFFER_TARGET_MUST_MATCH_THE_NATIVE_WORKSPACE"
     )
     assert.equal(offer.source.provider, runtimeName)
     assert.equal(offer.source.digest, prepared.digest)
@@ -916,6 +917,21 @@ async function main() {
     passed = true
   } catch (cause) {
     error = cause instanceof Error ? cause.message : String(cause)
+    const codeDescriptor =
+      cause && typeof cause === "object"
+        ? Object.getOwnPropertyDescriptor(cause, "code")
+        : undefined
+    const code =
+      codeDescriptor &&
+      "value" in codeDescriptor &&
+      (typeof codeDescriptor.value === "string" || typeof codeDescriptor.value === "number")
+        ? codeDescriptor.value
+        : undefined
+    record("failure", {
+      message: error,
+      code,
+      stack: cause instanceof Error ? cause.stack : undefined
+    })
     if (page) {
       const observed = await page
         .evaluate(() => ({

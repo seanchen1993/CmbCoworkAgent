@@ -2,6 +2,7 @@ import assert from "node:assert/strict"
 import { createHash } from "node:crypto"
 import { readFileSync, realpathSync } from "node:fs"
 import type { Locator } from "playwright"
+import { isSameWorkspacePath } from "../../src/shared/workspace-path"
 
 export function verifyWorkbenchNodeVersionApproval(
   pending: unknown,
@@ -45,7 +46,10 @@ export function verifyWorkbenchNodeVersionApproval(
     "WORKBENCH_ONLY_NODE_VERSION_ALLOWED"
   )
   assert(typeof request.cwd === "string")
-  assert.equal(realpathSync(request.cwd), realpathSync(expected.workspace))
+  assert(
+    isSameWorkspacePath(realpathSync(request.cwd), realpathSync(expected.workspace)),
+    "WORKBENCH_ONLY_OWNED_NATIVE_CWD_ALLOWED"
+  )
   assert.deepEqual(request.env, {}, "WORKBENCH_UNEXPECTED_ENVIRONMENT_OVERLAY")
   assert(
     request.unsetEnv === undefined ||

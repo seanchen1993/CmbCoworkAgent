@@ -41,6 +41,15 @@ function pending(
 try {
   const approved = verifyWorkbenchNodeVersionApproval(pending(), expected)
   assert.match(approved.digest, /^[a-f0-9]{64}$/)
+  let accepted = 1
+  if (process.platform === "win32") {
+    assert.match(
+      verifyWorkbenchNodeVersionApproval(pending({ cwd: workspace.toLowerCase() }), expected)
+        .digest,
+      /^[a-f0-9]{64}$/
+    )
+    accepted++
+  }
   let rejected = 0
   for (const value of [
     pending({ argv: [executable, "-e", "arbitrary command"] }),
@@ -117,7 +126,7 @@ try {
   }
   assert.equal(workbenchNativeStateDetails([detail])[0].observation.status, "unavailable")
   console.log(
-    `PASS workbench exact Node-version approval: 1 accepted, ${rejected + 3} rejected; workspace packet boundaries; no app or process launched`
+    `PASS workbench exact Node-version approval: ${accepted} accepted, ${rejected + 3} rejected; workspace packet boundaries; no app or process launched`
   )
 } finally {
   assert.equal(dirname(realpathSync(workspace)), realpathSync(tmpdir()))
