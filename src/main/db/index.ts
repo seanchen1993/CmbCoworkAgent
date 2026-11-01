@@ -82,6 +82,7 @@ import {
 } from "../services/thread-incarnation"
 import { assertFunctionConversationForkReady } from "./function-conversation-fork-gate"
 import { deleteFunctionConversationThreadDataInTransaction } from "./function-conversation-cleanup"
+import { cleanupOwnedAgentChildren } from "./owned-agent-cleanup"
 import { FUNCTION_CONVERSATION_PROJECTION_COLUMNS,
   type FunctionConversationProjectionColumns } from "./function-conversation-projection-receipt"
 import type { FunctionConversationRef, FunctionConversationRow } from "./function-conversation-store"
@@ -6944,6 +6945,8 @@ export function deleteThread(threadId: string): void {
   const database = getDb()
   const original = getThreadCore(threadId)
   const incarnation = original ? captureThreadIncarnation(original) : undefined
+  // Child conversation cleanup needs the still-present parent identity and native family.
+  cleanupOwnedAgentChildren(database, threadId, deleteThread)
   database.run("BEGIN")
   try {
     if (original && incarnation) deleteFunctionConversationThreadDataInTransaction(database, {

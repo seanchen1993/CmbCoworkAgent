@@ -73,6 +73,7 @@ const bounded = new Set([
   "model.classify",
   "model.fork",
   "mcp.call",
+  "mcp.connect",
   "session.cwd",
   "session.model",
   "session.turns",
@@ -98,6 +99,7 @@ const bounded = new Set([
   "ui.selection",
   "ui.panes",
   "ui.open",
+  "ui.place",
   "ui.close",
   "platform.action",
   "fs.read",
@@ -154,7 +156,6 @@ const metadata = new Set([
 ])
 
 const unavailable = new Set([
-  "mcp.connect",
   "telemetry.log",
   "telemetry.mark",
   "attribution.text",
@@ -202,8 +203,8 @@ export function getFunctionEventSupport(
     note: "已接入发送内容、模型回答和工具返回的真实消息保存流程，可由组件调整正文并供后续任务使用。沿用当前任务的权限和内容保护，不能任意替换以前保存的记录。不同界面的实时反馈仍需继续验证，不代表原版全部功能。"
   }
   if (name === "mcp.connect") return {
-    availability: "unavailable",
-    note: "当前主版本尚未开放组件主动连接服务。已经配置好的 MCP 工具仍可通过原 mcp.call 和 DIY 流程使用；新连接接口待后续完整验证后开放。"
+    availability: "bounded",
+    note: "仅普通聊天中当前 Claw 明确选择且配置摘要一致的宿管 stdio 来源；独立连接句柄，不接收命令、URL或凭证。list/status/disconnect为桌面扩展。HTTP/SSE和没有等价选择证明的项目/子会话尚未开放。旧mcp.call保持原行为。"
   }
   if (["turn.step", "process.spawn"].includes(name)) return {
     availability: "bounded",

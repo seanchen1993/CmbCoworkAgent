@@ -18,6 +18,37 @@ function fixture() {
   }
 }
 
+it("the real return-to-conversation wire appends context without sending or replacing a draft", () => {
+  const file = ts.createSourceFile("ChatContainer.tsx",
+    readFileSync("src/renderer/src/components/chat/ChatContainer.tsx", "utf8"),
+    ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX)
+  let expression: ts.Expression | undefined
+  const visit = (node: ts.Node) => {
+    if (ts.isJsxSelfClosingElement(node) && node.tagName.getText(file) === "ModsDevelopmentPanel") {
+      const attribute = node.attributes.properties.find(item => ts.isJsxAttribute(item) &&
+        item.name.getText(file) === "onReturnToChat")
+      if (attribute && ts.isJsxAttribute(attribute) && attribute.initializer &&
+        ts.isJsxExpression(attribute.initializer)) expression = attribute.initializer.expression
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(file)
+  expect(expression).toBeDefined()
+  const scope = { input: "older render", inputRef: { current: { value: "尚未发送的正文", focus: vi.fn() } },
+    setInput: vi.fn(), promptComposer: { changed: vi.fn() } }
+  const code = ts.transpileModule(`(${expression!.getText(file)})`, {
+    compilerOptions: { target: ts.ScriptTarget.ES2022 }
+  }).outputText
+  // No submit/queue capability is provided: this action must only edit and focus the composer.
+  const returnToChat = runInNewContext(code, scope) as (context?: string) => void
+  returnToChat("当前阶段身份与修改要求：")
+  expect(scope.setInput).toHaveBeenCalledExactlyOnceWith("尚未发送的正文\n\n当前阶段身份与修改要求：")
+  expect(scope.promptComposer.changed).toHaveBeenCalledOnce()
+  returnToChat()
+  expect(scope.setInput).toHaveBeenCalledOnce()
+  expect(scope.inputRef.current.focus).toHaveBeenCalledTimes(2)
+})
+
 it("submits only the repair instruction without consuming composer attachments or draft", () => {
   const f = fixture()
   enqueueCreatorRepair(f)

@@ -2,11 +2,13 @@ import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
 import { DatabaseSync } from "node:sqlite"
-import { AIMessage, HumanMessage, ToolMessage } from "@langchain/core/messages"
+import { AIMessage, AIMessageChunk, HumanMessage, HumanMessageChunk,
+  ToolMessage, ToolMessageChunk } from "@langchain/core/messages"
 import type { Checkpoint, CheckpointMetadata } from "@langchain/langgraph-checkpoint"
 import { afterEach, expect, it } from "vitest"
 import { SqlJsSaver } from "../../checkpointer/sqljs-saver"
 import { readFunctionSessionCheckpoint } from "./session-checkpoint"
+import { readFunctionSessionCheckpointPage } from "./session-checkpoint-page"
 import {
   FunctionSessionTranscriptWindow,
   projectFunctionSessionMessages
@@ -58,6 +60,93 @@ async function fixture(messages: unknown[], inline = false, state: Record<string
   }
   return path
 }
+
+for (const inline of [true, false]) {
+  it(`pages ${inline ? "inline" : "external"} native history larger than the whole-response limit`, async () => {
+    const messages = Array.from({ length: 16 }, (_, index) =>
+      new AIMessage(`${index}:` + "正文".repeat(18000)))
+    const path = await fixture(messages, inline)
+    expect(() => readFunctionSessionCheckpoint(path, "thread", "")).toThrow("MODS_JSON_SIZE")
+    const seen: string[] = []
+    let offset = 0
+    do {
+      const page = readFunctionSessionCheckpointPage(path, "thread", "", { offset, limit: 5 })!
+      expect(Buffer.byteLength(JSON.stringify(page))).toBeLessThan(256 * 1024)
+      expect(page.partial).toBe(false)
+      seen.push(...page.messages.map(message => message.text))
+      if (page.nextOffset === undefined) break
+      expect(page.nextOffset).toBeGreaterThan(offset)
+      offset = page.nextOffset
+    } while (offset < messages.length)
+    expect(seen).toEqual(messages.map(message => message.content))
+  })
+
+  it(`advances past oversized ${inline ? "inline" : "external"} messages without inventing text`, async () => {
+    const path = await fixture([
+      new HumanMessage("start"),
+      new AIMessage("oversize".repeat(150000)),
+      new AIMessage("retained actual answer")
+    ], inline)
+    const first = readFunctionSessionCheckpointPage(path, "thread", "", { offset: 0, limit: 2 })!
+    expect(first).toMatchObject({ messages: [{ role: "user", text: "start" }],
+      nextOffset: 2, skippedMessages: 1, partial: true })
+    const last = readFunctionSessionCheckpointPage(path, "thread", "", {
+      offset: first.nextOffset!, limit: 2, checkpointId: first.checkpointId
+    })!
+    expect(last.messages).toMatchObject([{ text: "retained actual answer" }])
+    expect(last.nextOffset).toBeUndefined()
+  })
+}
+
+it("keeps tool calls and actual results readable across native page boundaries", async () => {
+  const path = await fixture([
+    new AIMessage({ content: "checking", tool_calls: [
+      { id: "page-call", name: "read_file", args: { path: "actual.txt" }, type: "tool_call" }
+    ] }),
+    new ToolMessage({ tool_call_id: "page-call", content: "actual file body" })
+  ])
+  const first = readFunctionSessionCheckpointPage(path, "thread", "", { offset: 0, limit: 1 })!
+  const next = readFunctionSessionCheckpointPage(path, "thread", "", { offset: 1, limit: 1 })!
+  expect(first.messages[0].toolUses).toMatchObject([{ tool_use_id: "page-call", tool: "read_file" }])
+  expect(next.messages[0].toolResults).toMatchObject([
+    { tool_use_id: "page-call", text: "actual file body" }
+  ])
+})
+
+it("retains actual native stream message chunks and their tool evidence after serialization", async () => {
+  const path = await fixture([
+    new HumanMessageChunk({ content: "streamed task" }),
+    new AIMessageChunk({ content: "checking tool", tool_calls: [
+      { id: "stream-call", name: "read_file", args: { path: "proof.txt" }, type: "tool_call" }
+    ] }),
+    new ToolMessageChunk({ content: "native tool proof", tool_call_id: "stream-call" }),
+    new AIMessageChunk({ content: "native final answer" })
+  ])
+  const page = readFunctionSessionCheckpointPage(path, "thread", "", { offset: 0, limit: 10 })!
+  expect(page.messages.map(message => [message.role, message.text])).toEqual([
+    ["user", "streamed task"], ["assistant", "checking tool"], ["user", ""],
+    ["assistant", "native final answer"]
+  ])
+  expect(page.messages[1].toolUses).toMatchObject([{ tool_use_id: "stream-call", tool: "read_file" }])
+  expect(page.messages[2].toolResults).toMatchObject([{ text: "native tool proof" }])
+  expect(page.skippedMessages).toBe(0)
+  expect(readFunctionSessionCheckpoint(path, "thread", "")!.messages!.at(-1)?.text)
+    .toBe("native final answer")
+})
+
+it("rejects stale checkpoint cursors and invalid offsets instead of mixing histories", async () => {
+  const path = await fixture([new HumanMessage("actual")])
+  expect(() => readFunctionSessionCheckpointPage(path, "thread", "", {
+    offset: 0, limit: 50, checkpointId: "other-checkpoint"
+  })).toThrow("MODS_AGENT_CURSOR_CHANGED")
+  expect(() => readFunctionSessionCheckpointPage(path, "thread", "", {
+    offset: 2, limit: 50
+  })).toThrow("MODS_AGENT_CURSOR_CHANGED")
+  for (const invalid of [{ offset: -1, limit: 1 }, { offset: 0, limit: 101 }]) {
+    expect(() => readFunctionSessionCheckpointPage(path, "thread", "", invalid))
+      .toThrow("MODS_AGENT_PAGE_ARGUMENTS")
+  }
+})
 
 for (const inline of [true, false])
   it(`reads complete ${inline ? "inline" : "external"} engine messages without UI truncation`, async () => {

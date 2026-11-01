@@ -3,6 +3,7 @@ import { existsSync, lstatSync, opendirSync, statSync } from "node:fs"
 import { basename, isAbsolute, join, relative, resolve } from "node:path"
 import { serialize } from "node:v8"
 import type { PluginMetadata } from "../types"
+import { readHarnessNativeProjectBinding } from "../../shared/harness-board-types"
 import { assertPackageExtensionCompatibility } from "../plugins/extension-contract"
 import {
   hasAutobizBoardContext,
@@ -645,6 +646,9 @@ function toProjectMetadata(value: unknown): HarnessProjectMetadata | null {
   )
   const projectCreator = creator(value.creator)
   return {
+    ...(value.nativeBinding === undefined ? {} : {
+      nativeBinding: readHarnessNativeProjectBinding(value.nativeBinding)
+    }),
     projectId: boundedStoredText(
       value.projectId,
       HARNESS_PROJECT_TEXT_MAX_CHARS,
@@ -1028,9 +1032,11 @@ export function readHarnessProjectContexts(
       continue
     }
     const adapter = project["harness-adapter"]
-    const rawPlugin = fixedCatalogPlugin(id, pluginById.get(adapter.id) ?? pluginByName.get(adapter.name) ?? null, runtimeSource)
-    const boardConfig = rawPlugin ? readBoardConfig(rawPlugin.path) : null
-    const plugin = rawPlugin && boardConfig?.exists ? projectPluginMetadata(rawPlugin) : null
+    const rawPlugin = fixedCatalogPlugin(id, pluginById.get(adapter.id) ??
+      (project.nativeBinding ? null : pluginByName.get(adapter.name)) ?? null, runtimeSource)
+    const boardConfig = rawPlugin && !project.nativeBinding ? readBoardConfig(rawPlugin.path) : null
+    const plugin = rawPlugin && (project.nativeBinding || boardConfig?.exists)
+      ? projectPluginMetadata(rawPlugin) : null
     const feature = featureProjection
       ? selectedFeatureProjection(project.projectId, featureProjection)
       : null
@@ -1115,8 +1121,13 @@ function toProjectListItem(
   const stored = project["harness-adapter"]
   const adapterId = stored.id.trim()
   const adapterName = stored.name.trim()
-  const plugin = pluginById.get(adapterId) ?? pluginByName.get(adapterName) ?? null
-  const boardCompatibility: HarnessBoardCompatibility = plugin && hostPluginIds.has(plugin.id)
+  const plugin = pluginById.get(adapterId) ?? (project.nativeBinding ? null : pluginByName.get(adapterName)) ?? null
+  const nativeReady = project.nativeBinding?.installedPluginId === plugin?.id &&
+    !!plugin && hostPluginIds.has(plugin.id)
+  const boardCompatibility: HarnessBoardCompatibility = nativeReady
+    ? { status: "host-runtime", compatible: true, appApiVersion: APP_BOARD_API_VERSION,
+        label: "原生项目流程" }
+    : plugin && hostPluginIds.has(plugin.id)
     ? {
         status: "host-runtime", compatible: false, appApiVersion: APP_BOARD_API_VERSION,
         label: "绑定插件已改为原生项目模板",
@@ -1124,6 +1135,7 @@ function toProjectListItem(
       }
     : compatibility(plugin, adapterName, readConfig)
   return {
+    ...(project.nativeBinding ? { nativeBinding: project.nativeBinding } : {}),
     projectId: project.projectId,
     name: project.name,
     description: project.description,
@@ -1149,9 +1161,9 @@ function toProjectListItem(
     },
     ...(project.creator ? { creator: project.creator } : {}),
     boardCompatibility,
-    supportsDeployUnits: boardCompatibility.compatible,
+    supportsDeployUnits: boardCompatibility.compatible && !project.nativeBinding,
     supportsSessionContextInjection:
-      boardCompatibility.compatible && supportsSessionContext(plugin, readConfig),
+      boardCompatibility.compatible && !project.nativeBinding && supportsSessionContext(plugin, readConfig),
     lifecycle: project.lifecycle
   }
 }
@@ -1162,8 +1174,8 @@ function toRegistryItem(
   runtimeMode: "legacy" | "host" = "legacy"
 ): HarnessAdapterRegistryItem {
   const boardCompatibility: HarnessBoardCompatibility = runtimeMode === "host"
-    ? { status: "host-runtime", compatible: false, appApiVersion: APP_BOARD_API_VERSION,
-      label: "原生项目模板", message: "使用原生项目运行时创建和管理；不使用旧版看板协议。" }
+    ? { status: "host-runtime", compatible: true, appApiVersion: APP_BOARD_API_VERSION,
+      label: "原生项目流程", message: "通过项目和需求管理使用插件声明的流程。" }
     : compatibility(plugin, plugin.name, readConfig)
   // A Host may contain ordinary board-named data. Discovery must never execute or
   // advertise its legacy commands, even when those bytes resemble a board config.

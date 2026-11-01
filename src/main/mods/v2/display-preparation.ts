@@ -212,7 +212,7 @@ export class FunctionDisplayPreparationChannel {
       !isModObject(wire.readsNamedState)
     )
       return fail()
-    const sites: readonly string[] = ["Pane", ...FUNCTION_UI_SITES]
+    const sites: readonly string[] = ["Placed", "Pane", ...FUNCTION_UI_SITES]
     const list = (value: ModJson[]): string[] => {
       if (
         value.length > sites.length ||

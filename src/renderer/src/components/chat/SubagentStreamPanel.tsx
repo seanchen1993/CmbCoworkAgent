@@ -1,4 +1,5 @@
 import { SubagentSessionExportButton } from "./SubagentSessionExportButton"
+import { ModsAgentTranscriptPanel } from "./ModsAgentTranscriptPanel"
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
 import { ArrowLeft, Sparkles } from "lucide-react"
 import { MessageBubble } from "./MessageBubble"
@@ -49,6 +50,10 @@ function messageContentLength(content: Message["content"] | undefined): number {
 }
 
 export function SubagentStreamPanel(): React.JSX.Element {
+  const view = useAppStore(state => state.subagentFocusView)
+  return view?.modsView ? <ModsAgentTranscriptPanel key={view.modsView.id} intent={view.modsView} /> : <NativeSubagentStreamPanel />
+}
+function NativeSubagentStreamPanel(): React.JSX.Element {
   const subagentFocusView = useAppStore((state) => state.subagentFocusView)
   const closeSubagentFocusView = useAppStore((state) => state.closeSubagentFocusView)
   const requestOpenRightPanelAgents = useAppStore((state) => state.requestOpenRightPanelAgents)

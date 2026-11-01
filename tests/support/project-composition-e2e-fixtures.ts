@@ -35,6 +35,12 @@ export function projectCompositionEnvironment(root: string) {
   const isolated = mkdtempSync(join(parent, "run-"))
   const workspace = join(isolated, "workspace")
   mkdirSync(workspace)
+  return existingProjectCompositionEnvironment(root, isolated)
+}
+
+/** Only for an explicitly verified prior isolated test run, never a user's profile. */
+export function existingProjectCompositionEnvironment(root: string, isolated: string) {
+  const workspace = join(isolated, "workspace")
   const env: Record<string, string> = {}
   for (const [key, value] of Object.entries(process.env)) {
     if (
@@ -65,7 +71,7 @@ export function projectCompositionEnvironment(root: string) {
     HTTPS_PROXY: "http://127.0.0.1:9",
     NO_PROXY: "127.0.0.1,localhost"
   })
-  return { isolated, workspace, env, artifactRoot: parent }
+  return { isolated, workspace, env, artifactRoot: dirname(isolated) }
 }
 
 /** Suppress presentation and external login before production imports. Business IPC is unchanged. */

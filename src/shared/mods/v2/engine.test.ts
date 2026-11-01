@@ -141,8 +141,11 @@ describe("explicit native Ask structure", () => {
   })
 
   it("rejects hidden or future layout attributes rather than guessing their effect", () => {
+    // Generic Box supports clipping; ancestors of the real answer controls deliberately do not.
+    expect(() => validateFunctionAskTree({
+      type: "Box", props: { overflow: "hidden" }, children: [native]
+    })).toThrow("MODS_UI_ASK_TREE_INVALID")
     for (const props of [
-      { overflow: "hidden" },
       { display: "none" },
       { position: "absolute" },
       {

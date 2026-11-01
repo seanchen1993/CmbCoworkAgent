@@ -135,9 +135,15 @@ describe("Harness catalog reader", () => {
     writeFileSync(join(plugin.path, "board_core/board_config.json"), "ordinary text")
     const result = readHarnessCatalogPage(paths.projects, paths.plugins, { registryLimit: 1 })
     expect(result.registry).toMatchObject([{ id: plugin.id, runtimeMode: "host", enabled: true,
-      pullKnowledgeAvailable: false, boardCompatibility: { status: "host-runtime", compatible: false } }])
+      pullKnowledgeAvailable: false, boardCompatibility: { status: "host-runtime", compatible: true } }])
     expect(result.summary.totalRegistry).toBe(1)
     expect(result.projects[0].boardCompatibility.compatible).toBe(false)
+    const stored = JSON.parse(readFileSync(paths.projects, "utf8"))
+    stored.projects[0].nativeBinding = { engine: "host", installedPluginId: plugin.id }
+    writeFileSync(paths.projects, JSON.stringify(stored))
+    const native = readHarnessCatalogPage(paths.projects, paths.plugins, {})
+    expect(native.projects[0]).toMatchObject({ nativeBinding: { engine: "host", installedPluginId: plugin.id },
+      boardCompatibility: { compatible: true }, supportsDeployUnits: false })
   })
 
   it("lists Host templates without board resources and keeps disabled installation state explicit", async () => {
@@ -194,7 +200,7 @@ describe("Harness catalog reader", () => {
     expect(result.projects[0].harnessAdapter.id).toBe("adapter-0")
     expect(result.projects[0].boardCompatibility.compatible).toBe(true)
     expect(result.registry[0]).toMatchObject({ id: "adapter-0", runtimeMode: "legacy", boardCompatibility: { compatible: true } })
-    expect(result.registry.slice(1).every((row) => row.runtimeMode === "host" && !row.boardCompatibility.compatible)).toBe(true)
+    expect(result.registry.slice(1).every((row) => row.runtimeMode === "host" && row.boardCompatibility.compatible)).toBe(true)
     expect(result.registryNextCursor).not.toBeNull()
     expect(Buffer.byteLength(JSON.stringify({ projects: result.projects, registry: result.registry }), "utf8")).toBeLessThanOrEqual(16000)
     const next = readHarnessCatalogPage(paths.projects, paths.plugins, {

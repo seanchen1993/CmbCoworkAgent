@@ -57,6 +57,24 @@ describe("development trial explanations", () => {
       developmentCapabilitySummary(["session.send", "session.messages", "clock.every", "ui.copy"])
     ).toEqual(["创建运行期间的定时任务", "其他权限（见完整列表）"])
   })
+  it("explains new display, connection and child permissions without granting them", () => {
+    expect(developmentCapabilitySummary([
+      "ui.place", "mcp.list", "mcp.status", "mcp.connect", "mcp.call", "mcp.disconnect",
+      "agent.list", "agent.register", "agent.spawn", "agent.status", "agent.messages",
+      "agent.stop", "ui.view"
+    ])).toEqual([
+      "在聊天中显示面板和提示",
+      "查看已选 MCP 服务和所属连接状态",
+      "连接、调用或断开当前明确选择的 MCP 服务",
+      "查看可用的助手",
+      "定义或创建子任务，可能调用模型和工具",
+      "查看本灵件子任务的进度和原文",
+      "请求停止本灵件创建的子任务",
+      "按用户操作只读查看子任务"
+    ])
+    expect(developmentCapabilitySummary(["mcp.status", "agent.status"]).join(" "))
+      .not.toMatch(/创建|停止|断开/)
+  })
   it("distinguishes real activation from result verification and never retries unknown effects", () => {
     expect(developmentNextStep({ phase: "active", validation: "authorized-real" } as DevelopmentTrialStatus))
       .toContain("读取实际状态")

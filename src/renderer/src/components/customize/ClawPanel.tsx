@@ -31,6 +31,7 @@ import type { SimpleAuthoringPracticeIntent } from "@/lib/simple-authoring-inten
 import { goToConfigurationThread, useConfigurationDraft } from "@/lib/configuration-target"
 import { ModsUsageSetup } from "./ModsUsageSetup"
 import { ModsUsageSettingsEntry } from "./ModsUsageSettingsEntry"
+import { McpConnectionStatus } from "./McpConnectionStatus"
 
 const empty = (): ClawProfile => ({
   id: flowDraftId("claw"),
@@ -85,7 +86,7 @@ export function ClawPanel({
     />
   ) : (
     <p className="p-6 text-sm text-muted-foreground">
-      请在上方选择带项目目录的本地聊天，再来组合插件。
+      请在上方选择带本地目录的聊天，再配置或组合 Mods 功能。
     </p>
   )
 }
@@ -101,7 +102,15 @@ function ClawSettings({
   workspaceHint?: string | null
   practiceIntent?: SimpleAuthoringPracticeIntent
 }) {
-  const [advancedOpen, setAdvancedOpen] = useState(false)
+  const requestedSection = useAppStore(state => state.customizeInitialSection)
+  const [advancedOpen, setAdvancedOpen] = useState(requestedSection === "mcp")
+  const [mcpSelectionOpen, setMcpSelectionOpen] = useState(requestedSection === "mcp")
+  const mcpSelectionRef = useRef<HTMLDivElement>(null)
+  const chooseMcpSources = () => { setAdvancedOpen(true); setMcpSelectionOpen(true) }
+  useEffect(() => { if (requestedSection === "mcp") chooseMcpSources() }, [requestedSection])
+  useEffect(() => {
+    if (advancedOpen && mcpSelectionOpen) mcpSelectionRef.current?.scrollIntoView({ block: "nearest" })
+  }, [advancedOpen, mcpSelectionOpen])
   const [assemblyOpen, setAssemblyOpen] = useState(false)
   const [assemblyVisited, setAssemblyVisited] = useState(false)
   const [assemblySource, setAssemblySource] = useState<string>()
@@ -455,7 +464,7 @@ function ClawSettings({
             onClick={() => showAssembly()}>
             <strong>从 Mods 组装新插件</strong>
             <span className="mt-1 block text-xs text-muted-foreground">
-              组合 AutoBiz 业务步骤和自己的界面扩展，生成、检查后再安装新插件。
+              组合业务动作、事件规则和界面扩展，检查后保存为可复用的插件。
             </span>
           </button>
         </div>
@@ -467,6 +476,8 @@ function ClawSettings({
         </div>
       </header>
       <ModsUsageSetup threadId={threadId} workspaceHint={workspaceHint ?? view?.workspace} />
+      {view?.workspace && <McpConnectionStatus key={JSON.stringify([accountRevision, threadId, view.workspace])}
+        threadId={threadId} workspace={view.workspace} onChooseSources={chooseMcpSources} />}
       {assemblyVisited && <div hidden={!assemblyOpen} inert={!assemblyOpen}>
         <BusinessModAssemblyPanel threadId={threadId} workspace={workspaceHint ?? view?.workspace}
           initialPluginId={assemblySource} active={assemblyOpen} />
@@ -951,7 +962,8 @@ function ClawSettings({
                     </p>
                   ))}
                 </section>
-                <details className="space-y-4 rounded-xl border p-3">
+                <details className="space-y-4 rounded-xl border p-3" open={mcpSelectionOpen}
+                  onToggle={event => setMcpSelectionOpen(event.currentTarget.open)}>
                   <summary className="cursor-pointer text-sm font-medium">
                     更多设置：技能、工具、模型与步骤
                   </summary>
@@ -970,7 +982,7 @@ function ClawSettings({
                     unavailable={!sources}
                     onChange={(skills) => setDraft({ ...draft, skills })}
                   />
-                  <ClawSourceSelector
+                  <div ref={mcpSelectionRef}><ClawSourceSelector
                     title="连接工具"
                     description="选择助手可使用的外部服务，例如数据库或文档搜索。未选服务不能被这套组合调用，应用本身仍可能保持连接。"
                     entries={sources?.mcp ?? []}
@@ -978,7 +990,7 @@ function ClawSettings({
                     disabled={disabled}
                     unavailable={!sources}
                     onChange={(mcp) => setDraft({ ...draft, mcp })}
-                  />
+                  /></div>
                   <section className="space-y-3 rounded-xl border bg-muted/20 p-4">
                     <h3 className="text-sm font-medium">可选：指定使用的模型</h3>
                     <p className="text-xs text-muted-foreground">

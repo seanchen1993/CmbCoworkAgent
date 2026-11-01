@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react"
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react"
 import { createPortal } from "react-dom"
 import { ArrowRight, Settings2, Sparkles, X } from "lucide-react"
 import {
@@ -22,6 +22,8 @@ import type { ModCommandDescriptor } from "../../../../shared/mods/types"
 import { chatClawEffectiveView } from "@/lib/chat-claw-effective-view"
 import { ModsUsageSettingsEntry } from "../customize/ModsUsageSettingsEntry"
 import { ClawRecoveryApproval } from "./ClawRecoveryApproval"
+import { chatFunctionGroups } from "@/lib/chat-function-groups"
+import { useChatPluginAttribution } from "@/lib/use-chat-plugin-attribution"
 
 export function ClawSidebar({
   threadId,
@@ -86,6 +88,10 @@ export function ClawSidebar({
     []
   )
   const visible = useAppStore((state) => state.rightModule === "claw" && !state.rightPanelCollapsed)
+  const installedPlugins = useChatPluginAttribution(visible && tab === "configuration")
+  const sourceGroups = useMemo(() => chatFunctionGroups(
+    effective?.plugins ?? [], installedPlugins
+  ), [effective?.plugins, installedPlugins])
   const [commandView, setCommandView] = useState<{
     scope: string
     commands: ModCommandDescriptor[]
@@ -177,7 +183,7 @@ export function ClawSidebar({
         {(
           [
             ["run", "当前任务"],
-            ["results", "结果"],
+            ["results", "输出与面板"],
             ["configuration", "高级设置"]
           ] as const
         ).map(([id, name]) => (
@@ -194,9 +200,6 @@ export function ClawSidebar({
           </button>
         ))}
       </nav>
-      <div className="border-b px-4 py-2">
-        <ModsUsageSettingsEntry />
-      </div>
       <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-4">
         <div hidden={tab !== "run"} inert={tab !== "run"} className="space-y-4">
           {taskOverview}
@@ -242,46 +245,41 @@ export function ClawSidebar({
           className="space-y-4 text-sm"
         >
           <p className="text-xs leading-6 text-muted-foreground">
-            这里用于手动调整功能和预设。日常使用可以直接在聊天中描述需求。
+            查看本聊天可用的功能，或按需调整配置。
           </p>
+          <ModsUsageSettingsEntry disabled={disabled} />
           {binding && recovery.open && recovery.scope === recoveryScope && (
             <ClawRecoveryApproval threadId={threadId} binding={binding} disabled={disabled}
               onReload={() => flow.load()} />
           )}
-          <details className="rounded-xl border p-4">
-            <summary className="cursor-pointer text-sm font-medium">高级：为下一条消息使用预设任务</summary>
-            <div className="mt-3">
-              <ChatFlowControls flow={flow} disabled={disabled} onStart={onStart} showRun={false} />
-            </div>
-          </details>
           <div className="space-y-3 rounded-xl border p-4">
             {binding && (
               <p className="text-[11px] font-medium text-muted-foreground">
                 {usingSelection
-                  ? profile ? "这段聊天正在使用" : "这段聊天使用默认功能"
-                  : profile ? "这段聊天已选择，当前未生效" : "当前没有生效的灵件"}
+                  ? profile ? "已应用自定义设置" : "沿用默认设置"
+                  : profile ? "当前选择未生效" : "Mods 功能当前不可用"}
               </p>
             )}
             <h3 className="break-words font-semibold">
-              {profile?.name ?? (binding ? "默认聊天设置" : "正在读取聊天设置")}
+              {binding ? "本聊天可用功能" : "正在读取聊天设置"}
             </h3>
             {binding && !profile && (
               <p className="text-xs leading-6 text-muted-foreground">
-                尚未选择专用组合，沿用已授权的默认功能。要调整使用范围，可在创造者模式直接描述。
+                使用已启用且获准在本聊天使用的功能。
               </p>
             )}
             {binding && !usingSelection && (
               <div role="alert" className="space-y-1 text-xs text-destructive">
                 <p>
                   {effective?.state === "disabled"
-                    ? "功能已关闭，请点击上方“插件”启用。"
-                    : "这段聊天的组合暂不可用，请在‘管理助手组合’中核对。"}
+                    ? "Mods 功能已关闭，可在“管理已安装插件”中核对。"
+                    : "当前功能选择暂不可用，请展开下方手动管理入口核对。"}
                 </p>
                 {effective?.issues.map((issue) => <p key={issue}>{issue}</p>)}
               </div>
             )}
             <div className="flex flex-wrap gap-1.5">
-              {(profile?.capabilities ?? effective?.plugins ?? []).map((capability) => (
+              {sourceGroups.available.map((capability) => (
                 <span
                   key={capability.pluginId}
                   className="max-w-full break-all rounded-md bg-muted px-2 py-1 text-xs"
@@ -293,10 +291,23 @@ export function ClawSidebar({
                   ) && " · 未启用功能"}
                 </span>
               ))}
-              {profile && !profile.capabilities.length && (
-                <span className="text-xs text-muted-foreground">未添加灵件，可以照常聊天。</span>
+              {usingSelection && !effective?.plugins.length && (
+                <span className="text-xs text-muted-foreground">没有额外的 Mods 功能，仍可正常聊天。</span>
               )}
             </div>
+            {sourceGroups.dependencies.length > 0 && <details className="text-xs">
+              <summary className="cursor-pointer">项目依赖组件（{sourceGroups.dependencies.length}）</summary>
+              <p className="mt-2 text-muted-foreground">这些组件由项目引用。可用不代表项目已启动。</p>
+              <ul className="mt-2 space-y-2">
+                {sourceGroups.dependencies.map(({ source, projects }) => <li key={source.pluginId}>
+                  <span className="break-all font-medium">{source.name}</span>
+                  <span className="block text-muted-foreground">由 {projects.join("、")} 引用</span>
+                </li>)}
+              </ul>
+            </details>}
+            {usingSelection && !!effective?.plugins.length && <p className="text-xs text-muted-foreground">
+              此处列出可用能力；实际执行请看“当前任务”和运行记录。
+            </p>}
             {usingSelection && effective?.plugins.some((item) => item.components?.length) && (
               <details className="text-xs">
                 <summary className="cursor-pointer">本聊天使用的具体功能</summary>
@@ -311,21 +322,16 @@ export function ClawSidebar({
             )}
             {profile && (
               <details key={profile.id}>
-                <summary className="cursor-pointer text-xs">查看这套组合的设置</summary>
+                <summary className="cursor-pointer text-xs">查看技能、工具与模型</summary>
                 <dl className="mt-3 space-y-2 text-xs">
+                  <div><dt className="text-muted-foreground">已应用配置</dt><dd>{profile.name}</dd></div>
                   <div>
-                    <dt className="text-muted-foreground">做事方法（技能）</dt>
+                    <dt className="text-muted-foreground">技能范围</dt>
                     <dd className="mt-1">{clawSourceSummary(profile?.skills, "技能")}</dd>
-                    <dd className="mt-1 text-muted-foreground">
-                      告诉助手怎样完成任务，例如代码检视。
-                    </dd>
                   </div>
                   <div>
                     <dt className="text-muted-foreground">可调用的工具</dt>
                     <dd className="mt-1">{clawSourceSummary(profile?.mcp, "工具")}</dd>
-                    <dd className="mt-1 text-muted-foreground">
-                      让助手连接文件、数据库或其他服务。
-                    </dd>
                   </div>
                   <div>
                     <dt className="text-muted-foreground">回答问题的模型</dt>
@@ -362,15 +368,7 @@ export function ClawSidebar({
                     </div>
                   )}
                 </dl>
-                <p className="mt-3 text-[11px] leading-5 text-muted-foreground">
-                  在“助手组合”里修改后，点击“应用到当前对话”，这段聊天才会使用新设置。
-                </p>
               </details>
-            )}
-            {profile && (
-              <p className="text-[11px] leading-5 text-muted-foreground">
-                这套组合的功能选择只用于这段聊天。
-              </p>
             )}
             {profile?.models?.default && defaultModel.note && (
               <p className="text-[11px] leading-5 text-muted-foreground">
@@ -379,6 +377,12 @@ export function ClawSidebar({
               </p>
             )}
           </div>
+          <details className="rounded-xl border p-4">
+            <summary className="cursor-pointer text-sm font-medium">高级：为下一条消息使用预设任务</summary>
+            <div className="mt-3">
+              <ChatFlowControls flow={flow} disabled={disabled} onStart={onStart} showRun={false} />
+            </div>
+          </details>
           {effective?.plugins
             .filter(
               (item) =>
@@ -426,9 +430,9 @@ export function ClawSidebar({
               )
             })}
           <div className="rounded-xl border bg-muted/20 p-4">
-            <h3 className="font-medium">{profile ? "想调整这套组合？" : "想把几个插件一起用？"}</h3>
+            <h3 className="font-medium">想创建或调整 Mods 功能？</h3>
             <p className="mt-2 text-xs leading-6 text-muted-foreground">
-              直接描述想保留、增加或移除的功能，助手会结合当前设置完成调整。
+              在创造者对话中说明想增加的界面、工具、事件规则或流程；也可以组合已有能力。
             </p>
             <button
               type="button"
@@ -441,7 +445,7 @@ export function ClawSidebar({
                 creatorPending.current = ticket
                 setCreatorAction({ scope, busy: true, error: "" })
                 const names = (profile?.capabilities ?? effective?.plugins ?? []).map((item) => item.name)
-                const prompt = `请调整当前聊天的助手组合${profile ? `“${profile.name}”` : "（当前使用默认功能）"}。当前选择的功能：${names.join("、") || "未选择具体功能"}。保留我没有要求修改的功能、模型与执行步骤，先读取当前真实设置再调整。我的调整需求：`
+                const prompt = `请帮我创建或调整 Mods 功能。当前聊天的设置${profile ? `为“${profile.name}”` : "沿用默认功能"}，已选择功能：${names.join("、") || "未选择具体功能"}。先读取真实设置，根据我的目标决定创建独立能力、修改界面或流程，还是组合现有能力；保留我没有要求修改的设置。我的调整需求：`
                 try {
                   await onRequestCreator(prompt)
                   if (latestCreatorScope.current === scope && creatorPending.current === ticket) close()
@@ -457,7 +461,7 @@ export function ClawSidebar({
               }}
             >
               <Sparkles className="size-3.5" />
-              {creatorBusy ? "正在进入创造者模式…" : "用对话调整组合"}
+              {creatorBusy ? "正在进入创造者模式…" : "用对话创作 Mods"}
               <ArrowRight className="size-3.5" />
             </button>
             {creatorAction.scope === creatorScope && creatorAction.error &&
@@ -479,10 +483,10 @@ export function ClawSidebar({
           className="space-y-4"
         >
           <p className="text-xs text-muted-foreground">
-            已产生的结果显示在这里。任务进度和需要你确认的事项在“当前任务”中查看。
+            查看命令记录和插件提供的交互面板。面板可能是操作入口；它本身不代表任务已完成或通过检查。
           </p>
           <details open>
-            <summary className="cursor-pointer text-sm">命令与完成记录</summary>
+            <summary className="cursor-pointer text-sm">命令与任务记录</summary>
             {records}
           </details>
           <details onToggle={(event) => setOverviewOpen(event.currentTarget.open)}>

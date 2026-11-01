@@ -20,6 +20,7 @@ function fixture() {
   }
   service.status.mockReturnValue({ workspace: "workspace" })
   const actions = {
+    listProjectPromptDrafts: vi.fn(), readProjectStagePrompts: vi.fn(), saveProjectStagePrompt: vi.fn(),
     importSourceSet: vi.fn(), advanceSourceSet: vi.fn(), cancelSourceSet: vi.fn(),
     installSourceSetDependency: vi.fn(), reconcileSourceSetDependency: vi.fn(),
     undoComposition: vi.fn(),
@@ -52,6 +53,29 @@ function fixture() {
 }
 
 describe("development IPC authority", () => {
+  it("allows only stage body edits with pinned identity and no caller-selected files", () => {
+    const f = fixture()
+    const scope = { threadId: "creator", expectedWorkspace: "workspace" }
+    const save = { ...scope, id: "report", revision: 2, sourceDigest: "a".repeat(64),
+      stageId: "definition", body: "Updated instructions" }
+    for (const [channel, action, input] of [
+      ["list-project-prompt-drafts", f.actions.listProjectPromptDrafts, scope],
+      ["read-project-stage-prompts", f.actions.readProjectStagePrompts, { ...scope, id: "report" }],
+      ["save-project-stage-prompt", f.actions.saveProjectStagePrompt, save]
+    ] as const) {
+      expect(() => f.run(channel, input, {} as IpcMainInvokeEvent)).toThrow("UNTRUSTED")
+      for (const extra of [{ path: "skills/other/SKILL.md" }, { files: [] }, { passed: true }])
+        expect(() => f.run(channel, { ...input, ...extra })).toThrow("DEVELOPMENT_INPUT")
+      expect(action).not.toHaveBeenCalled()
+      f.run(channel, input)
+      expect(action).toHaveBeenCalledExactlyOnceWith(input)
+    }
+    for (const patch of [{ revision: 0 }, { sourceDigest: "fake" }, { stageId: "../other" },
+      { body: "x".repeat(65537) }])
+      expect(() => f.run("save-project-stage-prompt", { ...save, ...patch }))
+        .toThrow("DEVELOPMENT_INPUT")
+  })
+
   it("admits only exact native delivery and modularization identities without caller paths or PASS facts", () => {
     const f = fixture()
     const scope = { threadId: "creator", expectedWorkspace: "workspace" }

@@ -16,6 +16,7 @@ import { nativeMarkdownLeaves, type FunctionMarkdownLinkRegistry } from "./markd
 import { captureFunctionMarkdownDisplay, type FunctionMarkdownDisplayScope } from "./markdown-display-scope"
 import { isFunctionGuestLoadFailure } from "./client-load-failure"
 import { isFunctionGuestInvokeFailure } from "./guest-invoke-failure"
+import { captureUserViewAction } from "./user-view-action"
 import {
   validateFunctionTree,
   type FunctionClientAction,
@@ -81,7 +82,7 @@ interface Instance {
   backgroundRunning: boolean
   backgroundEvents: Map<string, { input: ModObject; generation: string }>
   renderStreak: number
-  pendingMessage?: { data: ModJson; generation: string }
+  pendingMessage?: { data: ModJson; generation: string; userAction?: ReturnType<typeof captureUserViewAction> }
   pendingDrawResult?: { dirty: boolean; message?: { data: ModJson; generation: string } }
   frame?: ReturnType<typeof setTimeout>
   timers: Map<string, { ms: number; timer: ReturnType<typeof setInterval> }>
@@ -534,7 +535,7 @@ export class FunctionClients {
     if (pending.generation !== instance.parentGeneration) return
     const data = await this.host.publish(pending.data)
     this.assert(instance)
-    const answer = await this.host.message(
+    const invoke = () => this.host.message(
       instance.snapshot.plugin,
       {
         surface: "desktop",
@@ -546,6 +547,7 @@ export class FunctionClients {
       },
       instance.controller.signal
     )
+    const answer = await (pending.userAction ? pending.userAction(invoke) : invoke())
     this.assert(instance)
     if (!isModObject(answer)) throw new ModFunctionError("MODS_CLIENT_MESSAGE_RESULT")
     if (Object.hasOwn(answer, "props")) {
@@ -1076,7 +1078,7 @@ export class FunctionClients {
             !(node.props.options as ModObject[]).some((o) => o.value === e.value)
           )
             throw new ModFunctionError("MODS_CLIENT_ACTION")
-          await this.update(instance, {
+          const update = () => this.update(instance, {
             kind: "control",
             handle: action.handle!,
             event: e,
@@ -1089,6 +1091,20 @@ export class FunctionClients {
                     ? "onSubmit"
                     : "onInput"
           })
+          if (discrete) {
+            const old = new Set([instance.pendingMessage, instance.pendingDrawResult?.message])
+            const userAction = captureUserViewAction(instance.snapshot.plugin, () => {
+              this.assert(instance)
+              if (instance.parentGeneration !== action.generation)
+                throw new ModFunctionError("MODS_UI_STALE_ACTION")
+            })
+            await update()
+            // Keep the original asynchronous Client posting lifecycle, granting only this
+            // control's newly produced message. Earlier queued output cannot borrow the click.
+            if (instance.pendingMessage && !old.has(instance.pendingMessage))
+              instance.pendingMessage.userAction = userAction
+          }
+          else await update()
           return event === "ui.press"
             ? { element: e.element }
             : { element: e.element, value: e.value }

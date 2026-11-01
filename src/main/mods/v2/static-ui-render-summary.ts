@@ -39,7 +39,7 @@ export interface StaticUiRenderProof {
   readonly reusableComponents: readonly string[]
   readonly readsNamedState: StaticNamedStateReads
 }
-const components = new Set<string>(["Pane", ...FUNCTION_UI_SITES])
+const components = new Set<string>(["Placed", "Pane", ...FUNCTION_UI_SITES])
 const digest = (code: string): string => createHash("sha256").update(code).digest("hex")
 
 // These are the current compiler's helpers, not arbitrary guest initializers.

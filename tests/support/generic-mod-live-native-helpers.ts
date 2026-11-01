@@ -94,7 +94,7 @@ export function genericModNativeJourney(
     assert(currentCandidates.some((candidate) => candidate?.phase === "needs-approval"),
       "A candidate must be active or require native confirmation")
     await openPanel()
-    await panel().getByRole("button", { name: "确认并应用到这段聊天", exact: true }).click()
+    await panel().getByRole("button", { name: "确认并开始聊天试用", exact: true }).click()
     await until("ACTIVE", async () => {
       const current = await status()
       const candidates = pending.map((expected) => current.trials.find((trial) =>

@@ -1,6 +1,6 @@
 import type { ModObject } from "../types"
 import { ModFunctionError } from "./contracts"
-import { FUNCTION_UI_SITES } from "./sites"
+import { isFunctionUiRenderComponent } from "./sites"
 
 export type FunctionUiFaultPhase = "load" | "render" | "run"
 
@@ -23,7 +23,7 @@ export function validateFunctionUiFault(value: ModObject): void {
     Object.keys(value).length !== keys.length ||
     keys.some((key) => !Object.hasOwn(value, key)) ||
     value.surface !== "desktop" ||
-    (value.component !== "Pane" && !FUNCTION_UI_SITES.some((site) => site === value.component)) ||
+    !isFunctionUiRenderComponent(value.component) ||
     !["load", "render", "run"].includes(String(value.phase)) ||
     ["requestId", "element", "module"].some(
       (key) => typeof value[key] !== "string" || !value[key] || (value[key] as string).length > 1024

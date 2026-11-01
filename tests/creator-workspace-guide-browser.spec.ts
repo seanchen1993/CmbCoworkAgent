@@ -46,7 +46,7 @@ async function main() {
       function CoveredGuide(){const ref=React.useRef(null);React.useEffect(()=>{document.getElementById('covered').dataset.ready='true'},[]);
         return <div id="covered" inert aria-hidden="true"><section ref={ref}><h2 data-visible-target>被遮盖的工作区</h2>
           <AnchoredGuide active config={visibilityConfig} rootRef={ref} steps={visibilitySteps}/></section></div>}
-      window.fixture={calls,render,covered:()=>root.render(<React.StrictMode><CoveredGuide/></React.StrictMode>),state:()=>state({guideId:"mods-creator-workspace-stage-debug",revision:2}),
+      window.fixture={calls,render,covered:()=>root.render(<React.StrictMode><CoveredGuide/></React.StrictMode>),state:()=>state({guideId:"mods-creator-workspace-stage-debug",revision:3}),
         noPreview:()=>{delete window.api.harnessBoard.localProjects.preview;render()},
         ordinary:()=>{current.mode="normal";delete current.projectTrial;current.drafts=[];current.trials=[];render("ordinary")},
         nativeWork:()=>{current.projectTrial={id:"native-request",draftId:"native-draft",name:"Native candidate",revision:1,digest:"b".repeat(64),goal:"Native creation"};listeners.forEach(fn=>fn({threadId:"ordinary"}))},
@@ -116,9 +116,9 @@ async function main() {
       1,
       "StrictMode must not consume the first-use display twice"
     )
-    const ids = ["overview", "create", "trial", "acceptance", "debug", "delivery", "components"]
+    const ids = ["overview", "create", "trial", "acceptance", "delivery"]
     for (const [index, id] of ids.entries()) {
-      await guide.getByText(`第 ${index + 1} / 7 步`, { exact: true }).waitFor()
+      await guide.getByText(`第 ${index + 1} / 5 步`, { exact: true }).waitFor()
       await page.locator(`[data-ui-guide-current="${id}"]`).waitFor({ state: "visible" })
       const bounds = await guide.boundingBox()
       assert(
@@ -129,25 +129,19 @@ async function main() {
           bounds.y + bounds.height <= 900,
         "Anchored help must remain inside the viewport"
       )
-      if (id === "debug") {
-        await workspace.getByRole("region", { name: "阶段隔离调试", exact: true }).waitFor()
-        assert.equal(
-          await page.evaluate("window.fixture.calls.some(row=>row[0]==='debug-read')"),
-          true
-        )
-        await page.screenshot({ path: join(output, "stage-debug-guide.png") })
-      }
+      assert.equal(await page.evaluate("window.fixture.calls.some(row=>row[0]==='debug-read')"), false,
+        "the normal guide must not open advanced snapshot tooling")
       if (index < ids.length - 1)
         await guide.getByRole("button", { name: "下一步", exact: true }).click()
     }
     await guide.getByRole("button", { name: "上一步", exact: true }).click()
-    await guide.getByText("第 6 / 7 步", { exact: true }).waitFor()
+    await guide.getByText("第 4 / 5 步", { exact: true }).waitFor()
     await guide.getByRole("button", { name: "下一步", exact: true }).click()
     await guide.getByRole("button", { name: "完成指引", exact: true }).click()
     await guide.waitFor({ state: "hidden" })
     await workspace.waitFor()
     await workspace.getByRole("button", { name: "使用指引", exact: true }).click()
-    await guide.getByText("第 1 / 7 步", { exact: true }).waitFor()
+    await guide.getByText("第 1 / 5 步", { exact: true }).waitFor()
     await guide.getByRole("button", { name: "跳过指引", exact: true }).click()
     await guide.waitFor({ state: "hidden" })
     await workspace.getByRole("button", { name: "使用指引", exact: true }).click()
@@ -173,11 +167,11 @@ async function main() {
     // Chat help now opens the application controls walkthrough, not this workspace.
     await page.locator('[data-app-guide="workspace"]').click()
     await workspace.getByRole("button", { name: "使用指引", exact: true }).click()
-    await guide.getByText("第 1 / 7 步", { exact: true }).waitFor()
+    await guide.getByText("第 1 / 5 步", { exact: true }).waitFor()
     await guide.getByRole("button", { name: "关闭使用指引", exact: true }).click()
     await page.setViewportSize({ width: 390, height: 740 })
     await workspace.getByRole("button", { name: "使用指引", exact: true }).click()
-    await guide.getByText("第 1 / 7 步", { exact: true }).waitFor()
+    await guide.getByText("第 1 / 5 步", { exact: true }).waitFor()
     const mobile = await guide.boundingBox()
     assert(
       mobile &&
@@ -192,11 +186,8 @@ async function main() {
     await workspace.getByRole("button", { name: "使用指引", exact: true }).click()
     for (let index = 0; index < 4; index++)
       await guide.getByRole("button", { name: "下一步", exact: true }).click()
-    await guide.getByRole("heading", { name: "从阶段快照隔离调试" }).waitFor()
-    assert.match(
-      await page.locator('[data-ui-guide-current="debug"]').innerText(),
-      /高级：独立项目试用/
-    )
+    await guide.getByRole("heading", { name: "保存成独立的新插件" }).waitFor()
+    assert.equal(await page.evaluate("window.fixture.calls.some(row=>row[0]==='debug-read')"), false)
     await page.evaluate("window.fixture.render('other')")
     await guide.waitFor({ state: "hidden" })
     await page.evaluate("window.fixture.covered()")
@@ -312,7 +303,7 @@ async function main() {
     )
     assert.deepEqual(errors, [])
     console.log(
-      "PASS creator anchored guide: first use, seven real destinations, stage disclosure, back/skip/close/Escape, reload persistence, manual reopen and mobile; no business actions"
+      "PASS creator anchored guide: first use, five actionable destinations, no advanced snapshot detour, back/skip/close/Escape, reload persistence, manual reopen and mobile; no business actions"
     )
   } finally {
     await browser.close()

@@ -243,7 +243,7 @@ async function activate() {
   const chat = page!.locator(`[data-chat-thread-id=${JSON.stringify(threadId)}]`)
   if (expected.phase === "needs-approval") {
     if (!(await panel().isVisible())) await chat.locator('[data-app-guide="workspace"]').click()
-    await panel().getByRole("button", { name: "确认并应用到这段聊天", exact: true }).click()
+    await panel().getByRole("button", { name: "确认并开始聊天试用", exact: true }).click()
   } else
     assert.equal(
       expected.phase,

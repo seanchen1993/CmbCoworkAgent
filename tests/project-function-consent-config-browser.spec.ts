@@ -166,6 +166,8 @@ async function main() {
     assert.equal(await settings.evaluate((element) => (element as HTMLDetailsElement).open), true)
 
     // A late review that changes readiness still surfaces required configuration after a close.
+    await form.locator(":scope > summary").click()
+    assert.equal(await form.evaluate((element) => (element as HTMLDetailsElement).open), false)
     await page.evaluate(() => (window as unknown as FixtureWindow).projectConfig.holdReview())
     const reads = await page.evaluate(
       () => (window as unknown as FixtureWindow).projectConfig.reviewReads
@@ -184,6 +186,11 @@ async function main() {
       return settings instanceof HTMLDetailsElement && settings.open
     })
     await region.getByRole("alert").filter({ hasText: "请先补齐上方必填参数" }).waitFor()
+    assert.equal(
+      await form.evaluate((element) => (element as HTMLDetailsElement).open),
+      true,
+      "Newly missing configuration reopens the actual parameter fields"
+    )
 
     // The existing project/version key and a changed retained source each reset expansion.
     await page.evaluate(() =>

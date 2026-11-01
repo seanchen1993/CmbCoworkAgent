@@ -13,6 +13,8 @@ type Props = {
   status?: DevelopmentStatus["sourceSet"]
   api: DevelopmentApi
   onStatus(value: DevelopmentStatus): void
+  /** Navigation only; the candidate and original native gates remain authoritative. */
+  onNavigate?(step: "trial" | "delivery"): void
 }
 export function CreatorSourceSetCard(props: Props) {
   const account = useAppStore((state) => state.accountRevision)
@@ -23,7 +25,7 @@ export function CreatorSourceSetCard(props: Props) {
     />
   )
 }
-function ScopedSourceSetCard({ threadId, workspace, status, api, onStatus }: Props) {
+function ScopedSourceSetCard({ threadId, workspace, status, api, onStatus, onNavigate }: Props) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState("")
   const [busyDependencies, setBusyDependencies] = useState<ReadonlySet<string>>(() => new Set())
@@ -126,7 +128,7 @@ function ScopedSourceSetCard({ threadId, workspace, status, api, onStatus }: Pro
   return (
     <section aria-label="导入项目作者源码" className="space-y-3 rounded border p-3">
       <p className="text-sm">
-        从作者源码目录安装模板及所需能力。每个依赖分别安装、授权，随后自动编译；安装不代表业务验收通过。
+        选择开发者提供的插件源码文件夹，按下方提示安装和配置所需组件，再生成可保存的插件。只安装现成 ZIP，请到“插件”管理页上传。
       </p>
       <button
         className={button}
@@ -140,7 +142,7 @@ function ScopedSourceSetCard({ threadId, workspace, status, api, onStatus }: Pro
           void run(() => api.importSourceSet!({ threadId, expectedWorkspace: workspace }), false)
         }
       >
-        选择作者源码目录
+        选择插件源码文件夹
       </button>
       {status && status.phase !== "cancelled" && (
         <>
@@ -225,7 +227,13 @@ function ScopedSourceSetCard({ threadId, workspace, status, api, onStatus }: Pro
             </button>
           )}
           {status.phase === "ready" && (
-            <p role="status">已按本机实际授权编译。请在下方交付卡确认安装模板，然后开始使用。</p>
+            <div className="space-y-2">
+              <p role="status">源码已准备完成。可以先试用当前候选，或前往保存。准备完成不代表试用通过。</p>
+              {onNavigate ? <div className="flex flex-wrap gap-2">
+                <button type="button" className={button} onClick={() => onNavigate("trial")}>前往试用当前候选</button>
+                <button type="button" className={button} onClick={() => onNavigate("delivery")}>前往保存当前候选</button>
+              </div> : <p className="text-sm">当前候选需要重新核对，请回原创作对话准备最新版本。原准备记录仍保留。</p>}
+            </div>
           )}
           {status.phase !== "ready" && (
             <button

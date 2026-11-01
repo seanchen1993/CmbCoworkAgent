@@ -75,6 +75,13 @@ it("routes native source edits and dependency reuse before legacy modularization
     "按依赖范围原子提交", "按完整模块分批", "不静默改格式",
     "独立检查 Mod 接入原项目门禁", "不信任模型自报 passed:true"])
     expect(prompt).toContain(text)
+  for (const text of ["modules[].skill", "共享同一 Skill", "不擅自改插件模板",
+    "不用旧对话里的源码覆盖手工修改", "保存草稿、编译通过、试用通过、保存插件是不同结果",
+    "不预设研发阶段", "阶段增删、替换和重组使用现有组合作者声明",
+    "由插件开发者在 Skill、资源、工作流或独立提供器中实现", "不为单个插件增加平台分支",
+    "上下游 Skill 与 tests/project-contract.json", "合并一次 project_patch，再编译",
+    "不顺手重写用户未要求修改的阶段", "不能把新身份冒充原草稿修改完成"])
+    expect(prompt).toContain(text)
   expect(modAuthoringRuntimePrompt([{ name: "mod_business" }])).not.toContain("dependency_save")
 })
 

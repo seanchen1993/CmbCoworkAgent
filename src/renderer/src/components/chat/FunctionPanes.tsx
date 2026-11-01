@@ -216,7 +216,7 @@ export function Element({
       />
     ))
     const style = functionUiStyle(node, inheritedBackground)
-    const background = node.type === "Text" ? style.backgroundColor : undefined
+    const background = node.type === "Text" || node.type === "Box" ? style.backgroundColor : undefined
     return (
       <FunctionTextBackground.Provider value={background ?? inheritedBackground}>
         <Tag style={style}>
@@ -716,7 +716,7 @@ function FunctionPanesSurface({ threadId }: { threadId: string }): React.JSX.Ele
               }}
             />
           </div>
-          <p className="mt-2 text-xs text-muted-foreground">由 {pane.plugin} 提供</p>
+          <p className="mt-2 text-xs text-muted-foreground">插件交互面板 · 来源：{pane.plugin}</p>
         </section>
       ))}
     </div>

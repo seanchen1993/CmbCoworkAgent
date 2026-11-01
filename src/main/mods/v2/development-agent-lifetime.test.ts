@@ -12,6 +12,12 @@ import { bindCreatorModelAccounting, issueCreatorModelAccounting,
   type CreatorModelAccounting } from "../devtools/creator-model-accounting"
 
 const hooks = vi.hoisted(() => ({ run: vi.fn() }))
+// This lifecycle fixture has synthetic runtime bindings and a mocked child runner.
+// Native parent/child rows and retained history are covered by the real-host integration.
+vi.mock("../../db", async (original) => ({
+  ...(await original<typeof import("../../db")>()),
+  getThreadCore: () => null
+}))
 vi.mock("./agent-spawn-host", () => ({
   prepareFunctionAgentPlan: async (input: Record<string, unknown>, workspace: string) => ({
     prompt: input.prompt,

@@ -428,11 +428,19 @@ function App(): React.JSX.Element {
   const renderRoutePending = renderedRoute !== selectedRenderRoute
   const renderedMainView = renderedRoute.mainView
   const renderedThreadId = renderedRoute.threadId
-  const platformWorkspaceReady = useAppStore((state) => {
+  const platformWorkspacePath = useAppStore((state) => {
     const workspace = state.threads.find((thread) =>
       thread.thread_id === renderedThreadId)?.metadata?.workspacePath
-    return typeof workspace === "string" && !!workspace.trim()
+    return typeof workspace === "string" ? workspace.trim() : ""
   })
+  const platformWorkspaceReady = !!platformWorkspacePath
+  const platformWorkspaceBirth = useAppStore(state => {
+    const thread = state.threads.find(row => row.thread_id === renderedThreadId)
+    return JSON.stringify([thread?.created_at, thread?.metadata?.cmb_thread_incarnation ?? null])
+  })
+  const platformWorkspaceScope = JSON.stringify([
+    accountRevision, renderedThreadId, platformWorkspacePath, platformWorkspaceBirth
+  ])
   const renderedHarnessSessionThreadId = renderedRoute.harnessSessionThreadId
   const isRightPanelFullscreen = previewFullscreen || browserFullscreen
   const showRightResizeHandle = !previewFullscreen
@@ -1384,6 +1392,8 @@ function App(): React.JSX.Element {
                           {renderedMainView === "thread" && renderedThreadId && platformWorkspaceReady && (
                             <Suspense fallback={null}>
                               <PlatformWorkspace
+                                key={platformWorkspaceScope}
+                                scopeKey={platformWorkspaceScope}
                                 threadId={renderedThreadId}
                                 active={!showCustomizeView && !renderRoutePending && !browserFullscreen}
                               />

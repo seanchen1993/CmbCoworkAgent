@@ -9,7 +9,17 @@ import type { BrowserWindow, IpcMain, IpcMainInvokeEvent } from "electron"
 const state = vi.hoisted(() => ({
   service: undefined as unknown,
   plugins: [] as Array<{ id: string; path: string; name: string; version: string; enabled: boolean }>,
+  binding: undefined as import("../../shared/harness-board-types").HarnessNativeFeatureBinding | undefined,
+  ensureNative: vi.fn(),
   afterSnapshot: undefined as (() => void) | undefined
+}))
+vi.mock("../harness-board/native-harness", () => ({
+  configureNativeHarnessRuntime: () => {},
+  assertNativeHarnessFeatureCurrent: () => {},
+  readNativeHarnessFeature: (project: string, feature: string) =>
+    state.binding?.projectId === project && state.binding?.featureId === feature ? state.binding : undefined,
+  findNativeHarnessFeatureByRunId: (id: string) => state.binding?.hostRunId === id ? state.binding : undefined,
+  ensureNativeHarnessFeatureRun: (...args: unknown[]) => state.ensureNative(...args)
 }))
 vi.mock("electron", () => ({ BrowserWindow: {} }))
 vi.mock("../storage", () => ({ getOpenworkDir: () => "C:/unused-runtime-authority", getPlugins: () => state.plugins }))
@@ -157,6 +167,8 @@ it.each(["destroyed", "replaced"])("rejects the actual desktop command before ap
 const templateRoots: string[] = []
 afterEach(() => {
   state.plugins = []
+  state.binding = undefined
+  state.ensureNative.mockReset()
   state.afterSnapshot = undefined
   for (const root of templateRoots.splice(0)) rmSync(root, { recursive: true, force: true })
 })
@@ -178,6 +190,7 @@ function nativeHandlers() {
     senderFrame: contents.mainFrame
   } as unknown as IpcMainInvokeEvent
   return {
+    native: (...args: unknown[]) => handlers.get("harnessBoard:nativeFeatureCommand")!(event, ...args),
     call: (name: string, ...args: unknown[]) =>
       handlers.get(`project-runtime:${name}`)!(event, ...args),
     destroy: () => {
@@ -382,4 +395,98 @@ it("keeps ordinary template creation fenced after its native await", async () =>
   await expect(
     handlers.call("create", { ...templateCreation, expectedTemplate: templateIdentity })
   ).rejects.toThrow("PROJECT_UNTRUSTED_SENDER")
+})
+
+function nativeFeatureFixture() {
+  state.binding = {
+    engine: "host", projectId: "container", featureId: "feature-a", hostRunId: "host-a",
+    title: "Feature A", workspace: "C:/feature-a", repositoryWorkspace: "C:/repository",
+    installedPluginId: "installed", packageDigest: "b".repeat(64),
+    expectedPlugin: { pluginId: "installed", name: "generic", version: "1.0", digest: "c".repeat(64) }
+  }
+  const project = { projectId: "host-a", installedPluginId: "installed", pluginDigest: "b".repeat(64),
+    workspace: "C:/feature-a", version: 1, status: "active", stageIndex: 0,
+    manifest: { stages: [{}] } }
+  const operation = { operationId: "host-op", expectedVersion: 1, status: "started" }
+  return { project, operation }
+}
+
+it("dispatches Feature first-start using the original Host continuation and permits cancellation while rejecting duplicate starts", async () => {
+  const { project, operation } = nativeFeatureFixture()
+  const entered = Promise.withResolvers<void>(), release = Promise.withResolvers<void>()
+  const cancel = vi.fn()
+  const continuation = vi.fn(async (_id, options) => {
+    options.beforeStart(operation)
+    entered.resolve()
+    await release.promise
+    options.assertAuthority()
+    return { reason: "cancelled" }
+  })
+  state.service = {
+    recoverInterrupted: () => {}, importedSource: () => undefined,
+    get: () => project, operations: () => [operation],
+    prepareRuntimeInputs: async () => {}, continue: continuation, cancel
+  }
+  state.ensureNative.mockImplementation(async (_project, _feature, _goal, guard) => guard())
+  const h = nativeHandlers()
+  const starting = h.native("container", "feature-a", {
+    kind: "start-feature", initialUserMessage: "Actual independent Feature request"
+  })
+  await entered.promise
+  await expect(h.native("container", "feature-a", {
+    kind: "start-feature", initialUserMessage: "Late second request"
+  })).rejects.toThrow("PROJECT_OPERATION_ALREADY_RUNNING")
+  await h.native("container", "feature-a", { kind: "cancel", operationId: "host-op" })
+  expect(cancel).toHaveBeenCalledExactlyOnceWith("host-op")
+  expect(state.ensureNative.mock.calls[0].slice(0, 3)).toEqual([
+    "container", "feature-a", "Actual independent Feature request"
+  ])
+  expect(continuation).toHaveBeenCalledTimes(1)
+  release.resolve()
+  await starting
+})
+
+it("rejects another Feature and a late binding replacement before native approval", async () => {
+  const { project, operation } = nativeFeatureFixture()
+  const entered = Promise.withResolvers<void>(), release = Promise.withResolvers<void>()
+  const approve = vi.fn()
+  state.service = {
+    recoverInterrupted: () => {}, importedSource: () => undefined,
+    get: () => project, operations: () => [operation], approve,
+    prepareRuntimeInputs: async () => { entered.resolve(); await release.promise }
+  }
+  const h = nativeHandlers()
+  await expect(h.native("container", "feature-b", { kind: "cancel", operationId: "host-op" }))
+    .rejects.toThrow("HARNESS_NATIVE_RUN_NOT_STARTED")
+  const deciding = h.native("container", "feature-a", {
+    kind: "approve", operationId: "host-op", expectedVersion: 1,
+    inputFingerprint: "a".repeat(64), decision: "approved"
+  })
+  await entered.promise
+  state.binding = { ...state.binding!, repositoryWorkspace: "C:/other-repository" }
+  release.resolve()
+  await expect(deciding).rejects.toThrow("HARNESS_NATIVE_FEATURE_CHANGED")
+  expect(approve).not.toHaveBeenCalled()
+})
+
+it("keeps standalone Host history visible and excludes Feature-owned executions", async () => {
+  const { project } = nativeFeatureFixture()
+  const standalone = { ...project, projectId: "standalone", name: "Historical run" }
+  state.service = {
+    recoverInterrupted: () => {}, list: () => [project, standalone]
+  }
+  expect(nativeHandlers().call("list")).toEqual([expect.objectContaining({ projectId: "standalone" })])
+})
+
+it("does not let a Feature replace its fixed package through the standalone migration command", async () => {
+  const { project } = nativeFeatureFixture()
+  const prepareRuntimeInputs = vi.fn()
+  state.service = {
+    recoverInterrupted: () => {}, importedSource: () => undefined,
+    get: () => project, operations: () => [], prepareRuntimeInputs
+  }
+  await expect(nativeHandlers().call("command", "host-a", {
+    kind: "review-plan", expectedVersion: 1
+  })).rejects.toThrow("HARNESS_NATIVE_FEATURE_SOURCE_FIXED")
+  expect(prepareRuntimeInputs).not.toHaveBeenCalled()
 })

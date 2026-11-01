@@ -805,6 +805,8 @@ export interface PluginManifest {
 }
 
 export interface PluginMetadata {
+  /** Display-only exact installed dependencies of a valid Host project; [] still marks a project. */
+  projectDependencyIds?: string[]
   /** Display-only installed-file hint; project entry still validates the real adapter. */
   hasProjectMode?: boolean
   id: string

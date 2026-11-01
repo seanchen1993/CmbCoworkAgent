@@ -1050,7 +1050,7 @@ interface CustomAPI {
     acknowledge(config: UiGuideConfig): Promise<void>
   }
   // Presentation receipts are native renderer-only and cannot be called through the Mods SDK.
-  mods: import("../shared/mods/v2/platform-ui-api").PlatformUiApi & {
+  mods: import("../shared/mods/v2/platform-ui-api").PlatformUiApi & import("../shared/mods/v2/agent-tasks").AgentViewApi & {
     onPlatformChanged: (callback: (event: { threadId: string }) => void) => () => void
     runtimeSessions: import("../shared/mods/v2/runtime-sessions").FunctionRuntimeSessionsApi["runtimeSessions"]
     previewSnapshotMaintenance: import("../shared/project-runtime/snapshot-maintenance").SnapshotMaintenanceApi["previewSnapshotMaintenance"]
@@ -1067,6 +1067,8 @@ interface CustomAPI {
     communityExamples: import("../shared/mods/community-examples").CommunityExamplesApi
     authoringInstall: import("../shared/mods/authoring-install").AuthoringInstallApi; authoringPreview: import("../shared/mods/authoring-preview").AuthoringPreviewApi; authoring: import("../shared/mods/authoring").AuthoringApi } & import("../shared/mods/flows/types").FlowApi & import("../shared/mods/claw").ClawApi & import("../shared/mods/v2/prompt-composer").PromptComposerApi & import("../shared/mods/v2/desktop-actions").DesktopApi & import("../shared/mods/v2/presentation").FunctionPresentationApi & import("../shared/mods/v2/config-api").FunctionConfigApi & {
     peerMessages(threadId: string): Promise<import("../shared/mods/v2/peer").FunctionPeerRecord[]>
+    mcpConnections: import("../shared/mods/v2/mcp-connections").McpConnectionsApi["mcpConnections"]
+    mcpDisconnect: import("../shared/mods/v2/mcp-connections").McpConnectionsApi["mcpDisconnect"]
     onPeerMessagesChanged(callback: (event: { threadId: string }) => void): () => void
     onConversationNotice(callback: (event: import("../shared/mods/v2/conversation-notice")
       .FunctionConversationNoticeEvent) => void): () => void
@@ -1110,6 +1112,11 @@ interface CustomAPI {
     feedback(threadId: string): Promise<import("../shared/mods/v2/ui-feedback").FunctionFeedbackEntry[]>
     turnNotices(threadId: string): Promise<import("../shared/mods/v2/turn").FunctionTurnNotice[]>
     panes(threadId: string): Promise<import("../shared/mods/v2/ui").FunctionPaneSnapshot[]>
+    placedRows(threadId: string, owner: string): Promise<import("../shared/mods/v2/placed").FunctionPlacedEntry[]>
+    placedRead(threadId: string, owner: string, requestId: string, lease: string): Promise<import("../shared/mods/v2/ui").FunctionPaneSnapshot>
+    placedAct(threadId: string, owner: string, requestId: string, lease: string, action: import("../shared/mods/v2/ui").FunctionUiAction): Promise<void | import("../shared/mods/v2/ui").FunctionFocusResult>
+    placedDismiss(threadId: string, owner: string, requestId: string): Promise<void>
+    placedRelease(threadId: string, owner: string, requestId: string, lease: string): Promise<void>
     markdownLink(threadId: string,
       action: import("../shared/mods/v2/markdown-links").FunctionMarkdownLinkAction
     ): Promise<import("../shared/mods/v2/markdown-links").FunctionMarkdownLinkOutcome>
@@ -3157,6 +3164,13 @@ interface CustomAPI {
     onChanged: (callback: () => void) => () => void
   }
   harnessBoard: {
+    nativeFeatureMods: import("../shared/project-runtime/function-source").ProjectFunctionSourceApi
+    nativeFeatureCommand(
+      projectId: string,
+      featureId: string,
+      command: import("../shared/project-runtime/platform-api").LocalProjectCommand |
+        { kind: "start-feature"; initialUserMessage: string }
+    ): Promise<import("../shared/project-runtime/platform-api").LocalProjectView>
     localProjects: import("../shared/project-runtime/platform-api").LocalProjectApi
     legacyProjects: import("../shared/project-runtime/legacy-operations").LegacyProjectRuntimeApi
     catalogPage: (input: HarnessBoardCatalogPageInput) => Promise<HarnessBoardCatalogPageResult>

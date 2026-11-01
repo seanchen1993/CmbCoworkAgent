@@ -29,7 +29,10 @@ export function CreatorProjectDeliveryCard(props: {
         props.threadId,
         props.workspace,
         props.request?.id,
-        props.request?.digest
+        props.request?.digest,
+        props.request?.journey ? creatorJourneyView(props.request.journey, {
+          threadId: props.threadId, digest: props.request.digest
+        }).current : true
       ])}
       {...props}
     />
@@ -45,8 +48,11 @@ function ScopedDelivery({
   api,
   onStatus
 }: Parameters<typeof CreatorProjectDeliveryCard>[0]) {
+  const journey = creatorJourneyView(request?.journey, { threadId, digest: request?.digest })
+  // An unchanged bound trial can outlive an edited draft. Its delivery remains historical.
+  const candidateCurrent = !request?.journey || journey.current
   const current =
-    !!request && delivery?.requestId === request.id && delivery.sourceDigest === request.digest
+    candidateCurrent && !!request && delivery?.requestId === request.id && delivery.sourceDigest === request.digest
   const [name, setName] = useState(() =>
     projectDeliveryInitialName(request, current && delivery ? delivery.name : undefined))
   const [version, setVersion] = useState(current && delivery ? delivery.version : "1.0.0")
@@ -63,10 +69,7 @@ function ScopedDelivery({
   const unresolved = !!delivery && ["unknown", "installing", "exporting"].includes(delivery.phase)
   const historical = !!delivery && !current
   const installed = current && !!delivery?.pluginId
-  const verified = creatorJourneyView(request?.journey, {
-    threadId,
-    digest: request?.digest
-  }).passed
+  const verified = journey.passed
   const validateStatus = (next: DevelopmentStatus) => {
     if (next.threadId !== threadId || !isSameWorkspacePath(next.workspace, workspace))
       throw Error("DEVELOPMENT_SCOPE_CHANGED")
@@ -107,7 +110,7 @@ function ScopedDelivery({
     act(async (assertCurrent) => {
       const deliver =
         operation === "install" ? api.installProjectDelivery : api.exportProjectDelivery
-      if (!request || !deliver || unresolved) throw Error("DEVELOPMENT_SCOPE_CHANGED")
+      if (!request || !candidateCurrent || !deliver || unresolved) throw Error("DEVELOPMENT_SCOPE_CHANGED")
       let prepared = delivery
       const installedDelivery = operation === "export" && installed ? delivery : undefined
       const targetName = installedDelivery?.name ?? name.trim()
@@ -171,6 +174,8 @@ function ScopedDelivery({
         {request
           ? unresolved
             ? "核对保存结果"
+            : !candidateCurrent
+              ? delivery?.pluginId ? "历史版本已保存" : "请先准备当前版本"
             : installed
               ? "插件已保存"
               : "保存插件"
@@ -181,6 +186,9 @@ function ScopedDelivery({
           下方交付记录属于历史候选，请重新准备当前版本。
         </p>
       )}
+      {!candidateCurrent && <p role="status" className="text-sm">
+        草稿已变化，请回原创作对话准备新候选，再试用和保存。下方仅保留原版本记录。
+      </p>}
       {unresolved && (
         <p role="status" className="text-sm">
           上次操作结果待核对，请先检查结果。
@@ -215,7 +223,7 @@ function ScopedDelivery({
           核对实际交付结果
         </button>
       )}
-      {!installed && request && !preparedBySourceSet && (
+      {!installed && candidateCurrent && request && !preparedBySourceSet && (
         <>
           <label className="grid gap-1 text-sm">
             插件名称
@@ -248,7 +256,7 @@ function ScopedDelivery({
           </details>
         </>
       )}
-      {request && !installed && (
+      {request && candidateCurrent && !installed && (
         <>
           <div className="flex flex-wrap gap-2">
             <button
@@ -293,6 +301,12 @@ function ScopedDelivery({
           {(installed || historical) && (
             <p className="text-sm">
               {delivery.name} · v{delivery.version}
+            </p>
+          )}
+          {installed && (
+            <p className="text-sm text-muted-foreground">
+              保存完成。点击“开始使用”后进入原项目页面，再创建项目、配置插件并添加需求。
+              本次试用与正式项目相互独立，权限会按实际使用范围确认。
             </p>
           )}
           {installed && (

@@ -8,13 +8,14 @@ import { claimLocalThreadRunLease, releaseLocalThreadRunLease } from "../../agen
 import type { ModCommandJob } from "../../../shared/mods/types"
 import type { FunctionPaneSnapshot, FunctionUiAction } from "../../../shared/mods/v2/ui"
 import { ordinaryFunctionNode } from "../../../../tests/support/function-ui-node"
+import { consumeUserViewAction } from "./user-view-action"
 
 const cleanups: Array<() => Promise<void>> = []
 afterEach(async () => {
   for (const cleanup of cleanups.splice(0)) await cleanup()
 })
 
-async function fixture(immediate = false, hooks = "") {
+async function fixture(immediate = false, hooks = "", callbackCode = "") {
   const threadId = randomUUID()
   const jobs = new Map<string, ModCommandJob>()
   const queue = new ModCommandQueue(
@@ -27,7 +28,7 @@ async function fixture(immediate = false, hooks = "") {
     () => {}
   )
   const guest = await FunctionGuestRuntime.create(`
-    let progress = "idle", calls = 0;
+    let progress = "idle", calls = 0, viewError;
     __cmbFunctionMod = {register(on) {
       on("session.start", async ($,e,next) => {
         await $.command.register({name:"work",description:"Work",${immediate ? "immediate:true" : ""}});
@@ -37,11 +38,12 @@ async function fixture(immediate = false, hooks = "") {
       on("command.run",{command:"work"},async ($,e) => {
         calls++;
         await $.clock.sleep(60);
-        return {text:JSON.stringify({calls,origin:e.origin,args:e.args})};
+        return {text:JSON.stringify({calls,origin:e.origin,args:e.args,viewError})};
       });
       on("ui.render",($,e) => {
         const {Box,Text,Button}=$.ui.resolve(e);
         return Box({children:[Text({children:progress}),Button({key:"run",label:"Run",onPress:async()=>{
+          ${callbackCode}
           progress="queued"; $.ui.invalidate("ui.render");
           const result=await $.command.run({command:"work",args:"from button"});
           progress=result.text; $.ui.invalidate("ui.render");
@@ -65,6 +67,10 @@ async function fixture(immediate = false, hooks = "") {
       workspace: "/project",
       assertLive: () => undefined,
       publish: async (v) => v,
+      agentTask: async plugin => {
+        consumeUserViewAction(plugin.name)()
+        return {requested:true,agentId:"child",readOnly:true,inputTarget:"parent"}
+      },
       scheduleCommand: (command, signal, run) =>
         scheduleFunctionCommand(queue, "/project", threadId, command, signal, run)
     }
@@ -156,6 +162,19 @@ it("retains the accepted callback when a press hook waits across a redraw", asyn
     .toContain("dispatching")
   await pending
   expect([...f.jobs.values()][0].state).toBe("succeeded")
+})
+
+it("denies view from the stale drawing without cancelling its already accepted command", async () => {
+  const f = await fixture(false, `on("ui.press",async($,e,next)=>{
+    progress="dispatching"; $.ui.invalidate("ui.render");
+    await $.clock.sleep(300); return next(e);
+  });`, `try{await $.ui.view({agentId:"child"})}catch(error){viewError=error.code}`)
+  const [pane] = await f.session.panes.snapshot()
+  const pending = f.session.panes.act(click(pane))
+  await expect.poll(async()=>JSON.stringify(await f.session.panes.snapshot())).toContain("dispatching")
+  await pending
+  expect([...f.jobs.values()][0].state).toBe("succeeded")
+  expect(JSON.stringify((await f.session.panes.snapshot())[0].tree)).toContain("MODS_UI_STALE_ACTION")
 })
 
 it("allows a plugin to close its own pane without aborting its successful callback", async () => {

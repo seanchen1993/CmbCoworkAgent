@@ -8,6 +8,7 @@ import { BuiltinNavigationPanel } from "./BuiltinNavigationPanel"
 import { openBuiltinNavigation } from "@/lib/builtin-navigation"
 import { builtinTargetFromItem, parseBuiltinNavigation, builtinNavigationPrefix, builtinCommandConflicts } from "@/features/slash-commands/builtin-commands"
 import { ModsDevelopmentPanel } from "../customize/ModsDevelopmentPanel"
+import { AgentViewReceiver } from "./ModsAgentTranscriptPanel"
 import { enterCreatorMode } from "../customize/creator-mode-entry"
 import { enqueueCreatorRepair } from "@/lib/creator-repair-submission"
 import { ChatTaskOverview } from "./ChatTaskOverview"
@@ -36,6 +37,7 @@ import { FunctionCompletionEvidence } from "./FunctionCompletionEvidence"
 import { FunctionSite } from "./FunctionSite"
 import { functionSpinnerFacts } from "../../lib/function-status-site"
 import { useFunctionTurnNotices } from "@/lib/use-function-turn-notices"
+import { useFunctionPlacedRows } from "../../lib/use-function-placed-rows"
 import { ModCards } from "./ModCards"
 import { FunctionPeerMessages } from "./FunctionPeerMessages"
 import { useHarnessNotifications } from "@/lib/harness-notifications"
@@ -2391,6 +2393,8 @@ export function ChatContainer({
     [threadId, modsChatState, hasCurrentThread, currentForkWorkspacePath, reloadMissingThread]
   )
   const functionTurnNotices = useFunctionTurnNotices(threadId, modsChatEnabled)
+  const functionPlacedRows = useFunctionPlacedRows(threadId,
+    modsChatEnabled && !readOnly && isOrdinaryFlowMetadata(currentThread?.metadata), modsChatState.isCurrent)
   const autoApproveGitPush =
     pendingApproval?.operation === "git_push" && yoloModeLoaded && yoloMode
   const workspacePathRef = useRef(workspacePath)
@@ -8589,6 +8593,7 @@ export function ChatContainer({
                   )}
                   <ChatMessageVirtualList
                     functionTurnNotices={functionTurnNotices}
+                    functionPlacedRows={functionPlacedRows}
                     messageAttempts={streamData.messageAttempts}
                     searchReveal={searchOpen ? searchReveal : null}
                     messages={displayMessages}
@@ -9063,10 +9068,17 @@ export function ChatContainer({
                 facts={{ isWorking: isLoading }}
                 className="sparks-inline-surface mx-auto w-full max-w-3xl overflow-auto text-xs text-muted-foreground" />
               <form onSubmit={handleSubmit} className="max-w-3xl mx-auto relative">
+                {!readOnly && isOrdinaryFlowMetadata(currentThread?.metadata) && currentForkWorkspacePath && <AgentViewReceiver threadId={threadId} workspace={currentForkWorkspacePath} />}
                 <ClawComposerBar threadId={threadId} flow={chatFlow}>
                   {!readOnly && isDevelopmentThreadMetadata(currentThread?.metadata) && (
                     <ModsDevelopmentPanel threadId={threadId} workspaceHint={currentForkWorkspacePath}
-                      mode="chat" onReturnToChat={() => inputRef.current?.focus()}
+                      mode="chat" onReturnToChat={(context) => {
+                        if (context) {
+                          setInput([inputRef.current?.value ?? input, context].filter(Boolean).join("\n\n"))
+                          promptComposer.changed()
+                        }
+                        inputRef.current?.focus({ preventScroll: true })
+                      }}
                       onSelectWorkspaceForCreator={() => enterCreatorFromChat(undefined, true)}
                       onModeChange={(mode) => setDevelopmentMode((current) =>
                         current?.scope === developmentScope && current.mode === mode

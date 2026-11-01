@@ -189,3 +189,19 @@ export interface FunctionSessionCheckpoint {
     cache_creation_input_tokens: number
   }
 }
+
+/** Native checkpoint window. Offsets refer to engine messages, including non-display entries. */
+export interface FunctionSessionPageInput {
+  offset: number
+  limit: number
+  checkpointId?: string
+}
+export interface FunctionSessionMessagePage {
+  checkpointId: string
+  messageCount: number
+  messages: FunctionSessionMessage[]
+  offset: number
+  nextOffset?: number
+  skippedMessages: number
+  partial: boolean
+}

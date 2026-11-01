@@ -16,6 +16,21 @@ const complete: FunctionTurnComplete = {
   durationMs: 1
 }
 
+it("exposes bounded child controls through the actual guest and rejects foreign input fields", async () => {
+  const calls: string[] = []
+  const session = await fixture(`on("command.run",async($)=>{
+    const values=[];
+    for(const method of ["status","messages","stop"]) values.push(await $.agent[method]({agentId:"child"}));
+    values.push(await $.ui.view({agentId:"child"}));
+    try { await $.agent.messages({agentId:"child",threadId:"other"}) } catch(e){ values.push(e.code) }
+    return {values};
+  });`, { agentTask: async (_plugin, method, input) => { calls.push(method); return { agentId: input.agentId } } })
+  expect(await session.run("spawn", "")).toEqual({ values: [
+    {agentId:"child"}, {agentId:"child"}, {agentId:"child"}, {agentId:"child"}, "MODS_AGENT_TASK_ARGUMENTS"
+  ] })
+  expect(calls).toEqual(["agent.status", "agent.messages", "agent.stop", "ui.view"])
+})
+
 it("registers a hook-rewritten role and returns a detached live-owner snapshot", async () => {
   const session = await fixture(`
     on("agent.register",async($,e,next)=>next({...e,prompt:"rewritten review"}));

@@ -178,7 +178,7 @@ async function main() {
     const panel = await openCreatorProjectPreview(page)
     await panel.getByRole("button", { name: "刷新", exact: true }).click()
     await panel.getByLabel("这次试用希望完成什么").fill("保留原稿，生成独立复核版本和真实检查记录")
-    const create = panel.getByRole("button", { name: "开始试用", exact: true })
+    const create = panel.getByRole("button", { name: "准备试用环境", exact: true })
     assert(await create.isEnabled())
     assert.equal(await panel.getByRole("checkbox").count(), 0)
     const beforeCreate = model.requests.length

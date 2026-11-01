@@ -1,3 +1,4 @@
+import { creatorNextStep } from "./creator-next-step"
 import type { StageDebugReviewIntent } from "../../../../shared/mods/v2/project-stage-debug-review"
 import { developmentCapabilityLabel } from "./development-capability-label"
 import {
@@ -9,7 +10,7 @@ import {
 import { BookOpen, WandSparkles } from "lucide-react"
 import { openApplicationUsageGuide } from "../guides/application-usage-guide"
 import { AnchoredGuide } from "../guides/AnchoredGuide"
-import { creatorWorkspaceGuide, creatorWorkspaceGuideSteps } from "./creator-workspace-guide"
+import { creatorWorkspaceGuide, creatorWorkspaceSteps } from "./creator-workspace-guide"
 import {
   Dialog,
   DialogContent,
@@ -21,6 +22,7 @@ import { rememberReuseSelection } from "./development-reuse-receipts"
 import type { DevelopmentSetupApi } from "./development-creation-setup"
 import { enterCreatorMode } from "./creator-mode-entry"
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react"
+import { PluginSurfaceEntries } from "../platform/PluginSurfaceEntries"
 import { useAppStore } from "@/lib/store"
 import { hasNativeCreatorWork } from "./creator-workspace-visibility"
 import type {
@@ -32,6 +34,7 @@ import type { AuthoringDocument } from "../../../../shared/mods/authoring"
 import type { DevelopmentReuseOrigin } from "./DevelopmentReusePanel"
 import { normalizeWorkspacePathKey } from "../../../../shared/workspace-path"
 import { ProjectDevelopmentPreviewPanel } from "./ProjectDevelopmentPreviewPanel"
+import { ProjectStagePromptEditor } from "./ProjectStagePromptEditor"
 import { DevelopmentReusePlanCard } from "./DevelopmentReusePlanCard"
 import { FunctionUserConfig } from "./FunctionUserConfig"
 import { BusinessCreatorReviewCard } from "./BusinessCreatorReviewCard"
@@ -108,7 +111,7 @@ export function ModsDevelopmentPanel({
   workspaceHint?: string | null
   mode?: "entry" | "chat"
   api?: DevelopmentApi
-  onReturnToChat?: () => void
+  onReturnToChat?: (context?: string) => void
   onRequestRepair?: (message: string) => void | Promise<void>
   onModeChange?: (mode: "normal" | "creator") => void
   onSelectWorkspaceForCreator?: () => Promise<void>
@@ -219,7 +222,7 @@ function ScopedDevelopment({
   workspaceHint?: string | null
   api: DevelopmentApi
   mode: "entry" | "chat"
-  onReturnToChat?: () => void
+  onReturnToChat?: (context?: string) => void
   onRequestRepair?: (message: string) => void | Promise<void>
   onModeChange?: (mode: "normal" | "creator") => void
   onOpenWorkbench?: () => void
@@ -233,6 +236,8 @@ function ScopedDevelopment({
   const workspaceBody = useRef<HTMLElement>(null)
   const focusChatAfterClose = useRef(false)
   const [status, setStatus] = useState<DevelopmentStatus | null>(null)
+  const latestStatus = useRef(status)
+  latestStatus.current = status
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState("")
   const live = useRef(false),
@@ -250,12 +255,10 @@ function ScopedDevelopment({
   const [stageDebugReview, setStageDebugReview] = useState<StageDebugReviewIntent>()
   const [creatorOptionsOpen, setCreatorOptionsOpen] = useState(false)
   const [businessTrialOpen, setBusinessTrialOpen] = useState(false)
+  const [hasProjectPromptDrafts, setHasProjectPromptDrafts] = useState(false)
   useEffect(() => {
     setWorkspaceTab("trial")
   }, [status?.projectTrial?.id, status?.business?.review?.planId, stageDebugReview?.id])
-  useEffect(() => {
-    if (status?.sourceSet?.phase === "ready") setWorkspaceTab("delivery")
-  }, [status?.sourceSet?.id, status?.sourceSet?.phase])
   useEffect(() => {
     if (status?.projectDelivery && !status.projectTrial && !status.business?.review)
       setWorkspaceTab("delivery")
@@ -386,7 +389,40 @@ function ScopedDevelopment({
       ? stageDebugReview
       : undefined
   const independentStageDebugReview = inlineStageDebugReview ? undefined : stageDebugReview
-  const workspaceVisible = !!creatorMode && (hasNativeCreatorWork(status) || !!stageDebugReview)
+  const workspaceVisible =
+    !!creatorMode &&
+    (hasNativeCreatorWork(status) || !!stageDebugReview || hasProjectPromptDrafts)
+  useEffect(() => {
+    setHasProjectPromptDrafts(false)
+    if (!creatorReady || !status?.workspace || !api.listProjectPromptDrafts) return
+    const workspace = status.workspace
+    let cancelled = false
+    let request = 0
+    const refreshDrafts = async () => {
+      const token = ++request
+      try {
+        const next = await api.listProjectPromptDrafts!({ threadId, expectedWorkspace: workspace })
+        if (
+          !cancelled &&
+          token === request &&
+          next.threadId === threadId &&
+          account.current === useAppStore.getState().accountRevision &&
+          normalizeWorkspacePathKey(next.workspace) === normalizeWorkspacePathKey(workspace)
+        )
+          setHasProjectPromptDrafts(next.drafts.length > 0)
+      } catch {
+        /* The editor reports scoped read errors without inventing a draft. */
+      }
+    }
+    void refreshDrafts()
+    const unsubscribe = api.onChanged((event) => {
+      if (event.threadId === threadId) void refreshDrafts()
+    })
+    return () => {
+      cancelled = true
+      unsubscribe()
+    }
+  }, [api, creatorReady, status?.workspace, threadId])
   useEffect(() => {
     const reviewApi = window.api.mods.stageDebugReview
     if (!creatorMode || !status?.workspace || !reviewApi) {
@@ -602,12 +638,14 @@ function ScopedDevelopment({
   const approvalKey = JSON.stringify(
     status?.trials
       .filter((row) => row.phase === "needs-approval")
-      .map((row) => [row.componentId, row.revision, row.bundleDigest, row.compiledDigest]) ?? []
+      .map((row) => JSON.stringify([row.componentId, row.draftId, row.revision, row.bundleDigest, row.compiledDigest]))
+      .sort() ?? []
   )
   useEffect(() => {
-    if (mode === "chat" && awaitingApproval && announcedApproval.current !== approvalKey) {
+    if (awaitingApproval && announcedApproval.current !== approvalKey) {
       announcedApproval.current = approvalKey
-      setOpen(true)
+      setWorkspaceTab("trial")
+      if (mode === "chat") setOpen(true)
     }
     if (!awaitingApproval) announcedApproval.current = ""
   }, [mode, awaitingApproval, approvalKey])
@@ -706,7 +744,8 @@ function ScopedDevelopment({
     setOpen(false)
     if (mode === "entry") onReturnToChat?.()
   }
-  const showNavigation = projectCreation || !status?.trials.length
+  const showNavigation = true
+  const nextStep = status ? creatorNextStep(status) : undefined
   const navigate = (target: "create" | "trial" | "acceptance" | "delivery") => {
     if (target === "create" && onReturnToChat) {
       focusChatAfterClose.current = true
@@ -761,7 +800,7 @@ function ScopedDevelopment({
         <AnchoredGuide
           active={workspaceVisible && (mode === "entry" || open)}
           config={creatorWorkspaceGuide}
-          steps={creatorWorkspaceGuideSteps}
+          steps={creatorWorkspaceSteps(nextStep)}
           rootRef={workspaceBody}
           onStepChange={(step) => {
             if (step.id === "delivery") setWorkspaceTab("delivery")
@@ -799,7 +838,7 @@ function ScopedDevelopment({
           </button>
         </section>
       )}
-      {(!awaitingApproval || projectCreation) && (
+      {(!awaitingApproval || projectCreation || mode === "entry") && (
         <div className="space-y-2 text-sm" aria-label="创作流程导航">
           {businessTrial && (
             <p role="status" className="text-xs text-muted-foreground">
@@ -835,6 +874,18 @@ function ScopedDevelopment({
           )}
         </div>
       )}
+      {nextStep && (
+        <section aria-label="当前创作状态" data-creator-guide="next-step" className="space-y-2 rounded-xl border border-primary/20 bg-primary/5 p-4">
+          <h3 className="font-medium">{nextStep.title}</h3>
+          {!awaitingApproval && <p className="text-sm leading-6 text-muted-foreground">{nextStep.detail}</p>}
+          {status?.projectTrial && <p className="text-xs text-muted-foreground">
+            {status.projectTrial.name} · 候选版本 {status.projectTrial.revision}
+          </p>}
+          {!awaitingApproval && nextStep.target !== workspaceTab && <button type="button" className={button} onClick={() => navigate(nextStep.target)}>
+            {nextStep.actionLabel}
+          </button>}
+        </section>
+      )}
       {status?.planning?.diagnostic && (
         <p role="status" className="text-xs text-muted-foreground">
           {status.planning.diagnostic}
@@ -844,6 +895,344 @@ function ScopedDevelopment({
         <p role="alert" className="text-sm text-destructive">
           隔离试用记录暂不可用：{businessTrialDiagnostic}。请核对原记录；这里不会启动或重放试用。
         </p>
+      )}
+      <section hidden={workspaceTab !== "trial"} aria-label="聊天功能试用" className="space-y-3" data-creator-trials>
+        {status?.trials.map((row) => {
+          if (reuseCurrent && reuse?.draftId === row.draftId &&
+            reuse.revision === row.revision && reuse.sourceDigest === row.bundleDigest &&
+            ["preparing", "needs-approval", "applying", "unknown"].includes(reuse.phase)) return null
+          const key = JSON.stringify([
+            row.componentId,
+            row.revision,
+            row.compiledDigest,
+            row.bundleDigest,
+            row.validation,
+            row.capabilities
+          ])
+          const name =
+            status.drafts.find((draft) => draft.id === row.draftId)?.name ?? row.componentId
+          const savedAsPlugin = reuseCurrent && reuse?.phase === "active" &&
+            reuse.draftId === row.draftId && row.phase === "stopped"
+          return (
+            <article
+              key={row.componentId}
+              aria-label={`组件试用 ${row.componentId}`}
+              className="space-y-3 rounded-xl border bg-card p-3 text-sm shadow-sm"
+            >
+              <p className="break-all font-medium">
+                {name}{" "}
+                <span className="text-xs font-normal text-muted-foreground">· v{row.revision}</span>
+              </p>
+              {row.purpose && (
+                <p className="line-clamp-2 break-words text-xs" title={row.purpose}>
+                  用途：{row.purpose}
+                </p>
+              )}
+              <p
+                className={`text-xs font-medium ${row.phase === "failed" ? "text-destructive" : row.phase === "needs-approval" ? "text-amber-700 dark:text-amber-400" : "text-muted-foreground"}`}
+                role="status"
+              >
+                {savedAsPlugin ? "已保存为插件，当前聊天正在使用正式版本"
+                  : row.phase === "queued" && row.waitingReason === "turn-interrupted"
+                  ? "制作已中断，待继续"
+                  : row.phase === "active" && row.validation === "authorized-real"
+                    ? "版本已生效，真实结果待核对"
+                    : phases[row.phase]}
+              </p>
+              {!savedAsPlugin && <p className="text-xs">下一步：{developmentNextStep(row)}</p>}
+              {row.phase === "active" && row.activeDigest && row.activeRevision !== undefined && (
+                <PluginSurfaceEntries
+                  key={JSON.stringify([row.componentId, row.activeRevision, row.activeDigest])}
+                  threadId={threadId}
+                  expectedWorkspace={status.workspace}
+                  compiledDigest={row.activeDigest}
+                  developmentComponentId={row.componentId}
+                  onNavigate={() => setOpen(false)}
+                  disabled={busy}
+                  isCurrent={() => {
+                    const current = latestStatus.current
+                    const trial = current?.trials.find(item => item.componentId === row.componentId)
+                    return live.current && account.current === useAppStore.getState().accountRevision &&
+                      current?.threadId === threadId && current.workspace === status.workspace &&
+                      trial?.phase === "active" && trial.activeRevision === row.activeRevision &&
+                      trial.activeDigest === row.activeDigest
+                  }}
+                />
+              )}
+              {row.canUndo && (
+                <button
+                  type="button"
+                  className={button}
+                  disabled={busy || undoBusy}
+                  onClick={() =>
+                    void operate(
+                      (expectedWorkspace) =>
+                        api.undoTrial({
+                          threadId,
+                          expectedWorkspace
+                        }),
+                      accept
+                    )
+                  }
+                >
+                  撤销这次修改
+                </button>
+              )}
+              {!savedAsPlugin && ["unknown", "stopped"].includes(row.phase) && onRequestRepair && (
+                <button
+                  type="button"
+                  className={button}
+                  disabled={busy}
+                  onClick={() =>
+                    void operate(
+                      (expectedWorkspace, assertCurrent) =>
+                        enterCreatorMode(
+                          settingsApi,
+                          api,
+                          threadId,
+                          expectedWorkspace,
+                          assertCurrent
+                        ),
+                      async (next) => {
+                        accept(next)
+                        await onRequestRepair(
+                          `请核对并恢复这段聊天保存的灵件“${name}”。先读取当前草稿、试用状态与实际运行结果；未知操作不要重放。确认没有旧实例运行后，检查最新源码并重新 request_trial，在当前聊天恢复运行；无需正式安装或跨聊天复用。`
+                        )
+                        focusChatAfterClose.current = true
+                        setOpen(false)
+                      }
+                    )
+                  }
+                >
+                  恢复这个灵件
+                </button>
+              )}
+              {row.phase === "failed" && (
+                <div className="space-y-3 rounded-lg bg-destructive/5 p-3">
+                  <p>{developmentFailureMessage(row.error)}</p>
+                  {row.activeRevision === undefined && (
+                    <p className="text-xs text-muted-foreground">
+                      此灵件还没有在这段聊天生效，无需再次寻找批准按钮。
+                    </p>
+                  )}
+                  {(onRequestRepair || onReturnToChat) && (
+                    <button
+                      type="button"
+                      className={primaryButton}
+                      disabled={busy}
+                      onClick={() => {
+                        if (!onRequestRepair) {
+                          setOpen(false)
+                          onReturnToChat?.()
+                          return
+                        }
+                        void operate(
+                          async (expectedWorkspace, assertCurrent) => {
+                            const next = await enterCreatorMode(
+                              settingsApi,
+                              api,
+                              threadId,
+                              expectedWorkspace,
+                              assertCurrent
+                            )
+                            assertCurrent()
+                            await onRequestRepair(developmentRepairPrompt(name, row))
+                            return next
+                          },
+                          (next) => {
+                            accept(next)
+                            focusChatAfterClose.current = true
+                            setOpen(false)
+                          }
+                        )
+                      }}
+                    >
+                      {busy
+                        ? "正在提交修复…"
+                        : onRequestRepair
+                          ? "修复并重新检查"
+                          : "回聊天继续修改"}
+                    </button>
+                  )}
+                </div>
+              )}
+              {row.phase === "queued" && (
+                <p className="text-xs">
+                  {row.waitingReason === "turn-interrupted"
+                    ? "本轮制作被停止或未完成，请回到聊天继续制作，再试用新版本。"
+                    : row.waitingReason === "turn-finishing"
+                      ? "正在等待本轮制作结束，完成后会切换到新版本。"
+                      : row.waitingReason === "conversation-busy"
+                        ? "当前聊天还有任务或界面操作，请结束后再检查试用。"
+                        : "已获批准，等待安全切换到新版本。"}
+                </p>
+              )}
+              {row.phase === "queued" && row.waitingReason !== "turn-interrupted" && (
+                <button
+                  type="button"
+                  className={button}
+                  disabled={busy}
+                  onClick={() =>
+                    void operate(
+                      (expectedWorkspace) =>
+                        api.approve({
+                          threadId,
+                          expectedWorkspace,
+                          id: row.componentId,
+                          revision: row.revision,
+                          digest: row.compiledDigest,
+                          sourceDigest: row.bundleDigest
+                        }),
+                      accept
+                    )
+                  }
+                >
+                  重新检查试用
+                </button>
+              )}
+              {row.activeRevision !== undefined &&
+                (row.phase !== "active" || row.activeRevision !== row.revision) && (
+                  <p>正在使用：v{row.activeRevision}。新版本尚未替换它。</p>
+                )}
+              {row.phase === "needs-approval" && (
+                <div className="space-y-3 rounded-lg border border-primary/20 bg-primary/5 p-3">
+                  <p className="font-medium">允许这个灵件：</p>
+                  {!!row.addedCapabilities?.length && row.activeRevision !== undefined && (
+                    <p className="text-xs">
+                      本次新增权限：{developmentCapabilitySummary(row.addedCapabilities).join("；")}
+                    </p>
+                  )}
+                  <ul className="list-inside list-disc space-y-1 text-xs text-muted-foreground">
+                    {developmentCapabilitySummary(row.capabilities).map((text) => (
+                      <li key={text}>{text}</li>
+                    ))}
+                  </ul>
+                  <p className="text-xs text-muted-foreground">
+                    仅在这段聊天试用，不会自动安装。同名正式版会在此临时替换，停止试用后恢复；新增权限会再请你确认。
+                  </p>
+                  <p className="text-xs">点击下方按钮，即表示同意以上用途与权限范围。</p>
+                  <button
+                    type="button"
+                    className={`${primaryButton} w-full`}
+                    disabled={busy}
+                    onClick={() =>
+                      void operate(
+                        (expectedWorkspace) =>
+                          api.approve({
+                            threadId,
+                            expectedWorkspace,
+                            id: row.componentId,
+                            revision: row.revision,
+                            digest: row.compiledDigest,
+                            sourceDigest: row.bundleDigest
+                          }),
+                        accept
+                      )
+                    }
+                  >
+                    确认并开始聊天试用
+                  </button>
+                </div>
+              )}
+              <details
+                key={`${key}:${row.phase}`}
+                className="rounded-lg bg-muted/40 px-3 py-2 text-xs text-muted-foreground"
+              >
+                <summary className="cursor-pointer">制作详情与完整权限</summary>
+                <p className="mt-2">
+                  源码保存在这段聊天，重启后需确认恢复。
+                  {row.validation === "authorized-real"
+                    ? "真实操作仍经过原有权限。"
+                    : "本聊天生效不代表外部能力已验证。"}
+                </p>
+                {row.error &&
+                  /^(MODS_|DEVELOPMENT_|AUTHORING_|CLAW_)[A-Z0-9_]+$/.test(row.error) && (
+                    <p className="mt-2 break-all">诊断代码：{row.error}</p>
+                  )}
+                <ul className="mt-2 max-h-40 list-inside list-disc overflow-y-auto space-y-1">
+                  {row.capabilities.map((capability) => (
+                    <li key={capability} className="break-all">
+                      {developmentCapabilityLabel(capability)}
+                    </li>
+                  ))}
+                </ul>
+                {!row.capabilities.length && <p>这个版本没有申请额外权限。</p>}
+                <p className="mt-2 break-all">
+                  目标聊天：{status.threadId}
+                  <br />
+                  项目：{status.workspace}
+                  <br />
+                  {row.purpose ? (
+                    <>
+                      用途：{row.purpose}
+                      <br />
+                    </>
+                  ) : null}
+                  源码摘要：{row.bundleDigest}
+                  <br />
+                  编译摘要：{row.compiledDigest}
+                  <br />
+                  能力标识：{row.capabilities.join("、") || "无"}
+                </p>
+                {row.diagnostics && (
+                  <p className="mt-2" aria-label="宿主资源诊断">
+                    当前聊天组合的宿主核对：业务能力 {row.diagnostics.providers ?? "未知"}，订阅{" "}
+                    {row.diagnostics.subscriptions ?? "未知"}， 调用中{" "}
+                    {row.diagnostics.inFlight ?? "未知"}，结果未知{" "}
+                    {row.diagnostics.unknownRequests ?? "未知"}， 后台资源{" "}
+                    {row.diagnostics.backgroundResources ?? "未知"}，页面{" "}
+                    {row.diagnostics.pages ?? "未知"}。
+                  </p>
+                )}
+                <p className="mt-2">
+                  关闭此制作面板不停止任务。停止试用、撤权、删除或退出应用会结束当前运行；重启先核对状态与权限，不会自动重放真实操作。
+                </p>
+              </details>
+              {row.phase !== "stopped" && (
+                <button
+                  type="button"
+                  className={button}
+                  disabled={busy}
+                  onClick={() =>
+                    void operate(
+                      (expectedWorkspace) =>
+                        api.stop({ threadId, expectedWorkspace, id: row.componentId }),
+                      accept
+                    )
+                  }
+                >
+                  停止此组件试用
+                </button>
+              )}
+              {row.phase === "unknown" && (
+                <p>尚未确认是否停止。请先刷新状态；确认停止前不会开始新的试用。</p>
+              )}
+              {row.error && row.phase !== "failed" && (
+                <p role="status">
+                  {row.phase === "queued" && row.error === "MODS_DEVELOPMENT_BUSY"
+                    ? "等待当前界面操作结束；已生效的旧版仍保留。"
+                    : publicError(new Error(row.error))}
+                </p>
+              )}
+            </article>
+          )
+        })}
+      </section>
+      {creatorReady && status?.workspace && (
+        <div hidden={workspaceTab !== "trial"}>
+        <ProjectStagePromptEditor
+          threadId={threadId}
+          workspace={status.workspace}
+          accountRevision={account.current}
+          api={api}
+          onRequestRepair={onRequestRepair}
+          onReturnToChat={onReturnToChat ? (context) => {
+            focusChatAfterClose.current = true
+            setOpen(false)
+            onReturnToChat(context)
+          } : undefined}
+        />
+        </div>
       )}
       {modularization && (
         <CreatorPluginModularizationCard
@@ -897,7 +1286,8 @@ function ScopedDevelopment({
           }
         />
       )}
-      {(projectCreation || !!status?.configuration || !status?.trials.length) && (
+      {(projectCreation || !!status?.configuration || !status?.trials.length ||
+        (!!status?.sourceSet && status.sourceSet.phase !== "cancelled")) && (
         <>
           <section
             data-creator-section="trial"
@@ -1088,6 +1478,8 @@ function ScopedDevelopment({
                   status={status.sourceSet}
                   api={api}
                   onStatus={accept}
+                  onNavigate={useProjectCandidate && status.projectTrial && (!status.projectTrial.journey || projectJourney?.current)
+                    ? (step) => navigate(step) : undefined}
                 />
               </details>
             )}
@@ -1176,9 +1568,8 @@ function ScopedDevelopment({
         data-creator-section="create"
         className="scroll-mt-4 space-y-3 rounded-xl border p-4"
         open={
-          awaitingApproval > 0 ||
-          failed ||
-          uncertain ||
+          composition?.phase === "failed" ||
+          compositionUnconfirmed ||
           (!!independentStageDebugReview && projectPreviewOpen)
         }
       >
@@ -1315,307 +1706,6 @@ function ScopedDevelopment({
             </p>
           </details>
         )}
-        {status?.trials.map((row) => {
-          if (reuseCurrent && reuse?.draftId === row.draftId &&
-            reuse.revision === row.revision && reuse.sourceDigest === row.bundleDigest &&
-            ["preparing", "needs-approval", "applying", "unknown"].includes(reuse.phase)) return null
-          const key = JSON.stringify([
-            row.componentId,
-            row.revision,
-            row.compiledDigest,
-            row.bundleDigest,
-            row.validation,
-            row.capabilities
-          ])
-          const name =
-            status.drafts.find((draft) => draft.id === row.draftId)?.name ?? row.componentId
-          const savedAsPlugin = reuseCurrent && reuse?.phase === "active" &&
-            reuse.draftId === row.draftId && row.phase === "stopped"
-          return (
-            <article
-              key={row.componentId}
-              aria-label={`组件试用 ${row.componentId}`}
-              className="space-y-3 rounded-xl border bg-card p-3 text-sm shadow-sm"
-            >
-              <p className="break-all font-medium">
-                {name}{" "}
-                <span className="text-xs font-normal text-muted-foreground">· v{row.revision}</span>
-              </p>
-              {row.purpose && (
-                <p className="line-clamp-2 break-words text-xs" title={row.purpose}>
-                  用途：{row.purpose}
-                </p>
-              )}
-              <p
-                className={`text-xs font-medium ${row.phase === "failed" ? "text-destructive" : row.phase === "needs-approval" ? "text-amber-700 dark:text-amber-400" : "text-muted-foreground"}`}
-                role="status"
-              >
-                {savedAsPlugin ? "已保存为插件，当前聊天正在使用正式版本"
-                  : row.phase === "queued" && row.waitingReason === "turn-interrupted"
-                  ? "制作已中断，待继续"
-                  : row.phase === "active" && row.validation === "authorized-real"
-                    ? "版本已生效，真实结果待核对"
-                    : phases[row.phase]}
-              </p>
-              {!savedAsPlugin && <p className="text-xs">下一步：{developmentNextStep(row)}</p>}
-              {row.canUndo && (
-                <button
-                  type="button"
-                  className={button}
-                  disabled={busy || undoBusy}
-                  onClick={() =>
-                    void operate(
-                      (expectedWorkspace) =>
-                        api.undoTrial({
-                          threadId,
-                          expectedWorkspace
-                        }),
-                      accept
-                    )
-                  }
-                >
-                  撤销这次修改
-                </button>
-              )}
-              {!savedAsPlugin && ["unknown", "stopped"].includes(row.phase) && onRequestRepair && (
-                <button
-                  type="button"
-                  className={button}
-                  disabled={busy}
-                  onClick={() =>
-                    void operate(
-                      (expectedWorkspace, assertCurrent) =>
-                        enterCreatorMode(
-                          settingsApi,
-                          api,
-                          threadId,
-                          expectedWorkspace,
-                          assertCurrent
-                        ),
-                      async (next) => {
-                        accept(next)
-                        await onRequestRepair(
-                          `请核对并恢复这段聊天保存的灵件“${name}”。先读取当前草稿、试用状态与实际运行结果；未知操作不要重放。确认没有旧实例运行后，检查最新源码并重新 request_trial，在当前聊天恢复运行；无需正式安装或跨聊天复用。`
-                        )
-                        focusChatAfterClose.current = true
-                        setOpen(false)
-                      }
-                    )
-                  }
-                >
-                  恢复这个灵件
-                </button>
-              )}
-              {row.phase === "failed" && (
-                <div className="space-y-3 rounded-lg bg-destructive/5 p-3">
-                  <p>{developmentFailureMessage(row.error)}</p>
-                  {row.activeRevision === undefined && (
-                    <p className="text-xs text-muted-foreground">
-                      此灵件还没有在这段聊天生效，无需再次寻找批准按钮。
-                    </p>
-                  )}
-                  {(onRequestRepair || onReturnToChat) && (
-                    <button
-                      type="button"
-                      className={primaryButton}
-                      disabled={busy}
-                      onClick={() => {
-                        if (!onRequestRepair) {
-                          setOpen(false)
-                          onReturnToChat?.()
-                          return
-                        }
-                        void operate(
-                          async (expectedWorkspace, assertCurrent) => {
-                            const next = await enterCreatorMode(
-                              settingsApi,
-                              api,
-                              threadId,
-                              expectedWorkspace,
-                              assertCurrent
-                            )
-                            assertCurrent()
-                            await onRequestRepair(developmentRepairPrompt(name, row))
-                            return next
-                          },
-                          (next) => {
-                            accept(next)
-                            focusChatAfterClose.current = true
-                            setOpen(false)
-                          }
-                        )
-                      }}
-                    >
-                      {busy
-                        ? "正在提交修复…"
-                        : onRequestRepair
-                          ? "修复并重新检查"
-                          : "回聊天继续修改"}
-                    </button>
-                  )}
-                </div>
-              )}
-              {row.phase === "queued" && (
-                <p className="text-xs">
-                  {row.waitingReason === "turn-interrupted"
-                    ? "本轮制作被停止或未完成，请回到聊天继续制作，再试用新版本。"
-                    : row.waitingReason === "turn-finishing"
-                      ? "正在等待本轮制作结束，完成后会切换到新版本。"
-                      : row.waitingReason === "conversation-busy"
-                        ? "当前聊天还有任务或界面操作，请结束后再检查试用。"
-                        : "已获批准，等待安全切换到新版本。"}
-                </p>
-              )}
-              {row.phase === "queued" && row.waitingReason !== "turn-interrupted" && (
-                <button
-                  type="button"
-                  className={button}
-                  disabled={busy}
-                  onClick={() =>
-                    void operate(
-                      (expectedWorkspace) =>
-                        api.approve({
-                          threadId,
-                          expectedWorkspace,
-                          id: row.componentId,
-                          revision: row.revision,
-                          digest: row.compiledDigest,
-                          sourceDigest: row.bundleDigest
-                        }),
-                      accept
-                    )
-                  }
-                >
-                  重新检查试用
-                </button>
-              )}
-              {row.activeRevision !== undefined &&
-                (row.phase !== "active" || row.activeRevision !== row.revision) && (
-                  <p>正在使用：v{row.activeRevision}。新版本尚未替换它。</p>
-                )}
-              {row.phase === "needs-approval" && (
-                <div className="space-y-3 rounded-lg border border-primary/20 bg-primary/5 p-3">
-                  <p className="font-medium">允许这个灵件：</p>
-                  {!!row.addedCapabilities?.length && row.activeRevision !== undefined && (
-                    <p className="text-xs">
-                      本次新增权限：{developmentCapabilitySummary(row.addedCapabilities).join("；")}
-                    </p>
-                  )}
-                  <ul className="list-inside list-disc space-y-1 text-xs text-muted-foreground">
-                    {developmentCapabilitySummary(row.capabilities).map((text) => (
-                      <li key={text}>{text}</li>
-                    ))}
-                  </ul>
-                  <p className="text-xs text-muted-foreground">
-                    仅在这段聊天试用，不会自动安装。同名正式版会在此临时替换，停止试用后恢复；新增权限会再请你确认。
-                  </p>
-                  <p className="text-xs">点击下方按钮，即表示同意以上用途与权限范围。</p>
-                  <button
-                    type="button"
-                    className={`${primaryButton} w-full`}
-                    disabled={busy}
-                    onClick={() =>
-                      void operate(
-                        (expectedWorkspace) =>
-                          api.approve({
-                            threadId,
-                            expectedWorkspace,
-                            id: row.componentId,
-                            revision: row.revision,
-                            digest: row.compiledDigest,
-                            sourceDigest: row.bundleDigest
-                          }),
-                        accept
-                      )
-                    }
-                  >
-                    确认并应用到这段聊天
-                  </button>
-                </div>
-              )}
-              <details
-                key={`${key}:${row.phase}`}
-                className="rounded-lg bg-muted/40 px-3 py-2 text-xs text-muted-foreground"
-              >
-                <summary className="cursor-pointer">制作详情与完整权限</summary>
-                <p className="mt-2">
-                  源码保存在这段聊天，重启后需确认恢复。
-                  {row.validation === "authorized-real"
-                    ? "真实操作仍经过原有权限。"
-                    : "本聊天生效不代表外部能力已验证。"}
-                </p>
-                {row.error &&
-                  /^(MODS_|DEVELOPMENT_|AUTHORING_|CLAW_)[A-Z0-9_]+$/.test(row.error) && (
-                    <p className="mt-2 break-all">诊断代码：{row.error}</p>
-                  )}
-                <ul className="mt-2 max-h-40 list-inside list-disc overflow-y-auto space-y-1">
-                  {row.capabilities.map((capability) => (
-                    <li key={capability} className="break-all">
-                      {developmentCapabilityLabel(capability)}
-                    </li>
-                  ))}
-                </ul>
-                {!row.capabilities.length && <p>这个版本没有申请额外权限。</p>}
-                <p className="mt-2 break-all">
-                  目标聊天：{status.threadId}
-                  <br />
-                  项目：{status.workspace}
-                  <br />
-                  {row.purpose ? (
-                    <>
-                      用途：{row.purpose}
-                      <br />
-                    </>
-                  ) : null}
-                  源码摘要：{row.bundleDigest}
-                  <br />
-                  编译摘要：{row.compiledDigest}
-                  <br />
-                  能力标识：{row.capabilities.join("、") || "无"}
-                </p>
-                {row.diagnostics && (
-                  <p className="mt-2" aria-label="宿主资源诊断">
-                    当前聊天组合的宿主核对：业务能力 {row.diagnostics.providers ?? "未知"}，订阅{" "}
-                    {row.diagnostics.subscriptions ?? "未知"}， 调用中{" "}
-                    {row.diagnostics.inFlight ?? "未知"}，结果未知{" "}
-                    {row.diagnostics.unknownRequests ?? "未知"}， 后台资源{" "}
-                    {row.diagnostics.backgroundResources ?? "未知"}，页面{" "}
-                    {row.diagnostics.pages ?? "未知"}。
-                  </p>
-                )}
-                <p className="mt-2">
-                  关闭此制作面板不停止任务。停止试用、撤权、删除或退出应用会结束当前运行；重启先核对状态与权限，不会自动重放真实操作。
-                </p>
-              </details>
-              {row.phase !== "stopped" && (
-                <button
-                  type="button"
-                  className={button}
-                  disabled={busy}
-                  onClick={() =>
-                    void operate(
-                      (expectedWorkspace) =>
-                        api.stop({ threadId, expectedWorkspace, id: row.componentId }),
-                      accept
-                    )
-                  }
-                >
-                  停止此组件试用
-                </button>
-              )}
-              {row.phase === "unknown" && (
-                <p>尚未确认是否停止。请先刷新状态；确认停止前不会开始新的试用。</p>
-              )}
-              {row.error && row.phase !== "failed" && (
-                <p role="status">
-                  {row.phase === "queued" && row.error === "MODS_DEVELOPMENT_BUSY"
-                    ? "等待当前界面操作结束；已生效的旧版仍保留。"
-                    : publicError(new Error(row.error))}
-                </p>
-              )}
-            </article>
-          )
-        })}
         {status?.enabled && (
           <details
             className="rounded-lg border px-3 py-2 text-xs text-muted-foreground"
@@ -1796,12 +1886,14 @@ function ScopedDevelopment({
     )
   const advancedCreatorEntry = creatorMode && !workspaceVisible && api.importSourceSet && (
     <details className="text-xs text-muted-foreground">
-      <summary className="cursor-pointer rounded px-2 py-1 hover:bg-accent">高级开发</summary>
+      <summary className="cursor-pointer rounded px-2 py-1 hover:bg-accent">导入开发文件夹（开发者）</summary>
       <div className="mt-2 space-y-2 rounded-lg border bg-background p-3">
-        <p>已有完整的作者源码目录时，可从这里导入并核对依赖。</p>
+        <p>拿到开发者提供的插件源码文件夹、需要生成可安装插件时，使用此入口。直接制作新功能，请在当前聊天描述需求。</p>
+        <p>选择包含 devclaw.source-set.json 的整个文件夹，按提示安装和配置所需组件，再到“保存插件”继续。</p>
+        <p>如果拿到的是 ZIP 安装包，请到“插件”管理页上传。</p>
         <button
           type="button"
-          title="选择完整的插件作者源码目录"
+          title="选择开发者提供的完整插件文件夹"
           className={button}
           disabled={busy || !status}
           onClick={() =>
@@ -1817,7 +1909,7 @@ function ScopedDevelopment({
             )
           }
         >
-          导入插件源码
+          选择插件源码文件夹
         </button>
       </div>
     </details>
@@ -1846,7 +1938,7 @@ function ScopedDevelopment({
           </button>
         )}
         {onReturnToChat && (
-          <button type="button" className={button} onClick={onReturnToChat}>
+        <button type="button" className={button} onClick={() => onReturnToChat?.()}>
             返回原聊天
           </button>
         )}

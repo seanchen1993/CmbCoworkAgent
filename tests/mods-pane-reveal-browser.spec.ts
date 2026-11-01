@@ -83,7 +83,7 @@ async function main() {
     await page.waitForFunction("document.querySelector('[data-claw-results]')?.hidden === false")
     assert.equal(
       await page
-        .getByRole("tab", { name: "结果", exact: true })
+        .getByRole("tab", { name: "输出与面板", exact: true })
         .getAttribute("aria-selected"),
       "true"
     )

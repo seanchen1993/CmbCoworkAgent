@@ -98,6 +98,9 @@ export type HostProjectCommandKind =
   | "cancel"
 
 export interface HostSkillExecutionContext {
+  /** Main-issued project/Feature ownership; never inferred from model output. */
+  harnessFeature?: { projectId: string; slug: string; source: "host"; repositoryWorkspace: string }
+  worktreeIsolation?: import("../../agent/workflow/types").WorkflowWorktreeIsolationBoundary
   /** Checks-only validation of explicitly imported artifacts; no model/Skill is invoked. */
   importedValidationOnly?: boolean
   importedResultApprovalRequired?: boolean

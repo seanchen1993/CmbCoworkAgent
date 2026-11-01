@@ -26,6 +26,7 @@ interface FixtureWindow extends Window {
     changeAccount(): void
     changeWorkspace(): void
     nativeReady(): void
+    projectGate(enabled: boolean): void
     disable(): void
     uninstall(): void
     change(): void
@@ -110,6 +111,7 @@ async function main() {
       resolveDir: root,
       contents: `
       import React from 'react'; import {createRoot} from 'react-dom/client';
+      import {InstalledPluginProjectEntry} from './src/renderer/src/components/customize/InstalledPluginProjectEntry';
       import {InstalledPluginStartUse} from './src/renderer/src/components/customize/InstalledPluginStartUse';
       import {CreatorProjectDeliveryCard} from './src/renderer/src/components/customize/CreatorProjectDeliveryCard';
       import {LocalProjectsPanel} from './src/renderer/src/components/harness-board/LocalProjectsPanel';
@@ -118,19 +120,22 @@ async function main() {
       import {useAppStore} from '@/lib/store';
       import {readHostPluginStartUseIntent,dismissHostPluginStartUse} from './src/renderer/src/lib/plugin-start-use-intent';
       import {parseClawProfile} from './src/shared/mods/claw';
+      let projectEnabled=true;
       let name='docs', changed=false, missing=false, fail=false, delayed, approved=false, global=false, workspaceEnabled=false, disabled=false, removed=false;
       let profiles=[],activeProfile=null,revision=0,bindingRevision=0,failWorkspace=false,hasOther=false,extra=[];
       const settings=[];
       const other=()=>({pluginId:'original-tools',name:'original-tools',digest:'f'.repeat(64),state:'ready',capabilities:['command']});
       const calls=[], create=[], commands=[], approvals=[], enables=[],configurationReads=[];
       const isChat=()=>name.startsWith('chat-');
-      const mod=()=>({pluginId:'installed',name, digest:'c'.repeat(64), state:disabled?'disabled':approved?'ready':'needs-approval',capabilities:['command']});
-      window.api={plugins:{prepareStartUse:async input=>{
+      const plain=()=>name==='chat-skill-only'||/^chat-(hook-only|mcp-only|integrations-mixed|empty)$/.test(name);
+      const integrations=()=>/hook-only|integrations-mixed|mod-mixed|mod-invalid/.test(name)?{hookCount:1,mcpServerNames:['documents']}:name==='chat-mcp-only'?{hookCount:0,mcpServerNames:['documents']}:undefined;
+      const mod=()=>({pluginId:'installed',name, digest:'c'.repeat(64), state:name==='chat-mod-invalid'?'invalid':disabled?'disabled':approved?'ready':'needs-approval',capabilities:['command']});
+      window.api={featureGates:{isEnabled:async()=>({enabled:projectEnabled})},plugins:{list:async()=>[{id:'installed',name,version:'1.0.0',enabled:!disabled}],prepareStartUse:async input=>{
         calls.push(structuredClone(input));
         if(removed)throw Error('PLUGIN_START_USE_PLUGIN_UNAVAILABLE');
         if(fail)throw Error('PLUGIN_START_USE_CONTENT_CHANGED');
         if(input.expected.digest&&input.expected.digest!==(changed?'b':'a').repeat(64))throw Error('PLUGIN_START_USE_CONTENT_CHANGED');
-        const destination=isChat()?'chat':'host-project';
+        const destination=isChat()?'chat':name==='legacy-gate'?'plugin-project':'host-project';
         const issues=!disabled?await pluginStartUseDestinationConfigurationIssues(destination,async()=>{
           configurationReads.push(input.expectedWorkspace);
           return{pluginId:'installed',plugin:name,digest:'c'.repeat(64),workspace:input.expectedWorkspace,
@@ -139,7 +144,7 @@ async function main() {
               {key:'selectedUnits',label:'Selected units',description:'',type:'string',supported:true,required:true}]:[]}
         }):[];
         const report={identity:{pluginId:'installed',name,version:'1.0.0',digest:(changed?'b':'a').repeat(64)},kind:destination,canOpen:!disabled,...(disabled?{activationRequired:true}:{}),issues,
-          ...(isChat()?{chat:{...(name==='chat-skill-only'?{}:{functionMod:mod()}),skills:disabled?[]:[{id:'plugin:installed/'+name,name:name+'-skill',description:'实际公开业务技能'}]}}:{})};
+          ...(isChat()?{chat:{...(plain()?{}:{functionMod:mod()}),integrations:integrations(),skills:disabled||/^chat-(hook-only|mcp-only|integrations-mixed|empty)$/.test(name)?[]:[{id:'plugin:installed/'+name,name:name+'-skill',description:'实际公开业务技能'}]}}:{})};
         if(delayed)await new Promise(resolve=>delayed=resolve);
         return report;
       },enableStartUse:async input=>{
@@ -164,6 +169,7 @@ async function main() {
           {apiVersion:'cmb.mods/v2',modId:'function:foreign',digest:'c'.repeat(64),command:'foreign-entry',name:'foreign'},
           {apiVersion:'cmb.mods/v2',modId:'function:'+name,digest:'d'.repeat(64),command:'stale-entry',name:'stale'},
           {apiVersion:'cmb.mods/v2',modId:'function:'+name,digest:'c'.repeat(64),command:'hidden-entry',name:'hidden',isHidden:true}]},
+        platformSurfaceList:async()=>({revision:1,entries:[],errors:[],canPrepare:false}),
         panes:async()=>[]
       },file:{selectDirectory:async()=>({canceled:false,filePaths:['C:/new-project']})},
       harnessBoard:{localProjects:{templates:async()=>[{installedPluginId:'installed',name,version:'1.0.0',stages:['draft','review']}],
@@ -172,20 +178,20 @@ async function main() {
       let close=beginConfigurationTarget({threadId:'chat',workspace:'C:/owned'});
       const app=createRoot(document.getElementById('root'));let fixtureRun=0;
       function App(){const state=useAppStore(s=>s);return state.board?<LocalProjectsPanel/>:
-        name.startsWith('creator-')?<CreatorProjectDeliveryCard key={name+state.accountRevision+':'+fixtureRun}
+        name.startsWith('entry-')?<InstalledPluginProjectEntry key={name+state.accountRevision+':'+fixtureRun} pluginId='installed' scope={{threadId:'chat',expectedWorkspace:'C:/owned'}} active disabled={state.fixtureDisabled}/>:name.startsWith('creator-')?<CreatorProjectDeliveryCard key={name+state.accountRevision+':'+fixtureRun}
           threadId='chat' workspace='C:/owned' request={{id:'saved-request',name,digest:'b'.repeat(64)}}
           delivery={{id:'delivery',requestId:'saved-request',sourceDigest:'b'.repeat(64),phase:'installed',pluginId:'installed',name,version:'1.0.0',digest:'a'.repeat(64),canInstall:false,canExport:false}}
           api={{}} onStatus={()=>{}}/>:<InstalledPluginStartUse key={name+state.accountRevision+':'+fixtureRun}
         threadId='chat' workspace='C:/owned' pluginId='installed' expected={{name,version:'1.0.0'}} actionLabel={state.fixtureLabel} disabled={state.fixtureDisabled}/>}
       app.render(<App/>);
       window.fixture={calls,create,commands,approvals,enables,configurationReads,
-        reset:next=>{fixtureRun++;const pending=readHostPluginStartUseIntent();if(pending)dismissHostPluginStartUse(pending.id);name=next;changed=false;missing=false;fail=false;delayed=undefined;approved=false;global=false;workspaceEnabled=false;disabled=false;removed=false;commands.length=0;approvals.length=0;enables.length=0;profiles=[];activeProfile=null;revision=0;bindingRevision=0;failWorkspace=false;hasOther=false;extra=[];settings.length=0;
+        reset:next=>{fixtureRun++;const pending=readHostPluginStartUseIntent();if(pending)dismissHostPluginStartUse(pending.id);name=next;projectEnabled=true;changed=false;missing=false;fail=false;delayed=undefined;approved=false;global=false;workspaceEnabled=false;disabled=false;removed=false;commands.length=0;approvals.length=0;enables.length=0;profiles=[];activeProfile=null;revision=0;bindingRevision=0;failWorkspace=false;hasOther=false;extra=[];settings.length=0;
           configurationReads.length=0;close();window.fixtureStore.update({accountRevision:1,currentThreadId:'chat',showCustomizeView:true,board:false,fixtureLabel:undefined,fixtureDisabled:false,
             threads:[{thread_id:'chat',metadata:{workspacePath:'C:/owned',agentMode:'normal'}}]});
           close=beginConfigurationTarget({threadId:'chat',workspace:'C:/owned'});app.render(<App/>);},
         missing:value=>missing=value, change:()=>changed=true, fail:()=>fail=true,
         nativeReady:()=>{approved=true;global=true;workspaceEnabled=true},
-        disable:()=>disabled=true,uninstall:()=>removed=true,
+        projectGate:value=>projectEnabled=value,disable:()=>disabled=true,uninstall:()=>removed=true,
         delay:()=>delayed=true, release:()=>{if(typeof delayed==='function'){const done=delayed;delayed=undefined;done()}},
         changeAccount:()=>window.fixtureStore.update({accountRevision:2}),
         changeWorkspace:()=>window.fixtureStore.update({threads:[{thread_id:'chat',metadata:{workspacePath:'C:/elsewhere',agentMode:'normal'}}]})};
@@ -218,6 +224,100 @@ async function main() {
     const start = page.getByRole("region", { name: "已安装插件开始使用", exact: true })
     const read = () => start.getByRole("button", { name: "开始使用", exact: true }).click()
     const form = page.getByRole("region", { name: "项目列表", exact: true })
+    for (const name of ["chat-hook-only", "chat-mcp-only", "chat-integrations-mixed"]) {
+      await page.evaluate((name) => {
+        const f = (window as unknown as FixtureWindow).fixture
+        f.reset(name)
+        f.disable()
+      }, name)
+      await read()
+      assert.equal(await start.getByRole("button", { name: "返回聊天", exact: true }).count(), 0)
+      await start.getByRole("button", { name: "确认并进入使用", exact: true }).click()
+      await start.getByRole("button", { name: "返回聊天", exact: true }).waitFor()
+      await start.getByText("这里只列出插件声明", { exact: false }).waitFor()
+      assert.deepEqual(
+        await page.evaluate(() => {
+          const f = (window as unknown as FixtureWindow).fixture
+          return [
+            f.enables.length,
+            f.approvals.length,
+            f.commands.length,
+            f.snapshot().settings.length
+          ]
+        }),
+        [1, 0, 0, 0]
+      )
+      await start.getByRole("button", { name: "查看插件设置", exact: true }).click()
+      assert.equal(
+        await page.evaluate(
+          () => (window as unknown as FixtureWindow).fixture.snapshot().currentThreadId
+        ),
+        "chat"
+      )
+      await start.getByRole("button", { name: "返回聊天", exact: true }).click()
+      assert.equal(await form.count(), 0)
+      results.push(
+        `${name}: explicit enable, declaration-only settings and return to chat without grants or execution`
+      )
+    }
+    await page.evaluate(() => (window as unknown as FixtureWindow).fixture.reset("chat-empty"))
+    await read()
+    await start.getByText("未找到聊天入口，请检查插件说明。", { exact: true }).waitFor()
+    assert.equal(await start.getByRole("button", { name: "返回聊天", exact: true }).count(), 0)
+    for (const name of ["chat-mod-mixed", "chat-mod-invalid"]) {
+      await page.evaluate((name) => (window as unknown as FixtureWindow).fixture.reset(name), name)
+      await read()
+      await start.getByText("这里只列出插件声明", { exact: false }).waitFor()
+      assert.equal(await start.getByRole("button", { name: "返回聊天", exact: true }).count(), 0)
+      assert.equal(
+        await page.evaluate(() => (window as unknown as FixtureWindow).fixture.commands.length),
+        0
+      )
+      if (name === "chat-mod-mixed") {
+        await start.getByRole("button", { name: "确认并进入使用", exact: true }).click()
+        await start.getByRole("button", { name: "返回聊天", exact: true }).waitFor()
+        assert.equal(
+          await page.evaluate(() => (window as unknown as FixtureWindow).fixture.approvals.length),
+          1
+        )
+      }
+    }
+    results.push(
+      "empty declarations stay unavailable; Hook/MCP declarations never bypass Function Mod approval or invalid source"
+    )
+    for (const name of ["native-gate", "legacy-gate"]) {
+      await page.evaluate((name) => {
+        const f = (window as unknown as FixtureWindow).fixture
+        f.reset(name)
+        f.disable()
+        f.projectGate(false)
+      }, name)
+      await read()
+      await start.getByRole("alert").filter({ hasText: "暂未开放项目模式" }).waitFor()
+      assert.equal(await form.count(), 0)
+      assert.equal(
+        await page.evaluate(() => (window as unknown as FixtureWindow).fixture.enables.length),
+        0
+      )
+    }
+    await page.evaluate(() => {
+      const f = (window as unknown as FixtureWindow).fixture
+      f.reset("entry-disabled")
+      f.presentation("开始使用", true)
+    })
+    await start.getByRole("button", { name: "开始使用", exact: true }).waitFor()
+    assert(await start.getByRole("button", { name: "开始使用", exact: true }).isDisabled())
+    results.push(
+      "native and legacy routes honor the real project gate before enabling; discovered native entry preserves parent disabled"
+    )
+    await page.evaluate(() => (window as unknown as FixtureWindow).fixture.reset("chat-hook-only"))
+    await read()
+    await start.getByRole("button", { name: "返回聊天", exact: true }).waitFor()
+    await page.evaluate(() => (window as unknown as FixtureWindow).fixture.uninstall())
+    await start.getByRole("button", { name: "查看插件设置", exact: true }).click()
+    await start.getByRole("alert").filter({ hasText: "聊天或插件已变化" }).waitFor()
+    assert.equal(await start.getByRole("button", { name: "返回聊天", exact: true }).count(), 0)
+    results.push("pure integrations recheck installed identity before settings navigation")
     for (const name of ["installed-disabled-docs", "installed-disabled-warehouse"]) {
       await page.evaluate((name) => {
         const f = (window as unknown as FixtureWindow).fixture

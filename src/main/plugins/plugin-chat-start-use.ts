@@ -6,11 +6,15 @@ import type { SkillMetadata } from "../types"
 export function pluginChatStartUseEntries(
   pluginId: string,
   mods: readonly FunctionPluginStatus[],
-  skills: readonly SkillMetadata[]
+  skills: readonly SkillMetadata[],
+  integrations?: NonNullable<PluginStartUseReport["chat"]>["integrations"]
 ): NonNullable<PluginStartUseReport["chat"]> {
   const own = mods.filter((mod) => mod.pluginId === pluginId)
   if (own.length > 1) throw Error("PLUGIN_START_USE_IDENTITY_CHANGED")
   return {
+    ...(integrations && (integrations.hookCount || integrations.mcpServerNames.length)
+      ? { integrations: structuredClone(integrations) }
+      : {}),
     ...(own[0] ? { functionMod: structuredClone(own[0]) } : {}),
     skills: skills
       .filter(

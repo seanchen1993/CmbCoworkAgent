@@ -1,7 +1,8 @@
 import type { Worker } from "node:worker_threads"
 import type { CanonicalCheckpointDisplaySelection } from "./function-conversation-canonical-display-worker"
 import { existsSync } from "node:fs"
-import type { FunctionSessionCheckpoint } from "../../shared/mods/v2/session"
+import type { FunctionSessionCheckpoint, FunctionSessionMessagePage,
+  FunctionSessionPageInput } from "../../shared/mods/v2/session"
 import type {
   CheckpointRuntimeProjectionStats,
   LegacyCheckpointTranscriptMigrationStats,
@@ -227,6 +228,7 @@ export class CheckpointRuntimeProjectionClient {
       | {
           type: "read-session-transcript"
           projection: "messages" | "turns" | "usage"
+          page?: FunctionSessionPageInput
           databasePath: string
           threadId: string
           checkpointNs: string
@@ -448,6 +450,17 @@ export class CheckpointRuntimeProjectionClient {
     ) as Promise<FunctionSessionCheckpoint | null>
   }
 
+  async readSessionTranscriptPage(
+    databasePath: string, threadId: string, signal: AbortSignal,
+    page: FunctionSessionPageInput, checkpointNs = ""
+  ): Promise<FunctionSessionMessagePage | null> {
+    signal.throwIfAborted()
+    if (this.pending.size >= 128) throw new Error("CHECKPOINT_QUERY_CAPACITY")
+    return this.request({ type: "read-session-transcript", databasePath, threadId,
+      checkpointNs, projection: "messages", page }, { cancellable: true, signal }
+    ) as Promise<FunctionSessionMessagePage | null>
+  }
+
   bootstrapLegacyTranscript(
     databasePath: string,
     messageDatabasePath: string,
@@ -604,6 +617,14 @@ export async function readFunctionSessionTranscriptInWorker(
   signal.throwIfAborted()
   if (!existsSync(databasePath)) return Promise.resolve(null)
   return getDefaultClient().readSessionTranscript(databasePath, threadId, signal, "", projection)
+}
+
+export async function readFunctionSessionPageInWorker(
+  databasePath: string, threadId: string, signal: AbortSignal, page: FunctionSessionPageInput
+): Promise<FunctionSessionMessagePage | null> {
+  signal.throwIfAborted()
+  if (!existsSync(databasePath)) return null
+  return getDefaultClient().readSessionTranscriptPage(databasePath, threadId, signal, page)
 }
 
 export function bootstrapLegacyCheckpointTranscriptInWorker(

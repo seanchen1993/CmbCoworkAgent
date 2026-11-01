@@ -326,17 +326,28 @@ const validCount = (value: unknown): value is number =>
 
 const compactedContext = new AsyncLocalStorage<{ startIndex: number; active: boolean }>()
 
+/** Keep one window alive across a provider's lazy stream pulls, then retire inherited callbacks. */
+export function createCompactedContextScope(startIndex: number) {
+  const scope = { startIndex, active: true }
+  return {
+    run<T>(operation: () => Promise<T>): Promise<T> {
+      return compactedContext.run(scope, operation)
+    },
+    close(): void { scope.active = false }
+  }
+}
+
 /** The next model already sees the new window before its response commits the graph update. */
 export async function withCompactedContext<T>(
   startIndex: number,
   run: () => Promise<T>
 ): Promise<T> {
-  const scope = { startIndex, active: true }
-  return compactedContext.run(scope, async () => {
+  const scope = createCompactedContextScope(startIndex)
+  return scope.run(async () => {
     try {
       return await run()
     } finally {
-      scope.active = false
+      scope.close()
     }
   })
 }

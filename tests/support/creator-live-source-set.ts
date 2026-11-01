@@ -25,10 +25,10 @@ export async function importLiveCreatorSourceSet(input: {
   }, directory)
   const visibleEntry = await page.locator('[data-app-guide="workspace"]').count()
   if (!visibleEntry) {
-    const advanced = page.getByText("高级开发", { exact: true })
+    const advanced = page.getByText("导入开发文件夹（开发者）", { exact: true })
     if (!(await advanced.evaluate((element) => (element.parentElement as HTMLDetailsElement).open)))
       await advanced.click()
-    await page.getByRole("button", { name: "导入插件源码", exact: true }).click()
+    await page.getByRole("button", { name: "选择插件源码文件夹", exact: true }).click()
   }
   if (!visibleEntry)
     await page.getByRole("dialog", { name: "插件创作工作区", exact: true }).waitFor()
@@ -38,7 +38,7 @@ export async function importLiveCreatorSourceSet(input: {
     await summary.click()
   const card = panel.getByRole("region", { name: "导入项目作者源码", exact: true })
   if (visibleEntry)
-    await card.getByRole("button", { name: "选择作者源码目录", exact: true }).click()
+    await card.getByRole("button", { name: "选择插件源码文件夹", exact: true }).click()
   const status = () =>
     page.evaluate((id) => window.api.mods.development.status({ threadId: id }), threadId)
   const deadline = Date.now() + 120_000

@@ -55,7 +55,7 @@ export function assertCreatorCreationMetrics(kind: "weather" | "document", input
   assert.equal(value.technicalPageVisits, CREATOR_S1_GATES.technicalPageVisits)
   assert.deepEqual(
     (input as { clicks: string[] }).clicks.slice().sort(),
-    ["发送消息", "确认并应用到这段聊天"].sort()
+    ["发送消息", "确认并开始聊天试用"].sort()
   )
   if (kind === "weather") {
     assert.equal(value.nativeHttpConfirmations, 1)

@@ -89,6 +89,9 @@ function FunctionUserConfigEditor({
   onSaved?(): void
 }) {
   const [open, setOpen] = useState(initiallyOpen === true)
+  useEffect(() => {
+    if (initiallyOpen) setOpen(true)
+  }, [initiallyOpen])
   const [view, setView] = useState<FunctionUserConfigView | null>(null)
   const [drafts, setDrafts] = useState<Record<string, FunctionUserConfigDraft>>({})
   const [picking, setPicking] = useState<string | null>(null)

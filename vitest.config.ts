@@ -12,6 +12,7 @@ export const VITEST_TEST_INCLUDE = [
   "src/renderer/src/components/customize/development-trial-view.test.ts",
   "src/renderer/src/components/customize/development-reuse-receipts.test.ts",
   "src/renderer/src/components/customize/creator-journey-view.test.ts",
+  "src/renderer/src/components/customize/creator-next-step.test.ts",
   "src/renderer/src/components/customize/creator-project-route.test.ts",
   "src/renderer/src/components/customize/project-delivery-view.test.ts",
   "src/renderer/src/lib/**/*.test.ts",

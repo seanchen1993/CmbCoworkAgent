@@ -765,7 +765,7 @@ async function main() {
     // These are actual React controls with deferred IPC promises. Native cancellation and
     // capability dispatch are independently exercised by platform-surfaces-query.test.ts.
     await page.evaluate("window.platformFixture.queryCold()")
-    const prepare = page.getByRole("button", { name: "打开扩展视图", exact: true })
+    const prepare = page.getByRole("button", { name: "查找可用插件界面", exact: true })
     await prepare.waitFor()
     await settle()
     assert.equal(

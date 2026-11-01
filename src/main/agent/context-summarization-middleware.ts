@@ -26,6 +26,7 @@ import { isWorkflowNotificationPrompt } from "../../shared/internal-notification
 import { withCompactedContext } from "./context-usage"
 import { ModError } from "../mods/errors"
 import { CompactionCommitObserver, type CmbCompactionHooks } from "./context-compaction-hooks"
+import { modelInputBudgetError, withFinalModelInputRecovery } from "./final-model-budget"
 
 export interface ContextSize {
   type: "messages" | "tokens" | "fraction"
@@ -730,7 +731,7 @@ function buildSummaryInstruction(
     : null
   const sizeConstraint =
     typeof targetSummaryTokens === "number" && targetSummaryTokens > 0
-      ? `The previous whole-conversation handoff is still too large for the outer model request. Rewrite it to no more than approximately ${targetSummaryTokens} tokens. Preserve the highest-value continuation facts, exact paths, commands, errors, constraints, decisions, and next steps. Return only the shortened handoff.`
+      ? `Keep the continuation handoff to no more than approximately ${targetSummaryTokens} tokens, leaving room for the next work step. Preserve the highest-value continuation facts, exact paths, commands, errors, constraints, decisions, and next steps. Return only the shortened handoff.`
       : null
   return [resolvedPrompt, initialAnchor, latestAnchor, sizeConstraint].filter(Boolean).join("\n\n")
 }
@@ -1604,7 +1605,8 @@ ${summary}
     initialOwnerSessionId?: string,
     historyMessages: BaseMessage[] = messagesToSummarize,
     instructions?: string,
-    persistArchive = true
+    persistArchive = true,
+    targetSummaryTokens?: number
   ): Promise<{
     summary: string
     summaryMessage: HumanMessage
@@ -1622,7 +1624,7 @@ ${summary}
       initialUserRequest,
       latestUserRequest,
       signal,
-      undefined,
+      targetSummaryTokens,
       undefined,
       instructions
     )
@@ -1665,7 +1667,8 @@ ${summary}
     owner?: string,
     historySourceMessages: BaseMessage[] = truncatedMessages,
     instructions?: string,
-    persistArchive = true
+    persistArchive = true,
+    finalBudget?: { inputBudget: number; fixedMessages: BaseMessage[] }
   ): Promise<TResult | CmbCompactionPlan> {
     const initialOwnerSessionId =
       owner &&
@@ -1675,7 +1678,7 @@ ${summary}
         ? `session_${crypto.randomUUID().substring(0, 8)}`
         : undefined
     const previousEvent = getValidSummarizationEvent(request.state, owner)
-    const cutoffIndex = handler
+    const cutoffIndex = handler && !finalBudget
       ? determineCutoffIndex(truncatedMessages, maxInputTokens)
       : truncatedMessages.length
     // DeepAgents Python refuses token-based compaction when it cannot preserve
@@ -1688,7 +1691,7 @@ ${summary}
     // that request genuinely overflows, surface the overflow instead of
     // committing a no-progress summarization event.
     const advancesStateCutoff = previousEvent == null || cutoffIndex > 1
-    if (handler && (cutoffIndex <= 0 || !advancesStateCutoff)) {
+    if (handler && !finalBudget && (cutoffIndex <= 0 || !advancesStateCutoff)) {
       return handler({ ...request, messages: truncatedMessages })
     }
 
@@ -1700,16 +1703,21 @@ ${summary}
     const latestUserRequest = preservedMessages.some(isRealUserMessage)
       ? null
       : findLatestUserRequest(messagesToSummarize)
-    const outerInputBudget =
+    const outerInputBudget = finalBudget?.inputBudget ?? (
       typeof postCompactionInputBudgetTokens === "number" && postCompactionInputBudgetTokens > 0
         ? postCompactionInputBudgetTokens
-        : null
+        : null)
+    const countOuterInput = (messages: BaseMessage[]): number => finalBudget
+      ? countTotalTokens([...finalBudget.fixedMessages, ...messages], undefined, request.tools)
+      : countTotalTokens(messages, request.systemMessage, request.tools)
     const estimateOuterInputTokens = (messages: BaseMessage[]): number =>
-      Math.ceil(
-        countTotalTokens(messages, request.systemMessage, request.tools) * tokenEstimationMultiplier
-      )
+      Math.ceil(countOuterInput(messages) * tokenEstimationMultiplier)
+    const targetSummaryTokens = outerInputBudget == null ? undefined : Math.max(1, Math.min(4096,
+      Math.floor((outerInputBudget - estimateOuterInputTokens([
+        buildSummaryMessage("", null, initialUserRequest), ...preservedMessages
+      ])) * 0.6)))
 
-    if (handler && preservedMessages.length === 0 && maxInputTokens) {
+    if (handler && !finalBudget && preservedMessages.length === 0 && maxInputTokens) {
       const compact = compactToolResults(
         truncatedMessages,
         maxInputTokens,
@@ -1746,7 +1754,8 @@ ${summary}
       initialOwnerSessionId,
       historyMessagesToSummarize,
       instructions,
-      persistArchive
+      persistArchive,
+      targetSummaryTokens
     )
 
     let finalSummaryMessage = summaryResult.summaryMessage
@@ -1761,7 +1770,7 @@ ${summary}
           : request.messages.length,
         async () => handler!({ ...request, messages: modifiedMessages })
       )
-    const modifiedTokens = countTotalTokens(modifiedMessages, request.systemMessage, request.tools)
+    const modifiedTokens = countOuterInput(modifiedMessages)
     const estimatedModifiedTokens = Math.ceil(modifiedTokens * tokenEstimationMultiplier)
     let needsWholeConversationRetry =
       outerInputBudget != null && estimatedModifiedTokens > outerInputBudget
@@ -1811,7 +1820,8 @@ ${summary}
           // previously retained; otherwise the historical head is duplicated.
           summaryResult.filePath ? preservedHistoryMessages : historySourceMessages,
           instructions,
-          persistArchive
+          persistArchive,
+          targetSummaryTokens
         )
         // The head may already be durably archived even if this best-effort tail
         // append fails. Never discard that valid recovery pointer because a
@@ -1837,7 +1847,7 @@ ${summary}
         )
         if (targetSummaryTokens <= 0) {
           throw new Error(
-            `Compacted request cannot fit the outer model input budget: fixed system, tools, and handoff wrapper require approximately ${fixedInputTokens} tokens, exceeding the ${outerInputBudget}-token budget.`
+            `MODS_MODEL_INPUT_BUDGET: 固定指令、工具及必要交接信息已超出输入预算，重复压缩无法解决。请检查输出预留或减少启用的工具和附加指令；聊天和草稿仍保留。 Compacted request cannot fit the outer model input budget: fixed system, tools, and handoff wrapper require approximately ${fixedInputTokens} tokens, exceeding the ${outerInputBudget}-token budget.`
           )
         }
 
@@ -1865,7 +1875,7 @@ ${summary}
         const shortenedEstimatedTokens = estimateOuterInputTokens([shortenedSummaryMessage])
         if (shortenedEstimatedTokens > outerInputBudget) {
           throw new Error(
-            `Shortened whole-conversation summary still exceeds the outer model input budget (${shortenedEstimatedTokens} estimated tokens > ${outerInputBudget}).`
+            `MODS_MODEL_INPUT_BUDGET: 压缩后仍超出输入预算，已停止重复尝试。请检查输出预留或减少本次输入；聊天和草稿仍保留。 Shortened whole-conversation summary still exceeds the outer model input budget (${shortenedEstimatedTokens} estimated tokens > ${outerInputBudget}).`
           )
         }
         finalSummaryMessage = shortenedSummaryMessage
@@ -2115,7 +2125,37 @@ ${summary}
           throw new Error("CONTEXT_COMPACTION_INTERNAL_RESULT")
         return compacted
       }
-      const result = await execute()
+      let finalRecovery: Command | undefined
+      const result = await withFinalModelInputRecovery(async (input) => {
+        // The final transport has already run its Hooks. Suspend it while replacing only
+        // history; do not call `handler` (and therefore those Hooks) again.
+        const fixedMessages = input.messages.filter(message => message.type === "system")
+        const history = input.messages.filter(message => message.type !== "system")
+        if (!history.length) throw modelInputBudgetError(input, "没有可压缩的聊天历史")
+        const resolvedModel = await getChatModel()
+        const fallback = await getFallbackChatModel()
+        input.signal.throwIfAborted()
+        let recovered: BaseMessage[] | undefined
+        const command = await performSummarization(
+          { ...request, messages: history, systemMessage: undefined, tools: input.tools,
+            runtime: { ...request.runtime, signal: input.signal } },
+          (next) => { recovered = next.messages; return undefined },
+          history, resolvedModel, fallback, getMaxInputTokens(resolvedModel), owner,
+          history, undefined, true, { inputBudget: input.inputBudget, fixedMessages }
+        )
+        if (!(command instanceof Command) || !recovered)
+          throw modelInputBudgetError(input, "压缩没有产生可继续的请求")
+        const update = command.update as CmbCompactionPlan["update"]
+        const cutoff = Array.isArray(request.state.messages)
+          ? request.state.messages.length : request.messages.length
+        // This summary covers the entire final effective history, including any earlier
+        // summary in this call. Publish its boundary in the original raw checkpoint.
+        update._summarizationEvent.cutoffIndex = cutoff
+        update._summarizationEvent.usageStartIndex = cutoff
+        finalRecovery = command
+        return { messages: [...fixedMessages, ...recovered], usageStartIndex: cutoff }
+      }, execute)
+      if (finalRecovery) return finalRecovery
       const previous = getValidSummarizationEvent(request.state, owner)
       if (previous && previous.usageStartIndex === undefined && AIMessage.isInstance(result)) {
         // The framework keeps the actual handler response when collecting this state update.

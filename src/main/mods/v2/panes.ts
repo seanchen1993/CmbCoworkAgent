@@ -33,6 +33,7 @@ import { nativeMarkdownLeaves, type FunctionMarkdownLinkRegistry,
   type FunctionMarkdownPublicationPlan } from "./markdown-link-registry"
 import { captureFunctionMarkdownDisplay } from "./markdown-display-scope"
 import { platformFormValues } from "../../../shared/mods/v2/platform-surfaces-widgets"
+import { withUserViewAction } from "./user-view-action"
 
 export interface FunctionUiDispatch {
   onlyPlugin?: string
@@ -66,7 +67,7 @@ interface Pane extends FunctionPaneSnapshot {
 }
 export interface PaneHost {
   /** Fixed by the native slot registry, never by a rendered node. */
-  component?: import("../../../shared/mods/v2/sites").FunctionUiSite
+  component?: import("../../../shared/mods/v2/sites").FunctionUiRenderComponent
   localNotificationsOnly?: boolean
   releaseState?(generation: string): void
   beginState?(generation: string): void
@@ -545,7 +546,8 @@ export class FunctionPanes {
               site?.requestId)
             const render = () => this.host.dispatch("ui.render", input, {
               generation: candidate.generation,
-              core: async (received) => candidate.drawing.keep(received)
+              core: async (received) => input.component === "Placed"
+                ? { type: "Box", props: {}, children: [] } : candidate.drawing.keep(received)
             })
             let tree: ModJson
             if (this.host.withUiResolveDrawing) {
@@ -1028,13 +1030,23 @@ export class FunctionPanes {
               !(node.props.options as ModObject[]).some((option) => option.value === input.value)
             )
               throw new ModFunctionError("MODS_UI_ACTION_INVALID")
-            await this.host.callback(
+            const assertAction = () => {
+              signal.throwIfAborted()
+              this.host.assertLive()
+              if (this.panes.get(pane.key) !== pane || pane.generation !== action.generation ||
+                pane.actionsInvalidated) throw new ModFunctionError("MODS_UI_STALE_ACTION")
+              this.host.assertNativeCurrent?.(pane)
+            }
+            const callback = () => this.host.callback(
               plugin,
               event,
               input,
               { handle: action.handle, generation: action.generation, kind },
               signal
             )
+            if (["press", "submit", "select"].includes(action.kind))
+              await withUserViewAction(plugin.name, assertAction, callback)
+            else await callback()
             return event === "ui.press"
               ? { element: input.element }
               : { element: input.element, value: input.value }

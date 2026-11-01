@@ -21,6 +21,10 @@ export const FUNCTION_UI_SITES = [
   "AskUserQuestion"
 ] as const
 export type FunctionUiSite = (typeof FUNCTION_UI_SITES)[number]
+export type FunctionUiRenderComponent = FunctionUiSite | "Pane" | "Placed"
+export function isFunctionUiRenderComponent(value: unknown): value is FunctionUiRenderComponent {
+  return value === "Pane" || value === "Placed" || FUNCTION_UI_SITES.some(site => site === value)
+}
 /** Passive presentation eligibility still requires a host source/purity/dependency proof. */
 export const FUNCTION_PASSIVE_DISPLAY_SITES: readonly FunctionUiSite[] = [
   "UserMessage", "AssistantMessage", "CommandOutput", "ToolUse", "ToolResult", "ToolGroup",

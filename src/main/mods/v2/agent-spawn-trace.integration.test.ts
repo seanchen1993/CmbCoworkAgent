@@ -46,6 +46,13 @@ vi.mock("../../services/workspace-probe-worker?nodeWorker", async () => ({
   default: (await import("../../services/workspace-probe.test-helper"))
     .createWorkspaceProbeTestWorker
 }))
+vi.mock("../../checkpointer/runtime-projection-worker?nodeWorker", async () => {
+  const { build } = await import("esbuild")
+  const { Worker } = await import("node:worker_threads")
+  const worker = join(fixture.root, "checkpoint-reader.cjs")
+  await build({entryPoints:[resolve("src/main/checkpointer/runtime-projection-worker.ts")],outfile:worker,bundle:true,platform:"node",format:"cjs",target:"node22"})
+  return { default: (options: import("node:worker_threads").WorkerOptions) => new Worker(worker, options) }
+})
 
 import { ModsManager, setModsManager } from "../manager"
 import {
@@ -74,6 +81,7 @@ import {
 } from "../devtools/creator-model-accounting"
 
 afterAll(async () => {
+  await (await import("../../checkpointer/runtime-projection-client")).closeCheckpointRuntimeProjectionWorker()
   setModsManager(undefined)
   await closeWorkspaceProbeWorker()
   await closeDatabase()
@@ -156,11 +164,13 @@ it("keeps real Guest peer and completion after parent lease release with child t
     `export function register(on){let child;
     on("session.start",async($,e,next)=>{await $.command.register({name:"spawn",description:"Spawn actual child"});
       await $.command.register({name:"send",description:"Send actual peer",immediate:true});
-      await $.command.register({name:"inspect",description:"Read actual completion",immediate:true});return next(e)});
+      await $.command.register({name:"inspect",description:"Read actual completion",immediate:true});
+      await $.command.register({name:"history",description:"Read native child evidence",immediate:true});return next(e)});
     on("command.run",{command:"spawn"},async($)=>{child=await $.agent.spawn({prompt:"Read proof.txt with read_file then report its contents"});
       return {text:JSON.stringify(child)}});
     on("command.run",{command:"send"},async($)=>({text:JSON.stringify(await $.session.send({to:{agentId:child.agentId},text:"NATIVE_PEER_AFTER_PARENT_RELEASE"}))}));
     on("command.run",{command:"inspect"},async($)=>({text:JSON.stringify(await $.store.get("completed"))}));
+    on("command.run",{command:"history"},async($)=>{try{return {text:JSON.stringify({status:await $.agent.status({agentId:child.agentId}),page:await $.agent.messages({agentId:child.agentId})})}}catch(error){return{text:JSON.stringify({error:error.code,message:error.message})}}});
     on("turn.complete",async($,e,next)=>{await $.store.set("completed",e);return next(e)});
     on("tool.call",async($,e,next)=>{await $.ui.log(JSON.stringify({tool:e.tool,agentId:e.agentId,id:e.tool_use_id}));return next(e)})
   }`
@@ -210,6 +220,10 @@ it("keeps real Guest peer and completion after parent lease release with child t
       debugLog: (plugin, text) => events.push({ plugin, text }),
       prepareAgent: (...args) => manager.prepareFunctionAgentSpawn(...args),
       spawnAgent: (...args) => manager.spawnFunctionAgent(...args),
+      agentTask: async (...args) => {
+        try { return await manager.functionAgentTask(...args) }
+        catch (error) { console.error("Native child evidence fixture", error); throw error }
+      },
       sendPeer: (...args) => manager.sendFunctionPeer(...args)
     },
     () => {
@@ -333,7 +347,23 @@ it("keeps real Guest peer and completion after parent lease release with child t
       expect(text).toBeTruthy()
       expect(JSON.parse(text!)).toMatchObject({ agentId: started.agentId, reason: "answer", answer: "native-tool-proof received" })
     }, { timeout: 5000 })
-    expect(getThreadCore(childThread)).toBeNull()
+    expect(getThreadCore(childThread)).not.toBeNull()
+    const grant = manager.store.getGrant(canonical, `function:${compiled.name}`)!
+    expect(manager.ownedAgentTasks.status("parent", canonical, grant, started.agentId)).toMatchObject({ status: "completed", model: fixture.config!.ref })
+    const history = JSON.parse((await command("history")).text!)
+    expect(history).not.toHaveProperty("error")
+    expect(history.status.status).toBe("completed")
+    if (!history.page.messages.some(message => message.text.includes("native-tool-proof received"))) {
+      const { visitLatestCheckpointMessages } = await import("../../checkpointer/runtime-projection-store")
+      const { peekThreadCheckpointPath } = await import("../../storage")
+      visitLatestCheckpointMessages(peekThreadCheckpointPath(childThread), childThread, "", message => {
+        const raw = message as { id?: unknown; type?: unknown; kwargs?: { type?: unknown } }
+        console.log("Native child raw message identity", JSON.stringify({id:raw.id,type:raw.type,kwargsType:raw.kwargs?.type}))
+      })
+    }
+    expect(history.page.messages.some(message => message.text.includes("Read proof.txt"))).toBe(true)
+    expect(history.page.messages.some(message => message.text.includes("native-tool-proof received")), JSON.stringify(history.page)).toBe(true)
+    expect(JSON.stringify(history.page.messages)).toContain("native-read")
     expect(JSON.parse(getThreadCore("parent")!.metadata!).workspacePath).toBe(workspace)
     expect(approvals).toHaveLength(1)
     expect(requests).toHaveLength(2)
@@ -378,6 +408,7 @@ it("keeps real Guest peer and completion after parent lease release with child t
     release()
     await parentTracer.finish("success")
     deleteThread("parent")
+    expect(getThreadCore(childThread)).toBeNull()
     manager.close()
     await Promise.all(guests.map((guest) => guest.dispose()))
     setModsManager(undefined)

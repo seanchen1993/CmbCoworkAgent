@@ -30,6 +30,7 @@ interface FixtureWindow {
     releaseCreate(): void
     holdRegistry(): void
     releaseRegistry(): void
+    createInputs: Array<Record<string, unknown>>
     createCalls: number
     mutationCalls: string[]
     guideDismissals: string[]
@@ -127,7 +128,7 @@ async function main() {
       let releaseCreate,registryDelayed=false;const pendingRegistry=[];
       const guideDismissals=[],mutationCalls=[];
       window.addEventListener('ui-guide:dismiss-current-entry',event=>guideDismissals.push(event.detail.guideId));
-      const search={calls,released,templates:0,createCalls:0,guideDismissals,mutationCalls,
+      const search={calls,released,templates:0,createCalls:0,createInputs:[],guideDismissals,mutationCalls,
         openDerived:()=>openDerivedProject('delayed-host','延迟模板项目插件'),
         openHostStartUse:()=>openPluginStartUse({threadId:'source-chat',expectedWorkspace:'C:/source',
           pluginId:hostAdapter.id,expected:{name:hostAdapter.name,version:hostAdapter.version}},
@@ -154,8 +155,15 @@ async function main() {
         builtinRobot:{getStatus:async()=>({settings:{enabled:false},connectionState:'offline',identityState:'unknown'}),
           onStatus:unsubscribe,getRemoteAccess:async()=>({featureGrants:[],threadGrants:[]}),onRemoteAccessChanged:unsubscribe},
         appNotifications:{list:async()=>[],onChanged:unsubscribe},
-        workspace:{cancelGitPanelReads:nothing,onFilesChanged:unsubscribe},
-        harnessBoard:{catalogPage:async()=>structuredClone(emptyCatalog),registry:async()=>registryDelayed?
+        workspace:{select:async()=>'C:/isolated/create',cancelGitPanelReads:nothing,onFilesChanged:unsubscribe},
+        harnessBoard:{
+          searchEnterpriseProjects:async()=>({projects:[],total:0,hasMore:false}),
+          verifyEnterpriseProjectCode:async()=>false,
+          createProject:async input=>{search.createCalls++;search.createInputs.push(input);
+            await new Promise(resolve=>releaseCreate=resolve);
+            return {...input,projectId:'created-before-account-switch',
+              'harness-adapter':{id:input.adapterId,name:hostAdapter.name,version:hostAdapter.version,type:'plugin'}}},
+          catalogPage:async()=>structuredClone(emptyCatalog),registry:async()=>registryDelayed?
           new Promise(resolve=>pendingRegistry.push(resolve)):[structuredClone(hostAdapter)],
           getProjectDetails:async()=>({}),cancelCatalogRequests:nothing,cancelKnowledgePreviewRequests:nothing,
           cancelEnterpriseRequests:nothing,stopWatchRefs:nothing,onWatchRefsChanged:unsubscribe,onManagedRunChanged:unsubscribe,
@@ -167,8 +175,7 @@ async function main() {
               const key=query.trim().toLowerCase();const rows=projects(account).filter(project=>project.projectId>after&&
                 (!key||[project.name,project.workspace].some(value=>value.toLowerCase().includes(key)))).slice(0,20);
               return held.has(query)?new Promise(resolve=>pending.push({query,rows,resolve})):rows},
-            create:async input=>{search.createCalls++;await new Promise(resolve=>releaseCreate=resolve);
-              return{project:{projectId:'created-before-account-switch',name:input.name},operations:[]}},
+            create:async()=>{throw Error('OLD_HOST_CREATE_MUST_NOT_RUN')},
             get:async projectId=>({project:{...projects(window.fixtureAccount()).find(item=>item.projectId===projectId),
               version:1,goal:'保留原项目进度',manifest:{stages:[{id:'verify',title:'验证阶段',approval:'human',checkIds:[],artifactIds:[]}],
                 checks:[],artifacts:[]}},operations:[],preview:{state:'expired'}}),
@@ -211,6 +218,11 @@ async function main() {
         () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))
       )
 
+    const expandHistory = async () => {
+      const summary = page.getByText("历史独立运行（兼容查看）", { exact: true })
+      await summary.waitFor()
+      if (await summary.locator("..").getAttribute("open") === null) await summary.click()
+    }
     await search.waitFor()
     await page.waitForFunction(
       () => document.querySelectorAll('[data-project-runtime="host"]').length === 20
@@ -223,6 +235,7 @@ async function main() {
     )
     await search.fill("目标第21个")
     await waitQuery("目标第21个")
+    await expandHistory()
     await page.getByRole("button", { name: "打开项目 账号0 目标第21个项目", exact: true }).waitFor()
     assert.equal(await cards.count(), 1)
 
@@ -231,11 +244,14 @@ async function main() {
     await page.waitForFunction(
       () => document.querySelectorAll('[data-project-runtime="host"]').length === 20
     )
-    await page.getByRole("button", { name: "加载更多项目", exact: true }).click()
+    await expandHistory()
+    await page.getByRole("button", { name: "加载更多历史运行", exact: true }).click()
     await waitQuery("通用项目", "host-019")
+    await expandHistory()
     await page.getByRole("button", { name: "打开项目 账号0 通用项目 39", exact: true }).waitFor()
     await search.fill("新词")
     await waitQuery("新词")
+    await expandHistory()
     await page.getByRole("button", { name: "打开项目 账号0 新词结果", exact: true }).waitFor()
     assert.equal(await cards.count(), 1, "changing the query resets the previous page and cursor")
 
@@ -249,6 +265,7 @@ async function main() {
       "a pending backend search must not tell an existing user to create their first project"
     )
     await search.fill("新词")
+    await expandHistory()
     await page.getByRole("button", { name: "打开项目 账号0 新词结果", exact: true }).waitFor()
     await page.evaluate(() => (window as unknown as FixtureWindow).hostSearch.release("旧词"))
     await tick()
@@ -266,6 +283,7 @@ async function main() {
     await waitQuery("旧账号")
     await page.evaluate(() => (window as unknown as FixtureWindow).hostSearch.changeAccount())
     await waitQuery("", "", 1)
+    await expandHistory()
     await page.getByRole("button", { name: "打开项目 账号1 通用项目 0", exact: true }).waitFor()
     await page.evaluate(() => (window as unknown as FixtureWindow).hostSearch.release("旧账号"))
     await tick()
@@ -282,6 +300,7 @@ async function main() {
     await page.getByText("未找到匹配项目", { exact: true }).waitFor()
     assert.equal(await page.getByText("暂无项目", { exact: true }).count(), 0)
     await page.getByRole("button", { name: "清除搜索", exact: true }).click()
+    await expandHistory()
     await page.getByRole("button", { name: "打开项目 账号1 通用项目 0", exact: true }).waitFor()
     assert.equal(await search.inputValue(), "")
     await page.evaluate(() => (window as unknown as FixtureWindow).hostSearch.fail("失败请求"))
@@ -315,6 +334,7 @@ async function main() {
     await waitQuery("", "", 2)
     await search.fill("目标第21个")
     await waitQuery("目标第21个", "", 2)
+    await expandHistory()
     await page.getByRole("button", { name: "打开项目 账号2 目标第21个项目", exact: true }).waitFor()
     await page.evaluate(() => (window as unknown as FixtureWindow).hostSearch.releaseTemplates(1))
     await tick()
@@ -323,14 +343,14 @@ async function main() {
     const hostOption = page.getByRole("option", { name: /延迟模板项目插件/ })
     assert.equal(await hostOption.isEnabled(), true)
     await hostOption.click()
-    await page.getByRole("textbox", { name: "希望完成什么", exact: true }).waitFor()
-    await page.getByRole("textbox", { name: "项目名称", exact: true }).fill("搜索后使用延迟模板")
+    await page.getByRole("textbox", { name: /系统编号/ }).waitFor()
+    await page.getByRole("textbox", { name: /项目名称/ }).fill("搜索后使用延迟模板")
     assert.equal(
       await page.getByText("项目插件尚未就绪，请启用插件并更新列表。", { exact: true }).count(),
       0,
       "a valid initial template response must survive intervening project searches"
     )
-    await page.getByRole("button", { name: "返回列表", exact: true }).click()
+    await page.getByRole("button", { name: "取消", exact: true }).click()
     await page.evaluate(() => (window as unknown as FixtureWindow).hostSearch.releaseTemplates())
     await tick()
     // The actual board must retire old account handoffs, then claim a current request only once.
@@ -354,6 +374,7 @@ async function main() {
     )
     // A saved Creator handoff can arrive while this same Board still shows its old Host trial.
     const openHostDetail = async () => {
+      await expandHistory()
       await page.getByRole("button", { name: "打开项目 账号3 通用项目 0", exact: true }).click()
       await page.locator('[aria-label="本地任务运行过程"]').waitFor()
       await page.getByText("保留原项目进度", { exact: true }).waitFor()
@@ -379,7 +400,7 @@ async function main() {
       fixture.changeSourceWorkspace("C:/source")
       fixture.openHostStartUse()
     })
-    await page.getByRole("textbox", { name: "希望完成什么", exact: true }).waitFor()
+    await page.getByRole("textbox", { name: /系统编号/ }).waitFor()
     assert.equal(
       await page.locator('[aria-label="本地任务运行过程"]').count(),
       0,
@@ -395,11 +416,11 @@ async function main() {
       ),
       null
     )
-    await page.getByRole("textbox", { name: "项目名称", exact: true }).fill("保留已打开表单草稿")
+    await page.getByRole("textbox", { name: /项目名称/ }).fill("保留已打开表单草稿")
     await page.evaluate(() => (window as unknown as FixtureWindow).hostSearch.openHostStartUse())
     await tick()
     assert.equal(
-      await page.getByRole("textbox", { name: "项目名称", exact: true }).inputValue(),
+      await page.getByRole("textbox", { name: /项目名称/ }).inputValue(),
       "保留已打开表单草稿"
     )
     assert.equal(await page.getByRole("dialog", { name: "新建项目", exact: true }).count(), 1)
@@ -409,19 +430,19 @@ async function main() {
       ),
       "a second explicit handoff waits for the current draft"
     )
-    await page.getByRole("button", { name: "返回列表", exact: true }).click()
+    await page.getByRole("button", { name: "取消", exact: true }).click()
     await page.waitForFunction(
       () => (window as unknown as FixtureWindow).hostSearch.pendingHostStartUse() === null
     )
-    await page.getByRole("textbox", { name: "希望完成什么", exact: true }).waitFor()
+    await page.getByRole("textbox", { name: /系统编号/ }).waitFor()
     assert.equal(
-      await page.getByRole("textbox", { name: "项目名称", exact: true }).inputValue(),
+      await page.getByRole("textbox", { name: /项目名称/ }).inputValue(),
       ""
     )
-    await page.getByRole("button", { name: "返回列表", exact: true }).click()
+    await page.getByRole("button", { name: "取消", exact: true }).click()
     await openHostDetail()
     await page.evaluate(() => (window as unknown as FixtureWindow).hostSearch.openDerived())
-    await page.getByRole("textbox", { name: "希望完成什么", exact: true }).waitFor()
+    await page.getByRole("textbox", { name: /系统编号/ }).waitFor()
     assert.equal(await page.getByRole("button", { name: "填写新项目", exact: true }).count(), 0)
     assert.equal(
       await page.evaluate(() => (window as unknown as FixtureWindow).hostSearch.pendingDerived()),
@@ -452,15 +473,24 @@ async function main() {
       [],
       "leaving detail and opening either form never stops, advances or approves the old project"
     )
-    await page.getByRole("textbox", { name: "项目名称", exact: true }).fill("提交后切换账号")
-    await page
-      .getByRole("textbox", { name: "希望完成什么", exact: true })
-      .fill("不重放已消费的创建请求")
-    await page.getByRole("button", { name: "选择工作目录", exact: true }).click()
-    await page.getByRole("button", { name: "创建项目", exact: true }).click()
+    await page.getByRole("textbox", { name: /项目名称/ }).fill("提交后切换账号")
+    await page.getByRole("textbox", { name: /项目编号/ }).fill("P-ACCOUNT-CAS")
+    await page.getByRole("textbox", { name: /项目描述/ }).fill("不重放已消费的创建请求")
+    await page.getByRole("textbox", { name: /系统编号/ }).fill("S1")
+    await page.getByRole("textbox", { name: /系统名称/ }).fill("通用系统")
+    await page.getByRole("textbox", { name: "插件工作区根目录", exact: true }).click()
+    await page.getByRole("button", { name: "创建", exact: true }).click()
     await page.waitForFunction(
       () => (window as unknown as FixtureWindow).hostSearch.createCalls === 1
     )
+    const createdInput = await page.evaluate(() =>
+      (window as unknown as FixtureWindow).hostSearch.createInputs[0])
+    assert.equal(createdInput.adapterId, "delayed-host")
+    assert.equal(createdInput.projectCode, "P-ACCOUNT-CAS")
+    assert.equal(createdInput.systemId, "S1")
+    assert.equal(Object.hasOwn(createdInput, "goal"), false)
+    assert.deepEqual(createdInput.expectedNativeTemplate, { pluginId: "delayed-host",
+      name: "延迟模板项目插件", version: "1.0.0", digest: "a".repeat(64) })
     await page.evaluate(() => {
       const fixture = (window as unknown as FixtureWindow).hostSearch
       fixture.changeAccount()

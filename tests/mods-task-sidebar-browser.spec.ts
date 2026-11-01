@@ -90,7 +90,7 @@ async function main() {
     await inlineTask.getByRole("region", { name: "当前任务进展", exact: true }).waitFor()
     assert.equal(await inlineTask.getByLabel("当前步骤进度").isVisible(), false,
       "expanded past tasks also keep technical execution details collapsed")
-    await sidebar.getByRole("tab", { name: "结果", exact: true }).click()
+    await sidebar.getByRole("tab", { name: "输出与面板", exact: true }).click()
     await sidebar.getByText("受控插件结果", { exact: true }).waitFor()
     assert.equal(await sidebar.getByLabel("本次规范与运行概况").count(), 0)
     assert.deepEqual(await call("panelCounts"), [1, 0])
@@ -109,7 +109,7 @@ async function main() {
       "a result arriving during real ordinary work must not take over the visible task view")
     await call("ordinaryWorking", false)
     await call("revealResult", "settled")
-    await sidebar.getByRole("tab", { name: "结果", exact: true, selected: true }).waitFor()
+    await sidebar.getByRole("tab", { name: "输出与面板", exact: true, selected: true }).waitFor()
     assert.equal((await calls()).slice(beforeModsOff).length, 0)
     writeFileSync(join(output, "report.json"), JSON.stringify({
       passed: true, checks: ["ordinary send requires no preset choice", "task is the default view",

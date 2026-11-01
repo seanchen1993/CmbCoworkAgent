@@ -53,7 +53,7 @@ export const FUNCTION_GUEST_BOOTSTRAP = String.raw`
   const signals = new Map();
   const registrations = [];
   const drawnComponents = new Set();
-  const uiComponents = new Set(["Pane","AbovePrompt","PromptHint","InfoNotice","Spinner",
+  const uiComponents = new Set(["Placed","Pane","AbovePrompt","PromptHint","InfoNotice","Spinner",
     "TurnDuration","SessionMode","UserMessage","AssistantMessage","CommandOutput",
     "ToolUse","ToolResult","ToolGroup","AskUserQuestion"]);
   // A redraw hint, never an authorization receipt. Inspect current mutable matchers on
@@ -451,7 +451,7 @@ export const FUNCTION_GUEST_BOOTSTRAP = String.raw`
         sdk[noun][method]=(ms,options)=>sdkCall(capability,[ms],options?.signal);
         continue;
       }
-      if(capability==="platform.act"){
+      if(capability==="platform.act"||capability==="mcp.connect"){
         sdk[noun][method]=(input,options)=>{
           if(options!==undefined&&(!options||typeof options!=="object"||Array.isArray(options)||
               ownKeys(options).some(key=>key!=="signal")))throw Error("MODS_PLATFORM_ARGUMENTS");

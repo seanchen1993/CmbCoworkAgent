@@ -3,7 +3,13 @@ import { Button } from "@/components/ui/button"
 import { useAppStore } from "@/lib/store"
 
 /** Navigation only: opening settings never enables or approves a plugin. */
-export function ModsUsageSettingsEntry({ disabled = false }: { disabled?: boolean }) {
+export function ModsUsageSettingsEntry({
+  disabled = false,
+  label = "管理已安装插件"
+}: {
+  disabled?: boolean
+  label?: string
+}) {
   return (
     <Button
       type="button"
@@ -13,7 +19,7 @@ export function ModsUsageSettingsEntry({ disabled = false }: { disabled?: boolea
       onClick={() => useAppStore.getState().setShowCustomizeView(true, "mods", "installed")}
     >
       <Settings2 className="size-3.5" />
-      插件
+      {label}
     </Button>
   )
 }

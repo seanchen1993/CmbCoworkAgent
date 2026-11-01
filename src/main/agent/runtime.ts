@@ -1284,6 +1284,8 @@ export function createScopedMcpCapabilityService(
     executionWorkspace?: string
     runtimeAuthority?: ModRuntimeAuthority
     onModBinding?: (release: () => void) => void
+    /** Main-only request-local adapter; do not replace a live turn's global binding. */
+    bindMod?: boolean
     /** Host-owned flow nodes execute exactly the selected MCP operation, without browser helpers. */
     directMcpInvocation?: boolean
     agentId?: string
@@ -1776,7 +1778,7 @@ export function createScopedMcpCapabilityService(
       await service.close()
     }
   }
-  const releaseModBinding = getModsManager()?.bindMcp(
+  const releaseModBinding = baseContext.bindMod === false ? undefined : getModsManager()?.bindMcp(
     {
       workspace: baseContext.workspacePath,
       runtimeAuthority: baseContext.runtimeAuthority,
@@ -8859,6 +8861,8 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
         signal?: AbortSignal
       ) => {
         modRuntimeAuthority?.assertLive()
+        // This callback follows the verified durable commit, before plugin PostCompact observes it.
+        if (!agentId || agentId === "main") getModsManager()?.clearFunctionPlacedRows(workspacePath, threadId)
         const context: HookContext = {
           workspacePath,
           sessionId: threadId,

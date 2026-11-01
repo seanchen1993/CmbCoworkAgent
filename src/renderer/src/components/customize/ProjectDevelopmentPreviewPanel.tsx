@@ -166,6 +166,9 @@ function ScopedPreview({
           刷新
         </button>
       </div>
+      <p className="text-sm leading-6 text-muted-foreground">
+        准备环境只创建独立试用项目；补齐配置并确认权限后，才会开始执行。
+      </p>
       {!drafts.length && <p className="text-sm">请回到聊天继续描述需求，准备好后即可试用。</p>}
       {error && (
         <p role="alert" className="text-sm">
@@ -364,7 +367,7 @@ function ScopedPreview({
                   })
                 }
               >
-                开始试用
+                准备试用环境
               </button>
             )}
           </div>

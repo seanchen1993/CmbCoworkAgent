@@ -44,7 +44,7 @@ import type { ClawSourceEntry } from "../../shared/mods/claw"
 import { derivationVisibility, isDerivedPlugin } from "../plugins/derivation-scope"
 import { isDerivationVisibleForProjectMode } from "../../shared/skill-visibility"
 
-interface CapabilitySource {
+export interface CapabilitySource {
   kind: "connector" | "plugin"
   providerKey: string
   providerDisplayName: string
@@ -214,6 +214,15 @@ export function readConfiguredClawMcpSources(): ClawSourceEntry[] {
     digest: buildFingerprint([source]),
     ...(source.pluginId ? { owner: source.ownerName ?? source.pluginId } : { owner: "全局连接器" })
   }))
+}
+
+/** Main-only exact configuration resolution. Never serialize this value to guests or the UI. */
+export function resolveSelectedMcpSource(id: string, digest: string): CapabilitySource {
+  const sources = [...toConnectorSources(), ...toPluginSources()]
+    .filter(source => source.providerKey === id)
+  if (sources.length !== 1 || buildFingerprint(sources) !== digest)
+    throw new ModError("MODS_MCP_SOURCE_CHANGED")
+  return sources[0]
 }
 
 async function listServerTools(

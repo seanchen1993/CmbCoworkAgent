@@ -1,3 +1,4 @@
+import { groupInstalledPlugins } from "@/lib/installed-plugin-groups"
 import { PluginDerivationPanel } from "./PluginDerivationPanel"
 import { BusinessModAssemblyPanel } from "./BusinessModAssemblyPanel"
 import {
@@ -580,6 +581,306 @@ export function ModsSettings({
       </div>
     )
   }
+  const groups = groupInstalledPlugins(installedAccount === account ? installed : [])
+  const renderPlugin = (
+    plugin: (typeof installed)[number],
+    dependency = false
+  ): React.ReactNode => {
+    const mod = status?.functionMods?.find((item) => item.pluginId === plugin.id)
+    const action = installedModNextAction(plugin.enabled, mod, globalEnabled && !!status?.enabled)
+    const canUseHere = active && threadId && status && !status.recovery && !readFailed
+    const hasChatScope = Boolean(threadId && workspaceHint)
+    const entries = projectEntries.account === account ? projectEntries : undefined
+    const projectEntry =
+      !hasChatScope && entries?.templates
+        ? classifyInstalledPluginProjectEntry(plugin.id, [plugin], entries.templates)
+        : undefined
+    const projectCandidate =
+      plugin.hasProjectMode ||
+      entries?.templates?.some((template) => template.installedPluginId === plugin.id)
+    const entryFailed =
+      !hasChatScope && plugin.enabled && projectCandidate && projectEntry?.kind === "unavailable"
+    const projectUse = projectEntry?.kind === "host" || projectEntry?.kind === "legacy"
+    const managing = managedPlugin === plugin.id
+    return (
+      <article
+        key={plugin.id}
+        aria-label={plugin.name}
+        data-installed-mod-id={plugin.id}
+        className="space-y-3 rounded-lg bg-muted/30 p-3"
+      >
+        <div className="flex items-start justify-between gap-2">
+          <h4 className="min-w-0 break-all font-medium">{plugin.name}</h4>
+          <Button
+            size="sm"
+            variant="ghost"
+            disabled={blocked}
+            aria-expanded={managing}
+            onClick={() => setManagedPlugin(managing ? null : plugin.id)}
+          >
+            {managing ? "收起管理" : "管理"}
+          </Button>
+        </div>
+        <p className="text-xs text-muted-foreground">
+          {[
+            plugin.skillCount > 0 && `${plugin.skillCount} 项技能`,
+            (plugin.hookCount ?? 0) > 0 && `${plugin.hookCount} 项自动检查`,
+            plugin.mcpServerCount > 0 && `${plugin.mcpServerCount} 个工具连接`,
+            (plugin.modCount ?? 0) > 0 && `${plugin.modCount} 个灵件模块`,
+            (plugin.businessModCount ?? 0) > 0 && `${plugin.businessModCount} 个可组合业务 Mods`,
+            (plugin.businessExtensionCount ?? 0) > 0 &&
+              `${plugin.businessExtensionCount} 个常驻扩展`,
+            (plugin.hasProjectMode || projectUse) && "支持项目模式"
+          ]
+            .filter(Boolean)
+            .join(" · ")}
+        </p>
+        {dependency ? (
+          <p className="text-xs text-muted-foreground">
+            由项目统一配置和授权，无需单独开始使用。
+            {(groups.owners.get(plugin.id)?.length ?? 0) > 1 &&
+              `共享于：${groups.owners.get(plugin.id)!.join("、")}。`}
+          </p>
+        ) : action === "修复" ? (
+          <>
+            <p role="alert" className="text-xs text-destructive">
+              {mod?.error || "插件无法加载，请核对配置或重新安装。"}
+            </p>
+            <Button
+              size="sm"
+              disabled={blocked || !active}
+              onClick={() => setManagedPlugin(plugin.id)}
+            >
+              修复
+            </Button>
+          </>
+        ) : canUseHere && typeof plugin.version === "string" ? (
+          <InstalledPluginStartUse
+            threadId={threadId}
+            workspace={status.workspace}
+            pluginId={plugin.id}
+            expected={{ name: plugin.name, version: plugin.version }}
+            actionLabel={action === "启用" ? "开始使用" : action}
+            disabled={
+              busy ||
+              (activeUsePlugin !== null && activeUsePlugin !== plugin.id) ||
+              (plugin.hasProjectMode && !projectMode.enabled)
+            }
+            onBusyChange={(value) =>
+              setActiveUsePlugin((current) =>
+                value ? plugin.id : current === plugin.id ? null : current
+              )
+            }
+          />
+        ) : (
+          <>
+            <Button
+              size="sm"
+              disabled={
+                busy ||
+                !active ||
+                (!plugin.enabled && hasChatScope) ||
+                (plugin.enabled &&
+                  (plugin.hasProjectMode || projectUse) &&
+                  (projectMode.loading || !projectMode.enabled))
+              }
+              onClick={() => {
+                if (!plugin.enabled) {
+                  if (hasChatScope) return
+                  void run(async () => {
+                    const result = await window.api.plugins.setEnabled(plugin.id, true)
+                    if (result?.success === false)
+                      throw new Error(result.error || "启用状态未能保存，请重试。")
+                    useAppStore.getState().bumpPluginVersion()
+                  })
+                } else if (!hasChatScope && entryFailed) {
+                  void run(async () => {}, false)
+                } else if (!hasChatScope && projectEntry?.kind === "host") {
+                  void run(async () => {
+                    const version = readVersion.current
+                    const current = () =>
+                      alive.current &&
+                      navigationScope.current.active &&
+                      navigationScope.current.account === account &&
+                      useAppStore.getState().accountRevision === account &&
+                      version === readVersion.current
+                    const actual = await readInstalledPluginProjectEntry(
+                      plugin.id,
+                      {
+                        plugins: () => window.api.plugins.list(),
+                        templates: () => window.api.harnessBoard.localProjects.templates()
+                      },
+                      current,
+                      plugin
+                    )
+                    if (actual.kind !== projectEntry?.kind)
+                      throw Error("插件项目入口已变化，请重新核对。")
+                    if (!current()) return
+                    openDerivedProject(actual.pluginId, actual.name)
+                  }, false)
+                } else if (plugin.hasProjectMode) {
+                  openDerivedProject(plugin.id, plugin.name)
+                } else {
+                  openPluginSettings(plugin.id)
+                }
+              }}
+            >
+              {!plugin.enabled
+                ? hasChatScope
+                  ? "使用状态待核对"
+                  : busy
+                    ? "正在启用插件…"
+                    : "启用插件"
+                : entryFailed
+                  ? "重新核对使用入口"
+                  : plugin.hasProjectMode || projectUse
+                    ? "去使用"
+                    : "配置"}
+            </Button>
+            {!hasChatScope && entryFailed && (
+              <p role="status" className="text-xs text-muted-foreground">
+                {projectEntry?.kind === "unavailable" && projectCandidate
+                  ? projectEntry.reason
+                  : "暂时无法确认项目入口，请重新核对。"}
+              </p>
+            )}
+            {!hasChatScope && projectUse && !projectMode.loading && !projectMode.enabled && (
+              <p role="status" className="text-xs text-muted-foreground">
+                当前应用暂未开放项目模式。
+              </p>
+            )}
+            {!plugin.hasProjectMode && hasChatScope && !canUseHere && (
+              <p className="text-xs text-muted-foreground">
+                {readFailed || status?.recovery
+                  ? "使用状态需要核对，请先处理下方提示。"
+                  : "打开聊天并选择项目目录后，即可使用此插件。"}
+              </p>
+            )}
+          </>
+        )}
+        {managing && (
+          <div className="space-y-3 border-t pt-3" aria-label={`${plugin.name}管理`}>
+            <p className="text-xs text-muted-foreground">插件启停会影响使用它的其他聊天。</p>
+            {!hasChatScope && plugin.enabled && entries?.failed && !plugin.hasProjectMode && (
+              <div className="space-y-2">
+                <p role="status" className="text-xs text-muted-foreground">
+                  暂时无法确认项目入口，插件配置仍可使用。
+                </p>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={busy || !active}
+                  onClick={() => void run(async () => {}, false)}
+                >
+                  重新核对项目入口
+                </Button>
+              </div>
+            )}
+            <div className="flex flex-wrap gap-2">
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={blocked}
+                onClick={() => openPluginSettings(plugin.id)}
+              >
+                插件配置
+              </Button>
+              {dependency && !plugin.enabled && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={blocked}
+                  onClick={() =>
+                    void run(async () => {
+                      const result = await window.api.plugins.setEnabled(plugin.id, true)
+                      if (result?.success === false) throw new Error(result.error || "组件启用失败")
+                      useAppStore.getState().bumpPluginVersion()
+                    })
+                  }
+                >
+                  启用组件
+                </Button>
+              )}
+              {plugin.enabled && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={blocked}
+                  onClick={() =>
+                    void run(async () => {
+                      const result = await window.api.plugins.setEnabled(plugin.id, false)
+                      if (result?.success === false)
+                        throw new Error(result.error || "停用状态未能保存，请重试。")
+                      useAppStore.getState().bumpPluginVersion()
+                    })
+                  }
+                >
+                  停用插件
+                </Button>
+              )}
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={blocked || !active}
+                aria-expanded={selectedProjectPlugin === plugin.id}
+                onClick={() =>
+                  setProjectSelection({
+                    scope: projectScope,
+                    pluginId: selectedProjectPlugin === plugin.id ? null : plugin.id
+                  })
+                }
+              >
+                {selectedProjectPlugin === plugin.id ? "收起流程定义" : "查看流程定义"}
+              </Button>
+              {onDerive && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={blocked}
+                  onClick={() => onDerive(plugin)}
+                >
+                  从此插件创建
+                </Button>
+              )}
+              <Button
+                size="sm"
+                variant="ghost"
+                disabled={blocked}
+                onClick={() => setDeleteTarget({ pluginId: plugin.id, name: plugin.name })}
+              >
+                卸载
+              </Button>
+            </div>
+            {active && selectedProjectPlugin === plugin.id && (
+              <Suspense fallback={<p role="status">正在读取插件流程定义…</p>}>
+                <InstalledPluginFlowDefinition
+                  key={JSON.stringify([projectScope, installedProjectPluginIdentity(plugin)])}
+                  pluginId={plugin.id}
+                  name={plugin.name}
+                  version={plugin.version}
+                />
+              </Suspense>
+            )}
+            {!dependency && mod && functionManagement(mod)}
+          </div>
+        )}
+        {plugin.hasProjectMode && !projectMode.loading && !projectMode.enabled && (
+          <p className="text-xs text-muted-foreground">当前应用尚未开放项目模式。</p>
+        )}
+        {!dependency && !!groups.dependencies.get(plugin.id)?.length && (
+          <details className="space-y-2 rounded border p-3" aria-label={`${plugin.name}的依赖组件`}>
+            <summary className="cursor-pointer text-sm">
+              依赖组件（{groups.dependencies.get(plugin.id)!.length}）
+            </summary>
+            <p className="text-xs text-muted-foreground">
+              随项目准备，在项目设置中统一配置并一次确认权限。停用或卸载共享组件会影响引用它的项目。
+            </p>
+            {groups.dependencies.get(plugin.id)!.map((child) => renderPlugin(child, true))}
+          </details>
+        )}
+      </article>
+    )
+  }
   return (
     <section className="w-full space-y-5 text-sm" data-mods-settings aria-label="灵件设置">
       <div className="space-y-1">
@@ -591,277 +892,7 @@ export function ModsSettings({
         data-installed-mods
         className="space-y-3 rounded-xl border p-4"
       >
-        {(installedAccount === account ? installed : []).map((plugin) => {
-          const mod = status?.functionMods?.find((item) => item.pluginId === plugin.id)
-          const action = installedModNextAction(
-            plugin.enabled,
-            mod,
-            globalEnabled && !!status?.enabled
-          )
-          const canUseHere = active && threadId && status && !status.recovery && !readFailed
-          const hasChatScope = Boolean(threadId && workspaceHint)
-          const entries = projectEntries.account === account ? projectEntries : undefined
-          const projectEntry =
-            !hasChatScope && entries?.templates
-              ? classifyInstalledPluginProjectEntry(plugin.id, [plugin], entries.templates)
-              : undefined
-          const projectCandidate =
-            plugin.hasProjectMode ||
-            entries?.templates?.some((template) => template.installedPluginId === plugin.id)
-          const entryFailed =
-            !hasChatScope &&
-            plugin.enabled &&
-            projectCandidate &&
-            projectEntry?.kind === "unavailable"
-          const projectUse = projectEntry?.kind === "host" || projectEntry?.kind === "legacy"
-          const managing = managedPlugin === plugin.id
-          return (
-            <article
-              key={plugin.id}
-              aria-label={plugin.name}
-              data-installed-mod-id={plugin.id}
-              className="space-y-3 rounded-lg bg-muted/30 p-3"
-            >
-              <div className="flex items-start justify-between gap-2">
-                <h4 className="min-w-0 break-all font-medium">{plugin.name}</h4>
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  disabled={blocked}
-                  aria-expanded={managing}
-                  onClick={() => setManagedPlugin(managing ? null : plugin.id)}
-                >
-                  {managing ? "收起管理" : "管理"}
-                </Button>
-              </div>
-              <p className="text-xs text-muted-foreground">
-                {[
-                  plugin.skillCount > 0 && `${plugin.skillCount} 项技能`,
-                  (plugin.hookCount ?? 0) > 0 && `${plugin.hookCount} 项自动检查`,
-                  plugin.mcpServerCount > 0 && `${plugin.mcpServerCount} 个工具连接`,
-                  (plugin.modCount ?? 0) > 0 && `${plugin.modCount} 个灵件模块`,
-                  (plugin.businessModCount ?? 0) > 0 &&
-                    `${plugin.businessModCount} 个可组合业务 Mods`,
-                  (plugin.businessExtensionCount ?? 0) > 0 &&
-                    `${plugin.businessExtensionCount} 个常驻扩展`,
-                  (plugin.hasProjectMode || projectUse) && "支持项目模式"
-                ]
-                  .filter(Boolean)
-                  .join(" · ")}
-              </p>
-              {action === "修复" ? (
-                <>
-                  <p role="alert" className="text-xs text-destructive">
-                    {mod?.error || "插件无法加载，请核对配置或重新安装。"}
-                  </p>
-                  <Button
-                    size="sm"
-                    disabled={blocked || !active}
-                    onClick={() => setManagedPlugin(plugin.id)}
-                  >
-                    修复
-                  </Button>
-                </>
-              ) : canUseHere && typeof plugin.version === "string" ? (
-                <InstalledPluginStartUse
-                  threadId={threadId}
-                  workspace={status.workspace}
-                  pluginId={plugin.id}
-                  expected={{ name: plugin.name, version: plugin.version }}
-                  actionLabel={action === "启用" ? "开始使用" : action}
-                  disabled={
-                    busy ||
-                    (activeUsePlugin !== null && activeUsePlugin !== plugin.id) ||
-                    (plugin.hasProjectMode && !projectMode.enabled)
-                  }
-                  onBusyChange={(value) =>
-                    setActiveUsePlugin((current) =>
-                      value ? plugin.id : current === plugin.id ? null : current
-                    )
-                  }
-                />
-              ) : (
-                <>
-                  <Button
-                    size="sm"
-                    disabled={
-                      busy ||
-                      !active ||
-                      (!plugin.enabled && hasChatScope) ||
-                      (plugin.enabled &&
-                        (plugin.hasProjectMode || projectUse) &&
-                        (projectMode.loading || !projectMode.enabled))
-                    }
-                    onClick={() => {
-                      if (!plugin.enabled) {
-                        if (hasChatScope) return
-                        void run(async () => {
-                          const result = await window.api.plugins.setEnabled(plugin.id, true)
-                          if (result?.success === false)
-                            throw new Error(result.error || "启用状态未能保存，请重试。")
-                          useAppStore.getState().bumpPluginVersion()
-                        })
-                      } else if (!hasChatScope && entryFailed) {
-                        void run(async () => {}, false)
-                      } else if (!hasChatScope && projectEntry?.kind === "host") {
-                        void run(async () => {
-                          const version = readVersion.current
-                          const current = () =>
-                            alive.current &&
-                            navigationScope.current.active &&
-                            navigationScope.current.account === account &&
-                            useAppStore.getState().accountRevision === account &&
-                            version === readVersion.current
-                          const actual = await readInstalledPluginProjectEntry(
-                            plugin.id,
-                            {
-                              plugins: () => window.api.plugins.list(),
-                              templates: () => window.api.harnessBoard.localProjects.templates()
-                            },
-                            current,
-                            plugin
-                          )
-                           if (actual.kind !== projectEntry?.kind)
-                            throw Error("插件项目入口已变化，请重新核对。")
-                          if (!current()) return
-                          openDerivedProject(actual.pluginId, actual.name)
-                        }, false)
-                      } else if (plugin.hasProjectMode) {
-                        openDerivedProject(plugin.id, plugin.name)
-                      } else {
-                        openPluginSettings(plugin.id)
-                      }
-                    }}
-                  >
-                    {!plugin.enabled
-                      ? hasChatScope
-                        ? "使用状态待核对"
-                        : busy
-                          ? "正在启用插件…"
-                          : "启用插件"
-                      : entryFailed
-                        ? "重新核对使用入口"
-                        : plugin.hasProjectMode || projectUse
-                          ? "去使用"
-                          : "配置"}
-                  </Button>
-                  {!hasChatScope && entryFailed && (
-                    <p role="status" className="text-xs text-muted-foreground">
-                      {projectEntry?.kind === "unavailable" && projectCandidate
-                        ? projectEntry.reason
-                        : "暂时无法确认项目入口，请重新核对。"}
-                    </p>
-                  )}
-                  {!hasChatScope && projectUse && !projectMode.loading && !projectMode.enabled && (
-                    <p role="status" className="text-xs text-muted-foreground">
-                      当前应用暂未开放项目模式。
-                    </p>
-                  )}
-                  {!plugin.hasProjectMode && hasChatScope && !canUseHere && (
-                    <p className="text-xs text-muted-foreground">
-                      {readFailed || status?.recovery
-                        ? "使用状态需要核对，请先处理下方提示。"
-                        : "打开聊天并选择项目目录后，即可使用此插件。"}
-                    </p>
-                  )}
-                </>
-              )}
-              {managing && (
-                <div className="space-y-3 border-t pt-3" aria-label={`${plugin.name}管理`}>
-                  <p className="text-xs text-muted-foreground">插件启停会影响使用它的其他聊天。</p>
-                  {!hasChatScope && plugin.enabled && entries?.failed && !plugin.hasProjectMode && (
-                    <div className="space-y-2">
-                      <p role="status" className="text-xs text-muted-foreground">
-                        暂时无法确认项目入口，插件配置仍可使用。
-                      </p>
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        disabled={busy || !active}
-                        onClick={() => void run(async () => {}, false)}
-                      >
-                        重新核对项目入口
-                      </Button>
-                    </div>
-                  )}
-                  <div className="flex flex-wrap gap-2">
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      disabled={blocked}
-                      onClick={() => openPluginSettings(plugin.id)}
-                    >
-                      插件配置
-                    </Button>
-                    {plugin.enabled && (
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        disabled={blocked}
-                        onClick={() =>
-                          void run(async () => {
-                            const result = await window.api.plugins.setEnabled(plugin.id, false)
-                            if (result?.success === false)
-                              throw new Error(result.error || "停用状态未能保存，请重试。")
-                            useAppStore.getState().bumpPluginVersion()
-                          })
-                        }
-                      >
-                        停用插件
-                      </Button>
-                    )}
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      disabled={blocked || !active}
-                      aria-expanded={selectedProjectPlugin === plugin.id}
-                      onClick={() =>
-                        setProjectSelection({
-                          scope: projectScope,
-                          pluginId: selectedProjectPlugin === plugin.id ? null : plugin.id
-                        })
-                      }
-                    >
-                      {selectedProjectPlugin === plugin.id ? "收起流程定义" : "查看流程定义"}
-                    </Button>
-                    {onDerive && (
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        disabled={blocked}
-                        onClick={() => onDerive(plugin)}
-                      >
-                        从此插件创建
-                      </Button>
-                    )}
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      disabled={blocked}
-                      onClick={() => setDeleteTarget({ pluginId: plugin.id, name: plugin.name })}
-                    >
-                      卸载
-                    </Button>
-                  </div>
-                  {active && selectedProjectPlugin === plugin.id && (
-                    <Suspense fallback={<p role="status">正在读取插件流程定义…</p>}>
-                      <InstalledPluginFlowDefinition
-                        key={JSON.stringify([projectScope, installedProjectPluginIdentity(plugin)])}
-                        pluginId={plugin.id}
-                        name={plugin.name}
-                        version={plugin.version}
-                      />
-                    </Suspense>
-                  )}
-                  {mod && functionManagement(mod)}
-                </div>
-              )}
-              {plugin.hasProjectMode && !projectMode.loading && !projectMode.enabled && (
-                <p className="text-xs text-muted-foreground">当前应用尚未开放项目模式。</p>
-              )}
-            </article>
-          )
-        })}
+        {groups.roots.map((plugin) => renderPlugin(plugin))}
         {installed.length === 0 && (
           <p className="text-xs text-muted-foreground">
             还没有添加插件，可以先到“挑选使用”试一个示例。
@@ -1095,7 +1126,7 @@ export function ModsSettings({
             <details className="rounded-xl border p-4">
               <summary className="cursor-pointer text-sm">查看进度或排查问题</summary>
               <p className="my-3 text-xs text-muted-foreground">
-                在聊天中描述需求并发送，在原任务卡或“任务进展”查看状态、待确认事项和结果。插件面板在“结果”中，技术记录可展开排查详情。
+                在聊天中描述需求并发送，在原任务卡或“任务进展”查看状态和待确认事项。交互面板与命令记录在“输出与面板”中，技术记录按需展开。
               </p>
               <Button
                 type="button"

@@ -16,6 +16,7 @@ import {
 } from "./MarketPanel/MarketPublishDialog"
 import { readUploadedItemNamesFromStorage } from "./MarketPanel/marketPublishStorage"
 import { toast } from "sonner"
+import { consumeMcpSettings, mcpSettingsCurrent, useMcpSettingsRequest } from "@/lib/mcp-settings-intent"
 
 const HIDDEN_MCP_CONNECTOR_NAMES = new Set(["in-app-browser"])
 
@@ -60,6 +61,8 @@ function buildMcpMarketConfig(connector: McpConnectorConfig): Record<string, unk
 }
 
 export function McpPanel(): React.JSX.Element {
+  const requestedSource = useMcpSettingsRequest()
+  const [sourceNotice, setSourceNotice] = useState("")
   const setShowCustomizeView = useAppStore((s) => s.setShowCustomizeView)
   const [mcpConnectors, setMcpConnectors] = useState<McpConnectorConfig[]>([])
   const [selectedMcpConnector, setSelectedMcpConnector] = useState<McpConnectorConfig | null>(null)
@@ -75,6 +78,20 @@ export function McpPanel(): React.JSX.Element {
     readUploadedItemNamesFromStorage("mcp")
   )
   const debounceTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  useEffect(() => {
+    if (!requestedSource) return
+    let live = true
+    void window.api.mcp.list().then(connectors => {
+      if (!live || !mcpSettingsCurrent(requestedSource)) return
+      const connector = connectors.find(item => item.id === requestedSource.connectorId)
+      setSelectedMcpConnector(connector ?? null)
+      setSourceNotice(connector ? "" : "该来源已移除，请重新选择连接工具。")
+      consumeMcpSettings(requestedSource.id)
+    }).catch(() => {
+      if (live && mcpSettingsCurrent(requestedSource)) setSourceNotice("无法读取该来源，请刷新核对。")
+    })
+    return () => { live = false }
+  }, [requestedSource])
 
   const handleSearchChange = useCallback((value: string) => {
     setSearchQuery(value)
@@ -211,6 +228,7 @@ export function McpPanel(): React.JSX.Element {
   return (
     <>
       <div className="w-[330px] shrink-0 border-r border-border flex flex-col">
+        {sourceNotice && <p role="alert" className="p-3 text-sm text-destructive">{sourceNotice}</p>}
         <div className="p-3 border-b border-border space-y-2">
           <div className="flex items-center justify-between gap-2">
             <h2 className="text-base font-bold">MCP 连接器</h2>

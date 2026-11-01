@@ -265,7 +265,7 @@ async function main() {
     }
     const consent = async (row: DevelopmentTrialStatus) => {
       await page!.getByText(/需授权的真实试用/).waitFor()
-      const button = page!.getByRole("button", { name: "确认并应用到这段聊天", exact: true })
+      const button = page!.getByRole("button", { name: "确认并开始聊天试用", exact: true })
       assert(await button.isEnabled())
       assert.equal(await page!.getByRole("checkbox").count(), 0)
       await button.click()

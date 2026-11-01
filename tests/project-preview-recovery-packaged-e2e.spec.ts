@@ -301,7 +301,7 @@ async function main() {
       "real authoring request"
     )
     let panel = await showAuthor(author)
-    const create = panel.getByRole("button", { name: "开始试用", exact: true })
+    const create = panel.getByRole("button", { name: "准备试用环境", exact: true })
     assert(await create.isEnabled())
     assert.equal(await panel.getByRole("checkbox").count(), 0)
     const beforeCreate = model.requests.length
@@ -534,7 +534,7 @@ async function main() {
     assert.equal(await acceptance.getByLabel("本轮阶段验收", { exact: true })
       .locator(":scope > li").count(), 2)
     await panel.getByLabel("这次试用希望完成什么").fill("第二个独立试用，不继承前次产物")
-    await panel.getByRole("button", { name: "开始试用", exact: true }).click()
+    await panel.getByRole("button", { name: "准备试用环境", exact: true }).click()
     const next = await until(
       () => page.evaluate((id) => window.api.harnessBoard.localProjects.preview.list(id), author),
       (value) => Boolean(value.drafts[0]?.projectId && value.drafts[0].projectId !== projectId),

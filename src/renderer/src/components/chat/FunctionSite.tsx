@@ -133,7 +133,7 @@ export function FunctionSiteContent({
     if (!entry) return null
     if (renderNative) return renderNative(entry.props)
     if (native.nativeUnchanged) return fallback
-    if (native.component === "Pane") return null
+    if (native.component === "Pane" || native.component === "Placed") return null
     return <Element node={functionSiteDefault(native.component, entry.props)} busy={false}
       act={async () => {}} />
   }

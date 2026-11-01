@@ -29,7 +29,7 @@ import type { FunctionSessionActivity } from "./session-activity"
 import type { FunctionSessionInitializer } from "./session-initializer"
 import { FunctionSharedWallCut } from "./shared-wall-cut"
 import { FunctionDispatchDeadline } from "./dispatch-deadline"
-import { FUNCTION_UI_SITES } from "../../../shared/mods/v2/sites"
+import { isFunctionUiRenderComponent } from "../../../shared/mods/v2/sites"
 import { wireError } from "./wire"
 
 type Admission = ReturnType<FunctionSessionInitializer["captureAdmission"]>
@@ -314,7 +314,7 @@ export class FunctionUiResolveMainAssembly implements FunctionUiResolveTransport
       if (!isModObject(components)) throw this.error()
       for (const [component, rows] of Object.entries(components)) {
         if (
-          (component !== "Pane" && !FUNCTION_UI_SITES.some((site) => site === component)) ||
+          !isFunctionUiRenderComponent(component) ||
           !Array.isArray(rows)
         )
           throw this.error()

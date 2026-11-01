@@ -1,4 +1,12 @@
 import { prepareMarketCommand } from "../services/market-content"
+import {
+  nativeHarnessPlugin, initializeNativeHarnessProject, createNativeHarnessFeature,
+  readNativeHarnessFeature, nativeHarnessProjectDetail, nativeHarnessRunDetail,
+  assertNativeHarnessProjectMutable, assertNativeHarnessFeatureCurrent,
+  nativeHarnessFeatureConfiguration, updateNativeHarnessFeatureConfiguration,
+  assertNativeFeatureConfiguration
+} from "./native-harness"
+import { readHarnessNativeProjectBinding } from "../../shared/harness-board-types"
 import { makeAutobizWatchRefs as makeWatchRefs } from "./adapters/autobiz-watch-refs"
 import {
   hasAutobizBoardContext,
@@ -16,7 +24,7 @@ import { prepareExtensionContext, readExtensionContextProjection } from "./exten
 import type { HarnessKnowledgeTarget } from "../../shared/harness-board-types"
 import { suppressCompositionPythonCache } from "./composition-python-cache"
 import { markHarnessStageAttributionDirty } from "../services/harness-stage-attribution"
-import { derivationDigest, snapshotDerivationSource } from "../plugins/derivation-source"
+import { derivationDigest, derivationContentIdentity, snapshotDerivationSource } from "../plugins/derivation-source"
 import {
   assertClosedBusinessModSelection,
   readBusinessModSelectionPolicy
@@ -672,6 +680,9 @@ async function resolveHarnessAdapter(
   if (adapterType !== "plugin") {
     throw new Error(`Unsupported harness adapter type: ${adapterType}`)
   }
+  const native = await nativeHarnessPlugin(adapterId)
+  if (native) return { id: native.plugin.id, name: native.plugin.name,
+    version: native.plugin.version, type: "plugin" }
   const plugin = projectRuntimePluginSources(getPlugins()).find((item) => pluginMatchesAdapterId(item, adapterId))
   if (!plugin || !isAutobizLegacyProjectRoot(plugin.path)) {
     throw new Error(
@@ -695,6 +706,9 @@ async function resolveHarnessAdapter(
 async function resolveHarnessAdapterSnapshot(
   adapter: HarnessAdapterSnapshot
 ): Promise<HarnessAdapterSnapshot> {
+  const native = await nativeHarnessPlugin(adapter.id)
+  if (native) return { id: native.plugin.id, name: native.plugin.name,
+    version: native.plugin.version, type: "plugin" }
   const plugin = findPluginForAdapterSnapshot(adapter)
   if (!plugin) {
     throw new Error(
@@ -1814,6 +1828,9 @@ function normalizeProject(value: unknown): HarnessProjectMetadata | null {
   const now = new Date().toISOString()
 
   return {
+    ...(value.nativeBinding === undefined ? {} : {
+      nativeBinding: readHarnessNativeProjectBinding(value.nativeBinding)
+    }),
     projectId: value.projectId.slice(0, HARNESS_PROJECT_TEXT_MAX_CHARS),
     name: value.name.slice(0, HARNESS_PROJECT_TEXT_MAX_CHARS),
     description: normalizeText(value.description).slice(0, HARNESS_PROJECT_DESCRIPTION_MAX_CHARS),
@@ -2154,6 +2171,8 @@ export async function getHarnessFeatureBinding(
   projectId: string,
   featureId: string
 ): Promise<HarnessFeatureDeployUnitBinding | null> {
+  const native = nativeHarnessFeatureConfiguration(projectId, featureId)
+  if (native) return native
   return findFeatureDeployUnitBinding(projectId, featureId)
 }
 
@@ -3079,6 +3098,12 @@ export async function resolveHarnessFeaturePluginIdentity(
     "harness-plugin-identity"
   )
   if (!workerContext) throw new Error("Project not found")
+  if (workerContext.project.nativeBinding) {
+    const binding = readNativeHarnessFeature(feature.projectId, feature.slug)
+    if (!binding) throw Error("HARNESS_NATIVE_FEATURE_MISSING")
+    assertNativeHarnessFeatureCurrent(binding)
+    return { pluginId: binding.installedPluginId, pluginName: binding.expectedPlugin.name }
+  }
   const context = projectConfigContextFromWorker(workerContext)
   if (!context.plugin || !context.configSnapshot || context.configSnapshot.error) {
     throw context.configSnapshot?.error ?? new Error("Harness board config unavailable")
@@ -3133,6 +3158,14 @@ async function buildHarnessFeatureAgentContextWithinDeadline(
   const project = workerContext.project
   const context = projectConfigContextFromWorker(workerContext)
   const plugin = context.plugin
+  if (project.nativeBinding) {
+    const binding = readNativeHarnessFeature(feature.projectId, feature.slug)
+    if (!binding) throw Error("HARNESS_NATIVE_FEATURE_MISSING")
+    assertNativeHarnessFeatureCurrent(binding)
+    return { featureId: feature.slug, harnessProjectId: project.projectId,
+      harnessAdapterName: binding.expectedPlugin.name, harnessAdapterVersion: binding.expectedPlugin.version,
+      projectCode: project.projectCode, projectDir: project.projectDir, systemId: project.systemId }
+  }
   if (!plugin || !context.configSnapshot || context.configSnapshot.error) {
     throw context.configSnapshot?.error ?? new Error("Harness board config unavailable")
   }
@@ -3498,8 +3531,24 @@ export async function createHarnessProject(
   const harnessAdapter = sourceBinding ? { id: sourceBinding.plugin.id, name: sourceBinding.plugin.name,
     version: sourceBinding.plugin.version, type: "plugin" as const }
     : await resolveHarnessAdapter(input.adapterId, input.adapterType)
+  const native = !sourceBinding && await nativeHarnessPlugin(harnessAdapter.id)
+  const assertNativeSource = async () => {
+    if (!native) return
+    const expected = input.expectedNativeTemplate
+    if (!expected || Object.keys(expected).sort().join(",") !== "digest,name,pluginId,version" ||
+      expected.pluginId !== native.plugin.id || expected.name !== native.plugin.name ||
+      expected.version !== native.plugin.version || !/^[a-f0-9]{64}$/.test(expected.digest))
+      throw Error("PROJECT_PACKAGE_IDENTITY_MISMATCH")
+    const current = getPlugins().find(plugin => plugin.id === expected.pluginId)
+    if (!current || current.path !== native.plugin.path || current.name !== expected.name ||
+      current.version !== expected.version ||
+      derivationContentIdentity((await snapshotDerivationSource(current.path)).files) !== expected.digest)
+      throw Error("PROJECT_PACKAGE_IDENTITY_MISMATCH")
+  }
+  await assertNativeSource()
   sourceBinding?.guard()
   const project: HarnessProjectMetadata = {
+    ...(native ? { nativeBinding: { engine: "host" as const, installedPluginId: native.plugin.id } } : {}),
     projectId: sourceBinding?.projectId ?? uuid(),
     name: input.name.trim(),
     description: input.description.trim(),
@@ -3523,12 +3572,14 @@ export async function createHarnessProject(
   const derivedPlugin = findAdapterPlugin(project)
   if (derivedPlugin) assertDerivedProjectDirectory(derivedPlugin.id,
     project.workspacePath, project.projectDir)
-  await initializeHarnessProject(project, !!sourceBinding, sourceBinding?.guard, sourceBinding?.signal)
+  if (native) initializeNativeHarnessProject(project)
+  else await initializeHarnessProject(project, !!sourceBinding, sourceBinding?.guard, sourceBinding?.signal)
   sourceBinding?.guard()
   // Private native owners persist the real metadata in their original owner transaction.
   // Their exact provider exposes it to the same Harness runtime, never the visible catalog.
   if (!sourceBinding) {
-    await mutateProjectStore((latest) => {
+    await mutateProjectStore(async (latest) => {
+      await assertNativeSource()
       validateProjectCodeUnique(input.projectCode, latest)
       validateProjectDirUnique(input.projectDir, input.workspacePath, latest)
       latest.projects.unshift(project)
@@ -3546,6 +3597,23 @@ export async function createHarnessFeature(
   await readFeatureDeployUnitBindingStore()
   const project = await requireProject(input.projectId)
   const feature = input.feature.trim()
+  if (project.nativeBinding) {
+    assertNativeFeatureConfiguration(input.sessionWorkspace, input.selectedDeployUnits)
+    const selectedDeployUnits = await resolveFeatureSelectedDeployUnits(input.selectedDeployUnits, { allowEmpty: true })
+    const repositoryWorkspace = await validateFeatureWorkspace(input.sessionWorkspace, selectedDeployUnits)
+    const identity = JSON.stringify(project)
+    const assertCurrent = async () => {
+      await guard?.()
+      signal?.throwIfAborted()
+      if (JSON.stringify(await requireProject(project.projectId)) !== identity)
+        throw Error("HARNESS_NATIVE_PROJECT_CHANGED")
+    }
+    const binding = await withHarnessStoreMutation(HARNESS_BOARD_FILE, () => createNativeHarnessFeature({ project, featureId: feature,
+      repositoryWorkspace, selectedDeployUnits, sessionWorkspace: input.sessionWorkspace,
+      guard: assertCurrent }))
+    return { projectId: project.projectId, slug: feature, title: feature,
+      workspacePath: binding.repositoryWorkspace }
+  }
   const workspacePath = projectDirectoryPath(project)
   const workflowOptions = buildFeatureWorkflowCommandOptions(input)
   let businessSelectionGuard: (() => Promise<void>) | undefined
@@ -3635,11 +3703,16 @@ export async function updateHarnessFeatureDeployUnits(
   }
   validateHarnessName(featureId, "特性名称")
   await requireProject(projectId)
+  if (readNativeHarnessFeature(projectId, featureId))
+    assertNativeFeatureConfiguration(input.sessionWorkspace, input.selectedDeployUnits)
 
   const selectedDeployUnits = await resolveFeatureSelectedDeployUnits(input.selectedDeployUnits, {
     allowEmpty: true
   })
-  await validateFeatureWorkspace(input.sessionWorkspace, selectedDeployUnits)
+  const repositoryWorkspace = await validateFeatureWorkspace(input.sessionWorkspace, selectedDeployUnits)
+  if (readNativeHarnessFeature(projectId, featureId))
+    return updateNativeHarnessFeatureConfiguration(projectId, featureId, repositoryWorkspace,
+      input.sessionWorkspace, selectedDeployUnits)
   return updateFeatureDeployUnitBinding(
     projectId,
     featureId,
@@ -3772,6 +3845,14 @@ export async function getHarnessDynamicWorkflowConfig(
   projectId: string
 ): Promise<HarnessDynamicWorkflowConfig | null> {
   const project = await requireProject(projectId)
+  if (project.nativeBinding) {
+    const source = await nativeHarnessPlugin(project.nativeBinding.installedPluginId)
+    if (!source) throw Error("PROJECT_PLUGIN_UNAVAILABLE")
+    const nodes = source.manifest.stages.map(stage => ({ id: stage.id, label: stage.title, description: "" }))
+    return { nodes, templates: [{ id: "default", templateType: "default", label: "插件完整流程",
+      description: "按插件声明执行，步骤在创造者模式中调整", nodes: nodes.map(node => node.id),
+      requiredNodes: nodes.map(node => node.id) }] }
+  }
   return getHarnessDynamicWorkflowConfigForProject(project)
 }
 
@@ -3844,6 +3925,10 @@ export async function updateHarnessProjectMetadata(
     validateProjectCodeUnique(input.projectCode, store, projectId)
     const existing = store.projects[index]
     const existingAdapter = existing["harness-adapter"]
+    if (!existing.nativeBinding && await nativeHarnessPlugin(input.adapterId.trim()))
+      throw Error("旧项目不能直接改为原生执行，请新建项目保留原需求记录")
+    if (existing.nativeBinding && input.adapterId.trim() !== existingAdapter.id)
+      assertNativeHarnessProjectMutable(projectId, true)
     const harnessAdapter =
       existingAdapter.type === input.adapterType && existingAdapter.id === input.adapterId.trim()
         ? await resolveHarnessAdapterSnapshot(existingAdapter)
@@ -3871,6 +3956,9 @@ export async function updateHarnessProjectMetadata(
       "harness-adapter": harnessAdapter,
       lifecycle: { ...existing.lifecycle, updateAt: new Date().toISOString() }
     }
+    const native = await nativeHarnessPlugin(harnessAdapter.id)
+    if (native) updated.nativeBinding = { engine: "host", installedPluginId: native.plugin.id }
+    else delete updated.nativeBinding
     store.projects[index] = updated
     return normalizeProject(updated)!
   })
@@ -3880,6 +3968,7 @@ export async function archiveHarnessProject(projectId: string): Promise<HarnessP
   return mutateProjectStore((store) => {
     const index = store.projects.findIndex((item) => item.projectId === projectId)
     if (index === -1) throw new Error("Project not found")
+    if (store.projects[index].nativeBinding) assertNativeHarnessProjectMutable(projectId)
     const archived: HarnessProjectMetadata = {
       ...store.projects[index],
       lifecycle: {
@@ -3897,6 +3986,7 @@ export async function deleteHarnessProject(projectId: string): Promise<HarnessPr
   return mutateProjectStore((store) => {
     const index = store.projects.findIndex((item) => item.projectId === projectId)
     if (index === -1) throw new Error("Project not found")
+    if (store.projects[index].nativeBinding) assertNativeHarnessProjectMutable(projectId)
     const [deleted] = store.projects.splice(index, 1)
     return normalizeProject(deleted)!
   })
@@ -4217,6 +4307,10 @@ async function loadHarnessProjectDetails(
 
   for (const project of projects) {
     throwIfHarnessDetailCancelled(signal)
+    if (project.nativeBinding) {
+      result[project.projectId] = await nativeHarnessProjectDetail(project)
+      continue
+    }
     const workerContext = contextById[project.projectId]
     if (!workerContext) throw new Error("Project not found")
     const configContext = projectConfigContextFromWorker(workerContext)
@@ -4366,6 +4460,12 @@ async function loadHarnessRunDetail(
   const workerContext = contexts.projects[projectId]
   if (!workerContext) throw new Error("Project not found")
   const project = workerContext.project
+  if (project.nativeBinding) {
+    const detail = nativeHarnessRunDetail(project, slug)
+    if (serialize(detail).byteLength > HARNESS_ADAPTER_DETAIL_MAX_IPC_BYTES)
+      throw Error("HARNESS_NATIVE_DETAIL_LIMIT")
+    return detail
+  }
   const context = projectConfigContextFromWorker(workerContext)
   const { buffer, configured } = await runInspectAdapterBufferFromContext(
     project,
@@ -4486,6 +4586,8 @@ export async function requireHarnessFeatureWorkspace(
   projectId: string,
   featureId: string
 ): Promise<string> {
+  const native = readNativeHarnessFeature(projectId, featureId)
+  if (native) return native.repositoryWorkspace
   const binding = await findFeatureDeployUnitBinding(projectId, featureId)
   return validateFeatureWorkspace(
     binding?.sessionWorkspace,

@@ -900,6 +900,8 @@ export interface WorkerFocusView {
 }
 
 export interface SubagentFocusView {
+  /** A host-issued read-only Mods child view; never a physical child input target. */
+  modsView?: import("../../../shared/mods/v2/agent-tasks").AgentViewIntent
   threadId: string
   subagentId: string
   name: string

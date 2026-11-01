@@ -11,6 +11,7 @@ import type {
 } from "../../../shared/mods/v2/ui-resolve-wire"
 import { FunctionGuestRuntime } from "./guest-runtime"
 import { FunctionSharedWallCut } from "./shared-wall-cut"
+import { FUNCTION_UI_SITES } from "../../../shared/mods/v2/sites"
 import {
   FunctionUiResolveUtilityAssembly,
   type FunctionUiResolveUtilityCall,
@@ -217,10 +218,16 @@ describe("actual utility UI resolver assembly", () => {
     if (!p) throw Error("missing actual P")
     const matches = vi.spyOn(p.guest, "matches")
     const prepared = await f.prepare()
-    expect(matches).toHaveBeenCalledTimes(14)
-    expect(new Set(matches.mock.calls.map((row) => row[1].component)).size).toBe(14)
+    const expectedComponents = ["Placed", "Pane", ...FUNCTION_UI_SITES]
+    expect(matches).toHaveBeenCalledTimes(expectedComponents.length)
+    expect(matches.mock.calls).toEqual(expectedComponents.map(component => [
+      p.guest.registrations[0].id, { surface: "desktop", component }
+    ]))
+    expect(new Set(matches.mock.calls.map(row => row[1].component)).size).toBe(expectedComponents.length)
+    expect(prepared.sources[f.q.runtimeId].Placed).toEqual([])
     expect(f.requestCredit).not.toHaveBeenCalled()
-    expect(f.assembly.ledger.stats.handles).toBe(0)
+    expect(f.assembly.ledger.stats).toEqual({ handles: 0, roots: 0, failedDisposals: 0 })
+    expect(f.credit().limits).toEqual({ handles: 0, roots: 0, branches: 0, reactions: 0 })
     f.assembly.adopt(prepared.preparedToken)
     expect((await f.render()).value).toMatchObject({ type: "Text", children: ["Q body"] })
   })

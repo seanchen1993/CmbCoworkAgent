@@ -1,4 +1,5 @@
 import { assertWorkflowResourceAdmission } from "../../agent/workflow/resource-deadline"
+import { agentTaskInput } from "../../../shared/mods/v2/agent-tasks"
 import { assertPlatformQueryMethod } from "./platform-query-scope"
 import { isFunctionContentBoundary } from "./content-boundary"
 import { validateFunctionModelResult, type FunctionModelProtocol, type FunctionModelResult, type FunctionForkResult } from "../../../shared/mods/v2/model-protocol"
@@ -121,6 +122,8 @@ import { FunctionPanes, type FunctionUiDispatch, type PaneHost } from "./panes"
 import { FunctionMarkdownLinkRegistry } from "./markdown-link-registry"
 import { FunctionMarkdownFilePreviews } from "./markdown-file-preview"
 import { FunctionUiSites } from "./sites"
+import { FunctionPlacedRows } from "./placed"
+import { validateFunctionPlacedArgs, validateFunctionPlacedResult, type FunctionPlacedResult } from "../../../shared/mods/v2/placed"
 import { FUNCTION_UI_SITES } from "../../../shared/mods/v2/sites"
 import { AsyncLocalStorage, AsyncResource } from "node:async_hooks"
 import {
@@ -143,6 +146,10 @@ export const SESSION_CAPABILITIES = [
   "session.send",
   "session.append",
   "agent.spawn",
+  "agent.status",
+  "agent.messages",
+  "agent.stop",
+  "ui.view",
   "agent.register",
   "settings.read",
   "config.list",
@@ -162,7 +169,7 @@ export const SESSION_CAPABILITIES = [
   "tool.register",
   "tool.list",
   "tool.check",
-  "mcp.call",
+  "mcp.call", "mcp.connect", "mcp.list", "mcp.status", "mcp.disconnect",
   "model.complete",
   "model.fork",
   "model.classify",
@@ -258,6 +265,8 @@ import {
 } from "../../../shared/mods/v2/ui-feedback"
 
 export interface FunctionSessionHost {
+  capturePlacedAnchor?(): import("../../../shared/mods/v2/placed").FunctionPlacedAnchor | undefined
+  placedAttached?(): boolean
   platformHub?: PlatformCapabilityHub
   platformNativeProviders?: readonly import("./platform-capabilities-types").NativePlatformCapabilityProvider[]
   platformSource?(plugin: FunctionPlugin): PlatformCapabilitySource
@@ -303,6 +312,7 @@ export interface FunctionSessionHost {
     creator?: import("./dispatcher").FunctionHookSource
   ): Promise<{ value: ModObject; completion: Promise<FunctionTurnComplete> }>
   readSettings?(): Promise<ModObject>
+  agentTask?(plugin: FunctionPlugin, method: string, input: ModObject, signal: AbortSignal): Promise<ModJson>
   sendPeer?(
     plugin: FunctionPlugin,
     input: FunctionPeerSend,
@@ -355,6 +365,8 @@ export interface FunctionSessionHost {
     signal: AbortSignal,
     dispatch: FunctionMcpToolDispatch
   ): Promise<ModObject>
+  manageMcp?(plugin: FunctionPlugin, method: "list" | "status" | "disconnect",
+    input: ModObject, signal: AbortSignal): Promise<ModObject>
   connectMcp?(
     plugin: FunctionPlugin,
     signal: AbortSignal,
@@ -445,6 +457,7 @@ export class FunctionSession {
   readonly platformSurfaces: PlatformSurfaces
   readonly platformBehaviors: PlatformBehaviors
   readonly sites: FunctionUiSites
+  readonly placed: FunctionPlacedRows
   readonly clients: FunctionClients
   readonly markdownLinks = new FunctionMarkdownLinkRegistry()
   readonly markdownPreviews: FunctionMarkdownFilePreviews
@@ -675,6 +688,7 @@ export class FunctionSession {
     this.namedState = host.namedState ?? new FunctionNamedState()
     this.stopStateListener = this.namedState.listen((generation) => {
       this.panes.invalidateGeneration(generation)
+      this.placed.invalidateGeneration(generation)
       if (this.sites.invalidateGeneration(generation)) this.panes.notify()
     })
     if (host.dialogs)
@@ -764,9 +778,10 @@ export class FunctionSession {
         return this.freshStartup(() => this.host.freshEntry ? this.host.freshEntry(fresh) : fresh())
       },
       changed: (pane) => {
-        if (!this.sites.notifyClient(pane)) this.panes.notify()
+        if (!this.sites.notifyClient(pane) && !this.placed.notifyClient(pane)) this.panes.notify()
       },
       captureDrawing: (pane, generation) => this.sites.captureClientDrawing(pane, generation)
+        ?? this.placed.captureClientDrawing(pane, generation)
         ?? this.panes.captureClientDrawing(pane, generation),
       withDrawing: (receipt, run) => this.clientDrawingScopes.run(receipt, run),
       publish: (value) => this.host.publish(value, this.controller.signal),
@@ -776,6 +791,7 @@ export class FunctionSession {
         return this.host.loadClient(plugin, module)
       },
       captureFault: (pane, generation) => this.sites.captureClientFault(pane, generation)
+        ?? this.placed.captureClientFault(pane, generation)
         ?? this.panes.captureClientFault(pane, generation),
       fault: async (name, input, signal, assertCurrent) => this.clientFaultScopes.run(assertCurrent, async () => {
         const plugin = plugins.find((plugin) => plugin.name === name)
@@ -869,6 +885,9 @@ export class FunctionSession {
       }
     }
     this.panes = new FunctionPanes(paneHost)
+    this.placed = new FunctionPlacedRows({ ...paneHost,
+      captureAnchor: () => host.capturePlacedAnchor?.(),
+      isAttached: () => host.placedAttached?.() === true })
     this.sites = new FunctionUiSites({ ...paneHost,
       userMessageOrigin: this.host.userMessageOrigin,
       pendingQuestion: this.host.pendingQuestion })
@@ -2589,6 +2608,7 @@ export class FunctionSession {
         if (name === "mcp.connect") functionMcpConnectInput(value)
         if (name === "tool.check") functionToolCheckInput(value, true)
         if (name === "ui.open") validatePaneArgs(value)
+        if (name === "ui.place") validateFunctionPlacedArgs(value)
         if (
           name === "ui.invalidate" &&
           (!["ui.render", "tool.describe", "prompt.context", "prompt.attachment", "config.describe"].includes(
@@ -2684,6 +2704,7 @@ export class FunctionSession {
           if (name === "ui.open" && (!isModObject(value.value) ||
             Object.keys(value.value).length !== 1 || typeof value.value.isPlaced !== "boolean"))
             throw new ModFunctionError("MODS_UI_OPEN_RESULT")
+          if (name === "ui.place") validateFunctionPlacedResult(value.value)
           if (name === "config.list") validateFunctionConfigRows(value.value)
           if (name === "ui.invalidate" && value.value !== undefined)
             throw new ModFunctionError("MODS_OPERATION_RESULT")
@@ -3263,6 +3284,16 @@ export class FunctionSession {
         throw new ModFunctionError("MODS_AGENT_REGISTER_RESULT")
       return result.value
     }
+    if (["agent.status", "agent.messages", "agent.stop", "ui.view"].includes(method)) {
+      if (args.length !== 1) throw new ModFunctionError("MODS_AGENT_TASK_ARGUMENTS")
+      const input = agentTaskInput(method, args[0])
+      if (!this.host.agentTask) throw new ModFunctionError("MODS_AGENT_TASK_UNAVAILABLE")
+      this.assertLive(plugin)
+      const result = await this.host.agentTask(plugin, method, input, callSignal)
+      callSignal.throwIfAborted()
+      this.assertLive(plugin)
+      return result
+    }
     if (method === "agent.spawn") {
       if (args.length !== 1 || !isModObject(args[0]))
         throw new ModFunctionError("MODS_AGENT_SPAWN_ARGUMENTS")
@@ -3754,6 +3785,22 @@ export class FunctionSession {
       this.assertLive(plugin)
       return parseResult(published)
     }
+    if (method === "mcp.list" || method === "mcp.status" || method === "mcp.disconnect") {
+      const action = method.slice(4) as "list" | "status" | "disconnect"
+      if (action === "list" ? args.length > 1 : args.length !== 1)
+        throw new ModFunctionError("MODS_MCP_ARGUMENTS")
+      const input = args[0] ?? {}
+      if (!isModObject(input) || Object.keys(input).some(key => key !== "server") ||
+        (action === "list" ? Object.keys(input).length !== 0 :
+          typeof input.server !== "string" || input.server.length > 128 ||
+            !input.server.startsWith("devclaw-mcp:")))
+        throw new ModFunctionError("MODS_MCP_ARGUMENTS")
+      if (!this.host.manageMcp) throw new ModFunctionError("MODS_MCP_UNAVAILABLE")
+      const result = await this.host.manageMcp(plugin, action, input, callSignal)
+      this.assertLive(plugin)
+      callSignal.throwIfAborted()
+      return result
+    }
     if (method === "mcp.connect") {
       if (args.length !== 1) throw new ModFunctionError("MODS_MCP_CONNECT_ARGUMENTS")
       const input = functionMcpConnectInput({ server: args[0] })
@@ -3801,7 +3848,8 @@ export class FunctionSession {
           plugin,
           core: async (value, signal) => {
             this.assertLive(plugin)
-            const registered = this.tools.resolveMcp(String(value.server), String(value.tool))
+            const registered = String(value.server).startsWith("devclaw-mcp:") ? undefined :
+              this.tools.resolveMcp(String(value.server), String(value.tool))
             if (registered) {
               const agentId = functionCallAgent(this.host.workspace, this.host.threadId)
               const input: ModObject = {
@@ -4257,8 +4305,8 @@ export class FunctionSession {
     if (method === "ui.invalidate") {
       const hint = args.length === 2 && args[0] === "ui.render" && isModObject(args[1]) &&
         Object.keys(args[1]).length === 1 && Array.isArray(args[1].components) &&
-        args[1].components.length > 0 && args[1].components.length <= FUNCTION_UI_SITES.length + 1 &&
-        args[1].components.every(component => component === "Pane" ||
+        args[1].components.length > 0 && args[1].components.length <= FUNCTION_UI_SITES.length + 2 &&
+        args[1].components.every(component => component === "Pane" || component === "Placed" ||
           FUNCTION_UI_SITES.some(site => site === component))
         ? new Set(args[1].components as string[]) : undefined
       if ((!hint && args.length !== 1) || !["ui.render", "tool.describe", "prompt.context", "prompt.attachment", "config.describe"].includes(args[0] as string))
@@ -4304,6 +4352,7 @@ export class FunctionSession {
               if (!components || components.has("Pane"))
                 this.panes.invalidate("panes")
               this.sites.invalidate(components, true)
+              if (!components || components.has("Placed")) this.placed.invalidate()
             } else {
               throw new ModFunctionError("MODS_UI_INVALIDATE_UNAVAILABLE")
             }
@@ -4370,6 +4419,32 @@ export class FunctionSession {
           }
         ))
       }
+    }
+    if (method === "ui.place") {
+      if (source.event === "ui.render" || this.clientDrawingScopes.getStore() ||
+        this.uiConstructorScopes.getStore()) throw new ModFunctionError("MODS_UI_PLACE_RENDER_EFFECT")
+      if (args.length !== 1) throw new ModFunctionError("MODS_UI_PLACE_ARGUMENTS")
+      validateFunctionPlacedArgs(args[0])
+      const placeArgs = { id: args[0].id }
+      let receipt: FunctionPlacedResult | undefined
+      const answer = await this.dispatch(method, placeArgs, callSignal,
+        { plugin: plugin.name, registration: source.registration }, depth + 1,
+        { plugin, core: async input => {
+          callSignal.throwIfAborted(); this.assertLive(plugin)
+          receipt = this.placed.place(plugin, input)
+          return receipt
+        } }, turnHeld)
+      if (!isModObject(answer)) throw new ModFunctionError("MODS_OPERATION_RESULT")
+      if (typeof answer.deny === "string") throw new ModFunctionError("MODS_OPERATION_DENIED", answer.deny)
+      validateFunctionPlacedResult(answer.value)
+      if (answer.value.isPlaced || answer.value.requestId !== undefined) {
+        if (!receipt || JSON.stringify(receipt) !== JSON.stringify(answer.value) || !receipt.requestId)
+          throw new ModFunctionError("MODS_UI_PLACE_RESULT")
+        this.placed.assertReceipt(plugin, placeArgs.id, receipt.requestId)
+        if (receipt.isPlaced && this.host.placedAttached?.() !== true)
+          throw new ModFunctionError("MODS_UI_PLACED_STALE")
+      }
+      return answer.value
     }
     if (method === "ui.open" || method === "ui.close") {
       if (!isModObject(args[0])) throw new ModFunctionError("MODS_UI_PANE_ARGUMENTS")
@@ -4574,6 +4649,7 @@ export class FunctionSession {
     this.logs.close()
     this.feedbackOrder.clear()
     this.panes.close()
+    this.placed.close()
     this.sites.close()
     this.clients.close()
     this.registry.clear()

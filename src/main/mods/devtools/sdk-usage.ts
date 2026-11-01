@@ -315,6 +315,7 @@ async function analyzeSnapshot(snapshot: Snapshot) {
   const helperArguments = new Map<TS.CallExpression, Set<TS.Node>>()
   const helperTargets = new Map<TS.CallExpression, FunctionNode>()
   const localClosures = new Set<FunctionNode>()
+  const timerCallbacks = new Set<FunctionNode>()
   const references = new Map<TS.Symbol, TS.Identifier[]>()
   for (const node of nodes) {
     if (!ts.isIdentifier(node)) continue
@@ -437,6 +438,38 @@ async function analyzeSnapshot(snapshot: Snapshot) {
     verifiedFunctions.add(fn)
     changed = true
   }
+  function nativeTimerCallback(call: TS.CallExpression) {
+    // Only literal callbacks owned by a verified native SDK timer call may retain its scope.
+    // Named callbacks, forwarding, optional/dynamic dispatch and arbitrary async closures
+    // remain subject to the ordinary escape checks. This grants no runtime permissions.
+    if (
+      !verifiedFunctions.has(functionOwner(call)!) ||
+      call.questionDotToken ||
+      call.arguments.length !== 2 ||
+      call.arguments.some(ts.isSpreadElement) ||
+      !["clock.after", "clock.every"].includes(path(call.expression) ?? "")
+    )
+      return
+    let receiver = call.expression
+    if (!ts.isPropertyAccessExpression(receiver) && !ts.isElementAccessExpression(receiver)) return
+    while (ts.isPropertyAccessExpression(receiver) || ts.isElementAccessExpression(receiver)) {
+      if (receiver.questionDotToken) return
+      receiver = receiver.expression
+    }
+    const callback = call.arguments[1]
+    if (
+      (!ts.isArrowFunction(callback) && !ts.isFunctionExpression(callback)) ||
+      callback.parameters.length ||
+      (ts.isFunctionExpression(callback) && callback.name) ||
+      timerCallbacks.has(callback)
+    )
+      return
+    if (++helperEdges > 256) throw Error("MODS_SDK_ANALYSIS_LIMIT")
+    implicitArguments(callback)
+    timerCallbacks.add(callback)
+    verifiedFunctions.add(callback)
+    changed = true
+  }
   for (const entry of snapshot.authoringEntries ?? []) {
     const source = sources.get(posix.resolve("/", entry.replace(/\\/g, "/")))
     const module = source && symbols(source)
@@ -475,6 +508,7 @@ async function analyzeSnapshot(snapshot: Snapshot) {
       if (!ts.isCallExpression(node)) continue
       const value = path(node.expression)
       if (value !== "@on" && value !== "@registration.catch" && value !== "@on.capability") {
+        nativeTimerCallback(node)
         propagateHelper(node)
         localClosure(node)
         continue
@@ -777,7 +811,13 @@ async function analyzeSnapshot(snapshot: Snapshot) {
       unknown(node, "SDK/注册来源被未验证的闭包捕获；请通过包内直接函数参数传递。")
     if (owner && ts.isIdentifier(node)) {
       const declaration = symbols(node)?.valueDeclaration
-      if (declaration && functionOwner(declaration) !== owner && !localClosures.has(owner) && !nativeUi)
+      if (
+        declaration &&
+        functionOwner(declaration) !== owner &&
+        !localClosures.has(owner) &&
+        !timerCallbacks.has(owner) &&
+        !nativeUi
+      )
         unknown(node, "SDK/注册来源来自外层闭包；helper 必须显式接收来源参数。")
     }
     if (

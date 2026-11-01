@@ -36,6 +36,7 @@ const pinned: Record<string, readonly string[]> = {
   "turn.step": ["turnId", "index", "messageCount", "agentId"],
   "turn.complete": ["agentId"],
   "ui.open": ["id"],
+  "ui.place": ["id"],
   "ui.notice": ["tool_use_id"],
   "ui.close": ["id", "origin"],
   "ui.render": ["surface", "component", "requestId", "viewport"],
@@ -161,7 +162,9 @@ export function normalizeFunctionInput(
   }
   if (event === "ui.render" && original.props && typeof original.props === "object") {
     const facts =
-      original.component === "AskUserQuestion"
+      original.component === "Placed"
+        ? ["id", "plugin", "onScreen"]
+        : original.component === "AskUserQuestion"
         ? ["tool", "metadataSource"]
         : original.component === "ToolGroup"
           ? ["calls", "isActive", "onScreen"]

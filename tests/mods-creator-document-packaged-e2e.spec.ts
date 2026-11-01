@@ -327,7 +327,7 @@ async function main() {
     )
     await until(status, (value) => value.trials[0]?.phase === "needs-approval", "initial review")
     const approvalReady = Date.now()
-    const approve = page.getByRole("button", { name: "确认并应用到这段聊天", exact: true })
+    const approve = page.getByRole("button", { name: "确认并开始聊天试用", exact: true })
     await approve.click()
     const approvalAt = Date.now()
     await until(status, (value) => value.trials[0]?.phase === "active", "active document trial")

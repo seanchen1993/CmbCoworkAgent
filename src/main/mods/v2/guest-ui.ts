@@ -67,7 +67,7 @@ export const FUNCTION_UI_BOOTSTRAP = String.raw`
   define(globalThis, "__functionFragment", { get: () => uiFragment });
   function uiElements(meta, input) {
     if (!input || input.surface !== "desktop" ||
-        !${JSON.stringify(["Pane", ...FUNCTION_UI_SITES])}.includes(input.component) ||
+        !${JSON.stringify(["Placed", "Pane", ...FUNCTION_UI_SITES])}.includes(input.component) ||
         !asyncScope?.uiGeneration || asyncScope.event !== "ui.render" ||
         asyncScope.plugin !== meta.plugin.name || asyncScope.requestId !== input.requestId ||
         asyncScope.component !== input.component)

@@ -86,7 +86,7 @@ export interface HarnessAdapterSnapshot {
 }
 
 export interface HarnessAdapterRegistryItem extends HarnessAdapterSnapshot {
-  /** Discovery only. Host templates use the original project-runtime APIs, never legacy board APIs. */
+  /** Selects the execution engine behind the same project/Feature UI; never a legacy script alias. */
   runtimeMode?: "legacy" | "host"
   /** Installed state, not execution authorization. Omission preserves older registry consumers. */
   enabled?: boolean
@@ -251,6 +251,7 @@ export interface HarnessProjectCreatorMetadata {
 }
 
 export interface HarnessProjectMetadata {
+  nativeBinding?: HarnessNativeProjectBinding
   projectId: string
   name: string
   description: string
@@ -274,6 +275,7 @@ export interface HarnessProjectMetadata {
 }
 
 export interface HarnessProjectCreateInput {
+  expectedNativeTemplate?: import("./plugin-start-use").PluginStartUseIdentity
   adapterId: string
   adapterType: HarnessAdapterType
   name: string
@@ -505,6 +507,7 @@ export interface HarnessProjectMetadataUpdateInput {
 }
 
 export interface HarnessProjectListItem {
+  nativeBinding?: HarnessNativeProjectBinding
   projectId: string
   name: string
   description: string
@@ -827,6 +830,7 @@ export interface HarnessWatchRefChangedEvent {
 }
 
 export interface HarnessFeatureSummary {
+  engine?: "host"
   id: string
   kind: "feature" | string
   slug: string
@@ -1045,6 +1049,8 @@ export interface HarnessRunNode {
 }
 
 export interface HarnessRunDetailViewModel {
+  nativeBinding?: HarnessNativeFeatureBinding
+  nativeProject?: import("./project-runtime/platform-api").LocalProjectView
   projectCapability?: import("./project-capability").ProjectCapabilityView
   projectRuntime?: {
     description?: import("./project-runtime").ProjectRuntimeDescription
@@ -1101,4 +1107,48 @@ export interface HarnessRunDetailViewModel {
     imManagementEnabled?: boolean
   }
   sessions: HarnessSessionBinding[]
+}
+
+/** Container identity only. Each native Feature owns a separate execution and output directory. */
+export interface HarnessNativeProjectBinding {
+  engine: "host"
+  installedPluginId: string
+}
+
+export interface HarnessNativeFeatureBinding extends HarnessNativeProjectBinding {
+  projectId: string
+  featureId: string
+  hostRunId: string
+  title: string
+  workspace: string
+  repositoryWorkspace: string
+  expectedPlugin: import("./plugin-start-use").PluginStartUseIdentity
+  /** Populated only after the original Host creates the real execution. */
+  packageDigest?: string
+  /** Original request retained across a failed first-start or process restart. */
+  initialUserMessage?: string
+  worktree?: {
+    name: string
+    branch: string
+    directory: string
+    gitRoot: string
+    sourceRoot: string
+    sourceRelativePath: string
+    workspaceDirectory: string
+    commonDir: string
+    sourceBranch: string
+    baseCommit: string
+  }
+}
+
+export function readHarnessNativeProjectBinding(value: unknown): HarnessNativeProjectBinding | undefined {
+  if (value === undefined) return undefined
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    throw Error("HARNESS_NATIVE_BINDING_INVALID")
+  const raw = value as Record<string, unknown>
+  if (Object.keys(raw).sort().join(",") !== "engine,installedPluginId" ||
+    raw.engine !== "host" || typeof raw.installedPluginId !== "string" ||
+    !raw.installedPluginId || raw.installedPluginId.length > 512)
+    throw Error("HARNESS_NATIVE_BINDING_INVALID")
+  return { engine: "host", installedPluginId: raw.installedPluginId }
 }

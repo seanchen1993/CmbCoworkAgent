@@ -1,4 +1,5 @@
-import type { FunctionSessionCheckpoint } from "../../shared/mods/v2/session"
+import type { FunctionSessionCheckpoint, FunctionSessionMessagePage,
+  FunctionSessionPageInput } from "../../shared/mods/v2/session"
 import type { CanonicalCheckpointDisplaySelection } from "./function-conversation-canonical-display-worker"
 
 export interface CheckpointRuntimeProjectionStats {
@@ -84,6 +85,7 @@ export type CheckpointRuntimeProjectionWorkerRequest =
   | {
       type: "read-session-transcript"
       projection: "messages" | "turns" | "usage"
+      page?: FunctionSessionPageInput
       requestId: number
       databasePath: string
       threadId: string
@@ -160,5 +162,5 @@ export type CheckpointRuntimeProjectionWorkerResponse =
       type: "read-session-transcript-result"
       requestId: number
       ok: true
-      transcript: FunctionSessionCheckpoint | null
+      transcript: FunctionSessionCheckpoint | FunctionSessionMessagePage | null
     }

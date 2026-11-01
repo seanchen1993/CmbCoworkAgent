@@ -1,3 +1,4 @@
+import { groupInstalledPlugins } from "@/lib/installed-plugin-groups"
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { PluginDetailOwner } from "@/lib/plugin-detail-owner"
 import { usePluginSettingsRequest, consumePluginSettings } from "@/lib/plugin-settings-intent"
@@ -816,13 +817,16 @@ export function PluginsPanel(): React.JSX.Element {
     [plugins]
   )
 
+  const pluginGroups = useMemo(() => groupInstalledPlugins(plugins), [plugins])
   const filteredPlugins = useMemo(() => {
     const q = debouncedQuery.trim().toLowerCase()
-    if (!q) return plugins
-    return plugins.filter(
-      (p) => p.name.toLowerCase().includes(q) || p.description.toLowerCase().includes(q)
+    if (!q) return pluginGroups.roots
+    return pluginGroups.roots.filter((p) =>
+      [p, ...(pluginGroups.dependencies.get(p.id) ?? [])].some(
+        (item) => item.name.toLowerCase().includes(q) || item.description.toLowerCase().includes(q)
+      )
     )
-  }, [plugins, debouncedQuery])
+  }, [pluginGroups, debouncedQuery])
 
   const visiblePlugins = filteredPlugins.slice(0, visiblePluginLimit)
 
@@ -897,72 +901,97 @@ export function PluginsPanel(): React.JSX.Element {
                 {visiblePlugins.map((plugin) => {
                   const isMarketPlugin = Boolean(resolvePluginMarketInfo(plugin, marketPluginMap))
                   return (
-                    <button
-                      key={plugin.id}
-                      className={cn(
-                        "w-full text-left rounded-md border border-border/70 p-2.5 transition-colors",
-                        selectedPlugin?.id === plugin.id
-                          ? "bg-muted/70 border-border"
-                          : "hover:bg-muted/50"
-                      )}
-                      onClick={() => handleSelectPlugin(plugin)}
-                    >
-                      <div className="flex items-center justify-between gap-2">
-                        <div className="flex items-center gap-2 min-w-0 flex-1">
-                          <Puzzle
-                            className={cn(
-                              "size-4 shrink-0",
-                              plugin.enabled ? "text-primary" : "text-muted-foreground/40"
+                    <div key={plugin.id}>
+                      <button
+                        className={cn(
+                          "w-full text-left rounded-md border border-border/70 p-2.5 transition-colors",
+                          selectedPlugin?.id === plugin.id
+                            ? "bg-muted/70 border-border"
+                            : "hover:bg-muted/50"
+                        )}
+                        onClick={() => handleSelectPlugin(plugin)}
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="flex items-center gap-2 min-w-0 flex-1">
+                            <Puzzle
+                              className={cn(
+                                "size-4 shrink-0",
+                                plugin.enabled ? "text-primary" : "text-muted-foreground/40"
+                              )}
+                            />
+                            <span
+                              className={cn(
+                                "text-sm font-medium truncate",
+                                !plugin.enabled && "text-muted-foreground"
+                              )}
+                            >
+                              {plugin.name}
+                            </span>
+                          </div>
+                          <div className="flex items-center gap-1.5 shrink-0">
+                            {isMarketPlugin && (
+                              <Badge variant="secondary" className="text-[10px] h-4 px-1.5">
+                                市场
+                              </Badge>
                             )}
-                          />
-                          <span
-                            className={cn(
-                              "text-sm font-medium truncate",
-                              !plugin.enabled && "text-muted-foreground"
+                            {plugin.version && (
+                              <Badge variant="outline" className="text-[10px] h-4 px-1.5">
+                                v{plugin.version}
+                              </Badge>
                             )}
-                          >
-                            {plugin.name}
-                          </span>
+                          </div>
                         </div>
-                        <div className="flex items-center gap-1.5 shrink-0">
-                          {isMarketPlugin && (
-                            <Badge variant="secondary" className="text-[10px] h-4 px-1.5">
-                              市场
-                            </Badge>
+                        {plugin.description && (
+                          <p className="text-xs text-muted-foreground mt-1 whitespace-pre-wrap break-words">
+                            {plugin.description}
+                          </p>
+                        )}
+                        <div className="flex items-center gap-3 mt-1.5">
+                          {plugin.skillCount > 0 && (
+                            <span className="text-[10px] text-muted-foreground flex items-center gap-1">
+                              <Sparkles className="size-3" />
+                              {plugin.skillCount} skills
+                            </span>
                           )}
-                          {plugin.version && (
-                            <Badge variant="outline" className="text-[10px] h-4 px-1.5">
-                              v{plugin.version}
-                            </Badge>
+                          {plugin.mcpServerCount > 0 && (
+                            <span className="text-[10px] text-muted-foreground flex items-center gap-1">
+                              <Plug className="size-3" />
+                              {plugin.mcpServerCount} MCPs
+                            </span>
+                          )}
+                          {(plugin.hookCount ?? 0) > 0 && (
+                            <span className="text-[10px] text-muted-foreground flex items-center gap-1">
+                              <Webhook className="size-3" />
+                              {plugin.hookCount ?? 0} Hooks
+                            </span>
                           )}
                         </div>
-                      </div>
-                      {plugin.description && (
-                        <p className="text-xs text-muted-foreground mt-1 whitespace-pre-wrap break-words">
-                          {plugin.description}
-                        </p>
+                      </button>
+                      {!!pluginGroups.dependencies.get(plugin.id)?.length && (
+                        <details
+                          className="ml-3 border-l pl-2 py-1"
+                          aria-label={`${plugin.name}的依赖组件`}
+                        >
+                          <summary className="cursor-pointer text-xs">
+                            依赖组件（{pluginGroups.dependencies.get(plugin.id)!.length}）
+                          </summary>
+                          <p className="py-2 text-xs text-muted-foreground">
+                            在项目设置中统一配置并确认权限，无需分别启动。
+                          </p>
+                          {pluginGroups.dependencies.get(plugin.id)!.map((dependency) => (
+                            <button
+                              key={dependency.id}
+                              type="button"
+                              className="block w-full break-all rounded p-2 text-left text-xs hover:bg-muted"
+                              onClick={() => handleSelectPlugin(dependency)}
+                            >
+                              {dependency.name}
+                              {!dependency.enabled && "（已停用）"}
+                            </button>
+                          ))}
+                        </details>
                       )}
-                      <div className="flex items-center gap-3 mt-1.5">
-                        {plugin.skillCount > 0 && (
-                          <span className="text-[10px] text-muted-foreground flex items-center gap-1">
-                            <Sparkles className="size-3" />
-                            {plugin.skillCount} skills
-                          </span>
-                        )}
-                        {plugin.mcpServerCount > 0 && (
-                          <span className="text-[10px] text-muted-foreground flex items-center gap-1">
-                            <Plug className="size-3" />
-                            {plugin.mcpServerCount} MCPs
-                          </span>
-                        )}
-                        {(plugin.hookCount ?? 0) > 0 && (
-                          <span className="text-[10px] text-muted-foreground flex items-center gap-1">
-                            <Webhook className="size-3" />
-                            {plugin.hookCount ?? 0} Hooks
-                          </span>
-                        )}
-                      </div>
-                    </button>
+                    </div>
                   )
                 })}
                 {visiblePlugins.length < filteredPlugins.length && (

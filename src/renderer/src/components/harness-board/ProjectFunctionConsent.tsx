@@ -6,6 +6,7 @@ import type {
   ProjectFunctionSourceApi,
   ProjectFunctionDependencyReview
 } from "../../../../shared/project-runtime/function-source"
+import { projectFunctionApprovalInput } from "../../../../shared/project-runtime/function-source"
 
 interface Props {
   projectId: string
@@ -57,6 +58,7 @@ function ProjectFunctionConsentScope({
   const [review, setReview] = useState<ProjectFunctionSourceReview>()
   const [error, setError] = useState("")
   const [busy, setBusy] = useState(false)
+  const [checking, setChecking] = useState(false)
   const [expanded, setExpanded] = useState<boolean>()
   const expansionReview = useRef<{ identity: string; ready: boolean } | undefined>(undefined)
   useEffect(() => {
@@ -87,8 +89,10 @@ function ProjectFunctionConsentScope({
     onReady(ready(next))
   }
   const refresh = async () => {
+    if (pending.current) return
     const token = ++generation.current
     setError("")
+    setChecking(true)
     onReady(false)
     try {
       const next = await api.read(projectId)
@@ -97,36 +101,48 @@ function ProjectFunctionConsentScope({
     } catch {
       if (token === generation.current && mounted.current)
         setError("无法读取插件权限。请点击“重新核对”；若仍失败，请重新打开项目。")
+    } finally {
+      if (token === generation.current && mounted.current) setChecking(false)
     }
   }
   useEffect(() => {
     mounted.current = true
     void refresh()
+    // Parameters or switches may be changed in the plugin settings while this panel stays mounted.
+    const changed = () => void refresh()
+    const stop = window.api.mods?.onConfigurationChanged?.(changed)
+    window.addEventListener("focus", changed)
     return () => {
       mounted.current = false
       generation.current++
+      stop?.()
+      window.removeEventListener("focus", changed)
     }
   }, [projectId, version, api])
 
-  const approve = async (source: Source, dependency: boolean) => {
-    if (pending.current || !review) return
+  const approve = async (source?: Source, dependency = false) => {
+    if (pending.current || checking || !review) return
     pending.current = true
     setBusy(true)
+    setError("")
     onReady(false)
     const token = generation.current
     try {
-      const input = {
+      const input = source && {
         projectId,
         projectVersion: review.projectVersion,
         packageDigest: review.packageDigest,
         compiledDigest: source.digest
       }
       let next: ProjectFunctionSourceReview
-      if (dependency) {
+      if (!source) {
+        if (!api.approveRequired) throw Error("PROJECT_DEPENDENCY_APPROVAL_UNAVAILABLE")
+        next = await api.approveRequired(projectFunctionApprovalInput(review))
+      } else if (dependency && input) {
         if (!api.approveDependency || !source.pluginId)
           throw Error("PROJECT_DEPENDENCY_APPROVAL_UNAVAILABLE")
         next = await api.approveDependency({ ...input, pluginId: source.pluginId })
-      } else next = await api.approve(input)
+      } else next = await api.approve(input!)
       if (token !== generation.current || !mounted.current) return
       accept(next, review)
     } catch (cause) {
@@ -145,11 +161,24 @@ function ProjectFunctionConsentScope({
     }
   }
 
-  if (!review?.source && !review?.dependencies?.length && !error) return null
+  if (!review && !error) return <p role="status">正在读取项目设置…</p>
+  if (review && !review.source && !review.dependencies?.length && !error) return null
   const sources: Array<{ source: Source; dependency: boolean }> = [
     ...(review?.source ? [{ source: review.source, dependency: false }] : []),
     ...(review?.dependencies ?? []).map((source) => ({ source, dependency: true }))
   ]
+  const missingConfiguration = sources.filter(({ source }) => source.configurationReady === false)
+  const unavailableSources = sources.filter(
+    ({ source }) => !["ready", "needs-approval"].includes(source.state)
+  )
+  const pendingSources = sources.filter(
+    ({ source }) =>
+      !("configurationOnly" in source && source.configurationOnly) &&
+      source.state === "needs-approval"
+  )
+  const needsConsent =
+    !!review &&
+    (pendingSources.length > 0 || (needsExecution(review) && review.workspaceEnabled === false))
   return (
     <section aria-label="本包功能权限">
       <details
@@ -158,17 +187,34 @@ function ProjectFunctionConsentScope({
         onToggle={(event) => setExpanded(event.currentTarget.open)}
       >
         <summary className="cursor-pointer text-sm font-medium">
-          项目设置 · {review && ready(review) ? "已就绪" : "待完成"}
+          项目设置 ·{" "}
+          {checking
+            ? "核对中"
+            : error
+              ? "需重新核对"
+              : review && ready(review)
+                ? "已就绪"
+                : "待完成"}
         </summary>
+        {review && !ready(review) && (
+          <p role="status">
+            {missingConfiguration.length > 0
+              ? `请填写并保存参数：${missingConfiguration.map(({ source }) => source.name).join("、")}。`
+              : unavailableSources.length > 0
+                ? `请先处理插件状态：${unavailableSources.map(({ source }) => source.name).join("、")}。`
+                : needsConsent
+                  ? "参数已齐备，请确认下方所列权限后开始项目。"
+                  : "请检查应用插件开关并重新核对。"}
+          </p>
+        )}
         {review && needsExecution(review) && review.globallyEnabled === false && (
           <p role="alert">应用插件功能已关闭。请在“插件”中开启应用功能后，返回此处重新核对。</p>
         )}
         {review && needsExecution(review) && review.workspaceEnabled === false && (
           <p role="status">当前目录尚未启用插件功能，请在下方确认后再执行。</p>
         )}
-        {error ? (
-          <p role="alert">{error}</p>
-        ) : (
+        {error && <p role="alert">{error}</p>}
+        {(
           review &&
           sources.map(({ source, dependency }) => {
             const configurationOnly =
@@ -262,7 +308,8 @@ function ProjectFunctionConsentScope({
                     打开对应插件
                   </button>
                 )}
-                {!configurationOnly &&
+                {!api.approveRequired &&
+                  !configurationOnly &&
                   (source.state === "needs-approval" ||
                     (source.state === "ready" && review.workspaceEnabled === false)) && (
                     <>
@@ -274,6 +321,7 @@ function ProjectFunctionConsentScope({
                         type="button"
                         disabled={
                           busy ||
+                          checking ||
                           review.globallyEnabled === false ||
                           source.configurationReady === false ||
                           (dependency && !api.approveDependency)
@@ -293,8 +341,47 @@ function ProjectFunctionConsentScope({
             )
           })
         )}
-        <button type="button" disabled={busy} className="underline" onClick={() => void refresh()}>
-          重新核对
+        {review && api.approveRequired && needsConsent && (
+          <div className="space-y-2 rounded border p-2">
+            <p>本次确认以下插件的当前源码版本在目录 {review.workspace} 运行：</p>
+            <ul className="list-disc pl-4">
+              {sources
+                .filter(
+                  ({ source }) => !("configurationOnly" in source && source.configurationOnly)
+                )
+                .map(({ source }) => (
+                  <li key={source.pluginId ?? source.name}>
+                    {source.name}：{source.capabilities.join("、") || "未声明额外能力"}
+                  </li>
+                ))}
+            </ul>
+            <p>已授权且版本未变的功能会复用授权；文件、网络、进程等具体操作仍按原规则确认。</p>
+            {review.workspaceEnabled === false && (
+              <p>同时启用当前目录；同目录其他聊天也会恢复此前已授权的功能。</p>
+            )}
+            <button
+              type="button"
+              className="rounded border px-2 py-1 disabled:opacity-50"
+              disabled={
+                busy ||
+                checking ||
+                review.globallyEnabled === false ||
+                missingConfiguration.length > 0 ||
+                unavailableSources.length > 0
+              }
+              onClick={() => void approve()}
+            >
+              {busy ? "正在确认项目权限…" : "确认以上权限并启用项目"}
+            </button>
+          </div>
+        )}
+        <button
+          type="button"
+          disabled={busy || checking}
+          className="underline"
+          onClick={() => void refresh()}
+        >
+          {checking ? "正在核对…" : "重新核对"}
         </button>
       </details>
     </section>

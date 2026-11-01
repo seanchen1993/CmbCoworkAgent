@@ -123,6 +123,8 @@ export async function runFunctionAgentChild(
     parentTrace?: Readonly<TraceContext>
     conversationParent?: FunctionConversationChildParent
     signal: AbortSignal
+    /** Release native resources normally; keep only the owned native transcript for read-only history. */
+    retainTranscript?: boolean
     assertLive(): void
     started(physicalThreadId: string): void
   }
@@ -155,6 +157,7 @@ export async function runFunctionAgentChild(
   const startedAt = Date.now()
   let incarnation: unknown
   let created = false
+  let published = false
   let answer = ""
   let reason: "answer" | "aborted" | "error" | "refusal" = "error"
   let refusal: ModelRefusal | undefined
@@ -303,6 +306,7 @@ export async function runFunctionAgentChild(
           )
           closePeer = () => peer.close()
           context.started(threadId)
+          published = true
         }
       })
     )
@@ -400,7 +404,7 @@ export async function runFunctionAgentChild(
           errors.push(error)
         }
       }
-      if (!errors.length) {
+      if (!errors.length && (!context.retainTranscript || !published || !getThreadCore(context.parentThreadId))) {
         try {
           assertChild()
           deleteThreadCheckpoint(threadId)

@@ -1,7 +1,11 @@
 import { BrowserWindow, dialog } from "electron"
 import type { IpcMain, IpcMainInvokeEvent } from "electron"
 import { isModObject } from "../../shared/mods/v2/contracts"
-import type { ProjectFunctionSourceApi } from "../../shared/project-runtime/function-source"
+import type {
+  ProjectFunctionApprovalInput,
+  ProjectFunctionSourceApi
+} from "../../shared/project-runtime/function-source"
+import { projectFunctionApprovalInput } from "../../shared/project-runtime/function-source"
 import { registerFunctionConfigHandlers } from "./mods-config"
 import {
   currentNativeConfigurationScope,
@@ -155,6 +159,128 @@ export function registerNativeProjectSourceHandlers(
     }
   )
   ipc.handle(`${prefix}:mods-read`, review)
+  ipc.handle(`${prefix}:mods-approve-required`, async (event, input: unknown) => {
+    const digest = (value: unknown) => typeof value === "string" && /^[a-f0-9]{64}$/.test(value)
+    if (
+      !isModObject(input) ||
+      Object.keys(input).some(
+        (key) =>
+          ![
+            "projectId",
+            "projectVersion",
+            "packageDigest",
+            "workspace",
+            "sourceDigest",
+            "dependencies"
+          ].includes(key)
+      ) ||
+      typeof input.projectId !== "string" ||
+      typeof input.workspace !== "string" ||
+      !Number.isSafeInteger(input.projectVersion) ||
+      !digest(input.packageDigest) ||
+      (input.sourceDigest !== undefined && !digest(input.sourceDigest)) ||
+      !Array.isArray(input.dependencies) ||
+      input.dependencies.length > 64 ||
+      input.dependencies.some(
+        (value) =>
+          !isModObject(value) ||
+          Object.keys(value).sort().join(",") !== "compiledDigest,pluginId" ||
+          typeof value.pluginId !== "string" ||
+          !value.pluginId ||
+          !digest(value.compiledDigest)
+      )
+    )
+      throw Error("PROJECT_INVALID_INPUT")
+    if (pending.has(input.projectId)) throw Error("PROJECT_MODS_APPROVAL_BUSY")
+    pending.add(input.projectId)
+    try {
+      const context = await scope(event, input.projectId)
+      if (
+        context.project.version !== input.projectVersion ||
+        context.project.pluginDigest !== input.packageDigest ||
+        context.input.workspace !== input.workspace
+      )
+        throw Error("PROJECT_INPUT_CHANGED")
+      const before = await review(event, input.projectId)
+      const expected = projectFunctionApprovalInput(before)
+      const targets = input.dependencies as ProjectFunctionApprovalInput["dependencies"]
+      const submitted = {
+        ...input,
+        dependencies: [...targets].sort((a, b) => a.pluginId.localeCompare(b.pluginId))
+      }
+      if (
+        Object.keys(expected).some(
+          (key) =>
+            JSON.stringify(expected[key as keyof typeof expected]) !==
+            JSON.stringify(submitted[key])
+        )
+      )
+        throw Error("PROJECT_INPUT_CHANGED")
+      if (!expected.sourceDigest && input.sourceDigest !== undefined)
+        throw Error("PROJECT_INPUT_CHANGED")
+      if (before.globallyEnabled === false) throw Error("PROJECT_MODS_GLOBALLY_DISABLED")
+      const sources = [...(before.source ? [before.source] : []), ...(before.dependencies ?? [])]
+      if (sources.some((source) => !["ready", "needs-approval"].includes(source.state)))
+        throw Error("PROJECT_DEPENDENCY_UNAVAILABLE")
+      if (sources.some((source) => source.configurationReady === false))
+        throw Error("PROJECT_MODS_CONFIGURATION_REQUIRED")
+      // Resolve every retained dependency before granting any. A partial/extra client list is rejected.
+      const dependencies = await Promise.all(
+        (before.dependencies ?? []).map(async (source) => {
+          if (!context.dependencies) throw Error("PROJECT_DEPENDENCY_NOT_DECLARED")
+          return { source, resolved: await context.dependencies.resolve(source.pluginId) }
+        })
+      )
+      const controls = context.workspaceControl
+      const settings = controls?.settingsStamp(context.input.workspace)
+      const frame = event.sender.mainFrame
+      const guard = () => {
+        context.guard()
+        if (
+          event.sender.isDestroyed() ||
+          event.sender.mainFrame !== frame ||
+          (controls && !controls.globallyEnabled()) ||
+          controls?.settingsStamp(context.input.workspace) !== settings
+        )
+          throw Error("PROJECT_MODS_APPROVAL_CHANGED")
+        for (const { resolved } of dependencies) resolved.assertCurrent()
+      }
+      guard()
+      // Reuse original configuration validation and grant ownership; never grants process/network I/O.
+      context.manager.assertRuntimeSourceConfiguration(context.input)
+      for (const { resolved } of dependencies)
+        context.manager.assertRuntimeSourceConfiguration({
+          workspace: context.input.workspace,
+          plugin: resolved.plugin
+        })
+      if (before.source && !before.source.configurationOnly && before.source.state !== "ready")
+        await context.manager.approveRuntimeSource(
+          { ...context.input, digest: before.source.digest },
+          guard
+        )
+      for (const { source, resolved } of dependencies) {
+        guard()
+        if (source.state !== "ready")
+          await context.manager.approve(
+            context.input.workspace,
+            resolved.plugin.id,
+            source.digest,
+            guard
+          )
+      }
+      guard()
+      if (controls && !controls.enabled(context.input.workspace)) {
+        try {
+          controls.enable(context.input.workspace)
+        } catch {
+          throw Error("PROJECT_MODS_WORKSPACE_ENABLE_UNCONFIRMED")
+        }
+      }
+      return review(event, input.projectId)
+    } finally {
+      pending.delete(input.projectId)
+    }
+  })
   ipc.handle(`${prefix}:mods-approve-dependency`, async (event, input: unknown) => {
     if (!isModObject(input) || Object.keys(input).some(key =>
       !["projectId", "projectVersion", "packageDigest", "pluginId", "compiledDigest"].includes(key)) ||

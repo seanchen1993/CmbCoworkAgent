@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto"
 import { resolve } from "node:path"
 import { afterEach, expect, it } from "vitest"
-import { FunctionSession, SESSION_CAPABILITIES } from "./session"
+import { FunctionSession, SESSION_CAPABILITIES, type FunctionSessionHost } from "./session"
+import { consumeUserViewAction } from "./user-view-action"
 import { FunctionGuestRuntime } from "./guest-runtime"
 import { compileFunctionPlugin } from "./loader"
 import { CLIENT_BOOTSTRAP } from "./client-bootstrap"
@@ -27,7 +28,8 @@ afterEach(async () => {
 async function fixture(
   surface?: string,
   publish: (v: ModJson) => Promise<ModJson> = async (v) => v,
-  decorateHooks = ""
+  decorateHooks = "",
+  extra: Partial<FunctionSessionHost> = {}
 ) {
   const compiled = await compileFunctionPlugin(resolve("tests/fixtures/mods-v2/client-board"))
   const guest = await FunctionGuestRuntime.create(compiled.code + "\n" + decorateHooks)
@@ -68,6 +70,7 @@ async function fixture(
         clients.push(runtime)
         return runtime
       },
+      ...extra,
       state: () => ({
         get: async (k) => state.get(k),
         keys: async () => [...state.keys()],
@@ -111,6 +114,28 @@ function action(
     ...(value === undefined ? {} : { value })
   }
 }
+
+it("grants readonly view only to the actual Client control message, never background output", async () => {
+  const f = await fixture(`var __cmbSurfaceMod={default(_,s){
+    if(s.state===undefined){s.setState(true);s.post({kind:"background"})}
+    return s.elements.Button({key:"increment",label:"View task",onPress:()=>s.post({kind:"click"})});
+  }}`, undefined, `const original=__cmbFunctionMod.register;__cmbFunctionMod={register(on,options){
+    original((event,matcher,handler)=>{
+      if(event!=="ui.message")return on(event,matcher,handler);
+      on(event,matcher,async($,e,next)=>{let result;
+        try{result=await $.ui.view({agentId:"child"})}catch(error){result={error:error.code}}
+        await $.store.set(e.data.kind,result);return handler($,e,next);
+      });
+    },options);
+  }};`, {agentTask:async(plugin,method)=>{
+    expect(method).toBe("ui.view");consumeUserViewAction(plugin.name)()
+    return {requested:true,readOnly:true,inputTarget:"parent",agentId:"child"}
+  }})
+  const {client}=await f.snapshot()
+  await expect.poll(()=>f.state.get("background")).toEqual({error:"MODS_UI_VIEW_REQUIRES_USER_ACTION"})
+  await f.session.clients.act(action(client,"press"))
+  await expect.poll(()=>f.state.get("click")).toEqual({requested:true,readOnly:true,inputTarget:"parent",agentId:"child"})
+})
 
 it("matches the upstream Client descriptor and preserves local state across parent redraws", async () => {
   const f = await fixture()

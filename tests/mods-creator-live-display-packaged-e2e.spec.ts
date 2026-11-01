@@ -189,7 +189,7 @@ async function main() {
     const card = page.locator('[data-function-site="AbovePrompt"] > div:not([data-function-site-cached])')
     await send("A21_CREATE_DISPLAY 制作只读任务耗时卡，读取本地业务状态文件并显示耗时，保留现有功能。")
     await until(status, value => value.trials[0]?.phase === "needs-approval", "original display confirmation")
-    await page.getByRole("button", { name: "确认并应用到这段聊天", exact: true }).click()
+    await page.getByRole("button", { name: "确认并开始聊天试用", exact: true }).click()
     await until(status, value => value.trials[0]?.phase === "active", "initial display active")
     await card.getByText(/^A21 耗时卡 · /).waitFor({ timeout: 90_000 })
     const before = await functions()

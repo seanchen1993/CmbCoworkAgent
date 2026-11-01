@@ -75,6 +75,7 @@ export async function mount(
       import {revealClawPanes,publishClawNotice,openClawSidebar} from ${source("lib/claw-sidebar.ts")};
       window.publishClawNotice=publishClawNotice;window.revealClawPanes=revealClawPanes;
       import {useAppStore} from "@/lib/store";
+      import {configureAppCatalogLoaders} from ${source("lib/app-catalog-cache.ts")};
       import {ScrollArea} from ${source("components/ui/scroll-area.tsx")};
       import {selectChatFlow} from  ${source("lib/chat-flow-choice.ts")};
       import {useChatFlow} from ${source("lib/use-chat-flow.ts")};
@@ -890,7 +891,7 @@ async function sidebarLifecycle(page: Page) {
   await page.evaluate("window.publishClawNotice('a','jobs','插件命令执行中')")
   await page.getByRole("button", { name: "插件命令执行中 · 查看", exact: true }).click()
   await page.locator("[data-claw-results]").waitFor()
-  assert.equal(await page.getByRole("tab", { name: "结果", exact: true }).getAttribute("aria-pressed"), "true")
+  assert.equal(await page.getByRole("tab", { name: "输出与面板", exact: true }).getAttribute("aria-pressed"), "true")
   assert.equal(await page.locator("[data-chat-flow-run]").count(), 0,
     "Hidden sidebar details release their duplicate run view")
   assert.equal(await page.locator("[data-chat-task-id='run1']").count(), 1)

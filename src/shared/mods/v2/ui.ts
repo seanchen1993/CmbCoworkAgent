@@ -6,9 +6,14 @@ import { functionCodeRows } from "./code"
 import { validateFunctionMarkdownProps, type FunctionMarkdownLeafProps } from "./markdown"
 import type { FunctionMarkdownLinkSidecar } from "./markdown-links"
 import { isPlatformWidget, validatePlatformWidget, type PlatformWidget } from "./platform-surfaces-widgets"
+import {
+  FUNCTION_UI_SPACE_PIXELS, FUNCTION_UI_SPACE_PROPERTIES,
+  FUNCTION_UI_TEXT_PIXELS, FUNCTION_UI_TEXT_WEIGHTS
+} from "./ui-layout"
 
 export const FUNCTION_UI_CAPABILITIES = [
   "ui.open",
+  "ui.place",
   "ui.focus",
   "ui.scroll",
   "ui.close",
@@ -231,19 +236,36 @@ const props: Record<FunctionUiNode["type"], readonly string[]> = {
     "key",
     "flexDirection",
     "gap",
+    "rowGap",
+    "columnGap",
     "padding",
     "paddingX",
     "paddingY",
+    "paddingTop",
+    "paddingBottom",
+    "paddingLeft",
+    "paddingRight",
     "margin",
     "marginX",
     "marginY",
     "marginTop",
+    "marginBottom",
+    "marginLeft",
+    "marginRight",
+    "flexGrow",
+    "flexShrink",
+    "flexWrap",
     "alignItems",
+    "alignSelf",
     "justifyContent",
     "borderStyle",
     "borderColor",
+    "backgroundColor",
+    "overflow",
     "width",
-    "height"
+    "height",
+    "minWidth",
+    "minHeight"
   ],
   Text: [
     "key",
@@ -255,7 +277,7 @@ const props: Record<FunctionUiNode["type"], readonly string[]> = {
     "strikethrough",
     "inverse",
     "dimColor",
-    "wrap"
+    "wrap", "size", "weight", "mono", "tabular"
   ],
   Button: ["key", "label", "plain", "dimColor", "autoFocus", "hotkey"],
   Input: ["key", "label", "placeholder", "value", "submitLabel", "autoFocus"],
@@ -368,6 +390,21 @@ export function validateFunctionTree(value: unknown): asserts value is FunctionU
       fail()
     for (const [key, value] of Object.entries(p)) {
       if (!props[item.type].includes(key)) fail()
+      if (FUNCTION_UI_SPACE_PROPERTIES.some(property => property === key) &&
+        typeof value === "string" && Object.hasOwn(FUNCTION_UI_SPACE_PIXELS, value)) continue
+      if (key === "size" &&
+        !(typeof value === "string" && Object.hasOwn(FUNCTION_UI_TEXT_PIXELS, value))) fail()
+      if (key === "weight" &&
+        !(typeof value === "string" && Object.hasOwn(FUNCTION_UI_TEXT_WEIGHTS, value))) fail()
+      if (["mono", "tabular"].includes(key) && typeof value !== "boolean") fail()
+      if (["rowGap", "columnGap", "paddingTop", "paddingBottom", "paddingLeft", "paddingRight",
+        "marginBottom", "marginLeft", "marginRight", "flexGrow", "flexShrink"].includes(key) &&
+        !(typeof value === "number" && Number.isFinite(value) && value >= 0 &&
+          value <= (["flexGrow", "flexShrink"].includes(key) ? 100 : 128))) fail()
+      if (key === "flexWrap" && !["nowrap", "wrap", "wrap-reverse"].includes(String(value))) fail()
+      if (key === "alignSelf" &&
+        !["auto", "flex-start", "center", "flex-end", "stretch"].includes(String(value))) fail()
+      if (key === "overflow" && !["visible", "hidden"].includes(String(value))) fail()
       if (item.type === "Link" && key === "href") {
         if (typeof value === "string" && (
           value.length > 2048 ||
@@ -419,7 +456,7 @@ export function validateFunctionTree(value: unknown): asserts value is FunctionU
       )
         fail()
       if (
-        ["width", "height"].includes(key) &&
+        ["width", "height", "minWidth", "minHeight"].includes(key) &&
         typeof value !== "number" &&
         !(typeof value === "string" && /^(100|[1-9]?\d)%$/.test(value))
       )
@@ -433,9 +470,11 @@ export function validateFunctionTree(value: unknown): asserts value is FunctionU
         fail()
     }
     if (p.key !== undefined && (!text(p.key, 256) || !p.key)) fail()
-    if (p.flexDirection !== undefined && !["row", "column"].includes(String(p.flexDirection)))
+    if (p.flexDirection !== undefined &&
+      !["row", "column", "row-reverse", "column-reverse"].includes(String(p.flexDirection)))
       fail()
-    if (p.wrap !== undefined && !["wrap", "truncate-start", "truncate-end"].includes(String(p.wrap))) fail()
+    if (p.wrap !== undefined &&
+      !["wrap", "truncate", "truncate-start", "truncate-end"].includes(String(p.wrap))) fail()
     if (["Button", "Input", "Select"].includes(item.type)) {
       if (
         !text(p.key, 256) ||

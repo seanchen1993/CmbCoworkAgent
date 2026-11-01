@@ -819,7 +819,7 @@ function Reuse({
             已保存并应用到当前聊天，可以继续使用。
           </p>
           <p className="text-xs">
-            回到聊天直接描述需求并发送；需要使用插件命令{mod?.userConfigFieldCount ? "或设置" : ""}时，可在“任务进展 → 高级设置”查看。结果在聊天或“结果”中核对。
+            回到聊天直接描述需求并发送；需要使用插件命令{mod?.userConfigFieldCount ? "或设置" : ""}时，可在“任务进展 → 高级设置”查看。回复在聊天中查看，交互面板在“输出与面板”中。
           </p>
           <div className="flex flex-wrap gap-2">
             {!!mod?.userConfigFieldCount && (

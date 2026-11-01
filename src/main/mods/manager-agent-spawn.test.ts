@@ -13,6 +13,10 @@ import { bindLiveToolEvidence, bindRuntimeTraceContext } from "../agent/trace/li
 import type { TraceContext } from "../agent/trace/types"
 
 const hooks = vi.hoisted(() => ({ run: vi.fn() }))
+// This suite owns synthetic runtime bindings, not native persisted parent/child rows.
+vi.mock("../db", async (original) => ({
+  ...(await original<typeof import("../db")>()), getThreadCore: () => null
+}))
 vi.mock("./v2/agent-spawn-host", () => ({
   prepareFunctionAgentPlan: async (
     input: Record<string, unknown>,

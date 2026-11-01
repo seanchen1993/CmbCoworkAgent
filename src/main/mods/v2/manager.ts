@@ -1,4 +1,7 @@
 import { currentNativeConfigurationScope } from "./native-configuration-scope"
+import { OwnedMcpConnections } from "../../mcp/owned-connections"
+import { resolveSelectedMcpSource } from "../../mcp/capability-service"
+import { OWNED_MCP_SERVER_PREFIX } from "../../../shared/mods/v2/mcp-connections"
 import { markRunCancellationEffectDispatched } from "../../agent/run-cancellation-settlement"
 import { captureProjectActionContentGuard } from "../../harness-board/project-action-scope"
 import { retainOriginalActionText } from "./action-result-text"
@@ -247,6 +250,7 @@ interface FunctionConnection {
   stopAndDrain?(): Promise<void>
 }
 interface SessionEntry {
+  ownedMcp?: Map<FunctionPlugin, import("../../mcp/owned-connections").OwnedMcpConnections>
   constructionOwner?: FunctionOperationScope
   runtimeSourceToken?: RuntimePluginSourceToken
   assertRuntimeSourceContent?: () => void
@@ -308,6 +312,9 @@ interface FunctionEndingRequest {
   stage?: FunctionClassicEndStage
 }
 interface FunctionManagerHost extends FunctionConversationManagerHost {
+  selectedMcpSources?(workspace: string, threadId: string):
+    import("../../../shared/mods/claw").ClawSourceReference[]
+  capturePlacedAnchor?(workspace: string, threadId: string): import("../../../shared/mods/v2/placed").FunctionPlacedAnchor | undefined
   platformNativeProviders?(workspace: string, threadId: string): readonly
     import("./platform-capabilities-types").NativePlatformCapabilityProvider[]
   platformChanged?(threadId: string): void
@@ -364,6 +371,8 @@ interface FunctionManagerHost extends FunctionConversationManagerHost {
     completion: Promise<FunctionTurnComplete>
   }>
   readSettings?(workspace: string, threadId: string): Promise<ModObject>
+  agentTask?(workspace: string, threadId: string, grant: ModGrant, method: string,
+    input: ModObject, signal: AbortSignal, plugin: string, sourceCurrent: () => void): Promise<ModJson>
   sendPeer?(
     workspace: string,
     threadId: string,
@@ -488,7 +497,8 @@ interface FunctionManagerHost extends FunctionConversationManagerHost {
     grant: ModGrant,
     input: ModObject,
     signal: AbortSignal,
-    dispatch: import("./mcp-sdk").FunctionMcpToolDispatch
+    dispatch: import("./mcp-sdk").FunctionMcpToolDispatch,
+    service?: import("../../mcp/capability-types").McpCapabilityService
   ): Promise<ModObject>
   connectMcp?(
     workspace: string,
@@ -957,6 +967,7 @@ export class FunctionModsManager {
       "feedback",
       "feedbackPresentation",
       "panes",
+      "clearPlacedRows",
       "markdownLink",
       "focusAck",
       "scrollAck",
@@ -1063,7 +1074,7 @@ export class FunctionModsManager {
       ...applyBefore, "configList", "configSet", "userConfig", "saveUserConfig", "saveSensitiveUserConfig", "migrateUserConfig", "runtimeReady",
       "effectiveStatus", "inspectCheckpointRecovery", "advanceAutobizCheckpoint", "completionGate",
       "measure", "turnComplete", "turnNotices", "interceptToolCheck", "hasEventHandler", "logs",
-      "feedback", "feedbackPresentation", "panes", "focusAck", "scrollAck", "act", "siteMount", "siteMountOutcome", "siteRead", "siteRender", "siteUnmount",
+      "feedback", "feedbackPresentation", "panes", "placedRows", "placedRead", "placedAct", "placedDismiss", "placedRelease", "focusAck", "scrollAck", "act", "siteMount", "siteMountOutcome", "siteRead", "siteRender", "siteUnmount",
       "siteAct", "clientAct", "actionCatalog", "markdownLink", "appendConversation"
     ]
     for (const name of native) {
@@ -3570,11 +3581,14 @@ export class FunctionModsManager {
     this.retiringEntries.add(entry)
     let closing: Promise<void> | undefined
     const failures: unknown[] = []
+    const mcpCleanup = Promise.all([...entry.ownedMcp?.values() ?? []]
+      .map(registry => registry.close())).catch(error => { failures.push(error) })
     if (immediateStop) {
       try { closing = entry.session?.close(strictCleanup) } catch (error) { failures.push(error) }
       try { entry.client.stop() } catch (error) { failures.push(error) }
     }
     const drained = Promise.resolve().then(async () => {
+      await mcpCleanup
       if (!constructionFailed) await entry.loading.catch(() => {})
       try { await (closing ?? entry.session?.close(strictCleanup)) }
       catch (error) { failures.push(error) }
@@ -4736,7 +4750,41 @@ export class FunctionModsManager {
             if (!grant) throw new ModFunctionError("MODS_GRANT_MISSING")
             return withSource(() => this.store.withProjectFunctionGrant(grant, () => run(grant)))
           }
+          const ownedMcp = (plugin: FunctionPlugin) => {
+            assertLive(plugin)
+            if (!this.host.selectedMcpSources) throw new ModFunctionError("MODS_MCP_UNAVAILABLE")
+            const existing = current.ownedMcp?.get(plugin)
+            if (existing) return existing
+            const scope = this.host.captureSiteGuard?.(workspace, threadId)
+            const registry = new OwnedMcpConnections({
+              assertOwner: scope,
+              assertCurrent: () => { scope?.(); assertContent(plugin) },
+              sources: () => this.host.selectedMcpSources!(workspace, threadId),
+              resolve: resolveSelectedMcpSource
+            })
+            ;(current.ownedMcp ??= new Map()).set(plugin, registry)
+            return registry
+          }
           current.session = new FunctionSession(plugins, {
+            manageMcp: async (plugin, method, input, signal) => {
+              const result = await withNativeGrant(plugin, `mcp.${method}`, async () => {
+                signal.throwIfAborted()
+                const registry = ownedMcp(plugin)
+                if (method === "list") return registry.view()
+                if (method === "status") return registry.status(String(input.server))
+                return registry.disconnect(String(input.server))
+              })
+              assertLive(plugin)
+              signal.throwIfAborted()
+              return result as unknown as ModObject
+            },
+            capturePlacedAnchor: () => {
+              assertLive()
+              const display = this.host.captureDisplayScope?.(workspace, threadId)
+              display?.assertCurrent()
+              return display ? this.host.capturePlacedAnchor?.(workspace, threadId) : undefined
+            },
+            placedAttached: () => this.host.desktop?.isAttached(threadId) === true,
             platformNativeProviders: this.host.platformNativeProviders?.(workspace, threadId),
             platformHub: this.platformHub,
             platformChanged: () => this.host.platformChanged?.(threadId),
@@ -4931,6 +4979,20 @@ export class FunctionModsManager {
               ))
               // Return ownership even after revocation so the session can await real cleanup.
               // It stores completion before checking the live resource again.
+              return result
+            },
+            agentTask: async (plugin, method, input, signal) => {
+              if (!this.host.agentTask) throw new ModFunctionError("MODS_AGENT_TASK_UNAVAILABLE")
+              const sourceCurrent = () => {
+                assertLive(plugin)
+                const compiled = current.snapshots.get(plugin.name)?.compiled ??
+                  (current.developmentPlugins.has(plugin) ? developmentCompiled : undefined)
+                if (!compiled) throw new ModFunctionError("MODS_GRANT_MISSING")
+                assertFunctionSourcesCurrent(compiled)
+              }
+              sourceCurrent()
+              const result = await withNativeGrant(plugin, method, grant => this.host.agentTask!(workspace, threadId, grant, method, input, signal, plugin.name, sourceCurrent))
+              sourceCurrent()
               return result
             },
             sendPeer: async (plugin, input, signal) => {
@@ -5134,13 +5196,23 @@ export class FunctionModsManager {
                 grant,
                 input,
                 signal,
-                dispatch
+                dispatch,
+                String(input.server).startsWith(OWNED_MCP_SERVER_PREFIX)
+                  ? ownedMcp(plugin).service(String(input.server)) : undefined
               ))
               assertLive(plugin)
               return result
             },
             connectMcp: async (plugin, signal, run) => {
               assertLive(plugin)
+              if (this.host.selectedMcpSources) {
+                return withNativeGrant(plugin, "mcp.connect", async () => run(async (input, active) => {
+                  const registry = ownedMcp(plugin)
+                  const admission = await registry.connect(String(input.server), active)
+                  assertLive(plugin)
+                  return admission
+                }))
+              }
               const snapshot = current.snapshots.get(plugin.name)
               if (!snapshot?.sourceId || !snapshot.sourcePath)
                 return run(async () => ({
@@ -7017,6 +7089,34 @@ export class FunctionModsManager {
     ).filter((pane) => !entry.session!.platformSurfaces.ownsPane(pane.plugin, pane.id))
   }
 
+  placedRows(workspace: string, threadId: string) {
+    return this.platformResident(workspace, threadId)?.placed.list() ?? []
+  }
+  async placedRead(workspace: string, threadId: string, requestId: string, lease: string, check: () => void) {
+    const session = this.platformResident(workspace, threadId)
+    if (!session) throw new ModFunctionError("MODS_UI_PLACED_STALE")
+    return session.placed.read(requestId, lease, () => {
+      check()
+      if (this.platformResident(workspace, threadId) !== session) throw new ModFunctionError("MODS_UI_PLACED_STALE")
+    })
+  }
+  async placedAct(workspace: string, threadId: string, requestId: string, lease: string, action: FunctionUiAction) {
+    const session = this.platformResident(workspace, threadId)
+    if (!session) throw new ModFunctionError("MODS_UI_PLACED_STALE")
+    return session.placed.act(requestId, lease, action)
+  }
+  placedDismiss(workspace: string, threadId: string, requestId: string) {
+    const session = this.platformResident(workspace, threadId)
+    if (!session) throw new ModFunctionError("MODS_UI_PLACED_STALE")
+    session.placed.dismiss(requestId)
+  }
+  placedRelease(workspace: string, threadId: string, requestId: string, lease: string) {
+    this.platformResident(workspace, threadId)?.placed.release(requestId, lease)
+  }
+  clearPlacedRows(workspace: string, threadId: string): void {
+    this.platformResident(workspace, threadId)?.placed.clear()
+  }
+
   private platformResident(workspace: string, threadId: string): FunctionSession | undefined {
     this.host.assertThread?.(workspace, threadId)
     if (this.closed || !this.host.enabled(workspace)) return undefined
@@ -7028,6 +7128,26 @@ export class FunctionModsManager {
     const session = this.platformResident(workspace, threadId)
     return { status: session ? "ready" as const : "unknown" as const,
       capabilities: session?.platform.list() ?? [] }
+  }
+  mcpConnections(workspace: string, threadId: string):
+    import("../../../shared/mods/v2/mcp-connections").McpRuntimeView {
+    this.host.assertThread?.(workspace, threadId)
+    const entries = new Set([...this.sessions.values(), ...this.retiringEntries])
+    return { workspace, connections: [...entries].filter(entry =>
+      entry.workspace === workspace && entry.threadId === threadId).flatMap(entry =>
+      [...entry.ownedMcp?.entries() ?? []].flatMap(([plugin, registry]) =>
+        registry.inspect().map(status => ({ ...status, component: plugin.name,
+          owner: JSON.stringify([entry.epoch, entry.generation, plugin.name]) })))) }
+  }
+  async mcpDisconnect(workspace: string, threadId: string, owner: string, server: string) {
+    this.host.assertThread?.(workspace, threadId)
+    const entry = this.sessions.get(JSON.stringify([workspace, threadId]))
+    const registry = [...entry?.ownedMcp?.entries() ?? []].find(([plugin]) =>
+      JSON.stringify([entry!.epoch, entry!.generation, plugin.name]) === owner)?.[1]
+    if (!registry) throw new ModFunctionError("MODS_MCP_LEASE_NOT_OWNED")
+    await registry.disconnect(server)
+    this.host.assertThread?.(workspace, threadId)
+    return this.mcpConnections(workspace, threadId)
   }
   platformSurfaceList(workspace: string, threadId: string) {
     return this.platformResident(workspace, threadId)?.platformSurfaces.list() ?? {

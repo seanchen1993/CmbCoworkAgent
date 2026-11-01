@@ -38,7 +38,8 @@ export async function sourceSetBrowser(
         clawChange:(threadId,mutation)=>call("clawChange",{threadId,mutation}),
         status:threadId=>call("modsStatus",{threadId}),globalEnabled:()=>call("modsGlobal",{}),
         approveFunction:(threadId,pluginId,digest,expectedWorkspace)=>call("approveFunction",{threadId,pluginId,digest,expectedWorkspace})},
-        plugins:{prepareStartUse:input=>call("prepareStartUse",input),enableStartUse:input=>call("enableStartUse",input)}};
+        plugins:{prepareStartUse:input=>call("prepareStartUse",input),enableStartUse:input=>call("enableStartUse",input)},
+        featureGates:{isEnabled:async()=>({enabled:true})}};
       let scope=window.fixtureSeed,status={...scope,drafts:[],trials:[],enabled:true};
       const root=createRoot(document.getElementById("root"));
       const onStatus=next=>{accepted.push(next);status=next;render()};

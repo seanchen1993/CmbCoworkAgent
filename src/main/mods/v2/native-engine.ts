@@ -6,7 +6,7 @@ import { normalizeFunctionInput } from "../../../shared/mods/v2/pinned-input"
 import {
   functionQuestionPresentation,
   functionSiteProps,
-  type FunctionUiSite
+  type FunctionUiRenderComponent
 } from "../../../shared/mods/v2/sites"
 import type { FunctionUiElement } from "../../../shared/mods/v2/ui"
 
@@ -16,11 +16,15 @@ const same = (left: unknown, right: unknown): boolean =>
 
 /** Trusted publication can redact display bodies, while identity stays host-owned. */
 export function functionNativePresentation(
-  component: FunctionUiSite | "Pane",
+  component: FunctionUiRenderComponent,
   received: unknown,
   original: ModObject
 ): ModObject {
   if (!isModObject(received)) throw new ModFunctionError("MODS_UI_NATIVE_PUBLICATION")
+  if (component === "Placed") {
+    if (!same(received, original)) throw new ModFunctionError("MODS_UI_NATIVE_PUBLICATION")
+    return clone(received)
+  }
   const fields: readonly string[] =
     component === "UserMessage"
       ? ["origin", "isExpanded"]
@@ -97,7 +101,7 @@ export class FunctionNativeDrawing {
     const checked = normalizeFunctionInput("ui.render", received, this.input)
     if (!isModObject(checked.props)) throw new ModFunctionError("MODS_UI_NATIVE_PUBLICATION")
     const props = functionNativePresentation(
-      this.input.component as FunctionUiSite | "Pane",
+      this.input.component as FunctionUiRenderComponent,
       checked.props,
       this.inputs[0]
     )
@@ -144,7 +148,7 @@ export class FunctionNativeDrawing {
         verified.push({
           ref: values[index].ref,
           props: functionNativePresentation(
-            this.input.component as FunctionUiSite | "Pane",
+            this.input.component as FunctionUiRenderComponent,
             value.props,
             values[index].props
           )
@@ -156,7 +160,7 @@ export class FunctionNativeDrawing {
     this.assertCurrent()
     const entries = refs.map((ref) => ({ ref, props: clone(this.protectedInputs.get(ref)!) }))
     const result: FunctionNativeContent = {
-      component: this.input.component as FunctionUiSite | "Pane",
+      component: this.input.component as FunctionUiRenderComponent,
       entries,
       ...(this.requestId === undefined ? {} : { requestId: this.requestId }),
       nativeUnchanged: entries.every((entry) => same(entry.props, this.inputs[0]))

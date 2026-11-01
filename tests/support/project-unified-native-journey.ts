@@ -3,16 +3,24 @@ import type { ElectronApplication, Page } from "playwright"
 
 const guideHandlers = new WeakSet<Page>()
 
+/** Authoring intentionally uses the creator dialog; project navigation must not dismiss it. */
+export async function allowCreatorWorkspaceInteraction(page: Page) {
+  await page.removeLocatorHandler(page.getByRole("dialog", { name: "插件创作工作区", exact: true }))
+}
+
 export async function openUnifiedProjectList(page: Page) {
   const creator = page.getByRole("dialog", { name: "插件创作工作区", exact: true })
+  // Delivery navigation removes this handler while it intentionally opens the creator UI.
+  // Reinstall on every project-list entry, including a later derived-plugin trial.
+  await page.removeLocatorHandler(creator)
+  await page.addLocatorHandler(creator, async () => {
+    await creator.getByRole("button", { name: "Close", exact: true }).click()
+    await creator.waitFor({ state: "hidden" })
+  })
   if (!guideHandlers.has(page)) {
     guideHandlers.add(page)
     const guide = page.getByRole("dialog", { name: "项目模式使用引导", exact: true })
     try {
-      await page.addLocatorHandler(creator, async () => {
-        await creator.getByRole("button", { name: "Close", exact: true }).click()
-        await creator.waitFor({ state: "hidden" })
-      })
       await page.addLocatorHandler(guide, async () => {
         await guide.getByRole("button", { name: "知道了，不再提示", exact: true }).click()
         await guide.waitFor({ state: "hidden" })

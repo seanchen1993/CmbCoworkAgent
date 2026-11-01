@@ -8,6 +8,7 @@ import type { LocalProjectView } from "../../src/shared/project-runtime/platform
 import { normalizeWorkspacePathKey } from "../../src/shared/workspace-path"
 import { openCreatorProjectPreview, openCreatorStep } from "./creator-navigation"
 import { openUnifiedProjectList } from "./project-unified-native-journey"
+import { liveProjectDeliveryName } from "./live-project-delivery-name"
 
 export async function exerciseLiveGeneratedProject(input: {
   app: ElectronApplication
@@ -934,7 +935,7 @@ export async function exerciseLiveGeneratedProject(input: {
           .getByRole("textbox", { name: "这次试用希望完成什么", exact: true })
           .fill(input.goal, { timeout: remaining() })
       await draftCard
-        .getByRole("button", { name: "开始试用", exact: true })
+        .getByRole("button", { name: "准备试用环境", exact: true })
         .click({ timeout: remaining() })
     }
     const preview = await until(
@@ -966,28 +967,41 @@ export async function exerciseLiveGeneratedProject(input: {
   events.push({ trial })
   save()
 
+  // The creator dialog can reopen asynchronously when switching back to its chat.
+  // Keep a scoped UI handler during navigation so that late modal opening cannot block the click.
   await page.removeLocatorHandler(creator)
-  const back = page.getByRole("button", { name: "返回会话", exact: true })
-  if (await back.isVisible()) await back.click({ timeout: remaining() })
-  if (await creator.isVisible())
-    await creator
-      .getByRole("button", { name: "Close", exact: true })
-      .click({ timeout: remaining() })
-  await page.getByRole("tab", { name: "对话模式", exact: true }).click({ timeout: remaining() })
-  const authorChat = page.locator(`[data-chat-thread-id=${JSON.stringify(authorThreadId)}]`)
-  if (!(await authorChat.isVisible())) {
-    if (await creator.isVisible())
-      await creator
-        .getByRole("button", { name: "Close", exact: true })
-        .click({ timeout: remaining() })
-    await page.getByText(author.title, { exact: true }).first().click({ timeout: remaining() })
+  await page.addLocatorHandler(creator, async dialog => {
+    await dialog.getByRole("button", { name: "Close", exact: true }).click({ timeout: remaining() })
+  })
+  try {
+    const back = page.getByRole("button", { name: "返回会话", exact: true })
+    if (await back.isVisible()) await back.click({ timeout: remaining() })
+    await page.getByRole("tab", { name: "对话模式", exact: true }).click({ timeout: remaining() })
+    const authorChat = page.locator(`[data-chat-thread-id=${JSON.stringify(authorThreadId)}]`)
+    if (!(await authorChat.isVisible()))
+      await page.getByText(author.title, { exact: true }).first().click({ timeout: remaining() })
+    assert(await authorChat.isVisible(), "LIVE_PROJECT_AUTHOR_NOT_DISPLAYED")
+  } finally {
+    await page.removeLocatorHandler(creator)
   }
-  assert(await authorChat.isVisible(), "LIVE_PROJECT_AUTHOR_NOT_DISPLAYED")
   const deliveryPanel = await openCreatorStep(page, "delivery")
   const card = deliveryPanel.getByRole("region", { name: "项目候选保存为新插件", exact: true })
   let installed = await status()
   if (installed.projectDelivery?.phase !== "installed" ||
       installed.projectDelivery.sourceDigest !== request.digest) {
+    const nameField = card.getByRole("textbox", { name: "新插件标识", exact: true })
+    if (await nameField.isVisible()) {
+      const previousName = await nameField.inputValue()
+      const plugins = await page.evaluate(() => window.api.plugins.list())
+      const nextName = liveProjectDeliveryName(previousName, request.digest, plugins.map(plugin => plugin.name))
+      if (nextName !== previousName) {
+        events.push({ operation: "delivery-name-collision", sourceDigest: request.digest,
+          previousName, newName: nextName,
+          retainedPluginIds: plugins.filter(plugin => plugin.name === previousName).map(plugin => plugin.id) })
+        save()
+        await nameField.fill(nextName, { timeout: remaining() })
+      }
+    }
     await card
       .getByRole("button", { name: "保存插件", exact: true })
       .click({ timeout: remaining() })

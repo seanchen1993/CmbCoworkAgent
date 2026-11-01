@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto"
 import { mkdtempSync, mkdirSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { dirname, join } from "node:path"
+import { basename, dirname, join, resolve } from "node:path"
 import { DatabaseSync } from "node:sqlite"
 import { afterEach, expect, it } from "vitest"
 import { HostProjectStore } from "./host-store"
@@ -16,7 +16,15 @@ afterEach(() => {
 const digest = (id: string) => createHash("sha256").update(id).digest("hex")
 function fixture() {
   const base = mkdtempSync(join(tmpdir(), "snapshot-reference-"))
-  cleanup.push(() => rmSync(base, { recursive: true, force: true }))
+  cleanup.push(() => {
+    const target = resolve(base)
+    if (
+      dirname(target) !== resolve(tmpdir()) ||
+      !/^snapshot-reference-[A-Za-z0-9]+$/.test(basename(target))
+    )
+      throw Error("Unsafe snapshot audit test cleanup")
+    rmSync(target, { recursive: true, force: true })
+  })
   const roots = projectSnapshotRoots(base)
   for (const root of roots) mkdirSync(root, { recursive: true })
   const audit = () =>
@@ -70,6 +78,52 @@ it("retains both plan versions from the original migration transaction and rejec
     review, previous: project, next: { ...candidate, version: 2 }, actor: "unrecognized"
   }))
   expect(f.audit().complete).toBe(false)
+})
+
+it("audits persisted branch baselines and rejects malformed records or unknown columns", () => {
+  const f = fixture()
+  const store = new HostProjectStore(join(f.base, "local-projects", "state.sqlite"))
+  cleanup.push(() => store.close())
+  const source = store.create(hostProjectFixture(f.base))
+  const baseline = {
+    projectId: "branch",
+    sourceProjectId: source.projectId,
+    sourceVersion: source.version,
+    pluginDigest: digest("branch-package"),
+    stageIndex: 0,
+    inputs: [{ path: "document.md", fingerprint: digest("branch-document") }]
+  }
+  store.createBranch(
+    {
+      ...hostProjectFixture(f.base),
+      projectId: baseline.projectId,
+      pluginDigest: baseline.pluginDigest
+    },
+    "draft",
+    { projectId: source.projectId, expectedVersion: source.version },
+    baseline
+  )
+  expect(store.branchInputs(baseline.projectId)).toEqual(baseline)
+  const audit = f.audit()
+  expect(audit.blockers).toEqual([])
+  expect(audit.digests.has(baseline.pluginDigest)).toBe(true)
+  expect(audit.digests.has(baseline.inputs[0].fingerprint)).toBe(true)
+  const db = f.db(["local-projects", "state.sqlite"])
+  for (const invalid of [
+    { ...baseline, unexpectedDigest: digest("future") },
+    { ...baseline, pluginDigest: "invalid" },
+    { ...baseline, inputs: [{ path: "../outside", fingerprint: digest("outside") }] }
+  ]) {
+    db.prepare("UPDATE host_branch_inputs SET data=?").run(JSON.stringify(invalid))
+    expect(f.audit().complete).toBe(false)
+  }
+  db.prepare("UPDATE host_branch_inputs SET data=?").run(JSON.stringify(baseline))
+  expect(f.audit().complete).toBe(true)
+  db.exec("ALTER TABLE host_branch_inputs ADD COLUMN future_reference TEXT")
+  expect(f.audit().blockers.join(" ")).toContain("SNAPSHOT_REFERENCE_SCHEMA_UNKNOWN")
+  db.exec("DROP TABLE host_branch_inputs")
+  // Databases written before branch baselines existed remain readable without migrations.
+  expect(f.audit().complete).toBe(true)
 })
 
 it("keeps disabled legacy history, all composition units, internal projects, selections and baseline receipts", () => {

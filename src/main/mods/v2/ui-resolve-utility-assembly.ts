@@ -103,7 +103,7 @@ export type FunctionUiResolveUtilitySources = Record<
   Record<string, Array<{ runtimeId: string; registration: string }>>
 >
 
-const components: readonly FunctionUiResolveComponent[] = ["Pane", ...FUNCTION_UI_SITES]
+const components: readonly FunctionUiResolveComponent[] = ["Placed", "Pane", ...FUNCTION_UI_SITES]
 const dimensions = ["handles", "roots", "branches", "reactions"] as const
 const maximum = { handles: 4096, roots: 32, branches: 1024, reactions: 1024 }
 function fail(code = "MODS_UI_RESOLVE_IDENTITY"): never {

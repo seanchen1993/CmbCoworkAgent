@@ -5,7 +5,7 @@ import type { CallbackManagerForLLMRun } from "@langchain/core/callbacks/manager
 import { AsyncLocalStorageProviderSingleton } from "@langchain/core/singletons"
 import { randomUUID } from "node:crypto"
 import { setImmediate as yieldToIo } from "node:timers/promises"
-import { countTokensApproximately, createMiddleware } from "langchain"
+import { createMiddleware } from "langchain"
 import type { ModJson, ModObject } from "../../shared/mods/types"
 import type { ModRuntimeAuthority } from "../mods/runtime-instance"
 import type { ModHookStream, FunctionStreamOptions } from "../mods/v2/stream-dispatcher"
@@ -13,6 +13,8 @@ import { currentCompletionBudget, reserveCompletionModelUsage } from "../mods/v2
 import { composeModPrompt } from "./mods-prompt-composition"
 import { assertRequiredPromptContext, promptContributionsFor } from "./mods-prompt-sources"
 import { measureHostRuntimeAsync, reportHostRuntimeTiming } from "../services/host-runtime-timing"
+import { fitFinalModelInput } from "./final-model-budget"
+import { createCompactedContextScope } from "./context-usage"
 import type {
   FunctionPromptCore,
   FunctionPromptEvent
@@ -547,6 +549,7 @@ class ModAwareChatModel extends BaseChatModel {
       let providerMessageId: string | undefined
       const preparationStarted = performance.now()
       let preparationReported = false
+      let recoveredUsage: ReturnType<typeof createCompactedContextScope> | undefined
       try {
         let provider = delegate
         let selection: FunctionStepModel | undefined
@@ -635,14 +638,15 @@ class ModAwareChatModel extends BaseChatModel {
         assertRequiredPromptContext(providerMessages, authority)
         // Budget the actual composed text and described tools, not the pre-Hook snapshot.
         if (selection) {
-          const inputTokens = countTokensApproximately(providerMessages, providerTools)
-          if (
-            !Number.isFinite(inputTokens) ||
-            !Number.isFinite(selection.inputBudget) ||
-            selection.inputBudget <= 0 ||
-            inputTokens > selection.inputBudget
-          )
-            throw new Error("MODS_MODEL_INPUT_BUDGET")
+          const recovered = await fitFinalModelInput({ messages: providerMessages,
+            tools: providerTools, model: selection.model, contextWindow: selection.contextWindow,
+            inputBudget: selection.inputBudget, signal: context.signal })
+          if (recovered) {
+            providerMessages = recovered.messages
+            recoveredUsage = createCompactedContextScope(recovered.usageStartIndex)
+          }
+          assertActive()
+          assertRequiredPromptContext(providerMessages, authority)
           release = stepModel?.activate?.(selection)
         }
         assertActive()
@@ -655,7 +659,10 @@ class ModAwareChatModel extends BaseChatModel {
         // releases (and some providers do not expose it at runtime).
         reportHostRuntimeTiming(performance.now() - preparationStarted)
         preparationReported = true
-        raw = await runProvider(() =>
+        const runSelectedProvider = <T>(operation: () => Promise<T>): Promise<T> =>
+          recoveredUsage === undefined ? runProvider(operation) :
+            recoveredUsage.run(() => runProvider(operation))
+        raw = await runSelectedProvider(() =>
           provider.stream(providerMessages, {
             ...options,
             callbacks: [],
@@ -666,7 +673,7 @@ class ModAwareChatModel extends BaseChatModel {
         while (true) {
           assertActive()
           context.signal.throwIfAborted()
-          const item = await runProvider(() => raw!.next())
+          const item = await runSelectedProvider(() => raw!.next())
           if (item.done) break
           assertActive()
           // Limit unconsumed host references, not the length of an ordinary streamed reply.
@@ -712,6 +719,7 @@ class ModAwareChatModel extends BaseChatModel {
           if (raw)
             await runProvider(() => raw!.return?.().then(() => undefined) ?? Promise.resolve())
         } finally {
+          recoveredUsage?.close()
           activeRequest = false
           // An expired authority cannot republish into its replacement session.
           try {

@@ -1,3 +1,11 @@
+import { registerNativeHarnessSourceHandlers } from "./native-harness-source"
+import {
+  configureNativeHarnessRuntime,
+  assertNativeHarnessFeatureCurrent,
+  readNativeHarnessFeature,
+  findNativeHarnessFeatureByRunId,
+  ensureNativeHarnessFeatureRun
+} from "../harness-board/native-harness"
 import { BrowserWindow, type IpcMain, type IpcMainInvokeEvent } from "electron"
 import { randomUUID } from "node:crypto"
 import { existsSync } from "node:fs"
@@ -18,6 +26,7 @@ import { effectiveHostResultApproval } from "../../shared/project-runtime/import
 import { registerLegacyProjectRuntimeHandlers } from "./project-runtime-legacy"
 import { registerProjectImportHandlers } from "./project-runtime-import"
 import { authorizeProjectWorkspaceResources } from "./project-workspace-resources"
+import { resolveWorkflowWorktreeIsolationBoundary } from "../services/git-worktree"
 import { ProjectWorkspaceModeGuard } from "../harness-board/project-runtime/workspace-mode-guard"
 import {
   matchesProjectHostBinding, projectHostFacts, registerBuiltinProjectBinding, registerBuiltinProjectFacts
@@ -380,6 +389,21 @@ export function registerProjectRuntimeHandlers(
           }
           projectAuthoringSessions.notifyTrialProject(context.project.projectId)
           context.internalCompositionUnit = internalCompositionProject(context.project.projectId)
+          const native = findNativeHarnessFeatureByRunId(context.project.projectId)
+          if (native) {
+            const authority = captureFeatureRunAuthority(native.projectId, native.featureId)
+            authority.assertCurrent()
+            context.harnessFeature = { projectId: native.projectId, slug: native.featureId,
+              source: "host", repositoryWorkspace: native.repositoryWorkspace }
+            if (native.worktree) {
+              context.worktreeIsolation = await resolveWorkflowWorktreeIsolationBoundary(native.worktree)
+              authority.assertCurrent()
+              if (!isSameWorkspacePath(context.worktreeIsolation.workspaceRoot, native.workspace))
+                throw Error("HARNESS_NATIVE_RUN_IDENTITY_CHANGED")
+            }
+            const originalGuard = context.assertInputsCurrent
+            context.assertInputsCurrent = () => { authority.assertCurrent(); originalGuard?.() }
+          }
           const libraryPath = join(getOpenworkDir(), "local-projects", "library.sqlite")
           if (existsSync(libraryPath)) {
             library ??= new ProjectLibrary(libraryPath)
@@ -663,7 +687,8 @@ export function registerProjectRuntimeHandlers(
       const page = platform().list(100, cursor, query)
       if (!page.length) break
       for (const project of page) {
-        if (!internalCompositionProject(project.projectId)) visible.push(project)
+        if (!internalCompositionProject(project.projectId) &&
+          !findNativeHarnessFeatureByRunId(project.projectId)) visible.push(project)
         if (visible.length === 20) break
       }
       cursor = page[page.length - 1].projectId
@@ -862,17 +887,117 @@ export function registerProjectRuntimeHandlers(
       return view(project.projectId)
     }
   )
-  ipc.handle(
-    "project-runtime:command",
-    async (event, projectId: string, command: LocalProjectCommand) => {
+  registerNativeHarnessSourceHandlers(ipc, {
+    trusted, platform, retainedRoot: project => snapshots!.read(project.pluginDigest).root,
+    readBinding: findNativeHarnessFeatureByRunId,
+    assertBinding: assertNativeHarnessFeatureCurrent
+  })
+  // One production Host instance serves both standalone history and Harness Features.
+  configureNativeHarnessRuntime({
+    view: id => platform().get(id) ? view(id) : undefined,
+    create: async (input, guard = () => {}) => {
+      const owner = mainWindow()
+      const assertCurrent = () => {
+        guard()
+        if (!owner || owner !== mainWindow() || owner.isDestroyed() || owner.webContents.isDestroyed())
+          throw Error("PROJECT_EXECUTION_WINDOW_UNAVAILABLE")
+      }
+      assertCurrent()
+      const api = platform()
+      const existing = api.get(input.projectId)
+      if (existing) {
+        if (existing.name !== input.name || existing.goal !== input.goal ||
+          !isSameWorkspacePath(existing.workspace, input.workspace) ||
+          existing.installedPluginId !== input.installedPluginId)
+          throw Error("HARNESS_NATIVE_RUN_IDENTITY_CHANGED")
+        if (input.expectedPlugin) {
+          const retained = snapshots!.read(existing.pluginDigest)
+          const actual = derivationContentIdentity((await snapshotDerivationSource(retained.root)).files)
+          assertCurrent()
+          if (input.expectedPlugin.pluginId !== existing.installedPluginId ||
+            input.expectedPlugin.name !== existing.packageId ||
+            input.expectedPlugin.version !== existing.packageVersion ||
+            input.expectedPlugin.digest !== actual)
+            throw Error("HARNESS_NATIVE_RUN_IDENTITY_CHANGED")
+        }
+      } else await api.localCreate(input, assertCurrent)
+      assertCurrent()
+      return view(input.projectId)
+    }
+  })
+  function captureFeatureRunAuthority(projectId: string, featureId: string) {
+    const binding = readNativeHarnessFeature(projectId, featureId)
+    if (!binding?.packageDigest) throw Error("HARNESS_NATIVE_RUN_NOT_STARTED")
+    const identity = JSON.stringify(binding)
+    const assertCurrent = () => {
+      assertNativeHarnessFeatureCurrent(binding)
+      if (JSON.stringify(readNativeHarnessFeature(projectId, featureId)) !== identity)
+        throw Error("HARNESS_NATIVE_FEATURE_CHANGED")
+      const run = platform().get(binding.hostRunId)
+      if (!run || run.installedPluginId !== binding.installedPluginId ||
+        run.pluginDigest !== binding.packageDigest ||
+        !isSameWorkspacePath(run.workspace, binding.workspace))
+        throw Error("HARNESS_NATIVE_RUN_IDENTITY_CHANGED")
+    }
+    assertCurrent()
+    return { binding, assertCurrent }
+  }
+  const nativeExecutions = new Set<string>()
+  ipc.handle("harnessBoard:nativeFeatureCommand", async (
+    event, projectId: string, featureId: string,
+    supplied: LocalProjectCommand | { kind: "start-feature"; initialUserMessage: string }
+  ) => {
+    const owner = trusted(event)
+    if (typeof projectId !== "string" || !projectId || projectId.length > 512 ||
+      typeof featureId !== "string" || !featureId || featureId.length > 512 ||
+      !supplied || typeof supplied !== "object" || Array.isArray(supplied))
+      throw Error("PROJECT_INVALID_COMMAND")
+    const command = structuredClone(supplied)
+    const key = JSON.stringify([projectId, featureId])
+    const executing = ["start-feature", "continue", "start", "validate", "validate-imported"].includes(command.kind)
+    if (executing && nativeExecutions.has(key)) throw Error("PROJECT_OPERATION_ALREADY_RUNNING")
+    if (executing) nativeExecutions.add(key)
+    try {
+      if (command.kind === "start-feature") {
+        if (Object.keys(command).sort().join(",") !== "initialUserMessage,kind" ||
+          typeof command.initialUserMessage !== "string" || !command.initialUserMessage.trim() ||
+          command.initialUserMessage.length > 8000)
+          throw Error("PROJECT_INVALID_COMMAND")
+        await ensureNativeHarnessFeatureRun(projectId, featureId, command.initialUserMessage, () => {
+          if (trusted(event) !== owner) throw Error("PROJECT_EXECUTION_WINDOW_UNAVAILABLE")
+        })
+      }
+      const captured = captureFeatureRunAuthority(projectId, featureId)
+      return await dispatchCommand(event, captured.binding.hostRunId,
+        command.kind === "start-feature"
+          ? { kind: "continue", expectedVersion: view(captured.binding.hostRunId).project.version }
+          : command,
+        captured.assertCurrent)
+    } finally {
+      if (executing) nativeExecutions.delete(key)
+    }
+  })
+  async function dispatchCommand(
+    event: IpcMainInvokeEvent,
+    projectId: string,
+    command: LocalProjectCommand,
+    assertBinding: () => void = () => {}
+  ): Promise<LocalProjectView> {
       const owner = trusted(event)
+      const native = findNativeHarnessFeatureByRunId(projectId)
+      const nativeAuthority = native ? captureFeatureRunAuthority(native.projectId, native.featureId) : undefined
       const assertAuthority = () => {
+        nativeAuthority?.assertCurrent()
+        assertBinding()
         if (trusted(event) !== owner) throw Error("PROJECT_EXECUTION_WINDOW_UNAVAILABLE")
       }
+      assertAuthority()
       const api = platform()
       const current = view(projectId)
       if (!command || typeof command !== "object" || Array.isArray(command))
         throw Error("PROJECT_INVALID_COMMAND")
+      if (native && (command.kind === "review-plan" || command.kind === "migrate-plan"))
+        throw Error("HARNESS_NATIVE_FEATURE_SOURCE_FIXED")
       const stageInstructions = command.kind === "prepare" ? command.stageInstructions : undefined
       const commandGuard = command.kind === "continue" || command.kind === "resume-input" ||
         command.kind === "validate-imported" ? "start"
@@ -908,7 +1033,7 @@ export function registerProjectRuntimeHandlers(
             maxDurationMs: 15 * 60_000,
             assertAuthority,
             beforeStart: operation => {
-              trusted(event)
+              assertAuthority()
               if (runOwners.has(operation.operationId)) throw Error("PROJECT_OPERATION_ALREADY_RUNNING")
               owned.add(operation.operationId)
               runOwners.set(operation.operationId, owner)
@@ -979,6 +1104,7 @@ export function registerProjectRuntimeHandlers(
       projectAuthoringSessions.notifyTrialProject(projectId)
       return { ...view(projectId), ...(continuation ? { continuation } : {}),
         ...(migrationReview ? { migrationReview } : {}) }
-    }
-  )
+  }
+  ipc.handle("project-runtime:command", (event, projectId: string, command: LocalProjectCommand) =>
+    dispatchCommand(event, projectId, command))
 }

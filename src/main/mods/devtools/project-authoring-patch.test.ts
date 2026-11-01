@@ -1,5 +1,6 @@
-import { readdir, rm } from "node:fs/promises"
-import { dirname } from "node:path"
+import { readFile, readdir, rm } from "node:fs/promises"
+import { basename, dirname, join } from "node:path"
+import { tmpdir } from "node:os"
 import { afterEach, expect, it } from "vitest"
 import { ProjectAuthoringSessions } from "./project-authoring-session"
 import { readProjectSource } from "./project-source"
@@ -15,7 +16,15 @@ const scope = {
 }
 const roots = new Set<string>()
 afterEach(async () => {
-  for (const root of roots) await rm(root, { recursive: true, force: true })
+  for (const root of roots) {
+    const target = resolve(root)
+    if (
+      dirname(target) !== resolve(tmpdir()) ||
+      !/^devclaw-project-authoring-[A-Za-z0-9]+$/.test(basename(target))
+    )
+      throw Error("Unsafe project patch test cleanup")
+    await rm(target, { recursive: true, force: true })
+  }
   roots.clear()
 })
 
@@ -136,7 +145,7 @@ it("does not suggest a native declaration for unsupported files in an ordinary H
   expect(sessions.read(scope, original.id).revision).toBe(1)
 })
 
-it("atomically appends and replaces generic native modules with exact companion files", async () => {
+it("atomically appends, replaces and removes generic native modules with exact companion files", async () => {
   const sessions = new ProjectAuthoringSessions(async () => [])
   const original = await sessions.scaffold(scope, "delta", "Delta", () => {}, "native-modular")
   roots.add(dirname(original.directory))
@@ -230,9 +239,49 @@ it("atomically appends and replaces generic native modules with exact companion 
   )
   expect(middle.modules).toEqual([before.modules[0], replacement, audit])
   expect(replaced.source.files).toEqual(expect.arrayContaining(files))
-  await expect(
-    sessions.compile(scope, replaced.id, replaced.revision, () => {})
-  ).resolves.toMatchObject({ revision: 5 })
+  const replacementCompiled = await sessions.compile(scope, replaced.id, replaced.revision, () => {})
+  expect(replacementCompiled.revision).toBe(5)
+  const removed = await sessions.patch(
+    scope,
+    {
+      id: replacementCompiled.id,
+      revision: replacementCompiled.revision,
+      sourceDigest: replacementCompiled.source.digest,
+      sourcePatch: [
+        { op: "test", path: "/modules/2/id", value: "audit" },
+        { op: "remove", path: "/modules/2" }
+      ]
+    },
+    () => {}
+  )
+  const removalCompiled = await sessions.compile(scope, removed.id, removed.revision, () => {})
+  expect(removalCompiled.revision).toBe(7)
+  const finalSource = JSON.parse(
+    removalCompiled.source.files.find((file) => file.path === declaration.path)!.text
+  )
+  expect(finalSource.modules).toEqual([before.modules[0], replacement])
+  expect(finalSource.resources).toEqual(middle.resources)
+  expect(removalCompiled.source.files).toEqual(expect.arrayContaining(files))
+  for (const path of before.resources)
+    expect(removalCompiled.source.files.find((file) => file.path === path)).toEqual(
+      original.source.files.find((file) => file.path === path)
+    )
+  const finalRuntime = parseProjectRuntimeManifest(
+    JSON.parse(
+      removalCompiled.source.files.find((file) => file.path === "devclaw.project-runtime.json")!.text
+    )
+  )
+  expect(finalRuntime.stages.map((stage) => stage.id)).toEqual(["draft", "review"])
+  expect(finalRuntime.checks.some((check) => check.id === "audit-schema")).toBe(false)
+  const retainedRuntime = parseProjectRuntimeManifest(
+    JSON.parse(
+      await readFile(join(replacementCompiled.directory, "devclaw.project-runtime.json"), "utf8")
+    )
+  )
+  expect(retainedRuntime.stages.map((stage) => stage.id)).toEqual(["draft", "review", "audit"])
+  expect(finalRuntime.checks).toEqual(
+    retainedRuntime.checks.filter((check) => check.id !== "audit-schema")
+  )
 })
 
 it("rejects failed source deltas, schema errors, ambiguous source and undeclared files before any save", async () => {

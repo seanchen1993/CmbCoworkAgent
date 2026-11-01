@@ -60,7 +60,7 @@ async function main() {
     assert.match(overview, /普通模式/)
     assert.match(overview, /发送消息/)
     assert.match(overview, /无需先配置模块或任务方案/)
-    assert.match(overview, /确认并应用到这段聊天/)
+    assert.match(overview, /确认并开始聊天试用/)
     assert.match(overview, /已保存或绑定的 Flow 不会自动启动/)
     assert.match(overview, /成功启动后恢复普通发送/)
     assert.match(overview, /预检失败会保留输入和选择/)

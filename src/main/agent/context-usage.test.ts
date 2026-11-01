@@ -2,6 +2,7 @@ import { AIMessage, HumanMessage } from "@langchain/core/messages"
 import { expect, it, vi } from "vitest"
 import {
   ContextUsageObservation,
+  createCompactedContextScope,
   currentCompactedContextStart,
   contextUsageStartIndex,
   readContextResponseUsage,
@@ -16,6 +17,22 @@ const response = (tokens: number) =>
     content: "actual",
     usage_metadata: { input_tokens: tokens, output_tokens: 2, total_tokens: tokens + 2 }
   })
+
+it("keeps a recovered lazy stream window alive across pulls and retires late callbacks", async () => {
+  const scope = createCompactedContextScope(4)
+  let release!: () => void
+  const pending = new Promise<void>(resolve => { release = resolve })
+  const inherited = scope.run(async () => {
+    await pending
+    return currentCompactedContextStart()
+  })
+  expect(await scope.run(async () => currentCompactedContextStart())).toBe(4)
+  expect(currentCompactedContextStart()).toBeUndefined()
+  expect(await scope.run(async () => currentCompactedContextStart())).toBe(4)
+  scope.close()
+  release()
+  expect(await inherited).toBeUndefined()
+})
 
 it("isolates in-flight compaction windows and expires inherited callbacks after settlement", async () => {
   let finish!: () => void

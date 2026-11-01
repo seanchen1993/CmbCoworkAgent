@@ -13,6 +13,7 @@ import { ToggleThumb } from "@/components/ui/toggle-thumb"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { cn } from "@/lib/utils"
 import {
+  calculateModelInputBudgetTokens,
   calculateSummarizationKeepTokens,
   calculateSummarizationTriggerTokens,
   MODEL_INPUT_SAFETY_BUFFER_TOKENS
@@ -403,6 +404,10 @@ export function CustomModelDialog({
     maxTokensError || maxOutputTokensError
       ? null
       : getTokenBudgetError(config.maxTokensInput, config.maxOutputTokensInput)
+  const availableInputTokens = !maxTokensError && !maxOutputTokensError && !tokenBudgetError &&
+    parseMaxTokens(config.maxTokensInput) !== null && parseMaxOutputTokens(config.maxOutputTokensInput) !== null
+    ? calculateModelInputBudgetTokens(Number(config.maxTokensInput), Number(config.maxOutputTokensInput))
+    : null
   const temperatureError = getTemperatureError(config.temperatureInput, tokenLimits)
   const topPError = getTopPError(config.topPInput, tokenLimits)
   const topKError = getTopKError(config.topKInput, tokenLimits)
@@ -848,7 +853,7 @@ export function CustomModelDialog({
 
               <div className="grid grid-cols-2 gap-3">
                 <div className="space-y-1">
-                  <ParameterLabel explanation="限制单次回复最多生成的 Token 数。数值越大越能输出长答案；超过模型或服务限制时请求可能失败。">
+                  <ParameterLabel explanation="单次输出上限，也是当前输入预算需要预留的空间，不代表每次都会输出这么多。共享总窗口时，预留越多，可用于聊天、工具和指令的输入越少，可能更频繁压缩。请按模型服务的真实限制填写。">
                     max_tokens（最大 Tokens）
                   </ParameterLabel>
                   <Input
@@ -871,6 +876,16 @@ export function CustomModelDialog({
                   )}
                   {tokenBudgetError && (
                     <p className="text-xs text-destructive">{tokenBudgetError}</p>
+                  )}
+                  {availableInputTokens !== null && (
+                    <p className="text-xs text-muted-foreground" role="status">
+                      配置的上下文窗口 {Number(config.maxTokensInput).toLocaleString()} − 输出预留{" "}
+                      {Number(config.maxOutputTokensInput).toLocaleString()} − 安全余量{" "}
+                      {MODEL_INPUT_SAFETY_BUFFER_TOKENS.toLocaleString()} = 按当前设置可用于输入{" "}
+                      {availableInputTokens.toLocaleString()} tokens（含聊天、指令和工具）。
+                      {Number(config.maxOutputTokensInput) > Number(config.maxTokensInput) / 2 &&
+                        " 当前输出预留超过配置窗口的一半，较容易触发压缩；可按实际回复长度需要调整。窗口值须与模型服务实际支持的限制一致。"}
+                    </p>
                   )}
                 </div>
 

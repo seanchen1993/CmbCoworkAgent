@@ -3143,6 +3143,16 @@ const api = {
     }
   },
   mods: {
+    agentViewPending: (threadId: string): Promise<import("../shared/mods/v2/agent-tasks").AgentViewIntent | null> =>
+      ipcRenderer.invoke("mods:agent-view-pending", threadId),
+    agentViewRead: (input: { threadId: string; intentId: string; cursor?: string }): Promise<{
+      status: import("../shared/mods/v2/agent-tasks").AgentTaskStatus;
+      messages: import("../shared/mods/v2/agent-tasks").AgentTaskMessages
+    }> => ipcRenderer.invoke("mods:agent-view-read", input),
+    agentViewStop: (input: { threadId: string; intentId: string }): Promise<{ agentId: string; stopRequested: boolean; status: string }> =>
+      ipcRenderer.invoke("mods:agent-view-stop", input),
+    agentViewClose: (input: { threadId: string; intentId: string }): Promise<void> =>
+      ipcRenderer.invoke("mods:agent-view-close", input),
     stageDebugReview: {
       current: (threadId: string) => ipcRenderer.invoke("mods:project-stage-debug-review-current", threadId) as Promise<import("../shared/mods/v2/project-stage-debug-review").StageDebugReviewIntent | undefined>,
       onRequested: (callback: (intent: import("../shared/mods/v2/project-stage-debug-review").StageDebugReviewIntent) => void) => {
@@ -3276,6 +3286,10 @@ const api = {
       ipcRenderer.on("mods:prompt-request", listener)
       return () => ipcRenderer.removeListener("mods:prompt-request", listener)
     },
+    mcpConnections: (threadId: string, expectedWorkspace: string) =>
+      ipcRenderer.invoke("mods:mcpConnections", threadId, expectedWorkspace),
+    mcpDisconnect: (threadId: string, input: { workspace: string; owner: string; server: string }) =>
+      ipcRenderer.invoke("mods:mcpDisconnect", threadId, input),
     clawView: (threadId: string): Promise<import("../shared/mods/claw").ClawView> =>
       ipcRenderer.invoke("mods:claw-view", threadId),
     clawSources: (threadId: string): Promise<import("../shared/mods/claw").ClawSourceCatalog> =>
@@ -3349,6 +3363,16 @@ const api = {
       ipcRenderer.invoke("mods:function-autobiz-transition", { threadId, transition }),
     panes: (threadId: string): Promise<import("../shared/mods/v2/ui").FunctionPaneSnapshot[]> =>
       ipcRenderer.invoke("mods:function-panes", threadId),
+    placedRows: (threadId: string, owner: string): Promise<import("../shared/mods/v2/placed").FunctionPlacedEntry[]> =>
+      ipcRenderer.invoke("mods:function-placed-rows", { threadId, owner }),
+    placedRead: (threadId: string, owner: string, requestId: string, lease: string): Promise<import("../shared/mods/v2/ui").FunctionPaneSnapshot> =>
+      ipcRenderer.invoke("mods:function-placed-read", { threadId, owner, requestId, lease }),
+    placedAct: (threadId: string, owner: string, requestId: string, lease: string, action: import("../shared/mods/v2/ui").FunctionUiAction): Promise<void | import("../shared/mods/v2/ui").FunctionFocusResult> =>
+      ipcRenderer.invoke("mods:function-placed-act", { threadId, owner, requestId, lease, action }),
+    placedDismiss: (threadId: string, owner: string, requestId: string): Promise<void> =>
+      ipcRenderer.invoke("mods:function-placed-dismiss", { threadId, owner, requestId }),
+    placedRelease: (threadId: string, owner: string, requestId: string, lease: string): Promise<void> =>
+      ipcRenderer.invoke("mods:function-placed-release", { threadId, owner, requestId, lease }),
     markdownLink: (threadId: string,
       action: import("../shared/mods/v2/markdown-links").FunctionMarkdownLinkAction
     ): Promise<import("../shared/mods/v2/markdown-links").FunctionMarkdownLinkOutcome> =>
@@ -4777,6 +4801,15 @@ const api = {
     }
   },
   harnessBoard: {
+    nativeFeatureMods: createNativeProjectSourceBridge(
+      (channel, input) => ipcRenderer.invoke(channel, input), "harness-native-feature"),
+    nativeFeatureCommand: (
+      projectId: string,
+      featureId: string,
+      command: import("../shared/project-runtime/platform-api").LocalProjectCommand |
+        { kind: "start-feature"; initialUserMessage: string }
+    ): Promise<import("../shared/project-runtime/platform-api").LocalProjectView> =>
+      ipcRenderer.invoke("harnessBoard:nativeFeatureCommand", projectId, featureId, command),
     localProjects: {
       legacyImport: {
         sources: () => ipcRenderer.invoke("project-runtime:import-sources"),

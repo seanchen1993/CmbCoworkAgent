@@ -9,6 +9,8 @@ export interface AnchoredGuideStep {
   title: string
   description: string
   selectors: readonly string[]
+  example?: { label: string; prompt: string }
+  expectation?: string
 }
 
 const dismissed = new Set<string>()
@@ -48,6 +50,7 @@ function ScopedAnchoredGuide({
   const [target, setTarget] = useState<HTMLElement | null>(null)
   const [missing, setMissing] = useState(false)
   const [available, setAvailable] = useState(false)
+  const [copyFeedback, setCopyFeedback] = useState("")
   const trigger = useRef<HTMLButtonElement>(null)
   const manual = useRef(false),
     claim = useRef<Promise<boolean> | null>(null),
@@ -58,6 +61,7 @@ function ScopedAnchoredGuide({
     descriptionId = useId()
   const step = steps[index]
   const api = window.api.uiGuides
+  useEffect(() => { setCopyFeedback("") }, [index, open])
 
   useEffect(() => {
     const root = rootRef.current
@@ -307,9 +311,45 @@ function ScopedAnchoredGuide({
               <X className="size-4" />
             </button>
           </div>
-          <p id={descriptionId} className="mt-3 text-sm leading-6 text-muted-foreground">
+          <p
+            id={descriptionId}
+            className="mt-3 whitespace-pre-line text-sm leading-6 text-muted-foreground"
+          >
             {step?.description}
           </p>
+          {step?.example && (
+            <div className="mt-3 space-y-2 rounded-lg border bg-muted/30 p-3">
+              <p className="text-xs font-medium">{step.example.label}</p>
+              <p className="select-text whitespace-pre-wrap text-xs leading-5">
+                {step.example.prompt}
+              </p>
+              <button
+                type="button"
+                className="rounded border px-2 py-1 text-xs hover:bg-muted"
+                onClick={async () => {
+                  try {
+                    await navigator.clipboard.writeText(step.example!.prompt)
+                    setCopyFeedback("已复制。回到聊天粘贴，按需修改后发送。")
+                  } catch {
+                    setCopyFeedback("请选中上方示例手动复制。")
+                  }
+                }}
+              >
+                复制示例
+              </button>
+              {copyFeedback && (
+                <p role="status" className="text-xs text-muted-foreground">
+                  {copyFeedback}
+                </p>
+              )}
+            </div>
+          )}
+          {step?.expectation && (
+            <p className="mt-3 text-xs leading-5">
+              <strong>完成后：</strong>
+              {step.expectation}
+            </p>
+          )}
           {missing && (
             <p role="status" className="mt-2 text-xs text-muted-foreground">
               当前界面暂未显示这个控件。可继续下一步，稍后再看。

@@ -6,6 +6,8 @@ export function isFunctionContentBoundary(method: string): boolean {
       "tool.call",
       "command.run",
       "agent.spawn",
+      "agent.status", "agent.messages", "agent.stop", "ui.view",
+      "ui.place",
       "session.append",
       "session.send",
       "session.compact",

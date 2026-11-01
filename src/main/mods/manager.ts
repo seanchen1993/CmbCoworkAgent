@@ -3,7 +3,10 @@ import { FunctionAgentInstances } from "./v2/agent-instances"
 import type { FunctionConversationCoordinator } from "./v2/conversation-coordinator"
 import { readCoordinatorWorkerModsContext } from "../agent/coordinator-worker-mods-context"
 import { readNativeChildModsContext } from "../agent/native-child-mods-context"
-import { getThreadCore } from "../db"
+import { getDb, getThreadCore } from "../db"
+import { OwnedAgentTasks } from "./v2/owned-agent-tasks"
+import { isOrdinaryFlowMetadata } from "../../shared/mods/flows/scope"
+import { consumeUserViewAction } from "./v2/user-view-action"
 import { captureThreadIncarnation, matchesThreadIncarnation } from "../services/thread-incarnation"
 import { captureRuntimePluginSourceAuthorityGuard, currentStageDebugSourcePolicy } from "../plugins/runtime-source-scope"
 import type { FunctionConversationGraphBinding } from "../agent/mods-conversation"
@@ -70,6 +73,7 @@ import type {
   ModCommandDescriptor,
   ModDiagnostic,
   ModIdentity,
+  ModJson,
   ModObject,
   ModProjection,
   ModStatus,
@@ -491,6 +495,34 @@ export class ModsManager {
     AbortController,
     { workspace: string; threadId: string }
   >()
+  readonly ownedAgentTasks = new OwnedAgentTasks()
+
+  async functionAgentTask(workspace: string, threadId: string, grant: ModGrant,
+    method: string, input: ModObject, signal: AbortSignal, plugin: string, sourceCurrent: () => void): Promise<ModJson> {
+    workspace = this.workspaceKey(workspace)
+    const check = () => assertFunctionGrant(this.store, workspace, threadId, grant, signal)
+    check()
+    const row = getThreadCore(threadId)
+    if (!row || !isOrdinaryFlowMetadata(JSON.parse(row.metadata ?? "{}")))
+      throw new ModError("MODS_AGENT_TASK_SCOPE_UNSUPPORTED")
+    const id = String(input.agentId)
+    if (method === "ui.view") {
+      const current = consumeUserViewAction(plugin)
+      current(); check()
+      const retainedGrant = grant.modId.startsWith("development:")
+        ? captureDevelopmentNativeResourceGuard(this.store, grant)
+        : undefined
+      return this.ownedAgentTasks.requestView(threadId, workspace, grant, id, sourceCurrent, retainedGrant)
+    }
+    if (method === "agent.stop") return this.ownedAgentTasks.stop(threadId, workspace, grant, id)
+    const value = method === "agent.messages"
+      ? await this.ownedAgentTasks.messages(threadId, workspace, grant, id, signal, input.cursor as string | undefined, input.limit as number | undefined)
+      : this.ownedAgentTasks.status(threadId, workspace, grant, id)
+    check()
+    const published = await this.publish(workspace, value as unknown as ModJson, undefined, signal)
+    check()
+    return published as ModJson
+  }
 
   functionAgentRuntimeAuthority(
     workspace: string,
@@ -571,6 +603,11 @@ export class ModsManager {
     assertFunctionGrant(this.store, workspace, threadId, grant, signal)
     const caller = functionCallAuthority(workspace, threadId)
     if (!caller) throw new ModError("MODS_RUNTIME_SCOPE_REQUIRED")
+    const parentRow = getThreadCore(threadId)
+    const retainTranscript = !!parentRow && isOrdinaryFlowMetadata(JSON.parse(parentRow.metadata ?? "{}"))
+    const parentBirth = retainTranscript ? captureThreadIncarnation(parentRow!) : undefined
+    const parentDatabase = retainTranscript ? getDb() : undefined
+    if (retainTranscript) this.ownedAgentTasks.assertCapacity(threadId)
     if (
       typeof input.tool_use_id !== "string" ||
       !input.tool_use_id ||
@@ -620,6 +657,9 @@ export class ModsManager {
       : () => this.store.assertGrant(grant)
     const assertOwned = () => {
       ownedSignal.throwIfAborted()
+      if (retainTranscript && (getDb() !== parentDatabase ||
+        !matchesThreadIncarnation(getThreadCore(threadId), parentBirth!)))
+        throw new ModError("MODS_AGENT_OWNER_CHANGED")
       assertResourceGrant()
       if (!this.isEnabled(workspace) || this.config(workspace).epoch !== epoch)
         throw new ModError("MODS_SCOPE_CHANGED")
@@ -742,6 +782,7 @@ export class ModsManager {
       let removeAlias: (() => void) | undefined
       let physicalThreadId: string | undefined
       let finishAgent: ((status: "completed" | "failed" | "killed") => void) | undefined
+      let finishOwnedAgent: ((outcome?: FunctionTurnComplete) => void) | undefined
       const completion = runFunctionAgentChild(this, approvedPlan, {
         parentThreadId: threadId,
         agentId,
@@ -750,10 +791,18 @@ export class ModsManager {
         parentTrace,
         conversationParent,
         signal: ownedSignal,
+        retainTranscript,
         assertLive: assertOwned,
         started: (physical) => {
           assertStartup()
           physicalThreadId = physical
+          const metadata = retainTranscript ? JSON.parse(getThreadCore(physical)!.metadata ?? "{}") : {}
+          if (retainTranscript) finishOwnedAgent = this.ownedAgentTasks.start({ agentId, parent: threadId, child: physical,
+            runId: String(metadata.modsAgentRunId), status: "running", model: plan.model,
+            description: plan.description, startedAt: Date.now(), scope: { workspace,
+              readOnly: approvedPlan.readOnly, blockedTools: approvedPlan.blockedToolNames,
+              ...(approvedPlan.allowedToolNames ? { allowedTools: approvedPlan.allowedToolNames } : {}),
+              ...(approvedPlan.maxTurns ? { maxTurns: approvedPlan.maxTurns } : {}) } }, grant, controller)
           removeAlias = this.peerInbox.alias(
             { workspace, sessionId: threadId, agentId },
             { workspace, sessionId: physical, agentId }
@@ -777,6 +826,7 @@ export class ModsManager {
       })
         .then(
           (result) => {
+            finishOwnedAgent?.(result)
             this.store.settle(
               receiptId,
               !started
@@ -798,6 +848,7 @@ export class ModsManager {
             return result
           },
           (error) => {
+            finishOwnedAgent?.()
             this.store.settle(receiptId, started ? "unknown" : "not_started")
             finishAgent?.(ownedSignal.aborted ? "killed" : "failed")
             ready.reject(error)
@@ -1717,6 +1768,7 @@ export class ModsManager {
     { tools: FunctionToolInfo[]; binding: ModThreadBinding }
   >()
   private functionLifecycle?: {
+    clearPlacedRows?(workspace: string, threadId: string): void
     appendConversation?(workspace: string, threadId: string,
       ticket: FunctionSessionAppendTicket): Promise<FunctionSessionAppendResult>
     hasEventHandler?(workspace: string, threadId: string, event: string): Promise<boolean>
@@ -1922,6 +1974,10 @@ export class ModsManager {
     this.functionLifecycle?.closeThread(threadId)
   }
 
+  clearFunctionPlacedRows(workspace: string, threadId: string): void {
+    this.functionLifecycle?.clearPlacedRows?.(this.workspaceKey(workspace), threadId)
+  }
+
   /** Native one-shot runtime cleanup, never an automatic eviction of a user conversation. */
   async closeFunctionThreadAndWait(threadId: string): Promise<void> {
     this.invalidateFunctionThreadOwner(threadId)
@@ -1956,6 +2012,7 @@ export class ModsManager {
   }
 
   private invalidateFunctionThreadOwner(threadId: string): void {
+    this.ownedAgentTasks.retireViews(threadId)
     for (const [controller, owner] of this.spawningAgents)
       if (owner.threadId === threadId) controller.abort()
     this.peerInbox.close(undefined, threadId)
@@ -2879,6 +2936,41 @@ export class ModsManager {
       invoke: (id: string, args: ModObject) => Promise<unknown>
     }
   >()
+  private readonly ownedMcpBinding = new AsyncLocalStorage<{
+    key: string
+    binding: ModThreadBinding
+    assertLive(): void
+    listTools(): Promise<McpCapabilityTool[]>
+    peekTools(): McpCapabilityTool[] | null
+    connect?: McpCapabilityService["connectPluginServer"]
+    invoke(id: string, args: ModObject): Promise<unknown>
+  }>()
+
+  /** Keep the existing authority/Hook/publication pipeline, replacing only this call's transport. */
+  async withOwnedMcpService<T>(workspace: string, threadId: string,
+    service: McpCapabilityService, run: () => Promise<T>): Promise<T> {
+    const key = this.mcpBindingKey({ workspace, threadId,
+      agentId: this.functionToolAgent(workspace, threadId) })
+    const base = this.mcpBindings.get(key)
+    if (!base) throw new ModError("MODS_MCP_CONTEXT_REQUIRED")
+    base.assertLive()
+    const { createScopedMcpCapabilityService } = await import("../agent/runtime")
+    const { createHookScope, resolveEnabledHooksForRun } = await import("../hooks/scope")
+    base.assertLive()
+    const hookScope = createHookScope()
+    const scoped = createScopedMcpCapabilityService(service, hookScope,
+      (event, context) => resolveEnabledHooksForRun(workspace, event, context, hookScope),
+      undefined, undefined, { ...base.binding, workspacePath: workspace, bindMod: false })
+    return this.ownedMcpBinding.run({ key, binding: base.binding,
+      assertLive: base.assertLive, listTools: () => scoped.listTools(),
+      peekTools: () => scoped.peekTools?.() ?? null,
+      invoke: (id, args) => scoped.invoke(id, args) }, run)
+  }
+
+  private currentMcpBinding(key: string) {
+    const owned = this.ownedMcpBinding.getStore()
+    return owned?.key === key ? owned : this.mcpBindings.get(key)
+  }
   private readonly sessions = new Map<string, Promise<Session>>()
   private readonly clients = new Map<string, ModRuntimeClient>()
   private readonly diagnostics: ModDiagnostic[] = []
@@ -4712,7 +4804,7 @@ export class ModsManager {
     assertFunctionGrant(this.store, workspace, threadId, grant, signal)
     if (!this.isEnabled(workspace)) throw new ModError("MODS_DISABLED")
     const agentId = this.functionToolAgent(workspace, threadId)
-    const mcp = this.mcpBindings.get(this.mcpBindingKey({ workspace, threadId, agentId }))
+    const mcp = this.currentMcpBinding(this.mcpBindingKey({ workspace, threadId, agentId }))
     if (!mcp?.listTools) throw new ModError("MODS_MCP_CONTEXT_REQUIRED")
     mcp.assertLive()
     this.assertFunctionBinding(mcp.binding)
@@ -5117,7 +5209,7 @@ export class ModsManager {
         assertSource?.()
         if (++capabilityCalls > 16) throw new ModError("MODS_CAPABILITY_LIMIT")
         this.assertNativeToolGrant(grant, binding.workspace, binding.threadId)
-        const mcp = this.mcpBindings.get(this.mcpBindingKey(binding))
+        const mcp = this.currentMcpBinding(this.mcpBindingKey(binding))
         if (target.startsWith("mcp:") && (!mcp || mcp.binding.turnId !== binding.turnId))
           throw new ModError("MODS_MCP_CONTEXT_REQUIRED")
         const assertTarget = () => {
@@ -5635,6 +5727,7 @@ export class ModsManager {
   }
 
   close(): void {
+    this.ownedAgentTasks.retireViews()
     this.peerInbox.close()
     this.peerListeners.clear()
     this.agentInstances.clear()

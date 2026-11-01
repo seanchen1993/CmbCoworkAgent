@@ -3,7 +3,7 @@ import { Buffer } from "node:buffer"
 import type { QuickJSContext, QuickJSHandle } from "quickjs-emscripten"
 import { MODS_MAX_BYTES } from "../../../shared/mods/validation"
 import { ModFunctionError } from "../../../shared/mods/v2/contracts"
-import { FUNCTION_UI_SITES } from "../../../shared/mods/v2/sites"
+import { isFunctionUiRenderComponent } from "../../../shared/mods/v2/sites"
 import type {
   FunctionUiResolveAssembly,
   FunctionUiResolveCall,
@@ -551,7 +551,7 @@ export class FunctionUiResolveRegistry {
 
   target(consumer: FunctionUiResolvePeer, component: FunctionUiResolveComponent) {
     const peer = this.peer(consumer)
-    if (component !== "Pane" && !FUNCTION_UI_SITES.some((site) => site === component)) fail()
+    if (!isFunctionUiRenderComponent(component)) fail()
     let components = peer.assembly.targets.get(consumer)
     if (!components) peer.assembly.targets.set(consumer, (components = new Map()))
     let value = components.get(component)

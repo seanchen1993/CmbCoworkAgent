@@ -123,6 +123,17 @@ async function main() {
       if (id === "composer") assert.equal(await target.evaluate((node) => node.tagName), "TEXTAREA")
       else assert.equal(await target.getAttribute("data-app-guide"), id)
       assert.equal(await guide.getByRole("status").count(), 0)
+      if (id === "composer") {
+        await page.evaluate(`Object.defineProperty(navigator, "clipboard", {
+          configurable: true,
+          value: { writeText: async text => { window.copiedExample = text } }
+        })`)
+        await guide.getByRole("button", { name: "复制示例", exact: true }).click()
+        await guide.getByRole("status").getByText("已复制。回到聊天粘贴，按需修改后发送。", { exact: true }).waitFor()
+        assert.match(await page.evaluate("window.copiedExample"), /真实事件统计/)
+        assert.equal(await page.getByLabel("原聊天草稿").inputValue(), "不要改动我的草稿")
+        assert.deepEqual(await page.evaluate("window.calls.filter(row=>row[0]==='business')"), [])
+      }
       if (index < ids.length - 1)
         await guide.getByRole("button", { name: "下一步", exact: true }).click()
     }

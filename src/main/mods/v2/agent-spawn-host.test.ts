@@ -123,6 +123,32 @@ function fixture() {
 }
 
 describe("independent native agent host", () => {
+  it("retains only an admitted ordinary child's native row while releasing all live resources", async () => {
+    const { plan, context, manager } = fixture()
+    host.rows.set("parent", { created_at: 1, metadata: "{}" })
+    const result = await runFunctionAgentChild(manager, plan, { ...context, retainTranscript: true })
+    const child = context.started.mock.calls[0][0]
+    expect(result.reason).toBe("answer")
+    expect(host.rows.has(child)).toBe(true)
+    expect(getLocalThreadRunLease(child)).toBeUndefined()
+    expect(manager.closeFunctionThread).toHaveBeenCalledWith(child)
+    expect(host.cleanup).toHaveBeenCalledTimes(2)
+    expect(host.checkpoint).toHaveBeenCalledTimes(1)
+  })
+  it("does not retain a failed ownership publication or deleted-parent child", async () => {
+    for (const failure of ["admission", "parent-deleted"]) {
+      const { plan, context, manager } = fixture()
+      host.rows.set("parent", { created_at: 1, metadata: "{}" })
+      context.started.mockImplementation(() => {
+        if (failure === "admission") throw Error("ADMISSION_FAILED")
+        host.rows.delete("parent")
+      })
+      await runFunctionAgentChild(manager, plan, { ...context, retainTranscript: true })
+      const child = context.started.mock.calls[0][0]
+      expect(host.rows.has(child)).toBe(false)
+      expect(getLocalThreadRunLease(child)).toBeUndefined()
+    }
+  })
   it.each(["answer", "error", "aborted", "cleanup"])(
     "finalizes optional telemetry only after physical cleanup facts for %s",
     async (outcome) => {

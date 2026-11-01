@@ -562,7 +562,7 @@ export class FunctionGuestRuntime implements FunctionUiConstructorGuest {
       if (!this.uiBinding) {
         if (!this.nativeUiTablesBound) return context.undefined
         const name = context.getString(component)
-        if (!["Pane", ...FUNCTION_UI_SITES].includes(name))
+        if (!["Placed", "Pane", ...FUNCTION_UI_SITES].includes(name))
           throw new ModFunctionError("MODS_UI_SURFACE_UNAVAILABLE")
         return this.helper("nativeTable", component)
       }

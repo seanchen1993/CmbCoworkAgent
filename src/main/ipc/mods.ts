@@ -12,6 +12,7 @@ import { PluginStartUseService } from "../plugins/plugin-start-use"
 import { pluginStartUseDestinationConfigurationIssues, pluginStartUseDependencyIssues } from "../plugins/plugin-start-use-diagnostics"
 import { projectRuntimeDependencies } from "../harness-board/project-runtime-dependencies"
 import { pluginChatStartUseEntries } from "../plugins/plugin-chat-start-use"
+import { readPluginChatIntegrations } from "../plugins/plugin-chat-integrations"
 import { notifyHooksChanged } from "../hooks/notifications"
 import { invalidateGlobalMcpCapabilityService } from "../mcp/capability-service"
 import { listPluginSkills } from "./skills"
@@ -34,6 +35,7 @@ import { readCurrentFunctionConversationCheckpoint } from "../mods/v2/conversati
 import { projectFunctionSessionApiMessages } from "../mods/v2/session-api-transcript"
 import { registerPromptComposerHandlers } from "./mods-prompt"
 import { FunctionDesktopBroker } from "../mods/v2/desktop-broker"
+import { captureFunctionPlacedAnchor } from "../mods/v2/placed-anchor-host"
 import { nativePlatformProviders } from "../mods/v2/platform-native-providers"
 import { createProjectStageDebugPlatformProvider } from "../mods/v2/platform-project-stage-debug-provider"
 import {
@@ -49,7 +51,7 @@ import { captureFunctionMarkdownFrame, withFunctionMarkdownDisplay } from "../mo
 import { functionMarkdownIpcLink, functionMarkdownIpcReceipt } from "../mods/v2/markdown-ipc-input"
 import { functionMarkdownUrlTransform } from "../../shared/mods/v2/markdown"
 import { createComposerPermissionScope } from "../mods/v2/composer-permission-scope"
-import { ModFunctionError } from "../../shared/mods/v2/contracts"
+import { isModObject, ModFunctionError } from "../../shared/mods/v2/contracts"
 import { writeFunctionModDebugLog } from "../logging"
 import { gitNoticeFunctionConfig } from "../mods/v2/git-notice-config"
 import { registerClawHandlers } from "./mods-claw"
@@ -153,6 +155,7 @@ import type { ClawProfile } from "../../shared/mods/claw"
 import type { DevelopmentScope } from "../mods/v2/development-session"
 import { registerModsAuthoringHandlers } from "./mods-authoring"
 import { registerModsDevelopmentHandlers } from "./mods-development"
+import { ProjectStagePrompts } from "../mods/devtools/project-stage-prompts"
 import { ModDevelopmentService, setModDevelopmentService } from "../mods/devtools/development-service"
 import { CreatorPlanningService } from "../mods/devtools/creator-planning"
 import { goalManager } from "../agent/goals/runtime"
@@ -285,6 +288,39 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
     return
   }
   setModsManager(manager)
+  function agentViewInput(input: { threadId: string; intentId: string; cursor?: string }) {
+    if (!isModObject(input) || typeof input.threadId !== "string" || !input.threadId || input.threadId.length > 512 ||
+      typeof input.intentId !== "string" || !input.intentId || input.intentId.length > 256 ||
+      (input.cursor !== undefined && (typeof input.cursor !== "string" || input.cursor.length > 512)) ||
+      Object.keys(input).some(key => !["threadId", "intentId", "cursor"].includes(key)))
+      throw new ModError("MODS_AGENT_VIEW_ARGUMENTS")
+  }
+  ipcMain.handle("mods:agent-view-pending", (event, threadId: string) => {
+    const workspace = writableScope(event, threadId)
+    return manager.ownedAgentTasks.view(threadId, workspace, grant => manager.store.assertGrant(grant))
+  })
+  ipcMain.handle("mods:agent-view-read", async (event, input: { threadId: string; intentId: string; cursor?: string }) => {
+    agentViewInput(input)
+    const workspace = writableScope(event, input.threadId)
+    const entry = manager.ownedAgentTasks.viewRead(input.threadId, workspace, input.intentId, grant => manager.store.assertGrant(grant))
+    const status = manager.ownedAgentTasks.status(input.threadId, workspace, entry.grant, entry.value.agentId)
+    const messages = await manager.ownedAgentTasks.messages(input.threadId, workspace, entry.grant,
+      entry.value.agentId, new AbortController().signal, input.cursor)
+    if (writableScope(event, input.threadId) !== workspace) throw new ModError("MODS_CALL_SCOPE_CHANGED")
+    manager.ownedAgentTasks.viewRead(input.threadId, workspace, input.intentId, grant => manager.store.assertGrant(grant))
+    return { status, messages }
+  })
+  ipcMain.handle("mods:agent-view-stop", (event, input: { threadId: string; intentId: string }) => {
+    agentViewInput(input)
+    const workspace = writableScope(event, input.threadId)
+    const entry = manager.ownedAgentTasks.viewRead(input.threadId, workspace, input.intentId, grant => manager.store.assertGrant(grant))
+    return manager.ownedAgentTasks.stop(input.threadId, workspace, entry.grant, entry.value.agentId)
+  })
+  ipcMain.handle("mods:agent-view-close", (event, input: { threadId: string; intentId: string }) => {
+    agentViewInput(input)
+    writableScope(event, input.threadId)
+    manager.ownedAgentTasks.closeView(input.threadId, input.intentId)
+  })
   const stopPolicyObservations = registerBuiltinPolicyScopeResolver(threadId => {
     const thread = getThreadCore(threadId)
     if (!thread) return undefined
@@ -557,6 +593,7 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
       projectCheck: (...args) => manager.runCompletionProjectCheck(...args),
       dialogs: nativeFunctionDialogAccess,
       sendPeer: (...args) => manager.sendFunctionPeer(...args),
+      agentTask: (...args) => manager.functionAgentTask(...args),
       prepareAgent: (workspace, threadId, grant, input, signal) =>
         runAgentCommand(workspace, threadId, grant, signal, () =>
           manager.prepareFunctionAgentSpawn(workspace, threadId, grant, input, signal)
@@ -827,6 +864,14 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
         )
       },
       callMcp,
+      selectedMcpSources: (workspace, threadId) => {
+        assertStandaloneThread(threadId)
+        if (writableThreadScope(threadId) !== workspace || readNativeChildModsContext(threadId))
+          throw new ModError("MODS_MCP_CONTEXT_EXPIRED")
+        const selection = manager.clawProfile(workspace, threadId)?.mcp
+        if (selection?.mode !== "selected") throw new ModError("MODS_MCP_SELECTION_REQUIRED")
+        return selection.items.map(item => ({ ...item }))
+      },
       connectMcp: (workspace, threadId, grant, owner, signal, run) =>
         withMcpBinding(workspace, threadId, grant, signal, operationSignal =>
           run((input, active) => manager.connectFunctionMcp(workspace, threadId, grant,
@@ -844,12 +889,13 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
             assertFunctionDataScope(workspace, threadId)
           }
         }
+        const database = getDb()
         const row = getThreadRuntimeScope(threadId)
         if (!row || writableThreadScope(threadId) !== workspace)
           throw new ModError("MODS_CALL_SCOPE_CHANGED")
         const incarnation = captureThreadIncarnation(row)
         return () => {
-          if (!matchesThreadIncarnation(getThreadRuntimeScope(threadId), incarnation) ||
+          if (getDb() !== database || !matchesThreadIncarnation(getThreadRuntimeScope(threadId), incarnation) ||
             writableThreadScope(threadId) !== workspace)
             throw new ModError("MODS_CALL_SCOPE_CHANGED")
         }
@@ -870,6 +916,11 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
       },
       creatorHook: (workspace, threadId) =>
         manager.functionModelHookSource(functionCallAuthority(workspace, threadId)),
+      capturePlacedAnchor: (_workspace, threadId) => {
+        if (readNativeChildModsContext(threadId)) return undefined
+        try { assertStandaloneThread(threadId) } catch { return undefined }
+        return captureFunctionPlacedAnchor(threadId)
+      },
       clawApplicable: (threadId) => functionClawScope(threadId) !== null,
       capabilityContext: functionCapabilityContext,
       clawScope: functionClawScope,
@@ -1075,7 +1126,8 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
     grant: ModGrant,
     input: ModObject,
     signal: AbortSignal,
-    dispatch?: FunctionMcpToolDispatch
+    dispatch?: FunctionMcpToolDispatch,
+    service?: import("../mcp/capability-types").McpCapabilityService
   ): Promise<ModObject> {
     if (!dispatch)
       return withMcpBinding(
@@ -1097,7 +1149,9 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
     return routeFunctionMcp(input, signal, dispatch, {
       resolve: (value, lookupSignal) =>
         withMcpBinding(workspace, threadId, grant, lookupSignal, (operationSignal) =>
-          manager.resolveFunctionMcp(workspace, threadId, grant, value, operationSignal)
+          service ? manager.withOwnedMcpService(workspace, threadId, service, () =>
+            manager.resolveFunctionMcp(workspace, threadId, grant, value, operationSignal)) :
+            manager.resolveFunctionMcp(workspace, threadId, grant, value, operationSignal)
         ),
       invoke: (value, callSignal, fingerprint) =>
         withMcpBinding(
@@ -1105,8 +1159,8 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
           threadId,
           grant,
           callSignal,
-          (operationSignal, readOnly, userInitiated) =>
-            manager.invokeFunctionMcp(
+          (operationSignal, readOnly, userInitiated) => {
+            const invoke = () => manager.invokeFunctionMcp(
               workspace,
               threadId,
               grant,
@@ -1116,6 +1170,8 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
               userInitiated,
               fingerprint
             )
+            return service ? manager.withOwnedMcpService(workspace, threadId, service, invoke) : invoke()
+          }
         )
     })
   }
@@ -1290,7 +1346,8 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
       guard()
       usage?.assertCurrent()
       return pluginChatStartUseEntries(plugin.id, mods,
-        usage ? skills.filter(skill => usage.allowsSkill(skill.path)) : skills)
+        usage ? skills.filter(skill => usage.allowsSkill(skill.path)) : skills,
+        readPluginChatIntegrations(plugin))
     }
   }), {
     trusted,
@@ -1642,7 +1699,15 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
   development.configureSourceSetStatus(threadId => {
     try { return creatorSourceSets.status(threadId) } catch { return undefined }
   })
+  const projectStagePrompts = new ProjectStagePrompts({
+    sessions: projectAuthoringSessions,
+    context: threadId => development.projectAuthoringContext(threadId),
+    workspaceKey: workspace => manager.workspaceKey(workspace)
+  })
   registerModsDevelopmentHandlers(ipcMain, development, trusted, {
+    listProjectPromptDrafts: async input => projectStagePrompts.list(input),
+    readProjectStagePrompts: async input => projectStagePrompts.read(input),
+    saveProjectStagePrompt: input => projectStagePrompts.save(input),
     importSourceSet: async input => {
       const context = development.reuseContext(input.threadId)
       if (context.scope.workspace !== manager.workspaceKey(input.expectedWorkspace)) throw Error("DEVELOPMENT_SCOPE_CHANGED")
@@ -2119,6 +2184,30 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
     )
       throw new ModError("MODS_THREAD_CONTEXT_REQUIRED")
   }
+  ipcMain.handle("mods:mcpConnections", (event, threadId: string, expectedWorkspace: string) => {
+    trusted(event)
+    const workspace = writableScope(event, threadId)
+    if (workspace !== expectedWorkspace) throw new ModError("MODS_CALL_SCOPE_CHANGED")
+    assertStandaloneThread(threadId)
+    return functions.mcpConnections(workspace, threadId)
+  })
+  ipcMain.handle("mods:mcpDisconnect", async (event, threadId: string, input: {
+    workspace: string; owner: string; server: string
+  }) => {
+    trusted(event)
+    const workspace = writableScope(event, threadId)
+    if (!input || input.workspace !== workspace || typeof input.owner !== "string" ||
+      typeof input.server !== "string") throw new ModError("MODS_CALL_SCOPE_CHANGED")
+    assertStandaloneThread(threadId)
+    const row = getThreadCore(threadId)!
+    const incarnation = captureThreadIncarnation(row)
+    const result = await functions.mcpDisconnect(workspace, threadId, input.owner, input.server)
+    trusted(event)
+    if (writableScope(event, threadId) !== workspace ||
+      !matchesThreadIncarnation(getThreadCore(threadId), incarnation))
+      throw new ModError("MODS_CALL_SCOPE_CHANGED")
+    return result
+  })
   registerClawHandlers(ipcMain, manager, functions, {
     context: functionCapabilityContext,
     sources: async () => {
@@ -2391,6 +2480,57 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
   ipcMain.handle("mods:function-markdown-preview-close", (event, input: unknown) => {
     const { threadId, receipt } = functionMarkdownIpcReceipt(input)
     functions.markdownPreviewClose(scope(event, threadId), threadId, receipt)
+  })
+  type PlacedInput = { threadId: string; owner: string; requestId?: string; lease?: string }
+  const placedOwner = (event: IpcMainInvokeEvent, input: PlacedInput) => {
+    const workspace = scope(event, input?.threadId)
+    assertStandaloneThread(input.threadId)
+    const desktop = desktopBroker.captureOwner(event.sender.id, input.threadId, input.owner)
+    const frame = captureFunctionMarkdownFrame(event.sender), database = getDb()
+    const thread = getThreadCore(input.threadId)
+    if (!thread) throw new ModError("MODS_THREAD_MISSING")
+    const incarnation = captureThreadIncarnation(thread)
+    const check = () => {
+      desktop(); frame.assertCurrent()
+      if (getDb() !== database || scope(event, input.threadId) !== workspace ||
+        !matchesThreadIncarnation(getThreadCore(input.threadId), incarnation))
+        throw new ModError("MODS_CALL_SCOPE_CHANGED")
+    }
+    return { workspace, check }
+  }
+  ipcMain.handle("mods:function-placed-rows", (event, input: PlacedInput) => {
+    const { workspace, check } = placedOwner(event, input)
+    check()
+    return functions.placedRows(workspace, input.threadId)
+  })
+  ipcMain.handle("mods:function-placed-read", (event, input: PlacedInput) => {
+    const { workspace, check } = placedOwner(event, input)
+    return withDisplayExecution(event, input.threadId, async () => {
+      check()
+      const drawing = await functions.placedRead(workspace, input.threadId, input.requestId!, input.lease!, check)
+      check()
+      return drawing
+    })
+  })
+  ipcMain.handle("mods:function-placed-act", (event, input: PlacedInput & { action: FunctionUiAction }) => {
+    const { workspace, check } = placedOwner(event, input)
+    return withFunctionExecution({ ...manager.functionUserScope(workspace, input.threadId), workspace,
+      threadId: input.threadId, leased: false, immediate: false,
+      userInitiated: ["press", "submit", "select"].includes(input.action?.kind) }, async () => {
+      check()
+      const result = await functions.placedAct(workspace, input.threadId, input.requestId!, input.lease!,
+        parseModJson(encodeModJson(input.action)) as unknown as FunctionUiAction)
+      check()
+      return result
+    })
+  })
+  ipcMain.handle("mods:function-placed-dismiss", (event, input: PlacedInput) => {
+    const { workspace, check } = placedOwner(event, input)
+    check(); functions.placedDismiss(workspace, input.threadId, input.requestId!)
+  })
+  ipcMain.handle("mods:function-placed-release", (event, input: PlacedInput) => {
+    const { workspace, check } = placedOwner(event, input)
+    check(); functions.placedRelease(workspace, input.threadId, input.requestId!, input.lease!)
   })
   ipcMain.handle(
     "mods:function-site-mount",

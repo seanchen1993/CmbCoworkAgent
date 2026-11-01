@@ -13,6 +13,7 @@ import {
 } from "../agent/run-cancellation-settlement"
 import { IpcMain, BrowserWindow, dialog } from "electron"
 import { getModsManager } from "../mods/manager"
+import { rememberFunctionPlacedMessage, forgetFunctionPlacedCursor } from "../mods/v2/placed-anchor-host"
 import { isPlainComposerSubmission } from "../../shared/mods/v2/prompt-submission"
 import { captureComposerMentionSubmission } from "../../shared/mods/v2/composer-mentions"
 import { captureCurrentRunMessageQueueOwnerData } from "../agent/current-run-message-queue"
@@ -4252,6 +4253,7 @@ setCurrentRunTranscriptFlushBeforeInjection((threadId, runToken) => {
 })
 
 function discardPendingStreamTranscriptMessages(threadId: string, runToken: string): string[] {
+  forgetFunctionPlacedCursor(threadId)
   const pendingKey = pendingStreamTranscriptKey(threadId, runToken)
   const pending = pendingStreamTranscriptMessages.get(pendingKey)
   if (!pending) return []
@@ -4281,6 +4283,7 @@ function queueStreamTranscriptMessage(
     pendingStreamTranscriptMessages.set(pendingKey, pending)
   }
   pending.messages.push(message)
+  rememberFunctionPlacedMessage(threadId, message, captureCurrentRunMessageQueueOwner(threadId, runToken))
   if (message.role === "assistant") {
     latestStreamAssistantCandidate.set(threadId, {
       messageId: message.id,
@@ -4313,6 +4316,7 @@ function persistStreamTranscriptChunk(
     if (partition.canonicalCount !== 1 || partition.ordinary.length !== 0)
       throw Error("MODS_CONVERSATION_STREAM_PROJECTION_INVALID")
     guardOwner()
+    rememberFunctionPlacedMessage(threadId, canonical, guardOwner)
     return canonical.id
   }
   const message = persistedMessageFromStreamPayload(payload)
@@ -8525,6 +8529,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 threadId, runToken, abortController.signal),
               workspacePath,
               coordinatorTurnPrompt,
+              worktreeIsolation: runExecutionContext.worktreeIsolation,
               coordinatorSelectedSkill,
               coordinatorExplicitSelectedSkill,
               coordinatorNotificationSelectedSkills,

@@ -171,6 +171,34 @@ afterEach(() => {
 })
 
 describe("original agent run bridge", () => {
+  it.each([false, true])("preserves main-issued Feature ownership through real Host settlement (changed=%s)", async changed => {
+    const binding = { projectId: "container", slug: "feature-a", source: "host" as const,
+      repositoryWorkspace: "C:/selected-repository" }
+    const f = await fixture(false, false, false, { executeSkill: context =>
+      executeHostProjectSkill({ ...context, harnessFeature: binding,
+        worktreeIsolation: { workspaceRoot: context.project.workspace,
+          worktreeRoot: context.project.workspace, commonDir: "C:/repository/.git",
+          branch: "feature-owned-branch" } }, owner) })
+    registerAgentRunImplementation(async (_request, _delivery, context) => {
+      const metadata = JSON.parse(mock.thread!.metadata)
+      expect(metadata.harnessFeature).toEqual(binding)
+      expect(metadata.hostProjectRuntime.projectId).toBe("local-docs")
+      expect(metadata.workspacePath).toBe(f.workspace)
+      expect(context.worktreeIsolation).toEqual({ workspaceRoot: f.workspace,
+        worktreeRoot: f.workspace, commonDir: "C:/repository/.git", branch: "feature-owned-branch" })
+      expect(currentRuntimePluginSource()!.stagePrompt).toContain("not permission to expand filesystem access")
+      writeFileSync(join(f.workspace, "document.md"), "Actual scoped result")
+      if (changed) mock.thread!.metadata = JSON.stringify({ ...metadata,
+        harnessFeature: { ...binding, slug: "other-feature" } })
+      context.onRunTerminated?.({ outcome: "success", code: "normal" })
+    })
+    const operation = f.service.prepare({ projectId: "local-docs", expectedVersion: 1,
+      idempotencyKey: "feature-owned-stage" })
+    const result = await f.service.start(operation.operationId)
+    expect(result.status).toBe(changed ? "unknown" : "succeeded")
+    expect(result.execution?.threadId).toBe(mock.thread?.thread_id)
+  })
+
   it("prepares the declared initial reading list without bypassing the original stage check", async () => {
     const f = await fixture(false, false, false, {}, root => {
       const path = join(root, "devclaw.project-runtime.json")

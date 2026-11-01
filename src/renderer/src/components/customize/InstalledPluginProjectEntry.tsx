@@ -123,6 +123,7 @@ export function InstalledPluginProjectEntry(props: {
           workspace={props.scope.expectedWorkspace}
           pluginId={entry.pluginId}
           expected={{ name: entry.name, version: entry.version }}
+          disabled={props.disabled || loading || projectMode.loading}
         />
       )}
       {loading && <p role="status">正在确认已安装插件的项目入口…</p>}

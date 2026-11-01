@@ -27,7 +27,7 @@ async function main() {
     await openModsResults(page)
     const sidebar = page.getByRole("complementary", { name: "任务进展", exact: true })
     assert.equal(
-      await sidebar.getByRole("tab", { name: "结果", exact: true }).getAttribute("aria-selected"),
+      await sidebar.getByRole("tab", { name: "输出与面板", exact: true }).getAttribute("aria-selected"),
       "true"
     )
     assert.equal(await sidebar.getByText("受控插件结果", { exact: true }).isVisible(), true)
@@ -46,7 +46,7 @@ async function main() {
     await sidebar.getByRole("tab", { name: "当前任务", exact: true }).click()
     await openModsResults(page)
     assert.equal(
-      await sidebar.getByRole("tab", { name: "结果", exact: true }).getAttribute("aria-selected"),
+      await sidebar.getByRole("tab", { name: "输出与面板", exact: true }).getAttribute("aria-selected"),
       "true"
     )
     await page.evaluate("window.fixture.hideSidebar();window.fixture.chat('b')")

@@ -153,6 +153,45 @@ describe("static SDK compatibility", () => {
     expect((await scan(`function handle(sdk) { return () => sdk.ui.log("x") }
       on("ui.render", handle); on("command.run", sdk => handle(sdk))`)).strictCompatible).toBe(false)
   })
+  it("checks direct native timer callbacks and their nonescaping local helpers", async () => {
+    const report = await scan(`on("command.run", sdk => {
+      const publish = () => sdk.ui.log("ready")
+      sdk.clock.after(0, async () => { await sdk.fs.read("input.json"); publish() })
+      sdk.clock.every(500, function () { publish() })
+    })`)
+    expect(report.diagnostics).toEqual([])
+    expect(report.strictCompatible).toBe(true)
+    expect(report.runtimeVerified).toBe(false)
+    expect(report.usages.map((row) => row.method).sort()).toEqual([
+      "clock.after",
+      "clock.every",
+      "fs.read",
+      "ui.log"
+    ])
+  })
+  it.each([
+    'sdk.clock.after(1, () => sdk)',
+    'sdk.clock.after(1, () => ({sdk}))',
+    'sdk.clock.after(1, () => external(sdk))',
+    'sdk.clock.after(1, () => () => sdk.ui.log("x"))',
+    'sdk.clock.after(1, () => external(() => sdk.ui.log("x")))',
+    'sdk.clock.after(1, () => sdk[event.method]())',
+    'sdk.clock.after(1, () => sdk.audio.speak("x"))',
+    'sdk.clock.after(1, () => sdk.model.complete({model:"x",prompt:"x",timeoutMs:10}))',
+    'sdk.clock[event.method](1, () => sdk.ui.log("x"))',
+    'sdk.clock.after?.(1, () => sdk.ui.log("x"))',
+    'sdk.clock?.after(1, () => sdk.ui.log("x"))',
+    'const after = sdk.clock.after; after(1, () => sdk.ui.log("x"))',
+    'const timer = () => sdk.ui.log("x"); sdk.clock.after(1, timer)',
+    'sdk.clock.after(1, function timer() { external(timer); sdk.ui.log("x") })',
+    'externalClock.after(1, () => sdk.ui.log("x"))',
+    'external(() => sdk.clock.after(1, () => sdk.ui.log("x")))',
+    'sdk.clock.after(1, () => { const read = () => sdk.fs.read("x"); read(); return read })'
+  ])("does not turn a native timer into SDK escape or dynamic authority: %s", async (body) => {
+    const report = await scan(`on("command.run", (sdk, event) => { ${body} })`)
+    expect(report.strictCompatible).toBe(false)
+    expect(report.diagnostics.length).toBeGreaterThan(0)
+  })
   it("bounds the captured helper call graph", async () => {
     const calls = Array.from({ length: 257 }, (_, index) => `helper${index}($);`).join("\n")
     const helpers = Array.from({ length: 257 }, (_, index) =>

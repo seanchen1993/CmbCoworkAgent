@@ -25,6 +25,36 @@ export function functionEventUsage(event: string): { when: string; effect: strin
     effect: "知道自己的面板是否已显示、折叠或获得焦点，按实际界面调整交互。",
     range: "只列该组件自己的已打开面板；查询不会重画面板或打开新面板。"
   }
+  if (event === "ui.place") return {
+    when: "插件请求在聊天中放置交互卡片时",
+    effect: "在当时的消息位置显示按钮、文字或其他受控界面，后续消息接在它后面。",
+    range: "普通本地聊天；卡片不发送给模型、不保存到历史，关闭、重载或压缩后消失。只有界面声明不会自动放卡。"
+  }
+  if (event === "ui.view") return {
+    when: "你操作插件按钮，请求查看它创建的子任务时",
+    effect: "打开只读结果分栏，或返回主聊天。",
+    range: "后台事件不能切换画面。当前输入目标和未发送草稿保持不变；查看不恢复或重跑子任务。"
+  }
+  if (event === "mcp.list" || event === "mcp.status") return {
+    when: "插件查询已选服务或自己的连接状态时",
+    effect: "显示真实的可连接来源及连接状态。",
+    range: "查询不会连接服务。没有明确选择或配置已经变化时，不能把旧记录当作可用连接。"
+  }
+  if (["mcp.connect", "mcp.call", "mcp.disconnect"].includes(event)) return {
+    when: "插件请求连接、使用或断开已选的 MCP 服务时",
+    effect: "使用宿主管理的配置建立自己的连接，再按原权限调用工具。",
+    range: "新增连接限普通本地聊天明确选择的服务；凭据不交给插件。断开只影响它自己的连接，失败或结果未知不自动重试工具。"
+  }
+  if (event === "agent.status" || event === "agent.messages") return {
+    when: "插件查询自己在当前聊天创建的子任务时",
+    effect: "读取实际进展、结果以及分页的原始消息和工具记录。",
+    range: "不能读取其他聊天或插件的子任务；历史缺失会明确提示，查看不会启动模型。"
+  }
+  if (event === "agent.stop") return {
+    when: "插件请求停止自己在当前聊天创建的子任务时",
+    effect: "向实际运行实例发送停止请求，并返回当前状态。",
+    range: "请求被接受不表示已经停止；须等真实任务和资源清理结算，未知结果不自动重跑。"
+  }
   if (event === "prompt.edit") return {
     when: "编辑聊天输入框时",
     effect: "按自己的规则整理、拒绝或标记输入文字；发送前会检查最新内容。",

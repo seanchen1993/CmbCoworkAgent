@@ -310,6 +310,7 @@ export function CreateLocalProject({
   templates,
   startUse,
   installedPluginId,
+  cancelLabel = "返回列表",
   onBusyChange,
   onCancel,
   onCreated
@@ -317,6 +318,7 @@ export function CreateLocalProject({
   templates: LocalProjectTemplate[]
   startUse?: HostPluginStartUseIntent
   installedPluginId?: string
+  cancelLabel?: string
   onBusyChange?: (busy: boolean) => void
   onCancel: () => void
   onCreated: (view: LocalProjectView) => void
@@ -509,7 +511,7 @@ export function CreateLocalProject({
           {busy ? "正在创建…" : "创建项目"}
         </button>
         <button type="button" disabled={busy} onClick={onCancel}>
-          返回列表
+          {cancelLabel}
         </button>
       </div>
     </form>

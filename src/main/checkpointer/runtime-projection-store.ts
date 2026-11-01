@@ -2190,6 +2190,7 @@ interface CheckpointMessageSink {
   readonly scanMessageLimit: number
   readonly rawMessageByteLimit?: number
   readonly exact?: boolean
+  readonly messageRange?: { start: number; end: number }
   pushChronological(row: BoundedCheckpointMessageRow): void
 }
 
@@ -2619,10 +2620,13 @@ export function visitLatestCheckpointMessages(
   databasePath: string,
   threadId: string,
   checkpointNs: string,
-  visit: (message: unknown) => void,
+  visit: (message: unknown, index: number) => void,
   options: {
     cancellationBuffer?: SharedArrayBuffer
     onContextUsageStart?(startIndex: number | undefined): void
+    /** Native-only bounded page; existing exact consumers retain strict whole-snapshot semantics. */
+    messageRange?: { start: number; end: number }
+    onOversizedMessage?(index: number): void
   } = {}
 ): { checkpointId: string; messageCount: number } | null {
   const cancellation = options.cancellationBuffer
@@ -2674,10 +2678,16 @@ export function visitLatestCheckpointMessages(
       exact: true,
       scanMessageLimit: 100000,
       rawMessageByteLimit: 1024 * 1024,
+      messageRange: options.messageRange,
       pushChronological(row) {
         throwIfCancelled(cancellation)
-        if (row.rawMessage === null) throw new Error("CHECKPOINT_MESSAGE_SIZE_LIMIT")
-        visit(JSON.parse(row.rawMessage))
+        if (options.messageRange && (row.messageIndex < options.messageRange.start ||
+          row.messageIndex >= options.messageRange.end)) return
+        if (row.rawMessage === null) {
+          if (options.onOversizedMessage) { options.onOversizedMessage(row.messageIndex); return }
+          throw new Error("CHECKPOINT_MESSAGE_SIZE_LIMIT")
+        }
+        visit(JSON.parse(row.rawMessage), row.messageIndex)
       }
     }
     let messageCount = source.kind === "external" ? 0 : source.messageCount
@@ -2725,7 +2735,11 @@ function readInlineBoundedCheckpointMessages(input: {
   cancellation?: Int32Array
 }): void {
   if (input.window.isDisabled || input.messageCount === 0) return
-  const scanStart = Math.max(0, input.messageCount - input.window.scanMessageLimit)
+  const scanStart = Math.min(input.messageCount,
+    Math.max(0, input.messageCount - input.window.scanMessageLimit,
+      input.window.messageRange?.start ?? 0))
+  const scanEnd = Math.max(scanStart,
+    Math.min(input.messageCount, input.window.messageRange?.end ?? input.messageCount))
   let previousIndex = scanStart - 1
   let visited = 0
   const rows = input.database
@@ -2750,7 +2764,7 @@ function readInlineBoundedCheckpointMessages(input: {
       input.row.checkpointNs,
       input.row.checkpointId,
       scanStart,
-      input.messageCount
+      scanEnd
     )
   for (const raw of rows) {
     if (visited % LEGACY_TRANSCRIPT_BATCH_LIMIT === 0) {
@@ -2759,14 +2773,14 @@ function readInlineBoundedCheckpointMessages(input: {
     const row = boundedCheckpointMessageRow(raw)
     if (input.window.exact && row.messageIndex !== previousIndex + 1)
       throw new Error("CHECKPOINT_MESSAGES_INVALID")
-    if (row.messageIndex <= previousIndex || row.messageIndex >= input.messageCount) {
+    if (row.messageIndex <= previousIndex || row.messageIndex >= scanEnd) {
       throw new Error("[CheckpointRuntimeWorker] Unordered inline checkpoint messages")
     }
     previousIndex = row.messageIndex
     visited += 1
     input.window.pushChronological(row)
   }
-  if (input.window.exact && visited !== input.messageCount - scanStart)
+  if (input.window.exact && visited !== scanEnd - scanStart)
     throw new Error("CHECKPOINT_MESSAGES_INVALID")
 }
 
@@ -2903,15 +2917,20 @@ function readExternalBoundedCheckpointMessages(input: {
      ORDER BY CAST(message.key AS INTEGER)`
   )
   for (const segment of input.segments) {
-    let expectedIndex = segment.localStart
+    const localStart = Math.max(segment.localStart,
+      (input.window.messageRange?.start ?? 0) - segment.globalOffset)
+    const localEnd = Math.min(segment.localEnd,
+      (input.window.messageRange?.end ?? Infinity) - segment.globalOffset)
+    if (localStart >= localEnd) continue
+    let expectedIndex = localStart
     const rows = statement.iterate(
       input.window.rawMessageByteLimit ?? CHECKPOINT_TRANSFER_RAW_MESSAGE_BYTE_LIMIT,
       input.window.rawMessageByteLimit ?? CHECKPOINT_TRANSFER_RAW_MESSAGE_BYTE_LIMIT,
       input.row.threadId,
       input.row.checkpointNs,
       segment.checkpointId,
-      segment.localStart,
-      segment.localEnd
+      localStart,
+      localEnd
     )
     for (const raw of rows) {
       if (visited % LEGACY_TRANSCRIPT_BATCH_LIMIT === 0) {
@@ -2928,7 +2947,7 @@ function readExternalBoundedCheckpointMessages(input: {
       visited += 1
       input.window.pushChronological({ ...localRow, messageIndex: globalIndex })
     }
-    if (input.window.exact && expectedIndex !== segment.localEnd)
+    if (input.window.exact && expectedIndex !== localEnd)
       throw new Error("CHECKPOINT_MESSAGES_INVALID")
   }
 }

@@ -87,7 +87,7 @@ async function main() {
     const enable = page.getByRole("button", { name: "启用应用和当前项目灵件", exact: true })
     await enable.waitFor()
     assert.deepEqual(await writes(), [])
-    await page.getByRole("button", { name: "插件", exact: true }).click()
+    await page.getByRole("button", { name: "管理已安装插件", exact: true }).click()
     assert.deepEqual(
       await page.evaluate(() => (window as unknown as { navigation: unknown }).navigation),
       [true, "mods", "installed"]
@@ -208,7 +208,7 @@ async function main() {
         ["project", "a", true, true, "C:/a"]
       ]
     )
-    await page.getByRole("button", { name: "插件", exact: true }).click()
+    await page.getByRole("button", { name: "管理已安装插件", exact: true }).click()
     assert.deepEqual(
       await page.evaluate(() =>
         (window as unknown as { fixture: { navigation(): unknown[][] } }).fixture.navigation()

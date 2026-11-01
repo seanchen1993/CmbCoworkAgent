@@ -18,3 +18,13 @@ it("explains real automatic triggers with their user-visible boundaries", () => 
   expect(functionEventUsage("model.complete").range).toContain("不消耗规则自身处理时间")
   expect(getFunctionEventSupport("config.list")?.note).toContain("敏感值不进入配置查询")
 })
+
+it("explains the new capability flows without inventing execution or input redirection", () => {
+  expect(functionEventUsage("ui.place").range).toContain("不发送给模型")
+  expect(functionEventUsage("ui.view").range).toContain("未发送草稿保持不变")
+  expect(functionEventUsage("mcp.list").range).toContain("不会连接")
+  expect(functionEventUsage("mcp.connect").range).toContain("明确选择")
+  expect(functionEventUsage("mcp.call").range).toContain("不自动重试工具")
+  expect(functionEventUsage("agent.messages").range).toContain("历史缺失")
+  expect(functionEventUsage("agent.stop").range).toContain("不表示已经停止")
+})

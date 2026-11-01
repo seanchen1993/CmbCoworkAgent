@@ -119,6 +119,8 @@ export interface AgentGoalControlResult {
  * that their lease or security policy belongs to the desktop.
  */
 export interface AgentRunExecutionContext {
+  /** Main-resolved managed worktree boundary; never accepted from renderer request fields. */
+  worktreeIsolation?: import("./workflow/types").WorkflowWorktreeIsolationBoundary
   /** Exact original Host-owned completed workflow, never renderer input. */
   hostWorkflowNotification?: {
     runId: string

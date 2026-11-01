@@ -19,6 +19,8 @@ import type { HITLRequest, Message, ToolCallState } from "@/types"
 import { HookLogChip } from "./HookLogViews"
 import { MessageBubble } from "./MessageBubble"
 import { FunctionTurnNotices } from "./FunctionTurnNotices"
+import { FunctionPlacedRows } from "./FunctionPlaced"
+import { placeFunctionRows, type FunctionPlacedEntry } from "../../../../shared/mods/v2/placed"
 import type { FunctionTurnNotice } from "../../../../shared/mods/v2/turn"
 import { placeFunctionTurnNotices } from "../../../../shared/mods/v2/turn-notice-placement"
 import { ChatSearchContext } from "./ChatSearchContext"
@@ -109,6 +111,7 @@ export function resolveChatScrollVirtualRangeSnapshot(
 }
 
 export interface ChatMessageVirtualListProps {
+  functionPlacedRows?: readonly FunctionPlacedEntry[]
   functionTurnNotices?: readonly FunctionTurnNotice[]
   messageAttempts?: MessageAttempts
   searchReveal?: ChatSearchReveal | null
@@ -368,6 +371,7 @@ const chatVirtualListComponents = {
 }
 
 export const ChatMessageVirtualList = React.memo(function ChatMessageVirtualList({
+  functionPlacedRows,
   functionTurnNotices = EMPTY_FUNCTION_NOTICES,
   messageAttempts,
   messages,
@@ -437,6 +441,9 @@ export const ChatMessageVirtualList = React.memo(function ChatMessageVirtualList
       ),
     [messages, visibleMessageIndexes, functionTurnNotices, historyGapBeforeMessageId]
   )
+  const placedRows = useMemo(() => placeFunctionRows(messages, visibleMessageIndexes,
+    functionPlacedRows ?? [], !historyHasMore && !historyGapBeforeMessageId),
+  [messages, visibleMessageIndexes, functionPlacedRows, historyHasMore, historyGapBeforeMessageId])
   const shouldVirtualize = shouldVirtualizeChatMessageList(visibleMessageIndexes.length)
   useLayoutEffect(() => {
     if (!shouldVirtualize || !customScrollParent) return
@@ -649,6 +656,7 @@ export const ChatMessageVirtualList = React.memo(function ChatMessageVirtualList
             notices={turnNoticePlacements.get(message.id)}
             anchorMessageId={message.id}
           />
+          <FunctionPlacedRows threadId={threadId} rows={placedRows.after.get(messageIndex) ?? []} />
         </>
       )
     },
@@ -676,6 +684,7 @@ export const ChatMessageVirtualList = React.memo(function ChatMessageVirtualList
       onSetGoalFromMessage,
       pendingApproval,
       pendingApprovalToolCallKeys,
+      placedRows,
       setMessageRef,
       threadId,
       toolCallStates,
@@ -773,6 +782,7 @@ export const ChatMessageVirtualList = React.memo(function ChatMessageVirtualList
     return (
       <VirtuosoMessageListWrapper>
         {historyHeader}
+        <FunctionPlacedRows threadId={threadId} rows={placedRows.start} />
         {footerContent}
       </VirtuosoMessageListWrapper>
     )
@@ -805,7 +815,7 @@ export const ChatMessageVirtualList = React.memo(function ChatMessageVirtualList
         itemsRendered={handleItemsRendered}
         rangeChanged={handleVirtualRangeChanged}
         totalListHeightChanged={onContentHeightChanged}
-        context={{ header: historyHeader, footer: footerContent,
+        context={{ header: <>{historyHeader}<FunctionPlacedRows threadId={threadId} rows={placedRows.start} /></>, footer: footerContent,
           windowKey: virtualWindow.key, firstItemIndex: virtualWindow.firstItemIndex,
           scrollParent: customScrollParent }}
         components={chatVirtualListComponents}

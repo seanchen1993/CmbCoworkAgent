@@ -1,11 +1,15 @@
+import { registerNativeHarnessSourceHandlers } from "./native-harness-source"
+import { derivationContentIdentity, snapshotDerivationSource } from "../plugins/derivation-source"
+import type { HarnessNativeFeatureBinding } from "../../shared/harness-board-types"
 import { FunctionUserConfigValues } from "../mods/v2/user-config-values"
 import { randomUUID } from "node:crypto"
 import { EventEmitter } from "node:events"
 import { projectPreviewRegistry } from "../mods/devtools/project-preview-registry"
 import { readProjectSource } from "../mods/devtools/project-source"
 import { testSecretProtector } from "../../../tests/support/mods-secret-protector"
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
-import { join } from "node:path"
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs"
+import { basename, dirname, join } from "node:path"
+import { projectFunctionApprovalInput } from "../../shared/project-runtime/function-source"
 import { tmpdir } from "node:os"
 import { afterEach, expect, it, vi } from "vitest"
 import type { IpcMain, IpcMainInvokeEvent } from "electron"
@@ -301,15 +305,34 @@ async function fixture(
     () => false
   )
   cleanup.push(
-    () => rmSync(root, { recursive: true, force: true }),
+    () => {
+      const target = realpathSync(root)
+      expect(dirname(target)).toBe(realpathSync(tmpdir()))
+      expect(basename(target)).toMatch(/^project-native-mods-[a-zA-Z0-9]{6}$/)
+      rmSync(target, { recursive: true, force: true })
+    },
     () => projects.close(),
     () => (core ? core.close() : control.close()),
     () => manager.close()
   )
   return {
     root,
+    source,
     workspace,
     control,
+    pendingSource(binding: HarnessNativeFeatureBinding) {
+      registerNativeHarnessSourceHandlers({ handle: (channel: string, handler: Parameters<IpcMain["handle"]>[1]) => { handlers.set(channel, handler) } } as unknown as IpcMain, {
+        trusted: value => { if (value !== event) throw Error("UNTRUSTED"); return event },
+        platform: () => service,
+        retainedRoot: value => snapshots.read(value.pluginDigest).root,
+        readBinding: id => id === binding.hostRunId ? binding : undefined,
+        assertBinding: value => { if (value.projectId !== binding.projectId) throw Error("BINDING_CHANGED") }
+      })
+      return {
+        call: (channel: string, input: unknown) => handlers.get("harness-native-feature:mods-" + channel)!(event, input),
+        config: (channel: string, input: unknown) => handlers.get("harness-native-feature:user-config" + channel)!(event, input)
+      }
+    },
     service,
     project,
     snapshots,
@@ -495,7 +518,12 @@ it("rechecks the locked provider after the approval probe and rejects a late sou
     pluginId: "dependency", compiledDigest: view.digest
   })
   void pending.catch(() => {})
-  await loading
+  await Promise.race([
+    loading,
+    pending.then(() => {
+      throw Error("APPROVAL_PROBE_NOT_ENTERED")
+    })
+  ])
   state.dependencies[0] = { ...state.dependencies[0], enabled: false }
   release()
   await expect(pending).rejects.toThrow()
@@ -924,4 +952,197 @@ it("rechecks complete package contents after the native path chooser resolves", 
   } finally {
     nativeDialogs.choose = old
   }
+})
+
+it("confirms the exact project and dependencies once, reuses grants and enables only its workspace", async () => {
+  const f = await fixture(false, false, false, true, true)
+  const review = await f.call("read", "project")
+  const input = projectFunctionApprovalInput(review)
+  await expect(f.call("approve-required", input)).rejects.toThrow(
+    "PROJECT_MODS_CONFIGURATION_REQUIRED"
+  )
+  expect(
+    f.control.getProjectFunctionGrant(
+      review.workspace,
+      "project",
+      review.packageDigest,
+      "real-compiled-id"
+    )
+  ).toBeNull()
+  expect(f.control.getGrant(review.workspace, "function:locked-rules")).toBeNull()
+  const view = await f.native("", { threadId: "project", pluginId: "dependency" })
+  await f.native("-save", {
+    threadId: "project",
+    pluginId: view.pluginId,
+    digest: view.digest,
+    revision: view.savedRevision,
+    workspace: view.workspace,
+    key: "label",
+    value: "chosen"
+  })
+  const approved = await f.call("approve-required", input)
+  expect(approved).toMatchObject({
+    workspaceEnabled: true,
+    source: { state: "ready" },
+    dependencies: [{ state: "ready", configurationReady: true }]
+  })
+  expect(f.enabledWorkspaces).toEqual([review.workspace])
+  const sourceGrant = f.control.getProjectFunctionGrant(
+    review.workspace,
+    "project",
+    review.packageDigest,
+    "real-compiled-id"
+  )
+  const dependencyGrant = f.control.getGrant(review.workspace, "function:locked-rules")
+  expect(sourceGrant?.digest).toBe(review.source.digest)
+  expect(dependencyGrant?.digest).toBe(review.dependencies[0].digest)
+  expect(f.control.getGrant(f.root, "function:locked-rules")).toBeNull()
+  const main = vi.spyOn(f.manager, "approveRuntimeSource")
+  const dependency = vi.spyOn(f.manager, "approve")
+  await f.call("approve-required", input)
+  expect(main).not.toHaveBeenCalled()
+  expect(dependency).not.toHaveBeenCalled()
+  expect(f.enabledWorkspaces).toEqual([review.workspace])
+  expect(
+    f.control.getProjectFunctionGrant(
+      review.workspace,
+      "project",
+      review.packageDigest,
+      "real-compiled-id"
+    )
+  ).toEqual(sourceGrant)
+  expect(f.control.getGrant(review.workspace, "function:locked-rules")).toEqual(dependencyGrant)
+  expect(f.service.operations("project")).toEqual([])
+}, 15000)
+
+it("rejects incomplete, extra, duplicate and stale bulk consent before any grant", async () => {
+  const f = await fixture(false, false, false, false, true)
+  const review = await f.call("read", "project")
+  const input = projectFunctionApprovalInput(review)
+  for (const altered of [
+    { ...input, dependencies: [] },
+    { ...input, dependencies: [...input.dependencies, ...input.dependencies] },
+    { ...input, dependencies: [{ pluginId: "undeclared", compiledDigest: "f".repeat(64) }] },
+    { ...input, workspace: f.root },
+    { ...input, projectVersion: input.projectVersion + 1 },
+    { ...input, sourceDigest: "f".repeat(64) },
+    { ...input, packageDigest: "f".repeat(64) }
+  ])
+    await expect(f.call("approve-required", altered)).rejects.toThrow("PROJECT_INPUT_CHANGED")
+  await expect(f.call("approve-required", { ...input, path: f.root })).rejects.toThrow(
+    "PROJECT_INVALID_INPUT"
+  )
+  expect(
+    f.control.getProjectFunctionGrant(
+      review.workspace,
+      "project",
+      review.packageDigest,
+      "real-compiled-id"
+    )
+  ).toBeNull()
+  expect(f.control.getGrant(review.workspace, "function:locked-rules")).toBeNull()
+}, 15000)
+
+it("rejects concurrent consent and a changed preview owner during the original grant probe", async () => {
+  const f = await fixture(false, true)
+  const input = projectFunctionApprovalInput(await f.call("read", "project"))
+  const probe = Promise.withResolvers<void>(),
+    entered = Promise.withResolvers<void>()
+  f.gate(probe.promise, () => entered.resolve())
+  const approval = f.call("approve-required", input)
+  const rejected = expect(approval).rejects.toThrow("PREVIEW_OWNER_CHANGED")
+  await entered.promise
+  await expect(f.call("approve-required", input)).rejects.toThrow("PROJECT_MODS_APPROVAL_BUSY")
+  f.revokePreview()
+  probe.resolve()
+  await rejected
+  expect(
+    f.control.getProjectFunctionGrant(
+      input.workspace,
+      "project",
+      input.packageDigest,
+      "real-compiled-id"
+    )
+  ).toBeNull()
+})
+
+it("never enables the global switch through aggregate project consent", async () => {
+  const f = await fixture(false, false, false, true)
+  const input = projectFunctionApprovalInput(await f.call("read", "project"))
+  f.setGlobal(false)
+  await expect(f.call("approve-required", input)).rejects.toThrow("PROJECT_MODS_GLOBALLY_DISABLED")
+  expect(f.enabledWorkspaces).toEqual([])
+  expect(
+    f.control.getProjectFunctionGrant(
+      input.workspace,
+      "project",
+      input.packageDigest,
+      "real-compiled-id"
+    )
+  ).toBeNull()
+})
+
+
+it("configures and confirms a pending native Feature before any Host execution exists, retaining exact scope after first creation", async () => {
+  const f = await fixture(true, false, false, true, true)
+  const workspace = join(f.root, "pending-feature")
+  mkdirSync(workspace)
+  const binding: HarnessNativeFeatureBinding = {
+    engine: "host", projectId: "container", featureId: "feature", hostRunId: "pending-host",
+    title: "Pending feature", workspace, repositoryWorkspace: f.workspace,
+    installedPluginId: "installation", expectedPlugin: { pluginId: "installation",
+      name: "mixed-project", version: "1.0.0",
+      digest: derivationContentIdentity((await snapshotDerivationSource(f.source)).files) }
+  }
+  const pending = f.pendingSource(binding)
+  const initial = await pending.call("read", binding.hostRunId)
+  expect(initial.projectVersion).toBe(0)
+  expect(initial.source.configurationReady).toBe(false)
+  expect(initial.dependencies[0].configurationReady).toBe(false)
+  expect(f.service.get(binding.hostRunId)).toBeUndefined()
+  await expect(pending.call("approve-required", projectFunctionApprovalInput(initial))).rejects.toThrow()
+  for (const pluginId of ["installation", "dependency"]) {
+    const config = await pending.config("", { threadId: binding.hostRunId, pluginId,
+      expectedWorkspace: initial.workspace })
+    await pending.config("-save", { threadId: binding.hostRunId, pluginId, digest: config.digest,
+      key: "label", value: "Feature configuration", revision: config.savedRevision,
+      workspace: config.workspace })
+  }
+  const configured = await pending.call("read", binding.hostRunId)
+  const approved = await pending.call("approve-required", projectFunctionApprovalInput(configured))
+  expect(approved.source.state).toBe("ready")
+  expect(approved.dependencies[0].state).toBe("ready")
+  expect(f.service.get(binding.hostRunId)).toBeUndefined()
+  expect(f.service.operations(binding.hostRunId)).toEqual([])
+  expect(f.control.getProjectFunctionGrant(initial.workspace, binding.hostRunId,
+    initial.packageDigest, initial.source.name)?.digest).toBe(initial.source.digest)
+  expect(f.control.getGrant(f.core!.workspaceKey(f.workspace), "function:locked-rules")).toBeNull()
+  const created = await f.service.localCreate({ projectId: binding.hostRunId,
+    name: binding.title, goal: "Actual Feature task", workspace, installedPluginId: "installation",
+    expectedPlugin: binding.expectedPlugin })
+  binding.packageDigest = created.pluginDigest
+  const active = await pending.call("read", binding.hostRunId)
+  expect(active.projectVersion).toBe(1)
+  expect(active.packageDigest).toBe(initial.packageDigest)
+  expect(active.source.state).toBe("ready")
+  await expect(pending.call("approve-required", projectFunctionApprovalInput(configured)))
+    .rejects.toThrow("PROJECT_INPUT_CHANGED")
+  expect(f.service.operations(binding.hostRunId)).toEqual([])
+}, 15_000)
+
+it("rejects pending Feature source replacement and wrong owner without creating a Host run or grant", async () => {
+  const f = await fixture(true)
+  const binding: HarnessNativeFeatureBinding = {
+    engine: "host", projectId: "container", featureId: "feature", hostRunId: "pending-host",
+    title: "Pending", workspace: f.workspace, repositoryWorkspace: f.workspace,
+    installedPluginId: "installation", expectedPlugin: { pluginId: "installation",
+      name: "mixed-project", version: "1.0.0",
+      digest: derivationContentIdentity((await snapshotDerivationSource(f.source)).files) }
+  }
+  const pending = f.pendingSource(binding)
+  await expect(pending.call("read", "other-owner")).rejects.toThrow("HARNESS_NATIVE_FEATURE_MISSING")
+  writeFileSync(join(f.source, "mods/main.ts"), "export function register(on){}")
+  await expect(pending.call("read", binding.hostRunId)).rejects.toThrow("PROJECT_PACKAGE_IDENTITY_MISMATCH")
+  expect(f.service.get(binding.hostRunId)).toBeUndefined()
+  expect(f.control.getGrant(f.workspace, "function:real-compiled-id")).toBeNull()
 })

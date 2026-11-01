@@ -1,5 +1,6 @@
 import { parentPort } from "node:worker_threads"
 import { readFunctionSessionCheckpoint } from "../mods/v2/session-checkpoint"
+import { readFunctionSessionCheckpointPage } from "../mods/v2/session-checkpoint-page"
 import type {
   CheckpointRuntimeProjectionWorkerRequest,
   CheckpointRuntimeProjectionWorkerResponse
@@ -65,7 +66,10 @@ workerPort.on("message", (request: CheckpointRuntimeProjectionWorkerRequest) => 
         type: "read-session-transcript-result",
         requestId: request.requestId,
         ok: true,
-        transcript: readFunctionSessionCheckpoint(
+        transcript: request.page ? readFunctionSessionCheckpointPage(
+          request.databasePath, request.threadId, request.checkpointNs,
+          request.page, request.cancellationBuffer
+        ) : readFunctionSessionCheckpoint(
           request.databasePath,
           request.threadId,
           request.checkpointNs,

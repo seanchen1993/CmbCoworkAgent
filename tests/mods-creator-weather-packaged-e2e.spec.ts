@@ -397,7 +397,7 @@ async function main() {
     const trial = needs.trials[0]
     assert.equal(trial.revision, 3)
     assert.equal(forecastRequests, 0, "checking failed candidates must not perform HTTP")
-    const approve = page.getByRole("button", { name: "确认并应用到这段聊天", exact: true })
+    const approve = page.getByRole("button", { name: "确认并开始聊天试用", exact: true })
     await approve.waitFor()
     const confirmationReady = Date.now()
     assert(await approve.isEnabled())

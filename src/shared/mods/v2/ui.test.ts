@@ -10,6 +10,29 @@ import type { ModObject } from "../types"
 import { functionFocusHandle, functionFocusTargets } from "./focus"
 
 describe("function UI data boundary", () => {
+  it("admits bounded responsive Box layout and text truncation without DOM styles", () => {
+    expect(() => validateFunctionTree({ type: "Box", props: {
+      minWidth: 0, minHeight: "100%", flexGrow: 1, flexShrink: 0, flexWrap: "wrap",
+      rowGap: 2, columnGap: 1, paddingTop: 0, paddingBottom: 2, paddingLeft: 1,
+      paddingRight: 1, marginBottom: 2, marginLeft: 0, marginRight: 0,
+      alignSelf: "stretch", justifyContent: "space-evenly", flexDirection: "row-reverse",
+      backgroundColor: "black", overflow: "hidden"
+    }, children: [{ type: "Box", props: { gap: "sm", padding: "xl", marginTop: "xs" }, children: [
+      { type: "Text", props: { wrap: "truncate", size: "heading", weight: "medium", mono: true,
+        tabular: false }, children: ["Retained full text"] }
+    ] }]
+    })).not.toThrow()
+    for (const props of [
+      { minWidth: "calc(100% - 2px)" }, { minHeight: "var(--height)" }, { minWidth: "101%" },
+      { minWidth: "10px" }, { minHeight: -1 }, { minWidth: Infinity }, { rowGap: 129 },
+      { columnGap: NaN }, { paddingLeft: -1 }, { flexGrow: 101 }, { flexShrink: "1" },
+      { flexWrap: "anything" }, { alignSelf: "safe center" }, { overflow: "scroll" },
+      { style: "position:fixed" }, { position: "absolute" }, { display: "none" }, { padding: "3px" }
+    ]) expect(() => validateFunctionTree({ type: "Box", props })).toThrow()
+    for (const props of [{size:"huge"},{weight:500},{mono:"true"},{tabular:1},{size:"16px"}])
+      expect(() => validateFunctionTree({type:"Text",props,children:["text"]})).toThrow()
+  })
+
   it("accepts only a bare non-negative safe integer engine reference", () => {
     for (const ref of [0, 1, Number.MAX_SAFE_INTEGER])
       expect(() => validateFunctionTree({ type: "engine", ref })).not.toThrow()

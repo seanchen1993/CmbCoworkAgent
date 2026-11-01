@@ -37,6 +37,23 @@ async function prepare(body: string) {
 afterEach(() => guests.splice(0).forEach((guest) => guest.dispose()))
 
 describe("function UI callback lifecycle", () => {
+  it("retains the new layout data through a real guest without introducing host effects", async () => {
+    const guest = await FunctionGuestRuntime.create(`var __cmbFunctionMod={register(on){
+      on("ui.render",($,event)=>{
+        const {Box,Text}=$.ui.resolve(event);
+        return Box({minWidth:0,flexGrow:1,flexShrink:1,flexWrap:"nowrap",columnGap:1,
+          paddingBottom:2,overflow:"hidden",children:[Text({wrap:"truncate",children:"Full content"})]});
+      });
+    }}`)
+    guests.push(guest)
+    const result = await guest.invoke("0", render, async () => { throw Error("No host effects") }, metadata)
+    expect(() => validateFunctionTree(result.value)).not.toThrow()
+    expect(result.value).toMatchObject({ type: "Box", props: {
+      minWidth: 0, flexGrow: 1, flexShrink: 1, flexWrap: "nowrap", columnGap: 1,
+      paddingBottom: 2, overflow: "hidden"
+    }, children: [{ type: "Text", props: { wrap: "truncate" }, children: ["Full content"] }] })
+  })
+
   it("passes a bare native ref through the real guest without producing action handles", async () => {
     const guest = await FunctionGuestRuntime.create(`var __cmbFunctionMod={register(on){
       on("ui.render",()=>({type:"engine",ref:0}));

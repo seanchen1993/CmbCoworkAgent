@@ -1,3 +1,4 @@
+import type { ProjectStagePromptsApi } from "./project-stage-prompts"
 import type { AuthoringDocument, AuthoringScope } from "./authoring"
 import type { CreatorPlanningApi } from "./creator-planning"
 import type { CreatorProjectTrialJourney } from "./creator-trial-journey"
@@ -274,7 +275,7 @@ export interface DevelopmentStatus {
 }
 
 /** Renderer controls are deliberately separate from the model's draft/trial request tool. */
-export interface DevelopmentApi extends Partial<CreatorPlanningApi> {
+export interface DevelopmentApi extends Partial<CreatorPlanningApi>, Partial<ProjectStagePromptsApi> {
   importSourceSet?(input: AuthoringScope): Promise<DevelopmentStatus>
   advanceSourceSet?(input: AuthoringScope & { id: string }): Promise<DevelopmentStatus>
   cancelSourceSet?(input: AuthoringScope & { id: string }): Promise<DevelopmentStatus>

@@ -91,6 +91,28 @@ export const register: Register = (on) => {
 }
 `
 
+export const DEVELOPMENT_LAYOUT_EXAMPLE = `const { Box, Text, Button } = $.ui.resolve(event)
+return Box({ flexDirection:"column", width:"100%", minWidth:0, rowGap:1, children:[
+  Box({ flexWrap:"wrap", columnGap:1, alignItems:"center", children:[
+    Box({ minWidth:0, flexGrow:1, flexShrink:1, children:[
+      Text({ children:"当前内容", wrap:"wrap" })
+    ] }),
+    Button({ key:"refresh", label:"刷新", onPress:()=>$.ui.invalidate("ui.render") })
+  ] })
+] })`
+
+export const DEVELOPMENT_SURFACE_EXAMPLE = `on.capability({
+  apiVersion:"devclaw.capability/v1",id:"notes-view",version:"1.0.0",title:"笔记界面",
+  scope:"conversation",stateSchema:{type:"object"},
+  presentation:{type:"surface",apiVersion:"devclaw.surface/v2",interaction:"query",
+    id:"notes",title:"笔记",placement:"sidebar",paneId:"notes",openAction:"open"},
+  actions:[{id:"open",title:"查看笔记",inputSchema:{type:"object"},outputSchema:{type:"object"},
+    requiredPermissions:["ui.open"],cancellable:true,idempotency:"keyed"}]
+}, {act:async($,event)=>{await $.ui.open({id:"notes",title:"笔记"});return {}}})
+on("ui.render",{component:"Pane",requestId:"notes"},($,event)=>{
+  const {Text}=$.ui.resolve(event);return Text({children:"插件自己的笔记内容"})
+})`
+
 export const DEVELOPMENT_SKILL_LIFECYCLE_EXAMPLE = `import type { Register } from "devclaw-mods"
 export const register: Register = (on) => {
   on("classic.PreSkillUse", { skill_name: "review" }, ($, event, next) => {
@@ -103,6 +125,24 @@ export const register: Register = (on) => {
   })
 }
 `
+
+export const DEVELOPMENT_PLACED_EXAMPLE = `on("session.start",async($,event,next)=>{
+  await $.command.register({name:"show-checklist",description:"在聊天中显示检查卡片"})
+  return next(event)
+})
+on("command.run",{command:"show-checklist"},async($)=>{
+  const result=await $.ui.place({id:"checklist"})
+  return {text:result.isPlaced ? "检查卡片已放入当前聊天。" : result.requestId
+    ? "检查卡片已准备，返回当前聊天后显示。" : "当前无法放置检查卡片："+result.reason}
+})
+on("ui.render",{component:"Placed"},($,event,next)=>{
+  if(event.props.plugin!==$.plugin.name||event.props.id!=="checklist") return next(event)
+  const {Box,Text,Button}=$.ui.resolve(event)
+  return Box({flexDirection:"column",gap:1,children:[
+    Text({children:"这是一张可交互的插件卡片"}),
+    Button({key:"refresh",label:"刷新",onPress:()=>$.ui.invalidate("ui.render")})
+  ]})
+})`
 
 /** The same declarations go to the model and the actual isolated type checker. */
 export function developmentCatalog() {
@@ -140,22 +180,22 @@ export function developmentCatalog() {
     deliveryGuidance: [
       CREATOR_S1_SUPPORT.authoringConstraints.usageMetrics,
       "技能生命周期用 classic.PreSkillUse/PostSkillUse（本应用扩展），matcher 用 skill_name；从 events/types 读取宿主固定身份与结果。Pre block 阻止激活，Post block 请求修订、preventContinuation 才终止。普通 Mod 不能吞掉必需业务 Hooks，原脚本不自动迁移；真实试用须新确认。",
-      "状态扩展用 scaffold(kind:state-extension) 生成真实 Function Mod、迁移计划与未执行测试入口，再 save/check/request_trial。默认只 hold；未确认原图、绑定原 writer 并实际验证前必须显示‘可执行决策骨架，未迁移状态’。inspect_raw.stateControl 保留原状态工具、Hooks、配置及知识来源；已有 Host authority 无需强制迁移。",
+      "状态扩展用 scaffold(kind:state-extension)→save/check/request_trial，生成真实Mod、迁移计划和未执行测试。未确认原图、绑定writer并实测前仅hold，显示‘可执行决策骨架，未迁移状态’。inspect_raw.stateControl保原工具/Hooks/配置/知识；Host authority无需强迁。",
       "创造者模式按自然语言需求选择复用、组合或编写；不要让用户先配置添加功能、常用搭配或执行步骤。连续修改先 list/read 更新当前开发组件，保留已有功能。",
-      "SDK路径须确定，事件literal。包内唯一具名/const函数可直接接SDK/on，形参不可写；局部闭包须不逃逸。原生ui.render根保留词法回调；helper不继承。逐方法检查；动态/外部调用、方法传递、SDK返回/存储未验证。32轮/256边，不新增授权。",
+      "SDK路径确定、事件literal。包内唯一具名/const函数可接SDK/on，形参只读、闭包不逃逸。原生ui.render根保留词法回调，helper不继承。逐方法检查；动态/外部调用、方法传递、SDK返回/存储未验证。32轮/256边，不增授权。",
       "组合用 mod_composition list 搜索摘要，details 按需读取配置 schema；stage 同轮累积并深合并配置，可引用真实模型、技能、MCP 和已保存步骤。save/apply_saved 保存套用命名组合，undo/cancel 撤销选择或取消排队。提交后结束本轮，再核对真实回执。",
       "用户参数在灵件清单 userConfig 声明，由原生参数表单绑定；缺必填项不批准执行。升级重命名或删除字段可在同份声明加入 userConfigSchema:{version:1,migrations:[{fromVersion:0,toVersion:1,changes:[{kind:'rename',from:'oldLabel',to:'label'}]}]}，并声明 cmbCompatibility:{modelProtocol:'result-v1',userConfigMigrations:'v1'}；后续版本逐一连续迁移，删除用 {kind:'remove',key:'字段名'}，不运行迁移脚本。迁移须原生确认，失败保留旧配置；导出不携带本机保存值、凭据或授权。",
-      "公共快捷指令应采用灵件专属名称，避免与已启用灵件重名。出现 MODS_COMMAND_CONFLICT 时修改本草稿的指令名称及使用说明，再重新请求试用；不要替用户关闭其他插件来绕开冲突。",
-      "试用状态先 list，按最新 trials.phase/error 回答；needs-approval 仅为快照，failed 是加载失败。勿循环轮询或重试；先读失败原因，再修复并申请确认。",
+      "快捷指令用灵件专属名称。MODS_COMMAND_CONFLICT须改本草稿指令名和说明再试用，不得关闭其他插件绕过。",
+      "先list，按最新trials.phase/error回答；needs-approval仅快照，failed是加载失败。先读原因、修复再申请，勿循环轮询/重试。",
       "优先 submit；失败按诊断修复，有效即结束本轮等确认。当前聊天恢复用 resume_trial，跨聊天复用用 request_reuse；安装仍须原生确认。",
       "交付说明触发、效果和必要设置，省略内部技术细节。",
       "说明实际聊天与生效状态；切回普通模式不停止试用。",
       "明确触发条件，例如 edit_file 完成后触发，不等于发送普通消息后触发。注册的命令写明参数示例。",
-      "需要文件、网络、模型、进程或业务能力时，可直接请求授权后的真实试用，无需先正式安装。确认绑定当前源码与目标，实际动作仍走宿主原权限；静态检查、隔离预览或批准都不是实际结果。",
-      "session.start 只登记指令和无副作用界面。真实文件、网络、模型及长期任务放到生效后用户触发的动作中；候选阶段禁止外部效果，失败时旧可用版保留。",
-      "真实动作后用读取或 platform.read/status 核对结果，不凭模型说明标完成。未知结果先读取核对，不自动重放；新权限更新须再次确认。",
-      "工作流进度通过 platform.list 发现当前宿主的 native.workflow/runs@1.0.0，再用 platform.read/subscribe/poll/unsubscribe 读取和观察原运行器；target 仅为 {kind:'current'}。状态不含提示词或完整日志，截断时用 inspect 动作的页偏移补读。工作树 agentIndex 为空表示原记录没有明确关联，不能按名称猜测。cancel 动作仍需原生确认并等待实际清理，不能把请求成功当作已清理。",
-      "result-v1 的 tool.call 返回包含 result 的对象；保留 next 返回的 ref 会保留原工具结果。追加说明用 context 字符串数组；通知须 await $.ui.toast(text)。",
+      "文件/网络/模型/进程/业务能力可直接申请真实试用，无需先安装。确认绑定当前源码和目标，执行沿原权限；静态检查、隔离预览和批准不是实际结果。",
+      "session.start仅登记指令/无副作用界面；文件/网络/模型/长期任务放生效后的用户动作。候选禁止外部效果，失败保留旧可用版。",
+      "动作后读取或platform.read/status核实，不凭模型说明标完成。未知结果先读、不重放；新增权限须确认。",
+      "工作流用platform.list发现native.workflow/runs@1.0.0，再read/subscribe/poll/unsubscribe观察原运行器，target仅{kind:'current'}。无提示词/完整日志；截断用inspect页偏移。agentIndex空表示无明确关联，禁按名猜。cancel沿原确认，等待真实清理；请求成功不等于已清理。",
+      "result-v1 tool.call返回{result}，保留next的ref以保原结果；追加说明用context字符串数组，通知await $.ui.toast(text)。",
       "制作轮中断后可在新的制作轮对未修改的草稿重新 request_trial；仍须等待新轮完成，不能报告已经生效。"
     ],
     package: {
@@ -208,8 +248,28 @@ export function developmentCatalogPage(
     return {
       contract: catalog.contract, section, query: exact, cursor,
       scope: "static-authoring-contract", grantsAuthority: false,
+      ...((exact.startsWith("agent.") || exact === "ui.view") && cursor === 0 ? {
+        usageExample: "const task=await $.agent.spawn({prompt:'核对指定任务',description:'核对'}); const status=await $.agent.status({agentId:task.agentId}); const page=await $.agent.messages({agentId:task.agentId,limit:50}); /* nextCursor 只用于同一任务；记录变化时从第一页重新读取。真实按钮回调中 await $.ui.view({agentId:task.agentId})；停止用 $.agent.stop。 */",
+        agentScope: "新增status/messages/stop/view仅普通本地父聊天、本源码摘要创建的真实子任务；模型/工具/目录仍由spawn原权限核对。messages是保留checkpoint原文分页，非完整审计转录：压缩前历史可能缺失，skippedMessages明确无法显示项。重启无活跃控制器标unknown，不自动重跑。ui.view仅真实按钮/提交/选择动作一次可请求；requested不是已显示，不改变父输入草稿/目标。agent.list仍保留原列表语义，列出项不等于有权读取。"
+      } : {}),
+      ...(exact.startsWith("mcp.") && cursor === 0 ? {
+        usageExample: "const catalog=await $.mcp.list(); const source=catalog.sources[0]; if(source){const connection=await $.mcp.connect(source.sourceId); if(connection.isConnected){const state=await $.mcp.status({server:connection.server}); /* Use only this lease's advertised real tool name with $.mcp.call. */ await $.mcp.disconnect({server:connection.server});}}",
+        mcpScope: "仅当前普通聊天Claw明确选中的id+配置摘要；先到搭配管理选择来源并保存应用。宿主管理命令、环境、凭证，作者不可传URL/command。connect暂仅stdio；HTTP/SSE、项目与子会话返回policy/范围拒绝。server是本组件独占opaque句柄；跨来源/过期不回退全局。list/status/disconnect为桌面扩展，读取不初始化。unknown表示清理未确认，不能重连；任务结束不自动断开，撤权/来源或选择变更/重载会清理。"
+      } : {}),
+      ...(exact === "ui.resolve" && cursor === 0 ? {
+        usageExample: DEVELOPMENT_LAYOUT_EXAMPLE,
+        layoutScope: "同一桌面声明树用于面板、页面、侧栏和工具栏；只影响插件内容，不替换外层授权/关闭控件。数字间距为8px单位，尺寸为字符/行或0..100%。无raw CSS/DOM/定位覆盖；精确属性见UiBoxProps/UiTextProps。"
+      } : {}),
+      ...(exact === "ui.place" && cursor === 0 ? {
+        usageExample: DEVELOPMENT_PLACED_EXAMPLE,
+        placedScope: "启动时只登记专属显示命令，用户在试用生效后运行show-checklist才放卡；候选预检查不能给活跃聊天放卡。id为1..64位字母数字_-，同来源id更新原位置。仅普通父聊天。props.id/plugin只读，pass画空。不入模型/转录，重启不恢复；真实压缩提交、关闭、撤权或来源替换清理。isPlaced仅表示surface已附着；false带requestId等待本进程界面，无requestId表示未登记。ui.scroll暂不支持Placed。"
+      } : {}),
       events, sdkMethods: methods,
       ...(registration ? { registration: "on.capability", event: "platform.action" } : {}),
+      ...(registration && cursor === 0 ? {
+        usageExample: DEVELOPMENT_SURFACE_EXAMPLE,
+        surfaceScope: "登记不等于打开。来源批准后，在原聊天的插件界面入口显式打开；openAction只初始化自己的Pane，关闭由宿主清理。v2交互仅允许只读查询与局部UI，不执行模型/网络/进程/写入或任务控制；有业务动作使用原v1队列及真实权限。placement仍在当前聊天内，不替换项目模式或全局设置。"
+      } : {}),
       matched: events.length + methods.length > 0,
       declarationAvailable: declarations.signatures.length > 0,
       content: text.slice(cursor, end), totalCharacters: text.length,

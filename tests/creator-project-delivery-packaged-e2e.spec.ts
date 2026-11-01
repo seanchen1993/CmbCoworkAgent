@@ -344,7 +344,7 @@ async function main() {
     assert.deepEqual(await page.evaluate(() => window.api.harnessBoard.localProjects.list()), [])
     if (combination) {
       const panel = await openCreatorProjectPreview(page)
-      await panel.getByRole("button", { name: "开始试用", exact: true }).click()
+      await panel.getByRole("button", { name: "准备试用环境", exact: true }).click()
       const preview = await until(
         () =>
           page.evaluate(

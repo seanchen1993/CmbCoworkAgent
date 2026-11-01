@@ -2,7 +2,7 @@ import { createHash } from "node:crypto"
 import type { Dirent, PathLike, Stats } from "node:fs"
 import { link, lstat, mkdir, mkdtemp, readdir, realpath, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { basename, dirname, join } from "node:path"
+import { basename, dirname, join, resolve } from "node:path"
 import { setImmediate as immediate } from "node:timers/promises"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { DERIVATION_LIMITS, snapshotDerivationSource } from "./derivation-source"
@@ -182,7 +182,15 @@ beforeEach(() => {
 afterEach(async () => {
   state.controls = {}
   expect(state.live).toBe(0)
-  for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true })
+  for (const root of roots.splice(0)) {
+    const target = resolve(root)
+    if (
+      dirname(target) !== resolve(tmpdir()) ||
+      !/^cmb-derivation-read-[A-Za-z0-9]+$/.test(basename(target))
+    )
+      throw Error("Unsafe derivation source test cleanup")
+    await rm(target, { recursive: true, force: true })
+  }
 })
 
 describe("derivation source content read ownership", () => {
@@ -422,11 +430,13 @@ describe("derivation source content read ownership", () => {
   it("retains the earliest DFS read error over a later metadata error and drains it", async () => {
     const root = await fixture({ "a.txt": "first", "z.txt": "later" })
     const first = deferred()
+    const firstReading = deferred()
     const later = deferred()
     const readError = Error("earlier read")
     const metadataError = Error("later metadata")
     state.controls.read = async (path) => {
       if (basename(path) === "a.txt") {
+        firstReading.resolve()
         await first.promise
         throw readError
       }
@@ -450,6 +460,9 @@ describe("derivation source content read ownership", () => {
     )
     try {
       await within(later.promise)
+      // Metadata traversal may reach z.txt before the pending open of a.txt completes.
+      // Observe the real read before asserting ownership; do not rely on filesystem timing.
+      await within(firstReading.promise)
       expect(settled).toBe(false)
       expect(state.live).toBeGreaterThan(0)
     } finally {

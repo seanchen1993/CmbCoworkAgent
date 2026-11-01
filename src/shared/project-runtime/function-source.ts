@@ -47,4 +47,30 @@ export interface ProjectFunctionSourceApi {
     pluginId: string
     compiledDigest: string
   }): Promise<ProjectFunctionSourceReview>
+  /** One explicit consent for the exact displayed package and its retained dependencies. */
+  approveRequired?(input: ProjectFunctionApprovalInput): Promise<ProjectFunctionSourceReview>
+}
+
+export interface ProjectFunctionApprovalInput {
+  projectId: string
+  projectVersion: number
+  packageDigest: string
+  workspace: string
+  sourceDigest?: string
+  dependencies: Array<{ pluginId: string; compiledDigest: string }>
+}
+
+export function projectFunctionApprovalInput(
+  review: ProjectFunctionSourceReview
+): ProjectFunctionApprovalInput {
+  return {
+    projectId: review.projectId,
+    projectVersion: review.projectVersion,
+    packageDigest: review.packageDigest,
+    workspace: review.workspace,
+    ...(review.source ? { sourceDigest: review.source.digest } : {}),
+    dependencies: (review.dependencies ?? [])
+      .map((source) => ({ pluginId: source.pluginId, compiledDigest: source.digest }))
+      .sort((a, b) => a.pluginId.localeCompare(b.pluginId))
+  }
 }

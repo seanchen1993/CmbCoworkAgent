@@ -238,12 +238,47 @@ it("checks connection invalidation after middleware finishes, without publishing
     .toContain("MODS_MCP_CONTEXT_EXPIRED")
 })
 
-it("keeps the unverified connection SDK out of the main release default guest", async () => {
-  const connectMcp = vi.fn<NonNullable<FunctionSessionHost["connectMcp"]>>()
+it("exposes the admitted connection SDK in default guests without inventing host success", async () => {
+  const connectMcp = vi.fn<NonNullable<FunctionSessionHost["connectMcp"]>>(
+    async (_plugin, _signal, run) => run(async () => ({
+      value: { isConnected: false, reason: "unapproved", message: "Select a source" },
+      assertCurrent: () => {}
+    })))
   const value = await session("", { connectMcp },
     '(async()=>{try{return await $.mcp.connect("own")}catch(error){return {error:String(error)}}})()')
-  expect(JSON.parse(String((await value.run("mcp", "{}")).text)).error).toContain("not a function")
-  expect(connectMcp).not.toHaveBeenCalled()
-  expect(SESSION_CAPABILITIES).not.toContain("mcp.connect")
+  expect(JSON.parse(String((await value.run("mcp", "{}")).text)))
+    .toMatchObject({ isConnected: false, reason: "unapproved" })
+  expect(connectMcp).toHaveBeenCalledOnce()
+  expect(SESSION_CAPABILITIES).toContain("mcp.connect")
   expect(SESSION_CAPABILITIES).toContain("mcp.call")
+})
+
+it("keeps the AbortSignal in call options and uses strict object arguments for desktop lease operations", async () => {
+  const connectMcp = vi.fn<NonNullable<FunctionSessionHost["connectMcp"]>>(
+    async (_plugin, signal, run) => {
+      expect(signal).toBeInstanceOf(AbortSignal)
+      return run(async input => {
+        expect(input).toEqual({ server: "selected" })
+        return { value: { isConnected: true, server: "devclaw-mcp:actual" }, assertCurrent: () => {} }
+      })
+    })
+  const manageMcp = vi.fn<NonNullable<FunctionSessionHost["manageMcp"]>>(
+    async (_plugin, method, input) => ({ method, ...input }))
+  const value = await session("", { connectMcp, manageMcp }, `(async()=>{
+    const result=await $.mcp.connect("selected",{signal:$.signal});
+    const list=await $.mcp.list({});
+    const status=await $.mcp.status({server:result.server});
+    const close=await $.mcp.disconnect({server:result.server});
+    const invalid=[];
+    for(const operation of [()=>$.mcp.status(result.server),()=>$.mcp.disconnect({server:result.server,url:"bad"}),()=>$.mcp.list({server:result.server})]){
+      try{await operation()}catch(error){invalid.push(String(error))}
+    }
+    return {list,status,close,invalid};
+  })()`)
+  const answer = JSON.parse(String((await value.run("mcp", "{}")).text))
+  expect(answer).toMatchObject({ list: { method: "list" },
+    status: { method: "status", server: "devclaw-mcp:actual" },
+    close: { method: "disconnect", server: "devclaw-mcp:actual" } })
+  expect(answer.invalid).toHaveLength(3)
+  expect(manageMcp).toHaveBeenCalledTimes(3)
 })

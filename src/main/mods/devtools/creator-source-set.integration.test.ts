@@ -356,6 +356,7 @@ it.each([
         )
       )
       expect(runtime.stages.map((stage: { id: string }) => stage.id)).toEqual([
+        "baseline",
         "definition",
         "solution",
         "code",

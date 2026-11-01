@@ -40,18 +40,18 @@ async function dismissModsTour(page: Page): Promise<void> {
 /** Opening an already visible panel must not toggle it closed or enter a hidden retained copy. */
 export async function openModsProgress(
   page: Page,
-  tab: "当前任务" | "结果" | "高级设置" = "当前任务"
+  tab: "当前任务" | "结果" | "输出与面板" | "高级设置" = "当前任务"
 ): Promise<Locator> {
   const panel = page.getByRole("complementary", { name: "任务进展", exact: true })
   if (!(await panel.isVisible()))
     await page.getByRole("button", { name: "查看任务进展", exact: true }).click()
-  await panel.getByRole("tab", { name: tab, exact: true }).click()
+  await panel.getByRole("tab", { name: tab === "结果" ? "输出与面板" : tab, exact: true }).click()
   return panel
 }
 
 export async function openModsResults(page: Page): Promise<void> {
-  const panel = await openModsProgress(page, "结果")
-  const records = panel.getByText("命令与完成记录", { exact: true })
+  const panel = await openModsProgress(page, "输出与面板")
+  const records = panel.getByText("命令与任务记录", { exact: true })
   if (!(await records.evaluate((element) => (element.parentElement as HTMLDetailsElement).open)))
     await records.click()
 }

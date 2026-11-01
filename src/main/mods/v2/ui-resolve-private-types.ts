@@ -1,5 +1,5 @@
 import type { QuickJSContext, QuickJSHandle, QuickJSRuntime } from "quickjs-emscripten"
-import type { FunctionUiSite } from "../../../shared/mods/v2/sites"
+import type { FunctionUiRenderComponent } from "../../../shared/mods/v2/sites"
 
 /** Utility/main host objects only. These are never ModJSON or guest-selected identifiers. */
 export interface FunctionUiResolveAssembly {
@@ -13,7 +13,7 @@ export interface FunctionUiResolvePeer {
   readonly context: QuickJSContext
   assertCurrent(): void
 }
-export type FunctionUiResolveComponent = "Pane" | FunctionUiSite
+export type FunctionUiResolveComponent = FunctionUiRenderComponent
 export interface FunctionUiResolveTarget {
   readonly assembly: FunctionUiResolveAssembly
   readonly consumer: FunctionUiResolvePeer

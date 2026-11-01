@@ -1,7 +1,35 @@
 import type { ModJson } from "../../../shared/mods/types"
 import type { FunctionSessionReadMethod } from "../../../shared/mods/v2/session"
+import type { FunctionSessionMessagePage, FunctionSessionPageInput } from "../../../shared/mods/v2/session"
 import { ModError } from "../errors"
 import { projectContextUsage } from "../../agent/context-usage"
+
+/** A bounded, exact checkpoint window without constructing any runtime or model. */
+export async function readColdFunctionSessionPage(
+  threadId: string, signal: AbortSignal, page: FunctionSessionPageInput
+): Promise<{ value: FunctionSessionMessagePage | null; assertLive(): void }> {
+  const { getDb, getThreadCore } = await import("../../db")
+  const { captureThreadIncarnation, matchesThreadIncarnation } =
+    await import("../../services/thread-incarnation")
+  signal.throwIfAborted()
+  const database = getDb()
+  const row = getThreadCore(threadId)
+  if (!row) throw new ModError("MODS_THREAD_MISSING")
+  const incarnation = captureThreadIncarnation(row)
+  const assertLive = () => {
+    signal.throwIfAborted()
+    const current = getThreadCore(threadId)
+    if (getDb() !== database || !current || !matchesThreadIncarnation(current, incarnation))
+      throw new ModError("MODS_CALL_SCOPE_CHANGED")
+  }
+  const { peekThreadCheckpointPath } = await import("../../storage")
+  const { readFunctionSessionPageInWorker } = await import("../../checkpointer/runtime-projection-client")
+  assertLive()
+  const value = await readFunctionSessionPageInWorker(
+    peekThreadCheckpointPath(threadId), threadId, signal, page)
+  assertLive()
+  return { value, assertLive }
+}
 
 /** No runtime/model construction, transcript migration, or display-log fallback. */
 export async function readColdFunctionSession(

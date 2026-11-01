@@ -98,11 +98,12 @@ export function ModsGuide() {
               </p>
               <ol className="list-decimal space-y-2 pl-5 text-muted-foreground marker:text-foreground">
                 <li>进入创造者模式；尚未选择本地项目时，先按提示选择目录。</li>
-                <li>用一句话说明需求并发送，助手会准备对应修改或组合。</li>
-                <li>需要新增权限时，核对页面显示的用途、权限和版本，再确认应用到这段聊天。</li>
+                <li>说明触发时机、要显示或输出什么，以及怎样判断成功；修改也在同一对话里继续。</li>
+                <li>打开插件创作工作区，按当前下一步准备试用，补齐必要参数并确认所列权限。</li>
                 <li>
-                  在聊天里实际使用并核对结果；要在其他聊天复用时，再说明“保存并在其他聊天复用”，确认对应保存卡片。
+                  开始执行并核对真实结果。项目试用先创建环境再开始执行；仅准备环境尚未运行。
                 </li>
+                <li>满意后保存插件，点击“开始使用”。项目插件进入原项目创建/需求流程；聊天功能进入对应聊天。</li>
               </ol>
               <details className="rounded-xl border p-3">
                 <summary className="cursor-pointer font-medium">

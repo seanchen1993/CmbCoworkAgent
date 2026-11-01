@@ -2,6 +2,22 @@ import { describe, expect, it, vi } from "vitest"
 import { createDevelopmentBridge } from "./development"
 
 describe("development preload bridge", () => {
+  it("forwards stage prompt identity and body without extending editing authority", async () => {
+    const invoke = vi.fn(async () => ({}))
+    const api = createDevelopmentBridge(invoke, () => () => {})
+    const scope = { threadId: "creator", expectedWorkspace: "workspace" }
+    const read = { ...scope, id: "report" }
+    const save = { ...read, revision: 1, sourceDigest: "a".repeat(64), stageId: "draft", body: "New" }
+    await api.listProjectPromptDrafts!(scope)
+    await api.readProjectStagePrompts!(read)
+    await api.saveProjectStagePrompt!(save)
+    expect(invoke.mock.calls).toEqual([
+      ["mods:development:list-project-prompt-drafts", scope],
+      ["mods:development:read-project-stage-prompts", read],
+      ["mods:development:save-project-stage-prompt", save]
+    ])
+  })
+
   it("forwards source-set choices without accepting filesystem paths or installation authority", async () => {
     const invoke = vi.fn(async () => ({}))
     const api = createDevelopmentBridge(invoke, () => () => {})

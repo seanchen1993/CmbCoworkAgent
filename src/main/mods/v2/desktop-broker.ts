@@ -36,6 +36,15 @@ export class FunctionDesktopBroker {
   private owners = new Map<string, Owner>()
   private pending = new Map<string, Pending>()
   constructor(private readonly writeClipboard: (text: string) => void) {}
+  isAttached(threadId: string): boolean { return this.owners.has(threadId) }
+  captureOwner(senderId: number, threadId: string, id: string): () => void {
+    this.assertOwner(senderId, threadId, id)
+    const owner = this.owners.get(threadId)
+    return () => {
+      this.assertOwner(senderId, threadId, id)
+      if (this.owners.get(threadId) !== owner) throw Error("MODS_DESKTOP_OWNER")
+    }
+  }
   attach(threadId: string, owner: string, senderId: number, send: Owner["send"], visible?: () => boolean): void {
     if (!threadId || threadId.length > 200 || !owner || owner.length > 100)
       throw Error("MODS_DESKTOP_OWNER")

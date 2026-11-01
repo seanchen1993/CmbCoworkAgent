@@ -329,7 +329,7 @@ export async function mutationCreatorJourney(input: {
       const card = panel.locator("article").filter({
         has: page.getByText(`${draft.name} · 版本 ${draft.revision}`, { exact: true })
       })
-      await card.getByRole("button", { name: "开始试用", exact: true }).click()
+      await card.getByRole("button", { name: "准备试用环境", exact: true }).click()
       const observed = await until(
         () =>
           page.evaluate(
@@ -623,7 +623,14 @@ export async function configureMutationProjectViaUi(input: {
       name: pending.dependency ? `依赖功能：${pending.source.name}` : "本包权限与参数",
       exact: true
     })
-    await section.getByRole("button", { name: label, exact: true }).click()
+    const aggregate = region.getByRole("button", { name: "确认以上权限并启用项目", exact: true })
+    if (await aggregate.count()) {
+      assert(
+        sources.every(({ source }) => source.configurationReady !== false),
+        "AUTOBIZ_CREATOR_PROVIDER_CONFIGURATION_REQUIRED"
+      )
+      await aggregate.click()
+    } else await section.getByRole("button", { name: label, exact: true }).click()
     // Observe the persisted consent; an extra refresh click must not replay the approval.
     const deadline = Date.now() + 30000
     let approved = false

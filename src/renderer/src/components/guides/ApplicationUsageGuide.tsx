@@ -8,7 +8,7 @@ import {
   subscribeApplicationUsageGuide
 } from "./application-usage-guide"
 
-const config = { guideId: "application-controls-walkthrough", revision: 1, maxShowCount: 1 }
+const config = { guideId: "application-controls-walkthrough", revision: 2, maxShowCount: 1 }
 
 /** The existing chat help button opens this walkthrough across the real application controls. */
 export function ApplicationUsageGuide({ active }: { active: boolean }) {

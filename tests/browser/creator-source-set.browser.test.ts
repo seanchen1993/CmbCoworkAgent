@@ -129,17 +129,17 @@ it("drops late source-set results and finally across thread/account changes", as
     sourceSet: { id: threadId, title: threadId, phase: "dependencies", dependencies: [] }
   })
   try {
-    await h.page.getByRole("button", { name: "选择作者源码目录", exact: true }).click()
+    await h.page.getByRole("button", { name: "选择插件源码文件夹", exact: true }).click()
     await expect.poll(() => pending.has("a")).toBe(true)
     await h.page.evaluate("window.fixture.switchTarget({threadId:'b',workspace:'C:/b'})")
-    await h.page.getByRole("button", { name: "选择作者源码目录", exact: true }).click()
+    await h.page.getByRole("button", { name: "选择插件源码文件夹", exact: true }).click()
     await expect.poll(() => pending.has("b")).toBe(true)
     pending.get("a")!(status("a"))
     await h.page.evaluate(
       "new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))"
     )
     expect(
-      await h.page.getByRole("button", { name: "选择作者源码目录", exact: true }).isDisabled()
+      await h.page.getByRole("button", { name: "选择插件源码文件夹", exact: true }).isDisabled()
     ).toBe(true)
     expect(await h.page.evaluate("window.fixture.accepted.length")).toBe(0)
     await h.page.evaluate("window.fixture.changeAccount()")
@@ -304,7 +304,7 @@ it("does not reopen the native directory picker after a busy import admission", 
     return { ...seed, enabled: true, drafts: [], trials: [] }
   })
   try {
-    await h.page.getByRole("button", { name: "选择作者源码目录", exact: true }).click()
+    await h.page.getByRole("button", { name: "选择插件源码文件夹", exact: true }).click()
     await h.page
       .getByRole("alert")
       .getByText(/本次操作尚未开始/)

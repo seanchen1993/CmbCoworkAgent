@@ -17,9 +17,15 @@ import { Element } from "../chat/FunctionPanes"
 import { windowPresentation } from "../../lib/window-presentation"
 import { functionSiteErrorCode } from "../../lib/function-site-recovery"
 import type { PlatformUiApi } from "../../../../shared/mods/v2/platform-ui-api"
+import { openClawSidebar } from "../../lib/claw-sidebar"
+import {
+  assertSurfaceDevelopmentCurrent, dismissPlatformSurfaceIntent, exactSurfaceEntries,
+  surfaceNavigationScopeCurrent, usePlatformSurfaceIntent
+} from "../../lib/platform-surface-intent"
 
 export type PlatformWorkspaceApi = PlatformUiApi
 interface OpenFrame {
+  scopeKey: string
   openId: string
   threadId: string
   address: PlatformSurfaceAddress
@@ -54,10 +60,12 @@ class SurfaceBoundary extends Component<
 export function PlatformWorkspace({
   threadId,
   active: requestedActive,
+  scopeKey: suppliedScopeKey,
   api: supplied
 }: {
   threadId: string
   active: boolean
+  scopeKey?: string
   api?: PlatformWorkspaceApi
 }): React.JSX.Element | null {
   const [presentable, setPresentable] = useState(() =>
@@ -76,10 +84,13 @@ export function PlatformWorkspace({
     }
   }, [requestedActive])
   const active = requestedActive && presentable
+  const scopeKey = suppliedScopeKey ?? threadId
+  const navigation = usePlatformSurfaceIntent()
   const api = supplied ?? (window.api.mods as unknown as PlatformWorkspaceApi)
-  const scope = useRef({ threadId, active, epoch: 0 })
-  if (scope.current.threadId !== threadId || scope.current.active !== active)
-    scope.current = { threadId, active, epoch: scope.current.epoch + 1 }
+  const scope = useRef({ threadId, scopeKey, active, epoch: 0 })
+  if (scope.current.threadId !== threadId || scope.current.active !== active ||
+    scope.current.scopeKey !== scopeKey)
+    scope.current = { threadId, scopeKey, active, epoch: scope.current.epoch + 1 }
   const epoch = scope.current.epoch
   const mounted = useRef(false)
   useEffect(() => {
@@ -92,12 +103,13 @@ export function PlatformWorkspace({
     () =>
       mounted.current &&
       scope.current.threadId === threadId &&
+      scope.current.scopeKey === scopeKey &&
       scope.current.active &&
       scope.current.epoch === epoch,
-    [threadId, epoch]
+    [threadId, scopeKey, epoch]
   )
-  const [catalog, setCatalog] = useState<{ threadId: string; value: PlatformSurfaceCatalog }>()
-  const [behaviors, setBehaviors] = useState<{ threadId: string; value: PlatformBehaviorCatalog }>()
+  const [catalog, setCatalog] = useState<{ scopeKey: string; value: PlatformSurfaceCatalog }>()
+  const [behaviors, setBehaviors] = useState<{ scopeKey: string; value: PlatformBehaviorCatalog }>()
   const [frame, setFrame] = useState<OpenFrame>()
   const [busy, setBusy] = useState(false)
   const [reading, setReading] = useState<FrameRead>()
@@ -106,6 +118,7 @@ export function PlatformWorkspace({
   const [error, setError] = useState("")
   const [showBehaviors, setShowBehaviors] = useState(false)
   const [cleanup, setCleanup] = useState<{ threadId: string; address: PlatformSurfaceAddress }>()
+  const [prepared, setPrepared] = useState(false)
   const request = useRef(0)
   const invalidateRequests = useCallback(() => {
     request.current++
@@ -125,9 +138,11 @@ export function PlatformWorkspace({
       const existing = retirements.current.get(key)
       if (existing) return existing
       const closing = api.platformSurfaceClose(previous.threadId, previous.address).catch(() => {
-        setCleanup({ threadId: previous.threadId, address: previous.address })
-        if (scope.current.threadId === previous.threadId)
+        if (mounted.current && scope.current.threadId === previous.threadId &&
+          scope.current.scopeKey === previous.scopeKey) {
+          setCleanup({ threadId: previous.threadId, address: previous.address })
           setError("页面清理尚未确认，可停用页面后核对状态")
+        }
         console.warn("[PlatformSurface] Page cleanup unconfirmed", {
           threadId: previous.threadId,
           surface: previous.address.key
@@ -145,14 +160,16 @@ export function PlatformWorkspace({
       const previous = frameRef.current
       if (previous?.threadId === threadId) void retireFrame(previous)
     },
-    [threadId, requestedActive, retireFrame]
+    [threadId, scopeKey, requestedActive, retireFrame]
   )
   useEffect(() => {
     setBusy(false)
     setError("")
     setFrame(undefined)
     setShowBehaviors(false)
-  }, [threadId, requestedActive])
+    setPrepared(false)
+    setCleanup(undefined)
+  }, [threadId, scopeKey, requestedActive])
   useEffect(() => {
     if (active) setBusy(false)
   }, [active])
@@ -165,14 +182,14 @@ export function PlatformWorkspace({
         api.platformBehaviorList(threadId)
       ])
       if (!current() || ticket !== request.current) return
-      setCatalog({ threadId, value: surfaces })
-      setBehaviors({ threadId, value: behavior })
+      setCatalog({ scopeKey, value: surfaces })
+      setBehaviors({ scopeKey, value: behavior })
       setError((previous) => previous === "扩展暂时不可用，聊天仍可继续" ? "" : previous)
       await refreshFrame.current()
     } catch {
       if (current() && ticket === request.current) setError("扩展暂时不可用，聊天仍可继续")
     }
-  }, [api, threadId, current])
+  }, [api, threadId, scopeKey, current])
   useEffect(() => {
     if (!active) return
     let running = false,
@@ -212,14 +229,15 @@ export function PlatformWorkspace({
       window.removeEventListener("mods:configuration-changed", schedule)
     }
   }, [active, threadId, refresh, invalidateRequests])
-  const rows = catalog?.threadId === threadId ? catalog.value : undefined
-  const policy = behaviors?.threadId === threadId ? behaviors.value : undefined
-  const shown = active && frame?.threadId === threadId ? frame : undefined
+  const rows = catalog?.scopeKey === scopeKey ? catalog.value : undefined
+  const policy = behaviors?.scopeKey === scopeKey ? behaviors.value : undefined
+  const shown = active && frame?.threadId === threadId && frame.scopeKey === scopeKey ? frame : undefined
   refreshFrame.current = () => {
     const opened = frameRef.current
     if (
       !opened ||
       opened.threadId !== threadId ||
+      opened.scopeKey !== scopeKey ||
       !current() ||
       retirements.current.has(JSON.stringify([opened.threadId, opened.openId]))
     )
@@ -328,15 +346,15 @@ export function PlatformWorkspace({
     window.addEventListener("keydown", key)
     return () => window.removeEventListener("keydown", key)
   }, [shown, showBehaviors, closePage])
-  const open = async (entry: PlatformSurfaceEntry) => {
-    if (!rows || busy || !current()) return
+  const open = async (entry: PlatformSurfaceEntry, suppliedCatalog = rows, reserved = false) => {
+    if (!suppliedCatalog || (busy && !reserved) || !current()) return
     if (shown?.address.key === entry.key) {
       await refreshFrame.current()
       return
     }
     setBusy(true)
     setError("")
-    const address = { key: entry.key, revision: rows.revision }
+    const address = { key: entry.key, revision: suppliedCatalog.revision }
     const openId = crypto.randomUUID()
     try {
       if (shown && shown.address.key !== entry.key) {
@@ -348,6 +366,7 @@ export function PlatformWorkspace({
       const ownedAddress = { ...address, openId: value.openId }
       if (!current()) {
         void retireFrame({
+          scopeKey,
           openId,
           threadId,
           address: ownedAddress,
@@ -357,6 +376,7 @@ export function PlatformWorkspace({
         return
       }
       setFrame({
+        scopeKey,
         openId,
         threadId,
         address: ownedAddress,
@@ -373,6 +393,33 @@ export function PlatformWorkspace({
       if (current()) setBusy(false)
     }
   }
+  useEffect(() => {
+    if (!navigation || !active || busy || navigation.threadId !== threadId) return
+    if (!surfaceNavigationScopeCurrent(navigation)) {
+      dismissPlatformSurfaceIntent(navigation.id)
+      return
+    }
+    // Claim once; subsequent renders never replay this explicit user's open request.
+    dismissPlatformSurfaceIntent(navigation.id)
+    setBusy(true)
+    setError("")
+    void (async () => {
+      try {
+        if (navigation.developmentComponentId)
+          await assertSurfaceDevelopmentCurrent(navigation, navigation.developmentComponentId,
+            navigation.compiledDigest, navigation.developmentRevision)
+        if (!current() || !surfaceNavigationScopeCurrent(navigation)) return
+        const value = await api.platformSurfaceList(threadId)
+        if (!current() || !surfaceNavigationScopeCurrent(navigation)) return
+        const entry = exactSurfaceEntries(value, navigation).find(row => row.key === navigation.entryKey)
+        if (!entry) throw Error("此插件的界面或许可已变化，请回使用入口重新核对。")
+        setCatalog({ scopeKey, value })
+        await open(entry, value, true)
+      } catch (cause) {
+        if (current()) setError(cause instanceof Error ? cause.message : "界面未打开，请重新核对。")
+      } finally { if (current()) setBusy(false) }
+    })()
+  }, [navigation, active, busy, threadId, scopeKey, current])
   const disable = async () => {
     if (!shown || busy || !current()) return
     setBusy(true)
@@ -431,7 +478,10 @@ export function PlatformWorkspace({
       }
     }
   }
-  if (!active || (!rows?.entries.length && !rows?.canPrepare && !policy?.bindings.length && !error)) return null
+  const directoryErrors = [...(rows?.errors ?? []), ...(policy?.errors ?? [])
+    .filter(message => !message.startsWith("能力尚未登记；"))]
+  if (!active || (!rows?.entries.length && !rows?.canPrepare && !policy?.bindings.length &&
+    !directoryErrors.length && !prepared && !error)) return null
   const button = (entry: PlatformSurfaceEntry) => (
     <span key={entry.key} className="inline-flex shrink-0 items-center">
       <button
@@ -470,10 +520,10 @@ export function PlatformWorkspace({
             disabled={busy} onClick={() => {
               setBusy(true)
               void api.platformSurfacePrepare!(threadId).then(async () => {
-                if (current()) await refresh()
+                if (current()) { setPrepared(true); await refresh() }
               }, () => { if (current()) setError("扩展视图未准备好，请核对插件状态") })
                 .finally(() => { if (current()) setBusy(false) })
-            }}>打开扩展视图</button>
+            }}>查找可用插件界面</button>
         )}
         {rows?.entries
           .filter((entry) =>
@@ -505,12 +555,20 @@ export function PlatformWorkspace({
           {rows.entries.filter((entry) => entry.placement === "sidebar").map(button)}
         </aside>
       )}
-      {error && (
+      {(error || directoryErrors.length > 0 || (prepared && !rows?.entries.length)) && (
         <div
           role="alert"
           className="pointer-events-auto absolute left-2 top-12 flex gap-2 rounded border bg-background p-2 text-sm"
         >
-          {error}
+          <div>
+            {error || (directoryErrors.length ? "插件界面尚未就绪" : "没有找到独立界面，可继续使用原聊天中的命令或规则。")}
+            {directoryErrors.map((message, index) => <p key={index}>{message}</p>)}
+            <button className="mr-2 underline" onClick={() => void refresh()}>重新核对</button>
+            <button className="mr-2 underline" onClick={() => {
+              closePage(); openClawSidebar("configuration")
+            }}>查看当前功能与配置</button>
+            <button className="underline" onClick={closePage}>返回聊天继续修改</button>
+          </div>
           {reading &&
             reading.frame.openId === shown?.openId &&
             !reading.running &&

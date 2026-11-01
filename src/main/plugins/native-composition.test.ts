@@ -435,12 +435,31 @@ describe("single-source native composition", () => {
       .checks.find((check) => check.kind === "action")!
     if (codeCheck.kind !== "action") throw Error("FIXTURE_CHECK_MISSING")
     codeCheck.config = { nativeCompositionProvider: { pluginId: "forged" } }
-    expect(() =>
+    // Dependency preflight wraps the exact binding failure in its structured diagnostic.
+    let conflictError: unknown
+    try {
       compileNativeComposition(conflict, {
         files: readNativeCompositionFiles(businessRoot, source),
         actionCatalog
       })
-    ).toThrow("PROVIDER_IDENTITY_CONFLICT")
+    } catch (error) {
+      conflictError = error
+    }
+    expect(conflictError).toMatchObject({
+      message: "NATIVE_COMPOSITION_PROVIDER_CONTRACT_MISMATCH",
+      dependencies: expect.arrayContaining([
+        expect.objectContaining({
+          usedBy: "code.business",
+          state: "contract-mismatch",
+          issues: expect.arrayContaining([
+            {
+              code: "PROVIDER_SCHEMA_OR_CONFIG_INVALID",
+              detail: "NATIVE_COMPOSITION_PROVIDER_IDENTITY_CONFLICT"
+            }
+          ])
+        })
+      ])
+    })
     const incompatibleCatalog = actionCatalog.map((action) =>
       action.actionId === "code"
         ? {

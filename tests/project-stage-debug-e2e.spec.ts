@@ -199,7 +199,7 @@ async function main() {
       "original creator tools prepare trial"
     )
     let panel = await showAuthor()
-    const create = panel.getByRole("button", { name: "开始试用", exact: true })
+    const create = panel.getByRole("button", { name: "准备试用环境", exact: true })
     assert(await create.isEnabled())
     assert.equal(await panel.getByRole("checkbox").count(), 0)
     await create.click()

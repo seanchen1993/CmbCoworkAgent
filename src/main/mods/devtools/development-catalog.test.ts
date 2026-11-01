@@ -49,6 +49,9 @@ it("extracts a real SDK method and UI element contracts, with exact independent 
   }
   expect(content).toContain("resolve(event:UiEvent):UiElements")
   expect(content).toContain("export interface UiElements")
+  expect(content).toContain("export interface UiBoxProps")
+  expect(content).toContain("minWidth?:number|string")
+  expect(content).toContain("flexWrap?")
   expect(content).toContain("Text(props:")
   expect(content).not.toContain("PlatformDescriptor")
 })

@@ -28,7 +28,7 @@ export function FunctionPluginApproval({
       {needsApproval && (
         <div className="space-y-1 text-xs leading-relaxed text-muted-foreground">
           <p>
-            允许此版本读取项目、添加工具与界面、调用已配置的模型（会产生实际用量）。写文件与执行命令仍需批准最终参数。
+            允许此版本读取项目、添加工具与界面、使用已选的 MCP 服务，以及创建和管理自己的子任务。模型调用会产生实际用量；写文件与执行命令仍需批准最终参数。
           </p>
           <p className="break-all">授权范围：{workspace}，同目录聊天共用。</p>
         </div>
@@ -37,6 +37,7 @@ export function FunctionPluginApproval({
         <summary className="cursor-pointer font-medium">权限与版本详情</summary>
         <p className="pt-2 leading-relaxed text-muted-foreground">
           允许注册命令和主助手的自定义工具、读取项目文件与会话标识、保存偏好、打开交互组件、调用或拦截工具及调用已配置的模型。
+          MCP 仅连接此聊天明确选择的服务，凭据由应用管理。插件只能读取或停止自己在当前聊天创建的子任务；查看子任务为只读，当前输入目标不变。
           写文件和执行命令仍需批准最终参数；即时查询命令不能执行写操作。
           模型调用自定义工具时可读取项目，不能借此自动执行写操作。
           模型请求会产生实际用量，限每插件每项目每分钟 30 次及 32768 个预留输出 Token。

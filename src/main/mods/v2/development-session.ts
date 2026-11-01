@@ -44,6 +44,7 @@ export const DEVELOPMENT_EVENT_CAPABILITIES = Object.freeze([
 ])
 export const DEVELOPMENT_CAPABILITIES = Object.freeze([
   "ui.open",
+  "ui.place",
   "ui.close",
   "ui.panes",
   "ui.resolve",

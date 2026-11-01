@@ -470,7 +470,7 @@ async function main() {
     await page.getByText("Composition A+B", { exact: true }).first().click()
     assert.equal(await page.locator("textarea.composer-textarea").count(), 1)
     const configuration = await openModsProgress(page, "高级设置")
-    await configuration.getByText("查看这套组合的设置", { exact: true }).click()
+    await configuration.getByText("查看技能、工具与模型", { exact: true }).click()
     await configuration.locator("dd").filter({ hasText: saved.definition.name }).waitFor()
     await page.screenshot({ path: join(artifacts, "composition-sidebar.png") })
     pass("Production chat has one composer and a separate Claw sidebar")

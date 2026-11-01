@@ -3,6 +3,7 @@ export const FUNCTION_SDK_METHODS = [
   "platform.list", "platform.read", "platform.subscribe", "platform.poll", "platform.unsubscribe",
   "platform.publish", "platform.act", "platform.cancel", "platform.status",
   "agent.list",
+  "agent.status", "agent.messages", "agent.stop",
   "agent.register",
   "agent.spawn",
   "clock.after",
@@ -22,7 +23,7 @@ export const FUNCTION_SDK_METHODS = [
   "fs.stat",
   "fs.write",
   "http.fetch",
-  "mcp.call",
+  "mcp.call", "mcp.connect", "mcp.list", "mcp.status", "mcp.disconnect",
   "model.classify",
   "model.complete",
   "model.fork",
@@ -70,10 +71,12 @@ export const FUNCTION_SDK_METHODS = [
   "ui.log",
   "ui.notice",
   "ui.open",
+  "ui.place",
   "ui.panes",
   "ui.resolve",
   "ui.scroll",
   "ui.selection",
   "ui.status",
-  "ui.toast"
+  "ui.toast",
+  "ui.view"
 ] as const

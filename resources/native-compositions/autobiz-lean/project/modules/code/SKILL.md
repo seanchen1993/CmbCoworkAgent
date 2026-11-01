@@ -8,3 +8,5 @@ description: 代码验证与合并
 生产缺陷保留一次有界 source_bug 自动修复。test_bug 会以 LEAN_TEST_CHANGE_REVIEW_REQUIRED 停止并保留原失败证据：先审查测试变更与原验收要求，通过明确的修订流程创建新运行；不能改写旧失败记录、降低断言后自行继续，或重放状态未知的合并/发布动作。
 
 workflow与action lock均从Host固定插件包根目录读取，业务产物从项目工作区读取。仅完成本阶段。feature在全任务一致，输出UTF-8/LF。缺失事实要澄清，失败要修实际产物；不得删检查、改上游或自报批准。Python使用python -I -B -X utf8，stdin/stdout严格UTF-8。完整校验输入不受初始阅读清单影响。
+
+启动方式：workflow start 的 scriptPath 只接受工作区内脚本或本线程已登记的工作流脚本，不能直接传工作区外的固定插件包路径。读取该包内工作流的完整原文字节后，可以通过 script 参数逐字内联提交（保留空白与末尾换行）；也可按权限把原文件逐字复制到当前工作区的独立临时脚本，核对与 action lock 固定摘要一致后通过 scriptPath 启动。不得重写、格式化或节选脚本，不硬编码安装路径，不同时传入覆盖 inline 的外部 scriptPath。两种方式都仍需原权限审批，且 code.verify 只接受固定摘要与真实执行回执。

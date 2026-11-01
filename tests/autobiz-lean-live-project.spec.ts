@@ -15,8 +15,13 @@ import {
 } from "./support/project-unified-native-journey"
 import { readProjectSource } from "../src/main/mods/devtools/project-source"
 import { compileNativeComposition } from "../src/main/plugins/native-composition"
+import { installLiveNativeProcessApprovals } from "./support/live-native-process-approvals"
+import { selectLiveStageOperation } from "./support/live-project-stage-operation"
+import { assertLeanResumeProject, prepareLeanResume } from "./support/live-lean-resume"
+import { configureLiveRepositoryIdentity } from "./support/live-repository-identity"
 import {
   createHeadlessProjectCompositionLaunch,
+  existingProjectCompositionEnvironment,
   projectCompositionEnvironment,
   projectCompositionCandidate
 } from "./support/project-composition-e2e-fixtures"
@@ -30,8 +35,22 @@ async function main() {
   assert.equal(process.env.COMPOSITION_E2E_PACKAGED_DIR, undefined, "NO_PACKAGING_ALLOWED")
   const candidate = projectCompositionCandidate(root)
   assert.equal(candidate.sha256, process.env.CREATOR_E2E_EXPECTED_SHA256, "LATEST_BUNDLE_REQUIRED")
-  process.env.COMPOSITION_E2E_ARTIFACT_ROOT = join(root, "output/lean-live-20261030")
-  const fixture = projectCompositionEnvironment(root)
+  process.env.COMPOSITION_E2E_ARTIFACT_ROOT ??= join(root, "output/lean-live-20261031")
+  const resume = process.env.CREATOR_LEAN_RESUME_RUN
+    ? prepareLeanResume({
+        run: process.env.CREATOR_LEAN_RESUME_RUN,
+        artifactRoot: process.env.COMPOSITION_E2E_ARTIFACT_ROOT,
+        projectId: process.env.CREATOR_LEAN_RESUME_PROJECT_ID ?? "",
+        appDigest: candidate.sha256,
+        sourceDigest: process.env.CREATOR_LEAN_SOURCE_DIGEST ?? "",
+        feedbackPath: process.env.CREATOR_LEAN_RESUME_FEEDBACK_FILE ?? ""
+      })
+    : undefined
+  assert(!resume || !uiJourney, "LEAN_RESUME_PUBLIC_IPC_REQUIRED")
+  const fixture = resume
+    ? existingProjectCompositionEnvironment(root, resume.isolated)
+    : projectCompositionEnvironment(root)
+  const evidenceDirectory = resume?.directory ?? fixture.isolated
   fixture.env.CMB_MODS_E2E = "0"
   const modelId = process.env.CMB_CREATOR_LIVE_MODEL_ID ?? "claude"
   const configHome = process.env.CMB_CREATOR_LIVE_CONFIG_HOME ?? join(homedir(), ".cmbcoworkagent")
@@ -63,42 +82,49 @@ async function main() {
     interface: "Production Electron and public IPC; harness decisions are automated and disclosed",
     knowledgeScope: "Only the explicitly bound small inventory knowledge directory is evaluated",
     isolated: fixture.isolated,
+    evidenceDirectory,
+    ...(resume ? { resumedAttempt: resume.attempt, feedback: resume.feedback } : {}),
     events
   }
-  const save = (name = "evidence.json", value: unknown = evidence) =>
-    writeFileSync(join(fixture.isolated, name), redact(JSON.stringify(value, null, 2)))
+  const save = (name = "evidence.json", value: unknown = evidence) => {
+    const text = redact(JSON.stringify(value, null, 2))
+    writeFileSync(join(evidenceDirectory, name), text)
+    if (
+      resume &&
+      ["pending-approval.json", "pending-user-input.json", "pending-model-input.json"].includes(
+        name
+      )
+    )
+      writeFileSync(join(fixture.isolated, name), text)
+  }
   save()
   const goal =
     "实现本地Node.js ESM库存预留模块，feature使用inventory-reservation。导出createInventory(initialStock)，返回reserve(orderId,sku,quantity)和getStock(sku)。初始库存用对象映射SKU到非负整数。reserve要求非空字符串订单ID与SKU；数量必须为number类型的有限正整数，严格拒绝0、负数、小数、NaN、Infinity、字符串、布尔及null。SKU不存在或库存不足须抛错，失败既不扣库存也不占用订单ID。成功时返回含orderId、sku、quantity的结果并扣减库存；同订单同SKU同数量重试返回原结果且不再次扣减，同订单不同参数必须冲突报错且库存不变。对库存10的SKU-1完整验收：预留3后余7，重试仍7，预留8失败仍7，失败订单随后预留2应成功余5。不得联网、发布或推送；只交付本地代码、真实Node编译/单元/E2E证据与归档。原始需求与知识约束必须贯穿五阶段，不得自称人类已批准。"
   const knowledge = join(fixture.isolated, "knowledge")
-  mkdirSync(knowledge)
-  writeFileSync(
-    join(knowledge, "AGENTS.md"),
-    "# 库存服务约束\nINVENTORY_ATOMICITY_RULE: 验证失败必须保持库存和成功订单记录均不变。仅本地交付，禁止远程发布。\n"
-  )
-  writeFileSync(
-    join(knowledge, "inventory.md"),
-    "---\ntitle: 库存幂等边界\ntype: Service Knowledge\ndeploy_unit: inventory-api\n---\nINVENTORY_IDEMPOTENCY_RULE: 仅成功预留占用订单ID；相同订单的不同参数必须拒绝。数量严格限定number有限正整数，不能隐式类型转换。\n"
-  )
-  writeFileSync(
-    join(fixture.workspace, "README.md"),
-    "# Inventory reservation\nIndependent live acceptance workspace.\n"
-  )
-  for (const args of [
-    ["init"],
-    ["add", "README.md"],
-    [
-      "-c",
-      "user.name=Lean Acceptance",
-      "-c",
-      "user.email=lean@example.invalid",
-      "commit",
-      "-m",
-      "chore: initialize independent inventory project"
-    ]
-  ]) {
-    const result = spawnSync("git", args, { cwd: fixture.workspace, encoding: "utf8" })
-    assert.equal(result.status, 0, result.stderr)
+  if (!resume) {
+    mkdirSync(knowledge)
+    writeFileSync(
+      join(knowledge, "AGENTS.md"),
+      "# 库存服务约束\nINVENTORY_ATOMICITY_RULE: 验证失败必须保持库存和成功订单记录均不变。仅本地交付，禁止远程发布。\n"
+    )
+    writeFileSync(
+      join(knowledge, "inventory.md"),
+      "---\ntitle: 库存幂等边界\ntype: Service Knowledge\ndeploy_unit: inventory-api\n---\nINVENTORY_IDEMPOTENCY_RULE: 仅成功预留占用订单ID；相同订单的不同参数必须拒绝。数量严格限定number有限正整数，不能隐式类型转换。\n"
+    )
+    writeFileSync(
+      join(fixture.workspace, "README.md"),
+      "# Inventory reservation\nIndependent live acceptance workspace.\n"
+    )
+    const initialized = spawnSync("git", ["init"], { cwd: fixture.workspace, encoding: "utf8" })
+    assert.equal(initialized.status, 0, initialized.stderr)
+    configureLiveRepositoryIdentity(fixture.isolated, fixture.workspace)
+    for (const args of [
+      ["add", "README.md"],
+      ["commit", "-m", "chore: initialize independent inventory project"]
+    ]) {
+      const result = spawnSync("git", args, { cwd: fixture.workspace, encoding: "utf8" })
+      assert.equal(result.status, 0, result.stderr)
+    }
   }
   for (const command of ["node", "python", "git"]) {
     const result = spawnSync(command, ["--version"], { encoding: "utf8" })
@@ -150,7 +176,7 @@ async function main() {
         }
       result += decoder.decode()
       response.end()
-      writeFileSync(join(fixture.isolated, `response-${number}.txt`), redact(result))
+      writeFileSync(join(evidenceDirectory, `response-${number}.txt`), redact(result))
       events.push({ request: number, status: upstream.status, elapsedMs: Date.now() - startedAt })
       save()
     } catch (error) {
@@ -170,6 +196,10 @@ async function main() {
     app = await createHeadlessProjectCompositionLaunch(root, fixture, {
       unobtrusivePresentation: true
     })()
+    await app.evaluate(installLiveNativeProcessApprovals, {
+      isolated: fixture.isolated,
+      workspace: fixture.workspace
+    })
     page = await app.firstWindow({ timeout: 60000 })
     await page.waitForFunction(() => Boolean(window.api?.harnessBoard?.localProjects))
     await page.evaluate("window.__name = value => value")
@@ -208,11 +238,12 @@ async function main() {
       )
       assert(result.success, JSON.stringify(result))
     }
-    for (const name of ["rules", "knowledge", "delivery"])
-      await install(
-        archive(join(root, "resources/native-compositions/autobiz-lean/providers", name)),
-        `${name}.zip`
-      )
+    if (!resume)
+      for (const name of ["rules", "knowledge", "delivery"])
+        await install(
+          archive(join(root, "resources/native-compositions/autobiz-lean/providers", name)),
+          `${name}.zip`
+        )
     save(
       "provider-status-before.json",
       await page.evaluate((id) => window.api.mods.status(id), threadId)
@@ -236,9 +267,33 @@ async function main() {
       "provider-status-after.json",
       await page.evaluate((id) => window.api.mods.status(id), threadId)
     )
+    const selectedSource = process.env.CREATOR_LEAN_PROJECT_SOURCE
     const source = await readProjectSource(
-      join(root, "resources/native-compositions/autobiz-lean/project")
+      selectedSource ?? join(root, "resources/native-compositions/autobiz-lean/project")
     )
+    if (resume)
+      assert.equal(source.bundle.digest, resume.sourceDigest, "LEAN_RESUME_SOURCE_CHANGED")
+    if (selectedSource) {
+      assert.match(
+        process.env.CREATOR_LEAN_SOURCE_DIGEST ?? "",
+        /^[a-f0-9]{64}$/,
+        "EXPLICIT_LEAN_SOURCE_DIGEST_REQUIRED"
+      )
+      assert.equal(
+        source.bundle.digest,
+        process.env.CREATOR_LEAN_SOURCE_DIGEST,
+        "LEAN_SOURCE_DIGEST_CHANGED"
+      )
+    }
+    save("authoring-source-provenance.json", {
+      root: source.root,
+      bundleDigest: source.bundle.digest,
+      files: source.bundle.files.map((file) => ({
+        path: file.path,
+        bytes: Buffer.byteLength(file.text),
+        sha256: sha(file.text)
+      }))
+    })
     const declaration = source.bundle.files.find((file) => file.path === "composition/source.json")!
     const compiled = compileNativeComposition(JSON.parse(declaration.text), {
       files: source.bundle.files.map((file) => ({
@@ -247,41 +302,52 @@ async function main() {
       })),
       actionCatalog: actions
     })
+    const pluginName = JSON.parse(
+      compiled.files.find((file) => file.path === "plugin.json")!.bytes.toString("utf8")
+    ).name as string
     const zip = new AdmZip()
     for (const file of compiled.files) zip.addFile(file.path, file.bytes)
     save("compiled-provenance.json", { lock: compiled.lock, actionLock: compiled.actionLock })
-    await install([...zip.toBuffer()], "autobiz-lean.zip")
-    const template = await page.evaluate(async () =>
-      (await window.api.harnessBoard.localProjects.templates()).find(
-        (item) => item.name === "autobiz-lean"
-      )
+    if (!resume) await install([...zip.toBuffer()], `${pluginName}.zip`)
+    const template = await page.evaluate(
+      async (name) =>
+        (await window.api.harnessBoard.localProjects.templates()).find(
+          (item) => item.name === name
+        ),
+      pluginName
     )
     assert(template && !template.unavailableReason, "LEAN_TEMPLATE_UNAVAILABLE")
-    let view = uiJourney
-      ? await createUnifiedHostProject(app, page, {
-          name: "库存预留真实模型验收",
-          workspace: fixture.workspace,
-          installedPluginId: template.installedPluginId,
-          pluginName: template.name,
-          version: template.version,
-          goal
-        })
-      : await page.evaluate(
-          async ({ workspace, goal }) => {
-            const template = (await window.api.harnessBoard.localProjects.templates()).find(
-              (item) => item.name === "autobiz-lean"
-            )
-            if (!template || template.unavailableReason) throw Error("LEAN_TEMPLATE_UNAVAILABLE")
-            return window.api.harnessBoard.localProjects.create({
-              name: "库存预留真实模型验收",
-              workspace,
-              installedPluginId: template.installedPluginId,
-              goal,
-              expectedTemplate: template.expectedTemplate
-            })
-          },
-          { workspace: fixture.workspace, goal }
+    let view = resume
+      ? await page.evaluate(
+          (id) => window.api.harnessBoard.localProjects.get(id),
+          resume.initial.projectId
         )
+      : uiJourney
+        ? await createUnifiedHostProject(app, page, {
+            name: "库存预留真实模型验收",
+            workspace: fixture.workspace,
+            installedPluginId: template.installedPluginId,
+            pluginName: template.name,
+            version: template.version,
+            goal
+          })
+        : await page.evaluate(
+            async ({ workspace, goal, pluginName }) => {
+              const template = (await window.api.harnessBoard.localProjects.templates()).find(
+                (item) => item.name === pluginName
+              )
+              if (!template || template.unavailableReason) throw Error("LEAN_TEMPLATE_UNAVAILABLE")
+              return window.api.harnessBoard.localProjects.create({
+                name: "库存预留真实模型验收",
+                workspace,
+                installedPluginId: template.installedPluginId,
+                goal,
+                expectedTemplate: template.expectedTemplate
+              })
+            },
+            { workspace: fixture.workspace, goal, pluginName }
+          )
+    if (resume) assertLeanResumeProject(view, resume.initial)
     evidence.projectId = view.project.projectId
     evidence.interface = uiJourney
       ? "Normal project form, real stage buttons and public read-only observations"
@@ -289,22 +355,23 @@ async function main() {
     if (uiJourney)
       await page.screenshot({ path: join(fixture.isolated, "ui-created.png"), fullPage: true })
     const projectId = view.project.projectId
-    for (const [key, value] of [
-      ["knowledgeRoot", knowledge],
-      [
-        "selectedDeployUnits",
-        JSON.stringify([{ deployUnitId: "inventory-api", appType: "backend" }])
-      ]
-    ]) {
-      await page.evaluate(
-        async ({ projectId, pluginId, key, value }) => {
-          const api = window.api.harnessBoard.localProjects.mods.config
-          const config = await api.userConfig(projectId, pluginId)
-          await api.saveUserConfig(projectId, config, key, value)
-        },
-        { projectId, pluginId: view.project.installedPluginId, key, value }
-      )
-    }
+    if (!resume)
+      for (const [key, value] of [
+        ["knowledgeRoot", knowledge],
+        [
+          "selectedDeployUnits",
+          JSON.stringify([{ deployUnitId: "inventory-api", appType: "backend" }])
+        ]
+      ]) {
+        await page.evaluate(
+          async ({ projectId, pluginId, key, value }) => {
+            const api = window.api.harnessBoard.localProjects.mods.config
+            const config = await api.userConfig(projectId, pluginId)
+            await api.saveUserConfig(projectId, config, key, value)
+          },
+          { projectId, pluginId: view.project.installedPluginId, key, value }
+        )
+      }
     const sourceReview = await page.evaluate(
       (id) => window.api.harnessBoard.localProjects.mods.read(id),
       projectId
@@ -324,13 +391,34 @@ async function main() {
       })
     const read = () =>
       page!.evaluate((id) => window.api.harnessBoard.localProjects.get(id), projectId)
-    for (const stage of view.project.manifest.stages) {
+    const expectedStages = view.project.manifest.stages.map((stage) => stage.id)
+    const completedStages: string[] = []
+    const resumedStageIndex = resume ? view.project.stageIndex : 0
+    evidence.expectedStages = expectedStages
+    for (const [index, stage] of view.project.manifest.stages.entries()) {
+      if (index < resumedStageIndex) {
+        completedStages.push(stage.id)
+        events.push({
+          stage: stage.id,
+          status: "previously-transitioned",
+          attempt: resume!.attempt
+        })
+        continue
+      }
       assert.equal(
         candidate.sha256,
         projectCompositionCandidate(root).sha256,
         "BUNDLE_CHANGED_DURING_RUN"
       )
       view = await read()
+      assert.equal(
+        view.project.manifest.stages[view.project.stageIndex]?.id,
+        stage.id,
+        "LIVE_CURRENT_STAGE_CHANGED"
+      )
+      const stageVersion = view.project.version
+      const stageIndex = view.project.stageIndex
+      const previousOperationIds = view.operations.map((item) => item.operationId)
       if (uiJourney) {
         await openUnifiedHostProject(page, view.project.name, fixture.workspace)
         await page.getByRole("button", { name: "开始当前阶段", exact: true }).click()
@@ -338,17 +426,25 @@ async function main() {
           await new Promise((done) => setTimeout(done, 200))
           view = await read()
         } while (
-          !view.operations.some((item) => item.stageId === stage.id) &&
+          !view.operations.some(
+            (item) => item.stageId === stage.id && item.expectedVersion === stageVersion
+          ) &&
           Date.now() < deadline
         )
       } else {
         view = await command({
           kind: "prepare",
           expectedVersion: view.project.version,
-          idempotencyKey: randomUUID()
+          idempotencyKey: randomUUID(),
+          ...(resume && index === resumedStageIndex ? { stageInstructions: resume.feedback } : {})
         })
       }
-      let operation = view.operations.at(-1)!
+      let operation = selectLiveStageOperation(
+        view.operations,
+        stage.id,
+        stageVersion,
+        previousOperationIds
+      )
       save(`${stage.id}-prepared.json`, view)
       if (uiJourney && (stage.approval === "human" || operation.contextProvider)) {
         await page.getByRole("button", { name: "批准并执行", exact: true }).click()
@@ -388,6 +484,15 @@ async function main() {
           save("pending-user-input.json", view.inputWait)
         }
         if (operation.execution?.threadId) {
+          const modelInput = await page.evaluate(
+            (id) => window.api.userInput.getPending(id),
+            operation.execution.threadId
+          )
+          if (modelInput)
+            save("pending-model-input.json", {
+              threadId: operation.execution.threadId,
+              request: modelInput
+            })
           const pending = await page.evaluate(
             (id) => window.api.sandbox.getPendingApprovals(id),
             operation.execution.threadId
@@ -497,8 +602,7 @@ async function main() {
             kind: "approve-result",
             operationId: operation.operationId,
             review: view.resultReview,
-            decision: "approved",
-            feedback: "Independent acceptance review recorded in isolated evidence"
+            decision: "approved"
           })
       }
       if (uiJourney) {
@@ -508,16 +612,32 @@ async function main() {
         })
         await page
           .getByRole("button", {
-            name: stage.id === "delivery" ? "确认完成任务" : "进入下一阶段",
+            name: stage.id === expectedStages.at(-1) ? "确认完成任务" : "进入下一阶段",
             exact: true
           })
           .click()
         view = await read()
       } else view = await command({ kind: "advance", operationId: operation.operationId })
+      assert.equal(view.project.version, stageVersion + 1, "LIVE_TRANSITION_VERSION_MISMATCH")
+      assert.equal(view.project.stageIndex, stageIndex + 1, "LIVE_TRANSITION_STAGE_MISMATCH")
+      assert.equal(
+        view.operations.find((item) => item.operationId === operation.operationId)?.status,
+        "transitioned",
+        "LIVE_OPERATION_NOT_TRANSITIONED"
+      )
+      completedStages.push(stage.id)
       events.push({ stage: stage.id, status: "transitioned", requests })
       save()
     }
     evidence.completedProject = view
+    evidence.completedStages = completedStages
+    assert.deepEqual(completedStages, expectedStages, "ALL_DECLARED_STAGES_REQUIRED")
+    assert.equal(
+      (await readProjectSource(source.root)).bundle.digest,
+      source.bundle.digest,
+      "LEAN_SOURCE_CHANGED_DURING_RUN"
+    )
+    assert.equal(view.project.status, "completed", "HOST_PROJECT_COMPLETION_REQUIRED")
     evidence.passed = view.project.status === "completed"
   } catch (error) {
     evidence.error = redact(String(error))
@@ -529,7 +649,7 @@ async function main() {
     await new Promise<void>((done) => relay.close(() => done()))
     console.log(
       JSON.stringify({
-        evidence: join(fixture.isolated, "evidence.json"),
+        evidence: join(evidenceDirectory, "evidence.json"),
         passed: evidence.passed,
         error: evidence.error
       })

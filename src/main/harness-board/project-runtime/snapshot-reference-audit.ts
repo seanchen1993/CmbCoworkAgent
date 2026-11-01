@@ -4,6 +4,7 @@ import { DatabaseSync } from "node:sqlite"
 import type { SnapshotReferenceAudit } from "./snapshot-retention"
 import { hostDigest, hostRecord, hostText, parseHostOperation, parseHostProjectState } from "./host-state-protocol"
 import { parseHostLegacyImportReceipt } from "./legacy-import-protocol"
+import { parseHostBranchInputs } from "./host-branch-inputs"
 import { parseProjectComposition } from "../../../shared/project-runtime/composition"
 import { parseCompositionUnitContext, parseCompositionUnitContexts } from "../../../shared/project-runtime/composition-api"
 
@@ -193,6 +194,15 @@ const databases: Array<{ path: string[]; tables: Record<string, Table>; hostSche
         validate: value => {
           const receipt = parseHostLegacyImportReceipt(value)
           legacy(receipt.review.source)
+        }
+      },
+      host_branch_inputs: {
+        optional: true,
+        columns: ["project_id", "data"],
+        json: ["data"],
+        requiresDigest: true,
+        validate: (value) => {
+          parseHostBranchInputs(value)
         }
       },
       host_operations: {

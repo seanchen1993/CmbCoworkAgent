@@ -8,7 +8,7 @@ import { closeModsProgress } from "./mods-sidebar-navigation"
 export async function waitForPackagedPaneResults(page: Page): Promise<void> {
   const panel = page.getByRole("complementary", { name: "任务进展", exact: true })
   await panel.waitFor({ state: "visible" })
-  await panel.getByRole("tab", { name: "结果", exact: true, selected: true }).waitFor()
+  await panel.getByRole("tab", { name: "输出与面板", exact: true, selected: true }).waitFor()
 }
 
 /** Uses public preload/UI only; the packaged app must not contain the test bridge. */

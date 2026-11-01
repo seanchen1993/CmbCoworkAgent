@@ -4,6 +4,8 @@ import type { ModCommandDescriptor, ModWorkspaceStatus } from "../../../../share
 import { captureConfigurationScope, goToConfigurationThread } from "@/lib/configuration-target"
 import { useAppStore } from "@/lib/store"
 import { openClawSidebar } from "@/lib/claw-sidebar"
+import { openPluginSettings } from "@/lib/plugin-settings-intent"
+import { PluginSurfaceEntries } from "../platform/PluginSurfaceEntries"
 import { isSameWorkspacePath } from "../../../../shared/workspace-path"
 import { FunctionPluginApproval } from "./FunctionPluginApproval"
 import { FunctionUserConfig } from "./FunctionUserConfig"
@@ -17,6 +19,13 @@ const needsPluginConfiguration = (report: PluginStartUseReport) =>
   report.issues.some(
     (issue) =>
       ["configuration", "knowledge"].includes(issue.code) && issue.resolution === "plugin-settings"
+  )
+
+const hasChatDeclarations = (report: PluginStartUseReport) =>
+  Boolean(
+    report.chat?.skills.length ||
+    report.chat?.integrations?.hookCount ||
+    report.chat?.integrations?.mcpServerNames.length
   )
 
 /** Explicit consent prepares native switches and the exact source; it never runs a task. */
@@ -162,9 +171,9 @@ export function InstalledChatPluginUse({
         functionReady ||
         Boolean(
           !after.activationRequired &&
-            !after.chat?.functionMod &&
-            after.chat?.skills.length &&
-            !after.issues.length
+          !after.chat?.functionMod &&
+          hasChatDeclarations(after) &&
+          !after.issues.length
         )
       if (requireReady && !ready && !(confirmed.current && needsPluginConfiguration(after)))
         throw Error("PLUGIN_START_USE_PERMISSION_CHANGED")
@@ -243,10 +252,10 @@ export function InstalledChatPluginUse({
   const mod = current.chat?.functionMod
   const ready = Boolean(
     !current.issues.length &&
-      !current.activationRequired &&
-      (mod
-        ? mod.state === "ready" && global && workspace?.enabled && plan?.selection.alreadySelected
-        : current.chat?.skills.length)
+    !current.activationRequired &&
+    (mod
+      ? mod.state === "ready" && global && workspace?.enabled && plan?.selection.alreadySelected
+      : hasChatDeclarations(current))
   )
   const configuration = needsPluginConfiguration(current)
   const activate = () =>
@@ -376,7 +385,7 @@ export function InstalledChatPluginUse({
       )}
       {!mod && current.activationRequired && (
         <div className="space-y-2 text-sm">
-          <p>确认后启用此已安装版本，并显示它的聊天技能入口。</p>
+          <p>确认后启用此已安装版本，并显示它的聊天使用方式。</p>
           <p className="break-all text-xs text-muted-foreground">
             版本摘要：{current.identity.digest}
           </p>
@@ -401,6 +410,50 @@ export function InstalledChatPluginUse({
         </div>
       )}
       {ready && purpose === "dependency" && <p role="status">依赖已就绪，可以继续制作。</p>}
+      {current.chat?.integrations && (
+        <div className="space-y-2 text-sm">
+          {!!current.chat.integrations.hookCount && (
+            <p>插件声明了 {current.chat.integrations.hookCount} 条 Hook 规则。</p>
+          )}
+          {!!current.chat.integrations.mcpServerNames.length && (
+            <p className="break-words">
+              MCP 工具配置：{current.chat.integrations.mcpServerNames.join("、")}
+            </p>
+          )}
+          <p className="text-xs text-muted-foreground">
+            这里只列出插件声明；工具是否可用、规则是否执行，以实际调用和任务记录为准。可在下方查看插件设置。
+          </p>
+          <button
+            className={button}
+            disabled={busy || disabled}
+            onClick={() => void run(async () => () => openPluginSettings(input.pluginId))}
+          >
+            查看插件设置
+          </button>
+          {!!current.chat.integrations.mcpServerNames.length && <button
+            className={button} disabled={busy || disabled}
+            onClick={() => void run(async () => () => {
+              goToConfigurationThread(nativeScope, () =>
+                useAppStore.getState().setShowCustomizeView(true, "claw", "mcp"))
+            })}
+          >选择聊天连接工具与查看状态</button>}
+        </div>
+      )}
+      {purpose !== "dependency" && ready && loaded && mod?.digest && (
+        <PluginSurfaceEntries
+          threadId={input.threadId}
+          expectedWorkspace={input.expectedWorkspace}
+          compiledDigest={mod.digest}
+          provider={mod.name}
+          disabled={busy || disabled}
+          isCurrent={() =>
+            live.current &&
+            !callbacks.current.disabled &&
+            account.current === useAppStore.getState().accountRevision &&
+            captureConfigurationScope(nativeScope)()
+          }
+        />
+      )}
       {purpose !== "dependency" && loaded && (
         <div className="space-y-2 text-sm" role="status">
           {commands.map((command) => (
@@ -448,7 +501,7 @@ export function InstalledChatPluginUse({
           </p>
         </div>
       )}
-      {!mod && !current.activationRequired && !current.chat?.skills.length && (
+      {!mod && !current.activationRequired && !hasChatDeclarations(current) && (
         <p className="text-sm">未找到聊天入口，请检查插件说明。</p>
       )}
       <details className="text-xs text-muted-foreground">

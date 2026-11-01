@@ -27,24 +27,28 @@ export function functionInlineLabel(
   label: (props: ModObject) => ReactNode
 ): ReactNode {
   if (!functionInlineTree(tree)) return null
-  const visit = (node: FunctionUiElement | string, key: number): ReactNode => {
+  const visit = (node: FunctionUiElement | string, key: number,
+    inheritedBackground?: string): ReactNode => {
     if (typeof node === "string") return node
     if (node.type === "engine") {
       const props = functionNativeProps(native, node.ref)
       return props ? <span key={key}>{label(props)}</span> : null
     }
     if (node.type === "fragment")
-      return <Fragment key={key}>{node.children.map(visit)}</Fragment>
+      return <Fragment key={key}>{node.children.map((child, index) =>
+        visit(child, index, inheritedBackground))}</Fragment>
     if (node.type === "Markdown") return null
+    const style = functionUiStyle(node, inheritedBackground)
     return (
       <span
         key={key}
         style={{
-          ...functionUiStyle(node),
+          ...style,
           ...(node.type === "Box" ? { display: "inline-flex" } : {})
         }}
       >
-        {(node.children ?? []).map(visit)}
+        {(node.children ?? []).map((child, index) =>
+          visit(child, index, style.backgroundColor ?? inheritedBackground))}
       </span>
     )
   }

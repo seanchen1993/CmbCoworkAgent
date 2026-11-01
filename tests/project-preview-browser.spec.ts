@@ -85,7 +85,7 @@ async function main() {
     await page.addScriptTag({ content: bundled.outputFiles[0].text })
     await page.getByText("文档模板 A · 版本 1", { exact: true }).waitFor()
     await page.getByRole("textbox").fill("生成试用文档")
-    const create = page.getByRole("button", { name: "开始试用", exact: true })
+    const create = page.getByRole("button", { name: "准备试用环境", exact: true })
     assert.equal(await create.isEnabled(), true)
     await page.evaluate(() => (window as unknown as FixtureWindow).fixture.update())
     await page.getByText("文档模板 A · 版本 2", { exact: true }).waitFor()

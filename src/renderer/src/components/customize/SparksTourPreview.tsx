@@ -325,7 +325,7 @@ export function SparksTourPreview({
           )}
           {stage === 2 && (
             <div className="mt-2 rounded border border-dashed p-2 text-xs">
-              原任务卡保留进度和结果；插件面板可在“任务进展 → 结果”查看
+              原任务卡保留进度和结果；插件面板可在“任务进展 → 输出与面板”查看
             </div>
           )}
           {stage === 3 && (

@@ -26,6 +26,13 @@ declare namespace DevClawMods {
   export interface AgentSpawnInput {prompt:string;description?:string;subagentType?:string;model?:string;name?:string;cwd?:string}
   /** A hook answering without next starts no child and may omit agentId. */
   export type AgentSpawnResult = {agentId?:string;model:string}|{deny:string}
+  export interface AgentInfo {id:string;description:string;type:string;status:string;parentId?:string;spawnedBy?:string;name?:string}
+  export type AgentTaskState = "running"|"stopping"|"completed"|"failed"|"cancelled"|"unknown"
+  export interface AgentTaskStatus {agentId:string;status:AgentTaskState;model:string;description:string;startedAt:number;finishedAt?:number;
+    scope:{workspace:string;readOnly:boolean;allowedTools?:string[];blockedTools:string[];maxTurns?:number};
+    outcome?:{answer:string;reason:string;durationMs:number;isAborted:boolean};diagnostic?:string}
+  export interface AgentTaskMessage {role:"user"|"assistant";text:string;toolUses:JsonObject[];toolResults?:JsonObject[]}
+  export interface AgentTaskMessages {agentId:string;messages:AgentTaskMessage[];nextCursor?:string;truncated:boolean;skippedMessages:number;history:"retained"|"partial"|"unavailable"}
   export type OperationResult<T> = {value:T}|{deny:string}
   export interface AgentSpawnEvent extends AgentSpawnInput {
     description:string;subagentType:string;tool_use_id:string;parentModel:string;
@@ -58,9 +65,36 @@ declare namespace DevClawMods {
   export interface ToolResult {result:Json;text?:string;isError?:true;context?:string[];ref?:number}
   export interface UiEvent {component:string;requestId?:string;surface:"desktop";props:JsonObject;viewport?:{columns:number;rows:number}}
   export type UiTree = unknown
+  export type UiSpace = number|"xs"|"sm"|"md"|"lg"|"xl"
+  /** Desktop layout only. Dimensions are character/line units or 0..100%; spacing numbers are 8px units. No DOM, CSS strings, positioning or overlays. */
+  export interface UiBoxProps {
+    key?:string;children?:UiTree[];
+    flexDirection?:"row"|"column"|"row-reverse"|"column-reverse";
+    /** Finite 0..100. */
+    flexGrow?:number;flexShrink?:number;
+    flexWrap?:"nowrap"|"wrap"|"wrap-reverse";
+    alignItems?:"flex-start"|"center"|"flex-end"|"stretch";
+    alignSelf?:"auto"|"flex-start"|"center"|"flex-end"|"stretch";
+    justifyContent?:"flex-start"|"center"|"flex-end"|"space-between"|"space-around"|"space-evenly";
+    gap?:UiSpace;padding?:UiSpace;paddingX?:UiSpace;paddingY?:UiSpace;
+    margin?:UiSpace;marginX?:UiSpace;marginY?:UiSpace;marginTop?:UiSpace;
+    /** Additional spacing is finite 0..128; use minWidth:0 and flexShrink for narrow layouts. */
+    rowGap?:UiSpace;columnGap?:UiSpace;paddingTop?:UiSpace;paddingBottom?:UiSpace;paddingLeft?:UiSpace;paddingRight?:UiSpace;
+    marginBottom?:UiSpace;marginLeft?:UiSpace;marginRight?:UiSpace;
+    width?:number|string;height?:number|string;minWidth?:number|string;minHeight?:number|string;
+    borderStyle?:string;borderColor?:string;backgroundColor?:string;overflow?:"visible"|"hidden"
+  }
+  export interface UiTextProps {
+    key?:string;children:string|string[];color?:string;backgroundColor?:string;
+    bold?:boolean;italic?:boolean;underline?:boolean;strikethrough?:boolean;inverse?:boolean;dimColor?:boolean;
+    size?:"caption"|"footnote"|"body"|"heading"|"title";
+    weight?:"regular"|"medium"|"semibold"|"bold";mono?:boolean;tabular?:boolean;
+    /** truncate preserves text content; hover/position are not supported. Explicit weight outranks bold. */
+    wrap?:"wrap"|"truncate"|"truncate-start"|"truncate-end"
+  }
   export interface UiElements {
-    Box(props:{children?:UiTree[];flexDirection?:"row"|"column";gap?:number;[key:string]:unknown}):UiTree
-    Text(props:{children:string|string[];[key:string]:unknown}):UiTree
+    Box(props:UiBoxProps):UiTree
+    Text(props:UiTextProps):UiTree
     Button(props:{label:string;onPress:()=>unknown;key?:string;hotkey?:string;[key:string]:unknown}):UiTree
     Input(props:{key:string;label?:string;placeholder?:string;value?:string;submitLabel?:string;autoFocus?:true;onSubmit:(value:string)=>unknown;onInput?:(value:string)=>unknown}):UiTree
     Select(props:{key:string;label?:string;options:{value:string;label:string}[];value?:string;autoFocus?:true;onSelect:(value:string)=>unknown}):UiTree
@@ -81,8 +115,15 @@ declare namespace DevClawMods {
   export interface PlatformQuery {ref:PlatformRef;target:{kind:"current"}}
   export interface PlatformAction {id:string;title:string;inputSchema:JsonObject;outputSchema:JsonObject;
     requiredPermissions:string[];cancellable:boolean;idempotency:"keyed"}
+  /** Existing public surface metadata. Host owns scope, initialization and Pane lifetime. */
+  export type PlatformSurfacePresentation = {
+    type:"surface";id:string;title:string;
+    placement:"page"|"navigation"|"sidebar"|"toolbar"|"settings";
+    paneId:string;openAction:string;closeAction?:string;order?:number;description?:string
+  } & ({apiVersion:"devclaw.surface/v1";interaction?:never}|
+    {apiVersion:"devclaw.surface/v2";interaction:"query"})
   export interface PlatformDescriptor {apiVersion:"devclaw.capability/v1";id:string;version:string;
-    title:string;scope:"conversation"|"workspace";stateSchema:JsonObject;actions:PlatformAction[];presentation?:JsonObject}
+    title:string;scope:"conversation"|"workspace";stateSchema:JsonObject;actions:PlatformAction[];presentation?:PlatformSurfacePresentation|JsonObject}
   export interface PlatformState {status:"ready"|"unknown";revision:number;
     source:{provider:string;digest:string;generation:string};value?:Json;reason?:string}
   export interface PlatformActionResult {requestKey:string;status:"running"|"succeeded"|"failed"|"cancelled"|"unknown";value?:Json;error?:string}
@@ -99,6 +140,16 @@ declare namespace DevClawMods {
     status(input:PlatformQuery&{requestKey:string}):Promise<PlatformActionResult>
   }
   export interface SDKBase<Owner extends string=string> {
+    /** Desktop-owned sources explicitly selected in the current Claw. Never supply URL/command/credentials. */
+    mcp:{
+      connect(sourceId:string,options?:{signal?:AbortSignal}):Promise<
+        {isConnected:true;server:string}|{isConnected:false;reason:"unlisted"|"unapproved"|"disabled"|"policy"|"auth"|"failed";message:string}>;
+      call(server:string,tool:string,args?:JsonObject):Promise<JsonObject>;
+      /** Desktop extensions. Reading never initializes a server. */
+      list(input?:Record<string,never>):Promise<{sources:{sourceId:string;name:string;configDigest:string}[];connections:McpConnectionStatus[]}>;
+      status(input:{server:string}):Promise<McpConnectionStatus>;
+      disconnect(input:{server:string}):Promise<McpConnectionStatus>
+    }
     platform:PlatformSdk
     fs:{write(path:string,text:string):Promise<void>;read(path:string):Promise<string>;
       list(path?:string):Promise<(Omit<FileStat,"mtimeMs"> & {name:string;mtimeMs?:number})[]>;
@@ -107,7 +158,11 @@ declare namespace DevClawMods {
     plugin:{readonly name:string;readonly root:string}
     session:{id():Promise<string>;cwd():Promise<string>;surface():Promise<"desktop">;surfaces():Promise<"desktop"[]>}
     command:{register(input:{/** 1..64 ASCII letters, digits, underscore or hyphen; use description for Chinese labels. */name:string;description:string;immediate?:true;argumentHint?:string;isHidden?:boolean}):Promise<void>}
-    agent:{register(spec:AgentSpec):Promise<{agent:string}>;spawn(input:AgentSpawnInput):Promise<AgentSpawnResult>}
+    agent:{register(spec:AgentSpec):Promise<{agent:string}>;spawn(input:AgentSpawnInput):Promise<AgentSpawnResult>;
+      list():Promise<AgentInfo[]>;status(input:{agentId:string}):Promise<AgentTaskStatus>;
+      /** Own child only; limit 1..100, default 50. Cursor is bound to the retained transcript revision. */
+      messages(input:{agentId:string;cursor?:string;limit?:number}):Promise<AgentTaskMessages>;
+      stop(input:{agentId:string}):Promise<{agentId:string;stopRequested:boolean;status:AgentTaskState}>}
     clock:{now():Promise<number>;sleep(ms:number,options?:{signal?:AbortSignal}):Promise<void>;
       /** Maximum supported interval is 60000 ms. */
       after(ms:number,callback:()=>void|Promise<void>):{cancel():Promise<void>};every(ms:number,callback:()=>void|Promise<void>):{cancel():Promise<void>}}
@@ -123,11 +178,23 @@ declare namespace DevClawMods {
       check(input:{tool:string;input:Json}):Promise<{decision:"allow"|"ask"|"deny";reason?:string;rule?:string;hook?:string;ceiling?:"allow"|"ask"|"deny"}>}
     store:{get(key:string):Promise<Json|undefined>;set(key:string,value:Json):Promise<void>;keys():Promise<string[]>;delete(key:string):Promise<void>}
     ui:{log(text:string):void;status(text?:string):void;toast(text:string):void;
+      /** Ephemeral row in the current ordinary desktop chat. Does not enter model/history. */
+      place(input:UiPlaceArgs):Promise<UiPlaceResult>;
+      /** Desktop extension: genuine user control callback only. Read-only focus; parent input target is unchanged. */
+      view(input:{agentId:string}):Promise<{requested:true;agentId:string;readOnly:true;inputTarget:"parent"}>;
       resolve(event:UiEvent):UiElements;invalidate(event:"ui.render"):void;
       open(input:{id:string;title?:string;focus?:boolean;closeOnEscape?:boolean}):Promise<{isPlaced:boolean}>;
       close(id:string):Promise<unknown>}
   }
+  export interface McpConnectionStatus {
+    server:string;sourceId:string;configDigest:string;
+    state:"connecting"|"connected"|"closing"|"closed"|"failed"|"unknown";toolCount:number;
+    tools?:{name:string;description?:string;inputSchema?:JsonObject}[]
+  }
   export type SDK<Owner extends string=string> = SDKBase<Owner> & EngineInterface
+  export interface UiPlaceArgs {id:string}
+  export type UiPlaceResult = {isPlaced:true;requestId:string}|{isPlaced:false;requestId?:string;reason:string}
+  export interface PlacedProps {readonly id:string;readonly plugin:string}
   export interface Next<E,R> { (event:E):Promise<R>;to(event:E,tier:"append"|"builtin"|"core"):Promise<R>;readonly signal:AbortSignal;readonly event:string }
   export interface NextStream<E> { (event:E):Stream<ProcessChunk,ProcessResult>;to(event:E,tier:"append"|"builtin"|"core"):Stream<ProcessChunk,ProcessResult>;readonly signal:AbortSignal;readonly event:string }
   export interface CommandEvent {command:string;args:string;origin?:Json;presentation?:Json}

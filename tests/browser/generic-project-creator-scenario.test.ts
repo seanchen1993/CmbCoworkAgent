@@ -67,6 +67,9 @@ describe("generic project creator conversation acceptance", () => {
   it("uses an independent three-stage request and a distinct replacement turn", () => {
     expect(genericProjectCreatorScenario.firstPrompt).toContain("native-modular")
     expect(genericProjectCreatorScenario.followupPrompt).toContain("trace-review")
+    expect(genericProjectCreatorScenario.followupPrompt).toContain("当前同一个草稿")
+    expect(genericProjectCreatorScenario.followupPrompt).toContain("阶段声明、Skill 正文及检查均保持不变")
+    expect(genericProjectCreatorScenario.followupPrompt).toContain("合并一次 project_patch 后再编译")
     expect(Object.values(genericProjectCreatorScenario).join(" ")).not.toMatch(/autobiz|board_core/i)
   })
   it("accepts a new revision that changes only the middle module and skill", () => {

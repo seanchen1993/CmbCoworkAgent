@@ -1,6 +1,6 @@
 import type { ModObject } from "../types"
 import { ModFunctionError } from "./contracts"
-import { FUNCTION_UI_SITES, type FunctionUiSite } from "./sites"
+import { isFunctionUiRenderComponent, type FunctionUiRenderComponent } from "./sites"
 import { isModObject } from "./contracts"
 import { encodeModJson } from "../validation"
 import {
@@ -12,7 +12,7 @@ import {
 
 /** Host-produced data only; integer refs do not carry permission or request authority. */
 export interface FunctionNativeContent {
-  component: FunctionUiSite | "Pane"
+  component: FunctionUiRenderComponent
   entries: { ref: number; props: ModObject }[]
   requestId?: string
   nativeUnchanged?: boolean
@@ -21,7 +21,7 @@ export interface FunctionNativeContent {
 /** IPC shape check only. Real input ownership and publication are enforced by the main process. */
 export function validateFunctionNativeContent(
   value: unknown,
-  component?: FunctionUiSite | "Pane",
+  component?: FunctionUiRenderComponent,
   expectedRequestId?: string
 ): asserts value is FunctionNativeContent {
   const fail = (): never => {
@@ -29,7 +29,7 @@ export function validateFunctionNativeContent(
   }
   if (
     !isModObject(value) ||
-    !(value.component === "Pane" || FUNCTION_UI_SITES.some((site) => site === value.component)) ||
+    !isFunctionUiRenderComponent(value.component) ||
     (component !== undefined && value.component !== component) ||
     !Array.isArray(value.entries) ||
     value.entries.length < 1 ||

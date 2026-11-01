@@ -30,11 +30,13 @@ function source(value: unknown) {
     : (message.type ?? outer.type ?? message.role)
   const className = Array.isArray(outer.id) ? outer.id.at(-1) : undefined
   const role =
-    type === "user" || type === "human" || className === "HumanMessage"
+    type === "user" || type === "human" || className === "HumanMessage" ||
+      className === "HumanMessageChunk"
       ? "user"
-      : type === "assistant" || type === "ai" || className === "AIMessage"
+      : type === "assistant" || type === "ai" || className === "AIMessage" ||
+          className === "AIMessageChunk"
         ? "assistant"
-        : type === "tool" || className === "ToolMessage"
+        : type === "tool" || className === "ToolMessage" || className === "ToolMessageChunk"
           ? "tool"
           : undefined
   if (!role) return undefined
@@ -69,7 +71,7 @@ function text(content: unknown): string {
   return pieces.join("")
 }
 
-function project(value: unknown): FunctionSessionMessage | undefined {
+export function projectFunctionSessionMessage(value: unknown): FunctionSessionMessage | undefined {
   const entry = source(value)
   if (!entry) return undefined
   const { role, message, outer } = entry
@@ -130,7 +132,7 @@ export function projectFunctionSessionMessages(
       selected = 0
     for (let i = messages.length - 1; i >= 0 && selected < FUNCTION_SESSION_MESSAGE_LIMIT; i--) {
       if (++scanned > SCAN_LIMIT) throw new ModFunctionError("MODS_SESSION_MESSAGE_SCAN_LIMIT")
-      const message = project(messages[i])
+      const message = projectFunctionSessionMessage(messages[i])
       if (message) {
         selected++
         yield message
@@ -203,7 +205,7 @@ export async function readLiveFunctionSessionTranscript(
     index--
   ) {
     if (++scanned > SCAN_LIMIT) throw new ModFunctionError("MODS_SESSION_MESSAGE_SCAN_LIMIT")
-    const message = project(messages[index])
+    const message = projectFunctionSessionMessage(messages[index])
     if (message) {
       const json = encodeModJson(message)
       bytes += Buffer.byteLength(json) + (selected.length ? 1 : 0)
@@ -230,7 +232,7 @@ export class FunctionSessionTranscriptWindow {
   push(value: unknown): void {
     if (++this.scanned > SCAN_LIMIT) throw new ModFunctionError("MODS_SESSION_MESSAGE_SCAN_LIMIT")
     this.turns += countFunctionSessionTurns([value])
-    const message = project(value)
+    const message = projectFunctionSessionMessage(value)
     if (!message) return
     const index = this.selected++
     const expired = index - FUNCTION_SESSION_MESSAGE_LIMIT

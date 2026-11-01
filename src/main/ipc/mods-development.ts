@@ -1,4 +1,5 @@
 import { z } from "zod"
+import type { ProjectStagePromptsApi } from "../../shared/mods/project-stage-prompts"
 import type { IpcMain, IpcMainInvokeEvent } from "electron"
 import type { ModDevelopmentService } from "../mods/devtools/development-service"
 import type { AuthoringScope } from "../../shared/mods/authoring"
@@ -14,7 +15,7 @@ export function registerModsDevelopmentHandlers(
   ipc: IpcMain,
   service: ModDevelopmentService,
   trusted: (event: IpcMainInvokeEvent) => void,
-  actions?: {
+  actions?: Partial<ProjectStagePromptsApi> & {
     importSourceSet?(input: AuthoringScope): Promise<unknown>
     advanceSourceSet?(input: AuthoringScope & { id: string }): Promise<unknown>
     cancelSourceSet?(input: AuthoringScope & { id: string }): Promise<unknown>
@@ -47,6 +48,22 @@ export function registerModsDevelopmentHandlers(
       return run(parsed.data)
     })
   }
+  register("list-project-prompt-drafts", scope.strict(), input => {
+    if (!actions?.listProjectPromptDrafts) throw Error("DEVELOPMENT_ACTION_UNAVAILABLE")
+    return actions.listProjectPromptDrafts(input)
+  })
+  register("read-project-stage-prompts", scope.extend({ id }).strict(), input => {
+    if (!actions?.readProjectStagePrompts) throw Error("DEVELOPMENT_ACTION_UNAVAILABLE")
+    return actions.readProjectStagePrompts(input)
+  })
+  register("save-project-stage-prompt", scope.extend({
+    id, revision, sourceDigest: z.string().regex(/^[a-f0-9]{64}$/),
+    stageId: z.string().regex(/^[a-zA-Z0-9][\w.-]{0,63}$/),
+    body: z.string().max(64 * 1024)
+  }).strict(), input => {
+    if (!actions?.saveProjectStagePrompt) throw Error("DEVELOPMENT_ACTION_UNAVAILABLE")
+    return actions.saveProjectStagePrompt(input)
+  })
   register("import-source-set", scope.strict(), input => {
     if (!actions?.importSourceSet) throw Error("DEVELOPMENT_ACTION_UNAVAILABLE")
     return actions.importSourceSet(input)

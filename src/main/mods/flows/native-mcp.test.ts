@@ -92,6 +92,8 @@ import { listNativeMcpTools, nativeMcpSchemaDigest, prepareNativeMcpStep } from 
 import { runHooksEnriched } from "../../hooks/required-skill"
 import type { McpCapabilityTool } from "../../mcp/capability-types"
 import { DEFAULT_MOD_POLICY } from "../policy"
+import { OwnedMcpConnections } from "../../mcp/owned-connections"
+import { resolveSelectedMcpSource } from "../../mcp/capability-service"
 
 let manager: ModsManager | undefined
 const sourceTokens: RuntimePluginSourceToken[] = []
@@ -196,6 +198,42 @@ async function fixture() {
     configPath
   }
 }
+
+it("routes an owned lease through real scoped permission and Hook chains without initializing other providers", async () => {
+  const f = await fixture()
+  const owned = new OwnedMcpConnections({
+    assertCurrent: () => manager!.store.assertGrant(f.grant),
+    sources: () => f.selection.items,
+    resolve: resolveSelectedMcpSource
+  })
+  try {
+    const connected = await owned.connect(f.sources[0].id, f.controller.signal)
+    if (!connected.value.isConnected) throw Error("Expected real connection")
+    const server = connected.value.server
+    const call = (input: ModObject) => withFunctionExecution(f.scope, () =>
+      withFunctionMcpCommand(f.workspace, f.scope.threadId, f.scope.turnId, f.controller.signal, () =>
+        manager!.withOwnedMcpService(f.workspace, f.scope.threadId, owned.service(server), () =>
+          manager!.invokeFunctionMcp(f.workspace, f.scope.threadId, f.grant,
+            { server, tool: "echo", args: input }, f.controller.signal, false, true))))
+    expect(await call({ tool: "owned" })).toMatchObject({ isError: false,
+      structuredContent: { provider: "a", value: "owned" } })
+    expect(f.confirm).toHaveBeenCalled()
+    expect(vi.mocked(runHooksEnriched)).toHaveBeenCalled()
+    expect(f.records().filter(row => row.event === "ready").map(row => row.provider)).toEqual(["a"])
+    expect(f.records().filter(row => row.event === "call")).toHaveLength(1)
+    f.confirm.mockResolvedValue(false)
+    await expect(call({ tool: "denied" })).rejects.toThrow()
+    expect(f.records().filter(row => row.event === "call")).toHaveLength(1)
+    f.confirm.mockImplementation(async () => {
+      fixtureState.plugins[0].enabled = false
+      return true
+    })
+    await expect(call({ tool: "changed-during-approval" })).rejects.toThrow()
+    expect(f.records().filter(row => row.event === "call")).toHaveLength(1)
+    // The request-local override must not leave an opaque lease in the shared provider catalog.
+    expect(await getGlobalMcpCapabilityService().listTools()).toEqual([])
+  } finally { await owned.close() }
+}, 30_000)
 
 it.each(["flow", "cold-command"] as const)("uses only the exact retained parent's real stdio peer for %s and leaves global peers independent", async route => {
   const f = await fixture()

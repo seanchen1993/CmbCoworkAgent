@@ -7,6 +7,12 @@ export function createDevelopmentBridge(
   subscribe: (channel: string, callback: (payload: unknown) => void) => () => void
 ): DevelopmentApi {
   return {
+    listProjectPromptDrafts: input => invoke("mods:development:list-project-prompt-drafts", input) as
+      ReturnType<NonNullable<DevelopmentApi["listProjectPromptDrafts"]>>,
+    readProjectStagePrompts: input => invoke("mods:development:read-project-stage-prompts", input) as
+      ReturnType<NonNullable<DevelopmentApi["readProjectStagePrompts"]>>,
+    saveProjectStagePrompt: input => invoke("mods:development:save-project-stage-prompt", input) as
+      ReturnType<NonNullable<DevelopmentApi["saveProjectStagePrompt"]>>,
     importSourceSet: input => invoke("mods:development:import-source-set", input) as ReturnType<NonNullable<DevelopmentApi["importSourceSet"]>>,
     advanceSourceSet: input => invoke("mods:development:advance-source-set", input) as ReturnType<NonNullable<DevelopmentApi["advanceSourceSet"]>>,
     cancelSourceSet: input => invoke("mods:development:cancel-source-set", input) as ReturnType<NonNullable<DevelopmentApi["cancelSourceSet"]>>,

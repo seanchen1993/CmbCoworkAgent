@@ -1,3 +1,5 @@
+import { prepareProjectSourceSetInstall } from "../plugins/project-source-set-install"
+import { readProjectDependencyIds } from "../plugins/project-dependency-metadata"
 import { isCreatorVersionSource } from "../plugins/creator-path"
 import { isLegacyProjectModePluginRoot } from "../harness-board/plugin-mode"
 import { isPluginInstallMode, type PluginInstallMode, type PluginInstallResult } from "../../shared/plugin-install"
@@ -441,6 +443,45 @@ async function installPluginFromDirLocked(
     assertOriginalDirectory(dirPath)
     if (!isPluginInstallMode(requireMods))
       return { success: false, error: "无效的插件安装方式" }
+    if (existsSync(path.join(dirPath, "devclaw.source-set.json"))) {
+      if (requireMods === true) throw Error("这是项目插件包，请从插件上传入口安装")
+      const staging = await fs.mkdtemp(path.join(os.tmpdir(), "project-set-install-"))
+      const added: string[] = []
+      try {
+        const plan = await prepareProjectSourceSetInstall(dirPath, staging, getPlugins())
+        for (const item of plan.slice(0, -1)) {
+          if (item.existing) continue
+          const result = await installPluginFromDirLocked(item.root, undefined, origin,
+            undefined, "capabilities", beforeWrite, {
+              name: item.name, pluginId: item.id, enabled: true, verifyCopied: item.verify
+            })
+          if (!result.success) throw Error(result.error || "项目包安装失败")
+          added.push(item.name)
+        }
+        // Provider compilation identities are captured at their actual installed locations.
+        const bound = await prepareProjectSourceSetInstall(dirPath,
+          path.join(staging, "bound"), getPlugins())
+        const project = bound[bound.length - 1]
+        if (!project.existing) {
+          const result = await installPluginFromDirLocked(project.root, undefined, origin,
+            undefined, "capabilities", beforeWrite, {
+              name: project.name, pluginId: project.id, verifyCopied: project.verify
+            })
+          if (!result.success) throw Error(result.error || "项目包安装失败")
+        }
+        const installed = getPlugins().find(item => item.id === project.id)
+        return { success: true, pluginId: project.id, pluginName: project.name,
+          kind: "plugin", enabled: installed?.enabled ?? false }
+      } catch (error) {
+        throw Error(`${error instanceof Error ? error.message : String(error)}${added.length
+          ? `；已添加（尚未授予项目运行权限）：${added.join("、")}。请保留记录并重试。` : ""}`)
+      } finally {
+        await fs.rm(staging, { recursive: true, force: true })
+      }
+    }
+    if (existsSync(path.join(dirPath, "composition/source.json")) &&
+        !existsSync(path.join(dirPath, "devclaw.project-runtime.json")))
+      throw Error("这是未编译的项目源码，请上传包含 devclaw.source-set.json 和依赖的完整项目包")
     let parsed = await parsePluginDir(dirPath, fallbackName)
     if (createOnly && (parsed.name !== createOnly.name || getPlugins().some(plugin =>
       plugin.name.trim().toLowerCase() === parsed.name.trim().toLowerCase() ||
@@ -632,6 +673,9 @@ async function selectExtractedPluginRoot(tempDir: string): Promise<string> {
   }
 
   const candidates = [tempDir, ...childDirs]
+  const sourceSets = candidates.filter(root => existsSync(path.join(root, "devclaw.source-set.json")))
+  if (sourceSets.length > 1) throw Error("ZIP 包含多个项目源码集合，请一次上传一个项目包")
+  if (sourceSets.length === 1) return sourceSets[0]
 
   for (const candidate of candidates) {
     if (readPluginManifest(candidate)) return candidate
@@ -803,7 +847,11 @@ export async function inspectPluginZip(buffer: ArrayBuffer): Promise<PluginDetai
       return empty
     }
     tempDir = extracted.tempDir
-    const parsed = await parsePluginDir(extracted.pluginRoot)
+    const previewRoot = existsSync(path.join(extracted.pluginRoot, "devclaw.source-set.json"))
+      ? (await prepareProjectSourceSetInstall(extracted.pluginRoot,
+          path.join(tempDir, ".project-preview"), [])).at(-1)!.root
+      : extracted.pluginRoot
+    const parsed = await parsePluginDir(previewRoot)
     return {
       skills: parsed.skillNames,
       mcpServers: Object.keys(parsed.mcpConfigs),
@@ -890,9 +938,13 @@ export function registerPluginHandlers(ipcMain: IpcMain): void {
   console.log("[Plugins] Registering plugin handlers...")
 
   ipcMain.handle("plugins:list", async (): Promise<PluginMetadata[]> => {
-    return getPlugins().map(plugin => ({
-      ...plugin, hasProjectMode: isLegacyProjectModePluginRoot(plugin.path)
-    }))
+    const plugins = getPlugins()
+    const installedIds = new Set(plugins.map((plugin) => plugin.id))
+    return Promise.all(plugins.map(async (plugin) => ({
+      ...plugin,
+      hasProjectMode: isLegacyProjectModePluginRoot(plugin.path),
+      projectDependencyIds: await readProjectDependencyIds(plugin, installedIds)
+    })))
   })
 
   ipcMain.handle(

@@ -2237,7 +2237,7 @@ Continue with the latest explicit user request. Reuse the recorded file paths, s
     expect(invoke).toHaveBeenCalledTimes(3)
     expect(summaryRequests).toHaveLength(3)
     expect(renderedRequest(summaryRequests[2]!)).toContain(
-      "previous whole-conversation handoff is still too large"
+      "leaving room for the next work step"
     )
     expect(renderedRequest(summaryRequests[2]!)).toContain("OVERSIZED_WHOLE_CONVERSATION_SUMMARY")
     expect(handler).toHaveBeenCalledTimes(1)

@@ -28,6 +28,8 @@ export interface PluginStartUseReport {
   chat?: {
     functionMod?: import("./mods/v2/commands").FunctionPluginStatus
     skills: Array<{ id: string; name: string; description: string }>
+    /** Static declarations only; neither connection health nor execution success. */
+    integrations?: { hookCount: number; mcpServerNames: string[] }
   }
 }
 

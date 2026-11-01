@@ -18,6 +18,8 @@ async function main() {
       import {ModsDevelopmentPanel} from "./src/renderer/src/components/customize/ModsDevelopmentPanel";
       import {CreatorProjectDeliveryCard} from "./src/renderer/src/components/customize/CreatorProjectDeliveryCard";
       import {CreatorTrialJourneyCard} from "./src/renderer/src/components/customize/CreatorTrialJourneyCard";
+      import {useAppStore} from "./src/renderer/src/lib/store";
+      import {readPlatformSurfaceIntent} from "./src/renderer/src/lib/platform-surface-intent";
       const calls=[];const listeners=new Set();const reviewListeners=new Set();let reviewIntent;
       let current={threadId:"creator",workspace:"C:/creator",enabled:true,mode:"creator",drafts:[],trials:[],
         business:{drafts:[],review:{planId:"plan",phase:"needs-approval",name:"独立测试插件",version:"1.0.0",
@@ -93,6 +95,31 @@ async function main() {
         renderMain();listeners.forEach(fn=>fn({threadId:"creator"}));
       };
       window.fixture={calls,cold: coldCreator,host:renderHost,journey:renderJourney,hostRoute:renderHostRoute,nativeReview:requestNativeReview,
+        chatContinuity:()=>{
+          reviewIntent=undefined;persistentColdTrial=undefined;
+          useAppStore.setState({currentThreadId:"creator",showCustomizeView:false,threads:[{thread_id:"creator",title:"Creator",metadata:{workspacePath:"C:/creator"}}]});
+          current={threadId:"creator",workspace:"C:/creator",enabled:true,mode:"creator",
+            drafts:[{id:"chat-draft",name:"已保存聊天插件",revision:1,digest:"1".repeat(64)}],
+            reuse:{phase:"active",name:"已保存聊天插件",draftId:"chat-draft",revision:1,sourceDigest:"1".repeat(64),capabilities:[]},trials:[
+            {componentId:"chat-component",draftId:"chat-draft",revision:1,bundleDigest:"1".repeat(64),compiledDigest:"2".repeat(64),phase:"stopped",capabilities:[]}]};
+          api.approve=async input=>{calls.push(["chat-approve",input]);current.trials[0].phase="queued";return structuredClone(current)};
+          renderMain();listeners.forEach(fn=>fn({threadId:"creator"}));
+        },
+        chatApproval:()=>{current.drafts[0]={...current.drafts[0],revision:2,digest:"3".repeat(64)};current.trials[0]={...current.trials[0],revision:2,bundleDigest:"3".repeat(64),compiledDigest:"4".repeat(64),phase:"needs-approval"};listeners.forEach(fn=>fn({threadId:"creator"}))},
+        refresh:()=>listeners.forEach(fn=>fn({threadId:"creator"})),
+        sourceWithChat:phase=>{current.sourceSet={id:"coexisting-source",title:"仍需处理的源码依赖",phase:"dependencies",dependencies:[
+          {id:"dep",name:"独立依赖",version:"1",digest:"5".repeat(64),phase}]};
+          api.reconcileSourceSetDependency=async input=>{calls.push(["source-reconcile",input]);current.sourceSet.dependencies[0].phase="prepared";return structuredClone(current)};
+          listeners.forEach(fn=>fn({threadId:"creator"}));},
+        chatSurface:()=>{delete current.sourceSet;current.trials[0]={...current.trials[0],phase:"active",activeRevision:2,
+          compiledDigest:"6".repeat(64),activeDigest:"6".repeat(64)};
+          window.api.mods.platformSurfaceList=async()=>({revision:7,errors:[],entries:[
+            {key:"real-host-key",id:"tool-page",type:"surface",apiVersion:"devclaw.surface/v1",title:"当前试用面板",placement:"page",paneId:"panel",openAction:"open",enabled:true,
+              ref:{provider:"actual-host-provider",id:"ui",version:"1.0.0"},source:{provider:"actual-host-provider",digest:"6".repeat(64),generation:1}},
+            {key:"wrong-source",id:"wrong-page",title:"其他版本页面",enabled:true,ref:{provider:"other-provider"},source:{provider:"other-provider",digest:"3".repeat(64)}}]});
+          listeners.forEach(fn=>fn({threadId:"creator"}));},
+        revokeSurface:()=>{current.trials[0].phase="stopped"},
+        surfaceIntent:readPlatformSurfaceIntent,
         emptySource:(mode="chat",cancel=false)=>{
           persistentColdTrial=undefined;reviewIntent=undefined;
           current={threadId:"creator",workspace:"C:/creator",enabled:true,mode:"normal",drafts:[],trials:[],business:{drafts:[]}};
@@ -102,6 +129,10 @@ async function main() {
         deliveryAttention:phase=>{current.projectDelivery=phase?{id:'retained-delivery',requestId:'historical-request',sourceDigest:'9'.repeat(64),name:'retained-copy',version:'1.0.0',digest:'8'.repeat(64),phase,canInstall:false,canExport:false,canReconcile:true,error:phase==='failed'?'PROJECT_DELIVERY_NAME_ALREADY_INSTALLED':undefined}:undefined;listeners.forEach(fn=>fn({threadId:'creator'}))},
         sourceSetReady:()=>{current.sourceSet={id:"native-source-set",title:"导入的作者源码",phase:"ready",dependencies:[]};listeners.forEach(fn=>fn({threadId:"creator"}))},
         hostRoutePassed:()=>{const journey=structuredClone(hostRouteEvidence);journey.phase="passed";journey.canDeliver=true;journey.stages[0].status="passed";current.projectTrial.journey=journey;listeners.forEach(fn=>fn({threadId:"creator"}))},
+        editBoundDraft:()=>{request.journey={projectId:"old-run",creatorThreadId:"creator",candidateDigest:request.digest,
+          workspace:"C:/old-trial",candidateCurrent:false,phase:"passed",canDeliver:false,operationsTruncated:false,
+          diagnostics:[],stages:[{id:"done",title:"完成",status:"passed",artifacts:[],checks:[],sessions:[]}]};
+          delivery={...delivery,phase:"installed",canInstall:false,canExport:false};renderHost()},
         changeHost:()=>{request.digest="d".repeat(64);renderHost()},modularize:()=>{current.business={drafts:[],modularization:{requestId:"migration",sourceDigest:"e".repeat(64),sourceName:"原始插件",phase:"needs-confirmation",summary:"保留原运行器、配置与校验，拆分可识别步骤",resources:8,mods:[{id:"step-a",title:"识别阶段"}],diagnostics:[],canConfirm:true}};renderMain()}};
     `
     },
@@ -110,7 +141,7 @@ async function main() {
     platform: "browser",
     format: "iife",
     define: { "import.meta.env": "{}", "import.meta.hot": "undefined",
-      "import.meta.url": '"http://creator.fixture/test-bundle.js"' },
+      "import.meta.url": '"http://localhost:4179/test-bundle.js"' },
     write: false,
     plugins: [browserWorkerPlugin()],
     loader: { ".md": "text", ".png": "dataurl" },
@@ -125,13 +156,14 @@ async function main() {
     const page = await browser.newPage({ viewport: { width: 1280, height: 900 } })
     const errors: string[] = []
     page.on("pageerror", (error) => errors.push(error.message))
-    await page.route("http://creator.fixture/**", (route) =>
+    // Loopback secure context supplies the same Web Crypto API used by Electron navigation intents.
+    await page.route("http://localhost:4179/**", (route) =>
       route.fulfill({
         contentType: "text/html",
         body: `<html><meta charset="utf-8"><textarea id="composer" aria-label="原聊天输入框"></textarea><div id="root"></div><script>${bundle.outputFiles[0].text.replaceAll("</script", "<\\/script")}</script></html>`
       })
     )
-    await page.goto("http://creator.fixture")
+    await page.goto("http://localhost:4179")
     for (const file of readdirSync("out/renderer/assets").filter((name) => name.endsWith(".css")))
       await page.addStyleTag({ path: resolve("out/renderer/assets", file) })
     const workspace = page.getByRole("dialog", { name: "插件创作工作区", exact: true })
@@ -280,6 +312,19 @@ async function main() {
       await page.evaluate("window.fixture.calls.find(row=>row[0]==='install-host')[1].digest"),
       "c".repeat(64)
     )
+    const beforeDraftEdit = await page.evaluate("window.fixture.calls.length")
+    await page.evaluate("window.fixture.editBoundDraft()")
+    await page.getByRole("heading", { name: "历史版本已保存", exact: true }).waitFor()
+    await page.getByRole("status").filter({ hasText: "草稿已变化" }).waitFor()
+    assert.equal(await page.getByRole("button", { name: "开始使用", exact: true }).count(), 0)
+    assert.equal(await page.getByRole("button", { name: "保存插件", exact: true }).count(), 0)
+    assert.equal(await page.getByRole("button", { name: /导出 ZIP/ }).count(), 0)
+    assert.equal(await page.getByRole("region", { name: "已安装插件开始使用", exact: true }).count(), 0)
+    await page.getByText("保存详情", { exact: true }).click()
+    await page.getByText(`来源候选：${"b".repeat(64)}`, { exact: true }).waitFor()
+    assert.equal(await page.evaluate("window.fixture.calls.length"), beforeDraftEdit,
+      "a retained installed package is only history after source invalidation, with no automatic install/use/export")
+    await page.screenshot({ path: join(output, "historical-saved-after-edit.png"), fullPage: true })
     await page.evaluate("window.fixture.changeHost()")
     await page
       .getByText(/^下方交付记录属于历史候选/)
@@ -364,9 +409,20 @@ async function main() {
       "Only the explicit trial request may prepare the initial Host project")
     const hostTrigger = page.locator('[aria-label="聊天模式与 Mod 状态"] button[aria-haspopup="dialog"]')
     await page.waitForFunction(() => document.querySelector('[aria-label="聊天模式与 Mod 状态"] button[aria-haspopup="dialog"]')?.textContent === "尚无整轮验收记录")
-    await workspace.getByRole("button", { name: "开始试用", exact: true }).waitFor()
+    await workspace.getByRole("button", { name: "准备试用环境", exact: true }).waitFor()
     await openCreatorProjectPreview(page)
     await page.screenshot({ path: join(output, "host-trial-default.png"), fullPage: true })
+    await page.setViewportSize({ width: 1280, height: 900 })
+    await workspace.getByRole("region", { name: "当前创作状态", exact: true }).scrollIntoViewIfNeeded()
+    await page.screenshot({ path: join(output, "host-trial-wide.png"), fullPage: true })
+    await page.setViewportSize({ width: 375, height: 812 })
+    await workspace.getByRole("region", { name: "当前创作状态", exact: true }).scrollIntoViewIfNeeded()
+    assert.equal(await workspace.getByRole("button", { name: "查看本轮试用与待办", exact: true }).count(), 0,
+      "the active trial page must not offer a no-op jump to itself")
+    const prepareBounds = await workspace.getByRole("button", { name: "准备试用环境", exact: true }).boundingBox()
+    assert(prepareBounds && prepareBounds.y >= 0 && prepareBounds.y + prepareBounds.height <= 812,
+      "the narrow trial page must show the complete preparation action, not a cropped strip")
+    await page.screenshot({ path: join(output, "host-trial-narrow.png"), fullPage: true })
     assert.equal(await workspace.getByRole("button", { name: "配置并试用此版本", exact: true }).count(), 0,
       "A matched Host candidate must not route through the legacy business trial dialog")
     assert.equal(await page.getByRole("dialog", { name: "插件试用与整轮验收", exact: true }).count(), 0)
@@ -419,9 +475,15 @@ async function main() {
     const beforeSourceReady = await page.evaluate("window.fixture.calls.length")
     await page.evaluate("window.fixture.sourceSetReady()")
     await page.waitForFunction(() => [...document.querySelectorAll('[aria-label="插件制作步骤"] button')]
-      .some(button => button.textContent === "3 · 保存插件" && button.getAttribute("aria-current") === "step"))
+      .some(button => button.textContent === "2 · 试用" && button.getAttribute("aria-current") === "step"))
     assert.equal(await page.evaluate("window.fixture.calls.length"), beforeSourceReady,
-      "An imported ready source set opens delivery without installing or starting a trial")
+      "A ready source set preserves the selected trial tab and never installs or starts a trial")
+    await openCreatorStep(page, "delivery")
+    await workspace.getByText("从源码导入", { exact: true }).click()
+    await workspace.getByRole("button", { name: "前往试用当前候选", exact: true }).click()
+    await workspace.getByRole("region", { name: "试用当前候选", exact: true }).waitFor()
+    assert.equal(await page.evaluate("window.fixture.calls.length"), beforeSourceReady,
+      "The explicit source-set trial action only navigates to the existing trial")
     await page.evaluate("window.fixture.hostRoute(false)")
     await page.waitForFunction(() => document.querySelector('[aria-label="聊天模式与 Mod 状态"] button[aria-haspopup="dialog"]')?.textContent === "业务插件组装")
     await workspace.getByRole("button", { name: "3 · 保存插件", exact: true }).click()
@@ -523,28 +585,30 @@ async function main() {
 
     await page.evaluate("window.fixture.emptySource()")
     await workspace.waitFor({ state: "hidden" })
-    assert.equal(await rail.getByRole("button", { name: "导入插件源码", exact: true }).count(), 0)
+    assert.equal(await rail.getByRole("button", { name: "选择插件源码文件夹", exact: true }).count(), 0)
     await rail.getByRole("button", { name: "创造者模式", exact: true }).click()
     await workspace.waitFor({ state: "hidden" })
     const importStart = await page.evaluate("window.fixture.calls.length")
     await rail.getByText("直接在聊天描述要制作、修改或组合的插件。", { exact: true }).waitFor()
     assert.equal(
-      await rail.getByRole("button", { name: "导入插件源码", exact: true }).count(),
+      await rail.getByRole("button", { name: "选择插件源码文件夹", exact: true }).count(),
       0,
       "Source import must stay hidden from the default creator chat entry"
     )
     assert.equal(await rail.locator('[title*="devclaw.source-set.json"]').count(), 0)
     await page.screenshot({ path: join(output, "empty-creator-chat-entry.png") })
-    const advancedEntry = rail.getByText("高级开发", { exact: true })
+    const advancedEntry = rail.getByText("导入开发文件夹（开发者）", { exact: true })
     await advancedEntry.focus()
     await page.keyboard.press("Enter")
+    await rail.getByText("如果拿到的是 ZIP 安装包，请到“插件”管理页上传。", { exact: true }).waitFor()
+    await rail.getByText("选择包含 devclaw.source-set.json 的整个文件夹，按提示安装和配置所需组件，再到“保存插件”继续。", { exact: true }).waitFor()
     assert.equal(
       await page.evaluate("window.fixture.calls.length"),
       importStart,
       "Opening advanced development must not import or authorize sources"
     )
     await page.screenshot({ path: join(output, "empty-creator-advanced-entry.png") })
-    await rail.getByRole("button", { name: "导入插件源码", exact: true }).click()
+    await rail.getByRole("button", { name: "选择插件源码文件夹", exact: true }).click()
     const importedSource = workspace.getByRole("region", { name: "导入项目作者源码", exact: true })
     await importedSource.getByText("本次导入的源码", { exact: true }).waitFor()
     assert.deepEqual(
@@ -563,7 +627,7 @@ async function main() {
       .getByText("已进入创造者模式，请回到原聊天描述要制作、修改或组合的插件。", { exact: true })
       .waitFor()
     assert.equal(
-      await entry.getByRole("button", { name: "导入插件源码", exact: true }).count(),
+      await entry.getByRole("button", { name: "选择插件源码文件夹", exact: true }).count(),
       0,
       "The separate creator entry must also collapse advanced source import"
     )
@@ -572,8 +636,8 @@ async function main() {
       await page.locator("#composer").evaluate((element) => element === document.activeElement),
       true
     )
-    await entry.getByText("高级开发", { exact: true }).click()
-    await entry.getByRole("button", { name: "导入插件源码", exact: true }).click()
+    await entry.getByText("导入开发文件夹（开发者）", { exact: true }).click()
+    await entry.getByRole("button", { name: "选择插件源码文件夹", exact: true }).click()
     await page
       .getByRole("region", { name: "导入项目作者源码", exact: true })
       .getByText("本次导入的源码", { exact: true })
@@ -581,9 +645,9 @@ async function main() {
 
     await page.evaluate("window.fixture.emptySource('chat',true)")
     await rail.getByRole("button", { name: "创造者模式", exact: true }).click()
-    await rail.getByText("高级开发", { exact: true }).click()
+    await rail.getByText("导入开发文件夹（开发者）", { exact: true }).click()
     const beforeCancel = await page.evaluate("window.fixture.calls.length")
-    await rail.getByRole("button", { name: "导入插件源码", exact: true }).click()
+    await rail.getByRole("button", { name: "选择插件源码文件夹", exact: true }).click()
     await page.waitForFunction(
       (start) =>
         (window as unknown as { fixture: { calls: unknown[][] } }).fixture.calls.length > start,
@@ -595,7 +659,62 @@ async function main() {
       "Cancelling source selection must keep the chat entry usable"
     )
     await rail.getByRole("button", { name: "普通模式", exact: true }).click()
-    assert.equal(await rail.getByText("高级开发", { exact: true }).count(), 0)
+    assert.equal(await rail.getByText("导入开发文件夹（开发者）", { exact: true }).count(), 0)
+
+    await page.evaluate("window.fixture.chatContinuity()")
+    await openCreatorStep(page, "delivery")
+    await page.evaluate("window.fixture.chatApproval()")
+    await workspace.getByRole("button", { name: "确认并开始聊天试用", exact: true }).waitFor()
+    await openCreatorStep(page, "delivery")
+    await page.evaluate("window.fixture.refresh()")
+    await page.waitForTimeout(100)
+    assert.equal(await workspace.locator('[data-creator-trials]').isVisible(), false,
+      "Refreshing the same exact approval must not steal the selected delivery tab")
+    await openCreatorStep(page, "trial")
+    await page.setViewportSize({ width: 375, height: 812 })
+    await workspace.getByRole("button", { name: "确认并开始聊天试用", exact: true }).scrollIntoViewIfNeeded()
+    await page.screenshot({ path: join(output, "chat-new-approval-375.png") })
+    await workspace.getByRole("button", { name: "确认并开始聊天试用", exact: true }).click()
+    await workspace.getByRole("button", { name: "确认并开始聊天试用", exact: true }).waitFor({ state: "hidden" })
+    assert.deepEqual(await page.evaluate("window.fixture.calls.filter(row=>row[0]==='chat-approve')"), [["chat-approve", {
+      threadId: "creator", expectedWorkspace: "C:/creator", id: "chat-component", revision: 2,
+      digest: "4".repeat(64), sourceDigest: "3".repeat(64)
+    }]])
+    await page.evaluate("window.fixture.sourceWithChat('unknown')")
+    await workspace.getByText("依赖安装结果待核对", { exact: true }).waitFor()
+    await openCreatorStep(page, "delivery")
+    const source = workspace.getByRole("region", { name: "导入项目作者源码", exact: true })
+    await source.getByRole("button", { name: "核对实际安装结果", exact: true }).waitFor()
+    assert.equal(await source.getByRole("button", { name: "安装此依赖", exact: true }).count(), 0)
+    await page.screenshot({ path: join(output, "source-and-chat-unknown-375.png") })
+    await source.getByRole("button", { name: "核对实际安装结果", exact: true }).click()
+    await source.getByRole("button", { name: "安装此依赖", exact: true }).waitFor()
+    assert.deepEqual(await page.evaluate("window.fixture.calls.filter(row=>row[0]==='source-reconcile')"), [["source-reconcile", {
+      threadId: "creator", expectedWorkspace: "C:/creator", id: "coexisting-source", dependencyId: "dep"
+    }]])
+    await page.setViewportSize({ width: 1280, height: 900 })
+    await page.screenshot({ path: join(output, "source-and-chat-pending-wide.png") })
+    await page.evaluate("window.fixture.chatSurface()")
+    await openCreatorStep(page, "trial")
+    const surfaceEntry = workspace.getByRole("region", { name: "插件界面入口", exact: true })
+    await surfaceEntry.getByRole("button", { name: "打开当前试用面板", exact: true }).waitFor()
+    assert.equal(await surfaceEntry.getByRole("button", { name: "打开其他版本页面", exact: true }).count(), 0,
+      "Surface discovery must match activeDigest, never the draft bundle digest")
+    await page.evaluate("window.fixture.revokeSurface()")
+    await surfaceEntry.getByRole("button", { name: "打开当前试用面板", exact: true }).click()
+    await surfaceEntry.getByRole("alert").filter({ hasText: "当前试用版本已变化" }).waitFor()
+    assert.equal(await page.evaluate("window.fixture.surfaceIntent()"), null,
+      "The actual native status is re-read before publishing navigation even if a change notification was lost")
+    await page.evaluate("window.fixture.chatSurface()")
+    await surfaceEntry.getByRole("alert").waitFor({ state: "hidden" })
+    await page.screenshot({ path: join(output, "active-trial-surface-wide.png") })
+    await surfaceEntry.getByRole("button", { name: "打开当前试用面板", exact: true }).click()
+    await workspace.waitFor({ state: "hidden" })
+    const surfaceIntent = await page.evaluate("window.fixture.surfaceIntent()") as Record<string, unknown>
+    assert.equal(surfaceIntent.provider, "actual-host-provider")
+    assert.equal(surfaceIntent.compiledDigest, "6".repeat(64))
+    assert.equal(surfaceIntent.developmentComponentId, "chat-component")
+    assert.equal(surfaceIntent.developmentRevision, 2)
     assert.deepEqual(errors, [])
     console.log(
       "PASS creator workspace navigation, long-flow disclosure, delivery, chat return, mobile bounds and 18-stage native-status aggregate verdicts"

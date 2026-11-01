@@ -1,5 +1,6 @@
 import { useEffect, useRef, type RefObject } from "react"
 import { FunctionPresentation } from "./function-presentation"
+import { publishFunctionDesktopOwner, retireFunctionDesktopOwner } from "./function-desktop-owner"
 import {
   desktopElementVisible,
   desktopChatRegions,
@@ -81,6 +82,7 @@ export function useFunctionDesktop(
       wasWorking = working
     }
     let ready = window.api.mods.desktopAttach(threadId, owner)
+    void ready.then(() => { if (alive) publishFunctionDesktopOwner(threadId, owner) }).catch(() => {})
     const presentation = typeof window.api.mods.desktopFeedback === "function"
       ? new FunctionPresentation(threadId, owner, () => ownsRoot() ? root.current : null, ready)
       : undefined
@@ -120,6 +122,7 @@ export function useFunctionDesktop(
     })
     const stopConfiguration = window.api.mods.onConfigurationChanged(() => {
       clear()
+      retireFunctionDesktopOwner(threadId, owner)
       // Retire all in-flight requests even when this chat stays mounted.
       ready = ready
         .catch(() => undefined)
@@ -129,10 +132,12 @@ export function useFunctionDesktop(
         })
       void ready.catch(() => undefined)
       presentation?.rebind(ready)
+      void ready.then(() => { if (alive) publishFunctionDesktopOwner(threadId, owner) }).catch(() => {})
     })
     void ready.catch(() => undefined)
     return () => {
       alive = false
+      retireFunctionDesktopOwner(threadId, owner)
       selected = undefined
       completion.current = null
       presentation?.close()

@@ -107,6 +107,32 @@ function createClient(): CheckpointRuntimeProjectionClient {
   return client
 }
 
+it("returns bounded real session pages through the native worker for multi-megabyte history", async () => {
+  const threadId = "owned-agent-paged-history"
+  const texts = Array.from({ length: 20 }, (_, index) => `${index}:` + "原始正文".repeat(16000))
+  const { databasePath } = await seedLegacyInlineFixture({ threadId,
+    messages: texts.map(content => ({ type: "ai", content })) })
+  const client = createClient()
+  const found: string[] = []
+  let offset = 0
+  let checkpointId: string | undefined
+  do {
+    const page = await client.readSessionTranscriptPage(databasePath, threadId,
+      new AbortController().signal, { offset, limit: 3, checkpointId })
+    expect(page).not.toBeNull()
+    expect(Buffer.byteLength(JSON.stringify(page))).toBeLessThan(256 * 1024)
+    found.push(...page!.messages.map(message => message.text))
+    checkpointId = page!.checkpointId
+    if (page!.nextOffset === undefined) break
+    expect(page!.nextOffset).toBeGreaterThan(offset)
+    offset = page!.nextOffset!
+  } while (offset < texts.length)
+  expect(found).toEqual(texts)
+  await expect(client.readSessionTranscriptPage(databasePath, threadId,
+    new AbortController().signal, { offset: 0, limit: 2, checkpointId: "expired" }))
+    .rejects.toThrow("MODS_AGENT_CURSOR_CHANGED")
+}, 30_000)
+
 async function seedLegacyInlineFixture(input: {
   threadId: string
   messages: unknown[]

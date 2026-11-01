@@ -1,0 +1,15 @@
+{
+  "globalCliVersionUnchanged": "2.1.295",
+  "declarationsSha256": "88E84A587572F4FE97DF0F378D29D441EF267142B1EA8394AA95EB80EF08A14D",
+  "originalProbe": "1 pass / 0 fail",
+  "moduleCount": 2877,
+  "fixtureCorrection": "Initial SDK reflection was refused by upstream; replaced with public ui.mount contract.",
+  "binarySha256": "E896A9D8DA519353A49BF69CA4A695BA7E09067752687C675B3969041E632D52",
+  "fixed": "2.1.316",
+  "latestAtRead": "2.1.316",
+  "publishedUtc": "2026-10-31T00:42:05.743Z",
+  "date": "2026-11-01",
+  "declarationsBytes": 671678,
+  "mainIntegrityVerified": true,
+  "nativeIntegrityVerified": true
+}

@@ -5,10 +5,13 @@ import { openPluginStartUse } from "@/lib/plugin-start-use-intent"
 import { useAppStore } from "@/lib/store"
 import { FunctionUserConfig } from "./FunctionUserConfig"
 import { InstalledChatPluginUse } from "./InstalledChatPluginUse"
+import { FEATURE_GATES } from "../../../../shared/feature-gates"
 
 const button = "rounded-lg border px-3 py-2 text-sm hover:bg-accent disabled:opacity-50"
 function errorMessage(cause: unknown) {
   const code = cause instanceof Error ? cause.message : ""
+  if (code === "PLUGIN_START_USE_PROJECT_MODE_DISABLED")
+    return "当前应用暂未开放项目模式，无法打开项目入口。"
   if (/SCOPE_CHANGED|THREAD|INCARNATION/.test(code))
     return "原聊天或目录已变化，请回到原聊天重新打开。"
   if (/CONTENT_CHANGED|IDENTITY_CHANGED/.test(code))
@@ -117,6 +120,16 @@ function ScopedStartUse({
         (actualInput.expected.digest && next.identity.digest !== actualInput.expected.digest)
       )
         throw Error("PLUGIN_START_USE_IDENTITY_CHANGED")
+      const assertProjectMode = async () => {
+        if (next.kind === "chat") return
+        const gate = await window.api.featureGates.isEnabled(FEATURE_GATES.projectMode)
+        guard()
+        if (!gate.enabled) throw Error("PLUGIN_START_USE_PROJECT_MODE_DISABLED")
+      }
+      // Both native and legacy projects use the existing feature gate, including callers
+      // whose catalog metadata intentionally describes only legacy project declarations.
+      await assertProjectMode()
+      guard()
       if (next.kind !== "chat" && next.activationRequired && !inspectOnly) {
         activationAttempted = true
         next = await window.api.plugins.enableStartUse(pinnedInput)
@@ -136,8 +149,11 @@ function ScopedStartUse({
         (next.kind !== "chat" || openChat) &&
         next.canOpen &&
         !needsConfiguration
-      )
+      ) {
+        await assertProjectMode()
+        guard()
         openPluginStartUse(pinnedInput, next)
+      }
     } catch (cause) {
       if (active.current) {
         setReport(undefined)

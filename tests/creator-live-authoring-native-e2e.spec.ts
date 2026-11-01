@@ -1,4 +1,4 @@
-/** Live configured provider through a credential-isolated relay; no authored plugin fixtures. */
+/** Real provider through an isolated relay; installed matrix seeds are disclosed separately. */
 import assert from "node:assert/strict"
 import { createHash } from "node:crypto"
 import { createServer } from "node:http"
@@ -21,6 +21,12 @@ import type { DevelopmentStatus } from "../src/shared/mods/development"
 import { enterModsCreatorChat } from "./support/mods-sidebar-navigation"
 import { hasLiveCreatorCandidate } from "./support/creator-live-candidate"
 import { rejectCreatorLiveRelay } from "./support/creator-live-transport"
+import { allowCreatorWorkspaceInteraction } from "./support/project-unified-native-journey"
+import {
+  assertMatrixAssembly, assertMatrixOrigin, creatorProjectMatrixMode, matrixFirstPrompt,
+  matrixFollowupPrompt, matrixRuntimeGoal, matrixReportRuntimeGoal, provisionMatrixSeed, readInstalledMatrixSeed,
+  readMatrixCandidate, type MatrixCandidate
+} from "./support/creator-project-matrix"
 import {
   assertGenericProjectReplacement,
   assertGenericProjectRepair,
@@ -51,7 +57,7 @@ fixture.env.CMB_MODS_E2E = "0"
 const maxRequests = Number(process.env.CMB_CREATOR_LIVE_MAX_REQUESTS ?? "24")
 assert([16, 24].includes(maxRequests) ||
   (maxRequests === 64 && (!!process.env.CREATOR_LIVE_SOURCE_SET ||
-    process.env.GENERIC_PROJECT_CREATOR === "1")), "LIVE_REQUEST_LIMIT_INVALID")
+    process.env.GENERIC_PROJECT_CREATOR === "1" || !!process.env.CREATOR_LIVE_PROJECT_MATRIX)), "LIVE_REQUEST_LIMIT_INVALID")
 const resumeRun = process.env.CMB_CREATOR_LIVE_RESUME_RUN
 const resumeMode = process.env.CMB_CREATOR_LIVE_RESUME_MODE
 const genericRepair = process.env.GENERIC_PROJECT_CREATOR === "1" &&
@@ -72,9 +78,14 @@ const RUNTIME_HTTP_LIMIT = 16
 const RUNTIME_STAGE_MS = 90_000
 const COMMAND_REVIEW_LIMIT = 8
 const genericProject = process.env.GENERIC_PROJECT_CREATOR === "1"
+const matrixMode = creatorProjectMatrixMode(process.env.CREATOR_LIVE_PROJECT_MATRIX)
+let matrixInheritedPluginId: string | undefined
+let matrixDeliveredPluginId: string | undefined
+let matrixAssemblies = 0
+let matrixRuntimeCompletions = 0
 const projectKind = genericProject ? "three-stage-material-project" : "two-stage-document-project"
 // Acceptance watchdog only; production model/tool budgets remain unchanged.
-const totalMs = genericProject ? 900_000 :
+const totalMs = genericProject || matrixMode ? 900_000 :
   process.env.CREATOR_LIVE_DEPENDENCY_CONSENT === "1" ? 600_000 : 300_000
 let priorEvidence:
   | { candidate: typeof candidate; observations: Observation[]; fatal?: string }
@@ -86,7 +97,8 @@ if (resumeRun) {
   priorEvidence = JSON.parse(readFileSync(join(isolated,
     genericDeliveryRecovery ? "continuation-runtime-repair.json" :
       genericRepair && resumeMode === "runtime" ? "continuation-diagnostic-repair-2.json" :
-      genericRepair ? "continuation-diagnostic.json" : "evidence.json"), "utf8"))
+      genericRepair && existsSync(join(isolated, "continuation-diagnostic.json"))
+        ? "continuation-diagnostic.json" : "evidence.json"), "utf8"))
   if (genericRepair) assert.equal(priorEvidence?.fatal, genericDeliveryRecovery ?
     "LIVE_PROJECT_RUNTIME_FAILED" : resumeMode === "runtime" ?
       "LIVE_PROJECT_INSTALLED_CANDIDATE_CHANGED" : "GENERIC_PROJECT_REPORT_OLD_REVIEW")
@@ -351,7 +363,7 @@ function nativeFields(value: unknown): unknown {
 function nativeRequest(args: Record<string, unknown>) {
   return {
     ...Object.fromEntries(
-      ["action", "id", "revision", "name", "kind", "template", "catalogSection", "cursor"]
+      ["action", "id", "revision", "name", "kind", "template", "catalogSection", "cursor", "pluginId"]
         .filter((key) => key in args)
         .map((key) => [key, args[key]])
     ),
@@ -942,7 +954,7 @@ async function exerciseCounter(threadId: string, workspace: string) {
   const chat = page.locator(`[data-chat-thread-id=${JSON.stringify(threadId)}]`)
   const panel = page.getByRole("dialog", { name: "插件创作工作区", exact: true })
   if (!(await panel.isVisible())) await chat.locator('[data-app-guide="workspace"]').click()
-  const approve = panel.getByRole("button", { name: "确认并应用到这段聊天", exact: true })
+  const approve = panel.getByRole("button", { name: "确认并开始聊天试用", exact: true })
   await approve.waitFor()
   await approve.click()
   let status: DevelopmentStatus | undefined
@@ -1012,6 +1024,7 @@ async function exerciseCounter(threadId: string, workspace: string) {
 
 async function runChat(kind: string, prompt: string, workspace: string, modelUrl: string) {
   assert(page)
+  await allowCreatorWorkspaceInteraction(page)
   executionStage = `${kind}-setup`
   runtime = undefined
   mkdirSync(workspace, { recursive: true })
@@ -1079,6 +1092,17 @@ async function runChat(kind: string, prompt: string, workspace: string, modelUrl
   assert(await authorChat.isVisible(), "LIVE_AUTHOR_NOT_DISPLAYED")
   executionStage = `${kind}-enter-creator`
   await enterModsCreatorChat(page, threadId, workspace)
+  const matrixPrefix = `matrix-${observations.length}`
+  const matrixSeed = matrixMode ? await provisionMatrixSeed(page, root, threadId,
+    matrixMode, matrixInheritedPluginId) : undefined
+  if (matrixMode) {
+    prompt = matrixFirstPrompt(matrixMode, matrixSeed)
+    writeFileSync(join(fixture.isolated, `${matrixPrefix}-input.json`),
+      JSON.stringify({ mode: matrixMode, seed: matrixSeed ?? null,
+        runtimeRequested: process.env.CMB_CREATOR_LIVE_PROJECT_RUNTIME === "1" }, null, 2),
+      { flag: "wx" })
+  }
+  let firstMatrixCandidate: MatrixCandidate | undefined
   let importedDigest: string | undefined = resumeRun && process.env.CREATOR_LIVE_SOURCE_SET
     ? JSON.parse(readFileSync(join(fixture.isolated, "imported-source-set.json"), "utf8")).digest
     : undefined
@@ -1184,6 +1208,27 @@ async function runChat(kind: string, prompt: string, workspace: string, modelUrl
     if (sawRunning && !running && active.requests.length && aborts.size === 0) {
       idleSince ||= Date.now()
       if (Date.now() - idleSince > 3000) {
+        if (matrixMode && !firstMatrixCandidate && active.candidateReadyMs !== undefined) {
+          const status = await page.evaluate(
+            id => window.api.mods.development.status({ threadId: id }), threadId)
+          assert(status.projectTrial, "LIVE_MATRIX_FIRST_CANDIDATE_MISSING")
+          firstMatrixCandidate = readMatrixCandidate(fixture.isolated, status.projectTrial)
+          assertMatrixOrigin(matrixMode, firstMatrixCandidate, matrixSeed, active.nativeTrace ?? [], active.failures)
+          writeFileSync(join(fixture.isolated, `${matrixPrefix}-first.json`),
+            JSON.stringify(firstMatrixCandidate, null, 2), { flag: "wx" })
+          importedDigest = status.projectTrial.digest
+          active.candidateReadyMs = undefined
+          executionStage = `${matrixPrefix}-append-stage-through-conversation`
+          const panel = page.getByRole("dialog", { name: "插件创作工作区", exact: true })
+          if (await panel.isVisible()) {
+            await panel.getByRole("button", { name: "返回聊天修改", exact: true }).click()
+            await panel.waitFor({ state: "hidden" })
+          }
+          await page.locator("textarea.composer-textarea").fill(matrixFollowupPrompt(firstMatrixCandidate, matrixMode))
+          await page.getByRole("button", { name: "发送消息", exact: true }).click()
+          idleSince = 0
+          continue
+        }
         if (genericProject && !firstGenericCandidate && active.candidateReadyMs !== undefined) {
           const status = await page.evaluate(
             (id) => window.api.mods.development.status({ threadId: id }), threadId
@@ -1236,6 +1281,22 @@ async function runChat(kind: string, prompt: string, workspace: string, modelUrl
   active.elapsedMs = Date.now() - active.startedAt
   active.outcome ??= "LIVE_TOTAL_TIME_LIMIT"
   const finalStatus = await observe(threadId)
+  if (matrixMode && firstMatrixCandidate &&
+      hasLiveCreatorCandidate(finalStatus, "project", firstMatrixCandidate.digest)) {
+    const status = await page.evaluate(id => window.api.mods.development.status({ threadId: id }), threadId)
+    assert(status.projectTrial, "LIVE_MATRIX_UPDATED_CANDIDATE_MISSING")
+    const after = readMatrixCandidate(fixture.isolated, status.projectTrial)
+    assertMatrixAssembly(firstMatrixCandidate, after, matrixMode)
+    matrixAssemblies++
+    if (matrixSeed) {
+      const retained = await readInstalledMatrixSeed(page, matrixSeed.installedPluginId, matrixSeed.origin)
+      assert.equal(retained.digest, matrixSeed.digest, "LIVE_MATRIX_INSTALLED_SOURCE_MUTATED")
+    }
+    writeFileSync(join(fixture.isolated, `${matrixPrefix}-assembly.json`), JSON.stringify({
+      originVerified: true, assemblyVerified: true, after, runtimeVerified: false,
+      acceptance: "candidate-only; runtime reported separately in evidence"
+    }, null, 2), { flag: "wx" })
+  }
   if (genericProject && firstGenericCandidate &&
       hasLiveCreatorCandidate(finalStatus, "project", firstGenericCandidate.digest)) {
     const status = await page.evaluate(
@@ -1323,14 +1384,14 @@ async function runChat(kind: string, prompt: string, workspace: string, modelUrl
             true
           return true
         },
-        artifactPrefix,
-        installedWorkspaceSuffix: genericProject ? finalStatus.projectTrial?.digest.slice(0, 12) : undefined,
+        artifactPrefix: matrixMode ? `${artifactPrefix}-${matrixPrefix}` : artifactPrefix,
+        installedWorkspaceSuffix: genericProject || matrixMode ? finalStatus.projectTrial?.digest.slice(0, 12) : undefined,
         installedProjectId,
         authorThreadId: threadId,
         authorWorkspace: workspace,
         artifacts: fixture.isolated,
         deadline,
-        goal: genericProject ? genericProjectCreatorScenario.runtimeGoal : "为团队制作一个完全本地离线的需求记录工具。用户可新建、编辑和查找需求，每条需求包含标题、目标、范围、验收标准和待确认问题；保存为工作目录内Markdown文档。验收标准：能创建与编辑一条需求，按标题查找，重启后能读回已保存文档；不联网、不访问工作目录外文件。仅为本地验收允许经实际逐条审查的只读JSON/Markdown校验命令，禁止任何写文件命令，业务文件须通过原生文件写入审批。无须额外取时间戳或哈希；按阶段Skill与已给需求直接完成产物与检查。第一阶段写需求草稿，第二阶段独立复核并保留原稿。",
+        goal: matrixMode ? matrixMode === "report-derived" ? matrixReportRuntimeGoal : matrixRuntimeGoal : genericProject ? genericProjectCreatorScenario.runtimeGoal : "为团队制作一个完全本地离线的需求记录工具。用户可新建、编辑和查找需求，每条需求包含标题、目标、范围、验收标准和待确认问题；保存为工作目录内Markdown文档。验收标准：能创建与编辑一条需求，按标题查找，重启后能读回已保存文档；不联网、不访问工作目录外文件。仅为本地验收允许经实际逐条审查的只读JSON/Markdown校验命令，禁止任何写文件命令，业务文件须通过原生文件写入审批。无须额外取时间戳或哈希；按阶段Skill与已给需求直接完成产物与检查。第一阶段写需求草稿，第二阶段独立复核并保留原稿。",
         beginStage(label: string, stageWorkspace: string, projectId?: string) {
           assert(!fatal, "LIVE_PROVIDER_ALREADY_STOPPED")
           activeProjectId = projectId
@@ -1363,6 +1424,10 @@ async function runChat(kind: string, prompt: string, workspace: string, modelUrl
       }
       active.runtime.project = report
       active.runtime.verified = true
+      if (matrixMode && "delivery" in report) {
+        matrixDeliveredPluginId = report.delivery.pluginId
+        matrixRuntimeCompletions++
+      }
     } catch (cause) {
       await recordFailure(cause)
       const code =
@@ -1429,12 +1494,24 @@ async function main() {
     if (scenario !== "counter" && first && Date.now() < deadline)
       await runChat(
         projectKind,
-        genericProject ? genericProjectCreatorScenario.firstPrompt : process.env.CREATOR_LIVE_PROMPT_FILE
+        matrixMode ? "" : genericProject ? genericProjectCreatorScenario.firstPrompt : process.env.CREATOR_LIVE_PROMPT_FILE
           ? readFileSync(resolve(process.env.CREATOR_LIVE_PROMPT_FILE), "utf8")
           : "请从零制作一个两阶段需求文档项目插件，不依赖已有插件：第一阶段根据本项目内用户需求生成 requirements.md，第二阶段独立复核需求是否有目标、范围、验收标准，输出 review.md 和机器可检查的 review.json。保留第一阶段原稿，成果通过实际文件检查后再交给人确认。请用原生项目创作工具生成、检查和准备隔离试用候选。不要安装、不要启动执行、不要代我批准。",
         join(fixture.workspace, "document"),
         modelUrl
       )
+    if (matrixMode === "report-derived" && matrixDeliveredPluginId && !fatal && Date.now() < deadline) {
+      matrixInheritedPluginId = matrixDeliveredPluginId
+      await runChat(projectKind, "", join(fixture.workspace, "derived-again"), modelUrl)
+    }
+    if (matrixMode && !fatal) {
+      assert.equal(matrixAssemblies, matrixMode === "report-derived" ? 2 : 1,
+        "LIVE_MATRIX_REQUIRED_ASSEMBLY_NOT_COMPLETED")
+      if (matrixMode !== "autobiz-derived")
+        assert(matrixDeliveredPluginId, "LIVE_MATRIX_RUNTIME_DELIVERY_NOT_COMPLETED")
+      assert.equal(matrixRuntimeCompletions, matrixMode === "autobiz-derived" ? 0 :
+        matrixMode === "report-derived" ? 2 : 1, "LIVE_MATRIX_REQUIRED_RUNTIME_NOT_COMPLETED")
+    }
   } catch (cause) {
     await recordFailure(cause)
     fatal ??=

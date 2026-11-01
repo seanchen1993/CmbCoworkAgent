@@ -1,3 +1,4 @@
+import { readNativeHarnessFeature } from "../harness-board/native-harness"
 import { requireHarnessFeatureWorkspace } from "../harness-board/service"
 import {
   BrowserWindow,
@@ -504,6 +505,8 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
   ipcMain.handle(
     "harnessBoard:validateManagedRunStart",
     async (_event, input: ManagedRunStartValidationInput): Promise<void> => {
+      if (readNativeHarnessFeature(input.projectId, input.featureId))
+        throw Error("HARNESS_NATIVE_FEATURE_COMMAND_REQUIRED")
       // Preflight only: startManagedRun repeats this gate inside the per-feature lock.
       await requireHarnessFeatureWorkspace(input.projectId, input.featureId)
       return managedRunController.validateStart(input)
@@ -513,6 +516,8 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
   ipcMain.handle(
     "harnessBoard:startManagedRun",
     async (event, input: ManagedRunStartInput): Promise<ManagedRunSummary> => {
+      if (readNativeHarnessFeature(input.projectId, input.featureId))
+        throw Error("HARNESS_NATIVE_FEATURE_COMMAND_REQUIRED")
       const window = BrowserWindow.fromWebContents(event.sender)
       if (!window) throw new Error("没有可用的应用主窗口，无法开始托管")
       return managedRunController.start({
@@ -525,6 +530,8 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
   ipcMain.handle(
     "harnessBoard:stopManagedRun",
     async (_event, input: ManagedRunStopInput): Promise<boolean> => {
+      if (readNativeHarnessFeature(input.projectId, input.featureId))
+        throw Error("HARNESS_NATIVE_FEATURE_COMMAND_REQUIRED")
       return managedRunController.stop(input)
     }
   )
