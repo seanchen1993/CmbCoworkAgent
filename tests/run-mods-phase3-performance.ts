@@ -20,20 +20,30 @@ async function main() {
         [
           "--smoke",
           "--baseline-only",
+          "--diagnostic-guest-dispose",
           "--suite=runtime",
           "--suite=ingress",
           "--suite=mcp"
         ].includes(arg)
       ),
-    "Usage: tsx tests/run-mods-phase3-performance.ts --suite=runtime|ingress|mcp [--smoke] [--baseline-only]"
+    "Usage: tsx tests/run-mods-phase3-performance.ts --suite=runtime|ingress|mcp [--smoke] [--baseline-only] [--diagnostic-guest-dispose]"
   )
   const choices = args.filter((arg) => arg.startsWith("--suite="))
   assert.equal(choices.length, 1)
   const suite = choices[0].slice(8)
   const smoke = args.includes("--smoke")
+  const diagnosticDispose = args.includes("--diagnostic-guest-dispose")
+  assert(
+    !diagnosticDispose || (suite === "runtime" && args.includes("--baseline-only") && !smoke),
+    "GUEST_DISPOSE_DIAGNOSTIC_REQUIRES_RUNTIME_BASELINE_ONLY_NOSMOKE"
+  )
   const tree = modsGitTree(root, "15492cc9f")
   const dependencyHash = tree.assertSameDependencies()
-  const output = join(root, "output", `phase3-performance-${suite}-${randomUUID().slice(0, 8)}`)
+  const output = join(
+    root,
+    "output",
+    `phase3-${diagnosticDispose ? "diagnostic-dispose" : "performance"}-${suite}-${randomUUID().slice(0, 8)}`
+  )
   mkdirSync(output)
   const variants = args.includes("--baseline-only") ? ["baseline"] : ["baseline", "current"]
   const fixture =
@@ -172,6 +182,8 @@ async function main() {
   }
   if (currentSnapshot) verifyModsSourceSnapshot(root, ["src"], currentSnapshot)
   const manifest = {
+    diagnosticOnly: diagnosticDispose,
+    timingEligible: !diagnosticDispose,
     baseline: tree.commit,
     dependencyHash,
     fixture,
@@ -184,8 +196,9 @@ async function main() {
     baselineSources: tree.loadedSources(),
     currentSources: Object.fromEntries(currentSources),
     currentSnapshot,
-    scope:
-      suite === "mcp"
+    scope: diagnosticDispose
+      ? "Diagnostic only: historical baseline single-plugin burst, original dispose reason; no formal samples or comparison."
+      : suite === "mcp"
         ? "Same named MCP resolver + instance authority + SQLite, 1000 tools, real host; passthrough transport, no VM/network/model"
         : suite === "runtime"
           ? "Paired 0/1/8 plugin matrix and disabled reads; real QuickJS/SQLite; excludes 2h soak/idle qualification"
@@ -255,6 +268,7 @@ async function main() {
     )
     const env = { ...process.env }
     env.CMB_MODS_PERFORMANCE_GC = "natural"
+    env.CMB_MODS_GUEST_DISPOSE_DIAGNOSTIC = diagnosticDispose ? "1" : "0"
     delete env.ELECTRON_RUN_AS_NODE
     for (const [key, name] of Object.entries({
       HOME: "home",
@@ -303,14 +317,17 @@ async function main() {
         : JSON.parse(readFileSync(join(run, "result.json"), "utf8"))
     reports.push({ variant, path: run, code, result })
     writeFileSync(
-      join(output, "comparison.json"),
+      join(output, diagnosticDispose ? "diagnostic.json" : "comparison.json"),
       JSON.stringify(
         { ...manifest, completedAt: new Date().toISOString(), reports, aggregate: aggregate() },
         null,
         2
       )
     )
-    assert([0, 2].includes(code), `PERFORMANCE_EXECUTION_FAILED:${variant}:${code}`)
+    assert(
+      (diagnosticDispose ? [0, 1, 2] : [0, 2]).includes(code),
+      `PERFORMANCE_EXECUTION_FAILED:${variant}:${code}`
+    )
   }
   assert.equal(createHash("sha256").update(readFileSync(fixturePath)).digest("hex"), fixtureHash)
   for (const [file, digest] of currentSources)
@@ -330,7 +347,11 @@ async function main() {
       digest,
       `PERFORMANCE_DRIVER_CHANGED:${file}`
     )
-  process.exitCode = reports.some((row) => row.code !== 0) ? 2 : 0
+  process.exitCode = diagnosticDispose
+    ? (reports.find((row) => row.code !== 0)?.code ?? 0)
+    : reports.some((row) => row.code !== 0)
+      ? 2
+      : 0
 }
 void main().catch((error) => {
   console.error(error)

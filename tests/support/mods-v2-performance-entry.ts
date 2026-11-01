@@ -22,6 +22,7 @@ mkdirSync(workspace)
 app.setPath("userData", join(output, "electron-profile"))
 app.commandLine.appendSwitch("disable-gpu")
 const diagnosticGc = process.env.CMB_MODS_PERFORMANCE_GC === "diagnostic"
+const diagnosticDispose = process.env.CMB_MODS_GUEST_DISPOSE_DIAGNOSTIC === "1"
 if (diagnosticGc) setFlagsFromString("--expose_gc")
 const collect = diagnosticGc ? (runInNewContext("gc") as () => void) : undefined
 const active = new Set<FunctionRuntimeClient>()
@@ -42,10 +43,15 @@ const report: Record<string, unknown> = {
   electronPid: process.pid,
   versions: process.versions,
   workloadComplete: false,
-  qualificationRequested: qualifiesPerformanceRun(options) && !diagnosticGc,
-  timingEligible: !diagnosticGc,
-  scope:
-    "Production FunctionModsManager -> FunctionSession -> utilityProcess QuickJS, real grants/digests and SQLite; host fixture publication passthrough and controlled file core. Not full ModsManager/LocalSandbox/renderer/model/permission I/O.",
+  diagnosticOnly: diagnosticDispose || diagnosticGc,
+  qualificationRequested: qualifiesPerformanceRun(options) && !diagnosticGc && !diagnosticDispose,
+  timingEligible: !diagnosticGc && !diagnosticDispose,
+  ...(diagnosticDispose
+    ? { diagnosticPlugins: 1, diagnosticMaximumEvents: 1 + options.warmups + options.samples }
+    : {}),
+  scope: diagnosticDispose
+    ? "Diagnostic only: baseline single-plugin burst and transparent test-host dispose observation. No timing/ABBA qualification."
+    : "Production FunctionModsManager -> FunctionSession -> utilityProcess QuickJS, real grants/digests and SQLite; host fixture publication passthrough and controlled file core. Not full ModsManager/LocalSandbox/renderer/model/permission I/O.",
   missingGates: [
     "full application disabled tool ingress",
     "8 plugins / 4 rendered panes input latency",
@@ -396,13 +402,22 @@ void app.whenReady().then(async () => {
       memory(postGc)
       save()
     }, 10000)
-    if (["all", "matrix"].includes(options.phase)) await matrix()
-    if (["all", "idle"].includes(options.phase)) await idle()
-    if (["all", "soak"].includes(options.phase)) await soak()
+    if (diagnosticDispose) {
+      phase = "diagnostic-single-guest-dispose"
+      await setProfile(1)
+      await event()
+      report.diagnosticExecutionHosts = [...active].map((client) => client.stats.pid)
+      save()
+      for (let index = 0; index < options.warmups + options.samples; index++) await event()
+    } else if (["all", "matrix"].includes(options.phase)) await matrix()
+    if (!diagnosticDispose && ["all", "idle"].includes(options.phase)) await idle()
+    if (!diagnosticDispose && ["all", "soak"].includes(options.phase)) await soak()
     await setProfile(0, false)
     report.status = "completed"
-    report.workloadComplete = true
+    report.workloadComplete = !diagnosticDispose
+    if (diagnosticDispose) report.diagnosticProbeComplete = true
   } catch (error) {
+    report.failureActive = [...active].map((client) => client.stats)
     report.status = "failed"
     report.error = error instanceof Error ? error.stack : String(error)
     console.error(error)
