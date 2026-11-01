@@ -13,6 +13,7 @@ import {
 } from "./mods-desktop-latency"
 import { verifyDesktopPerformance } from "./mods-desktop-performance-e2e"
 import { desktopHeapAssessment, type DesktopHeapSample } from "./mods-desktop-heap"
+import { desktopStreamDiagnostic } from "./mods-desktop-stream-diagnostic"
 
 /** Whole application workload. No test IPC bridge, direct guest dispatcher or fake store. */
 export async function verifyDesktopSoak(
@@ -26,6 +27,11 @@ export async function verifyDesktopSoak(
   historyRegression = false
 ): Promise<void> {
   const options = desktopSoakOptions({ smoke: process.env.CMB_MODS_SOAK_SMOKE })
+  const streamDiagnostic = desktopStreamDiagnostic(process.env.CMB_MODS_DESKTOP_STREAM_DIAGNOSTIC)
+  assert(
+    !streamDiagnostic || (performanceOnly && !historyRegression && !options.smoke),
+    "STREAM_DIAGNOSTIC_MUST_NOT_ENTER_SOAK_OR_SMOKE"
+  )
   const project = join(workspace, "desktop-soak")
   mkdirSync(project, { recursive: true })
   const id = await page.evaluate(async (project) => {
