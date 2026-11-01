@@ -55,11 +55,17 @@
 
 受控 desktop smoke 通过：`output/phase3-source-desktop-smoke-e9cd3185`。真实 Electron/native IPC/SQLite/QuickJS，8个实际导入授权 Mod、4个真实 Client Pane、24次顺序回执、3轮关闭/重载恢复，结束后无所属 utility/pane 残留。自然 heap 采样链实际执行，短测不符合两小时正式门槛。以上两份记录绑定当时15492cc9f工作区内容哈希，明确包含未提交改动，不冒充已提交版本。
 
+追加实现冻结到 `53a3dcd84824141716ee5b2ae212220df0278006` 后，新 native source smoke 退出0：`output/phase3-source-smoke-62742779`。完整源码/资源和选定 driver 启动前后围栏通过，实际 appPath 为新候选、版本2.0.0，当前 main/preload/renderer/公开 IPC 健康，父 textarea 实例和未发送草稿保留，正常关闭。其后受控原 Feature 到 completed、商业续验和正式性能另行记录。
+
 广域回归648文件：632通过、9跳过、7失败，7225项通过、10失败、10跳过。失败包括旧导入入口/未开放接口断言，以及开发并行期间载入了旧作者声明或通知实现的模块。修复和同步断言后，**全部7个失败文件按冻结源码联合重跑94/94通过**，退出0，记录 `output/mods-nonmedia-final-failed-files-2026-11-01.log`。导入采用真实 parent 入口和服务，没有恢复旧 UI 或放宽断言。不能据此把最初整套命令写成全绿。
 
 提交后 `npm run test:mods:continuity` 与 `npm run test:mods:phase2:browser` 均退出0：原项目创建、Feature 开始/批准/重试/取消以及 Placed、MCP、子会话、paint、UI 原语、真实 ChatContainer 组件检查通过。`npm run test:chat:performance` 的9个浏览器套件也全通过：400条混合高度消息拖动/前插不空屏，流式追加不增加导航几何读取，长消息无需 scrollHeight 读取，侧栏拖动期间 App 重渲染为0且释放时1次，解析缓存复用仍保留当前文件链接与复制回调。首次性能脚本因独立 esbuild 夹具未接真实 Worker loader 中断，接入现有 browserWorkerPlugin 后完整重跑通过；没有修改生产 Worker。记录 `output/mods-nonmedia-continuity-2026-11-01.log`、`output/mods-nonmedia-phase2-browser-2026-11-01.log`、`output/mods-nonmedia-chat-performance-browser-final-2026-11-01.log`。这些是实际组件/受控适配器回归，不等于商业模型或正式长稳。
 
-待填写：提交后真实作者从零/派生/调整、ZIP 导出再导入、原项目阶段到最终完成衔接及未验证节点。Git/审批环境单列，不算平台失败，也不把未到达节点写成通过。
+受控原流程全链已通过：`output/phase3-source-original-feature-completion-9e71f921/journey/run-SUEGV1`，运行绑定53a3dcd源码及当次完整测试 driver 哈希，启动/结束围栏通过。原 ProjectForm→配置→Feature→真实 `nativeFeatureCommand`，随后 implementation→delivery→audit→completed；3个真实执行线程、3次 transitioned、3个原生 schema check 均通过。14个本地200请求驱动真实工具，实际读取 Skill、前序输出和写回文件；3次公开 one-shot 审批均核对原 pending 身份及私有声明路径，最终3个文件 SHA 与发送 payload 一致。0商业请求、0环境阻塞、正常关闭，不把受控 provider 当成商业模型。
+
+该工具最初几次停在原 combobox 选择器、两种摘要混淆、multipart 文本展开及审批 DTO 字段假设；只修测试适配，未修改产品、放宽原生校验或审批。安装 identity 的 derivation digest 与 Host retained 完整包树 digest 分开核验，不用主目录 hash 代替依赖/投影后的 Host 快照。失败尝试记录保留，未到节点不算通过。
+
+待填写：真实作者从零/派生/调整续验、ZIP 导出再导入、各商业场景普通项目衔接及未验证节点。Git/审批环境单列，不算平台失败，也不把未到达节点写成通过。
 
 ## 性能
 

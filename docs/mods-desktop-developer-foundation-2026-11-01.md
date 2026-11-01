@@ -63,6 +63,8 @@ export const register: Register = (on) => {
 
 启动时只登记，批准并生效后由用户运行专属命令或点击按钮。不要在候选预检查中发送网络请求、修改文件或启动任务。保存、批准、生效和实际结果分别核对。
 
+原项目适配中，安装/派生 identity 的 digest 与 Host 权限审查的完整包树 `packageDigest` 属于不同协议，不能直接比较。依赖与组件投影也会影响 Host retained 快照。使用各自公开回执绑定的值，不自行猜测、替换摘要或让插件读取宿主内部缓存目录。
+
 ## 按需求找接口
 
 创造者的能力查询支持 `query` 精确查 SDK 方法、事件或五个真实 VM helper 导出：`atom`、`derive`、`memberOf`、`read`、`update`。完整声明只进入编译器；作者通过 `nextCursor` 按需取后续页，不在模型上下文重复填整份 SDK。

@@ -1,7 +1,7 @@
 /** Current-source native app; deterministic small JSON only, no commercial provider. */
 import assert from "node:assert/strict"
 import { createHash, randomUUID } from "node:crypto"
-import { appendFileSync, readFileSync, realpathSync, writeFileSync } from "node:fs"
+import { appendFileSync, existsSync, readFileSync, realpathSync, writeFileSync } from "node:fs"
 import { createServer } from "node:http"
 import { isAbsolute, join, relative, resolve } from "node:path"
 import AdmZip from "adm-zip"
@@ -73,17 +73,28 @@ const compiled = compileNativeComposition(source, { files, actionCatalog: [] })
 const zip = new AdmZip()
 for (const file of compiled.files) zip.addFile(file.path, file.bytes)
 const archive = zip.toBuffer()
-const calls = new Map<string, { stage: string; name: string; path: string }>()
+const calls = new Map<string, { stage: string; name: string; path: string; content?: string }>()
 const requests: Array<{ stage: string; tool?: string; inputBytes: number }> = []
 const toolApprovals: Array<{
   requestId: string
   toolCallId: string
+  modelToolCallId: string
   path: string
   sha256: string
 }> = []
 const errors: string[] = []
 let app: ElectronApplication | undefined
 let page: Page | undefined
+function messageText(content: unknown): string {
+  if (typeof content === "string") return content
+  if (Array.isArray(content))
+    return content
+      .map((part) =>
+        part && typeof part === "object" && typeof part.text === "string" ? part.text : ""
+      )
+      .join("\n")
+  return JSON.stringify(content) ?? ""
+}
 
 const server = createServer(async (request, response) => {
   try {
@@ -102,12 +113,13 @@ const server = createServer(async (request, response) => {
     }
     assert.equal(body.model, "original-feature-controlled")
     assert(requests.length < 24, "ORIGINAL_COMPLETION_REQUEST_LIMIT")
-    const text = body.messages
-      .map((message) =>
-        typeof message.content === "string" ? message.content : JSON.stringify(message.content)
+    const text = body.messages.map((message) => messageText(message.content)).join("\n")
+    const stage = stages.find((value) => new RegExp(`"stageId"\\s*:\\s*"${value}"`).test(text))
+    if (!stage && !existsSync(join(fixture.isolated, "controlled-unexpected-context.json")))
+      writeFileSync(
+        join(fixture.isolated, "controlled-unexpected-context.json"),
+        JSON.stringify({ model: body.model, messages: body.messages }, null, 2)
       )
-      .join("\n")
-    const stage = stages.find((value) => text.includes(`"stageId":"${value}"`))
     assert(stage, "ORIGINAL_COMPLETION_REAL_STAGE_CONTEXT_REQUIRED")
     const index = stages.indexOf(stage)
     const previous = index ? stages[index - 1] : undefined
@@ -161,10 +173,23 @@ const server = createServer(async (request, response) => {
             resultFor("read_file", join(workspace, `${previous}.json`))?.content
           ).includes(previous)
         )
-      assert.match(String(resultFor("write_file", output)?.content), /^Successfully wrote/)
+      assert.match(messageText(resultFor("write_file", output)?.content), /^Successfully wrote/)
     }
     const id = `original-completion-${requests.length}`
-    if (name) calls.set(id, { stage, name, path })
+    const args =
+      name === "write_file"
+        ? {
+            file_path: path,
+            content: JSON.stringify({ stage, predecessor: previous ?? "none" })
+          }
+        : { file_path: path }
+    if (name)
+      calls.set(id, {
+        stage,
+        name,
+        path,
+        ...(name === "write_file" ? { content: args.content } : {})
+      })
     requests.push({ stage, tool: name, inputBytes: bytes })
     const delta = name
       ? {
@@ -176,14 +201,7 @@ const server = createServer(async (request, response) => {
               type: "function",
               function: {
                 name,
-                arguments: JSON.stringify(
-                  name === "write_file"
-                    ? {
-                        file_path: path,
-                        content: JSON.stringify({ stage, predecessor: previous ?? "none" })
-                      }
-                    : { file_path: path }
-                )
+                arguments: JSON.stringify(args)
               }
             }
           ]
@@ -363,11 +381,19 @@ async function main() {
             assert(!request.retry_reason && request.allowed_approval_types.includes("approve"))
             const path = resolve(request.filePath)
             assert.equal(path, join(workspace, `${operation.stageId}.json`))
-            const args = request.tool_call.args as { file_path: string; content: string }
-            assert.equal(resolve(args.file_path), path)
+            const args = request.tool_call.args as { filePath: string }
+            assert.equal(resolve(args.filePath), path)
+            const emitted = [...calls].filter(
+              ([, call]) =>
+                call.stage === operation.stageId &&
+                call.name === "write_file" &&
+                resolve(call.path) === path
+            )
+            assert.equal(emitted.length, 1, "ORIGINAL_COMPLETION_EXACT_EMITTED_WRITE_REQUIRED")
+            const [modelToolCallId, write] = emitted[0]
             const index = stages.indexOf(operation.stageId as (typeof stages)[number])
-            assert(index >= 0 && typeof args.content === "string")
-            assert.deepEqual(JSON.parse(args.content), {
+            assert(index >= 0 && typeof write.content === "string")
+            assert.deepEqual(JSON.parse(write.content), {
               stage: operation.stageId,
               predecessor: index ? stages[index - 1] : "none"
             })
@@ -393,8 +419,9 @@ async function main() {
             toolApprovals.push({
               requestId: request.id,
               toolCallId: request.tool_call.id,
+              modelToolCallId,
               path,
-              sha256: createHash("sha256").update(args.content).digest("hex")
+              sha256: createHash("sha256").update(write.content).digest("hex")
             })
           }
           const end = Date.now() + 10_000

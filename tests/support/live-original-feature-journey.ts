@@ -12,6 +12,7 @@ import type { PluginStartUseIdentity } from "../../src/shared/plugin-start-use"
 import type { ProjectFunctionSourceReview } from "../../src/shared/project-runtime/function-source"
 import type { LocalProjectView } from "../../src/shared/project-runtime/platform-api"
 import { normalizeWorkspacePathKey } from "../../src/shared/workspace-path"
+import { readPackageProtocolDigestAsync } from "../../src/main/harness-board/project-runtime/package-snapshots"
 import { openUnifiedProjectList } from "./project-unified-native-journey"
 
 type JourneyStatus = "passed" | "failed" | "environment-blocked" | "unverified"
@@ -31,6 +32,8 @@ export interface OriginalFeatureJourneyResult {
   projectId?: string
   featureId?: string
   hostRunId?: string
+  runtimePackageDigest?: string
+  runtimePackageSource?: string
   steps: Array<{ name: string; status: JourneyStatus; evidence: Record<string, unknown> }>
   environmentIssues: Array<{ category: "git" | "system-approval"; message: string }>
   pendingReviews: Array<{ kind: "configuration" | "execution" | "result"; message: string }>
@@ -302,6 +305,11 @@ export async function exerciseLiveOriginalFeatureJourney(input: OriginalFeatureJ
     assert.equal(plugin[0].runtimeMode, "host", "ORIGINAL_FEATURE_NATIVE_PROJECT_PLUGIN_REQUIRED")
     assert.equal(plugin[0].name, input.installed.name)
     assert.equal(plugin[0].version, input.installed.version)
+    const installed = (await page.evaluate(() => window.api.plugins.list())).find(
+      (plugin) => plugin.id === input.installed.pluginId
+    )
+    assert(installed, "ORIGINAL_FEATURE_PACKAGE_NOT_FOUND")
+    assertInside(isolationRoot, realpathSync(installed.path))
     await openUnifiedProjectList(page)
     await page.getByRole("button", { name: "新建项目", exact: true }).first().click()
     const form = page.getByRole("dialog", { name: "新建项目", exact: true })
@@ -320,8 +328,8 @@ export async function exerciseLiveOriginalFeatureJourney(input: OriginalFeatureJ
         )
       })
       .click()
-    await form.getByRole("textbox", { name: /^项目编号/ }).fill(input.project.code)
-    await form.getByRole("textbox", { name: /^项目名称/ }).fill(input.project.name)
+    await form.getByPlaceholder("输入项目编号搜索", { exact: true }).fill(input.project.code)
+    await form.getByPlaceholder("输入项目名称搜索", { exact: true }).fill(input.project.name)
     await form.getByRole("textbox", { name: "项目描述", exact: true }).fill(input.feature.goal)
     await form.getByRole("textbox", { name: /^系统编号/ }).fill(input.project.systemId)
     await form.getByRole("textbox", { name: /^系统名称/ }).fill(input.project.systemName)
@@ -359,7 +367,7 @@ export async function exerciseLiveOriginalFeatureJourney(input: OriginalFeatureJ
     const edit = page.getByRole("dialog", { name: "编辑项目", exact: true })
     await edit.waitFor({ timeout: remaining() })
     assert.equal(
-      await edit.getByRole("textbox", { name: /^项目名称/ }).inputValue(),
+      await edit.getByPlaceholder("输入项目名称搜索", { exact: true }).inputValue(),
       input.project.name
     )
     assert.equal(
@@ -402,14 +410,24 @@ export async function exerciseLiveOriginalFeatureJourney(input: OriginalFeatureJ
     ).runs.filter((run) => !previous.includes(run.slug))
     assert.equal(runs.length, 1, "ORIGINAL_FEATURE_PUBLIC_FEATURE_NOT_UNIQUE")
     result.featureId = runs[0].slug
-    const readRun = () =>
-      page.evaluate(
-        ({ projectId, featureId }) => window.api.harnessBoard.getRunDetail(projectId, featureId),
-        {
-          projectId: project.projectId,
-          featureId: runs[0].slug
+    const readRun = async () => {
+      while (true) {
+        remaining()
+        try {
+          return await page.evaluate(
+            ({ projectId, featureId }) =>
+              window.api.harnessBoard.getRunDetail(projectId, featureId),
+            {
+              projectId: project.projectId,
+              featureId: runs[0].slug
+            }
+          )
+        } catch (error) {
+          if (!errorText(error).includes("Harness catalog request was superseded")) throw error
+          await new Promise((done) => setTimeout(done, 100))
         }
-      )
+      }
+    }
     const initial = await readRun()
     const binding = initial.nativeBinding
     assert(binding, "ORIGINAL_FEATURE_NATIVE_BINDING_REQUIRED")
@@ -448,7 +466,15 @@ export async function exerciseLiveOriginalFeatureJourney(input: OriginalFeatureJ
     const readReview = () =>
       page.evaluate((id) => window.api.harnessBoard.nativeFeatureMods.read(id), binding.hostRunId)
     let review = await readReview()
-    assert.equal(review.packageDigest, input.installed.sourceDigest)
+    assert(/^[a-f0-9]{64}$/.test(review.packageDigest))
+    const retained = realpathSync(
+      join(isolationRoot, "data/local-projects/packages", review.packageDigest, "package")
+    )
+    assertInside(isolationRoot, retained)
+    const runtimePackageDigest = await readPackageProtocolDigestAsync(retained)
+    assert.equal(review.packageDigest, runtimePackageDigest)
+    result.runtimePackageDigest = runtimePackageDigest
+    result.runtimePackageSource = retained
     assert(equalPath(review.workspace, binding.workspace))
     const executableSources = sources(review).filter(
       (source) => !("configurationOnly" in source && source.configurationOnly)
@@ -631,7 +657,7 @@ export async function exerciseLiveOriginalFeatureJourney(input: OriginalFeatureJ
       executionStarted.nativeProject!.project.installedPluginId,
       input.installed.pluginId
     )
-    assert.equal(executionStarted.nativeProject!.project.pluginDigest, input.installed.sourceDigest)
+    assert.equal(executionStarted.nativeProject!.project.pluginDigest, runtimePackageDigest)
     step("native-command-admission", "passed", {
       originalManagedRunDialog: true,
       publicCommand: "harnessBoard.nativeFeatureCommand(start-feature)",
@@ -650,6 +676,7 @@ export async function exerciseLiveOriginalFeatureJourney(input: OriginalFeatureJ
       assert.deepEqual(current.nativeBinding?.expectedPlugin, result.plugin)
       const view = current.nativeProject
       assert(view, "ORIGINAL_FEATURE_NATIVE_RUN_DISAPPEARED")
+      assert.equal(view.project.pluginDigest, runtimePackageDigest)
       if (
         !executionObserved &&
         view.operations.some((operation) => operation.execution?.threadId)
