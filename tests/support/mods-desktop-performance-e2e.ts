@@ -173,8 +173,7 @@ export async function verifyDesktopPerformance(input: {
         await window.api.threads.patchMetadata(id, {
           set: {
             model: "custom:desktop-perf",
-            subagentsEnabled: false,
-            ...(userUi ? { modelId: "custom:desktop-perf" } : {})
+            subagentsEnabled: false
           }
         })
         if (userUi) await window.api.models.setDefault("custom:desktop-perf")
@@ -628,9 +627,11 @@ export async function verifyDesktopPerformance(input: {
           const thread = await window.api.threads.get(threadId)
           const raw = thread?.metadata
           const metadata = typeof raw === "string" ? JSON.parse(raw) : raw
-          return metadata?.modelId
+          return metadata?.model
         }, id)
         assert.equal(selected, "custom:desktop-perf", "UI_STREAM_LOCAL_MODEL_NOT_PERSISTED")
+        const routingMode = await page.evaluate(() => window.api.routing.getMode())
+        assert.equal(routingMode, "pinned", "UI_STREAM_LOCAL_MODEL_MUST_BE_PINNED")
         const before = await page.evaluate(
           (threadId) => window.api.threads.getMessages(threadId),
           id
@@ -645,7 +646,8 @@ export async function verifyDesktopPerformance(input: {
           threadId: id,
           path: "original ChatContainer composer/send",
           localModelVisible: true,
-          persistedModelId: selected
+          persistedModelId: selected,
+          routingMode
         }
         diagnosticCalls.push(observation)
         saveDiagnostic()
@@ -762,10 +764,12 @@ export async function verifyDesktopPerformance(input: {
         const raw = thread?.metadata
         return {
           metadata: typeof raw === "string" ? JSON.parse(raw) : raw,
+          routingMode: await window.api.routing.getMode(),
           messages: await window.api.threads.getMessages(threadId)
         }
       }, id)
-      assert.equal(reloaded.metadata?.modelId, "custom:desktop-perf")
+      assert.equal(reloaded.metadata?.model, "custom:desktop-perf")
+      assert.equal(reloaded.routingMode, "pinned", "UI_STREAM_RELOADED_MODEL_MUST_BE_PINNED")
       assert.equal(
         reloaded.messages.filter(
           (message) => message.role === "assistant" && !originalAssistantIds.has(message.id)
