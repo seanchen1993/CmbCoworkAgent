@@ -601,7 +601,7 @@ async function main() {
     )
     assert(ordinary, "WORKBENCH_REAL_ORDINARY_COMMAND_REQUIRED")
     const queued = await page.evaluate(
-      ({ id, command }) => window.api.mods.enqueue(id, command, {}),
+      ({ id, command }) => window.api.mods.enqueue(id, command, { text: "" }),
       { id: threadId, command: ordinary }
     )
     const ordinaryDone = await until(
