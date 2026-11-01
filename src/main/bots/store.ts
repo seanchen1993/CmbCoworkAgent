@@ -1,3 +1,4 @@
+import type { AgentRunTerminal } from "../agent/agent-run-service"
 import { BotImGatewayStore } from "./im-gateway-store"
 import { BotWorkConversationJournal } from "./conversation-link-store"
 import { readWorkConversationRecord } from "./conversation-link-validation"
@@ -10,6 +11,7 @@ import type {
   BotWorkPage
 } from "../../shared/bots/work"
 import type { BotMockSource } from "../../shared/bots/mock-channel"
+import type { WorkflowRunReference } from "../agent/workflow/run-manager"
 import { BotMockChannelStore } from "./mock-channel-store"
 import { assertBotMockText, parseBotChannelSource } from "./mock-channel-validation"
 import { cleanUserAttachmentContentForDisplay } from "../../shared/user-attachment-display"
@@ -148,6 +150,11 @@ const TRANSITIONS: Record<BotTaskState, readonly BotTaskState[]> = {
 }
 
 /** Stores control data only. Messages/checkpoints remain in the existing runtime stores. */
+export interface BotWorkflowReference extends WorkflowRunReference {
+  sourceTaskId: string
+  suppressed: boolean
+}
+
 export class BotStore {
   readonly conversations: BotWorkConversationJournal
   readonly mock: BotMockChannelStore
@@ -225,6 +232,13 @@ export class BotStore {
       );
       CREATE INDEX IF NOT EXISTS bot_commands_owner ON bot_commands(thread_id, state);
       CREATE INDEX IF NOT EXISTS bot_commands_settled_age ON bot_commands(updated_at,id) WHERE state!='accepted';
+      CREATE TABLE IF NOT EXISTS bot_workflow_refs (
+        thread_id TEXT NOT NULL, run_id TEXT NOT NULL, started_at TEXT NOT NULL,
+        source_task_id TEXT NOT NULL, workspace_path TEXT NOT NULL,
+        suppressed INTEGER NOT NULL DEFAULT 0, retired_at INTEGER,
+        PRIMARY KEY(thread_id,run_id,started_at)
+      );
+      CREATE INDEX IF NOT EXISTS bot_workflow_refs_source ON bot_workflow_refs(source_task_id);
       CREATE UNIQUE INDEX IF NOT EXISTS bot_tasks_single_run ON bot_tasks(bot_id)
         WHERE state IN ('running', 'waiting_user');
     `)
@@ -252,10 +266,14 @@ export class BotStore {
           ALTER TABLE bot_message_reactions_upgrade RENAME TO bot_message_reactions;`)
       }
       const columns = this.rows("PRAGMA table_info(bot_tasks)")
+      if (!columns.some((column) => column.name === "notification_terminal_json"))
+        db.run("ALTER TABLE bot_tasks ADD COLUMN notification_terminal_json TEXT")
       if (!columns.some((column) => column.name === "continuation_checkpoint_id"))
         db.run("ALTER TABLE bot_tasks ADD COLUMN continuation_checkpoint_id TEXT")
       if (!columns.some((column) => column.name === "continuation_files_json"))
         db.run("ALTER TABLE bot_tasks ADD COLUMN continuation_files_json TEXT")
+      if (!columns.some((column) => column.name === "delivered_files_json"))
+        db.run("ALTER TABLE bot_tasks ADD COLUMN delivered_files_json TEXT")
       if (!columns.some((column) => column.name === "injected_into")) {
         db.run("ALTER TABLE bot_tasks ADD COLUMN injected_into TEXT")
         // One physical graph per Bot. Additional inbox messages consumed by that
@@ -385,6 +403,9 @@ export class BotStore {
         message TEXT,state TEXT NOT NULL,error TEXT,created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL,origin_json TEXT NOT NULL,thread_id TEXT NOT NULL
       );
+      CREATE INDEX IF NOT EXISTS bot_exchange_archive_family ON bot_exchange_archive(
+        COALESCE(json_extract(origin_json,'$.rootTaskId'),id)
+      );
       CREATE INDEX IF NOT EXISTS bot_exchange_archive_pair ON bot_exchange_archive(
         min(bot_id,json_extract(origin_json,'$.fromBotId')),
         max(bot_id,json_extract(origin_json,'$.fromBotId')),
@@ -397,11 +418,25 @@ export class BotStore {
         db.run(`UPDATE bot_exchange_archive SET work_id=(SELECT w.id FROM bot_work_items w
           WHERE w.thread_id=bot_exchange_archive.thread_id AND w.bot_id=bot_exchange_archive.bot_id)`)
       }
+      // The exchange view depends on the existing channel source column before
+      // channel-specific migrations run (SQLite validates views during ALTER).
+      for (const table of ["bot_tasks", "bot_task_receipts"])
+        if (!this.rows(`PRAGMA table_info(${table})`).some(v => v.name === "mock_source_json"))
+          db.run(`ALTER TABLE ${table} ADD COLUMN mock_source_json TEXT`)
+      if (!this.rows("PRAGMA table_info(bot_exchange_archive)").some((v) => v.name === "audience_key")) {
+        db.run("ALTER TABLE bot_exchange_archive ADD COLUMN audience_key TEXT")
+        // Retained execution receipts can recover old IM identities. If their
+        // identity is gone, do not expose an IM peer transcript as a private chat.
+        db.run(`UPDATE bot_exchange_archive SET audience_key=COALESCE(
+          (SELECT json_extract(r.mock_source_json,'$.audienceKey') FROM bot_task_receipts r WHERE r.request_id=bot_exchange_archive.request_id),
+          (SELECT w.audience_key FROM bot_work_items w WHERE w.id=bot_exchange_archive.work_id),
+          CASE WHEN thread_id LIKE 'im-%' OR thread_id LIKE 'bot-im-%' THEN NULL ELSE 'desktop' END)`)
+      }
       db.run(`DROP VIEW IF EXISTS bot_exchange_records;
         CREATE VIEW bot_exchange_records AS
-        SELECT id,bot_id,request_id,message,state,error,created_at,updated_at,origin_json,thread_id,work_id FROM bot_tasks
+        SELECT id,bot_id,request_id,message,state,error,created_at,updated_at,origin_json,thread_id,work_id,COALESCE(json_extract(mock_source_json,'$.audienceKey'),'desktop') AS audience_key FROM bot_tasks
         UNION ALL
-        SELECT id,bot_id,request_id,message,state,error,created_at,updated_at,origin_json,thread_id,work_id FROM bot_exchange_archive;`)
+        SELECT id,bot_id,request_id,message,state,error,created_at,updated_at,origin_json,thread_id,work_id,audience_key FROM bot_exchange_archive;`)
       db.run(`CREATE INDEX IF NOT EXISTS bot_tasks_exchange_pair ON bot_tasks(
         min(bot_id,json_extract(origin_json,'$.fromBotId')),
         max(bot_id,json_extract(origin_json,'$.fromBotId')),
@@ -458,6 +493,27 @@ export class BotStore {
   imConversationWorks(botId: string, id: string, cursor?: string, query?: string) {
     this.requireImGroup(botId, id)
     return this.listWorks(botId, cursor, query, `im:${id}`)
+  }
+
+  /** Explicit binding revocation ends its execution authority, unlike a temporary permit/connection loss. */
+  suppressRevokedImExecution(botId: string, bindingId: string) {
+    return this.transaction(() => {
+      if (!this.im.get(botId, bindingId).revoked)
+        throw new BotError("CONFLICT", "IM 绑定尚未撤销")
+      const source = "json_extract(t.mock_source_json,'$.transport')='im' AND json_extract(t.mock_source_json,'$.bindingId')=?"
+      const tasks = this.rows(
+        `SELECT t.* FROM bot_tasks t WHERE ${source} AND t.state IN ('queued','running','waiting_user')`, [bindingId]
+      ).map(row => this.task(row))
+      const commandIds = this.rows(
+        `SELECT c.id FROM bot_commands c JOIN bot_tasks t ON t.id=c.source_task_id WHERE c.state='accepted' AND ${source}`, [bindingId]
+      ).map(row => String(row.id))
+      for (const id of commandIds)
+        this.db.run("UPDATE bot_commands SET suppressed=1 WHERE id=? AND state='accepted'", [id])
+      const workflowSources = this.rows(
+        `SELECT DISTINCT t.id FROM bot_workflow_refs r JOIN bot_tasks t ON t.id=r.source_task_id WHERE r.retired_at IS NULL AND ${source}`, [bindingId]
+      ).map(row => String(row.id))
+      return { tasks, commandIds, workflows: this.suppressWorkflows(workflowSources) }
+    })
   }
 
   private requireImGroup(botId: string, id: string): void {
@@ -790,8 +846,11 @@ export class BotStore {
       t.created_at DESC,t.rowid DESC LIMIT 1) AS execution_state,
       (SELECT COUNT(*) FROM bot_tasks p WHERE json_extract(p.origin_json,'$.rootWorkId')=+w.id
         AND p.work_id IS NULL AND p.state IN ('queued','running','waiting_user')) AS pending_peers,
-      EXISTS(SELECT 1 FROM bot_commands c LEFT JOIN bot_tasks p ON p.id=c.source_task_id
-        WHERE c.state='accepted' AND (c.thread_id=w.thread_id OR json_extract(p.origin_json,'$.rootWorkId')=w.id)) AS background_busy`
+      (EXISTS(SELECT 1 FROM bot_commands c LEFT JOIN bot_tasks p ON p.id=c.source_task_id
+        WHERE c.state='accepted' AND (c.thread_id=w.thread_id OR json_extract(p.origin_json,'$.rootWorkId')=w.id))
+       OR EXISTS(SELECT 1 FROM bot_workflow_refs r WHERE r.retired_at IS NULL AND r.source_task_id IN (
+         SELECT wf_owner.id FROM bot_tasks wf_owner WHERE wf_owner.work_id=w.id OR json_extract(wf_owner.origin_json,'$.rootWorkId')=+w.id
+       ))) AS background_busy`
   }
   getWork(botId: string, workId: string): BotWorkItem {
     this.getBot(botId)
@@ -1155,7 +1214,7 @@ export class BotStore {
         source ? `tool:${source.taskId}:${source.callId}` : `lifecycle:${operationId}`,
         fingerprint,
         () => {
-          if (action === "complete" && backgroundBusy)
+          if (action === "complete" && (backgroundBusy || work.backgroundBusy))
             throw new BotError("CONFLICT", "后台工作或待处理结果仍未结束，请处理后再完成工作")
           if (work.version !== expectedVersion)
             throw new BotError("CONFLICT", "工作状态已变化，请刷新")
@@ -1303,6 +1362,12 @@ export class BotStore {
         ]).length
       )
         throw new BotError("CONFLICT", "请先停止后台任务并等待退出，再归档 Bot")
+      if (input.archived && (
+        this.stoppablePeerOwners(true, bot.id).some(owner => owner.bot_id === bot.id) ||
+        this.rows(`SELECT 1 FROM bot_workflow_refs r JOIN bot_tasks t ON t.id=r.source_task_id
+          WHERE t.bot_id=? AND r.retired_at IS NULL LIMIT 1`, [bot.id]).length
+      ))
+        throw new BotError("CONFLICT", "请先停止关联协作和后台任务并等待退出，再归档 Bot")
       this.db.run(
         `UPDATE bots SET name=?, instructions=?, model_ref=?, color=?, shape=?, label=?, memory_mode=?, archived=?,
         version=version+1, updated_at=? WHERE id=?`,
@@ -1321,12 +1386,17 @@ export class BotStore {
       )
       if (input.archived) {
         this.assertOwnedWorkPeersIdle(bot.id)
-        const awaitingReplies = this.rows(
-          `SELECT id FROM bot_tasks WHERE (bot_id=? OR json_extract(origin_json,'$.rootWorkId') IN (SELECT id FROM bot_work_items WHERE bot_id=?)) AND state='queued'
+        const awaitingReplies = new Map<string, string>()
+        for (const row of this.rows(
+          `SELECT * FROM bot_tasks WHERE (bot_id=? OR json_extract(origin_json,'$.rootWorkId') IN (SELECT id FROM bot_work_items WHERE bot_id=?)) AND state='queued'
            AND json_extract(origin_json,'$.kind')='bot'
-           AND json_extract(origin_json,'$.expectsReply')=1`,
+           AND (json_extract(origin_json,'$.expectsReply')=1 OR json_extract(origin_json,'$.upstreamTaskId') IS NOT NULL)`,
           [bot.id, bot.id]
-        )
+        )) {
+          const task = this.task(row)
+          const owner = this.peerHandoffSource(task)
+          if (owner && !awaitingReplies.has(owner.id)) awaitingReplies.set(owner.id, task.id)
+        }
         const reason = "Bot 已归档，排队任务未执行。"
         this.db.run(
           "UPDATE bot_tasks SET state='cancelled', error=?, updated_at=? WHERE (bot_id=? OR json_extract(origin_json,'$.rootWorkId') IN (SELECT id FROM bot_work_items WHERE bot_id=?)) AND state='queued'",
@@ -1334,7 +1404,8 @@ export class BotStore {
         )
         // Fence every queued parent before producing replies; never revive work
         // cancelled in this transaction or invent a second delivery path.
-        for (const row of awaitingReplies) this.settle(String(row.id), "cancelled", reason)
+        // Sibling integration turns owe one result for the same original handoff.
+        for (const id of awaitingReplies.values()) this.settle(id, "cancelled", reason)
       }
       this.changed()
       return this.getBot(bot.id)
@@ -1486,6 +1557,13 @@ export class BotStore {
       this.rows(
         `SELECT c.id FROM bot_commands c JOIN bot_tasks t ON t.id=c.source_task_id JOIN bot_work_items w ON w.id=json_extract(t.origin_json,'$.rootWorkId') WHERE w.bot_id=? AND c.state='accepted' LIMIT 1`,
         [botId]
+      ).length ||
+      this.rows(
+        `SELECT 1 FROM bot_workflow_refs r WHERE r.retired_at IS NULL AND r.source_task_id IN (
+          SELECT t.id FROM bot_tasks t WHERE t.work_id IN (SELECT id FROM bot_work_items WHERE bot_id=?)
+            OR json_extract(t.origin_json,'$.rootWorkId') IN (SELECT id FROM bot_work_items WHERE bot_id=?)
+        ) LIMIT 1`,
+        [botId, botId]
       ).length
     )
       throw new BotError("CONFLICT", "请先停止独立工作的关联协作和后台执行")
@@ -1520,7 +1598,35 @@ export class BotStore {
   beginDeletion(id: string, expectedVersion: number): string[] {
     return this.transaction(() => {
       const bot = this.getBot(id)
+      if (this.rows(
+        `SELECT 1 FROM bot_tasks WHERE bot_id=? AND state='queued'
+         AND json_extract(origin_json,'$.kind')='bot' AND json_extract(origin_json,'$.expectsReply')=1 LIMIT 1`,
+        [id]
+      ).length)
+        throw new BotError("CONFLICT", "请先停止排队协作并等待取消回执送达，再删除 Bot")
+      if (this.rows(
+        `SELECT 1 FROM bot_reply_outbox o JOIN bot_tasks t ON t.id=o.task_id
+         WHERE t.bot_id=? AND o.target_bot_id!=? AND o.blocked=0 LIMIT 1`, [id, id]
+      ).length)
+        throw new BotError("CONFLICT", "请等待协作回执送达，再删除 Bot")
+      // Once flushed, private file replies live in the caller's inbox but still
+      // require the sender's workspace identity when imported by the Runtime.
+      if (this.rows(
+        `SELECT 1 FROM bot_tasks WHERE state IN ('queued','running','waiting_user')
+         AND json_extract(origin_json,'$.kind')='bot'
+         AND json_extract(origin_json,'$.fromBotId')=?
+         AND json_extract(origin_json,'$.expectsReply')=0
+         AND json_extract(origin_json,'$.groupId') IS NULL
+         AND json_array_length(origin_json,'$.replyFiles')>0 LIMIT 1`, [id]
+      ).length)
+        throw new BotError("CONFLICT", "请等待同伴处理文件回执，或停止该协作后再删除 Bot")
+      if (this.stoppablePeerOwners(true).some((owner) => owner.bot_id === id))
+        throw new BotError("CONFLICT", "请先停止关联协作和后台任务并等待退出，再删除 Bot")
       this.assertOwnedWorkPeersIdle(id)
+      if (this.rows(
+        `SELECT 1 FROM bot_workflow_refs r JOIN bot_tasks t ON t.id=r.source_task_id
+         WHERE t.bot_id=? AND r.retired_at IS NULL LIMIT 1`, [id]
+      ).length) throw new BotError("CONFLICT", "请先停止关联协作和后台任务并等待退出，再删除 Bot")
       if (this.imGateway.hasLiveBindings(id))
         throw new BotError("CONFLICT", "请先在 IM 接入中撤销此 Bot 的绑定，再删除。")
       this.db.run(
@@ -1616,6 +1722,7 @@ export class BotStore {
         [id]
       )
       this.imGateway.removeBot(id)
+      this.db.run("DELETE FROM bot_workflow_refs WHERE source_task_id IN (SELECT id FROM bot_tasks WHERE bot_id=?)", [id])
       this.db.run("DELETE FROM bot_tasks WHERE bot_id=?", [id])
       this.db.run("DELETE FROM bot_commands WHERE bot_id=?", [id])
       this.db.run("DELETE FROM bot_task_receipts WHERE bot_id=?", [id])
@@ -2165,6 +2272,36 @@ export class BotStore {
     return row ? this.task(row) : undefined
   }
 
+  notificationAttempt(threadId: string, kind: "workflow" | "coordinator", key: string, startedAt?: string): BotTask | undefined {
+    const row = this.rows(
+      `SELECT * FROM bot_tasks WHERE thread_id=? AND json_extract(origin_json,'$.kind')='notification'
+       AND json_extract(origin_json,'$.notificationKind')=? AND json_extract(origin_json,'$.key')=?
+       AND json_extract(origin_json,'$.runStartedAt') IS ? ORDER BY created_at DESC,rowid DESC LIMIT 1`,
+      [threadId, kind, key, startedAt ?? null]
+    )[0]
+    return row ? this.task(row) : undefined
+  }
+
+  notificationTerminal(id: string): AgentRunTerminal | undefined {
+    const value = this.rows("SELECT notification_terminal_json FROM bot_tasks WHERE id=?", [id])[0]?.notification_terminal_json
+    return value == null ? undefined : JSON.parse(String(value)) as AgentRunTerminal
+  }
+
+  recordNotificationTerminal(id: string, terminal: AgentRunTerminal): void {
+    this.transaction(() => {
+      const task = this.getTask(id)
+      if (task.origin.kind !== "notification" || !["workflow", "coordinator"].includes(task.origin.notificationKind)) return
+      // A user's persisted Stop wins over a late provider terminal or shutdown settlement.
+      if (this.notificationTerminal(id)?.code === "cancelled") return
+      // Store only the classification, never an Error object or provider payload.
+      this.db.run("UPDATE bot_tasks SET notification_terminal_json=? WHERE id=?", [
+        JSON.stringify({ outcome: terminal.outcome, code: terminal.code,
+          ...(task.origin.notificationKind === "coordinator" && terminal.coordinatorNotificationDelivered !== undefined
+            ? { coordinatorNotificationDelivered: terminal.coordinatorNotificationDelivered } : {}) }), id
+      ])
+    })
+  }
+
   getTask(id: string): BotTask {
     const row = this.rows("SELECT * FROM bot_tasks WHERE id=?", [id])[0]
     if (!row) throw new BotError("NOT_FOUND", "任务不存在")
@@ -2289,6 +2426,131 @@ export class BotStore {
       [workId, workId]
     ).map((row) => this.task(row))
   }
+  private taskDescendants(taskId: string): BotTask[] {
+    const task = this.getTask(taskId)
+    const rootId = (task.origin.kind === "bot" || task.origin.kind === "notification")
+      ? task.origin.rootTaskId ?? task.id : task.id
+    return this.rows(
+      `WITH RECURSIVE family AS (
+         SELECT * FROM bot_tasks WHERE COALESCE(json_extract(origin_json,'$.rootTaskId'),id)=?
+       ), descendants(id) AS (
+         SELECT ? UNION
+         SELECT t.id FROM family t JOIN descendants d
+           ON COALESCE(json_extract(t.origin_json,'$.upstreamTaskId'),json_extract(t.origin_json,'$.sourceTaskId'),json_extract(t.origin_json,'$.rootTaskId'))=d.id
+       ) SELECT t.* FROM family t JOIN descendants d ON t.id=d.id WHERE t.id!=?`,
+      [rootId, taskId, taskId]
+    ).map((row) => this.task(row))
+  }
+
+  taskRootCancelled(task: BotTask): boolean {
+    if (task.origin.kind === "notification" && task.origin.notificationKind === "workflow" && task.origin.sourceTaskId) {
+      const source = this.rows("SELECT * FROM bot_tasks WHERE id=?", [task.origin.sourceTaskId])[0]
+      return !source || source.state === "cancelled" || this.taskRootCancelled(this.task(source))
+    }
+    if (task.origin.kind !== "bot") return false
+    // Started result turns keep their own checkpoint/command cleanup authority.
+    // Existing reply-source checks already reject stale, unstarted receipts.
+    if (!task.origin.expectsReply)
+      return this.rows("SELECT 1 FROM bot_tasks WHERE id=? AND state='cancelled'", [task.origin.rootTaskId]).length > 0
+    return this.rows(
+      `WITH RECURSIVE ancestors(id) AS (
+         SELECT ? UNION SELECT COALESCE(json_extract(t.origin_json,'$.upstreamTaskId'),json_extract(t.origin_json,'$.sourceTaskId'),json_extract(t.origin_json,'$.rootTaskId'))
+         FROM bot_tasks t JOIN ancestors a ON t.id=a.id WHERE (json_extract(t.origin_json,'$.kind')='bot' OR (json_extract(t.origin_json,'$.kind')='notification' AND json_extract(t.origin_json,'$.rootTaskId') IS NOT NULL))
+       ) SELECT 1 FROM bot_tasks t JOIN ancestors a ON t.id=a.id WHERE t.state IN ('cancelled','interrupted') LIMIT 1`,
+      [task.origin.upstreamTaskId ?? task.origin.rootTaskId]
+    ).length > 0
+  }
+
+  /** Existing task ancestry is authoritative even when a finished dispatch is outside recent history. */
+  private stoppablePeerOwners(includeSuppressedWorkflows = false, archivingBotId?: string) {
+    // Archive already cancels its own/work-family queued tasks atomically below.
+    // A terminal receipt alone is history, but other queued peers can still execute.
+    return this.rows(
+      `WITH RECURSIVE unfinished(id) AS (
+         SELECT id FROM bot_tasks WHERE ${archivingBotId
+           ? `state IN ('running','waiting_user') OR (state='queued' AND bot_id!=?
+               AND NOT EXISTS (SELECT 1 FROM bot_work_items w
+                 WHERE w.id=json_extract(bot_tasks.origin_json,'$.rootWorkId') AND w.bot_id=?))`
+           : "state IN ('queued','running','waiting_user')"}
+         UNION SELECT source_task_id FROM bot_commands WHERE state='accepted'
+         ${archivingBotId ? "" : "UNION SELECT task_id FROM bot_reply_outbox WHERE blocked=0"}
+         UNION SELECT source_task_id FROM bot_workflow_refs WHERE retired_at IS NULL AND (suppressed=0 OR ?=1)
+       ), owners(id) AS (
+         SELECT COALESCE(json_extract(t.origin_json,'$.upstreamTaskId'),json_extract(t.origin_json,'$.sourceTaskId'),json_extract(t.origin_json,'$.rootTaskId'))
+         FROM bot_tasks t JOIN unfinished u ON t.id=u.id WHERE (json_extract(t.origin_json,'$.kind')='bot' OR (json_extract(t.origin_json,'$.kind')='notification' AND json_extract(t.origin_json,'$.rootTaskId') IS NOT NULL))
+         UNION
+         SELECT COALESCE(json_extract(t.origin_json,'$.upstreamTaskId'),json_extract(t.origin_json,'$.sourceTaskId'),json_extract(t.origin_json,'$.rootTaskId'))
+         FROM bot_tasks t JOIN owners o ON t.id=o.id WHERE (json_extract(t.origin_json,'$.kind')='bot' OR (json_extract(t.origin_json,'$.kind')='notification' AND json_extract(t.origin_json,'$.rootTaskId') IS NOT NULL))
+       ) SELECT t.id,t.bot_id,t.thread_id,t.state FROM bot_tasks t JOIN owners o ON t.id=o.id`,
+      [...(archivingBotId ? [archivingBotId, archivingBotId] : []), includeSuppressedWorkflows ? 1 : 0]
+    )
+  }
+
+  stoppableCollaborationThreads(): string[] {
+    return [...new Set(this.stoppablePeerOwners().map((row) => String(row.thread_id)))]
+  }
+
+  stopConversationPeers(
+    botId: string,
+    threadId: string
+  ): { tasks: BotTask[]; commandIds: string[]; workflows: BotWorkflowReference[] } {
+    return this.stopPeerBranches(this.stoppablePeerOwners().filter(
+      (row) => row.bot_id === botId && row.thread_id === threadId
+    ))
+  }
+
+  stopTaskPeers(taskId: string): { tasks: BotTask[]; commandIds: string[]; workflows: BotWorkflowReference[] } {
+    return this.transaction(() => {
+      const stopped = this.stopPeerBranches(this.stoppablePeerOwners().filter((row) => row.id === taskId))
+      const task = this.getTask(taskId)
+      // Ordinary finite background jobs are not retained continuations. Include
+      // the stopped owner itself, without cancelling other tasks on its thread.
+      this.suppressCommands(task.threadId, task.id)
+      if (!["queued", "running", "waiting_user"].includes(task.state))
+        stopped.commandIds.push(...this.continuationCommandIds(task.id, true))
+      return stopped
+    })
+  }
+
+  private stopPeerBranches(
+    owners: readonly Record<string, unknown>[]
+  ): { tasks: BotTask[]; commandIds: string[]; workflows: BotWorkflowReference[] } {
+    return this.transaction(() => {
+      const tasks = new Map<string, BotTask>()
+      const commandIds = new Set<string>()
+      const workflows: BotWorkflowReference[] = []
+      for (const owner of owners) {
+        const id = String(owner.id)
+        // Keep the existing durable cancellation fence for this branch, not its siblings.
+        if (["completed", "failed", "outcome_unknown", "superseded"].includes(String(owner.state)))
+          this.db.run(
+            "UPDATE bot_tasks SET state='cancelled',updated_at=? WHERE id=? AND state=?",
+            [this.now(), id, owner.state]
+          )
+        for (const peer of this.taskDescendants(id)) {
+          workflows.push(...this.suppressWorkflows([peer.id]))
+          const pending = ["queued", "running", "waiting_user"].includes(peer.state)
+          if (pending) tasks.set(peer.id, peer)
+          const commands = this.rows(
+            "SELECT id FROM bot_commands WHERE source_task_id=? AND state='accepted'", [peer.id]
+          )
+          for (const command of commands) {
+            const commandId = String(command.id)
+            this.db.run("UPDATE bot_commands SET suppressed=1 WHERE id=? AND state='accepted'", [commandId])
+            // Pending owners retain the original physical-cleanup/settlement fence.
+            if (!pending) commandIds.add(commandId)
+          }
+        }
+      }
+      // All stopped owners are fenced before emitting any upstream cancellation.
+      // This is the owner turn's terminal receipt, not a claim that child processes exited.
+      for (const owner of owners)
+        if (["completed", "failed", "outcome_unknown", "superseded"].includes(String(owner.state)))
+          this.settle(String(owner.id), "cancelled", null)
+      if (owners.length) this.changed()
+      return { tasks: [...tasks.values()], commandIds: [...commandIds], workflows }
+    })
+  }
   suppressWorkPeerCommands(botId: string, workId: string): string[] {
     const work = this.getWork(botId, workId)
     return this.transaction(() => {
@@ -2352,25 +2614,37 @@ export class BotStore {
     })
   }
 
-  exchange(botId: string, taskId: string, groupId?: string, workId?: string): BotExchange {
+  private exchangeScope(botId: string, groupId?: string, workId?: string, imConversationId?: string) {
+    if (imConversationId) {
+      if (groupId || workId) throw new BotError("INVALID_INPUT", "交流会话范围冲突")
+      this.requireImGroup(botId, imConversationId)
+      const row = this.rows("SELECT thread_id FROM bot_im_conversations WHERE binding_id=? AND bot_id=?", [imConversationId, botId])[0]
+      if (!row) throw new BotError("NOT_FOUND", "招乎群会话不存在")
+      return { audienceKey: `im:${imConversationId}`, threadId: String(row.thread_id) }
+    }
+    const work = workId ? this.getWork(botId, workId) : undefined
+    return {
+      audienceKey: work?.audienceKey ?? "desktop",
+      threadId: work?.threadId ?? (groupId ? `group-${groupId}-${botId}` : this.getBot(botId).threadId)
+    }
+  }
+
+  exchange(botId: string, taskId: string, groupId?: string, workId?: string, imConversationId?: string): BotExchange {
     const viewer = this.getBot(botId)
-    const expectedThread = workId
-      ? this.getWork(botId, workId).threadId
-      : groupId
-        ? `group-${groupId}-${botId}`
-        : viewer.threadId
+    const scope = this.exchangeScope(botId, groupId, workId, imConversationId)
     const row = this.rows("SELECT * FROM bot_exchange_records WHERE id=?", [taskId])[0]
     if (!row) throw new BotError("NOT_FOUND", "任务不存在")
     const task = this.task(row)
     if (
       viewer.deleting ||
+      row.audience_key !== scope.audienceKey ||
       task.origin.kind !== "bot" ||
       !task.origin.expectsReply ||
       (task.origin.fromBotId !== botId && task.botId !== botId) ||
       botTaskGroupId(task) !== groupId ||
       (task.origin.fromBotId === botId
         ? (task.origin.returnWorkId ?? null) !== (workId ?? null)
-        : task.threadId !== expectedThread)
+        : task.threadId !== scope.threadId)
     )
       throw new BotError("NOT_FOUND", "当前会话没有这条协作记录")
     if (groupId) {
@@ -2441,16 +2715,19 @@ export class BotStore {
     taskId: string,
     groupId?: string,
     before?: string,
-    workId?: string
+    workId?: string,
+    imConversationId?: string
   ): BotExchangePage {
-    const anchor = this.exchange(botId, taskId, groupId, workId)
+    const scope = this.exchangeScope(botId, groupId, workId, imConversationId)
+    const anchor = this.exchange(botId, taskId, groupId, workId, imConversationId)
     const pair = [anchor.sender.id, anchor.recipient.id].sort()
-    const cursor = before ? this.exchange(botId, before, groupId, workId) : undefined
+    const cursor = before ? this.exchange(botId, before, groupId, workId, imConversationId) : undefined
     if (cursor && [cursor.sender.id, cursor.recipient.id].sort().join(":") !== pair.join(":"))
       throw new BotError("INVALID_INPUT", "交流历史游标不属于当前会话")
     const rows = this.rows(
       `SELECT id FROM bot_exchange_records
        WHERE json_extract(origin_json,'$.kind')='bot' AND json_extract(origin_json,'$.expectsReply')=1
+         AND audience_key=?
          AND min(bot_id,json_extract(origin_json,'$.fromBotId'))=?
          AND max(bot_id,json_extract(origin_json,'$.fromBotId'))=?
          AND COALESCE(json_extract(origin_json,'$.groupId'),'')=?
@@ -2458,16 +2735,13 @@ export class BotStore {
          ${cursor ? "AND (created_at,id)<(?,?)" : ""}
        ORDER BY created_at DESC,id DESC LIMIT 31`,
       [
+        scope.audienceKey,
         ...pair,
         groupId ?? "",
         botId,
         workId ?? "",
         botId,
-        workId
-          ? this.getWork(botId, workId).threadId
-          : groupId
-            ? `group-${groupId}-${botId}`
-            : this.getBot(botId).threadId,
+        scope.threadId,
         ...(cursor ? [cursor.createdAt, cursor.taskId] : [])
       ]
     )
@@ -2479,28 +2753,91 @@ export class BotStore {
     }
   }
 
+  /** Resolve historical integration sources without applying live execution/permission gates. */
+  private exchangeReplySources(ids: string[]): Map<string, string> {
+    const sources = new Map(ids.map(id => [id, id]))
+    const roots = this.rows(
+      `SELECT DISTINCT json_extract(origin_json,'$.rootTaskId') AS root FROM bot_exchange_records WHERE id IN (${ids.map(() => "?").join(",")})`, ids
+    ).map(row => String(row.root))
+    const records = this.rows(
+      `SELECT id,bot_id,thread_id,work_id,audience_key,request_id,origin_json,created_at,updated_at
+       FROM bot_exchange_records WHERE COALESCE(json_extract(origin_json,'$.rootTaskId'),id) IN (${roots.map(() => "?").join(",")})`, roots
+    ).map(row => {
+      const origin = JSON.parse(String(row.origin_json)) as BotTaskOrigin
+      const scope = JSON.stringify([row.bot_id, row.thread_id, row.work_id, row.audience_key,
+        "rootTaskId" in origin ? origin.rootTaskId : row.id,
+        "groupId" in origin ? origin.groupId : null,
+        "rootWorkId" in origin ? origin.rootWorkId : null])
+      return { row, origin, scope }
+    })
+    const byId = new Map(records.map(record => [String(record.row.id), record]))
+    const byRequest = new Map(records.map(record => [String(record.row.request_id), record]))
+    const owners = new Map<string, string | null>()
+    const ownerOf = (id: string): string | null => {
+      const path = new Set<string>()
+      let current = byId.get(id), owner: string | null = null
+      while (current && !path.has(String(current.row.id))) {
+        const currentId = String(current.row.id)
+        if (owners.has(currentId)) { owner = owners.get(currentId)!; break }
+        path.add(currentId)
+        const origin = current.origin
+        if (origin.kind === "bot" && origin.expectsReply) { owner = currentId; break }
+        const parentId = origin.kind === "bot" ? origin.upstreamTaskId
+          : origin.kind === "notification" && origin.notificationKind === "workflow" ? origin.sourceTaskId : undefined
+        const parent = parentId ? byId.get(parentId) : undefined
+        if (!parent || parent.scope !== current.scope) break
+        current = parent
+      }
+      for (const item of path) owners.set(item, owner)
+      return owner
+    }
+    const candidates = records.filter(record => {
+      const owner = ownerOf(String(record.row.id))
+      return owner && sources.has(owner)
+    })
+    const pending = new Set(candidates.length ? this.rows(
+      `SELECT task_id FROM bot_reply_outbox WHERE task_id IN (${candidates.map(() => "?").join(",")})`,
+      candidates.map(record => String(record.row.id))
+    ).map(row => String(row.task_id)) : [])
+    const latest = new Map<string, number>()
+    for (const { row } of candidates) {
+      const id = String(row.id), owner = owners.get(id)!
+      const receipt = byRequest.get(`reply-${id}`)
+      if (!receipt && !pending.has(id)) continue
+      const at = Number(receipt?.row.created_at ?? row.updated_at)
+      if (at >= (latest.get(owner) ?? -Infinity)) {
+        latest.set(owner, at)
+        sources.set(owner, id)
+      }
+    }
+    return sources
+  }
+
   /** Batch joins avoid a query per message, including outbox-to-receipt transitions. */
   private readExchanges(ids: string[]): BotExchange[] {
     if (!ids.length) return []
+    const sources = this.exchangeReplySources(ids)
     const rows = this.rows(
-      `SELECT t.*, s.name AS sender_name,s.color AS sender_color,s.shape AS sender_shape,
+      `WITH reply_sources(exchange_id,source_id) AS (VALUES ${ids.map(() => "(?,?)").join(",")})
+       SELECT t.*, s.name AS sender_name,s.color AS sender_color,s.shape AS sender_shape,
         b.name AS recipient_name,b.color AS recipient_color,b.shape AS recipient_shape,
         r.id AS receipt_id, r.thread_id AS reply_thread_id,r.request_id AS reply_request_id,
         COALESCE(r.message,o.message) AS reply_message,
         COALESCE(r.origin_json,o.origin_json) AS reply_origin,
         COALESCE(r.created_at,t.updated_at) AS reply_at
        FROM bot_exchange_records t
+       JOIN reply_sources rs ON rs.exchange_id=t.id
        JOIN bots s ON s.id=json_extract(t.origin_json,'$.fromBotId')
        JOIN bots b ON b.id=t.bot_id
-       LEFT JOIN (SELECT * FROM bot_exchange_records WHERE request_id IN (${ids.map(() => "?").join(",")})) r ON r.request_id='reply-'||t.id
+       LEFT JOIN (SELECT * FROM bot_exchange_records WHERE request_id IN (${ids.map(() => "?").join(",")})) r ON r.request_id='reply-'||rs.source_id
          AND r.bot_id=s.id AND json_extract(r.origin_json,'$.kind')='bot'
          AND json_extract(r.origin_json,'$.expectsReply')=0
          AND json_extract(r.origin_json,'$.fromBotId')=b.id
          AND json_extract(r.origin_json,'$.rootTaskId')=json_extract(t.origin_json,'$.rootTaskId')
          AND COALESCE(json_extract(r.origin_json,'$.groupId'),'')=COALESCE(json_extract(t.origin_json,'$.groupId'),'')
-       LEFT JOIN bot_reply_outbox o ON o.task_id=t.id
+       LEFT JOIN bot_reply_outbox o ON o.task_id=rs.source_id
        WHERE t.id IN (${ids.map(() => "?").join(",")}) ORDER BY t.created_at DESC,t.id DESC`,
-      [...ids.map((id) => `reply-${id}`), ...ids]
+      [...ids.flatMap(id => [id, sources.get(id)!]), ...ids.map(id => `reply-${sources.get(id)}`), ...ids]
     )
     const wanted = new Map<string, Set<string>>()
     for (const row of rows) {
@@ -2615,6 +2952,10 @@ export class BotStore {
           AND NOT EXISTS (SELECT 1 FROM bot_group_discussions d WHERE d.group_id=json_extract(t.origin_json,'$.groupId'))
           AND t.id NOT IN (SELECT id FROM bot_tasks WHERE state NOT IN ('queued','running','waiting_user') ORDER BY updated_at DESC,id DESC LIMIT 100)
           AND NOT EXISTS (SELECT 1 FROM bot_commands command WHERE command.source_task_id=t.id)
+          AND NOT EXISTS (
+            SELECT 1 FROM bot_workflow_refs wr JOIN bot_tasks owner ON owner.id=wr.source_task_id
+            WHERE wr.retired_at IS NULL AND COALESCE(json_extract(owner.origin_json,'$.rootTaskId'),owner.id)=COALESCE(json_extract(t.origin_json,'$.rootTaskId'),t.id)
+          )
           AND NOT EXISTS (SELECT 1 FROM bot_schedules s WHERE json_extract(s.payload,'$.sourceTaskId')=t.id)
           AND NOT EXISTS (SELECT 1 FROM bot_im_continuations c WHERE c.source_task_id=t.id)
           AND NOT EXISTS (SELECT 1 FROM bot_im_ingress ie WHERE ie.id=json_extract(t.mock_source_json,'$.eventId') AND (ie.state IN ('received','active') OR ie.needs_ack=1))
@@ -2653,7 +2994,8 @@ export class BotStore {
           task.origin.kind === "work_result" ||
           (task.origin.kind === "work" && task.origin.dispatch) ||
           (task.origin.kind === "notification" &&
-            ["command", "reaction"].includes(task.origin.notificationKind)) ||
+            (["command", "reaction"].includes(task.origin.notificationKind) ||
+              (task.origin.notificationKind === "workflow" && task.origin.rootTaskId && task.origin.sourceTaskId))) ||
           botTaskGroupId(task) ||
           (task.origin.kind === "user" && (task.origin.replyTo || task.origin.mentions?.length))
         ) {
@@ -2663,7 +3005,7 @@ export class BotStore {
               ? `来自 ${task.origin.fromBotName ?? "其他 Bot"} 的${task.origin.expectsReply ? "协作消息" : "协作结果"}：\n\n`
               : "例行任务：\n\n"
           this.db.run(
-            "INSERT INTO bot_exchange_archive(id,bot_id,request_id,message,state,error,created_at,updated_at,origin_json,thread_id,work_id) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO bot_exchange_archive(id,bot_id,request_id,message,state,error,created_at,updated_at,origin_json,thread_id,work_id,audience_key) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
             [
               row.id,
               row.bot_id,
@@ -2675,7 +3017,8 @@ export class BotStore {
               row.updated_at,
               row.origin_json,
               row.thread_id,
-              row.work_id
+              row.work_id,
+              task.mockSource?.audienceKey ?? "desktop"
             ]
           )
         }
@@ -2700,6 +3043,7 @@ export class BotStore {
         )
         this.db.run("DELETE FROM bot_im_local_execution WHERE task_id=?", [row.id])
         this.db.run("DELETE FROM bot_im_continuations WHERE task_id=?", [row.id])
+        this.db.run("DELETE FROM bot_workflow_refs WHERE source_task_id=? AND retired_at IS NOT NULL", [row.id])
         this.db.run("DELETE FROM bot_tasks WHERE id=?", [row.id])
       }
       // Idempotency receipts retain no message body; retries are protected for 90 days.
@@ -2712,17 +3056,19 @@ export class BotStore {
     })
   }
 
-  notificationThreadIds(): string[] {
+  notificationThreadIds(botId?: string): string[] {
+    const owner = botId === undefined ? "" : " AND b.id=?"
     return this.rows(
-      `SELECT thread_id FROM bots WHERE archived=0 AND deleting=0
-      UNION SELECT w.thread_id FROM bot_work_items w JOIN bots b ON b.id=w.bot_id WHERE b.archived=0 AND b.deleting=0 AND w.detached=0
-      UNION SELECT c.thread_id FROM bot_mock_conversations c JOIN bots b ON b.id=c.bot_id WHERE b.archived=0 AND b.deleting=0
-      UNION SELECT c.thread_id FROM bot_im_conversations c JOIN bots b ON b.id=c.bot_id WHERE b.archived=0 AND b.deleting=0
+      `SELECT b.thread_id FROM bots b WHERE b.archived=0 AND b.deleting=0${owner}
+      UNION SELECT w.thread_id FROM bot_work_items w JOIN bots b ON b.id=w.bot_id WHERE b.archived=0 AND b.deleting=0 AND w.detached=0${owner}
+      UNION SELECT c.thread_id FROM bot_mock_conversations c JOIN bots b ON b.id=c.bot_id WHERE b.archived=0 AND b.deleting=0${owner}
+      UNION SELECT c.thread_id FROM bot_im_conversations c JOIN bots b ON b.id=c.bot_id WHERE b.archived=0 AND b.deleting=0${owner}
       UNION SELECT t.thread_id FROM bot_tasks t JOIN bots b ON b.id=t.bot_id WHERE b.archived=0 AND b.deleting=0 AND
-        (t.work_id IS NULL OR EXISTS(SELECT 1 FROM bot_work_items w WHERE w.id=t.work_id AND w.detached=0))
+        (t.work_id IS NULL OR EXISTS(SELECT 1 FROM bot_work_items w WHERE w.id=t.work_id AND w.detached=0))${owner}
       UNION SELECT 'group-'||g.id||'-'||member.value FROM bot_groups g,
         json_each(g.payload,'$.memberIds') member JOIN bots b ON b.id=member.value
-        WHERE b.archived=0 AND b.deleting=0 AND COALESCE(json_extract(g.payload,'$.deleting'),0)=0`
+        WHERE b.archived=0 AND b.deleting=0 AND COALESCE(json_extract(g.payload,'$.deleting'),0)=0${owner}`,
+      botId === undefined ? [] : Array(6).fill(botId)
     ).map((row) => String(row.thread_id))
   }
 
@@ -2759,8 +3105,10 @@ export class BotStore {
         AND c.bot_id=t.bot_id AND c.thread_id=t.thread_id
         AND c.continuation_result_json IS NOT NULL AND c.state='accepted')
         OR (t.continuation_checkpoint_id IS NOT NULL
-          AND json_extract(t.origin_json,'$.kind')='bot'
-          AND (json_extract(t.origin_json,'$.expectsReply')=1 OR json_extract(t.origin_json,'$.upstreamTaskId') IS NOT NULL)
+          AND ((json_extract(t.origin_json,'$.kind')='bot'
+            AND (json_extract(t.origin_json,'$.expectsReply')=1 OR json_extract(t.origin_json,'$.upstreamTaskId') IS NOT NULL))
+            OR (json_extract(t.origin_json,'$.kind')='notification'
+              AND json_extract(t.origin_json,'$.notificationKind')='workflow'))
           AND EXISTS (
           SELECT 1 FROM bot_commands c WHERE c.source_task_id=t.id
           AND c.bot_id=t.bot_id AND c.thread_id=t.thread_id
@@ -2953,6 +3301,7 @@ export class BotStore {
              OR id IN (SELECT json_extract(child.origin_json,'$.upstreamTaskId') FROM bot_tasks child
                WHERE child.state='queued' AND json_extract(child.origin_json,'$.kind')='bot'
                  AND json_extract(child.origin_json,'$.expectsReply')=0)))
+           OR (json_extract(origin_json,'$.kind')='notification' AND json_extract(origin_json,'$.notificationKind')='workflow')
            OR json_extract(origin_json,'$.groupId') IS NOT NULL OR work_id IS NOT NULL
            OR (mock_source_json IS NULL AND EXISTS(
              SELECT 1 FROM bot_im_personal_links l WHERE l.bot_id=bot_tasks.bot_id)))`,
@@ -2965,16 +3314,22 @@ export class BotStore {
         [reason, this.now(), ...ACTIVE_STATES]
       )
       if (this.db.getRowsModified()) this.changed()
+      const workflowInterruptions = new Map<string, BotTask>()
       // Fence every interrupted parent first. Reuse normal terminal results/outbox,
       // never replaying the interrupted work.
       for (const row of awaitingOutcomes) {
         const task = this.getTask(String(row.id))
+        // This exact workflow interruption is reported once below before it can be acked.
+        if (task.origin.kind === "notification" && task.origin.notificationKind === "workflow" && task.origin.runStartedAt) {
+          workflowInterruptions.set(task.id, task)
+          continue
+        }
         // Recovery fences the state in bulk, so normal settle() would consider
         // this already settled. Persist the main-thread IM outcome in this same
         // transaction; the mirror still checks the original binding time/scope.
         this.im.mirrorPersonal(task, reason)
+        this.cancelQueuedReplyTurns(task)
         if (task.workId) {
-          this.cancelQueuedReplyTurns(task)
           this.recordWorkResult(task)
           this.noteWorkActivity(task.workId, reason, true)
           continue
@@ -3000,6 +3355,32 @@ export class BotStore {
         // The bulk fence above already changed the state; publish the new room outcome once.
         if (groupId) this.noteActivity("group", groupId, reason, true, this.getBot(task.botId).name)
       }
+      // Keep the existing no-replay restart policy. A durable interruption report consumes
+      // this automatic summary, not the workflow's result/history. Otherwise the newest
+      // unclassified attempt can permanently block every older pending result.
+      for (const row of this.rows(`SELECT id FROM bot_tasks WHERE state='interrupted'
+        AND notification_terminal_json IS NULL AND json_extract(origin_json,'$.kind')='notification'
+        AND json_extract(origin_json,'$.notificationKind')='workflow'
+        AND json_extract(origin_json,'$.runStartedAt') IS NOT NULL`)) {
+        const task = this.getTask(String(row.id))
+        workflowInterruptions.set(task.id, task)
+      }
+      for (const task of workflowInterruptions.values()) {
+        const interruption = task.error || reason
+        this.im.mirrorPersonal(task, interruption)
+        this.settle(task.id, "interrupted", interruption)
+        // settle() sees the bulk recovery state as already settled; persist its existing
+        // audience-specific result before making the notification eligible for ack.
+        if (task.mockSource) this.external(task.mockSource).settle(task, "interrupted", interruption)
+        if (task.workId) {
+          this.recordWorkResult(task)
+          this.noteWorkActivity(task.workId, interruption, true)
+        } else if (botTaskGroupId(task)) {
+          this.noteActivity("group", botTaskGroupId(task)!, interruption, true, this.getBot(task.botId).name)
+        } else if (!task.mockSource) this.noteActivity("bot", task.botId, interruption, true)
+        if (!this.notificationTerminal(task.id))
+          this.recordNotificationTerminal(task.id, { outcome: "unknown", code: "recovery_interrupted" })
+      }
       // Acceptance was committed before spawn. After a crash neither absence nor success is provable.
       // Retain that uncertainty and wake a verification turn; never restart the external command.
       for (const row of this.rows("SELECT id,thread_id FROM bot_commands WHERE state='accepted'"))
@@ -3020,6 +3401,69 @@ export class BotStore {
     })
   }
 
+  acceptWorkflow(sourceTaskId: string, run: WorkflowRunReference): void {
+    this.transaction(() => {
+      const source = this.getTask(sourceTaskId), bot = this.getBot(source.botId)
+      if (!ACTIVE_STATES.includes(source.state as (typeof ACTIVE_STATES)[number]) ||
+          source.threadId !== run.threadId || bot.archived || bot.deleting || this.taskRootCancelled(source))
+        throw new BotError("CONFLICT", "任务已停止，workflow 未启动")
+      if (source.mockSource) this.external(source.mockSource).execution(source)
+      const groupId = botTaskGroupId(source)
+      if (groupId) {
+        const group = this.getGroup(groupId)
+        if (group.deleting || !group.memberIds.includes(bot.id))
+          throw new BotError("CONFLICT", "群成员已变化，workflow 未启动")
+      }
+      this.db.run("INSERT INTO bot_workflow_refs(thread_id,run_id,started_at,source_task_id,workspace_path) VALUES(?,?,?,?,?)",
+        [run.threadId, run.runId, run.startedAt, source.id, run.workspacePath])
+      this.changed()
+    })
+  }
+
+  workflowReferences(threadId?: string): BotWorkflowReference[] {
+    return this.rows(`SELECT * FROM bot_workflow_refs WHERE retired_at IS NULL${threadId ? " AND thread_id=?" : ""}`,
+      threadId ? [threadId] : []).map((row) => this.workflowReferenceRow(row))
+  }
+
+  private workflowReferenceRow(row: Record<string, unknown>): BotWorkflowReference {
+    return { threadId: String(row.thread_id), runId: String(row.run_id), startedAt: String(row.started_at),
+      sourceTaskId: String(row.source_task_id), workspacePath: String(row.workspace_path), suppressed: Boolean(row.suppressed) }
+  }
+
+  workflowReference(threadId: string, runId: string, startedAt: string): BotWorkflowReference | undefined {
+    const row = this.rows("SELECT * FROM bot_workflow_refs WHERE thread_id=? AND run_id=? AND started_at=?", [threadId, runId, startedAt])[0]
+    return row ? this.workflowReferenceRow(row) : undefined
+  }
+
+  retireWorkflow(run: WorkflowRunReference): void {
+    this.db.run("UPDATE bot_workflow_refs SET retired_at=? WHERE thread_id=? AND run_id=? AND started_at=? AND retired_at IS NULL",
+      [this.now(), run.threadId, run.runId, run.startedAt])
+    if (this.db.getRowsModified()) this.changed()
+  }
+
+  private suppressWorkflows(taskIds: string[], onlyUnsuppressed = false): BotWorkflowReference[] {
+    if (!taskIds.length) return []
+    const refs = this.rows(`SELECT * FROM bot_workflow_refs WHERE source_task_id IN (${taskIds.map(() => "?").join(",")}) AND retired_at IS NULL${onlyUnsuppressed ? " AND suppressed=0" : ""}`, taskIds)
+      .map((row) => this.workflowReferenceRow(row))
+    for (const run of refs)
+      this.db.run("UPDATE bot_workflow_refs SET suppressed=1 WHERE thread_id=? AND run_id=? AND started_at=?",
+        [run.threadId, run.runId, run.startedAt])
+    return refs.map((run) => ({ ...run, suppressed: true }))
+  }
+
+  /** Batch Stop already schedules suppressed instances; single-task Stop claims only its own. */
+  suppressTaskWorkflows(taskId: string): BotWorkflowReference[] {
+    return this.transaction(() => this.suppressWorkflows([taskId], true))
+  }
+
+  suppressConversationWorkflows(threadId: string, workId?: string): BotWorkflowReference[] {
+    return this.transaction(() => this.suppressWorkflows(this.rows(
+      `SELECT DISTINCT t.id FROM bot_tasks t JOIN bot_workflow_refs r ON r.source_task_id=t.id
+       WHERE r.retired_at IS NULL AND (t.thread_id=?${workId ? " OR json_extract(t.origin_json,'$.rootWorkId')=?" : ""})`,
+      workId ? [threadId, workId] : [threadId]
+    ).map((row) => String(row.id))))
+  }
+
   acceptCommand(
     sourceTaskId: string,
     command: BackgroundCommandStart,
@@ -3027,6 +3471,11 @@ export class BotStore {
   ): void {
     this.transaction(() => {
       const source = this.getTask(sourceTaskId)
+      // Only inherited peer handoffs retain workflow-summary commands. Keep the
+      // same ownership rule as Runtime before admitting their partial results.
+      if (continueSource && source.origin.kind === "notification" &&
+          source.origin.notificationKind === "workflow" && !this.peerHandoffSource(source))
+        throw new BotError("CONFLICT", "Workflow 通知没有可续办的协作任务")
       if (source.mockSource) {
         if (source.mockSource.transport !== "im")
           throw new BotError("CONFLICT", "模拟渠道不允许本机后台命令")
@@ -3149,10 +3598,31 @@ export class BotStore {
     ).map((row) => String(row.id))
   }
 
-  suppressCommands(threadId: string): void {
-    this.db.run("UPDATE bot_commands SET suppressed=1 WHERE thread_id=? AND state='accepted'", [
-      threadId
+  suppressCommands(threadId: string, sourceTaskId?: string): void {
+    this.db.run(`UPDATE bot_commands SET suppressed=1 WHERE thread_id=? AND state='accepted'${sourceTaskId ? " AND source_task_id=?" : ""}`, [
+      threadId, ...(sourceTaskId ? [sourceTaskId] : [])
     ])
+  }
+
+  /** Withdraw this physical run's continuations; preserve actual command outcomes. */
+  stopRunCommands(threadId: string, commandIds: readonly string[]): string[] {
+    return this.transaction(() => {
+      const running: string[] = []
+      for (const id of commandIds) {
+        if (this.rows("SELECT id FROM bot_commands WHERE id=? AND thread_id=? AND state='accepted'", [id, threadId]).length)
+          running.push(id)
+        this.db.run("UPDATE bot_commands SET suppressed=1 WHERE id=? AND thread_id=?", [id, threadId])
+        const queued = this.rows(
+          `SELECT id FROM bot_tasks WHERE thread_id=? AND request_id=? AND state='queued'
+           AND json_extract(origin_json,'$.kind')='notification'
+           AND json_extract(origin_json,'$.notificationKind')='command'
+           AND json_extract(origin_json,'$.key')=?`,
+          [threadId, `notification:${threadId}:command:${id}`, id]
+        )[0]
+        if (queued) this.transition(String(queued.id), "cancelled")
+      }
+      return running
+    })
   }
 
   settleCommand(result: BackgroundCommandResult, unknown = false): void {
@@ -3204,6 +3674,16 @@ export class BotStore {
       }
       const work = this.workForThread(bot.id, result.threadId)
       if (work?.state === "completed") return
+      const source = row.source_task_id ? this.getTask(String(row.source_task_id)) : undefined
+      if (source?.mockSource) {
+        const channel = this.external(source.mockSource)
+        const owner = channel.continuationOwner(source)
+        // A revoked route stops automatic delivery, not the recording of a real result.
+        // Corrupt source identity or storage failures still abort the transaction.
+        channel.validateSource(source.mockSource, owner, false)
+        const binding = channel.get(owner, source.mockSource.bindingId)
+        if (binding.revoked || binding.grantVersion !== source.mockSource.grantVersion) return
+      }
       const output = result.output.slice(-16_000)
       const commandSucceeded = !unknown && result.exitCode === 0
       const message = [
@@ -3235,18 +3715,13 @@ export class BotStore {
         {
           kind: "notification",
           notificationKind: "command",
-          ...(row.source_task_id &&
-          this.getTask(String(row.source_task_id)).mockSource?.transport === "im"
-            ? { sourceTaskId: String(row.source_task_id) }
-            : {}),
+          ...(source?.mockSource?.transport === "im" ? { sourceTaskId: source.id } : {}),
           key: result.id,
           commandSucceeded,
-          ...(row.source_task_id && botTaskWorkFamily(this.getTask(String(row.source_task_id)))
-            ? { rootWorkId: botTaskWorkFamily(this.getTask(String(row.source_task_id))) }
-            : {}),
+          ...(source && botTaskWorkFamily(source) ? { rootWorkId: botTaskWorkFamily(source) } : {}),
           ...(groupId ? { groupId } : {})
         },
-        row.source_task_id ? this.getTask(String(row.source_task_id)).mockSource : undefined
+        source?.mockSource
       )
     })
   }
@@ -3281,10 +3756,13 @@ export class BotStore {
         )
           throw new BotError("CONFLICT", "群内交办仅限当前群成员")
       }
-      const depth = source.origin.kind === "bot" ? source.origin.depth + 1 : 1
+      const depthSource = this.workflowHandoffSource(source)
+      if (!depthSource) throw new BotError("CONFLICT", "Workflow 协作来源已失效")
+      const depth = depthSource.origin.kind === "bot" ? depthSource.origin.depth + 1 : 1
       if (depth > 4) throw new BotError("CONFLICT", "协作层数已达上限，请汇总进展交由用户决定")
       const requestId = `delegate-${source.id}-${createHash("sha256").update(key).digest("hex").slice(0, 24)}`
-      const rootTaskId = source.origin.kind === "bot" ? source.origin.rootTaskId : source.id
+      const rootTaskId = (source.origin.kind === "bot" || source.origin.kind === "notification")
+        ? source.origin.rootTaskId ?? source.id : source.id
       const prior = this.rows("SELECT id FROM bot_tasks WHERE request_id=?", [requestId])[0]
       if (prior) {
         const origin = this.getTask(String(prior.id)).origin
@@ -3312,7 +3790,7 @@ export class BotStore {
           ...(source.mockSource?.transport === "im" ? { sourceTaskId: source.id } : {}),
           ...(source.workId ? { returnWorkId: source.workId } : {}),
           ...(botTaskWorkFamily(source) ? { rootWorkId: botTaskWorkFamily(source) } : {}),
-          ...(source.origin.kind === "bot"
+          ...(source.origin.kind === "bot" || (source.origin.kind === "notification" && source.origin.rootTaskId)
             ? { upstreamTaskId: source.id }
             : {}),
           depth,
@@ -3329,37 +3807,90 @@ export class BotStore {
   }
 
   private hasPendingHandoff(task: BotTask): boolean {
-    if (task.origin.kind !== "bot") return false
+    const owner = this.peerHandoffSource(task)
+    if (!owner) return false
+    // A result turn resumes the original handoff, including unfinished siblings
+    // and work dispatched by earlier result turns. Reuse the cancellation ancestry.
+    const members = [owner, ...this.taskDescendants(owner.id)]
+    if (members.some(member => member.id !== task.id &&
+        ["queued", "running", "waiting_user"].includes(member.state))) return true
+    const family = members.map(member => member.id)
+    const slots = family.map(() => "?").join(",")
     return Boolean(
       this.rows(
-        `SELECT 1 FROM bot_tasks child
-       WHERE COALESCE(json_extract(child.origin_json,'$.rootTaskId'),child.id)=?
-         AND json_extract(child.origin_json,'$.upstreamTaskId')=?
-         AND (child.state IN ('queued','running','waiting_user') OR EXISTS(
-           SELECT 1 FROM bot_reply_outbox reply WHERE reply.task_id=child.id AND reply.blocked=0
-         )) LIMIT 1`,
-        [task.origin.rootTaskId, task.id]
+        `SELECT 1 FROM bot_workflow_refs r WHERE source_task_id IN (${slots}) AND retired_at IS NULL
+         AND NOT EXISTS (
+           SELECT 1 FROM bot_tasks summary WHERE summary.id IN (${slots})
+             AND (summary.id=? OR summary.state='completed') AND summary.thread_id=r.thread_id
+             AND json_extract(summary.origin_json,'$.notificationKind')='workflow'
+             AND json_extract(summary.origin_json,'$.key')=r.run_id
+             AND json_extract(summary.origin_json,'$.runStartedAt')=r.started_at
+         ) LIMIT 1`,
+        [...family, ...family, task.id]
+      ).length ||
+      this.rows(
+        `SELECT 1 FROM bot_reply_outbox WHERE task_id IN (${slots}) AND task_id!=? AND blocked=0 LIMIT 1`,
+        [...family, task.id]
       ).length
     )
   }
 
-  /** The original handoff owns output requirements across its existing result turns. */
-  peerHandoff(taskId: string): { pending: boolean; outputFiles: readonly string[] } {
-    const task = this.getTask(taskId)
-    let source: BotTask | null = task
+  private peerHandoffSource(task: BotTask): BotTask | null {
+    if (this.taskRootCancelled(task)) return null
+    let source: BotTask | null = this.workflowHandoffSource(task)
     for (
       let hop = 0;
       hop < 4 && source?.origin.kind === "bot" && !source.origin.expectsReply;
       hop++
     )
       source = this.upstreamReplySource(source.origin, task.botId, task.workId)
+    return source?.origin.kind === "bot" && source.origin.expectsReply ? source : null
+  }
+
+  /** The original handoff owns output requirements and delivered versions across result turns. */
+  peerHandoff(taskId: string): { owned: boolean; pending: boolean; outputFiles: readonly string[]; files?: BotDeliveredFile[] } {
+    const task = this.getTask(taskId)
+    const source = this.peerHandoffSource(task)
+    let files: BotDeliveredFile[] | undefined
+    if (source) {
+      const raw = this.rows("SELECT delivered_files_json FROM bot_tasks WHERE id=?", [source.id])[0]?.delivered_files_json
+      if (raw != null) {
+        files = parseBotFileDelivery(raw) ?? undefined
+        if (!files) throw new BotError("CONFLICT", "协作文件引用已损坏，请检查原任务。")
+      }
+    }
     return {
+      owned: Boolean(source),
       pending: this.hasPendingHandoff(task),
+      ...(files?.length ? { files } : {}),
       outputFiles:
         source?.origin.kind === "bot" && source.origin.expectsReply
           ? (source.origin.outputFiles ?? [])
           : []
     }
+  }
+
+  /** Only a successful explicit delivery updates the handoff's formal file versions. */
+  recordPeerDelivery(taskId: string, delivered: BotDeliveredFile[]): void {
+    this.transaction(() => {
+      const task = this.getTask(taskId)
+      if (!ACTIVE_STATES.includes(task.state as (typeof ACTIVE_STATES)[number]) || this.taskRootCancelled(task))
+        throw new BotError("CONFLICT", "任务已停止，无法记录交付附件")
+      const owner = this.peerHandoffSource(task)
+      if (!owner) return
+      const snapshots = delivered.filter((file) => file.attachmentPath)
+      if (!snapshots.length) return
+      const files = new Map((this.peerHandoff(taskId).files ?? []).map((file) => [file.filePath, file]))
+      for (const file of snapshots) {
+        files.delete(file.filePath)
+        files.set(file.filePath, file)
+        if (files.size > 8) files.delete(files.keys().next().value!)
+      }
+      const record = JSON.stringify({ kind: "bot-file-delivery", files: [...files.values()] })
+      if (!parseBotFileDelivery(record)) throw new BotError("INVALID_INPUT", "协作文件引用无效")
+      this.db.run("UPDATE bot_tasks SET delivered_files_json=? WHERE id=?", [record, owner.id])
+      this.changed()
+    })
   }
 
   injectIntoRun(id: string, parentId: string): void {
@@ -3388,7 +3919,8 @@ export class BotStore {
     error: string | null,
     result?: string,
     files?: BotDeliveredFile[],
-    explicitGroupMessages = false
+    explicitGroupMessages = false,
+    notificationTerminal?: AgentRunTerminal
   ): void {
     this.transaction(() => {
       const source = this.getTask(id)
@@ -3408,6 +3940,7 @@ export class BotStore {
       }
       // Preserve the actual final result as the sidebar preview, not a child's generic status.
       this.settle(id, state, error, result, files, explicitGroupMessages)
+      if (notificationTerminal) this.recordNotificationTerminal(id, notificationTerminal)
     })
   }
 
@@ -3420,12 +3953,23 @@ export class BotStore {
     explicitGroupMessages = false
   ): void {
     this.transaction(() => {
-      const alreadySettled = this.getTask(id).state === state
+      const priorTask = this.getTask(id)
+      const alreadySettled = priorTask.state === state
+      const groupId = botTaskGroupId(priorTask)
+      const departed = groupId ? !this.getGroup(groupId).memberIds.includes(priorTask.botId) : false
+      if (departed && state === "cancelled") {
+        // This is a Host cancellation receipt to the original caller, never a
+        // public post or model-generated result from a removed member.
+        result = undefined
+        files = undefined
+        error = "成员已离开群聊，协作已取消；未交付新的结果。"
+      }
       const body = result ? splitBotInlineReasoning(result).body : undefined
       const visibleResult =
         files?.length && isBotRoutineSilent(body) ? files.map((file) => file.name).join("、") : body
       const task = this.transition(id, state, error)
       if (STOPPED_REPLY_SOURCES.includes(state)) this.cancelQueuedReplyTurns(task)
+      if (departed && state !== "cancelled") return
       const silentCompletion =
         (task.origin.kind === "schedule" ||
           (task.origin.kind === "notification" &&
@@ -3441,7 +3985,6 @@ export class BotStore {
           state,
           visibleResult || error || botTaskStateLabel(state)
         )
-      const groupId = botTaskGroupId(task)
       const silentDiscussion =
         task.origin.kind === "discussion" &&
         (state === "cancelled" || (state === "completed" && isBotGroupPass(visibleResult)))
@@ -3450,14 +3993,13 @@ export class BotStore {
         (task.origin.kind === "group" ||
           (task.origin.kind === "notification" && task.origin.notificationKind === "command"))
       if (
-        groupId &&
+        groupId && !departed &&
         !(explicitGroupMessages && state === "completed") &&
         !silentDiscussion &&
         !silentSupersededGroup &&
         !silentCompletion
       ) {
         const group = this.getGroup(groupId)
-        if (!group.memberIds.includes(task.botId)) return
         const text = (
           visibleResult ||
           error ||
@@ -3517,22 +4059,22 @@ export class BotStore {
         ["completed", "failed", "cancelled", "interrupted", "outcome_unknown"].includes(state)
       )
         this.im.mirrorPersonal(task, visibleResult || error || botTaskStateLabel(state))
-      if (task.origin.kind !== "bot") return
+      let replyOrigin = task.origin.kind === "bot" ? task.origin : this.workflowHandoffSource(task, state === "interrupted" || state === "cancelled")?.origin
+      if (replyOrigin?.kind !== "bot") return
+      // A delivered physical turn owns its receipt ID permanently. Later branch
+      // cancellation must preserve that result, not enqueue different content under the same ID.
+      if (this.rows("SELECT id FROM bot_exchange_records WHERE request_id=?", [`reply-${task.id}`]).length) return
       // Finishing the dispatch turn is not finishing its outstanding private handoff.
       // The child's result turn returns the integrated outcome through the existing upstream route.
       if (state === "completed" && this.hasPendingHandoff(task)) return
       // A downstream receipt resumes only its exact original handoff, including
       // internal group work. Public posts alone never create a return route.
       // Ordinary receipts have no upstream route and must never bounce back to their sender.
-      let replyOrigin = task.origin
       if (!replyOrigin.expectsReply) {
         if (!replyOrigin.upstreamTaskId) return
         if (
           alreadySettled &&
-          (this.rows("SELECT task_id FROM bot_reply_outbox WHERE task_id=?", [task.id]).length ||
-            this.rows("SELECT id FROM bot_exchange_records WHERE request_id=?", [
-              `reply-${task.id}`
-            ]).length)
+          this.rows("SELECT task_id FROM bot_reply_outbox WHERE task_id=?", [task.id]).length
         )
           return
         for (let hop = 0; hop < 4; hop++) {
@@ -3600,7 +4142,8 @@ export class BotStore {
   }
 
   private cancelQueuedReplyTurns(task: BotTask): void {
-    if (task.origin.kind !== "bot") return
+    if (task.origin.kind !== "bot" &&
+        !(task.origin.kind === "notification" && task.origin.notificationKind === "workflow")) return
     for (const queued of this.rows(
       `SELECT id FROM bot_tasks WHERE bot_id=? AND state='queued' AND continuation_checkpoint_id IS NULL
        AND json_extract(origin_json,'$.kind')='bot'
@@ -3613,6 +4156,30 @@ export class BotStore {
       this.transition(String(queued.id), "cancelled", "原协作已停止，未执行此结果回合。")
   }
 
+  /** Resolve only Host-owned workflow continuations, preserving the original handoff contract. */
+  private workflowHandoffSource(task: BotTask, terminalReceipt = false): BotTask | null {
+    let source = task
+    const seen = new Set<string>()
+    while (source.origin.kind === "notification" && source.origin.notificationKind === "workflow" &&
+           source.origin.rootTaskId && source.origin.sourceTaskId) {
+      if (seen.has(source.id) || (STOPPED_REPLY_SOURCES.includes(source.state) &&
+          !(terminalReceipt && source.id === task.id && ["interrupted", "cancelled"].includes(source.state)))) return null
+      seen.add(source.id)
+      const row = this.rows("SELECT * FROM bot_tasks WHERE id=?", [source.origin.sourceTaskId])[0]
+      if (!row) return null
+      const parent = this.task(row)
+      const root = (parent.origin.kind === "bot" || parent.origin.kind === "notification")
+        ? parent.origin.rootTaskId ?? parent.id : parent.id
+      if (parent.botId !== source.botId || parent.threadId !== source.threadId ||
+          parent.workId !== source.workId || botTaskGroupId(parent) !== botTaskGroupId(source) ||
+          botTaskWorkFamily(parent) !== botTaskWorkFamily(source) || root !== source.origin.rootTaskId ||
+          JSON.stringify(parent.mockSource) !== JSON.stringify(source.mockSource) ||
+          STOPPED_REPLY_SOURCES.includes(parent.state)) return null
+      source = parent
+    }
+    return source
+  }
+
   private upstreamReplySource(
     origin: Extract<BotTaskOrigin, { kind: "bot" }>,
     botId: string,
@@ -3621,16 +4188,22 @@ export class BotStore {
     if (!origin.upstreamTaskId) return null
     const row = this.rows("SELECT * FROM bot_tasks WHERE id=?", [origin.upstreamTaskId])[0]
     if (!row) return null
-    const source = this.task(row)
-    return source.botId === botId &&
-      source.workId === workId &&
-      (!source.mockSource ||
-        (source.mockSource.transport === "im" && this.im.isContinuation(source))) &&
-      source.origin.kind === "bot" &&
-      source.origin.depth < origin.depth &&
-      source.origin.rootTaskId === origin.rootTaskId &&
-      source.origin.groupId === origin.groupId &&
+    const continuation = this.task(row)
+    if (continuation.origin.kind !== "bot" &&
+        !(continuation.origin.kind === "notification" && continuation.origin.notificationKind === "workflow" &&
+          continuation.origin.rootTaskId && continuation.origin.sourceTaskId)) return null
+    const source = this.workflowHandoffSource(continuation)
+    if (!source) return null
+    const depth = source.origin.kind === "bot" ? source.origin.depth : 0
+    const root = source.origin.kind === "bot" ? source.origin.rootTaskId : source.id
+    return continuation.botId === botId &&
+      continuation.workId === workId &&
+      (!continuation.mockSource ||
+        (continuation.mockSource.transport === "im" && this.im.isContinuation(continuation))) &&
+      depth < origin.depth && root === origin.rootTaskId &&
+      botTaskGroupId(source) === origin.groupId &&
       botTaskWorkFamily(source) === origin.rootWorkId &&
+      !STOPPED_REPLY_SOURCES.includes(continuation.state) &&
       !STOPPED_REPLY_SOURCES.includes(source.state)
       ? source
       : null
@@ -3772,12 +4345,16 @@ export class BotStore {
         const group = origin.groupId
           ? this.groups().find((item) => item.id === origin.groupId)
           : undefined
+        const cancelledSource = group && !group.memberIds.includes(origin.fromBotId)
+          ? this.rows("SELECT * FROM bot_tasks WHERE id=? AND bot_id=? AND state='cancelled'", [row.task_id, origin.fromBotId])[0]
+          : undefined
+        const departedCancellation = Boolean(cancelledSource && botTaskGroupId(this.task(cancelledSource)) === group?.id)
         const groupAllowed =
           !origin.groupId ||
           (group &&
             !group.deleting &&
             group.memberIds.includes(target?.id ?? "") &&
-            group.memberIds.includes(origin.fromBotId))
+            (group.memberIds.includes(origin.fromBotId) || departedCancellation))
         const work =
           origin.returnWorkId && target
             ? this.rows("SELECT state FROM bot_work_items WHERE id=? AND bot_id=?", [
@@ -3785,6 +4362,22 @@ export class BotStore {
                 target.id
               ])[0]
             : null
+        const sourceTask = origin.sourceTaskId
+          ? this.rows("SELECT * FROM bot_tasks WHERE id=?", [origin.sourceTaskId])[0]
+          : undefined
+        const sourceOwner = sourceTask ? this.task(sourceTask) : undefined
+        const source = sourceOwner?.mockSource
+        let sourceAllowed = !origin.sourceTaskId || Boolean(sourceOwner)
+        if (source && sourceOwner) {
+          const channel = this.external(source)
+          try {
+            channel.validateSource(source, channel.continuationOwner(sourceOwner))
+          } catch (error) {
+            if (!(error instanceof BotError) || !["CONFLICT", "NOT_FOUND"].includes(error.code))
+              throw error
+            sourceAllowed = false
+          }
+        }
         if (
           target &&
           !target.archived &&
@@ -3794,17 +4387,19 @@ export class BotStore {
           !["cancelled", "interrupted"].includes(String(root.state)) &&
           (!origin.upstreamTaskId ||
             this.upstreamReplySource(origin, target.id, origin.returnWorkId)) &&
-          groupAllowed
+          groupAllowed && sourceAllowed
         )
           this.enqueue(
             {
               botId: target.id,
               ...(origin.returnWorkId ? { workId: origin.returnWorkId } : {}),
               requestId: `reply-${row.task_id}`,
-              message: String(row.message)
+              message: departedCancellation
+                ? `${origin.fromBotName} 已离开群聊，协作已取消；未交付新的结果。`
+                : String(row.message)
             },
-            origin,
-            origin.sourceTaskId ? this.getTask(origin.sourceTaskId).mockSource : undefined
+            departedCancellation ? { ...origin, replyFiles: undefined, outputFiles: undefined } : origin,
+            source
           )
         else {
           // Preserve the result for exchange/history, without automatically running or reopening
@@ -4020,12 +4615,29 @@ export class BotStore {
             [this.now(), group.id]
           )
         }
+        const stoppedHandoffs = new Set<string>()
         for (const id of prior.memberIds.filter((id) => !group.memberIds.includes(id))) {
+          for (const row of this.rows(
+            "SELECT * FROM bot_tasks WHERE bot_id=? AND state='queued' AND json_extract(origin_json,'$.groupId')=?",
+            [id, group.id]
+          )) {
+            const owner = this.peerHandoffSource(this.task(row))
+            if (owner) stoppedHandoffs.add(owner.id)
+          }
           this.db.run(
             "UPDATE bot_tasks SET state='cancelled',updated_at=? WHERE bot_id=? AND state='queued' AND json_extract(origin_json,'$.groupId')=?",
             [this.now(), id, group.id]
           )
         }
+        // Retire the logical handoff once, not each queued integration turn.
+        // Running owners and physical resources remain Host's responsibility.
+        for (const id of stoppedHandoffs)
+          this.db.run(
+            "UPDATE bot_tasks SET state='cancelled',updated_at=? WHERE id=? AND state IN ('completed','failed','outcome_unknown','superseded')",
+            [this.now(), id]
+          )
+        for (const id of stoppedHandoffs)
+          if (this.getTask(id).state === "cancelled") this.settle(id, "cancelled", null)
       }
       this.changed()
       return group
@@ -4035,6 +4647,10 @@ export class BotStore {
     return this.transaction(() => {
       const group = this.getGroup(id)
       if (group.version !== version) throw new BotError("CONFLICT", "群聊已被修改，请刷新后重试")
+      if (this.rows(
+        `SELECT 1 FROM bot_workflow_refs r JOIN bot_tasks t ON t.id=r.source_task_id
+         WHERE r.retired_at IS NULL AND json_extract(t.origin_json,'$.groupId')=? LIMIT 1`, [id]
+      ).length) throw new BotError("CONFLICT", "请先停止群聊后台任务并等待退出，再删除群聊")
       if (
         this.rows("SELECT id FROM bot_commands WHERE group_id=? AND state='accepted' LIMIT 1", [id])
           .length
@@ -4071,6 +4687,7 @@ export class BotStore {
     this.transaction(() => {
       if (!this.getGroup(id).deleting) throw new BotError("CONFLICT", "尚未开始删除群聊")
       this.deleteReactionScopes("group", [id])
+      this.db.run("DELETE FROM bot_workflow_refs WHERE source_task_id IN (SELECT id FROM bot_tasks WHERE json_extract(origin_json,'$.groupId')=?)", [id])
       this.db.run("DELETE FROM bot_tasks WHERE json_extract(origin_json,'$.groupId')=?", [id])
       this.db.run("DELETE FROM bot_commands WHERE group_id=?", [id])
       this.db.run("DELETE FROM bot_task_receipts WHERE group_id=?", [id])
@@ -4102,7 +4719,8 @@ export class BotStore {
       if (botTaskGroupId(task) !== groupId) return
       const origin = task.origin
       if (origin.kind === "group" || origin.kind === "discussion") {
-        if (origin.messageId !== state.messageId) return
+        if (origin.messageId !== state.messageId &&
+            this.consumedGroupAssignmentOrdinal(task, state.messageId) === undefined) return
         state.posts++
         this.db.run("UPDATE bot_group_discussions SET payload=? WHERE group_id=?", [
           JSON.stringify(state),
@@ -4112,13 +4730,7 @@ export class BotStore {
       }
       let parentId: string | undefined
       if (origin.kind === "bot") parentId = origin.rootTaskId
-      else if (origin.kind === "notification" && origin.notificationKind === "command") {
-        const command = this.rows(
-          "SELECT source_task_id FROM bot_commands WHERE id=? AND group_id=? AND bot_id=? AND thread_id=?",
-          [origin.key, groupId, task.botId, task.threadId]
-        )[0]
-        if (command?.source_task_id) parentId = String(command.source_task_id)
-      }
+      else if (origin.kind === "notification") parentId = this.groupNotificationSource(task, groupId)
       if (!parentId) return
       const parent = this.rows("SELECT * FROM bot_tasks WHERE id=?", [parentId])[0]
       if (!parent) return
@@ -4326,36 +4938,42 @@ export class BotStore {
   private isGroupPostEvidence(
     message: Pick<BotGroupMessage, "id" | "authorBotId">,
     groupId: string,
-    messageId: string
+    messageId: string,
+    allowUnknownHistory = false
   ): boolean {
     if (message.id === messageId) return true
     const match = /^(?:send|files)-([0-9a-f-]{36})-|^result-([0-9a-f-]{36})$/.exec(message.id)
-    if (!match) return false
+    if (!match) return allowUnknownHistory
     let taskId = match[1] || match[2]
     const visited = new Set<string>()
     while (!visited.has(taskId)) {
       visited.add(taskId)
       const row = this.rows("SELECT * FROM bot_tasks WHERE id=?", [taskId])[0]
-      if (!row) return false
+      if (!row) return allowUnknownHistory
       const task = this.task(row)
       if (
         (visited.size === 1 && task.botId !== message.authorBotId) ||
         botTaskGroupId(task) !== groupId
       )
         return false
-      if (task.origin.kind === "discussion") return task.origin.messageId === messageId
+      if (task.origin.kind === "group" || task.origin.kind === "discussion") {
+        if (task.origin.messageId === messageId) return true
+        // A consumed answer continues the same physical run. Only posts after
+        // that input may serve its new assignment; older public posts stay history.
+        const consumed = this.consumedGroupAssignmentOrdinal(task, messageId)
+        const post = consumed === undefined ? undefined : this.rows(
+          "SELECT ordinal FROM bot_group_messages WHERE group_id=? AND id=?",
+          [groupId, message.id]
+        )[0]
+        return Boolean(post && Number(post.ordinal) > consumed!)
+      }
       if (task.origin.kind === "bot") {
         taskId = task.origin.rootTaskId
         continue
       }
-      if (task.origin.kind !== "notification" || task.origin.notificationKind !== "command")
-        return false
-      const command = this.rows(
-        "SELECT source_task_id FROM bot_commands WHERE id=? AND bot_id=? AND thread_id=? AND group_id=?",
-        [task.origin.key, task.botId, task.threadId, groupId]
-      )[0]
-      if (!command?.source_task_id) return false
-      taskId = String(command.source_task_id)
+      const sourceId = this.groupNotificationSource(task, groupId)
+      if (!sourceId) return allowUnknownHistory
+      taskId = sourceId
     }
     return false
   }
@@ -4376,15 +4994,52 @@ export class BotStore {
       .sort((a, b) => a.message.ordinal - b.message.ordinal)
   }
 
-  private groupCommandOwners(groupId: string): Set<string> {
+  /** Resolve public continuation evidence through its persisted execution owner. */
+  private groupNotificationSource(task: BotTask, groupId: string): string | undefined {
+    const origin = task.origin
+    if (origin.kind !== "notification") return
+    if (origin.notificationKind === "command") {
+      const command = this.rows(
+        "SELECT source_task_id FROM bot_commands WHERE id=? AND bot_id=? AND thread_id=? AND group_id=?",
+        [origin.key, task.botId, task.threadId, groupId]
+      )[0]
+      return command?.source_task_id ? String(command.source_task_id) : undefined
+    }
+    if (origin.notificationKind !== "workflow" || !origin.runStartedAt || !origin.sourceTaskId) return
+    const owner = this.rows(
+      `SELECT t.id FROM bot_workflow_refs r JOIN bot_tasks t ON t.id=r.source_task_id
+       WHERE r.thread_id=? AND r.run_id=? AND r.started_at=? AND t.id=?
+         AND t.bot_id=? AND t.thread_id=? AND json_extract(t.origin_json,'$.groupId')=?`,
+      [task.threadId, origin.key, origin.runStartedAt, origin.sourceTaskId, task.botId, task.threadId, groupId]
+    )[0]
+    return owner ? String(owner.id) : undefined
+  }
+
+  private consumedGroupAssignmentOrdinal(task: BotTask, messageId: string): number | undefined {
+    const groupId = botTaskGroupId(task)
+    if (!groupId) return
+    const row = this.rows(
+      `SELECT message.ordinal FROM bot_tasks input JOIN bot_group_messages message
+         ON message.id=json_extract(input.origin_json,'$.messageId') AND message.group_id=?
+       WHERE input.injected_into=? AND input.bot_id=? AND input.thread_id=?
+         AND input.state IN ('running','completed') AND json_extract(input.origin_json,'$.kind')='group'
+         AND json_extract(input.origin_json,'$.groupId')=? AND message.id=? LIMIT 1`,
+      [groupId, task.id, task.botId, task.threadId, groupId, messageId]
+    )[0]
+    return row ? Number(row.ordinal) : undefined
+  }
+
+  private groupBackgroundOwners(groupId: string): Set<string> {
     // A completed or superseded turn may leave a silent service alive. Keep its
     // process ownership fence, but do not treat that service as unfinished work.
     return new Set(
       this.rows(
         `SELECT c.bot_id FROM bot_commands c LEFT JOIN bot_tasks t ON t.id=c.source_task_id
        WHERE c.group_id=? AND c.state='accepted' AND COALESCE(
-         c.suppressed=1 AND c.continuation_result_json IS NULL AND t.state IN ('completed','superseded'),0)=0`,
-        [groupId]
+         c.suppressed=1 AND c.continuation_result_json IS NULL AND t.state IN ('completed','superseded'),0)=0
+       UNION SELECT t.bot_id FROM bot_workflow_refs r JOIN bot_tasks t ON t.id=r.source_task_id
+       WHERE json_extract(t.origin_json,'$.groupId')=? AND r.retired_at IS NULL AND r.suppressed=0`,
+        [groupId, groupId]
       ).map((row) => String(row.bot_id))
     )
   }
@@ -4394,6 +5049,16 @@ export class BotStore {
     for (const { seed, message, targets } of posts) {
       if (seed.origin.kind !== "discussion" || this.getTask(seed.id).state !== "queued") continue
       const group = this.getGroup(seed.origin.groupId)
+      // Historical posts outlive their author. A queued recipient seed is not
+      // owned by that author, so deletion need not have removed it.
+      if (
+        group.deleting ||
+        !message.authorBotId ||
+        !group.memberIds.includes(message.authorBotId)
+      ) {
+        this.transition(seed.id, "cancelled")
+        continue
+      }
       const author = this.getBot(message.authorBotId!)
       if (
         group.deleting ||
@@ -4411,7 +5076,7 @@ export class BotStore {
           AND state IN ('queued','running','waiting_user') AND id NOT IN (${held.map(() => "?").join(",")}) LIMIT 1`,
           [group.id, ...held]
         ).length ||
-        this.groupCommandOwners(group.id).size
+        this.groupBackgroundOwners(group.id).size
       )
         continue
       const prepared = this.prepareGroupPost(group, message, targets)
@@ -4520,6 +5185,45 @@ export class BotStore {
       this.changed()
       return true
     })
+  }
+  /** Exact public receipts, independent of the recent-chat preview window. */
+  groupTaskDeliveries(
+    groupId: string,
+    taskId: string,
+    authorBotId: string,
+    includeHandoffFiles = false
+  ): Pick<BotGroupMessage, "id" | "authorBotId" | "files">[] {
+    this.getGroup(groupId)
+    const taskIds = new Set([taskId])
+    if (includeHandoffFiles) {
+      const row = this.rows("SELECT * FROM bot_tasks WHERE id=?", [taskId])[0]
+      const source = row ? this.task(row) : undefined
+      const owner = source && source.botId === authorBotId && botTaskGroupId(source) === groupId
+        ? this.peerHandoffSource(source) : null
+      if (owner) {
+        for (const candidate of [owner, ...this.taskDescendants(owner.id)]) {
+          if (candidate.botId === authorBotId && botTaskGroupId(candidate) === groupId &&
+              this.peerHandoffSource(candidate)?.id === owner.id) taskIds.add(candidate.id)
+        }
+      }
+    }
+    return [...taskIds].flatMap((id) => this.rows(
+      `SELECT id,author_bot_id,files_json FROM bot_group_messages
+       WHERE rowid IN (
+         SELECT rowid FROM bot_group_messages WHERE id=?
+         UNION ALL SELECT rowid FROM bot_group_messages WHERE id>=? AND id<?
+         UNION ALL SELECT rowid FROM bot_group_messages WHERE id>=? AND id<?
+       ) AND group_id=? AND author_bot_id=?`,
+      [`result-${id}`, `send-${id}-`, `send-${id}.`,
+        `files-${id}-`, `files-${id}.`, groupId, authorBotId]
+    ).flatMap((row) => {
+      const files = row.files_json ? parseBotFileDelivery(row.files_json) ?? undefined : undefined
+      // Only immutable attachments cross physical result turns. Earlier progress
+      // text must not become proof that this turn's new result was published.
+      const retained = id === taskId ? files : files?.filter(file => file.attachmentPath)
+      if (id !== taskId && !retained?.length) return []
+      return [{ id: String(row.id), authorBotId: String(row.author_bot_id), ...(retained ? { files: retained } : {}) }]
+    }))
   }
   groupMessages(
     groupId: string,
@@ -4654,7 +5358,18 @@ export class BotStore {
         replyAuthor && !targets.includes(replyAuthor) ? this.getBot(replyAuthor) : null
       const notifiedAuthor =
         quotedAuthor && !quotedAuthor.archived && !quotedAuthor.deleting ? quotedAuthor.id : null
-      const participants = notifiedAuthor ? [...targets, notifiedAuthor] : targets
+      // Keep requested targets frozen for retry identity; broadcasts execute only active members.
+      // Explicit mentions retain enqueue's unavailable-recipient error, even alongside @all.
+      const broadcast = targets.length === group.memberIds.length &&
+        (!input.mentions?.length || input.mentions.some(mention => mention.botId === null))
+      const recipients = broadcast ? targets.filter(id => {
+        const bot = this.getBot(id)
+        return (!bot.archived && !bot.deleting) ||
+          input.mentions?.some(mention => mention.botId === id)
+      }) : targets
+      if (!recipients.length)
+        throw new BotError("CONFLICT", "群内没有可接收任务的 Bot，请先恢复或添加成员")
+      const participants = notifiedAuthor ? [...recipients, notifiedAuthor] : recipients
       const obsoleteDiscussion = this.groupDiscussionTask(group.id, input.requestId)
       if (obsoleteDiscussion && this.getTask(obsoleteDiscussion).state === "queued")
         this.transition(obsoleteDiscussion, "cancelled")
@@ -4861,8 +5576,11 @@ export class BotStore {
         }
         // Grok re-resolves participants from the current request and subsequent @handoffs.
         // Reuse validated recipients and persisted IDs, never guess from names or old tasks.
-        const addressed = new Set(JSON.parse(String(assignment.targets_json)) as string[])
         const botPost = typeof assignment.author_bot_id === "string"
+        // Original request targets are immutable retry identity. A skipped member must not
+        // join an old user request merely by being restored; later explicit handoffs still add it.
+        const addressed = new Set((JSON.parse(String(assignment.targets_json)) as string[])
+          .filter(id => botPost || initial.some(task => task.bot_id === id)))
         if (
           botPost &&
           (this.getBot(String(assignment.author_bot_id)).archived ||
@@ -4898,11 +5616,11 @@ export class BotStore {
             [groupId, Number(assignment.ordinal)]
           )) {
             if (
-              botPost &&
               !this.isGroupPostEvidence(
                 { id: String(message.id), authorBotId: String(message.author_bot_id) },
                 groupId,
-                state.messageId
+                state.messageId,
+                !botPost
               )
             )
               continue
@@ -4946,9 +5664,12 @@ export class BotStore {
           ).length
         )
           return
-        const recent = botPost ? postMessages : recentMessages.filter((m) => !independent.has(m.id))
-        const commandOwners = this.groupCommandOwners(groupId)
-        if (initialRunning || commandOwners.size) {
+        // A late result remains visible history, but cannot enlist members or
+        // supply work for a different user request that replaced its round.
+        const recent = botPost ? postMessages : recentMessages.filter((m) =>
+          !independent.has(m.id) && this.isGroupPostEvidence(m, groupId, state.messageId, true))
+        const backgroundOwners = this.groupBackgroundOwners(groupId)
+        if (initialRunning || backgroundOwners.size) {
           // Active work need not hold up a direct handoff to an idle peer. Keep
           // other discussion deferred until the original work or result completes.
           for (const id of eligible) {
@@ -4963,7 +5684,7 @@ export class BotStore {
             const stillWorking = initial.some(
               (task) => task.bot_id === id && task.state !== "completed"
             )
-            if (stillWorking || commandOwners.has(id) || !called) eligible.delete(id)
+            if (stillWorking || backgroundOwners.has(id) || !called) eligible.delete(id)
           }
           if (!eligible.size) return
         }
@@ -4996,7 +5717,7 @@ export class BotStore {
         for (const id of eligible) if (!hasUnreadPeerMessage(id)) eligible.delete(id)
         const botId = latest && nextGroupDiscussionSpeaker(state, latest, eligible)
         if (!botId) {
-          if (initialRunning || commandOwners.size) return
+          if (initialRunning || backgroundOwners.size) return
           finish()
           return
         }

@@ -39,12 +39,14 @@ const botOfficeFilePreview: OfficeFilePreviewAdapter = {
 export function BotMessageFilePreview({
   botId,
   groupId,
+  imConversationId,
   threadId,
   name,
   client
 }: {
   botId: string
   groupId?: string
+  imConversationId?: string
   threadId: string
   name: string
   client: BotClient
@@ -84,7 +86,10 @@ export function BotMessageFilePreview({
     savingRef.current = true
     setSaving(true)
     try {
-      if (groupId) await client.exportGroupFile(groupId, request.filePath)
+      if (imConversationId) {
+        if (!client.im?.exportFile) throw new Error("当前主机不支持保存招乎群文件")
+        await client.im.exportFile(botId, imConversationId, request.filePath)
+      } else if (groupId) await client.exportGroupFile(groupId, request.filePath)
       else await client.exportFile(botId, request.filePath)
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "文件保存失败，请重试")

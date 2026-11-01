@@ -122,22 +122,54 @@ export interface ManagedNotificationDispatch {
   kind: "workflow" | "coordinator"
   key: string
   runStartedAt?: string
+  /** Only the managed owner observes this hold; a declined ordinary thread is unchanged. */
+  notBefore?: number
+}
+
+export type ManagedNotificationResult = boolean | {
+  notificationRunId: string
+  terminal: AgentRunTerminal
+  /** The exact pending result was durably consumed (including an intentional halt). */
+  acknowledged?: boolean
 }
 
 export class PendingNotificationScheduler {
-  private managedDispatcher?: (notice: ManagedNotificationDispatch) => Promise<boolean>
+  private managedDispatcher?: (notice: ManagedNotificationDispatch) => Promise<ManagedNotificationResult>
 
   /** Optional durable queue owner. False preserves ordinary desktop/IM behavior. */
   setManagedDispatcher(
-    dispatcher: (notice: ManagedNotificationDispatch) => Promise<boolean>
+    dispatcher: (notice: ManagedNotificationDispatch) => Promise<ManagedNotificationResult>
   ): void {
     this.managedDispatcher = dispatcher
   }
 
-  private async dispatchManaged(notice: ManagedNotificationDispatch): Promise<boolean> {
+  private readonly managedRetryNotBefore = new Map<string, number>()
+
+  private async dispatchManaged(notice: ManagedNotificationDispatch): Promise<PendingNotificationOutcome | false> {
     if (!this.managedDispatcher) return false
     try {
-      return await this.managedDispatcher(notice)
+      const notBefore = this.managedRetryNotBefore.get(notice.threadId)
+      const result = await this.managedDispatcher({ ...notice, ...(notBefore ? { notBefore } : {}) })
+      if (result === false) return false
+      if (result === true) return { started: false, reason: "managed-queue" }
+      if (result.acknowledged) {
+        // The owner durably reported this outcome, including an interrupted summary.
+        // It owes no retry; preserve the real terminal in logs and drain independent results.
+        this.dependencies.log("managed summary outcome acknowledged", {
+          threadId: notice.threadId, kind: notice.kind, notificationRunId: result.notificationRunId,
+          outcome: result.terminal.outcome, code: result.terminal.code
+        })
+        this.managedRetryNotBefore.delete(notice.threadId)
+        this.clearFailureBudget(notice.threadId)
+        this.recheckRequested.add(notice.threadId)
+        return { started: true }
+      }
+      // Compute eligibility before settle installs the wake, so scheduling
+      // overhead cannot make the only timer arrive before its own gate opens.
+      if (this.isRetryable(result.terminal))
+        this.managedRetryNotBefore.set(notice.threadId, Date.now() + RETRY_AFTER_FAILURE_MS)
+      else this.managedRetryNotBefore.delete(notice.threadId)
+      return this.settle(notice.threadId, notice.kind, result.notificationRunId, result.terminal)
     } catch (error) {
       this.dependencies.log("managed queue unavailable", {
         threadId: notice.threadId,
@@ -146,7 +178,7 @@ export class PendingNotificationScheduler {
       })
       this.noteFailure(notice.threadId, notice.kind)
       // Never fall through to an unscoped desktop run when a queue owner failed.
-      return true
+      return { started: false, reason: "managed-queue" }
     }
   }
 
@@ -226,6 +258,7 @@ export class PendingNotificationScheduler {
     this.suppressedUntil.clear()
     this.failedAttempts.clear()
     this.budgetSpentUntil.clear()
+    this.managedRetryNotBefore.clear()
   }
 
   /**
@@ -408,16 +441,14 @@ export class PendingNotificationScheduler {
       return { started: false, reason: "no-pending-notification" }
     }
 
-    if (
-      await this.dispatchManaged({
+    const managed = await this.dispatchManaged({
         threadId,
         kind: "coordinator",
         key: createHash("sha256")
           .update(JSON.stringify(coordinatorWorkerManager.peekNotifications(threadId)))
           .digest("hex")
       })
-    )
-      return { started: false, reason: "managed-queue" }
+    if (managed) return managed
 
     const existingLease = getLocalThreadRunLease(threadId)
     if (existingLease) {
@@ -627,15 +658,13 @@ export class PendingNotificationScheduler {
       return { started: false, reason: "no-pending-notification" }
     }
 
-    if (
-      await this.dispatchManaged({
+    const managed = await this.dispatchManaged({
         threadId,
         kind: "workflow",
         key: run.runId,
         runStartedAt: run.startedAt
       })
-    )
-      return { started: false, reason: "managed-queue" }
+    if (managed) return managed
 
     const existingLease = getLocalThreadRunLease(threadId)
     if (existingLease) {

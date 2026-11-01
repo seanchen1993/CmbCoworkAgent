@@ -1,3 +1,4 @@
+import { pendingNotificationScheduler } from "../agent/pending-notification-scheduler"
 import { goalManager } from "../agent/goals/runtime"
 import { withCheckpointer, hasPendingApprovalForRuntimeThread } from "../agent/runtime"
 import { describeCheckpointForkability } from "../../shared/checkpoint-forkability"
@@ -62,7 +63,8 @@ async function mutate<T>(
   operation: (
     row: NonNullable<ReturnType<typeof getThreadCore>>,
     metadata: Record<string, unknown>
-  ) => Promise<T>
+  ) => Promise<T>,
+  deletingWork?: { botId: string; workId: string }
 ): Promise<T> {
   const lease = requireThreadMutationLease(threadId, "原会话不存在。")
   return workflowRunManager.withThreadTransitionLease(threadId, () =>
@@ -94,7 +96,7 @@ async function mutate<T>(
               "原会话还有未结算的执行或审批，请先在原会话处理后再关联。"
             )
         })
-        await host.assertConversationLinkIdle(threadId)
+        await host.assertConversationLinkIdle(threadId, deletingWork)
         const latest = getThreadCore(threadId)
         if (!latest || !matchesThreadIncarnation(latest, lease.incarnation))
           throw new BotError("CONFLICT", "原会话在检查期间已变化，关联已停止。")
@@ -171,6 +173,16 @@ export async function exposeWorkConversation(host: LocalBotHost, botId: string, 
     throw new BotError("CONFLICT", "模拟渠道任务不能转为本机私有会话。")
   const row = getThreadCore(work.threadId)
   if (!row) throw new BotError("NOT_FOUND", "请先打开原任务会话；原消息不存在时不会创建替代历史。")
+  if (work.conversation?.state === "detached") {
+    // A historical result still points to this ordinary conversation. Navigation
+    // must not bind it back to the old work, or accept a reused thread identity.
+    if (
+      work.conversation.ref.kind !== "local_thread" ||
+      !matchesThreadIncarnation(row, work.conversation.ref.incarnation)
+    )
+      throw new BotError("CONFLICT", "原会话身份已变化，不能打开替代历史。")
+    return work
+  }
   if (work.conversation?.state === "bound") {
     verifyWorkConversationThread(work, row, metadataOf(row.metadata))
     return work
@@ -207,16 +219,21 @@ export async function unlinkDeletingWorkConversation(
   workId: string,
   version: number
 ) {
-  return unlinkConversation(host, botId, workId, version, () =>
-    host.getWorkForDeletion(botId, workId)
+  const work = await unlinkConversation(host, botId, workId, version, () =>
+    host.getWorkForDeletion(botId, workId), true
   )
+  // Metadata and the mutation/run leases have been released. Preserve pending
+  // Team results and let the original scheduler consume them as ordinary work.
+  pendingNotificationScheduler.requestCheck(work.threadId)
+  return work
 }
 async function unlinkConversation(
   host: LocalBotHost,
   botId: string,
   workId: string,
   version: number,
-  readWork: () => BotWorkItem
+  readWork: () => BotWorkItem,
+  forDeletion = false
 ) {
   const work = readWork()
   if (work.conversation?.state === "detached") return work
@@ -245,7 +262,7 @@ async function unlinkConversation(
     const result = host.conversationLinks.detached(botId, workId)
     host.conversationLinkChanged()
     return result
-  })
+  }, forDeletion ? { botId, workId } : undefined)
 }
 export async function resolveWorkConversation(host: LocalBotHost, threadId: string) {
   let work = host.conversationLinks.forThread(threadId)

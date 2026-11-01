@@ -170,7 +170,7 @@ export function BotMemoryPanel({
         </p>
       </div>
       <div className="mb-4 flex items-center justify-between">
-        <h3 className="!mb-0">记忆</h3>
+        <h3 className="!mb-0">{groupId ? "记忆" : "全部记忆"}</h3>
         <button
           className="bot-icon-button"
           aria-label="添加记忆"
@@ -180,6 +180,11 @@ export function BotMemoryPanel({
           <Plus size={16} />
         </button>
       </div>
+      {!groupId && (
+        <p className="mb-3 text-xs text-muted-foreground">
+          可管理此 Bot 保留的所有记忆。群内记忆仍仅用于所属群，不会用于私聊。
+        </p>
+      )}
       {(error || readError) && (
         <p role="alert" className="mb-3 text-xs text-destructive">
           {error || readError}
@@ -200,14 +205,19 @@ export function BotMemoryPanel({
           className="space-y-3"
           onSubmit={(event) => {
             event.preventDefault()
+            const previous = editing === "new" ? undefined : editing.scope ?? { kind: "private" }
+            const scope: BotMemoryScope = scopeKind === "group"
+              ? { kind: "group", groupId: groupId ?? (previous?.kind === "group" ? previous.groupId : "") }
+              : { kind: scopeKind }
+            const unchanged = previous?.kind === scope.kind &&
+              (scope.kind !== "group" || (previous.kind === "group" && previous.groupId === scope.groupId))
             void mutate(() =>
               client.writeMemory(botId, {
                 name,
                 content,
-                scope:
-                  scopeKind === "group"
-                    ? { kind: "group", groupId: groupId! }
-                    : { kind: scopeKind },
+                // Omit unchanged scope: the service preserves it under the version
+                // check, including memories whose original group no longer exists.
+                ...(unchanged ? {} : { scope }),
                 ...(editing === "new" ? {} : { id: editing.id, expectedVersion: editing.version })
               })
             )
@@ -228,11 +238,10 @@ export function BotMemoryPanel({
               </SelectTrigger>
               <SelectContent align="end">
                 <SelectItem value="shared">Bot 共享</SelectItem>
-                {groupId ? (
-                  <SelectItem value="group">群内</SelectItem>
-                ) : (
-                  <SelectItem value="private">仅私聊</SelectItem>
+                {(groupId || (editing !== "new" && editing.scope?.kind === "group")) && (
+                  <SelectItem value="group">{groupId ? "群内" : "原群内"}</SelectItem>
                 )}
+                {!groupId && <SelectItem value="private">仅私聊</SelectItem>}
               </SelectContent>
             </Select>
           </div>
@@ -240,7 +249,7 @@ export function BotMemoryPanel({
             {scopeKind === "shared"
               ? "此 Bot 的私聊和各群均可使用。"
               : scopeKind === "group"
-                ? "仅当前群及其任务使用。"
+                ? "仅所属群及其任务使用；群已删除或 Bot 已离群时保留供你管理。"
                 : "仅私聊及其任务使用。"}
           </p>
           <label className="bot-field">

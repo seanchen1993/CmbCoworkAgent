@@ -5,6 +5,9 @@ import {
 import { botInteractionRoutes } from "../services/im/bot-interaction-route"
 import { describe, expect, it, vi, beforeEach } from "vitest"
 import { AsyncLocalStorage } from "node:async_hooks"
+import { DatabaseSync } from "node:sqlite"
+import { NativeSqliteAdapter } from "../db/native-sqlite-adapter"
+import { BotStore } from "./store"
 import { AsyncLocalStorageProviderSingleton } from "@langchain/core/singletons"
 import { AIMessage, HumanMessage } from "@langchain/core/messages"
 import type {
@@ -67,6 +70,7 @@ const fixture = vi.hoisted(() => ({
   recordQuestionResult: vi.fn(),
   publishMessage: vi.fn(() => ({ groupId: "g", messageId: "sent-message" })),
   groupMessages: vi.fn<() => BotGroupMessage[]>(() => []),
+  groupTaskDeliveries: vi.fn<(groupId: string, taskId: string, authorBotId: string, includeHandoffFiles?: boolean) => Pick<BotGroupMessage, "id" | "authorBotId" | "files">[]>(),
   groupTaskRequest: vi.fn<() => Pick<BotGroupMessage, "id" | "text" | "createdAt"> | null>(
     () => null
   ),
@@ -83,6 +87,19 @@ const fixture = vi.hoisted(() => ({
   workerActive: vi.fn(() => false),
   workerPersisting: vi.fn(() => false),
   cancelWorkflow: vi.fn(),
+  workflowReference: vi.fn(),
+  recoverWorkflow: vi.fn(async () => false),
+  acceptWorkflow: vi.fn(),
+  recordNotificationTerminal: vi.fn(),
+  workflowNotificationConsumed: vi.fn(() => false),
+  retireWorkflow: vi.fn(),
+  refreshWorkflows: vi.fn(async () => {}),
+  workflowSaved: vi.fn(),
+  workflowInterrupted: vi.fn(),
+  workflowFlushFailed: vi.fn(),
+  workflowTransition: vi.fn(async (_thread: string, callback: () => Promise<unknown>) => callback()),
+  workflowMarked: vi.fn(async () => true),
+  workflowWait: vi.fn(async () => {}),
   cancelCommands: vi.fn(),
   cancelCommandIds: vi.fn(),
   commandLifecycle: vi.fn((_id: string, retainSource = false) => ({
@@ -120,7 +137,8 @@ const fixture = vi.hoisted(() => ({
     ) => string[]
   >(() => ["delivery"]),
   verifyFiles: vi.fn(),
-  peerHandoff: vi.fn<(task: BotTask) => { pending: boolean; outputFiles: readonly string[] }>(),
+  peerHandoff: vi.fn<(task: BotTask) => { owned?: boolean; pending: boolean; outputFiles: readonly string[]; files?: BotDeliveredFile[] }>(),
+  recordPeerDelivery: vi.fn(),
   hashFile: vi.fn<(root: string, path: string, signal: AbortSignal) => Promise<string>>(),
   returnFileTools: vi.fn<
     (
@@ -204,11 +222,22 @@ vi.mock("../agent/local-sandbox", () => ({
   }
 }))
 vi.mock("../agent/workflow/run-manager", () => ({
+  onWorkflowNotificationBroadcast: vi.fn(() => vi.fn()),
   workflowRunManager: {
+    activeRunReference: fixture.workflowReference,
+    getFlushFailedRun: fixture.workflowFlushFailed,
+    withThreadTransitionLease: fixture.workflowTransition,
+    recoverFlushFailedRun: fixture.recoverWorkflow,
+    markNotified: fixture.workflowMarked,
+    waitForRunLifecycle: fixture.workflowWait,
     cancel: fixture.cancelWorkflow,
     isActive: fixture.workflowActive,
     hasDeliverablePendingNotificationAsync: fixture.workflowPending
   }
+}))
+vi.mock("../agent/workflow/run-store", () => ({
+  loadWorkflowRunAsync: fixture.workflowSaved,
+  markWorkflowRunInterrupted: fixture.workflowInterrupted
 }))
 vi.mock("../mcp/capability-service", () => ({ getGlobalMcpCapabilityService: () => ({}) }))
 vi.mock("./mcp-scope", () => ({ createBotMcpScope: () => fixture.scope }))
@@ -251,6 +280,62 @@ const task: BotTask = {
   updatedAt: 1,
   origin: { kind: "user" }
 }
+
+it.each(["group", "dm"] as const)("initializes a new %s IM peer once and preserves its missing-history fence", (kind) => {
+  const db = new NativeSqliteAdapter(new DatabaseSync(":memory:"))
+  try {
+    let store = new BotStore(db)
+    const a = store.create({ name: "A", instructions: "", color: "#123456", modelRef: null })
+    const b = store.create({ name: "B", instructions: "", color: "#123456", modelRef: null })
+    const binding = store.imGateway.register("realm", "owner", {
+      id: "binding", botId: a.id, kind, label: "IM", state: "active", version: 1,
+      conversationKey: "convo", createdAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 900000).toISOString()
+    })
+    store.im.importImBinding({ id: binding.id, botId: a.id, kind, label: "IM", channelKey: "channel", version: 1 })
+    store.im.setOnline(a.id, binding.id, true)
+    const ingress = store.imGateway.receive("realm", "owner", {
+      route: { bindingId: "binding", botId: a.id, kind, label: "IM", version: 1, senderId: "member" },
+      event: {
+        schemaVersion: 1, eventId: "event", platformMessageId: "message", principalId: "owner",
+        conversationKey: "convo", conversationSeq: 1, message: { type: "text", text: "Delegate to B" },
+        occurredAt: new Date().toISOString(), redelivered: false,
+        lease: { id: "lease", expiresAt: new Date(Date.now() + 900000).toISOString() }
+      }
+    })
+    store.imGateway.settle(ingress.id, "active", undefined, Date.now() + 900000)
+    const accepted = store.im.inject({ simulation: true, bindingId: binding.id, eventId: ingress.id,
+      messageId: "message", senderId: "member", text: "Delegate to B", mentionsBotIds: [a.id] })
+    const parent = store.getTask(accepted.taskId!)
+    store.transition(parent.id, "running")
+    const child = store.delegate(parent.id, b.id, "Review privately", "handoff")
+    fixture.thread.mockReturnValue(undefined)
+    expect(store.im.execution(child)!.threadInitialized).toBe(false)
+    fixture.create.mockImplementationOnce(() => { throw new Error("native create failed") })
+    expect(() => prepareBotThread(b, child, undefined, store.im.execution(child))).toThrow("native create failed")
+    expect(store.im.execution(child)!.threadInitialized).toBe(false)
+    prepareBotThread(b, child, undefined, store.im.execution(child))
+    store.im.initialize(child.mockSource!, child)
+    expect(store.im.execution(child)!.threadInitialized).toBe(true)
+    const createdMetadata = fixture.create.mock.calls.at(-1)![1]
+    fixture.thread.mockReturnValue({ metadata: JSON.stringify(createdMetadata) })
+    expect(() => prepareBotThread(b, child, undefined, store.im.execution(child))).not.toThrow()
+    expect(fixture.create).toHaveBeenCalledTimes(2)
+    store.transition(child.id, "running")
+    store.settle(child.id, "completed", null, "review done")
+    const next = store.delegate(parent.id, b.id, "Continue review", "next-handoff")
+    expect(next.threadId).toBe(child.threadId)
+    store = new BotStore(db)
+    store.im.setOnline(a.id, binding.id, true)
+    expect(store.im.execution(next)!.threadInitialized).toBe(true)
+    fixture.thread.mockReturnValue(undefined)
+    expect(() => prepareBotThread(b, next, undefined, store.im.execution(next))).toThrow("工作会话记录缺失")
+    expect(fixture.create).toHaveBeenCalledTimes(2)
+  } finally {
+    db.close()
+  }
+})
+
 function port(
   linked?: BotWorkItem,
   mock?: BotMockExecution,
@@ -270,6 +355,11 @@ function port(
         getWork: () => linked,
         mockExecution: () => mock,
         initializeMockThread: () => {},
+        refreshWorkflows: fixture.refreshWorkflows,
+        acceptWorkflow: fixture.acceptWorkflow,
+    recordNotificationTerminal: fixture.recordNotificationTerminal,
+        workflowNotificationConsumed: fixture.workflowNotificationConsumed,
+        retireWorkflow: fixture.retireWorkflow,
         initializeWorkThread: () => {},
         onSteeringReady: fixture.steeringReady,
         commandLifecycle: fixture.commandLifecycle,
@@ -284,9 +374,11 @@ function port(
         publishGroupFiles: fixture.publishFiles,
         publishGroupMessage: fixture.publishMessage,
         groupMessages: fixture.groupMessages,
+        groupTaskDeliveries: fixture.groupTaskDeliveries,
         groupTaskRequest: fixture.groupTaskRequest,
         peers: fixture.peers,
         peerHandoff: fixture.peerHandoff,
+        recordPeerDelivery: fixture.recordPeerDelivery,
         recordGroupQuestion: fixture.recordQuestion,
         recordGroupQuestionResult: fixture.recordQuestionResult
       }) as unknown as LocalBotHost,
@@ -340,6 +432,20 @@ beforeEach(() => {
         : []
   }))
   fixture.hashFile.mockReset().mockResolvedValue("sent-hash")
+  fixture.workflowReference.mockReset()
+  fixture.acceptWorkflow.mockReset()
+  fixture.recordNotificationTerminal.mockReset()
+  fixture.workflowNotificationConsumed.mockReset().mockReturnValue(false)
+  fixture.retireWorkflow.mockReset()
+  fixture.refreshWorkflows.mockReset().mockResolvedValue(undefined)
+  fixture.recoverWorkflow.mockReset().mockResolvedValue(false)
+  fixture.workflowSaved.mockReset()
+  fixture.workflowInterrupted.mockReset()
+  fixture.workflowFlushFailed.mockReset()
+  fixture.workflowTransition.mockReset().mockImplementation(async (_thread, callback) => callback())
+  fixture.workflowMarked.mockReset().mockResolvedValue(true)
+  fixture.workflowWait.mockReset().mockResolvedValue(undefined)
+  fixture.cancelWorkflow.mockReset().mockReturnValue(false)
   fixture.workflowActive.mockReturnValue(false)
   fixture.workflowPending.mockResolvedValue(false)
   fixture.workerActive.mockReturnValue(false)
@@ -353,6 +459,9 @@ beforeEach(() => {
   fixture.continuationFiles.mockReset().mockReturnValue([])
   fixture.stoppedTasks.mockReset().mockReturnValue([])
   fixture.groupMessages.mockReset().mockReturnValue([])
+  fixture.groupTaskDeliveries.mockReset().mockImplementation((groupId, taskId, authorBotId) =>
+    fixture.groupMessages().filter(item => item.groupId === groupId && item.authorBotId === authorBotId &&
+      (item.id === `result-${taskId}` || item.id.startsWith(`files-${taskId}-`) || item.id.startsWith(`send-${taskId}-`))))
   fixture.groupTaskRequest.mockReset().mockReturnValue(null)
   fixture.peers.mockReset().mockReturnValue([])
   fixture.checkpointTuple
@@ -748,7 +857,11 @@ describe("Bot Runtime integration", () => {
     expect(updated.disableAgentsPrompt).toBeUndefined()
     expect(fixture.create).not.toHaveBeenCalled()
     const context = fixture.start.mock.calls[0][2]
-    expect(context.remotePolicy).toEqual({ disableScheduler: true })
+    expect(context.remotePolicy).toEqual({ disableScheduler: true, blockedToolNames: ["workflow"], sharedTaskContext: true })
+    const { buildPersonalIdentityPrompt } = await import("../agent/personal-context")
+    const readIdentity = vi.fn(() => ({ userName: "DESKTOP_OWNER" }))
+    expect(buildPersonalIdentityPrompt(context.remotePolicy, readIdentity)).toBe("")
+    expect(readIdentity).not.toHaveBeenCalled()
     expect(context.additionalTools).toContain("owned-browser")
     expect(context.extraSystemPrompt).not.toContain("No files, shell")
     expect(
@@ -823,7 +936,7 @@ describe("Bot Runtime integration", () => {
       ]
     })
     expect(fixture.imOpening).not.toHaveBeenCalled()
-    expect(context.remotePolicy).toEqual({ disableScheduler: true })
+    expect(context.remotePolicy).toEqual({ disableScheduler: true, blockedToolNames: ["workflow"] })
     expect(context.additionalTools).toEqual([
       "works",
       "scoped-memory",
@@ -850,7 +963,7 @@ describe("Bot Runtime integration", () => {
         .execute(new AbortController().signal, vi.fn())
     ).resolves.toMatchObject({ state: "completed" })
     const desktop = fixture.start.mock.calls[1][2]
-    expect(desktop.remotePolicy).toEqual({ disableScheduler: true })
+    expect(desktop.remotePolicy).toEqual({ disableScheduler: true, blockedToolNames: ["workflow"] })
     expect(fixture.memorySnapshot).toHaveBeenCalled()
     expect(fixture.browserTools).toHaveBeenCalled()
   })
@@ -894,7 +1007,7 @@ describe("Bot Runtime integration", () => {
     try {
       await lease.execute(new AbortController().signal, vi.fn())
       const context = fixture.start.mock.calls[0][2]
-      expect(context.remotePolicy).toEqual({ disableScheduler: true })
+      expect(context.remotePolicy).toEqual({ disableScheduler: true, blockedToolNames: ["workflow"] })
       expect(context.additionalTools).toContain("owned-browser")
       expect(botInteractionRoutes.get(task.threadId)).toMatchObject({
         conversationKey: "bot-dm",
@@ -973,7 +1086,7 @@ describe("Bot Runtime integration", () => {
       "routine",
       "owned-browser"
     ])
-    expect(remote.remotePolicy).toEqual({ disableScheduler: true })
+    expect(remote.remotePolicy).toEqual({ disableScheduler: true, blockedToolNames: ["workflow"] })
     expect(fixture.browserTools.mock.calls[0][4]).toBe(`work-${work.id}--${bot.id}`)
     expect(
       remote.verifyResolvedThread({ metadata: nativeMetadata, workspacePath: work.workspace!.path })
@@ -1477,6 +1590,147 @@ describe("Bot Runtime integration", () => {
   })
 
   it.each([
+    ["peer", false], ["caller", false], ["peer", true], ["caller", true]
+  ] as const)("checks %s public delivery beyond the room preview without accepting a changed version (%s)", async (author, changed) => {
+    const db = new NativeSqliteAdapter(new DatabaseSync(":memory:"))
+    try {
+      const store = new BotStore(db)
+      const a = store.create({ name: "A", instructions: "", color: "#123456", modelRef: null })
+      const b = store.create({ name: "B", instructions: "", color: "#123456", modelRef: null })
+      const group = store.saveGroup({ name: "Retained delivery", memberIds: [a.id, b.id] })
+      store.sendGroup({ groupId: group.id, requestId: "original", text: "A delegate the report to B", targetBotIds: [a.id] })
+      const root = store.recentTasks().find(item => item.botId === a.id)!
+      store.transition(root.id, "running")
+      const peer = store.delegate(root.id, b.id, "Produce and deliver report.md", "handoff", ["report.md"])
+      store.transition(peer.id, "running")
+      const workspace = `/synthetic/workspaces/group-${group.id}`
+      const file = { filePath: `${workspace}/report.md`, name: "report.md", size: 7,
+        attachmentPath: `${workspace}/.bot-deliveries/sent/report.md` }
+      store.publishGroupFiles(author === "peer" ? peer.id : root.id, "published", [file])
+      store.settle(root.id, "completed", null, "Delegated", undefined, true)
+      const returned = { ...file, attachmentPath: `${workspace}/.bot-deliveries/returned/report.md` }
+      store.settle(peer.id, "completed", null, "Result", [returned], true)
+      store.flushReplies()
+      const callback = store.recentTasks().find(item => item.requestId === `reply-${peer.id}`)!
+      for (let i = 0; i < 50; i++)
+        store.sendGroup({ groupId: group.id, requestId: `later-${i}`, text: `Later activity ${i}`, targetBotIds: [b.id] })
+      expect(store.groupMessages(group.id).some(item => item.files?.length)).toBe(false)
+      const deliveredTask = author === "peer" ? peer : root
+      expect(store.groupTaskDeliveries(group.id, deliveredTask.id, deliveredTask.botId)).toHaveLength(1)
+      expect(store.groupTaskDeliveries(group.id, deliveredTask.id, author === "peer" ? a.id : b.id)).toEqual([])
+      expect(store.groupTaskDeliveries(group.id, `${deliveredTask.id}-other`, deliveredTask.botId)).toEqual([])
+      const otherGroup = store.saveGroup({ name: "Other room", memberIds: [a.id, b.id] })
+      expect(store.groupTaskDeliveries(otherGroup.id, deliveredTask.id, deliveredTask.botId)).toEqual([])
+      fixture.thread.mockReturnValue({ metadata: JSON.stringify({ ...metadata(group.id), botId: a.id }) })
+      fixture.groupMessages.mockImplementation(() => store.groupMessages(group.id))
+      fixture.groupTaskDeliveries.mockImplementation((...args) => store.groupTaskDeliveries(...args))
+      fixture.groupTaskRequest.mockImplementation(() => store.groupTaskRequest(callback.id))
+      fixture.hashFile.mockImplementation(async (_root, path) => changed && path.includes("/returned/") ? "new-bytes" : "sent-bytes")
+      const lease = port().acquire(a, callback)!
+      try {
+        await lease.execute(new AbortController().signal, vi.fn())
+        const [request, , context] = fixture.start.mock.calls[0]
+        expect(request.message).toContain(`public delivery for this exact peer result: ${!changed}`)
+        const reminder = context.checkFinalDelivery!([new HumanMessage("Peer result"), new AIMessage("(pass)")])
+        if (changed) expect(reminder).toContain("bot_send_message")
+        else expect(reminder).toBeUndefined()
+      } finally { lease.release() }
+    } finally { db.close() }
+  })
+
+  it.each([
+    ["workflow", "same"], ["workflow", "changed"], ["workflow", "text"],
+    ["nested", "same"], ["nested", "changed"],
+    ["intermediate", "same"], ["intermediate", "changed"],
+    ["sibling", "same"]
+  ] as const)("keeps %s handoff attachment evidence scoped to its returned version (%s)", async (route, version) => {
+    const { LocalBotHost } = await import("./host")
+    const { mkdtemp, writeFile, rm } = await import("node:fs/promises")
+    const { tmpdir } = await import("node:os")
+    const { join } = await import("node:path")
+    const actual = await vi.importActual<typeof import("./file-copy")>("./file-copy")
+    const workspace = await mkdtemp(join(tmpdir(), "cmb-delivery-owner-"))
+    const db = new NativeSqliteAdapter(new DatabaseSync(":memory:"))
+    try {
+      const store = new BotStore(db)
+      const host = new LocalBotHost(store, { onAvailable: () => () => {}, acquire: () => null })
+      const make = (name: string) => store.create({ name, instructions: "", color: "#123456", modelRef: null })
+      const a = make("A"), b = make("B"), c = make("C")
+      const group = store.saveGroup({ name: "Report", memberIds: [a.id, b.id, c.id] })
+      store.sendGroup({ groupId: group.id, requestId: "original", text: "Deliver and verify report", targetBotIds: [a.id] })
+      const root = store.recentTasks().find(t => t.botId === a.id)!
+      store.transition(root.id, "running")
+      const peer = store.delegate(root.id, b.id, "Deliver and verify report", "peer")
+      const filePath = join(workspace, "report.md")
+      await writeFile(filePath, "report!")
+      const file = { filePath, name: "report.md", ...await actual.snapshotBotDeliveryFile(workspace, filePath, new AbortController().signal) }
+      const publish = (id: string) => {
+        store.publishGroupFiles(id, "published", [file])
+        store.recordPeerDelivery(id, [file])
+      }
+      let returning = peer
+      if (route === "sibling") {
+        const sibling = store.delegate(root.id, b.id, "Separate report", "sibling")
+        store.transition(sibling.id, "running")
+        publish(sibling.id)
+        store.settle(sibling.id, "completed", null, "Published", [file], true)
+      }
+      store.transition(peer.id, "running")
+      if (route !== "intermediate" && route !== "sibling") publish(peer.id)
+      store.settle(root.id, "completed", null, "Delegated", undefined, true)
+      if (route === "workflow") {
+        const run = { threadId: peer.threadId, workspacePath: workspace, runId: "verify", startedAt: "2026-10-31T12:00:00.000Z" }
+        store.acceptWorkflow(peer.id, run)
+        store.settle(peer.id, "completed", null, "Verification started", [file], true)
+        returning = host.enqueueNotification(b.id, peer.threadId, "workflow", run.runId, "Verified", group.id, run.startedAt)!
+        store.transition(returning.id, "running")
+      } else if (route === "nested" || route === "intermediate") {
+        const first = store.delegate(peer.id, c.id, "First verification", "first")
+        const second = route === "intermediate" ? store.delegate(peer.id, c.id, "Second verification", "second") : undefined
+        store.transition(first.id, "running")
+        store.settle(peer.id, "completed", null, "Waiting for verification", route === "nested" ? [file] : undefined, true)
+        store.settle(first.id, "completed", null, "Verified", undefined, true)
+        store.flushReplies()
+        returning = store.recentTasks().find(t => t.requestId === `reply-${first.id}`)!
+        store.transition(returning.id, "running")
+        if (second) {
+          publish(returning.id)
+          store.settle(returning.id, "completed", null, "Published; waiting for second verification", [file], true)
+          store.transition(second.id, "running")
+          store.settle(second.id, "completed", null, "Verified", undefined, true)
+          store.flushReplies()
+          returning = store.recentTasks().find(t => t.requestId === `reply-${second.id}`)!
+          store.transition(returning.id, "running")
+        }
+      }
+      if (version === "changed") await writeFile(filePath, "edited!")
+      const returned = version === "changed" ? { filePath, name: "report.md", size: 7 } : file
+      store.settle(returning.id, "completed", null, "Final result", version === "text" ? undefined : [returned], true)
+      store.flushReplies()
+      const callback = store.recentTasks().find(t => t.requestId === `reply-${returning.id}`)!
+      fixture.thread.mockReturnValue({ metadata: JSON.stringify({ ...metadata(group.id), botId: a.id, workspacePath: workspace }) })
+      fixture.directory.mockReturnValue(workspace)
+      fixture.groupMessages.mockImplementation(() => store.groupMessages(group.id))
+      fixture.groupTaskDeliveries.mockImplementation((...args) => store.groupTaskDeliveries(...args))
+      fixture.groupTaskRequest.mockImplementation(() => store.groupTaskRequest(callback.id))
+      fixture.hashFile.mockImplementation(actual.hashBotFile)
+      const lease = port().acquire(a, callback)!
+      try {
+        await lease.execute(new AbortController().signal, vi.fn())
+        const [request, , context] = fixture.start.mock.calls[0]
+        const posted = version === "same" && route !== "sibling"
+        expect(request.message).toContain(`public delivery for this exact peer result: ${posted}`)
+        const reminder = context.checkFinalDelivery!([new HumanMessage("Peer result"), new AIMessage("(pass)")])
+        if (posted || version === "text") expect(reminder).toBeUndefined()
+        else expect(reminder).toContain("bot_send_message")
+      } finally { lease.release() }
+    } finally {
+      db.close()
+      await rm(workspace, { recursive: true, force: true })
+    }
+  })
+
+  it.each([
     "unchanged",
     "equal-size edit",
     "missing snapshot",
@@ -1548,7 +1802,7 @@ describe("Bot Runtime integration", () => {
       expect(fixture.hashFile).toHaveBeenCalledWith(
         "/synthetic/workspaces/group-g",
         file.filePath,
-        signal
+        context.signal
       )
       expect(
         fixture.hashFile.mock.calls.every(([root]) => root === "/synthetic/workspaces/group-g")
@@ -1797,6 +2051,7 @@ describe("Bot Runtime integration", () => {
     expect(result).toEqual({
       state: "completed",
       result: "Private reasoning and internal summary",
+      publicContribution: true,
       explicitGroupMessages: true
     })
     expect(fixture.start.mock.calls[0][2].additionalTools).toContain("collaboration")
@@ -2455,7 +2710,7 @@ describe("Bot Runtime integration", () => {
     expect(fixture.verifyFiles).toHaveBeenCalledWith(
       "/synthetic/workspaces/a",
       ["report.md"],
-      signal
+      fixture.start.mock.calls[0][2].signal
     )
     expect(result).toMatchObject({ state: "completed", files })
     fixture.verifyFiles.mockRejectedValueOnce(new Error("Required output missing"))
@@ -3029,14 +3284,19 @@ describe("Bot Runtime integration", () => {
     expect(JSON.parse(fixture.update.mock.calls.at(-1)![1].metadata).model).toBe("test-model")
   })
   it.each([undefined, "normal", "workflow", "coordinator"])(
-    "offers background workflows without changing persisted mode (%s)",
+    "blocks new workflows without disabling subagents or changing persisted mode (%s)",
     async (mode) => {
       fixture.thread.mockReturnValue({
         metadata: JSON.stringify({ ...metadata(), agentMode: mode })
       })
       await port().acquire(bot, task)!.execute(new AbortController().signal, vi.fn())
       const context = fixture.start.mock.calls[0][2]
-      expect(context.workflowEnabled).toBe(mode !== "coordinator")
+      expect(context.workflowEnabled).toBeUndefined()
+      expect(context.remotePolicy.blockedToolNames).toEqual(["workflow"])
+      expect(context.remotePolicy.disableSubagents).toBeUndefined()
+      expect(context.remotePolicy.allowedToolNames).toBeUndefined()
+      expect(context.additionalTools).toContain("collaboration")
+      expect(context.backgroundCommandLifecycle).toHaveProperty("settled")
       expect(context.workflowInternalNotification).toBe(false)
       expect(JSON.parse(fixture.update.mock.calls.at(-1)![1].metadata).agentMode).toBe(mode)
     }
@@ -3052,6 +3312,7 @@ describe("Bot Runtime integration", () => {
       expect(fixture.start.mock.calls.at(-1)![2].workflowInternalNotification).toBe(
         origin.kind === "notification"
       )
+      expect(fixture.start.mock.calls.at(-1)![2].remotePolicy.blockedToolNames).toEqual(["workflow"])
     }
   })
   it("does not invent a model when no configured model is available", () => {
@@ -3619,6 +3880,24 @@ describe("Bot Runtime integration", () => {
     fixture.hasNotifications.mockReturnValue(false)
     fixture.workflowPending.mockResolvedValue(true)
     expect(await runtime.hasPendingWork!(["t"])).toBe(true)
+  })
+  it("allows only completed coordinator notifications to return to a preserved conversation during Bot deletion", async () => {
+    const runtime = port()
+    const options = { allowPendingCoordinatorNotifications: true }
+    fixture.hasNotifications.mockReturnValue(true)
+    expect(await runtime.hasPendingWork!(["t"])).toBe(true)
+    expect(await runtime.hasPendingWork!(["t"], options)).toBe(false)
+    fixture.workerActive.mockReturnValue(true)
+    expect(await runtime.hasPendingWork!(["t"], options)).toBe(true)
+    fixture.workerActive.mockReturnValue(false)
+    fixture.workerPersisting.mockReturnValue(true)
+    expect(await runtime.hasPendingWork!(["t"], options)).toBe(true)
+    fixture.workerPersisting.mockReturnValue(false)
+    fixture.workflowActive.mockReturnValue(true)
+    expect(await runtime.hasPendingWork!(["t"], options)).toBe(true)
+    fixture.workflowActive.mockReturnValue(false)
+    fixture.workflowPending.mockResolvedValue(true)
+    expect(await runtime.hasPendingWork!(["t"], options)).toBe(true)
   })
   it("reuses the configured execution mode and scoped tools, then summarizes only a successful user turn", async () => {
     const runtime = port(),
@@ -4493,7 +4772,7 @@ describe("Bot steering uses the original runtime", () => {
         expect(fixture.verifyFiles).toHaveBeenCalledWith(
           "/synthetic/workspaces/a",
           [files[0].filePath],
-          signal
+          fixture.start.mock.calls.at(-1)![2].signal
         )
       else expect(fixture.verifyFiles).not.toHaveBeenCalled()
       expect(fixture.summary).not.toHaveBeenCalled()
@@ -4776,4 +5055,791 @@ describe("private Bot selected identity context", () => {
     expect(injected.content.endsWith("<skill>original</skill>")).toBe(true)
     expect(fixture.announce).not.toHaveBeenCalled()
   })
+})
+
+it.each(["completed", "failed"] as const)(
+  "notifies direct group %s and retains private user notifications",
+  (state) => {
+    const runtime = port()
+    runtime.onSettled!(
+      { ...task, origin: { kind: "group", groupId: "g", messageId: "u" } },
+      state,
+      "result"
+    )
+    expect(fixture.notify).toHaveBeenCalledTimes(1)
+    runtime.onSettled!(task, state, "result")
+    expect(fixture.notify).toHaveBeenCalledTimes(2)
+  }
+)
+it("retains an explicitly delivered snapshot after declared-output verification", async () => {
+  const original = { filePath: "/synthetic/workspaces/a/report.md", name: "report.md", size: 40 }
+  const snapshot = { ...original, attachmentPath: "/immutable/sent-report.md" }
+  fixture.verifyFiles.mockResolvedValue([original])
+  fixture.start.mockImplementation(
+    async (_request, _delivery, context: AgentRunExecutionContext) => {
+      fixture.deliveryTools.mock.calls.at(-1)![2]!([snapshot], "delivered")
+      context.onFinalAssistant?.({ messageId: "reply", finalText: "Delivered" })
+      context.onRunTerminated?.({ outcome: "success", code: "done" })
+      return { completion: Promise.resolve() }
+    }
+  )
+  const peerTask: BotTask = {
+    ...task,
+    origin: {
+      kind: "bot",
+      fromBotId: "b",
+      rootTaskId: "root",
+      depth: 1,
+      expectsReply: true,
+      outputFiles: ["report.md"]
+    }
+  }
+  const result = await port().acquire(bot, peerTask)!.execute(new AbortController().signal, vi.fn())
+  expect(result).toMatchObject({ state: "completed", files: [snapshot] })
+  expect(result.files![0].attachmentPath).toBe(snapshot.attachmentPath)
+})
+it("keeps optional discussion and passing group turns silent but reports group failures", () => {
+  const runtime = port()
+  runtime.onSettled!(
+    { ...task, origin: { kind: "discussion", groupId: "g", messageId: "u", round: 1 } },
+    "completed",
+    "New discussion"
+  )
+  runtime.onSettled!(
+    { ...task, origin: { kind: "group", groupId: "g", messageId: "u" } },
+    "completed",
+    "(pass)"
+  )
+  expect(fixture.notify).not.toHaveBeenCalled()
+  runtime.onSettled!(
+    { ...task, origin: { kind: "group", groupId: "g", messageId: "u" } },
+    "failed",
+    "(pass)"
+  )
+  expect(fixture.notify).toHaveBeenCalledOnce()
+})
+it("resumes a peer with the retained snapshot rather than its mutable original", async () => {
+  const snapshot = {
+    filePath: "/synthetic/workspaces/a/report.md",
+    name: "report.md",
+    size: 40,
+    attachmentPath: "/synthetic/workspaces/a/.bot-deliveries/hash/report.md"
+  }
+  fixture.groupCheckpoint.mockReturnValue("saved")
+  fixture.continuationFiles.mockReturnValue([snapshot])
+  fixture.verifyFiles.mockResolvedValue([
+    { ...snapshot, filePath: snapshot.attachmentPath, attachmentPath: undefined }
+  ])
+  const peerTask: BotTask = {
+    ...task,
+    origin: { kind: "bot", fromBotId: "b", rootTaskId: "root", depth: 1, expectsReply: true }
+  }
+  const result = await port().acquire(bot, peerTask)!.execute(new AbortController().signal, vi.fn())
+  expect(fixture.verifyFiles).toHaveBeenCalledWith(
+    "/synthetic/workspaces/a",
+    [snapshot.attachmentPath],
+    expect.any(AbortSignal)
+  )
+  expect(result).toMatchObject({ state: "completed", files: [snapshot] })
+})
+it("notifies an actual group attachment delivery even when private scratch ends with pass", async () => {
+  const groupTask: BotTask = {
+    ...task,
+    threadId: "group-g-a",
+    origin: { kind: "group", groupId: "g", messageId: "u" }
+  }
+  fixture.thread.mockReturnValue({ metadata: JSON.stringify(metadata("g")) })
+  fixture.start.mockImplementation(
+    async (_request, _delivery, context: AgentRunExecutionContext) => {
+      fixture.deliveryTools.mock.calls.at(-1)![2]!(
+        [{ filePath: "/synthetic/workspaces/group-g/report.md", name: "report.md", size: 40 }],
+        "public-file"
+      )
+      context.onFinalAssistant?.({ messageId: "reply", finalText: "(pass)" })
+      expect(context.shouldRaiseCompletionAttention?.()).toBe(true)
+      context.onRunTerminated?.({ outcome: "success", code: "done" })
+      return { completion: Promise.resolve() }
+    }
+  )
+  const runtime = port()
+  const result = await runtime
+    .acquire(bot, groupTask)!
+    .execute(new AbortController().signal, vi.fn())
+  expect(result.state).toBe("completed")
+  if (result.state === "deferred") throw new Error("Unexpected deferred")
+  runtime.onSettled!(
+    groupTask,
+    result.state,
+    result.result,
+    result.files,
+    result.publicContribution
+  )
+  expect(fixture.publishFiles).toHaveBeenCalled()
+  expect(fixture.notify).toHaveBeenCalledOnce()
+})
+it.each(
+  (["direct", "checkpoint", "peer-result", "peer-result-checkpoint"] as const)
+    .flatMap(mode => (["replace", "remove", "remove-snapshot"] as const).map(change => ({ mode, change })))
+)(
+  "preserves delivered version and validates its snapshot ($mode, $change)",
+  async ({ mode, change }) => {
+    const { mkdtemp, writeFile, readFile, rm, realpath } = await import("node:fs/promises")
+    const { tmpdir } = await import("node:os")
+    const { join } = await import("node:path")
+    const actual = await vi.importActual<typeof import("./tools")>("./tools")
+    const { snapshotBotDeliveryFile } =
+      await vi.importActual<typeof import("./file-copy")>("./file-copy")
+    const directory = await realpath(await mkdtemp(join(tmpdir(), "bot-snapshot-regression-")))
+    try {
+      const path = join(directory, "report.md")
+      const signal = new AbortController().signal
+      await writeFile(path, "OLD CHECKPOINT VERSION")
+      const oldSnapshot = { filePath: path, name: "report.md",
+        ...(await snapshotBotDeliveryFile(directory, path, signal)) }
+      await writeFile(path, "SENT VERSION")
+      const snapshot = {
+        filePath: path,
+        name: "report.md",
+        ...(await snapshotBotDeliveryFile(directory, path, signal))
+      }
+      fixture.directory.mockReturnValue(directory)
+      fixture.thread.mockReturnValue({
+        metadata: JSON.stringify({ ...metadata(), workspacePath: directory })
+      })
+      fixture.verifyFiles.mockImplementation(actual.verifyBotDeliveryFiles)
+      if (mode === "checkpoint") {
+        fixture.groupCheckpoint.mockReturnValue("saved")
+        fixture.continuationFiles.mockReturnValue([snapshot])
+      } else if (mode.startsWith("peer-result")) {
+        fixture.peerHandoff.mockReturnValue({ pending: false, outputFiles: ["report.md"], files: [snapshot] })
+        if (mode === "peer-result-checkpoint") {
+          fixture.groupCheckpoint.mockReturnValue("saved")
+          fixture.continuationFiles.mockReturnValue([oldSnapshot])
+        }
+      }
+      fixture.start.mockImplementation(
+        async (_request, _delivery, context: AgentRunExecutionContext) => {
+          if (mode === "direct") fixture.deliveryTools.mock.calls.at(-1)![2]!([snapshot], "delivered")
+          if (change === "replace") await writeFile(path, "NEXT VERSION IS DIFFERENT")
+          else await rm(change === "remove" ? path : snapshot.attachmentPath)
+          context.onFinalAssistant?.({ messageId: "reply", finalText: "Delivered" })
+          context.onRunTerminated?.({ outcome: "success", code: "done" })
+          return { completion: Promise.resolve() }
+        }
+      )
+      const peerTask: BotTask = {
+        ...task,
+        origin: {
+          kind: "bot",
+          fromBotId: "b",
+          rootTaskId: "root",
+          depth: 1,
+          expectsReply: true,
+          outputFiles: ["report.md"]
+        }
+      }
+      const execution = port().acquire(bot, peerTask)!.execute(signal, vi.fn())
+      if (change === "remove-snapshot") {
+        await expect(execution).rejects.toThrow("ENOENT")
+      } else {
+        const result = await execution
+        expect(result).toMatchObject({ state: "completed", files: [snapshot] })
+        expect(await readFile(result.files![0].attachmentPath!, "utf8")).toBe("SENT VERSION")
+        if (change === "replace") expect(await readFile(path, "utf8")).toBe("NEXT VERSION IS DIFFERENT")
+        else await expect(readFile(path)).rejects.toThrow("ENOENT")
+      }
+    } finally {
+      await rm(directory, { recursive: true, force: true })
+    }
+  }
+)
+
+it.each(["", "(pass)"])("keeps a normal silent group turn %j silent through settlement", async (silent) => {
+  fixture.thread.mockReturnValue({ metadata: JSON.stringify(metadata("g")) })
+  fixture.start.mockImplementationOnce(async (_request, _delivery, context) => {
+    expect(context.checkFinalDelivery!([
+      new HumanMessage("Only the other member has work"),
+      new AIMessage({ content: silent, response_metadata: { finish_reason: "stop" } })
+    ])).toBeUndefined()
+    context.onFinalAssistant?.({ messageId: "quiet", finalText: silent })
+    expect(context.shouldRaiseCompletionAttention?.()).toBe(false)
+    context.onRunTerminated?.({ outcome: "success", code: "done" })
+    return { completion: Promise.resolve() }
+  })
+  const groupTask: BotTask = {
+    ...task, threadId: "group-g-a",
+    origin: { kind: "group", groupId: "g", messageId: "current" }
+  }
+  const runtime = port()
+  const result = await runtime.acquire(bot, groupTask)!.execute(new AbortController().signal, vi.fn())
+  expect(result.state).toBe("completed")
+  if (result.state !== "completed") throw new Error("Expected completed turn")
+  runtime.onSettled!(groupTask, result.state, result.result, result.files, result.publicContribution)
+  expect(fixture.publishMessage).not.toHaveBeenCalled()
+  expect(fixture.notify).not.toHaveBeenCalled()
+})
+
+
+describe("Bot detached workflow ownership", () => {
+  const ref = { threadId: task.threadId, workspacePath: "/synthetic/workspaces/a", runId: "wf-owned", startedAt: "2026-10-31T00:00:00.001Z" }
+  const owned = { ...ref, sourceTaskId: task.id, suppressed: true }
+
+  it("registers the exact launch in the existing callback before its foreground turn ends", async () => {
+    fixture.workflowReference.mockReturnValue(ref)
+    fixture.start.mockImplementationOnce(async (_request, _delivery, context) => {
+      context.onDetachedResultAvailable?.({ kind: "workflow", threadId: ref.threadId, runId: ref.runId })
+      expect(fixture.acceptWorkflow).toHaveBeenCalledExactlyOnceWith(task.id, ref)
+      expect(context.signal.aborted).toBe(false)
+      context.onRunTerminated?.({ outcome: "success", code: "done" })
+      return { completion: Promise.resolve() }
+    })
+    const lease = port().acquire(bot, task)!
+    expect((await lease.execute(new AbortController().signal, vi.fn())).state).toBe("completed")
+    expect(fixture.cancelWorkflow).not.toHaveBeenCalled()
+    await vi.waitFor(() => expect(fixture.refreshWorkflows).toHaveBeenCalledWith(ref.threadId))
+    lease.release()
+  })
+
+  it("cancels an unrecordable launch synchronously and reports failure despite best-effort observers", async () => {
+    fixture.workflowReference.mockReturnValue(ref)
+    fixture.acceptWorkflow.mockImplementationOnce(() => { throw new Error("ownership storage failed") })
+    fixture.start.mockImplementationOnce(async (_request, _delivery, context) => {
+      context.onDetachedResultAvailable?.({ kind: "workflow", threadId: ref.threadId, runId: ref.runId })
+      expect(fixture.cancelWorkflow).toHaveBeenCalledExactlyOnceWith(ref.threadId, ref.runId)
+      expect(context.signal.aborted).toBe(true)
+      expect(context.shouldRaiseCompletionAttention?.()).toBe(false)
+      context.onRunTerminated?.({ outcome: "success", code: "done" })
+      return { completion: Promise.resolve() }
+    })
+    const lease = port().acquire(bot, task)!
+    await expect(lease.execute(new AbortController().signal, vi.fn())).rejects.toThrow("ownership storage failed")
+    lease.release()
+  })
+
+  it("aborts every matching instance before waiting for the first cleanup, without stopping a newer same-ID run", async () => {
+    const refs = [owned, { ...owned, threadId: "peer-c", runId: "wf-c" }, { ...owned, threadId: "peer-new" }]
+    const current = new Map(refs.map((run) => [run.threadId, run]))
+    current.set("peer-new", { ...refs[2], startedAt: "2026-10-31T00:01:00.001Z" })
+    fixture.workflowReference.mockImplementation((threadId) => current.get(threadId))
+    fixture.cancelWorkflow.mockReturnValue(true)
+    let finish!: () => void
+    fixture.workflowWait.mockImplementationOnce(() => new Promise<void>((resolve) => { finish = resolve }))
+    const pending = port().cancelWorkflowInstances!(refs)
+    expect(fixture.cancelWorkflow.mock.calls).toEqual([[ref.threadId, ref.runId], ["peer-c", "wf-c"]])
+    expect(fixture.workflowWait).toHaveBeenCalledTimes(2)
+    finish()
+    await pending
+    expect(fixture.recoverWorkflow).toHaveBeenCalledWith(ref.workspacePath, "peer-new", ref.runId, ref.startedAt)
+    expect(fixture.workflowMarked).toHaveBeenCalledWith(ref.workspacePath, "peer-new", ref.runId, ref.startedAt)
+  })
+
+  it("acknowledges suppressed flush-failed results through the manager without treating its kick flag as durable completion", async () => {
+    fixture.recoverWorkflow.mockResolvedValue(true)
+    fixture.workflowFlushFailed.mockReturnValue({ ...ref, status: "completed" })
+    fixture.workflowMarked.mockResolvedValue(false)
+    fixture.workflowSaved.mockResolvedValue({ ...ref, status: "running", notificationDelivered: false })
+    const runtime = port()
+    await runtime.reconcileWorkflows!([owned])
+    expect(fixture.recoverWorkflow).toHaveBeenCalledExactlyOnceWith(ref.workspacePath, ref.threadId, ref.runId, ref.startedAt)
+    expect(fixture.retireWorkflow).not.toHaveBeenCalled()
+    fixture.workflowMarked.mockResolvedValue(true)
+    await runtime.reconcileWorkflows!([owned])
+    expect(fixture.retireWorkflow).toHaveBeenCalledWith(owned)
+  })
+
+  it.each([false, true])("recovers an orphan running instance after restart (suppressed=%s)", async (suppressed) => {
+    const running = { ...ref, status: "running", notificationDelivered: false }
+    fixture.workflowSaved.mockResolvedValue(running)
+    fixture.workflowInterrupted.mockImplementation(async () => {
+      const recovered = { ...running, status: "aborted", notificationDelivered: true }
+      fixture.workflowSaved.mockResolvedValue(recovered)
+      return recovered
+    })
+    await port().reconcileWorkflows!([{ ...owned, suppressed }])
+    expect(fixture.workflowTransition).toHaveBeenCalled()
+    expect(fixture.workflowInterrupted).toHaveBeenCalledExactlyOnceWith(ref.workspacePath, ref.threadId, ref.runId)
+    expect(fixture.retireWorkflow).toHaveBeenCalledWith({ ...owned, suppressed })
+    expect(fixture.cancelWorkflow).not.toHaveBeenCalled()
+  })
+
+  it("does not interrupt a resumed instance or overwrite a flush-failed terminal snapshot", async () => {
+    const running = { ...ref, status: "running", notificationDelivered: false }
+    fixture.workflowSaved.mockResolvedValue(running)
+    fixture.workflowTransition.mockImplementationOnce(async (_thread, callback) => {
+      fixture.workflowReference.mockReturnValue({ ...ref, startedAt: "new-instance" })
+      return callback()
+    })
+    await port().reconcileWorkflows!([{ ...owned, suppressed: false }])
+    expect(fixture.workflowInterrupted).not.toHaveBeenCalled()
+    fixture.workflowReference.mockReset()
+    fixture.workflowFlushFailed.mockReturnValue({ ...ref, status: "completed" })
+    await port().reconcileWorkflows!([{ ...owned, suppressed: false }])
+    expect(fixture.workflowInterrupted).not.toHaveBeenCalled()
+    expect(fixture.retireWorkflow).not.toHaveBeenCalled()
+  })
+
+  it("keeps a normally completed result pending until its durable delivery acknowledgement", async () => {
+    const pending = { ...owned, suppressed: false }
+    fixture.workflowSaved.mockResolvedValue({ ...ref, status: "completed", notificationDelivered: false })
+    const runtime = port()
+    await runtime.reconcileWorkflows!([pending])
+    expect(fixture.retireWorkflow).not.toHaveBeenCalled()
+    expect(fixture.recoverWorkflow).not.toHaveBeenCalled()
+    expect(fixture.cancelWorkflow).not.toHaveBeenCalled()
+    fixture.workflowSaved.mockResolvedValue({ ...ref, status: "completed", notificationDelivered: true })
+    await runtime.reconcileWorkflows!([pending])
+    expect(fixture.retireWorkflow).toHaveBeenCalledWith(pending)
+  })
+})
+
+it("propagates the original Bot cancellation into its workflow-aware execution signal", async () => {
+  const parent = new AbortController()
+  fixture.start.mockImplementationOnce(async (_request, _delivery, context) => {
+    expect(context.signal.aborted).toBe(false)
+    parent.abort(new Error("User stop"))
+    expect(context.signal.aborted).toBe(true)
+    expect(context.signal.reason).toBe(parent.signal.reason)
+    return { completion: Promise.reject(context.signal.reason) }
+  })
+  await expect(port().acquire(bot, task)!.execute(parent.signal, vi.fn())).rejects.toThrow("User stop")
+})
+
+it.each([false, true])("retains notification terminal classification, with cancellation precedence=%s", async (cancelled) => {
+  fixture.recordNotificationTerminal.mockClear()
+  fixture.start.mockImplementation(async (_request, _delivery, context: AgentRunExecutionContext) => {
+    if (cancelled) context.onRunCancelled?.()
+    context.onRunTerminated?.({ outcome: "error", code: "provider_error" })
+    return { completion: Promise.resolve() }
+  })
+  const notification: BotTask = { ...task, origin: { kind: "notification", notificationKind: "workflow", key: "wf", runStartedAt: "2026-10-31T01:00:00.000Z" } }
+  const lease = port().acquire(bot, notification)!
+  await lease.execute(new AbortController().signal, vi.fn())
+  const expected = { outcome: "error", code: cancelled ? "cancelled" : "provider_error" }
+  expect(lease.notificationTerminal!()).toEqual(expected)
+  expect(fixture.recordNotificationTerminal).toHaveBeenLastCalledWith(task.id, expected)
+})
+
+it.each([false, true])("retains the coordinator input-commit boundary on provider failure: %s", async (delivered) => {
+  fixture.recordNotificationTerminal.mockClear()
+  fixture.hasNotifications.mockReturnValue(true)
+  const terminal = { outcome: "error" as const, code: "provider_error" as const, coordinatorNotificationDelivered: delivered }
+  fixture.start.mockImplementation(async (_request, _delivery, context: AgentRunExecutionContext) => {
+    context.onRunTerminated?.(terminal)
+    return { completion: Promise.resolve() }
+  })
+  const notification: BotTask = { ...task, origin: { kind: "notification", notificationKind: "coordinator", key: "queue" } }
+  const lease = port().acquire(bot, notification)!
+  await lease.execute(new AbortController().signal, vi.fn())
+  expect(lease.notificationTerminal!()).toEqual(terminal)
+  expect(fixture.recordNotificationTerminal).toHaveBeenLastCalledWith(task.id, terminal)
+})
+
+it("queries existing Team runtime states synchronously for archive without changing execution", () => {
+  const runtime = port()
+  fixture.hasNotifications.mockReturnValue(false)
+  expect(runtime.hasPendingCoordinator!(["team"])).toBe(false)
+  for (const check of [fixture.workerActive, fixture.workerPersisting, fixture.hasNotifications]) {
+    check.mockImplementation((id: string) => id === "team")
+    expect(runtime.hasPendingCoordinator!(["other"])).toBe(false)
+    expect(runtime.hasPendingCoordinator!(["other", "team"])).toBe(true)
+    check.mockReturnValue(false)
+  }
+})
+
+it("recovery discovers later threads without waiting for a queued notification summary", async () => {
+  fixture.check.mockImplementationOnce(() => new Promise(() => {}))
+  await port().recover!(["first", "second"], new AbortController().signal)
+  expect(fixture.check).toHaveBeenCalledWith("first")
+  expect(fixture.check).toHaveBeenCalledWith("second")
+})
+
+it("retries durable workflow acknowledgement with the exact instance, never relaunching the workflow", async () => {
+  const ref = { threadId: task.threadId, workspacePath: "/owned/workspace", runId: "wf", startedAt: "2026-10-31T01:00:00.000Z" }
+  const notification: BotTask = { ...task, origin: { kind: "notification", notificationKind: "workflow", key: ref.runId, runStartedAt: ref.startedAt } }
+  const runtime = port()
+  fixture.workflowMarked.mockResolvedValueOnce(false)
+  await expect(runtime.acknowledgeWorkflowNotification!(notification, ref)).rejects.toThrow("acknowledgement was not persisted")
+  expect(fixture.retireWorkflow).not.toHaveBeenCalled()
+  await runtime.acknowledgeWorkflowNotification!(notification, ref)
+  expect(fixture.recoverWorkflow).toHaveBeenLastCalledWith(ref.workspacePath, ref.threadId, ref.runId, ref.startedAt)
+  expect(fixture.workflowMarked).toHaveBeenLastCalledWith(ref.workspacePath, ref.threadId, ref.runId, ref.startedAt)
+  expect(fixture.retireWorkflow).toHaveBeenCalledExactlyOnceWith(ref)
+  expect(fixture.start).not.toHaveBeenCalled()
+  expect(fixture.cancelWorkflow).not.toHaveBeenCalled()
+})
+
+it("a yielded workflow summary retains provider retry classification on resume", async () => {
+  const db = new NativeSqliteAdapter(new DatabaseSync(":memory:"))
+  try {
+    const store = new BotStore(db)
+    const savedBot = store.create({ name: "C review", instructions: "", color: "#123456", modelRef: null })
+    const origin: BotTask["origin"] = { kind: "notification", notificationKind: "workflow", key: "wf-yield", runStartedAt: "2026-10-31T01:00:00.000Z" }
+    const receipt = store.enqueue({ botId: savedBot.id, requestId: "yield-summary", message: "summary" }, origin)
+    store.transition(receipt.id, "running")
+    fixture.recordNotificationTerminal.mockImplementation((_id, terminal) => store.recordNotificationTerminal(receipt.id, terminal))
+    const background: BotTask = { ...task, origin }
+    let context!: AgentRunExecutionContext
+    let finish!: () => void
+    fixture.start.mockImplementation(async (_request, _delivery, incoming) => {
+      context = incoming
+      return { completion: new Promise<void>(resolve => { finish = resolve }) }
+    })
+    const first = port().acquire(bot, background)!
+    const pending = first.execute(new AbortController().signal, vi.fn())
+    await vi.waitFor(() => expect(context).toBeDefined())
+    // Production IPC's onPrimaryModelRequestState callback aborts the physical
+    // run; that path invokes onRunCancelled while unwinding, after yield=true.
+    context.onModelRequestState!(() => {
+      queueMicrotask(() => {
+        context.onRunCancelled?.()
+        context.onRunTerminated?.({ outcome: "unknown", code: "unknown" })
+        finish()
+      })
+      return true
+    })
+    first.yieldToUser!(() => true)
+    const paused = await pending
+    expect(paused.state).toBe("deferred")
+    if (paused.state !== "deferred") throw new Error("not deferred")
+    store.deferTask(receipt.id, paused.checkpointId)
+    first.release()
+    fixture.groupCheckpoint.mockReturnValue(paused.checkpointId)
+    store.transition(receipt.id, "running")
+    fixture.start.mockImplementation(async (_request, _delivery, incoming) => {
+      incoming.onRunTerminated?.({ outcome: "error", code: "provider_error" })
+      return { completion: Promise.resolve() }
+    })
+    const resumed = port().acquire(bot, background)!
+    const result = await resumed.execute(new AbortController().signal, vi.fn())
+    expect(result.state).toBe("failed")
+    store.settleRun(receipt.id, [], "failed", "provider error", undefined, undefined, false, resumed.notificationTerminal!())
+    resumed.release()
+    expect(store.notificationTerminal(receipt.id)).toEqual({ outcome: "error", code: "provider_error" })
+  } finally { db.close() }
+})
+
+
+it.each([[false, false], [false, true], [true, false], [true, true]])("continues a consumed workflow receipt after commands and a later yield (group=%s, fast=%s)", async (inGroup, fast) => {
+  const { LocalBotHost } = await import("./host")
+  const db = new NativeSqliteAdapter(new DatabaseSync(":memory:"))
+  let host: LocalBotHost | undefined
+  try {
+    const store = new BotStore(db)
+    const savedBot = store.create({ name: "Receipt owner", instructions: "", color: "#123456", modelRef: null })
+    const receipt = store.enqueue({ botId: savedBot.id, requestId: "workflow-command", message: "Handle workflow result" }, {
+      kind: "notification", notificationKind: "workflow", key: "wf-command", runStartedAt: "2026-10-31T01:00:00Z"
+    })
+    host = new LocalBotHost(store, { acquire: () => null, onAvailable: () => () => {} })
+    const notice: BotTask = { ...task, origin: { ...receipt.origin, ...(inGroup ? { groupId: "g" } : {}) } }
+    fixture.thread.mockReturnValue({ metadata: JSON.stringify(metadata(inGroup ? "g" : undefined)) })
+    fixture.peerHandoff.mockReturnValue({ owned: true, pending: false, outputFiles: [] })
+    fixture.groupCheckpoint.mockImplementation(() => store.taskCheckpoint(receipt.id))
+    fixture.workflowNotificationConsumed.mockImplementation(() => host!.workflowNotificationConsumed(receipt.id))
+    fixture.recordNotificationTerminal.mockImplementation((_id, terminal) => store.recordNotificationTerminal(receipt.id, terminal))
+    store.transition(receipt.id, "running")
+    fixture.start.mockImplementationOnce(async (_request, _delivery, context) => {
+      expect(context.botWorkflowNotification).toEqual({ runId: "wf-command", startedAt: "2026-10-31T01:00:00Z" })
+      if (fast) fixture.commandResults.mockReturnValue([{ task_id: "build", state: "completed", exitCode: 0, output: "built" }])
+      else fixture.commandIds.mockReturnValue(["build"])
+      context.onRunTerminated?.({ outcome: "success", code: "normal" })
+      return { completion: Promise.resolve() }
+    })
+    const first = port().acquire(bot, notice)!
+    const deferred = await first.execute(new AbortController().signal, vi.fn())
+    expect(deferred.state).toBe("deferred")
+    if (deferred.state !== "deferred") throw new Error("missing command continuation")
+    store.deferTask(receipt.id, deferred.checkpointId)
+    first.release()
+    expect(host.workflowNotificationConsumed(receipt.id)).toBe(true)
+    fixture.commandIds.mockReturnValue([])
+    fixture.commandResults.mockReturnValue([{ task_id: "build", state: "completed", exitCode: 0, output: "built" }])
+    store.transition(receipt.id, "running")
+    let context!: AgentRunExecutionContext
+    let finish!: () => void
+    fixture.start.mockImplementationOnce(async (_request, _delivery, incoming) => {
+      context = incoming
+      return { completion: new Promise<void>((resolve) => { finish = resolve }) }
+    })
+    const second = port().acquire(bot, notice)!
+    const pending = second.execute(new AbortController().signal, vi.fn())
+    await vi.waitFor(() => expect(context).toBeDefined())
+    expect(context.workflowInternalNotification).toBe(false)
+    expect(context.botWorkflowNotification).toBeUndefined()
+    expect(context.resumeCheckpointId).toBeUndefined()
+    expect(context.continueBotTaskCheckpointId).toBe(deferred.checkpointId)
+    context.onModelRequestState!(() => {
+      queueMicrotask(() => {
+        context.onRunCancelled?.()
+        context.onRunTerminated?.({ outcome: "unknown", code: "unknown" })
+        finish()
+      })
+      return true
+    })
+    second.yieldToUser!(() => true)
+    const yielded = await pending
+    expect(yielded.state).toBe("deferred")
+    if (yielded.state !== "deferred") throw new Error("missing model-boundary continuation")
+    store.deferTask(receipt.id, yielded.checkpointId)
+    second.release()
+    expect(host.workflowNotificationConsumed(receipt.id)).toBe(true)
+    store.transition(receipt.id, "running")
+    fixture.start.mockImplementationOnce(async (_request, _delivery, incoming) => {
+      expect(incoming.workflowInternalNotification).toBe(false)
+      expect(incoming.botWorkflowNotification).toBeUndefined()
+      expect(incoming.resumeCheckpointId).toBeUndefined()
+      expect(incoming.continueBotTaskCheckpointId).toBe(yielded.checkpointId)
+      incoming.onFinalAssistant?.({ messageId: "final", finalText: "Build verified" })
+      incoming.onRunTerminated?.({ outcome: "success", code: "normal" })
+      return { completion: Promise.resolve() }
+    })
+    const last = port().acquire(bot, notice)!
+    expect(await last.execute(new AbortController().signal, vi.fn())).toMatchObject({ state: "completed", result: "Build verified" })
+    last.release()
+    expect(fixture.start).toHaveBeenCalledTimes(3)
+    store.recordNotificationTerminal(receipt.id, { outcome: "error", code: "cancelled" })
+    expect(host.workflowNotificationConsumed(receipt.id)).toBe(false)
+    store.settleRun(receipt.id, [], "cancelled", null)
+    // Restart keeps the existing interrupted/no-replay policy, even after a successful input turn.
+    const recovered = store.enqueue({ botId: savedBot.id, requestId: "workflow-restart", message: "summary" }, receipt.origin)
+    store.transition(recovered.id, "running")
+    store.recordNotificationTerminal(recovered.id, { outcome: "success", code: "normal" })
+    store.deferTask(recovered.id, "saved-after-success")
+    expect(host.workflowNotificationConsumed(recovered.id)).toBe(true)
+    store.recover()
+    expect(store.getTask(recovered.id).state).toBe("interrupted")
+    expect(host.workflowNotificationConsumed(recovered.id)).toBe(false)
+  } finally { await host?.stop(); db.close() }
+})
+
+it.each([false, true])("still claims the exact workflow when yielding before input succeeds (group=%s)", async (inGroup) => {
+  fixture.thread.mockReturnValue({ metadata: JSON.stringify(metadata(inGroup ? "g" : undefined)) })
+  fixture.groupCheckpoint.mockReturnValue("pending-model")
+  const notice: BotTask = { ...task, origin: { kind: "notification", notificationKind: "workflow",
+    key: "wf-unconsumed", runStartedAt: "2026-10-31T01:00:00Z", ...(inGroup ? { groupId: "g" } : {}) } }
+  const lease = port().acquire(bot, notice)!
+  await lease.execute(new AbortController().signal, vi.fn())
+  const context = fixture.start.mock.calls[0][2]
+  expect(context.workflowInternalNotification).toBe(true)
+  expect(context.botWorkflowNotification).toEqual({ runId: "wf-unconsumed", startedAt: "2026-10-31T01:00:00Z" })
+  expect(context.resumeCheckpointId).toBe(inGroup ? "pending-model" : undefined)
+  expect(context.continueBotTaskCheckpointId).toBe(inGroup ? undefined : "pending-model")
+  lease.release()
+})
+
+it("checks and captures the original peer output contract in a workflow summary", async () => {
+  fixture.peerHandoff.mockReturnValue({ owned: true, pending: false, outputFiles: ["report.md"] })
+  const notice: BotTask = { ...task, origin: { kind: "notification", notificationKind: "workflow",
+    key: "wf", runStartedAt: "2026-10-31T01:00:00Z", sourceTaskId: "original-peer", rootTaskId: "root" } }
+  fixture.verifyFiles.mockRejectedValueOnce(new Error("Required report missing"))
+  await expect(port().acquire(bot, notice)!.execute(new AbortController().signal, vi.fn()))
+    .rejects.toThrow("Required report missing")
+  const file = { filePath: "/synthetic/workspaces/a/report.md", name: "report.md", size: 12 }
+  fixture.verifyFiles.mockResolvedValue([file])
+  await expect(port().acquire(bot, notice)!.execute(new AbortController().signal, vi.fn()))
+    .resolves.toMatchObject({ state: "completed", files: [file] })
+  expect(fixture.verifyFiles).toHaveBeenLastCalledWith(expect.any(String), ["report.md"], expect.any(AbortSignal))
+})
+
+
+it.each([true, false])("keeps the group workflow final-delivery gate aligned with trusted private ownership (%s)", async (owned) => {
+  fixture.verifyFiles.mockResolvedValue([{ filePath: "/synthetic/workspaces/group-g/report.md", name: "report.md", size: 12 }])
+  fixture.thread.mockReturnValue({ metadata: JSON.stringify(metadata("g")) })
+  fixture.peerHandoff.mockReturnValue({ owned, pending: false, outputFiles: ["report.md"] })
+  const notice: BotTask = { ...task, threadId: "group-g-a", origin: { kind: "notification", notificationKind: "workflow",
+    key: "wf", groupId: "g", runStartedAt: "2026-10-31T01:00:00Z", sourceTaskId: "source", rootTaskId: "root" } }
+  await port().acquire(bot, notice)!.execute(new AbortController().signal, vi.fn())
+  const context = fixture.start.mock.calls.at(-1)![2]
+  const correction = context.checkFinalDelivery!([new HumanMessage("Summary"), new AIMessage("Verified private result")])
+  if (owned) expect(correction).toBeUndefined()
+  else expect(correction).toContain("bot_send_message")
+  expect(context.extraSystemPrompt.includes("This is INTERNAL coordination")).toBe(owned)
+  if (owned) {
+    expect(context.extraSystemPrompt).toContain('Declared outputs relative to this shared workspace: ["report.md"]')
+    expect(context.extraSystemPrompt).toContain("use bot_return_files")
+    expect(context.extraSystemPrompt).toContain("never for an internal draft")
+    expect(context.extraSystemPrompt).not.toContain("Generated workspace files are deliverables")
+  } else {
+    expect(context.extraSystemPrompt).toContain("Generated workspace files are deliverables")
+    expect(context.extraSystemPrompt).not.toContain("Declared outputs relative to this shared workspace")
+  }
+})
+
+it("accepts an intermediate peer result without verifying the unfinished aggregate", async () => {
+  const actualTools = await vi.importActual<typeof import("./tools")>("./tools")
+  const { mkdtemp, rm, writeFile, realpath } = await import("node:fs/promises")
+  const { tmpdir } = await import("node:os")
+  const { join } = await import("node:path")
+  const workspace = await realpath(await mkdtemp(join(tmpdir(), "bot-sibling-result-")))
+  const db = new NativeSqliteAdapter(new DatabaseSync(":memory:"))
+  try {
+    const store = new BotStore(db)
+    const [a, b, c, d] = ["Caller", "Integrator", "Fast", "Slow"].map(name => store.create({ name, instructions: "", color: "#123456", modelRef: null }))
+    const root = store.enqueue({ botId: a.id, requestId: "root", message: "Produce combined report" })
+    store.transition(root.id, "running")
+    const parent = store.delegate(root.id, b.id, "Combine two reviews", "parent", ["report.txt"])
+    store.settle(root.id, "completed", null, "Dispatched")
+    store.transition(parent.id, "running")
+    const fast = store.delegate(parent.id, c.id, "First review", "fast")
+    const slow = store.delegate(parent.id, d.id, "Second review", "slow")
+    store.settle(parent.id, "completed", null, "Waiting")
+    store.transition(fast.id, "running")
+    store.transition(slow.id, "running")
+    store.settle(fast.id, "completed", null, "First result")
+    store.flushReplies()
+    const first = store.recentTasks().find(t => t.requestId === `reply-${fast.id}`)!
+    store.transition(first.id, "running")
+    fixture.getBot.mockImplementation(id => store.getBot(id))
+    fixture.peerHandoff.mockImplementation(t => store.peerHandoff(t.id))
+    fixture.directory.mockReturnValue(workspace)
+    fixture.thread.mockReturnValue({ metadata: JSON.stringify({ botId: b.id, botHostId: "local", botGroupId: null, workspacePath: workspace }) })
+    fixture.verifyFiles.mockImplementation(actualTools.verifyBotDeliveryFiles)
+    const runtime = port()
+    const firstLease = runtime.acquire(b, first)!
+    try {
+      const result = await firstLease.execute(new AbortController().signal, vi.fn())
+      expect(result.state).toBe("completed")
+      expect(fixture.verifyFiles).not.toHaveBeenCalled()
+      store.settle(first.id, "completed", null, "Waiting for second")
+    } finally { firstLease.release() }
+    store.flushReplies()
+    expect(store.recentTasks().some(t => t.requestId === `reply-${first.id}`)).toBe(false)
+    store.settle(slow.id, "completed", null, "Second result")
+    store.flushReplies()
+    const last = store.recentTasks().find(t => t.requestId === `reply-${slow.id}`)!
+    store.transition(last.id, "running")
+    const lastLease = runtime.acquire(b, last)!
+    try {
+      // The final receipt still owes the actual output; no fabricated success.
+      await expect(lastLease.execute(new AbortController().signal, vi.fn())).rejects.toThrow("ENOENT")
+    } finally { lastLease.release() }
+    await writeFile(join(workspace, "report.txt"), "Both reviews integrated")
+    const successful = runtime.acquire(b, last)!
+    try {
+      const result = await successful.execute(new AbortController().signal, vi.fn())
+      expect(result).toMatchObject({ state: "completed", files: [{ name: "report.txt" }] })
+    } finally { successful.release() }
+  } finally {
+    db.close()
+    await rm(workspace, { recursive: true, force: true })
+  }
+})
+
+it("isolates authenticated IM peer browser owners while retaining their binding audience", async () => {
+  const { LocalBotHost } = await import("./host")
+  const db = new NativeSqliteAdapter(new DatabaseSync(":memory:"))
+  const store = new BotStore(db)
+  const host = new LocalBotHost(store, { onAvailable: () => () => {}, acquire: () => null })
+  const releaseTransport = botInteractionRoutes.setTransport(() => true)
+  try {
+    const make = (name: string) =>
+      store.create({ name, instructions: "", color: "#123456", modelRef: null })
+    const a = make("A"),
+      b = make("B"),
+      c = make("C")
+    const binding = store.imGateway.register("realm", "owner", {
+      id: "binding",
+      botId: a.id,
+      kind: "group",
+      label: "IM",
+      state: "active",
+      version: 1,
+      conversationKey: "convo",
+      createdAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 900000).toISOString()
+    })
+    store.im.importImBinding({
+      id: binding.id,
+      botId: a.id,
+      kind: "group",
+      label: "IM",
+      channelKey: "channel",
+      version: 1
+    })
+    store.im.setOnline(a.id, binding.id, true)
+    const accept = (n: number) => {
+      const ingress = store.imGateway.receive("realm", "owner", {
+        route: {
+          bindingId: "binding",
+          botId: a.id,
+          kind: "group",
+          label: "IM",
+          version: 1,
+          senderId: "member"
+        },
+        event: {
+          schemaVersion: 1,
+          eventId: `event-${n}`,
+          platformMessageId: `message-${n}`,
+          principalId: "owner",
+          conversationKey: "convo",
+          conversationSeq: n,
+          message: { type: "text", text: "Ask B and C to research separate sites" },
+          occurredAt: new Date().toISOString(),
+          redelivered: false,
+          lease: { id: `lease-${n}`, expiresAt: new Date(Date.now() + 900000).toISOString() }
+        }
+      })
+      store.imGateway.settle(ingress.id, "active", undefined, Date.now() + 900000)
+      return host.acceptImEvent({
+        bindingId: binding.id,
+        eventId: ingress.id,
+        messageId: `message-${n}`,
+        senderId: "member",
+        text: "Ask B and C to research separate sites",
+        mentionsBotIds: [a.id]
+      })
+    }
+    const accepted = accept(1)
+    const parent = store.getTask(accepted.taskId!)
+    store.transition(parent.id, "running")
+    const peers = [
+      store.delegate(parent.id, b.id, "Research site B", "b"),
+      store.delegate(parent.id, c.id, "Research site C", "c")
+    ]
+    for (const p of peers) store.transition(p.id, "running")
+    fixture.thread.mockReturnValue(undefined)
+    fixture.getBot.mockImplementation((id) => store.getBot(id))
+    const runtime = createLocalBotRunPort(
+      { editVersion: () => 0, forPrompt: () => [] } as any,
+      () => host,
+      {} as any,
+      { enqueue: () => {} } as any
+    )
+    const outputs: Array<{ thread: string; scope: unknown }> = []
+    const capture = async (t: BotTask) => {
+      const lease = runtime.acquire(store.getBot(t.botId), t)!
+      await lease.execute(new AbortController().signal, () => {})
+      lease.release()
+      outputs.push({
+        thread: t.threadId,
+        scope: fixture.browserTools.mock.calls.at(-1)![4]
+      })
+    }
+
+    for (const t of [parent, ...peers]) await capture(t)
+    store.transition(parent.id, "completed")
+    const nextParent = store.getTask(accept(2).taskId!)
+    store.transition(nextParent.id, "running")
+    const sameBot = store.delegate(nextParent.id, b.id, "Research an independent site", "next-b")
+    store.transition(sameBot.id, "running")
+    const backToOwner = store.delegate(sameBot.id, a.id, "Check a third site", "back-a")
+    store.transition(backToOwner.id, "running")
+    await capture(sameBot)
+    await capture(backToOwner)
+
+    expect(new Set(outputs.map((x) => x.thread)).size).toBe(5)
+    expect(new Set(outputs.map((x) => x.scope)).size).toBe(5)
+    expect(outputs[0].scope).toBe(`im-${binding.id}--${a.id}`)
+    expect(outputs[1].scope).toBe(`im-${binding.id}--${a.id}--${b.id}--${peers[0].threadId}`)
+    expect(outputs[2].scope).toBe(`im-${binding.id}--${a.id}--${c.id}--${peers[1].threadId}`)
+    expect(outputs[3].scope).toBe(`im-${binding.id}--${a.id}--${b.id}--${sameBot.threadId}`)
+    expect(outputs[4].scope).toBe(`im-${binding.id}--${a.id}--${a.id}--${backToOwner.threadId}`)
+    for (const out of outputs) expect(host.browserScope(String(out.scope))).toBe(out.scope)
+    expect(() => host.browserScope(`im-${binding.id}--${b.id}--${c.id}`)).toThrow()
+    expect(() => host.browserScope(`im-${binding.id}--${a.id}--missing`)).toThrow()
+  } finally {
+    releaseTransport()
+    await host.stop()
+    db.close()
+  }
 })

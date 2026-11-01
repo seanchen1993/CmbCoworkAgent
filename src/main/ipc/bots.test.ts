@@ -1,11 +1,15 @@
 import { beforeEach, describe, expect, it, vi } from "vitest"
 import { DatabaseSync } from "node:sqlite"
+import { mkdtempSync, rmSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import type { IpcMain } from "electron"
 import { botContinuationMessageId } from "../bots/continuation"
 import { parseGroup, parseSendBotMessage } from "../../shared/bots/validation"
 import { NativeSqliteAdapter } from "../db/native-sqlite-adapter"
 import { BotStore } from "../bots/store"
 import { LocalBotHost } from "../bots/host"
+import { BotMemoryService } from "../bots/memory"
 import { BotImChannelService, type BotImGatewayClient } from "../services/im/bot-channel-service"
 import {
   assertBotImBinding,
@@ -109,6 +113,57 @@ beforeEach(() => {
   fixture.getHost.mockImplementation(() => fixture)
 })
 describe("Bot IPC boundaries", () => {
+  it.each(["deleted", "left"])("keeps retained group memories manageable after the group is %s", async (action) => {
+    const root = mkdtempSync(join(tmpdir(), "cmb-memory-management-"))
+    const db = new NativeSqliteAdapter(new DatabaseSync(":memory:"))
+    const host = new LocalBotHost(new BotStore(db), { acquire: () => null, onAvailable: () => () => {} })
+    const memory = new BotMemoryService(root)
+    const profile = { name: "Owner", instructions: "", color: "#123456", modelRef: null }
+    const bot = host.create(profile), other = host.create({ ...profile, name: "Other" })
+    const group = host.saveGroup({ name: "Old group", memberIds: [bot.id, other.id] })
+    const current = host.saveGroup({ name: "Current group", memberIds: [bot.id, other.id] })
+    fixture.getHost.mockReturnValue(host)
+    fixture.getThread.mockReturnValue(undefined)
+    fixture.listMemory.mockImplementation(memory.list.bind(memory))
+    fixture.write.mockImplementation(memory.write.bind(memory))
+    fixture.remove.mockImplementation(memory.remove.bind(memory))
+    const call = register(async () => {})
+    try {
+      for (let i = 0; i < 200; i++) call("bots:memory:write", "local", bot.id, {
+        name: `Retained ${i}`, content: `Fact ${i}`, scope: { kind: "group", groupId: group.id }
+      })
+      if (action === "deleted") await call("bots:group:remove", "local", group.id, group.version)
+      else call("bots:group:save", "local", { name: group.name, memberIds: [other.id] }, {
+        id: group.id, version: group.version
+      })
+      expect(() => call("bots:memory:list", "local", bot.id, group.id)).toThrow()
+      expect(call("bots:memory:list", "local", bot.id, current.id)).toEqual([])
+      expect(memory.forPrompt(bot.id)).toEqual([])
+      expect(memory.forPrompt(bot.id, { groupId: current.id })).toEqual([])
+      expect(() => memory.write(bot.id, { name: "New", content: "New" })).toThrow("上限")
+      const retained = call("bots:memory:list", "local", bot.id) as ReturnType<BotMemoryService["list"]>
+      expect(retained).toHaveLength(200)
+      expect(call("bots:memory:list", "local", other.id)).toEqual([])
+      const entry = retained[0]
+      const updated = call("bots:memory:write", "local", bot.id, {
+        id: entry.id, expectedVersion: entry.version, name: entry.name, content: "Updated"
+      }) as ReturnType<BotMemoryService["write"]>
+      expect(updated.scope).toEqual({ kind: "group", groupId: group.id })
+      expect(memory.forPrompt(bot.id)).toEqual([])
+      expect(() => call("bots:memory:write", "local", bot.id, {
+        name: "Invalid", content: "Invalid", scope: { kind: "group", groupId: group.id }
+      })).toThrow()
+      expect(() => call("bots:memory:remove", "local", bot.id, entry.id, entry.version)).toThrow("更新")
+      call("bots:memory:remove", "local", bot.id, updated.id, updated.version)
+      call("bots:memory:write", "local", bot.id, { name: "New private", content: "Allowed" })
+      expect(memory.forPrompt(bot.id).map((item) => item.name)).toEqual(["New private"])
+      expect(memory.list(bot.id)).toHaveLength(200)
+    } finally {
+      fixture.listMemory.mockReset(); fixture.write.mockReset(); fixture.remove.mockReset()
+      await host.stop(); await memory.close(); db.close()
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
   it.each(["binding:synthetic", "b".repeat(128)])(
     "manages a wire-valid opaque binding %s through the actual IM service",
     async (bindingId) => {
@@ -191,7 +246,7 @@ describe("Bot IPC boundaries", () => {
         call("bots:memory:list", "local", bot.id, localId)
         expect(fixture.listMemory).toHaveBeenLastCalledWith(bot.id, { groupId: localId })
         call("bots:memory:list", "local", bot.id)
-        expect(fixture.listMemory).toHaveBeenLastCalledWith(bot.id, {})
+        expect(fixture.listMemory).toHaveBeenLastCalledWith(bot.id, undefined)
         expect(() => call("bots:memory:list", "local", other.id, localId)).toThrow("不属于")
         expect(() =>
           call("bots:memory:write", "local", other.id, {
@@ -694,23 +749,33 @@ describe("Bot IPC boundaries", () => {
       ["remote", "a", "task"],
       ["local", "../a", "task"],
       ["local", "a", "../task"],
-      ["local", "a", "task", "../group"]
+      ["local", "a", "task", "../group"],
+      ["local", "a", "task", undefined, "../work"],
+      ["local", "a", "task", undefined, undefined, "../im"],
+      ["local", "a", "task", undefined, undefined, {}]
     ])
       expect(() => call("bots:exchange", ...args)).toThrow()
     expect(fixture.exchange).not.toHaveBeenCalled()
     call("bots:exchange", "local", "a", "task", "group")
-    expect(fixture.exchange).toHaveBeenCalledWith("a", "task", "group", undefined)
+    expect(fixture.exchange).toHaveBeenCalledWith("a", "task", "group", undefined, undefined)
+    call("bots:exchange", "local", "a", "task", undefined, undefined, "im-one")
+    expect(fixture.exchange).toHaveBeenLastCalledWith("a", "task", undefined, undefined, "im-one")
     for (const args of [
       ["remote", "a", "task"],
       ["local", "../a", "task"],
       ["local", "a", "../task"],
       ["local", "a", "task", "../group"],
-      ["local", "a", "task", undefined, "../cursor"]
+      ["local", "a", "task", undefined, "../cursor"],
+      ["local", "a", "task", undefined, undefined, "../work"],
+      ["local", "a", "task", undefined, undefined, undefined, "../im"],
+      ["local", "a", "task", undefined, undefined, undefined, {}]
     ])
       expect(() => call("bots:exchange-history", ...args)).toThrow()
     expect(fixture.exchangeHistory).not.toHaveBeenCalled()
     call("bots:exchange-history", "local", "a", "task", "group", "cursor")
-    expect(fixture.exchangeHistory).toHaveBeenCalledWith("a", "task", "group", "cursor", undefined)
+    expect(fixture.exchangeHistory).toHaveBeenCalledWith("a", "task", "group", "cursor", undefined, undefined)
+    call("bots:exchange-history", "local", "a", "task", undefined, "cursor", undefined, "im-one")
+    expect(fixture.exchangeHistory).toHaveBeenLastCalledWith("a", "task", undefined, "cursor", undefined, "im-one")
   })
 
   it("validates manual unread requests before mutating a host", () => {

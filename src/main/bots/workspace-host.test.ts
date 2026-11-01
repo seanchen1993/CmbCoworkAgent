@@ -42,6 +42,38 @@ function fixture(running = false) {
 }
 const tick = () => new Promise((resolve) => setTimeout(resolve, 20))
 describe("fixed work workspace lifecycle", () => {
+  it("inherits the IM group's scoped default, while preserving explicit workspace choice", async () => {
+    const f = fixture(true)
+    const route = f.host.imGateway.register("realm", "owner", {
+      id: "binding", botId: f.bot.id, kind: "group", label: "Group", version: 1,
+      state: "active", conversationKey: "group", createdAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 60_000).toISOString()
+    })
+    f.host.imChannel.importImBinding({ id: route.id, botId: f.bot.id, kind: "group", label: "Group", channelKey: "group", version: 1 })
+    const ingress = f.host.imGateway.receive("realm", "owner", {
+      route: { bindingId: "binding", botId: f.bot.id, kind: "group", label: "Group", version: 1, senderId: "sender" },
+      event: { schemaVersion: 1, eventId: "event", platformMessageId: "message", principalId: "owner",
+        conversationKey: "group", conversationSeq: 1, message: { type: "text", text: "Create a task for this group's input.csv" },
+        occurredAt: new Date().toISOString(), redelivered: false,
+        lease: { id: "lease", expiresAt: new Date(Date.now() + 60_000).toISOString() } }
+    })
+    f.host.imGateway.settle(ingress.id, "active", undefined, Date.now() + 60_000)
+    f.host.acceptImEvent({ bindingId: route.id, eventId: ingress.id, messageId: "message", senderId: "sender",
+      text: "Create a task for this group's input.csv", mentionsBotIds: [f.bot.id] })
+    await tick()
+    const task = f.store.recentTasks().find(task => task.mockSource?.transport === "im")!
+    const receipt = await f.host.createWork(f.input, { taskId: task.id, callId: "create", key: "create" })
+    expect(receipt.work.source).toMatchObject({ bindingId: route.id, transport: "im" })
+    expect(receipt.work.source?.personal).toBeFalsy()
+    // Absence preserves prepareBotThread's existing source-scoped default.
+    expect(receipt.work.workspace).toBeUndefined()
+    expect(f.workspaces.resolve).not.toHaveBeenCalled()
+    f.workspaces.resolve.mockResolvedValue({ kind: "directory", path: "/selected" })
+    const selected = await f.host.createWork({ ...f.input, operationId: "explicit", workspace: { kind: "directory", path: "/selected" } },
+      { taskId: task.id, callId: "explicit", key: "explicit" })
+    expect(selected.work.workspace).toEqual({ kind: "directory", path: "/selected" })
+    expect(f.workspaces.resolve).toHaveBeenCalledTimes(1)
+  })
   it("pins the default once, preserves it through restart and completion/continuation, and replays without IO", async () => {
     const f = fixture()
     const receipt = await f.host.createWork(f.input)

@@ -97,7 +97,7 @@ export class BotImChannelService {
     } else if (binding.state === "revoked") {
       try {
         const local = host.imChannel.get(binding.botId, route.id)
-        if (!local.revoked) host.imChannel.revoke(binding.botId, route.id, local.grantVersion)
+        host.revokeImBinding(binding.botId, route.id, local.grantVersion)
       } catch (error) {
         if (!(error instanceof Error && "code" in error && error.code === "NOT_FOUND")) throw error
       }
@@ -559,9 +559,9 @@ export class BotImChannelService {
     this.delivering = true
     const epoch = this.epoch
     const host = this.getHost()
-    let reply: ReturnType<typeof host.imChannel.beginDelivery> = null
+    let reply: ReturnType<typeof host.beginImDelivery> = null
     try {
-      reply = host.imChannel.beginDelivery()
+      reply = host.beginImDelivery()
       if (!reply) return
       const registered = host.imGateway.binding(reply.bindingId)
       if (
@@ -571,7 +571,7 @@ export class BotImChannelService {
         registered.binding.state !== "active" ||
         !registered.binding.conversationKey
       ) {
-        host.imChannel.delivered(reply.id, "blocked")
+        host.settleImDelivery(reply.id, "blocked")
         return
       }
       const messages = buildImProactiveReplies({
@@ -582,7 +582,7 @@ export class BotImChannelService {
       })
       for (const message of messages) {
         if (this.stopped || epoch !== this.epoch) throw new Error("IM 连接已变化")
-        if (!host.imChannel.mayDeliver(reply.id)) return
+        if (!host.mayDeliverImReply(reply.id)) return
         const markdown =
           this.client.supportsMarkdownReplies?.() === true &&
           !this.usesTextReplies(registered.binding.conversationKey)
@@ -591,14 +591,14 @@ export class BotImChannelService {
           message: { ...message.message, type: markdown ? "markdown" : "text" }
         })
         if (result.state === "platform_unknown") {
-          host.imChannel.delivered(reply.id, "unknown")
+          host.settleImDelivery(reply.id, "unknown")
           return
         }
       }
-      host.imChannel.delivered(reply.id, "accepted")
+      host.settleImDelivery(reply.id, "accepted")
     } catch (error) {
       if (reply)
-        host.imChannel.delivered(
+        host.settleImDelivery(
           reply.id,
           error instanceof ImGatewayCommandError && error.resultUnknown
             ? "unknown"
@@ -617,7 +617,7 @@ export class BotImChannelService {
     this.nextSync = 0
     const host = this.resolvedHost
     if (!host) return
-    host.imChannel.setAllOffline()
+    host.setImOffline()
     for (const event of host.imGateway.active()) this.cancel(event)
   }
   stop(): void {

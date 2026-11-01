@@ -13,15 +13,17 @@ export function BotExchangePanel({
   botId,
   taskId,
   groupId,
+  imConversationId,
   onClose
 }: {
   client: BotClient
   botId: string
   taskId: string
   groupId?: string
+  imConversationId?: string
   onClose(): void
 }) {
-  const history = useBotExchange(client, botId, taskId, groupId)
+  const history = useBotExchange(client, botId, taskId, groupId, imConversationId)
   const exchange = history.anchor
   const closeRef = useRef<HTMLButtonElement>(null)
   useEffect(() => {

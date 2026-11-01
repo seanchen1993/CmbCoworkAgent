@@ -172,6 +172,7 @@ export class BotWorkConversationJournal {
   assertIdle(botId: string, workId: string) {
     const work = this.owner.getWork(botId, workId)
     if (
+      work.backgroundBusy ||
       this.owner.pendingWorkFamily(botId, workId).length ||
       this.rows(
         "SELECT c.id FROM bot_commands c LEFT JOIN bot_tasks t ON t.id=c.source_task_id WHERE c.state='accepted' AND (c.thread_id=? OR json_extract(t.origin_json,'$.rootWorkId')=?) LIMIT 1",

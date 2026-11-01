@@ -393,12 +393,13 @@ export function registerBotHandlers(
   ipcMain.handle("bots:snapshot", (_event, hostId: unknown) => hostFor(hostId).snapshot())
   ipcMain.handle(
     "bots:exchange",
-    (_event, hostId: unknown, botId: unknown, taskId: unknown, groupId: unknown, workId: unknown) =>
+    (_event, hostId: unknown, botId: unknown, taskId: unknown, groupId: unknown, workId: unknown, imConversationId: unknown) =>
       hostFor(hostId).exchange(
         botIdentifier(botId),
         botIdentifier(taskId),
         groupId == null ? undefined : botIdentifier(groupId),
-        workId == null ? undefined : botIdentifier(workId)
+        workId == null ? undefined : botIdentifier(workId),
+        imConversationId == null ? undefined : botIdentifier(imConversationId)
       )
   )
   ipcMain.handle(
@@ -410,14 +411,16 @@ export function registerBotHandlers(
       taskId: unknown,
       groupId: unknown,
       before: unknown,
-      workId: unknown
+      workId: unknown,
+      imConversationId: unknown
     ) =>
       hostFor(hostId).exchangeHistory(
         botIdentifier(botId),
         botIdentifier(taskId),
         groupId == null ? undefined : botIdentifier(groupId),
         before == null ? undefined : botIdentifier(before),
-        workId == null ? undefined : botIdentifier(workId)
+        workId == null ? undefined : botIdentifier(workId),
+        imConversationId == null ? undefined : botIdentifier(imConversationId)
       )
   )
   ipcMain.handle(
@@ -478,7 +481,9 @@ export function registerBotHandlers(
     const bot = host.getBot(botIdentifier(id))
     return getBotMemoryService().list(
       bot.id,
-      host.memoryContext(bot.id, groupId == null ? undefined : botIdentifier(groupId))
+      // The desktop owner can manage retained memories even after leaving/deleting
+      // a group. Model reads use their own execution context and remain scoped.
+      groupId == null ? undefined : host.memoryContext(bot.id, botIdentifier(groupId))
     )
   })
   ipcMain.handle("bots:memory:write", (_event, hostId: unknown, id: unknown, input: unknown) => {

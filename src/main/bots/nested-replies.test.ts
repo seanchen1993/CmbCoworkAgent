@@ -96,17 +96,117 @@ function finish(store: BotStore, task: BotTask, result: string, explicitGroupMes
 }
 
 describe("nested private collaboration result return", () => {
+  it.each([false, true])("records a live group peer delivery while waiting=%s", async (waiting) => {
+    const db = new NativeSqliteAdapter(new DatabaseSync(":memory:"))
+    databases.push(db)
+    const store = new BotStore(db)
+    const input = { name: "A", instructions: "", color: "#123456", modelRef: null }
+    const a = store.create(input), b = store.create({ ...input, name: "B" })
+    const group = store.saveGroup({ name: "Group", memberIds: [a.id, b.id] })
+    let childId = ""
+    const recorded: BotDeliveredFile[][] = []
+    const file = { filePath: "/workspace/report.txt", name: "report.txt", size: 4,
+      attachmentPath: "/workspace/.bot-deliveries/sent/report.txt" }
+    const host = new LocalBotHost(store, { onAvailable: () => () => {}, acquire: (_bot, task) => ({
+      release() {}, execute: async (_signal, setWaiting) => {
+        if (task.origin.kind === "group") childId = host.delegate(task.id, b.id, "Report", "child").id
+        if (task.id === childId) {
+          if (waiting) setWaiting(true)
+          host.publishGroupFiles(task.id, "delivery", [file])
+          host.recordPeerDelivery(task.id, [file])
+          recorded.push(store.peerHandoff(task.id).files!)
+          if (waiting) setWaiting(false)
+        }
+        return { state: "completed", result: "Done", publicContribution: true }
+      }
+    }) }, 2)
+    hosts.push(host)
+    host.sendGroup({ groupId: group.id, requestId: "group-delivery", text: "Report", targetBotIds: [a.id] })
+    await vi.waitFor(() => expect(recorded).toEqual([[file]]))
+    expect(store.groupMessages(group.id).some((message) => message.files?.length)).toBe(true)
+    await vi.waitFor(() => expect(store.getTask(childId).state).toBe("completed"))
+    expect(() => host.recordPeerDelivery(childId, [file])).toThrow(/已停止/)
+  })
+  it("shares the latest explicit revision across sibling result turns of one handoff", () => {
+    const f = fixture(2, "private", false, ["report.txt"])
+    const relay = f.chain[1], first = f.chain[2]
+    const other = f.store.create({ name: "Other reviewer", instructions: "", color: "#123456", modelRef: null })
+    const second = f.store.delegate(relay.id, other.id, "Review two", "second-review")
+    f.store.transition(second.id, "running")
+    const v1 = { filePath: "/workspace/report.txt", name: "report.txt", size: 2,
+      attachmentPath: "/workspace/.bot-deliveries/v1/report.txt" }
+    const v2 = { ...v1, attachmentPath: "/workspace/.bot-deliveries/v2/report.txt" }
+    f.store.recordPeerDelivery(relay.id, [v1])
+    f.store.settle(relay.id, "completed", null, "Dispatched", [v1])
+    f.store.settle(first.id, "completed", null, "Review one")
+    const r1 = receipt(f.store, first)
+    f.store.transition(r1.id, "running")
+    f.store.recordPeerDelivery(r1.id, [v2])
+    f.store.settle(r1.id, "completed", null, "Explicit revision", [v2])
+    const reloaded = new BotStore(f.db, () => 2000)
+    reloaded.settle(second.id, "completed", null, "Review two")
+    const r2 = receipt(reloaded, second)
+    expect(reloaded.peerHandoff(r2.id)).toMatchObject({ files: [v2] })
+    expect(reloaded.peerHandoff(second.id)).not.toHaveProperty("files")
+    reloaded.transition(f.root.id, "cancelled")
+    expect(reloaded.peerHandoff(r2.id)).not.toHaveProperty("files")
+  })
+  it("keeps a relay's delivered snapshot across a new result turn and store reload", () => {
+    const f = fixture(2, "private", false, ["report.txt"])
+    const relay = f.chain[1], leaf = f.chain[2]
+    const sent = { filePath: "/workspace/report.txt", name: "report.txt", size: 4,
+      attachmentPath: "/workspace/.bot-deliveries/sent/report.txt" }
+    f.store.recordPeerDelivery(relay.id, [sent])
+    f.store.settle(relay.id, "completed", null, "Waiting for review", [sent])
+    const reloaded = new BotStore(f.db, () => 2000)
+    reloaded.settle(leaf.id, "completed", null, "Reviewed")
+    const integration = receipt(reloaded, leaf)
+    expect(reloaded.peerHandoff(integration.id)).toMatchObject({ files: [sent] })
+    expect(reloaded.peerHandoff(leaf.id)).not.toHaveProperty("files")
+    expect(reloaded.taskCheckpoint(relay.id)).toBeUndefined()
+    expect(reloaded.continuationFiles(relay.id)).toEqual([])
+    reloaded.transition(integration.id, "running")
+    reloaded.settle(integration.id, "completed", null, "Final", [sent])
+    expect(receipt(reloaded, integration).origin).toMatchObject({ replyFiles: [sent] })
+  })
+  it("keeps active checkpoint files separate from later explicit handoff revisions", () => {
+    const f = fixture(2, "private", false, ["report.txt"])
+    const relay = f.chain[1], leaf = f.chain[2]
+    const old = { filePath: "/workspace/report.txt", name: "report.txt", size: 2,
+      attachmentPath: "/workspace/.bot-deliveries/v1/report.txt" }
+    const revised = { ...old, attachmentPath: "/workspace/.bot-deliveries/v2/report.txt" }
+    f.store.recordPeerDelivery(relay.id, [old])
+    f.store.acceptCommand(relay.id, { id: "snapshot-slow", threadId: relay.threadId,
+      command: "check", cwd: "/workspace", startedAt: 1, notifyOnComplete: true }, true)
+    f.store.deferTask(relay.id, "source-checkpoint", [old])
+    f.store.settle(leaf.id, "completed", null, "Reviewed")
+    const integration = receipt(f.store, leaf)
+    f.store.transition(f.root.id, "completed")
+    expect(f.store.nextQueued([])?.id).toBe(integration.id)
+    f.store.transition(integration.id, "running")
+    f.store.recordPeerDelivery(integration.id, [revised])
+    f.store.settle(integration.id, "completed", null, "Revised", [revised])
+    expect(f.store.taskCheckpoint(relay.id)).toBe("source-checkpoint")
+    expect(f.store.continuationFiles(relay.id)).toEqual([old])
+    expect(f.store.peerHandoff(relay.id).files).toEqual([revised])
+    f.store.settleCommand({ id: "snapshot-slow", threadId: relay.threadId,
+      exitCode: 0, output: "done", cancelled: false, truncated: false })
+    f.store.transition(relay.id, "running")
+    f.store.settle(relay.id, "completed", null, "Finished", [old])
+    // Settlement is not a new delivery and cannot roll the authority back.
+    expect(f.store.peerHandoff(relay.id).files).toEqual([revised])
+  })
   it.each(["private", "work", "group"] as const)(
     "retains the original %s report requirement until downstream integration",
     (scope) => {
       const f = fixture(2, scope, false, ["reports/final.json"])
       const relay = f.chain[1], leaf = f.chain[2]
-      expect(f.store.peerHandoff(relay.id)).toEqual({ pending: true, outputFiles: ["reports/final.json"] })
+      expect(f.store.peerHandoff(relay.id)).toEqual({ owned: true, pending: true, outputFiles: ["reports/final.json"] })
       f.store.settle(relay.id, "completed", null, "Waiting for downstream calculation")
       f.store.settle(leaf.id, "completed", null, "ACTUAL_RESULT")
       const integration = receipt(f.store, leaf)
       expect(integration.origin).not.toHaveProperty("outputFiles")
-      expect(f.store.peerHandoff(integration.id)).toEqual({ pending: false, outputFiles: ["reports/final.json"] })
+      expect(f.store.peerHandoff(integration.id)).toEqual({ owned: true, pending: false, outputFiles: ["reports/final.json"] })
       const stopped = fixture(2, scope, false, ["reports/final.json"])
       stopped.store.settle(stopped.chain[2].id, "completed", null, "ACTUAL_RESULT")
       const late = receipt(stopped.store, stopped.chain[2])
@@ -463,10 +563,144 @@ describe("nested private collaboration result return", () => {
     }
   )
 
+  it.each(["private", "work", "group"] as const)(
+    "returns one cancellation when an archived %s intermediary has queued integration",
+    (scope) => {
+      const f = fixture(2, scope)
+      f.store.settle(f.chain[2].id, "completed", null, "FACT")
+      const integration = receipt(f.store, f.chain[2])
+      const middle = f.store.getBot(f.bots[1].id)
+      const archived = f.store.update({ ...middle, expectedVersion: middle.version, archived: true })
+      expect(f.store.getTask(integration.id).state).toBe("cancelled")
+      const upstream = receipt(f.store, integration)
+      expect(upstream.botId).toBe(f.bots[0].id)
+      expect(upstream.message).toContain("已停止")
+      expect(upstream.message).toContain("Bot 已归档，排队任务未执行。")
+      expect(upstream.origin).not.toHaveProperty("replyFiles")
+      f.store.update({ ...archived, expectedVersion: archived.version, archived: false })
+      f.store.flushReplies()
+      expect(f.store.recentTasks().filter((task) => task.botId === f.bots[0].id &&
+        task.origin.kind === "bot").map((task) => task.id)).toEqual([upstream.id])
+      expect(f.store.getTask(integration.id).state).toBe("cancelled")
+    }
+  )
+
+  it("coalesces queued sibling results into one archive cancellation", () => {
+    const f = fixture(2, "private", false)
+    const relay = f.chain[1], first = f.chain[2]
+    const other = f.store.create({ name: "Other reviewer", instructions: "", color: "#123456", modelRef: null })
+    const second = f.store.delegate(relay.id, other.id, "Review two", "archive-second-review")
+    f.store.settle(f.root.id, "completed", null, "Waiting")
+    f.store.settle(relay.id, "completed", null, "Waiting")
+    f.store.settle(first.id, "completed", null, "Review one")
+    finish(f.store, second, "Review two")
+    const results = [receipt(f.store, first), receipt(f.store, second)]
+    const middle = f.store.getBot(f.bots[1].id)
+    f.store.update({ ...middle, expectedVersion: middle.version, archived: true })
+    f.store.flushReplies()
+    const returned = f.store.recentTasks().filter((task) => task.botId === f.bots[0].id && task.origin.kind === "bot")
+    expect(returned).toHaveLength(1)
+    const upstream = returned[0]
+    expect(upstream.message).toContain("已停止")
+    expect(upstream.message).toContain("Bot 已归档，排队任务未执行。")
+    expect(results.map((task) => f.store.getTask(task.id).state)).toEqual(["cancelled", "cancelled"])
+    expect(f.store.recentTasks().filter((task) => task.botId === f.bots[0].id &&
+      task.origin.kind === "bot").map((task) => task.id)).toEqual([upstream.id])
+  })
+
+  it.each([1, 2])("returns one cancellation when leaving a group with %s queued integration results", (count) => {
+    const f = fixture(2, "group", false)
+    const relay = f.chain[1], children = [f.chain[2]]
+    let group = f.group!
+    if (count === 2) {
+      const other = f.store.create({ name: "Other reviewer", instructions: "", color: "#123456", modelRef: null })
+      group = f.store.saveGroup({ name: group.name, memberIds: [...group.memberIds, other.id] }, group)
+      children.push(f.store.delegate(relay.id, other.id, "Review two", "leave-second-review"))
+    }
+    f.store.settle(f.root.id, "completed", null, "Waiting", undefined, true)
+    f.store.settle(relay.id, "completed", null, "Waiting", undefined, true)
+    for (const child of children) finish(f.store, child, "Reviewed", true)
+    f.store.flushReplies()
+    const integrations = f.store.recentTasks().filter(t => t.botId === f.bots[1].id && t.state === "queued")
+    const host = new LocalBotHost(f.store, { onAvailable: () => () => {}, acquire: () => null })
+    hosts.push(host)
+    host.saveGroup({ name: group.name, memberIds: group.memberIds.filter(id => id !== f.bots[1].id) }, group)
+    f.store.flushReplies()
+    const replies = f.store.recentTasks().filter(t => t.botId === f.bots[0].id && t.origin.kind === "bot")
+    expect(replies).toHaveLength(1)
+    expect(replies[0].message).toContain("协作已取消")
+    expect(integrations.every(t => f.store.getTask(t.id).state === "cancelled")).toBe(true)
+    expect(f.store.getTask(relay.id).state).toBe("cancelled")
+  })
+
+  it.each([false, true])("preserves an already delivered failure when the relay leaves (consumed=%s)", async (consumed) => {
+    const f = fixture(2, "group", false)
+    const relay = f.chain[1], leaf = f.chain[2], group = f.group!
+    f.store.settle(f.root.id, "completed", null, "Waiting", undefined, true)
+    f.store.settle(relay.id, "failed", "Provider failed")
+    const prior = receipt(f.store, relay)
+    if (consumed) finish(f.store, prior, "Failure acknowledged", true)
+    f.store.settle(leaf.id, "completed", null, "FACT", undefined, true)
+    const integration = receipt(f.store, leaf)
+    const errors = vi.fn()
+    const host = new LocalBotHost(f.store, { onAvailable: () => () => {}, acquire: () => null }, 1, errors)
+    hosts.push(host)
+    host.saveGroup({ name: group.name, memberIds: group.memberIds.filter(id => id !== relay.botId) }, group)
+    expect(() => f.store.flushReplies()).not.toThrow()
+    await new Promise(resolve => setImmediate(resolve))
+    expect(errors).not.toHaveBeenCalled()
+    expect(f.store.getTask(integration.id).state).toBe("cancelled")
+    expect(f.store.getTask(relay.id).state).toBe("cancelled")
+    const returned = f.store.recentTasks().filter(t => t.botId === f.bots[0].id && t.origin.kind === "bot")
+    expect(returned).toHaveLength(1)
+    expect(returned[0].id).toBe(prior.id)
+    expect(returned[0].message).toContain("Provider failed")
+    expect(() => host.send({ botId: leaf.botId, requestId: "after-leave", message: "Unrelated" })).not.toThrow()
+  })
+
+  it.each(["private", "work", "group"] as const)("shows nested results and cancellations in the original %s exchange", (scope) => {
+    for (const cancelled of [false, true]) {
+      const f = fixture(2, scope)
+      f.store.settle(f.chain[2].id, "completed", null, "FACT")
+      const integration = receipt(f.store, f.chain[2])
+      if (cancelled) {
+        const middle = f.store.getBot(f.bots[1].id)
+        f.store.update({ ...middle, expectedVersion: middle.version, archived: true })
+      } else finish(f.store, integration, "FINAL_INTEGRATION", Boolean(f.group))
+      const expected = cancelled ? "Bot 已归档" : "FINAL_INTEGRATION"
+      const exchange = () => f.store.exchange(f.bots[0].id, f.chain[1].id, f.group?.id, f.work?.id)
+      expect(exchange().reply?.message).toContain(expected)
+      expect(exchange().reply?.delivered).toBe(false)
+      f.store.flushReplies()
+      expect(exchange().reply?.message).toContain(expected)
+      expect(exchange().reply?.delivered).toBe(true)
+      expect(f.store.exchangeHistory(f.bots[0].id, f.chain[1].id, f.group?.id, undefined, f.work?.id)
+        .items.find(item => item.taskId === f.chain[1].id)?.reply?.message).toContain(expected)
+    }
+  })
+
+  it("does not confuse two handoffs to the same peer under one root in exchange history", () => {
+    const f = fixture(2, "private", false)
+    const second = f.store.delegate(f.root.id, f.bots[1].id, "Separate request", "separate-request")
+    f.store.settle(f.root.id, "completed", null, "Waiting")
+    f.store.settle(f.chain[1].id, "completed", null, "Waiting")
+    f.store.settle(f.chain[2].id, "completed", null, "FACT")
+    const integration = receipt(f.store, f.chain[2])
+    finish(f.store, integration, "FIRST_INTEGRATED")
+    finish(f.store, second, "SECOND_DIRECT")
+    f.store.flushReplies()
+    expect(f.store.exchange(f.bots[0].id, f.chain[1].id).reply?.message).toBe("FIRST_INTEGRATED")
+    expect(f.store.exchange(f.bots[0].id, second.id).reply?.message).toBe("SECOND_DIRECT")
+  })
+
   it("does not reactivate an archived intermediate after a late child finishes", () => {
     const f = fixture()
     const middle = f.store.getBot(f.bots[1].id)
-    const archived = f.store.update({ ...middle, expectedVersion: middle.version, archived: true })
+    expect(() => f.store.update({ ...middle, expectedVersion: middle.version, archived: true }))
+      .toThrow("关联协作")
+    // Old versions permitted this state. Retain the late-result guard for stored history.
+    f.db.run("UPDATE bots SET archived=1 WHERE id=?", [middle.id])
+    const archived = f.store.getBot(middle.id)
     f.store.settle(f.chain[2].id, "completed", null, "FACT")
     f.store.flushReplies()
     f.store.update({ ...archived, expectedVersion: archived.version, archived: false })
@@ -879,7 +1113,7 @@ describe("nested private collaboration result return", () => {
       host.cancel(activeReceipt!.id)
       await vi.waitFor(() => expect(f.store.getTask(activeReceipt!.id).state).toBe("cancelled"))
       releaseExtra()
-      await vi.waitFor(() => expect(f.store.getTask(lastChild!.id).state).toBe("completed"))
+      await vi.waitFor(() => expect(f.store.getTask(lastChild!.id).state).toBe(when === "after return" ? "completed" : "cancelled"))
       const late = f.store.recentTasks().find((task) => task.requestId === `reply-${lastChild!.id}`)
       expect(late?.state ?? "cancelled").toBe("cancelled")
       expect(resumed).not.toHaveBeenCalled()
@@ -888,7 +1122,7 @@ describe("nested private collaboration result return", () => {
   )
 
   it.each(["complete", "cancel"] as const)(
-    "keeps an already started child result's managed command owner until its own %s receipt",
+    "cascades Stop while retaining each started result's command owner until its own %s receipt",
     async (outcome) => {
       const f = fixture(0)
       f.store.settle(f.root.id, "completed", null, "Earlier unrelated history")
@@ -989,9 +1223,13 @@ describe("nested private collaboration result return", () => {
       expect(f.store.continuationCommandIds(source!.id)).toEqual(["source-command"])
       expect(f.store.continuationCommandIds(resumed!.id)).toEqual(["child-command"])
       host.cancel(source!.id)
-      await vi.waitFor(() =>
-        expect(cancelCommands).toHaveBeenCalledExactlyOnceWith(middle.threadId, ["source-command"])
-      )
+      host.cancel(source!.id)
+      await vi.waitFor(() => expect(cancelCommands).toHaveBeenCalledTimes(2))
+      expect(cancelCommands.mock.calls).toEqual([
+        [middle.threadId, ["source-command"]], [middle.threadId, ["child-command"]]
+      ])
+      expect(f.store.getTask(source!.id).state).toBe("queued")
+      expect(f.store.getTask(resumed!.id).state).toBe("queued")
       lifecycles.get("source-command")!.settled(result("source-command", true))
       pendingStops.get("source-command")!()
       await vi.waitFor(() => expect(f.store.getTask(source!.id).state).toBe("cancelled"))
@@ -1001,9 +1239,14 @@ describe("nested private collaboration result return", () => {
       expect(f.store.nextQueued([])).toBeNull()
       if (outcome === "complete") {
         lifecycles.get("child-command")!.settled(result("child-command", false))
-        await vi.waitFor(() => expect(f.store.getTask(resumed!.id).state).toBe("completed"))
-        expect(executions).toEqual(["source-start", "child-start", "child-resume"])
-        expect(cancelCommands).toHaveBeenCalledTimes(1)
+        expect(f.store.getTask(resumed!.id).state).toBe("queued")
+        expect(f.store.continuationCommandResults(resumed!.id)).toEqual([
+          expect.objectContaining({ task_id: "child-command", exitCode: 0, output: "ACTUAL_CHILD_RESULT", state: "completed" })
+        ])
+        pendingStops.get("child-command")!()
+        await vi.waitFor(() => expect(f.store.getTask(resumed!.id).state).toBe("cancelled"))
+        expect(executions).toEqual(["source-start", "child-start"])
+        expect(cancelCommands).toHaveBeenCalledTimes(2)
       } else {
         host.cancel(resumed!.id)
         await vi.waitFor(() =>
@@ -1024,4 +1267,45 @@ describe("nested private collaboration result return", () => {
       expect(errors).not.toHaveBeenCalled()
     }
   )
+})
+
+// A result turn resumes the whole original handoff, not just its own children.
+it.each(["private", "work", "group"] as const)("waits for sibling results before returning the %s aggregate", scope => {
+  const { store, bots, chain, root, group } = fixture(1, scope, false, ["report.txt"])
+  const parent = chain[1]
+  const peers = ["Fast", "Slow", "Follow-up"].map(name => store.create({ name, instructions: "", color: "#123456", modelRef: null }))
+  if (group) store.saveGroup({ name: group.name, memberIds: [...group.memberIds, ...peers.map(b => b.id)] }, { id: group.id, version: group.version })
+  const fast = store.delegate(parent.id, peers[0].id, "First review", "fast")
+  const slow = store.delegate(parent.id, peers[1].id, "Second review", "slow")
+  store.settle(root.id, "completed", null, "Dispatched", undefined, Boolean(group))
+  store.settle(parent.id, "completed", null, "Waiting", undefined, Boolean(group))
+  store.transition(fast.id, "running")
+  store.transition(slow.id, "running")
+  store.settle(fast.id, "completed", null, "First result", undefined, Boolean(group))
+  store.flushReplies()
+  const first = store.recentTasks().find(t => t.requestId === `reply-${fast.id}`)!
+  store.transition(first.id, "running")
+  expect(store.peerHandoff(first.id)).toMatchObject({ owned: true, pending: true, outputFiles: ["report.txt"] })
+  // A receipt may also dispatch its own follow-up, which belongs to this handoff.
+  const followup = store.delegate(first.id, peers[2].id, "Check extra detail", "followup")
+  store.settle(first.id, "completed", null, "Awaiting remaining reviews", undefined, Boolean(group))
+  store.flushReplies()
+  expect(store.recentTasks().some(t => t.requestId === `reply-${first.id}`)).toBe(false)
+  store.settle(slow.id, "completed", null, "Second result", undefined, Boolean(group))
+  store.flushReplies()
+  const second = store.recentTasks().find(t => t.requestId === `reply-${slow.id}`)!
+  store.transition(second.id, "running")
+  expect(store.peerHandoff(second.id).pending).toBe(true)
+  store.settle(second.id, "completed", null, "Awaiting follow-up", undefined, Boolean(group))
+  store.transition(followup.id, "running")
+  store.settle(followup.id, "completed", null, "Final detail", undefined, Boolean(group))
+  store.flushReplies()
+  const final = store.recentTasks().find(t => t.requestId === `reply-${followup.id}`)!
+  store.transition(final.id, "running")
+  expect(store.peerHandoff(final.id)).toMatchObject({ owned: true, pending: false, outputFiles: ["report.txt"] })
+  store.settle(final.id, "completed", null, "Integrated report", undefined, Boolean(group))
+  store.flushReplies()
+  const deliveries = store.recentTasks().filter(t => t.origin.kind === "bot" && !t.origin.expectsReply && t.botId === bots[0].id)
+  expect(deliveries).toHaveLength(1)
+  expect(deliveries[0].message).toContain("Integrated report")
 })

@@ -221,6 +221,7 @@ export interface QuestionCardQuestion {
   header: string
   question: string
   options: ReadonlyArray<{ label: string; description?: string }>
+  allowMultiple?: boolean
   /** True once answered by short code — rendered read-only, never resubmitted. */
   answered?: boolean
   answeredLabel?: string
@@ -306,7 +307,20 @@ export function buildQuestionCard(input: QuestionCardInput): CardComponent[] {
 
   const controls: CardComponent[] = []
   for (const question of unanswered) {
-    controls.push({
+    // The gateway contract defines string feedback, but not native multi-selector
+    // encoding. Use the supported text input with an explicit numbered format.
+    controls.push(question.allowMultiple ? {
+      subType: "inputBox",
+      title: question.header,
+      promptText: [question.question, ...question.options.map((option, index) =>
+        `${index + 1}. ${option.label}${option.description ? `（${option.description}）` : ""}`
+      ), "填写编号，多个编号用逗号分隔，如 1,2"].join("\n"),
+      feedbackKey: question.key,
+      required: false,
+      minLine: 1,
+      maxLine: 2,
+      fixLine: 1
+    } : {
       subType: "listSelector",
       title: question.header,
       promptText: question.question,

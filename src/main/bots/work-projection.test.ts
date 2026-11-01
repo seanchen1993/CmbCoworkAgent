@@ -102,6 +102,9 @@ describe("work activity projection query boundaries", () => {
       expect(
         plan.some((detail) => detail.startsWith("SEARCH p USING INDEX bot_tasks_work_history"))
       ).toBe(false)
+      // Workflow ownership also seeks exact source IDs; it must not scan unrelated task history.
+      expect(plan.some(detail => detail.startsWith("SCAN wf_owner"))).toBe(false)
+      expect(plan.some(detail => detail.startsWith("SEARCH r USING INDEX bot_workflow_refs_source"))).toBe(true)
       // Compare every projected field against the prior SQL, not only peer counts.
       const priorSql = sql.replaceAll("=+w.id", "=w.id")
       expect(f.db.exec(sql, bindings)).toEqual(f.db.exec(priorSql, bindings))

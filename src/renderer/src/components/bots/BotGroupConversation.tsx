@@ -64,7 +64,11 @@ import {
   useBotGroupDrafts
 } from "@/lib/bot-group-drafts"
 import { splitBotInlineReasoning } from "@/lib/bot-inline-reasoning"
-import { EMPTY_GROUP_HISTORY, mergeGroupHistory } from "@/lib/bot-group-history"
+import {
+  EMPTY_GROUP_HISTORY,
+  mergeGroupHistory,
+  readGroupHistoryRefresh
+} from "@/lib/bot-group-history"
 import {
   MAX_ATTACHMENT_FILE_BYTES,
   MAX_ATTACHMENT_PICKER_FILES,
@@ -109,6 +113,8 @@ export function BotGroupConversation({
 }) {
   const [history, setHistory] = useState(EMPTY_GROUP_HISTORY)
   const { messages } = history
+  const messagesRef = useRef(messages)
+  messagesRef.current = messages
   const answerReplies = useMemo(() => botGroupQuestionReplies(messages), [messages])
   const questions = useGroupQuestions(client.hostId, group.id, tasks)
   const timeline = useMemo<GroupTimelineItem[]>(
@@ -296,16 +302,30 @@ export function BotGroupConversation({
       pending = false,
       dirty = true
     const refresh = async () => {
-      if (anchorRef.current) return
       dirty = true
       if (pending) return
       pending = true
       try {
         while (dirty && !disposed) {
           dirty = false
-          const page = await client.groupMessages(group.id)
-          if (!disposed && !anchorRef.current) {
-            setHistory((previous) => mergeGroupHistory(previous, page))
+          const generation = historyGeneration.current
+          const anchor = anchorRef.current
+          const isCurrent = () =>
+            !disposed && historyGeneration.current === generation && anchorRef.current === anchor
+          const result = await readGroupHistoryRefresh(
+            (cursor) => client.groupMessages(group.id, cursor),
+            messagesRef.current,
+            !!anchor,
+            isCurrent
+          )
+          if (result && isCurrent()) {
+            setHistory((previous) => {
+              const loaded = new Set(previous.messages.map((item) => item.id))
+              return mergeGroupHistory(previous, [
+                ...result.page,
+                ...result.questions.filter((item) => loaded.has(item.id))
+              ])
+            })
             setError(null)
           }
         }

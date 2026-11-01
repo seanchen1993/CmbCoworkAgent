@@ -1,3 +1,11 @@
+import { mkdtempSync, rmSync } from "node:fs"
+import { join } from "node:path"
+import { tmpdir } from "node:os"
+import { DatabaseSync } from "node:sqlite"
+import { NativeSqliteAdapter } from "../db/native-sqlite-adapter"
+import { BotStore } from "../bots/store"
+import { LocalBotHost, type BotRunPort } from "../bots/host"
+import { createBotNotificationDispatcher } from "../bots/notification-dispatch"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { PendingNotificationScheduler } from "./pending-notification-scheduler"
 import { coordinatorWorkerManager } from "./coordinator-worker-manager"
@@ -729,4 +737,317 @@ describe("pending notification scheduler", () => {
     await scheduler.check(THREAD)
     expect(startRun).toHaveBeenCalledTimes(4)
   })
+})
+
+// Exercise the actual durable Bot queue and scheduler together. The controlled
+// runtime reports real terminal codes; it does not launch an app or a model.
+function botNotificationHarness(runtime: BotRunPort) {
+  const db = new NativeSqliteAdapter(new DatabaseSync(":memory:"))
+  const store = new BotStore(db)
+  const host = new LocalBotHost(store, runtime)
+  const bot = host.create({ name: "Notification QA", instructions: "", color: "#123456", modelRef: null })
+  const metadata = { botId: bot.id, botHostId: "local", agentMode: "workflow", workspacePath: WORKSPACE }
+  const harness = createHarness({ agentMode: "workflow", botMetadata: metadata })
+  harness.scheduler.setManagedDispatcher(createBotNotificationDispatcher(
+    () => ({ metadata: JSON.stringify(metadata) }), () => host
+  ))
+  return { ...harness, db, store, host, bot, close: async () => {
+    await host.stop()
+    harness.scheduler.stop()
+    db.close()
+  } }
+}
+
+describe("durable Bot notification attempts", () => {
+  it.each(["provider", "setup"])("retries %s failure after the existing delay, coalesces early events and never replays success", async (failure) => {
+    let now = Date.now()
+    vi.spyOn(Date, "now").mockImplementation(() => now)
+    const runs = pendingRuns(persistedRun())
+    let attempts = 0
+    const runtime: BotRunPort = {
+      onAvailable: () => () => {},
+      acquire: () => {
+        const attempt = ++attempts
+        return {
+          notificationTerminal: () => failure === "setup" && attempt === 1 ? undefined
+            : { outcome: attempt === 1 ? "error" : "success", code: attempt === 1 ? "provider_error" : "normal" },
+          execute: async () => {
+            h.scheduler.requestCheck(h.bot.threadId) // IPC renotify before durable settle
+            if (attempt === 1) {
+              if (failure === "setup") throw new Error("synthetic setup failure")
+              return { state: "failed", reason: "synthetic provider failure" }
+            }
+            await runs.deliverOne()
+            return { state: "completed", result: "Summary delivered" }
+          },
+          release: () => h.scheduler.requestCheck(h.bot.threadId)
+        }
+      }
+    }
+    const h = botNotificationHarness(runtime)
+    try {
+      await h.scheduler.check(h.bot.threadId)
+      expect(attempts).toBe(1)
+      expect(h.timers.delays()).toEqual([2000])
+      now += 1999
+      await h.scheduler.check(h.bot.threadId)
+      expect(attempts).toBe(1)
+      now += 1
+      h.timers.run()
+      await vi.waitFor(() => expect(h.store.recentTasks().filter(t => t.state === "completed")).toHaveLength(1))
+      await vi.waitFor(() => expect(h.timers.pending()).toBe(0))
+      await h.scheduler.check(h.bot.threadId)
+      expect(attempts).toBe(2)
+      expect(h.store.recentTasks().map(t => t.state).sort()).toEqual(["completed", "failed"])
+      expect(h.startRun).not.toHaveBeenCalled()
+    } finally { await h.close() }
+  })
+
+  it("bounds persistent failures to three attempts and preserves the original cooldown", async () => {
+    let now = Date.now()
+    vi.spyOn(Date, "now").mockImplementation(() => now)
+    pendingRuns(persistedRun())
+    let attempts = 0
+    const h = botNotificationHarness({
+      onAvailable: () => () => {},
+      acquire: () => ({
+        notificationTerminal: () => ({ outcome: "error", code: "provider_error" }),
+        execute: async () => { attempts++; return { state: "failed", reason: "provider unavailable" } },
+        release() {}
+      })
+    })
+    try {
+      for (let i = 0; i < 3; i++) {
+        await h.scheduler.check(h.bot.threadId)
+        now += 2000
+      }
+      expect(attempts).toBe(3)
+      // An earlier wake may still be queued when a fresh external check ran
+      // first; it must not bypass the spent budget or start a fourth attempt.
+      h.timers.run()
+      await vi.waitFor(() => expect(h.timers.pending()).toBe(0))
+      expect((await h.scheduler.check(h.bot.threadId)).reason).toBe("summary-attempts-exhausted")
+      expect(attempts).toBe(3)
+      now += 60000
+      await h.scheduler.check(h.bot.threadId)
+      expect(attempts).toBe(4)
+    } finally { await h.close() }
+  })
+
+  it.each(["cancelled", "hook_halt", "failure_fuse", "prompt_blocked"])("does not resurrect %s after repeated discovery or dispatcher recreation", async (code) => {
+    pendingRuns(persistedRun())
+    let attempts = 0
+    const h = botNotificationHarness({
+      onAvailable: () => () => {},
+      acquire: () => ({
+        notificationTerminal: () => ({ outcome: "error", code }),
+        execute: async () => { attempts++; return { state: "failed", reason: code } },
+        release() {}
+      })
+    })
+    try {
+      await h.scheduler.check(h.bot.threadId)
+      expect(h.timers.pending()).toBe(0)
+      await h.scheduler.check(h.bot.threadId)
+      const dispatch = createBotNotificationDispatcher(
+        () => ({ metadata: JSON.stringify({ botId: h.bot.id, botHostId: "local" }) }), () => h.host
+      )
+      const first = h.store.recentTasks()[0]
+      expect(first.origin.kind).toBe("notification")
+      if (first.origin.kind !== "notification") throw new Error("unexpected origin")
+      await dispatch({ threadId: h.bot.threadId, kind: "workflow", key: first.origin.key, runStartedAt: first.origin.runStartedAt })
+      expect(attempts).toBe(1)
+      expect(h.store.notificationTerminal(first.id)).toEqual({ outcome: "error", code })
+    } finally { await h.close() }
+  })
+
+  it("shutdown releases a queued notification check without starting a model", async () => {
+    pendingRuns(persistedRun())
+    const h = botNotificationHarness({ onAvailable: () => () => {}, acquire: () => null })
+    try {
+      const check = h.scheduler.check(h.bot.threadId)
+      await vi.waitFor(() => expect(h.store.recentTasks()).toHaveLength(1))
+      await h.host.stop()
+      expect(await check).toEqual({ started: false, reason: "managed-queue" })
+      expect(h.store.recentTasks()[0].state).toBe("queued")
+      expect(h.startRun).not.toHaveBeenCalled()
+    } finally { await h.close() }
+  })
+
+  it("does not issue a retry permit after durable settlement fails", async () => {
+    pendingRuns(persistedRun())
+    let attempts = 0
+    const h = botNotificationHarness({
+      onAvailable: () => () => {},
+      acquire: () => ({
+        notificationTerminal: () => ({ outcome: "error", code: "provider_error" }),
+        execute: async () => { attempts++; return { state: "failed" } },
+        release() {}
+      })
+    })
+    vi.spyOn(h.store, "settleRun").mockImplementation(() => { throw new Error("synthetic storage failure") })
+    try {
+      await h.scheduler.check(h.bot.threadId)
+      await h.scheduler.check(h.bot.threadId)
+      expect(attempts).toBe(1)
+      expect(h.store.recentTasks()[0].state).toBe("running")
+      expect(h.store.notificationTerminal(h.store.recentTasks()[0].id)).toBeUndefined()
+    } finally { await h.close() }
+  })
+})
+
+it("a consumed policy halt does not strand an older Bot workflow result", async () => {
+  const runs = pendingRuns(persistedRun({ runId: "newest" }), persistedRun({ runId: "older" }))
+  let attempts = 0
+  const h = botNotificationHarness({
+    onAvailable: () => () => {},
+    acknowledgeWorkflowNotification: async () => { await runs.deliverOne() },
+    acquire: () => {
+      const attempt = ++attempts
+      return {
+        notificationTerminal: () => ({ outcome: attempt === 1 ? "error" : "success", code: attempt === 1 ? "hook_halt" : "normal" }),
+        execute: async () => ({ state: attempt === 1 ? "failed" : "completed" }),
+        release: () => h.scheduler.requestCheck(h.bot.threadId)
+      }
+    }
+  })
+  try {
+    await h.scheduler.check(h.bot.threadId)
+    expect(attempts).toBe(2)
+    expect(h.store.recentTasks().map(t => t.state).sort()).toEqual(["completed", "failed"])
+    expect(h.startRun).not.toHaveBeenCalled()
+    expect(h.timers.pending()).toBe(0)
+  } finally { await h.close() }
+})
+
+it("after a summary succeeds, a failed acknowledgement retries only the acknowledgement", async () => {
+  let now = Date.now()
+  vi.spyOn(Date, "now").mockImplementation(() => now)
+  const runs = pendingRuns(persistedRun())
+  let executions = 0, acknowledgements = 0
+  const h = botNotificationHarness({
+    onAvailable: () => () => {},
+    acknowledgeWorkflowNotification: async () => {
+      if (++acknowledgements === 1) throw new Error("synthetic ack write failure")
+      await runs.deliverOne()
+    },
+    acquire: () => ({
+      notificationTerminal: () => ({ outcome: "success", code: "normal" }),
+      execute: async () => { executions++; return { state: "completed" } },
+      release() {}
+    })
+  })
+  try {
+    await h.scheduler.check(h.bot.threadId)
+    expect(executions).toBe(1)
+    expect(h.timers.delays()).toEqual([2000])
+    now += 2000
+    await h.scheduler.check(h.bot.threadId)
+    expect(executions).toBe(1)
+    expect(acknowledgements).toBe(2)
+  } finally { await h.close() }
+})
+
+it("scheduling overhead cannot consume the only managed retry wake", async () => {
+  let now = 100000
+  vi.spyOn(Date, "now").mockImplementation(() => now)
+  pendingRuns(persistedRun())
+  let due = 0, callback: (() => void) | undefined, attempts = 0
+  const metadata = { botId: "b", botHostId: "local", agentMode: "workflow", workspacePath: WORKSPACE }
+  const scheduler = new PendingNotificationScheduler({
+    getThread: (() => ({ thread_id: THREAD, metadata: JSON.stringify(metadata) })) as never,
+    setTimer: ((cb: () => void, delay: number) => { callback = cb; due = now + delay; now += 5; return 1 }) as never,
+    clearTimer: () => {}, log: () => {}
+  })
+  scheduler.setManagedDispatcher(createBotNotificationDispatcher(
+    () => ({ metadata: JSON.stringify(metadata) }), () => ({
+      enqueueNotification: () => { attempts++; return { id: `task-${attempts}`, state: "queued" } as never },
+      waitForNotification: async () => ({ outcome: "error", code: "provider_error" }),
+      acknowledgeNotification: async () => false
+    })
+  ))
+  try {
+    await scheduler.check(THREAD)
+    expect(attempts).toBe(1)
+    now = due
+    callback!()
+    await new Promise(resolve => setImmediate(resolve))
+    expect(attempts).toBe(2)
+  } finally { scheduler.stop() }
+})
+
+it("a direct Stop persists before cleanup so restart cannot retry the stopped summary", async () => {
+  const root = mkdtempSync(join(tmpdir(), "bot-notification-stop-"))
+  const snapshot = join(root, "stopped.db")
+  const run = persistedRun()
+  pendingRuns(run)
+  let finish!: () => void
+  let entered = false
+  const h = botNotificationHarness({
+    onAvailable: () => () => {},
+    acquire: (_bot, task) => ({
+      notificationTerminal: () => ({ outcome: "error", code: "provider_error" }),
+      execute: async () => {
+        h.host.recordNotificationTerminal(task.id, { outcome: "error", code: "provider_error" })
+        entered = true
+        await new Promise<void>(resolve => { finish = resolve })
+        return { state: "failed" }
+      },
+      release() {}
+    })
+  })
+  let recovered: LocalBotHost | undefined, copy: NativeSqliteAdapter | undefined
+  try {
+    const pending = h.scheduler.check(h.bot.threadId)
+    await vi.waitFor(() => expect(entered).toBe(true))
+    const task = h.store.recentTasks()[0]
+    h.host.cancel(task.id)
+    // Crash snapshot while the original executor is still unwinding. No business
+    // state is rewritten by the test; normal Store recovery sees this snapshot.
+    h.db.exec(`VACUUM INTO '${snapshot.replaceAll("'", "''")}'`)
+    copy = new NativeSqliteAdapter(new DatabaseSync(snapshot))
+    const store = new BotStore(copy)
+    store.recover()
+    recovered = new LocalBotHost(store, { onAvailable: () => () => {}, acquire: () => null })
+    recovered.enqueueNotification(h.bot.id, h.bot.threadId, "workflow", run.runId, "summary", undefined, run.startedAt)
+    expect(store.recentTasks()).toHaveLength(1)
+    expect(store.notificationTerminal(task.id)).toEqual({ outcome: "error", code: "cancelled" })
+    finish()
+    await pending
+  } finally {
+    finish?.()
+    await recovered?.stop()
+    copy?.close()
+    await h.close()
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+it("drains three reported crash interruptions and the remaining result without spending the retry budget", async () => {
+  const pending = ["crashed-3", "crashed-2", "crashed-1", "older-success"].map(runId => persistedRun({ runId }))
+  const runs = pendingRuns(...pending)
+  let executions = 0
+  const h = botNotificationHarness({
+    onAvailable: () => () => {},
+    acknowledgeWorkflowNotification: async () => { await runs.deliverOne() },
+    acquire: () => ({
+      notificationTerminal: () => ({ outcome: "success", code: "normal" }),
+      execute: async () => { executions++; return { state: "completed", result: "Older result" } },
+      release() {}
+    })
+  })
+  try {
+    for (const run of pending.slice(0, 3)) {
+      const task = h.host.enqueueNotification(h.bot.id, h.bot.threadId, "workflow", run.runId, "Summary", undefined, run.startedAt)!
+      h.store.transition(task.id, "running")
+      h.store.recover()
+    }
+    await h.scheduler.check(h.bot.threadId)
+    expect(executions).toBe(1)
+    expect(h.store.recentTasks().filter(t => t.state === "interrupted")).toHaveLength(3)
+    expect(h.store.recentTasks().filter(t => t.state === "completed")).toHaveLength(1)
+    expect(await workflowRunManager.findPendingNotificationAsync(WORKSPACE, h.bot.threadId)).toBeNull()
+    expect(h.timers.pending()).toBe(0)
+    expect(h.startRun).not.toHaveBeenCalled()
+  } finally { await h.close() }
 })

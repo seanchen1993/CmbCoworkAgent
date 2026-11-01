@@ -160,6 +160,8 @@ export interface BotImReplacement {
 }
 
 export interface BotImClient {
+  /** Local save of a retained group artifact, scoped by the host's binding ID. */
+  exportFile?(botId: string, conversationId: string, fileId: string): Promise<boolean>
   stopConversation(botId: string, conversationId: string): Promise<void>
   conversationWorks?(
     botId: string,
@@ -193,6 +195,14 @@ export interface BotImClient {
 }
 
 /** Local binding ID scopes pages to one IM audience; never use the platform group ID. */
-export function botImBrowserScope(bindingId: string, botId: string): string {
-  return `im-${bindingId}--${botId}`
+export function botImBrowserScope(
+  bindingId: string,
+  botId: string,
+  executorId = botId,
+  threadId?: string
+): string {
+  const audience = `im-${bindingId}--${botId}`
+  // Keep the desktop audience stable; independent peer threads own separate pages.
+  if (threadId) return `${audience}--${executorId}--${threadId}`
+  return executorId === botId ? audience : `${audience}--${executorId}`
 }

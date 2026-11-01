@@ -139,7 +139,7 @@ function renderQuestion(session: RemoteUserInputSession): string {
       (option, index) => `${index + 1}. ${option.label} — ${option.description}`
     ),
     "",
-    `回复 /回答 ${session.code} <编号>`,
+    `回复 /回答 ${session.code} ${question.allowMultiple ? "<编号，可用逗号分隔，如 1,2>" : "<编号>"}`,
     `如以上选项都不合适：/回答 ${session.code} 其他 <你的回答>`,
     `短码在本轮等待期间一直有效；普通文本不会被当作回答。`
   ].join("\n")
@@ -150,6 +150,16 @@ function answerFor(
   rawAnswer: string
 ): { answer: UserInputAnswer } | { message: string } {
   const normalized = rawAnswer.trim()
+  if (question.allowMultiple && /^\d+(?:\s*[,，]\s*\d+)*$/u.test(normalized)) {
+    const indices = normalized.split(/[,，]/u).map((value) => Number(value.trim()) - 1)
+    if (new Set(indices).size !== indices.length || indices.some((index) => !question.options[index]))
+      return { message: `请输入不重复的选项编号（1-${question.options.length}），多个编号用逗号分隔。` }
+    return { answer: {
+      type: "options",
+      questionId: question.id,
+      options: indices.map((optionIndex) => ({ optionIndex, ...question.options[optionIndex] }))
+    } }
+  }
   const optionMatch = normalized.match(/^(\d+)$/u)
   if (optionMatch) {
     const optionIndex = Number(optionMatch[1]) - 1
@@ -414,7 +424,9 @@ export class ImRemoteUserInputService {
       const custom = submitted.get(`${key}${QUESTION_OTHER_SUFFIX}`)?.trim() ?? ""
       const selected = submitted.get(key)?.trim() ?? ""
       // Free text wins: someone who filled it in meant none of the options.
-      const raw = custom ? `其他 ${custom}` : selected ? String(Number(selected) + 1) : ""
+      const raw = custom ? `其他 ${custom}` : selected
+        ? question.allowMultiple ? selected : String(Number(selected) + 1)
+        : ""
       if (!raw) {
         missing.push(`${index + 1}. ${question.header}`)
         continue
@@ -595,6 +607,7 @@ export class ImRemoteUserInputService {
         key: ImRemoteUserInputService.questionKey(index),
         header: question.header,
         question: question.question,
+        allowMultiple: question.allowMultiple,
         options: question.options.map((option) => ({
           label: option.label,
           description: option.description
@@ -603,6 +616,8 @@ export class ImRemoteUserInputService {
         answeredLabel:
           recorded?.type === "option"
             ? recorded.label
+            : recorded?.type === "options"
+              ? recorded.options.map((option) => option.label).join("、")
             : recorded?.type === "other"
               ? recorded.text
               : undefined

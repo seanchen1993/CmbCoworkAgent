@@ -6,6 +6,7 @@ import { afterEach, expect, it, vi } from "vitest"
 import { NativeSqliteAdapter } from "../db/native-sqlite-adapter"
 import { LocalSandbox } from "../agent/local-sandbox"
 import { BotStore } from "./store"
+import { LocalBotHost } from "./host"
 import type {
   BackgroundCommandResult,
   BackgroundCommandStart
@@ -75,6 +76,98 @@ async function fixture(directGroup = false) {
     store.recentTasks().filter((t) => t.botId === a.id && t.origin.kind === "bot")
   return { db, store, sandbox, task, b, group, dir, starts, results, launch, replies }
 }
+
+it.each([[false, false], [true, false], [true, true]])("single-task Stop preserves earlier jobs even with a shared authorization source (notification=%s, receiptFirst=%s)", async (notification, receiptFirst) => {
+  const f = await fixture(true)
+  f.store.settle(f.task.id, "completed", null, "Prior history", undefined, true)
+  const gate = join(f.dir, "release"), ownFile = join(f.dir, "stopped.txt"), otherFile = join(f.dir, "other.txt")
+  const program = (path: string) => `import{existsSync,writeFileSync}from'node:fs';const t=setInterval(()=>{if(existsSync(${JSON.stringify(gate)})){writeFileSync(${JSON.stringify(path)},'DONE');clearInterval(t)}},20)`
+  const otherScript = join(f.dir, "other.mjs"), ownScript = join(f.dir, "stopped.mjs"), triggerScript = join(f.dir, "trigger.mjs")
+  await writeFile(otherScript, program(otherFile))
+  await writeFile(ownScript, program(ownFile))
+  await writeFile(triggerScript, "console.log('BUILD_COMPLETE')")
+  let launched = false, taskId = "", commandId = "", otherId = "", triggerId = "", originalTaskId = ""
+  const results: BackgroundCommandResult[] = []
+  const cancel = vi.fn((thread: string, ids: readonly string[]) => LocalSandbox.cancelBackgroundTasksAndWait(thread, ids))
+  let host: LocalBotHost
+  const launch = async (task: { id: string; threadId: string }, signal: AbortSignal, file: string) => {
+    const lifecycle = host.commandLifecycle(task.id)
+    const sandbox = new LocalSandbox({ rootDir: f.dir, runId: task.threadId, windowsSandbox: "none", abortSignal: signal,
+      backgroundCommandLifecycle: { ...lifecycle,
+        accepted: start => {
+          lifecycle.accepted(start)
+          if (file === otherScript) otherId = start.id
+          else if (file === triggerScript) triggerId = start.id
+          else commandId = start.id
+        },
+        settled: result => { lifecycle.settled(result); results.push(result) }
+      } })
+    Reflect.set(sandbox, "runPreToolUseHookForTool", async () => null)
+    Reflect.set(sandbox, "runPreToolUseHook", async () => null)
+    Reflect.set(sandbox, "runHooks", async () => null)
+    Reflect.set(sandbox, "requestHumanGateForExecute", async () => undefined)
+    expect(await sandbox.executeBackground(`"${process.execPath}" "${file}"`, f.dir)).toContain("accepted")
+  }
+  host = new LocalBotHost(f.store, {
+    onAvailable: () => () => {},
+    cancelCommands: cancel,
+    cancelBackground: (thread) => LocalSandbox.cancelBackgroundTasksAndWait(thread),
+    acquire: (_bot, task) => ({ release() {}, execute: async (signal) => {
+      if (task.origin.kind === "group" && !originalTaskId) {
+        originalTaskId = task.id
+        await launch(task, signal, otherScript)
+        if (notification) await launch(task, signal, triggerScript)
+        return { state: "completed", result: "Started", explicitGroupMessages: true }
+      }
+      if (notification
+        ? task.origin.kind !== "notification" || task.origin.key !== triggerId
+        : task.origin.kind !== "group") return { state: "completed", result: "Noted", explicitGroupMessages: true }
+      taskId = task.id
+      await launch(task, signal, ownScript)
+      launched = true
+      await new Promise<void>(resolve => {
+        signal.addEventListener("abort", () => resolve(), { once: true })
+        if (signal.aborted) resolve()
+      })
+      return { state: "completed", result: "Stopped", explicitGroupMessages: true }
+    } })
+  }, Infinity)
+  cleanups.push(() => host.stop())
+  host.sendGroup({ groupId: f.group.id, requestId: "original-build", text: "Build and verify", targetBotIds: [f.task.botId] })
+  await vi.waitFor(() => expect(originalTaskId && f.store.getTask(originalTaskId).state).toBe("completed"))
+  if (!notification)
+    host.sendGroup({ groupId: f.group.id, requestId: "finite-stop", text: "Start another build", targetBotIds: [f.task.botId] })
+  await vi.waitFor(() => expect(launched).toBe(true))
+  if (notification) expect(f.store.commandUserRequest(taskId)?.id).toBe(originalTaskId)
+  const notice = (id: string) => f.store.recentTasks().find(task => task.origin.kind === "notification" && task.origin.key === id)
+  if (receiptFirst) {
+    await writeFile(gate, "go")
+    await vi.waitFor(() => expect(results.find(result => result.id === commandId)).toBeDefined())
+    await vi.waitFor(() => expect(results.find(result => result.id === otherId)).toBeDefined())
+    expect(notice(commandId)?.state).toBe("queued")
+    expect(notice(otherId)?.state).toBe("queued")
+  }
+  host.cancel(taskId)
+  host.cancel(taskId)
+  await vi.waitFor(() => expect(f.store.getTask(taskId).state).toBe("cancelled"))
+  if (receiptFirst) {
+    expect(cancel).not.toHaveBeenCalled()
+    expect(results.find(result => result.id === commandId)).toMatchObject({ exitCode: 0, cancelled: false })
+    expect(await readFile(ownFile, "utf8")).toBe("DONE")
+    expect(notice(commandId)?.state).toBe("cancelled")
+  } else {
+    expect(cancel).toHaveBeenCalledExactlyOnceWith(f.task.threadId, [commandId])
+    expect(results.find(result => result.id === commandId)).toMatchObject({ cancelled: true })
+    expect(results.some(result => result.id === otherId)).toBe(false)
+    await expect(readFile(ownFile, "utf8")).rejects.toMatchObject({ code: "ENOENT" })
+    expect(notice(commandId)).toBeUndefined()
+    await writeFile(gate, "go")
+  }
+  await vi.waitFor(() => expect(results.find(result => result.id === otherId)).toBeDefined())
+  expect(results.find(result => result.id === otherId)).toMatchObject({ exitCode: 0, cancelled: false })
+  expect(await readFile(otherFile, "utf8")).toBe("DONE")
+  await vi.waitFor(() => expect(notice(otherId)?.state).toBe("completed"))
+}, 10000)
 
 it.each([0, 7])(
   "retains the peer request until a real finite command exits (%s), then returns once",

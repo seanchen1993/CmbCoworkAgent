@@ -118,12 +118,23 @@ export class BotBrowserService {
     helpSkipped?: boolean
   } | null = null
   private generation = 0
+  private readonly scopeGenerations = new Map<string, number>()
+
+  private scopeGeneration(botId: string): number {
+    let generation = this.scopeGenerations.get(botId)
+    if (generation === undefined) {
+      generation = this.generation
+      this.scopeGenerations.set(botId, generation)
+    }
+    return generation
+  }
   private stopping = false
   private readonly returned = new Set<() => void>()
   private readonly downloads = new Map<Download, Promise<void>>()
   constructor(
     private readonly startEngine: () => Promise<BotBrowserEngine>,
-    private readonly workspace?: (botId: string) => string
+    private readonly workspace?: (botId: string) => string,
+    private readonly personalAudience?: (viewer: string, scope: string) => boolean
   ) {}
 
   private async start(): Promise<BrowserContext> {
@@ -201,6 +212,7 @@ export class BotBrowserService {
         this.pages.clear()
         this.human = null
         this.generation++
+        this.scopeGenerations.clear()
         void engine.close().catch(() => {})
         for (const wake of this.returned) wake()
       })
@@ -368,7 +380,7 @@ export class BotBrowserService {
     signal.throwIfAborted()
     if (this.stopping) throw new BotError("STOPPING", "浏览器正在退出")
     if (this.isRetired(botId)) throw new BotError("NOT_FOUND", "Bot 或群聊已删除")
-    if (this.human?.botId === botId || generation !== this.generation)
+    if (this.human?.botId === botId || generation !== this.scopeGeneration(botId))
       throw new BotError("CONFLICT", "浏览器控制权已改变，请等待用户归还，再重新观察页面")
   }
 
@@ -476,12 +488,12 @@ export class BotBrowserService {
         helpTargetClosed ||
         ![...this.pages.values()].some((entry) => entry.botId === botId && !entry.page.isClosed())
       ) {
-        this.check(signal, this.generation, botId)
+        this.check(signal, this.scopeGeneration(botId), botId)
         if (this.isRetired(botId)) throw new BotError("NOT_FOUND", "Bot 或群聊已删除")
         const pages = helpTargetClosed
           ? await this.lock.withKey("browser", () => this.pageList(botId))
           : []
-        this.check(signal, this.generation, botId)
+        this.check(signal, this.scopeGeneration(botId), botId)
         return JSON.stringify({
           closed: action.pageId ?? null,
           pages,
@@ -514,7 +526,7 @@ export class BotBrowserService {
           .join(" ")
       })
     }
-    const generation = this.generation
+    const generation = this.scopeGeneration(botId)
     this.check(signal, generation, botId)
     if (action.action === "upload" && withUploadFileLock) {
       // Keep file → browser lock order. Human waits return fresh evidence without uploading.
@@ -748,7 +760,7 @@ export class BotBrowserService {
           signal.aborted ||
           this.stopping ||
           this.human?.botId === botId ||
-          generation !== this.generation ||
+          generation !== this.scopeGeneration(botId) ||
           this.pages.get(entry.id) !== entry ||
           page.isClosed()
         )
@@ -764,10 +776,26 @@ export class BotBrowserService {
     })
   }
 
-  private async pageList(botId: string): Promise<BotBrowserState["pages"]> {
+  private inAudience(audience: string, owner: string): boolean {
+    return owner === audience || (
+      audience.startsWith("im-") && audience.split("--").length === 2 &&
+      owner.startsWith(`${audience}--`)
+    ) || this.personalAudience?.(audience, owner) === true
+  }
+  /** Desktop controls may select a delegated page; model actions keep their exact owner. */
+  private viewOwner(audience: string, pageId?: string): string {
+    if (!pageId && this.human && this.inAudience(audience, this.human.botId))
+      return this.human.botId
+    const page = pageId ? this.pages.get(pageId) : this.viewedPage(audience) ??
+      [...this.pages.values()].find(entry =>
+        this.inAudience(audience, entry.botId) && !entry.page.isClosed()
+      )
+    return page && this.inAudience(audience, page.botId) ? page.botId : audience
+  }
+  private async pageList(botId: string, includeDelegates = false): Promise<BotBrowserState["pages"]> {
     return Promise.all(
       [...this.pages.values()]
-        .filter((entry) => entry.botId === botId)
+        .filter((entry) => includeDelegates ? this.inAudience(botId, entry.botId) : entry.botId === botId)
         .map(async (entry) => ({
           id: entry.id,
           url: entry.page.url(),
@@ -789,13 +817,15 @@ export class BotBrowserService {
     // Read-only previews must not queue behind navigation or block takeover.
     // The engine bounds and coalesces captures for each exact native target.
     if (this.isRetired(botId)) throw new BotError("NOT_FOUND", "Bot 或群聊已删除")
+    const audience = botId
+    botId = this.viewOwner(audience, pageId)
     const targetId = pageId ?? (this.human?.botId === botId ? this.human.pageId : undefined)
     const selected = targetId ? this.pages.get(targetId) : this.viewedPage(botId)
     if (selected && selected.botId !== botId) throw new BotError("CONFLICT", "页面不属于此 Bot")
     // Remember selection before awaiting so a late capture cannot undo a newer selection.
     if (selected && !selected.page.isClosed()) this.rememberViewed(selected)
     const engine = this.engine
-    const pages = await this.pageList(botId)
+    const pages = await this.pageList(audience, true)
     let captureError: string | undefined
     const image =
       engine && selected && !selected.dialog && !selected.page.isClosed()
@@ -813,7 +843,7 @@ export class BotBrowserService {
     return {
       pages: pages.filter((page) => this.pages.has(page.id)),
       pageId: current?.id ?? null,
-      generation: this.human?.botId === botId ? this.human.generation : this.generation,
+      generation: this.human?.botId === botId ? this.human.generation : this.scopeGeneration(botId),
       control:
         this.human?.botId === botId
           ? this.human.status === "active"
@@ -833,6 +863,7 @@ export class BotBrowserService {
   }
 
   async takeOver(botId: string, pageId?: string, instruction?: string): Promise<void> {
+    botId = this.viewOwner(botId, pageId)
     if (this.stopping) throw new BotError("STOPPING", "浏览器正在退出")
     if (this.human && this.human.botId !== botId)
       throw new BotError("CONFLICT", "请先归还另一 Bot 的浏览器")
@@ -862,6 +893,7 @@ export class BotBrowserService {
       instruction,
       generation: ++this.generation
     }
+    this.scopeGenerations.set(botId, claim.generation)
     for (const entry of this.pages.values())
       if (entry.botId === botId) entry.automation.invalidate()
     this.human = claim
@@ -886,6 +918,7 @@ export class BotBrowserService {
     }
   }
   async giveBack(botId: string, expectedGeneration?: number, outcome?: "skipped"): Promise<void> {
+    botId = this.viewOwner(botId)
     if (outcome === "skipped" && expectedGeneration === undefined)
       throw new BotError("INVALID_INPUT", "跳过协助须提供当前浏览器控制版本")
     if (expectedGeneration !== undefined && expectedGeneration !== this.human?.generation)
@@ -913,7 +946,7 @@ export class BotBrowserService {
       this.human = null
       for (const entry of this.pages.values())
         if (entry.botId === botId) entry.automation.invalidate()
-      this.generation++
+      this.scopeGenerations.set(botId, ++this.generation)
       for (const wake of this.returned) wake()
     }
   }
@@ -923,6 +956,7 @@ export class BotBrowserService {
     address: string,
     expectedGeneration?: number
   ): Promise<void> {
+    botId = this.viewOwner(botId, pageId)
     const url = new URL(address)
     if (!["http:", "https:"].includes(url.protocol) || url.username || url.password)
       throw new BotError("INVALID_INPUT", "仅支持无内嵌凭据的 HTTP／HTTPS 地址")
@@ -952,6 +986,7 @@ export class BotBrowserService {
     action: BotBrowserHumanAction,
     expectedGeneration: number
   ): Promise<string | null> {
+    botId = this.viewOwner(botId, action.pageId)
     const claim = this.human
     const check = () => {
       if (
@@ -1010,10 +1045,10 @@ export class BotBrowserService {
     })
   }
   private isRetired(scope: string): boolean {
-    const [group, member] = scope.split("--")
+    const [group, ...members] = scope.split("--")
     return (
       this.retiredBots.has(scope) ||
-      (member !== undefined && this.retiredBots.has(member)) ||
+      members.some(member => this.retiredBots.has(member)) ||
       this.retiredGroups.has(group)
     )
   }
@@ -1030,7 +1065,7 @@ export class BotBrowserService {
   async removeBot(botId: string): Promise<void> {
     this.retiredBots.add(botId)
     const belongs = (scope: string) =>
-      scope === botId || (!botId.startsWith("group-") && scope.endsWith(`--${botId}`))
+      scope === botId || (!botId.startsWith("group-") && scope.split("--").slice(1).includes(botId))
     await this.clearPages(belongs)
   }
   removeGroupMember(groupId: string, botId: string): Promise<void> {

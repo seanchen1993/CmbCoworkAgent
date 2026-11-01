@@ -220,6 +220,8 @@ export type BotTaskOrigin =
   | {
       kind: "notification"
       notificationKind: "workflow" | "coordinator" | "command" | "reaction"
+      /** Workflow continuation inherits the verified launcher's collaboration family. */
+      rootTaskId?: string
       /** Host-owned originating turn, used to retain an authenticated IM route. */
       sourceTaskId?: string
       /** Inherits the host-owned collaboration quota; never an owner permission. */
@@ -375,8 +377,10 @@ export interface BotSnapshot {
     preview: string
     unread: boolean
   }>
-  /** Conversations with accepted native commands, including process-tree cleanup. */
+  /** Conversations with outstanding commands/workflows, including result and process cleanup. */
   backgroundThreads?: string[]
+  /** Conversations with outstanding delegated work; does not imply their own turn is busy. */
+  collaborationThreads?: string[]
   /** Verified owner DMs linked to the personal main conversation; no account identifiers. */
   personalIm?: Array<{ botId: string; connected: boolean }>
   imConversations?: import("./im-channel").BotImConversation[]
@@ -516,7 +520,7 @@ export interface BotClient {
     expectedGeneration: number
   ): Promise<string | null>
   snapshot(): Promise<BotSnapshot>
-  exchange(botId: string, taskId: string, groupId?: string, workId?: string): Promise<BotExchange>
+  exchange(botId: string, taskId: string, groupId?: string, workId?: string, imConversationId?: string): Promise<BotExchange>
   messageOrigins(
     botId: string,
     messageIds: string[],
@@ -541,7 +545,8 @@ export interface BotClient {
     taskId: string,
     groupId?: string,
     before?: string,
-    workId?: string
+    workId?: string,
+    imConversationId?: string
   ): Promise<BotExchangePage>
   markUnread(kind: "bot" | "group", id: string): Promise<void>
   markRead(kind: "bot" | "group" | "work" | "im", id: string, throughVersion: number): Promise<void>

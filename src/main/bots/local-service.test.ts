@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest"
-import { mkdtempSync, mkdirSync, rmSync, existsSync, writeFileSync, readFileSync } from "node:fs"
+import { mkdtempSync, mkdirSync, rmSync, existsSync, writeFileSync, readFileSync, realpathSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { DatabaseSync } from "node:sqlite"
@@ -7,6 +7,11 @@ import { DatabaseSync } from "node:sqlite"
 const fixture = vi.hoisted(() => ({
   stop: vi.fn(),
   browserClose: vi.fn(),
+  browserScope: vi.fn(),
+  hasPersonalBrowserScope: vi.fn(),
+  browserAudience: undefined as ((viewer: string, scope: string) => boolean) | undefined,
+  getWork: vi.fn(),
+  browserWorkspace: undefined as ((scope: string) => string) | undefined,
   memoryClose: vi.fn(),
   memoryChanged: vi.fn(),
   hasActiveRuns: vi.fn(),
@@ -50,6 +55,9 @@ vi.mock("./host", () => ({
     memoryChanged = fixture.memoryChanged
     hasActiveRuns = fixture.hasActiveRuns
     removeMessageReactionsForThreads = fixture.removeReactions
+    browserScope = fixture.browserScope
+    hasPersonalBrowserScope = fixture.hasPersonalBrowserScope
+    getWork = fixture.getWork
   }
 }))
 vi.mock("./runtime-adapter", () => ({ createLocalBotRunPort: vi.fn() }))
@@ -63,6 +71,10 @@ vi.mock("./memory", () => ({
 }))
 vi.mock("./browser", () => ({
   BotBrowserService: class {
+    constructor(_start: unknown, workspace: (scope: string) => string, audience: (viewer: string, scope: string) => boolean) {
+      fixture.browserWorkspace = workspace
+      fixture.browserAudience = audience
+    }
     close = fixture.browserClose
   }
 }))
@@ -78,6 +90,8 @@ beforeEach(() => {
   fixture.trace = []
   fixture.notifyMemory = undefined
   fixture.readReactions = undefined
+  fixture.browserWorkspace = undefined
+  fixture.browserAudience = undefined
   fixture.dataRoot = "/synthetic-test"
   fixture.openDatabase.mockReturnValue({ database: { close: fixture.databaseClose } })
   fixture.hasActiveRuns.mockReturnValue(true)
@@ -96,6 +110,55 @@ beforeEach(() => {
 })
 
 describe("Bot local service shutdown", () => {
+  it("resolves desktop browser audiences through the Host's personal binding proof", async () => {
+    const service = await import("./local-service")
+    service.getBotBrowserService()
+    fixture.hasPersonalBrowserScope.mockReturnValueOnce(true).mockReturnValueOnce(false)
+    expect(fixture.browserAudience!("owner", "im-dm--owner--peer")).toBe(true)
+    expect(fixture.browserAudience!("owner", "im-group--owner--peer")).toBe(false)
+    expect(fixture.hasPersonalBrowserScope.mock.calls).toEqual([
+      ["owner", "im-dm--owner--peer"], ["owner", "im-group--owner--peer"]
+    ])
+    await service.stopLocalBotHost()
+  })
+
+  it("resolves IM browser files in the execution workspace without widening path access", async () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "bot-im-browser-")))
+    fixture.dataRoot = root
+    const service = await import("./local-service")
+    const { resolveBotWorkspaceFile } = await import("./workspace-file")
+    service.getBotBrowserService()
+    const resolve = fixture.browserWorkspace!
+    try {
+      const workspace = resolve("im-binding-a--bot-a")
+      expect(workspace).toBe(join(root, "bots/workspaces/mock-binding-a"))
+      expect(fixture.browserScope).toHaveBeenCalledWith("im-binding-a--bot-a")
+      writeFileSync(join(workspace, "report.txt"), "current result")
+      expect(await resolveBotWorkspaceFile(workspace, "report.txt")).toBe(join(workspace, "report.txt"))
+      expect(await resolveBotWorkspaceFile(workspace, join(workspace, "report.txt"), { allowAbsolute: true })).toBe(join(workspace, "report.txt"))
+      expect(resolve("im-binding-a--bot-a--peer-b--im-peer-root-peer-b")).toBe(workspace)
+      expect(fixture.browserScope).toHaveBeenCalledWith("im-binding-a--bot-a--peer-b--im-peer-root-peer-b")
+      const other = resolve("im-binding-b--bot-b")
+      await expect(resolveBotWorkspaceFile(other, join(workspace, "report.txt"), { allowAbsolute: true })).rejects.toThrow()
+      mkdirSync(join(workspace, "downloads"))
+      writeFileSync(join(workspace, "downloads/result.txt"), "downloaded")
+      expect(readFileSync(join(root, "bots/workspaces/mock-binding-a/downloads/result.txt"), "utf8")).toBe("downloaded")
+
+      fixture.getWork.mockReturnValue({ threadId: "work-thread", source: { transport: "im", bindingId: "binding-a" } })
+      expect(resolve("work-work-a--bot-a")).toBe(workspace)
+      fixture.getWork.mockReturnValue({ threadId: "work-thread", workspace: { path: root }, source: { transport: "im", bindingId: "binding-a" } })
+      expect(resolve("work-work-a--bot-a")).toBe(root)
+      fixture.getWork.mockReturnValue({ threadId: "work-thread" })
+      expect(resolve("work-work-a--bot-a")).toBe(resolve("bot-a"))
+      expect(resolve("group-group-a--bot-a")).toBe(join(root, "bots/workspaces/group-group-a"))
+      fixture.browserScope.mockImplementation(() => { throw new Error("invalid owner") })
+      expect(() => resolve("im-binding-a--bot-b")).toThrow("invalid owner")
+    } finally {
+      await service.stopLocalBotHost()
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
   it("resolves a private file-only reply from its own successful delivery receipt and sent bytes", async () => {
     const service = await import("./local-service")
     service.getLocalBotHost()

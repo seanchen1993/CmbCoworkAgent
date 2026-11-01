@@ -1368,7 +1368,8 @@ function createInitialChatSkillCatalogState(
     store.threads.find((thread) => thread.thread_id === threadId)
   )
   const targetProjectId = binding?.projectId ?? null
-  const harnessScoped = surface !== "default" || Boolean(binding)
+  const harnessScoped =
+    surface === "harness-project" || surface === "harness-feature-session" || Boolean(binding)
   const preferredPlugin = binding ? getCachedHarnessPreferredPlugin(binding.projectId) : null
   const harnessCatalogReady = !binding || preferredPlugin !== null
   const snapshot = readSkillCatalogCache()
@@ -2222,7 +2223,10 @@ export function ChatContainer({
   const loadSkills = useCallback(async (): Promise<void> => {
     const requestId = ++skillsLoadRequestIdRef.current
     const binding = harnessFeatureBindingRef.current
-    const harnessScoped = chatSurfaceRef.current !== "default" || Boolean(binding)
+    const harnessScoped =
+      chatSurfaceRef.current === "harness-project" ||
+      chatSurfaceRef.current === "harness-feature-session" ||
+      Boolean(binding)
     const targetProjectId = binding?.projectId ?? null
     setSkillsLoadTargetProjectId(targetProjectId)
     const pluginVersion = useAppStore.getState().pluginVersion
@@ -7895,7 +7899,8 @@ export function ChatContainer({
       messageForkTarget.checkpoint.messageForkMode === "checkpoint"
         ? undefined
         : (messageForkTarget.checkpoint.resolvedMessageId ?? messageForkTarget.message.id)
-    const preserveHarnessView = surface !== "default"
+    const preserveHarnessView =
+      surface === "harness-project" || surface === "harness-feature-session"
     setForkingMessageId(messageForkTarget.message.id)
     try {
       const forkedThread = await forkThread(

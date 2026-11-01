@@ -25,6 +25,7 @@ import type {
 import type { BotImConversation as Conversation } from "../../../../shared/bots/im-channel"
 import type { BotMockFeedEntry } from "../../../../shared/bots/mock-channel"
 import { botErrorMessage } from "@/lib/bot-error-message"
+import { refreshBotImHistory } from "@/lib/bot-im-history"
 import { BotAvatar } from "./BotAvatar"
 import { useBotReadState } from "./use-bot-read-state"
 import type { useBotWorks } from "./use-bot-works"
@@ -115,6 +116,7 @@ export function BotImConversation({
   revision,
   tasks = [],
   backgroundThreads = [],
+  collaborationPending = false,
   detailOpen,
   onDetails,
   onManage,
@@ -127,6 +129,7 @@ export function BotImConversation({
   revision: number
   tasks?: BotTask[]
   backgroundThreads?: string[]
+  collaborationPending?: boolean
   detailOpen: boolean
   onDetails(): void
   onManage(): void
@@ -151,7 +154,8 @@ export function BotImConversation({
     ["queued", "running", "waiting_user"].includes(task.state)
   )
   const backgroundBusy = Boolean(
-    conversation.threadId && backgroundThreads.includes(conversation.threadId)
+    collaborationPending ||
+    (conversation.threadId && backgroundThreads.includes(conversation.threadId))
   )
   const stop = async () => {
     if (stopping) return
@@ -214,30 +218,19 @@ export function BotImConversation({
       setLoading(false)
       return
     }
-    void read(bot.id, conversation.id)
+    void refreshBotImHistory(
+      windowRef.current,
+      (before) => read(bot.id, conversation.id, before),
+      () => mounted.current && token === epoch.current
+    )
       .then(
-        (page) => {
-          if (!mounted.current || token !== epoch.current) return
-          const old = windowRef.current
-          const overlap =
-            !old.items.length ||
-            !page.items.length ||
-            page.items.some((item) => old.items.some((entry) => entry.id === item.id))
-          const next = {
-            items: overlap
-              ? [
-                  ...new Map(
-                    [...old.items, ...page.items].map((entry) => [entry.id, entry])
-                  ).values()
-                ]
-              : page.items,
-            before: overlap && old.items.length ? old.before : page.before
-          }
+        (next) => {
+          if (!next || !mounted.current || token !== epoch.current) return
           windowRef.current = next
           setEntries(next.items)
           setCursor(next.before)
           setError(null)
-          if (!overlap) {
+          if (!next.overlap) {
             setGap(true)
             atBottom.current = true
           }
@@ -341,6 +334,7 @@ export function BotImConversation({
           <BotMessageFilePreview
             client={client}
             botId={bot.id}
+            imConversationId={conversation.id}
             threadId={executionThreadId}
             name={conversation.title}
           />
@@ -348,6 +342,7 @@ export function BotImConversation({
             executionDetails
             client={client}
             botId={bot.id}
+            imConversationId={conversation.id}
             conversationThreadId={executionThreadId}
             bots={[bot]}
             onOpenWork={onWork}

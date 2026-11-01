@@ -7,6 +7,7 @@ import { describe, expect, it, vi } from "vitest"
 import type { BotTask } from "../../shared/bots/contracts"
 import type { LocalBotHost } from "./host"
 import { BOT_ROUTINE_SILENT } from "../../shared/bots/routine-silence"
+import { WORKFLOW_NOTIFICATION_TURN_PROMPT, WORKFLOW_NOTIFICATION_MARKER_PREFIX } from "../../shared/checkpoint-transcript"
 import { createBotGroupDeliveryCheck, createBotGroupMessageTool } from "./group-delivery"
 import {
   clearTurnCompletionGateState,
@@ -44,6 +45,23 @@ function receipt(groupId = "g", taskId = task.id, status: "success" | "error" = 
 }
 
 describe("formal group delivery", () => {
+  it.each(["length", "max_tokens", "max_output_tokens", "model_length", "content_filter_length"])(
+    "does not let a prior progress receipt waive an empty %s final",
+    async finish => {
+      const messages = receipt().slice(0, -1)
+      messages.push(new AIMessage({ content: "", additional_kwargs: { reasoning_content: "Still analyzing" }, response_metadata: { finish_reason: finish } }))
+      const run = `truncated-progress-${finish}`
+      const middleware = createTurnCompletionGateMiddleware({ ownerRunToken: run, checkFinalDelivery: createBotGroupDeliveryCheck(task) })
+      const hook = middleware.afterModel
+      const afterModel = typeof hook === "function" ? hook : hook!.hook
+      try {
+        const result = await afterModel({ messages } as never, { configurable: { thread_id: task.threadId } } as never)
+        expect(result).toMatchObject({ jumpTo: "model" })
+        expect(readTurnCompletionGateReport(task.threadId, run)?.retriesUsed).toBe(1)
+      } finally { clearTurnCompletionGateState(task.threadId, run) }
+    }
+  )
+
   it("does not redrive a clean private callback final into a duplicate public delivery", async () => {
     const callback: BotTask = {
       ...task,
@@ -127,7 +145,7 @@ describe("formal group delivery", () => {
     // Final prose is private scratch regardless of wording; only the send tool
     // publishes it. The host cannot infer that prose is a new room message.
     expect(check(end("The total needs correction to 80."))).toBeUndefined()
-    expect(check(end("", "length"))).toContain("bot_send_message")
+    expect(check(end("", "length"))).toContain("truncated")
     const files: BotTask = {
       ...callback,
       origin: {
@@ -224,7 +242,7 @@ describe("formal group delivery", () => {
       const final = new AIMessage({ content: "", response_metadata: { finish_reason: finish } })
       expect(
         createBotGroupDeliveryCheck(task)([new HumanMessage("Current request"), final])
-      ).toContain("bot_send_message")
+      ).toContain(finish === "length" ? "truncated" : "bot_send_message")
     }
     const empty = new AIMessage({ content: "", response_metadata: { finish_reason: "stop" } })
     const peer = {
@@ -686,7 +704,34 @@ describe("formal group delivery", () => {
     ).toContain("bot_send_message")
   })
 
-  it("skips native plumbing boundaries and accepts actual verified attachment delivery", () => {
+  it.each([WORKFLOW_NOTIFICATION_TURN_PROMPT, `${WORKFLOW_NOTIFICATION_MARKER_PREFIX}result]]`])(
+    "requires fresh delivery for a new workflow result: %s",
+    (boundary) => {
+      const notification: BotTask = {
+        ...task,
+        origin: { kind: "notification", notificationKind: "workflow", key: "run", groupId: "g" }
+      }
+      const check = createBotGroupDeliveryCheck(notification)
+      for (const [name, content] of [
+        ["bot_deliver_files", { kind: "bot-file-delivery", files: [{ filePath: "/group/report.md", name: "report.md", size: 12 }] }],
+        ["bot_delegate", { taskId: "peer-task", botId: "peer", state: "queued" }]
+      ] as const) {
+        const previous = [
+          new HumanMessage("Original request"),
+          new AIMessage({ content: "", tool_calls: [{ id: "old", name, args: {} }] }),
+          new ToolMessage({ tool_call_id: "old", content: JSON.stringify(content) })
+        ]
+        expect(check([...previous, new HumanMessage(boundary), new AIMessage("Result ready")]))
+          .toContain("bot_send_message")
+        // A gate redrive belongs to this same result turn, not to the old request.
+        expect(check([...previous, new HumanMessage(boundary), ...receipt().slice(1),
+          new HumanMessage("[[CMB_TURN_COMPLETION_GATE_V1:missing_delivery]]"), new AIMessage("")]))
+          .toBeUndefined()
+      }
+    }
+  )
+
+  it("skips same-turn gate recovery and accepts actual verified attachment delivery", () => {
     const check = createBotGroupDeliveryCheck(task)
     expect(
       check([

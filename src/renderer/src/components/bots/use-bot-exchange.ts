@@ -11,8 +11,8 @@ const EMPTY = {
   before: undefined as string | undefined
 }
 
-/** One in-flight reader; refresh only the latest page and older unfinished dispatches. */
-export function useBotExchange(client: BotClient, botId: string, taskId: string, groupId?: string) {
+/** One in-flight reader; refresh the latest page and already loaded history in batches. */
+export function useBotExchange(client: BotClient, botId: string, taskId: string, groupId?: string, imConversationId?: string) {
   const [view, setView] = useState(EMPTY)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
@@ -37,7 +37,7 @@ export function useBotExchange(client: BotClient, botId: string, taskId: string,
           const cursor = dirty ? undefined : requestedBefore
           if (dirty) dirty = false
           else requestedBefore = undefined
-          const page = await client.exchangeHistory(botId, taskId, groupId, cursor)
+          const page = await client.exchangeHistory(botId, taskId, groupId, cursor, undefined, imConversationId)
           if (disposed) return
           const updates = new Map(page.items.map((item) => [item.taskId, item]))
           if (
@@ -51,18 +51,22 @@ export function useBotExchange(client: BotClient, botId: string, taskId: string,
             initialized = false
             setView(EMPTY)
           }
+          // The clicked handoff can finish in a later integration turn outside the
+          // newest page. Reuse its fresh anchor without inserting unloaded history.
+          if (items.some(item => item.taskId === page.anchor.taskId))
+            updates.set(page.anchor.taskId, page.anchor)
           if (!cursor) {
-            // Old completed exchanges are immutable. Only pending replies need to be revisited.
-            for (const item of items) {
-              if (
-                !updates.has(item.taskId) &&
-                (["queued", "running", "waiting_user"].includes(item.state) ||
-                  (item.reply && !item.reply.delivered))
-              ) {
-                const updated = await client.exchange(botId, item.taskId, groupId)
-                if (disposed) return
-                updates.set(item.taskId, updated)
+            // Dispatch completion is not an immutable handoff result. Refresh the
+            // loaded window in existing pages, including late integrations after failure.
+            const remaining = new Set(items.filter(item => !updates.has(item.taskId)).map(item => item.taskId))
+            let older = page.before
+            while (older && remaining.size) {
+              const refreshed = await client.exchangeHistory(botId, taskId, groupId, older, undefined, imConversationId)
+              if (disposed) return
+              for (const item of refreshed.items) {
+                if (remaining.delete(item.taskId)) updates.set(item.taskId, item)
               }
+              older = refreshed.before
             }
           }
           const merged = new Map(items.map((item) => [item.taskId, item]))
@@ -120,7 +124,7 @@ export function useBotExchange(client: BotClient, botId: string, taskId: string,
       refreshRef.current = () => {}
       olderRef.current = () => {}
     }
-  }, [client, botId, taskId, groupId])
+  }, [client, botId, taskId, groupId, imConversationId])
   return {
     ...view,
     error,

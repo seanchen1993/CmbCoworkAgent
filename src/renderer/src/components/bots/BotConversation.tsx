@@ -32,6 +32,7 @@ export function BotConversation({
   schedules,
   tasks,
   backgroundBusy,
+  collaborationPending = false,
   client,
   onConfigureModel,
   onOpenWork,
@@ -45,6 +46,7 @@ export function BotConversation({
   schedules: BotSchedule[]
   tasks: BotTask[]
   backgroundBusy: boolean
+  collaborationPending?: boolean
   client: BotClient
   onConfigureModel?(): void
   onOpenWork(workId: string): void
@@ -233,6 +235,14 @@ export function BotConversation({
           <span>{error}</span>
           <button aria-label="关闭提示" onClick={() => setError(null)}>
             <X size={14} />
+          </button>
+        </div>
+      )}
+      {collaborationPending && !running && !backgroundBusy && (
+        <div className="bot-queue">
+          <span>协作任务仍在进行</span>
+          <button onClick={() => void cancel().catch((cause) => toast.error(botErrorMessage(cause)))}>
+            停止协作
           </button>
         </div>
       )}
