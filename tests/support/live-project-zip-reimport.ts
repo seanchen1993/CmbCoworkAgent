@@ -1,10 +1,12 @@
 import assert from "node:assert/strict"
 import { createHash, randomUUID } from "node:crypto"
-import { existsSync, readFileSync, realpathSync } from "node:fs"
+import { existsSync, readFileSync, realpathSync, writeFileSync } from "node:fs"
 import { isAbsolute, join, relative } from "node:path"
 import type { ElectronApplication, Locator, Page } from "playwright"
 import type { PluginMetadata } from "../../src/main/types"
 import type { CreatorProjectDeliveryStatus } from "../../src/shared/mods/development"
+import { pollPublicState } from "./poll-public-state"
+import { verifyLiveProjectZipIdentity } from "./live-project-zip-identity"
 
 function inside(root: string, target: string) {
   const tail = relative(root, target)
@@ -37,6 +39,23 @@ export async function reimportLiveProjectZip(input: {
   const zip = join(root, `project-delivery-${randomUUID()}.zip`)
   assert(!existsSync(zip), "LIVE_ZIP_NEW_OUTPUT_REQUIRED")
   const token = randomUUID()
+  const observed: Array<Record<string, unknown>> = []
+  let previous = ""
+  const observe = (value: CreatorProjectDeliveryStatus | undefined) => {
+    const snapshot = {
+      phase: value?.phase,
+      sourceDigest: value?.sourceDigest,
+      digest: value?.digest,
+      output: value?.output,
+      error: value?.error
+    }
+    const serialized = JSON.stringify(snapshot)
+    if (serialized !== previous) {
+      previous = serialized
+      observed.push({ at: new Date().toISOString(), ...snapshot })
+      writeFileSync(zip + ".observations.json", JSON.stringify(observed, null, 2))
+    }
+  }
   await app.evaluate(
     ({ dialog }, selected) => {
       const state = globalThis as typeof globalThis & {
@@ -57,16 +76,24 @@ export async function reimportLiveProjectZip(input: {
   )
   try {
     await input.card.getByRole("button", { name: /^(?:核对并)?导出 ZIP…$/ }).click()
-    await page.waitForFunction(
-      async ({ id, digest, path }) => {
-        const value = (await window.api.mods.development.status({ threadId: id })).projectDelivery
-        return value?.phase === "exported" && value.sourceDigest === digest && value.output === path
-      },
-      { id: input.threadId, digest: delivery.sourceDigest, path: zip },
+    await pollPublicState(
+      () =>
+        page.evaluate(
+          async (id) =>
+            (await window.api.mods.development.status({ threadId: id })).projectDelivery,
+          input.threadId
+        ),
+      (value) =>
+        value?.phase === "exported" &&
+        value.sourceDigest === delivery.sourceDigest &&
+        value.output === zip,
       {
-        timeout: Math.max(1, Math.min(120_000, input.deadline - Date.now()))
+        deadline: Math.min(input.deadline, Date.now() + 120_000),
+        code: "LIVE_ZIP_EXPORT_NOT_CONFIRMED",
+        observe
       }
     )
+    assert(existsSync(zip), "LIVE_ZIP_EXPORTED_WITHOUT_NATIVE_FILE")
   } finally {
     const count = await app.evaluate(({ dialog }, expected) => {
       const state = globalThis as typeof globalThis & {
@@ -90,6 +117,14 @@ export async function reimportLiveProjectZip(input: {
     expected: { name: plugin.name, version: plugin.version, digest: delivery.digest }
   })
   assert.equal(original.kind, "host-project")
+  const packageIdentity = await verifyLiveProjectZipIdentity({
+    zip,
+    originalDirectory: plugin.path,
+    expectedOriginalDigest: original.identity.digest,
+    name: plugin.name,
+    version: plugin.version
+  })
+  assert.equal(packageIdentity.zipSha256, hash, "LIVE_ZIP_CHANGED_DURING_VERIFICATION")
   const projects = await page.evaluate(() => window.api.harnessBoard.listProjects())
   assert(
     !projects.some(
@@ -120,18 +155,18 @@ export async function reimportLiveProjectZip(input: {
     .click()
   const upload = page.getByRole("dialog", { name: "安装 Plugin", exact: true })
   await upload.locator("#upload-plugin-input").setInputFiles(zip)
-  await page.waitForFunction(
-    async ({ old, name, version }) => {
-      return (await window.api.plugins.list()).some(
-        (value) => value.id !== old && value.name === name && value.version === version
-      )
-    },
-    { old: plugin.id, name: plugin.name, version: plugin.version },
+  const after = await pollPublicState(
+    () => page.evaluate(() => window.api.plugins.list()),
+    (values) =>
+      values.some(
+        (value) =>
+          value.id !== plugin.id && value.name === plugin.name && value.version === plugin.version
+      ),
     {
-      timeout: Math.max(1, Math.min(60_000, input.deadline - Date.now()))
+      deadline: Math.min(input.deadline, Date.now() + 60_000),
+      code: "LIVE_ZIP_UPLOAD_NOT_CONFIRMED"
     }
   )
-  const after = await page.evaluate(() => window.api.plugins.list())
   const fresh = after.filter(
     (value) =>
       value.id !== plugin.id &&
@@ -146,11 +181,19 @@ export async function reimportLiveProjectZip(input: {
     threadId: input.threadId,
     expectedWorkspace: input.workspace,
     pluginId: fresh[0].id,
-    expected: { name: plugin.name, version: plugin.version }
+    expected: {
+      name: plugin.name,
+      version: plugin.version,
+      digest: packageIdentity.zipContentDigest
+    }
   })
   assert.equal(report.kind, "host-project")
   assert.equal(report.identity.pluginId, fresh[0].id)
-  assert.equal(report.identity.digest, original.identity.digest, "LIVE_ZIP_PACKAGE_CONTENT_CHANGED")
+  assert.equal(
+    report.identity.digest,
+    packageIdentity.zipContentDigest,
+    "LIVE_ZIP_PACKAGE_CONTENT_CHANGED"
+  )
   await page.screenshot({ path: join(root, "project-delivery-original-zip-upload.png") })
   // Package identity is computed by the real loader, independently of the authoring digest.
   const back = page.getByRole("button", { name: "返回应用", exact: true })
@@ -165,6 +208,8 @@ export async function reimportLiveProjectZip(input: {
       oldInstallation: plugin.id,
       newInstallation: fresh[0].id,
       packageDigest: report.identity.digest,
+      originalPackageDigest: original.identity.digest,
+      packageIdentity,
       upload: "original-PluginsPanel-file-input",
       copiedGrants: false
     }

@@ -1,7 +1,37 @@
 import { createServer, type ServerResponse } from "node:http"
 import { ChatOpenAI } from "@langchain/openai"
 import { expect, it, vi } from "vitest"
-import { rejectCreatorLiveRelay } from "../support/creator-live-transport"
+import {
+  readCreatorLiveJsonRequest,
+  rejectCreatorLiveRelay
+} from "../support/creator-live-transport"
+
+it("preserves multibyte authoring text at every HTTP byte boundary", async () => {
+  const original = { files: [{ path: "说明.md", text: "输入框上方，中文🔧\n" }] }
+  const bytes = Buffer.from(JSON.stringify(original))
+  for (let split = 1; split < bytes.length; split++) {
+    async function* chunks() {
+      yield bytes.subarray(0, split)
+      yield bytes.subarray(split)
+    }
+    expect(await readCreatorLiveJsonRequest(chunks(), "LIVE")).toEqual(original)
+  }
+})
+
+it("bounds actual body bytes and refuses malformed UTF-8", async () => {
+  async function* tooLarge() {
+    yield Buffer.from('{"a":"中"}')
+  }
+  await expect(readCreatorLiveJsonRequest(tooLarge(), "LIVE", 8)).rejects.toThrow(
+    "LIVE_REQUEST_SIZE_LIMIT"
+  )
+  async function* invalid() {
+    yield Buffer.from([0x22, 0xe6, 0xa1, 0x22])
+  }
+  await expect(readCreatorLiveJsonRequest(invalid(), "GENERIC_LIVE")).rejects.toThrow(
+    "GENERIC_LIVE_REQUEST_UTF8_INVALID"
+  )
+})
 
 it("lets the original model client retry one transient relay failure within its own limit", async () => {
   let requests = 0

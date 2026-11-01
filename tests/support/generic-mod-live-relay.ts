@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs"
 import { createServer } from "node:http"
 import { homedir } from "node:os"
 import { join } from "node:path"
-import { rejectCreatorLiveRelay } from "./creator-live-transport"
+import { readCreatorLiveJsonRequest, rejectCreatorLiveRelay } from "./creator-live-transport"
 import { creatorLiveBudgetObservation } from "./creator-live-budget-observation"
 
 /** Only this parent process sees credentials; Electron receives a localhost dummy key. */
@@ -59,12 +59,7 @@ export function genericModLiveRelay() {
       assert.equal(request.url, "/v1/chat/completions")
       assert(metrics.filter((row) => row.round === round).length < 24, "GENERIC_LIVE_ROUND_LIMIT")
       metrics.push(metric)
-      let raw = ""
-      for await (const bytes of request) {
-        raw += bytes
-        assert(raw.length < 5_000_000, "GENERIC_LIVE_REQUEST_SIZE")
-      }
-      const body = JSON.parse(raw)
+      const body = await readCreatorLiveJsonRequest(request, "GENERIC_LIVE")
       const budget = creatorLiveBudgetObservation(body)
       for (const message of body.messages ?? [])
         for (const call of message.tool_calls ?? []) {

@@ -56,7 +56,14 @@ export interface OriginalFeatureJourneyInput {
   artifacts: string
   artifactPrefix?: string
   installed: { pluginId: string; name: string; version: string; sourceDigest: string }
-  project: { name: string; code: string; systemId: string; systemName: string; folder: string }
+  project: {
+    name: string
+    code: string
+    systemId: string
+    systemName: string
+    folder: string
+    description?: string
+  }
   feature: { title: string; goal: string }
   deadline: number
   /** Only explicit, non-sensitive values are entered through the real parameter form. */
@@ -183,6 +190,8 @@ async function choosePrivatePath(
 export async function exerciseLiveOriginalFeatureJourney(input: OriginalFeatureJourneyInput) {
   const { app, page } = input
   assert(input.deadline > Date.now(), "ORIGINAL_FEATURE_DEADLINE_EXPIRED")
+  const projectDescription = input.project.description ?? input.project.name
+  assert(projectDescription.length <= 100, "ORIGINAL_FEATURE_PROJECT_DESCRIPTION_TOO_LONG")
   assert(/^[a-f0-9]{64}$/i.test(input.installed.sourceDigest), "ORIGINAL_FEATURE_DIGEST_REQUIRED")
   const prefix = input.artifactPrefix ?? "original-feature"
   assert(/^[a-z0-9_.-]{1,80}$/i.test(prefix), "ORIGINAL_FEATURE_ARTIFACT_PREFIX_INVALID")
@@ -330,11 +339,15 @@ export async function exerciseLiveOriginalFeatureJourney(input: OriginalFeatureJ
       .click()
     await form.getByPlaceholder("输入项目编号搜索", { exact: true }).fill(input.project.code)
     await form.getByPlaceholder("输入项目名称搜索", { exact: true }).fill(input.project.name)
-    await form.getByRole("textbox", { name: "项目描述", exact: true }).fill(input.feature.goal)
+    await form.getByRole("textbox", { name: "项目描述", exact: true }).fill(projectDescription)
     await form.getByRole("textbox", { name: /^系统编号/ }).fill(input.project.systemId)
     await form.getByRole("textbox", { name: /^系统名称/ }).fill(input.project.systemName)
     await choosePrivatePath(app, paths.workspaceParent, "openDirectory", "选择工作区文件夹", () =>
       form.getByLabel("插件工作区根目录", { exact: true }).click()
+    )
+    await until(
+      () => form.getByLabel("插件工作区根目录", { exact: true }).inputValue(),
+      (value) => equalPath(value, paths.workspaceParent)
     )
     await form.getByLabel("本项目产物文件夹", { exact: true }).fill(input.project.folder)
     await form.getByRole("button", { name: "创建", exact: true }).click()
@@ -402,6 +415,10 @@ export async function exerciseLiveOriginalFeatureJourney(input: OriginalFeatureJ
       "openDirectory",
       "选择工作区文件夹",
       () => featureForm.getByLabel("会话工作区", { exact: true }).click()
+    )
+    await until(
+      () => featureForm.getByLabel("会话工作区", { exact: true }).inputValue(),
+      (value) => equalPath(value, paths.repositoryWorkspace)
     )
     await featureForm.getByRole("button", { name: "创建", exact: true }).click()
     await featureForm.waitFor({ state: "hidden", timeout: remaining() })
@@ -559,6 +576,10 @@ export async function exerciseLiveOriginalFeatureJourney(input: OriginalFeatureJ
                   exact: true
                 })
                 .click()
+          )
+          await until(
+            () => control.inputValue(),
+            (current) => equalPath(current, path)
           )
         } else if (field.options) await control.selectOption(String(value))
         else await control.fill(String(value))

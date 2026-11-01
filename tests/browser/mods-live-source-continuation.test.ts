@@ -26,6 +26,14 @@ describe("real author source continuation boundaries", () => {
           drafts: [{ id: "generic", name: "Generic", revision: 1, digest: source.digest }],
           nativeReadCount: 1,
           nativeReadReceipt: { messageId: "read-receipt" },
+          trials: [
+            {
+              draftId: "generic",
+              revision: 1,
+              bundleDigest: source.digest,
+              compiledDigest: "original-compile"
+            }
+          ],
           sourceFiles: files.map((file) => ({
             path: file.path,
             sha256: createHash("sha256").update(file.text).digest("hex")
@@ -43,9 +51,13 @@ describe("real author source continuation boundaries", () => {
       draftId: "generic",
       revision: 1,
       sourceDigest: source.digest,
+      compiledDigest: "original-compile",
       source
     }
     writeFileSync(record, JSON.stringify(native))
+    const newer = join(run, "data/mod-development/scope/newer/record.json")
+    mkdirSync(join(newer, ".."), { recursive: true })
+    writeFileSync(newer, JSON.stringify({ ...native, compiledDigest: "later-native-compile" }))
     const resumed = readGenericLiveSourceContinuation(root, run)
     expect(resumed.files).toEqual(source.files)
     expect(Object.keys(resumed).sort()).toEqual([
@@ -54,6 +66,8 @@ describe("real author source continuation boundaries", () => {
       "id",
       "name",
       "originalBuild",
+      "profile",
+      "revision",
       "sourceDigest"
     ])
     expect(JSON.stringify(resumed)).not.toContain("must-not-copy")

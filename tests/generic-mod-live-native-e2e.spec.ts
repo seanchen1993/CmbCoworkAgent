@@ -1,7 +1,7 @@
 /** Two real conversational authoring turns and native UI/tool execution, independent of projects. */
 import assert from "node:assert/strict"
-import { createHash } from "node:crypto"
-import { appendFileSync, readFileSync, writeFileSync } from "node:fs"
+import { createHash, randomUUID } from "node:crypto"
+import { appendFileSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs"
 import { basename, dirname, join, relative, resolve } from "node:path"
 import type { ElectronApplication, Page } from "playwright"
 import type { DevelopmentStatus } from "../src/shared/mods/development"
@@ -24,6 +24,18 @@ const sourceContinuation = process.env.GENERIC_MOD_LIVE_REUSE_SOURCE_RUN
   : undefined
 const resumeProfile = process.env.GENERIC_MOD_LIVE_RESUME_PROFILE
 assert(!(sourceContinuation && resumeProfile), "SOURCE_CONTINUATION_CANNOT_REUSE_OLD_PROFILE")
+const feedbackPath = process.env.GENERIC_MOD_LIVE_FEEDBACK_EVIDENCE
+const feedback = feedbackPath ? JSON.parse(readFileSync(feedbackPath, "utf8")) : undefined
+if (feedback) {
+  assert(sourceContinuation, "FEEDBACK_REQUIRES_VERIFIED_SOURCE_PROFILE")
+  assert.equal(dirname(resolve(feedbackPath!)), sourceContinuation.profile)
+  assert.match(basename(feedbackPath!), /^source-continuation-\d+\.json$/)
+  assert.equal(feedback.error, "GENERIC_LIVE_TIMEOUT_COUNTER_INCREMENT")
+  assert(
+    feedback.requests.length > 0 &&
+      feedback.requests.every((row: { status: number }) => row.status === 200)
+  )
+}
 const label = process.env.GENERIC_MOD_LIVE_LABEL ?? ""
 type RoundObservation = {
   round: number
@@ -50,6 +62,16 @@ let prior:
       diagnostic?: { status?: DevelopmentStatus }
     }
   | undefined
+if (sourceContinuation) {
+  const profile = sourceContinuation.profile
+  prior = JSON.parse(readFileSync(sourceContinuation.evidencePath, "utf8"))
+  for (const [key, value] of Object.entries(fixture.env))
+    if (value.startsWith(fixture.isolated))
+      fixture.env[key] = join(profile, relative(fixture.isolated, value))
+  fixture.isolated = profile
+  fixture.workspace = join(profile, "workspace")
+  fixture.artifactRoot = dirname(profile)
+}
 if (resumeProfile) {
   const profile = resolve(resumeProfile)
   assert.equal(dirname(profile), fixture.artifactRoot)
@@ -64,11 +86,30 @@ if (resumeProfile) {
   fixture.isolated = profile
   fixture.workspace = join(profile, "workspace")
 }
+const artifactDirectory = sourceContinuation
+  ? join(fixture.isolated, `continuation-${randomUUID()}`)
+  : fixture.isolated
+if (sourceContinuation) mkdirSync(artifactDirectory)
 const evidencePath = join(
-  fixture.isolated,
+  artifactDirectory,
   resumeProfile ? `continuation-${label}.json` : "evidence.json"
 )
-if (resumeProfile) writeFileSync(evidencePath, "{}", { flag: "wx" })
+if (resumeProfile || sourceContinuation) writeFileSync(evidencePath, "{}", { flag: "wx" })
+const originalEvidenceDigest =
+  sourceContinuation &&
+  createHash("sha256").update(readFileSync(sourceContinuation.evidencePath)).digest("hex")
+const protectedPictures =
+  sourceContinuation &&
+  Object.fromEntries(
+    readdirSync(fixture.isolated)
+      .filter((name) => /^(?:round-\d+.*|failure)\.png$/.test(name))
+      .map((name) => [
+        name,
+        createHash("sha256")
+          .update(readFileSync(join(fixture.isolated, name)))
+          .digest("hex")
+      ])
+  )
 fixture.env.CMB_MODS_E2E = "0"
 const relay = genericModLiveRelay()
 const observations: Array<{
@@ -84,7 +125,19 @@ const observations: Array<{
   activeTrials?: DevelopmentStatus["trials"]
   paint?: RoundObservation["paint"]
 }> = []
-if (prior) observations.push(prior.observations[0])
+if (feedback) {
+  const verified = feedback.observations.filter(
+    (row: RoundObservation) =>
+      row.round === 1 &&
+      row.drafts[0]?.digest === sourceContinuation!.sourceDigest &&
+      row.nativeReadCount === 1 &&
+      row.paint?.jobId
+  )
+  assert.equal(verified.length, 1, "FEEDBACK_REQUIRES_PREVIOUS_NATIVE_PAINT_AND_READ")
+  observations.push(verified[0])
+} else if (resumeProfile && prior) observations.push(prior.observations[0])
+const feedbackDigest =
+  feedbackPath && createHash("sha256").update(readFileSync(feedbackPath)).digest("hex")
 let app: ElectronApplication | undefined, page: Page | undefined
 let threadId = "",
   passed = false,
@@ -118,9 +171,11 @@ const save = () =>
           evidence: sourceContinuation.evidencePath,
           sourceDigest: sourceContinuation.sourceDigest,
           oldAuthorityCopied: false,
-          mode: "verified-real-model-source-in-fresh-profile"
+          mode: "verified-real-model-source-in-same-owned-profile",
+          consentBoundary: "native-confirmation-or-native-same-scope-reuse"
         },
         realRuntimeModel: true,
+        ...(feedbackPath ? { feedbackFrom: feedbackPath, rerunFirstRound: false } : {}),
         observations,
         retained,
         diagnostic,
@@ -297,7 +352,7 @@ async function trigger(round: number) {
   relay.phase(`trigger-${round}`)
   const observation = observations.at(-1)!
   observation.before = (await until("DISPLAY", display, 30_000)).count
-  const file = `generic-trigger-${round}.txt`,
+  const file = `${sourceContinuation ? basename(artifactDirectory) + "-" : ""}generic-trigger-${round}.txt`,
     marker = `GENERIC_NATIVE_READ_${round}`
   writeFileSync(join(fixture.workspace, file), `${marker}\n`)
   const beforeMessages = await page!.evaluate((id) => window.api.threads.getMessages(id), threadId)
@@ -349,7 +404,7 @@ async function trigger(round: number) {
   observation.activeTrials = (await status()).trials
   save()
   await page!.screenshot({
-    path: join(fixture.isolated, `${label ? label + "-" : ""}round-${round}-verified.png`)
+    path: join(artifactDirectory, `${label ? label + "-" : ""}round-${round}-verified.png`)
   })
 }
 async function verifyPaint(round: number) {
@@ -400,7 +455,7 @@ async function verifyPaint(round: number) {
     virtualTextVisible: true
   }
   save()
-  await page!.screenshot({ path: join(fixture.isolated, `round-${round}-paint-verified.png`) })
+  await page!.screenshot({ path: join(artifactDirectory, `round-${round}-paint-verified.png`) })
   await composer.fill("")
 }
 async function main() {
@@ -417,7 +472,7 @@ async function main() {
       .process()
       .stderr?.on("data", (bytes: Buffer) =>
         appendFileSync(
-          join(fixture.isolated, "electron-stderr.log"),
+          join(artifactDirectory, "electron-stderr.log"),
           relay.redact(bytes.toString("utf8"))
         )
       )
@@ -469,6 +524,14 @@ async function main() {
     if (!(await chat.isVisible()))
       await page.getByText("通用 Mod · 对话创建与修改", { exact: true }).first().click()
     await enterModsCreatorChat(page, threadId, fixture.workspace)
+    if (feedback) {
+      const current = await status()
+      const expected = feedback.observations.at(-1).drafts[0]
+      assert.equal(current.drafts.length, 1)
+      assert.equal(current.drafts[0].id, expected.id)
+      assert.equal(current.drafts[0].revision, expected.revision)
+      assert.equal(current.drafts[0].digest, expected.digest)
+    }
     if (resumeProfile) {
       const current = await status()
       assert.equal(current.drafts.length, 1)
@@ -491,36 +554,27 @@ async function main() {
         firstReadReceipt: { messageId: receipt.id, toolCallId: receipt.tool_call_id }
       }
     }
-    if (!resumeProfile) {
+    if (!resumeProfile && !feedback) {
       if (sourceContinuation) {
-        const imported = await page.evaluate(
-          async ({ id, original }) => {
-            const state = await window.api.mods.development.status({ threadId: id })
-            return window.api.mods.authoring.save({
-              threadId: id,
-              expectedWorkspace: state.workspace,
-              id: original.id,
-              name: original.name,
-              expectedRevision: 0,
-              files: original.files
-            })
-          },
-          { id: threadId, original: sourceContinuation }
-        )
-        assert.equal(
-          imported.source.digest,
-          sourceContinuation.sourceDigest,
-          "CONTINUATION_IMPORT_CHANGED_SOURCE"
-        )
+        const current = await status()
+        assert.equal(current.drafts.length, 1, "CONTINUATION_EXACT_RETAINED_DRAFT_REQUIRED")
+        assert.equal(current.drafts[0].id, sourceContinuation.id)
+        assert.equal(current.drafts[0].digest, sourceContinuation.sourceDigest)
+        assert.equal(current.drafts[0].revision, sourceContinuation.revision)
         await author(
           1,
-          `已将上次真实模型生成、逐文件hash核对的原源码导入全新工作区。草稿id=${imported.id}，revision=${imported.revision}，sourceDigest=${imported.source.digest}。请定向查询prompt.paint签名，读取同一草稿并检查、准备新的隔离试用候选；必须保留源文件一字节不改，不另建、不生成替代代码、不执行、不安装、不代我授权。此次全新试用不继承旧授权。`,
+          `应用已重启，继续验收同一已保存的真实模型源码，不重新创作。先定向查询prompt.paint签名，然后使用mod_authoring.read读取现有草稿id=${sourceContinuation.id}，revision=${sourceContinuation.revision}，sourceDigest=${sourceContinuation.sourceDigest}。保留源文件一字节不改，不调用save/submit、不另建、不生成替代代码。只检查并用request_trial准备当前版本的新隔离试用候选，然后结束本轮。不执行、不安装、不代我授权；本轮由我重新确认原生试用。`,
           true
         )
         assert.equal(
           observations[0].drafts[0].digest,
           sourceContinuation.sourceDigest,
           "CONTINUATION_MODEL_CHANGED_ORIGINAL_SOURCE"
+        )
+        assert.equal(
+          observations[0].trials[0].phase,
+          "needs-approval",
+          "CONTINUATION_FRESH_CONSENT_REQUIRED"
         )
       } else
         await author(
@@ -534,9 +588,11 @@ async function main() {
     }
     await author(
       2,
-      resumeProfile
-        ? "应用刚才重启了，请读取并核对上次已保存的同一个 Mod 最新草稿，保留已实现的 read_file 计数和最近工具显示，不另建、不手工重写已正确源码。用原生创作工具重新检查并恢复当前确切版本的试用候选，交给我重新确认；不要代我批准或安装，也不要执行文件或命令。"
-        : "请修改刚才的同一个 Mod，不另建：保留 paint-note 的 prompt.paint 纯显示行为与 read_file 完成后累计次数的能力以及‘工具调用次数：N’显示，并在后面增加‘最近工具：工具名称’；执行 read_file 后必须显示‘最近工具：read_file’。沿用当前草稿身份，准备新的可确认试用候选。不访问文件，不执行命令，不调用模型，不代我批准或安装。",
+      feedback
+        ? "反馈刚才同一草稿rev2的真实试用结果：read_file确实执行并返回了结果，但计数仍0，最近工具显示Read。平台公开未过滤tool.call事件的event.tool是Read，read_file是兼容过滤别名；把原来带{tool:'read_file'}的计数逻辑改成未过滤且只比较read_file后失效了。请读取当前同一草稿，修复对真实Read/read_file名称的处理，确保read_file完成后计数+1且最近工具显示read_file，其他工具按实际名称显示；保留paint-note纯显示行为和其余所有功能、文件，不另建、不重新生成。检查并准备新修订候选，结束本轮让我重新确认，不安装不代授权。"
+        : resumeProfile
+          ? "应用刚才重启了，请读取并核对上次已保存的同一个 Mod 最新草稿，保留已实现的 read_file 计数和最近工具显示，不另建、不手工重写已正确源码。用原生创作工具重新检查并恢复当前确切版本的试用候选，交给我重新确认；不要代我批准或安装，也不要执行文件或命令。"
+          : "请修改刚才的同一个 Mod，不另建：保留 paint-note 的 prompt.paint 纯显示行为与 read_file 完成后累计次数的能力以及‘工具调用次数：N’显示，并在后面增加‘最近工具：工具名称’；执行 read_file 后必须显示‘最近工具：read_file’。沿用当前草稿身份，准备新的可确认试用候选。不访问文件，不执行命令，不调用模型，不代我批准或安装。",
       !!resumeProfile
     )
     await activate()
@@ -568,7 +624,7 @@ async function main() {
         )
         .catch(() => ({ unavailable: true }))
     await page
-      ?.screenshot({ path: join(fixture.isolated, `${label ? label + "-" : ""}failure.png`) })
+      ?.screenshot({ path: join(artifactDirectory, `${label ? label + "-" : ""}failure.png`) })
       .catch(() => {})
   } finally {
     clearTimeout(watchdog)
@@ -578,6 +634,27 @@ async function main() {
         .catch(() => {})
     await app?.close().catch(() => {})
     await relay.close()
+    if (sourceContinuation)
+      assert.equal(
+        createHash("sha256").update(readFileSync(sourceContinuation.evidencePath)).digest("hex"),
+        originalEvidenceDigest,
+        "CONTINUATION_ORIGINAL_EVIDENCE_CHANGED"
+      )
+    if (feedbackPath)
+      assert.equal(
+        createHash("sha256").update(readFileSync(feedbackPath)).digest("hex"),
+        feedbackDigest,
+        "FEEDBACK_ORIGINAL_EVIDENCE_CHANGED"
+      )
+    if (protectedPictures)
+      for (const [name, digest] of Object.entries(protectedPictures))
+        assert.equal(
+          createHash("sha256")
+            .update(readFileSync(join(fixture.isolated, name)))
+            .digest("hex"),
+          digest,
+          "CONTINUATION_PREVIOUS_PICTURE_CHANGED"
+        )
     save()
     console.log(JSON.stringify({ passed, error, evidence: evidencePath }))
     if (!passed) process.exitCode = 1

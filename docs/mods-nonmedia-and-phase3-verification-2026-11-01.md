@@ -55,7 +55,9 @@
 
 受控 desktop smoke 通过：`output/phase3-source-desktop-smoke-e9cd3185`。真实 Electron/native IPC/SQLite/QuickJS，8个实际导入授权 Mod、4个真实 Client Pane、24次顺序回执、3轮关闭/重载恢复，结束后无所属 utility/pane 残留。自然 heap 采样链实际执行，短测不符合两小时正式门槛。以上两份记录绑定当时15492cc9f工作区内容哈希，明确包含未提交改动，不冒充已提交版本。
 
-追加实现冻结到 `53a3dcd84824141716ee5b2ae212220df0278006` 后，新 native source smoke 退出0：`output/phase3-source-smoke-62742779`。完整源码/资源和选定 driver 启动前后围栏通过，实际 appPath 为新候选、版本2.0.0，当前 main/preload/renderer/公开 IPC 健康，父 textarea 实例和未发送草稿保留，正常关闭。其后受控原 Feature 到 completed、商业续验和正式性能另行记录。
+追加实现冻结到 `53a3dcd84824141716ee5b2ae212220df0278006` 后，新 native source smoke 退出0：`output/phase3-source-smoke-62742779`。完整源码/资源和选定 driver 启动前后围栏通过，实际 appPath 为新候选、版本2.0.0，当前 main/preload/renderer/公开 IPC 健康，父 textarea 实例和未发送草稿保留，正常关闭。
+
+同一产品源码的新 desktop smoke 退出0：`output/phase3-source-desktop-smoke-0396e9c9`。实际8个组件、4个 Client Pane、24次回执和3轮关闭/重载，结束时资源清理完成。短测明确 `qualified:false`，自然 heap 窗口不足，不能代替正式两小时长稳。受控原 Feature 到 completed、商业续验和正式性能分别记录。
 
 广域回归648文件：632通过、9跳过、7失败，7225项通过、10失败、10跳过。失败包括旧导入入口/未开放接口断言，以及开发并行期间载入了旧作者声明或通知实现的模块。修复和同步断言后，**全部7个失败文件按冻结源码联合重跑94/94通过**，退出0，记录 `output/mods-nonmedia-final-failed-files-2026-11-01.log`。导入采用真实 parent 入口和服务，没有恢复旧 UI 或放宽断言。不能据此把最初整套命令写成全绿。
 
@@ -65,7 +67,13 @@
 
 该工具最初几次停在原 combobox 选择器、两种摘要混淆、multipart 文本展开及审批 DTO 字段假设；只修测试适配，未修改产品、放宽原生校验或审批。安装 identity 的 derivation digest 与 Host retained 完整包树 digest 分开核验，不用主目录 hash 代替依赖/投影后的 Host 快照。失败尝试记录保留，未到节点不算通过。
 
-待填写：真实作者从零/派生/调整续验、ZIP 导出再导入、各商业场景普通项目衔接及未验证节点。Git/审批环境单列，不算平台失败，也不把未到达节点写成通过。
+真实非 AutoBiz 项目续验 `output/phase3-source-project-82f854c6/journey/run-hL8qLO` 已用原真实模型生成的12个作者文件建立新试用、重新确认并执行，未复制配置或授权，也未重复生成源码。15个真实 HTTP 200 请求执行 collect→trace-review→deliver，3阶段原生校验通过，私有试用到 completed；普通项目入口仍需另行续验，不以私有试用替代。
+
+ZIP 导出/原插件面板上传已经实际执行，后续身份核验发现测试混淆了两种合法包树：导出器会添加 `devclaw.package-report.json`，因此原安装 digest 与完整 ZIP/fresh 安装 digest 可以不同。新验证器逐文件保持原源码，严格核对唯一报告增量及其声明，再核对完整 ZIP 树与 fresh identity；18项回归及实际目录/ZIP只读核验通过。未删除报告或放宽源码一致性。首次 continuation `output/phase3-installed-continuation-e68c81fe` 的身份断言失败保留，后续使用已导入的新安装，不重复导出、删除或上传。
+
+测试适配另修两个实际问题：当前 Playwright 的异步 `waitForFunction` 谓词不能用作 Node 异步状态轮询，改为显式逐次 await，保持按钮/上传仅执行一次；测试 relay 不再逐 Buffer 转 UTF-8，而在有界完整字节拼接后严格解码一次，逐字节中文/emoji、非法 UTF-8 和大小边界5项通过。没有修改生产流解码。旧尝试未保留逐块边界，不能把一次历史乱码确定归因给模型或产品。
+
+待填写：真实作者从零/派生/调整其余场景、各商业场景普通项目衔接及未验证节点。Git/审批环境单列，不算平台失败，也不把未到达节点写成通过。
 
 ## 性能
 

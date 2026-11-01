@@ -22,7 +22,10 @@ import { enterModsCreatorChat } from "./support/mods-sidebar-navigation"
 import { hasLiveCreatorCandidate } from "./support/creator-live-candidate"
 import { creatorLiveBudgetObservation } from "./support/creator-live-budget-observation"
 import { prepareProjectLiveSourceContinuation } from "./support/project-live-source-continuation"
-import { rejectCreatorLiveRelay } from "./support/creator-live-transport"
+import {
+  readCreatorLiveJsonRequest,
+  rejectCreatorLiveRelay
+} from "./support/creator-live-transport"
 import { allowCreatorWorkspaceInteraction } from "./support/project-unified-native-journey"
 import {
   assertMatrixAssembly,
@@ -689,12 +692,7 @@ const relay = createServer(async (request, response) => {
   const abort = new AbortController()
   aborts.add(abort)
   try {
-    let raw = ""
-    for await (const chunk of request) {
-      raw += chunk
-      if (raw.length > 5_000_000) return reject("LIVE_REQUEST_SIZE_LIMIT")
-    }
-    const body = JSON.parse(raw)
+    const body = await readCreatorLiveJsonRequest(request, "LIVE")
     const budget = creatorLiveBudgetObservation(body)
     inspectToolMessages(body.messages ?? [])
     if (capturedRuntime?.kind === "counter") {

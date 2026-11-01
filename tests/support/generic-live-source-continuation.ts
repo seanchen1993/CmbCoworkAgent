@@ -13,6 +13,12 @@ interface SourceProof {
     nativeReadCount: number
     nativeReadReceipt: { messageId: string }
     sourceFiles: Array<{ path: string; sha256: string }>
+    trials: Array<{
+      draftId: string
+      revision: number
+      bundleDigest: string
+      compiledDigest: string
+    }>
   }>
   requests: Array<{ status: number; tools: Array<{ action: string; sdkQuery?: string }> }>
 }
@@ -45,6 +51,17 @@ export function readGenericLiveSourceContinuation(repository: string, run: strin
   const expected = new Map<string, string>(
     observed.sourceFiles.map((file) => [file.path, file.sha256])
   )
+  const compiled = new Set(
+    observed.trials
+      .filter(
+        (row) =>
+          row.draftId === draft.id &&
+          row.revision === draft.revision &&
+          row.bundleDigest === draft.digest
+      )
+      .map((row) => row.compiledDigest)
+  )
+  assert(compiled.size > 0, "CONTINUATION_ORIGINAL_COMPILE_RECEIPT_REQUIRED")
   const base = join(profile, "data/mod-development")
   const records = readdirSync(base, { withFileTypes: true })
     .filter((entry) => entry.isDirectory())
@@ -60,7 +77,8 @@ export function readGenericLiveSourceContinuation(repository: string, run: strin
         record.coverage === "prepared-source-only-v1" &&
         record.draftId === draft.id &&
         record.revision === draft.revision &&
-        record.sourceDigest === draft.digest
+        record.sourceDigest === draft.digest &&
+        compiled.has(record.compiledDigest)
     )
   assert.equal(records.length, 1, "CONTINUATION_EXACT_NATIVE_RECORD_REQUIRED")
   const source = records[0].source
@@ -86,10 +104,12 @@ export function readGenericLiveSourceContinuation(repository: string, run: strin
       `CONTINUATION_SOURCE_CHANGED:${file.path}`
     )
   return {
+    profile,
     evidencePath,
     originalBuild: evidence.build,
     id: draft.id as string,
     name: draft.name as string,
+    revision: draft.revision,
     sourceDigest: draft.digest as string,
     files
   }

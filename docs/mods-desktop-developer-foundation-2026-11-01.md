@@ -84,6 +84,8 @@ export const register: Register = (on) => {
 
 以实际查询的签名为准。项目插件可以组合公共能力，但普通聊天 MCP/子会话接口不自动具有项目运行上下文。跨插件 action、任意 keybinding、任意 DOM/Node 和全局 CSS 没有因类型可见而开放。
 
+工具事件使用公开名称，如 `Read`、`Write`、`Edit`、`Bash`。兼容过滤器 `{tool:"read_file"}` 可以匹配读取事件，并向该处理器提供旧名称视图；移除过滤器后，事件仍是公开名称 `Read`。调整 Hook 时保留原过滤条件，或按公开名称判断，不能只删过滤器后继续比较旧别名。
+
 ## 本轮需要理解的适配条件
 
 - UI 只使用共享白名单。absolute 限于自己的绘制子树；原生问答树禁止绝对定位。hover 只支持本地 keyed Box，跨站点 scope 与未注册 Button action 拒绝。
