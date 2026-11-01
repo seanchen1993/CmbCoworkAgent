@@ -1,4 +1,6 @@
 import type { ModJson } from "../../../shared/mods/types"
+import type { NativeWorktreeObserver } from "../../mods/v2/native-observer"
+import { FunctionDispatchDeadline } from "../../mods/v2/dispatch-deadline"
 import { resolve, join } from "path"
 import { randomUUID } from "node:crypto"
 import {
@@ -76,6 +78,7 @@ export class WorkflowWorktreeLedger {
       approveMerge?(plan: WorkflowWorktreeMergePlan): Promise<boolean>
       onRecordChange?: (record: WorkflowWorktreeRecord) => void
       onRecordDelete?: (record: WorkflowWorktreeRecord) => void
+      removalObserver?: NativeWorktreeObserver
     }
   ) {}
 
@@ -1261,13 +1264,30 @@ export class WorkflowWorktreeLedger {
   }
 
   private async removeAndForget(owned: OwnedWorktree): Promise<void> {
-    await removeWorkflowWorktree({
+    const removal = Object.freeze({
       directory: owned.info.directory,
       gitRoot: owned.info.gitRoot,
       branch: owned.info.branch,
       expectedBranchHead: owned.info.baseCommit,
       preserveChanges: true
     })
+    if (this.options.removalObserver) {
+      const deadline = new FunctionDispatchDeadline(1500)
+      try {
+        if (owned.record.runId !== this.options.runId ||
+          owned.record.threadId !== (this.options.threadId ?? this.options.runId) ||
+          worktreeDirectoryKey(owned.record.directory) !== worktreeDirectoryKey(removal.directory))
+          throw Error("WORKTREE_OBSERVER_OWNER_CHANGED")
+        const facts = Object.freeze({ workspace: this.recordWorkspace(owned.record),
+          threadId: owned.record.threadId, runId: owned.record.runId, path: removal.directory })
+        await deadline.wait(this.options.removalObserver.observe(facts, deadline.signal))
+      } catch (error) {
+        // An optional observer neither owns cleanup nor converts failure into removal success.
+        console.warn("[Mods] Worktree removal observation stopped:",
+          error instanceof Error ? error.message : error)
+      } finally { deadline.close() }
+    }
+    await removeWorkflowWorktree(removal)
     try {
       await deleteWorkflowWorktreeRecord(
         owned.record.commonDir,

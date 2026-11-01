@@ -43,6 +43,49 @@ function fixture() {
     }
   }
 }
+
+it("deduplicates the same native binding without cutting pending reads or replacing its client", async () => {
+  const f = fixture()
+  const client = f.broker.bindings("t")[0]
+  const changes: unknown[] = []
+  f.broker.subscribe(change => changes.push(change))
+  const pending = f.broker.capture(f.scope)
+  const original = f.requests.at(-1)!
+  f.broker.attach("t", "owner", 1, () => { throw Error("duplicate must not replace transport") })
+  expect(f.broker.bindings("t")).toEqual([client])
+  expect(changes).toEqual([])
+  f.answer()
+  const access = await pending
+  const copied = access.copy({ text: "retained", surface: "desktop" }, f.scope.signal)
+  expect(f.requests.at(-1)!.requestId).not.toBe(original.requestId)
+  f.broker.commitCopy(1, "t", "owner", f.requests.at(-1)!.requestId, true)
+  expect(await copied).toEqual({ isCopied: true })
+})
+
+it("cuts old pending work before detach then attach, and a stale sender cannot remove its successor", async () => {
+  const f = fixture()
+  const changes: Array<{ event: string; clientId: string; surfaces: string[] }> = []
+  f.broker.subscribe(change => changes.push({ event: change.event,
+    clientId: change.binding.clientId, surfaces: f.broker.surfaces("t") }))
+  const pending = f.broker.capture(f.scope)
+  const rejected = expect(pending).rejects.toThrow("OWNER")
+  const before = f.broker.bindings("t")[0]
+  f.broker.attach("t", "next", 2, () => {})
+  await rejected
+  const after = f.broker.bindings("t")[0]
+  expect(after.clientId).not.toBe(before.clientId)
+  expect(changes).toEqual([
+    { event: "session.detach", clientId: before.clientId, surfaces: [] },
+    { event: "session.attach", clientId: after.clientId, surfaces: ["desktop"] }
+  ])
+  f.broker.detach("t", "owner", 1)
+  f.broker.closeSender(1)
+  expect(f.broker.bindings("t")).toEqual([after])
+  f.broker.closeSender(2)
+  f.broker.closeSender(2)
+  expect(changes.filter(change => change.event === "session.detach")).toHaveLength(2)
+  expect(f.broker.surfaces("t")).toEqual([])
+})
 it("copies only after the actual sender commits the one-shot private request", async () => {
   const f = fixture(),
     access = await f.prepare()

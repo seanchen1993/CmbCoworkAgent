@@ -21,12 +21,21 @@ import type { DevelopmentStatus } from "../src/shared/mods/development"
 import { enterModsCreatorChat } from "./support/mods-sidebar-navigation"
 import { hasLiveCreatorCandidate } from "./support/creator-live-candidate"
 import { creatorLiveBudgetObservation } from "./support/creator-live-budget-observation"
+import { prepareProjectLiveSourceContinuation } from "./support/project-live-source-continuation"
 import { rejectCreatorLiveRelay } from "./support/creator-live-transport"
 import { allowCreatorWorkspaceInteraction } from "./support/project-unified-native-journey"
 import {
-  assertMatrixAssembly, assertMatrixOrigin, creatorProjectMatrixMode, matrixFirstPrompt,
-  matrixFollowupPrompt, matrixRuntimeGoal, matrixReportRuntimeGoal, provisionMatrixSeed, readInstalledMatrixSeed,
-  readMatrixCandidate, type MatrixCandidate
+  assertMatrixAssembly,
+  assertMatrixOrigin,
+  creatorProjectMatrixMode,
+  matrixFirstPrompt,
+  matrixFollowupPrompt,
+  matrixRuntimeGoal,
+  matrixReportRuntimeGoal,
+  provisionMatrixSeed,
+  readInstalledMatrixSeed,
+  readMatrixCandidate,
+  type MatrixCandidate
 } from "./support/creator-project-matrix"
 import {
   assertGenericProjectReplacement,
@@ -52,18 +61,32 @@ process.env.COMPOSITION_E2E_ARTIFACT_ROOT ??= join(
 const fixture = projectCompositionEnvironment(root)
 fixture.env.CMB_MODS_E2E = "0"
 const maxRequests = Number(process.env.CMB_CREATOR_LIVE_MAX_REQUESTS ?? "24")
-assert([16, 24].includes(maxRequests) ||
-  (maxRequests === 64 && (!!process.env.CREATOR_LIVE_SOURCE_SET ||
-    process.env.GENERIC_PROJECT_CREATOR === "1" || !!process.env.CREATOR_LIVE_PROJECT_MATRIX)), "LIVE_REQUEST_LIMIT_INVALID")
+assert(
+  [16, 24].includes(maxRequests) ||
+    (maxRequests === 64 &&
+      (!!process.env.CREATOR_LIVE_SOURCE_SET ||
+        process.env.GENERIC_PROJECT_CREATOR === "1" ||
+        !!process.env.CREATOR_LIVE_PROJECT_MATRIX)),
+  "LIVE_REQUEST_LIMIT_INVALID"
+)
 const resumeRun = process.env.CMB_CREATOR_LIVE_RESUME_RUN
 const resumeMode = process.env.CMB_CREATOR_LIVE_RESUME_MODE
-const genericRepair = process.env.GENERIC_PROJECT_CREATOR === "1" &&
-  process.env.GENERIC_PROJECT_CREATOR_REPAIR === "1"
+const genericRepair =
+  process.env.GENERIC_PROJECT_CREATOR === "1" && process.env.GENERIC_PROJECT_CREATOR_REPAIR === "1"
 const genericRepairRetry = genericRepair && process.env.GENERIC_PROJECT_CREATOR_REPAIR_RETRY === "1"
-const genericDeliveryRecovery = genericRepair && resumeMode === "runtime" &&
+const genericDeliveryRecovery =
+  genericRepair &&
+  resumeMode === "runtime" &&
   process.env.GENERIC_PROJECT_CREATOR_DELIVERY_RECOVERY === "1"
-const resumeLabel = `continuation-${resumeMode}${genericRepair ?
-  genericDeliveryRecovery ? "-repair-recovered" : genericRepairRetry ? "-repair-2" : "-repair" : ""}.json`
+const resumeLabel = `continuation-${resumeMode}${
+  genericRepair
+    ? genericDeliveryRecovery
+      ? "-repair-recovered"
+      : genericRepairRetry
+        ? "-repair-2"
+        : "-repair"
+    : ""
+}.json`
 const installedProjectId = process.env.CMB_CREATOR_LIVE_INSTALLED_PROJECT_ID
 if (installedProjectId)
   assert(
@@ -80,10 +103,15 @@ let matrixInheritedPluginId: string | undefined
 let matrixDeliveredPluginId: string | undefined
 let matrixAssemblies = 0
 let matrixRuntimeCompletions = 0
+let matrixRuntimeEnvironmentBlocks = 0
 const projectKind = genericProject ? "three-stage-material-project" : "two-stage-document-project"
 // Acceptance watchdog only; production model/tool budgets remain unchanged.
-const totalMs = genericProject || matrixMode ? 900_000 :
-  process.env.CREATOR_LIVE_DEPENDENCY_CONSENT === "1" ? 600_000 : 300_000
+const totalMs =
+  genericProject || matrixMode
+    ? 900_000
+    : process.env.CREATOR_LIVE_DEPENDENCY_CONSENT === "1"
+      ? 600_000
+      : 300_000
 let priorEvidence:
   | { candidate: typeof candidate; observations: Observation[]; fatal?: string }
   | undefined
@@ -91,17 +119,34 @@ if (resumeRun) {
   assert(/^run-[A-Za-z0-9]+$/.test(resumeRun), "LIVE_RESUME_RUN_INVALID")
   assert(["diagnostic", "runtime"].includes(resumeMode ?? ""), "LIVE_RESUME_MODE_INVALID")
   const isolated = join(fixture.artifactRoot, resumeRun)
-  priorEvidence = JSON.parse(readFileSync(join(isolated,
-    genericDeliveryRecovery ? "continuation-runtime-repair.json" :
-      genericRepair && resumeMode === "runtime" ? "continuation-diagnostic-repair-2.json" :
-      genericRepair && existsSync(join(isolated, "continuation-diagnostic.json"))
-        ? "continuation-diagnostic.json" : "evidence.json"), "utf8"))
-  if (genericRepair) assert.equal(priorEvidence?.fatal, genericDeliveryRecovery ?
-    "LIVE_PROJECT_RUNTIME_FAILED" : resumeMode === "runtime" ?
-      "LIVE_PROJECT_INSTALLED_CANDIDATE_CHANGED" : "GENERIC_PROJECT_REPORT_OLD_REVIEW")
+  priorEvidence = JSON.parse(
+    readFileSync(
+      join(
+        isolated,
+        genericDeliveryRecovery
+          ? "continuation-runtime-repair.json"
+          : genericRepair && resumeMode === "runtime"
+            ? "continuation-diagnostic-repair-2.json"
+            : genericRepair && existsSync(join(isolated, "continuation-diagnostic.json"))
+              ? "continuation-diagnostic.json"
+              : "evidence.json"
+      ),
+      "utf8"
+    )
+  )
+  if (genericRepair)
+    assert.equal(
+      priorEvidence?.fatal,
+      genericDeliveryRecovery
+        ? "LIVE_PROJECT_RUNTIME_FAILED"
+        : resumeMode === "runtime"
+          ? "LIVE_PROJECT_INSTALLED_CANDIDATE_CHANGED"
+          : "GENERIC_PROJECT_REPORT_OLD_REVIEW"
+    )
   if (genericRepairRetry) {
-    const priorRepair = JSON.parse(readFileSync(
-      join(isolated, "continuation-diagnostic-repair.json"), "utf8"))
+    const priorRepair = JSON.parse(
+      readFileSync(join(isolated, "continuation-diagnostic-repair.json"), "utf8")
+    )
     assert.equal(priorRepair.fatal, "GENERIC_PROJECT_RETAINED_SOURCE_CHANGED")
     assert.equal(priorRepair.observations[0].requests.length, 0)
   }
@@ -131,10 +176,7 @@ const resumeDependencyReview =
   resumeMode === "diagnostic" && priorEvidence?.fatal === "LIVE_DEPENDENCY_EXPLICIT_REVIEW_REQUIRED"
 const afterDependencyConsentPrompt =
   "已通过原生确认完成所需依赖的安装与授权。请继续刚才的插件改造，重新发现真实公开动作并核对契约，完成编译检查和新版本隔离试用候选准备。不要重复安装，不要删减原有业务检查，不要执行项目。"
-const evidencePath = join(
-  fixture.isolated,
-  resumeRun ? resumeLabel : "evidence.json"
-)
+const evidencePath = join(fixture.isolated, resumeRun ? resumeLabel : "evidence.json")
 
 function realProvider() {
   const modelId = process.env.CMB_CREATOR_LIVE_MODEL_ID?.trim()
@@ -361,7 +403,17 @@ function nativeFields(value: unknown): unknown {
 function nativeRequest(args: Record<string, unknown>) {
   return {
     ...Object.fromEntries(
-      ["action", "id", "revision", "name", "kind", "template", "catalogSection", "cursor", "pluginId"]
+      [
+        "action",
+        "id",
+        "revision",
+        "name",
+        "kind",
+        "template",
+        "catalogSection",
+        "cursor",
+        "pluginId"
+      ]
         .filter((key) => key in args)
         .map((key) => [key, args[key]])
     ),
@@ -614,7 +666,9 @@ const relay = createServer(async (request, response) => {
           ? { commandProposals, limit: COMMAND_REVIEW_LIMIT }
           : {})
       })
-    rejectCreatorLiveRelay(response, code, status, (terminal) => { fatal = terminal })
+    rejectCreatorLiveRelay(response, code, status, (terminal) => {
+      fatal = terminal
+    })
   }
   if (request.url !== "/v1/chat/completions" || !current) return reject("LIVE_RELAY_SCOPE_INVALID")
   if (fatal || Date.now() >= deadline) return reject(fatal ?? "LIVE_TOTAL_TIME_LIMIT")
@@ -736,6 +790,15 @@ const save = () =>
         harnessRejections,
         commandReviews,
         acceptanceGuardsOnly: true,
+        sourceContinuation: process.env.GENERIC_PROJECT_LIVE_REUSE_SOURCE_RUN
+          ? {
+              mode: "verified-source-only-fresh-trial",
+              originalRun: process.env.GENERIC_PROJECT_LIVE_REUSE_SOURCE_RUN,
+              generationRepeated: false,
+              copiedConfiguration: false,
+              copiedGrants: false
+            }
+          : undefined,
         ...(priorEvidence ? { generationCandidate: priorEvidence.candidate, resumeMode } : {}),
         model: { id: provider.id, name: provider.name, model: provider.model, realProvider: true },
         transport: "in-memory credential relay; application stores localhost dummy key only",
@@ -848,7 +911,10 @@ async function settleBeforeClose(): Promise<boolean> {
     // A creator modal can cover the composer while its physical stream still runs.
     // Stop the exact owned acceptance thread through the original native cancellation path.
     if (active?.threadId)
-      await page.evaluate((id) => window.api.agent.cancel(id, { cancelWorkers: true }), active.threadId)
+      await page.evaluate(
+        (id) => window.api.agent.cancel(id, { cancelWorkers: true }),
+        active.threadId
+      )
     const stop = page.getByRole("button", { name: /停止生成|停止响应|停止运行/ })
     if (await stop.count()) {
       await stop.first().click({ timeout: 5000 })
@@ -873,7 +939,11 @@ async function observe(threadId: string) {
         drafts: status.drafts.map((row) => ({ id: row.id, revision: row.revision })),
         trials: status.trials.map((row) => ({ phase: row.phase, error: row.error })),
         projectTrial: status.projectTrial
-          ? { id: status.projectTrial.id, revision: status.projectTrial.revision, digest: status.projectTrial.digest }
+          ? {
+              id: status.projectTrial.id,
+              revision: status.projectTrial.revision,
+              digest: status.projectTrial.digest
+            }
           : null,
         projectDelivery: status.projectDelivery ? { phase: status.projectDelivery.phase } : null,
         reuse: status.reuse ? { phase: status.reuse.phase, planId: status.reuse.planId } : null,
@@ -1036,8 +1106,10 @@ async function runChat(kind: string, prompt: string, workspace: string, modelUrl
   priorToolIds.clear()
   const prior = priorEvidence?.observations[0]
   if (prior) {
-    assert(prior.kind === kind || (genericRepair && prior.kind === "two-stage-document-project"),
-      "LIVE_RESUME_SCENARIO_MISMATCH")
+    assert(
+      prior.kind === kind || (genericRepair && prior.kind === "two-stage-document-project"),
+      "LIVE_RESUME_SCENARIO_MISMATCH"
+    )
     assert(prior.threadId, "LIVE_RESUME_THREAD_REQUIRED")
     active.priorRequests = prior.requests.length + (prior.priorRequests ?? 0)
     if (resumeDependencyReview && prior.dependencyConsents)
@@ -1093,35 +1165,117 @@ async function runChat(kind: string, prompt: string, workspace: string, modelUrl
   executionStage = `${kind}-enter-creator`
   await enterModsCreatorChat(page, threadId, workspace)
   const matrixPrefix = `matrix-${observations.length}`
-  const matrixSeed = matrixMode ? await provisionMatrixSeed(page, root, threadId,
-    matrixMode, matrixInheritedPluginId) : undefined
+  const matrixSeed = matrixMode
+    ? await provisionMatrixSeed(page, root, threadId, matrixMode, matrixInheritedPluginId)
+    : undefined
   if (matrixMode) {
     prompt = matrixFirstPrompt(matrixMode, matrixSeed)
-    writeFileSync(join(fixture.isolated, `${matrixPrefix}-input.json`),
-      JSON.stringify({ mode: matrixMode, seed: matrixSeed ?? null,
-        runtimeRequested: process.env.CMB_CREATOR_LIVE_PROJECT_RUNTIME === "1" }, null, 2),
-      { flag: "wx" })
+    writeFileSync(
+      join(fixture.isolated, `${matrixPrefix}-input.json`),
+      JSON.stringify(
+        {
+          mode: matrixMode,
+          seed: matrixSeed ?? null,
+          runtimeRequested: process.env.CMB_CREATOR_LIVE_PROJECT_RUNTIME === "1"
+        },
+        null,
+        2
+      ),
+      { flag: "wx" }
+    )
   }
   let firstMatrixCandidate: MatrixCandidate | undefined
-  let importedDigest: string | undefined = resumeRun && process.env.CREATOR_LIVE_SOURCE_SET
-    ? JSON.parse(readFileSync(join(fixture.isolated, "imported-source-set.json"), "utf8")).digest
-    : undefined
+  let importedDigest: string | undefined =
+    resumeRun && process.env.CREATOR_LIVE_SOURCE_SET
+      ? JSON.parse(readFileSync(join(fixture.isolated, "imported-source-set.json"), "utf8")).digest
+      : undefined
   let firstGenericCandidate: GenericProjectCandidate | undefined
+  if (genericProject && process.env.GENERIC_PROJECT_LIVE_REUSE_SOURCE_RUN && !resumeRun) {
+    const original = await prepareProjectLiveSourceContinuation(
+      root,
+      process.env.GENERIC_PROJECT_LIVE_REUSE_SOURCE_RUN,
+      join(fixture.isolated, "verified-real-project-source")
+    )
+    const { importLiveCreatorSourceSet } = await import("./support/creator-live-source-set")
+    const imported = await importLiveCreatorSourceSet({
+      app: app!,
+      page,
+      threadId,
+      workspace,
+      directory: original.directory
+    })
+    const current = await page.evaluate(
+      (id) => window.api.mods.development.status({ threadId: id }),
+      threadId
+    )
+    assert(current.projectTrial, "PROJECT_CONTINUATION_FRESH_TRIAL_REQUIRED")
+    const candidate = readGenericProjectCandidate(fixture.isolated, current.projectTrial)
+    assert.equal(
+      candidate.digest,
+      original.provenance.originalSourceDigest,
+      "PROJECT_CONTINUATION_NATIVE_BUNDLE_CHANGED"
+    )
+    assert.deepEqual(
+      candidate.source,
+      original.provenance.originalSource,
+      "PROJECT_CONTINUATION_COMPOSITION_CHANGED"
+    )
+    assert.deepEqual(
+      candidate.skills,
+      original.provenance.originalSkills,
+      "PROJECT_CONTINUATION_SKILLS_CHANGED"
+    )
+    writeFileSync(
+      join(fixture.isolated, "source-continuation.json"),
+      JSON.stringify(
+        {
+          ...original.provenance,
+          imported,
+          freshCandidate: candidate,
+          acceptance: "continues verified real author source; not another from-zero generation"
+        },
+        null,
+        2
+      ),
+      { flag: "wx" }
+    )
+    active.candidateReadyMs = 0
+    active.outcome = "native-candidate-prepared"
+  }
   if (genericProject && resumeRun) {
-    assert(["diagnostic", "runtime"].includes(resumeMode ?? ""), "GENERIC_PROJECT_RESUME_MODE_INVALID")
-    const saved: GenericProjectCandidate = genericRepair && resumeMode === "runtime" ?
-      JSON.parse(readFileSync(join(fixture.isolated, "generic-project-repair.json"), "utf8")).after : genericRepair ?
-      JSON.parse(readFileSync(join(fixture.isolated, "generic-project-replacement.json"), "utf8")).after :
-      JSON.parse(readFileSync(join(fixture.isolated, "generic-project-first-candidate.json"), "utf8"))
+    assert(
+      ["diagnostic", "runtime"].includes(resumeMode ?? ""),
+      "GENERIC_PROJECT_RESUME_MODE_INVALID"
+    )
+    const saved: GenericProjectCandidate =
+      genericRepair && resumeMode === "runtime"
+        ? JSON.parse(readFileSync(join(fixture.isolated, "generic-project-repair.json"), "utf8"))
+            .after
+        : genericRepair
+          ? JSON.parse(
+              readFileSync(join(fixture.isolated, "generic-project-replacement.json"), "utf8")
+            ).after
+          : JSON.parse(
+              readFileSync(join(fixture.isolated, "generic-project-first-candidate.json"), "utf8")
+            )
     const status = await page.evaluate(
-      (id) => window.api.mods.development.status({ threadId: id }), threadId
+      (id) => window.api.mods.development.status({ threadId: id }),
+      threadId
     )
     assert(status.projectTrial, "GENERIC_PROJECT_RETAINED_CANDIDATE_MISSING")
     const retained = readGenericProjectCandidate(fixture.isolated, status.projectTrial)
-    assert.deepEqual(retained, {
-      draftId: saved.draftId, revision: saved.revision, digest: saved.digest,
-      directory: saved.directory, source: saved.source, skills: saved.skills
-    }, "GENERIC_PROJECT_RETAINED_SOURCE_CHANGED")
+    assert.deepEqual(
+      retained,
+      {
+        draftId: saved.draftId,
+        revision: saved.revision,
+        digest: saved.digest,
+        directory: saved.directory,
+        source: saved.source,
+        skills: saved.skills
+      },
+      "GENERIC_PROJECT_RETAINED_SOURCE_CHANGED"
+    )
     if (resumeMode === "diagnostic") firstGenericCandidate = retained
     importedDigest = resumeMode === "diagnostic" ? retained.digest : undefined
   }
@@ -1131,10 +1285,17 @@ async function runChat(kind: string, prompt: string, workspace: string, modelUrl
     executionStage = `${kind}-import-source-set`
     const { importLiveCreatorSourceSet } = await import("./support/creator-live-source-set")
     const imported = await importLiveCreatorSourceSet({
-      app: app!, page, threadId, workspace, directory: process.env.CREATOR_LIVE_SOURCE_SET
+      app: app!,
+      page,
+      threadId,
+      workspace,
+      directory: process.env.CREATOR_LIVE_SOURCE_SET
     })
     importedDigest = imported.digest
-    writeFileSync(join(fixture.isolated, "imported-source-set.json"), JSON.stringify(imported, null, 2))
+    writeFileSync(
+      join(fixture.isolated, "imported-source-set.json"),
+      JSON.stringify(imported, null, 2)
+    )
   }
   const panel = page.getByRole("dialog", { name: "插件创作工作区", exact: true })
   if (await panel.isVisible())
@@ -1165,19 +1326,22 @@ async function runChat(kind: string, prompt: string, workspace: string, modelUrl
     save()
     executionStage = `${kind}-real-model-authoring-after-dependency-consent`
   }
-  if (resumeMode !== "runtime") {
+  if (resumeMode !== "runtime" && !active.outcome) {
     await page
       .locator("textarea.composer-textarea")
       .fill(
         resumeDependencyReview
           ? afterDependencyConsentPrompt
           : resumeMode === "diagnostic"
-            ? genericProject ? genericRepair ? genericProjectCreatorScenario.repairPrompt :
-              genericProjectCreatorScenario.followupPrompt : process.env.CREATOR_LIVE_PROMPT_FILE
-              ? readFileSync(resolve(process.env.CREATOR_LIVE_PROMPT_FILE), "utf8")
-              : kind === "two-stage-document-project"
-                ? "请把刚才已生成检查通过的插件准备为本会话可确认的隔离试用候选，沿用现有草稿，不另建、不运行。"
-                : "按真实检查修正当前草稿并试用，不要重读已经取得的完整目录。"
+            ? genericProject
+              ? genericRepair
+                ? genericProjectCreatorScenario.repairPrompt
+                : genericProjectCreatorScenario.followupPrompt
+              : process.env.CREATOR_LIVE_PROMPT_FILE
+                ? readFileSync(resolve(process.env.CREATOR_LIVE_PROMPT_FILE), "utf8")
+                : kind === "two-stage-document-project"
+                  ? "请把刚才已生成检查通过的插件准备为本会话可确认的隔离试用候选，沿用现有草稿，不另建、不运行。"
+                  : "按真实检查修正当前草稿并试用，不要重读已经取得的完整目录。"
             : prompt
       )
     await page.getByRole("button", { name: "发送消息", exact: true }).click()
@@ -1195,9 +1359,17 @@ async function runChat(kind: string, prompt: string, workspace: string, modelUrl
   while (!active.outcome && Date.now() < deadline) {
     await rejectUnexpectedAuthoringApprovals(threadId)
     const metadata = await observe(threadId)
-    const running = await page.getByRole("button", { name: /停止生成|停止响应|停止运行/, includeHidden: true }).count()
+    const running = await page
+      .getByRole("button", { name: /停止生成|停止响应|停止运行/, includeHidden: true })
+      .count()
     if (running || active.requests.length) sawRunning = true
-    if (hasLiveCreatorCandidate(metadata, kind === "tool-counter" ? "function" : "project", importedDigest))
+    if (
+      hasLiveCreatorCandidate(
+        metadata,
+        kind === "tool-counter" ? "function" : "project",
+        importedDigest
+      )
+    )
       active.candidateReadyMs ??= Date.now() - active.startedAt
     if (fatal) {
       active.limitCode = fatal
@@ -1210,12 +1382,23 @@ async function runChat(kind: string, prompt: string, workspace: string, modelUrl
       if (Date.now() - idleSince > 3000) {
         if (matrixMode && !firstMatrixCandidate && active.candidateReadyMs !== undefined) {
           const status = await page.evaluate(
-            id => window.api.mods.development.status({ threadId: id }), threadId)
+            (id) => window.api.mods.development.status({ threadId: id }),
+            threadId
+          )
           assert(status.projectTrial, "LIVE_MATRIX_FIRST_CANDIDATE_MISSING")
           firstMatrixCandidate = readMatrixCandidate(fixture.isolated, status.projectTrial)
-          assertMatrixOrigin(matrixMode, firstMatrixCandidate, matrixSeed, active.nativeTrace ?? [], active.failures)
-          writeFileSync(join(fixture.isolated, `${matrixPrefix}-first.json`),
-            JSON.stringify(firstMatrixCandidate, null, 2), { flag: "wx" })
+          assertMatrixOrigin(
+            matrixMode,
+            firstMatrixCandidate,
+            matrixSeed,
+            active.nativeTrace ?? [],
+            active.failures
+          )
+          writeFileSync(
+            join(fixture.isolated, `${matrixPrefix}-first.json`),
+            JSON.stringify(firstMatrixCandidate, null, 2),
+            { flag: "wx" }
+          )
           importedDigest = status.projectTrial.digest
           active.candidateReadyMs = undefined
           executionStage = `${matrixPrefix}-append-stage-through-conversation`
@@ -1224,19 +1407,25 @@ async function runChat(kind: string, prompt: string, workspace: string, modelUrl
             await panel.getByRole("button", { name: "返回聊天修改", exact: true }).click()
             await panel.waitFor({ state: "hidden" })
           }
-          await page.locator("textarea.composer-textarea").fill(matrixFollowupPrompt(firstMatrixCandidate, matrixMode))
+          await page
+            .locator("textarea.composer-textarea")
+            .fill(matrixFollowupPrompt(firstMatrixCandidate, matrixMode))
           await page.getByRole("button", { name: "发送消息", exact: true }).click()
           idleSince = 0
           continue
         }
         if (genericProject && !firstGenericCandidate && active.candidateReadyMs !== undefined) {
           const status = await page.evaluate(
-            (id) => window.api.mods.development.status({ threadId: id }), threadId
+            (id) => window.api.mods.development.status({ threadId: id }),
+            threadId
           )
           assert(status.projectTrial, "GENERIC_PROJECT_FIRST_CANDIDATE_MISSING")
           firstGenericCandidate = readGenericProjectCandidate(fixture.isolated, status.projectTrial)
-          writeFileSync(join(fixture.isolated, "generic-project-first-candidate.json"),
-            JSON.stringify(firstGenericCandidate, null, 2), { flag: "wx" })
+          writeFileSync(
+            join(fixture.isolated, "generic-project-first-candidate.json"),
+            JSON.stringify(firstGenericCandidate, null, 2),
+            { flag: "wx" }
+          )
           importedDigest = status.projectTrial.digest
           active.candidateReadyMs = undefined
           executionStage = "generic-project-replace-middle-through-conversation"
@@ -1245,20 +1434,28 @@ async function runChat(kind: string, prompt: string, workspace: string, modelUrl
             await workspacePanel.getByRole("button", { name: "返回聊天修改", exact: true }).click()
             await workspacePanel.waitFor({ state: "hidden" })
           }
-          await page.locator("textarea.composer-textarea")
+          await page
+            .locator("textarea.composer-textarea")
             .fill(genericProjectCreatorScenario.followupPrompt)
           await page.getByRole("button", { name: "发送消息", exact: true }).click()
           idleSince = 0
           continue
         }
-        if (process.env.CREATOR_LIVE_DEPENDENCY_CONSENT === "1" &&
+        if (
+          process.env.CREATOR_LIVE_DEPENDENCY_CONSENT === "1" &&
           metadata.reuse?.phase === "needs-approval" &&
-          active.candidateReadyMs === undefined) {
+          active.candidateReadyMs === undefined
+        ) {
           assert((active.dependencyConsents?.length ?? 0) < 2, "LIVE_DEPENDENCY_CONSENT_LIMIT")
-          const { reviewLiveCreatorDependency } = await import("./support/creator-live-dependencies")
+          const { reviewLiveCreatorDependency } =
+            await import("./support/creator-live-dependencies")
           executionStage = `${kind}-dependency-native-review`
           const receipt = await reviewLiveCreatorDependency({
-            page, threadId, workspace, artifacts: fixture.isolated, deadline
+            page,
+            threadId,
+            workspace,
+            artifacts: fixture.isolated,
+            deadline
           })
           active.dependencyConsents ??= []
           active.dependencyConsents.push(receipt)
@@ -1281,36 +1478,73 @@ async function runChat(kind: string, prompt: string, workspace: string, modelUrl
   active.elapsedMs = Date.now() - active.startedAt
   active.outcome ??= "LIVE_TOTAL_TIME_LIMIT"
   const finalStatus = await observe(threadId)
-  if (matrixMode && firstMatrixCandidate &&
-      hasLiveCreatorCandidate(finalStatus, "project", firstMatrixCandidate.digest)) {
-    const status = await page.evaluate(id => window.api.mods.development.status({ threadId: id }), threadId)
+  if (
+    matrixMode &&
+    firstMatrixCandidate &&
+    hasLiveCreatorCandidate(finalStatus, "project", firstMatrixCandidate.digest)
+  ) {
+    const status = await page.evaluate(
+      (id) => window.api.mods.development.status({ threadId: id }),
+      threadId
+    )
     assert(status.projectTrial, "LIVE_MATRIX_UPDATED_CANDIDATE_MISSING")
     const after = readMatrixCandidate(fixture.isolated, status.projectTrial)
     assertMatrixAssembly(firstMatrixCandidate, after, matrixMode)
     matrixAssemblies++
     if (matrixSeed) {
-      const retained = await readInstalledMatrixSeed(page, matrixSeed.installedPluginId, matrixSeed.origin)
+      const retained = await readInstalledMatrixSeed(
+        page,
+        matrixSeed.installedPluginId,
+        matrixSeed.origin
+      )
       assert.equal(retained.digest, matrixSeed.digest, "LIVE_MATRIX_INSTALLED_SOURCE_MUTATED")
     }
-    writeFileSync(join(fixture.isolated, `${matrixPrefix}-assembly.json`), JSON.stringify({
-      originVerified: true, assemblyVerified: true, after, runtimeVerified: false,
-      acceptance: "candidate-only; runtime reported separately in evidence"
-    }, null, 2), { flag: "wx" })
+    writeFileSync(
+      join(fixture.isolated, `${matrixPrefix}-assembly.json`),
+      JSON.stringify(
+        {
+          originVerified: true,
+          assemblyVerified: true,
+          after,
+          runtimeVerified: false,
+          acceptance: "candidate-only; runtime reported separately in evidence"
+        },
+        null,
+        2
+      ),
+      { flag: "wx" }
+    )
   }
-  if (genericProject && firstGenericCandidate &&
-      hasLiveCreatorCandidate(finalStatus, "project", firstGenericCandidate.digest)) {
+  if (
+    genericProject &&
+    firstGenericCandidate &&
+    hasLiveCreatorCandidate(finalStatus, "project", firstGenericCandidate.digest)
+  ) {
     const status = await page.evaluate(
-      (id) => window.api.mods.development.status({ threadId: id }), threadId
+      (id) => window.api.mods.development.status({ threadId: id }),
+      threadId
     )
     assert(status.projectTrial, "GENERIC_PROJECT_UPDATED_CANDIDATE_MISSING")
     const after = readGenericProjectCandidate(fixture.isolated, status.projectTrial)
-    const comparison = genericRepair ? assertGenericProjectRepair(firstGenericCandidate, after) :
-      assertGenericProjectReplacement(firstGenericCandidate, after)
-    writeFileSync(join(fixture.isolated, genericRepair ? "generic-project-repair.json" :
-      "generic-project-replacement.json"),
-      JSON.stringify({ comparison, after }, null, 2), { flag: "wx" })
+    const comparison = genericRepair
+      ? assertGenericProjectRepair(firstGenericCandidate, after)
+      : assertGenericProjectReplacement(firstGenericCandidate, after)
+    writeFileSync(
+      join(
+        fixture.isolated,
+        genericRepair ? "generic-project-repair.json" : "generic-project-replacement.json"
+      ),
+      JSON.stringify({ comparison, after }, null, 2),
+      { flag: "wx" }
+    )
   }
-  if (!hasLiveCreatorCandidate(finalStatus, kind === "tool-counter" ? "function" : "project", importedDigest)) {
+  if (
+    !hasLiveCreatorCandidate(
+      finalStatus,
+      kind === "tool-counter" ? "function" : "project",
+      importedDigest
+    )
+  ) {
     active.candidateReadyMs = undefined
     if (active.outcome === "native-candidate-prepared") active.outcome = "authoring-turn-ended"
   }
@@ -1385,13 +1619,18 @@ async function runChat(kind: string, prompt: string, workspace: string, modelUrl
           return true
         },
         artifactPrefix: matrixMode ? `${artifactPrefix}-${matrixPrefix}` : artifactPrefix,
-        installedWorkspaceSuffix: genericProject || matrixMode ? finalStatus.projectTrial?.digest.slice(0, 12) : undefined,
         installedProjectId,
         authorThreadId: threadId,
         authorWorkspace: workspace,
         artifacts: fixture.isolated,
         deadline,
-        goal: matrixMode ? matrixMode === "report-derived" ? matrixReportRuntimeGoal : matrixRuntimeGoal : genericProject ? genericProjectCreatorScenario.runtimeGoal : "为团队制作一个完全本地离线的需求记录工具。用户可新建、编辑和查找需求，每条需求包含标题、目标、范围、验收标准和待确认问题；保存为工作目录内Markdown文档。验收标准：能创建与编辑一条需求，按标题查找，重启后能读回已保存文档；不联网、不访问工作目录外文件。仅为本地验收允许经实际逐条审查的只读JSON/Markdown校验命令，禁止任何写文件命令，业务文件须通过原生文件写入审批。无须额外取时间戳或哈希；按阶段Skill与已给需求直接完成产物与检查。第一阶段写需求草稿，第二阶段独立复核并保留原稿。",
+        goal: matrixMode
+          ? matrixMode === "report-derived"
+            ? matrixReportRuntimeGoal
+            : matrixRuntimeGoal
+          : genericProject
+            ? genericProjectCreatorScenario.runtimeGoal
+            : "为团队制作一个完全本地离线的需求记录工具。用户可新建、编辑和查找需求，每条需求包含标题、目标、范围、验收标准和待确认问题；保存为工作目录内Markdown文档。验收标准：能创建与编辑一条需求，按标题查找，重启后能读回已保存文档；不联网、不访问工作目录外文件。仅为本地验收允许经实际逐条审查的只读JSON/Markdown校验命令，禁止任何写文件命令，业务文件须通过原生文件写入审批。无须额外取时间戳或哈希；按阶段Skill与已给需求直接完成产物与检查。第一阶段写需求草稿，第二阶段独立复核并保留原稿。",
         beginStage(label: string, stageWorkspace: string, projectId?: string) {
           assert(!fatal, "LIVE_PROVIDER_ALREADY_STOPPED")
           activeProjectId = projectId
@@ -1416,17 +1655,31 @@ async function runChat(kind: string, prompt: string, workspace: string, modelUrl
       if (genericProject) {
         assert("trial" in report && report.trial, "GENERIC_PROJECT_TRIAL_REQUIRED")
         const runtimeAudit = {
-          trial: await auditGenericProjectRuntime(page, report.trial.projectId),
-          ordinary: await auditGenericProjectRuntime(page, report.ordinary.projectId)
+          trial: await auditGenericProjectRuntime(page, report.trial.projectId, {
+            domainAssertions: "observe"
+          }),
+          originalFeature: report.originalFeature,
+          ordinaryBusinessCompletion:
+            "not required; original Feature checks first native stage handoff"
         }
-        writeFileSync(join(fixture.isolated, "generic-project-business-runtime.json"),
-          JSON.stringify(runtimeAudit, null, 2), { flag: "wx" })
+        writeFileSync(
+          join(fixture.isolated, "generic-project-business-runtime.json"),
+          JSON.stringify(runtimeAudit, null, 2),
+          { flag: "wx" }
+        )
       }
       active.runtime.project = report
-      active.runtime.verified = true
+      const failed = report.originalFeature.steps.filter((step) => step.status === "failed")
+      assert.equal(failed.length, 0, `LIVE_ORIGINAL_FEATURE_FAILED:${JSON.stringify(failed)}`)
+      active.runtime.verified = report.originalFeature.steps.some(
+        (step) => step.name === "stage-handoff" && step.status === "passed"
+      )
+      if (!active.runtime.verified && !report.originalFeature.environmentIssues.length)
+        throw Error("LIVE_ORIGINAL_FEATURE_HANDOFF_UNVERIFIED")
       if (matrixMode && "delivery" in report) {
         matrixDeliveredPluginId = report.delivery.pluginId
-        matrixRuntimeCompletions++
+        if (active.runtime.verified) matrixRuntimeCompletions++
+        else matrixRuntimeEnvironmentBlocks++
       }
     } catch (cause) {
       await recordFailure(cause)
@@ -1469,8 +1722,14 @@ async function main() {
     app = await createHeadlessProjectCompositionLaunch(root, fixture, {
       unobtrusivePresentation: true
     })()
-    app.process().stderr?.on("data", (chunk: Buffer) =>
-      appendFileSync(join(fixture.isolated, "electron-stderr.log"), chunk.toString("utf8").replaceAll(provider.key, "[REDACTED]")))
+    app
+      .process()
+      .stderr?.on("data", (chunk: Buffer) =>
+        appendFileSync(
+          join(fixture.isolated, "electron-stderr.log"),
+          chunk.toString("utf8").replaceAll(provider.key, "[REDACTED]")
+        )
+      )
     page = await app.firstWindow({ timeout: 60_000 })
     page.setDefaultTimeout(20_000)
     await page.addInitScript("window.__name = value => value")
@@ -1494,23 +1753,38 @@ async function main() {
     if (scenario !== "counter" && first && Date.now() < deadline)
       await runChat(
         projectKind,
-        matrixMode ? "" : genericProject ? genericProjectCreatorScenario.firstPrompt : process.env.CREATOR_LIVE_PROMPT_FILE
-          ? readFileSync(resolve(process.env.CREATOR_LIVE_PROMPT_FILE), "utf8")
-          : "请从零制作一个两阶段需求文档项目插件，不依赖已有插件：第一阶段根据本项目内用户需求生成 requirements.md，第二阶段独立复核需求是否有目标、范围、验收标准，输出 review.md 和机器可检查的 review.json。保留第一阶段原稿，成果通过实际文件检查后再交给人确认。请用原生项目创作工具生成、检查和准备隔离试用候选。不要安装、不要启动执行、不要代我批准。",
+        matrixMode
+          ? ""
+          : genericProject
+            ? genericProjectCreatorScenario.firstPrompt
+            : process.env.CREATOR_LIVE_PROMPT_FILE
+              ? readFileSync(resolve(process.env.CREATOR_LIVE_PROMPT_FILE), "utf8")
+              : "请从零制作一个两阶段需求文档项目插件，不依赖已有插件：第一阶段根据本项目内用户需求生成 requirements.md，第二阶段独立复核需求是否有目标、范围、验收标准，输出 review.md 和机器可检查的 review.json。保留第一阶段原稿，成果通过实际文件检查后再交给人确认。请用原生项目创作工具生成、检查和准备隔离试用候选。不要安装、不要启动执行、不要代我批准。",
         join(fixture.workspace, "document"),
         modelUrl
       )
-    if (matrixMode === "report-derived" && matrixDeliveredPluginId && !fatal && Date.now() < deadline) {
+    if (
+      matrixMode === "report-derived" &&
+      matrixDeliveredPluginId &&
+      !fatal &&
+      Date.now() < deadline
+    ) {
       matrixInheritedPluginId = matrixDeliveredPluginId
       await runChat(projectKind, "", join(fixture.workspace, "derived-again"), modelUrl)
     }
     if (matrixMode && !fatal) {
-      assert.equal(matrixAssemblies, matrixMode === "report-derived" ? 2 : 1,
-        "LIVE_MATRIX_REQUIRED_ASSEMBLY_NOT_COMPLETED")
+      assert.equal(
+        matrixAssemblies,
+        matrixMode === "report-derived" ? 2 : 1,
+        "LIVE_MATRIX_REQUIRED_ASSEMBLY_NOT_COMPLETED"
+      )
       if (matrixMode !== "autobiz-derived")
         assert(matrixDeliveredPluginId, "LIVE_MATRIX_RUNTIME_DELIVERY_NOT_COMPLETED")
-      assert.equal(matrixRuntimeCompletions, matrixMode === "autobiz-derived" ? 0 :
-        matrixMode === "report-derived" ? 2 : 1, "LIVE_MATRIX_REQUIRED_RUNTIME_NOT_COMPLETED")
+      assert.equal(
+        matrixRuntimeCompletions + matrixRuntimeEnvironmentBlocks,
+        matrixMode === "autobiz-derived" ? 0 : matrixMode === "report-derived" ? 2 : 1,
+        "LIVE_MATRIX_REQUIRED_RUNTIME_NOT_COMPLETED"
+      )
     }
   } catch (cause) {
     await recordFailure(cause)

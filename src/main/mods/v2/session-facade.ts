@@ -4,6 +4,7 @@ import type { FunctionSessionActivity } from "./session-activity"
 const asynchronous = new Set<keyof FunctionSession>([
   "start",
   "end",
+  "observeNativeEvent",
   "commands",
   "turnStart",
   "checkCompletion",

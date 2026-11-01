@@ -388,6 +388,7 @@ export class FunctionGuestRuntime implements FunctionUiConstructorGuest {
             throw Error("MODS_REGISTRATION_INVALID")
           guest.registrations.push({
             id: row.id,
+            ...(typeof row.module === "string" ? { module: row.module } : {}),
             pattern: row.pattern,
             hasCatch: row.hasCatch,
             hasMatcher: row.hasMatcher,

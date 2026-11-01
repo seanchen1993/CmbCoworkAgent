@@ -124,6 +124,7 @@ export const FUNCTION_GUEST_BOOTSTRAP = String.raw`
   }
   define(globalThis, "__functionReleaseResource", {value: handle => resourceCallbacks.delete(handle)});
   let registering = true;
+  let activeRegistrationModule;
   function pack(value) {
     const text = stringify(value);
     if (typeof text !== "string") throw Error("MODS_RETURN_UNDEFINED");
@@ -193,17 +194,20 @@ export const FUNCTION_GUEST_BOOTSTRAP = String.raw`
       (positive.endsWith(".*") && event.startsWith(positive.slice(0, -1)));
     return negative ? !result : result;
   }
-  const on = (pattern, matcher, fn) => {
+  const registerHook = (moduleId, pattern, matcher, fn) => {
     if (!registering) throw Error("MODS_REGISTRATION_CLOSED");
+    if (moduleId !== activeRegistrationModule) throw Error("MODS_REGISTRATION_MODULE");
     if (typeof matcher === "function") { fn = matcher; matcher = undefined; }
     if (typeof pattern !== "string" || typeof fn !== "function") throw Error("MODS_REGISTRATION_INVALID");
     if (matcher === undefined) {
-      if (unqualified.has(pattern)) throw Error("MODS_DUPLICATE_REGISTRATION");
-      unqualified.add(pattern);
+      const key = stringify([moduleId,pattern]);
+      if (unqualified.has(key)) throw Error("MODS_DUPLICATE_REGISTRATION");
+      unqualified.add(key);
     }
     if (registrations.length >= 128) throw Error("MODS_REGISTRATION_LIMIT");
     const id = String(registrations.length);
     const record = { id, pattern, hasCatch: false, hasMatcher: matcher !== undefined };
+    if (moduleId !== undefined) record.module = moduleId;
     const handler = { fn, matcher, recover: undefined };
     registrations.push(record);
     handlers.set(id, handler);
@@ -214,24 +218,40 @@ export const FUNCTION_GUEST_BOOTSTRAP = String.raw`
       handler.recover = recover;
     }});
   };
-  define(on, "capability", { value(descriptor, handlers) {
+  const registrationOn = moduleId => {
+    const on = (pattern,matcher,fn) => registerHook(moduleId,pattern,matcher,fn);
+    define(on, "capability", { value(descriptor, handlers) {
     if (!registering) throw Error("MODS_REGISTRATION_CLOSED");
     const copied = frozen(parse(pack(descriptor)));
     if (!copied || typeof copied.id !== "string" || typeof copied.version !== "string" ||
         !handlers || typeof handlers.act !== "function") throw Error("MODS_PLATFORM_DESCRIPTOR");
     on("platform.action", { capability: { id: copied.id, version: copied.version } }, handlers.act);
     registrations[registrations.length - 1].platformCapability = copied;
-  }});
-  freeze(on);
+    }});
+    return freeze(on);
+  };
   define(globalThis, "__functionRegister", { value(json) {
     const options = frozen(parse(json));
     const module = globalThis.__cmbFunctionMod;
     if (!module || typeof module.register !== "function") throw Error("MODS_NO_REGISTER");
+    // Snapshot functions before any author's register runs. Scoped capabilities remain lexical;
+    // an on saved by an earlier entry cannot register under a later entry's native phase.
+    const entries = isArray(module.hookModules) ? module.hookModules.map(entry => {
+      if (!entry || typeof entry.id !== "string" || typeof entry.register !== "function")
+        throw Error("MODS_REGISTRATION_MODULE");
+      return {id:entry.id,register:entry.register,options:frozen(parse(pack(entry.options || {})))};
+    }) : [{id:undefined,register:module.register,options:{}}];
+    if (entries.length > 32 || new Set(entries.map(entry=>entry.id)).size !== entries.length)
+      throw Error("MODS_REGISTRATION_MODULE");
+    globalThis.__cmbFunctionMod = undefined;
     try {
-      const result = module.register(on, options);
-      if (result && typeof result.then === "function") throw Error("MODS_ASYNC_REGISTER");
+      for (const entry of entries) {
+        activeRegistrationModule = entry.id;
+        const result = entry.register(registrationOn(entry.id),frozen({...options,...entry.options}));
+        if (result && typeof result.then === "function") throw Error("MODS_ASYNC_REGISTER");
+      }
       return pack(registrations);
-    } finally { registering = false; }
+    } finally { registering = false; activeRegistrationModule = undefined; }
   }});
   define(globalThis, "__functionMatches", { value(id, json) {
     const handler = handlers.get(id);

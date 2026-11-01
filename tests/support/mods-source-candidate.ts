@@ -60,6 +60,11 @@ export async function prepareModsSourceCandidate(repository: string, directory: 
   mkdirSync(root, { recursive: true })
   const main = join(root, "out/main")
   mkdirSync(main, { recursive: true })
+  const platformExamples = PLATFORM_EXAMPLES.map((example) => {
+    assert.equal(example.origin, "devclaw", "SOURCE_PLATFORM_EXAMPLE_PROVENANCE_REQUIRED")
+    if (example.origin !== "devclaw") throw Error("SOURCE_PLATFORM_EXAMPLE_PROVENANCE_REQUIRED")
+    return example
+  })
   const sourceRoots = [
     "src",
     "package.json",
@@ -68,7 +73,7 @@ export async function prepareModsSourceCandidate(repository: string, directory: 
     "resources/mods-policy.json",
     "skills",
     "examples/autobiz-stage-checks",
-    ...PLATFORM_EXAMPLES.map((example) => example.sourcePath)
+    ...platformExamples.map((example) => example.sourcePath)
   ]
   const sources = captureModsSourceSnapshot(repository, sourceRoots)
   const workers = modsSourceNodeWorkers(repository)
@@ -173,7 +178,7 @@ export async function prepareModsSourceCandidate(repository: string, directory: 
     ["skills", "out/skills"],
     ["examples/autobiz-stage-checks", "out/resources/project-composition/autobiz"],
     ["resources/mods/community-originals", "out/resources/bundled-mods/community-originals"],
-    ...PLATFORM_EXAMPLES.map((example) => [
+    ...platformExamples.map((example) => [
       example.sourcePath,
       `out/resources/bundled-mods/platform-examples/${example.id}`
     ])

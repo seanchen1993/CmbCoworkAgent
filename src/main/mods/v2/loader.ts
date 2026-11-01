@@ -33,7 +33,8 @@ import {
   parseClawComponentExports,
   type ClawComponentExport
 } from "../../../shared/mods/claw-components"
-import { assembleFunctionComponents, type CompiledFunctionComponent } from "./component-projection"
+import { assembleFunctionComponents, orderedFunctionComponents, type CompiledFunctionComponent } from "./component-projection"
+import { scanFunctionModuleUses, combineFunctionModuleUses, type FunctionModuleScan } from "./module-uses"
 export { projectFunctionComponents, type FunctionComponentProjection } from "./component-projection"
 
 export interface CompiledFunctionPlugin {
@@ -57,6 +58,13 @@ export interface CompiledFunctionPlugin {
   actions?: ClawActionExport[]
   components?: ClawComponentExport[]
   componentModules?: Record<string, CompiledFunctionComponent>
+  admission?: { version?: string; modules: FunctionCompiledAdmissionModule[] }
+}
+
+export interface FunctionCompiledAdmissionModule extends FunctionModuleScan {
+  id: string
+  clients: string[]
+  requires?: string[]
 }
 
 /** Configuration readers may use native schema metadata without constructing a dummy guest.
@@ -267,6 +275,9 @@ export async function compileFunctionPlugin(
   let clientModules = new Set<string>()
   let environmentNames = { read: new Set<string>(), write: new Set<string>() }
   let activeComponentEntry: string | undefined
+  const sourceScans = new Map<string, FunctionModuleScan>()
+  const sourceClients = new Map<string, string[]>()
+  const sourceImports = new Map<string, Set<string>>()
   const buildModule = (contents: string, globalName: string, surface = false) =>
     build({
       stdin: {
@@ -309,6 +320,12 @@ export async function compileFunctionPlugin(
                   const path = resolveModFile(root, relative(root, candidate))
                   if (componentEntries.has(pathKey(path)) && pathKey(path) !== activeComponentEntry)
                     throw Error("CLAW_COMPONENT_CROSS_ENTRY_IMPORT")
+                  if (args.importer && args.importer !== "<stdin>") {
+                    const importer = relative(root, args.importer).replaceAll("\\", "/")
+                    const imports = sourceImports.get(importer) ?? new Set<string>()
+                    imports.add(relative(root, path).replaceAll("\\", "/"))
+                    sourceImports.set(importer, imports)
+                  }
                   return {
                     path,
                     namespace: "function-mod"
@@ -346,6 +363,8 @@ export async function compileFunctionPlugin(
                       : "js"
               if (!surface) {
                 const result = resolveClientModules(content, loader, file, root)
+                sourceScans.set(key, scanFunctionModuleUses(result.code))
+                sourceClients.set(key, result.modules)
                 const declaration = discoverFunctionEnvironment(result.code)
                 for (const name of declaration.read) environmentNames.read.add(name)
                 for (const name of declaration.write) environmentNames.write.add(name)
@@ -370,6 +389,7 @@ export async function compileFunctionPlugin(
           `import { register as r${i} } from ${JSON.stringify("./" + path.replace(/\\/g, "/"))}`
       )
       .join("\n") +
+    `\nexport const hookModules = [${paths.map((path, i) => `{id:${JSON.stringify(path.replaceAll("\\", "/"))},register:r${i}}`).join(",")}];` +
     `\nexport function register(on, options) { ${paths.map((_, i) => `const v${i} = r${i}(on, options); if (v${i} && typeof v${i}.then === "function") throw Error("MODS_ASYNC_REGISTER");`).join(" ")} }`
   const componentModules: Record<string, CompiledFunctionComponent> = Object.create(null)
   let componentBundleBytes = 0
@@ -399,6 +419,7 @@ export async function compileFunctionPlugin(
       componentModules[entry.id] = {
         code,
         globalName,
+        entry: modules[index].replaceAll("\\", "/"),
         clients,
         environment: {
           read: [...environmentNames.read].sort(),
@@ -416,16 +437,7 @@ export async function compileFunctionPlugin(
   }
   const output = components.length
     ? undefined
-    : await buildModule(
-        modules
-          .map(
-            (path, i) =>
-              `import { register as r${i} } from ${JSON.stringify("./" + path.replace(/\\/g, "/"))}`
-          )
-          .join("\n") +
-          `\nexport function register(on, options) { ${modules.map((_, i) => `const v${i} = r${i}(on, options); if (v${i} && typeof v${i}.then === "function") throw Error("MODS_ASYNC_REGISTER");`).join(" ")} }`,
-        "__cmbFunctionMod"
-      )
+    : await buildModule(registerSource(modules), "__cmbFunctionMod")
   const code = components.length
     ? assembleFunctionComponents(components, componentModules, {})
     : output?.outputFiles[0]?.text
@@ -482,6 +494,26 @@ export async function compileFunctionPlugin(
       write: [...environmentNames.write].sort()
     },
     options,
+    admission: {
+      ...(typeof packageManifest?.version === "string" ? { version: packageManifest.version } : {}),
+      modules: modules.map((path, index) => {
+        const id = path.replaceAll("\\", "/")
+        const done = new Set<string>(), ordered: string[] = []
+        const visit = (file: string) => {
+          if (done.has(file)) return
+          done.add(file)
+          for (const dependency of sourceImports.get(file) ?? []) visit(dependency)
+          ordered.push(file)
+        }
+        visit(id)
+        return { id,
+          ...(components.length ? { requires: components[index].dependsOn.map(dependency =>
+            componentModules[dependency].entry!) } : {}),
+          ...combineFunctionModuleUses(ordered.map(file => sourceScans.get(file) ?? {
+          uses: { events: [], calls: [] }, unknown: "module scan missing"
+        })), clients: [...new Set(ordered.flatMap(file => sourceClients.get(file) ?? []))].sort() }
+      })
+    },
     ...(userConfig === undefined ? {} : { userConfig }),
     ...(userConfigSchema === undefined ? {} : { userConfigSchema }),
     sources: [...captured.keys()].sort(),
@@ -492,6 +524,11 @@ export async function compileFunctionPlugin(
           authoringEntries: modules.map((path) => path.replace(/\\/g, "/"))
         }
       : {})
+  }
+  if (components.length && compiled.admission) {
+    const metadata = new Map(compiled.admission.modules.map(module => [module.id, module]))
+    compiled.admission.modules = orderedFunctionComponents(components).map(entry =>
+      metadata.get(componentModules[entry.id].entry!)!)
   }
   bindFunctionSourceProofs(compiled, [...sourceProofs.values()], [...missingSources], adoptableSources,
     { device: rootIdentity.dev, inode: rootIdentity.ino })

@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs"
 import { resolve } from "node:path"
 import { build } from "esbuild"
 import { chromium } from "playwright"
+import { browserWorkerPlugin } from "./support/browser-worker-plugin.mjs"
 
 interface LayoutSnapshot {
   frames: number
@@ -175,6 +176,7 @@ async function main() {
     alias: { "@": resolve("src/renderer/src") },
     define: { "process.env.NODE_ENV": '"production"', "import.meta.hot": "undefined" },
     plugins: [
+      browserWorkerPlugin(),
       {
         name: "geometry-only-bubbles",
         setup(builder) {

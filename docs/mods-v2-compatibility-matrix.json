@@ -3,7 +3,7 @@
   "status": "implementation-in-progress-not-full-parity",
   "currentDesktopReference": {
     "version": "2.1.316",
-    "hostRevision": "devclaw-mods-v94",
+    "hostRevision": "devclaw-mods-v95",
     "report": "docs/mods-nonmedia-and-phase3-verification-2026-11-01.md",
     "inventory": "docs/mods-nonmedia-sdk-inventory-2026-11-01.json",
     "scope": "Current bounded desktop adapters. Historical version references below keep their original scope; method presence is not provider equivalence."
@@ -67,6 +67,9 @@
     "scope": "Desktop application adaptation: isolated Function runtime, host-bound session/model/tool/MCP operations, real dynamic context and prompt-source provenance, bounded desktop sites and Client lifecycles, classic production triggers identified individually; actual main, independent Flow and known GP/registry task prompt/model boundaries with original-epoch and binding checks; original completion loop with application project rules, durable bound evidence and optional pinned Autobiz stage commits. Partial and unsupported rows remain explicit; not full Claude parity or universal business acceptance.",
     "desktopEvents": [
       "session.start",
+      "plugin.register (per-entry prior-admitted-prefix gate, shared package VM)",
+      "session.attach/session.detach (real local desktop binding roster only)",
+      "classic.WorktreeRemove (read/local-record-only owned workflow removal observation)",
       "engine.create (bounded per-session noun fold)",
       "turn.start (desktop/scheduler/heartbeat/legacy remote main runs)",
       "turn.complete (desktop/scheduler/heartbeat/legacy remote main runs and host-bound shared children)",
@@ -1053,8 +1056,8 @@
     },
     {
       "name": "session.attach",
-      "target": "reviewed-unavailable-desktop-contract",
-      "implementationStatus": "unsupported",
+      "target": "reviewed-bounded-desktop-contract",
+      "implementationStatus": "partial",
       "batch": "B3",
       "acceptance": [
         "A04"
@@ -1062,19 +1065,19 @@
       "differences": [
         "D03"
       ],
-      "availability": "unavailable",
-      "note": "Known catalog name only: no production Function Mods trigger is wired for session.attach. Registration metadata or a manually dispatched fixture does not establish a desktop engine adapter. Legacy V1 prompt hooks and native application actions are separate interfaces.",
+      "availability": "bounded",
+      "note": "Actual local desktop broker binding, opaque native clientId, duplicate-owner deduplication and late-start snapshot. Observes already-started runtimes only; mounting UI does not create a VM. Return values cannot alter the roster. Not a Remote Control online claim.",
       "implementation": [
         "src/main/mods/v2/session.ts",
         "src/main/mods/v2/manager.ts",
-        "src/shared/mods/v2/event-catalog.ts"
+        "src/main/mods/v2/desktop-broker.ts"
       ],
-      "evidence": []
+      "evidence": ["src/main/mods/v2/native-lifecycle.integration.test.ts", "src/main/mods/v2/desktop-broker.test.ts", "src/main/ipc/mods-desktop.test.ts"]
     },
     {
       "name": "session.detach",
-      "target": "reviewed-unavailable-desktop-contract",
-      "implementationStatus": "unsupported",
+      "target": "reviewed-bounded-desktop-contract",
+      "implementationStatus": "partial",
       "batch": "B3",
       "acceptance": [
         "A04"
@@ -1082,19 +1085,19 @@
       "differences": [
         "D03"
       ],
-      "availability": "unavailable",
-      "note": "Known catalog name only: no production Function Mods trigger is wired for session.detach. Registration metadata or a manually dispatched fixture does not establish a desktop engine adapter. Legacy V1 prompt hooks and native application actions are separate interfaces.",
+      "availability": "bounded",
+      "note": "Exact owner replacement, explicit local detach and renderer destruction update the real roster. Session end detaches with reason:end within the same 1.5s end deadline. Revoke/reload removes subscriptions without fabricating an end or remote lifecycle.",
       "implementation": [
         "src/main/mods/v2/session.ts",
         "src/main/mods/v2/manager.ts",
-        "src/shared/mods/v2/event-catalog.ts"
+        "src/main/mods/v2/desktop-broker.ts"
       ],
-      "evidence": []
+      "evidence": ["src/main/mods/v2/native-lifecycle.integration.test.ts", "src/main/mods/v2/desktop-broker.test.ts", "src/main/ipc/mods-desktop.test.ts"]
     },
     {
       "name": "plugin.register",
-      "target": "reviewed-unavailable-desktop-contract",
-      "implementationStatus": "unsupported",
+      "target": "reviewed-bounded-desktop-contract",
+      "implementationStatus": "partial",
       "batch": "B4",
       "acceptance": [
         "A03",
@@ -1104,14 +1107,16 @@
         "D01",
         "D08"
       ],
-      "availability": "unavailable",
-      "note": "Known catalog name only: no production Function Mods trigger is wired for plugin.register. Registration metadata or a manually dispatched fixture does not establish a desktop engine adapter. Legacy V1 prompt hooks and native application actions are separate interfaces.",
+      "availability": "bounded",
+      "note": "Per-entry admission by the prior admitted prefix before engine/start/index publication, with native-pinned manifest and static import-closure uses. Denied registrations, tools, actions, Client and UI bindings stay unavailable. Same package retains one VM/state/grant; synchronous top-level/register JS is evaluated without host authority before gating, so this is not intra-package memory isolation or pre-execution malware scanning. Unknown scans refuse only under a gate; no-judge legacy fast path remains. Provenance uses explicit local/development/builtin host sources.",
       "implementation": [
         "src/main/mods/v2/session.ts",
         "src/main/mods/v2/manager.ts",
-        "src/shared/mods/v2/event-catalog.ts"
+        "src/main/mods/v2/module-admission.ts",
+        "src/main/mods/v2/module-uses.ts",
+        "src/main/mods/v2/loader.ts"
       ],
-      "evidence": []
+      "evidence": ["src/main/mods/v2/module-admission.test.ts", "src/shared/mods/v2/plugin-register.test.ts"]
     },
     {
       "name": "turn.start",
@@ -3266,7 +3271,7 @@
     },
     {
       "name": "classic.WorktreeRemove",
-      "target": "schema-only-classic-contract",
+      "target": "reviewed-bounded-desktop-contract",
       "implementationStatus": "partial",
       "batch": "B3",
       "acceptance": [
@@ -3277,16 +3282,20 @@
         "D01",
         "D02"
       ],
-      "integration": "add-and-prove-production-trigger",
-      "note": "Result schema and manual FunctionSession dispatch only; no production trigger or result-effect integration. Not claimed as implemented compatibility.",
+      "integration": "owned-workflow-removal-read-only-observer",
+      "note": "Real owned workflow ledger removal attempt, before the original conservative Git cleanup. Captured already-started ordinary owner/source only, no VM creation. Dispatch requires an idle runtime with no retained/opening resources, pending calls or unknown cleanup; otherwise skipped with a diagnostic. A main-owned lease fences private resource control as well as the read/local store-state/log allowlist, persisting until actual dispatch and host promises settle, beyond a waiting timeout. Fixed thread/run/workspace/path; no deletion takeover or success claim. Dirty retention and original recovery remain. Project runtime-source proof is unsupported; this is not WorktreeCreate path takeover.",
       "evidence": [
         "docs/mods-v2-classic-contract-2026-09-23.md",
-        "src/shared/mods/v2/classic.test.ts"
+        "src/shared/mods/v2/classic.test.ts",
+        "src/main/mods/v2/native-lifecycle.integration.test.ts",
+        "src/main/mods/v2/worktree-observer-process.integration.test.ts"
       ],
-      "availability": "metadata",
+      "availability": "bounded",
       "implementation": [
         "src/shared/mods/v2/classic.ts",
-        "src/main/mods/v2/session.ts"
+        "src/main/mods/v2/session.ts",
+        "src/main/mods/v2/native-observer.ts",
+        "src/main/agent/workflow/worktree-lease.ts"
       ]
     },
     {

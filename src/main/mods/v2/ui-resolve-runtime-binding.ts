@@ -52,6 +52,20 @@ export function aliasFunctionUiResolveRuntime(source: FunctionGuest, alias: Func
   bindings.set(alias, binding)
 }
 
+/** A derived native identity can only narrow immutable registrations, never add a VM handler. */
+export function subsetFunctionUiResolveRuntime(source: FunctionGuest, target: FunctionGuest,
+  registrations: readonly FunctionRegistration[]): void {
+  const binding = bindings.get(source)
+  if (!binding) return
+  binding.assertCurrent()
+  const ids = new Set(registrations.map(row => row.id))
+  if (registrations.some(row => !binding.registrations.some(actual => actual.id === row.id &&
+      actual.pattern === row.pattern && actual.module === row.module)))
+    throw new ModFunctionError("MODS_UI_RESOLVE_IDENTITY")
+  bindings.set(target, Object.freeze({ ...binding,
+    registrations: Object.freeze(binding.registrations.filter(row => ids.has(row.id))) }))
+}
+
 export function functionUiResolveRuntimeBinding(
   guest: FunctionGuest
 ): FunctionUiResolveRuntimeBinding {

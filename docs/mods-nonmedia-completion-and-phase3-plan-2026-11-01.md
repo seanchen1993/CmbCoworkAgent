@@ -44,3 +44,15 @@
 先窄回归与 smoke，再正式 runtime/ingress、桌面流量和长稳测试。沿现有门槛：单插件 p95 ≤15ms；关闭 Mods 入口 p95 ≤基线105%；空闲 CPU 差≤0.5个百分点；桌面 TTFT p95 增量≤40ms、吞吐比≥0.95。正式长稳需要300秒 idle、2小时 soak、至少10000事件；renderer heap 首尾各10分钟窗口，增长≤max(10MiB,初始中位数10%)。短测不写成长稳通过。
 
 交付 SDK/自定义范围说明、当前验收和性能证据，更新 D:\王博闻\AutoBiz-项目模式模板 的使用说明。保留用户原文件和无关工作区变更，仅开发分支可推送。
+
+## 最终范围回检的补充（双审通过后实施）
+
+medium 回检确认三处现有生产流程不能笼统归为“无等价提供者”：模块加载准入、本地桌面绑定和 owned 工作树回收。因此正式性能暂缓，先补真实适配，不能只修改清单为已完成。
+
+1. `plugin.register` 按真实 hooks 模块顺序准入。保留同包单 VM、同一授权与命名状态；编译器给聚合 wrapper 生成模块范围，作者拿不到改变该范围的工厂。每 entry 及其 import 闭包静态扫描 events/calls/env/state，并固定 manifest、版本、来源与源码摘要。候选加入前只由此前准入前缀审查；拒绝模块不进入 engine、start、事件、工具、命令或公共 capability。动态准入索引必须在真实注册后同步，不能用整包删 snapshot 代替模块过滤。加载/重载才执行，无 judge 时沿原快路径。
+2. `session.attach/detach` 只适配真实本地 desktop broker owner。相同绑定去重并保留未完成请求；替换、精确解绑和 renderer 销毁更新真实 roster，再通知已经启动的 runtime。普通页面挂载不能启动 VM、扫描插件或重放启动 Hook；晚启动从真实绑定快照补通知。终止解绑共享现有 session.end 短期限，撤权/重载只清理订阅，不冒称远程客户端上线或对话结束。
+3. `classic.WorktreeRemove` 只接真实 owned workflow 工作树回收边界。固定原 thread/run/workspace/path 和当前来源权限；有界观察不得替换路径、伪造删除、绕过保留 dirty 策略或让清理操作新建 VM。真实移除前运行，失败照常交回原保守清理逻辑；没有实际回收的恢复/保留分支不发送该事件。
+
+完整模块及桌面/工作树方案均经 core 与 medium 两审正式通过后实施。实现回归另确认工作树观察若启动 writer，单纯取消等待不能证明物理停止，因此将该事件限定为读取、本地 store/state 与日志；私有异步作用域跨嵌套调用保持限制，拒绝进程、工具、原生写入等未知副作用，不新增删除/回滚引擎。新增实现完成后再以全新 medium agent 回检。已有真实模型生成的源只作为同源续验材料，重新核对文件哈希并申请当前候选的试用授权，不复制旧配置或 grant。
+
+WorktreeCreate 的路径接管、PermissionRequest 的 decision/updatedPermissions、模型切换的实际 cache/pricing 等仍需精确契约，不能把已有类似动作直接计作上游语义完成。终端绘制、受托组织身份及上游内部服务的条件继续明确列出。

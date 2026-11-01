@@ -140,3 +140,55 @@ export const register:Register=on=>{
 }`)
   expect(result.diagnostics).toEqual([])
 })
+
+it("gives authors precise module admission and native lifecycle types through bounded queries", async () => {
+  for (const event of ["plugin.register", "session.attach", "session.detach", "classic.WorktreeRemove"]) {
+    const page = developmentCatalogPage("events", 0, event)
+    expect(page, event).toMatchObject({ matched: true, declarationAvailable: true })
+    expect(JSON.stringify({ ok: true, result: page }).length, event).toBeLessThan(8000)
+  }
+  const result = await authorCheck(`import type {Register} from "devclaw-mods"
+export const register:Register=on=>{
+  on("plugin.register",{tier:"user"},async($,e,next)=>{
+    if(e.uses.calls.includes("process.spawn")) return {refuse:"此组合不允许后台进程"};
+    return next(e);
+  }).catch(($,e,next)=>next.called?next(e):{refuse:"无法核对准入"});
+  on("session.attach",{surface:"desktop"},($,e,next)=>next(e));
+  on("session.detach",{reason:"end"},($,e,next)=>next(e));
+  on("classic.WorktreeRemove",async($,e,next)=>{
+    await $.store.set("last-worktree",e.worktree_path);
+    return next(e);
+  });
+}`)
+  expect(result.diagnostics).toEqual([])
+})
+
+it("rejects fabricated admission decisions and worktree deletion effects in author types", async () => {
+  const result = await authorCheck(`import type {Register} from "devclaw-mods"
+export const register:Register=on=>{
+  on("plugin.register",()=>({allow:false}));
+  on("classic.WorktreeRemove",()=>({worktreePath:"/replacement"}));
+}`)
+  expect(result.diagnostics.filter((item) => item.file === "hooks/main.ts").map((item) => item.line))
+    .toEqual(expect.arrayContaining([3, 4]))
+})
+
+it("types cleanup observations as reads and local records while retaining real state helpers", async () => {
+  const valid = await authorCheck(`import {atom,read,update} from "devclaw-mods"
+import type {Register} from "devclaw-mods"
+const count=atom({plugin:"nonmedia",key:"removals"},0);
+export const register:Register=on=>{on("classic.WorktreeRemove",async($,e,next)=>{
+  await $.fs.exists(e.worktree_path);await $.store.set("last",e.worktree_path);
+  await read($,count);await update($,count,n=>n+1);return next(e);
+})}`)
+  expect(valid.diagnostics).toEqual([])
+  const invalid = await authorCheck(`import type {Register} from "devclaw-mods"
+export const register:Register=on=>{on("classic.WorktreeRemove",async($)=>{
+  await $.fs.write("late.txt","late");
+  await $.process.run(["writer"]);
+  await $.clock.after(1,()=>{});
+  return {};
+})}`)
+  expect(invalid.diagnostics.filter((item) => item.file === "hooks/main.ts").map((item) => item.line))
+    .toEqual(expect.arrayContaining([3, 4, 5]))
+})

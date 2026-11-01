@@ -1,4 +1,5 @@
 import { assertWorkflowResourceAdmission } from "../../agent/workflow/resource-deadline"
+import { WORKTREE_OBSERVER_METHODS } from "./native-observer"
 import { agentTaskInput } from "../../../shared/mods/v2/agent-tasks"
 import { assertPlatformQueryMethod } from "./platform-query-scope"
 import { isFunctionContentBoundary } from "./content-boundary"
@@ -76,6 +77,9 @@ import type { FunctionCommand } from "../../../shared/mods/v2/commands"
 import { assertModJson, encodeModJson, parseModJson } from "../../../shared/mods/validation"
 import { FunctionDispatcher, type FunctionPlugin } from "./dispatcher"
 import { FunctionEngineNouns } from "./engine-nouns"
+import { FunctionModuleAdmission } from "./module-admission"
+import { validateFunctionPluginRegisterInput, validateFunctionPluginRegisterResult,
+  type FunctionPluginRegisterResult } from "../../../shared/mods/v2/plugin-register"
 import {
   FunctionAgentRegistry,
   functionAgentSpec,
@@ -279,6 +283,9 @@ export interface FunctionSessionHost {
   platformSource?(plugin: FunctionPlugin): PlatformCapabilitySource
   platformIncarnation?: string
   platformChanged?(): void
+  desktopSurfaces?(): string[]
+  detachDesktopForEnd?(): Array<{ clientId: string }>
+  pendingDesktopObservers?(): Promise<void>
   appendSession?(plugin: FunctionPlugin, args: FunctionSessionAppendArgs,
     source: FunctionSessionAppendSource, run: FunctionConversationAppendRun):
       Promise<FunctionSessionAppendResult>
@@ -442,6 +449,8 @@ function assertConversationReplyJson(value: unknown): asserts value is ModJson {
 }
 
 export class FunctionSession {
+  readonly plugins: readonly FunctionPlugin[]
+  private readonly moduleAdmission: FunctionModuleAdmission
   /** A verified native gesture retains its sender, without pinning intentional redraws. */
   nativeMarkdownCallback<T>(assertCurrent: () => void, run: () => Promise<T>): Promise<T> {
     const scope: NativeIntentScope = { assertCurrent, parent: this.nativeIntentScopes.getStore() }
@@ -499,13 +508,43 @@ export class FunctionSession {
   private readonly clientFaultScopes = new AsyncLocalStorage<() => void>()
   private readonly clientDrawingScopes = new AsyncLocalStorage<import("./clients").FunctionClientDrawingReceipt | undefined>()
   private readonly nativeIntentScopes = new AsyncLocalStorage<NativeIntentScope>()
+  private readonly worktreeObservationScopes = new AsyncLocalStorage<boolean>()
+  private worktreeObserverLease?: { settled: boolean }
+  private pendingObserverHostCalls = 0
+  private pendingObserverDispatches = 0
+
+  /** Counts actual host finally, including work outliving a caller's bounded wait. */
+  private async retainObserverHostCall<T>(run: () => Promise<T>): Promise<T> {
+    this.pendingObserverHostCalls++
+    try { return await run() }
+    finally {
+      this.pendingObserverHostCalls--
+      this.releaseSettledWorktreeObserver()
+    }
+  }
+
+  private releaseSettledWorktreeObserver(): void {
+    if (this.worktreeObserverLease?.settled && !this.pendingObserverHostCalls &&
+      !this.pendingObserverDispatches) this.worktreeObserverLease = undefined
+  }
+
+  private claimWorktreeObserver(): { settled: boolean } | undefined {
+    let healthy = true
+    try { this.resources.assertCleanupHealthy() } catch { healthy = false }
+    if (!healthy || this.worktreeObserverLease || this.hasReleaseResources || this.processStreams.size ||
+      this.pendingObserverHostCalls || this.pendingObserverDispatches) {
+      console.warn("[Mods] Worktree removal observation skipped: runtime has retained or unsettled work")
+      return undefined
+    }
+    return this.worktreeObserverLease = { settled: false }
+  }
   private readonly nativeIntentChecks = new WeakSet<NativeIntentScope>()
   private readonly uiConstructorScopes = new AsyncLocalStorage<{
     assertCurrent(): void
     admission?: ReturnType<FunctionSessionInitializer["captureAdmission"]>
   }>()
   private readonly uiConstructorChecks = new WeakSet<object>()
-  private readonly uiResolve?: FunctionUiResolveMainAssembly
+  private uiResolve?: FunctionUiResolveMainAssembly
   private readonly startupPromptScopes = new AsyncLocalStorage<StartupPromptAccess>()
   private readonly startupModelScopes = new AsyncLocalStorage<() => void>()
   private readonly endScopes = new AsyncLocalStorage<FunctionDispatchDeadline>()
@@ -613,9 +652,12 @@ export class FunctionSession {
   }
 
   constructor(
-    readonly plugins: readonly FunctionPlugin[],
+    candidates: readonly FunctionPlugin[],
     private readonly host: FunctionSessionHost
   ) {
+    this.moduleAdmission = new FunctionModuleAdmission(candidates)
+    this.plugins = this.moduleAdmission.plugins
+    const plugins = this.plugins
     const memory = new Map<string, ModJson>()
     const fallbackHub = () => new PlatformCapabilityHub({
       get: (ns, key) => memory.get(JSON.stringify([ns, key])),
@@ -631,6 +673,7 @@ export class FunctionSession {
       source: plugin => host.platformSource?.(plugin) ?? { provider: plugin.name,
         digest: "session-local", generation: localGeneration },
       assertCurrent: (plugin, method) => {
+        if (method) this.assertWorktreeObserverMethod(method)
         this.assertLive(plugin)
         if (method) {
           host.initializer?.assertMethod(method)
@@ -739,42 +782,7 @@ export class FunctionSession {
     })
     this.nouns = new FunctionEngineNouns(plugins, (plugin) => this.assertLive(plugin),
       () => this.endInvocationOptions())
-    if (host.uiResolveQuota && plugins.length > 1 && plugins.some(plugin =>
-      plugin.guest.registrations.some(row => matchesEventPattern(row.pattern, "ui.resolve")))) {
-      this.uiResolve = new FunctionUiResolveMainAssembly(plugins, host.uiResolveQuota(), {
-        activity: host.activity, initializer: host.initializer, signal: this.lifecycleSignal,
-        assertCurrent: plugin => {
-          this.controller.signal.throwIfAborted()
-          host.assertLive(plugin)
-          host.assertUiResolveCurrent?.(plugin)
-        },
-        capabilities: plugin => this.nouns.capabilities(plugin),
-        captureExecution: () => captureFunctionUiResolveExecution(host.workspace, host.threadId),
-        execute: (plugin, registration, method, args, signal, execution, assertCurrent,
-          admission, drawing) => {
-          const run = () => withFunctionTransportExecution({
-            workspace: execution.workspace, threadId: execution.threadId,
-            agentId: execution.agentId, turnId: execution.turnId,
-            runtimeAuthority: execution.runtimeAuthority,
-            userInitiated: false, leased: false, immediate: true
-          }, () => withFreshFunctionSessionActivity(() =>
-            this.uiConstructorScopes.run({ assertCurrent, admission }, async () => {
-              this.assertUiConstructorCurrent()
-              if (!this.nouns.capabilities(plugin).includes(method))
-                throw new ModFunctionError("MODS_CAPABILITY_DENIED")
-              const value = await this.capability(plugin, method, args, signal,
-                { event: "ui.resolve", registration,
-                  identity: this.actualRegistration(plugin, registration) }, 0, undefined, signal,
-                drawing ? { drawing: drawing.generation } : {})
-              this.assertUiConstructorCurrent()
-              return value === undefined ? {} : { value }
-            })))
-          // Preparation retains its captured startup model route until the whole drain ends.
-          return drawing ? this.freshStartup(() => host.freshEntry ? host.freshEntry(run) : run())
-            : run()
-        }
-      })
-    }
+    if (!this.moduleAdmission.gated) this.prepareUiResolve()
     this.clients = new FunctionClients({
       markdownLinks: this.markdownLinks,
       assertLive: (name) => {
@@ -806,8 +814,12 @@ export class FunctionSession {
         ?? this.panes.captureClientDrawing(pane, generation),
       withDrawing: (receipt, run) => this.clientDrawingScopes.run(receipt, run),
       publish: (value) => this.host.publish(value, this.controller.signal),
-      checkModule: (plugin, module) => this.host.checkClientModule?.(plugin, module),
+      checkModule: (plugin, module) => {
+        this.moduleAdmission.assertClient(plugin, module)
+        this.host.checkClientModule?.(plugin, module)
+      },
       load: (plugin, module) => {
+        this.moduleAdmission.assertClient(plugin, module)
         if (!this.host.loadClient) throw new ModFunctionError("MODS_CLIENT_UNAVAILABLE")
         return this.host.loadClient(plugin, module)
       },
@@ -844,7 +856,8 @@ export class FunctionSession {
     })
     const paneHost: PaneHost = {
       markdownLinks: this.markdownLinks,
-      ...(this.uiResolve ? { withUiResolveDrawing: withFunctionUiResolveDrawing } : {}),
+      ...(this.uiResolve || this.moduleAdmission.gated
+        ? { withUiResolveDrawing: withFunctionUiResolveDrawing } : {}),
       withNativeIntent: (assertCurrent, run) => this.nativeMarkdownCallback(assertCurrent, run),
       beginState: generation => { this.namedState.beginDrawingDependencies(generation) },
       releaseState: (generation) => {
@@ -912,9 +925,57 @@ export class FunctionSession {
     this.sites = new FunctionUiSites({ ...paneHost,
       userMessageOrigin: this.host.userMessageOrigin,
       pendingQuestion: this.host.pendingQuestion })
-    for (const plugin of plugins)
-      plugin.guest.bindModuleHost?.(
+    for (const plugin of plugins) this.bindPluginModuleHost(plugin)
+  }
+
+  private prepareUiResolve(): void {
+    const host = this.host
+    const plugins = this.plugins
+    if (host.uiResolveQuota && plugins.length > 1 && plugins.some(plugin =>
+      plugin.guest.registrations.some(row => matchesEventPattern(row.pattern, "ui.resolve")))) {
+      this.uiResolve = new FunctionUiResolveMainAssembly(plugins, host.uiResolveQuota(), {
+        activity: host.activity, initializer: host.initializer, signal: this.lifecycleSignal,
+        assertCurrent: plugin => {
+          this.controller.signal.throwIfAborted()
+          host.assertLive(plugin)
+          host.assertUiResolveCurrent?.(plugin)
+        },
+        capabilities: plugin => this.nouns.capabilities(plugin),
+        captureExecution: () => captureFunctionUiResolveExecution(host.workspace, host.threadId),
+        execute: (plugin, registration, method, args, signal, execution, assertCurrent,
+          admission, drawing) => {
+          const run = () => withFunctionTransportExecution({
+            workspace: execution.workspace, threadId: execution.threadId,
+            agentId: execution.agentId, turnId: execution.turnId,
+            runtimeAuthority: execution.runtimeAuthority,
+            userInitiated: false, leased: false, immediate: true
+          }, () => withFreshFunctionSessionActivity(() =>
+            this.uiConstructorScopes.run({ assertCurrent, admission }, async () => {
+              this.assertUiConstructorCurrent()
+              if (!this.nouns.capabilities(plugin).includes(method))
+                throw new ModFunctionError("MODS_CAPABILITY_DENIED")
+              const value = await this.capability(plugin, method, args, signal,
+                { event: "ui.resolve", registration,
+                  identity: this.actualRegistration(plugin, registration) }, 0, undefined, signal,
+                drawing ? { drawing: drawing.generation } : {})
+              this.assertUiConstructorCurrent()
+              return value === undefined ? {} : { value }
+            })))
+          // Preparation retains its captured startup model route until the whole drain ends.
+          return drawing ? this.freshStartup(() => host.freshEntry ? host.freshEntry(run) : run())
+            : run()
+        }
+      })
+    }
+  }
+
+  private bindPluginModuleHost(plugin: FunctionPlugin): void {
+    plugin.guest.bindModuleHost?.(
         (method, args, signal, context) => {
+          if (this.worktreeObserverLease)
+            return Promise.reject(new ModFunctionError("MODS_WORKTREE_OBSERVER_READ_ONLY",
+              `MODS_WORKTREE_OBSERVER_READ_ONLY: ${method}`, true))
+          return this.retainObserverHostCall(async () => {
           this.platform.assertResourceMethod(method)
           const deadline = context ? this.endDeadline : undefined
           if (context && (!deadline || context.dispatchCutNs !== deadline.sharedCutNs))
@@ -1025,6 +1086,7 @@ export class FunctionSession {
           return deadline ? this.endScopes.run(deadline, () =>
             cleanup ? this.endCleanupScopes.run(true, run) : run())
             : cleanup && this.quitDrain ? this.endCleanupScopes.run(true, run) : run()
+          })
         },
         () => {
           this.processOpenings.delete(plugin)
@@ -1373,6 +1435,8 @@ export class FunctionSession {
   }
   private createModuleResource(plugin: FunctionPlugin, signal: AbortSignal,
     cleanup: () => void | Promise<void>): import("./module-resources").FunctionModuleResource {
+    if (this.worktreeObserverLease)
+      throw new ModFunctionError("MODS_WORKTREE_OBSERVER_READ_ONLY", "资源不能在工作树回收观察期间启动", true)
     const owner = this.platformResourceOwners.getStore()
     const parent = owner ? AbortSignal.any([signal, owner.signal]) : signal
     const resource = this.resources.create(plugin, parent, async () => {
@@ -1462,6 +1526,32 @@ export class FunctionSession {
 
   get hasCompletedStartup(): boolean { return this.started }
 
+  /** Existing runtime only: native observers cannot start or reload a guest. */
+  async observeNativeEvent(event: "session.attach" | "session.detach" | "classic.WorktreeRemove",
+    input: ModObject, result: ModObject, assertOriginal: () => void, signal?: AbortSignal): Promise<void> {
+    if (!this.started || this.ending) return
+    signal?.throwIfAborted()
+    const lease = event === "classic.WorktreeRemove" ? this.claimWorktreeObserver() : undefined
+    if (event === "classic.WorktreeRemove" && !lease) return
+    const deadline = new FunctionDispatchDeadline(1500,
+      signal ? AbortSignal.any([signal, this.controller.signal]) : this.controller.signal)
+    try {
+      const observe = () => this.nativeMarkdownCallback(assertOriginal, async () => {
+        await this.dispatch(event, input, deadline.signal, undefined, 0, undefined, undefined, {
+          observerResult: result, pinnedNativeInput: input, beforeHook: assertOriginal,
+          core: async () => result
+        })
+      })
+      const actual = event === "classic.WorktreeRemove"
+        ? this.worktreeObservationScopes.run(true, observe) : observe()
+      if (lease) void actual.finally(() => {
+        lease.settled = true
+        this.releaseSettledWorktreeObserver()
+      }).catch(() => {})
+      await deadline.wait(actual)
+    } finally { deadline.close() }
+  }
+
   private endInvocationOptions(): { dispatchCutNs?: string; platformUiOpen?: boolean; platformCleanup?: boolean } {
     const deadline = this.endScopes.getStore()
     deadline?.assertLive()
@@ -1479,6 +1569,19 @@ export class FunctionSession {
     this.endDeadline = deadline
     this.ending = this.endScopes.run(deadline, async () => {
       try {
+        const clients = this.host.detachDesktopForEnd?.() ?? []
+        await deadline.wait(this.host.pendingDesktopObservers?.() ?? Promise.resolve())
+        for (const client of clients) {
+          this.host.assertContent?.()
+          const input = { surface: "desktop", clientId: client.clientId, reason: "end" }
+          await deadline.wait(this.nativeMarkdownCallback(() => this.host.assertContent?.(),
+            () => this.dispatch("session.detach", input, deadline.signal,
+            undefined, 0, undefined, undefined, {
+              observerResult: { clientId: client.clientId }, pinnedNativeInput: input,
+              core: async () => ({ clientId: client.clientId })
+            })))
+          this.host.assertContent?.()
+        }
         await deadline.wait(this.dispatch("session.end", {
           reason, sessionId: this.host.threadId, resume: { id: this.host.threadId }
         }, deadline.signal, undefined, 0, undefined, undefined, {
@@ -1502,7 +1605,18 @@ export class FunctionSession {
       ), 120000)
       const active = AbortSignal.any([this.controller.signal, deadline.signal])
       this.startupSignal = active
-      this.starting = this.nouns.build(active).then(async () => {
+      this.starting = Promise.resolve().then(async () => {
+        await this.moduleAdmission.run(active,
+          input => this.dispatch("plugin.register", input as unknown as ModObject, active,
+            undefined, 0, undefined, undefined, { core: async () => ({ allow: true }) }) as Promise<FunctionPluginRegisterResult>,
+          (plugin, first) => {
+            if (first) this.bindPluginModuleHost(plugin)
+            this.platform.admit(plugin)
+          },
+          (plugin, module, reason) => this.host.debugLog?.(plugin.name,
+            `plugin.register refused ${module}: ${reason}`))
+        if (this.moduleAdmission.gated) this.prepareUiResolve()
+        await this.nouns.build(active)
         active.throwIfAborted()
         await this.uiResolve?.prepare(startupCut.expiresAtNs, active)
         active.throwIfAborted()
@@ -2436,10 +2550,13 @@ export class FunctionSession {
       prepareMentionPublication?(value: ModJson): ModJson
       beforeHook?(): void
       observerResult?: ModJson
+      pinnedNativeInput?: ModObject
       appendTicket?: FunctionSessionAppendTicket
     },
     logSignal?: AbortSignal
   ): Promise<ModJson> {
+    this.pendingObserverDispatches++
+    try {
     if (depth > 16) throw new ModFunctionError("MODS_DISPATCH_DEPTH")
     const parseToolResult = event === "tool.check" ? createToolCheckResultParser(input) : undefined
     this.assertLive()
@@ -2562,6 +2679,9 @@ export class FunctionSession {
       ...(event === "prompt.mention" ? { normalizeResult: (_name: string, value: ModJson,
         baseline: ModJson) => synchronizePromptMentionResult(value, baseline) } : {}),
       validateInput: (name, value) => {
+        if (name === "plugin.register") validateFunctionPluginRegisterInput(value)
+        if (presentation?.pinnedNativeInput && !isDeepStrictEqual(value, presentation.pinnedNativeInput))
+          throw new ModFunctionError("MODS_PINNED_INPUT")
         validateFunctionNonmediaInput(name, value)
         if (name === "session.append") validateFunctionSessionAppendInput(value)
         if (name === "config.set") validateFunctionConfigSetInput(value)
@@ -2697,6 +2817,7 @@ export class FunctionSession {
           throw new ModFunctionError("MODS_COMMAND_ARGS")
       },
       validateResult: (name, value) => {
+        if (name === "plugin.register") { validateFunctionPluginRegisterResult(value); return }
         validateFunctionNonmediaResult(name, value)
         if (name === "session.append" && presentation?.appendTicket) {
           presentation.appendTicket.acceptResult(value)
@@ -2805,6 +2926,10 @@ export class FunctionSession {
         presentation?.origin ??
         (skip ? { plugin: skip.plugin, tier: "user" } : { plugin: "engine", tier: "core" }),
       core: async (_, e, context): Promise<ModJson> => {
+        // These native cores only echo immutable lifecycle facts; they create no resource.
+        if (!["classic.WorktreeRemove", "session.attach", "session.detach", "session.end"].includes(event))
+          this.assertWorktreeObserverMethod(event)
+        return this.retainObserverHostCall(async () => {
         this.assertLive(operation?.plugin)
         operation?.assertLive?.()
         const run = async (): Promise<ModJson> => {
@@ -2843,6 +2968,7 @@ export class FunctionSession {
         const value = await run()
         if (contentBoundary) this.host.assertContent?.(operation?.plugin)
         return value
+        })
       },
       capability: (plugin, method, raw, callSignal, source) => {
         return this.capability(
@@ -2898,6 +3024,13 @@ export class FunctionSession {
     this.assertLive(undefined, true)
     if (contentBoundary) this.host.assertContent?.(operation?.plugin)
     operation?.assertLive?.()
+    if (event === "plugin.register" && isModObject(published) && typeof published.refuse === "string") {
+      const rawReason = isModObject(result.value) ? result.value.refuse : undefined
+      const refuser = [...result.trace].reverse().find(entry => entry.index < chainLength &&
+        isModObject(entry.returned) && entry.returned.refuse === rawReason)
+      this.host.debugLog?.(refuser?.plugin ?? "engine",
+        `plugin.register refused ${String(input.name)}: ${published.refuse}`)
+    }
     if (event === "fs.read" && input.as === "bytes" && isOperation) {
       if (!isModObject(published)) throw new ModFunctionError("MODS_FS_BYTES_POLICY")
       if (typeof published.deny !== "string") {
@@ -2915,6 +3048,10 @@ export class FunctionSession {
     if (parseToolResult) return parseToolResult(published)
     return parseModJson(encodeModJson(event === "prompt.context"
       ? synchronizePromptContext(published, result.value) : published)) as ModJson
+    } finally {
+      this.pendingObserverDispatches--
+      this.releaseSettledWorktreeObserver()
+    }
   }
 
   private capability(
@@ -2929,7 +3066,8 @@ export class FunctionSession {
     scope?: FunctionNamedStateScope,
     candidateInvalidation = false
   ): Promise<ModJson | undefined> {
-    return retainComposerPreparationWork(async () => {
+    this.assertWorktreeObserverMethod(method)
+    return this.retainObserverHostCall(() => retainComposerPreparationWork(async () => {
       assertPlatformQueryMethod(method)
       const boundary = isFunctionContentBoundary(method)
       if (boundary) this.host.assertContent?.(plugin)
@@ -2937,7 +3075,14 @@ export class FunctionSession {
       assertPlatformQueryMethod(method)
       if (boundary) this.host.assertContent?.(plugin)
       return value
-    }, method)
+    }, method))
+  }
+
+  private assertWorktreeObserverMethod(method: string): void {
+    if ((this.worktreeObserverLease || this.worktreeObservationScopes.getStore()) &&
+      (!WORKTREE_OBSERVER_METHODS.some(allowed => allowed === method) || this.nouns.provider(method)))
+      throw new ModFunctionError("MODS_WORKTREE_OBSERVER_READ_ONLY",
+        `MODS_WORKTREE_OBSERVER_READ_ONLY: ${method}`, true)
   }
 
   private capabilityWithin(
@@ -4637,6 +4782,7 @@ export class FunctionSession {
           core: (input, signal) =>
             runBasicSdk(method, input, {
               ...this.host,
+              surfaces: () => this.host.desktopSurfaces?.() ?? [],
               // The SessionHost takes an actual plugin and original per-call guard, whereas
               // the basic SDK deliberately sees only this captured private adapter.
               readConversation: this.host.readConversation && conversationGuard
@@ -4799,7 +4945,7 @@ export class FunctionSession {
     this.callbackSources.clear()
     this.agents.clear()
     this.tools.clear()
-    const disposed = await Promise.allSettled(this.plugins.map((plugin) => plugin.guest.dispose()))
+    const disposed = await Promise.allSettled(this.moduleAdmission.all.map((plugin) => plugin.guest.dispose()))
     const failed = disposed.find((result) => result.status === "rejected")
     if (failed?.status === "rejected") this.disposalFailure = failed.reason
     this.retirementComplete = true

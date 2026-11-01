@@ -68,6 +68,9 @@ const bounded = new Set([
   "command.run",
   "command.describe",
   "session.start",
+  "plugin.register",
+  "session.attach",
+  "session.detach",
   "session.end",
   "session.compact",
   "turn.start",
@@ -139,7 +142,8 @@ const bounded = new Set([
   "classic.PreCompact",
   "classic.PostCompact",
   "classic.Setup",
-  "classic.InstructionsLoaded"
+  "classic.InstructionsLoaded",
+  "classic.WorktreeRemove"
 ])
 
 const metadata = new Set([
@@ -153,7 +157,6 @@ const metadata = new Set([
   "classic.ElicitationResult",
   "classic.ConfigChange",
   "classic.WorktreeCreate",
-  "classic.WorktreeRemove",
   "classic.CwdChanged",
   "classic.FileChanged",
   "classic.DirectoryAdded",
@@ -163,9 +166,6 @@ const metadata = new Set([
 const unavailable = new Set([
   "prompt.media",
   "attribution.text",
-  "session.attach",
-  "session.detach",
-  "plugin.register",
   "audio.play",
   "audio.speak",
   "ui.blit",
@@ -177,6 +177,18 @@ export const FUNCTION_COMPATIBILITY_EVENT_NAMES = [...bounded, ...metadata, ...u
 export function getFunctionEventSupport(
   name: string
 ): { availability: "bounded" | "metadata" | "unavailable"; note: string } | undefined {
+  if (name === "plugin.register") return {
+    availability: "bounded",
+    note: "真实 hooks 模块加入前，由此前准入前缀审查宿主固定的 manifest 与逐 entry/import 静态 uses；拒绝模块不进入 engine、启动、工具、命令、UI 或能力索引。同包保留单 VM、共享状态与原授权；不确定扫描在门禁下拒绝，不猜测允许。仅加载/明确重载运行，不撤销此前已发生操作。本机 provenance 明确为 local/development/builtin，不伪造市场来源。"
+  }
+  if (name === "session.attach" || name === "session.detach") return {
+    availability: "bounded",
+    note: "真实本地 desktop broker 绑定的观察事件，clientId 为宿主不透明标识；相同绑定去重、替换与销毁精确解绑。只通知已启动组件，晚启动核对真实 roster；页面挂载不加载 VM。结束 reason:end 与 session.end 共用短期限，重载/撤权仅清理订阅，不冒充 Remote Control 在线状态。返回值不能改绑定。"
+  }
+  if (name === "classic.WorktreeRemove") return {
+    availability: "bounded",
+    note: "已启动且来源匹配的普通 runtime，在 owned workflow 工作树真实回收尝试前有界观察；项目来源尚无适配。仅闲置且无旧资源/opening/未结算调用时派发，否则诊断跳过。只允许读取、本地 store/state 和日志，其他副作用默认拒绝。主进程 lease 还封住私有资源通道，直到实际 dispatch 与宿主调用结算，等待超时不解除，未知期间新外部动作继续拒绝且不自动重试。thread/run/workspace/path 固定，不新建 VM、不接管删除，原 dirty/ownership/失败策略不变。"
+  }
   if (name === "classic.PreSkillUse" || name === "classic.PostSkillUse")
     return {
       availability: "bounded",

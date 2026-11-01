@@ -23,6 +23,7 @@ const pinned: Record<string, readonly string[]> = {
   "session.receive": ["origin", "agentId"],
   "session.measure": ["context", "rateLimits", "cost", "changed"],
   "session.end": ["reason", "sessionId", "resume"],
+  "plugin.register": ["name", "tier", "root", "version", "provenance", "uses"],
   "session.append": ["uuid", "door", "origin", "agentId"],
   "state.get": ["plugin", "key", "id"],
   "state.set": ["plugin", "key", "id", "ifVersion", "previous"],

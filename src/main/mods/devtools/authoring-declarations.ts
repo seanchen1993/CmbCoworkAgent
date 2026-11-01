@@ -21,8 +21,8 @@ declare namespace DevClawMods {
   export function derive<S extends readonly StateSource<unknown>[],T>(sources:S,compute:(...values:{[K in keyof S]:StateValue<S[K]>})=>T):Derived<T>
   export function memberOf<T>(family:Atom<T>,event:{requestId:string}):Atom<T>
   export function memberOf<P extends keyof PluginState,K extends keyof PluginState[P]>(family:StateRef<P,K>,event:{requestId:string}):StateRef<P,K>
-  export function read<T>(sdk:SDKBase,source:StateSource<T>):Promise<T>
-  export function update<T>(sdk:SDKBase,target:Atom<T>,change:(previous:T)=>T):Promise<T>
+  export function read<T>(sdk:Pick<SDKBase,"state">,source:StateSource<T>):Promise<T>
+  export function update<T>(sdk:Pick<SDKBase,"state">,target:Atom<T>,change:(previous:T)=>T):Promise<T>
   export type StateRef<P extends keyof PluginState,K extends keyof PluginState[P]> = { plugin:P;key:K;id?:string }
   export interface ProcessResult { code:number|null;signal:string|null }
   export interface ProcessChunk { stream:"stdout"|"stderr";text:string }
@@ -57,6 +57,38 @@ declare namespace DevClawMods {
     answer:string;durationMs:number;isAborted:boolean;turnId:string;agentId?:string;
     reason:"answer"|"aborted"|"error"|"refusal";
     refusal?:{category:string|null;explanation:string|null}
+  }
+  /** Native, immutable manifest and static scan facts for one hooks module. */
+  export interface PluginRegisterUses {
+    events:readonly string[];calls:readonly string[];
+    env?:{reads:readonly string[];writes:readonly string[]};
+    state?:{reads:readonly {plugin:string;key:string}[];writes:readonly {plugin:string;key:string}[]}
+  }
+  export interface PluginRegisterEvent {
+    name:string;tier:"prepend"|"user"|"append"|"builtin";root:string;version?:string;
+    /** Desktop host source, e.g. name@local or name@development; never a fabricated marketplace. */
+    provenance:string;uses:PluginRegisterUses
+  }
+  export type PluginRegisterResult = {allow:true;refuse?:never}|{refuse:string;allow?:never}
+  export interface CaughtNext<Input,Output> extends Next<Input,Output> {
+    readonly called:boolean;readonly error:{kind:string;message?:string;budget:number}
+  }
+  export interface HookHandle<Input,Output,Owner extends string=string> {
+    catch(handler:($:SDK<Owner>,event:Input,next:CaughtNext<Input,Output>)=>Output|Promise<Output>):void
+  }
+  /** Real local desktop binding only; it is not a Remote Control online status. */
+  export interface DesktopAttachEvent {surface:"desktop";clientId:string}
+  export interface DesktopDetachEvent extends DesktopAttachEvent {reason:"detach"|"end"}
+  export interface ClassicWorktreeRemoveEvent {
+    hook_event_name:"WorktreeRemove";session_id:string;transcript_path:string;cwd:string;
+    worktree_path:string;permission_mode?:string;agent_id?:string
+  }
+  /** Bounded cleanup observer: reads and local records, without starting a native writer. */
+  export type WorktreeObserverSDK<Owner extends string=string> = Pick<SDKBase<Owner>,"plugin"|"state"|"store"|"settings"> & {
+    session:Pick<SDKBase<Owner>["session"],"id"|"cwd"|"root"|"version"|"surface"|"surfaces"|"repo"|"model"|"messages"|"turns"|"usage">;
+    fs:Pick<SDKBase<Owner>["fs"],"ancestors"|"read"|"exists"|"stat"|"list">;
+    clock:Pick<SDKBase<Owner>["clock"],"now"|"sleep">;ui:Pick<SDKBase<Owner>["ui"],"log">;
+    config:Pick<SDKBase<Owner>["config"],"list">;env:Pick<SDKBase<Owner>["env"],"get">
   }
   /** DevClaw extension; native skill facts are immutable through next(). */
   export interface ClassicSkillUseEvent {
@@ -304,6 +336,14 @@ declare namespace DevClawMods {
   export interface CommandResult {text?:string;kind?:"complete"|"turn"}
   export interface ProcessEvent {argv:string[];cwd?:string;env?:Record<string,string>;input?:string}
   export interface On<Owner extends string=string> {
+    (event:"plugin.register",handler:($:SDK<Owner>,event:PluginRegisterEvent,next:Next<PluginRegisterEvent,PluginRegisterResult>)=>PluginRegisterResult|Promise<PluginRegisterResult>):HookHandle<PluginRegisterEvent,PluginRegisterResult,Owner>
+    (event:"plugin.register",matcher:{name?:string;tier?:PluginRegisterEvent["tier"];provenance?:string},handler:($:SDK<Owner>,event:PluginRegisterEvent,next:Next<PluginRegisterEvent,PluginRegisterResult>)=>PluginRegisterResult|Promise<PluginRegisterResult>):HookHandle<PluginRegisterEvent,PluginRegisterResult,Owner>
+    (event:"session.attach",handler:($:SDK<Owner>,event:DesktopAttachEvent,next:Next<DesktopAttachEvent,{clientId:string}>)=>{clientId:string}|Promise<{clientId:string}>):void
+    (event:"session.attach",matcher:{surface?:"desktop";clientId?:string},handler:($:SDK<Owner>,event:DesktopAttachEvent,next:Next<DesktopAttachEvent,{clientId:string}>)=>{clientId:string}|Promise<{clientId:string}>):void
+    (event:"session.detach",handler:($:SDK<Owner>,event:DesktopDetachEvent,next:Next<DesktopDetachEvent,{clientId:string}>)=>{clientId:string}|Promise<{clientId:string}>):void
+    (event:"session.detach",matcher:{surface?:"desktop";clientId?:string;reason?:"detach"|"end"},handler:($:SDK<Owner>,event:DesktopDetachEvent,next:Next<DesktopDetachEvent,{clientId:string}>)=>{clientId:string}|Promise<{clientId:string}>):void
+    (event:"classic.WorktreeRemove",handler:($:WorktreeObserverSDK<Owner>,event:ClassicWorktreeRemoveEvent,next:Next<ClassicWorktreeRemoveEvent,Record<string,never>>)=>Record<string,never>|Promise<Record<string,never>>):void
+    (event:"classic.WorktreeRemove",matcher:{worktree_path?:string},handler:($:WorktreeObserverSDK<Owner>,event:ClassicWorktreeRemoveEvent,next:Next<ClassicWorktreeRemoveEvent,Record<string,never>>)=>Record<string,never>|Promise<Record<string,never>>):void
     (event:"engine.create",handler:($:Record<string,never>,event:{plugins:string[]},next:EngineBuildNext<Owner>)=>Record<string,unknown>|Promise<Record<string,unknown>>):void
     (event:"ui.resolve",handler:($:SDK<Owner>,event:UiResolveEvent,next:Next<UiResolveEvent,UiResolveConstructors>)=>UiResolveConstructors|Promise<UiResolveConstructors>):void
     (event:"ui.resolve",matcher:{component:string},handler:($:SDK<Owner>,event:UiResolveEvent,next:Next<UiResolveEvent,UiResolveConstructors>)=>UiResolveConstructors|Promise<UiResolveConstructors>):void
@@ -393,6 +433,10 @@ export function functionAuthoringDeclarations(protocol: FunctionModelProtocol): 
 /** Queryable one-event fragments; full types stay in the compiler, never injected each model turn. */
 function otherEventHooks(): string {
   const already = new Set([
+    "plugin.register",
+    "session.attach",
+    "session.detach",
+    "classic.WorktreeRemove",
     "classic.PreSkillUse",
     "classic.PostSkillUse",
     "platform.action",

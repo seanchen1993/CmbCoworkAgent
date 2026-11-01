@@ -35,6 +35,12 @@ describe("natural desktop heap acceptance", () => {
     const gap = samples().filter((_, index) => index !== 2 && index !== 3)
     expect(desktopHeapAssessment(gap, false).qualified).toBe(false)
   })
+  it("measures two hours between actual samples, including the first sample's IPC offset", () => {
+    const shifted = samples().map((sample) => ({ ...sample, atMs: sample.atMs + 100 }))
+    expect(desktopHeapAssessment(shifted, false).qualified).toBe(true)
+    shifted.at(-1)!.atMs -= 1
+    expect(desktopHeapAssessment(shifted, false).qualified).toBe(false)
+  })
   it("rejects replaced renderer identities and different cache/pane states", () => {
     for (const mutation of [
       { rendererPid: 456 },

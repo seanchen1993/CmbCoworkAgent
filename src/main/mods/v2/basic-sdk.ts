@@ -443,6 +443,7 @@ export async function runBasicSdk(
   context: {
     threadId: string
     workspace: string
+    surfaces?(): string[]
     version?: FunctionSessionVersion
     plugin: string
     registry: Map<string, FunctionCommand>
@@ -522,7 +523,7 @@ export async function runBasicSdk(
     return version
   }
   if (method === "session.surface") return "desktop"
-  if (method === "session.surfaces") return ["desktop"]
+  if (method === "session.surfaces") return context.surfaces?.() ?? []
   if (method === "clock.now") return Date.now()
   if (method === "clock.sleep") {
     await new Promise<void>((resolve, reject) => {

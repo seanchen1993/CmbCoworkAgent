@@ -7,6 +7,7 @@ import type { ElectronApplication, Page } from "playwright"
 import type { DevelopmentStatus } from "../src/shared/mods/development"
 import { enterModsCreatorChat } from "./support/mods-sidebar-navigation"
 import { genericModLiveRelay } from "./support/generic-mod-live-relay"
+import { readGenericLiveSourceContinuation } from "./support/generic-live-source-continuation"
 import {
   createHeadlessProjectCompositionLaunch,
   assertCreatorLiveCandidate,
@@ -18,7 +19,11 @@ assert.equal(JSON.parse(readFileSync(join(root, "package.json"), "utf8")).versio
 const build = assertCreatorLiveCandidate(root)
 process.env.COMPOSITION_E2E_ARTIFACT_ROOT ??= join(root, "output/generic-mod-live-20261028")
 const fixture = projectCompositionEnvironment(root)
+const sourceContinuation = process.env.GENERIC_MOD_LIVE_REUSE_SOURCE_RUN
+  ? readGenericLiveSourceContinuation(root, process.env.GENERIC_MOD_LIVE_REUSE_SOURCE_RUN)
+  : undefined
 const resumeProfile = process.env.GENERIC_MOD_LIVE_RESUME_PROFILE
+assert(!(sourceContinuation && resumeProfile), "SOURCE_CONTINUATION_CANNOT_REUSE_OLD_PROFILE")
 const label = process.env.GENERIC_MOD_LIVE_LABEL ?? ""
 type RoundObservation = {
   round: number
@@ -108,6 +113,13 @@ const save = () =>
           ? { restarted: true, priorEvidence: join(fixture.isolated, "evidence.json") }
           : {}),
         realAuthoring: true,
+        model: relay.model,
+        sourceContinuation: sourceContinuation && {
+          evidence: sourceContinuation.evidencePath,
+          sourceDigest: sourceContinuation.sourceDigest,
+          oldAuthorityCopied: false,
+          mode: "verified-real-model-source-in-fresh-profile"
+        },
         realRuntimeModel: true,
         observations,
         retained,
@@ -353,13 +365,14 @@ async function verifyPaint(round: number) {
   const text = "TODO 核对一条资料"
   await composer.fill(text)
   const before = await composer.evaluate((node) => ({
-    start: node.selectionStart,
-    end: node.selectionEnd
+    start: (node as HTMLTextAreaElement).selectionStart,
+    end: (node as HTMLTextAreaElement).selectionEnd
   }))
   const descriptor = (await page!.evaluate((id) => window.api.mods.commands(id), threadId)).find(
     (command) => command.command === "paint-note"
   )
-  assert(descriptor?.immediate, "REAL_AUTHOR_PAINT_COMMAND_REQUIRED")
+  // Trial commands deliberately retain the physical queue even when authored as immediate.
+  assert(descriptor, "REAL_AUTHOR_PAINT_COMMAND_REQUIRED")
   const queued = await page!.evaluate(
     ({ id, descriptor }) => window.api.mods.enqueue(id, descriptor, { text: "" }),
     { id: threadId, descriptor }
@@ -374,8 +387,8 @@ async function verifyPaint(round: number) {
   await chat.locator("[data-prompt-virtual]").filter({ hasText: "待核对" }).waitFor()
   assert.equal(await composer.inputValue(), text, "PAINT_CANNOT_REWRITE_DRAFT")
   const after = await composer.evaluate((node) => ({
-    start: node.selectionStart,
-    end: node.selectionEnd
+    start: (node as HTMLTextAreaElement).selectionStart,
+    end: (node as HTMLTextAreaElement).selectionEnd
   }))
   assert.deepEqual(after, before, "PAINT_CANNOT_MOVE_CURSOR")
   observations.at(-1)!.paint = {
@@ -479,10 +492,41 @@ async function main() {
       }
     }
     if (!resumeProfile) {
-      await author(
-        1,
-        "请制作一个通用的工具次数计数与输入框标记 Mod，独立于项目模式和业务插件。先用 catalog(query:prompt.paint)、catalog(query:prompt.read) 定向查询新公开方法签名，不猜接口。只在当前聊天每个 read_file 工具执行完成后累计一次，其他工具不计数，在输入框上方显示‘工具调用次数：N’，初始0。另外注册 immediate:true 的 paint-note 命令：执行时通过 prompt.read 取得原输入，以原 text 调用 prompt.paint，对开头TODO四个字符添加 bold:true 和 virtualText:待核对；没有TODO开头则返回明确未标记。这个命令只绘制，不更改正文和光标，不填入新文本，不调用 prompt.fill，不自动执行。命令返回实际 isPainted 结果。不访问文件，不执行命令进程，不调用模型。请使用原生创作工具生成、检查并准备本聊天可确认的隔离试用候选，不要代我批准或安装。"
-      )
+      if (sourceContinuation) {
+        const imported = await page.evaluate(
+          async ({ id, original }) => {
+            const state = await window.api.mods.development.status({ threadId: id })
+            return window.api.mods.authoring.save({
+              threadId: id,
+              expectedWorkspace: state.workspace,
+              id: original.id,
+              name: original.name,
+              expectedRevision: 0,
+              files: original.files
+            })
+          },
+          { id: threadId, original: sourceContinuation }
+        )
+        assert.equal(
+          imported.source.digest,
+          sourceContinuation.sourceDigest,
+          "CONTINUATION_IMPORT_CHANGED_SOURCE"
+        )
+        await author(
+          1,
+          `已将上次真实模型生成、逐文件hash核对的原源码导入全新工作区。草稿id=${imported.id}，revision=${imported.revision}，sourceDigest=${imported.source.digest}。请定向查询prompt.paint签名，读取同一草稿并检查、准备新的隔离试用候选；必须保留源文件一字节不改，不另建、不生成替代代码、不执行、不安装、不代我授权。此次全新试用不继承旧授权。`,
+          true
+        )
+        assert.equal(
+          observations[0].drafts[0].digest,
+          sourceContinuation.sourceDigest,
+          "CONTINUATION_MODEL_CHANGED_ORIGINAL_SOURCE"
+        )
+      } else
+        await author(
+          1,
+          "请制作一个通用的工具次数计数与输入框标记 Mod，独立于项目模式和业务插件。先用 catalog(query:prompt.paint)、catalog(query:prompt.read) 定向查询新公开方法签名，不猜接口。只在当前聊天每个 read_file 工具执行完成后累计一次，其他工具不计数，在输入框上方显示‘工具调用次数：N’，初始0。另外注册 immediate:true 的 paint-note 命令：执行时通过 prompt.read 取得原输入，以原 text 调用 prompt.paint，对开头TODO四个字符添加 bold:true 和 virtualText:待核对；没有TODO开头则返回明确未标记。这个命令只绘制，不更改正文和光标，不填入新文本，不调用 prompt.fill，不自动执行。命令返回实际 isPainted 结果。不访问文件，不执行命令进程，不调用模型。请使用原生创作工具生成、检查并准备本聊天可确认的隔离试用候选，不要代我批准或安装。"
+        )
       await activate()
       await trigger(1)
       await verifyPaint(1)

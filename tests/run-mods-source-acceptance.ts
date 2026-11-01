@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
 import { spawn } from "node:child_process"
 import { createHash, randomUUID } from "node:crypto"
-import { appendFileSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs"
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { join, resolve } from "node:path"
 import {
   prepareModsSourceCandidate,
@@ -12,6 +12,7 @@ import {
   projectCompositionEnvironment
 } from "./support/project-composition-e2e-fixtures"
 import { enterModsCreatorChat } from "./support/mods-sidebar-navigation"
+import { modsSourceDriverHashes } from "./support/mods-source-driver-hashes"
 
 async function main() {
   const root = resolve(__dirname, "..")
@@ -19,7 +20,7 @@ async function main() {
   assert.equal(
     option.length,
     1,
-    "Usage: tsx tests/run-mods-source-acceptance.ts --scenario=smoke|generic-mod|composition|project|report-derived|autobiz-from-zero|autobiz-derived|desktop-smoke|desktop-performance|desktop-soak"
+    "Usage: tsx tests/run-mods-source-acceptance.ts --scenario=smoke|original-feature-completion|generic-mod|composition|project|report-derived|autobiz-from-zero|autobiz-derived|desktop-smoke|desktop-performance|desktop-soak"
   )
   assert(option[0].startsWith("--scenario="), "SOURCE_SCENARIO_FLAG_REQUIRED")
   const scenario = option[0].replace(/^--scenario=/, "")
@@ -32,8 +33,10 @@ async function main() {
     "autobiz-derived": "creator-project-matrix-live-native-e2e.spec.ts"
   }
   const realModel = Object.hasOwn(live, scenario)
+  const originalCompletion = scenario === "original-feature-completion"
   assert(
     scenario === "smoke" ||
+      originalCompletion ||
       realModel ||
       ["desktop-smoke", "desktop-performance", "desktop-soak"].includes(scenario),
     "UNKNOWN_SOURCE_SCENARIO"
@@ -41,19 +44,22 @@ async function main() {
   if (realModel) assert(process.env.CMB_CREATOR_LIVE_MODEL_ID, "REAL_MODEL_EXPLICIT_ID_REQUIRED")
   const output = join(root, "output", `phase3-source-${scenario}-${randomUUID().slice(0, 8)}`)
   mkdirSync(output)
-  const candidate = await prepareModsSourceCandidate(root, join(output, "candidate"))
   const digest = (file: string) => createHash("sha256").update(readFileSync(file)).digest("hex")
-  const driverFiles = [
+  const selected =
+    scenario === "smoke"
+      ? []
+      : [
+          scenario.startsWith("desktop-")
+            ? "tests/mods-e2e.spec.ts"
+            : originalCompletion
+              ? "tests/original-feature-source-e2e.spec.ts"
+              : `tests/${live[scenario as keyof typeof live]}`
+        ]
+  const driverHashes = await modsSourceDriverHashes(root, [
     "tests/run-mods-source-acceptance.ts",
-    "tests/mods-e2e.spec.ts",
-    ...Object.values(live).map((file) => `tests/${file}`),
-    ...readdirSync(join(root, "tests/support"))
-      .filter((file) => /\.(?:ts|mjs)$/.test(file))
-      .map((file) => `tests/support/${file}`)
-  ]
-  const driverHashes = Object.fromEntries(
-    driverFiles.map((file) => [file, digest(join(root, file))])
-  )
+    ...selected
+  ])
+  const candidate = await prepareModsSourceCandidate(root, join(output, "candidate"))
   const proof = {
     scenario,
     output,
@@ -81,6 +87,12 @@ async function main() {
     })
   )
   try {
+    for (const [file, expected] of Object.entries(driverHashes))
+      assert.equal(
+        digest(join(root, file)),
+        expected,
+        `SOURCE_DRIVER_CHANGED_DURING_COMPILE:${file}`
+      )
     if (scenario === "smoke") {
       const fixture = projectCompositionEnvironment(root)
       const app = await createHeadlessProjectCompositionLaunch(root, fixture)()
@@ -212,7 +224,11 @@ async function main() {
           ELECTRON_RENDERER_URL: candidate.manifest.rendererUrl,
           ...(scenario === "desktop-smoke" ? { CMB_MODS_SOAK_SMOKE: "1" } : {})
         })
-      const script = desktop ? "mods-e2e.spec.ts" : live[scenario as keyof typeof live]
+      const script = desktop
+        ? "mods-e2e.spec.ts"
+        : originalCompletion
+          ? "original-feature-source-e2e.spec.ts"
+          : live[scenario as keyof typeof live]
       const code = await new Promise<number>((done, fail) => {
         const child = spawn(
           process.execPath,

@@ -1,7 +1,7 @@
 /** Executes the unchanged, freely authored candidate through public native UI and APIs. */
 import assert from "node:assert/strict"
 import { createHash } from "node:crypto"
-import { existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs"
+import { existsSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs"
 import { dirname, isAbsolute, join, relative, resolve } from "node:path"
 import type { ElectronApplication, Page } from "playwright"
 import type { LocalProjectView } from "../../src/shared/project-runtime/platform-api"
@@ -9,6 +9,8 @@ import { normalizeWorkspacePathKey } from "../../src/shared/workspace-path"
 import { openCreatorProjectPreview, openCreatorStep } from "./creator-navigation"
 import { openUnifiedProjectList } from "./project-unified-native-journey"
 import { liveProjectDeliveryName } from "./live-project-delivery-name"
+import { reimportLiveProjectZip } from "./live-project-zip-reimport"
+import { exerciseLiveOriginalFeatureJourney } from "./live-original-feature-journey"
 
 export async function exerciseLiveGeneratedProject(input: {
   app: ElectronApplication
@@ -17,8 +19,6 @@ export async function exerciseLiveGeneratedProject(input: {
   authorWorkspace: string
   artifacts: string
   artifactPrefix?: string
-  /** Keep separate candidate trials from sharing an ordinary-project workspace. */
-  installedWorkspaceSuffix?: string
   /** Explicitly continue this same installed project; never select another project by name. */
   installedProjectId?: string
   goal?: string
@@ -33,6 +33,20 @@ export async function exerciseLiveGeneratedProject(input: {
     await openUnifiedProjectList(page)
     const workspace = projectWorkspaces.get(name)
     assert(workspace, "LIVE_PROJECT_EXPECTED_WORKSPACE_REQUIRED")
+    const records = await page.evaluate(() => window.api.harnessBoard.localProjects.list())
+    const matches = records.filter(
+      (record) =>
+        record.name === name &&
+        normalizeWorkspacePathKey(record.workspace) === normalizeWorkspacePathKey(workspace)
+    )
+    assert.equal(matches.length, 1, "LIVE_PROJECT_EXACT_PERSISTED_TRIAL_REQUIRED")
+    // Isolated Host trials are intentionally separate from the original Feature project list.
+    const history = page
+      .locator("details")
+      .filter({ has: page.getByText("历史独立运行（兼容查看）", { exact: true }) })
+    assert.equal(await history.count(), 1, "LIVE_PROJECT_HISTORY_SECTION_REQUIRED")
+    if (!(await history.evaluate((node) => (node as HTMLDetailsElement).open)))
+      await history.locator(":scope > summary").click()
     await page
       .getByRole("button", { name: `打开项目 ${name}`, exact: true })
       .filter({ has: page.getByText(workspace, { exact: true }) })
@@ -96,58 +110,6 @@ export async function exerciseLiveGeneratedProject(input: {
     inside(realpathSync(workspace), realpathSync(ancestor))
     return target
   }
-  async function createViaStartUseForm(
-    app: ElectronApplication,
-    page: Page,
-    config: {
-      name: string
-      workspace: string
-      installedPluginId: string
-      pluginName: string
-      version: string
-      goal: string
-    }
-  ) {
-    const before = await page.evaluate(() => window.api.harnessBoard.localProjects.list())
-    const form = page.getByRole("dialog", { name: "新建项目", exact: true })
-    await form.waitFor({ state: "visible", timeout: remaining() })
-    await form
-      .getByText(config.pluginName + " · " + config.version, { exact: true })
-      .waitFor({ timeout: remaining() })
-    await form.getByLabel("项目名称", { exact: true }).fill(config.name)
-    await form.getByLabel("希望完成什么", { exact: true }).fill(config.goal)
-    await app.evaluate(({ dialog }, workspace) => {
-      let count = 0
-      const original = dialog.showOpenDialog
-      dialog.showOpenDialog = (async (_owner: unknown, options?: { title?: string }) => {
-        if (options?.title !== "选择任务工作目录" || ++count !== 1)
-          throw Error("LIVE_UNEXPECTED_DIRECTORY_DIALOG")
-        dialog.showOpenDialog = original
-        return { canceled: false, filePaths: [workspace] }
-      }) as typeof dialog.showOpenDialog
-    }, config.workspace)
-    await form.getByRole("button", { name: "选择工作目录", exact: true }).click()
-    await form.getByRole("button", { name: "创建项目", exact: true }).click()
-    await form.waitFor({ state: "hidden", timeout: remaining() })
-    const after = await page.evaluate(() => window.api.harnessBoard.localProjects.list())
-    const created = after.filter(
-      (project) => !before.some((old) => old.projectId === project.projectId)
-    )
-    assert.equal(created.length, 1, "LIVE_ORDINARY_CREATION_NOT_UNIQUE")
-    const view = await page.evaluate(
-      (id) => window.api.harnessBoard.localProjects.get(id),
-      created[0].projectId
-    )
-    assert.equal(
-      view.project.installedPluginId,
-      config.installedPluginId,
-      "LIVE_ORDINARY_PLUGIN_CHANGED"
-    )
-    assert.equal(view.project.workspace, config.workspace, "LIVE_ORDINARY_WORKSPACE_CHANGED")
-    assert.equal(view.project.goal, config.goal, "LIVE_ORDINARY_GOAL_CHANGED")
-    assert.equal(view.operations.length, 0, "LIVE_ORDINARY_PREEXECUTED")
-    return view
-  }
   const metadata = (view: LocalProjectView) => ({
     projectId: view.project.projectId,
     pluginId: view.project.installedPluginId,
@@ -167,11 +129,11 @@ export async function exerciseLiveGeneratedProject(input: {
     "LIVE_PROJECT_AUTHOR_SCOPE_CHANGED"
   )
   const request = authored.projectTrial!
-  if (!input.installedProjectId) assert(request, "LIVE_PROJECT_CANDIDATE_REQUIRED")
+  assert(request, "LIVE_PROJECT_CANDIDATE_REQUIRED")
   const author = await page.evaluate((id) => window.api.threads.get(id), authorThreadId)
   assert(author?.title, "LIVE_PROJECT_AUTHOR_TITLE_REQUIRED")
 
-  async function runProject(created: LocalProjectView, kind: "trial" | "ordinary") {
+  async function runProject(created: LocalProjectView, kind: "trial") {
     const { projectId, workspace, name, manifest } = created.project
     projectWorkspaces.set(name, workspace)
     inside(artifactRoot, realpathSync(workspace))
@@ -829,61 +791,7 @@ export async function exerciseLiveGeneratedProject(input: {
     }
   }
 
-  if (input.installedProjectId) {
-    assert(/^[a-f0-9-]{36}$/.test(input.installedProjectId), "LIVE_INSTALLED_PROJECT_ID_INVALID")
-    const delivery = authored.projectDelivery
-    assert.equal(delivery?.phase, "installed", "LIVE_INSTALLED_DELIVERY_REQUIRED")
-    assert(delivery.pluginId && delivery.sourceDigest, "LIVE_INSTALLED_DELIVERY_IDENTITY_REQUIRED")
-    const created = await page.evaluate(
-      (id) => window.api.harnessBoard.localProjects.get(id),
-      input.installedProjectId
-    )
-    assert.equal(
-      created.project.installedPluginId,
-      delivery.pluginId,
-      "LIVE_INSTALLED_PROJECT_PLUGIN_CHANGED"
-    )
-    inside(artifactRoot, realpathSync(created.project.workspace))
-    assert(
-      !created.operations.some((op) =>
-        ["started", "cancel_requested", "unknown"].includes(op.status)
-      ),
-      "LIVE_INSTALLED_PROJECT_UNSETTLED"
-    )
-    const plugin = await page.evaluate(
-      async (id) => (await window.api.plugins.list()).find((p) => p.id === id),
-      delivery.pluginId
-    )
-    assert(plugin?.enabled, "LIVE_INSTALLED_PLUGIN_NOT_ENABLED")
-    events.push({
-      installedContinuation: {
-        projectId: created.project.projectId,
-        pluginDigest: created.project.pluginDigest,
-        sourceDigest: delivery.sourceDigest,
-        operations: created.operations.map((op) => ({
-          id: op.operationId,
-          stageId: op.stageId,
-          status: op.status,
-          terminal: op.execution?.terminal?.code
-        }))
-      }
-    })
-    save()
-    projectWorkspaces.set(created.project.name, created.project.workspace)
-    await openUnifiedHostProject(page, created.project.name)
-    const ordinary = await runProject(created, "ordinary")
-    events.push({ ordinary, delivery })
-    save()
-    return {
-      model: "real configured provider",
-      controlledOutputs: false,
-      reviewedCommand,
-      reviewedCommands,
-      sameCandidateDigest: delivery.sourceDigest,
-      ordinary,
-      delivery
-    }
-  }
+  assert(!input.installedProjectId, "LIVE_LEGACY_HOST_CONTINUATION_REQUIRES_FRESH_ORIGINAL_FEATURE")
   let projectId: string
   if (request.journey?.phase === "passed" && request.journey.canDeliver) {
     assert.equal(
@@ -970,7 +878,7 @@ export async function exerciseLiveGeneratedProject(input: {
   // The creator dialog can reopen asynchronously when switching back to its chat.
   // Keep a scoped UI handler during navigation so that late modal opening cannot block the click.
   await page.removeLocatorHandler(creator)
-  await page.addLocatorHandler(creator, async dialog => {
+  await page.addLocatorHandler(creator, async (dialog) => {
     await dialog.getByRole("button", { name: "Close", exact: true }).click({ timeout: remaining() })
   })
   try {
@@ -987,17 +895,29 @@ export async function exerciseLiveGeneratedProject(input: {
   const deliveryPanel = await openCreatorStep(page, "delivery")
   const card = deliveryPanel.getByRole("region", { name: "项目候选保存为新插件", exact: true })
   let installed = await status()
-  if (installed.projectDelivery?.phase !== "installed" ||
-      installed.projectDelivery.sourceDigest !== request.digest) {
+  if (
+    installed.projectDelivery?.phase !== "installed" ||
+    installed.projectDelivery.sourceDigest !== request.digest
+  ) {
     const nameField = card.getByRole("textbox", { name: "新插件标识", exact: true })
     if (await nameField.isVisible()) {
       const previousName = await nameField.inputValue()
       const plugins = await page.evaluate(() => window.api.plugins.list())
-      const nextName = liveProjectDeliveryName(previousName, request.digest, plugins.map(plugin => plugin.name))
+      const nextName = liveProjectDeliveryName(
+        previousName,
+        request.digest,
+        plugins.map((plugin) => plugin.name)
+      )
       if (nextName !== previousName) {
-        events.push({ operation: "delivery-name-collision", sourceDigest: request.digest,
-          previousName, newName: nextName,
-          retainedPluginIds: plugins.filter(plugin => plugin.name === previousName).map(plugin => plugin.id) })
+        events.push({
+          operation: "delivery-name-collision",
+          sourceDigest: request.digest,
+          previousName,
+          newName: nextName,
+          retainedPluginIds: plugins
+            .filter((plugin) => plugin.name === previousName)
+            .map((plugin) => plugin.id)
+        })
         save()
         await nameField.fill(nextName, { timeout: remaining() })
       }
@@ -1007,7 +927,8 @@ export async function exerciseLiveGeneratedProject(input: {
       .click({ timeout: remaining() })
     installed = await until(
       status,
-      (value) => value.projectDelivery?.phase === "installed" &&
+      (value) =>
+        value.projectDelivery?.phase === "installed" &&
         value.projectDelivery.sourceDigest === request.digest,
       "LIVE_PROJECT_INSTALL_NOT_COMPLETED"
     )
@@ -1020,56 +941,92 @@ export async function exerciseLiveGeneratedProject(input: {
     delivery.pluginId
   )
   assert(plugin, "LIVE_PROJECT_INSTALLATION_NOT_FOUND")
-  await card.getByRole("button", { name: "开始使用", exact: true }).click({ timeout: remaining() })
-  await until(
-    () =>
-      page.evaluate(
-        async (id) => (await window.api.plugins.list()).find((value) => value.id === id)?.enabled,
-        plugin.id
-      ),
-    Boolean,
-    "LIVE_PROJECT_EXPLICIT_ENABLE_FAILED"
-  )
-  const suffix = input.installedWorkspaceSuffix
-  assert(!suffix || /^[a-f0-9]{12}$/.test(suffix), "LIVE_PROJECT_WORKSPACE_SUFFIX_INVALID")
-  const workspace = join(input.artifacts, `live-installed-project-workspace${suffix ? `-${suffix}` : ""}`)
-  mkdirSync(workspace, { recursive: true })
-  const ordinaryCreated = await createViaStartUseForm(input.app, page, {
-    name: "Live created plugin ordinary project",
-    workspace,
-    installedPluginId: plugin.id,
-    pluginName: plugin.name,
-    version: plugin.version,
-    goal: input.goal ?? trialCreated.project.goal
+  const zip = await reimportLiveProjectZip({
+    app: input.app,
+    page,
+    card,
+    threadId: authorThreadId,
+    workspace: authorWorkspace,
+    artifacts: input.artifacts,
+    delivery,
+    plugin,
+    deadline
   })
-  // Delivery renames plugin identity only; executable stages/checks/resources remain the tested ones.
-  assert.deepEqual(
-    ordinaryCreated.project.manifest.stages,
-    trialCreated.project.manifest.stages,
-    "LIVE_PROJECT_INSTALLED_STAGES_CHANGED"
-  )
-  assert.deepEqual(
-    ordinaryCreated.project.manifest.artifacts,
-    trialCreated.project.manifest.artifacts,
-    "LIVE_PROJECT_INSTALLED_ARTIFACTS_CHANGED"
-  )
-  assert.deepEqual(
-    ordinaryCreated.project.manifest.checks,
-    trialCreated.project.manifest.checks,
-    "LIVE_PROJECT_INSTALLED_CHECKS_CHANGED"
-  )
-  const ordinary = await runProject(ordinaryCreated, "ordinary")
-  events.push({
-    ordinary,
-    delivery: {
-      id: delivery.id,
-      pluginId: delivery.pluginId,
-      sourceDigest: delivery.sourceDigest,
-      digest: delivery.digest,
-      name: delivery.name,
-      version: delivery.version
-    }
+  events.push({ operation: "zip-original-upload", ...zip.evidence, identity: zip.identity })
+  save()
+  const suffix = request.digest.slice(0, 12)
+  const originalFeature = await exerciseLiveOriginalFeatureJourney({
+    app: input.app,
+    page,
+    isolationRoot: input.artifacts,
+    workspaceParent: input.artifacts,
+    artifacts: input.artifacts,
+    artifactPrefix: `${artifactPrefix}-installed`,
+    installed: {
+      pluginId: zip.plugin.id,
+      name: zip.plugin.name,
+      version: zip.plugin.version,
+      sourceDigest: zip.identity.digest
+    },
+    project: {
+      name: `Live original project ${suffix}`,
+      code: `LIVE${suffix}`,
+      systemId: "MODS-ACCEPTANCE",
+      systemName: "Isolated Mods acceptance",
+      folder: `project-${suffix}`
+    },
+    feature: { title: `Handoff ${suffix}`, goal: input.goal ?? trialCreated.project.goal },
+    deadline,
+    execution: {
+      providerBoundary: "commercial",
+      maxStageTransitions: 1,
+      confirmStage(view, operation) {
+        assert.deepEqual(view.project.manifest.stages, trialCreated.project.manifest.stages)
+        assert.deepEqual(view.project.manifest.checks, trialCreated.project.manifest.checks)
+        assert.equal(view.project.manifest.actions.length, 0)
+        return (
+          operation.status === "prepared" &&
+          operation.stageId === view.project.manifest.stages[0].id
+        )
+      },
+      confirmKnownResult(view) {
+        const operation = view.operations.find(
+          (value) => value.operationId === view.resultReview?.operationId
+        )
+        if (
+          !operation ||
+          operation.status !== "succeeded" ||
+          operation.execution?.terminal?.outcome !== "success" ||
+          !operation.receipts.length ||
+          !operation.receipts.every((receipt) => receipt.result === "passed")
+        )
+          return false
+        const workspace = realpathSync(view.project.workspace)
+        inside(artifactRoot, workspace)
+        const files = view.project.manifest.artifacts.filter((artifact) =>
+          existsSync(join(workspace, artifact.path))
+        )
+        for (const artifact of files) {
+          const path = privatePath(workspace, resolve(workspace, artifact.path))
+          assert(statSync(path).isFile(), "LIVE_ORIGINAL_RESULT_NOT_FILE")
+          assert(statSync(path).size <= 2 * 1024 * 1024, "LIVE_ORIGINAL_RESULT_TOO_LARGE")
+          const text = readFileSync(path, "utf8")
+          if (artifact.path.endsWith(".json")) JSON.parse(text)
+          events.push({
+            operation: "original-result-read",
+            path: artifact.path,
+            bytes: Buffer.byteLength(text),
+            sha256: createHash("sha256").update(text).digest("hex")
+          })
+        }
+        save()
+        return files.length > 0
+      }
+    },
+    beginStage: input.beginStage,
+    endStage: input.endStage
   })
+  events.push({ originalFeature })
   save()
   return {
     model: "real configured provider",
@@ -1078,14 +1035,16 @@ export async function exerciseLiveGeneratedProject(input: {
     reviewedCommands,
     sameCandidateDigest: request.digest,
     trial,
-    ordinary,
+    originalFeature,
+    zip: zip.evidence,
     delivery: {
       id: delivery.id,
-      pluginId: delivery.pluginId,
+      pluginId: zip.plugin.id,
+      originalPluginId: delivery.pluginId,
       sourceDigest: delivery.sourceDigest,
-      digest: delivery.digest,
-      name: delivery.name,
-      version: delivery.version
+      digest: zip.identity.digest,
+      name: zip.plugin.name,
+      version: zip.plugin.version
     }
   }
 }

@@ -29,6 +29,7 @@ export interface FunctionPlugin {
   guest: FunctionGuest
   capabilities: string[]
   environment?: import("./environment-sdk").FunctionEnvironmentDeclaration
+  admission?: { version?: string; provenance?: string; modules: readonly import("./loader").FunctionCompiledAdmissionModule[] }
 }
 
 /** A host-captured handler identity; never a guest-supplied execution option. */

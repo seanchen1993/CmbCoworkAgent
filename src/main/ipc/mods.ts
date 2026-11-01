@@ -1987,6 +1987,7 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
     turnStep: (...args) => functions.turnStep(...args),
     offerAgent: (...args) => functions.offerAgent(...args),
     classicEvent: (...args) => functions.classicEvent(...args),
+    captureWorktreeRemovalObserver: (...args) => functions.captureWorktreeRemovalObserver(...args),
     presentationEvent: (...args) => functions.presentationEvent(...args),
     invalidate: (workspace) => functions.invalidate(workspace),
     pluginsChanged: (workspace, ids) => functions.pluginsChanged(workspace, ids),

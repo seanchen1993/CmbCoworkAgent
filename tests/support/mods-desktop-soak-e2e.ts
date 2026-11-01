@@ -371,6 +371,13 @@ export async function verifyDesktopSoak(
       }
     }
     await sampling
+    if (!options.smoke && naturalHeap.length) {
+      // Start-up IPC can timestamp the first sample after the workload clock starts. Keep
+      // the same warmed state until the actual first-to-last measurement spans two hours.
+      await waitUntilMonotonic(started + naturalHeap[0].atMs + options.durationMs, () => {
+        if (existsSync(join(artifacts, "STOP"))) throw Error("DESKTOP_SOAK_STOP_REQUESTED")
+      })
+    }
     await sampleHeap()
     clearInterval(heapTimer)
     const heapAssessment = desktopHeapAssessment(naturalHeap, forcedGc)

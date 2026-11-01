@@ -1,6 +1,6 @@
 # 桌面 Mods 开发者入口
 
-本说明对应 `codex/mods-v2` 的桌面适配，应用版本 2.0.0，宿主契约修订 v94。
+本说明对应 `codex/mods-v2` 的桌面适配，应用版本 2.0.0，宿主契约修订 v95。
 面向用户的能力范围见 [可自定义说明](mods-user-customization-2026-11-01.md)；阶段业务留在插件中，原项目模式入口和运行器继续沿用。
 
 ## 最小插件和 ZIP
@@ -78,6 +78,7 @@ export const register: Register = (on) => {
 | 子助手 | `agent.register`、`agent.spawn`、`agent.status`、`agent.messages`、`agent.stop`、`ui.view` |
 | 参数与状态 | `config.list/set`、`state.get/set`、`store.get/set` 及五个 helper |
 | 本机执行与诊断 | `process.run/spawn`、`http.fetch`、`env.set`、`ui.notify`、`telemetry.records` |
+| 模块准入与本机生命周期 | `plugin.register`、`session.attach/detach`、`classic.WorktreeRemove` |
 
 以实际查询的签名为准。项目插件可以组合公共能力，但普通聊天 MCP/子会话接口不自动具有项目运行上下文。跨插件 action、任意 keybinding、任意 DOM/Node 和全局 CSS 没有因类型可见而开放。
 
@@ -90,7 +91,17 @@ export const register: Register = (on) => {
 - `env.set` 静态声明 literal 名称；只影响本插件当前会话之后的 process.run/spawn，显式进程 env 优先，不更改宿主进程或模型工具环境。
 - `ui.notify(text,{surface:"desktop"})` 是明确桌面扩展。默认上游终端通道在桌面返回 no-surface；不要把系统接收展示当作用户已看见。
 - `telemetry.log/mark` 可被实际 Hook 消费，当前落本插件有界本地诊断；`records` 不是上传服务。身份、终端面和无提供者的生命周期事件的完整限制见用户说明。
-- v94 扩大了宿主能力摘要，v93 的旧确认不会默许新权限。当前版本集中核对一次，源码或权限改变后仍需重新确认；不会在重新启动时偷偷继承旧试用授权。
+- v95 扩大了宿主能力摘要，v94 及更早的旧确认不会默许新权限。当前版本集中核对一次，源码或权限改变后仍需重新确认；不会在重新启动时偷偷继承旧试用授权。
+
+## 模块准入与生命周期
+
+`plugin.register` 在模块加入执行链前，由此前已准入的模块检查宿主固定的 manifest 与逐 entry/import 扫描的 `uses`。返回 `{refuse:"原因"}` 后，该模块不进入 engine、启动、事件、工具、命令或公共能力索引。同包仍使用单 VM、共享状态和同一授权；同步顶层及 register 代码会为收集登记而求值，此时没有宿主执行权限。**这不是同包模块内存隔离或恶意源码执行前的安全扫描**，拒绝不会撤销这些同步局部内存副作用。未能准确扫描的模块在门禁下拒绝；没有 judge 时保留既有语法和快路径。
+
+`session.attach/detach` 只观察真实本地桌面绑定，`clientId` 为宿主标识；不代表远程设备上线。`session.surfaces()` 读取实际 roster，无绑定返回空数组。只通知已经启动的组件，打开页面不会主动创建 VM；结束解绑与 `session.end` 共用原短期限。
+
+`classic.WorktreeRemove` 是 owned workflow 工作树实际回收尝试前的有界观察。输入路径和原 thread/run 由宿主固定，返回空对象。这里只允许读取、本地 store/state 记录和日志；原生写入、进程、工具、网络、模型、子任务、定时任务与平台动作拒绝，嵌套调用继续受限。只调用已启动、来源可核验且闲置的普通 runtime；有旧资源句柄、opening、未结算调用或清理未知时跳过并记录原因。主进程观察 lease 阻止私有资源通道绕过，只在实际 dispatch 和全部宿主调用结算后解除；超时等待结束不解除保护，未确认期间新的外部动作仍会被拒绝，不能自动重试。
+
+项目运行来源尚无这项观察适配，缺少来源证明时也不派发。它不是任意工作树监听或强制业务清理服务。原 dirty 保留和失败恢复策略继续执行，事件发生不证明物理回收已经成功。
 
 ## 验收与维护
 

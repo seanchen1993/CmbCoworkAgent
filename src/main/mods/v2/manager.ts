@@ -1,4 +1,6 @@
 import { currentNativeConfigurationScope } from "./native-configuration-scope"
+import type { NativeDesktopBinding, NativeDesktopChange, NativeWorktreeObserver,
+  NativeWorktreeRemoval } from "./native-observer"
 import { FunctionDesktopNotifications } from "./desktop-notify"
 import { OwnedMcpConnections } from "../../mcp/owned-connections"
 import { resolveSelectedMcpSource } from "../../mcp/capability-service"
@@ -251,6 +253,9 @@ interface FunctionConnection {
   stopAndDrain?(): Promise<void>
 }
 interface SessionEntry {
+  desktopClients?: Map<string, NativeDesktopBinding>
+  desktopObservers?: Promise<void>
+  desktopObserverCount?: number
   ownedMcp?: Map<FunctionPlugin, import("../../mcp/owned-connections").OwnedMcpConnections>
   constructionOwner?: FunctionOperationScope
   runtimeSourceToken?: RuntimePluginSourceToken
@@ -879,6 +884,7 @@ export class FunctionModsManager {
   private compatibilityProbe?: { workspace: string; client: FunctionConnection }
   private sessionGeneration = this.initialEpoch
   private readonly stopWatching: () => void
+  private readonly stopDesktop?: () => void
 
   constructor(
     private readonly store: ModControlStore,
@@ -886,6 +892,7 @@ export class FunctionModsManager {
     private readonly createClient: () => FunctionConnection = () =>
       new FunctionRuntimeClient(join(__dirname, "function-mod-host.js"))
   ) {
+    this.stopDesktop = host.desktop?.subscribe(change => this.observeDesktopChange(change))
     this.platformHub = new PlatformCapabilityHub(store.functionState)
     try {
       for (const receipt of readRuntimeStopReceipts(store)) {
@@ -2955,6 +2962,110 @@ export class FunctionModsManager {
         matchesEventPattern(registration.pattern, event)))
   }
 
+  /** Never calls session()/status(): mounting a desktop cannot discover or start plugins. */
+  private observeDesktopChange(change: NativeDesktopChange): void {
+    if (this.closed) return
+    for (const entry of this.sessions.values()) {
+      if (entry.threadId !== change.binding.threadId || !entry.session?.hasCompletedStartup ||
+        !this.host.enabled(entry.workspace) || this.endingEntries.has(
+          JSON.stringify([entry.workspace, entry.threadId]))) continue
+      const clients = entry.desktopClients ??= new Map()
+      if (change.event === "session.attach") {
+        if (clients.has(change.binding.clientId)) continue
+        clients.set(change.binding.clientId, change.binding)
+      } else if (!clients.delete(change.binding.clientId)) continue
+      this.queueDesktopObserver(entry, change)
+    }
+  }
+
+  private synchronizeDesktop(entry: SessionEntry): void {
+    if (this.sessions.get(JSON.stringify([entry.workspace, entry.threadId])) !== entry ||
+      !entry.session?.hasCompletedStartup || !this.host.enabled(entry.workspace)) return
+    for (const binding of this.host.desktop?.bindings(entry.threadId) ?? [])
+      this.observeDesktopChange({ event: "session.attach", binding,
+        input: { surface: "desktop", clientId: binding.clientId } })
+  }
+
+  private assertObserverEntry(entry: SessionEntry): void {
+    this.host.assertThread?.(entry.workspace, entry.threadId)
+    if (this.closed || !this.host.enabled(entry.workspace) ||
+      this.epoch(entry.workspace) !== entry.epoch ||
+      this.sessions.get(JSON.stringify([entry.workspace, entry.threadId])) !== entry)
+      throw new ModFunctionError("MODS_SCOPE_CHANGED")
+    for (const snapshot of entry.snapshots.values()) {
+      this.assertSnapshotContent(snapshot)
+      this.store.assertGrant(snapshot.grant)
+      this.assertConfiguredOptions(entry.workspace, snapshot.compiled, snapshot.configuredRevision ?? 0)
+      assertConfigurationSourcesCurrent(snapshot.sourcePath ?? snapshot.compiled.root, snapshot.compiled)
+    }
+    for (const activation of entry.developmentPlugins.values()) activation.assertCurrent()
+    entry.session!.assertTransportLive()
+  }
+
+  private queueDesktopObserver(entry: SessionEntry, change: NativeDesktopChange): void {
+    if (!this.sessionHasHandler(entry, change.event)) return
+    if ((entry.desktopObserverCount ?? 0) >= 32) {
+      console.warn("[Mods] Desktop lifecycle observation stopped: pending observer limit")
+      return
+    }
+    entry.desktopObserverCount = (entry.desktopObserverCount ?? 0) + 1
+    const prior = entry.desktopObservers ?? Promise.resolve()
+    const run = () => this.startupModels.fresh(() => entry.activity.fresh(() => this.operations.exit(() =>
+      withFunctionTransportExecution({ workspace: entry.workspace, threadId: entry.threadId,
+        userInitiated: false, leased: false, immediate: true }, async () => {
+          const guard = () => this.assertObserverEntry(entry)
+          guard()
+          await entry.session!.observeNativeEvent(change.event, { ...change.input },
+            { clientId: change.binding.clientId }, guard)
+          guard()
+        }))))
+    const actual = prior.then(() => entry.runtimeSourceToken
+      ? withRuntimePluginSource(entry.runtimeSourceToken, run) : run())
+    entry.desktopObservers = actual.catch(error => {
+      // Retirement intentionally cuts queued observation; it is not a plugin/session-end event.
+      if (this.closed || entry.session?.lifecycleSignal.aborted ||
+        !this.host.enabled(entry.workspace) ||
+        this.sessions.get(JSON.stringify([entry.workspace, entry.threadId])) !== entry ||
+        this.endingEntries.has(JSON.stringify([entry.workspace, entry.threadId]))) return
+      console.warn("[Mods] Desktop lifecycle observation stopped:",
+        error instanceof Error ? error.message : error)
+    }).finally(() => { entry.desktopObserverCount = (entry.desktopObserverCount ?? 1) - 1 })
+  }
+
+  /** Original native owner is captured at workflow launch, not reacquired during cleanup. */
+  captureWorktreeRemovalObserver(workspace: string, threadId: string, runId: string,
+    assertOwner: () => void): NativeWorktreeObserver | undefined {
+    if (this.closed || !this.host.enabled(workspace)) return undefined
+    const entry = this.sessions.get(JSON.stringify([workspace, threadId]))
+    // Project source lifetimes are not interchangeable with ordinary native workflow owners.
+    if (!entry?.session?.hasCompletedStartup || entry.runtimeSourceToken ||
+      !this.sessionHasHandler(entry, "classic.WorktreeRemove")) return undefined
+    const guard = () => { assertOwner(); this.assertObserverEntry(entry) }
+    guard()
+    return Object.freeze({ observe: async (facts: NativeWorktreeRemoval, signal?: AbortSignal) => {
+      signal?.throwIfAborted()
+      if (!isSameWorkspacePath(facts.workspace, workspace) || facts.threadId !== threadId || facts.runId !== runId)
+        throw new ModFunctionError("MODS_WORKTREE_OBSERVER_SCOPE")
+      guard()
+      // Check before entering our own activity token. This never cancels or waits for old work.
+      if (entry.activity.size) {
+        console.warn("[Mods] Worktree removal observation skipped: original runtime is busy")
+        return
+      }
+      const input: ModObject = { hook_event_name: "WorktreeRemove", session_id: threadId,
+        transcript_path: "", cwd: workspace, worktree_path: facts.path }
+      await this.startupModels.fresh(() => entry.activity.fresh(() => this.operations.exit(() =>
+        withFunctionTransportExecution({ workspace, threadId, userInitiated: false,
+          leased: false, immediate: true }, async () => {
+          signal?.throwIfAborted()
+          guard()
+          await entry.session!.observeNativeEvent("classic.WorktreeRemove", input, {}, guard, signal)
+          signal?.throwIfAborted()
+          guard()
+        }))))
+    } })
+  }
+
   /** Native core is not a resource of an unrelated UI guest. Policy and owner still fence it. */
   private captureNativeBoundary(workspace: string, threadId: string, signal: AbortSignal) {
     const epoch = this.nativeEpochs.get(workspace) ?? this.initialEpoch
@@ -4341,7 +4452,7 @@ export class FunctionModsManager {
       JSON.stringify([entry.workspace, entry.threadId])) === entry)
       this.activateConversationOwner(entry)
     const session = entry.session!
-    if (session.hasStarted) return session.start()
+    if (session.hasStarted) return session.start().then(() => this.synchronizeDesktop(entry))
     const key = JSON.stringify([entry.workspace, entry.threadId])
     const facts = [...entry.snapshots.values()]
     const sources = this.configurationSources(entry.workspace, entry.threadId)
@@ -4373,6 +4484,7 @@ export class FunctionModsManager {
       await session.start()
       // Guest recovery cannot admit an outdated cold snapshot after a model guard failed.
       if (analyzed) assertLive()
+      this.synchronizeDesktop(entry)
     })
   }
 
@@ -4660,6 +4772,8 @@ export class FunctionModsManager {
               )
             plugins.push({
               name: compiled.name,
+              ...(projection.admission ? { admission: { ...projection.admission,
+                provenance: `${compiled.name}@local` } } : {}),
               root: compiled.root,
               environment: projection.environment,
               modelProtocol: compiled.modelProtocol,
@@ -4688,6 +4802,8 @@ export class FunctionModsManager {
             localDevelopment.assertCapabilities(
               platformRegistrationCapabilities(guest.registrations))
             const plugin: FunctionPlugin = { name: compiled.name, root: compiled.root, tier: "user",
+              ...(compiled.admission ? { admission: { ...projectFunctionComponents(compiled).admission!,
+                provenance: `${compiled.name}@development` } } : {}),
               environment: compiled.environment,
               modelProtocol: compiled.modelProtocol,
               guest, capabilities: localDevelopment.revision.capabilities.filter(value => !value.startsWith("event:")) }
@@ -4703,6 +4819,12 @@ export class FunctionModsManager {
             assertLive()
             const builtin: FunctionPlugin = {
               name: CONTEXT_METER_NAME,
+              admission: { provenance: `${CONTEXT_METER_NAME}@builtin`, modules: [{
+                id: "native", clients: [], uses: {
+                  events: ["ui.render", "turn.complete"],
+                  calls: [...CONTEXT_METER_CAPABILITIES].sort()
+                }
+              }] },
               root: workspace,
               tier: "builtin",
               guest,
@@ -4791,6 +4913,14 @@ export class FunctionModsManager {
             return registry
           }
           current.session = new FunctionSession(plugins, {
+            desktopSurfaces: () => this.host.desktop?.surfaces(threadId) ?? [],
+            pendingDesktopObservers: () => current.desktopObservers ?? Promise.resolve(),
+            detachDesktopForEnd: () => {
+              const clients = [...(current.desktopClients?.values() ?? [])]
+              current.desktopClients?.clear()
+              this.host.desktop?.closeThread(threadId, "end")
+              return clients.map(client => ({ clientId: client.clientId }))
+            },
             manageMcp: async (plugin, method, input, signal) => {
               const result = await withNativeGrant(plugin, `mcp.${method}`, async () => {
                 signal.throwIfAborted()
@@ -8206,6 +8336,7 @@ export class FunctionModsManager {
     this.stopCompatibilityProbe()
     this.namedStates.clear()
     this.stopWatching()
+    this.stopDesktop?.()
     this.stopConfigurationIdle()
     this.configurationIdleListeners.clear()
     for (const candidate of this.candidates) {

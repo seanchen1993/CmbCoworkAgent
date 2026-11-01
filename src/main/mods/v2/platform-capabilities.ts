@@ -155,25 +155,7 @@ export class PlatformCapabilities {
       digest: "native.file-edits/v1",
       generation: host.incarnation
     }
-    for (const plugin of plugins) {
-      const owner = {}
-      this.owners.set(plugin, owner)
-      const source = platformCopy(host.source(plugin))
-      for (const registration of plugin.guest.registrations) {
-        if (!registration.platformCapability) continue
-        const descriptor = platformDescriptor(registration.platformCapability)
-        if (
-          this.providers.some(
-            (p) =>
-              p.plugin === plugin &&
-              p.descriptor.id === descriptor.id &&
-              p.descriptor.version === descriptor.version
-          )
-        )
-          platformError("MODS_PLATFORM_DUPLICATE")
-        this.providers.push({ plugin, registration, descriptor, source })
-      }
-    }
+    for (const plugin of plugins) this.admit(plugin)
     const owner = {}
     this.owners.set(this.nativePlugin, owner)
     this.providers.push({
@@ -220,6 +202,22 @@ export class PlatformCapabilities {
         native,
         registration: { id: "native", pattern: "platform.action", hasCatch: false }
       })
+    }
+  }
+  /** Called only at the native module admission boundary, before startup/publication. */
+  admit(plugin: FunctionPlugin): void {
+    this.host.lifetime.throwIfAborted()
+    if (this.closed) platformError("MODS_PLATFORM_CLOSED")
+    if (!this.owners.has(plugin)) this.owners.set(plugin, {})
+    const source = platformCopy(this.host.source(plugin))
+    for (const registration of plugin.guest.registrations) {
+      if (!registration.platformCapability || this.providers.some(item =>
+        item.plugin === plugin && item.registration.id === registration.id)) continue
+      const descriptor = platformDescriptor(registration.platformCapability)
+      if (this.providers.some(item => item.plugin === plugin &&
+          item.descriptor.id === descriptor.id && item.descriptor.version === descriptor.version))
+        platformError("MODS_PLATFORM_DUPLICATE")
+      this.providers.push({ plugin, registration, descriptor, source })
     }
   }
   private source(plugin: FunctionPlugin): PlatformCapabilitySource {

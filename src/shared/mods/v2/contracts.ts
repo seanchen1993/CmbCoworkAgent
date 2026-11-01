@@ -3,7 +3,7 @@ import type { ModJson, ModObject } from "../types"
 export const MODS_V2_API = "cmb.mods/v2" as const
 export const CLAUDE_MODS_PROFILE = "claude-code/2.1.278" as const
 /** Bump when expanding host authority so an old digest grant cannot silently gain capabilities. */
-export const FUNCTION_HOST_REVISION = "devclaw-mods-v94" as const
+export const FUNCTION_HOST_REVISION = "devclaw-mods-v95" as const
 export const MOD_TIERS = ["prepend", "user", "append", "builtin", "core"] as const
 export type ModTier = (typeof MOD_TIERS)[number]
 
@@ -14,6 +14,8 @@ export interface ModOrigin {
 
 export interface FunctionRegistration {
   id: string
+  /** Compiled hooks entry, captured by the native registration scope, never SDK input. */
+  module?: string
   pattern: string
   hasCatch: boolean
   /** Missing metadata retains remote matching for older runtime peers. */

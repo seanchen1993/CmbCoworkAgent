@@ -1,10 +1,10 @@
 # 非媒体补齐、第三阶段与性能验收
 
-状态：产品实现、三组 medium 独立回检及当前源码 native/受控桌面 smoke 通过；真实模型与正式性能仍在验收中。本文尚不是整轮完成声明。
+状态：主要实现及追加的模块准入、本机生命周期已完成双审、定向回归和全新 medium 独立复审。最终 Node/Web 类型、改动文件 lint 及原流程/第二阶段浏览器检查通过。真实模型续验与正式性能尚未完成，本文尚不是整轮完成声明。
 
 ## 交付范围
 
-按 [双审方案](mods-nonmedia-completion-and-phase3-plan-2026-11-01.md) 实施。应用保持 2.0.0，宿主权限摘要升到 v94，防止 v93 的旧确认自动取得新增能力。没有业务名分支，也没有替换项目创建、配置、需求管理或执行运行器。
+按 [双审方案](mods-nonmedia-completion-and-phase3-plan-2026-11-01.md) 实施。应用保持 2.0.0，宿主权限摘要升到 v95，防止 v94 及更早的旧确认自动取得新增能力。本轮没有新增业务名分支，也没有替换项目创建、配置、需求管理或执行运行器。
 
 固定官方 2.1.316 的 Core 清单含 85 个可调用方法及 2 个 plugin 只读字段。本机方法目录包含其中 82 个方法名称；缺少 audio.play/audio.speak/prompt.media 属于本轮排除项。**方法存在不代表底层完全等价**：终端 blit、托管身份、通知通道和遥测有明确条件；无生产者的生命周期和 classic metadata 仍未开放，不混入“全部已完成”统计。
 
@@ -24,6 +24,8 @@
 | 环境变量 | 实际 Node run/spawn 子进程读到设置，其他来源读不到，不改 host process.env；literal 声明、危险变量拒绝、删除/显式 env 优先。凭据词前缀及解释器注入键回归通过 |
 | 通知/身份/诊断 | OS show/failed 适配器回执，短路不能伪造成功，设置关闭/撤权/失败/幂等清理；未人工确认 Windows 横幅。普通身份 deny；遥测为真实 Hook 与受保护有界本地 ring，无上游上传 |
 | 作者底座 | 全部本机 SDK 方法及5个真实 VM helper 可以定向查询；UI 构造器、engine/ui 函数表重载进入同一隔离编译器。正常工具结果仍小于8K，不通过提高预算或每轮灌入全量类型解决 |
+| 模块准入 | 按真实 entry/import 扫描、同包共享 VM 与授权、此前准入前缀的模块门禁；拒绝不加入运行链、engine/start/工具/页面。同步顶层/register 仍求值，不冒充恶意源码执行前扫描或同包内存隔离；独立复审通过 |
+| 本机生命周期 | 真实 desktop owner 绑定/解绑与 roster，晚启动不新建 VM，结束共用原1.5秒短期限；普通 idle runtime 在无保留资源和未知调用时才做 owned workflow 回收前只读观察。原 dirty/ownership/删除恢复不变；独立复审通过 |
 
 ## 独立回检及修复
 
@@ -32,6 +34,16 @@
 1. runtime：发现危险环境键拒绝表达式的前缀漏洞，补凭据词和解释器注入键后通过；最终通知/作者补充27项通过。
 2. UX：发现父提交准备竞态 P1 与陈旧菜单 P2，补准备 lease、原子预占和回调硬挡。独立真实 ChatContainer 五场景与 lease 5项通过，证据 `output/mods-chatcontainer-input-target-browser/1793515650311`。
 3. remote/UI：发现截断原文可访问性与复制、Client textarea pointer 排除问题；全部修复。独立原语浏览器最新证据 `C:\Users\87624\AppData\Local\Temp\mods-nonmedia-primitives-dFHOa3`，无剩余产品阻断。
+
+最终范围回检随后确认三个 P2：模块准入、真实桌面绑定和 owned 工作树回收有现成生产者而尚未接入，完整补充方案经两审通过后实施。实现与新 medium 回检进一步关闭可变 handler/recovery handle 隐藏 SDK 使用，以及旧 process 资源关闭通道绕过只读限制的问题。工作树观察使用主进程 lease，只在无资源/未知调用时派发；等待超时不解除保护，实际 host/dispatch 结算后才恢复。最终两组独立复审均通过。WorktreeCreate 路径接管与审批权限闭环等仍需专门契约，不能只用同名通知宣称等价。
+
+复审曾推断 eval 可绕静态扫描并写文件；后核实 `FUNCTION_CODEGEN_GUARD` 在插件前已禁用 eval/Function，真实对照 RPC 为0，故撤回该“运行时绕过”推断。新增静态 unknown 只补声明准确性，保留普通数组循环、纯数据 descriptor、局部变量重名、稳定注册句柄与 Promise.catch；没有扩成全语言限制。
+
+新增契约/作者查询39项组合通过，覆盖宿主固定 facts、输入限额、互斥准入结果、精准只读 SDK、真实 state helper 兼容及每个定向结果的预算；记录 `output/mods-v95-authoring-discovery-2026-11-01.log`。编译与声明通过不等于生产执行已验收。
+
+最终中心联合回归33文件628/628通过，记录 `output/mods-v95-final-central-regression.log`；此后仅对 recovery handle 静态来源做增量收口，另行49/49通过，记录 `output/module-admission-recovery-handle-final.log`，不能把628写作该增量后的全量重跑。生命周期最终8文件86/86及跨进程专项5/5通过；真实 carrier 为生产 client/host-entry/QuickJS 加 Nodefork，后端保留流受控，未声称实际 OS SIGTERM 或完整 Electron 通过。
+
+冻结后 Node/Web 类型检查退出0，56个改动 TS/JS 文件 ESLint quiet 退出0（未全量格式化既有文件）。`test:mods:continuity` 和六套 `test:mods:phase2:browser` 退出0，记录 `output/mods-v95-continuity-final.log`、`output/mods-v95-phase2-browser-final.log`。原 ProjectForm、Feature 开始/批准/重试/取消、Placed、MCP、子会话、paint、原语及实际 ChatContainer 均按既有流程回归。
 
 ## 当前源码与真实模型
 
@@ -44,6 +56,8 @@
 受控 desktop smoke 通过：`output/phase3-source-desktop-smoke-e9cd3185`。真实 Electron/native IPC/SQLite/QuickJS，8个实际导入授权 Mod、4个真实 Client Pane、24次顺序回执、3轮关闭/重载恢复，结束后无所属 utility/pane 残留。自然 heap 采样链实际执行，短测不符合两小时正式门槛。以上两份记录绑定当时15492cc9f工作区内容哈希，明确包含未提交改动，不冒充已提交版本。
 
 广域回归648文件：632通过、9跳过、7失败，7225项通过、10失败、10跳过。失败包括旧导入入口/未开放接口断言，以及开发并行期间载入了旧作者声明或通知实现的模块。修复和同步断言后，**全部7个失败文件按冻结源码联合重跑94/94通过**，退出0，记录 `output/mods-nonmedia-final-failed-files-2026-11-01.log`。导入采用真实 parent 入口和服务，没有恢复旧 UI 或放宽断言。不能据此把最初整套命令写成全绿。
+
+提交后 `npm run test:mods:continuity` 与 `npm run test:mods:phase2:browser` 均退出0：原项目创建、Feature 开始/批准/重试/取消以及 Placed、MCP、子会话、paint、UI 原语、真实 ChatContainer 组件检查通过。`npm run test:chat:performance` 的9个浏览器套件也全通过：400条混合高度消息拖动/前插不空屏，流式追加不增加导航几何读取，长消息无需 scrollHeight 读取，侧栏拖动期间 App 重渲染为0且释放时1次，解析缓存复用仍保留当前文件链接与复制回调。首次性能脚本因独立 esbuild 夹具未接真实 Worker loader 中断，接入现有 browserWorkerPlugin 后完整重跑通过；没有修改生产 Worker。记录 `output/mods-nonmedia-continuity-2026-11-01.log`、`output/mods-nonmedia-phase2-browser-2026-11-01.log`、`output/mods-nonmedia-chat-performance-browser-final-2026-11-01.log`。这些是实际组件/受控适配器回归，不等于商业模型或正式长稳。
 
 待填写：提交后真实作者从零/派生/调整、ZIP 导出再导入、原项目阶段到最终完成衔接及未验证节点。Git/审批环境单列，不算平台失败，也不把未到达节点写成通过。
 

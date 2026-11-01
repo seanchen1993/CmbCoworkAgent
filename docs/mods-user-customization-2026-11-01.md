@@ -32,6 +32,7 @@
 | 模型与执行 | 已配置模型调用、分类、分叉；本机 process.run/spawn、受策略控制的 HTTP、定时任务 | 原模型预算、网络/命令权限和取消清理保留；插件不能绕过主机策略或拿模型密钥 |
 | 进程环境 | literal 声明的 env.set/get；本插件会话内覆盖、删除，并进入之后的 process.run/spawn | 不改 Electron 全局环境、其他插件或模型工具环境；危险变量拒绝，重载清空覆盖 |
 | 提醒与诊断 | toast/status/log、工具说明、原生问答、显式桌面系统通知；本地有界 telemetry 及 Hook 消费 | ui.notify 的桌面通道为明确扩展；OS show 不证明用户已看见；诊断不上传 Anthropic 或企业 collector |
+| 加载策略与生命周期 | 模块加入链前的 `plugin.register`；真实本地桌面 attach/detach；owned workflow 工作树回收观察 | 只由此前准入模块审候选；同包同步登记代码仍求值，不提供同包内存隔离。工作树观察仅能读取、记本地状态和日志，不接管删除或启动写入任务 |
 | 通用扩展协议 | engine.create、公共版本化 capability、查询/订阅/动作/取消/状态和受限交互页面 | 宿主核验提供者、来源、目标和双方权限；复杂业务接口、算法、企业流程仍由插件开发者实现 |
 
 功能开关、参数和权限集中沿已有设置入口管理。桌面通知开关位于组合设置的“插件桌面通知”，关闭会收回已有通知；插件不能自行重新开启该策略。
@@ -52,8 +53,8 @@
 - Raster/`ui.blit`、ToolProgress 属于上游终端绘制面。当前桌面无该绘制面，不能假成功。桌面用受限 UI 元素、SVG 和 Client 实现适合的界面。
 - 组织托管 `session.identity` 没有相应可信身份提供者；普通来源得到 deny，不公开本机登录令牌、组织资料或伪造 `isVerified`。`session.authorize` 无提供者时返回 null。
 - `telemetry.log/mark` 当前以真实 Hook 和本地诊断适配，不提供 Anthropic 内部或企业 collector 的上游上传语义。用 `telemetry.records()` 查看自己的本地记录。
-- `plugin.register` 的加载前准入否决、Remote Control attach/detach、`attribution.text`，以及 metadata-only 的 classic 事件，仍无等价生产者。登记同名事件不能触发真实业务。
-- metadata-only 清单：PermissionDenied、PreModelSwitch、PostModelSwitch、PermissionRequest、TaskCreated、TaskCompleted、Elicitation、ElicitationResult、ConfigChange、WorktreeCreate、WorktreeRemove、CwdChanged、FileChanged、DirectoryAdded、MessageDisplay；TeammateIdle 也不可用。不会把普通 turn、待办、切页或消息快照冒充这些上游语义。
+- 本地 desktop attach/detach 已接真实绑定，仍不代表 Remote Control 设备在线。`attribution.text` 没有已核实的“模型读取 Git 署名文本”生产者；不能拿自动提交字符串冒充。
+- metadata-only 清单：PermissionDenied、PreModelSwitch、PostModelSwitch、PermissionRequest、TaskCreated、TaskCompleted、Elicitation、ElicitationResult、ConfigChange、WorktreeCreate、CwdChanged、FileChanged、DirectoryAdded、MessageDisplay；TeammateIdle 也不可用。WorktreeRemove 只开放上述有限观察。已有审批、模型选择及工作树创建流程，也不等于已接通上游的权限改写、cache/pricing 或路径接管契约；不会用普通 turn、待办、切页或消息快照代替这些语义。
 - Button 的上游任意 keybinding action 与跨站点 hover group 等参数，只有存在明确本机实现才开放；未支持的参数应拒绝，不会静默表示生效。
 
 因此，当前是**可组合的桌面通用能力集**，不是“除多模态外所有 Claude Code API 和内部生命周期完全等价”。本轮补齐和第三阶段的实际通过范围、未验证节点与性能结果另见验收记录。

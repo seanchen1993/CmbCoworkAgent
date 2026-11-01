@@ -2,52 +2,178 @@ import { describe, expect, it } from "vitest"
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { dirname, join, resolve } from "node:path"
 import { tmpdir } from "node:os"
+import type { Page } from "playwright"
 import {
   assertGenericProjectArtifacts,
   assertGenericProjectReplacement,
   assertGenericProjectRepair,
+  auditGenericProjectRuntime,
   genericProjectCreatorScenario,
   readGenericProjectCandidate,
   type GenericProjectCandidate
 } from "../support/generic-project-creator-scenario"
 
 function candidate(revised = false): GenericProjectCandidate {
-  const module = (id: string) => ({ id, version: "1.0.0", title: id,
-    skill: `modules/${id}/SKILL.md`, inputs: [],
-    outputs: [{ id: id === "trace-review" ? "review" : id,
-      path: id === "trace-review" ? "review.json" : `${id}.json`, contract: "docs/v1" }],
-    checks: [{ id: `${id}-schema`, kind: "json-schema" as const,
-      artifactId: id === "trace-review" ? "review" : id,
-      schema: revised && id === "trace-review" ? { required: ["evidence"] } : {} }],
-    approval: "none" as const, resultApproval: "human" as const })
-  return { digest: revised ? "b".repeat(64) : "a".repeat(64), revision: revised ? 2 : 1,
-    draftId: "source-documents", directory: "unused",
-    source: { apiVersion: "devclaw.native-composition/v1", plugin: {
-      id: "source-documents", version: "1.0.0", title: "Documents", description: "Documents"
-    }, resources: [], environment: [],
-    modules: [module("collect"), module(revised ? "trace-review" : "review"), module("deliver")] },
-    skills: { collect: "collect skill", [revised ? "trace-review" : "review"]:
-      revised ? "trace references" : "review quality", deliver: "deliver skill" } }
+  const module = (id: string) => ({
+    id,
+    version: "1.0.0",
+    title: id,
+    skill: `modules/${id}/SKILL.md`,
+    inputs: [],
+    outputs: [
+      {
+        id: id === "trace-review" ? "review" : id,
+        path: id === "trace-review" ? "review.json" : `${id}.json`,
+        contract: "docs/v1"
+      }
+    ],
+    checks: [
+      {
+        id: `${id}-schema`,
+        kind: "json-schema" as const,
+        artifactId: id === "trace-review" ? "review" : id,
+        schema: revised && id === "trace-review" ? { required: ["evidence"] } : {}
+      }
+    ],
+    approval: "none" as const,
+    resultApproval: "human" as const
+  })
+  return {
+    digest: revised ? "b".repeat(64) : "a".repeat(64),
+    revision: revised ? 2 : 1,
+    draftId: "source-documents",
+    directory: "unused",
+    source: {
+      apiVersion: "devclaw.native-composition/v1",
+      plugin: {
+        id: "source-documents",
+        version: "1.0.0",
+        title: "Documents",
+        description: "Documents"
+      },
+      resources: [],
+      environment: [],
+      modules: [module("collect"), module(revised ? "trace-review" : "review"), module("deliver")]
+    },
+    skills: {
+      collect: "collect skill",
+      [revised ? "trace-review" : "review"]: revised ? "trace references" : "review quality",
+      deliver: "deliver skill"
+    }
+  }
 }
 
 function outputs() {
-  const materials = { sources: [{ id: "source-a", title: "A", text: "first original quote" },
-    { id: "source-b", title: "B", text: "second original quote" }] }
-  const review = { sourceIds: ["source-a", "source-b"], summary: "current review", findings: ["gap"],
-    evidence: [{ sourceId: "source-a", quote: "first original", assessment: "A" },
-      { sourceId: "source-b", quote: "second original", assessment: "B" }] }
-  return { materials, review,
-    report: { sourceIds: ["source-a", "source-b"], reviewSummary: "current review", report: "report" } }
+  const materials = {
+    sources: [
+      { id: "source-a", title: "A", text: "first original quote" },
+      { id: "source-b", title: "B", text: "second original quote" }
+    ]
+  }
+  const review = {
+    sourceIds: ["source-a", "source-b"],
+    summary: "current review",
+    findings: ["gap"],
+    evidence: [
+      { sourceId: "source-a", quote: "first original", assessment: "A" },
+      { sourceId: "source-b", quote: "second original", assessment: "B" }
+    ]
+  }
+  return {
+    materials,
+    review,
+    report: {
+      sourceIds: ["source-a", "source-b"],
+      reviewSummary: "current review",
+      report: "report"
+    }
+  }
 }
 
 describe("generic project creator conversation acceptance", () => {
+  it("observes domain wording separately while still requiring native checks and input read receipts", async () => {
+    const workspace = mkdtempSync(join(tmpdir(), "generic-handoff-audit-"))
+    expect(dirname(resolve(workspace))).toBe(resolve(tmpdir()))
+    const data = outputs()
+    data.report.reviewSummary = "Different domain wording"
+    data.materials.sources.pop()
+    for (const [name, value] of Object.entries(data))
+      writeFileSync(join(workspace, `${name}.json`), JSON.stringify(value))
+    const stages = ["collect", "trace-review", "deliver"]
+    const view = {
+      project: {
+        status: "completed",
+        workspace,
+        manifest: { stages: stages.map((id) => ({ id })) }
+      },
+      operations: stages.map((stageId) => ({
+        stageId,
+        operationId: stageId,
+        status: "transitioned",
+        execution: { threadId: stageId, terminal: { outcome: "success" } },
+        receipts: [{ checkId: "schema", result: "passed" }]
+      }))
+    }
+    const messages = Object.fromEntries(
+      ["trace-review", "deliver"].map((stage) => [
+        stage,
+        ["materials.json", ...(stage === "deliver" ? ["review.json"] : [])].flatMap(
+          (file, index) => [
+            {
+              id: `${stage}-assistant-${index}`,
+              role: "assistant",
+              tool_calls: [
+                { id: `${stage}-${index}`, name: "read_file", args: { file_path: file } }
+              ]
+            },
+            {
+              id: `${stage}-receipt-${index}`,
+              role: "tool",
+              tool_call_id: `${stage}-${index}`,
+              content: JSON.stringify(file === "materials.json" ? data.materials : data.review)
+            }
+          ]
+        )
+      ])
+    )
+    const page = {
+      evaluate: async (_fn: unknown, id: string) => (id === "project" ? view : messages[id])
+    } as unknown as Page
+    try {
+      const observed = await auditGenericProjectRuntime(page, "project", {
+        domainAssertions: "observe"
+      })
+      expect(observed.domainAudit.status).toBe("observation-not-passed")
+      expect(observed.nativeSuccessfulReads).toHaveLength(3)
+      expect(
+        observed.nativeSuccessfulReads.every((receipt) =>
+          /^[a-f0-9]{64}$/.test(receipt.currentFileSha256)
+        )
+      ).toBe(true)
+      view.operations[0].receipts[0].result = "failed"
+      await expect(
+        auditGenericProjectRuntime(page, "project", { domainAssertions: "observe" })
+      ).rejects.toThrow("GENERIC_PROJECT_NATIVE_HANDOFF_CHECKS_REQUIRED")
+      view.operations[0].receipts[0].result = "passed"
+      messages.deliver = messages.deliver.filter((message) => message.role !== "tool")
+      await expect(
+        auditGenericProjectRuntime(page, "project", { domainAssertions: "observe" })
+      ).rejects.toThrow("GENERIC_PROJECT_CURRENT_INPUT_NOT_READ")
+    } finally {
+      rmSync(workspace, { recursive: true, force: true })
+    }
+  })
   it("keeps the same source identity when native trial progress is later attached", () => {
     const root = mkdtempSync(join(tmpdir(), "generic-project-source-read-"))
     expect(dirname(resolve(root))).toBe(resolve(tmpdir()))
     try {
       const value = candidate()
-      const directory = join(root, "electron/mods/project-authoring", "scope",
-        `${value.draftId}-r1-immutable`)
+      const directory = join(
+        root,
+        "electron/mods/project-authoring",
+        "scope",
+        `${value.draftId}-r1-immutable`
+      )
       mkdirSync(join(directory, "composition"), { recursive: true })
       writeFileSync(join(directory, "composition/source.json"), JSON.stringify(value.source))
       for (const module of value.source.modules) {
@@ -68,13 +194,22 @@ describe("generic project creator conversation acceptance", () => {
     expect(genericProjectCreatorScenario.firstPrompt).toContain("native-modular")
     expect(genericProjectCreatorScenario.followupPrompt).toContain("trace-review")
     expect(genericProjectCreatorScenario.followupPrompt).toContain("当前同一个草稿")
-    expect(genericProjectCreatorScenario.followupPrompt).toContain("阶段声明、Skill 正文及检查均保持不变")
-    expect(genericProjectCreatorScenario.followupPrompt).toContain("合并一次 project_patch 后再编译")
-    expect(Object.values(genericProjectCreatorScenario).join(" ")).not.toMatch(/autobiz|board_core/i)
+    expect(genericProjectCreatorScenario.followupPrompt).toContain(
+      "阶段声明、Skill 正文及检查均保持不变"
+    )
+    expect(genericProjectCreatorScenario.followupPrompt).toContain(
+      "合并一次 project_patch 后再编译"
+    )
+    expect(Object.values(genericProjectCreatorScenario).join(" ")).not.toMatch(
+      /autobiz|board_core/i
+    )
   })
   it("accepts a new revision that changes only the middle module and skill", () => {
-    expect(assertGenericProjectReplacement(candidate(), candidate(true)).stages)
-      .toEqual(["collect", "trace-review", "deliver"])
+    expect(assertGenericProjectReplacement(candidate(), candidate(true)).stages).toEqual([
+      "collect",
+      "trace-review",
+      "deliver"
+    ])
   })
   it.each(["digest", "revision", "draftId"] as const)("rejects stale or unrelated %s", (key) => {
     const before = candidate()
@@ -111,7 +246,9 @@ describe("generic project creator conversation acceptance", () => {
   it("rejects a plausible quote fabricated outside the current sources", () => {
     const { materials, review, report } = outputs()
     review.evidence[0].quote = "invented quotation"
-    expect(() => assertGenericProjectArtifacts(materials, review, report)).toThrow(/QUOTED|QUOTATION/)
+    expect(() => assertGenericProjectArtifacts(materials, review, report)).toThrow(
+      /QUOTED|QUOTATION/
+    )
   })
   it("allows extra exact title evidence only alongside real content citations", () => {
     const { materials, review, report } = outputs()
@@ -120,14 +257,22 @@ describe("generic project creator conversation acceptance", () => {
   })
   it("rejects extra fabricated evidence even when valid content citations are present", () => {
     const { materials, review, report } = outputs()
-    review.evidence.push({ sourceId: "source-a", quote: "fabricated fact", assessment: "unfounded" })
+    review.evidence.push({
+      sourceId: "source-a",
+      quote: "fabricated fact",
+      assessment: "unfounded"
+    })
     expect(() => assertGenericProjectArtifacts(materials, review, report)).toThrow(/QUOTATION/)
   })
   it("rejects replacing all content evidence with title-only citations", () => {
     const { materials, review, report } = outputs()
-    review.evidence = [{ sourceId: "source-a", quote: "A", assessment: "title checked" },
-      { sourceId: "source-b", quote: "B", assessment: "title checked" }]
-    expect(() => assertGenericProjectArtifacts(materials, review, report)).toThrow(/CONTENT_NOT_QUOTED/)
+    review.evidence = [
+      { sourceId: "source-a", quote: "A", assessment: "title checked" },
+      { sourceId: "source-b", quote: "B", assessment: "title checked" }
+    ]
+    expect(() => assertGenericProjectArtifacts(materials, review, report)).toThrow(
+      /CONTENT_NOT_QUOTED/
+    )
   })
   it("rejects a report copied from an older review", () => {
     const { materials, review, report } = outputs()
@@ -137,6 +282,8 @@ describe("generic project creator conversation acceptance", () => {
   it("rejects a missing source even if the review claims successful completion", () => {
     const { materials, review, report } = outputs()
     review.sourceIds.pop()
-    expect(() => assertGenericProjectArtifacts(materials, review, report)).toThrow(/SOURCES_CHANGED/)
+    expect(() => assertGenericProjectArtifacts(materials, review, report)).toThrow(
+      /SOURCES_CHANGED/
+    )
   })
 })

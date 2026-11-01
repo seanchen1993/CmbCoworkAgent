@@ -14,6 +14,7 @@ import type { CapabilityUsageContext } from "../../../shared/mods/capability-usa
 export interface CompiledFunctionComponent {
   code: string
   globalName: string
+  entry?: string
   clients: Record<string, string>
   environment: FunctionEnvironmentDeclaration
 }
@@ -26,9 +27,10 @@ export interface FunctionComponentProjection {
   options: ModObject
   effectiveIds: string[]
   selectionDigest?: string
+  admission?: CompiledFunctionPlugin["admission"]
 }
 
-function ordered(entries: ClawComponentExport[]): ClawComponentExport[] {
+export function orderedFunctionComponents(entries: ClawComponentExport[]): ClawComponentExport[] {
   const result: ClawComponentExport[] = []
   const done = new Set<string>()
   const visit = (entry: ClawComponentExport) => {
@@ -48,10 +50,12 @@ export function assembleFunctionComponents(
   modules: Record<string, CompiledFunctionComponent>,
   config: Record<string, ModObject>
 ): string {
-  const selected = ordered(entries)
+  const selected = orderedFunctionComponents(entries)
   return (
     selected.map((entry) => modules[entry.id].code).join("\n") +
-    "\nvar __cmbFunctionMod = { register: function(on, options) {\n" +
+    "\nvar __cmbFunctionMod = { hookModules: [" + selected.map(entry =>
+      `{id:${JSON.stringify(modules[entry.id].entry ?? entry.entry)},register:${modules[entry.id].globalName}.register,options:${JSON.stringify(config[entry.id] ?? {})}}`).join(",") +
+    "], register: function(on, options) {\n" +
     selected
       .map((entry, index) => {
         const value = JSON.stringify(JSON.stringify(config[entry.id] ?? {}))
@@ -88,6 +92,7 @@ export function projectFunctionComponents(
       environment: compiled.environment,
       actions: compiled.actions ?? [],
       options,
+      ...(compiled.admission ? { admission: compiled.admission } : {}),
       effectiveIds: []
     }
   const config = structuredClone(selection?.config ?? {})
@@ -105,7 +110,7 @@ export function projectFunctionComponents(
       throw Error(`CLAW_COMPONENT_CONFIG_UNDECLARED: ${entry.name}`)
     }
   }
-  const effective = ordered(entries)
+  const effective = orderedFunctionComponents(entries)
   const effectiveIds = effective.map((entry) => entry.id)
   const modules = compiled.componentModules!
   const clients: Record<string, string> = Object.create(null)
@@ -134,6 +139,9 @@ export function projectFunctionComponents(
     actions: (compiled.actions ?? []).filter((action) => actionIds.has(action.id)),
     options,
     effectiveIds,
-    selectionDigest
+    selectionDigest,
+    ...(compiled.admission ? { admission: { ...compiled.admission,
+      modules: effective.map(entry => compiled.admission!.modules.find(module =>
+        module.id === modules[entry.id].entry)!).filter(Boolean) } } : {})
   }
 }

@@ -1,4 +1,5 @@
 import { captureHostWorkflowExecution } from "./host-execution"
+import { getModsManager } from "../../mods/manager"
 import { BrowserWindow, webContents, type WebContents } from "electron"
 import { AsyncLocalStorage } from "node:async_hooks"
 import { mkdir, stat, writeFile } from "fs/promises"
@@ -1362,6 +1363,16 @@ class WorkflowRunManager {
       userCancelled: false,
       settled: Promise.resolve(),
       worktrees: new WorkflowWorktreeLedger({
+        removalObserver: (() => {
+          try {
+            return getModsManager()?.captureFunctionWorktreeRemovalObserver?.(
+              request.workspacePath, request.threadId, request.runId)
+          } catch (error) {
+            console.warn("[Mods] Worktree observer capture stopped:",
+              error instanceof Error ? error.message : error)
+            return undefined
+          }
+        })(),
         executionResources: request.executionResources,
         workspacePath: request.workspacePath,
         runId: request.runId,

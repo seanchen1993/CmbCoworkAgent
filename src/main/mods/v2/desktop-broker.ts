@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto"
+import type { NativeDesktopBinding, NativeDesktopChange } from "./native-observer"
 import type { FunctionPromptScope } from "./prompt-broker"
 import { FunctionPresentationPublisher, type NativePresentationBinding } from "./presentation-broker"
 import type { FunctionPresentationReport, FunctionPresentationSnapshot } from "../../../shared/mods/v2/presentation"
@@ -14,7 +15,7 @@ import {
   type FunctionPaneDrawing
 } from "../../../shared/mods/v2/desktop-actions"
 
-type Owner = { id: string; senderId: number; send(request: DesktopRequest): void; presentation: FunctionPresentationPublisher; visible?: () => boolean }
+type Owner = { id: string; senderId: number; clientId: string; send(request: DesktopRequest): void; presentation: FunctionPresentationPublisher; visible?: () => boolean }
 type Pending = {
   owner: Owner
   scope: FunctionPromptScope
@@ -35,7 +36,28 @@ export interface FunctionDesktopAccess {
 export class FunctionDesktopBroker {
   private owners = new Map<string, Owner>()
   private pending = new Map<string, Pending>()
+  private readonly lifecycle = new Set<(change: NativeDesktopChange) => void>()
   constructor(private readonly writeClipboard: (text: string) => void) {}
+  bindings(threadId: string): NativeDesktopBinding[] {
+    const owner = this.owners.get(threadId)
+    return owner ? [Object.freeze({ threadId, owner: owner.id, senderId: owner.senderId,
+      clientId: owner.clientId })] : []
+  }
+  surfaces(threadId: string): string[] { return this.owners.has(threadId) ? ["desktop"] : [] }
+  subscribe(listener: (change: NativeDesktopChange) => void): () => void {
+    this.lifecycle.add(listener)
+    return () => { this.lifecycle.delete(listener) }
+  }
+  private changed(event: NativeDesktopChange["event"], binding: NativeDesktopBinding,
+    reason?: "detach" | "end"): void {
+    const change = Object.freeze({ event, binding,
+      input: Object.freeze({ surface: "desktop", clientId: binding.clientId,
+        ...(reason ? { reason } : {}) }) })
+    for (const listener of this.lifecycle) {
+      try { listener(change) }
+      catch (error) { console.warn("[Mods] Desktop observer stopped:", error) }
+    }
+  }
   isAttached(threadId: string): boolean { return this.owners.has(threadId) }
   captureOwner(senderId: number, threadId: string, id: string): () => void {
     this.assertOwner(senderId, threadId, id)
@@ -46,10 +68,16 @@ export class FunctionDesktopBroker {
     }
   }
   attach(threadId: string, owner: string, senderId: number, send: Owner["send"], visible?: () => boolean): void {
-    if (!threadId || threadId.length > 200 || !owner || owner.length > 100)
+    if (typeof threadId !== "string" || !threadId || threadId.length > 200 ||
+      typeof owner !== "string" || !owner || owner.length > 100 ||
+      !Number.isSafeInteger(senderId) || senderId < 0)
       throw Error("MODS_DESKTOP_OWNER")
+    const previous = this.owners.get(threadId)
+    if (previous?.id === owner && previous.senderId === senderId) return
     this.closeThread(threadId)
-    this.owners.set(threadId, { id: owner, senderId, send, visible, presentation: new FunctionPresentationPublisher() })
+    this.owners.set(threadId, { id: owner, senderId, send, visible, clientId: randomUUID(),
+      presentation: new FunctionPresentationPublisher() })
+    this.changed("session.attach", this.bindings(threadId)[0])
   }
   async feedback(senderId: number, threadId: string, id: string,
     read: () => Promise<NativePresentationBinding | undefined>): Promise<FunctionPresentationSnapshot> {
@@ -264,11 +292,13 @@ export class FunctionDesktopBroker {
       }
     }
   }
-  closeThread(threadId: string): void {
+  closeThread(threadId: string, reason: "detach" | "end" = "detach"): void {
+    const binding = this.bindings(threadId)[0]
     this.owners.get(threadId)?.presentation.close()
     this.owners.delete(threadId)
     for (const item of [...this.pending.values()])
       if (item.scope.threadId === threadId) item.reject(Error("MODS_DESKTOP_OWNER"))
+    if (binding) this.changed("session.detach", binding, reason)
   }
   closeSender(senderId: number): void {
     for (const [thread, owner] of this.owners)

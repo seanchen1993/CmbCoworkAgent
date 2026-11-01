@@ -8,7 +8,9 @@ import { OwnedAgentTasks } from "./v2/owned-agent-tasks"
 import { isOrdinaryFlowMetadata } from "../../shared/mods/flows/scope"
 import { consumeUserViewAction } from "./v2/user-view-action"
 import { captureThreadIncarnation, matchesThreadIncarnation } from "../services/thread-incarnation"
-import { captureRuntimePluginSourceAuthorityGuard, currentStageDebugSourcePolicy } from "../plugins/runtime-source-scope"
+import { captureRuntimePluginSourceAuthorityGuard, captureRuntimePluginSourceToken,
+  currentStageDebugSourcePolicy } from "../plugins/runtime-source-scope"
+import type { NativeWorktreeObserver } from "./v2/native-observer"
 import type { FunctionConversationGraphBinding } from "../agent/mods-conversation"
 import { currentFunctionConversationOriginalNativeWork } from
   "../agent/function-conversation-native-node"
@@ -1896,6 +1898,8 @@ export class ModsManager {
       signal: AbortSignal,
       core?: (input: ModObject, signal: AbortSignal) => Promise<ModObject>
     ): Promise<ModObject>
+    captureWorktreeRemovalObserver?(workspace: string, threadId: string, runId: string,
+      assertOwner: () => void): NativeWorktreeObserver | undefined
     presentationEvent?(
       workspace: string,
       threadId: string,
@@ -1907,6 +1911,20 @@ export class ModsManager {
 
   attachFunctions(lifecycle: NonNullable<ModsManager["functionLifecycle"]>): void {
     this.functionLifecycle = lifecycle
+  }
+
+  /** Called by the original workflow launch; cleanup may only retain this exact native owner. */
+  captureFunctionWorktreeRemovalObserver(workspace: string, threadId: string,
+    runId: string): NativeWorktreeObserver | undefined {
+    if (!this.functionLifecycle?.captureWorktreeRemovalObserver || captureRuntimePluginSourceToken())
+      return undefined
+    const key = this.workspaceKey(workspace)
+    if (!this.isEnabled(key)) return undefined
+    const authority = functionCallAuthority(key, threadId) ??
+      this.functionUserScope(key, threadId).runtimeAuthority
+    if (!authority) return undefined
+    const assertOwner = this.captureFunctionRuntimeGuard(authority)
+    return this.functionLifecycle.captureWorktreeRemovalObserver(key, threadId, runId, assertOwner)
   }
 
   async hasFunctionEvent(workspace: string, threadId: string, event: string): Promise<boolean> {

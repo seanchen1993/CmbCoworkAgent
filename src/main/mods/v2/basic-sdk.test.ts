@@ -2,6 +2,17 @@ import { expect, it } from "vitest"
 import { basicSdkInput, runBasicSdk, validateBasicInput, validateBasicResult } from "./basic-sdk"
 import type { ModObject } from "../../../shared/mods/types"
 
+it("reads the native attached roster instead of assuming that desktop is always attached", async () => {
+  const context = { threadId: "thread", workspace: "/project", plugin: "plugin",
+    registry: new Map(), signal: new AbortController().signal }
+  expect(await runBasicSdk("session.surfaces", {}, context)).toEqual([])
+  let attached = false
+  const host = { ...context, surfaces: () => attached ? ["desktop"] : [] }
+  expect(await runBasicSdk("session.surfaces", {}, host)).toEqual([])
+  attached = true
+  expect(await runBasicSdk("session.surfaces", {}, host)).toEqual(["desktop"])
+})
+
 it("keeps native command name limits and Chinese descriptions aligned with authoring", () => {
   for (const name of ["检查文本", "text review", "", "a".repeat(65), null])
     expect(() => validateBasicInput("command.register", { name, description: "检查文本" }))
