@@ -534,6 +534,7 @@ export function RequirementStepsPanel({
             filePath={normalizePrdFilePath(selectedFunction.file)}
             threadId={threadId}
             prototypeGenerated={selectedPrototypeStatus?.generated ?? false}
+            hasPrototypeDesignSession={Boolean(selectedFunction.htmlId?.trim())}
             prototypeSkipped={selectedPrototypeStatus?.skipped ?? false}
             prototypePreview={
               selectedPrototypeStatus?.generated && threadId ? (
@@ -833,31 +834,44 @@ export function RequirementStepsPanel({
                     </p>
                   </div>
                   {!allPrototypeFunctionsCompleted ? (
-                    <Button
-                      type="button"
-                      size="sm"
-                      disabled={
-                        conversationLoading ||
-                        batchStarting ||
-                        !prototypeStatuses.some((item) => !item.complete)
-                      }
-                      onClick={() => {
-                        const existingSelections = prototypeStatuses.filter(
-                          (item) => item.functionInfo.needDesign === "1" || item.generated
-                        )
-                        if (hasPrototypeDesignSession) {
-                          void runBatchPrototypeDesign(
-                            existingSelections.map((item) => item.functionInfo)
-                          )
-                          return
-                        }
-                        setBatchSelection(new Set())
-                        setBatchDialogOpen(true)
-                      }}
-                    >
-                      <WandSparkles className="size-3.5" />
-                      {hasPrototypeDesignSession ? "继续原型设计" : "批量设计全部原型"}
-                    </Button>
+                    <TooltipProvider delayDuration={200}>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <span className="inline-flex">
+                            <Button
+                              type="button"
+                              size="sm"
+                              disabled={
+                                conversationLoading ||
+                                batchStarting ||
+                                !prototypeStatuses.some((item) => !item.complete)
+                              }
+                              onClick={() => {
+                                const existingSelections = prototypeStatuses.filter(
+                                  (item) => item.functionInfo.needDesign === "1" || item.generated
+                                )
+                                if (hasPrototypeDesignSession) {
+                                  void runBatchPrototypeDesign(
+                                    existingSelections.map((item) => item.functionInfo)
+                                  )
+                                  return
+                                }
+                                setBatchSelection(new Set())
+                                setBatchDialogOpen(true)
+                              }}
+                            >
+                              <WandSparkles className="size-3.5" />
+                              {hasPrototypeDesignSession ? "继续原型设计" : "批量设计全部原型"}
+                            </Button>
+                          </span>
+                        </TooltipTrigger>
+                        <TooltipContent side="top" className="max-w-72">
+                          {hasPrototypeDesignSession
+                            ? "已关联设计会话，点击可跳转并继续设计未完成的原型"
+                            : "选择需要设计的功能，并为它们批量创建设计会话"}
+                        </TooltipContent>
+                      </Tooltip>
+                    </TooltipProvider>
                   ) : (
                     <Button
                       type="button"

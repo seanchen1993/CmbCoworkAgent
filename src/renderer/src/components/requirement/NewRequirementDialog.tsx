@@ -445,7 +445,7 @@ export function NewRequirementDialog({
                 />
               </div>
               <p className="mt-3 text-sm leading-5 text-muted-foreground">
-                支持飞书文档、腾讯文档、语雀、Confluence 和普通网页链接，链接信息会一起归档。
+                支持 WPS、Wiki 等链接，链接信息会一起归档。
               </p>
             </div>
           ) : (
