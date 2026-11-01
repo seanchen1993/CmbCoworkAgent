@@ -42,7 +42,7 @@ try {
         import {BrowserPanel} from './src/renderer/src/components/browser/BrowserPanel';
         import {OverlayDrawer} from './src/renderer/src/components/panels/OverlayDrawer';
         import {useBrowserViewLifecycle} from './src/renderer/src/components/browser/useBrowserViewLifecycle';
-        import {LinkModal} from './src/renderer/src/components/design/DesignModals';
+        import {ImportUrlModal} from './src/renderer/src/components/design/DesignModals';
         import {setBrowserPageConfirmation,clearBrowserPageConfirmation} from './src/renderer/src/lib/browser-page-confirmation';
         function Fixture(){
           const [modal,setModal]=useState(false);
@@ -60,7 +60,7 @@ try {
             <OverlayDrawer open={open} title="内置浏览器" onClose={close}>
               <BrowserPanel workspacePath={${JSON.stringify(directory)}} initialUrl={${JSON.stringify(pathToFileURL(path.join(directory, "page.html")).href)}}/>
             </OverlayDrawer>
-            <LinkModal open={modal} mode="import" url={url} onUrlChange={setUrl} onConfirm={()=>setModal(false)} onClose={()=>setModal(false)}/></div>;
+            <ImportUrlModal open={modal} url={url} onUrlChange={setUrl} onConfirm={()=>setModal(false)} onClose={()=>setModal(false)}/></div>;
         }
         createRoot(document.getElementById('root')).render(<Fixture/>);
       `

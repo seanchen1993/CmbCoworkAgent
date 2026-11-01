@@ -387,6 +387,7 @@ export interface TabState {
   selectedSkill: SkillInfo | null
   selectedDesignSystemId: string | null
   codeContext: Array<{ filename: string; content: string }> | null
+  /** Legacy session field, ignored by the current UI and generation prompts. */
   designLink: string | null
   attachedFiles: FileAttachment[] | null
   retryPrompt: string | null

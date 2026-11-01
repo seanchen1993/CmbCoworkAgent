@@ -195,6 +195,85 @@ describe("background design conversations", () => {
     })
   })
 
+  it("resumes a stopped first page from its durable draft and tweaks instead of restarting the template", async () => {
+    const h = harness()
+    h.create()
+    h.manager.start({ requestId: "first", designSessionId: "ds_a", kind: "agent",
+      prompt: "生成销售看板\n[初始模板 HTML]", cleanUserMsg: "生成销售看板", modelId: "test-model" })
+    await Promise.resolve()
+    const firstEmit = h.emitters.get("first")!
+    const firstRun = h.manager.get("ds_a").activeRunId!
+    const partialHtml = html(true).replace("data-design-pending", "")
+      .replace("页面", "已完成的标题")
+      .replace("</body>", '<section data-design-section="details" data-design-pending>统计区占位</section></body>')
+    firstEmit({ type: "preview", preview: { ...preview(firstRun, 7), html: partialHtml,
+      ...inspectDesignDocument(partialHtml) } })
+    h.manager.tweak("ds_a", { scope: "draft", runId: firstRun, baseRevision: h.manager.get("ds_a").state.draftPreview!.tweaks!.revision,
+      operation: "set", key: "primary", value: "#00aa00" })
+    const stopped = h.manager.stop("ds_a")
+    h.finishes.get("first")!()
+    const checkpoint = stopped.state.draftPreview!
+    h.manager.retry("ds_a", "resume-one")
+    await Promise.resolve()
+    const resumed = h.manager.get("ds_a")
+    const request = h.execute.mock.calls.at(-1)![0]
+    expect(request).toMatchObject({ kind: "agent", isIteration: true, resumeFromDraft: true,
+      resumeGoal: "生成销售看板", resumeInstruction: "生成销售看板", modelId: "test-model",
+      sourceArtifactPath: checkpoint.draftPath,
+      currentHtml: materializeTweaks(checkpoint.html, checkpoint.tweaks, false) })
+    expect(request.prompt).toContain("已完成区块：main")
+    expect(request.prompt).toContain("待完成区块：details")
+    expect(request.prompt).not.toContain("初始模板 HTML")
+    expect(resumed.state.html).toBe("")
+    expect(resumed.state.draftPreview).toMatchObject({ runId: resumed.activeRunId,
+      revision: 0, html: checkpoint.html, status: "building" })
+    expect(resumed.state.draftPreview!.tweaks!.overrides.primary).toBe("#00aa00")
+    firstEmit({ type: "done", html: html() })
+    expect(h.manager.get("ds_a").state.html).toBe("")
+    const updatedHtml = partialHtml.replace("统计区占位", "统计区已完成一半")
+    h.emitters.get("resume-one")!({ type: "preview", preview: { ...preview(resumed.activeRunId!, 1),
+      html: updatedHtml, ...inspectDesignDocument(updatedHtml) } })
+    expect(h.manager.get("ds_a").state.draftPreview!.revision).toBe(1)
+    h.manager.stop("ds_a")
+    h.finishes.get("resume-one")!()
+    h.manager.retry("ds_a", "resume-two")
+    await vi.waitFor(() => expect(h.execute).toHaveBeenCalledTimes(3))
+    const secondRequest = h.execute.mock.calls.at(-1)![0]
+    expect(secondRequest.currentHtml).toContain("统计区已完成一半")
+    expect(secondRequest.currentHtml).toContain("#00aa00")
+    expect(secondRequest.prompt.match(/\[接续未完成的设计\]/g)).toHaveLength(1)
+    expect(secondRequest.resumeGoal).toBe("生成销售看板")
+  })
+
+  it("continues recovered drafts for a follow-up using draft values rather than the previous final page", async () => {
+    const h = harness()
+    h.create()
+    h.manager.patch("ds_a", { html: html() })
+    h.manager.tweak("ds_a", { scope: "artifact", baseRevision: h.manager.get("ds_a").state.tweaks!.revision,
+      operation: "set", key: "primary", value: "#bb0000" })
+    const emit = await h.start()
+    const runId = h.manager.get("ds_a").activeRunId!
+    emit({ type: "preview", preview: preview(runId, 4, true) })
+    h.manager.tweak("ds_a", { scope: "draft", runId, baseRevision: h.manager.get("ds_a").state.draftPreview!.tweaks!.revision,
+      operation: "set", key: "primary", value: "#00aa00" })
+    const recovered = new DesignRunManager(h.store, h.deps)
+    expect(recovered.get("ds_a").state.generationState).toBe("interrupted")
+    const checkpoint = recovered.get("ds_a").state.draftPreview!
+    recovered.start({ requestId: "follow-up", designSessionId: "ds_a", kind: "patch",
+      prompt: "继续补齐统计图表", cleanUserMsg: "继续补齐统计图表", currentHtml: "错误的旧页面" })
+    await Promise.resolve()
+    const request = h.execute.mock.calls.at(-1)![0]
+    expect(request.kind).toBe("agent")
+    expect(request.currentHtml).toBe(materializeTweaks(checkpoint.html, checkpoint.tweaks, false))
+    expect(request.currentHtml).toContain("#00aa00")
+    expect(request.currentHtml).not.toContain("#bb0000")
+    expect(request.prompt).toContain("继续补齐统计图表")
+    expect(request.resumeGoal).toBe("生成页面")
+    expect(recovered.get("ds_a").state.html).toBe(html())
+    expect(recovered.get("ds_a").state.tweaks!.overrides.primary).toBe("#bb0000")
+    expect(recovered.get("ds_a").state.draftPreview!.html).toBe(checkpoint.html)
+  })
+
   it("never finalizes a pending scaffold and keeps the last preview through rollback/recovery", async () => {
     const finalize = vi.fn((event) => event)
     const h = harness({ finalize })

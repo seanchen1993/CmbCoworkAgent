@@ -11,6 +11,7 @@ interface Options {
   signal: AbortSignal
   publish: (preview: DesignDraftPreview) => void
   throttleMs?: number
+  expectedSections?: string[]
   read?: (filePath: string) => Promise<string | null>
 }
 
@@ -31,6 +32,7 @@ export class DesignDraftPublisher {
 
   constructor(private readonly options: Options) {
     this.candidate = path.resolve(options.workspacePath, options.draftPath)
+    for (const section of options.expectedSections ?? []) this.sections.add(section)
     options.signal.addEventListener("abort", () => this.dispose(), { once: true })
   }
 

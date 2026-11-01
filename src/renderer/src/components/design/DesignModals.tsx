@@ -295,9 +295,8 @@ export function CreateDesignModal({
   )
 }
 
-export function LinkModal({
+export function ImportUrlModal({
   open,
-  mode,
   url,
   loading,
   onUrlChange,
@@ -305,7 +304,6 @@ export function LinkModal({
   onClose
 }: {
   open: boolean
-  mode: "reference" | "import"
   url: string
   loading?: boolean
   onUrlChange: (v: string) => void
@@ -321,19 +319,16 @@ export function LinkModal({
       return false
     }
   })()
-  const title = mode === "import" ? "🌐 通过链接还原页面" : "🔗 通过链接关联设计图"
-  const description =
-    mode === "import"
-      ? "输入链接，在内置浏览器中完成登录并确认页面，再抓取当前页面还原为可编辑设计。"
-      : "输入 Figma、Sketch、设计图或参考页面的链接，模型将把它作为视觉参考。"
-  const confirmLabel = mode === "import" ? (loading ? "打开中..." : "在内置浏览器中打开") : "确认关联"
+  const title = "🌐 通过链接还原页面"
+  const description = "输入链接，在内置浏览器中完成登录并确认页面，再抓取当前页面还原为可编辑设计。"
+  const confirmLabel = loading ? "打开中..." : "在内置浏览器中打开"
 
   return (
     <div
       data-cmb-modal-dialog="true"
       role="dialog"
       aria-modal="true"
-      aria-label={mode === "import" ? "通过链接还原页面" : "通过链接关联设计图"}
+      aria-label="通过链接还原页面"
       onKeyDown={(event) => { if (event.key === "Escape") onClose() }}
       style={{
         position: "fixed",
@@ -383,11 +378,7 @@ export function LinkModal({
           value={url}
           disabled={loading}
           onChange={(e) => onUrlChange(e.target.value)}
-          placeholder={
-            mode === "import"
-              ? "https://example.com/page"
-              : "https://www.figma.com/... 或其他参考链接"
-          }
+          placeholder="https://example.com/page"
           autoFocus
           onKeyDown={(e) => {
             if (e.key === "Enter" && isValid && !loading) onConfirm()

@@ -5,6 +5,23 @@ afterEach(() => vi.useRealTimers())
 const html = (text: string) =>
   `<!doctype html><html><body><section data-design-section="main">${text}</section></body></html>`
 describe("draft mutation publishing", () => {
+  it("retains checkpoint section identities before the resumed run publishes its first write", async () => {
+    const controller = new AbortController(), publish = vi.fn()
+    let content = html("a restarted page")
+    const publisher = new DesignDraftPublisher({ runId: "continued", workspacePath: "/work",
+      draftPath: "continued.html", signal: controller.signal, publish,
+      expectedSections: ["main", "details"], read: async () => content })
+    expect(publisher.expectedSections).toEqual(["main", "details"])
+    publisher.notify("continued.html")
+    await publisher.flush()
+    expect(publish).not.toHaveBeenCalled()
+    content = content.replace("</body>", '<section data-design-section="details">接续完成</section></body>')
+    publisher.notify("continued.html")
+    await publisher.flush()
+    expect(publish).toHaveBeenCalledOnce()
+    expect(publisher.latest!.sections).toEqual(["main", "details"])
+    controller.abort()
+  })
   it("coalesces successful target writes, deduplicates content and retains valid state after malformed writes", async () => {
     vi.useFakeTimers()
     let content = html("first")

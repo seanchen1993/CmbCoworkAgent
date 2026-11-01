@@ -12,6 +12,7 @@ export function HtmlThumbnailPreview({
   browserUrl,
   browserWorkspacePath,
   onSelect,
+  showBrowserPreview = true,
   fit = "thumbnail",
   className
 }: {
@@ -20,6 +21,7 @@ export function HtmlThumbnailPreview({
   browserUrl: string
   browserWorkspacePath?: string | null
   onSelect?: () => void
+  showBrowserPreview?: boolean
   fit?: "thumbnail" | "fill"
   className?: string
 }): React.JSX.Element {
@@ -88,21 +90,23 @@ export function HtmlThumbnailPreview({
           onClick={onSelect}
         />
       ) : null}
-      <TooltipProvider delayDuration={250}>
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <button
-              type="button"
-              aria-label={`放大查看${title}`}
-              onClick={openInBrowser}
-              className="absolute right-0 top-2 z-20 inline-flex h-8 w-10 cursor-pointer items-center justify-center rounded-l-full border border-r-0 border-primary/70 bg-primary text-primary-foreground shadow-md transition-colors duration-200 hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 focus-visible:ring-offset-2"
-            >
-              <Eye className="size-4" strokeWidth={2.2} />
-            </button>
-          </TooltipTrigger>
-          <TooltipContent side="top">点击可以放大预览完整页面效果</TooltipContent>
-        </Tooltip>
-      </TooltipProvider>
+      {showBrowserPreview && (
+        <TooltipProvider delayDuration={250}>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                type="button"
+                aria-label={`放大查看${title}`}
+                onClick={openInBrowser}
+                className="absolute right-0 top-2 z-20 inline-flex h-8 w-10 cursor-pointer items-center justify-center rounded-l-full border border-r-0 border-primary/70 bg-primary text-primary-foreground shadow-md transition-colors duration-200 hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 focus-visible:ring-offset-2"
+              >
+                <Eye className="size-4" strokeWidth={2.2} />
+              </button>
+            </TooltipTrigger>
+            <TooltipContent side="top">点击可以放大预览完整页面效果</TooltipContent>
+          </Tooltip>
+        </TooltipProvider>
+      )}
     </div>
   )
 }

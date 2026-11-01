@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef } from "react"
+import { useCallback, useEffect, useRef, type KeyboardEventHandler } from "react"
 import { GripVertical } from "lucide-react"
 
 const HANDLE_WIDTH = 6 // px
@@ -7,9 +7,25 @@ interface ResizeHandleProps {
   onDrag: (totalDelta: number) => void
   onDragStart?: () => void
   onDragEnd?: () => void
+  label?: string
+  value?: number
+  min?: number
+  max?: number
+  onKeyDown?: KeyboardEventHandler<HTMLDivElement>
+  onReset?: () => void
 }
 
-export function ResizeHandle({ onDrag, onDragStart, onDragEnd }: ResizeHandleProps) {
+export function ResizeHandle({
+  onDrag,
+  onDragStart,
+  onDragEnd,
+  label,
+  value,
+  min,
+  max,
+  onKeyDown,
+  onReset
+}: ResizeHandleProps) {
   const startXRef = useRef<number>(0)
   const draggingRef = useRef(false)
   const frameRef = useRef<number | null>(null)
@@ -42,7 +58,7 @@ export function ResizeHandle({ onDrag, onDragStart, onDragEnd }: ResizeHandlePro
     window.addEventListener("blur", handleWindowBlur)
     return () => {
       window.removeEventListener("blur", handleWindowBlur)
-      clearDragState(false)
+      clearDragState()
     }
   }, [clearDragState])
 
@@ -81,10 +97,21 @@ export function ResizeHandle({ onDrag, onDragStart, onDragEnd }: ResizeHandlePro
 
   return (
     <div
+      role="separator"
+      aria-label={label ?? "调整面板宽度"}
+      aria-orientation="vertical"
+      aria-valuenow={value}
+      aria-valuemin={min}
+      aria-valuemax={max}
+      tabIndex={onKeyDown ? 0 : undefined}
+      onKeyDown={onKeyDown}
+      onDoubleClick={onReset}
+      title="左右拖动调整宽度，双击恢复默认"
       onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}
       onPointerUp={handlePointerEnd}
       onPointerCancel={handlePointerEnd}
+      onLostPointerCapture={handlePointerEnd}
       className="group hover:bg-border/50 active:bg-primary/30 transition-colors cursor-col-resize flex items-center justify-center shrink-0 select-none"
       style={{ width: HANDLE_WIDTH }}
     >

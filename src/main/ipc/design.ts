@@ -2777,9 +2777,9 @@ export function registerDesignHandlers(): void {
           workspacePath: snapshot.workspacePath ?? undefined,
           artifactId: `${request.designSessionId}_design-main`,
           currentHtml: request.isIteration
-            ? snapshot.state.creationSelection?.template.package
+            ? request.currentHtml || (snapshot.state.creationSelection?.template.package
               ? materializeTweaks(snapshot.state.html, snapshot.state.tweaks, false)
-              : request.currentHtml || snapshot.state.html
+              : snapshot.state.html)
             : undefined,
           designSystemId: snapshot.state.selectedDesignSystemId ?? undefined,
           singleVariant: isSingleDesignVariant(snapshot.state, snapshot.meta),
@@ -3366,7 +3366,7 @@ export function registerDesignHandlers(): void {
   registerDesignExecutor(
     "design:agent-generate",
     async (event, {
-      sessionId, prompt, modelId, tabId, imageData, mimeType, currentHtml, skill, workspacePath: requestedWorkspacePath, artifactId, sourceArtifactPath, designSessionId, designSystemId, templatePackage, singleVariant,
+      sessionId, prompt, modelId, tabId, imageData, mimeType, currentHtml, skill, workspacePath: requestedWorkspacePath, artifactId, sourceArtifactPath, designSessionId, designSystemId, templatePackage, singleVariant, resumeFromDraft,
     }: {
       sessionId: string
       prompt: string
@@ -3383,6 +3383,7 @@ export function registerDesignHandlers(): void {
       designSystemId?: string
       templatePackage?: DesignTemplateReference
       singleVariant?: boolean
+      resumeFromDraft?: boolean
     }) => {
       const channel = `design:stream:${sessionId}`
       const win = event.sender ? BrowserWindow.fromWebContents(event.sender) : null
@@ -3510,9 +3511,6 @@ export function registerDesignHandlers(): void {
           ? currentHtml
           : ""
         const outputArtifactPath = preparedArtifact.filePath
-        const templateContext = templatePackage
-          ? buildTemplatePackageContext(templatePackages.materialize(templatePackage, path.dirname(outputArtifactPath)))
-          : ""
         const draftArtifactPath = makeDesignArtifactDraftPath(outputArtifactPath)
         const sourcePathIsOutput = sameResolvedFilePath(sourceArtifact.filePath, outputArtifactPath)
         let sourceFilePathForPrompt: string | undefined
@@ -3571,6 +3569,12 @@ export function registerDesignHandlers(): void {
             ? currentHtml
             : storedHtml
         const isNewDesign = !hasExistingArtifactHtml && !htmlForIteration
+        const templateContext = templatePackage
+          ? buildTemplatePackageContext(
+            templatePackages.materialize(templatePackage, path.dirname(outputArtifactPath)),
+            !isNewDesign
+          )
+          : ""
         const enforceSingleVariant = !!singleVariant || !!designSystemId
         const artifactInstruction = isNewDesign
           ? buildDesignCreationArtifactInstruction(draftArtifactPath)
@@ -3593,6 +3597,7 @@ export function registerDesignHandlers(): void {
         let recordedRuntimeReady = false
         draftPublisher = new DesignDraftPublisher({
           runId: sessionId, workspacePath, draftPath: candidateDraftPath, signal: controller.signal,
+          expectedSections: resumeFromDraft ? inspectDesignDocument(currentHtmlSource).sections : undefined,
           publish: (preview) => {
             if (!designVariantPolicyIssue(preview.html, enforceSingleVariant)) send({ type: "preview", preview })
           },

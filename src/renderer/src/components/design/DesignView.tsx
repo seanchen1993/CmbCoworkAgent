@@ -10,7 +10,7 @@ import {
 import { isSingleDesignVariant } from "../../../../shared/design-variation-policy"
 import React, { useState, useRef, useCallback, useEffect } from "react"
 import { v4 as uuid } from "uuid"
-import { Redo2, Undo2 } from "lucide-react"
+import { ChevronDown, LayoutTemplate, Redo2, Undo2, X } from "lucide-react"
 import { buildDesignHtmlPreviewDocument } from "@/lib/design-html-srcdoc"
 import { DESIGN_PREVIEW_NAVIGATION_SCRIPT } from "@/lib/design-preview-navigation"
 import { buildDesignVariationDocument } from "@/lib/design-variation-document"
@@ -26,12 +26,12 @@ import {
   CommentIcon,
   ContextPill,
   DesignApprovalBar,
+  DesignStartActions,
   DrawIcon,
   EditIcon,
   EmptyState,
   ModelSelector,
   RightTabBtn,
-  ToolbarIcon,
   TweaksBtn
 } from "./DesignControls"
 import { CommentDraftInput, CommentPin } from "./DesignComments"
@@ -43,8 +43,12 @@ import {
   type ResolvedDrawStroke
 } from "./DesignDraw"
 import { DesignGallery } from "./DesignGallery"
-import { ExportDesignModal, LinkModal } from "./DesignModals"
+import { DesignAttachmentMenu } from "./DesignAttachmentMenu"
+import { ExportDesignModal, ImportUrlModal } from "./DesignModals"
 import { DesignCreationPage } from "./DesignCreationPage"
+import { DesignWorkspaceLayout } from "./DesignWorkspaceLayout"
+import { DesignTemplateDialog } from "./DesignTemplateDialog"
+import type { DesignPageTemplate } from "./use-design-template-selection"
 import { buildDesignCreationContext } from "./creation-context"
 import { RequirementDesignContextBar } from "./RequirementDesignContextBar"
 import { ElementPropsPanel } from "./ElementPropsPanel"
@@ -293,7 +297,15 @@ function getCurrentDesignHtml(state: TabState | undefined): string {
 }
 
 function hasExistingDesignArtifact(state: TabState | undefined): boolean {
-  return getCurrentDesignHtml(state).length > 0
+  return Boolean(state?.draftPreview?.html.trim()) || getCurrentDesignHtml(state).length > 0
+}
+
+function canChangePageTemplate(state: TabState | undefined): boolean {
+  return (
+    !hasExistingDesignArtifact(state) &&
+    !state?.draftPreview &&
+    !["asking", "generating", "questions_ready"].includes(state?.generationState ?? "idle")
+  )
 }
 
 type DesignIterationRollbackSnapshot = {
@@ -1436,8 +1448,8 @@ export function DesignView(): React.JSX.Element {
   )
   const [codeModalOpen, setCodeModalOpen] = useState(false)
   const [linkModalOpen, setLinkModalOpen] = useState(false)
-  const [linkModalMode, setLinkModalMode] = useState<"reference" | "import">("reference")
   const [linkModalText, setLinkModalText] = useState("")
+  const [templatePickerSessionId, setTemplatePickerSessionId] = useState<string | null>(null)
   const urlImport = useDesignUrlImport()
   const browserConfirmationIdRef = useRef<string | null>(null)
   useEffect(() => () => {
@@ -1486,6 +1498,7 @@ export function DesignView(): React.JSX.Element {
   const tabStatesRef = useRef(tabStates)
   const currentSessionIdRef = useRef<string | null>(currentSessionId)
   const fileInputRef = useRef<HTMLInputElement>(null) // images only (screenshot / 📷)
+  const composerRef = useRef<HTMLTextAreaElement>(null)
   const messageListRef = useRef<HTMLDivElement>(null)
   const skillOptionRefs = useRef<Array<HTMLDivElement | null>>([])
   const pendingArtifactSaveRef = useRef<PendingArtifactSave | null>(null)
@@ -1496,6 +1509,11 @@ export function DesignView(): React.JSX.Element {
   const showSavedVersion = savedVersionSelection?.sessionId === currentSessionId && savedVersionSelection?.runId === ts.draftPreview?.runId && savedVersionSelection?.show
   const visibleDraft = showSavedVersion ? null : ts.draftPreview
   const visibleHtml = visibleDraft?.html ?? ts.html
+  const hasPreviewContent = Boolean(visibleHtml.trim())
+  const showCanvasPanel = hasPreviewContent || ts.generationState === "generating"
+  const questionsInConversation = !showCanvasPanel && ts.rightTab === "questions"
+  const isWelcome = !hasPreviewContent && !questionsInConversation && ts.messages.length === 0 &&
+    !["asking", "generating", "questions_ready"].includes(ts.generationState)
   const tweakEditor = useDesignTweaks(currentSessionId, visibleDraft ? visibleDraft.tweaks : ts.tweaks, visibleDraft?.runId)
 
   // ── Per-tab derived values (all read from ts) ────────────────
@@ -2255,12 +2273,6 @@ export function DesignView(): React.JSX.Element {
     [readDependencyTextFile]
   )
 
-  const openReferenceLinkModal = useCallback(() => {
-    setLinkModalMode("reference")
-    setLinkModalText(ts.designLink ?? "")
-    setLinkModalOpen(true)
-  }, [ts.designLink])
-
   const openImportUrlModal = useCallback(async () => {
     if (importingSource) return
     const ready = await ensureWorkspaceSelected("导入链接页面")
@@ -2270,7 +2282,6 @@ export function DesignView(): React.JSX.Element {
       browserConfirmationIdRef.current = null
     }
     urlImport.reset()
-    setLinkModalMode("import")
     setLinkModalText("")
     setLinkModalOpen(true)
   }, [ensureWorkspaceSelected, importingSource, urlImport])
@@ -2780,7 +2791,7 @@ export function DesignView(): React.JSX.Element {
       patchTargets?: DesignPatchTarget[]
     ) => {
       const state = tabStatesRef.current[SINGLE_DESIGN_TAB_ID]
-      const local = isIteration && !image && !skill && !state.creationSelection?.template.package && shouldUseDesignPatch(prompt, !!patchTargets?.length)
+      const local = isIteration && !image && !skill && !state.draftPreview && !state.creationSelection?.template.package && shouldUseDesignPatch(prompt, !!patchTargets?.length)
       const observations = (patchTargets ?? []).flatMap((target) => {
         const doc = iframeRef.current?.contentDocument
         const el = doc && [...doc.querySelectorAll<HTMLElement>("[data-design-node]")].find((n) => n.dataset.designNode === target.nodeId)
@@ -2935,13 +2946,18 @@ export function DesignView(): React.JSX.Element {
   }, [activeTabId, tabStates, updateTs, showToast])
 
   // ── Retry last failed generation ─────────────────────────
-  const handleRetry = useCallback(() => {
+  const handleRetry = useCallback(async () => {
     const id = currentSessionIdRef.current
-    if (id)
-      void getDesignSessionClient()
-        .retry(id, uuid())
-        .catch((error) => showToast(`重试失败：${String(error)}`))
-  }, [showToast])
+    if (!id) return
+    try {
+      await directEditor.flush()
+      await tweakEditor.flush()
+      if (currentSessionIdRef.current !== id) return
+      await getDesignSessionClient().retry(id, uuid())
+    } catch (error) {
+      showToast(`恢复生成失败：${String(error)}`)
+    }
+  }, [showToast, directEditor.flush, tweakEditor.flush])
 
   // ── Build comment prompt helper ───────────────────────────
   // Returns both the instruction prompt (no HTML — main process injects via htmlStore)
@@ -3497,7 +3513,6 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
     const selectedModelId = tabStates[activeTabId]?.selectedModelId ?? undefined
     const selectedSkill = tabStates[activeTabId]?.selectedSkill ?? null
     const codeContext = tabStates[activeTabId]?.codeContext ?? null
-    const designLink = tabStates[activeTabId]?.designLink ?? null
     const attachedFiles = tabStates[activeTabId]?.attachedFiles ?? null
     if (!prompt && !attachedImage) return
     const state = tabStates[activeTabId]?.generationState ?? "idle"
@@ -3574,9 +3589,6 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
             })
             .join("\n\n")
         : ""
-    const linkSuffix = designLink
-      ? `\n\n---\n[Design reference URL: ${designLink}]\nPlease use this as a visual/layout reference for the design.`
-      : ""
     const workspaceFilesSuffix = (() => {
       const lines: string[] = []
       if (syncedContext.attachmentsDir) {
@@ -3644,7 +3656,6 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
     const contextSuffix =
       creationContext +
       skillContext +
-      linkSuffix +
       workspaceFilesSuffix +
       workspaceFileSummarySuffix +
       (selectedSkill ? "" : inlineCodeSuffix) +
@@ -3960,14 +3971,53 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
   const isGenerating = ts.generationState === "generating"
   const isAsking = ts.generationState === "asking"
   const isBlocked = isGenerating || isAsking || ts.generationState === "questions_ready"
+  const showPageTemplate = !hasExistingDesignArtifact(ts) && !ts.draftPreview
+  const pageTemplate = ts.creationSelection?.template
+  const hasPageTemplate =
+    pageTemplate?.mode !== "none" && Boolean(pageTemplate?.html || pageTemplate?.package)
+  const templateDisabled =
+    isBlocked || Boolean(importingSource) || workspaceLoading || sessionOpening ||
+    Boolean(browserConfirmationIdRef.current)
+  const templatePickerOpen = Boolean(
+    currentSessionId && templatePickerSessionId === currentSessionId &&
+    showPageTemplate && !templateDisabled
+  )
+
+  useEffect(() => {
+    if (!showPageTemplate || templateDisabled || templatePickerSessionId !== currentSessionId) {
+      setTemplatePickerSessionId(null)
+    }
+  }, [showPageTemplate, templateDisabled, templatePickerSessionId, currentSessionId])
+
+  const applyPageTemplate = (template: DesignPageTemplate, expectedSessionId: string | null): void => {
+    const state = tabStatesRef.current[activeTabId]
+    if (
+      !expectedSessionId || currentSessionIdRef.current !== expectedSessionId ||
+      templateDisabled || !canChangePageTemplate(state)
+    ) return
+    updateTs(activeTabId, (previous) => ({
+      creationSelection: {
+        ...(previous.creationSelection ?? {
+          method: "prompt",
+          workspacePath,
+          requirement: {
+            mode: "none", namespaceId: null, pathName: null, requirement: null,
+            implementationDetails: [], path: null
+          },
+          designSystemId: previous.selectedDesignSystemId ?? null
+        }),
+        template
+      },
+      // A failed first run may contain the previous template in its composed retry prompt.
+      retryPrompt: null,
+      retryIsIteration: false,
+      retryCleanMsg: null,
+      retrySkill: null
+    }))
+    setTemplatePickerSessionId(null)
+  }
 
   const handleLinkModalConfirm = useCallback(async () => {
-    if (linkModalMode === "reference") {
-      updateTs(activeTabId, { designLink: linkModalText.trim() })
-      setLinkModalOpen(false)
-      return
-    }
-
     if (importingSource || browserConfirmationIdRef.current) return
     const url = linkModalText.trim()
     try {
@@ -4035,7 +4085,6 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
       onCancel: cancel,
       onEditUrl: () => {
         clearConfirmation()
-        setLinkModalMode("import")
         setLinkModalOpen(true)
       }
     })
@@ -4058,9 +4107,6 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
       })
     }
   }, [
-    linkModalMode,
-    updateTs,
-    activeTabId,
     linkModalText,
     handleImportUrl,
     creationPageOpen,
@@ -4187,9 +4233,8 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
           onImportHtml={() => void handleImportHtmlFile("gallery")}
           onImportPrototypeZip={() => void handleImportPrototypeZip("gallery")}
         />
-        <LinkModal
+        <ImportUrlModal
           open={linkModalOpen}
-          mode={linkModalMode}
           url={linkModalText}
           loading={importingSource === "url"}
           onUrlChange={setLinkModalText}
@@ -4222,9 +4267,8 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
             void handleSelectWorkspace()
           }}
         />
-        <LinkModal
+        <ImportUrlModal
           open={linkModalOpen}
-          mode={linkModalMode}
           url={linkModalText}
           loading={importingSource === "url"}
           onUrlChange={setLinkModalText}
@@ -4262,6 +4306,15 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
 
   return (
     <div style={S.root}>
+      {templatePickerOpen && (
+        <DesignTemplateDialog
+          key={templatePickerSessionId}
+          initial={pageTemplate}
+          onConfirm={(template) => applyPageTemplate(template, templatePickerSessionId)}
+          onClose={() => setTemplatePickerSessionId(null)}
+          onRestoreFocus={() => composerRef.current?.focus()}
+        />
+      )}
       {/* Code & Link modals — rendered at root so they overlay everything */}
       {codeModalOpen && (
         <CodeModal
@@ -4273,9 +4326,8 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
           onClose={() => setCodeModalOpen(false)}
         />
       )}
-      <LinkModal
+      <ImportUrlModal
         open={linkModalOpen}
-        mode={linkModalMode}
         url={linkModalText}
         loading={importingSource === "url"}
         onUrlChange={setLinkModalText}
@@ -4498,26 +4550,24 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
         />
       ) : null}
 
-      <div style={S.mainContent}>
+      <DesignWorkspaceLayout showPreview={showCanvasPanel}>
         {/* ── Left Chat Panel ── */}
-        <div style={S.leftPanel}>
+        <div className="design-conversation" data-welcome={isWelcome}>
           {/* Chat Body */}
-          <div style={S.chatBody}>
-            {ts.messages.length === 0 ? (
-              <EmptyState
-                onUploadScreenshot={() => fileInputRef.current?.click()}
-                onAttachCode={() => setCodeModalOpen(true)}
-                onAttachLink={openReferenceLinkModal}
-                onImportUrl={openImportUrlModal}
-                onImportHtml={() => {
-                  void handleImportHtmlFile("session")
-                }}
-                onImportPrototypeZip={() => {
-                  void handleImportPrototypeZip("session")
-                }}
+          <div className="design-conversation-body" style={{ ...S.chatBody, flex: isWelcome ? "0 0 auto" : 1 }}>
+            {questionsInConversation ? (
+              <QuestionsPanel
+                questions={ts.questions}
+                answers={ts.answers}
+                isLoading={isAsking}
+                onAnswer={setAnswer}
+                onContinue={handleContinue}
+                onSkip={handleContinue}
               />
+            ) : isWelcome ? (
+              <EmptyState />
             ) : (
-              <div ref={messageListRef} style={S.messageList}>
+              <div ref={messageListRef} className="design-conversation-messages" style={S.messageList}>
                 {ts.messages.map((msg, i) => (
                   <MessageBubble key={i} message={msg} />
                 ))}
@@ -4550,7 +4600,7 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
           />
 
           {/* Bottom Input */}
-          <div style={{ ...S.inputArea, position: "relative" }}>
+          <div className="design-composer-area">
             {/* Skill picker popup — shown when input is "/" + optional filter text */}
             {isSlashMode && filteredSkills.length > 0 && (
               <div
@@ -4677,7 +4727,7 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
                 无匹配技能 — 输入 / 不加文字可查看全部
               </div>
             )}
-            <div style={S.inputBox}>
+            <div className="design-composer-box">
               {/* Screenshot preview strip */}
               {ts.attachedImage && (
                 <div
@@ -4723,13 +4773,45 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
                   <span style={{ fontSize: 12, color: "#8a8a8a" }}>截图已附加</span>
                 </div>
               )}
-              {/* Context pills row — skill / code / design-link / attached files */}
+              {/* Context pills row — skill / code / attached files */}
               {(selectedDesignSystem ||
+                (showPageTemplate && hasPageTemplate) ||
                 ts.selectedSkill ||
                 ts.codeContext ||
-                ts.designLink ||
                 (ts.attachedFiles && ts.attachedFiles.length > 0)) && (
                 <div style={{ padding: "8px 12px 0", display: "flex", flexWrap: "wrap", gap: 6 }}>
+                  {showPageTemplate && hasPageTemplate && (
+                    <div
+                      role="group"
+                      aria-label="页面模板"
+                      className="inline-flex max-w-full items-center rounded-md border border-primary/25 bg-primary/5 text-xs text-foreground"
+                    >
+                      <button
+                        type="button"
+                        aria-label={`更换页面模板：${pageTemplate?.name || "已关联模板"}`}
+                        disabled={templateDisabled}
+                        onClick={() => setTemplatePickerSessionId(currentSessionId)}
+                        className="flex min-w-0 items-center gap-1.5 rounded-l-md px-2 py-1.5 hover:bg-primary/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
+                      >
+                        <LayoutTemplate size={13} className="shrink-0 text-primary" />
+                        <span className="shrink-0 text-muted-foreground">页面模板 ·</span>
+                        <span className="max-w-40 truncate">{pageTemplate?.name || "已关联模板"}</span>
+                        <ChevronDown size={12} className="shrink-0" />
+                      </button>
+                      <button
+                        type="button"
+                        aria-label="移除页面模板"
+                        title="移除页面模板"
+                        disabled={templateDisabled}
+                        onClick={() => applyPageTemplate(
+                          { mode: "none", name: null, html: null, path: null }, currentSessionId
+                        )}
+                        className="shrink-0 rounded-r-md p-1.5 text-muted-foreground hover:bg-primary/10 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
+                      >
+                        <X size={12} />
+                      </button>
+                    </div>
+                  )}
                   {selectedDesignSystem && (
                     <ContextPill
                       icon="▦"
@@ -4769,21 +4851,6 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
                       color={{ bg: "#f0f8f0", border: "#b8d8b8", text: "#2a5a2a", dot: "#5a9a5a" }}
                       onRemove={() => updateTs(activeTabId, { codeContext: null })}
                       onClick={() => setCodeModalOpen(true)}
-                    />
-                  )}
-                  {ts.designLink && (
-                    <ContextPill
-                      icon="🔗"
-                      label={(() => {
-                        try {
-                          return new URL(ts.designLink).hostname
-                        } catch {
-                          return ts.designLink.slice(0, 30)
-                        }
-                      })()}
-                      color={{ bg: "#fff8f0", border: "#e8d0b0", text: "#5a3a00", dot: "#c07820" }}
-                      onRemove={() => updateTs(activeTabId, { designLink: null })}
-                      onClick={openReferenceLinkModal}
                     />
                   )}
                   {ts.attachedFiles &&
@@ -4827,35 +4894,40 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
                 />
               )}
               <textarea
+                ref={composerRef}
                 value={inputValue}
                 onChange={(e) => setInputValue(e.target.value)}
                 onKeyDown={handleKeyDown}
                 placeholder={
                   ts.attachedImage
                     ? "补充说明，如「还原这个页面」或「修改颜色为蓝色」…（可选）"
-                    : "描述你想创建的设计… (输入 / 选择技能)"
+                    : hasPreviewContent
+                      ? "描述需要调整的地方… (输入 / 选择技能)"
+                      : "描述你想创建的页面，或输入 / 选择技能…"
                 }
-                rows={2}
-                style={S.textarea}
+                rows={isWelcome ? 3 : 2}
+                style={{ ...S.textarea, minHeight: isWelcome ? 96 : 48,
+                  fontSize: isWelcome ? 16 : 14, color: "var(--foreground, #1a1a1a)" }}
                 disabled={isBlocked}
               />
               <div style={S.inputToolbar}>
                 <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
-                  <ToolbarIcon
-                    title="附加文档（txt / md / csv / docx / xlsx）"
-                    onClick={handleDocAttach}
-                  >
-                    {attachmentLoading ? "⏳" : "📎"}
-                  </ToolbarIcon>
-                  <ToolbarIcon
-                    title="关联代码（ts / tsx / js / css / py 等）"
-                    onClick={() => setCodeModalOpen(true)}
-                  >
-                    🗂️
-                  </ToolbarIcon>
-                  <ToolbarIcon title="上传截图" onClick={() => fileInputRef.current?.click()}>
-                    📷
-                  </ToolbarIcon>
+                  <DesignAttachmentMenu
+                    attachmentLoading={attachmentLoading}
+                    importDisabled={Boolean(importingSource) || isBlocked}
+                    showContextActions={ts.messages.length > 0}
+                    onAssociateTemplate={
+                      showPageTemplate && !hasPageTemplate && !isWelcome
+                        ? () => setTemplatePickerSessionId(currentSessionId) : undefined
+                    }
+                    templateDisabled={templateDisabled}
+                    onUploadFile={() => void handleDocAttach()}
+                    onUploadScreenshot={() => fileInputRef.current?.click()}
+                    onImportPrototypeZip={() => void handleImportPrototypeZip("session")}
+                    onImportUrl={() => void openImportUrlModal()}
+                    onImportHtml={() => void handleImportHtmlFile("session")}
+                    onAttachCode={() => setCodeModalOpen(true)}
+                  />
                   <ModelSelector
                     models={availableModels}
                     selectedId={ts.selectedModelId}
@@ -4882,7 +4954,7 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
                   <button onClick={handleCancel} style={S.cancelBtn}>
                     ■ 停止
                   </button>
-                ) : (ts.generationState === "error" || ts.generationState === "interrupted") &&
+                ) : (["error", "interrupted", "cancelled"].includes(ts.generationState)) &&
                   ts.retryPrompt ? (
                   <div style={{ display: "flex", gap: 6 }}>
                     <button
@@ -4894,7 +4966,7 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
                         border: "1px solid #f0c070"
                       }}
                     >
-                      🔄 重试
+                      {ts.draftPreview?.html.trim() ? "继续生成" : "🔄 重试"}
                     </button>
                     <button
                       onClick={handleSend}
@@ -4930,12 +5002,22 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
               </div>
             </div>
           </div>
+          {isWelcome && (
+            <DesignStartActions
+              onSelectTemplate={() => setTemplatePickerSessionId(currentSessionId)}
+              templateSelected={hasPageTemplate}
+              templateDisabled={templateDisabled}
+              onAttachCode={() => setCodeModalOpen(true)}
+              onImportUrl={() => void openImportUrlModal()}
+              onImportHtml={() => void handleImportHtmlFile("session")}
+            />
+          )}
         </div>
 
         {/* ── Right Canvas Panel ── */}
         <div style={S.rightPanel}>
           {/* Canvas Tab Bar */}
-          <div style={S.canvasBar}>
+          <div style={{ ...S.canvasBar, overflowX: "auto" }}>
             <button
               style={S.navBtn}
               title="重新加载预览"
@@ -5114,7 +5196,7 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
           {!!ts.patchStatus && <div role="status" data-testid="design-patch-status" style={{ padding: "8px 16px", fontSize: 12, background: "#fffbeb", color: "#92400e" }}>{ts.patchStatus.message}</div>}
           {/* Canvas Content */}
           <div style={S.canvas}>
-            {ts.rightTab === "questions" ? (
+            {ts.rightTab === "questions" && !isGenerating ? (
               /* ── Questions Form ── */
               <QuestionsPanel
                 questions={ts.questions}
@@ -5127,7 +5209,7 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
             ) : (
               /* ── Design Preview ── */
               <>
-                {isGenerating && !visibleHtml ? (
+                {isGenerating && !hasPreviewContent ? (
                   <DesignGenerationWaiting
                     key={`${currentSessionId}:${ts.generationMetrics?.startedAt ?? ""}`}
                     metrics={ts.generationMetrics}
@@ -5588,7 +5670,7 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
             )}
           </div>
         </div>
-      </div>
+      </DesignWorkspaceLayout>
     </div>
   )
 }

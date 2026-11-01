@@ -1,36 +1,57 @@
 import React from "react"
-import { Check, ChevronDown, Key, PenLine, Plus } from "lucide-react"
+import {
+  Check,
+  ChevronDown,
+  FileCode2,
+  FolderCode,
+  Globe,
+  Key,
+  LayoutTemplate,
+  PenLine,
+  Plus
+} from "lucide-react"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { S } from "./styles"
 import type { DesignApprovalDecision, DesignApprovalRequest, ModelOption } from "./types"
 
-export function EmptyState({
-  onUploadScreenshot,
+export function EmptyState() {
+  return (
+    <div className="design-welcome-header">
+      <span className="design-welcome-icon" aria-hidden="true">
+        <PenLine size={22} />
+      </span>
+      <h2>想设计什么？</h2>
+      <p>描述你的想法，或导入一个现有页面，我们从这里开始。</p>
+    </div>
+  )
+}
+
+export function DesignStartActions({
+  onSelectTemplate,
+  templateSelected,
+  templateDisabled,
   onAttachCode,
-  onAttachLink,
   onImportUrl,
-  onImportHtml,
-  onImportPrototypeZip
+  onImportHtml
 }: {
-  onUploadScreenshot: () => void
+  onSelectTemplate: () => void
+  templateSelected: boolean
+  templateDisabled: boolean
   onAttachCode: () => void
-  onAttachLink: () => void
   onImportUrl: () => void
   onImportHtml: () => void
-  onImportPrototypeZip: () => void
 }) {
   return (
-    <div style={S.emptyState}>
-      <h2 style={S.emptyTitle}>从上下文开始</h2>
-      <p style={S.emptySubtitle}>可以先导入现有页面，也可以仅附加参考上下文后重新生成。</p>
-      <div style={S.contextCards}>
-        <ContextCard icon="🌐" label="通过链接还原页面" onClick={onImportUrl} />
-        <ContextCard icon="📄" label="导入 HTML 文件" onClick={onImportHtml} />
-        <ContextCard icon="📦" label="上传原型图压缩包" onClick={onImportPrototypeZip} />
-        <ContextCard icon="🖼️" label="上传截图" onClick={onUploadScreenshot} />
-        <ContextCard icon="🗂️" label="关联代码" onClick={onAttachCode} />
-        <ContextCard icon="🔗" label="通过链接关联设计图" onClick={onAttachLink} />
-      </div>
+    <div role="group" aria-label="设计开始方式" className="design-start-actions">
+      <ContextCard
+        icon={<LayoutTemplate size={14} />}
+        label={templateSelected ? "更换模板" : "选择模板"}
+        onClick={onSelectTemplate}
+        disabled={templateDisabled}
+      />
+      <ContextCard icon={<Globe size={14} />} label="通过链接还原页面" onClick={onImportUrl} />
+      <ContextCard icon={<FileCode2 size={14} />} label="上传 HTML 文件" onClick={onImportHtml} />
+      <ContextCard icon={<FolderCode size={14} />} label="关联代码" onClick={onAttachCode} />
     </div>
   )
 }
@@ -185,54 +206,20 @@ export function RightTabBtn({
 function ContextCard({
   icon,
   label,
-  hint,
-  onClick
+  onClick,
+  disabled
 }: {
-  icon: string
+  icon: React.ReactNode
   label: string
-  hint?: boolean
   onClick: () => void
+  disabled?: boolean
 }) {
   return (
-    <button
-      onClick={onClick}
-      style={{
-        display: "flex",
-        alignItems: "center",
-        gap: 12,
-        padding: "12px 16px",
-        background: "#ffffff",
-        border: "1px solid #e8e6e0",
-        borderRadius: 24,
-        cursor: "pointer",
-        fontFamily: "inherit",
-        fontSize: 14,
-        fontWeight: 500,
-        color: "#1a1a1a",
-        textAlign: "left",
-        width: "100%"
-      }}
-    >
-      <span style={{ fontSize: 16 }}>{icon}</span>
-      <span style={{ flex: 1 }}>{label}</span>
-      {hint && (
-        <span
-          style={{
-            width: 18,
-            height: 18,
-            borderRadius: "50%",
-            border: "1px solid #c0beb8",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            fontSize: 11,
-            color: "#8a8a8a",
-            flexShrink: 0
-          }}
-        >
-          ?
-        </span>
-      )}
+    <button type="button" onClick={onClick} disabled={disabled} className="design-start-action">
+      <span aria-hidden="true" style={{ display: "inline-flex" }}>
+        {icon}
+      </span>
+      {label}
     </button>
   )
 }

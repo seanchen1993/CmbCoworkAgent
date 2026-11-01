@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react"
+import { useState } from "react"
 import {
   Archive,
   ArrowLeft,
@@ -9,16 +9,12 @@ import {
   FolderOpen,
   LoaderCircle,
   PencilLine,
-  Upload,
   X
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
-import { HtmlThumbnailPreview } from "@/components/ui/html-thumbnail-preview"
 import { cn } from "@/lib/utils"
-import type {
-  DesignTemplatePackage,
-  DesignTemplateSummary
-} from "../../../../shared/design-template"
+import { DesignTemplateSelector } from "./DesignTemplateSelector"
+import { useDesignTemplateSelection } from "./use-design-template-selection"
 import type {
   DesignCreationSelection,
   DesignSessionKind,
@@ -36,16 +32,6 @@ type UploadedFile = {
   html?: string
   attachment?: FileAttachment
 }
-
-type TemplateOption = {
-  id: string
-  name: string
-  description: string
-  html: string
-  previewPath: string
-}
-
-const TEMPLATE_PAGE_SIZE = 4
 
 function getPathName(filePath: string): string {
   return filePath.split(/[\\/]/).pop() || filePath
@@ -110,16 +96,8 @@ export function DesignCreationPage({
   onImportHtml: () => void
   onImportPrototypeZip: () => void
 }): React.JSX.Element {
-  const [templateMode, setTemplateMode] = useState<SelectionMode>("select")
-  const [templates, setTemplates] = useState<TemplateOption[]>([])
-  const [templatesLoading, setTemplatesLoading] = useState(true)
-  const [templatesError, setTemplatesError] = useState<string | null>(null)
-  const [selectedTemplateId, setSelectedTemplateId] = useState("")
-  const [templatePage, setTemplatePage] = useState(0)
-  const [uploadedTemplate, setUploadedTemplate] = useState<DesignTemplatePackage | null>(null)
-  const [importedTemplates, setImportedTemplates] = useState<DesignTemplateSummary[]>([])
-  const [templateUploading, setTemplateUploading] = useState(false)
-  const [templateError, setTemplateError] = useState<string | null>(null)
+  const templatePicker = useDesignTemplateSelection()
+  const { templateMode, selectedTemplate, uploadedTemplate } = templatePicker
   const [requirementMode, setRequirementMode] = useState<SelectionMode>("select")
   const [requirementSelection, setRequirementSelection] = useState<NamespaceTreeSelection | null>(
     null
@@ -128,86 +106,8 @@ export function DesignCreationPage({
   const [requirementUploading, setRequirementUploading] = useState(false)
   const [requirementError, setRequirementError] = useState<string | null>(null)
 
-  useEffect(() => {
-    let cancelled = false
-    void window.api.design
-      .listTemplates()
-      .then((items) => {
-        if (cancelled) return
-        const nextTemplates = items.map((item) => ({
-          id: item.path,
-          name: item.name,
-          description: item.description,
-          html: item.previewHtml,
-          previewPath: item.previewPath
-        }))
-        setTemplates(nextTemplates)
-        setSelectedTemplateId(nextTemplates[0]?.id ?? "")
-        setTemplatePage(0)
-      })
-      .catch((error: unknown) => {
-        if (!cancelled) {
-          setTemplatesError(error instanceof Error ? error.message : "加载模板列表失败")
-        }
-      })
-      .finally(() => {
-        if (!cancelled) setTemplatesLoading(false)
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [])
-
-  useEffect(() => {
-    let cancelled = false
-    void window.api.design
-      .listImportedTemplates()
-      .then((items) => {
-        if (!cancelled) setImportedTemplates(items)
-      })
-      .catch((error) => console.warn("[Design] Imported template list unavailable", error))
-    return () => {
-      cancelled = true
-    }
-  }, [])
-
   const busy = workspaceLoading || importingSource !== null
-  const canStart =
-    !busy &&
-    !templateUploading &&
-    !requirementUploading &&
-    (templateMode !== "upload" || !!uploadedTemplate)
-
-  const selectTemplateFile = async (source: "file" | "directory" = "file"): Promise<void> => {
-    setTemplateUploading(true)
-    setTemplateError(null)
-    try {
-      const result = await window.api.design.importTemplate(source)
-      if (result.canceled) return
-      if (!result.template) throw new Error(result.error || "无法读取模板包")
-      setUploadedTemplate(result.template)
-      const items = await window.api.design.listImportedTemplates()
-      setImportedTemplates(items)
-    } catch (error) {
-      setTemplateError(error instanceof Error ? error.message : "上传模板失败")
-    } finally {
-      setTemplateUploading(false)
-    }
-  }
-
-  const readImportedTemplate = async (id: string, entryPath: string): Promise<void> => {
-    setTemplateUploading(true)
-    setTemplateError(null)
-    try {
-      const result = await window.api.design.readTemplate({ id, entryPath })
-      if (!result.template) throw new Error(result.error || "无法读取模板入口")
-      setUploadedTemplate(result.template)
-    } catch (error) {
-      setTemplateError(error instanceof Error ? error.message : "加载模板失败")
-    } finally {
-      setTemplateUploading(false)
-    }
-  }
+  const canStart = !busy && !requirementUploading && templatePicker.canConfirm
 
   const selectRequirementFile = async (): Promise<void> => {
     setRequirementUploading(true)
@@ -233,15 +133,9 @@ export function DesignCreationPage({
     }
   }
 
-  const selectedTemplate = templates.find((item) => item.id === selectedTemplateId)
   const selectedDesignSystem = designSystemGroups
     .flatMap((group) => group.items)
     .find((system) => system.id === selectedDesignSystemId)
-  const templatePageCount = Math.ceil(templates.length / TEMPLATE_PAGE_SIZE)
-  const visibleTemplates = templates.slice(
-    templatePage * TEMPLATE_PAGE_SIZE,
-    (templatePage + 1) * TEMPLATE_PAGE_SIZE
-  )
   const getTemplateSummary = (): string => {
     if (templateMode === "none") return "模板：不选择"
     if (templateMode === "upload") return `模板：上传 ${uploadedTemplate?.name || "尚未选择"}`
@@ -258,34 +152,10 @@ export function DesignCreationPage({
 
   const handleStart = (): void => {
     if (!canStart) return
-    const templateHtml =
-      templateMode === "select"
-        ? (selectedTemplate?.html ?? null)
-        : templateMode === "upload"
-          ? (uploadedTemplate?.html ?? null)
-          : null
-    const templateName =
-      templateMode === "select"
-        ? (selectedTemplate?.name ?? null)
-        : templateMode === "upload"
-          ? (uploadedTemplate?.name ?? null)
-          : null
     onEnterDesign({
       method: "prompt",
       workspacePath,
-      template: {
-        mode: templateMode,
-        name: templateName,
-        html: templateHtml,
-        path:
-          templateMode === "upload" && uploadedTemplate
-            ? `${uploadedTemplate.rootDir}/${uploadedTemplate.entryPath}`
-            : null,
-        package:
-          templateMode === "upload" && uploadedTemplate
-            ? { id: uploadedTemplate.id, entryPath: uploadedTemplate.entryPath }
-            : undefined
-      },
+      template: templatePicker.selection,
       requirement: {
         mode: requirementMode,
         namespaceId:
@@ -452,239 +322,7 @@ export function DesignCreationPage({
               className="mt-6 border-t border-border pt-6"
               aria-labelledby="template-heading"
             >
-              <div className="flex flex-wrap items-start justify-between gap-3">
-                <div>
-                  <h2 id="template-heading" className="text-sm font-semibold text-foreground">
-                    选择模板
-                  </h2>
-                  <p className="mt-1 text-xs leading-5 text-muted-foreground">
-                    模板会作为页面结构和信息层级的起点。
-                  </p>
-                </div>
-                <div
-                  className="inline-flex rounded-md border border-border bg-background p-0.5"
-                  role="group"
-                  aria-label="模板来源"
-                >
-                  {(["select", "upload", "none"] as const).map((mode) => (
-                    <button
-                      key={mode}
-                      type="button"
-                      aria-pressed={templateMode === mode}
-                      onClick={() => setTemplateMode(mode)}
-                      className={cn(
-                        "rounded px-2.5 py-1.5 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-                        templateMode === mode
-                          ? "bg-primary text-primary-foreground"
-                          : "text-muted-foreground hover:bg-muted hover:text-foreground"
-                      )}
-                    >
-                      {mode === "select" ? "选择模板" : mode === "upload" ? "上传模板" : "不选模板"}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              {templateMode === "select" && (
-                <div className="mt-4">
-                  {templatesLoading ? (
-                    <div className="flex h-48 items-center justify-center gap-2 rounded-lg border border-dashed border-border bg-muted/20 text-xs text-muted-foreground">
-                      <LoaderCircle className="size-3.5 animate-spin" /> 正在加载模板...
-                    </div>
-                  ) : templatesError ? (
-                    <p className="rounded-lg border border-destructive/30 bg-destructive/5 px-4 py-3 text-xs text-destructive">
-                      {templatesError}
-                    </p>
-                  ) : templates.length === 0 ? (
-                    <p className="rounded-lg border border-dashed border-border bg-muted/20 px-4 py-3 text-xs text-muted-foreground">
-                      未找到可预览的 HTML 模板。
-                    </p>
-                  ) : (
-                    <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-                      {visibleTemplates.map((template) => {
-                        const active = template.id === selectedTemplateId
-                        return (
-                          <div
-                            key={template.id}
-                            className={cn(
-                              "overflow-hidden rounded-lg border text-left transition-colors",
-                              active
-                                ? "border-primary bg-primary/5 shadow-[0_0_0_2px_rgba(196,149,106,0.12)]"
-                                : "border-border bg-background hover:border-border-emphasis"
-                            )}
-                          >
-                            <HtmlThumbnailPreview
-                              html={template.html}
-                              title={`${template.name}模板预览`}
-                              className="h-50"
-                              onSelect={() => setSelectedTemplateId(template.id)}
-                              browserUrl={template.previewPath}
-                            />
-                            <button
-                              type="button"
-                              aria-pressed={active}
-                              onClick={() => setSelectedTemplateId(template.id)}
-                              className="flex w-full cursor-pointer gap-2 border-t border-border px-3 py-2.5 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
-                            >
-                              <FileText className="mt-0.5 size-3.5 shrink-0 text-primary" />
-                              <span className="min-w-0">
-                                <span className="block text-xs font-semibold text-foreground">
-                                  {template.name}
-                                </span>
-                                <span className="mt-0.5 block h-8 line-clamp-2 text-[11px] leading-4 text-muted-foreground">
-                                  {template.description}
-                                </span>
-                              </span>
-                            </button>
-                          </div>
-                        )
-                      })}
-                    </div>
-                  )}
-                  {templatePageCount > 1 && (
-                    <div className="mt-4 flex items-center justify-end gap-2 text-xs text-muted-foreground">
-                      <button
-                        type="button"
-                        aria-label="上一页模板"
-                        title="上一页"
-                        disabled={templatePage === 0}
-                        onClick={() => setTemplatePage((page) => Math.max(0, page - 1))}
-                        className="inline-flex size-8 items-center justify-center rounded-md border border-border transition-colors hover:bg-muted disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                      >
-                        <ArrowLeft className="size-3.5" />
-                      </button>
-                      <span className="min-w-16 text-center">
-                        第 {templatePage + 1} / {templatePageCount} 页
-                      </span>
-                      <button
-                        type="button"
-                        aria-label="下一页模板"
-                        title="下一页"
-                        disabled={templatePage >= templatePageCount - 1}
-                        onClick={() =>
-                          setTemplatePage((page) => Math.min(templatePageCount - 1, page + 1))
-                        }
-                        className="inline-flex size-8 items-center justify-center rounded-md border border-border transition-colors hover:bg-muted disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                      >
-                        <ArrowRight className="size-3.5" />
-                      </button>
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {templateMode === "upload" && (
-                <div className="mt-4 rounded-lg border border-dashed border-border bg-muted/20 p-4">
-                  <div className="flex flex-wrap items-center justify-between gap-3">
-                    <div className="flex min-w-0 items-center gap-2 text-sm text-foreground">
-                      <Upload className="size-4 text-primary" />{" "}
-                      <span className="truncate">
-                        {uploadedTemplate?.name || "上传 HTML、ZIP 或模板文件夹"}
-                      </span>
-                    </div>
-                    <div className="flex gap-2">
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="outline"
-                        disabled={templateUploading}
-                        onClick={() => void selectTemplateFile("directory")}
-                      >
-                        <FolderOpen className="size-3.5" /> 选择文件夹
-                      </Button>
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="outline"
-                        disabled={templateUploading}
-                        onClick={() => void selectTemplateFile()}
-                      >
-                        {templateUploading && <LoaderCircle className="size-3.5 animate-spin" />}
-                        选择 HTML / ZIP
-                      </Button>
-                    </div>
-                  </div>
-                  <p className="mt-2 text-xs leading-5 text-muted-foreground">
-                    整包保留页面、框架、样式和图片；支持浏览器可直接运行的模板。源码工程请先构建为静态页面。
-                  </p>
-                  {importedTemplates.length > 0 && (
-                    <label className="mt-3 flex items-center gap-2 text-xs text-muted-foreground">
-                      已导入模板
-                      <select
-                        aria-label="已导入模板"
-                        disabled={templateUploading}
-                        value={uploadedTemplate?.id ?? ""}
-                        className="min-w-0 flex-1 rounded border border-border bg-background px-2 py-1.5 text-foreground"
-                        onChange={(event) => {
-                          const item = importedTemplates.find(
-                            (template) => template.id === event.target.value
-                          )
-                          if (item) void readImportedTemplate(item.id, item.entryPath)
-                        }}
-                      >
-                        <option value="" disabled>
-                          选择已保存的模板
-                        </option>
-                        {importedTemplates.map((template) => (
-                          <option key={template.id} value={template.id}>
-                            {template.name} · {template.framework}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                  )}
-                  {uploadedTemplate && (
-                    <div className="mt-3 space-y-2 text-xs text-muted-foreground">
-                      <p>
-                        {uploadedTemplate.framework} · {uploadedTemplate.files.length} 个文件 ·{" "}
-                        {(uploadedTemplate.totalBytes / 1024 / 1024).toFixed(2)} MB
-                      </p>
-                      <label className="flex items-center gap-2">
-                        页面入口
-                        <select
-                          aria-label="模板页面入口"
-                          value={uploadedTemplate.entryPath}
-                          disabled={templateUploading}
-                          className="min-w-0 flex-1 rounded border border-border bg-background px-2 py-1.5 text-foreground"
-                          onChange={(event) =>
-                            void readImportedTemplate(uploadedTemplate.id, event.target.value)
-                          }
-                        >
-                          {uploadedTemplate.pages.map((page) => (
-                            <option key={page} value={page}>
-                              {page}
-                            </option>
-                          ))}
-                        </select>
-                      </label>
-                      {uploadedTemplate.warnings.map((warning) => (
-                        <p key={warning} className="text-amber-700">
-                          {warning}
-                        </p>
-                      ))}
-                    </div>
-                  )}
-                  {templateError && (
-                    <p className="mt-2 text-xs text-destructive">{templateError}</p>
-                  )}
-                  {uploadedTemplate?.previewUrl && (
-                    <iframe
-                      title="上传模板预览"
-                      key={`${uploadedTemplate.id}:${uploadedTemplate.entryPath}`}
-                      src={uploadedTemplate.previewUrl}
-                      sandbox="allow-scripts allow-forms allow-modals"
-                      referrerPolicy="no-referrer"
-                      className="mt-4 block h-80 w-full rounded border border-border bg-white"
-                    />
-                  )}
-                </div>
-              )}
-
-              {templateMode === "none" && (
-                <p className="mt-4 rounded-lg border border-dashed border-border bg-muted/20 px-4 py-3 text-xs text-muted-foreground">
-                  将根据设计描述从空白页面开始。
-                </p>
-              )}
+              <DesignTemplateSelector picker={templatePicker} />
             </section>
 
             <section

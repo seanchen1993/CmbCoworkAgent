@@ -7,6 +7,7 @@ import {
   createDesignProgressNormalizer,
   normalizeQuestionDef,
   buildNewDesignPrompt,
+  buildDesignDraftResumePrompt,
   type DesignRunRequest,
   type DesignRunEvent,
   type DesignSessionSnapshot,
@@ -404,6 +405,31 @@ export class DesignRunManager {
     const next = this.get(request.designSessionId)
     next.state.singleVariant = isSingleDesignVariant(next.state, next.meta)
     if (next.activeRunId) throw new Error("当前设计仍在运行，请先停止或等待完成")
+    const resumeDraft =
+      request.kind !== "questions" && next.state.draftPreview?.html.trim()
+        ? next.state.draftPreview
+        : null
+    if (resumeDraft) {
+      if (!inspectDesignDocument(resumeDraft.html, resumeDraft.sections).valid)
+        throw new Error("已保存的草稿结构不完整，无法安全接续，请先检查草稿")
+      const instruction = request.resumeInstruction ?? request.prompt
+      const previousRequest = this.store.latestRequest(next.id)
+      const goal =
+        previousRequest?.resumeGoal ?? previousRequest?.cleanUserMsg ??
+        previousRequest?.resumeInstruction ?? previousRequest?.prompt ?? instruction
+      request = {
+        ...request,
+        kind: "agent",
+        isIteration: true,
+        resumeFromDraft: true,
+        resumeInstruction: instruction,
+        resumeGoal: goal,
+        prompt: buildDesignDraftResumePrompt(instruction, resumeDraft, goal),
+        currentHtml: materializeTweaks(resumeDraft.html, resumeDraft.tweaks, false),
+        sourceArtifactPath: resumeDraft.draftPath,
+        patch: undefined
+      }
+    }
     if (
       request.kind === "patch" &&
       (!request.patch || request.patch.artifactRevision !== (next.state.artifactRevision ?? 0))
@@ -419,7 +445,9 @@ export class DesignRunManager {
       run.request.prompt += `\n\n${SINGLE_DESIGN_VARIANT_PROMPT}`
     next.activeRunId = run.id
     next.state.lastCompletedRunId = null
-    next.state.draftPreview = null
+    next.state.draftPreview = resumeDraft
+      ? { ...clone(resumeDraft), runId: run.id, revision: 0, status: "building", phase: "sections" }
+      : null
     next.state.generationMetrics = { startedAt: Date.now() }
     next.state.patchMetrics = undefined
     next.state.patchStatus =
@@ -442,7 +470,7 @@ export class DesignRunManager {
               .map((k) => [k, request.rollback![k as keyof TabState]])
           )
         : null
-    } else if (request.isIteration && next.state.tweaks)
+    } else if (request.isIteration && next.state.tweaks && !request.resumeFromDraft)
       run.request.currentHtml = materializeTweaks(
         request.currentHtml || next.state.html,
         next.state.tweaks,
@@ -910,7 +938,16 @@ export class DesignRunManager {
   retry(id: string, requestId: string): DesignSessionSnapshot {
     const request = this.store.latestRequest(id)
     if (!request) throw new Error("没有可重试的生成任务")
-    return this.start({ ...request, requestId, freshAgentThread: request.kind === "agent" })
+    const hasDraft = Boolean(this.get(id).state.draftPreview?.html.trim())
+    return this.start({
+      ...request,
+      requestId,
+      freshAgentThread: request.kind === "agent",
+      // Resume the page and its actual requirements, without reinjecting initial template HTML.
+      resumeInstruction: hasDraft
+        ? request.resumeInstruction ?? request.cleanUserMsg ?? request.prompt
+        : request.resumeInstruction
+    })
   }
 
   setWorkspace(id: string, path: string): DesignSessionSnapshot {

@@ -329,9 +329,18 @@ export class DesignTemplatePackages {
 }
 
 export function buildTemplatePackageContext(
-  prepared: ReturnType<DesignTemplatePackages["materialize"]>
+  prepared: ReturnType<DesignTemplatePackages["materialize"]>,
+  isIteration = false
 ): string {
   const { template, referencePath, resourcePrefix } = prepared
+  if (isIteration) {
+    return (
+      `\n\n---\n[当前页面的本地依赖]\n` +
+      `继续基于本次提供的当前设计源文件修改，保留已生成的页面内容和用户修改。\n` +
+      `此页面最初使用 ${template.name}（${template.framework}）；模板仅用于查找本地依赖，不要重新读取原模板来重建页面。\n` +
+      `已有资源目录：${resourcePrefix}。保持当前页面的相对资源路径，沿用本次设计目录内的框架、样式和图片；不要复制原始上传文件覆盖已有资源。\n`
+    )
+  }
   return (
     `\n\n---\n[用户选择的本地模板包]\n` +
     `模板：${template.name}；框架：${template.framework}。先读取入口参考文件：${referencePath}\n` +

@@ -22,7 +22,7 @@ export const S: Record<string, CSSProperties> = {
   inputArea:         { padding: "12px 16px 16px", borderTop: "1px solid #e8e6e0", flexShrink: 0 },
   inputBox:          { border: "1px solid #e0ded8", borderRadius: 12, background: "#fafaf8", padding: "10px 12px" },
   textarea:          { width: "100%", border: "none", background: "transparent", resize: "none", fontSize: 14, color: "#1a1a1a", outline: "none", fontFamily: "inherit", lineHeight: 1.5, boxSizing: "border-box" as const },
-  inputToolbar:      { display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: 8 },
+  inputToolbar:      { display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 8, marginTop: 8 },
   importBtn:         { padding: "4px 10px", fontSize: 12, fontWeight: 500, background: "none", border: "1px solid #d0cec8", borderRadius: 6, cursor: "pointer", color: "#4a4a4a", fontFamily: "inherit" },
   sendBtn:           { padding: "6px 16px", fontSize: 13, fontWeight: 600, color: "#fff", border: "none", borderRadius: 8, fontFamily: "inherit", transition: "background 0.15s" },
   cancelBtn:         { padding: "6px 16px", fontSize: 13, fontWeight: 600, background: "#e8e6e0", color: "#4a4a4a", border: "none", borderRadius: 8, cursor: "pointer", fontFamily: "inherit" },
@@ -31,7 +31,7 @@ export const S: Record<string, CSSProperties> = {
   approvalPermanentBtn: { padding: "6px 12px", fontSize: 12, fontWeight: 600, background: "#16a34a", color: "#fff", border: "none", borderRadius: 7, cursor: "pointer", fontFamily: "inherit" },
   approvalRejectBtn: { padding: "6px 12px", fontSize: 12, fontWeight: 600, background: "#ffffff", color: "#4a4a4a", border: "1px solid #d0cec8", borderRadius: 7, cursor: "pointer", fontFamily: "inherit" },
 
-  rightPanel:        { flex: 1, display: "flex", flexDirection: "column", background: "#f0efeb", overflow: "hidden" },
+  rightPanel:        { flex: 1, minWidth: 0, minHeight: 0, display: "flex", flexDirection: "column", background: "#f0efeb", overflow: "hidden" },
   canvasBar:         { display: "flex", alignItems: "center", padding: "0 12px", height: 45, background: "#f0efeb", borderBottom: "1px solid #e0ded8", flexShrink: 0, gap: 4 },
   navBtn:            { width: 30, height: 30, display: "flex", alignItems: "center", justifyContent: "center", background: "#ffffff", border: "1px solid #d0cec8", borderRadius: 8, cursor: "pointer", fontSize: 14, color: "#4a4a4a", flexShrink: 0 },
   canvasActionBtn:   { display: "flex", alignItems: "center", gap: 6, padding: "5px 12px", fontSize: 13, fontWeight: 500, background: "none", border: "1px solid #d0cec8", borderRadius: 8, cursor: "pointer", color: "#1a1a1a", fontFamily: "inherit" },

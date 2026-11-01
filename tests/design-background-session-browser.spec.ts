@@ -2,7 +2,7 @@
 import assert from "node:assert/strict"
 import { createServer } from "node:http"
 import { DatabaseSync } from "node:sqlite"
-import { resolve } from "node:path"
+import { basename, dirname, resolve } from "node:path"
 import { build, transformSync } from "esbuild"
 import { readFileSync } from "node:fs"
 import { prepareEditableSource } from "../src/main/services/design/direct-edit"
@@ -32,6 +32,9 @@ const bundle = await build({
     import { BrowserPageConfirmationBar } from './src/renderer/src/components/browser/BrowserPageConfirmationBar';
     import { useBrowserViewLifecycle } from './src/renderer/src/components/browser/useBrowserViewLifecycle';
     import { onOpenResourcePanelOverlay, onCloseResourcePanelOverlay } from './src/renderer/src/lib/resource-panel-overlay-events';
+    import { applyThemePreference } from './src/renderer/src/lib/theme-preference';
+    import { DEFAULT_THEME_ID } from './src/renderer/src/lib/theme-registry';
+    window.applyDesignTestTheme = (dark) => applyThemePreference(dark ? 'codex-dark' : DEFAULT_THEME_ID);
     function Fixture() {
       const [show, setShow] = useState(true);
       const [browserOpen, setBrowserOpen] = useState(false);
@@ -72,7 +75,17 @@ const bundle = await build({
 })
 const reactRuntime = await build({ stdin: { contents: `import * as React from 'react'; import {createRoot} from 'react-dom/client'; window.React=React; window.ReactDOM={createRoot};`, resolveDir: process.cwd() }, bundle: true, write: false, platform: "browser", format: "iife" })
 const vueRuntime = process.env.DESIGN_VUE_RUNTIME ? readFileSync(process.env.DESIGN_VUE_RUNTIME, "utf8") : null
+const uiStyles = process.env.DESIGN_UI_STYLES
 const server = createServer((_request, response) => {
+  if (uiStyles && _request.url === "/ui.css") {
+    response.setHeader("Content-Type", "text/css")
+    response.end(readFileSync(uiStyles))
+    return
+  }
+  if (uiStyles && /\.(woff2?|ttf)$/.test(_request.url ?? "")) {
+    response.end(readFileSync(resolve(dirname(uiStyles), basename(_request.url!))))
+    return
+  }
   if (_request.url === "/react.js" || _request.url === "/babel.js" || _request.url === "/vue.js") {
     response.setHeader("Content-Type", "text/javascript")
     response.end(_request.url === "/react.js" ? reactRuntime.outputFiles[0].contents : _request.url === "/vue.js" ? vueRuntime ?? "" :
@@ -86,7 +99,7 @@ const server = createServer((_request, response) => {
   response.end(
     _request.url === "/app.js"
       ? bundle.outputFiles[0].contents
-      : '<div id="root"></div><script src="/app.js"></script>'
+      : `${uiStyles ? '<link rel="stylesheet" href="/ui.css">' : ''}<div id="root"></div><script src="/app.js"></script>`
   )
 })
 await new Promise<void>((resolveReady) => server.listen(0, "127.0.0.1", resolveReady))
@@ -118,7 +131,11 @@ const manager = new DesignRunManager(new DesignSessionStore(db), {
 manager.create({
   id: "ds_browser",
   meta: { id: "ds_browser", title: "浏览器回归", createdAt: 1, updatedAt: 1 },
-  state: { ...createDesignState(), selectedModelId: "custom:test" },
+  state: {
+    ...createDesignState(),
+    selectedModelId: "custom:test",
+    designLink: "https://legacy-design-reference.example.com/private"
+  },
   workspacePath: "/workspace"
 })
 try {
@@ -184,6 +201,9 @@ try {
     const importFixture = { mode: "success", requests: [] as Array<{ requestId: string; source: string }>,
       pending: null as null | ((value: unknown) => void), opened: false, hiddenCount: 0 }
     ;(window as unknown as { importFixture: typeof importFixture }).importFixture = importFixture
+    const templatePackage = { id: "fixture-template", name: "import.html", entryPath: "index.html", rootDir: "/workspace/template", html: "<h1>HTML 导入页面</h1>", files: ["index.html", "detail.html"], pages: ["index.html", "detail.html"], warnings: [], previewUrl: "about:blank", framework: "html", sourceKind: "html", importedAt: "2026-10-29", totalBytes: 25 }
+    const templateFixture = { mode: "success", sources: [] as string[], pending: null as null | ((value: unknown) => void), templatePackage }
+    ;(window as any).templateFixture = templateFixture
     ;(window as unknown as { deliver: (event: unknown) => void }).deliver = (event) => {
       for (const callback of listeners) callback(event)
     }
@@ -226,7 +246,13 @@ try {
       design: {
         sessions,
         listImportedTemplates: async () => [],
-        importTemplate: async () => ({ template: { id: "fixture-template", name: "import.html", entryPath: "index.html", rootDir: "/workspace/template", html: "<h1>HTML 导入页面</h1>", files: ["index.html"], pages: ["index.html"], warnings: [], previewUrl: "about:blank", framework: "html", sourceKind: "html", importedAt: "2026-10-29", totalBytes: 25 } }),
+        importTemplate: async (source: string) => {
+          templateFixture.sources.push(source)
+          if (templateFixture.mode === "error") return { error: "模板导入失败" }
+          if (templateFixture.mode === "delayed") return new Promise((resolve) => { templateFixture.pending = resolve })
+          return { template: templatePackage }
+        },
+        readTemplate: async ({ entryPath }: { entryPath: string }) => ({ template: { ...templatePackage, entryPath } }),
         listSystems: async () => [
           {
             id: "neutral-modern",
@@ -342,6 +368,124 @@ try {
   await page.goto(`http://127.0.0.1:${address.port}`)
   const input = page.locator("textarea").first()
   await input.waitFor()
+  const workspace = page.getByTestId("design-workspace")
+  const conversation = page.getByRole("region", { name: "设计对话", exact: true })
+  const canvas = page.getByRole("region", { name: "设计页面", exact: true })
+  const divider = page.getByRole("separator", { name: "调整对话与页面宽度", exact: true })
+  assert.equal(await workspace.getAttribute("data-layout"), "conversation")
+  assert.equal(await canvas.count(), 0, "an empty session has no blank preview pane")
+  assert.equal(await divider.count(), 0)
+  const composerBox = await input.boundingBox()
+  assert.ok(composerBox && composerBox.width >= 700, "the initial composer fills a wide centered conversation")
+  assert.ok(Math.abs(composerBox.x + composerBox.width / 2 - 720) < 20, "the composer is centered")
+  if (process.env.DESIGN_WORKSPACE_SCREENSHOTS) {
+    await page.screenshot({ path: `${process.env.DESIGN_WORKSPACE_SCREENSHOTS}-welcome.png`, animations: "disabled" })
+    await page.setViewportSize({ width: 700, height: 900 })
+    await page.evaluate(() => (window as any).applyDesignTestTheme(true))
+    assert.equal(await conversation.evaluate(element => element.scrollWidth <= element.clientWidth), true)
+    await page.screenshot({ path: `${process.env.DESIGN_WORKSPACE_SCREENSHOTS}-welcome-dark.png`, animations: "disabled" })
+    await page.evaluate(() => (window as any).applyDesignTestTheme(false))
+    await page.setViewportSize({ width: 1440, height: 1000 })
+  }
+  const startActions = page.getByRole("group", { name: "设计开始方式", exact: true })
+  assert.equal(await startActions.getByRole("button").count(), 4, "the template picker sits beside the three context actions")
+  for (const label of ["选择模板", "通过链接还原页面", "上传 HTML 文件", "关联代码"]) {
+    assert.equal(await startActions.getByRole("button", { name: label, exact: false }).count(), 1)
+  }
+  assert.equal(await page.getByRole("button", { name: "上传截图", exact: true }).count(), 0,
+    "screenshot upload has no duplicate standalone button")
+  await page.getByRole("button", { name: "更多上传选项", exact: true }).click()
+  const attachmentMenu = page.getByRole("menu")
+  assert.equal(await attachmentMenu.getByRole("menuitem").count(), 2)
+  assert.equal(await attachmentMenu.getByRole("menuitem", { name: "关联页面模板", exact: true }).count(), 0,
+    "the welcome template shortcut has no duplicate entry in More")
+  for (const label of ["上传截图", "上传原型图压缩包"]) {
+    await attachmentMenu.getByRole("menuitem", { name: label, exact: true }).waitFor()
+  }
+  assert.equal(await attachmentMenu.getByRole("menuitem", { name: "通过链接关联设计图", exact: true }).count(), 0)
+  assert.equal(await page.getByText("legacy-design-reference.example.com", { exact: true }).count(), 0,
+    "legacy reference links have no visible entry or context pill")
+  await page.keyboard.press("Escape")
+  await attachmentMenu.waitFor({ state: "detached" })
+  await page.waitForFunction(() => document.activeElement?.getAttribute("aria-label") === "更多上传选项")
+  assert.equal(await page.getByRole("button", { name: "更多上传选项", exact: true }).evaluate(element => element === document.activeElement), true)
+  await page.getByRole("button", { name: "更多上传选项", exact: true }).click()
+  const screenshotChooser = page.waitForEvent("filechooser")
+  await page.getByRole("menuitem", { name: "上传截图", exact: true }).click()
+  await (await screenshotChooser).setFiles([])
+  console.log("PASS compact context actions and attachment menu screenshot/keyboard flows without URL-only references")
+
+  const openTemplatePicker = async () => {
+    await startActions.getByRole("button", { name: "选择模板", exact: true }).click()
+    await page.getByRole("dialog", { name: "关联页面模板", exact: true }).waitFor()
+  }
+  const templateDialog = page.getByRole("dialog", { name: "关联页面模板", exact: true })
+  await openTemplatePicker()
+  await templateDialog.getByRole("button", { name: "选择模板 2模板预览", exact: true }).click()
+  if (process.env.DESIGN_TEMPLATE_UI_SCREENSHOTS) {
+    await templateDialog.screenshot({ path: `${process.env.DESIGN_TEMPLATE_UI_SCREENSHOTS}-picker.png`, animations: "disabled" })
+    await page.setViewportSize({ width: 390, height: 844 })
+    const lightBackground = await templateDialog.evaluate(element => getComputedStyle(element).backgroundColor)
+    await page.evaluate(() => (window as any).applyDesignTestTheme(true))
+    assert.notEqual(await templateDialog.evaluate(element => getComputedStyle(element).backgroundColor), lightBackground)
+    assert.equal(await templateDialog.evaluate(element => element.scrollWidth <= element.clientWidth), true,
+      "the template picker fits a narrow window")
+    await templateDialog.screenshot({ path: `${process.env.DESIGN_TEMPLATE_UI_SCREENSHOTS}-narrow.png`, animations: "disabled" })
+    await page.evaluate(() => (window as any).applyDesignTestTheme(false))
+    await page.setViewportSize({ width: 1440, height: 1000 })
+  }
+  await templateDialog.getByRole("button", { name: "取消", exact: true }).click()
+  assert.equal(manager.get("ds_browser").state.creationSelection, undefined, "cancel leaves the original selection untouched")
+  await openTemplatePicker()
+  await templateDialog.getByRole("button", { name: "选择模板 1模板预览", exact: true }).click()
+  await templateDialog.getByRole("button", { name: "关联此模板", exact: true }).click()
+  await page.getByRole("button", { name: "更换页面模板：模板 1", exact: true }).waitFor()
+  await startActions.getByRole("button", { name: "更换模板", exact: true }).waitFor()
+  if (process.env.DESIGN_TEMPLATE_UI_SCREENSHOTS) {
+    await page.screenshot({ path: `${process.env.DESIGN_TEMPLATE_UI_SCREENSHOTS}-composer.png`, animations: "disabled" })
+  }
+  await page.reload()
+  await page.getByRole("button", { name: "更换页面模板：模板 1", exact: true }).click()
+  assert.equal(await templateDialog.getByRole("button", { pressed: true }).filter({ hasText: "模板 1" }).count(), 1)
+  await templateDialog.getByRole("button", { name: "选择模板 2模板预览", exact: true }).click()
+  await templateDialog.getByRole("button", { name: "取消", exact: true }).click()
+  await page.getByRole("button", { name: "更换页面模板：模板 1", exact: true }).waitFor()
+  await page.getByRole("button", { name: "更多上传选项", exact: true }).click()
+  assert.equal(await page.getByRole("menuitem", { name: "关联页面模板", exact: true }).count(), 0, "bound templates have one entry in the composer")
+  await page.keyboard.press("Escape")
+  await page.getByRole("button", { name: "移除页面模板", exact: true }).click()
+  await page.getByRole("group", { name: "页面模板", exact: true }).waitFor({ state: "detached" })
+
+  // Upload errors and results arriving after cancellation cannot change the session.
+  await openTemplatePicker()
+  await templateDialog.getByRole("button", { name: "上传模板", exact: true }).click()
+  await page.evaluate(() => { (window as any).templateFixture.mode = "error" })
+  await templateDialog.getByRole("button", { name: "选择 HTML / ZIP", exact: true }).click()
+  await templateDialog.getByText("模板导入失败", { exact: true }).waitFor()
+  assert.equal(await templateDialog.getByRole("button", { name: "关联此模板", exact: true }).isDisabled(), true)
+  await page.evaluate(() => { (window as any).templateFixture.mode = "delayed" })
+  await templateDialog.getByRole("button", { name: "选择 HTML / ZIP", exact: true }).click()
+  await page.waitForFunction(() => Boolean((window as any).templateFixture.pending))
+  await templateDialog.getByRole("button", { name: "取消", exact: true }).click()
+  await page.evaluate(() => {
+    const fixture = (window as any).templateFixture
+    fixture.pending({ template: fixture.templatePackage }); fixture.mode = "success"
+  })
+  assert.equal(await page.getByRole("group", { name: "页面模板", exact: true }).count(), 0)
+  await openTemplatePicker()
+  await templateDialog.getByRole("button", { name: "上传模板", exact: true }).click()
+  await templateDialog.getByRole("button", { name: "选择文件夹", exact: true }).click()
+  await templateDialog.getByLabel("模板页面入口", { exact: true }).selectOption("detail.html")
+  await templateDialog.getByRole("button", { name: "关联此模板", exact: true }).click()
+  await page.getByRole("button", { name: "更换页面模板：import.html", exact: true }).click()
+  await templateDialog.getByLabel("模板页面入口", { exact: true }).waitFor()
+  assert.equal(await templateDialog.getByLabel("模板页面入口", { exact: true }).inputValue(), "detail.html")
+  await templateDialog.getByRole("button", { name: "选择模板", exact: true }).click()
+  await templateDialog.getByRole("button", { name: "选择模板 2模板预览", exact: true }).click()
+  await templateDialog.getByRole("button", { name: "关联此模板", exact: true }).click()
+  await page.getByRole("button", { name: "更换页面模板：模板 2", exact: true }).waitFor()
+  assert.equal(requests.length, 0, "associating a template does not start a model run")
+  console.log("PASS first-generation composer template association, cancellation, persistence, removal and package entry selection")
   await input.fill("直接生成一个测试页面")
   await page.getByRole("button", { name: "▶ 发送", exact: true }).click()
   await page
@@ -352,10 +496,32 @@ try {
       console.log("STATE", JSON.stringify(manager.get("ds_browser")).slice(0, 1200))
       throw error
     })
+  await page.getByRole("button", { name: "更多上传选项", exact: true }).click()
+  for (const label of ["通过链接还原页面", "上传 HTML 文件", "关联代码"]) {
+    assert.equal(await page.getByRole("menuitem", { name: label, exact: true }).count(), 1,
+      "context actions stay available after the welcome actions disappear")
+  }
+  for (const label of ["通过链接还原页面", "上传 HTML 文件", "上传原型图压缩包"]) {
+    assert.equal(await page.getByRole("menuitem", { name: label, exact: true }).getAttribute("aria-disabled"), "true",
+      "imports cannot replace a design while it is generating")
+  }
+  await page.keyboard.press("Escape")
   await new Promise<void>((done) => setTimeout(done, 200))
   assert.equal(emitters.length, 1)
+  assert.doesNotMatch(requests[0].prompt, /legacy-design-reference\.example\.com|Design reference URL/,
+    "legacy URL-only references are no longer sent to the model")
+  assert.match(requests[0].prompt, /模板内容 2/, "the confirmed template is included in the first generation")
+  assert.equal(await page.getByRole("button", { name: "更换页面模板：模板 2", exact: true }).isDisabled(), true)
   const waiting = page.getByTestId("design-generation-waiting")
   await waiting.waitFor()
+  assert.equal(await workspace.getAttribute("data-layout"), "split", "generation immediately opens both panes")
+  await canvas.getByTestId("design-generation-waiting").waitFor()
+  await divider.waitFor()
+  assert.equal(await conversation.getByTestId("design-generation-waiting").count(), 0,
+    "the conversation is reserved for model execution and messages")
+  emitters[0]({ type: "execution", event: { kind: "assistant_text", content: "模型正在规划页面结构", timestamp: Date.now() } })
+  await conversation.getByText("模型正在规划页面结构", { exact: true }).waitFor()
+  assert.equal(await canvas.getByText("模型正在规划页面结构", { exact: true }).count(), 0)
   await waiting.getByRole("heading", { name: "先看结构，再调细节" }).waitFor()
   emitters[0]({ type: "metrics", metrics: { firstModelChunkAt: Date.now() } })
   await waiting.getByRole("status").filter({ hasText: "正在生成首个页面框架" }).waitFor()
@@ -400,6 +566,55 @@ try {
   preview(1, makeHtml(true))
   await page.frameLocator("iframe").getByText("布局占位", { exact: true }).waitFor()
   assert.equal(await waiting.count(), 0, "the first framework immediately replaces the waiting card")
+  await canvas.waitFor()
+  await divider.waitFor()
+  assert.equal(await workspace.getAttribute("data-layout"), "split")
+  const widthBeforeDrag = (await conversation.boundingBox())!.width
+  await page.locator("iframe").evaluate((frame) => { (window as any).resizePreviewFrame = frame })
+  const dragDivider = async (delta: number) => {
+    const box = (await divider.boundingBox())!
+    await page.mouse.move(box.x + box.width / 2, box.y + Math.min(200, box.height / 2))
+    await page.mouse.down()
+    await page.mouse.move(box.x + box.width / 2 + delta, box.y + Math.min(200, box.height / 2), { steps: 8 })
+    await page.mouse.up()
+    await page.waitForFunction(() => !document.querySelector('[data-testid="design-resize-shield"]'))
+  }
+  await dragDivider(180)
+  assert.ok(Math.abs((await conversation.boundingBox())!.width - widthBeforeDrag - 180) <= 2,
+    "dragging right gives the conversation more room")
+  await dragDivider(-90)
+  const resizedWidth = (await conversation.boundingBox())!.width
+  assert.ok(Math.abs(resizedWidth - widthBeforeDrag - 90) <= 2, "dragging left gives the page more room")
+  assert.equal(await page.evaluate(() => localStorage.getItem("design_conversation_width_v1")), String(resizedWidth))
+  await divider.press("Home")
+  assert.equal((await conversation.boundingBox())!.width, 320, "the conversation cannot be dragged out of view")
+  await divider.press("End")
+  assert.ok((await canvas.boundingBox())!.width >= 359, "the canvas keeps its minimum width")
+  await divider.press("Enter")
+  assert.equal((await conversation.boundingBox())!.width, 420)
+  await divider.press("ArrowRight")
+  assert.equal((await conversation.boundingBox())!.width, 444)
+  await divider.dblclick()
+  assert.equal((await conversation.boundingBox())!.width, 420, "double-click restores the default split")
+  await divider.press("ArrowRight")
+  const capturedDivider = (await divider.boundingBox())!
+  await page.mouse.move(capturedDivider.x + 3, capturedDivider.y + 120)
+  await page.mouse.down()
+  await page.setViewportSize({ width: 700, height: 900 })
+  await divider.waitFor({ state: "detached" })
+  await page.getByTestId("design-resize-shield").waitFor({ state: "detached" })
+  await page.mouse.up()
+  assert.equal(await workspace.getAttribute("data-stacked"), "true", "narrow windows stack both panes without horizontal overflow")
+  assert.equal(await page.evaluate(() => document.body.style.cursor), "", "window resize releases the drag cursor")
+  await page.setViewportSize({ width: 1440, height: 1000 })
+  await divider.waitFor()
+  assert.equal(await page.getByTestId("design-resize-shield").count(), 0)
+  assert.equal(await page.locator("iframe").evaluate(frame => frame === (window as any).resizePreviewFrame), true,
+    "resizing does not recreate the live preview")
+  console.log("PASS wide initial conversation, generation-triggered split, pointer/keyboard resizing and drag cleanup")
+  if (process.env.DESIGN_WORKSPACE_SCREENSHOTS) {
+    await page.screenshot({ path: `${process.env.DESIGN_WORKSPACE_SCREENSHOTS}-split.png`, animations: "disabled" })
+  }
   await page.locator("iframe").evaluate((frame) => {
     const w = (frame as HTMLIFrameElement).contentWindow as Window & {
       kept?: Element | null
@@ -496,6 +711,7 @@ try {
   completions[0]()
   await page.locator("#toggle-mode").click()
   await page.getByText("✓ 设计已生成", { exact: true }).waitFor()
+  assert.equal((await conversation.boundingBox())!.width, 444, "reopening remembers the conversation width")
   await page.getByText("后台验证已完成", { exact: true }).waitFor()
   await page.frameLocator("iframe").first().getByText("后台完成的设计", { exact: true }).waitFor()
   await page.waitForFunction(
@@ -548,6 +764,11 @@ try {
   await page.getByRole("button", { name: "▶ 发送", exact: true }).click()
   await page.getByRole("button", { name: "■ 停止", exact: true }).waitFor()
   assert.equal(requests[1].kind, "patch", "chat edits route to the bounded executor")
+  assert.doesNotMatch(requests[1].prompt, /模板内容 2|创建设计时选择的参考资料/, "iterations never reapply the initial template HTML")
+  assert.equal(await page.getByRole("group", { name: "页面模板", exact: true }).count(), 0)
+  await page.getByRole("button", { name: "更多上传选项", exact: true }).click()
+  assert.equal(await page.getByRole("menuitem", { name: "关联页面模板", exact: true }).count(), 0, "generated pages cannot rebind their initial template")
+  await page.keyboard.press("Escape")
   assert.equal(await waiting.count(), 0, "edits keep the previous design visible")
   assert.equal(
     requests[1].currentHtml,
@@ -781,7 +1002,10 @@ try {
     "cancelled imports retain selections"
   )
   await page.getByRole("button", { name: "上传需求文件", exact: true }).click()
-  await page.getByRole("button", { name: "选择文件", exact: true }).click()
+  await page.getByRole("button", { name: "选择文件", exact: true }).click().catch(async error => {
+    console.log("REQUIREMENT FILE BODY", (await page.locator("body").innerText()).slice(-2500))
+    throw error
+  })
   await page.getByRole("button", { name: "进入设计", exact: false }).click()
   await page.locator("textarea").first().waitFor()
   const createdId = await page.evaluate(() => localStorage.getItem("design_last_session"))
@@ -791,12 +1015,26 @@ try {
   assert.equal(manager.get(createdId).state.selectedDesignSystemId, "wealth")
   assert.equal(manager.get(createdId).state.creationSelection?.template.name, "模板 5")
   assert.equal(manager.get(createdId).state.attachedFiles?.[0].content, "需求附件内容")
+  const originalRequirement = manager.get(createdId).state.creationSelection!.requirement
+  await page.getByRole("button", { name: "更换页面模板：模板 5", exact: true }).click()
+  await templateDialog.getByRole("button", { name: "上一页模板", exact: true }).click()
+  await templateDialog.getByRole("button", { name: "选择模板 3模板预览", exact: true }).click()
+  await templateDialog.getByRole("button", { name: "关联此模板", exact: true }).click()
+  await page.getByRole("button", { name: "更换页面模板：模板 3", exact: true }).waitFor()
   await page.reload()
+  await page.getByRole("button", { name: "更换页面模板：模板 3", exact: true }).waitFor()
+  const reassociated = manager.get(createdId)
+  assert.equal(reassociated.workspacePath, "/workspace/selected")
+  assert.equal(reassociated.state.selectedDesignSystemId, "wealth")
+  assert.deepEqual(reassociated.state.creationSelection!.requirement, originalRequirement,
+    "changing a template preserves the requirement association")
+  assert.equal(reassociated.state.attachedFiles?.[0].content, "需求附件内容")
   await page.locator("textarea").first().fill("直接生成一个模板测试页面")
   await page.getByRole("button", { name: "▶ 发送", exact: true }).click()
   await page.getByRole("button", { name: "■ 停止", exact: true }).waitFor()
   const creationRequest = requests.at(-1)!
-  assert.match(creationRequest.prompt, /模板内容 5/)
+  assert.match(creationRequest.prompt, /模板内容 3/)
+  assert.doesNotMatch(creationRequest.prompt, /模板内容 5/)
   assert.match(creationRequest.prompt, /需求附件内容/)
   assert.equal(
     creationRequest.cleanUserMsg,
@@ -806,6 +1044,21 @@ try {
   emitters.at(-1)!({ type: "error", error: "测试结束" })
   completions.at(-1)!()
   await page.getByText(/测试结束/).waitFor()
+  await page.getByRole("button", { name: "更换页面模板：模板 3", exact: true }).click()
+  await templateDialog.getByRole("button", { name: "选择模板 4模板预览", exact: true }).click()
+  await templateDialog.getByRole("button", { name: "关联此模板", exact: true }).click()
+  await page.getByRole("button", { name: "更换页面模板：模板 4", exact: true }).waitFor()
+  assert.equal(await page.getByRole("button", { name: "🔄 重试", exact: true }).count(), 0,
+    "changing the initial template clears stale retry prompts")
+  await page.locator("textarea").first().fill("直接生成更新后的模板页面")
+  await page.getByRole("button", { name: "▶ 发送", exact: true }).click()
+  await page.getByRole("button", { name: "■ 停止", exact: true }).waitFor()
+  assert.match(requests.at(-1)!.prompt, /模板内容 4/)
+  assert.doesNotMatch(requests.at(-1)!.prompt, /模板内容 3|模板内容 5/)
+  emitters.at(-1)!({ type: "error", error: "模板切换测试结束" })
+  completions.at(-1)!()
+  await page.getByText("模板切换测试结束", { exact: false }).waitFor()
+  console.log("PASS editor template changes preserve workspace/requirements/design system and invalidate stale retries")
 
   // Opening a URL requires a separate confirmation of the live browser page before capture.
   await page.getByTitle("返回历史记录").click()
@@ -1075,6 +1328,77 @@ try {
   assert.equal(requests.length, directRunsBefore, "direct edits never invoke the model")
   console.log("PASS: direct double-click/IME text, icon retention, nested selection/deletion, history, persistence and real React rerender")
 
+  // Both the explicit Continue action and a follow-up must use the latest unfinished page.
+  manager.create({
+    id: "ds_resume_draft",
+    meta: { id: "ds_resume_draft", title: "接续草稿", createdAt: 1, updatedAt: 1 },
+    state: { ...createDesignState(), selectedModelId: "custom:test", creationSelection: {
+      method: "prompt", workspacePath: "/workspace", designSystemId: null,
+      template: { mode: "select", name: "恢复测试模板", html: "<h1>不应重建的初始模板</h1>", path: null },
+      requirement: { mode: "none", namespaceId: null, pathName: null, requirement: null, implementationDetails: [], path: null }
+    } },
+    workspacePath: "/workspace"
+  })
+  await page.evaluate(() => localStorage.setItem("design_last_session", "ds_resume_draft"))
+  await page.reload()
+  await page.locator("textarea").first().fill("直接生成一个接续测试页面")
+  await page.getByRole("button", { name: "▶ 发送", exact: true }).click()
+  await page.getByRole("button", { name: "■ 停止", exact: true }).waitFor()
+  const firstResumeEmitter = emitters.at(-1)!
+  const firstResumeFinish = completions.at(-1)!
+  const partialResumeHtml = makeHtml(false).replace("后台完成的设计", "已经完成的欢迎区")
+    .replace("保留节点", "待生成统计区")
+  const emitResumePreview = (revision: number, html: string) => {
+    const runId = manager.get("ds_resume_draft").activeRunId!
+    emitters.at(-1)!({ type: "preview", preview: {
+      runId, revision, html, draftPath: "/workspace/resume-draft.html", phase: "sections", status: "building",
+      ...inspectDesignDocument(html), tweaks: null, createdAt: Date.now(), updatedAt: Date.now()
+    } })
+  }
+  emitResumePreview(5, partialResumeHtml)
+  await page.frameLocator("iframe").getByRole("heading", { name: "已经完成的欢迎区", exact: true }).waitFor()
+  await page.getByRole("button", { name: "■ 停止", exact: true }).click()
+  await page.getByRole("button", { name: "继续生成", exact: true }).waitFor()
+  firstResumeFinish()
+  await page.reload()
+  await page.frameLocator("iframe").getByRole("heading", { name: "已经完成的欢迎区", exact: true }).waitFor()
+  await page.getByRole("button", { name: "继续生成", exact: true }).click()
+  await page.getByRole("button", { name: "■ 停止", exact: true }).waitFor()
+  const resumedDraftRequest = requests.at(-1)!
+  assert.equal(resumedDraftRequest.resumeFromDraft, true)
+  assert.equal(resumedDraftRequest.isIteration, true)
+  assert.match(resumedDraftRequest.currentHtml!, /已经完成的欢迎区|待生成统计区/)
+  assert.doesNotMatch(resumedDraftRequest.prompt, /不应重建的初始模板|创建设计时选择的参考资料/)
+  await page.frameLocator("iframe").getByRole("heading", { name: "已经完成的欢迎区", exact: true }).waitFor()
+  assert.equal(await waiting.count(), 0, "continuing keeps the draft on screen without returning to the waiting card")
+  firstResumeEmitter({ type: "done", html: makeHtml(false, true) })
+  assert.equal(manager.get("ds_resume_draft").state.html, "", "late completion of the stopped run cannot replace the resumed draft")
+  const latestResumeHtml = partialResumeHtml.replace("待生成统计区", "统计区已经写到一半")
+  const secondResumeFinish = completions.at(-1)!
+  emitResumePreview(1, latestResumeHtml)
+  await page.frameLocator("iframe").getByText("统计区已经写到一半", { exact: true }).waitFor()
+  await page.getByRole("button", { name: "■ 停止", exact: true }).click()
+  await page.getByRole("button", { name: "继续生成", exact: true }).waitFor()
+  secondResumeFinish()
+  await page.locator("textarea").first().fill("继续，把统计区补完")
+  await page.getByRole("button", { name: "▶ 发送", exact: true }).click()
+  await page.getByRole("button", { name: "■ 停止", exact: true }).waitFor()
+  assert.equal(requests.at(-1)!.kind, "agent")
+  assert.equal(requests.at(-1)!.resumeFromDraft, true)
+  assert.match(requests.at(-1)!.currentHtml!, /统计区已经写到一半/)
+  assert.match(requests.at(-1)!.prompt, /继续，把统计区补完/)
+  assert.doesNotMatch(requests.at(-1)!.prompt, /不应重建的初始模板|创建设计时选择的参考资料/)
+  assert.equal(requests.at(-1)!.resumeGoal, "直接生成一个接续测试页面")
+  assert.equal(requests.at(-1)!.prompt.match(/\[接续未完成的设计\]/g)?.length, 1)
+  const resumedFinalHtml = makeHtml(false, true).replace("后台完成的设计", "已经完成的欢迎区")
+    .replace("尾部内容完成", "统计区接续完成")
+  emitters.at(-1)!({ type: "done", html: resumedFinalHtml })
+  completions.at(-1)!()
+  await page.frameLocator("iframe").getByText("统计区接续完成", { exact: true }).waitFor()
+  assert.match(manager.get("ds_resume_draft").state.html, /已经完成的欢迎区/)
+  assert.equal(manager.get("ds_resume_draft").state.draftPreview, null)
+  console.log("PASS: stopped drafts resume after reload through Continue and follow-ups, retaining completed content and latest progress")
+
   manager.create({
     id: "ds_stream_questions",
     meta: { id: "ds_stream_questions", title: "逐题刷新", createdAt: 1, updatedAt: 1 },
@@ -1102,6 +1426,7 @@ try {
   // Reopening mid-stream must restore editable questions and their saved answers.
   await page.reload()
   await page.getByText("看板名称", { exact: true }).waitFor()
+  assert.equal(await canvas.count(), 0, "requirement questions stay in the wide conversation")
   assert.equal(await page.getByPlaceholder("输入你的回答...", { exact: true }).inputValue(), "华东销售中心")
   questionEmit({ type: "question", question: scopeQuestion })
   await page.getByRole("button", { name: "收入", exact: true }).click()
@@ -1117,8 +1442,11 @@ try {
   assert.equal(requests.at(-1)!.kind, "agent")
   assert.match(requests.at(-1)!.prompt, /华东销售中心/)
   await waiting.waitFor()
+  await canvas.getByTestId("design-generation-waiting").waitFor()
+  assert.equal(await workspace.getAttribute("data-layout"), "split", "submitting answers opens the generation pane")
   await waiting.getByRole("button", { name: "停止生成", exact: true }).click()
   await waiting.waitFor({ state: "detached" })
+  assert.equal(await workspace.getAttribute("data-layout"), "conversation", "stopping before any preview returns to the conversation")
   assert.equal(manager.get("ds_stream_questions").activeRunId, null)
   completions.at(-1)!()
   console.log("PASS: questions appear before completion, accept answers while streaming, and preserve them across refresh and submission")

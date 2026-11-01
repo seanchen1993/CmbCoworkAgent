@@ -37,9 +37,37 @@ export interface DesignRunRequest {
   skill?: DesignSkillReference | null
   sourceArtifactPath?: string | null
   freshAgentThread?: boolean
+  /** Set by the host when continuing from its durable, unfinished page. */
+  resumeFromDraft?: boolean
+  /** Unwrapped instruction, so repeated stops do not nest continuation prompts. */
+  resumeInstruction?: string
+  /** Original page requirements, retained even after a short follow-up such as “continue”. */
+  resumeGoal?: string
   rollback?: Partial<TabState> | null
   currentHtml?: string
   patch?: DesignPatchRequest
+}
+
+export function buildDesignDraftResumePrompt(
+  instruction: string,
+  draft: DesignDraftPreview,
+  goal?: string
+): string {
+  const completed = draft.completedSections
+  const pending = draft.sections.filter((section) => !completed.includes(section))
+  return [
+    "[接续未完成的设计]",
+    "本次已提供停止前保存的当前页面草稿。请从该草稿继续完成，不要从原始模板或空白页面重新生成。",
+    `已完成区块：${completed.join("、") || "暂无"}。`,
+    `待完成区块：${pending.join("、") || "继续检查剩余内容和页面完整性"}。`,
+    "保留已完成区块、页面结构、资源路径及用户的微调值；除本次明确要求修改的部分外，只补齐未完成内容。",
+    "沿用原有 data-design-section 标识，完成对应区块后再移除 data-design-pending，整个页面完成后移除 data-design-build 并校验保存。",
+    "如果草稿内容已经完整，仅完成检查和保存，不要重建页面。当前草稿优先于本次要求中附带的初始模板示例。",
+    "",
+    ...(goal && goal !== instruction ? ["[原始生成要求]", goal, ""] : []),
+    "[本次要求]",
+    instruction
+  ].join("\n")
 }
 export interface DesignRunEvent {
   type: string
