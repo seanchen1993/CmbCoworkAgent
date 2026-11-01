@@ -38,13 +38,18 @@ export function desktopHeapAssessment(samples: readonly DesktopHeapSample[], for
         !index ||
         (sample.atMs > values[index - 1].atMs && sample.atMs - values[index - 1].atMs <= 60000)
     )
+  const consistentRenderer = samples.every(
+    (sample) =>
+      sample.rendererPid === samples[0].rendererPid &&
+      sample.rendererCreatedAt === samples[0].rendererCreatedAt
+  )
   const qualified =
     observed.durationMs >= 7200000 &&
     matchedState &&
     !forcedGc &&
     initial.at(-1)!.atMs < final[0].atMs &&
-    regular(initial) &&
-    regular(final)
+    regular(samples) &&
+    consistentRenderer
   return {
     ...observed,
     qualified,
@@ -52,6 +57,7 @@ export function desktopHeapAssessment(samples: readonly DesktopHeapSample[], for
     initialSamples: initial.length,
     finalSamples: final.length,
     matchedState,
+    consistentRenderer,
     scope:
       "Natural renderer used heap in matching warm steady-workload windows; not whole-application live heap"
   }

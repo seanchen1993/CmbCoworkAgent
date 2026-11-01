@@ -26,10 +26,14 @@ const resumeProfile = process.env.GENERIC_MOD_LIVE_RESUME_PROFILE
 assert(!(sourceContinuation && resumeProfile), "SOURCE_CONTINUATION_CANNOT_REUSE_OLD_PROFILE")
 const feedbackPath = process.env.GENERIC_MOD_LIVE_FEEDBACK_EVIDENCE
 const feedback = feedbackPath ? JSON.parse(readFileSync(feedbackPath, "utf8")) : undefined
+const finalFeedback = process.env.GENERIC_MOD_LIVE_FINAL_FEEDBACK === "1"
+assert(!finalFeedback || feedback, "FINAL_FEEDBACK_REQUIRES_PRIOR_FAILURE")
 if (feedback) {
   assert(sourceContinuation, "FEEDBACK_REQUIRES_VERIFIED_SOURCE_PROFILE")
-  assert.equal(dirname(resolve(feedbackPath!)), sourceContinuation.profile)
-  assert.match(basename(feedbackPath!), /^source-continuation-\d+\.json$/)
+  assert.match(
+    relative(sourceContinuation.profile, resolve(feedbackPath!)).replaceAll("\\", "/"),
+    /^(?:source-continuation-\d+\.json|continuation-[a-f0-9-]{36}\/evidence\.json)$/
+  )
   assert.equal(feedback.error, "GENERIC_LIVE_TIMEOUT_COUNTER_INCREMENT")
   assert(
     feedback.requests.length > 0 &&
@@ -175,7 +179,9 @@ const save = () =>
           consentBoundary: "native-confirmation-or-native-same-scope-reuse"
         },
         realRuntimeModel: true,
-        ...(feedbackPath ? { feedbackFrom: feedbackPath, rerunFirstRound: false } : {}),
+        ...(feedbackPath
+          ? { feedbackFrom: feedbackPath, rerunFirstRound: false, finalFeedback }
+          : {}),
         observations,
         retained,
         diagnostic,
@@ -589,7 +595,9 @@ async function main() {
     await author(
       2,
       feedback
-        ? "反馈刚才同一草稿rev2的真实试用结果：read_file确实执行并返回了结果，但计数仍0，最近工具显示Read。平台公开未过滤tool.call事件的event.tool是Read，read_file是兼容过滤别名；把原来带{tool:'read_file'}的计数逻辑改成未过滤且只比较read_file后失效了。请读取当前同一草稿，修复对真实Read/read_file名称的处理，确保read_file完成后计数+1且最近工具显示read_file，其他工具按实际名称显示；保留paint-note纯显示行为和其余所有功能、文件，不另建、不重新生成。检查并准备新修订候选，结束本轮让我重新确认，不安装不代授权。"
+        ? finalFeedback
+          ? '最后一次精确反馈，请先读取当前同一草稿源码，不另建、不从零重做。一次真实read_file执行后当前计数2，原因是新增无filter处理器和原legacy-filter处理器都在计数，而猜测ID字段的去重失效。请删除新增无filter重复计数与整段猜测ID去重，只保留一个原本可用的on("tool.call",{tool:"read_file"},...)计数处理器；事件名和过滤值以这个已真实验证有效的原代码为准，不再猜接口。该唯一处理器每次实际read_file完成后只加1并将最近工具显示为read_file，其他必要显示处理器不能重复计数或覆写这项结果。保留现有paint-note/原文字光标不变的纯显示行为及其余文件。读取→修改同草稿→原生检查/编译→准备当前版本试用，然后结束本轮让我按实际原生边界确认，不安装不代我授权。不要进行任何真实文件/命令工具执行来代我测试。'
+          : "反馈刚才同一草稿rev2的真实试用结果：read_file确实执行并返回了结果，但计数仍0，最近工具显示Read。平台公开未过滤tool.call事件的event.tool是Read，read_file是兼容过滤别名；把原来带{tool:'read_file'}的计数逻辑改成未过滤且只比较read_file后失效了。请读取当前同一草稿，修复对真实Read/read_file名称的处理，确保read_file完成后计数+1且最近工具显示read_file，其他工具按实际名称显示；保留paint-note纯显示行为和其余所有功能、文件，不另建、不重新生成。检查并准备新修订候选，结束本轮让我重新确认，不安装不代授权。"
         : resumeProfile
           ? "应用刚才重启了，请读取并核对上次已保存的同一个 Mod 最新草稿，保留已实现的 read_file 计数和最近工具显示，不另建、不手工重写已正确源码。用原生创作工具重新检查并恢复当前确切版本的试用候选，交给我重新确认；不要代我批准或安装，也不要执行文件或命令。"
           : "请修改刚才的同一个 Mod，不另建：保留 paint-note 的 prompt.paint 纯显示行为与 read_file 完成后累计次数的能力以及‘工具调用次数：N’显示，并在后面增加‘最近工具：工具名称’；执行 read_file 后必须显示‘最近工具：read_file’。沿用当前草稿身份，准备新的可确认试用候选。不访问文件，不执行命令，不调用模型，不代我批准或安装。",

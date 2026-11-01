@@ -56,6 +56,18 @@ describe("natural desktop heap acceptance", () => {
       })
     }
   })
+  it("rejects missing middle samples or transient middle renderer replacement", () => {
+    const gap = samples().filter((_, index) => index !== 120 && index !== 121)
+    expect(desktopHeapAssessment(gap, false)).toMatchObject({ qualified: false, passed: false })
+    for (const mutation of [{ rendererPid: 456 }, { rendererCreatedAt: 20 }]) {
+      const changed = samples()
+      Object.assign(changed[120], mutation)
+      expect(desktopHeapAssessment(changed, false)).toMatchObject({
+        qualified: false,
+        passed: false
+      })
+    }
+  })
   it("keeps sufficient evidence qualified when growth itself exceeds the budget", () => {
     const changed = samples().map((sample) => ({
       ...sample,

@@ -102,6 +102,15 @@ const RUNTIME_STAGE_MS = 90_000
 const COMMAND_REVIEW_LIMIT = 8
 const genericProject = process.env.GENERIC_PROJECT_CREATOR === "1"
 const matrixMode = creatorProjectMatrixMode(process.env.CREATOR_LIVE_PROJECT_MATRIX)
+const deliveredMatrixGeneration = !!process.env.CREATOR_LIVE_MATRIX_DELIVERED_RUN
+assert(
+  !deliveredMatrixGeneration || matrixMode === "report-derived",
+  "DELIVERED_MATRIX_SCENARIO_REQUIRED"
+)
+let deliveredMatrixProof:
+  | import("./support/matrix-delivered-source-proof").DeliveredMatrixSourceProof
+  | undefined
+let deliveredIntegrityFailure: string | undefined
 let matrixInheritedPluginId: string | undefined
 let matrixDeliveredPluginId: string | undefined
 let matrixAssemblies = 0
@@ -797,6 +806,15 @@ const save = () =>
               copiedGrants: false
             }
           : undefined,
+        ...(deliveredMatrixGeneration
+          ? {
+              priorGenerationReference: deliveredMatrixProof,
+              newGenerationsRequired: 1,
+              copiedGrants: false,
+              copiedConfiguration: false,
+              additionalIntegrityFailure: deliveredIntegrityFailure
+            }
+          : {}),
         ...(priorEvidence ? { generationCandidate: priorEvidence.candidate, resumeMode } : {}),
         model: { id: provider.id, name: provider.name, model: provider.model, realProvider: true },
         transport: "in-memory credential relay; application stores localhost dummy key only",
@@ -1164,8 +1182,17 @@ async function runChat(kind: string, prompt: string, workspace: string, modelUrl
   await enterModsCreatorChat(page, threadId, workspace)
   const matrixPrefix = `matrix-${observations.length}`
   const matrixSeed = matrixMode
-    ? await provisionMatrixSeed(page, root, threadId, matrixMode, matrixInheritedPluginId)
+    ? await provisionMatrixSeed(
+        page,
+        root,
+        threadId,
+        matrixMode,
+        matrixInheritedPluginId,
+        fixture.isolated,
+        title
+      )
     : undefined
+  if (matrixSeed?.deliveredSourceProof) deliveredMatrixProof = matrixSeed.deliveredSourceProof
   if (matrixMode) {
     prompt = matrixFirstPrompt(matrixMode, matrixSeed)
     writeFileSync(
@@ -1763,6 +1790,7 @@ async function main() {
       )
     if (
       matrixMode === "report-derived" &&
+      !deliveredMatrixGeneration &&
       matrixDeliveredPluginId &&
       !fatal &&
       Date.now() < deadline
@@ -1773,14 +1801,18 @@ async function main() {
     if (matrixMode && !fatal) {
       assert.equal(
         matrixAssemblies,
-        matrixMode === "report-derived" ? 2 : 1,
+        matrixMode === "report-derived" && !deliveredMatrixGeneration ? 2 : 1,
         "LIVE_MATRIX_REQUIRED_ASSEMBLY_NOT_COMPLETED"
       )
       if (matrixMode !== "autobiz-derived")
         assert(matrixDeliveredPluginId, "LIVE_MATRIX_RUNTIME_DELIVERY_NOT_COMPLETED")
       assert.equal(
         matrixRuntimeCompletions + matrixRuntimeEnvironmentBlocks,
-        matrixMode === "autobiz-derived" ? 0 : matrixMode === "report-derived" ? 2 : 1,
+        matrixMode === "autobiz-derived"
+          ? 0
+          : matrixMode === "report-derived" && !deliveredMatrixGeneration
+            ? 2
+            : 1,
         "LIVE_MATRIX_REQUIRED_RUNTIME_NOT_COMPLETED"
       )
     }
@@ -1795,6 +1827,18 @@ async function main() {
     clearTimeout(watchdog)
     const settled = await settleBeforeClose()
     if (!settled) fatal ??= "LIVE_CLEANUP_EXECUTION_UNSETTLED"
+    if (deliveredMatrixProof) {
+      try {
+        const { verifyDeliveredMatrixSourceProof } =
+          await import("./support/matrix-delivered-source-proof")
+        await verifyDeliveredMatrixSourceProof(deliveredMatrixProof)
+      } catch (cause) {
+        fatal ??= "LIVE_DELIVERED_SOURCE_CHANGED"
+        deliveredIntegrityFailure = (
+          cause instanceof Error ? cause.message : String(cause)
+        ).replaceAll(provider.key, "[REDACTED]")
+      }
+    }
     aborts.forEach((row) => row.abort())
     save()
     if (settled) await app?.close().catch(() => {})

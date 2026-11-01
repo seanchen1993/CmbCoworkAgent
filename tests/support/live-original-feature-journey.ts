@@ -91,6 +91,40 @@ export interface OriginalFeatureJourneyInput {
   endStage?(): void
 }
 
+/** Fixture preflight follows the unchanged original ProjectForm's metadata constraints. */
+export function assertOriginalFeatureMetadata(
+  input: Pick<OriginalFeatureJourneyInput, "installed" | "project" | "feature">
+) {
+  const { project, feature } = input
+  for (const [name, value] of Object.entries({
+    pluginId: input.installed.pluginId,
+    name: project.name,
+    code: project.code,
+    folder: project.folder,
+    systemId: project.systemId,
+    systemName: project.systemName,
+    featureTitle: feature.title,
+    featureGoal: feature.goal
+  }))
+    assert(typeof value === "string" && value.trim(), `ORIGINAL_FEATURE_REQUIRED:${name}`)
+  const description = project.description ?? project.name
+  for (const [name, value, maximum] of [
+    ["name", project.name, 50],
+    ["code", project.code, 15],
+    ["description", description, 100],
+    ["folder", project.folder, 30]
+  ] as const)
+    assert(Array.from(value.trim()).length <= maximum, `ORIGINAL_FEATURE_METADATA_TOO_LONG:${name}`)
+  const pattern = /^[\u4e00-\u9fffA-Za-z0-9_-]+$/u
+  assert(pattern.test(project.code), "ORIGINAL_FEATURE_METADATA_PATTERN:code")
+  assert(pattern.test(project.folder), "ORIGINAL_FEATURE_METADATA_PATTERN:folder")
+  // The original Feature title input removes whitespace as the user types.
+  assert(
+    pattern.test(feature.title.replace(/\s/g, "")),
+    "ORIGINAL_FEATURE_METADATA_PATTERN:featureTitle"
+  )
+}
+
 function assertInside(root: string, target: string) {
   const tail = relative(root, target)
   assert(
@@ -189,9 +223,9 @@ async function choosePrivatePath(
 
 export async function exerciseLiveOriginalFeatureJourney(input: OriginalFeatureJourneyInput) {
   const { app, page } = input
+  assertOriginalFeatureMetadata(input)
   assert(input.deadline > Date.now(), "ORIGINAL_FEATURE_DEADLINE_EXPIRED")
   const projectDescription = input.project.description ?? input.project.name
-  assert(projectDescription.length <= 100, "ORIGINAL_FEATURE_PROJECT_DESCRIPTION_TOO_LONG")
   assert(/^[a-f0-9]{64}$/i.test(input.installed.sourceDigest), "ORIGINAL_FEATURE_DIGEST_REQUIRED")
   const prefix = input.artifactPrefix ?? "original-feature"
   assert(/^[a-z0-9_.-]{1,80}$/i.test(prefix), "ORIGINAL_FEATURE_ARTIFACT_PREFIX_INVALID")
@@ -312,6 +346,7 @@ export async function exerciseLiveOriginalFeatureJourney(input: OriginalFeatureJ
     const plugin = registry.filter((item) => item.id === input.installed.pluginId)
     assert.equal(plugin.length, 1, "ORIGINAL_FEATURE_INSTALLED_PLUGIN_NOT_UNIQUE")
     assert.equal(plugin[0].runtimeMode, "host", "ORIGINAL_FEATURE_NATIVE_PROJECT_PLUGIN_REQUIRED")
+    assert(plugin[0].enabled !== false, "ORIGINAL_FEATURE_INSTALLED_ADAPTER_DISABLED")
     assert.equal(plugin[0].name, input.installed.name)
     assert.equal(plugin[0].version, input.installed.version)
     const installed = (await page.evaluate(() => window.api.plugins.list())).find(

@@ -970,7 +970,7 @@ export async function exerciseLiveGeneratedProject(input: {
     },
     project: {
       name: `Live original project ${suffix}`,
-      code: `LIVE${suffix}`,
+      code: `LIVE${suffix.slice(0, 11)}`,
       systemId: "MODS-ACCEPTANCE",
       systemName: "Isolated Mods acceptance",
       folder: `project-${suffix}`
