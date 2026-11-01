@@ -26,6 +26,7 @@ import { openModsSettings } from "./support/mods-sidebar-navigation"
 import { pollPublicState } from "./support/poll-public-state"
 import { installLiveNativeProcessApprovals } from "./support/live-native-process-approvals"
 import { isSameWorkspacePath } from "../src/shared/workspace-path"
+import { startWorkbenchCursorCdpDiagnostic } from "./support/workbench-cursor-cdp-diagnostic"
 import {
   verifyWorkbenchNodeVersionApproval,
   workbenchVisibleJson,
@@ -84,6 +85,8 @@ async function main() {
     error: string | undefined,
     monitorStopped = false,
     monitor: Promise<void> | undefined
+  let stopCursorCdpDiagnostic: (() => Promise<void>) | undefined
+  const cursorCdpDiagnostic = process.env.DEVELOPER_WORKBENCH_CURSOR_CDP === "1"
   let modelRequests = 0,
     previewResourceRequests = 0,
     otherRequests = 0,
@@ -105,6 +108,7 @@ async function main() {
       JSON.stringify(
         {
           scenario: "developer-workbench",
+          diagnosticOnly: cursorCdpDiagnostic,
           passed,
           error,
           publisher: {
@@ -455,6 +459,13 @@ async function main() {
       ).length
     })
     await cursorCheckpoint("after-first-surface-catalog")
+    if (cursorCdpDiagnostic)
+      stopCursorCdpDiagnostic = await startWorkbenchCursorCdpDiagnostic({
+        page,
+        selector: `[data-chat-thread-id=${JSON.stringify(threadId)}] textarea.composer-textarea`,
+        expectedText: draft,
+        record
+      })
     if (firstCatalog.canPrepare) {
       await cursorCheckpoint("before-original-surface-prepare")
       await nav.getByRole("button", { name: "查找可用插件界面", exact: true }).click()
@@ -472,6 +483,10 @@ async function main() {
       "WORKBENCH_CURRENT_SOURCE_SURFACES_PREPARED"
     )
     await cursorCheckpoint("after-current-source-catalog-ready")
+    if (stopCursorCdpDiagnostic) {
+      await stopCursorCdpDiagnostic()
+      stopCursorCdpDiagnostic = undefined
+    }
     assert.equal(
       catalog.entries.filter((entry) => entry.ref.provider === "developer-workbench").length,
       5
@@ -1059,6 +1074,7 @@ async function main() {
     }
   } finally {
     clearTimeout(watchdog)
+    if (stopCursorCdpDiagnostic) await clean("owned-cursor-CDP-diagnostic", stopCursorCdpDiagnostic)
     if (page)
       await clean("owned-cursor-observer", async () => {
         const observed = await page!.evaluate(() => {
