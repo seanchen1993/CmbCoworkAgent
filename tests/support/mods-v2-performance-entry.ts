@@ -5,6 +5,8 @@ import { readFile } from "node:fs/promises"
 import { join, resolve } from "node:path"
 import { setFlagsFromString } from "node:v8"
 import { runInNewContext } from "node:vm"
+import { fixedVmEventCadence } from "./mods-event-cadence"
+import { waitUntilMonotonic } from "./mods-monotonic-wait"
 import { FunctionModsManager } from "../../src/main/mods/v2/manager"
 import { FunctionRuntimeClient } from "../../src/main/mods/v2/runtime-client"
 import { ModControlStore } from "../../src/main/mods/control-store"
@@ -179,22 +181,39 @@ async function matrix(): Promise<void> {
   for (let round = 0; round < options.rounds; round++) {
     for (const count of round % 2 ? [8, 1, 0] : [0, 1, 8]) {
       await setProfile(count)
+      const cadence = fixedVmEventCadence({
+        now: () => performance.now(),
+        checkStop,
+        waitUntil: (deadline) => waitUntilMonotonic(deadline, checkStop)
+      })
+      await cadence.wait()
       const cold = performance.now()
       await event()
       const coldMs = performance.now() - cold
-      for (let index = 0; index < options.warmups; index++) await event()
+      cadence.recordStart(cold)
+      for (let index = 0; index < options.warmups; index++) {
+        await cadence.wait()
+        const started = performance.now()
+        await event()
+        cadence.recordStart(started)
+      }
       const values: number[] = []
       for (let index = 0; index < options.samples; index++) {
+        await cadence.wait()
         const before = performance.now()
         await event()
         values.push(performance.now() - before)
+        cadence.recordStart(before)
       }
+      const cadenceReport = cadence.snapshot()
+      assert.equal(cadenceReport.starts, 1 + options.warmups + options.samples)
       await settled()
       const summary = summarizeSamples(values)
       const row = {
         round,
         plugins: count,
         coldMs,
+        cadence: cadenceReport,
         ...summary,
         withinSinglePluginBudget: count === 1 ? summary.p95Ms <= 15 : null
       }

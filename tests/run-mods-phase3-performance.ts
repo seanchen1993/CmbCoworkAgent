@@ -183,6 +183,19 @@ async function main() {
   }
   if (currentSnapshot) verifyModsSourceSnapshot(root, ["src"], currentSnapshot)
   const manifest = {
+    workloadSchedule: diagnosticDispose
+      ? "unpaced diagnostic burst; not a formal sample"
+      : suite === "mcp"
+        ? "unchanged unpaced 1000-tool resolver fixture"
+        : {
+            minimumVmEventStartIntervalMs: 25,
+            maximumOfferedVmEventsPerSecond: 40,
+            appliesTo: "matrix cold/warmup/samples for every 0/1/8-plugin profile in both variants",
+            scheduling: "last actual start; serial; no catch-up; waiting outside timed calls",
+            unchanged:
+              "paired disabled/direct reads stay equally interleaved and unpaced; no VM involved",
+            scope: "Declared-load single-call latency, not saturation throughput"
+          },
     diagnosticOnly: diagnosticDispose,
     timingEligible: !diagnosticDispose,
     compiledGuestDisposeObserver: diagnosticDispose,

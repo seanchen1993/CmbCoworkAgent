@@ -1,6 +1,6 @@
 # 非媒体补齐、第三阶段与性能验收
 
-状态：v96开发者工作台补齐和后续实际缺陷已修复，经双审及中等强度非作者回检。整体Node/Web退出0，改动代码ESLint quiet错误0；首次全量失败的22个文件已按实际断点修正复验，相关独立功能链通过。原始全量失败及worker RPC异常保留，不称全量重跑全绿。当前源码原生/真实模型补验与最终性能尚未完成，本文不是整轮完成声明。
+状态（2026-11-02更新）：v96开发者工作台补齐和实际缺陷经双审修复，中等强度非作者回检通过；正式原生工作台、通用功能精确修改与组合恢复补验通过。第二代真实ZIP派生完成四阶段隔离试用、重打包及原入口导入，普通项目首阶段衔接受系统写入审批阻塞，整组退出1，未验证节点不写通过。整体Node/Web退出0，改动代码ESLint quiet错误0；首次全量失败文件已定向复验，原始全量失败及worker RPC异常保留，不称全量重跑全绿。最终性能仍在进行，本文不是整轮完成声明。
 
 ## 交付范围
 
@@ -136,11 +136,34 @@ AutoBiz 派生与装配候选验收 `output/phase3-source-autobiz-derived-9cdadc
 
 用户扩大范围后，最终性能明确延后到上述能力、可见入口和真实补验完成并冻结之后。没有把开发中并发样本或旧短测替代最终回归。
 
+## 本轮最小续验收口
+
+以下四组实际执行绑定 `27d5e527ec3be399829f9f0133dc17fe4a2a74eb` 及各自driver、完整候选源码摘要。当前产品改动截止d458162fb，随后提交仅为测试适配。真实服务别名虽为claude，实际为deepseek-v4-flash；本轮新增39次HTTP请求均200，不把历史messages中的工具清单或错误计为本次新动作。
+
+| 场景 | 实际结果 | 边界 |
+| --- | --- | --- |
+| 正式开发工作台 | `phase3-source-developer-workbench-847ff7d0/journey/run-QSC0wo`，退出0，0模型请求 | 原ZIP导入和来源确认、默认五项简明状态、按需开发信息、真实行5列7定位ACK、安全HTML纯文本、后续命令后预览保留、真实文件patch和16订阅者LRU失效、一次精确Node命令批准及自然退出、关闭资源三0、撤权和runtime退役均通过 |
+| 通用功能最后一次修改 | `phase3-source-generic-mod-d805dc25`，退出0，5次新请求 | 仅一次精确反馈至rev6，真实读取计数0→1、最近工具read_file；虚拟输入标记可见且原文字和光标不变。首轮仅历史引用，未重新执行 |
+| 原组合撤权后恢复 | `phase3-source-composition-e139ad51`，退出0，1次新请求 | 原UI重新核对两来源、检查版本、保存、预览确认；原profile仅两摘要更新，ID、顺序、参数与其他选择保留。v2实际任务及普通聊天通过，未重做20次作者请求或复制grant |
+| 交付ZIP第二次派生 | `phase3-source-report-derived-deb4aa27/journey/run-fQXTkT`，退出1，12次作者及21次运行请求 | 派生、编译、追加audit-again、四阶段试用completed、新ZIP和fresh原入口安装、原ProjectForm/配置/Feature准入及执行通过；普通项目首handoff因document.json的write_file系统审批未到达 |
+
+全部路径相对于开发仓库output，不随D盘模板复制完整模型记录。三组退出0与第四组的范围成功分别核对，中等强度非作者已实际审查证据。报告派生的原 `LIVE_CLEANUP_EXECUTION_UNSETTLED` 保留；操作者随后对原operation公开cancel，先得到cancel_requested，最终为unknown、pending0，不称cancelled。正常关闭后精确owned进程树为0，无强杀、无迟到批准和任务重放。该组源码复核字段是独立operator-post-exit中的 `sourceCandidateReadVerified=true`，run.json字段为 `driverIntegrityVerified=true`。其来源列表为空，无需Function Mod授权，不宣传发生了不存在的新grant。
+
+第二代作者曾在原request_user_input中询问试用目标。操作者从原UI提供既定371字matrixReportRuntimeGoal，原pending清除后继续同一任务；没有重开作者或改模型源码。目标只整理两条时间资料、限制200字摘要并禁止命令和扩写实现。此项是正常需求澄清，不是多一次权限批准。
+
+正式原生验收以一次真实键盘操作在原草稿建立选区[5,8]，之后不补写选区；diagnosticOnly=false、control=null，未启CDP或额外pointer诊断，全部原文本、同DOM与选区断言通过。此前未聚焦时由脚本设置选区的路径在首次准备按钮后移至末尾，原因尚未解释，负例与独立对照全部保留；不能扩大为任意未聚焦脚本选区均保持的保证。旧聊天恢复期间的16条迁移、8条runtime过期日志未阻塞通用修改成功，原因未定，不能仅凭计数归为授权失败或平台故障。
+
+ZIP身份另由root独立读CRC、逐文件字节及手写摘要重算，不调用原验收helper：旧ZIP为13文件/12作者文件，新ZIP为15文件/14作者文件；两者均与fresh安装逐字节一致，报告仅作为唯一合法增量。新候选摘要475f9999…、报告sourceDigest 66f67464…、完整ZIP文件树29eebe75…属于不同域；新ZIP SHA为7b1bcd3a…。证据为 `output/mods-report-second-lineage-root-independent-27d5e5.json`，不再混用这三种身份。
+
 ## 性能
 
 基线固定15492cc9f，完整 Git 树解析 main/shared 及相关 JSON，不回退到当前源码。固定同一依赖与负载，比较源/driver/fixture/bundle 哈希，ABBA/BAAB。开发中并发测试期间的初次 baseline 仅作诊断，不能据此判新版本回归。
 
 正式门槛保持原值：单插件 p95≤15ms；关闭 Mods 的入口 p95≤基线105%；idle CPU增量≤0.5个百分点；桌面TTFT p95增量≤40ms、吞吐比≥0.95。正式长稳需300秒idle、2小时及至少10000事件；自然heap每30秒采样，首尾各10分钟，同一暖缓存和renderer进程，增长≤max(10MiB,初始中位数10%)。强制GC仅诊断，采样缺失或身份变化不能写通过。
+
+首次安静窗口的runtime基线 `phase3-performance-runtime-3d22a416` 在单插件突发负载中退出1，未测current，不能据此作回归比较。首轮dispose诊断262e2397未装入worker，明确无效；后续724a7b45先核实际executionHostPID安装回执，捕获原 `MODS_BUDGET_EXCEEDED`、guestFailure=true、CPU500.1005ms及窗口2196.4347ms，确认突发测试触发生产500ms/5秒保护。诊断与旧片段不计正式成绩，历史基线源码及产品预算均未修改。
+
+两位medium随后通过统一正式测试调度方案：runtime与ingress的0/1/8链冷起、100warm及每轮1000sample使用相同25ms最小实际启动间隔，5轮完整保留；等待在计时之外，慢调用不追赶，异常不吞、不自适应降速，8链实际hops/mask/存活校验保留。新结果只描述≤40Hz声明负载下的单调用延迟，不称饱和吞吐。禁用直接调用的成对交错、无VM的MCP resolver、桌面流量、idle和两小时自然heap负载保持原样。实际调度与完整耗时随新样本记录；正式结果仍待完成。
 
 待填写：安静窗口的正式基线/当前样本、桌面固定流量、两小时自然heap与CPU结果，以及任何未过门槛项及其原因。
 

@@ -1,5 +1,7 @@
 import { IngressCostProfile } from "./mods-ingress-cost-profile"
 import assert from "node:assert/strict"
+import { fixedVmEventCadence } from "./mods-event-cadence"
+import { waitUntilMonotonic } from "./mods-monotonic-wait"
 import { app } from "electron"
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { join, resolve } from "node:path"
@@ -200,11 +202,31 @@ async function runMatrix(): Promise<void> {
   for (let round = 0; round < options.rounds; round++) {
     for (const count of round % 2 ? [8, 1, 0] : [0, 1, 8]) {
       await profile(count, "enabled")
+      const cadence = fixedVmEventCadence({
+        now: () => performance.now(),
+        checkStop,
+        waitUntil: (deadline) => waitUntilMonotonic(deadline, checkStop)
+      })
+      await cadence.wait()
+      const coldStart = performance.now()
       const coldMs = await event(count)
-      for (let i = 0; i < options.warmups; i++) await event(count)
+      cadence.recordStart(coldStart)
+      for (let i = 0; i < options.warmups; i++) {
+        await cadence.wait()
+        const started = performance.now()
+        await event(count)
+        cadence.recordStart(started)
+      }
       costs?.reset()
       const values: number[] = []
-      for (let i = 0; i < options.samples; i++) values.push(await event(count))
+      for (let i = 0; i < options.samples; i++) {
+        await cadence.wait()
+        const started = performance.now()
+        values.push(await event(count))
+        cadence.recordStart(started)
+      }
+      const cadenceReport = cadence.snapshot()
+      assert.equal(cadenceReport.starts, 1 + options.warmups + options.samples)
       costs?.pause()
       const storeCosts = costs?.snapshot()
       await settled()
@@ -221,6 +243,7 @@ async function runMatrix(): Promise<void> {
         round,
         plugins: count,
         coldMs,
+        cadence: cadenceReport,
         ...(storeCosts ? { storeCosts } : {}),
         ...summary,
         auditReceipt: { callId: audit.callId, toolId: audit.toolId, status: audit.status },
