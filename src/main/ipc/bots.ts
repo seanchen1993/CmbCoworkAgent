@@ -8,6 +8,7 @@ import {
 } from "../../shared/bots/contracts"
 import {
   botIdentifier,
+  botBrowserScopeIdentifier,
   parseCreateBot,
   parseSendBotMessage,
   parseUpdateBot,
@@ -223,7 +224,7 @@ export function registerBotHandlers(
   ipcMain.handle(
     "bots:browser:preview",
     (_event, hostId: unknown, id: unknown, pageId: unknown) => {
-      const scope = hostFor(hostId).browserScope(botIdentifier(id))
+      const scope = hostFor(hostId).browserScope(botBrowserScopeIdentifier(id))
       return getBotBrowserService().preview(
         scope,
         pageId == null ? undefined : botIdentifier(pageId)
@@ -233,7 +234,7 @@ export function registerBotHandlers(
   ipcMain.handle(
     "bots:browser:takeover",
     (_event, hostId: unknown, id: unknown, pageId: unknown) => {
-      const scope = hostFor(hostId).browserScope(botIdentifier(id))
+      const scope = hostFor(hostId).browserScope(botBrowserScopeIdentifier(id))
       return getBotBrowserService().takeOver(
         scope,
         pageId == null ? undefined : botIdentifier(pageId)
@@ -243,7 +244,7 @@ export function registerBotHandlers(
   ipcMain.handle(
     "bots:browser:give-back",
     (_event, hostId: unknown, id: unknown, generation: unknown, outcome: unknown) => {
-      const scope = hostFor(hostId).browserScope(botIdentifier(id))
+      const scope = hostFor(hostId).browserScope(botBrowserScopeIdentifier(id))
       if (
         generation !== undefined &&
         (typeof generation !== "number" || !Number.isSafeInteger(generation) || generation < 0)
@@ -261,7 +262,7 @@ export function registerBotHandlers(
   ipcMain.handle(
     "bots:browser:navigate",
     (_event, hostId: unknown, id: unknown, pageId: unknown, url: unknown) => {
-      const scope = hostFor(hostId).browserScope(botIdentifier(id))
+      const scope = hostFor(hostId).browserScope(botBrowserScopeIdentifier(id))
       if (typeof url !== "string" || url.length > 4096 || url.includes("\0"))
         throw new BotError("INVALID_INPUT", "网页地址无效")
       return getBotBrowserService().navigateAsHuman(scope, botIdentifier(pageId), url)
@@ -270,7 +271,7 @@ export function registerBotHandlers(
   ipcMain.handle(
     "bots:browser:operate",
     (_event, hostId: unknown, id: unknown, input: unknown, generation: unknown) => {
-      const scope = hostFor(hostId).browserScope(botIdentifier(id))
+      const scope = hostFor(hostId).browserScope(botBrowserScopeIdentifier(id))
       if (typeof generation !== "number" || !Number.isSafeInteger(generation) || generation < 0)
         throw new BotError("INVALID_INPUT", "浏览器控制版本无效")
       if (

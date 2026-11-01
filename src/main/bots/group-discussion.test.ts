@@ -2291,6 +2291,70 @@ describe("bounded group discussion on the existing Bot queue", () => {
   })
 })
 
+describe("group discussion budget feedback", () => {
+  function reachLimit() {
+    const f = fixture()
+    f.send("review-until-done")
+    let calls = 0
+    for (;;) {
+      const task = f.store.nextQueued([])
+      if (!task) break
+      expect(++calls).toBeLessThan(10)
+      const peer = f.members.find(member => member.id !== task.botId)!
+      f.store.transition(task.id, "running")
+      f.store.publishGroupMessage(task.id, `step-${calls}`, `@${peer.name} Please review the next revision.`)
+      f.store.settle(task.id, "completed", null, "private scratch", undefined, true)
+      f.store.advanceGroupDiscussions()
+    }
+    expect(calls).toBe(4) // Existing budget, not more automatic execution.
+    return f
+  }
+
+  it("retains the limit reason across refresh/restart/retry/rename, then clears it on a new instruction", () => {
+    const f = reachLimit()
+    expect(f.store.getGroup(f.group.id)).toMatchObject({
+      discussionLimit: { messageId: "review-until-done" }
+    })
+    expect(f.db.exec("SELECT * FROM bot_group_discussions")[0].values).toEqual([])
+    expect(f.store.nextQueued([])).toBeNull()
+    const refreshed = new BotStore(f.db, () => 1000)
+    expect(refreshed.getGroup(f.group.id)).toEqual(f.store.getGroup(f.group.id))
+    f.send("review-until-done") // Lost transport acknowledgement must not clear the notice.
+    expect(f.store.getGroup(f.group.id)).toHaveProperty("discussionLimit")
+    f.store.saveGroup({ name: "Renamed", memberIds: f.group.memberIds }, f.group)
+    expect(f.store.getGroup(f.group.id)).toHaveProperty("discussionLimit")
+    f.send("continue-review")
+    expect(f.store.getGroup(f.group.id)).not.toHaveProperty("discussionLimit")
+    expect(f.store.nextQueued([])?.message).toContain("Please review the next revision.")
+    expect(f.store.nextQueued([])?.origin).toMatchObject({ kind: "group", messageId: "continue-review" })
+  })
+
+  it("does not turn natural settling, cancellation or failure into a budget warning", () => {
+    for (const terminal of ["completed", "cancelled", "failed"] as const) {
+      const f = fixture()
+      const [task] = f.send()
+      f.store.transition(task.id, "running")
+      f.store.settle(task.id, terminal, terminal === "failed" ? "test failure" : null, "Done")
+      f.store.advanceGroupDiscussions()
+      expect(f.store.getGroup(f.group.id)).not.toHaveProperty("discussionLimit")
+    }
+  })
+
+  it("clears a stale warning on explicit stop or member change without changing other groups", () => {
+    const f = reachLimit()
+    const untouched = f.store.saveGroup({ name: "Other room", memberIds: f.group.memberIds })
+    f.store.stopGroupDiscussion(f.group.id, "unrelated-old-request")
+    expect(f.store.getGroup(f.group.id)).toHaveProperty("discussionLimit")
+    f.store.stopGroupDiscussion(f.group.id)
+    expect(f.store.getGroup(f.group.id)).not.toHaveProperty("discussionLimit")
+    expect(f.store.getGroup(untouched.id)).toEqual(untouched)
+    const other = reachLimit()
+    const updated = other.store.saveGroup({ name: "Room", memberIds: [other.members[0].id] }, other.group)
+    expect(updated).not.toHaveProperty("discussionLimit")
+    expect(other.store.getGroup(other.group.id)).not.toHaveProperty("discussionLimit")
+  })
+})
+
 describe("group public activity and dispatch budgets", () => {
   function cursor(f: ReturnType<typeof fixture>): GroupDiscussion {
     const rows = f.db.exec("SELECT payload FROM bot_group_discussions WHERE group_id=?", [

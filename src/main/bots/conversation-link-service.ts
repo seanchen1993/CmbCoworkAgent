@@ -19,6 +19,7 @@ import { claimLocalThreadRunLease, releaseLocalThreadRunLease } from "../agent/t
 import { isExternallyManagedThreadRunBusy } from "../services/thread-external-run-busy"
 import { verifyWorkConversationThread } from "./conversation-link-authority"
 import type { BotWorkItem } from "../../shared/bots/work"
+import { assertBotNonTeamConversation } from "../../shared/bots/team-policy"
 
 function metadataOf(raw: string | null): Record<string, unknown> {
   const value = JSON.parse(raw || "{}")
@@ -126,6 +127,7 @@ export async function linkExistingConversation(
   return mutate(host, ref.threadId, async (row, metadata) => {
     if (!matchesThreadIncarnation(row, ref.incarnation))
       throw new BotError("CONFLICT", "原会话已变化，请重新确认。")
+    assertBotNonTeamConversation(metadata)
     const previous = host.conversationLinks.forThread(ref.threadId)
     if (previous?.conversation) {
       const replay = host.conversationLinks.prepare(input)
@@ -143,6 +145,9 @@ function finishBinding(
   metadata: Record<string, unknown>
 ) {
   const link = work.conversation!
+  // A completed old binding may still be opened/unlinked to retain its history.
+  // Preparing (including crash recovery) must not admit a new Team binding.
+  if (link.state !== "bound") assertBotNonTeamConversation(metadata)
   if (
     link.ref.kind !== "local_thread" ||
     !matchesThreadIncarnation(row, link.ref.incarnation) ||

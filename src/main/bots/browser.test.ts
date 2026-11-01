@@ -142,6 +142,89 @@ afterEach(async () => {
 })
 
 describe("Bot browser ownership and control", () => {
+  it("lets a peer observe, take over and return while another Bot is navigating", async () => {
+    const a = JSON.parse(await service.act("a", { action: "observe" }, signal()))
+    const b = JSON.parse(await service.act("b", { action: "observe" }, signal()))
+    const entered = deferred(), finish = deferred()
+    context.entries[0].goto.mockImplementationOnce(async () => {
+      entered.resolve()
+      await finish.promise
+    })
+    const navigation = service.act("a", {
+      action: "navigate", pageId: a.pageId, url: "https://example.test/slow"
+    }, signal())
+    const settled = Promise.allSettled([navigation])
+    await entered.promise
+    try {
+      expect(JSON.parse(await service.act("b", { action: "observe", pageId: b.pageId }, signal())).pageId)
+        .toBe(b.pageId)
+      await service.takeOver("b", b.pageId)
+      expect((await service.preview("b")).control).toBe("human")
+      await service.giveBack("b")
+      expect((await service.preview("b")).control).toBe("bot")
+      expect(context.entries[0].closed).toBe(false)
+    } finally {
+      finish.resolve()
+      await settled
+    }
+    expect((await settled)[0].status).toBe("fulfilled")
+    expect(context.entries[0].goto).toHaveBeenCalledTimes(1)
+  })
+
+  it("keeps same-scope actions serialized and rejects queued input after takeover", async () => {
+    const a = JSON.parse(await service.act("a", { action: "observe" }, signal()))
+    const entered = deferred(), finish = deferred()
+    context.entries[0].goto.mockImplementationOnce(async () => {
+      entered.resolve()
+      await finish.promise
+    })
+    const navigation = service.act("a", {
+      action: "navigate", pageId: a.pageId, url: "https://example.test/slow"
+    }, signal())
+    const navigationResult = Promise.allSettled([navigation])
+    await entered.promise
+    const input = service.act("a", {
+      action: "fill", pageId: a.pageId, role: "textbox", name: "Name", text: "stale"
+    }, signal())
+    const inputResult = Promise.allSettled([input])
+    await new Promise<void>(resolve => setImmediate(resolve))
+    expect(context.entries[0].fill).not.toHaveBeenCalled()
+    const taking = service.takeOver("a", a.pageId)
+    finish.resolve()
+    expect((await navigationResult)[0].status).toBe("rejected")
+    expect((await inputResult)[0].status).toBe("rejected")
+    await taking
+    expect(context.entries[0].fill).not.toHaveBeenCalled()
+    expect((await service.preview("a")).control).toBe("human")
+    await service.giveBack("a")
+  })
+
+  it("cleans a removed group member's pending first page before allowing a rejoined action", async () => {
+    const owner = botGroupBrowserScope("room", "a")
+    const engine = await launch()
+    launch.mockResolvedValue(engine)
+    const entered = deferred(), finish = deferred()
+    vi.spyOn(engine, "createPage").mockImplementationOnce(async () => {
+      const page = await context.newPage()
+      entered.resolve()
+      await finish.promise
+      return page as unknown as Awaited<ReturnType<BotBrowserEngine["createPage"]>>
+    })
+    const first = service.act(owner, { action: "observe" }, signal())
+    const firstResult = Promise.allSettled([first])
+    await entered.promise
+    const removed = service.removeGroupMember("room", "a")
+    const rejoined = service.act(owner, { action: "observe" }, signal())
+    finish.resolve()
+    await firstResult
+    await removed
+    const next = JSON.parse(await rejoined)
+    expect(context.entries).toHaveLength(2)
+    expect(context.entries[0].closed).toBe(true)
+    expect(context.entries[1].closed).toBe(false)
+    expect((await service.preview(owner)).pages.map(page => page.id)).toEqual([next.pageId])
+  })
+
   it("routes native toolbar actions through the same owner and lease, excluding browser chrome", async () => {
     const a = JSON.parse(await service.act("a", { action: "observe" }, signal()))
     const b = JSON.parse(await service.act("b", { action: "observe" }, signal()))

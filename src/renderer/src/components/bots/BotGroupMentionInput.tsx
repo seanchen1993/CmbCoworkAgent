@@ -292,7 +292,8 @@ function BotMentionInput<M extends Mention>({
     }
   }, [editor])
   useEffect(() => {
-    if (editor && !editor.isDestroyed) editor.setEditable(!privateChat?.disabled)
+    // Enabling the editor is not a user edit; preserve restored retry identities.
+    if (editor && !editor.isDestroyed) editor.setEditable(!privateChat?.disabled, false)
   }, [editor, privateChat?.disabled])
   const draftIdentity = useMemo(() => JSON.stringify({ text, mentions }), [text, mentions])
   useLayoutEffect(() => {

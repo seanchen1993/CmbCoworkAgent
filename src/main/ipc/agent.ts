@@ -8019,7 +8019,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             message: routingDecisionMessage || effectiveMessage,
             threadId,
             requestedModelId,
-            routingMode: getGlobalRoutingMode()
+            routingMode: runExecutionContext.modelRoutingMode ?? getGlobalRoutingMode()
           })
           throwIfInvokeAborted()
           invokeRoutingResult = preparedRouting.result

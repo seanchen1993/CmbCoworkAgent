@@ -262,6 +262,8 @@ export function botGroupBrowserScope(groupId: string, botId: string): string {
 
 export interface BotGroup {
   deleting?: boolean
+  /** Automatic discussion stopped at its budget; a new user instruction can continue. */
+  discussionLimit?: { messageId: string }
   id: string
   hostId: string
   name: string

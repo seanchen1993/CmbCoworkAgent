@@ -1661,7 +1661,10 @@ export class LocalBotHost {
     while (!this.stopping && this.active.size < this.concurrency) {
       const task = this.store.nextQueued(
         [...excluded],
-        ![...this.active.values()].some((run) => !!botTaskWorkFamily(run.task))
+        // The finite-slot policy reserves capacity for main conversations. With
+        // admission uncapped, unrelated work threads need no global reservation.
+        this.concurrency === Number.POSITIVE_INFINITY ||
+          ![...this.active.values()].some((run) => !!botTaskWorkFamily(run.task))
       )
       if (!task) return
       if (this.store.taskRootCancelled(task)) {

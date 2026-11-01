@@ -112,6 +112,30 @@ export function botIdentifier(value: unknown): string {
   return id
 }
 
+/** Browser audiences compose existing IDs; validate parts without enlarging Bot IDs. */
+export function botBrowserScopeIdentifier(value: unknown): string {
+  // IM scope: binding + owner + optional executor + im-peer-{rootTaskId}-{executorId}.
+  const id = boundedString(value, "浏览器标识", 3 + 3 * 128 + 6 + 8 + 128 + 1 + 128)
+  const prefix = ["im-", "group-", "work-"].find((item) => id.startsWith(item))
+  if (!prefix) return botIdentifier(id)
+  const parts = id.slice(prefix.length).split("--")
+  if (
+    parts.length < 2 ||
+    parts.length > (prefix === "im-" ? 4 : 2) ||
+    parts.some((part) => !part)
+  ) throw new BotError("INVALID_INPUT", "浏览器目标格式无效")
+  parts.forEach((part, index) => {
+    if (prefix === "im-" && index === 3) {
+      const thread = boundedString(part, "浏览器线程", 8 + 128 + 1 + 128)
+      if (!/^im-peer-[A-Za-z0-9_-]+$/.test(thread) || !thread.endsWith(`-${parts[2]}`))
+        throw new BotError("INVALID_INPUT", "浏览器线程格式无效")
+    } else if (botIdentifier(part) !== part) {
+      throw new BotError("INVALID_INPUT", "浏览器目标格式无效")
+    }
+  })
+  return id
+}
+
 export function parseCreateBot(input: unknown): CreateBotInput {
   const item = record(input)
   const color = boundedString(item.color, "头像颜色", 7)

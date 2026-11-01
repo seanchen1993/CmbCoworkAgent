@@ -18,7 +18,7 @@ import { getThreadCore } from "../db"
 import { verifyWorkConversationThread } from "../bots/conversation-link-authority"
 import { prepareBotThread } from "../bots/runtime-adapter"
 import { resolveBotWorkspaceFile } from "../bots/workspace-file"
-import { botImportDestination, copyBotFile, copyBotFileBytes } from "../bots/file-copy"
+import { botImportDestination, copyBotFile, copyBotFileBytes, exportBotFile } from "../bots/file-copy"
 import {
   cancelWorkspaceFileScan,
   cancelWorkspaceFileScansForOwner,
@@ -339,7 +339,7 @@ export function registerBotFileHandlers(
     })
     if (destination.canceled || !destination.filePath) return false
     validate()
-    await copyBotFile(workspace, source, destination.filePath)
+    await exportBotFile(workspace, source, destination.filePath)
     return true
   }
   const groupContext = (hostId: unknown, groupId: unknown) => {

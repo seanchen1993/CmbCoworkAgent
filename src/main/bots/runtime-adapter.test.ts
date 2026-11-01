@@ -2212,7 +2212,7 @@ describe("Bot Runtime integration", () => {
         workspacePath,
         model: "custom:original",
         memoryEnabled: true,
-        agentMode: "coordinator",
+        agentMode: "normal",
         title: "Original title",
         botWorkId: linked.id,
         botAudienceKey: "desktop",
@@ -2234,10 +2234,11 @@ describe("Bot Runtime integration", () => {
         .execute(new AbortController().signal, vi.fn())
       expect(fixture.start.mock.calls[0][0]).toMatchObject({
         modelId: "custom:original",
-        agentMode: "coordinator",
+        agentMode: "normal",
         threadId: "existing"
       })
       const context = fixture.start.mock.calls[0][2] as AgentRunExecutionContext
+      expect(context.modelRoutingMode).toBeUndefined()
       expect(context.toolConcurrencyQueueId).toBe(`workspace:${workspacePath}`)
       expect(context.verifyResolvedThread!({ workspacePath, metadata: original })).toBeNull()
       const upload = vi.fn(async () => "uploaded")
@@ -3272,6 +3273,7 @@ describe("Bot Runtime integration", () => {
       .acquire({ ...bot, modelRef: null }, task)!
       .execute(new AbortController().signal, vi.fn())
     expect(fixture.start.mock.calls[0][0].modelId).toBe("custom:available-default")
+    expect(fixture.start.mock.calls[0][2].modelRoutingMode).toBeUndefined()
     expect(JSON.parse(fixture.update.mock.calls.at(-1)![1].metadata).model).toBe(
       "custom:available-default"
     )
@@ -3283,7 +3285,7 @@ describe("Bot Runtime integration", () => {
     prepareBotThread(bot)
     expect(JSON.parse(fixture.update.mock.calls.at(-1)![1].metadata).model).toBe("test-model")
   })
-  it.each([undefined, "normal", "workflow", "coordinator"])(
+  it.each([undefined, "normal", "workflow"])(
     "blocks new workflows without disabling subagents or changing persisted mode (%s)",
     async (mode) => {
       fixture.thread.mockReturnValue({
@@ -3710,6 +3712,76 @@ describe("Bot Runtime integration", () => {
     if (origin.kind === "user")
       expect(prompt).toContain("Before tools for substantive work")
     else expect(prompt).not.toContain("Before tools for substantive work")
+  })
+  it.each(["completed", "failed", "outcome_unknown"] as const)(
+    "notifies user-facing peer integrations (%s), not private nested handoffs",
+    async (terminal) => {
+      const { LocalBotHost } = await import("./host")
+      const db = new NativeSqliteAdapter(new DatabaseSync(":memory:"))
+      const store = new BotStore(db)
+      const makeBot = (name: string) => store.create({ name, instructions: "", color: "#123456", modelRef: null })
+      const owner = makeBot("Owner")
+      const peer = makeBot("Reviewer")
+      const leaf = makeBot("Checker")
+      let host!: LocalBotHost
+      const runtime = createLocalBotRunPort(
+        {} as BotMemoryService, () => host, {} as BotBrowserService, {} as BotMemoryMaintainer
+      )
+      const events: { task: BotTask; notifications: number }[] = []
+      let ownerResults = 0
+      const errors = vi.fn()
+      host = new LocalBotHost(store, {
+        onAvailable: () => () => {},
+        acquire: (_bot, current) => ({
+          execute: async () => {
+            if (current.origin.kind === "user")
+              host.delegate(current.id, peer.id, "Review", "review")
+            else if (current.botId === peer.id && current.origin.kind === "bot" && current.origin.expectsReply && current.message === "Review")
+              host.delegate(current.id, leaf.id, "Check", "check")
+            else if (current.botId === owner.id) {
+              ownerResults++
+              if (ownerResults === 1) host.delegate(current.id, peer.id, "Verify revision", "revision")
+              else return { state: terminal, result: "Final verified result", ...(terminal !== "completed" ? { error: "Review failed" } : {}) }
+            }
+            return { state: "completed", result: "Intermediate result" }
+          },
+          release: () => {}
+        }),
+        onSettled: (current, state, text, files, publicContribution) => {
+          const before = fixture.notify.mock.calls.length
+          runtime.onSettled!(current, state, text, files, publicContribution)
+          events.push({ task: current, notifications: fixture.notify.mock.calls.length - before })
+        }
+      }, Infinity, errors)
+      try {
+        host.send({ botId: owner.id, requestId: "peer-notification", message: "Review requested changes" })
+        await vi.waitFor(() => expect(events.filter(e => e.task.botId === owner.id && e.task.origin.kind === "bot")).toHaveLength(2))
+        expect(errors).not.toHaveBeenCalled()
+        const final = events.at(-1)!
+        expect(final.task.botId).toBe(owner.id)
+        expect(final.task.origin).toMatchObject({ kind: "bot", expectsReply: false, upstreamTaskId: expect.any(String) })
+        expect(final.notifications).toBe(1)
+        expect(events.filter(e => e.task.origin.kind === "bot" && e !== final).map(e => e.notifications)).toEqual([0, 0, 0, 1, 0])
+        expect(events.find(e => e.task.origin.kind === "user")?.notifications).toBe(1)
+        expect(fixture.notify).toHaveBeenLastCalledWith(
+          `Owner · ${terminal === "completed" ? "有新回复" : "需要你查看"}`, "返回 Bots 工作区查看结果。"
+        )
+      } finally { await host.stop(); db.close() }
+    }
+  )
+  it("keeps silent, private, work and external peer receipts out of desktop notifications", () => {
+    const runtime = port()
+    const receipt: BotTask = { ...task, origin: { kind: "bot", fromBotId: "peer", rootTaskId: "root", depth: 1, expectsReply: false } }
+    fixture.peerHandoff.mockReturnValue({ owned: false, pending: false, outputFiles: [] })
+    for (const result of ["", "   ", "(pass)", "BOT_ROUTINE_SILENT", "<think>private</think>"])
+      runtime.onSettled!(receipt, "completed", result)
+    runtime.onSettled!({ ...receipt, workId: "work" }, "completed", "Work result")
+    runtime.onSettled!({ ...receipt, origin: { ...receipt.origin, groupId: "g" } as BotTask["origin"] }, "completed", "Group result")
+    runtime.onSettled!({ ...receipt, mockSource: { transport: "im", personal: true } as BotTask["mockSource"] }, "completed", "External result")
+    runtime.onSettled!(receipt, "cancelled", "Stopped")
+    expect(fixture.notify).not.toHaveBeenCalled()
+    runtime.onSettled!(receipt, "completed", "(pass)", [{ filePath: "/synthetic/report.md", name: "report.md", size: 1 }])
+    expect(fixture.notify).toHaveBeenCalledOnce()
   })
   it("does not notify for an exact no-change routine marker", () => {
     const runtime = port()
@@ -5621,6 +5693,7 @@ it.each([false, true])("still claims the exact workflow when yielding before inp
   const context = fixture.start.mock.calls[0][2]
   expect(context.workflowInternalNotification).toBe(true)
   expect(context.botWorkflowNotification).toEqual({ runId: "wf-unconsumed", startedAt: "2026-10-31T01:00:00Z" })
+  expect(context.modelRoutingMode).toBe("pinned")
   expect(context.resumeCheckpointId).toBe(inGroup ? "pending-model" : undefined)
   expect(context.continueBotTaskCheckpointId).toBe(inGroup ? undefined : "pending-model")
   lease.release()
@@ -5842,4 +5915,63 @@ it("isolates authenticated IM peer browser owners while retaining their binding 
     await host.stop()
     db.close()
   }
+})
+
+// Global auto-routing must not override an explicit per-Bot model selection.
+it.each([false, true])("pins an explicitly selected Bot model (group=%s)", async (inGroup) => {
+  fixture.thread.mockReturnValue({ metadata: JSON.stringify(metadata(inGroup ? "g" : undefined)) })
+  const current: BotTask = inGroup
+    ? { ...task, origin: { kind: "group", groupId: "g", messageId: "group-message" } }
+    : task
+  const lease = port().acquire(bot, current)!
+  try {
+    await lease.execute(new AbortController().signal, vi.fn())
+    expect(fixture.start.mock.calls[0][0].modelId).toBe(bot.modelRef)
+    expect(fixture.start.mock.calls[0][2].modelRoutingMode).toBe("pinned")
+  } finally { lease.release() }
+})
+
+it.each(["user", "group", "bot", "schedule"] as const)("rejects Team on new %s tasks before starting a runtime", async (kind) => {
+  const current = { ...task, origin: kind === "group" ? { kind, groupId: "g", messageId: "m" } :
+    kind === "bot" ? { kind, fromBotId: "b", sourceTaskId: "source", rootTaskId: "root", depth: 1, expectsReply: true } :
+    kind === "schedule" ? { kind, scheduleId: "schedule", occurrence: "once" } : { kind } } as BotTask
+  const original = { ...metadata(kind === "group" ? "g" : undefined), agentMode: "coordinator" }
+  fixture.thread.mockReturnValue({ metadata: JSON.stringify(original) })
+  const lease = port().acquire(bot, current)!
+  try {
+    await expect(lease.execute(new AbortController().signal, vi.fn())).rejects.toThrow("不支持 Team")
+    expect(fixture.start).not.toHaveBeenCalled()
+    expect(fixture.update).not.toHaveBeenCalled()
+  } finally { lease.release() }
+})
+it.each(["[coordinator] write code", "#coordinator: write code"])("rejects forced Team input without rewriting the normal Bot: %s", async (message) => {
+  fixture.thread.mockReturnValue({ metadata: JSON.stringify({ ...metadata(), agentMode: "normal" }) })
+  const lease = port().acquire(bot, { ...task, message })!
+  try {
+    await expect(lease.execute(new AbortController().signal, vi.fn())).rejects.toThrow("不支持 Team")
+    expect(fixture.start).not.toHaveBeenCalled()
+    expect(fixture.update).not.toHaveBeenCalled()
+    expect(await lease.steer!({ ...task, id: "new", requestId: "new", message }, vi.fn())).toBe(false)
+    expect(fixture.steer).not.toHaveBeenCalled()
+  } finally { lease.release() }
+})
+it("rejects a process Team override for Bot runs and leaves the environment unchanged", async () => {
+  const previous = process.env.CMB_COORDINATOR_MODE
+  process.env.CMB_COORDINATOR_MODE = "1"
+  const lease = port().acquire(bot, task)!
+  try {
+    await expect(lease.execute(new AbortController().signal, vi.fn())).rejects.toThrow("不支持 Team")
+    expect(fixture.start).not.toHaveBeenCalled()
+    expect(process.env.CMB_COORDINATOR_MODE).toBe("1")
+  } finally {
+    lease.release()
+    if (previous === undefined) delete process.env.CMB_COORDINATOR_MODE
+    else process.env.CMB_COORDINATOR_MODE = previous
+  }
+})
+it("rechecks Team metadata at the existing execution authorization boundary", async () => {
+  await port().acquire(bot, task)!.execute(new AbortController().signal, vi.fn())
+  const context = fixture.start.mock.calls[0][2] as AgentRunExecutionContext
+  expect(context.verifyResolvedThread!({ workspacePath: metadata().workspacePath,
+    metadata: { ...metadata(), agentMode: "coordinator" } })).toContain("不支持 Team")
 })

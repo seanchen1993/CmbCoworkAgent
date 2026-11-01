@@ -96,6 +96,42 @@ function finish(store: BotStore, task: BotTask, result: string, explicitGroupMes
 }
 
 describe("nested private collaboration result return", () => {
+  it.each(["private", "work", "group"] as const)("discloses clipped %s peer results in the caller and exchange", (scope) => {
+    const f = fixture(1, scope)
+    const child = f.chain[1]
+    const result = "Review item. ".repeat(2800) + "FINAL_BLOCKER"
+    f.store.settle(child.id, "completed", null, result, undefined, Boolean(f.group))
+    const exchange = () => f.store.exchange(f.bots[0].id, child.id, f.group?.id, f.work?.id)
+    expect(exchange().reply?.message).toContain("正文已截断")
+    expect(exchange().reply?.message).not.toContain("FINAL_BLOCKER")
+    const reply = receipt(f.store, child)
+    expect(reply.message).toContain("正文已截断")
+    expect(reply.message).toContain(result.slice(0, 30_000))
+    expect(reply.message).not.toContain("FINAL_BLOCKER")
+    expect(exchange().reply?.message).toContain("正文已截断")
+    expect(exchange().reply?.delivered).toBe(true)
+    expect(f.store.getTask(child.id).state).toBe("completed")
+    f.store.flushReplies()
+    expect(f.store.recentTasks().filter(task => task.requestId === `reply-${child.id}`)).toHaveLength(1)
+  })
+
+  it.each(["Short result", "x".repeat(30_000)])("preserves a complete peer result within the budget", (result) => {
+    const f = fixture(1)
+    f.store.settle(f.chain[1].id, "completed", null, result)
+    const reply = receipt(f.store, f.chain[1])
+    expect(reply.message).toBe(`Peer 1 的协作任务已结束（已完成）。\n${result}`)
+    expect(f.store.exchange(f.bots[0].id, f.chain[1].id).reply?.message).toBe(result)
+  })
+
+  it("discloses clipped failure details without changing the failed outcome", () => {
+    const f = fixture(1)
+    f.store.settle(f.chain[1].id, "failed", "Failure detail. ".repeat(2500))
+    const reply = receipt(f.store, f.chain[1])
+    expect(reply.message).toContain("协作任务已结束（执行失败）")
+    expect(reply.message).toContain("正文已截断")
+    expect(f.store.getTask(f.chain[1].id).state).toBe("failed")
+  })
+
   it.each([false, true])("records a live group peer delivery while waiting=%s", async (waiting) => {
     const db = new NativeSqliteAdapter(new DatabaseSync(":memory:"))
     databases.push(db)

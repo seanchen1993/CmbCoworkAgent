@@ -210,6 +210,44 @@ function fixture(
 }
 
 describe("authenticated IM on the existing Bot host", () => {
+  it.each(["group", "personal", "work"] as const)("routes stopped background activity to the IM %s owner", async (scope) => {
+    const f = fixture(undefined, undefined, () => false)
+    const own = f.host.send({ botId: f.bot.id, requestId: "baseline", message: "Private baseline" })
+    f.store.transition(own.id, "running")
+    f.store.settle(own.id, "completed", null, "Private outcome")
+    const binding = await f.binding(scope === "personal" ? "dm" : "group")
+    await f.service.receive(f.event(binding, "command-source"))
+    let source = f.store.recentTasks().find(task => task.mockSource)!
+    f.store.transition(source.id, "running")
+    if (scope === "work") {
+      const work = f.store.createWork(
+        { botId: f.bot.id, operationId: "work", title: "Work", goal: "Run" },
+        { taskId: source.id, callId: "create", key: "create" }
+      )
+      f.store.settle(source.id, "completed", null, "Work created")
+      source = work.task
+      f.store.transition(source.id, "running")
+    }
+    f.host.commandLifecycle(source.id).accepted({ id: "command", threadId: source.threadId, command: "node check.js", cwd: "/synthetic", startedAt: Date.now() })
+    f.store.settle(source.id, "completed", null, "Started")
+    const before = f.store.activities()
+    f.cancelBackground.mockImplementation(async (threadId) => {
+      expect(threadId).toBe(source.threadId)
+      f.host.commandLifecycle(source.id).settled({ id: "command", threadId, output: "", exitCode: null, truncated: false, cancelled: true })
+    })
+    if (scope === "group") f.host.stopImConversation(f.bot.id, source.mockSource!.bindingId)
+    else f.host.stopConversation(f.bot.id, undefined, source.workId)
+    await eventually(() => f.store.activeCommandThreads().length === 0)
+    const activity = f.store.activities()
+    const main = (items: typeof activity) => items.find(item => item.kind === "bot" && item.id === f.bot.id)
+    if (scope === "personal") expect(main(activity)?.preview).toBe("后台任务已停止")
+    else {
+      expect(main(activity)).toEqual(main(before))
+      expect(f.host.snapshot().imConversations?.find(item => item.bindingId === binding.id)?.activity.preview).toBe("后台任务已停止")
+    }
+    if (scope === "work") expect(f.store.getWork(f.bot.id, source.workId!).activity?.preview).toBe("后台任务已停止")
+    expect(f.errors).toEqual([])
+  })
   it("publishes idle IM disconnect once and refreshes again on reconnect", async () => {
     const f = fixture(), binding = await f.binding()
     const views: boolean[] = []

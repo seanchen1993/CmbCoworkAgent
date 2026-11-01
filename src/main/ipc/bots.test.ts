@@ -12,6 +12,7 @@ import { LocalBotHost } from "../bots/host"
 import { BotMemoryService } from "../bots/memory"
 import { BotImChannelService, type BotImGatewayClient } from "../services/im/bot-channel-service"
 import {
+  botImBrowserScope,
   assertBotImBinding,
   assertBotImEvent,
   type BotImBinding
@@ -32,10 +33,12 @@ const fixture = vi.hoisted(() => ({
   listMemory: vi.fn(),
   create: vi.fn(),
   preview: vi.fn(),
+  takeOver: vi.fn(),
+  navigate: vi.fn(),
   giveBack: vi.fn(),
   operateBrowser: vi.fn(),
   browserScope: vi.fn((id: string) => {
-    if (id === "group-missing") throw new Error("群聊不存在")
+    if (id === "group-missing--a") throw new Error("群聊不存在")
     return id
   }),
   snapshot: vi.fn(() => ({ revision: 1 })),
@@ -76,6 +79,8 @@ vi.mock("../bots/local-service", () => ({
     giveBack: fixture.giveBack,
     operateAsHuman: fixture.operateBrowser,
     preview: fixture.preview,
+    takeOver: fixture.takeOver,
+    navigateAsHuman: fixture.navigate,
     removeBot: fixture.removeBot,
     removeGroup: fixture.removeBrowserGroup
   })
@@ -694,7 +699,7 @@ describe("Bot IPC boundaries", () => {
       expect(() => call("bots:browser:operate", "local", "a", input, 3)).toThrow()
     expect(() => call("bots:browser:operate", "remote", "a", reload, 3)).toThrow("本机")
     expect(() => call("bots:browser:operate", "local", "../a", reload, 3)).toThrow()
-    expect(() => call("bots:browser:operate", "local", "group-missing", reload, 3)).toThrow(
+    expect(() => call("bots:browser:operate", "local", "group-missing--a", reload, 3)).toThrow(
       "不存在"
     )
     expect(fixture.operateBrowser).not.toHaveBeenCalled()
@@ -790,7 +795,7 @@ describe("Bot IPC boundaries", () => {
 
   it("resolves existing group browser scopes before forwarding page requests", () => {
     const call = register()
-    expect(() => call("bots:browser:preview", "local", "group-missing")).toThrow("不存在")
+    expect(() => call("bots:browser:preview", "local", "group-missing--a")).toThrow("不存在")
     expect(() => call("bots:browser:preview", "local", "group-../private")).toThrow()
     expect(fixture.preview).not.toHaveBeenCalled()
     call("bots:browser:preview", "local", "group-g--a")
@@ -886,4 +891,54 @@ describe("Bot IPC boundaries", () => {
       diagnostic.mockRestore()
     }
   })
+})
+
+it.each([false, true])("accepts real IM browser scopes through every IPC (tool-created=%s)", async (toolCreated) => {
+  const db = new NativeSqliteAdapter(new DatabaseSync(":memory:"))
+  const store = new BotStore(db)
+  const owner = store.create({ name: "Owner", instructions: "", color: "#123456", modelRef: null })
+  const task = store.enqueue({ botId: owner.id, requestId: "create-peer", message: "Create a teammate" })
+  store.transition(task.id, "running")
+  const teammate = toolCreated
+    ? store.createTeammate(task.id, "peer", { name: "Peer", instructions: "Research" })
+    : store.create({ name: "Peer", instructions: "Research", color: "#123456", modelRef: null })
+  store.settle(task.id, "completed", null, "Created")
+  const host = new LocalBotHost(store, { acquire: () => null, onAvailable: () => () => {} })
+  try {
+    const route = host.imGateway.register("realm", "principal", {
+      id: "binding", botId: teammate.id, kind: "group", label: "Research", version: 1,
+      state: "active", conversationKey: "conversation", expiresAt: "2099-01-01T00:00:00Z",
+      createdAt: "2026-11-01T00:00:00Z"
+    })
+    fixture.getHost.mockReturnValue(host)
+    const invoke = register()
+    const scopes = [
+      botImBrowserScope(route.id, teammate.id),
+      botImBrowserScope(route.id, teammate.id, owner.id),
+      botImBrowserScope(route.id, teammate.id, owner.id, `im-peer-${task.id}-${owner.id}`)
+    ]
+    expect(scopes[0].length).toBe(toolCreated ? 144 : 108)
+    for (const scope of scopes) {
+      invoke("bots:browser:preview", "local", scope, "page")
+      expect(fixture.preview).toHaveBeenLastCalledWith(scope, "page")
+      invoke("bots:browser:takeover", "local", scope, "page")
+      expect(fixture.takeOver).toHaveBeenLastCalledWith(scope, "page")
+      invoke("bots:browser:give-back", "local", scope, 2)
+      expect(fixture.giveBack).toHaveBeenLastCalledWith(scope, 2)
+      invoke("bots:browser:navigate", "local", scope, "page", "https://example.invalid")
+      expect(fixture.navigate).toHaveBeenLastCalledWith(scope, "page", "https://example.invalid")
+      invoke("bots:browser:operate", "local", scope, { action: "reload", pageId: "page" }, 2)
+      expect(fixture.operateBrowser).toHaveBeenLastCalledWith(scope, { action: "reload", pageId: "page" }, 2)
+    }
+    const calls = fixture.preview.mock.calls.length
+    for (const invalid of [
+      botImBrowserScope(route.id, owner.id), // Existing binding, wrong owner.
+      botImBrowserScope("missing-binding", teammate.id),
+      botImBrowserScope(route.id, teammate.id, "deleted-peer"),
+      `${scopes[0]}--${owner.id}--im-peer-root-wrong-executor`,
+      `${scopes[0]}--${owner.id}--im-peer-root-${owner.id}--extra`
+    ]) expect(() => invoke("bots:browser:preview", "local", invalid)).toThrow()
+    expect(() => invoke("bots:browser:preview", "local", scopes[0], "p".repeat(129))).toThrow()
+    expect(fixture.preview).toHaveBeenCalledTimes(calls)
+  } finally { await host.stop(); db.close() }
 })

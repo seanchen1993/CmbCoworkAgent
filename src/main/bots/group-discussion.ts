@@ -24,6 +24,16 @@ export const groupDiscussionSchema = z.object({
 })
 export type GroupDiscussion = z.infer<typeof groupDiscussionSchema>
 
+/** Distinguish the existing finite budget from an ordinary silent/settled round. */
+export function isGroupDiscussionBudgetExhausted(state: GroupDiscussion): boolean {
+  return (
+    state.round >= GROUP_DISCUSSION_MAX_ROUNDS ||
+    state.turns >= GROUP_DISCUSSION_MAX_DISPATCHES ||
+    (state.turns >= GROUP_DISCUSSION_MAX_TURNS &&
+      (state.posts === undefined || state.posts >= GROUP_DISCUSSION_MAX_POSTS))
+  )
+}
+
 /** Apply the existing room budget to whole messages, never silently clip their data. */
 export function boundGroupReferences(
   references: readonly { source: string; authorName?: string; text: string }[]
@@ -81,12 +91,7 @@ export function nextGroupDiscussionSpeaker(
   latest: { ordinal: number },
   eligibleIds: ReadonlySet<string>
 ): string | null {
-  while (
-    state.round < GROUP_DISCUSSION_MAX_ROUNDS &&
-    state.turns < GROUP_DISCUSSION_MAX_DISPATCHES &&
-    (state.turns < GROUP_DISCUSSION_MAX_TURNS ||
-      (state.posts !== undefined && state.posts < GROUP_DISCUSSION_MAX_POSTS))
-  ) {
+  while (!isGroupDiscussionBudgetExhausted(state)) {
     if (state.speakerIndex >= state.memberIds.length) {
       if (latest.ordinal <= state.roundStartOrdinal) return null // All pass: settled.
       state.round++

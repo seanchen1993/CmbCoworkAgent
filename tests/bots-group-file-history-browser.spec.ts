@@ -40,7 +40,7 @@ const author={id:'author',name:'Original author',shape:'circle',color:'#ff2850'}
 const peer={...author,id:'peer',name:'Remaining member'};
 const state=window.historyFixture={reads:[],media:[],saves:[],privateSaves:[],groupLists:[],memberLists:[],imports:[],shares:[],render(mode){
  state.mode=mode;
- const group={id:'g',name:'Retained files',memberIds:mode.startsWith('empty')?[]:mode==='current'?['author','peer']:['peer'],version:1};
+ const group={id:'g',name:'Retained files',memberIds:mode.startsWith('empty')?[]:mode==='current'?['author','peer']:['peer'],version:1,...(mode==='discussion-limit'?{discussionLimit:{messageId:'review'}}:{})};
  const bots=['current','removed'].includes(mode)?[author,peer]:mode.startsWith('empty')?[]:[peer];
  root.render(mode==='native-links'?<ChatPresentationContext.Provider value='bot'><StreamingMarkdown threadId='group-g-native'>{'[URI相对文件](%41.md) '+String.fromCharCode(96)+'%41.md'+String.fromCharCode(96)}</StreamingMarkdown><BotMessageFilePreview client={client} botId='native' threadId='group-g-native' name='Native'/></ChatPresentationContext.Provider>:mode==='private'?<><BotDeliveredFile client={client} botId='private-bot' threadId='private-thread' filePath='/private/report.md'/><BotMessageFilePreview client={client} botId='private-bot' threadId='private-thread' name='Private'/></>:<><BotGroupConversation key={mode} client={client} group={group} bots={bots} tasks={mode==='current'?[{id:'task',threadId:'group-g-peer',botId:'peer',state:'running',origin:{kind:'group',groupId:'g',messageId:'request'}}]:[]} revision={1} userInitials='U' detailOpen={false} onEdit={()=>{}} onDetails={()=>{}} onOpenBot={()=>{}} onBrowser={()=>{}} onFiles={()=>{}}/><BotFilesPanel key={'library-'+mode} client={client} group={group} bot={bots.find(bot=>group.memberIds.includes(bot.id))} peers={bots}/></>);
 }};
@@ -84,7 +84,7 @@ state.render('removed');`
             loader: "tsx",
             contents:
               args.path === "thread-context"
-                ? "const files=[{path:'report.md',is_dir:false},{path:'A.md',is_dir:false},{path:'%41.md',is_dir:false}];export const useThreadStateSelector=(id,select)=>id?select({workspacePath:id.startsWith('group-g-')?'/group':null,workspaceFiles:files}):null;"
+                ? "const files=[{path:'report.md',is_dir:false},{path:'A.md',is_dir:false},{path:'%41.md',is_dir:false}];export const useThreadStateSelector=(id,select)=>id?select({workspacePath:id.startsWith('group-g-')?'/group':null,workspaceFiles:files}):null;const context={subscribeToThreadState:()=>()=>{},subscribeToStream:()=>()=>{},getThreadState:()=>({pendingApprovals:[],coordinatorWorkers:[]}),getStreamData:()=>({isLoading:false,liveMessages:[]})};export const useThreadContext=()=>context;"
                 : args.path === "BotConversationTools"
                 ? "export const BotConversationTools=({children})=>children;"
                 : args.path === "ChatContainer"
@@ -122,6 +122,12 @@ state.render('removed');`
     const errors: string[] = []
     page.on("pageerror", (e) => errors.push(e.message))
     await page.goto(`http://127.0.0.1:${address.port}`)
+    await page.evaluate(() => (window as any).historyFixture.render("discussion-limit"))
+    const limitNotice = page.getByRole("status").filter({ hasText: "本轮自动讨论已达到上限" })
+    await limitNotice.waitFor()
+    assert.match(await limitNotice.innerText(), /请发送新的指令/)
+    await page.evaluate(() => (window as any).historyFixture.render("removed"))
+    await limitNotice.waitFor({ state: "detached" })
     for (const mode of ["current", "removed", "deleted", "empty", "private"]) {
       await page.evaluate((mode) => (window as any).historyFixture.render(mode), mode)
       const open = page.getByRole("button", { name: "打开 report.md", exact: true })
@@ -236,7 +242,7 @@ state.render('removed');`
         )
         await page.keyboard.press("Escape")
         if (mode !== "current") continue
-        await page.getByRole("button", { name: "Remaining member · 正在处理", exact: true }).click()
+        await page.locator(".bot-group-progress").getByRole("button", { name: "Remaining member", exact: true }).click()
         await openLibrary()
         for (const action of [
           page.getByRole("button", { name: "打开 execution.md", exact: true }),

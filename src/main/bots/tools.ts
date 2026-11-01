@@ -18,7 +18,7 @@ import {
   type BotBrowserService,
   type BotBrowserUploadLock
 } from "./browser"
-import { botImportDestination, copyBotFile, snapshotBotDeliveryFile } from "./file-copy"
+import { botImportDestination, exportBotFile, snapshotBotDeliveryFile } from "./file-copy"
 import { MAIN_TURN_ONLY_TOOL_METADATA_KEY } from "../agent/runtime-tool-catalog"
 import { getHookAgentIdFromRequest } from "../hooks/execution-context"
 import { parseBotReactionEmoji } from "../../shared/bots/message-reactions"
@@ -194,7 +194,8 @@ function createBotFileTools(
             let destination = imported.get(file.path)
             if (!destination) {
               const target = await botImportDestination(workspacePath, basename(file.path))
-              await copyBotFile(peer!.workspacePath, file.path, target.path, signal)
+              // Exact host-verified results retain the same size support as direct delivery.
+              await exportBotFile(peer!.workspacePath, file.path, target.path, signal)
               imported.set(file.path, target.path)
               destination = target.path
             }

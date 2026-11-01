@@ -100,7 +100,7 @@ function fixture() {
   const original = {
     workspacePath: "/original/workspace",
     model: "custom:original",
-    agentMode: "coordinator",
+    agentMode: "normal",
     memoryEnabled: true,
     outputStyle: "normal",
     title: "Original title",
@@ -168,6 +168,10 @@ describe("trusted local conversation handshake", () => {
   it("rejects deletion before mutating a linked Team with pending work, then preserves its original conversation", async () => {
     const x = fixture()
     const admitted = await linkExistingConversation(x.host, x.input)
+    // Model an already-persisted Team association from before the admission gate.
+    x.original.agentMode = "coordinator"
+    const saved = f.rows.get("original")!
+    f.rows.set("original", { ...saved, metadata: JSON.stringify({ ...JSON.parse(saved.metadata!), agentMode: "coordinator" }) })
     x.pending.mockResolvedValue(true)
     x.coordinatorPending.mockImplementation(threads => threads.includes("original"))
     const group = x.store.saveGroup({ name: "Keep membership", memberIds: [x.bot.id] })
@@ -191,6 +195,10 @@ describe("trusted local conversation handshake", () => {
   it("recovers an old deletion fence by preserving completed Team results for the original conversation", async () => {
     const x = fixture()
     const admitted = await linkExistingConversation(x.host, x.input)
+    // Model an already-persisted Team association from before the admission gate.
+    x.original.agentMode = "coordinator"
+    const saved = f.rows.get("original")!
+    f.rows.set("original", { ...saved, metadata: JSON.stringify({ ...JSON.parse(saved.metadata!), agentMode: "coordinator" }) })
     x.pending.mockResolvedValue(true)
     // Ordinary unlink must still require consumption of the pending result.
     await expect(unlinkWorkConversation(x.host, x.bot.id, admitted.id, admitted.version)).rejects.toThrow("后台执行")
@@ -433,4 +441,52 @@ it("opens detached historical results without rebinding or creating tasks, and r
   )
   f.rows.delete(opened.threadId)
   await expect(exposeWorkConversation(x.host, x.bot.id, linked.id)).rejects.toThrow("原消息不存在")
+})
+
+it.each([{ agentMode: "coordinator" }, { coordinatorMode: true }, { coordinatorMode: "on" }])(
+  "rejects new Team association without writing metadata or work: %j", async (mode) => {
+    const x = fixture()
+    const original = { ...x.original, agentMode: undefined, ...mode }
+    const row = { ...x.row, metadata: JSON.stringify(original) }
+    f.rows.set("original", row)
+    await expect(linkExistingConversation(x.host, x.input)).rejects.toThrow("不支持 Team")
+    expect(f.update).not.toHaveBeenCalled()
+    expect(f.rows.get("original")).toEqual(row)
+    expect(x.store.listWorks(x.bot.id).items).toHaveLength(0)
+    expect(x.store.recentTasks()).toHaveLength(0)
+  }
+)
+it("rechecks mode after admission awaits and rejects Team without creating an association", async () => {
+  const x = fixture()
+  x.pending.mockImplementationOnce(async () => {
+    f.rows.set("original", { ...x.row, metadata: JSON.stringify({ ...x.original, agentMode: "coordinator" }) })
+    return false
+  })
+  await expect(linkExistingConversation(x.host, x.input)).rejects.toThrow("不支持 Team")
+  expect(f.update).not.toHaveBeenCalled()
+  expect(x.store.listWorks(x.bot.id).items).toHaveLength(0)
+})
+it("keeps an existing Team association readable and detachable without converting its mode", async () => {
+  const x = fixture()
+  const linked = await linkExistingConversation(x.host, x.input)
+  const saved = f.rows.get("original")!
+  f.rows.set("original", { ...saved, metadata: JSON.stringify({ ...JSON.parse(saved.metadata!), agentMode: "coordinator" }) })
+  f.update.mockClear()
+  expect(await exposeWorkConversation(x.host, x.bot.id, linked.id)).toMatchObject({ id: linked.id })
+  await expect(linkExistingConversation(x.host, x.input)).rejects.toThrow("不支持 Team")
+  expect(f.update).not.toHaveBeenCalled()
+  await unlinkWorkConversation(x.host, x.bot.id, linked.id, linked.version)
+  expect(JSON.parse(f.rows.get("original")!.metadata!)).toEqual({ ...x.original, agentMode: "coordinator" })
+  expect(x.store.recentTasks()).toHaveLength(0)
+})
+it("does not finish a historical preparing Team association through expose", async () => {
+  const x = fixture()
+  f.update.mockImplementationOnce(() => { throw new Error("interrupted") })
+  await expect(linkExistingConversation(x.host, x.input)).rejects.toThrow("interrupted")
+  const work = x.store.conversations.forThread("original")!
+  f.rows.set("original", { ...x.row, metadata: JSON.stringify({ ...x.original, agentMode: "coordinator" }) })
+  f.update.mockClear()
+  await expect(exposeWorkConversation(x.host, x.bot.id, work.id)).rejects.toThrow("不支持 Team")
+  expect(f.update).not.toHaveBeenCalled()
+  expect(x.store.conversations.record(work.id)?.state).toBe("preparing")
 })

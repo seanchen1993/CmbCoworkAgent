@@ -523,6 +523,11 @@ export function BotGroupConversation({
           </button>
         </div>
       </header>
+      {group.discussionLimit && (
+        <div role="status" className="bot-notice">
+          <span>本轮自动讨论已达到上限。若需继续，请发送新的指令。</span>
+        </div>
+      )}
       {error && (
         <div role="alert" className="bot-notice">
           <span>{error}</span>

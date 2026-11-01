@@ -128,6 +128,11 @@ export class BotBrowserService {
     }
     return generation
   }
+  private withScopeLock<T>(botId: string, operation: () => Promise<T>): Promise<T> {
+    // Include scopes whose first page is still being created in deletion barriers.
+    this.scopeGeneration(botId)
+    return this.lock.withKey(`scope:${botId}`, operation)
+  }
   private stopping = false
   private readonly returned = new Set<() => void>()
   private readonly downloads = new Map<Download, Promise<void>>()
@@ -350,6 +355,12 @@ export class BotBrowserService {
   }
 
   private async page(botId: string, pageId?: string, newTab = false): Promise<OwnedPage> {
+    // Creation stays serialized: native page events use the single `creating` promise
+    // to distinguish a Bot-created target from a manually opened human tab.
+    return this.lock.withKey("pages", () => this.resolvePage(botId, pageId, newTab))
+  }
+
+  private async resolvePage(botId: string, pageId?: string, newTab = false): Promise<OwnedPage> {
     if (this.isRetired(botId)) throw new BotError("NOT_FOUND", "Bot 或群聊已删除")
     if (pageId) {
       const entry = this.pages.get(pageId)
@@ -535,7 +546,7 @@ export class BotBrowserService {
         return this.act(botId, action, signal, waiting)
       })
     }
-    return this.lock.withKey("browser", async () => {
+    return this.withScopeLock(botId, async () => {
       this.check(signal, generation, botId)
       const url = action.action === "navigate" ? new URL(action.url ?? "") : undefined
       if (url && (!["http:", "https:"].includes(url.protocol) || url.username || url.password))
@@ -872,7 +883,7 @@ export class BotBrowserService {
       if (claim.status !== "active")
         throw new BotError("CONFLICT", "浏览器已由你接管或正在切换，请稍候")
       // Reopen the user's current target without replacing the lease or waking the model.
-      await this.lock.withKey("browser", async () => {
+      await this.withScopeLock(botId, () => this.lock.withKey("browser", async () => {
         if (this.stopping || this.human !== claim || claim.status !== "active")
           throw new BotError("CONFLICT", "浏览器控制权已改变，请刷新后重试")
         const targetId = pageId ?? claim.pageId
@@ -883,7 +894,7 @@ export class BotBrowserService {
           throw new BotError("CONFLICT", "浏览器控制权已改变，请刷新后重试")
         claim.pageId = entry.id
         this.rememberViewed(entry)
-      })
+      }))
       return
     }
     const claim = {
@@ -898,7 +909,7 @@ export class BotBrowserService {
       if (entry.botId === botId) entry.automation.invalidate()
     this.human = claim
     try {
-      await this.lock.withKey("browser", async () => {
+      await this.withScopeLock(botId, () => this.lock.withKey("browser", async () => {
         if (this.stopping || this.human !== claim || claim.status !== "requesting")
           throw new BotError("CONFLICT", "浏览器控制权已改变，请刷新后重试")
         const entry = await this.page(botId, pageId ?? this.viewedPage(botId)?.id)
@@ -908,7 +919,7 @@ export class BotBrowserService {
         claim.pageId = entry.id
         claim.status = "active"
         this.rememberViewed(entry)
-      })
+      }))
     } catch (error) {
       if (this.human === claim) {
         this.human = null
@@ -1077,17 +1088,21 @@ export class BotBrowserService {
       this.human = null
       for (const wake of this.returned) wake()
     }
-    await this.lock.withKey("browser", async () => {
+    const owners = new Set([
+      ...this.scopeGenerations.keys(),
+      ...[...this.pages.values()].map(entry => entry.botId)
+    ].filter(belongs))
+    for (const owner of owners) await this.withScopeLock(owner, () => this.lock.withKey("browser", async () => {
       // FIFO puts this cleanup after in-flight operations and before a rejoined member's new ones.
       // Keep entries until close succeeds so a failed native close remains available for cleanup retry.
       for (const entry of this.pages.values()) {
-        if (!belongs(entry.botId)) continue
+        if (entry.botId !== owner) continue
         entry.automation.invalidate()
         await entry.dialog?.dismiss().catch(() => {})
         await entry.page.close({ runBeforeUnload: false })
         this.pages.delete(entry.id)
       }
-    })
+    }))
   }
   async close(): Promise<void> {
     this.stopping = true

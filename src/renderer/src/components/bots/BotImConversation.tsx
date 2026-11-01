@@ -204,13 +204,24 @@ export function BotImConversation({
   const anchor = useRef<{ height: number; top: number } | null>(null)
   useEffect(() => {
     mounted.current = true
+    const visibilityChanged = () => {
+      // Stop an in-flight history scan immediately, then refresh on returning.
+      epoch.current++
+      setRetry((value) => value + 1)
+    }
+    document.addEventListener("visibilitychange", visibilityChanged)
     return () => {
       mounted.current = false
       epoch.current++
+      document.removeEventListener("visibilitychange", visibilityChanged)
     }
   }, [])
   useEffect(() => {
     const token = ++epoch.current
+    if (document.hidden || executionThreadId) {
+      setLoading(false)
+      return
+    }
     setLoading(true)
     const read = client.im?.conversationHistory
     if (!read) {
@@ -221,7 +232,7 @@ export function BotImConversation({
     void refreshBotImHistory(
       windowRef.current,
       (before) => read(bot.id, conversation.id, before),
-      () => mounted.current && token === epoch.current
+      () => mounted.current && token === epoch.current && !document.hidden
     )
       .then(
         (next) => {
@@ -243,7 +254,7 @@ export function BotImConversation({
       .finally(() => {
         if (mounted.current && token === epoch.current) setLoading(false)
       })
-  }, [client, bot.id, conversation.id, revision, retry])
+  }, [client, bot.id, conversation.id, revision, retry, executionThreadId])
   useBotReadState(client, presented)
   useLayoutEffect(() => {
     const node = scroll.current

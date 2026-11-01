@@ -2,6 +2,8 @@ import { describe, expect, it, vi } from "vitest"
 import {
   mkdtemp,
   mkdir,
+  open,
+  stat,
   writeFile,
   readFile,
   realpath,
@@ -24,8 +26,9 @@ import {
   createBotProfileTools,
   createBotCollaborationTools
 } from "./tools"
+import type { BotDeliveredFile } from "../../shared/bots/file-delivery"
 import { parseBotFileDelivery } from "../../shared/bots/file-delivery"
-import { snapshotBotDeliveryFile } from "./file-copy"
+import { copyBotFile, hashBotFile, snapshotBotDeliveryFile } from "./file-copy"
 import { BotBrowserActionError, type BotBrowserService } from "./browser"
 import { AIMessage, HumanMessage, ToolMessage } from "@langchain/core/messages"
 import { convertToOpenAITool } from "@langchain/core/utils/function_calling"
@@ -573,6 +576,58 @@ it.each(["changed", "removed"])(
       expect(await readFile(copied[0].filePath, "utf8")).toBe("SENT_V1")
       expect(await readFile(copied[0].attachmentPath!, "utf8")).toBe("SENT_V1")
       expect(await readFile(sent.attachmentPath, "utf8")).toBe("SENT_V1")
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  }
+)
+
+it.each(["public", "internal"] as const)(
+  "delivers a large verified %s peer result without relaxing external imports",
+  async (mode) => {
+    const root = await mkdtemp(join(tmpdir(), "bot-large-peer-"))
+    try {
+      const mine = join(root, "mine"), peer = join(root, "peer")
+      await mkdir(mine)
+      await mkdir(peer)
+      const original = join(peer, "result.bin"), size = 100 * 1024 * 1024 + 1
+      const handle = await open(original, "w")
+      try {
+        await handle.truncate(size)
+        await handle.write(Buffer.from("START"), 0, 5, 0)
+        await handle.write(Buffer.from("END"), 0, 3, size - 3)
+      } finally {
+        await handle.close()
+      }
+      const controller = new AbortController(), signal = controller.signal
+      const verified: BotDeliveredFile[] = []
+      const capture = (files: BotDeliveredFile[]) => { verified.push(...files) }
+      const [sender] = mode === "public"
+        ? createBotDeliveryTools(peer, signal, capture)
+        : createBotReturnFileTools(peer, signal, capture)
+      const sent = await sender.invoke({ type: "tool_call", id: "sender", name: sender.name, args: { files: [original] } })
+      expect(sent.status).toBe("success")
+      expect(verified).toHaveLength(1)
+      const publish = vi.fn()
+      const [receiver] = createBotDeliveryTools(mine, signal, publish, { workspacePath: peer, files: verified })
+      const result = await receiver.invoke({ type: "tool_call", id: "receiver", name: receiver.name, args: { files: [original] } })
+      expect(result.status).toBe("success")
+      const files = parseBotFileDelivery(result.content)!
+      expect(files).toHaveLength(1)
+      expect((await stat(files[0].attachmentPath!)).size).toBe(size)
+      expect(await hashBotFile(mine, files[0].attachmentPath!, signal)).toBe(await hashBotFile(peer, original, signal))
+      expect(publish).toHaveBeenCalledExactlyOnceWith(files, "receiver")
+      // The larger delivery allowance does not grant arbitrary peer paths or uploads.
+      const unlisted = join(peer, "private.txt")
+      await writeFile(unlisted, "private")
+      const denied = await receiver.invoke({ type: "tool_call", id: "unlisted", name: receiver.name, args: { files: [unlisted] } })
+      expect(denied.status).toBe("error")
+      expect(publish).toHaveBeenCalledTimes(1)
+      await expect(copyBotFile(peer, original, join(mine, "upload.bin"), signal)).rejects.toThrow("100 MiB")
+      await expect(stat(join(mine, "upload.bin"))).rejects.toThrow()
+      controller.abort(new Error("cancelled"))
+      await expect(receiver.invoke({ type: "tool_call", id: "cancelled", name: receiver.name, args: { files: [original] } })).rejects.toThrow("cancelled")
+      expect(publish).toHaveBeenCalledTimes(1)
     } finally {
       await rm(root, { recursive: true, force: true })
     }

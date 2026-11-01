@@ -757,6 +757,43 @@ describe("durable local independent works", () => {
       f.db.exec("SELECT suppressed FROM bot_commands WHERE id='unrelated-command'")[0].values[0][0]
     ).toBe(0)
   })
+  it.each([false, true])("unlimited admission isolates independent works (same Bot: %s)", async (sameBot) => {
+    const f = fixture()
+    const executions: Array<{ task: ReturnType<BotStore["getTask"]>; finish(): void }> = []
+    const runtime: BotRunPort = {
+      onAvailable: () => () => {},
+      acquire: (_bot, task) => ({
+        release() {},
+        execute: async (signal, waiting) => {
+          waiting(true)
+          await new Promise<void>((resolve) => {
+            executions.push({ task, finish: resolve })
+            signal.addEventListener("abort", () => resolve(), { once: true })
+          })
+          return { state: "completed" }
+        }
+      })
+    }
+    const host = new LocalBotHost(f.store, runtime, Number.POSITIVE_INFINITY)
+    hosts.push(host)
+    const a = await host.createWork({ botId: f.bot.id, operationId: "a", title: "A", goal: "A" })
+    await vi.waitFor(() => expect(f.store.getTask(a.task.id).state).toBe("waiting_user"))
+    const b = await host.createWork({ botId: sameBot ? f.bot.id : f.peer.id, operationId: "b", title: "B", goal: "B" })
+    await vi.waitFor(() => expect(f.store.getTask(b.task.id).state).toBe("waiting_user"))
+    expect(a.work.threadId).not.toBe(b.work.threadId)
+    // Queue a follow-up through Store so it cannot be steered into the active run.
+    const followup = f.store.enqueue({ botId: b.work.botId, workId: b.work.id, requestId: "later", message: "Continue B" })
+    host.cancel(a.task.id)
+    await vi.waitFor(() => expect(f.store.getTask(a.task.id).state).toBe("cancelled"))
+    expect(f.store.getTask(b.task.id).state).toBe("waiting_user")
+    expect(f.store.getTask(followup.id).state).toBe("queued")
+    expect(executions.some(e => e.task.id === followup.id)).toBe(false)
+    expect(executions.filter(e => e.task.id === a.task.id)).toHaveLength(1)
+    executions.find(e => e.task.id === b.task.id)!.finish()
+    await vi.waitFor(() => expect(f.store.getTask(followup.id).state).toBe("waiting_user"))
+    expect(f.store.getTask(b.task.id).state).toBe("completed")
+    expect(executions.filter(e => e.task.id === b.task.id)).toHaveLength(1)
+  })
   it("reserves one graph for main while a work or its peer waits; additional work stays queued", async () => {
     const f = fixture(),
       executions: Array<{ task: ReturnType<BotStore["getTask"]>; finish: () => void }> = []

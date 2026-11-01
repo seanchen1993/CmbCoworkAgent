@@ -62,7 +62,8 @@ import { coordinatorWorkerManager } from "../agent/coordinator-worker-manager"
 import { workflowRunManager, onWorkflowNotificationBroadcast } from "../agent/workflow/run-manager"
 import { loadWorkflowRunAsync, markWorkflowRunInterrupted } from "../agent/workflow/run-store"
 import { LocalSandbox } from "../agent/local-sandbox"
-import { getAgentModeFromMetadata } from "../agent/coordinator-mode"
+import { getAgentModeFromMetadata, resolveCoordinatorModeRequest } from "../agent/coordinator-mode"
+import { BOT_TEAM_UNSUPPORTED } from "../../shared/bots/team-policy"
 import { getGlobalMcpCapabilityService } from "../mcp/capability-service"
 import { createBotWorkTools } from "./work-tools"
 import type { BotMockExecution } from "../../shared/bots/mock-channel"
@@ -486,6 +487,19 @@ export function createLocalBotRunPort(
       }
     },
     onSettled(task, state, result, files, publicContribution) {
+      if (
+        task.workId ||
+        (state !== "completed" && state !== "failed" && state !== "outcome_unknown")
+      ) return
+      let privatePeerResult = false
+      if (
+        task.origin.kind === "bot" && !task.origin.expectsReply &&
+        !task.mockSource && !botTaskGroupId(task)
+      ) {
+        // Nested integrations still owe their caller a private result. Reuse
+        // that owner instead of treating every peer receipt as a user reply.
+        privatePeerResult = !getHost().peerHandoff(task).owned
+      }
       const privateNotification =
         task.origin.kind === "notification" && !botTaskGroupId(task) ? task.origin : undefined
       const privateCommand =
@@ -493,14 +507,17 @@ export function createLocalBotRunPort(
       const privateWorkflow = privateNotification?.notificationKind === "workflow"
       const privateReaction = privateNotification?.notificationKind === "reaction"
       if (
-        task.workId ||
-        (!["user", "group", "schedule", "work_result"].includes(task.origin.kind) &&
-          !privateCommand &&
-          !privateWorkflow &&
-          !privateReaction)
+        !["user", "group", "schedule", "work_result"].includes(task.origin.kind) &&
+        !privatePeerResult &&
+        !privateCommand &&
+        !privateWorkflow &&
+        !privateReaction
       )
         return
-      if (state !== "completed" && state !== "failed" && state !== "outcome_unknown") return
+      if (privatePeerResult && state === "completed" && !files?.length) {
+        const body = splitBotInlineReasoning(result ?? "").body.trim()
+        if (!body || isBotGroupPass(body) || isBotRoutineSilent(body)) return
+      }
       if (
         task.origin.kind === "group" &&
         state === "completed" &&
@@ -526,7 +543,7 @@ export function createLocalBotRunPort(
             ? "需要你查看"
             : privateWorkflow
               ? "后台任务有新结果"
-              : privateReaction
+              : privateReaction || privatePeerResult
                 ? "有新回复"
                 : "工作已完成"
       notifyIfBackground(`${bot.name} · ${label}`, "返回 Bots 工作区查看结果。")
@@ -606,6 +623,9 @@ export function createLocalBotRunPort(
           tryYield()
         },
         async steer(message, beforeInject) {
+          // Reject mode-switch prefixes before interrupting or injecting into a live Bot run.
+          if (resolveCoordinatorModeRequest(message.message,
+            JSON.parse(getThreadCore(task.threadId)?.metadata || "{}")).enabled) return false
           // A peer, routine or another conversation cannot change this run's
           // prompt/authority. Group input joins only while its own question waits.
           if (
@@ -685,6 +705,16 @@ export function createLocalBotRunPort(
             throw new Error("外部渠道来源证明缺失")
           const mock = task.mockSource ? getHost().mockExecution(task) : undefined
           const simulated = Boolean(mock && mock.source.transport !== "im")
+          // Only already-owned worker results retain their legacy cleanup path. New inbox,
+          // peer, group, IM and routine work must not enter Team or rewrite an old Team thread.
+          const legacyTeamResult = task.origin.kind === "notification" &&
+            task.origin.notificationKind === "coordinator"
+          const teamRefusal = (message: string, metadata: Record<string, unknown>) =>
+            !legacyTeamResult && resolveCoordinatorModeRequest(message, metadata, {
+              allowForcedRequests: !simulated && task.origin.kind !== "work_result"
+            }).enabled ? BOT_TEAM_UNSUPPORTED : null
+          if (teamRefusal(task.message, JSON.parse(getThreadCore(task.threadId)?.metadata || "{}")))
+            throw new BotError("CONFLICT", BOT_TEAM_UNSUPPORTED)
           const host = getHost()
           const imBinding = !botInteractionRoutes.enabled()
             ? null
@@ -1126,6 +1156,9 @@ export function createLocalBotRunPort(
               }),
               {
                 source: "bot",
+                // Linked work retains its own model/routing policy; default-following Bots
+                // still use global routing. Only an explicit Bot selection opts into a pin.
+                modelRoutingMode: !work?.conversation && bot.modelRef ? "pinned" : undefined,
                 resumeCheckpointId,
                 continueBotTaskCheckpointId,
                 // Reply-producing delegation and routines keep their original managed task owner
@@ -1432,6 +1465,8 @@ export function createLocalBotRunPort(
                           : {})
                       },
                 verifyResolvedThread: (resolved) => {
+                  const unsupportedMode = teamRefusal(message, resolved.metadata)
+                  if (unsupportedMode) return unsupportedMode
                   if (workflowRegistrationError) return workflowRegistrationError.message
                   if (!resultStillLinked()) return "原任务关联已解除，未回传结果。"
                   if (work?.conversation) {

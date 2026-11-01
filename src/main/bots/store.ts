@@ -59,6 +59,7 @@ import {
   GROUP_DISCUSSION_MAX_DISPATCHES,
   GROUP_DISCUSSION_MAX_POSTS,
   groupDiscussionSchema,
+  isGroupDiscussionBudgetExhausted,
   nextGroupDiscussionSpeaker,
   type GroupDiscussion
 } from "./group-discussion"
@@ -3657,12 +3658,16 @@ export class BotStore {
         return
       }
       if (result.cancelled) {
-        this.noteActivity(
-          row.group_id == null ? "bot" : "group",
-          String(row.group_id ?? row.bot_id),
-          "后台任务已停止",
-          false
-        )
+        // Cancellation updates the same conversation as its source, even after
+        // the model turn has ended. IM rooms and works have no local group_id.
+        const work = this.workForThread(String(row.bot_id), result.threadId)
+        const source = row.source_task_id ? this.getTask(String(row.source_task_id)) : undefined
+        if (row.group_id != null)
+          this.noteActivity("group", String(row.group_id), "后台任务已停止", false)
+        else if (work) this.noteWorkActivity(work.id, "后台任务已停止", false)
+        else if (source?.mockSource?.transport === "im" && !source.mockSource.personal)
+          this.noteActivity("im", source.mockSource.bindingId, "后台任务已停止", false)
+        else this.noteActivity("bot", String(row.bot_id), "后台任务已停止", false)
       }
       if (row.suppressed || result.cancelled) return
       const bot = this.getBot(String(row.bot_id))
@@ -4121,7 +4126,11 @@ export class BotStore {
       const fallback = commands.length
         ? "任务已结束，已启动命令的实际结果见下方回执。"
         : "未收到可确认的结果，请核对任务状态。"
-      const message = `${source.name} 的协作任务已结束（${botTaskStateLabel(state)}）。\n${(visibleResult || error || fallback).slice(0, 30_000)}${commandFacts}${references}`
+      const resultBody = visibleResult || error || fallback
+      const excerpt = resultBody.length > 30_000
+        ? `[协作结果正文已截断，以下仅为前段，末尾内容已省略。]\n${resultBody.slice(0, 30_000)}`
+        : resultBody
+      const message = `${source.name} 的协作任务已结束（${botTaskStateLabel(state)}）。\n${excerpt}${commandFacts}${references}`
       this.db.run(
         "INSERT OR IGNORE INTO bot_reply_outbox(task_id,target_bot_id,message,origin_json) VALUES (?, ?, ?, ?)",
         [
@@ -4597,6 +4606,10 @@ export class BotStore {
       if (!prior && this.groups().length >= 50) throw new BotError("CONFLICT", "群聊数量已达上限")
       const group: BotGroup = {
         ...input,
+        ...(prior?.discussionLimit &&
+        JSON.stringify(prior.memberIds) === JSON.stringify(input.memberIds)
+          ? { discussionLimit: prior.discussionLimit }
+          : {}),
         id: prior?.id ?? randomUUID(),
         hostId: LOCAL_BOT_HOST_ID,
         version: (prior?.version ?? 0) + 1
@@ -5086,6 +5099,7 @@ export class BotStore {
       }
       prepared.state.initialTaskIds = [seed.id]
       prepared.state.pendingTaskId = seed.id
+      this.setGroupDiscussionLimit(group.id)
       this.db.run("INSERT INTO bot_group_discussions VALUES(?,?)", [
         group.id,
         JSON.stringify(prepared.state)
@@ -5483,6 +5497,15 @@ export class BotStore {
     })
   }
 
+  private setGroupDiscussionLimit(groupId: string, messageId?: string): void {
+    const group = this.getGroup(groupId)
+    if (group.discussionLimit?.messageId === messageId) return
+    if (messageId) group.discussionLimit = { messageId }
+    else delete group.discussionLimit
+    this.db.run("UPDATE bot_groups SET payload=? WHERE id=?", [JSON.stringify(group), groupId])
+    this.changed()
+  }
+
   /** One durable cursor per active room; no duplicate transcript, executor or polling timer. */
   stopGroupDiscussion(groupId: string, messageId?: string): void {
     if (!messageId) {
@@ -5508,6 +5531,7 @@ export class BotStore {
       if (this.db.getRowsModified()) this.changed()
     }
     this.db.run("DELETE FROM bot_group_discussions WHERE group_id=?", [groupId])
+    this.setGroupDiscussionLimit(groupId)
   }
   groupDiscussionTask(groupId: string, exceptMessageId?: string): string | undefined {
     const row = this.rows("SELECT payload FROM bot_group_discussions WHERE group_id=?", [
@@ -5719,6 +5743,10 @@ export class BotStore {
         if (!botId) {
           if (initialRunning || backgroundOwners.size) return
           finish()
+          // Keep the original bound, but do not present unconsumed room activity
+          // as natural settling. This is display metadata, never an execution queue.
+          if (eligible.size && isGroupDiscussionBudgetExhausted(state))
+            this.setGroupDiscussionLimit(groupId, state.messageId)
           return
         }
         const unseen = recent.filter(
