@@ -87,6 +87,11 @@ async function main() {
     monitor: Promise<void> | undefined
   let stopCursorCdpDiagnostic: (() => Promise<void>) | undefined
   const cursorCdpDiagnostic = process.env.DEVELOPER_WORKBENCH_CURSOR_CDP === "1"
+  const cursorKeyboardDiagnostic = process.env.DEVELOPER_WORKBENCH_CURSOR_KEYBOARD === "1"
+  assert(
+    !(cursorCdpDiagnostic && cursorKeyboardDiagnostic),
+    "WORKBENCH_ONE_CURSOR_DIAGNOSTIC_AT_A_TIME"
+  )
   let modelRequests = 0,
     previewResourceRequests = 0,
     otherRequests = 0,
@@ -108,7 +113,10 @@ async function main() {
       JSON.stringify(
         {
           scenario: "developer-workbench",
-          diagnosticOnly: cursorCdpDiagnostic,
+          diagnosticOnly: cursorCdpDiagnostic || cursorKeyboardDiagnostic,
+          cursorBaseline: cursorKeyboardDiagnostic
+            ? "focused-real-keyboard"
+            : "programmatic-setSelectionRange",
           passed,
           error,
           publisher: {
@@ -375,7 +383,12 @@ async function main() {
       }
       observe("before-baseline")
     }, draft)
-    await composer.evaluate((node) => (node as HTMLTextAreaElement).setSelectionRange(5, 8))
+    if (cursorKeyboardDiagnostic) {
+      await composer.focus()
+      await composer.press("Control+Home")
+      for (let index = 0; index < 5; index++) await composer.press("ArrowRight")
+      for (let index = 0; index < 3; index++) await composer.press("Shift+ArrowRight")
+    } else await composer.evaluate((node) => (node as HTMLTextAreaElement).setSelectionRange(5, 8))
     const composerHandle = await composer.elementHandle()
     assert(composerHandle)
     const assertDraft = async () => {
@@ -467,8 +480,55 @@ async function main() {
         record
       })
     if (firstCatalog.canPrepare) {
+      const prepare = nav.getByRole("button", { name: "查找可用插件界面", exact: true })
+      if (cursorKeyboardDiagnostic)
+        await prepare.evaluate(
+          (button, { selector, expectedText }) => {
+            const textarea = document.querySelector<HTMLTextAreaElement>(selector)
+            if (!textarea) throw Error("WORKBENCH_OWNED_COMPOSER_REQUIRED")
+            const target = window as unknown as {
+              workbenchNativeProbe: { cursorTrace: unknown[]; cursorOverflow: number }
+              workbenchPreparePointerStop?: () => void
+            }
+            const listeners: { type: string; capture: boolean; handler: (event: Event) => void }[] =
+              []
+            for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click"])
+              for (const capture of [true, false]) {
+                const handler = (event: Event) => {
+                  const state = target.workbenchNativeProbe
+                  if (state.cursorTrace.length >= 128) {
+                    state.cursorOverflow++
+                    return
+                  }
+                  state.cursorTrace.push({
+                    kind: `prepare-${type}-${capture ? "capture" : "bubble"}`,
+                    at: Date.now(),
+                    targetIsButton: event.target instanceof Node && button.contains(event.target),
+                    start: textarea.selectionStart,
+                    end: textarea.selectionEnd,
+                    direction: textarea.selectionDirection,
+                    sameDraft: textarea.value === expectedText,
+                    focused: document.activeElement === textarea,
+                    disabled: textarea.disabled,
+                    readOnly: textarea.readOnly,
+                    connected: textarea.isConnected
+                  })
+                }
+                listeners.push({ type, capture, handler })
+                button.addEventListener(type, handler, { capture, passive: true })
+              }
+            target.workbenchPreparePointerStop = () => {
+              for (const { type, capture, handler } of listeners)
+                button.removeEventListener(type, handler, capture)
+            }
+          },
+          {
+            selector: `[data-chat-thread-id=${JSON.stringify(threadId)}] textarea.composer-textarea`,
+            expectedText: draft
+          }
+        )
       await cursorCheckpoint("before-original-surface-prepare")
-      await nav.getByRole("button", { name: "查找可用插件界面", exact: true }).click()
+      await prepare.click()
       await cursorCheckpoint("after-original-surface-prepare")
     }
     const catalog = await until(
@@ -1081,7 +1141,10 @@ async function main() {
           const target = window as unknown as {
             workbenchNativeProbe?: unknown
             workbenchCursorStop?: () => void
+            workbenchPreparePointerStop?: () => void
           }
+          target.workbenchPreparePointerStop?.()
+          delete target.workbenchPreparePointerStop
           target.workbenchCursorStop?.()
           delete target.workbenchCursorStop
           return target.workbenchNativeProbe ?? null
