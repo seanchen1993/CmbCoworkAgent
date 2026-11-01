@@ -8,11 +8,26 @@ import { tmpdir } from "node:os"
 import { FunctionGuestRuntime } from "../../src/main/mods/v2/guest-runtime"
 import { installGuestDisposeDiagnostic } from "./mods-guest-dispose-diagnostic"
 
-if (process.env.CMB_MODS_GUEST_DISPOSE_DIAGNOSTIC === "1") {
+declare const __MODS_GUEST_DISPOSE_DIAGNOSTIC__: boolean
+if (typeof __MODS_GUEST_DISPOSE_DIAGNOSTIC__ !== "undefined" && __MODS_GUEST_DISPOSE_DIAGNOSTIC__) {
   const path = join(tmpdir(), `guest-dispose-${process.pid}.jsonl`)
+  const original = Object.getOwnPropertyDescriptor(FunctionGuestRuntime.prototype, "dispose")
   const diagnostic = installGuestDisposeDiagnostic(FunctionGuestRuntime.prototype, (record) => {
     appendFileSync(path, JSON.stringify(record) + "\n")
   })
+  const installed = Object.getOwnPropertyDescriptor(FunctionGuestRuntime.prototype, "dispose")
+  if (!installed || typeof installed.value !== "function" || installed.value === original?.value)
+    throw Error("DIAGNOSTIC_HOST_INSTALL_FAILED")
+  appendFileSync(
+    path,
+    JSON.stringify({
+      diagnosticOnly: true,
+      pid: process.pid,
+      at: Date.now(),
+      kind: "diagnostic-host-installed",
+      methodInstalled: true
+    }) + "\n"
+  )
   process.once("exit", () => {
     const restored = diagnostic.restore()
     try {

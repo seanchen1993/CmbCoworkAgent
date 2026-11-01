@@ -405,8 +405,37 @@ void app.whenReady().then(async () => {
     if (diagnosticDispose) {
       phase = "diagnostic-single-guest-dispose"
       await setProfile(1)
+      const coldStartedAt = Date.now()
+      report.diagnosticColdStartedAt = coldStartedAt
       await event()
-      report.diagnosticExecutionHosts = [...active].map((client) => client.stats.pid)
+      const executionHosts = [...active].map((client) => client.stats.pid)
+      report.diagnosticExecutionHosts = executionHosts
+      try {
+        assert.equal(executionHosts.length, 1, "DIAGNOSTIC_SINGLE_EXECUTION_HOST_REQUIRED")
+        for (const pid of executionHosts) {
+          assert(typeof pid === "number" && Number.isSafeInteger(pid) && pid > 0)
+          const installed = readFileSync(join(output, "temp", `guest-dispose-${pid}.jsonl`), "utf8")
+            .trim()
+            .split("\n")
+            .map((line) => JSON.parse(line))
+            .filter(
+              (row) =>
+                row?.kind === "diagnostic-host-installed" &&
+                row.pid === pid &&
+                typeof row.at === "number" &&
+                row.at >= coldStartedAt &&
+                row.at <= Date.now()
+            )
+          assert.equal(installed.length, 1, "DIAGNOSTIC_CURRENT_HOST_INSTALL_RECEIPT_REQUIRED")
+          assert(
+            installed[0].diagnosticOnly === true && installed[0].methodInstalled === true,
+            "DIAGNOSTIC_HOST_INSTALLATION_REQUIRED"
+          )
+        }
+      } catch (error) {
+        report.diagnosticInstallationError = String(error)
+        throw Error("DIAGNOSTIC_INSTRUMENTATION_UNAVAILABLE")
+      }
       save()
       for (let index = 0; index < options.warmups + options.samples; index++) await event()
     } else if (["all", "matrix"].includes(options.phase)) await matrix()

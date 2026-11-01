@@ -127,14 +127,30 @@ void (async () => {
   const end = entry.indexOf("    await setProfile(0, false)", start)
   assert(start > 0 && end > start, "ACTUAL_PERFORMANCE_PHASE_BRANCH_REQUIRED")
   const branch = entry.slice(start, end)
-  for (const diagnosticDispose of [true, false])
-    for (const phase of ["all", "matrix", "idle", "soak"]) {
-      const calls: string[] = []
-      const context = {
+  const contextFor = (
+    diagnosticDispose: boolean,
+    phase: string,
+    receipt: () => string = () =>
+      JSON.stringify({
+        kind: "diagnostic-host-installed",
+        pid: 123,
+        at: Date.now(),
+        diagnosticOnly: true,
+        methodInstalled: true
+      })
+  ) => {
+    const calls: string[] = []
+    return {
+      calls,
+      values: {
         diagnosticDispose,
         options: { phase, warmups: 2, samples: 3 },
         report: {},
+        output: "owned-diagnostic",
         active: new Set([{ stats: { pid: 123 } }]),
+        assert,
+        join,
+        readFileSync: () => receipt(),
         save: () => {},
         setProfile: async (count: number) => {
           calls.push(`profile:${count}`)
@@ -152,13 +168,106 @@ void (async () => {
           calls.push("soak")
         }
       }
-      await runInNewContext(`(async () => {let phase;${branch}})()`, context)
+    }
+  }
+  for (const diagnosticDispose of [true, false])
+    for (const phase of ["all", "matrix", "idle", "soak"]) {
+      const { calls, values } = contextFor(diagnosticDispose, phase)
+      await runInNewContext(`(async () => {let phase;${branch}})()`, values)
       if (diagnosticDispose)
         assert.deepEqual(calls, ["profile:1", ...Array<string>(6).fill("event")])
       else assert.deepEqual(calls, phase === "all" ? ["matrix", "idle", "soak"] : [phase])
     }
   checks.push(
     "actual diagnostic entry remains one bounded plugin even for phase=all; formal phases unchanged"
+  )
+  for (const receipt of [
+    () => {
+      throw Error("ENOENT")
+    },
+    () => "invalid JSON",
+    ...[
+      { pid: 124 },
+      { kind: "other" },
+      { diagnosticOnly: false },
+      { methodInstalled: false },
+      { at: 0 }
+    ].map(
+      (change) => () =>
+        JSON.stringify({
+          kind: "diagnostic-host-installed",
+          pid: 123,
+          at: Date.now(),
+          diagnosticOnly: true,
+          methodInstalled: true,
+          ...change
+        })
+    ),
+    () => {
+      const row = JSON.stringify({
+        kind: "diagnostic-host-installed",
+        pid: 123,
+        at: Date.now(),
+        diagnosticOnly: true,
+        methodInstalled: true
+      })
+      return row + "\n" + row
+    }
+  ]) {
+    const { calls, values } = contextFor(true, "all", receipt)
+    await assert.rejects(
+      runInNewContext(`(async () => {let phase;${branch}})()`, values),
+      /DIAGNOSTIC_INSTRUMENTATION_UNAVAILABLE/
+    )
+    assert.deepEqual(
+      calls,
+      ["profile:1", "event"],
+      "No warmup/burst without actual host installation"
+    )
+  }
+  checks.push(
+    "missing, malformed, stale, duplicate or mismatched installation receipt prevents the burst"
+  )
+  const host = readFileSync(join(__dirname, "support/mods-v2-performance-host.ts"), "utf8")
+  const hostStart = host.indexOf("if (typeof __MODS_GUEST_DISPOSE_DIAGNOSTIC__")
+  const hostEnd = host.indexOf("\nif (process.env.CMB_MODS_PERFORMANCE_GC", hostStart)
+  assert(hostStart > 0 && hostEnd > hostStart, "ACTUAL_HOST_COMPILE_GATE_REQUIRED")
+  const hostBranch = host.slice(hostStart, hostEnd)
+  for (const control of [undefined, false, true]) {
+    class FixtureGuest {
+      dispose() {
+        return undefined
+      }
+    }
+    const original = Object.getOwnPropertyDescriptor(FixtureGuest.prototype, "dispose")
+    const records: Record<string, unknown>[] = []
+    const holder: { exit?: () => void } = {}
+    const values = {
+      FunctionGuestRuntime: FixtureGuest,
+      installGuestDisposeDiagnostic,
+      join,
+      tmpdir: () => "owned-diagnostic",
+      appendFileSync: (_path: string, text: string) => records.push(JSON.parse(text)),
+      process: {
+        pid: 123,
+        env: { CMB_MODS_GUEST_DISPOSE_DIAGNOSTIC: "1" },
+        once: (_event: string, callback: () => void) => {
+          holder.exit = callback
+        }
+      },
+      ...(control === undefined ? {} : { __MODS_GUEST_DISPOSE_DIAGNOSTIC__: control })
+    }
+    runInNewContext(hostBranch, values)
+    assert.equal(records.length, control === true ? 1 : 0)
+    if (control === true) {
+      assert.equal(records[0].kind, "diagnostic-host-installed")
+      assert.equal(records[0].methodInstalled, true)
+      holder.exit?.()
+    }
+    assert.deepEqual(Object.getOwnPropertyDescriptor(FixtureGuest.prototype, "dispose"), original)
+  }
+  checks.push(
+    "actual host compile gate is zero-patch when undefined/false even with an inherited env flag"
   )
   console.log(JSON.stringify({ passed: checks.length, checks }))
 })().catch((error) => {

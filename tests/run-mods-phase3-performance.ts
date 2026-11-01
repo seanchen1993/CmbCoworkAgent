@@ -109,6 +109,7 @@ async function main() {
           }
         : {}),
       define: {
+        __MODS_GUEST_DISPOSE_DIAGNOSTIC__: diagnosticDispose ? "true" : "false",
         "import.meta.env": "{}",
         "import.meta.url": "__filename",
         __MODS_MCP_SDK__: "true",
@@ -184,6 +185,7 @@ async function main() {
   const manifest = {
     diagnosticOnly: diagnosticDispose,
     timingEligible: !diagnosticDispose,
+    compiledGuestDisposeObserver: diagnosticDispose,
     baseline: tree.commit,
     dependencyHash,
     fixture,
