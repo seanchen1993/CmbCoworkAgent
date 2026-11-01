@@ -71,7 +71,7 @@
     "test:design-html": "node --experimental-strip-types tests/design-html-preview.spec.ts && node --experimental-strip-types tests/design-html-preview-audit.spec.ts",
     "test:design-templates": "vitest run src/main/services/design/template-packages.test.ts && tsx tests/design-template-package-browser.spec.mts",
     "test:design-url-import": "vitest run src/main/ipc/design-url-import.test.ts src/main/services/design/capture-assets.test.ts src/main/services/design/url-import-service.test.ts src/main/services/design/run-manager.test.ts && tsx tests/design-url-import-electron.spec.mts && tsx tests/design-browser-confirmation-electron.spec.mts",
-    "test:design-sessions": "vitest run src/main/services/design src/shared/design-progressive.test.ts src/renderer/src/lib/design-session-client.test.ts && node scripts/run-design-session-browser.mjs",
+    "test:design-sessions": "vitest run src/main/services/design src/shared/design-progressive.test.ts src/shared/design-live-output.test.ts src/renderer/src/lib/design-session-client.test.ts && node scripts/run-design-session-browser.mjs",
     "test:html-preview:browser": "node tests/html-preview-browser.spec.mjs",
     "test:session-recovery:e2e": "node tests/run-session-checkpoint-recovery-e2e.mjs",
     "start": "electron-vite preview",

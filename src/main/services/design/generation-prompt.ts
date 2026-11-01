@@ -4,6 +4,17 @@ export const DESIGN_FIRST_WRITE_TARGET_BYTES = 8 * 1024
 export const DESIGN_ARTIFACT_CONTINUATION_MAX_ATTEMPTS = 3
 export const DESIGN_ARTIFACT_CONTINUATION_STALL_ATTEMPTS = 2
 
+export function describeIncompleteDesignArtifact(html?: string, expected: string[] = []): string {
+  if (!html?.trim()) return "模型本轮未写入可用的 HTML 文件。请重试。"
+  const draft = inspectDesignDocument(html, expected)
+  const reasons = [...draft.issues.slice(0, 3)]
+  const pending = draft.sections.filter((id) => !draft.completedSections.includes(id))
+  if (pending.length) reasons.push(`未完成区块：${pending.slice(0, 6).join("、")}${pending.length > 6 ? "等" : ""}`)
+  else if (draft.pending) reasons.push("页面仍有未完成标记")
+  if (draft.building) reasons.push("页面仍标记为生成中，尚未声明完成")
+  return `页面生成尚未完成：${reasons.join("；") || "未获得可交付的文件"}。已保留当前草稿，可继续生成。`
+}
+
 export const DESIGN_QUESTIONS_PROMPT = `You help clarify a design request. Return only <question-form id="discovery">{"questions":[...]}</question-form>.
 Generate about 10 short, task-specific clarifying questions (normally 8–12), ordered by importance. Cover the relevant gaps in goals, audience, platform, key workflows, page structure, content/data, interactions, exceptional states, accessibility and delivery scope. Tailor each question to this request; skip facts already supplied and avoid duplicate or filler questions.
 Each question has a unique snake_case id, type (text, textarea or chips), and a Chinese label. chips require 3–5 concise Chinese options and multi (boolean). hint and required are optional. Finish each question object before starting the next; the user can answer it immediately.
@@ -49,7 +60,8 @@ export function buildDesignContinuationPrompt(
   const pending = draft?.sections.filter((id) => !draft.completedSections.includes(id)) ?? []
   return (
     `继续当前 Design 草稿，保留已完成内容、方案数量与业务交互。复用当前线程已有需求和参考资料，只补未完成区块及脚本；复用已知源码和唯一占位标记直接 edit_file，不在成功修改之间例行 read_file/grep。仅在缺失上下文、匹配失败或外部改写时定向读取，禁止盲目重试。按有意义的区块批量修改，完成后立即结束，由宿主校验。\n` +
-    `未完成区块：${pending.join("、") || "检查并补齐尚未完成的内容/交互，完成后移除 building 标记"}。\n` +
+    `未完成区块：${pending.join("、") || "检查并补齐尚未完成的内容/交互"}。\n` +
+    (draft?.building ? '页面仍标记为生成中。确认内容和交互已完成后，移除 data-design-build 或将其设置为 "complete"；不要重建已完成区块。\n' : "") +
     (draft?.issues.length
       ? `结构错误：${draft.issues.slice(0, 8).join("；")}。只修复报告涉及的结构与标记。\n`
       : "") +

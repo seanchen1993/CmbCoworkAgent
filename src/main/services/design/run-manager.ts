@@ -31,7 +31,8 @@ import {
   type DesignEditableDocument
 } from "../../../shared/design-edit"
 import { sourceHash, verifyDesignPatchDependencies } from "./document-index"
-import { inspectDesignDocument } from "../../../shared/design-progressive"
+import { inspectDesignDocument, type DesignDraftPreview } from "../../../shared/design-progressive"
+import { DesignLiveOutputTracker } from "../../../shared/design-live-output"
 import { isSingleDesignVariant, designVariantPolicyIssue, SINGLE_DESIGN_VARIANT_PROMPT } from "../../../shared/design-variation-policy"
 import {
   readTweakDeclaration,
@@ -47,12 +48,14 @@ interface ActiveRun {
   id: string
   request: DesignRunRequest
   normalize: (token: string) => string
+  output: DesignLiveOutputTracker
   pending: DesignRunEvent[]
   timer?: ReturnType<typeof setTimeout>
   snapshot?: DesignSessionSnapshot
 }
 
 export interface DesignRunDependencies {
+  recoverDraft?: (snapshot: DesignSessionSnapshot) => DesignDraftPreview | null
   validateDirectEdit?: (
     candidate: DirectEditCandidate,
     before: DesignSessionSnapshot
@@ -94,6 +97,7 @@ export class DesignRunManager {
       snapshot.state.singleVariant = isSingleDesignVariant(snapshot.state, snapshot.meta)
       snapshot.state.artifactRevision ??= 0
       snapshot.state.patchStatus = null
+      snapshot.state.liveOutput = null
       snapshot.state.draftPreview ??= null
       snapshot.state.tweaks ??=
         snapshot.state.artifactMetadata?.tweaks ??
@@ -282,6 +286,7 @@ export class DesignRunManager {
     delete updates.draftPreview
     delete updates.tweaks
     delete updates.generationMetrics
+    delete updates.liveOutput
     delete updates.lastCompletedRunId
     delete updates.singleVariant
     for (const key of [
@@ -313,6 +318,7 @@ export class DesignRunManager {
     if (importingPage) {
       next.state.draftPreview = null
       next.state.generationMetrics = {}
+      next.state.liveOutput = null
       next.state.lastCompletedRunId = null
       next.state.appliedPatch = null
       next.state.patchStatus = null
@@ -417,6 +423,11 @@ export class DesignRunManager {
       const goal =
         previousRequest?.resumeGoal ?? previousRequest?.cleanUserMsg ??
         previousRequest?.resumeInstruction ?? previousRequest?.prompt ?? instruction
+      const confirmedAnswers = next.state.questions.flatMap((question) => {
+        const value = next.state.answers[question.id]
+        if (!value || (Array.isArray(value) && !value.length)) return []
+        return [`- ${question.label}：${Array.isArray(value) ? value.join("、") : value}`]
+      }).join("\n")
       request = {
         ...request,
         kind: "agent",
@@ -424,7 +435,8 @@ export class DesignRunManager {
         resumeFromDraft: true,
         resumeInstruction: instruction,
         resumeGoal: goal,
-        prompt: buildDesignDraftResumePrompt(instruction, resumeDraft, goal),
+        prompt: buildDesignDraftResumePrompt(instruction, resumeDraft, goal) +
+          (confirmedAnswers ? `\n\n[已确认的补充要求]\n${confirmedAnswers}` : ""),
         currentHtml: materializeTweaks(resumeDraft.html, resumeDraft.tweaks, false),
         sourceArtifactPath: resumeDraft.draftPath,
         patch: undefined
@@ -439,6 +451,7 @@ export class DesignRunManager {
       id: randomUUID(),
       request: clone(request),
       normalize: createDesignProgressNormalizer(),
+      output: new DesignLiveOutputTracker(),
       pending: []
     }
     if (next.state.singleVariant && request.kind !== "questions" && !run.request.prompt.includes(SINGLE_DESIGN_VARIANT_PROMPT))
@@ -449,6 +462,7 @@ export class DesignRunManager {
       ? { ...clone(resumeDraft), runId: run.id, revision: 0, status: "building", phase: "sections" }
       : null
     next.state.generationMetrics = { startedAt: Date.now() }
+    next.state.liveOutput = run.output.snapshot()
     next.state.patchMetrics = undefined
     next.state.patchStatus =
       request.kind === "patch" ? { phase: "locating", message: "正在定位修改目标" } : null
@@ -541,6 +555,21 @@ export class DesignRunManager {
 
   private receive(run: ActiveRun, event: DesignRunEvent): void {
     if (this.active.get(run.request.designSessionId) !== run) return
+    if (event.type === "model_activity") {
+      if (event.activity) run.output.activity(event.activity)
+      // Partial arguments are transient. Persist only the bounded, decoded output snapshot.
+      event = { type: "model_activity" }
+    } else if (event.type === "token" && event.token) run.output.text(event.token)
+    else if (event.type === "execution" && event.event) {
+      const activity = event.event as NonNullable<TabState["messages"][number]["executionEvents"]>[number]
+      if (activity.kind === "tool_call" && Object.keys(activity.args ?? {}).length)
+        run.output.phase("tool", activity.name)
+      else if (activity.kind === "tool_result") run.output.phase("waiting")
+      else if (activity.kind === "validation")
+        run.output.phase(activity.status === "running" ? "validation" : "waiting")
+    } else if (event.type === "model_retry") run.output.phase("retry")
+    else if (event.type === "approval") run.output.phase("approval")
+    else if (["model_retry_clear", "approval_resolved"].includes(event.type)) run.output.phase("waiting")
     run.pending.push(clone(event))
     if (
       [
@@ -582,6 +611,7 @@ export class DesignRunManager {
     next.seq++
     next.activeRunId = null
     next.state.generationState = "error"
+    next.state.liveOutput = null
     next.state.pendingApproval = null
     if (next.state.draftPreview) {
       next.state.draftPreview.status = "incomplete"
@@ -821,6 +851,7 @@ export class DesignRunManager {
       state.pendingApproval = null
       next.activeRunId = null
     }
+    state.liveOutput = terminal ? null : run.output.snapshot()
     this.commit(
       next,
       events,
@@ -938,11 +969,20 @@ export class DesignRunManager {
   retry(id: string, requestId: string): DesignSessionSnapshot {
     const request = this.store.latestRequest(id)
     if (!request) throw new Error("没有可重试的生成任务")
+    const next = this.get(id)
+    if (request.kind !== "questions" && !next.activeRunId && !next.state.draftPreview && ["error", "cancelled", "interrupted"].includes(next.state.generationState)) {
+      const recovered = this.deps.recoverDraft?.(next)
+      if (recovered && inspectDesignDocument(recovered.html, recovered.sections).valid) {
+        next.state.draftPreview = recovered
+        this.commit(next, [{ type: "draft_recovered", draftPath: recovered.draftPath }])
+      }
+    }
     const hasDraft = Boolean(this.get(id).state.draftPreview?.html.trim())
     return this.start({
       ...request,
       requestId,
       freshAgentThread: request.kind === "agent",
+      resumeOnly: hasDraft,
       // Resume the page and its actual requirements, without reinjecting initial template HTML.
       resumeInstruction: hasDraft
         ? request.resumeInstruction ?? request.cleanUserMsg ?? request.prompt

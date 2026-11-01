@@ -24,6 +24,10 @@ import { getDb } from "../db"
 import { DesignSessionStore } from "../services/design/session-store"
 import { DesignRunManager } from "../services/design/run-manager"
 import { DesignDraftPublisher } from "../services/design/draft-preview"
+import {
+  prepareDesignDraftResume, validateDesignDraftResumeEdit, recoverDesignDraftCheckpoint,
+  buildDesignDraftResumeArtifactInstruction, DESIGN_DRAFT_RESUME_SYSTEM_PROMPT
+} from "../services/design/draft-resume"
 import { executeDesignPatch, DESIGN_PATCH_TOOLS, normalizeDesignPatchReply, readDesignPatchStream } from "../services/design/patch-executor"
 import { DesignPatchScopeError } from "../services/design/patch-context"
 import { decorateDesignNodes } from "../../shared/design-node-ids"
@@ -34,7 +38,7 @@ import {
   DESIGN_PROGRESSIVE_PROMPT, DESIGN_DECLARATIVE_TWEAKS_PROMPT,
   DESIGN_QUESTIONS_PROMPT, DESIGN_CREATION_SYSTEM_PROMPT, DESIGN_FRAMEWORK_EDITING_PROMPT,
   buildDesignCreationBasePrompt, buildDesignCreationArtifactInstruction, validateFirstDesignWrite,
-  buildDesignContinuationPrompt, hasDesignContinuationProgress,
+  buildDesignContinuationPrompt, hasDesignContinuationProgress, describeIncompleteDesignArtifact,
   DESIGN_ARTIFACT_CONTINUATION_MAX_ATTEMPTS, DESIGN_ARTIFACT_CONTINUATION_STALL_ATTEMPTS
 } from "../services/design/generation-prompt"
 import { DesignQuestionStream } from "../services/design/question-stream"
@@ -48,6 +52,7 @@ import {
 import { designStreamWithArtifactRecovery, isDesignGraphRecursionLimit } from "../services/design/generation-stream"
 import { getAgentGraphRecursionLimit } from "../../shared/agent-runtime-limits"
 import { inspectDesignDocument, isFinalizableDesignDraft } from "../../shared/design-progressive"
+import { extractDesignPublicText } from "../../shared/design-live-output"
 import { materializeTweaks, readTweakDeclaration, reconcileTweaks, tweakSourceDiagnostics, type DesignTweakCommand, type DesignTweaksState } from "../../shared/design-tweaks"
 import { approvalDecisionBroker } from "../agent/approval-decision-broker"
 import { asDesignApprovalRequest, type DesignRunEvent, type DesignSessionChange, type DesignSessionSeed, type DesignRunRequest, type TabState, type SessionMeta } from "../../shared/managed-design-session"
@@ -2296,8 +2301,6 @@ type NormalizedDesignToolCall = { id?: string; name?: string; args?: Record<stri
 
 const DESIGN_PLACEHOLDER_FILE_PATH_RE =
   /^(?:TD_PATH|TBD_PATH|TODO_PATH|OUTPUT_PATH|ARTIFACT_PATH|FILE_PATH|PATH|<[^>]+>|\[[^\]]+\])$/i
-const DESIGN_PROGRESS_ONLY_TEXT_RE =
-  /^(?:我(?:先|来)?|让我|现在|接下来).{0,80}(?:读取|分析|查看|理解|检查|构建|生成|还原|开始)/u
 const DESIGN_TOOL_MESSAGE_ERROR_RE =
   /(?:^|\n)\s*(?:Error\b|Cannot\b|Failed\b|Invalid\b|String not found\b|Multiple occurrences found\b|\[Hook blocked\])/i
 
@@ -2307,13 +2310,6 @@ function truncateDesignToolString(value: string, limit = 500): string {
 
 function isPlaceholderDesignFilePath(rawPath: string): boolean {
   return DESIGN_PLACEHOLDER_FILE_PATH_RE.test(rawPath.trim())
-}
-
-function isLikelyDesignProgressOnlyText(rawText: string): boolean {
-  const text = rawText.trim()
-  if (!text) return false
-  if (text.includes("<!DOCTYPE") || /<html[\s>]/i.test(text)) return false
-  return text.length <= 500 && DESIGN_PROGRESS_ONLY_TEXT_RE.test(text)
 }
 
 function normalizeDesignHtmlForChangeCheck(html: string): string {
@@ -2652,6 +2648,14 @@ export function registerDesignHandlers(): void {
     abort: (runId) => {
       activeSessions.get(runId)?.abort()
       activeDesignAgents.get(runId)?.abort()
+    },
+    recoverDraft: (snapshot) => {
+      const workspace = snapshot.workspacePath
+      if (!workspace) return null
+      const artifact = resolveDesignArtifactPath(`${snapshot.id}_design-main`, workspace)
+      return artifact.filePath
+        ? recoverDesignDraftCheckpoint(workspace, artifact.filePath, snapshot.state.messages)
+        : null
     },
     execute: async (request, runId, emit, snapshot) => {
       if (request.kind === "patch" && snapshot.state.creationSelection?.template.package) {
@@ -3366,7 +3370,7 @@ export function registerDesignHandlers(): void {
   registerDesignExecutor(
     "design:agent-generate",
     async (event, {
-      sessionId, prompt, modelId, tabId, imageData, mimeType, currentHtml, skill, workspacePath: requestedWorkspacePath, artifactId, sourceArtifactPath, designSessionId, designSystemId, templatePackage, singleVariant, resumeFromDraft,
+      sessionId, prompt, modelId, tabId, imageData, mimeType, currentHtml, skill, workspacePath: requestedWorkspacePath, artifactId, sourceArtifactPath, designSessionId, designSystemId, templatePackage, singleVariant, resumeFromDraft, resumeOnly,
     }: {
       sessionId: string
       prompt: string
@@ -3384,6 +3388,7 @@ export function registerDesignHandlers(): void {
       templatePackage?: DesignTemplateReference
       singleVariant?: boolean
       resumeFromDraft?: boolean
+      resumeOnly?: boolean
     }) => {
       const channel = `design:stream:${sessionId}`
       const win = event.sender ? BrowserWindow.fromWebContents(event.sender) : null
@@ -3443,7 +3448,7 @@ export function registerDesignHandlers(): void {
 
         const selectedSkill = normalizeDesignSkillReference(skill)
         let skillContext = ""
-        if (selectedSkill) {
+        if (selectedSkill && !resumeFromDraft) {
           const skillEventId = `selected-skill:${selectedSkill.name}:${Date.now()}`
           send({
             type: "execution",
@@ -3512,10 +3517,14 @@ export function registerDesignHandlers(): void {
           : ""
         const outputArtifactPath = preparedArtifact.filePath
         const draftArtifactPath = makeDesignArtifactDraftPath(outputArtifactPath)
+        const generationStartedAtMs = Date.now()
         const sourcePathIsOutput = sameResolvedFilePath(sourceArtifact.filePath, outputArtifactPath)
         let sourceFilePathForPrompt: string | undefined
 
-        if (currentHtmlSource) {
+        if (resumeFromDraft) {
+          prepareDesignDraftResume(workspacePath, draftArtifactPath, currentHtmlSource)
+          sourceFilePathForPrompt = draftArtifactPath
+        } else if (currentHtmlSource) {
           const snapshot = writeDesignArtifactSourceSnapshot(outputArtifactPath, currentHtmlSource)
           if (!snapshot.success || !snapshot.filePath) {
             send({ type: "error", error: snapshot.error ?? "Failed to snapshot current design HTML" })
@@ -3569,14 +3578,16 @@ export function registerDesignHandlers(): void {
             ? currentHtml
             : storedHtml
         const isNewDesign = !hasExistingArtifactHtml && !htmlForIteration
-        const templateContext = templatePackage
+        const templateContext = templatePackage && !resumeFromDraft
           ? buildTemplatePackageContext(
             templatePackages.materialize(templatePackage, path.dirname(outputArtifactPath)),
             !isNewDesign
           )
           : ""
         const enforceSingleVariant = !!singleVariant || !!designSystemId
-        const artifactInstruction = isNewDesign
+        const artifactInstruction = resumeFromDraft
+          ? buildDesignDraftResumeArtifactInstruction(draftArtifactPath)
+          : isNewDesign
           ? buildDesignCreationArtifactInstruction(draftArtifactPath)
           : buildDesignArtifactInstruction(draftArtifactPath, false, sourceFilePathForPrompt)
         const promptWithCurrentHtml = htmlForIteration
@@ -3602,6 +3613,10 @@ export function registerDesignHandlers(): void {
             if (!designVariantPolicyIssue(preview.html, enforceSingleVariant)) send({ type: "preview", preview })
           },
         })
+        if (resumeFromDraft) {
+          draftPublisher.notify(candidateDraftPath)
+          await draftPublisher.flush()
+        }
         const isFinalizableCandidate = (candidate: string) => isCompleteHtmlDocument(candidate) && isFinalizableDesignDraft(candidate, draftPublisher?.expectedSections)
         const shouldResetInitialCheckpoint = !hasExistingArtifactHtml && !htmlForIteration
 
@@ -3629,24 +3644,34 @@ export function registerDesignHandlers(): void {
             threadId: runtimeThreadId,
             workspacePath,
             modelId,
-            baseSystemPrompt: isNewDesign || validationRepair ? buildDesignCreationBasePrompt(workspacePath) : undefined,
+            baseSystemPrompt: isNewDesign || resumeFromDraft || validationRepair ? buildDesignCreationBasePrompt(workspacePath) : undefined,
             mainFilesystemToolDescriptions: DESIGN_FILE_TOOL_DESCRIPTIONS,
             mainMiddleware: repairProgress ? [repairProgress.middleware] : undefined,
-            extraSystemPrompt: (validationRepair ? DESIGN_VALIDATION_REPAIR_SYSTEM_PROMPT : isNewDesign ? DESIGN_CREATION_SYSTEM_PROMPT + (templatePackage ? DESIGN_FRAMEWORK_EDITING_PROMPT : "") : DESIGN_SYSTEM_PROMPT) + (enforceSingleVariant ? "\n\n" + SINGLE_DESIGN_VARIANT_PROMPT : "") + (templatePackage ? "\n\n## Selected template package\nUse the selected local template's framework, component library and theme. Its dependencies have already been copied by the host. Keep relative local script/style references instead of inlining vendor bundles or switching to remote CDNs. Produce exactly one complete HTML page, preserving React/Vue and JSX/Babel where present. These template rules override generic inline-only and variation instructions.\n" : ""),
+            extraSystemPrompt: (validationRepair ? DESIGN_VALIDATION_REPAIR_SYSTEM_PROMPT : resumeFromDraft ? DESIGN_DRAFT_RESUME_SYSTEM_PROMPT : isNewDesign ? DESIGN_CREATION_SYSTEM_PROMPT + (templatePackage ? DESIGN_FRAMEWORK_EDITING_PROMPT : "") : DESIGN_SYSTEM_PROMPT) + (enforceSingleVariant ? "\n\n" + SINGLE_DESIGN_VARIANT_PROMPT : "") + (templatePackage ? "\n\n## Selected template package\nUse the selected local template's framework, component library and theme. Its dependencies have already been copied by the host. Keep relative local script/style references instead of inlining vendor bundles or switching to remote CDNs. Produce exactly one complete HTML page, preserving React/Vue and JSX/Babel where present. These template rules override generic inline-only and variation instructions.\n" : ""),
             noSchedulerTool: true,
             noSkillEvolutionTool: true,
-            disableSubagents: validationRepair || (isNewDesign && !selectedSkill),
-            allowedSkillNames: validationRepair ? [] : isNewDesign ? (selectedSkill ? [selectedSkill.name] : []) : undefined,
-            disableMcpTools: validationRepair || (isNewDesign && !selectedSkill && !/https?:\/\//i.test(prompt)),
-            blockedToolNames: validationRepair ? ["execute", "task_output", "code_exec", "write_todos", "write_file", "ls", "glob"] : (isNewDesign && !selectedSkill) ? ["execute", "task_output", "code_exec", "write_todos"] : [],
+            disableSubagents: validationRepair || !!resumeFromDraft || (isNewDesign && !selectedSkill),
+            allowedSkillNames: validationRepair || resumeFromDraft ? [] : isNewDesign ? (selectedSkill ? [selectedSkill.name] : []) : undefined,
+            disableMcpTools: validationRepair || !!resumeFromDraft || (isNewDesign && !selectedSkill && !/https?:\/\//i.test(prompt)),
+            blockedToolNames: validationRepair || resumeFromDraft ? ["execute", "task_output", "code_exec", "write_todos", "write_file", "ls", "glob"] : (isNewDesign && !selectedSkill) ? ["execute", "task_output", "code_exec", "write_todos"] : [],
             enableAgentsPrompt: false,
             abortSignal: controller.signal,
             retryHooks: buildDesignModelRetryHooks(send),
             maxRetryAttempts: DESIGN_MODEL_MAX_RETRY_ATTEMPTS,
-            validateFileWrite: (filePath, content) =>
-              isNewDesign && !recordedFirstWrite && sameResolvedFilePath(filePath, candidateDraftPath)
+            validateFileWrite: (filePath, content) => {
+              if (resumeFromDraft) {
+                if (!sameResolvedFilePath(filePath, candidateDraftPath))
+                  return `接续阶段请仅修改当前草稿 ${candidateDraftPath}`
+                try {
+                  return validateDesignDraftResumeEdit(fs.readFileSync(candidateDraftPath, "utf8"), content)
+                } catch {
+                  return "当前草稿无法读取，已停止修改；不要重新创建页面。"
+                }
+              }
+              return isNewDesign && !recordedFirstWrite && sameResolvedFilePath(filePath, candidateDraftPath)
                 ? validateFirstDesignWrite(content)
-                : undefined,
+                : undefined
+            },
             onFileMutation: (filePath) => {
               if (sameResolvedFilePath(path.resolve(workspacePath, filePath), candidateDraftPath)) {
                 wroteCandidateDraft = true
@@ -3825,6 +3850,7 @@ export function registerDesignHandlers(): void {
           let midStreamRetriesLeft = 2
           let streamedText = ""
           let finalMessageText = ""
+          let liveMessageScope = `${runtimeThreadId}:${Date.now()}`
           let completedDraftHtml: string | undefined
           const readCompletedDraft = async (): Promise<string | undefined> => {
             if (!wroteCandidateDraft) return undefined
@@ -3898,7 +3924,7 @@ export function registerDesignHandlers(): void {
                           })
                         }
 
-                        const assistantText = extractTextContent(kwargs.content ?? msg.content)
+                        const assistantText = extractDesignPublicText(kwargs.content ?? msg.content)
                         if (assistantText && !className.includes("Chunk")) {
                           emitAssistantText(`assistant:${String(kwargs.id || msg.id || Date.now())}`, assistantText)
                         }
@@ -3948,6 +3974,13 @@ export function registerDesignHandlers(): void {
                 const className = getSerializedClassName(msgChunk)
 
                 if (className.includes("AI")) {
+                  if (className.includes("Chunk")) {
+                    if (typeof kwargs.id === "string" && kwargs.id) liveMessageScope = kwargs.id
+                    send({
+                      type: "model_activity",
+                      activity: { scope: liveMessageScope, toolCallChunks: kwargs.tool_call_chunks }
+                    })
+                  }
                   if (!recordedFirstModelChunk) {
                     recordedFirstModelChunk = true
                     send({ type: "metrics", metrics: { firstModelChunkAt: Date.now() } })
@@ -3988,6 +4021,7 @@ export function registerDesignHandlers(): void {
                 }
 
                 if (className.includes("Tool")) {
+                  liveMessageScope = `${runtimeThreadId}:${Date.now()}`
                   const toolCallId = typeof kwargs.tool_call_id === "string" ? kwargs.tool_call_id : ""
                   const resultKey = `${toolCallId || "tool"}:${String(kwargs.id || "")}`
                   if (toolCallId && !emittedToolResultIds.has(resultKey)) {
@@ -4015,7 +4049,7 @@ export function registerDesignHandlers(): void {
                 if (!className.includes("AI")) continue
 
                 // Extract text content, which can be a plain string or content blocks.
-                const token = extractTextContent(kwargs.content)
+                const token = extractDesignPublicText(kwargs.content)
                 if (!token) continue
 
                 if (className.includes("Chunk")) {
@@ -4071,12 +4105,8 @@ export function registerDesignHandlers(): void {
           deleteThreadCheckpoint(threadId)
         }
 
-        const generationStartedAtMs = Date.now()
-        const initialResult = await runDesignAgentOnce(promptWithArtifact, threadId)
-        let html = initialResult.html
-        let fullText = initialResult.fullText
-        const firstFailureText = initialResult.fullText
-        const requiresFreshEditArtifact = Boolean(currentHtmlSource.trim() || sourceFilePathForPrompt)
+        let html: string | undefined
+        const requiresFreshEditArtifact = !(resumeFromDraft && resumeOnly) && Boolean(currentHtmlSource.trim() || sourceFilePathForPrompt)
         const sendValidationEvent = (
           status: DesignExecutionStatus,
           content: string,
@@ -4188,6 +4218,14 @@ export function registerDesignHandlers(): void {
           return { ok: true }
         }
 
+        // A finished checkpoint may only have failed final validation/saving. Do not ask
+        // the model to regenerate it merely to produce a "fresh" write for the host.
+        if (resumeFromDraft && resumeOnly && isFinalizableCandidate(currentHtmlSource)) {
+          html = currentHtmlSource
+        } else {
+          html = (await runDesignAgentOnce(promptWithArtifact, threadId)).html
+        }
+
         if (!html || !isFinalizableCandidate(html)) {
           const draftArtifact = readFreshDesignArtifactDraftFile(
             candidateDraftPath,
@@ -4217,9 +4255,6 @@ export function registerDesignHandlers(): void {
           sendValidationEvent("running", "继续生成 artifact...", false)
           const continuationResult = await runDesignAgentOnce(continuationPrompt, threadId)
           html = continuationResult.html
-          if (continuationResult.fullText && !isLikelyDesignProgressOnlyText(continuationResult.fullText)) {
-            fullText = continuationResult.fullText
-          }
           if (!html || !isFinalizableCandidate(html) || wroteCandidateDraft) {
             const continuationDraftArtifact = readFreshDesignArtifactDraftFile(
               continuationArtifactPath,
@@ -4239,7 +4274,7 @@ export function registerDesignHandlers(): void {
           stalledContinuationAttempts = madeProgress ? 0 : stalledContinuationAttempts + 1
         }
 
-        for (let recoveryAttempt = 1; (!html || !isFinalizableCandidate(html)) && recoveryAttempt <= DESIGN_ARTIFACT_WRITE_RECOVERY_ATTEMPTS && !draftPublisher?.latest; recoveryAttempt++) {
+        for (let recoveryAttempt = 1; (!html || !isFinalizableCandidate(html)) && recoveryAttempt <= DESIGN_ARTIFACT_WRITE_RECOVERY_ATTEMPTS && !draftPublisher?.latest && !resumeFromDraft; recoveryAttempt++) {
           const recoveryArtifactPath = makeDesignArtifactDraftPath(outputArtifactPath)
           candidateDraftPath = recoveryArtifactPath
           draftPublisher?.setCandidate(candidateDraftPath)
@@ -4267,9 +4302,6 @@ export function registerDesignHandlers(): void {
             recoveryInstruction
           const recoveryResult = await runDesignAgentOnce(recoveryPrompt, recoveryThreadId)
           html = recoveryResult.html
-          if (recoveryResult.fullText && !isLikelyDesignProgressOnlyText(recoveryResult.fullText)) {
-            fullText = recoveryResult.fullText
-          }
           if (!html || !isFinalizableCandidate(html) || wroteCandidateDraft) {
             const recoveryDraftArtifact = readFreshDesignArtifactDraftFile(
               recoveryArtifactPath,
@@ -4312,14 +4344,11 @@ export function registerDesignHandlers(): void {
             await closeCheckpointer(repairThreadId)
             deleteThreadCheckpoint(repairThreadId)
             const repairPrompt = buildDesignValidationRepairPrompt(validationOutcome.repairReport?.(repairArtifactPath) ?? validationOutcome.message, repairArtifactPath)
-            const repairResult = await runDesignAgentOnce(repairPrompt, repairThreadId, true)
+            await runDesignAgentOnce(repairPrompt, repairThreadId, true)
             if (!wroteCandidateDraft) {
               send({ type: "error", error: `模型未实际修改修复草稿，已停止自动修复并保留页面。\n${validationOutcome.message}` })
               abortAgentSession()
               return
-            }
-            if (repairResult.fullText && !isLikelyDesignProgressOnlyText(repairResult.fullText)) {
-              fullText = repairResult.fullText
             }
             // A model summary or HTML in chat cannot stand in for the repaired file.
             const repairDraftArtifact = readFreshDesignArtifactDraftFile(
@@ -4343,30 +4372,35 @@ export function registerDesignHandlers(): void {
             continue
           }
 
+          const unfinished = readFreshDesignArtifactDraftFile(
+            candidateDraftPath, workspacePath, generationStartedAtMs, wroteCandidateDraft
+          )
+          const failureMessage = describeIncompleteDesignArtifact(
+            unfinished.html || draftPublisher?.latest?.html || html,
+            draftPublisher?.expectedSections
+          )
           const artifact = tabId ? readDesignArtifact(resolvedArtifactId, workspacePath) : null
           if (artifact?.success && artifact.html && isFinalizableCandidate(artifact.html)) {
             storeDesignHtml(htmlStoreKey, artifact.html)
             send({
               type: "error",
-              error: "本次生成没有写出完整的新 HTML，已保留上一版设计。请重试或缩小页面规模。",
+              error: `已保留上一版设计。${failureMessage}`,
             })
             return
           }
-          const errorText = !fullText.trim() || isLikelyDesignProgressOnlyText(fullText)
-            ? firstFailureText
-            : fullText
           send({
             type: "error",
-            error: html && (html.includes("<!DOCTYPE") || /<html[\s>]/i.test(html))
-              ? "模型本轮没有写出完整 HTML artifact。分块写入可能未完成，请重试或缩小页面规模。"
-              : errorText.trim()
-                ? "模型本轮没有写出完整 HTML artifact。已停止本次生成，请重试或缩小页面规模。"
-                : "生成未返回任何内容，请重试。",
+            error: failureMessage,
           })
           abortAgentSession()
           return
         }
       } catch (err) {
+        // Persist the last successful mutation before abort disposes the publisher.
+        // API failures can otherwise discard the preview still waiting on its throttle.
+        if (!controller.signal.aborted) {
+          try { await draftPublisher?.flush() } catch { /* Keep the original failure. */ }
+        }
         if (controller.signal.aborted) {
           send({ type: "cancelled" })
         } else {

@@ -5306,6 +5306,9 @@ export class LocalSandbox
             occurrences = r.occurrences
           }
 
+          const domainError = this._validateFileWrite?.(resolvedPath, expectedContent)
+          if (domainError) return { error: domainError }
+
           if (this.isAborted) {
             return { error: "文件编辑已取消。" }
           }

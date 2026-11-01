@@ -4822,7 +4822,7 @@ export interface CreateAgentRuntimeOptions {
   skillUseTracker?: SkillUseTracker
   /** Callback invoked after successful write/edit/upload filesystem operations. */
   onFileMutation?: (filePath: string, kind: AgentFileMutationKind) => void
-  /** Optional domain check on effective write_file content before any write. */
+  /** Optional domain check on effective write_file/edit_file content before any write. */
   validateFileWrite?: (filePath: string, content: string) => string | undefined
   /** Extra tools appended to the runtime tool list (e.g. a workflow subagent's structured_output). */
   additionalTools?: DynamicStructuredTool[]

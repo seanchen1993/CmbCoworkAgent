@@ -26,6 +26,18 @@ const page = (attrs = "", content = '<span id="label">开始</span>') =>
   `<!doctype html><html><head><style>.card{color:var(--primary);border-radius:var(--radius)}</style><script type="application/design-tweaks+json">${JSON.stringify(declaration)}</script></head><body ${attrs}><section data-design-section="main">${content}</section></body></html>`
 
 describe("progressive artifact contract", () => {
+  it("accepts explicit completion on large documents without bypassing pending or structural checks", () => {
+    const finished = page('data-design-build="complete"', "内容".repeat(40_000))
+    expect(inspectDesignDocument(finished)).toMatchObject({ valid: true, finalizable: true, building: false })
+    expect(isFinalizableDesignDraft(page('data-design-build=" Complete "'))).toBe(true)
+    for (const state of ["", "building", "unknown"]) {
+      expect(isFinalizableDesignDraft(page(`data-design-build="${state}"`))).toBe(false)
+    }
+    expect(isFinalizableDesignDraft(finished.replace('<section data-design-section="main">', '<section data-design-section="main" data-design-pending>'))).toBe(false)
+    expect(isFinalizableDesignDraft(finished.replace("</section>", ""))).toBe(false)
+    expect(isFinalizableDesignDraft(finished, ["missing"])).toBe(false)
+    expect(isFinalizableDesignDraft(finished.replace("</body>", '<div data-design-build="building"></div></body>'))).toBe(false)
+  })
   it("identifies duplicate section markers across A/B variations with actionable feedback", () => {
     const variation = (id: string, section: string) => `<div id="variation-${id}"><section data-design-section="${section}">内容</section></div>`
     const duplicate = `<!doctype html><html><body>${variation("a", "shell")}${variation("b", "shell")}</body></html>`

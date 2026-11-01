@@ -1,6 +1,7 @@
 import type { FileAttachment as BaseFileAttachment } from "@/types"
 import type { DesignTemplateReference } from "../../../../shared/design-template"
 import type { DesignDraftPreview, DesignGenerationMetrics } from "../../../../shared/design-progressive"
+import type { DesignLiveOutput } from "../../../../shared/design-live-output"
 import type { DesignTweaksState } from "../../../../shared/design-tweaks"
 import type { DesignAppliedPatch, DesignPatchMetrics, DesignPatchStatus } from "../../../../shared/design-patch"
 
@@ -349,6 +350,7 @@ export interface TabState {
   draftPreview?: DesignDraftPreview | null
   tweaks?: DesignTweaksState | null
   generationMetrics?: DesignGenerationMetrics
+  liveOutput?: DesignLiveOutput | null
   lastCompletedRunId?: string | null
   sourceInfo: DesignSourceInfo | null
   generationState: GenerationState

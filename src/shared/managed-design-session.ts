@@ -11,6 +11,7 @@ import type {
   DesignArtifactMetadata
 } from "../renderer/src/components/design/types"
 import type { DesignDraftPreview, DesignGenerationMetrics } from "./design-progressive"
+import type { DesignModelActivity } from "./design-live-output"
 import type { DesignTweakCommand, DesignTweaksState } from "./design-tweaks"
 import type {
   DesignAppliedPatch,
@@ -39,6 +40,8 @@ export interface DesignRunRequest {
   freshAgentThread?: boolean
   /** Set by the host when continuing from its durable, unfinished page. */
   resumeFromDraft?: boolean
+  /** Resume button: a completed saved draft needs validation, without another model rewrite. */
+  resumeOnly?: boolean
   /** Unwrapped instruction, so repeated stops do not nest continuation prompts. */
   resumeInstruction?: string
   /** Original page requirements, retained even after a short follow-up such as “continue”. */
@@ -75,6 +78,7 @@ export interface DesignRunEvent {
   tweaks?: DesignTweaksState | null
   metrics?: DesignGenerationMetrics
   token?: string
+  activity?: DesignModelActivity
   html?: string
   questions?: unknown[]
   question?: unknown
@@ -220,7 +224,7 @@ export function clampDesignProgressText(content: string): string {
   return content
 }
 
-export function createDesignProgressNormalizer(): (token: string) => string {
+export function createDesignProgressNormalizer(options: { includeCode?: boolean } = {}): (token: string) => string {
   let insideThinkBlock = false
   let insideHtmlArtifact = false
   let htmlProgressEmitted = false
@@ -272,9 +276,10 @@ export function createDesignProgressNormalizer(): (token: string) => string {
     }
 
     visible = visible.replace(THINK_CLOSE_PATTERN, "")
-    if (!visible.trim()) return ""
     if (DESIGN_TOOL_MARKUP_PROGRESS_PATTERN.test(visible)) return ""
     if (DESIGN_TOOL_PROGRESS_LINE_PATTERN.test(visible) || /^OK$/i.test(visible.trim())) return ""
+    if (options.includeCode) return visible
+    if (!visible.trim()) return ""
 
     if (DESIGN_HTML_PROGRESS_PATTERN.test(visible)) {
       insideHtmlArtifact = true
@@ -534,6 +539,7 @@ export function createDesignState(): TabState {
     draftPreview: null,
     tweaks: null,
     generationMetrics: {},
+    liveOutput: null,
     sourceInfo: null,
     generationState: "idle",
     questions: [],

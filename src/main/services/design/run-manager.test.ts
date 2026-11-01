@@ -63,6 +63,31 @@ function harness(options: Partial<DesignRunDependencies> = {}) {
 }
 
 describe("background design conversations", () => {
+  it("streams bounded generated file output, persists it across reopen and clears it on stop/retry", async () => {
+    const h = harness()
+    h.create()
+    const emit = await h.start()
+    expect(h.manager.get("ds_a").state.liveOutput?.phase).toBe("waiting")
+    emit({ type: "model_activity", activity: { scope: "ai", toolCallChunks: [{ index: 0, name: "write_file", args: '{"content":"<html>' }] } })
+    emit({ type: "model_activity", activity: { scope: "ai", toolCallChunks: [{ index: 0, args: 'streaming-page' }] } })
+    await vi.advanceTimersByTimeAsync(100)
+    expect(h.store.get("ds_a")!.state.liveOutput).toMatchObject({ phase: "file", text: "<html>streaming-page" })
+    expect(h.manager.get("ds_a").state.liveOutput?.text).toContain("streaming-page")
+    h.manager.patch("ds_a", { liveOutput: null })
+    expect(h.manager.get("ds_a").state.liveOutput).not.toBeNull()
+    h.manager.stop("ds_a")
+    expect(h.manager.get("ds_a").state.liveOutput).toBeNull()
+    emit({ type: "token", token: "late output" })
+    expect(h.manager.get("ds_a").state.liveOutput).toBeNull()
+    h.finishes.get("request-a")!()
+    const second = await h.start("ds_a", "request-b")
+    expect(h.manager.get("ds_a").state.liveOutput?.text).toBe("")
+    second({ type: "preview", preview: preview(h.manager.get("ds_a").activeRunId!, 1, true) })
+    second({ type: "done", html: html().replace("<body>", '<body data-design-build="complete">') })
+    expect(h.manager.get("ds_a").state.generationState).toBe("done")
+    expect(h.manager.get("ds_a").state.liveOutput).toBeNull()
+    h.finishes.get("request-b")!()
+  })
   it("imports a captured page with fresh runtime state and refuses to replace an active run", async () => {
     const h = harness()
     // A failed generation may leave a recoverable draft. Import must replace it.
@@ -243,6 +268,55 @@ describe("background design conversations", () => {
     expect(secondRequest.currentHtml).toContain("#00aa00")
     expect(secondRequest.prompt.match(/\[接续未完成的设计\]/g)).toHaveLength(1)
     expect(secondRequest.resumeGoal).toBe("生成销售看板")
+  })
+
+  it("continues the latest failed draft across repeated errors and app reopen, retaining confirmed answers", async () => {
+    const h = harness()
+    h.create()
+    h.manager.patch("ds_a", { questions: [{ id: "platform", type: "text", label: "运行平台" }], answers: { platform: "企业内部桌面端" } })
+    const emit = await h.start()
+    const runId = h.manager.get("ds_a").activeRunId!
+    const latest = html(true).replace("页面", "出错前已完成一半")
+    emit({ type: "preview", preview: { ...preview(runId, 8, true), html: latest } })
+    emit({ type: "error", error: "模型请求失败" })
+    h.finishes.get("request-a")!()
+    expect(h.manager.get("ds_a").state.generationState).toBe("error")
+    h.manager.retry("ds_a", "retry-error")
+    await Promise.resolve()
+    let request = h.execute.mock.calls.at(-1)![0]
+    expect(request).toMatchObject({ resumeFromDraft: true, resumeOnly: true, isIteration: true })
+    expect(request.currentHtml).toContain("出错前已完成一半")
+    expect(request.prompt).toContain("运行平台：企业内部桌面端")
+    h.emitters.get("retry-error")!({ type: "error", error: "再次请求失败，未写入新内容" })
+    h.finishes.get("retry-error")!()
+    const reopened = new DesignRunManager(h.store, h.deps)
+    expect(reopened.get("ds_a").state.draftPreview!.html).toBe(latest)
+    reopened.retry("ds_a", "retry-reopened")
+    await Promise.resolve()
+    request = h.execute.mock.calls.at(-1)![0]
+    expect(request.currentHtml).toContain("出错前已完成一半")
+    expect(request.prompt.match(/\[接续未完成的设计\]/g)).toHaveLength(1)
+    expect(request.prompt.match(/运行平台：企业内部桌面端/g)).toHaveLength(1)
+    reopened.stop("ds_a")
+    h.finishes.get("retry-reopened")!()
+  })
+
+  it("recovers a lost legacy preview before retry instead of dispatching the original creation again", async () => {
+    const recoverDraft = vi.fn(() => ({ ...preview("legacy", 0, true), html: html(true).replace("页面", "旧版本出错前的内容") }))
+    const h = harness({ recoverDraft })
+    h.create()
+    const emit = await h.start()
+    emit({ type: "error", error: "旧版本没有保留草稿引用" })
+    h.finishes.get("request-a")!()
+    h.manager.retry("ds_a", "recover-legacy")
+    await Promise.resolve()
+    expect(recoverDraft).toHaveBeenCalledOnce()
+    const request = h.execute.mock.calls.at(-1)![0]
+    expect(request).toMatchObject({ resumeFromDraft: true, resumeOnly: true, isIteration: true })
+    expect(request.currentHtml).toContain("旧版本出错前的内容")
+    expect(h.store.get("ds_a")!.state.draftPreview!.html).toContain("旧版本出错前的内容")
+    h.manager.stop("ds_a")
+    h.finishes.get("recover-legacy")!()
   })
 
   it("continues recovered drafts for a follow-up using draft values rather than the previous final page", async () => {

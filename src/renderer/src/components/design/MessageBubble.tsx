@@ -81,7 +81,7 @@ function getToolProgressText(
     return `${label}执行失败，正在等待模型处理...`
   }
 
-  if (call.name === "read_file") return `已读取${target}，正在分析内容...`
+  if (call.name === "read_file") return `已读取${target}`
   if (call.name === "write_file") return `已写入${target}，正在整理生成结果...`
   if (call.name === "edit_file") return `已修改${target}，正在整理生成结果...`
   if (call.name === "glob" || call.name === "grep" || call.name === "list_files") {
@@ -511,11 +511,11 @@ function DesignModelRetryNotice({ retry }: { retry: DesignModelRetryState }) {
   )
 }
 
-export function MessageBubble({ message }: { message: Message }) {
+export function MessageBubble({ message, hasLiveOutput = false }: { message: Message; hasLiveOutput?: boolean }) {
   const isUser = message.role === "user"
   const isQPrompt = message.role === "questions-prompt"
   const hasAssistantExecutionEvents = !isUser && Boolean(message.executionEvents?.length)
-  const fallbackContent = message.isStreaming
+  const fallbackContent = message.isStreaming && !hasLiveOutput
     ? <span style={{ opacity: 0.4 }}>{message.isIteration ? "正在更新设计..." : "正在生成..."}</span>
     : ""
   const shouldRenderBubble =
@@ -546,7 +546,7 @@ export function MessageBubble({ message }: { message: Message }) {
           />
         </div>
       )}
-      {!isUser && <DesignExecutionPanel events={message.executionEvents} isStreaming={message.isStreaming} />}
+      {!isUser && <DesignExecutionPanel events={message.executionEvents} isStreaming={message.isStreaming && !hasLiveOutput} />}
       {shouldRenderBubble && (
         <div style={{ display: "flex", justifyContent: isUser ? "flex-end" : "flex-start" }}>
           <div style={{ maxWidth: "85%", padding: "9px 13px", borderRadius: isUser ? "16px 16px 4px 16px" : "16px 16px 16px 4px", background: isUser ? "#1a1a1a" : "#f4f3ef", color: isUser ? "#fff" : "#1a1a1a", fontSize: 13, lineHeight: 1.6, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>

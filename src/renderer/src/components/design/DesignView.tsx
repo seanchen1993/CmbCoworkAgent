@@ -66,6 +66,7 @@ import {
 import { TweaksFloatingPanel } from "./TweaksFloatingPanel"
 import { DesignPreviewFrame } from "./DesignPreviewFrame"
 import { DesignGenerationWaiting } from "./DesignGenerationWaiting"
+import { DesignLiveOutput } from "./DesignLiveOutput"
 import { TweaksParameterPanel } from "./TweaksParameterPanel"
 import { useDesignTweaks } from "./use-design-tweaks"
 import { useDesignDirectEdit } from "./use-design-direct-edit"
@@ -4569,7 +4570,7 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
             ) : (
               <div ref={messageListRef} className="design-conversation-messages" style={S.messageList}>
                 {ts.messages.map((msg, i) => (
-                  <MessageBubble key={i} message={msg} />
+                  <MessageBubble key={i} message={msg} hasLiveOutput={Boolean(ts.liveOutput)} />
                 ))}
                 {isAsking && (
                   <div
@@ -4601,6 +4602,7 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
 
           {/* Bottom Input */}
           <div className="design-composer-area">
+            {(isGenerating || isAsking) && ts.liveOutput && <DesignLiveOutput output={ts.liveOutput} />}
             {/* Skill picker popup — shown when input is "/" + optional filter text */}
             {isSlashMode && filteredSkills.length > 0 && (
               <div

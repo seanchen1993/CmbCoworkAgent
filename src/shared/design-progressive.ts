@@ -55,10 +55,17 @@ export function inspectDesignDocument(html: string, expected: string[] = []) {
   }
   for (const id of expected) if (!sections.includes(id)) issues.push(`缺少预期区块 ${id}`)
   const pending = all.some((el) => attribute(el, "data-design-pending") !== undefined)
-  const building = all.some((el) => attribute(el, "data-design-build") !== undefined)
+  // Some models retain the attribute and explicitly set it to "complete".
+  // Attribute presence alone must not reject an otherwise finished document.
+  const building = all.some((el) => {
+    const state = attribute(el, "data-design-build")
+    return state !== undefined && state.trim().toLowerCase() !== "complete"
+  })
   return {
     valid: !issues.length,
     finalizable: !issues.length && !pending && !building,
+    pending,
+    building,
     issues,
     sections,
     completedSections,

@@ -4,6 +4,7 @@ import {
   validateFirstDesignWrite,
   buildDesignContinuationPrompt,
   hasDesignContinuationProgress,
+  describeIncompleteDesignArtifact,
   DESIGN_ARTIFACT_CONTINUATION_MAX_ATTEMPTS
 } from "./generation-prompt"
 import { inspectDesignDocument } from "../../../shared/design-progressive"
@@ -11,6 +12,16 @@ import { inspectDesignDocument } from "../../../shared/design-progressive"
 describe("first design framework budget", () => {
   const page = (body: string) =>
     `<!DOCTYPE html><html><head><title>销售看板</title></head><body data-design-build="building"><nav>销售中心</nav><section data-design-section="overview" data-design-pending>${body}</section></body></html>`
+
+  it("reports actual completion blockers instead of guessing a page size limit", () => {
+    expect(describeIncompleteDesignArtifact()).toContain("未写入")
+    expect(describeIncompleteDesignArtifact(page("概览"))).toContain("未完成区块：overview")
+    expect(describeIncompleteDesignArtifact(page("概览").replace(" data-design-pending", ""))).toContain("尚未声明完成")
+    expect(describeIncompleteDesignArtifact(page("概览").replace("</html>", ""))).toContain("尚未完整闭合")
+    const done = inspectDesignDocument(page("概览").replace(" data-design-pending", "").replace('="building"', '="complete"'))
+    expect(hasDesignContinuationProgress(inspectDesignDocument(page("概览")), done)).toBe(true)
+    expect(buildDesignContinuationPrompt("/draft.html", inspectDesignDocument(page("概览")))).toContain('"complete"')
+  })
 
   it("continues only outstanding sections without counting cosmetic writes as progress", () => {
     const before = inspectDesignDocument(page("概览"))
