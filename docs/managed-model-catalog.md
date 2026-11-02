@@ -50,13 +50,17 @@ CMB_BUILTIN_MODEL_API_KEY=<由凭据管理系统注入，不要提交到 Git>
 在仓库 `.env` 中配置以下变量，沿用 `envcrypt` Git 过滤器加密保存的流程（见 [环境变量加密说明](env-encryption-guide.md)）：
 
 ```dotenv
-MAIN_VITE_IDLE_MODEL_PROD_BASE_URL=<生产网关地址，路径截至 /pattern/llm/v1>
+MAIN_VITE_IDLE_MODEL_PROD_BASE_URL=<生产转发网关的完整 Base URL，不含 /chat/completions>
 MAIN_VITE_IDLE_MODEL_PROD_API_KEY=<独立团队提供的生产网关凭据>
 MAIN_VITE_IDLE_MODEL_UAT_BASE_URL=<UAT 网关地址，路径截至 /pattern/llm/v1>
 MAIN_VITE_IDLE_MODEL_UAT_API_KEY=<独立团队提供的 UAT 网关凭据>
 ```
 
 这四个变量只注入主进程，不下发到渲染进程。原有 `MAIN_VITE_IDLE_MODEL_BASE_URL` / `MAIN_VITE_IDLE_MODEL_API_KEY` 已迁移至对应的 UAT 变量。配置所选环境的地址后，客户端会独立加入 `builtin:idle-ultra`，不受远端目录替换影响，也不复用其他内置模型的密钥。
+
+生产环境经网关转发时，Base URL 需包含网关要求的完整路由前缀；客户端在其后追加 `/chat/completions`。修改仓库 `.env` 后需重新构建应用。
+
+当前闲时模型生产 Base URL 为 `http://pmsgateway.paasoa.cmbchina.cn/devagent/pattern/llm/v1`，最终请求路径为 `/devagent/pattern/llm/v1/chat/completions`。
 
 默认使用生产环境。在应用数据目录的 `settings.json`（默认 `~/.cmbcoworkagent/settings.json`；使用 `CMB_COWORK_AGENT_HOME` 时位于该目录）中合并以下配置，可切换到 UAT：
 
