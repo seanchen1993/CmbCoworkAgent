@@ -303,6 +303,7 @@ import {
 import { createPersistentThreadHookScope } from "../hooks/thread-scope-persistence"
 import type { HookConfig, HookEvent, HookResult } from "../hooks/types"
 import { fireSessionStartOnce } from "../hooks/session-lifecycle"
+import { createSubagentValuesTracker } from "../hooks/subagent-values"
 import { runHooksEnriched } from "../hooks/required-skill"
 import {
   buildSubagentStartHookContext,
@@ -2047,6 +2048,7 @@ async function maybeRunSubagentStopHooksFromStreamPayload(params: {
   turnId?: string
   hookScope: HookScopeController
   firedToolCallIds: Set<string>
+  subagentTypes: Map<string, string>
   onHookResult?: HookResultCallback
   /** Diagnostic-only callback for "matched event but filtered out by scope". */
   onHookSkipped?: ScopeSkipCallback
@@ -2087,6 +2089,7 @@ async function maybeRunSubagentStopHooksFromStreamPayload(params: {
     threadId: params.threadId,
     turnId: params.turnId,
     toolCallId,
+    subagentType: params.subagentTypes.get(toolCallId),
     failed: isErr
   })
   const result = await runHooksEnriched(
@@ -2124,6 +2127,7 @@ function maybeRunSubagentStartHooksFromToolCalls(params: {
   harnessAdapterName?: string
   hookScope: HookScopeController
   firedStartIds: Set<string>
+  subagentTypes: Map<string, string>
   onHookResult?: HookResultCallback
   onHookSkipped?: ScopeSkipCallback
 }): void {
@@ -2131,10 +2135,12 @@ function maybeRunSubagentStartHooksFromToolCalls(params: {
   for (const tc of params.toolCalls) {
     if (tc?.name !== "task") continue
     const id = typeof tc.id === "string" ? tc.id : ""
-    if (!id || params.firedStartIds.has(id)) continue
-    params.firedStartIds.add(id)
+    if (!id) continue
     const args = (tc.args ?? {}) as Record<string, unknown>
     const subagentType = typeof args.subagent_type === "string" ? args.subagent_type : undefined
+    if (subagentType !== undefined) params.subagentTypes.set(id, subagentType)
+    if (params.firedStartIds.has(id)) continue
+    params.firedStartIds.add(id)
     const taskDescription = typeof args.description === "string" ? args.description : undefined
     const context = buildSubagentStartHookContext({
       workspacePath: params.workspacePath,
@@ -2166,8 +2172,8 @@ function maybeRunSubagentStartHooksFromToolCalls(params: {
 /**
  * Apply the paired subagent lifecycle hooks for one serialized stream message.
  * All physical stream entry points (initial, resume, and interrupt-continue)
- * use this bridge so a resumed turn cannot emit SubagentStop without first
- * observing the corresponding task tool call as SubagentStart.
+ * use this bridge for both messages and values, sharing task identity and
+ * dedupe. Resume baselines remember pending starts without replaying them.
  */
 async function maybeRunSubagentLifecycleHooksFromStreamPayload(params: {
   payload: unknown
@@ -2189,6 +2195,7 @@ async function maybeRunSubagentLifecycleHooksFromStreamPayload(params: {
   hookScope: HookScopeController
   firedStartIds: Set<string>
   firedStopIds: Set<string>
+  subagentTypes: Map<string, string>
   onHookResult?: HookResultCallback
   onStartHookSkipped?: ScopeSkipCallback
   onStopHookSkipped?: ScopeSkipCallback
@@ -2204,6 +2211,7 @@ async function maybeRunSubagentLifecycleHooksFromStreamPayload(params: {
     harnessAdapterName: params.harnessAdapterName,
     hookScope: params.hookScope,
     firedStartIds: params.firedStartIds,
+    subagentTypes: params.subagentTypes,
     onHookResult: params.onHookResult,
     onHookSkipped: params.onStartHookSkipped
   })
@@ -2227,6 +2235,7 @@ async function maybeRunSubagentLifecycleHooksFromStreamPayload(params: {
     turnId: params.turnId,
     hookScope: params.hookScope,
     firedToolCallIds: params.firedStopIds,
+    subagentTypes: params.subagentTypes,
     onHookResult: params.onHookResult,
     onHookSkipped: params.onStopHookSkipped
   })
@@ -8114,6 +8123,12 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           // Track which subagent tool-call IDs we've already emitted SubagentStop for (dedupe)
           const _subagentStopFired = new Set<string>()
           const _subagentStartFired = new Set<string>()
+          const subagentTypes = new Map<string, string>()
+          const trackSubagentValues = createSubagentValuesTracker({
+            firedStartIds: _subagentStartFired,
+            firedStopIds: _subagentStopFired,
+            subagentTypes
+          })
           const _llmNodeByMessageId = new Map<string, string>()
           const _reasoningByAiMessageId = new Map<string, string>()
           const _toolNodeByRef = new Map<string, string>()
@@ -8160,7 +8175,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             )
           }
 
-          const processMessagesSideEffects = async (payload: unknown): Promise<void> => {
+          const processSubagentLifecycle = async (payload: unknown): Promise<void> => {
             // Lifecycle hooks have control-flow semantics (SubagentStop can halt
             // the parent turn), so keep them outside the best-effort metrics/
             // tracing catch below. A HookHaltError must reach the stream owner.
@@ -8175,11 +8190,15 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               ...getHarnessHookContext(harnessAgentContext),
               firedStartIds: _subagentStartFired,
               firedStopIds: _subagentStopFired,
+              subagentTypes,
               onHookResult,
               onStartHookSkipped: onHookSkippedFactory("SubagentStart"),
               onStopHookSkipped: onHookSkippedFactory("SubagentStop")
             })
+          }
 
+          const processMessagesSideEffects = async (payload: unknown): Promise<void> => {
+            await processSubagentLifecycle(payload)
             try {
               // eslint-disable-next-line @typescript-eslint/no-explicit-any
               const [msgChunk] = payload as [any]
@@ -8514,6 +8533,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               return
             }
             if (mode === "values") {
+              for (const tuple of trackSubagentValues(payload)) {
+                await processSubagentLifecycle(tuple)
+              }
               processValuesSideEffects(payload, valuesSnapshotKind)
             }
           }
@@ -10967,6 +10989,12 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           const pendingResumeMessagePayloads = createStreamMessageSideEffectBuffer()
           const resumeSubagentStartFired = new Set<string>()
           const resumeSubagentStopFired = new Set<string>()
+          const resumeSubagentTypes = new Map<string, string>()
+          const trackResumeSubagentValues = createSubagentValuesTracker({
+            firedStartIds: resumeSubagentStartFired,
+            firedStopIds: resumeSubagentStopFired,
+            subagentTypes: resumeSubagentTypes
+          })
 
           const consumeResumeStream = async (source: AsyncIterable<unknown>): Promise<void> => {
             const serializeForRun = createStreamDataSerializer({ projectMessageChunks: true })
@@ -10975,23 +11003,27 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               messages: [] as unknown[],
               valuesMessageIndexOffset: 0
             }
+            const processResumeSubagentLifecycle = async (payload: unknown): Promise<void> => {
+              await maybeRunSubagentLifecycleHooksFromStreamPayload({
+                payload,
+                workspacePath,
+                threadId,
+                turnId: turnState.turnId,
+                hookScope,
+                pluginOutputDir: harnessAgentContext.pluginOutputDir,
+                systemId: harnessAgentContext.systemId,
+                ...getHarnessHookContext(harnessAgentContext),
+                firedStartIds: resumeSubagentStartFired,
+                firedStopIds: resumeSubagentStopFired,
+                subagentTypes: resumeSubagentTypes,
+                onHookResult,
+                onStartHookSkipped: onHookSkippedFactory("SubagentStart"),
+                onStopHookSkipped: onHookSkippedFactory("SubagentStop")
+              })
+            }
             const commitPendingResumeMessageSideEffects = async (): Promise<void> => {
               for (const payload of pendingResumeMessagePayloads.drain()) {
-                await maybeRunSubagentLifecycleHooksFromStreamPayload({
-                  payload,
-                  workspacePath,
-                  threadId,
-                  turnId: turnState.turnId,
-                  hookScope,
-                  pluginOutputDir: harnessAgentContext.pluginOutputDir,
-                  systemId: harnessAgentContext.systemId,
-                  ...getHarnessHookContext(harnessAgentContext),
-                  firedStartIds: resumeSubagentStartFired,
-                  firedStopIds: resumeSubagentStopFired,
-                  onHookResult,
-                  onStartHookSkipped: onHookSkippedFactory("SubagentStart"),
-                  onStopHookSkipped: onHookSkippedFactory("SubagentStop")
-                })
+                await processResumeSubagentLifecycle(payload)
                 stopContextCollector.processStreamChunk("messages", payload)
               }
             }
@@ -11036,6 +11068,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   pendingResumeMessagePayloads.push(serialized)
                 } else {
                   await commitPendingResumeMessageSideEffects()
+                  if (mode === "values") {
+                    for (const payload of trackResumeSubagentValues(serialized)) {
+                      await processResumeSubagentLifecycle(payload)
+                    }
+                  }
                   stopContextCollector.processStreamChunk(mode, serialized)
                 }
               }
@@ -12108,6 +12145,12 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           const pendingIntMessagePayloads = createStreamMessageSideEffectBuffer()
           const interruptSubagentStartFired = new Set<string>()
           const interruptSubagentStopFired = new Set<string>()
+          const interruptSubagentTypes = new Map<string, string>()
+          const trackInterruptSubagentValues = createSubagentValuesTracker({
+            firedStartIds: interruptSubagentStartFired,
+            firedStopIds: interruptSubagentStopFired,
+            subagentTypes: interruptSubagentTypes
+          })
 
           const consumeInterruptStream = async (source: AsyncIterable<unknown>): Promise<void> => {
             const serializeForRun = createStreamDataSerializer({ projectMessageChunks: true })
@@ -12116,23 +12159,27 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               messages: [] as unknown[],
               valuesMessageIndexOffset: 0
             }
+            const processInterruptSubagentLifecycle = async (payload: unknown): Promise<void> => {
+              await maybeRunSubagentLifecycleHooksFromStreamPayload({
+                payload,
+                workspacePath,
+                threadId,
+                turnId: turnState.turnId,
+                hookScope,
+                pluginOutputDir: harnessAgentContext.pluginOutputDir,
+                systemId: harnessAgentContext.systemId,
+                ...getHarnessHookContext(harnessAgentContext),
+                firedStartIds: interruptSubagentStartFired,
+                firedStopIds: interruptSubagentStopFired,
+                subagentTypes: interruptSubagentTypes,
+                onHookResult,
+                onStartHookSkipped: onHookSkippedFactory("SubagentStart"),
+                onStopHookSkipped: onHookSkippedFactory("SubagentStop")
+              })
+            }
             const commitPendingInterruptMessageSideEffects = async (): Promise<void> => {
               for (const payload of pendingIntMessagePayloads.drain()) {
-                await maybeRunSubagentLifecycleHooksFromStreamPayload({
-                  payload,
-                  workspacePath,
-                  threadId,
-                  turnId: turnState.turnId,
-                  hookScope,
-                  pluginOutputDir: harnessAgentContext.pluginOutputDir,
-                  systemId: harnessAgentContext.systemId,
-                  ...getHarnessHookContext(harnessAgentContext),
-                  firedStartIds: interruptSubagentStartFired,
-                  firedStopIds: interruptSubagentStopFired,
-                  onHookResult,
-                  onStartHookSkipped: onHookSkippedFactory("SubagentStart"),
-                  onStopHookSkipped: onHookSkippedFactory("SubagentStop")
-                })
+                await processInterruptSubagentLifecycle(payload)
                 stopContextCollector.processStreamChunk("messages", payload)
               }
             }
@@ -12177,6 +12224,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   pendingIntMessagePayloads.push(serialized)
                 } else {
                   await commitPendingInterruptMessageSideEffects()
+                  if (mode === "values") {
+                    for (const payload of trackInterruptSubagentValues(serialized)) {
+                      await processInterruptSubagentLifecycle(payload)
+                    }
+                  }
                   stopContextCollector.processStreamChunk(mode, serialized)
                 }
               }

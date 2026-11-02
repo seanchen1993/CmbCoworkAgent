@@ -3488,7 +3488,7 @@ async function testHookAgentIdentityPlumbing(): Promise<void> {
   )
   assertMatches(
     agentIpc,
-    /const processMessagesSideEffects = async[\s\S]{0,300}?await maybeRunSubagentLifecycleHooksFromStreamPayload\(\{[\s\S]{0,900}?\}\)\s*\n\s*try \{/,
+    /const processMessagesSideEffects = async[\s\S]{0,150}?await processSubagentLifecycle\(payload\)\s*try \{/,
     "initial stream runs lifecycle control flow outside the best-effort tracing catch"
   )
   assertMatches(
@@ -3508,14 +3508,27 @@ async function testHookAgentIdentityPlumbing(): Promise<void> {
   )
   assertMatches(
     agentIpc,
-    /commitPendingResumeMessageSideEffects[\s\S]{0,1200}?firedStartIds:\s*resumeSubagentStartFired/,
+    /processResumeSubagentLifecycle[\s\S]{0,1200}?firedStartIds:\s*resumeSubagentStartFired/,
     "resume stream tracks and dispatches SubagentStart independently"
   )
   assertMatches(
     agentIpc,
-    /commitPendingInterruptMessageSideEffects[\s\S]{0,1200}?firedStartIds:\s*interruptSubagentStartFired/,
+    /processInterruptSubagentLifecycle[\s\S]{0,1200}?firedStartIds:\s*interruptSubagentStartFired/,
     "interrupt-continue stream tracks and dispatches SubagentStart independently"
   )
+  for (const [tracker, dispatch] of [
+    ["trackSubagentValues", "processSubagentLifecycle"],
+    ["trackResumeSubagentValues", "processResumeSubagentLifecycle"],
+    ["trackInterruptSubagentValues", "processInterruptSubagentLifecycle"]
+  ]) {
+    assertMatches(
+      agentIpc,
+      new RegExp(
+        `for \\(const (tuple|payload) of ${tracker}\\([^)]+\\)\\) \\{\\s*await ${dispatch}\\(`
+      ),
+      `${tracker} dispatches values-only lifecycle hooks with awaited halt semantics`
+    )
+  }
   assertOccurrenceCount(
     subagentContext,
     "agentId: input.toolCallId",
