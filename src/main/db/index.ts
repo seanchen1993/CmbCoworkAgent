@@ -1,3 +1,4 @@
+import { ensureManagedRunSchedulesSchema } from "./managed-run-schedules"
 import { ensureAppNotificationsSchema } from "./app-notifications-schema"
 import { ensureUiGuideSchema } from "./ui-guide-store"
 import {
@@ -954,6 +955,7 @@ export async function initializeDatabase(): Promise<NativeSqliteAdapter> {
 
   ensureAppNotificationsSchema(db)
   ensureUiGuideSchema(db)
+  ensureManagedRunSchedulesSchema(db)
   ensureImServiceSchema(db)
 
   migrateLegacyMemorySessionOptIn(db)

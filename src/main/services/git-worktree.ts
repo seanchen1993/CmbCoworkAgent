@@ -769,23 +769,6 @@ export async function identifyRepository(
   directory: string,
   signal?: AbortSignal
 ): Promise<RepoIdentity | null> {
-  // Resolve Git's relative output ourselves instead of using
-  // `--path-format=absolute`. Older Git for Windows (including 2.18) echoes that
-  // unknown option to stdout while still exiting successfully, which can turn
-  // `--path-format=absolute\n.git` into a fictitious filesystem path.
-  const commonRaw = await git(
-    directory,
-    ["rev-parse", "--git-common-dir"],
-    GIT_QUERY_TIMEOUT_MS,
-    signal
-  )
-  if (commonRaw.code !== 0) return null
-  const commonValue = commonRaw.stdout.trim()
-  if (!commonValue) return null
-  const commonDir = await canonicalExistingPath(
-    path.resolve(directory, commonValue),
-    "git common directory"
-  )
   const sourceTop = await git(
     directory,
     ["rev-parse", "--show-toplevel"],
@@ -794,6 +777,26 @@ export async function identifyRepository(
   )
   if (sourceTop.code !== 0 || !sourceTop.stdout.trim()) return null
   const sourceRoot = await canonicalExistingPath(sourceTop.stdout.trim(), "source checkout")
+
+  // Resolve Git's relative output ourselves instead of using
+  // `--path-format=absolute`. Older Git for Windows (including 2.18) echoes that
+  // unknown option to stdout while still exiting successfully, which can turn
+  // `--path-format=absolute\n.git` into a fictitious filesystem path.
+  // Query and resolve from the checkout root to avoid duplicating a workspace
+  // subdirectory prefix in Git's relative output.
+  const commonRaw = await git(
+    sourceRoot,
+    ["rev-parse", "--git-common-dir"],
+    GIT_QUERY_TIMEOUT_MS,
+    signal
+  )
+  if (commonRaw.code !== 0) return null
+  const commonValue = commonRaw.stdout.trim()
+  if (!commonValue) return null
+  const commonDir = await canonicalExistingPath(
+    path.resolve(sourceRoot, commonValue),
+    "git common directory"
+  )
 
   // Do not derive the primary checkout from `dirname(commonDir)`: that is wrong
   // for submodules and --separate-git-dir repositories. Git's own worktree list is

@@ -1,4 +1,10 @@
 import type {
+  ManagedRunSchedule,
+  ManagedRunScheduleInput,
+  ManagedRunScheduleIdentity,
+  ManagedRunScheduleChange
+} from "../shared/managed-run-schedule"
+import type {
   KnowledgeAccumulationData,
   KnowledgeActiveDetails,
   KnowledgeFileReaders,
@@ -1345,7 +1351,7 @@ const api = {
     },
     generateTitle: (
       message: string,
-      context?: { threadId: string; skillName?: string }
+      context?: { threadId: string; skillName?: string; skillDescription?: string }
     ): Promise<string> => {
       return ipcRenderer.invoke("threads:generateTitle", message, context)
     },
@@ -4457,6 +4463,11 @@ const api = {
       ) as Promise<HarnessKnowledgePreviewResult>,
     cancelKnowledgePreviewRequests: (): Promise<void> =>
       ipcRenderer.invoke("harnessBoard:cancelKnowledgePreviewRequests") as Promise<void>,
+    selectProjectDirectory: (): Promise<{
+      workspacePath: string
+      projectDir: string
+      validationError: string | null
+    } | null> => ipcRenderer.invoke("harnessBoard:selectProjectDirectory"),
     createProject: (input: HarnessProjectCreateInput): Promise<HarnessProjectMetadata> =>
       ipcRenderer.invoke("harnessBoard:createProject", input) as Promise<HarnessProjectMetadata>,
     searchEnterpriseProjects: (
@@ -4532,6 +4543,28 @@ const api = {
         "harnessBoard:ensureFeatureThreadImGrant",
         input
       ) as Promise<HarnessFeatureThreadGrantResult>,
+    getActiveManagedRunSchedules: (): Promise<ManagedRunSchedule[]> =>
+      ipcRenderer.invoke("harnessBoard:getActiveManagedRunSchedules"),
+    getManagedRunSchedule: (
+      projectId: string,
+      featureId: string
+    ): Promise<ManagedRunSchedule | null> =>
+      ipcRenderer.invoke("harnessBoard:getManagedRunSchedule", projectId, featureId),
+    scheduleManagedRun: (input: ManagedRunScheduleInput): Promise<ManagedRunSchedule> =>
+      ipcRenderer.invoke("harnessBoard:scheduleManagedRun", input),
+    cancelManagedRunSchedule: (input: ManagedRunScheduleIdentity): Promise<void> =>
+      ipcRenderer.invoke("harnessBoard:cancelManagedRunSchedule", input),
+    updateManagedRunSchedule: (
+      input: ManagedRunScheduleIdentity & { scheduledAt: string }
+    ): Promise<void> => ipcRenderer.invoke("harnessBoard:updateManagedRunSchedule", input),
+    onManagedRunScheduleChanged: (
+      callback: (event: ManagedRunScheduleChange) => void
+    ): (() => void) => {
+      const handler = (_event: unknown, payload: ManagedRunScheduleChange): void =>
+        callback(payload)
+      ipcRenderer.on("harnessBoard:managedRunScheduleChanged", handler)
+      return () => ipcRenderer.removeListener("harnessBoard:managedRunScheduleChanged", handler)
+    },
     validateManagedRunStart: (input: ManagedRunStartValidationInput): Promise<void> =>
       ipcRenderer.invoke("harnessBoard:validateManagedRunStart", input) as Promise<void>,
     startManagedRun: (input: ManagedRunStartInput): Promise<ManagedRunSummary> =>
@@ -4616,6 +4649,8 @@ const api = {
         "harnessBoard:getManagedRunEvents",
         input
       ) as Promise<ManagedRunEventsPage>,
+    getManagedRuns: (projectId: string, featureId: string): Promise<ManagedRunSummary[]> =>
+      ipcRenderer.invoke("harnessBoard:getManagedRuns", projectId, featureId),
     getLatestManagedRun: (
       projectId: string,
       featureId: string

@@ -1,4 +1,10 @@
 import type {
+  ManagedRunSchedule,
+  ManagedRunScheduleInput,
+  ManagedRunScheduleIdentity,
+  ManagedRunScheduleChange
+} from "../shared/managed-run-schedule"
+import type {
   KnowledgeAccumulationData,
   KnowledgeActiveDetails,
   KnowledgeFileReaders,
@@ -1292,7 +1298,7 @@ interface CustomAPI {
     }>
     generateTitle: (
       message: string,
-      context?: { threadId: string; skillName?: string }
+      context?: { threadId: string; skillName?: string; skillDescription?: string }
     ) => Promise<string>
     onThreadsChanged: (callback: () => void) => () => void
   }
@@ -3038,6 +3044,11 @@ interface CustomAPI {
     syncProjectConstraints: (adapterId: string) => Promise<HarnessProjectConstraintSyncResult>
     getKnowledgePreview: (adapterId: string) => Promise<HarnessKnowledgePreviewResult>
     cancelKnowledgePreviewRequests: () => Promise<void>
+    selectProjectDirectory: () => Promise<{
+      workspacePath: string
+      projectDir: string
+      validationError: string | null
+    } | null>
     createProject: (input: HarnessProjectCreateInput) => Promise<HarnessProjectMetadata>
     searchEnterpriseProjects: (
       input: HarnessEnterpriseProjectSearchInput
@@ -3067,6 +3078,17 @@ interface CustomAPI {
     ensureFeatureThreadImGrant: (
       input: HarnessFeatureThreadGrantInput
     ) => Promise<HarnessFeatureThreadGrantResult>
+    getActiveManagedRunSchedules: () => Promise<ManagedRunSchedule[]>
+    getManagedRunSchedule: (
+      projectId: string,
+      featureId: string
+    ) => Promise<ManagedRunSchedule | null>
+    scheduleManagedRun: (input: ManagedRunScheduleInput) => Promise<ManagedRunSchedule>
+    cancelManagedRunSchedule: (input: ManagedRunScheduleIdentity) => Promise<void>
+    updateManagedRunSchedule: (
+      input: ManagedRunScheduleIdentity & { scheduledAt: string }
+    ) => Promise<void>
+    onManagedRunScheduleChanged: (callback: (event: ManagedRunScheduleChange) => void) => () => void
     validateManagedRunStart: (input: ManagedRunStartValidationInput) => Promise<void>
     startManagedRun: (input: ManagedRunStartInput) => Promise<ManagedRunSummary>
     stopManagedRun: (input: ManagedRunStopInput) => Promise<boolean>
@@ -3097,6 +3119,7 @@ interface CustomAPI {
     getManagedRunEvents: (
       input: ManagedRunIdentity & { cursor?: ManagedRunEventCursor; limit?: number }
     ) => Promise<ManagedRunEventsPage>
+    getManagedRuns: (projectId: string, featureId: string) => Promise<ManagedRunSummary[]>
     getLatestManagedRun: (projectId: string, featureId: string) => Promise<ManagedRunSummary | null>
     cancelDialogTips: () => Promise<void>
     onWatchRefsChanged: (callback: (event: HarnessWatchRefChangedEvent) => void) => () => void

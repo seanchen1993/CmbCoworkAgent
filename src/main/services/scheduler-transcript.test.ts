@@ -74,7 +74,10 @@ vi.mock("./trusted-tool-file-preview", () => ({
 }))
 
 import * as db from "../db"
-import { cancelTask, isTaskRunning, runTaskNow } from "./scheduler"
+import { cancelTask, isTaskRunning, runTaskNow, startScheduler, stopScheduler } from "./scheduler"
+import { ManagedRunScheduleStore } from "../db/managed-run-schedules"
+import { ManagedRunScheduler } from "../harness-board/managed-run-scheduler"
+import type { ManagedRunSummary } from "../../shared/harness-board-types"
 
 beforeAll(async () => {
   fixture.path = join(mkdtempSync(join(tmpdir(), "cmb-scheduler-transcript-")), "threads.sqlite")
@@ -259,4 +262,59 @@ it("holds the task busy until transcript and checkpoint settlement finish", asyn
   release()
   await running
   expect(isTaskRunning(fixture.task.id)).toBe(false)
+})
+
+it("starts SQLite-backed managed reservations on the shared minute tick and stops checking on shutdown", async () => {
+  vi.useFakeTimers()
+  vi.setSystemTime(new Date("2026-10-28T13:59:30Z"))
+  const managed = new ManagedRunScheduler(new ManagedRunScheduleStore(() => db.getDb()))
+  const start = vi.fn(async () => ({ status: "running" }) as ManagedRunSummary)
+  const onTick = vi.fn((now: Date) => managed.tick(now))
+  managed.initialize({ start, changed: vi.fn() })
+  managed.create({
+    projectId: "minute-tick-project",
+    featureId: "feature",
+    workspacePath: "fixture",
+    scheduledAt: "2026-10-28 22:00:00"
+  })
+  try {
+    startScheduler(onTick)
+    expect(start).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(59_999)
+    expect(start).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(1)
+    expect(start).toHaveBeenCalledTimes(1)
+    expect(managed.get("minute-tick-project", "feature")).toBeNull()
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(start).toHaveBeenCalledTimes(1)
+    stopScheduler()
+    const count = onTick.mock.calls.length
+    await vi.advanceTimersByTimeAsync(120_000)
+    expect(onTick).toHaveBeenCalledTimes(count)
+  } finally {
+    stopScheduler()
+    managed.removeProject("minute-tick-project")
+    vi.useRealTimers()
+  }
+})
+
+it("continues minute checks when additional scheduled work fails", async () => {
+  vi.useFakeTimers()
+  const errorLog = vi.spyOn(console, "error").mockImplementation(() => {})
+  const onTick = vi.fn(async () => {
+    throw new Error("database unavailable")
+  })
+  try {
+    startScheduler(onTick)
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(onTick).toHaveBeenCalledTimes(2)
+    expect(errorLog).toHaveBeenCalledWith(
+      "[Scheduler] Additional scheduled work failed:",
+      expect.any(Error)
+    )
+  } finally {
+    stopScheduler()
+    vi.useRealTimers()
+    errorLog.mockRestore()
+  }
 })

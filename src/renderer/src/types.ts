@@ -372,6 +372,7 @@ export interface QueuedMessage {
   attachmentDisplayPrefix?: string
   skillBlock?: string
   skillName?: string
+  skillDescription?: string
   builtinBrowser?: boolean
   modelId?: string
   handoffRequestedAt?: Date

@@ -5778,6 +5778,7 @@ export function ChatContainer({
         attachmentDisplayPrefix,
         skillBlock,
         skillName: skill?.name,
+        skillDescription: skill?.description,
         builtinBrowser: browser,
         modelId: currentModel,
         created_at: new Date(),
@@ -5887,7 +5888,7 @@ export function ChatContainer({
             titleSource = getBuiltinBrowserTitleSource(browser)
           }
           if (titleSource) {
-            generateTitleForFirstMessage(threadId, titleSource, skill?.name)
+            generateTitleForFirstMessage(threadId, titleSource, skill?.name, skill?.description)
           }
         }
       }
@@ -6330,7 +6331,12 @@ export function ChatContainer({
         const hasDefaultTitle = currentThread?.title?.startsWith("Thread ")
         const titleSource = queued.text.trim() || (queued.skillBlock ? "使用技能" : "")
         if (hasDefaultTitle && titleSource) {
-          generateTitleForFirstMessage(threadId, titleSource, queued.skillName)
+          generateTitleForFirstMessage(
+            threadId,
+            titleSource,
+            queued.skillName,
+            queued.skillDescription
+          )
         }
       }
       const startTime = Date.now()
@@ -6750,7 +6756,7 @@ export function ChatContainer({
       try {
         await Promise.all([stream?.stop(), window.api.agent.cancel(threadId)])
         if (isManagedRunSessionActive) {
-          toast.success("已退出托管模式")
+          toast.success("已退出托管模式", { duration: 1200 })
         }
       } finally {
         if (goalUi.goal) {

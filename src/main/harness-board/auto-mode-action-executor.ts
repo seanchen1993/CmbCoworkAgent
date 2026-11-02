@@ -1,6 +1,10 @@
 import { v4 as uuid } from "uuid"
-import { getThread, upsertThreadMessages } from "../db"
-import { startAgentRun, type AgentRunDelivery } from "../agent/agent-run-service"
+import { getThreadCore, upsertThreadMessages } from "../db"
+import {
+  startAgentRun,
+  type AgentRunDelivery,
+  type AgentRunExecutionContext
+} from "../agent/agent-run-service"
 import { emitAppAttention } from "../app-attention-events"
 import { listAllSkills, listPluginSkills } from "../ipc/skills"
 import { normalizeSkillId } from "../skills/ids"
@@ -30,6 +34,7 @@ interface PreparedHarnessMessage {
   displayMessage: string
   userMessageId: string
   skillName?: string
+  skillDescription?: string
 }
 
 interface PreparedManagedAgentRun {
@@ -60,7 +65,7 @@ export interface CreateManagedHarnessSessionInput {
 }
 
 function parseThreadMetadata(threadId: string): Record<string, unknown> {
-  const thread = getThread(threadId)
+  const thread = getThreadCore(threadId)
   if (!thread) throw new Error(`未找到会话：${threadId}`)
   if (!thread.metadata) return {}
   try {
@@ -153,7 +158,8 @@ async function prepareHarnessMessage(
     modelMessage,
     displayMessage: modelMessage,
     userMessageId: uuid(),
-    skillName: skill.name
+    skillName: skill.name,
+    skillDescription: skill.description
   }
 }
 
@@ -185,7 +191,7 @@ function buildManagedAgentRunRequest(
   }
 }
 
-function prepareManagedAgentRun(
+export function prepareManagedAgentRun(
   threadId: string,
   prepared: PreparedHarnessMessage,
   delivery: AgentRunDelivery
@@ -203,7 +209,10 @@ function prepareManagedAgentRun(
 }
 
 /** The caller must finish preparation before entering this side-effecting submission step. */
-export async function startPreparedManagedAgentRun(input: PreparedManagedAgentRun): Promise<void> {
+export async function startPreparedManagedAgentRun(
+  input: PreparedManagedAgentRun,
+  context?: AgentRunExecutionContext
+): Promise<void> {
   const { request, message: prepared, delivery: resolvedDelivery } = input
   const threadId = request.threadId
   const persistedCount = upsertThreadMessages(threadId, [
@@ -228,7 +237,7 @@ export async function startPreparedManagedAgentRun(input: PreparedManagedAgentRu
 
   let handle: Awaited<ReturnType<typeof startAgentRun>>
   try {
-    handle = await startAgentRun(request, resolvedDelivery)
+    handle = await startAgentRun(request, resolvedDelivery, context)
   } catch (error) {
     const requestChannel = resolveAgentStreamRequestChannel(
       `agent:stream:${threadId}`,
@@ -287,7 +296,11 @@ export async function createAndStartManagedHarnessSession(
   input: CreateManagedHarnessSessionInput
 ): Promise<{ threadId: string; thread: Thread }> {
   const prepared = await prepareManagedHarnessSession(input)
-  const thread = await createManagedHarnessSession(input, prepared.skillName)
+  const thread = await createManagedHarnessSession(
+    input,
+    prepared.skillName,
+    prepared.skillDescription
+  )
   await startManagedHarnessSession(input, thread.threadId, prepared)
   return thread
 }
@@ -301,10 +314,9 @@ export async function prepareManagedHarnessSession(
   return prepared
 }
 
-export async function startManagedHarnessSession(
+export async function prepareManagedHarnessSessionGrant(
   input: CreateManagedHarnessSessionInput,
-  threadId: string,
-  prepared: PreparedHarnessMessage
+  threadId: string
 ): Promise<void> {
   const grant = await materializeHarnessFeatureThreadGrant({
     projectId: input.projectId,
@@ -315,6 +327,14 @@ export async function startManagedHarnessSession(
   if (grant.required && !grant.granted) {
     throw new Error(grant.error || `无法为 ManagedRun 会话 ${threadId} 创建招乎授权`)
   }
+}
+
+export async function startManagedHarnessSession(
+  input: CreateManagedHarnessSessionInput,
+  threadId: string,
+  prepared: PreparedHarnessMessage
+): Promise<void> {
+  await prepareManagedHarnessSessionGrant(input, threadId)
   try {
     await startPreparedManagedAgentRun(prepareManagedAgentRun(threadId, prepared, input.delivery))
   } catch (error) {
@@ -326,14 +346,17 @@ export async function startManagedHarnessSession(
 
 export async function createManagedHarnessSession(
   input: CreateManagedHarnessSessionInput,
-  skillName?: string
+  skillName?: string,
+  skillDescription?: string
 ): Promise<{ threadId: string; thread: Thread }> {
   const titleSource = input.nextAction.userMessage?.trim() ?? ""
   const title = titleSource
-    ? await generateProjectThreadTitle(titleSource, skillName, {
-        projectId: input.projectId,
-        slug: input.featureId
-      })
+    ? await generateProjectThreadTitle(
+        titleSource,
+        skillName,
+        { projectId: input.projectId, slug: input.featureId },
+        skillDescription
+      )
     : undefined
   const thread = await createThreadService(
     {

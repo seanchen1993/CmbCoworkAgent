@@ -551,6 +551,7 @@ function toProjectMetadata(value: unknown): HarnessProjectMetadata | null {
     ),
     projectCode,
     projectFromLean: value.projectFromLean === true,
+    ...(typeof value.isTestProject === "boolean" ? { isTestProject: value.isTestProject } : {}),
     projectDir:
       boundedStoredText(
         value.projectDir,
@@ -1008,6 +1009,7 @@ function toProjectListItem(
     description: project.description,
     projectCode: project.projectCode,
     projectFromLean: project.projectFromLean,
+    ...(typeof project.isTestProject === "boolean" ? { isTestProject: project.isTestProject } : {}),
     projectDir: project.projectDir,
     systemId: project.systemId,
     systemName: project.systemName,
