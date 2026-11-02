@@ -12,7 +12,7 @@ import {
 } from "@/components/ui/dialog"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import type { MarketItem } from "../../api/market"
-import { orgSkillMarketApi } from "../../api/org-skill-market"
+import { isOrgSkillLoginRequiredError, orgSkillMarketApi } from "../../api/org-skill-market"
 import { isBackendNotConfiguredError } from "../../api/backend-endpoint"
 import type { SkillsByCategoryItem } from "./SkillsByCategorySection"
 
@@ -63,13 +63,16 @@ export function OrganizationSkillsSection({
 }: OrganizationSkillsSectionProps): React.JSX.Element | null {
   const [organizationSkillsData, setOrganizationSkillsData] = useState<MarketItem[]>([])
   const [organizationSkillsTotal, setOrganizationSkillsTotal] = useState(0)
-  const [loadError, setLoadError] = useState<string | null>(null)
+  const [loadError, setLoadError] = useState<{ message: string; retryable: boolean } | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [loadAttempt, setLoadAttempt] = useState(0)
   const [installPromptItem, setInstallPromptItem] = useState<SkillsByCategoryItem | null>(null)
 
   useEffect(() => {
     let canceled = false
 
     const loadOrganizationSkills = async (): Promise<void> => {
+      setLoading(true)
       try {
         const orgSkills = await loadOrganizationSkillsOnce()
         if (canceled) return
@@ -78,10 +81,17 @@ export function OrganizationSkillsSection({
         setLoadError(null)
       } catch (error) {
         if (canceled) return
-        setLoadError(error instanceof Error ? error.message : "组织级技能加载失败")
-        if (!isBackendNotConfiguredError(error)) {
-          console.error("[OrganizationSkillsSection] Failed to load organization skills:", error)
-        }
+        const missingService = isBackendNotConfiguredError(error)
+        setLoadError({
+          message: missingService
+            ? "组织技能服务未配置，可继续聊天和使用本地技能。"
+            : isOrgSkillLoginRequiredError(error)
+              ? "请先登录后再查看组织技能，可继续聊天和使用本地技能。"
+              : "组织技能暂时无法加载，可继续聊天和使用本地技能。",
+          retryable: !missingService
+        })
+      } finally {
+        if (!canceled) setLoading(false)
       }
     }
 
@@ -89,7 +99,7 @@ export function OrganizationSkillsSection({
     return () => {
       canceled = true
     }
-  }, [])
+  }, [loadAttempt])
 
   const organizationItems = useMemo<SkillsByCategoryItem[]>(() => {
     const localSkillMap = new Map(
@@ -117,7 +127,30 @@ export function OrganizationSkillsSection({
   }, [organizationSkillsData, skills])
 
   if (loadError) {
-    return <p role="status" className="py-3 text-xs text-muted-foreground">{loadError}</p>
+    return (
+      <div
+        role="status"
+        aria-label="组织技能加载状态"
+        className="flex flex-wrap items-center gap-2 py-3 text-xs text-muted-foreground"
+      >
+        <span>{loadError.message}</span>
+        {loadError.retryable && (
+          <button
+            type="button"
+            className="underline"
+            disabled={loading}
+            onClick={() => {
+              if (!loading) {
+                setLoading(true)
+                setLoadAttempt((attempt) => attempt + 1)
+              }
+            }}
+          >
+            {loading ? "正在重试…" : "重试"}
+          </button>
+        )}
+      </div>
+    )
   }
   if (organizationItems.length === 0) return null
 

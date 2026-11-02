@@ -382,6 +382,34 @@ jobs:
       - name: Verify native JavaScript foundations
         run: node scripts/apply-langchain-native-foundations.mjs --check
 
+      - name: Verify organization skill response contracts
+        timeout-minutes: 5
+        run: >-
+          npx vitest run --maxWorkers=2
+          src/renderer/src/api/json-response.test.ts
+          src/renderer/src/api/org-skill-market-response.test.ts
+          src/renderer/src/api/backend-endpoint.test.ts
+          src/renderer/src/api/backend-endpoint-integration.test.ts
+          src/renderer/src/api/market-bounded-response.test.ts
+          src/renderer/src/components/chat/remote-catalog-failure.test.ts
+
+      - name: Verify organization skill discovery on chat open (Windows)
+        if: runner.os == 'Windows'
+        timeout-minutes: 5
+        run: node --import tsx tests/organization-skills-initial-load-browser.spec.ts
+
+      - name: Upload organization skill discovery evidence
+        if: always() && runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: CMBDevClaw-win-organization-skills-${{ github.run_number }}
+          path: |
+            output/organization-skills-initial-load-*/report.json
+            output/organization-skills-initial-load-*/failure.json
+            output/organization-skills-initial-load-*/*.png
+          if-no-files-found: warn
+          retention-days: 14
+
       - name: Verify generic workflow creation and composition contracts
         timeout-minutes: 5
         run: >-

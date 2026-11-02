@@ -1,4 +1,5 @@
-import { resolveBackendEndpoint } from "./backend-endpoint"
+import { BackendNotConfiguredError, resolveBackendEndpoint } from "./backend-endpoint"
+import { readJsonResponse, RemoteJsonResponseError } from "./json-response"
 import type { DownloadedItemFile, MarketApiResponse, MarketItem } from "./market"
 
 interface OrgSkillVersion {
@@ -119,12 +120,23 @@ const ORG_SKILL_LOGIN_ENDPOINT = (
     : "")
 ).trim()
 const ORG_SKILL_LOGIN_EXPIRED_MESSAGE = "登录凭据已过期，请重新登录后再查看组织级技能"
+const ORG_SKILL_LOGIN_MISSING_MESSAGE = "未获取到登录凭据，请先登录后再查看组织级技能"
 const ORG_SKILL_LOGIN_REFRESH_TIMEOUT_MS = 15_000
 
 let orgSkillLoginRefreshPromise: Promise<OrgSkillUserInfo | null> | null = null
 
 function isOrgSkillLoginExpiredError(error: unknown): boolean {
   return error instanceof OrgSkillLoginExpiredError
+}
+
+/** Recognize existing terminal login failures without changing their public Error contract. */
+export function isOrgSkillLoginRequiredError(error: unknown): boolean {
+  return isOrgSkillLoginExpiredError(error) || (
+    error instanceof Error && (
+      error.message === ORG_SKILL_LOGIN_EXPIRED_MESSAGE ||
+      error.message === ORG_SKILL_LOGIN_MISSING_MESSAGE
+    )
+  )
 }
 
 function getOrgSkillLoginInfoEndpoint(): string {
@@ -171,24 +183,7 @@ async function readOrgSkillResponseError(response: Response): Promise<OrgSkillRe
   const loginExpiredByStatus = response.status === 401
 
   try {
-    const contentType = response.headers.get("content-type") || ""
-    let body: unknown
-
-    if (contentType.includes("application/json")) {
-      body = await response.json()
-    } else {
-      const text = await response.text()
-      if (!text.trim()) {
-        return { message: fallback, loginExpired: loginExpiredByStatus }
-      }
-
-      try {
-        body = JSON.parse(text)
-      } catch {
-        return { message: text, loginExpired: loginExpiredByStatus }
-      }
-    }
-
+    const body = await readJsonResponse<unknown>(response, "组织技能服务")
     const record = asRecord(body)
     const returnCode = record ? readString(record, "returnCode") : undefined
     return {
@@ -196,8 +191,8 @@ async function readOrgSkillResponseError(response: Response): Promise<OrgSkillRe
       loginExpired: loginExpiredByStatus || isOrgSkillLoginExpiredReturnCode(returnCode)
     }
   } catch (error) {
-    console.warn("[orgSkillMarketApi] Failed to parse error response:", error)
-    return { message: fallback, loginExpired: loginExpiredByStatus }
+    if (!(error instanceof RemoteJsonResponseError)) throw error
+    return { message: error.message, loginExpired: loginExpiredByStatus }
   }
 }
 
@@ -327,7 +322,7 @@ async function withOrgSkillLoginRefresh<T>(request: () => Promise<T>): Promise<T
 
     const currentUserInfo = await window.api.models.getUserInfo().catch(() => null)
     if (!currentUserInfo) {
-      throw new Error("未获取到登录凭据，请先登录后再查看组织级技能")
+      throw new Error(ORG_SKILL_LOGIN_MISSING_MESSAGE)
     }
 
     const refreshedUserInfo = await refreshOrgSkillLogin(currentUserInfo)
@@ -420,9 +415,27 @@ const MOCK_ORG_SKILL_ITEMS: OrgSkillApiItem[] = [
 const ORG_SKILL_GATEWAY_URL = String(
   import.meta.env.VITE_OPEN_ASSISTANT_HUB_GATEWAY_URL ||
     ""
-).replace(/\/+$/, "")
+).trim()
 
 const ORG_SKILL_CLAWPARTNER_URL =String( import.meta.env.VITE_ZZJ_WEB_URL || '').replace(/\/+$/, "")
+
+function orgSkillEndpoint(suffix: string): string {
+  // An absent optional service must not accidentally fetch the renderer's SPA route.
+  // Explicit relative proxies remain supported on HTTP(S) documents by the existing resolver.
+  if (!ORG_SKILL_GATEWAY_URL || !/^(?:https?:\/\/|\/|\.\.?\/)/i.test(ORG_SKILL_GATEWAY_URL)) {
+    throw new BackendNotConfiguredError("组织技能服务")
+  }
+  if (ORG_SKILL_GATEWAY_URL.startsWith("//")) {
+    try {
+      new URL(ORG_SKILL_GATEWAY_URL, "https://backend.invalid/")
+    } catch {
+      throw new BackendNotConfiguredError("组织技能服务")
+    }
+  }
+  return resolveBackendEndpoint(
+    ORG_SKILL_GATEWAY_URL.replace(/\/+$/, ""), suffix, "组织技能服务"
+  )
+}
 
 const ORG_SKILL_ENDPOINTS = {
   page: (pageNum: number, pageSize: number, labelIds: string[] = [], keyword = "") => {
@@ -435,20 +448,12 @@ const ORG_SKILL_ENDPOINTS = {
     const queryParts = [`pageNum=${pageNum}`, `pageSize=${pageSize}`, `queryAll=true`, 'queryType=null']
     if (labelIdsParam) queryParts.push(`labelIds=${labelIdsParam}`)
     if (normalizedKeyword) queryParts.push(`keyword=${encodeURIComponent(normalizedKeyword)}`)
-    return resolveBackendEndpoint(
-      ORG_SKILL_GATEWAY_URL,
-      `/gw/mgr/open-api/skill/page?${queryParts.join("&")}`,
-      "组织技能服务"
-    )
+    return orgSkillEndpoint(`/gw/mgr/open-api/skill/page?${queryParts.join("&")}`)
   },
-  labels: () => resolveBackendEndpoint(
-    ORG_SKILL_GATEWAY_URL, "/gw/mgr/open-api/skill/labels", "组织技能服务"
-  ),
+  labels: () => orgSkillEndpoint("/gw/mgr/open-api/skill/labels"),
   download: (skillId: number, versionId: number) =>
-    resolveBackendEndpoint(
-      ORG_SKILL_GATEWAY_URL,
-      `/gw/mgr/open-api/skill/document/download?skillId=${skillId}&versionId=${versionId}`,
-      "组织技能服务"
+    orgSkillEndpoint(
+      `/gw/mgr/open-api/skill/document/download?skillId=${skillId}&versionId=${versionId}`
     )
 }
 
@@ -742,6 +747,52 @@ async function getOrgSkillAuthHeaders(): Promise<HeadersInit> {
   return token ? { Authorization: token } : {}
 }
 
+async function readOrgSkillJsonResponse<T>(response: Response): Promise<T> {
+  const data = await readJsonResponse<unknown>(response, "组织技能服务")
+  const record = asRecord(data)
+  if (!record || typeof record.returnCode !== "string" || !record.returnCode.trim() ||
+    (record.errorMsg != null && typeof record.errorMsg !== "string")) {
+    throw new RemoteJsonResponseError(response, "组织技能服务", "invalid-shape")
+  }
+  return data as T
+}
+
+function hasOptionalStrings(record: Record<string, unknown>, keys: readonly string[]): boolean {
+  return keys.every((key) => record[key] == null || typeof record[key] === "string")
+}
+
+function hasOptionalNumbers(record: Record<string, unknown>, keys: readonly string[]): boolean {
+  return keys.every((key) => record[key] == null || (
+    typeof record[key] === "number" && Number.isFinite(record[key])
+  ))
+}
+
+/** Validate only fields projected into the existing cards; missing optional values stay valid. */
+function isOrgSkillItemShape(value: unknown): boolean {
+  const item = asRecord(value)
+  if (!item || !hasOptionalStrings(item, [
+    "slug", "name", "description", "sourceOriginName", "sourceOrigin", "category",
+    "createdAt", "updateAt", "updatedAt"
+  ]) || !hasOptionalNumbers(item, ["id", "subscriptionCount"])) return false
+
+  if (item.manager != null) {
+    const manager = asRecord(item.manager)
+    if (!manager || !hasOptionalStrings(manager, ["ystId", "userId", "name", "department"])) {
+      return false
+    }
+  }
+  if (item.versions != null && (!Array.isArray(item.versions) || !item.versions.every((value) => {
+    const version = asRecord(value)
+    return version !== null && hasOptionalStrings(version, ["name"]) &&
+      hasOptionalNumbers(version, ["id", "skillId"])
+  }))) return false
+  if (item.labels != null && (!Array.isArray(item.labels) || !item.labels.every((value) => {
+    const label = asRecord(value)
+    return label !== null && hasOptionalStrings(label, ["labelName"])
+  }))) return false
+  return true
+}
+
 export const orgSkillMarketApi = {
   async getOrgSkills(
     pageNum = 1,
@@ -762,7 +813,15 @@ export const orgSkillMarketApi = {
         await throwOrgSkillError(response)
       }
 
-      const data = (await response.json()) as OrgSkillPageResponse
+      const data = await readOrgSkillJsonResponse<OrgSkillPageResponse>(response)
+      if (data.returnCode === "SUC0000" && data.body != null) {
+        const body = asRecord(data.body)
+        if (!body || (body.list != null && (
+          !Array.isArray(body.list) || !body.list.every(isOrgSkillItemShape)
+        ))) {
+          throw new RemoteJsonResponseError(response, "组织技能服务", "invalid-shape")
+        }
+      }
       return toMarketResponse(data, pageNum, pageSize)
     })
   },
@@ -781,7 +840,12 @@ export const orgSkillMarketApi = {
         await throwOrgSkillError(response)
       }
 
-      const data = (await response.json()) as OrgSkillLabelsResponse
+      const data = await readOrgSkillJsonResponse<OrgSkillLabelsResponse>(response)
+      if (data.returnCode === "SUC0000" && (!Array.isArray(data.body) ||
+        !data.body.every((item) => asRecord(item) !== null &&
+          typeof item.labelId === "string" && typeof item.labelName === "string"))) {
+        throw new RemoteJsonResponseError(response, "组织技能服务", "invalid-shape")
+      }
       assertOrgSkillLabelsResponse(data)
       return data.body!
     })
