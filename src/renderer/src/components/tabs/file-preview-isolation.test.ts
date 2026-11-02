@@ -205,16 +205,17 @@ describe("persisted active file preview isolation", () => {
     )
   })
 
-  it("keeps the resource drawer resizable from its left border", () => {
+  it("keeps the resource drawer resizable and closes it only from the close button", () => {
     expect(overlayDrawer).toContain('role="separator"')
     expect(overlayDrawer).toContain('aria-orientation="vertical"')
     expect(overlayDrawer).toContain('document.body.style.cursor = "col-resize"')
     expect(overlayDrawer).toContain(
       "setWidth(clampWidth(start.width - (latestClientX - start.clientX)))"
     )
-    expect(overlayDrawer).toContain("suppressBackdropCloseRef.current = true")
-    expect(overlayDrawer).toContain("if (suppressBackdropCloseRef.current)")
-    expect(overlayDrawer).toContain("onClick={handleBackdropClick}")
+    expect(overlayDrawer).toContain('className="pointer-events-none absolute inset-0')
+    expect(overlayDrawer).toContain("onClick={onClose}")
+    expect(overlayDrawer).not.toContain("handleBackdropClick")
+    expect(overlayDrawer).not.toContain("suppressBackdropCloseRef")
   })
 
   it("defers ambiguous POSIX path intent until main applies the authoritative boundary", () => {
