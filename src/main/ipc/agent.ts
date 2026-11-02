@@ -83,6 +83,7 @@ import type { CheckpointMetadata } from "@langchain/langgraph-checkpoint"
 import {
   addThreadGoalEvent,
   appendThreadMessageTextDelta,
+  ThreadMessageStreamAttempt,
   flushStrict,
   getThreadCore,
   isFirstThreadUserMessage,
@@ -3827,6 +3828,7 @@ const streamTranscriptToolCallAccumulators = new Map<
 >()
 
 const streamTranscriptAssistantIdentities = new Map<string, StreamTranscriptAssistantIdentity>()
+const streamTranscriptAttempts = new Map<string, ThreadMessageStreamAttempt>()
 
 function pendingStreamTranscriptKey(threadId: string, runToken: string): string {
   return `${threadId}\u0000${runToken}`
@@ -3869,10 +3871,14 @@ function discardStreamTranscriptToolCallAccumulators(threadId: string, runToken:
   const runKey = pendingStreamTranscriptKey(threadId, runToken)
   streamTranscriptToolCallAccumulators.delete(runKey)
   streamTranscriptAssistantIdentities.delete(runKey)
+  streamTranscriptAttempts.delete(runKey)
 }
 
 function discardStreamTranscriptToolCallAccumulatorsForThread(threadId: string): void {
   const prefix = `${threadId}\u0000`
+  for (const key of streamTranscriptAttempts.keys()) {
+    if (key.startsWith(prefix)) streamTranscriptAttempts.delete(key)
+  }
   for (const key of streamTranscriptToolCallAccumulators.keys()) {
     if (key.startsWith(prefix)) streamTranscriptToolCallAccumulators.delete(key)
   }
@@ -3881,7 +3887,7 @@ function discardStreamTranscriptToolCallAccumulatorsForThread(threadId: string):
 function flushPendingStreamTranscriptMessages(
   threadId: string,
   runToken: string,
-  options: { throwOnError?: boolean } = {}
+  options: { throwOnError?: boolean; checkpoint?: boolean } = {}
 ): void {
   const pendingKey = pendingStreamTranscriptKey(threadId, runToken)
   const pending = pendingStreamTranscriptMessages.get(pendingKey)
@@ -3921,9 +3927,14 @@ function flushPendingStreamTranscriptMessages(
     })
     const { messages, preserveExistingOrder } = resolved
     if (messages.length === 0) return
+    let streamAttempt = options.checkpoint ? undefined : streamTranscriptAttempts.get(pendingKey)
+    if (!options.checkpoint && !streamAttempt) {
+      streamAttempt = new ThreadMessageStreamAttempt(threadId)
+      streamTranscriptAttempts.set(pendingKey, streamAttempt)
+    }
     let persistedCount: number
     if (resolved.appendTextDelta && messages.length === 1) {
-      if (!appendThreadMessageTextDelta(threadId, messages[0])) {
+      if (!appendThreadMessageTextDelta(threadId, messages[0], streamAttempt)) {
         // This payload is a suffix, not an authoritative snapshot. Falling
         // through to upsert would replace/create the durable row with only the
         // suffix. Retain it in the pending buffer until a safe snapshot arrives.
@@ -3936,7 +3947,10 @@ function flushPendingStreamTranscriptMessages(
       }
       persistedCount = 1
     } else {
-      persistedCount = upsertThreadMessages(threadId, messages, { preserveExistingOrder })
+      persistedCount = upsertThreadMessages(threadId, messages, {
+        preserveExistingOrder,
+        streamAttempt
+      })
     }
     if (persistedCount !== messages.length) {
       throw new Error(
@@ -3980,6 +3994,9 @@ function flushPendingStreamTranscriptMessagesForThread(
     if (key.startsWith(prefix)) owners.add(key.slice(prefix.length))
   }
   for (const key of streamTranscriptAssistantIdentities.keys()) {
+    if (key.startsWith(prefix)) owners.add(key.slice(prefix.length))
+  }
+  for (const key of streamTranscriptAttempts.keys()) {
     if (key.startsWith(prefix)) owners.add(key.slice(prefix.length))
   }
 
@@ -4202,7 +4219,12 @@ function persistAndForwardPhysicalRunStreamChunk(
     for (const snapshot of snapshots) {
       persistStreamTranscriptChunk(threadId, runToken, "messages", snapshot, { deferFlush: true })
     }
-    flushPendingStreamTranscriptMessages(threadId, runToken)
+    flushPendingStreamTranscriptMessages(threadId, runToken, {
+      throwOnError: true,
+      checkpoint: true
+    })
+    // Values are the committed graph boundary, not part of the next failed attempt.
+    streamTranscriptAttempts.delete(pendingStreamTranscriptKey(threadId, runToken))
   }
   safeSendToWindow(window, channel, {
     type: "stream",
@@ -4669,10 +4691,20 @@ function resetFailedStreamAttempt(
     inFlightMessageIds.clear()
     return
   }
+  if (!isCurrentRunMessageQueueOwner(threadId, runToken)) {
+    discardPendingStreamTranscriptMessages(threadId, runToken)
+    discardStreamTranscriptToolCallAccumulators(threadId, runToken)
+    inFlightMessageIds.clear()
+    return
+  }
+  const rollback = streamTranscriptAttempts
+    .get(pendingStreamTranscriptKey(threadId, runToken))
+    ?.rollback()
   discardStreamTranscriptToolCallAccumulators(threadId, runToken)
   const discardedMessageIds = [
     ...new Set([
       ...inFlightMessageIds,
+      ...(rollback?.discardedMessageIds ?? []),
       ...discardPendingStreamTranscriptMessages(threadId, runToken)
     ])
   ]
@@ -4683,7 +4715,9 @@ function resetFailedStreamAttempt(
     data: {
       type: "stream_retry_reset",
       messages: stableMessages,
-      discardedMessageIds
+      discardedMessageIds,
+      discardedPersistedMessageIds: rollback?.discardedMessageIds ?? [],
+      restoredMessages: rollback?.restoredMessages ?? []
     }
   })
 }
