@@ -431,6 +431,22 @@ jobs:
           src/main/mods/v2/autobiz-upstream-contract.test.ts
           tests/browser/canonical-temp-root.test.ts
 
+      - name: Verify project bundle grouping and unavailable project isolation
+        timeout-minutes: 5
+        run: >-
+          npx vitest run --maxWorkers=1
+          src/main/skill-plugin-catalog/project-dependency-projection.test.ts
+          src/main/skill-plugin-catalog/reader.test.ts
+          src/main/plugins/project-dependency-metadata.test.ts
+          src/renderer/src/lib/installed-plugin-groups.test.ts
+          src/main/harness-board/service-native-detail-isolation.test.ts
+          src/main/harness-board/detail-runtime-contract.test.ts
+
+      - name: Verify guide dismissal before explicit project entry (Windows)
+        if: runner.os == 'Windows'
+        timeout-minutes: 5
+        run: npx vitest run --maxWorkers=1 tests/browser/page-entry-guide-dismiss.test.ts
+
       - name: Verify AutoBiz startup and question continuation regressions (Windows)
         if: runner.os == 'Windows'
         timeout-minutes: 5
@@ -513,6 +529,24 @@ jobs:
 
       - name: Build
         run: npm run build
+
+      - name: Verify real project ZIP import and original project entry (Windows)
+        if: runner.os == 'Windows'
+        timeout-minutes: 10
+        run: node --import tsx tests/project-bundle-import-native-e2e.spec.ts
+
+      - name: Upload project bundle import evidence
+        if: always() && runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: CMBDevClaw-win-project-bundle-${{ github.run_number }}
+          path: |
+            output/project-bundle-import-native-*/**/report.json
+            output/project-bundle-import-native-*/**/*.png
+            output/project-bundle-import-native-*/**/main.stdout.log
+            output/project-bundle-import-native-*/**/main.stderr.log
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Get package version
         id: pkg

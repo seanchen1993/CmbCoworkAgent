@@ -6,6 +6,7 @@ import {
 import {
   closeSync,
   existsSync,
+  lstatSync,
   opendirSync,
   openSync,
   readdirSync,
@@ -32,6 +33,11 @@ import type {
 } from "../types"
 import type { SkillPreviewGrantRequest } from "../../shared/skill-preview"
 import { isProjectModePluginRoot } from "../harness-board/plugin-mode"
+import { parseProjectRuntimeManifest, PROJECT_RUNTIME_MAX_BYTES } from "../../shared/project-runtime"
+import { PROJECT_ACTION_LOCK_PATH } from "../../shared/project-runtime/action-bindings"
+import { readProjectActionLock } from "../harness-board/project-runtime/action-input"
+import { readRuntimeScopedFile } from "../harness-board/project-runtime/safe-files"
+import { projectDependencyIdsFromLock } from "../plugins/project-dependency-projection"
 import {
   SKILL_PLUGIN_CATALOG_CANCELLED,
   SKILL_PLUGIN_CATALOG_CURSOR_EXPIRED,
@@ -411,6 +417,62 @@ function parsePlugins(source: SkillPluginCatalogSourceConfig, context: BuildCont
     if (plugin) plugins.push(plugin)
   }
   return plugins
+}
+
+function pluginProjectDisplayMetadata(
+  plugin: PluginMetadata,
+  installedIds: ReadonlySet<string>,
+  context: BuildContext
+): PluginMetadata {
+  checkCancelled(context)
+  try {
+    if (!isAbsolute(plugin.path)) return plugin
+    const directory = lstatSync(plugin.path)
+    if (!directory.isDirectory() || directory.isSymbolicLink()) return plugin
+    const root = resolve(plugin.path)
+    const readFile = (relativePath: string, limit: number): { bytes?: Buffer } => {
+      checkCancelled(context)
+      if (relativePath !== "devclaw.project-runtime.json" && relativePath !== PROJECT_ACTION_LOCK_PATH)
+        throw new Error("CATALOG_PROJECT_METADATA_PATH_INVALID")
+      if (!consumeFileBudget(context)) throw new Error("CATALOG_PROJECT_METADATA_BUDGET")
+      const remaining = SKILL_PLUGIN_CATALOG_MAX_TOTAL_READ_BYTES - context.stats.readBytes
+      if (remaining <= 0) {
+        markTruncated(context, "total-read-bytes")
+        throw new Error("CATALOG_PROJECT_METADATA_BUDGET")
+      }
+      const reserved = Math.min(limit, remaining)
+      // A failed identity check may follow actual reads. Retain its conservative reservation
+      // on failure so changing files cannot bypass the aggregate source-read budget.
+      context.stats.readBytes += reserved
+      try {
+        const observation = readRuntimeScopedFile(root, relativePath, reserved)
+        context.stats.readBytes -= reserved - (observation.bytes?.byteLength ?? 0)
+        checkCancelled(context)
+        return observation
+      } catch (error) {
+        if (error instanceof Error && error.message === "PROJECT_HOST_FILE_LIMIT") {
+          markTruncated(context, reserved < limit ? "total-read-bytes" : "project-metadata-file-bytes")
+        }
+        throw error
+      }
+    }
+    const runtime = readFile("devclaw.project-runtime.json", PROJECT_RUNTIME_MAX_BYTES)
+    if (!runtime.bytes) return plugin
+    const manifest = parseProjectRuntimeManifest(
+      JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(runtime.bytes))
+    )
+    checkCancelled(context)
+    if (manifest.mode !== "host") return plugin
+    if (manifest.plugin.id !== plugin.name || manifest.plugin.version !== plugin.version) return plugin
+    // This injected reader is the only lock read; the existing complete validation remains intact.
+    const lock = readProjectActionLock(root, manifest, readFile)
+    checkCancelled(context)
+    return { ...plugin, projectDependencyIds: projectDependencyIdsFromLock(plugin.id, lock, installedIds) }
+  } catch {
+    checkCancelled(context)
+    // Incomplete/invalid metadata must leave ordinary plugins visible, never grant authority.
+    return plugin
+  }
 }
 
 function safePluginPath(root: string, relativePath: string): string | null {
@@ -989,7 +1051,11 @@ function buildSnapshot(
       limit: SKILL_PLUGIN_CATALOG_MAX_SNAPSHOT_BYTES
     }
     const retainedPlugins: PluginMetadata[] = []
-    for (const plugin of plugins) retainBoundedEntry(retainedPlugins, plugin, budget, context)
+    const installedIds = new Set(plugins.map((plugin) => plugin.id))
+    for (const plugin of plugins) {
+      const projected = pluginProjectDisplayMetadata(plugin, installedIds, context)
+      retainBoundedEntry(retainedPlugins, projected, budget, context)
+    }
     const snapshot: CatalogSnapshot = {
       id: `spc-${nextSnapshotId++}`,
       key,

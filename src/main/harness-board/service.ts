@@ -4308,7 +4308,17 @@ async function loadHarnessProjectDetails(
   for (const project of projects) {
     throwIfHarnessDetailCancelled(signal)
     if (project.nativeBinding) {
-      result[project.projectId] = await nativeHarnessProjectDetail(project)
+      try {
+        result[project.projectId] = await nativeHarnessProjectDetail(project)
+      } catch (error) {
+        throwIfHarnessDetailCancelled(signal)
+        if (!(error instanceof Error) || error.message !== "PROJECT_PLUGIN_UNAVAILABLE") throw error
+        result[project.projectId] = makeProjectErrorDetail(
+          project,
+          "项目插件不可用",
+          "此项目绑定的插件已不可用，请恢复原插件安装后重试。"
+        )
+      }
       continue
     }
     const workerContext = contextById[project.projectId]

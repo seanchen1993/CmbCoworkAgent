@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from "react"
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react"
 import { toast } from "sonner"
 import type { UiGuideConfig } from "../../../../shared/ui-guides"
 import { Button } from "@/components/ui/button"
@@ -36,7 +36,7 @@ function ActivePageEntryGuide({
   const countedRef = useRef(false)
   const dismissedRef = useRef(false)
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     return subscribeCurrentPageEntryGuideDismiss(guideId, () => {
       dismissedRef.current = true
       setOpen(false)
