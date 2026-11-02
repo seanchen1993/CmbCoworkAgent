@@ -344,6 +344,10 @@ export class BotStore {
         )
       )
         db.run("ALTER TABLE bot_commands ADD COLUMN continuation_consumed INTEGER NOT NULL DEFAULT 0")
+      if (!this.rows("PRAGMA table_info(bot_commands)").some(column => column.name === "pending_notification"))
+        db.run("ALTER TABLE bot_commands ADD COLUMN pending_notification TEXT")
+      db.run(`CREATE INDEX IF NOT EXISTS bot_commands_pending_notification ON bot_commands(updated_at,id)
+        WHERE pending_notification IS NOT NULL AND suppressed=0`)
       // Repair partially applied older migrations without changing valid group/private ownership.
       db.run(
         "UPDATE bot_tasks SET thread_id=(SELECT thread_id FROM bots WHERE bots.id=bot_tasks.bot_id) WHERE thread_id IS NULL"
@@ -505,11 +509,12 @@ export class BotStore {
       const tasks = this.rows(
         `SELECT t.* FROM bot_tasks t WHERE ${source} AND t.state IN ('queued','running','waiting_user')`, [bindingId]
       ).map(row => this.task(row))
-      const commandIds = this.rows(
-        `SELECT c.id FROM bot_commands c JOIN bot_tasks t ON t.id=c.source_task_id WHERE c.state='accepted' AND ${source}`, [bindingId]
-      ).map(row => String(row.id))
-      for (const id of commandIds)
-        this.db.run("UPDATE bot_commands SET suppressed=1 WHERE id=? AND state='accepted'", [id])
+      const commands = this.rows(
+        `SELECT c.id,c.state FROM bot_commands c JOIN bot_tasks t ON t.id=c.source_task_id WHERE (c.state='accepted' OR (c.pending_notification IS NOT NULL AND c.suppressed=0)) AND ${source}`, [bindingId]
+      )
+      for (const command of commands)
+        this.db.run("UPDATE bot_commands SET suppressed=1 WHERE id=?", [command.id])
+      const commandIds = commands.filter(command => command.state === "accepted").map(command => String(command.id))
       const workflowSources = this.rows(
         `SELECT DISTINCT t.id FROM bot_workflow_refs r JOIN bot_tasks t ON t.id=r.source_task_id WHERE r.retired_at IS NULL AND ${source}`, [bindingId]
       ).map(row => String(row.id))
@@ -848,7 +853,7 @@ export class BotStore {
       (SELECT COUNT(*) FROM bot_tasks p WHERE json_extract(p.origin_json,'$.rootWorkId')=+w.id
         AND p.work_id IS NULL AND p.state IN ('queued','running','waiting_user')) AS pending_peers,
       (EXISTS(SELECT 1 FROM bot_commands c LEFT JOIN bot_tasks p ON p.id=c.source_task_id
-        WHERE c.state='accepted' AND (c.thread_id=w.thread_id OR json_extract(p.origin_json,'$.rootWorkId')=w.id))
+        WHERE (c.state='accepted' OR (c.pending_notification IS NOT NULL AND c.suppressed=0)) AND (c.thread_id=w.thread_id OR json_extract(p.origin_json,'$.rootWorkId')=w.id))
        OR EXISTS(SELECT 1 FROM bot_workflow_refs r WHERE r.retired_at IS NULL AND r.source_task_id IN (
          SELECT wf_owner.id FROM bot_tasks wf_owner WHERE wf_owner.work_id=w.id OR json_extract(wf_owner.origin_json,'$.rootWorkId')=+w.id
        ))) AS background_busy`
@@ -955,8 +960,8 @@ export class BotStore {
           SELECT work_id FROM bot_tasks WHERE work_id IS NOT NULL AND state IN ('queued','running','waiting_user')
           UNION SELECT json_extract(origin_json,'$.rootWorkId') FROM bot_tasks WHERE state IN ('queued','running','waiting_user') AND json_extract(origin_json,'$.rootWorkId') IS NOT NULL
           UNION SELECT a.id FROM bot_activity a WHERE a.kind='work' AND a.attention_version>a.seen_version
-          UNION SELECT x.id FROM bot_commands c JOIN bot_work_items x ON x.thread_id=c.thread_id WHERE c.state='accepted'
-          UNION SELECT json_extract(t.origin_json,'$.rootWorkId') FROM bot_commands c JOIN bot_tasks t ON t.id=c.source_task_id WHERE c.state='accepted')
+          UNION SELECT x.id FROM bot_commands c JOIN bot_work_items x ON x.thread_id=c.thread_id WHERE (c.state='accepted' OR (c.pending_notification IS NOT NULL AND c.suppressed=0))
+          UNION SELECT json_extract(t.origin_json,'$.rootWorkId') FROM bot_commands c JOIN bot_tasks t ON t.id=c.source_task_id WHERE (c.state='accepted' OR (c.pending_notification IS NOT NULL AND c.suppressed=0)))
         ORDER BY CASE execution_state WHEN 'waiting_user' THEN 0 WHEN 'running' THEN 1 ELSE 2 END,w.updated_at DESC,w.ordinal DESC LIMIT 6`,
         [botId, audience ?? null, audience ?? null, query, query]
       ).map((row) => this.workSummary(row)),
@@ -1226,7 +1231,7 @@ export class BotStore {
               [workId, workId]
             ).length ||
               this.rows(
-                `SELECT c.id FROM bot_commands c LEFT JOIN bot_tasks t ON t.id=c.source_task_id WHERE c.state='accepted' AND (c.thread_id=? OR json_extract(t.origin_json,'$.rootWorkId')=?) LIMIT 1`,
+                `SELECT c.id FROM bot_commands c LEFT JOIN bot_tasks t ON t.id=c.source_task_id WHERE (c.state='accepted' OR (c.pending_notification IS NOT NULL AND c.suppressed=0)) AND (c.thread_id=? OR json_extract(t.origin_json,'$.rootWorkId')=?) LIMIT 1`,
                 [work.threadId, workId]
               ).length ||
               this.rows(
@@ -1387,6 +1392,9 @@ export class BotStore {
       )
       if (input.archived) {
         this.assertOwnedWorkPeersIdle(bot.id)
+        this.db.run(`UPDATE bot_commands SET suppressed=1 WHERE pending_notification IS NOT NULL
+          AND (bot_id=? OR source_task_id IN (SELECT id FROM bot_tasks
+            WHERE json_extract(origin_json,'$.rootWorkId') IN (SELECT id FROM bot_work_items WHERE bot_id=?)))`, [bot.id, bot.id])
         const awaitingReplies = new Map<string, string>()
         for (const row of this.rows(
           `SELECT * FROM bot_tasks WHERE (bot_id=? OR json_extract(origin_json,'$.rootWorkId') IN (SELECT id FROM bot_work_items WHERE bot_id=?)) AND state='queued'
@@ -1556,7 +1564,7 @@ export class BotStore {
         [botId]
       ).length ||
       this.rows(
-        `SELECT c.id FROM bot_commands c JOIN bot_tasks t ON t.id=c.source_task_id JOIN bot_work_items w ON w.id=json_extract(t.origin_json,'$.rootWorkId') WHERE w.bot_id=? AND c.state='accepted' LIMIT 1`,
+        `SELECT c.id FROM bot_commands c JOIN bot_tasks t ON t.id=c.source_task_id JOIN bot_work_items w ON w.id=json_extract(t.origin_json,'$.rootWorkId') WHERE w.bot_id=? AND (c.state='accepted' OR (c.pending_notification IS NOT NULL AND c.suppressed=0)) LIMIT 1`,
         [botId]
       ).length ||
       this.rows(
@@ -2473,7 +2481,7 @@ export class BotStore {
                AND NOT EXISTS (SELECT 1 FROM bot_work_items w
                  WHERE w.id=json_extract(bot_tasks.origin_json,'$.rootWorkId') AND w.bot_id=?))`
            : "state IN ('queued','running','waiting_user')"}
-         UNION SELECT source_task_id FROM bot_commands WHERE state='accepted'
+         UNION SELECT source_task_id FROM bot_commands WHERE state='accepted' OR (pending_notification IS NOT NULL AND suppressed=0)
          ${archivingBotId ? "" : "UNION SELECT task_id FROM bot_reply_outbox WHERE blocked=0"}
          UNION SELECT source_task_id FROM bot_workflow_refs WHERE retired_at IS NULL AND (suppressed=0 OR ?=1)
        ), owners(id) AS (
@@ -2533,13 +2541,13 @@ export class BotStore {
           const pending = ["queued", "running", "waiting_user"].includes(peer.state)
           if (pending) tasks.set(peer.id, peer)
           const commands = this.rows(
-            "SELECT id FROM bot_commands WHERE source_task_id=? AND state='accepted'", [peer.id]
+            "SELECT id,state FROM bot_commands WHERE source_task_id=? AND (state='accepted' OR (pending_notification IS NOT NULL AND suppressed=0))", [peer.id]
           )
           for (const command of commands) {
             const commandId = String(command.id)
-            this.db.run("UPDATE bot_commands SET suppressed=1 WHERE id=? AND state='accepted'", [commandId])
+            this.db.run("UPDATE bot_commands SET suppressed=1 WHERE id=?", [commandId])
             // Pending owners retain the original physical-cleanup/settlement fence.
-            if (!pending) commandIds.add(commandId)
+            if (!pending && command.state === "accepted") commandIds.add(commandId)
           }
         }
       }
@@ -2555,12 +2563,13 @@ export class BotStore {
   suppressWorkPeerCommands(botId: string, workId: string): string[] {
     const work = this.getWork(botId, workId)
     return this.transaction(() => {
-      const ids = this.rows(
-        `SELECT c.id FROM bot_commands c JOIN bot_tasks t ON t.id=c.source_task_id WHERE c.state='accepted' AND c.thread_id!=? AND json_extract(t.origin_json,'$.rootWorkId')=?`,
+      const commands = this.rows(
+        `SELECT c.id,c.state FROM bot_commands c JOIN bot_tasks t ON t.id=c.source_task_id WHERE (c.state='accepted' OR (c.pending_notification IS NOT NULL AND c.suppressed=0)) AND c.thread_id!=? AND json_extract(t.origin_json,'$.rootWorkId')=?`,
         [work.threadId, workId]
-      ).map((row) => String(row.id))
-      for (const id of ids)
-        this.db.run("UPDATE bot_commands SET suppressed=1 WHERE id=? AND state='accepted'", [id])
+      )
+      for (const command of commands)
+        this.db.run("UPDATE bot_commands SET suppressed=1 WHERE id=?", [command.id])
+      const ids = commands.filter(command => command.state === "accepted").map(command => String(command.id))
       return ids
     })
   }
@@ -3536,14 +3545,19 @@ export class BotStore {
     })
   }
 
-  activeCommandThreads(): string[] {
-    return this.rows("SELECT DISTINCT thread_id FROM bot_commands WHERE state='accepted'").map(
+  activeCommandThreads(includePending = false): string[] {
+    return this.rows(`SELECT DISTINCT thread_id FROM bot_commands WHERE state='accepted'${includePending ? " OR (pending_notification IS NOT NULL AND suppressed=0)" : ""}`).map(
       (row) => String(row.thread_id)
     )
   }
 
+  hasPendingCommandNotifications(): boolean {
+    return this.rows("SELECT 1 FROM bot_commands WHERE pending_notification IS NOT NULL AND suppressed=0 LIMIT 1").length > 0
+  }
+
   private pruneCommandReceipts(): void {
     this.db.run(`DELETE FROM bot_commands WHERE state!='accepted'
+      AND (pending_notification IS NULL OR suppressed=1)
       AND NOT EXISTS (SELECT 1 FROM bot_tasks t WHERE t.id=bot_commands.source_task_id
         AND t.state IN ('queued','running','waiting_user') AND bot_commands.continuation_result_json IS NOT NULL)
       AND id NOT IN (SELECT id FROM bot_commands WHERE state!='accepted' ORDER BY updated_at DESC,id DESC LIMIT 200)`)
@@ -3599,20 +3613,25 @@ export class BotStore {
     ).map((row) => String(row.id))
   }
 
-  suppressCommands(threadId: string, sourceTaskId?: string): void {
-    this.db.run(`UPDATE bot_commands SET suppressed=1 WHERE thread_id=? AND state='accepted'${sourceTaskId ? " AND source_task_id=?" : ""}`, [
+  suppressCommands(threadId: string, sourceTaskId?: string, includePending = true): void {
+    this.db.run(`UPDATE bot_commands SET suppressed=1 WHERE thread_id=? AND suppressed=0 AND (state='accepted'${includePending ? " OR pending_notification IS NOT NULL" : ""})${sourceTaskId ? " AND source_task_id=?" : ""}`, [
       threadId, ...(sourceTaskId ? [sourceTaskId] : [])
     ])
+    if (this.db.getRowsModified()) this.changed()
   }
 
   /** Withdraw this physical run's continuations; preserve actual command outcomes. */
-  stopRunCommands(threadId: string, commandIds: readonly string[]): string[] {
+  stopRunCommands(threadId: string, commandIds: readonly string[], preserveResults = false): string[] {
     return this.transaction(() => {
       const running: string[] = []
       for (const id of commandIds) {
         if (this.rows("SELECT id FROM bot_commands WHERE id=? AND thread_id=? AND state='accepted'", [id, threadId]).length)
           running.push(id)
-        this.db.run("UPDATE bot_commands SET suppressed=1 WHERE id=? AND thread_id=?", [id, threadId])
+        this.db.run(`UPDATE bot_commands SET suppressed=1 WHERE id=? AND thread_id=? AND suppressed=0
+          ${preserveResults ? "AND state='accepted'" : ""}`, [id, threadId])
+        if (this.db.getRowsModified()) this.changed()
+        // Shutdown preserves both saved and already-admitted results; user Stop withdraws both.
+        if (preserveResults) continue
         const queued = this.rows(
           `SELECT id FROM bot_tasks WHERE thread_id=? AND request_id=? AND state='queued'
            AND json_extract(origin_json,'$.kind')='notification'
@@ -3670,25 +3689,6 @@ export class BotStore {
         else this.noteActivity("bot", String(row.bot_id), "后台任务已停止", false)
       }
       if (row.suppressed || result.cancelled) return
-      const bot = this.getBot(String(row.bot_id))
-      if (bot.archived || bot.deleting) return
-      const groupId = row.group_id == null ? undefined : String(row.group_id)
-      if (groupId) {
-        const group = this.getGroup(groupId)
-        if (group.deleting || !group.memberIds.includes(bot.id)) return
-      }
-      const work = this.workForThread(bot.id, result.threadId)
-      if (work?.state === "completed") return
-      const source = row.source_task_id ? this.getTask(String(row.source_task_id)) : undefined
-      if (source?.mockSource) {
-        const channel = this.external(source.mockSource)
-        const owner = channel.continuationOwner(source)
-        // A revoked route stops automatic delivery, not the recording of a real result.
-        // Corrupt source identity or storage failures still abort the transaction.
-        channel.validateSource(source.mockSource, owner, false)
-        const binding = channel.get(owner, source.mockSource.bindingId)
-        if (binding.revoked || binding.grantVersion !== source.mockSource.grantVersion) return
-      }
       const output = result.output.slice(-16_000)
       const commandSucceeded = !unknown && result.exitCode === 0
       const message = [
@@ -3710,25 +3710,60 @@ export class BotStore {
           ? `This is an internal completion receipt, not a new user message requiring an acknowledgement. If it only confirms an already reported result or expected cleanup, with no new deliverable, anomaly or needed decision, reply exactly ${BOT_ROUTINE_SILENT}. That marker is a valid final response recorded for audit without a user notification. Do not replace it with a brief confirmation, internal verification note, old answer or unchanged attachment. Otherwise verify and deliver the new result; never silence an unreported result.`
           : "This receipt reports a failed or unconfirmed command outcome. Report the actual failure or uncertainty; do not use a silence marker or repeat the command."
       ].join("\n\n")
-      this.enqueue(
-        {
-          botId: bot.id,
-          requestId: `notification:${result.threadId}:command:${result.id}`,
-          ...(work ? { workId: work.id } : {}),
-          message
-        },
-        {
-          kind: "notification",
-          notificationKind: "command",
-          ...(source?.mockSource?.transport === "im" ? { sourceTaskId: source.id } : {}),
-          key: result.id,
-          commandSucceeded,
-          ...(source && botTaskWorkFamily(source) ? { rootWorkId: botTaskWorkFamily(source) } : {}),
-          ...(groupId ? { groupId } : {})
-        },
-        source?.mockSource
-      )
+      // Persist the result before admission. Capacity is backpressure, not a storage failure.
+      const pending = JSON.stringify({ message, commandSucceeded })
+      this.db.run("UPDATE bot_commands SET pending_notification=? WHERE id=?", [pending, result.id])
+      this.flushCommandNotification({ ...row, pending_notification: pending })
     })
+  }
+
+  /** Admit a saved completion through the same queue and request identity, never rerun its command. */
+  private flushCommandNotification(row: Record<string, unknown>): void {
+    const suppress = () => {
+      this.db.run("UPDATE bot_commands SET suppressed=1 WHERE id=?", [row.id])
+    }
+    const bot = this.getBot(String(row.bot_id))
+    if (bot.archived || bot.deleting) return suppress()
+    const groupId = row.group_id == null ? undefined : String(row.group_id)
+    if (groupId) {
+      const group = this.getGroup(groupId)
+      if (group.deleting || !group.memberIds.includes(bot.id)) return suppress()
+    }
+    const work = this.workForThread(bot.id, String(row.thread_id))
+    if (work?.state === "completed") return suppress()
+    const source = row.source_task_id ? this.getTask(String(row.source_task_id)) : undefined
+    if (source?.mockSource) {
+      const channel = this.external(source.mockSource)
+      const owner = channel.continuationOwner(source)
+      // A revoked route stops automatic delivery, not the recording of a real result.
+      // Corrupt source identity or storage failures still abort the transaction.
+      channel.validateSource(source.mockSource, owner, false)
+      const binding = channel.get(owner, source.mockSource.bindingId)
+      if (binding.revoked || binding.grantVersion !== source.mockSource.grantVersion) return suppress()
+    }
+    if (Number(this.rows("SELECT COUNT(*) AS n FROM bot_tasks WHERE state='queued'")[0].n) >= 500) return
+    const { message, commandSucceeded } = JSON.parse(String(row.pending_notification)) as {
+      message: string; commandSucceeded: boolean
+    }
+    this.enqueue(
+      {
+        botId: bot.id,
+        requestId: `notification:${row.thread_id}:command:${row.id}`,
+        ...(work ? { workId: work.id } : {}),
+        message
+      },
+      {
+        kind: "notification",
+        notificationKind: "command",
+        ...(source?.mockSource?.transport === "im" ? { sourceTaskId: source.id } : {}),
+        key: String(row.id),
+        commandSucceeded,
+        ...(source && botTaskWorkFamily(source) ? { rootWorkId: botTaskWorkFamily(source) } : {}),
+        ...(groupId ? { groupId } : {})
+      },
+      source?.mockSource
+    )
+    this.db.run("UPDATE bot_commands SET pending_notification=NULL WHERE id=?", [row.id])
   }
 
   delegate(
@@ -4330,11 +4365,11 @@ export class BotStore {
     this.db.run("DELETE FROM bot_reply_outbox WHERE task_id=?", [row.task_id])
   }
 
-  flushReplies(): void {
-    this.transaction(() => {
+  flushReplies(): boolean {
+    return this.transaction(() => {
       const capacity =
         500 - Number(this.rows("SELECT COUNT(*) AS n FROM bot_tasks WHERE state='queued'")[0].n)
-      if (capacity <= 0) return
+      if (capacity <= 0) return false
       for (const row of this.rows(
         "SELECT * FROM bot_reply_outbox WHERE blocked=0 ORDER BY rowid LIMIT ?",
         [Math.min(capacity, 16)]
@@ -4418,6 +4453,20 @@ export class BotStore {
         }
         this.db.run("DELETE FROM bot_reply_outbox WHERE task_id=?", [row.task_id])
       }
+      const available = 500 - Number(this.rows("SELECT COUNT(*) AS n FROM bot_tasks WHERE state='queued'")[0].n)
+      if (available > 0) {
+        const pending = this.rows(
+          `SELECT * FROM bot_commands WHERE pending_notification IS NOT NULL AND suppressed=0
+           ORDER BY updated_at,id LIMIT ?`, [Math.min(available, 16)]
+        )
+        for (const row of pending) this.flushCommandNotification(row)
+        // A batch of withdrawn routes must not strand the next valid receipt.
+        // Continue through the Host's existing wake, yielding between bounded batches.
+        return pending.length > 0 &&
+          Number(this.rows("SELECT COUNT(*) AS n FROM bot_tasks WHERE state='queued'")[0].n) < 500 &&
+          this.hasPendingCommandNotifications()
+      }
+      return false
     })
   }
 
@@ -5048,7 +5097,7 @@ export class BotStore {
     return new Set(
       this.rows(
         `SELECT c.bot_id FROM bot_commands c LEFT JOIN bot_tasks t ON t.id=c.source_task_id
-       WHERE c.group_id=? AND c.state='accepted' AND COALESCE(
+       WHERE c.group_id=? AND (c.state='accepted' OR (c.pending_notification IS NOT NULL AND c.suppressed=0)) AND COALESCE(
          c.suppressed=1 AND c.continuation_result_json IS NULL AND t.state IN ('completed','superseded'),0)=0
        UNION SELECT t.bot_id FROM bot_workflow_refs r JOIN bot_tasks t ON t.id=r.source_task_id
        WHERE json_extract(t.origin_json,'$.groupId')=? AND r.retired_at IS NULL AND r.suppressed=0`,
