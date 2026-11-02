@@ -462,7 +462,7 @@ export class BotStore {
       () => this.changed(),
       this.now
     )
-    this.imGateway = new BotImGatewayStore(db)
+    this.imGateway = new BotImGatewayStore(db, () => this.changed())
     this.im = new BotMockChannelStore(
       db,
       this,

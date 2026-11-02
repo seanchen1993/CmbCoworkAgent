@@ -16,8 +16,8 @@ const cleanups: (() => Promise<void>)[] = []
 afterEach(async () => {
   for (const close of cleanups.splice(0)) await close()
 })
-const wait = async (predicate: () => boolean) => {
-  const until = Date.now() + 3500
+const wait = async (predicate: () => boolean, timeout = 3500) => {
+  const until = Date.now() + timeout
   while (!predicate()) {
     if (Date.now() > until) throw new Error("socket condition timed out")
     await new Promise((r) => setTimeout(r, 10))
@@ -57,6 +57,7 @@ it.each(["group", "dm"] as const)("routes %s through WebSocket", async (kind) =>
     botId: bot.id,
     kind,
     label: bot.name,
+    ...(kind === "group" ? { peerLabel: "原项目群" } : {}),
     version: 1,
     state: "active",
     conversationKey: `${kind}-conversation`,
@@ -242,6 +243,26 @@ it.each(["group", "dm"] as const)("routes %s through WebSocket", async (kind) =>
   expect(replies[0].conversationKey).toBe(`${kind}-conversation`)
   expect(replies[0].message.content).toBe("已收到群内交办")
   expect(errors).toEqual([])
+  if (kind === "group") {
+    const before = host.snapshot().imConversations![0]
+    expect(before.title).toBe("原项目群")
+    const displayed: string[] = []
+    const unsubscribe = host.subscribe(() => displayed.push(host.snapshot().imConversations![0].title))
+    // Simulate the gateway committing groupName from a new callback before BOT_EVENT.
+    binding.peerLabel = "项目群 · 已改名"
+    send(socket!, "BOT_EVENT", {
+      ...payload,
+      event: { ...event, eventId: "rename-event", platformMessageId: "rename-message", conversationSeq: 2 }
+    }, undefined, "rename-push")
+    await wait(() => displayed.includes(binding.peerLabel!), 7000)
+    const after = host.snapshot().imConversations![0]
+    expect(after).toMatchObject({ id: before.id, threadId: before.threadId, title: binding.peerLabel })
+    expect(host.snapshot().imConversations).toHaveLength(1)
+    await wait(() => replies.length === 2 && fileDeliveries === 2)
+    expect(runs).toBe(2)
+    expect(errors).toEqual([])
+    unsubscribe()
+  }
   if (kind === "dm") {
     host.send({ botId: bot.id, requestId: "app-input", message: "App 主对话" })
     await wait(() => replies.length === 2)
@@ -268,4 +289,4 @@ it.each(["group", "dm"] as const)("routes %s through WebSocket", async (kind) =>
     "legacy-push"
   )
   await wait(() => legacy === 1)
-})
+}, 15000)

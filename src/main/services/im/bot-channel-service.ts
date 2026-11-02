@@ -32,6 +32,8 @@ export class BotImChannelService {
   private pumping = false
   private stopped = false
   private nextSync = 0
+  private nextGroupSync = 0
+  private readonly groupsToSync = new Set<string>()
   private syncing = false
   private delivering = false
   private epoch = 0
@@ -83,7 +85,7 @@ export class BotImChannelService {
   private register(binding: BotImBinding, principal: string): BotImBinding {
     const host = this.getHost()
     host.getBot(binding.botId)
-    const route = host.imGateway.register(this.realm, principal, binding)
+    const route = host.registerImBinding(this.realm, principal, binding)
     binding = route.binding
     if (binding.state === "active") {
       host.imChannel.importImBinding({
@@ -330,6 +332,9 @@ export class BotImChannelService {
       })
       return
     }
+    // The gateway updates peerLabel before dispatch. Refresh through the existing binding
+    // protocol without delaying execution; coalesce group traffic and skip redeliveries.
+    if (!old && payload.route.kind === "group") this.groupsToSync.add(payload.route.botId)
     try {
       await this.client.sendAcknowledgement({
         type: "received",
@@ -461,9 +466,8 @@ export class BotImChannelService {
     this.cancel(event)
     return true
   }
-  private async sync(): Promise<void> {
-    const principal = this.identity()
-    for (const botId of this.getHost().imGateway.botIds(this.realm, principal)) {
+  private async sync(botIds: string[]): Promise<void> {
+    for (const botId of botIds) {
       let before: string | undefined
       const seen = new Set<string>()
       do {
@@ -481,17 +485,26 @@ export class BotImChannelService {
       if (event.expiresAt <= Date.now()) this.cancel(event)
   }
   private async syncBindings(): Promise<void> {
+    const now = Date.now(),
+      periodic = now >= this.nextSync
     if (
       this.syncing ||
       this.stopped ||
       !this.client.supportsBotChannel() ||
-      Date.now() < this.nextSync
+      (!periodic && (!this.groupsToSync.size || now < this.nextGroupSync))
     )
       return
     this.syncing = true
-    this.nextSync = Date.now() + 30000
     try {
-      await this.sync()
+      const botIds = periodic
+        ? this.getHost().imGateway.botIds(this.realm, this.identity())
+        : [...this.groupsToSync]
+      // At most one refresh every five seconds, regardless of group message volume.
+      // Remove before awaiting so new messages during a request still schedule a refresh.
+      for (const id of botIds) this.groupsToSync.delete(id)
+      if (periodic) this.nextSync = now + 30000
+      this.nextGroupSync = now + 5000
+      await this.sync(botIds)
     } catch (error) {
       this.reportError(error)
     } finally {
@@ -638,6 +651,8 @@ export class BotImChannelService {
   disconnected(): void {
     this.epoch++
     this.nextSync = 0
+    this.nextGroupSync = 0
+    this.groupsToSync.clear()
     const host = this.resolvedHost
     if (!host) return
     host.setImOffline()

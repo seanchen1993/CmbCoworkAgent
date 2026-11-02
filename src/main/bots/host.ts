@@ -49,6 +49,7 @@ import type { BackgroundCommandLifecycle } from "../agent/background-command-lif
 import type { UserInputRequest } from "../types"
 import { parseCreateBotWork } from "../../shared/bots/validation"
 import { parseBotReactionTarget, type BotReactionTarget } from "../../shared/bots/message-reactions"
+import type { BotImBinding } from "../../shared/bots/im-channel"
 
 export interface BotRunLease {
   notificationTerminal?(): AgentRunTerminal | undefined
@@ -491,6 +492,11 @@ export class LocalBotHost {
   }
   get imGateway() {
     return this.store.imGateway
+  }
+  /** Invalidate the group read model when authenticated binding metadata changes. */
+  registerImBinding(realm: string, principal: string, binding: BotImBinding) {
+    this.requireRunning()
+    return this.updateImState(() => this.store.imGateway.register(realm, principal, binding))
   }
   /** Authenticated binding revocation; never stop a whole shared personal thread. */
   revokeImBinding(botId: string, id: string, version: number): void {
