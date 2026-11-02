@@ -301,7 +301,7 @@ export class LocalBotHost {
       personalIm: this.store.imGateway.personalStatuses(),
       imConversations: this.store.imGateway.groupConversations(),
       backgroundThreads: [...new Set([
-        ...this.store.activeCommandThreads(),
+        ...this.store.activeCommandThreads(true),
         ...this.store.workflowReferences().map(run => run.threadId)
       ])],
       collaborationThreads: this.store.stoppableCollaborationThreads()
@@ -503,6 +503,7 @@ export class LocalBotHost {
     if (execution.commandIds.length)
       void Promise.resolve(this.runtime.cancelBackgroundCommands?.(execution.commandIds)).catch(this.reportError)
     this.changed()
+    this.wake()
   }
   /** Authenticated main-process IM registration; unchanged syncs need no queue wake. */
   setImOnline(botId: string, id: string, online: boolean) {
@@ -565,6 +566,7 @@ export class LocalBotHost {
     this.requireRunning()
     const result = this.store.mock.revoke(botId, id, version)
     this.changed()
+    this.wake()
     return result
   }
   injectMockEvent(input: BotMockEvent) {
@@ -770,6 +772,7 @@ export class LocalBotHost {
       void Promise.resolve(this.runtime.cancelBackground?.(threadId)).catch(this.reportError)
     }
     this.changed()
+    this.wake()
     return group
   }
   groupMessages(id: string, cursor?: BotGroupHistoryCursor): BotGroupMessage[] {
@@ -889,6 +892,7 @@ export class LocalBotHost {
     const next = input.enabled ? this.nextSchedule(input, new Date()) : null
     const schedule = this.store.saveSchedule(botId, input, next, existing, sourceTaskId)
     this.changed()
+    this.wake()
     this.armSchedules()
     return schedule
   }
@@ -897,6 +901,7 @@ export class LocalBotHost {
     this.requireRunning()
     this.store.removeSchedule(id, version)
     this.changed()
+    this.wake()
     this.armSchedules()
   }
 
@@ -1008,6 +1013,7 @@ export class LocalBotHost {
     }
     const threads = this.store.beginDeletion(id, expectedVersion)
     this.changed()
+    this.wake()
     this.armSchedules()
     const deletion = Promise.resolve()
       .then(() => cleanup(threads))
@@ -1031,6 +1037,7 @@ export class LocalBotHost {
     if (pending) return pending
     const threads = this.store.beginGroupDeletion(id, version)
     this.changed()
+    this.wake()
     const deletion = Promise.resolve()
       .then(() => cleanup(threads))
       .then(() => {
@@ -1347,6 +1354,7 @@ export class LocalBotHost {
         this.store.injectIntoRun(task.id, run.task.id)
         run.steered.add(task.id)
         this.changed()
+        if (this.store.hasPendingCommandNotifications()) this.wake()
         return true
       })
       .catch(this.reportError)
@@ -1507,6 +1515,7 @@ export class LocalBotHost {
   }
 
   stopImConversation(botId: string, bindingId: string): void {
+    const revision = this.store.revision()
     this.requireRunning()
     const { tasks, threads } = this.store.imConversationControl(botId, bindingId)
     // Completed dispatchers can still own live peer services. Reuse the same
@@ -1528,8 +1537,13 @@ export class LocalBotHost {
       void Promise.resolve(this.runtime.cancelBackgroundCommands?.(commandIds)).catch(
         this.reportError
       )
+    if (revision !== this.store.revision()) {
+      this.changed()
+      this.wake()
+    }
   }
   stopConversation(botId: string, groupId?: string, workId?: string): void {
+    const revision = this.store.revision()
     if (groupId && workId) throw new BotError("INVALID_INPUT", "群与工作目标不能混用")
     const bot = groupId ? this.getGroupMember(groupId, botId) : this.getBot(botId)
     if (groupId) {
@@ -1565,6 +1579,10 @@ export class LocalBotHost {
       void Promise.resolve(this.runtime.cancelBackgroundCommands?.(commandIds)).catch(
         this.reportError
       )
+    if (revision !== this.store.revision()) {
+      this.changed()
+      this.wake()
+    }
   }
 
   hasActiveRuns(): boolean {
@@ -1651,8 +1669,10 @@ export class LocalBotHost {
         this.reportError(error)
       }
     }
-    this.store.flushReplies()
+    if (this.store.flushReplies()) this.wake()
     this.store.advanceGroupDiscussions()
+    // Retiring stale group posts can free capacity without dispatching a task.
+    if (this.store.hasPendingCommandNotifications() && this.store.flushReplies()) this.wake()
     this.pumpMockDelivery()
     const excluded = new Set([
       ...[...this.active.values()].map((run) => run.task.threadId),
@@ -1700,6 +1720,8 @@ export class LocalBotHost {
         steeringReady: false
       })
       this.changed()
+      // Dispatch frees a queued slot even if this run will remain active for a long time.
+      if (this.store.hasPendingCommandNotifications()) this.wake()
     }
   }
 
@@ -1781,7 +1803,7 @@ export class LocalBotHost {
           (state === "failed" || state === "outcome_unknown"))
       ) {
         const launched = controller.signal.aborted
-          ? this.store.stopRunCommands(task.threadId, [...(this.active.get(task.id)?.launchedCommands ?? [])])
+          ? this.store.stopRunCommands(task.threadId, [...(this.active.get(task.id)?.launchedCommands ?? [])], this.stopping)
           : []
         const commands = [...new Set([...this.store.continuationCommandIds(task.id, true), ...launched])]
         if (commands.length) {
@@ -1855,7 +1877,7 @@ export class LocalBotHost {
       for (const run of this.active.values()) run.controller.abort()
     }
     const backgroundStops = this.store.activeCommandThreads().map((threadId) => {
-      this.store.suppressCommands(threadId)
+      this.store.suppressCommands(threadId, undefined, false)
       return this.runtime.cancelBackground?.(threadId)
     })
     await Promise.allSettled(

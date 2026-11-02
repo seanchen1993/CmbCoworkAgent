@@ -2663,3 +2663,55 @@ it.each(["success", "failure", "restart"] as const)("settles a revoked IM comman
   await eventually(() => f.store.getTask(next.id).state === "completed")
   expect(f.errors).toEqual([])
 })
+
+it.each([false, true])("defers an IM completion at full Bot capacity and rechecks revocation before admission (revoke=%s)", async revoke => {
+  let available = true
+  let lifecycle: ReturnType<LocalBotHost["commandLifecycle"]> | undefined
+  let source: BotTask | undefined
+  const f = fixture(async (task, host) => {
+    source = task
+    lifecycle = host.commandLifecycle(task.id)
+    lifecycle.accepted({ id: "capacity-im", threadId: task.threadId, command: "check", cwd: "/synthetic", startedAt: 1 })
+    return { state: "completed", result: "Started" }
+  }, undefined, () => available)
+  const binding = await f.binding()
+  await f.service.receive(f.event(binding, "capacity-source"))
+  await eventually(() => !!source && f.store.getTask(source.id).state === "completed")
+  available = false
+  const queued = Array.from({ length: 500 }, (_, i) => f.store.enqueue({ botId: f.bot.id, requestId: `capacity-${i}`, message: "Unrelated" }))
+  lifecycle!.settled({ id: "capacity-im", threadId: source!.threadId, exitCode: 7, output: "IM_FAILURE", cancelled: false, truncated: false })
+  expect(f.store.recentTasks().filter(t => t.origin.kind === "notification")).toHaveLength(0)
+  if (revoke) await f.service.revoke(f.bot.id, binding.id, binding.version)
+  f.store.transition(queued[0].id, "cancelled")
+  f.store.flushReplies()
+  const notices = f.store.recentTasks().filter(t => t.origin.kind === "notification")
+  expect(notices).toHaveLength(revoke ? 0 : 1)
+  if (!revoke) expect(notices[0]).toMatchObject({
+    threadId: source!.threadId, mockSource: source!.mockSource,
+    origin: { sourceTaskId: source!.id, commandSucceeded: false },
+    message: expect.stringContaining("IM_FAILURE")
+  })
+  expect(f.errors).toEqual([])
+})
+
+it("rechecks saved unrelated results when IM revocation releases queued capacity", async () => {
+  const f = fixture(undefined, undefined, () => false)
+  const binding = await f.binding()
+  await f.service.receive(f.event(binding, "queued-capacity-owner"))
+  const external = f.store.recentTasks().find(t => t.origin.kind === "mock")!
+  const owner = f.store.create({ name: "Independent", instructions: "", color: "#123456", modelRef: null })
+  const task = f.store.enqueue({ botId: owner.id, requestId: "independent-source", message: "Run" })
+  f.store.transition(task.id, "running")
+  f.store.acceptCommand(task.id, { id: "independent-result", threadId: task.threadId, command: "check", cwd: "/synthetic", startedAt: 1 })
+  f.store.settle(task.id, "completed", null, "Started", undefined, true)
+  for (let i = 0; i < 499; i++) f.store.enqueue({ botId: f.bot.id, requestId: `unrelated-${i}`, message: "Later" })
+  f.store.settleCommand({ id: "independent-result", threadId: task.threadId, output: "UNRELATED_FAILURE", exitCode: 7, cancelled: false, truncated: false })
+  await new Promise(resolve => setTimeout(resolve, 20))
+  expect(f.store.hasPendingCommandNotifications()).toBe(true)
+  f.host.revokeImBinding(f.bot.id, external.mockSource!.bindingId, external.mockSource!.grantVersion)
+  await eventually(() => f.store.recentTasks().some(t => t.origin.kind === "notification"))
+  expect(f.store.recentTasks().find(t => t.origin.kind === "notification")).toMatchObject({
+    botId: owner.id, threadId: task.threadId, state: "queued", message: expect.stringContaining("UNRELATED_FAILURE")
+  })
+  expect(f.errors).toEqual([])
+})
