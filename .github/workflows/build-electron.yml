@@ -431,6 +431,13 @@ jobs:
           src/main/mods/v2/autobiz-upstream-contract.test.ts
           tests/browser/canonical-temp-root.test.ts
 
+      # Node service imports also resolve Electron's executable path. Restore only its
+      # locked downloader after --ignore-scripts; never run npm rebuild or alter node-pty.
+      - name: Prepare Electron for service regressions (Linux)
+        if: runner.os == 'Linux'
+        timeout-minutes: 5
+        run: node node_modules/electron/install.js
+
       - name: Verify project bundle grouping and unavailable project isolation
         timeout-minutes: 5
         run: >-
