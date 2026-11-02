@@ -34,6 +34,7 @@ interface PreparedHarnessMessage {
   displayMessage: string
   userMessageId: string
   skillName?: string
+  skillDescription?: string
 }
 
 interface PreparedManagedAgentRun {
@@ -157,7 +158,8 @@ async function prepareHarnessMessage(
     modelMessage,
     displayMessage: modelMessage,
     userMessageId: uuid(),
-    skillName: skill.name
+    skillName: skill.name,
+    skillDescription: skill.description
   }
 }
 
@@ -294,7 +296,11 @@ export async function createAndStartManagedHarnessSession(
   input: CreateManagedHarnessSessionInput
 ): Promise<{ threadId: string; thread: Thread }> {
   const prepared = await prepareManagedHarnessSession(input)
-  const thread = await createManagedHarnessSession(input, prepared.skillName)
+  const thread = await createManagedHarnessSession(
+    input,
+    prepared.skillName,
+    prepared.skillDescription
+  )
   await startManagedHarnessSession(input, thread.threadId, prepared)
   return thread
 }
@@ -340,14 +346,17 @@ export async function startManagedHarnessSession(
 
 export async function createManagedHarnessSession(
   input: CreateManagedHarnessSessionInput,
-  skillName?: string
+  skillName?: string,
+  skillDescription?: string
 ): Promise<{ threadId: string; thread: Thread }> {
   const titleSource = input.nextAction.userMessage?.trim() ?? ""
   const title = titleSource
-    ? await generateProjectThreadTitle(titleSource, skillName, {
-        projectId: input.projectId,
-        slug: input.featureId
-      })
+    ? await generateProjectThreadTitle(
+        titleSource,
+        skillName,
+        { projectId: input.projectId, slug: input.featureId },
+        skillDescription
+      )
     : undefined
   const thread = await createThreadService(
     {

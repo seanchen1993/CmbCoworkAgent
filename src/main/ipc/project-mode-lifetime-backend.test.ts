@@ -12,6 +12,7 @@ import * as execution from "./project-mode-execution-metrics"
 import * as snapshots from "./project-mode-snapshot-filters"
 import { fetchCompleteProjectDevMetrics } from "./project-mode-dev-metrics"
 import { ProjectModePageCache } from "./project-mode-page-cache"
+import { projectModeTestScopeCacheKey } from "./project-mode-test-projects"
 import {
   compareProjectAttentionValues,
   isProjectAttentionSortKey
@@ -171,6 +172,7 @@ function fixture(featureCount = 1) {
       new Map(ids.map((projectId) => [projectId, { projectId, name: projectId }]))
   )
   const context: Record<string, unknown> = {
+    projectModeTestScopeCacheKey,
     ...code,
     ...stages,
     ...operational,

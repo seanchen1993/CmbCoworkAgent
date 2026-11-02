@@ -1385,7 +1385,8 @@ export function TraceHistoryDialog({
   exporting = false,
   loading,
   error,
-  onPageChange
+  onPageChange,
+  loadThreadTraces
 }: {
   open: boolean
   onOpenChange: (open: boolean) => void
@@ -1406,6 +1407,7 @@ export function TraceHistoryDialog({
   loading: boolean
   error: string | null
   onPageChange?: (page: number) => void
+  loadThreadTraces?: (threadId: string) => Promise<DashboardTraceDetail[]>
 }): React.JSX.Element {
   const displayTotalTraces = Math.max(totalTraces, traces.length)
   const totalPages = Math.max(1, Math.ceil(displayTotalTraces / Math.max(1, tracePageSize)))
@@ -1433,6 +1435,7 @@ export function TraceHistoryDialog({
           </div>
         </DialogHeader>
         <TraceExplorer
+          loadThreadTraces={loadThreadTraces}
           traces={traces}
           codeStats={codeStats}
           loading={loading}
