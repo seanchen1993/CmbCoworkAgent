@@ -1,6 +1,7 @@
 import type { DesignUrlImportApi } from "../shared/design-url-import"
 import type { DesignSessionApi, DesignSessionChange } from "../shared/managed-design-session"
 import type { DesignTemplateApi } from "../shared/design-template"
+import { DESIGN_SYSTEM_EXTRACTION_PROGRESS, type DesignSystemLibraryApi, type DesignSystemInfo } from "../shared/design-system"
 import type {
   KnowledgeAccumulationData,
   KnowledgeActiveDetails,
@@ -4720,6 +4721,17 @@ const api = {
     importTemplate: ((source) => ipcRenderer.invoke("design:import-template", source)) satisfies DesignTemplateApi["importTemplate"],
     listImportedTemplates: (() => ipcRenderer.invoke("design:list-imported-templates")) satisfies DesignTemplateApi["listImportedTemplates"],
     readTemplate: ((reference) => ipcRenderer.invoke("design:read-template", reference)) satisfies DesignTemplateApi["readTemplate"],
+    readSystem: ((id) => ipcRenderer.invoke("design:read-system", id)) satisfies DesignSystemLibraryApi["readSystem"],
+    saveSystem: ((draft) => ipcRenderer.invoke("design:save-system", draft)) satisfies DesignSystemLibraryApi["saveSystem"],
+    selectSystemFile: (() => ipcRenderer.invoke("design:select-system-file")) satisfies DesignSystemLibraryApi["selectSystemFile"],
+    exportSystem: ((content) => ipcRenderer.invoke("design:export-system", content)) satisfies DesignSystemLibraryApi["exportSystem"],
+    extractSystem: ((request) => ipcRenderer.invoke("design:extract-system", request)) satisfies DesignSystemLibraryApi["extractSystem"],
+    cancelSystemExtraction: ((requestId) => ipcRenderer.invoke("design:cancel-system-extraction", requestId)) satisfies DesignSystemLibraryApi["cancelSystemExtraction"],
+    onSystemExtractionProgress: ((callback) => {
+      const listener = (_event: Electron.IpcRendererEvent, progress: Parameters<typeof callback>[0]) => callback(progress)
+      ipcRenderer.on(DESIGN_SYSTEM_EXTRACTION_PROGRESS, listener)
+      return () => ipcRenderer.removeListener(DESIGN_SYSTEM_EXTRACTION_PROGRESS, listener)
+    }) satisfies DesignSystemLibraryApi["onSystemExtractionProgress"],
     sessions: {
       inspectEditable: (id) => ipcRenderer.invoke("design:inspect-editable", id),
       edit: (id, command) => ipcRenderer.invoke("design:direct-edit", { id, command }),
@@ -4920,26 +4932,7 @@ const api = {
         relatedFileCount?: number
         error?: string
       }>,
-    listSystems: (): Promise<
-      Array<{
-        id: string
-        name: string
-        description: string
-        category?: string
-        source?: string
-        origin?: string
-        license?: string
-        path: string
-        tokens?: {
-          bg: string
-          surface: string
-          fg: string
-          muted: string
-          border: string
-          accent: string
-        }
-      }>
-    > => ipcRenderer.invoke("design:list-systems"),
+    listSystems: (): Promise<DesignSystemInfo[]> => ipcRenderer.invoke("design:list-systems"),
     listTemplates: (): Promise<
       Array<{
         name: string

@@ -243,24 +243,7 @@ export interface DesignContextSyncResult {
   codeFiles?: Array<{ sourcePath: string; targetPath: string; filename: string }>
 }
 
-export interface DesignSystemInfo {
-  id: string
-  name: string
-  description: string
-  category?: string
-  source?: string
-  origin?: string
-  license?: string
-  path: string
-  tokens?: {
-    bg: string
-    surface: string
-    fg: string
-    muted: string
-    border: string
-    accent: string
-  }
-}
+export type { DesignSystemInfo } from "../../../../shared/design-system"
 
 export interface DirectionCard {
   id: string

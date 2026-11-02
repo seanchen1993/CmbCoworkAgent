@@ -13,6 +13,9 @@ import path from "path"
 import { ipcMain, BrowserWindow, app, dialog, type WebContents } from "electron"
 import { DesignTemplatePackages, buildTemplatePackageContext } from "../services/design/template-packages"
 import { registerDesignUrlImportHandlers } from "./design-url-import"
+import { registerDesignSystemLibraryHandlers } from "./design-system-library"
+import { DesignSystemLibrary } from "../services/design/system-library"
+import type { DesignSystemInfo } from "../../shared/design-system"
 import { DesignTemplatePreview } from "../services/design/template-preview"
 import { createDesignArtifactZip } from "../services/design/artifact-package"
 import { writeDesignFilesAtomically } from "../services/design/artifact-storage"
@@ -559,25 +562,6 @@ interface DesignContextFilesSyncParams {
   files: DesignContextFileSyncItem[]
 }
 
-interface DesignSystemInfo {
-  id: string
-  name: string
-  description: string
-  category?: string
-  source?: string
-  origin?: string
-  license?: string
-  path: string
-  tokens?: {
-    bg: string
-    surface: string
-    fg: string
-    muted: string
-    border: string
-    accent: string
-  }
-}
-
 interface DesignTemplateInfo {
   name: string
   description: string
@@ -694,9 +678,13 @@ function extractDesignSystemTokens(markdown: string): DesignSystemInfo["tokens"]
     : undefined
 }
 
+function personalDesignSystemLibrary(): DesignSystemLibrary {
+  return new DesignSystemLibrary(path.join(getOpenworkDir(), "design-system-library"))
+}
+
 function listDesignSystems(): DesignSystemInfo[] {
   const root = firstExistingDir(candidateRepoResourceDirs(DESIGN_SYSTEMS_DIRNAME))
-  if (!root) return []
+  if (!root) return personalDesignSystemLibrary().list()
   const systems: DesignSystemInfo[] = []
   for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
     if (!entry.isDirectory()) continue
@@ -716,6 +704,8 @@ function listDesignSystems(): DesignSystemInfo[] {
         ?.trim()
       systems.push({
         id: entry.name,
+        ownership: "builtin",
+        version: 1,
         name: typeof meta.name === "string" ? meta.name : (frontmatterName || title || entry.name),
         description: typeof meta.description === "string" ? meta.description : (frontmatterDescription || description || ""),
         category: typeof meta.category === "string" ? meta.category : undefined,
@@ -729,6 +719,7 @@ function listDesignSystems(): DesignSystemInfo[] {
       // Ignore malformed systems.
     }
   }
+  systems.push(...personalDesignSystemLibrary().list())
   return systems.sort((a, b) => {
     const aPinned = DESIGN_SYSTEM_PINNED_ORDER.get(a.id)
     const bPinned = DESIGN_SYSTEM_PINNED_ORDER.get(b.id)
@@ -3359,6 +3350,7 @@ export function registerDesignHandlers(): void {
   )
 
   ipcMain.handle("design:list-systems", async (): Promise<DesignSystemInfo[]> => listDesignSystems())
+  registerDesignSystemLibraryHandlers(personalDesignSystemLibrary, getDesignSystemById)
 
   ipcMain.handle("design:list-templates", async (): Promise<DesignTemplateInfo[]> => listDesignTemplates())
 

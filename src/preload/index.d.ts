@@ -1,6 +1,7 @@
 import type { DesignUrlImportApi } from "../shared/design-url-import"
 import type { DesignSessionApi } from "../shared/managed-design-session"
 import type { DesignTemplateApi } from "../shared/design-template"
+import type { DesignSystemLibraryApi, DesignSystemInfo } from "../shared/design-system"
 import type {
   KnowledgeAccumulationData,
   KnowledgeActiveDetails,
@@ -2313,6 +2314,13 @@ interface CustomAPI {
     importTemplate: DesignTemplateApi["importTemplate"]
     listImportedTemplates: DesignTemplateApi["listImportedTemplates"]
     readTemplate: DesignTemplateApi["readTemplate"]
+    readSystem: DesignSystemLibraryApi["readSystem"]
+    saveSystem: DesignSystemLibraryApi["saveSystem"]
+    selectSystemFile: DesignSystemLibraryApi["selectSystemFile"]
+    exportSystem: DesignSystemLibraryApi["exportSystem"]
+    extractSystem: DesignSystemLibraryApi["extractSystem"]
+    cancelSystemExtraction: DesignSystemLibraryApi["cancelSystemExtraction"]
+    onSystemExtractionProgress: DesignSystemLibraryApi["onSystemExtractionProgress"]
     sessions: DesignSessionApi
     generate: (
       sessionId: string,
@@ -2407,26 +2415,7 @@ interface CustomAPI {
       relatedFileCount?: number
       error?: string
     }>
-    listSystems: () => Promise<
-      Array<{
-        id: string
-        name: string
-        description: string
-        category?: string
-        source?: string
-        origin?: string
-        license?: string
-        path: string
-        tokens?: {
-          bg: string
-          surface: string
-          fg: string
-          muted: string
-          border: string
-          accent: string
-        }
-      }>
-    >
+    listSystems: () => Promise<DesignSystemInfo[]>
     listTemplates: () => Promise<
       Array<{
         name: string

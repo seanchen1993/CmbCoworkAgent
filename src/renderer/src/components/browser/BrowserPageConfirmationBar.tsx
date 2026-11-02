@@ -15,10 +15,10 @@ export function BrowserPageConfirmationBar({ loading, url }: { loading: boolean;
   const disabled = confirmation.phase !== "ready" || loading || !/^https?:\/\//i.test(url)
   return (
     <section
-      aria-label="确认页面并还原"
+      aria-label={confirmation.confirmLabel || "确认页面并还原"}
       className="shrink-0 border-b border-border bg-background-elevated px-3 py-3 text-xs"
     >
-      <p className="font-medium text-foreground">确认当前页面后还原设计</p>
+      <p className="font-medium text-foreground">{confirmation.title || "确认当前页面后还原设计"}</p>
       <p role="status" aria-live="polite" className="mt-1 text-muted-foreground">
         {confirmation.message}
       </p>
@@ -34,7 +34,7 @@ export function BrowserPageConfirmationBar({ loading, url }: { loading: boolean;
           onClick={confirmation.onConfirm}
           className="rounded-md bg-foreground px-3 py-2 font-medium text-background disabled:opacity-50"
         >
-          {capturing ? "正在还原…" : "确认页面并还原"}
+          {capturing ? (confirmation.busyLabel || "正在还原…") : (confirmation.confirmLabel || "确认页面并还原")}
         </button>
         <button
           type="button"

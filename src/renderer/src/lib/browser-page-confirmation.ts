@@ -1,5 +1,8 @@
 export interface BrowserPageConfirmation {
   id: string
+  title?: string
+  confirmLabel?: string
+  busyLabel?: string
   phase: "opening" | "ready" | "capturing"
   message: string
   error?: string

@@ -46,6 +46,7 @@ import { DesignGallery } from "./DesignGallery"
 import { DesignAttachmentMenu } from "./DesignAttachmentMenu"
 import { ExportDesignModal, ImportUrlModal } from "./DesignModals"
 import { DesignCreationPage } from "./DesignCreationPage"
+import { DesignSystemLibraryDialog, type DesignSystemLibraryMode } from "./DesignSystemLibraryDialog"
 import { DesignWorkspaceLayout } from "./DesignWorkspaceLayout"
 import { DesignTemplateDialog } from "./DesignTemplateDialog"
 import type { DesignPageTemplate } from "./use-design-template-selection"
@@ -209,7 +210,7 @@ function compareDesignSystemsForDisplay(a: DesignSystemInfo, b: DesignSystemInfo
 }
 
 function getDefaultDesignSystemId(systems: DesignSystemInfo[]): string | null {
-  return systems.find((system) => system.id === "neutral-modern")?.id ?? systems[0]?.id ?? null
+  return systems.find((system) => system.id === "neutral-modern")?.id ?? systems.find(system => system.isLatest !== false)?.id ?? null
 }
 
 function getSessionKindLabel(
@@ -1436,6 +1437,8 @@ export function DesignView(): React.JSX.Element {
   const [modelDialogSelectedId, setModelDialogSelectedId] = useState<string | undefined>(undefined)
   const [allSkills, setAllSkills] = useState<SkillInfo[]>([])
   const [designSystems, setDesignSystems] = useState<DesignSystemInfo[]>([])
+  const designSystemsLoaded = useRef(false)
+  const [systemLibrary, setSystemLibrary] = useState<{ mode: DesignSystemLibraryMode; id?: string | null } | null>(null)
   const [createDesignSystemId, setCreateDesignSystemId] = useState<string | null>(null)
   const [activeSkillIndex, setActiveSkillIndex] = useState(0)
   const [workspacePath, setWorkspacePath] = useState<string | null>(null)
@@ -1542,7 +1545,7 @@ export function DesignView(): React.JSX.Element {
   }, [previewVisible])
   const selectedDesignSystem =
     designSystems.find((system) => system.id === ts.selectedDesignSystemId) ?? null
-  const orderedDesignSystems = [...designSystems].sort(compareDesignSystemsForDisplay)
+  const orderedDesignSystems = designSystems.filter(system => system.isLatest !== false || system.id === createDesignSystemId).sort(compareDesignSystemsForDisplay)
   const designSystemGroups = groupByLabel(orderedDesignSystems, (system) =>
     getDesignSystemGroupLabel(system.category || system.source)
   )
@@ -1708,10 +1711,12 @@ export function DesignView(): React.JSX.Element {
   const loadDesignSystems = useCallback(async (): Promise<void> => {
     try {
       const systems = await window.api.design.listSystems()
+      const initializeSelection = !designSystemsLoaded.current
+      designSystemsLoaded.current = true
       setDesignSystems(systems)
       setCreateDesignSystemId((prev) => {
         if (prev && systems.some((system) => system.id === prev)) return prev
-        return getDefaultDesignSystemId(systems)
+        return initializeSelection ? getDefaultDesignSystemId(systems) : null
       })
     } catch {
       setDesignSystems([])
@@ -4211,6 +4216,21 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
     setLinkModalOpen(false)
   }
 
+  const systemLibraryDialog = systemLibrary && (
+    <DesignSystemLibraryDialog
+      systems={designSystems}
+      mode={systemLibrary.mode}
+      initialId={systemLibrary.id}
+      onChanged={loadDesignSystems}
+      onSelect={(system) => {
+        if (systemLibrary.mode !== "select") return
+        if (system) setDesignSystems(previous => previous.some(item => item.id === system.id) ? previous : [...previous, system])
+        setCreateDesignSystemId(system?.id ?? null)
+      }}
+      onClose={() => setSystemLibrary(null)}
+    />
+  )
+
   if (creationPageOpen) {
     return (
       <>
@@ -4222,6 +4242,7 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
           designSystemGroups={designSystemGroups}
           selectedDesignSystemId={createDesignSystemId}
           onDesignSystemChange={setCreateDesignSystemId}
+          onOpenSystemLibrary={(mode) => setSystemLibrary({ mode, id: createDesignSystemId })}
           importingSource={importingSource}
           onEnterDesign={(selection) => {
             createSession(undefined, {
@@ -4234,6 +4255,7 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
           onImportHtml={() => void handleImportHtmlFile("gallery")}
           onImportPrototypeZip={() => void handleImportPrototypeZip("gallery")}
         />
+        {systemLibraryDialog}
         <ImportUrlModal
           open={linkModalOpen}
           url={linkModalText}
@@ -4261,6 +4283,7 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
           sessionIndex={sessionIndex}
           onOpen={openSession}
           onNew={() => setCreationPageOpen(true)}
+          onManageSystems={() => setSystemLibrary({ mode: "manage" })}
           onDelete={deleteSession}
           workspacePath={workspacePath}
           workspaceLoading={workspaceLoading}
@@ -4268,6 +4291,7 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
             void handleSelectWorkspace()
           }}
         />
+        {systemLibraryDialog}
         <ImportUrlModal
           open={linkModalOpen}
           url={linkModalText}
@@ -4307,6 +4331,7 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
 
   return (
     <div style={S.root}>
+      {systemLibraryDialog}
       {templatePickerOpen && (
         <DesignTemplateDialog
           key={templatePickerSessionId}
@@ -4457,7 +4482,10 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
         </div>
         <div style={S.titleActions}>
           {selectedDesignSystem && (
-            <span
+            <button
+              type="button"
+              aria-label={`查看设计系统：${selectedDesignSystem.name}`}
+              onClick={() => setSystemLibrary({ mode: "inspect", id: selectedDesignSystem.id })}
               title={`设计系统: ${selectedDesignSystem.path}`}
               style={{
                 maxWidth: 210,
@@ -4473,6 +4501,7 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
                 display: "inline-flex",
                 alignItems: "center",
                 gap: 6,
+                cursor: "pointer",
                 whiteSpace: "nowrap",
                 overflow: "hidden",
                 textOverflow: "ellipsis"
@@ -4480,9 +4509,9 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
             >
               <span style={{ flexShrink: 0 }}>▦</span>
               <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>
-                {selectedDesignSystem.name}
+                {selectedDesignSystem.name}{selectedDesignSystem.ownership === "user" ? ` · v${selectedDesignSystem.version || 1}` : ""}
               </span>
-            </span>
+            </button>
           )}
           <button
             onClick={handleSelectWorkspace}

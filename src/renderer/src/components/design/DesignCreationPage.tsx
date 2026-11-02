@@ -78,6 +78,7 @@ export function DesignCreationPage({
   designSystemGroups,
   selectedDesignSystemId,
   onDesignSystemChange,
+  onOpenSystemLibrary,
   importingSource,
   onImportUrl,
   onImportHtml,
@@ -91,6 +92,7 @@ export function DesignCreationPage({
   designSystemGroups: Array<{ label: string; items: DesignSystemInfo[] }>
   selectedDesignSystemId: string | null
   onDesignSystemChange: (id: string | null) => void
+  onOpenSystemLibrary: (mode: "select" | "manage") => void
   importingSource: "url" | "html" | "prototype_zip" | null
   onImportUrl: () => void
   onImportHtml: () => void
@@ -201,6 +203,8 @@ export function DesignCreationPage({
         </Button>
         <span className="text-xs text-muted-foreground">/</span>
         <span className="text-sm font-semibold text-foreground">新建设计</span>
+        <span className="flex-1" />
+        <Button type="button" variant="outline" size="sm" onClick={() => onOpenSystemLibrary("manage")}>设计系统库</Button>
       </header>
 
       <main className="min-h-0 flex-1 overflow-auto px-6 py-8 lg:px-10">
@@ -233,37 +237,25 @@ export function DesignCreationPage({
             </div>
           </section>
 
-          {designSystemGroups.length > 0 && (
+          {(
             <section className="mt-6 rounded-xl border border-border bg-background-elevated p-5 shadow-sm">
               <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_300px] md:items-center">
                 <div>
                   <h2 className="text-sm font-semibold text-foreground">设计系统</h2>
                   <p className="mt-1 text-xs leading-5 text-muted-foreground">
-                    创建或导入后会固定到本次设计中，进入编辑器后可继续使用现有设计系统能力。
+                    统一页面的色彩、字体、组件与交互规范，创建后固定使用所选版本。
                   </p>
                 </div>
-                <select
-                  aria-label="设计系统"
-                  value={selectedDesignSystemId ?? ""}
-                  onChange={(event) => onDesignSystemChange(event.target.value || null)}
-                  title={
-                    selectedDesignSystem
-                      ? `设计系统: ${selectedDesignSystem.path}`
-                      : "不注入设计系统"
-                  }
-                  className="h-9 w-full rounded-md border border-input bg-background px-3 text-xs font-medium text-foreground outline-none transition focus-visible:ring-2 focus-visible:ring-ring"
-                >
-                  <option value="">无设计系统</option>
-                  {designSystemGroups.map(({ label: category, items: systems }) => (
-                    <optgroup key={category} label={category}>
-                      {systems.map((system) => (
-                        <option key={system.id} value={system.id}>
-                          {system.name}
-                        </option>
-                      ))}
-                    </optgroup>
-                  ))}
-                </select>
+                <Button type="button" variant="outline" onClick={() => onOpenSystemLibrary("select")}>
+                  {selectedDesignSystem ? "更换设计系统" : "选择设计系统"}
+                </Button>
+              </div>
+              <div className="mt-4 flex flex-wrap items-center gap-2 rounded-lg bg-muted/40 px-3 py-3 text-sm">
+                <FileText className="size-4 text-muted-foreground" />
+                <span>{selectedDesignSystem?.name || "暂不使用设计系统"}</span>
+                {selectedDesignSystem && <span className="text-xs text-muted-foreground">{selectedDesignSystem.ownership === "user" ? `我的 · v${selectedDesignSystem.version || 1}` : "系统内置"}</span>}
+                <span className="flex-1" />
+                {selectedDesignSystem && <Button type="button" variant="ghost" size="sm" onClick={() => onDesignSystemChange(null)}>移除</Button>}
               </div>
             </section>
           )}

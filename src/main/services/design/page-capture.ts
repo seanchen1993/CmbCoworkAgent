@@ -7,6 +7,7 @@ import type {
   DesignImportWarning
 } from "../../../shared/design-url-import"
 import { extractDesignPageSnapshot, type CapturedPageSnapshot } from "./page-snapshot"
+import { extractDesignStyleSnapshot, type DesignStyleSnapshot } from "./system-style-snapshot"
 
 export function abortableCapture<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
   if (signal.aborted) return Promise.reject(signal.reason)
@@ -57,6 +58,7 @@ export async function waitForDesignPage(): Promise<boolean> {
 }
 
 export interface DesignCapturedPage {
+  styles?: DesignStyleSnapshot
   snapshot: CapturedPageSnapshot
   screenshot: Buffer
   warnings: DesignImportWarning[]
@@ -68,7 +70,8 @@ export interface DesignCapturedPage {
 export async function captureDesignPage(
   request: DesignImportRequest,
   signal: AbortSignal,
-  progress: (stage: DesignImportProgress["stage"], message: string) => void
+  progress: (stage: DesignImportProgress["stage"], message: string) => void,
+  options?: { includeDesignStyles: boolean }
 ): Promise<DesignCapturedPage> {
   let window: BrowserWindow | null = null
   let contents: WebContents
@@ -160,6 +163,9 @@ export async function captureDesignPage(
       snapshot.restrictedReason ||= `页面返回 HTTP ${httpStatus}，请在浏览器中检查登录或访问限制。`
     else if (httpStatus >= 400) throw new Error(`页面加载失败：HTTP ${httpStatus}`)
     const screenshot = (await abortableCapture(contents.capturePage(), combined)).toPNG()
+    const styles = options?.includeDesignStyles
+      ? await execute<DesignStyleSnapshot>(`(${extractDesignStyleSnapshot.toString()})()`)
+      : undefined
     const assertCurrent = () => {
       combined.throwIfAborted()
       if (contents.isDestroyed() || contents.getURL() !== url)
@@ -167,6 +173,7 @@ export async function captureDesignPage(
     }
     assertCurrent()
     return {
+      styles,
       snapshot,
       screenshot,
       warnings: settled
