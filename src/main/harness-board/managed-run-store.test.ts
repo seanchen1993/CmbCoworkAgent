@@ -35,6 +35,18 @@ function runPath(store: ManagedRunStore, runId: string): string {
 }
 
 describe("ManagedRunStore", () => {
+  it("persists the model selection and accepts older snapshots without it", () => {
+    const store = makeStore()
+    const run = store.createRun("project-1", "feature-1", "/workspace", "ultra")
+    expect(store.getRun(run).snapshot?.modelSelection).toBe("ultra")
+    const oldSnapshot = { ...run }
+    delete oldSnapshot.modelSelection
+    writeFileSync(runPath(store, run.runId), JSON.stringify(oldSnapshot))
+    expect(store.getRun(run)).toMatchObject({ corrupt: false, snapshot: oldSnapshot })
+    writeFileSync(runPath(store, run.runId), JSON.stringify({ ...run, modelSelection: "invalid" }))
+    expect(store.getRun(run).corrupt).toBe(true)
+  })
+
   it("lists only the requested feature runs by start time rather than modification time", () => {
     const store = makeStore()
     const older = store.createRun("project-1", "feature-1")

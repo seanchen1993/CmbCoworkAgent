@@ -1,3 +1,7 @@
+import {
+  resolveManagedRunModelSelection,
+  type ManagedRunModelSelection
+} from "../../shared/managed-run-model"
 import { formatGmt8Timestamp } from "../../shared/gmt8-time"
 import { randomUUID } from "crypto"
 import {
@@ -440,6 +444,9 @@ function normalizeSnapshot(value: unknown): ManagedRunSnapshot {
     !snapshot.featureId.trim() ||
     !MANAGED_RUN_STATUSES.has(snapshot.status as string) ||
     !isOptionalText(snapshot.workspacePath, 4096) ||
+    (snapshot.modelSelection !== undefined &&
+      snapshot.modelSelection !== "default" &&
+      snapshot.modelSelection !== "ultra") ||
     !isManagedRunCurrentSession(snapshot.currentSession) ||
     !isManagedRunDecisionBaseline(snapshot.decisionBaseline) ||
     (snapshot.currentSession === undefined) !== (snapshot.decisionBaseline === undefined) ||
@@ -749,7 +756,12 @@ export class ManagedRunStore {
     return validated
   }
 
-  createRun(projectId: string, featureId: string, workspacePath?: string): ManagedRunSnapshot {
+  createRun(
+    projectId: string,
+    featureId: string,
+    workspacePath?: string,
+    modelSelection?: ManagedRunModelSelection
+  ): ManagedRunSnapshot {
     const runId = `mr_${randomUUID().replace(/-/gu, "")}`
     const now = formatGmt8Timestamp()
     const snapshot: ManagedRunSnapshot = {
@@ -758,6 +770,7 @@ export class ManagedRunStore {
       projectId,
       featureId,
       status: "running",
+      modelSelection: resolveManagedRunModelSelection(modelSelection),
       ...(workspacePath?.trim() ? { workspacePath: workspacePath.trim() } : {}),
       providerRetryCount: 0,
       startedAt: now,

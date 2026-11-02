@@ -1576,6 +1576,7 @@ if (browserNativeMessagingHostLaunch) {
             workspacePath: schedule.workspacePath,
             initialUserMessage: schedule.initialUserMessage,
             existingThreadId: schedule.existingThreadId,
+            modelSelection: schedule.modelSelection,
             scheduledStartId: schedule.scheduleId,
             delivery: createBrowserWindowAgentRunDelivery(window)
           })

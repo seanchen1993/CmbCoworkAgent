@@ -63,6 +63,7 @@ import { createBrowserWindowAgentRunDelivery } from "../agent/agent-run-service"
 import { managedRunScheduler } from "../harness-board/managed-run-scheduler"
 import type {
   ManagedRunScheduleInput,
+  ManagedRunScheduleUpdateInput,
   ManagedRunScheduleIdentity
 } from "../../shared/managed-run-schedule"
 import { managedRunController } from "../harness-board/managed-run-controller"
@@ -566,8 +567,7 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
   )
   ipcMain.handle(
     "harnessBoard:updateManagedRunSchedule",
-    (_event, input: ManagedRunScheduleIdentity & { scheduledAt: string }) =>
-      managedRunScheduler.reschedule(input)
+    (_event, input: ManagedRunScheduleUpdateInput) => managedRunScheduler.reschedule(input)
   )
 
   ipcMain.handle(

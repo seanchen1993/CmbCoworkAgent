@@ -7,9 +7,11 @@ import {
   type ManagedRunSchedule,
   type ManagedRunScheduleChange,
   type ManagedRunScheduleIdentity,
+  type ManagedRunScheduleUpdateInput,
   type ManagedRunScheduleInput
 } from "../../shared/managed-run-schedule"
 import type { ManagedRunSummary } from "../../shared/harness-board-types"
+import { resolveManagedRunModelSelection } from "../../shared/managed-run-model"
 
 interface SchedulerRuntime {
   start(schedule: ManagedRunSchedule): Promise<ManagedRunSummary>
@@ -75,6 +77,7 @@ export class ManagedRunScheduler {
       workspacePath: input.workspacePath,
       initialUserMessage: input.initialUserMessage,
       existingThreadId: input.existingThreadId,
+      modelSelection: resolveManagedRunModelSelection(input.modelSelection),
       scheduledAt: input.scheduledAt,
       scheduleId: randomUUID(),
       status: "pending",
@@ -106,12 +109,13 @@ export class ManagedRunScheduler {
     this.remove(row)
   }
 
-  reschedule(input: ManagedRunScheduleIdentity & { scheduledAt: string }, now = new Date()): void {
+  reschedule(input: ManagedRunScheduleUpdateInput, now = new Date()): void {
     const row = this.requireEditable(input)
     this.assertFuture(input.scheduledAt, now)
     this.save({
       ...row,
       scheduledAt: input.scheduledAt,
+      modelSelection: resolveManagedRunModelSelection(input.modelSelection ?? row.modelSelection),
       status: "pending",
       failureReason: undefined,
       updatedAt: formatGmt8Timestamp(now)

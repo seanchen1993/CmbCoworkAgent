@@ -1,3 +1,4 @@
+import type { ManagedRunModelSelection } from "../../../../shared/managed-run-model"
 import { RepositoryBranchHint, RepositoryPathsField } from "./RepositoryPathField"
 import projectModeGuideImage from "@/assets/guides/feature-create-guide-v5.png"
 import {
@@ -6949,7 +6950,8 @@ function FeatureDetailPage({
       enableImManagement = true,
       initialUserMessage?: string,
       existingThreadId?: string,
-      scheduledAt?: string
+      scheduledAt?: string,
+      modelSelection?: ManagedRunModelSelection
     ): Promise<boolean> => {
       if (
         !detail ||
@@ -6976,6 +6978,7 @@ function FeatureDetailPage({
               workspacePath: confirmedWorkspacePath,
               initialUserMessage,
               existingThreadId,
+              modelSelection,
               scheduledAt
             })
             toast.success("已预约托管运行")
@@ -6986,7 +6989,8 @@ function FeatureDetailPage({
             featureId: detail.run.slug,
             workspacePath: confirmedWorkspacePath,
             initialUserMessage,
-            existingThreadId
+            existingThreadId,
+            modelSelection
           })
           if (existingThreadId) {
             void window.api.threads
@@ -7695,7 +7699,8 @@ function FeatureDetailPage({
             initialUserMessage,
             existingThreadId,
             imEnabled,
-            scheduledAt
+            scheduledAt,
+            modelSelection
           }) =>
             handleManagedRunChange(
               true,
@@ -7703,7 +7708,8 @@ function FeatureDetailPage({
               imEnabled,
               initialUserMessage,
               existingThreadId,
-              scheduledAt
+              scheduledAt,
+              modelSelection
             )
           }
         />

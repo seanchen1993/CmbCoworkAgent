@@ -1,3 +1,5 @@
+import type { ManagedRunModelSelection } from "./managed-run-model"
+
 export type HarnessUiKind =
   | "pending"
   | "active"
@@ -428,6 +430,7 @@ export interface ManagedRunStartInput {
   workspacePath: string
   initialUserMessage?: string
   existingThreadId?: string
+  modelSelection?: ManagedRunModelSelection
 }
 
 export interface ManagedRunStartValidationInput {
@@ -585,6 +588,7 @@ export interface ManagedRunSnapshot {
   featureId: string
   status: ManagedRunStatus
   workspacePath?: string
+  modelSelection?: ManagedRunModelSelection
   currentSession?: {
     threadId: string
     workspacePath?: string

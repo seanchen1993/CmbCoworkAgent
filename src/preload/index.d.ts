@@ -1,6 +1,7 @@
 import type {
   ManagedRunSchedule,
   ManagedRunScheduleInput,
+  ManagedRunScheduleUpdateInput,
   ManagedRunScheduleIdentity,
   ManagedRunScheduleChange
 } from "../shared/managed-run-schedule"
@@ -3085,9 +3086,7 @@ interface CustomAPI {
     ) => Promise<ManagedRunSchedule | null>
     scheduleManagedRun: (input: ManagedRunScheduleInput) => Promise<ManagedRunSchedule>
     cancelManagedRunSchedule: (input: ManagedRunScheduleIdentity) => Promise<void>
-    updateManagedRunSchedule: (
-      input: ManagedRunScheduleIdentity & { scheduledAt: string }
-    ) => Promise<void>
+    updateManagedRunSchedule: (input: ManagedRunScheduleUpdateInput) => Promise<void>
     onManagedRunScheduleChanged: (callback: (event: ManagedRunScheduleChange) => void) => () => void
     validateManagedRunStart: (input: ManagedRunStartValidationInput) => Promise<void>
     startManagedRun: (input: ManagedRunStartInput) => Promise<ManagedRunSummary>

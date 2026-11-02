@@ -1,5 +1,6 @@
 import type { ManagedRunStartInput } from "./harness-board-types"
 import { formatGmt8Timestamp } from "./gmt8-time"
+import type { ManagedRunModelSelection } from "./managed-run-model"
 
 export interface ManagedRunScheduleInput extends ManagedRunStartInput {
   scheduledAt: string
@@ -23,6 +24,11 @@ export interface ManagedRunScheduleChange {
   projectId: string
   featureId: string
   schedule: ManagedRunSchedule | null
+}
+
+export interface ManagedRunScheduleUpdateInput extends ManagedRunScheduleIdentity {
+  scheduledAt: string
+  modelSelection?: ManagedRunModelSelection
 }
 
 export function parseManagedRunScheduleTime(value: string): number {

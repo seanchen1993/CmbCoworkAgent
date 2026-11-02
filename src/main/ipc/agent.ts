@@ -7818,6 +7818,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             message: routingDecisionMessage || effectiveMessage,
             threadId,
             requestedModelId,
+              managedExecution,
             routingMode: getGlobalRoutingMode()
           })
           throwIfInvokeAborted()

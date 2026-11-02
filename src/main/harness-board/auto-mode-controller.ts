@@ -909,7 +909,12 @@ export async function startManagedRun(input: ManagedRunStartRequest): Promise<Ma
     managedRunScheduler.assertCanStart(input.projectId, input.featureId, input.scheduledStartId)
     assertManagedRunCanStart(input.projectId, input.featureId, !input.scheduledStartId)
 
-    const created = managedRunStore.createRun(input.projectId, input.featureId, workspacePath)
+    const created = managedRunStore.createRun(
+      input.projectId,
+      input.featureId,
+      workspacePath,
+      input.modelSelection
+    )
     const sourceEvent = managedRunStore.appendEvent(created, {
       type: "run_started",
       scope: "global",

@@ -1,6 +1,6 @@
 import { useId } from "react"
 import { Input } from "@/components/ui/input"
-import { cn } from "@/lib/utils"
+import { ManagedRunRadioOption } from "./ManagedRunRadioOption"
 
 export function ManagedRunStartTimeField({
   scheduled,
@@ -17,38 +17,26 @@ export function ManagedRunStartTimeField({
 }): React.JSX.Element {
   const fieldId = useId()
   return (
-    <div className="mt-2 grid gap-2">
-      <div id={fieldId} className="flex items-center gap-1.5 text-sm font-medium">
+    <div className="grid gap-2 sm:grid-cols-[6rem_minmax(0,1fr)] sm:gap-x-4">
+      <div id={fieldId} className="flex h-9 items-center text-sm font-medium">
         开始时间
       </div>
-      <div className="grid gap-2 rounded-lg border border-border/70 bg-background/70 px-3 py-2.5">
+      <div className="grid min-w-0 gap-2">
         {onScheduledChange && (
-          <div
-            role="radiogroup"
-            aria-labelledby={fieldId}
-            className="flex items-center gap-4 text-sm"
-          >
+          <div role="radiogroup" aria-labelledby={fieldId} className="flex flex-wrap gap-x-5">
             {[
               { scheduled: false, label: "立即开始" },
               { scheduled: true, label: "预约开始" }
             ].map((option) => (
-              <label
+              <ManagedRunRadioOption
                 key={option.label}
-                className={cn(
-                  "flex items-center gap-1.5 whitespace-nowrap",
-                  disabled ? "cursor-not-allowed opacity-50" : "cursor-pointer"
-                )}
+                name={fieldId}
+                checked={scheduled === option.scheduled}
+                onChange={() => onScheduledChange(option.scheduled)}
+                disabled={disabled}
               >
-                <input
-                  type="radio"
-                  name={fieldId}
-                  checked={scheduled === option.scheduled}
-                  onChange={() => onScheduledChange(option.scheduled)}
-                  disabled={disabled}
-                  className="size-3.5 shrink-0 appearance-none rounded-full border border-muted-foreground/60 bg-background checked:border-primary checked:bg-primary checked:shadow-[inset_0_0_0_3px_var(--background)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
-                />
                 {option.label}
-              </label>
+              </ManagedRunRadioOption>
             ))}
           </div>
         )}
@@ -57,13 +45,14 @@ export function ManagedRunStartTimeField({
             <Input
               type="datetime-local"
               aria-label="托管启动时间"
+              aria-describedby={`${fieldId}-notice`}
               value={scheduledAt.replace(" ", "T").slice(0, 16)}
               onChange={(event) =>
                 onTimeChange(event.target.value ? `${event.target.value.replace("T", " ")}:00` : "")
               }
               disabled={disabled}
             />
-            <p className="text-xs text-muted-foreground">
+            <p id={`${fieldId}-notice`} className="text-xs leading-5 text-muted-foreground">
               应用和电脑处于唤醒状态，到达预约时间后会开始托管运行。
             </p>
           </>

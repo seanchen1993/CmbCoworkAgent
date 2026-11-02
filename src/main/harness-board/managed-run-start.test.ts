@@ -29,7 +29,11 @@ const dependencies = vi.hoisted(() => ({
   send: vi.fn(),
   getThread: vi.fn(),
   getThreadCore: vi.fn(),
+  modelConfig: vi.fn(),
   assertScheduleCanStart: vi.fn()
+}))
+vi.mock("../models/registry", () => ({
+  getModelConfigByRef: dependencies.modelConfig
 }))
 vi.mock("./managed-run-scheduler", () => ({
   managedRunScheduler: { assertCanStart: dependencies.assertScheduleCanStart }
@@ -127,6 +131,7 @@ vi.mock("./managed-run-store", async (importOriginal) => {
 })
 
 import { ManagedRunStore as RunStore } from "./managed-run-store"
+import { getManagedRunModelOverride } from "./managed-run-model"
 import {
   handleAutoModeAgentCancelled,
   handleAutoModeAgentTurnEnd,
@@ -235,6 +240,7 @@ beforeEach(() => {
   dependencies.inspect.mockImplementation(async () => feature)
   dependencies.requestDecision.mockResolvedValue(true)
   dependencies.deliveryAvailable.mockReturnValue(true)
+  dependencies.modelConfig.mockReturnValue({ apiKey: "test-key" })
   dependencies.grant.mockResolvedValue({ required: false, granted: false })
   dependencies.startAgent.mockImplementation(async (request) => ({
     threadId: request.threadId,
@@ -262,6 +268,57 @@ beforeEach(() => {
 afterEach(() => rmSync(root, { recursive: true, force: true }))
 
 describe("start managed mode with an existing session", () => {
+  it.each([
+    [null, "请检查内置模型配置和登录用户信息"],
+    [{ unavailableReason: "请完善八位 SAP 工号" }, "请完善八位 SAP 工号"]
+  ])(
+    "reports unavailable Ultra configuration without selecting another model: %s",
+    async (config, reason) => {
+      await start({ modelSelection: "ultra" })
+      dependencies.modelConfig.mockReturnValue(config)
+      expect(() => getManagedRunModelOverride("origin")).toThrow(reason as string)
+      expect(metadata().model).toBe("original-model")
+    }
+  )
+
+  it("uses Ultra for an existing session only while its managed run is active", async () => {
+    dependencies.startAgent.mockImplementationOnce(async (request) => {
+      expect(getManagedRunModelOverride(request.threadId)).toBe("builtin:idle-ultra")
+      return { threadId: request.threadId, completion: Promise.resolve() }
+    })
+    const run = await start({ modelSelection: "ultra" })
+    expect(run.modelSelection).toBe("ultra")
+    expect(metadata().model).toBe("original-model")
+    expect(getManagedRunModelOverride("origin")).toBe("builtin:idle-ultra")
+    dependencies.threads.set("previous", {
+      ...dependencies.threads.get("origin")!,
+      thread_id: "previous"
+    })
+    expect(getManagedRunModelOverride("previous")).toBeUndefined()
+    await stopManagedRun({ projectId: "project", featureId: "feature", runId: run.runId })
+    expect(getManagedRunModelOverride("origin")).toBeUndefined()
+    expect(metadata().model).toBe("original-model")
+  })
+
+  it("uses Ultra on the first turn of a newly created managed session", async () => {
+    dependencies.startAgent.mockImplementationOnce(async (request) => {
+      expect(request.threadId).toBe("created")
+      expect(getManagedRunModelOverride(request.threadId)).toBeUndefined()
+      expect(getManagedRunModelOverride(request.threadId, request.managedExecution)).toBe(
+        "builtin:idle-ultra"
+      )
+      return { threadId: request.threadId, completion: Promise.resolve() }
+    })
+    const run = await start({
+      existingThreadId: undefined,
+      workspacePath: root,
+      modelSelection: "ultra"
+    })
+    expect(run.status).toBe("running")
+    expect(run.modelSelection).toBe("ultra")
+    expect(run.currentSession?.threadId).toBe("created")
+  })
+
   it("creates a new run, preserves history and configuration, and binds ownership before starting", async () => {
     const oldRecord = JSON.stringify(dependencies.store!.getRun(oldRun))
     dependencies.startAgent.mockImplementationOnce(async (request) => {

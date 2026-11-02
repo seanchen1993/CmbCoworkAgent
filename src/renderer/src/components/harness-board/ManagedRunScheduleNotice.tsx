@@ -10,6 +10,11 @@ import {
   DialogTitle
 } from "@/components/ui/dialog"
 import { ManagedRunStartTimeField } from "./ManagedRunStartTimeField"
+import { ManagedRunModelField } from "./ManagedRunModelField"
+import {
+  MANAGED_RUN_MODEL_LABELS,
+  type ManagedRunModelSelection
+} from "../../../../shared/managed-run-model"
 import {
   parseManagedRunScheduleTime,
   nextManagedRunScheduleTime,
@@ -31,6 +36,7 @@ export function ManagedRunScheduleNotice({
 }): React.JSX.Element | null {
   const [editing, setEditing] = useState(false)
   const [scheduledAt, setScheduledAt] = useState("")
+  const [modelSelection, setModelSelection] = useState<ManagedRunModelSelection>("default")
   const [busy, setBusy] = useState(false)
   if (error)
     return (
@@ -52,6 +58,7 @@ export function ManagedRunScheduleNotice({
     scheduleId: schedule.scheduleId
   }
   const change = async (cancel: boolean): Promise<void> => {
+    if (busy || starting || disabled) return
     setBusy(true)
     try {
       if (cancel) await window.api.harnessBoard.cancelManagedRunSchedule(identity)
@@ -59,10 +66,14 @@ export function ManagedRunScheduleNotice({
         if (!(parseManagedRunScheduleTime(scheduledAt) > Date.now())) {
           throw new Error("请选择晚于当前时间的预约时间")
         }
-        await window.api.harnessBoard.updateManagedRunSchedule({ ...identity, scheduledAt })
+        await window.api.harnessBoard.updateManagedRunSchedule({
+          ...identity,
+          scheduledAt,
+          modelSelection
+        })
       }
       setEditing(false)
-      toast.success(cancel ? "已退出预约托管模式" : "托管启动时间已修改")
+      toast.success(cancel ? "已退出预约托管模式" : "托管预约已修改")
     } catch (error) {
       toast.error(error instanceof Error ? error.message : String(error))
     } finally {
@@ -87,6 +98,9 @@ export function ManagedRunScheduleNotice({
                 : "预约托管启动失败"}
         </span>
         <span className="text-xs leading-5 text-muted-foreground">{schedule.scheduledAt}</span>
+        <span className="text-xs leading-5 text-muted-foreground">
+          {MANAGED_RUN_MODEL_LABELS[schedule.modelSelection ?? "default"]}
+        </span>
         {schedule.failureReason && (
           <span className="text-xs text-status-critical">{schedule.failureReason}</span>
         )}
@@ -98,6 +112,7 @@ export function ManagedRunScheduleNotice({
           className="rounded-md border-border/80"
           disabled={disabled || starting || busy}
           onClick={() => {
+            setModelSelection(schedule.modelSelection ?? "default")
             setScheduledAt(
               parseManagedRunScheduleTime(schedule.scheduledAt) > Date.now()
                 ? schedule.scheduledAt
@@ -106,7 +121,7 @@ export function ManagedRunScheduleNotice({
             setEditing(true)
           }}
         >
-          修改时间
+          修改预约
         </Button>
         <Button
           size="sm"
@@ -126,17 +141,22 @@ export function ManagedRunScheduleNotice({
           }}
         >
           <DialogContent
-            className="z-[60]"
+            className="z-[60] gap-5"
             onPointerDownOutside={(event) => event.preventDefault()}
           >
             <DialogHeader>
-              <DialogTitle>修改托管启动时间</DialogTitle>
+              <DialogTitle>修改托管预约</DialogTitle>
             </DialogHeader>
+            <ManagedRunModelField
+              value={modelSelection}
+              onChange={setModelSelection}
+              disabled={busy || starting || disabled}
+            />
             <ManagedRunStartTimeField
               scheduled
               scheduledAt={scheduledAt}
               onTimeChange={setScheduledAt}
-              disabled={busy || starting}
+              disabled={busy || starting || disabled}
             />
             <DialogFooter>
               <Button variant="outline" disabled={busy} onClick={() => setEditing(false)}>
@@ -146,7 +166,7 @@ export function ManagedRunScheduleNotice({
                 disabled={busy || starting || disabled || !scheduledAt}
                 onClick={() => void change(false)}
               >
-                保存启动时间
+                保存预约
               </Button>
             </DialogFooter>
           </DialogContent>

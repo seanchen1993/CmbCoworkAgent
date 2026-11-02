@@ -42,6 +42,61 @@ afterEach(() => {
 })
 
 describe("managed run reservations", () => {
+  it("persists model changes across restart and launches with the latest selection", async () => {
+    const scheduler = make()
+    const row = scheduler.create({ ...input, modelSelection: "ultra" }, now)
+    expect(make().get("project", "feature")?.modelSelection).toBe("ultra")
+    scheduler.reschedule({ ...row, modelSelection: "default" }, now)
+    expect(make().get("project", "feature")?.modelSelection).toBe("default")
+    scheduler.reschedule({ ...row, modelSelection: "ultra" }, now)
+    database.close()
+    database = openNativeSqliteDatabase(join(root, "main.sqlite")).database
+    const restarted = make()
+    const callbacks = runtime()
+    restarted.initialize(callbacks, now)
+    await restarted.tick(due)
+    expect(callbacks.start).toHaveBeenCalledWith(
+      expect.objectContaining({ modelSelection: "ultra", existingThreadId: "origin" })
+    )
+    await vi.waitFor(() => expect(restarted.get("project", "feature")).toBeNull())
+  })
+
+  it("adds the default model selection to existing reservations without changing their data", () => {
+    database.run("DROP TABLE managed_run_schedules")
+    database.run(`CREATE TABLE managed_run_schedules (
+      schedule_id TEXT PRIMARY KEY, project_id TEXT, feature_id TEXT, workspace_path TEXT,
+      initial_user_message TEXT, existing_thread_id TEXT, scheduled_at TEXT, status TEXT,
+      failure_reason TEXT, created_at TEXT, updated_at TEXT
+    )`)
+    database.run(`INSERT INTO managed_run_schedules VALUES (
+      'old', 'project', 'feature', '/workspace', '原始消息', 'origin',
+      '2026-10-28 22:00:00', 'pending', NULL, '2026-10-28 18:00:00', '2026-10-28 18:00:00'
+    )`)
+    ensureManagedRunSchedulesSchema(database)
+    ensureManagedRunSchedulesSchema(database)
+    expect(make().get("project", "feature")).toMatchObject({
+      scheduleId: "old",
+      initialUserMessage: "原始消息",
+      existingThreadId: "origin",
+      modelSelection: "default",
+      scheduledAt: input.scheduledAt
+    })
+  })
+
+  it("rejects invalid model selections before changing a reservation", () => {
+    const scheduler = make()
+    const invalid = "other" as "ultra"
+    expect(() => scheduler.create({ ...input, modelSelection: invalid }, now)).toThrow(
+      "模型选项无效"
+    )
+    expect(scheduler.get("project", "feature")).toBeNull()
+    const row = scheduler.create(input, now)
+    expect(() => scheduler.reschedule({ ...row, modelSelection: invalid }, now)).toThrow(
+      "模型选项无效"
+    )
+    expect(scheduler.get("project", "feature")).toEqual(row)
+  })
+
   it("persists in SQLite without starting a run before the due time", async () => {
     const scheduler = make()
     const callbacks = runtime()

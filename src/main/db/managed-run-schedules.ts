@@ -1,3 +1,4 @@
+import { resolveManagedRunModelSelection } from "../../shared/managed-run-model"
 import type { ManagedRunSchedule } from "../../shared/managed-run-schedule"
 import type { NativeSqliteAdapter } from "./native-sqlite-adapter"
 
@@ -14,14 +15,21 @@ export function ensureManagedRunSchedulesSchema(database: NativeSqliteAdapter): 
     failure_reason TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
+    model_selection TEXT NOT NULL DEFAULT 'default',
     UNIQUE (project_id, feature_id)
   )`)
+  const columns = database.exec("PRAGMA table_info(managed_run_schedules)")[0]?.values ?? []
+  if (!columns.some((column) => column[1] === "model_selection")) {
+    database.run(
+      "ALTER TABLE managed_run_schedules ADD COLUMN model_selection TEXT NOT NULL DEFAULT 'default'"
+    )
+  }
   database.run(`CREATE INDEX IF NOT EXISTS idx_managed_run_schedules_due
     ON managed_run_schedules (status, scheduled_at)`)
 }
 
 const SELECT_COLUMNS = `schedule_id, project_id, feature_id, workspace_path,
-  initial_user_message, existing_thread_id, scheduled_at, status, failure_reason, created_at, updated_at`
+  initial_user_message, existing_thread_id, scheduled_at, status, failure_reason, created_at, updated_at, model_selection`
 
 export class ManagedRunScheduleStore {
   constructor(private readonly getDatabase: () => NativeSqliteAdapter) {}
@@ -42,7 +50,8 @@ export class ManagedRunScheduleStore {
       status: row[7] as ManagedRunSchedule["status"],
       failureReason: row[8] === null ? undefined : String(row[8]),
       createdAt: String(row[9]),
-      updatedAt: String(row[10])
+      updatedAt: String(row[10]),
+      modelSelection: resolveManagedRunModelSelection(row[11])
     }))
   }
 
@@ -78,7 +87,7 @@ export class ManagedRunScheduleStore {
 
   insert(row: ManagedRunSchedule): void {
     this.getDatabase().run(
-      `INSERT INTO managed_run_schedules (${SELECT_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO managed_run_schedules (${SELECT_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         row.scheduleId,
         row.projectId,
@@ -90,20 +99,22 @@ export class ManagedRunScheduleStore {
         row.status,
         row.failureReason,
         row.createdAt,
-        row.updatedAt
+        row.updatedAt,
+        resolveManagedRunModelSelection(row.modelSelection)
       ]
     )
   }
 
   update(row: ManagedRunSchedule): void {
     this.getDatabase().run(
-      `UPDATE managed_run_schedules SET scheduled_at = ?, status = ?, failure_reason = ?, updated_at = ?
+      `UPDATE managed_run_schedules SET scheduled_at = ?, status = ?, failure_reason = ?, updated_at = ?, model_selection = ?
        WHERE schedule_id = ? AND project_id = ? AND feature_id = ?`,
       [
         row.scheduledAt,
         row.status,
         row.failureReason,
         row.updatedAt,
+        resolveManagedRunModelSelection(row.modelSelection),
         row.scheduleId,
         row.projectId,
         row.featureId

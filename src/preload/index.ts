@@ -1,6 +1,7 @@
 import type {
   ManagedRunSchedule,
   ManagedRunScheduleInput,
+  ManagedRunScheduleUpdateInput,
   ManagedRunScheduleIdentity,
   ManagedRunScheduleChange
 } from "../shared/managed-run-schedule"
@@ -4554,9 +4555,8 @@ const api = {
       ipcRenderer.invoke("harnessBoard:scheduleManagedRun", input),
     cancelManagedRunSchedule: (input: ManagedRunScheduleIdentity): Promise<void> =>
       ipcRenderer.invoke("harnessBoard:cancelManagedRunSchedule", input),
-    updateManagedRunSchedule: (
-      input: ManagedRunScheduleIdentity & { scheduledAt: string }
-    ): Promise<void> => ipcRenderer.invoke("harnessBoard:updateManagedRunSchedule", input),
+    updateManagedRunSchedule: (input: ManagedRunScheduleUpdateInput): Promise<void> =>
+      ipcRenderer.invoke("harnessBoard:updateManagedRunSchedule", input),
     onManagedRunScheduleChanged: (
       callback: (event: ManagedRunScheduleChange) => void
     ): (() => void) => {
