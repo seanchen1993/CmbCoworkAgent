@@ -1765,7 +1765,7 @@ export function ChatContainer({
   const shouldShowHarnessDialogTips = surfaceConfig.showHarnessDialogTips && !readOnly
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const botInputRef = useRef<BotGroupInputControl | null>(null)
-  const [botCaret, setBotCaret] = useState(0)
+  const [, setBotSelectionRevision] = useState(0)
   const textareaResizeFrameRef = useRef<number | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const chatRootRef = useRef<HTMLDivElement>(null)
@@ -5473,6 +5473,7 @@ export function ChatContainer({
     },
     [threadId, workspacePath]
   )
+  const botCaret = botInputRef.current?.selectionStart ?? input.length
   const atFileMentions = useAtFileMentions({
     input,
     cursorOffset: managedTurn?.mentionOptions ? botCaret : inputRef.current?.selectionStart ?? input.length,
@@ -9633,7 +9634,7 @@ export function ChatContainer({
                             files: atFileMentions.mode.kind === "at-file" ? atFileMentions.mode.suggestions : [],
                             onSelectFile: applyAtFileMention,
                             onKeyDown: handleKeyDown,
-                            onCaret: setBotCaret,
+                            onCaret: () => setBotSelectionRevision((revision) => revision + 1),
                             className: composerRightClearanceClass ?? undefined
                           }}
                         />

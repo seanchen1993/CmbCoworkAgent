@@ -14,13 +14,13 @@ import React,{useRef,useState} from 'react';
 import {createRoot} from 'react-dom/client';
 import {BotGroupMentionInput,BotPrivateMentionInput} from './src/renderer/src/components/bots/BotGroupMentionInput';
 window.electron={process:{platform:'darwin'}};
-const state=window.fixture={edits:[],disabled:false,mode:'group',generation:0};
+const state=window.fixture={edits:[],carets:[],editCaret:null,disabled:false,mode:'group',generation:0};
 const root=createRoot(document.getElementById('root'));
 function Fixture(){
  const ref=useRef(null);
  const [value,setValue]=useState({text:'@Peer saved draft',mentions:[{start:0,end:5,botId:'peer',label:'Peer'}]});
- const props={...value,members:[],inputRef:ref,onEdit:next=>{state.edits.push(next);setValue(next)},onCancelReply:()=>false,onPasteFiles:()=>{}};
- return state.mode==='group'?<BotGroupMentionInput {...props}/>:<BotPrivateMentionInput {...props} privateChat={{groups:[],files:[],disabled:state.disabled,onSelectFile:()=>{},onKeyDown:()=>{},onCaret:()=>{}}}/>;
+ const props={...value,members:[],inputRef:ref,onEdit:next=>{state.edits.push(next);state.editCaret=ref.current?.selectionStart;setValue(next)},onCancelReply:()=>false,onPasteFiles:()=>{}};
+ return state.mode==='group'?<BotGroupMentionInput {...props}/>:<BotPrivateMentionInput {...props} privateChat={{groups:[],files:[],disabled:state.disabled,onSelectFile:()=>{},onKeyDown:()=>{},onCaret:offset=>state.carets.push(offset)}}/>;
 }
 state.render=()=>root.render(<Fixture key={state.mode+state.generation}/>);
 state.render();`
@@ -68,11 +68,22 @@ state.render();`
       }
       await editor.click()
       await page.keyboard.press("ControlOrMeta+End")
+      await page.evaluate(() => { (window as any).fixture.carets = [] })
       await page.keyboard.type("X")
       await page.waitForFunction(() => (window as any).fixture.edits.length > 0)
       const edits = await page.evaluate(() => (window as any).fixture.edits)
       assert.match(edits.at(-1).text, /X/)
       assert.equal(edits.at(-1).mentions[0].botId, "peer", "real edits retain mention identity")
+      if (mode === "private") {
+        assert.equal(await page.evaluate(() => (window as any).fixture.carets.length), 0,
+          "typing updates the draft without a redundant parent selection notification")
+        assert.equal(await page.evaluate(() => (window as any).fixture.editCaret), edits.at(-1).text.length,
+          "draft subscribers can read the new caret synchronously, including atomic mentions")
+        await page.keyboard.press("ArrowLeft")
+        await page.waitForFunction(() => (window as any).fixture.carets.length > 0)
+        assert.equal(await page.evaluate(() => (window as any).fixture.carets.at(-1)), edits.at(-1).text.length - 1,
+          "selection-only movement still notifies file suggestions")
+      }
       await page.evaluate(() => {
         const state = (window as any).fixture
         state.edits = []; state.generation++; state.render()
