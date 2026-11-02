@@ -102,7 +102,10 @@ function aggregate(docs: Doc[], definitions: Doc): Doc {
           return 0
         }
         if (c.after)
-          expect(Object.keys(c.after).sort()).toEqual(sources.map((s: Doc) => s.key).sort())
+          if (Object.keys(c.after).length !== sources.length)
+            throw new Error(
+              `[after] has ${Object.keys(c.after).length} value(s) but [sources] has ${sources.length}`
+            )
         const page = [...groups.values()]
           .sort((a, b) => compare(a.key, b.key))
           .filter((g) => !c.after || compare(g.key, c.after) > 0)
@@ -224,7 +227,9 @@ function trace(id: string, extra: Doc = {}): Doc {
     ...extra
   }
 }
-function harness(events: Doc[], traces: Doc[]) {
+const stripNulls = (v: unknown): Doc =>
+  JSON.parse(JSON.stringify(v, (_key, value) => (value === null ? undefined : value)))
+function harness(events: Doc[], traces: Doc[], stripNullKeys = false) {
   const requests: Array<{ index: string; body: Doc; matches: Doc[] }> = []
   let active = 0,
     peak = 0
@@ -232,6 +237,7 @@ function harness(events: Doc[], traces: Doc[]) {
     requests,
     peak: () => peak,
     query: async (index: string, body: Doc) => {
+      if (stripNullKeys) body = stripNulls(body)
       expect(body.size).toBe(0)
       expect(JSON.stringify(body)).not.toContain('"_raw"')
       const selected = (index === "event" ? events : traces).filter((doc) =>
@@ -242,11 +248,12 @@ function harness(events: Doc[], traces: Doc[]) {
       peak = Math.max(active, peak)
       try {
         await new Promise((resolve) => setTimeout(resolve, 1))
-        return {
+        const result = {
           timed_out: false,
           _shards: { failed: 0 },
           aggregations: aggregate(selected, body.aggs)
         }
+        return stripNullKeys ? stripNulls(result) : result
       } finally {
         active--
       }
@@ -445,4 +452,64 @@ describe("运行分析独立场景验收", () => {
     const matches = filterRunAnalysis(data, { ...DEFAULT_RUN_ANALYSIS_FILTERS }, "span", false)
     expect(groupRunAnalysis(data, matches, "span", false)[0].row.subagentCount).toBe(1)
   })
+})
+
+it("survives null-dropping gateways across all child key combinations and >500 buckets", async () => {
+  const traces: Doc[] = []
+  for (const feature of [undefined, "same"])
+    for (const kind of [undefined, "task"])
+      for (const hasThread of [false, true])
+        for (let i = 0; i < 501; i++)
+          traces.push(
+            trace(`t${traces.length}`, {
+              harnessFeatureSlug: feature,
+              traceKind: "subagent",
+              subagentKind: kind,
+              subagentThreadId: hasThread ? `child${i}` : undefined
+            })
+          )
+  const h = harness([snapshot("p", ["same"])], traces, true)
+  const result = await fetchRunAnalysis(scope(), h.query)
+  expect(result.rows).toHaveLength(2)
+  for (const row of result.rows) {
+    expect(row.subagentTurns).toBe(2004)
+    expect(row.subagentCount).toBe(501)
+    expect(row.projectSubagentCount).toBe(501)
+    expect(row.subagentKinds).toEqual({ task: 1002, 未记录类型: 1002 })
+  }
+  expect(h.peak()).toBeLessThanOrEqual(2)
+  // 2 snapshot pages + 4 metric pages + 2 empty code partitions + 20 child pages.
+  expect(h.requests).toHaveLength(28)
+  for (const { body } of h.requests) {
+    const composite = body.aggs.rows?.composite
+    expect(JSON.stringify(body)).not.toContain("missing_bucket")
+    if (composite?.after) {
+      expect(Object.values(composite.after).every((v) => typeof v === "string")).toBe(true)
+      expect(Object.keys(composite.after)).toHaveLength(composite.sources.length)
+    }
+  }
+})
+
+it("reproduces the reported four-source 400 when thread and kind cursor keys are dropped", async () => {
+  const h = harness([], [trace("legacy", { traceKind: "subagent" })], true)
+  await expect(
+    h.query("trace", {
+      size: 0,
+      query: { match_all: {} },
+      aggs: {
+        rows: {
+          composite: {
+            size: 500,
+            sources: [
+              { project: { terms: { field: "harnessProjectId" } } },
+              { feature: { terms: { field: "harnessFeatureSlug", missing_bucket: true } } },
+              { thread: { terms: { field: "subagentThreadId", missing_bucket: true } } },
+              { kind: { terms: { field: "subagentKind", missing_bucket: true } } }
+            ],
+            after: { project: "p", feature: "same", thread: null, kind: null }
+          }
+        }
+      }
+    })
+  ).rejects.toThrow("[after] has 2 value(s) but [sources] has 4")
 })

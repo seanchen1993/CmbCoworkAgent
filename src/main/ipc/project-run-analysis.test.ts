@@ -30,18 +30,20 @@ const scope: RunAnalysisScope = {
 }
 
 describe("runtime analysis complete bounded scalar aggregation", () => {
-  it("keeps the entire composite cursor including null and completes >500 stages", async () => {
+  it("enumerates >500 named stages and missing stages without nullable cursors", async () => {
     const first = Array.from({ length: RUN_ANALYSIS_PAGE_SIZE }, (_, i) => ({
-      key: { stage: i === 0 ? null : `s${i}` }
+      key: { stage: `s${i}` }
     }))
     const query = vi
       .fn()
-      .mockResolvedValueOnce(page(first, { stage: null }))
+      .mockResolvedValueOnce(page(first, { stage: "s499" }))
       .mockResolvedValueOnce(page([{ key: { stage: "tail" } }]))
+      .mockResolvedValueOnce({ aggregations: { missing: { doc_count: 2 } } })
     const rows = await fetchRunAnalysisStages(query, "trace", [], range)
-    expect(rows).toHaveLength(501)
-    expect((query.mock.calls[1][1] as Json).aggs.rows.composite.after).toEqual({ stage: null })
-    expect(rows[0].firstExecutedAt).toBeNull()
+    expect(rows).toHaveLength(502)
+    expect(query.mock.calls[1][1].aggs.rows.composite.after).toEqual({ stage: "s499" })
+    expect(rows.at(-1)?.nodeName).toBeNull()
+    expect(JSON.stringify(query.mock.calls)).not.toContain("missing_bucket")
   })
   it.each([
     [{ timed_out: true }, "未完整"],
@@ -63,8 +65,8 @@ describe("runtime analysis complete bounded scalar aggregation", () => {
   it("rejects repeated keys and repeated composite cursors", async () => {
     const query = vi
       .fn()
-      .mockResolvedValueOnce(page([{ key: { feature: "a" } }], { feature: null }))
-      .mockResolvedValueOnce(page([{ key: { feature: "b" } }], { feature: null }))
+      .mockResolvedValueOnce(page([{ key: { feature: "a" } }], { feature: "same" }))
+      .mockResolvedValueOnce(page([{ key: { feature: "b" } }], { feature: "same" }))
     await expect(
       forEachRunAnalysisBucket(
         query,
@@ -161,7 +163,7 @@ describe("runtime analysis complete bounded scalar aggregation", () => {
     expect(data.featureCount).toBe(201)
     expect(data.projectCount).toBe(201)
     expect(max).toBe(2)
-    expect(requests).toHaveLength(6)
+    expect(requests).toHaveLength(8)
     const batchSizes = requests
       .map(({ body }) =>
         body.query.bool.filter.find(
@@ -170,14 +172,7 @@ describe("runtime analysis complete bounded scalar aggregation", () => {
       )
       .map((f: Json) => Object.values(f.terms)[0] as string[])
       .map((v) => v.length)
-    expect(batchSizes).toEqual([
-      RUN_ANALYSIS_BATCH_SIZE,
-      RUN_ANALYSIS_BATCH_SIZE,
-      RUN_ANALYSIS_BATCH_SIZE,
-      1,
-      1,
-      1
-    ])
+    expect(batchSizes).toEqual([...Array(4).fill(RUN_ANALYSIS_BATCH_SIZE), ...Array(4).fill(1)])
     for (const { body } of requests) {
       expect(body.size).toBe(0)
       expect(JSON.stringify(body)).not.toContain("_raw")
@@ -202,14 +197,16 @@ describe("partial historical child observability", () => {
           }
         ])
       if (index === "events") return page([])
-      if (agg.composite.sources.some((s: Json) => s.thread)) {
-        expect(agg.composite.sources.find((s: Json) => s.thread).thread.terms.missing_bucket).toBe(
-          true
-        )
-        return page([
-          { key: { project: "p", feature: "f", thread: null, kind: "task" }, doc_count: 1 },
-          { key: { project: "p", feature: "f", thread: "child", kind: "task" }, doc_count: 3 }
-        ])
+      const names = agg.composite.sources.flatMap((s: Json) => Object.keys(s))
+      const missingFields = body.query.bool.filter.flatMap((f: Json) =>
+        (f.bool?.must_not ?? []).map((q: Json) => q.exists?.field).filter(Boolean)
+      )
+      if (missingFields.includes("harnessFeatureSlug") || missingFields.includes("subagentKind"))
+        return page([])
+      if (!agg.aggs.first_execution) {
+        const key: Json = { project: "p", feature: "f", kind: "task" }
+        if (names.includes("thread")) key.thread = "child"
+        return page([{ key, doc_count: names.includes("thread") ? 3 : 1 }])
       }
       return page([
         {

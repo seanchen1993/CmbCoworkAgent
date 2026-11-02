@@ -232,7 +232,7 @@ describe("knowledge project range and query budget", () => {
           query: { bool: { filter: Record<string, unknown>[] } }
           aggs: { loaded?: unknown; ids?: { composite: { size: number } } }
         }
-        expect(b.size).toBe(0)
+        expect(body.size).toBe(0)
         expect(JSON.stringify(body)).not.toMatch(/_raw|top_hits/)
         expect(b.query.bool.filter).toContainEqual(permission)
         if (b.aggs.loaded) return snapshot

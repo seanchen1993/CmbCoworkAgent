@@ -66,8 +66,74 @@ const childFilter: Json = {
   }
 }
 
-/** Exact stable enumeration; all key components (including null) survive after_key. */
+/** Partition missing fields before querying: gateways may drop null object keys.
+ * Each partition is disjoint and sequential; cursors contain only indexed strings.
+ * At most three optional dimensions are used (feature/thread/kind => eight partitions).
+ */
 export async function forEachRunAnalysisBucket(
+  query: RunAnalysisQuery,
+  index: string,
+  filters: Json[],
+  sources: Json[],
+  aggs: Json,
+  consume: (bucket: Json) => void
+): Promise<void> {
+  const optional = sources.filter(
+    (s) => record(record(Object.values(s)[0]).terms).missing_bucket === true
+  )
+  if (optional.length > 3) throw new Error("运行分析可空聚合维度过多")
+  const partitions = 2 ** optional.length
+  for (let mask = 0; mask < partitions; mask++) {
+    const missing: Json = {}
+    const scopedFilters = [...filters]
+    const presentSources: Json[] = []
+    for (const entry of sources) {
+      const name = Object.keys(entry)[0]
+      const terms = record(record(entry[name]).terms)
+      const bit = optional.indexOf(entry)
+      if (bit >= 0) {
+        const exists = { exists: { field: terms.field } }
+        if (mask & (1 << bit)) {
+          scopedFilters.push({ bool: { must_not: [exists] } })
+          missing[name] = null
+          continue
+        }
+        scopedFilters.push(exists)
+      }
+      const presentTerms = { ...terms }
+      delete presentTerms.missing_bucket
+      presentSources.push({ [name]: { terms: presentTerms } })
+    }
+    if (!presentSources.length) {
+      // A stage-only query with no stage field has one aggregate, no cursor.
+      const raw = record(
+        await query(index, {
+          size: 0,
+          track_total_hits: false,
+          query: { bool: { filter: scopedFilters } },
+          aggs: { missing: { filter: { match_all: {} }, aggs } }
+        })
+      )
+      assertProjectModeResultComplete(raw)
+      const bucket = record(record(raw.aggregations).missing)
+      if (typeof bucket.doc_count !== "number") throw new Error("运行分析聚合缺失，请重试")
+      if (bucket.doc_count > 0) consume({ ...bucket, key: missing })
+      continue
+    }
+    await forEachPresentRunAnalysisBucket(
+      query,
+      index,
+      scopedFilters,
+      presentSources,
+      aggs,
+      (bucket) => {
+        consume({ ...bucket, key: { ...record(bucket.key), ...missing } })
+      }
+    )
+  }
+}
+
+async function forEachPresentRunAnalysisBucket(
   query: RunAnalysisQuery,
   index: string,
   filters: Json[],
@@ -102,7 +168,7 @@ export async function forEachRunAnalysisBucket(
       const key = record(bucket.key)
       if (
         Object.keys(key).length !== names.length ||
-        names.some((n) => !(n in key) || (key[n] !== null && typeof key[n] !== "string"))
+        names.some((n) => !(n in key) || typeof key[n] !== "string")
       )
         throw new Error("运行分析聚合键不完整")
       const signature = JSON.stringify(names.map((n) => key[n]))
@@ -119,7 +185,7 @@ export async function forEachRunAnalysisBucket(
     const next = record(page.after_key)
     if (
       Object.keys(next).length !== names.length ||
-      names.some((n) => !(n in next) || (next[n] !== null && typeof next[n] !== "string"))
+      names.some((n) => !(n in next) || typeof next[n] !== "string")
     )
       throw new Error("运行分析分页游标不完整")
     const signature = JSON.stringify(names.map((n) => next[n]))
@@ -392,6 +458,7 @@ export async function fetchRunAnalysis(
         throw new Error("运行分析聚合超出请求范围")
       return get(id, slug)
     }
+    let hasChildren = false
     // Two independent scalar aggregations in flight at most; batches are sequential.
     await Promise.all([
       forEachRunAnalysisBucket(
@@ -400,7 +467,11 @@ export async function fetchRunAnalysis(
         traceFilters,
         featureSources(),
         runAnalysisMetricAggs(scope.range),
-        (b) => Object.assign(identify(b), readRunAnalysisMetrics(b))
+        (b) => {
+          const metrics = readRunAnalysisMetrics(b)
+          Object.assign(identify(b), metrics)
+          hasChildren ||= metrics.subagentTurns > 0
+        }
       ),
       forEachRunAnalysisBucket(
         query,
@@ -428,6 +499,8 @@ export async function fetchRunAnalysis(
         }
       )
     ])
+    // No child documents in this batch: avoid all optional-field inventory partitions.
+    if (!hasChildren) continue
     // Exact distinct thread inventory, no cardinality estimates and no trace bodies.
     const threads = new Map<string, Set<string>>()
     const projectThreads = new Map<string, Set<string>>()
