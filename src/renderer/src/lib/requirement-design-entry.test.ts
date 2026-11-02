@@ -3,9 +3,11 @@ import { beforeEach, describe, expect, it } from "vitest"
 import {
   REQUIREMENT_DESIGN_ASSOCIATIONS_KEY,
   buildRequirementDesignPrompt,
+  buildFullPrdDesignPrompt,
   listRequirementDesignEntries,
   loadActiveRequirementDesignEntry,
-  shouldCreateRequirementDesignSession,
+  isRequirementPrototypeStepComplete,
+  removeRequirementDesignSessions,
   storeActiveRequirementDesignEntry,
   storeRequirementDesignEntries,
   type RequirementDesignEntry
@@ -86,6 +88,23 @@ describe("active requirement design entry", () => {
     expect(loadActiveRequirementDesignEntry(second.htmlId, storage)).toEqual(second)
   })
 
+  it("removes successful session mappings while preserving failed ones for retry", async () => {
+    const failed = { ...entry, htmlId: "design-session-failed" }
+    storeRequirementDesignEntries([entry, failed], storage)
+
+    const failedIds = await removeRequirementDesignSessions(
+      [entry.htmlId, failed.htmlId],
+      async (sessionId) => {
+        if (sessionId === failed.htmlId) throw new Error("delete failed")
+      },
+      storage
+    )
+
+    expect(failedIds).toEqual([failed.htmlId])
+    expect(loadActiveRequirementDesignEntry(entry.htmlId, storage)).toBeNull()
+    expect(loadActiveRequirementDesignEntry(failed.htmlId, storage)).toEqual(failed)
+  })
+
   it("deduplicates function tabs while preferring the active historical session", () => {
     const newer = { ...entry, htmlId: "design-session-new" }
     storeRequirementDesignEntries([entry, newer], storage)
@@ -94,14 +113,6 @@ describe("active requirement design entry", () => {
     expect(listRequirementDesignEntries(entry.requirementId, storage, entry.htmlId)).toEqual([
       entry
     ])
-  })
-
-  it("only initializes the requirement attachment for a new design session", () => {
-    const sessionIds = new Set([entry.htmlId])
-
-    expect(shouldCreateRequirementDesignSession("", sessionIds)).toBe(true)
-    expect(shouldCreateRequirementDesignSession("missing-session", sessionIds)).toBe(true)
-    expect(shouldCreateRequirementDesignSession(entry.htmlId, sessionIds)).toBe(false)
   })
 })
 
@@ -114,5 +125,37 @@ describe("requirement design prompt", () => {
     expect(prompt).toContain("其他资料仅作补充")
     expect(prompt).toContain("以需求文件为准")
     expect(prompt).toContain("可独立运行")
+  })
+
+  it("builds a single-session prompt from the complete PRD", () => {
+    const prompt = buildFullPrdDesignPrompt("prd/product.md")
+
+    expect(prompt).toContain("完整 PRD 文档「prd/product.md」")
+    expect(prompt).toContain("整个产品")
+    expect(prompt).toContain("信息架构")
+  })
+})
+
+describe("requirement prototype completion", () => {
+  it("completes the step when the full PRD prototype has been saved", () => {
+    expect(
+      isRequirementPrototypeStepComplete({
+        skipped: false,
+        allFunctionsComplete: false,
+        fullPrdHtmlFile: "/workspace/full-prd.html",
+        published: false
+      })
+    ).toBe(true)
+  })
+
+  it("keeps the step incomplete while a full PRD session has no saved prototype", () => {
+    expect(
+      isRequirementPrototypeStepComplete({
+        skipped: false,
+        allFunctionsComplete: false,
+        fullPrdHtmlFile: "",
+        published: false
+      })
+    ).toBe(false)
   })
 })

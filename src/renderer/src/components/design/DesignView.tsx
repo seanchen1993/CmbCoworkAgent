@@ -16,7 +16,10 @@ import { DESIGN_PREVIEW_NAVIGATION_SCRIPT } from "@/lib/design-preview-navigatio
 import { buildDesignVariationDocument } from "@/lib/design-variation-document"
 import { getDesignPreviewViewportStyle } from "@/lib/design-preview-viewport"
 import { useAppStore } from "@/lib/store"
-import { loadActiveRequirementDesignEntry } from "@/lib/requirement-design-entry"
+import {
+  loadActiveRequirementDesignEntry,
+  REQUIREMENT_DESIGN_ENTRY_KEY
+} from "@/lib/requirement-design-entry"
 // 需求详情进入设计模式的适配逻辑集中在独立 Hook，避免侵入设计器主体流程。
 import { useRequirementDesignEntry } from "./use-requirement-design-entry"
 import { usePersistentRequirementDesignEntry } from "./use-persistent-requirement-design-entry"
@@ -1419,12 +1422,14 @@ function injectIntoIframe(iframe: HTMLIFrameElement | null, script: string) {
 
 export function DesignView(): React.JSX.Element {
   // ── Session / gallery state ───────────────────────────────
+  const requirementDesignPending = Boolean(localStorage.getItem(REQUIREMENT_DESIGN_ENTRY_KEY))
   const [sessionIndex, setSessionIndex] = useState<SessionMeta[]>(() => loadIndex())
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(
-    () => localStorage.getItem(SESSION_LAST_KEY) ?? null
+    () => (requirementDesignPending ? null : localStorage.getItem(SESSION_LAST_KEY) ?? null)
   )
 
   const [_init] = useState<ReturnType<typeof loadSessionById>>(() => {
+    if (requirementDesignPending) return defaultSession()
     const sid = localStorage.getItem(SESSION_LAST_KEY)
     return sid ? loadSessionById(sid) : defaultSession()
   })
@@ -1449,7 +1454,7 @@ export function DesignView(): React.JSX.Element {
   const [workspaceLoading, setWorkspaceLoading] = useState(false)
   // Open the creation workspace when there is no editor session to restore.
   const [creationPageOpen, setCreationPageOpen] = useState(
-    () => !localStorage.getItem(SESSION_LAST_KEY)
+    () => !requirementDesignPending && !localStorage.getItem(SESSION_LAST_KEY)
   )
   const [codeModalOpen, setCodeModalOpen] = useState(false)
   const [linkModalOpen, setLinkModalOpen] = useState(false)

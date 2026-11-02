@@ -90,6 +90,13 @@ export const requirementsApi = {
       manifestError?: string
       error?: string
     }>,
+  clearDesign: (payload: { reqId: string; function?: { fr: string; file: string } }) =>
+    ipcRenderer.invoke("requirements:clear-design", payload) as Promise<{
+      success: boolean
+      requirement?: RequirementRuntimeItem
+      manifest?: RequirementRuntimeItem["prdManifest"]
+      error?: string
+    }>,
   savePrd: (payload: {
     reqId: string
     version: string
@@ -124,6 +131,7 @@ export const requirementsApi = {
     requirementFilePath: string
     htmlFile?: string
     htmlId: string
+    fullPrd?: boolean
   }) =>
     ipcRenderer.invoke("requirements:update-function-html", payload) as Promise<{
       success: boolean

@@ -2546,6 +2546,14 @@ interface CustomAPI {
       manifestError?: string
       error?: string
     }>
+    clearDesign: (payload: { reqId: string; function?: { fr: string; file: string } }) => Promise<{
+      success: boolean
+      requirement?: Awaited<ReturnType<NonNullable<CustomAPI["requirements"]>["list"]>>[number]
+      manifest?: Awaited<
+        ReturnType<NonNullable<CustomAPI["requirements"]>["list"]>
+      >[number]["prdManifest"]
+      error?: string
+    }>
     savePrd: (payload: {
       reqId: string
       version: string
@@ -2577,6 +2585,7 @@ interface CustomAPI {
       requirementFilePath: string
       htmlFile?: string
       htmlId: string
+      fullPrd?: boolean
     }) => Promise<{
       success: boolean
       htmlFile?: string

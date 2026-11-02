@@ -38,9 +38,13 @@ export function RequirementDesignContextBar({
   const savingRef = useRef(false)
   const sessionListRef = useRef<HTMLDivElement>(null)
   const requirementName = entry.requirementName?.trim() || "未命名需求"
+  const isFullPrd = entry.scope === "full-prd"
   const designEntries = useMemo(
-    () => listRequirementDesignEntries(entry.requirementId, localStorage, entry.htmlId),
-    [entry]
+    () =>
+      listRequirementDesignEntries(entry.requirementId, localStorage, entry.htmlId).filter(
+        (designEntry) => (designEntry.scope === "full-prd") === isFullPrd
+      ),
+    [entry, isFullPrd]
   )
   const sessionStates = useMemo(
     () => new Map(sessions.map((session) => [session.id, session.generationState])),
@@ -113,11 +117,12 @@ export function RequirementDesignContextBar({
         workspacePath: entry.workspacePath,
         requirementFilePath: entry.requirementFilePath,
         htmlFile,
-        htmlId
+        htmlId,
+        fullPrd: entry.scope === "full-prd"
       })
-      if (!synced.success) throw new Error(synced.error || "同步需求 Manifest 失败")
+      if (!synced.success) throw new Error(synced.error || "同步需求数据失败")
       onEntryChange({ ...entry, htmlId, htmlFile, bindingReady: true })
-      showToast("设计已保存并同步到需求 Manifest")
+      showToast(entry.scope === "full-prd" ? "整个需求原型已保存" : "功能原型已保存")
     } catch (error) {
       showToast(error instanceof Error ? error.message : "保存需求设计失败")
     } finally {
@@ -133,7 +138,17 @@ export function RequirementDesignContextBar({
           <strong className="min-w-0 truncate text-xs font-semibold text-foreground ml-1.5">
             {requirementName}
           </strong>
-          {previewButton(entry.requirementOverviewFilePath, "需求文件")}
+          <span
+            className={`shrink-0 rounded-full px-1.5 py-0.5 text-[9px] font-semibold ${
+              isFullPrd ? "bg-violet-100 text-violet-700" : "bg-blue-100 text-blue-700"
+            }`}
+          >
+            {isFullPrd ? "整个需求设计" : "功能设计"}
+          </span>
+          {previewButton(
+            isFullPrd ? entry.requirementFilePath : entry.requirementOverviewFilePath,
+            isFullPrd ? "完整 PRD" : "需求文件"
+          )}
         </div>
         <div className="mt-0.5 flex w-full items-center text-[10px]">
           <TooltipProvider delayDuration={200}>
@@ -159,10 +174,20 @@ export function RequirementDesignContextBar({
               </TooltipTrigger>
               <TooltipContent side="bottom" className="max-w-64">
                 <p>
-                  已完成 {completedCount}/{designEntries.length} 个功能模块
+                  {isFullPrd
+                    ? completedCount > 0
+                      ? "整个需求原型已完成"
+                      : "整个需求原型待完成"
+                    : `已完成 ${completedCount}/${designEntries.length} 个功能模块`}
                 </p>
-                <p>计算方式：已同步模块数 ÷ 模块总数 × 100%</p>
-                <p>设计成功同步到需求后，该模块才计为完成。</p>
+                {isFullPrd ? (
+                  <p>保存整个需求原型后即视为完成。</p>
+                ) : (
+                  <>
+                    <p>计算方式：已同步模块数 ÷ 模块总数 × 100%</p>
+                    <p>设计成功同步到需求后，该模块才计为完成。</p>
+                  </>
+                )}
               </TooltipContent>
             </Tooltip>
           </TooltipProvider>
@@ -227,7 +252,10 @@ export function RequirementDesignContextBar({
                   </span>
                 </button>
                 <span className="ml-1.5 flex shrink-0 items-center gap-1 pr-2">
-                  {previewButton(designEntry.requirementFilePath, "功能文件")}
+                  {previewButton(
+                    designEntry.requirementFilePath,
+                    designEntry.scope === "full-prd" ? "完整 PRD" : "功能文件"
+                  )}
                   <span
                     className={`text-[10px] font-medium ${
                       completed

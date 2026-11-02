@@ -7,7 +7,7 @@ import { MarkdownPreview } from "@/components/ui/MarkdownPreview/MarkdownPreview
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { assembleBoundedTextPreview } from "@/lib/text-preview-pages"
 import type { WorkspaceFilePreviewReadResult } from "../../../../shared/workspace-file-preview"
-import type { RequirementPrdManifest, RequirementRecord } from "./requirement-data"
+import type { RequirementRecord } from "./requirement-data"
 
 const PREVIEW_MAX_BYTES = 8 * 1024 * 1024
 const PREVIEW_MAX_PAGES = 64
@@ -40,7 +40,8 @@ async function readWorkspaceTextFile(
 
 export function RequirementFunctionWorkspace({
   requirement,
-  functionInfo,
+  title,
+  scope = "function",
   filePath,
   threadId,
   prototypeGenerated,
@@ -53,7 +54,8 @@ export function RequirementFunctionWorkspace({
   onRequestPrototypeDesign
 }: {
   requirement: RequirementRecord
-  functionInfo: RequirementPrdManifest["functions"][number]
+  title: string
+  scope?: "function" | "full-prd"
   filePath: string
   threadId: string | null
   prototypeGenerated: boolean
@@ -63,7 +65,7 @@ export function RequirementFunctionWorkspace({
   conversationLoading: boolean
   reloadToken: number
   onBack: () => void
-  onRequestPrototypeDesign: () => void
+  onRequestPrototypeDesign?: () => void
 }): React.JSX.Element {
   const [content, setContent] = useState("")
   const [draft, setDraft] = useState("")
@@ -129,11 +131,9 @@ export function RequirementFunctionWorkspace({
           onClick={onBack}
         >
           <ArrowLeft className="size-3.5" />
-          返回功能清单
+          {scope === "full-prd" ? "返回原型设计" : "返回功能清单"}
         </Button>
-        <h2 className="min-w-0 truncate text-sm font-semibold text-foreground">
-          {functionInfo.fr}：{functionInfo.name || "未命名功能"} · 预览
-        </h2>
+        <h2 className="min-w-0 truncate text-sm font-semibold text-foreground">{title} · 预览</h2>
         <span className="shrink-0 rounded-full bg-primary/10 px-2 py-0.5 text-[11px] font-medium text-primary">
           {prototypeGenerated ? "原型设计阶段" : "规范 PRD 阶段"}
         </span>
@@ -207,7 +207,7 @@ export function RequirementFunctionWorkspace({
               <textarea
                 value={draft}
                 onChange={(event) => setDraft(event.target.value)}
-                aria-label={`编辑 ${functionInfo.name} PRD`}
+                aria-label={`编辑 ${title} PRD`}
                 className="h-full min-h-[360px] w-full resize-none border-0 bg-white p-5 font-mono text-sm leading-6 text-foreground outline-none focus:ring-2 focus:ring-inset focus:ring-primary/20"
                 spellCheck={false}
                 autoFocus
@@ -286,27 +286,29 @@ export function RequirementFunctionWorkspace({
                       ? "设计会话已创建，当前尚未生成原型 HTML，可返回会话继续沟通和设计。"
                       : "尚未创建设计会话，点击下方按钮开始设计原型。"}
                 </p>
-                <TooltipProvider delayDuration={200}>
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <span className="mt-5 inline-flex">
-                        <Button
-                          type="button"
-                          size="sm"
-                          disabled={conversationLoading}
-                          onClick={onRequestPrototypeDesign}
-                        >
-                          {prototypeSkipped || !hasPrototypeDesignSession ? "去设计" : "继续设计"}
-                        </Button>
-                      </span>
-                    </TooltipTrigger>
-                    <TooltipContent side="top" className="max-w-72">
-                      {prototypeSkipped || !hasPrototypeDesignSession
-                        ? "尚未关联设计会话，点击可创建设计会话并开始原型设计"
-                        : "已创建设计会话，暂未生成可预览的原型 HTML，点击可跳转到会话继续设计"}
-                    </TooltipContent>
-                  </Tooltip>
-                </TooltipProvider>
+                {onRequestPrototypeDesign ? (
+                  <TooltipProvider delayDuration={200}>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <span className="mt-5 inline-flex">
+                          <Button
+                            type="button"
+                            size="sm"
+                            disabled={conversationLoading}
+                            onClick={onRequestPrototypeDesign}
+                          >
+                            {prototypeSkipped || !hasPrototypeDesignSession ? "去设计" : "继续设计"}
+                          </Button>
+                        </span>
+                      </TooltipTrigger>
+                      <TooltipContent side="top" className="max-w-72">
+                        {prototypeSkipped || !hasPrototypeDesignSession
+                          ? "尚未关联设计会话，点击可创建设计会话并开始原型设计"
+                          : "已创建设计会话，暂未生成可预览的原型 HTML，点击可跳转到会话继续设计"}
+                      </TooltipContent>
+                    </Tooltip>
+                  </TooltipProvider>
+                ) : null}
               </div>
             )}
           </div>

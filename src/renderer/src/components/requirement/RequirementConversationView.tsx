@@ -37,9 +37,13 @@ import {
 } from "./requirement-data"
 import {
   buildRequirementDesignPrompt,
+  buildFullPrdDesignPrompt,
+  listAllRequirementDesignEntries,
   listRequirementDesignEntries,
+  isRequirementPrototypeStepComplete,
   openRequirementDesign,
   openRequirementDesignBatch,
+  removeRequirementDesignSessions,
   type RequirementDesignEntry
 } from "@/lib/requirement-design-entry"
 import {
@@ -48,6 +52,7 @@ import {
 } from "./requirement-session-capabilities"
 import { RequirementStepsPanel } from "./RequirementStepsPanel"
 import { getSelectedRequirementSystem } from "./requirement-store"
+import { getDesignSessionClient } from "@/components/design/session-client"
 
 const REQUIREMENT_SPACE_PUBLISH_MESSAGE = "发布到需求空间"
 const LEANSTAR_TOKEN_MESSAGE_PREFIX = "精益之星身份令牌-Token："
@@ -123,6 +128,8 @@ function normalizeRequirementSpaceManifest(value: unknown): RequirementPrdManife
           ? Math.max(1, Math.min(5, Math.trunc(prd.currentStep)))
           : fallbackStep,
       needDesign: normalizeNeedDesign(prd.needDesign),
+      htmlFile: asText(prd.htmlFile),
+      htmlId: asText(prd.htmlId),
       ...(asText(prd.prDetailUrl) ? { prDetailUrl: asText(prd.prDetailUrl) } : {})
     },
     functions: functions.map((item) => {
@@ -387,11 +394,36 @@ function RequirementConversationSession({
   const skippedPrototypeCount = prototypeStatuses.filter((item) => item.skipped).length
   const allPrototypeFunctionsCompleted =
     prototypeStatuses.length > 0 && completedPrototypeCount === prototypeStatuses.length
+  const fullPrdDesignEntry = useMemo((): RequirementDesignEntry | null => {
+    const prd = requirementSpaceManifest?.prd
+    if (!prd?.htmlId) return null
+    const workspacePath = threadState?.workspacePath ?? requirement.requirementPath
+    const relativePrdFile = normalizePrdFilePath(prd.file).replace(/^\/+/, "")
+    const separator = workspacePath.includes("\\") ? "\\" : "/"
+    const requirementFilePath = `${workspacePath.replace(/[\\/]+$/, "")}${separator}${relativePrdFile.replace(/\//g, separator)}`
+    return {
+      scope: "full-prd",
+      requirementId: requirement.id,
+      requirementName: requirement.title,
+      functionName: `${requirement.title} · 完整 PRD 原型`,
+      workspacePath,
+      previewThreadId: threadId ?? undefined,
+      requirementOverviewFilePath: requirementFilePath,
+      requirementFilePath,
+      prompt: buildFullPrdDesignPrompt(relativePrdFile),
+      htmlId: prd.htmlId,
+      htmlFile: prd.htmlFile || undefined
+    }
+  }, [requirement, requirementSpaceManifest?.prd, threadId, threadState?.workspacePath])
   const expertAnalysisStarted = subagents.length > 0 || prdGenerationCompleted
   const expertAnalysisCompleted =
     prdGenerationCompleted || (subagents.length > 0 && !expertProcessRunning)
-  const prototypeStepCompleted =
-    prototypeRoute === "skip" || allPrototypeFunctionsCompleted || requirementSpacePublished
+  const prototypeStepCompleted = isRequirementPrototypeStepComplete({
+    skipped: prototypeRoute === "skip",
+    allFunctionsComplete: allPrototypeFunctionsCompleted,
+    fullPrdHtmlFile: fullPrdDesignEntry?.htmlFile,
+    published: requirementSpacePublished
+  })
   const prototypeStepEnabled =
     prdGenerationCompleted && (prototypeRoute !== null || requirementSpacePublished)
   const requirementSpaceStepEnabled =
@@ -544,8 +576,64 @@ function RequirementConversationSession({
     [buildPrototypeDesignEntry, conversationLoading, requirement.id]
   )
   const startBatchPrototypeDesign = useCallback(
-    async (functionInfos: RequirementPrdManifest["functions"]): Promise<void> => {
+    async (
+      functionInfos: RequirementPrdManifest["functions"],
+      mode: "functions" | "full-prd"
+    ): Promise<void> => {
       if (conversationLoading) throw new Error("当前会话正在处理中，请稍后再试")
+      const existingEntries = new Map(
+        listRequirementDesignEntries(requirement.id).map((entry) => [
+          entry.requirementFilePath,
+          entry
+        ])
+      )
+      let fullPrdEntry: RequirementDesignEntry | undefined
+      if (mode === "full-prd") {
+        const workspacePath = threadState?.workspacePath ?? requirement.requirementPath
+        const workspaceRoot = workspacePath.replace(/[\\/]+$/, "")
+        if (!requirementSpaceManifest?.prd.file?.trim()) throw new Error("未找到完整 PRD 文档")
+        const relativePrdFile = normalizePrdFilePath(requirementSpaceManifest.prd.file).replace(
+          /^\/+/,
+          ""
+        )
+        const separator = workspacePath.includes("\\") ? "\\" : "/"
+        const requirementFilePath = `${workspaceRoot}${separator}${relativePrdFile.replace(/\//g, separator)}`
+        const existingEntry = existingEntries.get(requirementFilePath)
+        const designSystem = getSelectedRequirementSystem(requirement.systemId)
+        fullPrdEntry = {
+          scope: "full-prd",
+          requirementId: requirement.id,
+          requirementName: requirement.title,
+          functionName: `${requirement.title} · 完整 PRD 原型`,
+          workspacePath,
+          previewThreadId: threadId ?? undefined,
+          requirementOverviewFilePath: requirementFilePath,
+          requirementFilePath,
+          designSystemId: designSystem?.id,
+          prompt: buildFullPrdDesignPrompt(relativePrdFile),
+          htmlId: requirementSpaceManifest.prd.htmlId || existingEntry?.htmlId || "",
+          htmlFile: requirementSpaceManifest.prd.htmlFile || existingEntry?.htmlFile
+        }
+        if (existingEntry?.scope === "full-prd" && existingEntry.htmlId) {
+          openRequirementDesign(fullPrdEntry)
+          return
+        }
+      } else if (functionInfos.length > 0) {
+        const continuationEntries = functionInfos.map((functionInfo) => {
+          const designEntry = buildPrototypeDesignEntry(functionInfo)
+          return {
+            ...designEntry,
+            htmlId:
+              designEntry.htmlId ||
+              existingEntries.get(designEntry.requirementFilePath)?.htmlId ||
+              ""
+          }
+        })
+        if (continuationEntries.every((entry) => entry.htmlId)) {
+          openRequirementDesignBatch(continuationEntries)
+          return
+        }
+      }
       const selectedKeys = new Set(functionInfos.map(getPrototypeFunctionKey))
       const result = await window.api.requirements.saveStepState({
         reqId: requirement.id,
@@ -555,7 +643,12 @@ function RequirementConversationSession({
           fr: functionInfo.fr,
           file: functionInfo.file,
           htmlFile: functionInfo.htmlFile,
-          needDesign: selectedKeys.has(getPrototypeFunctionKey(functionInfo)) ? "1" : "0"
+          needDesign:
+            mode === "full-prd"
+              ? functionInfo.needDesign
+              : selectedKeys.has(getPrototypeFunctionKey(functionInfo))
+                ? "1"
+                : "0"
         }))
       })
       if (!result.success || !result.requirement) {
@@ -565,13 +658,12 @@ function RequirementConversationSession({
         setRequirementSpaceManifest(normalizeRequirementSpaceManifest(result.manifest))
       }
       onRequirementUpdated(fromPersistedRequirement(result.requirement, requirement.system))
+      if (mode === "full-prd") {
+        if (!fullPrdEntry) throw new Error("完整 PRD 设计入口无效")
+        openRequirementDesign(fullPrdEntry)
+        return
+      }
       if (functionInfos.length > 0) {
-        const existingEntries = new Map(
-          listRequirementDesignEntries(requirement.id).map((entry) => [
-            entry.requirementFilePath,
-            entry
-          ])
-        )
         openRequirementDesignBatch(
           functionInfos.map((functionInfo) => {
             const designEntry = buildPrototypeDesignEntry(functionInfo)
@@ -593,7 +685,84 @@ function RequirementConversationSession({
       prototypeFunctions,
       requirement.id,
       requirement.system,
-      requirementSpaceManifest?.prd.currentStep
+      requirement.systemId,
+      requirement.title,
+      requirement.requirementPath,
+      requirementSpaceManifest?.prd.currentStep,
+      requirementSpaceManifest?.prd.file,
+      threadId,
+      threadState?.workspacePath
+    ]
+  )
+  const clearPrototypeDesign = useCallback(async (): Promise<void> => {
+    if (conversationLoading) throw new Error("当前会话正在处理中，请稍后再试")
+    const mappedEntries = listAllRequirementDesignEntries(requirement.id)
+    const sessionIds = new Set([
+      requirementSpaceManifest?.prd.htmlId ?? "",
+      ...mappedEntries.map((entry) => entry.htmlId),
+      ...prototypeFunctions.map((functionInfo) => functionInfo.htmlId)
+    ])
+    sessionIds.delete("")
+    const result = await window.api.requirements.clearDesign({ reqId: requirement.id })
+    if (!result.success || !result.requirement || !result.manifest) {
+      throw new Error(result.error || "重置设计失败")
+    }
+    setRequirementSpaceManifest(normalizeRequirementSpaceManifest(result.manifest))
+    onRequirementUpdated(fromPersistedRequirement(result.requirement, requirement.system))
+    const client = getDesignSessionClient()
+    const failedSessionIds = await removeRequirementDesignSessions(sessionIds, (sessionId) =>
+      client.remove(sessionId)
+    )
+    if (failedSessionIds.length > 0) {
+      throw new Error(`设计已重置，但有 ${failedSessionIds.length} 个历史会话删除失败，请重试`)
+    }
+    setPrototypeRoute(null)
+    setPreviewTab("prd")
+  }, [
+    conversationLoading,
+    onRequirementUpdated,
+    prototypeFunctions,
+    requirement.id,
+    requirement.system,
+    requirementSpaceManifest?.prd.htmlId
+  ])
+  const clearPrototypeFunction = useCallback(
+    async (functionInfo: RequirementPrdManifest["functions"][number]): Promise<void> => {
+      if (conversationLoading) throw new Error("当前会话正在处理中，请稍后再试")
+      const designEntry = buildPrototypeDesignEntry(functionInfo)
+      const mappedEntries = listAllRequirementDesignEntries(requirement.id).filter(
+        (entry) => entry.requirementFilePath === designEntry.requirementFilePath
+      )
+      const sessionIds = new Set([
+        functionInfo.htmlId,
+        ...mappedEntries.map((entry) => entry.htmlId)
+      ])
+      sessionIds.delete("")
+      const result = await window.api.requirements.clearDesign({
+        reqId: requirement.id,
+        function: { fr: functionInfo.fr, file: functionInfo.file }
+      })
+      if (!result.success || !result.requirement || !result.manifest) {
+        throw new Error(result.error || "重置功能设计失败")
+      }
+      setRequirementSpaceManifest(normalizeRequirementSpaceManifest(result.manifest))
+      onRequirementUpdated(fromPersistedRequirement(result.requirement, requirement.system))
+      const client = getDesignSessionClient()
+      const failedSessionIds = await removeRequirementDesignSessions(sessionIds, (sessionId) =>
+        client.remove(sessionId)
+      )
+      if (failedSessionIds.length > 0) {
+        throw new Error(
+          `功能设计已重置，但有 ${failedSessionIds.length} 个历史会话删除失败，请重试`
+        )
+      }
+    },
+    [
+      buildPrototypeDesignEntry,
+      conversationLoading,
+      onRequirementUpdated,
+      requirement.id,
+      requirement.system
     ]
   )
   const revealRequirementFile = useCallback(
@@ -1297,6 +1466,7 @@ function RequirementConversationSession({
             prdGenerationCompleted={prdGenerationCompleted}
             prototypeStepEnabled={prototypeStepEnabled}
             prototypeStepCompleted={prototypeStepCompleted}
+            fullPrdDesignEntry={fullPrdDesignEntry}
             requirementSpaceStepEnabled={requirementSpaceStepEnabled}
             requirementSpacePublished={requirementSpacePublished}
             allPrototypeFunctionsCompleted={allPrototypeFunctionsCompleted}
@@ -1320,6 +1490,8 @@ function RequirementConversationSession({
             onRevealRequirementFile={revealRequirementFile}
             onRequestPrototypeDesign={requestPrototypeDesign}
             onStartBatchPrototypeDesign={startBatchPrototypeDesign}
+            onClearPrototypeDesign={clearPrototypeDesign}
+            onClearPrototypeFunction={clearPrototypeFunction}
             onUpdatePrototypeFunctionDesign={updatePrototypeFunctionDesign}
             onCompletePrototypeDesign={completePrototypeDesign}
             onPublishToRequirementSpace={handlePublishToRequirementSpace}

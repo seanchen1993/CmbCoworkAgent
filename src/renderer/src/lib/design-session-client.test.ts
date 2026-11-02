@@ -109,6 +109,16 @@ describe("design view reconnect", () => {
     expect(h.api.onChange).toHaveBeenCalledOnce()
   })
 
+  it("does not fetch an already open session twice", async () => {
+    const h = fixture()
+    await h.client.initialize([])
+    await h.client.open("ds_a")
+    await h.client.open("ds_a")
+    expect(h.api.open).toHaveBeenCalledOnce()
+    await h.client.open("ds_a", true)
+    expect(h.api.open).toHaveBeenCalledTimes(2)
+  })
+
   it("detaches without stopping and restores messages accumulated while absent", async () => {
     const h = fixture()
     await h.client.initialize([])

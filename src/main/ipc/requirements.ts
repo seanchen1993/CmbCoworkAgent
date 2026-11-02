@@ -38,6 +38,8 @@ export type IndexedPrdManifest = {
     prDetailUrl?: string
     currentStep: number
     needDesign: NeedDesignChoice
+    htmlFile: string
+    htmlId: string
   }
   functions: Array<{
     id?: string
@@ -344,6 +346,7 @@ type RequirementFunctionHtmlPayload = {
   requirementFilePath: string
   htmlFile?: string
   htmlId?: string
+  fullPrd?: boolean
 }
 
 function normalizeManifestFilePath(value: string): string {
@@ -424,6 +427,43 @@ async function updateRequirementFunctionHtml(
   const { list, index, item } = requirement
   const manifestResult = await readWorkspaceManifest(item)
   if (manifestResult.status !== "ok") throw new Error("无法读取需求 Manifest")
+  const commit = async (updatedRaw: Record<string, unknown>): Promise<void> => {
+    const manifestPath = getRequirementPrdPath(item)
+    try {
+      await writeJsonAtomic(manifestPath, updatedRaw)
+      list[index] = {
+        ...item,
+        prdManifest: normalizePrdManifest(updatedRaw),
+        updatedAt: new Date().toISOString()
+      }
+      await writeRequirementIndex(list)
+    } catch (error) {
+      const current = await readJson<unknown>(manifestPath, null)
+      if (JSON.stringify(current) === JSON.stringify(updatedRaw)) {
+        await writeJsonAtomic(manifestPath, manifestResult.raw).catch(() => undefined)
+      }
+      throw error
+    }
+  }
+  if (payload.fullPrd) {
+    const existingHtmlFile = manifestResult.manifest.prd.htmlFile
+    const htmlFile = payload.htmlFile?.trim() ? path.resolve(payload.htmlFile) : existingHtmlFile
+    if (payload.htmlFile?.trim()) {
+      try {
+        if (!(await fs.stat(htmlFile)).isFile()) throw new Error("HTML 文件无效")
+      } catch (error) {
+        if (error instanceof Error && error.message === "HTML 文件无效") throw error
+        throw new Error("HTML 文件不存在或无法访问")
+      }
+    }
+    const rawPrd = isRecord(manifestResult.raw.prd) ? manifestResult.raw.prd : {}
+    const updatedRaw = {
+      ...manifestResult.raw,
+      prd: { ...rawPrd, htmlFile, htmlId, needDesign: "1" }
+    }
+    await commit(updatedRaw)
+    return { htmlFile, htmlId }
+  }
   const match = resolveRequirementFunction(
     manifestResult.manifest,
     payload.workspacePath,
@@ -449,20 +489,7 @@ async function updateRequirementFunctionHtml(
       entryIndex === match.index ? { ...rawFunction, htmlFile, htmlId, needDesign: "1" } : entry
     )
   }
-  const updatedManifest = normalizePrdManifest(updatedRaw)
-  const manifestPath = getRequirementPrdPath(item)
-  try {
-    await writeJsonAtomic(manifestPath, updatedRaw)
-    list[index] = { ...item, prdManifest: updatedManifest, updatedAt: new Date().toISOString() }
-    await writeRequirementIndex(list)
-  } catch (error) {
-    // Roll back only our own write. Never overwrite a newer external manifest edit.
-    const current = await readJson<unknown>(manifestPath, null)
-    if (JSON.stringify(current) === JSON.stringify(updatedRaw)) {
-      await writeJsonAtomic(manifestPath, manifestResult.raw).catch(() => undefined)
-    }
-    throw error
-  }
+  await commit(updatedRaw)
   return { htmlFile, htmlId }
 }
 
@@ -556,7 +583,9 @@ function createEmptyPrdManifest(): IndexedPrdManifest {
       description: "",
       file: "",
       currentStep: 1,
-      needDesign: ""
+      needDesign: "",
+      htmlFile: "",
+      htmlId: ""
     },
     functions: []
   }
@@ -599,6 +628,8 @@ function normalizePrdManifest(value: unknown): IndexedPrdManifest {
         ? Math.max(1, Math.min(5, Math.trunc(prd.currentStep)))
         : fallbackStep,
     needDesign: normalizeNeedDesign(prd.needDesign),
+    htmlFile: readManifestString(prd, "htmlFile"),
+    htmlId: readManifestString(prd, "htmlId"),
     ...(prDetailUrl ? { prDetailUrl } : {})
   }
 
@@ -999,6 +1030,54 @@ async function saveRequirementStepState(
   }
 }
 
+async function clearRequirementDesign(
+  reqId: string,
+  targetFunction?: { fr: string; file: string }
+): Promise<{
+  requirement: RequirementRuntimeItem
+  manifest: IndexedPrdManifest
+}> {
+  const normalizedReqId = reqId?.trim()
+  if (!normalizedReqId) throw new Error("需求编号不能为空")
+  const list = await readRequirementIndex()
+  const index = list.findIndex((item) => item.reqId === normalizedReqId)
+  if (index < 0) throw new Error(`需求不存在：${normalizedReqId}`)
+  const item = list[index]
+  const workspaceManifest = await readWorkspaceManifest(item)
+  if (workspaceManifest.status !== "ok") throw new Error("无法读取需求文件，请刷新后重试")
+  const rawPrd = isRecord(workspaceManifest.raw.prd) ? workspaceManifest.raw.prd : {}
+  const rawFunctions = workspaceManifest.raw.functions as unknown[]
+  let targetFound = !targetFunction
+  const functions = rawFunctions.map((entry) => {
+    const rawFunction = isRecord(entry) ? entry : {}
+    const selected =
+      !targetFunction ||
+      (readManifestString(rawFunction, "fr") === targetFunction.fr &&
+        readManifestString(rawFunction, "file") === targetFunction.file)
+    if (selected) targetFound = true
+    return selected ? { ...rawFunction, htmlFile: "", htmlId: "", needDesign: "" } : rawFunction
+  })
+  if (!targetFound) throw new Error("未找到需要重置的功能")
+  const updatedRaw = {
+    ...workspaceManifest.raw,
+    prd: targetFunction
+      ? rawPrd
+      : { ...rawPrd, currentStep: 3, needDesign: "", htmlFile: "", htmlId: "" },
+    functions
+  }
+  const manifest = normalizePrdManifest(updatedRaw)
+  await writeJsonAtomic(getRequirementPrdPath(item), updatedRaw)
+  const next: RequirementIndexItem = {
+    ...item,
+    updatedAt: new Date().toISOString(),
+    needDesign: targetFunction ? item.needDesign : "",
+    prdManifest: manifest
+  }
+  list[index] = next
+  await writeRequirementIndex(list)
+  return { requirement: await toRuntimeRequirement(next), manifest }
+}
+
 async function saveRequirementPrd(payload: SavePrdPayload): Promise<RequirementRuntimeItem> {
   const list = await readRequirementIndex()
   const index = list.findIndex((item) => item.reqId === payload?.reqId)
@@ -1034,7 +1113,9 @@ async function saveRequirementPrd(payload: SavePrdPayload): Promise<RequirementR
       description: "",
       file: modules[0]?.filePath ?? "",
       currentStep: 3,
-      needDesign: ""
+      needDesign: "",
+      htmlFile: "",
+      htmlId: ""
     },
     functions: modules.map((module) => ({
       fr: module.moduleId,
@@ -1350,6 +1431,24 @@ export function registerRequirementHandlers(ipcMain: IpcMain): void {
         return {
           success: false,
           error: error instanceof Error ? error.message : "保存原型流程状态失败"
+        }
+      }
+    }
+  )
+  ipcMain.handle(
+    "requirements:clear-design",
+    async (_event, payload: { reqId: string; function?: { fr: string; file: string } }) => {
+      try {
+        return {
+          success: true,
+          ...(await enqueueManifestOperation(payload.reqId, () =>
+            clearRequirementDesign(payload.reqId, payload.function)
+          ))
+        }
+      } catch (error) {
+        return {
+          success: false,
+          error: error instanceof Error ? error.message : "重置设计失败"
         }
       }
     }

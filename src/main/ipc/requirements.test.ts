@@ -208,7 +208,9 @@ describe("requirement source preview", () => {
         file: "pr-doc.md",
         prDetailUrl: "https://www.baidu.com",
         currentStep: 5,
-        needDesign: ""
+        needDesign: "",
+        htmlFile: "",
+        htmlId: ""
       },
       functions: [
         {
@@ -619,6 +621,78 @@ describe("requirement source preview", () => {
     await remove(null, created.requirement.reqId)
   })
 
+  it("resets one function or all prototype design state", async () => {
+    const workDir = join(tempHome, "clear-design-workspace")
+    mkdirSync(workDir)
+    const create = handlers.get("requirements:create")!
+    const clearDesign = handlers.get("requirements:clear-design")!
+    const remove = handlers.get("requirements:delete")!
+    const created = (await create(null, {
+      systemId: "system-clear-design",
+      title: "重置设计",
+      workDir,
+      source: { type: "text", fileName: "" }
+    })) as { requirement: { reqId: string; requirementPath: string } }
+    const manifestPath = join(created.requirement.requirementPath, "prd", "prd-manifest.json")
+    mkdirSync(join(created.requirement.requirementPath, "prd"), { recursive: true })
+    writeFileSync(
+      manifestPath,
+      JSON.stringify({
+        prd: {
+          name: "重置设计",
+          status: "generated",
+          currentStep: 4,
+          needDesign: "1",
+          htmlFile: "full.html",
+          htmlId: "full-session"
+        },
+        functions: [
+          {
+            fr: "FR1",
+            file: "fr-1.md",
+            htmlFile: "fr-1.html",
+            htmlId: "session-1",
+            needDesign: "1"
+          },
+          {
+            fr: "FR2",
+            file: "fr-2.md",
+            htmlFile: "fr-2.html",
+            htmlId: "session-2",
+            needDesign: "1"
+          }
+        ]
+      }),
+      "utf-8"
+    )
+
+    const single = (await clearDesign(null, {
+      reqId: created.requirement.reqId,
+      function: { fr: "FR1", file: "fr-1.md" }
+    })) as { success: boolean }
+    expect(single.success).toBe(true)
+    expect(JSON.parse(readFileSync(manifestPath, "utf-8"))).toMatchObject({
+      prd: { currentStep: 4, needDesign: "1", htmlFile: "full.html", htmlId: "full-session" },
+      functions: [
+        { fr: "FR1", htmlFile: "", htmlId: "", needDesign: "" },
+        { fr: "FR2", htmlFile: "fr-2.html", htmlId: "session-2", needDesign: "1" }
+      ]
+    })
+
+    const all = (await clearDesign(null, { reqId: created.requirement.reqId })) as {
+      success: boolean
+    }
+    expect(all.success).toBe(true)
+    expect(JSON.parse(readFileSync(manifestPath, "utf-8"))).toMatchObject({
+      prd: { currentStep: 3, needDesign: "", htmlFile: "", htmlId: "" },
+      functions: [
+        { htmlFile: "", htmlId: "", needDesign: "" },
+        { htmlFile: "", htmlId: "", needDesign: "" }
+      ]
+    })
+    await remove(null, created.requirement.reqId)
+  })
+
   it("binds a generated HTML file and session to exactly one requirement function", async () => {
     const workDir = join(tempHome, "function-html-workspace")
     mkdirSync(workDir)
@@ -694,6 +768,21 @@ describe("requirement source preview", () => {
     expect(JSON.parse(readFileSync(manifestPath, "utf-8")).functions[0]).toMatchObject({
       htmlFile,
       htmlId: "ds_abcd1234",
+      needDesign: "1"
+    })
+
+    const fullPrdUpdated = (await updateFunctionHtml(null, {
+      reqId: created.requirement.reqId,
+      workspacePath,
+      requirementFilePath,
+      htmlFile,
+      htmlId: "ds_fullprd",
+      fullPrd: true
+    })) as { success: boolean; error?: string }
+    expect(fullPrdUpdated.success, fullPrdUpdated.error).toBe(true)
+    expect(JSON.parse(readFileSync(manifestPath, "utf-8")).prd).toMatchObject({
+      htmlFile,
+      htmlId: "ds_fullprd",
       needDesign: "1"
     })
     const binding = (await getFunctionHtml(null, { workspacePath, requirementFilePath })) as {

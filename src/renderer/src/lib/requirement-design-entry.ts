@@ -6,6 +6,7 @@ export const REQUIREMENT_CONVERSATION_ENTRY_KEY = "pending-requirement-conversat
 export const REQUIREMENT_CONVERSATION_NAVIGATE_EVENT = "requirement-conversation:navigate"
 
 export type RequirementDesignEntry = {
+  scope?: "function" | "full-prd"
   requirementId: string
   requirementName?: string
   functionName?: string
@@ -23,11 +24,18 @@ export type RequirementDesignEntryPayload =
   | RequirementDesignEntry
   | { entries: RequirementDesignEntry[] }
 
-export function shouldCreateRequirementDesignSession(
-  htmlId: string,
-  existingSessionIds: ReadonlySet<string>
-): boolean {
-  return !htmlId || !existingSessionIds.has(htmlId)
+export function isRequirementPrototypeStepComplete({
+  skipped,
+  allFunctionsComplete,
+  fullPrdHtmlFile,
+  published
+}: {
+  skipped: boolean
+  allFunctionsComplete: boolean
+  fullPrdHtmlFile?: string
+  published: boolean
+}): boolean {
+  return skipped || allFunctionsComplete || Boolean(fullPrdHtmlFile?.trim()) || published
 }
 
 export function buildRequirementDesignPrompt(
@@ -40,6 +48,15 @@ export function buildRequirementDesignPrompt(
     `请根据已附加的需求文件「${coreRequirementFile}」，为「${target}」设计高保真交互原型。`,
     "",
     "需求文件是业务范围、流程和规则的主要依据；其他资料仅作补充，冲突时以需求文件为准。请覆盖核心流程及必要的空状态、异常状态，输出可独立运行、主要流程可交互的单页 HTML。关键信息缺失时先提问确认。"
+  ].join("\n")
+}
+
+export function buildFullPrdDesignPrompt(requirementFile: string): string {
+  const prdFile = requirementFile.trim() || "完整 PRD 文档"
+  return [
+    `请根据已附加的完整 PRD 文档「${prdFile}」，为整个产品设计高保真 UI 交互原型。`,
+    "",
+    "请以完整 PRD 为唯一业务依据，系统梳理信息架构、页面关系和核心用户流程，并覆盖必要的空状态、异常状态与关键交互。输出可独立运行、主要流程可交互的单页 HTML；关键信息缺失时先提问确认。"
   ].join("\n")
 }
 
@@ -92,6 +109,21 @@ export function storeRequirementDesignEntries(
   }
 }
 
+export async function removeRequirementDesignSessions(
+  sessionIds: Iterable<string>,
+  removeSession: (sessionId: string) => Promise<void>,
+  storage: RequirementEntryStorage = localStorage
+): Promise<string[]> {
+  const ids = [...new Set(sessionIds)].filter(Boolean)
+  const results = await Promise.allSettled(
+    ids.map(async (sessionId) => {
+      await removeSession(sessionId)
+      storeActiveRequirementDesignEntry(null, sessionId, storage)
+    })
+  )
+  return ids.filter((_, index) => results[index].status === "rejected")
+}
+
 export function loadActiveRequirementDesignEntry(
   sessionId: string | null,
   storage: RequirementEntryStorage = localStorage
@@ -118,6 +150,15 @@ export function listRequirementDesignEntries(
     }
   }
   return [...entriesByFunction.values()]
+}
+
+export function listAllRequirementDesignEntries(
+  requirementId: string,
+  storage: RequirementEntryStorage = localStorage
+): RequirementDesignEntry[] {
+  return Object.values(readRequirementDesignAssociations(storage)).filter(
+    (entry) => entry.requirementId === requirementId
+  )
 }
 
 function readRequirementDesignAssociations(

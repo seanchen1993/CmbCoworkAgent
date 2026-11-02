@@ -1,5 +1,13 @@
 import type { ReactNode } from "react"
-import { Check, CheckCircle2, EllipsisVertical, Eye, FolderOpen, Palette } from "lucide-react"
+import {
+  Check,
+  CheckCircle2,
+  EllipsisVertical,
+  Eye,
+  FolderOpen,
+  Palette,
+  Trash2
+} from "lucide-react"
 
 import { Button } from "@/components/ui/button"
 import {
@@ -21,12 +29,14 @@ export function RequirementPrototypeMenu({
   disabled,
   onChange,
   onDesign,
+  onClear,
   className
 }: {
   needDesign: NeedDesignChoice
   disabled: boolean
   onChange: (needDesign: NeedDesignChoice) => void
   onDesign: () => void
+  onClear?: () => void
   className?: string
 }): React.JSX.Element {
   const needsDesign = needDesign === "1"
@@ -67,6 +77,15 @@ export function RequirementPrototypeMenu({
           <span className="flex-1">无需设计</span>
           {!needsDesign ? <Check className="text-status-nominal" /> : null}
         </DropdownMenuItem>
+        {onClear ? (
+          <DropdownMenuItem
+            onSelect={onClear}
+            className="cursor-pointer text-destructive focus:text-destructive"
+          >
+            <Trash2 />
+            <span className="flex-1">重置设计</span>
+          </DropdownMenuItem>
+        ) : null}
       </DropdownMenuContent>
     </DropdownMenu>
   )
@@ -78,13 +97,15 @@ export function RequirementPrototypeAction({
   choiceMade,
   disabled,
   onChange,
-  onDesign
+  onDesign,
+  onClear
 }: {
   needDesign: NeedDesignChoice
   choiceMade: boolean
   disabled: boolean
   onChange: (needDesign: NeedDesignChoice) => void
   onDesign: () => void
+  onClear?: () => void
 }): React.JSX.Element {
   if (!choiceMade) {
     return (
@@ -149,6 +170,7 @@ export function RequirementPrototypeAction({
         disabled={disabled}
         onChange={onChange}
         onDesign={onDesign}
+        onClear={onClear}
         className="absolute right-1 top-1"
       />
 

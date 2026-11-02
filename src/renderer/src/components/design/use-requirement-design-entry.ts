@@ -2,7 +2,6 @@ import { useEffect } from "react"
 
 import {
   REQUIREMENT_DESIGN_ENTRY_KEY,
-  shouldCreateRequirementDesignSession,
   storeRequirementDesignEntries,
   type RequirementDesignEntry,
   type RequirementDesignEntryPayload
@@ -82,10 +81,20 @@ export function useRequirementDesignEntry({
         onEntryChange({ ...firstEntry, bindingReady: false })
         setWorkspacePath(firstEntry.workspacePath)
         const client = getDesignSessionClient()
-        const sessionIds = new Set(client.list().map((session) => session.id))
         for (const entry of entries) {
           let readyEntry: ActiveRequirementDesignEntry
-          if (shouldCreateRequirementDesignSession(entry.htmlId, sessionIds)) {
+          let reuseExisting = false
+          if (entry.htmlId) {
+            try {
+              await client.open(entry.htmlId, true)
+              reuseExisting = true
+            } catch (error) {
+              if (!(error instanceof Error) || !error.message.includes("设计会话不存在"))
+                throw error
+              client.close(entry.htmlId)
+            }
+          }
+          if (!reuseExisting) {
             const requirementAttachment = await readRequirementAttachment(entry.requirementFilePath)
             const sessionId = createSession(
               { title: entry.functionName?.trim() || "需求原型" },
@@ -97,12 +106,12 @@ export function useRequirementDesignEntry({
               }
             )
             await client.waitUntilReady(sessionId)
-            sessionIds.add(sessionId)
             const updated = await window.api.requirements.updateFunctionHtml({
               reqId: entry.requirementId,
               workspacePath: entry.workspacePath,
               requirementFilePath: entry.requirementFilePath,
-              htmlId: sessionId
+              htmlId: sessionId,
+              fullPrd: entry.scope === "full-prd"
             })
             if (!updated.success) throw new Error(updated.error || "同步设计会话失败")
             readyEntry = { ...entry, htmlId: sessionId, bindingReady: true }

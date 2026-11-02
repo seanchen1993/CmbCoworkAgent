@@ -17,6 +17,8 @@ export type RequirementPrdManifest = {
     prDetailUrl?: string
     currentStep: number
     needDesign: NeedDesignChoice
+    htmlFile: string
+    htmlId: string
   }
   functions: Array<{
     id?: string

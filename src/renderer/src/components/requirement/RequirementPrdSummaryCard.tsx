@@ -1,4 +1,5 @@
 import { Eye, FileText, FolderOpen } from "lucide-react"
+import { Button } from "@/components/ui/button"
 import type { ReactNode } from "react"
 import { IconPopoverButton } from "@/components/ui/icon-popover-button"
 import type { RequirementPrdManifest } from "./requirement-data"
@@ -8,12 +9,14 @@ export function RequirementPrdSummaryCard({
   fallbackName,
   onOpenFile,
   onRevealFile,
+  onOpenDetails,
   children
 }: {
   prd: RequirementPrdManifest["prd"]
   fallbackName: string
   onOpenFile?: () => void
   onRevealFile?: () => void
+  onOpenDetails?: () => void
   children?: ReactNode
 }): React.JSX.Element {
   const canOpenFile = Boolean(prd.file && onOpenFile)
@@ -27,6 +30,18 @@ export function RequirementPrdSummaryCard({
             <h3 className="truncate text-base font-semibold leading-6 text-foreground">
               {prd.name || fallbackName}
             </h3>
+            {onOpenDetails ? (
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                className="h-7 shrink-0 gap-1 px-2 text-xs text-primary hover:text-primary"
+                onClick={onOpenDetails}
+              >
+                <Eye className="size-3.5" />
+                查看详情
+              </Button>
+            ) : null}
             {prd.file ? (
               <div className="flex items-center gap-0.5">
                 <IconPopoverButton

@@ -196,7 +196,9 @@ export class DesignSessionClient {
       this.apply(await this.api.start(request))
     )
   }
-  async open(id: string): Promise<DesignSessionSnapshot> {
+  async open(id: string, refresh = false): Promise<DesignSessionSnapshot> {
+    const cached = !refresh && this.opened.has(id) ? this.get(id) : undefined
+    if (cached) return cached
     this.opened.add(id)
     const version = (this.openVersions.get(id) ?? 0) + 1
     this.openVersions.set(id, version)
