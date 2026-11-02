@@ -2,6 +2,7 @@ import { useState } from "react"
 import { ChevronDown, ChevronRight, Eye, Wrench } from "lucide-react"
 import { getToolLabel } from "@/lib/tool-labels"
 import type { DesignExecutionEvent, DesignModelRetryState, Message } from "./types"
+import { DesignReasoning } from "./DesignReasoning"
 
 const MAX_VISIBLE_TOOL_CALLS = 60
 const MAX_VISIBLE_ASSISTANT_TEXT_EVENTS = 80
@@ -527,6 +528,7 @@ export function MessageBubble({ message, hasLiveOutput = false }: { message: Mes
   if (isQPrompt) {
     return (
       <div style={{ margin: "6px 0 10px" }}>
+        <DesignReasoning id={`design-message:${message.id}`} reasoning={message.reasoning} />
         <div style={{ display: "inline-flex", alignItems: "center", gap: 8, padding: "8px 14px", background: "rgba(204,120,92,0.08)", border: "1px solid rgba(204,120,92,0.25)", borderRadius: 20, fontSize: 13, color: "#cc785c", fontWeight: 500 }}>
           <span style={{ width: 7, height: 7, borderRadius: "50%", background: "#cc785c", flexShrink: 0 }} />
           {message.content}
@@ -537,6 +539,10 @@ export function MessageBubble({ message, hasLiveOutput = false }: { message: Mes
 
   return (
     <div style={{ marginBottom: 10 }}>
+      {!isUser && !(message.isStreaming && hasLiveOutput) && <DesignReasoning
+        id={`design-message:${message.id}`} reasoning={message.reasoning}
+        isStreaming={message.isStreaming} hasAnswer={Boolean(message.content || message.executionEvents?.length)}
+      />}
       {isUser && message.imageUrl && (
         <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 4 }}>
           <img

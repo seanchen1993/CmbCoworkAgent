@@ -341,7 +341,9 @@ describe("bounded patch model executor", () => {
         usage_metadata: { input_tokens: 100, output_tokens: 20, total_tokens: 120 }
       })
     }
-    const reply = normalizeDesignPatchReply(await readDesignPatchStream(stream()))
+    const received: AIMessageChunk[] = []
+    const reply = normalizeDesignPatchReply(await readDesignPatchStream(stream(), (chunk) => received.push(chunk)))
+    expect(received).toHaveLength(2)
     expect(JSON.parse(reply.content)).toEqual({ action: "target", targetIds: ["n_1"] })
     expect(reply.inputTokens).toBe(100)
   })

@@ -898,6 +898,7 @@ function sanitizePersistedMessages(messages: Message[]): Message[] {
         message.role === "assistant" &&
         message.isStreaming &&
         !message.content.trim() &&
+        !message.reasoning?.trim() &&
         !message.executionEvents?.length
       )
     })

@@ -55,7 +55,8 @@ import {
 import { designStreamWithArtifactRecovery, isDesignGraphRecursionLimit } from "../services/design/generation-stream"
 import { getAgentGraphRecursionLimit } from "../../shared/agent-runtime-limits"
 import { inspectDesignDocument, isFinalizableDesignDraft } from "../../shared/design-progressive"
-import { extractDesignPublicText } from "../../shared/design-live-output"
+import { createDesignModelActivity, extractDesignPublicText } from "../../shared/design-live-output"
+import { readStreamMessageWireMode, STREAM_MESSAGE_REASONING_MODE_KEY } from "../../shared/stream-message-wire-mode"
 import { materializeTweaks, readTweakDeclaration, reconcileTweaks, tweakSourceDiagnostics, type DesignTweakCommand, type DesignTweaksState } from "../../shared/design-tweaks"
 import { approvalDecisionBroker } from "../agent/approval-decision-broker"
 import { asDesignApprovalRequest, type DesignRunEvent, type DesignSessionChange, type DesignSessionSeed, type DesignRunRequest, type TabState, type SessionMeta } from "../../shared/managed-design-session"
@@ -2667,6 +2668,7 @@ export function registerDesignHandlers(): void {
         const candidateFile = path.join(path.dirname(artifactPath), `.patch-${runId}.html`)
         activeSessions.set(runId, controller)
         let nativeTools = true
+        let patchModelCall = 0
         try {
           if (process.env.DESIGN_LOCAL_PATCH === "0") throw new DesignPatchScopeError("局部补丁通道已通过配置关闭")
           if (designVariantPolicyIssue(snapshot.state.html, isSingleDesignVariant(snapshot.state, snapshot.meta)))
@@ -2684,7 +2686,12 @@ export function registerDesignHandlers(): void {
               const input = messages.map((m) => m.role === "system" ? new SystemMessage(m.content) : new HumanMessage(m.content))
               const read = async (withTools: boolean) => {
                 const stream = await (withTools ? model.bindTools(DESIGN_PATCH_TOOLS, { parallel_tool_calls: false }) : model).stream(input, { signal })
-                return await readDesignPatchStream(stream)
+                const scope = `${runId}:patch:${++patchModelCall}`
+                return await readDesignPatchStream(stream, (chunk) => {
+                  emit({ type: "model_activity", activity: createDesignModelActivity(chunk, scope) })
+                  const token = extractDesignPublicText(chunk.content)
+                  if (token) emit({ type: "token", token, displayText: false })
+                })
               }
               let reply
               try { reply = await read(nativeTools) }
@@ -2990,12 +2997,14 @@ export function registerDesignHandlers(): void {
 
         for await (const chunk of stream) {
           if (controller.signal.aborted) break
-          const token = typeof chunk.content === "string" ? chunk.content : ""
+          send({ type: "model_activity", activity: createDesignModelActivity(chunk, sessionId) })
+          if (firstChunk) {
+            firstChunk = false
+            send({ type: "metrics", metrics: { firstModelChunkAt: Date.now() } })
+          }
+          const token = extractDesignPublicText(chunk.content)
           if (token) {
-            if (firstChunk) {
-              firstChunk = false
-              send({ type: "metrics", metrics: { firstModelChunkAt: Date.now() } })
-            }
+            send({ type: "token", token })
             fullText += token
             for (const question of questionStream.push(token)) {
               if (filterActiveDesignSystemQuestions([question], designSystemId).length)
@@ -3110,7 +3119,8 @@ export function registerDesignHandlers(): void {
 
         for await (const chunk of stream) {
           if (controller.signal.aborted) break
-          const token = typeof chunk.content === "string" ? chunk.content : ""
+          send({ type: "model_activity", activity: createDesignModelActivity(chunk, sessionId) })
+          const token = extractDesignPublicText(chunk.content)
           if (token) {
             fullText += token
             send({ type: "token", token })
@@ -3211,7 +3221,8 @@ export function registerDesignHandlers(): void {
 
         for await (const chunk of stream) {
           if (controller.signal.aborted) break
-          const token = typeof chunk.content === "string" ? chunk.content : ""
+          send({ type: "model_activity", activity: createDesignModelActivity(chunk, sessionId) })
+          const token = extractDesignPublicText(chunk.content)
           if (token) {
             fullText += token
             tokenCount++
@@ -3917,6 +3928,8 @@ export function registerDesignHandlers(): void {
                         }
 
                         const assistantText = extractDesignPublicText(kwargs.content ?? msg.content)
+                        const activity = createDesignModelActivity(msg, `${runtimeThreadId}:${String(kwargs.id || msg.id || "values")}`, "snapshot", true)
+                        if (activity.reasoning) send({ type: "model_activity", activity })
                         if (assistantText && !className.includes("Chunk")) {
                           emitAssistantText(`assistant:${String(kwargs.id || msg.id || Date.now())}`, assistantText)
                         }
@@ -3959,20 +3972,20 @@ export function registerDesignHandlers(): void {
 
                 if (mode !== "messages") continue
 
-                const [msgChunk] = (serialized as unknown[]) as [Record<string, unknown>]
+                const [msgChunk, metadata] = (serialized as unknown[]) as [Record<string, unknown>, Record<string, unknown> | undefined]
                 if (!msgChunk) continue
 
                 const kwargs = (msgChunk.kwargs ?? {}) as Record<string, unknown>
                 const className = getSerializedClassName(msgChunk)
 
                 if (className.includes("AI")) {
-                  if (className.includes("Chunk")) {
-                    if (typeof kwargs.id === "string" && kwargs.id) liveMessageScope = kwargs.id
-                    send({
-                      type: "model_activity",
-                      activity: { scope: liveMessageScope, toolCallChunks: kwargs.tool_call_chunks }
-                    })
-                  }
+                  if (typeof kwargs.id === "string" && kwargs.id) liveMessageScope = `${runtimeThreadId}:${kwargs.id}`
+                  const completed = !className.includes("Chunk")
+                  send({
+                    type: "model_activity",
+                    activity: createDesignModelActivity(msgChunk, liveMessageScope,
+                      completed ? "snapshot" : readStreamMessageWireMode(metadata?.[STREAM_MESSAGE_REASONING_MODE_KEY]) ?? "delta", completed)
+                  })
                   if (!recordedFirstModelChunk) {
                     recordedFirstModelChunk = true
                     send({ type: "metrics", metrics: { firstModelChunkAt: Date.now() } })

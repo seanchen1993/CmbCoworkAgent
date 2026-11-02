@@ -1,9 +1,11 @@
 import { useEffect, useRef, useState } from "react"
 import { ChevronDown, ChevronUp } from "lucide-react"
 import type { DesignLiveOutput as LiveOutput } from "../../../../shared/design-live-output"
+import { DesignReasoning } from "./DesignReasoning"
 
 const labels: Record<LiveOutput["phase"], string> = {
   waiting: "等待模型继续输出",
+  thinking: "模型正在思考",
   model: "正在接收模型输出",
   file: "正在生成文件内容",
   tool: "正在执行工具",
@@ -41,12 +43,17 @@ export function DesignLiveOutput({ output }: { output: LiveOutput }) {
         {expanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
       </button>
       {expanded && <>
-        <pre ref={lines} aria-label="模型实时输出" style={{
+        {output.reasoning && <div style={{ padding: "0 12px" }}>
+          <DesignReasoning key={output.reasoningScope} id={`design-live:${output.startedAt}:${output.reasoningScope}`}
+            reasoning={output.reasoning} isStreaming isThinking={output.phase === "thinking"}
+            hasAnswer={output.phase !== "thinking"} />
+        </div>}
+        {(output.text || !output.reasoning) && <pre ref={lines} aria-label="模型实时输出" style={{
           margin: "0 12px", height: 72, overflow: "auto", whiteSpace: "pre-wrap", overflowWrap: "anywhere",
           fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontSize: 11, lineHeight: "18px", color: "#80796e"
-        }}>{output.text || (output.phase === "validation" ? "等待当前页面的检查结果…" : "等待可显示的模型输出…")}</pre>
+        }}>{output.text || (output.phase === "validation" ? "等待当前页面的检查结果…" : "等待可显示的模型输出…")}</pre>}
         <div style={{ display: "flex", justifyContent: "space-between", gap: 8, padding: "7px 12px 9px", fontSize: 11, color: "#9a9389", fontVariantNumeric: "tabular-nums" }}>
-          <span>{output.chars ? `已接收 ${output.chars.toLocaleString()} 字符` : "任务正在进行"}</span>
+          <span>{output.reasoningChars ? `思考 ${output.reasoningChars.toLocaleString()} 字符${output.chars ? ` · 输出 ${output.chars.toLocaleString()} 字符` : ""}` : output.chars ? `已接收 ${output.chars.toLocaleString()} 字符` : "任务正在进行"}</span>
           <span>{seconds < 2 ? "刚刚收到活动" : `${seconds} 秒未收到新活动`}</span>
         </div>
       </>}

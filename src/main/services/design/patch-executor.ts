@@ -18,10 +18,14 @@ export interface PatchModelReply {
   outputTokens?: number
 }
 export async function readDesignPatchStream<T extends { concat(other: T): T }>(
-  stream: AsyncIterable<T>
+  stream: AsyncIterable<T>,
+  onChunk?: (chunk: T) => void
 ): Promise<T> {
   let full: T | undefined
-  for await (const chunk of stream) full = full ? full.concat(chunk) : chunk
+  for await (const chunk of stream) {
+    onChunk?.(chunk)
+    full = full ? full.concat(chunk) : chunk
+  }
   if (!full) throw new Error("模型返回了空补丁")
   return full
 }

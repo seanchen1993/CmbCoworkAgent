@@ -559,7 +559,7 @@ export class DesignRunManager {
       if (event.activity) run.output.activity(event.activity)
       // Partial arguments are transient. Persist only the bounded, decoded output snapshot.
       event = { type: "model_activity" }
-    } else if (event.type === "token" && event.token) run.output.text(event.token)
+    } else if (event.type === "token" && event.token) run.output.text(event.token, run.request.kind !== "questions" && event.displayText !== false)
     else if (event.type === "execution" && event.event) {
       const activity = event.event as NonNullable<TabState["messages"][number]["executionEvents"]>[number]
       if (activity.kind === "tool_call" && Object.keys(activity.args ?? {}).length)
@@ -670,7 +670,7 @@ export class DesignRunManager {
       } else if (event.type === "token" && event.token) {
         if (!state.generationMetrics?.firstTokenAt)
           state.generationMetrics = { ...state.generationMetrics, firstTokenAt: Date.now() }
-        const text = run.normalize(event.token)
+        const text = run.request.kind === "questions" || event.displayText === false ? "" : run.normalize(event.token)
         if (text)
           assistant.executionEvents = appendDesignExecutionEvent(assistant.executionEvents ?? [], {
             kind: "assistant_text",
@@ -851,6 +851,7 @@ export class DesignRunManager {
       state.pendingApproval = null
       next.activeRunId = null
     }
+    assistant.reasoning = run.output.reasoning || undefined
     state.liveOutput = terminal ? null : run.output.snapshot()
     this.commit(
       next,

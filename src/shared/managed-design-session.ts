@@ -78,6 +78,7 @@ export interface DesignRunEvent {
   tweaks?: DesignTweaksState | null
   metrics?: DesignGenerationMetrics
   token?: string
+  displayText?: boolean
   activity?: DesignModelActivity
   html?: string
   questions?: unknown[]
@@ -190,10 +191,10 @@ const DESIGN_HTML_PROGRESS_PATTERN =
 const DESIGN_TOOL_MARKUP_PROGRESS_PATTERN =
   /(?:[<＜]\s*[|｜]?DSML[|｜]?\s*[>＞]|tool Calls|invoke name=|parameter name=|<\/\s*[|｜]?DSML[|｜]?\s*>)/i
 const DESIGN_TOOL_PROGRESS_LINE_PATTERN = /^\s*(?:读取文件|写入文件|修改文件|编辑文件):/i
-const THINK_OPEN_PATTERN = /<think\b[^>]*>?/i
+const THINK_OPEN_PATTERN = /<think\b[^>]*>/i
 const THINK_CLOSE_PATTERN = /<\/think>/i
-const THINK_PARTIAL_OPEN_PATTERN = /<t(?:h(?:i(?:n(?:k(?:\b[^>]*)?)?)?)?)?$/i
-const THINK_PARTIAL_CLOSE_PATTERN = /<\/t(?:h(?:i(?:n(?:k)?)?)?)?$/i
+const THINK_PARTIAL_OPEN_PATTERN = /<(?:t|th|thi|thin|think(?:\b[^>]*)?)?$/i
+const THINK_PARTIAL_CLOSE_PATTERN = /<(?:\/(?:t|th|thi|thin|think)?)?$/i
 const DIRECT_DESIGN_REQUEST_PATTERN =
   /\b(skip questions|no questions|just build|build directly|directly generate)\b|(?:直接|马上|立刻)(?:生成|开始|做|出图|出页面)|(?:不要|不用|无需|别)(?:问|提问|问题|澄清|确认)|跳过(?:问题|问答|提问|澄清)/i
 
@@ -224,7 +225,10 @@ export function clampDesignProgressText(content: string): string {
   return content
 }
 
-export function createDesignProgressNormalizer(options: { includeCode?: boolean } = {}): (token: string) => string {
+export function createDesignProgressNormalizer(options: {
+  includeCode?: boolean
+  onReasoning?: (text: string) => void
+} = {}): (token: string) => string {
   let insideThinkBlock = false
   let insideHtmlArtifact = false
   let htmlProgressEmitted = false
@@ -245,8 +249,10 @@ export function createDesignProgressNormalizer(options: { includeCode?: boolean 
           if (partialClose?.index !== undefined) {
             pendingThinkTagFragment = partialClose[0]
           }
+          options.onReasoning?.(remaining.slice(0, partialClose?.index ?? remaining.length))
           return visible
         }
+        options.onReasoning?.(remaining.slice(0, close.index))
         remaining = remaining.slice(close.index + close[0].length)
         insideThinkBlock = false
         continue
@@ -269,9 +275,13 @@ export function createDesignProgressNormalizer(options: { includeCode?: boolean 
 
       const close = remaining.match(THINK_CLOSE_PATTERN)
       if (!close || close.index === undefined) {
+        const partialClose = remaining.match(THINK_PARTIAL_CLOSE_PATTERN)
+        pendingThinkTagFragment = partialClose?.[0] ?? ""
+        options.onReasoning?.(remaining.slice(0, partialClose?.index ?? remaining.length))
         insideThinkBlock = true
         break
       }
+      options.onReasoning?.(remaining.slice(0, close.index))
       remaining = remaining.slice(close.index + close[0].length)
     }
 

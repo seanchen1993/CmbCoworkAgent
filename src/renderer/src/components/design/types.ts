@@ -25,6 +25,7 @@ export interface Message {
   id?: string
   role: "user" | "assistant" | "questions-prompt"
   content: string
+  reasoning?: string
   tags?: string[]
   skillName?: string
   attachments?: MessageAttachment[]
