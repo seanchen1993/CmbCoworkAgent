@@ -33,7 +33,13 @@ import {
   type ImEventRecord,
   type ImEventStore
 } from "./event-store"
-import { imProjectModeReplyPrefix, imTargetReplyPrefix } from "./reply-context"
+import {
+  buildImReplyContinuationHint,
+  imProjectModeReplyPrefix,
+  imTargetReplyPrefix
+} from "./reply-context"
+import { projectThreadAliasParts } from "./thread-alias"
+import { prepareImSessionLink } from "./session-link-store"
 import { buildImProactiveReplies } from "./reply-segmentation"
 import { ImReplyClient } from "./reply-client"
 import { resolveImProjectModeReplyContext } from "./project-reply-context"
@@ -82,7 +88,7 @@ type WorkflowPort = Pick<
 
 interface ImRemoteModeNotificationPumpDependencies {
   conversations: ImConversationStateStore
-  events: Pick<ImEventStore, "enqueueProactiveReplies">
+  events: Pick<ImEventStore, "enqueueProactiveReplies" | "sessionLinks">
   capabilityGuard: ImRemoteCapabilityGuard
   replyClient: Pick<ImReplyClient, "sendPending">
   coordinator: CoordinatorPort
@@ -768,11 +774,30 @@ export class ImRemoteModeNotificationPump {
     let switched = false
     try {
       const bound = this.dependencies.conversations.getSelectedTarget(notice.conversationKey)
-      switched = Boolean(bound && bound.snapshot.targetId !== notice.targetSnapshot.targetId)
+      switched = Boolean(bound && bound.snapshot.threadId !== notice.targetSnapshot.threadId)
     } catch {
       // 只兜数据库读失败:标注不出来也要把通知发出去。
       switched = false
     }
+    const sessionCode = switched
+      ? prepareImSessionLink(this.dependencies.events.sessionLinks, {
+          principalId: notice.principalId,
+          conversationKey: notice.conversationKey,
+          threadId: notice.targetSnapshot.threadId,
+          kind: notice.targetSnapshot.kind,
+          label: threadTitle || projectContext?.featureName || "默认聊天",
+          deliveryId
+        })
+      : undefined
+    const continuationHint = buildImReplyContinuationHint({
+      switched,
+      kind: notice.targetSnapshot.kind,
+      sessionCode,
+      threadTitle:
+        threadTitle ||
+        (notice.targetSnapshot.kind === "thread" ? notice.targetSnapshot.title : undefined),
+      requiresSelection: !sessionCode || Boolean(thread && projectThreadAliasParts(thread))
+    })
     try {
       await this.dependencies.events.enqueueProactiveReplies(
         buildImProactiveReplies({
@@ -780,8 +805,12 @@ export class ImRemoteModeNotificationPump {
           conversationKey: notice.conversationKey,
           text,
           prefix: projectContext
-            ? imProjectModeReplyPrefix({ ...projectContext, switched })
-            : imTargetReplyPrefix(notice.targetSnapshot, { switched, threadTitle }),
+            ? imProjectModeReplyPrefix({ ...projectContext, switched, continuationHint })
+            : imTargetReplyPrefix(notice.targetSnapshot, {
+                switched,
+                threadTitle,
+                continuationHint
+              }),
           format: "markdown"
         })
       )

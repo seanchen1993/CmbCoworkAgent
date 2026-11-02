@@ -1,3 +1,5 @@
+import { isModelAvailable } from "../../shared/model-catalog"
+import { getModelClientOptions } from "../models/connection"
 import { prepareMarketCommand, resolveMarketRuntimePath } from "../services/market-content"
 import { spawn } from "node:child_process"
 import { ChatOpenAI } from "@langchain/openai"
@@ -864,7 +866,7 @@ function getPromptHookModel(modelId: string | undefined, timeout: number): ChatO
     ? (getModelConfigByRef(modelId) ?? getAvailableModelConfigOrDefault())
     : getAvailableModelConfigOrDefault()
 
-  if (!config?.apiKey) return null
+  if (!isModelAvailable(config)) return null
 
   return new ChatOpenAI({
     model: config.model,
@@ -876,7 +878,7 @@ function getPromptHookModel(modelId: string | undefined, timeout: number): ChatO
     modelKwargs: {
       ...topKModelKwargs(config.model, config.topK)
     },
-    configuration: { baseURL: config.baseUrl }
+    ...getModelClientOptions(config)
   })
 }
 

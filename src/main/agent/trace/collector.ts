@@ -1580,7 +1580,17 @@ export class TraceCollector {
     // Finishing touches several non-idempotent side channels (skill-eval
     // windows, local persistence, cloud reporting, and adoption cleanup). Keep
     // the documented first-call-wins contract even when two teardown paths race.
-    this.finishPromise ??= this.finishOnce(outcome, errorMessage)
+    if (!this.finishPromise) {
+      // Tool writes already capture attribution synchronously in recordGen.
+      // Release execution state now, before potentially slow/hung metadata
+      // enrichment in finishOnce. A late finish cannot clear a newer turn.
+      try {
+        clearAdoptionContext(this.threadId, this.traceId)
+      } catch {
+        // Attribution cleanup must not mask the original finish result.
+      }
+      this.finishPromise = this.finishOnce(outcome, errorMessage)
+    }
     return this.finishPromise
   }
 
@@ -1818,26 +1828,15 @@ export class TraceCollector {
       : trace
 
     try {
-      try {
-        flushSystemConstraintReadSummaries(this.traceId, outcome)
-      } catch (error) {
-        console.warn("[Tracer] Failed to flush system-constraint read telemetry:", error)
-      }
-      writeTraceFile(traceWithEval)
-
-      // Keep reporting off the main run path, but track it so graceful app
-      // shutdown can wait for already-scheduled uploads within a hard bound.
-      reportTraceInBackground(traceWithEval)
-    } finally {
-      // A child trace may finish in the background after a continuation has
-      // installed a newer context on the same worker thread. Only clear the
-      // context still owned by this trace, even when persistence fails.
-      try {
-        clearAdoptionContext(this.threadId, this.traceId)
-      } catch {
-        // ignore
-      }
+      flushSystemConstraintReadSummaries(this.traceId, outcome)
+    } catch (error) {
+      console.warn("[Tracer] Failed to flush system-constraint read telemetry:", error)
     }
+    writeTraceFile(traceWithEval)
+
+    // Keep reporting off the main run path, but track it so graceful app
+    // shutdown can wait for already-scheduled uploads within a hard bound.
+    reportTraceInBackground(traceWithEval)
 
     return traceWithEval
   }

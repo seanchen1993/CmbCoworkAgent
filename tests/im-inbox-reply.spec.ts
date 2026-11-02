@@ -184,7 +184,7 @@ function testReplySegmentationAndStableEnvelope(): void {
   assert.equal(eventShortCode("event-stable-id"), eventShortCode("event-stable-id"))
   assert.match(eventShortCode("event-stable-id"), /^[A-F0-9]{8}$/)
 
-  assert.equal(imInboxReplyPrefix(), "【远程收件箱】")
+  assert.equal(imInboxReplyPrefix(), "【默认聊天】")
   assert.equal(imThreadReplyPrefix("  接口   排障  "), "【会话：接口 排障】")
   assert.equal(
     imFeatureReplyPrefix({
@@ -210,10 +210,9 @@ function testReplySegmentationAndStableEnvelope(): void {
       "特性：【快捷支付】",
       "当前阶段：Dev-代码实现",
       "阶段状态：进行中",
-      // f80fb47b 把模型正文和这段抬头分开：末尾的空串是那一行分隔空行，
-      // 少了它正文会直接贴在「阶段状态」后面。
-      "模型返回：",
-      ""
+      "",
+      "──────────",
+      "以下是该会话的回复："
     ].join("\n")
   )
 }
@@ -229,8 +228,8 @@ function fenceLines(segment: string): number {
  * may rely on it being rendered.
  */
 function testMarkdownSegmentsRenderOnTheirOwn(): void {
-  assert.deepEqual(segmentImMarkdownText("# 标题\n\n正文", { prefix: "【远程收件箱】" }), [
-    "【远程收件箱】\n\n# 标题\n\n正文"
+  assert.deepEqual(segmentImMarkdownText("# 标题\n\n正文", { prefix: "【默认聊天】" }), [
+    "【默认聊天】\n\n# 标题\n\n正文"
   ])
   const projectPrefix = imProjectModeReplyPrefix({
     projectName: "支付平台",
@@ -240,7 +239,7 @@ function testMarkdownSegmentsRenderOnTheirOwn(): void {
   })
   assert.equal(
     segmentImMarkdownText("答复", { prefix: projectPrefix })[0],
-    "【项目模式会话返回】\n\n项目：【支付平台】\n\n特性：【快捷支付】\n\n当前阶段：Dev-代码实现\n\n阶段状态：进行中\n\n模型返回：\n\n答复"
+    "【项目模式会话返回】  \n项目：【支付平台】  \n特性：【快捷支付】  \n当前阶段：Dev-代码实现  \n阶段状态：进行中\n\n──────────  \n以下是该会话的回复：\n\n答复"
   )
 
   // The cut prefers the paragraph break, and the marker stays off the heading.
@@ -327,17 +326,12 @@ function testMarkdownSegmentsRenderOnTheirOwn(): void {
 }
 
 /**
- * Markdown leaves as markdown only on a connection that agreed to it, and only
- * for a conversation not in /文字模式; the reply mode is not even read when the
- * gateway could not take it. A markdown segment refused as a payload goes out
+ * Markdown leaves as markdown only on a connection that agreed to it.
+ * A markdown segment refused as a payload goes out
  * again at once as text under the same key — any other refusal stays refused.
  */
-async function testMarkdownGoesOutOnlyWhereAgreedAndWanted(): Promise<void> {
-  const run = async (options: {
-    supportsMarkdown?: boolean
-    textMode?: boolean
-    refuseMarkdownWith?: string
-  }) => {
+async function testMarkdownGoesOutOnlyWhereAgreed(): Promise<void> {
+  const run = async (options: { supportsMarkdown?: boolean; refuseMarkdownWith?: string }) => {
     const records: ImReplyOutboxRecord[] = (["markdown", "text"] as const).map((contentFormat) => ({
       outboxId: `outbox-${contentFormat}`,
       deliveryId: `delivery-${contentFormat}`,
@@ -359,7 +353,6 @@ async function testMarkdownGoesOutOnlyWhereAgreedAndWanted(): Promise<void> {
     const find = (outboxId: string): ImReplyOutboxRecord =>
       records.find((record) => record.outboxId === outboxId)!
     const submitted: Array<{ key: string; type: string }> = []
-    const modeReads: string[] = []
     const gateway = {
       submitReply: async (reply: RemoteImReplyV1) => {
         submitted.push({ key: reply.idempotencyKey, type: reply.message.type })
@@ -391,17 +384,9 @@ async function testMarkdownGoesOutOnlyWhereAgreedAndWanted(): Promise<void> {
         return find(outboxId)
       }
     } as unknown as ImEventStore
-    const client = new ImReplyClient(
-      gateway,
-      eventStore,
-      () => 0,
-      (conversationKey) => {
-        modeReads.push(conversationKey)
-        return options.textMode === true
-      }
-    )
+    const client = new ImReplyClient(gateway, eventStore, () => 0)
     await client.sendPending()
-    return { submitted, modeReads, records }
+    return { submitted, records }
   }
   const types = (entries: Array<{ type: string }>): string[] => entries.map((entry) => entry.type)
 
@@ -410,14 +395,9 @@ async function testMarkdownGoesOutOnlyWhereAgreedAndWanted(): Promise<void> {
 
   const released = await run({})
   assert.deepEqual(types(released.submitted), ["text", "text"])
-  assert.deepEqual(released.modeReads, [], "no reply mode is read for a gateway without markdown")
 
   const declined = await run({ supportsMarkdown: false })
   assert.deepEqual(types(declined.submitted), ["text", "text"])
-
-  const textMode = await run({ supportsMarkdown: true, textMode: true })
-  assert.deepEqual(types(textMode.submitted), ["text", "text"])
-  assert.deepEqual(textMode.modeReads, ["conversation-1"], "read once, for the markdown reply only")
 
   const refused = await run({ supportsMarkdown: true, refuseMarkdownWith: "INVALID_PAYLOAD" })
   assert.deepEqual(refused.submitted.slice(0, 2), [
@@ -645,7 +625,7 @@ const tests: Array<[string, () => void | Promise<void>]> = [
   ["testManagedInboxCreationAndReuse", testManagedInboxCreationAndReuse],
   ["testReplySegmentationAndStableEnvelope", testReplySegmentationAndStableEnvelope],
   ["testMarkdownSegmentsRenderOnTheirOwn", testMarkdownSegmentsRenderOnTheirOwn],
-  ["testMarkdownGoesOutOnlyWhereAgreedAndWanted", testMarkdownGoesOutOnlyWhereAgreedAndWanted],
+  ["testMarkdownGoesOutOnlyWhereAgreed", testMarkdownGoesOutOnlyWhereAgreed],
   ["testConcurrentOutboxDrainUsesSingleSender", testConcurrentOutboxDrainUsesSingleSender],
   [
     "testSegmentDeliveryStopsBehindUnconfirmedPredecessor",

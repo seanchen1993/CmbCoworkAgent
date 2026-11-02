@@ -184,6 +184,17 @@ describe("OpenAI-compatible context overflow classification", () => {
     }),
     new Error("outer middleware", {
       cause: Object.assign(new Error("maximum context length is 128000 tokens"), { status: 400 })
+    }),
+    { status: 485, errorMsg: "模型服务内部异常或当前任务上下文超过最大限度" },
+    { statusCode: 580, errorMsg: "当前任务上下文超过最大限度，请缩短上下文" },
+    { returnCode: "XCDZB485", errorMsg: "模型服务内部异常或当前任务上下文超过最大限度" },
+    { error: { code: "XCDZB580", message: "当前任务上下文超过最大限度" } },
+    {
+      status: 580,
+      responseBody: '{"returnCode":"XCDZB580","errorMsg":"当前任务上下文超过最大限度"}'
+    },
+    new Error("outer middleware", {
+      cause: Object.assign(new Error("485 当前任务上下文超过最大限度"), { status: 485 })
     })
   ])("recognises an established overflow shape", (error) => {
     expect(isCmbContextOverflow(error)).toBe(true)
@@ -193,7 +204,19 @@ describe("OpenAI-compatible context overflow classification", () => {
     Object.assign(new Error("tool_calls must be followed by tool messages"), { status: 400 }),
     Object.assign(new Error("invalid API key"), { status: 401 }),
     Object.assign(new Error("rate limit exceeded"), { status: 429 }),
-    new Error("maximum retries exceeded")
+    new Error("maximum retries exceeded"),
+    { status: 485, errorMsg: "模型服务内部异常" },
+    { status: 580, errorMsg: "模型服务内部异常" },
+    { status: 500, errorMsg: "当前任务上下文超过最大限度" },
+    { status: 434, errorMsg: "当前任务上下文超过最大限度", returnCode: "XCDZB580" },
+    { status: 401, errorMsg: "当前任务上下文超过最大限度" },
+    { status: 429, errorMsg: "当前任务上下文超过最大限度" },
+    { errorMsg: "当前任务上下文超过最大限度" },
+    { returnCode: "XCDZB485", errorMsg: "模型服务内部异常" },
+    {
+      status: 580,
+      responseBody: '{"errorMsg":"模型服务内部异常","request":{"text":"任务上下文超过最大限度"}}'
+    }
   ])("does not turn unrelated provider failures into compaction", (error) => {
     expect(isCmbContextOverflow(error)).toBe(false)
   })
@@ -632,6 +655,68 @@ describe("CmbCowork context compaction middleware", () => {
     expect(handler).toHaveBeenCalledTimes(2)
     expect(invoke).toHaveBeenCalledTimes(1)
   })
+
+  it.each([485, 580])(
+    "bounds recovery when every gateway request still overflows with status %s",
+    async (status) => {
+      const error = Object.assign(new Error("模型服务内部异常或当前任务上下文超过最大限度"), {
+        status
+      })
+      const invoke = vi.fn(async () => new AIMessage(validSummary("gateway recovery")))
+      const handler = vi.fn(async () => {
+        throw error
+      })
+      const middleware = createTestMiddleware(invoke, {
+        trigger: { type: "messages", value: 100 },
+        keepTokens: 1
+      })
+
+      await expect(
+        middleware.wrapModelCall(
+          {
+            messages: [
+              new HumanMessage(`OLD_CONTEXT ${"x".repeat(4_000)}`),
+              new HumanMessage("RECENT_MESSAGE_TO_KEEP")
+            ],
+            state: {},
+            tools: []
+          },
+          handler
+        )
+      ).rejects.toBe(error)
+
+      expect(handler).toHaveBeenCalledTimes(3)
+      expect(invoke).toHaveBeenCalledTimes(2)
+    }
+  )
+
+  it.each([485, 580])(
+    "bounds gateway overflow failures in the summary model itself with status %s",
+    async (status) => {
+      const error = Object.assign(new Error("模型服务内部异常或当前任务上下文超过最大限度"), {
+        status
+      })
+      const invoke = vi.fn(async () => {
+        throw error
+      })
+      const handler = vi.fn(async () => new AIMessage("handled"))
+      const middleware = createTestMiddleware(invoke, {
+        keepTokens: 1,
+        trimTokensToSummarize: 8_000
+      })
+      const messages = Array.from(
+        { length: 80 },
+        (_, index) => new HumanMessage(`ROUND_${index} ${"x".repeat(800)}`)
+      )
+
+      await expect(
+        middleware.wrapModelCall({ messages, state: {}, tools: [] }, handler)
+      ).rejects.toBe(error)
+      expect(invoke.mock.calls.length).toBeGreaterThan(1)
+      expect(invoke.mock.calls.length).toBeLessThanOrEqual(4)
+      expect(handler).not.toHaveBeenCalled()
+    }
+  )
 
   it("does not apply a parent cutoff event to an isolated task-subagent prompt", async () => {
     const ownerConfigKey = "cmb_test_subagent_owner"

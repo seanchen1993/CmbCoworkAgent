@@ -1,3 +1,5 @@
+import { isModelAvailable } from "../../shared/model-catalog"
+import { getModelClientOptions } from "../models/connection"
 import { managedBizRetryService } from "../harness-board/biz-retry-service"
 import { IpcMain, BrowserWindow, dialog } from "electron"
 import {
@@ -1129,7 +1131,7 @@ function rejectDesktopRunForRemoteReadOnlyThread(
     error: "REMOTE_INBOX_DESKTOP_READ_ONLY",
     message: historical
       ? "设备接管前的远程历史 Thread 仅可查看。"
-      : "远程收件箱在桌面仅可查看，请从招乎继续发送消息。"
+      : "招乎默认聊天在桌面仅可查看，请从招乎继续发送消息。"
   })
   safeSendToWindow(window, channel, { type: "done" })
   return true
@@ -4949,7 +4951,7 @@ async function judgeSkillWorthiness(
   context: SkillProposalWindowContext
 ): Promise<WorthinessResult | null> {
   const config = getDefaultModelConfig()
-  if (!config?.apiKey) {
+  if (!isModelAvailable(config)) {
     console.log(
       `[SkillEvolution][${threadId}] Worthiness LLM skipped: missing model config or API key`
     )
@@ -4959,7 +4961,7 @@ async function judgeSkillWorthiness(
   const model = new ChatOpenAI({
     model: config.model,
     apiKey: config.apiKey,
-    configuration: { baseURL: config.baseUrl },
+    ...getModelClientOptions(config, { sessionId: threadId }),
     maxTokens: config.maxOutputTokens,
     ...samplingFields(config.model, { temperature: config.temperature, topP: config.topP }),
     modelKwargs: {
@@ -5031,7 +5033,7 @@ async function generateSkillProposal(
   emitSkillGenerating(threadId, "start")
 
   const config = getDefaultModelConfig()
-  if (!config?.apiKey) {
+  if (!isModelAvailable(config)) {
     emitSkillGenerating(threadId, "error", "未配置模型或 API Key，无法生成技能草稿")
     return null
   }
@@ -5050,7 +5052,7 @@ Based on this conversation, generate a reusable skill. Output JSON only.`
     const model = new ChatOpenAI({
       model: config.model,
       apiKey: config.apiKey,
-      configuration: { baseURL: config.baseUrl },
+      ...getModelClientOptions(config, { sessionId: threadId }),
       maxTokens: config.maxOutputTokens,
       ...samplingFields(config.model, { temperature: config.temperature, topP: config.topP }),
       modelKwargs: {
@@ -9593,14 +9595,14 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                       }).catch(() => null)
                       const memModelId = memRoutingResult?.resolvedModelId ?? modelId
                       const config = getModelConfigByRef(memModelId) ?? getDefaultModelConfig()
-                      if (!config?.apiKey) {
+                      if (!isModelAvailable(config)) {
                         console.warn("[Agent] No model config available — skipping memory tasks")
                         return null
                       }
                       return new ChatOpenAI({
                         model: config.model,
                         apiKey: config.apiKey,
-                        configuration: { baseURL: config.baseUrl },
+                        ...getModelClientOptions(config, { sessionId: threadId }),
                         maxTokens: config.maxOutputTokens,
                         ...samplingFields(config.model, {
                           temperature: config.temperature,

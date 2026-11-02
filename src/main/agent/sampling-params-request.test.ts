@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { getModelInstance } from "./runtime"
+import * as storage from "../storage"
 
 /**
  * Protocol-level guard for the temporary deepseek/minimax sampling-param filter:
@@ -54,6 +55,35 @@ async function requestBodyFor(model: string): Promise<Record<string, unknown>> {
 }
 
 describe("deepseek / minimax sampling params", () => {
+  it("never retries a 434 gateway balance error in the actual agent fetch pipeline", async () => {
+    vi.spyOn(storage, "getUserInfo").mockReturnValue({ sapId: "12345678" })
+    const send = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      expect(String(input)).toContain("/chat/completions")
+      expect(init?.method).toBe("POST")
+      return new Response(JSON.stringify({ returnCode: "XCDZB434", errorMsg: "码豆余额不足" }), {
+        status: 434,
+        headers: { "content-type": "application/json", "x-request-id": "balance-test" }
+      })
+    })
+    vi.stubGlobal("fetch", send)
+    const onFetchError = vi.fn()
+    const model = getModelInstance(
+      { ...baseConfig, model: "ultra", transport: "idle-gateway" },
+      { onFetchError },
+      6,
+      "agent",
+      "agent-thread"
+    )
+    await expect(model.invoke("hi")).rejects.toMatchObject({
+      status: 434,
+      message: expect.stringContaining("余额不足")
+    })
+    expect(send).toHaveBeenCalledTimes(1)
+    expect(onFetchError).toHaveBeenCalledWith(
+      expect.objectContaining({ status: 434, requestId: "balance-test" })
+    )
+    expect(new Headers(send.mock.calls[0][1]?.headers).get("x-session-id")).toBe("agent-thread")
+  })
   it("sends no temperature, top_p or top_k for deepseek", async () => {
     const body = await requestBodyFor("deepseek-v4-flash")
     expect(body).not.toHaveProperty("temperature")

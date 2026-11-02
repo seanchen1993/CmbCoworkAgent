@@ -1377,6 +1377,13 @@ function isDashboardProjectModeAdmin(
   return getDashboardAllowedIds().has(access.ystId)
 }
 
+function getDashboardOrgFilterDefaults(): string[] {
+  const access = requireDashboardAccess()
+  if (isDashboardProjectModeAdmin(access)) return []
+  const room = access.upperOrgLv1.trim()
+  return room ? [room] : []
+}
+
 function requireDashboardProjectModeAccess(): DashboardAccessContext {
   const access = getDashboardAccessContext()
   if (!access.loggedIn) throw new Error("请先登录后再查看项目运营面板")
@@ -6405,8 +6412,8 @@ function assembleAdvancedFeatureCards(
           (m.imSendFailed > 0 ? `(异常 ${m.imSendFailed})` : ""),
         items: [
           { label: "收到", count: imInbound, tone: "neutral" },
-          { label: "已完成", count: m.imCompleted, tone: "good" },
-          { label: "回复", count: m.imReplied, tone: "neutral" },
+          { label: "处理完成", count: m.imCompleted, tone: "good" },
+          { label: "回复条数", count: m.imReplied, tone: "neutral" },
           { label: "主动推送", count: m.imPushed, tone: "good" },
           { label: "审批/提问", count: m.imCards, tone: "neutral" },
           // Covers both a send that failed outright and one the gateway never
@@ -15587,6 +15594,8 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
   _ipcMain.handle("dashboard:isProjectModeAllowed", async () => {
     return isDashboardProjectModeAllowed()
   })
+
+  _ipcMain.handle("dashboard:orgFilterDefaults", () => getDashboardOrgFilterDefaults())
 
   _ipcMain.handle("dashboard:isAnalysisAgentAllowed", async () => {
     return isDashboardAnalysisAgentAllowed()

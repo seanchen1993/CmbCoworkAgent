@@ -114,7 +114,6 @@ import type {
   HarnessSkipNodeResult,
   HarnessFeatureSummary,
   ManagedFeatureStatusSnapshot,
-  ManagedRunViewStatus,
   HarnessStatus,
   HarnessWatchRef,
   HarnessWorkflow,
@@ -2609,11 +2608,15 @@ function makeProjectDetailViewModel(
 ): HarnessProjectDetailViewModel {
   const systemConstraintUpdate = resolveSystemConstraintUpdateConfig(project, context)
   const runs = data.runs.map((run) => {
-    const managedRunStatus: ManagedRunViewStatus | undefined = managedRunStore.getLatestRun(
-      project.projectId,
-      run.slug
-    )?.status
-    return managedRunStatus ? { ...run, managedRunStatus } : run
+    const managedRun = managedRunStore.getLatestRun(project.projectId, run.slug)
+    return managedRun
+      ? {
+          ...run,
+          managedRunStatus: managedRun.status,
+          managedRunThreadId:
+            managedRun.status === "running" ? managedRun.currentSession?.threadId : undefined
+        }
+      : run
   })
   return {
     project: {

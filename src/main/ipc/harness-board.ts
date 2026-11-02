@@ -800,6 +800,12 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
   )
 
   ipcMain.handle(
+    "harnessBoard:getManagedRuns",
+    (_event, projectId: string, featureId: string): ManagedRunSummary[] =>
+      managedRunStore.listFeatureRunSummaries(projectId, featureId)
+  )
+
+  ipcMain.handle(
     "harnessBoard:getLatestManagedRun",
     (_event, projectId: string, featureId: string): ManagedRunSummary | null =>
       managedRunStore.getLatestRun(projectId, featureId)

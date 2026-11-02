@@ -1616,6 +1616,10 @@ export interface CustomModelConfig {
   enableThinkingEffort?: boolean
   thinkingEffort?: ThinkingEffort
   tier?: "premium" | "economy"
+  /** Assigned by the built-in registry; never accepted from custom model storage. */
+  transport?: import("../shared/model-catalog").ModelTransport
+  notice?: string
+  unavailableReason?: string
 }
 
 export interface BuiltinModelOverride {
@@ -1986,6 +1990,15 @@ function getSettingsStore(): Store {
     _settingsStore = new Store({ name: "settings", cwd: getOpenworkDir() })
   }
   return _settingsStore
+}
+
+export function getStoredIdleModelUseUat(): boolean {
+  try {
+    return getSettingsStore().get("idleModelUseUat", false) === true
+  } catch (error) {
+    console.warn("[Storage] Failed to load idle model environment; using production:", error)
+    return false
+  }
 }
 
 const BUILTIN_MODEL_OVERRIDES_KEY = "builtinModelOverrides"

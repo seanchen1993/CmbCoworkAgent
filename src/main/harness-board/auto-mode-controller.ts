@@ -19,14 +19,20 @@ import {
   createAndStartManagedHarnessSession,
   createManagedHarnessSession,
   ManagedActionValidationError,
+  prepareManagedAgentRun,
   prepareManagedBizRetryRun,
   prepareManagedHarnessSession,
+  prepareManagedHarnessSessionGrant,
   sendManagedProviderRetry,
   startManagedHarnessSession,
   startPreparedManagedAgentRun,
   type CreateManagedHarnessSessionInput
 } from "./auto-mode-action-executor"
 import { managedRunStore } from "./managed-run-store"
+import {
+  bindExistingManagedSession,
+  requireIdleManagedSession
+} from "./managed-run-existing-session"
 import { reportManagedRunEnded, reportManagedRunStarted } from "./managed-run-telemetry"
 import { formatGmt8Timestamp } from "../../shared/gmt8-time"
 import {
@@ -169,9 +175,13 @@ function hasActiveFeatureThread(projectId: string, featureId: string): boolean {
   return false
 }
 
-function assertManagedRunCanStart(projectId: string, featureId: string): void {
+function assertManagedRunCanStart(
+  projectId: string,
+  featureId: string,
+  checkActiveThreads = true
+): void {
   const existing = managedRunStore.findRunningRun(projectId, featureId)
-  if (hasActiveFeatureThread(projectId, featureId)) {
+  if (checkActiveThreads && hasActiveFeatureThread(projectId, featureId)) {
     throw new Error("已有运行中的会话，无法开启托管")
   }
   if (existing?.snapshot?.status === "running") {
@@ -180,7 +190,9 @@ function assertManagedRunCanStart(projectId: string, featureId: string): void {
 }
 
 export function validateManagedRunStart(input: ManagedRunStartValidationInput): void {
-  assertManagedRunCanStart(input.projectId, input.featureId)
+  // Allow opening the picker to show running sessions as disabled options.
+  // Submission still applies the existing feature-wide execution gate.
+  assertManagedRunCanStart(input.projectId, input.featureId, false)
 }
 
 function toManagedRunSessionAction(
@@ -591,7 +603,8 @@ async function inspectAndLaunch(
   delivery: AgentRunDelivery,
   sourceEvent: ManagedRunSourceRef,
   terminal?: Pick<AgentTurnEndEvent, "outcome" | "endReason" | "contextUsage">,
-  initialUserMessage?: string
+  initialUserMessage?: string,
+  existingThreadId?: string
 ): Promise<void> {
   if (isManagedRunStopRequested(run)) return
   const feature = await inspectHarnessManagedFeatureStatus(run.projectId, run.featureId)
@@ -625,6 +638,12 @@ async function inspectAndLaunch(
     ...evaluation.policyResult,
     facts: decisionFacts
   }
+  if (existingThreadId && policyResult.reasonCode === "initial_action_resolved") {
+    policyResult.proposedAction = "continue_current_thread"
+    policyResult.reasonCode = "initial_existing_session_selected"
+    policyResult.rule = "用户选择已有会话时，在该会话中执行当前步骤，并建立新的托管运行。"
+    evaluation.summary = "用户选择已有会话，继续执行当前步骤"
+  }
   if (
     policyResult.type === "biz_retry" &&
     (policyResult.proposedAction === "continue_current_thread" ||
@@ -648,7 +667,7 @@ async function inspectAndLaunch(
     policyResult,
     decisionAction: policyResult.proposedAction as ManagedRunDecisionAction,
     summary: evaluation.summary,
-    sourceThreadId: run.currentSession?.threadId
+    sourceThreadId: existingThreadId ?? run.currentSession?.threadId
   })
   const decidedRun = decision.run
 
@@ -726,7 +745,61 @@ async function inspectAndLaunch(
     delivery
   }
   if (isManagedRunStopRequested(decidedRun)) return
+  let launchingRun = decidedRun
   try {
+    if (existingThreadId) {
+      const prepared = await prepareManagedHarnessSession(sessionInput)
+      await prepareManagedHarnessSessionGrant(sessionInput, existingThreadId)
+      const session = await requireIdleManagedSession({
+        projectId: run.projectId,
+        featureId: run.featureId,
+        threadId: existingThreadId
+      })
+      if (session.workspacePath !== workspacePath) {
+        throw new Error("所选会话的工作区已变化，请重新选择后再开启托管")
+      }
+      if (isManagedRunStopRequested(decidedRun)) return
+      const preparedRun = prepareManagedAgentRun(existingThreadId, prepared, delivery)
+      // Persist ownership before submission so cancellation and turn-end callbacks
+      // resolve the new run even when the agent finishes immediately.
+      launchingRun = managedRunStore.updateSnapshot({
+        ...decidedRun,
+        currentSession: { threadId: existingThreadId },
+        decisionBaseline: {
+          nodeId: feature.currentNodeId,
+          featureStateHash: feature.featureStateHash,
+          featureStatus: feature.featureStatus,
+          nodeStatus: feature.currentNodeStatus,
+          nextActionHash: feature.nextActionHash
+        }
+      })
+      bindExistingManagedSession(session, run.runId, feature.currentNodeId)
+      await startPreparedManagedAgentRun(preparedRun, {
+        source: "desktop",
+        verifyResolvedThread: ({ workspacePath: resolvedWorkspacePath, metadata }) => {
+          if (resolvedWorkspacePath?.trim() !== workspacePath) {
+            return "所选会话的工作区已变化，请重新选择后再开启托管"
+          }
+          const binding = readHarnessFeatureMetadata(metadata)
+          return binding?.projectId === run.projectId &&
+            binding.slug === run.featureId &&
+            binding.runId === run.runId &&
+            binding.nodeId === feature.currentNodeId
+            ? null
+            : "所选会话的归属已变化，请重新选择后再开启托管"
+        }
+      })
+      managedRunStore.appendEvent(launchingRun, {
+        type: "session_continued",
+        scope: "stage",
+        nodeId: feature.currentNodeId,
+        targetThreadId: existingThreadId,
+        decisionEventId: decision.event.eventId,
+        summary: "已在用户选择的已有会话中开启托管运行"
+      })
+      publishManagedRunChanged(lastRunSummary(launchingRun))
+      return
+    }
     const created = await createAndStartManagedHarnessSession(sessionInput)
     const advancesStage = policyResult.type === "biz_progress"
     const persisted = managedRunStore.updateSnapshot(
@@ -774,7 +847,7 @@ async function inspectAndLaunch(
     publishManagedRunChanged(lastRunSummary(persisted))
   } catch (error) {
     await markTerminal(
-      decidedRun,
+      launchingRun,
       "failed",
       error instanceof Error ? error.message : String(error),
       "run_failed",
@@ -788,7 +861,20 @@ export async function startManagedRun(input: ManagedRunStartRequest): Promise<Ma
   return featureLocks.withKey(featureKey(input.projectId, input.featureId), async () => {
     // The persisted workspace is a configuration gate. A user-confirmed override remains valid.
     await requireHarnessFeatureWorkspace(input.projectId, input.featureId)
-    const workspacePath = typeof input.workspacePath === "string" ? input.workspacePath.trim() : ""
+    const existingThreadId = input.existingThreadId?.trim()
+    if (input.existingThreadId !== undefined && !existingThreadId) {
+      throw new Error("请选择要继续执行的已有会话")
+    }
+    const existingSession = existingThreadId
+      ? await requireIdleManagedSession({
+          projectId: input.projectId,
+          featureId: input.featureId,
+          threadId: existingThreadId
+        })
+      : undefined
+    const workspacePath =
+      existingSession?.workspacePath ??
+      (typeof input.workspacePath === "string" ? input.workspacePath.trim() : "")
     if (!workspacePath) {
       throw new Error("请选择本次托管使用的会话工作区")
     }
@@ -821,7 +907,8 @@ export async function startManagedRun(input: ManagedRunStartRequest): Promise<Ma
         input.delivery,
         sourceEvent,
         undefined,
-        input.initialUserMessage
+        input.initialUserMessage,
+        existingThreadId
       )
     } catch (error) {
       const failed = recordManagedRunDecision({

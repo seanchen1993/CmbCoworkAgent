@@ -2338,11 +2338,11 @@ function isCancelledDashboardResult(value: unknown): boolean {
   )
 }
 
-export function useDashboard() {
+export function useDashboard(initialOrgLv1List: string[]) {
   const [granularity, setGranularity] = useState<Granularity>("day")
   const [range, setRange] = useState<TimeRange>(() => getDefaultRange("day"))
-  // 顶部「室筛选」支持多选 LV1 组织；空数组表示全部。
-  const [selectedOrgLv1List, setSelectedOrgLv1List] = useState<string[]>([])
+  // 首次查询直接带入主进程按当前账号解析的默认室；后续仍支持多选和清除。
+  const [selectedOrgLv1List, setSelectedOrgLv1List] = useState<string[]>(initialOrgLv1List)
   // 项目运营概览「仅精益项目」全局开关：仅统计绑定了企业（精益）项目的项目。
   const [fromLeanProjectsOnly, setFromLeanProjectsOnly] = useState(false)
   // 项目运营概览「仅本期新建」全局开关：仅统计创建时间落在当前所选时间范围内的项目。
@@ -2390,7 +2390,7 @@ export function useDashboard() {
   const [knowledgeCommitRateLoading, setKnowledgeCommitRateLoading] = useState(false)
   const [knowledgeCommitRateError, setKnowledgeCommitRateError] = useState<string | null>(null)
   // 顶部全量组织（LV1）筛选可选项，随时间范围刷新。
-  const [orgOptions, setOrgOptions] = useState<string[]>([])
+  const [orgOptions, setOrgOptions] = useState<string[]>(initialOrgLv1List)
 
   const fetchIdRef = useRef(0)
   const userStatsFetchIdRef = useRef(0)
@@ -2896,12 +2896,14 @@ export function useDashboard() {
       try {
         const result = await window.api.dashboard.orgOptions(range)
         if (id !== orgOptionsFetchIdRef.current) return
-        if (result.success) setOrgOptions(result.data ?? [])
+        // 即使本室在所选时间没有 Trace，也保留选项，清除后仍可重新选择。
+        if (result.success)
+          setOrgOptions(Array.from(new Set([...initialOrgLv1List, ...(result.data ?? [])])))
       } catch {
-        if (id === orgOptionsFetchIdRef.current) setOrgOptions([])
+        if (id === orgOptionsFetchIdRef.current) setOrgOptions(initialOrgLv1List)
       }
     })()
-  }, [range])
+  }, [initialOrgLv1List, range])
 
   const changeGranularity = useCallback((g: Granularity) => {
     setGranularity(g)

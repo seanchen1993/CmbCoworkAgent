@@ -1,3 +1,4 @@
+import { getModelClientOptions } from "../models/connection"
 import { tool } from "langchain"
 import { ChatOpenAI } from "@langchain/openai"
 import {
@@ -105,7 +106,7 @@ function createDashboardAnalysisModel(config: CustomModelConfig): ChatOpenAI {
   return new ChatOpenAI({
     model: config.model,
     apiKey: config.apiKey,
-    configuration: { baseURL: config.baseUrl },
+    ...getModelClientOptions(config),
     maxTokens: config.maxOutputTokens,
     ...samplingFields(config.model, { temperature: config.temperature, topP: config.topP }),
     maxRetries: 0,

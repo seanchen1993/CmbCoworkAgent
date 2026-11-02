@@ -150,23 +150,40 @@ const INTERNAL_COORDINATOR_NOTIFICATION_KEY = "cmb_internal_coordinator_notifica
 // message contract used by checkpoint transcripts.
 const VISIBLE_USER_MESSAGE_KEY = "cmb_visible_user_message"
 
-function overflowCandidateStrings(value: unknown): string[] {
+function overflowCandidateStrings(value: unknown, depth = 0): string[] {
+  if (depth > 4) return []
   if (typeof value === "string") return [value]
   if (!value || typeof value !== "object") return []
   const record = value as Record<string, unknown>
   const candidates: string[] = []
-  for (const key of ["message", "code", "type", "responseBody"]) {
+  for (const key of ["message", "code", "type", "errorMsg", "returnCode"]) {
     const candidate = record[key]
     if (typeof candidate === "string") candidates.push(candidate)
   }
-  const nested = record.error
-  if (nested && typeof nested === "object") {
-    for (const key of ["message", "code", "type"]) {
-      const candidate = (nested as Record<string, unknown>)[key]
-      if (typeof candidate === "string") candidates.push(candidate)
+  candidates.push(...overflowCandidateStrings(record.error, depth + 1))
+  if (typeof record.responseBody === "string") {
+    try {
+      candidates.push(...overflowCandidateStrings(JSON.parse(record.responseBody), depth + 1))
+    } catch {
+      candidates.push(record.responseBody)
     }
   }
   return candidates
+}
+
+/** The gateway shares 485/580 with internal failures; require its exact overflow text. */
+export function isGatewayContextOverflow(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false
+  const record = error as Record<string, unknown>
+  const candidates = overflowCandidateStrings(error)
+  const status = record.status ?? record.statusCode
+  const matchesStatus =
+    status != null
+      ? status === 485 || status === 580
+      : candidates.some((candidate) => /^XCDZB(?:485|580)$/.test(candidate.trim()))
+  return (
+    matchesStatus && candidates.some((candidate) => candidate.includes("任务上下文超过最大限度"))
+  )
 }
 
 /** Recognise context overflow across LangChain and known OpenAI-compatible
@@ -177,6 +194,7 @@ export function isCmbContextOverflow(error: unknown): boolean {
   while (current && !seen.has(current)) {
     seen.add(current)
     if (ContextOverflowError.isInstance(current)) return true
+    if (isGatewayContextOverflow(current)) return true
 
     if (typeof current === "object") {
       const record = current as Record<string, unknown>

@@ -44,3 +44,39 @@ CMB_BUILTIN_MODEL_API_KEY=<由凭据管理系统注入，不要提交到 Git>
 清单没有 `modelCatalog`、目录为空或首次拉取失败时，客户端只使用内置的 MiniMax 作为本地兜底模型，不会额外注入 DeepSeek。成功加载过后台目录后，后续刷新失败会继续保留上一次内存中的有效目录。客户端启动时拉取一次，并等待首次请求完成后才启动调度器、心跳和 ChatX，之后每 30 分钟刷新。
 
 模型列表将用户保存的默认模型放在首位；固定模型被后台撤下或失去密钥时，ChatX 会回退到保存的默认可用模型。
+
+## 闲时模型（生产 / UAT）
+
+在仓库 `.env` 中配置以下变量，沿用 `envcrypt` Git 过滤器加密保存的流程（见 [环境变量加密说明](env-encryption-guide.md)）：
+
+```dotenv
+MAIN_VITE_IDLE_MODEL_PROD_BASE_URL=<生产转发网关的完整 Base URL，不含 /chat/completions>
+MAIN_VITE_IDLE_MODEL_PROD_API_KEY=<独立团队提供的生产网关凭据>
+MAIN_VITE_IDLE_MODEL_UAT_BASE_URL=<UAT 网关地址，路径截至 /pattern/llm/v1>
+MAIN_VITE_IDLE_MODEL_UAT_API_KEY=<独立团队提供的 UAT 网关凭据>
+```
+
+这四个变量只注入主进程，不下发到渲染进程。原有 `MAIN_VITE_IDLE_MODEL_BASE_URL` / `MAIN_VITE_IDLE_MODEL_API_KEY` 已迁移至对应的 UAT 变量。配置所选环境的地址后，客户端会独立加入 `builtin:idle-ultra`，不受远端目录替换影响，也不复用其他内置模型的密钥。
+
+生产环境经网关转发时，Base URL 需包含网关要求的完整路由前缀；客户端在其后追加 `/chat/completions`。修改仓库 `.env` 后需重新构建应用。
+
+当前闲时模型生产 Base URL 为 `http://pmsgateway.paasoa.cmbchina.cn/devagent/pattern/llm/v1`，最终请求路径为 `/devagent/pattern/llm/v1/chat/completions`。
+
+默认使用生产环境。在应用数据目录的 `settings.json`（默认 `~/.cmbcoworkagent/settings.json`；使用 `CMB_COWORK_AGENT_HOME` 时位于该目录）中合并以下配置，可切换到 UAT：
+
+```json
+{
+  "idleModelUseUat": true
+}
+```
+
+修改后重启应用生效。设为 `false` 或删除该字段即使用生产环境；只有布尔值 `true` 启用 UAT。地址和密钥成对切换，任一环境配置缺失时不会借用另一环境的地址或密钥。该开关仅影响闲时模型，固定的模型引用、用户参数覆盖和历史会话保持沿用。
+
+- 默认显示为“闲时模型 Ultra”，请求模式固定 `ultra`，上下文窗口固定 128,000 Tokens；连接信息、模式和上下文窗口不可由用户修改。最大输出 Tokens 等其他参数沿用现有设置。
+- 展示北京时间 `22:00–次日 07:00` 的服务时间提示，所有时段均允许选择；客户端不设置时间门禁。
+- 每次请求从当前登录用户信息读取八位 `sapId`，作为 `x-spaid`；缺少或格式不正确时禁止调用，并提示完善用户信息。
+- 网关凭据使用 `x-gateway-key`，会话使用 `x-session-id`，每次调用携带 `x-request-id`。主对话与上下文压缩沿用同一个 Thread ID；独立子会话使用自身 Thread ID，无 Thread 的辅助调用使用模型实例生命周期内稳定的独立会话 ID。
+- 复用 OpenAI 聊天、SSE 与工具调用协议。界面始终显示配置名称，响应中的实际模型名仅用于诊断。
+- 沿用现有重试等待策略，不读取 `retry_after_ms` 或 `Retry-After`；`434` 显示“码豆余额不足”，不进行自动重试或模型故障切换。保留其他网关错误的 `errorMsg` 和请求追踪 ID。
+- `485/580` 的错误文案包含“任务上下文超过最大限度”时，优先进入现有上下文压缩恢复；`580` 不再先原样重复请求。恢复复用摘要生成、完整轮次裁剪及最近消息保留逻辑，摘要模型调用共享最多 4 次的预算，仍无法恢复时返回错误。不包含该文案的内部异常继续沿用原有错误处理。
+- 此网关提供 OpenAI 接口，暂不用于要求 Anthropic 接口的 Claude Code 终端。
