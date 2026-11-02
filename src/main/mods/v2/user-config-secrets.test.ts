@@ -1,7 +1,7 @@
-import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto"
 import { expect, it, vi } from "vitest"
-import { FunctionUserConfigSecrets, type FunctionSecretProtector } from "./user-config-secrets"
+import { FunctionUserConfigSecrets } from "./user-config-secrets"
 import type { FunctionUserConfigField } from "../../../shared/mods/v2/user-config"
+import { testSecretProtector as protector } from "../../../../tests/support/mods-secret-protector"
 
 const field: FunctionUserConfigField = {
   type: "string",
@@ -9,23 +9,24 @@ const field: FunctionUserConfigField = {
   description: "Help",
   sensitive: true
 }
-function protector(): FunctionSecretProtector {
-  const key = randomBytes(32)
-  return {
-    isEncryptionAvailable: () => true,
-    encryptString: (value) => {
-      const nonce = randomBytes(12),
-        cipher = createCipheriv("aes-256-gcm", key, nonce)
-      const bytes = Buffer.concat([cipher.update(value, "utf8"), cipher.final()])
-      return Buffer.concat([nonce, cipher.getAuthTag(), bytes])
-    },
-    decryptString: (bytes) => {
-      const decipher = createDecipheriv("aes-256-gcm", key, bytes.subarray(0, 12))
-      decipher.setAuthTag(bytes.subarray(12, 28))
-      return Buffer.concat([decipher.update(bytes.subarray(28)), decipher.final()]).toString("utf8")
-    }
+
+it.each(["win32", "linux", "darwin"] as const)(
+  "uses authenticated fixture storage on %s",
+  (platform) => {
+    const secrets = new FunctionUserConfigSecrets(protector(), platform)
+    const sealed = secrets.seal("project", "plugin", "token", field, "private-fixture")
+    expect(secrets.open("project", "plugin", "token", field, sealed)).toBe("private-fixture")
+    expect(() =>
+      new FunctionUserConfigSecrets(protector(), platform).open(
+        "project",
+        "plugin",
+        "token",
+        field,
+        sealed
+      )
+    ).toThrow("MODS_SECRET_STORAGE_INVALID")
   }
-}
+)
 
 it("round-trips typed confidential values without storing plaintext, binding all actual identities", () => {
   const secrets = new FunctionUserConfigSecrets(protector(), "win32")

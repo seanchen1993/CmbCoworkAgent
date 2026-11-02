@@ -66,8 +66,21 @@ async function main() {
       page.evaluate(
         () => new Promise<void>((done) => requestAnimationFrame(() => setTimeout(done, 0)))
       )
-    const down = () =>
-      page.getByRole("separator").dispatchEvent("mousedown", { clientX: 100, button: 0 })
+    let pointerStart = 0
+    const down = async () => {
+      await page.mouse.up()
+      const box = await page.getByRole("separator").boundingBox()
+      assert(box)
+      pointerStart = box.x + box.width / 2
+      await page.mouse.move(pointerStart, box.y + Math.min(box.height / 2, 200))
+      await page.mouse.down()
+    }
+    const move = (delta: number) =>
+      page.evaluate((clientX) => {
+        document
+          .querySelector('[role="separator"]')
+          ?.dispatchEvent(new PointerEvent("pointermove", { clientX, pointerId: 1, bubbles: true }))
+      }, pointerStart + delta)
     const snapshot = () => page.evaluate(() => (window as ResizeFixtureWindow).snapshot())
     for (const fullscreen of [false, true]) {
       for (const explicitCleanup of [false, true]) {
@@ -79,27 +92,32 @@ async function main() {
           )
           await settle()
           await down()
-          await page.evaluate(() =>
-            document.dispatchEvent(new MouseEvent("mousemove", { clientX: 120 }))
-          )
+          await move(20)
           await settle()
           assert.equal((await snapshot()).value, fullscreen ? 48 : 480)
-          // Keep the last pointer update pending until release, after App's old
-          // document listener has already run; blur has no document mouseup.
-          await page.evaluate((end) => {
-            document.dispatchEvent(new MouseEvent("mousemove", { clientX: 140 }))
-            if (end === "blur") window.dispatchEvent(new Event("blur"))
-            else document.dispatchEvent(new MouseEvent("mouseup"))
-          }, end)
+          // Keep the last update pending until release. Pointer capture and blur
+          // must end the drag even without a compatibility mouseup event.
+          await page.evaluate(
+            ({ end, clientX }) => {
+              const handle = document.querySelector('[role="separator"]')!
+              handle.dispatchEvent(
+                new PointerEvent("pointermove", { clientX, pointerId: 1, bubbles: true })
+              )
+              if (end === "blur") window.dispatchEvent(new Event("blur"))
+              else
+                handle.dispatchEvent(
+                  new PointerEvent("pointerup", { clientX, pointerId: 1, bubbles: true })
+                )
+            },
+            { end, clientX: pointerStart + 40 }
+          )
           await settle()
           const first = await snapshot()
           assert.equal(first.value, fullscreen ? 46 : 460)
           if (explicitCleanup)
             assert.deepEqual([first.widthStart, first.percentStart], [null, null])
           await down()
-          await page.evaluate(() => {
-            document.dispatchEvent(new MouseEvent("mousemove", { clientX: 110 }))
-          })
+          await move(10)
           await settle()
           const second = await snapshot()
           assert.equal(
@@ -107,9 +125,9 @@ async function main() {
             explicitCleanup ? (fullscreen ? 45 : 450) : fullscreen ? 49 : 490,
             explicitCleanup
               ? "next drag uses the preceding final width"
-              : "old App lifecycle reproduces stale baseline"
+              : "legacy mouse-only cleanup leaves a stale pointer baseline"
           )
-          await page.evaluate(() => document.dispatchEvent(new MouseEvent("mouseup")))
+          await page.mouse.up()
           await settle()
           assert.equal(
             (await snapshot()).value,
@@ -135,17 +153,13 @@ async function main() {
       )
       await settle()
       await down()
-      await page.evaluate(() =>
-        document.dispatchEvent(new MouseEvent("mousemove", { clientX: 120 }))
-      )
+      await move(20)
       await settle()
       await page.evaluate(() => (window as ResizeFixtureWindow).remove())
       await settle()
       const cancelled = await snapshot()
       assert.deepEqual([cancelled.widthStart, cancelled.percentStart], [null, null])
-      await page.evaluate(() =>
-        document.dispatchEvent(new MouseEvent("mousemove", { clientX: 300 }))
-      )
+      await move(200)
       await settle()
       assert.deepEqual(await snapshot(), cancelled, "unmounted handle cannot update the panel")
     }
@@ -155,7 +169,7 @@ async function main() {
       JSON.stringify({ passed: true, evidence, errors }, null, 2)
     )
     console.log(
-      "PASS real ResizeHandle: old stale baseline reproduced; explicit end/cancel preserves consecutive pixel/percent drags, pending mouseup, blur and unmount"
+      "PASS real ResizeHandle: pointer capture and explicit end/cancel preserves consecutive pixel/percent drags, pending mouseup, blur and unmount"
     )
   } finally {
     await browser.close()

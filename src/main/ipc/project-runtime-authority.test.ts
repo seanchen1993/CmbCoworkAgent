@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest"
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
-import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { hostProjectFixture } from "../harness-board/project-runtime/host-fixtures.test-helper"
 import { derivationContentIdentity, snapshotDerivationSource } from "../plugins/derivation-source"
@@ -236,7 +235,7 @@ function nativeHandlers() {
 }
 
 function installedTemplate() {
-  const root = mkdtempSync(join(tmpdir(), "project-template-identity-"))
+  const root = mkdtempSync(join(canonicalTmpdir(), "project-template-identity-"))
   templateRoots.push(root)
   const manifest = hostProjectFixture(root).manifest
   writeFileSync(join(root, "plugin.json"), JSON.stringify({ name: "docs", version: "1.0.0" }))
@@ -259,7 +258,7 @@ function installedTemplate() {
 it("returns exact ordinary template content identities without scanning unrelated broken plugins", async () => {
   const plugin = installedTemplate()
   const other = installedTemplate()
-  const malformed = mkdtempSync(join(tmpdir(), "not-a-host-template-"))
+  const malformed = mkdtempSync(join(canonicalTmpdir(), "not-a-host-template-"))
   templateRoots.push(malformed)
   writeFileSync(join(malformed, "devclaw.project-runtime.json"), "{bad json")
   state.plugins.unshift(

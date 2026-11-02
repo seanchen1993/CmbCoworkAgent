@@ -10,7 +10,7 @@ import { testSecretProtector } from "../../../tests/support/mods-secret-protecto
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs"
 import { basename, dirname, join } from "node:path"
 import { projectFunctionApprovalInput } from "../../shared/project-runtime/function-source"
-import { tmpdir } from "node:os"
+import { canonicalTmpdir } from "../../../tests/support/canonical-temp-dir"
 import { afterEach, expect, it, vi } from "vitest"
 import type { IpcMain, IpcMainInvokeEvent } from "electron"
 import { registerProjectRuntimeModsHandlers } from "./project-runtime-mods"
@@ -112,7 +112,7 @@ async function fixture(
   workspaceControls = false,
   withDependency = false
 ) {
-  const root = mkdtempSync(join(tmpdir(), "project-native-mods-")),
+  const root = mkdtempSync(join(canonicalTmpdir(), "project-native-mods-")),
     source = join(root, "source"),
     workspace = join(root, "workspace")
   mkdirSync(source)
@@ -364,7 +364,7 @@ async function fixture(
   cleanup.push(
     () => {
       const target = realpathSync(root)
-      expect(dirname(target)).toBe(realpathSync(tmpdir()))
+      expect(dirname(target)).toBe(canonicalTmpdir())
       expect(basename(target)).toMatch(/^project-native-mods-[a-zA-Z0-9]{6}$/)
       rmSync(target, { recursive: true, force: true })
     },

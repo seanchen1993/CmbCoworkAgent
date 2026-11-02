@@ -6,6 +6,8 @@ export function testSecretProtector(): FunctionSecretProtector {
   const key = randomBytes(32)
   return {
     isEncryptionAvailable: () => true,
+    // Advertise the supported interface in Node fixtures; this is not an OS keyring test.
+    getSelectedStorageBackend: () => "gnome_libsecret",
     encryptString: (value) => {
       const nonce = randomBytes(12),
         cipher = createCipheriv("aes-256-gcm", key, nonce)

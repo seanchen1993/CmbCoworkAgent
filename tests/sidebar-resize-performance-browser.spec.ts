@@ -62,12 +62,27 @@ async function main() {
       page.evaluate(
         () => new Promise<void>((done) => requestAnimationFrame(() => setTimeout(done, 0)))
       )
+    let pointerStart = 0
     const down = async () => {
-      await page.getByRole("separator").dispatchEvent("mousedown", { clientX: 240, button: 0 })
+      await page.mouse.up()
+      const box = await page.getByRole("separator").boundingBox()
+      assert(box)
+      pointerStart = box.x + box.width / 2
+      await page.mouse.move(pointerStart, box.y + Math.min(box.height / 2, 200))
+      await page.mouse.down()
     }
     const move = (x: number) =>
-      page.evaluate((x) => document.dispatchEvent(new MouseEvent("mousemove", { clientX: x })), x)
-    const up = () => page.evaluate(() => document.dispatchEvent(new MouseEvent("mouseup")))
+      page.evaluate(
+        (clientX) => {
+          document
+            .querySelector('[role="separator"]')
+            ?.dispatchEvent(
+              new PointerEvent("pointermove", { clientX, pointerId: 1, bubbles: true })
+            )
+        },
+        pointerStart + x - 240
+      )
+    const up = () => page.mouse.up()
     const width = () =>
       page.getByLabel("sidebar").evaluate((element) => element.getBoundingClientRect().width)
     await page.getByRole("separator").waitFor()
@@ -156,10 +171,14 @@ async function main() {
     await page.evaluate(() => (window as ResizeWindow).mount("baseline"))
     await settle()
     await down()
-    await page.evaluate(() => {
-      document.dispatchEvent(new MouseEvent("mousemove", { clientX: 280 }))
-      document.dispatchEvent(new MouseEvent("mouseup"))
-    })
+    await page.evaluate((clientX) => {
+      const handle = document.querySelector('[role="separator"]')!
+      handle.dispatchEvent(
+        new PointerEvent("pointermove", { clientX, pointerId: 1, bubbles: true })
+      )
+      handle.dispatchEvent(new PointerEvent("pointerup", { clientX, pointerId: 1, bubbles: true }))
+    }, pointerStart + 40)
+    await up()
     await settle()
     assert.equal(await width(), 280)
     assert.deepEqual(errors, [])

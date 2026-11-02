@@ -12,6 +12,7 @@ interface ResizeHandleProps {
 
 export function ResizeHandle({ onDrag, onDragStart, onDragEnd, onDragCancel }: ResizeHandleProps) {
   const startXRef = useRef<number>(0)
+  const previousBodyStyle = useRef({ cursor: "", userSelect: "" })
   const draggingRef = useRef(false)
   const frameRef = useRef<number | null>(null)
   const latestDeltaRef = useRef(0)
@@ -35,8 +36,10 @@ export function ResizeHandle({ onDrag, onDragStart, onDragEnd, onDragCancel }: R
       if (notifyEnd) onDragRef.current(latestDeltaRef.current)
     }
     draggingRef.current = false
-    document.body.style.cursor = ""
-    document.body.style.userSelect = ""
+    if (wasDragging) {
+      document.body.style.cursor = previousBodyStyle.current.cursor
+      document.body.style.userSelect = previousBodyStyle.current.userSelect
+    }
     if (wasDragging) {
       if (notifyEnd) onDragEndRef.current?.(latestDeltaRef.current)
       else onDragCancelRef.current?.()
@@ -55,6 +58,10 @@ export function ResizeHandle({ onDrag, onDragStart, onDragEnd, onDragCancel }: R
   const handlePointerDown = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
     if (event.button !== 0) return
     event.currentTarget.setPointerCapture(event.pointerId)
+    previousBodyStyle.current = {
+      cursor: document.body.style.cursor,
+      userSelect: document.body.style.userSelect
+    }
     draggingRef.current = true
     latestDeltaRef.current = 0
     startXRef.current = event.clientX
