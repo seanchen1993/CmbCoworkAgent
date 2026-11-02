@@ -9,6 +9,7 @@ const state = vi.hoisted(() => ({
   localApiKey: "local-test-key",
   bundledApiKey: "bundled-test-key",
   sapId: "12345678" as string | undefined,
+  idleModelUseUat: false,
   fetchGate: null as Promise<void> | null
 }))
 
@@ -43,6 +44,7 @@ vi.mock("../storage", () => ({
   },
   getCustomModelConfigs: () => state.customConfigs,
   getStoredDefaultModelId: () => state.storedDefault,
+  getStoredIdleModelUseUat: () => state.idleModelUseUat,
   getUserInfo: () => ({ sapId: state.sapId })
 }))
 
@@ -75,8 +77,11 @@ import {
 } from "./registry"
 
 beforeEach(() => {
-  vi.stubEnv("MAIN_VITE_IDLE_MODEL_BASE_URL", "")
-  vi.stubEnv("MAIN_VITE_IDLE_MODEL_API_KEY", "")
+  vi.stubEnv("MAIN_VITE_IDLE_MODEL_PROD_BASE_URL", "")
+  vi.stubEnv("MAIN_VITE_IDLE_MODEL_PROD_API_KEY", "")
+  vi.stubEnv("MAIN_VITE_IDLE_MODEL_UAT_BASE_URL", "")
+  vi.stubEnv("MAIN_VITE_IDLE_MODEL_UAT_API_KEY", "")
+  state.idleModelUseUat = false
   state.sapId = "12345678"
   stopBuiltinModelCatalogRefresh()
   state.manifest = {}
@@ -110,9 +115,51 @@ describe("builtin model registry", () => {
   })
 
   function configureIdleModel() {
-    vi.stubEnv("MAIN_VITE_IDLE_MODEL_BASE_URL", "http://idle.example.test/pattern/llm/v1")
-    vi.stubEnv("MAIN_VITE_IDLE_MODEL_API_KEY", "idle-test-key")
+    vi.stubEnv("MAIN_VITE_IDLE_MODEL_PROD_BASE_URL", "http://idle.example.test/pattern/llm/v1")
+    vi.stubEnv("MAIN_VITE_IDLE_MODEL_PROD_API_KEY", "idle-test-key")
+    vi.stubEnv("MAIN_VITE_IDLE_MODEL_UAT_BASE_URL", "http://idle-uat.example.test/pattern/llm/v1")
+    vi.stubEnv("MAIN_VITE_IDLE_MODEL_UAT_API_KEY", "idle-uat-test-key")
   }
+
+  it("defaults to production and switches the idle URL and credential together", () => {
+    configureIdleModel()
+    expect(getModelConfigByRef("builtin:idle-ultra")).toMatchObject({
+      baseUrl: "http://idle.example.test/pattern/llm/v1",
+      apiKey: "idle-test-key"
+    })
+    state.idleModelUseUat = true
+    expect(getModelConfigByRef("builtin:idle-ultra")).toMatchObject({
+      baseUrl: "http://idle-uat.example.test/pattern/llm/v1",
+      apiKey: "idle-uat-test-key",
+      model: "ultra",
+      maxTokens: 128_000
+    })
+    state.idleModelUseUat = false
+    expect(getModelConfigByRef("builtin:idle-ultra")?.apiKey).toBe("idle-test-key")
+  })
+
+  it.each([false, true])("does not borrow credentials across environments (UAT %s)", (useUat) => {
+    configureIdleModel()
+    state.idleModelUseUat = useUat
+    vi.stubEnv(
+      useUat ? "MAIN_VITE_IDLE_MODEL_UAT_API_KEY" : "MAIN_VITE_IDLE_MODEL_PROD_API_KEY",
+      ""
+    )
+    expect(getModelConfigByRef("builtin:idle-ultra")?.apiKey).toBeUndefined()
+    expect(
+      getBuiltinModelPublicConfigs().find((item) => item.id === "idle-ultra")?.hasApiKey
+    ).toBe(false)
+  })
+
+  it.each([false, true])("does not fall back to another environment's URL (UAT %s)", (useUat) => {
+    configureIdleModel()
+    state.idleModelUseUat = useUat
+    vi.stubEnv(
+      useUat ? "MAIN_VITE_IDLE_MODEL_UAT_BASE_URL" : "MAIN_VITE_IDLE_MODEL_PROD_BASE_URL",
+      ""
+    )
+    expect(getModelConfigByRef("builtin:idle-ultra")).toBeNull()
+  })
 
   it("retains the independent idle model alongside remote models with fixed ultra and 128k", async () => {
     configureIdleModel()
@@ -152,7 +199,7 @@ describe("builtin model registry", () => {
 
   it("does not reuse another built-in model's credential for the idle gateway", () => {
     configureIdleModel()
-    vi.stubEnv("MAIN_VITE_IDLE_MODEL_API_KEY", "")
+    vi.stubEnv("MAIN_VITE_IDLE_MODEL_PROD_API_KEY", "")
     expect(getModelConfigByRef("builtin:idle-ultra")?.apiKey).toBeUndefined()
   })
 

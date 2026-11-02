@@ -28,6 +28,7 @@ import {
   getBuiltinModelOverrides,
   getCustomModelConfigs,
   getStoredDefaultModelId,
+  getStoredIdleModelUseUat,
   getUserInfo,
   resetBuiltinModelOverride as resetStoredBuiltinModelOverride,
   setStoredDefaultModelId,
@@ -256,7 +257,16 @@ function getBaseDefinitions(): BuiltinModelDefinition[] {
   const definitions = remoteDefinitions?.length
     ? remoteDefinitions
     : FALLBACK_CATALOG.map((item) => normalizeDefinition(item, "fallback"))
-  const baseUrl = (import.meta.env.MAIN_VITE_IDLE_MODEL_BASE_URL ?? "").trim()
+  const environment = getStoredIdleModelUseUat()
+    ? {
+        baseUrl: import.meta.env.MAIN_VITE_IDLE_MODEL_UAT_BASE_URL,
+        apiKey: import.meta.env.MAIN_VITE_IDLE_MODEL_UAT_API_KEY
+      }
+    : {
+        baseUrl: import.meta.env.MAIN_VITE_IDLE_MODEL_PROD_BASE_URL,
+        apiKey: import.meta.env.MAIN_VITE_IDLE_MODEL_PROD_API_KEY
+      }
+  const baseUrl = (environment.baseUrl ?? "").trim()
   if (!baseUrl) return definitions
   const idleModel: BuiltinModelDefinition = {
     ...normalizeDefinition(
@@ -266,7 +276,7 @@ function getBaseDefinitions(): BuiltinModelDefinition[] {
         baseUrl,
         model: IDLE_MODEL_MODE,
         maxTokens: IDLE_MODEL_MAX_TOKENS,
-        apiKey: import.meta.env.MAIN_VITE_IDLE_MODEL_API_KEY,
+        apiKey: environment.apiKey,
         tier: "premium"
       },
       "local"

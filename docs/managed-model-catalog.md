@@ -45,16 +45,28 @@ CMB_BUILTIN_MODEL_API_KEY=<由凭据管理系统注入，不要提交到 Git>
 
 模型列表将用户保存的默认模型放在首位；固定模型被后台撤下或失去密钥时，ChatX 会回退到保存的默认可用模型。
 
-## 闲时模型（UAT）
+## 闲时模型（生产 / UAT）
 
 在仓库 `.env` 中配置以下变量，沿用 `envcrypt` Git 过滤器加密保存的流程（见 [环境变量加密说明](env-encryption-guide.md)）：
 
 ```dotenv
-MAIN_VITE_IDLE_MODEL_BASE_URL=<UAT 网关地址，路径截至 /pattern/llm/v1>
-MAIN_VITE_IDLE_MODEL_API_KEY=<独立团队提供的 UAT 网关凭据>
+MAIN_VITE_IDLE_MODEL_PROD_BASE_URL=<生产网关地址，路径截至 /pattern/llm/v1>
+MAIN_VITE_IDLE_MODEL_PROD_API_KEY=<独立团队提供的生产网关凭据>
+MAIN_VITE_IDLE_MODEL_UAT_BASE_URL=<UAT 网关地址，路径截至 /pattern/llm/v1>
+MAIN_VITE_IDLE_MODEL_UAT_API_KEY=<独立团队提供的 UAT 网关凭据>
 ```
 
-这两个变量只注入主进程，不下发到渲染进程。配置地址后，客户端会独立加入 `builtin:idle-ultra`，不受远端目录替换影响，也不复用其他内置模型的密钥。
+这四个变量只注入主进程，不下发到渲染进程。原有 `MAIN_VITE_IDLE_MODEL_BASE_URL` / `MAIN_VITE_IDLE_MODEL_API_KEY` 已迁移至对应的 UAT 变量。配置所选环境的地址后，客户端会独立加入 `builtin:idle-ultra`，不受远端目录替换影响，也不复用其他内置模型的密钥。
+
+默认使用生产环境。在应用数据目录的 `settings.json`（默认 `~/.cmbcoworkagent/settings.json`；使用 `CMB_COWORK_AGENT_HOME` 时位于该目录）中合并以下配置，可切换到 UAT：
+
+```json
+{
+  "idleModelUseUat": true
+}
+```
+
+修改后重启应用生效。设为 `false` 或删除该字段即使用生产环境；只有布尔值 `true` 启用 UAT。地址和密钥成对切换，任一环境配置缺失时不会借用另一环境的地址或密钥。该开关仅影响闲时模型，固定的模型引用、用户参数覆盖和历史会话保持沿用。
 
 - 默认显示为“闲时模型 Ultra”，请求模式固定 `ultra`，上下文窗口固定 128,000 Tokens；连接信息、模式和上下文窗口不可由用户修改。最大输出 Tokens 等其他参数沿用现有设置。
 - 展示北京时间 `22:00–次日 07:00` 的服务时间提示，所有时段均允许选择；客户端不设置时间门禁。
