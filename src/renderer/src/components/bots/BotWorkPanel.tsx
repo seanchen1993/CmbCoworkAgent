@@ -201,16 +201,21 @@ export function BotWorkPanel({
               <ArrowLeft size={13} />
               {backLabel}
             </button>
-            <button disabled={disabled || saving} onClick={() => void lifecycle()}>
-              {selected.state === "completed" ? <RotateCcw size={13} /> : <Check size={13} />}{" "}
-              {selected.state === "completed" ? "继续处理" : "完成任务"}
-            </button>
+            {selected.conversation?.state !== "detached" && (
+              <button disabled={disabled || saving} onClick={() => void lifecycle()}>
+                {selected.state === "completed" ? <RotateCcw size={13} /> : <Check size={13} />}{" "}
+                {selected.state === "completed" ? "继续处理" : "完成任务"}
+              </button>
+            )}
           </div>
           <div className="bot-work-origin" aria-label="任务来源">
             <span>来源 · {sourceLabel}</span>
             {!selected.source && client.conversations && (
               <button disabled={saving} onClick={() => void openConversation()}>
-                {selected.conversation?.origin === "existing" ? "打开原会话" : "在对话模式打开"}
+                {selected.conversation?.origin === "existing" ||
+                selected.conversation?.state === "detached"
+                  ? "打开原会话"
+                  : "在对话模式打开"}
                 <ArrowUpRight size={13} aria-hidden="true" />
               </button>
             )}

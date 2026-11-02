@@ -10,6 +10,7 @@ import {
 } from "@/lib/bot-conversation-transition"
 import type { BotWorkConversationResolution } from "../../../../shared/bots/conversation"
 import type { BotDefinition } from "../../../../shared/bots/contracts"
+import { assertBotNonTeamConversation } from "../../../../shared/bots/team-policy"
 import {
   Dialog,
   DialogContent,
@@ -65,6 +66,9 @@ export function ConversationTaskControls({
   const begin = async () => {
     const target = threadId
     try {
+      const row = await window.api.threads.get(target)
+      if (current.current !== target) return
+      assertBotNonTeamConversation(row?.metadata)
       const snapshot = await window.api.bots.snapshot()
       if (current.current !== target) return
       const available = snapshot.bots.filter((b) => !b.archived && !b.deleting)
@@ -96,6 +100,7 @@ export function ConversationTaskControls({
       await parkOrdinaryConversationQueue(context, target)
       const row = await window.api.threads.get(target)
       if (current.current !== target) return
+      assertBotNonTeamConversation(row?.metadata)
       const token = row?.metadata?.cmb_thread_incarnation
       const input = {
         botId,

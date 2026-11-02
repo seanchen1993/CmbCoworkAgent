@@ -32,6 +32,71 @@ function fixture() {
 }
 
 describe("Bot native command receipts", () => {
+  it.each(["private", "group", "work"] as const)("keeps cancelled command activity in its %s conversation", (scope) => {
+    const { store, bot, task, command, result } = fixture()
+    let source = task
+    let target: { kind: string; id: string } = { kind: "bot", id: bot.id }
+    if (scope !== "private") {
+      store.settle(task.id, "completed", null, "Private baseline")
+      if (scope === "group") {
+        const group = store.saveGroup({ name: "Group", memberIds: [bot.id] })
+        store.sendGroup({ groupId: group.id, requestId: "group", text: "Run", targetBotIds: [bot.id] })
+        source = store.nextQueued([])!
+        target = { kind: "group", id: group.id }
+      } else {
+        const work = store.createWork({ botId: bot.id, operationId: "work", title: "Work", goal: "Run" })
+        source = work.task
+        target = { kind: "work", id: work.work.id }
+      }
+      store.transition(source.id, "running")
+    }
+    store.acceptCommand(source.id, { ...command, threadId: source.threadId })
+    store.settle(source.id, "completed", null, "Started", undefined, scope === "group")
+    const main = store.activities().find(activity => activity.kind === "bot" && activity.id === bot.id)
+    const cancelled = { ...result, threadId: source.threadId, cancelled: true }
+    store.settleCommand(cancelled)
+    const after = store.activities()
+    expect((scope === "work" ? store.getWork(bot.id, target.id).activity : after.find(activity => activity.kind === target.kind && activity.id === target.id))?.preview).toBe("后台任务已停止")
+    if (scope !== "private") expect(after.find(activity => activity.kind === "bot" && activity.id === bot.id)).toEqual(main)
+    expect(store.activeCommandThreads()).toEqual([])
+    store.settleCommand(cancelled)
+    expect(store.activities()).toEqual(after)
+  })
+  it.each([
+    ["completed", false],
+    ["superseded", false],
+    ["completed", true],
+    ["superseded", true]
+  ] as const)(
+    "preserves command ownership after %s while only silent services allow peer review (notify=%s)",
+    (state, notifyOnComplete) => {
+      const { store, bot, task, command, result } = fixture()
+      store.settle(task.id, "completed", null, "Done")
+      const peer = store.create({ name: "Reviewer", instructions: "", color: "#123456", modelRef: null })
+      const group = store.saveGroup({ name: "Service review", memberIds: [bot.id, peer.id] })
+      store.sendGroup({ groupId: group.id, requestId: "service", text: "Start the preview", targetBotIds: [bot.id] })
+      const source = store.nextQueued([])!
+      store.transition(source.id, "running")
+      store.acceptCommand(source.id, { ...command, threadId: source.threadId, notifyOnComplete })
+      store.transition(source.id, "waiting_user")
+      store.sendGroup({ groupId: group.id, requestId: "review", text: "Review the preview", targetBotIds: [peer.id] })
+      store.transition(source.id, "running")
+      store.settle(source.id, state, null, "", undefined, true)
+      const review = store.nextQueued([])!
+      expect(review.botId).toBe(peer.id)
+      store.transition(review.id, "running")
+      store.publishGroupMessage(review.id, "feedback", "@Local Please apply this review.")
+      store.settle(review.id, "completed", null, "", undefined, true)
+      store.advanceGroupDiscussions()
+      expect(store.nextQueued([])?.botId ?? null).toBe(notifyOnComplete ? null : bot.id)
+      expect(store.activeCommandThreads()).toEqual([source.threadId])
+      expect(store.continuationCommandIds(source.id, true)).toEqual(notifyOnComplete ? [] : [command.id])
+      expect(() => store.update({ ...bot, archived: true, expectedVersion: bot.version })).toThrow()
+      store.settleCommand({ ...result, threadId: source.threadId })
+      expect(store.activeCommandThreads()).toEqual([])
+      expect(store.recentTasks().filter(t => t.origin.kind === "notification")).toHaveLength(notifyOnComplete ? 1 : 0)
+    }
+  )
   it.each([
     [0, false, true],
     [7, false, false],

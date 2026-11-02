@@ -52,6 +52,46 @@ function receipt(status = "submitted", id = "choice-call") {
 const check = createBotIntroductionDeliveryCheck(task, () => true)
 
 describe("Bot introduction choice delivery", () => {
+  it.each(["length", "max_tokens", "max_output_tokens", "model_length", "content_filter_length", "stop"])(
+    "keeps the real completion budget after an answered choice and %s final",
+    async (finish) => {
+      class ChoiceFollowupModel extends BaseChatModel {
+        calls = 0
+        _llmType() { return "introduction-truncation-regression" }
+        bindTools() { return this }
+        async _generate(): Promise<ChatResult> {
+          this.calls += 1
+          const message = new AIMessage({
+            content: "",
+            additional_kwargs: { reasoning_content: "Consider the submitted choice" },
+            response_metadata: { finish_reason: finish }
+          })
+          return { generations: [{ text: "", message }] }
+        }
+      }
+      const model = new ChoiceFollowupModel({})
+      const runId = `intro-choice-${finish}`
+      const agent = createAgent({
+        model, tools: [],
+        middleware: [createTurnCompletionGateMiddleware({ ownerRunToken: runId, checkFinalDelivery: check })]
+      })
+      try {
+        const result = await agent.invoke(
+          { messages: [begin, call(), receipt()] },
+          { configurable: { thread_id: task.threadId } }
+        )
+        expect(model.calls).toBe(finish === "stop" ? 1 : 3)
+        expect(result.messages.filter((message) => ToolMessage.isInstance(message))).toHaveLength(1)
+        const report = readTurnCompletionGateReport(task.threadId, runId)
+        expect(report?.retriesUsed).toBe(finish === "stop" ? 0 : 2)
+        if (finish === "stop") expect(report?.unresolved).toBeNull()
+        else expect(report?.unresolved).toMatchObject({ defect: "missing_delivery" })
+      } finally {
+        clearTurnCompletionGateState(task.threadId, runId)
+      }
+    }
+  )
+
   it("rejects the actual greeting-only response instead of accepting a completed introduction", () => {
     expect(check([begin, greeting])).toContain("request_user_input")
     expect(check([begin, greeting])).toContain("Do not repeat your greeting")

@@ -328,6 +328,8 @@ async function complete({
       taskCheckpoint: () => undefined,
       profileContinuationRequest: () => null,
       onSteeringReady: vi.fn(),
+      recordNotificationTerminal: vi.fn(),
+      peerHandoff: () => ({ owned: false, pending: false, outputFiles: [] }),
       stoppedTaskContext: () => [],
       associatedWorks: () => ({ items: [], hasMore: false }),
       publishGroupMessage: publishedText,
@@ -336,6 +338,8 @@ async function complete({
     } as unknown as LocalBotHost
     const emptyTools = () => []
     const factory = runInNewContext(adapterFactory, {
+      AbortController,
+      AbortSignal,
       startAgentRun,
       notifyIfBackground,
       botWorkResultLabel,
@@ -621,10 +625,11 @@ describe("Bot notification ownership at the native run boundary", () => {
       })
       expect(completion.context).toMatchObject({
         source: "bot",
-        workflowEnabled: true,
         workflowInternalNotification: true,
         botWorkflowNotification: { runId: workflow.key, startedAt: workflow.runStartedAt }
       })
+      expect(completion.context.workflowEnabled).not.toBe(true)
+      expect(completion.context.remotePolicy?.blockedToolNames).toContain("workflow")
       expect(completion.notifications).toEqual([
         {
           title: `Synthetic Bot · ${state === "completed" ? "后台任务有新结果" : "需要你查看"}`,

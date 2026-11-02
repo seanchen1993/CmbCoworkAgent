@@ -104,6 +104,8 @@ export interface AgentGoalControlResult {
  */
 export interface AgentRunExecutionContext {
   source: StandardTurnSource
+  /** Opt-in per-run model pin from a trusted caller; omitted callers keep global routing. */
+  modelRoutingMode?: "pinned"
   localRunLease?: {
     owner: LocalThreadRunOwner
     runId: string

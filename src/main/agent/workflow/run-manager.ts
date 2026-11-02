@@ -94,6 +94,14 @@ export interface WorkflowLaunchResult {
   whenInitialPersisted: Promise<boolean>
 }
 
+/** Exact detached instance identity; a resumed run may reuse runId. */
+export interface WorkflowRunReference {
+  threadId: string
+  workspacePath: string
+  runId: string
+  startedAt: string
+}
+
 interface ActiveWorkflowRun {
   threadId: string
   workspacePath: string
@@ -101,6 +109,7 @@ interface ActiveWorkflowRun {
   workspaceKey: string
   runId: string
   workflowName: string
+  startedAt: string
   controller: AbortController
   userCancelled: boolean
   settled: Promise<void>
@@ -661,6 +670,21 @@ class WorkflowRunManager {
     return this.active.get(threadId)?.runId
   }
 
+  /** Read-only instance identity. runId alone cannot distinguish a resumed run.
+   * Callers that need an exact cancel compare this snapshot and call cancel
+   * synchronously, without an intervening await. */
+  activeRunReference(threadId: string): WorkflowRunReference | undefined {
+    const run = this.active.get(threadId)
+    return run
+      ? {
+          threadId: run.threadId,
+          workspacePath: run.workspacePath,
+          runId: run.runId,
+          startedAt: run.startedAt
+        }
+      : undefined
+  }
+
   /** A renderer can observe the engine's terminal event while manager-owned
    * worktree reclaim/final persistence is still finishing. Let a matching UI
    * action wait for that short lifecycle tail instead of failing as "active". */
@@ -1141,6 +1165,7 @@ class WorkflowRunManager {
       runId: request.runId,
       workflowName: request.parsed.meta.name,
       controller,
+      startedAt: now,
       userCancelled: false,
       settled: Promise.resolve(),
       worktrees: new WorkflowWorktreeLedger({

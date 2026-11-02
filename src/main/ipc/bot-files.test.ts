@@ -7,6 +7,7 @@ const fixture = vi.hoisted(() => ({
   getGroupMember: vi.fn(),
   getGroup: vi.fn(),
   getWork: vi.fn(),
+  imGateway: { binding: vi.fn() },
   initializeWorkThread: vi.fn(),
   prepare: vi.fn(),
   open: vi.fn(),
@@ -17,6 +18,7 @@ const fixture = vi.hoisted(() => ({
   resolve: vi.fn(),
   destination: vi.fn(),
   copy: vi.fn(),
+  exportCopy: vi.fn(),
   copyBytes: vi.fn(),
   stableOpen: vi.fn(),
   stableRead: vi.fn(),
@@ -37,6 +39,7 @@ vi.mock("../bots/workspace-file", () => ({ resolveBotWorkspaceFile: fixture.reso
 vi.mock("../bots/file-copy", () => ({
   botImportDestination: fixture.destination,
   copyBotFile: fixture.copy,
+  exportBotFile: fixture.exportCopy,
   copyBotFileBytes: fixture.copyBytes
 }))
 vi.mock("../workspace-file-scan/manager", () => ({
@@ -100,6 +103,43 @@ beforeEach(() => {
     size: 12,
     truncated: false
   })
+})
+
+it("exports a retained IM group snapshot only through its owning Bot and binding", async () => {
+  const invoke = register()
+  fixture.imGateway.binding.mockReturnValue({ binding: { botId: "a", kind: "group", state: "revoked" } })
+  await expect(invoke("export-im", "a", "im-binding", "report.md")).resolves.toBe(true)
+  expect(fixture.resolve).toHaveBeenCalledWith("/test-data/bots/workspaces/mock-im-binding", "report.md", { allowAbsolute: true })
+  expect(fixture.exportCopy).toHaveBeenCalledWith("/test-data/bots/workspaces/mock-im-binding",
+    "/test-data/bots/workspaces/mock-im-binding/report.md", "/saved/report.md")
+  await expect(invoke("export-im", "other", "im-binding", "report.md")).rejects.toThrow("会话")
+  fixture.imGateway.binding.mockReturnValue({ binding: { botId: "a", kind: "dm" } })
+  await expect(invoke("export-im", "a", "im-binding", "report.md")).rejects.toThrow("会话")
+  expect(fixture.save).toHaveBeenCalledTimes(1)
+})
+
+it("rechecks IM ownership after the save dialog and keeps workspace containment", async () => {
+  const invoke = register()
+  fixture.imGateway.binding.mockReturnValue({ binding: { botId: "a", kind: "group" } })
+  fixture.resolve.mockRejectedValueOnce(new Error("outside workspace"))
+  await expect(invoke("export-im", "a", "im-binding", "/other/private.txt")).rejects.toThrow("outside workspace")
+  expect(fixture.save).not.toHaveBeenCalled()
+  fixture.save.mockImplementationOnce(async () => {
+    fixture.imGateway.binding.mockReturnValue(null)
+    return { canceled: false, filePath: "/saved/report.md" }
+  })
+  await expect(invoke("export-im", "a", "im-binding", "report.md")).rejects.toThrow("会话")
+  expect(fixture.exportCopy).not.toHaveBeenCalled()
+})
+
+it("permits real IM work files while preserving the simulated-channel restriction", async () => {
+  const invoke = register()
+  fixture.getWork.mockReturnValue({ id: "work", botId: "a", threadId: "work-thread", source: { transport: "im" } })
+  await expect(invoke("export", "a", "report.md", undefined, "work")).resolves.toBe(true)
+  expect(fixture.prepare.mock.calls[0][2].source.transport).toBe("im")
+  fixture.getWork.mockReturnValue({ id: "work", botId: "a", threadId: "work-thread", source: { transport: "mock" } })
+  await expect(invoke("export", "a", "report.md", undefined, "work")).rejects.toThrow("模拟渠道")
+  expect(fixture.save).toHaveBeenCalledTimes(1)
 })
 
 describe("Bot file IPC group scope", () => {
@@ -269,7 +309,7 @@ describe("Bot file IPC group scope", () => {
       "report.md",
       { allowAbsolute: true }
     )
-    expect(fixture.copy).toHaveBeenCalledWith(
+    expect(fixture.exportCopy).toHaveBeenCalledWith(
       "/test-data/bots/workspaces/group-g",
       "/test-data/bots/workspaces/group-g/report.md",
       "/saved/report.md"
@@ -293,7 +333,7 @@ describe("Bot file IPC group scope", () => {
       return { canceled: false, filePath: "/saved/report.md" }
     })
     await expect(call("export-group", "g", "report.md")).rejects.toThrow("Group unavailable")
-    expect(fixture.copy).not.toHaveBeenCalled()
+    expect(fixture.exportCopy).not.toHaveBeenCalled()
   })
 
   it("keeps group history exports within the resolver boundary and supports cancelled saves", async () => {
@@ -305,7 +345,7 @@ describe("Bot file IPC group scope", () => {
     expect(fixture.save).not.toHaveBeenCalled()
     fixture.save.mockResolvedValueOnce({ canceled: true })
     expect(await call("export-group", "g", "report.md")).toBe(false)
-    expect(fixture.copy).not.toHaveBeenCalled()
+    expect(fixture.exportCopy).not.toHaveBeenCalled()
     await expect(call("export-group", "../g", "report.md")).rejects.toThrow()
   })
 
@@ -489,13 +529,13 @@ describe("Bot file IPC group scope", () => {
     expect(fixture.resolve).toHaveBeenCalledWith("/group", "/group/report.md", {
       allowAbsolute: true
     })
-    expect(fixture.copy).toHaveBeenCalledWith("/group", "/group/report.md", "/saved/report.md")
+    expect(fixture.exportCopy).toHaveBeenCalledWith("/group", "/group/report.md", "/saved/report.md")
     fixture.save.mockClear()
-    fixture.copy.mockClear()
+    fixture.exportCopy.mockClear()
     fixture.resolve.mockRejectedValueOnce(new Error("文件不在此 Bot 工作目录中"))
     await expect(call("export", "a", "/private/b/secret.md", "team")).rejects.toThrow("工作目录")
     expect(fixture.save).not.toHaveBeenCalled()
-    expect(fixture.copy).not.toHaveBeenCalled()
+    expect(fixture.exportCopy).not.toHaveBeenCalled()
   })
   it("uses a validated group workspace for list/import/export and copies explicitly shared files into private storage", async () => {
     const call = register()
@@ -517,7 +557,7 @@ describe("Bot file IPC group scope", () => {
       "/group/shared/copy.md"
     )
     await call("export", "a", "report.md", "team")
-    expect(fixture.copy).toHaveBeenCalledWith("/group", "/group/report.md", "/saved/report.md")
+    expect(fixture.exportCopy).toHaveBeenCalledWith("/group", "/group/report.md", "/saved/report.md")
     await call("share", "a", "report.md", "a", "team")
     expect(fixture.copy).toHaveBeenCalledWith(
       "/group",
@@ -560,7 +600,7 @@ describe("Bot file IPC group scope", () => {
       return { canceled: false, filePath: "/saved/report.md" }
     })
     await expect(call("export", "a", "report.md", "team")).rejects.toThrow("删除")
-    expect(fixture.copy).not.toHaveBeenCalled()
+    expect(fixture.exportCopy).not.toHaveBeenCalled()
   })
 
   it("rejects a member removed while preparing the import destination", async () => {

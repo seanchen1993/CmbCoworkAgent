@@ -2,6 +2,7 @@ import { AIMessage, HumanMessage, ToolMessage } from "@langchain/core/messages"
 import { isWorkflowPlumbingTranscriptContent } from "../../shared/checkpoint-transcript"
 import { isFreeformUserInputOption } from "../../shared/user-input-options"
 import type { BotTask } from "../../shared/bots/contracts"
+import { botTruncationReminder } from "./delivery-protocol"
 import {
   inspectFinalAssistantMessage,
   type TurnFinalDeliveryCheck
@@ -39,6 +40,8 @@ export function createBotIntroductionDeliveryCheck(
   stillRequired: () => boolean
 ): TurnFinalDeliveryCheck {
   return (messages) => {
+    const truncation = botTruncationReminder(messages)
+    if (truncation) return truncation
     const currentReply = () => {
       const final = messages.at(-1)
       const defect =

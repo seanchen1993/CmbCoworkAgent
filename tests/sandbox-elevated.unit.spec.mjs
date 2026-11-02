@@ -932,7 +932,7 @@ test("isLikelySandboxDenied keyword check matches real failure outputs and rejec
 test("background execute() routes results through the orchestrator's bypass check", () => {
   const backgroundSection = sectionBetween(
     localSandboxSource,
-    "async executeBackground(command: string, cwd?: string)",
+    "async executeBackground(",
     "  /**\r\n   * Retrieve a background task's"
   )
 

@@ -10,6 +10,7 @@ export function BotDeliveredFile({
   client,
   botId,
   groupId,
+  imConversationId,
   threadId,
   filePath,
   attachmentPath,
@@ -19,6 +20,7 @@ export function BotDeliveredFile({
   client: BotClient
   botId: string
   groupId?: string
+  imConversationId?: string
   threadId: string
   filePath: string
   attachmentPath?: string
@@ -34,7 +36,11 @@ export function BotDeliveredFile({
     lock.current = true
     setSaving(true)
     try {
-      if (groupId) await client.exportGroupFile(groupId, openedPath)
+      if (imConversationId) {
+        if (!client.im?.exportFile) throw new Error("当前主机不支持 IM 文件导出")
+        await client.im.exportFile(botId, imConversationId, openedPath)
+      }
+      else if (groupId) await client.exportGroupFile(groupId, openedPath)
       else await client.exportFile(botId, openedPath)
     } catch (cause) {
       toast.error(botErrorMessage(cause, "文件保存失败，请重试"))

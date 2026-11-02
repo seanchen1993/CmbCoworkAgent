@@ -18,6 +18,7 @@ import {
   botImportDestination,
   copyBotFile,
   copyBotFileBytes,
+  exportBotFile,
   hashBotFile,
   snapshotBotDeliveryFile
 } from "./file-copy"
@@ -69,7 +70,7 @@ describe("Bot files", () => {
       (await readdir(join(root, ".bot-deliveries"))).some((name) => name.endsWith(".part"))
     ).toBe(false)
   })
-  it("keeps zero-byte deliveries and streams above the original import/export copy cap", async () => {
+  it("saves delivered files above the import cap without relaxing internal copies", async () => {
     const root = await fixture(),
       source = join(root, "large.bin")
     const signal = new AbortController().signal
@@ -78,6 +79,8 @@ describe("Bot files", () => {
     const empty = await snapshotBotDeliveryFile(root, source, signal)
     expect(empty.size).toBe(0)
     expect((await stat(empty.attachmentPath)).size).toBe(0)
+    await exportBotFile(root, empty.attachmentPath, join(root, "empty-saved.bin"), signal)
+    expect((await stat(join(root, "empty-saved.bin"))).size).toBe(0)
     const large = await open(source, "r+")
     await large.truncate(100 * 1024 * 1024 + 1)
     await large.close()
@@ -87,7 +90,28 @@ describe("Bot files", () => {
     const sent = await snapshotBotDeliveryFile(root, source, signal)
     expect(sent.size).toBe(100 * 1024 * 1024 + 1)
     expect((await stat(sent.attachmentPath)).size).toBe(sent.size)
+    const saved = join(root, "saved.bin")
+    await exportBotFile(root, sent.attachmentPath, saved, signal)
+    expect((await stat(saved)).size).toBe(sent.size)
+    expect(await hashBotFile(root, saved, signal)).toBe(
+      await hashBotFile(root, sent.attachmentPath, signal)
+    )
     expect((await stat(empty.attachmentPath)).size).toBe(0)
+  })
+  it("keeps export containment, cancellation and atomic publication protections", async () => {
+    const root = await fixture(), workspace = join(root, "workspace")
+    await mkdir(workspace)
+    const source = join(workspace, "report.bin"), destination = join(root, "saved.bin")
+    await writeFile(source, "NEW")
+    await writeFile(destination, "KEEP")
+    await expect(exportBotFile(workspace, destination, join(root, "escaped.bin"))).rejects.toThrow()
+    const controller = new AbortController()
+    controller.abort(new Error("cancelled"))
+    await expect(exportBotFile(workspace, source, destination, controller.signal)).rejects.toThrow("cancelled")
+    expect(await readFile(destination, "utf8")).toBe("KEEP")
+    expect((await readdir(root)).some(name => name.endsWith(".part"))).toBe(false)
+    await exportBotFile(workspace, source, destination)
+    expect(await readFile(destination, "utf8")).toBe("NEW")
   })
   it("rejects changed snapshots, linked destinations, outside sources and cancellation without partial publication", async () => {
     const root = await fixture(),

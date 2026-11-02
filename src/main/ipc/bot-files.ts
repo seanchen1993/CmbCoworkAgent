@@ -18,7 +18,7 @@ import { getThreadCore } from "../db"
 import { verifyWorkConversationThread } from "../bots/conversation-link-authority"
 import { prepareBotThread } from "../bots/runtime-adapter"
 import { resolveBotWorkspaceFile } from "../bots/workspace-file"
-import { botImportDestination, copyBotFile, copyBotFileBytes } from "../bots/file-copy"
+import { botImportDestination, copyBotFile, copyBotFileBytes, exportBotFile } from "../bots/file-copy"
 import {
   cancelWorkspaceFileScan,
   cancelWorkspaceFileScansForOwner,
@@ -100,7 +100,7 @@ export function registerBotFileHandlers(
     const validate = () => {
       if (workKey) {
         const current = host.getWork(id, workKey)
-        if (current.source)
+        if (current.source && current.source.transport !== "im")
           throw new BotError("CONFLICT", "模拟渠道仅支持文字，尚不开放本机文件和附件")
         if (current.conversation) {
           const row = getThreadCore(current.threadId)
@@ -339,7 +339,7 @@ export function registerBotFileHandlers(
     })
     if (destination.canceled || !destination.filePath) return false
     validate()
-    await copyBotFile(workspace, source, destination.filePath)
+    await exportBotFile(workspace, source, destination.filePath)
     return true
   }
   const groupContext = (hostId: unknown, groupId: unknown) => {
@@ -369,6 +369,22 @@ export function registerBotFileHandlers(
     "bots:files:export-group",
     async (event, hostId: unknown, groupId: unknown, id: unknown) => {
       const { workspace, validate } = groupContext(hostId, groupId)
+      return exportFile(event, workspace, id, validate)
+    }
+  )
+  ipcMain.handle(
+    "bots:files:export-im",
+    async (event, hostId: unknown, botId: unknown, conversationId: unknown, id: unknown) => {
+      const host = hostFor(hostId), bot = botIdentifier(botId), bindingId = botIdentifier(conversationId)
+      const validate = () => {
+        host.getBot(bot)
+        const route = host.imGateway.binding(bindingId)
+        if (!route || route.binding.botId !== bot || route.binding.kind !== "group")
+          throw new BotError("NOT_FOUND", "招乎群会话不存在")
+      }
+      validate()
+      // Local retained history remains readable after revoke; this grants no IM execution.
+      const workspace = botDirectory(join(getCmbCoworkAgentDataRoot(), "bots"), "workspaces", `mock-${bindingId}`)
       return exportFile(event, workspace, id, validate)
     }
   )

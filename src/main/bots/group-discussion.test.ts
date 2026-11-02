@@ -53,6 +53,97 @@ function fixture(count = 2, duplicateNames = false) {
 }
 
 describe("public group turn admission", () => {
+  it.each(["default", "everyone"])("broadcasts %s only to active members after archive", (mode) => {
+    const f = fixture()
+    const [a, b] = f.members
+    f.store.update({ ...b, expectedVersion: b.version, archived: true })
+    const input = {
+      groupId: f.group.id, requestId: "archive-broadcast", text: mode === "everyone" ? "@all Check" : "Check",
+      targetBotIds: f.group.memberIds,
+      ...(mode === "everyone" ? { mentions: [{ start: 0, end: 4, botId: null, label: "all" }] } : {})
+    }
+    expect(f.store.sendGroup(input)).toBe(true)
+    const tasks = f.store.recentTasks()
+    expect(tasks.map(task => task.botId)).toEqual([a.id])
+    expect(f.store.nextQueued([])?.id).toBe(tasks[0].id)
+    const cursor = JSON.parse(String(f.db.exec("SELECT payload FROM bot_group_discussions")[0].values[0][0]))
+    expect(cursor.initialTaskIds).toEqual([tasks[0].id])
+    expect(cursor.turns).toBe(1)
+    // A transport retry retains the original request, even if membership availability changes.
+    const archived = f.store.getBot(b.id)
+    f.store.update({ ...archived, expectedVersion: archived.version, archived: false })
+    expect(f.store.sendGroup(input)).toBe(false)
+    expect(f.store.recentTasks().map(task => task.id)).toEqual(tasks.map(task => task.id))
+    expect(f.store.groupMessages(f.group.id)).toHaveLength(1)
+  })
+
+  it("rejects explicit archived recipients without silently delivering a partial assignment", () => {
+    const f = fixture(3)
+    const [a, b] = f.members
+    f.store.update({ ...b, expectedVersion: b.version, archived: true })
+    expect(() => f.send("explicit-subset", [a.id, b.id])).toThrow("归档")
+    const text = `@${b.name} Check`
+    expect(() => f.store.sendGroup({
+      groupId: f.group.id, requestId: "explicit-mention", text, targetBotIds: [b.id],
+      mentions: [{ start: 0, end: b.name.length + 1, botId: b.id, label: b.name }]
+    })).toThrow("归档")
+    expect(f.store.groupMessages(f.group.id)).toEqual([])
+    expect(f.store.recentTasks()).toEqual([])
+  })
+
+  it("does not save a broadcast when no active member remains", () => {
+    const f = fixture()
+    for (const bot of f.members) f.store.update({ ...bot, expectedVersion: bot.version, archived: true })
+    expect(() => f.send("inactive-room", f.group.memberIds)).toThrow("没有可接收任务的")
+    expect(f.store.groupMessages(f.group.id)).toEqual([])
+    expect(f.store.recentTasks()).toEqual([])
+  })
+
+  it("rejects a pre-deletion member snapshot and accepts the refreshed group", () => {
+    const f = fixture()
+    const [a, b] = f.members
+    f.store.beginDeletion(b.id, b.version)
+    expect(() => f.send("deleting-broadcast", f.group.memberIds)).toThrow("请选择群内")
+    expect(f.store.recentTasks()).toEqual([])
+    expect(f.send("deleting-broadcast", f.store.getGroup(f.group.id).memberIds).map(task => task.botId)).toEqual([a.id])
+    expect(f.store.getBot(b.id).deleting).toBe(true)
+  })
+
+  it.each(["none", "specific", "everyone"])("restoring a skipped member requires a new handoff: %s", (handoff) => {
+    const f = fixture()
+    const [a, b] = f.members
+    f.store.update({ ...b, expectedVersion: b.version, archived: true })
+    const [initial] = f.send("archived-start", f.group.memberIds)
+    expect(initial.botId).toBe(a.id)
+    f.store.transition(initial.id, "running")
+    const archived = f.store.getBot(b.id)
+    f.store.update({ ...archived, expectedVersion: archived.version, archived: false })
+    const text = handoff === "specific" ? `@${b.name} Review my result` :
+      handoff === "everyone" ? "@all Review my result" : "My result is complete"
+    f.store.publishGroupMessage(initial.id, "completed-result", text)
+    f.store.settle(initial.id, "completed", null, text, undefined, true)
+    f.store.advanceGroupDiscussions()
+    const later = f.store.pendingConversationTasks(b.id, f.group.id)
+    expect(later).toHaveLength(handoff === "none" ? 0 : 1)
+    if (handoff !== "none") expect(later[0].origin).toMatchObject({ kind: "discussion", messageId: "archived-start" })
+  })
+
+  it("does not hide an explicit archived mention inside an everyone broadcast", () => {
+    const f = fixture()
+    const b = f.members[1]
+    f.store.update({ ...b, expectedVersion: b.version, archived: true })
+    expect(() => f.store.sendGroup({
+      groupId: f.group.id, requestId: "all-explicit", text: `@all @${b.name} Check`,
+      targetBotIds: f.group.memberIds,
+      mentions: [
+        { start: 0, end: 4, botId: null, label: "all" },
+        { start: 5, end: b.name.length + 6, botId: b.id, label: b.name }
+      ]
+    })).toThrow("归档")
+    expect(f.store.recentTasks()).toEqual([])
+    expect(f.store.groupMessages(f.group.id)).toEqual([])
+  })
+
   it("runs initial members concurrently while a later group request waits", () => {
     const f = fixture()
     f.send("first", f.members.map((bot) => bot.id))
@@ -2197,6 +2288,70 @@ describe("bounded group discussion on the existing Bot queue", () => {
     host.stopConversation(f.members[0].id, f.group.id)
     // Stop every current member's queue through the existing cancellation path.
     host.stopConversation(f.members[1].id, f.group.id)
+  })
+})
+
+describe("group discussion budget feedback", () => {
+  function reachLimit() {
+    const f = fixture()
+    f.send("review-until-done")
+    let calls = 0
+    for (;;) {
+      const task = f.store.nextQueued([])
+      if (!task) break
+      expect(++calls).toBeLessThan(10)
+      const peer = f.members.find(member => member.id !== task.botId)!
+      f.store.transition(task.id, "running")
+      f.store.publishGroupMessage(task.id, `step-${calls}`, `@${peer.name} Please review the next revision.`)
+      f.store.settle(task.id, "completed", null, "private scratch", undefined, true)
+      f.store.advanceGroupDiscussions()
+    }
+    expect(calls).toBe(4) // Existing budget, not more automatic execution.
+    return f
+  }
+
+  it("retains the limit reason across refresh/restart/retry/rename, then clears it on a new instruction", () => {
+    const f = reachLimit()
+    expect(f.store.getGroup(f.group.id)).toMatchObject({
+      discussionLimit: { messageId: "review-until-done" }
+    })
+    expect(f.db.exec("SELECT * FROM bot_group_discussions")[0].values).toEqual([])
+    expect(f.store.nextQueued([])).toBeNull()
+    const refreshed = new BotStore(f.db, () => 1000)
+    expect(refreshed.getGroup(f.group.id)).toEqual(f.store.getGroup(f.group.id))
+    f.send("review-until-done") // Lost transport acknowledgement must not clear the notice.
+    expect(f.store.getGroup(f.group.id)).toHaveProperty("discussionLimit")
+    f.store.saveGroup({ name: "Renamed", memberIds: f.group.memberIds }, f.group)
+    expect(f.store.getGroup(f.group.id)).toHaveProperty("discussionLimit")
+    f.send("continue-review")
+    expect(f.store.getGroup(f.group.id)).not.toHaveProperty("discussionLimit")
+    expect(f.store.nextQueued([])?.message).toContain("Please review the next revision.")
+    expect(f.store.nextQueued([])?.origin).toMatchObject({ kind: "group", messageId: "continue-review" })
+  })
+
+  it("does not turn natural settling, cancellation or failure into a budget warning", () => {
+    for (const terminal of ["completed", "cancelled", "failed"] as const) {
+      const f = fixture()
+      const [task] = f.send()
+      f.store.transition(task.id, "running")
+      f.store.settle(task.id, terminal, terminal === "failed" ? "test failure" : null, "Done")
+      f.store.advanceGroupDiscussions()
+      expect(f.store.getGroup(f.group.id)).not.toHaveProperty("discussionLimit")
+    }
+  })
+
+  it("clears a stale warning on explicit stop or member change without changing other groups", () => {
+    const f = reachLimit()
+    const untouched = f.store.saveGroup({ name: "Other room", memberIds: f.group.memberIds })
+    f.store.stopGroupDiscussion(f.group.id, "unrelated-old-request")
+    expect(f.store.getGroup(f.group.id)).toHaveProperty("discussionLimit")
+    f.store.stopGroupDiscussion(f.group.id)
+    expect(f.store.getGroup(f.group.id)).not.toHaveProperty("discussionLimit")
+    expect(f.store.getGroup(untouched.id)).toEqual(untouched)
+    const other = reachLimit()
+    const updated = other.store.saveGroup({ name: "Room", memberIds: [other.members[0].id] }, other.group)
+    expect(updated).not.toHaveProperty("discussionLimit")
+    expect(other.store.getGroup(other.group.id)).not.toHaveProperty("discussionLimit")
   })
 })
 

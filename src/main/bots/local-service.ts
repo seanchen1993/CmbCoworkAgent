@@ -52,6 +52,22 @@ export function getBotBrowserService(): BotBrowserService {
           return metadata.workspacePath
         }
         if (work.workspace) return work.workspace.path
+        if (work.source) {
+          getLocalBotHost().browserScope(scope)
+          return botDirectory(
+            join(getCmbCoworkAgentDataRoot(), "bots"),
+            "workspaces",
+            `mock-${work.source.bindingId}`
+          )
+        }
+      }
+      if (scope.startsWith("im-")) {
+        getLocalBotHost().browserScope(scope)
+        return botDirectory(
+          join(getCmbCoworkAgentDataRoot(), "bots"),
+          "workspaces",
+          `mock-${scope.slice(3).split("--")[0]}`
+        )
       }
       return botDirectory(
         join(getCmbCoworkAgentDataRoot(), "bots"),
@@ -62,7 +78,8 @@ export function getBotBrowserService(): BotBrowserService {
             ? scope.split("--")[1]
             : scope
       )
-    }
+    },
+    (viewer, scope) => getLocalBotHost().hasPersonalBrowserScope(viewer, scope)
   ))
 }
 

@@ -26,7 +26,9 @@ export function LinkedBotConversation({ link }: { link: BotWorkConversationResol
           bots={snapshot?.bots ?? [link.bot]}
           schedules={snapshot?.schedules ?? []}
           tasks={tasks}
+          collaborationPending={Boolean(snapshot?.collaborationThreads?.includes(link.work.threadId))}
           backgroundBusy={Boolean(
+            link.work.backgroundBusy ||
             snapshot?.backgroundThreads?.includes(link.work.threadId) ||
             threadSummaries[link.work.threadId]?.workflowRunning ||
             threadSummaries[link.work.threadId]?.hasRunningCoordinatorWorker

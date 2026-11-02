@@ -14,6 +14,8 @@ export const localBotsApi: BotClient = {
       ipcRenderer.invoke("bots:conversation:unlink", LOCAL_BOT_HOST_ID, botId, workId, version)
   },
   im: {
+    exportFile: (botId, id, fileId) =>
+      ipcRenderer.invoke("bots:files:export-im", LOCAL_BOT_HOST_ID, botId, id, fileId),
     stopConversation: (botId, id) => ipcRenderer.invoke("bots:im:conversation-stop", LOCAL_BOT_HOST_ID, botId, id),
     conversationWorks: (botId, id, cursor, query) =>
       ipcRenderer.invoke("bots:im:conversation-works", LOCAL_BOT_HOST_ID, botId, id, cursor, query),
@@ -139,8 +141,8 @@ export const localBotsApi: BotClient = {
   removeSchedule: (id, version) =>
     ipcRenderer.invoke("bots:schedule:remove", LOCAL_BOT_HOST_ID, id, version),
   snapshot: () => ipcRenderer.invoke("bots:snapshot", LOCAL_BOT_HOST_ID),
-  exchange: (botId, taskId, groupId, workId) =>
-    ipcRenderer.invoke("bots:exchange", LOCAL_BOT_HOST_ID, botId, taskId, groupId, workId),
+  exchange: (botId, taskId, groupId, workId, imConversationId) =>
+    ipcRenderer.invoke("bots:exchange", LOCAL_BOT_HOST_ID, botId, taskId, groupId, workId, imConversationId),
   messageOrigins: (botId, ids, groupId, workId) =>
     ipcRenderer.invoke("bots:message-origins", LOCAL_BOT_HOST_ID, botId, ids, groupId, workId),
   messageReply: (botId, messageId, workId) =>
@@ -158,7 +160,7 @@ export const localBotsApi: BotClient = {
     ),
   requestReceipts: (botId, checks, workId) =>
     ipcRenderer.invoke("bots:request-receipts", LOCAL_BOT_HOST_ID, botId, checks, workId),
-  exchangeHistory: (botId, taskId, groupId, before, workId) =>
+  exchangeHistory: (botId, taskId, groupId, before, workId, imConversationId) =>
     ipcRenderer.invoke(
       "bots:exchange-history",
       LOCAL_BOT_HOST_ID,
@@ -166,7 +168,8 @@ export const localBotsApi: BotClient = {
       taskId,
       groupId,
       before,
-      workId
+      workId,
+      imConversationId
     ),
   markUnread: (kind, id) => ipcRenderer.invoke("bots:mark-unread", LOCAL_BOT_HOST_ID, kind, id),
   markRead: (kind, id, version) =>

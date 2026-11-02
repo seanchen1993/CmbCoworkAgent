@@ -963,6 +963,37 @@ function testDefaultCompletionAndRepetitionContract(workspacePath: string): void
       notifiedBackgroundCommands: true
     })}${AUTOMATIC_WORKFLOW_SYSTEM_PROMPT}`
   )
+  const peerBackgroundPrompt = getSystemPrompt(workspacePath, "none", {
+    managedForegroundExec: true,
+    notifiedBackgroundCommands: true,
+    retainedBackgroundCommands: true
+  })
+  assert(
+    peerBackgroundPrompt.includes("notify_on_complete: false") &&
+      peerBackgroundPrompt.includes("before returning to its requester") &&
+      !peerBackgroundPrompt.includes("briefly report what is pending and end this turn"),
+    "owned peer jobs must preserve final return while allowing server readiness checks"
+  )
+  assert(
+    !getSystemPrompt(workspacePath, "none").includes("notify_on_complete") &&
+      !getSystemPrompt(workspacePath, "none", { managedForegroundExec: true }).includes(
+        "notify_on_complete"
+      ),
+    "ordinary and managed workbench prompts must not inherit the Bot peer capability"
+  )
+  const directBotServicePrompt = getSystemPrompt(workspacePath, "none", {
+    notifiedBackgroundCommands: true,
+    silentBackgroundServices: true
+  })
+  assert(
+    directBotServicePrompt.includes("notify_on_complete: false") &&
+      directBotServicePrompt.includes(
+        "Keep finite builds/tests on the default notification path"
+      ) &&
+      !directBotServicePrompt.includes("host resumes this same task") &&
+      !finalBotWorkflowPrompt.includes("notify_on_complete"),
+    "silent service capability must be explicit, without changing finite result routing or legacy hosts"
+  )
   assertCompletionAndRepetitionContract(finalBotWorkflowPrompt, "automatic Bot workflow")
   assert(
     finalBotWorkflowPrompt.includes("the host persists completion and wakes this conversation automatically") &&
@@ -1213,6 +1244,9 @@ async function testManagedForegroundCommands(workspacePath: string): Promise<voi
 async function testBotBackgroundCommandHandoff(workspacePath: string): Promise<void> {
   const cases = [
     { command: "node long-task.js", run_in_background: true, blocked: false },
+    { command: "node server.js", run_in_background: true, notify: false, silentServices: true, blocked: false },
+    { command: "node server.js", run_in_background: true, notify: false, retained: true, blocked: false },
+    { command: "node old-host.js", run_in_background: true, notify: false, blocked: false },
     { command: "node long-task.js & sleep 2", blocked: true },
     { command: "bash -c 'node long-task.js &'", blocked: true },
     { command: "printf '%s' 'a & b'", blocked: false },
@@ -1225,6 +1259,7 @@ async function testBotBackgroundCommandHandoff(workspacePath: string): Promise<v
   for (const fixture of cases) {
     let foreground = 0,
       background = 0
+    let actualNotify: boolean | undefined
     const calls: ToolStrategyRequest[] = []
     const backend = {
       id: "bot-background-handoff",
@@ -1233,7 +1268,8 @@ async function testBotBackgroundCommandHandoff(workspacePath: string): Promise<v
         foreground++
         return { output: "verified fixture", exitCode: 0 }
       },
-      executeBackground: async () => {
+      executeBackground: async (_command: string, _cwd?: string, notify?: boolean) => {
+        actualNotify = notify
         background++
         return "task_id: fixture-background"
       }
@@ -1243,13 +1279,18 @@ async function testBotBackgroundCommandHandoff(workspacePath: string): Promise<v
         ? finishedStrategyMessage()
         : new AIMessage({
             content: "",
-            tool_calls: [{
-              id: "command", name: "execute", type: "tool_call",
-              args: {
-                command: fixture.command,
-                run_in_background: fixture.run_in_background
+            tool_calls: [
+              {
+                id: "command",
+                name: "execute",
+                type: "tool_call",
+                args: {
+                  command: fixture.command,
+                  run_in_background: fixture.run_in_background,
+                  notify_on_complete: fixture.notify
+                }
               }
-            }]
+            ]
           })
     )
     const agent = createDeepAgent({
@@ -1257,6 +1298,8 @@ async function testBotBackgroundCommandHandoff(workspacePath: string): Promise<v
       backend,
       managedExecution: true,
       notifiedBackgroundCommands: true,
+      retainedBackgroundCommands: fixture.retained ?? false,
+      silentBackgroundServices: fixture.silentServices ?? false,
       backgroundCommandCwd: workspacePath,
       backgroundCommandShellSyntax: fixture.syntax ?? "posix",
       mainSubagentsEnabled: false,
@@ -1270,6 +1313,8 @@ async function testBotBackgroundCommandHandoff(workspacePath: string): Promise<v
         background === (!fixture.blocked && fixture.run_in_background ? 1 : 0),
       `Bot root command handoff must act before execution: ${fixture.command}`
     )
+    assert(actualNotify === (fixture.silentServices || fixture.retained ? fixture.notify : undefined),
+      "execute schema must forward explicit service policy only for hosts that support it")
     const feedback = requestText(calls.at(-1)!.messages)
     assert(
       feedback.includes("Command was not started") === fixture.blocked &&

@@ -1368,7 +1368,8 @@ function createInitialChatSkillCatalogState(
     store.threads.find((thread) => thread.thread_id === threadId)
   )
   const targetProjectId = binding?.projectId ?? null
-  const harnessScoped = surface !== "default" || Boolean(binding)
+  const harnessScoped =
+    surface === "harness-project" || surface === "harness-feature-session" || Boolean(binding)
   const preferredPlugin = binding ? getCachedHarnessPreferredPlugin(binding.projectId) : null
   const harnessCatalogReady = !binding || preferredPlugin !== null
   const snapshot = readSkillCatalogCache()
@@ -1764,7 +1765,7 @@ export function ChatContainer({
   const shouldShowHarnessDialogTips = surfaceConfig.showHarnessDialogTips && !readOnly
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const botInputRef = useRef<BotGroupInputControl | null>(null)
-  const [botCaret, setBotCaret] = useState(0)
+  const [, setBotSelectionRevision] = useState(0)
   const textareaResizeFrameRef = useRef<number | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const chatRootRef = useRef<HTMLDivElement>(null)
@@ -2222,7 +2223,10 @@ export function ChatContainer({
   const loadSkills = useCallback(async (): Promise<void> => {
     const requestId = ++skillsLoadRequestIdRef.current
     const binding = harnessFeatureBindingRef.current
-    const harnessScoped = chatSurfaceRef.current !== "default" || Boolean(binding)
+    const harnessScoped =
+      chatSurfaceRef.current === "harness-project" ||
+      chatSurfaceRef.current === "harness-feature-session" ||
+      Boolean(binding)
     const targetProjectId = binding?.projectId ?? null
     setSkillsLoadTargetProjectId(targetProjectId)
     const pluginVersion = useAppStore.getState().pluginVersion
@@ -5469,6 +5473,7 @@ export function ChatContainer({
     },
     [threadId, workspacePath]
   )
+  const botCaret = botInputRef.current?.selectionStart ?? input.length
   const atFileMentions = useAtFileMentions({
     input,
     cursorOffset: managedTurn?.mentionOptions ? botCaret : inputRef.current?.selectionStart ?? input.length,
@@ -7895,7 +7900,8 @@ export function ChatContainer({
       messageForkTarget.checkpoint.messageForkMode === "checkpoint"
         ? undefined
         : (messageForkTarget.checkpoint.resolvedMessageId ?? messageForkTarget.message.id)
-    const preserveHarnessView = surface !== "default"
+    const preserveHarnessView =
+      surface === "harness-project" || surface === "harness-feature-session"
     setForkingMessageId(messageForkTarget.message.id)
     try {
       const forkedThread = await forkThread(
@@ -9628,7 +9634,7 @@ export function ChatContainer({
                             files: atFileMentions.mode.kind === "at-file" ? atFileMentions.mode.suggestions : [],
                             onSelectFile: applyAtFileMention,
                             onKeyDown: handleKeyDown,
-                            onCaret: setBotCaret,
+                            onCaret: () => setBotSelectionRevision((revision) => revision + 1),
                             className: composerRightClearanceClass ?? undefined
                           }}
                         />

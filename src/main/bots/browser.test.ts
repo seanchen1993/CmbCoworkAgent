@@ -20,6 +20,7 @@ import type { BotBrowserEngine, BotBrowserToolbarAction } from "./browser-engine
 import { NativeSqliteAdapter } from "../db/native-sqlite-adapter"
 import { BotStore } from "./store"
 import { LocalBotHost, type BotRunPort } from "./host"
+import { botImBrowserScope } from "../../shared/bots/im-channel"
 import { botGroupBrowserScope } from "../../shared/bots/contracts"
 
 const launch = vi.fn()
@@ -141,6 +142,89 @@ afterEach(async () => {
 })
 
 describe("Bot browser ownership and control", () => {
+  it("lets a peer observe, take over and return while another Bot is navigating", async () => {
+    const a = JSON.parse(await service.act("a", { action: "observe" }, signal()))
+    const b = JSON.parse(await service.act("b", { action: "observe" }, signal()))
+    const entered = deferred(), finish = deferred()
+    context.entries[0].goto.mockImplementationOnce(async () => {
+      entered.resolve()
+      await finish.promise
+    })
+    const navigation = service.act("a", {
+      action: "navigate", pageId: a.pageId, url: "https://example.test/slow"
+    }, signal())
+    const settled = Promise.allSettled([navigation])
+    await entered.promise
+    try {
+      expect(JSON.parse(await service.act("b", { action: "observe", pageId: b.pageId }, signal())).pageId)
+        .toBe(b.pageId)
+      await service.takeOver("b", b.pageId)
+      expect((await service.preview("b")).control).toBe("human")
+      await service.giveBack("b")
+      expect((await service.preview("b")).control).toBe("bot")
+      expect(context.entries[0].closed).toBe(false)
+    } finally {
+      finish.resolve()
+      await settled
+    }
+    expect((await settled)[0].status).toBe("fulfilled")
+    expect(context.entries[0].goto).toHaveBeenCalledTimes(1)
+  })
+
+  it("keeps same-scope actions serialized and rejects queued input after takeover", async () => {
+    const a = JSON.parse(await service.act("a", { action: "observe" }, signal()))
+    const entered = deferred(), finish = deferred()
+    context.entries[0].goto.mockImplementationOnce(async () => {
+      entered.resolve()
+      await finish.promise
+    })
+    const navigation = service.act("a", {
+      action: "navigate", pageId: a.pageId, url: "https://example.test/slow"
+    }, signal())
+    const navigationResult = Promise.allSettled([navigation])
+    await entered.promise
+    const input = service.act("a", {
+      action: "fill", pageId: a.pageId, role: "textbox", name: "Name", text: "stale"
+    }, signal())
+    const inputResult = Promise.allSettled([input])
+    await new Promise<void>(resolve => setImmediate(resolve))
+    expect(context.entries[0].fill).not.toHaveBeenCalled()
+    const taking = service.takeOver("a", a.pageId)
+    finish.resolve()
+    expect((await navigationResult)[0].status).toBe("rejected")
+    expect((await inputResult)[0].status).toBe("rejected")
+    await taking
+    expect(context.entries[0].fill).not.toHaveBeenCalled()
+    expect((await service.preview("a")).control).toBe("human")
+    await service.giveBack("a")
+  })
+
+  it("cleans a removed group member's pending first page before allowing a rejoined action", async () => {
+    const owner = botGroupBrowserScope("room", "a")
+    const engine = await launch()
+    launch.mockResolvedValue(engine)
+    const entered = deferred(), finish = deferred()
+    vi.spyOn(engine, "createPage").mockImplementationOnce(async () => {
+      const page = await context.newPage()
+      entered.resolve()
+      await finish.promise
+      return page as unknown as Awaited<ReturnType<BotBrowserEngine["createPage"]>>
+    })
+    const first = service.act(owner, { action: "observe" }, signal())
+    const firstResult = Promise.allSettled([first])
+    await entered.promise
+    const removed = service.removeGroupMember("room", "a")
+    const rejoined = service.act(owner, { action: "observe" }, signal())
+    finish.resolve()
+    await firstResult
+    await removed
+    const next = JSON.parse(await rejoined)
+    expect(context.entries).toHaveLength(2)
+    expect(context.entries[0].closed).toBe(true)
+    expect(context.entries[1].closed).toBe(false)
+    expect((await service.preview(owner)).pages.map(page => page.id)).toEqual([next.pageId])
+  })
+
   it("routes native toolbar actions through the same owner and lease, excluding browser chrome", async () => {
     const a = JSON.parse(await service.act("a", { action: "observe" }, signal()))
     const b = JSON.parse(await service.act("b", { action: "observe" }, signal()))
@@ -2273,3 +2357,240 @@ describe("Bot browser ownership and control", () => {
     expect((await service.preview("a")).control).toBe("bot")
   })
 })
+
+it("keeps B input valid while taking over A invalidates already executed B click", async () => {
+  const a = JSON.parse(await service.act("a", { action: "observe" }, signal()))
+  const b = JSON.parse(await service.act("b", { action: "observe" }, signal()))
+  const entered = deferred(),
+    finish = deferred()
+  context.entries[1].click.mockImplementation(async () => {
+    entered.resolve()
+    await finish.promise
+  })
+  const clicking = service.act(
+    "b",
+    { action: "click", pageId: b.pageId, role: "button", name: "Go" },
+    signal()
+  )
+
+  await entered.promise
+  const taking = service.takeOver("a", a.pageId)
+  finish.resolve()
+  await expect(clicking).resolves.toContain(b.pageId)
+  await taking
+  expect(context.entries[1].click).toHaveBeenCalledOnce()
+})
+
+
+describe("IM browser audience and execution owners", () => {
+  const audience = "im-binding--owner"
+  const peer = botImBrowserScope("binding", "owner", "peer", "im-peer-root-peer")
+  it("keeps peer pages isolated while the original audience previews and controls them", async () => {
+    const a = JSON.parse(
+      await service.act(audience, { action: "navigate", url: "https://a.example" }, signal())
+    )
+    const b = JSON.parse(
+      await service.act(peer, { action: "navigate", url: "https://b.example" }, signal())
+    )
+    expect(a.pageId).not.toBe(b.pageId)
+    await expect(
+      service.act(audience, { action: "close", pageId: b.pageId }, signal())
+    ).rejects.toThrow("不属于")
+    const view = await service.preview(audience, b.pageId)
+    expect(view.pages.map((page) => page.id)).toEqual([a.pageId, b.pageId])
+    expect(view.pageId).toBe(b.pageId)
+    await service.takeOver(audience, b.pageId)
+    expect((await service.preview(audience)).control).toBe("human")
+    expect((await service.preview(audience)).pageId).toBe(b.pageId)
+    await service.navigateAsHuman(audience, b.pageId, "https://manual.example")
+    const generation = (await service.preview(audience)).generation
+    await service.giveBack(audience, generation)
+    await service.act(audience, { action: "close", pageId: a.pageId }, signal())
+    expect(
+      JSON.parse(await service.act(peer, { action: "observe", pageId: b.pageId }, signal())).url
+    ).toBe("https://manual.example/")
+  })
+
+  it("isolates two roots of one executor and reuses the stable thread on continuation", async () => {
+    const second = botImBrowserScope("binding", "owner", "peer", "im-peer-next-peer")
+    const a = JSON.parse(
+      await service.act(peer, { action: "navigate", url: "https://first.example" }, signal())
+    )
+    const b = JSON.parse(
+      await service.act(second, { action: "navigate", url: "https://second.example" }, signal())
+    )
+    expect(a.pageId).not.toBe(b.pageId)
+    const resumed = botImBrowserScope("binding", "owner", "peer", "im-peer-root-peer")
+    expect(JSON.parse(await service.act(resumed, { action: "observe" }, signal()))).toMatchObject({
+      pageId: a.pageId,
+      url: "https://first.example/"
+    })
+    await expect(
+      service.act(second, { action: "close", pageId: a.pageId }, signal())
+    ).rejects.toThrow("不属于")
+    await service.act(second, { action: "close", pageId: b.pageId }, signal())
+    expect((await service.preview(audience)).pages.map((p) => p.id)).toEqual([a.pageId])
+  })
+
+  it("does not include a different IM audience or let it take control", async () => {
+    const b = JSON.parse(await service.act(peer, { action: "observe" }, signal()))
+    const other = "im-other-binding--owner"
+    expect((await service.preview(other)).pages).toEqual([])
+    await expect(service.preview(other, b.pageId)).rejects.toThrow("不属于")
+    await expect(service.takeOver(other, b.pageId)).rejects.toThrow("不属于")
+    await service.takeOver(audience, b.pageId)
+    const generation = (await service.preview(audience)).generation
+    await expect(service.giveBack(other, generation)).rejects.toThrow()
+    await service.giveBack(audience, generation)
+  })
+
+  it("returns or skips only the delegated help owner and keeps sibling model actions independent", async () => {
+    const sibling = `${audience}--sibling`
+    const b = JSON.parse(await service.act(peer, { action: "observe" }, signal()))
+    const c = JSON.parse(await service.act(sibling, { action: "observe" }, signal()))
+    const waiting = vi.fn()
+    const help = service.act(
+      peer,
+      { action: "request_help", pageId: b.pageId, instruction: "Enter a synthetic note" },
+      signal(),
+      waiting
+    )
+    await vi.waitFor(() => expect(waiting).toHaveBeenCalledWith(true))
+    const state = await service.preview(audience)
+    expect(state.pageId).toBe(b.pageId)
+    expect(state.helpInstruction).toBe("Enter a synthetic note")
+    expect(
+      JSON.parse(
+        await service.act(
+          sibling,
+          { action: "navigate", pageId: c.pageId, url: "https://sibling.example" },
+          signal()
+        )
+      ).url
+    ).toBe("https://sibling.example/")
+    await expect(service.giveBack(audience, state.generation - 1, "skipped")).rejects.toThrow()
+    await service.giveBack(audience, state.generation, "skipped")
+    expect(JSON.parse(await help).helpSkipped).toBe(true)
+    expect(waiting).toHaveBeenLastCalledWith(false)
+    expect((await service.preview(sibling)).pages).toHaveLength(1)
+  })
+
+  it("routes native close and return to the selected peer without closing the audience's page", async () => {
+    const a = JSON.parse(await service.act(audience, { action: "observe" }, signal()))
+    const b = JSON.parse(await service.act(peer, { action: "observe" }, signal()))
+    await service.takeOver(audience, b.pageId)
+    const first = await service.preview(audience)
+    await toolbar!(context.entries[1], first.generation, { action: "return" })
+    expect((await service.preview(audience)).control).toBe("bot")
+    await service.takeOver(audience, b.pageId)
+    const state = await service.preview(audience)
+    await toolbar!(context.entries[1], state.generation, { action: "close" })
+    expect(context.entries[0].closed).toBe(false)
+    expect(context.entries[1].closed).toBe(true)
+    expect((await service.preview(audience)).control).toBe("bot")
+    await expect(service.giveBack(audience, state.generation)).rejects.toThrow("控制权已改变")
+    expect(
+      JSON.parse(await service.act(audience, { action: "observe", pageId: a.pageId }, signal()))
+        .pageId
+    ).toBe(a.pageId)
+  })
+
+  it.each(["owner", "peer"])("retires scoped pages when their %s Bot is deleted", async (id) => {
+    await service.act(peer, { action: "observe" }, signal())
+    await service.act("unrelated", { action: "observe" }, signal())
+    await service.removeBot(id)
+    expect(context.entries[0].closed).toBe(true)
+    expect(context.entries[1].closed).toBe(false)
+    await expect(service.act(peer, { action: "observe" }, signal())).rejects.toThrow("删除")
+  })
+})
+
+it.each([undefined, "skipped"] as const)(
+  "reopens hidden personal IM helper pages from the original desktop and returns %s",
+  async (outcome) => {
+    const db = new NativeSqliteAdapter(new DatabaseSync(":memory:"))
+    const store = new BotStore(db)
+    const host = new LocalBotHost(store, { onAvailable: () => () => {}, acquire: () => null })
+    const owner = store.create({
+      name: "Owner",
+      instructions: "",
+      color: "#123456",
+      modelRef: null
+    })
+    const peer = store.create({ name: "Peer", instructions: "", color: "#654321", modelRef: null })
+    const register = (kind: "dm" | "group") =>
+      store.imGateway.register("realm", "principal", {
+        id: kind,
+        botId: owner.id,
+        kind,
+        state: "active",
+        version: 1,
+        label: kind,
+        conversationKey: kind,
+        createdAt: new Date().toISOString(),
+        expiresAt: new Date(Date.now() + 900000).toISOString()
+      })
+    const dm = register("dm"),
+      group = register("group")
+    service = new BotBrowserService(launch, undefined, (viewer, scope) =>
+      host.hasPersonalBrowserScope(viewer, scope)
+    )
+    const execution = botImBrowserScope(dm.id, owner.id, peer.id, `im-peer-root-${peer.id}`)
+    const groupExecution = botImBrowserScope(
+      group.id,
+      owner.id,
+      peer.id,
+      `im-peer-group-${peer.id}`
+    )
+    const controller = new AbortController()
+    let help: Promise<string> | undefined
+    try {
+      const own = JSON.parse(await service.act(owner.id, { action: "observe" }, signal()))
+      const page = JSON.parse(await service.act(execution, { action: "observe" }, signal()))
+      await service.act(groupExecution, { action: "observe" }, signal())
+      const waiting = vi.fn()
+      help = service.act(
+        execution,
+        { action: "request_help", pageId: page.pageId, instruction: "Enter a synthetic note" },
+        controller.signal,
+        waiting
+      )
+      void help.catch(() => {})
+      await vi.waitFor(() => expect(waiting).toHaveBeenCalledWith(true))
+      const direct = await service.preview(botImBrowserScope(dm.id, owner.id))
+      hidden!(context.entries[1], direct.generation)
+      await new Promise((resolve) => setImmediate(resolve))
+      const view = await service.preview(owner.id)
+      expect(view.control).toBe("human")
+      expect(view.pageId).toBe(page.pageId)
+      expect(view.pages.map((p) => p.id)).toEqual([own.pageId, page.pageId])
+      expect((await service.preview(peer.id)).pages).toEqual([])
+      await expect(
+        service.act(owner.id, { action: "close", pageId: page.pageId }, signal())
+      ).rejects.toThrow("不属于")
+      await service.takeOver(owner.id)
+      expect(context.entries[1].bringToFront).toHaveBeenCalledTimes(2)
+      await service.navigateAsHuman(
+        owner.id,
+        page.pageId,
+        "https://manual.example",
+        view.generation
+      )
+      await service.giveBack(owner.id, view.generation, outcome)
+      const result = JSON.parse(await help)
+      expect(result.url).toBe("https://manual.example/")
+      expect(Boolean(result.helpSkipped)).toBe(outcome === "skipped")
+      expect(context.entries[0].closed).toBe(false)
+      expect(context.entries[2].closed).toBe(false)
+      expect(host.hasPersonalBrowserScope(owner.id, groupExecution)).toBe(false)
+      expect(host.hasPersonalBrowserScope(peer.id, execution)).toBe(false)
+      expect(host.hasPersonalBrowserScope(peer.id, botImBrowserScope(dm.id, peer.id))).toBe(false)
+    } finally {
+      controller.abort()
+      await help?.catch(() => {})
+      await service.close()
+      await host.stop()
+      db.close()
+    }
+  }
+)

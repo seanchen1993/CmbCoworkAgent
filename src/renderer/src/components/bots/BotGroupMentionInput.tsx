@@ -155,16 +155,17 @@ function BotMentionInput<M extends Mention>({
       setFocused(false)
       setDismissed(null)
     },
-    onSelectionUpdate: ({ editor: value }) => {
+    onSelectionUpdate: ({ editor: value, transaction }) => {
       const offset = groupEditorOffset(value.state.doc, value.state.selection.from)
       setCaret(offset)
-      current.current.privateChat?.onCaret(offset)
+      // Content edits already notify the composer through its draft store. Only
+      // selection-only changes need another parent update for file suggestions.
+      if (!transaction.docChanged) current.current.privateChat?.onCaret(offset)
     },
     onUpdate: ({ editor: value }) => {
       setDismissed(null)
       setCaret(groupEditorOffset(value.state.doc, value.state.selection.from))
       current.current.onEdit(current.current.draft(value.getJSON()))
-      current.current.privateChat?.onCaret(groupEditorOffset(value.state.doc, value.state.selection.from))
     }
   })
   const query = focused && !composing ? groupMentionQuery(text, caret, mentions) : null
@@ -292,7 +293,8 @@ function BotMentionInput<M extends Mention>({
     }
   }, [editor])
   useEffect(() => {
-    if (editor && !editor.isDestroyed) editor.setEditable(!privateChat?.disabled)
+    // Enabling the editor is not a user edit; preserve restored retry identities.
+    if (editor && !editor.isDestroyed) editor.setEditable(!privateChat?.disabled, false)
   }, [editor, privateChat?.disabled])
   const draftIdentity = useMemo(() => JSON.stringify({ text, mentions }), [text, mentions])
   useLayoutEffect(() => {

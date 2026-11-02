@@ -38,14 +38,14 @@ window.electron={process:{platform:'darwin'}};
 const root=createRoot(document.getElementById('root'));
 const author={id:'author',name:'Original author',shape:'circle',color:'#ff2850'};
 const peer={...author,id:'peer',name:'Remaining member'};
-const state=window.historyFixture={reads:[],media:[],saves:[],privateSaves:[],groupLists:[],memberLists:[],imports:[],shares:[],render(mode){
+const state=window.historyFixture={reads:[],media:[],saves:[],privateSaves:[],groupLists:[],memberLists:[],imports:[],shares:[],requests:[],render(mode){
  state.mode=mode;
- const group={id:'g',name:'Retained files',memberIds:mode.startsWith('empty')?[]:mode==='current'?['author','peer']:['peer'],version:1};
+ const group={id:'g',name:'Retained files',memberIds:mode.startsWith('empty')?[]:mode==='current'?['author','peer']:['peer'],version:1,...(mode==='discussion-limit'?{discussionLimit:{messageId:'review'}}:{})};
  const bots=['current','removed'].includes(mode)?[author,peer]:mode.startsWith('empty')?[]:[peer];
  root.render(mode==='native-links'?<ChatPresentationContext.Provider value='bot'><StreamingMarkdown threadId='group-g-native'>{'[URI相对文件](%41.md) '+String.fromCharCode(96)+'%41.md'+String.fromCharCode(96)}</StreamingMarkdown><BotMessageFilePreview client={client} botId='native' threadId='group-g-native' name='Native'/></ChatPresentationContext.Provider>:mode==='private'?<><BotDeliveredFile client={client} botId='private-bot' threadId='private-thread' filePath='/private/report.md'/><BotMessageFilePreview client={client} botId='private-bot' threadId='private-thread' name='Private'/></>:<><BotGroupConversation key={mode} client={client} group={group} bots={bots} tasks={mode==='current'?[{id:'task',threadId:'group-g-peer',botId:'peer',state:'running',origin:{kind:'group',groupId:'g',messageId:'request'}}]:[]} revision={1} userInitials='U' detailOpen={false} onEdit={()=>{}} onDetails={()=>{}} onOpenBot={()=>{}} onBrowser={()=>{}} onFiles={()=>{}}/><BotFilesPanel key={'library-'+mode} client={client} group={group} bot={bots.find(bot=>group.memberIds.includes(bot.id))} peers={bots}/></>);
 }};
 const libraryPage=()=>({files:[{path:'library.md',is_dir:false,size:12,modified_at:'2026-10-25T00:00:00Z'}],cursor:null});
-const client=window.fixtureClient={hostId:'fixture',subscribe(){return()=>{}},async groupFileWorkspace(){return '/group'},async listGroupFiles(...args){state.groupLists.push({mode:state.mode,args});return libraryPage()},async listFiles(...args){state.memberLists.push(args);return libraryPage()},async importFiles(...args){state.imports.push(args);return []},async shareFile(...args){state.shares.push(args);return 'shared.md'},async cancelFileList(){},async groupMessages(){return [{id:'file-delivery',ordinal:1,groupId:'g',authorBotId:'author',text:'[查看正文文件](/group/report.md) [相对路径](report.md) [拒绝越界](../private/secret.md) [拒绝根外绝对路径](/private/secret.md) [拒绝绝对路径穿越](/group/../private/secret.md) [拒绝编码路径穿越](/group/%2e%2e/private/secret.md) [拒绝编码绝对路径](%2Fprivate%2Fsecret.md) '+String.fromCharCode(96)+'report.md'+String.fromCharCode(96),createdAt:1,files:window.historyFixture.mode?.endsWith('link-only')?[]:[{filePath:'/group/report.md',attachmentPath:'/group/.deliveries/snapshot.md',name:'report.md',size:12}]}]},async messageReactions(target,ids){return {revision:1,items:ids.map(messageId=>({messageId,canReact:true,reactions:[]}))}},async exportGroupFile(...args){state.saves.push(args);return true},async exportFile(...args){state.privateSaves.push(args);return true},filePreview:{async readFilePreview(input){state.reads.push(input.source);return {success:true,content:'preserved bytes'}},async openMediaPreview(input){state.media.push(input.source);return {success:false,error:'fixture'}},cancelReadFilePreview(){},revokeMediaPreview(){}}};
+const client=window.fixtureClient={hostId:'fixture',subscribe(){return()=>{}},async groupFileWorkspace(){return '/group'},async listGroupFiles(...args){state.groupLists.push({mode:state.mode,args});return libraryPage()},async listFiles(...args){state.memberLists.push(args);return libraryPage()},async importFiles(...args){state.imports.push(args);return []},async shareFile(...args){state.shares.push(args);return 'shared.md'},async cancelFileList(){},async groupMessages(){if(state.mode==='typing')return [{id:'mention-history',ordinal:1,groupId:'g',authorBotId:'peer',text:'@Remaining member hello',mentions:[{start:0,end:17,botId:'peer',label:'Remaining member'}],createdAt:1}];return [{id:'file-delivery',ordinal:1,groupId:'g',authorBotId:'author',text:'[查看正文文件](/group/report.md) [相对路径](report.md) [拒绝越界](../private/secret.md) [拒绝根外绝对路径](/private/secret.md) [拒绝绝对路径穿越](/group/../private/secret.md) [拒绝编码路径穿越](/group/%2e%2e/private/secret.md) [拒绝编码绝对路径](%2Fprivate%2Fsecret.md) '+String.fromCharCode(96)+'report.md'+String.fromCharCode(96),createdAt:1,files:window.historyFixture.mode?.endsWith('link-only')?[]:[{filePath:'/group/report.md',attachmentPath:'/group/.deliveries/snapshot.md',name:'report.md',size:12}]}]},async messageReactions(target,ids){return {revision:1,items:ids.map(messageId=>({messageId,canReact:true,reactions:[]}))}},async exportGroupFile(...args){state.saves.push(args);return true},async exportFile(...args){state.privateSaves.push(args);return true},filePreview:{async readFilePreview(input){state.reads.push(input.source);return {success:true,content:'preserved bytes'}},async openMediaPreview(input){state.media.push(input.source);return {success:false,error:'fixture'}},cancelReadFilePreview(){},revokeMediaPreview(){}}};
 state.prepareRetry=async()=>{
  const key=groupDraftKey('fixture','g');
  useBotGroupDrafts.setState({drafts:{}});
@@ -59,6 +59,7 @@ state.prepareRetry=async()=>{
 };
 state.editRetry=()=>useBotGroupDrafts.getState().edit(groupDraftKey('fixture','g'),{text:'@Original author Edited'});
 client.sendGroup=async(input)=>{state.requests.push(structuredClone(input));if(state.loseAck)throw new Error('Synthetic lost acknowledgement')};
+state.renamePeer=(reset=false)=>{peer.name=reset?'Remaining member':'Renamed peer';peer.color=reset?'#ff2850':'#123456';state.render('typing')};
 state.render('removed');`
     },
     bundle: true,
@@ -84,7 +85,7 @@ state.render('removed');`
             loader: "tsx",
             contents:
               args.path === "thread-context"
-                ? "const files=[{path:'report.md',is_dir:false},{path:'A.md',is_dir:false},{path:'%41.md',is_dir:false}];export const useThreadStateSelector=(id,select)=>id?select({workspacePath:id.startsWith('group-g-')?'/group':null,workspaceFiles:files}):null;"
+                ? "const files=[{path:'report.md',is_dir:false},{path:'A.md',is_dir:false},{path:'%41.md',is_dir:false}];export const useThreadStateSelector=(id,select)=>id?select({workspacePath:id.startsWith('group-g-')?'/group':null,workspaceFiles:files}):null;const context={subscribeToThreadState:()=>()=>{},subscribeToStream:()=>()=>{},getThreadState:()=>({pendingApprovals:[],coordinatorWorkers:[]}),getStreamData:()=>({isLoading:false,liveMessages:[]})};export const useThreadContext=()=>context;"
                 : args.path === "BotConversationTools"
                 ? "export const BotConversationTools=({children})=>children;"
                 : args.path === "ChatContainer"
@@ -122,6 +123,50 @@ state.render('removed');`
     const errors: string[] = []
     page.on("pageerror", (e) => errors.push(e.message))
     await page.goto(`http://127.0.0.1:${address.port}`)
+    await page.evaluate(() => (window as any).historyFixture.render("discussion-limit"))
+    const limitNotice = page.getByRole("status").filter({ hasText: "本轮自动讨论已达到上限" })
+    await limitNotice.waitFor()
+    assert.match(await limitNotice.innerText(), /请发送新的指令/)
+    await page.evaluate(() => (window as any).historyFixture.render("removed"))
+    await limitNotice.waitFor({ state: "detached" })
+    await page.evaluate(() => (window as any).historyFixture.render("typing"))
+    const mention = page.locator('[data-chat-message-id="mention-history"] .bot-inline-mention')
+    await mention.waitFor()
+    const composer = page.getByRole("textbox", { name: "群聊消息" })
+    await composer.fill("draft")
+    await page.waitForTimeout(500) // Settle the initial composer height and Virtuoso measurements.
+    const originalMention = await mention.elementHandle()
+    await composer.press("End")
+    await page.keyboard.type(" changes")
+    assert.equal(
+      await mention.evaluate((node, original) => node === original, originalMention),
+      true,
+      "editing the draft must not recreate unchanged history mentions / reparse Markdown"
+    )
+    await composer.fill("x".repeat(30_001))
+    assert.equal(await composer.innerText(), "draft changes", "oversized paste keeps the existing draft")
+    const longDraft = "x".repeat(30_000)
+    await composer.fill(longDraft)
+    assert.equal((await composer.innerText()).length, longDraft.length)
+    await composer.fill("latest reply")
+    await page.getByRole("button", { name: "回复Remaining member的消息", exact: true }).click()
+    await page.getByRole("button", { name: "取消回复", exact: true }).waitFor()
+    await page.getByRole("button", { name: "发送群聊消息", exact: true }).click()
+    await page.waitForFunction(() => (window as any).historyFixture.requests.length === 1)
+    const sentDraft = await page.evaluate(() => (window as any).historyFixture.requests[0])
+    assert.equal(sentDraft.text, "latest reply", "send reads the latest composer draft")
+    assert.equal(sentDraft.replyToId, "mention-history")
+    assert.deepEqual(sentDraft.targetBotIds, ["peer"])
+    await page.waitForFunction(() => !document.querySelector('[aria-label="取消回复"]'))
+    await page.evaluate(() => (window as any).historyFixture.renamePeer())
+    await page.waitForFunction(
+      () =>
+        document.querySelector<HTMLElement>(
+          '[data-chat-message-id="mention-history"] .bot-mention-identity'
+        )?.style.color === "rgb(18, 52, 86)"
+    )
+    await page.evaluate(() => (window as any).historyFixture.renamePeer(true))
+    await composer.fill("")
     for (const mode of ["current", "removed", "deleted", "empty", "private"]) {
       await page.evaluate((mode) => (window as any).historyFixture.render(mode), mode)
       const open = page.getByRole("button", { name: "打开 report.md", exact: true })
@@ -236,7 +281,7 @@ state.render('removed');`
         )
         await page.keyboard.press("Escape")
         if (mode !== "current") continue
-        await page.getByRole("button", { name: "Remaining member · 正在处理", exact: true }).click()
+        await page.locator(".bot-group-progress").getByRole("button", { name: "Remaining member", exact: true }).click()
         await openLibrary()
         for (const action of [
           page.getByRole("button", { name: "打开 execution.md", exact: true }),

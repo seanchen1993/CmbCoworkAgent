@@ -56,3 +56,9 @@ export function botContinuationMessageId(taskId: string, checkpointId: string): 
     throw new Error("Bot 续办标识无效")
   return `bot-continuation:${taskId}:${createHash("sha256").update(checkpointId).digest("hex")}`
 }
+
+/** Bot notification retry classification; policy/user stops are decisions, not transient failures. */
+export function isRetryableNotificationTerminal(terminal: { outcome: string; code: string; coordinatorNotificationDelivered?: boolean }): boolean {
+  return !terminal.coordinatorNotificationDelivered && terminal.outcome !== "success" &&
+    !["cancelled", "hook_halt", "failure_fuse", "prompt_blocked", "recovery_interrupted"].includes(terminal.code)
+}

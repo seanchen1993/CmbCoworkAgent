@@ -1,7 +1,7 @@
 import { AIMessage, HumanMessage, ToolMessage, type BaseMessage } from "@langchain/core/messages"
 import { tool } from "langchain"
 import { z } from "zod"
-import { isWorkflowPlumbingTranscriptContent } from "../../shared/checkpoint-transcript"
+import { TURN_COMPLETION_GATE_MARKER_PREFIX } from "../../shared/checkpoint-transcript"
 import { botTaskGroupId, type BotTask } from "../../shared/bots/contracts"
 import { isBotGroupPass } from "../../shared/bots/group-discussion"
 import { isBotRoutineSilent } from "../../shared/bots/routine-silence"
@@ -15,6 +15,7 @@ import {
 } from "../agent/turn-completion-integrity"
 import { MAIN_TURN_ONLY_TOOL_METADATA_KEY } from "../agent/runtime-tool-catalog"
 import { getHookAgentIdFromRequest } from "../hooks/execution-context"
+import { botTruncationReminder } from "./delivery-protocol"
 
 /** Grok's SendMessage boundary, using the existing local room and Runtime tool receipts. */
 export function createBotGroupMessageTool(
@@ -88,10 +89,14 @@ export function createBotGroupMessageTool(
 /** Only actual tool receipts in the latest user boundary satisfy formal delivery. */
 export function createBotGroupDeliveryCheck(
   task: BotTask,
-  peerDeliveryPosted = false
+  peerDeliveryPosted = false,
+  peerResultOwner = false
 ): TurnFinalDeliveryCheck {
   const groupId = botTaskGroupId(task)
   return (messages: readonly BaseMessage[]) => {
+    const final = messages.at(-1)
+    const truncation = botTruncationReminder(messages)
+    if (truncation) return truncation
     const origin = task.origin
     const privateCallback =
       origin.kind === "bot" && !origin.expectsReply && !origin.upstreamTaskId
@@ -105,7 +110,10 @@ export function createBotGroupDeliveryCheck(
       const message = messages[i]
       if (
         HumanMessage.isInstance(message) &&
-        !isWorkflowPlumbingTranscriptContent(message.content)
+        // Gate recovery continues this turn; a workflow notification starts a
+        // new result turn and must not inherit an older delivery receipt.
+        !(typeof message.content === "string" &&
+          message.content.trimStart().startsWith(TURN_COMPLETION_GATE_MARKER_PREFIX))
       ) {
         start = i + 1
         break
@@ -159,15 +167,14 @@ export function createBotGroupDeliveryCheck(
         /* An invalid receipt is not a delivery. */
       }
     }
-    const final = messages.at(-1)
     const body =
       final && AIMessage.isInstance(final)
         ? splitBotInlineReasoning(extractVisibleText(final.content)).body.trim()
         : ""
     // Internal work still owes its parent a useful result, not a forced public message.
     if (
-      task.origin.kind === "bot" &&
-      (task.origin.expectsReply || Boolean(task.origin.upstreamTaskId))
+      peerResultOwner || (task.origin.kind === "bot" &&
+      (task.origin.expectsReply || Boolean(task.origin.upstreamTaskId)))
     )
       return body && !isBotGroupPass(body)
         ? undefined

@@ -64,7 +64,11 @@ import {
   useBotGroupDrafts
 } from "@/lib/bot-group-drafts"
 import { splitBotInlineReasoning } from "@/lib/bot-inline-reasoning"
-import { EMPTY_GROUP_HISTORY, mergeGroupHistory } from "@/lib/bot-group-history"
+import {
+  EMPTY_GROUP_HISTORY,
+  mergeGroupHistory,
+  readGroupHistoryRefresh
+} from "@/lib/bot-group-history"
 import {
   MAX_ATTACHMENT_FILE_BYTES,
   MAX_ATTACHMENT_PICKER_FILES,
@@ -109,6 +113,8 @@ export function BotGroupConversation({
 }) {
   const [history, setHistory] = useState(EMPTY_GROUP_HISTORY)
   const { messages } = history
+  const messagesRef = useRef(messages)
+  messagesRef.current = messages
   const answerReplies = useMemo(() => botGroupQuestionReplies(messages), [messages])
   const questions = useGroupQuestions(client.hostId, group.id, tasks)
   const timeline = useMemo<GroupTimelineItem[]>(
@@ -152,16 +158,7 @@ export function BotGroupConversation({
   }, [])
   const draftKey = groupDraftKey(client.hostId, group.id)
   useEffect(() => useBotGroupDrafts.getState().restore(draftKey), [draftKey])
-  const draft = useBotGroupDrafts((state) => state.drafts[draftKey] ?? EMPTY_GROUP_DRAFT)
-  const input = draft.text
   const inputRef = useRef<BotGroupInputControl>(null)
-  const [expandedInput, setExpandedInput] = useState(false)
-  const mentioned = groupMessageRecipients(draft.mentions, group.memberIds, {
-    targets: draft.targets,
-    replyAuthorId: draft.replyTo?.authorBotId
-  })
-  const retrying = hasUnchangedGroupRequest(draft)
-  const targets = mentioned.ids
   const editDraft = (patch: {
     text?: string
     mentions?: BotGroupMention[]
@@ -222,7 +219,7 @@ export function BotGroupConversation({
     }
   }, [client, group.id])
   const attach = async (dropped?: File[]) => {
-    if (attachmentLock.current || draft.sending) return
+    if (attachmentLock.current || useBotGroupDrafts.getState().drafts[draftKey]?.sending) return
     const member = members.find((bot) => !bot.archived && !bot.deleting)
     if (!member) {
       setError("没有可用于添加附件的群成员")
@@ -296,16 +293,30 @@ export function BotGroupConversation({
       pending = false,
       dirty = true
     const refresh = async () => {
-      if (anchorRef.current) return
       dirty = true
       if (pending) return
       pending = true
       try {
         while (dirty && !disposed) {
           dirty = false
-          const page = await client.groupMessages(group.id)
-          if (!disposed && !anchorRef.current) {
-            setHistory((previous) => mergeGroupHistory(previous, page))
+          const generation = historyGeneration.current
+          const anchor = anchorRef.current
+          const isCurrent = () =>
+            !disposed && historyGeneration.current === generation && anchorRef.current === anchor
+          const result = await readGroupHistoryRefresh(
+            (cursor) => client.groupMessages(group.id, cursor),
+            messagesRef.current,
+            !!anchor,
+            isCurrent
+          )
+          if (result && isCurrent()) {
+            setHistory((previous) => {
+              const loaded = new Set(previous.messages.map((item) => item.id))
+              return mergeGroupHistory(previous, [
+                ...result.page,
+                ...result.questions.filter((item) => loaded.has(item.id))
+              ])
+            })
             setError(null)
           }
         }
@@ -415,6 +426,14 @@ export function BotGroupConversation({
   )
   const send = async (event: React.FormEvent) => {
     event.preventDefault()
+    const draft = useBotGroupDrafts.getState().drafts[draftKey] ?? EMPTY_GROUP_DRAFT
+    const input = draft.text
+    const mentioned = groupMessageRecipients(draft.mentions, group.memberIds, {
+      targets: draft.targets,
+      replyAuthorId: draft.replyTo?.authorBotId
+    })
+    const retrying = hasUnchangedGroupRequest(draft)
+    const targets = mentioned.ids
     setError(null)
     // The composer already exposes this validation error, including to screen readers.
     if (!retrying && mentioned.error) return
@@ -503,6 +522,11 @@ export function BotGroupConversation({
           </button>
         </div>
       </header>
+      {group.discussionLimit && (
+        <div role="status" className="bot-notice">
+          <span>本轮自动讨论已达到上限。若需继续，请发送新的指令。</span>
+        </div>
+      )}
       {error && (
         <div role="alert" className="bot-notice">
           <span>{error}</span>
@@ -972,166 +996,19 @@ export function BotGroupConversation({
                 </button>
               </div>
             )}
-            <form
-              className="bot-group-composer"
-              onSubmit={send}
-              onKeyDown={(event) => {
-                if (
-                  event.key === "Escape" &&
-                  !event.defaultPrevented &&
-                  !event.nativeEvent.isComposing &&
-                  event.keyCode !== 229 &&
-                  draft.replyTo
-                ) {
-                  event.preventDefault()
-                  editDraft({ replyTo: null })
-                }
-              }}
-              onDragOver={(event) => {
-                if (event.dataTransfer.types.includes("Files")) event.preventDefault()
-              }}
-              onDrop={(event) => {
-                if (event.dataTransfer.files.length) {
-                  event.preventDefault()
-                  void attach(Array.from(event.dataTransfer.files))
-                }
-              }}
-            >
-              {draft.replyTo && (
-                <div className="bot-group-reply-draft">
-                  <button
-                    type="button"
-                    className="bot-group-reply-preview"
-                    disabled={busy}
-                    aria-label="跳转到被回复的消息"
-                    onClick={() => void jumpToReply(draft.replyTo!)}
-                  >
-                    <MessageCircle size={15} />
-                    <span>“{draft.replyTo.text || "文件消息"}”</span>
-                  </button>
-                  <button
-                    type="button"
-                    className="bot-icon-button"
-                    aria-label="取消回复"
-                    onClick={() => {
-                      editDraft({ replyTo: null })
-                      inputRef.current?.focus()
-                    }}
-                  >
-                    <X size={15} />
-                  </button>
-                </div>
-              )}
-              {draft.targets !== null && draft.mentions.length === 0 && (
-                <div className="bot-group-recipients" aria-label="交办给">
-                  <span>
-                    {members
-                      .filter((bot) => targets.includes(bot.id))
-                      .map((bot) => bot.name)
-                      .join("、") || "尚未选择成员"}
-                  </span>
-                  <button type="button" onClick={() => editDraft({ targets: null })}>
-                    恢复所有人
-                  </button>
-                </div>
-              )}
-              {draft.attachments.length > 0 && (
-                <div className="flex flex-wrap gap-2 pb-2">
-                  {draft.attachments.map((file) => (
-                    <span
-                      key={file.filePath}
-                      className="inline-flex max-w-full items-center gap-2 rounded-xl bg-muted px-3 py-1.5 text-xs"
-                    >
-                      <span className="truncate">{file.filename}</span>
-                      <button
-                        type="button"
-                        className="bot-icon-button"
-                        aria-label={`移除附件 ${file.filename}`}
-                        disabled={attaching || draft.sending}
-                        onClick={() =>
-                          editDraft({
-                            attachments: draft.attachments.filter(
-                              (item) => item.filePath !== file.filePath
-                            )
-                          })
-                        }
-                      >
-                        <X size={13} />
-                      </button>
-                    </span>
-                  ))}
-                </div>
-              )}
-              <div
-                className="bot-group-composer-fields"
-                data-expanded={expandedInput || draft.attachments.length > 0}
-              >
-                <button
-                  type="button"
-                  className="bot-icon-button"
-                  aria-label="添加群附件"
-                  disabled={
-                    attaching ||
-                    draft.sending ||
-                    draft.attachments.length >= MAX_ATTACHMENT_PICKER_FILES
-                  }
-                  onClick={() => void attach()}
-                >
-                  {attaching ? <Loader2 size={18} className="animate-spin" /> : <Plus size={20} />}
-                </button>
-                <BotGroupMentionInput
-                  text={input}
-                  mentions={draft.mentions}
-                  members={members}
-                  placeholder={questions.length ? "输入你的回答，或聊点别的" : undefined}
-                  inputRef={inputRef}
-                  onEdit={editDraft}
-                  onLayout={(multiline, hasText) =>
-                    setExpandedInput((expanded) => hasText && (expanded || multiline))
-                  }
-                  onCancelReply={() => {
-                    if (!draft.replyTo) return false
-                    editDraft({ replyTo: null })
-                    return true
-                  }}
-                  onPasteFiles={(files) => void attach(files)}
-                />
-                {(input.trim().length > 0 || draft.attachments.length > 0 || draft.sending) && (
-                  <button
-                    type="submit"
-                    className="bot-group-send"
-                    disabled={
-                      draft.sending ||
-                      attaching ||
-                      (!input.trim() && !draft.attachments.length) ||
-                      (!retrying && !targets.length)
-                    }
-                    aria-label="发送群聊消息"
-                  >
-                    {draft.sending ? (
-                      <Loader2 size={18} className="animate-spin" />
-                    ) : (
-                      <ArrowUp size={20} />
-                    )}
-                  </button>
-                )}
-              </div>
-              {!retrying && mentioned.error && (
-                <p role="alert" className="text-xs text-destructive">
-                  {mentioned.error}
-                </p>
-              )}
-              {draft.error && (
-                <p role="alert" className="text-xs text-destructive">
-                  {draft.error}
-                </p>
-              )}
-              {draft.storageError && (
-                <p role="alert" className="text-xs text-destructive">
-                  {draft.storageError}
-                </p>
-              )}
-            </form>
+            <GroupComposer
+              draftKey={draftKey}
+              group={group}
+              members={members}
+              busy={busy}
+              attaching={attaching}
+              inputRef={inputRef}
+              editDraft={editDraft}
+              attach={attach}
+              send={send}
+              jumpToReply={jumpToReply}
+              hasQuestions={questions.length > 0}
+            />
           </BotMessageReactionsProvider>
         )}
       </div>
@@ -1146,5 +1023,197 @@ export function BotGroupConversation({
         />
       )}
     </ChatPresentationContext.Provider>
+  )
+}
+
+// Keep keystroke updates local: subscribing the timeline to drafts also rerenders
+// every visible message and forces the virtual list to measure its layout.
+function GroupComposer({
+  draftKey,
+  group,
+  members,
+  busy,
+  attaching,
+  inputRef,
+  editDraft,
+  attach,
+  send,
+  jumpToReply,
+  hasQuestions
+}: {
+  draftKey: string
+  group: BotGroup
+  members: BotDefinition[]
+  busy: boolean
+  attaching: boolean
+  inputRef: RefObject<BotGroupInputControl | null>
+  editDraft: (patch: Parameters<ReturnType<typeof useBotGroupDrafts.getState>["edit"]>[1]) => void
+  attach: (files?: File[]) => Promise<void>
+  send: (event: React.FormEvent) => Promise<void>
+  jumpToReply: (reply: { id: string; ordinal: number }) => Promise<void>
+  hasQuestions: boolean
+}) {
+  const draft = useBotGroupDrafts((state) => state.drafts[draftKey] ?? EMPTY_GROUP_DRAFT)
+  const input = draft.text
+  const [expandedInput, setExpandedInput] = useState(false)
+  const mentioned = groupMessageRecipients(draft.mentions, group.memberIds, {
+    targets: draft.targets,
+    replyAuthorId: draft.replyTo?.authorBotId
+  })
+  const retrying = hasUnchangedGroupRequest(draft)
+  const targets = mentioned.ids
+  return (
+    <form
+      className="bot-group-composer"
+      onSubmit={send}
+      onKeyDown={(event) => {
+        if (
+          event.key === "Escape" &&
+          !event.defaultPrevented &&
+          !event.nativeEvent.isComposing &&
+          event.keyCode !== 229 &&
+          draft.replyTo
+        ) {
+          event.preventDefault()
+          editDraft({ replyTo: null })
+        }
+      }}
+      onDragOver={(event) => {
+        if (event.dataTransfer.types.includes("Files")) event.preventDefault()
+      }}
+      onDrop={(event) => {
+        if (event.dataTransfer.files.length) {
+          event.preventDefault()
+          void attach(Array.from(event.dataTransfer.files))
+        }
+      }}
+    >
+      {draft.replyTo && (
+        <div className="bot-group-reply-draft">
+          <button
+            type="button"
+            className="bot-group-reply-preview"
+            disabled={busy}
+            aria-label="跳转到被回复的消息"
+            onClick={() => void jumpToReply(draft.replyTo!)}
+          >
+            <MessageCircle size={15} />
+            <span>“{draft.replyTo.text || "文件消息"}”</span>
+          </button>
+          <button
+            type="button"
+            className="bot-icon-button"
+            aria-label="取消回复"
+            onClick={() => {
+              editDraft({ replyTo: null })
+              inputRef.current?.focus()
+            }}
+          >
+            <X size={15} />
+          </button>
+        </div>
+      )}
+      {draft.targets !== null && draft.mentions.length === 0 && (
+        <div className="bot-group-recipients" aria-label="交办给">
+          <span>
+            {members
+              .filter((bot) => targets.includes(bot.id))
+              .map((bot) => bot.name)
+              .join("、") || "尚未选择成员"}
+          </span>
+          <button type="button" onClick={() => editDraft({ targets: null })}>
+            恢复所有人
+          </button>
+        </div>
+      )}
+      {draft.attachments.length > 0 && (
+        <div className="flex flex-wrap gap-2 pb-2">
+          {draft.attachments.map((file) => (
+            <span
+              key={file.filePath}
+              className="inline-flex max-w-full items-center gap-2 rounded-xl bg-muted px-3 py-1.5 text-xs"
+            >
+              <span className="truncate">{file.filename}</span>
+              <button
+                type="button"
+                className="bot-icon-button"
+                aria-label={`移除附件 ${file.filename}`}
+                disabled={attaching || draft.sending}
+                onClick={() =>
+                  editDraft({
+                    attachments: draft.attachments.filter((item) => item.filePath !== file.filePath)
+                  })
+                }
+              >
+                <X size={13} />
+              </button>
+            </span>
+          ))}
+        </div>
+      )}
+      <div
+        className="bot-group-composer-fields"
+        data-expanded={expandedInput || draft.attachments.length > 0}
+      >
+        <button
+          type="button"
+          className="bot-icon-button"
+          aria-label="添加群附件"
+          disabled={
+            attaching || draft.sending || draft.attachments.length >= MAX_ATTACHMENT_PICKER_FILES
+          }
+          onClick={() => void attach()}
+        >
+          {attaching ? <Loader2 size={18} className="animate-spin" /> : <Plus size={20} />}
+        </button>
+        <BotGroupMentionInput
+          text={input}
+          mentions={draft.mentions}
+          members={members}
+          placeholder={hasQuestions ? "输入你的回答，或聊点别的" : undefined}
+          inputRef={inputRef}
+          onEdit={editDraft}
+          onLayout={(multiline, hasText) =>
+            setExpandedInput((expanded) => hasText && (expanded || multiline))
+          }
+          onCancelReply={() => {
+            if (!draft.replyTo) return false
+            editDraft({ replyTo: null })
+            return true
+          }}
+          onPasteFiles={(files) => void attach(files)}
+        />
+        {(input.trim().length > 0 || draft.attachments.length > 0 || draft.sending) && (
+          <button
+            type="submit"
+            className="bot-group-send"
+            disabled={
+              draft.sending ||
+              attaching ||
+              (!input.trim() && !draft.attachments.length) ||
+              (!retrying && !targets.length)
+            }
+            aria-label="发送群聊消息"
+          >
+            {draft.sending ? <Loader2 size={18} className="animate-spin" /> : <ArrowUp size={20} />}
+          </button>
+        )}
+      </div>
+      {!retrying && mentioned.error && (
+        <p role="alert" className="text-xs text-destructive">
+          {mentioned.error}
+        </p>
+      )}
+      {draft.error && (
+        <p role="alert" className="text-xs text-destructive">
+          {draft.error}
+        </p>
+      )}
+      {draft.storageError && (
+        <p role="alert" className="text-xs text-destructive">
+          {draft.storageError}
+        </p>
+      )}
+    </form>
   )
 }

@@ -15,6 +15,7 @@ import type { BotImBinding, BotImReplacement } from "../../../../shared/bots/im-
 import type { BotMockFeedEntry } from "../../../../shared/bots/mock-channel"
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog"
 import { botErrorMessage } from "@/lib/bot-error-message"
+import { refreshBotImHistory } from "@/lib/bot-im-history"
 
 const bindingLabels = {
   pending: "等待绑定",
@@ -137,30 +138,21 @@ export function BotImChannelDialog({
       if (!loadedBindingPages.current) setCursor(page.before)
       const id = selection.current
       if (id) {
-        const history = await api.history(bot.id, id)
-        if (!live.current || selection.current !== id) return
         const old = historyWindow.current
-        const gap =
-          old?.id === id &&
-          old.items.length > 0 &&
-          history.items.length > 0 &&
-          !history.items.some((entry) => old.items.some((previous) => previous.id === entry.id))
-        const append = old?.id === id && old.items.length > 0 && !gap
-        const next = {
-          id,
-          items: append
-            ? [
-                ...new Map(
-                  [...old.items, ...history.items].map((entry) => [entry.id, entry])
-                ).values()
-              ]
-            : history.items,
-          before: append ? old.before : history.before
-        }
-        historyWindow.current = next
+        const window = old?.id === id ? old : { items: [], before: null }
+        const items = window.items
+        const next = await refreshBotImHistory(
+          window,
+          (before) => api.history(bot.id, id, before),
+          // More replaces items on the same window; do not overwrite that newer page.
+          () => live.current && selection.current === id &&
+            historyWindow.current === old && window.items === items
+        )
+        if (!next) return
+        historyWindow.current = { id, items: next.items, before: next.before }
         setEntries(next.items)
         setHistoryCursor(next.before)
-        if (gap) setHistoryNotice("新消息较多，已展示最近记录；可以继续查看更早记录。")
+        if (!next.overlap) setHistoryNotice("新消息较多，已展示最近记录；可以继续查看更早记录。")
       }
       setError(null)
     } catch (e) {

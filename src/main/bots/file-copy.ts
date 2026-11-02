@@ -27,15 +27,35 @@ export async function copyBotFileBytes(destination: string, bytes: ArrayBuffer):
 }
 
 /** Stream an authorized, stable inode. No whole-file buffer; partial outputs are never published. */
-export async function copyBotFile(
+export function copyBotFile(
   root: string,
   source: string,
   destination: string,
   signal?: AbortSignal
 ): Promise<void> {
+  return copyStableBotFile(root, source, destination, signal, MAX_FILE_BYTES)
+}
+
+/** Formal delivery copies and user-selected exports share supported sizes; other imports stay capped. */
+export function exportBotFile(
+  root: string,
+  source: string,
+  destination: string,
+  signal?: AbortSignal
+): Promise<void> {
+  return copyStableBotFile(root, source, destination, signal, Number.MAX_SAFE_INTEGER)
+}
+
+async function copyStableBotFile(
+  root: string,
+  source: string,
+  destination: string,
+  signal: AbortSignal | undefined,
+  byteLimit: number
+): Promise<void> {
   const temporary = join(dirname(destination), `.${randomUUID()}.part`)
   try {
-    await streamBotFileCopy(root, source, temporary, signal, MAX_FILE_BYTES)
+    await streamBotFileCopy(root, source, temporary, signal, byteLimit)
     signal?.throwIfAborted()
     await rename(temporary, destination)
   } finally {
@@ -104,7 +124,7 @@ export async function snapshotBotDeliveryFile(
   try {
     const digest = createHash("sha256")
     // Delivery previously had no copy-size cap. Keep streaming and its existing
-    // supported metadata range; the original import/export cap is unchanged.
+    // supported metadata range; imports and internal copies keep their own cap.
     const size = await streamBotFileCopy(
       workspace,
       source,

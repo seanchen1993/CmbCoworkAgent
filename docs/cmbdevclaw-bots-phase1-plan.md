@@ -1,5 +1,319 @@
 # CMBDevClaw Bots 第一期实施方案与验收清单
 
+- 2026-11-02三方复核后computer use补验：当前renderer重新构建，仅一份隔离完整应用；群@键盘选择/换行/引用取消、切页后草稿及普通导入附件恢复/移除、私聊Bot和文件候选选择/方向键精确插入/文本提及草稿恢复、原工作台输入/历史定位/滚动及回到底部均实际通过，无renderer page error。额外确认既有边界：私聊@文件临时标签切会话后消失，普通工作台亦复现；对应mentionedFiles局部状态在HEAD相同，非本轮新增，不计通过，单列后续评估。本轮未发送模型任务或重跑小时级任务，不据此声称执行全覆盖。合成草稿已清理、隔离应用正常退出；生产代码及用户暂存不动，未提交/push。证据 `~/.local/state/cmbdevclaw-beta-preview/quality-review/editor-perf-1101/computer-use-current-diff-1102.json`。
+
+- 2026-11-02非输入性能补查：复核头像休眠/清理、浏览器抓图、记忆/表情订阅、资料扫描与任务摘要边界，并参考DeepSeek界面刷新及Hermes动画预算实现。隔离完整应用computer use连续24轮A资料库→B→A→记忆面板，全部返回正确页面、无renderer page error；第8/16/24轮诊断GC后JS存活22.86/23.35/23.60MiB，监听器恒840、DOM恒2026，未确认持续累积泄漏。渲染RSS峰值319.16MiB、末尾244.81MiB；结束后14.06秒空闲总CPU约0.34%（含采样开销）。文件/记忆为空的隔离面板，不冒充大资料库、真实IM或小时级性能验收；已通过输入项不重测。未新增生产补丁，Runtime/调度及暂存不动，隔离应用正常退出，未提交/push。证据 `~/.local/state/cmbdevclaw-beta-preview/quality-review/editor-perf-1101/navigation-performance-followup.json`。
+
+- 2026-11-02私聊内存/CPU同条件补验：旧对照私聊122条/普通23条消息，不可直接归因。新增隔离克隆、统一空历史、同样原生5000字符输入；保留代码两边总CPU累计约19.22/19.13秒，阶段平均约91%/91%（含输入前后空档），渲染RSS峰值402.5/361.1MiB。去掉持续RAF测量循环后，私聊停止输入28秒阶段总CPU约1.7%。诊断GC后私聊连续三轮存活JS18.77/18.97/18.99MiB、监听器恒288，未见累积泄漏；不是整个应用RSS或绝无泄漏承诺。尝试仅按需订阅onLayout，真实组件反例红绿明确，但完整应用布局次数5003不变、CPU与RSS无稳定收益，已撤回候选及候选测试，不堆无效优化。参考Grok重建富文本入口及DeepSeek composer；本轮未新增生产补丁、未动Runtime/长程调度，原暂存保持，不提交/push。证据 `~/.local/state/cmbdevclaw-beta-preview/quality-review/editor-perf-1101/private-memory-cpu-followup.md`。
+
+- 2026-11-02私聊长输入性能闭环：进一步定位 Radix ScrollArea 1.2.10 每次父渲染重写相同 style、触发文档级样式失效。使用上游首次修复版1.2.12，保留此前消除重复光标通知，未增加自建缓存/调度。真实组件100次输入style替换修前100/修后0；隔离全应用5000字timeline样式重算5034→7，正式依赖构建再次computer use私聊与普通任务各5000字完整，输入阶段无>50ms主线程长任务，最大帧间隔分别50/17.8ms。提及键盘选择、原工作台历史定位、消息/草稿/群历史/滚动回归、Web类型与构建通过；滚动测试补齐缺失的空Mod preload接口。私聊工作集峰值594MiB后回落390MiB，非全局内存最优保证。此前保护退出/密集探针等待不能当自然崩溃；原生paste未生效不计通过。未替换用户运行应用，未动Runtime/长程调度；原暂存保持，未提交/push。证据 `/Users/chenqiang/.local/state/cmbdevclaw-beta-preview/quality-review/editor-perf-1101/private-input-resolved.md`。
+
+- 2026-11-01私聊输入性能补验：仅移除文档编辑时重复的上层光标通知，复用现有编辑器selectionStart；草稿立即保存、单独移动光标、私群提及及普通任务输入保持。真实编辑器/逐气泡引用回归、test:messages、Web类型和隔离构建通过。高速连续5000字符仍出现数秒观测等待，未闭环；额外列表memo无明确收益已撤回。候选复跑曾误命名为before，已纠正，不用作收益统计；测试内存保护退出不能当产品自然崩溃。未提交/push，保留外部暂存。证据 `/Users/chenqiang/.local/state/cmbdevclaw-beta-preview/quality-review/editor-perf-1101/private-input-followup.md`。
+
+- 2026-11-01群输入卡顿已定位并最小修复：群页面订阅整个草稿，逐字输入带动未变历史重绘、Markdown解析和Virtuoso布局；原生5,000字符隔离复现无响应/内存保护退出。仅把原form及草稿订阅移到同文件GroupComposer，发送/附件仍取原Store最新草稿；初版正文memo已撤回，无Runtime/调度/锁改动。修后原生5,000字符完整输入、30,000字符粘贴及界面心跳通过，内存回落；超限仍按原规则拒绝。真实组件修前红/修后绿，引用发送/旧请求重试/附件历史及私群提及回归、47项草稿等单测、Web类型及隔离构建通过。未替换用户运行应用，未提交/push。证据 `/Users/chenqiang/.local/state/cmbdevclaw-beta-preview/quality-review/editor-perf-1101/root-cause-and-fix.md`。
+
+- 2026-11-01最后一轮代码检视目标完成：全新三位GPT-6.1-sol/high使用同一提示，独立检查首Bot父提交c77230722至HEAD d2874c19b的64个可达提交、全部作者/合并及37份暂存变更。三份完整报告已收齐并全文核对，均未确认新增必修缺陷。范围涵盖业务/交付/体验、CPU内存与资源生命周期、原工作台/长程兼容，按相关链路参考Grok重建/提取代码、DeepSeek Bot、Hermes及本机coding agent；不是逐行穷尽全部548个范围文件。三方生产模块探针通过；A定向3文件323项、B定向5文件589项通过，存在重叠不累加。父侧复核共享模型路由opt-in与普通入口默认语义。没有新增生产或测试修改，原37份暂存及指纹f546736a…18fd4cc保持，仅更新未暂存plan；未提交/push。原生GUI、真实模型/外部IM、小时级CPU/RSS未在本轮验证，不将未复现或外部证据不足说成通过；既定延期保留。完整记录 `~/.local/state/cmbdevclaw-beta-preview/quality-review/final-goal-1101-r1/summary.md`。
+
+- 2026-11-01本轮全面检视收尾：累计五轮同提示GPT-6.1-sol/high三方独立审查，每轮收齐报告后父核实/修复再交原三方复核；确认修复5项（独立work全局门禁、隐藏IM历史重读、取消活动串会话、大附件同伴交接限额、私聊同伴新结果通知）。第五轮全新三份报告已全文核对，均无新确认必修缺陷；不是所有源码逐行穷尽或绝无bug保证。当前完整核心121文件2227项、原工作台入口基线、Node/Web类型与定向/真实React测试通过（重叠不累加）。本轮新增生产修复限Bot层，原底层/长程调度未新增修改。IM Goal控制入口及外部群问题卡片身份为证据不足边界，未当确定bug修，也未称验收通过；真实原生GUI/模型/IM/通知横幅/小时级资源仍需集成验证。最后一轮期间外部将37份改动全暂存，父/子代理未操作索引；轮前后生产/测试字节相同，保留4a43e1ff…b5d10e新索引，本条仅更新未暂存plan。完整汇总 `~/.local/state/cmbdevclaw-beta-preview/quality-review/full-quality-1101-closeout/summary.md`，终轮报告 `full-quality-1101-independent-final/independent_final_{a,b,c}/report.md`。未提交/push。
+
+- 2026-11-01第四轮全新三方检视确认P2私聊同伴结果整合漏OS通知：三份报告收齐后，仅Bot adapter复用peerHandoff.owned区分内部多跳与面向用户结果，新增本机私聊新回复提醒，work/group/IM/内部及静默不扩围；使用“有新回复”避免把后续仍需委派的回合说成全部完成。不新增Store/调度/底层机制。真实Host/Store/outbox嵌套及再次委派的三终态反例修前失败，修后相关3文件397项、Node及diff通过。首轮夹具遗漏和pending语义假设已纠正并保留日志；不冒充GUI真实通知。证据 `~/.local/state/cmbdevclaw-beta-preview/quality-review/full-quality-1101-closeout/parent-notification-verification.md`；三方修复复核均通过；当前完整Bot核心121文件2227项、原工作台入口基线通过。已再换全新三方全范围审查（full-quality-1101-independent-final），尚未提前结束。原暂存不动，未提交/push。
+
+- 2026-11-01 第三轮全新三方检视确认P2大附件同伴交接容量不一致：100MiB+1成果在发送方正式交付成功，接收方按Host精确引用转交却被普通导入上限拒绝；小文件对照通过。父侧独立真实FS探针及public/internal两个正式反例修前红；只让tools.ts已验证的同伴成果复用exportBotFile，普通导入/IPC分享上限不变，无新机制/底层改动。修后文件工具/文件模块/IPC三文件72项、流式哈希及Node/diff通过；原快照、权限、取消保护保留。三份完整报告已读，例行work候选依据Bot全局standalone契约排除，不扩展能力；三方修复复核均通过，独立中途取消及原件变更后快照保真探针通过；随后已启动全新三方全范围检视（full-quality-1101-closeout），未提前宣告结束。证据 `~/.local/state/cmbdevclaw-beta-preview/quality-review/full-quality-1101-fresh/`。原暂存保持，未提交/push，未作原生GUI或真实模型验收。
+
+- 2026-11-01 第二轮跨模块检视确认取消活动归属错误（P3）：IM群/独立work停止后台命令后，提示误写主私聊，命令实际取消正常。仅BotStore复用原group/work/IM活动出口修复，保留attention=false、续办早返回、幂等和取消/回传执行。新增私聊、本地群、work、IM群、个人IM、IM work六路径；相关3文件152项及Node类型通过。新增测试先误用主聊活动接口、再混用远端/本地bindingId，已修正并保留失败日志，不作产品缺陷计数。三位独立修复复核均通过，另行验证source保留、重复/迟到回调、成功通知和保留式续办；新查询命中既有thread索引。随后启动全新三位GPT-6.1-sol/high同提示全范围轮，结果未提前判定。证据 `~/.local/state/cmbdevclaw-beta-preview/quality-review/full-quality-1101-final/`，新轮 `full-quality-1101-fresh/`。本轮新增修复仅Bot层；原29份暂存指纹a76d48c4…07a6f保持，未暂存/提交/push；未做原生GUI、真实IM/模型或小时级资源验收。
+
+- 2026-11-01 跨模块重新检视：三位 GPT-6.1-sol/high 同提示独立覆盖首 Bot 父提交 c77230722 至当前 HEAD 的全部作者/合并及现有变更，报告收齐后确认并最小修复两项 P2。①生产 Host 已使用 Infinity，但旧独立 work 单槽门禁仍使 A 待答阻塞同/不同 Bot 的 B 独立任务；仅 Infinity 跳过旧 reservation，有限额度、同线程串行、停止/回传和底层锁不变。②IM transcript 在隐藏或执行详情视图仍因全局 revision 重读历史；仅在不可见时暂停，复用 epoch 作废在途扫描，恢复刷新原窗口，保留旧 completed 用户记录后来取消的状态与分页。参考 Grok 本地重建版 per-agent run queue、DeepSeek per-session delivery、OpenCode per-session runner、Hermes visibility/dispose；Claude/Codex/Grok Build 的实际工具/线程/后台身份链只作各自有限范围对照，不混称官方云端全实现。修前两项 work 反例及真实 React 隐藏反例均失败；修后 226 项 Host/work/background/history、229 项群/嵌套/任务历史通过，真实 React/headless Chromium 可见性测试、Node/Web 类型及 diff 通过。三位修复复核均通过；随后已换三位全新代理再次全范围审查，尚未提前标为终轮完成。可见超长 IM 历史的重读成本仍保留正确性策略，没有实际卡顿/长期 CPU/RSS 证据便不扩大补丁；不宣称整应用 GUI/真实模型/小时级全验收。证据 `~/.local/state/cmbdevclaw-beta-preview/quality-review/full-quality-1101-crossmodule/`，新轮 `full-quality-1101-final/`。本轮只改 Bot Host 与 Bot renderer，原 29 份暂存指纹 a76d48c4…07a6f 保持，未暂存/提交/push。
+
+- 2026-11-01按用户决定从Bot边界禁止新Team关联：关联服务在新绑定及preparing恢复时拒绝coordinator（含legacy coordinatorMode），前端表单打开/提交同样提示；已bound历史仍可查看/解除，不改模式、不删除历史文件。Bot adapter复用原模式解析，在prepare前拒绝新Team输入/前缀/环境强制，steer在打断注入前拒绝，原verifyResolvedThread复查实际模式；原有coordinator结果收尾、恢复/取消保留，不新增Team兼容，也不宣称worker回传缺口已修复。普通normal子代理、Bot通信、群协作及原工作台不变。本轮没有修改共享Runtime、调度、锁、线程模式或worker实现。定向318项、Bot核心121文件2213项、Node/Web类型、原工作台入口基线及diff通过；三位全新GPT-6.1-sol/high同提示独立复核均未发现实质问题。未作真实模型/GUI/外部IM/小时级验收。证据 `~/.local/state/cmbdevclaw-beta-preview/quality-review/team-admission-1101/`。原25份暂存保留，本轮未暂存/提交/push。
+
+- 2026-11-01 Bot明确模型与IM浏览器复合标识修复：修前隔离反例确认全局auto覆盖Bot显式modelRef，工具创建Bot的144字符IM scope被128字符单ID校验误拒。最小修复复用已有pinned路由，仅由非关联会话且明确modelRef的Bot通过可信执行上下文启用；共享入口增加可选字段和一处读取，普通任务、默认Bot、关联原会话仍走原全局策略，不改调度/锁/取消/检查点算法。浏览器五个IPC改为复合scope分段校验，保留Host绑定/成员/工作归属及page ID限制。参考DeepSeek roster.js的按Bot模型接线及Grok本地重建版cursor-session的显式/默认模型区分，不宣称当前官方云端完全相同。定向5文件348项、Bot核心121文件2200项、原工作台入口基线、完整Workflow回归及Node类型通过；三位全新GPT-6.1-sol/high同提示独立复核均未发现实质漏洞。Team条目继续延期。未做真实供应商/GUI/小时级验证，未将路由与IPC受控测试混称全流程实测。证据 `~/.local/state/cmbdevclaw-beta-preview/quality-review/model-scope-1101/`；原16份暂存保留，本轮未暂存/提交/push。
+
+- 2026-11-01 Bot 浏览器全局锁阻塞最小修复：真实 Chromium 确认 A 等待 1 秒使 B 独立页面观察由 2ms 增至 967ms；改后同题为 3ms，B 接管/归还在 A 等待结束前完成。仅 browser.ts 将耗时模型动作改为现有浏览器 owner scope 串行；页面创建保留独立同步，人工窗口控制保留全局同步，接管先等待本 scope，成员清理包含创建中的 scope 并保留移除/重入 FIFO。参考 DeepSeek Bot browser/mount.js 的 per-Bot session/hold，以及 Grok 本地重建版 SandBrowserDriver 的 agent window/box/view 定位；不将重建源码视为当前官方云端完整实现。不改共享 Runtime、底层锁、Electron engine 或长程调度，同文件并发编辑按用户要求继续暂缓。新增跨 Bot 导航/接管、同 scope 排队输入失效、首次创建中移除与重入回归；浏览器/原生 host-entry/engine 116 项及 Runtime adapter/local service 305 项共 421 项通过，Node 类型及 diff 检查通过。三位 GPT-6.1 Sol/High 同提示独立复核均未发现必须修改的问题。真实 Chromium 使用测试 show/hide 适配器，未作 computer use 原生界面或小时级长程验收，不能混称全流程通过。证据：`~/.local/state/cmbdevclaw-beta-preview/quality-review/browser-scope-1101/`。原有暂存内容保留，本轮未暂存/提交/push。
+
+- 2026-11-01按最新要求重新检视（代码检视目标完成）：r1三位全新GPT-6.1 Sol/High同提示独立检查首Bot父提交c77230722至d2874c19b的64个提交、全部作者/合并及当前代码，不读取plan历史或旧代理报告。三份报告收齐后核实一项P2：正式交付接受超过100MiB成果且承诺可保存，但卡片/预览/资料库保存复用导入100MiB限制，ZIP/bin正常保存失败；生产交付工具反例100MiB成功保存、100MiB+1交付成功却保存失败，非模型问题或罕见竞态。仅在Bot文件复制模块新增exportBotFile策略，用户原生保存选择后使用与交付相同尺寸范围，复用稳定句柄、背压流、同目录临时文件与原子rename；copyBotFile导入/同伴复制/分享仍100MiB，拖入仍5MiB，原权限/取消/路径检查保留，未改共享Runtime/调度/锁。38项文件/IPC、103项交付/历史/后台消费者回归与Node类型通过；三位独立修复复核通过，实际100MiB+1交付快照保存及128/160MiB流中取消验证保留旧目标且无残片。r2全新三方全范围报告已收齐；发现协作正文超过30,000字符时静默截断，正常Store入口36.8k审查结果的尾部结论未进入调用方/交流UI。按用户新增要求，三位又分别核对Claude Code 2.1.88提取树、Codex本地954fa905和Grok Build 19d42e35/SOURCE_REV7d67deac，区分预算合理与截断事实缺失；只在Bot Store的超限回执前置事实标记，原30k片段、短文、终态、文件/命令事实、路由不变，不新增完整报告存储/读取或行为提示。原文仍在执行会话，不宣称自动补齐长报告。新增私聊/work/群等6例；修前3条正常超限反例失败，另失败场景断言的状态文案写错后纠正并保留日志；修后相关4文件131项及Node类型通过；原三方修复复核均通过，独立验证实际消费者、失败命令事实、根取消不重派。r3全新三位GPT-6.1 Sol/High同提示全范围报告已收齐并全文核对，纳入Claude Code/Codex/Grok Build参考要求，均未确认待修实质问题。独立任务内创建本机例行回主Bot候选经生产链路及既定合同核对排除：例行指令需包含独立输入/路径，不承诺隐式继承work目录；保留原反例，不扩展调度。最终核心120文件2176项、Node类型及差异检查通过，重叠测试不累加为覆盖率。达到本轮新三方无待修项的代码检视完成条件，不代表绝无bug。记忆同步读取、SQL规模、主线程/动画/缓存/资源生命周期均纳入审查；未证实新的重大资源缺陷，不将短时Node探针当Electron长期CPU/RSS验收。证据 `/Users/chenqiang/.local/state/cmbdevclaw-beta-preview/quality-review/full-review-1101-renewed/`；原暂存保留，不提交/push。
+
+- 2026-11-01提交后新一轮全范围检视（代码检视目标完成）：三位全新 GPT-6.1 Sol/High 同提示独立覆盖首次 Bot 父提交 `c77230722` 至 `d2874c19b` 的全部作者/共享接线；三份完整报告收齐后核实并修复群自动讨论达到预算却没有停止原因的问题。参照 DeepSeek `groups.js:469–570` 的显式预算提示、Hermes `hosted_room_discussion.py:630–661` 的 bounded/settled 区分；Grok 0.18 重建保留有界轮次，已提取的本机 0.78.1 客户端不代表不可见的服务端调度。仅复用 BotGroup 展示元数据和原新消息入口，显示达到上限、发新指令继续；不增加轮数、执行队列、恢复接口或修改底层。正式反例修前两红一绿，修后核心120文件2169项、Node/Web、原消息套件通过。实际 React 群组件的浏览器回归另发现恢复未确认草稿时 `setEditable` 默认发 update，虚增 revision、使原请求失去重试身份；生产修正仅在 Bot 提及编辑器传 `emitUpdate=false`，保留真实输入。完整群文件/重试脚本及群/私聊编辑器挂载、禁用切换、真实输入和重挂载均通过；两处旧测试夹具接口/选择器已更新，失败日志保留。这些为离线 Host/Store 和真实组件浏览器检查，不冒充原生整应用/模型验收。原三方完整候选复核均无待修问题；随后又启动三位全新 GPT-6.1 Sol/High 同提示全范围检视，覆盖64个可达提交及当前9份工作区文件，三份完整报告已收齐并逐份核对，均未确认待修的实质问题。r2独立窄回归分别为A的396项与原队列41项、B的344项与真实编辑器浏览器脚本、C的234项；相互重叠，不累加为覆盖率。A/B定位规则时意外看到plan历史摘要，均已披露且未读取旧代理报告、未使用历史结论作证；C未接触旧报告/历史结论。达到本轮代码检视完成条件，不表示绝无bug。
+  CPU/内存/句柄/缓存/历史查询/隐藏动画已主动纳入三方检查；两轮真实Store/SQLite合成样本覆盖最多10000任务、1000工作，结合空闲唤醒、资源上限和生命周期检查，未确认重大资源缺陷，不等同于原生进程树长期压力测试。同文件跨成员并写风险保留已有延期决策，不恢复群共享锁；Team、旧Playwright升级、正文搜索与外部条件仍按用户范围保留。证据 `/Users/chenqiang/.local/state/cmbdevclaw-beta-preview/quality-review/full-review-1101-postcommit/`；本轮不提交、不push，原暂存保持。
+
+- 2026-11-01本次重新全面检视目标完成：维护后r2全新三位GPT-6.1 Sol/High同提示、全历史及当前实现独立检视，三份完整报告已收齐并全文核对，均未确认本轮范围待处理的实质问题；B额外用真实Store/SQLite、文件快照与记忆服务验证嵌套取消/迟到结果和无关命令、双版本附件、群记忆边界，最终通过，首次测试正文换行断言错误保留。B搜索产品约定时意外看到plan历史摘要，已披露，不使用其作为证据，未读取其他代理报告。两轮共六位全新审查者，本轮仅修一个旧测试期望，未新增生产修改；相关4文件87项、Node/diff通过，上一广域除该旧断言的2131项及原工作台基线通过（重叠不相加）。生产与测试文件r2起点指纹不变，外部暂存保留。代码检视通过不等于GUI/模型/长时负载验收或绝无bug；Team、旧Playwright及外部条件仍按用户决定延期。未提交/push。完整证据 `/Users/chenqiang/.local/state/cmbdevclaw-beta-preview/quality-review/full-review-1101-new/`。
+
+- 2026-11-01按用户要求重新启动全范围代码检视目标：r1全新三位GPT-6.1 Sol/High同提示覆盖首Bot父提交c77230722至HEAD a1a2ce060的63个可达提交、全部作者/合并及当前工作树。三份完整报告均未确认新增实质生产缺陷；“本机例行回到Bot主聊”经产品约定核对不是新bug。共同发现旧通知测试仍要求workflowEnabled=true，与已授权移除新工具冲突；仅更新该测试三参数例的期望，增加未开启且工具仍被屏蔽的断言，保留真实通知身份/单次OS通知/终态/attention。4文件87项、Node类型和diff通过；原三方再次独立复核均认可，无生产改动。广域测试首轮失败日志保留，不把重叠测试数相加。当前开启r2全新三方全范围检视，目标尚未完成；不启动GUI/真实模型、不提交/push，保留外部暂存（源码内容与r1起点一致）。证据 `/private/tmp/cmb-bot-full-review-1101-new/r1/`。
+
+- 2026-11-01修复Bot技能误过滤与关联任务Fork后仍停旧页：仅ChatContainer三处surface条件，技能初始化/刷新按明确Harness surface或真实项目绑定过滤；Bot Fork复用原store默认导航至新普通会话，原项目回调保持。不改底层、Team跨入口继续延期。生产逻辑回归修前12项中两条Bot反例失败，修后相关5文件38项、Web类型检查、test:messages及diff检查通过；三位全新GPT-6.1 Sol/High使用同提示独立复核，均未发现本轮实质问题。验证为生产函数/状态更新及调用链，不冒充GUI或真实模型实测。用户原暂存内容保持，未提交/push。证据 `/Users/chenqiang/.local/state/cmbdevclaw-beta-preview/quality-review/bot-surface-fix-1101/`。
+
+- 2026-11-01按用户要求对移除Bot workflow再作三方独立复核：三位全新GPT-6.1 Sol/High相同提示，父侧等待并全文核对三份完整报告，均未确认本轮实质缺陷，建议保留最小适配层修改，不扩大共享Runtime/调度改造。B窄验证8项、C窄验证6项通过（重叠不合计）；A审计源码与原始验收。共同核对task/协作/附件工具、旧结果领取与后台取消路径及真实验收边界。复核前后生产/测试、HEAD和暂存指纹均未变，仅追加本记录；未提交/push。报告 `/Users/chenqiang/.local/state/cmbdevclaw-beta-preview/quality-review/workflow-removal-1101/three-review/summary.md`。
+
+- 2026-11-01移除Bot workflow后的真实模型补验完成：当前源码隔离Electron/正式Host/Runtime，M2.7记账CLI与M3持久化HTTP服务各做原工具列表/移除后同题对照，四份正式ZIP均通过相同独立断言（双方各41/41）及包内node:test；均一次正式附件，群任务自然收尾。原方案M3有一次模型Internal server error后重新交办，保留失败，不能计全过程无错；两边均未主动调用workflow，因此不宣称验证其执行算法或统计最优。移除后M2.7后台失败回传、停止上游精确终止3个下游进程、同群新任务恢复独立31/31通过，无漏失败/重复启动/取消复活/提前成功。仅短程真实模型与进程，不冒充GUI或小时级验收。本轮未新增生产代码，原暂存字节及开测前生产文件指纹保持；未提交/push。完整报告 `/Users/chenqiang/.local/state/cmbdevclaw-beta-preview/quality-review/workflow-removal-1101/report.md`。
+
+- 2026-11-01按用户要求仅从Bot工具列表移除workflow：Bot适配层撤去自动启用，并复用既有remotePolicy.blockedToolNames屏蔽新调用（含旧workflow模式及结果续跑）；原工作台、共享Runtime/调度、task子代理及Bot通信/群协作不改，已有workflow/命令的所有权、回传、取消、恢复接线保留。三位GPT-6.1 Sol/High独立复核调用链及最终差异未发现本轮实质问题。相关9文件592项通过；新增真createDeepAgent执行图的2项受控模型对照通过，实际task调用并返回、workflow不再向父模型展示、通信/文件工具保留；Node类型检查通过。首次旧策略精确期望及测试夹具对结构化system内容识别失败已修正，日志保留。工具表实测是受控模型/合成工具，不冒充完整应用或真实模型端到端验收。证据 `/private/tmp/bot-workflow-disable-{regression2,surface,typecheck2}.log`。用户暂存内容保持；未提交/push。
+
+- 2026-11-01重新检视目标完成：r5全新三位GPT-6.1 Sol/High相同提示，独立覆盖首Bot起全部相关作者/合并/当前候选及共享消费者；三份完整报告已全文核对，均未确认本轮范围待处理实质缺陷。父侧核对r5起始541路径、HEAD、status与暂存字节指纹全部不变。最终核心119文件2164项、Node及diff通过；Web为此前最后相关renderer/shared类型变更后的通过记录，本轮最后Store补修未涉及Web。三方额外窄验证不叠加为新的全量数量。
+  本目标实际修复四类问题：群已加载旧问题卡终态不刷新；IM独立协作共用浏览器页（含同Bot不同root）；个人IM协助窗口隐藏后原主聊无入口重开/归还；归档成员阻断默认群广播，及其恢复后被旧讨论追加的候选遗漏。均保留修前反例、失败夹具记录和原三方修复复核；新增生产修复位于Bot/其renderer与shared Bot helper，没有新增共享Runtime/Worker改动。
+  此为代码检视通过，不等于原生集成已通过或绝无bug。真实IM群卡片答题者约束仍需网关证据；此前的下载退休/旧IM来源标签未证疑点不升级为确定bug。Team跨入口/个人IM兼容及旧Playwright原生手动关弹窗恢复继续按用户决定后续处理；每Bot队列并发边界不变。外部暂存c50b9f85103ff9e377d4a1b566e7cfbcf104b65cccc8bf251a33b3d4f7bba967保留，本侧未暂存/提交/push、未启动应用或模型。完整报告 `/private/tmp/cmb-bot-recheck-1101/r5/{a,b,c}.md`，最终核对 `parent-end-check.json`。
+
+- r4第二版三份完整独立修复报告已全文核对，均未确认整组剩余实质缺陷。核心119文件2164项、Node及diff通过；正式恢复反例关闭，新明确@、引用作者、botPost、原任务/命令/workflow归属和幂等均保留。当前启动r5全新三位GPT-6.1 Sol/High同提示全范围审查；目标尚未完成，仍以新轮三份完整结论为结束条件。索引c50b9f85…ba967保持，未提交/push、未启动应用/模型。证据r4/{a,b,c}-fix2.md、parent-core2.log、parent-node2.log；新轮 `/private/tmp/cmb-bot-recheck-1101/r5/`。
+
+- r4修复复核三份已收齐，追加确认恢复被跳过成员会自动进入旧讨论。父侧真实Store及正式none/specific/everyone反例确认：修前无@仍唤醒，明确@对照通过。补修仅复用已有initialTaskIds实际bot_id限定本地用户初始讨论受众，后续合法@及botPost原路径保留；不新增字段/协议，不改变原targets请求身份。删除测试误用beginDeletion前成员快照已改为旧快照拒绝、刷新后成功，原失败日志保留。原三位第二次复核、最终core2/Node2进行中；索引c50b9f85…ba967保持，未提交/push、未启动应用或模型。证据r4/*-fix.md、parent-restored-test-red.log。
+
+- r4全新三份完整报告已收齐并全文核对：确认P2归档群成员后默认广播/所有人整条回滚。父侧真实Store/SQLite独立复现，正式3反例修前失败，显式收件人对照通过；候选仅Bot Store过滤广播实际执行成员，保留明确点名错误、原请求targets幂等及事务，不改共享调度/原工作台。初步5文件346项通过，新增删除中与混合提及边界后的核心/Node检查及原三方修复复核进行中；之后仍需全新三方全范围轮。外部已将此前70项全部暂存c50b9f85…ba967，父侧541路径内容指纹核对无变化并保留；本侧未暂存/提交/push、未启动应用或模型。证据 `/private/tmp/cmb-bot-recheck-1101/r4/{a,b,c}.md`、`parent-archive-{red,green}.log`。
+
+- r3修复后三份独立完整报告已全文核对，均未确认剩余实质缺陷；撤销/移除绑定后的桌面历史页控制、取消后不复活模型、原主页与群页隔离均有受控证据。最终核心119文件2155项、Node及diff通过，Web为上一版最后相关类型变更通过记录。现在启动r4全新三位GPT-6.1 Sol/High同提示全范围审查；目标仍待新一轮三份结论。70项索引421d78ac…605ed保留，未提交/push、未启动应用/模型。证据 `r3/{a,b,c}-fix.md`，新提示与指纹 `/private/tmp/cmb-bot-recheck-1101/r4/`。
+
+- r3全新三份完整报告已收齐，独立确认P2：本人IM委派的浏览器协助窗口隐藏后，原桌面主聊无法重开/归还其IM peer页。父侧生产BrowserService复现，真实Host/SQLite配合正式正常归还/跳过两反例修前红，修后192项及Node通过（核心接线回归继续）。候选仅Bot Host/BrowserService/local-service复用历史personal binding证明向原主聊聚合页面，模型动作仍exact owner，不改变scope/目录/锁/共享调度；IM群/他人受众不纳入。原三方正独立复核，之后仍需全新轮。证据 `/private/tmp/cmb-bot-recheck-1101/r3/parent-personal-*`；索引421d78ac…605ed保留，未提交/push、未启动应用或模型。
+
+- r2第二版三份独立修复报告已全文核对，均未确认剩余实质缺陷；同Bot不同root隔离、同thread不同回执task的连续性、原IM聚合入口与退休均有受控证据。最终核心119文件2152项、Node/Web/diff通过。现启动r3全新三位GPT-6.1 Sol/High同提示全范围检视，目标尚未完成。当前70项暂存421d78ac…605ed保持，未提交/push、未启动应用/模型。报告 `r2/{a,b,c}-fix2.md`，新提示与指纹 `/private/tmp/cmb-bot-recheck-1101/r3/`。
+
+- r2修复复核确认同一Bot不同IM root仍可并发共用页面，父侧真实Host/SQLite复现2线程1页；已沿现有稳定im-peer线程进一步隔离，覆盖回委派binding owner，不使用瞬时taskId。正式2反例修前红、补修后5文件508项及Node/Web通过；真实Host复验2线程2页，第一页面URL保持。原三方正在第二版复核，随后仍需全新三方全范围轮；未改共享调度/锁/原工作台，未启动应用/模型，索引421d78ac…605ed保留，未提交/push。证据 `/private/tmp/cmb-bot-recheck-1101/r2/parent-branch-*`、`parent-same-peer-*`。
+
+- r2全新三份完整报告已收齐并全文核对，确认P2：IM委派将不同执行Bot的默认browser owner都接到binding owner，合法导航/精确close可覆盖或关闭另一任务页面。父侧真实Store→adapter及生产BrowserService受控复现；正式5反例修前失败、修后384项通过。候选仅Bot层将IM展示受众与执行scope分开，保留原IM入口聚合预览，按精确pageId/当前人控lease路由，删除绑定owner或协作者均退休对应页；未改锁/Runtime共享调度。正在补接管/跳过/原生toolbar端口与workspace回归，再交原三方复核及全新轮。审查期间外部将群历史修复暂存，src内容无变化，当前70项索引421d78ac…605ed保留；父侧未暂存/提交/push、未启动应用或模型。证据 `/private/tmp/cmb-bot-recheck-1101/r2/`。
+
+- 本轮r1修复三方复核均未确认剩余实质遗漏，完整报告已全文核对；父侧核心119文件2144项、原消息回归通过，新增consumer夹具类型补齐后Web最终exit0通过（parent-web4.log）。现在启动r2全新三位GPT-6.1 Sol/High相同提示全范围审查，目标未完成；未提交/push、未启动应用，索引233647df…dfd66保留。证据 `r1/{a,b,c}-fix.md`，新提示与指纹 `/private/tmp/cmb-bot-recheck-1101/r2/`。
+
+- 本轮r1三份完整报告已收齐，独立确认本地群已加载旧问题卡不随终态刷新，搜索历史锚点也受影响。父侧真实Store/SQLite与生产refresh回调反例先红后绿；仅renderer复用原定点groupMessages刷新已加载未结算问题，保留历史锚点/分页及过期响应保护，不改执行、取消、回传或底层。原三方正在复核，之后继续全新三方全范围轮。审查中外部将前轮变更暂存，src内容未变，当前66项索引233647df…dfd66保持；本侧未暂存/提交/push、未启动应用。证据 `/private/tmp/cmb-bot-recheck-1101/r1/`。
+
+- 2026-11-01用户要求再试一次，已建立全新检视目标并启动全新三位GPT-6.1 Sol/High，同提示各自审查首Bot起全部相关提交/合并/作者及当前变更。禁止借用前轮结论；等三份完整报告后父侧确认真实问题才最小修复，修复后仍需新三方全范围轮。既有延期/每Bot队列边界、暂存c7becac7…bd24ec0和不提交/push、不启动应用约束保持。提示与起始指纹 `/private/tmp/cmb-bot-recheck-1101/r1/`；当前目标进行中。
+
+- 最后一轮r4全新三方全范围代码检视完成（2026-11-01）：三位GPT-6.1 Sol/High相同提示独立盘点首Bot起63个可达提交、所有作者/合并、当前暂存及未暂存实现；三份完整报告已全文核对，均未确认本轮范围内待处理实质缺陷。父侧核对生产内容在本轮审查期间未变，用户62项暂存SHA256仍为c7becac737d82d04dcfe260ca92c74cd26ae5c046b67e933fd27ca100bd24ec0。当前最终核心118文件2135项、Node（最终Store版）、Web（最终renderer版）及diff通过；三方独立定向测试不叠加成新全量。
+  此目标中实际新增修复为两类：私有文件回执已进入接收者inbox时保护发送者身份，防删除导致尚未消费的交付失效；两个IM历史消费者刷新已加载旧页的动态状态，并保留分页/切换/卸载保护。新增修复只在Bot Store/renderer，未再改底层。受控反例、失败夹具记录和三方修复复核保留于r1–r3。
+  代码检视目标达成，不等于原生集成已通过或绝无bug。Team/个人IM兼容、旧Playwright原生手动关弹窗恢复继续按用户决定后续处理；每Bot队列的独立整文件并发风险为既有接受边界。IM卡片实际提交者授权缺网关契约证据；IM执行详情很旧来源卡片投影需具体UI核对，当前未证实影响执行/交付/受众，不为此扩API或补理论防御。后续集成阶段按真实入口验证，不将上述疑点标成已修。三份报告 `/private/tmp/cmb-bot-final-review-1101/r4/{a,b,c}.md`，父侧最终指纹 `parent-end-check.json`。未启动应用/真实模型、未暂存/提交/push。
+
+- 最后一轮r3修复复核三份完整报告已全文核对，均未确认剩余实质缺陷；三方独立核对真实Store/SQLite及组件refresh/More双向完成顺序、切换/卸载，原错误展示已修正。父侧最终核心118文件2135项、Web及diff通过。现进入全新r4三位GPT-6.1 Sol/High同提示全范围审查，目标尚未提前完成。用户62份暂存指纹c7becac7…bd24ec0保持，未提交/push、未启动应用。证据 `r3/{a,b,c}-fix.md`、`parent-core.log`、`parent-web.log`；新轮 `r4/`。
+
+- 最后一轮r3三份完整报告已收齐，独立确认同一旧页状态刷新缺口还存在于正式“IM接入→接入记录”入口：后台accepted，组件两次refresh仍pending。现复用已有renderer reader，保留原history API/5秒timer，窗口身份及items引用防止刷新覆盖新加载页；未改后端/执行。正式消费者反例先红后绿，19项定向、Web及真实SQLite50条回调验证通过，三方正在独立复核；随后仍需全新全范围轮。证据 `r3/{a,b,c}.md`、`parent-dialog-*`，用户索引不变，未提交/push、未启动应用。
+
+- 最后一轮r2修复后三份完整独立报告均已全文核对，未确认剩余实质缺陷；实际Host/Store/SQLite覆盖单回执/会话停止、归档、嵌套、work、IM撤权、恢复后门禁释放，无关Bot及群共享文件对照保留。新增查询命中既有state索引，无新表/索引/轮询。父侧最终核心117文件2132项、Node及diff通过，Web为上一renderer最终版本通过记录。已启动全新r3三位GPT-6.1 Sol/High相同提示继续全范围检查；不提前完成目标。用户索引c7becac7…bd24ec0不变，未暂存/提交/push、未启动应用。证据 `r2/{a,b,c}-fix.md`、`parent-delete-core.log`，新轮 `r3/`。
+
+- 最后一轮r2三份完整报告已收齐，确认一项P2：私有文件回执已从B outbox进入A队列后，删除B会令A的Runtime因缺少sender身份而拒绝导入。父侧真实Store/SQLite/快照独立复现，文件仍在但交付回合失效。仅Bot Store删除门禁增加对活跃私有文件inbox依赖的保护；保留原文件授权，不改Runtime/执行/取消/底层。正式三反例修前失败，纯文字/群共享/已取消三对照通过；正确生命周期修后验证，夹具两处跳状态错误留档，不当产品失败。原三位正独立复核修复，目标仍未完成，之后需全新三方全范围轮。证据 `r2/{a,b,c}.md`、`parent-delete-*`；用户暂存不变，未提交/push、未启动应用。
+
+- 最后一轮r1第二版三份完整复核已核对，均未确认剩余实质缺陷。父侧最终核心117文件2126项、Web及diff通过；三方分别用真实Store/SQLite验证终态用户行停止后刷新，400–500行成本样本未确认正常规模问题（不含原生IPC/渲染，不声称端到端实测）。现已启动全新r2三位GPT-6.1 Sol/High相同提示、全历史/当前实现独立审查，目标仍待本轮三份完整结论；用户暂存c7becac7…bd24ec0保持。证据 `r1/{a,b,c}-fix2.md`、`r1/parent-fix2-core.log`，新提示及起始指纹 `r2/`。未提交/push、未启动应用。
+
+- 最后一轮r1修复复核追加确认：旧用户dispatch即使completed仍可因停止其未完协作变cancelled，不能当不可变终态。父侧真实Store反例成立，正式反例先红后绿；reader复用原keyset刷新已加载用户行及未终结投递行，不依赖有上限的recentTasks覆盖、不新增接口/状态体系，已送达Bot行仍跳过。16项定向、Web及真实SQLite停止协作证据通过（50行、两次读取、显示cancelled）；当前原三方正在第二版复核，随后仍须全新全范围轮。只改renderer，无本轮底层改动，用户暂存不变。证据 `r1/parent-fix2-*`、`parent-terminal-green.log`；未启动应用、未提交/push。
+
+- 最后一轮r1三份完整报告已收齐：两位无确定finding，一位确认招乎群已加载旧页的可变投递/执行状态不随revision刷新。父侧真实Store/SQLite独立复现50条记录中旧pending已accepted仍不在前40刷新页；候选仅renderer，沿原history API刷新已加载待完成行，保留游标/滚动、丢弃过期响应、不扩展历史窗口。15项定向及Web通过，真实SQLite+reader通过；原三位正在修复复核，之后仍需全新轮。未改底层/执行/回传/锁，索引c7becac7…bd24ec0不变。外部脚本初次顶层await配置失败保留。证据 `/private/tmp/cmb-bot-final-review-1101/r1/`，未提交/push。
+
+- 2026-11-01按用户要求重新建立最后一轮检视目标，启动三位全新GPT-6.1 Sol/High，相同提示独立覆盖首Bot提交起全部相关历史和当前62份变更，不沿用上一轮无问题结论。等三份完整报告后再独立判断与修复；如有修复，交三方复核后再开全新轮。现有全部变更已被外部暂存，索引c7becac7…bd24ec0保留，不提交/push；本阶段不启动应用/模型。明确延期范围及每Bot队列决定不变。提示和指纹 `/private/tmp/cmb-bot-final-review-1101/r1/`。
+
+- R21全新全范围检视完成（2026-11-01）：三位GPT-6.1 Sol/High使用同提示独立覆盖首个Bot提交至当前63个可达提交（含7个merge）、全部作者及当前暂存/未暂存/相关未跟踪实现；三份完整报告已全文核对，均未确认本轮范围内待处理实质缺陷。本轮无新增生产修复；生产内容与轮初指纹一致，索引0f776c3e…c45d74eaf不变。原最终核心116文件2114项、Node及diff通过；三方额外窄验证110/337/823项分别记录，不相加为新全量。C的外部测试配置额外匹配非生产副本而导入超时，整体命令exit1如实保留，不算全绿。
+  本阶段代码检视目标达成，不代表原生集成完成或绝无bug。IM群卡片实际点击者授权仍需网关集成证据，不据此改代码；用户明确延期的Team/个人IM兼容和旧Playwright原生弹窗恢复留后。不同Bot取消共享锁后的同文件并发覆盖风险已按既有用户选择单列，未恢复群锁，不宣称具备跨thread写入保护。后续集成按本轮修改入口验证；本轮未启动应用/模型、未暂存/提交/push。报告 `/private/tmp/cmb-bot-rereview-1031/full-r21/{a,b,c}.md`。
+
+- R20最终三份修复复核已全文核对：均未确认当前范围剩余实质缺陷，首聊真实问答registry回执、两次恢复预算、clean-stop/steer及中断祖先分支隔离均有独立证据。最终核心116文件2114项、Node/diff通过；中间import错误已修正并留失败记录。现启动R21全新三位GPT-6.1 Sol/High相同提示全范围审查，目标仍未提前完成。Team/Playwright两项用户延期保持；索引0f776c3e…c45d74eaf未变，未暂存/提交/push、未启动应用或模型。证据 `full-r20/*-fix2-review.md`、`parent-core-fix2.log`、`parent-node-fix2.log`；新提示 `full-r21/prompt.txt`。
+
+- R20修复复核追加确认：首聊已答选择卡同样会豁免空正文显式截断。父侧生产gate复现零恢复误成功，正式五截断反例修前失败、clean-stop对照通过；现两个Bot入口共用16行局部检查，保留原两次恢复和真实回执，不改共享分类器。提取期间漏保留旧分支import导致的中间回归已恢复，失败记录保留；最终两个delivery文件67项通过，Node通过，核心回归及原三方第二次修复复核进行中。两项用户延期仍为后续范围；暂存指纹不变，未提交/push。证据 `full-r20/parent-intro-{red,test-red,test-green,test-green2}.log`。
+
+- R20三份全范围报告已收齐并全文核对：独立确认正常退出后中断父交办的queued子任务仍被执行且无法回传，以及群progress回执让空正文显式token截断被豁免完成。父侧真实Host/SQLite及生产gate独立复现，正式8反例修前失败、3完成父任务对照通过。候选仅Bot层：既有expectsReply祖先guard纳入interrupted；群交付check先拒绝明确截断，保留原有限恢复/合法静默。未改共享分类器/原工作台/调度体系。5文件354项、Node/diff通过，正在原三方修复复核。IM卡片操作者及原IM coordinator输入已ack后退出的输出回传为待证集成边界，不据此改代码；两项用户延期保持。索引0f776c3e…c45d74eaf保留，未暂存/提交/push，未启动应用/模型。证据 `full-r20/{a,b,c}.md`、`parent-{protocol,recovery}-{red,green}.log`、`parent-regression-{red,green}.log`。
+
+- R19最终三份修复复核已全部收齐并全文核对：三方均未确认剩余范围内实质缺陷，独立原workflow/nested反例已转绿。最终核心116文件2097项、Node与diff检查通过，查询计划确认外层ordinal精确定位；没有把源代码验证说成原生集成通过。当前开启R20全新三位GPT-6.1 Sol/High相同提示的全范围审查，仍按目标等三方都无待处理问题才结束。两项用户明确延期保持。暂存0f776c3e…c45d74eaf未变，本轮未暂存/提交/push。证据 `full-r19/*-fix2-review.md`、`parent-core-fix2.log`、`parent-node-fix2.log`；新提示 `full-r20/prompt.txt`。
+
+- R19修复复核三份已收齐：两位分别确认同一handoff经workflow或嵌套结果回合继承已公开附件时，仍会按最后物理ID误判未交付。父侧独立复现后复用peerHandoffSource/taskDescendants，只有replyFiles非空才读取同一handoff/作者/群的历史immutable附件；不合并祖先文字、不放宽同路径新版本，也不新增来源存储或调度。正式workflow/nested/intermediate三正例修前失败，版本变化/兄弟交办/纯文字反例保持；406项相关回归、Node通过。查询改用既有rowid外层定位，实测计划为group_id+ordinal而非全群范围；初版计划说明与测试夹具失败留档。原三方正在第二次独立复核。索引0f776c3e…c45d74eaf保持，未暂存/提交/push；仍未做原生集成。证据 `full-r19/parent-handoff-{red-final,green}.log`、`parent-window-fixed2.log`。
+
+- R19全范围三份报告已收齐：一位确认交付证据被最近50条群消息预览截断，两位未确认其他范围内实质缺陷。父侧真实Store/交付工具和实际Runtime适配器独立复现；peer/caller已交付正例修前失败，同路径内容变化反例保持未交付。候选仅在Bot Store/Host/adapter按既有任务ID、作者和群查询正式记录，原快照/hash校验、上下文分页及执行/取消调度不变，不新增表或索引。查询计划使用现有ID索引；核心116文件2089项、Node与diff检查通过。正在原三方修复复核，未提前完成目标。外部暂存更新为0f776c3e…c45d74eaf，核对59份文件内容与轮初一致并保留；本轮4份修复与本记录不暂存、不提交/push。证据 `/private/tmp/cmb-bot-rereview-1031/full-r19/`。
+
+- R18最终三方修复复核已收齐并全文核对，均未确认整组候选待处理实质缺陷。第一次修复复核额外确认空闲断线漏事件，父侧受控及正式反例成立；现复用同一Host变更入口，并让原setAllOffline仅实际修改行时递增revision，保持原断线/取消/重连语义。最终相关3文件100项、Node检查通过，前阶段核心116文件2084项及Web通过；三方另独立验证普通App/mock、撤权取消、重连不重放、重复断线零事件及精准Stop。测试夹具类型修正仅合法RunLease返回/可选快照字段，失败日志保留。无新增共享底层改动，索引9a6fde8f…f9c8保持。随后按目标开启R19全新三方相同提示全范围审查，未提前完成；不提交/push，不启动应用或真实模型。证据 `full-r18/*-fix2-review.md`、`parent-fix2-green.log`、`parent-node-fix2-final.log`；新提示 `full-r19/prompt.txt`。
+
+- R18三份完整报告已收齐：两位独立确认原normal关联任务缺协作Stop入口，一位确认IM入站排队/投递终态漏Host订阅事件；父侧真实Host/SQLite及实际组件受控证据成立。仅补LinkedBotConversation已有collaborationPending/work.backgroundBusy两项、Bot Host和IM适配器既有变更事件接线；不加轮询、不改执行/取消/长程调度、不新增共享底层改动。新反例先失败，修后定向2文件87项、Node/Web及diff检查通过；原三位正在同提示修复复核，全新全范围轮仍待完成，未提前判定全目标通过。暂存9a6fde8f…f9c8保留；未提交/push，未启动应用/模型。Playwright原生弹窗项按用户最新确认明确后续集成处理，保持升级撤回；Team跨入口同样维持后续范围。证据 `full-r18/{a,b,c}.md`、`parent-regression-{red,green}.log`、`parent-{node-final,web}.log`。
+
+- R17最终修复复核三份已收齐并全文核对：三位均未确认候选待处理实质缺陷。追加确认的非anchor旧交流（无结果/先失败后整合）刷新遗漏，统一复用现有分页批量更新已加载窗口，撤回按dispatch终态判断历史不可变的假设；不新增接口/字段/轮询，不改执行状态。正式反例先红后绿，三方真实Store+hook独立复验通过跨页新增消息、游标保留、不插未加载页、隐藏/卸载/失权清空；非GUI验收。Store最终核心115文件2074项通过；最后hook正式3变体及邻近9项、Web通过（数量不相加/不冒充最后版本全量重跑）。回执防重保留取消围栏和不同物理回合结果。现开启R18全新三方同提示全范围检查，仍不提前完成目标。暂存9a6fde8f…f9c8保持，未提交/push、未启动应用或模型。证据 `full-r17/*fix3-review.md`、`parent-refresh-all-{red,green}.log`、`parent-nonanchor-green.log`；新轮提示 `full-r18/prompt.txt`。
+
+- R17修复复核三份已收齐：确认离群候选对已投递失败回执再次结算会发生请求冲突，父侧真实Host反例重复成立；现复用真实receipt存在性保留旧回执，取消围栏与物理清理仍在。另补交流已加载旧anchor的订阅刷新，不插入未加载历史、不加轮询。新正式2条Host反例及1条真实hook受控反例均修前失败、修后通过；六文件288项、Node/Web通过。archive root查询加匹配原live表达式的单索引，2000归档计划由SCAN改SEARCH，有限样本约3.8–4.9ms，不宣称真实UI性能保证。原三方正在第二次独立复核；候选只在Bot Store与Bot hook，无新增共享底层修改。暂存9a6fde8f…f9c8保持，未提交/push，未启动应用或模型。证据 `full-r17/*fix2*`、`parent-leave-failed-{red,green}.log`、`parent-exchange-cost-indexed.log`。
+
+- R17三份全范围报告已收齐（2026-10-31）：三位独立确认R16归档修复必要、无该候选实质缺陷；新增确认三项：离群时同一交办2–3条取消回合；删除queued接收者不告知存活调用者；多跳结果已回传但交流面板reply=null。父侧均用真实Host/Store/SQLite独立复现。当前候选只改Bot Store：删除前要求沿既有Stop完成待交办/对外outbox；离群原事务围栏queued并按handoff只结算一次，物理清理仍由Host负责；交流查询按现有exact来源链关联物理回执，私聊workflow协作元数据纳入既有archive。不改回执ID、Runtime/执行调度，不新增状态表或提示词。定向生命周期365项、交流134项通过（有重叠），Node通过；原三位正在独立修复复核。已撤回单纯移除Store离群围栏的候选，保留失败记录；2000归档记录查询成本与计划已测，后续继续核对，不以通过数量宣布完成。旧版本已丢失的workflow来源桥不能凭参与者/时间猜配。暂存区外部更新至9a6fde8f4c346a323bc724dd0c1e0a82c8349d811d4172deb4971a59a533f9c8，父侧保留；本轮未暂存、未提交/push、未启动应用或模型。证据 `/private/tmp/cmb-bot-rereview-1031/full-r17/`。
+
+- R16三份全范围报告已收齐：A/B未确认范围内待修实质缺陷，C发现归档中间协作者会取消待整合结果但漏通知原调用者。父代理以真实Store/SQLite生产调用独立复现，私聊/群/独立任务及双子结果四项正式反例修前失败。候选仅改Bot Store归档入口，复用已有handoff来源、取消回执和事务围栏，同一原交办只结算一条排队回执；不改变已完成dispatch状态，不新增共享底层/调度体系。71项嵌套协作回归通过，相邻Host/workflow/background218项通过；最终核心114文件2062项、Node类型检查及diff检查通过。独立原反例重跑从零回执变为一次取消回执，恢复后仍一次；不归档对照仍正常返回整合结果。首版尝试终止已完成dispatch被现有状态机正确拒绝，已撤回该做法；后续测试错误假定JSON及取消文案的失败记录均保留。已开启R17全新三位GPT-6.1 Sol/High相同提示全范围独立审查并复核该修复，不提前标记目标完成。索引外部更新至c2f37f8688be012fbce5c73d7319801dec34e1cda53aca34dae98d703f411cdf，32份生产文件内容在此前外部暂存时未改变；本轮新增Store/测试/plan修订不暂存。未提交/push、未启动应用或模型。证据 `/private/tmp/cmb-bot-rereview-1031/full-r16/`；新轮提示 `full-r17/prompt.txt`。
+
+- R15记忆修复复核已收齐：原三位均独立确认本次修复无待处理实质缺陷。删群/离群、保留原scope编辑、版本冲突与配额回收、显式群/模型读取隔离已覆盖；Node/Web检查均通过，Web测试辅助函数首次失败记录保留。生产只改Bot专用IPC和记忆面板；无共享底层修改。开始R16三位全新同提示全范围审查，尚未完成目标；用户明确后续的Playwright原生弹窗与Team跨入口项仍保留。索引95fbc40e…e7c992未变，本次修复未暂存，未提交/push。
+
+- R15三份完整报告已收齐（2026-10-31）：A/B未确认本轮待修实质缺陷；C发现删群后群内记忆保留却无管理入口。父代理独立重跑真实Host/SQLite/记忆服务成立，新增正式IPC删群/离群用例均修前失败；一条记忆即失去入口，200条仅验证正常配额后果。候选只调整桌面记忆管理列表和原编辑组件，模型上下文/群内隔离/版本检查不变，无底层变化。5文件110项与组件6项通过，Node检查通过；Web首次因新测试辅助函数缺少显式return失败，已修正重跑。原三位正在独立复核，尚不宣布整轮完成。两项证据不足疑点（IM群卡片网关回答者契约、独立任务内例行是否需继承任务范围）只记录待集成确认，不贸然加代码。证据`/private/tmp/cmb-bot-rereview-1031/full-r15/`。用户索引外部更新到95fbc40e…e7c992已保留，本轮不暂存/提交/push、不启动应用或模型。
+
+- 用户范围决定（2026-10-31，R15期间）：旧版 Playwright 原生手动关闭 JavaScript 弹窗后的恢复缺口，明确单列待办、后续集成阶段处理；本轮不恢复已撤回的升级候选，不把该问题标为已修复。后续需验证原生浏览器兼容与真实关闭/继续操作流程。本轮代码检视继续其余范围，Team 跨入口仍按此前决定暂缓。
+
+- R14修复与复核完成：新增直接/嵌套workflow协作的修前失败用例后，仅在Bot Store补齐partial-result排队资格，并在retained workflow命令受理时复用原peerHandoffSource校验。保留checkpoint、真实未消费结果、同source/bot/thread、取消及例行等待条件，无新表/调度器/共享底层改动。另移除IM无正常触发证据的重填fallback及注入false的测试，保留真实多选协议修复。三位原代理独立复核报告已全部收齐并核对，均无本次修复待处理实质缺陷。定向3文件66项、邻近6文件594项、核心113文件2050项、Node类型检查通过；这些数量不相加为独立案例，也不代表GUI/真实模型验收。用户暂存指纹保持不变。已开启R15三名全新GPT-6.1 Sol/High相同提示全范围审查，目标仍未完成；已知原生弹窗兼容缺口仍未闭环。证据`/private/tmp/cmb-bot-rereview-1031/full-r14/*fix-review.md`、`parent-core.log`、`parent-node-check.log`；新轮提示`full-r15/prompt.txt`。未提交或push。
+
+- R14当前补丁必要性复核（2026-10-31）：三位GPT-6.1 Sol/High独立审查全部31个生产修改文件，报告已收齐。主要取消、附件快照、浏览器scope、IM隔离及通知接线均能对应真实入口；未据代码量认定过度设计。IM `remote-user-input-service.ts` 提交拒绝且原pending仍在时重置全部答案的约10行fallback，在多选格式根因修好后未找到正常触发依据；注入false的测试不能证明必要性，标为可独立精简而非已证实有害。另确认当前接线漏项：workflow-owned协作通知已启用retained commands，但`nextQueued`部分结果唤醒例外仍只认origin=bot；父代理重跑真实Host/SQLite受控反例，首结果已落盘但仍有命令时不可排队，原bot对照可排队。待补齐Bot层资格并回归，不能称当前修复完备。恢复锁顺序仅锁级受控复现，正常启动入口有反证，暂不改；私有附件跨回合疑点也不直接列bug。本轮仅审查和记录，无生产代码修改、未暂存/提交/push；暂存SHA256保持`34fadab059d3eea0b0695b85506646faf15a2c815b43dd2acba51ef289900c6f`。报告及反例：`/private/tmp/cmb-bot-rereview-1031/full-r14/`。未做模型/GUI集成，目标未完成。
+
+- 用户范围决定（2026-10-31）：正式关联原工作台Team经个人IM转达的撤权/通知来源兼容问题单列待办，本轮不改相关共享Worker接口，不关闭既有跨入口能力；不是已修复或不存在。默认Bot和Bot群保持normal，不扩建Team支持。R13已完成范围核实、无此项生产改动；后续独立审查遵守该明确暂缓范围，其他普通Bot执行/交付/取消/恢复/隔离/性能及原工作台兼容仍继续检查。
+
+- R13范围补核收齐：A用真实关联服务、IM服务、工作工具、Host/SQLite、runtime-adapter及WorkerManager受控runner贯通正式linked原Team；父代理在独立临时目录重跑，确认撤销个人IM绑定后该worker未停、后续本机任务的自动通知被历史IM授权拦住。原Bot主聊仍normal，不涉及隐藏前缀。B独立验证个人IM准入、IM群拒绝，但仅到受控run port；C的整链fixture在导入阶段失败，没有执行测试体，不能计通过。以上是受控组合证据，模型/完整IPC及原生网关未跑；F1的撤权是否应覆盖已交给原工作台的任务仍需结合既有产品取消契约判断，F3影响限定自动总结入口，未证明文件丢失。peer提前回传未证明正式linked普通入口可达，不据此扩建默认Bot Team。已收敛旧接口建议，本轮未改生产代码/依赖，未提交/push；原三方目标尚未达到完成条件。证据 `full-r13/r13_a-linked-proof.md`、`full-r13/parent/linked-im-team.log`及B/C范围报告。
+
+- R13三份完整全范围报告已收齐并全文核对。B未确认实质缺陷；A/C独立确认显式Team来源交界，父代理重跑真实Host/SQLite/Team工具与WorkerManager受控runner后复现：IM撤权漏停已detached worker；Team peer前台结束即发回执且实际完成通知缺上游身份；后来的本机coordinator通知误取旧IM授权而无法入队。范围更正：Team peer提前回传目前只证实接收Bot主线程已额外进入Team时成立，未证明普通Bot或正式linked Team可直接触发；IM撤权和通知错源的个人IM→正式linked Team入口静态可达，完整入口受控复现仍待补。三项均不能表述为默认normal Bot群的普遍问题；生产入口静态链与受控执行证据分开，未称GUI/模型已验。证据 `full-r13/parent/ownership-before.log`及三方完整报告。用户已提醒普通Bot不启用Team，现收敛为三方只读核实正式入口，停止扩建Team能力的方案推进。不能以隐藏前缀或全范围检视目标为由增加底层生命周期体系；关联原工作台Team的既有行为也不能未经核实禁用。尚未修改生产代码，不盲扩公共Runtime、不削弱原Team/长任务，目标未完成。
+
+- R12第四次修复复核已收齐并全文核对：三位均未确认本批仍有待处理实质缺陷。receipt-first 候选仅保留本活动回合已接受命令的精确身份，在Stop时撤销对应未开始通知，保留命令真实成功事实、同授权来源旧命令及通知；原持久检查点和物理清理屏障不变。父代理真实进程三种对照通过、受控核心113文件2047项及Node检查通过，Web/原桌面/IM基线此前已通过且相应消费者未再改。独立证据 `full-r12/full_1031_r12_{a,b,c}-fix-review4.md`；未做GUI/模型/真实网关验收，已知原生弹窗缺口仍未解决。用户暂存指纹保持 `34fadab059d3eea0b0695b85506646faf15a2c815b43dd2acba51ef289900c6f`。
+- R13已按相同完整提示启动三位全新 GPT-6.1 Sol / High 独立全范围审查；覆盖全部作者相关历史、当前生效生产消费者及本地变更，不只复查取消补丁，不把“没有新增”当成“没有待处理”。等待三份报告后主代理核实并处置，不提交/push，目标继续。提示及证据目录 `full-r13/`。
+
+- R12第三次复核：第二次三份报告全部确认授权source与实际launcher不同导致续作漏停。候选仅在既有Host active记录保留精确命令ID，Stop并入原cancelCommands清理，不改source授权链/持久checkpoint/公共执行器；真实同root旧命令保留对照通过，核心113文件2046项及Node/Web通过。第三次复核又确认“命令已完成、通知已queued、原回合仍活动时Stop”漏撤销后续通知；父代理真实重跑成立，文件在Stop前已生成，不夸大为Stop后进程副作用。尚未完成本批，三份报告收齐后再做最小修正。
+
+- R12第二次修复复核仍进行中，未宣布通过：首轮三方确认单任务Stop还遗漏自身普通有限后台命令，父代理真实进程复现停止后仍写文件并重新通知；已按source任务抑制并沿原清理屏障修正，真实进程及同线程无关任务保留通过。核心113文件2045项、原桌面基线与IM基线通过，但第二次独立复核继续发现命令通知续作/首条消息注入时，授权source与实际launcher不同，仍可能漏停；父代理已重跑通知续作反例。此处不能用现有测试通过数量判定完备，等待三份报告后统一处理，不改公共执行器或调度，不提交/push。
+
+**重新全范围代码检视（2026-10-31，进行中）**：按用户要求重新建立目标，重新启动三位同提示独立子代理，从 `c77230722..a1a2ce06` 全部作者相关历史及当前17份暂存文件出发，追踪真实入口与状态生命周期，不以前轮绿灯或测试数量替代审查。收齐三份报告后核实真实问题并最小修复，再三方复核；如有修复，继续新三方全范围轮。保留当前暂存区，不提交/push，不启动应用或模型集成。新证据目录 `/private/tmp/cmb-bot-rereview-1031/`。
+
+- R12按用户要求重新开始：三位全新代理均显式使用GPT-6.1 Sol / High / 独立上下文，收到同一份完整提示 `full-r12/prompt.txt`。修正审查判据：检查当前待处理实质缺陷，不限定“新增”，不得因已知问题或既往暂缓标签跳过；从全部作者历史与生产入口/消费者复核执行、交付、取消、恢复、隔离、性能和资源生命周期。三方均独立覆盖全范围并主动反证，受控复现可用，应用/浏览器/模型仍禁止启动；报告收齐前不处置或修改生产实现。用户暂存指纹保持，未提交/push，证据 `full-r12/start.json`。
+
+- R12三份全范围报告已收齐，主代理重跑生产Host/SQLite、真实问答校验及身份投影后确认4处：单任务Stop遗漏已运行/后台协作后代；群成员移除后遗漏原交办者的取消回执；非个人IM来源未关闭桌面身份注入；Bot多选题经IM适配成单选答案而被真实校验拒绝并失去入口。另一条“主Bot Team通知”报告因缺少正式模式入口证据撤回确定结论，保留待证，不照单修改。
+- R12候选复用原协作祖先链、精确取消、outbox和sharedTaskContext；IM只补既有答案适配，未改公共UserInput校验或执行调度。多选卡片的原生feedback编码无资料证实，暂用已有inputBox明确填写编号集，单选listSelector不变。修后新增正反例已覆盖单任务/会话停止、兄弟分支保留、已完成dispatch持有的后台命令/workflow、离群只回取消事实、真实IM多选校验和失败重答；首次候选重复取消服务被原测试拦住，已拆回原单任务清理路径消除重复，失败记录保留。原三位正在按同一份 `full-r12/fix-review-prompt.txt` 独立复核，未计通过；尚未做GUI/模型验收。当前用户索引指纹 `34fadab059d3eea0b0695b85506646faf15a2c815b43dd2acba51ef289900c6f`（此前外部暂存已保留），本轮新增改动仅在未暂存区，不提交/push。
+
+- R10上游候选收尾：统一Playwright 1.63及既有Bot薄适配器方案通过三方代码复核、构建、Node/Web、核心113文件2035项和原回放/录制/bridge受控67项；生产函数反例确认native关闭后DialogManager退休且恢复dragEnter/drop，不调用旧Dialog。以上仍不是原生Electron/CDP兼容验证。考虑缺陷影响局限及用户“非必要不动底层”的要求，父代理撤回全部7份升级候选，恢复原1.58.2依赖与构建，未保留双版本alias或额外关闭状态机制。问题与候选/通过及失败证据保留在 `full-r10/upstream-parent/`，该问题仍未闭环，不以撤回当修复。用户暂存SHA256保持 `1680732e26ddcbafa08b8f565ba144415e6bbd10f6899ec48cbba988802182ce`。
+- R11已启动三位全新GPT-6.1 Sol，按相同提示独立审查全部历史及当前实现，报告待收齐；本轮不因升级候选已撤回就省略其他核心链路。用户随后明确后续新子代理推理强度为High，后续创建均显式使用 `gpt-6.1-sol` / `high`，不重启已经工作的代理浪费本轮证据。尚未达到代码检视目标完成条件，未提交/push，未启动应用或真实模型。
+- R11三份最终报告已全部收齐并全文核对，均未确认新的正常可达实质缺陷；覆盖执行/交付/取消/恢复/隔离、共享接口必要性、原工作台兼容及CPU/内存/资源生命周期。此轮为独立静态审查，未重复全量测试，不声称真实UI/模型已验。7份Playwright候选文件逐字恢复核验通过、原1.58.2与恢复构建确认，暂存指纹保持、无新增未跟踪文件。完成性审计 `full-r11/completion-audit.json` 明确仍有已知原生弹窗恢复缺口；三方“没有新增finding”不抵消它，不据此把全目标标为完成。当前没有其它证据支持追加生产改动，不再重复全范围轮次；该局部缺陷需明确暂缓处置或进入允许原生浏览器兼容验证的阶段。
+
+- R10三份全范围独立报告已收齐，覆盖全部63提交及当前实现，包含正常规模SQL/序列化、CPU/内存、监听/定时器/进程清理和原工作台兼容；未凭规模上限或理论竞态凑问题。新增确认1项未闭环P2：原生用户关闭JavaScript弹窗后，Bot缓存与Playwright DialogManager仍认为弹窗未结束，预览/导航受阻。父代理生产服务反例成立。曾尝试仅在Bot engine按精确弹窗同步关闭，98项定向回归和Node检查通过；但原三方独立复核一致发现不完备：Bot的HTML5 drag实际依赖仍被stale DialogManager阻止，无法发出dragEnter/drop；snapshot正常，不能夸大为所有自动化失败。父代理重跑依赖生产函数反例确认。
+- R10候选已完整撤回（仅本轮5份未暂存浏览器文件），此前已验证修复与用户暂存内容保持。证据、候选diff和三份复核在 `/private/tmp/cmb-bot-rereview-1031/full-r10/`。没有采用旧Dialog重放、依赖内部猴补丁或重连所有页面这类有副作用扩改；当前未找到满足边界的安全小补丁。该项保持未解决，代码检视目标未完成；未启动Electron/真实模型，原生UI还需后续集成确认，未提交/push。
+- R10上游评估三份最终报告已收齐并全文核对：Playwright 1.63 的官方 `dialogclosed` 与 DialogManager 关闭处理可解决该依赖缺口，但当前锁定1.58.2；直接升级会移除现有MCP工具入口和两个私有方法，必须适配并回归原浏览器脚本回放。仅Bot引入第二份core也需要类型/快照/evaluate适配，并增加依赖与内存成本，不作为规避底层改动的默认方案。本阶段未修改依赖或增加兼容代码；将有界上游升级与原生弹窗、拖放、原回放验证留作后续集成阶段的明确未闭环项，不以受控函数验证冒充实际兼容。三个报告为 `full-r10/full_1031_r10_{a,b,c}-upstream-review.md`。其余性能/资源检视未发现新增正常使用下的确定缺陷；不是长期内存/CPU实测保证，不追极端压力组合凑问题。
+
+- R9三份全范围报告已收齐，独立复现后仅修正常协作中的workflow续办缺口：首次成功处理workflow输入后等待后台命令，续办又领取已消费实例而失败。复用Bot已有task checkpoint与notification terminal success判断已消费，继续走原检查点校验，不改共享Runtime/scheduler/workflow manager，不新增表、等待器或提示词。覆盖私聊/群、快慢命令、续办再次yield、首次成功前yield、Stop覆盖及重启仍中断不重放；核心113文件2033项、Node类型及diff检查通过。原三方独立复核均无待处理正常路径实质缺陷，三份完整报告已核对；开启R10全新三方全范围轮，仍不算目标完成。新测试夹具未结算上一任务导致UNIQUE失败已修正，失败日志保留。
+- R9另两项按用户最新“真正问题、排除低概率压力组合、非必要不改底层”要求区分处置：旧IM managed Team未入outbox回复的重启恢复缺口确实存在，但是e772已明确延期的独立旧IM限制，Bot不经过该Map，本轮留范围外记录；满500 queued时后台完成结果引发Host fault已复现，但未发现无大量积压的普通触发，本轮作为容量压力边界留档，不新增队列/配额。不是宣称两项不存在。证据 `full-r9/parent-{b,c}-repro.log`及三方报告/范围补核。检视期间外部再次更新暂存区为SHA256 `1680732e26ddcbafa08b8f565ba144415e6bbd10f6899ec48cbba988802182ce`，父代理未执行暂存，保留其状态；后续本记录与测试补充不暂存。用户要求全面检查业务、性能、内存/CPU/资源生命周期，后续各轮持续执行，不以理论竞态凑问题。
+
+- R8原三方再次复核均无待处理实质缺陷（`full_1031_r8_{a,b,c}-recheck2.md`全文已核对）。首次复核共同指出前版已落deleting的关联Team仍被终态通知卡住；父代理独立补两项修前失败反例后，仅在Bot删除恢复入口区分已排队通知与仍在执行/落盘的资源，解除原关联后复用原scheduler唤醒，保留原会话和未确认通知，不取消/伪确认结果，不回滚部分删除，不改两份共享底层文件。三方独立验证身份/审批/live/persistence/普通解绑/原通知消费者及清理失败重试。最终核心113文件2027项、共享兼容4文件70项、原工作台基线、Node/Web及diff检查通过。49份用户暂存保持；本轮新增修订未暂存。随后开启R9全新三方全范围审查，尚不满足目标完成条件。
+
+- R8三份全范围报告已收齐：独立复现两项真实缺口，关联原Team仍有后台执行/待通知时删除先落围栏导致入口受阻，以及IM群的Bot交流历史混入私聊/其他IM群。候选复用Host已有同步后台状态预检；交流查询、分页、刷新传递既有IM会话身份，归档保留稳定audienceKey。没有新增共享层改动。首次归档视图迁移顺序错误已修正，失败证据保留；定向3文件24项通过。核心113文件2025项中仅旧IPC参数断言失败，更新断言并补非法会话ID/对象拒绝后该文件23项通过；Node/Web类型检查通过。原三方正在独立复核，尚未闭环，之后仍需新三方全范围轮。审查期间外部将49项变更暂存，父代理保留该索引（SHA256 `951442c406efbcc5ea7c68836411c3f51bf721551a229ad9626ad55d4e259a78`），新增测试修订和本记录不暂存。证据 `/private/tmp/cmb-bot-rereview-1031/full-r8/`。
+
+- R7三份全范围报告已收齐，父代理独立复现并仅在Bot层修正三项：群workflow回传后复核未被接续；正式快照仍在但原文件删除导致协作终态误报失败；多子协作的中间结果遗漏未完成兄弟任务而提前验收/回传。复用现有workflow来源、任务后代查询和交付快照，不新增调度器或底层接口。三方复核进一步确认旧后台结果可能混入新请求；来源过滤首版又误缩成员忙保护、遗漏已注入原运行的用户回答，失败证据均保留。现已恢复原全群后台资源保护，使用既有injected_into及消息ordinal识别已消费回答后的合法接力，排除回答前旧帖。文字/附件/command/workflow四路径Host回归通过；当前核心112文件2021项、Node类型和diff检查通过；原三方最终复核均无待处理实质缺陷，报告全文已核对。已准备开启R8全新三方全范围审查，不能把修复复核当作目标完成。证据 `/private/tmp/cmb-bot-rereview-1031/full-r7/`；用户17份暂存哈希保持，未提交/push，未启动应用或模型。
+- R6三份全范围报告已收齐，父代理以生产Host/SQLite和真实交付检查函数独立复现后，当前修正四类问题：新workflow通知回合误用旧附件/委派回执；IM执行详情中的附件保存和浏览器协助卡缺失会话范围；已关联Team通知在输入未持久化前失败后不再重试；归档漏查关联Team仍在运行或待回传的worker。新增修改全部在Bot及Bot UI范围：新结果边界不复用旧交付；显式传递IM会话ID复用原导出/浏览器入口；复用现有Bot attempt/terminal/wait与原scheduler预算，持久保留coordinator输入已消费标志；同步归档查询现有manager和既有完整线程枚举，恢复未完成时拒绝归档。未新增worker管理器、worker表、取消机制或底层接口。
+- R6原报告的“普通Bot Team协作须新增worker来源体系”建议经真实产品入口反证收窄：普通Bot不提供Team入口，已有历史拒绝前缀切模式，仅首条无历史/环境强制等非支持模式路径可达；关联原工作台Team仍必须保留。没有为此扩展普通Bot Team支持，原反例及收窄依据保留，不将模拟可达直接当作普通支持流程。三方正在独立复核这个范围判断及全部修复，若发现受支持流程的实际漏交付仍继续处理。
+- R6验证进行中：新workflow边界先红2项、修后通过；coordinator通知先红5项、修后与workflow所有权37项通过；Host/adapter/notification三文件419项及Node/Web类型检查通过。IM消费者覆盖两IM会话、原私聊、原群聊、实际工具附件及正文文件入口。完整核心回归112文件1998项已通过，原三方最终修复复核均未发现追加实质问题，完整报告已读取；随后启动R7新三方全范围审查，不能据此宣布目标完成。证据 `full-r6/`，用户17份暂存binary diff SHA256仍为`2525db6f6c3219ae8085336067792097bec834decfa0fb95cdd9aaf2941d7f68`；本轮未启动应用/模型、未暂存、未提交/push。
+
+- R5全新三方报告已收齐（`full-r5/full_1031_r5_{a,b,c}.md`），独立复现后确认五类缺口：归档遗漏协作/自身workflow所有权；单任务Stop遗漏自身workflow；非personal IM工作默认误用Bot私聊目录；IM群历史附件保存走错目录；真实IM工作附件被模拟渠道门禁拒绝。父代理通过真实Host/Store/SQLite及生产IPC/路径函数复现，未启动应用或模型。候选只修改Bot Store/Host及Bot专用IPC/preload/类型/UI，复用既有实例清理、来源目录和稳定文件复制；未再扩展共享层。
+- R5首次定向60项通过后，全量1980项中5项归档失败，不能将其改断言凑通过。三方重新核查确认其中4项是候选guard过宽：可随归档取消的work队列、已完成仅待投递的回执应保留原可归档行为；第5项确有running子任务，公开归档应拒绝，但仍用明确legacy状态保留迟到回执不重开验证。现已收窄现有ancestry查询的归档种子，不改变Stop/删除；私聊及群queued后代不在原取消范围，继续阻止归档，新增三类queued边界。3文件115项通过；最终受控核心111文件1983项、Node类型检查通过（Web在本轮UI修复后已通过，后续仅Store/测试收窄）；原三方最终修复报告均无待处理实质问题，首轮失败记录保留。已启动全新R6三方全范围复核，不能宣布目标完成。
+- 两处既有底层候选已再次独立核实：`workflow/run-manager.ts`只读精确实例身份，`pending-notification-scheduler.ts`可选managed终态/ack重试桥接。后者确实涉及共享通知调度，不能统称“只读查询”。三位均比较了Bot自建身份缓存/重试定时器等替代方案，认为复用原机制的两处接口扩展更小；并非承诺数学上唯一或零风险。依据原三份R5报告及`full-r5/parent-shared-boundary.md`。用户暂存17份哈希保持，未提交/push。
+
+- R4新三方完整报告已收齐（full-r4/full_1031_r4_{a,b,c}.md），中途额度错误后恢复原审查，没有把错误/未返回当通过。确认三项并由主代理独立重跑：明确撤销IM绑定后已准入peer未abort；移除成员漏已终态未通知workflow清理阻止删除；直接群workflow后台阶段遗漏主要停止入口。前/后三者属Bot既有执行/交互缺口，中间项属本候选新增引用与成员生命周期接线遗漏，不归因原工作台。
+- R4候选仅Bot域：成员移除复用精确workflow清理；Host快照沿既有backgroundThreads投影未退休workflow；明确IM revoke按冻结binding来源精准抑制/取消任务、命令与workflow，不停止整个个人线程，不改离线或permit到期规则。Bot IM service仅接此入口，公共执行器/调度/锁均未新增改动。两workflow反例修前失败、修后23项通过；两IM反例修前超时、修后通过。旧late receipt测试改用Store授权撤销以继续覆盖迟到真实终态，service主动abort由新增用例覆盖，不移除原blocked/隔离断言。Node/Web通过，组合4文件251项及完整受控111文件1972项通过；原三方修复复核均已返回，未发现剩余实质问题（full_1031_r4_{a,b,c}-fix-review.md）；这仅是修复复核，不等于全范围目标完成。已启动全新R5三方（full_1031_r5_{a,b,c}）同提示审查全部相关历史及当前实现，特别独立核实两处底层改动的必要性与可替代方案，三份报告齐全前不继续改生产代码。证据full-r4/，用户暂存哈希保持不变，未提交/push，未启动应用/模型。
+
+- 三份独立报告已收齐，确认此前覆盖仍有遗漏。已在未暂存区修正：IM 浏览器与 Runtime 工作目录不一致；全新 IM peer 线程错误标为已初始化；撤销 IM 绑定后迟到私有回执导致全局 Host fault；嵌套 peer 整合结果额外外发（首次 peer 初始化修复后必须同时覆盖的边界）。前三者均经真实生产函数/内存 SQLite 定向复现；第四项使用真实 Host/Store/IM service、受控执行器及网关出口复现，不冒称模型或 GUI 实测。
+- 修复保留既有文件隔离、旧线程缺失历史拒绝重建、原调用方正式回传；仅来源失效的回执 blocked，真实存储异常仍上抛。原三位独立复核均未发现四处修复的新实质反例；Bot 目录46文件1233项与 Node 类型检查通过（`fix-bots-all.log`、`fix-node.log`），不以此代表未处理项也通过。首次重启测试未恢复 IM online 导致预期许可拒绝，修正测试重连步骤后通过，日志保留。用户暂存哈希仍为 `2525db6f6c3219ae8085336067792097bec834decfa0fb95cdd9aaf2941d7f68`。
+- 仍未闭环，不能宣布本轮通过：workflow 结果通知失败后固定 requestId 阻止重试；停止上游漏掉协作者已脱离 Bot 回合的后台 workflow（用户新反例重跑失败，生产独立 AbortController/取消链吻合）。后者不能以停止 B 整个线程替代精确取消，需保留其他任务及同 runId 新实例。当前 workflow 取消候选尚未完成最终复核；多余的启动拦截和取消参数扩展已撤回，底层只保留只读运行实例身份查询（原启动/取消签名、调度与锁未改）。三方定向复核另确认并修正 IM 后续消息混用来源、workflow 通知再委派回传被旧类型门禁拒绝、重启 running 引用无法结清；前两者沿原来源验证/回传处理，后者仅在 Bot adapter 复用原 transition lease 和 markWorkflowRunInterrupted，保留 active/flush-failed/startedAt 身份保护。325项定向及 Node/Web 类型检查通过。第二轮三方中两位未发现新反例，一位复现“C 回执已排队、B 总结重启中断后旧回执仍可执行”；已补现有取消/恢复入口，仅清理无 checkpoint 的未开始回执，211项相关回归通过，原三方复核均未发现剩余实质问题；最终 Bot 目录47文件1252项及Node/Web类型检查通过，证据 `workflow-cancellation-verification.json`。失败与修正日志均保留于本轮证据目录；这些不是 GUI/模型验收。通知失败重试已补齐：复用原 managed-dispatch 接线回传持久终态及原重试预算，Bot 保存精确尝试/停止分类，未新增执行器或重试队列。候选复核中修正策略终止后的积压唤醒、计时门禁时差、直接停止清理前重启，以及正常让位误记为用户停止；修前失败日志保留。原三方最终分别复核完整候选，均无待处理实质问题（`rereview_1031_{a,b,c}-f2-final-review.md`）。53文件1343项相关回归通过；最后的让位修正后4文件316项通过；原工作台 `test:workflow`、`test:desktop-agent-baseline`、最新Node/Web类型检查通过。只读身份查询以外的共享变更限原通知接线的兼容扩展/纯错误分类复用，普通工作台boolean分支保留，不改执行器、工具、锁及workflow启动取消签名。已启动三名全新代理 `full_1031_r2_{a,b,c}` 同提示进行下一轮全范围检视，尚未收到三份报告，不宣布目标完成。四处修复与后续修正全部完成并经原三方复核后，仍须新三方全范围审查才能完成目标。
+
+- 新一轮三位独立全范围报告已收齐（`fresh-full/full_1031_r2_{a,b,c}.md`），主代理重复生产 Host/Store 受控反例后确认三项：workflow 直接摘要没有沿原委派回信；work 完成/解绑/删除漏掉协作者持有的 workflow；崩溃摘要无终态导致 pending 队首无法消费。前三份计划评估收齐后修正 Bot 来源/结果与生命周期接线，复用原 outbox、backgroundBusy、workflow 引用，不新增状态体系。崩溃保留原“不自动重放”政策，先同事务报告中断再精确确认通知，历史和真实 workflow 结果保留；不把中断当成功。managed 已消费回执不再扣重试预算，避免连续三条中断阻塞剩余结果。
+- 按用户“非必要不动底层”要求，已撤回 `shared/internal-notification-turn.ts` 重试辅助函数抽取，恢复 scheduler 原私有分类；Bot 分类留在现有 continuation.ts。仍保留必要的原 managed dispatcher 终态/ack 接口和 workflow 只读实例查询，不声称完全未改共享层。新 R2 修正没有扩展 workflow 引擎、启动/取消签名、执行锁或普通任务路径。
+- R2 定向证据：`workflow-family-before.log` 两条反例失败，修后 `workflow-family-fixed.log` 5文件79项通过（含查询计划不扫描无关历史）；`workflow-return-before.log` 两条失败，修后 `workflow-return-fixed.log` 5文件445项通过（含 IM 私有回传、输出合同）；`workflow-recovery-before.log` 中断回信缺失，修后 `r2-drain.log` 2文件62项通过，覆盖连续三条已报告中断后仍交付旧结果。VM 通知测试补齐 AbortController/AbortSignal 及 Host stub，未将夹具错误算成产品缺陷。旧全量111文件1937项通过记录仅为 R2 修正前基线。
+- R2 首次修复复核三份报告均指出进一步消费点遗漏，已逐一独立复现：群内 workflow 摘要被要求公开回复、已保存终态但未结算时重启缺原调用者回执、IM A→B→A 私有摘要中断误入外部 outbox。修正仅在 Bot 门禁/受众/恢复路径，保留原不自动重放规则及祖先取消保护；六文件470项、Bot受控核心111文件1952项、共享通知/实例查询/IPC夹具三文件86项及Node检查通过。上述测试均无应用或真实模型。
+- 第二次三方复核收齐后，再确认内部附件提示仍有旧 origin 类型门禁；沿正式 adapter 正反例修前一失败一通过，复用现有 handoff 投影与原内部附件文案后，三文件314项通过（`r2-prompt-red.log`/`r2-prompt-green.log`）。没有新增提示词体系或执行状态，原三方最终复核均未发现待处理实质缺陷（`full_1031_r2_{a,b,c}-followup3.md`），Node/Web检查通过；现已启动三位新代理 `full_1031_r3_{a,b,c}`，同提示且不继承旧报告进行全范围审查，证据目录 `full-r3/`，目标未完成。
+- 三方分别核查“非必要不动底层”：原 boolean managed hook 无法把真实终态/精确确认接回原重试和 drain，Bot 自建 timer/预算会重复调度；原 activeRunId/workspace 查询无法区分同runId续跑实例，初次持久化前读磁盘也不等价。因此保留 scheduler 可选 managed 结果桥接和 manager 同步只读实例查询；普通 false/true 分支、原执行器、启动/取消签名及锁不改。依据见 `full_1031_r2_{a,b,c}-followup2.md`，不以测试数量替代必要性判断。
+- 暂存17文件二进制diff哈希保持 `2525db6f6c3219ae8085336067792097bec834decfa0fb95cdd9aaf2941d7f68`。未启动应用或真实模型，未提交/push。
+
+
+- R3 三位新代理报告已收齐（`full-r3/full_1031_r3_{a,b,c}.md`），独立核实4项：撤销IM后普通后台命令回执回滚导致全Host fault；撤回queued协作漏上游取消回执；删除派发Bot漏后代任务/后台工作；删除群漏后台workflow而先进入deleting后清理失败。父代理分别重跑外置Host/SQLite反例，证据 `full-r3/parent-*.log`；真实应用/模型仍未启动。
+- R3候选只改Bot Store/Host：对已撤销/换版IM路由保留命令终态、停止自动通知；单独撤回协作复用原settle/outbox，批量停止后代仍由分支owner统一反馈；删除Bot复用既有协作owner投影（清理未retired仍阻止删除），删除群在tombstone之前检查workflow。未改公共调度、引擎、锁或启动/取消签名。9项新增确定反例修前失败，另一个service夹具未推进收件人状态，修正后独立3项删除反例失败；不将夹具错误算产品缺陷。
+- 组合回归发现批量取消可能多建一条随后取消的内部回执，已保持原批量语义并补正反例；一项旧测试允许活跃后代时删除sender，改为已完成但回执迟到，仍验证不会复活已删sender。当前相关3文件228项、IM整文件77项通过；全量受控回归/类型检查及原三位修复复核进行中，未计目标完成。索引17份保持，不提交/push。
+- R3原三方修复复核确认work整体停止仍漏已完成祖先取消保护，queued/running peer的取消回执可重新唤醒同work；父代理独立running反例成立。仅在Bot Host复用原stopConversationPeers(work.threadId)，整体撤回不逐个唤醒caller；新增1/2层×queued/running四条修前全失败。复测发现旧work命令与新peers命令ID重叠，保留原断言，合并Set一次清理；实际消费者幂等，不夸大成已证实进程损坏。最终四文件253项通过（work-stop-final.log），Node/Web日志无错误；新增fake Runtime返回值类型错误已纠正，非产品问题。原三方最终修复复核均未发现剩余实质问题（full_1031_r3_{a,b,c}-fix-review3.md）；最终受控核心111文件1968项与Node/Web检查通过。已启动三位全新 full_1031_r4_{a,b,c} 同提示全范围审查，目标仍未完成。所有本轮生产修正仍只在Bot Store/Host，暂存哈希保持，未启动应用或真实模型。
+
+
+
+**全新全范围代码检视目标（2026-10-31，本轮完成）**：基线 `c77230722`，首个 Bot 提交 `bfcc10f71`，当前 HEAD `a1a2ce06`；涵盖期间63个提交中的Bot相关改动、所有作者/合并及本地变更，沿当前调用链审查，不声称逐行形式化证明。首轮三位同提示独立检视全部返回后，确认并修复1项P2：IM群停止漏掉已完成协作者持有的后台服务，全部回合结束时停止入口也可能隐藏。仅在3份Bot生产文件中复用已有协作祖先取消、精确命令清理和 `collaborationThreads` 投影；不改公共Runtime、锁或工具。新增反例修前2项失败、修后通过，相关4文件284项及Node/Web类型检查通过；原三位分别复核修复并全部通过。随后重新启动三位同提示子代理做全范围独立审查，三方均无待处理实质问题；各自回归511、1818、663项通过（覆盖重叠，不相加）。范围、提示、修前/修后证据和全部报告见 `/private/tmp/cmb-bot-full-review-1031/verification.md`。本轮未启动应用/真实模型/IM网关，不替代后续集成测试；此前OS通知弹窗证据缺口仍保留。未提交或push，用户原暂存内容保持，新修复和本记录留在未暂存区。
+
+
+**六项修复真实界面验收及快照补修（2026-10-30—31，未提交/push）**：在单个隔离应用中通过 computer use 与真实 MiniMax M2.7 补验。删除获准的 QA1030-Poster 后历史保留、孤立 seed 取消、其他 Bot 新任务正常；停止主对话实际终止下游心跳，保留无关任务；跨 Bot 浏览器接管与12秒导航精确重叠无误判；解除任务关联后旧结果卡正常打开原普通会话；原工作台真实 Node 任务及重启历史正常。
+
+- 真实附件验收发现此前遗漏：正式交付后继续子协作，结果回合丢失原快照。最小补修将正式交付引用独立保存在任务行，只有真实成功交付更新；不覆写检查点、不在 defer/settle 回写。三位独立复核最终均通过，4文件459项、Node类型及构建通过。真实最终回执保留 attachmentPath，原文件为 NEXT-SNAPSHOT3、正式附件仍为 SENT-SNAPSHOT3，已从UI打开核对。模型额外确认、反向委派及重访旧取消任务另保留，未混称整轮完美。
+- 系统通知仍未计实屏通过：实际群任务成功，系统通知经授权临时开启，但通知中心绑定超时，未取得OS弹窗证据，失败终态弹窗亦未覆盖。已通过系统UI恢复原关闭设置。小时级及Windows未补测。
+- 用户暂存14份内容哈希保持；5份补修及本记录仅工作区变更。无活动任务/命令/讨论或可投递回执；保留一条既有blocked取消回执。详细证据 `/private/tmp/cmb-six-ui-1030/evidence/verification.md`、`final-audit.json`。未提交或push。
+
+
+**追加三路独立复核与闭环（2026-10-30，未提交/push）**：按同一提示启动三位新子代理，收齐全部报告后补齐确定遗漏：空正文群回合保持静默；停止中间协作者时沿既有 upstreamTaskId 取消后代、保留根与兄弟；完成派发后仍通过只读 collaborationThreads 投影显示专用停止入口，不改变聊天 busy；完成中间派发者复用 settle 向有效上游返回一次停止事实。投影不依赖最近100条任务历史，不读取消息正文。
+
+- 全量回归发现原单任务 cancel 的检查点/命令所有权约定必须保留，因此级联取消仅用于 stopConversation；原 nested-replies 断言不改。新交办检查取消祖先，内部结果继续沿原回传与清理通路。没有新增子树聚合等待、公共Runtime或执行锁改动。
+- 三位最终均确认本轮范围无剩余实质问题；独立复现覆盖运行/完成中间节点、下游副作用、兄弟服务保留、重复停止仅一次上游回执。最终52文件1263项全部通过，Node/Web类型检查通过；新测试初次文案误用“已取消”，已按原状态文案“已停止”修正，失败记录保留。
+- 原12份暂存内容哈希不变，本轮补修未暂存；无新增仓库内临时文件，未提交或push。未做本轮真实模型、GUI点击、OS弹窗或小时级验证。日志 `/private/tmp/cmb-six-r3-final.log`、`cmb-six-r3-final-node.log`、`cmb-six-r3-final-web.log`，审查记录 `/private/tmp/cmb-six-final-review-1030/verification.md`。
+
+**六项确定缺陷修复与三路复核（2026-10-30，未提交或 push）**
+
+- 优先修复三项执行/交付缺陷：删除群帖作者后只取消失效 seed，不再让全局 Host 故障；停止主对话沿现有 rootTaskId 撤销未完成协作，包含派发根已完成但子任务/服务仍运行的情况，保留晚回传和重启围栏；协作终态校验及检查点恢复保留正式附件快照，不降级成可变原文件。
+- 其余三项：浏览器控制代际按所属范围校验，接管 A 不误判 B 的已执行操作；解除任务关联后的历史卡复用普通会话导航，仍验证 thread incarnation，不重绑或创建替代历史；用户直接群任务的完成/失败接回现有 OS 通知出口，讨论及纯 pass 继续静默，已正式交付附件后 pass 仍按真实公开贡献通知。
+- 三位子代理以相同要求独立复核全部修复，全部返回后再处理共同发现的缺口：完成根的未完协作、完成协作的后台服务、附件交付后 pass 通知。补回归后，三位均确认本轮范围通过、未发现新的实质问题。最后保留无公开贡献时通知回调的原四参数调用，避免改变既有调用约定。
+- 最终回归：Bot、shared Bot 与 bot-work-client 共52文件1257项通过；Node/Web类型检查、原工作台 desktop-agent-baseline 通过。包含真实 Host/SQLite、真实临时文件快照字节、取消后晚回传/重启、跨 Bot 浏览器控制隔离、detached身份反例。三位独立复核覆盖重叠，不重复累计数量。
+- 未改共享 Runtime、公共执行锁或长任务调度。当前未做真实模型、GUI点击、OS实际弹窗、小时级或Windows验收；不把受控回归称作全场景零风险。归档IM同步报告经当前实现复核未成立，未添加修复。现有无关未跟踪副本保持，未暂存、提交或push。证据汇总 `/private/tmp/cmb-six-fixes-1030/verification.md`，最终日志 `/private/tmp/cmb-six-final-bots.log`、`cmb-six-final-node.log`、`cmb-six-final-web.log`。
+
+**部分回执续跑三路独立复核（2026-10-30，三方一致通过本轮审查）**：按相同提示启动3位子代理，分别独立检视全部3份生产改动、3份测试及取消/失败/抢占/重启调用链，并核对Grok提取Host、DeepSeek Harness参考源码。等待三份报告全部返回后，三方均确认原等待为实际问题，当前修复未发现新的确定缺陷或过度设计；无需追加生产代码。三位分别运行相关3文件373项，全部通过（覆盖重叠，不相加）。复核了现有真实MiniMax时序证据，生产源码仍与实测构建逐字一致；本轮未重新调用模型、启动Electron或小时级测试，不承诺绝对零风险。证据 `/private/tmp/cmb-receipt-incremental-1030/evidence/three-agent-review.json`，各独立日志见其中路径。未暂存、提交或push；其他工作区缺失文件未恢复或混入修复。
+
+
+**Bot 同伴任务部分回执续跑（2026-10-30，最小修复已验证，未提交/push）**
+
+收尾工作区独立异常：Git/文件系统显示7个renderer受跟踪文件缺失（含main.tsx）及未跟踪`.zcode/`，本次未删除或恢复，来源未确认；详见上述隔离证据目录assessment.json。Bot源码与实测构建一致，不将本项通过扩大为当前整个工作区可发布。
+
+- 确认缺陷：同线程容量8被占满后，尚未启动的后续命令若是已运行命令的依赖，原 `nextQueued` 等全部命令结束才续跑会形成等待环；既有M2.7反例等到fixture的150秒超时才恢复。不是漏回执修复删了结果，也不需要改公共执行锁或容量。
+- 参考：官方安装包提取Host `official-host-main-7cb9acc.cjs:605802` 的完成批次续轮、DeepSeek Harness `packages/jobs/tool-jobs/src/index.ts:278` 的单作业完成通知原owner。仅借鉴已完成结果可推进原任务，不声称官方完整云端已实测。
+- 最小实现：只改Bot Store/Host/adapter三份生产文件。需要回传的同伴任务在已有检查点且有新终态回执时可续跑；现有命令表加一个消费标记，与下一检查点在同一事务保存。仅标记该成功回合实际收到的结果快照；私聊抢占不消费，执行期间新结果留待下一轮。回执内容仍完整保留，原最终完成门禁、同线程容量8、取消清理、静默服务及例行等待均保留。普通工作台、共享Runtime与锁无改动。
+- 自动回归：原反例修前2/2失败、修后通过；Bot及IPC共52文件1260项通过，新增持久化失败事务回滚补验通过，最终相关3文件373项通过；原工作台desktop基线、原后台执行/工具能力16项、Node类型检查通过。覆盖结果竞态、重复通知不续跑、其他任务隔离、抢占不消费、保存失败不消费、取消/重启不重放以及服务与例行边界。
+- 真实MiniMax M2.7：隔离应用正式Host/Runtime四组完成（12项依赖、两批10项、3项取消后新任务、强制先8后4依赖）；共38个命令各启动一次，所有结果退出码/随机token逐项独立核对，报告和正式附件在相应全部结果结束后交付，每个最终报告仅回传/交付一次。强制依赖组20/20及4条时序断言通过：1号仍运行时消费2–8结果并启动9–12，1号最后exit7，不再触发150秒超时；两批21/21、取消恢复23/23通过。
+- 保留偏差：普通12项组模型一次cwd写错被拒后纠正、一次额外task_output查询，故严格过程断言18/20，不能称模型所有行为完美；没有重复进程、漏结果或提前完成。首次隔离配置遗漏导致报告写入等待审批，已正常退出、保留现场，补齐原基线配置后才重跑完整验收。未做本轮小时级/Windows或完整CUA验收，不外推为所有场景零风险。
+- 证据：`/private/tmp/cmb-receipt-incremental-1030/evidence/verification.json`、`forced-partial/verification.json`、`forced-partial/causality.json`及`current.patch`；红例 `/private/tmp/cmb-incremental-red.log`、回归 `cmb-incremental-bots-all.log`/`cmb-incremental-final-focused.log`。唯一隔离Electron正常退出0；未暂存、提交或push，Git索引哈希保持。
+
+
+**超过8条回执真实模型补验（2026-10-30，MiniMax M2.7，通过本场景）**：一个隔离应用、新群两位Bot，正式Host/Runtime与当前6份生产源码逐字一致。协调者真实委派，执行者启动9个独立有限后台命令（模型分三批、每批3个调用），全部 `run_in_background:true/notify_on_complete:true`。最早接受的检查1等待后8项完成后以exit 7结束；其余8项exit 0。续跑后报告完整保留9项真实随机token/退出码，明确overall=failed及检查1失败；写报告、一次内部回传、一次正式群附件均晚于最后进程退出。独立审计23/23通过：每项仅一次启动、无重复尝试、无task_output轮询或读取脚本/审计文件猜结果、附件字节一致、无活动任务/命令/回传残留，唯一验收应用正常退出0。发送到正式交付43.155秒。证据 `/private/tmp/cmb-receipt9-real-1030/evidence/verification.json`、`runtime-messages.json`、`state.json`；启动首次因隔离构建缺generated资源失败，补齐后才发送任务，失败日志保留，不计模型失败。此为正式执行链真实模型验证，不冒称computer use全流程；未新增生产代码，用户暂存哈希保持，未提交/push。
+
+**最后追加三路复核（2026-10-30）**：再启三位独立子代理，以同一要求复核全部当前变更；三份最终报告均为“未发现新的确定问题”，无追加修复建议。额外独立验证17条成功/失败/取消/unknown混合回执身份与状态完整、文本预算及一次回传；另一位运行2文件52/52通过，日志 `/private/tmp/cmb-round5-b-focused.log`。第三位完成调用链与diff检查，未重复完整测试。未新增生产代码，暂存哈希仍为 `af66a17775790a900476ad3779fcfaf40b449cef2a79a61ef9e672d6aa73f14a`；未提交/push。本轮不包含新的Electron、模型、小时级或Windows实测。
+
+**再次三路独立全量变更复核（2026-10-30，三方一致通过本轮审查）**：按用户要求重新启动三位独立子代理，使用相同提示分别检查当前全部13份变更及相关调用链，等待三份最终报告全部返回。三位均未发现新的确定问题或需要追加的过度设计修正；核查覆盖Bot能力门控、原工作台/例行/workflow默认行为、有限任务检查点续跑、快结果、长任务回执、取消/失败精确清理、静默服务归属及群讨论、重启不重放。各自独立执行52项、280项、406项定向测试，均通过（有重叠，不相加为独立覆盖数）；另验证8/9/33条SQLite回执经过失败回传后全部身份/退出码仍保留、预算受控、重复flush不重复投递。既有recover中断与未知命令记录顺序经核查未发现本次造成错误成功、已落盘结果丢失或自动重跑，不据此扩张修复。证据 `/private/tmp/cmb-round4-a-background.log`、`cmb-round4-a-receipts.log`、`cmb-final-round4-b-tests.log`、`cmb-review-round4-c.log`。本轮未新增生产改动，未重跑Electron/模型/小时级/Windows，不承诺所有场景零风险；用户最新暂存diff哈希 `af66a17775790a900476ad3779fcfaf40b449cef2a79a61ef9e672d6aa73f14a` 保持，未提交/push。
+
+**最终三路独立复核与回执窗口修正（2026-10-30）**：按相同审查要求启动三位独立子代理，等待全部报告后统一处理。三位共同确认：同一委派先启动长构建、再陆续完成8个短检查，不超过同时运行上限，但既有 `readContinuationCommands LIMIT 8` 会排除最早启动、最后失败的构建回执。本次开放peer显式后台使该路径正常可达；条数限制本身既有，不能称为全新底层缺陷。最小修正仅在Bot Store读取投影中保留全部终态ID/状态/退出码；≤8条保持原样，>8条按原8条容量分配output/command/cwd文本额度，输出保留尾部并明确截断，数据库原始JSON不变。不新增表、消费游标、队列或任务数量限制，不修改原工作台或底层调度。成功/失败两条反例修前均漏首条，修后通过；6文件496项及Node类型检查通过。三位分别复查后均确认问题解决、未发现新的确定问题或过度设计，其中两位各自额外重跑内存复现/新增反例。此前本轮完整workflow、原工作台基线及404项通过记录仍保留，不将其扩大为全部场景零风险。日志 `/private/tmp/cmb-three-final-receipt-{red,green,regression,types}.log`。新增修正及测试未暂存，用户暂存diff哈希保持 `52f35f1232493039add140294cb57838965220b34777e225ed79b00610955ead`；未提交/push。
+
+**原工作台跨模型短流程（2026-10-30，MiniMax M2.7）**：按用户澄清仅验证本次底层改动的跨模型兼容性，不重跑61分钟。一个隔离应用、原生Solo、真实MiniMax-M2.7响应HTTP200：后台命令唯一启动，PID4281、任务9af5b69f，5.008秒后exit 0，task_output取得M27_BG_OK，再完整read_file回读start/result；[11,17,23]合计51，已从界面打开。预期exit 7命令执行一次、如实报告失败，无重试。另起120秒取消用例，运行中从原生停止按钮取消，任务d39a40cf/PID5902物理退出、心跳保持1047B不再增长、done.txt未生成；同线程新echo/read任务5秒完成，未恢复旧任务。独立文件/工具回执核对通过，本项未发现此次底层补丁造成的回归；不把预期exit 7当产品报错，不扩展为所有Bot群协作已验收。
+
+- 证据 `/private/tmp/cmb-native-ui-1030/m27-smoke-summary.json`、`m27-runtime-receipts.json`、`m27-success-failure.png`、`m27-after-stop.png`。模型仅在隔离配置切换，未更改用户生产模型；唯一验收应用正常退出码0。原暂存diff哈希一致，未新增生产改动、未提交/push；认证仍非本项范围。
+
+**原工作台小时级补验（2026-10-30，DeepSeek，已通过本项）**：在同一个隔离Electron、当前未提交构建中，通过computer use从原生Solo工作台启动真实有限后台作业。北京时间16:28:26至17:29:26，单调时钟3660.008秒、实际墙钟3660.024秒；唯一PID19617、唯一execute后台启动，8次task_output均读取同一个7727d9de。最后真实回执exit 0及HOUR_DONE_1030，DeepSeek随后读文件核对并交付，已从真实链接打开result.json预览。61批/6100条、逐批范围与总和18608050独立复算全部正确；122条心跳连续，最大间隔30002ms，原脚本哈希不变，进程正常结束。没有提前交付、重复启动或结果丢失。
+
+- 长作业运行期间，另一原生Multi线程调用真实task子代理、写文件及Node断言，11秒完成；30分钟后该线程新echo/只读任务3秒完成，界面切换及预览正常，没有阻断原长作业。退出时只关闭本轮验收应用，正常退出码0；未改生产源码、未改用户暂存内容、未提交/push。
+- 证据 `/private/tmp/cmb-native-ui-1030/hourly-summary.json`、`hourly-runtime-receipts.json`、`hourly-observations.jsonl`、`hourly-independent-check.json`及`hour-final-result.png`。这是小时级有限后台作业生命周期/回读交付补验，不等同于小时级复杂编程自主协作；睡眠唤醒、持续断网、Windows及企业认证未纳入本项。脚本首批在启动时执行、61批在第60分钟齐全，仍真实等满61分钟才写最终结果，不将其说成首批延迟60秒。
+
+**原工作台 computer use 回归（2026-10-30，DeepSeek）**：用户本轮授权使用 DeepSeek，MiniMax 额度不足不再调用。以当前未提交源码构建，在一个隔离 Electron 实例的原 CmbCowork 工作台实屏执行五项：①Solo真实写入/命令/完整回读及JSON预览，合计51，预期exit 7如实报告；②原生后台execute→task_output→回读/预览，唯一PID、12.008秒、合计26；③运行中从界面停止，任务显示中断、进程已退出，心跳停止后96.3秒仍未增长，180秒完成文件未生成；④该后台运行期间，另一原生Multi线程调用真实task子代理并完成核验，9秒完成；⑤已停止的同一线程执行新的echo/只读任务，5秒完成，未恢复旧命令。本轮覆盖路径未发现此次改动引入回归，不把短任务验证扩大为所有长程场景通过。
+
+- 当前构建和源码diff哈希已固定，五张截图、产物与独立校验记录位于 `/private/tmp/cmb-native-ui-1030/acceptance-summary.json`。唯一自有验收实例通过Cmd+Q正常退出，退出码0。首次发送因隔离配置缺API key在模型调用前被拒绝，补入既有DeepSeek配置后再开始实际验收，未计为模型任务失败。
+- 测试启动器只跳过企业登录导航，未覆盖模型、Runtime或工具；本轮不验认证、Windows、小时级运行/睡眠唤醒，也不替代Bot复杂协作整轮验收。未改生产代码；仅新增本记录，用户原暂存diff哈希保持一致，未提交/push。
+
+**第二轮三路独立复核（2026-10-30）**：三位新子代理均确认另一处同类调度漏项：群任务启动静默服务后，用户转向其他成员使原回合变为 `superseded`，服务按原约定继续运行，但群讨论仍将原成员视为忙碌，导致同伴后续@复核无法推进。仅把群讨论的静默服务排除状态从 `completed` 补为 `completed/superseded`；保留进程所有权及停止/归档/删除保护，有限作业仍等待，不改Host/Runtime停止规则。新增两种终态×静默/有限共4条反例，修前仅被替代回合的静默服务组失败，修后4文件404/404及Node类型检查通过；三位分别复查后均未发现新的确定问题。首轮测试准备中缺少问题结束转回running及公开群消息标记，已纠正，失败日志保留；最终对照 `/private/tmp/cmb-three-review-round2-red-final-1030.log`、`/private/tmp/cmb-three-review-round2-green-1030.log`。未启动模型或Electron，未追加小时级/Windows验收，未提交/push。
+
+**三路独立变更复核（2026-10-30）**：三个子代理均确认同一实际缺口：后台命令完成通知轮启动静默服务后，服务原本映射到已完成的原用户任务，当前通知轮失败/取消时按自身ID查不到服务。最小修正仅让 `notifyOnComplete:false` 保留实际启动任务ID；有限命令原有授权来源和结果回传映射不变。新增真实Host/SQLite失败与取消两条反例，修前均未发清理调用；修后精确停止本轮服务，原任务服务保留。Host、Runtime适配与真实后台进程回归366/366，后台命令原行为34/34、Node类型检查通过。三位原审查代理分别复核修正及其消费者，均确认原问题解决，未发现新的确定问题。首轮测试准备顺序导致启动恢复把预置服务标为未知结果，已纠正并保留失败日志；最终日志 `/private/tmp/cmb-three-review-green-final-1030.log`。本次未启动Electron或调用模型，不代替小时级/Windows实测；付费实验目标保持暂停，原暂存区保留，未提交/push。
+
+**当前实验限制（2026-10-30 15:11）**：MiniMax M2.7、M3、M3.1-Flash分别仅发一次32-token可用性请求，均HTTP429且响应明确为额度不足；未发新编程实验，未切换用户停用的付费DeepSeek。后台回传专项及落盘恢复补验已通过；复杂任务自然收尾仍待同题真实复验，不能用代码检查通过替代。尾部现有证据未发现Host重放，同伴独立新交办中混有必要修订/集成请求，不做全部丢弃或首次交付后强停。当前暂不添加静默邮箱/语义去重，额度恢复前不循环请求；验收浏览器嵌套沙箱冲突路径停用。证据 `dashboard-fixed-1030/evidence/all-model-availability-1030.json`（完整根目录 `/private/tmp/cmb-resume-group-1029/`）。未提交/push。
+
+**后台回执落盘恢复补验（2026-10-30）**：补齐现有内存恢复测试未覆盖的真实SQLite文件关闭/重开边界：同一委派同时有未结束的静默服务和已结束但未读回的有限作业，分别验证退出码0/7。重开后有限作业真实输出和退出码仍可读取；recover将原任务标为中断并向原调用方回传一次，回执包含原真实输出；服务不触发新的通知，重复recover和迟到的同一完成回调不重复投递，不自动重新入队工作。新增2条定向测试均通过（同文件其他10条未重复运行），日志 `/private/tmp/cmb-peer-reopen-1030.log`。此次仅新增测试和计划记录，未修改生产代码或既有暂存内容；未启动Electron、未调用付费模型。此验证不等于异常退出后外部进程仍可自动接管，也不计作复杂看板已完成。
+
+**复杂群收尾回执追踪（2026-10-30，未新增生产补丁）**：M3.1预算补验的尾部任务逐条核对后，未发现同一Host回执重放：都是成员显式新发的内部协作调用及后续结果。479秒发送的有效修订建议，等接收方1290秒结束初轮才处理；另有“模块完成、交你集成／供确认”等完成报告再次形成expectsReply交办。部分消息确实仍请求复核或最终集成，不能按“FYI”一概丢弃，也不能在首次公开交付后取消所有剩余协作。Grok提取harness的SendToAgent契约（793903、789419）区分actionable与held信息，但本地client片段不证明当前云端调度；DeepSeek groups.js:332在busy时steer，Hermes delegate_tool_progress.py:149–167按父子任务返回摘要。三家接线不同，不能笼统说直接移植等价。本地现有steerUserMessage/injectIntoRun是用户消息注入，连带授权、问题卡和子项结算，不直接用于同伴数据。保留该通信能力差距与证据，未新增静默收件箱/语义门禁。详见 `/private/tmp/cmb-resume-group-1029/complex-m31-budget-1029/evidence/peer-tail-analysis.json`。
+
+**后台修复后的复杂看板复验（2026-10-30，已停止，未通过整轮验收）**：原M3 X3保持SPEC、样例和模型配置，在一个隔离Electron中使用当前修复源码。静默HTTP服务已实际启动，CUA打开页面并验证分页；尚无最终正式交付。浏览器工具反复报 `ERR_FAILED (-2) loading 'about:blank'`，macOS崩溃记录确认多个浏览器子进程的父进程为本轮验收PID17946，父应用仍存活。用户反馈异常退出弹窗后，通过正常Host停止本轮合成群，任务/命令/讨论/回执活动数均归零，禁止本轮继续重试或重启这条验收路径。后续系统日志明确显示14:55:56起该子进程的GPU/Renderer/Helper连续被拒绝 forbidden-sandbox-reinit：验收外层sandbox-exec与子浏览器自身沙箱初始化冲突；不能把该隔离环境失败算作生产后台补丁失败。只读核对启动源码后，向已空闲父应用发送一次由现有处理器转为app.quit的SIGTERM，退出码0，未重新启动。未降低生产浏览器安全设置，也未关闭系统崩溃提示。证据 `/private/tmp/cmb-resume-group-1029/dashboard-fixed-1030/evidence/stopped-browser-crash-dialogs.json`。未提交/push，既有暂存内容保留。
+
+**M3.1 输出预算单变量补验（2026-10-30，观察结束，非整轮通过）**：旧X2有3次 `finish_reason=length`、8192输出/8191推理tokens；本次仅将隔离模型 `maxOutputTokens` 改为32768，源码保持旧complex-1029基线531561f09（不混入新后台补丁），SPEC/样例/oracle一致，生产配置未改。本次无length结束，有2次有效响应超过8192、最高9873；正式project.zip独立26/26，ZIP与review.md同一次公开交付。但成员自行扩展多轮随机/差分和解压复验，25分钟观察上限时仍有内部回传未完成，停止后4完成/6取消；不是自然收尾通过，也不能认定增大预算解决群交付效率。两条公开模型消息，另4条停止状态不计模型重复；无同ZIP重复附送。参考Hermes截断重试预算处理，未证实Cmb配置读取bug，不新增生产自动提额或重试。待执行/命令/讨论/回执归零后关闭唯一隔离应用。证据 `/private/tmp/cmb-resume-group-1029/complex-m31-budget-1029/evidence/final-summary.json`、`results/summary.json`及published目录oracle。未提交/push；后台修复的专项通过结论与此独立实验分开记录。
+
+**复杂看板缺项补验（2026-10-30，观察结束，未全通过）**：仅补此前429未交付的 M3/M3.1-Flash X3，保持同一 SPEC/样例/oracle。M3 最终正式 ZIP 通过独立19/19，但有4次附件交付、27条公开模型消息，25分钟观察上限后停止末条合成任务；不是自然收尾通过。M3.1 初轮 provider Internal server error 后同伴重新委派补齐服务，随后多次探测隔离环境中的 Chromium 启动失败，约16分钟停止，无最终 ZIP，不计交付通过。CUA 对生成中的页面实测了分页、搜索/状态过滤、空结果、恶意标题纯文本和CSV下载（52/54行）；M3.1窄屏360px无横向溢出；这只证明当时工作文件页面，不能替代最终包完整验收。M3旧服务停止后页面明确显示加载失败与重试。原生 Electron 窗口未能由 CUA 绑定，不冒称原生交付卡已验。证据 `/private/tmp/cmb-resume-group-1029/dashboard-1030/evidence/results`。期间进一步确认：普通群任务缺少静默服务选项，关闭开发服务器被当作失败通知再次触发核验；下一段记录对此的最小修复。
+
+
+
+**普通 Bot 常驻服务通知补齐（2026-10-30，已验证，未提交）**：X3真实记录显示，多条开发服务器的正常清理/端口失败形成独立完成通知，失败通知要求必须报告，推动反复核验；不能把所有重复消息都归于这一原因。沿 Hermes 的显式服务通知选择，将已实现的 `notify_on_complete:false` 从同伴任务补齐到普通 Bot 任务。Host 显式开启 `allowSilentServices`，原工作台与旧 lifecycle 默认不启用。有限作业默认仍保留真实成功/失败通知，需向同伴回传的有限作业仍由原检查点继续；不依据命令文本猜服务、不吞普通失败。服务仍持有进程停止/删除保护，仅已完成来源任务的静默服务不阻塞群后续复核。失败/取消清理只覆盖当前任务命令；例行失败行为保留原边界。复用现有命令表、suppressed及结果通道，无新表/队列/调度器。
+
+验证：Bot核心110文件1854项、完整Workflow、原工作台desktop基线、Node类型检查通过；真实进程新增普通群服务退出0/7不额外通知、有限作业退出0/7仍通知一次、失败清理不误停其他任务，Runtime工具schema正反例覆盖显式能力与旧Host。真实 MiniMax M2.7/M3/M3.1-Flash各一组新群，普通开发者后台启动HTTP服务 → 公开@复核者 → 验证health/PID、sum=465与503反例 → shutdown → 正式report.json，一次启动/一次交付，全部自然结束，0待办/命令/讨论/回执；独立60/60断言通过。M3中途脚本被存量命令策略误报后自行改用简单命令，不改该策略；M2.7仍有一次额外读回，不称所有冗余已消除。证据 `/private/tmp/cmb-resume-group-1029/dashboard-1030/evidence/direct-service-verification.json`。真实应用使用测试驱动发题、正式Host/Runtime/模型和工具，原生窗口CUA不可绑定，不能当作完整界面验收。最终复核额外将例行失败清理排除，保留既有例行边界（实测D任务非例行，不改变其执行路径），Host124项补验通过。未提交/push，暂存区未改。
+
+
+**Bot 协作后台执行与原调用方回传修复（2026-10-30，代码与关键路径已验证，未提交）**：原接线为保留同伴最终回传而关闭后台生命周期，使 `run_in_background` 在需回传的协作任务中按前台等待，常驻 HTTP 服务导致无法继续健康检查。现对需向原调用方返回结果的 Bot 任务开启已有后台管理：有限作业使用原任务检查点/命令回执续跑，真正完成并核验后再回传；常驻服务显式 `notify_on_complete:false`，启动不等于就绪，可继续健康检查且仍可停止/清理。快任务在本轮结束前已经退出也会将真实回执交给原任务一次。取消/失败只清理该任务自己的命令，重启保持中断/结果不确定，不自动重跑。不新增表、队列或等待状态机；原生工作台、例行、工具锁及前台长命令执行约定保持。Runtime 的新能力默认关闭，仅 Bot 接线启用。
+
+参考位置：Grok 本机提取 Host `official-host-main-7cb9acc.cjs:822645` 的 Shell 有限前台等待/后台完成通知；Hermes `tools/terminal_tool.py:166` 区分有限任务通知与常驻服务就绪检查；DeepSeek `ds-bot/src/host/groups.js:515–527,833` 区分工作中/最终回复并保留 askedBy。借鉴生命周期及结果归属，不声称三家内部实现相同或替代官方云端实测。
+
+实测只开一个隔离 Electron，用正式 Host/Runtime、真实 MiniMax M2.7/M3/M3.1-Flash，各做常驻服务和12秒有限作业，共6组；全部自然结束，12份正式附件逐字核对，独立检查111/111。每组程序只启动一次、内部最终回传一次、公开交付一次；有限作业30条数据及合计1395正确，服务健康检查、1–30求和465、预期503和正常退出正确。回归补出“委派已完成但静默服务还活着时，群讨论仍将其视为未完成工作”的确定反例：只在讨论等待判断中排除这种已完成委派的静默服务，保留进程所有权/删除/停止保护；真实 HTTP 正反例和群调度检查通过。最终构建追加M2.7公开@复核：服务仍活着时成功回传并推进同伴复核，最后关闭服务、交付正确报告；19项中18项通过，协调者再次附送同一报告这一收尾冗余保留，不计整轮体验完全通过。两次附送来自两位成员不同的正式调用，不是进程重跑或同一回执重放，未为此新增语义去重补丁。
+
+最终 Bot 核心110文件1849项、完整 `test:workflow`、Node类型检查及隔离主进程构建通过；补验覆盖真实进程成功/非零退出、快结果、缺检查点、取消清理、失败清理隔离、重启不重放、Hook更新参数、原生后台约定不变。首轮过时字符串断言/测试私有方法类型错误均保留并纠正；服务仍活着的群复核反例修前失败、修后通过。没有再次跑小时级/Windows；computer use 未能绑定该运行中的Electron，不能冒称全界面验收。三个构建阶段的哈希、真实回执、首次反例和最终检查在 `/private/tmp/cmb-resume-group-1029/peer-background-1030/evidence/`。暂存区保持空，未提交或push。历史复杂任务质量问题未据此标成全部解决。
+
+附加收尾回执复核：M2.7 公开复核后的重复附件并非丢失“同伴已交付”上下文：协调者收到的群消息含正式附件路径、大小和已交付说明，其推理也明确承认同伴已交付，仍决定“保险起见”再附送。它同时提及此前第一阶段就绪回传的 `public delivery:false`；该事实只属于当时的内部就绪结果，不能证明当前群附件状态错误。未发现此轮有完成门禁催发或同一工具调用重放，尚不能将重复归为新的宿主代码缺陷，也不据此认定所有重复都只是模型问题。保留原失败项及检查点证据 `evidence/redundant-delivery-context.json`，不追加提示词、附件语义去重或重跑同题。
+
+**合并后真实编程补验与复杂任务升级（2026-10-29，本批已收尾，额度阻断项保留）**：基于 `531561f09` 的完整生产源码，在一个隔离 Electron/Host 应用中，用 MiniMax M2.7、M3、M3.1-Flash 分别跑 C1 委派编程和 C4 后台索引构建；任务由验收脚本调用正式 Host 发送，不冒称 computer use 全流程通过。起始隔离构建漏复制 resources，六组均在模型调用前报 MODS_CONTROL_RECOVERY_REQUIRED；补齐当前构建资源后使用新群重新开始，失败记录保留，未改生产代码。C1 最终发布 ZIP 独立检查：M2.7 25/26（缺硬链接同文件拒绝）、M3 26/26、M3.1 26/26；C4：M2.7、M3 已发布 ZIP 均18/18，M3.1 未交付。整轮不能据此全算通过：M2.7 C1 的委派声明 coalesce.test.mjs，接收方实际产出 range.test.mjs，文件契约检查失败后由负责人核验并完成交付；M3 C4、M3.1 C1 达到18分钟观察限额后中止，后者仍有已排队回传收尾；M3.1 C4 构建者交付校验失败，验收者循环等待不存在的产物，已停止本轮自有测试进程及应用。M2.7 C4 的后台命令开始约12秒、尚未结束时触发 missing_delivery，模型随后查 task_output；正式样例只执行一次，但提前催发值得单独核对。未因此改共享 Runtime、待办、锁或生产提示词。证据 `/private/tmp/cmb-resume-group-1029/merged-531561/evidence/`。
+
+按用户新要求追加9组复杂编程实验：X1持久化队列/HTTP服务、X2多来源CSV对账、X3带筛选分页及导出的真实看板；每题三位Bot分工，MiniMax M2.7、M3、M3.1-Flash各一组。基于同一合并提交和固定需求/接口，只开一个隔离Electron，最多同时3群；每组25分钟观察上限，未结束则通过原Host停止自有合成任务。结果如下（“代码检查”只针对实际发布附件，不代表协作通过）：
+
+| 模型 | X1 队列/HTTP | X2 CSV对账 | X3 前后端看板 |
+| --- | --- | --- | --- |
+| M2.7 | 23/23；5分14秒自然结束，附件1次 | 26/26；21分37秒自然结束，但2条内部任务失败后恢复，附件4次 | 19/19；已交付，25分钟时内部协作仍等待，停止 |
+| M3 | 23/23；附件4次，25分钟未收尾，停止 | 26/26；23分27秒自然结束，附件3次 | 额度耗尽，3条初轮任务429失败，无交付 |
+| M3.1-Flash | 25分钟未交付，停止；反复检查记录保留 | 26/26；初轮有输出长度耗尽失败，后续补成附件3次，25分钟未收尾，停止 | 额度耗尽，3条初轮任务429失败，无交付 |
+
+9组均已终态；6份最终发布代码包通过指定独立断言（合计143条），仅3组自然完成整轮，不能宣称最佳方案或体验全部通过。M2.7 X3另用computer use实际打开交付包页面，验证48条任务分页、筛选、空结果、断开服务后的错误提示及恢复重试、真实CSV下载；全量导出48行而非当前页20行，筛选导出8行，公式前缀转义正确。未把其他两模型的看板或窄屏布局计为已验。最终模型公开消息统计排除Host生成的停止/错误通知，避免把额度错误算成自说自话。
+
+根因与后续范围：①M3 X1临时测试脚本的HTTP结束标志错误及未关闭连接导致挂起，不能归为共享锁问题。②M3 X1四次附件来自四次不同的正式交付调用，后两次ZIP内容未变；同伴重复交办及回传触发再交付，未发现Host重放同一工具调用。③M2.7 X2声明文件名/相对路径与实际输出不符，Host正确拒绝缺失文件，模型后续恢复。④M3.1 X2有三次8192输出tokens耗尽（reasoning8191、finish_reason=length、内容空）；只调隔离模型输出上限到32768的同题对照已准备，但额度耗尽，尚未启动，不据此宣称修好。⑤M2.7 X3内部需回传结果的协作任务用run_in_background启动常驻HTTP服务，Bot接线keepCommandSource保留原回执所有者、关闭notified background，Runtime按现有managed约定等待前台命令，阻塞该成员收尾；这是已确认的能力限制，不能直接删除保护造成回传丢失。
+
+已对照本机新版Grok提取Host的公开发送/静默及群回合路径、DeepSeek的定向续接/迟到结果处理、Hermes后台命令与子任务进程归属。参考实现不能直接证明可无损替换现有回传保护，本轮不堆提示、不添加交付去重状态机、不修改共享Runtime。下一步应先针对⑤验证保留原结果归属的后台执行接线；②需确认重复交办的通用边界，不能针对题号拦截附件。额度恢复后仅补两组未完成看板及一次M3.1预算对照，不重跑已通过的包检查。
+
+证据 `/private/tmp/cmb-resume-group-1029/complex-1029/evidence/final-summary.json`、`findings.json`、`published/`、`m27-x3-ui.json`；源版本与接口/需求固定哈希在同目录source-manifest.json及上级fixtures-sha256.json。两组429和预算对照未验保留。全部测试任务、后台命令、讨论与回传队列归零后关闭唯一自有验收应用，未改生产代码、模型设置或暂存区，未提交或push。
+
+**后台所有权离线反例核对（2026-10-29）**：额度耗尽后未继续模型调用。对照Grok提取Host的Shell有限前台等待/后台完成通知（822645、622928），Hermes terminal区分有限后台作业与常驻服务（terminal_tool.py:166），以及DeepSeek working/lateRoomReply携带askedBy；三者均不能等同于本地只删除keepCommandSource。使用隔离源码、真实BotStore及内存SQLite完成3项针对性反例/对照：普通后台接线会先将“已启动”回给原调用方，真正结果变为独立通知；continueSource=true但提前settle则真正结果留在已完成任务，原调用方不续跑；保留defer可正确完成有限后台任务并回传一次，但常驻服务不结束时原任务仍无法继续健康检查。这3项证明简单开关方案不足，不是修复验收通过。生产代码和暂存区未动；不改原工作台/共享Runtime，也不加入新等待状态机。证据 complex-1029/evidence/background-owner-probe.json、findings.json 的 background_followup；实验测试文件仅新增在隔离目录，位于已结束的付费实验之后，未混入其源版本。待模型额度恢复后再验证完整候选，不能把“能后台启动”当作“不会丢失回传”。
+
+**模型实验受阻（2026-10-29 22:23）**：连续三轮工作中外部模型额度阻碍仍在。先前Python探测仅得到传输异常，不作额度证据；随后Node最小32-token请求明确返回HTTP429、额度耗尽2056（quota-recheck-node.json）。未切换到用户已停用的DeepSeek付费模型，未重启应用或重发编程任务。已完成可离线确认的源码及三个回传反例；真正的后台执行/回传方案、两组看板及M3.1预算对照仍未验，不标完成。现阶段停止自动重试，待额度恢复后继续；没有保留未经验证的生产补丁，也未提交或push。
+
 **合并提交验收（2026-10-29）**：本地群协作修复提交 `3d52bcd03`，与远端截至 `bfbc6941e` 的9项新提交合并。4个冲突文件逐块处理：保留远端按会话调度、IM执行/停止控制和非群工作区路径归一化；本地原生群保持按 `[groupId, botId]` 分开的工具队列、同请求首轮并行、未读快照和嵌套回传。未恢复整群共享工具锁，未更改原工作台锁实现。合并回归首轮4条旧语义断言失败，补充组合断言后，Bot核心109文件1838项全部通过；Node/Web类型检查、完整test:workflow、生产构建通过。组合断言明确验证：取消物理清理阻塞同一线程，独立私聊继续；后来群请求仍等待前一轮其他成员；群workflow/coordinator回执使用该成员队列且原提示原样保留。此前独立coordinator通知提交保留，已通过对应测试及workflow回归。自动化通过不代表群协作的所有模型质量偏差已消除；真实编程对比后续继续，未把隔离候选或共享todos补丁合入。
 
 
@@ -1959,6 +2273,10 @@ CP本地I07原合同11／11通过：具名取消保留，获准确认删除早�
 > 2026-10-13 用户补充：UI 和动画必须与 Grok Bot 保持一致，核心功能尽量对齐；按实际界面和操作路径验收，不以类似组件替代。CmbCowork 提供底层能力；不能因为复用现有聊天组件而将原工作台的执行模式、配置流程直接暴露给 Bot 用户。此前确认的一期浏览器与部署范围仍按下文执行。
 
 ## 0. 清单使用规则
+
+**参考核实约束（2026-11-01 用户明确要求，持续适用）**：确认代码问题前，除 Grok Bot、DeepSeek Bot、Hermes 外，还应核对桌面 AI 目录中 Claude Code、Codex、Grok Build 等 Coding Agent 的相关机制，记录版本、具体消费路径及来源边界，避免把合理的工程取舍误判成缺陷。参考不能替代本地普通入口复现，也不要求照搬内部架构；只有确认实际影响后才做最小通用修复。
+
+**底层修改约束（2026-10-31 用户明确要求，持续适用）**：优先在 Bot 层复用原有接口；非必要不修改共享 Runtime、工具、调度和执行管理器。确有缺口时，先说明现有接口为何不足及最小必要扩展，避免以实现方便为由扩大底层改动。复核实际 diff，并用原工作台、取消/回传及长程任务相关回归验证兼容性；可由 Bot 层完成的候选底层改动应撤回。
 
 每项实施先核实原 CmbCowork 的接口与可复用实现，对照 Grok 对应源码及实际交互；Hermes 有适用做法时再借鉴。以核心功能、交付效果和使用体验为验收依据，不要求内部实现相同：可采用更适合本地架构的实现，但须说明理由并实测验证。确定最小必要接线后才改代码，保留原功能边界，并记录具体参考位置、改动理由及 MiniMax／DeepSeek 正反例结果。确认有效后更新清单；无效尝试撤回，失败记录保留。此流程适用于后续全部功能、UI、动画及修复，不等待用户再次提醒。
 

@@ -595,3 +595,43 @@ describe("group input during an existing question", () => {
     expect(f.store.getTask(queued.id).state).toBe("queued")
   })
 })
+
+it.each(["message", "files", "workflow", "command"] as const)(
+  "keeps the consumed group answer's %s handoff without reusing pre-answer posts",
+  async (kind) => {
+    const f = fixture()
+    const peer = f.store.create({ name: "Reviewer", instructions: "", color: "#123456", modelRef: null })
+    const group = f.store.saveGroup({ name: "Answer review", memberIds: [f.bot.id, peer.id] })
+    f.host.sendGroup({ groupId: group.id, requestId: "old", text: "Create report", targetBotIds: [f.bot.id] })
+    const root = f.store.recentTasks().find(t => t.origin.kind === "group")!
+    await vi.waitFor(() => expect(f.store.getTask(root.id).state).toBe("running"))
+    f.host.publishGroupMessage(root.id, "before", "@Reviewer BEFORE_ANSWER old idea")
+    f.host.onSteeringReady(root.id)
+    f.wait(true)
+    f.host.sendGroup({ groupId: group.id, requestId: "answer", text: "PDF, then ask Reviewer", targetBotIds: [f.bot.id] })
+    const answer = f.store.recentTasks().find(t => t.origin.kind === "group" && t.origin.messageId === "answer")!
+    expect(f.injections.get(answer.id)!()).toBe(true)
+    const run = { threadId: root.threadId, workspacePath: "/synthetic", runId: "report", startedAt: "2026-10-31T02:00:00Z" }
+    if (kind === "workflow") f.store.acceptWorkflow(root.id, run)
+    else if (kind === "command") f.store.acceptCommand(root.id, { id: "report-job", threadId: root.threadId, command: "report", cwd: "/synthetic", startedAt: 1 })
+    else if (kind === "files") f.store.publishGroupFiles(root.id, "files", [{ filePath: "/synthetic/report.pdf", name: "report.pdf", size: 12 }], "@Reviewer AFTER_ANSWER review PDF")
+    else f.host.publishGroupMessage(root.id, "after", "@Reviewer AFTER_ANSWER review PDF")
+    f.finish({ state: "completed", result: "" })
+    await vi.waitFor(() => expect(f.store.getTask(answer.id).state).toBe("completed"))
+    if (kind === "workflow" || kind === "command") {
+      if (kind === "workflow") f.host.enqueueNotification(f.bot.id, root.threadId, "workflow", run.runId, "Ready", group.id, run.startedAt)
+      else f.store.settleCommand({ id: "report-job", threadId: root.threadId, exitCode: 0, output: "Ready", cancelled: false, truncated: false })
+      const notice = f.store.recentTasks().find(t => t.origin.kind === "notification")!
+      f.store.transition(notice.id, "running")
+      f.store.publishGroupMessage(notice.id, "after", "@Reviewer AFTER_ANSWER review PDF")
+      f.store.settle(notice.id, "completed", null, "", undefined, true)
+      if (kind === "workflow") f.store.retireWorkflow(run)
+    }
+    f.store.advanceGroupDiscussions()
+    const reviews = f.store.recentTasks().filter(t => t.botId === peer.id && t.state === "queued")
+    expect(reviews).toHaveLength(1)
+    expect(reviews[0].origin).toMatchObject({ kind: "discussion", messageId: "answer" })
+    expect(reviews[0].message).toContain("AFTER_ANSWER")
+    expect(reviews[0].message).not.toContain("BEFORE_ANSWER")
+  }
+)

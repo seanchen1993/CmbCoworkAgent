@@ -49,6 +49,7 @@ import { botBrowserHelpHistory } from "@/lib/bot-browser-help-history"
 import { BotDeliveredFile } from "./BotDeliveredFile"
 import { parseBotFileDelivery } from "../../../../shared/bots/file-delivery"
 import { botGroupBrowserScope } from "../../../../shared/bots/contracts"
+import { botImBrowserScope } from "../../../../shared/bots/im-channel"
 import { projectBotExecution } from "@/lib/bot-execution-visibility"
 import { botProfileEvent } from "@/lib/bot-profile-event"
 import { botScheduleReceipt } from "@/lib/bot-schedule-view"
@@ -72,6 +73,7 @@ export function BotConversationTools({
   client,
   botId,
   groupId,
+  imConversationId,
   conversationThreadId,
   onOpenWork,
   onOpenBot,
@@ -86,6 +88,7 @@ export function BotConversationTools({
   client: BotClient
   botId: string
   groupId?: string
+  imConversationId?: string
   conversationThreadId?: string
   onOpenWork?(workId: string): void
   onOpenBot?(botId: string): void
@@ -281,7 +284,7 @@ export function BotConversationTools({
         return (
           <BotBrowserHelpCard
             client={client}
-            scopeId={groupId ? botGroupBrowserScope(groupId, botId) : botId}
+            scopeId={imConversationId ? botImBrowserScope(imConversationId, botId) : groupId ? botGroupBrowserScope(groupId, botId) : botId}
             instruction={tool.args.instruction.trim()}
           />
         )
@@ -379,6 +382,7 @@ export function BotConversationTools({
                 client={client}
                 botId={botId}
                 groupId={groupId}
+                imConversationId={imConversationId}
                 threadId={threadId}
                 filePath={file.filePath}
                 attachmentPath={file.attachmentPath}
@@ -415,6 +419,7 @@ export function BotConversationTools({
       tasks,
       client,
       groupId,
+      imConversationId,
       botId,
       threadId,
       showExecutionDetails,
@@ -510,9 +515,9 @@ export function BotConversationTools({
   const presentFile = useCallback(
     (file: { filePath: string; threadId: string; label: ReactNode; messageId?: string }) => {
       if (file.messageId && deliveredReferences.get(file.messageId)?.has(file.filePath)) return null
-      return <BotDeliveredFile {...file} client={client} botId={botId} groupId={groupId} />
+      return <BotDeliveredFile {...file} client={client} botId={botId} groupId={groupId} imConversationId={imConversationId} />
     },
-    [client, botId, groupId, deliveredReferences]
+    [client, botId, groupId, imConversationId, deliveredReferences]
   )
   return (
     <ChatHistorySourceContext.Provider value={groupId ? null : openHistorySource}>
@@ -559,6 +564,7 @@ export function BotConversationTools({
           botId={botId}
           taskId={exchangeId}
           groupId={groupId}
+          imConversationId={imConversationId}
           onClose={() => setExchangeId(null)}
         />
       )}

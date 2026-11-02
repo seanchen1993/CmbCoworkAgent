@@ -6918,12 +6918,21 @@ export class LocalSandbox
    * The command runs asynchronously with a long timeout.
    * Use `getTaskOutput(taskId)` to retrieve the result or check progress.
    */
-  async executeBackground(command: string, cwd?: string): Promise<string> {
+  async executeBackground(
+    command: string,
+    cwd?: string,
+    notifyOnComplete?: boolean
+  ): Promise<string> {
     if (this.backgroundCommandLifecycle) this.abortSignal?.throwIfAborted()
     const pendingStart = LocalSandbox.beginBackgroundTaskStart()
     if (!pendingStart) return LocalSandbox.backgroundStartCancelledMessage()
     try {
-      return await this.executeBackgroundAfterStart(command, cwd, pendingStart.abortController)
+      return await this.executeBackgroundAfterStart(
+        command,
+        cwd,
+        pendingStart.abortController,
+        notifyOnComplete
+      )
     } finally {
       pendingStart.finish()
     }
@@ -6932,10 +6941,20 @@ export class LocalSandbox
   private async executeBackgroundAfterStart(
     command: string,
     cwd: string | undefined,
-    taskAbortController: AbortController
+    taskAbortController: AbortController,
+    notifyOnComplete?: boolean
   ): Promise<string> {
     const requestedCwd = this.resolveExecutionCwd(cwd)
-    const toolArgs = { command, run_in_background: true as const, cwd: requestedCwd }
+    const toolArgs = {
+      command,
+      run_in_background: true as const,
+      cwd: requestedCwd,
+      ...((this.backgroundCommandLifecycle?.allowSilentServices ||
+        this.backgroundCommandLifecycle?.retainSource) &&
+      notifyOnComplete !== undefined
+        ? { notify_on_complete: notifyOnComplete }
+        : {})
+    }
     const preResult = await this.runPreToolUseHookForTool("execute", toolArgs)
     if (taskAbortController.signal.aborted) {
       return LocalSandbox.backgroundStartCancelledMessage()
@@ -6965,12 +6984,22 @@ export class LocalSandbox
   private async executeBackgroundAfterPreToolUse(
     command: string,
     requestedCwd: string,
-    toolArgs: { command: string; run_in_background: true; cwd: string },
+    toolArgs: {
+      command: string
+      run_in_background: true
+      cwd: string
+      notify_on_complete?: boolean
+    },
     preResult: HookResult | null,
     taskAbortController: AbortController,
     transferHumanGateLease: (completion: Promise<void>) => void
   ): Promise<string> {
     const updatedArgs = LocalSandbox.mergeUpdatedInput(toolArgs, preResult?.updatedInput)
+    const notifyOnComplete =
+      !(
+        this.backgroundCommandLifecycle?.allowSilentServices ||
+        this.backgroundCommandLifecycle?.retainSource
+      ) || updatedArgs.notify_on_complete !== false
     const effectiveCommand =
       typeof updatedArgs.command === "string" && updatedArgs.command.trim()
         ? updatedArgs.command
@@ -7096,8 +7125,12 @@ export class LocalSandbox
       termination: undefined as Promise<void> | undefined
     }
     this.backgroundCommandLifecycle?.accepted({
-      id: taskId, threadId: this.runId, command: effectiveCommand,
-      cwd: effectiveCwd, startedAt: task.startedAt
+      id: taskId,
+      threadId: this.runId,
+      command: effectiveCommand,
+      cwd: effectiveCwd,
+      startedAt: task.startedAt,
+      ...(!notifyOnComplete ? { notifyOnComplete: false } : {})
     })
     LocalSandbox.backgroundTasks.set(taskId, task)
     if (this.commandMayMutateHarnessState(effectiveCommand, effectiveCwd)) {
@@ -7239,13 +7272,24 @@ export class LocalSandbox
     // also need a deletion-safe ownership fence after cancellation.
     task.completion = completion
 
-    const startedMessage = this.backgroundCommandLifecycle
-      ? `Background task accepted (id: ${taskId}). Its completion will be delivered automatically to this conversation. This ID is not a process PID. Report what is pending and end this turn; do not poll or restart the command.`
-      : `Background task started (id: ${taskId}). Use task_output tool with this id to check results later.`
+    const startedMessage = !notifyOnComplete
+      ? `Background service accepted (id: ${taskId}). Its exit will not wake the task. This is not a PID or proof of readiness: continue with a health check and the authorized work while it runs. Stop the service when no longer needed; it remains tracked by the host.`
+      : this.backgroundCommandLifecycle?.retainSource
+        ? `Background task accepted (id: ${taskId}). This is not a PID or proof of completion. Continue independent authorized work; if waiting for this result, end the turn. The host will resume this same task with its actual result before returning to the requester. Do not poll or restart it.`
+        : this.backgroundCommandLifecycle
+          ? `Background task accepted (id: ${taskId}). Its completion will be delivered automatically to this conversation. This ID is not a process PID. Report what is pending and end this turn; do not poll or restart the command.`
+          : `Background task started (id: ${taskId}). Use task_output tool with this id to check results later.`
     try {
       return await this.applyPostToolUseHookToText(
         "execute",
-        { command: effectiveCommand, run_in_background: true, cwd: effectiveCwd },
+        {
+          command: effectiveCommand,
+          run_in_background: true,
+          cwd: effectiveCwd,
+          ...(toolArgs.notify_on_complete !== undefined || !notifyOnComplete
+            ? { notify_on_complete: notifyOnComplete }
+            : {})
+        },
         startedMessage
       )
     } catch (error) {

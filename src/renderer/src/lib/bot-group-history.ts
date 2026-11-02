@@ -6,6 +6,42 @@ export const EMPTY_GROUP_HISTORY = {
   loaded: false
 }
 
+/** Refresh mutable questions already on screen without loading the intervening chat. */
+export async function readGroupHistoryRefresh(
+  read: (cursor?: { targetMessageId: string }) => Promise<BotGroupMessage[]>,
+  loaded: BotGroupMessage[],
+  anchored: boolean,
+  isCurrent: () => boolean
+): Promise<{ page: BotGroupMessage[]; questions: BotGroupMessage[] } | null> {
+  const page = anchored ? [] : await read()
+  if (!isCurrent()) return null
+  const covered = new Set(page.map((item) => item.id))
+  const pending = new Set(
+    loaded
+      .filter((item) => {
+        const question = item.question
+        return (
+          question &&
+          !question.result &&
+          !covered.has(item.id) &&
+          (question.resultId || !["cancelled", "interrupted"].includes(question.state ?? ""))
+        )
+      })
+      .map((item) => item.id)
+  )
+  const questions: BotGroupMessage[] = []
+  for (const id of pending) {
+    const rows = await read({ targetMessageId: id })
+    if (!isCurrent()) return null
+    // One existing page may cover several questions. Never insert unloaded neighbours.
+    for (const row of rows) {
+      if (pending.delete(row.id)) questions.push(row)
+    }
+    pending.delete(id)
+  }
+  return { page, questions }
+}
+
 /** Preserve Virtuoso's absolute item positions when an overlapping older page arrives. */
 export function mergeGroupHistory(
   previous: typeof EMPTY_GROUP_HISTORY,

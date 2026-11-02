@@ -53,6 +53,11 @@ export class BotMockChannelStore {
         CREATE INDEX IF NOT EXISTS bot_im_continuations_source ON bot_im_continuations(source_task_id);
         CREATE INDEX IF NOT EXISTS bot_mock_outbox_pending ON bot_mock_outbox(state,created_at,id);
         CREATE INDEX IF NOT EXISTS bot_mock_outbox_page ON bot_mock_outbox(binding_id,created_at,id);`)
+      // Old continuation rows claimed initialized; preserve their missing-history
+      // fence. Newly admitted peer threads start false until native creation succeeds.
+      if (!this.rows("PRAGMA table_info(bot_im_continuations)").some((row) => row.name === "initialized"))
+        this.run("ALTER TABLE bot_im_continuations ADD COLUMN initialized INTEGER NOT NULL DEFAULT 1")
+      this.run("CREATE INDEX IF NOT EXISTS bot_im_continuations_thread ON bot_im_continuations(thread_id)")
       // Preserve existing receipts while allowing one opening and one final reply per task.
       if (
         !this.rows("PRAGMA table_info(bot_mock_outbox)").some((row) => row.name === "delivery_kind")
@@ -240,7 +245,7 @@ export class BotMockChannelStore {
   }
   setAllOffline(): void {
     this.run("UPDATE bot_mock_bindings SET online=0 WHERE online=1")
-    this.changed()
+    if (this.db.getRowsModified()) this.changed()
   }
   /** Only BotStore's admitted local-user command (or its tool-created child) grants this. */
   authorizeLocalContinuation(task: BotTask): void {
@@ -264,11 +269,16 @@ export class BotMockChannelStore {
       throw new BotError("CONFLICT", "后台任务来源已改变")
     const owner = this.continuationOwner(parent)
     this.validateSource(task.mockSource, owner)
-    this.run("INSERT OR IGNORE INTO bot_im_continuations VALUES(?,?,?,?)", [
+    const initialized = this.rows(
+      "SELECT 1 FROM bot_im_continuations WHERE thread_id=? AND initialized=1 LIMIT 1",
+      [task.threadId]
+    ).length > 0
+    this.run("INSERT OR IGNORE INTO bot_im_continuations(task_id,source_task_id,owner_bot_id,thread_id,initialized) VALUES(?,?,?,?,?)", [
       task.id,
       parent.id,
       owner,
-      task.threadId
+      task.threadId,
+      initialized ? 1 : 0
     ])
     this.run("INSERT OR IGNORE INTO bot_im_local_execution VALUES(?)", [task.id])
   }
@@ -416,7 +426,12 @@ export class BotMockChannelStore {
         if (work.threadId !== task.threadId || work.audienceKey !== source.audienceKey)
           throw new BotError("CONFLICT", "后台任务与原受众不一致")
       }
-      return { source, threadId: task.threadId, threadInitialized: true, label: binding.label }
+      const threadInitialized = task.workId
+        ? this.owner.getWork(task.botId, task.workId).threadInitialized
+        : task.threadId.startsWith("im-peer-")
+          ? this.rows("SELECT 1 FROM bot_im_continuations WHERE thread_id=? AND initialized=1 LIMIT 1", [task.threadId]).length > 0
+          : true
+      return { source, threadId: task.threadId, threadInitialized, label: binding.label }
     }
     if (task.workId) {
       const work = this.owner.getWork(task.botId, task.workId)
@@ -492,7 +507,12 @@ export class BotMockChannelStore {
       label: binding.label
     }
   }
-  initialize(source: BotMockSource): void {
+  initialize(source: BotMockSource, task?: BotTask): void {
+    if (task && this.isContinuation(task) && task.threadId.startsWith("im-peer-")) {
+      this.validateSource(source, this.continuationOwner(task))
+      this.run("UPDATE bot_im_continuations SET initialized=1 WHERE thread_id=?", [task.threadId])
+      return
+    }
     this.validateSource(source, this.active(source.bindingId).botId)
     if (source.personal) return
     this.run("UPDATE bot_mock_conversations SET initialized=1 WHERE id=? AND binding_id=?", [
@@ -668,7 +688,9 @@ export class BotMockChannelStore {
     const owner = this.continuationOwner(task)
     const source = this.validateSource(task.mockSource, owner, false)
     // A collaborator returns to its caller through the existing Bot reply outbox.
-    if (task.origin.kind === "bot" && task.origin.expectsReply) return
+    if (task.origin.kind === "bot" && (task.origin.expectsReply || task.origin.upstreamTaskId)) return
+    if (task.origin.kind === "notification" && task.origin.notificationKind === "workflow" &&
+        this.isContinuation(task) && task.threadId.startsWith("im-peer-")) return
     this.run("UPDATE bot_mock_events SET execution_state=? WHERE task_id=?", [state, task.id])
     if (state !== "completed")
       this.run(

@@ -168,4 +168,45 @@ return await agent("must not start")`
     ).toBe(false)
     expect(await workflowRunManager.findPendingNotificationAsync(repo, threadId)).toBeNull()
   })
+  test("exposes an immutable active identity without changing ordinary launch or cancellation", async () => {
+    const script = `export const meta = { name: "identity", description: "d" }; return "finished"`
+    const request = {
+      threadId,
+      workspacePath: repo,
+      runId,
+      parsed: validateWorkflowScript(script),
+      script,
+      scriptSha256: sha256Hex(script),
+      subagentDeps: {
+        parentThreadId: threadId,
+        createRuntime: vi.fn(async () => {
+          throw new Error("unused")
+        }),
+        cleanupThread: async () => {},
+        isRetryableApiError: () => false
+      }
+    }
+    await workflowRunManager.prepareLaunch(repo, threadId)
+    const first = workflowRunManager.launch(request)
+    const ref = workflowRunManager.activeRunReference(threadId)!
+    expect(ref).toMatchObject({ threadId, workspacePath: repo, runId })
+    expect(ref.startedAt).toBeTruthy()
+    ref.startedAt = "mutated snapshot"
+    expect(workflowRunManager.activeRunReference(threadId)?.startedAt).not.toBe(ref.startedAt)
+    await first.whenInitialPersisted
+    await workflowRunManager.waitForRunLifecycle(threadId, runId)
+    expect(loadWorkflowRun(repo, threadId, runId)?.status).toBe("completed")
+    expect(workflowRunManager.activeRunReference(threadId)).toBeUndefined()
+
+    const oldStartedAt = loadWorkflowRun(repo, threadId, runId)!.startedAt
+    const second = workflowRunManager.launch({ ...request, resumed: true })
+    const current = workflowRunManager.activeRunReference(threadId)!
+    expect(current.startedAt).not.toBe(oldStartedAt)
+    // The original two-argument API still aborts before any engine work starts.
+    expect(workflowRunManager.cancel(threadId, runId)).toBe(true)
+    await second.whenInitialPersisted
+    await workflowRunManager.waitForRunLifecycle(threadId, runId)
+    expect(loadWorkflowRun(repo, threadId, runId)?.status).toBe("aborted")
+    expect(request.subagentDeps.createRuntime).not.toHaveBeenCalled()
+  })
 })

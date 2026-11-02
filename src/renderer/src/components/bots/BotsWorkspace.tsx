@@ -903,11 +903,43 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
   const loadedWork = activeWorkId && works.selected?.id === activeWorkId ? works.selected : null
   const selectedWork =
     loadedWork &&
+    loadedWork.conversation?.state !== "detached" &&
     (selectedIm
       ? loadedWork.source?.transport === "im" && loadedWork.source.bindingId === selectedIm.id
       : loadedWork.source?.transport !== "im")
       ? loadedWork
       : null
+  useEffect(() => {
+    if (
+      !loadedWork ||
+      loadedWork.conversation?.state !== "detached" ||
+      loadedWork.source ||
+      !client.conversations ||
+      loadedWork.botId !== selected?.id
+    )
+      return
+    let disposed = false
+    const work = loadedWork
+    void (async () => {
+      // The host verifies the retained thread incarnation without rebinding it.
+      const original = await client.conversations!.expose(work.botId, work.id)
+      if (disposed) return
+      await useAppStore.getState().loadThreads()
+      if (disposed) return
+      updateView({
+        activeWorkIdByBot: {
+          ...useBotViewStore.getState().hosts[client.hostId]?.activeWorkIdByBot,
+          [work.botId]: null
+        }
+      })
+      await useAppStore.getState().selectThread(original.threadId)
+    })().catch((cause) => {
+      if (!disposed) toast.error(botErrorMessage(cause))
+    })
+    return () => {
+      disposed = true
+    }
+  }, [client, loadedWork?.id, loadedWork?.conversation?.state, selected?.id])
   // Old saved navigation and workbench deep links still arrive by Bot ID. Resolve the
   // host-owned source before rendering, then keep the source group selected.
   useEffect(() => {
@@ -2213,6 +2245,9 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
             <BotImConversation
               tasks={snapshot?.tasks ?? []}
               backgroundThreads={snapshot?.backgroundThreads ?? []}
+              collaborationPending={Boolean(
+                selectedIm.threadId && snapshot?.collaborationThreads?.includes(selectedIm.threadId)
+              )}
               key={selectedIm.id}
               conversation={selectedIm}
               bot={selected}
@@ -2353,6 +2388,7 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
                   bots={snapshot?.bots ?? []}
                   schedules={snapshot?.schedules ?? []}
                   tasks={tasks}
+                  collaborationPending={Boolean(snapshot?.collaborationThreads?.includes(selectedThreadId))}
                   backgroundBusy={Boolean(
                     snapshot?.backgroundThreads?.includes(selectedThreadId) ||
                     threadSummaries[selectedThreadId]?.workflowRunning ||
