@@ -37,7 +37,7 @@ async function main() {
         manifest:{stages:[{id:'collect',title:'整理资料',approval:'human',resultApproval:'none'}]}},operations:[{operationId:'op-a',stageId:'collect',expectedVersion:1,inputFingerprint:'fingerprint-a',status:'started'}]});
       window.api={builtinRobot:{getStatus:async()=>({settings:{enabled:false},connectionState:'offline',identityState:'unknown'}),onStatus:()=>()=>{},getRemoteAccess:async()=>({featureGrants:[],threadGrants:[]}),onRemoteAccessChanged:()=>()=>{}},
         workspace:{cancelGitPanelReads:async()=>{},onFilesChanged:()=>()=>{},getGitChangedFilesSummary:async()=>({success:true,isWorktree:false,isGitRepo:false,taskId:'history-thread',files:[],changedFilesTotal:0,omittedFileCount:0,hasPendingDiff:false}),select:async()=>{directorySelections.push('C:/isolated');return 'C:/isolated'}},appNotifications:{list:async()=>[],onChanged:()=>()=>{}},mods:{onConfigurationChanged:()=>()=>{}},
-        harnessBoard:{getManagedRunEvents:async()=>({events:[],hasMore:false}),
+        harnessBoard:{getManagedRuns:async()=>[],getManagedRunEvents:async()=>({events:[],hasMore:false}),
           startManagedRun:async()=>{throw Error('LEGACY_DRIVER_FORBIDDEN')},validateManagedRunStart:async()=>{throw Error('LEGACY_DRIVER_FORBIDDEN')},
           nativeFeatureMods:{config:{
             userConfig:async(threadId,pluginId,expectedWorkspace)=>{configReads.push({threadId,pluginId,expectedWorkspace,identity:current.nativeBinding.workspaceIdentity});
@@ -607,6 +607,9 @@ async function main() {
 
     await page.evaluate("window.stageFixture.setHistoricalUnstarted()")
     const edit = page.getByRole("button", { name: "编辑特性配置", exact: true })
+    // React remounts after this fixture transition. Wait for the actual control,
+    // retaining the disabled-state assertion and the real edit click below.
+    await edit.click({ trial: true })
     assert(
       await edit.isEnabled(),
       "An unstarted historical binding without a worktree keeps its original edit entry"
