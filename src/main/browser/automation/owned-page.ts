@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto"
 import type { Locator, Page } from "playwright"
-import { browserTools } from "playwright/lib/mcp/browser/tools"
+import { tools as playwrightTools } from "playwright-core/lib/coreBundle"
 
 // Reuse the MCP handlers shipped with the application's existing Playwright.
 // Do not create an MCP BrowserContext: its tab discovery, downloads and lifetime
@@ -21,12 +21,11 @@ const supportedTools = new Set([
   "browser_evaluate"
 ])
 const tools = new Map(
-  (browserTools as McpTool[])
+  (playwrightTools.browserTools as McpTool[])
     .filter((tool) => supportedTools.has(tool.schema.name))
     .map((tool) => [tool.schema.name, tool])
 )
 const CHUNK_SIZE = 24_000
-type AiPage = Page & { _snapshotForAI(): Promise<{ full: string }> }
 
 /** Page/lease-qualified handles wrap Playwright's own ARIA refs, not new selectors. */
 export class OwnedPageAutomation {
@@ -67,10 +66,10 @@ export class OwnedPageAutomation {
       return this.chunk(offset)
     }
     const prefix = this.prefix
-    const result = await (this.page as AiPage)._snapshotForAI()
+    const result = await this.page.ariaSnapshot({ mode: "ai" })
     if (prefix !== this.prefix) throw new Error("观察期间页面已改变，请重新观察")
     const refs = new Map<string, string>()
-    const text = result.full.replace(/\[ref=([^\]\s]+)\]/g, (_match, raw: string) => {
+    const text = result.replace(/\[ref=([^\]\s]+)\]/g, (_match, raw: string) => {
       const ref = `${prefix}:${raw}`
       refs.set(ref, raw)
       return `[ref=${ref}]`
@@ -117,7 +116,7 @@ export class OwnedPageAutomation {
         return tab
       }
     }
-    const refLocator = async ({ ref }: { ref: string }) => {
+    const targetLocator = async ({ target: ref }: { target: string }) => {
       check()
       // A handler can issue several inputs (e.g. type, then Enter). Re-check
       // ownership and the reference between inputs, including after a dialog
@@ -133,14 +132,19 @@ export class OwnedPageAutomation {
           }
         }
       })
-      return { locator, resolved: "" }
+      return {
+        locator,
+        resolved: "",
+        selector: `aria-ref=${this.refs.get(ref)}`
+      }
     }
     const tab = {
       page: this.page,
       context,
       modalStates: () => [], // The host arbitrates dialogs before invoking us.
-      refLocator,
-      refLocators: (refs: { ref: string }[]) => Promise.all(refs.map(refLocator)),
+      targetLocator,
+      targetLocators: (targets: { target: string }[]) => Promise.all(targets.map(targetLocator)),
+      actionTimeoutOptions: {}, // Keep the owned context’s existing default timeout.
       waitForCompletion: async (operation: () => Promise<unknown>) => {
         check()
         // Locator actions retain Playwright's actionability/auto-waiting. Dialog
@@ -150,6 +154,7 @@ export class OwnedPageAutomation {
     }
     const response = {
       addCode: () => {},
+      addAction: () => {},
       setIncludeSnapshot: () => {}, // The host returns the owned page's fresh snapshot.
       addError: (error: string) => {
         throw new Error(error)
@@ -157,19 +162,42 @@ export class OwnedPageAutomation {
       addTextResult: (text: string) => {
         results.push(text)
       },
-      addResult: async ({
-        text,
-        suggestedFilename
-      }: {
-        text?: string
-        suggestedFilename?: string
-      }) => {
+      addResult: async (
+        _title: string,
+        text: string,
+        { suggestedFilename }: { suggestedFilename?: string } = {}
+      ) => {
         if (suggestedFilename) throw new Error("浏览器输出文件必须经过当前工作目录的文件工具")
         if (text) results.push(text)
         return {}
       }
     }
-    await tool.handle(context, tool.schema.inputSchema.parse(input), response)
+    // Keep Bot's existing ref-only contract. New upstream selector targets are
+    // never accepted from the caller; all targets still resolve through our map.
+    const params = {
+      ...input,
+      target: input.ref,
+      startTarget: input.startRef,
+      endTarget: input.endRef,
+      ...(Array.isArray(input.fields)
+        ? {
+            fields: input.fields.map((field) => ({
+              ...field,
+              target: field.ref
+            }))
+          }
+        : {})
+    }
+    const parsed = tool.schema.inputSchema.parse(params) as Record<string, unknown>
+    if (name === "browser_wait_for" && input.text && input.textGone) {
+      // Playwright 1.64 races these conditions. Keep Bot's existing contract:
+      // loading must disappear before the expected result is checked.
+      await tool.handle(context, { ...parsed, text: undefined }, response)
+      check()
+      await tool.handle(context, { ...parsed, textGone: undefined }, response)
+    } else {
+      await tool.handle(context, parsed, response)
+    }
     return results
   }
 }

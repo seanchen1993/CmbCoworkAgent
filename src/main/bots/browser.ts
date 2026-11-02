@@ -303,6 +303,9 @@ export class BotBrowserService {
     page.on("dialog", (dialog) => {
       entry.dialog = dialog
     })
+    page.on("dialogclosed", (dialog) => {
+      if (entry.dialog === dialog) entry.dialog = undefined
+    })
     page.on("download", (download) => {
       if (this.stopping || !this.workspace || this.downloads.size >= 4) {
         void download.cancel().catch(() => {})

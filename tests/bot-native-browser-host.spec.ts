@@ -199,6 +199,59 @@ app.whenReady().then(async () => {
     const helpToolbar = engine.context.pages().find(page => page.url().startsWith('data:text/html') && !page.isClosed());
     await helpToolbar.getByRole('button', { name: '归还并继续', exact: true }).click();
     assert.equal(JSON.parse(await help).url, fixtureUrl + '/help-confirmed');
+    // A native/out-of-band close must retire both Playwright's dialog and our cache.
+    // The CDP side channel bypasses Dialog.accept/dismiss, like a manual native close.
+    const nativeSession = await engine.context.newCDPSession(pages[0]);
+    await nativeSession.send('Page.enable');
+    for (const scenario of [
+      { type: 'confirm', accept: true, expected: true },
+      { type: 'confirm', accept: false, expected: false },
+      { type: 'alert', accept: true, expected: undefined }
+    ]) {
+      await service.takeOver('a', a.pageId);
+      const opened = pages[0].waitForEvent('dialog');
+      const result = pages[0].evaluate(type => window[type]('Native close regression'), scenario.type);
+      const nativeDialog = await opened;
+      let replayed = 0;
+      nativeDialog.accept = nativeDialog.dismiss = async () => {
+        replayed++; throw new Error('must not replay a native dialog decision');
+      };
+      assert.equal((await service.preview('a', a.pageId)).dialogPending, true);
+      const closed = pages[0].waitForEvent('dialogclosed');
+      await nativeSession.send('Page.handleJavaScriptDialog', {
+        accept: scenario.accept
+      });
+      assert.equal(await closed, nativeDialog);
+      assert.equal(await result, scenario.expected);
+      const resumed = await service.preview('a', a.pageId);
+      assert.equal(resumed.dialogPending, false);
+      assert.equal(resumed.control, 'human');
+      assert.ok(resumed.image);
+      await service.giveBack('a', resumed.generation);
+      await service.act('a', { action: 'fill', role: 'textbox', name: 'Name', text: 'after native close' }, new AbortController().signal);
+      assert.equal(await pages[0].getByLabel('Name', { exact: true }).inputValue(), 'after native close');
+      assert.equal(replayed, 0);
+    }
+    await nativeSession.detach();
+    // Exercise HTML5 drag on the SAME page whose dialogs were closed. This
+    // failed with the stale upstream DialogManager even when snapshots worked.
+    await pages[0].evaluate(() => {
+      const source = document.createElement('button');
+      source.textContent = 'Native drag';
+      source.draggable = true;
+      source.addEventListener('dragstart', event => event.dataTransfer.setData('text/plain', 'closed-dialog'));
+      const target = document.createElement('button');
+      target.textContent = 'Native drop';
+      target.style.marginLeft = '100px';
+      target.addEventListener('dragover', event => event.preventDefault());
+      target.addEventListener('drop', event => { event.preventDefault(); target.textContent = event.dataTransfer.getData('text/plain'); });
+      document.body.append(source, target);
+    });
+    const dragSnapshot = JSON.parse(await service.act('a', { action: 'observe', pageId: a.pageId }, new AbortController().signal));
+    const nativeRef = name => dragSnapshot.content.split('\\n').find(line => line.includes('"' + name + '"')).split('[ref=')[1].split(']')[0];
+    await service.act('a', { action: 'drag', pageId: a.pageId, ref: nativeRef('Native drag'), toRef: nativeRef('Native drop') }, new AbortController().signal);
+    assert.equal(await pages[0].getByRole('button', { name: 'closed-dialog', exact: true }).count(), 1);
+    console.log('BOT_NATIVE_DIALOG_CLOSE_PASS: accept/dismiss/alert, preview, return, input and same-page HTML5 drag');
     await (await import(${JSON.stringify(pathToFileURL(resolve("tests/support/bot-browser-automation-journey.mjs")).href)})).default(service, engine, fixtureUrl, workspace);
     // Do not wait for Chromium's periodic cookie flush before closing the host.
     await service.act('a', { action: 'navigate', url: fixtureUrl + '/login' }, new AbortController().signal);
@@ -239,8 +292,9 @@ app.whenReady().then(async () => {
       assert.equal(code, 0, output)
       assert.ok(output.includes("BOT_NATIVE_HOST_PASS"), output)
       assert.ok(output.includes("BOT_OWNED_AUTOMATION_PASS"), output)
+      assert.ok(output.includes("BOT_NATIVE_DIALOG_CLOSE_PASS"), output)
       console.log(
-        "PASS: production Bot browser adapter resolves duplicate labels and iframe refs, isolates task/group pages and popups, runs forms/hover/drag/wait/evaluate, preserves scoped uploads/downloads, paginates long snapshots, and resumes human takeover without replaying input. Native previews render hidden pages with stalled fonts and refresh after hiding. Persistent cookies survive a host restart."
+        "PASS: production Bot browser adapter resolves duplicate labels and iframe refs, isolates task/group pages and popups, runs forms/hover/drag/wait/evaluate, preserves scoped uploads/downloads, paginates long snapshots, and resumes human takeover without replaying input. Native dialog close restores preview, control return and same-page HTML5 drag without replaying decisions. Native previews render hidden pages with stalled fonts and refresh after hiding. Persistent cookies survive a host restart."
       )
     } finally {
       clearTimeout(timer)

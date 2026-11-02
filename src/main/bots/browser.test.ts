@@ -39,7 +39,7 @@ class TestPage extends EventEmitter {
   setInputFiles = vi.fn<(file: string) => Promise<void>>(async () => {})
   getByLabel = vi.fn(() => ({ count: async () => 1, setInputFiles: this.setInputFiles }))
   snapshot = vi.fn(async () => '- textbox "Name"')
-  _snapshotForAI = async () => ({ full: await this.snapshot() })
+  ariaSnapshot = async () => await this.snapshot()
   fileInputs = vi.fn(
     async (): Promise<{
       controls: { label: string | null; multiple: boolean; accept: string; disabled: boolean }[]
@@ -2594,3 +2594,62 @@ it.each([undefined, "skipped"] as const)(
     }
   }
 )
+
+it("resumes the same owned page after native dialog closure without replaying the decision", async () => {
+  const { pageId } = JSON.parse(await service.act("a", { action: "observe" }, signal()))
+  const page = context.entries[0]
+  await service.takeOver("a", pageId)
+  const dialog = {
+    type: () => "confirm",
+    message: () => "Continue?",
+    accept: vi.fn(),
+    dismiss: vi.fn()
+  }
+  page.emit("dialog", dialog)
+  expect(await service.preview("a", pageId)).toMatchObject({
+    dialogPending: true,
+    image: null
+  })
+  page.emit("dialogclosed", dialog)
+  const recovered = await service.preview("a", pageId)
+  expect(recovered).toMatchObject({
+    pageId,
+    dialogPending: false,
+    control: "human"
+  })
+  expect(recovered.image).toBeTruthy()
+  await toolbar!(page, recovered.generation, { action: "reload" })
+  expect(page.reload).toHaveBeenCalledOnce()
+  await service.giveBack("a", recovered.generation)
+  await service.act("a", { action: "click", pageId, role: "button", name: "Continue" }, signal())
+  expect(page.click).toHaveBeenCalledOnce()
+  expect(dialog.accept).not.toHaveBeenCalled()
+  expect(dialog.dismiss).not.toHaveBeenCalled()
+  expect(context.entries).toHaveLength(1)
+})
+
+it("clears only the exact closed dialog and preserves the other owner and a subsequent identical dialog", async () => {
+  const a = JSON.parse(await service.act("a", { action: "observe" }, signal()))
+  const b = JSON.parse(await service.act("b", { action: "observe" }, signal()))
+  const first = { type: () => "confirm", message: () => "same" }
+  const later = { type: () => "confirm", message: () => "same" }
+  const peer = { type: () => "confirm", message: () => "same" }
+  context.entries[0].emit("dialog", first)
+  context.entries[0].emit("dialog", later)
+  context.entries[1].emit("dialog", peer)
+  context.entries[0].emit("dialogclosed", first)
+  expect(await service.preview("a", a.pageId)).toMatchObject({
+    dialogPending: true
+  })
+  context.entries[0].emit("dialogclosed", later)
+  expect(await service.preview("a", a.pageId)).toMatchObject({
+    dialogPending: false
+  })
+  expect(await service.preview("b", b.pageId)).toMatchObject({
+    dialogPending: true
+  })
+  context.entries[1].emit("dialogclosed", peer)
+  expect(await service.preview("b", b.pageId)).toMatchObject({
+    dialogPending: false
+  })
+})
