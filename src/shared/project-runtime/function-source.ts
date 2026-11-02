@@ -10,6 +10,8 @@ export interface ProjectFunctionDependencyReview {
   configurationReady?: boolean
 }
 export interface ProjectFunctionSourceReview {
+  /** This project already uses owner consent; a Feature cannot mint an independent grant. */
+  approvalAtProject?: true
   projectId: string
   projectVersion: number
   packageDigest: string

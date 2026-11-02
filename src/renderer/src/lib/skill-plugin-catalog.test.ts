@@ -317,7 +317,15 @@ describe("renderer skill/plugin catalog pagination", () => {
     )
     expect(welcomeSource).toContain("FEATURED_AUTO_INSTALL_LIMIT")
     expect(welcomeSource).toContain("FEATURED_AUTO_INSTALL_MAX_BYTES")
-    expect(welcomeSource).toContain("installFeaturedSkillsOnce(goodSkillsData, localSkills, controller.signal)")
+    expect(welcomeSource).toContain(
+      "installFeaturedSkillsOnce(autoInstallSkills, localSkills, controller.signal)"
+    )
+    expect(welcomeSource).toContain(
+      "setAutoInstallSkills(allowFeaturedInstall ? goodSkills : [])"
+    )
+    expect(welcomeSource).toContain(
+      "queryRemoteSkills(controller.signal, marketLoadAttempt === 0)"
+    )
     expect(welcomeSource).toContain("controller.abort()")
     expect(marketSource).toContain("MARKET_SKILL_LIST_MAX_RESPONSE_BYTES")
     expect(marketSkillsSource).not.toContain("response.json()")

@@ -1982,7 +1982,7 @@ function testCancelSuppressesAutoDrain(): void {
   )
   assertMatches(
     chat,
-    /if \(queueAutoDrainSuppressed \|\| chatFlow\.active \|\| chatFlow\.busy\) return/,
+    /if \(parentInputPaused \|\| queueAutoDrainSuppressed \|\| chatFlow\.active \|\| chatFlow\.busy\) return/,
     "pump effect preserves stop suppression and cannot drain ordinary chat during a Claw flow"
   )
   // Cleared at the two send paths that represent unambiguous renewed intent — an
@@ -2194,8 +2194,34 @@ function testWillEnqueueDistinguishesLivePreparationFromPumpInFlight(): void {
   assertSourceOrder(
     liveSubmitBody,
     "if (shouldLockSubmit) liveSubmitPreparingThreads.delete(threadId)",
-    "await stream.submit(",
+    "const submitted = stream.submit(",
     "the duplicate-submit guard ends when the prepared payload is committed, before the run starts"
+  )
+  assertSourceOrder(
+    liveSubmitBody,
+    "const submitted = stream.submit(",
+    "inputPreparation.release()",
+    "the prepared input lease is released only after stream submission starts"
+  )
+  assertSourceOrder(
+    liveSubmitBody,
+    "inputPreparation.release()",
+    "await submitted",
+    "live submit still waits for its original stream promise after releasing input preparation"
+  )
+  const outerFinally = "} finally {\n      inputPreparation?.release()"
+  assertSourceOrder(
+    liveSubmitBody,
+    "await submitted",
+    outerFinally,
+    "the outer finally also releases input preparation after stream settlement or failure"
+  )
+  const liveSubmitCleanup = liveSubmitBody.slice(liveSubmitBody.indexOf(outerFinally))
+  assertSourceOrder(
+    liveSubmitCleanup,
+    outerFinally,
+    "releaseSubmitInFlightLock(submitInFlightRef, shouldLockSubmit, threadId)",
+    "the shared submit lock remains held until outer-finally cleanup"
   )
 }
 
@@ -2896,7 +2922,7 @@ function testPumpHoldsSharedSubmitInFlightLock(): void {
     "the separate pump-only lock was removed; submitInFlightRef is the single source of truth"
   )
   const pumpEffectStart = chat.indexOf(
-    "if (queueAutoDrainSuppressed || chatFlow.active || chatFlow.busy) return"
+    "if (parentInputPaused || queueAutoDrainSuppressed || chatFlow.active || chatFlow.busy) return"
   )
   assert(pumpEffectStart >= 0, "pump effect not found")
   const pumpEffectBody = chat.slice(pumpEffectStart, pumpEffectStart + 2800)

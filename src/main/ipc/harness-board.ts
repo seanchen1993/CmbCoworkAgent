@@ -1,4 +1,5 @@
 import { readNativeHarnessFeature } from "../harness-board/native-harness"
+import { reviewProjectUse, projectUseIpcOwner } from "../harness-board/project-use-authorization"
 import { requireHarnessFeatureWorkspace } from "../harness-board/service"
 import {
   BrowserWindow,
@@ -188,6 +189,13 @@ import type {
 } from "../../shared/harness-board-types"
 
 export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
+  ipcMain.handle("harnessBoard:reviewProjectUse", async (event,
+    input: import("../../shared/project-use-authorization").HarnessProjectUseReviewInput) => {
+    const owner = projectUseIpcOwner(event)
+    const review = await reviewProjectUse(input, owner)
+    if (projectUseIpcOwner(event) !== owner) throw Error("PROJECT_UNTRUSTED_SENDER")
+    return review
+  })
   console.log("[HarnessBoard] Registering harness board handlers...")
 
   const enterpriseCleanupSenders = new WeakSet<WebContents>()
@@ -381,8 +389,9 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
 
   ipcMain.handle(
     "harnessBoard:createProject",
-    async (_event, input: HarnessProjectCreateInput): Promise<HarnessProjectMetadata> => {
-      const created = await createHarnessProject(input)
+    async (event, input: HarnessProjectCreateInput): Promise<HarnessProjectMetadata> => {
+      const owner = input.projectUseApproval ? projectUseIpcOwner(event) : undefined
+      const created = await createHarnessProject(input, undefined, owner)
       // 立即补一次快照上报，避免新建项目要等下一轮 20 分钟定时扫描才出现在运营面板。
       // 尽力而为：内部已 try/catch，不抛错、不阻断创建结果返回。
       void reportProjectSnapshotNow(created.projectId)
@@ -560,10 +569,11 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
   ipcMain.handle(
     "harnessBoard:updateProject",
     async (
-      _event,
+      event,
       payload: { projectId: string; input: HarnessProjectMetadataUpdateInput }
     ): Promise<HarnessProjectMetadata> => {
-      const updated = await updateHarnessProjectMetadata(payload.projectId, payload.input)
+      const owner = payload.input.projectUseApproval ? projectUseIpcOwner(event) : undefined
+      const updated = await updateHarnessProjectMetadata(payload.projectId, payload.input, owner)
       // 编辑元数据（如 projectFromLean 切换）后立即补一次快照上报，否则改动要等下一轮
       // 20 分钟定时扫描才刷到运营面板。尽力而为：内部已 try/catch，不抛错、不阻断返回。
       void reportProjectSnapshotNow(payload.projectId)

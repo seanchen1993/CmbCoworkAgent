@@ -4813,13 +4813,16 @@ const api = {
     }
   },
   harnessBoard: {
+    reviewProjectUse: (input: import("../shared/project-use-authorization").HarnessProjectUseReviewInput):
+      Promise<import("../shared/project-use-authorization").HarnessProjectUseReview> =>
+      ipcRenderer.invoke("harnessBoard:reviewProjectUse", input),
     nativeFeatureMods: createNativeProjectSourceBridge(
       (channel, input) => ipcRenderer.invoke(channel, input), "harness-native-feature"),
     nativeFeatureCommand: (
       projectId: string,
       featureId: string,
       command: import("../shared/project-runtime/platform-api").LocalProjectCommand |
-        { kind: "start-feature"; initialUserMessage: string }
+        { kind: "start-feature"; initialUserMessage: string; workspacePath?: string }
     ): Promise<import("../shared/project-runtime/platform-api").LocalProjectView> =>
       ipcRenderer.invoke("harnessBoard:nativeFeatureCommand", projectId, featureId, command),
     localProjects: {

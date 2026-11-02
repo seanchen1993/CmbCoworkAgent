@@ -4,6 +4,7 @@ import { runInNewContext } from "node:vm"
 import ts from "typescript"
 import { expect, it } from "vitest"
 import { isOrdinaryFlowMetadata } from "../../../shared/mods/flows/scope"
+import { canUseChatWorkbench } from "./chat-workbench-visibility"
 
 const file = ts.createSourceFile(
   "ChatContainer.tsx",
@@ -23,15 +24,18 @@ function visit(node: ts.Node) {
 }
 visit(file)
 
-function evaluate(expression: ts.Expression | undefined, metadata: object, extra = {}) {
+function evaluate(
+  expression: ts.Expression | undefined,
+  metadata: object,
+  extra: { surface?: string; readOnly?: boolean; modsChatEnabled?: boolean } = {}
+) {
   if (!expression) throw Error("Production Flow entry guard missing")
   return runInNewContext(expression.getText(file), {
     currentThread: { metadata },
     isOrdinaryFlowMetadata,
     modsChatEnabled: true,
     readOnly: false,
-    // A project surface must not independently block a trusted local binding.
-    isProjectModeAgentContext: true,
+    chatWorkbenchAvailable: canUseChatWorkbench(extra.surface ?? "default", { metadata }),
     ...extra
   })
 }
@@ -39,12 +43,29 @@ function evaluate(expression: ts.Expression | undefined, metadata: object, extra
 it.each([
   { agentMode: "normal", harnessProjectSession: { projectId: "project", kind: "knowledge" } },
   { agentMode: "normal", harnessFeature: { projectId: "project", slug: "feature" } }
-])("allows the actual chat hook and sidebar in a local Harness session %j", (metadata) => {
-  expect(evaluate(enabled, metadata)).toBe(true)
-  expect(evaluate(visible, metadata)).toBe(true)
-  expect(evaluate(enabled, metadata, { readOnly: true })).toBe(false)
-  expect(evaluate(enabled, metadata, { modsChatEnabled: false })).toBe(false)
+])("keeps the actual workbench hook and sidebar out of a local Harness session %j", (metadata) => {
+  expect(isOrdinaryFlowMetadata(metadata)).toBe(true)
+  expect(evaluate(enabled, metadata)).toBe(false)
+  expect(evaluate(visible, metadata)).toBe(false)
 })
+
+it.each([{ agentMode: "normal" }, { agentMode: "normal", modsDevelopment: { mode: "creator" } }])(
+  "preserves ordinary chat and creator workbench guards %j",
+  (metadata) => {
+    expect(evaluate(enabled, metadata)).toBe(true)
+    expect(evaluate(visible, metadata)).toBe(true)
+    expect(evaluate(enabled, metadata, { readOnly: true })).toBe(false)
+    expect(evaluate(enabled, metadata, { modsChatEnabled: false })).toBe(false)
+  }
+)
+
+it.each(["harness-project", "harness-feature-session"])(
+  "keeps a project surface closed before its project metadata arrives: %s",
+  (surface) => {
+    expect(evaluate(enabled, { agentMode: "normal" }, { surface })).toBe(false)
+    expect(evaluate(visible, { agentMode: "normal" }, { surface })).toBe(false)
+  }
+)
 
 it.each([
   { agentMode: "normal", harnessFeature: { projectId: "p", slug: "f", runId: "controller" } },

@@ -391,12 +391,13 @@ jobs:
           src/renderer/src/api/backend-endpoint.test.ts
           src/renderer/src/api/backend-endpoint-integration.test.ts
           src/renderer/src/api/market-bounded-response.test.ts
+          src/renderer/src/api/market-json-failure.test.ts
           src/renderer/src/components/chat/remote-catalog-failure.test.ts
 
       - name: Verify organization skill discovery on chat open (Windows)
         if: runner.os == 'Windows'
         timeout-minutes: 5
-        run: node --import tsx tests/organization-skills-initial-load-browser.spec.ts
+        run: npm run test:chat-discovery
 
       - name: Upload organization skill discovery evidence
         if: always() && runner.os == 'Windows'
@@ -407,6 +408,8 @@ jobs:
             output/organization-skills-initial-load-*/report.json
             output/organization-skills-initial-load-*/failure.json
             output/organization-skills-initial-load-*/*.png
+            output/welcome-market-recovery-*/report.json
+            output/welcome-market-recovery-*/*.png
           if-no-files-found: warn
           retention-days: 14
 
@@ -448,6 +451,24 @@ jobs:
           src/renderer/src/lib/installed-plugin-groups.test.ts
           src/main/harness-board/service-native-detail-isolation.test.ts
           src/main/harness-board/detail-runtime-contract.test.ts
+          src/shared/mods/v2/session-capabilities.test.ts
+          src/main/harness-board/project-use-authorization.test.ts
+          src/main/mods/project-use-grant.test.ts
+          src/main/harness-board/native-harness-selected-directory.test.ts
+          src/main/harness-board/native-harness.test.ts
+          src/main/harness-board/service-legacy-admission.test.ts
+          src/main/ipc/project-runtime-authority.test.ts
+          src/main/ipc/project-runtime-mods.test.ts
+          src/main/ipc/native-project-source-configuration-only.integration.test.ts
+          src/main/services/thread-service-workspace.test.ts
+          src/main/services/thread-service-workspace-validation.test.ts
+          src/renderer/src/components/harness-board/project-runtime-message.test.ts
+          src/renderer/src/lib/chat-workbench-visibility.test.ts
+
+      - name: Verify original project UI and one-time consent (Windows)
+        if: runner.os == 'Windows'
+        timeout-minutes: 5
+        run: npm run test:project-original-flow
 
       - name: Verify guide dismissal before explicit project entry (Windows)
         if: runner.os == 'Windows'
@@ -552,6 +573,14 @@ jobs:
             output/project-bundle-import-native-*/**/*.png
             output/project-bundle-import-native-*/**/main.stdout.log
             output/project-bundle-import-native-*/**/main.stderr.log
+            output/project-unified-entry-browser/report.json
+            output/project-unified-entry-browser/*.png
+            output/native-feature-original-flow-browser-*/report.json
+            output/native-feature-original-flow-browser-*/*.png
+            output/native-feature-session-browser-*/report.json
+            output/native-feature-session-browser-*/*.png
+            output/project-use-consent-browser-*/report.json
+            output/project-use-consent-browser-*/*.png
           if-no-files-found: warn
           retention-days: 14
 

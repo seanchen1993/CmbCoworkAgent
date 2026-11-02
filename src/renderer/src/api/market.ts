@@ -3,6 +3,8 @@ import { toast } from "sonner"
 import { getMockOrgSkillMarketResponse, orgSkillMarketApi } from "./org-skill-market"
 import { USE_MARKET_MOCK_ON_ERROR } from "./market-flags"
 import { isBackendNotConfiguredError, resolveBackendEndpoint } from "./backend-endpoint"
+import { parseJsonResponse, readJsonResponse } from "./json-response"
+import { marketListItems } from "./market-list-response"
 
 export type MarketItemType = "skill" | "orgSkill" | "mcp" | "plugin"
 
@@ -209,7 +211,7 @@ export async function readBoundedMarketJsonResponse<T>(
     if (bytes.byteLength > boundedMaxBytes) {
       throw new Error(`Market response exceeds ${boundedMaxBytes} bytes`)
     }
-    return JSON.parse(new TextDecoder().decode(bytes)) as T
+    return parseJsonResponse<T>(response, new TextDecoder().decode(bytes), "应用市场")
   }
 
   const chunks: Uint8Array[] = []
@@ -242,7 +244,7 @@ export async function readBoundedMarketJsonResponse<T>(
     bytes.set(chunk, offset)
     offset += chunk.byteLength
   }
-  return JSON.parse(new TextDecoder().decode(bytes)) as T
+  return parseJsonResponse<T>(response, new TextDecoder().decode(bytes), "应用市场")
 }
 
 export async function readBoundedMarketBinaryResponse(
@@ -445,18 +447,12 @@ export const marketApi = {
         throw new Error(`HTTP error! status: ${response.status}`)
       }
 
-      const contentType = response.headers.get("content-type")
-      if (!contentType || !contentType.includes("application/json")) {
-        console.error("Expected JSON but received content type:", contentType || "unknown")
-        throw new Error("Response is not JSON")
-      }
-
       const data = await readBoundedMarketJsonResponse<MarketListResponse>(
         response,
         MARKET_SKILL_LIST_MAX_RESPONSE_BYTES,
         options?.signal
       )
-      const items = Array.isArray(data.items) ? data.items : []
+      const items = marketListItems(data, response)
       const result = {
         success: true,
         data: items.slice(0, MARKET_SKILL_LIST_MAX_ITEMS),
@@ -507,17 +503,10 @@ export const marketApi = {
         await throwMarketError(response)
       }
 
-      const contentType = response.headers.get("content-type")
-      if (!contentType || !contentType.includes("application/json")) {
-        const responseText = await response.text()
-        console.error("Expected JSON but received:", responseText.substring(0, 200))
-        throw new Error("Response is not JSON")
-      }
-
-      const data: MarketListResponse = await response.json()
+      const data = await readJsonResponse<MarketListResponse>(response, "应用市场")
       const result = {
         success: true,
-        data: data.items || []
+        data: marketListItems(data, response)
       }
 
       // Cache the result
@@ -566,17 +555,10 @@ export const marketApi = {
         await throwMarketError(response)
       }
 
-      const contentType = response.headers.get("content-type")
-      if (!contentType || !contentType.includes("application/json")) {
-        const responseText = await response.text()
-        console.error("Expected JSON but received:", responseText.substring(0, 200))
-        throw new Error("Response is not JSON")
-      }
-
-      const data: MarketListResponse = await response.json()
+      const data = await readJsonResponse<MarketListResponse>(response, "应用市场")
       const result = {
         success: true,
-        data: data.items || []
+        data: marketListItems(data, response)
       }
 
       // Cache the result

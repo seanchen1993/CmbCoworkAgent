@@ -367,16 +367,20 @@ export function Element({
 
 export const FunctionPanes = withModsChatScope(FunctionPanesSurface)
 
-function FunctionPanesSurface({ threadId }: { threadId: string }): React.JSX.Element | null {
+function FunctionPanesSurface({ threadId, revealInSidebar = true }: {
+  threadId: string
+  revealInSidebar?: boolean
+}): React.JSX.Element | null {
   const resultsVisible = useContext(ClawResultsVisibility)
   const [panes, setPanes] = useState<FunctionPaneSnapshot[]>([])
   const [busy, setBusy] = useState(false)
   const pending = useRef(0)
   const [error, setError] = useState("")
   useEffect(() => {
+    if (!revealInSidebar) return
     publishClawNotice(threadId, "panes", panes.length ? `${panes.length} 个插件面板` : "")
     return () => publishClawNotice(threadId, "panes", "")
-  }, [threadId, panes.length])
+  }, [threadId, panes.length, revealInSidebar])
   const refreshRef = useRef<() => void>(() => {})
   const panesRef = useRef(panes)
   const measurements = useRef(new Map<string, { open: string; columns: number }>())
@@ -631,7 +635,7 @@ function FunctionPanesSurface({ threadId }: { threadId: string }): React.JSX.Ele
             for (const client of row.clients ?? []) validateFunctionTree(client.tree)
           }
           // Host-owned consumption survives temporary scope remounts; focus waits for visibility.
-          revealClawPanes(threadId, rows)
+          if (revealInSidebar) revealClawPanes(threadId, rows)
           loadedThread.current = threadId
           setPanes(rows)
         })
@@ -655,7 +659,7 @@ function FunctionPanesSurface({ threadId }: { threadId: string }): React.JSX.Ele
       stopConfiguration()
       window.removeEventListener("mods:configuration-changed", refresh)
     }
-  }, [threadId])
+  }, [threadId, revealInSidebar])
   const act = useCallback(
     async (
       pane: FunctionPaneSnapshot,

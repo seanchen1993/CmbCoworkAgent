@@ -687,7 +687,10 @@ export function WelcomeSkills({
 
   const [marketSkillsData, setMarketSkillsData] = useState<MarketItem[]>([])
   const [goodSkillsData, setGoodSkillsData] = useState<MarketItem[]>([])
+  const [autoInstallSkills, setAutoInstallSkills] = useState<MarketItem[]>([])
   const [marketError, setMarketError] = useState<string | null>(null)
+  const [marketLoadAttempt, setMarketLoadAttempt] = useState(0)
+  const [retryingMarket, setRetryingMarket] = useState(false)
   const [showAllProgrammingSkills, setShowAllProgrammingSkills] = useState(false)
   const [showAllCustomSkills, setShowAllCustomSkills] = useState(false)
   const instructionUrl = import.meta.env.VITE_INTRUCTION_URL
@@ -724,16 +727,19 @@ export function WelcomeSkills({
     [getTargetRemoteSkill, onUseSkillPrompt]
   )
 
-  const queryRemoteSkills = useCallback(async (signal: AbortSignal): Promise<void> => {
+  const queryRemoteSkills = useCallback(async (signal: AbortSignal,
+    allowFeaturedInstall: boolean): Promise<void> => {
     try {
       const { allSkills, goodSkills } = await loadMarketSkillsSnapshot(signal)
       if (signal.aborted) return
       setMarketSkillsData(allSkills)
       setGoodSkillsData(goodSkills)
+      setAutoInstallSkills(allowFeaturedInstall ? goodSkills : [])
       setMarketError(null)
     } catch (error) {
       if (signal.aborted) return
-      setMarketError(error instanceof Error ? error.message : "应用市场加载失败")
+      setMarketError(isBackendNotConfiguredError(error) ? null
+        : "应用市场推荐暂时无法加载，可继续聊天和使用本地技能。")
       if (!isBackendNotConfiguredError(error)) {
         console.error("Failed to query remote skills:", error)
       }
@@ -743,20 +749,22 @@ export function WelcomeSkills({
   useEffect(() => {
     const controller = new AbortController()
     const timeoutId = window.setTimeout(() => {
-      void queryRemoteSkills(controller.signal)
+      void queryRemoteSkills(controller.signal, marketLoadAttempt === 0).finally(() => {
+        if (!controller.signal.aborted) setRetryingMarket(false)
+      })
     }, 0)
     return () => {
       window.clearTimeout(timeoutId)
       controller.abort()
     }
-  }, [queryRemoteSkills])
+  }, [queryRemoteSkills, marketLoadAttempt])
 
   useEffect(() => {
-    if (skillsLoading || goodSkillsData.length === 0) return
+    if (skillsLoading || autoInstallSkills.length === 0) return
 
     const controller = new AbortController()
     const localSkills = readSkillCatalogCache()?.localSkills ?? skills
-    void installFeaturedSkillsOnce(goodSkillsData, localSkills, controller.signal)
+    void installFeaturedSkillsOnce(autoInstallSkills, localSkills, controller.signal)
       .then(async (installed) => {
         if (installed && !controller.signal.aborted) {
           await onSkillsInstalled()
@@ -770,7 +778,7 @@ export function WelcomeSkills({
     return () => {
       controller.abort()
     }
-  }, [goodSkillsData, onSkillsInstalled, skills, skillsLoading])
+  }, [autoInstallSkills, onSkillsInstalled, skills, skillsLoading])
 
   const marketSkillCategoryByName = useMemo(() => {
     const categoryByName = new Map<string, string>()
@@ -915,9 +923,18 @@ export function WelcomeSkills({
 
   return (
     <div className="pb-8">
-      {marketError && <p role="status" className="pb-3 text-xs text-muted-foreground">
-        {marketError}
-      </p>}
+      {(marketError || retryingMarket) && <div className="flex items-start gap-2 pb-3 text-xs text-muted-foreground">
+        <p role="status">{retryingMarket ? "正在重新加载市场推荐…" : marketError}</p>
+        <button type="button" className="shrink-0 underline" disabled={retryingMarket}
+          onClick={() => {
+            setMarketError(null)
+            setAutoInstallSkills([])
+            setRetryingMarket(true)
+            setMarketLoadAttempt((attempt) => attempt + 1)
+          }}>
+          重新加载推荐
+        </button>
+      </div>}
       {skillsLoading ? (
         <div className="py-10 text-center text-sm text-muted-foreground">正在加载技能列表...</div>
       ) : skills.length === 0 ? null : (

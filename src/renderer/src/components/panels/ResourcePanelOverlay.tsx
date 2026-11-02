@@ -3,6 +3,7 @@ import { RightPanel } from "@/components/panels/RightPanel"
 import { OverlayDrawer } from "@/components/panels/OverlayDrawer"
 import { useBrowserViewLifecycle } from "@/components/browser/useBrowserViewLifecycle"
 import { useAppStore } from "@/lib/store"
+import type { RightModule } from "@/lib/store"
 import {
   onOpenResourcePanelOverlay,
   type ResourcePanelOverlayMode
@@ -14,15 +15,18 @@ interface ResourcePanelOverlayProps {
   isAgentFocusActive: boolean
   renderedMainView: string
   renderedPanelThreadId: string | null
+  moduleMode?: RightModule
 }
 
 export function ResourcePanelOverlay({
   isAgentFocusActive,
   renderedMainView,
-  renderedPanelThreadId
+  renderedPanelThreadId,
+  moduleMode
 }: ResourcePanelOverlayProps): React.JSX.Element | null {
   const rightPanelCollapsed = useAppStore((state) => state.rightPanelCollapsed)
-  const rightModule = useAppStore((state) => state.rightModule)
+  const storedRightModule = useAppStore((state) => state.rightModule)
+  const rightModule = moduleMode ?? storedRightModule
   const setRightModule = useAppStore((state) => state.setRightModule)
   const activeThreadId = renderedPanelThreadId
   const standardRightPanelMounted =
@@ -54,13 +58,13 @@ export function ResourcePanelOverlay({
   )
   const overlayThreadId = renderedPanelThreadId
 
-  useEffect(() => {
-    // Only the drawer opened for this protected request follows its native lifetime.
-    // Explicit preview/browser/git and ordinary file requests keep their original behavior.
-    if (!protectedOnlyOpen || !open || mode !== "preview" || protectedPreview) return
+  // A drawer stops owning the surface when the original panel returns or its request ends.
+  // Adopt that state before painting, so collapsing the panel cannot revive an old drawer.
+  const protectedPreviewEnded = protectedOnlyOpen && open && mode === "preview" && !protectedPreview
+  if (open && (standardRightPanelMounted || protectedPreviewEnded)) {
     setOpen(false)
-    setProtectedOnlyOpen(false)
-  }, [protectedOnlyOpen, open, mode, protectedPreview])
+    if (protectedPreviewEnded) setProtectedOnlyOpen(false)
+  }
 
   const close = useCallback(() => {
     setOpen(false)
@@ -71,13 +75,6 @@ export function ResourcePanelOverlay({
 
   useEffect(() => {
     if (!standardRightPanelMounted) return
-    setOpen(false)
-    clearPreviewRequest()
-  }, [clearPreviewRequest, standardRightPanelMounted])
-
-  useEffect(() => {
-    if (!standardRightPanelMounted) return
-    setOpen(false)
     clearPreviewRequest()
   }, [clearPreviewRequest, standardRightPanelMounted])
 

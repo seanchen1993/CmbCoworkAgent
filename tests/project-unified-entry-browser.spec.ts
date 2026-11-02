@@ -29,6 +29,11 @@ async function main() {
       {
         name: "isolated-store",
         setup(builder) {
+          builder.onLoad({ filter: /HarnessBoardView\.tsx$/ }, (args) => ({
+            loader: "tsx",
+            resolveDir: dirname(args.path),
+            contents: readFileSync(args.path, "utf8") + "\nexport { ProjectEditDialog }\n"
+          }))
           builder.onResolve({ filter: /(?:^@\/lib\/store$|^\.\/store$|\/lib\/store$)/ }, () => ({
             path: "store",
             namespace: "fixture"
@@ -51,7 +56,7 @@ async function main() {
       resolveDir: process.cwd(),
       contents: `
       import React,{useState}from'react';import{createRoot}from'react-dom/client';
-      import{ProjectFormDialog}from'./src/renderer/src/components/harness-board/HarnessBoardView';
+      import{ProjectFormDialog,ProjectEditDialog}from'./src/renderer/src/components/harness-board/HarnessBoardView';
       import{HostProjectListItems,LocalProjectRun}from'./src/renderer/src/components/harness-board/LocalProjectsPanel';
       import{parseProjectRuntimeManifestV1}from'./src/shared/project-runtime/manifest';
       const root=createRoot(document.getElementById('root')),calls=[],views={},templates=[{installedPluginId:'host',name:'四阶段项目插件',version:'0.1.3',stages:['转换','需求','规格','设计'],expectedTemplate:{pluginId:'host',name:'四阶段项目插件',version:'0.1.3',digest:'a'.repeat(64)}}];
@@ -70,20 +75,24 @@ async function main() {
           stages:['转换','需求','规格','设计'].map((title,index)=>({id:'stage'+index,title,skill:'draft',actionIds:[],artifactIds:[],checkIds:[],approval:'none'})),actions:[],artifacts:[],checks:[],environment:[],
           capabilities:{execution:true,conditionalTransition:true,idempotency:true,reconciliation:true,cancellation:true}})},operations:[]}}
       window.api={plugins:{prepareStartUse:async()=>({kind:'host-project',canOpen:true,identity:installedIdentity,issues:[]})},file:{selectDirectory:async()=>({canceled:false,filePaths:['C:/fixture/project']})},
-        harnessBoard:{searchEnterpriseProjects:async()=>[],createProject:async input=>{calls.push(['legacy-create',input]);return{}},
+        harnessBoard:{searchEnterpriseProjects:async()=>[],reviewProjectUse:async input=>({reviewId:'review-'+input.projectDir,reviewDigest:'c'.repeat(64),projectId:input.existingProjectId??'allocated',workspace:input.workspacePath+'/'+input.projectDir,plugin:installedIdentity,packageDigest:'d'.repeat(64),sources:[{pluginId:'host',name:'四阶段项目插件',digest:'e'.repeat(64),capabilities:['process.run'],actionIds:[],configurationOnly:false}],scopeNotice:'仅用于本项目通过原界面登记的目录。',requiresApplicationEnable:false,...(input.existingProjectId?{authorizationCurrent:true}:{}),expiresAt:Date.now()+60000}),createProject:async input=>{calls.push(['legacy-create',input]);return{}},
           localProjects:{get:async id=>{calls.push(['get',id]);return structuredClone(views[id])},mods:{read:async id=>({projectId:id,projectVersion:1,packageDigest:'a'.repeat(64),workspace:'C:/fixture/project'}),approve:async()=>{throw Error('NO_AUTO_APPROVAL')}},
             create:async input=>{calls.push(['host-create',input]);if(JSON.stringify(input.expectedPlugin??input.expectedTemplate)!==JSON.stringify(installedIdentity))throw Error('PROJECT_HOST_PACKAGE_IDENTITY_MISMATCH');const result=make(input);views[result.project.projectId]=result;if(holdCreate)await new Promise(resolve=>finishCreate=resolve);return structuredClone(result)},
             command:async()=>{throw Error('NO_AUTO_START')}}}};
       const blank=()=>({name:'既有项目',description:'独立目标',projectCode:'P001',systemId:'S1',systemName:'系统',projectDir:'legacy',workspacePath:'C:/fixture',adapterType:'plugin',adapterId:'',projectFromLean:false});
-      function Fixture(){const[open,setOpen]=useState(false),[form,setForm]=useState(blank),[selected,setSelected]=useState(),[items,setItems]=useState([]),[startUse,setStartUse]=useState();
+      function Fixture(){const[open,setOpen]=useState(false),[editing,setEditing]=useState(false),[form,setForm]=useState(blank),[selected,setSelected]=useState(),[items,setItems]=useState([]),[startUse,setStartUse]=useState();
         window.startSaved=()=>{setStartUse({id:'saved-intent',accountRevision:0,input:{threadId:'creator',expectedWorkspace:'C:/author',pluginId:'host',expected:installedIdentity},report:{kind:'host-project',canOpen:true,identity:installedIdentity,issues:[]}});setForm({...blank(),adapterId:'host'});setOpen(true)};
+        window.editSaved=()=>{setForm({...blank(),adapterId:'host'});setEditing(true)};
         window.fixture={calls,refreshTemplate:()=>{templates[0].expectedTemplate={...installedIdentity};setForm(value=>({...value}))},missingTemplate:()=>delete templates[0].expectedTemplate,remount:()=>{setSelected(undefined);setItems(Object.values(views).map(v=>v.project))}};
         if(selected)return <><button onClick={()=>setSelected(undefined)}>项目列表</button><LocalProjectRun key={selected} projectId={selected} onChanged={()=>{}}/></>;
         return <><button onClick={()=>{setStartUse(undefined);setForm(blank());setOpen(true)}}>新建项目</button><HostProjectListItems projects={items} onSelect={setSelected}/>
           <ProjectFormDialog open={open} creating={false} form={form} registry={registry} hostTemplates={templates} hostStartUse={startUse}
             installingPluginNames={new Set()} error={null} verification={{pending:false,error:null}} onOpenChange={setOpen} onChange={setForm}
-            onInstallPlugin={()=>{throw Error('NO_AUTO_INSTALL')}} onPickWorkspace={()=>{}} onSubmit={async()=>{await window.api.harnessBoard.createProject(form);setOpen(false)}}
-            onHostCreated={view=>{setItems(Object.values(views).map(v=>v.project));setOpen(false);setSelected(view.project.projectId)}}/></>}
+            onInstallPlugin={()=>{throw Error('NO_AUTO_INSTALL')}} onPickWorkspace={()=>{}} onSubmit={async approval=>{await window.api.harnessBoard.createProject({...form,...(approval?{projectUseApproval:approval}:{})});setOpen(false)}}
+            onHostCreated={view=>{setItems(Object.values(views).map(v=>v.project));setOpen(false);setSelected(view.project.projectId)}}/>
+          <ProjectEditDialog projectId="existing-owner" open={editing} saving={false} form={form} registry={registry}
+            installingPluginNames={new Set()} error={null} verification={{pending:false,error:null}} onOpenChange={setEditing} onChange={setForm}
+            onInstallPlugin={()=>{throw Error('NO_AUTO_INSTALL')}} onSubmit={approval=>{calls.push(['edit',{...form,...(approval?{projectUseApproval:approval}:{})}]);setEditing(false)}}/></>}
       root.render(<Fixture/>);
     `
     }
@@ -125,7 +134,7 @@ async function main() {
         1,
         "ordinary project metadata remains the only creation form"
       )
-    assert(await page.getByRole("button", { name: "创建", exact: true }).isDisabled())
+    assert(await page.getByRole("button", { name: /^(创建|创建并授权)$/ }).isDisabled())
     assert.equal(await page.getByRole("textbox", { name: "希望完成什么", exact: true }).count(), 0)
     assert(await page.getByRole("button", { name: "取消", exact: true }).isEnabled())
     await page.getByRole("button", { name: "取消", exact: true }).click()
@@ -213,10 +222,10 @@ async function main() {
       0
     )
     await page.getByRole("textbox", { name: /系统编号/ }).fill("")
-    assert(await page.getByRole("button", { name: "创建", exact: true }).isDisabled())
+    assert(await page.getByRole("button", { name: /^(创建|创建并授权)$/ }).isDisabled())
     await page.getByRole("textbox", { name: /系统编号/ }).fill("S1")
     await page.screenshot({ path: resolve(output, "native-original-project-form.png") })
-    await page.getByRole("button", { name: "创建", exact: true }).click()
+    await page.getByRole("button", { name: "创建并授权", exact: true }).click()
     const first = (await page.evaluate("window.fixture.calls[0]")) as [
       string,
       Record<string, unknown>
@@ -225,13 +234,17 @@ async function main() {
     assert.equal(first[1].adapterId, "host")
     assert.equal(first[1].projectCode, "P001")
     assert.equal(first[1].systemId, "S1")
+    assert.deepEqual(first[1].projectUseApproval, {
+      reviewId: "review-legacy",
+      reviewDigest: "c".repeat(64)
+    })
     assert(!Object.hasOwn(first[1], "goal"), "project creation does not create a feature goal/run")
     assert.equal(await page.getByText("当前：转换", { exact: true }).count(), 0)
     await page.evaluate("window.startSaved()")
     for (const name of ["项目编号 *", "项目名称 *", "系统编号 *", "系统名称 *", "插件配置"])
       await page.getByText(name, { exact: true }).waitFor()
     await page.screenshot({ path: resolve(output, "saved-original-project-form.png") })
-    await page.getByRole("button", { name: "创建", exact: true }).click()
+    await page.getByRole("button", { name: "创建并授权", exact: true }).click()
     assert.equal(await page.evaluate("window.fixture.calls[1][1].adapterId"), "host")
     await page.getByRole("button", { name: "新建项目", exact: true }).click()
     await page.getByRole("button", { name: "选择插件", exact: true }).click()
@@ -241,6 +254,18 @@ async function main() {
     assert.equal(
       await page.evaluate("window.fixture.calls.filter(c=>c[0]==='host-create').length"),
       0
+    )
+    await page.evaluate("window.editSaved()")
+    const editing = page.getByRole("dialog", { name: "编辑项目", exact: true })
+    await editing.getByText("已沿用创建项目时的授权。", { exact: false }).waitFor()
+    await editing.getByRole("textbox", { name: "项目名称 *", exact: true }).fill("仅修改项目名称")
+    assert.equal(await editing.getByRole("button", { name: "保存并授权", exact: true }).count(), 0)
+    await editing.getByRole("button", { name: "保存", exact: true }).click()
+    const saved = await page.evaluate("window.fixture.calls[3][1]")
+    assert.equal(saved.name, "仅修改项目名称")
+    assert(
+      !Object.hasOwn(saved, "projectUseApproval"),
+      "metadata edit does not authorize or enable again"
     )
     assert.deepEqual(errors, [])
     writeFileSync(
@@ -256,6 +281,7 @@ async function main() {
             "same harness create endpoint",
             "saved/manual same original form",
             "legacy unchanged",
+            "existing authorized project metadata save does not authorize again",
             "picker wheel and short viewport"
           ]
         },

@@ -3166,11 +3166,13 @@ interface CustomAPI {
   }
   harnessBoard: {
     nativeFeatureMods: import("../shared/project-runtime/function-source").ProjectFunctionSourceApi
+    reviewProjectUse: (input: import("../shared/project-use-authorization").HarnessProjectUseReviewInput) =>
+      Promise<import("../shared/project-use-authorization").HarnessProjectUseReview>
     nativeFeatureCommand(
       projectId: string,
       featureId: string,
       command: import("../shared/project-runtime/platform-api").LocalProjectCommand |
-        { kind: "start-feature"; initialUserMessage: string }
+        { kind: "start-feature"; initialUserMessage: string; workspacePath?: string }
     ): Promise<import("../shared/project-runtime/platform-api").LocalProjectView>
     localProjects: import("../shared/project-runtime/platform-api").LocalProjectApi
     legacyProjects: import("../shared/project-runtime/legacy-operations").LegacyProjectRuntimeApi

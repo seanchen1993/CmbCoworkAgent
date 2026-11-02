@@ -15,6 +15,8 @@ import { MOD_COMMAND_HISTORY_LIMIT } from "../../shared/mods/types"
 import { encodeModJson, parseModJson } from "../../shared/mods/validation"
 import { ModError } from "./errors"
 import { FunctionStateStore } from "./v2/state-store"
+import type { HarnessProjectUseSource } from "../../shared/project-use-authorization"
+import type { PluginStartUseIdentity } from "../../shared/plugin-start-use"
 import { developmentNativeGrant, assertDevelopmentNativeGrant } from "./v2/development-native-authority"
 import type { CompletionEvidenceRecord } from "./v2/completion-evidence"
 import {
@@ -33,8 +35,53 @@ export interface ModGrant {
   enabled: boolean
 }
 
+export interface ProjectUsePolicy {
+  projectId: string
+  workspace: string
+  plugin: PluginStartUseIdentity
+  packageDigest: string
+  capabilityDigest: string
+  sources: HarnessProjectUseSource[]
+  installedSources: Array<{ pluginId: string; path: string; name: string; version: string }>
+  reviewDigest: string
+}
+
+export interface ProjectUseReceipt {
+  policy: ProjectUsePolicy
+  epoch: number
+  enabled: boolean
+}
+
+function checkedProjectUsePolicy(value: ProjectUsePolicy): string {
+  const digest = (item: unknown) => typeof item === "string" && /^[a-f0-9]{64}$/.test(item)
+  if (!value || typeof value.projectId !== "string" || !value.projectId ||
+    value.projectId.length > 256 || typeof value.workspace !== "string" || !value.workspace ||
+    !value.plugin?.pluginId || !digest(value.plugin.digest) || !digest(value.packageDigest) ||
+    !digest(value.capabilityDigest) || !digest(value.reviewDigest) ||
+    !Array.isArray(value.sources) || value.sources.length > 65 ||
+    !Array.isArray(value.installedSources) || value.installedSources.length > 65 ||
+    value.sources.some(source => !source.pluginId || !source.name || !digest(source.digest) ||
+      !Array.isArray(source.capabilities) || source.capabilities.length > 256 ||
+      source.capabilities.some(item => typeof item !== "string" || item.length > 256) ||
+      !Array.isArray(source.actionIds) || source.actionIds.length > 256 ||
+      source.actionIds.some(item => typeof item !== "string" || item.length > 256) ||
+      typeof source.configurationOnly !== "boolean") ||
+    value.installedSources.some(source => !source.pluginId || !source.path || !source.name ||
+      typeof source.version !== "string")) throw new ModError("MODS_PROJECT_USE_INVALID")
+  const { reviewDigest, ...policy } = value
+  if (createHash("sha256").update(JSON.stringify(policy)).digest("hex") !== reviewDigest)
+    throw new ModError("MODS_PROJECT_USE_INVALID")
+  const json = JSON.stringify(value)
+  if (Buffer.byteLength(json) > 512 * 1024) throw new ModError("MODS_PROJECT_USE_INVALID")
+  return json
+}
+
 export class ModControlStore {
   private readonly projectGrants = new WeakMap<ModGrant, string>()
+  private readonly delegatedProjectGrants = new WeakMap<ModGrant, {
+    owner: ProjectUseReceipt
+    assertChild(): void
+  }>()
   private readonly projectGrantCalls = new AsyncLocalStorage<{ grant: ModGrant; active: boolean }>()
   private readonly db: DatabaseSync
   private grantQuery?: ReturnType<DatabaseSync["prepare"]>
@@ -59,6 +106,10 @@ export class ModControlStore {
         workspace TEXT NOT NULL, mod_id TEXT NOT NULL, digest TEXT NOT NULL,
         epoch INTEGER NOT NULL, enabled INTEGER NOT NULL,
         PRIMARY KEY(workspace, mod_id)
+      );
+      CREATE TABLE IF NOT EXISTS mods_project_use_authorizations (
+        project_id TEXT PRIMARY KEY, epoch INTEGER NOT NULL, enabled INTEGER NOT NULL,
+        policy TEXT NOT NULL
       );
       CREATE TABLE IF NOT EXISTS mods_calls (
         id TEXT PRIMARY KEY, args_hash TEXT NOT NULL, status TEXT NOT NULL,
@@ -495,12 +546,81 @@ export class ModControlStore {
       assertDevelopmentNativeGrant(this, expected)
       return
     }
+    const delegated = this.delegatedProjectGrants.get(expected)
+    if (delegated) {
+      delegated.assertChild()
+      const actual = this.getProjectUseAuthorization(delegated.owner.policy.projectId)
+      if (!actual?.enabled || actual.epoch !== delegated.owner.epoch ||
+        actual.policy.reviewDigest !== delegated.owner.policy.reviewDigest)
+        throw new ModError("MODS_GRANT_REVOKED")
+      delegated.assertChild()
+      return
+    }
     const scopedKey = expected.sourceScope === undefined ? undefined : this.projectGrants.get(expected)
     if (expected.sourceScope !== undefined && !scopedKey) throw new ModError("MODS_GRANT_REVOKED")
     const actual = this.getGrant(expected.workspace, scopedKey ?? expected.modId)
     if (!actual?.enabled || actual.digest !== expected.digest || actual.epoch !== expected.epoch) {
       throw new ModError("MODS_GRANT_REVOKED")
     }
+  }
+
+  getProjectUseAuthorization(projectId: string): ProjectUseReceipt | undefined {
+    const row = this.db.prepare(
+      "SELECT epoch,enabled,policy FROM mods_project_use_authorizations WHERE project_id=?"
+    ).get(projectId)
+    if (!row) return undefined
+    const policy = JSON.parse(String(row.policy)) as ProjectUsePolicy
+    checkedProjectUsePolicy(policy)
+    if (policy.projectId !== projectId || !Number.isSafeInteger(row.epoch) || Number(row.epoch) < 1)
+      throw new ModError("MODS_PROJECT_USE_INVALID")
+    return { policy, epoch: Number(row.epoch), enabled: row.enabled === 1 }
+  }
+
+  /** One aggregate commit; this never writes an ordinary workspace function grant. */
+  saveProjectUseAuthorization(policy: ProjectUsePolicy, expectedEpoch = 0): ProjectUseReceipt {
+    const json = checkedProjectUsePolicy(policy)
+    this.db.exec("BEGIN IMMEDIATE")
+    try {
+      const previous = this.getProjectUseAuthorization(policy.projectId)
+      if ((previous?.epoch ?? 0) !== expectedEpoch)
+        throw new ModError("MODS_PROJECT_USE_CHANGED")
+      if (previous) {
+        this.db.prepare("UPDATE mods_project_use_authorizations SET epoch=epoch+1,enabled=1,policy=? WHERE project_id=?")
+          .run(json, policy.projectId)
+      } else {
+        this.db.prepare("INSERT INTO mods_project_use_authorizations VALUES (?,1,1,?)")
+          .run(policy.projectId, json)
+      }
+      this.db.exec("COMMIT")
+    } catch (error) {
+      this.db.exec("ROLLBACK")
+      throw error
+    }
+    return this.getProjectUseAuthorization(policy.projectId)!
+  }
+
+  revokeProjectUseAuthorization(projectId: string, expectedEpoch?: number): void {
+    if (expectedEpoch === undefined) {
+      this.db.prepare("UPDATE mods_project_use_authorizations SET enabled=0,epoch=epoch+1 WHERE project_id=?")
+        .run(projectId)
+    } else {
+      this.db.prepare("UPDATE mods_project_use_authorizations SET enabled=0,epoch=epoch+1 WHERE project_id=? AND epoch=?")
+        .run(projectId, expectedEpoch)
+    }
+  }
+
+  /** The opaque receipt is useful only while both its owner and exact registered child remain live. */
+  delegateProjectFunctionGrant(owner: ProjectUseReceipt, workspace: string, pluginId: string,
+    name: string, digest: string, assertChild: () => void): ModGrant {
+    const source = owner.policy.sources.find(item => item.pluginId === pluginId && item.name === name)
+    if (!owner.enabled || !source || source.configurationOnly || source.digest !== digest)
+      throw new ModError("MODS_GRANT_REVOKED")
+    assertChild()
+    const grant: ModGrant = Object.freeze({ workspace, modId: `function:${name}`, digest,
+      epoch: owner.epoch, enabled: true, sourceScope: `project-use:${owner.policy.projectId}` })
+    this.delegatedProjectGrants.set(grant, { owner: structuredClone(owner), assertChild })
+    this.assertGrant(grant)
+    return grant
   }
 
   private projectGrantKey(projectId: string, packageDigest: string, name: string): string {

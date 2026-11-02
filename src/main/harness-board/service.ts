@@ -1,8 +1,11 @@
 import { prepareMarketCommand } from "../services/market-content"
+import { prepareProjectUseCreation, prepareProjectUseUpdate,
+  revokeProjectUseAuthorization } from "./project-use-authorization"
 import {
   nativeHarnessPlugin, initializeNativeHarnessProject, createNativeHarnessFeature,
   readNativeHarnessFeature, nativeHarnessProjectDetail, nativeHarnessRunDetail,
   assertNativeHarnessProjectMutable, assertNativeHarnessFeatureCurrent,
+  assertNativeHarnessFeatureBinding, readNativeHarnessFeatureStage,
   nativeHarnessFeatureConfiguration, updateNativeHarnessFeatureConfiguration,
   assertNativeFeatureConfiguration
 } from "./native-harness"
@@ -13,7 +16,11 @@ import {
   isAutobizLegacyProjectRoot
 } from "../plugins/business-adapters/autobiz-package-admission"
 import { isInternalHarnessProjectId, readInternalHarnessProject, readInternalHarnessProjectWorkspaceIndex } from "./internal-project-context"
-import { readRuntimeScopedFile } from "./project-runtime/safe-files"
+import {
+  readRuntimeScopedFile,
+  probeRuntimeScopedFile,
+  runtimeDirectoryIdentity
+} from "./project-runtime/safe-files"
 import {
   assertPackageExtensionCompatibility,
   assertPackageExtensionCompatibilityAsync,
@@ -1919,15 +1926,32 @@ function normalizeProjectStore(value: unknown): HarnessProjectStoreFile {
 const managedRunProjectDirectoryById = new Map<string, string>()
 const capabilityProjectWorkspacesById = new Map<string, readonly string[]>()
 const capabilityFeatureWorkspacesByKey = new Map<string, string>()
+const nativeProjectAuthorityById = new Map<string, HarnessProjectMetadata>()
+let nativeProjectAuthorityFingerprint: string | undefined
 
-function refreshManagedRunProjectDirectoryCache(store: HarnessProjectStoreFile): void {
+function projectStoreFingerprint(): string | undefined {
+  try {
+    return probeRuntimeScopedFile(getOpenworkDir(), "harness-board-projects.json").fingerprint
+  } catch {
+    return undefined
+  }
+}
+
+function refreshManagedRunProjectDirectoryCache(
+  store: HarnessProjectStoreFile,
+  nativeFingerprint = projectStoreFingerprint()
+): void {
   managedRunProjectDirectoryById.clear()
   capabilityProjectWorkspacesById.clear()
+  nativeProjectAuthorityById.clear()
+  nativeProjectAuthorityFingerprint = nativeFingerprint
   for (const project of store.projects) {
     try {
       managedRunProjectDirectoryById.set(project.projectId, projectDirectoryPath(project))
       capabilityProjectWorkspacesById.set(project.projectId,
         [resolve(project.workspacePath), projectDirectoryPath(project)])
+      if (nativeFingerprint && project.nativeBinding)
+        nativeProjectAuthorityById.set(project.projectId, structuredClone(project))
     } catch (error) {
       console.warn("[ManagedRun] Ignoring project with invalid ManagedRun directory:", {
         projectId: project.projectId,
@@ -1954,14 +1978,76 @@ export function assertHarnessProjectAdapterCurrent(
 
 async function readProjectStore(): Promise<HarnessProjectStoreFile> {
   assertHarnessConfigAvailable()
+  const before = projectStoreFingerprint()
   const parsed = await readHarnessJsonFileBounded(
     HARNESS_BOARD_FILE,
     HARNESS_PROJECT_STORE_MAX_BYTES,
     "Harness project store"
   )
   const store = parsed === null ? emptyProjectStore() : normalizeProjectStore(parsed)
-  refreshManagedRunProjectDirectoryCache(store)
+  const after = projectStoreFingerprint()
+  refreshManagedRunProjectDirectoryCache(store, before && before === after ? after : "")
   return store
+}
+
+/** Current native owner facts. Hot authorization checks probe identities, never parse the store. */
+export function readHarnessProjectUseParent(projectId: string) {
+  if (!nativeProjectAuthorityFingerprint ||
+    projectStoreFingerprint() !== nativeProjectAuthorityFingerprint) return undefined
+  const project = nativeProjectAuthorityById.get(projectId)
+  if (!project?.nativeBinding) return undefined
+  try {
+    const workspace = projectDirectoryPath(project)
+    const directoryIdentity = runtimeDirectoryIdentity(workspace)
+    return {
+      projectId,
+      workspace,
+      installedPluginId: project.nativeBinding.installedPluginId,
+      active: project.lifecycle.status === "active",
+      identity: JSON.stringify([projectId, directoryIdentity, project.nativeBinding,
+        project["harness-adapter"]])
+    }
+  } catch {
+    return undefined
+  }
+}
+
+/** Exact child ownership; callers cannot authorize a parent directory or another Feature. */
+export function assertHarnessProjectUseChild(
+  binding: import("../../shared/harness-board-types").HarnessNativeFeatureBinding
+): void {
+  const parent = readHarnessProjectUseParent(binding.projectId)
+  if (!parent?.active || parent.installedPluginId !== binding.installedPluginId)
+    throw Error("HARNESS_NATIVE_PROJECT_CHANGED")
+  const project = nativeProjectAuthorityById.get(binding.projectId)
+  assertNativeHarnessFeatureBinding(binding, project)
+  const plugin = getPlugins().find(item => item.id === binding.installedPluginId)
+  if (!plugin?.enabled || plugin.name !== binding.expectedPlugin.name ||
+    plugin.version !== binding.expectedPlugin.version) throw Error("PROJECT_PLUGIN_UNAVAILABLE")
+}
+
+/** Normal native conversations keep the original configured repository directory. */
+export async function prepareHarnessFeatureThreadSession(projectId: string, featureId: string) {
+  const projects = await readProjectStore()
+  const project = projects.projects.find(item => item.projectId === projectId)
+  if (!project?.nativeBinding) {
+    if (readNativeHarnessFeature(projectId, featureId)) throw Error("HARNESS_NATIVE_PROJECT_CHANGED")
+    return undefined
+  }
+  const binding = readNativeHarnessFeature(projectId, featureId)
+  if (!binding) throw Error("HARNESS_NATIVE_FEATURE_MISSING")
+  assertHarnessProjectUseChild(binding)
+  const parent = readHarnessProjectUseParent(projectId)!
+  const directoryIdentity = runtimeDirectoryIdentity(binding.repositoryWorkspace)
+  const assertCurrent = () => {
+    if (readHarnessProjectUseParent(projectId)?.identity !== parent.identity ||
+      runtimeDirectoryIdentity(binding.repositoryWorkspace) !== directoryIdentity)
+      throw Error("HARNESS_NATIVE_BINDING_CHANGED")
+    assertHarnessProjectUseChild(binding)
+  }
+  const launchStage = readNativeHarnessFeatureStage(projectId, featureId)
+  assertCurrent()
+  return { workspacePath: binding.repositoryWorkspace, launchStage, assertCurrent }
 }
 
 async function mutateProjectStore<T>(
@@ -2233,6 +2319,16 @@ export function getHarnessCapabilityWorkspaces(projectId: string): readonly stri
 export function getHarnessCapabilityFeatureWorkspace(projectId: string, featureId: string): string | undefined {
   const internal = readInternalHarnessProjectWorkspaceIndex(projectId)
   if (internal) return internal.featureId === featureId ? internal.workspace : undefined
+  if (nativeProjectAuthorityById.has(projectId)) {
+    try {
+      const binding = readNativeHarnessFeature(projectId, featureId)
+      if (!binding) return undefined
+      assertHarnessProjectUseChild(binding)
+      return binding.repositoryWorkspace
+    } catch {
+      return undefined
+    }
+  }
   return capabilityFeatureWorkspacesByKey.get(featureDeployUnitBindingKey(projectId, featureId))
 }
 
@@ -3288,6 +3384,13 @@ export async function resolveHarnessFeatureCurrentStage(
     const normalizedSlug = normalizeText(slug).trim()
     if (!normalizedProjectId || !normalizedSlug) return null
     const context = await requireProjectContext(normalizedProjectId)
+    if (context.project.nativeBinding) {
+      const binding = readNativeHarnessFeature(normalizedProjectId, normalizedSlug)
+      if (!binding) return null
+      assertNativeHarnessFeatureBinding(binding, context.project)
+      const stage = readNativeHarnessFeatureStage(normalizedProjectId, normalizedSlug)
+      return stage ? { name: stage.name, status: options.labelOnly ? null : stage.status } : null
+    }
     const snapshot = await runInspectAdapter(
       context.project,
       projectConfigContextFromWorker(context),
@@ -3518,7 +3621,8 @@ export interface NativeHarnessProjectSourceBinding {
 }
 export async function createHarnessProject(
   input: HarnessProjectCreateInput,
-  sourceBinding?: NativeHarnessProjectSourceBinding
+  sourceBinding?: NativeHarnessProjectSourceBinding,
+  projectUseOwner?: object
 ): Promise<HarnessProjectMetadata> {
   validateCreateInput(input)
   const store = await readProjectStore()
@@ -3546,10 +3650,11 @@ export async function createHarnessProject(
       throw Error("PROJECT_PACKAGE_IDENTITY_MISMATCH")
   }
   await assertNativeSource()
+  const projectUse = native ? prepareProjectUseCreation(input, projectUseOwner) : undefined
   sourceBinding?.guard()
   const project: HarnessProjectMetadata = {
     ...(native ? { nativeBinding: { engine: "host" as const, installedPluginId: native.plugin.id } } : {}),
-    projectId: sourceBinding?.projectId ?? uuid(),
+    projectId: sourceBinding?.projectId ?? projectUse?.projectId ?? uuid(),
     name: input.name.trim(),
     description: input.description.trim(),
     projectCode: input.projectCode.trim(),
@@ -3578,14 +3683,20 @@ export async function createHarnessProject(
   // Private native owners persist the real metadata in their original owner transaction.
   // Their exact provider exposes it to the same Harness runtime, never the visible catalog.
   if (!sourceBinding) {
-    await mutateProjectStore(async (latest) => {
-      await assertNativeSource()
-      validateProjectCodeUnique(input.projectCode, latest)
-      validateProjectDirUnique(input.projectDir, input.workspacePath, latest)
-      latest.projects.unshift(project)
-    })
+    try {
+      await mutateProjectStore(async (latest) => {
+        await assertNativeSource()
+        validateProjectCodeUnique(input.projectCode, latest)
+        validateProjectDirUnique(input.projectDir, input.workspacePath, latest)
+        projectUse?.commit()
+        latest.projects.unshift(project)
+      })
+    } catch (error) {
+      projectUse?.rollback()
+      throw error
+    }
   }
-  return project
+  return projectUse ? { ...project, projectUseStatus: projectUse.complete() } : project
 }
 
 export async function createHarnessFeature(
@@ -3849,8 +3960,8 @@ export async function getHarnessDynamicWorkflowConfig(
     const source = await nativeHarnessPlugin(project.nativeBinding.installedPluginId)
     if (!source) throw Error("PROJECT_PLUGIN_UNAVAILABLE")
     const nodes = source.manifest.stages.map(stage => ({ id: stage.id, label: stage.title, description: "" }))
-    return { nodes, templates: [{ id: "default", templateType: "default", label: "插件完整流程",
-      description: "按插件声明执行，步骤在创造者模式中调整", nodes: nodes.map(node => node.id),
+    return { nodes, templates: [{ id: "default", templateType: "default", label: "插件默认流程",
+      description: "此插件声明的流程节点如下", nodes: nodes.map(node => node.id),
       requiredNodes: nodes.map(node => node.id) }] }
   }
   return getHarnessDynamicWorkflowConfigForProject(project)
@@ -3916,10 +4027,15 @@ export async function markHarnessProjectManagedRunStarted(
 
 export async function updateHarnessProjectMetadata(
   projectId: string,
-  input: HarnessProjectMetadataUpdateInput
+  input: HarnessProjectMetadataUpdateInput,
+  projectUseOwner?: object
 ): Promise<HarnessProjectMetadata> {
   validateProjectMetadataInput(input)
-  return mutateProjectStore(async (store) => {
+  const projectUse = input.projectUseApproval
+    ? prepareProjectUseUpdate(projectId, input, projectUseOwner) : undefined
+  let result: HarnessProjectMetadata
+  try {
+    result = await mutateProjectStore(async (store) => {
     const index = store.projects.findIndex((item) => item.projectId === projectId)
     if (index === -1) throw new Error("Project not found")
     validateProjectCodeUnique(input.projectCode, store, projectId)
@@ -3959,9 +4075,18 @@ export async function updateHarnessProjectMetadata(
     const native = await nativeHarnessPlugin(harnessAdapter.id)
     if (native) updated.nativeBinding = { engine: "host", installedPluginId: native.plugin.id }
     else delete updated.nativeBinding
+    if (projectUse && !native) throw Error("PROJECT_USE_AUTHORIZATION_INVALID")
+    projectUse?.commit()
+    if (!projectUse && existing.nativeBinding?.installedPluginId !== updated.nativeBinding?.installedPluginId)
+      revokeProjectUseAuthorization(projectId)
     store.projects[index] = updated
     return normalizeProject(updated)!
-  })
+    })
+  } catch (error) {
+    projectUse?.rollback()
+    throw error
+  }
+  return projectUse ? { ...result, projectUseStatus: projectUse.complete() } : result
 }
 
 export async function archiveHarnessProject(projectId: string): Promise<HarnessProjectMetadata> {
@@ -3969,6 +4094,7 @@ export async function archiveHarnessProject(projectId: string): Promise<HarnessP
     const index = store.projects.findIndex((item) => item.projectId === projectId)
     if (index === -1) throw new Error("Project not found")
     if (store.projects[index].nativeBinding) assertNativeHarnessProjectMutable(projectId)
+    revokeProjectUseAuthorization(projectId)
     const archived: HarnessProjectMetadata = {
       ...store.projects[index],
       lifecycle: {
@@ -3987,6 +4113,7 @@ export async function deleteHarnessProject(projectId: string): Promise<HarnessPr
     const index = store.projects.findIndex((item) => item.projectId === projectId)
     if (index === -1) throw new Error("Project not found")
     if (store.projects[index].nativeBinding) assertNativeHarnessProjectMutable(projectId)
+    revokeProjectUseAuthorization(projectId)
     const [deleted] = store.projects.splice(index, 1)
     return normalizeProject(deleted)!
   })

@@ -249,7 +249,11 @@ export async function captureCompletionBinding(
   let diffFiles: string[] | undefined
   let repository = false
   try {
-    repository = (await git(input, ["rev-parse", "--is-inside-work-tree"])).trim() === "true"
+    const repositoryRoot = (await git(input, ["rev-parse", "--show-toplevel"])).trim()
+    // A containing repository cannot replace evidence for the selected child workspace.
+    repository =
+      repositoryRoot.length > 0 &&
+      relative(resolve(input.workspace), resolve(repositoryRoot)) === ""
   } catch (error) {
     input.signal?.throwIfAborted()
     if (!(error && typeof error === "object" && "code" in error && error.code === 128)) throw error

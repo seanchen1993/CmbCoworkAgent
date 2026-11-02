@@ -94,7 +94,7 @@ import type {
 import { FunctionTurnNotices } from "./turn-notices"
 import type { FunctionTurnNotice } from "../../../shared/mods/v2/turn"
 import { existsSync, readFileSync, realpathSync, statSync } from "node:fs"
-import { join } from "node:path"
+import { join, resolve } from "node:path"
 import { createHash, randomInt, randomUUID } from "node:crypto"
 import {
   parseCompletionPolicy,
@@ -560,6 +560,31 @@ export type PreparedClawAction =
     }
 
 export class FunctionModsManager {
+  private projectUseGrant?: (input: {
+    workspace: string; name: string; scope: RuntimeFunctionGrantScope; pluginId?: string
+  }) => ModGrant | null | undefined
+
+  /** Native controllers only; does not expose the store or authority through the SDK. */
+  projectUseControlStore(): ModControlStore { return this.store }
+
+  setProjectUseGrantResolver(resolve: NonNullable<FunctionModsManager["projectUseGrant"]>): void {
+    this.projectUseGrant = resolve
+  }
+
+  /** Static source proof only. A future project's directory and config do not exist yet. */
+  async projectUseSourceFacts(plugin: ModPluginSource) {
+    if (this.closed || !plugin.enabled) throw new ModFunctionError("MODS_CONFIG_SOURCE_CHANGED")
+    if (!this.isSource(plugin) && !isConfigurationOnlyPackage(plugin.path)) return undefined
+    const compiled = await this.configurationSourceCache.read(plugin.path)
+    const assertCurrent = () => {
+      if (this.closed || !plugin.enabled) throw new ModFunctionError("MODS_CONFIG_SOURCE_CHANGED")
+      assertConfigurationSourcesCurrent(plugin.path, compiled)
+    }
+    assertCurrent()
+    return { name: compiled.name, digest: compiled.digest,
+      configurationOnly: compiled.configurationOnly === true,
+      capabilities: compiled.configurationOnly ? [] : [...SESSION_CAPABILITIES], assertCurrent }
+  }
   private readonly desktopNotifiers = new Map<string, FunctionDesktopNotifications>()
 
   private notificationPreference(workspace: string): { enabled: boolean; revision: number } {
@@ -1062,7 +1087,8 @@ export class FunctionModsManager {
     const hasSavedSecret = Object.entries(compiled.userConfig).some(([key, field]) =>
       field.sensitive && !Object.hasOwn(saved.values, key) && Object.hasOwn(saved.sealed ?? {}, key))
     const grant = hasSavedSecret && !explicitApproval
-      ? this.functionSourceGrant(workspace, compiled.name) : undefined
+      ? this.functionSourceGrant(workspace, compiled.name, undefined,
+          this.sources().find(source => resolve(source.path) === resolve(compiled.root))?.id) : undefined
     const assertAuthorized = () => {
       if (!hasSavedSecret) return
       if (explicitApproval) return explicitApproval()
@@ -1726,6 +1752,7 @@ export class FunctionModsManager {
     plugin: ModPluginSource
     name: string
     digest: string
+    scope?: RuntimeFunctionGrantScope
   }): boolean {
     const installed = this.host.plugins().find(source => source.id === input.plugin.id)
     if (this.closed || !installed?.enabled || installed.path !== input.plugin.path ||
@@ -1735,7 +1762,10 @@ export class FunctionModsManager {
     const facts = this.getRuntimeSourceFacts(input)
     if (!facts || facts.configurationOnly || facts.name !== input.name || facts.digest !== input.digest)
       throw new ModFunctionError("MODS_CONFIG_SOURCE_CHANGED")
-    const grant = this.store.getGrant(input.workspace, `function:${facts.name}`)
+    const scoped = input.scope && this.projectUseGrant?.({ workspace: input.workspace,
+      name: facts.name, scope: input.scope, pluginId: input.plugin.id })
+    const grant = scoped === undefined
+      ? this.store.getGrant(input.workspace, `function:${facts.name}`) : scoped
     return !!grant?.enabled && grant.digest === facts.digest
   }
 
@@ -1812,7 +1842,7 @@ export class FunctionModsManager {
     }
     const sdk = await analyzeFunctionSdk(compiled)
     assertConfigurationSourcesCurrent(input.plugin.path, compiled)
-    const grant = this.functionSourceGrant(input.workspace, facts.name, input.scope)
+    const grant = this.functionSourceGrant(input.workspace, facts.name, input.scope, input.plugin.id)
     return {
       ...facts,
       configurationReady,
@@ -1836,7 +1866,7 @@ export class FunctionModsManager {
     this.assertRuntimeSourceConfiguration(input)
     const compiled = this.retainedRuntimeCompilation(input)
     if (!compiled || compiled.configurationOnly) return
-    const grant = this.functionSourceGrant(input.workspace, compiled.name, input.scope)
+    const grant = this.functionSourceGrant(input.workspace, compiled.name, input.scope, input.plugin.id)
     if (!this.host.enabled(input.workspace) || !grant?.enabled || grant.digest !== compiled.digest)
       throw new ModFunctionError("PROJECT_MODS_APPROVAL_REQUIRED")
   }
@@ -3484,8 +3514,14 @@ export class FunctionModsManager {
     return compiled
   }
 
-  private functionSourceGrant(workspace: string, name: string, explicit?: RuntimeFunctionGrantScope): ModGrant | null {
+  private functionSourceGrant(workspace: string, name: string, explicit?: RuntimeFunctionGrantScope,
+    pluginId?: string): ModGrant | null {
     const binding = currentRuntimePluginSource()
+    const projectUse = explicit ?? (binding?.mode === "host" ? binding : undefined)
+    if (projectUse) {
+      const grant = this.projectUseGrant?.({ workspace, name, scope: projectUse, pluginId })
+      if (grant !== undefined) return grant
+    }
     if (!explicit && binding?.actionSources?.some(item => item.name === name))
       return this.store.getGrant(workspace, `function:${name}`)
     const scope = explicit ?? (binding?.mode === "host" ||
@@ -3504,7 +3540,7 @@ export class FunctionModsManager {
           throw new ModFunctionError("CLAW_ACTION_PROVIDER_CHANGED")
         if (compiled.name === CONTEXT_METER_NAME)
           throw new ModFunctionError("MODS_RESERVED_BUILTIN_NAME")
-        const grant = this.functionSourceGrant(workspace, compiled.name)
+        const grant = this.functionSourceGrant(workspace, compiled.name, undefined, source.id)
         result.push({
           pluginId: source.id,
           name: compiled.name,
@@ -4720,7 +4756,7 @@ export class FunctionModsManager {
               )
             )
               throw new ModFunctionError("CLAW_CAPABILITY_CHANGED")
-            const grant = this.functionSourceGrant(workspace, compiled.name)
+            const grant = this.functionSourceGrant(workspace, compiled.name, undefined, source.id)
             if (!grant?.enabled || grant.digest !== compiled.digest) continue
             const componentSelection = selected?.capabilities.find(
               (capability) => capability.pluginId === source.id

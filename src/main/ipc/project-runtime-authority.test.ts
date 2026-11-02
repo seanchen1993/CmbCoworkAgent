@@ -1,16 +1,24 @@
-import { afterEach, expect, it, vi } from "vitest"
+import { afterEach, beforeEach, expect, it, vi } from "vitest"
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { hostProjectFixture } from "../harness-board/project-runtime/host-fixtures.test-helper"
 import { derivationContentIdentity, snapshotDerivationSource } from "../plugins/derivation-source"
 import type { BrowserWindow, IpcMain, IpcMainInvokeEvent } from "electron"
+import { canonicalTmpdir } from "../../../tests/support/canonical-temp-dir"
+import { ModControlStore } from "../mods/control-store"
+import type { FunctionModsManager } from "../mods/v2/manager"
+import { configureProjectUseRuntime } from "../harness-board/project-use-authorization"
 
 const state = vi.hoisted(() => ({
   service: undefined as unknown,
   plugins: [] as Array<{ id: string; path: string; name: string; version: string; enabled: boolean }>,
   binding: undefined as import("../../shared/harness-board-types").HarnessNativeFeatureBinding | undefined,
   ensureNative: vi.fn(),
+  nativeReady: vi.fn(async (...args: unknown[]) => {
+    void args
+    return { ready: true, assertCurrent: () => {}, assertExecutionReady: () => {} }
+  }),
   afterSnapshot: undefined as (() => void) | undefined
 }))
 vi.mock("../harness-board/native-harness", () => ({
@@ -21,8 +29,18 @@ vi.mock("../harness-board/native-harness", () => ({
   findNativeHarnessFeatureByRunId: (id: string) => state.binding?.hostRunId === id ? state.binding : undefined,
   ensureNativeHarnessFeatureRun: (...args: unknown[]) => state.ensureNative(...args)
 }))
+vi.mock("../harness-board/service", () => ({
+  // These IPC fixtures represent pre-existing native projects without owner receipts.
+  // Real parent/child providers and aggregate consent are covered by the service integration.
+  readHarnessProjectUseParent: () => undefined,
+  assertHarnessProjectUseChild: () => { throw Error("UNEXPECTED_OWNER_ADMISSION") }
+}))
+vi.mock("./native-harness-source", () => ({
+  registerNativeHarnessSourceHandlers: () => (...args: unknown[]) => state.nativeReady(...args)
+}))
 vi.mock("electron", () => ({ BrowserWindow: {} }))
-vi.mock("../storage", () => ({ getOpenworkDir: () => "C:/unused-runtime-authority", getPlugins: () => state.plugins }))
+vi.mock("../storage", () => ({ getOpenworkDir: () => "C:/unused-runtime-authority", getPlugins: () => state.plugins,
+  getUserInfo: () => null }))
 vi.mock("../db", () => ({ getThreadCore: () => undefined }))
 vi.mock("../harness-board/project-runtime/host-service", () => ({
   HostProjectService: class { constructor() { return state.service as object } }
@@ -165,10 +183,28 @@ it.each(["destroyed", "replaced"])("rejects the actual desktop command before ap
 
 
 const templateRoots: string[] = []
+let authorizationStore: ModControlStore
+beforeEach(() => {
+  const root = mkdtempSync(join(canonicalTmpdir(), "native-authority-control-"))
+  templateRoots.push(root)
+  authorizationStore = new ModControlStore(join(root, "control.sqlite"))
+  configureProjectUseRuntime({ store: authorizationStore, workspaceKey: value => value,
+    manager: { setProjectUseGrantResolver: () => {} } as unknown as FunctionModsManager,
+    control: {
+      applicationStamp: () => "unchanged", settingsStamp: () => "unchanged",
+      globallyEnabled: () => false, enabled: () => false,
+      enable: () => { throw Error("UNEXPECTED_OWNER_ENABLE") },
+      initialize: () => { throw Error("UNEXPECTED_OWNER_INITIALIZATION") },
+      enableApplication: () => { throw Error("UNEXPECTED_OWNER_ENABLE") }
+    } })
+})
 afterEach(() => {
+  authorizationStore.close()
   state.plugins = []
   state.binding = undefined
   state.ensureNative.mockReset()
+  state.nativeReady.mockReset().mockResolvedValue({ ready: true, assertCurrent: () => {},
+    assertExecutionReady: () => {} })
   state.afterSnapshot = undefined
   for (const root of templateRoots.splice(0)) rmSync(root, { recursive: true, force: true })
 })
@@ -489,4 +525,39 @@ it("does not let a Feature replace its fixed package through the standalone migr
     kind: "review-plan", expectedVersion: 1
   })).rejects.toThrow("HARNESS_NATIVE_FEATURE_SOURCE_FIXED")
   expect(prepareRuntimeInputs).not.toHaveBeenCalled()
+})
+
+it("blocks the first native continuation before any Skill when its actual scope is not ready", async () => {
+  const { project } = nativeFeatureFixture()
+  const continuation = vi.fn()
+  const prepareRuntimeInputs = vi.fn()
+  state.service = { recoverInterrupted: () => {}, importedSource: () => undefined,
+    get: () => project, operations: () => [], prepareRuntimeInputs, continue: continuation }
+  state.ensureNative.mockImplementation(async (_project, _feature, _goal, guard) => guard())
+  state.nativeReady.mockResolvedValue({ ready: false, assertCurrent: () => {}, assertExecutionReady: () => {} })
+  const result = await nativeHandlers().native("container", "feature-a", {
+    kind: "start-feature", initialUserMessage: "Actual request", workspacePath: "C:/chosen-execution"
+  }) as { continuation: { reason: string; error: string } }
+  expect(result.continuation.reason).toBe("blocked")
+  expect(result.continuation.error).toContain("本次运行目录已保存")
+  expect(state.ensureNative.mock.calls[0][4]).toBe("C:/chosen-execution")
+  expect(state.nativeReady).toHaveBeenCalledTimes(1)
+  expect(prepareRuntimeInputs).not.toHaveBeenCalled()
+  expect(continuation).not.toHaveBeenCalled()
+})
+
+it("carries the independent readiness fence past the dispatch preparation await", async () => {
+  const { project } = nativeFeatureFixture()
+  let configured = true
+  const continuation = vi.fn()
+  state.nativeReady.mockResolvedValue({ ready: true, assertCurrent: () => {},
+    assertExecutionReady: () => { if (!configured) throw Error("DEPENDENCY_CONFIGURATION_CHANGED") } })
+  state.service = { recoverInterrupted: () => {}, importedSource: () => undefined,
+    get: () => project, operations: () => [], continue: continuation,
+    prepareRuntimeInputs: async () => { await Promise.resolve(); configured = false } }
+  state.ensureNative.mockImplementation(async (_project, _feature, _goal, guard) => guard())
+  await expect(nativeHandlers().native("container", "feature-a", {
+    kind: "start-feature", initialUserMessage: "Actual request"
+  })).rejects.toThrow("DEPENDENCY_CONFIGURATION_CHANGED")
+  expect(continuation).not.toHaveBeenCalled()
 })

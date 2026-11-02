@@ -1,4 +1,5 @@
 import { openClawSidebar } from "@/lib/claw-sidebar"
+import { canUseChatWorkbench, effectiveChatRightModule } from "@/lib/chat-workbench-visibility"
 import { ClawSidebarHost } from "@/components/panels/ClawSidebarHost"
 import { editorNavigationScopeKey } from "../../shared/mods/v2/developer-editor"
 import {
@@ -269,7 +270,7 @@ function App(): React.JSX.Element {
     rightPanelCollapsed,
     toggleRightPanel,
     rightPanelWorkRequest,
-    rightModule,
+    rightModule: selectedRightModule,
     setRightModule,
     setBrowserCdpConfig,
     setPendingEvolution,
@@ -450,6 +451,13 @@ function App(): React.JSX.Element {
     accountRevision, renderedThreadId, platformWorkspacePath, platformWorkspaceBirth
   ])
   const renderedHarnessSessionThreadId = renderedRoute.harnessSessionThreadId
+  const workbenchThreadId = renderedMainView === "harness"
+    ? renderedHarnessSessionThreadId : renderedThreadId
+  const chatWorkbenchAvailable = useAppStore(state => canUseChatWorkbench(
+    renderedMainView === "harness" ? "harness-project" : "default",
+    state.threads.find(thread => thread.thread_id === workbenchThreadId)
+  ))
+  const rightModule = effectiveChatRightModule(selectedRightModule, chatWorkbenchAvailable)
   const isRightPanelFullscreen = previewFullscreen || browserFullscreen
   const showRightResizeHandle = !previewFullscreen
   const fullscreenMainClassName = browserFullscreen
@@ -1185,7 +1193,7 @@ function App(): React.JSX.Element {
               !rightPanelCollapsed &&
               !isAgentFocusActive && (
                 <>
-                  {((renderedMainView === "thread" && renderedThreadId) ||
+                  {chatWorkbenchAvailable && ((renderedMainView === "thread" && renderedThreadId) ||
                     (renderedMainView === "harness" && renderedHarnessSessionThreadId)) && (
                     <button
                       type="button"
@@ -1421,7 +1429,7 @@ function App(): React.JSX.Element {
                       />
                     </div>
                   )}
-                {renderedMainView === "thread" && renderedThreadId && (
+                {renderedMainView === "thread" && renderedThreadId && chatWorkbenchAvailable && (
                   <div
                     hidden={rightPanelCollapsed || rightModule !== "claw" || isAgentFocusActive}
                     inert={rightPanelCollapsed || rightModule !== "claw" || isAgentFocusActive}
@@ -1578,23 +1586,6 @@ function App(): React.JSX.Element {
                     </section>
                   </>
                 )}
-                {renderedHarnessSessionThreadId && (
-                  <div
-                    hidden={rightPanelCollapsed || rightModule !== "claw" || isHarnessAgentFocusActive}
-                    inert={rightPanelCollapsed || rightModule !== "claw" || isHarnessAgentFocusActive}
-                    data-claw-sidebar-shell
-                    className="h-full min-h-0 shrink-0 border-l bg-background max-[1050px]:absolute max-[1050px]:inset-y-0 max-[1050px]:right-0 max-[1050px]:z-40 max-[1050px]:shadow-2xl"
-                    style={{
-                      width: Math.max(340, Math.min(rightWidth, 480)),
-                      maxWidth: "calc(100vw - 24px)"
-                    }}
-                  >
-                    <ClawSidebarHost
-                      key={renderedHarnessSessionThreadId}
-                      threadId={renderedHarnessSessionThreadId}
-                    />
-                  </div>
-                )}
                 {renderedHarnessSessionThreadId &&
                   !rightPanelCollapsed &&
                   rightModule !== "claw" &&
@@ -1680,6 +1671,7 @@ function App(): React.JSX.Element {
               </div>
             )}
             <ResourcePanelOverlay
+              moduleMode={rightModule}
               isAgentFocusActive={isAgentFocusActive}
               renderedMainView={renderedMainView}
               renderedPanelThreadId={renderedRightPanelThreadId}

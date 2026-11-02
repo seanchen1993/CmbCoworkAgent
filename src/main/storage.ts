@@ -2034,6 +2034,7 @@ const WINDOW_CLOSE_BEHAVIOR_KEY = "windowCloseBehavior"
 const GIT_CHANGE_NOTICE_ENABLED_KEY = "gitChangeNoticeEnabled"
 const GIT_CHANGE_NOTICE_REVISION_KEY = "gitChangeNoticeRevision"
 const MODS_GLOBAL_ENABLED_KEY = "modsGlobalEnabled"
+const MODS_GLOBAL_REVISION_KEY = "modsGlobalRevision"
 let modsGlobalSwitch: ReturnType<typeof createDisabledSwitchReader> | undefined
 
 /** Application-level safety switch for both legacy Mods and Function Mods. */
@@ -2053,9 +2054,19 @@ export function getModsGlobalEnabled(): boolean {
 
 export function setModsGlobalEnabled(enabled: boolean): boolean {
   const normalized = Boolean(enabled)
-  getSettingsStore().set(MODS_GLOBAL_ENABLED_KEY, normalized)
+  const settings = getSettingsStore()
+  const revision = settings.get(MODS_GLOBAL_REVISION_KEY, 0)
+  if (!Number.isSafeInteger(revision) || Number(revision) < 0)
+    throw Error("MODS_SETTINGS_INVALID")
+  settings.set({ [MODS_GLOBAL_ENABLED_KEY]: normalized,
+    [MODS_GLOBAL_REVISION_KEY]: Number(revision) + 1 })
   modsGlobalSwitch?.invalidate()
   return normalized
+}
+
+/** Compare-and-set reviews must detect even an off -> off user settings transaction. */
+export function getModsGlobalSettingsStamp(): string {
+  return JSON.stringify([getModsGlobalEnabled(), getSettingsStore().get(MODS_GLOBAL_REVISION_KEY, 0)])
 }
 
 export function getGitChangeNoticeEnabled(): boolean {

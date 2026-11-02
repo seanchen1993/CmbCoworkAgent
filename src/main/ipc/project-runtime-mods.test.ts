@@ -14,7 +14,7 @@ import { tmpdir } from "node:os"
 import { afterEach, expect, it, vi } from "vitest"
 import type { IpcMain, IpcMainInvokeEvent } from "electron"
 import { registerProjectRuntimeModsHandlers } from "./project-runtime-mods"
-import { setProjectRuntimeFunctions } from "../harness-board/project-runtime-function-source"
+import { assertProjectRuntimeSourceApproved, setProjectRuntimeFunctions } from "../harness-board/project-runtime-function-source"
 import { HostProjectService } from "../harness-board/project-runtime/host-service"
 import { HostProjectStore } from "../harness-board/project-runtime/host-store"
 import { HostPackageSnapshots } from "../harness-board/project-runtime/package-snapshots"
@@ -44,9 +44,66 @@ vi.mock("electron", () => ({
 }))
 const cleanup: Array<() => void> = []
 afterEach(() => {
+  vi.restoreAllMocks()
   for (const close of cleanup.splice(0).reverse()) close()
   state.enabled = true
   state.dependencies = []
+})
+
+it("checks required main configuration even when code consent already reports ready", async () => {
+  const f = await fixture(true)
+  const loading = vi.spyOn(FunctionGuestRuntime, "create")
+  const read = await f.call("read", "project")
+  f.control.grantProjectFunction(f.workspace, "project", f.project.pluginDigest,
+    read.source.name, read.source.digest, true)
+  expect((await f.call("read", "project")).source).toMatchObject({
+    state: "ready", configurationReady: false
+  })
+  await expect(assertProjectRuntimeSourceApproved(f.project,
+    f.snapshots.read(f.project.pluginDigest).root)).rejects.toThrow("Invalid plugin configuration field: label")
+  expect(f.service.operations("project")).toEqual([])
+  expect(loading).not.toHaveBeenCalled()
+})
+
+it("preflights exact dependency configuration without Guest work and keeps a live execution fence", async () => {
+  const f = await fixture(false, false, false, true, true)
+  const loading = vi.spyOn(FunctionGuestRuntime, "create")
+  const workspace = f.core!.workspaceKey(f.workspace)
+  const read = await f.call("read", "project")
+  f.control.grantProjectFunction(workspace, "project", read.packageDigest,
+    read.source.name, read.source.digest, true)
+  f.control.grant(workspace, `function:${read.dependencies[0].name}`, read.dependencies[0].digest, true)
+  f.core!.configure(workspace, true, false)
+  const binding: HarnessNativeFeatureBinding = { engine: "host", projectId: "container",
+    featureId: "feature", hostRunId: "project", title: "Mixed", workspace: f.workspace,
+    repositoryWorkspace: f.workspace, installedPluginId: "installation",
+    packageDigest: f.project.pluginDigest, expectedPlugin: { pluginId: "installation",
+      name: "mixed-project", version: "1.0.0",
+      digest: derivationContentIdentity((await snapshotDerivationSource(f.source)).files) } }
+  const pending = f.pendingSource(binding)
+  expect((await pending.ready()).ready).toBe(false)
+  expect(loading).not.toHaveBeenCalled()
+  const values = new FunctionUserConfigValues(f.control)
+  const schema = { label: { type: "string" as const, title: "Label", description: "Required", required: true } }
+  values.save(workspace, "locked-rules", schema, "label", "Configured", 0, () => {})
+  const ready = await pending.ready()
+  expect(ready.ready).toBe(true)
+  if (!ready.ready) throw Error("Expected a proved configuration")
+  ready.assertExecutionReady()
+  f.core!.configure(workspace, false, false)
+  expect(() => ready.assertExecutionReady()).toThrow("PROJECT_MODS_APPROVAL_REQUIRED")
+  f.core!.configure(workspace, true, false)
+  const beforeStart = vi.fn()
+  vi.spyOn(f.service, "prepareRuntimeInputs").mockImplementationOnce(async () => {
+    await Promise.resolve()
+    values.reset(workspace, "locked-rules", schema, "label", 1, () => {})
+  })
+  const result = await f.service.continue("project", { assertAuthority: ready.assertExecutionReady, beforeStart })
+  expect(result.reason).toBe("blocked")
+  expect(result.error).toContain("Invalid plugin configuration field: label")
+  expect(beforeStart).not.toHaveBeenCalled()
+  expect(f.service.operations("project")).toEqual([])
+  expect(loading).not.toHaveBeenCalled()
 })
 async function fixture(
   config = false,
@@ -321,7 +378,7 @@ async function fixture(
     workspace,
     control,
     pendingSource(binding: HarnessNativeFeatureBinding) {
-      registerNativeHarnessSourceHandlers({ handle: (channel: string, handler: Parameters<IpcMain["handle"]>[1]) => { handlers.set(channel, handler) } } as unknown as IpcMain, {
+      const ready = registerNativeHarnessSourceHandlers({ handle: (channel: string, handler: Parameters<IpcMain["handle"]>[1]) => { handlers.set(channel, handler) } } as unknown as IpcMain, {
         trusted: value => { if (value !== event) throw Error("UNTRUSTED"); return event },
         platform: () => service,
         retainedRoot: value => snapshots.read(value.pluginDigest).root,
@@ -329,6 +386,7 @@ async function fixture(
         assertBinding: value => { if (value.projectId !== binding.projectId) throw Error("BINDING_CHANGED") }
       })
       return {
+        ready: () => ready(event, binding.hostRunId),
         call: (channel: string, input: unknown) => handlers.get("harness-native-feature:mods-" + channel)!(event, input),
         config: (channel: string, input: unknown) => handlers.get("harness-native-feature:user-config" + channel)!(event, input)
       }

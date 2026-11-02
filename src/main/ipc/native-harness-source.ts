@@ -8,6 +8,7 @@ import { capturePackageMetadataGuard } from "../harness-board/project-runtime/pa
 import { projectRuntimeFunctionSource } from "../harness-board/project-runtime-function-source"
 import { projectRuntimeDependencies } from "../harness-board/project-runtime-dependencies"
 import { registerNativeProjectSourceHandlers } from "./native-project-source"
+import { projectUseOwnsFeature, admitProjectUseFeature } from "../harness-board/project-use-authorization"
 
 /** Configuration identity exists before execution. It is never a manufactured Host state. */
 export function registerNativeHarnessSourceHandlers(ipc: IpcMain, deps: {
@@ -17,12 +18,13 @@ export function registerNativeHarnessSourceHandlers(ipc: IpcMain, deps: {
   readBinding(hostRunId: string): HarnessNativeFeatureBinding | undefined
   assertBinding(binding: HarnessNativeFeatureBinding): void
 }) {
-  registerNativeProjectSourceHandlers(ipc, "harness-native-feature", async (event, ownerKey) => {
+  return registerNativeProjectSourceHandlers(ipc, "harness-native-feature", async (event, ownerKey) => {
     const owner = deps.trusted(event)
     if (typeof ownerKey !== "string" || !ownerKey || ownerKey.length > 256)
       throw Error("PROJECT_INVALID_INPUT")
     const binding = deps.readBinding(ownerKey)
     if (!binding || binding.hostRunId !== ownerKey) throw Error("HARNESS_NATIVE_FEATURE_MISSING")
+    admitProjectUseFeature(binding)
     const originalBinding = JSON.stringify(binding)
     const api = deps.platform()
     const existing = api.get(ownerKey)
@@ -62,13 +64,25 @@ export function registerNativeHarnessSourceHandlers(ipc: IpcMain, deps: {
       (existing?.packageVersion ?? pending!.snapshot.manifest.plugin.version) !== binding.expectedPlugin.version)
       throw Error("PROJECT_PACKAGE_IDENTITY_MISMATCH")
     const guard = () => { authorityGuard(); sourceGuard(); pending?.assertCurrent(); authorityGuard() }
+    const executionGuard = () => {
+      if (deps.trusted(event) !== owner ||
+        JSON.stringify(deps.readBinding(ownerKey)) !== originalBinding)
+        throw Error("PROJECT_INPUT_CHANGED")
+      deps.assertBinding(binding)
+      const current = getPlugins().find(plugin => plugin.id === binding.installedPluginId)
+      if (!current?.enabled || JSON.stringify([current.id, current.path, current.name,
+        current.version, current.enabled]) !== installedIdentity)
+        throw Error("PROJECT_PLUGIN_UNAVAILABLE")
+      sourceGuard()
+    }
     const source = projectRuntimeFunctionSource({ projectId: ownerKey,
       workspace: binding.workspace, pluginDigest: packageDigest,
       installedPluginId: binding.installedPluginId, packageId: binding.expectedPlugin.name }, root)
     const dependencies = projectRuntimeDependencies({ root, workspace: source.input.workspace,
-      manager: source.manager, plugins: getPlugins, assertCurrent: guard })
+      manager: source.manager, plugins: getPlugins, assertCurrent: guard, scope: source.input.scope })
     // Version zero is a pending configuration scope; real execution versions start at one.
-    return { project: { projectId: ownerKey, version: existing?.version ?? 0, pluginDigest: packageDigest },
-      root, guard, authorityGuard, ...source, dependencies }
+    return { ...(projectUseOwnsFeature(ownerKey) ? { approvalAtProject: true as const } : {}),
+      project: { projectId: ownerKey, version: existing?.version ?? 0, pluginDigest: packageDigest },
+      root, guard, authorityGuard, executionGuard, ...source, dependencies }
   })
 }

@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto"
+import { randomUUID } from "node:crypto"
 import { existsSync, mkdirSync, realpathSync } from "node:fs"
 import { dirname, isAbsolute, join, resolve } from "node:path"
 import { DatabaseSync } from "node:sqlite"
@@ -25,17 +25,15 @@ import { getOpenworkDir, getPlugins } from "../storage"
 import { derivationContentIdentity, snapshotDerivationSource } from "../plugins/derivation-source"
 import { readProjectRuntimeDescription } from "./project-runtime/description"
 import { withHarnessStoreMutation } from "./async-json-store"
-import { readRuntimeScopedFile, probeRuntimeScopedFile } from "./project-runtime/safe-files"
+import {
+  readRuntimeScopedFile,
+  probeRuntimeScopedFile,
+  runtimeDirectory,
+  runtimeDirectoryIdentity
+} from "./project-runtime/safe-files"
 import { HARNESS_PROJECT_STORE_MAX_BYTES } from "./store-limits"
 import { hostGoal } from "./project-runtime/host-state-protocol"
-import {
-  identifyRepository,
-  prepareWorkflowWorktreeSource,
-  isWorktreePristine,
-  createWorkflowWorktree,
-  resolveWorkflowWorktreeIsolationBoundary,
-  persistWorkflowWorktreeRecord
-} from "../services/git-worktree"
+import { resolveWorkflowWorktreeIsolationBoundary } from "../services/git-worktree"
 
 interface NativeFeatureRecord extends HarnessNativeFeatureBinding {
   manifest: ProjectRuntimeManifest
@@ -90,6 +88,17 @@ export class NativeHarnessFeatureStore {
       !isAbsolute(data.repositoryWorkspace) ||
       data.expectedPlugin?.pluginId !== data.installedPluginId ||
       !/^[a-f0-9]{64}$/.test(data.expectedPlugin.digest) ||
+      (data.workspaceMode !== undefined && data.workspaceMode !== "selected-directory") ||
+      (data.workspaceMode === "selected-directory" &&
+        (typeof data.workspaceIdentity !== "string" ||
+          !data.workspaceIdentity ||
+          data.workspaceIdentity.length > 8192 ||
+          !!data.worktree ||
+          (data.repositoryWorkspaceIdentity !== undefined &&
+            (typeof data.repositoryWorkspaceIdentity !== "string" ||
+              !data.repositoryWorkspaceIdentity ||
+              data.repositoryWorkspaceIdentity.length > 8192)) ||
+          (!data.repositoryWorkspaceIdentity && data.workspace !== data.repositoryWorkspace))) ||
       (data.packageDigest !== undefined && !/^[a-f0-9]{64}$/.test(data.packageDigest))
     )
       throw Error("HARNESS_NATIVE_BINDING_INVALID")
@@ -159,6 +168,17 @@ function publicBinding(record: NativeFeatureRecord): HarnessNativeFeatureBinding
     title: record.title,
     workspace: record.workspace,
     repositoryWorkspace: record.repositoryWorkspace,
+    ...(record.workspaceMode
+      ? {
+          workspaceMode: record.workspaceMode,
+          workspaceIdentity: record.workspaceIdentity,
+          ...(record.repositoryWorkspaceIdentity
+            ? {
+                repositoryWorkspaceIdentity: record.repositoryWorkspaceIdentity
+              }
+            : {})
+        }
+      : {}),
     installedPluginId: record.installedPluginId,
     expectedPlugin: structuredClone(record.expectedPlugin),
     ...(record.packageDigest ? { packageDigest: record.packageDigest } : {}),
@@ -184,20 +204,46 @@ export function assertNativeHarnessFeatureCurrent(binding: HarnessNativeFeatureB
   const project = value?.projects?.find(
     (item: HarnessProjectMetadata) => item.projectId === binding.projectId
   )
+  assertNativeHarnessFeatureBinding(binding, project)
+}
+
+/** The caller supplies current host-owned project facts, never renderer metadata. */
+export function assertNativeHarnessFeatureBinding(
+  binding: HarnessNativeFeatureBinding,
+  project: HarnessProjectMetadata | undefined,
+  options: { allowArchivedRead?: boolean } = {}
+): void {
   if (
     !project ||
-    project.lifecycle?.status !== "active" ||
+    (project.lifecycle?.status !== "active" &&
+      !(options.allowArchivedRead && project.lifecycle?.status === "archived")) ||
     project.nativeBinding?.engine !== "host" ||
     project.nativeBinding.installedPluginId !== binding.installedPluginId ||
     project["harness-adapter"]?.id !== binding.installedPluginId ||
-    (!binding.worktree && dirname(dirname(binding.workspace)) !== nativeProjectRoot(project)) ||
-    (binding.worktree && binding.worktree.workspaceDirectory !== binding.workspace) ||
+    (binding.workspaceMode === "selected-directory"
+      ? !!binding.worktree ||
+        runtimeDirectoryIdentity(binding.workspace) !== binding.workspaceIdentity ||
+        runtimeDirectoryIdentity(binding.repositoryWorkspace) !==
+          (binding.repositoryWorkspaceIdentity ?? binding.workspaceIdentity)
+      : (!binding.worktree && dirname(dirname(binding.workspace)) !== nativeProjectRoot(project)) ||
+        (binding.worktree && binding.worktree.workspaceDirectory !== binding.workspace)) ||
     realpathSync(binding.workspace) !== binding.workspace
   )
     throw Error("HARNESS_NATIVE_PROJECT_CHANGED")
   const current = readNativeHarnessFeature(binding.projectId, binding.featureId)
   if (!current || JSON.stringify(current) !== JSON.stringify(binding))
     throw Error("HARNESS_NATIVE_BINDING_CHANGED")
+}
+
+/** Reading a stage for a normal conversation never starts a Host or an adapter. */
+export function readNativeHarnessFeatureStage(projectId: string, featureId: string) {
+  const record = existingStore()?.get(projectId, featureId)
+  if (!record) throw Error("HARNESS_NATIVE_FEATURE_MISSING")
+  const view = runtime ? recordView(record) : undefined
+  if (!runtime && record.packageDigest) throw Error("HARNESS_NATIVE_RUNTIME_UNAVAILABLE")
+  const manifest = view?.project.manifest ?? record.manifest
+  const stage = manifest.stages[view?.project.stageIndex ?? 0]
+  return stage ? { name: stage.title, status: stageStatus(view, stage.id) } : null
 }
 
 export async function nativeHarnessPlugin(id: string) {
@@ -265,51 +311,23 @@ export async function createNativeHarnessFeature(input: {
     }
     const root = nativeProjectRoot(project)
     if (realpathSync(root) !== root) throw Error("HARNESS_NATIVE_WORKSPACE_INVALID")
-    const features = join(root, ".harness-features")
-    mkdirSync(features, { recursive: true })
-    if (realpathSync(features) !== features) throw Error("HARNESS_NATIVE_WORKSPACE_INVALID")
     const hostRunId = `harness-feature:${randomUUID()}`
-    let workspace = join(features, createHash("sha256").update(hostRunId).digest("hex"))
-    const repositoryWorkspace = realpathSync(input.repositoryWorkspace)
-    let worktree: HarnessNativeFeatureBinding["worktree"]
-    if (await identifyRepository(repositoryWorkspace)) {
-      const source = await prepareWorkflowWorktreeSource(repositoryWorkspace)
-      if (!(await isWorktreePristine(source.sourceRoot, source.baseCommit)))
-        throw Error(
-          "原仓库有未提交或未跟踪内容，请先提交或处理后再创建隔离需求；不会静默忽略原改动"
-        )
-      await input.guard?.()
-      worktree = await createWorkflowWorktree({
-        workspacePath: repositoryWorkspace,
-        source,
-        runId: hostRunId,
-        threadId: hostRunId,
-        label: "feature",
-        persistOwnership: true
-      })
-      workspace = realpathSync(worktree.workspaceDirectory)
-      await resolveWorkflowWorktreeIsolationBoundary(worktree)
-      await persistWorkflowWorktreeRecord({
-        id: worktree.name,
-        runId: hostRunId,
-        threadId: hostRunId,
-        ...worktree,
-        headCommit: worktree.baseCommit,
-        dirty: false,
-        status: "ready",
-        updatedAt: new Date().toISOString()
-      })
-      await input.guard?.()
-    } else mkdirSync(workspace)
+    const repositoryWorkspace = runtimeDirectory(realpathSync(input.repositoryWorkspace))
+    const workspaceIdentity = runtimeDirectoryIdentity(repositoryWorkspace)
+    await input.guard?.()
+    if (runtimeDirectoryIdentity(repositoryWorkspace) !== workspaceIdentity)
+      throw Error("HARNESS_NATIVE_WORKSPACE_INVALID")
     const record: NativeFeatureRecord = {
       engine: "host",
       projectId: project.projectId,
       featureId,
       hostRunId,
       title: featureId,
-      workspace,
+      workspace: repositoryWorkspace,
       repositoryWorkspace,
-      ...(worktree ? { worktree } : {}),
+      workspaceMode: "selected-directory",
+      workspaceIdentity,
+      repositoryWorkspaceIdentity: workspaceIdentity,
       installedPluginId: source.plugin.id,
       expectedPlugin,
       manifest,
@@ -326,7 +344,8 @@ export async function ensureNativeHarnessFeatureRun(
   projectId: string,
   featureId: string,
   goal: string,
-  guard: () => void = () => {}
+  guard: () => void = () => {},
+  executionWorkspace?: string
 ): Promise<LocalProjectView> {
   return withHarnessStoreMutation(`native-feature:${projectId}:${featureId}`, async () => {
     if (!runtime) throw Error("HARNESS_NATIVE_RUNTIME_UNAVAILABLE")
@@ -334,6 +353,25 @@ export async function ensureNativeHarnessFeatureRun(
     const record = store().get(projectId, featureId)
     if (!record) throw Error("HARNESS_NATIVE_FEATURE_MISSING")
     assertNativeHarnessFeatureCurrent(publicBinding(record))
+    if (executionWorkspace !== undefined) {
+      if (
+        typeof executionWorkspace !== "string" ||
+        !isAbsolute(executionWorkspace) ||
+        executionWorkspace.length > 4096
+      )
+        throw Error("HARNESS_NATIVE_WORKSPACE_INVALID")
+      const selected = runtimeDirectory(realpathSync(executionWorkspace))
+      if (
+        (record.goal || record.packageDigest || record.workspaceMode !== "selected-directory") &&
+        selected !== record.workspace
+      )
+        throw Error("本次执行已固定目录，不能更换运行目录")
+      if (!record.goal && !record.packageDigest && record.workspaceMode === "selected-directory") {
+        record.repositoryWorkspaceIdentity ??= record.workspaceIdentity
+        record.workspace = selected
+        record.workspaceIdentity = runtimeDirectoryIdentity(selected)
+      }
+    }
     if (record.worktree) await resolveWorkflowWorktreeIsolationBoundary(record.worktree)
     guard()
     goal = hostGoal(goal)
@@ -420,6 +458,11 @@ export function updateNativeHarnessFeatureConfiguration(
   if (record.worktree || record.goal || record.packageDigest)
     throw Error("需求已固定隔离工作区，不能更换原执行的工作区配置")
   record.repositoryWorkspace = realpathSync(repositoryWorkspace)
+  if (record.workspaceMode === "selected-directory") {
+    record.workspace = runtimeDirectory(record.repositoryWorkspace)
+    record.workspaceIdentity = runtimeDirectoryIdentity(record.workspace)
+    record.repositoryWorkspaceIdentity = record.workspaceIdentity
+  }
   record.sessionWorkspace = sessionWorkspace
   record.selectedDeployUnits = selectedDeployUnits
   store().update(record)
@@ -546,6 +589,7 @@ export function nativeHarnessRunDetail(
 ): HarnessRunDetailViewModel {
   const record = store().get(project.projectId, featureId)
   if (!record) throw Error("HARNESS_NATIVE_FEATURE_MISSING")
+  assertNativeHarnessFeatureBinding(publicBinding(record), project, { allowArchivedRead: true })
   const view = recordView(record)
   const manifest = view?.project.manifest ?? record.manifest
   const overview = summary(record, view)

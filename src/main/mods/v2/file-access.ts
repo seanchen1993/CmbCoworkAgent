@@ -17,7 +17,8 @@ import {
 
 export const FUNCTION_READ_LIMIT = 512 * 1024
 const ENTRY_LIMIT = 1024
-export const FILE_CAPABILITIES = ["fs.read", "fs.list", "fs.exists", "fs.stat"] as const
+import { FILE_CAPABILITIES } from "../../../shared/mods/v2/session-capabilities"
+export { FILE_CAPABILITIES }
 export type FunctionFileMethod = (typeof FILE_CAPABILITIES)[number]
 
 export interface FunctionFileAccess {

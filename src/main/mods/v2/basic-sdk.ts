@@ -16,32 +16,8 @@ import {
   type FunctionSessionMessagesArgs
 } from "../../../shared/mods/v2/session-append"
 
-export const SESSION_CAPABILITIES = [
-  "command.register",
-  "command.list",
-  "command.run",
-  "session.id",
-  "session.cwd",
-  "session.root",
-  "session.version",
-  "session.surface",
-  "session.surfaces",
-  "session.repo",
-  "session.model",
-  "session.messages",
-  "session.turns",
-  "session.usage",
-  "session.compact",
-  "session.authorize",
-  "clock.now",
-  "clock.sleep",
-  "store.get",
-  "store.set",
-  "store.delete",
-  "store.keys",
-  "fs.ancestors",
-  ...FILE_CAPABILITIES
-] as const
+import { BASIC_SESSION_CAPABILITIES as SESSION_CAPABILITIES } from "../../../shared/mods/v2/session-capabilities"
+export { SESSION_CAPABILITIES }
 
 function validateReadMode(mode: ModJson | undefined): void {
   if (mode !== undefined && mode !== "text" && mode !== "bytes") throw new ModFunctionError("MODS_FS_OPTIONS")

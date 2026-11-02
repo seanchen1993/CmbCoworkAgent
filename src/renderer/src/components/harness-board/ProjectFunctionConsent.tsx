@@ -121,7 +121,7 @@ function ProjectFunctionConsentScope({
   }, [projectId, version, api])
 
   const approve = async (source?: Source, dependency = false) => {
-    if (pending.current || checking || !review) return
+    if (pending.current || checking || !review || review.approvalAtProject) return
     pending.current = true
     setBusy(true)
     setError("")
@@ -202,20 +202,27 @@ function ProjectFunctionConsentScope({
               ? `请填写并保存参数：${missingConfiguration.map(({ source }) => source.name).join("、")}。`
               : unavailableSources.length > 0
                 ? `请先处理插件状态：${unavailableSources.map(({ source }) => source.name).join("、")}。`
-                : needsConsent
-                  ? "参数已齐备，请确认下方所列权限后开始项目。"
-                  : "请检查应用插件开关并重新核对。"}
+                : review.approvalAtProject && needsConsent
+                  ? pendingSources.length > 0
+                    ? "项目授权已失效或尚未完成。请在项目的“编辑项目 → 插件配置”中重新核对并保存。"
+                    : "项目授权可沿用，当前目录的插件功能已关闭。请在插件设置中恢复后重新核对。"
+                  : needsConsent
+                    ? "参数已齐备，请确认下方所列权限后开始项目。"
+                    : "请检查应用插件开关并重新核对。"}
           </p>
         )}
         {review && needsExecution(review) && review.globallyEnabled === false && (
           <p role="alert">应用插件功能已关闭。请在“插件”中开启应用功能后，返回此处重新核对。</p>
         )}
         {review && needsExecution(review) && review.workspaceEnabled === false && (
-          <p role="status">当前目录尚未启用插件功能，请在下方确认后再执行。</p>
+          <p role="status">
+            {review.approvalAtProject
+              ? "当前目录的插件功能已关闭，请在插件设置中恢复后重新核对。"
+              : "当前目录尚未启用插件功能，请在下方确认后再执行。"}
+          </p>
         )}
         {error && <p role="alert">{error}</p>}
-        {(
-          review &&
+        {review &&
           sources.map(({ source, dependency }) => {
             const configurationOnly =
               "configurationOnly" in source && source.configurationOnly === true
@@ -237,7 +244,9 @@ function ProjectFunctionConsentScope({
                       ? "主包仅需配置参数；请完成下列依赖的参数与授权。"
                       : "此包仅需配置参数，无需代码运行授权。"
                     : source.state === "ready"
-                      ? "此目录已授权当前源码版本。"
+                      ? review.approvalAtProject
+                        ? "已沿用创建项目时的授权。"
+                        : "此目录已授权当前源码版本。"
                       : source.state === "disabled"
                         ? "此插件已停用或应用功能已关闭。请恢复对应开关后重新核对。"
                         : source.state === "missing"
@@ -275,6 +284,7 @@ function ProjectFunctionConsentScope({
                   </>
                 )}
                 {!configurationOnly &&
+                  !review.approvalAtProject &&
                   review.workspaceEnabled === false &&
                   review.globallyEnabled !== false && (
                     <p>
@@ -308,7 +318,8 @@ function ProjectFunctionConsentScope({
                     打开对应插件
                   </button>
                 )}
-                {!api.approveRequired &&
+                {!review.approvalAtProject &&
+                  !api.approveRequired &&
                   !configurationOnly &&
                   (source.state === "needs-approval" ||
                     (source.state === "ready" && review.workspaceEnabled === false)) && (
@@ -339,9 +350,8 @@ function ProjectFunctionConsentScope({
                   )}
               </section>
             )
-          })
-        )}
-        {review && api.approveRequired && needsConsent && (
+          })}
+        {review && !review.approvalAtProject && api.approveRequired && needsConsent && (
           <div className="space-y-2 rounded border p-2">
             <p>本次确认以下插件的当前源码版本在目录 {review.workspace} 运行：</p>
             <ul className="list-disc pl-4">

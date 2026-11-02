@@ -38,6 +38,7 @@ vi.mock("../ipc/models", () => ({ getDefaultModel: () => undefined }))
 vi.mock("../agent/coordinator-mode", () => ({ getAgentModeFromMetadata: () => "normal" }))
 vi.mock("../harness-board/service", () => ({
   buildHarnessFeatureAgentContext: mocks.buildHarnessFeatureAgentContext,
+  prepareHarnessFeatureThreadSession: vi.fn(async () => undefined),
   DEFAULT_HARNESS_REQUEST_USER_INPUT_CONFIG: {}
 }))
 vi.mock("../ipc/recent-workspace", () => ({

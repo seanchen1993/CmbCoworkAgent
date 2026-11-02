@@ -251,6 +251,8 @@ export interface HarnessProjectCreatorMetadata {
 }
 
 export interface HarnessProjectMetadata {
+  /** Ephemeral create/update outcome; does not certify execution or change source consent. */
+  projectUseStatus?: { state: "ready" | "enable-unconfirmed"; message?: string }
   nativeBinding?: HarnessNativeProjectBinding
   projectId: string
   name: string
@@ -275,6 +277,7 @@ export interface HarnessProjectMetadata {
 }
 
 export interface HarnessProjectCreateInput {
+  projectUseApproval?: import("./project-use-authorization").HarnessProjectUseApproval
   expectedNativeTemplate?: import("./plugin-start-use").PluginStartUseIdentity
   adapterId: string
   adapterType: HarnessAdapterType
@@ -494,6 +497,7 @@ export interface HarnessSkipNodeResult {
 }
 
 export interface HarnessProjectMetadataUpdateInput {
+  projectUseApproval?: import("./project-use-authorization").HarnessProjectUseApproval
   adapterId: string
   adapterType: HarnessAdapterType
   name: string
@@ -1073,6 +1077,7 @@ export interface HarnessRunDetailViewModel {
     systemId: string
     workspacePath: string
     projectRootPath: string
+    lifecycle?: HarnessProjectMetadata["lifecycle"]
   }
   adapterSnapshot: {
     mode: "run"
@@ -1109,7 +1114,7 @@ export interface HarnessRunDetailViewModel {
   sessions: HarnessSessionBinding[]
 }
 
-/** Container identity only. Each native Feature owns a separate execution and output directory. */
+/** Container identity only. Each native Feature retains its own execution and workspace binding. */
 export interface HarnessNativeProjectBinding {
   engine: "host"
   installedPluginId: string
@@ -1122,6 +1127,12 @@ export interface HarnessNativeFeatureBinding extends HarnessNativeProjectBinding
   title: string
   workspace: string
   repositoryWorkspace: string
+  /** New Features use the directory selected in the original project form. */
+  workspaceMode?: "selected-directory"
+  /** Physical directory identity; ordinary file edits do not change this proof. */
+  workspaceIdentity?: string
+  /** The Feature's default chat directory remains independent of a run override. */
+  repositoryWorkspaceIdentity?: string
   expectedPlugin: import("./plugin-start-use").PluginStartUseIdentity
   /** Populated only after the original Host creates the real execution. */
   packageDigest?: string

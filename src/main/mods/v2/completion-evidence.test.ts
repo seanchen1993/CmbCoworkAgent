@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { execFile } from "node:child_process"
@@ -15,6 +15,107 @@ const roots: string[] = []
 const execute = promisify(execFile)
 afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })))
+})
+
+async function ignoredNestedWorkspace() {
+  const parent = await mkdtemp(join(tmpdir(), "mods-nested-evidence-"))
+  roots.push(parent)
+  await execute("git", ["-C", parent, "init"], { windowsHide: true })
+  await writeFile(join(parent, ".gitignore"), "workspace/\n")
+  const workspace = join(parent, "workspace")
+  await mkdir(workspace)
+  return { parent, workspace }
+}
+
+it.each(["add", "modify", "delete"] as const)(
+  "invalidates evidence after %s in an ignored nested workspace",
+  async (change) => {
+    const { workspace } = await ignoredNestedWorkspace()
+    await writeFile(join(workspace, "unchanged.ts"), "stable")
+    const changed = join(workspace, "changed.ts")
+    if (change !== "add") await writeFile(changed, "before")
+    const input = {
+      workspace,
+      threadId: "thread",
+      turnId: "turn",
+      pluginDigests: {},
+      runtimeGeneration: 1
+    }
+    const before = await captureCompletionBinding(input)
+    if (change === "delete") await rm(changed)
+    else await writeFile(changed, "after")
+    const after = await captureCompletionBinding(input)
+
+    expect(sameCompletionBinding(before, after)).toBe(false)
+    expect(before).not.toHaveProperty("diffFiles")
+    expect(after.files).toContainEqual(expect.objectContaining({ path: "unchanged.ts" }))
+    expect(after.files.some((file) => file.path === "changed.ts")).toBe(change !== "delete")
+  }
+)
+
+it("does not bind parent-repository changes to an ignored nested workspace", async () => {
+  const { parent, workspace } = await ignoredNestedWorkspace()
+  await writeFile(join(workspace, "source.ts"), "selected workspace")
+  const outside = join(parent, "outside.ts")
+  await writeFile(outside, "before")
+  await execute("git", ["-C", parent, "add", "--intent-to-add", "--", "outside.ts"], {
+    windowsHide: true
+  })
+  const input = {
+    workspace,
+    threadId: "thread",
+    turnId: "turn",
+    pluginDigests: {},
+    runtimeGeneration: 1
+  }
+  const before = await captureCompletionBinding(input)
+  await writeFile(outside, "after")
+  const after = await captureCompletionBinding(input)
+
+  expect(sameCompletionBinding(before, after)).toBe(true)
+  expect(after.files.map((file) => file.path)).toEqual(["source.ts"])
+})
+
+it("rejects a linked directory in an ignored nested workspace", async () => {
+  const { parent, workspace } = await ignoredNestedWorkspace()
+  const outside = join(parent, "outside")
+  await mkdir(outside)
+  await writeFile(join(outside, "private.txt"), "outside selected workspace")
+  await symlink(
+    outside,
+    join(workspace, "linked"),
+    process.platform === "win32" ? "junction" : "dir"
+  )
+
+  await expect(
+    captureCompletionBinding({
+      workspace,
+      threadId: "thread",
+      turnId: "turn",
+      pluginDigests: {},
+      runtimeGeneration: 1
+    })
+  ).rejects.toThrow("COMPLETION_EVIDENCE_LINK")
+})
+
+it("keeps Git diff evidence for an unborn repository root", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "mods-unborn-evidence-"))
+  roots.push(workspace)
+  await execute("git", ["-C", workspace, "init"], { windowsHide: true })
+  await writeFile(join(workspace, "source.ts"), "before")
+  const input = {
+    workspace,
+    threadId: "thread",
+    turnId: "turn",
+    pluginDigests: {},
+    runtimeGeneration: 1
+  }
+  const before = await captureCompletionBinding(input)
+  await writeFile(join(workspace, "source.ts"), "after")
+  const after = await captureCompletionBinding(input)
+
+  expect(before.diffFiles).toEqual(["source.ts"])
+  expect(sameCompletionBinding(before, after)).toBe(false)
 })
 
 it("binds workspace, run, plugin generation, diff, requirements and file fingerprints", async () => {

@@ -1,4 +1,7 @@
 import { registerNativeHarnessSourceHandlers } from "./native-harness-source"
+import { configureProjectUseIpcTrust, configureProjectUseAuthority,
+  admitProjectUseFeature, captureProjectUseFeature } from "../harness-board/project-use-authorization"
+import { readHarnessProjectUseParent, assertHarnessProjectUseChild } from "../harness-board/service"
 import {
   configureNativeHarnessRuntime,
   assertNativeHarnessFeatureCurrent,
@@ -260,6 +263,12 @@ export function registerProjectRuntimeHandlers(
       throw Error("PROJECT_UNTRUSTED_SENDER")
     return owner
   }
+  configureProjectUseIpcTrust(event => {
+    const owner = trusted(event)
+    return owner.webContents.mainFrame
+  })
+  configureProjectUseAuthority({ parent: readHarnessProjectUseParent,
+    child: findNativeHarnessFeatureByRunId, assertChild: assertHarnessProjectUseChild })
   function platform() {
     if (!service) {
       const root = join(getOpenworkDir(), "local-projects")
@@ -392,7 +401,9 @@ export function registerProjectRuntimeHandlers(
           const native = findNativeHarnessFeatureByRunId(context.project.projectId)
           if (native) {
             const authority = captureFeatureRunAuthority(native.projectId, native.featureId)
+            const projectUseGuard = captureProjectUseFeature(native)
             authority.assertCurrent()
+            projectUseGuard?.()
             context.harnessFeature = { projectId: native.projectId, slug: native.featureId,
               source: "host", repositoryWorkspace: native.repositoryWorkspace }
             if (native.worktree) {
@@ -402,7 +413,7 @@ export function registerProjectRuntimeHandlers(
                 throw Error("HARNESS_NATIVE_RUN_IDENTITY_CHANGED")
             }
             const originalGuard = context.assertInputsCurrent
-            context.assertInputsCurrent = () => { authority.assertCurrent(); originalGuard?.() }
+            context.assertInputsCurrent = () => { authority.assertCurrent(); projectUseGuard?.(); originalGuard?.() }
           }
           const libraryPath = join(getOpenworkDir(), "local-projects", "library.sqlite")
           if (existsSync(libraryPath)) {
@@ -887,7 +898,7 @@ export function registerProjectRuntimeHandlers(
       return view(project.projectId)
     }
   )
-  registerNativeHarnessSourceHandlers(ipc, {
+  const nativeFeatureReady = registerNativeHarnessSourceHandlers(ipc, {
     trusted, platform, retainedRoot: project => snapshots!.read(project.pluginDigest).root,
     readBinding: findNativeHarnessFeatureByRunId,
     assertBinding: assertNativeHarnessFeatureCurrent
@@ -903,6 +914,8 @@ export function registerProjectRuntimeHandlers(
           throw Error("PROJECT_EXECUTION_WINDOW_UNAVAILABLE")
       }
       assertCurrent()
+      const nativeBinding = findNativeHarnessFeatureByRunId(input.projectId)
+      if (nativeBinding) admitProjectUseFeature(nativeBinding)
       const api = platform()
       const existing = api.get(input.projectId)
       if (existing) {
@@ -945,7 +958,7 @@ export function registerProjectRuntimeHandlers(
   const nativeExecutions = new Set<string>()
   ipc.handle("harnessBoard:nativeFeatureCommand", async (
     event, projectId: string, featureId: string,
-    supplied: LocalProjectCommand | { kind: "start-feature"; initialUserMessage: string }
+    supplied: LocalProjectCommand | { kind: "start-feature"; initialUserMessage: string; workspacePath?: string }
   ) => {
     const owner = trusted(event)
     if (typeof projectId !== "string" || !projectId || projectId.length > 512 ||
@@ -955,24 +968,50 @@ export function registerProjectRuntimeHandlers(
     const command = structuredClone(supplied)
     const key = JSON.stringify([projectId, featureId])
     const executing = ["start-feature", "continue", "start", "validate", "validate-imported"].includes(command.kind)
+    if (executing && command.kind !== "start-feature") {
+      const authorizationBinding = readNativeHarnessFeature(projectId, featureId)
+      if (authorizationBinding) admitProjectUseFeature(authorizationBinding)
+    }
     if (executing && nativeExecutions.has(key)) throw Error("PROJECT_OPERATION_ALREADY_RUNNING")
     if (executing) nativeExecutions.add(key)
     try {
       if (command.kind === "start-feature") {
-        if (Object.keys(command).sort().join(",") !== "initialUserMessage,kind" ||
+        if (Object.keys(command).some(key => !["initialUserMessage", "kind", "workspacePath"].includes(key)) ||
           typeof command.initialUserMessage !== "string" || !command.initialUserMessage.trim() ||
-          command.initialUserMessage.length > 8000)
+          command.initialUserMessage.length > 8000 ||
+          (Object.hasOwn(command, "workspacePath") && (typeof command.workspacePath !== "string" ||
+            !command.workspacePath.trim() || command.workspacePath.length > 4096 || command.workspacePath.includes("\0"))))
           throw Error("PROJECT_INVALID_COMMAND")
         await ensureNativeHarnessFeatureRun(projectId, featureId, command.initialUserMessage, () => {
           if (trusted(event) !== owner) throw Error("PROJECT_EXECUTION_WINDOW_UNAVAILABLE")
-        })
+        }, command.workspacePath)
       }
       const captured = captureFeatureRunAuthority(projectId, featureId)
+      let executionReadyGuard: (() => void) | undefined
+      if (command.kind === "start-feature") {
+        const ownerGuard = captureProjectUseFeature(captured.binding)
+        ownerGuard?.()
+        const readiness = await nativeFeatureReady(event, captured.binding.hostRunId)
+        captured.assertCurrent()
+        ownerGuard?.()
+        trusted(event)
+        if (!readiness.ready) {
+          const current = view(captured.binding.hostRunId)
+          return { ...current, continuation: { reason: "blocked" as const,
+            error: "本次运行目录已保存。请在当前特性的插件参数区补全必填项，并检查项目授权与插件开关后重试。" } }
+        }
+        readiness.assertCurrent()
+        executionReadyGuard = () => {
+          ownerGuard?.()
+          readiness.assertExecutionReady()
+          captured.assertCurrent()
+        }
+      }
       return await dispatchCommand(event, captured.binding.hostRunId,
         command.kind === "start-feature"
           ? { kind: "continue", expectedVersion: view(captured.binding.hostRunId).project.version }
           : command,
-        captured.assertCurrent)
+        () => { captured.assertCurrent(); executionReadyGuard?.() })
     } finally {
       if (executing) nativeExecutions.delete(key)
     }

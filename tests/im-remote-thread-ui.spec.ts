@@ -172,7 +172,17 @@ function testRemoteThreadsHaveStableSourceAndModeLabels(): void {
   assert(harnessBoard.includes("接入招乎"))
   assert(harnessBoard.includes("从招乎发起新会话"))
   assert(harnessBoard.includes("window.api.builtinRobot.setFeatureRemoteAccess"))
-  assert(harnessBoard.includes("disabled={busy || (!enabled && !featureImManagementAvailable)}"))
+  assert(
+    harnessBoard.includes(
+      "disabled={busy || !!managementUnsupportedReason || (!enabled && !featureImManagementAvailable)}"
+    )
+  )
+  assert(
+    /managementUnsupportedReason=\{detail\.nativeBinding\s+\?\s+"[^"\r\n]+"\s+:\s+undefined\}/u.test(
+      harnessBoard
+    ),
+    "only native bindings supply an unsupported reason; legacy feature management stays available"
+  )
   assert(harnessBoard.includes("关闭后已经接入招乎的会话不受影响，可在会话中单独管理接入状态"))
 }
 

@@ -1,10 +1,12 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
+import { cp, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { basename, dirname, join, resolve } from "node:path"
 import { afterEach, beforeEach, expect, it, vi } from "vitest"
 import { createProjectTemplate } from "../mods/devtools/project-template"
 import type { PluginMetadata } from "../types"
 import type { HarnessProjectCreateInput } from "../../shared/harness-board-types"
+import { canonicalTmpdir } from "../../../tests/support/canonical-temp-dir"
+import { projectUseConsentFixture } from "../../../tests/support/project-use-consent"
 
 const state = vi.hoisted(() => ({ root: "", plugins: [] as PluginMetadata[] }))
 vi.mock("../storage", () => ({
@@ -27,9 +29,10 @@ vi.mock("./catalog-client", async (original) => ({
 }))
 
 let service: typeof import("./service")
+let consent: Awaited<ReturnType<typeof projectUseConsentFixture>> | undefined
 beforeEach(async () => {
   vi.resetModules()
-  state.root = await mkdtemp(join(tmpdir(), "harness-direct-admission-"))
+  state.root = await mkdtemp(join(canonicalTmpdir(), "harness-direct-admission-"))
   const path = join(state.root, "plugin")
   await mkdir(join(path, "board_core"), { recursive: true })
   const command = join(path, "create-project.cjs")
@@ -65,9 +68,11 @@ beforeEach(async () => {
   service = await import("./service")
 })
 afterEach(async () => {
+  consent?.close()
+  consent = undefined
   const native = await import("./native-harness")
   native.closeNativeHarnessFeatureStore()
-  expect(dirname(resolve(state.root))).toBe(resolve(tmpdir()))
+  expect(dirname(resolve(state.root))).toBe(await realpath(tmpdir()))
   expect(basename(state.root)).toMatch(/^harness-direct-admission-[a-zA-Z0-9]{6}$/)
   await rm(state.root, { recursive: true, force: true })
 })
@@ -109,7 +114,8 @@ it("creates a native Harness container by exact Host id without invoking board-s
     digest: derivationContentIdentity((await snapshotDerivationSource(state.plugins[0].path)).files)
   }
   await expect(service.createHarnessProject(input())).rejects.toThrow("PACKAGE_IDENTITY_MISMATCH")
-  const project = await service.createHarnessProject({ ...input(), expectedNativeTemplate })
+  consent = await projectUseConsentFixture(state.root, () => state.plugins)
+  const project = await consent.create({ ...input(), expectedNativeTemplate })
   expect(project).toMatchObject({
     nativeBinding: { engine: "host", installedPluginId: "plugin" }
   })
@@ -143,9 +149,10 @@ it("creates a native Harness container by exact Host id without invoking board-s
   expect(await service.getHarnessFeatureBinding(project.projectId, "request-a")).toMatchObject({
     sessionWorkspace: { source: "directory", path: state.root }
   })
-  expect(native.nativeHarnessRunDetail(project, "request-a").nativeBinding?.workspace).not.toBe(
+  expect(native.nativeHarnessRunDetail(project, "request-a").nativeBinding?.workspace).toBe(
     state.root
   )
+  expect(consent.guestLoads()).toBe(0)
   await expect(readFile(join(state.root, "created-marker.txt"))).rejects.toMatchObject({
     code: "ENOENT"
   })
@@ -173,10 +180,22 @@ it("projects the real AutoBiz scaffold through original project and Feature serv
   const { derivationContentIdentity, snapshotDerivationSource } =
     await import("../plugins/derivation-source")
   const root = resolve("resources/native-compositions/autobiz-lean")
+  for (const name of ["knowledge", "rules", "delivery"]) {
+    const path = join(state.root, "providers", name)
+    await cp(join(root, "providers", name), path, { recursive: true })
+    const metadata = JSON.parse(await readFile(join(path, "plugin.json"), "utf8"))
+    state.plugins.push({
+      ...state.plugins[0],
+      id: `fixture-${name}`,
+      name: metadata.name,
+      version: metadata.version,
+      path
+    })
+  }
   const actions = (
     await Promise.all(
       ["knowledge", "rules", "delivery"].map(async (name) => {
-        const provider = await compileFunctionPlugin(join(root, "providers", name))
+        const provider = await compileFunctionPlugin(join(state.root, "providers", name))
         if (!provider?.actions) throw Error("Reference provider compilation failed")
         return provider.actions.map(({ id, ...action }) => ({
           ...action,
@@ -214,7 +233,8 @@ it("projects the real AutoBiz scaffold through original project and Feature serv
     throw Error("Lazy admission must not execute")
   })
   native.configureNativeHarnessRuntime({ view: () => undefined, create: execute })
-  const project = await service.createHarnessProject({ ...input(), expectedNativeTemplate })
+  consent = await projectUseConsentFixture(state.root, () => state.plugins)
+  const project = await consent.create({ ...input(), expectedNativeTemplate })
   const detail = await service.getHarnessProjectDetail(project.projectId)
   expect(detail.error).toBeNull()
   expect(detail.runs).toEqual([])
@@ -242,12 +262,11 @@ it("projects the real AutoBiz scaffold through original project and Feature serv
     expectedPlugin: expectedNativeTemplate
   })
   expect(pending.project.projectRootPath).toBe(pending.nativeBinding!.workspace)
-  expect(dirname(pending.nativeBinding!.workspace)).toBe(
-    join(state.root, "sample", ".harness-features")
-  )
+  expect(pending.nativeBinding!.workspace).toBe(state.root)
   expect(pending.run.sessionWorkspace).toEqual({ source: "directory", path: state.root })
   expect((await service.getHarnessProjectDetail(project.projectId)).runs).toHaveLength(1)
   expect(execute).not.toHaveBeenCalled()
+  expect(consent.guestLoads()).toBe(0)
   await expect(readFile(join(state.root, "created-marker.txt"))).rejects.toMatchObject({
     code: "ENOENT"
   })

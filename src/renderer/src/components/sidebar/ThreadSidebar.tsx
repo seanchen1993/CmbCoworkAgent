@@ -51,6 +51,8 @@ import {
   useThreadContext
 } from "@/lib/thread-context"
 import { cn, truncate } from "@/lib/utils"
+import { useFeatureGate } from "@/lib/feature-gates"
+import { FEATURE_GATES } from "../../../../shared/feature-gates"
 import {
   cleanupDeletedThreadIfResident,
   deleteThreadGroupSequentially,
@@ -629,6 +631,12 @@ export const ThreadSidebar = memo(function ThreadSidebar(): React.JSX.Element {
   threadStateSummariesRef.current = threadStateSummaries
   const activeSidebarTab: SidebarTab =
     showHarnessBoardView || mainView === "harness" ? "project" : "chat"
+  const {
+    enabled: projectModeEnabled,
+    loading: projectModeLoading,
+    refresh: refreshProjectModeGate
+  } = useFeatureGate(FEATURE_GATES.projectMode)
+  const projectModeForceRefreshRef = useRef<Promise<unknown> | null>(null)
 
   const handleSelectChatTab = useCallback(async (): Promise<void> => {
     if (mainView === "harness" || showHarnessBoardView) {
@@ -658,8 +666,19 @@ export const ThreadSidebar = memo(function ThreadSidebar(): React.JSX.Element {
   ])
 
   const handleSelectProjectTab = useCallback(async (): Promise<void> => {
-    setShowHarnessBoardView(true)
-  }, [setShowHarnessBoardView])
+    if (projectModeEnabled) {
+      setShowHarnessBoardView(true)
+      return
+    }
+    toast.info("敬请期待")
+    if (!projectModeForceRefreshRef.current) {
+      const refreshPromise = refreshProjectModeGate({ refresh: true }).finally(() => {
+        if (projectModeForceRefreshRef.current === refreshPromise)
+          projectModeForceRefreshRef.current = null
+      })
+      projectModeForceRefreshRef.current = refreshPromise
+    }
+  }, [projectModeEnabled, refreshProjectModeGate, setShowHarnessBoardView])
 
   const persistUnread = useCallback((ids: Set<string>) => {
     localStorage.setItem("threads:unreadIds", JSON.stringify([...ids]))
@@ -1213,11 +1232,15 @@ export const ThreadSidebar = memo(function ThreadSidebar(): React.JSX.Element {
                   type="button"
                   role="tab"
                   aria-selected={activeSidebarTab === "project"}
+                  aria-disabled={!projectModeEnabled}
                   className={cn(
                     "flex min-w-0  items-center justify-center gap-1.5 rounded px-2 text-sm font-semibold transition-all focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
-                    activeSidebarTab === "project"
+                    projectModeEnabled
+                      ? activeSidebarTab === "project"
                         ? "shadow border border-border/70 bg-background text-foreground"
                         : "text-muted-foreground hover:text-foreground"
+                      : "cursor-not-allowed text-muted-foreground/50 opacity-60 hover:text-muted-foreground/60",
+                    projectModeLoading && !projectModeEnabled && "opacity-55"
                   )}
                   onClick={() => void handleSelectProjectTab()}
                 >
@@ -1225,7 +1248,9 @@ export const ThreadSidebar = memo(function ThreadSidebar(): React.JSX.Element {
                   <span className="min-w-0 truncate">项目模式</span>
                 </button>
               </TooltipTrigger>
-              <TooltipContent side="bottom" sideOffset={6}>项目列表与已开通的项目功能</TooltipContent>
+              {!projectModeEnabled && <TooltipContent side="bottom" sideOffset={6}>
+                敬请期待
+              </TooltipContent>}
             </Tooltip>
           </TooltipProvider>
         </div>

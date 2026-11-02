@@ -14,7 +14,7 @@ export function ClawSidebarHost({ threadId }: { threadId: string }) {
       className="h-full min-h-0 [&:has(aside)>p]:hidden"
     >
       <p className="p-5 text-sm leading-6 text-muted-foreground">
-        请在本地普通对话或 Plugin 项目会话中开启 Mods，再配置 Claw。受控运行和远程会话暂不支持。
+        任务进展用于普通对话。项目任务请在原项目页面查看阶段、会话和成果。
       </p>
     </div>
   )

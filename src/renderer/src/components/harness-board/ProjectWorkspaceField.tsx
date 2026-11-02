@@ -8,6 +8,7 @@ export function ProjectWorkspaceField({
   workspacePath,
   projectDir,
   readOnly = false,
+  artifactsInProjectDirectory = true,
   error,
   onPickWorkspace,
   onProjectDirChange
@@ -15,11 +16,13 @@ export function ProjectWorkspaceField({
   workspacePath: string
   projectDir: string
   readOnly?: boolean
+  artifactsInProjectDirectory?: boolean
   error: string | null
   onPickWorkspace?: () => void
   onProjectDirChange?: (value: string) => void
 }): React.JSX.Element {
   const id = useId()
+  const projectDirLabel = artifactsInProjectDirectory ? "本项目产物文件夹" : "本项目文件夹"
   const fieldClassName =
     "min-w-0 max-w-[calc((100%-1.5rem)/2)] shrink-0 truncate text-foreground placeholder:text-muted-foreground/45 focus:text-clip"
 
@@ -39,7 +42,9 @@ export function ProjectWorkspaceField({
               </button>
             </TooltipTrigger>
             <TooltipContent side="top" className="z-[70] max-w-72">
-              插件工作区，存放 spec.md、plan.md，非代码/会话路径
+              {artifactsInProjectDirectory
+                ? "插件工作区，存放 spec.md、plan.md，非代码/会话路径"
+                : "用于登记本项目。各特性的运行与产物位于创建特性或首次开启托管时确认的目录，实际位置见特性详情。"}
             </TooltipContent>
           </Tooltip>
         </TooltipProvider>
@@ -78,9 +83,9 @@ export function ProjectWorkspaceField({
           onBlur={(event) => {
             event.currentTarget.scrollLeft = 0
           }}
-          aria-label="本项目产物文件夹"
-          title={projectDir || "本项目产物文件夹"}
-          placeholder="本项目产物文件夹"
+          aria-label={projectDirLabel}
+          title={projectDir || projectDirLabel}
+          placeholder={projectDirLabel}
           className={cn(
             fieldClassName,
             projectDir ? "w-auto [field-sizing:content]" : "w-44",

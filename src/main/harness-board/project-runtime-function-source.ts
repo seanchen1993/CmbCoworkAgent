@@ -1,6 +1,7 @@
 import type { HostProjectState } from "../../shared/project-runtime/host-types"
 import type { FunctionModsManager } from "../mods/v2/manager"
 import type { RuntimePluginSourceToken } from "../plugins/runtime-source-scope"
+import { configureProjectUseRuntime } from "./project-use-authorization"
 
 let current:
   | {
@@ -15,6 +16,9 @@ export interface ProjectRuntimeWorkspaceControl {
   globallyEnabled(): boolean
   enabled(workspace: string): boolean
   enable(workspace: string): void
+  applicationStamp?(): string
+  initialize?(workspace: string): void
+  enableApplication?(): void
 }
 
 /** Reuses the application's one original manager and durable grant store. Main process only. */
@@ -24,6 +28,26 @@ export function setProjectRuntimeFunctions(
   workspaceControl?: ProjectRuntimeWorkspaceControl
 ) {
   current = { manager, workspaceKey, workspaceControl }
+  const unavailable = (): never => {
+    throw Error("PROJECT_USE_AUTHORIZATION_UNAVAILABLE")
+  }
+  configureProjectUseRuntime({
+    manager,
+    store: manager.projectUseControlStore(),
+    workspaceKey,
+    control: {
+      settingsStamp: (workspace) => workspaceControl?.settingsStamp(workspace) ?? unavailable(),
+      applicationStamp: () => workspaceControl?.applicationStamp?.() ?? unavailable(),
+      globallyEnabled: () => workspaceControl?.globallyEnabled() ?? false,
+      enabled: (workspace) => workspaceControl?.enabled(workspace) ?? false,
+      enable: (workspace) =>
+        workspaceControl ? workspaceControl.enable(workspace) : unavailable(),
+      initialize: (workspace) =>
+        workspaceControl?.initialize ? workspaceControl.initialize(workspace) : unavailable(),
+      enableApplication: () =>
+        workspaceControl?.enableApplication ? workspaceControl.enableApplication() : unavailable()
+    }
+  })
 }
 
 /** Main-only recovery adapters reuse the original configuration owner, never a second store. */
@@ -36,8 +60,13 @@ export function settleProjectRuntimeFunctionSource(token: RuntimePluginSourceTok
   current?.manager.settleEmptyHostSource(token)
 }
 
-export function projectRuntimeFunctionSource(project: Pick<HostProjectState,
-  "workspace" | "projectId" | "pluginDigest" | "installedPluginId" | "packageId">, root: string) {
+export function projectRuntimeFunctionSource(
+  project: Pick<
+    HostProjectState,
+    "workspace" | "projectId" | "pluginDigest" | "installedPluginId" | "packageId"
+  >,
+  root: string
+) {
   if (!current) throw Error("PROJECT_MODS_RUNTIME_UNAVAILABLE")
   return {
     manager: current.manager,
@@ -55,5 +84,6 @@ export async function assertProjectRuntimeSourceApproved(project: HostProjectSta
   const { manager, input } = projectRuntimeFunctionSource(project, root)
   const review = await manager.runtimeSourceReview(input)
   if (review && review.state !== "ready") throw Error("PROJECT_MODS_APPROVAL_REQUIRED")
+  if (review) manager.assertRuntimeSourceReady(input)
   return review
 }

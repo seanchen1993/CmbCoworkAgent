@@ -1,6 +1,6 @@
 import type { ProjectFunctionDependencyReview } from "../../shared/project-runtime/function-source"
 import { ModFunctionError } from "../../shared/mods/v2/contracts"
-import type { FunctionModsManager } from "../mods/v2/manager"
+import type { FunctionModsManager, RuntimeFunctionGrantScope } from "../mods/v2/manager"
 import type { ModPluginSource } from "../mods/manager"
 import { compileFunctionPlugin } from "../mods/v2/loader"
 import { assertConfigurationSourcesCurrent } from "../mods/v2/configuration-source-cache"
@@ -14,6 +14,7 @@ export function projectRuntimeDependencies(input: {
   manager: FunctionModsManager
   plugins(): readonly ModPluginSource[]
   assertCurrent(): void
+  scope?: RuntimeFunctionGrantScope
 }) {
   async function bindings() {
     input.assertCurrent()
@@ -126,7 +127,8 @@ export function projectRuntimeDependencies(input: {
           workspace: input.workspace,
           plugin: resolved.plugin,
           name: dependency.name,
-          digest: dependency.digest
+          digest: dependency.digest,
+          ...(input.scope ? { scope: input.scope } : {})
         }) ? "ready" : "needs-approval"
         resolved.assertCurrent()
       } catch {

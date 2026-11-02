@@ -1,5 +1,5 @@
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises"
-import { join } from "node:path"
+import { basename, join, toNamespacedPath } from "node:path"
 import type { HostSkillExecutionContext } from "./host-service"
 import { readPackageExtensionContract } from "../../plugins/extension-contract"
 import { readStageRecoveryPolicy } from "./stage-recovery-policy"
@@ -37,11 +37,12 @@ export async function executeStageRecoveryContextProvider(
   }
   guard()
   const parent = join(project.workspace, ".dcp")
-  await mkdir(parent).catch((error) => {
+  await mkdir(toNamespacedPath(parent)).catch((error) => {
     if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error
   })
   runtimeDirectory(parent)
-  const scratch = await mkdtemp(join(parent, "r-"))
+  const created = await mkdtemp(toNamespacedPath(join(parent, "r-")))
+  const scratch = join(parent, basename(created))
   guard()
   runtimeDirectory(scratch)
   const argumentsByName = {

@@ -1,5 +1,7 @@
 # 项目插件 ZIP 导入与原项目入口修复（2026-11-02）
 
+本页保留较早的导入修复范围。最新项目流程、尾链补验及仍未通过的完整回归和性能结论，见[项目模式与 UAT 对照验收](mods-project-mode-uat-compatibility-2026-11-02.md)；Actions #936 和本页早期入口验收不能替代后续改动的验证，也没有新的安装包或 Actions。
+
 本次修复平台的列表投影与项目入口，保留原有项目创建、配置、特性和运行流程。
 应用版本继续为 2.0.0，代码只提交和推送到 `codex/mods-v2` 开发分支。
 
@@ -41,8 +43,8 @@
 最终入口验收通过，两位非作者分别完成方案评审，修复后由中等强度 agent 回检代码与证据。
 候选产物、源码、依赖锁及验收脚本的摘要均有记录；本地详细证据位于：
 
-- `output/project-bundle-source-8396ec9d-e2f8-4a01-8282-7e262aac427f/run.json`
-- `output/project-bundle-import-native-571bea3b-531c-4c7f-afd6-5899790e3109/run-KlFbyB/report.json`
+- `output/project-bundle-source-4010d5b7-db32-4908-a210-3ba5089bacf4/run.json`
+- `output/project-bundle-import-native-0bb4323e-66d7-48a3-8c3c-5c6f8efa2c8b/run-U5WmYF/report.json`
 - 同目录的 `plugins-one-project-collapsed.png`、`original-project-form.png`
 
 本项入口验收不包含提交新建表单、真实 SSO、模型调用、业务实现或安装器验证。
@@ -51,7 +53,7 @@
 
 ## 补充回归
 
-- 最终定向测试 10 个文件、67 项全部通过，包含目录、依赖投影、原错误隔离及指南回归。
+- 核心修复定向测试 10 个文件、67 项全部通过，包含目录、依赖投影、原错误隔离及指南回归。
 - Node/Web 官方类型检查、改动文件 ESLint 及验收脚本类型检查通过。
 - 原有分组、开始使用、统一项目入口和原特性流程四套浏览器回归全部通过，
   包含 41 条命名检查及依赖分组整套；受控 IPC，不请求模型。
@@ -59,3 +61,22 @@
   准备 8654 ms、冷读 143373 ms、缓存分页 3 ms、预览 19 ms；原读取及响应预算断言通过。
 
 这些是本次相关路径的回归，不替代既有整体性能报告中未通过项目的结论。
+
+首次 CI #935 的依赖与夹具失败保留：Linux 跳过依赖安装脚本后缺少 Electron 路径，
+Windows 临时目录缩写被原目录保护拒绝。前者仅显式恢复锁定 Electron 的下载器，
+不重建 node-pty；后者复用既有 `canonicalTmpdir()` 创建物理临时根，保留链接拒绝。
+修后 8 项服务测试及 2 项临时根/链接保护测试通过，Node 官方类型检查再次通过。
+更新后的完整源码围栏候选再次完成上述原 ZIP 入口验收，main 摘要与前次完全相同。
+
+新一轮构建见 [Actions #936](https://github.com/seanchen1993/CmbCoworkAgent/actions/runs/41377092038)，
+代码为 `b2bac28b9e4758e70d77b2ff254b7e320b4ab4d7`，manylinux、Linux、Windows 三个任务全部成功。
+Windows 的真实 ZIP 入口、原包内 Mods 和聊天验收通过；安装包位于 Artifacts 中名称包含
+`win-2.0.0-installer` 的条目。完全退出旧应用后安装，再使用原 ZIP；无需重新压缩模板。
+这是构建与包内验收，不是 NSIS 安装过程或完整模型业务验收。
+
+此前完整 `npm test` 的 attempt1、attempt2 均因继续修复测试输入或用户新报告的问题而主动中止，
+没有最终测试结论，均不计通过，也不计产品失败。既有全量和整体性能失败结论不由本次 CI 成功抵销。
+
+后续原项目流程恢复及创建时一次授权，见
+[UAT 对比与纠正范围](./mods-project-mode-uat-compatibility-2026-11-02.md)。
+本页 Actions #936 与 ZIP 入口结果属于上一轮修复，不能作为后续新增改动的验收依据。

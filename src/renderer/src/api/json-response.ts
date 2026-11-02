@@ -31,9 +31,9 @@ export class RemoteJsonResponseError extends Error {
   }
 }
 
-/** The caller owns HTTP/authorization handling; body-read failures retain their identity. */
-export async function readJsonResponse<T>(response: Response, service: string): Promise<T> {
-  const text = (await response.text()).trim()
+/** Parse already-read text without retaining remote bodies or parser causes. */
+export function parseJsonResponse<T>(response: Response, body: string, service: string): T {
+  const text = body.trim()
   if (!text) throw new RemoteJsonResponseError(response, service, "empty")
   if (responseMime(response) === "text/html" || /^<(?:!doctype\b|html\b)/i.test(text)) {
     throw new RemoteJsonResponseError(response, service, "html")
@@ -43,4 +43,9 @@ export async function readJsonResponse<T>(response: Response, service: string): 
   } catch {
     throw new RemoteJsonResponseError(response, service, "invalid-json")
   }
+}
+
+/** The caller owns HTTP/authorization handling; body-read failures retain their identity. */
+export async function readJsonResponse<T>(response: Response, service: string): Promise<T> {
+  return parseJsonResponse<T>(response, await response.text(), service)
 }

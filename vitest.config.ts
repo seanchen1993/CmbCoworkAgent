@@ -40,6 +40,7 @@ export const VITEST_TEST_INCLUDE = [
   "src/renderer/src/lib/skill-plugin-catalog.test.ts",
   "src/renderer/src/lib/model-catalog-cache.test.ts",
   "src/renderer/src/api/market-bounded-response.test.ts",
+  "src/renderer/src/api/market-json-failure.test.ts",
   "src/renderer/src/api/json-response.test.ts",
   "src/renderer/src/api/org-skill-market-response.test.ts",
   "src/renderer/src/api/chat-upload.test.ts",

@@ -1,4 +1,4 @@
-import { useRef, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import type {
   LocalProjectCommand,
   LocalProjectView
@@ -24,6 +24,7 @@ export function NativeFeatureReview(props: {
   featureId: string
   binding: HarnessNativeFeatureBinding
   view?: LocalProjectView
+  readOnly?: boolean
   onRefresh(): void | Promise<void>
   onReady(ready: boolean): void
   onPendingChange(pending: boolean): void
@@ -32,22 +33,36 @@ export function NativeFeatureReview(props: {
   onViewThread(threadId: string): void
 }) {
   const continuation = props.continuation ?? props.view?.continuation
+  useEffect(() => {
+    if (props.readOnly) {
+      props.onReady(false)
+      props.onPendingChange(false)
+    }
+  }, [props.readOnly, props.onReady, props.onPendingChange])
   return (
     <section className="space-y-3 rounded border p-3" aria-label="需求权限与确认">
       <p className="break-all text-xs text-muted-foreground">
         本条需求的实际运行与产物目录：{props.binding.workspace}
       </p>
-      <ProjectFunctionConsent
-        key={
-          props.view?.operations
-            .map((operation) => `${operation.operationId}:${operation.status}`)
-            .join("|") ?? "pending"
-        }
-        projectId={props.binding.hostRunId}
-        version={props.view?.project.version ?? 0}
-        api={window.api.harnessBoard.nativeFeatureMods}
-        onReady={props.onReady}
-      />
+      {props.readOnly ? (
+        <p role="status" className="text-sm">
+          已归档，仅查看历史记录。
+        </p>
+      ) : (
+        <ProjectFunctionConsent
+          key={JSON.stringify([
+            props.binding.workspace,
+            props.binding.workspaceIdentity,
+            props.view?.operations
+              .map((operation) => `${operation.operationId}:${operation.status}`)
+              .join("|") ?? "pending"
+          ])}
+          projectId={props.binding.hostRunId}
+          version={props.view?.project.version ?? 0}
+          api={window.api.harnessBoard.nativeFeatureMods}
+          onReady={props.onReady}
+        />
+      )}
       {continuation && continuation.reason !== "completed" && (
         <p role="status" className="text-sm">
           执行已暂停：
@@ -67,7 +82,8 @@ function NativeRunReview({
   onRefresh,
   onPendingChange,
   onContinuation,
-  onViewThread
+  onViewThread,
+  readOnly = false
 }: {
   projectId: string
   featureId: string
@@ -76,9 +92,12 @@ function NativeRunReview({
   onPendingChange(pending: boolean): void
   onContinuation(value: LocalProjectView["continuation"]): void
   onViewThread(threadId: string): void
+  readOnly?: boolean
 }) {
   const [busy, setBusy] = useState(false)
   const pending = useRef(false)
+  const readOnlyRef = useRef(readOnly)
+  readOnlyRef.current = readOnly
   const [error, setError] = useState("")
   const [feedback, setFeedback] = useState("")
   const [consent, setConsent] = useState("")
@@ -90,7 +109,7 @@ function NativeRunReview({
       item.status !== "transitioned"
   )
   async function act(commands: LocalProjectCommand[]) {
-    if (pending.current) return
+    if (pending.current || readOnlyRef.current) return
     pending.current = true
     setBusy(true)
     onPendingChange(true)
@@ -98,15 +117,17 @@ function NativeRunReview({
     setError("")
     try {
       for (const command of commands) {
+        if (readOnlyRef.current) return
         const result = await window.api.harnessBoard.nativeFeatureCommand(
           projectId,
           featureId,
           command
         )
+        if (readOnlyRef.current) return
         onContinuation(result.continuation)
       }
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause))
+      if (!readOnlyRef.current) setError(cause instanceof Error ? cause.message : String(cause))
     } finally {
       try {
         await onRefresh()
@@ -132,7 +153,7 @@ function NativeRunReview({
           </Button>
           {view.inputWait.resumable && (
             <Button
-              disabled={busy}
+              disabled={busy || readOnly}
               onClick={() =>
                 void act([
                   {
@@ -158,6 +179,7 @@ function NativeRunReview({
                 <input
                   type="checkbox"
                   checked={consent === operation.operationId}
+                  disabled={readOnly}
                   onChange={(event) =>
                     setConsent(event.target.checked ? operation.operationId : "")
                   }
@@ -166,7 +188,11 @@ function NativeRunReview({
               </label>
             )}
             <Button
-              disabled={busy || (!!operation.contextProvider && consent !== operation.operationId)}
+              disabled={
+                busy ||
+                readOnly ||
+                (!!operation.contextProvider && consent !== operation.operationId)
+              }
               onClick={() =>
                 void act([
                   {
@@ -200,6 +226,7 @@ function NativeRunReview({
             <textarea
               aria-label="成果修改意见"
               value={feedback}
+              readOnly={readOnly}
               maxLength={4000}
               onChange={(event) => setFeedback(event.target.value)}
               className="w-full rounded border p-2"
@@ -207,7 +234,7 @@ function NativeRunReview({
             />
             <div className="flex gap-2">
               <Button
-                disabled={busy || !view.resultReview}
+                disabled={busy || readOnly || !view.resultReview}
                 onClick={() =>
                   void act([
                     {
@@ -224,7 +251,7 @@ function NativeRunReview({
               </Button>
               <Button
                 variant="outline"
-                disabled={busy || !view.resultReview}
+                disabled={busy || readOnly || !view.resultReview}
                 onClick={() =>
                   void act([
                     {
@@ -246,17 +273,22 @@ function NativeRunReview({
         (["failed", "cancelled"].includes(operation.status) ||
           operation.resultApproval?.decision === "rejected") && (
           <div className="space-y-2">
-            <p role="status">本次执行未完成；重试会保留原记录，重新检查输入和权限。</p>
+            <p role="status">
+              {readOnly
+                ? "本次执行未完成；历史记录已保留。"
+                : "本次执行未完成；重试会保留原记录，重新检查输入和权限。"}
+            </p>
             <textarea
               aria-label="重试补充说明"
               value={feedback}
+              readOnly={readOnly}
               maxLength={4000}
               onChange={(event) => setFeedback(event.target.value)}
               className="w-full rounded border p-2"
             />
             <Button
               variant="outline"
-              disabled={busy}
+              disabled={busy || readOnly}
               onClick={() =>
                 void act([
                   ...(operation.resultApproval?.decision === "rejected"
@@ -282,7 +314,7 @@ function NativeRunReview({
           <p role="alert">上次执行结果待核对，不能直接重跑或推进。</p>
           <Button
             variant="outline"
-            disabled={busy}
+            disabled={busy || readOnly}
             onClick={() =>
               void act([
                 {

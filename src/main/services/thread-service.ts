@@ -5,6 +5,7 @@ import { getAgentModeFromMetadata } from "../agent/coordinator-mode"
 import {
   buildHarnessFeatureAgentContext,
   requireHarnessFeatureWorkspace,
+  prepareHarnessFeatureThreadSession,
   resolveHarnessFeatureCurrentStage,
   DEFAULT_HARNESS_REQUEST_USER_INPUT_CONFIG
 } from "../harness-board/service"
@@ -31,11 +32,19 @@ export async function createThreadService(
     !Array.isArray(nextMetadata.harnessFeature)
       ? (nextMetadata.harnessFeature as Record<string, unknown>)
       : undefined
+  let nativeSession: Awaited<ReturnType<typeof prepareHarnessFeatureThreadSession>> = undefined
+  if (harnessFeatureMetadata && !options.managedWorkspace) {
+    const { projectId, slug } = harnessFeatureMetadata
+    if (typeof projectId !== "string" || typeof slug !== "string")
+      throw new Error("特性会话标识无效")
+    nativeSession = await prepareHarnessFeatureThreadSession(projectId, slug)
+  }
   if (harnessFeatureMetadata) {
     const projectId = harnessFeatureMetadata.projectId
     const slug = harnessFeatureMetadata.slug
-    const launchStage =
-      typeof projectId === "string" && typeof slug === "string"
+    const launchStage = nativeSession
+      ? nativeSession.launchStage
+      : typeof projectId === "string" && typeof slug === "string"
         ? await resolveHarnessFeatureCurrentStage(projectId, slug)
         : null
     nextMetadata.harnessFeature = {
@@ -49,7 +58,8 @@ export async function createThreadService(
     const { projectId, slug } = harnessFeatureMetadata
     if (typeof projectId !== "string" || typeof slug !== "string")
       throw new Error("特性会话标识无效")
-    nextMetadata.workspacePath = await requireHarnessFeatureWorkspace(projectId, slug)
+    nextMetadata.workspacePath =
+      nativeSession?.workspacePath ?? (await requireHarnessFeatureWorkspace(projectId, slug))
   }
 
   const hasWorkspacePath = Object.prototype.hasOwnProperty.call(nextMetadata, "workspacePath")
@@ -124,6 +134,8 @@ export async function createThreadService(
   const title = (nextMetadata.title as string) || `Thread ${new Date().toLocaleDateString()}`
   nextMetadata.title = title
 
+  // This check deliberately remains outside the best-effort context lookup above.
+  nativeSession?.assertCurrent()
   const thread = dbCreateThread(threadId, nextMetadata)
   return {
     thread_id: thread.thread_id,

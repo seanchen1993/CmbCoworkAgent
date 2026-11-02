@@ -28,6 +28,11 @@ it("distinguishes completed trials from expired execution authority without decl
 
 describe("native task recovery guidance", () => {
   it.each([
+    ["PROJECT_USE_REVIEW_CHANGED", "重新核对插件权限"],
+    ["PROJECT_USE_REVIEW_REQUIRED", "不会自动重新授权"],
+    ["PROJECT_USE_SOURCE_CHANGED", "原权限核对已失效"],
+    ["PROJECT_USE_AUTHORIZATION_INVALID", "编辑项目 → 插件配置"],
+    ["PROJECT_USE_AUTHORIZATION_UNAVAILABLE", "项目授权暂时无法核实"],
     ["PROJECT_TEMPLATE_PLUGIN_LIMIT", "移除不再使用的插件"],
     ["PROJECT_TEMPLATE_RESPONSE_LIMIT", "读取上限"],
     ["HOST_PROJECT_NAVIGATION_CHANGED", "重新打开阶段会话"],

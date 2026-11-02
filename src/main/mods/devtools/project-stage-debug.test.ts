@@ -1,6 +1,18 @@
-import { randomUUID } from "node:crypto"
-import { mkdir, mkdtemp, readFile, rm, unlink, writeFile } from "node:fs/promises"
-import { basename, dirname, join, resolve } from "node:path"
+import { createHash, randomUUID } from "node:crypto"
+import {
+  lstat,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  realpath,
+  rename,
+  rm,
+  symlink,
+  unlink,
+  writeFile
+} from "node:fs/promises"
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path"
 import { tmpdir } from "node:os"
 import { afterEach, expect, it, vi } from "vitest"
 import {
@@ -35,6 +47,7 @@ import { parseFunctionUserConfig } from "../../../shared/mods/v2/user-config"
 import { testSecretProtector } from "../../../../tests/support/mods-secret-protector"
 import { createHostProjectInputIdentity } from "../../harness-board/project-runtime/package-input-identity"
 import { executeStageRecoveryContextProvider } from "../../harness-board/project-runtime/stage-recovery-context-provider"
+import * as ownedCommands from "../../hooks/owned-command"
 import {
   wrapProjectRuntimeManifest,
   CONTEXT_HANDOFF_PROTOCOL
@@ -214,7 +227,8 @@ async function fixture(
   nativeOwnerGuard: () => void = () => {},
   recovery?: StageRecoveryPolicy,
   nativeConfiguration = false,
-  providerScript?: string
+  providerScript?: string,
+  providerWorkspaceLength?: number
 ) {
   const root = await mkdtemp(join(tmpdir(), "creator-stage-debug-"))
   const settings = new ModControlStore(join(root, "controls.sqlite"))
@@ -236,7 +250,14 @@ async function fixture(
   }
   const context = { scope, guard: nativeOwnerGuard }
   const sessions = new ProjectAuthoringSessions()
-  sessions.configurePersistence(settings, join(root, "sources"))
+  let trialRoot: string | undefined
+  if (providerWorkspaceLength !== undefined) {
+    const prefix = join(root, "provider-trials-")
+    const parentLength = providerWorkspaceLength - "/trial-workspace-XXXXXX".length
+    if (parentLength < prefix.length) throw Error("Fixture workspace length is too short")
+    trialRoot = prefix + "x".repeat(parentLength - prefix.length)
+  }
+  sessions.configurePersistence(settings, join(root, "sources"), trialRoot)
   let draft = await sessions.scaffold(scope, "docs", "受控文档", () => {}, "harness-lite")
   const userConfig = parseFunctionUserConfig({
     audience: {
@@ -483,7 +504,16 @@ async function fixture(
       })
     const result = await service.start(operation.operationId)
     if (result.status === "failed") break
-    expect(result.status, providerErrors.join(",")).toBe("succeeded")
+    const providerDiagnostic = providerErrors.length
+      ? JSON.stringify({
+          errors: providerErrors,
+          nativeJournal: new StageRecoveryHookJournal(settings).list(originalId).map((entry) => ({
+            phase: entry.phase,
+            ...(entry.exitCode === undefined ? {} : { exitCode: entry.exitCode })
+          }))
+        })
+      : undefined
+    expect(result.status, providerDiagnostic).toBe("succeeded")
     original = service.transition(operation.operationId)
   }
   const snapshot = debug.list(context).snapshots.find((item) => item.stageId === "review")!
@@ -535,6 +565,56 @@ async function fixture(
     recoveryInputs,
     userConfig
   }
+}
+
+function realContextFixture(workspaceLength: number) {
+  return fixture(
+    false,
+    undefined,
+    () => {},
+    {
+      apiVersion: "devclaw.stage-recovery/v1",
+      hookExecution: "windows-sandbox",
+      externalEffects: "network-requires-confirmation",
+      contextProvider: {
+        protocol: "devclaw.context-text/v1",
+        args: ["--stage", "${stageId}"]
+      }
+    },
+    true,
+    "import json, sys\nvalue=json.load(sys.stdin)\nassert value['configuration']['audience']=='native original editors'\nprint('REAL_NATIVE_PROVIDER_CONTEXT '+value['stageId'])\n",
+    workspaceLength
+  )
+}
+
+async function approvedContextBranch(
+  f: Awaited<ReturnType<typeof realContextFixture>>,
+  idempotencyKey: string
+) {
+  const plan = await f.prepare()
+  const created = await f.debug.create(f.context, {
+    threadId: f.scope.threadId,
+    preparationId: plan.id,
+    expectedDigest: plan.candidateDigest,
+    recoveryApproval: { policyDigest: plan.recovery!.policyDigest, allowNetworkSideEffects: true }
+  })
+  const branch = f.service.get(created.projectId)!
+  const operation = f.service.prepare({
+    projectId: branch.projectId,
+    expectedVersion: branch.version,
+    idempotencyKey
+  })
+  f.service.approve(operation.operationId, {
+    expectedVersion: branch.version,
+    inputFingerprint: operation.inputFingerprint,
+    decision: "approved",
+    actorId: "new-stage-user",
+    contextProviderApproval: {
+      policyDigest: operation.contextProvider!.policyDigest,
+      allowNetworkSideEffects: true
+    }
+  })
+  return { branch, operation }
 }
 
 it.each(["same-length replacement", "different-length replacement", "missing file"])(
@@ -699,22 +779,9 @@ it("forks a real configuration-only Host package through the complete native sna
 it.runIf(process.platform === "win32")(
   "runs an independently approved real context script on the first trial and again on a frozen stage branch",
   async () => {
-    const f = await fixture(
-      false,
-      undefined,
-      () => {},
-      {
-        apiVersion: "devclaw.stage-recovery/v1",
-        hookExecution: "windows-sandbox",
-        externalEffects: "network-requires-confirmation",
-        contextProvider: {
-          protocol: "devclaw.context-text/v1",
-          args: ["--stage", "${stageId}"]
-        }
-      },
-      true,
-      "import json, sys\nvalue=json.load(sys.stdin)\nassert value['configuration']['audience']=='native original editors'\nprint('REAL_NATIVE_PROVIDER_CONTEXT '+value['stageId'])\n"
-    )
+    const f = await realContextFixture(200)
+    expect(f.original.workspace.length).toBe(200)
+    expect(f.original.workspace.startsWith("\\\\?\\")).toBe(false)
     const originalOperations = f.service.operations(f.original.projectId)
     expect(
       originalOperations.every(
@@ -763,6 +830,204 @@ it.runIf(process.platform === "win32")(
     expect(new StageRecoveryHookJournal(f.settings).list(branch.projectId)).toMatchObject([
       { phase: "settled", exitCode: 0 }
     ])
+  },
+  40000
+)
+
+it.runIf(process.platform === "win32")(
+  "runs a real context provider in an explicit long Windows workspace without changing scope paths",
+  async () => {
+    const startOwned = ownedCommands.startOwnedHookCommand
+    const observations: Array<Record<string, string | number | boolean | null>> = []
+    const observedCompletions: Promise<void>[] = []
+    const starts = vi.spyOn(ownedCommands, "startOwnedHookCommand").mockImplementation((input) => {
+      const payloadIndex = input.args.findIndex((arg) =>
+        ["recovery-argv-file", "recovery-cmd-file"].includes(arg)
+      )
+      const observation: Record<string, string | number | boolean | null> = {
+        cwdLength: input.cwd.length,
+        scratchLength: input.env.DEVCLAW_PLUGIN_DATA_ROOT?.length ?? 0,
+        sandboxHomeLength: input.env.CODEX_HOME?.length ?? 0,
+        payloadLength: payloadIndex < 0 ? null : input.args[payloadIndex + 1]?.length ?? null,
+        signalAbortedAtStart: input.signal?.aborted ?? false
+      }
+      observations.push(observation)
+      let stdoutBytes = 0, stderrBytes = 0, observed = false
+      const stdoutHash = createHash("sha256"), stderrHash = createHash("sha256")
+      const recordError = (error: unknown) => {
+        if (!(error instanceof Error)) return
+        observation.errorName = /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(error.name)
+          ? error.name : "Error"
+        observation.errorMessageSha256 = createHash("sha256").update(error.message).digest("hex")
+        const code = "code" in error ? error.code : undefined
+        if (typeof code === "number" ||
+          (typeof code === "string" && /^[A-Z_][A-Z0-9_]{0,63}$/.test(code)))
+          observation.errorCode = code
+      }
+      const finish = () => {
+        observed = true
+        Object.assign(observation, {
+          stdoutBytes,
+          stderrBytes,
+          stdoutSha256: stdoutHash.digest("hex"),
+          stderrSha256: stderrHash.digest("hex"),
+          signalAbortedAtEnd: input.signal?.aborted ?? false
+        })
+      }
+      try {
+        const owned = startOwned({
+          ...input,
+          stdout: (chunk) => {
+            stdoutBytes += chunk.length
+            if (!observed) stdoutHash.update(chunk)
+            input.stdout(chunk)
+          },
+          stderr: (chunk) => {
+            stderrBytes += chunk.length
+            if (!observed) stderrHash.update(chunk)
+            input.stderr(chunk)
+          }
+        })
+        observedCompletions.push(owned.completion.then((result) => {
+          observation.code = result.code
+          if (result.error) recordError(result.error)
+          finish()
+        }, (error) => {
+          observation.rejected = true
+          recordError(error)
+          finish()
+        }))
+        return owned
+      } catch (error) {
+        observation.startRejected = true
+        recordError(error)
+        finish()
+        throw error
+      }
+    })
+    try {
+      const f = await realContextFixture(240)
+      expect(f.original.workspace.length).toBe(240)
+      expect(join(f.original.workspace, ".dcp", "r-XXXXXX").length).toBeGreaterThan(248)
+      const { branch, operation } = await approvedContextBranch(f, "long-context-provider")
+      expect(branch.workspace.length).toBe(240)
+      expect((await f.service.start(operation.operationId)).status).toBe("succeeded")
+      const workspaces = [f.original.workspace, branch.workspace]
+      const providerStarts = starts.mock.calls.filter(([input]) =>
+        workspaces.includes(dirname(dirname(input.env.DEVCLAW_PLUGIN_DATA_ROOT ?? "")))
+      )
+      expect(providerStarts.length).toBeGreaterThanOrEqual(3)
+      for (const [input] of providerStarts) {
+        const scratch = input.env.DEVCLAW_PLUGIN_DATA_ROOT
+        expect(scratch.startsWith("\\\\?\\")).toBe(false)
+        expect(basename(dirname(scratch))).toBe(".dcp")
+        expect(input.env.CODEX_HOME.startsWith("\\\\?\\")).toBe(false)
+        expect(dirname(input.env.CODEX_HOME)).toBe(join(dirname(dirname(scratch)), ".dcr"))
+        const payloadIndex = input.args.indexOf("recovery-argv-file")
+        expect(payloadIndex).toBeGreaterThanOrEqual(0)
+        const payload = input.args[payloadIndex + 1]
+        expect(payload).toBe(join(input.env.CODEX_HOME, "i"))
+        expect(payload.length).toBe(256)
+        expect(payload.startsWith("\\\\?\\")).toBe(false)
+        expect(await readdir(scratch)).toEqual([])
+      }
+      await Promise.all(observedCompletions)
+      expect(observations.length).toBeGreaterThanOrEqual(3)
+      expect(observations.every((entry) => entry.code === 0 && !entry.rejected)).toBe(true)
+      expect(new StageRecoveryHookJournal(f.settings).list(branch.projectId)).toMatchObject([
+        { phase: "settled", exitCode: 0 }
+      ])
+    } finally {
+      await Promise.allSettled(observedCompletions)
+      console.info("[StageContextProviderNativeEvidence]", JSON.stringify(observations))
+      starts.mockRestore()
+    }
+  },
+  40000
+)
+
+it.runIf(process.platform === "win32").each(["junction", "file"] as const)(
+  "rejects a context scratch parent that is a %s before starting another provider",
+  async (kind) => {
+    const f = await realContextFixture(200)
+    const { branch, operation } = await approvedContextBranch(f, `scratch-parent-${kind}`)
+    const outside = join(f.root, "outside-provider-scratch")
+    await mkdir(outside)
+    const workspace = resolve(branch.workspace)
+    const child = relative(resolve(f.root), workspace)
+    if (!child || isAbsolute(child) || child === ".." || child.startsWith("..\\"))
+      throw Error("Unsafe fixture workspace")
+    expect(await realpath(workspace)).toBe(workspace)
+    const parent = join(workspace, ".dcp")
+    const retained = join(workspace, ".dcp-retained")
+    const parentStat = await lstat(parent, { bigint: true })
+    expect(parentStat.isDirectory()).toBe(true)
+    expect(parentStat.isSymbolicLink()).toBe(false)
+    expect(await realpath(parent)).toBe(parent)
+    const parentEntries = (await readdir(parent)).sort()
+    await expect(lstat(retained)).rejects.toMatchObject({ code: "ENOENT" })
+    const journal = new StageRecoveryHookJournal(f.settings)
+    const originalJournal = journal.list(branch.projectId)
+    const starts = vi.spyOn(ownedCommands, "startOwnedHookCommand")
+    let providerFailure: unknown
+    let parentRetained = false
+    let replacementCreated = false
+    const execution = vi.spyOn(f.serviceDependencies, "executeSkill").mockImplementationOnce(
+      async (input) => {
+        const threadId = randomUUID()
+        input.bindThread(threadId)
+        input.stageDebug = f.debug.executionPolicy(input.project)
+        const current = await lstat(parent, { bigint: true })
+        expect([current.dev, current.ino]).toEqual([parentStat.dev, parentStat.ino])
+        expect(current.isDirectory() && !current.isSymbolicLink()).toBe(true)
+        expect(await realpath(parent)).toBe(parent)
+        await expect(lstat(retained)).rejects.toMatchObject({ code: "ENOENT" })
+        await rename(parent, retained)
+        parentRetained = true
+        if (kind === "junction") await symlink(outside, parent, "junction")
+        else await writeFile(parent, "Keep this ordinary file")
+        replacementCreated = true
+        try {
+          await executeStageRecoveryContextProvider(input, threadId, () => {})
+        } catch (error) {
+          providerFailure = error
+          throw error
+        }
+        throw Error("Context provider unexpectedly accepted an invalid scratch parent")
+      }
+    )
+    try {
+      expect((await f.service.start(operation.operationId)).status).toBe("unknown")
+      expect(providerFailure).toMatchObject({ message: "PROJECT_HOST_DIRECTORY_INVALID" })
+      expect(starts).not.toHaveBeenCalled()
+      expect(await readdir(outside)).toEqual([])
+      if (kind === "file") expect(await readFile(parent, "utf8")).toBe("Keep this ordinary file")
+      expect(journal.list(branch.projectId)).toEqual(originalJournal)
+    } finally {
+      try {
+        if (replacementCreated) {
+          const replacement = await lstat(parent)
+          if (kind === "junction") {
+            expect(replacement.isSymbolicLink()).toBe(true)
+            expect(await realpath(parent)).toBe(await realpath(outside))
+          } else {
+            expect(replacement.isFile() && !replacement.isSymbolicLink()).toBe(true)
+            expect(await readFile(parent, "utf8")).toBe("Keep this ordinary file")
+          }
+          await unlink(parent)
+        }
+        if (parentRetained) {
+          await rename(retained, parent)
+          const restored = await lstat(parent, { bigint: true })
+          expect([restored.dev, restored.ino]).toEqual([parentStat.dev, parentStat.ino])
+          expect(await realpath(parent)).toBe(parent)
+          expect((await readdir(parent)).sort()).toEqual(parentEntries)
+        }
+      } finally {
+        starts.mockRestore()
+        execution.mockRestore()
+      }
+    }
   },
   40000
 )

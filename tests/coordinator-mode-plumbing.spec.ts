@@ -1484,10 +1484,25 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
     "const coordinatorWorkerTurnPlanning = createCoordinatorWorkerTurnPlanningState()",
     "agent invoke preserves coordinator worker planning counters across failover runtime rebuilds"
   )
-  assertMatches(
+  const firstCoordinatorBaseOptions = sliceBetween(
     agentIpc,
-    /coordinatorTurnPrompt,\s+coordinatorSelectedSkill,/,
+    "baseOptions: () => ({",
+    "...foregroundToolPolicy(effectiveAgentMode, metadata)"
+  )
+  assertMatches(
+    firstCoordinatorBaseOptions,
+    /^[ \t]*coordinatorTurnPrompt,[ \t]*$/m,
     "agent invoke passes turn-scoped coordinator context into the first coordinator runtime"
+  )
+  assertMatches(
+    firstCoordinatorBaseOptions,
+    /^[ \t]*coordinatorSelectedSkill,[ \t]*$/m,
+    "agent invoke passes the selected skill into the first coordinator runtime"
+  )
+  assertMatches(
+    firstCoordinatorBaseOptions,
+    /^[ \t]*worktreeIsolation: runExecutionContext\.worktreeIsolation,[ \t]*$/m,
+    "agent invoke preserves worktree isolation in the first coordinator runtime"
   )
   assertIncludes(
     agentIpc,

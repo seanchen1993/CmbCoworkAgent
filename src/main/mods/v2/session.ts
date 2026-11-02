@@ -121,7 +121,6 @@ import {
   validateBasicResult
 } from "./basic-sdk"
 import {
-  FUNCTION_UI_CAPABILITIES,
   validateFunctionUiPressedLink,
   validateFunctionTree,
   validatePaneArgs
@@ -140,52 +139,8 @@ import {
   validateNamedStateEvent,
   type FunctionNamedStateScope
 } from "./named-state"
-export const SESSION_CAPABILITIES = [
-  "platform.list", "platform.read", "platform.subscribe", "platform.poll", "platform.unsubscribe",
-  "platform.publish", "platform.act", "platform.cancel", "platform.status",
-  "prompt.read",
-  "prompt.fill",
-  "prompt.paint",
-  "prompt.suggest",
-  "prompt.compose",
-  "prompt.context",
-  "prompt.attachment",
-  "prompt.submit",
-  "http.fetch",
-  "session.send",
-  "session.append",
-  "agent.spawn",
-  "agent.status",
-  "agent.messages",
-  "agent.stop",
-  "ui.view",
-  "agent.register",
-  "settings.read",
-  "config.list",
-  "config.set",
-  "env.get",
-  "env.set",
-  ...FUNCTION_NONMEDIA_METHODS,
-  "process.run",
-  "process.spawn",
-  "clock.after",
-  "clock.every",
-  "state.get",
-  "state.set",
-  ...BASIC_CAPABILITIES,
-  ...FUNCTION_UI_CAPABILITIES,
-  "tool.call",
-  "fs.write",
-  "agent.list",
-  "tool.register",
-  "tool.list",
-  "tool.check",
-  "mcp.call", "mcp.connect", "mcp.list", "mcp.status", "mcp.disconnect",
-  "model.complete",
-  "model.fork",
-  "model.classify",
-  "turn.abort"
-]
+import { SESSION_CAPABILITIES } from "../../../shared/mods/v2/session-capabilities"
+export { SESSION_CAPABILITIES }
 type SuggestionProof = { isShown: boolean; parent?: SuggestionProof }
 type CopyProof = { isCopied: boolean; parent?: CopyProof }
 import type { FunctionStateAccess } from "./state-store"

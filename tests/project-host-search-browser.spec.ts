@@ -1,15 +1,25 @@
 /** Actual unified project page: bounded Host search/paging and stale-response fences. */
 import assert from "node:assert/strict"
-import { existsSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs"
 import { resolve } from "node:path"
 import { build } from "esbuild"
-import { chromium } from "playwright"
+import { chromium, type Page } from "playwright"
 import { browserWorkerPlugin } from "./support/browser-worker-plugin.mjs"
+import type {
+  HarnessProjectUseReview,
+  HarnessProjectUseReviewInput
+} from "../src/shared/project-use-authorization"
 
 interface SearchCall {
   account: number
   after: string
   query: string
+}
+interface ReviewCall {
+  account: number
+  input: HarnessProjectUseReviewInput
+  review: HarnessProjectUseReview
+  released: boolean
 }
 interface FixtureWindow {
   hostSearch: {
@@ -30,6 +40,9 @@ interface FixtureWindow {
     releaseCreate(): void
     holdRegistry(): void
     releaseRegistry(): void
+    holdReviews(): void
+    releaseReviews(): void
+    reviewCalls: ReviewCall[]
     createInputs: Array<Record<string, unknown>>
     createCalls: number
     mutationCalls: string[]
@@ -125,10 +138,11 @@ async function main() {
       function projects(account){return names.map((name,index)=>({projectId:'host-'+String(index).padStart(3,'0'),
         name:'账号'+account+' '+name,workspace:'C:/account-'+account+'/project-'+index,
         status:'active',stageIndex:0,updatedAt:index,packageVersion:'1.0.0'}))}
-      let releaseCreate,registryDelayed=false;const pendingRegistry=[];
+      let releaseCreate,registryDelayed=false,reviewsHeld=false,reviewSequence=0;
+      const pendingRegistry=[],pendingReviews=[],reviewCalls=[];
       const guideDismissals=[],mutationCalls=[];
       window.addEventListener('ui-guide:dismiss-current-entry',event=>guideDismissals.push(event.detail.guideId));
-      const search={calls,released,templates:0,createCalls:0,createInputs:[],guideDismissals,mutationCalls,
+      const search={calls,released,templates:0,createCalls:0,createInputs:[],guideDismissals,mutationCalls,reviewCalls,
         openDerived:()=>openDerivedProject('delayed-host','延迟模板项目插件'),
         openHostStartUse:()=>openPluginStartUse({threadId:'source-chat',expectedWorkspace:'C:/source',
           pluginId:hostAdapter.id,expected:{name:hostAdapter.name,version:hostAdapter.version}},
@@ -138,6 +152,8 @@ async function main() {
         pendingDerived:()=>readDerivedProjectIntent(),finishTemplateDelay:()=>templateDelay=false,
         holdRegistry:()=>registryDelayed=true,
         releaseRegistry:()=>{registryDelayed=false;pendingRegistry.splice(0).forEach(resolve=>resolve([structuredClone(hostAdapter)]))},
+        holdReviews:()=>reviewsHeld=true,
+        releaseReviews:()=>{reviewsHeld=false;pendingReviews.splice(0).forEach(release=>release())},
         releaseCreate:()=>releaseCreate?.(),hold:query=>held.add(query),fail:query=>failures.add(query),
         release:query=>{held.delete(query);for(let i=pending.length-1;i>=0;i--)if(pending[i].query===query){const item=pending.splice(i,1)[0];released.push(query);item.resolve(item.rows)}},
         delayTemplates:()=>templateDelay=true,
@@ -159,7 +175,35 @@ async function main() {
         harnessBoard:{
           searchEnterpriseProjects:async()=>({projects:[],total:0,hasMore:false}),
           verifyEnterpriseProjectCode:async()=>false,
-          createProject:async input=>{search.createCalls++;search.createInputs.push(input);
+          reviewProjectUse:async input=>{
+            const account=window.fixtureAccount(),held=reviewsHeld;
+            if(input.adapterId!==hostAdapter.id||input.adapterType!=='plugin'||
+              JSON.stringify(input.expectedNativeTemplate)!==JSON.stringify(template.expectedTemplate))
+              throw Error('PROJECT_USE_REVIEW_IDENTITY_MISMATCH');
+            const captured=structuredClone(input),sequence=++reviewSequence,
+              reviewId='review-'+sequence+'-'+crypto.randomUUID();
+            const bytes=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(JSON.stringify([account,captured,reviewId])));
+            const reviewDigest=Array.from(new Uint8Array(bytes),value=>value.toString(16).padStart(2,'0')).join('');
+            const review={reviewId,reviewDigest,projectId:'owner-'+sequence,
+              workspace:input.workspacePath+'/'+input.projectDir,plugin:structuredClone(template.expectedTemplate),
+              packageDigest:'b'.repeat(64),sources:[{pluginId:hostAdapter.id,name:hostAdapter.name,
+                digest:'c'.repeat(64),capabilities:['process.run'],actionIds:[],configurationOnly:false}],
+              scopeNotice:'一次允许本项目通过原界面登记的目录使用所列能力。',
+              requiresApplicationEnable:false,expiresAt:Date.now()+60000};
+            const request={account,input:captured,review,released:!held};reviewCalls.push(request);
+            if(!held)return structuredClone(review);
+            return new Promise(resolve=>pendingReviews.push(()=>{request.released=true;resolve(structuredClone(review))}));
+          },
+          createProject:async input=>{
+            const receipt=input.projectUseApproval,request=reviewCalls.find(item=>
+              item.review.reviewId===receipt?.reviewId&&item.review.reviewDigest===receipt?.reviewDigest);
+            if(!request||!request.released||request.account!==window.fixtureAccount()||
+              request.review.expiresAt<=Date.now()||request.input.adapterId!==input.adapterId||
+              request.input.adapterType!==input.adapterType||request.input.workspacePath!==input.workspacePath||
+              request.input.projectDir!==input.projectDir||
+              JSON.stringify(request.input.expectedNativeTemplate)!==JSON.stringify(input.expectedNativeTemplate))
+              throw Error('PROJECT_USE_APPROVAL_MISMATCH');
+            search.createCalls++;search.createInputs.push(input);
             await new Promise(resolve=>releaseCreate=resolve);
             return {...input,projectId:'created-before-account-switch',
               'harness-adapter':{id:input.adapterId,name:hostAdapter.name,version:hostAdapter.version,type:'plugin'}}},
@@ -189,10 +233,12 @@ async function main() {
     headless: true,
     ...(existsSync(chromium.executablePath()) ? {} : { channel: "msedge" })
   })
+  let failurePage: Page | undefined
+  const errors: string[] = []
   try {
     const page = await browser.newPage({ viewport: { width: 1400, height: 950 } })
+    failurePage = page
     page.setDefaultTimeout(15000)
-    const errors: string[] = []
     page.on("pageerror", (error) => errors.push(error.message))
     // A trustworthy local origin preserves the app's native Web Crypto behavior.
     await page.route("http://127.0.0.1/**", (route) =>
@@ -473,13 +519,32 @@ async function main() {
       [],
       "leaving detail and opening either form never stops, advances or approves the old project"
     )
+    await page.evaluate(() => (window as unknown as FixtureWindow).hostSearch.holdReviews())
     await page.getByRole("textbox", { name: /项目名称/ }).fill("提交后切换账号")
     await page.getByRole("textbox", { name: /项目编号/ }).fill("P-ACCOUNT-CAS")
     await page.getByRole("textbox", { name: /项目描述/ }).fill("不重放已消费的创建请求")
     await page.getByRole("textbox", { name: /系统编号/ }).fill("S1")
     await page.getByRole("textbox", { name: /系统名称/ }).fill("通用系统")
     await page.getByRole("textbox", { name: "插件工作区根目录", exact: true }).click()
-    await page.getByRole("button", { name: "创建", exact: true }).click()
+    await page.waitForFunction(() =>
+      (window as unknown as FixtureWindow).hostSearch.reviewCalls.some(
+        (request) => !request.released && request.input.workspacePath === "C:/isolated/create"
+      )
+    )
+    assert.equal(
+      await page.getByRole("button", { name: /^创建(?:并授权)?$/, exact: true }).isDisabled(),
+      true,
+      "the original form cannot submit while its actual scope review is pending"
+    )
+    assert.equal(await page.evaluate(() =>
+      (window as unknown as FixtureWindow).hostSearch.createCalls), 0)
+    assert.deepEqual(await page.evaluate(() =>
+      (window as unknown as FixtureWindow).hostSearch.mutationCalls), [])
+    await page.evaluate(() => (window as unknown as FixtureWindow).hostSearch.releaseReviews())
+    const authorize = page.getByRole("button", { name: "创建并授权", exact: true })
+    await authorize.waitFor()
+    assert.equal(await authorize.isEnabled(), true)
+    await authorize.click()
     await page.waitForFunction(
       () => (window as unknown as FixtureWindow).hostSearch.createCalls === 1
     )
@@ -491,6 +556,18 @@ async function main() {
     assert.equal(Object.hasOwn(createdInput, "goal"), false)
     assert.deepEqual(createdInput.expectedNativeTemplate, { pluginId: "delayed-host",
       name: "延迟模板项目插件", version: "1.0.0", digest: "a".repeat(64) })
+    const approved = await page.evaluate(() =>
+      (window as unknown as FixtureWindow).hostSearch.reviewCalls.at(-1)!)
+    assert.equal(approved.account, 3)
+    assert.equal(approved.input.workspacePath, createdInput.workspacePath)
+    assert.equal(approved.input.projectDir, createdInput.projectDir)
+    assert.deepEqual(approved.input.expectedNativeTemplate, createdInput.expectedNativeTemplate)
+    assert.deepEqual(approved.review.sources.map(source => ({
+      capabilities: source.capabilities, configurationOnly: source.configurationOnly
+    })), [{ capabilities: ["process.run"], configurationOnly: false }])
+    assert.deepEqual(createdInput.projectUseApproval, {
+      reviewId: approved.review.reviewId, reviewDigest: approved.review.reviewDigest
+    })
     await page.evaluate(() => {
       const fixture = (window as unknown as FixtureWindow).hostSearch
       fixture.changeAccount()
@@ -512,6 +589,21 @@ async function main() {
     console.log(
       "PASS actual HarnessBoardView searches beyond page one, fences stale responses and retains delayed templates"
     )
+  } catch (error) {
+    try {
+      const output = resolve("output")
+      mkdirSync(output, { recursive: true })
+      const failure = mkdtempSync(resolve(output, "project-host-search-failure-"))
+      writeFileSync(resolve(failure, "pageerrors.json"), JSON.stringify(errors, null, 2))
+      if (failurePage) {
+        writeFileSync(resolve(failure, "page.html"), await failurePage.content())
+        await failurePage.screenshot({ path: resolve(failure, "failure.png"), fullPage: true })
+      }
+      console.error(`Host search failure evidence: ${failure}`)
+    } catch (captureError) {
+      console.warn("Host search failure evidence could not be saved:", captureError)
+    }
+    throw error
   } finally {
     await browser.close()
   }

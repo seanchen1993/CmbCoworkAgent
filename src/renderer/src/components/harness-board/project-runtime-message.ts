@@ -17,6 +17,10 @@ export function projectCheckKindLabel(kind: string | undefined): string {
 
 /** Shared recovery wording for both project entry points; technical details remain expandable. */
 export function projectRuntimeRecoveryMessage(error: string): string | undefined {
+  if (/PROJECT_USE_(?:REVIEW_CHANGED|REVIEW_REQUIRED|SOURCE_CHANGED)/.test(error))
+    return "插件版本、目录或开关已变化，原权限核对已失效。请重新核对插件权限后提交；若插件已更新，请取消后重新选择。系统不会自动重新授权。"
+  if (/PROJECT_USE_AUTHORIZATION_(?:INVALID|UNAVAILABLE)/.test(error))
+    return "项目授权暂时无法核实。请在“编辑项目 → 插件配置”中核对当前插件并保存后重试。"
   if (/PROJECT_TEMPLATE_(PLUGIN|RESPONSE)_LIMIT/.test(error))
     return "已安装插件或模板列表超过当前读取上限。请移除不再使用的插件，或由维护者调整模板范围后更新列表；反复启用插件不会解决此限制。"
   if (error.includes("HOST_PROJECT_NAVIGATION_CHANGED"))

@@ -1,4 +1,6 @@
 import { resolveBackendEndpoint } from "./backend-endpoint"
+import { readJsonResponse } from "./json-response"
+import { marketListItems } from "./market-list-response"
 
 export interface MarketPluginItem {
   name?: string
@@ -34,13 +36,8 @@ export async function getMarketPlugins(): Promise<MarketPluginListResult> {
       return { success: false, error: `HTTP error! status: ${response.status}` }
     }
 
-    const contentType = response.headers.get("content-type") || ""
-    if (!contentType.includes("application/json")) {
-      return { success: false, error: "Response is not JSON" }
-    }
-
-    const data = (await response.json()) as MarketPluginListResponse
-    return { success: true, data: Array.isArray(data.items) ? data.items : [] }
+    const data = await readJsonResponse<MarketPluginListResponse>(response, "应用市场")
+    return { success: true, data: marketListItems(data, response) }
   } catch (error) {
     return { success: false, error: error instanceof Error ? error.message : "Unknown error" }
   }

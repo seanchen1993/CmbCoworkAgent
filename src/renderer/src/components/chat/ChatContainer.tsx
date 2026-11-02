@@ -21,6 +21,7 @@ import { isPromptSubmissionReady } from "@/lib/prompt-submission-readiness"
 import { PromptDecorations } from "./PromptDecorations"
 import { useChatFlow } from "@/lib/use-chat-flow"
 import { ClawSidebar, ClawComposerBar } from "./ClawSidebar"
+import { canUseChatWorkbench } from "@/lib/chat-workbench-visibility"
 import { openClawRecovery } from "../../lib/claw-sidebar"
 import { ModCompositionRecoveryNotice } from "./ModCompositionRecoveryNotice"
 import { MODS_COMPOSITION_REVIEW_REQUIRED } from "../../../../shared/mods/v2/contracts"
@@ -1473,12 +1474,12 @@ function ChatErrorCard({
   error: string
   detail: ApiErrorDetailState | null
   onDismiss: () => void
-  onReviewComposition: () => void
+  onReviewComposition?: () => void
 }): React.JSX.Element {
   const [showDetails, setShowDetails] = useState(false)
 
   const compositionRecovery = error.includes(MODS_COMPOSITION_REVIEW_REQUIRED)
-  const title = compositionRecovery ? "功能组合需要核对" : detail?.statusLabel
+  const title = compositionRecovery ? onReviewComposition ? "功能组合需要核对" : "插件配置需要核对" : detail?.statusLabel
     ? `${detail.statusLabel}${detail.status ? `（${detail.status}）` : ""}`
     : "代理出错"
   const reason = (detail?.reason || error || "").trim()
@@ -1509,7 +1510,9 @@ function ChatErrorCard({
       <AlertCircle className="size-5 text-destructive shrink-0 mt-0.5" />
       <div className="flex-1 min-w-0">
         <div className="font-medium text-destructive text-sm">{title}</div>
-        {compositionRecovery && <ModCompositionRecoveryNotice onReview={onReviewComposition} />}
+        {compositionRecovery && (onReviewComposition
+          ? <ModCompositionRecoveryNotice onReview={onReviewComposition} />
+          : <p className="mt-1 text-sm text-muted-foreground">请在项目的插件配置中核对参数和开关后重试。</p>)}
         {!compositionRecovery && reason && (
           <div className="text-sm text-muted-foreground mt-1 break-words whitespace-pre-wrap">
             {reason}
@@ -2020,6 +2023,7 @@ export function ChatContainer({
     surface === "harness-project" ||
     surface === "harness-feature-session" ||
     Boolean(harnessFeatureBinding)
+  const chatWorkbenchAvailable = canUseChatWorkbench(surface, currentThread)
   const [isManagedRunSessionActive, setIsManagedRunSessionActive] = useState(false)
   const appNotifications = useHarnessNotifications()
   const bizRetry = appNotifications.find(
@@ -2373,7 +2377,9 @@ export function ChatContainer({
     draftBuiltinBrowser: selectedBuiltinBrowser,
     setDraftBuiltinBrowser: setSelectedBuiltinBrowser
   } = useCurrentThread(threadId)
-  const chatFlow = useChatFlow(threadId, currentForkWorkspacePath, modsChatEnabled && !readOnly && isOrdinaryFlowMetadata(currentThread?.metadata))
+  const chatFlowController = useChatFlow(threadId, currentForkWorkspacePath,
+    chatWorkbenchAvailable && modsChatEnabled && !readOnly && isOrdinaryFlowMetadata(currentThread?.metadata))
+  const chatFlow = chatWorkbenchAvailable ? chatFlowController : { ...chatFlowController, choice: null }
   const latestChatFlow = useRef(chatFlow)
   latestChatFlow.current = chatFlow
   useChatComposerFocus(inputRef, threadId, currentForkWorkspacePath, showCustomizeView)
@@ -5266,9 +5272,9 @@ export function ChatContainer({
   const firstTask = useSimpleAuthoringTask(threadId, currentForkWorkspacePath ?? null)
   const [preparingFirstTask, setPreparingFirstTask] = useState(false)
   const firstTaskScope = useRef("")
-  firstTaskScope.current = JSON.stringify([threadId, currentForkWorkspacePath, firstTask?.id])
+  firstTaskScope.current = JSON.stringify([threadId, currentForkWorkspacePath, firstTask?.id, chatWorkbenchAvailable])
   const prepareFirstTask = async () => {
-    if (!firstTask || preparingFirstTask || isLoading || chatFlow.active || chatFlow.busy) return
+    if (!chatWorkbenchAvailable || !firstTask || preparingFirstTask || isLoading || chatFlow.active || chatFlow.busy) return
     const captured = firstTaskScope.current
     const draft = readPromptDraft()
     if (firstTask.kind === "command" && draft.text.trim()) {
@@ -5304,7 +5310,9 @@ export function ChatContainer({
       }
       dismissSimpleAuthoringTask(firstTask.id)
       inputRef.current?.focus()
-    } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)) }
+    } catch (cause) {
+      if (firstTaskScope.current === captured) setError(cause instanceof Error ? cause.message : String(cause))
+    }
     finally { setPreparingFirstTask(false) }
   }
 
@@ -8369,7 +8377,7 @@ export function ChatContainer({
       )}
       {threadError && !isLoading && (
         <ChatErrorCard error={threadError} detail={errorDetail} onDismiss={handleDismissError}
-          onReviewComposition={() => openClawRecovery(threadId)} />
+          onReviewComposition={chatWorkbenchAvailable ? () => openClawRecovery(threadId) : undefined} />
       )}
     </div>
   )
@@ -9049,7 +9057,7 @@ export function ChatContainer({
                 reserveLeftSpace && "md:pl-[20px]"
               )}
             >
-              {firstTask && <section aria-label="在这段聊天使用" className="mx-auto mb-3 max-w-3xl space-y-2 rounded-xl border p-3 text-sm">
+              {chatWorkbenchAvailable && firstTask && <section aria-label="在这段聊天使用" className="mx-auto mb-3 max-w-3xl space-y-2 rounded-xl border p-3 text-sm">
                 <p>{firstTask.flow ? "已应用。选择本次步骤，在聊天输入框描述任务并发送。" : "已应用。把任务填入输入框，检查后再发送。"}</p>
                 {input.trim() && <p className="text-muted-foreground">{firstTask.kind === "command" ? "请先保存或处理原输入，再填入插件命令。" : "你的原输入会保留，新任务附加在后面。"}</p>}
                 <button type="button" className="mr-4 underline" disabled={preparingFirstTask || isLoading || chatFlow.active || chatFlow.busy}
@@ -9062,7 +9070,7 @@ export function ChatContainer({
                 threadId={threadId} workspace={currentForkWorkspacePath} />}
               <div className="max-w-3xl mx-auto"><ModCards threadId={threadId} slot="turn.summary" /></div>
               <FunctionPeerMessages key={`peers:${threadId}`} threadId={threadId} />
-              {isOrdinaryFlowMetadata(currentThread?.metadata) ? <ClawSidebar key={`claw:${threadId}`} threadId={threadId} flow={chatFlow}
+              {chatWorkbenchAvailable && isOrdinaryFlowMetadata(currentThread?.metadata) ? <ClawSidebar key={`claw:${threadId}`} threadId={threadId} flow={chatFlow}
                 workspace={currentForkWorkspacePath}
                 onRequestCreator={enterCreatorFromChat}
                 onStart={goal => modsAgentInputActive(threadId, useAppStore.getState().accountRevision)
@@ -9102,10 +9110,10 @@ export function ChatContainer({
                 onFollowUp={(text) => {
                   setInput([inputRef.current?.value ?? input, text].filter(Boolean).join("\n\n"))
                 }}>
-                <FunctionPanes key={`panes:${threadId}`} threadId={threadId} />
+                <FunctionPanes key={`panes:${threadId}`} threadId={threadId} revealInSidebar={chatWorkbenchAvailable} />
               </ClawSidebar> : <>
                 <ModCommandJobs key={threadId} threadId={threadId} />
-                <FunctionPanes key={`panes:${threadId}`} threadId={threadId} />
+                <FunctionPanes key={`panes:${threadId}`} threadId={threadId} revealInSidebar={chatWorkbenchAvailable} />
                 <FunctionCompletionEvidence key={`evidence:${threadId}`} threadId={threadId} isWorking={isLoading} />
               </>}
               {modsChatScope.error && (
@@ -9121,7 +9129,7 @@ export function ChatContainer({
                 className="sparks-inline-surface mx-auto w-full max-w-3xl overflow-auto text-xs text-muted-foreground" />
               <form onSubmit={handleSubmit} className="max-w-3xl mx-auto relative">
                 {!readOnly && isOrdinaryFlowMetadata(currentThread?.metadata) && currentForkWorkspacePath && <AgentViewReceiver threadId={threadId} workspace={currentForkWorkspacePath} />}
-                <ClawComposerBar threadId={threadId} flow={chatFlow}>
+                {chatWorkbenchAvailable && <ClawComposerBar threadId={threadId} flow={chatFlow}>
                   {!readOnly && isDevelopmentThreadMetadata(currentThread?.metadata) && (
                     <ModsDevelopmentPanel threadId={threadId} workspaceHint={currentForkWorkspacePath}
                       mode="chat" onReturnToChat={(context) => {
@@ -9141,7 +9149,7 @@ export function ChatContainer({
                         useAppStore.getState().setShowCustomizeView(true, "mods")
                       }} />
                   )}
-                </ClawComposerBar>
+                </ClawComposerBar>}
                 <SlashCommandPopover
                   mode={parentInputPaused || chatFlow.choice ? { kind: "closed" } : slash.mode}
                   selectedIdx={slash.selectedIdx}

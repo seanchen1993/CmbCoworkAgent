@@ -94,6 +94,7 @@ import {
   getPluginsDir,
   getInstalledPluginIds,
   setModsGlobalEnabled,
+  getModsGlobalSettingsStamp,
   getStoredDefaultModelId,
   getStoredAgentGraphRecursionLimit,
   getWindowsSandboxMode
@@ -1917,6 +1918,20 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
       scope.threadId, scope.signal, scope.assertCurrent, work)
   })
   setProjectRuntimeFunctions(functions, workspace => manager.workspaceKey(workspace), {
+    applicationStamp: () => getModsGlobalSettingsStamp(),
+    enableApplication: () => {
+      setModsGlobalEnabled(true)
+      manager.invalidateAll()
+      creatorComposition.reconcile()
+      creatorReuse.reconcileAuthorizations()
+      const owner = window()
+      if (owner && !owner.isDestroyed()) owner.webContents.send("mods:configuration-changed")
+    },
+    initialize: workspace => {
+      const current = manager.store.getSetting(`enabled:${workspace}`, "")
+      if (current === "") manager.configure(workspace, true, manager.protects(workspace))
+      // Explicit false belongs to the user's previous transaction, never to a new Feature.
+    },
     settingsStamp: workspace => JSON.stringify(["enabled", "policy", "epoch"].map(key =>
       manager.store.getSetting(`${key}:${workspace}`, ""))),
     globallyEnabled: () => manager.isGloballyEnabled(),

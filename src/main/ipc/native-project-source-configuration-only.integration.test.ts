@@ -78,7 +78,7 @@ it("preserves the real metadata-only source review through native IPC without gu
     if (!current) throw Error("NATIVE_OWNER_CHANGED")
   }
   const handlers = new Map<string, Parameters<IpcMain["handle"]>[1]>()
-  registerNativeProjectSourceHandlers(
+  const executionReady = registerNativeProjectSourceHandlers(
     {
       handle: (channel: string, run: Parameters<IpcMain["handle"]>[1]) => {
         handlers.set(channel, run)
@@ -105,6 +105,7 @@ it("preserves the real metadata-only source review through native IPC without gu
       handlers.get(`test-native-config:${kind}`)!(event, value)
     ) as Promise<T>
   const review = await invoke<ProjectFunctionSourceReview>("mods-read", "native-project")
+  expect((await executionReady(event, "native-project")).ready).toBe(false)
   expect(review).toMatchObject({
     globallyEnabled: false,
     workspaceEnabled: false,
@@ -136,6 +137,9 @@ it("preserves the real metadata-only source review through native IPC without gu
     source: { configurationOnly: true, state: "ready", configurationReady: true }
   })
   manager.assertRuntimeSourceReady(input)
+  const ready = await executionReady(event, "native-project")
+  expect(ready.ready).toBe(true)
+  if (ready.ready) expect(() => ready.assertExecutionReady()).not.toThrow()
   const approval = {
     projectId: "native-project",
     projectVersion: 1,

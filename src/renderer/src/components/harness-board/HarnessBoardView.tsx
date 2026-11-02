@@ -1,4 +1,7 @@
 import { NativeFeatureReview } from "./NativeFeatureReview"
+import { ProjectUseConsent } from "./ProjectUseConsent"
+import { useProjectUseReview } from "./use-project-use-review"
+import type { HarnessProjectUseApproval } from "../../../../shared/project-use-authorization"
 import { useNativeNodeIntent, dismissNativeNodePlan, type NativeNodeIntent } from "@/lib/node-composition-intent"
 import { isSameWorkspacePath } from "../../../../shared/workspace-path"
 import type { NativeNodePlan } from "../../../../shared/node-composition"
@@ -22,7 +25,6 @@ import { useHarnessNotifications } from "@/lib/harness-notifications"
 import { BizRetryNotice } from "./BizRetryNotice"
 import { ProjectWorkspaceField } from "./ProjectWorkspaceField"
 import { ProjectCapabilityPanel } from "./ProjectCapabilityPanel"
-import { ProjectCompositionEntry } from "./ProjectCompositionEntry"
 import { HostProjectListItems, LocalProjectRun } from "./LocalProjectsPanel"
 import type { LocalProjectSummary, LocalProjectTemplate, LocalProjectView } from "../../../../shared/project-runtime/platform-api"
 import { dismissHostPluginStartUse, hostPluginStartUseCurrent, useHostPluginStartUseIntent, type HostPluginStartUseIntent } from "@/lib/plugin-start-use-intent"
@@ -2851,6 +2853,7 @@ function DeployUnitSearchInput({
 }
 
 export function ProjectFormDialog({
+  hostTemplates,
   hostStartUse,
   open,
   creating,
@@ -2879,7 +2882,7 @@ export function ProjectFormDialog({
   onChange: (form: HarnessProjectCreateInput) => void
   onInstallPlugin: (adapter: HarnessAdapterRegistryItem) => void | Promise<void>
   onPickWorkspace: () => void
-  onSubmit: () => void
+  onSubmit: (approval?: HarnessProjectUseApproval) => void
 }): React.JSX.Element {
   const [dialogPortalContainer, setDialogPortalContainer] = useState<HTMLDivElement | null>(null)
   const projectDirEditedRef = useRef(false)
@@ -2905,6 +2908,18 @@ export function ProjectFormDialog({
   const selectedAdapter = findSelectedAdapter(registry, form.adapterId)
   const selectedAdapterMessage = selectedAdapter?.runtimeMode === "host" ? null
     : boardCompatibilityMessage(selectedAdapter?.boardCompatibility)
+  const nativeTemplate = hostStartUse?.report.identity ?? hostTemplates?.find(
+    (template) => template.installedPluginId === selectedAdapter?.id
+  )?.expectedTemplate
+  const nativeReview = useProjectUseReview(open && selectedAdapter?.runtimeMode === "host" &&
+    nativeTemplate && form.workspacePath.trim() && form.projectDir.trim() ? {
+      adapterId: selectedAdapter.id,
+      adapterType: "plugin",
+      workspacePath: form.workspacePath,
+      projectDir: form.projectDir,
+      expectedNativeTemplate: nativeTemplate
+    } : undefined)
+  const authorizesCode = nativeReview.review?.sources.some((source) => !source.configurationOnly)
 
   const picker = <fieldset disabled={creating || !!hostStartUse}>
     <AdapterPicker allowHost value={form.adapterId} registry={registry}
@@ -2927,7 +2942,6 @@ export function ProjectFormDialog({
         </DialogHeader>
         <div className="min-h-0 overflow-y-auto py-1 pr-1">
           <div className="grid gap-4">
-            {picker}
             <section className="rounded-md border border-border bg-muted/30 p-3">
               <div className="mb-3 text-sm font-semibold">项目信息</div>
               <div className="grid grid-cols-2 items-start gap-3">
@@ -3036,6 +3050,7 @@ export function ProjectFormDialog({
             <section className="rounded-md border border-border bg-muted/30 p-3">
               <div className="mb-3 text-sm font-semibold">插件配置</div>
               <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
+                {picker}
                 {selectedAdapterMessage && (
                   <span className="text-status-warning">{selectedAdapterMessage}</span>
                 )}
@@ -3043,6 +3058,7 @@ export function ProjectFormDialog({
               <ProjectWorkspaceField
                 workspacePath={form.workspacePath}
                 projectDir={form.projectDir}
+                artifactsInProjectDirectory={selectedAdapter?.runtimeMode !== "host"}
                 error={projectDirError}
                 onPickWorkspace={onPickWorkspace}
                 onProjectDirChange={(value) => {
@@ -3053,9 +3069,12 @@ export function ProjectFormDialog({
               />
               {form.workspacePath.trim() && form.projectDir.trim() && (
                 <p className="mt-1.5 break-all text-xs leading-relaxed text-muted-foreground">
-                  将在 {resolveProjectRootPath(form)} 路径下创建本项目的插件工作目录。
+                  {selectedAdapter?.runtimeMode === "host"
+                    ? `本项目文件夹：${resolveProjectRootPath(form)}。运行与产物的实际位置见特性详情。`
+                    : `将在 ${resolveProjectRootPath(form)} 路径下创建本项目的插件工作目录。`}
                 </p>
               )}
+              {selectedAdapter?.runtimeMode === "host" && <ProjectUseConsent state={nativeReview} />}
             </section>
 
             {error && (
@@ -3070,20 +3089,21 @@ export function ProjectFormDialog({
             取消
           </Button>
           <Button
-            onClick={onSubmit}
+            onClick={() => onSubmit(nativeReview.approval)}
             disabled={
               creating ||
               verification.pending ||
               metadataRequiredMissing(form) ||
               metadataNameInvalid(form) ||
               metadataLengthInvalid(form, { validateProjectDir: true }) ||
+              (selectedAdapter?.runtimeMode === "host" && !nativeReview.approval) ||
               !(selectedAdapter?.runtimeMode === "host" ? selectedAdapter.enabled !== false
                 : selectedAdapter?.boardCompatibility.compatible)
             }
             className="gap-2"
           >
             {creating ? <Loader2 className="size-4 animate-spin" /> : <Plus className="size-4" />}
-            创建
+            {authorizesCode ? "创建并授权" : "创建"}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -3092,6 +3112,7 @@ export function ProjectFormDialog({
 }
 
 function ProjectEditDialog({
+  projectId,
   open,
   saving,
   form,
@@ -3104,6 +3125,7 @@ function ProjectEditDialog({
   onInstallPlugin,
   onSubmit
 }: {
+  projectId?: string
   open: boolean
   saving: boolean
   form: HarnessProjectMetadataUpdateInput
@@ -3114,7 +3136,7 @@ function ProjectEditDialog({
   onOpenChange: (open: boolean) => void
   onChange: (form: HarnessProjectMetadataUpdateInput) => void
   onInstallPlugin: (adapter: HarnessAdapterRegistryItem) => void | Promise<void>
-  onSubmit: () => void
+  onSubmit: (approval?: HarnessProjectUseApproval) => void
 }): React.JSX.Element {
   const [dialogPortalContainer, setDialogPortalContainer] = useState<HTMLDivElement | null>(null)
   const projectCodeError = getHarnessNameError("项目编号", form.projectCode)
@@ -3131,7 +3153,18 @@ function ProjectEditDialog({
   )
   const projectCodeValidationError = projectCodeError ?? projectCodeLengthError
   const selectedAdapter = findSelectedAdapter(registry, form.adapterId)
-  const selectedAdapterMessage = boardCompatibilityMessage(selectedAdapter?.boardCompatibility)
+  const selectedAdapterMessage = selectedAdapter?.runtimeMode === "host" ? null
+    : boardCompatibilityMessage(selectedAdapter?.boardCompatibility)
+  const nativeReview = useProjectUseReview(open && projectId &&
+    selectedAdapter?.runtimeMode === "host" ? {
+      adapterId: selectedAdapter.id,
+      adapterType: "plugin",
+      workspacePath: form.workspacePath,
+      projectDir: form.projectDir,
+      existingProjectId: projectId
+    } : undefined)
+  const authorizesCode = !nativeReview.review?.authorizationCurrent &&
+    nativeReview.review?.sources.some((source) => !source.configurationOnly)
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -3243,6 +3276,7 @@ function ProjectEditDialog({
               <div className="mb-3 text-sm font-semibold">插件配置</div>
               <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
                 <AdapterPicker
+                  allowHost={selectedAdapter?.runtimeMode === "host"}
                   value={form.adapterId}
                   registry={registry}
                   installingPluginNames={installingPluginNames}
@@ -3260,8 +3294,11 @@ function ProjectEditDialog({
                 workspacePath={form.workspacePath}
                 projectDir={form.projectDir}
                 readOnly
+                artifactsInProjectDirectory={selectedAdapter?.runtimeMode !== "host"}
                 error={getHarnessNameError("项目文件夹", form.projectDir)}
               />
+              {selectedAdapter?.runtimeMode === "host" &&
+                <ProjectUseConsent state={nativeReview} editing />}
             </section>
 
             {error && (
@@ -3276,18 +3313,20 @@ function ProjectEditDialog({
             取消
           </Button>
           <Button
-            onClick={onSubmit}
+            onClick={() => onSubmit(nativeReview.review?.authorizationCurrent
+              ? undefined : nativeReview.approval)}
             disabled={
               saving ||
               verification.pending ||
               metadataRequiredMissing(form) ||
               metadataNameInvalid(form) ||
-              metadataLengthInvalid(form)
+              metadataLengthInvalid(form) ||
+              (selectedAdapter?.runtimeMode === "host" && !nativeReview.approval)
             }
             className="gap-2"
           >
             {saving ? <Loader2 className="size-4 animate-spin" /> : <Pencil className="size-4" />}
-            保存
+            {authorizesCode ? "保存并授权" : "保存"}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -3602,6 +3641,7 @@ function FeatureCreateDialog({
   const agentsReadyDeployUnitIds = new Set(agentsReadyDeployUnits)
   const localAgentmdDeployUnitMappingIds = new Set(localAgentmdDeployUnitMappings)
   const supportsSessionContextInjection = project?.supportsSessionContextInjection === true
+  const supportsDeployUnits = project?.supportsDeployUnits !== false
   const selectableDeployUnitMappings = rows.filter((mapping) => mapping.deployUnitIdMapping.trim())
   const needsWideDialog = selectableDeployUnitMappings.some(
     (mapping) =>
@@ -3639,7 +3679,7 @@ function FeatureCreateDialog({
   }
   const rowClassName =
     "grid min-w-[calc(41.5rem+var(--feature-extra-width))] grid-cols-[1rem_minmax(0,1fr)_19rem_var(--feature-actions-width)] items-center gap-2 rounded-sm border border-transparent px-2 py-2 text-sm transition-colors hover:bg-muted/60"
-  const defaultTab = nodePlan ? "workflow" : "deploy-units"
+  const defaultTab = nodePlan || !supportsDeployUnits ? "workflow" : "deploy-units"
   const workflowPanel = workflowLoading ? (
     <div className="flex min-h-32 items-center justify-center rounded-md border border-border bg-background text-sm text-muted-foreground">
       <Loader2 className="mr-2 size-4 animate-spin" />
@@ -3984,7 +4024,7 @@ function FeatureCreateDialog({
               <TabsList className="grid w-full grid-cols-2">
                 <FeatureCreateTabTrigger
                   value="deploy-units"
-                  disabled={false}
+                  disabled={!supportsDeployUnits}
                   tooltip="插件暂不支持"
                 >
                   <span className="inline-flex min-w-0 items-center gap-1.5">
@@ -6394,7 +6434,14 @@ function ProjectSessionPage({
   onHarnessSessionCreated?: (threadId: string) => void
 }): React.JSX.Element {
   const title = thread ? getThreadTitle(thread) : "项目会话"
-  const readOnlyReason = deleted ? "所属项目已删除，当前会话只读。" : null
+  const nativeArchived = Boolean(
+    project.nativeBinding && project.lifecycle.status === "archived"
+  )
+  const readOnlyReason = deleted
+    ? "所属项目已删除，当前会话只读。"
+    : nativeArchived
+      ? "项目已归档，仅可查看历史会话。"
+      : null
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-background">
@@ -6414,16 +6461,6 @@ function ProjectSessionPage({
             </div>
             <div className="truncate text-xs text-muted-foreground">{project.name}</div>
           </div>
-          {!deleted && thread && typeof thread.metadata?.workspacePath === "string" && (
-            <ProjectCompositionEntry
-              key={thread.thread_id}
-              scope={{
-                projectId: project.projectId,
-                threadId: thread.thread_id,
-                expectedWorkspace: thread.metadata.workspacePath
-              }}
-            />
-          )}
         </div>
       </div>
 
@@ -6445,6 +6482,7 @@ function RemoteFeatureAccessPanel({
   featureImManagementEnabled,
   featureImManagementAvailable,
   featureImUnavailableReason,
+  managementUnsupportedReason,
   updatingFeatureImManagement,
   projectInteractionDisabled,
   onFeatureImManagementChange,
@@ -6455,6 +6493,7 @@ function RemoteFeatureAccessPanel({
   featureImManagementEnabled: boolean
   featureImManagementAvailable: boolean
   featureImUnavailableReason: string | null
+  managementUnsupportedReason?: string
   updatingFeatureImManagement: boolean
   projectInteractionDisabled: boolean
   onFeatureImManagementChange: (enabled: boolean) => void
@@ -6538,18 +6577,20 @@ function RemoteFeatureAccessPanel({
           <Switch
             aria-label="通过招乎管理特性"
             checked={enabled}
-            disabled={busy || (!enabled && !featureImManagementAvailable)}
+            disabled={busy || !!managementUnsupportedReason || (!enabled && !featureImManagementAvailable)}
             onCheckedChange={onFeatureImManagementChange}
           />
         </div>
         <p className="text-xs leading-5 text-muted-foreground">
-          {enabled
+          {managementUnsupportedReason ?? (enabled
             ? "关闭后已经接入招乎的会话不受影响，可在会话中单独管理接入状态"
-            : "打开后创建会话将自动接入招乎，也可从招乎发起新会话"}
+            : "打开后创建会话将自动接入招乎，也可从招乎发起新会话")}
         </p>
         {relatedSessions.length === 0 ? (
           <p className="rounded border border-dashed px-2.5 py-3 text-xs text-muted-foreground">
-            当前没有已接入的会话。打开上方开关后，可在招乎通过 /会话 选择此特性并新建会话。
+            {managementUnsupportedReason
+              ? "当前没有已接入的会话。可在普通会话中单独管理招乎接入状态。"
+              : "当前没有已接入的会话。打开上方开关后，可在招乎通过 /会话 选择此特性并新建会话。"}
           </p>
         ) : (
           <div className="max-h-72 space-y-2 overflow-y-auto">
@@ -6573,6 +6614,16 @@ function RemoteFeatureAccessPanel({
         )}
       </div>
     </section>
+  )
+}
+
+const nativeFeatureDirectoryLockReason =
+  "此特性的默认会话目录已固定，当前版本暂不支持更改。需使用其他目录时请新建特性。"
+
+function nativeFeatureDirectoryLocked(detail: HarnessRunDetailViewModel | null | undefined): boolean {
+  return Boolean(
+    detail?.nativeBinding &&
+      (detail.nativeBinding.worktree || detail.nativeBinding.initialUserMessage || detail.nativeProject)
   )
 }
 
@@ -6663,12 +6714,29 @@ function FeatureDetailPage({
   const featureOverallStatus = detail?.run.overallStatus ??
     selectedNode?.status ?? { label: "读取中", uiKind: "unknown" as const }
   const managedRun = detail?.run.managedRun
-  const nativeOperation = detail?.nativeProject?.operations.find(operation =>
-    ["started", "cancel_requested"].includes(operation.status))
+  const nativeStageId = detail?.nativeProject?.project.manifest.stages[
+    detail.nativeProject.project.stageIndex
+  ]?.id
+  const nativeOperation = nativeStageId
+    ? detail?.nativeProject?.operations.find(
+        (operation) =>
+          operation.stageId === nativeStageId &&
+          operation.expectedVersion === detail?.nativeProject?.project.version &&
+          ["prepared", "started", "cancel_requested", "succeeded"].includes(operation.status)
+      )
+    : undefined
   const managedRunIsRunning = detail?.nativeBinding ? !!nativeOperation : managedRun?.status === "running"
   const [nativeReadyScope, setNativeReadyScope] = useState("")
-  const nativeScope = `${detail?.nativeBinding?.hostRunId ?? ""}:${detail?.nativeProject?.project.version ?? 0}`
+  const nativeScope = JSON.stringify([
+    detail?.nativeBinding?.hostRunId,
+    detail?.nativeProject?.project.version ?? 0,
+    detail?.nativeBinding?.workspace,
+    detail?.nativeBinding?.workspaceIdentity
+  ])
   const nativeReady = nativeReadyScope === nativeScope
+  const nativeCanChooseWorkspace = detail?.nativeBinding?.workspaceMode === "selected-directory" &&
+    !detail.nativeProject && !detail.nativeBinding.initialUserMessage
+  const featureDirectoryLocked = nativeFeatureDirectoryLocked(detail)
   const [nativePendingScope, setNativePendingScope] = useState("")
   const nativeReviewPending = !!detail?.nativeBinding &&
     nativePendingScope === detail.nativeBinding.hostRunId
@@ -6745,7 +6813,10 @@ function FeatureDetailPage({
   const [activeDetailTab, setActiveDetailTab] = useState<"feature" | "session">(() =>
     isViewingSession && activeSessionThreadId ? "session" : "feature"
   )
-  const projectInteractionDisabled = Boolean(unbound || projectDeleted)
+  const nativeArchived = Boolean(
+    detail?.nativeBinding && detail.project.lifecycle?.status === "archived"
+  )
+  const projectInteractionDisabled = Boolean(unbound || projectDeleted || nativeArchived)
   const featureImManagementAvailable =
     featureImRobotStatus?.settings.enabled === true &&
     featureImRobotStatus.connectionState === "online" &&
@@ -6869,13 +6940,6 @@ function FeatureDetailPage({
   const handleCreateSession = useCallback(
     async (nextAction?: HarnessWorkflowNextAction, initialAgentMode?: "multi"): Promise<void> => {
       if (!detail || sessionBusy || projectInteractionDisabled) return
-      if (detail.nativeBinding) {
-        setManagedRunWorkspacePath(detail.run.resolvedSessionWorkspacePath ?? "")
-        setManagedRunUserMessage("")
-        setManagedRunImEnabled(false)
-        setManagedRunDialogOpen(true)
-        return
-      }
       setSessionBusy("create")
       try {
         const thread = await createHarnessSession({
@@ -6914,6 +6978,7 @@ function FeatureDetailPage({
   const setCombinedFeatureImManagement = useCallback(
     async (enabled: boolean): Promise<void> => {
       if (!detail) return
+      if (detail.nativeBinding) throw Error("此插件暂不支持通过招乎管理整条特性")
       const projectId = detail.project.projectId
       const featureId = detail.run.slug
       const previousManagementEnabled = detail.run.imManagementEnabled === true
@@ -7019,7 +7084,7 @@ function FeatureDetailPage({
     managedRunIsRunning, onRefresh])
 
   const handlePickManagedRunWorkspace = useCallback(async (): Promise<void> => {
-    if (pickingManagedRunWorkspace || detail?.nativeBinding) return
+    if (pickingManagedRunWorkspace || (detail?.nativeBinding && !nativeCanChooseWorkspace)) return
     setPickingManagedRunWorkspace(true)
     try {
       const workspacePath = normalizeWorkspacePath(await window.api.workspace.select())
@@ -7029,7 +7094,7 @@ function FeatureDetailPage({
     } finally {
       setPickingManagedRunWorkspace(false)
     }
-  }, [pickingManagedRunWorkspace, detail?.nativeBinding])
+  }, [pickingManagedRunWorkspace, detail?.nativeBinding, nativeCanChooseWorkspace])
 
   const handleOpenManagedRunDialog = useCallback(async (): Promise<void> => {
     if (!detail || updatingManagedRun || nativeReviewPending ||
@@ -7037,13 +7102,14 @@ function FeatureDetailPage({
       return
     setOpeningManagedRunDialog(true)
     try {
-      if (detail.nativeBinding && !nativeReady)
-        throw new Error("请先在当前需求中完成插件配置和授权")
+      if (detail.nativeBinding && !nativeReady && !nativeCanChooseWorkspace)
+        throw new Error("请先完成插件必填参数，并核对项目授权与插件开关")
       if (!detail.nativeBinding) await window.api.harnessBoard.validateManagedRunStart({
         projectId: detail.project.projectId,
         featureId: detail.run.slug
       })
-      const defaultWorkspacePath = normalizeWorkspacePath(detail.run.resolvedSessionWorkspacePath)
+      const defaultWorkspacePath = normalizeWorkspacePath(detail.nativeBinding
+        ? detail.nativeBinding.workspace : detail.run.resolvedSessionWorkspacePath)
       if (!defaultWorkspacePath) throw new Error(MISSING_FEATURE_WORKSPACE)
       setManagedRunWorkspacePath(defaultWorkspacePath)
       const defaultUserMessage = detail.nativeProject?.project.goal ??
@@ -7063,6 +7129,7 @@ function FeatureDetailPage({
     featureImManagementAvailable,
     openingManagedRunDialog,
     nativeReady,
+    nativeCanChooseWorkspace,
     nativeReviewPending,
     projectInteractionDisabled,
     updatingManagedRun
@@ -7076,8 +7143,7 @@ function FeatureDetailPage({
       initialUserMessage?: string
     ): Promise<boolean> => {
       if (detail?.nativeBinding && !shouldStart) {
-        const operation = detail.nativeProject?.operations.find(item =>
-          ["started", "cancel_requested"].includes(item.status))
+        const operation = nativeOperation
         if (!operation || projectInteractionDisabled) return false
         try {
           await window.api.harnessBoard.nativeFeatureCommand(detail.project.projectId, detail.run.slug,
@@ -7100,8 +7166,8 @@ function FeatureDetailPage({
       setUpdatingManagedRun(true)
       try {
         if (detail.nativeBinding) {
-          if (shouldStart && !nativeReady)
-            throw new Error("请先在当前需求中完成插件配置和授权")
+          if (shouldStart && !nativeReady && !nativeCanChooseWorkspace)
+            throw new Error("请先完成插件必填参数，并核对项目授权与插件开关")
           setManagedRunDialogOpen(false)
           const native = detail.nativeProject
           setNativeContinuations(current => ({
@@ -7110,12 +7176,13 @@ function FeatureDetailPage({
           if (shouldStart) {
             const result = await window.api.harnessBoard.nativeFeatureCommand(detail.project.projectId, detail.run.slug,
               native ? { kind: "continue", expectedVersion: native.project.version }
-                : { kind: "start-feature", initialUserMessage: initialUserMessage?.trim() ?? "" })
+                : { kind: "start-feature", initialUserMessage: initialUserMessage?.trim() ?? "",
+                  workspacePath: normalizeWorkspacePath(workspacePath) || undefined })
             setNativeContinuations(current => ({
               ...current, [detail.nativeBinding!.hostRunId]: result.continuation
             }))
           } else {
-            const activeOperation = native?.operations.find(item => ["started", "cancel_requested"].includes(item.status))
+            const activeOperation = nativeOperation
             if (!activeOperation) throw Error("没有可停止的执行，请刷新状态")
             await window.api.harnessBoard.nativeFeatureCommand(detail.project.projectId, detail.run.slug,
               { kind: "cancel", operationId: activeOperation.operationId })
@@ -7171,6 +7238,8 @@ function FeatureDetailPage({
       detail,
       onRefresh,
       nativeReady,
+      nativeCanChooseWorkspace,
+      nativeOperation,
       nativeReviewPending,
       projectInteractionDisabled,
       setCombinedFeatureImManagement,
@@ -7491,20 +7560,6 @@ function FeatureDetailPage({
               }
             />
           </div>
-          {!projectDeleted &&
-            detail &&
-            activeSessionThreadIdForView &&
-            typeof threadsById.get(activeSessionThreadIdForView)?.metadata?.workspacePath === "string" && (
-              <ProjectCompositionEntry
-                key={activeSessionThreadIdForView}
-                scope={{
-                  projectId: detail.project.projectId,
-                  threadId: activeSessionThreadIdForView,
-                  expectedWorkspace: threadsById.get(activeSessionThreadIdForView)!.metadata!
-                    .workspacePath as string
-                }}
-              />
-            )}
           {effectiveActiveDetailTab === "feature" && (
             <div className={cn(harnessPageHeaderActionsClassName, "pt-0")}>
               <TooltipProvider delayDuration={150}>
@@ -7532,7 +7587,8 @@ function FeatureDetailPage({
                       openingManagedRunDialog ||
                       ((updatingManagedRun || nativeReviewPending) &&
                         !(detail?.nativeBinding && managedRunIsRunning)) ||
-                      (!!detail?.nativeBinding && !nativeReady && !managedRunIsRunning)
+                      (!!detail?.nativeBinding && !nativeReady && !nativeCanChooseWorkspace &&
+                        !managedRunIsRunning)
                     }
                   >
                     {(openingManagedRunDialog || updatingManagedRun) && (
@@ -7567,17 +7623,36 @@ function FeatureDetailPage({
                   }
                 />
               )}
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                className={cn(harnessDetailSecondaryButtonClassName, "w-[176px]")}
-                onClick={onEditDeployUnits}
-                disabled={loading || !detail || projectInteractionDisabled}
-              >
-                <Pencil className="size-4" />
-                编辑特性配置
-              </Button>
+              <TooltipProvider delayDuration={150}>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <span
+                      className="inline-flex"
+                      tabIndex={featureDirectoryLocked ? 0 : undefined}
+                      aria-label={featureDirectoryLocked ? "特性配置修改限制" : undefined}
+                    >
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        className={cn(harnessDetailSecondaryButtonClassName, "w-[176px]")}
+                        onClick={onEditDeployUnits}
+                        disabled={
+                          loading || !detail || projectInteractionDisabled || featureDirectoryLocked
+                        }
+                      >
+                        <Pencil className="size-4" />
+                        编辑特性配置
+                      </Button>
+                    </span>
+                  </TooltipTrigger>
+                  {featureDirectoryLocked && (
+                    <TooltipContent side="bottom" className="z-[70] max-w-72">
+                      {nativeFeatureDirectoryLockReason}
+                    </TooltipContent>
+                  )}
+                </Tooltip>
+              </TooltipProvider>
               <Button
                 type="button"
                 variant="ghost"
@@ -7615,11 +7690,22 @@ function FeatureDetailPage({
         </div>
       </div>
 
+      {nativeArchived && (
+        <p role="status" className="px-4 pt-3 text-sm text-muted-foreground">
+          项目已归档，仅可查看历史记录。
+        </p>
+      )}
       {activeSessionThreadIdForView ? (
         <div className="flex min-h-0 flex-1 flex-col pt-3">
           <FeatureConversationPanel
             threadId={activeSessionThreadIdForView}
-            readOnlyReason={projectDeleted ? "项目已删除，仅可查看历史会话" : null}
+            readOnlyReason={
+              projectDeleted
+                ? "项目已删除，仅可查看历史会话"
+                : nativeArchived
+                  ? "项目已归档，仅可查看历史会话。"
+                  : null
+            }
             onHarnessSessionCreated={handleContextReminderSessionCreated}
           />
         </div>
@@ -7670,11 +7756,13 @@ function FeatureDetailPage({
               key={`${detail.project.projectId}:${detail.run.slug}:${detail.nativeProject?.project.stageIndex ?? 0}`}
               projectId={detail.project.projectId} featureId={detail.run.slug}
               binding={detail.nativeBinding} view={detail.nativeProject} onRefresh={onRefresh}
+              readOnly={nativeArchived}
               continuation={nativeContinuations[detail.nativeBinding.hostRunId]}
               onContinuation={(value) => setNativeContinuations(current => ({
                 ...current, [detail.nativeBinding!.hostRunId]: value
               }))}
-              onReady={(ready) => setNativeReadyScope(ready ? nativeScope : "")}
+              onReady={(ready) => setNativeReadyScope(current => ready ? nativeScope :
+                current === nativeScope ? "" : current)}
               onPendingChange={(pending) => setNativePendingScope(current =>
                 pending ? detail.nativeBinding!.hostRunId :
                   current === detail.nativeBinding!.hostRunId ? "" : current
@@ -7870,6 +7958,9 @@ function FeatureDetailPage({
                   featureImManagementEnabled={detail.run.imManagementEnabled === true}
                   featureImManagementAvailable={featureImManagementAvailable}
                   featureImUnavailableReason={featureImUnavailableReason}
+                  managementUnsupportedReason={detail.nativeBinding
+                    ? "此插件暂不支持通过招乎管理整条特性或新建会话；已有普通会话仍可单独接入。"
+                    : undefined}
                   updatingFeatureImManagement={updatingFeatureImManagement}
                   projectInteractionDisabled={projectInteractionDisabled}
                   onFeatureImManagementChange={(checked) =>
@@ -7977,8 +8068,8 @@ function FeatureDetailPage({
                     </span>
                   </TooltipTrigger>
                   <TooltipContent side="top" className="z-[70] max-w-72">
-                    {detail?.nativeBinding
-                      ? "这是本条需求的来源目录；实际执行目录见需求详情中的运行与产物目录。"
+                    {detail?.nativeBinding && !nativeCanChooseWorkspace
+                      ? "本次执行已固定目录；特性默认的会话工作区保持不变。"
                       : "该路径将作为本次托管模式自动创建会话时使用的会话工作区"}
                   </TooltipContent>
                 </Tooltip>
@@ -7990,7 +8081,8 @@ function FeatureDetailPage({
               title={managedRunWorkspacePath}
               placeholder="请选择文件夹"
               aria-label="会话工作区"
-              disabled={pickingManagedRunWorkspace || updatingManagedRun || !!detail?.nativeBinding}
+              disabled={pickingManagedRunWorkspace || updatingManagedRun ||
+                !!(detail?.nativeBinding && !nativeCanChooseWorkspace)}
               className="min-w-0 cursor-pointer text-foreground"
               onClick={() => void handlePickManagedRunWorkspace()}
               onKeyDown={(event) => {
@@ -8034,7 +8126,9 @@ function FeatureDetailPage({
                   </TooltipProvider>
                 </div>
                 <div className="mt-1 text-xs text-muted-foreground">
-                  {featureImUnavailableReason
+                  {detail?.nativeBinding
+                    ? "此插件的托管运行暂不支持通过招乎审批"
+                    : featureImUnavailableReason
                     ? featureImUnavailableReason
                     : "确认后同步更新“通过招乎管理特性”开关"}
                 </div>
@@ -8063,7 +8157,7 @@ function FeatureDetailPage({
               onClick={() => void handleConfirmManagedRun()}
               disabled={
                 !managedRunWorkspacePath.trim() || updatingManagedRun || pickingManagedRunWorkspace ||
-                (!!detail?.nativeBinding && (!nativeReady ||
+                (!!detail?.nativeBinding && ((!nativeReady && !nativeCanChooseWorkspace) ||
                   (!detail.nativeProject && !managedRunUserMessage.trim())))
               }
             >
@@ -8697,7 +8791,10 @@ function ProjectFeatureSidebar({
                                       size="icon-sm"
                                       className="size-6 shrink-0 opacity-70 hover:bg-accent/20"
                                       title="新增会话"
-                                      disabled={creatingSession}
+                                      disabled={
+                                        creatingSession ||
+                                        (!!group.project.nativeBinding && projectArchived)
+                                      }
                                       onClick={(event) => {
                                         event.stopPropagation()
                                         void onCreateSession(group.project, featureGroup.slug)
@@ -10571,7 +10668,7 @@ function EnterpriseHarnessBoardView({
     }
   }
 
-  const handleSubmit = async (): Promise<void> => {
+  const handleSubmit = async (projectUseApproval?: HarnessProjectUseApproval): Promise<void> => {
     if (creatingProjectRef.current || creating || createProjectVerification.pending) return
     setFormError(null)
     if (derivedCreationSource && !derivedProjectIntentCurrent(derivedCreationSource)) {
@@ -10624,6 +10721,7 @@ function EnterpriseHarnessBoardView({
         throw Error("插件身份尚未核对，请重新选择插件")
       const project = await window.api.harnessBoard.createProject({
         ...form,
+        ...(projectUseApproval ? { projectUseApproval } : {}),
         ...(expectedNativeTemplate ? { expectedNativeTemplate } : {})
       })
       if (!current()) return
@@ -10635,8 +10733,10 @@ function EnterpriseHarnessBoardView({
       closeProjectDialogAdapterSession()
       resetCreateForm()
       await loadProjects({ force: true })
+      if (project.projectUseStatus?.state === "enable-unconfirmed")
+        toast.error("项目已创建，但插件启用尚未完成。请检查插件开关后打开项目，勿重复创建。")
     } catch (error) {
-      if (current()) setFormError(cleanIpcError(error))
+      if (current()) setFormError(projectRuntimeRecoveryMessage(cleanIpcError(error)) ?? cleanIpcError(error))
     } finally {
       creatingProjectRef.current = false
       if (boardMountedRef.current) setCreating(false)
@@ -10722,7 +10822,7 @@ function EnterpriseHarnessBoardView({
     [confirmingProjectAction, deletingProjectId]
   )
 
-  const handleSubmitEdit = async (): Promise<void> => {
+  const handleSubmitEdit = async (projectUseApproval?: HarnessProjectUseApproval): Promise<void> => {
     if (!editingProject || savingEdit || editProjectVerification.pending) return
     setEditError(null)
     if (metadataRequiredMissing(editForm)) {
@@ -10737,7 +10837,10 @@ function EnterpriseHarnessBoardView({
 
     setSavingEdit(true)
     try {
-      await window.api.harnessBoard.updateProject(editingProject.projectId, editForm)
+      const updated = await window.api.harnessBoard.updateProject(editingProject.projectId,
+        { ...editForm, ...(projectUseApproval ? { projectUseApproval } : {}) })
+      if (updated.projectUseStatus?.state === "enable-unconfirmed")
+        toast.error("项目已保存，但插件启用尚未完成。请检查插件开关后重新打开项目。")
       const projectId = editingProject.projectId
       setEditingProject(null)
       closeProjectDialogAdapterSession()
@@ -10751,7 +10854,7 @@ function EnterpriseHarnessBoardView({
         await loadProjectDetail(projectId)
       }
     } catch (error) {
-      setEditError(cleanIpcError(error))
+      setEditError(projectRuntimeRecoveryMessage(cleanIpcError(error)) ?? cleanIpcError(error))
     } finally {
       setSavingEdit(false)
     }
@@ -11409,6 +11512,10 @@ function EnterpriseHarnessBoardView({
     : null
   const openFeatureDeployUnitEditDialog = useCallback((): void => {
     if (!selectedProject || !runDetailWithSessions || selectedFeature?.deleted) return
+    if (nativeFeatureDirectoryLocked(runDetailWithSessions)) {
+      toast.info(nativeFeatureDirectoryLockReason)
+      return
+    }
 
     const requestId = ++featureWorkflowRequestIdRef.current
     setFeatureWorkspace(
@@ -12315,7 +12422,10 @@ function EnterpriseHarnessBoardView({
 
   const handleCreateSidebarSession = useCallback(
     async (project: ProjectFeatureSidebarProject, slug: string): Promise<void> => {
-      if (project.lifecycle.status === "deleted") return
+      if (
+        project.lifecycle.status === "deleted" ||
+        (project.nativeBinding && project.lifecycle.status === "archived")
+      ) return
       const key = `feature:${project.projectId}:${slug}`
       if (creatingSidebarSessionKey) return
       setCreatingSidebarSessionKey(key)
@@ -12692,6 +12802,7 @@ function EnterpriseHarnessBoardView({
           onSubmit={handleSubmitFeatureDialog}
         />
         <ProjectEditDialog
+          projectId={editingProject?.projectId}
           open={editingProject !== null}
           saving={savingEdit}
           form={editForm}
@@ -12702,7 +12813,7 @@ function EnterpriseHarnessBoardView({
           onOpenChange={handleEditDialogOpenChange}
           onChange={setEditForm}
           onInstallPlugin={handleInstallMarketPlugin}
-          onSubmit={() => void handleSubmitEdit()}
+          onSubmit={(approval) => void handleSubmitEdit(approval)}
         />
         <KnowledgeDialog
           open={knowledgeDialogOpen}
@@ -13098,9 +13209,10 @@ function EnterpriseHarnessBoardView({
         onChange={setForm}
         onInstallPlugin={handleInstallMarketPlugin}
         onPickWorkspace={() => void handlePickWorkspace()}
-        onSubmit={() => void handleSubmit()}
+        onSubmit={(approval) => void handleSubmit(approval)}
       />
       <ProjectEditDialog
+        projectId={editingProject?.projectId}
         open={editingProject !== null}
         saving={savingEdit}
         form={editForm}
@@ -13111,7 +13223,7 @@ function EnterpriseHarnessBoardView({
         onOpenChange={handleEditDialogOpenChange}
         onChange={setEditForm}
         onInstallPlugin={handleInstallMarketPlugin}
-        onSubmit={() => void handleSubmitEdit()}
+        onSubmit={(approval) => void handleSubmitEdit(approval)}
       />
       <ProjectActionConfirmDialog
         action={pendingProjectAction}

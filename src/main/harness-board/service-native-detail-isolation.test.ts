@@ -1,4 +1,14 @@
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises"
+import {
+  access,
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  rename,
+  rm,
+  symlink,
+  writeFile
+} from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { basename, dirname, join } from "node:path"
 import { afterEach, beforeEach, expect, it, vi } from "vitest"
@@ -7,6 +17,7 @@ import type { PluginMetadata } from "../types"
 import { createProjectTemplate } from "../mods/devtools/project-template"
 import { derivationContentIdentity, snapshotDerivationSource } from "../plugins/derivation-source"
 import { canonicalTmpdir } from "../../../tests/support/canonical-temp-dir"
+import { projectUseConsentFixture } from "../../../tests/support/project-use-consent"
 
 const state = vi.hoisted(() => ({ root: "", plugins: [] as PluginMetadata[] }))
 vi.mock("../storage", () => ({
@@ -34,6 +45,7 @@ let native: typeof import("./native-harness")
 let healthy: HarnessProjectMetadata
 let orphan: HarnessProjectMetadata
 let originalStore: string
+let consent: Awaited<ReturnType<typeof projectUseConsentFixture>> | undefined
 const template = createProjectTemplate({
   packageId: "generic-docs",
   name: "Generic docs",
@@ -96,6 +108,8 @@ beforeEach(async () => {
 
 afterEach(async () => {
   vi.restoreAllMocks()
+  consent?.close()
+  consent = undefined
   native.closeNativeHarnessFeatureStore()
   const root = await realpath(state.root)
   expect(dirname(root)).toBe(await realpath(tmpdir()))
@@ -167,7 +181,8 @@ it("reads the original native workflow again when its exact installation is rest
 
 it("keeps native project creation on the original service and exact template identity", async () => {
   const plugin = state.plugins[0]
-  const created = await service.createHarnessProject({
+  consent = await projectUseConsentFixture(state.root, () => state.plugins)
+  const created = await consent.create({
     adapterId: plugin.id,
     adapterType: "plugin",
     name: "New project",
@@ -186,9 +201,294 @@ it("keeps native project creation on the original service and exact template ide
     }
   })
   expect(created.nativeBinding?.installedPluginId).toBe(plugin.id)
+  expect(consent.guestLoads()).toBe(0)
   const detail = (await service.getHarnessProjectDetails([created.projectId]))[created.projectId]
   expect(detail.error).toBeNull()
   expect(detail.workflow.nodes).toHaveLength(2)
+})
+
+it("uses real source and dependency consent while keeping required encrypted configuration separate", async () => {
+  const plugin = state.plugins[0]
+  const manifestPath = join(plugin.path, "plugin.json")
+  const metadata = JSON.parse(await readFile(manifestPath, "utf8"))
+  metadata.mods = "mods/manifest.json"
+  metadata.userConfig = {
+    token: {
+      type: "string",
+      title: "Token",
+      description: "Service access",
+      sensitive: true,
+      required: true
+    }
+  }
+  await mkdir(join(plugin.path, "mods"))
+  await writeFile(manifestPath, JSON.stringify(metadata))
+  await writeFile(
+    join(plugin.path, "mods/manifest.json"),
+    JSON.stringify({
+      apiVersion: "cmb.mods/v2",
+      id: "generic-docs",
+      entry: "main.ts"
+    })
+  )
+  await writeFile(join(plugin.path, "mods/main.ts"), "export function register(){}")
+  const provider = {
+    ...plugin,
+    id: "provider-exact-id",
+    name: "generic-validator",
+    path: join(state.root, "provider")
+  }
+  await mkdir(join(provider.path, "mods"), { recursive: true })
+  await writeFile(
+    join(provider.path, "plugin.json"),
+    JSON.stringify({
+      name: provider.name,
+      version: "1.0.0",
+      mods: "mods/manifest.json"
+    })
+  )
+  await writeFile(
+    join(provider.path, "mods/manifest.json"),
+    JSON.stringify({
+      apiVersion: "cmb.mods/v2",
+      id: provider.name,
+      claw: {
+        componentsVersion: 1,
+        components: [
+          {
+            id: "main",
+            kind: "module",
+            name: "Validator",
+            entry: "main.ts",
+            dependsOn: [],
+            actionIds: ["validate"]
+          }
+        ],
+        actions: [
+          { id: "validate", name: "Validate", command: "validate", inputSchema: { type: "object" } }
+        ]
+      }
+    })
+  )
+  await writeFile(join(provider.path, "mods/main.ts"), "export function register(){}")
+  state.plugins.push(provider)
+  await writeFile(join(state.root, "plugins.json"), JSON.stringify(state.plugins))
+  const { compileFunctionPlugin } = await import("../mods/v2/loader")
+  const compiled = await compileFunctionPlugin(provider.path)
+  const { createProjectActionBinding } = await import("./project-runtime/action-input")
+  const { id: actionId, ...action } = compiled!.actions![0]
+  const binding = createProjectActionBinding(
+    "validate",
+    {
+      ...action,
+      actionId,
+      pluginId: provider.id,
+      plugin: compiled!.name,
+      digest: compiled!.digest
+    },
+    {}
+  )
+  const projectManifestPath = join(plugin.path, "devclaw.project-runtime.json")
+  const projectManifest = JSON.parse(await readFile(projectManifestPath, "utf8"))
+  projectManifest.actions = [{ id: binding.id, ref: binding.ref }]
+  projectManifest.stages[0].actionIds = [binding.id]
+  await writeFile(projectManifestPath, JSON.stringify(projectManifest))
+  await writeFile(
+    join(plugin.path, "devclaw.project-actions.lock.json"),
+    JSON.stringify({
+      apiVersion: "devclaw.project-actions-lock/v1",
+      bindings: [binding]
+    })
+  )
+  consent = await projectUseConsentFixture(state.root, () => state.plugins)
+  const expectedNativeTemplate = {
+    pluginId: plugin.id,
+    name: plugin.name,
+    version: plugin.version!,
+    digest: derivationContentIdentity((await snapshotDerivationSource(plugin.path)).files)
+  }
+  const createInput = {
+    adapterId: plugin.id,
+    adapterType: "plugin",
+    name: "Authorized",
+    description: "",
+    projectCode: "authorized",
+    projectDir: "AuthorizedCase",
+    projectFromLean: false,
+    systemId: "system",
+    systemName: "System",
+    workspacePath: state.root,
+    expectedNativeTemplate
+  } as const
+  const target = join(state.root, createInput.projectDir)
+  const runtimePreparation = vi.spyOn(consent.manager, "prepareRuntimeSourceFacts")
+  const configurationRead = vi.spyOn(consent.manager, "userConfig")
+  expect(() => consent!.core.workspaceKey(target)).toThrow("不存在或不可访问")
+  const reviewed = await consent.review(createInput)
+  expect(reviewed.workspace).toBe(process.platform === "win32" ? target.toLowerCase() : target)
+  if (process.platform === "win32") {
+    const same = await consent.review({ ...createInput, workspacePath: state.root.toUpperCase() })
+    expect(same.workspace).toBe(reviewed.workspace)
+  }
+  const cancelled = await consent.review({ ...createInput, projectDir: "cancelled" })
+  await expect(access(join(state.root, "cancelled"))).rejects.toMatchObject({ code: "ENOENT" })
+  await expect(access(target)).rejects.toMatchObject({ code: "ENOENT" })
+  expect(() => consent!.core.workspaceKey(target)).toThrow("不存在或不可访问")
+  expect(consent.store.getProjectUseAuthorization(reviewed.projectId)).toBeUndefined()
+  expect(consent.store.getProjectUseAuthorization(cancelled.projectId)).toBeUndefined()
+  expect(consent.store.getSetting(`enabled:${reviewed.workspace}`, "")).toBe("")
+  expect(consent.core.isGloballyEnabled()).toBe(false)
+  expect(runtimePreparation).not.toHaveBeenCalled()
+  expect(configurationRead).not.toHaveBeenCalled()
+  expect(consent.guestLoads()).toBe(0)
+  // A normal parent edit must not revoke consent: directory mtime is not an ownership identity.
+  await writeFile(join(state.root, "ordinary-edit.txt"), "Unrelated parent file")
+  const created = await consent.createReviewed(createInput, reviewed)
+  expect(created.projectUseStatus?.state).toBe("ready")
+  const receipt = consent.store.getProjectUseAuthorization(created.projectId)!
+  expect(receipt.policy.sources.map((source) => source.pluginId)).toEqual([plugin.id, provider.id])
+  const { initializeHarnessConfigV2 } = await import("./config-v2")
+  await initializeHarnessConfigV2(state.root)
+  await service.createHarnessFeature({
+    projectId: created.projectId,
+    feature: "request",
+    selectedDeployUnits: [],
+    sessionWorkspace: { source: "directory", path: state.root }
+  })
+  const feature = native.readNativeHarnessFeature(created.projectId, "request")!
+  const auth = await import("./project-use-authorization")
+  auth.admitProjectUseFeature(feature)
+  const { HostPackageSnapshots } = await import("./project-runtime/package-snapshots")
+  const retained = new HostPackageSnapshots(join(state.root, "local-projects", "packages")).read(
+    receipt.policy.packageDigest
+  )
+  const source = { ...plugin, path: retained.root }
+  const scope = { projectId: feature.hostRunId, packageDigest: receipt.policy.packageDigest }
+  const workspace = consent.core.workspaceKey(feature.workspace)
+  const input = { workspace, plugin: source, scope }
+  expect(await consent.manager.runtimeSourceReview(input)).toMatchObject({
+    state: "ready",
+    configurationReady: false
+  })
+  expect(() => consent!.manager.assertRuntimeSourceReady(input)).toThrow(
+    "Invalid plugin configuration field: token"
+  )
+  expect(
+    consent.manager.isInstalledRuntimeSourceApproved({
+      workspace,
+      plugin: provider,
+      name: compiled!.name,
+      digest: compiled!.digest,
+      scope
+    })
+  ).toBe(true)
+  const { withNativeConfigurationScope } = await import("../mods/v2/native-configuration-scope")
+  const guard = auth.captureProjectUseFeature(feature)!
+  const signal = new AbortController().signal
+  const secret = "fixture-only-local-token"
+  const configured = await withNativeConfigurationScope(
+    {
+      workspace,
+      projectId: feature.hostRunId,
+      plugin: source,
+      assertCurrent: guard,
+      assertContentCurrent: guard
+    },
+    async () => {
+      const view = await consent!.manager.userConfig(
+        workspace,
+        feature.hostRunId,
+        plugin.id,
+        signal,
+        guard
+      )
+      return consent!.manager.saveSensitiveUserConfig(
+        workspace,
+        feature.hostRunId,
+        plugin.id,
+        view.digest,
+        "token",
+        { operation: "set", value: secret },
+        view.savedRevision,
+        signal,
+        guard
+      )
+    }
+  )
+  expect(JSON.stringify(configured)).not.toContain(secret)
+  expect(JSON.stringify(receipt)).not.toContain(secret)
+  expect(await consent.manager.runtimeSourceReview(input)).toMatchObject({
+    state: "ready",
+    configurationReady: true
+  })
+  expect(() => consent!.manager.assertRuntimeSourceReady(input)).not.toThrow()
+  expect(consent.store.getGrant(workspace, `function:${plugin.name}`)).toBeNull()
+  expect(consent.store.getGrant(workspace, `function:${provider.name}`)).toBeNull()
+  expect(consent.guestLoads()).toBe(0)
+  auth.revokeProjectUseAuthorization(created.projectId)
+  expect(() => consent!.manager.assertRuntimeSourceReady(input)).toThrow(
+    "PROJECT_USE_AUTHORIZATION_INVALID"
+  )
+})
+
+it("rejects parent, existing target and future junction replacements without creating a grant", async () => {
+  const plugin = state.plugins[0]
+  consent = await projectUseConsentFixture(state.root, () => state.plugins)
+  const expectedNativeTemplate = {
+    pluginId: plugin.id,
+    name: plugin.name,
+    version: plugin.version!,
+    digest: derivationContentIdentity((await snapshotDerivationSource(plugin.path)).files)
+  }
+  const base = {
+    adapterId: plugin.id,
+    adapterType: "plugin",
+    name: "Ownership",
+    description: "",
+    projectCode: "ownership",
+    projectFromLean: false,
+    systemId: "system",
+    systemName: "System",
+    expectedNativeTemplate
+  } as const
+  const parent = join(state.root, "parent")
+  await mkdir(parent)
+  const first = { ...base, workspacePath: parent, projectDir: "future" }
+  const parentReview = await consent.review(first)
+  await rename(parent, join(state.root, "old-parent"))
+  await mkdir(parent)
+  await expect(consent.createReviewed(first, parentReview)).rejects.toThrow(
+    "PROJECT_USE_REVIEW_CHANGED"
+  )
+  await expect(access(join(parent, first.projectDir))).rejects.toMatchObject({ code: "ENOENT" })
+  expect(consent.store.getProjectUseAuthorization(parentReview.projectId)).toBeUndefined()
+  const second = { ...base, workspacePath: parent, projectDir: "existing" }
+  const target = join(parent, second.projectDir)
+  await mkdir(target)
+  const targetReview = await consent.review(second)
+  await rename(target, join(parent, "old-target"))
+  await mkdir(target)
+  await expect(consent.createReviewed(second, targetReview)).rejects.toThrow(
+    "PROJECT_USE_REVIEW_CHANGED"
+  )
+  expect(consent.store.getProjectUseAuthorization(targetReview.projectId)).toBeUndefined()
+  const third = { ...base, workspacePath: parent, projectDir: "linked" }
+  const linkedReview = await consent.review(third)
+  const outside = join(state.root, "outside")
+  await mkdir(outside)
+  await symlink(
+    outside,
+    join(parent, third.projectDir),
+    process.platform === "win32" ? "junction" : "dir"
+  )
+  await expect(consent.createReviewed(third, linkedReview)).rejects.toThrow(
+    "PROJECT_HOST_DIRECTORY_INVALID"
+  )
+  expect(consent.store.getProjectUseAuthorization(linkedReview.projectId)).toBeUndefined()
+  expect(consent.guestLoads()).toBe(0)
+  expect(await readFile(join(state.root, "harness-board-projects.json"), "utf8")).toBe(
+    originalStore
+  )
 })
 
 it("still enforces the whole batch response budget after isolating one unavailable plugin", async () => {

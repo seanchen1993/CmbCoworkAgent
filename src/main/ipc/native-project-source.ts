@@ -1,6 +1,6 @@
 import { BrowserWindow, dialog } from "electron"
 import type { IpcMain, IpcMainInvokeEvent } from "electron"
-import { isModObject } from "../../shared/mods/v2/contracts"
+import { isModObject, ModFunctionError } from "../../shared/mods/v2/contracts"
 import type {
   ProjectFunctionApprovalInput,
   ProjectFunctionSourceApi
@@ -18,7 +18,10 @@ export type NativeProjectSourceContext = ReturnType<typeof projectRuntimeFunctio
   project: { projectId: string; version: number; pluginDigest: string }
   guard(): void
   authorityGuard(): void
+  /** Physical execution may advance the original Host; this guard never pins its old JSON. */
+  executionGuard?(): void
   dependencies?: ReturnType<typeof projectRuntimeDependencies>
+  approvalAtProject?: true
 }
 
 /** The original native editor and exact-source consent, with a host-owned target resolver. */
@@ -33,6 +36,9 @@ export function registerNativeProjectSourceHandlers(
   const pending = new Set<string>()
   async function review(event: IpcMainInvokeEvent, projectId: string) {
     const context = await scope(event, projectId)
+    return reviewContext(context, projectId)
+  }
+  async function reviewContext(context: NativeProjectSourceContext, projectId: string) {
     const source = await context.manager.runtimeSourceReview(context.input)
     const dependencies = await context.dependencies?.review()
     context.guard()
@@ -43,6 +49,7 @@ export function registerNativeProjectSourceHandlers(
       for (const dependency of dependencies ?? [])
         if (dependency.state === "ready") dependency.state = "needs-approval"
     return {
+      ...(context.approvalAtProject ? { approvalAtProject: true as const } : {}),
       projectId,
       projectVersion: context.project.version,
       packageDigest: context.project.pluginDigest,
@@ -195,6 +202,7 @@ export function registerNativeProjectSourceHandlers(
     pending.add(input.projectId)
     try {
       const context = await scope(event, input.projectId)
+      if (context.approvalAtProject) throw Error("PROJECT_USE_REVIEW_REQUIRED")
       if (
         context.project.version !== input.projectVersion ||
         context.project.pluginDigest !== input.packageDigest ||
@@ -288,6 +296,7 @@ export function registerNativeProjectSourceHandlers(
       typeof input.compiledDigest !== "string" || !/^[a-f0-9]{64}$/.test(input.compiledDigest))
       throw Error("PROJECT_INVALID_INPUT")
     const context = await scope(event, input.projectId)
+    if (context.approvalAtProject) throw Error("PROJECT_USE_REVIEW_REQUIRED")
     if (context.project.version !== input.projectVersion || context.project.pluginDigest !== input.packageDigest)
       throw Error("PROJECT_INPUT_CHANGED")
     if (!context.dependencies) throw Error("PROJECT_DEPENDENCY_NOT_DECLARED")
@@ -332,6 +341,7 @@ export function registerNativeProjectSourceHandlers(
       )
         throw Error("PROJECT_INVALID_INPUT")
       const context = await scope(event, input.projectId)
+      if (context.approvalAtProject) throw Error("PROJECT_USE_REVIEW_REQUIRED")
       if (
         context.project.version !== input.projectVersion ||
         context.project.pluginDigest !== input.packageDigest
@@ -369,4 +379,47 @@ export function registerNativeProjectSourceHandlers(
       }
     }
   )
+  /** Main-only execution preflight; never registered as a preview or authorization IPC. */
+  return async (event: IpcMainInvokeEvent, projectId: string) => {
+    const context = await scope(event, projectId)
+    const snapshot = await reviewContext(context, projectId)
+    const dependencies = snapshot.dependencies ?? []
+    const executable = (!!snapshot.source && !snapshot.source.configurationOnly) || dependencies.length > 0
+    if ((snapshot.source && (snapshot.source.state !== "ready" ||
+      snapshot.source.configurationReady === false)) ||
+      dependencies.some(source => source.state !== "ready" || source.configurationReady === false) ||
+      (executable && (!snapshot.globallyEnabled || !snapshot.workspaceEnabled)))
+      return { ready: false as const, assertCurrent: () => context.guard() }
+    const providers = context.dependencies
+      ? await Promise.all(dependencies.map(source => context.dependencies!.resolve(source.pluginId))) : []
+    const executionGuard = context.executionGuard ?? context.guard
+    const assertExecutionReady = () => {
+      executionGuard()
+      if (executable && context.workspaceControl &&
+        (!context.workspaceControl.globallyEnabled() ||
+          !context.workspaceControl.enabled(context.input.workspace)))
+        throw new ModFunctionError("PROJECT_MODS_APPROVAL_REQUIRED")
+      context.manager.assertRuntimeSourceReady(context.input)
+      for (const provider of providers) {
+        const input = { ...context.input, plugin: provider.plugin }
+        context.manager.assertRuntimeSourceConfiguration(input)
+        if (!context.manager.isInstalledRuntimeSourceApproved({ ...input,
+          name: provider.facts.name, digest: provider.facts.digest }))
+          throw new ModFunctionError("PROJECT_MODS_APPROVAL_REQUIRED")
+      }
+      executionGuard()
+    }
+    const assertCurrent = () => {
+      context.guard()
+      assertExecutionReady()
+      context.guard()
+    }
+    try { assertCurrent() } catch (error) {
+      if (error instanceof ModFunctionError &&
+        /^(MODS_USER_CONFIG_|MODS_SECRET_|PROJECT_MODS_APPROVAL_REQUIRED$)/.test(error.code))
+        return { ready: false as const, assertCurrent: () => context.guard() }
+      throw error
+    }
+    return { ready: true as const, assertCurrent, assertExecutionReady }
+  }
 }

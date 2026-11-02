@@ -1,9 +1,8 @@
 import { execFile } from "node:child_process"
 import { lstatSync, readdirSync } from "node:fs"
 import { lstat, mkdir, mkdtemp, unlink, writeFile } from "node:fs/promises"
-import { isAbsolute, join, relative, resolve, sep } from "node:path"
+import { basename, isAbsolute, join, relative, resolve, sep, toNamespacedPath } from "node:path"
 import { promisify } from "node:util"
-import { randomUUID } from "node:crypto"
 import { ensureCodexExe } from "../agent/codex-sandbox-binary"
 import { resolveWindowsBackgroundJobControllerPath } from "../agent/windows-background-job-controller-path"
 import {
@@ -183,13 +182,14 @@ export async function prepareStageRecoveryCommand(input: {
   if (roots.some((root) => contains(root, workspace) || contains(workspace, root)))
     fail("COMMAND_SCOPE_INVALID")
   const identities = [workspace, ...roots].map(runtimeDirectoryIdentity)
+  const privateDirectories: Array<[string, string]> = []
   const current = () => {
     input.guard()
     input.signal?.throwIfAborted()
     if (
       [workspace, ...roots].some(
         (root, index) => runtimeDirectoryIdentity(root) !== identities[index]
-      )
+      ) || privateDirectories.some(([root, identity]) => runtimeDirectoryIdentity(root) !== identity)
     )
       fail("COMMAND_SCOPE_CHANGED")
   }
@@ -210,16 +210,21 @@ export async function prepareStageRecoveryCommand(input: {
   // Creator workspaces are already deeply nested on Windows. Keep private protocol paths
   // bounded so the native controller and interpreter do not exceed legacy MAX_PATH.
   const temporary = join(workspace, ".dcr")
-  await mkdir(temporary, { recursive: true })
+  await mkdir(toNamespacedPath(temporary), { recursive: true })
+  const temporaryIdentity = runtimeDirectoryIdentity(temporary)
+  privateDirectories.push([temporary, temporaryIdentity])
   current()
   runtimeDirectory(temporary)
-  const sandboxHome = await mkdtemp(join(temporary, "h-"))
+  const created = await mkdtemp(toNamespacedPath(join(temporary, "h-")))
+  const sandboxHome = join(temporary, basename(created))
+  const sandboxHomeIdentity = runtimeDirectoryIdentity(sandboxHome)
+  privateDirectories.push([sandboxHome, sandboxHomeIdentity])
   current()
   if (Buffer.byteLength(input.stdin) > 1_000_000) fail("HOOK_INPUT_LIMIT")
-  const payload = join(temporary, `i-${randomUUID()}`)
+  // The unique Home owns this fixed private filename; keep the controller's read path short.
+  const payload = join(sandboxHome, "i")
   await writeFile(payload, input.stdin, { flag: "wx", mode: 0o600 })
   current()
-  const temporaryIdentity = runtimeDirectoryIdentity(temporary)
   const executable = await resolveStageRecoverySandboxBinary()
   current()
   const controller = resolveWindowsBackgroundJobControllerPath()
@@ -244,7 +249,8 @@ export async function prepareStageRecoveryCommand(input: {
       try {
         if (
           runtimeDirectoryIdentity(workspace) !== identities[0] ||
-          runtimeDirectoryIdentity(temporary) !== temporaryIdentity
+          runtimeDirectoryIdentity(temporary) !== temporaryIdentity ||
+          runtimeDirectoryIdentity(sandboxHome) !== sandboxHomeIdentity
         )
           return
         await unlink(payload)

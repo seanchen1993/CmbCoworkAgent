@@ -8,16 +8,22 @@ import {
   rmSync,
   writeFileSync
 } from "node:fs"
-import { tmpdir } from "node:os"
 import { basename, dirname, join } from "node:path"
+import { DatabaseSync } from "node:sqlite"
 import { afterEach, beforeEach, expect, it, vi } from "vitest"
+import { canonicalTmpdir } from "../../../tests/support/canonical-temp-dir"
 import type { PluginMetadata } from "../types"
 import type { HarnessProjectMetadata } from "../../shared/harness-board-types"
 import { HostProjectStore } from "./project-runtime/host-store"
 import { HostPackageSnapshots } from "./project-runtime/package-snapshots"
 import { HostProjectService } from "./project-runtime/host-service"
 import { hostProjectFixture } from "./project-runtime/host-fixtures.test-helper"
-import { removeWorkflowWorktree, type WorkflowWorktreeInfo } from "../services/git-worktree"
+import {
+  createWorkflowWorktree,
+  prepareWorkflowWorktreeSource,
+  removeWorkflowWorktree,
+  type WorkflowWorktreeInfo
+} from "../services/git-worktree"
 
 const state = vi.hoisted(() => ({ root: "", plugins: [] as PluginMetadata[] }))
 vi.mock("../storage", () => ({ getOpenworkDir: () => state.root, getPlugins: () => state.plugins }))
@@ -50,7 +56,7 @@ const saveProject = () =>
     JSON.stringify({ version: 1, projects: [project] })
   )
 beforeEach(() => {
-  state.root = mkdtempSync(join(tmpdir(), "native-harness-"))
+  state.root = mkdtempSync(join(canonicalTmpdir(), "native-harness-"))
   repository = join(state.root, "repository")
   mkdirSync(repository)
   const path = join(state.root, "plugin")
@@ -146,7 +152,7 @@ afterEach(async () => {
       preserveChanges: true
     })
   const root = realpathSync(state.root)
-  expect(dirname(root)).toBe(realpathSync(tmpdir()))
+  expect(dirname(root)).toBe(canonicalTmpdir())
   expect(basename(root)).toMatch(/^native-harness-[a-zA-Z0-9]{6}$/)
   rmSync(root, { recursive: true, force: true })
 })
@@ -162,10 +168,14 @@ async function feature(id: string) {
   return value
 }
 
-it("persists two isolated Features and projects the original Host facts into the old view models", async () => {
+it("persists separate Feature executions on the selected directory and projects original Host facts", async () => {
   const a = await feature("first")
   const b = await feature("second")
-  expect(a.workspace).not.toBe(b.workspace)
+  expect(a.workspace).toBe(realpathSync(repository))
+  expect(b.workspace).toBe(a.workspace)
+  expect(a.workspaceMode).toBe("selected-directory")
+  expect(b.workspaceMode).toBe("selected-directory")
+  expect(a.hostRunId).not.toBe(b.hostRunId)
   expect(a.repositoryWorkspace).toBe(realpathSync(repository))
   expect(nativeHarnessRunDetail(project, "first").nativeProject).toBeUndefined()
   expect((await nativeHarnessProjectDetail(project)).runs.map((run) => run.featureStatus)).toEqual([
@@ -178,7 +188,8 @@ it("persists two isolated Features and projects the original Host facts into the
   await host.continue(a.hostRunId)
   expect(executions).toBe(1)
   expect(readFileSync(join(a.workspace, "document.md"), "utf8")).toBe("Actual request A")
-  expect(existsSync(join(b.workspace, "document.md"))).toBe(false)
+  expect(existsSync(join(b.workspace, "document.md"))).toBe(true)
+  expect(nativeHarnessRunDetail(project, "second").run.nodes[0].nodeStatus).toBe("not_started")
   expect(nativeHarnessRunDetail(project, "first").run.nodes[0].nodeStatus).toBe("done")
   expect(nativeHarnessRunDetail(project, "first").run.nodes[1].nodeStatus).toBe("blocked")
   expect(() => assertNativeHarnessProjectMutable(project.projectId)).toThrow("尚未结算")
@@ -211,7 +222,9 @@ it("persists two isolated Features and projects the original Host facts into the
     "done",
     "done"
   ])
-  expect(readFileSync(join(a.workspace, "document.md"), "utf8")).toBe("Actual request A")
+  expect(host.get(a.hostRunId)?.goal).toBe("Actual request A")
+  expect(host.get(b.hostRunId)?.goal).toBe("Actual request B")
+  expect(readFileSync(join(a.workspace, "document.md"), "utf8")).toBe("Actual request B")
   expect(readFileSync(join(b.workspace, "document.md"), "utf8")).toBe("Actual request B")
   const before = executions
   expect((await host.continue(a.hostRunId)).reason).toBe("completed")
@@ -293,7 +306,7 @@ it("keeps authorization, exact source identity, parent lifecycle and duplicate c
   ).toThrow("PROJECT_CHANGED")
 })
 
-it("uses a real owned Git worktree and rejects dirty input instead of silently dropping it", async () => {
+it("keeps an explicitly historical owned worktree while new dirty-Git Features use the selected directory", async () => {
   const git = (args: string[]) =>
     execFileSync("git", ["-C", repository, ...args], { encoding: "utf8", windowsHide: true }).trim()
   git(["init"])
@@ -304,11 +317,36 @@ it("uses a real owned Git worktree and rejects dirty input instead of silently d
   writeFileSync(join(repository, "src/example.txt"), "original\n")
   git(["add", "."])
   git(["commit", "-m", "base"])
-  writeFileSync(join(repository, "uncommitted.txt"), "user data")
-  await expect(feature("dirty")).rejects.toThrow("未提交或未跟踪")
-  expect(readNativeHarnessFeature(project.projectId, "dirty")).toBeUndefined()
-  rmSync(join(repository, "uncommitted.txt"))
-  const a = await feature("clean")
+  const source = await prepareWorkflowWorktreeSource(repository)
+  const info = await createWorkflowWorktree({
+    workspacePath: repository,
+    source,
+    runId: "historical-feature",
+    threadId: "historical-feature",
+    label: "historical",
+    persistOwnership: true
+  })
+  worktrees.push(info)
+  await feature("historical")
+  closeNativeHarnessFeatureStore()
+  const database = new DatabaseSync(join(state.root, "harness-native-features.sqlite"))
+  try {
+    const row = database
+      .prepare("SELECT data FROM native_harness_features WHERE project_id=? AND feature_id=?")
+      .get(project.projectId, "historical") as { data: string }
+    const record = JSON.parse(row.data)
+    delete record.workspaceMode
+    delete record.workspaceIdentity
+    record.workspace = realpathSync(info.workspaceDirectory)
+    record.worktree = info
+    database
+      .prepare("UPDATE native_harness_features SET data=? WHERE project_id=? AND feature_id=?")
+      .run(JSON.stringify(record), project.projectId, "historical")
+  } finally {
+    database.close()
+  }
+  const a = readNativeHarnessFeature(project.projectId, "historical")!
+  expect(a.workspaceMode).toBeUndefined()
   expect(a.worktree?.sourceRoot).toBe(realpathSync(repository))
   expect(a.workspace).not.toBe(repository)
   expect(readFileSync(join(a.workspace, "src/example.txt"), "utf8")).toBe("original\n")
@@ -320,5 +358,20 @@ it("uses a real owned Git worktree and rejects dirty input instead of silently d
       .trim()
       .replaceAll("\\", "/")
   ).toBe(a.worktree!.directory.replaceAll("\\", "/"))
-  expect(git(["status", "--porcelain"])).toBe("")
+  writeFileSync(join(repository, "uncommitted.txt"), "user data")
+  const before = git(["status", "--porcelain"])
+  const selected = await feature("dirty")
+  expect(selected.workspaceMode).toBe("selected-directory")
+  expect(selected.workspace).toBe(realpathSync(repository))
+  expect(selected.worktree).toBeUndefined()
+  expect(git(["status", "--porcelain"])).toBe(before)
+  expect(readFileSync(join(repository, "uncommitted.txt"), "utf8")).toBe("user data")
+  expect(() => assertNativeHarnessFeatureCurrent(a)).not.toThrow()
+  const run = await ensureNativeHarnessFeatureRun(
+    project.projectId,
+    "historical",
+    "Original historical request"
+  )
+  expect(run.project.workspace).toBe(a.workspace)
+  expect(readNativeHarnessFeature(project.projectId, "historical")?.workspaceMode).toBeUndefined()
 }, 30000)

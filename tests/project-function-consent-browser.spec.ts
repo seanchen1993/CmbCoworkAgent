@@ -4,7 +4,7 @@ import { resolve } from "node:path"
 import { build } from "esbuild"
 import { chromium, type Browser } from "playwright"
 
-async function aggregateConsent(browser: Browser) {
+async function aggregateConsent(browser: Browser, projectOwned = false) {
   const bundle = await build({
     write: false,
     bundle: true,
@@ -20,14 +20,14 @@ async function aggregateConsent(browser: Browser) {
       import React from 'react';import{createRoot}from'react-dom/client';
       import{ProjectFunctionConsent}from'./src/renderer/src/components/harness-board/ProjectFunctionConsent';
       const root=createRoot(document.getElementById('root'));const listeners=new Set(),calls=[],ready=[];
-      let configured=false,granted=false,pending,fail=false,version=1;
-      const review=(v=version)=>({projectId:'aggregate',projectVersion:v,packageDigest:'a'.repeat(64),
-        workspace:'C:/aggregate',workspaceEnabled:granted,globallyEnabled:true,
+      let configured=false,granted=${projectOwned},grantedVersion=${projectOwned ? 1 : 0},directoryEnabled=true,pending,fail=false,version=1;
+      const review=(v=version)=>({projectId:'aggregate',projectVersion:v,packageDigest:'a'.repeat(64),approvalAtProject:${projectOwned},
+        workspace:'C:/aggregate',workspaceEnabled:directoryEnabled&&granted&&grantedVersion===v,globallyEnabled:true,
         source:{pluginId:'main',name:'参数包',digest:'b'.repeat(64),state:'ready',configurationOnly:true,
           capabilities:[],scannedMethods:[],scanIncomplete:false,hasConfiguration:true,configurationReady:configured},
-        dependencies:[{pluginId:'rules',name:'规则',digest:'c'.repeat(64),state:granted?'ready':'needs-approval',
+        dependencies:[{pluginId:'rules',name:'规则',digest:'c'.repeat(64),state:granted&&grantedVersion===v?'ready':'needs-approval',
           actionIds:['check'],capabilities:['process.run'],configurationReady:true},
-          {pluginId:'knowledge',name:'知识',digest:'d'.repeat(64),state:granted?'ready':'needs-approval',
+          {pluginId:'knowledge',name:'知识',digest:'d'.repeat(64),state:granted&&grantedVersion===v?'ready':'needs-approval',
           actionIds:['read'],capabilities:['platform.read'],configurationReady:true}]});
       const view=()=>({pluginId:'main',plugin:'参数包',digest:'b'.repeat(64),workspace:'C:/aggregate',savedRevision:0,
         state:'inactive',fields:[{key:'root',label:'知识目录',description:'Required input',type:'string',supported:true,
@@ -35,15 +35,16 @@ async function aggregateConsent(browser: Browser) {
       const api={read:async()=>review(),approve:async()=>{throw Error('NO_INDIVIDUAL_APPROVAL')},
         approveDependency:async()=>{throw Error('NO_INDIVIDUAL_DEPENDENCY')},
         approveRequired:input=>{calls.push(input);return new Promise((resolve,reject)=>{pending=()=>{
-          if(fail){fail=false;reject(Error('PROJECT_INPUT_CHANGED'));return}granted=true;resolve(review(input.projectVersion))}})},
+          if(fail){fail=false;reject(Error('PROJECT_INPUT_CHANGED'));return}granted=true;grantedVersion=input.projectVersion;resolve(review(input.projectVersion))}})},
         config:{userConfig:async()=>view(),saveUserConfig:async()=>{configured=true;return view()}}};
       window.api={harnessBoard:{localProjects:{mods:api}},mods:{onConfigurationChanged:cb=>{
         listeners.add(cb);return()=>listeners.delete(cb)}}};
-      const render=()=>root.render(<React.StrictMode><ProjectFunctionConsent projectId="aggregate" version={version}
-        onReady={value=>ready.push({version,value})}/></React.StrictMode>);
+      const render=()=>{const renderedVersion=version;root.render(<React.StrictMode><ProjectFunctionConsent projectId="aggregate" version={renderedVersion}
+        onReady={value=>ready.push({version:renderedVersion,value})}/></React.StrictMode>)};
       window.aggregate={calls,ready,resolve:()=>pending(),fail:()=>fail=true,
         configure:()=>{configured=true;for(const cb of listeners)cb()},
         revoke:()=>{granted=false;window.dispatchEvent(new Event('focus'))},
+        directory:value=>{directoryEnabled=value;window.dispatchEvent(new Event('focus'))},
         next:()=>{version++;granted=false;render()}};render();
     `
     }
@@ -56,6 +57,24 @@ async function aggregateConsent(browser: Browser) {
     await page.addScriptTag({ content: bundle.outputFiles[0].text })
     const button = page.getByRole("button", { name: "确认以上权限并启用项目", exact: true })
     await page.getByText("请填写并保存参数：参数包。", { exact: true }).waitFor()
+    if (projectOwned) {
+      assert.equal(await button.count(), 0)
+      await page.evaluate("window.aggregate.configure()")
+      await page.getByText("项目设置 · 已就绪", { exact: true }).waitFor()
+      await page.evaluate("window.aggregate.directory(false)")
+      await page.getByText("项目授权可沿用，当前目录的插件功能已关闭。", { exact: false }).waitFor()
+      assert.equal(await button.count(), 0)
+      assert.equal(await page.getByText("项目授权已失效或尚未完成。", { exact: false }).count(), 0)
+      await page.evaluate("window.aggregate.directory(true)")
+      await page.getByText("项目设置 · 已就绪", { exact: true }).waitFor()
+      await page.evaluate("window.aggregate.revoke()")
+      await page.getByText("项目授权已失效或尚未完成。", { exact: false }).waitFor()
+      assert.equal(await button.count(), 0)
+      assert.equal(await page.getByRole("button", { name: /^允许/ }).count(), 0)
+      assert.equal(await page.evaluate("window.aggregate.calls.length"), 0)
+      assert.deepEqual(errors, [])
+      return
+    }
     assert(await button.isDisabled())
     assert.equal(await page.getByRole("button", { name: /^允许依赖/ }).count(), 0)
     await page.evaluate("window.aggregate.configure()")
@@ -98,6 +117,7 @@ async function aggregateConsent(browser: Browser) {
     await button.waitFor()
     await button.click()
     await page.evaluate("window.aggregate.next()")
+    await page.waitForFunction("window.aggregate.ready.some(x=>x.version===2&&x.value===false)")
     await page.evaluate("window.aggregate.resolve()")
     assert.equal(
       await page.evaluate("window.aggregate.ready.some(x=>x.version===2&&x.value)"),
@@ -234,7 +254,8 @@ async function dependencyConsent(browser: Browser) {
       .click()
     await page.evaluate("window.fixture.resolve()")
     await page.waitForFunction("window.fixture.ready.some(([id,value])=>id==='A'&&value)")
-    const settings = page.getByRole("region", { name: "本包功能权限", exact: true })
+    const settings = page
+      .getByRole("region", { name: "本包功能权限", exact: true })
       .locator(":scope > details")
     if (!(await settings.evaluate((node) => (node as HTMLDetailsElement).open)))
       await settings.locator(":scope > summary").click()
@@ -435,6 +456,7 @@ async function main() {
     assert.deepEqual(errors, [])
     await dependencyConsent(browser)
     await aggregateConsent(browser)
+    await aggregateConsent(browser, true)
     console.log(
       "PASS exact native package and dependency consent, required configuration, all-ready aggregation, unavailable/source-changed denial, legacy compatibility, double-click and delayed cross-project fencing"
     )

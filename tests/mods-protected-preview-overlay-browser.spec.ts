@@ -24,7 +24,8 @@ const panelSlot: Plugin = {
   }
 }
 
-async function fixture(page: Page, module = "claw", collapsed = false, focused = false) {
+async function fixture(page: Page, module = "claw", collapsed = false, focused = false,
+  moduleMode?: string) {
   await mount(page, `
     import {createPortal} from "react-dom";
     import {ResourcePanelOverlay} from ${file("components/panels/ResourcePanelOverlay.tsx")};
@@ -65,7 +66,8 @@ async function fixture(page: Page, module = "claw", collapsed = false, focused =
           invalidate:()=>{for(const fn of invalidated)fn({threadId:'thread',receipt:'actual-native-receipt'})}};
         useEffect(()=>{ready=true;return()=>{ready=false}},[]);
         return <main><ClawSidebarHost threadId='thread'/><PortalSource/>
-          <ResourcePanelOverlay isAgentFocusActive={focus} renderedMainView='thread' renderedPanelThreadId={thread}/>
+          <ResourcePanelOverlay isAgentFocusActive={focus} renderedMainView='thread' renderedPanelThreadId={thread}
+            moduleMode={${JSON.stringify(moduleMode) ?? "undefined"}}/>
         </main>;
       }
       host.render(<Fixture/>);
@@ -129,6 +131,14 @@ async function main() {
     assert.equal(await page.locator("[data-panel-slot-spy]").count(), 0)
     assert.equal(await page.evaluate("window.overlayFixture.facts.some(row=>row[0]==='snapshot')"), false)
     pass("expanded non-Claw standard panels leave overlay inactive and do not create a duplicate snapshot reader")
+
+    await fixture(page, "claw", false, false, "work")
+    await page.getByRole("link", { name: "Workspace report", exact: true }).click()
+    await page.waitForFunction("window.overlayFixture.facts.some(row=>row[0]==='link')")
+    await page.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))))
+    assert.equal(await page.locator("[data-panel-slot-spy]").count(), 0)
+    assert.equal(await page.evaluate("window.overlayFixture.facts.some(row=>row[0]==='snapshot')"), false)
+    pass("project work-panel override keeps a stale Claw selection from opening a duplicate preview drawer")
 
     for (const [collapsed, focused] of [[true, false], [false, true]]) {
       await fixture(page, "work", collapsed, focused)
