@@ -1,3 +1,4 @@
+import { BOT_IM_FILE_EXTENSION, type BotImFileCommand, type BotImFileResult } from "../../../shared/bots/im-file"
 import {
   BOT_IM_EXTENSION,
   assertBotImEvent,
@@ -190,6 +191,8 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
   private markdownReplies = false
   private botChannel = false
   private botCards = false
+  private botFiles = false
+  private readonly fileCommands = new Map<string, PendingCommand<BotImFileResult>>()
   private readonly botCommands = new Map<
     string,
     PendingCommand<BotImBinding | BotImBindingPage> & { request: BotImCommand }
@@ -236,6 +239,26 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
 
   supportsBotCards(): boolean {
     return this.supportsBotChannel() && this.botCards
+  }
+
+  supportsBotFiles(): boolean { return this.supportsBotChannel() && this.botFiles }
+
+  botFileCommand(request: BotImFileCommand): Promise<BotImFileResult> {
+    if (!this.supportsBotFiles()) return Promise.reject(new ImGatewayCommandError("当前网关不支持发送附件，请升级网关", { permanent: true }))
+    const commandId = randomUUID()
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.fileCommands.delete(commandId)
+        // Retrying begin checks the durable outbox before uploading or posting again.
+        reject(new ImGatewayCommandError("附件传输确认超时，稍后重试"))
+      }, request.action === "finish" ? 300_000 : COMMAND_TIMEOUT_MS)
+      this.fileCommands.set(commandId, { resolve, reject, timer })
+      try { this.sendCommand("BOT_FILE_COMMAND", request, commandId) }
+      catch (error) {
+        clearTimeout(timer); this.fileCommands.delete(commandId)
+        reject(error)
+      }
+    })
   }
 
   supportsBotChannel(): boolean {
@@ -303,6 +326,7 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
     this.markdownReplies = false
     this.botChannel = false
     this.botCards = false
+    this.botFiles = false
     this.clearTimers()
     this.rejectPending(
       new ImGatewayCommandError("统一机器人连接已断开", { reasonCode: "DESKTOP_OFFLINE" })
@@ -643,6 +667,7 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
     this.markdownReplies = false
     this.botChannel = false
     this.botCards = false
+    this.botFiles = false
     const url = this.options.url()?.trim()
     const token = this.options.token()?.trim()
     if (!url || !token) {
@@ -720,7 +745,7 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
         protocolExtensions: [
           DEFAULT_ROUTE_SYNC_EXTENSION,
           IM_MARKDOWN_REPLY_EXTENSION,
-          ...(this.options.onBotEvent ? [BOT_IM_EXTENSION, "bot-cards-v1"] : [])
+          ...(this.options.onBotEvent ? [BOT_IM_EXTENSION, "bot-cards-v1", BOT_IM_FILE_EXTENSION] : [])
         ]
       })
     })
@@ -879,6 +904,7 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
           Array.isArray(extensions) &&
           extensions.includes(BOT_IM_EXTENSION)
         )
+        this.botFiles = this.botChannel && Array.isArray(extensions) && extensions.includes(BOT_IM_FILE_EXTENSION)
         this.botCards =
           this.botChannel && Array.isArray(extensions) && extensions.includes("bot-cards-v1")
         this.markdownReplies =
@@ -907,6 +933,17 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
         this.scheduleAuthenticationRefresh()
         this.syncCommandId = this.sendEnvelope("SYNC_REQUEST", {})
         return
+      }
+      case "BOT_FILE_RESULT": {
+        const pending = commandId ? this.fileCommands.get(commandId) : undefined
+        if (!pending || !commandId) return
+        if (!["uploading", "accepted", "aborted", "unknown", "failed"].includes(String(payload.state)) ||
+            (payload.uploadId !== undefined && !nonEmptyString(payload.uploadId)) ||
+            (payload.offset !== undefined && (!Number.isSafeInteger(payload.offset) || Number(payload.offset) < 0)))
+          throw new ImGatewayProtocolError("附件回执格式无效")
+        clearTimeout(pending.timer); this.fileCommands.delete(commandId)
+        pending.resolve(payload as unknown as BotImFileResult)
+        break
       }
       case "BOT_BINDING_RESULT": {
         const pending = commandId ? this.botCommands.get(commandId) : undefined
@@ -1214,6 +1251,14 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
         lastError: "统一机器人网关尚未配置机器人 OpenID；配置完成后请手动重连。"
       })
       this.socket?.close(4002, "robot OpenID is not configured")
+      return
+    }
+    const filePending = commandId ? this.fileCommands.get(commandId) : undefined
+    if (filePending && commandId) {
+      clearTimeout(filePending.timer); this.fileCommands.delete(commandId)
+      filePending.reject(new ImGatewayCommandError(`附件发送失败：${reasonCode}`, {
+        reasonCode, permanent: !["FILE_UPLOAD_RETRY", "FILE_UPLOAD_MISSING", "FILE_UPLOAD_BUSY", "SESSION_SUPERSEDED"].includes(reasonCode)
+      }))
       return
     }
     const botPending = commandId ? this.botCommands.get(commandId) : undefined
@@ -1540,7 +1585,8 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
       ...this.permitCommands.values(),
       ...this.replyCommands.values(),
       ...this.cardCommands.values(),
-      ...this.botCommands.values()
+      ...this.botCommands.values(),
+      ...this.fileCommands.values()
     ]) {
       clearTimeout(pending.timer)
       pending.reject(error)
@@ -1550,6 +1596,7 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
     this.replyCommands.clear()
     this.replyCommandByIdempotencyKey.clear()
     this.botCommands.clear()
+    this.fileCommands.clear()
     this.cardCommands.clear()
     this.cardCommandByInteraction.clear()
     this.cardChains.clear()

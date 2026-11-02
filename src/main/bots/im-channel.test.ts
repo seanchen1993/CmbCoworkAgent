@@ -2715,3 +2715,49 @@ it("rechecks saved unrelated results when IM revocation releases queued capacity
   })
   expect(f.errors).toEqual([])
 })
+
+it.each(["dm", "group"] as const)("delivers independent-work attachments only to their original %s", async (kind) => {
+  const root = await mkdtemp(join(tmpdir(), "im-work-file-"))
+  cleanups.push(() => rm(root, { recursive: true, force: true }))
+  const filePath = join(root, "任务成果.xlsx")
+  await writeFile(filePath, "verified task bytes")
+  const { snapshotBotDeliveryFile } = await import("./file-copy")
+  const file = { name: "任务成果.xlsx", filePath, ...await snapshotBotDeliveryFile(root, filePath, new AbortController().signal) }
+  const f = fixture(async (task, host) => {
+    if (task.workId) return { state: "completed", result: "任务文件已生成", files: [file] }
+    if (task.origin.kind === "work_result") return { state: "completed", result: "任务已返回结果" }
+    await host.createWork({ botId: task.botId, operationId: task.id, title: "文件任务", goal: "生成表格" },
+      { taskId: task.id, callId: "create", key: "create" })
+    return { state: "completed", result: "已创建任务" }
+  })
+  const finished: string[] = [], routes: string[] = []
+  let offset = 0
+  Object.assign(f.client, {
+    supportsBotFiles: () => true,
+    botFileCommand: async (request: import("../../shared/bots/im-file").BotImFileCommand) => {
+      if (request.action === "begin") { routes.push(request.conversationKey); offset = 0; return { state: "uploading", uploadId: request.deliveryId, offset } }
+      if (request.action === "chunk") { offset += Buffer.from(request.data, "base64").length; return { state: "uploading", uploadId: request.uploadId, offset } }
+      finished.push(request.uploadId)
+      return { state: "accepted" }
+    }
+  })
+  const binding = await f.binding(kind)
+  await f.service.receive(f.event(binding, "file-work", "请生成文件"))
+  await eventually(() => finished.length === 1)
+  expect(routes).toEqual([binding.conversationKey])
+  expect(f.errors).toEqual([])
+  expect(f.calls.some(task => task.workId)).toBe(true)
+  // A result-summary round must not resend the original attachment.
+  await new Promise(resolve => setTimeout(resolve, 1100))
+  expect(finished).toHaveLength(1)
+})
+
+it("keeps the local file and reports an old gateway's missing attachment capability", async () => {
+  const file = { name: "报告.docx", filePath: "/synthetic/report.docx", size: 3, attachmentPath: "/synthetic/.bot-deliveries/" + "a".repeat(64) + "/报告.docx" }
+  const f = fixture(async () => ({ state: "completed", result: "文件已准备", files: [file] }))
+  const binding = await f.binding("group")
+  await f.service.receive(f.event(binding))
+  await eventually(() => f.client.submitReply.mock.calls.some(([reply]) => reply.message.content.includes("附件未全部发送成功")))
+  expect(f.errors.some(error => String(error).includes("升级网关"))).toBe(true)
+  expect(f.store.im.history(f.bot.id, botImScopeId("realm", "owner", binding.id)).items.some(row => row.state === "blocked")).toBe(true)
+})

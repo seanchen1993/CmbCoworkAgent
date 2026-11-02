@@ -1,3 +1,4 @@
+import { deliverBotImFile } from "./bot-file-delivery"
 import { botInteractionRoutes } from "./bot-interaction-route"
 import { submitFormattedImReply } from "./submit-formatted-reply"
 import { conversationSwitchedToText } from "./withheld-text-notices"
@@ -23,7 +24,7 @@ export type BotImGatewayClient = Pick<
   | "renewBotPermit"
   | "submitReply"
 > &
-  Partial<Pick<ImGatewayWsClient, "supportsMarkdownReplies" | "supportsBotCards">>
+  Partial<Pick<ImGatewayWsClient, "supportsMarkdownReplies" | "supportsBotCards" | "supportsBotFiles" | "botFileCommand">>
 
 /** Authenticated IM -> local Bot adapter. Renderer has no event injection API. */
 export class BotImChannelService {
@@ -574,12 +575,12 @@ export class BotImChannelService {
         host.settleImDelivery(reply.id, "blocked")
         return
       }
-      const messages = buildImProactiveReplies({
+      const messages = reply.text.trim() ? buildImProactiveReplies({
         deliveryId: reply.id,
         conversationKey: registered.binding.conversationKey,
         text: reply.text,
         format: "markdown"
-      })
+      }) : []
       for (const message of messages) {
         if (this.stopped || epoch !== this.epoch) throw new Error("IM 连接已变化")
         if (!host.mayDeliverImReply(reply.id)) return
@@ -595,8 +596,30 @@ export class BotImChannelService {
           return
         }
       }
+      for (const [index, file] of (reply.files ?? []).entries()) {
+        if (!this.client.supportsBotFiles?.() || !this.client.botFileCommand)
+          throw new ImGatewayCommandError("当前网关不支持发送附件，请升级网关；文件可在 App 中查看", { permanent: true })
+        const state = await deliverBotImFile(
+          this.client.botFileCommand.bind(this.client), `${reply.id}:file:${index}`,
+          registered.binding.conversationKey, file,
+          () => {
+            if (this.stopped || epoch !== this.epoch || !host.mayDeliverImReply(reply!.id))
+              throw new ImGatewayCommandError("附件发送已暂停，连接或绑定发生变化")
+          }
+        )
+        if (state === "unknown") { host.settleImDelivery(reply.id, "unknown"); return }
+      }
       host.settleImDelivery(reply.id, "accepted")
     } catch (error) {
+      if (reply?.files?.length && error instanceof ImGatewayCommandError && error.permanent &&
+          !this.stopped && epoch === this.epoch && host.mayDeliverImReply(reply.id)) {
+        const route = host.imGateway.binding(reply.bindingId)
+        if (route?.binding.conversationKey) {
+          const notice = buildImProactiveReplies({ deliveryId: `${reply.id}:file-error`, conversationKey: route.binding.conversationKey,
+            text: "附件未全部发送成功，请在 App 中查看或重新交付。" })
+          for (const message of notice) await this.client.submitReply(message).catch(() => {})
+        }
+      }
       if (reply)
         host.settleImDelivery(
           reply.id,

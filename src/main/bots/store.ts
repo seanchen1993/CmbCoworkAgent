@@ -4023,7 +4023,8 @@ export class BotStore {
         this.external(task.mockSource).settle(
           task,
           state,
-          visibleResult || error || botTaskStateLabel(state)
+          visibleResult || error || botTaskStateLabel(state),
+          files
         )
       const silentDiscussion =
         task.origin.kind === "discussion" &&
@@ -4098,7 +4099,7 @@ export class BotStore {
         !silentCompletion &&
         ["completed", "failed", "cancelled", "interrupted", "outcome_unknown"].includes(state)
       )
-        this.im.mirrorPersonal(task, visibleResult || error || botTaskStateLabel(state))
+        this.im.mirrorPersonal(task, visibleResult || error || botTaskStateLabel(state), files)
       let replyOrigin = task.origin.kind === "bot" ? task.origin : this.workflowHandoffSource(task, state === "interrupted" || state === "cancelled")?.origin
       if (replyOrigin?.kind !== "bot") return
       // A delivered physical turn owns its receipt ID permanently. Later branch

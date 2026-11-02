@@ -1,3 +1,4 @@
+import { parseBotFileDelivery, type BotDeliveredFile } from "../../shared/bots/file-delivery"
 import { createHash, randomUUID } from "node:crypto"
 import type { NativeSqliteAdapter } from "../db/native-sqlite-adapter"
 import type { BotStore } from "./store"
@@ -73,6 +74,8 @@ export class BotMockChannelStore {
           CREATE INDEX bot_mock_outbox_pending ON bot_mock_outbox(state,created_at,id);
           CREATE INDEX bot_mock_outbox_page ON bot_mock_outbox(binding_id,created_at,id);`)
       }
+      if (!this.rows("PRAGMA table_info(bot_mock_outbox)").some((row) => row.name === "files_json"))
+        this.run("ALTER TABLE bot_mock_outbox ADD COLUMN files_json TEXT")
       for (const [table, column] of [
         ["bot_tasks", "mock_source_json"],
         ["bot_task_receipts", "mock_source_json"],
@@ -667,7 +670,7 @@ export class BotMockChannelStore {
     )
       return
     const source = this.validateSource(task.mockSource, task.botId)
-    this.run("INSERT OR IGNORE INTO bot_mock_outbox VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", [
+    this.run("INSERT OR IGNORE INTO bot_mock_outbox(id,bot_id,binding_id,grant_version,conversation_id,reply_to_message_id,source_task_id,work_id,text,state,created_at,delivery_kind) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", [
       `im-opening-${task.id}`,
       task.botId,
       source.bindingId,
@@ -683,7 +686,7 @@ export class BotMockChannelStore {
     ])
     if (this.db.getRowsModified()) this.changed()
   }
-  settle(task: BotTask, state: BotTaskState, text: string): void {
+  settle(task: BotTask, state: BotTaskState, text: string, files?: BotDeliveredFile[]): void {
     if (!task.mockSource) return
     const owner = this.continuationOwner(task)
     const source = this.validateSource(task.mockSource, owner, false)
@@ -698,9 +701,9 @@ export class BotMockChannelStore {
         [task.id]
       )
     // Personal work reports once through the existing main-conversation result notification.
-    if (source.personal && task.workId) return
+    if (source.personal && task.workId && !files?.length) return
     const binding = this.get(owner, source.bindingId)
-    const output = text.trim() || "本轮没有可确认的文字结果，请查看执行状态。"
+    const output = source.personal && task.workId ? "" : text.trim() || "本轮没有可确认的文字结果，请查看执行状态。"
     this.run(
       "INSERT OR IGNORE INTO bot_mock_outbox(id,bot_id,binding_id,grant_version,conversation_id,reply_to_message_id,source_task_id,work_id,text,state,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
       [
@@ -717,15 +720,17 @@ export class BotMockChannelStore {
         this.now()
       ]
     )
+    this.freezeFiles(`mock-reply-${task.id}`, files)
     this.changed()
   }
-  /** Mirror new personal main-conversation responses; never copy group/external transcripts. */
-  mirrorPersonal(task: BotTask, text: string): void {
+  /** Mirror new personal replies and their work attachments; never copy group/external transcripts. */
+  mirrorPersonal(task: BotTask, text: string, files?: BotDeliveredFile[]): void {
+    const work = task.workId ? this.owner.workForThread(task.botId, task.threadId) : null
+    const mainThread = this.owner.getBot(task.botId).threadId
     if (
       this.transport !== "im" ||
       task.mockSource ||
-      task.workId ||
-      task.threadId !== this.owner.getBot(task.botId).threadId ||
+      (task.workId ? !files?.length || !work || Boolean(work.source) || work.parentThreadId !== mainThread || (work.conversation && work.conversation.state !== "bound") : task.threadId !== mainThread) ||
       this.rows("SELECT injected_into FROM bot_tasks WHERE id=?", [task.id])[0]?.injected_into ||
       !text.trim()
     )
@@ -748,13 +753,20 @@ export class BotMockChannelStore {
         String(convo.id),
         `app-${task.id}`,
         task.id,
-        task.origin.kind === "work_result" ? task.origin.workId : null,
-        text.trim().slice(0, 60000),
+        task.workId ?? (task.origin.kind === "work_result" ? task.origin.workId : null),
+        task.workId ? "" : text.trim().slice(0, 60000),
         "pending",
         this.now()
       ]
     )
+    this.freezeFiles(`im-personal-${task.id}`, files)
     this.changed()
+  }
+  private freezeFiles(id: string, files?: BotDeliveredFile[]): void {
+    if (this.transport !== "im" || !files?.length) return
+    const json = JSON.stringify({ kind: "bot-file-delivery", files })
+    if (!parseBotFileDelivery(json)) throw new BotError("INVALID_INPUT", "交付附件记录无效")
+    this.run("UPDATE bot_mock_outbox SET files_json=? WHERE id=? AND files_json IS NULL", [json, id])
   }
   outbox(row: Record<string, unknown>): BotMockOutbox {
     return {
@@ -764,6 +776,7 @@ export class BotMockChannelStore {
       conversationId: String(row.conversation_id),
       replyToMessageId: String(row.reply_to_message_id),
       sourceTaskId: String(row.source_task_id),
+      ...(row.delivery_kind !== "opening" && row.files_json ? { files: parseBotFileDelivery(row.files_json) ?? [] } : {}),
       ...(row.work_id ? { workId: String(row.work_id) } : {}),
       text: String(row.text),
       state: row.state as BotMockOutbox["state"],
