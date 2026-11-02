@@ -14,7 +14,7 @@ import { ChevronDown, LayoutTemplate, Redo2, Undo2, X } from "lucide-react"
 import { buildDesignHtmlPreviewDocument } from "@/lib/design-html-srcdoc"
 import { DESIGN_PREVIEW_NAVIGATION_SCRIPT } from "@/lib/design-preview-navigation"
 import { buildDesignVariationDocument } from "@/lib/design-variation-document"
-import { getDesignPreviewViewport } from "@/lib/design-preview-viewport"
+import { getDesignPreviewViewportStyle } from "@/lib/design-preview-viewport"
 import { useAppStore } from "@/lib/store"
 import { loadActiveRequirementDesignEntry } from "@/lib/requirement-design-entry"
 // 需求详情进入设计模式的适配逻辑集中在独立 Hook，避免侵入设计器主体流程。
@@ -1495,7 +1495,7 @@ export function DesignView(): React.JSX.Element {
   }, [])
   // Canvas refs
   const iframeRef = useRef<HTMLIFrameElement>(null)
-  const canvasContainerRef = useRef<HTMLDivElement>(null)
+  const [canvasContainer, setCanvasContainer] = useState<HTMLDivElement | null>(null)
   const previewScrollRef = useRef<HTMLDivElement>(null)
   const [previewSize, setPreviewSize] = useState({ width: 800, height: 600 })
   const activeTabId = SINGLE_DESIGN_TAB_ID
@@ -1526,11 +1526,9 @@ export function DesignView(): React.JSX.Element {
   const tweaksOn = ts.tweaksOn
   const activeMode = visibleDraft || ts.generationState === "generating" ? null : ts.activeMode
   const zoom = ts.zoom
-  const previewVisible = Boolean(currentSessionId && visibleHtml && ts.rightTab === "design")
-
   useEffect(() => {
-    const container = canvasContainerRef.current
-    if (!previewVisible || !container) return
+    const container = canvasContainer
+    if (!container) return
     const measure = () => {
       const width = container.clientWidth
       const height = container.clientHeight
@@ -1543,7 +1541,7 @@ export function DesignView(): React.JSX.Element {
     const observer = new ResizeObserver(measure)
     observer.observe(container)
     return () => observer.disconnect()
-  }, [previewVisible])
+  }, [canvasContainer])
   const selectedDesignSystem =
     designSystems.find((system) => system.id === ts.selectedDesignSystemId) ?? null
   const orderedDesignSystems = designSystems.filter(system => system.isLatest !== false || system.id === createDesignSystemId).sort(compareDesignSystemsForDisplay)
@@ -5264,11 +5262,7 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
                             ? "#f59e0b"
                             : undefined
                     const iframeDoc = iframeRef.current?.contentDocument ?? null
-                    const viewport = getDesignPreviewViewport(
-                      previewSize.width,
-                      previewSize.height,
-                      zoom
-                    )
+                    const viewport = getDesignPreviewViewportStyle(zoom)
                     // Region numbers must match buildDrawPrompt's "[区域 N]" labels, so this uses
                     // the same filter and ordering the prompt does.
                     const regionNumberByStroke = new Map<string, number>()
@@ -5323,7 +5317,8 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
                         }}
                       >
                         <div
-                          ref={canvasContainerRef}
+                          ref={setCanvasContainer}
+                          data-testid="design-preview-viewport"
                           style={{ position: "relative", flex: 1, minWidth: 0, height: "100%" }}
                           onClick={() => {
                             if (ts.activeCommentId) updateTs(activeTabId, { activeCommentId: null })
@@ -5391,7 +5386,7 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
                             </div>
                           )}
                           {/* Scroll wrapper — overflow lives here so the iframe's height: 100% resolves
-                        against canvasContainerRef (which has explicit height: "100%") rather than
+                        against the canvas container (which has explicit height: "100%") rather than
                         an overflow:auto ancestor (which breaks CSS % height resolution in Chromium). */}
                           <div
                             ref={previewScrollRef}
@@ -5506,8 +5501,8 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
                           {(activeMode === "comment" || ts.comments.length > 0) &&
                             (() => {
                               const zf = zoom / 100
-                              const cw = canvasContainerRef.current?.clientWidth || 800
-                              const ch = canvasContainerRef.current?.clientHeight || 600
+                              const cw = previewSize.width
+                              const ch = previewSize.height
                               return ts.comments.map((c, i) => {
                                 const anchoredPoint = resolveAnchorPagePoint(iframeDoc, c.anchor)
                                 const pageX = anchoredPoint?.x ?? c.pageX
@@ -5546,8 +5541,8 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
                           {ts.draftComment &&
                             (() => {
                               const zf = zoom / 100
-                              const cw = canvasContainerRef.current?.clientWidth || 800
-                              const ch = canvasContainerRef.current?.clientHeight || 600
+                              const cw = previewSize.width
+                              const ch = previewSize.height
                               const anchoredPoint = resolveAnchorPagePoint(
                                 iframeDoc,
                                 ts.draftComment.anchor

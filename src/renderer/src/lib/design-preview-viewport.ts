@@ -7,3 +7,9 @@ export function getDesignPreviewViewport(width: number, height: number, zoom: nu
     height: Math.max(1, height) / scale
   }
 }
+
+/** Percentage dimensions follow the mounted canvas immediately, including during split dragging. */
+export function getDesignPreviewViewportStyle(zoom: number) {
+  const viewport = getDesignPreviewViewport(100, 100, zoom)
+  return { width: `${viewport.width}%`, height: `${viewport.height}%` }
+}
