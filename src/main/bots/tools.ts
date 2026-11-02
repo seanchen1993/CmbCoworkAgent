@@ -517,7 +517,7 @@ export function createBotBrowserTools(
           .string()
           .max(30_000)
           .describe(
-            "Evaluate: () => {...}, or (element) => {...} with ref. Runs in the web page, without Node/browser-context access."
+            "Evaluate: () => {...}, or (element) => {...} with ref. Runs in the web page, without Node/browser-context access. Each script segment is limited to 30 seconds, excluding native dialog waiting and active human control; timeout closes this page. Start long-running work and inspect progress in separate calls."
           )
           .optional(),
         doubleClick: z.boolean().optional(),
@@ -528,7 +528,13 @@ export function createBotBrowserTools(
           .enum(["button", "link", "textbox", "combobox", "checkbox", "radio", "tab", "menuitem"])
           .optional(),
         name: z.string().max(1000).optional(),
-        text: z.string().max(30_000).optional(),
+        text: z
+          .string()
+          .max(30_000)
+          .describe(
+            'Fill: required text to enter; use "" only to clear. Wait: text to wait for. Dialog: prompt response.'
+          )
+          .optional(),
         key: z.string().max(80).optional(),
         direction: z.enum(["up", "down"]).optional(),
         fileId: z

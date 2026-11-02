@@ -275,7 +275,8 @@ export const BotAvatar = memo(function BotAvatar({
     target.receipt = receipt
     target.driver.setCompact(size < 48)
     target.dirty = true
-    wake()
+    // A local change must not repaint every other settled avatar in the window.
+    invalidatePointer()
   }, [busy, mood, animated, idleAnimation, shape, color, size, settlement?.id, settlement?.state])
   return (
     <svg

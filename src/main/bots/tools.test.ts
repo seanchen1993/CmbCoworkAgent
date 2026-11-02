@@ -29,7 +29,7 @@ import {
 import type { BotDeliveredFile } from "../../shared/bots/file-delivery"
 import { parseBotFileDelivery } from "../../shared/bots/file-delivery"
 import { copyBotFile, hashBotFile, snapshotBotDeliveryFile } from "./file-copy"
-import { BotBrowserActionError, type BotBrowserService } from "./browser"
+import { BotBrowserActionError, BotBrowserService } from "./browser"
 import { AIMessage, HumanMessage, ToolMessage } from "@langchain/core/messages"
 import { convertToOpenAITool } from "@langchain/core/utils/function_calling"
 import { filterTaskSubagentTools } from "../agent/runtime-tool-catalog"
@@ -922,6 +922,33 @@ it("exposes human browser help as a dedicated scope-bound tool with original err
   controller.abort(new Error("cancelled"))
   await expect(help.invoke(call)).rejects.toThrow("cancelled")
 })
+
+it.each([{ ref: "page:e1" }, { role: "textbox", name: "Name" }])(
+  "rejects a fill without text before touching the browser: %j",
+  async (target) => {
+    const launch = vi.fn()
+    const service = new BotBrowserService(launch)
+    const [browser] = createBotBrowserTools(
+      { id: "private" } as BotDefinition,
+      service,
+      new AbortController().signal,
+      vi.fn()
+    )
+    // A real model sent `value`; the schema strips that unknown argument.
+    const result = await browser.invoke({
+      type: "tool_call",
+      id: "missing-text",
+      name: "bot_browser",
+      args: { action: "fill", ...target, value: "keep this text" }
+    })
+    expect(result.status).toBe("error")
+    expect(JSON.parse(result.content)).toMatchObject({
+      ok: false,
+      error: expect.stringContaining("fill 必须提供 text")
+    })
+    expect(launch).not.toHaveBeenCalled()
+  }
+)
 
 it("passes an explicit browser new-tab request through the original conversation scope", async () => {
   const act = vi.fn().mockResolvedValue("new owned page evidence")

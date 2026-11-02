@@ -466,6 +466,11 @@ export function registerBotHandlers(
       )
   )
   ipcMain.handle(
+    "bots:stop-group",
+    (_event, hostId: unknown, groupId: unknown) =>
+      hostFor(hostId).stopGroup(botIdentifier(groupId))
+  )
+  ipcMain.handle(
     "bots:mark-read",
     (_event, hostId: unknown, kind: unknown, id: unknown, version: unknown) => {
       if (

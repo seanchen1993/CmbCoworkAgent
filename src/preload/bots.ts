@@ -180,6 +180,7 @@ export const localBotsApi: BotClient = {
   send: (input) => ipcRenderer.invoke("bots:send", LOCAL_BOT_HOST_ID, input),
   stopConversation: (botId, groupId, workId) =>
     ipcRenderer.invoke("bots:stop-conversation", LOCAL_BOT_HOST_ID, botId, groupId, workId),
+  stopGroup: (groupId) => ipcRenderer.invoke("bots:stop-group", LOCAL_BOT_HOST_ID, groupId),
   cancel: (taskId) => ipcRenderer.invoke("bots:cancel", LOCAL_BOT_HOST_ID, taskId),
   subscribe(listener) {
     const receive = (_event: IpcRendererEvent, payload: BotChangeEvent) => listener(payload)

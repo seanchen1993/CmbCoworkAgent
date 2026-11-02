@@ -398,14 +398,78 @@ export class BotBrowserService {
       throw new BotError("CONFLICT", "浏览器控制权已改变，请等待用户归还，再重新观察页面")
   }
 
+  /** A timeout must stop the page script, not just stop awaiting its result. */
+  private async evaluate(entry: OwnedPage, operation: () => Promise<unknown>): Promise<void> {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    let expired = false
+    let generation = this.scopeGeneration(entry.botId)
+    const humanActive = () => this.human?.botId === entry.botId && this.human.status === "active"
+    let rejectDeadline!: (error: unknown) => void
+    const deadline = new Promise<never>((_, reject) => { rejectDeadline = reject })
+    const pause = () => {
+      if (timer !== undefined) clearTimeout(timer)
+      timer = undefined
+    }
+    const resume = () => {
+      pause()
+      if (expired || entry.dialog || entry.page.isClosed() || humanActive()) return
+      timer = setTimeout(() => {
+        pause()
+        if (humanActive()) return
+        expired = true
+        // Browser-level target close also works when page JavaScript is blocked.
+        // Wait for it before reporting failure; other pages and commands stay intact.
+        void entry.page.close({ runBeforeUnload: false }).then(() => rejectDeadline(new BotError(
+          "CONFLICT",
+          "网页脚本执行超过 30 秒，已关闭该页面以终止脚本。此前操作可能已生效，不能视为回滚；请重新打开页面核对结果，不要直接重复提交。长任务应启动后分步检查结果，不要在 evaluate 中一直等待。"
+        )), rejectDeadline)
+      }, 30_000)
+    }
+    const returned = () => {
+      const current = this.scopeGeneration(entry.botId)
+      if (current === generation) return // Another Bot returning must not extend this deadline.
+      generation = current
+      resume()
+    }
+    // Reuse the existing control-return notification. A requesting takeover may
+    // still be waiting for our action lock, so only active human control suspends expiry.
+    this.returned.add(returned)
+    // The native UI and the Bot's dialog action both emit dialogclosed. Waiting
+    // for the user is unbounded; each resumed script segment has its own deadline.
+    entry.page.on("dialog", pause)
+    entry.page.on("dialogclosed", resume)
+    resume()
+    try {
+      const running = Promise.resolve().then(operation).then(
+        () => expired ? deadline : undefined,
+        (error) => { if (expired) return deadline; throw error }
+      )
+      await Promise.race([running, deadline])
+    } finally {
+      pause()
+      entry.page.off("dialog", pause)
+      entry.page.off("dialogclosed", resume)
+      this.returned.delete(returned)
+    }
+  }
+
+  /** Release the action lock for every native dialog, including consecutive dialogs. */
+  private async waitForInput(entry: OwnedPage): Promise<void> {
+    if (!entry.pendingInput || entry.dialog) return
+    let dialogOpened!: () => void
+    const dialog = new Promise<void>((resolve) => { dialogOpened = resolve })
+    entry.page.once("dialog", dialogOpened)
+    try {
+      await Promise.race([entry.pendingInput, dialog])
+    } finally {
+      entry.page.off("dialog", dialogOpened)
+    }
+  }
+
   /** A JS dialog suspends Chromium's input acknowledgement. Return it for explicit handling. */
   private async input(entry: OwnedPage, operation: () => Promise<unknown>): Promise<void> {
-    if (entry.pendingInput) await entry.pendingInput
-    let dialogOpened!: () => void
-    const dialog = new Promise<void>((resolve) => {
-      dialogOpened = resolve
-    })
-    entry.page.once("dialog", dialogOpened)
+    await this.waitForInput(entry)
+    if (entry.dialog) return // Return the new dialog without replaying the requested input.
     const pending = Promise.resolve()
       .then(operation)
       .then(() => {})
@@ -415,11 +479,7 @@ export class BotBrowserService {
         if (entry.pendingInput === pending) entry.pendingInput = undefined
       })
       .catch(() => {})
-    try {
-      await Promise.race([pending, dialog])
-    } finally {
-      entry.page.off("dialog", dialogOpened)
-    }
+    await this.waitForInput(entry)
   }
 
   async act(
@@ -430,6 +490,11 @@ export class BotBrowserService {
     withUploadFileLock?: BotBrowserUploadLock
   ): Promise<string> {
     signal.throwIfAborted()
+    if (action.action === "fill" && typeof action.text !== "string")
+      throw new BotError(
+        "INVALID_INPUT",
+        'fill 必须提供 text 字符串；清空输入框请显式传入 text: ""'
+      )
     if (action.cursor && action.action !== "observe")
       throw new BotError("INVALID_INPUT", "读取游标仅支持 observe")
     if (action.newTab && (action.action !== "navigate" || action.pageId !== undefined))
@@ -572,9 +637,12 @@ export class BotBrowserService {
             throw new BotError("CONFLICT", "页面已关闭，请重新观察")
         }
         const run = async (name: string, args: Record<string, unknown>) => {
-          await this.input(entry, async () => {
+          const operation = async () => {
             results = await entry.automation.run(name, args, check)
-          })
+          }
+          await this.input(entry, () => name === "browser_evaluate"
+            ? this.evaluate(entry, operation)
+            : operation())
         }
         signal.throwIfAborted()
         if (entry.dialog && action.action !== "dialog" && action.action !== "close") {
@@ -604,7 +672,7 @@ export class BotBrowserService {
             dialogNotice =
               "The dialog was already closed by the browser or user. Its outcome is unknown; verify the page's current result before continuing. Do not repeat the preceding submission."
           }
-          await entry.pendingInput
+          await this.waitForInput(entry)
         } else if (action.action === "upload") {
           if (!this.workspace || !action.fileId || (!action.ref && !action.name))
             throw new BotError(

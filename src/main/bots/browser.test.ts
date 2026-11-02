@@ -16,6 +16,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { BotBrowserService } from "./browser"
+import { OwnedPageAutomation } from "../browser/automation/owned-page"
 import type { BotBrowserEngine, BotBrowserToolbarAction } from "./browser-engine"
 import { NativeSqliteAdapter } from "../db/native-sqlite-adapter"
 import { BotStore } from "./store"
@@ -142,6 +143,248 @@ afterEach(async () => {
 })
 
 describe("Bot browser ownership and control", () => {
+  it("bounds a stuck evaluate, closes only its page and allows a fresh page", async () => {
+    const a = JSON.parse(await service.act("a", { action: "observe" }, signal()))
+    const sameBot = JSON.parse(await service.act("a", { action: "navigate", newTab: true, url: "https://example.test/other" }, signal()))
+    const peer = JSON.parse(await service.act("b", { action: "observe" }, signal()))
+    const page = context.entries[0]
+    const entered = deferred()
+    const run = vi.spyOn(OwnedPageAutomation.prototype, "run").mockImplementationOnce(async () => {
+      entered.resolve()
+      await new Promise((_, reject) => page.once("close", () => reject(new Error("target closed"))))
+      return []
+    })
+    vi.useFakeTimers()
+    try {
+      const result = service.act("a", { action: "evaluate", pageId: a.pageId, function: "() => new Promise(() => {})" }, signal())
+        .catch((error: Error) => error.message)
+      await entered.promise
+      await vi.advanceTimersByTimeAsync(30_000)
+      expect(await result).toContain("已关闭该页面以终止脚本")
+      expect(page.closed).toBe(true)
+      expect(context.entries.slice(1).every((entry) => !entry.closed)).toBe(true)
+      expect(JSON.parse(await service.act("a", { action: "observe", pageId: sameBot.pageId }, signal())).pageId).toBe(sameBot.pageId)
+      await service.takeOver("b", peer.pageId)
+      await service.giveBack("b")
+      const fresh = JSON.parse(await service.act("a", { action: "navigate", newTab: true, url: "https://example.test/other" }, signal()))
+      expect(fresh.pageId).not.toBe(a.pageId)
+      expect(vi.getTimerCount()).toBe(0)
+    } finally { run.mockRestore(); vi.useRealTimers() }
+  })
+
+  it.each(["success", "failure", "cancel"] as const)("cleans the script deadline after %s", async (outcome) => {
+    const { pageId } = JSON.parse(await service.act("a", { action: "observe" }, signal()))
+    const page = context.entries[0], entered = deferred(), controller = new AbortController()
+    const run = vi.spyOn(OwnedPageAutomation.prototype, "run").mockImplementationOnce(async () => {
+      entered.resolve()
+      if (outcome === "cancel") await new Promise((_, reject) => page.once("close", () => reject(new Error("target closed"))))
+      if (outcome === "failure") throw new Error("script error")
+      return ["42"]
+    })
+    vi.useFakeTimers()
+    try {
+      const result = service.act("a", { action: "evaluate", pageId, function: "() => 42" }, controller.signal)
+        .then(() => "ok", (error: Error) => error.message)
+      await entered.promise
+      if (outcome === "cancel") controller.abort()
+      expect(await result).toBe(outcome === "success" ? "ok" : outcome === "failure" ? "script error" : "target closed")
+      await vi.advanceTimersByTimeAsync(60_000)
+      expect(page.closed).toBe(outcome === "cancel")
+      expect(vi.getTimerCount()).toBe(0)
+    } finally { run.mockRestore(); vi.useRealTimers() }
+  })
+
+  it("does not count native dialog waiting as script time, but bounds the resumed script", async () => {
+    const { pageId } = JSON.parse(await service.act("a", { action: "observe" }, signal()))
+    const page = context.entries[0]
+    const dialog = { type: () => "confirm", message: () => "Continue?", accept: vi.fn(async () => { page.emit("dialogclosed", dialog) }), dismiss: vi.fn(async () => {}) }
+    const run = vi.spyOn(OwnedPageAutomation.prototype, "run").mockImplementationOnce(async () => {
+      page.emit("dialog", dialog)
+      await new Promise((_, reject) => page.once("close", () => reject(new Error("target closed"))))
+      return []
+    })
+    vi.useFakeTimers()
+    try {
+      const result = JSON.parse(await service.act("a", { action: "evaluate", pageId, function: "async () => { confirm('Continue?'); await new Promise(() => {}) }" }, signal()))
+      expect(result.dialog.type).toBe("confirm")
+      await vi.advanceTimersByTimeAsync(120_000)
+      expect(page.closed).toBe(false)
+      expect(vi.getTimerCount()).toBe(0)
+      const resumed = service.act("a", { action: "dialog", pageId, accept: true }, signal()).catch((error: Error) => error.message)
+      await vi.advanceTimersByTimeAsync(30_000)
+      expect(await resumed).toContain("已关闭该页面以终止脚本")
+      expect(dialog.accept).toHaveBeenCalledOnce()
+    } finally { run.mockRestore(); vi.useRealTimers() }
+  })
+
+  it("resumes the deadline when the user handles a dialog directly in the native UI", async () => {
+    const { pageId } = JSON.parse(await service.act("a", { action: "observe" }, signal()))
+    const page = context.entries[0]
+    const dialog = { type: () => "confirm", message: () => "Continue?" }
+    const run = vi.spyOn(OwnedPageAutomation.prototype, "run").mockImplementationOnce(async () => {
+      page.emit("dialog", dialog)
+      await new Promise((_, reject) => page.once("close", () => reject(new Error("target closed"))))
+      return []
+    })
+    vi.useFakeTimers()
+    try {
+      await service.act("a", { action: "evaluate", pageId, function: "async () => { confirm('Continue?'); await new Promise(() => {}) }" }, signal())
+      await vi.advanceTimersByTimeAsync(120_000)
+      expect(page.closed).toBe(false)
+      // This is the same event emitted when Electron's native dialog is handled.
+      page.emit("dialogclosed", dialog)
+      await vi.advanceTimersByTimeAsync(30_000)
+      expect(page.closed).toBe(true)
+      expect(vi.getTimerCount()).toBe(0)
+      expect(page.listenerCount("dialogclosed")).toBe(1) // only ownership tracking remains
+    } finally { run.mockRestore(); vi.useRealTimers() }
+  })
+
+  it.each(["before takeover", "during takeover"] as const)(
+    "suspends the script deadline when a native dialog is handled %s and resumes after return",
+    async (when) => {
+      const { pageId } = JSON.parse(await service.act("a", { action: "observe" }, signal()))
+      const page = context.entries[0]
+      const dialog = { type: () => "confirm", message: () => "Continue?" }
+      const run = vi.spyOn(OwnedPageAutomation.prototype, "run").mockImplementationOnce(async () => {
+        page.emit("dialog", dialog)
+        await new Promise((_, reject) => page.once("close", () => reject(new Error("target closed"))))
+        return []
+      })
+      vi.useFakeTimers()
+      try {
+        await service.act("a", { action: "evaluate", pageId, function: "async () => { confirm('Continue?'); await new Promise(() => {}) }" }, signal())
+        if (when === "before takeover") page.emit("dialogclosed", dialog)
+        await service.takeOver("a", pageId)
+        if (when === "during takeover") page.emit("dialogclosed", dialog)
+        await vi.advanceTimersByTimeAsync(120_000)
+        expect(page.closed).toBe(false)
+        expect((await service.preview("a")).control).toBe("human")
+        await service.giveBack("a")
+        await vi.advanceTimersByTimeAsync(29_999)
+        expect(page.closed).toBe(false)
+        await vi.advanceTimersByTimeAsync(1)
+        expect(page.closed).toBe(true)
+        expect(vi.getTimerCount()).toBe(0)
+      } finally { run.mockRestore(); vi.useRealTimers() }
+    }
+  )
+
+  it("does not extend a running script deadline when another Bot returns control", async () => {
+    const a = JSON.parse(await service.act("a", { action: "observe" }, signal()))
+    const b = JSON.parse(await service.act("b", { action: "observe" }, signal()))
+    const page = context.entries[0], entered = deferred()
+    const run = vi.spyOn(OwnedPageAutomation.prototype, "run").mockImplementationOnce(async () => {
+      entered.resolve()
+      await new Promise((_, reject) => page.once("close", () => reject(new Error("target closed"))))
+      return []
+    })
+    vi.useFakeTimers()
+    try {
+      const pending = service.act("a", { action: "evaluate", pageId: a.pageId, function: "() => new Promise(() => {})" }, signal()).catch((error: Error) => error.message)
+      await entered.promise
+      await vi.advanceTimersByTimeAsync(20_000)
+      await service.takeOver("b", b.pageId)
+      await service.giveBack("b")
+      await vi.advanceTimersByTimeAsync(10_000)
+      expect(await pending).toContain("已关闭该页面")
+      expect(context.entries[1].closed).toBe(false)
+    } finally { run.mockRestore(); vi.useRealTimers() }
+  })
+
+  it("does not suspend a stuck script just because a takeover is waiting for its action lock", async () => {
+    const { pageId } = JSON.parse(await service.act("a", { action: "observe" }, signal()))
+    const page = context.entries[0], entered = deferred()
+    const run = vi.spyOn(OwnedPageAutomation.prototype, "run").mockImplementationOnce(async () => {
+      entered.resolve()
+      await new Promise((_, reject) => page.once("close", () => reject(new Error("target closed"))))
+      return []
+    })
+    vi.useFakeTimers()
+    try {
+      const pending = service.act("a", { action: "evaluate", pageId, function: "() => new Promise(() => {})" }, signal()).catch((error: Error) => error.message)
+      await entered.promise
+      const takeover = service.takeOver("a", pageId).then(() => "unexpected success", () => "closed target")
+      await vi.advanceTimersByTimeAsync(30_000)
+      expect(await pending).toContain("已关闭该页面")
+      expect(await takeover).toBe("closed target")
+      expect(page.closed).toBe(true)
+    } finally { run.mockRestore(); vi.useRealTimers() }
+  })
+
+  it("returns consecutive script dialogs without trapping the next dialog action behind the scope lock", async () => {
+    const { pageId } = JSON.parse(await service.act("a", { action: "observe" }, signal()))
+    const page = context.entries[0], finish = deferred()
+    const second = { type: () => "alert", message: () => "Second", accept: async () => { page.emit("dialogclosed", second); finish.resolve() } }
+    const first = { type: () => "confirm", message: () => "First", accept: async () => { page.emit("dialogclosed", first); page.emit("dialog", second) } }
+    const run = vi.spyOn(OwnedPageAutomation.prototype, "run").mockImplementationOnce(async () => {
+      page.emit("dialog", first)
+      await finish.promise
+      return ["done"]
+    })
+    try {
+      expect(JSON.parse(await service.act("a", { action: "evaluate", pageId, function: "() => { confirm('First'); alert('Second'); return 'done' }" }, signal())).dialog.message).toBe("First")
+      expect(JSON.parse(await service.act("a", { action: "dialog", pageId, accept: true }, signal())).dialog.message).toBe("Second")
+      expect(JSON.parse(await service.act("a", { action: "dialog", pageId, accept: true }, signal())).pageId).toBe(pageId)
+      expect(page.closed).toBe(false)
+    } finally { run.mockRestore() }
+  })
+
+  it("does not replay a queued input when the previous script opens another native dialog", async () => {
+    const { pageId } = JSON.parse(await service.act("a", { action: "observe" }, signal()))
+    const page = context.entries[0], finish = deferred()
+    const first = { type: () => "confirm", message: () => "First" }
+    const second = { type: () => "alert", message: () => "Second" }
+    const run = vi.spyOn(OwnedPageAutomation.prototype, "run").mockImplementationOnce(async () => {
+      page.emit("dialog", first)
+      await finish.promise
+      return []
+    })
+    try {
+      await service.act("a", { action: "evaluate", pageId, function: "async () => { confirm('First'); await someWork(); alert('Second') }" }, signal())
+      page.emit("dialogclosed", first)
+      const clicking = service.act("a", { action: "click", pageId, role: "button", name: "Submit" }, signal())
+      // Let the requested input reach the previous-operation wait.
+      for (let i = 0; i < 20; i++) await Promise.resolve()
+      page.emit("dialog", second)
+      expect(JSON.parse(await clicking).dialog.message).toBe("Second")
+      expect(page.click).not.toHaveBeenCalled()
+      page.emit("dialogclosed", second)
+      finish.resolve()
+    } finally { finish.resolve(); run.mockRestore() }
+  })
+
+  it("does not apply the script deadline to normal browser navigation", async () => {
+    const { pageId } = JSON.parse(await service.act("a", { action: "observe" }, signal()))
+    const page = context.entries[0], entered = deferred(), finish = deferred()
+    page.goto.mockImplementationOnce(async () => { entered.resolve(); await finish.promise })
+    vi.useFakeTimers()
+    try {
+      const result = service.act("a", { action: "navigate", pageId, url: "https://example.test" }, signal())
+      await entered.promise
+      await vi.advanceTimersByTimeAsync(60_000)
+      expect(page.closed).toBe(false)
+      finish.resolve()
+      expect(JSON.parse(await result).pageId).toBe(pageId)
+    } finally { vi.useRealTimers() }
+  })
+
+  it("does not clear existing input when fill omits text", async () => {
+    const { pageId } = JSON.parse(await service.act("a", { action: "observe" }, signal()))
+    await expect(
+      service.act("a", { action: "fill", pageId, role: "textbox", name: "Name" }, signal())
+    ).rejects.toThrow("fill 必须提供 text")
+    expect(context.entries[0].fill).not.toHaveBeenCalled()
+  })
+
+  it.each(["new text", ""])(
+    "preserves explicit fill text, including intentional clearing: %j",
+    async (text) => {
+      await service.act("a", { action: "fill", role: "textbox", name: "Name", text }, signal())
+      expect(context.entries[0].fill).toHaveBeenCalledExactlyOnceWith(text)
+    }
+  )
+
   it("lets a peer observe, take over and return while another Bot is navigating", async () => {
     const a = JSON.parse(await service.act("a", { action: "observe" }, signal()))
     const b = JSON.parse(await service.act("b", { action: "observe" }, signal()))

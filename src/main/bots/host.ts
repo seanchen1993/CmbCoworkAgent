@@ -1542,6 +1542,13 @@ export class LocalBotHost {
       this.wake()
     }
   }
+  stopGroup(groupId: string): void {
+    const group = this.getGroup(groupId)
+    // Include finished dispatchers that still own peer work. Stop the members in
+    // one synchronous Host call, before queued cancellation receipts can dispatch.
+    for (const botId of group.memberIds) this.stopConversation(botId, groupId)
+  }
+
   stopConversation(botId: string, groupId?: string, workId?: string): void {
     const revision = this.store.revision()
     if (groupId && workId) throw new BotError("INVALID_INPUT", "群与工作目标不能混用")

@@ -50,6 +50,7 @@ const fixture = vi.hoisted(() => ({
   setMessageReaction: vi.fn(),
   requestReceipts: vi.fn(),
   stopConversation: vi.fn(),
+  stopGroup: vi.fn(),
   markUnread: vi.fn(),
   markRead: vi.fn(),
   groupMessages: vi.fn(),
@@ -630,6 +631,15 @@ describe("Bot IPC boundaries", () => {
     expect(fixture.stopConversation).toHaveBeenCalledExactlyOnceWith("a", undefined, undefined)
     call("bots:stop-conversation", "local", "a", "g")
     expect(fixture.stopConversation).toHaveBeenLastCalledWith("a", "g", undefined)
+  })
+  it("validates whole-group stop at the local Host boundary", () => {
+    const call = register()
+    expect(() => call("bots:stop-group", "remote", "g")).toThrow()
+    expect(() => call("bots:stop-group", "local", "../g")).toThrow()
+    expect(() => call("bots:stop-group", "local", undefined)).toThrow()
+    expect(fixture.stopGroup).not.toHaveBeenCalled()
+    call("bots:stop-group", "local", "g")
+    expect(fixture.stopGroup).toHaveBeenCalledExactlyOnceWith("g")
   })
   it("validates bounded private receipt queries before accessing the Host", () => {
     const call = register()
