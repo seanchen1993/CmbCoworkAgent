@@ -6,6 +6,7 @@ import type { HarnessProjectMetadata } from "../../shared/harness-board-types"
 import type { PluginMetadata } from "../types"
 import { createProjectTemplate } from "../mods/devtools/project-template"
 import { derivationContentIdentity, snapshotDerivationSource } from "../plugins/derivation-source"
+import { canonicalTmpdir } from "../../../tests/support/canonical-temp-dir"
 
 const state = vi.hoisted(() => ({ root: "", plugins: [] as PluginMetadata[] }))
 vi.mock("../storage", () => ({
@@ -41,7 +42,7 @@ const template = createProjectTemplate({
 
 beforeEach(async () => {
   vi.resetModules()
-  state.root = await mkdtemp(join(tmpdir(), "harness-native-details-"))
+  state.root = await mkdtemp(join(canonicalTmpdir(), "harness-native-details-"))
   const pluginRoot = join(state.root, "plugin")
   for (const file of template.files) {
     await mkdir(dirname(join(pluginRoot, file.path)), { recursive: true })
