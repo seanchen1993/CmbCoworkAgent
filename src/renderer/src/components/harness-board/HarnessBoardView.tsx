@@ -38,6 +38,7 @@ import {
   CircleDot,
   CircleDashed,
   CircleHelp,
+  Clock,
   FileText,
   FolderOpen,
   GitBranch,
@@ -92,7 +93,7 @@ import { KnowledgeDialog } from "@/components/harness-board/KnowledgeDialog"
 import { ArtifactAccumulationButton } from "./ArtifactAccumulationButton"
 import { ManagedRunIcon } from "@/components/ui/managed-run-icon"
 import { ManagedRunHistory } from "@/components/harness-board/ManagedRunHistory"
-import { ManagedRunScheduleNotice } from "./ManagedRunScheduleNotice"
+import { ManagedRunScheduleBadge } from "./ManagedRunScheduleBadge"
 import { useManagedRunSchedule, useManagedRunScheduleIndex } from "@/lib/use-managed-run-schedule"
 import { ManagedRunStartDialog } from "./ManagedRunStartDialog"
 import { buildManagedRunSessionOptions } from "@/lib/managed-run-session-options"
@@ -4547,9 +4548,7 @@ function FeatureCard({
   const managedRunStatus =
     run.managedRunStatus === "running"
       ? { label: MANAGED_RUN_STATUS_LABELS.running, uiKind: "active" as const }
-      : scheduledAt
-        ? { label: "已预约托管运行", uiKind: "ok" as const }
-        : null
+      : null
 
   return (
     <button
@@ -4565,9 +4564,17 @@ function FeatureCard({
         <div className="flex shrink-0 flex-wrap items-center justify-end gap-1">
           {pendingDecision ? (
             <StatusPill status={{ label: "待人工确认", uiKind: "warning" }} />
-          ) : (
-            managedRunStatus && <StatusPill status={managedRunStatus} />
-          )}
+          ) : managedRunStatus ? (
+            <StatusPill status={managedRunStatus} />
+          ) : scheduledAt ? (
+            <span
+              className="inline-flex h-6 max-w-full shrink-0 items-center gap-1.5 rounded border border-status-nominal/50 bg-status-nominal/10 px-2 text-[11px] font-medium text-status-nominal"
+              title={`预约启动时间：${scheduledAt}`}
+            >
+              <Clock className="size-3.5 shrink-0" aria-hidden="true" />
+              <span className="truncate">已预约托管运行</span>
+            </span>
+          ) : null}
           <StatusPill status={run.overallStatus} />
         </div>
       </div>
@@ -7438,17 +7445,6 @@ function FeatureDetailPage({
         </div>
       </div>
 
-      {effectiveActiveDetailTab === "feature" && (
-        <ManagedRunScheduleNotice
-          key={`${detailKey}:${managedSchedule.schedule?.scheduleId ?? ""}`}
-          className={harnessSurfaceClassName}
-          schedule={managedSchedule.schedule}
-          error={managedSchedule.error}
-          onRetry={managedSchedule.reload}
-          disabled={projectDeleted}
-        />
-      )}
-
       {activeSessionThreadIdForView ? (
         <div className="flex min-h-0 flex-1 flex-col pt-3">
           <FeatureConversationPanel
@@ -7557,15 +7553,26 @@ function FeatureDetailPage({
                       {detail.run.title}
                     </h2>
                     <StatusPill status={featureOverallStatus} />
-                    {managedRunStatus && (
-                      <StatusPill
-                        status={managedRunStatus}
-                        onClick={
-                          managedRun?.status === "running" && managedRunSessionThreadId
-                            ? () => handleHookSessionSelect(managedRunSessionThreadId)
-                            : undefined
-                        }
+                    {managedSchedule.schedule || managedSchedule.error ? (
+                      <ManagedRunScheduleBadge
+                        key={`${detailKey}:${managedSchedule.schedule?.scheduleId ?? ""}`}
+                        schedule={managedSchedule.schedule}
+                        error={managedSchedule.error}
+                        onRetry={managedSchedule.reload}
+                        disabled={projectDeleted}
                       />
+                    ) : (
+                      !managedSchedule.loading &&
+                      managedRunStatus && (
+                        <StatusPill
+                          status={managedRunStatus}
+                          onClick={
+                            managedRun?.status === "running" && managedRunSessionThreadId
+                              ? () => handleHookSessionSelect(managedRunSessionThreadId)
+                              : undefined
+                          }
+                        />
+                      )
                     )}
                     {unbound && (
                       <span className="rounded-full border border-status-warning/30 bg-status-warning/10 px-2 py-0.5 text-[11px] text-status-warning">

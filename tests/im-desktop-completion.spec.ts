@@ -315,7 +315,12 @@ async function testADesktopResultFromAnotherThreadSaysSo(): Promise<void> {
     })
     const outbox = context.events.listOutbox()
     assert.equal(outbox.length, 1)
-    assert.equal(outbox[0].content, `【会话：桌面会话】（非当前绑定会话）\n\n桌面最终答复`)
+    assert(outbox[0].content.startsWith("【会话：桌面会话】（非当前绑定会话）"))
+    assert.match(outbox[0].content, /先单独发送：\/切换 @[23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{8}/u)
+    const code = outbox[0].content.match(/\/切换 @([23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{8})/u)![1]
+    assert.equal(context.events.sessionLinks.get(code)?.thread_id, "thread-1")
+    assert(outbox[0].content.includes("切换成功后再发送你的问题"))
+    assert(outbox[0].content.endsWith("桌面最终答复"))
   } finally {
     context.database.close()
   }
@@ -386,7 +391,9 @@ async function testASuspendedBindingStillGetsTheNotice(): Promise<void> {
     })
     const outbox = context.events.listOutbox()
     assert.equal(outbox.length, 1)
-    assert.equal(outbox[0].content, `【会话：桌面会话】（非当前绑定会话）\n\n桌面最终答复`)
+    assert(outbox[0].content.includes("（非当前绑定会话）"))
+    assert.match(outbox[0].content, /先单独发送：\/切换 @[23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{8}/u)
+    assert(outbox[0].content.endsWith("桌面最终答复"))
   } finally {
     context.database.close()
   }

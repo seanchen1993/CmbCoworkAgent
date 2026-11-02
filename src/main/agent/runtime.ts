@@ -1,4 +1,8 @@
 import { createStageUsageMiddleware } from "./trace/stage-usage-middleware"
+import {
+  createSubagentLifecycleMiddleware,
+  type SubagentLifecycleCallbacks
+} from "./subagent-lifecycle-middleware"
 import { randomUUID } from "crypto"
 import { TurnTraceRecorder } from "./trace/turn-trace-recorder"
 import { AsyncRWLock, AsyncSemaphore } from "./async-lock"
@@ -36,7 +40,12 @@ import {
 } from "../storage"
 import { getAvailableModelConfigOrDefault, getModelConfigByRef } from "../models/registry"
 import { samplingFields, topKModelKwargs } from "../models/sampling-params"
-import { createCmbSummarizationMiddleware } from "./context-summarization-middleware"
+import { getModelClientOptions } from "../models/connection"
+import type { ModelTransport } from "../../shared/model-catalog"
+import {
+  createCmbSummarizationMiddleware,
+  isGatewayContextOverflow
+} from "./context-summarization-middleware"
 import {
   createTurnCompletionGateMiddleware,
   type TurnCompletionRecoveryCallback
@@ -2108,6 +2117,7 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
     windowsShellKind = "unknown",
     toolConcurrencyQueueId = "default",
     toolHookMiddleware,
+    subagentLifecycleMiddleware,
     threadId,
     onTaskSubagentPromptsResolved,
     currentRunMessageQueueOwnerToken,
@@ -2928,6 +2938,9 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
       ...(threadId ? [createTaskMmdMiddleware({ threadId, scope: "main" })] : []),
       createSkillHookContextMiddleware(filesystemBackend),
       gradedToolConcurrencyMiddleware,
+      // Parent-only: observe rejected/recovered task results, and gate the next model
+      // after task results are checkpointed. Never share this queue with children.
+      ...(subagentLifecycleMiddleware ? [subagentLifecycleMiddleware] : []),
       ...(toolHookMiddleware ? [toolHookMiddleware] : []),
       toolErrorMiddleware,
       ...(mainSubagentsEnabled
@@ -3938,11 +3951,24 @@ function createRetryingFetch(
           `[Runtime] fetch headers in ${Date.now() - attemptStartedAt}ms: status=${res.status}, stream requested=${requestedStream}, content-type=${res.headers.get("content-type") ?? "unknown"}, request-id=${res.headers.get("x-request-id") ?? "unknown"}`
         )
 
-        // Success or non-retryable error — return as-is.
-        if (!isRetryableStatus(res.status)) {
+        // 580 also represents context overflow. Let summarization reduce the
+        // request before trying it again instead of repeating an oversized body.
+        let contextOverflow = false
+        if (res.status === 580) {
+          try {
+            contextOverflow = isGatewayContextOverflow({
+              status: res.status,
+              responseBody: await res.clone().text()
+            })
+          } catch {
+            // Unreadable error bodies retain the normal server-error policy.
+          }
+        }
+
+        // Success, non-retryable error, or overflow handled by summarization.
+        if (!isRetryableStatus(res.status) || contextOverflow) {
           await captureFetchError(res)
-          // If this is a successful retry (not the first attempt), notify the UI
-          // so the retry indicator can be cleared immediately.
+          // Clear any previous retry indicator when this retry loop ends.
           if (attempt > 1) hooks?.onRetrySuccess?.()
           return res
         }
@@ -4219,6 +4245,7 @@ export function getModelInstance(
     enableThinking?: boolean
     enableThinkingEffort?: boolean
     thinkingEffort?: "low" | "high" | "max"
+    transport?: ModelTransport
   },
   retryHooks?: ModelRetryHooks,
   maxRetryAttempts?: number,
@@ -4287,14 +4314,14 @@ export function getModelInstance(
             ...(enableThinking ? { thinking: { type: "enabled" } } : {})
           })
     },
-    configuration: {
-      baseURL: customConfig.baseUrl,
+    ...getModelClientOptions(customConfig, {
+      sessionId: captureThreadId,
       fetch: withModelResponseDiagnostics(
         modelFetch,
         { model: resolvedModel, purpose },
         (diagnostic) => console.log("[Runtime][ModelResponse]", JSON.stringify(diagnostic))
       )
-    }
+    })
   }
 
   let model: ChatOpenAI
@@ -4512,6 +4539,8 @@ export interface CreateAgentRuntimeOptions {
   onHookResult?: HookResultCallback
   /** Callback invoked when repeated tool failures should be shown to the user. */
   onFailureFuseNotice?: FailureFuseNoticeCallback
+  /** Shared with stream delivery; gates the parent graph after task completion. */
+  subagentLifecycle?: SubagentLifecycleCallbacks
   /** Foreground-only callback for the main agent's context compaction lifecycle. */
   onContextCompaction?: ContextCompactionLifecycleCallback
   /**
@@ -4756,7 +4785,8 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     customConfig,
     retryHooks,
     maxRetryAttempts,
-    "context-compaction"
+    "context-compaction",
+    threadId
   )
   const projectThreadDataDirectory = await getProjectThreadDataDirectory(workspacePath, threadId)
   const conversationHistoryPathPrefix = path.join(
@@ -6782,6 +6812,9 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
 
   const agent = createDeepAgent({
     middleware: traceContext?.harnessFeature ? [createStageUsageMiddleware(traceContext)] : [],
+    subagentLifecycleMiddleware: options.subagentLifecycle
+      ? createSubagentLifecycleMiddleware(options.subagentLifecycle)
+      : undefined,
     model,
     summarizationModel: contextCompactionModel,
     tools: mainTools,

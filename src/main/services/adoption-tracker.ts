@@ -161,11 +161,9 @@ const SHARD_SIZE_LIMIT_BYTES = 10 * 1024 * 1024 // 10 MB per shard
 const SHARD_MAX_AGE_MS = 30 * 60 * 1000 // rotate every 30 min
 const DISK_HARD_CAP_BYTES = 100 * 1024 * 1024 // 100 MB
 const MAX_LINES_FOR_MEASURE = 20000 // skip giant files (applied symmetrically at gen + measure)
-// One live entry per active TraceCollector. Multi-agent runs (coordinator
-// workers + workflow subagents) can keep dozens alive at once, and eviction is
-// insertion-ordered — the root thread goes first — so leave ample headroom.
-// Entries are ~KB-sized; 256 stays well under 1 MB.
-const MAX_CONTEXT_ENTRIES = 256 // bound in-memory context size
+// Only untraced metadata is evictable. Trace-owned attribution is execution
+// state and is released when its Trace finishes, even under cache pressure.
+const MAX_CONTEXT_ENTRIES = 256 // bound contexts without a live Trace owner
 const STAGED_BLOB_MAX_BYTES = 8 * 1024 * 1024 // cap git show output per staged file
 const LOCAL_SOURCE_TEXT_MAX_BYTES = 2 * 1024 * 1024 // per-gen local-only source payload cap
 const LOCAL_PENDING_SOURCE_MAX_BYTES = 50 * 1024 * 1024
@@ -436,8 +434,10 @@ let outboxLifecycleController = new AbortController()
 let commitJobDrainPromise: Promise<void> | null = null
 const inFlightCommitJobs = new Map<string, Promise<boolean>>()
 
-/** threadId → AdoptionContext. Evicted oldest-first at MAX_CONTEXT_ENTRIES. */
+/** Untraced metadata is a bounded cache; running Trace state must not be evicted. */
 const threadContexts = new Map<string, AdoptionContext>()
+/** Released by TraceCollector.finish(), guarded by traceId for continuations. */
+const traceOwnedContexts = new Map<string, AdoptionContext>()
 
 type GenIndexObservabilityColumns = Pick<
   GenIndexRow,
@@ -985,14 +985,24 @@ function buildPendingObservabilityEventProperties(
 
 export function setAdoptionContext(threadId: string, ctx: AdoptionContext): void {
   if (!threadId) return
+  // Skill inheritance is captured once at task startup. Evicting a live
+  // context silently loses that snapshot until the child reads its own Skill,
+  // giving otherwise identical Workflow children different attribution.
+  // Keep live execution state for its owner's lifetime, not a FIFO cache's.
+  // Merge so a later Skill update doesn't wipe the model or Trace linkage.
+  const merged = { ...getContext(threadId), ...ctx }
+  if (merged.traceId) {
+    traceOwnedContexts.set(threadId, merged)
+    threadContexts.delete(threadId)
+    return
+  }
+  traceOwnedContexts.delete(threadId)
   // Evict oldest if size cap would be exceeded (Map preserves insertion order).
   if (!threadContexts.has(threadId) && threadContexts.size >= MAX_CONTEXT_ENTRIES) {
     const oldest = threadContexts.keys().next().value
     if (oldest !== undefined) threadContexts.delete(oldest)
   }
-  // Merge so a later setUsedSkills call doesn't wipe modelId set earlier.
-  const prior = threadContexts.get(threadId)
-  threadContexts.set(threadId, { ...(prior ?? {}), ...ctx })
+  threadContexts.set(threadId, merged)
 }
 
 /** Apply a late asynchronous enrichment only while the originating trace still owns the thread. */
@@ -1001,19 +1011,20 @@ export function patchAdoptionContextForTrace(
   expectedTraceId: string,
   ctx: AdoptionContext
 ): boolean {
-  const prior = threadContexts.get(threadId)
-  if (!prior || prior.traceId !== expectedTraceId) return false
-  threadContexts.set(threadId, { ...prior, ...ctx })
+  const prior = getContext(threadId)
+  if (prior.traceId !== expectedTraceId) return false
+  setAdoptionContext(threadId, ctx)
   return true
 }
 
 export function clearAdoptionContext(threadId: string, expectedTraceId?: string): void {
-  if (expectedTraceId && threadContexts.get(threadId)?.traceId !== expectedTraceId) return
+  if (expectedTraceId && getContext(threadId).traceId !== expectedTraceId) return
   threadContexts.delete(threadId)
+  traceOwnedContexts.delete(threadId)
 }
 
 function getContext(threadId: string): AdoptionContext {
-  return threadContexts.get(threadId) ?? {}
+  return traceOwnedContexts.get(threadId) ?? threadContexts.get(threadId) ?? {}
 }
 
 function snapshotContext(threadId: string): AdoptionContext {
@@ -3650,4 +3661,5 @@ export function shutdownAdoptionTracker(): void {
     // ignore
   }
   threadContexts.clear()
+  traceOwnedContexts.clear()
 }

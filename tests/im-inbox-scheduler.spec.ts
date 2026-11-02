@@ -169,7 +169,7 @@ async function testScheduledInboxUsesLeaseAndStableProactiveOutbox(): Promise<vo
     assert.equal(executions, 1)
     assert.equal(gateway.replies.length, 1)
     assert.equal(gateway.replies[0].eventId, undefined)
-    assert.equal(gateway.replies[0].message.content, "【远程收件箱】\n\n记得喝水。")
+    assert.equal(gateway.replies[0].message.content, "【默认聊天】\n\n记得喝水。")
     assert.equal(context.eventStore.listOutbox("sent")[0].contentFormat, "markdown")
     assert.equal(context.eventStore.listOutbox("sent").length, 1)
     assert.equal(getLocalThreadRunLease(target.threadId), undefined)
@@ -224,7 +224,59 @@ async function testOwnerMismatchAndOfflineDeferWithoutExecution(): Promise<void>
   }
 }
 
+async function testReminderFinishingElsewhereExplainsHowToReturn(): Promise<void> {
+  const context = await createContext()
+  const gateway = new TestGateway()
+  const replyClient = new ImReplyClient(gateway, context.eventStore, () =>
+    Date.parse("2026-07-23T08:05:00.000Z")
+  )
+  try {
+    await executeImInboxScheduledTask(taskFixture(), new AbortController().signal, {
+      occurrence: "switched-reminder",
+      gateway,
+      conversationState: context.conversationState,
+      eventStore: context.eventStore,
+      capabilityGuard: context.capabilityGuard,
+      replyClient,
+      executeTurn: async () => {
+        await context.conversationState.registerTarget(
+          "conversation-1",
+          {
+            kind: "thread",
+            targetId: "other-target",
+            threadId: "other-thread",
+            grantId: "other-grant",
+            grantVersion: 1,
+            title: "项目会话",
+            workspacePath: "/workspace"
+          },
+          { activate: true }
+        )
+        return "记得喝水。"
+      }
+    })
+    const text = gateway.replies[0].message.content
+    assert(text.includes("【默认聊天】（非当前绑定会话）"), text)
+    assert.match(text, /先单独发送：\/切换 @[23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{8}/u)
+    const code = text.match(/\/切换 @([23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{8})/u)![1]
+    assert.equal(context.eventStore.sessionLinks.get(code)?.thread_id, target.threadId)
+    assert(text.includes("切换成功后再发送你的问题"), text)
+    assert(text.endsWith("记得喝水。"), text)
+    assert.equal(
+      context.conversationState.getActiveTarget("conversation-1")?.threadId,
+      "other-thread",
+      "a reminder never switches the user's target"
+    )
+  } finally {
+    context.database.close()
+  }
+}
+
 const tests: Array<[string, () => Promise<void>]> = [
+  [
+    "testReminderFinishingElsewhereExplainsHowToReturn",
+    testReminderFinishingElsewhereExplainsHowToReturn
+  ],
   [
     "testScheduledInboxUsesLeaseAndStableProactiveOutbox",
     testScheduledInboxUsesLeaseAndStableProactiveOutbox

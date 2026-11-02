@@ -6,9 +6,10 @@ import { imConversationStateStore, type ImConversationStateStore } from "./conve
 import { imEventStore, type ImEventRecord } from "./event-store"
 import { unavailableImGatewayClient, type ImGatewayClientPort } from "./gateway-client"
 import { createImInboxRemotePolicy, executePreparedRemoteStandardTurn } from "./remote-runner"
-import { imInboxReplyPrefix } from "./reply-context"
+import { buildImReplyContinuationHint, imInboxReplyPrefix } from "./reply-context"
 import { buildImProactiveReplies } from "./reply-segmentation"
 import { ImReplyClient } from "./reply-client"
+import { prepareImSessionLink } from "./session-link-store"
 
 export type ImInboxScheduledRunResult =
   | { status: "completed"; text: string; deliveryId: string }
@@ -189,12 +190,32 @@ export async function executeImInboxScheduledTask(
       signal,
       remotePolicy: { ...createImInboxRemotePolicy(), disableScheduler: true }
     })
+    let switched = false
+    try {
+      const bound = conversationState.getSelectedTarget(delivery.conversationKey)
+      switched = Boolean(bound && bound.snapshot.threadId !== delivery.inboxThreadId)
+    } catch (error) {
+      console.warn("[IM] Scheduled reminder could not read the bound target:", error)
+    }
+    const sessionCode = switched
+      ? prepareImSessionLink(eventStore.sessionLinks, {
+          principalId: delivery.principalId,
+          conversationKey: delivery.conversationKey,
+          threadId: delivery.inboxThreadId,
+          kind: "inbox",
+          label: "默认聊天",
+          deliveryId
+        })
+      : undefined
     await eventStore.enqueueProactiveReplies(
       buildImProactiveReplies({
         deliveryId,
         conversationKey: delivery.conversationKey,
         text,
-        prefix: imInboxReplyPrefix(),
+        prefix: imInboxReplyPrefix(
+          switched,
+          buildImReplyContinuationHint({ switched, kind: "inbox", sessionCode })
+        ),
         format: "markdown"
       })
     )

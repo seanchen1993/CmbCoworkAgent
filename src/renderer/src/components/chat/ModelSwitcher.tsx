@@ -252,7 +252,10 @@ function ModelSwitcherImpl({ threadId }: ModelSwitcherProps): React.JSX.Element 
                     if (model.available) handleModelSelect(model.id)
                   }}
                   disabled={!model.available}
-                  title={model.available ? undefined : "请先在模型配置中填写 API 密钥"}
+                  title={
+                    model.unavailableReason ??
+                    (model.available ? model.notice : "请先在模型配置中填写 API 密钥")
+                  }
                   className={cn(
                     "w-full flex items-center gap-1.5 px-2 py-1.5 rounded-sm text-xs transition-colors text-left font-mono disabled:cursor-not-allowed disabled:opacity-50",
                     currentModel === model.id
@@ -265,7 +268,11 @@ function ModelSwitcherImpl({ threadId }: ModelSwitcherProps): React.JSX.Element 
                   <CustomIcon className="size-3.5 shrink-0" />
                   <span className="flex-1 truncate">
                     {model.name}
-                    {!model.available ? "（未配置密钥）" : ""}
+                    {!model.available
+                      ? model.unavailableReason
+                        ? "（用户信息不完整）"
+                        : "（未配置密钥）"
+                      : ""}
                   </span>
                   <span className="shrink-0 rounded bg-muted px-1 py-0.5 text-[9px] text-muted-foreground">
                     {model.source === "builtin" ? "内置" : "自定义"}
@@ -275,6 +282,11 @@ function ModelSwitcherImpl({ threadId }: ModelSwitcherProps): React.JSX.Element 
                   )}
                 </button>
               ))}
+              {selectedModel?.notice && (
+                <p className="px-2 py-1.5 text-[11px] leading-5 text-muted-foreground">
+                  {selectedModel.notice}
+                </p>
+              )}
 
               <button
                 onClick={() => {

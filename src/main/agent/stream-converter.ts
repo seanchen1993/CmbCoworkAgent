@@ -264,8 +264,14 @@ function convertValuesMessages(
 
       const reasoning = role === "assistant" ? extractVisibleReasoning(kwargs) : ""
       return {
-        id: (kwargs.id as string) || `msg-${messageIndexOffset + index}`,
+        id:
+          typeof kwargs.id === "string" && kwargs.id.trim()
+            ? kwargs.id
+            : `msg-${messageIndexOffset + index}`,
         role,
+        ...getMessageProviderTupleFromMetadata(
+          kwargs.additional_kwargs as Record<string, unknown> | undefined
+        ),
         content: extractContent(kwargs.content ?? message.content),
         ...(reasoning ? { reasoning } : {}),
         tool_calls: kwargs.tool_calls as unknown[] | undefined,
@@ -273,11 +279,12 @@ function convertValuesMessages(
           ? { tool_call_id: kwargs.tool_call_id as string }
           : {}),
         ...(role === "tool" && kwargs.name ? { name: kwargs.name as string } : {}),
+        ...(role === "tool" && kwargs.status ? { status: kwargs.status } : {}),
+        ...(role === "tool" && isToolMessageError(kwargs) ? { is_error: true } : {}),
         internalNotification: isInternalNotificationMessage(message)
       }
     })
-    .filter((message) => !message.internalNotification)
-    .map(({ internalNotification: _internalNotification, ...message }) => message)
+    .flatMap(({ internalNotification, ...message }) => (internalNotification ? [] : [message]))
 }
 
 const SUBAGENT_NAME_MAP: Record<string, string> = {
@@ -364,6 +371,32 @@ export class StreamConverter {
     private readonly runScope: string = crypto.randomUUID(),
     private readonly valuesTurnUserMessageId?: string
   ) {}
+
+  /** Share the values conversion contract without replaying completed tool/subagent effects. */
+  resetStreamAttempt(data: Record<string, unknown>): Record<string, unknown> {
+    const discarded = new Set(
+      Array.isArray(data.discardedMessageIds)
+        ? data.discardedMessageIds.filter((id): id is string => typeof id === "string")
+        : []
+    )
+    for (const [key, callId] of this.toolCallChunkIndexToId) {
+      const messageId = key.slice(0, key.lastIndexOf(":"))
+      if (!discarded.has(messageId)) continue
+      this.toolCallChunkIndexToId.delete(key)
+      this.accumulatedToolCalls.delete(callId)
+    }
+    return {
+      ...data,
+      discardedMessageIds: [...discarded],
+      messages: convertValuesMessages(
+        Array.isArray(data.messages) ? (data.messages as SerializedMsg[]) : [],
+        0
+      ).map((message) => ({
+        ...message,
+        type: message.role === "assistant" ? "ai" : message.role === "user" ? "human" : message.role
+      }))
+    }
+  }
 
   /** Convert one raw LangGraph `[mode, data]` chunk into ≥0 standardised events. */
   processChunk(

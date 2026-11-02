@@ -53,6 +53,14 @@ export function hasPendingUserInputForThread(threadId: string): boolean {
   return pendingUserInputThreads.has(threadId)
 }
 
+/** Includes detached child runtimes, while keeping sibling thread IDs isolated. */
+export function hasPendingUserInputForRuntimeThread(threadId: string): boolean {
+  for (const pendingThreadId of pendingUserInputThreads.keys()) {
+    if (pendingThreadId === threadId || pendingThreadId.startsWith(`${threadId}__`)) return true
+  }
+  return false
+}
+
 export function getPendingUserInputForThread(threadId: string): UserInputRequest | null {
   const requestId = pendingUserInputThreads.get(threadId)
   if (!requestId) return null

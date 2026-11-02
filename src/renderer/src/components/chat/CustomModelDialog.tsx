@@ -12,6 +12,7 @@ import { Input } from "@/components/ui/input"
 import { ToggleThumb } from "@/components/ui/toggle-thumb"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { cn } from "@/lib/utils"
+import type { BuiltinModelLockedField } from "../../../../shared/model-catalog"
 import {
   calculateSummarizationKeepTokens,
   calculateSummarizationTriggerTokens,
@@ -30,7 +31,10 @@ type ThinkingEffort = "low" | "high" | "max"
 interface CustomConfig {
   id?: string
   source: "builtin" | "custom"
-  origin?: "remote" | "fallback"
+  origin?: "remote" | "fallback" | "local"
+  notice?: string
+  unavailableReason?: string
+  lockedFields?: BuiltinModelLockedField[]
   name: string
   baseUrl: string
   model: string
@@ -66,7 +70,10 @@ interface TokenLimits {
 interface CustomModelItem {
   id: string
   source: "builtin" | "custom"
-  origin?: "remote" | "fallback"
+  origin?: "remote" | "fallback" | "local"
+  notice?: string
+  unavailableReason?: string
+  lockedFields?: BuiltinModelLockedField[]
   name: string
   baseUrl: string
   model: string
@@ -177,6 +184,9 @@ function configFromItem(item: CustomModelItem, limits: TokenLimits): CustomConfi
     id: item.id,
     source: item.source,
     origin: item.origin,
+    notice: item.notice,
+    unavailableReason: item.unavailableReason,
+    lockedFields: item.lockedFields,
     name: item.name,
     baseUrl: item.baseUrl,
     model: item.model,
@@ -430,6 +440,7 @@ export function CustomModelDialog({
     !duplicateNameError
 
   const canTest =
+    !config.unavailableReason &&
     config.baseUrl.trim() &&
     config.model.trim() &&
     (hasExistingKey || config.apiKey.trim()) &&
@@ -673,7 +684,9 @@ export function CustomModelDialog({
           </DialogTitle>
           <DialogDescription>
             {config.source === "builtin"
-              ? "连接信息由系统管理；你可以调整上下文、采样、思考和路由参数。"
+              ? config.lockedFields?.includes("maxTokens")
+                ? "连接信息、模型模式和 128k 上下文窗口由系统管理。"
+                : "连接信息由系统管理；你可以调整上下文、采样、思考和路由参数。"
               : "配置兼容 OpenAI 接口格式的模型服务。"}
           </DialogDescription>
         </DialogHeader>
@@ -728,7 +741,11 @@ export function CustomModelDialog({
                           <span className="min-w-0 flex-1 truncate font-medium">{item.name}</span>
                           {item.source === "builtin" && (
                             <span className="shrink-0 rounded bg-muted px-1 py-0.5 text-[9px]">
-                              {item.origin === "remote" ? "后台" : "兜底"}
+                              {item.origin === "remote"
+                                ? "后台"
+                                : item.origin === "local"
+                                  ? "闲时"
+                                  : "兜底"}
                             </span>
                           )}
                         </div>
@@ -747,6 +764,14 @@ export function CustomModelDialog({
 
           <div className="min-h-0 flex flex-col">
             <div className="min-h-0 flex-1 space-y-3 overflow-y-auto overscroll-y-contain pr-1">
+              {config.notice && (
+                <p className="rounded-md border border-border bg-muted/40 px-3 py-2 text-xs leading-5 text-muted-foreground">
+                  {config.notice}
+                </p>
+              )}
+              {config.unavailableReason && (
+                <p className="text-xs text-destructive">{config.unavailableReason}</p>
+              )}
               <div className="space-y-1">
                 <label className="text-xs font-medium text-muted-foreground">显示名称</label>
                 <Input
@@ -832,6 +857,7 @@ export function CustomModelDialog({
                   className="h-8"
                   type="number"
                   value={config.maxTokensInput}
+                  disabled={config.lockedFields?.includes("maxTokens")}
                   onChange={(e) => {
                     setConfig((c) => ({
                       ...c,
