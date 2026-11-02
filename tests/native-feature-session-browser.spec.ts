@@ -130,7 +130,7 @@ async function main() {
             created_at:'2026-11-02T00:00:00Z',updated_at:'2026-11-02T00:00:00Z',status:'idle',title:'新讨论',metadata:structuredClone(metadata)}}},
           harnessBoard:{catalogPage:async()=>structuredClone(catalog),registry:async()=>[adapter],getProjectDetails:async()=>({container:structuredClone(projectDetail)}),getProjectDetail:async()=>structuredClone(projectDetail),
             getRunDetail:async()=>{calls.push(['read-run']);return structuredClone(detail)},listProjects:async()=>[project],
-            cancelCatalogRequests:nothing,cancelKnowledgePreviewRequests:nothing,cancelEnterpriseRequests:nothing,stopWatchRefs:nothing,onWatchRefsChanged:unsubscribe,onManagedRunChanged:unsubscribe,
+            cancelCatalogRequests:nothing,cancelKnowledgePreviewRequests:nothing,cancelEnterpriseRequests:nothing,stopWatchRefs:nothing,onWatchRefsChanged:unsubscribe,onManagedRunChanged:unsubscribe,onManagedRunScheduleChanged:unsubscribe,getManagedRunSchedule:async()=>null,getActiveManagedRunSchedules:async()=>[],
             getDeployUnitMappings:async()=>[],getLeanTokenConfig:async()=>({leanToken:''}),getManagedRunEvents:async()=>({events:[],hasMore:false}),getEnterpriseProjectDetails:async()=>({projects:[]}),getProjectReviews:async()=>({tokenConfigured:false,reviews:[]}),
             ensureFeatureThreadImGrant:async()=>({required:false,granted:false}),
             getDialogTips:async()=>null,getFeatureBinding:async()=>null,

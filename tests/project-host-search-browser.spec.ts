@@ -210,7 +210,7 @@ async function main() {
           catalogPage:async()=>structuredClone(emptyCatalog),registry:async()=>registryDelayed?
           new Promise(resolve=>pendingRegistry.push(resolve)):[structuredClone(hostAdapter)],
           getProjectDetails:async()=>({}),cancelCatalogRequests:nothing,cancelKnowledgePreviewRequests:nothing,
-          cancelEnterpriseRequests:nothing,stopWatchRefs:nothing,onWatchRefsChanged:unsubscribe,onManagedRunChanged:unsubscribe,
+          cancelEnterpriseRequests:nothing,stopWatchRefs:nothing,onWatchRefsChanged:unsubscribe,onManagedRunChanged:unsubscribe,onManagedRunScheduleChanged:unsubscribe,getManagedRunSchedule:async()=>null,getActiveManagedRunSchedules:async()=>[],
           getDeployUnitMappings:async()=>[],getLeanTokenConfig:async()=>({leanToken:''}),
           localProjects:{templates:async()=>{search.templates++;return templateDelay?
               new Promise(resolve=>pendingTemplates.push(resolve)):[structuredClone(template)]},

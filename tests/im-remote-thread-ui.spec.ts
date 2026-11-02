@@ -45,7 +45,7 @@ function testRemoteInboxIsReadOnlyAtRendererAndMainBoundary(): void {
   const chat = source("src/renderer/src/components/chat/ChatContainer.tsx")
   const agent = source("src/main/ipc/agent.ts")
   assert(chat.includes('remoteThreadInfo?.kind === "inbox"'))
-  assert(chat.includes("远程收件箱在桌面仅可查看"))
+  assert(chat.includes("招乎默认聊天在桌面仅可查看"))
   // Composer rendering and Agent entry behavior are covered by chat-composer-guard.test.ts
   // and biz-retry-input-guard.test.ts; no assertions on local variable spelling.
   assert(agent.includes("rejectDesktopRunForRemoteReadOnlyThread"))
@@ -87,7 +87,7 @@ function testRemoteThreadsHaveStableSourceAndModeLabels(): void {
   )
   const remoteAccessEligibility = source("src/renderer/src/lib/builtin-robot-remote-access.ts")
   const harnessBoard = source("src/renderer/src/components/harness-board/HarnessBoardView.tsx")
-  assert(chat.includes('remoteThreadInfo.kind === "inbox" ? "远程收件箱" : "远程会话"'))
+  assert(chat.includes('remoteThreadInfo.kind === "inbox" ? "招乎默认聊天" : "远程会话"'))
   assert(!chat.includes("远程 Feature"))
   assert(!chat.includes("桌面发出的本轮结果只保留在本机，不会自动发送到招乎"))
   assert(!chat.includes("compactConversationKey"))
@@ -100,15 +100,15 @@ function testRemoteThreadsHaveStableSourceAndModeLabels(): void {
   assert(chat.includes("aria-label={`关闭${remoteThreadTipLabel}提示`}"))
   assert(sidebar.includes("getRemoteThreadKind"))
   assert(sidebar.includes("remoteThreadHistorical"))
-  assert(sidebar.includes('"远程收件箱"'))
+  assert(sidebar.includes('"默认聊天"'))
   assert(sidebar.includes('"远程会话"'))
   assert(!sidebar.includes('"远程 Feature"'))
   assert(sidebar.includes('"远程历史"'))
-  assert(remoteDisplay.includes('REMOTE_INBOX_WORKSPACE_NAME = "远程收件箱"'))
+  assert(remoteDisplay.includes('REMOTE_INBOX_WORKSPACE_NAME = IM_DEFAULT_CHAT_TITLE'))
   assert(sidebar.includes("isManagedInbox"))
   assert(sidebar.includes("isManagedInbox ? REMOTE_INBOX_WORKSPACE_NAME"))
   assert(sidebar.includes("应用托管目录，路径已隐藏"))
-  assert(sidebar.includes("远程收件箱名称由应用管理"))
+  assert(sidebar.includes("招乎默认聊天名称由应用管理"))
   assert(workspacePicker.includes("concealWorkspacePath"))
   assert(workspacePicker.includes("应用托管目录，路径已隐藏"))
   assert(rightPanel.includes("concealWorkspacePath"))
@@ -117,7 +117,7 @@ function testRemoteThreadsHaveStableSourceAndModeLabels(): void {
   // No reply in Zhaohu names /帮助, so this line is how a reader learns the
   // robot takes commands — and which one fixes a card cut short.
   assert(robotPanel.includes("在招乎发送 /帮助 查看全部指令"))
-  assert(robotPanel.includes("发送 /文字模式 改用文字"))
+  assert(robotPanel.includes("发送 /文字模式 开 改用文字"))
   assert(robotPanel.includes('? "已登录"'))
   assert(robotPanel.includes(': "未登录"'))
   assert(!robotPanel.includes("企业账号"))
@@ -159,9 +159,9 @@ function testRemoteThreadsHaveStableSourceAndModeLabels(): void {
   assert(remoteAccessEligibility.includes('metadata.targetKind === "feature"'))
   assert(remoteAccessEligibility.includes('metadata.targetKind !== "inbox"'))
   assert(robotPanel.includes("isBuiltinRobotThreadRemoteAccessEligible"))
-  assert(robotPanel.includes("普通会话和 Project Mode 会话均支持"))
-  assert(robotPanel.includes("Feature 开关只控制能否从招乎"))
-  assert(robotPanel.includes("Feature 远程新建会话"))
+  assert(robotPanel.includes("普通会话、项目模式以及 Team / Workflow 均支持"))
+  assert(robotPanel.includes("特性开关允许从招乎在该特性下新建会话"))
+  assert(robotPanel.includes("特性下新建会话"))
   assert(robotPanel.includes("!remoteAccess?.principalAvailable"))
   const featureSetter = robotManager.slice(
     robotManager.indexOf("setFeatureRemoteAccess("),

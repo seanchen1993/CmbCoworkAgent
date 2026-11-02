@@ -5,82 +5,94 @@ const HANDLE_WIDTH = 6 // px
 
 interface ResizeHandleProps {
   onDrag: (totalDelta: number) => void
+  onDragStart?: () => void
   onDragEnd?: (totalDelta: number) => void
   onDragCancel?: () => void
 }
 
-export function ResizeHandle({ onDrag, onDragEnd, onDragCancel }: ResizeHandleProps) {
+export function ResizeHandle({ onDrag, onDragStart, onDragEnd, onDragCancel }: ResizeHandleProps) {
   const startXRef = useRef<number>(0)
-  const cleanupRef = useRef<(() => void) | null>(null)
-  useEffect(() => () => cleanupRef.current?.(), [])
+  const draggingRef = useRef(false)
+  const frameRef = useRef<number | null>(null)
+  const latestDeltaRef = useRef(0)
+  const onDragRef = useRef(onDrag)
+  const onDragStartRef = useRef(onDragStart)
+  const onDragEndRef = useRef(onDragEnd)
+  const onDragCancelRef = useRef(onDragCancel)
 
-  const handleMouseDown = useCallback(
-    (e: React.MouseEvent) => {
-      e.preventDefault()
-      cleanupRef.current?.()
-      startXRef.current = e.clientX
-      let frame: number | null = null
-      let latestDelta = 0
-      const previousCursor = document.body.style.cursor
-      const previousUserSelect = document.body.style.userSelect
+  useEffect(() => {
+    onDragRef.current = onDrag
+    onDragStartRef.current = onDragStart
+    onDragEndRef.current = onDragEnd
+    onDragCancelRef.current = onDragCancel
+  }, [onDrag, onDragEnd, onDragStart, onDragCancel])
 
-      const flushDrag = (): void => {
-        frame = null
-        onDrag(latestDelta)
+  const clearDragState = useCallback((notifyEnd = true) => {
+    const wasDragging = draggingRef.current
+    if (frameRef.current !== null) {
+      window.cancelAnimationFrame(frameRef.current)
+      frameRef.current = null
+      if (notifyEnd) onDragRef.current(latestDeltaRef.current)
+    }
+    draggingRef.current = false
+    document.body.style.cursor = ""
+    document.body.style.userSelect = ""
+    if (wasDragging) {
+      if (notifyEnd) onDragEndRef.current?.(latestDeltaRef.current)
+      else onDragCancelRef.current?.()
+    }
+  }, [])
+
+  useEffect(() => {
+    const handleWindowBlur = (): void => clearDragState()
+    window.addEventListener("blur", handleWindowBlur)
+    return () => {
+      window.removeEventListener("blur", handleWindowBlur)
+      clearDragState(false)
+    }
+  }, [clearDragState])
+
+  const handlePointerDown = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0) return
+    event.currentTarget.setPointerCapture(event.pointerId)
+    draggingRef.current = true
+    latestDeltaRef.current = 0
+    startXRef.current = event.clientX
+    onDragStartRef.current?.()
+    event.preventDefault()
+    document.body.style.cursor = "col-resize"
+    document.body.style.userSelect = "none"
+  }, [])
+
+  const handlePointerMove = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    if (!draggingRef.current) return
+    latestDeltaRef.current = event.clientX - startXRef.current
+    if (frameRef.current !== null) return
+    frameRef.current = window.requestAnimationFrame(() => {
+      frameRef.current = null
+      onDragRef.current(latestDeltaRef.current)
+    })
+  }, [])
+
+  const handlePointerEnd = useCallback(
+    (event: React.PointerEvent<HTMLDivElement>) => {
+      if (!draggingRef.current) return
+      if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+        event.currentTarget.releasePointerCapture(event.pointerId)
       }
-
-      const scheduleDrag = (delta: number): void => {
-        latestDelta = delta
-        if (frame === null) {
-          frame = window.requestAnimationFrame(flushDrag)
-        }
-      }
-
-      const handleMouseMove = (e: MouseEvent) => {
-        // Calculate total delta from drag start
-        const totalDelta = e.clientX - startXRef.current
-        scheduleDrag(totalDelta)
-      }
-
-      const cleanup = () => {
-        if (frame !== null) window.cancelAnimationFrame(frame)
-        frame = null
-        document.removeEventListener("mousemove", handleMouseMove)
-        document.removeEventListener("mouseup", handleMouseUp)
-        window.removeEventListener("blur", handleMouseUp)
-        document.body.style.cursor = previousCursor
-        document.body.style.userSelect = previousUserSelect
-        cleanupRef.current = null
-      }
-      const handleMouseUp = () => {
-        if (frame !== null) {
-          window.cancelAnimationFrame(frame)
-          frame = null
-          onDrag(latestDelta)
-        }
-        cleanup()
-        onDragEnd?.(latestDelta)
-      }
-
-      cleanupRef.current = () => {
-        cleanup()
-        onDragCancel?.()
-      }
-
-      document.addEventListener("mousemove", handleMouseMove)
-      document.addEventListener("mouseup", handleMouseUp)
-      window.addEventListener("blur", handleMouseUp)
-      document.body.style.cursor = "col-resize"
-      document.body.style.userSelect = "none"
+      clearDragState()
     },
-    [onDrag, onDragEnd, onDragCancel]
+    [clearDragState]
   )
 
   return (
     <div
       role="separator"
       aria-orientation="vertical"
-      onMouseDown={handleMouseDown}
+      onPointerDown={handlePointerDown}
+      onPointerMove={handlePointerMove}
+      onPointerUp={handlePointerEnd}
+      onPointerCancel={handlePointerEnd}
       className="group hover:bg-border/50 active:bg-primary/30 transition-colors cursor-col-resize flex items-center justify-center shrink-0 select-none"
       style={{ width: HANDLE_WIDTH }}
     >

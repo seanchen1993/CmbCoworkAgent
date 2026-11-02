@@ -67,6 +67,10 @@ import {
 } from "./mods-instructions-loaded"
 import { applyClassicToolOutput } from "../hooks/tool-output"
 import { createStageUsageMiddleware } from "./trace/stage-usage-middleware"
+import {
+  createSubagentLifecycleMiddleware,
+  type SubagentLifecycleCallbacks
+} from "./subagent-lifecycle-middleware"
 import { TurnTraceRecorder } from "./trace/turn-trace-recorder"
 import { foregroundToolPolicy } from "./foreground-tool-policy"
 import { createTaskModelOutcomeMiddleware, withTaskModelOutcome } from "./task-model-outcome"
@@ -152,6 +156,9 @@ import {
   type CmbContextController
 } from "./context-summarization-middleware"
 import { hasSameCompactionEvidence } from "./context-compaction-hooks"
+import { getModelClientOptions } from "../models/connection"
+import type { ModelTransport } from "../../shared/model-catalog"
+import { isGatewayContextOverflow } from "./context-summarization-middleware"
 import {
   createTurnCompletionGateMiddleware,
   type TurnCompletionRecoveryCallback
@@ -427,6 +434,7 @@ import {
   getActionStationarityHaltError
 } from "./action-stationarity"
 import { createLspTool } from "./tools/lsp-tool"
+import { createInAppBrowserTools } from "./tools/in-app-browser-tools"
 import { detectJavaProject } from "../lsp"
 import {
   buildAgentsPromptLoadStatusItems,
@@ -2486,6 +2494,7 @@ function assembleDeepAgent(
     toolHookMiddleware,
     modToolBatch,
     modInstructions,
+    subagentLifecycleMiddleware,
     threadId,
     onTaskSubagentPromptsResolved,
     currentRunMessageQueueOwnerToken,
@@ -3640,6 +3649,9 @@ function assembleDeepAgent(
         createTaskMmdMiddleware({ threadId, scope: "main" }), "cmb:task-state")] : []),
       namedSource(createSkillHookContextMiddleware(filesystemBackend), "cmb:skill-hook-context"),
       gradedToolConcurrencyMiddleware,
+      // Parent-only: observe rejected/recovered task results, and gate the next model
+      // after task results are checkpointed. Never share this queue with children.
+      ...(subagentLifecycleMiddleware ? [subagentLifecycleMiddleware] : []),
       ...(toolHookMiddleware ? [toolHookMiddleware] : []),
       toolErrorMiddleware,
       ...(mainSubagentsEnabled
@@ -4789,11 +4801,24 @@ function createRetryingFetch(
           `[Runtime] fetch headers in ${Date.now() - attemptStartedAt}ms: status=${res.status}, stream requested=${requestedStream}, content-type=${res.headers.get("content-type") ?? "unknown"}, request-id=${res.headers.get("x-request-id") ?? "unknown"}`
         )
 
-        // Success or non-retryable error — return as-is.
-        if (!isRetryableStatus(res.status)) {
+        // 580 also represents context overflow. Let summarization reduce the
+        // request before trying it again instead of repeating an oversized body.
+        let contextOverflow = false
+        if (res.status === 580) {
+          try {
+            contextOverflow = isGatewayContextOverflow({
+              status: res.status,
+              responseBody: await res.clone().text()
+            })
+          } catch {
+            // Unreadable error bodies retain the normal server-error policy.
+          }
+        }
+
+        // Success, non-retryable error, or overflow handled by summarization.
+        if (!isRetryableStatus(res.status) || contextOverflow) {
           await captureFetchError(res)
-          // If this is a successful retry (not the first attempt), notify the UI
-          // so the retry indicator can be cleared immediately.
+          // Clear any previous retry indicator when this retry loop ends.
           if (attempt > 1) hooks?.onRetrySuccess?.()
           return res
         }
@@ -5082,6 +5107,7 @@ export function getModelInstance(
     enableThinking?: boolean
     enableThinkingEffort?: boolean
     thinkingEffort?: "low" | "high" | "max"
+    transport?: ModelTransport
   },
   retryHooks?: ModelRetryHooks,
   maxRetryAttempts?: number,
@@ -5155,14 +5181,14 @@ export function getModelInstance(
             ...(enableThinking ? { thinking: { type: "enabled" } } : {})
           })
     },
-    configuration: {
-      baseURL: customConfig.baseUrl,
+    ...getModelClientOptions(customConfig, {
+      sessionId: captureThreadId,
       fetch: withModelResponseDiagnostics(
         withModelStreamCancellation(modelFetch),
         { model: resolvedModel, purpose },
         (diagnostic) => console.log("[Runtime][ModelResponse]", JSON.stringify(diagnostic))
       )
-    }
+    })
   }
 
   let model: ChatOpenAI
@@ -5480,6 +5506,8 @@ export interface CreateAgentRuntimeOptions {
   onHookResult?: HookResultCallback
   /** Callback invoked when repeated tool failures should be shown to the user. */
   onFailureFuseNotice?: FailureFuseNoticeCallback
+  /** Shared with stream delivery; gates the parent graph after task completion. */
+  subagentLifecycle?: SubagentLifecycleCallbacks
   /** Foreground-only callback for the main agent's context compaction lifecycle. */
   onContextCompaction?: ContextCompactionLifecycleCallback
   /**
@@ -6915,6 +6943,16 @@ The workspace root is: ${fileRoot}`
   const nativeCreatorTools = new Set(extraTools.filter(tool =>
     tool.name === "mod_authoring" || tool.name === "mod_composition" ||
     tool.name === "mod_configuration" || tool.name === "mod_business"))
+
+  if (!disableMcpTools && !isConstrainedCoordinatorWorker) {
+    extraTools.push(
+      ...(await createInAppBrowserTools(allMcpTools, {
+        workspacePath,
+        threadId: options.threadId,
+        abortSignal: options.abortSignal
+      }))
+    )
+  }
 
   // Wrap extra tools so that errors are returned as strings instead of throwing
   function wrapToolErrors(tools: RuntimeTool[]): void {
@@ -8603,6 +8641,9 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
       ...(traceContext?.harnessFeature ? [createStageUsageMiddleware(traceContext)] : [])
     ],
     completionCancellation,
+    subagentLifecycleMiddleware: options.subagentLifecycle
+      ? createSubagentLifecycleMiddleware(options.subagentLifecycle)
+      : undefined,
     model,
     summarizationModel: contextCompactionModel,
     tools: mainTools,

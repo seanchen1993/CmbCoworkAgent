@@ -79,7 +79,7 @@ async function main() {
           localProjects:{get:async id=>{calls.push(['get',id]);return structuredClone(views[id])},mods:{read:async id=>({projectId:id,projectVersion:1,packageDigest:'a'.repeat(64),workspace:'C:/fixture/project'}),approve:async()=>{throw Error('NO_AUTO_APPROVAL')}},
             create:async input=>{calls.push(['host-create',input]);if(JSON.stringify(input.expectedPlugin??input.expectedTemplate)!==JSON.stringify(installedIdentity))throw Error('PROJECT_HOST_PACKAGE_IDENTITY_MISMATCH');const result=make(input);views[result.project.projectId]=result;if(holdCreate)await new Promise(resolve=>finishCreate=resolve);return structuredClone(result)},
             command:async()=>{throw Error('NO_AUTO_START')}}}};
-      const blank=()=>({name:'既有项目',description:'独立目标',projectCode:'P001',systemId:'S1',systemName:'系统',projectDir:'legacy',workspacePath:'C:/fixture',adapterType:'plugin',adapterId:'',projectFromLean:false});
+      const blank=()=>({name:'既有项目',description:'独立目标',projectCode:'P001',systemId:'S1',systemName:'系统',projectDir:'legacy',workspacePath:'C:/fixture',adapterType:'plugin',adapterId:'',projectFromLean:false,isTestProject:true});
       function Fixture(){const[open,setOpen]=useState(false),[editing,setEditing]=useState(false),[form,setForm]=useState(blank),[selected,setSelected]=useState(),[items,setItems]=useState([]),[startUse,setStartUse]=useState();
         window.startSaved=()=>{setStartUse({id:'saved-intent',accountRevision:0,input:{threadId:'creator',expectedWorkspace:'C:/author',pluginId:'host',expected:installedIdentity},report:{kind:'host-project',canOpen:true,identity:installedIdentity,issues:[]}});setForm({...blank(),adapterId:'host'});setOpen(true)};
         window.editSaved=()=>{setForm({...blank(),adapterId:'host'});setEditing(true)};
@@ -87,7 +87,7 @@ async function main() {
         if(selected)return <><button onClick={()=>setSelected(undefined)}>项目列表</button><LocalProjectRun key={selected} projectId={selected} onChanged={()=>{}}/></>;
         return <><button onClick={()=>{setStartUse(undefined);setForm(blank());setOpen(true)}}>新建项目</button><HostProjectListItems projects={items} onSelect={setSelected}/>
           <ProjectFormDialog open={open} creating={false} form={form} registry={registry} hostTemplates={templates} hostStartUse={startUse}
-            installingPluginNames={new Set()} error={null} verification={{pending:false,error:null}} onOpenChange={setOpen} onChange={setForm}
+            workspaceError={null} workspaceValidating={false} installingPluginNames={new Set()} error={null} verification={{pending:false,error:null}} onOpenChange={setOpen} onChange={setForm}
             onInstallPlugin={()=>{throw Error('NO_AUTO_INSTALL')}} onPickWorkspace={()=>{}} onSubmit={async approval=>{await window.api.harnessBoard.createProject({...form,...(approval?{projectUseApproval:approval}:{})});setOpen(false)}}
             onHostCreated={view=>{setItems(Object.values(views).map(v=>v.project));setOpen(false);setSelected(view.project.projectId)}}/>
           <ProjectEditDialog projectId="existing-owner" open={editing} saving={false} form={form} registry={registry}

@@ -188,6 +188,9 @@ describe("IM stores on the native sqlite adapter", () => {
 
     const queued = await eventStore.queueEvent(event.eventId)
     expect(queued.state).toBe("queued")
+    expect(eventStore.countQueuedConversationEvents("conv-1")).toBe(1)
+    expect(eventStore.countQueuedConversationEvents("conv-other")).toBe(0)
+    expect(eventStore.hasReplyDelivery(`delivery-${event.eventId}`)).toBe(false)
 
     const permit = await eventStore.recordExecutionPermit({
       eventId: event.eventId,
@@ -208,6 +211,20 @@ describe("IM stores on the native sqlite adapter", () => {
     expect(completed.permitState).toBe("revoked")
     expect(eventStore.getStatusSummary().eventCounts).toEqual({ completed: 1 })
     expect(eventStore.listOutbox("pending")).toHaveLength(1)
+    expect(eventStore.countQueuedConversationEvents("conv-1")).toBe(0)
+    expect(eventStore.hasReplyDelivery(`delivery-${event.eventId}`)).toBe(true)
+    const code = eventStore.sessionLinks.prepare({
+      principalId: "principal-1",
+      conversationKey: "conv-1",
+      threadId: "thread-1",
+      kind: "thread",
+      label: "原生数据库会话",
+      deliveryId: `delivery-${event.eventId}`
+    })
+    expect(eventStore.sessionLinks.get(code)?.thread_id).toBe("thread-1")
+    const card = eventStore.sessionLinks.getCard(`delivery-${event.eventId}`)!
+    expect(await eventStore.sessionLinks.claimCard(card, "native-click")).toBe(true)
+    expect(eventStore.sessionLinks.getCard(card.delivery_id)?.state).toBe("handling")
   })
 
   it("writes remote grants and approval audits on the native adapter", async () => {

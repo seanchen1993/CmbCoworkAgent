@@ -1,3 +1,7 @@
+import {
+  resolveManagedRunModelSelection,
+  type ManagedRunModelSelection
+} from "../../shared/managed-run-model"
 import { formatGmt8Timestamp } from "../../shared/gmt8-time"
 import { randomUUID } from "crypto"
 import {
@@ -398,7 +402,12 @@ function isManagedRunPolicyResult(value: unknown): value is ManagedRunPolicyResu
   ) {
     return false
   }
-  if (value.type === "biz_progress") return value.proposedAction === "start_new_thread"
+  if (value.type === "biz_progress") {
+    return (
+      value.proposedAction === "start_new_thread" ||
+      value.proposedAction === "continue_current_thread"
+    )
+  }
   if (value.type === "biz_retry") {
     return ["continue_current_thread", "start_new_thread", "fail_managed_run"].includes(
       value.proposedAction as string
@@ -435,6 +444,9 @@ function normalizeSnapshot(value: unknown): ManagedRunSnapshot {
     !snapshot.featureId.trim() ||
     !MANAGED_RUN_STATUSES.has(snapshot.status as string) ||
     !isOptionalText(snapshot.workspacePath, 4096) ||
+    (snapshot.modelSelection !== undefined &&
+      snapshot.modelSelection !== "default" &&
+      snapshot.modelSelection !== "ultra") ||
     !isManagedRunCurrentSession(snapshot.currentSession) ||
     !isManagedRunDecisionBaseline(snapshot.decisionBaseline) ||
     (snapshot.currentSession === undefined) !== (snapshot.decisionBaseline === undefined) ||
@@ -744,7 +756,12 @@ export class ManagedRunStore {
     return validated
   }
 
-  createRun(projectId: string, featureId: string, workspacePath?: string): ManagedRunSnapshot {
+  createRun(
+    projectId: string,
+    featureId: string,
+    workspacePath?: string,
+    modelSelection?: ManagedRunModelSelection
+  ): ManagedRunSnapshot {
     const runId = `mr_${randomUUID().replace(/-/gu, "")}`
     const now = formatGmt8Timestamp()
     const snapshot: ManagedRunSnapshot = {
@@ -753,6 +770,7 @@ export class ManagedRunStore {
       projectId,
       featureId,
       status: "running",
+      modelSelection: resolveManagedRunModelSelection(modelSelection),
       ...(workspacePath?.trim() ? { workspacePath: workspacePath.trim() } : {}),
       providerRetryCount: 0,
       startedAt: now,
@@ -926,6 +944,25 @@ export class ManagedRunStore {
     } catch {
       return { ...record.snapshot, status: "corrupt", corrupt: true }
     }
+  }
+
+  listFeatureRunSummaries(projectId: string, featureId: string): ManagedRunSummary[] {
+    return this.listFeatureRuns(projectId, featureId)
+      .map((record): ManagedRunSummary => {
+        if (record.snapshot && !record.corrupt) return record.snapshot
+        return {
+          version: 2.5,
+          runId: record.runId,
+          projectId: record.projectId,
+          featureId: record.featureId,
+          status: "corrupt",
+          corrupt: true,
+          providerRetryCount: 0,
+          startedAt: "",
+          updatedAt: ""
+        }
+      })
+      .sort((left, right) => right.startedAt.localeCompare(left.startedAt))
   }
 
   validateRunEvents(identity: ManagedRunIdentity): { repaired: boolean } {

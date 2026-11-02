@@ -1,3 +1,5 @@
+import { isModelAvailable } from "../../shared/model-catalog"
+import { getModelClientOptions } from "../models/connection"
 import { prepareMarketCommand, resolveMarketRuntimePath } from "../services/market-content"
 import { markRunCancellationEffectDispatched } from "../agent/run-cancellation-settlement"
 import { prepareStageCheckReceipts } from "./stage-check-receipts"
@@ -964,7 +966,7 @@ function getPromptHookModel(
     ? (getModelConfigByRef(modelId) ?? getAvailableModelConfigOrDefault())
     : getAvailableModelConfigOrDefault()
 
-  if (!config?.apiKey) return null
+  if (!isModelAvailable(config)) return null
 
   return new ChatOpenAI({
     model: config.model,
@@ -976,13 +978,10 @@ function getPromptHookModel(
     modelKwargs: {
       ...topKModelKwargs(config.model, config.topK)
     },
-    configuration: {
-      baseURL: config.baseUrl,
-      ...(accounting ? { fetch: async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
-        accounting.assertCurrent()
-        return withCompletionModelBudget(fetch, accounting.receipt, false)(input, init)
-      } } : {})
-    }
+    ...getModelClientOptions(config, accounting ? { fetch: async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+      accounting.assertCurrent()
+      return withCompletionModelBudget(fetch, accounting.receipt, false)(input, init)
+    } } : {})
   })
 }
 

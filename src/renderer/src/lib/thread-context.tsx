@@ -1569,6 +1569,8 @@ interface CustomEventData {
   parentThreadId?: string
   messages?: LiveStreamMessage[]
   discardedMessageIds?: string[]
+  discardedPersistedMessageIds?: string[]
+  restoredMessages?: Message[]
   assistantMessage?: LiveStreamMessage
   fromId?: string
   toId?: string
@@ -4304,6 +4306,37 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             getLiveStreamTranscriptIndex(threadStatesRef.current[threadId]?.messages ?? [])
               .messageIdentities
           )
+          // These are exact durable row ids from the native rollback, not raw
+          // provider ids. They can already be in the visible/history page.
+          const persistedDiscards = new Set(data.discardedPersistedMessageIds ?? [])
+          for (const id of persistedDiscards) discardedMessageIds.add(id)
+          const pendingCommits = pendingVisibleMessageCommitsRef.current[threadId]
+          if (pendingCommits) {
+            pendingVisibleMessageCommitsRef.current[threadId] = pendingCommits.filter(
+              ({ message }) => !discardedMessageIds.has(message.id)
+            )
+          }
+          const transitional = transitionalLiveMessagesRef.current[threadId]
+          if (transitional) {
+            transitionalLiveMessagesRef.current[threadId] = transitional.filter(
+              (message) => !message.id || !discardedMessageIds.has(message.id)
+            )
+          }
+          if (persistedDiscards.size > 0 || data.restoredMessages?.length) {
+            updateThreadState(threadId, (state) => {
+              const restored = new Map(
+                (data.restoredMessages ?? []).map((message) => [message.id, message])
+              )
+              const messages = state.messages
+                .filter((message) => !persistedDiscards.has(message.id))
+                .map((message) =>
+                  restored.has(message.id)
+                    ? { ...restored.get(message.id)!, created_at: message.created_at }
+                    : message
+                )
+              return { messages }
+            })
+          }
           accumulator.messages = []
           accumulator.normalizeMessageIds = createLiveStreamMessageIdNormalizer()
           accumulator.mergeMessages = createLiveStreamMessageMerger()
@@ -6900,6 +6933,41 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         // Reuse handleCustomEvent for workspace / subagents / token_usage / interrupt
         case "custom": {
           const data = event.data as CustomEventData
+          if (data?.type === "stream_retry_reset") {
+            // Scheduler messages live in thread state, rather than the foreground
+            // live accumulator. Drop its pending tail and trusted locations too.
+            const tracker = schedulerStreamingRef.current[threadId]
+            const failedTail = tracker?.assistantLocation?.tail
+            clearSchedulerMainStreamingForThread(threadId)
+            updateThreadState(threadId, (state) => {
+              const stable = (data.messages ?? []).map((message) => ({
+                ...message,
+                id: message.id!,
+                role: liveStreamMessageRole(message.type)
+              })) as Parameters<typeof mergeSchedulerTurnMessageSnapshot>[1]
+              const exactDiscards = new Set(data.discardedPersistedMessageIds ?? [])
+              // A sub-250ms attempt may never have had a durable row. Resolve
+              // only its owned live tail against the retained checkpoint/history.
+              if (failedTail) {
+                const tail = { ...failedTail, type: "ai" as const }
+                const retained = state.messages.filter((message) => message !== failedTail)
+                const liveDiscards = resolveDiscardedLiveMessageIds(
+                  new Set(data.discardedMessageIds ?? []),
+                  [tail],
+                  data.messages ?? [],
+                  getLiveStreamTranscriptIndex(retained).messageIdentities
+                )
+                for (const id of liveDiscards) exactDiscards.add(id)
+              }
+              const snapshot = mergeSchedulerTurnMessageSnapshot(
+                state.messages.filter((message) => !exactDiscards.has(message.id)),
+                stable
+              )
+              return { messages: snapshot.messages }
+            })
+            handleCustomEvent(threadId, data)
+            break
+          }
           if (data?.type === "coordinator_ai_snapshot_message") {
             const tracker = (schedulerStreamingRef.current[threadId] ||= {
               currentMsgId: null,

@@ -67,7 +67,8 @@ import {
   waitForHarnessInvocation
 } from "./invocation-lifecycle"
 import { createHash } from "crypto"
-import { access, mkdir, stat } from "node:fs/promises"
+import { access, stat } from "node:fs/promises"
+import { assertEmptyProjectDirectory } from "./project-workspace"
 import { basename, isAbsolute, join, relative, resolve } from "path"
 import { serialize } from "node:v8"
 import * as chardet from "jschardet"
@@ -165,7 +166,6 @@ import type {
   HarnessSkipNodeResult,
   HarnessFeatureSummary,
   ManagedFeatureStatusSnapshot,
-  ManagedRunViewStatus,
   HarnessStatus,
   HarnessWatchRef,
   HarnessWorkflow,
@@ -1843,6 +1843,7 @@ function normalizeProject(value: unknown): HarnessProjectMetadata | null {
     description: normalizeText(value.description).slice(0, HARNESS_PROJECT_DESCRIPTION_MAX_CHARS),
     projectCode,
     projectFromLean: value.projectFromLean === true,
+    ...(typeof value.isTestProject === "boolean" ? { isTestProject: value.isTestProject } : {}),
     projectDir,
     systemId: normalizeText(value.systemId).slice(0, HARNESS_PROJECT_TEXT_MAX_CHARS),
     systemName: normalizeText(value.systemName).slice(0, HARNESS_PROJECT_TEXT_MAX_CHARS),
@@ -2425,6 +2426,9 @@ function validateCreateInput(input: HarnessProjectCreateInput): void {
   if (required.some((value) => typeof value !== "string" || value.trim().length === 0)) {
     throw new Error("Project name, code, system and workspace are required")
   }
+  if (typeof input.isTestProject !== "boolean") {
+    throw new Error("请选择是否作为测试项目")
+  }
   if (typeof input.description !== "string") {
     throw new Error("Project description must be a string")
   }
@@ -2445,6 +2449,9 @@ function validateProjectMetadataInput(input: HarnessProjectMetadataUpdateInput):
   ]
   if (required.some((value) => typeof value !== "string" || value.trim().length === 0)) {
     throw new Error("Project name, code, system and workspace are required")
+  }
+  if (typeof input.isTestProject !== "boolean") {
+    throw new Error("请选择是否作为测试项目")
   }
   if (typeof input.description !== "string") {
     throw new Error("Project description must be a string")
@@ -2844,11 +2851,15 @@ function makeProjectDetailViewModel(
 ): HarnessProjectDetailViewModel {
   const systemConstraintUpdate = resolveSystemConstraintUpdateConfig(project, context)
   const runs = data.runs.map((run) => {
-    const managedRunStatus: ManagedRunViewStatus | undefined = managedRunStore.getLatestRun(
-      project.projectId,
-      run.slug
-    )?.status
-    return managedRunStatus ? { ...run, managedRunStatus } : run
+    const managedRun = managedRunStore.getLatestRun(project.projectId, run.slug)
+    return managedRun
+      ? {
+          ...run,
+          managedRunStatus: managedRun.status,
+          managedRunThreadId:
+            managedRun.status === "running" ? managedRun.currentSession?.threadId : undefined
+        }
+      : run
   })
   return {
     project: {
@@ -2879,16 +2890,8 @@ async function initializeHarnessProject(project: HarnessProjectMetadata, interna
   guard?: () => void, signal?: AbortSignal): Promise<void> {
   try {
     const projectPath = projectDirectoryPath(project)
-    try {
-      await access(projectPath)
-      if (!internalOwned) throw new Error(`项目目录已存在：${projectPath}`)
-    } catch (error) {
-      if (error instanceof Error && error.message.startsWith("项目目录已存在")) throw error
-    }
-
     const configured = await buildConfiguredHarnessInvocation(project, "createProject")
-
-    await mkdir(projectPath, { recursive: true })
+    if (!internalOwned) await assertEmptyProjectDirectory(projectPath)
     await runHarnessInvocationAsync(
       configured,
       harnessCommandLogOptions("createProject"),
@@ -2898,9 +2901,6 @@ async function initializeHarnessProject(project: HarnessProjectMetadata, interna
     )
   } catch (error) {
     const raw = error instanceof Error ? error.message : String(error)
-    if (raw.includes("已存在")) {
-      throw new Error("该项目文件夹已在所选工作区存在")
-    }
     throw new Error(`创建项目失败：${raw}`)
   }
 }
@@ -3627,7 +3627,6 @@ export async function createHarnessProject(
   validateCreateInput(input)
   const store = await readProjectStore()
   validateProjectCodeUnique(input.projectCode, store)
-  validateProjectDirUnique(input.projectDir, input.workspacePath, store)
   sourceBinding?.guard()
   if (sourceBinding && (!sourceBinding.projectId.startsWith("creator-business-trial:") ||
       sourceBinding.plugin.id !== input.adapterId || !sourceBinding.plugin.enabled))
@@ -3636,6 +3635,7 @@ export async function createHarnessProject(
     version: sourceBinding.plugin.version, type: "plugin" as const }
     : await resolveHarnessAdapter(input.adapterId, input.adapterType)
   const native = !sourceBinding && await nativeHarnessPlugin(harnessAdapter.id)
+  if (native) validateProjectDirUnique(input.projectDir, input.workspacePath, store)
   const assertNativeSource = async () => {
     if (!native) return
     const expected = input.expectedNativeTemplate
@@ -3659,6 +3659,7 @@ export async function createHarnessProject(
     description: input.description.trim(),
     projectCode: input.projectCode.trim(),
     projectFromLean: input.projectFromLean === true,
+    isTestProject: input.isTestProject,
     projectDir: input.projectDir.trim(),
     systemId: input.systemId.trim(),
     systemName: input.systemName.trim(),
@@ -3667,7 +3668,7 @@ export async function createHarnessProject(
     creator: getCurrentProjectCreator(),
     lifecycle: {
       status: "active",
-      createAt: new Date().toISOString()
+      createAt: formatGmt8Timestamp()
     }
   }
   normalizeProject(project)
@@ -3687,7 +3688,7 @@ export async function createHarnessProject(
       await mutateProjectStore(async (latest) => {
         await assertNativeSource()
         validateProjectCodeUnique(input.projectCode, latest)
-        validateProjectDirUnique(input.projectDir, input.workspacePath, latest)
+        if (native) validateProjectDirUnique(input.projectDir, input.workspacePath, latest)
         projectUse?.commit()
         latest.projects.unshift(project)
       })
@@ -4065,12 +4066,13 @@ export async function updateHarnessProjectMetadata(
       description: input.description.trim(),
       projectCode: input.projectCode.trim(),
       projectFromLean: input.projectFromLean === true,
+      isTestProject: input.isTestProject,
       projectDir: existingProjectDir,
       systemId: input.systemId.trim(),
       systemName: input.systemName.trim(),
       workspacePath: existing.workspacePath,
       "harness-adapter": harnessAdapter,
-      lifecycle: { ...existing.lifecycle, updateAt: new Date().toISOString() }
+      lifecycle: { ...existing.lifecycle, updateAt: formatGmt8Timestamp() }
     }
     const native = await nativeHarnessPlugin(harnessAdapter.id)
     if (native) updated.nativeBinding = { engine: "host", installedPluginId: native.plugin.id }

@@ -15,6 +15,7 @@ const source = readFileSync(new URL("./dashboard.ts", import.meta.url), "utf8")
 const ast = ts.createSourceFile("dashboard.ts", source, ts.ScriptTarget.Latest, true)
 const names = new Set([
   "requireDashboardUncommittedAnalysisAccess",
+  "getDashboardOrgFilterDefaults",
   "isDashboardProjectModeAdmin",
   "buildProjectModeAccessFilter",
   "buildNoAccessFilter",
@@ -70,6 +71,10 @@ function fixture(override: Partial<Access> = {}) {
   })
   const deps = {
     getDashboardAccessContext: () => access,
+    requireDashboardAccess: () => {
+      if (!access.loggedIn) throw new Error("请先登录后再查看运营面板")
+      return access
+    },
     getDashboardAllowedIds: () => new Set(["398340"]),
     getTraceEvolverReviewAdminIds: () => new Set(["review-admin"]),
     esQuery,
@@ -89,12 +94,13 @@ function fixture(override: Partial<Access> = {}) {
   const api = new Function(
     ...Object.keys(deps),
     `${compiled}
-    return { fetchUncommittedRanking, fetchUncommittedDetail, buildProjectModeAccessFilter }
+    return { fetchUncommittedRanking, fetchUncommittedDetail, buildProjectModeAccessFilter, getDashboardOrgFilterDefaults }
   `
   )(...Object.values(deps)) as {
     fetchUncommittedRanking: (range: unknown, options?: Json) => Promise<unknown>
     fetchUncommittedDetail: (sapId: string, range: unknown, options?: Json) => Promise<unknown>
     buildProjectModeAccessFilter: (access: Access) => Json | null
+    getDashboardOrgFilterDefaults: () => string[]
   }
   async function requests(options?: Json): Promise<Json[][]> {
     await api.fetchUncommittedRanking(range, options)
@@ -103,6 +109,40 @@ function fixture(override: Partial<Access> = {}) {
   }
   return { access, esQuery, api, requests }
 }
+
+describe("dashboard default room selection", () => {
+  it("keeps project administrators on all rooms", () => {
+    const { api, esQuery } = fixture()
+    expect(api.getDashboardOrgFilterDefaults()).toEqual([])
+    expect(esQuery).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    { ystId: "ordinary", unrestricted: false },
+    { ystId: "room-manager", unrestricted: true },
+    { ystId: "review-admin", unrestricted: false }
+  ])("defaults to the same room as project data permissions: %j", (override) => {
+    const { api, access, esQuery } = fixture(override)
+    const rooms = api.getDashboardOrgFilterDefaults()
+    expect(rooms).toEqual(["own-room"])
+    expect(api.buildProjectModeAccessFilter(access)).toEqual({ term: { upperOrgLv1: rooms[0] } })
+    expect(esQuery).not.toHaveBeenCalled()
+  })
+
+  it("does not invent a room when account organization metadata is missing", () => {
+    const { api, access } = fixture({ ystId: "ordinary", upperOrgLv1: "" })
+    expect(api.getDashboardOrgFilterDefaults()).toEqual([])
+    expect(api.buildProjectModeAccessFilter(access)).toEqual({
+      term: { traceId: "__dashboard_no_access__" }
+    })
+  })
+
+  it("rejects unauthenticated initialization before querying ES", () => {
+    const { api, esQuery } = fixture({ loggedIn: false, sapId: "", ystId: "" })
+    expect(() => api.getDashboardOrgFilterDefaults()).toThrow("请先登录")
+    expect(esQuery).not.toHaveBeenCalled()
+  })
+})
 
 describe("uncommitted analysis access", () => {
   it.each([

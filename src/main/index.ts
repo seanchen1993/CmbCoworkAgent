@@ -379,6 +379,9 @@ import { registerFeatureGateHandlers } from "./ipc/feature-gates"
 import { registerHarnessBoardHandlers } from "./ipc/harness-board"
 import { registerProjectRuntimeHandlers } from "./ipc/project-runtime"
 import { recoverManagedRunsAtStartup } from "./harness-board/managed-run-recovery"
+import { managedRunController } from "./harness-board/managed-run-controller"
+import { managedRunScheduler } from "./harness-board/managed-run-scheduler"
+import { createBrowserWindowAgentRunDelivery } from "./agent/agent-run-service"
 import { configureManagedRunProjectDirectories } from "./harness-board/managed-run-store"
 import {
   getHarnessProjectRootPath,
@@ -628,9 +631,6 @@ function hideMainWindowToTray(window: BrowserWindow): void {
   if (window.isDestroyed()) return
   window.hide()
   showPendingAppAttention()
-  if (process.platform === "darwin" && app.dock) {
-    app.dock.hide()
-  }
 }
 
 function clearCloseToTrayPromptState(): void {
@@ -966,6 +966,25 @@ function ensureMainWindowVisible(): BrowserWindow | null {
   return mainWindow
 }
 
+/**
+ * Pet 点击在主窗口的显示与隐藏状态之间切换。
+ */
+function toggleMainWindowVisibilityFromPet(): BrowserWindow | null {
+  if (
+    mainWindow &&
+    !mainWindow.isDestroyed() &&
+    mainWindow.isVisible() &&
+    !mainWindow.isMinimized()
+  ) {
+    hideMainWindowToTray(mainWindow)
+    // Pet 只切换主窗口显隐，macOS Dock 中的应用图标应始终保留。
+    applyMacDockIcon()
+    return mainWindow
+  }
+
+  return ensureMainWindowVisible()
+}
+
 function collectRecentWorkspacePathsForSandboxPrewarm(): string[] {
   const workspaces: string[] = []
   const seen = new Set<string>()
@@ -1030,7 +1049,7 @@ if (browserNativeMessagingHostLaunch) {
     // Set dock icon on macOS
     applyMacDockIcon()
     configurePetWindow({
-      ensureMainWindowVisible,
+      toggleMainWindowVisibility: toggleMainWindowVisibilityFromPet,
       applyMacDockIcon
     })
 
@@ -1574,6 +1593,33 @@ if (browserNativeMessagingHostLaunch) {
     const initialModelCatalogLoad = startBuiltinModelCatalogRefresh()
     createWindow()
     mainWindowStartupReady = true
+    if (harnessConfigAvailable) {
+      managedRunScheduler.initialize({
+        async start(schedule) {
+          const window = mainWindow
+          if (!window || window.isDestroyed()) {
+            throw new Error("没有可用的应用主窗口，无法开始托管")
+          }
+          return managedRunController.start({
+            projectId: schedule.projectId,
+            featureId: schedule.featureId,
+            workspacePath: schedule.workspacePath,
+            initialUserMessage: schedule.initialUserMessage,
+            existingThreadId: schedule.existingThreadId,
+            modelSelection: schedule.modelSelection,
+            scheduledStartId: schedule.scheduleId,
+            delivery: createBrowserWindowAgentRunDelivery(window)
+          })
+        },
+        changed(event) {
+          for (const window of BrowserWindow.getAllWindows()) {
+            if (!window.isDestroyed() && !window.webContents.isDestroyed()) {
+              window.webContents.send("harnessBoard:managedRunScheduleChanged", event)
+            }
+          }
+        }
+      })
+    }
     // An IM turn must not depend on someone having the desktop open, and must
     // not be tied to whichever window happened to be focused when it arrived.
     // The managed delivery broadcasts on the thread-scoped channel the renderer
@@ -1599,7 +1645,7 @@ if (browserNativeMessagingHostLaunch) {
 
     // Start scheduled task scheduler and heartbeat service
     await builtinRobotManager.start(app.getVersion())
-    startScheduler()
+    startScheduler(harnessConfigAvailable ? (now) => managedRunScheduler.tick(now) : undefined)
     startHeartbeat()
     startHookConfigWatcher()
     startUpdateChecker()

@@ -67,7 +67,9 @@ export interface ModelConfig {
   description?: string
   available: boolean
   source: ProviderId
-  origin?: "remote" | "fallback"
+  origin?: "remote" | "fallback" | "local"
+  notice?: string
+  unavailableReason?: string
   maxTokens?: number
   /** Routing tier — absent means premium */
   tier?: "premium" | "economy"
@@ -380,6 +382,7 @@ export interface QueuedMessage {
   existingUploads?: import("../../shared/mods/v2/composer-mentions").ComposerFileAttachment[]
   fileOnly?: boolean
   skillName?: string
+  skillDescription?: string
   builtinBrowser?: boolean
   modelId?: string
   handoffRequestedAt?: Date

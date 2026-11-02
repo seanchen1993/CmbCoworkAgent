@@ -3015,8 +3015,6 @@ export class ElectronIPCTransport implements UseStreamTransport {
     messageIds: string[],
     stableMessages: RoleCollisionMessage[] = []
   ): string[] {
-    this.mainAssistantIndexByStreamScope.clear()
-    this.mainAssistantScopedObservedIds.clear()
     this.pendingIdlessCompletedAssistantRoute = undefined
     const discardedMessageIds = new Set([...messageIds, ...this.inFlightMainMessageIds])
     this.inFlightMainMessageIds.clear()
@@ -3077,13 +3075,39 @@ export class ElectronIPCTransport implements UseStreamTransport {
     }
 
     const discardedAssistantIndexes = new Set<number>()
+    const retainedAssistants = normalizeCompleteMessageIds(stableMessages).filter(
+      (message) => message.role === "assistant" || message.type === "ai"
+    )
+    const retainedAssistantIds = new Set(retainedAssistants.map((message) => message.id))
+    const retainedProviderIdentities = new Set(
+      retainedAssistants.map((message) =>
+        this.mainAssistantProviderIdentityKey(
+          getMessageProviderSourceId(message),
+          getMessageProviderOccurrence(message) ?? 1
+        )
+      )
+    )
     for (const [index, messageId] of this.mainAssistantMessageIdByIndex) {
       if (!discardedMessageIds.has(this.resolveMainAssistantMessageIdAlias(messageId))) continue
+      // A raw provider id can name both a checkpointed tool call and the failed
+      // reply. Keep the completed slot so a resumed reply still gets occurrence
+      // N+1 instead of being merged into the earlier tool-call bubble.
+      const providerIdentity = this.mainAssistantProviderIdentityByIndex.get(index)
+      if (
+        retainedAssistantIds.has(messageId) ||
+        (providerIdentity &&
+          retainedProviderIdentities.has(
+            this.mainAssistantProviderIdentityKey(
+              providerIdentity.providerSourceId,
+              providerIdentity.providerOccurrence
+            )
+          ))
+      )
+        continue
       discardedAssistantIndexes.add(index)
       this.mainAssistantMessageIdByIndex.delete(index)
       this.streamedMainAssistantIndexes.delete(index)
       this.sealedMainAssistantIndexes.delete(index)
-      const providerIdentity = this.mainAssistantProviderIdentityByIndex.get(index)
       if (providerIdentity) {
         this.mainAssistantIndexByProviderIdentity.delete(
           this.mainAssistantProviderIdentityKey(
@@ -3097,6 +3121,15 @@ export class ElectronIPCTransport implements UseStreamTransport {
     for (const [observedId, index] of this.mainAssistantIndexByObservedId) {
       if (discardedMessageIds.has(observedId) || discardedAssistantIndexes.has(index)) {
         this.mainAssistantIndexByObservedId.delete(observedId)
+      }
+    }
+    this.mainAssistantScopedObservedIds.clear()
+    for (const [scope, index] of this.mainAssistantIndexByStreamScope) {
+      if (discardedAssistantIndexes.has(index)) {
+        this.mainAssistantIndexByStreamScope.delete(scope)
+      } else {
+        // Keys are local JSON tuples of [provider id, graph execution namespace].
+        this.mainAssistantScopedObservedIds.add((JSON.parse(scope) as [string, string])[0])
       }
     }
     for (const [fromId, toId] of this.mainAssistantMessageIdAliases) {

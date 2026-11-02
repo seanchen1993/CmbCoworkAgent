@@ -4,10 +4,31 @@ import {
   buildScriptExecutableScript,
   extractScriptRecordingVariables,
   generateScriptRecording,
-  parseScriptRecordingScript
+  parseScriptRecordingScript,
+  stabilizeDynamicElementUiOverlayLocators
 } from "../../../src/shared/browser-script-recording"
 
 describe("browser script recording", () => {
+  it("preserves a contentFrame locator when its text target becomes a variable", () => {
+    const script = `import { test } from "@playwright/test";
+
+test("recorded script flow", async ({ page }) => {
+  await page.locator('iframe[name="iframeName"]').contentFrame().getByText('我的模板', { exact: true }).click();
+});
+`
+    const parsed = parseScriptRecordingScript(script, "script")
+    const actionId = parsed.actions[0]!.id
+    const regenerated = generateScriptRecording(parsed.actions, {
+      source: "script",
+      variableActionIds: [actionId],
+      variableActionNames: { [actionId]: "模板类型" }
+    })
+
+    expect(regenerated).toContain(
+      `await page.locator('iframe[name="iframeName"]').contentFrame().getByText(变量_模板类型, { exact: true }).click();`
+    )
+  })
+
   it("preserves codegen contentFrame chains when round-tripping a recorded script draft", () => {
     const script = `import { test } from "@playwright/test";
 
@@ -91,6 +112,35 @@ test("recorded script flow", async ({ page }) => {
 
   await page.goto("https://example.com");
   await page.getByRole("button", { name: "Save" }).click();`
+    )
+  })
+
+  it("stabilizes saved Element UI overlay locators before playback", () => {
+    const script = `import { test } from "@playwright/test";
+
+test("recorded script flow", async ({ page }) => {
+  await page.locator('#el-popover-3396').getByText('Merge（推荐）').click();
+  await page.locator("#el-tooltip-4366").getByText("帮助").click();
+  await page.locator('#at-popover-2048').getByText('Confirm').click();
+  await page.locator('#custom-menu-popover-9001').getByText('Deploy').click();
+  await page.locator('#merge-popover').getByText('保持不变').click();
+});
+`
+
+    expect(buildScriptExecutableScript(script)).toContain(
+      `page.locator('[id^="el-popover-"]:visible').getByText('Merge（推荐）').click()`
+    )
+    expect(buildScriptExecutableScript(script)).toContain(
+      `page.locator("[id^='el-tooltip-']:visible").getByText("帮助").click()`
+    )
+    expect(buildScriptExecutableScript(script)).toContain(
+      `page.locator('[id^="at-popover-"]:visible').getByText('Confirm').click()`
+    )
+    expect(buildScriptExecutableScript(script)).toContain(
+      `page.locator('[id^="custom-menu-popover-"]:visible').getByText('Deploy').click()`
+    )
+    expect(stabilizeDynamicElementUiOverlayLocators(script)).toContain(
+      `page.locator('#merge-popover').getByText('保持不变').click()`
     )
   })
 
@@ -335,14 +385,16 @@ test("recorded script flow", async ({ page }) => {
       }
     )
 
-    expect(script).toContain('const 变量_目标地址 = ""; // 变量-目标地址')
+    expect(script).toContain(
+      'const 变量_目标地址 = "https://example.com/dashboard"; // 变量-目标地址'
+    )
     expect(script).toContain("await page.goto(变量_目标地址);")
   })
 
   it("round-trips variableized navigation steps and applies execution values", () => {
     const script = `import { test } from "@playwright/test";
 
-const 变量_目标地址 = ""; // 变量-目标地址
+const 变量_目标地址 = "https://example.com/original"; // 变量-目标地址
 
 test("recorded script flow", async ({ page }) => {
   await page.goto(变量_目标地址);
@@ -353,7 +405,7 @@ test("recorded script flow", async ({ page }) => {
     expect(parsed.actions).toEqual([
       expect.objectContaining({
         kind: "navigate",
-        url: "目标地址"
+        url: "https://example.com/original"
       })
     ])
     expect(parsed.variableActionNames).toEqual({
@@ -410,6 +462,24 @@ test("recorded script flow", async ({ page }) => {
     expect(
       applyScriptRecordingVariableValues(script, { 变量_目标地址: "https://example.com/login" })
     ).toContain('const 变量_目标地址 = "https://example.com/login"; // 变量-目标地址')
+  })
+
+  it("ignores arbitrary trailing comments when recognizing variable declarations", () => {
+    const script = `const 变量_仓库名 = "react/react"; // 仓库名称
+const 变量_目标地址 = "https://example.com/path"; // 变量-也不读取这个名称`
+
+    expect(extractScriptRecordingVariables(script)).toEqual([
+      {
+        identifier: "变量_仓库名",
+        displayName: "仓库名",
+        isArray: false
+      },
+      {
+        identifier: "变量_目标地址",
+        displayName: "目标地址",
+        isArray: false
+      }
+    ])
   })
 
   it("clicks radio-card choices with their semantic role", () => {

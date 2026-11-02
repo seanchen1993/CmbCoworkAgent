@@ -85,7 +85,7 @@ function input(): HarnessProjectCreateInput {
     description: "",
     projectCode: "sample",
     projectDir: "sample",
-    projectFromLean: false,
+    projectFromLean: false, isTestProject: true,
     systemId: "system",
     systemName: "System",
     workspacePath: state.root
@@ -159,6 +159,7 @@ it("creates a native Harness container by exact Host id without invoking board-s
 })
 
 it("preserves old creation and rejects an existing binding changed to a native Host declaration", async () => {
+  await mkdir(join(state.root, "sample"))
   const project = await service.createHarnessProject(input())
   expect(project["harness-adapter"].id).toBe("plugin")
   expect(await readFile(join(state.root, "created-marker.txt"), "utf8")).toBe(

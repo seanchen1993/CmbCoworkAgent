@@ -323,7 +323,7 @@ async function chooseDirectory(path: string, trigger: () => Promise<void>) {
     dialog.showOpenDialog = (async (...args: unknown[]) => {
       dialog.showOpenDialog = original
       const options = args.at(-1) as { title?: string }
-      if (options?.title !== "选择工作区文件夹") throw Error("UNEXPECTED_DIRECTORY_PICKER")
+      if (!["选择工作区文件夹", "选择项目工作区文件夹"].includes(options?.title ?? "")) throw Error("UNEXPECTED_DIRECTORY_PICKER")
       return { canceled: false, filePaths: [selected] }
     }) as typeof dialog.showOpenDialog
   }, path)
@@ -351,18 +351,13 @@ async function submitOriginalProject(name: string, code: string, pluginId: strin
   await dialog.getByRole("textbox", { name: "项目名称 *", exact: true }).fill(name)
   await dialog.getByRole("textbox", { name: "系统编号 *", exact: true }).fill("FIXTURE_SYSTEM")
   await dialog.getByRole("textbox", { name: "系统名称 *", exact: true }).fill("原界面回归系统")
-  await dialog
-    .getByRole("textbox", { name: /^(本项目产物文件夹|本项目文件夹)$/ })
-    .fill(code.toLowerCase())
-  await chooseDirectory(projectContainers, () =>
-    dialog.getByRole("textbox", { name: "插件工作区根目录", exact: true }).click()
+  await dialog.getByRole("radiogroup", { name: "是否作为测试项目 *", exact: true }).getByRole("radio", { name: "是", exact: true }).check()
+  const projectDirectory = join(projectContainers, code.toLowerCase())
+  mkdirSync(projectDirectory, { recursive: true })
+  await chooseDirectory(projectDirectory, () =>
+    dialog.getByRole("button", { name: /插件工作区.*选择文件夹/ }).click()
   )
-  await page!.waitForFunction(
-    (expected) =>
-      document.querySelector<HTMLInputElement>('[aria-label="插件工作区根目录"]')?.value ===
-      expected,
-    projectContainers
-  )
+  await dialog.getByText(projectDirectory, { exact: true }).waitFor()
   await dialog.locator('[aria-label="创建项目时授权"]').waitFor()
   assert.equal(
     await page!.getByRole("dialog").count(),
@@ -932,6 +927,7 @@ async function main() {
             name,
             projectCode: code,
             projectFromLean: false,
+            isTestProject: true,
             projectDir: code.toLowerCase(),
             description: "Isolated container only; no feature or business run",
             systemId: "fixture",

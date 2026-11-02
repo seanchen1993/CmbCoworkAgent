@@ -12,9 +12,31 @@ import { SKILL_USE_TAG_NAME } from "./skill-use-block"
 // feature that prepends them) so main-process consumers, which must not import
 // renderer modules, share one spelling with the composer.
 
-export const BUILTIN_BROWSER_PROMPT_PREFIX = "使用内置浏览器 browser_*工具："
-export const BUILTIN_BROWSER_NO_SCREENSHOT_PROMPT_PREFIX =
+export const LEGACY_BUILTIN_BROWSER_PROMPT_PREFIX = "使用内置浏览器 browser_*工具："
+export const LEGACY_BUILTIN_BROWSER_NO_SCREENSHOT_PROMPT_PREFIX =
   "使用内置浏览器 browser_*工具（不允许使用截图功能）："
+const BROWSER_TASK_ROUTING_PROMPT =
+  "先用 inAppBrowser_list_recordings 查找匹配的可复用操作，匹配时优先执行；否则使用普通浏览器工具。iframe 内容无法读取时，调用 inAppBrowser_extract_iframes（支持跨域）。WPS 在线文档正文无法读取时，调用 inAppBrowser_read_wps_document。按返回的 nextTextOffset 或 nextLinkOffset 继续读取截断内容。"
+export const BUILTIN_BROWSER_INSTRUCTIONS_OPEN = "<builtin-browser-instructions>"
+export const BUILTIN_BROWSER_INSTRUCTIONS_CLOSE = "</builtin-browser-instructions>"
+
+function wrapBuiltinBrowserInstructions(instructions: string): string {
+  return `${BUILTIN_BROWSER_INSTRUCTIONS_OPEN}\n${instructions}\n${BUILTIN_BROWSER_INSTRUCTIONS_CLOSE}\n`
+}
+
+export const BUILTIN_BROWSER_PROMPT_PREFIX = wrapBuiltinBrowserInstructions(
+  `使用内置浏览器 browser_* 工具。${BROWSER_TASK_ROUTING_PROMPT}`
+)
+export const BUILTIN_BROWSER_NO_SCREENSHOT_PROMPT_PREFIX = wrapBuiltinBrowserInstructions(
+  `使用内置浏览器 browser_* 工具，不允许使用截图功能。${BROWSER_TASK_ROUTING_PROMPT}`
+)
+
+export function stripBuiltinBrowserInstructions(content: string): string | null {
+  if (!content.startsWith(BUILTIN_BROWSER_INSTRUCTIONS_OPEN)) return null
+  const closeAt = content.indexOf(BUILTIN_BROWSER_INSTRUCTIONS_CLOSE)
+  if (closeAt < 0) return null
+  return content.slice(closeAt + BUILTIN_BROWSER_INSTRUCTIONS_CLOSE.length).replace(/^\r?\n/, "")
+}
 
 const SKILL_USE_BLOCK_PATTERN = new RegExp(
   `<${SKILL_USE_TAG_NAME}>[\\s\\S]*?</${SKILL_USE_TAG_NAME}>`,
@@ -36,10 +58,13 @@ const SLASH_COMMAND_PATTERN = /^\s*\/[a-z][a-z0-9-]*(?=\s|$)/
  */
 export function stripUserInputTransportDecorations(content: string): string {
   let text = content
-  if (text.startsWith(BUILTIN_BROWSER_NO_SCREENSHOT_PROMPT_PREFIX)) {
-    text = text.slice(BUILTIN_BROWSER_NO_SCREENSHOT_PROMPT_PREFIX.length)
-  } else if (text.startsWith(BUILTIN_BROWSER_PROMPT_PREFIX)) {
-    text = text.slice(BUILTIN_BROWSER_PROMPT_PREFIX.length)
+  const browserText = stripBuiltinBrowserInstructions(text)
+  if (browserText !== null) {
+    text = browserText
+  } else if (text.startsWith(LEGACY_BUILTIN_BROWSER_NO_SCREENSHOT_PROMPT_PREFIX)) {
+    text = text.slice(LEGACY_BUILTIN_BROWSER_NO_SCREENSHOT_PROMPT_PREFIX.length)
+  } else if (text.startsWith(LEGACY_BUILTIN_BROWSER_PROMPT_PREFIX)) {
+    text = text.slice(LEGACY_BUILTIN_BROWSER_PROMPT_PREFIX.length)
   }
   return text
     .replace(COORDINATOR_PREFIX_PATTERN, "")

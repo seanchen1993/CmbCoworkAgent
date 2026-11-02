@@ -166,7 +166,7 @@ function creation(review: Awaited<ReturnType<typeof reviewProjectUse>>): Harness
     ...input,
     name: "One",
     projectCode: "ONE",
-    projectFromLean: false,
+    projectFromLean: false, isTestProject: true,
     description: "",
     systemId: "system",
     systemName: "System",

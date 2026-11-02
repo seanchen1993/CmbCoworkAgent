@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto"
 import { lstat, mkdir, realpath } from "node:fs/promises"
 import { isAbsolute, join, relative, resolve } from "node:path"
 import { DEFAULT_IM_CHANNEL_ID } from "../../../shared/im-gateway-contract"
+import { IM_DEFAULT_CHAT_TITLE } from "../../../shared/im-display"
 import { createThread, getThread } from "../../db"
 import { getOpenworkDir } from "../../storage"
 import {
@@ -134,7 +135,7 @@ export class ImInboxService {
     }
 
     this.dependencies.createThread(threadId, {
-      title: "远程收件箱",
+      title: IM_DEFAULT_CHAT_TITLE,
       workspacePath,
       agentMode: "normal",
       targetKind: "inbox",

@@ -1451,6 +1451,7 @@ export class CreatorBusinessTrials {
             projectCode: "TRIAL" + record.featureId.replaceAll("-", ""),
             projectDir,
             projectFromLean: false,
+            isTestProject: true,
             systemId: "CREATOR-TRIAL",
             systemName: "隔离候选试用",
             workspacePath: dirname(workspace)

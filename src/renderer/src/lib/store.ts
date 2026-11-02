@@ -1040,7 +1040,8 @@ interface AppState {
   generateTitleForFirstMessage: (
     threadId: string,
     content: string,
-    skillName?: string
+    skillName?: string,
+    skillDescription?: string
   ) => Promise<void>
 
   // Model actions
@@ -1593,11 +1594,17 @@ export const useAppStore = create<AppState>((set, get) => ({
     })
   },
 
-  generateTitleForFirstMessage: async (threadId: string, content: string, skillName?: string) => {
+  generateTitleForFirstMessage: async (
+    threadId: string,
+    content: string,
+    skillName?: string,
+    skillDescription?: string
+  ) => {
     try {
       const generatedTitle = await window.api.threads.generateTitle(content, {
         threadId,
-        skillName
+        skillName,
+        skillDescription
       })
       await get().updateThread(threadId, { title: generatedTitle })
     } catch (error) {

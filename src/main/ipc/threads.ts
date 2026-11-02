@@ -4643,7 +4643,11 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
   // Generate a title from a message
   ipcMain.handle(
     "threads:generateTitle",
-    async (_event, message: string, context?: { threadId: string; skillName?: string }) => {
+    async (
+      _event,
+      message: string,
+      context?: { threadId: string; skillName?: string; skillDescription?: string }
+    ) => {
       try {
         if (context?.threadId) {
           const thread = getThreadCore(context.threadId)
@@ -4651,7 +4655,8 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
           return await generateProjectThreadTitle(
             message,
             context.skillName,
-            metadata?.harnessFeature
+            metadata?.harnessFeature,
+            context.skillDescription
           )
         }
       } catch (error) {
