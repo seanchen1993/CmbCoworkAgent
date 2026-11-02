@@ -53,6 +53,7 @@ interface RemoteUserInputRoute {
   conversationKey: string
   threadId: string
   prefix: string
+  kind?: "dm" | "group"
   botEventId?: string
   senderId?: string
   isCurrent?: () => boolean
@@ -139,6 +140,9 @@ function renderQuestion(session: RemoteUserInputSession): string {
       (option, index) => `${index + 1}. ${option.label} — ${option.description}`
     ),
     "",
+    ...(session.route.kind === "group"
+      ? ["请由发起这项工作的群成员在群内 @当前机器人，再发送以下回答指令："]
+      : []),
     `回复 /回答 ${session.code} ${question.allowMultiple ? "<编号，可用逗号分隔，如 1,2>" : "<编号>"}`,
     `如以上选项都不合适：/回答 ${session.code} 其他 <你的回答>`,
     `短码在本轮等待期间一直有效；普通文本不会被当作回答。`

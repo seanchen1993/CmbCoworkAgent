@@ -10,6 +10,7 @@ import {
   CircleAlert,
   ChevronRight,
   Loader2,
+  MessageCircle,
   MoreHorizontal,
   PanelRight,
   Pin,
@@ -2636,7 +2637,8 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
                           setImBot(selected)
                         }}
                       >
-                        IM 接入
+                        <MessageCircle className="mr-2 size-4" aria-hidden="true" />
+                        招乎接入
                       </button>
                     )}
                     <button
