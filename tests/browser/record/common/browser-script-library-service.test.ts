@@ -62,6 +62,17 @@ describe("browser script library service", () => {
     expect(manifest.entries).toHaveLength(2)
   })
 
+  it("can list manifest metadata without inspecting script variables", async () => {
+    const saved = await saveBrowserScriptLibraryEntry({
+      displayName: "企业查询", recordingSource: "script",
+      script: 'const 变量_企业 = "旧企业"; // 变量-企业', workspacePath: "/tmp/workspace"
+    })
+    const metadata = await listBrowserScriptLibraryEntries({ includeVariableInfo: false })
+    expect(metadata).toEqual([saved])
+    const enriched = await listBrowserScriptLibraryEntries()
+    expect(enriched[0].hasVariables).toBe(true)
+  })
+
   it("lists all mappings regardless of workspace hint", async () => {
     await saveBrowserScriptLibraryEntry({
       displayName: "工作区 A",

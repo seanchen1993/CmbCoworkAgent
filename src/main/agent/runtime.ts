@@ -296,6 +296,7 @@ import {
   getActionStationarityHaltError
 } from "./action-stationarity"
 import { createLspTool } from "./tools/lsp-tool"
+import { createInAppBrowserTools } from "./tools/in-app-browser-tools"
 import { detectJavaProject } from "../lsp"
 import {
   buildAgentsPromptLoadStatusItems,
@@ -5517,6 +5518,16 @@ The workspace root is: ${fileRoot}`
     }
   } catch (e) {
     console.warn("[Runtime] Failed to check LSP config:", e)
+  }
+
+  if (!disableMcpTools && !isConstrainedCoordinatorWorker) {
+    extraTools.push(
+      ...(await createInAppBrowserTools(allMcpTools, {
+        workspacePath,
+        threadId: options.threadId,
+        abortSignal: options.abortSignal
+      }))
+    )
   }
 
   // Wrap extra tools so that errors are returned as strings instead of throwing
