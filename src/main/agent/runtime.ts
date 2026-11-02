@@ -1,4 +1,8 @@
 import { createStageUsageMiddleware } from "./trace/stage-usage-middleware"
+import {
+  createSubagentLifecycleMiddleware,
+  type SubagentLifecycleCallbacks
+} from "./subagent-lifecycle-middleware"
 import { randomUUID } from "crypto"
 import { TurnTraceRecorder } from "./trace/turn-trace-recorder"
 import { AsyncRWLock, AsyncSemaphore } from "./async-lock"
@@ -2107,6 +2111,7 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
     windowsShellKind = "unknown",
     toolConcurrencyQueueId = "default",
     toolHookMiddleware,
+    subagentLifecycleMiddleware,
     threadId,
     onTaskSubagentPromptsResolved,
     currentRunMessageQueueOwnerToken,
@@ -2927,6 +2932,9 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
       ...(threadId ? [createTaskMmdMiddleware({ threadId, scope: "main" })] : []),
       createSkillHookContextMiddleware(filesystemBackend),
       gradedToolConcurrencyMiddleware,
+      // Parent-only: observe rejected/recovered task results, and gate the next model
+      // after task results are checkpointed. Never share this queue with children.
+      ...(subagentLifecycleMiddleware ? [subagentLifecycleMiddleware] : []),
       ...(toolHookMiddleware ? [toolHookMiddleware] : []),
       toolErrorMiddleware,
       ...(mainSubagentsEnabled
@@ -4511,6 +4519,8 @@ export interface CreateAgentRuntimeOptions {
   onHookResult?: HookResultCallback
   /** Callback invoked when repeated tool failures should be shown to the user. */
   onFailureFuseNotice?: FailureFuseNoticeCallback
+  /** Shared with stream delivery; gates the parent graph after task completion. */
+  subagentLifecycle?: SubagentLifecycleCallbacks
   /** Foreground-only callback for the main agent's context compaction lifecycle. */
   onContextCompaction?: ContextCompactionLifecycleCallback
   /**
@@ -6771,6 +6781,9 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
 
   const agent = createDeepAgent({
     middleware: traceContext?.harnessFeature ? [createStageUsageMiddleware(traceContext)] : [],
+    subagentLifecycleMiddleware: options.subagentLifecycle
+      ? createSubagentLifecycleMiddleware(options.subagentLifecycle)
+      : undefined,
     model,
     summarizationModel: contextCompactionModel,
     tools: mainTools,

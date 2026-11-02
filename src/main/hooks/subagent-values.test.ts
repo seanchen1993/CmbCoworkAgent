@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest"
-import { createSubagentValuesTracker, type SubagentLifecycleState } from "./subagent-values"
+import {
+  createSubagentBaselineGate,
+  createSubagentValuesTracker,
+  runSubagentStopHookOnce,
+  type SubagentLifecycleState
+} from "./subagent-values"
 import { buildSubagentStopHookContext } from "./subagent-context"
 import { AIMessage, HumanMessage, ToolMessage, type BaseMessage } from "@langchain/core/messages"
 import { createStreamDataSerializer } from "../ipc/stream-data-serialization"
@@ -22,6 +27,72 @@ function setup() {
 }
 
 describe("subagent lifecycle values", () => {
+  it("seeds resume identities before admitting a prefetched task start", async () => {
+    const state: SubagentLifecycleState = {
+      firedStartIds: new Set(),
+      firedStopIds: new Set(),
+      subagentTypes: new Map()
+    }
+    const gate = createSubagentBaselineGate(new AbortController().signal)
+    const track = createSubagentValuesTracker(state, gate.markReady)
+    let admitted = false
+    const start = gate.wait().then(() => {
+      admitted = true
+      expect(state.firedStartIds.has("pending")).toBe(true)
+      expect(state.subagentTypes.get("pending")).toBe("research")
+    })
+    await Promise.resolve()
+    expect(admitted).toBe(false)
+    track({ messages: [ai("pending", "research")] })
+    await start
+  })
+
+  it.each([false, true])(
+    "releases baseline wait when cancelled (already aborted=%s)",
+    async (early) => {
+      const controller = new AbortController()
+      if (early) controller.abort()
+      const gate = createSubagentBaselineGate(controller.signal)
+      const wait = gate.wait()
+      controller.abort()
+      await expect(wait).rejects.toMatchObject({ name: "AbortError" })
+    }
+  )
+  it("joins an in-flight consumer decision and propagates the same halt to the producer", async () => {
+    const fired = new Set<string>()
+    const hooks = new Map<string, Promise<void>>()
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const halt = new Error("hook halted")
+    let calls = 0
+    const consumer = runSubagentStopHookOnce(fired, hooks, "task", async () => {
+      calls++
+      await gate
+      throw halt
+    })
+    const producer = runSubagentStopHookOnce(fired, hooks, "task", async () => {
+      throw new Error("must join the first decision")
+    })
+    expect(producer).toBe(consumer)
+    const outcomes = Promise.allSettled([consumer, producer])
+    release()
+    expect(await outcomes).toEqual([
+      { status: "rejected", reason: halt },
+      { status: "rejected", reason: halt }
+    ])
+    expect(calls).toBe(1)
+    await expect(runSubagentStopHookOnce(fired, hooks, "task", async () => {})).rejects.toBe(halt)
+  })
+
+  it("does not replay a completed checkpoint hook with no in-flight decision", async () => {
+    let calls = 0
+    await runSubagentStopHookOnce(new Set(["old"]), new Map(), "old", async () => {
+      calls++
+    })
+    expect(calls).toBe(0)
+  })
   it("handles production full/append/tail projections and reconnect replay", () => {
     const { state, track } = setup()
     let serialize = createStreamDataSerializer()

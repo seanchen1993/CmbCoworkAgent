@@ -4,7 +4,7 @@
 import assert from "node:assert/strict"
 import { createServer } from "node:http"
 import { once } from "node:events"
-import { appendFileSync, mkdirSync, writeFileSync } from "node:fs"
+import { appendFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs"
 import { createRequire } from "node:module"
 import { join, resolve } from "node:path"
 import { _electron, type ElectronApplication } from "playwright"
@@ -26,6 +26,7 @@ interface TestApi {
     setDefault(id: string): Promise<void>
   }
   routing: { setMode(mode: string): Promise<void> }
+  sandbox: { setYoloMode(enabled: boolean): Promise<void> }
   hooks: { create(config: Record<string, unknown>): Promise<{ id: string }> }
   threads: {
     create(metadata: Record<string, unknown>): Promise<{ thread_id: string }>
@@ -57,7 +58,7 @@ async function main() {
       if (req.url?.startsWith("/hook/")) {
         captured.push({ route: req.url, body: JSON.parse(text) as HookPayload })
         if (req.url === "/hook/halt" && haltEnabled) {
-          await new Promise((resolve) => setTimeout(resolve, 100))
+          await new Promise((resolve) => setTimeout(resolve, 1500))
         }
         res.writeHead(200, { "content-type": "application/json" })
         res.end(
@@ -94,7 +95,24 @@ async function main() {
       const delta = child
         ? { content: "CHILD_COMPLETED" }
         : done
-          ? { content: `PARENT_COMPLETED_${scenario}` }
+          ? scenario === "halt"
+            ? {
+                tool_calls: [
+                  {
+                    index: 0,
+                    id: "after-stop-write",
+                    type: "function",
+                    function: {
+                      name: "write_file",
+                      arguments: JSON.stringify({
+                        file_path: join(workspace, "after-stop.txt").replaceAll("\\", "/"),
+                        content: "must not execute after SubagentStop"
+                      })
+                    }
+                  }
+                ]
+              }
+            : { content: `PARENT_COMPLETED_${scenario}` }
           : {
               tool_calls: [
                 {
@@ -112,7 +130,7 @@ async function main() {
               ]
             }
       send({ role: "assistant", ...delta })
-      send({}, child || done ? "stop" : "tool_calls")
+      send({}, child || (done && scenario !== "halt") ? "stop" : "tool_calls")
       res.end("data: [DONE]\n\n")
     })().catch((error) => {
       errors.push(String(error))
@@ -178,6 +196,7 @@ async function main() {
         })
         await api.models.setDefault("custom:hook-local")
         await api.routing.setMode("pinned")
+        await api.sandbox.setYoloMode(true)
         for (const [event, matcher, route] of [
           ["SessionStart", "*", "control"],
           ["SubagentStart", "general-purpose", "start-name"],
@@ -214,6 +233,7 @@ async function main() {
         async ({ id, scenario }) => {
           const api = (window as unknown as { api: TestApi }).api
           return new Promise<AgentEvent>((resolve) => {
+            let haltNotice: unknown
             const timer = setTimeout(() => {
               cleanup()
               resolve({ type: "timeout" })
@@ -222,10 +242,18 @@ async function main() {
               id,
               `PARENT_PROBE_${scenario}: delegate a task`,
               (event) => {
+                const data = event.data as { type?: string; action?: string } | undefined
+                if (
+                  event.type === "custom" &&
+                  data?.type === "hook_blocked" &&
+                  data.action === "halt"
+                ) {
+                  haltNotice = data
+                }
                 if (["done", "error"].includes(event.type)) {
                   clearTimeout(timer)
                   cleanup()
-                  resolve(event)
+                  resolve({ ...event, haltNotice })
                 }
               }
             )
@@ -257,9 +285,7 @@ async function main() {
       const finalCalls = requests.filter(
         (r) => r.scenario === scenario && r.role === "parent-final"
       )
-      // The graph may prefetch the next model request before the consumer
-      // observes values. A halt must prevent its answer from being delivered.
-      if (scenario !== "halt") assert.equal(finalCalls.length, scenario === "retry" ? 2 : 1)
+      assert.equal(finalCalls.length, scenario === "halt" ? 0 : scenario === "retry" ? 2 : 1)
       const history = await page.evaluate(
         async (id) => (window as unknown as { api: TestApi }).api.threads.getMessages(id),
         thread.thread_id
@@ -271,7 +297,15 @@ async function main() {
       assert.ok(JSON.stringify(toolResult.content).includes("CHILD_COMPLETED"))
       assert.ok(!JSON.stringify(history).includes("FAILED_ATTEMPT"))
       if (scenario === "halt") {
+        assert.deepEqual(terminal.haltNotice, {
+          type: "hook_blocked",
+          hookEvent: "SubagentStop",
+          action: "halt",
+          reason: "SUBAGENT_HOOK_HALT",
+          systemMessage: undefined
+        })
         assert.ok(!JSON.stringify(history).includes("PARENT_COMPLETED_halt"))
+        assert.equal(existsSync(join(workspace, "after-stop.txt")), false)
       }
       results.push({
         scenario,
