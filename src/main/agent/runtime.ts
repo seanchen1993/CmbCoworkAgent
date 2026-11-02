@@ -119,8 +119,8 @@ import type {
   HarnessRequestUserInputConfig
 } from "../../shared/harness-board-types"
 import {
+  calculateContextCompactionBudget,
   calculateModelInputBudgetTokens,
-  calculateSummarizationKeepTokens,
   calculateSummarizationTriggerTokens
 } from "../../shared/model-token-budget"
 import {
@@ -4872,6 +4872,8 @@ function applyDeployUnitMappingsToAgentmdLoadStatus(
 }
 
 export interface CreateAgentRuntimeOptions {
+  /** Optional working-context budget; does not change the provider output limit. */
+  contextBudgetTokens?: number
   /** Internal inheritance override; absent on top-level runs to capture the global setting. */
   toolStrategy?: AgentToolStrategy
   /** Thread ID - REQUIRED for per-thread checkpointing */
@@ -7404,14 +7406,16 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
     agentMode,
     deferredToolIds: deferredToolIds.length
   })
-  const triggerTokens = calculateSummarizationTriggerTokens(maxTokens, configuredMaxOutputTokens)
-  const mainModelInputBudget = calculateModelInputBudgetTokens(maxTokens, configuredMaxOutputTokens)
+  const {
+    triggerTokens,
+    keepTokens,
+    inputBudgetTokens: mainModelInputBudget
+  } = calculateContextCompactionBudget(maxTokens, configuredMaxOutputTokens, options.contextBudgetTokens)
   const summaryMaxOutputTokens = Math.min(
     configuredMaxOutputTokens,
     CONTEXT_COMPACTION_MAX_OUTPUT_TOKENS
   )
   const summaryInputBudget = calculateModelInputBudgetTokens(maxTokens, summaryMaxOutputTokens)
-  const keepTokens = calculateSummarizationKeepTokens(maxTokens)
   const toolEvictLimit = Math.min(20_000, Math.max(Math.floor(maxTokens * 0.08), 6_000))
   const summaryOverflowRetryTarget = calculateSummaryOverflowRetryTargetTokens(
     maxTokens,
@@ -7422,6 +7426,8 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
     maxTokens,
     "→ summarization trigger:",
     triggerTokens,
+    "→ working context budget:",
+    options.contextBudgetTokens || "model default",
     "→ reserved model output:",
     configuredMaxOutputTokens,
     "→ model input budget:",

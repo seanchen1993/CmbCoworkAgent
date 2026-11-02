@@ -15,6 +15,8 @@ import type { ModsManager } from "../mods/manager"
 import { Command, MemorySaver } from "@langchain/langgraph"
 import { createAgent, FakeToolCallingModel } from "langchain"
 import { describe, expect, it, vi } from "vitest"
+import { calculateContextCompactionBudget } from "../../shared/model-token-budget"
+import { BOT_CONTEXT_BUDGET_DEFAULT } from "../../shared/bots/context-budget"
 import {
   neutralizeWorkflowPlumbingUserText,
   WORKFLOW_NOTIFICATION_TURN_PROMPT
@@ -568,6 +570,46 @@ describe("CmbCowork context compaction middleware", () => {
     expect(invoke).toHaveBeenCalledTimes(1)
     expect(handler).toHaveBeenCalledTimes(1)
   })
+
+  it.each([360000, 380000])(
+    "checks the Bot ceiling at %s tokens while ordinary chat keeps its model budget",
+    async (historyTokens) => {
+      for (const budget of [undefined, BOT_CONTEXT_BUDGET_DEFAULT]) {
+        const limits = calculateContextCompactionBudget(1_000_000, 8192, budget)
+        const invoke = vi.fn(async () => new AIMessage(validSummary("retain the user's current goal")))
+        const handler = vi.fn(async () => new AIMessage("handled"))
+        const middleware = createTestMiddleware(invoke, {
+          maxInputTokens: 1_000_000,
+          trigger: { type: "tokens", value: limits.triggerTokens },
+          keepTokens: limits.keepTokens,
+          postCompactionInputBudgetTokens: limits.inputBudgetTokens
+        })
+        await middleware.wrapModelCall(
+          {
+            messages: [
+              new HumanMessage("Original user goal"),
+              new AIMessage({
+                content: "old output ".repeat(30000),
+                usage_metadata: {
+                  input_tokens: historyTokens - 1000,
+                  output_tokens: 1000,
+                  total_tokens: historyTokens
+                }
+              }),
+              new HumanMessage("Continue the original goal")
+            ],
+            state: {},
+            tools: []
+          },
+          handler
+        )
+        expect(invoke).toHaveBeenCalledTimes(
+          budget === BOT_CONTEXT_BUDGET_DEFAULT && historyTokens > 375000 ? 1 : 0
+        )
+        expect(handler).toHaveBeenCalledTimes(1)
+      }
+    }
+  )
 
   it("compacts CJK history with the Python-aligned 10% keep window", async () => {
     const invoke = vi.fn(async () => new AIMessage(validSummary("CJK usage trigger")))

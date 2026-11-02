@@ -93,6 +93,7 @@ flowchart LR
 - `cmbcoworkagent.sqlite`：线程元数据数据库（sql.js）
 - `threads/*.sqlite`：按线程的 LangGraph checkpoint
 - `custom-models.json`：模型配置
+- `settings.json`：应用运行设置，支持打包后修改 Bot 上下文预算
 - `mcp-connectors.json`：MCP 连接器
 - `plugins.json` + `plugins/`：插件元数据与内容
 - `scheduled-tasks.json` + `task-runs.json`：定时任务配置与执行记录
@@ -102,6 +103,25 @@ flowchart LR
 - `memory/`：记忆文件与索引
 - `traces/`：默认使用系统用户密钥加密的 Agent Trace；机制与配置见 [Trace 本地存储安全](docs/trace-local-storage-security.md)
 - `logs/`、`hooks/log/`：统一执行敏感字段脱敏；规则见 [本地日志敏感信息脱敏](docs/log-redaction-security.md)
+
+### Bot 上下文预算
+
+打包后的应用也会读取数据目录中的 `settings.json`：Windows 为
+`%USERPROFILE%\.cmbcoworkagent\settings.json`，macOS 为 `~/.cmbcoworkagent/settings.json`。
+如配置了 `CMB_COWORK_AGENT_HOME`，使用该目录下的同名文件。
+
+退出应用后，在现有 JSON 对象中增加或修改以下字段，保留其他配置项，再重新启动应用，无需重新打包：
+
+```json
+{
+  "botContextBudgetTokens": 500000
+}
+```
+
+单位为 token，接受不少于 16000 的整数；未配置、值不合法或文件读取失败时使用 500000，异常会记录日志。
+Bot 私聊、群聊及独立任务共用此预算，普通会话不变。实际预算取配置值与模型窗口的较小值，
+通常在约 75% 时压缩（500K 对应约 375K），最大输出预留可能使压缩更早发生。
+它控制提前压缩，不会删除聊天记录，也不是对每次请求强制截断。每次 Bot 运行读取配置，正在执行的运行沿用开始时的预算。
 
 ## 项目结构
 

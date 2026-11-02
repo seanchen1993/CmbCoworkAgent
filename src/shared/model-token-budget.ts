@@ -1,6 +1,35 @@
 export const MODEL_INPUT_SAFETY_BUFFER_TOKENS = 1_000
 export const SUMMARIZATION_KEEP_RATIO = 0.1
 
+/** A working-context budget changes compaction, never the provider's output limit. */
+export function calculateContextCompactionBudget(
+  contextWindowTokens: number,
+  maxOutputTokens: number,
+  contextBudgetTokens?: number
+): { triggerTokens: number; keepTokens: number; inputBudgetTokens: number } {
+  if (
+    contextBudgetTokens !== undefined &&
+    (!Number.isSafeInteger(contextBudgetTokens) || contextBudgetTokens <= 0)
+  )
+    throw new Error("Invalid context budget.")
+  const window = Math.floor(contextWindowTokens)
+  const workingWindow =
+    contextBudgetTokens === undefined ? window : Math.min(window, Math.floor(contextBudgetTokens))
+  if (!Number.isSafeInteger(workingWindow) || workingWindow <= 0)
+    throw new Error("Context budget must be positive.")
+  return {
+    triggerTokens: Math.min(
+      calculateSummarizationTriggerTokens(window, maxOutputTokens),
+      Math.floor(workingWindow * 0.75)
+    ),
+    keepTokens: calculateSummarizationKeepTokens(workingWindow),
+    inputBudgetTokens: Math.min(
+      calculateModelInputBudgetTokens(window, maxOutputTokens),
+      workingWindow
+    )
+  }
+}
+
 export function calculateSummarizationKeepTokens(contextWindowTokens: number): number {
   const contextWindow = Math.floor(contextWindowTokens)
   if (contextWindow <= 0) {

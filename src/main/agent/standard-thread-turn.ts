@@ -17,7 +17,8 @@ import {
   getDisabledSkillDirs,
   getEnabledPluginSkillSourceMetadata,
   getEnabledSkillsSources,
-  getGlobalRoutingMode
+  getGlobalRoutingMode,
+  getStoredBotContextBudget
 } from "../storage"
 import {
   isSkillVisibleForProjectMode,
@@ -839,6 +840,8 @@ function applyRemoteTurnPolicy(
 export function prepareStandardThreadRuntimeFactory(
   input: StandardThreadRuntimeFactoryInput
 ): PreparedThreadRuntimeFactory {
+  // Snapshot once per run so a file edit cannot change the budget during model failover.
+  const botContextBudget = input.source === "bot" ? getStoredBotContextBudget() : undefined
   const optionsForModel = (modelId?: string): CreateAgentRuntimeOptions => {
     const callerOptions =
       typeof input.baseOptions === "function" ? input.baseOptions() : input.baseOptions
@@ -850,6 +853,7 @@ export function prepareStandardThreadRuntimeFactory(
         },
         input.remotePolicy
       ),
+      ...(botContextBudget !== undefined ? { contextBudgetTokens: botContextBudget } : {}),
       modelId,
       modTurnRunId: input.runLease.runId
     }

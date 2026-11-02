@@ -32,6 +32,7 @@ import {
 import type { AgentAutoCommitSettings, AgentAutoCommitWorkspaceCard } from "./types"
 import { normalizeWorkspacePathKey } from "../shared/workspace-path"
 import { normalizeWindowCloseBehavior, type WindowCloseBehavior } from "../shared/close-to-tray"
+import { isBotContextBudget, normalizeBotContextBudget } from "../shared/bots/context-budget"
 import { readdir, rm, mkdir, readFile, writeFile } from "fs/promises"
 import {
   isAgentGraphRecursionLimit,
@@ -2072,6 +2073,20 @@ export function setWindowCloseBehavior(behavior: WindowCloseBehavior): WindowClo
 const AGENT_GRAPH_RECURSION_LIMIT_KEY = "agentGraphRecursionLimit"
 
 const AGENT_TOOL_STRATEGY_KEY = "agentToolStrategy"
+
+/** Hand-editable in the existing application-data settings.json; read for each Bot run. */
+export function getStoredBotContextBudget(): number {
+  try {
+    const value = getSettingsStore().get("botContextBudgetTokens")
+    if (value !== undefined && !isBotContextBudget(value)) {
+      console.warn("[Storage] Invalid botContextBudgetTokens in settings.json; using 500000.")
+    }
+    return normalizeBotContextBudget(value)
+  } catch {
+    console.warn("[Storage] Failed to read Bot context budget from settings.json; using 500000.")
+    return normalizeBotContextBudget(undefined)
+  }
+}
 
 export function getStoredAgentToolStrategy(): AgentToolStrategy {
   try {

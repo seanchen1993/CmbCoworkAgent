@@ -1,5 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
+const budgetMock = vi.hoisted(() => vi.fn(() => 500000))
+vi.mock("../storage", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../storage")>()),
+  getStoredBotContextBudget: budgetMock
+}))
+
 const harnessServiceMocks = vi.hoisted(() => ({
   buildHarnessFeatureAgentContext: vi.fn(),
   getHarnessProjectAdapterSnapshot: vi.fn(),
@@ -186,6 +192,53 @@ describe("getHarnessAgentContext", () => {
       reason: expect.stringContaining("received 65")
     })
   })
+})
+
+describe("Bot context budget routing", () => {
+  beforeEach(() => { budgetMock.mockReset().mockReturnValue(500000) })
+  afterEach(() => { budgetMock.mockReset().mockReturnValue(500000) })
+
+  it("caps an existing Bot thread without changing its model or workspace", () => {
+    const factory = prepareStandardThreadRuntimeFactory({
+      source: "bot",
+      runLease: { owner: "desktop", runId: "run" },
+      baseOptions: { threadId: "existing-bot-thread", workspacePath: "/fixture" }
+    })
+    expect(factory.optionsForModel("custom:1m-model")).toMatchObject({
+      contextBudgetTokens: 500000,
+      modelId: "custom:1m-model",
+      threadId: "existing-bot-thread",
+      workspacePath: "/fixture"
+    })
+  })
+
+  it("uses edited configuration for the next run while keeping model failover stable", () => {
+    const createFactory = () => prepareStandardThreadRuntimeFactory({
+      source: "bot",
+      runLease: { owner: "desktop", runId: "run" },
+      baseOptions: { threadId: "existing-bot-thread", workspacePath: "/fixture" }
+    })
+    budgetMock.mockReturnValue(400000)
+    const active = createFactory()
+    expect(active.optionsForModel("first-model").contextBudgetTokens).toBe(400000)
+    budgetMock.mockReturnValue(600000)
+    expect(active.optionsForModel("fallback-model").contextBudgetTokens).toBe(400000)
+    expect(createFactory().optionsForModel().contextBudgetTokens).toBe(600000)
+    expect(budgetMock).toHaveBeenCalledTimes(2)
+  })
+
+  it.each(["desktop", "im", "scheduler", "heartbeat"] as const)(
+    "leaves ordinary %s runs on their model's original budget",
+    (source) => {
+      const options = prepareStandardThreadRuntimeFactory({
+        source,
+        runLease: { owner: "desktop", runId: "run" },
+        baseOptions: { threadId: "ordinary-thread", workspacePath: "/fixture" }
+      }).optionsForModel("custom:1m-model")
+      expect(options.contextBudgetTokens).toBeUndefined()
+      expect(budgetMock).not.toHaveBeenCalled()
+    }
+  )
 })
 
 describe("opt-in mock runtime policy",()=>{

@@ -50,13 +50,14 @@ describe("stored agent runtime settings", () => {
 
     expect(storage.getStoredAgentGraphRecursionLimit()).toBe(AGENT_GRAPH_RECURSION_LIMIT_DEFAULT)
     expect(storage.getStoredAgentToolStrategy()).toBe("standard")
+    expect(storage.getStoredBotContextBudget()).toBe(500000)
     expect(storage.getStoredWorkflowWorktreeTimeoutMinutes()).toBe(
       WORKFLOW_WORKTREE_TIMEOUT_MINUTES_DEFAULT
     )
     expect(storage.getStoredWorkflowWorktreeRemoveTimeoutMinutes()).toBe(
       WORKFLOW_WORKTREE_REMOVE_TIMEOUT_MINUTES_DEFAULT
     )
-    expect(warn).toHaveBeenCalledTimes(4)
+    expect(warn).toHaveBeenCalledTimes(5)
   })
 
   it("falls back to defaults when reading the settings store fails", async () => {
@@ -68,13 +69,14 @@ describe("stored agent runtime settings", () => {
 
     expect(storage.getStoredAgentGraphRecursionLimit()).toBe(AGENT_GRAPH_RECURSION_LIMIT_DEFAULT)
     expect(storage.getStoredAgentToolStrategy()).toBe("standard")
+    expect(storage.getStoredBotContextBudget()).toBe(500000)
     expect(storage.getStoredWorkflowWorktreeTimeoutMinutes()).toBe(
       WORKFLOW_WORKTREE_TIMEOUT_MINUTES_DEFAULT
     )
     expect(storage.getStoredWorkflowWorktreeRemoveTimeoutMinutes()).toBe(
       WORKFLOW_WORKTREE_REMOVE_TIMEOUT_MINUTES_DEFAULT
     )
-    expect(warn).toHaveBeenCalledTimes(4)
+    expect(warn).toHaveBeenCalledTimes(5)
   })
 
   it("keeps old/invalid stored settings off, and validates before writing", async () => {
