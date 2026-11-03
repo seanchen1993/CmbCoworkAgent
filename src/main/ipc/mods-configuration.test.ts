@@ -77,7 +77,7 @@ it.each(["composition", "reuse"])(
     const handler = globalHandler({
       scope: () => "workspace", writableScope: () => "workspace",
       captureThreadIncarnation, matchesThreadIncarnation,
-      getThreadCore: () => ({ thread_id: "thread", created_at: 1, metadata: null }),
+      getThreadRuntimeScope: () => ({ thread_id: "thread", created_at: 1, metadata: null }),
       manager: { configure: (_workspace: string, value: boolean) => { enabled = value } },
       creatorComposition: { reconcile: reconcile("composition") },
       creatorReuse: { reconcileAuthorizations: reconcile("reuse") },
@@ -97,7 +97,7 @@ it.each(["workspace", "incarnation", "frame"])(
     const dialog = Promise.withResolvers<{ response: number }>()
     const reconcile = vi.fn()
     const handler = globalHandler({ scope: () => workspace,
-      getThreadCore: () => row, captureThreadIncarnation, matchesThreadIncarnation,
+      getThreadRuntimeScope: () => row, captureThreadIncarnation, matchesThreadIncarnation,
       window: () => ({}), dialog: { showMessageBox: () => dialog.promise },
       manager: { store: { reconcile } }
     }, "mods:reconcile")

@@ -179,7 +179,9 @@ it("refreshes stages and presence each turn, retains the frozen skill, and stops
     stageSkillReference: null
   })
   expect(executions).toBe(2)
-})
+  // This is a complete two-stage filesystem/SQLite lifecycle, including snapshot retention
+  // and approval. Its overall deadline is separate from per-read performance observations.
+}, 20_000)
 
 it.each(["changed", "version", "disabled", "removed", "workspace", "archived"])(
   "fails closed for %s instead of answering without context",

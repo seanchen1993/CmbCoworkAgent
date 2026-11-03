@@ -269,7 +269,15 @@ export interface DevelopmentStatus {
   projectTrial?: DevelopmentProjectTrialRequest
   business?: DevelopmentBusinessStatus
   reuse?: DevelopmentReuseStatus
-  undo?: { phase: "queued" | "applying" | "active" | "failed"; error?: string }
+  undo?: {
+    phase: "queued" | "applying" | "active" | "failed"
+    error?: string
+    componentId?: string
+    revision?: number
+    compiledDigest?: string
+    /** A different trial is actually active; the original receipt is historical, not successful. */
+    superseded?: boolean
+  }
   drafts: Array<{ id: string; name: string; revision: number; digest: string }>
   trials: DevelopmentTrialStatus[]
 }

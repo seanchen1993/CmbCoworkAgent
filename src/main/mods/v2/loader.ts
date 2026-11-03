@@ -362,7 +362,7 @@ export async function compileFunctionPlugin(
                       ? "ts"
                       : "js"
               if (!surface) {
-                const result = resolveClientModules(content, loader, file, root)
+                const result = await resolveClientModules(content, loader, file, root)
                 sourceScans.set(key, scanFunctionModuleUses(result.code))
                 sourceClients.set(key, result.modules)
                 const declaration = discoverFunctionEnvironment(result.code)
@@ -374,7 +374,7 @@ export async function compileFunctionPlugin(
                 return { contents: result.code, loader: "js" }
               }
               return {
-                contents: parseFunctionModule(content, loader, file, root).code,
+                contents: (await parseFunctionModule(content, loader, file, root)).code,
                 loader: "js"
               }
             })

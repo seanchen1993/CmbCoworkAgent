@@ -16,13 +16,13 @@ function nodes(tree: Node): AnyNode[] {
 }
 
 /** All plugin suffixes share the same ESM syntax and import restrictions. */
-export function parseFunctionModule(
+export async function parseFunctionModule(
   source: string,
   loader: Loader,
   file: string,
   root: string
-): { code: string; ast: AnyNode[] } {
-  const { code } = modCompiler().transformSync(source, {
+): Promise<{ code: string; ast: AnyNode[] }> {
+  const { code } = await modCompiler().transform(source, {
     loader,
     format: "esm",
     sourcefile: relative(root, file).replaceAll("\\", "/"),
@@ -40,13 +40,13 @@ export function parseFunctionModule(
 }
 
 /** Resolve Client assets at approval time, including TSX and renamed destructured constructors. */
-export function resolveClientModules(
+export async function resolveClientModules(
   source: string,
   loader: Loader,
   file: string,
   root: string
-): { code: string; modules: string[] } {
-  const { code, ast } = parseFunctionModule(source, loader, file, root)
+): Promise<{ code: string; modules: string[] }> {
+  const { code, ast } = await parseFunctionModule(source, loader, file, root)
   const names = new Set(["Client"])
   for (const node of ast) {
     if (node.type !== "ObjectPattern") continue

@@ -761,6 +761,29 @@ jobs:
           COMPOSITION_E2E_ARTIFACT_ROOT: output/chat-history-package-validation
         run: node --import tsx tests/chat-history-interaction-e2e.spec.ts
 
+      - name: Verify asynchronous Mods compilation and compiler lifecycle
+        if: matrix.platform == 'win'
+        timeout-minutes: 5
+        run: npx vitest run src/main/mods/compiler-service.test.ts src/main/mods/v2/client-loader.test.ts src/main/mods/v2/loader.test.ts src/main/mods/v2/component-loader.test.ts src/main/mods/loader.test.ts src/main/mods/v2/guest-runtime.test.ts src/main/mods/v2/guest-bootstrap-compilation.test.ts
+
+      - name: Validate populated chat and mode navigation in Windows package
+        if: matrix.platform == 'win'
+        timeout-minutes: 10
+        shell: pwsh
+        env:
+          COMPOSITION_E2E_PACKAGED_DIR: dist/win-unpacked
+          COMPOSITION_E2E_ARTIFACT_ROOT: output/chat-navigation-package-validation
+        run: node --import tsx tests/chat-navigation-performance-packaged.spec.ts
+
+      - name: Validate lazy compiler startup and idle process cleanup
+        if: matrix.platform == 'win'
+        timeout-minutes: 5
+        shell: pwsh
+        env:
+          COMPOSITION_E2E_PACKAGED_DIR: dist/win-unpacked
+          COMPOSITION_E2E_ARTIFACT_ROOT: output/compiler-lifecycle-package-validation
+        run: node --import tsx tests/mods-compiler-lifecycle-packaged.spec.ts
+
       - name: Upload chat interaction validation evidence
         if: always() && matrix.platform == 'win'
         uses: actions/upload-artifact@v4
@@ -774,6 +797,12 @@ jobs:
             output/chat-history-package-validation/**/blank-*.png
             output/chat-history-package-validation/**/main.stdout.log
             output/chat-history-package-validation/**/main.stderr.log
+            output/chat-navigation-package-validation/**/navigation-acceptance.json
+            output/chat-navigation-package-validation/**/navigation.ndjson
+            output/chat-navigation-package-validation/**/ipc-timings.json
+            output/chat-navigation-package-validation/**/*.png
+            output/chat-navigation-package-validation/**/failure-ui.txt
+            output/compiler-lifecycle-package-validation/**/compiler-lifecycle.json
           if-no-files-found: warn
           retention-days: 14
 

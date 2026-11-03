@@ -684,7 +684,7 @@ function ScopedDevelopment({
                               ? "填写插件参数"
                               : undoBusy
                                 ? "正在撤销修改"
-                                : status?.undo?.phase === "failed"
+                                : status?.undo?.phase === "failed" && !status.undo.superseded
                                   ? "撤销结果待核对"
                                   : reuse?.phase === "needs-approval"
                                     ? "确认跨聊天复用"
@@ -1581,7 +1581,9 @@ function ScopedDevelopment({
             {status.undo.phase === "active"
               ? "撤销已完成。请核对当前聊天显示与操作效果。"
               : status.undo.phase === "failed"
-                ? "撤销尚未确认完成，请先刷新状态核对当前运行版本，不要重复执行。"
+                ? status.undo.superseded
+                  ? "之前试用的撤销未确认完成，记录已保留；当前显示的是新启用的灵件。此记录不表示新灵件撤销失败。"
+                  : "撤销尚未确认完成，请先刷新状态核对当前运行版本，不要重复执行。"
                 : "已准备撤销，正在等待当前操作结束并恢复运行状态。"}
           </div>
         )}

@@ -6,15 +6,17 @@ import { parseModManifest } from "../../shared/mods/validation"
 import type { ModManifest } from "../../shared/mods/types"
 import { ModError } from "./errors"
 import { openStableFileHandle, readStableFileHandleBounded } from "../services/stable-file-handle"
+import { createModCompilerService, type ModCompiler } from "./compiler-service"
 
-let compiler: typeof import("esbuild") | undefined
-export function modCompiler(): typeof import("esbuild") {
+let compiler: ModCompiler | undefined
+export function modCompiler(): ModCompiler {
   if (!compiler) {
-    const require = createRequire(join(__dirname, "mods-loader.cjs"))
-    // esbuild uses spawn, which cannot execute an ASAR virtual path. Load its
-    // real unpacked JS entry so it also resolves the real unpacked native binary.
-    const entry = require.resolve("esbuild").replace(/\.asar([\\/])/, ".asar.unpacked$1")
-    compiler = require(entry) as typeof import("esbuild")
+    compiler = createModCompilerService(() => {
+      const require = createRequire(join(__dirname, "mods-loader.cjs"))
+      // esbuild cannot spawn an ASAR virtual path; resolve its unpacked binary.
+      const entry = require.resolve("esbuild").replace(/\.asar([\\/])/, ".asar.unpacked$1")
+      return require(entry) as typeof import("esbuild")
+    })
   }
   return compiler
 }

@@ -131,7 +131,14 @@ function fixture() {
     panes: operation, siteMount: operation, siteMountOutcome: operation, siteRender: operation,
     commands: nativeCommands, runCommand
   }
-  const getThreadCore = (id: string) => id === threadId ? row : undefined
+  const getThreadCore = vi.fn((id: string) => id === threadId ? row : undefined)
+  const getThreadRuntimeScope = vi.fn((id: string) => {
+    const current = id === threadId ? row : undefined
+    if (!current?.metadata) return current
+    const metadata = JSON.parse(current.metadata)
+    delete metadata.llmFileHistory
+    return { ...current, metadata: JSON.stringify(metadata) }
+  })
   const code = ts.transpileModule([
     ...helpers.map(node => node.getText(source)),
     ...handlerNodes.map(node => node.getText(source)),
@@ -142,7 +149,7 @@ function fixture() {
   const display: Display = runInNewContext(code, {
     ipcMain: { handle: (channel: string, handler: Handler) => handlers.set(channel, handler) },
     process: { env: {} }, URL, __dirname: nativeDirectory, join, pathToFileURL,
-    window: () => owner, getThreadCore, getThreadRuntimeScope: getThreadCore,
+    window: () => owner, getThreadCore, getThreadRuntimeScope,
     ...nativeChildThreadReaders(getThreadCore),
     manager: { workspaceKey: (workspace: string) => workspace, functionUserScope,
       commands: legacyCommands, isEnabled: () => true }, functions, queue: { enqueue },
@@ -155,7 +162,7 @@ function fixture() {
   const input: DisplayInput = { threadId, component: "AskUserQuestion", owner: "actual-owner",
     messageId: "actual-message", expectedRequestId: "actual-request-R1", props: { text: "safe" } }
   return { display, event, input, handlers, operation, functionUserScope, descriptor,
-    nativeCommands, legacyCommands, enqueue, runCommand,
+    nativeCommands, legacyCommands, enqueue, runCommand, getThreadCore, getThreadRuntimeScope,
     runQueued: () => { if (!queued) throw new Error("no actual queued callback")
       return queued(new AbortController().signal) },
     setRow: (value: ThreadIncarnationRow | undefined) => { row = value },
@@ -163,6 +170,18 @@ function fixture() {
     facts: { workspace: "/display-project", threadId, agentId: "actual-child",
       turnId: "actual-turn", userInitiated: true, leased: false, immediate: false } }
 }
+
+it("keeps repeated display identity checks independent of large file-adoption history", async () => {
+  const f = fixture()
+  f.setRow({ created_at: 1, metadata: JSON.stringify({
+    workspacePath: f.facts.workspace, cmb_thread_incarnation: "R1",
+    llmFileHistory: { history: "x".repeat(512 * 1024) }
+  }) })
+  for (let index = 0; index < 20; index++)
+    await f.display(f.event, f.facts.threadId, async () => f.operation())
+  expect(f.getThreadRuntimeScope).toHaveBeenCalled()
+  expect(f.getThreadCore).not.toHaveBeenCalled()
+})
 
 it.each(channels)("enters a cold read-only native identity through actual %s", async channel => {
   const f = fixture()

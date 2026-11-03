@@ -25,6 +25,7 @@ function fixture() {
     publishDevelopmentTurnSettlement({ ...scope, turnId: "turn", outcome }),
   idle: () => { busy = false; idle() },
   edit: () => { trial = { ...trial, revision: 2 } },
+  replace: (patch: Partial<DevelopmentTrialStatus>) => { trial = { ...trial, ...patch } },
   leave: () => { alive = false } }
 }
 afterEach(() => { for (const service of services.splice(0)) service.close() })
@@ -57,4 +58,46 @@ it("does not perform an undo from an interrupted turn or a stale scope", async (
   expect(f.stop).not.toHaveBeenCalled()
   f.leave()
   expect(f.service.status(scope.threadId)).toBeUndefined()
+})
+
+it.each(["component", "revision"])(
+  "keeps an old undo failure as history after an actually active replacement %s", async kind => {
+    const f = fixture()
+    await f.service.request(scope, "mod", "turn", f.guard)
+    f.settle("cancelled")
+    await vi.waitFor(() => expect(f.service.status(scope.threadId))
+      .toMatchObject({ phase: "failed", superseded: false }))
+    f.replace({ ...(kind === "component" ? { componentId: "new-mod", draftId: "new-mod" } : {}),
+      revision: 2, compiledDigest: "c".repeat(64), activeRevision: 2,
+      activeDigest: "c".repeat(64), phase: "active" })
+    expect(f.service.status(scope.threadId)).toMatchObject({
+      phase: "failed", error: "DEVELOPMENT_UNDO_TURN_INTERRUPTED", superseded: true,
+      componentId: "mod", revision: 1, compiledDigest: "b".repeat(64)
+    })
+    f.idle()
+    expect(f.stop).not.toHaveBeenCalled()
+  }
+)
+
+it.each(["needs-approval", "unknown", "stopped"] as const)(
+  "does not dismiss an unresolved undo because a later trial is merely %s", async phase => {
+    const f = fixture()
+    await f.service.request(scope, "mod", "turn", f.guard)
+    f.settle("cancelled")
+    await vi.waitFor(() => expect(f.service.status(scope.threadId)?.phase).toBe("failed"))
+    f.replace({ componentId: "later", revision: 2, phase,
+      compiledDigest: "c".repeat(64), activeRevision: undefined, activeDigest: undefined })
+    expect(f.service.status(scope.threadId)).toMatchObject({ phase: "failed", superseded: false })
+    expect(f.stop).not.toHaveBeenCalled()
+  }
+)
+
+it("does not confuse a changed draft with a replacement running revision", async () => {
+  const f = fixture()
+  await f.service.request(scope, "mod", "turn", f.guard)
+  f.settle("cancelled")
+  await vi.waitFor(() => expect(f.service.status(scope.threadId)?.phase).toBe("failed"))
+  f.replace({ revision: 2, bundleDigest: "c".repeat(64), compiledDigest: "d".repeat(64) })
+  expect(f.service.status(scope.threadId)).toMatchObject({ phase: "failed", superseded: false })
+  expect(f.stop).not.toHaveBeenCalled()
 })

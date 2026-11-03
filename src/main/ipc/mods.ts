@@ -2170,12 +2170,12 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
       (typeof expectedWorkspace !== "string" || expectedWorkspace !== workspace))
       throw new ModError("MODS_SCOPE_CHANGED")
     const incarnation = expectedWorkspace === undefined ? undefined :
-      captureThreadIncarnation(getThreadCore(threadId)!)
+      captureThreadIncarnation(getThreadRuntimeScope(threadId)!)
     const frame = event.sender?.mainFrame
     return { workspace, assertCurrent: () => {
       if (read() !== workspace || (incarnation !== undefined &&
         (event.sender.mainFrame !== frame ||
-          !matchesThreadIncarnation(getThreadCore(threadId), incarnation))))
+          !matchesThreadIncarnation(getThreadRuntimeScope(threadId), incarnation))))
         throw new ModError("MODS_SCOPE_CHANGED")
     } }
   }
@@ -2196,7 +2196,9 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
   async function withDisplayExecution<T>(event: IpcMainInvokeEvent, threadId: string,
     run: (workspace: string) => Promise<T>): Promise<T> {
     const workspace = scope(event, threadId)
-    const row = getThreadCore(threadId)
+    // Display identity never consumes adoption history. Keep a fresh database projection
+    // on every fence, without repeatedly transferring/parsing the full metadata blob.
+    const row = getThreadRuntimeScope(threadId)
     if (!row) throw new ModError("MODS_THREAD_MISSING")
     const incarnation = captureThreadIncarnation(row)
     const nativeFrame = event.sender.mainFrame
@@ -2216,7 +2218,7 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
     const assertDisplay = () => {
       markdownFrame.assertCurrent()
       if (event.sender.mainFrame !== nativeFrame || scope(event, threadId) !== workspace ||
-        !matchesThreadIncarnation(getThreadCore(threadId), incarnation))
+        !matchesThreadIncarnation(getThreadRuntimeScope(threadId), incarnation))
         throw new ModError("MODS_CALL_SCOPE_CHANGED")
       facts.runtimeAuthority?.assertLive()
     }

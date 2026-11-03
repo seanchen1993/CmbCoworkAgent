@@ -8,6 +8,7 @@ interface Entry {
   id: string
   turnId?: string
   signature: string
+  target: Pick<DevelopmentTrialStatus, "revision" | "bundleDigest" | "compiledDigest">
   guard(): void
   settled: boolean
   receipt: NonNullable<DevelopmentStatus["undo"]>
@@ -48,7 +49,27 @@ export class CreatorTrialUndoScheduler {
     const entry = this.entries.get(threadId)
     if (!entry) return undefined
     try { entry.guard() } catch { return undefined }
-    return { ...entry.receipt }
+    const receipt = { ...entry.receipt, componentId: entry.id,
+      revision: entry.target.revision, compiledDigest: entry.target.compiledDigest }
+    if (entry.receipt.phase !== "failed") return receipt
+    try {
+      const trials = this.deps.read(entry.scope)
+      const original = trials.some(trial => trial.componentId === entry.id &&
+        ((trial.activeRevision === entry.target.revision &&
+          trial.activeDigest === entry.target.compiledDigest) ||
+        (trial.revision === entry.target.revision &&
+        trial.bundleDigest === entry.target.bundleDigest &&
+        trial.compiledDigest === entry.target.compiledDigest && trial.phase !== "stopped")))
+      // Missing/stopped alone is not proof of success. Only a confirmed replacement moves
+      // the old warning out of the current-trial heading; its failure receipt remains intact.
+      const replacement = trials.some(trial => trial.phase === "active" &&
+        trial.activeRevision !== undefined && trial.activeDigest !== undefined &&
+        (trial.componentId !== entry.id || trial.activeRevision !== entry.target.revision ||
+          trial.activeDigest !== entry.target.compiledDigest))
+      return { ...receipt, superseded: !original && replacement }
+    } catch {
+      return receipt
+    }
   }
   async request(scope: DevelopmentScope, id: string, turnId: string | undefined,
     guard: () => void): Promise<{ phase: "queued" }> {
@@ -65,7 +86,9 @@ export class CreatorTrialUndoScheduler {
       if (released) this.entries.delete(released[0])
       else throw Error("DEVELOPMENT_UNDO_CAPACITY")
     }
-    const entry: Entry = { scope, id, turnId, signature: signature(trial), guard,
+    const entry: Entry = { scope, id, turnId, signature: signature(trial),
+      target: { revision: trial.revision, bundleDigest: trial.bundleDigest,
+        compiledDigest: trial.compiledDigest }, guard,
       settled: !turnId, receipt: { phase: "queued" } }
     this.entries.set(scope.threadId, entry)
     this.deps.changed(scope.threadId)

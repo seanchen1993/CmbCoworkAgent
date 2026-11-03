@@ -52,7 +52,18 @@ import type {
   FunctionUiResolveSyncBudget
 } from "./ui-resolve-private-types"
 
-let compiledBootstrap: string | undefined
+let compiledBootstrap: Promise<string> | undefined
+function bootstrapProgram(): Promise<string> {
+  if (!compiledBootstrap) {
+    const pending = modCompiler().transform(FUNCTION_GUEST_BOOTSTRAP, { target: "es2016" })
+      .then(result => result.code)
+    compiledBootstrap = pending
+    void pending.catch(() => {
+      if (compiledBootstrap === pending) compiledBootstrap = undefined
+    })
+  }
+  return compiledBootstrap
+}
 
 interface InvocationFrame {
   id: string
@@ -355,14 +366,12 @@ export class FunctionGuestRuntime implements FunctionUiConstructorGuest {
       // Native await bypasses Promise.then; lowering both sources makes continuation identity
       // explicit. Compilation happens only on load, outside the guest's execution slices.
       const compiler = modCompiler()
-      compiledBootstrap ??= compiler.transformSync(FUNCTION_GUEST_BOOTSTRAP, {
-        target: "es2016"
-      }).code
-      const program = compiler.transformSync(code, { target: "es2016" }).code
+      const bootstrap = await bootstrapProgram()
+      const program = (await compiler.transform(code, { target: "es2016" })).code
       guest.evaluate(FUNCTION_CODEGEN_GUARD).dispose()
       guest.deadline = performance.now() + 50
       guest.uiCopyDispose = installFunctionUiResolveDataCopy(context)
-      guest.evaluate(compiledBootstrap).dispose()
+      guest.evaluate(bootstrap).dispose()
       guest.uiConstructorHelper = context.getProp(context.global, "__functionUiConstructorBootstrap")
       guest.uiResolverInvoke = context.getProp(context.global, "__functionUiResolverInvoke")
       guest.evaluate("delete globalThis.__functionUiConstructorBootstrap; delete globalThis.__functionUiResolverInvoke").dispose()

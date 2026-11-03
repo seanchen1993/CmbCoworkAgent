@@ -107,6 +107,9 @@ async function main() {
         },
         chatApproval:()=>{current.drafts[0]={...current.drafts[0],revision:2,digest:"3".repeat(64)};current.trials[0]={...current.trials[0],revision:2,bundleDigest:"3".repeat(64),compiledDigest:"4".repeat(64),phase:"needs-approval"};listeners.forEach(fn=>fn({threadId:"creator"}))},
         refresh:()=>listeners.forEach(fn=>fn({threadId:"creator"})),
+        undoReceipt:superseded=>{current.undo={phase:"failed",error:"DEVELOPMENT_UNDO_TURN_INTERRUPTED",
+          componentId:"previous-component",revision:1,compiledDigest:"8".repeat(64),superseded};
+          listeners.forEach(fn=>fn({threadId:"creator"}));},
         sourceWithChat:phase=>{current.sourceSet={id:"coexisting-source",title:"仍需处理的源码依赖",phase:"dependencies",dependencies:[
           {id:"dep",name:"独立依赖",version:"1",digest:"5".repeat(64),phase}]};
           api.reconcileSourceSetDependency=async input=>{calls.push(["source-reconcile",input]);current.sourceSet.dependencies[0].phase="prepared";return structuredClone(current)};
@@ -715,6 +718,19 @@ async function main() {
     assert.equal(surfaceIntent.compiledDigest, "6".repeat(64))
     assert.equal(surfaceIntent.developmentComponentId, "chat-component")
     assert.equal(surfaceIntent.developmentRevision, 2)
+    await page.evaluate("window.fixture.undoReceipt(false)")
+    await page.getByRole("button", { name: "撤销结果待核对", exact: true }).waitFor()
+    await page.evaluate("window.fixture.undoReceipt(true)")
+    const activeTrial = page.getByRole("button", { name: "灵件试用中", exact: true })
+    await activeTrial.waitFor()
+    assert.equal(await page.getByRole("button", { name: "撤销结果待核对", exact: true }).count(), 0)
+    await page.screenshot({ path: join(output, "replacement-trial-status.png") })
+    await activeTrial.click()
+    await openCreatorStep(page, "trial")
+    await workspace.getByText("组件与高级设置", { exact: true }).click()
+    await workspace.getByText("之前试用的撤销未确认完成，记录已保留；当前显示的是新启用的灵件。此记录不表示新灵件撤销失败。", { exact: true }).waitFor()
+    assert.equal(await workspace.getByText("撤销已完成。请核对当前聊天显示与操作效果。", { exact: true }).count(), 0)
+    await page.screenshot({ path: join(output, "replacement-trial-history.png") })
     assert.deepEqual(errors, [])
     console.log(
       "PASS creator workspace navigation, long-flow disclosure, delivery, chat return, mobile bounds and 18-stage native-status aggregate verdicts"
