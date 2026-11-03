@@ -485,6 +485,7 @@ jobs:
           npx vitest run --maxWorkers=2
           src/main/ipc/native-conversation-transcript-flush.test.ts
           src/main/services/notification-pipeline.test.ts
+          src/main/services/im/thread-activity.test.ts
           src/main/harness-board/auto-mode-retained-skill.test.ts
           src/main/ipc/dashboard-trace-export-ipc.test.ts
           src/renderer/src/components/dashboard/trace-export-scope.test.ts
@@ -500,6 +501,10 @@ jobs:
           npx vitest run --maxWorkers=1
           src/main/agent/function-conversation-native-host.test.ts
           -t "actual native partial debounce and canonical commit race"
+
+      - name: Verify physical-run message queue integration
+        timeout-minutes: 5
+        run: node --import tsx tests/message-queue-plumbing.spec.ts
 
       - name: Verify illustrated release guide navigation (Windows)
         if: runner.os == 'Windows'

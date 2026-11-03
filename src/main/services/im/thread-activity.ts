@@ -65,6 +65,7 @@ export async function readImThreadActivity(
     else if (imRunning || lease?.owner === "im") label = "招乎任务执行中"
     else if (lease?.owner === "desktop") label = "桌面任务执行中"
     else if (lease?.owner === "scheduler") label = "定时任务执行中"
+    else if (lease?.owner === "mods") label = "Mods 命令执行中"
     else if (teamPending) label = "Team 子任务结果待汇总"
     else if (workflowPending) label = "Workflow 结果待汇总"
   }

@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest"
 import type { ThreadRow } from "../../db"
+import type { LocalThreadRunLease } from "../../agent/thread-run-lease"
 
 vi.mock("../../agent/coordinator-worker-manager", () => ({ coordinatorWorkerManager: {} }))
 vi.mock("../../agent/workflow/run-manager", () => ({ workflowRunManager: {} }))
@@ -21,7 +22,7 @@ function fixture(agentMode = "normal") {
     metadata: JSON.stringify({ agentMode, workspacePath: "/workspace" })
   } as ThreadRow
   const dependencies = {
-    lease: vi.fn(() => undefined),
+    lease: vi.fn<() => LocalThreadRunLease | undefined>(() => undefined),
     coordinator: {
       hasRunningWorkersForThread: vi.fn(() => false),
       hasTerminalWorkerAwaitingNotificationForThread: vi.fn(() => false),
@@ -38,6 +39,26 @@ function fixture(agentMode = "normal") {
 }
 
 describe("IM execution status with detached children", () => {
+  it.each([
+    ["desktop", "桌面任务执行中"],
+    ["im", "招乎任务执行中"],
+    ["scheduler", "定时任务执行中"],
+    ["mods", "Mods 命令执行中"]
+  ] as const)("keeps the %s run owner busy until its lease is released", async (owner, label) => {
+    const { thread, dependencies } = fixture()
+    dependencies.lease.mockReturnValue({
+      threadId: thread.thread_id, owner, runId: "run", acquiredAt: "2026-11-03"
+    })
+    expect(await readImThreadActivity(thread, false, dependencies)).toEqual({
+      busy: true, label, interaction: null
+    })
+    dependencies.userInput.mockReturnValue(true)
+    expect((await readImThreadActivity(thread, false, dependencies)).label).toContain("等待补充回答")
+    dependencies.userInput.mockReturnValue(false)
+    dependencies.lease.mockReturnValue(undefined)
+    expect((await readImThreadActivity(thread, false, dependencies)).busy).toBe(false)
+  })
+
   it("reports Team work when the main thread is idle and has no lease", async () => {
     const { thread, dependencies } = fixture("coordinator")
     dependencies.coordinator.hasRunningWorkersForThread.mockReturnValue(true)

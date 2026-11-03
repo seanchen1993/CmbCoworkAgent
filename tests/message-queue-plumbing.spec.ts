@@ -1156,14 +1156,14 @@ function testStreamTranscriptBuffersArePhysicalRunScoped(): void {
   )
   assertSourceOrder(
     transcriptFlushBody,
-    "appendThreadMessageTextDelta(threadId, partition.ordinary[0])",
-    "upsertThreadMessages(threadId, partition.ordinary, { preserveExistingOrder })",
+    "appendThreadMessageTextDelta(threadId, partition.ordinary[0], streamAttempt)",
+    "upsertThreadMessages(threadId, partition.ordinary, { preserveExistingOrder, streamAttempt })",
     "content-only batches append fragments before the structural fallback"
   )
   assertSourceOrder(
     transcriptFlushBody,
     "partitionCanonicalThreadMessageEchoes(threadId, messages)",
-    "appendThreadMessageTextDelta(threadId, partition.ordinary[0])",
+    "appendThreadMessageTextDelta(threadId, partition.ordinary[0], streamAttempt)",
     "canonical echoes are checked before ordinary delta persistence"
   )
   assertIncludes(
@@ -1173,18 +1173,18 @@ function testStreamTranscriptBuffersArePhysicalRunScoped(): void {
   )
   assertMatches(
     transcriptFlushBody,
-    /persistedCount = partition\.canonicalCount \+\s*upsertThreadMessages\(threadId, partition\.ordinary, \{ preserveExistingOrder \}\)/,
+    /persistedCount = partition\.canonicalCount \+\s*upsertThreadMessages\(threadId, partition\.ordinary, \{ preserveExistingOrder, streamAttempt \}\)/,
     "mixed batches count canonical echoes and persist only ordinary messages"
   )
   assertSourceOrder(
     transcriptFlushBody,
-    "upsertThreadMessages(threadId, partition.ordinary, { preserveExistingOrder })",
+    "upsertThreadMessages(threadId, partition.ordinary, { preserveExistingOrder, streamAttempt })",
     "if (persistedCount !== messages.length)",
     "persistence still accounts for every message in the complete batch"
   )
   assertSourceOrder(
     transcriptFlushBody,
-    "upsertThreadMessages(threadId, partition.ordinary, { preserveExistingOrder })",
+    "upsertThreadMessages(threadId, partition.ordinary, { preserveExistingOrder, streamAttempt })",
     "} catch (error) {",
     "both incremental persistence paths run inside the buffer-restoration boundary"
   )
