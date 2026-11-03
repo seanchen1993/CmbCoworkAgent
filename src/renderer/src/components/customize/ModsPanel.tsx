@@ -163,7 +163,7 @@ export function ModsPanel({
   return (
     <div className="mx-auto w-full max-w-5xl space-y-5 p-4 sm:p-6">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <h1 className="text-xl font-semibold">灵件</h1>
+        <h1 data-release-guide="mods" className="text-xl font-semibold">灵件</h1>
         <div className="flex items-center gap-2">
           {onManageSources && (
             <Button size="sm" variant="ghost" onClick={onManageSources}>
@@ -202,7 +202,7 @@ export function ModsPanel({
         />
       )}
       {section === "create" && (
-        <section className="space-y-3 rounded-xl border border-primary/20 bg-primary/5 p-5">
+        <section data-release-guide="creator-entry" className="space-y-3 rounded-xl border border-primary/20 bg-primary/5 p-5">
           <h2 className="font-semibold">一句话，制作或组合你需要的灵件</h2>
           <p className="text-sm leading-6 text-muted-foreground">
             进入创造者模式后，告诉助手你想改变什么。生成新灵件、调整已有功能、组合多个灵件并应用，都可以在聊天中完成。
@@ -992,7 +992,8 @@ export function ModsSettings({
             <DialogTitle>卸载插件</DialogTitle>
             <DialogDescription>
               确认卸载「{deleteTarget?.name}」的整个来源插件？其中的灵件、技能、工具连接和自动检查
-              会一并移除，相关命令与面板停止运行；其他插件保留。聊天记录不受影响，当前组合会移除该插件的灵件引用。
+              会一并移除，相关命令与面板停止运行。未被其他项目引用的随包依赖一起移除，共享或单独安装的组件保留。
+              聊天记录不受影响，当前组合会移除该插件的灵件引用。
               已保存的搭配和流程模板保留，复用时需重新核对来源。审计记录和已保存的灵件数据不清除。
             </DialogDescription>
           </DialogHeader>

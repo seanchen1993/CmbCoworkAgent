@@ -1,5 +1,5 @@
 import AdmZip from "adm-zip"
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from "node:fs"
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, existsSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { basename, dirname, join, resolve } from "node:path"
 import { afterAll, beforeAll, expect, it, vi } from "vitest"
@@ -146,6 +146,8 @@ it("uploads a complete project source ZIP through the normal plugin installer", 
     .filter(id => id !== project.id).sort()
   expect(listed.find(item => item.id === project.id)?.projectDependencyIds).toEqual(dependencyIds)
   expect(dependencyIds.every(id => listed.some(item => item.id === id))).toBe(true)
+  expect([...storage.getPlugins().find(item => item.id === project.id)!.bundleDependencyIds!].sort()).toEqual(dependencyIds)
+  expect(dependencyIds.every(id => storage.getPlugins().find(item => item.id === id)?.dependencyOnly === true)).toBe(true)
   expect(listed.find(item => item.id === native().id)?.projectDependencyIds).toBeUndefined()
   for (const pluginId of new Set(lock.bindings.map(binding => binding.ref.pluginId))) {
     const provider = storage.getPlugins().find(item => item.id === pluginId)!
@@ -202,4 +204,19 @@ it("imports a non-business-specific project source set using the same ZIP route"
   expect(storage.getPlugins().find(item => item.id === result.pluginId)?.skillCount).toBe(5)
   const listed = await handlers.get("plugins:list")!(null) as unknown as import("../types").PluginMetadata[]
   expect(listed.find(item => item.id === result.pluginId)?.projectDependencyIds).toEqual([])
+})
+
+it("uninstalls all exclusive bundle files even if the project's runtime declaration is damaged", async () => {
+  const project = storage.getPlugins().find(item => item.bundleDependencyIds?.length === 3)!
+  expect(project).toBeDefined()
+  const dependencies = storage.getPlugins().filter(item => project.bundleDependencyIds!.includes(item.id))
+  writeFileSync(join(project.path, "devclaw.project-runtime.json"), "{invalid")
+  const result = await handlers.get("plugins:delete")!(null, project.id)
+  expect(result).toEqual({ success: true })
+  for (const item of [project, ...dependencies]) {
+    expect(storage.getPlugins().some(plugin => plugin.id === item.id)).toBe(false)
+    expect(existsSync(item.path)).toBe(false)
+  }
+  expect(storage.getPlugins().some(item => item.name === "vendor-native-fixture")).toBe(true)
+  expect(native()).toBeDefined()
 })

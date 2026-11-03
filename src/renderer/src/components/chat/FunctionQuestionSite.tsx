@@ -18,7 +18,9 @@ export function FunctionQuestionSite({
       questions: request.questions
     })
   } catch {
-    return null
+    return <p role="alert" className="px-4 py-3 text-sm text-destructive">
+      问题格式暂时无法显示，请停止当前任务后重试。系统不会替你选择答案。
+    </p>
   }
   return (
     <FunctionSite
@@ -34,7 +36,9 @@ export function FunctionQuestionSite({
             </div>
           )
         } catch {
-          return null
+          return <p role="alert" className="px-4 py-3 text-sm text-destructive">
+            问题内容校验未通过，请重新读取界面后重试。
+          </p>
         }
       }}
       fallback={renderQuestions(request.questions)}

@@ -59,7 +59,7 @@ async function main() {
       import{ProjectFormDialog,ProjectEditDialog}from'./src/renderer/src/components/harness-board/HarnessBoardView';
       import{HostProjectListItems,LocalProjectRun}from'./src/renderer/src/components/harness-board/LocalProjectsPanel';
       import{parseProjectRuntimeManifestV1}from'./src/shared/project-runtime/manifest';
-      const root=createRoot(document.getElementById('root')),calls=[],views={},templates=[{installedPluginId:'host',name:'四阶段项目插件',version:'0.1.3',stages:['转换','需求','规格','设计'],expectedTemplate:{pluginId:'host',name:'四阶段项目插件',version:'0.1.3',digest:'a'.repeat(64)}}];
+      const root=createRoot(document.getElementById('root')),calls=[],reviews=[],views={},templates=[{installedPluginId:'host',name:'四阶段项目插件',version:'0.1.3',stages:['转换','需求','规格','设计'],expectedTemplate:{pluginId:'host',name:'四阶段项目插件',version:'0.1.3',digest:'a'.repeat(64)}}];
       let installedIdentity={...templates[0].expectedTemplate};
       window.replaceInstalled=kind=>{installedIdentity={...installedIdentity,...(kind==='version'?{version:'0.1.4'}:{digest:'b'.repeat(64)})}};
       window.resetInstalled=()=>{installedIdentity={pluginId:'host',name:'四阶段项目插件',version:'0.1.3',digest:'a'.repeat(64)};templates[0].expectedTemplate={...installedIdentity}};
@@ -75,19 +75,19 @@ async function main() {
           stages:['转换','需求','规格','设计'].map((title,index)=>({id:'stage'+index,title,skill:'draft',actionIds:[],artifactIds:[],checkIds:[],approval:'none'})),actions:[],artifacts:[],checks:[],environment:[],
           capabilities:{execution:true,conditionalTransition:true,idempotency:true,reconciliation:true,cancellation:true}})},operations:[]}}
       window.api={plugins:{prepareStartUse:async()=>({kind:'host-project',canOpen:true,identity:installedIdentity,issues:[]})},file:{selectDirectory:async()=>({canceled:false,filePaths:['C:/fixture/project']})},
-        harnessBoard:{searchEnterpriseProjects:async()=>[],reviewProjectUse:async input=>({reviewId:'review-'+input.projectDir,reviewDigest:'c'.repeat(64),projectId:input.existingProjectId??'allocated',workspace:input.workspacePath+'/'+input.projectDir,plugin:installedIdentity,packageDigest:'d'.repeat(64),sources:[{pluginId:'host',name:'四阶段项目插件',digest:'e'.repeat(64),capabilities:['process.run'],actionIds:[],configurationOnly:false}],scopeNotice:'仅用于本项目通过原界面登记的目录。',requiresApplicationEnable:false,...(input.existingProjectId?{authorizationCurrent:true}:{}),expiresAt:Date.now()+60000}),createProject:async input=>{calls.push(['legacy-create',input]);return{}},
+        harnessBoard:{searchEnterpriseProjects:async()=>[],reviewProjectUse:async input=>(reviews.push(input),{reviewId:'review-'+input.projectDir,reviewDigest:'c'.repeat(64),projectId:input.existingProjectId??'allocated',workspace:input.workspacePath+'/'+input.projectDir,plugin:installedIdentity,packageDigest:'d'.repeat(64),sources:[{pluginId:'host',name:'四阶段项目插件',digest:'e'.repeat(64),capabilities:['process.run'],actionIds:[],configurationOnly:false}],scopeNotice:'仅用于本项目通过原界面登记的目录。',requiresApplicationEnable:false,...(input.existingProjectId?{authorizationCurrent:true}:{}),expiresAt:Date.now()+60000}),createProject:async input=>{calls.push(['legacy-create',input]);return{}},
           localProjects:{get:async id=>{calls.push(['get',id]);return structuredClone(views[id])},mods:{read:async id=>({projectId:id,projectVersion:1,packageDigest:'a'.repeat(64),workspace:'C:/fixture/project'}),approve:async()=>{throw Error('NO_AUTO_APPROVAL')}},
             create:async input=>{calls.push(['host-create',input]);if(JSON.stringify(input.expectedPlugin??input.expectedTemplate)!==JSON.stringify(installedIdentity))throw Error('PROJECT_HOST_PACKAGE_IDENTITY_MISMATCH');const result=make(input);views[result.project.projectId]=result;if(holdCreate)await new Promise(resolve=>finishCreate=resolve);return structuredClone(result)},
             command:async()=>{throw Error('NO_AUTO_START')}}}};
       const blank=()=>({name:'既有项目',description:'独立目标',projectCode:'P001',systemId:'S1',systemName:'系统',projectDir:'legacy',workspacePath:'C:/fixture',adapterType:'plugin',adapterId:'',projectFromLean:false,isTestProject:true});
-      function Fixture(){const[open,setOpen]=useState(false),[editing,setEditing]=useState(false),[form,setForm]=useState(blank),[selected,setSelected]=useState(),[items,setItems]=useState([]),[startUse,setStartUse]=useState();
+      function Fixture(){const[open,setOpen]=useState(false),[editing,setEditing]=useState(false),[form,setForm]=useState(blank),[selected,setSelected]=useState(),[items,setItems]=useState([]),[startUse,setStartUse]=useState(),[workspaceError,setWorkspaceError]=useState(null),[workspaceValidating,setWorkspaceValidating]=useState(false);
         window.startSaved=()=>{setStartUse({id:'saved-intent',accountRevision:0,input:{threadId:'creator',expectedWorkspace:'C:/author',pluginId:'host',expected:installedIdentity},report:{kind:'host-project',canOpen:true,identity:installedIdentity,issues:[]}});setForm({...blank(),adapterId:'host'});setOpen(true)};
         window.editSaved=()=>{setForm({...blank(),adapterId:'host'});setEditing(true)};
-        window.fixture={calls,refreshTemplate:()=>{templates[0].expectedTemplate={...installedIdentity};setForm(value=>({...value}))},missingTemplate:()=>delete templates[0].expectedTemplate,remount:()=>{setSelected(undefined);setItems(Object.values(views).map(v=>v.project))}};
+        window.fixture={calls,reviews,setWorkspaceState:(error,pending)=>{setWorkspaceError(error);setWorkspaceValidating(pending)},refreshTemplate:()=>{templates[0].expectedTemplate={...installedIdentity};setForm(value=>({...value}))},missingTemplate:()=>delete templates[0].expectedTemplate,remount:()=>{setSelected(undefined);setItems(Object.values(views).map(v=>v.project))}};
         if(selected)return <><button onClick={()=>setSelected(undefined)}>项目列表</button><LocalProjectRun key={selected} projectId={selected} onChanged={()=>{}}/></>;
         return <><button onClick={()=>{setStartUse(undefined);setForm(blank());setOpen(true)}}>新建项目</button><HostProjectListItems projects={items} onSelect={setSelected}/>
           <ProjectFormDialog open={open} creating={false} form={form} registry={registry} hostTemplates={templates} hostStartUse={startUse}
-            workspaceError={null} workspaceValidating={false} installingPluginNames={new Set()} error={null} verification={{pending:false,error:null}} onOpenChange={setOpen} onChange={setForm}
+            workspaceError={workspaceError} workspaceValidating={workspaceValidating} installingPluginNames={new Set()} error={null} verification={{pending:false,error:null}} onOpenChange={setOpen} onChange={setForm}
             onInstallPlugin={()=>{throw Error('NO_AUTO_INSTALL')}} onPickWorkspace={()=>{}} onSubmit={async approval=>{await window.api.harnessBoard.createProject({...form,...(approval?{projectUseApproval:approval}:{})});setOpen(false)}}
             onHostCreated={view=>{setItems(Object.values(views).map(v=>v.project));setOpen(false);setSelected(view.project.projectId)}}/>
           <ProjectEditDialog projectId="existing-owner" open={editing} saving={false} form={form} registry={registry}
@@ -267,6 +267,33 @@ async function main() {
       !Object.hasOwn(saved, "projectUseApproval"),
       "metadata edit does not authorize or enable again"
     )
+    const reviewsBeforeInvalid = await page.evaluate("window.fixture.reviews.length")
+    await page.evaluate(() => {
+      const fixture = window as unknown as {
+        fixture: { setWorkspaceState(error: string | null, pending: boolean): void }
+        startSaved(): void
+      }
+      fixture.fixture.setWorkspaceState("插件工作区必须为空，不能包含隐藏文件或文件夹", false)
+      fixture.startSaved()
+    })
+    await page.getByRole("alert").filter({ hasText: "插件工作区必须为空" }).waitFor()
+    await page.getByText("请选择新建的空文件夹。已有代码仓库请在创建特性时选择，不要清空代码仓库。", { exact: true }).waitFor()
+    // Cover the debounce boundary: invalid directories must never start a second review.
+    await page.waitForTimeout(450)
+    assert.equal(await page.evaluate("window.fixture.reviews.length"), reviewsBeforeInvalid)
+    assert.equal(await page.getByText("重新核对", { exact: true }).count(), 0)
+    assert.equal(await page.getByText(/无法核对插件/).count(), 0)
+    assert(await page.getByRole("button", { name: /^(创建|创建并授权)$/ }).isDisabled())
+    await page.screenshot({ path: resolve(output, "invalid-workspace-guidance.png") })
+    await page.evaluate("window.fixture.setWorkspaceState(null,true)")
+    await page.getByRole("alert").filter({ hasText: "插件工作区必须为空" }).waitFor({ state: "detached" })
+    await page.waitForTimeout(450)
+    assert.equal(await page.evaluate("window.fixture.reviews.length"), reviewsBeforeInvalid)
+    assert(await page.getByRole("button", { name: /^(创建|创建并授权)$/ }).isDisabled())
+    await page.evaluate("window.fixture.setWorkspaceState(null,false)")
+    await page.getByRole("button", { name: "创建并授权", exact: true }).click({ trial: true })
+    assert.equal(await page.evaluate("window.fixture.reviews.length"), reviewsBeforeInvalid + 1)
+    await page.getByRole("button", { name: "取消", exact: true }).click()
     assert.deepEqual(errors, [])
     writeFileSync(
       resolve(output, "report.json"),
@@ -282,7 +309,8 @@ async function main() {
             "saved/manual same original form",
             "legacy unchanged",
             "existing authorized project metadata save does not authorize again",
-            "picker wheel and short viewport"
+            "picker wheel and short viewport",
+            "invalid or pending workspace blocks review; a valid replacement restores one-time consent"
           ]
         },
         null,

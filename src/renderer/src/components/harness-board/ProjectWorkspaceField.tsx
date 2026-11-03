@@ -81,6 +81,11 @@ export function ProjectWorkspaceField({
           </Button>
         )}
       </div>
+      {!readOnly && (
+        <p className="text-xs font-normal leading-relaxed">
+          请选择新建的空文件夹。已有代码仓库请在创建特性时选择，不要清空代码仓库。
+        </p>
+      )}
       {error && (
         <span id={`${id}-error`} role="alert" className="text-status-critical">
           {error}

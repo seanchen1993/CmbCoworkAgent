@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto"
+import { HARNESS_NAME_PATTERN } from "../../shared/harness-name"
 import { realpathSync, lstatSync } from "node:fs"
 import { basename, dirname, isAbsolute, join, resolve } from "node:path"
 import type {
@@ -143,7 +144,7 @@ function canonicalTarget(input: HarnessProjectUseReviewInput): string {
     typeof input.projectDir !== "string" ||
     input.workspacePath.length > 4096 ||
     !isAbsolute(input.workspacePath) ||
-    !/^[a-zA-Z0-9_-]+$/.test(input.projectDir) ||
+    !HARNESS_NAME_PATTERN.test(input.projectDir) ||
     input.projectDir.length > 128
   )
     fail("PROJECT_INVALID_INPUT")

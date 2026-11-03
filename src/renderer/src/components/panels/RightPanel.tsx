@@ -1,3 +1,4 @@
+import { groupInstalledPlugins } from "@/lib/installed-plugin-groups"
 import {
   useState,
   useRef,
@@ -774,6 +775,9 @@ export function RightPanel({
   const [plugins, setPlugins] = useState<PluginMetadata[]>(
     () => readPluginCatalogCache()?.plugins ?? []
   )
+  const pluginGroups = useMemo(() => groupInstalledPlugins(plugins), [plugins])
+  const [pluginCatalogKey, setPluginCatalogKey] = useState(() => readPluginCatalogCache()?.key)
+  const pluginCountCurrent = pluginCatalogKey === getPluginCatalogRevision(pluginVersion)
   const [pluginSummary, setPluginSummary] = useState<HeaderSummaryState>(() => {
     const snapshot = readPluginCatalogCache()
     return {
@@ -891,6 +895,7 @@ export function RightPanel({
       const snapshot = await revalidatePluginCatalog(pluginVersion)
       if (requestId !== pluginCatalogRequestIdRef.current) return
       setPlugins(snapshot.plugins)
+      setPluginCatalogKey(snapshot.key)
       setPluginSummary({
         value: {
           total: snapshot.total,
@@ -2397,9 +2402,9 @@ export function RightPanel({
             <SectionHeader
               title="插件"
               icon={Puzzle}
-              badge={pluginSummary.value?.total ?? null}
+              badge={pluginCountCurrent ? pluginGroups.roots.length : null}
               badgeTitle={
-                pluginSummary.value ? `已安装 ${pluginSummary.value.total} 个插件` : undefined
+                pluginCountCurrent ? `已安装 ${pluginGroups.roots.length} 个插件（依赖组件已归组）` : undefined
               }
               badgeTruncated={pluginSummary.value?.truncated}
               loading={pluginSummary.loading || (!pluginSummary.value && !pluginSummary.error)}
@@ -4681,11 +4686,12 @@ function SkillsContent({
 }
 
 function PluginsContent({ plugins }: { plugins: PluginMetadata[] }): React.JSX.Element {
+  const groups = useMemo(() => groupInstalledPlugins(plugins), [plugins])
   const [visiblePluginCount, setVisiblePluginCount] = useState(RIGHT_PANEL_INITIAL_RENDER_ITEMS)
   const pluginWindow = useMemo(
     () =>
-      selectRightPanelPrioritizedWindow(plugins, visiblePluginCount, (plugin) => plugin.enabled),
-    [plugins, visiblePluginCount]
+      selectRightPanelPrioritizedWindow(groups.roots, visiblePluginCount, (plugin) => plugin.enabled),
+    [groups, visiblePluginCount]
   )
 
   if (plugins.length === 0) {
@@ -4701,6 +4707,7 @@ function PluginsContent({ plugins }: { plugins: PluginMetadata[] }): React.JSX.E
   const renderPluginCard = (plugin: PluginMetadata): React.JSX.Element => (
     <div
       key={plugin.id}
+      data-workspace-plugin-id={plugin.id}
       className={cn("p-3 rounded-sm border border-border", !plugin.enabled && "opacity-60")}
     >
       <div className="flex items-center gap-2 text-sm font-medium">
@@ -4743,6 +4750,16 @@ function PluginsContent({ plugins }: { plugins: PluginMetadata[] }): React.JSX.E
           </span>
         )}
       </div>
+      {!!groups.dependencies.get(plugin.id)?.length && (
+        <details className="mt-2 text-xs text-muted-foreground">
+          <summary className="cursor-pointer">依赖组件（{groups.dependencies.get(plugin.id)!.length}）</summary>
+          <ul className="mt-2 space-y-1 pl-3">
+            {groups.dependencies.get(plugin.id)!.map((child) => (
+              <li key={child.id} className="break-words">{child.name} · {child.version}</li>
+            ))}
+          </ul>
+        </details>
+      )}
     </div>
   )
 

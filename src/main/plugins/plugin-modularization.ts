@@ -603,7 +603,8 @@ function hostCatalog(
           actionIds: stage.actionIds,
           artifactIds: stage.artifactIds,
           checkIds: stage.checkIds,
-          approval: stage.approval
+          approval: stage.approval,
+          ...(stage.userGuide === undefined ? {} : { userGuide: stage.userGuide })
         },
         actions,
         artifacts: runtime.artifacts.filter((artifact) => stage.artifactIds.includes(artifact.id)),

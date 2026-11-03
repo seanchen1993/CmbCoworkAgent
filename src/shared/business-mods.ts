@@ -24,7 +24,7 @@ export interface BusinessModKernel {
 export interface BusinessModHostDeclaration {
   stage: Pick<
     ProjectRuntimeManifest["stages"][number],
-    "actionIds" | "artifactIds" | "checkIds" | "approval"
+    "actionIds" | "artifactIds" | "checkIds" | "approval" | "userGuide"
   >
   actions: ProjectRuntimeManifest["actions"]
   artifacts: ProjectRuntimeManifest["artifacts"]

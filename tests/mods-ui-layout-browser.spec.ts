@@ -36,7 +36,7 @@ async function main() {
       import {Element} from ${JSON.stringify(resolve(renderer, "components/chat/FunctionPanes.tsx"))};
       import {validateFunctionTree} from ${JSON.stringify(resolve("src/shared/mods/v2/ui.ts"))};
       const longText="可读的完整内容".repeat(80);
-      const tree={type:'Box',props:{flexDirection:'column',width:'100%',minWidth:0,rowGap:'sm',padding:'md',backgroundColor:'black',overflow:'hidden'},children:[
+      const tree={type:'Box',props:{flexDirection:'column',width:'100%',minWidth:0,gap:'lg',rowGap:'sm',padding:'md',backgroundColor:'black',overflow:'hidden'},children:[
         {type:'Text',props:{size:'heading',weight:'medium',color:'white'},children:['插件界面示例']},
         {type:'Box',props:{width:'100%',minWidth:0,flexWrap:'nowrap',columnGap:'sm',alignItems:'center'},children:[
           {type:'Box',props:{flexGrow:1,flexShrink:1,minWidth:0},children:[{type:'Text',props:{wrap:'truncate',size:'footnote',color:'white',mono:true,tabular:true},children:[longText]}]},
@@ -74,6 +74,9 @@ async function main() {
             fontWeight: style.fontWeight,
             color: style.color,
             background: getComputedStyle(element.firstElementChild!).backgroundColor,
+            padding: getComputedStyle(element.firstElementChild!).padding,
+            rowGap: getComputedStyle(element.firstElementChild!).rowGap,
+            columnGap: getComputedStyle(element.firstElementChild!).columnGap,
             fullLength: long.textContent?.length,
             clipped: getComputedStyle(long).textOverflow,
             scrollWidth: document.documentElement.scrollWidth,
@@ -84,6 +87,9 @@ async function main() {
         assert.equal(measured.fontWeight, "500")
         assert.equal(measured.color, "rgb(255, 255, 255)")
         assert.equal(measured.background, "rgb(0, 0, 0)")
+        assert.equal(measured.padding, "8px", "Absent side overrides must not erase padding")
+        assert.equal(measured.rowGap, "4px", "Explicit row spacing overrides the shorthand")
+        assert.equal(measured.columnGap, "12px", "Absent column override must preserve gap")
         assert.equal(measured.fullLength, "可读的完整内容".repeat(80).length)
         assert.equal(measured.clipped, "ellipsis")
         assert(measured.scrollWidth <= measured.windowWidth, "layout must fit a narrow host")

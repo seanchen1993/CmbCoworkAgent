@@ -385,6 +385,7 @@ export const CREATOR_S1_SUPPORT = Object.freeze({
     nativeComposition: {
       protocol: "devclaw.native-composition/v1",
       source: "composition/source.json",
+      userGuidance: "modules[].userGuide：面向用户的阶段说明（Markdown，最多4000字符），与模型Skill分开。创建时填写要准备的资料、预期成果；派生时继承并按需求调整；组合时随阶段保留并修正跨阶段引用。原项目聊天欢迎区展示，缺省用通用说明，不触发执行或新增授权。",
       scaffold: { tool: "mod_authoring", action: "project_scaffold", template: "native-modular" },
       discovery: { tool: "mod_authoring", action: "project_actions" },
       compilation: { tool: "mod_authoring", action: "project_compile" },

@@ -13,6 +13,8 @@ export interface ProjectRuntimeManifest {
     id: string
     title: string
     skill?: string
+    /** User-facing Markdown, separate from the model's Skill instructions. */
+    userGuide?: string
     /** Retained Host declaration; does not grant execution or merge approval. */
     executionMode?: "normal" | "workflow"
     actionIds: string[]

@@ -246,6 +246,26 @@ export function readNativeHarnessFeatureStage(projectId: string, featureId: stri
   return stage ? { name: stage.title, status: stageStatus(view, stage.id) } : null
 }
 
+/** Read current discussion facts without creating a run, preparing actions or granting access. */
+export function readNativeHarnessDiscussionState(projectId: string, featureId: string) {
+  const record = existingStore()?.get(projectId, featureId)
+  if (!record) throw Error("HARNESS_NATIVE_FEATURE_MISSING")
+  const binding = publicBinding(record)
+  assertNativeHarnessFeatureCurrent(binding)
+  if (!runtime && record.packageDigest) throw Error("HARNESS_NATIVE_RUNTIME_UNAVAILABLE")
+  const view = runtime ? recordView(record) : undefined
+  return structuredClone({
+    binding,
+    manifest: view?.project.manifest ?? record.manifest,
+    goal: view?.project.goal ?? record.goal ?? null,
+    stageIndex: view?.project.stageIndex ?? 0,
+    status: view?.project.status ?? "not_started",
+    version: view?.project.version ?? null,
+    operations: view?.operations ?? [],
+    inputWait: view?.inputWait ?? null
+  })
+}
+
 export async function nativeHarnessPlugin(id: string) {
   const plugin = getPlugins().find((item) => item.id === id)
   if (!plugin) return undefined
@@ -474,6 +494,7 @@ function workflow(manifest: ProjectRuntimeManifest): HarnessWorkflow {
     nodes: manifest.stages.map((stage) => ({
       id: stage.id,
       label: stage.title,
+      ...(stage.userGuide === undefined ? {} : { userGuide: stage.userGuide }),
       artifactDefinitions: stage.artifactIds.map((id) => ({
         id,
         required: true,

@@ -14,6 +14,8 @@ async function main() {
       import {CustomizeView} from ${JSON.stringify(join(renderer, "components/customize/CustomizeView.tsx"))};
       import {SettingsReturnFocusContext} from ${JSON.stringify(join(renderer, "components/customize/settings-return-focus.ts"))};
       import {useAppStore} from '@/lib/store';
+      import {revealGuideSettings} from '@/components/guides/release-guide-navigation';
+      window.revealGuideSettings=revealGuideSettings;
       window.calls=[];
       window.api={mods:{globalEnabled:async()=>{window.calls.push(['read-global']);return true},
         status:async threadId=>{window.calls.push(['read-settings',threadId]);return {workspace:'C:/Owned/Workspace',enabled:true}},
@@ -59,6 +61,7 @@ async function main() {
   const results: unknown[] = []
   try {
     for (const scenario of [
+      { task: "create", option: "0", tab: "mods", releaseNavigation: true },
       { task: "create", option: "0", tab: "mods" },
       { task: "combine", option: "1", tab: "mods" },
       { task: "create", option: "0", tab: "claw", error: "DEVELOPMENT_SCOPE_CHANGED" },
@@ -74,6 +77,21 @@ async function main() {
         (window as unknown as { routingScenario: unknown }).routingScenario = scenario
       }, scenario)
       await page.addScriptTag({ content: bundle.outputFiles[0].text })
+      if (scenario.releaseNavigation) {
+        await page.getByLabel("ModsPanel草稿").fill("保留灵件草稿")
+        for (let request = 1; request <= 2; request++) {
+          await page.evaluate("window.revealGuideSettings('mods')")
+          await page.waitForFunction((count) => (window as unknown as {calls: unknown[][]}).calls.filter(row => row[0] === "manual-navigation").length === count, request)
+          assert.equal(await page.getByLabel("ModsPanel草稿").inputValue(), "保留灵件草稿")
+        }
+        const calls = await page.evaluate("window.calls")
+        assert.equal(calls.filter((row: unknown[]) => row[0] === "panel-mounted" && row[1] === "ModsPanel").length, 1)
+        assert.equal(calls.filter((row: unknown[]) => row[0] === "mode").length, 0)
+        assert.deepEqual(errors, [])
+        results.push({ ...scenario, calls })
+        await page.close()
+        continue
+      }
       if (scenario.unavailable) {
         await page.getByRole("button", { name: "返回应用", exact: true }).waitFor()
         assert.equal(await page.getByRole("button", { name: "任务示例演练", exact: true }).count(), 0)

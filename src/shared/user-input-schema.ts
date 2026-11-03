@@ -57,6 +57,11 @@ function validateQuestionIds(
 }
 
 export const requestUserInputSchema = questionsSchema.superRefine(validateQuestionIds)
+// The host removes model-authored "Other" options because the client supplies free text.
+// That normalized request can legitimately contain zero or one fixed option.
+export const userInputPresentationSchema = z.object({
+  questions: z.array(questionSchema.extend({ options: z.array(optionSchema).max(5) })).min(1).max(10)
+}).superRefine(validateQuestionIds)
 export const requestUserInputWithAutoResolutionSchema = questionsSchema
   .extend({
     autoResolutionMs: z

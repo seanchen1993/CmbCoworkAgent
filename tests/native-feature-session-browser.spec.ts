@@ -67,9 +67,11 @@ async function main() {
                     ? `
               import React from'react';import{useAppStore}from'@/lib/store';
               import{getPendingHarnessNextAction}from'./src/renderer/src/lib/harness-next-action';
+              import{NativeProjectChatGuide}from'./src/renderer/src/components/harness-board/NativeProjectChatGuide';
               export function TabbedPanel(props){const thread=useAppStore(s=>s.threads.find(t=>t.thread_id===props.threadId));
                 const pending=getPendingHarnessNextAction(props.threadId);
                 return <section aria-label="受控聊天边界" data-thread-id={props.threadId}>
+                  <NativeProjectChatGuide threadId={props.threadId} renderMarkdown={text=><p>{text}</p>}>{null}</NativeProjectChatGuide>
                   <output data-metadata>{JSON.stringify(thread?.metadata)}</output>
                   <textarea aria-label="会话草稿边界" disabled={!!props.readOnlyReason||!!thread?.metadata?.hostProjectRuntime}
                     defaultValue={pending?.userMessage??''}/></section>}
@@ -110,7 +112,7 @@ async function main() {
           lifecycle:{status:'active',createAt:'2026-11-01T00:00:00Z'},boardCompatibility:{status:'compatible',compatible:true,label:'兼容'},
           supportsDeployUnits:false,supportsSessionContextInjection:false};
         const nodes=[{id:'collect',label:'整理资料',nodeStatus:'not_started',status:{label:'未开始',uiKind:'pending'},artifacts:[],hooks:[]}];
-        const workflow={display:{mode:'ordered_nodes'},nodes:nodes.map(node=>({...node,states:[{nodeStatus:'not_started',nextAction:{userMessage:'请先讨论原需求，不要直接执行'}}]}))};
+        const workflow={display:{mode:'ordered_nodes'},nodes:nodes.map(node=>({...node,userGuide:'请准备本次评估的范围和材料。完成后查看评估报告。',states:[{nodeStatus:'not_started',nextAction:{userMessage:'请先讨论原需求，不要直接执行'}}]}))};
         const detail={project,workflow,adapterSnapshot:{mode:'run',mock:false},sessions:[],
           ...(mode.native?{nativeBinding:{engine:'host',hostRunId:'run-a',projectId:'container',featureId:'request-a',workspace:'C:/isolated-execution',repositoryWorkspace:'C:/chosen-repository',installedPluginId:'plugin',packageDigest:'a'.repeat(64)}}:{}),
           run:{id:'request-a',slug:'request-a',title:'需求A',currentNodeId:'collect',nodes,featureStatus:'not_started',skipNodeAvailable:false,selectedDeployUnits:[],resolvedSessionWorkspacePath:'C:/chosen-repository'}};
@@ -221,6 +223,25 @@ async function main() {
           assert(await draft.isEnabled())
           assert.equal(await draft.inputValue(), "请先讨论原需求，不要直接执行")
           await draft.fill("用户继续调整草稿，尚未发送")
+          const guide = page.getByRole("region", { name: "当前阶段指引", exact: true })
+          if (native) {
+            await guide.waitFor()
+            assert((await guide.innerText()).includes("整理资料"))
+            const chatGuide = page.getByRole("region", { name: "项目插件使用指引", exact: true })
+            await chatGuide.waitFor()
+            assert((await chatGuide.innerText()).includes("请准备本次评估的范围和材料"))
+            assert((await chatGuide.innerText()).includes("普通聊天不会自动启动阶段"))
+            assert((await chatGuide.innerText()).includes("无需手动输入斜杠命令"))
+            assert.equal(await draft.inputValue(), "用户继续调整草稿，尚未发送")
+            await chatGuide.getByRole("button", { name: "前往项目设置", exact: true }).click()
+            await page.getByRole("region", { name: "需求权限与确认", exact: true }).waitFor()
+            const start = guide.getByRole("button", { name: "填写需求并开始", exact: true })
+            await start.waitFor()
+            await start.click()
+            const dialog = page.getByRole("dialog", { name: "开启托管运行", exact: true })
+            await dialog.waitFor()
+            await dialog.getByRole("button", { name: "取消", exact: true }).click()
+          } else assert.equal(await guide.count(), 0, "Legacy next-action guidance is unchanged")
           const observation = await page.evaluate(() => {
             const fixture = (
               window as unknown as {

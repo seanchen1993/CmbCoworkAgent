@@ -70,7 +70,7 @@ function FunctionSitePending({ component, slow = false, quiet = false, cache, pr
   if (quiet) return null
   const message = ["UserMessage", "AssistantMessage", "CommandOutput"].includes(component)
   // Optional decorations should not introduce bars or layout rows while they are unknown.
-  if (!message && !slow) return null
+  if (!message && !slow && component !== "AskUserQuestion") return null
   return (
     <div ref={placeholder} data-function-site-pending className={message
       ? `space-y-2 py-1${component === "UserMessage" ? " w-40 max-w-full" : ""}` : undefined}
@@ -80,6 +80,9 @@ function FunctionSitePending({ component, slow = false, quiet = false, cache, pr
         <div className="h-3 w-1/2 rounded bg-muted" />
       </div>}
       {slow && <p role="status" aria-live="polite" className="mt-2">内容加载较慢，请稍候…</p>}
+      {component === "AskUserQuestion" && !slow && (
+        <p role="status" className="px-4 py-3">正在读取问题和选项…</p>
+      )}
     </div>
   )
 }

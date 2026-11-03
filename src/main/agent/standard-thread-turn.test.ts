@@ -309,6 +309,28 @@ describe("getHarnessAgentContext", () => {
     })
   })
 
+  it("passes refreshed ordinary project discussion context into the model runtime without a slash or Host token", async () => {
+    for (const stage of ["draft", "review"]) {
+      const prompt = `Current bound stage ${stage}; discuss its Skill, do not start the stage.`
+      harnessServiceMocks.buildHarnessFeatureAgentContext.mockResolvedValue({
+        harnessProjectId: "project-1", featureId: "feature-1", systemPromptInject: prompt
+      })
+      const context = await getHarnessAgentContext({ harnessFeature: {
+        projectId: "project-1", slug: "feature-1"
+      } }, { featureBinding: { projectId: "project-1", slug: "feature-1" } })
+      const options = prepareStandardThreadRuntimeFactory({ source: "desktop",
+        runLease: { owner: "desktop", runId: "discussion" },
+        baseOptions: { threadId: "discussion-thread", enableAgentsPrompt: true } as Omit<CreateAgentRuntimeOptions, "modelId">,
+        harnessContext: context
+      }).optionsForModel()
+      expect(options.pluginPromptInject).toBe(prompt)
+      expect(options.harnessAgentsPrompt).toBeUndefined()
+      // createAgentRuntime defaults an omitted enableAgentsPrompt to true.
+      expect(options.enableAgentsPrompt ?? true).toBe(true)
+      expect(options.pluginRoot).toBeUndefined()
+    }
+  })
+
   it("explains missing required knowledge instead of suggesting a model retry", async () => {
     vi.spyOn(console, "warn").mockImplementation(() => undefined)
     harnessServiceMocks.buildHarnessFeatureAgentContext.mockRejectedValue(

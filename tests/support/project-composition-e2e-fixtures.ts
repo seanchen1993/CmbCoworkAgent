@@ -333,7 +333,7 @@ export function compositionStandaloneSkill(name: string, marker: string): number
   return [...zip.toBuffer()]
 }
 
-export function compositionHostFlow(receivesReport = false): number[] {
+export function compositionHostFlow(receivesReport = false, userGuide?: string): number[] {
   const zip = new AdmZip()
   const add = (name: string, value: unknown) =>
     zip.addFile(name, Buffer.from(typeof value === "string" ? value : JSON.stringify(value)))
@@ -379,6 +379,7 @@ export function compositionHostFlow(receivesReport = false): number[] {
       {
         id: "report",
         title: receivesReport ? "核对接收报告" : "核对隔离报告",
+        ...(userGuide === undefined ? {} : { userGuide }),
         actionIds: [],
         artifactIds: ["report"],
         checkIds: ["report-exists"],

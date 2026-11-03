@@ -1,4 +1,7 @@
 import { NativeFeatureReview } from "./NativeFeatureReview"
+import { nativeFeatureChatGuide, nativeFeatureGuidance, nativeFeatureSessionLabel } from "./native-feature-guidance"
+import { NativeProjectChatGuideContext, NativeProjectChatPresence } from "./native-project-chat-context"
+import { HARNESS_NAME_PATTERN as harnessNamePattern } from "../../../../shared/harness-name"
 import { ProjectUseConsent } from "./ProjectUseConsent"
 import { useProjectUseReview } from "./use-project-use-review"
 import type { HarnessProjectUseApproval } from "../../../../shared/project-use-authorization"
@@ -282,7 +285,6 @@ const projectCreateDialogClassName =
   "top-[calc(50%-1rem)] grid max-h-[calc(100dvh-4rem)] max-w-3xl grid-rows-[auto_minmax(0,1fr)_auto] overflow-visible"
 const harnessProjectPopoverContentClassName =
   "bg-popover text-popover-foreground data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 z-[70] origin-[var(--radix-popover-content-transform-origin)] w-[var(--radix-popover-trigger-width)] rounded-md border p-0 shadow-md outline-none"
-const harnessNamePattern = /^[\u4e00-\u9fffA-Za-z0-9_-]+$/u
 const harnessNameRuleMessage = "仅支持中文、英文字母、数字、-、_"
 const PROJECT_NAME_MAX_CHARS = 50
 const PROJECT_CODE_MAX_CHARS = 15
@@ -2920,6 +2922,7 @@ export function ProjectFormDialog({
     (template) => template.installedPluginId === selectedAdapter?.id
   )?.expectedTemplate
   const nativeReview = useProjectUseReview(open && selectedAdapter?.runtimeMode === "host" &&
+    !workspaceValidating && !projectDirError &&
     nativeTemplate && form.workspacePath.trim() && form.projectDir.trim() ? {
       adapterId: selectedAdapter.id,
       adapterType: "plugin",
@@ -6606,6 +6609,7 @@ function nativeFeatureDirectoryLocked(detail: HarnessRunDetailViewModel | null |
 
 function FeatureDetailPage({
   detail,
+  nativeProjectPlugin = false,
   loading,
   unbound,
   projectDeleted,
@@ -6624,6 +6628,8 @@ function FeatureDetailPage({
   onActiveSessionThreadChange,
 }: {
   detail: HarnessRunDetailViewModel | null
+  /** The project remains known while a session temporarily has only an unbound detail. */
+  nativeProjectPlugin?: boolean
   loading: boolean
   unbound?: boolean
   projectDeleted?: boolean
@@ -6710,6 +6716,9 @@ function FeatureDetailPage({
     detail?.nativeBinding?.workspaceIdentity
   ])
   const nativeReady = nativeReadyScope === nativeScope
+  const nativeSettingsRef = useRef<HTMLDivElement>(null)
+  const nativeGuide = nativeFeatureGuidance(detail)
+  const nativeChatGuide = useMemo(() => nativeFeatureChatGuide(detail), [detail])
   const nativeCanChooseWorkspace = detail?.nativeBinding?.workspaceMode === "selected-directory" &&
     !detail.nativeProject && !detail.nativeBinding.initialUserMessage
   const featureDirectoryLocked = nativeFeatureDirectoryLocked(detail)
@@ -7718,19 +7727,74 @@ function FeatureDetailPage({
           项目已归档，仅可查看历史记录。
         </p>
       )}
+      {nativeGuide && !loading && !projectInteractionDisabled && (
+        <section aria-label="当前阶段指引" className="mx-3 mt-3 flex shrink-0 items-center gap-3 rounded-lg border bg-muted/30 px-4 py-3">
+          <div className="min-w-0 flex-1">
+            <p className="mb-1 text-xs text-muted-foreground">
+              项目插件：{detail?.nativeProject?.project.packageId ?? detail?.nativeBinding?.expectedPlugin?.name ?? "已绑定项目插件"}
+              {" · "}{detail?.nativeProject?.project.packageVersion ?? detail?.nativeBinding?.expectedPlugin?.version ?? ""}
+              {activeSessionThreadIdForView && ` · ${nativeFeatureSessionLabel(detail, activeSessionThreadIdForView)}`}
+              {!activeSessionThreadIdForView && !detail?.nativeProject && " · 尚未启动插件流程"}
+            </p>
+            <p className="text-sm font-medium">当前阶段：{nativeGuide.stage}</p>
+            {!activeSessionThreadIdForView && <p className="mt-1 text-xs leading-5 text-muted-foreground">{nativeGuide.message}</p>}
+          </div>
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={updatingManagedRun || nativeReviewPending || openingManagedRunDialog}
+            onClick={() => {
+              if (nativeGuide.action === "input" && nativeGuide.threadId) {
+                handleHookSessionSelect(nativeGuide.threadId)
+              } else if (activeSessionThreadIdForView) {
+                handleBackToFeature()
+              } else if (nativeGuide.action === "start" && (nativeReady || nativeCanChooseWorkspace)) {
+                void handleOpenManagedRunDialog()
+              } else {
+                nativeSettingsRef.current?.scrollIntoView({ block: "start" })
+                nativeSettingsRef.current?.focus({ preventScroll: true })
+              }
+            }}
+          >
+            {nativeGuide.action === "input" ? "前往答复" : activeSessionThreadIdForView
+              ? nativeGuide.action === "start" ? "前往项目设置" : "查看特性详情"
+              : nativeGuide.action === "start"
+                ? nativeReady || nativeCanChooseWorkspace ? "填写需求并开始" : "完成项目设置"
+                : "查看当前步骤"}
+          </Button>
+        </section>
+      )}
       {activeSessionThreadIdForView ? (
         <div className="flex min-h-0 flex-1 flex-col pt-3">
-          <FeatureConversationPanel
-            threadId={activeSessionThreadIdForView}
-            readOnlyReason={
-              projectDeleted
-                ? "项目已删除，仅可查看历史会话"
-                : nativeArchived
-                  ? "项目已归档，仅可查看历史会话。"
-                  : null
-            }
-            onHarnessSessionCreated={handleContextReminderSessionCreated}
-          />
+          <NativeProjectChatPresence.Provider value={nativeProjectPlugin || !detail || loading || !!detail.nativeBinding}>
+            <NativeProjectChatGuideContext.Provider
+              value={nativeChatGuide && !loading && !projectInteractionDisabled ? {
+                threadId: activeSessionThreadIdForView,
+                guide: nativeChatGuide,
+                actionLabel: nativeChatGuide.action === "input"
+                  ? "前往答复"
+                  : nativeChatGuide.action === "start" ? "前往项目设置" : "查看特性详情",
+                disabled: updatingManagedRun || nativeReviewPending || openingManagedRunDialog,
+                onAction: () => {
+                  if (nativeChatGuide.action === "input" && nativeChatGuide.threadId) {
+                    handleHookSessionSelect(nativeChatGuide.threadId)
+                  } else handleBackToFeature()
+                }
+              } : null}
+            >
+              <FeatureConversationPanel
+                threadId={activeSessionThreadIdForView}
+                readOnlyReason={
+                  projectDeleted
+                    ? "项目已删除，仅可查看历史会话"
+                    : nativeArchived
+                      ? "项目已归档，仅可查看历史会话。"
+                      : null
+                }
+                onHarnessSessionCreated={handleContextReminderSessionCreated}
+              />
+            </NativeProjectChatGuideContext.Provider>
+          </NativeProjectChatPresence.Provider>
         </div>
       ) : projectDeleted ? (
         <div className="flex w-full flex-1 items-center justify-center p-6">
@@ -7775,7 +7839,7 @@ function FeatureDetailPage({
               featureId={detail.run.slug}
               onViewThread={handleHookSessionSelect}
             />
-            {detail.nativeBinding && <NativeFeatureReview
+            {detail.nativeBinding && <div ref={nativeSettingsRef} tabIndex={-1}><NativeFeatureReview
               key={`${detail.project.projectId}:${detail.run.slug}:${detail.nativeProject?.project.stageIndex ?? 0}`}
               projectId={detail.project.projectId} featureId={detail.run.slug}
               binding={detail.nativeBinding} view={detail.nativeProject} onRefresh={onRefresh}
@@ -7790,7 +7854,7 @@ function FeatureDetailPage({
                 pending ? detail.nativeBinding!.hostRunId :
                   current === detail.nativeBinding!.hostRunId ? "" : current
               )}
-              onViewThread={handleHookSessionSelect} />}
+              onViewThread={handleHookSessionSelect} /></div>}
             {pendingHumanGate && (
               <section ref={capabilityHumanGateRef} tabIndex={-1} className="mb-4 flex flex-col gap-3 rounded-xl border border-status-warning/35 bg-status-warning/10 p-4 shadow-sm sm:flex-row sm:items-center">
                 <div className="flex min-w-0 flex-1 items-start gap-3">
@@ -12750,6 +12814,7 @@ function EnterpriseHarnessBoardView({
       <>
         <FeatureDetailPage
           detail={runDetailWithSessions}
+          nativeProjectPlugin={!!projects.find((project) => project.projectId === selectedFeature.projectId)?.nativeBinding}
           loading={loadingRun}
           unbound={showingUnboundRunDetail}
           projectDeleted={selectedFeatureDeleted}

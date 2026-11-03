@@ -8,6 +8,13 @@ import { chromium } from "playwright"
 import { mount } from "./mods-flow-browser.spec"
 import { browserWorkerPlugin } from "./support/browser-worker-plugin.mjs"
 
+interface QuestionLayoutWindow extends Window {
+  questionLayout: {
+    show(layout: string): void
+    answers: Array<{ answers: Record<string, { text?: string }> }>
+  }
+}
+
 async function main() {
   const artifacts = resolve("output/question-site-layout-browser", String(Date.now()))
   mkdirSync(artifacts, { recursive: true })
@@ -57,7 +64,7 @@ async function main() {
           const row=rows.get(owner),engine={type:'engine',ref:0};
           const context={type:'Text',props:{},children:['QUESTION_CONTEXT '+ 'Explanation '.repeat(350)+'CONTEXT_END']};
           const button={type:'Button',props:{key:'custom-action',label:'Custom action'},press:{plugin:'fixture',handle:1}};
-          const tree=layout==='native'?engine:layout==='legacy'?{type:'Box',props:{},children:[context,engine]}:
+          const tree=['native','single','free-text'].includes(layout)?engine:layout==='legacy'?{type:'Box',props:{},children:[context,engine]}:
             {type:'Box',props:{flexDirection:'column',padding:1,borderStyle:'round'},children:[
               {type:'Box',props:{flexDirection:'row',gap:1},children:[context,button]},
               {type:'fragment',children:[{type:'Box',props:{flexDirection:'column'},children:[engine]}]}]};
@@ -70,8 +77,8 @@ async function main() {
           window.questionLayout={answers,show:next=>{layout=next;revision++;setRequestId('R'+(revision+1))}};
           const request={requestId,threadId:'thread',createdAt:'2026-10-21T00:00:00Z',questions:[{
             id:'original_choice',header:'Plan',question:'Original question?',options:[
-              {label:'Careful',description:'Original careful'},{label:'Fast',description:'Original fast'}]}]};
-          return <ModsChatScope.Provider value={{threadId:'thread',enabled:layout!=='off',ready:true}}>
+              {label:'Careful',description:'Original careful'},{label:'Fast',description:'Original fast'}].slice(0,layout==='single'?1:layout==='free-text'?0:2)}]};
+          return <ModsChatScope.Provider value={{threadId:'thread',enabled:layout!=='off',ready:layout!=='loading'}}>
             <main style={{position:'relative',width:'calc(100vw - 32px)',height:'calc(100vh - 32px)',margin:16}}>
               <textarea aria-label='Ordinary draft' defaultValue='Keep my draft'/>
               <UserInputRequestDialog request={request} onSubmit={answer=>answers.push(answer)}/>
@@ -207,6 +214,24 @@ async function main() {
         layout + ": bounded dialog, reachable original controls, retained draft and answer identity"
       )
     }
+    for (const layout of ["single", "free-text"]) {
+      await page.evaluate((mode) => (window as QuestionLayoutWindow).questionLayout.show(mode), layout)
+      await dialog.getByText("Original question?", { exact: true }).waitFor()
+      assert.equal(await dialog.getByRole("radio").count(), layout === "single" ? 1 : 0)
+      const answer = dialog.getByRole("textbox", { name: "自定义回答", exact: true })
+      await answer.fill("保留原需求，先补充说明")
+      await dialog.getByRole("button", { name: "提交", exact: true }).click()
+      const submitted = await page.evaluate(() => (window as QuestionLayoutWindow).questionLayout.answers.at(-1))
+      assert(submitted)
+      assert.equal(submitted.answers.original_choice.text, "保留原需求，先补充说明")
+      assert.equal(await page.getByRole("textbox", { name: "Ordinary draft" }).inputValue(), "Keep my draft")
+      await page.screenshot({ path: join(artifacts, `${layout}.png`) })
+      checks.push(`${layout}: question body and free text remain visible after option cleanup`)
+    }
+    await page.evaluate(() => (window as QuestionLayoutWindow).questionLayout.show("loading"))
+    await dialog.getByText("正在读取问题和选项…", { exact: true }).waitFor()
+    assert.equal(await dialog.getByRole("button", { name: "提交", exact: true }).count(), 0)
+    checks.push("Pending protected questions show a loading message without exposing unverified controls")
     assert.deepEqual(errors, [])
     console.log(checks.join("\n"))
   } catch (error) {

@@ -2,7 +2,7 @@
 import assert from "node:assert/strict"
 import { execFileSync } from "node:child_process"
 import { createHash, randomUUID } from "node:crypto"
-import { appendFileSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs"
+import { appendFileSync, existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs"
 import { isAbsolute, join, relative, resolve } from "node:path"
 import { pathToFileURL } from "node:url"
 import AdmZip from "adm-zip"
@@ -197,6 +197,17 @@ async function checkOriginalProjectResourcePanels(
   // With ordinary Claw still the raw selection, project mode must render the original work panel.
   const work = page!.getByTestId("workspace-info-panel")
   await work.waitFor()
+  const pluginsButton = work.getByRole("button").filter({ has: page!.getByText("插件", { exact: true }) })
+  if ((await pluginsButton.getAttribute("aria-expanded")) !== "true") await pluginsButton.click()
+  const installedPlugins = await page!.evaluate(() => window.api.plugins.list())
+  for (const owner of installedPlugins.filter((plugin) => plugin.projectDependencyIds?.length)) {
+    const card = work.locator(`[data-workspace-plugin-id="${owner.id}"]`)
+    await card.waitFor()
+    assert.equal(await card.locator("details").count(), 1)
+    for (const dependency of owner.projectDependencyIds!) {
+      assert.equal(await work.locator(`[data-workspace-plugin-id="${dependency}"]`).count(), 0)
+    }
+  }
   const files = work.getByRole("button").filter({ has: page!.getByText("文件", { exact: true }) })
   assert(await files.isEnabled())
   if ((await files.getAttribute("aria-expanded")) !== "true") await files.click()
@@ -246,7 +257,7 @@ async function checkOriginalProjectResourcePanels(
 async function startCreatorFlowReadObserver() {
   await app!.evaluate(({ ipcMain }) => {
     type Handler = (event: Electron.IpcMainInvokeEvent, ...args: unknown[]) => unknown
-    type Observer = { events: Array<{ channel: string; threadId?: string }>; restore(): void }
+    type Observer = { events: Array<{ channel: string; threadId?: string; projectId?: string }>; restore(): void }
     const target = globalThis as typeof globalThis & { __projectCreatorFlowObserver?: Observer }
     if (target.__projectCreatorFlowObserver) throw Error("CREATOR_FLOW_OBSERVER_ALREADY_INSTALLED")
     const handlers = (ipcMain as typeof ipcMain & { _invokeHandlers: Map<string, Handler> })
@@ -255,6 +266,7 @@ async function startCreatorFlowReadObserver() {
     const channels = [...handlers.keys()].filter(
       (channel) =>
         channel.startsWith("mods:flow-") ||
+        channel === "harnessBoard:getDialogTips" ||
         channel === "mods:claw-view" ||
         channel === "project-composition:catalog"
     )
@@ -262,7 +274,8 @@ async function startCreatorFlowReadObserver() {
       "mods:flow-runs",
       "mods:flow-active",
       "mods:claw-view",
-      "project-composition:catalog"
+      "project-composition:catalog",
+      "harnessBoard:getDialogTips"
     ])
       if (!channels.includes(channel)) throw Error(`REAL_CREATOR_FLOW_HANDLER_REQUIRED:${channel}`)
     const events: Observer["events"] = []
@@ -280,7 +293,8 @@ async function startCreatorFlowReadObserver() {
                   typeof input.threadId === "string"
                 ? input.threadId
                 : undefined
-          events.push({ channel, threadId })
+          const projectId = input && typeof input === "object" && "projectId" in input && typeof input.projectId === "string" ? input.projectId : undefined
+          events.push({ channel, threadId, ...(projectId ? { projectId } : {}) })
           return original(event, ...args)
         }
       }.invoke
@@ -352,7 +366,8 @@ async function submitOriginalProject(name: string, code: string, pluginId: strin
   await dialog.getByRole("textbox", { name: "系统编号 *", exact: true }).fill("FIXTURE_SYSTEM")
   await dialog.getByRole("textbox", { name: "系统名称 *", exact: true }).fill("原界面回归系统")
   await dialog.getByRole("radiogroup", { name: "是否作为测试项目 *", exact: true }).getByRole("radio", { name: "是", exact: true }).check()
-  const projectDirectory = join(projectContainers, code.toLowerCase())
+  const projectDir = `${code.toLowerCase()}-项目记录`
+  const projectDirectory = join(projectContainers, projectDir)
   mkdirSync(projectDirectory, { recursive: true })
   await chooseDirectory(projectDirectory, () =>
     dialog.getByRole("button", { name: /插件工作区.*选择文件夹/ }).click()
@@ -381,6 +396,7 @@ async function submitOriginalProject(name: string, code: string, pluginId: strin
   assert.equal(project.harnessAdapter.id, pluginId)
   assert.equal(project.nativeBinding?.installedPluginId, pluginId)
   assert.equal(realpathSync(project.workspacePath), realpathSync(projectContainers))
+  assert.equal(project.projectDir, projectDir, "Chinese directory names survive review and creation")
   const review = await existingProjectReview(project)
   assert.equal(
     review.authorizationCurrent,
@@ -525,6 +541,39 @@ async function createManualSession(
   const editedDraft = `${feature.title} ${entry}：先讨论方案，用户尚未发送。`
   await composer.fill(editedDraft)
   assert.equal(await composer.inputValue(), editedDraft)
+  const stageGuide = page!.getByRole("region", { name: "当前阶段指引", exact: true })
+  await stageGuide.waitFor()
+  assert((await stageGuide.innerText()).includes(node.label))
+  assert((await stageGuide.innerText()).includes("普通讨论会话（不自动推进阶段）"))
+  assert((await stageGuide.innerText()).includes(feature.run.nativeBinding!.expectedPlugin.name))
+  const chatGuide = chat.getByRole("region", { name: "项目插件使用指引", exact: true })
+  await chatGuide.waitFor()
+  assert((await chatGuide.innerText()).includes(node.label))
+  const authoredGuide = feature.run.workflow.nodes.find((item) => item.id === node.id)?.userGuide
+  assert((await chatGuide.innerText()).includes(authoredGuide ?? "验收要求"))
+  await chatGuide.getByText("查看项目流程", { exact: true }).click()
+  assert((await chatGuide.innerText()).includes(feature.run.workflow.nodes.map((item) => item.label).join(" → ")))
+  assert.equal(await composer.inputValue(), editedDraft, "Reading guidance must preserve the draft")
+  await page!.screenshot({ path: join(fixture.isolated, `${project.projectCode}-${feature.slug}-${entry}-user-guide.png`) })
+  if (entry === "detail") {
+    await chatGuide.getByRole("button", { name: "前往项目设置", exact: true }).click()
+    await page!.getByRole("region", { name: "需求权限与确认", exact: true }).waitFor()
+    await stageGuide.getByRole("button", { name: "填写需求并开始", exact: true }).click()
+    const startDialog = page!.getByRole("dialog", { name: "开启托管运行", exact: true })
+    await startDialog.waitFor()
+    assert.equal(await page!.getByRole("dialog").count(), 1)
+    await startDialog.getByRole("button", { name: "取消", exact: true }).click()
+    const group = page!.locator(
+      `[data-sidebar-group-key="feature:${project.projectId}:${feature.slug}"]`
+    )
+    const collapsed = group.getByRole("button", { name: "展开特性会话", exact: true })
+    if (await collapsed.isVisible()) await collapsed.click()
+    await group.locator("..").locator(
+      `div[title=${JSON.stringify(thread.title?.trim() || thread.thread_id)}]`
+    ).first().click()
+    await composer.waitFor()
+    assert.equal(await composer.inputValue(), editedDraft, "Guidance navigation preserves the chat draft")
+  }
   await assertProjectWorkbenchAbsent(chat, `${project.projectCode}-${feature.slug}-${entry}-chat`)
   assert.equal(
     await chat.getByText(/Response is not JSON|Unexpected token/).count(),
@@ -886,6 +935,41 @@ async function main() {
     await page.addInitScript("window.__name = value => value")
     await page.evaluate("window.__name = value => value")
     await page.waitForFunction(() => Boolean(window.api?.plugins?.install))
+    const releaseIntro = page.getByRole("dialog", { name: "把助手变成适合你的工作台" })
+    await releaseIntro.waitFor({ timeout: 30_000 })
+    await page.waitForFunction(() => Array.from(document.images).every(image => image.complete && image.naturalWidth > 0))
+    await page.screenshot({ path: join(fixture.isolated, "release-introduction.png") })
+    await releaseIntro.getByRole("button", { name: "带我走一遍" }).click()
+    await releaseIntro.waitFor({ state: "hidden" })
+    const releaseTour = page.locator('[role="dialog"][aria-label="新功能操作指引"]')
+    for (const [index, id] of ["mods", "creator", "composer", "workspace", "progress", "plugins", "project", "market", "tools"].entries()) {
+      evidence.releaseGuideStep = id
+      await page.locator(`[data-ui-guide-current="${id}"]`).waitFor()
+      if (!["composer", "workspace", "progress"].includes(id)) {
+        const anchor = id === "creator" ? "creator-entry" : id
+        await page.locator(`[data-release-guide="${anchor}"][data-ui-guide-current="${id}"]`).waitFor()
+      }
+      await releaseTour.getByRole("button", { name: index === 8 ? "完成指引" : "下一步", exact: true }).click()
+    }
+    await page.getByRole("button", { name: "新功能指南", exact: true }).click()
+    await releaseIntro.waitFor()
+    for (const title of ["认识灵件", "用对话创造功能", "试用与保存", "导入现成插件", "调整项目流程", "分享与复用", "查看执行结果", "连接外部工具"]) {
+      evidence.releaseGuideTopic = title
+      await releaseIntro.getByRole("button", { name: new RegExp(`^${title}`) }).click()
+      await releaseTour.waitFor()
+      if (title === "认识灵件") {
+        await page.getByRole("button", { name: "返回应用", exact: true }).click()
+        assert.equal(await releaseTour.isVisible(), true, "Outside page navigation must retain the guide")
+      }
+      await releaseTour.getByRole("button", { name: "返回功能目录", exact: true }).click()
+      await releaseIntro.waitFor()
+    }
+    await releaseIntro.getByRole("button", { name: /^连接外部工具/ }).click()
+    await releaseTour.getByRole("button", { name: "关闭使用指引", exact: true }).click()
+    await page.getByRole("button", { name: "重新打开新功能指南", exact: true }).click()
+    await releaseIntro.waitFor()
+    await releaseIntro.getByRole("button", { name: "关闭新功能介绍" }).click()
+    await page.getByRole("button", { name: "返回应用", exact: true }).click()
     phase("create-good-and-unavailable-fixture-projects")
     const setup = await page.evaluate(
       async ({ workspace, oldZip, goodZip }) => {
@@ -959,7 +1043,7 @@ async function main() {
       {
         workspace: fixture.workspace,
         oldZip: compositionHostFlow(),
-        goodZip: compositionHostFlow(true)
+        goodZip: compositionHostFlow(true, "请准备待核对的报告和验收要求。完成后在特性详情查看汇总结果。")
       }
     )
     evidence.setup = setup
@@ -967,6 +1051,7 @@ async function main() {
     phase("upload-original-zip")
     await page.reload()
     await page.getByText("项目包导入验收", { exact: true }).first().click()
+    assert.equal(await releaseIntro.count(), 0, "Release introduction stays dismissed after restart")
     const sourceList = await openPlugins()
     await sourceList.getByRole("button", { name: /composition-reader-fixture/ }).waitFor()
     // Select the header action, independently of the initial empty/loading state.
@@ -1205,6 +1290,11 @@ async function main() {
       [],
       "The mature project workflow must not request the separate composition catalog"
     )
+    assert.deepEqual(
+      creatorFlowEvents.filter((event) => event.channel === "harnessBoard:getDialogTips"),
+      [],
+      "Native chat guidance reuses the detail snapshot without legacy worker IPC reads"
+    )
     assert(
       creatorFlowEvents.some(
         (event) => event.threadId === setup.threadId && event.channel === "mods:claw-view"
@@ -1226,6 +1316,18 @@ async function main() {
     assert.deepEqual(errors, [])
     assert.equal(createHash("sha256").update(readFileSync(inputZip)).digest("hex"), inputSha256)
     assert.equal(projectCompositionCandidate(root).sha256, candidate.sha256)
+    phase("uninstall-bundle-exclusive-dependencies")
+    const bundleRemoval = await page!.evaluate((id) => window.api.plugins.delete(id), main.id)
+    assert.equal(bundleRemoval.success, true, bundleRemoval.error)
+    const afterRemoval = await page!.evaluate(() => window.api.plugins.list())
+    for (const removed of [main, ...dependencies]) {
+      assert(!afterRemoval.some((plugin) => plugin.id === removed.id), `No catalog orphan: ${removed.name}`)
+      assert(!existsSync(removed.path), `No directory orphan: ${removed.name}`)
+    }
+    assert(afterRemoval.some((plugin) => plugin.id === setup.goodPluginId))
+    assert.equal(readFileSync(pendingUserFile, "utf8"), pendingUserFileText)
+    evidence.bundleUninstall = { removed: [main, ...dependencies].map((plugin) => plugin.name),
+      retained: afterRemoval.map((plugin) => plugin.name), userRepositoryPreserved: true }
     phase("complete")
     passed = true
     console.log(`PASS real project bundle import and original entry: ${fixture.isolated}`)

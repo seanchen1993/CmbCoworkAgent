@@ -11,6 +11,22 @@ import type { DevelopmentScope } from "../v2/development-session"
 const scope: DevelopmentScope = { threadId: "project-authoring-test", workspace: "workspace",
   incarnation: { token: "one", legacyCreatedAt: 1 } }
 const roots = new Set<string>()
+
+it("creator source patches change user guidance independently of model prompts and keep prior revisions", async () => {
+  const sessions = new ProjectAuthoringSessions(async () => [])
+  const guard = () => undefined
+  const first = await sessions.scaffold(scope, "guided-project", "指导文档", guard, "native-modular")
+  roots.add(dirname(first.directory))
+  const changed = await sessions.patch(scope, {
+    id: first.id, revision: first.revision, sourceDigest: first.source.digest,
+    sourcePatch: [{ op: "replace", path: "/modules/0/userGuide", value: "请提供评审范围和验收标准。" }]
+  }, guard)
+  const compiled = await sessions.compile(scope, changed.id, changed.revision, guard)
+  expect(compiled.source.files.find((file) => file.path === "devclaw.project-runtime.json")!.text).toContain("请提供评审范围和验收标准。")
+  expect(await readFile(join(first.directory, "devclaw.project-runtime.json"), "utf8")).not.toContain("请提供评审范围和验收标准。")
+  for (const file of first.source.files.filter((item) => item.path.endsWith("SKILL.md")))
+    expect(compiled.source.files.find((item) => item.path === file.path)?.text).toBe(file.text)
+})
 afterEach(async () => { for (const root of roots) await rm(root, { recursive: true, force: true }); roots.clear() })
 
 it("keeps failure repair on immutable revisions and checks the current creator authority", async () => {

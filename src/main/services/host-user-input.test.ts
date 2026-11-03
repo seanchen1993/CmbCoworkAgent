@@ -111,6 +111,24 @@ const questionProps = {
   questions: JSON.parse(JSON.stringify(request.questions))
 }
 
+it.each([0, 1])("persists and renders a normalized question with %i fixed options", async (count) => {
+  const f = fixture()
+  const release = bindHostUserInputScope(request.threadId, binding, () => {})
+  const questions = [{ ...request.questions[0], options: request.questions[0].options.slice(0, count) }]
+  const record = prepareHostInputInterrupt(request.threadId, "normalized-question", questions)!
+  release()
+  expect(f.store.get(record.request.requestId)?.request.questions).toEqual(questions)
+  const sites = questionSites()
+  const owner = await sites.mount("AskUserQuestion", undefined, record.request.requestId)
+  await expect(sites.render(owner, {
+    tool: "request_user_input", questions: JSON.parse(JSON.stringify(questions))
+  })).resolves.toBeDefined()
+  expect(submitUserInputResponse({ requestId: record.request.requestId, answers: {
+    choice: { type: "other", questionId: "choice", text: "用户补充的答案" }
+  } })).toBe(true)
+  expect(f.store.get(record.request.requestId)?.status).toBe("answered")
+})
+
 it("pins a durable native question across fresh database reads and accepts its first answer", async () => {
   const f = fixture()
   const record = durableQuestion()

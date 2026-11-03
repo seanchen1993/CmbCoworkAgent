@@ -210,6 +210,32 @@ it("reviews without grants, Guest loading, enabling settings or requiring Featur
   expect(directories.size).toBe(0)
 })
 
+it.each(["新建文件夹", "AutoBiz-项目记录", "项目_2026-11"])(
+  "reviews and authorizes the original project's Chinese directory name %s",
+  async (projectDir) => {
+    input = { ...input, workspacePath: join(state.root, "用户", "图文副本-20261022"), projectDir }
+    await mkdir(join(input.workspacePath, projectDir), { recursive: true })
+    const review = await reviewProjectUse(input, owner)
+    const expected = realpathSync(join(input.workspacePath, projectDir))
+    expect(review.workspace).toBe(process.platform === "win32" ? expected.toLowerCase() : expected)
+    expect(applicationEnables).toBe(0)
+    const prepared = prepareProjectUseCreation(creation(review), owner)
+    prepared.commit()
+    await publish(review)
+    expect(prepared.complete().state).toBe("ready")
+    expect(() => admitProjectUseFeature(child(review))).not.toThrow()
+  }
+)
+
+it.each(["", ".", "..", "../outside", "..\\outside", "中文/子目录", "中文\\子目录", "有 空格", "尾随.", "x:y", "目录\u0000", "a".repeat(129)])(
+  "still rejects unsafe or unsupported project directory names: %j",
+  async (projectDir) => {
+    await expect(reviewProjectUse({ ...input, projectDir }, owner)).rejects.toThrow("PROJECT_INVALID_INPUT")
+    expect(applicationEnables).toBe(0)
+    expect(directories.size).toBe(0)
+  }
+)
+
 it("keeps pure native configuration usable without opening application or directory execution", async () => {
   configurationOnly = true
   const review = await reviewProjectUse(input, owner)

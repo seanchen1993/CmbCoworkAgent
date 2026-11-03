@@ -71,7 +71,7 @@ async function main() {
           }))
           builder.onResolve({ filter: /^\.\/[A-Z]/ }, (args) =>
             args.importer.endsWith("CustomizeView.tsx") &&
-            !["./SparksTour", "./ConfigurationTargetPicker"].includes(args.path)
+            !["./SparksTour", "./ConfigurationTargetPicker", "./SettingsOverlay"].includes(args.path)
               ? { path: args.path, namespace: "panel" }
               : undefined
           )

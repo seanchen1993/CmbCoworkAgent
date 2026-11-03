@@ -5,6 +5,7 @@ import type {
   HarnessProjectUseReviewInput
 } from "../../../../shared/project-use-authorization"
 import { useAppStore } from "@/lib/store"
+import { projectUseReviewError } from "./project-runtime-message"
 
 /** Selection reads the scope only. The existing form submission records consent. */
 export function useProjectUseReview(input?: HarnessProjectUseReviewInput) {
@@ -39,11 +40,11 @@ export function useProjectUseReview(input?: HarnessProjectUseReviewInput) {
             Math.min(review.expiresAt - Date.now(), 2_147_483_647)
           )
         })
-        .catch(() => {
+        .catch((error: unknown) => {
           if (current)
             setResult({
               key,
-              error: "无法核对插件。请确认目录可用后重试；若插件已更新，请取消后重新选择插件。"
+              error: projectUseReviewError(error)
             })
         })
     }, 300)

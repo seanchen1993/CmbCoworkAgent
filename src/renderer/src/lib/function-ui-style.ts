@@ -66,7 +66,7 @@ export function functionUiStyle(node: FunctionUiNode, inheritedBackground?: stri
       : typeof p[key] === "string"
         ? (p[key] as string)
         : undefined
-  return {
+  const style: CSSProperties = {
     boxSizing: "border-box",
     maxWidth: "100%",
     display: p.display === "none" ? "none" : "flex",
@@ -130,6 +130,9 @@ export function functionUiStyle(node: FunctionUiNode, inheritedBackground?: stri
     minWidth: size("minWidth", "ch"),
     minHeight: size("minHeight", "lh")
   }
+  // React assigns inline styles in order. An absent rowGap/paddingTop must not clear
+  // the gap/padding shorthand that was just assigned on the same element.
+  return Object.fromEntries(Object.entries(style).filter(([, value]) => value !== undefined))
 }
 
 /** Native style-only hover. Cross-site author groups are intentionally not inferred. */

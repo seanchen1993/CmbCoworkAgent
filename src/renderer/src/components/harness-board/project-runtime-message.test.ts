@@ -1,9 +1,29 @@
 import { describe, expect, it } from "vitest"
 import {
   projectCheckKindLabel,
+  projectUseReviewError,
   projectPreviewStatusMessage,
   projectRuntimeRecoveryMessage
 } from "./project-runtime-message"
+
+it.each([
+  ["PROJECT_INVALID_INPUT", "文件夹名支持中文"],
+  ["ENOENT", "文件夹存在且可读写"],
+  ["PROJECT_DEPENDENCY_UNAVAILABLE", "依赖组件"],
+  ["PROJECT_DEPENDENCY_CHANGED", "依赖组件"],
+  ["PROJECT_PACKAGE_IDENTITY_MISMATCH", "所选插件已变化"],
+  ["PROJECT_USE_AUTHORIZATION_UNAVAILABLE", "重启应用"],
+  ["PROJECT_USE_REVIEW_CHANGED", "重新核对插件权限"]
+])("explains project review failure %s without exposing raw diagnostics", (code, expected) => {
+  const message = projectUseReviewError(new Error(`Error invoking remote method: ${code} private-fixture`))
+  expect(message).toContain(expected)
+  expect(message).not.toContain("private-fixture")
+})
+
+it("uses a safe fallback for unknown project review failures", () => {
+  expect(projectUseReviewError(new Error("private-fixture"))).toContain("无法核对插件")
+  expect(projectUseReviewError(new Error("private-fixture"))).not.toContain("private-fixture")
+})
 
 it("distinguishes actual business receipts from structural and file checks", () => {
   expect(projectCheckKindLabel("action")).toBe("业务校验")

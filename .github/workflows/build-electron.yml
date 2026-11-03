@@ -470,6 +470,20 @@ jobs:
         timeout-minutes: 5
         run: npm run test:project-original-flow
 
+      - name: Verify native stage chat and grouped uninstall regressions
+        timeout-minutes: 5
+        run: >-
+          npx vitest run --maxWorkers=1
+          src/main/harness-board/native-discussion-context.test.ts
+          src/renderer/src/components/harness-board/native-feature-guidance.test.ts
+          src/main/plugins/project-bundle-removal.test.ts
+          src/shared/user-input-presentation.test.ts
+
+      - name: Verify illustrated release guide navigation (Windows)
+        if: runner.os == 'Windows'
+        timeout-minutes: 5
+        run: node --import tsx tests/release-feature-guide-browser.spec.ts
+
       - name: Verify guide dismissal before explicit project entry (Windows)
         if: runner.os == 'Windows'
         timeout-minutes: 5

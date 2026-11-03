@@ -1,5 +1,7 @@
 import { isDevelopmentThreadMetadata } from "../../../../shared/mods/development-scope"
 import { AssistantWorkbench } from "./AssistantWorkbench"
+import { openApplicationUsageGuide } from "../guides/application-usage-guide"
+import { subscribeGuideSettings } from "../guides/release-guide-navigation"
 import { creatorEntryError, enterCreatorMode } from "./creator-mode-entry"
 import { SparksTour, type SparksTourHandle } from "./SparksTour"
 import { useSettingsComposerReturn } from "./settings-return-focus"
@@ -382,6 +384,15 @@ export function CustomizeView(): React.JSX.Element {
     }
   }
   const navigationScope = JSON.stringify([currentThreadId, currentWorkspacePath])
+  useEffect(() => subscribeGuideSettings((tab) => {
+    tourRef.current?.dismiss()
+    setActiveTab(tab)
+    if (tab === "mods") setModsNavigation((previous) => ({
+      id: (previous?.id ?? 0) + 1,
+      scope: navigationScope,
+      section: "create"
+    }))
+  }), [navigationScope])
   const initialSectionRequest = useRef<string | null>(null)
   const [previousNavigationScope, setPreviousNavigationScope] = useState(navigationScope)
   if (previousNavigationScope !== navigationScope) {
@@ -469,8 +480,9 @@ export function CustomizeView(): React.JSX.Element {
   return (
     <div className="flex h-full flex-col overflow-hidden bg-background sm:flex-row">
       <div className="flex max-h-[35%] shrink-0 flex-col border-b border-border sm:max-h-none sm:w-[200px] sm:border-b-0 sm:border-r">
-        <div className="p-3 flex items-center gap-2">
+        <div className="p-3 flex flex-wrap items-center gap-2">
           <SettingsBackButton onClick={() => setShowCustomizeView(false)} />
+          <button type="button" className="ml-auto rounded px-2 py-1 text-xs text-muted-foreground hover:bg-muted" onClick={openApplicationUsageGuide}>新功能指南</button>
         </div>
         <nav className="min-h-0 flex-1 px-3 pb-3 space-y-3 overflow-y-auto">
           {MENU_GROUPS.map((group) => {

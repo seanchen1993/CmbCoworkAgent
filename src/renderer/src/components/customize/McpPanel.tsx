@@ -231,7 +231,7 @@ export function McpPanel(): React.JSX.Element {
         {sourceNotice && <p role="alert" className="p-3 text-sm text-destructive">{sourceNotice}</p>}
         <div className="p-3 border-b border-border space-y-2">
           <div className="flex items-center justify-between gap-2">
-            <h2 className="text-base font-bold">MCP 连接器</h2>
+            <h2 data-release-guide="tools" className="text-base font-bold">MCP 连接器</h2>
             <div className="flex items-center gap-1">
               <div className="relative flex-1 min-w-[120px] max-w-[160px]">
                 <Search className="absolute left-2 top-1/2 -translate-y-1/2 size-3.5 text-muted-foreground pointer-events-none" />

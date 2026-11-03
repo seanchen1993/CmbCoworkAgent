@@ -196,6 +196,20 @@ function legacyFixture() {
 }
 
 describe("original plugin first modularization", () => {
+  it("keeps authored user guidance when converting a Host plugin into reusable modules", () => {
+    const source = fixture()
+    edit(source, "devclaw.project-runtime.json", (value) => {
+      const runtime = parseProjectRuntimeManifest(value)
+      runtime.stages[0].userGuide = "请准备原始资料。\n检查生成的文档。"
+      return runtime
+    })
+    const catalog = inspectPluginModularization(source).catalog!
+    expect(catalog.modules[0].host?.stage.userGuide).toBe("请准备原始资料。\n检查生成的文档。")
+    const candidate = createPluginModularizationCandidate(source, {
+      confirmed: true, sourceDigest: source.digest, catalog
+    })
+    expect(candidate.status).toBe("needs-native-validation")
+  })
   it("keeps state ownership and preservation sources explicit instead of treating assembly metadata as executable migration", () => {
     const { source, catalog } = legacyFixture()
     addFile(source, "scripts/state_store.py", "# Original unique writer; preserve exactly.\n")

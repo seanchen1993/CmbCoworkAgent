@@ -11,6 +11,7 @@ export interface AnchoredGuideStep {
   selectors: readonly string[]
   example?: { label: string; prompt: string }
   expectation?: string
+  missingHint?: string
 }
 
 const dismissed = new Set<string>()
@@ -27,6 +28,10 @@ interface AnchoredGuideProps {
   dialogLabel?: string
   returnFocusRef?: RefObject<HTMLElement | null>
   onStepChange?(step: AnchoredGuideStep): void
+  onClose?(): void
+  onOverview?(): void
+  persistent?: boolean
+  layer?: number
 }
 
 export function AnchoredGuide(props: AnchoredGuideProps) {
@@ -43,7 +48,11 @@ function ScopedAnchoredGuide({
   hideTrigger = false,
   dialogLabel = "插件创作使用指引",
   returnFocusRef,
-  onStepChange
+  onStepChange,
+  onClose,
+  onOverview,
+  persistent = false,
+  layer = 70
 }: AnchoredGuideProps) {
   const [open, setOpen] = useState(false)
   const [index, setIndex] = useState(0)
@@ -97,6 +106,7 @@ function ScopedAnchoredGuide({
   const close = () => {
     dismissed.add(key)
     setOpen(false)
+    onClose?.()
     // Closing must work even if persistence is unavailable. Ensure the record exists first.
     if (api)
       void api
@@ -107,7 +117,7 @@ function ScopedAnchoredGuide({
 
   useEffect(() => {
     if (!active || !available) {
-      setOpen(false)
+      if (!persistent) setOpen(false)
       return
     }
     if (!autoStart || !api || dismissed.has(key)) return
@@ -124,7 +134,7 @@ function ScopedAnchoredGuide({
     return () => {
       cancelled = true
     }
-  }, [active, available, api, key, config, autoStart])
+  }, [active, available, api, key, config, autoStart, persistent])
 
   useEffect(() => {
     if (!active || !available || !request || request === handledRequest.current) return
@@ -238,11 +248,21 @@ function ScopedAnchoredGuide({
   const anchor = useMemo(
     () => ({
       current: {
-        getBoundingClientRect: () => target?.getBoundingClientRect() ?? new DOMRect(),
+        getBoundingClientRect: () => {
+          const rect = target?.getBoundingClientRect() ?? new DOMRect()
+          // A page-sized panel leaves no space above or below it. Anchor inside its
+          // visible area instead of placing the instructions outside the viewport.
+          if (missing || rect.height > window.innerHeight / 2) {
+            const x = Math.min(Math.max(rect.left + 24, 16), window.innerWidth - 32)
+            const y = missing ? 48 : Math.min(Math.max(rect.top + 32, 32), window.innerHeight / 3)
+            return new DOMRect(x, y, 0, 0)
+          }
+          return rect
+        },
         contextElement: target ?? undefined
       }
     }),
-    [target]
+    [target, missing]
   )
   if (!active) return null
   return (
@@ -277,11 +297,14 @@ function ScopedAnchoredGuide({
           collisionPadding={12}
           className="overflow-y-auto p-4"
           style={{
-            zIndex: 70,
+            zIndex: layer,
             width: "min(23rem, calc(100vw - 2rem))",
             maxHeight: "calc(100dvh - 2rem)"
           }}
           onFocusOutside={(event) => event.preventDefault()}
+          onPointerDownOutside={(event) => {
+            if (persistent) event.preventDefault()
+          }}
           onEscapeKeyDown={(event) => {
             event.preventDefault()
             event.stopPropagation()
@@ -352,10 +375,17 @@ function ScopedAnchoredGuide({
           )}
           {missing && (
             <p role="status" className="mt-2 text-xs text-muted-foreground">
-              当前界面暂未显示这个控件。可继续下一步，稍后再看。
+              {step?.missingHint ?? "当前界面暂未显示这个控件。可继续下一步，稍后再看。"}
             </p>
           )}
-          <p className="mt-2 text-xs text-muted-foreground">可随时关闭，再从“使用指引”重新打开。</p>
+          {onOverview ? (
+            <button type="button" onClick={onOverview}
+              className="mt-3 rounded border px-3 py-1.5 text-xs hover:bg-muted">
+              返回功能目录
+            </button>
+          ) : (
+            <p className="mt-2 text-xs text-muted-foreground">可随时关闭，再从“使用指引”重新打开。</p>
+          )}
           <div className="mt-4 flex flex-wrap items-center justify-between gap-2">
             <button
               type="button"

@@ -1,4 +1,6 @@
 import { prepareMarketCommand } from "../services/market-content"
+import { HARNESS_NAME_PATTERN } from "../../shared/harness-name"
+import { buildNativeDiscussionContext } from "./native-discussion-context"
 import { prepareProjectUseCreation, prepareProjectUseUpdate,
   revokeProjectUseAuthorization } from "./project-use-authorization"
 import {
@@ -310,7 +312,6 @@ const HARNESS_LOG_OUTPUT_PREVIEW_BYTES = 16 * 1024
 const HARNESS_LEAN_TOKEN_MAX_BYTES = 64 * 1024
 const HARNESS_LEAN_TOKEN_MAX_CHARS = 8 * 1024
 const HARNESS_BOARD_CONFIG_MAX_BYTES = 1024 * 1024
-const HARNESS_NAME_PATTERN = /^[\u4e00-\u9fffA-Za-z0-9_-]+$/u
 const HARNESS_NAME_RULE_MESSAGE = "仅支持中文、英文字母、数字、-、_，不允许空格"
 const CUSTOM_WORKFLOW_TEMPLATE_ID = "custom"
 
@@ -3258,7 +3259,10 @@ async function buildHarnessFeatureAgentContextWithinDeadline(
     const binding = readNativeHarnessFeature(feature.projectId, feature.slug)
     if (!binding) throw Error("HARNESS_NATIVE_FEATURE_MISSING")
     assertNativeHarnessFeatureCurrent(binding)
-    return { featureId: feature.slug, harnessProjectId: project.projectId,
+    const systemPromptInject = options.requestUserInputConfigSource === "plugin"
+      ? undefined // Thread creation only asks for policy; read the stage when a message is sent.
+      : await buildNativeDiscussionContext(feature.projectId, feature.slug, options)
+    return { systemPromptInject, featureId: feature.slug, harnessProjectId: project.projectId,
       harnessAdapterName: binding.expectedPlugin.name, harnessAdapterVersion: binding.expectedPlugin.version,
       projectCode: project.projectCode, projectDir: project.projectDir, systemId: project.systemId }
   }

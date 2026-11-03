@@ -79,7 +79,7 @@ function hostDeclaration(
   const raw = businessModObject(value)
   fields(raw, ["stage", "actions", "artifacts", "checks", "environment"])
   const stage = businessModObject(raw.stage)
-  fields(stage, ["actionIds", "artifactIds", "checkIds", "approval"])
+  fields(stage, ["actionIds", "artifactIds", "checkIds", "approval", "userGuide"])
   const runtime = parseProjectRuntimeManifestV1({
     apiVersion: "devclaw.project-runtime/v1",
     plugin: { id: "business-mod-validation", version: "1.0.0" },
@@ -99,9 +99,9 @@ function hostDeclaration(
     }
   })
   assertHostRuntimeSupported(runtime)
-  const { actionIds, artifactIds, checkIds, approval } = runtime.stages[0]
+  const { actionIds, artifactIds, checkIds, approval, userGuide } = runtime.stages[0]
   return {
-    stage: { actionIds, artifactIds, checkIds, approval },
+    stage: { actionIds, artifactIds, checkIds, approval, ...(userGuide === undefined ? {} : { userGuide }) },
     actions: runtime.actions,
     artifacts: runtime.artifacts,
     checks: runtime.checks,

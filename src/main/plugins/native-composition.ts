@@ -1,4 +1,5 @@
 import { z } from "zod"
+import { isProjectUserGuide } from "../../shared/project-runtime/user-guide"
 import type { ClawActionDescriptor } from "../../shared/mods/claw-actions"
 import { clawActionObject } from "../../shared/mods/claw-actions"
 import type { ProjectActionBinding } from "../../shared/project-runtime/action-bindings"
@@ -101,6 +102,7 @@ export const nativeCompositionSchema = z
             id,
             version: z.string().regex(/^\d+\.\d+\.\d+$/),
             title: text,
+            userGuide: z.string().refine(isProjectUserGuide, "PROJECT_USER_GUIDE_INVALID").optional(),
             skill: path,
             executionMode: z.enum(["normal", "workflow"]).optional(),
             inputs: z.array(z.object({ artifactId: id, contract: text }).strict()).max(32),
@@ -483,6 +485,7 @@ export function compileNativeComposition(
     stages.push({
       id: module.id,
       title: module.title,
+      ...(module.userGuide === undefined ? {} : { userGuide: module.userGuide }),
       skill: compiledSkill,
       ...(module.executionMode === undefined ? {} : { executionMode: module.executionMode }),
       ...(module.contextArtifactIds === undefined

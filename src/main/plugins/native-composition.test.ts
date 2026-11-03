@@ -33,6 +33,33 @@ const compileVendor = (source = sourceAt(vendorRoot)) =>
   })
 
 describe("single-source native composition", () => {
+  it("retains display-only stage guides through compile and derivation without changing Skills or checks", () => {
+    const source = sourceAt(vendorRoot)
+    const baseline = compileVendor(source)
+    source.modules[0].userGuide = "请准备供应商资料。\n\n- 完成后检查评估结果。"
+    const first = compileVendor(source)
+    expect(parseProjectRuntimeManifest(first.runtime).stages[0].userGuide).toBe(source.modules[0].userGuide)
+    for (const file of baseline.files.filter((item) => item.path.endsWith("SKILL.md")))
+      expect(first.files.find((item) => item.path === file.path)?.bytes).toEqual(file.bytes)
+    const derived = structuredClone(first.source)
+    derived.plugin.id = "derived-vendor-guide"
+    derived.modules[0].userGuide = "请准备新的评估范围。"
+    const second = compileVendor(derived)
+    expect(parseProjectRuntimeManifest(second.runtime).stages[0].userGuide).toBe(derived.modules[0].userGuide)
+    expect(first.source.modules[0].userGuide).toBe(source.modules[0].userGuide)
+    expect(parseProjectRuntimeManifest(second.runtime).checks).toEqual(parseProjectRuntimeManifest(first.runtime).checks)
+    const retained = JSON.parse(second.files.find((file) => file.path === "composition/source.json")!.bytes.toString())
+    expect(retained.modules[0].userGuide).toBe(derived.modules[0].userGuide)
+  })
+
+  it.each(["", " ", "x".repeat(4001), "hidden\u0000", "hidden\u202e"])("rejects invalid display guide %j", (userGuide) => {
+    const source = sourceAt(vendorRoot)
+    source.modules[0].userGuide = userGuide
+    expect(nativeCompositionSchema.safeParse(source).success).toBe(false)
+    const runtime = parseProjectRuntimeManifest(compileVendor().runtime)
+    runtime.stages[0].userGuide = userGuide
+    expect(() => parseProjectRuntimeManifest(runtime)).toThrow("PROJECT_RUNTIME_MANIFEST_INVALID")
+  })
   const metadataPaths = [
     "composition/lock.json", "plugin.json", "devclaw.project-runtime.json",
     "devclaw.project-actions.lock.json"

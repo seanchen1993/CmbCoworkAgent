@@ -1,4 +1,6 @@
 import { requestChatFlowUse } from "@/lib/chat-flow-use"
+import { NativeProjectChatGuide } from "../harness-board/NativeProjectChatGuide"
+import { NativeProjectChatPresence } from "../harness-board/native-project-chat-context"
 import { useChatComposerFocus } from "@/lib/use-chat-composer-focus"
 import { sameSimpleAuthoringScope } from "@/lib/simple-authoring-intent"
 import { useSimpleAuthoringTask, dismissSimpleAuthoringTask } from "@/lib/simple-authoring-composer"
@@ -1749,7 +1751,8 @@ export function ChatContainer({
   const parentInputPaused = !!modsInputTarget
   const shouldShowWelcomeHeadline = surfaceConfig.showWelcomeHeadline
   const shouldShowWelcomeSkillTabs = surfaceConfig.showWelcomeSkillTabs && !hideWelcomeSkillTabs
-  const shouldShowHarnessDialogTips = surfaceConfig.showHarnessDialogTips && !readOnly
+  const nativeProjectChat = React.useContext(NativeProjectChatPresence)
+  const shouldShowHarnessDialogTips = surfaceConfig.showHarnessDialogTips && !readOnly && !nativeProjectChat
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const textareaResizeFrameRef = useRef<number | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -7739,11 +7742,16 @@ export function ChatContainer({
 
     return (
       <div className="pt-6">
-        {(shouldShowHarnessDialogTips || shouldShowNextActionDialogTips) && harnessDialogTips ? (
-          <DialogTipsMarkdown content={harnessDialogTips} />
-        ) : !shouldShowWelcomeHeadline || harnessFeatureBinding ? null : (
-          <RotatingHeadline />
-        )}
+        <NativeProjectChatGuide
+          threadId={threadId}
+          renderMarkdown={(content) => <DialogTipsMarkdown content={content} />}
+        >
+          {(shouldShowHarnessDialogTips || shouldShowNextActionDialogTips) && harnessDialogTips ? (
+            <DialogTipsMarkdown content={harnessDialogTips} />
+          ) : !shouldShowWelcomeHeadline || harnessFeatureBinding ? null : (
+            <RotatingHeadline />
+          )}
+        </NativeProjectChatGuide>
       </div>
     )
   }, [
@@ -7754,7 +7762,8 @@ export function ChatContainer({
     isLoading,
     shouldShowHarnessDialogTips,
     shouldShowNextActionDialogTips,
-    shouldShowWelcomeHeadline
+    shouldShowWelcomeHeadline,
+    threadId
   ])
 
   const extractMessageText = useCallback((content: Message["content"]): string => {

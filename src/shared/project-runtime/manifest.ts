@@ -1,4 +1,5 @@
 import { parseClawActionIdentity } from "../mods/claw-actions"
+import { isProjectUserGuide } from "./user-guide"
 import {
   PROJECT_RUNTIME_V2_API_VERSION,
   projectRuntimeExtensionContract,
@@ -154,8 +155,9 @@ export function parseProjectRuntimeManifestV1(value: unknown): ProjectRuntimeMan
           const stage = record(
             value,
             ["id", "title", "actionIds", "artifactIds", "checkIds", "approval"],
-            ["skill", "resultApproval", "executionMode", "inputArtifactIds", "contextArtifactIds"]
+            ["skill", "userGuide", "resultApproval", "executionMode", "inputArtifactIds", "contextArtifactIds"]
           )
+          if (stage.userGuide !== undefined && !isProjectUserGuide(stage.userGuide)) return invalid()
           if (stage.approval !== "none" && stage.approval !== "human") return invalid()
           if (
             stage.resultApproval !== undefined &&
@@ -178,6 +180,7 @@ export function parseProjectRuntimeManifestV1(value: unknown): ProjectRuntimeMan
           return {
             id: id(stage.id),
             title: text(stage.title),
+            ...(stage.userGuide === undefined ? {} : { userGuide: stage.userGuide as string }),
             actionIds: refs(stage.actionIds),
             artifactIds: refs(stage.artifactIds),
             ...(stage.inputArtifactIds === undefined

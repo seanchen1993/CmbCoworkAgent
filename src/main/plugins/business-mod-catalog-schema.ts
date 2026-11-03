@@ -1,4 +1,5 @@
 import { z } from "zod"
+import { isProjectUserGuide } from "../../shared/project-runtime/user-guide"
 
 const id = z.string().regex(/^[a-zA-Z0-9][\w.-]{0,79}$/)
 const paths = z.array(z.string().min(1).max(512)).max(4096)
@@ -77,6 +78,7 @@ export const businessModCatalogSchema = z
                 stage: z
                   .object({
                     actionIds: ids,
+                    userGuide: z.string().refine(isProjectUserGuide).optional(),
                     artifactIds: ids,
                     checkIds: ids,
                     approval: z.enum(["none", "human"])

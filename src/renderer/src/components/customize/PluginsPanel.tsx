@@ -221,7 +221,7 @@ function ConfirmDeleteDialog(props: {
       <DialogContent className="sm:max-w-sm">
         <DialogHeader>
           <DialogTitle>确认卸载</DialogTitle>
-          <DialogDescription>确定要卸载插件「{pluginName}」吗？此操作不可撤销。</DialogDescription>
+          <DialogDescription>确定要卸载插件「{pluginName}」吗？随包安装且未被其他项目引用的依赖组件会一起移除；单独安装的组件会保留。此操作不可撤销。</DialogDescription>
         </DialogHeader>
         <DialogFooter className="gap-2 sm:gap-0">
           <Button variant="outline" size="sm" onClick={onCancel}>
@@ -839,7 +839,7 @@ export function PluginsPanel(): React.JSX.Element {
       >
         <div className="p-3 border-b border-border space-y-2">
           <div className="flex items-center justify-between gap-2">
-            <h2 className="text-base font-bold">Plugins</h2>
+            <h2 data-release-guide="plugins" className="text-base font-bold">Plugins</h2>
             <div className="flex items-center gap-1">
               <div className="relative flex-1 min-w-[120px] max-w-[160px]">
                 <Search className="absolute left-2 top-1/2 -translate-y-1/2 size-3.5 text-muted-foreground pointer-events-none" />

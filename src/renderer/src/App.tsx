@@ -14,7 +14,7 @@ import {
   lazy,
   Suspense
 } from "react"
-import { ApplicationUsageGuide } from "@/components/guides/ApplicationUsageGuide"
+import { ReleaseFeatureGuide } from "@/components/guides/ReleaseFeatureGuide"
 import { PageEntryGuide } from "@/components/guides/PageEntryGuide"
 import {
   Sparkles,
@@ -1281,7 +1281,7 @@ function App(): React.JSX.Element {
                       {renderedMainView === "scheduled" ? (
                         <ScheduledPanel />
                       ) : (
-                        <MarketPanel key={accountRevision} />
+                        <div data-release-guide="market" className="flex min-h-0 flex-1 flex-col"><MarketPanel key={accountRevision} /></div>
                       )}
                     </Suspense>
                   </main>
@@ -1448,6 +1448,7 @@ function App(): React.JSX.Element {
                 <main
                   ref={isHarnessAgentFocusActive ? undefined : rightPanelMainRef}
                   key="harness-main"
+                  data-release-guide="project"
                   style={
                     isHarnessAgentFocusActive
                       ? { width: `${workerSplitLeftPercent}%` }
@@ -1613,7 +1614,7 @@ function App(): React.JSX.Element {
           )}
         </div>
       </div>
-      <ApplicationUsageGuide active={!showCustomizeView && !isAgentFocusActive} />
+      <ReleaseFeatureGuide active={!isAgentFocusActive} />
       <PetStateBridge />
       <Toaster position="top-center" richColors duration={2200} theme={toastTheme} />
     </ThreadProvider>

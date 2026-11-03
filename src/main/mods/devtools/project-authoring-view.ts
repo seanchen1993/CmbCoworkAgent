@@ -40,6 +40,12 @@ export function projectAuthoringReadView(
         protocol: "devclaw.native-composition/v1",
         sourcePath: "composition/source.json",
         stateOwner: "host",
+        userGuidance: {
+          field: "modules[].userGuide",
+          format: "Optional Markdown, 1–4000 characters; displayed in the original project chat welcome area.",
+          authoring: "Write a short user-facing explanation for every stage: what to provide, what the stage produces, and what to do next. Keep model instructions in the Skill. Derive by inheriting and revising this field; when assembling, retain it with its stage and adapt any references to removed stages. Omitted guidance uses a generic fallback. Never claim permissions or execution from guidance text.",
+          edit: "Use sourcePatch /modules/<index>/userGuide. Recompile and save a new version; existing runs retain their frozen version."
+        },
         nextStep: { action: "project_read", id: draft.id, assetPath: "composition/source.json" },
         dependencies: { action: "catalog", catalogSection: "project-dependencies" },
         edit: {

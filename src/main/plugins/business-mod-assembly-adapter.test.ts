@@ -176,6 +176,18 @@ describe("business assembly reviewed runtime adapters", () => {
     })
   })
 
+  it("retains each selected module's own guide through assembly and portable catalog re-import", () => {
+    const raw = catalog()
+    for (const mod of raw.modules) Object.assign(mod.host.stage, { userGuide: `用户准备 ${mod.id}\n查看本阶段成果。` })
+    const result = assemble(raw)
+    const runtime = parseProjectRuntimeManifest(value(result.files, "devclaw.project-runtime.json"))
+    const portable = parseBusinessModCatalog(value(result.files, BUSINESS_MOD_MANIFEST))
+    for (const stage of runtime.stages) {
+      expect(stage.userGuide).toBe(`用户准备 ${stage.id}\n查看本阶段成果。`)
+      expect(portable.modules.find((mod) => mod.id === stage.id)?.host?.stage.userGuide).toBe(stage.userGuide)
+    }
+  })
+
   it("rejects unknown adapter identifiers and a Host kernel carrying board config", () => {
     const unknown = catalog()
     Object.assign(unknown.kernel.runtime, { adapter: "author-code.js" })

@@ -1,3 +1,20 @@
+/** Creation reviews should identify the failing input without exposing raw IPC diagnostics. */
+export function projectUseReviewError(error: unknown): string {
+  const message = error instanceof Error ? error.message : typeof error === "string" ? error : ""
+  if (/\bPROJECT_INVALID_INPUT\b/.test(message))
+    return "项目目录信息不符合规则，请重新选择文件夹。文件夹名支持中文、英文字母、数字、-、_。"
+  if (/\b(?:ENOENT|ENOTDIR|EACCES|EPERM)\b/.test(message))
+    return "无法访问所选项目目录，请确认文件夹存在且可读写，或更换文件夹后重试。"
+  if (/\bPROJECT_DEPENDENCY_(?:UNAVAILABLE|CHANGED)\b/.test(message))
+    return "项目插件的依赖组件不可用或已变化，请到插件页检查依赖组件是否齐全并已启用，再重新选择项目插件。"
+  if (/\bPROJECT_PACKAGE_IDENTITY_MISMATCH\b/.test(message))
+    return "所选插件已变化或不可用，请取消新建，在插件页确认已启用后重新选择。"
+  if (/\bPROJECT_USE_AUTHORIZATION_UNAVAILABLE\b/.test(message))
+    return "插件权限服务尚未就绪，请重启应用后重新核对。"
+  return projectRuntimeRecoveryMessage(message) ??
+    "无法核对插件。请确认目录可用后重试；若插件已更新，请取消后重新选择插件。"
+}
+
 export function projectPreviewStatusMessage(
   preview: { state: string; revision?: number },
   completed: boolean

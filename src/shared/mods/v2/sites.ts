@@ -1,4 +1,4 @@
-import { requestUserInputSchema } from "../../user-input-schema"
+import { userInputPresentationSchema } from "../../user-input-schema"
 import { MOD_COMMAND_HISTORY_LIMIT, type ModObject } from "../types"
 import { encodeModJson } from "../validation"
 import { isModObject, ModFunctionError } from "./contracts"
@@ -51,8 +51,8 @@ export function functionUiSite(value: unknown): FunctionUiSite {
 
 /** Display wording may change; native answer IDs and option ordering keep their original meaning. */
 export function functionQuestionPresentation(original: unknown, value: unknown) {
-  const before = requestUserInputSchema.safeParse({ questions: original })
-  const after = requestUserInputSchema.safeParse({ questions: value })
+  const before = userInputPresentationSchema.safeParse({ questions: original })
+  const after = userInputPresentationSchema.safeParse({ questions: value })
   if (!before.success || !after.success) throw new ModFunctionError("MODS_UI_SITE_PROPS")
   const identity = (questions: typeof before.data.questions) =>
     questions.map((q) => [q.id, q.multiSelect === true, q.options.map((option) => option.label)])
@@ -72,14 +72,14 @@ export function functionSiteProps(site: FunctionUiSite, value: unknown): ModObje
   if (!isModObject(value)) return fail()
   const text = (v: unknown): v is string => typeof v === "string" && v.length <= 10000
   if (site === "AskUserQuestion") {
-    const parsed = requestUserInputSchema.safeParse({ questions: value.questions })
+    const parsed = userInputPresentationSchema.safeParse({ questions: value.questions })
     if (
       !text(value.tool) ||
       !value.tool ||
       !parsed.success ||
       (value.metadataSource !== undefined && !text(value.metadataSource)) ||
       Object.keys(value).some((key) => !["tool", "questions", "metadataSource"].includes(key)) ||
-      encodeModJson(value).length > 16000
+      encodeModJson(value).length > 64000
     )
       return fail()
     return {

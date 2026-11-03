@@ -209,7 +209,8 @@ async function main() {
       await page.getByRole("button", { name: "托管运行当前特性", exact: true }).isEnabled(),
       "The first selected-directory run can open its original picker before default-scope readiness"
     )
-    await page.getByRole("button", { name: "托管运行当前特性", exact: true }).click()
+    await page.getByRole("region", { name: "当前阶段指引", exact: true })
+      .getByRole("button", { name: "填写需求并开始", exact: true }).click()
     const dialog = page.getByRole("dialog", { name: "开启托管运行", exact: true })
     await dialog.waitFor()
     assert.equal(

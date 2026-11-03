@@ -1,4 +1,5 @@
-import { mkdtemp, rm, cp, writeFile, mkdir } from "node:fs/promises"
+import { mkdtemp, rm, cp, writeFile, mkdir, readFile } from "node:fs/promises"
+import AdmZip from "adm-zip"
 import { tmpdir } from "node:os"
 import { dirname, isAbsolute, join, relative, resolve } from "node:path"
 import { randomUUID } from "node:crypto"
@@ -167,6 +168,10 @@ async function vendorSource(workspace: string, dependency = false) {
   await cp(resolve("tests/fixtures/native-compositions/vendor"), join(selected, "project"), {
     recursive: true
   })
+  const sourcePath = join(selected, "project/composition/source.json")
+  const composition = JSON.parse(await readFile(sourcePath, "utf8"))
+  composition.modules[0].userGuide = "请准备供应商基本资料，完成后核对评估结果。"
+  await writeFile(sourcePath, JSON.stringify(composition))
   if (dependency) {
     const source = createAuthoringTemplate({
       id: "vendor-" + randomUUID().slice(0, 8),
@@ -473,6 +478,9 @@ it("drives real vendor import, compile, install and start-use through the actual
       { deliveryId: exported.id, digest: exported.digest },
       join(f.workspace, "owned-test-export.zip")
     )
+    const zip = new AdmZip(join(f.workspace, "owned-test-export.zip"))
+    expect(parseProjectRuntimeManifest(JSON.parse(zip.readAsText("devclaw.project-runtime.json"))).stages[0].userGuide)
+      .toBe("请准备供应商基本资料，完成后核对评估结果。")
     expect(status().projectDelivery?.canInstall).toBe(true)
     deliveries = new CreatorProjectDeliveries({ ...f.deliveryDependencies, sessions })
     sets = new CreatorSourceSets({ ...f.deps, sessions, deliveries })
@@ -494,6 +502,13 @@ it("drives real vendor import, compile, install and start-use through the actual
     expect(sessions.list(f.scope)[0].revision).toBe(revision)
     await h.page.getByRole("button", { name: "保存插件", exact: true }).click()
     await expect.poll(() => deliveries.status(f.threadId)?.phase).toBe("installed")
+    const installedProject = storage.getPlugins().find((plugin) =>
+      plugin.id === deliveries.status(f.threadId)?.pluginId
+    )!
+    const installedRuntime = parseProjectRuntimeManifest(JSON.parse(
+      await readFile(join(installedProject.path, "devclaw.project-runtime.json"), "utf8")
+    ))
+    expect(installedRuntime.stages[0].userGuide).toBe("请准备供应商基本资料，完成后核对评估结果。")
     deliveries = new CreatorProjectDeliveries({ ...f.deliveryDependencies, sessions })
     sets = new CreatorSourceSets({ ...f.deps, sessions, deliveries })
     expect(status().sourceSet?.phase).toBe("ready")

@@ -1,4 +1,5 @@
 import { prepareProjectSourceSetInstall } from "../plugins/project-source-set-install"
+import { projectBundleRemovalIds } from "../plugins/project-bundle-removal"
 import { readProjectDependencyIds } from "../plugins/project-dependency-metadata"
 import { isCreatorVersionSource } from "../plugins/creator-path"
 import { isLegacyProjectModePluginRoot } from "../harness-board/plugin-mode"
@@ -436,6 +437,7 @@ async function installPluginFromDirLocked(
     name: string
     pluginId: string
     enabled?: true
+    dependencyOnly?: true
     verifyCopied: (directory: string) => Promise<void>
   }
 ): Promise<PluginInstallResult> {
@@ -453,7 +455,8 @@ async function installPluginFromDirLocked(
           if (item.existing) continue
           const result = await installPluginFromDirLocked(item.root, undefined, origin,
             undefined, "capabilities", beforeWrite, {
-              name: item.name, pluginId: item.id, enabled: true, verifyCopied: item.verify
+              name: item.name, pluginId: item.id, enabled: true, dependencyOnly: true,
+              verifyCopied: item.verify
             })
           if (!result.success) throw Error(result.error || "项目包安装失败")
           added.push(item.name)
@@ -470,6 +473,9 @@ async function installPluginFromDirLocked(
           if (!result.success) throw Error(result.error || "项目包安装失败")
         }
         const installed = getPlugins().find(item => item.id === project.id)
+        if (installed) upsertPlugin({
+          ...installed, bundleDependencyIds: bound.slice(0, -1).map((item) => item.id)
+        })
         return { success: true, pluginId: project.id, pluginName: project.name,
           kind: "plugin", enabled: installed?.enabled ?? false }
       } catch (error) {
@@ -611,6 +617,7 @@ async function installPluginFromDirLocked(
     const resolvedOrigin: "market" | "local" = origin ?? existing?.origin ?? "local"
     const meta: PluginMetadata = {
       id: installedPluginId,
+      dependencyOnly: createOnly?.dependencyOnly === true,
       name: parsed.name,
       version: resolvedVersion,
       description: parsed.manifest?.description ?? "",
@@ -1063,14 +1070,46 @@ export function registerPluginHandlers(ipcMain: IpcMain): void {
           return { success: false, error: "Plugin 不存在" }
         }
         try {
-          if (!isCreatorVersionSource(getPluginsDir(), plugin.path) && existsSync(plugin.path)) {
-            rmSync(plugin.path, { recursive: true, force: true })
+          const installedIds = new Set(plugins.map((item) => item.id))
+          const dependencies = new Map<string, string[]>()
+          let incompleteProject = false
+          for (const item of plugins) {
+            const ids = await readProjectDependencyIds(item, installedIds)
+            if (ids !== undefined || item.bundleDependencyIds !== undefined) dependencies.set(
+              item.id, [...new Set([...(ids ?? []), ...(item.bundleDependencyIds ?? [])])]
+                .filter((dependency) => installedIds.has(dependency))
+            )
+            else if (item.id !== id && existsSync(path.join(item.path, "devclaw.project-runtime.json")))
+              incompleteProject = true
           }
-          deletePluginStorage(id)
-          getModsManager()?.pluginsChanged([id])
-          invalidateEnabledSkillsCache()
-          await invalidateGlobalMcpCapabilityService("plugin:delete")
-          notifyHooksChanged("plugin-deleted")
+          // Do not report a complete bundle uninstall when another project's references are unknown.
+          if (incompleteProject && dependencies.get(id)?.length) {
+            throw Error("其他项目插件的依赖信息无法核对，本次未卸载。请先修复或移除失效插件后重试。")
+          }
+          const removalIds = projectBundleRemovalIds(id, plugins, dependencies)
+          const removals = removalIds.map((candidate) => plugins.find((item) => item.id === candidate)!)
+          const managedRoot = path.resolve(getPluginsDir())
+          // Dependency cleanup is confined to the platform's installed package directory.
+          const safeRemovals = removals.filter((item) => item.id === id ||
+            (path.dirname(path.resolve(item.path)) === managedRoot &&
+              !isCreatorVersionSource(getPluginsDir(), item.path)))
+          const removed: string[] = []
+          try {
+            for (const item of safeRemovals) {
+              if (!isCreatorVersionSource(getPluginsDir(), item.path) && existsSync(item.path)) {
+                rmSync(item.path, { recursive: true, force: true })
+              }
+              deletePluginStorage(item.id)
+              removed.push(item.id)
+            }
+          } finally {
+            if (removed.length) {
+              getModsManager()?.pluginsChanged(removed)
+              invalidateEnabledSkillsCache()
+              await invalidateGlobalMcpCapabilityService("plugin:delete")
+              notifyHooksChanged("plugin-deleted")
+            }
+          }
           return { success: true }
         } catch (e) {
           return { success: false, error: e instanceof Error ? e.message : "删除失败" }

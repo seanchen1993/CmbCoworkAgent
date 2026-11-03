@@ -62,6 +62,7 @@ beforeEach(() => {
   const path = join(state.root, "plugin")
   mkdirSync(path)
   const manifest = hostProjectFixture(repository).manifest
+  manifest.stages[0].userGuide = "请准备文档目标，完成后查看成果。"
   writeFileSync(join(path, "plugin.json"), JSON.stringify({ name: "docs", version: "1.0.0" }))
   writeFileSync(join(path, "devclaw.project-runtime.json"), JSON.stringify(manifest))
   for (const stage of manifest.stages) {
@@ -178,11 +179,13 @@ it("persists separate Feature executions on the selected directory and projects 
   expect(a.hostRunId).not.toBe(b.hostRunId)
   expect(a.repositoryWorkspace).toBe(realpathSync(repository))
   expect(nativeHarnessRunDetail(project, "first").nativeProject).toBeUndefined()
+  expect(nativeHarnessRunDetail(project, "first").workflow.nodes[0].userGuide).toBe("请准备文档目标，完成后查看成果。")
   expect((await nativeHarnessProjectDetail(project)).runs.map((run) => run.featureStatus)).toEqual([
     "not_started",
     "not_started"
   ])
   const view = await ensureNativeHarnessFeatureRun(project.projectId, "first", "Actual request A")
+  expect(view.project.manifest.stages[0].userGuide).toBe("请准备文档目标，完成后查看成果。")
   expect(view.project.goal).toBe("Actual request A")
   expect(host.get(b.hostRunId)).toBeUndefined()
   await host.continue(a.hostRunId)

@@ -28,7 +28,10 @@ async function main() {
       ];
       window.api={plugins:{list:async()=>plugins.map(p=>({...p})),
         setEnabled:async(id,enabled)=>{window.calls.push(['enable',id,enabled]);plugins=plugins.map(p=>p.id===id?{...p,enabled}:p);return {success:true}},
-        delete:async(id)=>{window.calls.push(['delete',id]);plugins=plugins.filter(p=>p.id!==id);return {success:true}}},
+        delete:async(id)=>{window.calls.push(['delete',id]);const target=plugins.find(p=>p.id===id);
+          const shared=new Set(plugins.filter(p=>p.id!==id).flatMap(p=>p.projectDependencyIds??[]));
+          const removed=new Set([id,...(target?.projectDependencyIds??[]).filter(child=>!shared.has(child))]);
+          plugins=plugins.filter(p=>!removed.has(p.id));return {success:true}}},
         mods:{globalEnabled:async()=>false,onConfigurationChanged:()=>()=>{},
           status:async()=>({workspace:'C:/fixture',enabled:false,outputPolicy:false,mods:[],functionMods:plugins.filter(p=>p.modCount).map(p=>({pluginId:p.id,name:p.name,digest:'a'.repeat(64),state:'needs-approval',capabilities:['command']})),diagnostics:[]}),
           clawView:async()=>null,approveFunction:async()=>{throw Error('Grouping must not grant permission')}},
@@ -191,15 +194,15 @@ async function main() {
     assert.deepEqual(await rootIds(), ["project-a", "unrelated", "project-b"])
     assert.equal(await card("rules").isVisible(), true)
 
-    // Removing one owner restores its exclusive children, while the shared child stays under B.
+    // Bundle removal deletes exclusive children; the shared component stays under B.
     await remove("project-a")
-    assert.deepEqual(await rootIds(), ["rules", "workflow", "unrelated", "project-b"])
+    assert.deepEqual(await rootIds(), ["unrelated", "project-b"])
     assert.equal(await card("knowledge").count(), 1)
-    assert.equal(await card("rules").locator("[data-native-start-use]").count(), 1)
+    assert.equal(await card("rules").count(), 0)
     assert.equal(await card("knowledge").locator("[data-native-start-use]").count(), 0)
     await remove("project-b")
-    assert.deepEqual(await rootIds(), ["rules", "workflow", "knowledge", "unrelated"])
-    assert.equal(await card("knowledge").locator("[data-native-start-use]").count(), 1)
+    assert.deepEqual(await rootIds(), ["unrelated"])
+    assert.equal(await card("knowledge").count(), 0)
     assert.equal(await installed.locator("details").count(), 0)
     const calls = await page.evaluate(() => window.calls)
     assert.deepEqual(calls, [

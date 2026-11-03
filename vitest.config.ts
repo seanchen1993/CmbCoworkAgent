@@ -63,6 +63,7 @@ export const VITEST_TEST_INCLUDE = [
   "src/renderer/src/components/harness-board/harness-board-cache.test.ts",
   "src/renderer/src/components/harness-board/project-capability-controller.test.ts",
   "src/renderer/src/components/harness-board/project-runtime-message.test.ts",
+  "src/renderer/src/components/harness-board/native-feature-guidance.test.ts",
   "src/renderer/src/components/harness-board/project-check-diagnostics.test.ts",
   "src/renderer/src/components/harness-board/bounded-latest-task-queue.test.ts",
   "src/renderer/src/components/harness-board/harness-board-render-window.test.ts",

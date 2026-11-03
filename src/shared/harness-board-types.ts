@@ -996,6 +996,8 @@ export interface HarnessWorkflowArtifactDefinition {
 export interface HarnessWorkflowNodeDefinition {
   id: string
   label: string
+  /** Native stage guidance, copied from the selected/frozen project package. */
+  userGuide?: string
   group?: string
   description?: string
   states?: HarnessWorkflowStateDefinition[]

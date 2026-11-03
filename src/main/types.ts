@@ -807,6 +807,10 @@ export interface PluginManifest {
 }
 
 export interface PluginMetadata {
+  /** Host-written install provenance. Explicit standalone installs are never bundle garbage. */
+  dependencyOnly?: boolean
+  /** Host-written source-set membership, retained even if installed runtime files become invalid. */
+  bundleDependencyIds?: string[]
   /** Display-only exact installed dependencies of a valid Host project; [] still marks a project. */
   projectDependencyIds?: string[]
   /** Display-only installed-file hint; project entry still validates the real adapter. */

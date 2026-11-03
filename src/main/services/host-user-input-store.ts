@@ -2,7 +2,7 @@ import { mkdirSync } from "node:fs"
 import { dirname, isAbsolute } from "node:path"
 import { DatabaseSync } from "node:sqlite"
 import type { UserInputRequest, UserInputResponse } from "../types"
-import { requestUserInputSchema } from "../../shared/user-input-schema"
+import { userInputPresentationSchema } from "../../shared/user-input-schema"
 import type { ClawActionIdentity } from "../../shared/mods/claw-actions"
 
 /** Retained only after the original restricted provider and native Flow facts settle. */
@@ -73,7 +73,7 @@ function checkRecord(record: HostUserInputRecord): HostUserInputRecord {
     JSON.stringify(record).length > 256 * 1024
   )
     throw Error("HOST_USER_INPUT_RECORD_INVALID")
-  requestUserInputSchema.parse({ questions: record.request.questions })
+  userInputPresentationSchema.parse({ questions: record.request.questions })
   if (
     record.continuation &&
     (record.continuation.protocol !== "host-user-input-interrupt/v1" ||

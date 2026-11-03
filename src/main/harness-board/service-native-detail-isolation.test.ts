@@ -179,6 +179,25 @@ it("reads the original native workflow again when its exact installation is rest
   )
 })
 
+it("passes a native Feature's current skill to ordinary chat without replacing AGENTS or granting execution", async () => {
+  const repository = join(state.root, "discussion-repo")
+  await mkdir(repository)
+  const binding = await native.createNativeHarnessFeature({ project: healthy, featureId: "discussion",
+    repositoryWorkspace: repository, sessionWorkspace: { source: "directory", path: repository },
+    selectedDeployUnits: [] })
+  const context = await service.buildHarnessFeatureAgentContext({ harnessFeature: {
+    projectId: healthy.projectId, slug: "discussion"
+  } }, { workspacePath: binding.repositoryWorkspace })
+  expect(context?.systemPromptInject).toContain("devclaw.project-discussion/v1")
+  expect(context?.systemPromptInject).toContain("stageSkillReference")
+  expect(context?.systemPromptInject).toContain("普通讨论")
+  expect(context?.harnessAgentsPrompt).toBeUndefined()
+  expect(context?.enableAgentsPrompt).toBeUndefined()
+  expect(context?.pluginRoot).toBeUndefined()
+  expect(context?.additionalAgentsWorkspacePaths).toBeUndefined()
+  expect(native.readNativeHarnessFeature(healthy.projectId, "discussion")?.packageDigest).toBeUndefined()
+})
+
 it("keeps native project creation on the original service and exact template identity", async () => {
   const plugin = state.plugins[0]
   consent = await projectUseConsentFixture(state.root, () => state.plugins)
