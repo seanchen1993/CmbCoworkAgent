@@ -42,6 +42,7 @@ import { getAvailableModelConfigOrDefault, getModelConfigByRef } from "../models
 import { samplingFields, topKModelKwargs } from "../models/sampling-params"
 import { getIdleModelServiceHoursRejection, getModelClientOptions } from "../models/connection"
 import type { ModelTransport } from "../../shared/model-catalog"
+import type { IdleModelEnvironment } from "../../shared/idle-model-service-window"
 import {
   createCmbSummarizationMiddleware,
   isGatewayContextOverflow
@@ -4247,6 +4248,7 @@ export function getModelInstance(
     enableThinkingEffort?: boolean
     thinkingEffort?: "low" | "high" | "max"
     transport?: ModelTransport
+    idleModelEnvironment?: IdleModelEnvironment
   },
   retryHooks?: ModelRetryHooks,
   maxRetryAttempts?: number,

@@ -13,7 +13,19 @@ const config = {
   transport: "idle-gateway" as const
 }
 
-function reply(): Response {
+function reply(streaming = false): Response {
+  if (streaming) {
+    const chunk = {
+      id: "reply",
+      object: "chat.completion.chunk",
+      created: 1,
+      model: "ultra",
+      choices: [{ index: 0, delta: { role: "assistant", content: "ok" }, finish_reason: "stop" }]
+    }
+    return new Response(`data: ${JSON.stringify(chunk)}\n\ndata: [DONE]\n\n`, {
+      headers: { "content-type": "text/event-stream" }
+    })
+  }
   return new Response(
     JSON.stringify({
       id: "reply",
@@ -79,6 +91,35 @@ describe("idle service hours at the real HTTP boundary", () => {
     expect(onRetry).toHaveBeenCalledTimes(1)
     expect(onRetrySuccess).toHaveBeenCalledTimes(1)
   })
+
+  it.each(["agent", "context-compaction"] as const)(
+    "allows UAT %s requests and retries after 07:00",
+    async (purpose) => {
+      vi.spyOn(ChatOpenAICompletions.prototype, "getNumTokens").mockResolvedValue(1)
+      const send = vi.fn(async () => {
+        if (send.mock.calls.length > 1) return reply(purpose === "context-compaction")
+        return new Response(JSON.stringify({ error: { message: "temporary failure" } }), {
+          status: 503,
+          headers: { "content-type": "application/json" }
+        })
+      })
+      vi.stubGlobal("fetch", send)
+      vi.spyOn(Math, "random").mockReturnValue(0)
+      const onRetry = vi.fn(() => vi.setSystemTime(new Date("2026-11-04T07:00:00+08:00")))
+      const model = getModelInstance(
+        { ...config, idleModelEnvironment: "uat" },
+        { onRetry },
+        2,
+        purpose,
+        "uat-thread"
+      )
+      await expect(model.invoke("first request")).resolves.toBeDefined()
+      vi.setSystemTime(new Date("2026-11-04T12:00:00+08:00"))
+      await expect(model.invoke("next request")).resolves.toBeDefined()
+      expect(send).toHaveBeenCalledTimes(3)
+      expect(onRetry).toHaveBeenCalledTimes(1)
+    }
+  )
 
   it("lets an existing SSE stream finish after 07:00, then blocks its next round", async () => {
     vi.spyOn(ChatOpenAICompletions.prototype, "getNumTokens").mockResolvedValue(1)
