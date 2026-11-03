@@ -30,6 +30,8 @@ async function fixture(
 ) {
   const compiled = await compileFunctionPlugin(resolve("tests/fixtures/mods-v2/client-board"))
   const guest = await FunctionGuestRuntime.create(compiled.code)
+  // Compilation owns a shared idle-reclamation timer before any Client clocks exist.
+  const compilerTimers = vi.getTimerCount()
   const clients: FunctionGuestRuntime[] = []
   const messages: ModJson[] = []
   const state = new Map<string, ModJson>()
@@ -81,7 +83,7 @@ async function fixture(
       handle: ordinaryFunctionNode(current.tree).press!.handle,
       intentId: randomUUID()
     })
-  return { session, clients, messages, snapshot, client, press }
+  return { session, clients, messages, snapshot, client, press, compilerTimers }
 }
 
 it("unmounts exactly on the third uninterrupted render setState and releases its clock", async () => {
@@ -96,6 +98,8 @@ it("unmounts exactly on the third uninterrupted render setState and releases its
   expect((await f.snapshot()).error).toBe("MODS_CLIENT_RENDER_LOOP")
   expect(f.clients[0].stats.disposed).toBe(true)
   await frame(100) // The owning Pane independently coalesces renderer notifications for 100 ms.
+  expect(vi.getTimerCount()).toBe(f.compilerTimers)
+  await frame(30_000) // The shared compiler must also retire its idle timer.
   expect(vi.getTimerCount()).toBe(0)
   expect(await f.session.commands()).toHaveLength(1)
 })
@@ -197,6 +201,8 @@ it("bounds a burst of one hundred posts to one owner dispatch, then leaves no su
   expect(f.messages).toEqual([{ count: 100 }])
   await f.session.close()
   await frame(100)
+  expect(vi.getTimerCount()).toBe(f.compilerTimers)
+  await frame(30_000)
   expect(vi.getTimerCount()).toBe(0)
   expect(f.clients[0].stats.disposed).toBe(true)
 })
@@ -210,6 +216,8 @@ it("drops an undelivered post when the pane closes before its next frame", async
   await frame(100)
   expect(f.messages).toEqual([])
   expect(f.clients[0].stats.disposed).toBe(true)
+  expect(vi.getTimerCount()).toBe(f.compilerTimers)
+  await frame(30_000)
   expect(vi.getTimerCount()).toBe(0)
 })
 

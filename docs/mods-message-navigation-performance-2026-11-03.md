@@ -66,6 +66,16 @@ Actions #953 的 Linux 构建通过；Windows 在原生阶段聊天的两阶段�
 
 定向撤销与开发服务 55 项通过，真实 React 浏览器回归通过（含更换后的聊天顶部状态和历史记录，截图 `output/creator-workspace-browser/1793707452134/replacement-trial-status.png`、`replacement-trial-history.png`）。改动文件 lint 无错误。前述编译器包不包含本项追加修改，最终源码重新构建到 `output/mods-undo-final-package`；全量回归收据使用 `output/mods-performance-final-20261103.result.json`，以最终收据为准，启动测试不等于通过。
 
+## 全量回归中的计时器断言修正
+
+完整 `npm test` 首轮收据 `output/mods-performance-final-20261103.result.json`：源码及证据文件未变、归属进程残留 0，退出码 1。Vitest 为 1,937 文件通过、1 文件失败、19 文件跳过；20,391 项通过、3 项失败、94 项跳过。失败均在 `client-lifecycle.test.ts`：该测试原先要求所有计时器立即归零，把新增的共享编译器空闲回收计时器也当成客户端泄漏；其余功能断言通过。
+
+修正测试的资源归属断言：挂载客户端前记录编译器计时器基线；客户端关闭后必须回到该基线；随后推进空闲回收时间，仍要求全部计时器归零。保留客户端已销毁、消息不得迟到和渲染循环等原断言。正式源码中的相关 8 文件 92 项复测通过，记录为 `output/mods-compiler-client-final.log`。应用源码没有因此追加修改；CI 的异步编译检查加入了这一生命周期套件。
+
+首轮因 Vitest 非零退出而未执行后续独立套件，现从 `package.json` 原 `test` 命令逐项解析并保持顺序全部补跑，记录为 `output/mods-performance-remaining-20261103.result.json`。最终验收由首轮全量记录、修正后的定向复测、全部剩余套件及对应 Actions 共同构成；不把首轮 `npm test` 记作退出码 0，也不重复已经通过的长业务流程。
+
+追加撤销修复的本地包 SHA-256 为 `c892749ff3a9c1fefe572110b359ba87883e91a52ddbb2b1ea639e7aa60ddb6a`。其导航回归 `output/mods-undo-final-navigation.log` 通过，12 次均小于 1,500 ms，首次 1,134 ms、后续会话切换 437–514 ms、项目列表 124–576 ms、返回聊天 513–547 ms；截图已确认正文可见。测量期间另有全量回归运行，不作为固定整机负载基准。进程回收 `output/mods-undo-final-lifecycle.log` 通过：0 → 1 → 0 → 1 → 0，应用退出后归属进程残留 0。汇总见 `output/mods-undo-final-acceptance.json`。
+
 ## 尚未解决的独立功能问题
 
 项目内新增会话按“普通讨论”处理，与正式阶段执行尚未贯通。建议复用现有斜杠技能选择及 `trustedExplicitSkill`，由主进程绑定当前插件版本和阶段并进入原 Host 执行链，避免重复注入大段提示词；产物检查与阶段推进继续由原流程负责。此方案尚未实现，本次性能修复不能当作已修复这一问题。

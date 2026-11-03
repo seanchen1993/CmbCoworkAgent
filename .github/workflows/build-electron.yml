@@ -764,7 +764,7 @@ jobs:
       - name: Verify asynchronous Mods compilation and compiler lifecycle
         if: matrix.platform == 'win'
         timeout-minutes: 5
-        run: npx vitest run src/main/mods/compiler-service.test.ts src/main/mods/v2/client-loader.test.ts src/main/mods/v2/loader.test.ts src/main/mods/v2/component-loader.test.ts src/main/mods/loader.test.ts src/main/mods/v2/guest-runtime.test.ts src/main/mods/v2/guest-bootstrap-compilation.test.ts
+        run: npx vitest run src/main/mods/compiler-service.test.ts src/main/mods/v2/client-loader.test.ts src/main/mods/v2/loader.test.ts src/main/mods/v2/component-loader.test.ts src/main/mods/loader.test.ts src/main/mods/v2/guest-runtime.test.ts src/main/mods/v2/guest-bootstrap-compilation.test.ts src/main/mods/v2/client-lifecycle.test.ts
 
       - name: Validate populated chat and mode navigation in Windows package
         if: matrix.platform == 'win'
