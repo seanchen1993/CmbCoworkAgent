@@ -856,7 +856,11 @@ async function runMain(failures: unknown[]): Promise<void> {
         })) as typeof dialog.showSaveDialog
       }, exported)
       await page!.getByRole("button", { name: "导出文本", exact: true }).click()
-      await until(async () => existsSync(exported), "packaged report export creates a real file")
+      // writeFile creates the destination before its asynchronous content write completes.
+      await until(
+        async () => existsSync(exported) && readFileSync(exported, "utf8").includes("PROJECT_VERIFIED"),
+        "packaged report export writes the expected content to a real file"
+      )
       assert(readFileSync(exported, "utf8").includes("PROJECT_VERIFIED"))
       await preview.scrollIntoViewIfNeeded()
       await page!.screenshot({ path: join(artifacts, "cold-command.png") })
