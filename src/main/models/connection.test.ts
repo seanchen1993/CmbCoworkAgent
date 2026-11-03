@@ -71,6 +71,67 @@ describe("idle gateway OpenAI transport", () => {
     }
   })
 
+  it.each([35, 36, 37, 40, 41])("bounds a %i-character session ID in the actual request", async (length) => {
+    const originalSessionId = "s".repeat(length)
+    let sessionId: string | null = null
+    const send = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+      sessionId = new Headers(init?.headers).get("x-session-id")
+      return jsonReply()
+    })
+    const model = new ChatOpenAI({
+      model: "ultra",
+      apiKey: config.apiKey,
+      ...getModelClientOptions(config, { sessionId: originalSessionId, fetch: send })
+    })
+    await model.invoke("hello")
+    if (length <= 36) expect(sessionId).toBe(originalSessionId)
+    else expect(sessionId).toMatch(/^[a-f0-9]{36}$/)
+  })
+
+  it("keeps long sessions stable across model instances and separates children sharing a prefix", async () => {
+    const sessionIds: Array<string | null> = []
+    const send = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+      sessionIds.push(new Headers(init?.headers).get("x-session-id"))
+      return jsonReply()
+    })
+    const make = (sessionId: string) =>
+      new ChatOpenAI({
+        model: "ultra",
+        apiKey: config.apiKey,
+        ...getModelClientOptions(config, { sessionId, fetch: send })
+      })
+    const parent = "parent".repeat(12)
+    await make(`${parent}__worker__alpha`).invoke("hello")
+    await make(`${parent}__worker__alpha`).invoke("compaction")
+    await make(`${parent}__worker__beta`).invoke("child")
+    for (const sessionId of sessionIds) expect(sessionId).toMatch(/^[a-f0-9]{36}$/)
+    expect(sessionIds[0]).toBe(sessionIds[1])
+    expect(sessionIds[2]).not.toBe(sessionIds[0])
+  })
+
+  it("uses a stable UUID per model instance when no thread ID is supplied", async () => {
+    const sessionIds: Array<string | null> = []
+    const send = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+      sessionIds.push(new Headers(init?.headers).get("x-session-id"))
+      return jsonReply()
+    })
+    const make = () =>
+      new ChatOpenAI({
+        model: "ultra",
+        apiKey: config.apiKey,
+        ...getModelClientOptions(config, { fetch: send })
+      })
+    const model = make()
+    await model.invoke("hello")
+    await model.invoke("continue")
+    await make().invoke("independent call")
+    for (const sessionId of sessionIds) {
+      expect(sessionId).toMatch(/^[a-f0-9-]{36}$/)
+    }
+    expect(sessionIds[0]).toBe(sessionIds[1])
+    expect(sessionIds[2]).not.toBe(sessionIds[0])
+  })
+
   it.each([undefined, "", "123456", "abcdefgh"])(
     "blocks missing or invalid SAP identity %s before sending",
     (sapId) => {
