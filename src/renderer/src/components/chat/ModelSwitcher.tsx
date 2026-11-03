@@ -250,9 +250,9 @@ function ModelSwitcherImpl({ threadId }: ModelSwitcherProps): React.JSX.Element 
                 <button
                   key={model.id}
                   onClick={() => {
-                    if (model.available) handleModelSelect(model.id)
+                    if (model.selectable ?? model.available) handleModelSelect(model.id)
                   }}
-                  disabled={!model.available}
+                  disabled={!(model.selectable ?? model.available)}
                   title={
                     model.unavailableReason ??
                     (model.available ? model.notice : "请先在模型配置中填写 API 密钥")
@@ -261,7 +261,7 @@ function ModelSwitcherImpl({ threadId }: ModelSwitcherProps): React.JSX.Element 
                     "w-full flex items-center gap-1.5 px-2 py-1.5 rounded-sm text-xs transition-colors text-left font-mono disabled:cursor-not-allowed disabled:opacity-50",
                     currentModel === model.id
                       ? "bg-muted text-foreground"
-                      : model.available
+                      : (model.selectable ?? model.available)
                         ? "text-muted-foreground hover:text-foreground hover:bg-muted/50"
                         : "text-muted-foreground"
                   )}

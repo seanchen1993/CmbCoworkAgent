@@ -28,11 +28,11 @@ const idle = {
   lockedFields: ["baseUrl", "model", "apiKey", "maxTokens"] as const
 }
 const fixture = {
-  idleCatalog(available = true) {
+  idleCatalog(available = true, selectable = true) {
     idleAvailable = available
     store.setModels([
       ...store.localModels,
-      { ...idle, id: idle.ref, provider: "builtin", available,
+      { ...idle, id: idle.ref, provider: "builtin", available, selectable,
         unavailableReason: available ? undefined : IDLE_MODEL_OUTSIDE_HOURS_MESSAGE }
     ])
     for (const listener of modelChangeListeners) listener()
