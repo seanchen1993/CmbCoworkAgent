@@ -454,9 +454,13 @@ export function RequirementEntryView(): React.JSX.Element {
             setSystemDialogOpen(false)
             setRequirementDialogOpen(true)
           }}
-          title="新增需求 · 选择业务系统"
-          description="先关联需求使用的业务系统，需求内容和规范 PRD 将归档到对应目录。"
-          confirmLabel="确认并创建需求"
+          title={requirementDialogOpen ? "切换业务系统" : "新增需求 · 选择业务系统"}
+          description={
+            requirementDialogOpen
+              ? "切换后，本次需求将关联新的业务系统；已填写的内容会保留。"
+              : "先关联需求使用的业务系统，需求内容和规范 PRD 将归档到对应目录。"
+          }
+          confirmLabel={requirementDialogOpen ? "确认切换" : "确认并创建需求"}
         />
       )}
 
@@ -464,6 +468,7 @@ export function RequirementEntryView(): React.JSX.Element {
         <NewRequirementDialog
           open
           system={selectedSystem}
+          onChangeSystem={() => setSystemDialogOpen(true)}
           onOpenChange={setRequirementDialogOpen}
           onStartConversation={async (requirement, options) => {
             const capabilities = {

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react"
 import {
   ArrowRight,
   BadgeCheck,
+  Building2,
   FileText,
   FolderOpen,
   Link,
@@ -126,11 +127,13 @@ export function NewRequirementDialog({
   open,
   onOpenChange,
   system,
+  onChangeSystem,
   onStartConversation
 }: {
   open: boolean
   onOpenChange: (open: boolean) => void
   system: DesignSystemInfo
+  onChangeSystem: () => void
   onStartConversation: (
     requirement: RequirementRecord,
     options?: { autoGeneratePrd?: boolean } & Partial<RequirementSessionCapabilities>
@@ -320,12 +323,35 @@ export function NewRequirementDialog({
               {`新增需求 · ${source === "file" ? "文件" : source === "text" ? "文本" : "链接"}`}
             </DialogTitle>
             <DialogDescription className="mt-1.5">
-              已选择「{system.name}
-              」；先选择归档工作目录，再选择文件、文本或链接作为需求来源。
+              先选择归档工作目录，再选择文件、文本或链接作为需求来源。
             </DialogDescription>
           </div>
         </DialogHeader>
         <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-6 pb-5 pt-4">
+          <div className="rounded-xl border-[1.5px] border-primary/30 bg-primary/5 p-4">
+            <div className="flex items-center gap-3">
+              <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
+                <Building2 className="size-4" />
+              </span>
+              <div className="min-w-0 flex-1">
+                <div className="text-xs font-medium text-muted-foreground">业务系统</div>
+                <div className="truncate text-sm font-semibold text-foreground">{system.name}</div>
+                <div className="mt-0.5 text-xs text-muted-foreground">
+                  默认沿用上次选择的系统
+                </div>
+              </div>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={saving}
+                onClick={onChangeSystem}
+              >
+                切换系统
+              </Button>
+            </div>
+          </div>
+
           <div className="rounded-xl border-[1.5px] border-border bg-[#fdfbf7] p-4">
             <div className="mb-2 flex items-center gap-2">
               <FolderOpen className="size-4 text-primary" />
