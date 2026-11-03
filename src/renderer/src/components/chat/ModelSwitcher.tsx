@@ -16,6 +16,7 @@ import {
   type ModelRoutingMode
 } from "../../../../shared/thread-model-selection"
 import { CustomModelDialog } from "./CustomModelDialog"
+import { IDLE_MODEL_OUTSIDE_HOURS_MESSAGE } from "../../../../shared/idle-model-service-window"
 import {
   invalidateModelCatalogCache,
   readModelCatalogCache,
@@ -269,9 +270,11 @@ function ModelSwitcherImpl({ threadId }: ModelSwitcherProps): React.JSX.Element 
                   <span className="flex-1 truncate">
                     {model.name}
                     {!model.available
-                      ? model.unavailableReason
-                        ? "（用户信息不完整）"
-                        : "（未配置密钥）"
+                      ? model.unavailableReason === IDLE_MODEL_OUTSIDE_HOURS_MESSAGE
+                        ? "（非服务时段）"
+                        : model.unavailableReason
+                          ? "（用户信息不完整）"
+                          : "（未配置密钥）"
                       : ""}
                   </span>
                   <span className="shrink-0 rounded bg-muted px-1 py-0.5 text-[9px] text-muted-foreground">

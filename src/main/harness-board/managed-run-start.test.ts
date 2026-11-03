@@ -133,6 +133,7 @@ vi.mock("./managed-run-store", async (importOriginal) => {
 
 import { ManagedRunStore as RunStore } from "./managed-run-store"
 import { getManagedRunModelOverride } from "./managed-run-model"
+import { IdleModelServiceHoursError } from "../../shared/idle-model-service-window"
 import { createManagedHarnessSession } from "./auto-mode-action-executor"
 import {
   handleAutoModeAgentCancelled,
@@ -270,6 +271,19 @@ beforeEach(() => {
 afterEach(() => rmSync(root, { recursive: true, force: true }))
 
 describe("start managed mode with an existing session", () => {
+  it("keeps service-hours errors non-retryable for managed Ultra sessions", async () => {
+    await start({ modelSelection: "ultra" })
+    vi.useFakeTimers({ toFake: ["Date"] })
+    vi.setSystemTime(new Date("2026-11-04T07:00:00+08:00"))
+    try {
+      dependencies.modelConfig.mockReturnValue({ apiKey: "test-key", transport: "idle-gateway" })
+      expect(() => getManagedRunModelOverride("origin")).toThrow(IdleModelServiceHoursError)
+      expect(metadata().model).toBe("original-model")
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it("uses the explicit creation model without reading the run store inside the factory", async () => {
     const read = vi.spyOn(dependencies.store!, "getRun").mockImplementation(() => {
       throw new Error("factory must not read run state")

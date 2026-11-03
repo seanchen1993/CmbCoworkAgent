@@ -28,13 +28,36 @@ function jsonReply() {
 
 beforeEach(() => {
   state.sapId = "12345678"
+  vi.useFakeTimers({ toFake: ["Date"] })
+  vi.setSystemTime(new Date("2026-11-03T22:30:00+08:00"))
 })
 
 afterEach(() => {
+  vi.useRealTimers()
   vi.restoreAllMocks()
 })
 
 describe("idle gateway OpenAI transport", () => {
+  it("rejects a reused connection after closing without sending a request", async () => {
+    const send = vi.fn(async () => jsonReply())
+    const model = new ChatOpenAI({
+      model: "ultra",
+      apiKey: config.apiKey,
+      ...getModelClientOptions(config, { sessionId: "same-thread", fetch: send })
+    })
+    await model.invoke("night")
+    vi.setSystemTime(new Date("2026-11-04T07:00:00+08:00"))
+    await expect(model.invoke("next tool round")).rejects.toMatchObject({
+      status: 400,
+      code: "idle_model_outside_service_hours",
+      message: expect.stringContaining("非服务时段")
+    })
+    expect(send).toHaveBeenCalledTimes(1)
+    vi.setSystemTime(new Date("2026-11-04T22:00:00+08:00"))
+    await expect(model.invoke("next night")).resolves.toBeDefined()
+    expect(send).toHaveBeenCalledTimes(2)
+  })
+
   it("sends the UAT path, employee identity and gateway key with stable per-thread sessions", async () => {
     const requests: Array<{ url: string; headers: Headers; body: Record<string, unknown> }> = []
     const send = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
@@ -270,6 +293,7 @@ describe("idle gateway OpenAI transport", () => {
   })
 
   it("keeps existing custom model connections unchanged", () => {
+    vi.setSystemTime(new Date("2026-11-03T12:00:00+08:00"))
     state.sapId = undefined
     const send = vi.fn()
     expect(
