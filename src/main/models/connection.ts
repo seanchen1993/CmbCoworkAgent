@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto"
+import { createHash, randomUUID } from "node:crypto"
 import { IDLE_MODEL_MODE, isValidSapId, type ModelTransport } from "../../shared/model-catalog"
 import { getUserInfo } from "../storage"
 
@@ -12,6 +12,8 @@ interface ModelConnectionOptions {
   sessionId?: string
   fetch?: typeof fetch
 }
+
+const MAX_IDLE_SESSION_ID_LENGTH = 36
 
 export function getModelClientOptions(
   config: ModelConnectionConfig,
@@ -41,7 +43,15 @@ export function getModelConnection(
   }
   requireIdleModelSapId()
   if (!config.apiKey) throw new Error("闲时模型网关密钥未配置")
-  const sessionId = options.sessionId || randomUUID()
+  const originalSessionId = options.sessionId || randomUUID()
+  // Hash the whole ID so child threads with the same parent keep distinct sessions.
+  const sessionId =
+    originalSessionId.length <= MAX_IDLE_SESSION_ID_LENGTH
+      ? originalSessionId
+      : createHash("sha256")
+          .update(originalSessionId)
+          .digest("hex")
+          .slice(0, MAX_IDLE_SESSION_ID_LENGTH)
   const send = options.fetch ?? ((...args: Parameters<typeof fetch>) => fetch(...args))
   return {
     baseURL: config.baseUrl,
