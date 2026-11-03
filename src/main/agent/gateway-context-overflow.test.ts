@@ -61,10 +61,13 @@ function finalResponse(): Response {
 }
 
 beforeEach(() => {
+  vi.useFakeTimers({ toFake: ["Date"] })
+  vi.setSystemTime(new Date("2026-11-03T22:30:00+08:00"))
   vi.spyOn(storage, "getUserInfo").mockReturnValue({ sapId: "12345678" })
 })
 
 afterEach(() => {
+  vi.useRealTimers()
   vi.restoreAllMocks()
   vi.unstubAllGlobals()
 })

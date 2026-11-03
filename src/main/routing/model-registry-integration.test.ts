@@ -1,5 +1,17 @@
 import { beforeEach, describe, expect, it, vi } from "vitest"
 
+const idle = vi.hoisted(() => ({
+  id: "idle-ultra",
+  ref: "builtin:idle-ultra",
+  source: "builtin",
+  tier: "premium",
+  model: "ultra",
+  baseUrl: "http://idle.example.test/v1",
+  apiKey: "idle-key",
+  transport: "idle-gateway" as const,
+  unavailableReason: "outside service hours"
+}))
+
 const state = vi.hoisted(() => ({
   metadata: null as string | null
 }))
@@ -55,6 +67,7 @@ vi.mock("../models/registry", () => ({
   getModelByTier: (tier: "premium" | "economy") =>
     configs.find((config) => config.tier === tier) ?? configs[0] ?? null,
   getModelConfigByRef: (value: string) =>
+    (value === idle.ref ? idle : null) ??
     configs.find((config) => config.ref === value) ??
     configs.find((config) => config.source === "custom" && config.id === value) ??
     null,
@@ -73,6 +86,22 @@ beforeEach(() => {
 })
 
 describe("routing with managed model refs", () => {
+  it("rejects an explicitly pinned idle model outside hours instead of replacing it", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] })
+    vi.setSystemTime(new Date("2026-11-03T07:00:00+08:00"))
+    try {
+      await expect(
+        resolveModel({
+          taskSource: "chat",
+          routingMode: "pinned",
+          requestedModelId: idle.ref
+        })
+      ).rejects.toMatchObject({ status: 400, code: "idle_model_outside_service_hours" })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it("falls back safely when a pinned model was removed by a catalog refresh", async () => {
     const result = await resolveModel({
       taskSource: "chat",

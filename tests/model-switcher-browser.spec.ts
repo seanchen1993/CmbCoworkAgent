@@ -262,11 +262,21 @@ async function main(): Promise<void> {
     )
     await page.getByRole("button", { name: "Local A", exact: true }).click()
     const idleOption = page.getByRole("button", { name: /闲时模型 Ultra/ })
-    assert.equal(await idleOption.isEnabled(), true, "idle hours do not restrict selection")
+    assert.equal(await idleOption.isEnabled(), true, "idle model is selectable during service hours")
     await idleOption.click()
     assert.equal((await settle()).currentModel, "builtin:idle-ultra")
     await page.getByRole("button", { name: "闲时模型 Ultra", exact: true }).click()
     assert.equal(await page.getByText(/闲时服务时间：22:00–次日 07:00/).isVisible(), true)
+    await page.evaluate(() =>
+      (window as unknown as FixtureWindow).modelSwitcherFixture.idleCatalog(false)
+    )
+    const closedIdleOption = page.getByRole("button", { name: /闲时模型 Ultra.*非服务时段/ })
+    await closedIdleOption.waitFor()
+    assert.equal(await closedIdleOption.isDisabled(), true)
+    assert.equal((await settle()).currentModel, "builtin:idle-ultra")
+    await page.evaluate(() =>
+      (window as unknown as FixtureWindow).modelSwitcherFixture.idleCatalog(true)
+    )
     await page.keyboard.press("Escape")
     await page.evaluate(() =>
       (window as unknown as FixtureWindow).modelSwitcherFixture.showIdleSettings()
@@ -275,7 +285,16 @@ async function main(): Promise<void> {
     assert.equal(await page.locator('input[value="ultra"]').isDisabled(), true)
     assert.equal(await page.locator('input[value="128000"]').isDisabled(), true)
     assert.equal(await page.getByText(/闲时服务时间：22:00–次日 07:00/).isVisible(), true)
-    console.log("PASS idle model: selectable, hours notice, locked ultra and 128k context")
+    const nameInput = page.locator('input[value="闲时模型 Ultra"]')
+    await nameInput.fill("未保存的闲时名称")
+    await page.evaluate(() =>
+      (window as unknown as FixtureWindow).modelSwitcherFixture.idleCatalog(false)
+    )
+    await page.getByText(/当前为非服务时段/).waitFor()
+    assert.equal(await page.getByRole("button", { name: /测试连接/ }).isDisabled(), true)
+    assert.equal(await page.locator('input[value="未保存的闲时名称"]').count(), 1)
+    assert.equal((await settle()).currentModel, "builtin:idle-ultra")
+    console.log("PASS idle model: service availability refresh preserves selection and drafts")
   } finally {
     await app.close()
   }

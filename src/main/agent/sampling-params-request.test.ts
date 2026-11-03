@@ -10,6 +10,7 @@ import * as storage from "../storage"
  */
 
 afterEach(() => {
+  vi.useRealTimers()
   vi.restoreAllMocks()
   vi.unstubAllGlobals()
   delete process.env.CMB_STRIP_SAMPLING_PARAMS
@@ -56,6 +57,8 @@ async function requestBodyFor(model: string): Promise<Record<string, unknown>> {
 
 describe("deepseek / minimax sampling params", () => {
   it("never retries a 434 gateway balance error in the actual agent fetch pipeline", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] })
+    vi.setSystemTime(new Date("2026-11-03T22:30:00+08:00"))
     vi.spyOn(storage, "getUserInfo").mockReturnValue({ sapId: "12345678" })
     const send = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
       expect(String(input)).toContain("/chat/completions")

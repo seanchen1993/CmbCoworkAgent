@@ -1,4 +1,6 @@
 import { projectHumanGate } from "../../../../shared/harness-notifications"
+import { IDLE_MODEL_OUTSIDE_HOURS_MESSAGE } from "../../../../shared/idle-model-service-window"
+import { IDLE_MODEL_SAP_REQUIRED_MESSAGE } from "../../../../shared/model-catalog"
 import { useHarnessNotifications } from "@/lib/harness-notifications"
 import { BizRetryDecisionCard } from "@/components/harness-board/BizRetryNotice"
 import React, {
@@ -1020,6 +1022,8 @@ const RECOVERABLE_QUEUE_ERRORS = new Set([
   QUEUE_MODEL_REQUIRED_ERROR,
   QUEUE_MODEL_MISSING_ERROR,
   QUEUE_MODEL_UNAVAILABLE_ERROR,
+  IDLE_MODEL_OUTSIDE_HOURS_MESSAGE,
+  IDLE_MODEL_SAP_REQUIRED_MESSAGE,
   QUEUE_WORKSPACE_REQUIRED_ERROR
 ])
 const CHAT_REPORT_UPLOAD_DEBOUNCE_MS = 250
@@ -5287,7 +5291,7 @@ export function ChatContainer({
         return
       }
       if (!selectedModel.available) {
-        setError("当前模型不可用，请先在模型配置中设置 API 密钥。")
+        setError(selectedModel.unavailableReason || QUEUE_MODEL_UNAVAILABLE_ERROR)
         return
       }
       if (!workspacePath) {
@@ -5575,7 +5579,7 @@ export function ChatContainer({
         }
 
         if (!selectedModel.available) {
-          setError("当前模型不可用，请先在模型配置中设置 API 密钥。")
+          setError(selectedModel.unavailableReason || QUEUE_MODEL_UNAVAILABLE_ERROR)
           return
         }
 
@@ -6233,7 +6237,7 @@ export function ChatContainer({
         if (!queued.modelId && !currentModel) {
           setError(QUEUE_MODEL_REQUIRED_ERROR)
         } else if (queuedModel || currentSelectedModel) {
-          setError(QUEUE_MODEL_UNAVAILABLE_ERROR)
+          setError((queuedModel || currentSelectedModel)?.unavailableReason || QUEUE_MODEL_UNAVAILABLE_ERROR)
         } else {
           setError(QUEUE_MODEL_MISSING_ERROR)
         }

@@ -40,7 +40,7 @@ import {
 } from "../storage"
 import { getAvailableModelConfigOrDefault, getModelConfigByRef } from "../models/registry"
 import { samplingFields, topKModelKwargs } from "../models/sampling-params"
-import { getModelClientOptions } from "../models/connection"
+import { getIdleModelServiceHoursRejection, getModelClientOptions } from "../models/connection"
 import type { ModelTransport } from "../../shared/model-catalog"
 import {
   createCmbSummarizationMiddleware,
@@ -3871,7 +3871,8 @@ export interface ModelRetryHooks {
 function createRetryingFetch(
   hooks?: ModelRetryHooks,
   maxAttempts: number = DEFAULT_RETRY_MAX_ATTEMPTS,
-  capture?: { threadId?: string }
+  capture?: { threadId?: string },
+  beforeAttempt?: () => Response | undefined
 ): typeof fetch {
   const totalAttempts = Math.max(1, maxAttempts)
   const maxRetries = totalAttempts - 1
@@ -3921,6 +3922,14 @@ function createRetryingFetch(
         const requestedStream =
           typeof init?.body === "string" && init.body.includes('"stream":true')
         const attemptStartedAt = Date.now()
+        // Recheck after backoff, immediately before each actual HTTP attempt.
+        const rejection = beforeAttempt?.()
+        if (rejection) {
+          cleanup()
+          await captureFetchError(rejection)
+          if (attempt > 1) hooks?.onRetrySuccess?.()
+          return rejection
+        }
         // Observe only attempts submitted to fetch, after cancellation checks.
         const sendFetch = capture ? withRawApiCallCapture(fetch, capture.threadId) : fetch
         const res = await sendFetch(input, { ...init, signal: attemptCtrl.signal })
@@ -4270,11 +4279,15 @@ export function getModelInstance(
   // return empty content, so keep thinking exclusive to normal agent calls.
   const enableThinking = purpose === "agent" && thinkingConfigured
   const enableThinkingEffort = enableThinking && customConfig.enableThinkingEffort === true
+  const beforeAttempt =
+    customConfig.transport === "idle-gateway"
+      ? () => getIdleModelServiceHoursRejection(customConfig)
+      : undefined
   const modelFetch =
     purpose === "agent"
-      ? createRetryingFetch(retryHooks, maxRetryAttempts, { threadId: captureThreadId })
-      : retryHooks || maxRetryAttempts !== undefined
-        ? createRetryingFetch(retryHooks, maxRetryAttempts)
+      ? createRetryingFetch(retryHooks, maxRetryAttempts, { threadId: captureThreadId }, beforeAttempt)
+      : retryHooks || maxRetryAttempts !== undefined || beforeAttempt
+        ? createRetryingFetch(retryHooks, maxRetryAttempts, undefined, beforeAttempt)
         : defaultRetryingFetch
 
   const baseFields = {
