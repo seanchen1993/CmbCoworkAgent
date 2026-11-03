@@ -311,7 +311,10 @@ function isOptionalNonNegativeNumber(value: unknown): boolean {
 
 function isAgentEndReason(value: unknown): boolean {
   if (!isPlainRecord(value) || !AGENT_END_REASON_CODES.has(value.code as string)) return false
-  return isOptionalText(value.message, EVENT_SUMMARY_MAX_LENGTH)
+  return (
+    isOptionalText(value.message, EVENT_SUMMARY_MAX_LENGTH) &&
+    (value.retryable === undefined || typeof value.retryable === "boolean")
+  )
 }
 
 function isManagedRunDecisionFacts(value: unknown): value is ManagedRunDecisionFacts {
@@ -326,6 +329,7 @@ function isManagedRunDecisionFacts(value: unknown): value is ManagedRunDecisionF
     value.changedFields.every((field) => MANAGED_RUN_CHANGED_FIELDS.has(field as string)) &&
     typeof value.initialInspection === "boolean" &&
     isNonNegativeInteger(value.providerRetryCount) &&
+    (value.totalRetryCount === undefined || isNonNegativeInteger(value.totalRetryCount)) &&
     isOptionalText(value.slashSkill, 256) &&
     isOptionalText(value.previousNodeId, 512) &&
     isOptionalNonNegativeNumber(value.contextInputTokens) &&
@@ -451,6 +455,7 @@ function normalizeSnapshot(value: unknown): ManagedRunSnapshot {
     !isManagedRunDecisionBaseline(snapshot.decisionBaseline) ||
     (snapshot.currentSession === undefined) !== (snapshot.decisionBaseline === undefined) ||
     !isNonNegativeInteger(snapshot.providerRetryCount) ||
+    (snapshot.totalRetryCount !== undefined && !isNonNegativeInteger(snapshot.totalRetryCount)) ||
     (snapshot.nextRetryAt !== undefined &&
       (typeof snapshot.nextRetryAt !== "string" ||
         !MANAGED_RUN_TIME_PATTERN.test(snapshot.nextRetryAt))) ||
@@ -467,7 +472,7 @@ function normalizeSnapshot(value: unknown): ManagedRunSnapshot {
   ) {
     throw new ManagedRunCorruptError("ManagedRun run.json has an invalid snapshot")
   }
-  return snapshot as ManagedRunSnapshot
+  return { ...snapshot, totalRetryCount: snapshot.totalRetryCount ?? 0 } as ManagedRunSnapshot
 }
 
 function readSnapshot(path: string): ManagedRunSnapshot {
@@ -735,6 +740,9 @@ export class ManagedRunStore {
       endReason: event.endReason
         ? {
             code: event.endReason.code,
+            ...(event.endReason.retryable !== undefined
+              ? { retryable: event.endReason.retryable }
+              : {}),
             ...(endReasonMessage ? { message: endReasonMessage } : {})
           }
         : undefined,
@@ -773,6 +781,7 @@ export class ManagedRunStore {
       modelSelection: resolveManagedRunModelSelection(modelSelection),
       ...(workspacePath?.trim() ? { workspacePath: workspacePath.trim() } : {}),
       providerRetryCount: 0,
+      totalRetryCount: 0,
       startedAt: now,
       updatedAt: now
     }

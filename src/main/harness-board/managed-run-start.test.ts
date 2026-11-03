@@ -9,6 +9,7 @@ import type {
   ManagedRunSummary
 } from "../../shared/harness-board-types"
 import type { ManagedRunStore } from "./managed-run-store"
+import { resolveHydratedThreadModel } from "../../shared/thread-model-selection"
 
 const dependencies = vi.hoisted(() => ({
   store: undefined as ManagedRunStore | undefined,
@@ -133,6 +134,7 @@ vi.mock("./managed-run-store", async (importOriginal) => {
 
 import { ManagedRunStore as RunStore } from "./managed-run-store"
 import { getManagedRunModelOverride } from "./managed-run-model"
+import { createManagedHarnessSession } from "./auto-mode-action-executor"
 import {
   handleAutoModeAgentCancelled,
   handleAutoModeAgentTurnEnd,
@@ -269,6 +271,28 @@ beforeEach(() => {
 afterEach(() => rmSync(root, { recursive: true, force: true }))
 
 describe("start managed mode with an existing session", () => {
+  it("uses the explicit creation model without reading the run store inside the factory", async () => {
+    const read = vi.spyOn(dependencies.store!, "getRun").mockImplementation(() => {
+      throw new Error("factory must not read run state")
+    })
+    try {
+      const created = await createManagedHarnessSession({
+        projectId: "project",
+        featureId: "feature",
+        runId: "run",
+        nodeId: "dev.code",
+        nextAction: { slashSkill: "dev-code", userMessage: "继续" },
+        workspacePath: root,
+        delivery,
+        modelSelection: "ultra"
+      })
+      expect(created.thread.metadata?.model).toBe("builtin:idle-ultra")
+      expect(read).not.toHaveBeenCalled()
+    } finally {
+      read.mockRestore()
+    }
+  })
+
   it.each([
     [null, "请检查内置模型配置和登录用户信息"],
     [{ unavailableReason: "请完善八位 SAP 工号" }, "请完善八位 SAP 工号"]
@@ -301,23 +325,46 @@ describe("start managed mode with an existing session", () => {
     expect(metadata().model).toBe("original-model")
   })
 
-  it("uses Ultra on the first turn of a newly created managed session", async () => {
-    dependencies.startAgent.mockImplementationOnce(async (request) => {
-      expect(request.threadId).toBe("created")
-      expect(getManagedRunModelOverride(request.threadId)).toBeUndefined()
-      expect(getManagedRunModelOverride(request.threadId, request.managedExecution)).toBe(
+  it.each([undefined, "reservation"])(
+    "persists Ultra for a newly created session, including scheduled startup: %s",
+    async (scheduledStartId) => {
+      dependencies.startAgent.mockImplementationOnce(async (request) => {
+        expect(request.threadId).toBe("created")
+        expect(request.modelId).toBe("builtin:idle-ultra")
+        expect(getManagedRunModelOverride(request.threadId)).toBeUndefined()
+        expect(getManagedRunModelOverride(request.threadId, request.managedExecution)).toBe(
+          "builtin:idle-ultra"
+        )
+        return { threadId: request.threadId, completion: Promise.resolve() }
+      })
+      const run = await start({
+        existingThreadId: undefined,
+        workspacePath: root,
+        modelSelection: "ultra",
+        scheduledStartId
+      })
+      expect(run.status).toBe("running")
+      expect(run.modelSelection).toBe("ultra")
+      expect(run.currentSession?.threadId).toBe("created")
+      const createdMetadata = JSON.parse(dependencies.threads.get("created")!.metadata!)
+      expect(createdMetadata.model).toBe("builtin:idle-ultra")
+      expect(resolveHydratedThreadModel(createdMetadata, "pinned").modelId).toBe(
         "builtin:idle-ultra"
       )
-      return { threadId: request.threadId, completion: Promise.resolve() }
-    })
+    }
+  )
+
+  it("retains the selected Ultra model after a new managed session fails to start", async () => {
+    dependencies.startAgent.mockRejectedValueOnce(new Error("当前时段不允许调用该接口"))
     const run = await start({
       existingThreadId: undefined,
       workspacePath: root,
-      modelSelection: "ultra"
+      modelSelection: "ultra",
+      scheduledStartId: "reservation"
     })
-    expect(run.status).toBe("running")
-    expect(run.modelSelection).toBe("ultra")
-    expect(run.currentSession?.threadId).toBe("created")
+    expect(run.status).toBe("failed")
+    const createdMetadata = JSON.parse(dependencies.threads.get("created")!.metadata!)
+    expect(resolveHydratedThreadModel(createdMetadata, "pinned").modelId).toBe("builtin:idle-ultra")
   })
 
   it("creates a new run, preserves history and configuration, and binds ownership before starting", async () => {
@@ -476,6 +523,7 @@ describe("start managed mode with an existing session", () => {
       "实现代码"
     )
     expect(dependencies.createThread).toHaveBeenCalledOnce()
+    expect(dependencies.createThread.mock.calls[0][0]).not.toHaveProperty("model")
     expect(metadata().harnessFeature.runId).toBe(oldRun.runId)
   })
 

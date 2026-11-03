@@ -1,0 +1,2 @@
+export const MAX_MANAGED_PROVIDER_RETRIES = 3
+export const MAX_MANAGED_RUN_RETRIES = 5

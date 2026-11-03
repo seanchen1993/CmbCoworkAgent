@@ -15,6 +15,10 @@ import { generateProjectThreadTitle } from "../services/project-thread-title"
 import { getDisabledSkills } from "../storage"
 import type { AgentInvokeParams, SkillMetadata, Thread } from "../types"
 import { getHarnessProjectAdapterSnapshot } from "./service"
+import {
+  MANAGED_ULTRA_MODEL_REF,
+  type ManagedRunModelSelection
+} from "../../shared/managed-run-model"
 import { resolveAgentStreamRequestChannel } from "../../shared/agent-stream-channel"
 import { formatSkillUseBlock } from "../../shared/skill-use-block"
 import {
@@ -79,6 +83,7 @@ export interface CreateManagedHarnessSessionInput {
   nodeId: string
   nextAction: ManagedRunSessionAction
   workspacePath: string
+  modelSelection?: ManagedRunModelSelection
   delivery: AgentRunDelivery
   imRoute?: ImGrantRouteIdentity
 }
@@ -331,11 +336,11 @@ export async function startPreparedManagedAgentRun(
   managedRunHandles.set(threadId, reference)
 }
 
-export async function sendManagedProviderRetry(
+export function prepareManagedProviderRetryRun(
   threadId: string,
   delivery: AgentRunDelivery
-): Promise<void> {
-  const prepared = prepareManagedAgentRun(
+): PreparedManagedAgentRun {
+  return prepareManagedAgentRun(
     threadId,
     {
       modelMessage: "继续当前任务",
@@ -344,7 +349,6 @@ export async function sendManagedProviderRetry(
     },
     delivery
   )
-  await startPreparedManagedAgentRun(prepared)
 }
 
 export function prepareManagedBizRetryRun(
@@ -435,6 +439,7 @@ export async function createManagedHarnessSession(
     {
       workspacePath: input.workspacePath,
       ...(internal ? { isInternalFlowRuntime: true } : {}),
+      ...(input.modelSelection === "ultra" ? { model: MANAGED_ULTRA_MODEL_REF } : {}),
       ...(title ? { title } : {}),
       harnessFeature: {
         projectId: input.projectId,

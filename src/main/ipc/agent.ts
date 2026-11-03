@@ -329,6 +329,7 @@ import {
 } from "../agent/coordinator-worker-manager"
 import {
   isRetryableApiError,
+  isRetryableManagedProviderError,
   isEmptyModelResponseError,
   isResumableStreamFailure,
   extractErrorDetail,
@@ -620,12 +621,23 @@ type AutoModeTerminalCode = AgentTurnEndEvent["endReason"]["code"]
 function createAutoModeTerminal(
   outcome: AgentTurnEndEvent["outcome"],
   code: AutoModeTerminalCode,
-  message?: string
+  message?: string,
+  error?: unknown
 ): AutoModeTerminal {
+  const retryable = code === "provider_error" ? isRetryableManagedProviderError(error) : undefined
+  if (code === "provider_error") {
+    const detail = extractErrorDetail(error)
+    console.warn("[AutoMode] Provider failure classified:", {
+      category: detail.code,
+      status: detail.status,
+      retryable
+    })
+  }
   return {
     outcome,
     endReason: {
       code,
+      ...(retryable !== undefined ? { retryable } : {}),
       ...(message?.trim() ? { message: message.trim() } : {})
     }
   }
@@ -7487,7 +7499,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           terminalMessage?: string,
           terminalError?: unknown
         ): void => {
-          autoModeTerminal = createAutoModeTerminal(outcome, code, terminalMessage)
+          autoModeTerminal = createAutoModeTerminal(outcome, code, terminalMessage, terminalError)
           // Failures are reported to the renderer and then swallowed, so this
           // run resolves normally either way. A managed transport has no stream
           // to read: without this it can only infer failure from "no final
@@ -8702,6 +8714,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           let agent: Awaited<ReturnType<typeof invokeRuntimeFactory.create>> | null = null
           let stream: AsyncIterable<unknown> | null = null
 
+          let lastInitializationError: unknown
           for (const candidateId of orderedChain) {
             if (abortController.signal.aborted) break
             try {
@@ -8730,6 +8743,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               break
             } catch (err) {
               if (!isRetryableApiError(err)) throw err
+              lastInitializationError = err
               failoverAttempts.push({
                 modelId: candidateId,
                 error: String(err),
@@ -8754,7 +8768,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
           if (!stream || !agent) {
             const allErrors = failoverAttempts.map((a) => `${a.modelId}: ${a.error}`).join("; ")
-            throw new Error(`All models failed: ${allErrors}`)
+            throw new Error(`All models failed: ${allErrors}`, { cause: lastInitializationError })
           }
 
           // Notify frontend if failover happened — update model display + context window
@@ -11671,6 +11685,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           let resumeAgentRuntime: Awaited<ReturnType<typeof resumeRuntimeFactory.create>> | null =
             null
 
+          let lastInitializationError: unknown
           for (const candidateId of resumeOrderedChain) {
             if (abortController.signal.aborted) break
             try {
@@ -11706,6 +11721,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               break
             } catch (err) {
               if (nativeContext?.hostUserInputResume || !isRetryableApiError(err)) throw err
+              lastInitializationError = err
               resumeFailoverAttempts.push({
                 modelId: candidateId,
                 error: String(err),
@@ -11730,7 +11746,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             const allErrors = resumeFailoverAttempts
               .map((a) => `${a.modelId}: ${a.error}`)
               .join("; ")
-            throw new Error(`All models failed during resume: ${allErrors}`)
+            throw new Error(`All models failed during resume: ${allErrors}`, {
+              cause: lastInitializationError
+            })
           }
 
           // Notify frontend + persist routing state if failover happened
@@ -12144,7 +12162,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             resumeAutoModeTerminal = createAutoModeTerminal(
               "error",
               "provider_error",
-              error instanceof Error ? error.message : "Unknown error"
+              error instanceof Error ? error.message : "Unknown error",
+              error
             )
             clearResumeCoordinatorNotificationSelectedSkillsOnExit = true
             console.error("[Agent] Resume error:", error)
@@ -12895,6 +12914,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           let intAgentRuntime: Awaited<ReturnType<typeof interruptRuntimeFactory.create>> | null =
             null
 
+          let lastInitializationError: unknown
           for (const candidateId of intOrderedChain) {
             if (abortController.signal.aborted) break
             try {
@@ -12921,6 +12941,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               break
             } catch (err) {
               if (!isRetryableApiError(err)) throw err
+              lastInitializationError = err
               intFailoverAttempts.push({
                 modelId: candidateId,
                 error: String(err),
@@ -12943,7 +12964,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
           if (!intStream) {
             const allErrors = intFailoverAttempts.map((a) => `${a.modelId}: ${a.error}`).join("; ")
-            throw new Error(`All models failed during interrupt-continue: ${allErrors}`)
+            throw new Error(`All models failed during interrupt-continue: ${allErrors}`, {
+              cause: lastInitializationError
+            })
           }
 
           // Notify frontend + persist routing state if failover happened
@@ -13360,7 +13383,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           interruptAutoModeTerminal = createAutoModeTerminal(
             "error",
             "provider_error",
-            error instanceof Error ? error.message : "Unknown error"
+            error instanceof Error ? error.message : "Unknown error",
+            error
           )
           clearInterruptCoordinatorNotificationSelectedSkillsOnExit = true
           console.error("[Agent] Interrupt error:", error)

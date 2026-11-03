@@ -88,13 +88,14 @@ describe("gateway context overflow through the real agent transport", () => {
       const onRetry = vi.fn()
       const onFetchError = vi.fn()
       const hooks = { onRetry, onFetchError }
-      const agentModel = getModelInstance(config, hooks, 6, "agent", "gateway-overflow-thread")
+      const threadId = "12345678-1234-1234-1234-123456789012__wf_run12345_a0"
+      const agentModel = getModelInstance(config, hooks, 6, "agent", threadId)
       const summaryModel = getModelInstance(
         config,
         hooks,
         6,
         "context-compaction",
-        "gateway-overflow-thread"
+        threadId
       )
       const middleware = createCmbSummarizationMiddleware({
         model: summaryModel,
@@ -126,9 +127,9 @@ describe("gateway context overflow through the real agent transport", () => {
       expect(result).toBeInstanceOf(Command)
       expect(send).toHaveBeenCalledTimes(3)
       expect(requests.map((request) => Boolean(request.body.stream))).toEqual([false, true, false])
-      expect(requests.map((request) => request.headers.get("x-session-id"))).toEqual(
-        Array(3).fill("gateway-overflow-thread")
-      )
+      const sessionIds = requests.map((request) => request.headers.get("x-session-id"))
+      expect(sessionIds[0]).toMatch(/^[a-f0-9]{36}$/)
+      expect(sessionIds).toEqual(Array(3).fill(sessionIds[0]))
       expect(JSON.stringify(requests[2].body.messages)).toContain("LATEST_TASK")
       // The initial request remains as a bounded anchor; its full oversized body is removed.
       expect(JSON.stringify(requests[2].body.messages)).not.toContain("x".repeat(4_000))

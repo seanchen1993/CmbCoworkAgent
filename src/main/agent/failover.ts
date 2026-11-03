@@ -357,19 +357,42 @@ function isRetryableApiErrorEntry(error: unknown): boolean {
   return false
 }
 
-function getStatusCode(error: unknown): number | null {
-  if (!error || typeof error !== "object") return null
-  // Direct status property
-  if ("status" in error && typeof (error as { status: unknown }).status === "number") {
-    return (error as { status: number }).status
+/** Shared same-model HTTP retry policy, originally defined by the runtime fetch wrapper. */
+const RETRYABLE_NON_5XX_STATUS = new Set([408, 409, 429, 432, 433])
+
+export function isRetryableStatus(status: number): boolean {
+  return status >= 500 || RETRYABLE_NON_5XX_STATUS.has(status)
+}
+
+/** Reuse the runtime's same-model policy and the existing API error classifier. */
+export function isRetryableManagedProviderError(error: unknown): boolean {
+  if (!error || isAbortLikeError(error)) return false
+  const status = getStatusCode(error)
+  if (status !== null) {
+    return isRetryableStatus(status)
   }
-  // Nested response.status (axios-style)
-  if ("response" in error) {
-    const resp = (error as { response: unknown }).response
-    if (resp && typeof resp === "object" && "status" in resp) {
-      const s = (resp as { status: unknown }).status
-      if (typeof s === "number") return s
+  const visited = new Set<object>()
+  let current: unknown = error
+  while (current && typeof current === "object" && !visited.has(current)) {
+    visited.add(current)
+    const category = classifyApiError(current)
+    if (category !== "unknown") {
+      return ["network_error", "server_error", "rate_limit", "empty_response"].includes(category)
     }
+    current = (current as { cause?: unknown }).cause
+  }
+  return false
+}
+
+function getStatusCode(error: unknown): number | null {
+  const visited = new Set<object>()
+  let current = error
+  while (current && typeof current === "object" && !visited.has(current)) {
+    visited.add(current)
+    const detail = current as { status?: unknown; response?: { status?: unknown }; cause?: unknown }
+    if (typeof detail.status === "number") return detail.status
+    if (typeof detail.response?.status === "number") return detail.response.status
+    current = detail.cause
   }
   return null
 }

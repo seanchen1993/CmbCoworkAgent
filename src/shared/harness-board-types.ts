@@ -634,6 +634,8 @@ export interface ManagedRunSnapshot {
     nextActionHash: string
   }
   providerRetryCount: number
+  /** Absent in historical records; the store normalizes it to zero on read. */
+  totalRetryCount?: number
   nextRetryAt?: string
   failureReason?: string
   cancellationReason?: string
@@ -667,6 +669,7 @@ export interface ManagedRunDecisionFacts {
   initialInspection: boolean
   previousNodeId?: string
   providerRetryCount: number
+  totalRetryCount?: number
   contextInputTokens?: number
   contextMaxTokens?: number
   contextUsageRatio?: number
@@ -940,6 +943,7 @@ export interface AgentTurnEndEvent extends AutoModeEventBase {
   endReason: {
     code: "normal" | "provider_error" | "hook_halt" | "failure_fuse" | "unknown"
     message?: string
+    retryable?: boolean
   }
   contextUsage?: {
     inputTokens: number
