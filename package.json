@@ -30,7 +30,7 @@
     "desktop"
   ],
   "engines": {
-    "node": ">=18 <24"
+    "node": ">=20 <24"
   },
   "scripts": {
     "format": "prettier --write .",
@@ -217,7 +217,8 @@
     "micromatch": "^4.0.8",
     "node-diff3": "^3.2.1",
     "node-pty": "^1.1.0",
-    "playwright": "^1.58.2",
+    "playwright": "1.64.1",
+    "playwright-core": "1.64.1",
     "react-diff-viewer-continued": "^4.1.2",
     "react-markdown": "^10.1.0",
     "react-resizable-panels": "^4.4.0",

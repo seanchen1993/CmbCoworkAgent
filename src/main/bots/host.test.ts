@@ -17,6 +17,62 @@ const input = {
   color: "#ea2845",
   modelRef: null
 }
+
+it.each([false, true])("stops the whole group including completed peer owners (worker first: %s)", async (workerFirst) => {
+  const db = store()
+  const owner = db.create(input), worker = db.create({ ...input, name: "Worker" })
+  const group = db.saveGroup({ name: "Shared work", memberIds: workerFirst ? [worker.id, owner.id] : [owner.id, worker.id] })
+  let childId = "", replyRuns = 0
+  const errors = vi.fn()
+  const host = new LocalBotHost(db, {
+    onAvailable: () => () => {},
+    acquire: (_bot, task) => ({
+      release() {},
+      async execute(signal) {
+        if (task.origin.kind === "group") {
+          childId = host.delegate(task.id, worker.id, "Finish assigned work", "group-child").id
+          return { state: "completed", result: "Delegated", explicitGroupMessages: true, publicContribution: false }
+        }
+        if (task.id === childId || task.requestId === "unrelated-private") {
+          await new Promise<void>((resolve) => {
+            signal.addEventListener("abort", () => resolve(), { once: true })
+            if (signal.aborted) resolve()
+          })
+        } else replyRuns++
+        return { state: "completed", result: "Done", explicitGroupMessages: true, publicContribution: false }
+      }
+    })
+  }, Infinity, errors)
+  hosts.push(host)
+  host.sendGroup({ groupId: group.id, requestId: "group-request", text: "Delegate", targetBotIds: [owner.id] })
+  await vi.waitFor(() => expect(childId && db.getTask(childId).state).toBe("running"))
+  const root = db.recentTasks().find((task) => task.origin.kind === "group")!
+  await vi.waitFor(() => expect(db.getTask(root.id).state).toBe("completed"))
+  const privateTask = host.send({ botId: owner.id, requestId: "unrelated-private", message: "Independent work" })
+  await vi.waitFor(() => expect(db.getTask(privateTask.id).state).toBe("running"))
+  expect(host.snapshot().collaborationThreads).toContain(root.threadId)
+  host.stopGroup(group.id)
+  await vi.waitFor(() => expect(db.getTask(childId).state).toBe("cancelled"))
+  expect(db.getTask(root.id).state).toBe("cancelled")
+  expect(db.getTask(privateTask.id).state).toBe("running")
+  expect(db.recentTasks().some((task) => task.requestId === `reply-${childId}`)).toBe(false)
+  expect(replyRuns).toBe(0)
+  expect(errors).not.toHaveBeenCalled()
+
+  const stoppedChild = childId
+  host.sendGroup({ groupId: group.id, requestId: "new-group-request", text: "New assignment", targetBotIds: [owner.id] })
+  await vi.waitFor(() => {
+    expect(childId).not.toBe(stoppedChild)
+    expect(db.getTask(childId).state).toBe("running")
+  })
+  expect(db.getTask(stoppedChild).state).toBe("cancelled")
+  expect(db.getTask(privateTask.id).state).toBe("running")
+  host.stopGroup(group.id)
+  await vi.waitFor(() => expect(db.getTask(childId).state).toBe("cancelled"))
+  expect(replyRuns).toBe(0)
+  expect(errors).not.toHaveBeenCalled()
+})
+
 function store() {
   const db = new NativeSqliteAdapter(new DatabaseSync(":memory:"))
   databases.push(db)

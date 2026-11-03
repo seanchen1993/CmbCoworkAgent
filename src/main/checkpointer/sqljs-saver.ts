@@ -1484,7 +1484,9 @@ export class SqlJsSaver extends BaseCheckpointSaver {
                   parent.parent_checkpoint_id,
                   LENGTH(COALESCE(parent.suffix, ''))
            FROM message_chain AS chain
-           JOIN checkpoint_message_snapshots AS parent
+           -- Keep the recursive row outermost so SQLite looks up its parent by
+           -- primary key instead of rescanning every snapshot in the namespace.
+           CROSS JOIN checkpoint_message_snapshots AS parent
              ON parent.thread_id = ?
             AND parent.checkpoint_ns = ''
             AND parent.checkpoint_id = chain.parent_checkpoint_id

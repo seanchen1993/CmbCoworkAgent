@@ -578,6 +578,8 @@ export interface BotClient {
   send(input: SendBotMessageInput): Promise<BotTask>
   /** Stops private conversation work from the inbox authority, including unseen accepted requests. */
   stopConversation(botId: string, groupId?: string, workId?: string): Promise<void>
+  /** Stops this group's work and its peer owners, preserving members' other conversations. */
+  stopGroup(groupId: string): Promise<void>
   cancel(taskId: string): Promise<void>
   subscribe(listener: (event: BotChangeEvent) => void): () => void
 }

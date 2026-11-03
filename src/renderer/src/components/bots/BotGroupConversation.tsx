@@ -18,7 +18,7 @@ import { botGroupQuestionHistory, botGroupQuestionReplies } from "@/lib/bot-ques
 import { botGroupActiveTasks } from "@/lib/bot-group-question"
 import { useGroupQuestions, type BotGroupPendingQuestion } from "./use-group-questions"
 import { BotMentionLabel } from "./BotMentionLabel"
-import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react"
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react"
 import { useBotMessageEntrances } from "@/lib/use-bot-message-entrances"
 import { BotMessageEntrance } from "./BotMessageEntrance"
 import {
@@ -667,11 +667,6 @@ export function BotGroupConversation({
                     const displayText = item.authorBotId
                       ? splitBotInlineReasoning(item.text).body
                       : cleanUserAttachmentContentForDisplay(item.text)
-                    const mentions = displayedGroupMentions(
-                      item.text,
-                      displayText,
-                      item.mentions ?? []
-                    )
                     const author = item.authorBotId
                       ? bots.find((bot) => bot.id === item.authorBotId)
                       : null
@@ -817,43 +812,16 @@ export function BotGroupConversation({
                                     </span>
                                   </button>
                                 )}
-                                <BotInlineMentionsContext.Provider
-                                  value={
-                                    mentions.length
-                                      ? {
-                                          mentions,
-                                          renderLabel: (mention) => (
-                                            <BotMentionLabel
-                                              mention={mention}
-                                              bot={bots.find(
-                                                (bot) => bot.id === mention.botId && !bot.deleting
-                                              )}
-                                            />
-                                          ),
-                                          canOpen: (id) =>
-                                            bots.some((bot) => bot.id === id && !bot.deleting),
-                                          open: (id) => {
-                                            const bot = bots.find(
-                                              (bot) => bot.id === id && !bot.deleting
-                                            )
-                                            if (bot) onOpenBot(bot)
-                                          }
-                                        }
-                                      : null
+                                <GroupMessageMarkdown
+                                  message={item}
+                                  text={displayText}
+                                  bots={bots}
+                                  onOpenBot={onOpenBot}
+                                  threadId={
+                                    author ? `group-${group.id}-${author.id}` : filePreviewThreadId
                                   }
-                                >
-                                  <ChatFileWorkspaceContext.Provider value={markdownWorkspace}>
-                                    <StreamingMarkdown
-                                      isStreaming={false}
-                                      botTranscript={Boolean(item.authorBotId)}
-                                      threadId={
-                                        author ? `group-${group.id}-${author.id}` : filePreviewThreadId
-                                      }
-                                    >
-                                      {displayText}
-                                    </StreamingMarkdown>
-                                  </ChatFileWorkspaceContext.Provider>
-                                </BotInlineMentionsContext.Provider>
+                                  workspace={markdownWorkspace}
+                                />
                                 <BotGroupMessageActions
                                   messageId={item.id}
                                   allowReaction={Boolean(item.authorBotId)}
@@ -985,11 +953,7 @@ export function BotGroupConversation({
                 <button
                   aria-label="停止群聊工作"
                   onClick={() =>
-                    void Promise.all(
-                      [
-                        ...new Set([...running.map((task) => task.botId), ...backgroundMembers])
-                      ].map((id) => client.stopConversation(id, group.id))
-                    ).catch((cause) => setError(botErrorMessage(cause)))
+                    void client.stopGroup(group.id).catch((cause) => setError(botErrorMessage(cause)))
                   }
                 >
                   <Square size={13} />
@@ -1025,6 +989,56 @@ export function BotGroupConversation({
     </ChatPresentationContext.Provider>
   )
 }
+
+// Scrolling updates the virtual list, not the message. Keep mention context stable
+// so Markdown's existing memoization can reuse the parsed body and its DOM.
+const GroupMessageMarkdown = memo(function GroupMessageMarkdown({
+  message,
+  text,
+  bots,
+  onOpenBot,
+  threadId,
+  workspace
+}: {
+  message: BotGroupMessage
+  text: string
+  bots: BotDefinition[]
+  onOpenBot(bot: BotDefinition): void
+  threadId: string
+  workspace: { threadId: string; workspacePath: string | null }
+}) {
+  const mentionsContext = useMemo(() => {
+    const mentions = displayedGroupMentions(message.text, text, message.mentions ?? [])
+    if (!mentions.length) return null
+    return {
+      mentions,
+      renderLabel: (mention: BotGroupMention) => (
+        <BotMentionLabel
+          mention={mention}
+          bot={bots.find((bot) => bot.id === mention.botId && !bot.deleting)}
+        />
+      ),
+      canOpen: (id: string) => bots.some((bot) => bot.id === id && !bot.deleting),
+      open: (id: string) => {
+        const bot = bots.find((bot) => bot.id === id && !bot.deleting)
+        if (bot) onOpenBot(bot)
+      }
+    }
+  }, [message.text, message.mentions, text, bots, onOpenBot])
+  return (
+    <BotInlineMentionsContext.Provider value={mentionsContext}>
+      <ChatFileWorkspaceContext.Provider value={workspace}>
+        <StreamingMarkdown
+          isStreaming={false}
+          botTranscript={Boolean(message.authorBotId)}
+          threadId={threadId}
+        >
+          {text}
+        </StreamingMarkdown>
+      </ChatFileWorkspaceContext.Provider>
+    </BotInlineMentionsContext.Provider>
+  )
+})
 
 // Keep keystroke updates local: subscribing the timeline to drafts also rerenders
 // every visible message and forces the virtual list to measure its layout.

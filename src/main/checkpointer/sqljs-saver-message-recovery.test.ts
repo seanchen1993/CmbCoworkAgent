@@ -1143,6 +1143,63 @@ describe("SqlJsSaver checkpoint message integrity", () => {
     await saver.close()
   })
 
+  it("looks up each retained snapshot parent by checkpoint id without rescanning the namespace", async () => {
+    const path = databasePath()
+    const threadId = "retention-parent-lookup"
+    const saver = new SqlJsSaver(path, undefined, {
+      maxRootCheckpoints: 32,
+      maxRootForkBoundaryCheckpoints: 3
+    })
+    const messages: Record<string, unknown>[] = []
+    for (let index = 1; index <= 24; index++) {
+      messages.push(message(`a-${index}`, "snapshot payload ".repeat(300)))
+      await saver.put(
+        config(threadId, index > 1 ? `cp-${index - 1}` : undefined),
+        checkpoint(`cp-${index}`, index, [...messages]),
+        metadata
+      )
+    }
+    const internal = saverInternals(saver)
+    const database = internal.db!
+    const exec = database.exec.bind(database)
+    let parentLookup = ""
+    let equivalent = false
+    database.exec = ((sql, bindings) => {
+      const result = exec(sql, bindings)
+      if (sql.includes("WITH RECURSIVE message_chain")) {
+        // The query-plan change must preserve the original accounting exactly.
+        equivalent =
+          JSON.stringify(result) ===
+          JSON.stringify(exec(sql.replace("CROSS JOIN", "JOIN"), bindings))
+        const plan = exec(`EXPLAIN QUERY PLAN ${sql}`, bindings)[0].values
+        const parentStep = plan.find((row) => String(row[3]).includes("SEARCH parent"))
+        parentLookup = String(parentStep?.[3])
+      }
+      return result
+    }) as NativeSqliteAdapter["exec"]
+    internal.maxRootCheckpoints = 3
+    try {
+      internal.pruneRootCheckpoints(threadId, database)
+    } finally {
+      database.exec = exec
+      await saver.close()
+    }
+    expect(equivalent).toBe(true)
+    expect(parentLookup).toContain("checkpoint_id=?")
+    const reopened = new SqlJsSaver(path)
+    try {
+      const retained: string[] = []
+      for await (const tuple of reopened.list(config(threadId))) {
+        retained.push(tuple.checkpoint.id)
+        const count = Number(tuple.checkpoint.id.slice(3))
+        expect(tuple.checkpoint.channel_values.messages).toEqual(messages.slice(0, count))
+      }
+      expect(retained).toEqual(["cp-24", "cp-23", "cp-22", "cp-21", "cp-20", "cp-19"])
+    } finally {
+      await reopened.close()
+    }
+  })
+
   it("does not report a committed put as failed when post-commit retention is busy", async () => {
     const path = databasePath()
     const threadId = "retention-busy-after-commit"

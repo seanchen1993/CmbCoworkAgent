@@ -38,14 +38,14 @@ window.electron={process:{platform:'darwin'}};
 const root=createRoot(document.getElementById('root'));
 const author={id:'author',name:'Original author',shape:'circle',color:'#ff2850'};
 const peer={...author,id:'peer',name:'Remaining member'};
-const state=window.historyFixture={reads:[],media:[],saves:[],privateSaves:[],groupLists:[],memberLists:[],imports:[],shares:[],requests:[],render(mode){
+const state=window.historyFixture={reads:[],media:[],saves:[],privateSaves:[],groupLists:[],memberLists:[],imports:[],shares:[],requests:[],stops:[],render(mode){
  state.mode=mode;
  const group={id:'g',name:'Retained files',memberIds:mode.startsWith('empty')?[]:mode==='current'?['author','peer']:['peer'],version:1,...(mode==='discussion-limit'?{discussionLimit:{messageId:'review'}}:{})};
  const bots=['current','removed'].includes(mode)?[author,peer]:mode.startsWith('empty')?[]:[peer];
  root.render(mode==='native-links'?<ChatPresentationContext.Provider value='bot'><StreamingMarkdown threadId='group-g-native'>{'[URI相对文件](%41.md) '+String.fromCharCode(96)+'%41.md'+String.fromCharCode(96)}</StreamingMarkdown><BotMessageFilePreview client={client} botId='native' threadId='group-g-native' name='Native'/></ChatPresentationContext.Provider>:mode==='private'?<><BotDeliveredFile client={client} botId='private-bot' threadId='private-thread' filePath='/private/report.md'/><BotMessageFilePreview client={client} botId='private-bot' threadId='private-thread' name='Private'/></>:<><BotGroupConversation key={mode} client={client} group={group} bots={bots} tasks={mode==='current'?[{id:'task',threadId:'group-g-peer',botId:'peer',state:'running',origin:{kind:'group',groupId:'g',messageId:'request'}}]:[]} revision={1} userInitials='U' detailOpen={false} onEdit={()=>{}} onDetails={()=>{}} onOpenBot={()=>{}} onBrowser={()=>{}} onFiles={()=>{}}/><BotFilesPanel key={'library-'+mode} client={client} group={group} bot={bots.find(bot=>group.memberIds.includes(bot.id))} peers={bots}/></>);
 }};
 const libraryPage=()=>({files:[{path:'library.md',is_dir:false,size:12,modified_at:'2026-10-25T00:00:00Z'}],cursor:null});
-const client=window.fixtureClient={hostId:'fixture',subscribe(){return()=>{}},async groupFileWorkspace(){return '/group'},async listGroupFiles(...args){state.groupLists.push({mode:state.mode,args});return libraryPage()},async listFiles(...args){state.memberLists.push(args);return libraryPage()},async importFiles(...args){state.imports.push(args);return []},async shareFile(...args){state.shares.push(args);return 'shared.md'},async cancelFileList(){},async groupMessages(){if(state.mode==='typing')return [{id:'mention-history',ordinal:1,groupId:'g',authorBotId:'peer',text:'@Remaining member hello',mentions:[{start:0,end:17,botId:'peer',label:'Remaining member'}],createdAt:1}];return [{id:'file-delivery',ordinal:1,groupId:'g',authorBotId:'author',text:'[查看正文文件](/group/report.md) [相对路径](report.md) [拒绝越界](../private/secret.md) [拒绝根外绝对路径](/private/secret.md) [拒绝绝对路径穿越](/group/../private/secret.md) [拒绝编码路径穿越](/group/%2e%2e/private/secret.md) [拒绝编码绝对路径](%2Fprivate%2Fsecret.md) '+String.fromCharCode(96)+'report.md'+String.fromCharCode(96),createdAt:1,files:window.historyFixture.mode?.endsWith('link-only')?[]:[{filePath:'/group/report.md',attachmentPath:'/group/.deliveries/snapshot.md',name:'report.md',size:12}]}]},async messageReactions(target,ids){return {revision:1,items:ids.map(messageId=>({messageId,canReact:true,reactions:[]}))}},async exportGroupFile(...args){state.saves.push(args);return true},async exportFile(...args){state.privateSaves.push(args);return true},filePreview:{async readFilePreview(input){state.reads.push(input.source);return {success:true,content:'preserved bytes'}},async openMediaPreview(input){state.media.push(input.source);return {success:false,error:'fixture'}},cancelReadFilePreview(){},revokeMediaPreview(){}}};
+const client=window.fixtureClient={hostId:'fixture',async stopGroup(id){state.stops.push(id)},subscribe(){return()=>{}},async groupFileWorkspace(){return '/group'},async listGroupFiles(...args){state.groupLists.push({mode:state.mode,args});return libraryPage()},async listFiles(...args){state.memberLists.push(args);return libraryPage()},async importFiles(...args){state.imports.push(args);return []},async shareFile(...args){state.shares.push(args);return 'shared.md'},async cancelFileList(){},async groupMessages(){if(['typing','scrolling'].includes(state.mode))return [{id:'mention-history',ordinal:1,groupId:'g',authorBotId:'peer',text:'@Remaining member hello'+(state.mode==='scrolling'?'\\n\\nA stable paragraph with **formatting** and a [link](https://example.com).'.repeat(100):''),mentions:[{start:0,end:17,botId:'peer',label:'Remaining member'}],createdAt:1}];return [{id:'file-delivery',ordinal:1,groupId:'g',authorBotId:'author',text:'[查看正文文件](/group/report.md) [相对路径](report.md) [拒绝越界](../private/secret.md) [拒绝根外绝对路径](/private/secret.md) [拒绝绝对路径穿越](/group/../private/secret.md) [拒绝编码路径穿越](/group/%2e%2e/private/secret.md) [拒绝编码绝对路径](%2Fprivate%2Fsecret.md) '+String.fromCharCode(96)+'report.md'+String.fromCharCode(96),createdAt:1,files:window.historyFixture.mode?.endsWith('link-only')?[]:[{filePath:'/group/report.md',attachmentPath:'/group/.deliveries/snapshot.md',name:'report.md',size:12}]}]},async messageReactions(target,ids){return {revision:1,items:ids.map(messageId=>({messageId,canReact:true,reactions:[]}))}},async exportGroupFile(...args){state.saves.push(args);return true},async exportFile(...args){state.privateSaves.push(args);return true},filePreview:{async readFilePreview(input){state.reads.push(input.source);return {success:true,content:'preserved bytes'}},async openMediaPreview(input){state.media.push(input.source);return {success:false,error:'fixture'}},cancelReadFilePreview(){},revokeMediaPreview(){}}};
 state.prepareRetry=async()=>{
  const key=groupDraftKey('fixture','g');
  useBotGroupDrafts.setState({drafts:{}});
@@ -123,12 +123,32 @@ state.render('removed');`
     const errors: string[] = []
     page.on("pageerror", (e) => errors.push(e.message))
     await page.goto(`http://127.0.0.1:${address.port}`)
+    await page.evaluate(() => (window as any).historyFixture.render("current"))
+    await page.getByRole("button", { name: "停止群聊工作", exact: true }).click()
+    assert.deepEqual(await page.evaluate(() => (window as any).historyFixture.stops), ["g"],
+      "whole-group Stop must address the group, including owners absent from the running list")
     await page.evaluate(() => (window as any).historyFixture.render("discussion-limit"))
     const limitNotice = page.getByRole("status").filter({ hasText: "本轮自动讨论已达到上限" })
     await limitNotice.waitFor()
     assert.match(await limitNotice.innerText(), /请发送新的指令/)
     await page.evaluate(() => (window as any).historyFixture.render("removed"))
     await limitNotice.waitFor({ state: "detached" })
+    await page.evaluate(() => (window as any).historyFixture.render("scrolling"))
+    const scrollMention = page.locator(
+      '[data-chat-message-id="mention-history"] .bot-inline-mention'
+    )
+    await scrollMention.waitFor()
+    await page.waitForTimeout(500)
+    const retainedMention = await scrollMention.elementHandle()
+    const groupScroller = page.locator('[data-virtuoso-scroller="true"]')
+    await groupScroller.hover()
+    await page.mouse.wheel(0, -120)
+    await page.getByRole("button", { name: "回到最新群消息", exact: true }).waitFor()
+    assert.equal(
+      await scrollMention.evaluate((node, retained) => node === retained, retainedMention),
+      true,
+      "scrolling unchanged messages must not rebuild mention components and reparse Markdown"
+    )
     await page.evaluate(() => (window as any).historyFixture.render("typing"))
     const mention = page.locator('[data-chat-message-id="mention-history"] .bot-inline-mention')
     await mention.waitFor()

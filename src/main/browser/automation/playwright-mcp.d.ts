@@ -1,3 +1,3 @@
-declare module "playwright/lib/mcp/browser/tools" {
-  export const browserTools: unknown[]
+declare module "playwright-core/lib/coreBundle" {
+  export const tools: { browserTools: unknown[] }
 }
