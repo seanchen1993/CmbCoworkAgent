@@ -501,7 +501,7 @@ export function RequirementStepsPanel({
         }}
         className="flex min-h-0 flex-1 flex-col"
       >
-        {!selectedFunction ? (
+        {!selectedFunction && !fullPrdWorkspaceOpen ? (
           <div className="flex shrink-0 items-start justify-between gap-2 border-b border-border/70 bg-white px-3 shadow-[0_1px_0_rgba(15,23,42,0.02)]">
             <TabsList
               aria-label="需求处理步骤"
@@ -657,7 +657,6 @@ export function RequirementStepsPanel({
           <RequirementFunctionWorkspace
             requirement={requirement}
             title={requirementSpaceManifest.prd.name || requirement.title}
-            scope="full-prd"
             filePath={normalizePrdFilePath(requirementSpaceManifest.prd.file)}
             threadId={threadId}
             prototypeGenerated={fullPrdPrototypeGenerated}
@@ -677,6 +676,23 @@ export function RequirementStepsPanel({
             reloadToken={prdPreviewReloadToken}
             conversationLoading={conversationLoading}
             onBack={() => setFullPrdWorkspaceOpen(false)}
+            navigationValue="full-prd"
+            navigationItems={[
+              { value: "full-prd", label: "完整需求 MD" },
+              ...requirementSpaceManifest.functions.map((functionInfo) => ({
+                value: getPrototypeFunctionKey(functionInfo),
+                label: functionInfo.name || "未命名功能"
+              }))
+            ]}
+            onNavigate={(value) => {
+              if (value === "full-prd") return
+              const nextFunction = requirementSpaceManifest.functions.find(
+                (functionInfo) => getPrototypeFunctionKey(functionInfo) === value
+              )
+              if (!nextFunction) return
+              setFullPrdWorkspaceOpen(false)
+              setSelectedFunction(nextFunction)
+            }}
             onRequestPrototypeDesign={
               hasFullPrdDesignSession
                 ? () => void runBatchPrototypeDesign([], "full-prd")
@@ -686,11 +702,12 @@ export function RequirementStepsPanel({
         ) : selectedFunction ? (
           <RequirementFunctionWorkspace
             requirement={requirement}
-            title={`${selectedFunction.fr}：${selectedFunction.name || "未命名功能"}`}
+            title={selectedFunction.name || "未命名功能"}
             filePath={normalizePrdFilePath(selectedFunction.file)}
             threadId={threadId}
             prototypeGenerated={selectedPrototypeStatus?.generated ?? false}
             hasPrototypeDesignSession={Boolean(selectedFunction.htmlId?.trim())}
+            prototypeCoveredByFullPrd={hasFullPrdDesignSession}
             prototypeSkipped={selectedPrototypeStatus?.skipped ?? false}
             prototypePreview={
               selectedPrototypeStatus?.generated && threadId ? (
@@ -706,12 +723,43 @@ export function RequirementStepsPanel({
             reloadToken={prdPreviewReloadToken}
             conversationLoading={conversationLoading}
             onBack={() => setSelectedFunction(null)}
-            onRequestPrototypeDesign={() => {
-              if (selectedPrototypeStatus?.skipped) {
-                updatePrototypeFunctionDesign(selectedFunction, "1")
-              }
-              requestPrototypeDesign(selectedFunction)
-            }}
+            navigationValue={getPrototypeFunctionKey(selectedFunction)}
+            navigationItems={
+              requirementSpaceManifest
+                ? [
+                    { value: "full-prd", label: "完整需求 MD" },
+                    ...requirementSpaceManifest.functions.map((functionInfo) => ({
+                      value: getPrototypeFunctionKey(functionInfo),
+                      label: functionInfo.name || "未命名功能"
+                    }))
+                  ]
+                : undefined
+            }
+            onNavigate={
+              requirementSpaceManifest
+                ? (value) => {
+                    if (value === "full-prd") {
+                      setSelectedFunction(null)
+                      setFullPrdWorkspaceOpen(true)
+                      return
+                    }
+                    const nextFunction = requirementSpaceManifest.functions.find(
+                      (functionInfo) => getPrototypeFunctionKey(functionInfo) === value
+                    )
+                    if (nextFunction) setSelectedFunction(nextFunction)
+                  }
+                : undefined
+            }
+            onRequestPrototypeDesign={
+              hasFullPrdDesignSession
+                ? undefined
+                : () => {
+                    if (selectedPrototypeStatus?.skipped) {
+                      updatePrototypeFunctionDesign(selectedFunction, "1")
+                    }
+                    requestPrototypeDesign(selectedFunction)
+                  }
+            }
           />
         ) : null}
 
@@ -942,9 +990,7 @@ export function RequirementStepsPanel({
                       openWorkspaceFilePreview(normalizePrdFilePath(filePath))
                     }
                     onOpenDetails={
-                      !hasFullPrdDesignSession && functionInfo.file
-                        ? () => setSelectedFunction(functionInfo)
-                        : undefined
+                      functionInfo.file ? () => setSelectedFunction(functionInfo) : undefined
                     }
                   />
                 ))}
@@ -1115,9 +1161,7 @@ export function RequirementStepsPanel({
                       openWorkspaceFilePreview(normalizePrdFilePath(filePath))
                     }
                     onOpenDetails={
-                      !hasFullPrdDesignSession && functionInfo.file
-                        ? () => setSelectedFunction(functionInfo)
-                        : undefined
+                      functionInfo.file ? () => setSelectedFunction(functionInfo) : undefined
                     }
                     actions={
                       hasFullPrdDesignSession ? (
@@ -1375,9 +1419,7 @@ export function RequirementStepsPanel({
                             openWorkspaceFilePreview(normalizePrdFilePath(filePath))
                           }
                           onOpenDetails={
-                            !hasFullPrdDesignSession && functionInfo.file
-                              ? () => setSelectedFunction(functionInfo)
-                              : undefined
+                            functionInfo.file ? () => setSelectedFunction(functionInfo) : undefined
                           }
                           actions={
                             hasFullPrdDesignSession ? (

@@ -16,7 +16,6 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger
 } from "@/components/ui/dropdown-menu"
-import { IconPopoverButton } from "@/components/ui/icon-popover-button"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { cn } from "@/lib/utils"
 import type { NeedDesignChoice, RequirementPrdManifest } from "./requirement-data"
@@ -257,74 +256,51 @@ export function RequirementFunctionCard({
             </span>
             {functionInfo.file ? (
               <>
-                <IconPopoverButton
-                  icon={<FolderOpen className="size-3.5" />}
-                  popoverContent="打开文件所在文件夹"
+                <button
+                  type="button"
                   aria-label={`在文件夹中显示 ${functionInfo.file}`}
-                  className="size-6 p-0 hover:text-primary"
-                  stopPropagation
-                  onClick={() => onRevealFile(functionInfo.file)}
-                />
+                  className="inline-flex size-6 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-primary"
+                  onClick={(event) => {
+                    event.stopPropagation()
+                    onRevealFile(functionInfo.file)
+                  }}
+                >
+                  <FolderOpen className="size-3.5" />
+                </button>
                 {onPreviewFile ? (
-                  <IconPopoverButton
-                    icon={<Eye className="size-3.5" />}
-                    popoverContent="在右侧面板预览文件"
+                  <button
+                    type="button"
                     aria-label={`预览 ${functionInfo.file}`}
-                    className="size-6 p-0 hover:text-primary"
-                    stopPropagation
-                    onClick={() => onPreviewFile(functionInfo.file)}
-                  />
+                    className="inline-flex size-6 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-primary"
+                    onClick={(event) => {
+                      event.stopPropagation()
+                      onPreviewFile(functionInfo.file)
+                    }}
+                  >
+                    <Eye className="size-3.5" />
+                  </button>
                 ) : null}
               </>
             ) : null}
           </div>
           <div className="min-w-0 flex-1">
-            <div className="flex min-w-0 items-center gap-1.5">
-              <TooltipProvider delayDuration={250}>
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <h4 className="min-w-0 flex-1 truncate text-sm font-semibold text-foreground">
-                      {functionInfo.name || "未命名功能"}
-                    </h4>
-                  </TooltipTrigger>
-                  <TooltipContent side="top" className="max-w-80 whitespace-normal">
-                    {functionInfo.name || "未命名功能"}
-                  </TooltipContent>
-                </Tooltip>
-              </TooltipProvider>
-            </div>
-            <TooltipProvider delayDuration={250}>
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <p className="mt-1 line-clamp-2 text-xs leading-5 text-muted-foreground">
-                    {functionInfo.description || "暂无功能描述"}
-                  </p>
-                </TooltipTrigger>
-                <TooltipContent side="top" className="max-w-80 whitespace-normal">
-                  {functionInfo.description || "暂无功能描述"}
-                </TooltipContent>
-              </Tooltip>
-            </TooltipProvider>
+            <h4 className="text-sm font-semibold leading-5 text-foreground">
+              {functionInfo.name || "未命名功能"}
+            </h4>
+            <p className="mt-1 whitespace-pre-wrap text-xs leading-5 text-muted-foreground">
+              {functionInfo.description || "暂无功能描述"}
+            </p>
             {functionInfo.keywords.length > 0 ? (
-              <TooltipProvider delayDuration={250}>
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <div className="mt-2 line-clamp-2 leading-6">
-                      {functionInfo.keywords.map((keyword, keywordIndex) => (
-                        <span
-                          key={`${functionInfo.fr || functionInfo.id}-${keyword}-${keywordIndex}`}
-                          className="mb-1.5 mr-1.5 inline-flex rounded border border-border/70 bg-muted/30 px-1.5 py-0.5 text-[11px] text-muted-foreground"
-                        >
-                          {keyword}
-                        </span>
-                      ))}
-                    </div>
-                  </TooltipTrigger>
-                  <TooltipContent side="top" className="max-w-80 whitespace-normal">
-                    {functionInfo.keywords.join("、")}
-                  </TooltipContent>
-                </Tooltip>
-              </TooltipProvider>
+              <div className="mt-2 flex flex-wrap gap-1.5">
+                {functionInfo.keywords.map((keyword, keywordIndex) => (
+                  <span
+                    key={`${functionInfo.fr || functionInfo.id}-${keyword}-${keywordIndex}`}
+                    className="inline-flex rounded border border-border/70 bg-muted/30 px-1.5 py-0.5 text-[11px] text-muted-foreground"
+                  >
+                    {keyword}
+                  </span>
+                ))}
+              </div>
             ) : null}
             {details}
           </div>

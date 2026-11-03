@@ -1,8 +1,23 @@
 import { useEffect, useState, type ReactNode } from "react"
-import { ArrowLeft, ExternalLink, FileText, Loader2, Pencil, Save } from "lucide-react"
+import {
+  ArrowLeft,
+  Check,
+  ChevronDown,
+  ExternalLink,
+  FileText,
+  Loader2,
+  Pencil,
+  Save
+} from "lucide-react"
 import { toast } from "sonner"
 
 import { Button } from "@/components/ui/button"
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger
+} from "@/components/ui/dropdown-menu"
 import { MarkdownPreview } from "@/components/ui/MarkdownPreview/MarkdownPreview"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { assembleBoundedTextPreview } from "@/lib/text-preview-pages"
@@ -41,30 +56,36 @@ async function readWorkspaceTextFile(
 export function RequirementFunctionWorkspace({
   requirement,
   title,
-  scope = "function",
   filePath,
   threadId,
   prototypeGenerated,
   hasPrototypeDesignSession,
+  prototypeCoveredByFullPrd = false,
   prototypeSkipped,
   prototypePreview,
   conversationLoading,
   reloadToken,
   onBack,
+  navigationItems,
+  navigationValue,
+  onNavigate,
   onRequestPrototypeDesign
 }: {
   requirement: RequirementRecord
   title: string
-  scope?: "function" | "full-prd"
   filePath: string
   threadId: string | null
   prototypeGenerated: boolean
   hasPrototypeDesignSession: boolean
+  prototypeCoveredByFullPrd?: boolean
   prototypeSkipped: boolean
   prototypePreview?: ReactNode
   conversationLoading: boolean
   reloadToken: number
   onBack: () => void
+  navigationItems?: Array<{ value: string; label: string }>
+  navigationValue?: string
+  onNavigate?: (value: string) => void
   onRequestPrototypeDesign?: () => void
 }): React.JSX.Element {
   const [content, setContent] = useState("")
@@ -131,8 +152,38 @@ export function RequirementFunctionWorkspace({
           onClick={onBack}
         >
           <ArrowLeft className="size-3.5" />
-          {scope === "full-prd" ? "返回原型设计" : "返回功能清单"}
+          返回
         </Button>
+        {navigationItems && navigationItems.length > 0 && onNavigate ? (
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="h-7 min-w-0 max-w-72 gap-1.5 px-2 text-xs"
+              >
+                <span className="truncate">
+                  {navigationItems.find((item) => item.value === navigationValue)?.label ||
+                    "切换详情"}
+                </span>
+                <ChevronDown className="size-3.5 shrink-0" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="start" className="max-h-80 w-72 overflow-y-auto">
+              {navigationItems.map((item) => (
+                <DropdownMenuItem
+                  key={item.value}
+                  className="cursor-pointer gap-2"
+                  onSelect={() => onNavigate(item.value)}
+                >
+                  <Check className={item.value === navigationValue ? "opacity-100" : "opacity-0"} />
+                  <span className="min-w-0 flex-1 truncate">{item.label}</span>
+                </DropdownMenuItem>
+              ))}
+            </DropdownMenuContent>
+          </DropdownMenu>
+        ) : null}
         <h2 className="min-w-0 truncate text-sm font-semibold text-foreground">{title} · 预览</h2>
         <span className="shrink-0 rounded-full bg-primary/10 px-2 py-0.5 text-[11px] font-medium text-primary">
           {prototypeGenerated ? "原型设计阶段" : "规范 PRD 阶段"}
@@ -273,20 +324,24 @@ export function RequirementFunctionWorkspace({
                   <FileText className="size-5" />
                 </div>
                 <p className="text-base font-semibold text-foreground">
-                  {prototypeSkipped
-                    ? "已选择无需设计，尚未生成原型"
-                    : hasPrototypeDesignSession
-                      ? "尚未生成可预览原型"
-                      : "尚未开始原型设计"}
+                  {prototypeCoveredByFullPrd
+                    ? "已包含在完整需求原型中"
+                    : prototypeSkipped
+                      ? "已选择无需设计，尚未生成原型"
+                      : hasPrototypeDesignSession
+                        ? "尚未生成可预览原型"
+                        : "尚未开始原型设计"}
                 </p>
                 <p className="mt-2 text-xs leading-5 text-muted-foreground">
-                  {prototypeSkipped
-                    ? "如需补充原型，可随时点击下方按钮重新进入原型设计。"
-                    : hasPrototypeDesignSession
-                      ? "设计会话已创建，当前尚未生成原型 HTML，可返回会话继续沟通和设计。"
-                      : "尚未创建设计会话，点击下方按钮开始设计原型。"}
+                  {prototypeCoveredByFullPrd
+                    ? "当前需求采用完整需求原型设计，无需为此功能单独创建原型。"
+                    : prototypeSkipped
+                      ? "如需补充原型，可随时点击下方按钮重新进入原型设计。"
+                      : hasPrototypeDesignSession
+                        ? "设计会话已创建，当前尚未生成原型 HTML，可返回会话继续沟通和设计。"
+                        : "尚未创建设计会话，点击下方按钮开始设计原型。"}
                 </p>
-                {onRequestPrototypeDesign ? (
+                {onRequestPrototypeDesign && !prototypeCoveredByFullPrd ? (
                   <TooltipProvider delayDuration={200}>
                     <Tooltip>
                       <TooltipTrigger asChild>
