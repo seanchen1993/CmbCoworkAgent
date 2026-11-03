@@ -3,6 +3,7 @@ import { resolve } from "node:path"
 import { promisify } from "node:util"
 import { expect, it } from "vitest"
 
+// Allow the child process's own 10 s deadline to report and clean up before the test expires.
 it("binds verified-candidate decisions and actual code bytes before commit without invoking rollback", async () => {
   const result = await promisify(execFile)(
     "python",
@@ -32,4 +33,4 @@ it("binds verified-candidate decisions and actual code bytes before commit witho
       "all-checks-are-read-only-and-never-rollback"
     ])
   })
-})
+}, 15_000)

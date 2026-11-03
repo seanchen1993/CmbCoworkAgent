@@ -30,6 +30,7 @@ it("uses the effective declared graph for inserted and replaced stages without f
   ).toThrow("AUTOBIZ_MOD_WORKFLOW_CONTRACT_REQUIRED")
 })
 
+// Allow the child process's own 10 s deadline to report and clean up before the test expires.
 it("checks bounded schemas, validator bindings and actual adapter stdout isolation without an AutoBiz package", async () => {
   const result = await promisify(execFile)(
     "python",
@@ -49,4 +50,4 @@ it("checks bounded schemas, validator bindings and actual adapter stdout isolati
     checks: 19,
     actualAdapterStdoutProtocol: true
   })
-})
+}, 15_000)
