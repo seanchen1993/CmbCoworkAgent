@@ -30,47 +30,77 @@ function fixture() {
   }
 }
 
-it("keeps the same native request budget across tool/service rebuilds and separates new human requests", () => {
+it("continues existing request counters across rebuilds without an operation or repair quota", () => {
   const f = fixture()
-  for (let i = 0; i < 3; i++) f.make().claim("scope", "native-run", "candidate")
-  expect(() => f.make().claim("scope", "native-run", "candidate")).toThrow(
-    "DEVELOPMENT_REPAIR_BUDGET"
-  )
+  for (let i = 0; i < 512; i++) f.make().claim("scope", "native-run", "operation")
+  for (let i = 0; i < 12; i++) f.make().claim("scope", "native-run", "candidate")
+  f.advance(24 * 60 * 60_000)
+  expect(f.make().claim("scope", "native-run", "operation"))
+    .toMatchObject({ operations: 513, candidates: 12 })
   expect(f.make().claim("scope", "explicit-new-request", "candidate").candidates).toBe(1)
   expect(f.make().claim("another-scope", "native-run", "candidate").candidates).toBe(1)
   expect(f.make().latest("scope")?.runId).toBe("explicit-new-request")
+  expect(CREATOR_REQUEST_LIMITS).toMatchObject({ operations: null, candidates: null, durationMs: null })
 })
 
-it("bounds discovery operations and elapsed time without resetting them on reconstruction", () => {
+it("retains a host goal's accounting through continuation, reconstruction and goal completion", () => {
   const f = fixture()
-  for (let i = 0; i < 32; i++) f.make().claim("scope", "run", "operation")
-  expect(() => f.make().claim("scope", "run", "operation")).toThrow("DEVELOPMENT_TURN_BUDGET")
-  f.make().claim("scope", "timed", "operation")
-  f.advance(CREATOR_REQUEST_LIMITS.durationMs)
-  expect(() => f.make().claim("scope", "timed", "candidate")).toThrow("DEVELOPMENT_TURN_BUDGET")
-})
-
-it("shares a host goal's cumulative budget across native turns, failover and goal completion", () => {
-  const f = fixture()
-  for (let i = 0; i < 3; i++)
+  for (let i = 0; i < 4; i++)
     f.make().claim("scope", `native-${i}`, "candidate", "goal:trusted-host-id")
-  expect(() => f.make().claim("scope", "native-3", "candidate", "goal:trusted-host-id")).toThrow(
-    "DEVELOPMENT_REPAIR_BUDGET"
-  )
-  // Finishing/changing a goal during the same physical turn cannot detach its old accounting.
-  expect(() => f.make().claim("scope", "native-2", "candidate")).toThrow(
-    "DEVELOPMENT_REPAIR_BUDGET"
-  )
-  expect(() => f.make().claim("scope", "native-2", "candidate", "goal:new")).toThrow(
-    "DEVELOPMENT_REPAIR_BUDGET"
-  )
+  expect(f.make().claim("scope", "native-2", "candidate").candidates).toBe(5)
+  expect(f.make().claim("scope", "native-2", "candidate", "goal:new").candidates).toBe(6)
   expect(f.make().claim("scope", "explicit-new-native", "candidate", "goal:new").candidates).toBe(1)
-  const elapsed = fixture()
-  elapsed.make().claim("scope", "first", "operation", "goal:host")
-  elapsed.advance(CREATOR_REQUEST_LIMITS.durationMs)
-  expect(() => elapsed.make().claim("scope", "continued", "operation", "goal:host")).toThrow(
-    "DEVELOPMENT_TURN_BUDGET"
-  )
+  f.advance(24 * 60 * 60_000)
+  expect(f.make().claim("scope", "continued", "operation", "goal:trusted-host-id"))
+    .toMatchObject({ operations: 1, candidates: 6 })
+})
+
+it("does not expire model accounting just because creator work passes ten minutes", () => {
+  const f = fixture()
+  const bound = f.make().bindModel("scope", "run")
+  f.advance(24 * 60 * 60_000)
+  expect(f.make().claimModel("scope", bound.runId)).toBeTypeOf("string")
+})
+
+it("continues more than 64 model calls and 32 native continuations under the same goal", () => {
+  const f = fixture()
+  for (let index = 0; index < 128; index++) {
+    const bound = f.make().bindModel("scope", `run-${index}`, "goal:host")
+    f.make().claim("scope", `run-${index}`, "operation", "goal:host")
+    const attempt = f.make().claimModel("scope", bound.runId)
+    f.make().settleModel("scope", bound.runId, attempt, { inputTokens: 1, outputTokens: 2 })
+  }
+  expect(f.make().latest("scope")?.operations).toBe(128)
+  expect(f.make().modelReference("scope", "run-127")).toBe("run-0")
+  expect(creatorModelSummary(f.make().latest("scope")?.model)).toMatchObject({
+    attemptLimit: null, attempts: 128, inputTokens: 128, outputTokens: 256, coverage: "complete"
+  })
+})
+
+it("migrates the retired default on resume without losing receipts or explicit host policy", () => {
+  const f = fixture()
+  f.make().bindModel("scope", "old")
+  const [key, raw] = [...f.values][0]
+  const rows = JSON.parse(raw)
+  rows[0].model.limit = 64
+  delete rows[0].model.limitSource
+  rows[0].model.attempts = Array.from({ length: 64 }, (_, index) => ({
+    id: `old-${index}`, state: "reported", inputTokens: 1, outputTokens: 2
+  }))
+  f.values.set(key, JSON.stringify(rows))
+  f.make().bindModel("scope", "old")
+  expect(() => f.make().claimModel("scope", "old")).not.toThrow()
+  expect(creatorModelSummary(f.make().latest("scope")?.model)).toMatchObject({
+    attemptLimit: null, attempts: 65, inputTokens: 64, outputTokens: 128
+  })
+  // Owned trials resume through the accounting reference without a fresh bind.
+  f.values.set(key, JSON.stringify(rows))
+  expect(creatorModelSummary(f.make().latest("scope")?.model).attemptLimit).toBeNull()
+  expect(() => f.make().claimModel("scope", "old")).not.toThrow()
+  expect(f.make().latest("scope")?.model?.attempts).toHaveLength(65)
+  f.make().bindModel("explicit", "run", undefined, { modelAttemptLimit: 64 })
+  f.make().bindModel("explicit", "run")
+  expect(f.make().latest("explicit")?.model?.limit).toBe(64)
 })
 
 it("fails closed for corrupt or concurrently replaced accounting and retains a bounded history", () => {
@@ -129,9 +159,12 @@ it("migrates historical rows without claiming old token counts are zero and reje
   expect(creatorModelSummary(f.make().latest("scope")?.model)).not.toHaveProperty("inputTokens")
   expect(creatorModelSummary(f.make().latest("scope")?.model).cost).not.toHaveProperty("amount")
   expect(bound.runId).toBe("old")
-  expect(() => f.make().claimModel("scope", bound.runId)).toThrow(
-    "DEVELOPMENT_MODEL_HISTORY_UNCONFIRMED"
-  )
+  expect(() => f.make().claimModel("scope", bound.runId)).not.toThrow()
+  expect(creatorModelSummary(f.make().latest("scope")?.model).coverage).toBe("partial")
+  f.make().claim("limited", "old", "operation")
+  f.make().bindModel("limited", "old", undefined, { modelAttemptLimit: 2 })
+  expect(() => f.make().claimModel("limited", "old"))
+    .toThrow("DEVELOPMENT_MODEL_HISTORY_UNCONFIRMED")
   expect(f.make().latest("scope")?.operations).toBe(1)
   f.make().bindModel("scope", "genuine-new-human")
   expect(() => f.make().claimModel("scope", "genuine-new-human")).not.toThrow()
@@ -190,7 +223,7 @@ it("keeps a frozen policy explicit and fits the full bounded history without los
   expect(JSON.parse([...f.values.values()][0])).toHaveLength(16)
   expect(f.make().latest("scope")?.model?.attempts).toHaveLength(64)
   expect(Buffer.byteLength([...f.values.values()][0])).toBeLessThan(1024 * 1024)
-  expect(() => f.make().claimModel("scope", "run-15")).toThrow("DEVELOPMENT_MODEL_ATTEMPT_BUDGET")
+  expect(() => f.make().claimModel("scope", "run-15")).not.toThrow()
 })
 
 it("reuses validated raw history across service rebuilds while reading storage on every call", () => {
@@ -205,7 +238,7 @@ it("reuses validated raw history across service rebuilds while reading storage o
   const parse = vi.spyOn(JSON, "parse")
   try {
     expect(new CreatorRequestBudgets(settings, () => 1000).latest("scope")?.runId).toBe("run")
-    expect(new CreatorRequestBudgets(settings, () => 1000).latest("scope")?.model?.limit).toBe(64)
+    expect(new CreatorRequestBudgets(settings, () => 1000).latest("scope")?.model?.limit).toBeNull()
     new CreatorRequestBudgets(settings, () => 1000).claimModel("scope", "run")
     expect(parse.mock.calls.filter(([text]) => text === raw)).toHaveLength(1)
     expect(reads).toHaveBeenCalledTimes(3)
@@ -249,7 +282,7 @@ it("invalidates exact-raw cache hits for external changes, corruption and oversi
   const rows: CreatorRequestObservation[] = JSON.parse(raw)
   rows[0].operations = 32
   f.values.set(key, JSON.stringify(rows))
-  expect(() => f.make().claim("scope", "run", "operation")).toThrow("DEVELOPMENT_TURN_BUDGET")
+  expect(f.make().claim("scope", "run", "operation").operations).toBe(33)
   rows[0].operations = -1
   f.values.set(key, JSON.stringify(rows))
   expect(() => f.make().latest("scope")).toThrow("DEVELOPMENT_BUDGET_UNCONFIRMED")
@@ -337,8 +370,7 @@ it("bounds retained raw bytes and revalidates evicted full histories without res
   expect(stats.entries).toBeLessThan(12)
   expect(stats.bytes).toBeLessThanOrEqual(stats.maxBytes)
   expect(f.values.size).toBe(12)
-  expect(() => f.make().claimModel("large-0", "run-15"))
-    .toThrow("DEVELOPMENT_MODEL_ATTEMPT_BUDGET")
+  expect(() => f.make().claimModel("large-0", "run-15")).not.toThrow()
   const corrupt = JSON.parse(raw)
   corrupt[15].model.attempts[0].state = "invented-state"
   f.values.set(key("large-0"), JSON.stringify(corrupt))

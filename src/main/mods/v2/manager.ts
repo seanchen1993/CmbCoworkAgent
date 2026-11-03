@@ -7383,12 +7383,14 @@ export class FunctionModsManager {
     this.host.assertThread?.(workspace, threadId)
     return this.mcpConnections(workspace, threadId)
   }
-  platformSurfaceList(workspace: string, threadId: string) {
+  platformSurfaceList(workspace: string, threadId: string, residentOnly = false) {
     return this.platformResident(workspace, threadId)?.platformSurfaces.list() ?? {
       revision: 0,
       entries: [],
       errors: [],
-      canPrepare: !this.closed && this.host.enabled(workspace) && this.hasSources(workspace, threadId)
+      // Chat navigation needs only registered entries. Source discovery can synchronously
+      // inspect plugin files, so reserve it for the explicit plugin-use/settings entry.
+      canPrepare: !residentOnly && !this.closed && this.host.enabled(workspace) && this.hasSources(workspace, threadId)
     }
   }
   async platformSurfacePrepare(

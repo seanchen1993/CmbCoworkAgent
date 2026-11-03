@@ -67,7 +67,7 @@ const nativeProjectRouting = `
 - mod_authoring.project_list/project_read 中已有 composition/source.json：这是原生可组合项目，继续 project_read/project_patch/project_compile/project_request_trial。不再 inspect_raw、首次模块化或寻找旧 Python 适配器。
 - 用户修改某阶段提示词时，先读取当前草稿及 modules[].skill 指向的作者文件。只修改该 Skill 正文并保留原 frontmatter、输入输出、知识、Hooks 与检查；不要修改生成的 skills/native-*。共享同一 Skill 的多个阶段须先说明影响，不能把一次局部修改暗中应用到其他阶段。阶段提示词不是完整模型上下文，也不会修改 workflow 中的子任务提示或独立业务规则。
 - 用户在创作工作区手工保存阶段提示词后，重新 project_list/project_read 核对最新 revision/sourceDigest，不用旧对话里的源码覆盖手工修改。按新版本 project_compile 检查，再 project_request_trial 从头试用；保存草稿、编译通过、试用通过、保存插件是不同结果。保留旧试用，不自动回退原项目，不继承旧成功、批准和权限。用户只要求本次执行补充说明时，不擅自改插件模板。
-- 修改阶段前先读取相关作者声明、上下游 Skill 与 tests/project-contract.json，核对实际依赖和剩余修订预算。将同一依赖范围内的声明、正文、必要的下游引用及契约测试样例合并一次 project_patch，再编译；不要先分散保存或编译后才补漏相关文件。产物交接保持兼容时，不顺手重写用户未要求修改的阶段。超出单次补丁上限时按完整依赖范围分批并预留编译修订；预算不足走明确的既有续作流程，不能把新身份冒充原草稿修改完成。
+- 修改阶段前先读取相关作者声明、上下游 Skill 与 tests/project-contract.json，核对实际依赖。将同一依赖范围内的声明、正文、必要的下游引用及契约测试样例合并一次 project_patch，再编译；不要先分散保存或编译后才补漏相关文件。产物交接保持兼容时，不顺手重写用户未要求修改的阶段。超出单次补丁上限时按完整依赖范围分批，再编译并按实际诊断继续修订；创作不设累计操作、修复、模型调用次数或总时长配额。不能把新身份冒充原草稿修改完成。
 - 原生项目新增执行或校验能力：先 project_actions(query=需要的能力或插件名称，不带id) 检查已有且已授权的动作与契约，满足需求则直接复用。project_actions(id) 只列该草稿已声明的依赖；localActionId 是已有需求的 usedBy，不是新动作的搜索词。缺少时用 catalog(catalogSection="project-dependencies") 发现可复用源码，匹配需求的来源直接 dependency_prepare(sourceId)，由 Host 固定完整源码、检查并准备原生复用方案，然后结束本轮。准备方案不会安装、授权或执行，不必先请用户决定技术方案；实际安装等待原生确认。定制源码才用 save/check/request_reuse；dependency_save 是精确摘要复制的分步入口。确认后重新查询已授权动作的真实身份与契约，再绑定流程。不能猜动作名、重复安装或把安装当执行。
 - 仅当真实来源是 mods/business/manifest.json 时，使用 mod_business 的 inspect/preview/transform_workflow；仅未模块化原始插件才使用 inspect_raw/request_modularization。业务清单的旧适配器说明不能覆盖原生组合的 Host 状态所有权。
 大型原生项目只读取 composition/source.json 与本次必要的 Skill/契约文件。修改组合声明优先 project_patch(id,revision,sourceDigest,sourcePatch,files)：sourcePatch 是固定作用于 composition/source.json 的 JSON Pointer 操作，只支持 add/replace/remove/test。追加阶段用 add /modules/-；替换时先 test 目标模块的 id，再 replace 对应位置；新增资源用 add /resources/-，配置也只修改对应字段。不必转写整份声明，也不能同时提交该文件全文。files 只提交新增或修改的 Skill/资源；仅修改声明时可省略。project_patch 保留所有遗漏资源，无需为了保留 Hooks、知识和原 workflow 而逐个抄写。新增 workflow、知识或测试样例资源时，在同一次 project_patch 用 sourcePatch 声明精确 resources 路径并提交对应 files；不能先存未声明资源再补声明。生成的 runtime/action-lock/native skills 不作为编辑源。分页内容依 nextCursor 读完整后才判断源码有缺陷，不能因截断而误修原 workflow。源码验证使用 project_compile/project_doctor/project_test；不能执行临时脚本时继续原生检查，不为此要求额外权限或改用文件工具绕过。缺少测试运行配置时在插件声明必填配置，由项目使用入口填写，不把这个缺项当成无法创建可配置插件。
@@ -82,7 +82,7 @@ const guidance = `
 
 本轮提供原生工具 mod_authoring、mod_composition 和 mod_configuration。无需用户安装个人技能或提供本应用源码路径。编写新功能先用 mod_authoring 的 action="catalog" 读取随当前应用内置的 SDK、包结构、示例和交付指引；再按需用 catalogSection="types"/"events"/"sdk" 分页获取精确类型与支持范围。不要猜接口或依赖另一版本的文档。
 
-首批一句话创作的保证范围以 catalogSection="support" 返回的 creator-s1 支持表为准，包含接点、动作、配置与复用边界。超出范围先保留已有运行版、草稿与组合，说明具体限制和可验证替代方案；不要静默删功能、关闭其它 Mod 或虚构能力。现有高级 SDK/项目工具不等于任意需求都能自动生成。当前请求的修复、操作和时间预算跨工具重建共用，不能自动新开请求规避；达到预算或结果未知时停止并准确说明已保存和未完成部分。
+首批一句话创作的保证范围以 catalogSection="support" 返回的 creator-s1 支持表为准，包含接点、动作、配置与复用边界。超出范围先保留已有运行版、草稿与组合，说明具体限制和可验证替代方案；不要静默删功能、关闭其它 Mod 或虚构能力。现有高级 SDK/项目工具不等于任意需求都能自动生成。创造者没有累计操作次数、候选修复次数或总时长配额；持续按真实诊断完成创作。用户停止、权限失效或结果未知时停止并准确说明已保存和未完成部分，不自动重放未知副作用。
 
 组合已有 Mods 时，先用 mod_composition 的 action="list" 按 query 搜索真实来源摘要、当前选择、可用模型/技能/MCP/已保存步骤及 catalogToken；需要配置时再用 details 取得所选 Mod 的 schema。按用户目标用 stage 提交 capabilities 和必要选择；同一轮的提交会累积，默认保留已有设置、深合并对象，数组整体替换，删除字段用 removeConfigPaths。只有用户明确要求替换或移除时才使用 replace/removePluginIds。可用 save 保存当前或待应用组合，用 apply_saved 套用真实名称和版本。undo 恢复上次选择，cancel 取消尚未应用的排队操作，均不回放外部动作。不得假造来源或代批权限，不要求用户去管理页逐项配置。stage/undo/apply_saved 后结束本轮，宿主等待轮末和空闲后应用；用 status 核对实际结果，queued 不能当成 active。
 
@@ -140,6 +140,6 @@ export function modAuthoringRuntimePrompt(tools: readonly { name?: string }[]): 
     ? "另有 mod_configuration 可编辑原插件 userConfig：inspect 核对精确身份与版本；set/reset 仅修改普通字段，目录、文件和敏感字段通过 request_input 让用户在原生卡片选择或填写，不把秘密放进聊天。参数在项目中共享，pending 不代表生效。"
     : "本轮未提供插件用户配置工具，不要声称已修改插件 userConfig。"
   return finish(
-    `\n\n## 当前对话：创造者模式（受限工具）\n${available}\n${config}\n\n按用户目标完成可支持部分，保留其他已启用功能和已有成果。说明具体缺口，不假造工具或要求用户逐项手配。必要授权继续使用原确认，排队不代表生效。操作或修复预算耗尽、用户停止或结果未知时停止自动推进，保留草稿和真实状态，不自动重放副作用。`
+    `\n\n## 当前对话：创造者模式（受限工具）\n${available}\n${config}\n\n按用户目标完成可支持部分，保留其他已启用功能和已有成果。说明具体缺口，不假造工具或要求用户逐项手配。必要授权继续使用原确认，排队不代表生效。用户停止、权限失效或结果未知时停止自动推进，保留草稿和真实状态，不自动重放副作用。`
   )
 }

@@ -23,7 +23,7 @@ interface Controller {
     signal: AbortSignal,
     assertCurrent: () => void
   ): Promise<PlatformSurfaceCatalog>
-  platformSurfaceList(workspace: string, threadId: string): PlatformSurfaceCatalog
+  platformSurfaceList(workspace: string, threadId: string, residentOnly?: boolean): PlatformSurfaceCatalog
   platformSurfaceRead(
     workspace: string,
     threadId: string,
@@ -156,9 +156,10 @@ export function registerPlatformHandlers(
     }
   }
   ipc.handle("mods:platform-surface-list", (event, value: unknown) => {
-    const input = record(value, ["threadId"]),
+    const input = record(value, ["threadId", "residentOnly"]),
       scope = capture(event, input, false)
-    return controller.platformSurfaceList(scope.workspace, scope.threadId)
+    if (input.residentOnly !== undefined && typeof input.residentOnly !== "boolean") invalid()
+    return controller.platformSurfaceList(scope.workspace, scope.threadId, input.residentOnly === true)
   })
   ipc.handle("mods:platform-surface-prepare", (event, value: unknown) => {
     const input = record(value, ["threadId"]),

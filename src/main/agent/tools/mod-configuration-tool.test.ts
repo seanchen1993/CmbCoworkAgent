@@ -24,7 +24,7 @@ afterEach(() => {
   releaseLocalThreadRunLease(threadId, "desktop", "run")
 })
 
-it("routes exact original config bindings while retaining native scope and request budget", async () => {
+it("routes exact original config bindings without an operation quota while retaining native scope", async () => {
   const f = fixture()
   expect(JSON.parse(await f.native.invoke({ action: "inspect", pluginId: "p" })).ok).toBe(true)
   await f.native.invoke({ action: "request_input", pluginId: "p", digest: "a".repeat(64),
@@ -32,9 +32,9 @@ it("routes exact original config bindings while retaining native scope and reque
   expect(f.service.change).toHaveBeenCalledWith(threadId, "workspace",
     { pluginId: "p", digest: "a".repeat(64), revision: 2 }, "request_input", "token",
     undefined, expect.any(AbortSignal), expect.any(Function))
-  for (let i = 0; i < 30; i++) await f.native.invoke({ action: "status" })
+  for (let i = 0; i < 100; i++) await f.native.invoke({ action: "status" })
   expect(JSON.parse(await createModConfigurationTool({ threadId, workspace: "workspace" })
-    .invoke({ action: "status" }))).toMatchObject({ ok: false, error: "DEVELOPMENT_TURN_BUDGET" })
+    .invoke({ action: "status" }))).toMatchObject({ ok: true })
 })
 
 it("rejects stale creator mode and forbids passing values to the native input request", async () => {

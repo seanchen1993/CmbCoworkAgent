@@ -131,13 +131,18 @@ async function main() {
 
     await approve.waitFor()
     assert(await approve.isEnabled())
-    await call("requestBudget", { runId: "original-run", startedAt: 1, operations: 4, candidates: 3 })
+    await call("requestBudget", { runId: "original-run", startedAt: 1, operations: 120, candidates: 12,
+      model: { attempts: 128, attemptLimit: null, usageReportedAttempts: 128,
+        usageUnknownAttempts: 0, usagePendingAttempts: 0, historicalUsageUnknown: false,
+        coverage: "complete", traceIds: [], traceCoverage: "partial",
+        cost: { state: "unavailable", reason: "pricing-unavailable" } } })
     const advancedTools = page.locator('[data-creator-section="create"] > summary')
     if (!await advancedTools.evaluate(element => (element.parentElement as HTMLDetailsElement).open)) await advancedTools.click()
     await page.getByText("制作记录与用量", { exact: true }).click()
-    await page.getByText("最近一次需求已检查 3/3 个候选；重新打开界面不会重置修复次数。", { exact: true }).waitFor()
+    await page.getByText("最近一次需求已完成 120 次操作，检查 12 个候选。操作和修复次数不设配额。").waitFor()
+    await page.getByText(/模型实际请求 128 次（不设固定次数上限）/).waitFor()
     await call("requestBudget", { error: "DEVELOPMENT_BUDGET_UNCONFIRMED" })
-    await page.getByText("本次制作预算无法核对，已停止继续提交。草稿和当前功能仍保留。", { exact: true }).waitFor()
+    await page.getByText("本次制作记录无法核对，已停止继续提交。草稿和当前功能仍保留。", { exact: true }).waitFor()
     await call("requestBudget", undefined)
     const approvalsBeforeClick = ((await call("get")) as { calls: unknown[][] }).calls
       .filter(([name]) => name === "approve").length

@@ -1686,11 +1686,14 @@ function ScopedDevelopment({
             <summary className="cursor-pointer">制作记录与用量</summary>
             <p className="mt-2">
             {"error" in status.request
-              ? "本次制作预算无法核对，已停止继续提交。草稿和当前功能仍保留。"
-              : `${status.request.groupId ? "当前目标累计" : "最近一次需求"}已检查 ${status.request.candidates}/3 个候选；重新打开界面不会重置修复次数。`}
+              ? "本次制作记录无法核对，已停止继续提交。草稿和当前功能仍保留。"
+              : `${status.request.groupId ? "当前目标累计" : "最近一次需求"}已完成 ${status.request.operations} 次操作，检查 ${status.request.candidates} 个候选。操作和修复次数不设配额。`}
             {!("error" in status.request) && status.request.model && (
               <span className="block">
-                模型实际请求 {status.request.model.attempts}/{status.request.model.attemptLimit}{" "}
+                模型实际请求 {status.request.model.attempts} 次
+                {status.request.model.attemptLimit !== null
+                  ? `（当前显式策略上限 ${status.request.model.attemptLimit} 次）`
+                  : "（不设固定次数上限）"}{" "}
                 次（含重试）； 用量已上报 {status.request.model.usageReportedAttempts} 次
                 {status.request.model.coverage === "partial" ? "，其余用量待核对" : ""}。
                 {status.request.model.recordedModelCalls !== undefined

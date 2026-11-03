@@ -143,20 +143,33 @@ async function main() {
           observer.observe(scope, { subtree: true, childList: true, attributes: true, characterData: true })
           button.click()
         })
-        for (let frame = 0; frame < 2; frame++)
+        // Loading state can settle before the virtualized body paints. Observe readable rows
+        // within the existing interaction recovery budget instead of assuming two frames suffice.
+        const responseSettledAt = performance.now()
+        let initialPaint: { rows: number; blank: number } | undefined
+        let paint = { rows: 0, blank: 0 }
+        let stable = 0
+        do {
+          const rect = viewport.getBoundingClientRect()
+          const visible = [...viewport.querySelectorAll<HTMLElement>("[data-index]")].filter(row => {
+            const box = row.getBoundingClientRect()
+            return box.height > 0 && box.bottom > rect.top && box.top < rect.bottom
+          })
+          paint = { rows: visible.length, blank: visible.filter(row => !row.textContent?.trim()).length }
+          initialPaint ??= paint
+          stable = paint.rows > 0 && paint.blank === 0 ? stable + 1 : 0
+          if (stable === 3) break
           await new Promise<void>(done => requestAnimationFrame(() => done()))
-        const rect = viewport.getBoundingClientRect()
-        const visible = [...viewport.querySelectorAll<HTMLElement>("[data-index]")].filter(row => {
-          const box = row.getBoundingClientRect()
-          return box.height > 0 && box.bottom > rect.top && box.top < rect.bottom
-        })
+        } while (performance.now() - responseSettledAt < 1000)
         return { elapsedMs: performance.now() - start, beforeLabel,
           afterLabel: scope.querySelector('[data-chat-history-boundary="older"]')?.textContent,
-          rows: visible.length, blank: visible.filter(row => !row.textContent?.trim()).length,
-          scrollTop: viewport.scrollTop, mountedRows: viewport.querySelectorAll("[data-index]").length }
+          initialPaint, paintWaitMs: performance.now() - responseSettledAt, stable,
+          ...paint, scrollTop: viewport.scrollTop,
+          mountedRows: viewport.querySelectorAll("[data-index]").length }
       }, threadId)
-      assert(result.rows > 0 && result.blank === 0, "Loaded history must paint visible content")
       record({ kind: "actual-history-page-paint", sample, ...result })
+      assert(result.stable === 3 && result.elapsedMs < 1500 && result.rows > 0 && result.blank === 0,
+        "Loaded history must paint visible content within the interaction budget")
     }
     assert.deepEqual(errors, [])
     await page.screenshot({ path: join(fixture.isolated, "history.png") })

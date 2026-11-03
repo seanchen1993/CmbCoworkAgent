@@ -3,10 +3,11 @@ import type { AuthoringAtomicSettings } from "./authoring-config-snapshot"
 import type { CreatorTraceUsage } from "./creator-model-accounting"
 
 export const CREATOR_REQUEST_LIMITS = Object.freeze({
-  operations: 32,
-  candidates: 3,
-  durationMs: 10 * 60_000,
-  modelAttempts: 64,
+  // Creation progress is counted, not rationed. Null is explicit in SDK discovery/JSON.
+  operations: null,
+  candidates: null,
+  durationMs: null,
+  modelAttempts: null,
   retainedRequests: 16
 })
 export interface CreatorRequestObservation {
@@ -20,7 +21,9 @@ export interface CreatorRequestObservation {
   model?: CreatorModelObservation
 }
 export interface CreatorModelObservation {
-  limit: number
+  limit: number | null
+  /** Distinguishes an explicit host policy from the retired default of 64 attempts. */
+  limitSource?: "explicit" | "default"
   historicalUsageUnknown: boolean
   attempts: Array<{
     id: string
@@ -35,7 +38,7 @@ export interface CreatorModelObservation {
   hardMoneyLimit?: { amount: number; currency: string }
 }
 const absent = "\0creator-request-absent"
-// 16 requests × 64 genuine attempts × maximum 256-character trace references fit this bound.
+// Bound persisted accounting bytes, independently of creation-operation quotas.
 const MAX_CREATOR_BUDGET_BYTES = 1024 * 1024
 function validMoneyLimit(
   value: unknown
@@ -56,18 +59,17 @@ function validModelObservation(value: unknown): value is CreatorModelObservation
   const row = value as CreatorModelObservation
   return (
     Object.keys(row).every((key) =>
-      ["limit", "historicalUsageUnknown", "attempts", "cost", "hardMoneyLimit"].includes(key)
+      ["limit", "limitSource", "historicalUsageUnknown", "attempts", "cost", "hardMoneyLimit"].includes(key)
     ) &&
-    Number.isSafeInteger(row.limit) &&
-    row.limit > 0 &&
-    row.limit <= CREATOR_REQUEST_LIMITS.modelAttempts &&
+    (row.limit === null || (Number.isSafeInteger(row.limit) && row.limit > 0)) &&
+    (row.limitSource === undefined || ["explicit", "default"].includes(row.limitSource)) &&
     typeof row.historicalUsageUnknown === "boolean" &&
     row.cost?.state === "unavailable" &&
     row.cost.reason === "pricing-unavailable" &&
     Object.keys(row.cost).length === 2 &&
     (row.hardMoneyLimit === undefined || validMoneyLimit(row.hardMoneyLimit)) &&
     Array.isArray(row.attempts) &&
-    row.attempts.length <= row.limit &&
+    (row.limit === null || row.attempts.length <= row.limit) &&
     new Set(row.attempts.map((attempt) => attempt?.id)).size === row.attempts.length &&
     row.attempts.every(
       (attempt) =>
@@ -144,7 +146,6 @@ function validBudgetRow(row: CreatorRequestObservation): boolean {
       (typeof row.groupId !== "string" || !row.groupId || row.groupId.length > 160)) ||
     (row.nativeRuns !== undefined &&
       (!Array.isArray(row.nativeRuns) ||
-        row.nativeRuns.length > CREATOR_REQUEST_LIMITS.operations ||
         row.nativeRuns.some((id) => typeof id !== "string" || !id || id.length > 160) ||
         new Set(row.nativeRuns).size !== row.nativeRuns.length)) ||
     (row.model !== undefined && !validModelObservation(row.model)) ||
@@ -152,10 +153,8 @@ function validBudgetRow(row: CreatorRequestObservation): boolean {
     row.startedAt < 0 ||
     !Number.isSafeInteger(row.operations) ||
     row.operations < 0 ||
-    row.operations > CREATOR_REQUEST_LIMITS.operations ||
     !Number.isSafeInteger(row.candidates) ||
-    row.candidates < 0 ||
-    row.candidates > CREATOR_REQUEST_LIMITS.candidates
+    row.candidates < 0
   )
 }
 function validBudgetRows(rows: CreatorRequestObservation[]): boolean {
@@ -209,7 +208,14 @@ export function creatorRequestBudgetCacheDiagnosticsForTests(settings: Authoring
     maxEntries: CREATOR_BUDGET_CACHE_ENTRIES, maxBytes: CREATOR_BUDGET_CACHE_BYTES }
 }
 
-export function creatorModelSummary(model: CreatorModelObservation | undefined) {
+function currentModelPolicy(model: CreatorModelObservation): CreatorModelObservation {
+  return model.limit === 64 && model.limitSource !== "explicit"
+    ? { ...model, limit: null, limitSource: "default" }
+    : model
+}
+
+export function creatorModelSummary(observation: CreatorModelObservation | undefined) {
+  const model = observation && currentModelPolicy(observation)
   const reported = model?.attempts.filter((attempt) => attempt.state === "reported") ?? []
   const traces = new Map(
     model?.attempts.flatMap((attempt) =>
@@ -332,9 +338,7 @@ export class CreatorRequestBudgets {
       (groupId ? rows.find((row) => row.groupId === groupId) : undefined)
     const limit = policy.modelAttemptLimit ?? CREATOR_REQUEST_LIMITS.modelAttempts
     if (
-      !Number.isSafeInteger(limit) ||
-      limit < 1 ||
-      limit > CREATOR_REQUEST_LIMITS.modelAttempts ||
+      (limit !== null && (!Number.isSafeInteger(limit) || limit < 1)) ||
       (policy.hardMoneyLimit !== undefined && !validMoneyLimit(policy.hardMoneyLimit))
     )
       throw Error("DEVELOPMENT_BUDGET_UNCONFIRMED")
@@ -345,10 +349,16 @@ export class CreatorRequestBudgets {
       candidates: 0,
       ...(groupId ? { groupId, nativeRuns: [] } : {})
     }
+    // Before limitSource existed, production always used the default 64. Preserve
+    // explicitly supplied policies and all receipts while allowing old work to resume.
+    const previousModel = row.model && policy.modelAttemptLimit !== undefined
+      ? { ...row.model, limitSource: "explicit" as const }
+      : row.model && currentModelPolicy(row.model)
     const next = {
       ...row,
-      model: row.model ?? {
+      model: previousModel ?? {
         limit,
+        limitSource: policy.modelAttemptLimit === undefined ? "default" as const : "explicit" as const,
         attempts: [],
         historicalUsageUnknown: !!existing,
         cost: { state: "unavailable" as const, reason: "pricing-unavailable" as const },
@@ -364,8 +374,6 @@ export class CreatorRequestBudgets {
       throw Error("DEVELOPMENT_BUDGET_UNCONFIRMED")
     // Keep the original request/goal association after goal completion or replacement.
     if (next.nativeRuns && !next.nativeRuns.includes(runId)) {
-      if (next.nativeRuns.length >= CREATOR_REQUEST_LIMITS.operations)
-        throw Error("DEVELOPMENT_TURN_BUDGET")
       next.nativeRuns = [...next.nativeRuns, runId]
     }
     this.write(
@@ -384,18 +392,17 @@ export class CreatorRequestBudgets {
     const row = rows.find((row) => row.runId === boundRunId)
     if (!row?.model || (traceId !== undefined && (!traceId || traceId.length > 256)))
       throw Error("DEVELOPMENT_MODEL_ACCOUNTING_SCOPE")
-    if (
-      this.now() < row.startedAt ||
-      this.now() - row.startedAt >= CREATOR_REQUEST_LIMITS.durationMs
-    )
-      throw Error("DEVELOPMENT_TURN_BUDGET")
-    if (row.model.hardMoneyLimit) throw Error("DEVELOPMENT_MODEL_COST_UNSUPPORTED")
-    if (row.model.historicalUsageUnknown) throw Error("DEVELOPMENT_MODEL_HISTORY_UNCONFIRMED")
-    if (row.model.attempts.length >= row.model.limit)
+    // Existing owned trials may resume directly from their bound reference.
+    const model = currentModelPolicy(row.model)
+    if (this.now() < row.startedAt) throw Error("DEVELOPMENT_BUDGET_UNCONFIRMED")
+    if (model.hardMoneyLimit) throw Error("DEVELOPMENT_MODEL_COST_UNSUPPORTED")
+    if (model.historicalUsageUnknown && model.limit !== null)
+      throw Error("DEVELOPMENT_MODEL_HISTORY_UNCONFIRMED")
+    if (model.limit !== null && model.attempts.length >= model.limit)
       throw Error("DEVELOPMENT_MODEL_ATTEMPT_BUDGET")
     const id = randomUUID()
-    const next: CreatorRequestObservation = { ...row, model: { ...row.model,
-      attempts: [...row.model.attempts, { id, state: "pending", ...(traceId ? { traceId } : {}) }] } }
+    const next: CreatorRequestObservation = { ...row, model: { ...model,
+      attempts: [...model.attempts, { id, state: "pending", ...(traceId ? { traceId } : {}) }] } }
     this.write(key, raw, rows.map(value => value === row ? next : value))
     return id
   }
@@ -503,25 +510,14 @@ export class CreatorRequestBudgets {
       candidates: 0,
       ...(groupId ? { groupId, nativeRuns: [] as string[] } : {})
     }
-    if (now < record.startedAt || now - record.startedAt >= CREATOR_REQUEST_LIMITS.durationMs)
-      throw Error("DEVELOPMENT_TURN_BUDGET")
-    if (kind === "operation" && record.operations >= CREATOR_REQUEST_LIMITS.operations)
-      throw Error("DEVELOPMENT_TURN_BUDGET")
-    if (kind === "candidate" && record.candidates >= CREATOR_REQUEST_LIMITS.candidates)
-      throw Error("DEVELOPMENT_REPAIR_BUDGET")
-    if (
-      record.nativeRuns &&
-      !record.nativeRuns.includes(runId) &&
-      record.nativeRuns.length >= CREATOR_REQUEST_LIMITS.operations
-    )
-      throw Error("DEVELOPMENT_TURN_BUDGET")
+    if (now < record.startedAt) throw Error("DEVELOPMENT_BUDGET_UNCONFIRMED")
     const next = {
       ...record,
       ...(record.groupId
         ? { nativeRuns: [...new Set([...(record.nativeRuns ?? []), runId])] }
         : {}),
-      operations: record.operations + Number(kind === "operation"),
-      candidates: record.candidates + Number(kind === "candidate")
+      operations: Math.min(Number.MAX_SAFE_INTEGER, record.operations + Number(kind === "operation")),
+      candidates: Math.min(Number.MAX_SAFE_INTEGER, record.candidates + Number(kind === "candidate"))
     }
     this.write(key, raw,
       [...rows.filter(row => row !== existing), next].slice(-CREATOR_REQUEST_LIMITS.retainedRequests))

@@ -74,6 +74,7 @@ async function main() {
       const draw=()=>host.render(<Harness id={activeThread} shown={visible}/>);
       window.platformFixture={ops,counts:()=>({mounts,unmounts,sends,cards:pcards.size,platform:pchanges.size,activeReads,maxActiveReads,completedReads,lateFramesSeen:lateFramesSeen.length}),
         queryCold:()=>{queryMode=true;cold=true;activeThread='query';draw()},
+        prepareFromPlugin:async()=>{await api.platformSurfacePrepare(activeThread);for(const fn of pchanges)fn({threadId:activeThread})},
         queryStats:()=>({pending:queryRequests.length,completed:queryCompleted,times:queryRequests.map(row=>row.time)}),
         queryFinish:(index,fail=false)=>{const request=queryRequests[index];if(fail)request.reject(Error('MODS_QUERY_SUPERSEDED'));else{queryResult='查询结果'+request.handle;request.resolve()}},
         catalogFail:value=>{catalogFailure=value;for(const fn of pchanges)fn({threadId:activeThread})},
@@ -765,17 +766,18 @@ async function main() {
     // These are actual React controls with deferred IPC promises. Native cancellation and
     // capability dispatch are independently exercised by platform-surfaces-query.test.ts.
     await page.evaluate("window.platformFixture.queryCold()")
-    const prepare = page.getByRole("button", { name: "查找可用插件界面", exact: true })
-    await prepare.waitFor()
     await settle()
+    assert.equal(await page.getByRole("button", { name: "查找可用插件界面", exact: true }).count(), 0)
     assert.equal(
       await page.evaluate("window.platformFixture.ops.filter(x=>x[0]==='prepare').length"),
       0
     )
     const beforePrepare = await stats()
     await page.getByLabel("原聊天输入").fill("冷启动仍能输入")
-    await prepare.click()
-    await prepare.waitFor({ state: "detached" })
+    // This workspace consumes registration from the explicit plugin-use entry. The
+    // real entry's click, identity and consent boundaries have their own browser suite.
+    await page.evaluate("window.platformFixture.prepareFromPlugin()")
+    await page.getByRole("button", { name: "通用作者页面", exact: true }).waitFor()
     assert.equal(
       await page.evaluate("window.platformFixture.ops.filter(x=>x[0]==='prepare').length"),
       1
@@ -783,7 +785,7 @@ async function main() {
     assert.equal((await stats()).opens, beforePrepare.opens)
     assert.equal(await page.getByLabel("原聊天输入").inputValue(), "冷启动仍能输入")
     checks.push(
-      "cold catalog prepares only after an explicit click; discovery preserves chat draft"
+      "cold sources add no discovery control or activation; plugin-use registration preserves chat draft"
     )
 
     await open()

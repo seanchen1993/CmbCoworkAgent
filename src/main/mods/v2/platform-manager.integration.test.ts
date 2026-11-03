@@ -24,11 +24,12 @@ async function fixture(body: string) {
   const store = new ModControlStore(join(workspace, "control.sqlite"))
   const guests: FunctionGuestRuntime[] = []
   let loads = 0,
+    sourceReads = 0,
     enabled = true
   const manager = new FunctionModsManager(
     store,
     {
-      plugins: () => [{ id: "p", name: "platform-demo", path: root, enabled }],
+      plugins: () => { sourceReads++; return [{ id: "p", name: "platform-demo", path: root, enabled }] },
       enabled: () => true,
       clawApplicable: () => true,
       changed() {
@@ -87,6 +88,7 @@ async function fixture(body: string) {
     store,
     workspace,
     loads: () => loads,
+    sourceReads: () => sourceReads,
     disable: () => {
       enabled = false
     },
@@ -101,7 +103,12 @@ it("cold desktop discovery never loads/registers/starts a guest and reports unkn
     status: "unknown",
     capabilities: []
   })
+  const reads = f.sourceReads()
+  for (let index = 0; index < 100; index++)
+    expect(f.manager.platformSurfaceList(f.workspace, "t", true)).toMatchObject({ entries: [], canPrepare: false })
+  expect(f.sourceReads()).toBe(reads)
   expect(f.manager.platformSurfaceList(f.workspace, "t").entries).toEqual([])
+  expect(f.sourceReads()).toBeGreaterThan(reads)
   expect(f.manager.platformBehaviorList(f.workspace, "t").bindings).toEqual([])
   expect(f.loads()).toBe(0)
   expect(f.manager.runtimeSessions().sessions).toEqual([])

@@ -100,6 +100,9 @@ it("does not publish a delayed read or control receipt into a changed native tar
 it("keeps discovery read-only and binds actions to native workspace and trusted writable target", async () => {
   const f = fixture()
   expect(await f.call("surface-list")).toEqual({ revision: 3, entries: [], errors: [] })
+  await f.call("surface-list", { threadId: "thread", residentOnly: true })
+  expect(f.controller.platformSurfaceList).toHaveBeenLastCalledWith("native-workspace", "thread", true)
+  await expect(f.call("surface-list", { threadId: "thread", residentOnly: "true" })).rejects.toThrow("MODS_PLATFORM_ARGUMENTS")
   expect(await f.call("behavior-list")).toMatchObject({ revision: 3 })
   expect(f.userAction).not.toHaveBeenCalled()
   await f.call("surface-open", { ...target, intentId: "intent" })

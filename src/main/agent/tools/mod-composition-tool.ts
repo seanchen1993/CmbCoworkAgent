@@ -5,7 +5,6 @@ import { getCreatorCompositionService } from "../../mods/devtools/creator-compos
 import { captureLocalThreadRunLease, getLocalThreadRunLease } from "../thread-run-lease"
 import type { CreatorCompositionInput } from "../../mods/devtools/creator-composition"
 import { ModFunctionError } from "../../../shared/mods/v2/contracts"
-import { CREATOR_REQUEST_LIMITS } from "../../mods/devtools/creator-request-budget"
 
 export function createModCompositionTool(input: {
   threadId: string
@@ -17,8 +16,6 @@ export function createModCompositionTool(input: {
   const ownsLease = captureLocalThreadRunLease(threadId)
   const development = getModDevelopmentService()
   const assertCreator = development?.captureCreatorMode?.(threadId, workspace)
-  const started = performance.now()
-  let operations = 0
   return tool(
     async (args) => {
       try {
@@ -35,9 +32,6 @@ export function createModCompositionTool(input: {
         }
         assertTurn()
         development!.claimAuthoringBudget?.(threadId, lease!.runId, "operation")
-        if (++operations > CREATOR_REQUEST_LIMITS.operations ||
-          performance.now() - started > CREATOR_REQUEST_LIMITS.durationMs)
-          throw Error("DEVELOPMENT_TURN_BUDGET")
         const service = getCreatorCompositionService()
         if (!service) throw Error("COMPOSITION_UNAVAILABLE")
         let result: unknown
@@ -116,8 +110,8 @@ export function createModCompositionTool(input: {
         return JSON.stringify({
           ok: false,
           error: /^[A-Z][A-Z0-9_]+$/.test(code) ? code : "COMPOSITION_OPERATION_FAILED",
-          hint: code === "DEVELOPMENT_TURN_BUDGET" || code === "DEVELOPMENT_BUDGET_UNCONFIRMED"
-            ? "本次制作请求的预算已耗尽或无法核对，停止提交并说明已完成与未完成部分。保留草稿和当前组合，不得自动新开请求绕过预算。"
+          hint: code === "DEVELOPMENT_BUDGET_UNCONFIRMED"
+            ? "本次制作请求的操作记录无法核对，停止提交并说明已完成与未完成部分。保留草稿和当前组合，核对状态后继续。"
             : "先 list 取得当前真实身份和 catalogToken。stage 默认保留已有组合，只改变当前对话，成功轮次结束且空闲后应用。未授权能力需用户经原权限入口处理。提交前检查失败会保留原组合；MODS_COMPOSITION_APPLY_UNCONFIRMED 表示提交后的清理或切换未确认，必须核对状态和操作结果，不可自动重试。queued 不代表已生效。"
         })
       }

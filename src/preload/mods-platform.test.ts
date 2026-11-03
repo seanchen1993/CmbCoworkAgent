@@ -9,6 +9,7 @@ it("forwards bounded native addresses and explicit selection without exposing ar
   expect(api.platformSurfacePrepare).toBeTypeOf("function")
   await api.platformSurfacePrepare!("thread")
   await api.platformSurfaceList("thread")
+  await api.platformSurfaceList("thread", { residentOnly: true })
   await api.platformSurfaceOpen("thread", address, "intent")
   await api.platformSurfaceClose("thread", address)
   await api.platformBehaviorPreview("thread", ["provider/behavior"])
@@ -16,6 +17,7 @@ it("forwards bounded native addresses and explicit selection without exposing ar
   expect(invoke.mock.calls).toEqual([
     ["mods:platform-surface-prepare", { threadId: "thread" }],
     ["mods:platform-surface-list", { threadId: "thread" }],
+    ["mods:platform-surface-list", { threadId: "thread", residentOnly: true }],
     ["mods:platform-surface-open", { threadId: "thread", address, intentId: "intent" }],
     ["mods:platform-surface-close", { threadId: "thread", address }],
     ["mods:platform-behavior-preview", { threadId: "thread", selected: ["provider/behavior"] }],

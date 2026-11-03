@@ -733,6 +733,19 @@ jobs:
 
       # Validate the exact Windows package produced above; do not rebuild or install the app here.
       # A failed check blocks uploads/release. Linux keeps its existing native/GLIBC checks.
+      - name: Verify idle Mods refresh and presentation work stays bounded (Windows)
+        if: matrix.platform == 'win'
+        timeout-minutes: 5
+        shell: pwsh
+        run: |
+          node --import tsx tests/mods-idle-refresh-browser.spec.ts
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node --import tsx tests/mods-presentation-layout-performance-browser.spec.ts
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Verify creator continuation and passive surface lookup
+        run: npx vitest run src/main/mods/devtools/creator-request-budget.test.ts src/main/agent/tools/mod-authoring-tool.test.ts src/main/agent/tools/mod-composition-tool.test.ts src/main/agent/tools/mod-business-tool.test.ts src/main/agent/tools/mod-configuration-tool.test.ts src/main/agent/tools/mod-authoring-budget.integration.test.ts src/main/mods/devtools/development-service.test.ts src/main/ipc/mods-platform.test.ts src/main/mods/v2/platform-manager.integration.test.ts src/preload/mods-platform.test.ts
+
       - name: Validate Mods in Windows package
         if: matrix.platform == 'win'
         timeout-minutes: 20

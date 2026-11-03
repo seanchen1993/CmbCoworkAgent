@@ -168,18 +168,24 @@ export function publishDesktopSelection(
     captured.range.toString() === captured.rangeText
   return { text: captured.text, ...(stillDrawn ? { requestId: captured.requestId } : {}) }
 }
-export function readDesktopPaneDrawings(regions: HTMLElement[]): FunctionPaneDrawing[] {
-  const nodes = new Set(
+export function collectDesktopPaneNodes(regions: HTMLElement[]): HTMLElement[] {
+  return [...new Set(
     regions.flatMap((region) => [
       ...region.querySelectorAll<HTMLElement>("[data-function-pane-key]")
     ])
-  )
+  )].slice(0, 64)
+}
+
+export function readDesktopPaneDrawings(
+  regions: HTMLElement[],
+  nodes = collectDesktopPaneNodes(regions)
+): FunctionPaneDrawing[] {
   const modal = [
     ...document.querySelectorAll<HTMLElement>(
       '[role="dialog"][aria-modal="true"], [role="alertdialog"]'
     )
   ].some(desktopElementVisible)
-  return [...nodes].slice(0, 64).map((node) => {
+  return nodes.slice(0, 64).map((node) => {
     const visible = desktopElementVisible(node)
     return {
       key: node.dataset.functionPaneKey!,

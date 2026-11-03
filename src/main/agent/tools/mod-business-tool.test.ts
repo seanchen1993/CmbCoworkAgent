@@ -601,15 +601,15 @@ describe("native business authoring tool", () => {
     })
     expect(f.service.catalog).not.toHaveBeenCalled()
   })
-  it("does not recreate tools to evade an exhausted cumulative request budget", async () => {
+  it("preserves a corrupt-accounting failure across tool reconstruction", async () => {
     const f = fixture()
     f.mode.claimAuthoringBudget.mockImplementation(() => {
-      throw Error("DEVELOPMENT_TURN_BUDGET")
+      throw Error("DEVELOPMENT_BUDGET_UNCONFIRMED")
     })
     for (const tool of [f.tool, createModBusinessTool({ threadId, workspace })]) {
       expect(JSON.parse(await tool.invoke({ action: "catalog" }))).toMatchObject({
         ok: false,
-        error: "DEVELOPMENT_TURN_BUDGET"
+        error: "DEVELOPMENT_BUDGET_UNCONFIRMED"
       })
     }
     expect(f.service.catalog).not.toHaveBeenCalled()

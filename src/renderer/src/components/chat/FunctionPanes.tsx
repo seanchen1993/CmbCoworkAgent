@@ -1,6 +1,5 @@
 import { publishClawNotice, revealClawPanes, ClawResultsVisibility } from "@/lib/claw-sidebar"
 import { withModsChatScope } from "../../lib/mods-chat-scope"
-import { isModSiteChangeScope } from "../../../../shared/mods/types"
 import { useFunctionPaneScroll } from "../../lib/function-pane-scroll"
 import { createContext, useContext, Fragment, useCallback, useEffect, useId, useRef, useState,
   type CSSProperties } from "react"
@@ -624,8 +623,15 @@ function FunctionPanesSurface({ threadId, revealInSidebar = true }: {
   useEffect(() => {
     let live = true
     let sequence = 0
-    const refresh = (): void => {
-      const request = ++sequence
+    let running = false
+    let dirty = false
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const read = (): void => {
+      timer = undefined
+      if (!live || running || !dirty) return
+      dirty = false
+      running = true
+      const request = sequence
       void window.api.mods
         .panes(threadId)
         .then((rows) => {
@@ -642,10 +648,23 @@ function FunctionPanesSurface({ threadId, revealInSidebar = true }: {
         .catch(() => {
           if (live && request === sequence) setPanes([])
         })
+        .finally(() => {
+          running = false
+          if (live && dirty) timer = setTimeout(read, 16)
+        })
+    }
+    const refresh = (): void => {
+      if (!live) return
+      sequence++
+      dirty = true
+      if (!running && timer === undefined) timer = setTimeout(read, 0)
     }
     refreshRef.current = refresh
     const stop = window.api.mods.onCardsChanged((event) => {
-      if (event.threadId === threadId && event.scope !== "records" && !isModSiteChangeScope(event.scope)) refresh()
+      if (event.threadId !== threadId) return
+      if (event.scope === undefined || event.scope === "panes" ||
+        event.scope.startsWith("source-replaced:") || event.scope.startsWith("source-retiring:"))
+        refresh()
     })
     const stopConfiguration = window.api.mods.onConfigurationChanged(() => {
       focusEpoch.current++
@@ -655,6 +674,7 @@ function FunctionPanesSurface({ threadId, revealInSidebar = true }: {
     refresh()
     return () => {
       live = false
+      clearTimeout(timer)
       stop()
       stopConfiguration()
       window.removeEventListener("mods:configuration-changed", refresh)

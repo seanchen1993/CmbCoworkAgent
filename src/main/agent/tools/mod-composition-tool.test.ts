@@ -35,20 +35,20 @@ afterEach(() => {
   releaseLocalThreadRunLease(threadId, "desktop", "run")
 })
 describe("creator native composition tool", () => {
-  it("uses the frozen cumulative operation budget instead of a lower per-tool limit", async () => {
+  it("keeps counting long creation sessions without a per-tool or cumulative operation quota", async () => {
     const f = fixture()
     const ledger = new CreatorRequestBudgets()
     Object.assign(f.mode, { claimAuthoringBudget: (_thread: string, run: string,
       kind: "operation" | "candidate") => ledger.claim("workspace", run, kind) })
     const native = createModCompositionTool({ threadId, workspace: "workspace" })
-    for (let i = 0; i < 32; i++)
+    for (let i = 0; i < 100; i++)
       expect(JSON.parse(await native.invoke({ action: "status" })).ok).toBe(true)
     expect(JSON.parse(await native.invoke({ action: "status" })))
-      .toMatchObject({ ok: false, error: "DEVELOPMENT_TURN_BUDGET" })
+      .toMatchObject({ ok: true })
     expect(JSON.parse(await createModCompositionTool({ threadId, workspace: "workspace" })
       .invoke({ action: "status" })))
-      .toMatchObject({ ok: false, error: "DEVELOPMENT_TURN_BUDGET" })
-    expect(f.service.refreshStatus).toHaveBeenCalledTimes(32)
+      .toMatchObject({ ok: true })
+    expect(f.service.refreshStatus).toHaveBeenCalledTimes(102)
   })
 
   it("routes directory search/refresh and pinned provider details", async () => {

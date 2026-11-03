@@ -8,8 +8,8 @@ export function createPlatformBridge(
       invoke("mods:platform-surface-prepare", { threadId }) as Promise<
         import("../shared/mods/v2/platform-surfaces").PlatformSurfaceCatalog
       >,
-    platformSurfaceList: (threadId) =>
-      invoke("mods:platform-surface-list", { threadId }) as ReturnType<
+    platformSurfaceList: (threadId, options) =>
+      invoke("mods:platform-surface-list", { threadId, ...options }) as ReturnType<
         PlatformUiApi["platformSurfaceList"]
       >,
     platformSurfaceRead: (threadId, address) =>

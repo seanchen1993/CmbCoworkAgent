@@ -200,9 +200,7 @@ export function createModAuthoringTool(input: {
   const assertCreator = getModDevelopmentService()?.captureCreatorMode?.(threadId, workspace)
   const lease = getLocalThreadRunLease(threadId)
   const ownsLease = captureLocalThreadRunLease(threadId)
-  let operations = 0
   let candidateAttempts = 0
-  const createdAt = performance.now()
   const signal = input.signal ?? new AbortController().signal
   return tool(
     async (args) => {
@@ -223,9 +221,6 @@ export function createModAuthoringTool(input: {
         }
         assertTurn()
         service!.claimAuthoringBudget?.(threadId, lease!.runId, "operation")
-        if (++operations > CREATOR_REQUEST_LIMITS.operations ||
-          performance.now() - createdAt > CREATOR_REQUEST_LIMITS.durationMs)
-          throw Error("DEVELOPMENT_TURN_BUDGET")
         const id = () => {
           if (args.action === "dependency_prepare" && !args.id && args.sourceId) return args.sourceId
           if (!args.id) throw Error("DEVELOPMENT_ID_REQUIRED")
@@ -261,8 +256,6 @@ export function createModAuthoringTool(input: {
             candidateAttempts = observed.candidates
             return
           }
-          if (candidateAttempts >= CREATOR_REQUEST_LIMITS.candidates)
-            throw Error("DEVELOPMENT_REPAIR_BUDGET")
           candidateAttempts++
         }
         const project = () => {
@@ -920,9 +913,8 @@ export function createModAuthoringTool(input: {
                 repair: {
                   attempt: candidateAttempts,
                   maxAttempts: CREATOR_REQUEST_LIMITS.candidates,
-                  remaining: Math.max(0, CREATOR_REQUEST_LIMITS.candidates - candidateAttempts),
-                  canRetry:
-                    error.repairable && candidateAttempts < CREATOR_REQUEST_LIMITS.candidates,
+                  remaining: null,
+                  canRetry: error.repairable,
                   previousVersionPreserved: true
                 }
               }
@@ -984,12 +976,8 @@ export function createModAuthoringTool(input: {
                   "AUTHORING_SOURCE_COLLISION", "AUTHORING_SOURCE_LIMIT"].includes(code)
                 ? "先 project_read(id) 核对真实 revision 与 sourceDigest；project_patch可传新增/修改的files，或sourcePatch固定修改composition/source.json，或二者原子合用；遗漏文件保留。新增资源用sourcePatch add /resources/-和files同次提交，无需整份重写source.json；完整composition文件与sourcePatch互斥。大型文件按assetPath/cursor读取，失败或未知不能猜版本重放；保存不代表编译、审批或业务通过。"
               : code === "DEVELOPMENT_BUDGET_UNCONFIRMED"
-                ? "本次制作请求的预算记录无法核对，已停止推进。保留草稿和当前运行版，先核对状态；不要自动重试或新开轮次绕过。"
-                : code === "DEVELOPMENT_TURN_BUDGET"
-                  ? "本次制作请求已达到操作或时间预算。保留草稿和当前运行版，说明已完成与未完成部分，等待用户明确的新要求；不要自动新开请求继续。"
-                  : code === "DEVELOPMENT_REPAIR_BUDGET"
-                    ? "本轮已检查三个候选（初次制作加两次修复）。保留草稿和当前可用版，说明最后的准确诊断；不要继续循环提交或重放动作。"
-                    : code === "DEVELOPMENT_BUSY"
+                ? "本次制作请求的操作记录无法核对，已停止推进。保留草稿和当前运行版，先核对状态；不要自动重试或新开轮次绕过。"
+                : code === "DEVELOPMENT_BUSY"
                       ? "当前制作检查仍在进行。等待在途操作结束后用 list/read 核对最新 revision，再继续原请求；不要并发或循环提交。"
                       : args.action.startsWith("project_") && [
                           "AUTHORING_PLUGIN_MANIFEST_REQUIRED", "AUTHORING_INSTALL_PURE_SOURCE_REQUIRED",
@@ -1028,7 +1016,7 @@ export function createModAuthoringTool(input: {
         "For independent Mods, use catalog(query:'tool.call') or catalog(query:'ui.resolve') to read exact real event/SDK signatures and referenced types. Prefer targeted discovery for the needed feature; full catalogSection:types remains paged for additional declarations. Query does not discover or authorize installed actions. " +
         "Keep author source in native draft files: edit scaffold/read result.files and submit the complete files directly. Do not write temporary workspace files or run commands merely to prepare an independent Mod. A scaffold is a placeholder, not the requested implementation. For two cooperating Mods, discover the public provider registration with catalog(query:'platform.action',catalogSection:'events') and the consumer call with catalog(query:'platform.act',catalogSection:'sdk'); provider uses on.capability and consumer calls its declared contract. Prefer this explicit interface over recreating the provider algorithm or inventing tool names. Author-created source is not proof that both providers are active; verify the selected combination after native confirmation. " +
         "A conversation has one development trial slot. When the user requests multiple independently reusable Mods, scaffold(kind:'capability',id,name,instruction) provides a complete stateless public-provider package; replace its placeholder act behavior with the requested implementation, retain the descriptor and full files, save/check then request_reuse for its exact draft and end the turn for native confirmation. catalog(query:'on.capability') also resolves this exact registration; it is not a missing SDK method. After installation is confirmed, create/check/reuse the consumer against the real provider contract; compose the installed selections while preserving existing functions. Do not replace one trial with another and claim both are running, request approval for an invalid consumer, or ask the user to choose routine implementation architecture. " +
-        "For a large existing project, first read composition/source.json and only resources needed for this change. project_patch preserves every unread/omitted file: do not page through all Hooks, knowledge or workflows merely to preserve them. Compare actual retained file indexes/digests after patch/compile to verify preservation. Reuse unchanged dependencies with dependency_prepare(sourceId); do not transcribe complete templates or ask the user to choose routine implementation details. Keep the existing operation budget and prepare the native reviewable candidate within this request. " +
+        "For a large existing project, first read composition/source.json and only resources needed for this change. project_patch preserves every unread/omitted file: do not page through all Hooks, knowledge or workflows merely to preserve them. Compare actual retained file indexes/digests after patch/compile to verify preservation. Reuse unchanged dependencies with dependency_prepare(sourceId); do not transcribe complete templates or ask the user to choose routine implementation details. Continue necessary creation and repair until a native reviewable candidate is ready; there is no cumulative operation, repair-count or elapsed-time quota. Stop on user cancellation, lost authority or an unconfirmed effect. " +
         "Native composition checks can use any real authorized Function Mod public action. project_actions() or project_actions(query,cursor) discovers real installed authorized actions; query matches plugin/actionId/name by case-insensitive substring before paging, even if id or localActionId is also supplied. project_actions(id) lists only the source's already declared requirements; project_actions(id,localActionId=usedBy,cursor) evaluates actual actions against one exact declared Host input contract. To add a new capability, discover it without id or with query first; an undeclared localActionId is not a discovery query. Config never supplies missing input fields. catalog(catalogSection:project-dependencies) returns real uninstalled sourceId values. Call dependency_prepare(sourceId) to pin the complete Host-bundled source, save it with ordinary CAS, check its exact revision and prepare the existing native reuse plan in one bounded operation. Default draft id is sourceId and display name is the real plugin.name; optional id/name override draft identity/display only, optional revision/sourceDigest remain strict expectations. Existing different source or unknown reuse outcomes are never overwritten/replayed. No file transcription, hand-filled hash, install, authorization, execution or Function trial occurs. needs-approval means end this turn now and wait for original native confirmation. Returned companion text is bounded inert data: project_patch that text and composition/source.json.resources together when the project needs it; provider installation does not add project-relative files. Large companions remain indexed for catalog reads. project_read reads saved project drafts, never catalog assets. Advanced dependency_save(id,name,revision,assetPath=sourceId,sourceDigest) still saves an exact pinned source only; use check/request_reuse separately. Use catalog assetPath pages and ordinary save when deliberately editing source. After native confirmation re-read project_actions, patch the real provider and compile latest revision. on.capability implements ordinary independent validators; never invent identities, weaken checks or treat compile as execution. " +
         "For existing or large projects prefer project_patch(id,revision,sourceDigest,files?,sourcePatch?): omitted files are preserved. sourcePatch is a bounded array of strict JSON Pointer add/replace/remove/test operations targeting only composition/source.json: add /modules/- appends, replace /modules/2 replaces a middle module, add /resources/- declares a resource; value is required except remove. Up to16 operations,16KiB/value,32KiB total; no root/move/copy, unsafe keys, sparse/out-of-range array writes or implicit parent creation. It applies to an independent JSON clone and saves with files once through original CAS/schema/resource checks; a failed test or invalid patch changes no revision. Newly added Skill/workflow/fixture files and their resource declarations belong in the same atomic call. sourcePatch alone may omit files; do not also send a complete composition/source.json file. Generated files and other JSON files cannot be targeted by sourcePatch. It saves one immutable revision; it does not compile, approve, install or execute. project_read may return readMode:file-index; use assetPath and cursor/nextCursor only for needed exact file pages, then patch using the real sourceDigest/revision. Never treat an index/page as a complete snapshot for project_save. " +
         "Project delivery: project_scaffold/read -> project_save complete snapshot -> project_compile using the returned revision -> inspect doctor/test results -> project_request_trial(id,latestRevision,goal from the user's existing task). After the exact native candidate is prepared, end the turn and wait for user confirmation. project_dev is OPTIONAL development-directory preparation only, NOT a trial candidate or delivery completion; it never substitutes for project_request_trial. If goal is missing, ask the user instead of inventing it. " +

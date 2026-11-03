@@ -3,7 +3,6 @@ import { z } from "zod"
 import { getCreatorBusinessService } from "../../mods/devtools/creator-business"
 import { getModDevelopmentService } from "../../mods/devtools/development-service"
 import { getLocalThreadRunLease, captureLocalThreadRunLease } from "../thread-run-lease"
-import { CREATOR_REQUEST_LIMITS } from "../../mods/devtools/creator-request-budget"
 import {
   BusinessDraftLimitError,
   businessDraftLimitHint
@@ -88,8 +87,6 @@ export function createModBusinessTool(input: {
     owns = captureLocalThreadRunLease(input.threadId)
   const development = getModDevelopmentService()
   const creator = development?.captureCreatorMode?.(input.threadId, input.workspace)
-  const started = performance.now()
-  let operations = 0
   return tool(
     async (args) => {
       try {
@@ -106,11 +103,6 @@ export function createModBusinessTool(input: {
         }
         assertTurn()
         development!.claimAuthoringBudget(input.threadId, lease!.runId, "operation")
-        if (
-          ++operations > CREATOR_REQUEST_LIMITS.operations ||
-          performance.now() - started > CREATOR_REQUEST_LIMITS.durationMs
-        )
-          throw Error("DEVELOPMENT_TURN_BUDGET")
         const service = getCreatorBusinessService()
         if (!service) throw Error("BUSINESS_CREATOR_UNAVAILABLE")
         let result: unknown
@@ -536,7 +528,7 @@ export function createModBusinessTool(input: {
           ...(error instanceof BusinessDraftLimitError
             ? { limit: error.reason, recovery: businessDraftLimitHint(error.reason) }
             : {}),
-          hint: "保留当前插件和草稿。用 catalog/inspect 核对真实来源；preview 必须解决依赖与知识诊断，不得删原 Hooks、知识入口或产物校验来通过。request_review 只准备原生确认卡，不安装、不授权、不执行业务。来源/版本变化需重新预览；unknown 停止并核对原事务，不自动重放。预算耗尽不新开请求绕过。"
+          hint: "保留当前插件和草稿。用 catalog/inspect 核对真实来源；preview 必须解决依赖与知识诊断，不得删原 Hooks、知识入口或产物校验来通过。request_review 只准备原生确认卡，不安装、不授权、不执行业务。来源/版本变化需重新预览；unknown 停止并核对原事务，不自动重放。没有累计操作次数或总时长配额；持续完成必要创作，遵守用户停止和原权限边界。"
         })
       }
     },

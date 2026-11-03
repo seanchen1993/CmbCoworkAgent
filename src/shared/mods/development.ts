@@ -256,7 +256,7 @@ export interface DevelopmentStatus {
   /** Observations linked to the original chat run; never restores approval or execution. */
   request?:
     | { runId: string; startedAt: number; operations: number; candidates: number; groupId?: string
-        model?: { attemptLimit: number; attempts: number; usageReportedAttempts: number
+        model?: { attemptLimit: number | null; attempts: number; usageReportedAttempts: number
           usageUnknownAttempts: number; usagePendingAttempts: number; historicalUsageUnknown: boolean
           coverage: "complete" | "partial"; inputTokens?: number; outputTokens?: number; traceIds: string[]
           traceCoverage: "complete" | "partial"; recordedModelCalls?: number; recordedToolCalls?: number

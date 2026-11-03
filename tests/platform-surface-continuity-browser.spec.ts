@@ -268,17 +268,16 @@ async function main() {
       .getByText("notes/invalid: 页面声明不可用", { exact: true })
       .waitFor()
     await page.evaluate("window.surfaceFixture.badDirectory(false);window.surfaceFixture.empty()")
-    await page.getByRole("button", { name: "查找可用插件界面", exact: true }).click()
-    await page
-      .getByRole("alert")
-      .filter({ hasText: "没有找到独立界面，可继续使用原聊天中的命令或规则。" })
-      .waitFor()
+    await page.locator("[data-platform-workspace]").waitFor({ state: "detached" })
+    await page.getByRole("button", { name: "插件使用入口", exact: true }).click()
+    await page.getByRole("button", { name: "查找插件界面", exact: true }).click()
+    await page.getByText("此版本没有独立界面，可按上方使用方式在聊天中触发命令或规则。", { exact: true }).waitFor()
     assert.equal(
       await page.getByRole("textbox", { name: "原聊天草稿" }).inputValue(),
       "保留未发送内容"
     )
     pass(
-      "empty prepared catalogue and invalid declarations stay visible with a real return/configuration path"
+      "invalid declarations retain recovery; empty catalogues stay quiet in chat and are explained in plugin settings"
     )
     assert.deepEqual(errors, [])
     await page.screenshot({ path: resolve(output, "continuity.png"), fullPage: true })

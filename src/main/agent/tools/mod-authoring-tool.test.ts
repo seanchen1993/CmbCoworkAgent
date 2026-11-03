@@ -1176,7 +1176,7 @@ describe("conversation Mod tool", () => {
     })
     expect(list).toHaveBeenCalledTimes(1)
   })
-  it("retains the request repair budget when tools are rebuilt during the same native run", async () => {
+  it("retains repair accounting without stopping at three candidates when tools are rebuilt", async () => {
     const service = fixture()
     const ledger = new CreatorRequestBudgets()
     Object.assign(service, {
@@ -1191,11 +1191,11 @@ describe("conversation Mod tool", () => {
       ).toBe(true)
     expect(
       JSON.parse(await createModAuthoringTool({ threadId, workspace }).invoke(args))
-    ).toMatchObject({ ok: false, error: "DEVELOPMENT_REPAIR_BUDGET" })
-    expect(service.submit).toHaveBeenCalledTimes(3)
-    expect(ledger.latest(workspace)).toMatchObject({ runId: "first", candidates: 3, operations: 4 })
+    ).toMatchObject({ ok: true })
+    expect(service.submit).toHaveBeenCalledTimes(4)
+    expect(ledger.latest(workspace)).toMatchObject({ runId: "first", candidates: 4, operations: 4 })
   })
-  it("returns exact startup diagnostics and bounds same-turn repair to two attempts", async () => {
+  it("returns exact startup diagnostics and permits further repair while preserving the previous version", async () => {
     const service = fixture()
     const files = authoringFiles(
       'export const register = (on) => { on("session.start", async ($) => {}) }'
@@ -1216,15 +1216,15 @@ describe("conversation Mod tool", () => {
       diagnostics: [
         { stage: "candidate-startup", event: "session.start", file: "mods/main.ts", line: 1 }
       ],
-      repair: { attempt: 1, maxAttempts: 3, remaining: 2, canRetry: true }
+      repair: { attempt: 1, maxAttempts: null, remaining: null, canRetry: true }
     })
     await author.invoke(args)
-    expect(JSON.parse(await author.invoke(args))).toMatchObject({ repair: { canRetry: false } })
+    expect(JSON.parse(await author.invoke(args))).toMatchObject({ repair: { canRetry: true } })
     expect(JSON.parse(await author.invoke(args))).toMatchObject({
       ok: false,
-      error: "DEVELOPMENT_REPAIR_BUDGET"
+      error: "MODS_RETURN_UNDEFINED"
     })
-    expect(service.submit).toHaveBeenCalledTimes(3)
+    expect(service.submit).toHaveBeenCalledTimes(4)
     expect(service.requestReuse).not.toHaveBeenCalled()
   })
   it.each(["submit", "request_trial", "resume_trial"] as const)(
@@ -1338,11 +1338,11 @@ describe("conversation Mod tool", () => {
     ).toMatchObject({
       ok: false,
       error: "MODS_RUNTIME_LOST",
-      repair: { remaining: 2, canRetry: false }
+      repair: { remaining: null, canRetry: false }
     })
     expect(service.submit).toHaveBeenCalledTimes(1)
   })
-  it("still charges genuine failed candidates and cannot reset an exhausted budget with missing inputs", async () => {
+  it("counts genuine failed candidates and missing-input checks without stopping repair", async () => {
     const service = fixture()
     const ledger = new CreatorRequestBudgets()
     Object.assign(service, {
@@ -1361,7 +1361,7 @@ describe("conversation Mod tool", () => {
     for (let attempt = 1; attempt <= 3; attempt++) {
       expect(
         JSON.parse(await createModAuthoringTool({ threadId, workspace }).invoke(args))
-      ).toMatchObject({ ok: false, repair: { attempt, canRetry: attempt < 3 } })
+      ).toMatchObject({ ok: false, repair: { attempt, canRetry: true } })
     }
     const author = createModAuthoringTool({ threadId, workspace })
     expect(JSON.parse(await author.invoke({ ...args, revision: undefined }))).toMatchObject({
@@ -1370,10 +1370,10 @@ describe("conversation Mod tool", () => {
     })
     expect(JSON.parse(await author.invoke(args))).toMatchObject({
       ok: false,
-      error: "DEVELOPMENT_REPAIR_BUDGET"
+      error: "MODS_RETURN_UNDEFINED"
     })
-    expect(ledger.latest(workspace)).toMatchObject({ candidates: 3, operations: 5 })
-    expect(service.submit).toHaveBeenCalledTimes(3)
+    expect(ledger.latest(workspace)).toMatchObject({ candidates: 4, operations: 5 })
+    expect(service.submit).toHaveBeenCalledTimes(4)
   })
   it("names missing scaffold fields and preserves a host error code without exposing its message", async () => {
     const service = fixture()
@@ -1588,17 +1588,16 @@ describe("conversation Mod tool", () => {
     expect(JSON.parse(await author.invoke({ action: "list" }))).toMatchObject({ ok: true })
     expect(service.status).toHaveBeenCalledWith(threadId)
   })
-  it("bounds attempts and provides no model approval or installation action", async () => {
+  it("allows long authoring sessions but provides no model approval or installation action", async () => {
     const service = fixture()
     const author = createModAuthoringTool({ threadId, workspace })
     expect(author.schema.safeParse({ action: "approve" }).success).toBe(false)
     expect(author.schema.safeParse({ action: "set_enabled" }).success).toBe(false)
-    for (let index = 0; index < 32; index++) await author.invoke({ action: "list" })
+    for (let index = 0; index < 100; index++) await author.invoke({ action: "list" })
     expect(JSON.parse(await author.invoke({ action: "list" }))).toMatchObject({
-      ok: false,
-      error: "DEVELOPMENT_TURN_BUDGET"
+      ok: true
     })
-    expect(service.status).toHaveBeenCalledTimes(32)
+    expect(service.status).toHaveBeenCalledTimes(101)
   })
   it("rejects cancellation and a stale result after asynchronous analysis", async () => {
     const service = fixture()

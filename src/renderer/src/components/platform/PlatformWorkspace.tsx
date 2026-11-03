@@ -118,7 +118,6 @@ export function PlatformWorkspace({
   const [error, setError] = useState("")
   const [showBehaviors, setShowBehaviors] = useState(false)
   const [cleanup, setCleanup] = useState<{ threadId: string; address: PlatformSurfaceAddress }>()
-  const [prepared, setPrepared] = useState(false)
   const request = useRef(0)
   const invalidateRequests = useCallback(() => {
     request.current++
@@ -167,7 +166,6 @@ export function PlatformWorkspace({
     setError("")
     setFrame(undefined)
     setShowBehaviors(false)
-    setPrepared(false)
     setCleanup(undefined)
   }, [threadId, scopeKey, requestedActive])
   useEffect(() => {
@@ -178,7 +176,7 @@ export function PlatformWorkspace({
     const ticket = ++request.current
     try {
       const [surfaces, behavior] = await Promise.all([
-        api.platformSurfaceList(threadId),
+        api.platformSurfaceList(threadId, { residentOnly: true }),
         api.platformBehaviorList(threadId)
       ])
       if (!current() || ticket !== request.current) return
@@ -211,8 +209,11 @@ export function PlatformWorkspace({
       })()
     }
     const stop = window.api.mods.onCardsChanged((event) => {
-      if (event.threadId === threadId && (event.scope === "panes" || event.scope === undefined))
-        schedule()
+      if (event.threadId !== threadId) return
+      // Drawings change far more often than capability declarations. A closed page needs
+      // no work; an open page reads its drawing without rescanning plugin sources.
+      if (event.scope === "panes") void refreshFrame.current()
+      else if (event.scope === undefined) schedule()
     })
     const platformStop = window.api.mods.onPlatformChanged?.((event) => {
       if (event.threadId === threadId) schedule()
@@ -409,7 +410,7 @@ export function PlatformWorkspace({
           await assertSurfaceDevelopmentCurrent(navigation, navigation.developmentComponentId,
             navigation.compiledDigest, navigation.developmentRevision)
         if (!current() || !surfaceNavigationScopeCurrent(navigation)) return
-        const value = await api.platformSurfaceList(threadId)
+        const value = await api.platformSurfaceList(threadId, { residentOnly: true })
         if (!current() || !surfaceNavigationScopeCurrent(navigation)) return
         const entry = exactSurfaceEntries(value, navigation).find(row => row.key === navigation.entryKey)
         if (!entry) throw Error("此插件的界面或许可已变化，请回使用入口重新核对。")
@@ -480,8 +481,8 @@ export function PlatformWorkspace({
   }
   const directoryErrors = [...(rows?.errors ?? []), ...(policy?.errors ?? [])
     .filter(message => !message.startsWith("能力尚未登记；"))]
-  if (!active || (!rows?.entries.length && !rows?.canPrepare && !policy?.bindings.length &&
-    !directoryErrors.length && !prepared && !error)) return null
+  if (!active || (!rows?.entries.length && !policy?.bindings.length &&
+    !directoryErrors.length && !error)) return null
   const button = (entry: PlatformSurfaceEntry) => (
     <span key={entry.key} className="inline-flex shrink-0 items-center">
       <button
@@ -515,16 +516,6 @@ export function PlatformWorkspace({
         aria-label="扩展工作区"
         className="pointer-events-auto absolute left-2 right-2 top-1 flex items-center gap-1 overflow-x-auto whitespace-nowrap rounded border bg-background/95 p-1 shadow-sm"
       >
-        {rows?.canPrepare && api.platformSurfacePrepare && (
-          <button className="rounded px-2 py-1 text-sm hover:bg-muted disabled:opacity-50"
-            disabled={busy} onClick={() => {
-              setBusy(true)
-              void api.platformSurfacePrepare!(threadId).then(async () => {
-                if (current()) { setPrepared(true); await refresh() }
-              }, () => { if (current()) setError("扩展视图未准备好，请核对插件状态") })
-                .finally(() => { if (current()) setBusy(false) })
-            }}>查找可用插件界面</button>
-        )}
         {rows?.entries
           .filter((entry) =>
             ["page", "navigation", "toolbar", "settings"].includes(entry.placement)
@@ -555,13 +546,13 @@ export function PlatformWorkspace({
           {rows.entries.filter((entry) => entry.placement === "sidebar").map(button)}
         </aside>
       )}
-      {(error || directoryErrors.length > 0 || (prepared && !rows?.entries.length)) && (
+      {(error || directoryErrors.length > 0) && (
         <div
           role="alert"
           className="pointer-events-auto absolute left-2 top-12 flex gap-2 rounded border bg-background p-2 text-sm"
         >
           <div>
-            {error || (directoryErrors.length ? "插件界面尚未就绪" : "没有找到独立界面，可继续使用原聊天中的命令或规则。")}
+            {error || "插件界面尚未就绪"}
             {directoryErrors.map((message, index) => <p key={index}>{message}</p>)}
             <button className="mr-2 underline" onClick={() => void refresh()}>重新核对</button>
             <button className="mr-2 underline" onClick={() => {

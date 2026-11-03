@@ -61,7 +61,7 @@ function fixture() {
   }
 }
 
-it("bounds real authoring tools across reconstruction using the original service and host goal", async () => {
+it("continues real authoring tools across reconstruction while preserving original service and host goal", async () => {
   const f = fixture()
   const service = f.make()
   await service.setEnabled(threadId, workspace, true)
@@ -80,22 +80,20 @@ it("bounds real authoring tools across reconstruction using the original service
     const result = await createModAuthoringTool({ threadId, workspace }).invoke(args)
     expect(JSON.parse(result).ok).toBe(true)
   }
-  const exhausted = await createModAuthoringTool({ threadId, workspace }).invoke(args)
-  expect(JSON.parse(exhausted)).toMatchObject({ ok: false, error: "DEVELOPMENT_REPAIR_BUDGET" })
-  expect(request).toHaveBeenCalledTimes(3)
+  const continued = await createModAuthoringTool({ threadId, workspace }).invoke(args)
+  expect(JSON.parse(continued)).toMatchObject({ ok: true })
+  expect(request).toHaveBeenCalledTimes(4)
   const restored = f.make()
   await restored.setEnabled(threadId, workspace, true)
   expect(restored.status(threadId).request).toMatchObject({
     runId: "native-run",
     groupId: "goal:original",
-    candidates: 3,
+    candidates: 4,
     operations: 4
   })
   expect(restored.status(threadId).request).not.toHaveProperty("nativeRuns")
   f.setGoal(undefined)
-  expect(() => restored.claimAuthoringBudget(threadId, "native-run", "candidate")).toThrow(
-    "DEVELOPMENT_REPAIR_BUDGET"
-  )
+  expect(restored.claimAuthoringBudget(threadId, "native-run", "candidate").candidates).toBe(5)
   expect(f.runtime.approveDevelopment).not.toHaveBeenCalled()
   expect(f.runtime.stageDevelopment).not.toHaveBeenCalled()
 })

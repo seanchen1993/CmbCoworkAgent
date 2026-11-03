@@ -4,6 +4,7 @@ import { functionSiteErrorCode } from "./function-site-recovery"
 import type { FunctionPresentationSnapshot } from "../../../shared/mods/v2/presentation"
 import {
   desktopChatRegions,
+  collectDesktopPaneNodes,
   desktopElementPresented,
   readDesktopPaneDrawings
 } from "./function-desktop"
@@ -214,14 +215,9 @@ export class FunctionPresentation {
     const root = this.root()
     const present = root?.dataset.chatThreadId === this.thread && desktopElementPresented(root)
     const regions = present && root ? desktopChatRegions(root, this.thread) : []
-    const drawings = readDesktopPaneDrawings(regions).map((row) => {
-      const node = regions
-        .flatMap((region) => [...region.querySelectorAll<HTMLElement>("[data-function-pane-key]")])
-        .find(
-          (node) =>
-            node.dataset.functionPaneKey === row.key &&
-            node.dataset.functionPaneGeneration === row.generation
-        )
+    const paneNodes = collectDesktopPaneNodes(regions)
+    const drawings = readDesktopPaneDrawings(regions, paneNodes).map((row, index) => {
+      const node = paneNodes[index]
       const shown = desktopElementPresented(node ?? null)
       return { ...row, isShown: shown, isFocused: shown && row.isFocused }
     })
