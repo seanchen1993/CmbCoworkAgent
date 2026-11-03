@@ -74,6 +74,7 @@ async function fixture() {
       publisher.mockRestore()
       if (dirname(resolve(root)) !== resolve(tmpdir()) ||
         !basename(root).startsWith("mods-attachment-publication-"))
+        // eslint-disable-next-line no-unsafe-finally -- Fixture cleanup must report an unsafe path or unsettled resource instead of silently continuing.
         throw Error("Unexpected attachment fixture cleanup path")
       rmSync(root, { recursive: true, force: true })
     }

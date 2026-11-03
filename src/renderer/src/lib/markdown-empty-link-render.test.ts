@@ -42,6 +42,7 @@ describe("StreamingMarkdown 空链接渲染", () => {
   it("无反引号的工作区绝对路径链接仍可进入文件预览", () => {
     threadState.workspacePath = "/workspace"
     const html = renderToStaticMarkup(
+      // eslint-disable-next-line react/no-children-prop -- The regression explicitly supplies the native renderer children prop.
       createElement(
         StreamingMarkdown,
         { threadId: "thread-preview", children: "查看 [index.ts](/workspace/src/index.ts:12)" }
@@ -56,6 +57,7 @@ describe("StreamingMarkdown 空链接渲染", () => {
   it("线程消息保留 Windows 盘符链接，交给预览链接组件解析", () => {
     threadState.workspacePath = "C:/workspace"
     const html = renderToStaticMarkup(
+      // eslint-disable-next-line react/no-children-prop -- The regression explicitly supplies the native renderer children prop.
       createElement(
         StreamingMarkdown,
         {

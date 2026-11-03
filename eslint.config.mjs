@@ -21,6 +21,9 @@ export default defineConfig(
       "output/**",
       // Byte-identical official compatibility fixtures; provenance hashes guard these sources.
       "tests/fixtures/mods-upstream/**",
+      "resources/mods/community-originals/**",
+      // Generated collector dependency: verified byte-for-byte by its preparation/check scripts.
+      "resources/native-compositions/autobiz-lean/providers/knowledge/mods/frontmatter.cjs",
       // Original business reference files are checked by provenance, not rewritten by lint.
       "tests/fixtures/native-compositions/legacy-reference/**",
       // Runtime conversations, generated workflow scripts, caches and traces.
@@ -53,8 +56,44 @@ export default defineConfig(
     rules: {
       ...eslintPluginReactHooks.configs.recommended.rules,
       ...eslintPluginReactRefresh.configs.vite.rules,
-      "@typescript-eslint/explicit-function-return-type": "off"
+      "@typescript-eslint/explicit-function-return-type": "off",
+      // Explicitly discarded callback parameters and rest exclusions are intentional.
+      "@typescript-eslint/no-unused-vars": ["error", {
+        argsIgnorePattern: "^_", varsIgnorePattern: "^_", ignoreRestSiblings: true
+      }],
+      // Mixed helper/component exports fall back to full HMR invalidation; retain the warning.
+      "react-refresh/only-export-components": "warn"
     }
+  },
+  {
+    // CommonJS fixtures and launchers must keep require(), including Electron entry points.
+    files: ["**/*.cjs"],
+    rules: { "@typescript-eslint/no-require-imports": "off" }
+  },
+  {
+    files: ["**/*.test.ts", "tests/**/*.ts"],
+    rules: {
+      // Preserve the toolkit's arrow allowance; fixture object methods may also be no-ops.
+      "@typescript-eslint/no-empty-function": ["error", {
+        allow: ["arrowFunctions", "methods", "asyncMethods"]
+      }]
+    }
+  },
+  {
+    // These declarations record arbitrary original function identities, not callable APIs.
+    files: ["patches/*-native-*.d.ts"],
+    rules: { "@typescript-eslint/no-unsafe-function-type": "off" }
+  },
+  {
+    // Independently compiled guest examples use dynamic SDK contexts, not host TS interfaces.
+    // Keep typing debt visible without treating it as a platform type-checking failure.
+    files: ["resources/native-compositions/**/mods/**/*.ts"],
+    rules: { "@typescript-eslint/no-explicit-any": "warn" }
+  },
+  {
+    // These files use the sandbox JSX renderer, not React/PropTypes.
+    files: ["resources/mods/**/*.tsx", "tests/fixtures/mods-v2/**/*.tsx"],
+    rules: { "react/prop-types": "off" }
   },
   {
     // tseslint.configs.recommended above has no `files` filter, so its rules also

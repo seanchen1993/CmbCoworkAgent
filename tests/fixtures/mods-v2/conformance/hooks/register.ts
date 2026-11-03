@@ -21,9 +21,11 @@ export function register(on) {
     yield* next(e)
     return yield* next(e)
   })
+  // eslint-disable-next-line require-yield -- Conformance fixture intentionally throws before its first streamed value.
   on("turn.step", { model: "cmb-stream-throw-before" }, async function* () {
     throw Error("before-stream")
   })
+  // eslint-disable-next-line require-yield -- Conformance fixture intentionally throws before its first streamed value.
   on("turn.step", { model: "cmb-stream-catch" }, async function* () {
     throw Error("before-stream-catch")
   }).catch(async function* ($, e, next) {

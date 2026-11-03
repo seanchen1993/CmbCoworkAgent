@@ -44,6 +44,7 @@ export function SkillCreateConfirmDialog({
   const [draftContent, setDraftContent] = useState("")
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- Synchronize local draft/loading state with this external selection before its asynchronous work.
     setShowContent(false)
     setDraftContent(request?.content ?? "")
   }, [request?.requestId, request?.content])

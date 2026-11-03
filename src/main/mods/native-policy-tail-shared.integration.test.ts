@@ -187,6 +187,7 @@ afterRun?: () => Promise<void>) {
       Promise.resolve().then(() => saver.close())
     ])
     const failed = results.find(result => result.status === "rejected")
+    // eslint-disable-next-line no-unsafe-finally -- Fixture cleanup must report an unsafe path or unsettled resource instead of silently continuing.
     if (failed?.status === "rejected") throw failed.reason
   }
 }

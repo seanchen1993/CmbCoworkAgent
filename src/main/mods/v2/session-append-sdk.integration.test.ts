@@ -74,6 +74,7 @@ async function fixture(body: string, options: Partial<FunctionSessionHost> = {},
             type: args.message.type, content: args.message.content,
             ...(args.message.type === "user" ? { role: "user", isMeta: true } : {}) } }
         let ticket: FunctionSessionAppendTicket
+        // eslint-disable-next-line prefer-const -- Capture is registered before initialization; preserve the two-phase lifetime and cleanup behavior.
         ticket = new FunctionSessionAppendTicket({ kind: "sdk", input, target,
           source: mutation, signal, assertCurrent: guard, protect: async value => value,
           prepare: async safe => ({

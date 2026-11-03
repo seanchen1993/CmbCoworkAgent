@@ -513,6 +513,7 @@ describe("actual native SSE minimum source/encoding boundary", () => {
         finally {
           for (let index = 0; index < methods.length; index++) {
             const descriptor = descriptors[index]
+            // eslint-disable-next-line no-unsafe-finally -- Fixture cleanup must report an unsafe path or unsettled resource instead of silently continuing.
             if (!descriptor) throw Error("ACTUAL_WEAKSET_DESCRIPTOR_REQUIRED")
             Object.defineProperty(WeakSet.prototype, methods[index], descriptor)
           }

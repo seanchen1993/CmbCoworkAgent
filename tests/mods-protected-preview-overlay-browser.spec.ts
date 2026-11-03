@@ -88,6 +88,36 @@ async function main() {
   page.setDefaultTimeout(10000)
   const pass = (label: string) => { checks.push(label); console.log("PASS " + label) }
   try {
+    await mount(page, `
+      import {Suspense,startTransition} from 'react';
+      import {ProtectedFunctionPreview} from ${file("components/panels/ProtectedFunctionPreview.tsx")};
+      {
+        const invalidated=new Set(),rendered=[],closed=[],pending=new Promise(()=>{});
+        window.api.mods.markdownPreview=async(thread,receipt)=>({receipt,title:'Committed preview',text:'COMMITTED_SAFE_PREVIEW'});
+        window.api.mods.markdownPreviewClose=async()=>{};
+        window.api.mods.onMarkdownPreviewInvalidated=fn=>{invalidated.add(fn);return()=>invalidated.delete(fn)};
+        function Suspend({version}){rendered.push(version);if(version===1)throw pending;return null}
+        function Fixture(){
+          const [version,setVersion]=useState(0);
+          window.concurrentPreview={rendered,closed,suspend:()=>startTransition(()=>setVersion(1)),
+            invalidate:()=>{for(const fn of invalidated)fn({threadId:'thread',receipt:'receipt-0'})}};
+          return <Suspense fallback={<p>Pending new view</p>}>
+            <ProtectedFunctionPreview request={{threadId:'thread',preview:{receipt:'receipt-'+version}}}
+              onClose={()=>closed.push(version)}/><Suspend version={version}/>
+          </Suspense>;
+        }
+        host.render(<Fixture/>);
+      }
+    `)
+    await page.getByText("COMMITTED_SAFE_PREVIEW", { exact: true }).waitFor()
+    await page.evaluate("window.concurrentPreview.suspend()")
+    await page.waitForFunction("window.concurrentPreview.rendered.includes(1)")
+    assert(await page.getByText("COMMITTED_SAFE_PREVIEW", { exact: true }).isVisible())
+    await page.evaluate("window.concurrentPreview.invalidate()")
+    await page.waitForFunction("window.concurrentPreview.closed.length===1")
+    assert.deepEqual(await page.evaluate("window.concurrentPreview.closed"), [0])
+    pass("a suspended replacement render cannot redirect invalidation away from the committed preview")
+
     await fixture(page)
     await page.getByRole("link", { name: "Workspace report", exact: true }).click()
     await page.getByText("SAFE_NATIVE_OVERLAY_SNAPSHOT", { exact: true }).waitFor()

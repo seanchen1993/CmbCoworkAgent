@@ -119,6 +119,7 @@ export function ScheduledPanel(): React.JSX.Element {
   }, [])
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- Synchronize local draft/loading state with this external selection before its asynchronous work.
     loadTasks()
   }, [loadTasks])
 

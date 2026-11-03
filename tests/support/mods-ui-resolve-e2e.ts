@@ -637,6 +637,7 @@ export async function verifyUiResolve(
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()))
     writeFileSync(join(artifacts, "ui-resolve-evidence.json"), JSON.stringify(evidence, null, 2))
     await page.evaluate(() => window.api.models.setDefault("custom:mods-model-fixture")).catch(() => {})
+    // eslint-disable-next-line no-unsafe-finally -- Fixture cleanup must report an unsafe path or unsettled resource instead of silently continuing.
     if (observerFailure && !evidence.error) throw observerFailure
   }
 }

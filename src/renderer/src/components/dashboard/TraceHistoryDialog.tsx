@@ -962,6 +962,7 @@ export function TraceExplorer({
     if (!selectedThreadId || selectedThreadId === "unknown-thread") return
     if (threadTraceCache[selectedThreadId]) return
     let cancelled = false
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- Synchronize local draft/loading state with this external selection before its asynchronous work.
     setThreadLoadingId(selectedThreadId)
     setThreadLoadErrorId((current) => (current === selectedThreadId ? null : current))
     void effectiveLoadThreadTraces(selectedThreadId)

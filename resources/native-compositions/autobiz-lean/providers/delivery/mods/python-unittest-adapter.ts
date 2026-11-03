@@ -172,7 +172,7 @@ export function preparePythonTest(input: EvidenceRecord) {
       (path) =>
         typeof path === "string" &&
         path.length <= 160 &&
-        /^(?!\.)(?!.*(?:^|\/)\.\.?\/)[a-zA-Z0-9_.\/-]+$/.test(path) &&
+        /^(?!\.)(?!.*(?:^|\/)\.\.?\/)[a-zA-Z0-9_./-]+$/.test(path) &&
         !path
           .split("/")
           .some(

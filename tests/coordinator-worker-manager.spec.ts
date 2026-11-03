@@ -3642,6 +3642,7 @@ async function testRestoreHydratedRawTextRejectsSymlinkOutsideWorkspace(): Promi
               dirname(target) !== resolve(tmpdir()) ||
               !basename(target).startsWith("coordinator-worker-outside-")
             )
+              // eslint-disable-next-line no-unsafe-finally -- Fixture cleanup must report an unsafe path or unsettled resource instead of silently continuing.
               throw new Error("Outside fixture cleanup must stay inside its own temporary directory")
             await rm(target, { recursive: true, force: true })
           } catch (error) {
@@ -3741,6 +3742,7 @@ async function testReadWorkerResultRejectsSymlinkOutsideWorkspace(): Promise<voi
               dirname(target) !== resolve(tmpdir()) ||
               !basename(target).startsWith("coordinator-worker-read-outside-")
             )
+              // eslint-disable-next-line no-unsafe-finally -- Fixture cleanup must report an unsafe path or unsettled resource instead of silently continuing.
               throw new Error("Outside fixture cleanup must stay inside its own temporary directory")
             await rm(target, { recursive: true, force: true })
           } catch (error) {

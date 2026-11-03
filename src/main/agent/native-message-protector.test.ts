@@ -243,6 +243,7 @@ describe("application-owned complete native protection", () => {
   it.each(["close", "safe-body"])("rejects source-guard synchronous %s before policy certification",
     async change => {
       const f = fixture()
+      // eslint-disable-next-line prefer-const -- Capture is registered before initialization; preserve the two-phase lifetime and cleanup behavior.
       let effect: (() => void) | undefined
       const original = f.admission.assertCurrent
       f.admission.assertCurrent = () => { original(); effect?.() }

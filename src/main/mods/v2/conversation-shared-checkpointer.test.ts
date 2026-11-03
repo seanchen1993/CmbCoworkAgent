@@ -51,6 +51,7 @@ function fixture() {
       agentId: `mod-task:${randomUUID()}`, turnId: randomUUID() }, signal, parent.authority)
     let scope!: FunctionConversationSharedCheckpointScope
     let admittedNamespace: string | undefined
+    // eslint-disable-next-line prefer-const -- Capture is registered before initialization; preserve the two-phase lifetime and cleanup behavior.
     scope = new FunctionConversationSharedCheckpointScope({ saver, authority: child.authority,
       parentConfig: config, parentGraphNamespace: "", signal,
       assertCurrent: () => { onCurrent(); child.authority.assertLive() },

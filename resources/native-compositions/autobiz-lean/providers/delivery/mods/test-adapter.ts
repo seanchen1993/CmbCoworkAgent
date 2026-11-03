@@ -34,7 +34,7 @@ export function prepareTest(input: any) {
   const paths = (value: any, max: any, tests: any) => Array.isArray(value) && value.length > 0 &&
     value.length <= max && new Set(value).size === value.length && value.every((path: any) =>
       typeof path === "string" && path.length <= 160 &&
-      /^(?!\.)(?!.*(?:^|\/)\.\.?\/)[a-zA-Z0-9_.\/-]+$/.test(path) &&
+      /^(?!\.)(?!.*(?:^|\/)\.\.?\/)[a-zA-Z0-9_./-]+$/.test(path) &&
       !path.split("/").some((part: any) => !part || [".", "..", ".git", ".devclaw", ".cmbcoworkagent"].includes(part)) &&
       (!tests || /\.(?:test|spec)\.(?:cjs|mjs|js)$/.test(path)))
   if (!input || Object.keys(input).sort().join("|") !== "files|subjects|timeoutMs" ||

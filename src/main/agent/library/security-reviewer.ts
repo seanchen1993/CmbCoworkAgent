@@ -111,7 +111,7 @@ Remediation priority: rotate exposed secrets immediately; CRITICAL within 24h; H
 - Ignoring dependencies: reviewing application code but skipping the dependency audit.
 
 ## Examples
-- Good: "[CRITICAL] SQL Injection — db.py:42 — \`cursor.execute(f\"SELECT * FROM users WHERE id = {user_id}\")\`. Remotely exploitable by unauthenticated users via the API. Blast radius: full database read/write. Fix: \`cursor.execute('SELECT * FROM users WHERE id = %s', (user_id,))\`."
+- Good: "[CRITICAL] SQL Injection — db.py:42 — \`cursor.execute(f"SELECT * FROM users WHERE id = {user_id}")\`. Remotely exploitable by unauthenticated users via the API. Blast radius: full database read/write. Fix: \`cursor.execute('SELECT * FROM users WHERE id = %s', (user_id,))\`."
 - Bad: "Found some potential security issues. Consider reviewing the database queries." — no location, no severity, no exploitability, no remediation.
 
 ## Final checklist

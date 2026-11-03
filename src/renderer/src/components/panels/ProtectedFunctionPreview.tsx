@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react"
+import { useEffect, useLayoutEffect, useRef, useState } from "react"
 import { FileText, X } from "lucide-react"
 import type { FunctionMarkdownProtectedPreview } from "../../../../shared/mods/v2/markdown-links"
 import type { ProtectedFunctionPreviewRequest } from "../../lib/protected-function-preview"
@@ -14,15 +14,17 @@ export function ProtectedFunctionPreview({ request, onClose }: {
     value: FunctionMarkdownProtectedPreview
   } | null>(null)
   const onCloseRef = useRef(onClose)
-  onCloseRef.current = onClose
   const key = `${request.threadId}:${request.preview.receipt}`
   const current = useRef(key)
-  current.current = key
+  useLayoutEffect(() => {
+    onCloseRef.current = onClose
+    current.current = key
+  }, [onClose, key])
   useEffect(() => {
     let live = true
     let closed = false
     let timeout: ReturnType<typeof setTimeout> | undefined
-    setSnapshot(null)
+    // A previous snapshot is hidden by its receipt key until the new read settles.
     const close = () => {
       if (!live || closed || current.current !== key) return
       closed = true

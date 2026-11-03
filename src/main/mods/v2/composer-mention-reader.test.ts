@@ -51,6 +51,7 @@ async function fixture(body = 'on("prompt.mention",($,e,next)=>next(e));') {
   const workspace = manager.workspaceKey(root)
   const claim = claimLocalThreadRunLease({ threadId, owner: "desktop", runId: "mention-run" })
   if (!claim.acquired) throw Error("real lease unavailable")
+  // eslint-disable-next-line prefer-const -- Capture is registered before initialization; preserve the two-phase lifetime and cleanup behavior.
   let guest: FunctionGuestRuntime | undefined, session: FunctionSession | undefined
   cleanup.push(async () => {
     controller.abort()

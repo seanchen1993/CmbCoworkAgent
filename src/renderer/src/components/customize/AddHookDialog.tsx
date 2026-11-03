@@ -2538,7 +2538,7 @@ export function AddHookDialog(props: {
                     className="w-full min-h-[64px] rounded-md border border-input bg-background px-3 py-2 text-xs font-mono"
                   />
                   <p className="text-xs text-muted-foreground">
-                    值支持 $VAR / ${"${VAR}"} 插值；仅下面"允许的 env var"列表内的变量会被解析，
+                    值支持 $VAR / ${"${VAR}"} 插值；仅下面&quot;允许的 env var&quot;列表内的变量会被解析，
                     其余替换为空串。
                   </p>
                 </div>
@@ -2692,7 +2692,7 @@ export function AddHookDialog(props: {
                     后，同一会话里，同一条 Hook
                     第一次成功执行（exit=0）后不再重复执行；不同事件、来源或 Hook ID
                     分别计算。脚本失败或超时（exit≠0）不会标记为已执行，下次匹配时仍会再试。
-                    会话结束、编辑、禁用再启用或删除该 Hook 都会立即清除"已执行"状态。
+                    会话结束、编辑、禁用再启用或删除该 Hook 都会立即清除&quot;已执行&quot;状态。
                   </p>
                   <p className="text-xs text-muted-foreground">
                     在 SubagentStop / Notification / SessionStart / SessionEnd 等 fire-and-forget
@@ -2942,8 +2942,8 @@ export function AddHookDialog(props: {
                 JSON 字段：
                 <code className="mx-1 font-mono text-foreground/85">forcedOutcome</code>
                 可选
-                <code className="mx-1 font-mono text-foreground/85">"always-revise"</code>/
-                <code className="mx-1 font-mono text-foreground/85">"always-halt"</code>
+                <code className="mx-1 font-mono text-foreground/85">&quot;always-revise&quot;</code>/
+                <code className="mx-1 font-mono text-foreground/85">&quot;always-halt&quot;</code>
                 ，省略即跟随 stdout；
                 <code className="mx-1 font-mono text-foreground/85">forcedReason</code>
                 可选，用作静态原因。

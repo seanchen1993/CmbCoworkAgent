@@ -203,6 +203,7 @@ describe("SDK selected original invoke settlement without application permission
     const original = declared.invoke
     let receiver: unknown, invokes = 0
     Object.defineProperty(declared, "invoke", { configurable: true, writable: true, value: function(this: typeof declared, ...args: Parameters<typeof original>) {
+      // eslint-disable-next-line @typescript-eslint/no-this-alias -- The fixture records the actual receiver identity for its assertion.
       receiver = this; invokes++
       return Reflect.apply(original, this, args)
     } })
@@ -431,6 +432,7 @@ describe("SDK selected original invoke settlement without application permission
     const declared = tool(async () => { effects++; return "actual" }, { name: "declared", description: "outer-close", schema: z.object({ text: z.string() }) })
     const agent = createNativeToolInvokeAgent({ model: new FakeToolCallingModel({ toolCalls: [[]] }), tools: [declared] })
     const value = { ...c.value }
+    // eslint-disable-next-line prefer-const -- Capture is registered before initialization; preserve the two-phase lifetime and cleanup behavior.
     let operation!: NativeToolInvokeOperation
     Object.defineProperty(value, "context", { enumerable: true, get() {
       drain = retain(closeAndDrainNativeToolInvokeOperation(operation))

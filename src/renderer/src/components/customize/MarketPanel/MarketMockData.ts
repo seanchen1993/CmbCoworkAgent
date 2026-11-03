@@ -130,7 +130,7 @@ const BASE_MOCK_MARKET_DATA: Record<MarketItemType, MarketItem[]> = {
       tag: "认证",
       version: "1.0.0",
       user_id: "80***99",
-      guidance: "选择其一提问：\r\***线问题扫描及修复",
+      guidance: "选择其一提问：\r***线问题扫描及修复",
       ip: "99.***.***.216",
       description: "针对六种高优先级的红***，直接按清单修复",
       filename: "hig***ix.zip",

@@ -325,6 +325,7 @@ export function deleteFunctionConversationThreadDataInTransaction(db: NativeSqli
     legacyCreatedAt: integer(input.incarnation.legacyCreatedAt) })
   const key = functionConversationProjectionIncarnation(incarnation)
   const guard = input.assertCurrent.bind(input)
+  // eslint-disable-next-line prefer-const -- Capture is registered before initialization; preserve the two-phase lifetime and cleanup behavior.
   let original: Thread | undefined
   const current = () => {
     sync(guard)

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react"
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react"
 import { functionMarkdownLinkAddressKey } from "../../../shared/mods/v2/markdown-links"
 import {
   onProtectedFunctionPreview,
@@ -11,12 +11,12 @@ export function useProtectedFunctionPreview(threadId: string | null, enabled = t
   const [request, setRequest] = useState<ProtectedFunctionPreviewRequest | null>(null)
   const latest = useRef(0)
   const current = useRef(request)
-  current.current = request
   const onRequestRef = useRef(onRequest)
-  onRequestRef.current = onRequest
+  useLayoutEffect(() => { onRequestRef.current = onRequest }, [onRequest])
   const clear = useCallback(() => { current.current = null; setRequest(null) }, [])
   useEffect(() => {
     current.current = null
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- Clear receipts when the externally selected owner/thread changes.
     setRequest(null)
     if (!enabled || !threadId) return
     const stopOpen = onProtectedFunctionPreview((next) => {

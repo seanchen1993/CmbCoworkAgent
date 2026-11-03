@@ -693,6 +693,7 @@ function NonGitAdoptionReportsPanel({
 
   useEffect(() => {
     if (!active) return
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- Synchronize local draft/loading state with this external selection before its asynchronous work.
     load(page)
   }, [active, load, page])
 

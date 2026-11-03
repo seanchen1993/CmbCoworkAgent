@@ -239,6 +239,7 @@ export function useMarkdownFilePreviewComponents({
 
   useEffect(() => {
     if (!shouldResolveInlineFiles) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- Synchronize local draft/loading state with this external selection before its asynchronous work.
       setFilePreviewIndex(EMPTY_FILE_PREVIEW_INDEX)
       return
     }

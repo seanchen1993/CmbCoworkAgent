@@ -3629,6 +3629,7 @@ export class CoordinatorWorkerManager {
         } else {
           const incarnation = parentIncarnation
           const actualWorkspace = workspace
+          // eslint-disable-next-line prefer-const -- Capture is registered before initialization; preserve the two-phase lifetime and cleanup behavior.
           let entry: WorkerModsEntry
           const view: CoordinatorWorkerModsContext = Object.freeze({
             workerThreadId: original.workerThreadId,

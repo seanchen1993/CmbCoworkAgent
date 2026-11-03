@@ -12,7 +12,7 @@
  *   npx tsx tests/skill-hook-runner.spec.ts
  */
 
-import { mkdir, mkdtemp, rm, writeFile, readFile } from "fs/promises"
+import { mkdir, mkdtemp, rm, readFile } from "fs/promises"
 import { existsSync } from "fs"
 import { tmpdir } from "os"
 import { join } from "path"

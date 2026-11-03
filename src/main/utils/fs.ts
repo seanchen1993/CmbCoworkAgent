@@ -42,7 +42,7 @@ export async function copyDirRecursive(src: string, dest: string): Promise<void>
  *   try { ... } finally { lock.release() }
  */
 export function createAsyncMutex(): { acquire: () => Promise<void>; release: () => void } {
-  let _queue: Array<() => void> = []
+  const _queue: Array<() => void> = []
   let _locked = false
 
   return {

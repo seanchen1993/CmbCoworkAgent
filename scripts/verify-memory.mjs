@@ -51,7 +51,7 @@ if (perFactFiles.length > 0) {
       const head = readFileSync(join(MEMORY_DIR, f), "utf-8").slice(0, 256)
       const m = head.match(/^type:\s*(\w+)/m)
       if (m) type = m[1]
-    } catch {}
+    } catch { /* Unreadable optional metadata keeps the fallback type. */ }
     console.log(`      [${type.padEnd(9)}] ${f.padEnd(45)} ${ageDays}d old`)
   }
   if (perFactFiles.length > 10) console.log(`      … and ${perFactFiles.length - 10} more`)

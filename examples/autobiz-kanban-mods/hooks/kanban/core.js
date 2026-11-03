@@ -3,7 +3,8 @@ import { variants } from "./workflow.generated.ts"
 export function relativePath(value, allowRoot = false) {
   if (allowRoot && value === ".") return "."
   if (typeof value !== "string" || !value || value.length > 240 ||
-    value.startsWith("/") || /[\\:*?\[\]\x00-\x1f]/.test(value) ||
+    // eslint-disable-next-line no-control-regex -- Reject control characters in user-supplied artifact paths.
+    value.startsWith("/") || /[\\:*?[\]\x00-\x1f]/.test(value) ||
     value.split("/").some(p => !p || p === "." || p === ".." || /[. ]$/.test(p) ||
       /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(p)))
     throw Error("请使用当前项目内的相对路径，不能包含 ..、绝对路径或特殊设备名。")
@@ -70,7 +71,7 @@ export function formatReport(record, stage, evidence) {
 // Deliberately small glob contract. Other upstream patterns fail explicitly.
 export function matchesArtifact(pattern, path) {
   if (pattern === "specs/**/*.md") return path.startsWith("specs/") && path.endsWith(".md")
-  if (/[*?\[]/.test(pattern)) throw Error(`未支持的产物模式：${pattern}`)
+  if (/[*?[]/.test(pattern)) throw Error(`未支持的产物模式：${pattern}`)
   relativePath(pattern)
   return pattern === path || path.startsWith(pattern + "/")
 }
