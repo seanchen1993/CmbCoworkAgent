@@ -173,6 +173,7 @@ async function main() {
         appNotifications:{list:async()=>[],onChanged:unsubscribe},
         workspace:{select:async()=>'C:/isolated/create',cancelGitPanelReads:nothing,onFilesChanged:unsubscribe},
         harnessBoard:{
+          selectProjectDirectory:async()=>({workspacePath:'C:/isolated/create',projectDir:'project',validationError:null}),
           searchEnterpriseProjects:async()=>({projects:[],total:0,hasMore:false}),
           verifyEnterpriseProjectCode:async()=>false,
           reviewProjectUse:async input=>{
@@ -525,7 +526,9 @@ async function main() {
     await page.getByRole("textbox", { name: /项目描述/ }).fill("不重放已消费的创建请求")
     await page.getByRole("textbox", { name: /系统编号/ }).fill("S1")
     await page.getByRole("textbox", { name: /系统名称/ }).fill("通用系统")
-    await page.getByRole("textbox", { name: "插件工作区根目录", exact: true }).click()
+    await page.getByRole("radiogroup", { name: /是否作为测试项目/ })
+      .getByRole("radio", { name: "否", exact: true }).check()
+    await page.getByRole("button", { name: /插件工作区.*选择文件夹/ }).click()
     await page.waitForFunction(() =>
       (window as unknown as FixtureWindow).hostSearch.reviewCalls.some(
         (request) => !request.released && request.input.workspacePath === "C:/isolated/create"
@@ -552,6 +555,7 @@ async function main() {
       (window as unknown as FixtureWindow).hostSearch.createInputs[0])
     assert.equal(createdInput.adapterId, "delayed-host")
     assert.equal(createdInput.projectCode, "P-ACCOUNT-CAS")
+    assert.equal(createdInput.isTestProject, false)
     assert.equal(createdInput.systemId, "S1")
     assert.equal(Object.hasOwn(createdInput, "goal"), false)
     assert.deepEqual(createdInput.expectedNativeTemplate, { pluginId: "delayed-host",

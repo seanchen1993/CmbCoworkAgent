@@ -254,6 +254,7 @@ export async function exerciseLiveOriginalFeatureJourney(input: OriginalFeatureJ
     projectRoot: join(journeyRoot, "projects", input.project.folder)
   }
   mkdirSync(paths.workspaceParent)
+  mkdirSync(paths.projectRoot)
   mkdirSync(paths.repositoryWorkspace)
   const artifacts = realpathSync(input.artifacts)
   const result: OriginalFeatureJourneyResult = {
@@ -377,15 +378,16 @@ export async function exerciseLiveOriginalFeatureJourney(input: OriginalFeatureJ
     await form.getByRole("textbox", { name: "项目描述", exact: true }).fill(projectDescription)
     await form.getByRole("textbox", { name: /^系统编号/ }).fill(input.project.systemId)
     await form.getByRole("textbox", { name: /^系统名称/ }).fill(input.project.systemName)
-    await choosePrivatePath(app, paths.workspaceParent, "openDirectory", "选择工作区文件夹", () =>
-      form.getByLabel("插件工作区根目录", { exact: true }).click()
+    await form.getByRole("radiogroup", { name: /是否作为测试项目/ })
+      .getByRole("radio", { name: "是", exact: true }).check()
+    await choosePrivatePath(app, paths.projectRoot, "openDirectory", "选择项目工作区文件夹", () =>
+      form.getByRole("button", { name: /插件工作区.*选择文件夹/ }).click()
     )
     await until(
-      () => form.getByLabel("插件工作区根目录", { exact: true }).inputValue(),
-      (value) => equalPath(value, paths.workspaceParent)
+      () => form.locator("div[aria-labelledby][title]").getAttribute("title"),
+      (value) => typeof value === "string" && equalPath(value, paths.projectRoot)
     )
-    await form.getByLabel("本项目产物文件夹", { exact: true }).fill(input.project.folder)
-    await form.getByRole("button", { name: "创建", exact: true }).click()
+    await form.getByRole("button", { name: /^创建(?:并授权)?$/, exact: true }).click()
     await form.waitFor({ state: "hidden", timeout: remaining() })
     const created = (await page.evaluate(() => window.api.harnessBoard.listProjects())).filter(
       (item) => !before.some((old) => old.projectId === item.projectId)
@@ -397,6 +399,7 @@ export async function exerciseLiveOriginalFeatureJourney(input: OriginalFeatureJ
     assert.equal(project.projectCode, input.project.code)
     assert.equal(project.systemId, input.project.systemId)
     assert.equal(project.systemName, input.project.systemName)
+    assert.equal(project.isTestProject, true)
     assert.equal(project.projectDir, input.project.folder)
     assert(equalPath(project.workspacePath, paths.workspaceParent))
     assert.equal(project.harnessAdapter.id, input.installed.pluginId)
@@ -418,15 +421,9 @@ export async function exerciseLiveOriginalFeatureJourney(input: OriginalFeatureJ
       await edit.getByPlaceholder("输入项目名称搜索", { exact: true }).inputValue(),
       input.project.name
     )
-    assert.equal(
-      await edit.getByLabel("本项目产物文件夹", { exact: true }).inputValue(),
-      input.project.folder
-    )
+    const displayedProjectRoot = await edit.locator("div[aria-labelledby][title]").getAttribute("title")
     assert(
-      equalPath(
-        await edit.getByLabel("插件工作区根目录", { exact: true }).inputValue(),
-        paths.workspaceParent
-      )
+      typeof displayedProjectRoot === "string" && equalPath(displayedProjectRoot, paths.projectRoot)
     )
     await edit.getByRole("button", { name: "取消", exact: true }).click()
     const detail = await page.evaluate(

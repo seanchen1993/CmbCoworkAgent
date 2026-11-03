@@ -506,6 +506,11 @@ jobs:
         timeout-minutes: 5
         run: node --import tsx tests/message-queue-plumbing.spec.ts
 
+      - name: Verify project search and creator handoff (Windows)
+        if: runner.os == 'Windows'
+        timeout-minutes: 5
+        run: node --import tsx tests/project-host-search-browser.spec.ts
+
       - name: Verify illustrated release guide navigation (Windows)
         if: runner.os == 'Windows'
         timeout-minutes: 5
