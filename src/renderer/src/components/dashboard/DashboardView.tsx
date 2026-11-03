@@ -83,6 +83,7 @@ import {
   type TimeRange
 } from "./use-dashboard"
 import { OverviewPanel } from "./panels/OverviewPanel"
+import { BotOverviewPanel } from "./panels/BotOverviewPanel"
 import { ProjectModePanel } from "./panels/ProjectModePanel"
 import { EfficiencyPanel } from "./panels/EfficiencyPanel"
 import { ProjectMetricGroupFilter } from "./panels/ProjectMetricGroupFilter"
@@ -2796,6 +2797,7 @@ export function DashboardView(): React.JSX.Element {
 
   const [exporting, setExporting] = useState(false)
   const [projectMetricRefreshKey, setProjectMetricRefreshKey] = useState(0)
+  const [botRefreshKey, setBotRefreshKey] = useState(0)
   const [activeMainTab, setActiveMainTab] = useState<DashboardMainTab>("overview")
   const [projectModeAllowed, setProjectModeAllowed] = useState(false)
   const [selectedGroupNames, setSelectedGroupNames] = useState<string[]>([])
@@ -3785,6 +3787,7 @@ export function DashboardView(): React.JSX.Element {
 
   const handleRefresh = useCallback(() => {
     refresh()
+    setBotRefreshKey((current) => current + 1)
     if (activeMainTab === "skill-eval") {
       setSkillEvalSelectedSkillKey(undefined)
       clearSkillEval()
@@ -5521,7 +5524,15 @@ export function DashboardView(): React.JSX.Element {
               {/* Advanced Features */}
               <section>
                 <h2 className="mb-3 text-sm font-semibold text-foreground">高级特性运营</h2>
-                <AdvancedFeaturesPanel data={advancedFeatures} loading={loading} />
+                <div className="space-y-4">
+                  <BotOverviewPanel
+                    range={range}
+                    granularity={granularity}
+                    organizations={selectedOrgLv1List}
+                    refreshKey={botRefreshKey}
+                  />
+                  <AdvancedFeaturesPanel data={advancedFeatures} loading={loading} />
+                </div>
               </section>
 
               {/* Model Analysis */}

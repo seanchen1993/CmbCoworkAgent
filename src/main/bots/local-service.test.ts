@@ -51,6 +51,7 @@ vi.mock("./store", () => ({
 }))
 vi.mock("./host", () => ({
   LocalBotHost: class {
+    telemetry = { due: () => [], settle: () => 0 }
     stop = fixture.stop
     memoryChanged = fixture.memoryChanged
     hasActiveRuns = fixture.hasActiveRuns

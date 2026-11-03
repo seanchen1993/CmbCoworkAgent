@@ -493,6 +493,9 @@ export class LocalBotHost {
   get imGateway() {
     return this.store.imGateway
   }
+  get telemetry() {
+    return this.store.telemetry
+  }
   /** Invalidate the group read model when authenticated binding metadata changes. */
   registerImBinding(realm: string, principal: string, binding: BotImBinding) {
     this.requireRunning()

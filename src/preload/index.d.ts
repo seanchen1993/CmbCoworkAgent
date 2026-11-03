@@ -2799,6 +2799,11 @@ interface CustomAPI {
       }
       error?: string
     }>
+    botOverview: (
+      range: { from: string; to: string },
+      granularity: "day" | "week" | "month" | "custom",
+      opts?: { upperOrgLv1?: string | string[] | null }
+    ) => Promise<{ success: boolean; data?: import("../shared/bots/telemetry").BotOverviewData; error?: string }>
     overview: (
       range: { from: string; to: string },
       granularity: "day" | "week" | "month" | "custom",

@@ -1,5 +1,6 @@
 import type { AgentRunTerminal } from "../agent/agent-run-service"
 import { BotImGatewayStore } from "./im-gateway-store"
+import { BotTelemetryStore, type BotTelemetryContext } from "./telemetry-store"
 import { BotWorkConversationJournal } from "./conversation-link-store"
 import { readWorkConversationRecord } from "./conversation-link-validation"
 import { upgradeWorkConversationSchema } from "./conversation-link-schema"
@@ -157,6 +158,7 @@ export interface BotWorkflowReference extends WorkflowRunReference {
 }
 
 export class BotStore {
+  readonly telemetry: BotTelemetryStore
   readonly conversations: BotWorkConversationJournal
   readonly mock: BotMockChannelStore
   readonly im: BotMockChannelStore
@@ -183,7 +185,8 @@ export class BotStore {
       threadId: string,
       messageIds: string[],
       work?: BotWorkItem
-    ) => Pick<BotMessageReply, "id" | "role" | "ordinal">[]
+    ) => Pick<BotMessageReply, "id" | "role" | "ordinal">[],
+    telemetryContext: () => BotTelemetryContext = () => ({ userName: "unknown", userIp: "" })
   ) {
     this.transaction(() => {
       db.run(`
@@ -473,6 +476,7 @@ export class BotStore {
     )
     this.im.setAllOffline()
     this.restoreImConversationActivities()
+    this.telemetry = new BotTelemetryStore(db, telemetryContext)
   }
 
   imConversationHistory(botId: string, id: string, before?: string) {
