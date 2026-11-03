@@ -2,6 +2,7 @@ import { BrowserWindow, powerMonitor } from "electron"
 import {
   assertIdleModelServiceHours,
   getIdleModelServiceWindow,
+  isIdleModelOutsideServiceHours,
   IDLE_MODEL_OUTSIDE_HOURS_MESSAGE
 } from "../../shared/idle-model-service-window"
 import type { RemoteModelCatalog, RemoteModelCatalogItem } from "../../shared/model-catalog"
@@ -10,6 +11,7 @@ import {
   IDLE_MODEL_MODE,
   IDLE_MODEL_MAX_TOKENS,
   IDLE_MODEL_NOTICE,
+  IDLE_MODEL_UAT_NOTICE,
   IDLE_MODEL_SAP_REQUIRED_MESSAGE,
   isModelAvailable,
   isValidSapId,
@@ -283,10 +285,12 @@ function getBaseDefinitions(): BuiltinModelDefinition[] {
     : FALLBACK_CATALOG.map((item) => normalizeDefinition(item, "fallback"))
   const environment = getStoredIdleModelUseUat()
     ? {
+        idleModelEnvironment: "uat" as const,
         baseUrl: import.meta.env.MAIN_VITE_IDLE_MODEL_UAT_BASE_URL,
         apiKey: import.meta.env.MAIN_VITE_IDLE_MODEL_UAT_API_KEY
       }
     : {
+        idleModelEnvironment: "production" as const,
         baseUrl: import.meta.env.MAIN_VITE_IDLE_MODEL_PROD_BASE_URL,
         apiKey: import.meta.env.MAIN_VITE_IDLE_MODEL_PROD_API_KEY
       }
@@ -306,7 +310,8 @@ function getBaseDefinitions(): BuiltinModelDefinition[] {
       "local"
     ),
     transport: "idle-gateway",
-    notice: IDLE_MODEL_NOTICE
+    idleModelEnvironment: environment.idleModelEnvironment,
+    notice: environment.idleModelEnvironment === "uat" ? IDLE_MODEL_UAT_NOTICE : IDLE_MODEL_NOTICE
   }
   return [...definitions.filter((item) => item.id !== IDLE_MODEL_ID), idleModel]
 }
@@ -389,7 +394,7 @@ export function getBuiltinModelConfigs(): ResolvedModelConfig[] {
           getBuiltinModelApiKey({ allowBundledFallback: base.model === BUNDLED_CREDENTIAL_MODEL }),
       ...(isIdle && !isValidSapId(getUserInfo()?.sapId)
         ? { unavailableReason: IDLE_MODEL_SAP_REQUIRED_MESSAGE }
-        : isIdle && !getIdleModelServiceWindow().available
+        : isIdleModelOutsideServiceHours(base)
           ? { unavailableReason: IDLE_MODEL_OUTSIDE_HOURS_MESSAGE }
           : {}),
       ref: `builtin:${base.id}`,

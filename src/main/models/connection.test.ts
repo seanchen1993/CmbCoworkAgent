@@ -58,6 +58,23 @@ describe("idle gateway OpenAI transport", () => {
     expect(send).toHaveBeenCalledTimes(2)
   })
 
+  it("allows a UAT connection outside hours, including subsequent tool rounds", async () => {
+    const send = vi.fn(async () => jsonReply())
+    const model = new ChatOpenAI({
+      model: "ultra",
+      apiKey: config.apiKey,
+      ...getModelClientOptions(
+        { ...config, idleModelEnvironment: "uat" },
+        { sessionId: "same-thread", fetch: send }
+      )
+    })
+    for (const hour of [7, 12, 21]) {
+      vi.setSystemTime(new Date(`2026-11-04T${String(hour).padStart(2, "0")}:00:00+08:00`))
+      await expect(model.invoke("next tool round")).resolves.toBeDefined()
+    }
+    expect(send).toHaveBeenCalledTimes(3)
+  })
+
   it("sends the UAT path, employee identity and gateway key with stable per-thread sessions", async () => {
     const requests: Array<{ url: string; headers: Headers; body: Record<string, unknown> }> = []
     const send = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
@@ -165,18 +182,21 @@ describe("idle gateway OpenAI transport", () => {
     }
   )
 
-  it("revalidates identity after an account change", async () => {
-    const send = vi.fn(async () => jsonReply())
-    const model = new ChatOpenAI({
-      model: "ultra",
-      apiKey: config.apiKey,
-      maxRetries: 0,
-      ...getModelClientOptions(config, { fetch: send })
-    })
-    state.sapId = undefined
-    await expect(model.invoke("hello")).rejects.toThrow("八位 SAP")
-    expect(send).not.toHaveBeenCalled()
-  })
+  it.each(["production", "uat"] as const)(
+    "revalidates %s identity after an account change",
+    async (idleModelEnvironment) => {
+      const send = vi.fn(async () => jsonReply())
+      const model = new ChatOpenAI({
+        model: "ultra",
+        apiKey: config.apiKey,
+        maxRetries: 0,
+        ...getModelClientOptions({ ...config, idleModelEnvironment }, { fetch: send })
+      })
+      state.sapId = undefined
+      await expect(model.invoke("hello")).rejects.toThrow("八位 SAP")
+      expect(send).not.toHaveBeenCalled()
+    }
+  )
 
   it("preserves streamed tool-call fragments and accepts the tool result on the next request", async () => {
     // The wire fixture does not need the SDK's external tokenizer vocabulary.

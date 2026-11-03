@@ -1,5 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { IDLE_MODEL_OUTSIDE_HOURS_MESSAGE } from "../../shared/idle-model-service-window"
+import {
+  assertIdleModelServiceHours,
+  IDLE_MODEL_OUTSIDE_HOURS_MESSAGE
+} from "../../shared/idle-model-service-window"
+import { isModelAvailable, isModelSelectable } from "../../shared/model-catalog"
 
 const state = vi.hoisted(() => ({
   manifest: {} as Record<string, unknown>,
@@ -148,17 +152,42 @@ describe("builtin model registry", () => {
     configureIdleModel()
     expect(getModelConfigByRef("builtin:idle-ultra")).toMatchObject({
       baseUrl: "http://idle.example.test/pattern/llm/v1",
-      apiKey: "idle-test-key"
+      apiKey: "idle-test-key",
+      idleModelEnvironment: "production"
     })
     state.idleModelUseUat = true
     expect(getModelConfigByRef("builtin:idle-ultra")).toMatchObject({
       baseUrl: "http://idle-uat.example.test/pattern/llm/v1",
       apiKey: "idle-uat-test-key",
+      idleModelEnvironment: "uat",
       model: "ultra",
       maxTokens: 128_000
     })
     state.idleModelUseUat = false
     expect(getModelConfigByRef("builtin:idle-ultra")?.apiKey).toBe("idle-test-key")
+  })
+
+  it("keeps UAT available all day and binds the exemption to the selected connection", () => {
+    configureIdleModel()
+    vi.setSystemTime(new Date("2026-11-03T12:00:00+08:00"))
+    const production = getModelConfigByRef("builtin:idle-ultra")!
+    state.idleModelUseUat = true
+    const uat = getAvailableModelConfigOrDefault("builtin:idle-ultra")!
+    expect(isModelAvailable(uat)).toBe(true)
+    expect(isModelSelectable(uat)).toBe(true)
+    expect(uat.unavailableReason).toBeUndefined()
+    expect(uat.notice).toBe("当前使用 UAT 测试环境，不受闲时服务时段限制。")
+    state.storedDefault = "builtin:idle-ultra"
+    expect(getModelByTier("premium")?.id).toBe("idle-ultra")
+    expect(() => assertIdleModelServiceHours(production)).toThrow("非服务时段")
+
+    state.idleModelUseUat = false
+    expect(() => assertIdleModelServiceHours(uat)).not.toThrow()
+    expect(() => getAvailableModelConfigOrDefault("builtin:idle-ultra")).toThrow("非服务时段")
+    state.idleModelUseUat = true
+    state.sapId = undefined
+    expect(isModelAvailable(getModelConfigByRef("builtin:idle-ultra"))).toBe(false)
+    expect(getModelConfigByRef("builtin:idle-ultra")?.unavailableReason).toContain("SAP")
   })
 
   it.each([false, true])("does not borrow credentials across environments (UAT %s)", (useUat) => {

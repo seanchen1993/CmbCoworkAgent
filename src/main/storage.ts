@@ -1618,6 +1618,8 @@ export interface CustomModelConfig {
   tier?: "premium" | "economy"
   /** Assigned by the built-in registry; never accepted from custom model storage. */
   transport?: import("../shared/model-catalog").ModelTransport
+  /** Bound to the built-in connection's URL and credential; not a user model override. */
+  idleModelEnvironment?: import("../shared/idle-model-service-window").IdleModelEnvironment
   notice?: string
   unavailableReason?: string
 }

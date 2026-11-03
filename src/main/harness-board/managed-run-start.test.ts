@@ -271,6 +271,23 @@ beforeEach(() => {
 afterEach(() => rmSync(root, { recursive: true, force: true }))
 
 describe("start managed mode with an existing session", () => {
+  it("allows managed UAT Ultra sessions outside production service hours", async () => {
+    await start({ modelSelection: "ultra" })
+    vi.useFakeTimers({ toFake: ["Date"] })
+    vi.setSystemTime(new Date("2026-11-04T12:00:00+08:00"))
+    try {
+      dependencies.modelConfig.mockReturnValue({
+        apiKey: "test-key",
+        transport: "idle-gateway",
+        idleModelEnvironment: "uat"
+      })
+      expect(getManagedRunModelOverride("origin")).toBe("builtin:idle-ultra")
+      expect(metadata().model).toBe("original-model")
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it("keeps service-hours errors non-retryable for managed Ultra sessions", async () => {
     await start({ modelSelection: "ultra" })
     vi.useFakeTimers({ toFake: ["Date"] })

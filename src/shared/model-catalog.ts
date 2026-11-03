@@ -11,6 +11,7 @@ export const IDLE_MODEL_MAX_TOKENS = 128_000
 export const IDLE_MODEL_SAP_REQUIRED_MESSAGE = "请先完善当前用户的八位 SAP 员工编号"
 export const IDLE_MODEL_NOTICE =
   "闲时服务时间：22:00–次日 07:00（北京时间）。可提前选择，非服务时段禁止调用；已发出的请求可完成，后续请求需等待下一开放时段。"
+export const IDLE_MODEL_UAT_NOTICE = "当前使用 UAT 测试环境，不受闲时服务时段限制。"
 
 export function isValidSapId(value: unknown): value is string {
   return typeof value === "string" && /^\d{8}$/.test(value.trim())

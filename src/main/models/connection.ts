@@ -2,12 +2,13 @@ import { createHash, randomUUID } from "node:crypto"
 import { IDLE_MODEL_MODE, isValidSapId, type ModelTransport } from "../../shared/model-catalog"
 import { getUserInfo } from "../storage"
 import {
-  getIdleModelServiceWindow,
+  isIdleModelOutsideServiceHours,
   IDLE_MODEL_OUTSIDE_HOURS_CODE,
-  IDLE_MODEL_OUTSIDE_HOURS_MESSAGE
+  IDLE_MODEL_OUTSIDE_HOURS_MESSAGE,
+  type IdleModelServiceHoursConfig
 } from "../../shared/idle-model-service-window"
 
-interface ModelConnectionConfig {
+interface ModelConnectionConfig extends IdleModelServiceHoursConfig {
   baseUrl: string
   apiKey?: string
   transport?: ModelTransport
@@ -22,9 +23,9 @@ const MAX_IDLE_SESSION_ID_LENGTH = 36
 
 /** A local non-retryable response: no network call, failover, or compaction recovery. */
 export function getIdleModelServiceHoursRejection(
-  config: Pick<ModelConnectionConfig, "transport">
+  config: IdleModelServiceHoursConfig
 ): Response | undefined {
-  if (config.transport !== "idle-gateway" || getIdleModelServiceWindow().available) return
+  if (!isIdleModelOutsideServiceHours(config)) return
   return new Response(
     JSON.stringify({
       error: {

@@ -9,7 +9,8 @@ const idle = vi.hoisted(() => ({
   baseUrl: "http://idle.example.test/v1",
   apiKey: "idle-key",
   transport: "idle-gateway" as const,
-  unavailableReason: "outside service hours"
+  idleModelEnvironment: undefined as "production" | "uat" | undefined,
+  unavailableReason: "outside service hours" as string | undefined
 }))
 
 const state = vi.hoisted(() => ({
@@ -83,9 +84,28 @@ import { resolveModel } from "./index"
 
 beforeEach(() => {
   state.metadata = null
+  idle.idleModelEnvironment = undefined
+  idle.unavailableReason = "outside service hours"
 })
 
 describe("routing with managed model refs", () => {
+  it("keeps a pinned UAT idle model outside production service hours", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] })
+    vi.setSystemTime(new Date("2026-11-03T12:00:00+08:00"))
+    idle.idleModelEnvironment = "uat"
+    idle.unavailableReason = undefined
+    try {
+      const result = await resolveModel({
+        taskSource: "chat",
+        routingMode: "pinned",
+        requestedModelId: idle.ref
+      })
+      expect(result.resolvedModelId).toBe(idle.ref)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it("rejects an explicitly pinned idle model outside hours instead of replacing it", async () => {
     vi.useFakeTimers({ toFake: ["Date"] })
     vi.setSystemTime(new Date("2026-11-03T07:00:00+08:00"))

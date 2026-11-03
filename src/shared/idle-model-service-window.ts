@@ -1,5 +1,12 @@
 const BEIJING_OFFSET_MS = 8 * 60 * 60 * 1000
 
+export type IdleModelEnvironment = "production" | "uat"
+
+export interface IdleModelServiceHoursConfig {
+  transport?: string
+  idleModelEnvironment?: IdleModelEnvironment
+}
+
 export const IDLE_MODEL_OUTSIDE_HOURS_MESSAGE =
   "闲时模型仅在北京时间 22:00–次日 07:00 开放，当前为非服务时段，请在开放时间重试或手动选择其他模型。"
 export const IDLE_MODEL_OUTSIDE_HOURS_CODE = "idle_model_outside_service_hours"
@@ -33,8 +40,19 @@ export class IdleModelServiceHoursError extends Error {
   }
 }
 
-export function assertIdleModelServiceHours(config: { transport?: string } | null): void {
-  if (config?.transport === "idle-gateway" && !getIdleModelServiceWindow().available) {
+export function isIdleModelOutsideServiceHours(
+  config: IdleModelServiceHoursConfig | null | undefined
+): boolean {
+  // Only an explicitly selected UAT connection is exempt; legacy configs stay restricted.
+  return (
+    config?.transport === "idle-gateway" &&
+    config.idleModelEnvironment !== "uat" &&
+    !getIdleModelServiceWindow().available
+  )
+}
+
+export function assertIdleModelServiceHours(config: IdleModelServiceHoursConfig | null): void {
+  if (isIdleModelOutsideServiceHours(config)) {
     throw new IdleModelServiceHoursError()
   }
 }
