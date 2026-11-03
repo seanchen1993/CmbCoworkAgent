@@ -2308,6 +2308,7 @@ function actualPartialDebounce(f: Awaited<ReturnType<typeof fixture>>) {
   const api = runInNewContext(code, { exports: {}, console, setTimeout, clearTimeout,
     STREAM_TRANSCRIPT_FLUSH_DEBOUNCE_MS: 250, pendingStreamTranscriptMessages: pending,
     streamTranscriptAssistantIdentities: new Map(), latestStreamAssistantCandidate: new Map(),
+    streamTranscriptAttempts: new Map(), ThreadMessageStreamAttempt: appDb.ThreadMessageStreamAttempt,
     streamAssistantRevision: 0, getMessageProviderSourceId, getMessageProviderOccurrence,
     captureLocalThreadRunLease, captureThreadIncarnation, matchesThreadIncarnation,
     getLocalThreadRunLease, captureCurrentRunMessageQueueOwner, isCurrentRunMessageQueueOwner,

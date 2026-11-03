@@ -2,13 +2,19 @@ import { mkdtempSync, readFileSync, rmSync, existsSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { runInNewContext } from "node:vm"
-import { createSourceFile, isFunctionDeclaration, ScriptTarget, transpileModule } from "typescript"
+import {
+  createSourceFile, isFunctionDeclaration, isExpressionStatement, isCallExpression,
+  isIdentifier, isStringLiteral, ScriptTarget, transpileModule
+} from "typescript"
 import AdmZip from "adm-zip"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { loadTraceExportDetails } from "./dashboard-trace-export"
 import { buildThreadTraceScopeFilters } from "./dashboard-trace-thread-list"
 import { redactTraceDetailForDisplay } from "../agent/trace/display-redaction"
 import { isDashboardEsResponseTooLarge } from "../services/dashboard-es-client"
+import {
+  excludesTestProjects, testProjectLookupScope, withProjectModeTestExclusion
+} from "./project-mode-test-projects"
 
 // Exercise the actual IPC handlers and Markdown/JSON formatters, with only ES,
 // authentication and native dialogs replaced. Electron must not boot in Vitest.
@@ -39,7 +45,12 @@ const names = [
   "normalizeUserTraceExportPayload",
   "fetchTraceExportDetails",
   "dashboardTraceSourceIncludes",
-  "appendOptionalFilter"
+  "appendOptionalFilter",
+  "registerScopedDashboardHandler",
+  "runDashboardHandlerInProjectScope",
+  "buildProjectModeOrgFilter",
+  "normalizeUpperOrgLv1List",
+  "buildUpperOrgLv1ListFilter"
 ]
 const functions = source.statements.filter(
   (node) => isFunctionDeclaration(node) && names.includes(node.name?.text ?? "")
@@ -49,9 +60,15 @@ const register = source.statements.find(
   (node) => isFunctionDeclaration(node) && node.name?.text === "registerDashboardHandlers"
 )!
 const registrations = isFunctionDeclaration(register)
-  ? register.body!.statements.filter((node) =>
-      /^_ipcMain\.handle\("dashboard:export(?:Skill|User)Traces",/.test(node.getText(source))
-    )
+  ? register.body!.statements.filter((node) => {
+      if (!isExpressionStatement(node) || !isCallExpression(node.expression)) return false
+      const call = node.expression
+      const channel = call.arguments[1]
+      return isIdentifier(call.expression) &&
+        call.expression.text === "registerScopedDashboardHandler" &&
+        channel && isStringLiteral(channel) &&
+        ["dashboard:exportSkillTraces", "dashboard:exportUserTraces"].includes(channel.text)
+    })
   : []
 expect(registrations).toHaveLength(2)
 const compiled = transpileModule(
@@ -110,6 +127,7 @@ function fixture() {
     ]
   }))
   const esQuery = vi.fn(async (_index: string, body: Record<string, unknown>) => {
+    if (body.aggs) return { aggregations: { projects: { buckets: [] } } }
     const query = body.query as {
       bool: { filter: Array<{ bool?: { should: Array<{ terms: Record<string, string[]> }> } }> }
     }
@@ -145,6 +163,12 @@ function fixture() {
     buildThreadTraceScopeFilters,
     redactTraceDetailForDisplay,
     isDashboardEsResponseTooLarge,
+    excludesTestProjects,
+    testProjectLookupScope,
+    withProjectModeTestExclusion,
+    isDashboardRequestCancelled: () => false,
+    isDashboardEsRequestCancelled: () => false,
+    logDashboardRequestError: vi.fn(),
     esQuery,
     dialog: { showSaveDialog: save },
     BrowserWindow: {
@@ -222,9 +246,11 @@ describe("real dashboard ZIP export", () => {
   it("retains project permissions, dates and trigger scope for project-user exports", async () => {
     const { invoke, payload, esQuery, projectAccess, platformAccess } = fixture()
     expect(await invoke("User", { ...payload, projectMode: true })).toMatchObject({ success: true })
-    expect(projectAccess).toHaveBeenCalledOnce()
+    // The request scope and the export itself independently enforce project access.
+    expect(projectAccess).toHaveBeenCalledTimes(2)
     expect(platformAccess).not.toHaveBeenCalled()
-    const query = JSON.stringify(esQuery.mock.calls[0][1].query)
+    expect(esQuery.mock.calls[0][1].aggs).toBeDefined()
+    const query = JSON.stringify(esQuery.mock.calls.find(([, body]) => !body.aggs)![1].query)
     expect(query).toContain("项目本室")
     expect(query).toContain("2026-10-01")
     expect(query).toContain("triggerSource")

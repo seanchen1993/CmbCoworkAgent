@@ -47,6 +47,7 @@ function fixture() {
   const context = {
     window: { api: { dashboard: { exportSkillTraces, threadTraces } }, alert: vi.fn() },
     unwrapThreadTracesResponse,
+    activeMainTab: "skills",
     selectedSkill: "skill",
     skillTraceViewMode: "thread",
     skillTraceTriggerScope: "active",
@@ -83,17 +84,20 @@ function fixture() {
 }
 
 describe("dashboard trace export/detail scope", () => {
-  it("passes the loaded skill page's actual view and trigger modes to export", async () => {
+  it.each(["skills", "project-mode"])("passes loaded export scope for %s", async (tab) => {
     const { callbacks, exportSkillTraces, context } = fixture()
+    context.activeMainTab = tab
     await callbacks.handleSkillTraceExport()
     expect(exportSkillTraces).toHaveBeenCalledWith(
       expect.objectContaining({
+        projectMode: tab === "project-mode",
         viewMode: "trace",
         triggerScope: "all",
         traces: context.skillDetail.traces
       })
     )
     expect(context.setSkillTraceExporting.mock.calls).toEqual([[true], [false]])
+    expect(context.window.alert).not.toHaveBeenCalled()
   })
   it("loads project-list thread details cumulatively, retaining project/feature/stage filters", async () => {
     const { callbacks, threadTraces } = fixture()

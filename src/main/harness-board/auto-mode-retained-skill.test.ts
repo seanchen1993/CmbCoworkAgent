@@ -102,7 +102,7 @@ it.each([true, false])(
     }, "review")
     expect(title).toHaveBeenCalledExactlyOnceWith("Goal", "review", {
       projectId: "project", slug: "feature"
-    })
+    }, undefined)
     expect(create.mock.calls[0]?.[0]).toMatchObject({
       title: "Project title",
       harnessFeature: { projectId: "project", runId: "run" }

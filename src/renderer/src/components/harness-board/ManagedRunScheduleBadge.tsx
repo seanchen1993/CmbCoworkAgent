@@ -186,7 +186,7 @@ export function ManagedRunScheduleBadge({
                     type="button"
                     size="sm"
                     variant="ghost"
-                    className="text-status-critical hover:text-status-critical"
+                    className="text-status-critical"
                     disabled={disabled || starting || busy}
                     onClick={() => void change(true)}
                   >

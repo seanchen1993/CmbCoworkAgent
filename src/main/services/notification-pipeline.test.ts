@@ -9,6 +9,7 @@ const dependencies = vi.hoisted(() => ({
   enqueue: vi.fn(),
   grant: vi.fn(),
   conversation: vi.fn(),
+  activity: vi.fn(),
   cardAccepted: false,
   threadMessages: [] as Array<{ role: string; content: string }>,
   cardInteractions: new Map<string, Record<string, unknown>>(),
@@ -19,6 +20,7 @@ const dependencies = vi.hoisted(() => ({
 vi.mock("../db", () => ({
   getDb: () => dependencies.database,
   getThread: () => ({ title: "Thread" }),
+  getThreadHydrationCore: () => ({ title: "Thread" }),
   getThreadMessages: () => dependencies.threadMessages
 }))
 vi.mock("./im/event-store", () => ({
@@ -49,7 +51,11 @@ vi.mock("./im/card-publisher", () => ({
 // destinations must not initialize an agent runtime or external delivery service.
 vi.mock("../agent/standard-thread-turn", () => ({ parseStandardThreadMetadata: vi.fn() }))
 vi.mock("../agent/runtime", () => ({ hasPendingApprovalForRuntimeThread: vi.fn() }))
-vi.mock("./user-input", () => ({ hasPendingUserInputForThread: vi.fn() }))
+vi.mock("./im/thread-activity", () => ({ readImThreadActivity: dependencies.activity }))
+vi.mock("./user-input", () => ({
+  hasPendingUserInputForThread: vi.fn(),
+  hasPendingUserInputForRuntimeThread: vi.fn(() => false)
+}))
 vi.mock("./im/inbox-service", () => ({ imInboxService: {} }))
 vi.mock("./im/selection-context", () => ({ imSelectionContextStore: {} }))
 vi.mock("./im/remote-approval-service", () => ({ imRemoteApprovalService: {} }))
@@ -500,6 +506,7 @@ for (const source of ["human_gate", "biz_retry"] as const) {
           expect(await router.handle({ command, ...owner })).toContain("已失效或已使用")
           expect(handler).toHaveBeenCalledTimes(1)
           expect(toolApproval).not.toHaveBeenCalled()
+          expect(dependencies.activity).not.toHaveBeenCalled()
         }
       )
     }

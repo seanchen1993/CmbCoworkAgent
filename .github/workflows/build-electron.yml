@@ -479,6 +479,28 @@ jobs:
           src/main/plugins/project-bundle-removal.test.ts
           src/shared/user-input-presentation.test.ts
 
+      - name: Verify branch review regression boundaries
+        timeout-minutes: 5
+        run: >-
+          npx vitest run --maxWorkers=2
+          src/main/ipc/native-conversation-transcript-flush.test.ts
+          src/main/services/notification-pipeline.test.ts
+          src/main/harness-board/auto-mode-retained-skill.test.ts
+          src/main/ipc/dashboard-trace-export-ipc.test.ts
+          src/renderer/src/components/dashboard/trace-export-scope.test.ts
+          src/renderer/src/lib/function-question-site.test.ts
+          src/renderer/src/lib/theme-surface-policy.test.ts
+          src/main/plugins/autobiz-lean.test.ts
+          tests/browser/mods-source-candidate.test.ts
+          tests/browser/mods-live-source-continuation.test.ts
+
+      - name: Verify native transcript debounce and canonical commit races
+        timeout-minutes: 5
+        run: >-
+          npx vitest run --maxWorkers=1
+          src/main/agent/function-conversation-native-host.test.ts
+          -t "actual native partial debounce and canonical commit race"
+
       - name: Verify illustrated release guide navigation (Windows)
         if: runner.os == 'Windows'
         timeout-minutes: 5

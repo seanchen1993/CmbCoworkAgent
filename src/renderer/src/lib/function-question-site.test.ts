@@ -36,5 +36,7 @@ it("does not mount a site for malformed native question facts", () => {
       renderQuestions: () => null
     })
   )
-  expect(html).toBe("")
+  expect(html).toContain('role="alert"')
+  expect(html).toContain("问题格式暂时无法显示")
+  expect(html).not.toContain("data-function-site")
 })
