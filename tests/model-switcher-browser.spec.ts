@@ -272,8 +272,18 @@ async function main(): Promise<void> {
     )
     const closedIdleOption = page.getByRole("button", { name: /闲时模型 Ultra.*非服务时段/ })
     await closedIdleOption.waitFor()
-    assert.equal(await closedIdleOption.isDisabled(), true)
+    assert.equal(await closedIdleOption.isEnabled(), true)
+    await page.getByRole("button", { name: /^Local A/ }).click()
+    await page.getByRole("button", { name: "Local A", exact: true }).click()
+    await closedIdleOption.click()
     assert.equal((await settle()).currentModel, "builtin:idle-ultra")
+    assert.equal((await settle()).writes.at(-1), "builtin:idle-ultra")
+    await page.getByRole("button", { name: "闲时模型 Ultra", exact: true }).click()
+    await page.evaluate(() =>
+      (window as unknown as FixtureWindow).modelSwitcherFixture.idleCatalog(false, false)
+    )
+    await settle()
+    assert.equal(await closedIdleOption.isDisabled(), true, "missing credentials or identity still prevent selection")
     await page.evaluate(() =>
       (window as unknown as FixtureWindow).modelSwitcherFixture.idleCatalog(true)
     )
@@ -294,7 +304,7 @@ async function main(): Promise<void> {
     assert.equal(await page.getByRole("button", { name: /测试连接/ }).isDisabled(), true)
     assert.equal(await page.locator('input[value="未保存的闲时名称"]').count(), 1)
     assert.equal((await settle()).currentModel, "builtin:idle-ultra")
-    console.log("PASS idle model: service availability refresh preserves selection and drafts")
+    console.log("PASS idle model: preselection outside hours, blocked calls, and preserved drafts")
   } finally {
     await app.close()
   }

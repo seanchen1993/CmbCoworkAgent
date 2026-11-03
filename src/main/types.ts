@@ -150,6 +150,8 @@ export interface ModelConfig {
   model: string
   description?: string
   available: boolean
+  /** May be selected now, even if a configured idle model is outside service hours. */
+  selectable?: boolean
   source: ProviderId
   origin?: "remote" | "fallback" | "local"
   notice?: string
