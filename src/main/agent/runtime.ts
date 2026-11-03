@@ -360,7 +360,7 @@ import {
   type WorkerValuesSnapshotContext
 } from "./coordinator-worker-stream"
 import { createSubagentSkillAttribution } from "./turn-attribution"
-import { buildOrderedChain, isRetryableApiError } from "./failover"
+import { buildOrderedChain, isRetryableApiError, isRetryableStatus } from "./failover"
 import { resolveModel } from "../routing"
 import { patchRuntimeReadFileTool, resolveReadFileTraceContext } from "./read-file-tool"
 import { createWorkflowTool } from "./workflow/tool"
@@ -3791,14 +3791,6 @@ export async function retireThreadCheckpointers(threadId: string): Promise<void>
 // Single source of truth for same-model retry logic. SDK-level retry is
 // disabled (maxRetries: 0) so this is the only layer that retries.
 
-/** Specific non-5xx status codes that should trigger a retry on the SAME model/endpoint.
- *  All 5xx are also retryable (handled by isRetryableStatus below). */
-const RETRYABLE_NON_5XX_STATUS = new Set([408, 409, 429, 432, 433])
-
-function isRetryableStatus(status: number): boolean {
-  return status >= 500 || RETRYABLE_NON_5XX_STATUS.has(status)
-}
-
 const DEFAULT_RETRY_MAX_ATTEMPTS = 6 // 1 initial + 5 retries (used when caller does not specify)
 const RETRY_BASE_DELAY_MS = 1000 // exponential: 1s, 2s, 4s, 8s
 /** Per-attempt timeout — guards against half-open / stalled connections
@@ -3865,7 +3857,7 @@ export interface ModelRetryHooks {
 /**
  * Build a retrying fetch wrapper. Retries on:
  *   - Network errors thrown by fetch
- *   - HTTP status in RETRYABLE_NON_5XX_STATUS (or >= 500)
+ *   - HTTP errors allowed by the shared isRetryableStatus policy
  *   - Per-attempt timeout (half-open / stalled connection guard)
  * Does NOT retry on:
  *   - Parent signal abort (user cancelled) — propagated immediately

@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import type { AgentRunDelivery } from "../agent/agent-run-service"
+import * as managedPolicy from "./managed-run-policy"
 import type {
   ManagedFeatureStatusSnapshot,
   ManagedRunSnapshot
@@ -14,6 +15,8 @@ const dependencies = vi.hoisted(() => ({
   inspectFeature: vi.fn(),
   requestBizRetry: vi.fn(),
   createSession: vi.fn(),
+  startRetry: vi.fn(),
+  prepareRetry: vi.fn(),
   getRun: vi.fn(),
   findRunningRun: vi.fn(),
   getLatestRun: vi.fn(),
@@ -60,7 +63,9 @@ vi.mock("./human-gate-service", () => ({
 }))
 vi.mock("./auto-mode-action-executor", () => ({
   ManagedActionValidationError: class extends Error {},
-  createAndStartManagedHarnessSession: dependencies.createSession
+  createAndStartManagedHarnessSession: dependencies.createSession,
+  prepareManagedProviderRetryRun: dependencies.prepareRetry,
+  startPreparedManagedAgentRun: dependencies.startRetry
 }))
 vi.mock("./managed-run-store", () => ({
   managedRunStore: {
@@ -146,6 +151,235 @@ beforeEach(() => {
   dependencies.hasWorkerNotifications.mockReturnValue(false)
   dependencies.inspectFeature.mockResolvedValue(feature)
   dependencies.requestBizRetry.mockReturnValue(true)
+  dependencies.startRetry.mockResolvedValue(undefined)
+  dependencies.prepareRetry.mockImplementation(() => ({}))
+})
+
+describe("managed provider retries and the cumulative limit", () => {
+  it("ends the run if a future timer policy returns an unsupported decision", async () => {
+    const resolve = managedPolicy.resolveManagedRunDecision
+    vi.spyOn(console, "warn").mockImplementation(() => undefined)
+    vi.spyOn(managedPolicy, "resolveManagedRunDecision")
+      .mockImplementationOnce(resolve)
+      .mockReturnValueOnce({
+        policyResult: {
+          type: "biz_retry",
+          proposedAction: "continue_current_thread",
+          reasonCode: "biz_retry_no_progress"
+        },
+        summary: "unsupported timer action"
+      })
+    await handleAutoModeAgentTurnEnd(
+      turnEnd({
+        outcome: "error",
+        endReason: { code: "provider_error", retryable: true }
+      })
+    )
+    await vi.advanceTimersByTimeAsync(5_000)
+    expect(run.status).toBe("failed")
+    expect(run.lastDecision?.policyResult.reasonCode).toBe("controller_processing_failed")
+    expect(vi.getTimerCount()).toBe(0)
+    expect(dependencies.startRetry).not.toHaveBeenCalled()
+  })
+
+  it("ends the run when a scheduling decision has no execution plan", async () => {
+    vi.spyOn(managedPolicy, "resolveManagedRunDecision").mockReturnValueOnce({
+      policyResult: {
+        type: "provider_retry",
+        proposedAction: "schedule_provider_retry",
+        reasonCode: "provider_error"
+      },
+      summary: "missing plan"
+    })
+    await handleAutoModeAgentTurnEnd(
+      turnEnd({
+        outcome: "error",
+        endReason: { code: "provider_error", retryable: true }
+      })
+    )
+    expect(run.status).toBe("failed")
+    expect(run.failureReason).toContain("缺少执行计划")
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it("reports a missing retry session rather than an exhausted provider budget", async () => {
+    const append = dependencies.appendEvent.getMockImplementation()!
+    dependencies.appendEvent.mockImplementation((snapshot, event) => {
+      if (
+        event.type === "managed_run_decision" &&
+        event.decisionAction === "schedule_provider_retry"
+      ) {
+        delete snapshot.currentSession
+        delete snapshot.decisionBaseline
+      }
+      return append(snapshot, event)
+    })
+    await handleAutoModeAgentTurnEnd(
+      turnEnd({
+        outcome: "error",
+        endReason: { code: "provider_error", retryable: true }
+      })
+    )
+    expect(run.status).toBe("failed")
+    expect(run.failureReason).toContain("缺少当前会话或阶段基线")
+    expect(
+      dependencies.appendEvent.mock.calls.some(
+        ([, event]) => event.reasonCode === "provider_retry_missing_session"
+      )
+    ).toBe(true)
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it("retries a temporary failure in a final feature and records counts after submission", async () => {
+    dependencies.inspectFeature.mockResolvedValue({
+      ...feature,
+      isFinalNode: true,
+      featureStatus: "done",
+      currentNodeStatus: "done"
+    })
+    await handleAutoModeAgentTurnEnd(
+      turnEnd({ outcome: "error", endReason: { code: "provider_error", retryable: true } })
+    )
+    expect(run.status).toBe("running")
+    expect(run.providerRetryCount).toBe(0)
+    await vi.advanceTimersByTimeAsync(5_000)
+    expect(run.providerRetryCount).toBe(1)
+    expect(run.totalRetryCount).toBe(1)
+    const execution = dependencies.appendEvent.mock.calls.find(
+      ([, event]) =>
+        event.type === "managed_run_decision" && event.decisionAction === "continue_current_thread"
+    )
+    expect(execution?.[1].policyResult.facts).toMatchObject({
+      providerRetryCount: 1,
+      totalRetryCount: 1
+    })
+  })
+
+  it("reuses the timer inspection for termination and writes one terminal decision", async () => {
+    await handleAutoModeAgentTurnEnd(
+      turnEnd({ outcome: "error", endReason: { code: "provider_error", retryable: true } })
+    )
+    run.totalRetryCount = 5
+    dependencies.inspectFeature.mockClear()
+    dependencies.appendEvent.mockClear()
+    await vi.advanceTimersByTimeAsync(5_000)
+    expect(run.status).toBe("failed")
+    expect(dependencies.inspectFeature).toHaveBeenCalledTimes(1)
+    expect(
+      dependencies.appendEvent.mock.calls.filter(
+        ([, event]) => event.type === "managed_run_decision"
+      )
+    ).toHaveLength(1)
+    expect(dependencies.startRetry).not.toHaveBeenCalled()
+  })
+
+  it("reads the latest count immediately before a retry attempt", async () => {
+    await handleAutoModeAgentTurnEnd(
+      turnEnd({ outcome: "error", endReason: { code: "provider_error", retryable: true } })
+    )
+    dependencies.prepareRetry.mockImplementationOnce(() => {
+      run = { ...run, totalRetryCount: 4 }
+      return {}
+    })
+    await vi.advanceTimersByTimeAsync(5_000)
+    expect(run.totalRetryCount).toBe(5)
+  })
+
+  it("does not record a continue decision when stop is requested during preparation", async () => {
+    await handleAutoModeAgentTurnEnd(
+      turnEnd({ outcome: "error", endReason: { code: "provider_error", retryable: true } })
+    )
+    dependencies.prepareRetry.mockImplementationOnce(() => {
+      void stopManagedRun(run)
+      return {}
+    })
+    await vi.advanceTimersByTimeAsync(5_000)
+    expect(dependencies.startRetry).not.toHaveBeenCalled()
+    expect(
+      dependencies.appendEvent.mock.calls.some(
+        ([, event]) => event.decisionAction === "continue_current_thread"
+      )
+    ).toBe(false)
+    expect(run.totalRetryCount ?? 0).toBe(0)
+  })
+
+  const providerFailure = () =>
+    turnEnd({
+      outcome: "error",
+      endReason: { code: "provider_error", retryable: true }
+    })
+
+  it("stops a forbidden provider call even if the stage was already completed", async () => {
+    run.decisionBaseline!.nodeStatus = "done"
+    dependencies.inspectFeature.mockResolvedValue({ ...feature, currentNodeStatus: "done" })
+    await handleAutoModeAgentTurnEnd(
+      turnEnd({
+        outcome: "error",
+        endReason: {
+          code: "provider_error",
+          retryable: false,
+          message: "403 当前时段不允许调用该接口"
+        }
+      })
+    )
+    expect(run.status).toBe("failed")
+    expect(run.failureReason).toContain("403")
+    expect(dependencies.createSession).not.toHaveBeenCalled()
+    expect(dependencies.startRetry).not.toHaveBeenCalled()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it("counts only submitted retries and stops after three failures in the same session", async () => {
+    run.decisionBaseline!.nodeStatus = "done"
+    dependencies.inspectFeature.mockResolvedValue({ ...feature, currentNodeStatus: "done" })
+    for (const [index, delay] of [5_000, 30_000, 120_000].entries()) {
+      await handleAutoModeAgentTurnEnd(providerFailure())
+      expect(run.totalRetryCount ?? 0).toBe(index)
+      await vi.advanceTimersByTimeAsync(delay)
+      expect(run.totalRetryCount).toBe(index + 1)
+      expect(run.currentSession?.threadId).toBe("thread")
+    }
+    await handleAutoModeAgentTurnEnd(providerFailure())
+    expect(run.status).toBe("failed")
+    expect(run.failureReason).toContain("模型服务重试已达到上限")
+    expect(dependencies.startRetry).toHaveBeenCalledTimes(3)
+    expect(dependencies.createSession).not.toHaveBeenCalled()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it("allows the fifth cumulative retry and refuses the sixth", async () => {
+    run.totalRetryCount = 4
+    await handleAutoModeAgentTurnEnd(providerFailure())
+    expect(run.totalRetryCount).toBe(4)
+    await vi.advanceTimersByTimeAsync(5_000)
+    expect(run.totalRetryCount).toBe(5)
+    await handleAutoModeAgentTurnEnd(providerFailure())
+    expect(run.status).toBe("failed")
+    expect(run.failureReason).toContain("累计重试上限")
+    expect(dependencies.startRetry).toHaveBeenCalledTimes(1)
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it("does not consume retry budget when a pending retry is cancelled", async () => {
+    run.totalRetryCount = 4
+    await handleAutoModeAgentTurnEnd(providerFailure())
+    await stopManagedRun(run)
+    await vi.advanceTimersByTimeAsync(120_000)
+    expect(run.totalRetryCount).toBe(4)
+    expect(dependencies.startRetry).not.toHaveBeenCalled()
+  })
+
+  it("retains the cumulative count across successful turns and normal stage advances", async () => {
+    run.totalRetryCount = 4
+    run.providerRetryCount = 2
+    dependencies.createSession.mockResolvedValue({ threadId: "next" })
+    dependencies.inspectFeature.mockResolvedValue({ ...feature, currentNodeId: "next-stage" })
+    await handleAutoModeAgentTurnEnd(turnEnd())
+    expect(run.status).toBe("running")
+    expect(run.currentSession?.threadId).toBe("next")
+    expect(run.providerRetryCount).toBe(0)
+    expect(run.totalRetryCount).toBe(4)
+  })
 })
 
 const workerBusyStates = [

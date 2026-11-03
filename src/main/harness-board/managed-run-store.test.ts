@@ -35,6 +35,38 @@ function runPath(store: ManagedRunStore, runId: string): string {
 }
 
 describe("ManagedRunStore", () => {
+  it("persists cumulative retries and treats old snapshots without the field as zero", () => {
+    const store = makeStore()
+    const run = store.createRun("project-1", "feature-1")
+    expect(run.totalRetryCount).toBe(0)
+    store.updateSnapshot({ ...run, totalRetryCount: 4 })
+    expect(store.getRun(run).snapshot?.totalRetryCount).toBe(4)
+    const oldSnapshot = { ...run }
+    delete oldSnapshot.totalRetryCount
+    writeFileSync(runPath(store, run.runId), JSON.stringify(oldSnapshot))
+    expect(store.getRun(run)).toMatchObject({ corrupt: false, snapshot: { totalRetryCount: 0 } })
+    writeFileSync(runPath(store, run.runId), JSON.stringify({ ...run, totalRetryCount: -1 }))
+    expect(store.getRun(run).corrupt).toBe(true)
+  })
+
+  it("retains the structured provider retry decision in the event journal", () => {
+    const store = makeStore()
+    const run = store.createRun("project-1", "feature-1")
+    const endReason = {
+      code: "provider_error" as const,
+      retryable: false,
+      message: "403 forbidden"
+    }
+    store.appendEvent(run, {
+      type: "managed_agent_turn_ended",
+      threadId: "thread",
+      outcome: "error",
+      endReason,
+      summary: "失败"
+    })
+    expect(store.listEvents(run).events[0].endReason).toEqual(endReason)
+  })
+
   it("persists the model selection and accepts older snapshots without it", () => {
     const store = makeStore()
     const run = store.createRun("project-1", "feature-1", "/workspace", "ultra")

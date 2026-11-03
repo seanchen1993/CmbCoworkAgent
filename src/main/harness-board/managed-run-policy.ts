@@ -5,10 +5,20 @@ import type {
   ManagedRunPolicyResult,
   ManagedRunSnapshot
 } from "../../shared/harness-board-types"
+import {
+  MAX_MANAGED_PROVIDER_RETRIES,
+  MAX_MANAGED_RUN_RETRIES
+} from "../../shared/managed-run-retry"
 
 export interface ManagedRunPolicyEvaluation {
   policyResult: ManagedRunPolicyResult
   summary: string
+  providerRetryPlan?: ManagedProviderRetryPlan
+}
+
+export interface ManagedProviderRetryPlan {
+  retryNumber: number
+  delayMs: number
 }
 
 export interface ManagedRunPolicyConfig {
@@ -19,8 +29,25 @@ export interface ManagedRunPolicyConfig {
 
 export const DEFAULT_MANAGED_RUN_POLICY: ManagedRunPolicyConfig = {
   incompleteStageRetryMode: "adaptive",
-  maxProviderRetries: 3,
+  maxProviderRetries: MAX_MANAGED_PROVIDER_RETRIES,
   maxContextReuseRatio: 0.9
+}
+
+export const MANAGED_RUN_RETRY_LIMIT_MESSAGE = `本次托管已达到累计重试上限（${MAX_MANAGED_RUN_RETRIES} 次），请处理问题后重新开启托管`
+
+export function resolveManagedRunRetryLimit(
+  run: ManagedRunSnapshot
+): ManagedRunPolicyEvaluation | null {
+  if ((run.totalRetryCount ?? 0) < MAX_MANAGED_RUN_RETRIES) return null
+  return {
+    policyResult: {
+      type: "run_termination",
+      proposedAction: "fail_managed_run",
+      reasonCode: "total_retry_limit_exceeded",
+      rule: `同一次托管累计最多执行 ${MAX_MANAGED_RUN_RETRIES} 次重试，达到上限后结束托管运行。`
+    },
+    summary: MANAGED_RUN_RETRY_LIMIT_MESSAGE
+  }
 }
 
 export const MANAGED_PROVIDER_RETRY_DELAYS_MS = [5_000, 30_000, 120_000] as const
@@ -28,10 +55,7 @@ export const MANAGED_PROVIDER_RETRY_DELAYS_MS = [5_000, 30_000, 120_000] as cons
 export function resolveProviderRetryPlan(
   providerRetryCount: number,
   maxRetries = DEFAULT_MANAGED_RUN_POLICY.maxProviderRetries
-): {
-  retryNumber: number
-  delayMs: number
-} | null {
+): ManagedProviderRetryPlan | null {
   const retryNumber = providerRetryCount + 1
   if (retryNumber > maxRetries) return null
   const delayMs = MANAGED_PROVIDER_RETRY_DELAYS_MS[retryNumber - 1]
@@ -144,32 +168,6 @@ export function resolveManagedRunDecision(input: {
 }): ManagedRunPolicyEvaluation {
   const { run, feature, terminal } = input
   const config = input.config ?? DEFAULT_MANAGED_RUN_POLICY
-  if (
-    feature.isFinalNode &&
-    (feature.featureStatus === "done" || feature.featureStatus === "archived") &&
-    (feature.currentNodeStatus === "done" || feature.currentNodeStatus === "archived")
-  ) {
-    return {
-      policyResult: {
-        type: "run_termination",
-        proposedAction: "complete_managed_run",
-        reasonCode: "feature_terminal",
-        rule: "当前阶段是工作流最后阶段，且特性状态和阶段状态均为已完成或已归档时，完成托管运行。"
-      },
-      summary: "特性已进入终态"
-    }
-  }
-  if (["blocked", "warning", "error", "unknown"].includes(feature.featureStatus)) {
-    return {
-      policyResult: {
-        type: "run_termination",
-        proposedAction: "fail_managed_run",
-        reasonCode: `feature_status_${feature.featureStatus}`,
-        rule: "特性状态为受阻、警告、错误或未知时，结束托管运行并等待人工处理。"
-      },
-      summary: `特性状态为 ${feature.featureStatus}，托管运行失败，需处理后重新开始`
-    }
-  }
   if (terminal?.endReason.code === "hook_halt") {
     return {
       policyResult: {
@@ -192,25 +190,6 @@ export function resolveManagedRunDecision(input: {
       summary: terminal.endReason.message || "失败熔断器阻止了继续执行"
     }
   }
-
-  const nodeChanged = Boolean(
-    run.decisionBaseline && run.decisionBaseline.nodeId !== feature.currentNodeId
-  )
-  const nodeStatusChanged = Boolean(
-    run.decisionBaseline && run.decisionBaseline.nodeStatus !== feature.currentNodeStatus
-  )
-  const nodeCompleted = isCompletedNodeStatus(feature.currentNodeStatus)
-  if (terminal?.endReason.code === "provider_error" && !nodeChanged && !nodeCompleted) {
-    return {
-      policyResult: {
-        type: "provider_retry",
-        proposedAction: "schedule_provider_retry",
-        reasonCode: "provider_error",
-        rule: "模型服务调用失败且当前阶段尚未结束时，不考虑上下文占用，在原会话中按退避计划重试。"
-      },
-      summary: "模型服务调用失败，计划在原会话重试"
-    }
-  }
   if (terminal?.outcome === "error" && terminal.endReason.code !== "provider_error") {
     return {
       policyResult: {
@@ -220,6 +199,80 @@ export function resolveManagedRunDecision(input: {
         rule: "非模型服务错误导致会话失败时，不自动重试并结束托管运行。"
       },
       summary: terminal.endReason.message || "Agent 执行失败"
+    }
+  }
+
+  if (terminal?.endReason.code === "provider_error" && terminal.endReason.retryable === false) {
+    return {
+      policyResult: {
+        type: "run_termination",
+        proposedAction: "fail_managed_run",
+        reasonCode: "provider_error_not_retryable",
+        rule: "模型服务返回不可重试错误时，结束托管，不创建新会话或继续重试。"
+      },
+      summary: terminal.endReason.message || "模型服务不可用，需处理后重新开启托管"
+    }
+  }
+  if (["blocked", "warning", "error", "unknown"].includes(feature.featureStatus)) {
+    return {
+      policyResult: {
+        type: "run_termination",
+        proposedAction: "fail_managed_run",
+        reasonCode: `feature_status_${feature.featureStatus}`,
+        rule: "特性状态为受阻、警告、错误或未知时，结束托管运行并等待人工处理。"
+      },
+      summary: `特性状态为 ${feature.featureStatus}，托管运行失败，需处理后重新开始`
+    }
+  }
+
+  const nodeChanged = Boolean(
+    run.decisionBaseline && run.decisionBaseline.nodeId !== feature.currentNodeId
+  )
+  const nodeCompleted = isCompletedNodeStatus(feature.currentNodeStatus)
+  if (terminal?.endReason.code === "provider_error") {
+    // Older terminal events do not carry retryable; retain bounded retries for them.
+    const limit = resolveManagedRunRetryLimit(run)
+    if (limit) return limit
+    const providerRetryPlan = resolveProviderRetryPlan(
+      run.providerRetryCount,
+      config.maxProviderRetries
+    )
+    if (!providerRetryPlan) {
+      return {
+        policyResult: {
+          type: "run_termination",
+          proposedAction: "fail_managed_run",
+          reasonCode: "provider_retry_limit_exceeded",
+          rule: `模型服务重试最多 ${config.maxProviderRetries} 次，达到上限后结束托管运行。`
+        },
+        summary: "模型服务重试已达到上限"
+      }
+    }
+    return {
+      policyResult: {
+        type: "provider_retry",
+        proposedAction: "schedule_provider_retry",
+        reasonCode: "provider_error",
+        rule: "模型服务调用失败且允许重试时，不因阶段完成或切换创建新会话，只在原会话按退避计划重试。"
+      },
+      summary: "模型服务调用失败，计划在原会话重试",
+      providerRetryPlan
+    }
+  }
+
+  if (
+    feature.isFinalNode &&
+    (feature.featureStatus === "done" || feature.featureStatus === "archived") &&
+    (feature.currentNodeStatus === "done" || feature.currentNodeStatus === "archived")
+  ) {
+    return {
+      policyResult: {
+        type: "run_termination",
+        proposedAction: "complete_managed_run",
+        reasonCode: "feature_terminal",
+        rule: "当前阶段是工作流最后阶段，且特性状态和阶段状态均为已完成或已归档时，完成托管运行。"
+      },
+      summary: "特性已进入终态"
     }
   }
 
@@ -237,8 +290,9 @@ export function resolveManagedRunDecision(input: {
     }
   }
 
-  const shouldAdvanceCompletedNode =
-    nodeCompleted && (terminal?.outcome !== "success" || nodeStatusChanged)
+  const shouldAdvanceCompletedNode = Boolean(
+    nodeCompleted && run.decisionBaseline && !isCompletedNodeStatus(run.decisionBaseline.nodeStatus)
+  )
   if (nodeChanged || shouldAdvanceCompletedNode) {
     const invalidAction = missingNextActionDecision(feature)
     if (invalidAction) return invalidAction
@@ -255,6 +309,8 @@ export function resolveManagedRunDecision(input: {
     }
   }
 
+  const limit = resolveManagedRunRetryLimit(run)
+  if (limit) return limit
   const retry = resolveBizRetryMode({
     run,
     feature,
