@@ -32,7 +32,7 @@ describe("project workspace directory", () => {
   it("rejects a file", async () => {
     const file = join(root, "file")
     await writeFile(file, "")
-    await expect(assertEmptyProjectDirectory(file)).rejects.toThrow("请选择文件夹")
+    await expect(assertEmptyProjectDirectory(file)).rejects.toThrow("请选择空文件夹作为插件工作区")
   })
 
   it("returns the selected path and validation result before project creation", async () => {

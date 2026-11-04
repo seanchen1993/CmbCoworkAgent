@@ -7,6 +7,13 @@ import type {
   RunAnalysisSessions
 } from "../shared/project-run-analysis"
 import type {
+  ManagedRunSchedule,
+  ManagedRunScheduleInput,
+  ManagedRunScheduleUpdateInput,
+  ManagedRunScheduleIdentity,
+  ManagedRunScheduleChange
+} from "../shared/managed-run-schedule"
+import type {
   KnowledgeAccumulationData,
   KnowledgeActiveDetails,
   KnowledgeFileReaders,
@@ -1373,7 +1380,7 @@ interface CustomAPI {
         id: string
         ref: `builtin:${string}`
         source: "builtin"
-        origin: "remote" | "fallback"
+        origin: "remote" | "fallback" | "local"
         name: string
         baseUrl: string
         model: string
@@ -1388,7 +1395,9 @@ interface CustomAPI {
         enableThinkingEffort?: boolean
         thinkingEffort?: "low" | "high" | "max"
         tier?: "premium" | "economy"
-        lockedFields: Array<"baseUrl" | "model" | "apiKey">
+        notice?: string
+        unavailableReason?: string
+        lockedFields: Array<"baseUrl" | "model" | "apiKey" | "maxTokens">
       }>
     >
     updateBuiltinConfig: (
@@ -3096,6 +3105,15 @@ interface CustomAPI {
     ensureFeatureThreadImGrant: (
       input: HarnessFeatureThreadGrantInput
     ) => Promise<HarnessFeatureThreadGrantResult>
+    getActiveManagedRunSchedules: () => Promise<ManagedRunSchedule[]>
+    getManagedRunSchedule: (
+      projectId: string,
+      featureId: string
+    ) => Promise<ManagedRunSchedule | null>
+    scheduleManagedRun: (input: ManagedRunScheduleInput) => Promise<ManagedRunSchedule>
+    cancelManagedRunSchedule: (input: ManagedRunScheduleIdentity) => Promise<void>
+    updateManagedRunSchedule: (input: ManagedRunScheduleUpdateInput) => Promise<void>
+    onManagedRunScheduleChanged: (callback: (event: ManagedRunScheduleChange) => void) => () => void
     validateManagedRunStart: (input: ManagedRunStartValidationInput) => Promise<void>
     startManagedRun: (input: ManagedRunStartInput) => Promise<ManagedRunSummary>
     stopManagedRun: (input: ManagedRunStopInput) => Promise<boolean>

@@ -14,6 +14,10 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { cn } from "@/lib/utils"
 import { MANAGED_RUN_STATUS_LABELS } from "../../../../shared/harness-board-types"
+import {
+  MAX_MANAGED_PROVIDER_RETRIES,
+  MAX_MANAGED_RUN_RETRIES
+} from "../../../../shared/managed-run-retry"
 import type {
   ManagedRunDecisionFacts,
   ManagedRunEvent,
@@ -198,12 +202,16 @@ function DecisionDetailsTooltip({
                   <div>会话结果：{facts.terminalOutcome === "success" ? "成功" : "失败"}</div>
                 )}
                 {facts.terminalReason && <div>会话说明：{facts.terminalReason}</div>}
-                {policyType === "provider_retry" ? (
-                  <div>本次模型服务重试：{Math.min(facts.providerRetryCount + 1, 3)}/3</div>
-                ) : (
-                  facts.providerRetryCount > 0 && (
-                    <div>模型服务已重试：{facts.providerRetryCount}/3</div>
-                  )
+                <div>
+                  累计已执行重试：{facts.totalRetryCount ?? 0}/{MAX_MANAGED_RUN_RETRIES}
+                </div>
+                {(policyType === "provider_retry" || facts.providerRetryCount > 0) && (
+                  <div>
+                    模型服务已重试：{facts.providerRetryCount}/{MAX_MANAGED_PROVIDER_RETRIES}
+                  </div>
+                )}
+                {proposedAction === "schedule_provider_retry" && (
+                  <div>计划进行第 {facts.providerRetryCount + 1} 次模型服务重试</div>
                 )}
                 {policyType === "biz_retry" && facts.contextUsageRatio !== undefined && (
                   <div>上下文占用：{Math.round(facts.contextUsageRatio * 1000) / 10}%</div>
@@ -304,7 +312,8 @@ export function ManagedRunPanel({
 
       {run.status === "running" && run.nextRetryAt && (
         <div className="mt-2 rounded-lg border border-status-info/25 bg-status-info/5 px-2.5 py-2 text-[11px] text-status-info">
-          托管模型服务重试中 {run.providerRetryCount}/3 · {run.nextRetryAt}
+          将进行第 {run.providerRetryCount + 1}/{MAX_MANAGED_PROVIDER_RETRIES} 次模型服务重试 ·{" "}
+          {run.nextRetryAt}
         </div>
       )}
       {run.status === "corrupt" && (

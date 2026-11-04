@@ -2066,21 +2066,16 @@ test("user-pasted V1 workflow marker is de-weaponized, not swallowed (#5)", () =
   )
 })
 
-test("workflow script writeFile shares the run-level write lock with subagent tool writes (#2)", () => {
-  // Script writeFile() used its own fileWriteChain while subagent tool writes used
-  // the threadId tool-concurrency lock — two silos that could clobber the same file
-  // on a concurrent script+agent write. runtime injects the SAME lock
-  // (getToolConcurrencyLock(threadId).write); the engine's writeFile routes through
-  // it; run-manager threads it down.
+test("workflow script writes share admission and backend file locks with agents", () => {
   assert.match(
     runtimeSource,
-    /runExclusiveFileWrite:[\s\S]*?getToolConcurrencyLock\(threadId\)\.write\(fn\)/,
-    "runtime injects the threadId write lock as the workflow's runExclusiveFileWrite"
+    /runExclusiveFileWrite:[\s\S]*?getToolConcurrencyLock\(threadId\)\.read\(fn, signal\)/,
+    "runtime shares file admission while excluding unknown tools"
   )
   assert.match(
     workflowEngineSource,
-    /context\.runExclusiveFileWrite/,
-    "engine writeFile routes through the injected run-level write lock"
+    /withFileOperation\(context\.workspacePath, resolved, "write", performWrite, signal\)/,
+    "engine uses the same per-file protection as sandbox writes"
   )
   assert.match(
     workflowRunManagerSource,

@@ -1,3 +1,5 @@
+import type { ManagedRunModelSelection } from "./managed-run-model"
+
 export type HarnessUiKind =
   | "pending"
   | "active"
@@ -428,6 +430,7 @@ export interface ManagedRunStartInput {
   workspacePath: string
   initialUserMessage?: string
   existingThreadId?: string
+  modelSelection?: ManagedRunModelSelection
 }
 
 export interface ManagedRunStartValidationInput {
@@ -585,6 +588,7 @@ export interface ManagedRunSnapshot {
   featureId: string
   status: ManagedRunStatus
   workspacePath?: string
+  modelSelection?: ManagedRunModelSelection
   currentSession?: {
     threadId: string
     workspacePath?: string
@@ -597,6 +601,8 @@ export interface ManagedRunSnapshot {
     nextActionHash: string
   }
   providerRetryCount: number
+  /** Absent in historical records; the store normalizes it to zero on read. */
+  totalRetryCount?: number
   nextRetryAt?: string
   failureReason?: string
   cancellationReason?: string
@@ -630,6 +636,7 @@ export interface ManagedRunDecisionFacts {
   initialInspection: boolean
   previousNodeId?: string
   providerRetryCount: number
+  totalRetryCount?: number
   contextInputTokens?: number
   contextMaxTokens?: number
   contextUsageRatio?: number
@@ -902,6 +909,7 @@ export interface AgentTurnEndEvent extends AutoModeEventBase {
   endReason: {
     code: "normal" | "provider_error" | "hook_halt" | "failure_fuse" | "unknown"
     message?: string
+    retryable?: boolean
   }
   contextUsage?: {
     inputTokens: number

@@ -222,6 +222,7 @@ async function testSubagentStopCommandPayload(): Promise<void> {
       threadId: "parent-thread",
       turnId: "parent-turn",
       toolCallId: "task-call-stop",
+      subagentType: "research",
       failed: true
     })
     const observed = await captureContextThroughCommandHook("SubagentStop", context)
@@ -233,6 +234,7 @@ async function testSubagentStopCommandPayload(): Promise<void> {
     assert.equal(observed.payload.workspace, workspacePath)
     assert.equal(observed.payload.workspace_path, workspacePath)
     assert.equal(subagent.id, "task-call-stop")
+    assert.equal(subagent.name, "research")
     assert.equal(subagent.status, "failed")
     assert.equal(observed.env.agentId, "task-call-stop")
     assert.equal(observed.env.workspacePath, workspacePath)
@@ -241,11 +243,30 @@ async function testSubagentStopCommandPayload(): Promise<void> {
   }
 }
 
+async function testSubagentStopNameMatchers(): Promise<void> {
+  for (const failed of [false, true]) {
+    const context = buildSubagentStopHookContext({
+      threadId: "parent-thread",
+      toolCallId: "task-call-stop",
+      subagentType: "research",
+      failed
+    })
+    for (const matcher of ["*", "research", "^research$", "different"]) {
+      let calls = 0
+      await runHooks([makeCaptureHook("SubagentStop", matcher)], "SubagentStop", context, () => {
+        calls++
+      })
+      assert.equal(calls, matcher === "different" ? 0 : 1, `stop matcher ${matcher}`)
+    }
+  }
+}
+
 async function main(): Promise<void> {
   await testRuntimeAgentIdFlowsThroughLocalSandbox()
   await testSubagentStartCommandPayload()
   testSubagentStartExtractionFromResumedStreamPayload()
   await testSubagentStopCommandPayload()
+  await testSubagentStopNameMatchers()
   console.log("PASS agent hook context integration")
 }
 

@@ -1,3 +1,4 @@
+import { isModelAvailable } from "../../shared/model-catalog"
 import { getModelConfigByRef, getModelConfigs, toModelRef } from "../models/registry"
 
 // ─── PR-12 / PR-17 — minimal API error classifier ─────────────────────────────
@@ -50,6 +51,7 @@ const STATUS_CODE_INFO: Record<number, StatusInfo> = {
     hint: "输入过长，请减少输入或稍后重试"
   },
   433: { category: "rate_limit", label: "输出 Token 数限流", hint: "请稍后重试" },
+  434: { category: "invalid_request", label: "码豆余额不足", hint: "请充值后重试" },
   480: { category: "invalid_request", label: "请求参数异常", hint: "请检查请求参数" },
   481: { category: "invalid_request", label: "目标模型不存在", hint: "请检查模型名称是否正确" },
   482: { category: "invalid_request", label: "模型不支持该用途", hint: "请更换模型或调整用途" },
@@ -255,7 +257,7 @@ export function classifyApiError(error: unknown): ApiErrorCode {
 // ─── Error classification ────────────────────────────────────────────────────
 
 // Status codes that are NOT retryable — switching model won't help
-const NON_RETRYABLE_STATUS_CODES = new Set([400, 401, 403])
+const NON_RETRYABLE_STATUS_CODES = new Set([400, 401, 403, 434])
 
 const RETRYABLE_NETWORK_CODES = new Set([
   "ECONNREFUSED",
@@ -336,19 +338,42 @@ export function isRetryableApiError(error: unknown): boolean {
   return false
 }
 
-function getStatusCode(error: unknown): number | null {
-  if (!error || typeof error !== "object") return null
-  // Direct status property
-  if ("status" in error && typeof (error as { status: unknown }).status === "number") {
-    return (error as { status: number }).status
+/** Shared same-model HTTP retry policy, originally defined by the runtime fetch wrapper. */
+const RETRYABLE_NON_5XX_STATUS = new Set([408, 409, 429, 432, 433])
+
+export function isRetryableStatus(status: number): boolean {
+  return status >= 500 || RETRYABLE_NON_5XX_STATUS.has(status)
+}
+
+/** Reuse the runtime's same-model policy and the existing API error classifier. */
+export function isRetryableManagedProviderError(error: unknown): boolean {
+  if (!error || isAbortLikeError(error)) return false
+  const status = getStatusCode(error)
+  if (status !== null) {
+    return isRetryableStatus(status)
   }
-  // Nested response.status (axios-style)
-  if ("response" in error) {
-    const resp = (error as { response: unknown }).response
-    if (resp && typeof resp === "object" && "status" in resp) {
-      const s = (resp as { status: unknown }).status
-      if (typeof s === "number") return s
+  const visited = new Set<object>()
+  let current: unknown = error
+  while (current && typeof current === "object" && !visited.has(current)) {
+    visited.add(current)
+    const category = classifyApiError(current)
+    if (category !== "unknown") {
+      return ["network_error", "server_error", "rate_limit", "empty_response"].includes(category)
     }
+    current = (current as { cause?: unknown }).cause
+  }
+  return false
+}
+
+function getStatusCode(error: unknown): number | null {
+  const visited = new Set<object>()
+  let current = error
+  while (current && typeof current === "object" && !visited.has(current)) {
+    visited.add(current)
+    const detail = current as { status?: unknown; response?: { status?: unknown }; cause?: unknown }
+    if (typeof detail.status === "number") return detail.status
+    if (typeof detail.response?.status === "number") return detail.response.status
+    current = detail.cause
   }
   return null
 }
@@ -381,6 +406,7 @@ export interface ApiErrorDetail {
 const ERROR_DETAIL_MAX_BODY = 800
 /** Body keys commonly used by gateways/relays to carry the human reason. */
 const BODY_REASON_KEYS = [
+  "errorMsg",
   "message",
   "msg",
   "detail",
@@ -612,7 +638,7 @@ export function buildOrderedChain(
   primaryTier: "premium" | "economy",
   allowFailover = true
 ): string[] {
-  const configs = getModelConfigs()
+  const configs = getModelConfigs().filter(isModelAvailable)
   const chain: string[] = []
   const seen = new Set<string>()
 
@@ -654,7 +680,7 @@ export function buildOrderedChain(
       const tier = cfg.tier ?? "premium"
       // Only add if not downgrading
       if (primaryTier === "premium" && tier === "economy") continue
-      if (cfg.apiKey) add(id)
+      if (isModelAvailable(cfg)) add(id)
     }
   }
 

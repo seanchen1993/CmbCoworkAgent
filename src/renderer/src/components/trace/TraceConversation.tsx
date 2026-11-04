@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react"
 import { Bot, ChevronDown, ChevronRight, Info, Route, User, Wrench } from "lucide-react"
 import { cn } from "@/lib/utils"
+import { BuiltinBrowserChip } from "@/features/builtin-browser/BuiltinBrowserChip"
+import { parseUserVisibleBuiltinBrowserContent } from "@/features/builtin-browser/chat-integration"
 import {
   parseSkillUseBlock,
   skillUseDisplayLabel,
@@ -112,6 +114,8 @@ export interface TraceConversationMessage {
   occurredAt?: string
   /** Which trace this message was reconstructed from (thread view only). */
   traceId?: string
+  /** The user explicitly selected the /browser slash command for this turn. */
+  builtinBrowserSelected?: boolean
 }
 
 export interface TraceConversationSummary {
@@ -192,7 +196,7 @@ function textFromUnknown(value: unknown): string {
  * refusal is not evidence that this is user prose, and the looser display-only
  * strip takes over rather than rendering the raw block.
  */
-function cleanUserText(raw: string): string {
+function stripTraceSkillUseBlock(raw: string): string {
   const text = raw.trim()
   if (!text) return text
   const parsed = parseSkillUseBlock(text)
@@ -202,6 +206,21 @@ function cleanUserText(raw: string): string {
   const salvaged = stripSkillUseBlockForDisplay(text)
   if (!salvaged) return text
   return salvaged.rest.trim() || skillUseDisplayLabel(salvaged.skillName)
+}
+
+function parseTraceUserContent(raw: string): {
+  visibleText: string
+  builtinBrowserSelected: boolean
+} {
+  const browserContent = parseUserVisibleBuiltinBrowserContent(stripTraceSkillUseBlock(raw))
+  return {
+    visibleText: browserContent.visibleText,
+    builtinBrowserSelected: browserContent.browserSelected
+  }
+}
+
+function cleanUserText(raw: string): string {
+  return parseTraceUserContent(raw).visibleText
 }
 
 function uniqueToolNames(names: string[]): string[] {
@@ -491,7 +510,10 @@ export function buildTraceConversation(
     executionMode: trace.executionMode,
     triggerSource: trace.triggerSource
   })
-  const userText = internalNotificationKind ? "" : cleanUserText(rawUserText)
+  const userContent = internalNotificationKind
+    ? { visibleText: "", builtinBrowserSelected: false }
+    : parseTraceUserContent(rawUserText)
+  const userText = userContent.visibleText
 
   const timeline = sortTimeline(buildTraceTimeline(trace, 0))
   const messages = timeline.map((entry) => entry.message)
@@ -538,9 +560,20 @@ function buildTraceTimeline(trace: TraceConversationSource, traceOrder: number):
     executionMode: trace.executionMode,
     triggerSource: trace.triggerSource
   })
-  const userText = internalNotificationKind ? "" : cleanUserText(rawUserText)
-  if (userText) {
-    add({ role: "user", label: instructionLabel(trace), content: userText }, trace.startedAt)
+  const userContent = internalNotificationKind
+    ? { visibleText: "", builtinBrowserSelected: false }
+    : parseTraceUserContent(rawUserText)
+  const userText = userContent.visibleText
+  if (userText || userContent.builtinBrowserSelected) {
+    add(
+      {
+        role: "user",
+        label: instructionLabel(trace),
+        content: userText,
+        ...(userContent.builtinBrowserSelected ? { builtinBrowserSelected: true } : {})
+      },
+      trace.startedAt
+    )
   }
 
   const llmNodes = (trace.nodes ?? []).filter((node) => node.type === "llm")
@@ -1089,8 +1122,11 @@ function TimelineMessageRow({
           </div>
         )}
         {message.reasoning ? <ReasoningDetails text={message.reasoning} /> : null}
+        {message.builtinBrowserSelected ? (
+          <BuiltinBrowserChip compact className={cn(message.content && "mr-2")} />
+        ) : null}
         {message.content ? (
-          <div className="whitespace-pre-wrap break-words">{message.content}</div>
+          <span className="whitespace-pre-wrap break-words">{message.content}</span>
         ) : null}
       </div>
       {isUser && (
@@ -1155,6 +1191,7 @@ export function TraceConversation({
  * trace」，读起来像内容就这么多。所以这里不渲染半张脸的时间线，直接给占位。
  * 混合状态（部分已加载）不算——那说明数据已经在陆续到位了。
  */
+// eslint-disable-next-line react-refresh/only-export-components
 export function isThreadAwaitingFullLoad(traces: readonly TraceConversationSource[]): boolean {
   return traces.length > 0 && traces.every((trace) => trace.rawPending === true)
 }

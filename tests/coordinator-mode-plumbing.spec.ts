@@ -3482,13 +3482,13 @@ async function testHookAgentIdentityPlumbing(): Promise<void> {
   )
   assertOccurrenceCount(
     agentIpc,
-    "maybeRunSubagentLifecycleHooksFromStreamPayload({",
+    "= createSubagentLifecycleBridge({",
     3,
     "initial, resume, and interrupt-continue streams share the paired lifecycle bridge"
   )
   assertMatches(
     agentIpc,
-    /const processMessagesSideEffects = async[\s\S]{0,300}?await maybeRunSubagentLifecycleHooksFromStreamPayload\(\{[\s\S]{0,900}?\}\)\s*\n\s*try \{/,
+    /const processMessagesSideEffects = async[\s\S]{0,150}?await subagentLifecycle.processPayload\(payload\)\s*try \{/,
     "initial stream runs lifecycle control flow outside the best-effort tracing catch"
   )
   assertMatches(
@@ -3506,15 +3506,28 @@ async function testHookAgentIdentityPlumbing(): Promise<void> {
       .length === 2,
     "resume and interrupt-continue must both bypass disconnect retry for Hook halts"
   )
+  for (const bridge of [
+    "subagentLifecycle",
+    "resumeSubagentLifecycle",
+    "interruptSubagentLifecycle"
+  ]) {
+    assertIncludes(
+      agentIpc,
+      `subagentLifecycle: ${bridge}.callbacks`,
+      `${bridge} shares decisions with the producer gate across runtime rebuilds`
+    )
+    assertMatches(
+      agentIpc,
+      new RegExp(
+        `for \\(const (tuple|payload) of ${bridge}\\.trackValues\\([^)]+\\)\\) \\{\\s*await ${bridge}\\.processPayload\\(`
+      ),
+      `${bridge} dispatches values-only lifecycle hooks with awaited halt semantics`
+    )
+  }
   assertMatches(
-    agentIpc,
-    /commitPendingResumeMessageSideEffects[\s\S]{0,1200}?firedStartIds:\s*resumeSubagentStartFired/,
-    "resume stream tracks and dispatches SubagentStart independently"
-  )
-  assertMatches(
-    agentIpc,
-    /commitPendingInterruptMessageSideEffects[\s\S]{0,1200}?firedStartIds:\s*interruptSubagentStartFired/,
-    "interrupt-continue stream tracks and dispatches SubagentStart independently"
+    runtime,
+    /gradedToolConcurrencyMiddleware,\s*(?:\/\/[^\n]+\n\s*)*\.\.\.\(subagentLifecycleMiddleware[^\n]+\n\s*\.\.\.\(toolHookMiddleware[^\n]+\n\s*toolErrorMiddleware/,
+    "parent lifecycle gate wraps rejected/recovered task results without sharing the child queue"
   )
   assertOccurrenceCount(
     subagentContext,

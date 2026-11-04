@@ -197,7 +197,7 @@ function clearRuntimeProjection(root: string): void {
   projections.delete(realpathSync(root))
 }
 
-/** Legacy all-file installs and explicit Markdown consumers need decoded files. */
+/** Scripts also need decoded Markdown when they read or copy templates via native I/O. */
 export function materializeMarketRuntimeRoot(root: string): string {
   root = realpathSync(root)
   if (
@@ -247,11 +247,6 @@ export function resolveMarketRuntimePath(filePath: string): string {
   const real = realpathSync(filePath)
   const rel = relative(realpathSync(root), real)
   if (rel.startsWith("..") || isAbsolute(rel)) throw new Error(MARKET_CONTENT_DENIED)
-  if (
-    isMarketProtectionComplete(root) &&
-    (!isMarketMarkdownFile(filePath) || statSync(real).isDirectory())
-  )
-    return filePath
   return join(materializeMarketRuntimeRoot(root), rel)
 }
 
@@ -264,22 +259,31 @@ export function prepareMarketCommand(
   for (const candidate of new Set(roots)) {
     const root = findProtectedMarketRoot(candidate)
     if (!root) continue
-    // Scripts/configuration are plain under the Markdown-only policy. Execute
-    // them in place so relative paths, generated files and embedded repos work.
-    if (isMarketProtectionComplete(root)) continue
-    const variants = [root, root.replace(/\\/g, "/"), root.replace(/\\/g, "\\\\")]
-    if (!variants.some((value) => command.includes(value)) && !cwd.startsWith(root)) continue
-    const runtime = materializeMarketRuntimeRoot(root)
+    // Plain scripts can still consume encoded Markdown through fs/copy commands.
+    // Map their resource tree together, but keep external workspace/output paths.
+    const variants = [...new Set([root, root.replace(/\\/g, "/"), root.replace(/\\/g, "\\\\")])]
+    let runtime: string | undefined
     for (const value of variants.sort((a, b) => b.length - a.length)) {
-      const replacement = value.includes("/")
-        ? runtime.replace(/\\/g, "/")
-        : value.includes("\\\\")
-          ? runtime.replace(/\\/g, "\\\\")
-          : runtime
-      command = command.split(value).join(replacement)
+      const escaped = value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+      // Match a whole path root, not a sibling or a suffix of an unrelated path.
+      const pattern = new RegExp(
+        `(^|[\\s"'\x60=(:,;|&<>])${escaped}(?=$|[\\\\/\\s"'\x60;|&<>])`,
+        process.platform === "win32" ? "gi" : "g"
+      )
+      command = command.replace(pattern, (_match, before: string) => {
+        runtime ??= materializeMarketRuntimeRoot(root)
+        const replacement = value.includes("/")
+          ? runtime.replace(/\\/g, "/")
+          : value.includes("\\\\")
+            ? runtime.replace(/\\/g, "\\\\")
+            : runtime
+        return before + replacement
+      })
     }
     const rel = relative(root, cwd)
-    if (rel === "" || (!rel.startsWith("..") && !isAbsolute(rel))) cwd = join(runtime, rel)
+    if (rel === "" || (!rel.startsWith("..") && !isAbsolute(rel))) {
+      cwd = join(runtime ?? materializeMarketRuntimeRoot(root), rel)
+    }
   }
   return { command, cwd }
 }

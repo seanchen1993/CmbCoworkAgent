@@ -2,6 +2,8 @@ import { readFileSync } from "node:fs"
 import { resolve } from "node:path"
 import ts from "typescript"
 import { describe, expect, it, vi } from "vitest"
+import { extractErrorDetail, isRetryableManagedProviderError } from "../agent/failover"
+import type { AgentTurnEndEvent } from "../../shared/harness-board-types"
 
 // Execute the invoke settlement callback with runtime boundaries stubbed, without
 // initializing Electron and the unrelated agent tools imported by agent.ts.
@@ -12,6 +14,91 @@ const file = ts.createSourceFile(
   true,
   ts.ScriptKind.TS
 )
+const terminalFactory = file.statements.find(
+  (node): node is ts.FunctionDeclaration =>
+    ts.isFunctionDeclaration(node) && node.name?.text === "createAutoModeTerminal"
+)
+if (!terminalFactory) throw new Error("Managed terminal factory is missing")
+const terminalFactoryCode = ts.transpileModule(terminalFactory.getText(file), {
+  compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None }
+}).outputText
+const createTerminal = new Function(
+  "isRetryableManagedProviderError",
+  "extractErrorDetail",
+  `${terminalFactoryCode}\nreturn createAutoModeTerminal`
+)(isRetryableManagedProviderError, extractErrorDetail) as (
+  outcome: AgentTurnEndEvent["outcome"],
+  code: AgentTurnEndEvent["endReason"]["code"],
+  message: string,
+  error: unknown
+) => Pick<AgentTurnEndEvent, "outcome" | "endReason">
+
+describe("managed terminal provider error metadata", () => {
+  it("logs and stops an unclassified provider failure", () => {
+    const log = vi.spyOn(console, "warn").mockImplementation(() => undefined)
+    try {
+      const terminal = createTerminal(
+        "error",
+        "provider_error",
+        "未知失败",
+        new Error("unclassified")
+      )
+      expect(terminal.endReason.retryable).toBe(false)
+      expect(log).toHaveBeenCalledWith(
+        "[AutoMode] Provider failure classified:",
+        expect.objectContaining({ category: "unknown", retryable: false })
+      )
+    } finally {
+      log.mockRestore()
+    }
+  })
+
+  it("preserves the structured cause at all three failover exhaustion boundaries", () => {
+    const constructors: ts.NewExpression[] = []
+    function collect(node: ts.Node): void {
+      if (
+        ts.isNewExpression(node) &&
+        ts.isIdentifier(node.expression) &&
+        node.expression.text === "Error" &&
+        node.arguments?.[0] &&
+        ts.isTemplateExpression(node.arguments[0]) &&
+        node.arguments[0].head.text.startsWith("All models failed")
+      ) {
+        constructors.push(node)
+      }
+      ts.forEachChild(node, collect)
+    }
+    collect(file)
+    expect(constructors).toHaveLength(3)
+    const original = Object.assign(new Error("网关暂时不可用"), { status: 503 })
+    for (const node of constructors) {
+      const wrapped = new Function(
+        "allErrors",
+        "lastInitializationError",
+        `return ${node.getText(file)}`
+      )("内置模型: 503 网关暂时不可用", original) as Error
+      expect(wrapped.cause).toBe(original)
+      expect(
+        createTerminal("error", "provider_error", wrapped.message, wrapped).endReason.retryable
+      ).toBe(true)
+    }
+  })
+
+  it.each([
+    { error: { status: 403, code: "ECONNRESET", message: "503 timeout" }, retryable: false },
+    { error: { response: { status: 401 } }, retryable: false },
+    { error: { status: 434 }, retryable: false },
+    { error: { status: 503 }, retryable: true },
+    { error: { code: "ECONNRESET" }, retryable: true }
+  ])(
+    "classifies $error as retryable=$retryable from the original error",
+    ({ error, retryable }) => {
+      const terminal = createTerminal("error", "provider_error", "调用失败", error)
+      expect(terminal.endReason).toEqual({ code: "provider_error", retryable, message: "调用失败" })
+    }
+  )
+})
+
 let invokeTerminalCallback: ts.ArrowFunction | undefined
 function visit(node: ts.Node): void {
   if (invokeTerminalCallback) return

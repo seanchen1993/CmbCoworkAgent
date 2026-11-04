@@ -179,13 +179,13 @@ describe("market content storage and runtime", () => {
       "企业知识\n00ff\n"
     )
     const prepared = prepareMarketCommand(`node "${join(root, "run.cjs")}"`, root, [root])
-    expect(prepared.command).toBe(`node "${join(root, "run.cjs")}"`)
-    expect(prepared.cwd).toBe(root)
-    expect(execFileSync(process.execPath, [join(root, "run.cjs")], { encoding: "utf8" })).toBe(
+    expect(prepared.command).toBe(`node "${join(runtime, "run.cjs")}"`)
+    expect(prepared.cwd).toBe(runtime)
+    expect(execFileSync(process.execPath, [join(runtime, "run.cjs")], { encoding: "utf8" })).toBe(
       "企业知识\n00ff\n"
     )
-    expect(resolveMarketRuntimePath(root)).toBe(root)
-    expect(resolveMarketRuntimePath(join(root, "run.cjs"))).toBe(join(root, "run.cjs"))
+    expect(resolveMarketRuntimePath(root)).toBe(runtime)
+    expect(resolveMarketRuntimePath(join(root, "run.cjs"))).toBe(join(runtime, "run.cjs"))
     expect(readFileSync(join(root, "run.cjs"), "utf8")).not.toContain(MARKET_CONTENT_PREFIX)
     cleanupMarketRuntimeContent()
     expect(existsSync(runtime)).toBe(false)
@@ -215,6 +215,75 @@ describe("market content storage and runtime", () => {
         expect(decodeMarketContent(stored)).toEqual(Buffer.from([0, 1, 128, 255]))
       } else expect(stored).toEqual(Buffer.from([0, 1, 128, 255]))
     }
+  })
+
+  it("keeps workspace Markdown plain when scripts copy and render market templates", () => {
+    const parent = fixture()
+    const root = join(parent, "plugin")
+    // A similar prefix must not redirect the user's output directory.
+    const workspace = join(parent, "plugin-output")
+    mkdirSync(root)
+    mkdirSync(workspace)
+    const template = "# 报告模板\n企业分析内容\n"
+    writeFileSync(join(root, "template.md"), template)
+    writeFileSync(join(root, "asset.bin"), Buffer.from([0, 128, 255]))
+    writeFileSync(
+      join(root, "run.cjs"),
+      `const fs = require("node:fs"), path = require("node:path")
+const output = process.argv[2]
+fs.writeFileSync(path.join(output, "fresh.md"), "# New report")
+fs.copyFileSync(path.join(__dirname, "template.md"), path.join(output, "copied.md"))
+fs.writeFileSync(path.join(output, "rendered.md"), fs.readFileSync(path.join(__dirname, "template.md"), "utf8") + "Result")
+fs.copyFileSync(path.join(__dirname, "asset.bin"), path.join(output, "asset.bin"))
+console.log(process.cwd())`
+    )
+    protectMarketDirectory(root)
+    const encodedTemplate = readFileSync(join(root, "template.md"))
+    const script = prepareMarketCommand(join(root, "run.cjs"), workspace, [root])
+    const output = prepareMarketCommand(workspace, workspace, [root])
+    expect(script.cwd).toBe(workspace)
+    expect(output).toEqual({ command: workspace, cwd: workspace })
+    expect(
+      execFileSync(process.execPath, [script.command, output.command], {
+        cwd: script.cwd,
+        encoding: "utf8"
+      }).trim()
+    ).toBe(workspace)
+    expect(readFileSync(join(workspace, "fresh.md"), "utf8")).toBe("# New report")
+    expect(readFileSync(join(workspace, "copied.md"), "utf8")).toBe(template)
+    expect(readFileSync(join(workspace, "rendered.md"), "utf8")).toBe(template + "Result")
+    expect(readFileSync(join(workspace, "asset.bin"))).toEqual(Buffer.from([0, 128, 255]))
+    expect(findProtectedMarketRoot(workspace)).toBeNull()
+    expect(readFileSync(join(root, "template.md"))).toEqual(encodedTemplate)
+    expect(encodedTemplate.toString()).toContain(MARKET_CONTENT_PREFIX)
+    cleanupMarketRuntimeContent()
+    expect(readFileSync(join(workspace, "copied.md"), "utf8")).toBe(template)
+  })
+
+  it("maps shell and JSON paths without changing sibling paths or workspace cwd", () => {
+    const parent = fixture()
+    const root = join(parent, "plugin")
+    const workspace = join(parent, "plugin-output")
+    mkdirSync(root)
+    mkdirSync(workspace)
+    writeFileSync(join(root, "template.md"), "template")
+    protectMarketDirectory(root)
+    const runtime = materializeMarketRuntimeRoot(root)
+    for (const format of [
+      (value: string) => value,
+      (value: string) => value.replaceAll("\\", "/"),
+      (value: string) => value.replaceAll("\\", "\\\\")
+    ]) {
+      const command = `copy "${format(join(root, "template.md"))}" "${format(join(workspace, "report.md"))}"`
+      expect(prepareMarketCommand(command, workspace, [root])).toEqual({
+        command: `copy "${format(join(runtime, "template.md"))}" "${format(join(workspace, "report.md"))}"`,
+        cwd: workspace
+      })
+      const unrelated = `echo "prefix${format(root)}"`
+      expect(prepareMarketCommand(unrelated, workspace, [root]).command).toBe(unrelated)
+    }
+    expect(prepareMarketCommand("node run.cjs", root, [root]).cwd).toBe(runtime)
+    expect(resolveMarketRuntimePath(runtime)).toBe(runtime)
   })
 
   it("upgrades only marked encoded installs and restores every non-Markdown byte", () => {

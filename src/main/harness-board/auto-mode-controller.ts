@@ -23,23 +23,28 @@ import {
   prepareManagedBizRetryRun,
   prepareManagedHarnessSession,
   prepareManagedHarnessSessionGrant,
-  sendManagedProviderRetry,
+  prepareManagedProviderRetryRun,
   startManagedHarnessSession,
   startPreparedManagedAgentRun,
   type CreateManagedHarnessSessionInput
 } from "./auto-mode-action-executor"
 import { managedRunStore } from "./managed-run-store"
+import { managedRunScheduler } from "./managed-run-scheduler"
 import {
   bindExistingManagedSession,
   requireIdleManagedSession
 } from "./managed-run-existing-session"
 import { reportManagedRunEnded, reportManagedRunStarted } from "./managed-run-telemetry"
 import { formatGmt8Timestamp } from "../../shared/gmt8-time"
+import { MAX_MANAGED_PROVIDER_RETRIES } from "../../shared/managed-run-retry"
 import {
   DEFAULT_MANAGED_RUN_POLICY,
   resolveContextUsageRatio,
   resolveManagedRunDecision,
-  resolveProviderRetryPlan
+  resolveManagedRunRetryLimit,
+  MANAGED_RUN_RETRY_LIMIT_MESSAGE,
+  type ManagedRunPolicyEvaluation,
+  type ManagedProviderRetryPlan
 } from "./managed-run-policy"
 import type {
   AgentTurnEndEvent,
@@ -72,6 +77,7 @@ export interface AutoModeAgentTurnEndInput {
 
 export interface ManagedRunStartRequest extends ManagedRunStartInput {
   delivery: AgentRunDelivery
+  scheduledStartId?: string
 }
 
 interface HarnessFeatureContext {
@@ -190,6 +196,7 @@ function assertManagedRunCanStart(
 }
 
 export function validateManagedRunStart(input: ManagedRunStartValidationInput): void {
+  managedRunScheduler.assertCanStart(input.projectId, input.featureId)
   // Allow opening the picker to show running sessions as disabled options.
   // Submission still applies the existing feature-wide execution gate.
   assertManagedRunCanStart(input.projectId, input.featureId, false)
@@ -314,6 +321,7 @@ function buildManagedRunDecisionFacts(
     initialInspection: !run.decisionBaseline,
     ...(run.decisionBaseline?.nodeId ? { previousNodeId: run.decisionBaseline.nodeId } : {}),
     providerRetryCount: run.providerRetryCount,
+    totalRetryCount: run.totalRetryCount ?? 0,
     ...(terminal?.contextUsage
       ? {
           contextInputTokens: terminal.contextUsage.inputTokens,
@@ -332,22 +340,22 @@ function buildManagedRunDecisionFacts(
   }
 }
 
-function scheduleProviderRetry(
+async function scheduleProviderRetry(
   run: ManagedRunSnapshot,
   delivery: AgentRunDelivery,
-  decisionEventId: string
-): void {
+  decisionEventId: string,
+  retryPlan: ManagedProviderRetryPlan
+): Promise<void> {
   if (isManagedRunStopRequested(run)) return
-  const retryNumber = run.providerRetryCount + 1
-  const retryPlan = resolveProviderRetryPlan(run.providerRetryCount)
-  if (!retryPlan || !run.currentSession?.threadId || !run.decisionBaseline?.nodeId) {
-    void markTerminal(
+  const retryNumber = retryPlan.retryNumber
+  if (!run.currentSession?.threadId || !run.decisionBaseline?.nodeId) {
+    await markTerminal(
       run,
       "failed",
-      "模型服务重试已达到上限",
+      "模型服务重试缺少当前会话或阶段基线，已结束托管",
       "run_failed",
       decisionEventId,
-      "provider_retry_limit_exceeded"
+      "provider_retry_missing_session"
     )
     return
   }
@@ -358,7 +366,6 @@ function scheduleProviderRetry(
     {
       ...run,
       status: "running",
-      providerRetryCount: retryNumber,
       nextRetryAt
     },
     {
@@ -370,7 +377,7 @@ function scheduleProviderRetry(
       retryNumber,
       retryAt: nextRetryAt,
       delayMs,
-      reasonCode: `provider_error_${retryNumber}_of_3`,
+      reasonCode: `provider_error_${retryNumber}_of_${MAX_MANAGED_PROVIDER_RETRIES}`,
       summary: `${delayMs / 1000} 秒后在原会话自动发送“继续当前任务”`
     }
   )
@@ -431,7 +438,7 @@ async function processProviderRetry(
         scope: "stage",
         nodeId: record.snapshot.decisionBaseline?.nodeId,
         threadId: record.snapshot.currentSession?.threadId,
-        retryNumber: record.snapshot.providerRetryCount,
+        retryNumber: record.snapshot.providerRetryCount + 1,
         summary: "模型服务重试等待时间已到"
       })
       try {
@@ -467,16 +474,17 @@ async function processProviderRetry(
         feature,
         terminal: {
           outcome: "error",
-          endReason: { code: "provider_error" }
+          endReason: { code: "provider_error", retryable: true }
         }
       })
       if (inspectedDecision.policyResult.type !== "provider_retry") {
-        const running = managedRunStore.updateSnapshot({
-          ...record.snapshot,
-          status: "running",
-          nextRetryAt: undefined
+        await finishManagedRunFromDecision(record.snapshot, sourceEvent, {
+          ...inspectedDecision,
+          policyResult: {
+            ...inspectedDecision.policyResult,
+            facts: buildManagedRunDecisionFacts(record.snapshot, feature)
+          }
         })
-        await inspectAndLaunch(running, delivery, sourceEvent)
         return
       }
       const currentThreadId = record.snapshot.currentSession?.threadId
@@ -503,23 +511,27 @@ async function processProviderRetry(
         return
       }
 
-      const retryDecision = recordManagedRunDecision({
-        run: { ...record.snapshot, status: "running", nextRetryAt: undefined },
-        sourceEvent,
-        policyResult: {
-          type: "provider_retry",
-          proposedAction: "continue_current_thread",
-          reasonCode: `provider_error_${record.snapshot.providerRetryCount}_of_3`,
-          facts: buildManagedRunDecisionFacts(record.snapshot, feature)
-        },
-        decisionAction: "continue_current_thread",
-        summary: "在原会话继续模型服务重试",
-        sourceThreadId: currentThreadId
-      })
-      const running = retryDecision.run
-      if (isManagedRunStopRequested(running)) return
+      let running = record.snapshot
       try {
-        await sendManagedProviderRetry(currentThreadId, delivery)
+        const prepared = prepareManagedProviderRetryRun(currentThreadId, delivery)
+        const counted = await prepareManagedRetryAttempt(running, sourceEvent, "provider")
+        if (!counted) return
+        running = counted
+        const retryDecision = recordManagedRunDecision({
+          run: counted,
+          sourceEvent,
+          policyResult: {
+            type: "provider_retry",
+            proposedAction: "continue_current_thread",
+            reasonCode: `provider_error_${counted.providerRetryCount}_of_${MAX_MANAGED_PROVIDER_RETRIES}`,
+            facts: buildManagedRunDecisionFacts(counted, feature)
+          },
+          decisionAction: "continue_current_thread",
+          summary: "在原会话继续模型服务重试",
+          sourceThreadId: currentThreadId
+        })
+        running = retryDecision.run
+        await startPreparedManagedAgentRun(prepared)
         const published = managedRunStore.updateSnapshot(running, {
           type: "session_continued",
           scope: "stage",
@@ -530,14 +542,15 @@ async function processProviderRetry(
         })
         publishManagedRunChanged(lastRunSummary(published))
       } catch (error) {
-        await markTerminal(
-          running,
-          "failed",
-          error instanceof Error ? error.message : String(error),
-          "run_failed",
-          retryDecision.event.eventId,
-          "provider_retry_action_failed"
-        )
+        await finishManagedRunFromDecision(running, sourceEvent, {
+          policyResult: {
+            type: "provider_retry",
+            proposedAction: "fail_managed_run",
+            reasonCode: "provider_retry_action_failed",
+            facts: buildManagedRunDecisionFacts(running, feature)
+          },
+          summary: error instanceof Error ? error.message : String(error)
+        })
       }
     }
   )
@@ -590,6 +603,92 @@ async function markTerminal(
   publishManagedRunChanged(lastRunSummary(persisted))
 }
 
+async function finishManagedRunFromDecision(
+  run: ManagedRunSnapshot,
+  sourceEvent: ManagedRunSourceRef,
+  evaluation: ManagedRunPolicyEvaluation
+): Promise<void> {
+  let terminalEvaluation = evaluation
+  const action = evaluation.policyResult.proposedAction
+  if (action !== "fail_managed_run" && action !== "complete_managed_run") {
+    console.warn("[ManagedRun] Unexpected terminal decision:", evaluation.policyResult)
+    terminalEvaluation = {
+      policyResult: {
+        type: "run_termination",
+        proposedAction: "fail_managed_run",
+        reasonCode: "controller_processing_failed"
+      },
+      summary: "托管重试收到无法执行的决策，已结束托管，请检查后重新开始"
+    }
+  }
+  const terminalAction =
+    terminalEvaluation.policyResult.proposedAction === "complete_managed_run"
+      ? "complete_managed_run"
+      : "fail_managed_run"
+  const decision = recordManagedRunDecision({
+    run,
+    sourceEvent,
+    policyResult: terminalEvaluation.policyResult,
+    decisionAction: terminalAction,
+    summary: terminalEvaluation.summary
+  })
+  await markTerminal(
+    decision.run,
+    terminalAction === "complete_managed_run" ? "completed" : "failed",
+    terminalEvaluation.summary,
+    terminalAction === "complete_managed_run" ? "run_completed" : "run_failed",
+    decision.event.eventId,
+    terminalEvaluation.policyResult.reasonCode
+  )
+}
+
+/** Called under the existing Feature lock, immediately before an actual retry attempt. */
+async function prepareManagedRetryAttempt(
+  run: ManagedRunSnapshot,
+  sourceEvent: ManagedRunSourceRef,
+  kind: "provider" | "business"
+): Promise<ManagedRunSnapshot | null> {
+  const record = managedRunStore.getRun(run)
+  const current = record.snapshot
+  if (
+    !current ||
+    record.corrupt ||
+    current.status !== "running" ||
+    isManagedRunStopRequested(current)
+  ) {
+    return null
+  }
+  const limit = resolveManagedRunRetryLimit(current)
+  if (limit) {
+    await finishManagedRunFromDecision(current, sourceEvent, limit)
+    return null
+  }
+  const counted = managedRunStore.updateSnapshot({
+    ...current,
+    totalRetryCount: (current.totalRetryCount ?? 0) + 1,
+    providerRetryCount: current.providerRetryCount + (kind === "provider" ? 1 : 0),
+    nextRetryAt: undefined
+  })
+  publishManagedRunChanged(lastRunSummary(counted))
+  return counted
+}
+
+/** Other facts retain the original decision snapshot; only counters reflect this execution attempt. */
+function withCurrentRetryCounts(
+  policyResult: ManagedRunPolicyResult,
+  run: ManagedRunSnapshot
+): ManagedRunPolicyResult {
+  if (!policyResult.facts) return policyResult
+  return {
+    ...policyResult,
+    facts: {
+      ...policyResult.facts,
+      providerRetryCount: run.providerRetryCount,
+      totalRetryCount: run.totalRetryCount ?? 0
+    }
+  }
+}
+
 function hasPendingCoordinatorWork(threadId: string): boolean {
   return (
     coordinatorWorkerManager.hasRunningWorkersForThread(threadId) ||
@@ -604,7 +703,8 @@ async function inspectAndLaunch(
   sourceEvent: ManagedRunSourceRef,
   terminal?: Pick<AgentTurnEndEvent, "outcome" | "endReason" | "contextUsage">,
   initialUserMessage?: string,
-  existingThreadId?: string
+  existingThreadId?: string,
+  useReservedWorkspace = false
 ): Promise<void> {
   if (isManagedRunStopRequested(run)) return
   const feature = await inspectHarnessManagedFeatureStatus(run.projectId, run.featureId)
@@ -694,18 +794,23 @@ async function inspectAndLaunch(
     return
   }
   if (policyResult.proposedAction === "schedule_provider_retry") {
-    if (!resolveProviderRetryPlan(decidedRun.providerRetryCount)) {
-      await markTerminal(
-        decidedRun,
-        "failed",
-        "模型服务重试已达到上限",
-        "run_failed",
-        decision.event.eventId,
-        "provider_retry_limit_exceeded"
-      )
+    if (!evaluation.providerRetryPlan) {
+      await finishManagedRunFromDecision(decidedRun, sourceEvent, {
+        policyResult: {
+          type: "run_termination",
+          proposedAction: "fail_managed_run",
+          reasonCode: "controller_processing_failed"
+        },
+        summary: "模型服务重试决策缺少执行计划，已结束托管"
+      })
       return
     }
-    scheduleProviderRetry(decidedRun, delivery, decision.event.eventId)
+    await scheduleProviderRetry(
+      decidedRun,
+      delivery,
+      decision.event.eventId,
+      evaluation.providerRetryPlan
+    )
     return
   }
 
@@ -742,6 +847,7 @@ async function inspectAndLaunch(
     nodeId: feature.currentNodeId,
     nextAction,
     workspacePath,
+    modelSelection: decidedRun.modelSelection,
     delivery
   }
   if (isManagedRunStopRequested(decidedRun)) return
@@ -753,9 +859,10 @@ async function inspectAndLaunch(
       const session = await requireIdleManagedSession({
         projectId: run.projectId,
         featureId: run.featureId,
-        threadId: existingThreadId
+        threadId: existingThreadId,
+        launchWorkspacePath: useReservedWorkspace ? workspacePath : undefined
       })
-      if (session.workspacePath !== workspacePath) {
+      if (!useReservedWorkspace && session.workspacePath !== workspacePath) {
         throw new Error("所选会话的工作区已变化，请重新选择后再开启托管")
       }
       if (isManagedRunStopRequested(decidedRun)) return
@@ -773,7 +880,19 @@ async function inspectAndLaunch(
           nextActionHash: feature.nextActionHash
         }
       })
-      bindExistingManagedSession(session, run.runId, feature.currentNodeId)
+      bindExistingManagedSession(
+        session,
+        run.runId,
+        feature.currentNodeId,
+        useReservedWorkspace ? workspacePath : undefined
+      )
+      if (useReservedWorkspace && session.workspacePath !== workspacePath) {
+        for (const window of BrowserWindow.getAllWindows()) {
+          if (!window.isDestroyed() && !window.webContents.isDestroyed()) {
+            window.webContents.send("threads:changed")
+          }
+        }
+      }
       await startPreparedManagedAgentRun(preparedRun, {
         source: "desktop",
         verifyResolvedThread: ({ workspacePath: resolvedWorkspacePath, metadata }) => {
@@ -872,9 +991,11 @@ export async function startManagedRun(input: ManagedRunStartRequest): Promise<Ma
           threadId: existingThreadId
         })
       : undefined
-    const workspacePath =
-      existingSession?.workspacePath ??
-      (typeof input.workspacePath === "string" ? input.workspacePath.trim() : "")
+    const requestedWorkspacePath =
+      typeof input.workspacePath === "string" ? input.workspacePath.trim() : ""
+    const workspacePath = input.scheduledStartId
+      ? requestedWorkspacePath
+      : (existingSession?.workspacePath ?? requestedWorkspacePath)
     if (!workspacePath) {
       throw new Error("请选择本次托管使用的会话工作区")
     }
@@ -887,9 +1008,15 @@ export async function startManagedRun(input: ManagedRunStartRequest): Promise<Ma
     if (!workspaceDirectoryExists) {
       throw new Error("所选会话工作区不存在或不是文件夹")
     }
-    assertManagedRunCanStart(input.projectId, input.featureId)
+    managedRunScheduler.assertCanStart(input.projectId, input.featureId, input.scheduledStartId)
+    assertManagedRunCanStart(input.projectId, input.featureId, !input.scheduledStartId)
 
-    const created = managedRunStore.createRun(input.projectId, input.featureId, workspacePath)
+    const created = managedRunStore.createRun(
+      input.projectId,
+      input.featureId,
+      workspacePath,
+      input.modelSelection
+    )
     const sourceEvent = managedRunStore.appendEvent(created, {
       type: "run_started",
       scope: "global",
@@ -908,7 +1035,8 @@ export async function startManagedRun(input: ManagedRunStartRequest): Promise<Ma
         sourceEvent,
         undefined,
         input.initialUserMessage,
-        existingThreadId
+        existingThreadId,
+        Boolean(input.scheduledStartId)
       )
     } catch (error) {
       const failed = recordManagedRunDecision({
@@ -1176,6 +1304,12 @@ export async function resolveManagedBizRetryDecision(
       return { applied: true, message: "托管运行已停止" }
     }
 
+    const retryLimit = resolveManagedRunRetryLimit(run)
+    if (retryLimit) {
+      await finishManagedRunFromDecision(run, input.sourceEvent, retryLimit)
+      return { applied: false, message: MANAGED_RUN_RETRY_LIMIT_MESSAGE }
+    }
+
     if (input.choice === "continue") {
       if (
         run.currentSession?.threadId !== input.originThreadId ||
@@ -1191,19 +1325,21 @@ export async function resolveManagedBizRetryDecision(
         input.delivery,
         input.message?.trim() || "继续当前任务"
       )
+      const retryRun = await prepareManagedRetryAttempt(run, input.sourceEvent, "business")
+      if (!retryRun) return { applied: false, message: "托管运行已停止，未执行重试。" }
       try {
         await startPreparedManagedAgentRun(prepared)
       } catch (error) {
-        return failManagedBizRetryDecision(input, run, error)
+        return failManagedBizRetryDecision(input, retryRun, error)
       }
       try {
         if (!finishManagedBizRetryDecision(input)) {
           throw new Error("消息已提交，但决策通知已被其他路径结束")
         }
         const decision = recordManagedRunDecision({
-          run,
+          run: retryRun,
           sourceEvent: input.sourceEvent,
-          policyResult: input.policyResult,
+          policyResult: withCurrentRetryCounts(input.policyResult, retryRun),
           decisionActor: "user",
           decisionChannel: input.channel,
           notificationId: input.decisionId,
@@ -1254,17 +1390,25 @@ export async function resolveManagedBizRetryDecision(
       nodeId: feature.currentNodeId,
       nextAction,
       workspacePath,
+      modelSelection: run.modelSelection,
       delivery: input.delivery,
       imRoute: input.channel === "im" ? input.route : undefined
     }
     const prepared = await prepareManagedHarnessSession(sessionInput)
-    const created = await createManagedHarnessSession(
-      sessionInput,
-      prepared.skillName,
-      prepared.skillDescription
-    )
+    const retryRun = await prepareManagedRetryAttempt(run, input.sourceEvent, "business")
+    if (!retryRun) return { applied: false, message: "托管运行已停止，未执行重试。" }
+    let created: Awaited<ReturnType<typeof createManagedHarnessSession>>
+    try {
+      created = await createManagedHarnessSession(
+        sessionInput,
+        prepared.skillName,
+        prepared.skillDescription
+      )
+    } catch (error) {
+      return failManagedBizRetryDecision(input, retryRun, error)
+    }
     const executionRun: ManagedRunSnapshot = {
-      ...run,
+      ...retryRun,
       currentSession: { threadId: created.threadId },
       decisionBaseline: {
         nodeId: feature.currentNodeId,
@@ -1273,6 +1417,7 @@ export async function resolveManagedBizRetryDecision(
         nodeStatus: feature.currentNodeStatus,
         nextActionHash: feature.nextActionHash
       },
+      providerRetryCount: 0,
       nextRetryAt: undefined
     }
     try {
@@ -1290,7 +1435,7 @@ export async function resolveManagedBizRetryDecision(
         const decision = recordManagedRunDecision({
           run: executionRun,
           sourceEvent: input.sourceEvent,
-          policyResult: input.policyResult,
+          policyResult: withCurrentRetryCounts(input.policyResult, executionRun),
           decisionActor: "user",
           decisionChannel: input.channel,
           notificationId: input.decisionId,

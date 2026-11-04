@@ -9,6 +9,7 @@ import type {
   ManagedRunSummary
 } from "../../shared/harness-board-types"
 import type { ManagedRunStore } from "./managed-run-store"
+import { resolveHydratedThreadModel } from "../../shared/thread-model-selection"
 
 const dependencies = vi.hoisted(() => ({
   store: undefined as ManagedRunStore | undefined,
@@ -28,7 +29,15 @@ const dependencies = vi.hoisted(() => ({
   grant: vi.fn(),
   send: vi.fn(),
   getThread: vi.fn(),
-  getThreadCore: vi.fn()
+  getThreadCore: vi.fn(),
+  modelConfig: vi.fn(),
+  assertScheduleCanStart: vi.fn()
+}))
+vi.mock("../models/registry", () => ({
+  getModelConfigByRef: dependencies.modelConfig
+}))
+vi.mock("./managed-run-scheduler", () => ({
+  managedRunScheduler: { assertCanStart: dependencies.assertScheduleCanStart }
 }))
 vi.mock("electron", () => ({ BrowserWindow: { getAllWindows: () => [] } }))
 vi.mock("../db", () => ({
@@ -123,6 +132,9 @@ vi.mock("./managed-run-store", async (importOriginal) => {
 })
 
 import { ManagedRunStore as RunStore } from "./managed-run-store"
+import { getManagedRunModelOverride } from "./managed-run-model"
+import { IdleModelServiceHoursError } from "../../shared/idle-model-service-window"
+import { createManagedHarnessSession } from "./auto-mode-action-executor"
 import {
   handleAutoModeAgentCancelled,
   handleAutoModeAgentTurnEnd,
@@ -231,6 +243,7 @@ beforeEach(() => {
   dependencies.inspect.mockImplementation(async () => feature)
   dependencies.requestDecision.mockResolvedValue(true)
   dependencies.deliveryAvailable.mockReturnValue(true)
+  dependencies.modelConfig.mockReturnValue({ apiKey: "test-key" })
   dependencies.grant.mockResolvedValue({ required: false, granted: false })
   dependencies.startAgent.mockImplementation(async (request) => ({
     threadId: request.threadId,
@@ -258,6 +271,132 @@ beforeEach(() => {
 afterEach(() => rmSync(root, { recursive: true, force: true }))
 
 describe("start managed mode with an existing session", () => {
+  it("allows managed UAT Ultra sessions outside production service hours", async () => {
+    await start({ modelSelection: "ultra" })
+    vi.useFakeTimers({ toFake: ["Date"] })
+    vi.setSystemTime(new Date("2026-11-04T12:00:00+08:00"))
+    try {
+      dependencies.modelConfig.mockReturnValue({
+        apiKey: "test-key",
+        transport: "idle-gateway",
+        idleModelEnvironment: "uat"
+      })
+      expect(getManagedRunModelOverride("origin")).toBe("builtin:idle-ultra")
+      expect(metadata().model).toBe("original-model")
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it("keeps service-hours errors non-retryable for managed Ultra sessions", async () => {
+    await start({ modelSelection: "ultra" })
+    vi.useFakeTimers({ toFake: ["Date"] })
+    vi.setSystemTime(new Date("2026-11-04T07:00:00+08:00"))
+    try {
+      dependencies.modelConfig.mockReturnValue({ apiKey: "test-key", transport: "idle-gateway" })
+      expect(() => getManagedRunModelOverride("origin")).toThrow(IdleModelServiceHoursError)
+      expect(metadata().model).toBe("original-model")
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it("uses the explicit creation model without reading the run store inside the factory", async () => {
+    const read = vi.spyOn(dependencies.store!, "getRun").mockImplementation(() => {
+      throw new Error("factory must not read run state")
+    })
+    try {
+      const created = await createManagedHarnessSession({
+        projectId: "project",
+        featureId: "feature",
+        runId: "run",
+        nodeId: "dev.code",
+        nextAction: { slashSkill: "dev-code", userMessage: "继续" },
+        workspacePath: root,
+        delivery,
+        modelSelection: "ultra"
+      })
+      expect(created.thread.metadata?.model).toBe("builtin:idle-ultra")
+      expect(read).not.toHaveBeenCalled()
+    } finally {
+      read.mockRestore()
+    }
+  })
+
+  it.each([
+    [null, "请检查内置模型配置和登录用户信息"],
+    [{ unavailableReason: "请完善八位 SAP 工号" }, "请完善八位 SAP 工号"]
+  ])(
+    "reports unavailable Ultra configuration without selecting another model: %s",
+    async (config, reason) => {
+      await start({ modelSelection: "ultra" })
+      dependencies.modelConfig.mockReturnValue(config)
+      expect(() => getManagedRunModelOverride("origin")).toThrow(reason as string)
+      expect(metadata().model).toBe("original-model")
+    }
+  )
+
+  it("uses Ultra for an existing session only while its managed run is active", async () => {
+    dependencies.startAgent.mockImplementationOnce(async (request) => {
+      expect(getManagedRunModelOverride(request.threadId)).toBe("builtin:idle-ultra")
+      return { threadId: request.threadId, completion: Promise.resolve() }
+    })
+    const run = await start({ modelSelection: "ultra" })
+    expect(run.modelSelection).toBe("ultra")
+    expect(metadata().model).toBe("original-model")
+    expect(getManagedRunModelOverride("origin")).toBe("builtin:idle-ultra")
+    dependencies.threads.set("previous", {
+      ...dependencies.threads.get("origin")!,
+      thread_id: "previous"
+    })
+    expect(getManagedRunModelOverride("previous")).toBeUndefined()
+    await stopManagedRun({ projectId: "project", featureId: "feature", runId: run.runId })
+    expect(getManagedRunModelOverride("origin")).toBeUndefined()
+    expect(metadata().model).toBe("original-model")
+  })
+
+  it.each([undefined, "reservation"])(
+    "persists Ultra for a newly created session, including scheduled startup: %s",
+    async (scheduledStartId) => {
+      dependencies.startAgent.mockImplementationOnce(async (request) => {
+        expect(request.threadId).toBe("created")
+        expect(request.modelId).toBe("builtin:idle-ultra")
+        expect(getManagedRunModelOverride(request.threadId)).toBeUndefined()
+        expect(getManagedRunModelOverride(request.threadId, request.managedExecution)).toBe(
+          "builtin:idle-ultra"
+        )
+        return { threadId: request.threadId, completion: Promise.resolve() }
+      })
+      const run = await start({
+        existingThreadId: undefined,
+        workspacePath: root,
+        modelSelection: "ultra",
+        scheduledStartId
+      })
+      expect(run.status).toBe("running")
+      expect(run.modelSelection).toBe("ultra")
+      expect(run.currentSession?.threadId).toBe("created")
+      const createdMetadata = JSON.parse(dependencies.threads.get("created")!.metadata!)
+      expect(createdMetadata.model).toBe("builtin:idle-ultra")
+      expect(resolveHydratedThreadModel(createdMetadata, "pinned").modelId).toBe(
+        "builtin:idle-ultra"
+      )
+    }
+  )
+
+  it("retains the selected Ultra model after a new managed session fails to start", async () => {
+    dependencies.startAgent.mockRejectedValueOnce(new Error("当前时段不允许调用该接口"))
+    const run = await start({
+      existingThreadId: undefined,
+      workspacePath: root,
+      modelSelection: "ultra",
+      scheduledStartId: "reservation"
+    })
+    expect(run.status).toBe("failed")
+    const createdMetadata = JSON.parse(dependencies.threads.get("created")!.metadata!)
+    expect(resolveHydratedThreadModel(createdMetadata, "pinned").modelId).toBe("builtin:idle-ultra")
+  })
+
   it("creates a new run, preserves history and configuration, and binds ownership before starting", async () => {
     const oldRecord = JSON.stringify(dependencies.store!.getRun(oldRun))
     dependencies.startAgent.mockImplementationOnce(async (request) => {
@@ -414,6 +553,7 @@ describe("start managed mode with an existing session", () => {
       "实现代码"
     )
     expect(dependencies.createThread).toHaveBeenCalledOnce()
+    expect(dependencies.createThread.mock.calls[0][0]).not.toHaveProperty("model")
     expect(metadata().harnessFeature.runId).toBe(oldRun.runId)
   })
 
@@ -569,5 +709,94 @@ describe("start managed mode with an existing session", () => {
     await expect(start({ existingThreadId: undefined, workspacePath: root })).rejects.toThrow(
       "已有运行中的会话"
     )
+  })
+
+  it("starts a scheduled new session even when another session under the feature is active", async () => {
+    dependencies.active.mockReturnValue(true)
+    const run = await start({
+      existingThreadId: undefined,
+      workspacePath: root,
+      scheduledStartId: "reservation"
+    })
+    expect(run.status).toBe("running")
+    expect(dependencies.createThread).toHaveBeenCalledTimes(1)
+    expect(dependencies.assertScheduleCanStart).toHaveBeenCalledWith(
+      "project",
+      "feature",
+      "reservation"
+    )
+  })
+
+  it("still rejects a busy selected session when startup comes from a reservation", async () => {
+    dependencies.active.mockReturnValue(true)
+    await expect(start({ scheduledStartId: "reservation" })).rejects.toThrow("所选会话仍在运行")
+    expect(dependencies.startAgent).not.toHaveBeenCalled()
+  })
+
+  it("still rejects a second managed run when startup comes from a reservation", async () => {
+    await start()
+    await expect(
+      start({
+        existingThreadId: undefined,
+        workspacePath: root,
+        scheduledStartId: "reservation"
+      })
+    ).rejects.toThrow("已有运行中的托管 Run")
+  })
+
+  it("uses the reserved workspace for an existing session and clears the replaced workspace context", async () => {
+    updateOrigin({
+      metadata: JSON.stringify({
+        ...metadata(),
+        workspacePath: tmpdir(),
+        isWorktree: true,
+        gitRoot: tmpdir(),
+        worktreeBranch: "other",
+        llmModifiedFiles: ["other.txt"],
+        gitContext: { workspacePath: tmpdir() }
+      })
+    })
+    dependencies.startAgent.mockImplementationOnce(
+      async (request, _delivery, context: AgentRunExecutionContext) => {
+        const current = metadata()
+        expect(current.workspacePath).toBe(root)
+        expect(current.isWorktree).toBeUndefined()
+        expect(current.gitRoot).toBeUndefined()
+        expect(current.worktreeBranch).toBeUndefined()
+        expect(current.llmModifiedFiles).toBeUndefined()
+        expect(current.gitContext).toBeUndefined()
+        expect(
+          context.verifyResolvedThread?.({ workspacePath: root, metadata: current })
+        ).toBeNull()
+        return { threadId: request.threadId, completion: Promise.resolve() }
+      }
+    )
+    const run = await start({ scheduledStartId: "reservation", workspacePath: root })
+    expect(run.status).toBe("running")
+    expect(run.workspacePath).toBe(root)
+    expect(dependencies.createThread).not.toHaveBeenCalled()
+    expect(dependencies.workflowBusy).toHaveBeenCalledWith("origin", root)
+  })
+
+  it("does not fall back to the current workspace if the reserved directory no longer exists", async () => {
+    await expect(
+      start({
+        scheduledStartId: "reservation",
+        workspacePath: join(root, "removed")
+      })
+    ).rejects.toThrow("所选会话工作区不存在")
+    expect(metadata().workspacePath).toBe(root)
+    expect(dependencies.startAgent).not.toHaveBeenCalled()
+  })
+
+  it("keeps the original workspace when the reserved workspace has background workflow work", async () => {
+    updateOrigin({ metadata: JSON.stringify({ ...metadata(), workspacePath: tmpdir() }) })
+    dependencies.workflowBusy.mockImplementation(
+      async (_threadId: string, workspace: string) => workspace === root
+    )
+    const run = await start({ scheduledStartId: "reservation", workspacePath: root })
+    expect(run.status).toBe("failed")
+    expect(metadata().workspacePath).toBe(tmpdir())
+    expect(dependencies.startAgent).not.toHaveBeenCalled()
   })
 })
