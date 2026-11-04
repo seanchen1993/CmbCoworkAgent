@@ -15,6 +15,21 @@ const model = (
 })
 
 describe("model names without changing model references", () => {
+  it("does not label a selectable model outside service hours as missing credentials", () => {
+    const entry = {
+      ...model("builtin:idle", "闲时模型", "ultra", false),
+      selectable: true,
+      unavailableReason: "outside service hours"
+    }
+    expect(resolveModelDisplay("builtin:idle", [entry], true)).toMatchObject({
+      name: "闲时模型",
+      note: "暂不可用",
+      available: false
+    })
+    expect(resolveModelDisplay("builtin:idle", [{ ...entry, selectable: false }], true).note).toBe(
+      "配置待完善"
+    )
+  })
   it("keeps null snapshots neutral even when appStore has a name", () => {
     expect(resolveModelDisplay("custom:b", [model("custom:b", "模型 B")], false)).toEqual({
       name: "模型 B",

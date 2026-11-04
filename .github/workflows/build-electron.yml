@@ -767,6 +767,18 @@ jobs:
         timeout-minutes: 5
         run: npm run test:mods:approvals
 
+      - name: Verify merged model selection and market plugin journeys (Windows)
+        if: matrix.platform == 'win'
+        timeout-minutes: 5
+        shell: pwsh
+        run: |
+          npx vitest run src/renderer/src/lib/model-display.test.ts src/renderer/src/lib/market-plugin-install.test.ts
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node --import tsx tests/model-switcher-browser.spec.ts
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node --import tsx tests/project-plugin-browser.spec.ts
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Validate Mods in Windows package
         if: matrix.platform == 'win'
         timeout-minutes: 20

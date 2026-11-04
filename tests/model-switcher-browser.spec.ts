@@ -278,7 +278,7 @@ async function main(): Promise<void> {
     await closedIdleOption.click()
     assert.equal((await settle()).currentModel, "builtin:idle-ultra")
     assert.equal((await settle()).writes.at(-1), "builtin:idle-ultra")
-    await page.getByRole("button", { name: "闲时模型 Ultra", exact: true }).click()
+    await page.getByRole("button", { name: /^闲时模型 Ultra.*暂不可用$/ }).click()
     await page.evaluate(() =>
       (window as unknown as FixtureWindow).modelSwitcherFixture.idleCatalog(false, false)
     )

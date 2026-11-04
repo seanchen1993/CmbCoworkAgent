@@ -1,13 +1,16 @@
 import type { ModelConfig } from "../types"
 
-export type ModelDisplayConfig = Pick<ModelConfig, "id" | "source" | "model" | "name" | "available">
+export type ModelDisplayConfig = Pick<
+  ModelConfig,
+  "id" | "source" | "model" | "name" | "available" | "selectable" | "unavailableReason"
+>
 
 export interface ModelDisplay {
   name: string
   note: string | null
   matchedModelId: string | null
   state: "unspecified" | "unconfirmed" | "matched" | "not-found" | "ambiguous"
-  /** Cached key metadata, not endpoint health. */
+  /** Catalog availability, not a live endpoint health check. */
   available: boolean | null
 }
 
@@ -77,7 +80,13 @@ export function resolveModelDisplay(
     }
   return {
     name: matched.name.trim() || fallback,
-    note: matched.available ? null : "未配置密钥",
+    note: matched.available
+      ? null
+      : matched.selectable
+        ? "暂不可用"
+        : matched.unavailableReason
+          ? "配置待完善"
+          : "未配置密钥",
     matchedModelId: matched.id,
     state: "matched",
     available: matched.available
