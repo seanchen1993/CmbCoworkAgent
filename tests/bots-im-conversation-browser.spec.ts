@@ -203,6 +203,9 @@ async function main() {
       )
     )
     assert.equal(await page.locator(".bots-conversation textarea").count(), 0)
+    const unread = (id: string) => page.locator(`[data-bot-row-key="im:${id}"] .bot-unread-dot`)
+    await unread("group-a").waitFor({ state: "detached" })
+    assert.equal(await unread("group-b").count(), 1)
     const artifacts = join(process.env.BOT_TEST_APP_OUT!, "artifacts")
     assert.equal(await page.getByRole("button", { name: "执行详情", exact: true }).count(), 0)
     await page.getByRole("button", { name: "查看执行过程", exact: true }).click()
@@ -221,12 +224,62 @@ async function main() {
         document.querySelector('[data-testid="native-execution"]')?.getAttribute("data-thread") ===
         "im-b"
     )
+    // Opening a group with execution details already enabled must acknowledge it too.
+    await unread("group-b").waitFor({ state: "detached" })
+    await page.evaluate(() => {
+      const f = (window as any).fixture
+      for (const group of f.groups) {
+        group.activity.version++
+        group.activity.unread = true
+      }
+      f.bump()
+    })
+    await page.waitForFunction(() =>
+      (window as any).fixture.reads.some(
+        ([kind, id, version]: any[]) => kind === "im" && id === "group-b" && version === 3
+      )
+    )
+    await unread("group-b").waitFor({ state: "detached" })
+    assert.equal(await unread("group-a").count(), 1)
+    assert.equal(
+      await page.evaluate(
+        () => (window as any).fixture.calls.filter((call: any) => call.id === "group-b").length
+      ),
+      0,
+      "Execution details must not load a second copy of the IM history just to mark it read"
+    )
+    // Background updates stay unread until the window regains focus.
+    await page.evaluate(() => {
+      Object.defineProperty(document, "hasFocus", {
+        configurable: true,
+        value: Boolean.bind(null, false)
+      })
+      const f = (window as any).fixture
+      f.groups[1].activity.version++
+      f.groups[1].activity.unread = true
+      f.bump()
+    })
+    await unread("group-b").waitFor({ state: "visible" })
+    assert.equal(
+      await page.evaluate(() =>
+        (window as any).fixture.reads.some(
+          ([kind, id, version]: any[]) => kind === "im" && id === "group-b" && version === 4
+        )
+      ),
+      false
+    )
+    await page.evaluate(() => {
+      delete (document as any).hasFocus
+      window.dispatchEvent(new Event("focus"))
+    })
+    await unread("group-b").waitFor({ state: "detached" })
     await page.getByRole("button", { name: "招乎群聊：产品协作群", exact: true }).click()
     await page.waitForFunction(
       () =>
         document.querySelector('[data-testid="native-execution"]')?.getAttribute("data-thread") ===
         "im-a"
     )
+    await unread("group-a").waitFor({ state: "detached" })
     await page.getByRole("button", { name: "收起执行过程", exact: true }).click()
     await page.getByLabel("产品协作群消息记录").waitFor({ state: "visible" })
     const taskSnapshot = previewTasks([

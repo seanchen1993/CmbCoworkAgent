@@ -255,7 +255,9 @@ export function BotImConversation({
         if (mounted.current && token === epoch.current) setLoading(false)
       })
   }, [client, bot.id, conversation.id, revision, retry, executionThreadId])
-  useBotReadState(client, presented)
+  // Execution details use the native thread instead of loading the IM feed.
+  // Acknowledge this selected group in either view, with the same focus/version guards.
+  useBotReadState(client, executionThreadId ? conversation.activity : presented)
   useLayoutEffect(() => {
     const node = scroll.current
     if (!node || executionThreadId) return

@@ -171,6 +171,12 @@ const client = {
   },
   markRead: async (...args: any[]) => {
     f.reads.push(args)
+    const [kind, id, version] = args
+    const group = kind === "im" ? groups.find((item) => item.id === id) : undefined
+    if (group?.activity.unread && version >= group.activity.version) {
+      group.activity.unread = false
+      f.bump()
+    }
   },
   open: async () => {},
   requestReceipts: async () => [],
