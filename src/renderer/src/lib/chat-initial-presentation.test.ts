@@ -94,6 +94,7 @@ function samplingFixture(siteCount: number, nativeCount: number, depth: number) 
   } as unknown as HTMLElement
   return {
     sites,
+    viewport,
     nativeRows,
     ancestors,
     hidden,
@@ -104,6 +105,14 @@ function samplingFixture(siteCount: number, nativeCount: number, depth: number) 
 }
 
 describe("initial chat presentation barrier", () => {
+  it("does not restart visible-text stabilization when only virtual overscan height changes", () => {
+    const f = samplingFixture(2, 0, 2)
+    const original = f.sample()
+    Object.defineProperty(f.viewport, "scrollHeight", { value: 1900 })
+    expect(f.sample()).toEqual(original)
+    f.viewport.scrollTop = 30
+    expect(f.sample().geometry).not.toBe(original.geometry)
+  })
   it("reads shared ancestor styles once per sample across site and native rows", () => {
     const f = samplingFixture(12, 4, 5)
     expect(f.sample().ready).toBe(true)

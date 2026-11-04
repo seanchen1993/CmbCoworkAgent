@@ -22,6 +22,10 @@ async function main() {
       <section id="visible" class="row">visible</section>
       <section id="contents" style="display:contents"><span>visible contents</span></section>
       <section id="offscreen" class="row" style="position:absolute;top:1500px">offscreen</section>
+      <div style="position:absolute;top:1600px;height:40px;width:400px">
+        <section id="scroll-contents" style="display:contents"><span>scrolling text</span></section>
+        <section id="shared-contents" style="display:contents"><span>second text</span></section>
+      </div>
       <section style="height:30px;overflow:hidden"><div style="height:100px"></div>
         <section id="clipped" style="display:contents"><span>clipped contents</span></section>
       </section>
@@ -49,6 +53,26 @@ async function main() {
       ["transparent", false],
       ["hidden", false]
     ])
+    await page.evaluate(`window.visibilityProbe = FunctionSiteVisibility.observeFunctionSiteVisibility(
+      document.getElementById('offscreen'))`)
+    assert.equal(await page.evaluate("window.visibilityProbe.visible()"), false)
+    await page.evaluate(`window.contentsProbe = FunctionSiteVisibility.observeFunctionSiteVisibility(
+      document.getElementById('scroll-contents'));
+      window.sharedProbe = FunctionSiteVisibility.observeFunctionSiteVisibility(
+      document.getElementById('shared-contents'));window.scrollTo(0,0)`)
+    await page.waitForFunction("!window.contentsProbe.visible() && !window.sharedProbe.visible()")
+    await page.evaluate("window.scrollTo(0,1400)")
+    await page.waitForFunction("window.contentsProbe.visible() && window.sharedProbe.visible()")
+    await page.evaluate("window.contentsProbe.close();window.scrollTo(0,0)")
+    await page.waitForFunction("!window.sharedProbe.visible()")
+    await page.evaluate("window.sharedProbe.close()")
+    await page.evaluate("window.scrollTo(0, 1200)")
+    await page.waitForFunction("window.visibilityProbe.visible()")
+    await page.evaluate("window.scrollTo(0, 0)")
+    await page.waitForFunction("!window.visibilityProbe.visible()")
+    await page.evaluate("window.visibilityProbe.close();window.scrollTo(0,1200)")
+    await page.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))))
+    assert.equal(await page.evaluate("window.visibilityProbe.visible()"), false)
     console.log("PASS actual contents/ancestor-clipping/viewport scheduling geometry")
   } finally {
     await browser.close()

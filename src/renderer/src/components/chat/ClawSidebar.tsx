@@ -24,6 +24,7 @@ import { ModsUsageSettingsEntry } from "../customize/ModsUsageSettingsEntry"
 import { ClawRecoveryApproval } from "./ClawRecoveryApproval"
 import { chatFunctionGroups } from "@/lib/chat-function-groups"
 import { useChatPluginAttribution } from "@/lib/use-chat-plugin-attribution"
+import { ChatPluginControls } from "./ChatPluginControls"
 
 export function ClawSidebar({
   threadId,
@@ -248,6 +249,13 @@ export function ClawSidebar({
             查看本聊天可用的功能，或按需调整配置。
           </p>
           <ModsUsageSettingsEntry disabled={disabled} />
+          {visible && tab === "configuration" && workspace && binding?.usageContext !== "project" && (
+            <ChatPluginControls threadId={threadId} workspace={workspace}
+              sources={binding?.capabilities ?? []}
+              plugins={installedPlugins} activeIds={usingSelection
+                ? effective?.plugins.map((plugin) => plugin.pluginId) ?? [] : []}
+              disabled={disabled} />
+          )}
           {binding && recovery.open && recovery.scope === recoveryScope && (
             <ClawRecoveryApproval threadId={threadId} binding={binding} disabled={disabled}
               onReload={() => flow.load()} />

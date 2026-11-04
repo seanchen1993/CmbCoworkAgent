@@ -31,3 +31,15 @@ it("preserves default highlighting and file diagnostics across independent recyc
       expect(render(rehypeChatHighlight, text)).toEqual(render(rehypeHighlight, text))
   expect(rehypeChatHighlight()).toBe(rehypeChatHighlight())
 })
+
+it("never reuses mutated syntax nodes or another document's diagnostics", () => {
+  const text = "```typescript\nconst isolated: number = 75\n```"
+  const expected = render(rehypeHighlight, text)
+  const first = render(rehypeChatHighlight, text)
+  first.tree.children.length = 0
+  expect(render(rehypeChatHighlight, text)).toEqual(expected)
+  expect(render(rehypeChatHighlight, "\n\n" + text)).toEqual(render(rehypeHighlight, "\n\n" + text))
+  const unknown = "```does-not-exist\nhello\n```"
+  expect(render(rehypeChatHighlight, unknown).messages).toHaveLength(1)
+  expect(render(rehypeChatHighlight, unknown).messages).toHaveLength(1)
+})

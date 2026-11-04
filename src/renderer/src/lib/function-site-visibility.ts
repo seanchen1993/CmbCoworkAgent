@@ -44,3 +44,49 @@ export function isFunctionSiteInViewport(element: HTMLElement | null): boolean {
   }
   return current === null && right > left && bottom > top
 }
+
+const observations = new Map<Element, Set<(visible: boolean) => void>>()
+let observer: IntersectionObserver | undefined
+
+/** One observer for mounted sites; queued reads consult a boolean, never scroll-time layout. */
+export function observeFunctionSiteVisibility(element: HTMLElement | null) {
+  let visible = isFunctionSiteInViewport(element)
+  // Transcript sites use display:contents. Observe the nearest layout box instead:
+  // observing the section itself would report zero area even when its text is visible.
+  let target = element
+  const view = element?.ownerDocument.defaultView
+  while (target && view?.getComputedStyle(target).display === "contents")
+    target = target.parentElement
+  const changed = (value: boolean) => { visible = value }
+  if (target && typeof IntersectionObserver !== "undefined") {
+    observer ??= new IntersectionObserver((entries) => {
+      for (const entry of entries) {
+        // The initial transcript is intentionally clipped until protected rows are ready.
+        // Preserve its initial geometry hint; clipping must not demote all cold visible rows.
+        if (entry.target.closest('[data-chat-initial-presentation="pending"]')) continue
+        for (const update of observations.get(entry.target) ?? [])
+          update(entry.isIntersecting && entry.intersectionRatio > 0)
+      }
+    })
+    const subscribers = observations.get(target) ?? new Set()
+    subscribers.add(changed)
+    observations.set(target, subscribers)
+    observer.observe(target)
+  }
+  return {
+    visible: () => visible,
+    close: () => {
+      if (!target) return
+      const subscribers = observations.get(target)
+      subscribers?.delete(changed)
+      if (!subscribers?.size) {
+        observer?.unobserve(target)
+        observations.delete(target)
+      }
+      if (!observations.size) {
+        observer?.disconnect()
+        observer = undefined
+      }
+    }
+  }
+}

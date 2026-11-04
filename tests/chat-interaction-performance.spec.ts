@@ -459,18 +459,49 @@ async function observe(page: Page, client: CDPSession, scenario: string, output:
     await page.mouse.wheel(0, -480)
     await page.waitForTimeout(24)
   }
+  const readableAfterJump: number[] = []
   for (const index of [0.1, 0.45, 0.2, 0.78, 0.3, 1].map((fraction) =>
     Math.round((messageCount - 1) * fraction)
   )) {
     await phase("jump:" + index)
-    await page.evaluate(
-      (index) =>
-        (window as unknown as { perfFixture: { jump(index: number): void } }).perfFixture.jump(
-          index
-        ),
-      index
-    )
-    await page.waitForTimeout(180)
+    const elapsed = await page.evaluate(async (index) => {
+      const viewport = document.querySelector<HTMLElement>("[data-perf-viewport]")!
+      const initialTop = viewport.scrollTop
+      const start = performance.now()
+      ;(window as unknown as { perfFixture: { jump(index: number): void } }).perfFixture.jump(index)
+      let stable = 0
+      while (performance.now() - start < 3000) {
+        await new Promise<void>((done) => requestAnimationFrame(() => done()))
+        const bounds = viewport.getBoundingClientRect()
+        const rows = [...viewport.querySelectorAll<HTMLElement>("[data-chat-message-id]")]
+          .filter((row) => {
+            const box = row.getBoundingClientRect()
+            return box.bottom > bounds.top && box.top < bounds.bottom
+          })
+        // The low-level virtual jump estimates unmeasured row heights. Measure the text
+        // actually on screen after movement, not accuracy of that provisional row estimate.
+        const moved = viewport.scrollTop !== initialTop || rows.some((row) =>
+          row.dataset.chatMessageId === `perf-${index}`)
+        const readable = moved && rows.length > 0 && rows.every((row) =>
+          row.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }) &&
+          !row.closest('[inert], [aria-hidden="true"]') &&
+          !row.querySelector("[data-function-site-pending]") && row.textContent?.includes("PERF_MESSAGE_")
+        )
+        stable = readable ? stable + 1 : 0
+        if (stable >= 2) return performance.now() - start
+      }
+      const bounds = viewport.getBoundingClientRect()
+      const rows = [...viewport.querySelectorAll<HTMLElement>("[data-chat-message-id]")].map((row) => {
+        const box = row.getBoundingClientRect()
+        return { id: row.dataset.chatMessageId, top: box.top, bottom: box.bottom,
+          pending: !!row.querySelector("[data-function-site-pending]"),
+          text: !!row.textContent?.includes("PERF_MESSAGE_") }
+      })
+      throw Error("Visible transcript did not become readable after fast history jump: " +
+        JSON.stringify({ index, viewport: { top: bounds.top, bottom: bounds.bottom }, rows }))
+    }, index)
+    readableAfterJump.push(elapsed)
+    assert(elapsed < 1500, `Visible message recovery exceeded 1500 ms: ${elapsed}`)
   }
   await phase("bump")
   const beforeUpdates = await page.evaluate(() => {
@@ -528,6 +559,7 @@ async function observe(page: Page, client: CDPSession, scenario: string, output:
   }))
   return {
     scenario,
+    readableAfterJump,
     ...measurements,
     unrelatedUpdates: {
       beforeCommits: beforeUpdates.commits,
@@ -748,6 +780,7 @@ async function main() {
       console.log(
         JSON.stringify({
           scenario: row.scenario,
+          readableAfterJump: row.readableAfterJump,
           fixtureBridge: scenario.bridge,
           transportCounters,
           wholeMessageLengths: wholeMessages.map((sample) => sample.length),

@@ -1,3 +1,5 @@
+type Priority = "ordinary" | "visible" | "interactive"
+
 /** Bounds UI-only IPC across virtualized rows; native tools and permission requests never use it. */
 export function createFunctionSiteQueue() {
   let active = 0
@@ -5,12 +7,17 @@ export function createFunctionSiteQueue() {
   let interactiveStreak = 0
   let visibleStreak = 0
   const pending: Array<{
-    priority: "ordinary" | "visible" | "interactive"
+    priority: Priority
+    readPriority?: () => Priority
     current: () => boolean
     stale: () => void
     start: () => void
   }> = []
   function pump(): void {
+    // Scroll can move an overscan row on screen while it waits. Reclassify pending
+    // work using observer state, without forcing layout or increasing IPC concurrency.
+    for (const entry of pending)
+      if (entry.readPriority) entry.priority = entry.readPriority()
     while (active < 4 && pending.length) {
       const interactive = pending.findIndex((entry) => entry.priority === "interactive")
       const visible = pending.findIndex((entry) => entry.priority === "visible")
@@ -44,7 +51,7 @@ export function createFunctionSiteQueue() {
     run<T>(
       current: () => boolean,
       work: () => Promise<T>,
-      priority: "ordinary" | "visible" | "interactive" = "ordinary"
+      priority: Priority | (() => Priority) = "ordinary"
     ): Promise<T | null> {
       // Revoked virtualized rows do not consume admission capacity for new visible rows.
       if (pending.length >= 256)
@@ -57,8 +64,9 @@ export function createFunctionSiteQueue() {
         }
       if (pending.length >= 256) return Promise.reject(new Error("MODS_UI_SITE_QUEUE_LIMIT"))
       return new Promise<T | null>((resolve, reject) => {
-        pending.push({
-          priority,
+        const entry = {
+          priority: typeof priority === "function" ? priority() : priority,
+          readPriority: typeof priority === "function" ? priority : undefined,
           current,
           stale: () => resolve(null),
           start: () => {
@@ -67,17 +75,19 @@ export function createFunctionSiteQueue() {
               return
             }
             active++
-            if (priority === "interactive") activeInteractive++
+            const interactive = entry.priority === "interactive"
+            if (interactive) activeInteractive++
             // Preserve even a late mount token: the caller must unmount it when its ticket expired.
             void (async () => work())()
               .then(resolve, reject)
               .finally(() => {
                 active--
-                if (priority === "interactive") activeInteractive--
+                if (interactive) activeInteractive--
                 pump()
               })
           }
-        })
+        }
+        pending.push(entry)
         pump()
       })
     }

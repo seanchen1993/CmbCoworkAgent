@@ -1,6 +1,24 @@
 import { expect, it, vi } from "vitest"
 import { createFunctionSiteQueue } from "./function-site-queue"
 
+it("promotes newly visible rows and demotes rows scrolled away while waiting", async () => {
+  const queue = createFunctionSiteQueue()
+  let release!: () => void
+  const gate = new Promise<void>((resolve) => { release = resolve })
+  const active = Array.from({ length: 4 }, () => queue.run(() => true, () => gate))
+  const started: string[] = []
+  let reversed = false
+  const old = queue.run(() => true, async () => { started.push("old") },
+    () => reversed ? "ordinary" : "visible")
+  const overscan = queue.run(() => true, async () => { started.push("overscan") })
+  const next = queue.run(() => true, async () => { started.push("new") },
+    () => reversed ? "visible" : "ordinary")
+  reversed = true
+  release()
+  await Promise.all([...active, old, overscan, next])
+  expect(started).toEqual(["new", "old", "overscan"])
+})
+
 it("admits composer work ahead of a transcript backlog without increasing concurrency", async () => {
   const queue = createFunctionSiteQueue()
   const releases: Array<() => void> = []

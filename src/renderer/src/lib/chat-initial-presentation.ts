@@ -115,7 +115,9 @@ export function sampleInitialChatPresentation(
   const view = root.ownerDocument.defaultView
   if (!view) return { ready: false, geometry: "" }
   const bounds = viewport.getBoundingClientRect()
-  const geometry: unknown[] = [viewport.scrollTop, viewport.scrollHeight, viewport.clientHeight]
+  // Virtual overscan can keep refining total height after visible text has settled.
+  // Only viewport/visible-row geometry belongs to the initial presentation barrier.
+  const geometry: unknown[] = [viewport.scrollTop, viewport.clientHeight]
   let count = 0
   let ready = true
   // Rows share most ancestors. Read each style once per sample; later frames must recheck it.

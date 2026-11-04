@@ -58,7 +58,8 @@ export async function mount(
   page: Page,
   body = "host.render(<FlowsPanel threadId='a'/>);",
   plugins: Plugin[] = [],
-  advanced = true
+  advanced = true,
+  url = "about:blank"
 ) {
   const result = await build({
     stdin: {
@@ -207,7 +208,7 @@ export async function mount(
       }
     ]
   })
-  await page.goto("about:blank")
+  await page.goto(url)
   await page.setContent('<div id="root"></div>')
   await page.addScriptTag({ content: result.outputFiles[0].text })
   // Existing editor/engine regressions explicitly opt into the retained advanced editor.

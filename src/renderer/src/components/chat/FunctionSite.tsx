@@ -24,7 +24,7 @@ import { paneFocusElement } from "../../lib/function-pane-focus"
 import { functionFocusTargets } from "../../../../shared/mods/v2/focus"
 import { FunctionSiteLifetime, type FunctionSiteTicket } from "../../lib/function-site-lifecycle"
 import { functionSiteQueue } from "../../lib/function-site-queue"
-import { isFunctionSiteInViewport } from "../../lib/function-site-visibility"
+import { observeFunctionSiteVisibility } from "../../lib/function-site-visibility"
 import { retainsFunctionSitePresentation } from "../../lib/function-site-transition"
 import { FunctionSiteRecovery, functionSiteErrorCode,
   isTransientFunctionSiteError } from "../../lib/function-site-recovery"
@@ -529,6 +529,7 @@ function FunctionSiteSurface({
   useEffect(() => {
     live.current = true
     const lifetime = new FunctionSiteLifetime()
+    const siteVisibility = observeFunctionSiteVisibility(section.current)
     lifetimeRef.current = lifetime
     let stopped = false
     let owner: string | null = null
@@ -613,9 +614,9 @@ function FunctionSiteSurface({
         }
       }
       // Read geometry only for cold admission, never for each appended token/redraw.
-      const queuePriority = ["AbovePrompt", "PromptHint", "SessionMode", "Spinner", "AskUserQuestion"]
+      const queuePriority = () => ["AbovePrompt", "PromptHint", "SessionMode", "Spinner", "AskUserQuestion"]
         .includes(component) ? "interactive" :
-        !owner && isFunctionSiteInViewport(section.current) ? "visible" : "ordinary"
+        siteVisibility.visible() ? "visible" : "ordinary"
       try {
         // Keep admission and its first drawing in one fair queue job. Requeueing a mounted
         // owner behind every other cold mount needlessly delayed the first readable message.
@@ -896,6 +897,7 @@ function FunctionSiteSurface({
     update()
     return () => {
       stopped = true
+      siteVisibility.close()
       cancelTimer()
       live.current = false
       lifetime.close()
