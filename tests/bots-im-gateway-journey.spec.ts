@@ -1,5 +1,11 @@
 import assert from "node:assert/strict"
-import { randomUUID } from "node:crypto"
+import { createHash, randomUUID } from "node:crypto"
+import { mkdtemp, writeFile, rm, readFile } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import AdmZip from "adm-zip"
+import { snapshotBotDeliveryFile } from "../src/main/bots/file-copy"
+import type { BotDeliveredFile } from "../src/shared/bots/file-delivery"
 import { DatabaseSync } from "node:sqlite"
 import { NativeSqliteAdapter } from "../src/main/db/native-sqlite-adapter"
 import { BotStore } from "../src/main/bots/store"
@@ -59,6 +65,8 @@ async function main() {
       groupOpenId?: string
       toId?: string
       requestId: string
+      imageId?: string
+      fileId?: string
     }[]
   > => (await fetch(base + "/local-bot-platform/messages")).json()
   const db = new NativeSqliteAdapter(new DatabaseSync(":memory:")),
@@ -73,6 +81,9 @@ async function main() {
     errors: unknown[] = [],
     legacy: string[] = []
   let workId = ""
+  let mediaRoot: string | undefined
+  let mediaFiles: BotDeliveredFile[] = []
+  let rejectedImage: BotDeliveredFile | undefined
   const host: LocalBotHost = new LocalBotHost(
     store,
     {
@@ -84,6 +95,24 @@ async function main() {
           host.mockExecution(task)
           if (task.origin.kind === "work_result")
             return { state: "completed", result: "已回报：" + JSON.parse(task.message).result }
+          if (task.workId && host.getWork(task.botId, task.workId).goal === "media:work")
+            return { state: "completed", result: "任务文件已交付", files: mediaFiles }
+          if (task.message === "media:direct")
+            return { state: "completed", result: "图片和文档已准备", files: mediaFiles }
+          if (task.message === "media:upload-failure")
+            return { state: "completed", result: "开始交付图片", files: [rejectedImage!] }
+          if (task.message === "media:work") {
+            await host.createWork(
+              {
+                botId: task.botId,
+                operationId: task.id,
+                title: "图片与附件验收",
+                goal: "media:work"
+              },
+              { taskId: task.id, callId: task.id, key: task.id }
+            )
+            return { state: "completed", result: "已创建文件任务" }
+          }
           if (task.workId) return { state: "completed", result: "任务结果：" + task.message }
           const source = { taskId: task.id, callId: task.id, key: task.id }
           if (task.message === "create")
@@ -167,6 +196,146 @@ async function main() {
     client.start()
     await wait(() => client.supportsBotChannel(), "authenticated Bot negotiation")
     assert.equal(client.getStatus().principalId, "local-bot-owner")
+    if (process.env.BOT_IM_MEDIA_ONLY === "1") {
+      assert(client.supportsBotFiles())
+      mediaRoot = await mkdtemp(join(tmpdir(), "bot-media-journey-"))
+      const png = Buffer.from(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGPQb3gLAAJ+AZ1KaAMtAAAAAElFTkSuQmCC",
+        "base64"
+      )
+      const save = async (name: string, bytes: Buffer): Promise<BotDeliveredFile> => {
+        const filePath = join(mediaRoot!, name)
+        await writeFile(filePath, bytes)
+        return {
+          name,
+          filePath,
+          ...(await snapshotBotDeliveryFile(mediaRoot!, filePath, new AbortController().signal))
+        }
+      }
+      // Small, valid Office documents; verify exact retained bytes at the platform boundary.
+      const office = (sheet: boolean) => {
+        const zip = new AdmZip()
+        const main = sheet ? "xl/workbook.xml" : "word/document.xml"
+        const type = sheet ? "spreadsheetml.sheet" : "wordprocessingml.document"
+        zip.addFile(
+          "[Content_Types].xml",
+          Buffer.from(
+            `<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/${main}" ContentType="application/vnd.openxmlformats-officedocument.${type}.main+xml"/>${sheet ? '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>' : ""}</Types>`
+          )
+        )
+        zip.addFile(
+          "_rels/.rels",
+          Buffer.from(
+            `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="${main}"/></Relationships>`
+          )
+        )
+        zip.addFile(
+          main,
+          Buffer.from(
+            sheet
+              ? '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Test" sheetId="1" r:id="rId1"/></sheets></workbook>'
+              : '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Attachment delivery test</w:t></w:r></w:p></w:body></w:document>'
+          )
+        )
+        if (sheet) {
+          zip.addFile(
+            "xl/_rels/workbook.xml.rels",
+            Buffer.from(
+              '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>'
+            )
+          )
+          zip.addFile(
+            "xl/worksheets/sheet1.xml",
+            Buffer.from(
+              '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1"><v>42</v></c></row></sheetData></worksheet>'
+            )
+          )
+        }
+        return zip.toBuffer()
+      }
+      mediaFiles = await Promise.all([
+        save("截图.png", png),
+        save("报告.docx", office(false)),
+        save("统计.xlsx", office(true))
+      ])
+      rejectedImage = await save("reject-upload.png", png)
+      const uploads = async (): Promise<
+        Array<{ id: string; name: string; kind: string; size: number; sha256: string }>
+      > => (await fetch(base + "/local-bot-platform/uploads")).json()
+      const mediaMessages = async () => (await messages()).filter((m) => m.imageId || m.fileId)
+      const checkDelivery = async (kind: "dm" | "group", send: () => Promise<void> | void) => {
+        const before = (await mediaMessages()).length
+        await send()
+        await wait(
+          async () => (await mediaMessages()).length === before + mediaFiles.length,
+          kind + " media delivery"
+        )
+        const received = (await mediaMessages()).slice(before)
+        const resources = await uploads()
+        assert.equal(received.filter((m) => m.imageId).length, 1)
+        assert.equal(received.filter((m) => m.fileId).length, 2)
+        for (const message of received) {
+          assert.equal(message.fromId, "local-bot-robot-open")
+          assert.equal(
+            message.path,
+            `/local-bot-platform/robot-service/${kind === "group" ? "group-message" : "single-message"}/${message.imageId ? "image" : "file"}`
+          )
+          assert.equal(message.groupOpenId, kind === "group" ? "local-group-open" : undefined)
+          assert.equal(message.toId, kind === "dm" ? "local-owner-open" : undefined)
+          const upload = resources.find(
+            (entry) => entry.id === (message.imageId ?? message.fileId)
+          )!
+          const file = mediaFiles.find((entry) => entry.name === upload.name)!
+          assert.equal(upload.size, file.size)
+          assert.equal(
+            upload.sha256,
+            createHash("sha256")
+              .update(await readFile(file.attachmentPath!))
+              .digest("hex")
+          )
+          assert.equal(upload.kind, message.imageId ? "image" : "file")
+        }
+        await new Promise((resolve) => setTimeout(resolve, 2200))
+        assert.equal(
+          (await mediaMessages()).length,
+          before + mediaFiles.length,
+          "no duplicate publication"
+        )
+      }
+      await bind("group")
+      const duplicate = randomUUID()
+      await checkDelivery("group", async () => {
+        await post("group", "media:direct", duplicate)
+        await post("group", "media:direct", duplicate)
+      })
+      await checkDelivery("group", () => post("group", "media:work"))
+      await bind("dm")
+      await checkDelivery("dm", () => post("dm", "media:direct"))
+      await checkDelivery("dm", () => post("dm", "media:work"))
+      await checkDelivery("dm", () => {
+        host.send({ botId: bot.id, requestId: randomUUID(), message: "media:direct" })
+      })
+      assert.deepEqual(errors, [])
+      // Upload rejection must remain visible, with no IMAGE message and no automatic retry.
+      const beforeFailure = (await mediaMessages()).length
+      await post("group", "media:upload-failure")
+      await wait(
+        async () =>
+          (await messages()).some(
+            (m) => m.groupOpenId === "local-group-open" && m.content?.includes("附件未全部发送成功")
+          ),
+        "upload failure notice"
+      )
+      assert.equal((await mediaMessages()).length, beforeFailure)
+      assert.equal(errors.length, 1)
+      assert.equal((errors[0] as { reasonCode?: string }).reasonCode, "IMAGE_UPLOAD_FAILED")
+      const delivered = await mediaMessages()
+      assert.equal(new Set(delivered.map((m) => m.requestId)).size, delivered.length)
+      console.log(
+        "PASS: real Java/MySQL/WebSocket/HTTP: native PNG + DOCX/XLSX, direct group/DM, independent group/DM work, App mirror, byte hashes, original audiences, duplicate suppression and upload failure notice"
+      )
+      return
+    }
     if (process.env.BOT_IM_REBIND_ONLY === "1") {
       const original = await bind("dm"),
         group = await bind("group")
@@ -250,13 +419,13 @@ async function main() {
       "one task despite duplicate delivery"
     )
     await wait(
-      async () => (await messages()).some((m) => m.content === "任务结果：create"),
+      async () => (await messages()).some((m) => m.content === "任务结果：周六下午3点"),
       "group task result"
     )
     assert.equal(host.getWork(bot.id, workId).goal, "周六下午3点")
     await post("group", "revise", randomUUID(), "member-b")
     await wait(
-      async () => (await messages()).some((m) => m.content === "任务结果：revise"),
+      async () => (await messages()).some((m) => m.content === "任务结果：改为周日下午4点"),
       "revised task result"
     )
     await post("group", "complete")
@@ -269,7 +438,12 @@ async function main() {
         store.recentTasks().every((t) => t.state === "completed"),
       "event settlement"
     )
-    assert.equal(host.listWorks(bot.id).items.length, 1)
+    assert.equal(host.listWorks(bot.id).items.length, 0, "group work is absent from private tasks")
+    const groupConversationId = runs[0].mockSource!.bindingId
+    assert.deepEqual(
+      host.imConversationWorks(bot.id, groupConversationId).items.map((work) => work.id),
+      [workId]
+    )
     assert.deepEqual(
       runs.filter((t) => t.workId).map((t) => t.workId),
       [workId, workId]
@@ -324,7 +498,7 @@ async function main() {
     await wait(
       async () =>
         (await messages()).some(
-          (m) => m.content === "已回报：任务结果：create" && m.toId === "local-owner-open"
+          (m) => m.content === "已回报：任务结果：周六下午3点" && m.toId === "local-owner-open"
         ),
       "personal task result through shared main conversation"
     )
@@ -335,7 +509,7 @@ async function main() {
     await wait(
       async () =>
         (await messages()).filter(
-          (m) => m.content === "已回报：任务结果：revise" && m.toId === "local-owner-open"
+          (m) => m.content === "已回报：任务结果：改为周日下午4点" && m.toId === "local-owner-open"
         ).length === 1,
       "desktop revises personal task"
     )
@@ -343,7 +517,7 @@ async function main() {
     await wait(
       async () =>
         (await messages()).filter(
-          (m) => m.content === "已回报：任务结果：revise" && m.toId === "local-owner-open"
+          (m) => m.content === "已回报：任务结果：改为周日下午4点" && m.toId === "local-owner-open"
         ).length === 2,
       "IM revises the same personal task"
     )
@@ -429,6 +603,7 @@ async function main() {
     client.stop()
     await host.stop()
     db.close()
+    if (mediaRoot) await rm(mediaRoot, { recursive: true, force: true })
   }
 }
 main().catch((error) => {

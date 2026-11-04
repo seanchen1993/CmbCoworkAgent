@@ -1,5 +1,6 @@
 import type { AgentRunTerminal } from "../agent/agent-run-service"
 import { BotImGatewayStore } from "./im-gateway-store"
+import { BotTelemetryStore, type BotTelemetryContext } from "./telemetry-store"
 import { BotWorkConversationJournal } from "./conversation-link-store"
 import { readWorkConversationRecord } from "./conversation-link-validation"
 import { upgradeWorkConversationSchema } from "./conversation-link-schema"
@@ -158,6 +159,7 @@ export interface BotWorkflowReference extends WorkflowRunReference {
 }
 
 export class BotStore {
+  readonly telemetry: BotTelemetryStore
   readonly conversations: BotWorkConversationJournal
   readonly mock: BotMockChannelStore
   readonly im: BotMockChannelStore
@@ -184,7 +186,8 @@ export class BotStore {
       threadId: string,
       messageIds: string[],
       work?: BotWorkItem
-    ) => Pick<BotMessageReply, "id" | "role" | "ordinal">[]
+    ) => Pick<BotMessageReply, "id" | "role" | "ordinal">[],
+    telemetryContext: () => BotTelemetryContext = () => ({ userName: "unknown", userIp: "" })
   ) {
     this.transaction(() => {
       db.run(`
@@ -467,7 +470,7 @@ export class BotStore {
       () => this.changed(),
       this.now
     )
-    this.imGateway = new BotImGatewayStore(db)
+    this.imGateway = new BotImGatewayStore(db, () => this.changed())
     this.im = new BotMockChannelStore(
       db,
       this,
@@ -478,6 +481,7 @@ export class BotStore {
     )
     this.im.setAllOffline()
     this.restoreImConversationActivities()
+    this.telemetry = new BotTelemetryStore(db, telemetryContext)
   }
 
   imConversationHistory(botId: string, id: string, before?: string) {
@@ -4148,7 +4152,8 @@ export class BotStore {
         this.external(task.mockSource).settle(
           task,
           state,
-          visibleResult || error || botTaskStateLabel(state)
+          visibleResult || error || botTaskStateLabel(state),
+          files
         )
       const silentDiscussion =
         task.origin.kind === "discussion" &&
@@ -4223,7 +4228,7 @@ export class BotStore {
         !silentCompletion &&
         ["completed", "failed", "cancelled", "interrupted", "outcome_unknown"].includes(state)
       )
-        this.im.mirrorPersonal(task, visibleResult || error || botTaskStateLabel(state))
+        this.im.mirrorPersonal(task, visibleResult || error || botTaskStateLabel(state), files)
       let replyOrigin = task.origin.kind === "bot" ? task.origin : this.workflowHandoffSource(task, state === "interrupted" || state === "cancelled")?.origin
       if (replyOrigin?.kind !== "bot") return
       // A delivered physical turn owns its receipt ID permanently. Later branch

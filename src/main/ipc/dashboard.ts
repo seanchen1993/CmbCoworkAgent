@@ -60,6 +60,7 @@ import {
   type DashboardSkillCodeAdoptionStats
 } from "./dashboard-code-stats"
 import { emptyOrgValueClauses, isMissingOrgValue, readOrgText } from "./dashboard-org-fields"
+import { buildBotMetricsQuery, makeMockBotOverview, parseBotMetrics } from "./dashboard-bot-metrics"
 import {
   computeKnowledgeCommitRate,
   formatKnowledgeApiTime,
@@ -3173,6 +3174,24 @@ async function fetchOverview(
       ...asRecord(codeRaw)
     },
     DASHBOARD_HOME_ENDPOINT_OUTPUT_BYTE_LIMITS.overview
+  )
+}
+
+async function fetchBotOverview(range: TimeRange, granularity: Granularity, opts?: OrgFilterOptions) {
+  const access = requireDashboardAccess()
+  const duration = Date.parse(range?.to) - Date.parse(range?.from)
+  if (
+    !Number.isFinite(duration) || duration < 0 || duration > 366 * 86400000 ||
+    !["day", "week", "month", "custom"].includes(granularity)
+  )
+    throw new Error("请选择有效的统计时间范围（最多 366 天）")
+  const filters = [timeRangeFilter("eventTime", range)]
+  appendOptionalFilter(filters, buildTraceAccessFilter(access))
+  appendOptionalFilter(filters, buildUpperOrgLv1ListFilter(normalizeUpperOrgLv1List(opts?.upperOrgLv1)))
+  return parseBotMetrics(
+    await esQuery(getEsIndex("event"), buildBotMetricsQuery(filters), {
+      outputByteLimit: 256 * 1024
+    })
   )
 }
 
@@ -15576,6 +15595,21 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
         }
       } catch (e) {
         console.error("[Dashboard] projectModeProjectCommits error:", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    }
+  )
+
+  registerLatestDashboardHandler(
+    _ipcMain,
+    "dashboard:botOverview",
+    async (_, range: TimeRange, granularity: Granularity, opts?: OrgFilterOptions) => {
+      try {
+        if (import.meta.env.DEV)
+          return { success: true, data: makeMockBotOverview(range, getMockOrgScale(opts)) }
+        return { success: true, data: await fetchBotOverview(range, granularity, opts) }
+      } catch (e) {
+        logDashboardRequestError("botOverview", e)
         return { success: false, error: e instanceof Error ? e.message : String(e) }
       }
     }

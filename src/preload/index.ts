@@ -4111,6 +4111,12 @@ const api = {
       }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:projectModeProjectCommits", projectId, range, options),
+    botOverview: (
+      range: { from: string; to: string },
+      granularity: "day" | "week" | "month" | "custom",
+      opts?: { upperOrgLv1?: string | string[] | null }
+    ): Promise<{ success: boolean; data?: import("../shared/bots/telemetry").BotOverviewData; error?: string }> =>
+      ipcRenderer.invoke("dashboard:botOverview", range, granularity, opts),
     overview: (
       range: { from: string; to: string },
       granularity: "day" | "week" | "month" | "custom",

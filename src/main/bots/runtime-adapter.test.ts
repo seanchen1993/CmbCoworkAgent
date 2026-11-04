@@ -26,6 +26,8 @@ import type { BotBrowserService } from "./browser"
 import type { BotDeliveredFile } from "../../shared/bots/file-delivery"
 import type { BotWorkItem } from "../../shared/bots/work"
 import type { BotMockExecution } from "../../shared/bots/mock-channel"
+import type { BotImBinding } from "../../shared/bots/im-channel"
+import type { BotImGatewayClient } from "../services/im/bot-channel-service"
 import type { BotPeerDeliveryFiles } from "./tools"
 import type { UserInputRequest } from "../types"
 import type { LocalThreadRunLease } from "../agent/thread-run-lease"
@@ -150,6 +152,9 @@ const fixture = vi.hoisted(() => ({
   publishFiles: vi.fn()
 }))
 vi.mock("./work-tools", () => ({ createBotWorkTools: fixture.workTools }))
+vi.mock("../services/im/withheld-text-notices", () => ({
+  conversationSwitchedToText: () => false
+}))
 vi.mock("./file-copy", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./file-copy")>()),
   hashBotFile: fixture.hashFile
@@ -1193,6 +1198,202 @@ describe("Bot Runtime integration", () => {
     ).resolves.toMatchObject({ state: "failed" })
     expect(fixture.start).toHaveBeenCalledTimes(1)
   })
+
+  it.each(["group", "dm", "app"] as const)(
+    "delivers direct %s files from the real tool through Runtime and the IM outbox",
+    async (source) => {
+      const { LocalBotHost } = await import("./host")
+      const { BotImChannelService } = await import("../services/im/bot-channel-service")
+      const { botImScopeId } = await import("./im-gateway-store")
+      const { mkdtemp, writeFile, readFile, rm } = await import("node:fs/promises")
+      const { tmpdir } = await import("node:os")
+      const { join } = await import("node:path")
+      const { createHash } = await import("node:crypto")
+      const actual = await vi.importActual<typeof import("./tools")>("./tools")
+      const root = await mkdtemp(join(tmpdir(), "bot-direct-im-file-"))
+      const db = new NativeSqliteAdapter(new DatabaseSync(":memory:"))
+      const store = new BotStore(db)
+      const host = new LocalBotHost(store, { onAvailable: () => () => {}, acquire: () => null })
+      const originalDelivery = fixture.deliveryTools.getMockImplementation()!
+      let service: InstanceType<typeof BotImChannelService> | undefined
+      try {
+        const owner = store.create({
+          name: "File Bot",
+          instructions: "",
+          color: "#123456",
+          modelRef: null
+        })
+        const binding: BotImBinding = {
+          id: "file-binding",
+          botId: owner.id,
+          kind: source === "group" ? "group" : "dm",
+          label: "File delivery",
+          state: "active",
+          version: 1,
+          conversationKey: "file-conversation",
+          createdAt: new Date().toISOString(),
+          expiresAt: new Date(Date.now() + 900000).toISOString()
+        }
+        const chunks: Buffer[] = []
+        const errors: unknown[] = []
+        const client: BotImGatewayClient = {
+          getStatus: () => ({ principalId: "owner" }) as ReturnType<BotImGatewayClient["getStatus"]>,
+          supportsBotChannel: () => true,
+          supportsBotFiles: () => true,
+          botBindingCommand: vi.fn(async () => ({ items: [binding], before: null })),
+          sendAcknowledgement: vi.fn(async () => {}),
+          acquireBotPermit: vi.fn<BotImGatewayClient["acquireBotPermit"]>(async () => ({
+            status: "granted"
+          })),
+          renewBotPermit: vi.fn<BotImGatewayClient["renewBotPermit"]>(async () => ({
+            status: "granted"
+          })),
+          submitReply: vi.fn<BotImGatewayClient["submitReply"]>(async () => ({ state: "accepted" })),
+          botFileCommand: vi.fn<NonNullable<BotImGatewayClient["botFileCommand"]>>(
+            async (request) => {
+              if (request.action === "begin") {
+                expect(request.conversationKey).toBe(binding.conversationKey)
+                expect(request.name).toBe("截图.png")
+                expect(request.sha256).toBe(createHash("sha256").update(bytes).digest("hex"))
+                return { state: "uploading", uploadId: "upload", offset: 0 }
+              }
+              if (request.action === "chunk") {
+                expect(request.offset).toBe(Buffer.concat(chunks).length)
+                chunks.push(Buffer.from(request.data, "base64"))
+                return {
+                  state: "uploading",
+                  uploadId: "upload",
+                  offset: Buffer.concat(chunks).length
+                }
+              }
+              expect(request.action).toBe("finish")
+              return { state: "accepted" }
+            }
+          )
+        }
+        service = new BotImChannelService(
+          client,
+          "realm",
+          () => host,
+          (error) => errors.push(error),
+          () => false
+        )
+        await service.list(owner.id)
+        const localBinding = store.imGateway.binding(botImScopeId("realm", "owner", binding.id))!
+        // Use the registered local scope, never another group or the Bot's private route.
+        const ingress = store.imGateway.receive("realm", "owner", {
+          route: {
+            bindingId: binding.id,
+            botId: owner.id,
+            kind: binding.kind,
+            label: binding.label,
+            version: 1,
+            senderId: "member"
+          },
+          event: {
+            schemaVersion: 1,
+            eventId: "file-event",
+            platformMessageId: "file-message",
+            principalId: "owner",
+            conversationKey: binding.conversationKey!,
+            conversationSeq: 1,
+            message: { type: "text", text: "Send the screenshot" },
+            occurredAt: new Date().toISOString(),
+            redelivered: false,
+            lease: { id: "lease", expiresAt: new Date(Date.now() + 900000).toISOString() }
+          }
+        })
+        store.imGateway.settle(ingress.id, "active", undefined, Date.now() + 900000)
+        const accepted = host.acceptImEvent({
+          bindingId: localBinding.id,
+          eventId: ingress.id,
+          messageId: "file-message",
+          senderId: "member",
+          text: "Send the screenshot",
+          mentionsBotIds: [owner.id]
+        })
+        let current = store.getTask(accepted.taskId!)
+        if (source === "app") {
+          store.transition(current.id, "running")
+          store.settle(current.id, "completed", null, "Connected")
+          const initial = host.beginImDelivery()!
+          host.settleImDelivery(initial.id, "accepted")
+          current = store.enqueue({
+            botId: owner.id,
+            requestId: "app-file",
+            message: "Send the screenshot"
+          })
+        }
+        store.transition(current.id, "running")
+        const bytes = Buffer.from(
+          "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=",
+          "base64"
+        )
+        await writeFile(join(root, "截图.png"), bytes)
+        fixture.directory.mockReturnValue(root)
+        fixture.thread.mockReturnValue(undefined)
+        fixture.getBot.mockImplementation((id) => store.getBot(id))
+        fixture.deliveryTools.mockImplementation(
+          actual.createBotDeliveryTools as unknown as typeof originalDelivery
+        )
+        fixture.start.mockImplementation(async (_request, _delivery, context) => {
+          const deliver = context.additionalTools!.find(
+            (tool) => tool.name === "bot_deliver_files"
+          ) as ReturnType<typeof actual.createBotDeliveryTools>[number]
+          const receipt = JSON.parse(String(await deliver.invoke({ files: ["截图.png"] })))
+          expect(receipt.kind).toBe("bot-file-delivery")
+          expect(await readFile(receipt.files[0].attachmentPath)).toEqual(bytes)
+          context.onFinalAssistant?.({ messageId: "file-reply", finalText: "Screenshot ready" })
+          context.onRunTerminated?.({ outcome: "success", code: "done" })
+          return { completion: Promise.resolve() }
+        })
+        const runtime = createLocalBotRunPort(
+          { editVersion: () => 0, forPrompt: () => [] } as unknown as BotMemoryService,
+          () => host,
+          {} as BotBrowserService,
+          { enqueue: () => {} } as unknown as BotMemoryMaintainer
+        )
+        const lease = runtime.acquire(owner, current)!
+        const result = await lease.execute(new AbortController().signal, () => {})
+        lease.release()
+        expect(result).toMatchObject({
+          state: "completed",
+          files: [expect.objectContaining({ name: "截图.png", size: bytes.length })]
+        })
+        if (result.state !== "completed") throw new Error("Expected completed file delivery")
+        store.settle(current.id, result.state, null, result.result, result.files)
+        service.start()
+        await vi.waitFor(
+          () => {
+            expect(client.botFileCommand).toHaveBeenCalledWith({
+              action: "finish",
+              uploadId: "upload"
+            })
+          },
+          { timeout: 3000 }
+        )
+        expect(Buffer.concat(chunks)).toEqual(bytes)
+        expect(client.submitReply).toHaveBeenCalledWith(
+          expect.objectContaining({ conversationKey: binding.conversationKey })
+        )
+        expect(errors).toEqual([])
+        expect(fixture.publishFiles).not.toHaveBeenCalled()
+        // Repeated polling must not resend an accepted attachment.
+        await new Promise((resolve) => setTimeout(resolve, 1100))
+        expect(
+          vi
+            .mocked(client.botFileCommand!)
+            .mock.calls.filter(([request]) => request.action === "finish")
+        ).toHaveLength(1)
+      } finally {
+        service?.stop()
+        await host.stop()
+        fixture.deliveryTools.mockImplementation(originalDelivery)
+        db.close()
+        await rm(root, { recursive: true, force: true })
+      }
+    }
+  )
 
   it("captures verified files from an independent task for its result receipt", async () => {
     const work: BotWorkItem = {

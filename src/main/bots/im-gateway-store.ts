@@ -28,7 +28,10 @@ export const botImScopeId = (...parts: string[]): string =>
 
 /** Routing receipts only. Bot content and tasks still belong to the existing BotStore. */
 export class BotImGatewayStore {
-  constructor(private readonly db: NativeSqliteAdapter) {
+  constructor(
+    private readonly db: NativeSqliteAdapter,
+    private readonly changed: () => void = () => {}
+  ) {
     db.run(`CREATE TABLE IF NOT EXISTS bot_im_routes (
       id TEXT PRIMARY KEY,realm TEXT NOT NULL,principal TEXT NOT NULL,bot_id TEXT NOT NULL,binding_json TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS bot_im_routes_owner ON bot_im_routes(realm,principal,bot_id);
@@ -107,6 +110,7 @@ export class BotImGatewayStore {
       "INSERT INTO bot_im_routes VALUES(?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET binding_json=excluded.binding_json",
       [id, realm, principal, binding.botId, JSON.stringify(binding)]
     )
+    if (binding.kind === "group" && old?.binding.peerLabel !== binding.peerLabel) this.changed()
     return { id, realm, principal, binding }
   }
   /** Remove only the local configuration entry; retain routing proofs and conversation history. */

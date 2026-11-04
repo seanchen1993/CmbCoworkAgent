@@ -29,7 +29,11 @@ vi.mock("../services/im/bot-interaction-command", () => ({
 }))
 const cleanups: (() => Promise<void>)[] = []
 afterEach(async () => {
-  for (const close of cleanups.splice(0)) await close()
+  try {
+    for (const close of cleanups.splice(0)) await close()
+  } finally {
+    vi.useRealTimers()
+  }
 })
 const eventually = async (condition: () => boolean) => {
   const until = Date.now() + 4500
@@ -1264,6 +1268,88 @@ describe("authenticated IM on the existing Bot host", () => {
       expect(f.calls).toHaveLength(1)
     }
   )
+  it("refreshes group names after messages and notifies the UI without moving history or works", async () => {
+    vi.useFakeTimers()
+    const f = fixture(async (task, host) => {
+      if (!task.workId && task.message === "创建群任务")
+        await host.createWork(
+          { botId: task.botId, operationId: task.id, title: "群内任务", goal: "写通知" },
+          { taskId: task.id, callId: task.id, key: task.id }
+        )
+      return { state: "completed", result: "已回复" }
+    })
+    const group = await f.binding(), other = await f.binding(), dm = await f.binding("dm")
+    f.remote.set(group.id, { ...group, peerLabel: "原群名" })
+    f.remote.set(other.id, { ...other, peerLabel: "另一个群" })
+    await f.service.list(f.bot.id)
+    await f.service.receive(f.event(group, "create-before-rename", "创建群任务"))
+    await vi.advanceTimersByTimeAsync(1000)
+    const before = f.host.snapshot().imConversations!.find((g) => g.bindingId === group.id)!
+    const works = f.host.imConversationWorks(f.bot.id, before.id).items
+    expect(works).toHaveLength(1)
+    const notifications = vi.fn(() => f.host.snapshot())
+    const unsubscribe = f.host.subscribe(notifications)
+    f.remote.set(group.id, { ...group, peerLabel: "项目协作群 · 二期" })
+    await f.service.receive(f.event(group, "after-rename", "继续交流"))
+    await vi.advanceTimersByTimeAsync(5000)
+    const after = f.host.snapshot().imConversations!.find((g) => g.bindingId === group.id)!
+    expect(after).toMatchObject({ id: before.id, threadId: before.threadId, title: "项目协作群 · 二期" })
+    expect(f.host.imConversationWorks(f.bot.id, after.id).items.map((w) => w.id)).toEqual(works.map((w) => w.id))
+    expect(f.host.imConversationHistory(f.bot.id, after.id).items.map((m) => m.text)).toContain("创建群任务")
+    expect(f.host.snapshot().imConversations!.find((g) => g.bindingId === other.id)?.title).toBe("另一个群")
+    expect(f.host.getBot(f.bot.id).name).toBe("IM Bot")
+    expect(f.host.imGateway.binding(botImScopeId("realm", "owner", dm.id))!.binding).toEqual(dm)
+    expect(notifications.mock.results.some((r) => r.value.imConversations.some((g: { title: string }) => g.title === after.title))).toBe(true)
+    notifications.mockClear()
+    await f.service.list(f.bot.id)
+    expect(notifications).not.toHaveBeenCalled()
+    unsubscribe()
+    expect(f.errors).toEqual([])
+  })
+
+  it("coalesces group name refreshes, reads every binding page and ignores message replays", async () => {
+    vi.useFakeTimers()
+    const f = fixture(), a = await f.binding(), b = await f.binding()
+    await vi.advanceTimersByTimeAsync(1000)
+    f.client.botBindingCommand.mockClear()
+    f.client.botBindingCommand.mockImplementation(async (command) => {
+      if (command.action !== "list") throw new Error("unexpected command")
+      return command.before
+        ? { items: [{ ...b, peerLabel: "第二页的新群名" }], before: null }
+        : { items: [{ ...a, peerLabel: "第一页的新群名" }], before: "1" }
+    })
+    const event = f.event(b, "rename-burst", "群消息")
+    await f.service.receive(event)
+    for (let i = 0; i < 8; i++) await f.service.receive(f.event(a, `burst-${i}`, "群消息"))
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(f.client.botBindingCommand.mock.calls.map(([command]) => command)).toEqual([
+      { action: "list", botId: f.bot.id }, { action: "list", botId: f.bot.id, before: "1" }
+    ])
+    expect(f.host.snapshot().imConversations!.find((g) => g.bindingId === b.id)?.title).toBe("第二页的新群名")
+    const runs = f.calls.length
+    await f.service.receive({ ...event, event: { ...event.event, redelivered: true } })
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(f.client.botBindingCommand).toHaveBeenCalledTimes(2)
+    expect(f.calls).toHaveLength(runs)
+    expect(f.errors).toEqual([])
+  })
+
+  it("keeps group execution available when a name refresh fails and recovers on the next sync", async () => {
+    vi.useFakeTimers()
+    const f = fixture(), group = await f.binding()
+    await vi.advanceTimersByTimeAsync(1000)
+    f.remote.set(group.id, { ...group, peerLabel: "恢复后的群名" })
+    f.client.botBindingCommand.mockRejectedValueOnce(new Error("temporary list failure"))
+    await f.service.receive(f.event(group, "refresh-fails", "正常交办"))
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(f.calls).toHaveLength(1)
+    expect(f.store.getTask(f.calls[0].id).state).toBe("completed")
+    expect(f.errors).toHaveLength(1)
+    expect(String(f.errors[0])).toContain("temporary list failure")
+    await vi.advanceTimersByTimeAsync(25000)
+    expect(f.host.snapshot().imConversations![0].title).toBe("恢复后的群名")
+  })
+
   it("exposes retained groups separately from private previews and keeps read boundaries scoped", async () => {
     const f = fixture(),
       a = await f.binding(),
@@ -2714,4 +2800,50 @@ it("rechecks saved unrelated results when IM revocation releases queued capacity
     botId: owner.id, threadId: task.threadId, state: "queued", message: expect.stringContaining("UNRELATED_FAILURE")
   })
   expect(f.errors).toEqual([])
+})
+
+it.each(["dm", "group"] as const)("delivers independent-work attachments only to their original %s", async (kind) => {
+  const root = await mkdtemp(join(tmpdir(), "im-work-file-"))
+  cleanups.push(() => rm(root, { recursive: true, force: true }))
+  const filePath = join(root, "任务成果.xlsx")
+  await writeFile(filePath, "verified task bytes")
+  const { snapshotBotDeliveryFile } = await import("./file-copy")
+  const file = { name: "任务成果.xlsx", filePath, ...await snapshotBotDeliveryFile(root, filePath, new AbortController().signal) }
+  const f = fixture(async (task, host) => {
+    if (task.workId) return { state: "completed", result: "任务文件已生成", files: [file] }
+    if (task.origin.kind === "work_result") return { state: "completed", result: "任务已返回结果" }
+    await host.createWork({ botId: task.botId, operationId: task.id, title: "文件任务", goal: "生成表格" },
+      { taskId: task.id, callId: "create", key: "create" })
+    return { state: "completed", result: "已创建任务" }
+  })
+  const finished: string[] = [], routes: string[] = []
+  let offset = 0
+  Object.assign(f.client, {
+    supportsBotFiles: () => true,
+    botFileCommand: async (request: import("../../shared/bots/im-file").BotImFileCommand) => {
+      if (request.action === "begin") { routes.push(request.conversationKey); offset = 0; return { state: "uploading", uploadId: request.deliveryId, offset } }
+      if (request.action === "chunk") { offset += Buffer.from(request.data, "base64").length; return { state: "uploading", uploadId: request.uploadId, offset } }
+      finished.push(request.uploadId)
+      return { state: "accepted" }
+    }
+  })
+  const binding = await f.binding(kind)
+  await f.service.receive(f.event(binding, "file-work", "请生成文件"))
+  await eventually(() => finished.length === 1)
+  expect(routes).toEqual([binding.conversationKey])
+  expect(f.errors).toEqual([])
+  expect(f.calls.some(task => task.workId)).toBe(true)
+  // A result-summary round must not resend the original attachment.
+  await new Promise(resolve => setTimeout(resolve, 1100))
+  expect(finished).toHaveLength(1)
+})
+
+it("keeps the local file and reports an old gateway's missing attachment capability", async () => {
+  const file = { name: "报告.docx", filePath: "/synthetic/report.docx", size: 3, attachmentPath: "/synthetic/.bot-deliveries/" + "a".repeat(64) + "/报告.docx" }
+  const f = fixture(async () => ({ state: "completed", result: "文件已准备", files: [file] }))
+  const binding = await f.binding("group")
+  await f.service.receive(f.event(binding))
+  await eventually(() => f.client.submitReply.mock.calls.some(([reply]) => reply.message.content.includes("附件未全部发送成功")))
+  expect(f.errors.some(error => String(error).includes("升级网关"))).toBe(true)
+  expect(f.store.im.history(f.bot.id, botImScopeId("realm", "owner", binding.id)).items.some(row => row.state === "blocked")).toBe(true)
 })

@@ -139,6 +139,7 @@ const trackEventErrorLogger = new RateLimitedErrorLogger()
 // ─────────────────────────────────────────────────────────
 
 export type EventCategory =
+  | "bot"
   | "skill"
   | "git"
   | "code_adoption"

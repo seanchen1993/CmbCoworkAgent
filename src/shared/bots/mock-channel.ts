@@ -59,6 +59,7 @@ export interface BotMockOutbox {
   conversationId: string
   replyToMessageId: string
   sourceTaskId: string
+  files?: import("./file-delivery").BotDeliveredFile[]
   workId?: string
   text: string
   state: "pending" | "sending" | "sent" | "accepted" | "unknown" | "blocked"

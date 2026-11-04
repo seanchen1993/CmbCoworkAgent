@@ -8,6 +8,8 @@ import { DatabaseSync } from "node:sqlite"
 import { getCmbCoworkAgentDataRoot } from "../app-data-root"
 import { openNativeSqliteDatabase, NativeSqliteAdapter } from "../db/native-sqlite-adapter"
 import { BotStore } from "./store"
+import { BotTelemetryReporter } from "./telemetry-reporter"
+import { buildEvent, getEventReporter } from "../services/event-reporter"
 import { LocalBotHost } from "./host"
 import { verifyWorkConversationThread } from "./conversation-link-authority"
 import { createLocalBotRunPort } from "./runtime-adapter"
@@ -24,6 +26,7 @@ import { setWorkConversationLookup } from "./conversation-link-authority"
 import { parseBotFileDelivery } from "../../shared/bots/file-delivery"
 
 let host: LocalBotHost | undefined
+let telemetry: BotTelemetryReporter | undefined
 let database: NativeSqliteAdapter | undefined
 let memory: BotMemoryService | undefined
 let browser: BotBrowserService | undefined
@@ -247,6 +250,17 @@ export function getLocalBotHost(): LocalBotHost {
               ? [{ id: message.id, ordinal: message.ordinal!, role: message.role }]
               : []
           )
+        },
+        () => {
+          const {
+            eventId: _id,
+            eventName: _name,
+            eventTime: _time,
+            eventCategory: _category,
+            properties: _properties,
+            ...context
+          } = buildEvent("bot.context", "bot")
+          return context
         }
       ),
       createLocalBotRunPort(
@@ -267,6 +281,8 @@ export function getLocalBotHost(): LocalBotHost {
           input.intervalMinutes
         )
     )
+    telemetry = new BotTelemetryReporter(host.telemetry, getEventReporter)
+    telemetry.start()
     setWorkConversationLookup((threadId) => host?.conversationLinks.forThread(threadId) ?? null)
     return host
   } catch (error) {
@@ -331,6 +347,7 @@ export function stopLocalBotHost(): Promise<void> {
   shutdown = Promise.resolve().then(async () => {
     const results: PromiseSettledResult<unknown>[] = []
     results.push(...(await Promise.allSettled([host?.stop()])))
+    results.push(...(await Promise.allSettled([telemetry?.close()])))
     results.push(...(await Promise.allSettled([browser?.close(), summaries?.close()])))
     results.push(...(await Promise.allSettled([memory?.close()])))
     try {
