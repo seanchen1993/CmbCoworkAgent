@@ -26,6 +26,7 @@ const call = {
   isInterrupted: false
 }
 const siteCases: Array<[FunctionUiSite, ModObject]> = [
+  ["ChatHeader", { isWorking: false, bodyColumns: 80, maxRows: 6 }],
   ["AbovePrompt", { isWorking: false, bodyColumns: 80, maxRows: 8 }],
   ["PromptHint", { isWorking: false, isDraft: false, hint: "Enter" }],
   ["InfoNotice", { text: "info", command: null }],

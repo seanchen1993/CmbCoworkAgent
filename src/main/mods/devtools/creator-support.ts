@@ -1,5 +1,8 @@
 import { CREATOR_REQUEST_LIMITS } from "./creator-request-budget"
 import { HOST_INPUT_RESUME_CAPABILITIES } from "../../../shared/project-runtime/host-types"
+import { FUNCTION_UI_SITES } from "../../../shared/mods/v2/sites"
+import { FUNCTION_SDK_METHODS } from "../v2/sdk-capabilities"
+import { FUNCTION_COMPATIBILITY_EVENT_NAMES, getFunctionEventSupport } from "../../../shared/mods/v2/compatibility-catalog"
 
 export type CreatorCapabilityDiscovery =
   | { kind: "tool"; tool: "mod_authoring"; arguments: Readonly<Record<string, string>> }
@@ -358,13 +361,13 @@ export const CREATOR_CONDITIONAL_CAPABILITIES = [
   }
 ] as const satisfies readonly CreatorConditionalCapability[]
 
-/** A bounded first-release promise, not an authorization envelope or a replacement SDK. */
+/** Entry guidance, not an exhaustive capability list or an authorization envelope. */
 export const CREATOR_S1_SUPPORT = Object.freeze({
   id: "creator-s1-2026-10-16",
   target: "关联本地项目的普通聊天",
   scope: {
     id: "function-authoring-s1",
-    description: "首批函数创作保证；Host导出/调试另核条件。",
+    description: "当前创作入口与常用示例；完整能力查SDK/事件目录，Host导出/调试另核条件。",
     discovery: {
       kind: "tool",
       tool: "mod_authoring",
@@ -466,8 +469,14 @@ export const CREATOR_S1_SUPPORT = Object.freeze({
     usageMetrics:
       "Token 上下文占用与累计输入/输出用量是不同指标；用当前 SDK catalog/types 发现真实字段及来源，按语义取数。缺字段/统计显示“暂无统计”，不得默认 0 当作已测量，不得据此虚构 session API。"
   },
-  sites: ["AbovePrompt", "PromptHint", "InfoNotice", "TurnDuration"],
-  events: [
+  sites: [...FUNCTION_UI_SITES, "Pane", "Placed"],
+  capabilityDiscovery: {
+    sdkMethods: FUNCTION_SDK_METHODS.length,
+    boundedEvents: FUNCTION_COMPATIBILITY_EVENT_NAMES.filter(name =>
+      getFunctionEventSupport(name)?.availability === "bounded").length,
+    instructions: "下面是常用示例，不是白名单。缺项先用catalogSection=sdk/events及query精查；完整目录按nextCursor分页。声明、试用准入和当前目标可用性分别核对，不因示例未列出就宣称平台不支持。"
+  },
+  eventExamples: [
     "session.start",
     "ui.render",
     "tool.call",
@@ -475,7 +484,7 @@ export const CREATOR_S1_SUPPORT = Object.freeze({
     "turn.complete",
     "prompt.compose"
   ],
-  localMethods: [
+  localMethodExamples: [
     "ui.open",
     "ui.close",
     "ui.resolve",
@@ -490,7 +499,7 @@ export const CREATOR_S1_SUPPORT = Object.freeze({
     "command.register",
     "clock.now"
   ],
-  authorizedMethods: [
+  authorizedMethodExamples: [
     "http.fetch",
     "fs.read",
     "fs.list",
@@ -518,5 +527,5 @@ export const CREATOR_S1_SUPPORT = Object.freeze({
     "未知副作用自动重放"
   ],
   onUnsupported:
-    "保留当前运行版、草稿和可用组合；明示缺口/实际替代，未应用标草稿。禁删功能/关其它Mod/虚构完成；高级SDK≠首批保证。"
+    "先查询完整SDK/事件及条件能力，再判断缺口。保留当前运行版、草稿和可用组合；未应用标草稿，禁删功能/关其它Mod/虚构完成。可编写不代表任意需求自动验收通过。"
 })

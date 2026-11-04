@@ -319,7 +319,8 @@ describe("owned agent spawn lifecycle", () => {
         background: true
       }),
       expect.any(AbortSignal),
-      expect.any(String)
+      expect.any(String),
+      expect.objectContaining({ modId: "function:review", assertCurrent: expect.any(Function) })
     )
     f.startup.abort()
     f.instance.release()

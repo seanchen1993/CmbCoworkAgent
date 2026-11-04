@@ -1,3 +1,4 @@
+import { ModApprovalInbox } from "../../ipc/mods-approval-inbox"
 import { AsyncResource } from "node:async_hooks"
 import { randomUUID } from "node:crypto"
 import { mkdtemp, rm } from "node:fs/promises"
@@ -15,6 +16,7 @@ import {
   assertDevelopmentNativeGrant,
   captureDevelopmentNativeResourceGuard,
   developmentNativeGrant,
+  developmentNativeComponentId,
   withDevelopmentNativeAuthority
 } from "./development-native-authority"
 import { withFunctionExecution } from "./execution-context"
@@ -36,6 +38,7 @@ async function fixture() {
   }
   let sourceCurrent = true
   let activation: DevelopmentActivation | undefined
+  const changed = new Set<() => void>()
   const sessions = new FunctionDevelopmentSessions({
     assertScope: () => {},
     prepare: async () => ({ dispose: async () => {} }),
@@ -43,7 +46,7 @@ async function fixture() {
     activate: (next) => {
       activation = next
     },
-    changed: () => {}
+    changed: () => { for (const notify of changed) notify() }
   })
   const revision: DevelopmentRevision = {
     componentId: randomUUID(),
@@ -97,6 +100,7 @@ async function fixture() {
     run,
     call,
     activation: () => activation!,
+    onChanged: (notify: () => void) => changed.add(notify),
     invalidateSource: () => {
       sourceCurrent = false
     }
@@ -290,4 +294,47 @@ it("retains ordinary formal grants before, during, and after development authori
     f.store.grant(f.workspace, formal.modId, "changed-digest", true)
     expect(verify).toThrow("REVOKED")
   })
+})
+
+it("allows a real trial approval on renderer context and removes pending consent on stop", async () => {
+  const f = await fixture()
+  const inbox = new ModApprovalInbox(() => {})
+  f.onChanged(() => inbox.prune())
+  const controller = new AbortController()
+  const request = () => f.call(identity => inbox.request({ workspace: f.workspace,
+    threadId: f.scope.threadId, modId: developmentNativeComponentId(f.store, identity)! }, {
+      message: "test request", signal: controller.signal, buttons: ["拒绝", "允许本次请求"]
+    }, () => f.store.assertGrant(identity)), "http.fetch")
+  const first = request()
+  await vi.waitFor(() => expect(inbox.snapshot().current).not.toBeNull())
+  expect(inbox.snapshot().current?.modId).toBe(f.revision.componentId)
+  inbox.decide({ requestId: inbox.snapshot().current!.requestId, decision: "allow" })
+  await expect(first).resolves.toEqual({ response: 1 })
+  const second = request()
+  const rejected = expect(second).rejects.toThrow()
+  await vi.waitFor(() => expect(inbox.snapshot().current).not.toBeNull())
+  await f.sessions.stop(f.scope, f.revision.componentId, () => {})
+  await rejected
+  expect(inbox.snapshot().current).toBeNull()
+})
+
+it("a fresh trial activation cannot evade a pause by changing its ephemeral grant id", async () => {
+  const f = await fixture()
+  const inbox = new ModApprovalInbox(() => {})
+  const request = () => f.call(identity => inbox.request({ workspace: f.workspace,
+    threadId: f.scope.threadId, modId: developmentNativeComponentId(f.store, identity)! }, {
+      message: "test request", signal: new AbortController().signal,
+      buttons: ["拒绝", "允许本次请求"]
+    }, () => f.store.assertGrant(identity)), "http.fetch")
+  const pending = request()
+  await vi.waitFor(() => expect(inbox.snapshot().current).not.toBeNull())
+  inbox.decide({ requestId: inbox.snapshot().current!.requestId, decision: "deny" })
+  await pending
+  const previous = f.activation().id
+  const revision = { ...f.revision, revision: 2, compiledDigest: "c".repeat(64), turnId: "next" }
+  f.stage(revision)
+  f.sessions.approve(f.scope, revision.componentId, revision.compiledDigest, revision.capabilities, () => {})
+  f.sessions.noteSettled(f.scope, revision.turnId, "completed")
+  await vi.waitFor(() => expect(f.activation().id).not.toBe(previous))
+  await expect(request()).rejects.toThrow("MODS_APPROVAL_PAUSED")
 })

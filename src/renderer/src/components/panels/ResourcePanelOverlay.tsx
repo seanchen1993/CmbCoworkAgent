@@ -29,12 +29,15 @@ export function ResourcePanelOverlay({
   const rightModule = moduleMode ?? storedRightModule
   const setRightModule = useAppStore((state) => state.setRightModule)
   const activeThreadId = renderedPanelThreadId
-  const standardRightPanelMounted =
+  // The task sidebar occupies the same native right-panel slot. Explicit module
+  // navigation must replace it, rather than open an unrelated overlay whose
+  // content disagrees with the selected titlebar button.
+  const standardRightPanelAvailable =
     !isAgentFocusActive &&
     !rightPanelCollapsed &&
-    rightModule !== "claw" &&
     (renderedMainView === "thread" || renderedMainView === "harness") &&
     Boolean(renderedPanelThreadId)
+  const standardRightPanelMounted = standardRightPanelAvailable && rightModule !== "claw"
   const [open, setOpen] = useState(false)
   const [protectedOnlyOpen, setProtectedOnlyOpen] = useState(false)
   const [mode, setMode] = useState<ResourcePanelOverlayMode>("preview")
@@ -81,7 +84,7 @@ export function ResourcePanelOverlay({
   const selectMode = useCallback(
     (nextMode: ResourcePanelOverlayMode) => {
       setProtectedOnlyOpen(false)
-      if (standardRightPanelMounted) {
+      if (standardRightPanelAvailable) {
         setOpen(false)
         setRightModule(nextMode)
         return
@@ -89,7 +92,7 @@ export function ResourcePanelOverlay({
       setMode(nextMode)
       setOpen(true)
     },
-    [setRightModule, standardRightPanelMounted]
+    [setRightModule, standardRightPanelAvailable]
   )
 
   useEffect(() => {

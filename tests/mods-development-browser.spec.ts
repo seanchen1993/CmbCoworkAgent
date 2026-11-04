@@ -466,6 +466,11 @@ async function main() {
     await page.getByText(/未知操作不会自动重试/).waitFor()
     await page.screenshot({path:join(output,"real-unknown-375.png"),fullPage:true})
     await call("mount", "chat")
+    const restoredAttention = page.getByRole("button", { name: "试用结果待核对", exact: true })
+    await restoredAttention.waitFor()
+    assert.equal(await page.getByRole("dialog").count(), 0,
+      "restoring creator state must not automatically reopen its workspace")
+    await restoredAttention.click()
     await page.getByRole("button", { name: "恢复这个灵件", exact: true }).waitFor()
     await page.keyboard.press("Escape")
     const attentionReads = ((await call("get")) as { reads: number }).reads

@@ -1,6 +1,8 @@
+import { ModApprovalInbox } from "@/components/chat/ModApprovalInbox"
 import { openClawSidebar } from "@/lib/claw-sidebar"
 import { canUseChatWorkbench, effectiveChatRightModule } from "@/lib/chat-workbench-visibility"
-import { ClawSidebarHost } from "@/components/panels/ClawSidebarHost"
+import { ClawSidebarShell } from "@/components/panels/ClawSidebarHost"
+import { RightPanelDock } from "@/components/panels/RightPanelDock"
 import { editorNavigationScopeKey } from "../../shared/mods/v2/developer-editor"
 import {
   useCallback,
@@ -1338,51 +1340,28 @@ function App(): React.JSX.Element {
                   </>
                 )}
 
-                {renderedMainView === "thread" &&
-                  rightModule === "claw" &&
-                  !rightPanelCollapsed &&
-                  !isAgentFocusActive && (
-                    <div className="max-[1050px]:hidden">
-                      <ResizeHandle
-                        onDrag={handleRightResize}
-                        onDragStart={handleRightResizeStart}
-                        onDragEnd={handleRightResizeEnd}
-                      />
-                    </div>
-                  )}
-                {renderedMainView === "thread" && renderedThreadId && chatWorkbenchAvailable && (
-                  <div
-                    hidden={rightPanelCollapsed || rightModule !== "claw" || isAgentFocusActive}
-                    inert={rightPanelCollapsed || rightModule !== "claw" || isAgentFocusActive}
-                    data-claw-sidebar-shell
-                    ref={rightModule === "claw" ? rightPanelContainerRef : undefined}
-                    className="h-full min-h-0 shrink-0 border-l bg-background max-[1050px]:absolute max-[1050px]:inset-y-0 max-[1050px]:right-0 max-[1050px]:z-40 max-[1050px]:shadow-2xl"
-                    style={{
-                      width: Math.max(340, Math.min(typeof fullscreenRightPanelStyle?.width === "number" ? fullscreenRightPanelStyle.width : 340, 480)),
-                      maxWidth: "calc(100vw - 24px)"
-                    }}
+                {renderedMainView === "thread" && (
+                  <RightPanelDock
+                    hidden={
+                      rightPanelCollapsed ||
+                      isAgentFocusActive ||
+                      (rightModule === "claw" && (!renderedThreadId || !chatWorkbenchAvailable))
+                    }
+                    resizable={showRightResizeHandle}
+                    panelRef={rightPanelContainerRef}
+                    className={fullscreenRightPanelClassName}
+                    style={fullscreenRightPanelStyle}
+                    onResizeStart={handleRightResizeStart}
+                    onResize={handleRightResize}
+                    onResizeEnd={handleRightResizeEnd}
                   >
-                    <ClawSidebarHost key={renderedThreadId} threadId={renderedThreadId} />
-                  </div>
-                )}
-                {renderedMainView === "thread" &&
-                  !rightPanelCollapsed &&
-                  !isAgentFocusActive &&
-                  rightModule !== "claw" && (
-                  <>
-                    {showRightResizeHandle && (
-                      <ResizeHandle
-                        onDragStart={handleRightResizeStart}
-                        onDrag={handleRightResize}
-                        onDragEnd={handleRightResizeEnd}
+                    {renderedThreadId && chatWorkbenchAvailable && (
+                      <ClawSidebarShell
+                        threadId={renderedThreadId}
+                        hidden={rightPanelCollapsed || rightModule !== "claw" || isAgentFocusActive}
                       />
                     )}
-                    {/* Right Panel - floating style */}
-                    <div
-                      ref={rightPanelContainerRef}
-                      style={fullscreenRightPanelStyle}
-                      className={fullscreenRightPanelClassName}
-                    >
+                    {!rightPanelCollapsed && !isAgentFocusActive && rightModule !== "claw" && (
                       <RightPanel
                         threadId={renderedThreadId}
                         moduleMode={rightModule}
@@ -1391,8 +1370,8 @@ function App(): React.JSX.Element {
                         onPreviewFullscreenChange={setPreviewFullscreen}
                         onBrowserFullscreenChange={setBrowserFullscreen}
                       />
-                    </div>
-                  </>
+                    )}
+                  </RightPanelDock>
                 )}
               </div>
             ) : null}
@@ -1615,6 +1594,7 @@ function App(): React.JSX.Element {
         </div>
       </div>
       <ReleaseFeatureGuide active={!isAgentFocusActive} />
+      <ModApprovalInbox key={accountRevision} />
       <PetStateBridge />
       <Toaster position="top-center" richColors duration={2200} theme={toastTheme} />
     </ThreadProvider>

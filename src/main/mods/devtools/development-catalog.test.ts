@@ -123,18 +123,21 @@ it("freezes a discoverable S1 promise using real supported sites, events and SDK
     throw Error("expected support profile")
   const support = page.content
   expect(support.id).toBe("creator-s1-2026-10-16")
+  expect(support.capabilityDiscovery.sdkMethods).toBe(FUNCTION_SDK_METHODS.length)
+  expect(support.capabilityDiscovery.instructions).toContain("不是白名单")
+  expect(support.sites).toEqual(expect.arrayContaining(["ChatHeader", "AbovePrompt", "Pane", "Placed"]))
   expect(
     support.sites.every((site) =>
-      FUNCTION_UI_SITES.includes(site as (typeof FUNCTION_UI_SITES)[number])
+      [...FUNCTION_UI_SITES, "Pane", "Placed"].includes(site)
     )
   ).toBe(true)
   expect(
-    [...support.localMethods, ...support.authorizedMethods].filter(
+    [...support.localMethodExamples, ...support.authorizedMethodExamples].filter(
       (method) => !FUNCTION_SDK_METHODS.some((known) => known === method)
     )
   ).toEqual([])
   expect(
-    support.events.every((event) => getFunctionEventSupport(event)?.availability === "bounded")
+    support.eventExamples.every((event) => getFunctionEventSupport(event)?.availability === "bounded")
   ).toBe(true)
   expect(support.onUnsupported).toContain("保留当前运行版、草稿和可用组合")
   expect(support.unsupported).toContain("自动启动任意已保存 Flow")

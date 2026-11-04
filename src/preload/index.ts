@@ -3153,6 +3153,16 @@ const api = {
     }
   },
   mods: {
+    approvalInbox: {
+      snapshot: () => ipcRenderer.invoke("mods:approval-snapshot"),
+      decide: (input: { requestId: string; decision: "allow" | "deny" | "details" }) => ipcRenderer.invoke("mods:approval-decide", input),
+      resume: (sourceId: string) => ipcRenderer.invoke("mods:approval-resume", sourceId),
+      onChanged: (callback: () => void) => {
+        const listener = () => callback()
+        ipcRenderer.on("mods:approval-changed", listener)
+        return () => ipcRenderer.removeListener("mods:approval-changed", listener)
+      }
+    },
     ...createEditorNavigationBridge((channel, input) => ipcRenderer.invoke(channel, input), (callback) => {
       const listener = (_event: unknown, value: import("../shared/mods/v2/developer-editor").DeveloperEditorEvent) => callback(value)
       ipcRenderer.on("mods:editor-navigation", listener)

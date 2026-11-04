@@ -8405,6 +8405,9 @@ export function ChatContainer({
       data-chat-thread-id={threadId}
       className="relative flex flex-1 flex-col min-h-0 overflow-hidden"
     >
+      <FunctionSite key={`header:${threadId}`} threadId={threadId} component="ChatHeader"
+        facts={{ isWorking: isLoading }}
+        className="sparks-inline-surface mx-auto w-full max-w-3xl text-xs text-muted-foreground" />
       {remoteThreadInfo && !dismissedRemoteTipThreadIds.has(threadId) ? (
         <div className="flex shrink-0 items-start gap-2 border-b border-status-info/20 bg-status-info/5 px-4 py-2 text-xs">
           <Info className="mt-0.5 size-3.5 shrink-0 text-status-info" />

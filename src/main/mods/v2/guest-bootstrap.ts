@@ -53,7 +53,7 @@ export const FUNCTION_GUEST_BOOTSTRAP = String.raw`
   const signals = new Map();
   const registrations = [];
   const drawnComponents = new Set();
-  const uiComponents = new Set(["Placed","Pane","AbovePrompt","PromptHint","InfoNotice","Spinner",
+  const uiComponents = new Set(["Placed","Pane","ChatHeader","AbovePrompt","PromptHint","InfoNotice","Spinner",
     "TurnDuration","SessionMode","UserMessage","AssistantMessage","CommandOutput",
     "ToolUse","ToolResult","ToolGroup","AskUserQuestion"]);
   // A redraw hint, never an authorization receipt. Inspect current mutable matchers on

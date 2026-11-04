@@ -110,3 +110,11 @@ export function captureDevelopmentNativeResourceGuard(
     activation.assertCapability(method)
   }
 }
+
+/** Stable display/pause identity only; never substitutes for the call-scoped grant. */
+export function developmentNativeComponentId(store: ModControlStore, identity: ModGrant): string | undefined {
+  const call = calls.getStore()
+  if (!call || call.store !== store || call.identity !== identity) return undefined
+  assertCall(call)
+  return call.activation.revision.componentId
+}

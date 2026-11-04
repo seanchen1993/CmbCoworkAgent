@@ -219,6 +219,8 @@ export interface DevelopmentRuntimeDiagnostics {
 export interface DevelopmentTrialStatus {
   componentId: string
   draftId: string
+  /** Previous-process observation; stopping this record cannot disable an installed Mod. */
+  historical?: true
   revision: number
   bundleDigest: string
   compiledDigest: string

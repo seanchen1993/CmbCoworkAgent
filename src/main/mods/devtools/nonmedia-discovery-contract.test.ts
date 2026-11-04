@@ -10,6 +10,8 @@ import {
 } from "../../../shared/mods/v2/event-catalog"
 import { FUNCTION_SDK_METHODS } from "../v2/sdk-capabilities"
 import { SESSION_CAPABILITIES } from "../v2/session"
+import { DEVELOPMENT_REAL_CAPABILITIES } from "../v2/development-session"
+import { FUNCTION_COMPATIBILITY_EVENT_NAMES, getFunctionEventSupport } from "../../../shared/mods/v2/compatibility-catalog"
 import { developmentCatalogPage } from "./development-catalog"
 import { checkFunctionAuthorTypes } from "./authoring-check"
 
@@ -56,6 +58,7 @@ it("matches the fixed upstream Core inventory while excluding media and labeling
 
 it("provides queryable declarations for every actual SDK method under the creator budget", () => {
   for (const method of FUNCTION_SDK_METHODS) {
+    expect(DEVELOPMENT_REAL_CAPABILITIES, method).toContain(method)
     const page = developmentCatalogPage("sdk", 0, method)
     expect(page, method).toMatchObject({
       matched: true,
@@ -66,6 +69,29 @@ it("provides queryable declarations for every actual SDK method under the creato
   }
   expect(JSON.stringify({ ok: true, result: developmentCatalogPage() }).length).toBeLessThan(8000)
 }, 30000)
+
+it("provides a queryable author declaration for every bounded runtime event", () => {
+  const events = FUNCTION_COMPATIBILITY_EVENT_NAMES.filter(name =>
+    getFunctionEventSupport(name)?.availability === "bounded")
+  for (const event of events) {
+    const page = developmentCatalogPage("events", 0, event)
+    expect(page, event).toMatchObject({ matched: true, declarationAvailable: true })
+    expect(DEVELOPMENT_REAL_CAPABILITIES, event).toContain(`event:${event}`)
+    expect(JSON.stringify({ ok: true, result: page }).length, event).toBeLessThan(8000)
+  }
+}, 30000)
+
+it("typechecks the real classification Hook envelope instead of inventing a result shape", async () => {
+  const valid = await authorCheck(`import type {Register} from "devclaw-mods"
+export const register:Register=on=>{on("model.classify",async($,e,next)=>{
+  const text:string=e.text;const labels:string[]=e.labels;const model:string=e.model;
+  return next({...e,text,labels,model});
+})}`)
+  expect(valid.diagnostics).toEqual([])
+  const invalid = await authorCheck(`import type {Register} from "devclaw-mods"
+export const register:Register=on=>{on("model.classify",()=>({value:{label:"invented"}}))}`)
+  expect(invalid.valid).toBe(false)
+})
 
 it("lets real authors typecheck nonmedia hooks and SDK calls without ambient Node or DOM", async () => {
   const result = await authorCheck(`import type {Register} from "devclaw-mods"

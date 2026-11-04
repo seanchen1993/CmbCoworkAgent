@@ -111,6 +111,8 @@ export interface DevelopmentStatus extends Omit<
 > {
   capabilities: string[]
   phase: DevelopmentPhase
+  /** Previous-process observation only; it is not a current trial or cleanup proof. */
+  historical?: true
   activeRevision?: number
   activeDigest?: string
   waitingReason?: DevelopmentWaitingReason

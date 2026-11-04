@@ -267,12 +267,20 @@ export function developmentCatalogPage(
         usageExample: "const catalog=await $.mcp.list(); const source=catalog.sources[0]; if(source){const connection=await $.mcp.connect(source.sourceId); if(connection.isConnected){const state=await $.mcp.status({server:connection.server}); /* Use only this lease's advertised real tool name with $.mcp.call. */ await $.mcp.disconnect({server:connection.server});}}",
         mcpScope: "仅当前普通聊天Claw明确选择的id+配置摘要。宿主管理stdio/Streamable HTTP/SSE命令、URL和认证，插件只传sourceId；远程同源、禁重定向/自动协议回退/工具重放。项目或子会话缺等价选择证明仍拒绝。server是本组件独占opaque句柄；跨来源/过期不回退全局。list/status/disconnect为桌面扩展，读取不初始化。取消关闭该连接；unknown表示本机回收未确认，不代表远程任务停止，不能自动重连。撤权/来源或选择变更/重载清理。"
       } : {}),
+      ...(exact === "http.fetch" && cursor === 0 ? {
+        networkGuide: "请求用户实际能访问的完整HTTP/HTTPS地址，保留端口和路径；不要将服务监听地址当访问地址。本机开发服务通常使用localhost或127.0.0.1及真实端口，不猜端口。授权仅允许请求，不证明服务可达。失败显示error.message中的安全诊断；不得自动重放有副作用请求或关闭TLS证书校验。当前传输不自动继承浏览器登录态或代理。HTTP 4xx/5xx是响应，须检查status/ok，不能当网络断开。"
+      } : {}),
       ...(exact === "config.set" && cursor === 0 ? {
         migrationExample: "userConfigSchema:{version:1,migrations:[{fromVersion:0,toVersion:1,changes:[{kind:'rename',from:'oldLabel',to:'label'}]}]}, cmbCompatibility:{modelProtocol:'result-v1',userConfigMigrations:'v1'}。删除用{kind:'remove',key:'字段名'}；后续逐版本连续迁移，原生确认，失败保留旧值，不执行迁移脚本。"
       } : {}),
       ...(exact === "ui.resolve" && cursor === 0 ? {
         usageExample: DEVELOPMENT_LAYOUT_EXAMPLE,
         layoutScope: "同一桌面声明树用于面板、页面、侧栏和工具栏；只影响插件内容，外层授权/关闭控件保留。间距8px单位，尺寸为字符/行或0..100%。仅白名单样式、有界局部定位和hover，无raw CSS/DOM。精确属性与条件见UiBoxProps/UiTextProps。"
+      } : {}),
+      ...(exact === "ui.render" && cursor === 0 ? {
+        placementGuide: "ChatHeader：固定在当前聊天页顶部，滚动消息不移动；AbovePrompt：固定在输入框上方。两者独立滚动，props.maxRows/bodyColumns 是可用尺寸，勿重复按 scroll.offset 裁剪完整 DOM 表单。多字段/长报告用 Pane 或 capability surface placement:sidebar/page；侧栏与聊天并列，不是聊天消息。Placed 随消息滚动。固定指聊天区域，不覆盖窗口标题栏/原生审批。空树不占位。",
+        usageExample: 'on("ui.render", {component:"ChatHeader"}, ($,event)=>$.ui.resolve(event).Text({children:"工作台状态"}))',
+        renderSites: catalog.support.sites
       } : {}),
       ...(exact === "ui.place" && cursor === 0 ? {
         usageExample: DEVELOPMENT_PLACED_EXAMPLE,

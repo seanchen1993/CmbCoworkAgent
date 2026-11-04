@@ -6,6 +6,7 @@ import { normalizeFunctionInput } from "../../../shared/mods/v2/pinned-input"
 import {
   functionQuestionPresentation,
   functionSiteProps,
+  isFunctionDockedSite,
   type FunctionUiRenderComponent
 } from "../../../shared/mods/v2/sites"
 import type { FunctionUiElement } from "../../../shared/mods/v2/ui"
@@ -42,7 +43,7 @@ export function functionNativePresentation(
                   ? ["tool", "metadataSource"]
                   : component === "PromptHint"
                     ? ["isWorking", "isDraft"]
-                    : component === "AbovePrompt" || component === "Pane"
+                    : isFunctionDockedSite(component) || component === "Pane"
                       ? Object.keys(original).filter(
                           (key) => component !== "Pane" || key !== "title"
                         )
@@ -67,9 +68,9 @@ export function functionNativePresentation(
   }
   if (component === "AskUserQuestion")
     functionQuestionPresentation(original.questions, received.questions)
-  // AbovePrompt already holds normalized, pinned geometry rather than renderer input fields.
-  if (component === "Pane" || component === "AbovePrompt") {
-    if (component === "AbovePrompt" && !same(received, original))
+  // Docked sites already hold normalized, pinned geometry rather than renderer input fields.
+  if (component === "Pane" || isFunctionDockedSite(component)) {
+    if (isFunctionDockedSite(component) && !same(received, original))
       throw new ModFunctionError("MODS_UI_NATIVE_PUBLICATION")
     if (component === "Pane" && typeof received.title !== "string")
       throw new ModFunctionError("MODS_UI_NATIVE_PUBLICATION")

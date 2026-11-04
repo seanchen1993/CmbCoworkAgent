@@ -25,6 +25,7 @@ import { enterCreatorMode } from "./creator-mode-entry"
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react"
 import { PluginSurfaceEntries } from "../platform/PluginSurfaceEntries"
 import { useAppStore } from "@/lib/store"
+import { openClawSidebar } from "@/lib/claw-sidebar"
 import { hasNativeCreatorWork } from "./creator-workspace-visibility"
 import type {
   DevelopmentApi,
@@ -241,6 +242,10 @@ function ScopedDevelopment({
   const latestStatus = useRef(status)
   latestStatus.current = status
   const [busy, setBusy] = useState(false)
+  const [stoppingId, setStoppingId] = useState<string>()
+  // Restoring creator mode restores records, not dialog visibility.
+  const initialStatusRead = useRef(true)
+  const readSequence = useRef(0)
   const [message, setMessage] = useState("")
   const live = useRef(false),
     pending = useRef(false),
@@ -290,20 +295,21 @@ function ScopedDevelopment({
   )
   const read = useCallback(
     async (clearError = true) => {
-      if (pending.current) return
-      const ticket = ++generation.current
+      const ticket = generation.current
+      const sequence = ++readSequence.current
       try {
         const next = await api.status({ threadId })
         if (
           !live.current ||
           generation.current !== ticket ||
+          readSequence.current !== sequence ||
           account.current !== useAppStore.getState().accountRevision
         )
           return
         accept(next)
         if (clearError) setMessage("")
       } catch (error) {
-        if (live.current && generation.current === ticket)
+        if (live.current && generation.current === ticket && readSequence.current === sequence)
           setMessage(publicError(error, "暂时无法读取创作状态。请点击“重新读取状态”后继续。"))
       }
     },
@@ -347,6 +353,7 @@ function ScopedDevelopment({
       assertCurrent()
       const result = await call(workspace, assertCurrent)
       assertCurrent()
+      readSequence.current++
       await done(result)
     } catch (error) {
       if (live.current && ticket === generation.current) setMessage(publicError(error))
@@ -354,6 +361,7 @@ function ScopedDevelopment({
       if (live.current && ticket === generation.current) {
         pending.current = false
         setBusy(false)
+        setStoppingId(undefined)
         await read(false)
       }
     }
@@ -433,23 +441,26 @@ function ScopedDevelopment({
     }
     let cancelled = false
     const workspace = status.workspace
-    let observed = ""
-    const refreshReview = async () => {
+    let revealed = ""
+    let request = 0
+    const refreshReview = async (reveal = false) => {
+      const ticket = ++request
       try {
         // Read back from the native ephemeral ledger. Event JSON alone never selects a plan.
         const intent = await reviewApi.current(threadId)
         if (
           cancelled ||
+          ticket !== request ||
           !intent ||
           intent.threadId !== threadId ||
           intent.expiresAt <= Date.now() ||
-          normalizeWorkspacePathKey(intent.workspace) !== normalizeWorkspacePathKey(workspace) ||
-          intent.id === observed
+          normalizeWorkspacePathKey(intent.workspace) !== normalizeWorkspacePathKey(workspace)
         )
           return
-        observed = intent.id
         setStageDebugReview(intent)
         setProjectPreviewOpen(!reviewTargetsProjectTrial(intent, status?.projectTrial))
+        if (!reveal || revealed === intent.id) return
+        revealed = intent.id
         setOpen(true)
         requestAnimationFrame(() =>
           workspaceBody.current
@@ -457,11 +468,11 @@ function ScopedDevelopment({
             ?.scrollIntoView({ block: "start" })
         )
       } catch {
-        if (!cancelled) setStageDebugReview(undefined)
+        if (!cancelled && ticket === request) setStageDebugReview(undefined)
       }
     }
     const stop = reviewApi.onRequested((intent) => {
-      if (intent.threadId === threadId) void refreshReview()
+      if (intent.threadId === threadId) void refreshReview(true)
     })
     void refreshReview()
     return () => {
@@ -477,19 +488,19 @@ function ScopedDevelopment({
     status?.projectTrial?.digest
   ])
   const awaitingApproval =
-    status?.trials.filter((row) => row.phase === "needs-approval").length ?? 0
+    status?.trials.filter((row) => !row.historical && row.phase === "needs-approval").length ?? 0
   const active = status?.trials.some(
-    (row) => row.activeRevision !== undefined && row.phase !== "stopped"
+    (row) => !row.historical && row.activeRevision !== undefined && row.phase !== "stopped"
   )
-  const failed = status?.trials.some((row) => row.phase === "failed")
+  const failed = status?.trials.some((row) => !row.historical && row.phase === "failed")
   const uncertain = status?.trials.some(
-    (row) => row.phase === "unknown" || (row.diagnostics?.unknownRequests ?? 0) > 0
+    (row) => !row.historical && (row.phase === "unknown" || (row.diagnostics?.unknownRequests ?? 0) > 0)
   )
   const trialAttentionKey = JSON.stringify(
     status?.trials
       .filter(
         (row) =>
-          ["failed", "unknown"].includes(row.phase) || (row.diagnostics?.unknownRequests ?? 0) > 0
+          !row.historical && (["failed", "unknown"].includes(row.phase) || (row.diagnostics?.unknownRequests ?? 0) > 0)
       )
       .map((row) => [row.componentId, row.revision, row.compiledDigest, row.phase, row.error]) ?? []
   )
@@ -500,7 +511,7 @@ function ScopedDevelopment({
       announcedTrialAttention.current !== trialAttentionKey
     ) {
       announcedTrialAttention.current = trialAttentionKey
-      setOpen(true)
+      if (!initialStatusRead.current) setOpen(true)
     }
     if (trialAttentionKey === "[]") announcedTrialAttention.current = ""
   }, [mode, trialAttentionKey])
@@ -520,7 +531,7 @@ function ScopedDevelopment({
   useEffect(() => {
     if (mode === "chat" && reuseKey && announcedReuse.current !== reuseKey) {
       announcedReuse.current = reuseKey
-      setOpen(true)
+      if (!initialStatusRead.current) setOpen(true)
     }
     if (!reuseKey) announcedReuse.current = ""
   }, [mode, reuseKey])
@@ -540,7 +551,7 @@ function ScopedDevelopment({
       announcedCompositionFailure.current !== compositionFailureKey
     ) {
       announcedCompositionFailure.current = compositionFailureKey
-      setOpen(true)
+      if (!initialStatusRead.current) setOpen(true)
     }
     if (!compositionFailureKey) announcedCompositionFailure.current = ""
   }, [mode, compositionFailureKey])
@@ -549,7 +560,7 @@ function ScopedDevelopment({
   useEffect(() => {
     if (mode === "chat" && configurationId && announcedConfiguration.current !== configurationId) {
       announcedConfiguration.current = configurationId
-      setOpen(true)
+      if (!initialStatusRead.current) setOpen(true)
     }
   }, [mode, configurationId])
   const projectTrialId = status?.projectTrial?.id
@@ -566,7 +577,7 @@ function ScopedDevelopment({
     if (deliveryAttention && announcedDeliveryAttention.current !== deliveryAttention) {
       announcedDeliveryAttention.current = deliveryAttention
       setWorkspaceTab("delivery")
-      if (mode === "chat") setOpen(true)
+      if (mode === "chat" && !initialStatusRead.current) setOpen(true)
     }
     if (!deliveryAttention) announcedDeliveryAttention.current = ""
   }, [mode, deliveryAttention])
@@ -580,7 +591,7 @@ function ScopedDevelopment({
   useEffect(() => {
     if (mode === "chat" && projectTrialId && announcedProjectTrial.current !== projectTrialId) {
       announcedProjectTrial.current = projectTrialId
-      setOpen(true)
+      if (!initialStatusRead.current) setOpen(true)
     }
   }, [mode, projectTrialId])
   const businessReview = status?.business?.review
@@ -595,7 +606,7 @@ function ScopedDevelopment({
       announcedModularization.current !== modularization.requestId
     ) {
       announcedModularization.current = modularization.requestId
-      setOpen(true)
+      if (!initialStatusRead.current) setOpen(true)
     }
   }, [mode, modularization?.phase, modularization?.requestId])
   const projectCreation = !!businessReview || !!status?.projectTrial
@@ -605,7 +616,7 @@ function ScopedDevelopment({
   useEffect(() => {
     if (businessTrialOpen && hostBusinessReview) {
       setBusinessTrialOpen(false)
-      if (mode === "chat") setOpen(true)
+      if (mode === "chat" && !initialStatusRead.current) setOpen(true)
     }
   }, [businessTrialOpen, hostBusinessReview, mode])
   const businessJourney = businessTrial
@@ -619,8 +630,10 @@ function ScopedDevelopment({
   useEffect(() => {
     if (businessTrialAttention && announcedBusinessTrial.current !== businessTrialAttention) {
       announcedBusinessTrial.current = businessTrialAttention
-      setBusinessTrialOpen(true)
-      setOpen(false)
+      if (!initialStatusRead.current) {
+        setBusinessTrialOpen(true)
+        setOpen(false)
+      }
     }
   }, [businessTrialAttention])
   const businessReviewKey = businessReview
@@ -634,12 +647,12 @@ function ScopedDevelopment({
       announcedBusinessReview.current !== businessReviewKey
     ) {
       announcedBusinessReview.current = businessReviewKey
-      if (!businessTrialAttention && !businessTrialOpen) setOpen(true)
+      if (!businessTrialAttention && !businessTrialOpen && !initialStatusRead.current) setOpen(true)
     }
   }, [mode, businessReviewKey, businessTrialAttention, businessTrialOpen])
   const approvalKey = JSON.stringify(
     status?.trials
-      .filter((row) => row.phase === "needs-approval")
+      .filter((row) => !row.historical && row.phase === "needs-approval")
       .map((row) => JSON.stringify([row.componentId, row.draftId, row.revision, row.bundleDigest, row.compiledDigest]))
       .sort() ?? []
   )
@@ -647,10 +660,14 @@ function ScopedDevelopment({
     if (awaitingApproval && announcedApproval.current !== approvalKey) {
       announcedApproval.current = approvalKey
       setWorkspaceTab("trial")
-      if (mode === "chat") setOpen(true)
+      if (mode === "chat" && !initialStatusRead.current) setOpen(true)
     }
     if (!awaitingApproval) announcedApproval.current = ""
   }, [mode, awaitingApproval, approvalKey])
+  // Keep this after the attention effects so their first snapshot is acknowledged quietly.
+  useEffect(() => {
+    if (status) initialStatusRead.current = false
+  }, [status])
   const label =
     modularization?.phase === "needs-confirmation"
       ? "确认插件模块化"
@@ -766,7 +783,7 @@ function ScopedDevelopment({
     <div role="status" className="space-y-2 rounded-lg bg-muted p-3 text-sm">
       <p>{message}</p>
       <div className="flex flex-wrap gap-2">
-        <button type="button" className={button} disabled={busy} onClick={() => void read()}>
+        <button type="button" className={button} onClick={() => void read()}>
           重新读取状态
         </button>
         {message.includes("灵件功能已关闭") && (
@@ -812,7 +829,6 @@ function ScopedDevelopment({
         <button
           type="button"
           className="rounded px-2 py-1 text-xs text-muted-foreground hover:bg-accent"
-          disabled={busy}
           onClick={() => {
             setMessage("")
             void read()
@@ -914,7 +930,7 @@ function ScopedDevelopment({
           const name =
             status.drafts.find((draft) => draft.id === row.draftId)?.name ?? row.componentId
           const savedAsPlugin = reuseCurrent && reuse?.phase === "active" &&
-            reuse.draftId === row.draftId && row.phase === "stopped"
+            reuse.draftId === row.draftId && (row.phase === "stopped" || row.historical)
           return (
             <article
               key={row.componentId}
@@ -934,14 +950,23 @@ function ScopedDevelopment({
                 className={`text-xs font-medium ${row.phase === "failed" ? "text-destructive" : row.phase === "needs-approval" ? "text-amber-700 dark:text-amber-400" : "text-muted-foreground"}`}
                 role="status"
               >
-                {savedAsPlugin ? "已保存为插件，当前聊天正在使用正式版本"
+                {row.historical ? "上次试用记录（非当前运行状态）"
+                  : savedAsPlugin ? "已保存为插件，当前聊天正在使用正式版本"
                   : row.phase === "queued" && row.waitingReason === "turn-interrupted"
                   ? "制作已中断，待继续"
                   : row.phase === "active" && row.validation === "authorized-real"
                     ? "版本已生效，真实结果待核对"
                     : phases[row.phase]}
               </p>
-              {!savedAsPlugin && <p className="text-xs">下一步：{developmentNextStep(row)}</p>}
+              {(!savedAsPlugin || row.historical) && <p className="text-xs">下一步：{developmentNextStep(row)}</p>}
+              {row.historical && mode === "chat" && (
+                <button type="button" className={button} onClick={() => {
+                  setOpen(false)
+                  openClawSidebar("configuration")
+                }}>
+                  管理此会话灵件
+                </button>
+              )}
               {row.phase === "active" && row.activeDigest && row.activeRevision !== undefined && (
                 <PluginSurfaceEntries
                   key={JSON.stringify([row.componentId, row.activeRevision, row.activeDigest])}
@@ -1092,7 +1117,7 @@ function ScopedDevelopment({
                   重新检查试用
                 </button>
               )}
-              {row.activeRevision !== undefined &&
+              {!row.historical && row.activeRevision !== undefined &&
                 (row.phase !== "active" || row.activeRevision !== row.revision) && (
                   <p>正在使用：v{row.activeRevision}。新版本尚未替换它。</p>
                 )}
@@ -1190,26 +1215,28 @@ function ScopedDevelopment({
                   关闭此制作面板不停止任务。停止试用、撤权、删除或退出应用会结束当前运行；重启先核对状态与权限，不会自动重放真实操作。
                 </p>
               </details>
-              {row.phase !== "stopped" && (
+              {!row.historical && row.phase !== "stopped" && (
                 <button
                   type="button"
                   className={button}
-                  disabled={busy}
-                  onClick={() =>
+                  disabled={busy || row.phase === "retiring"}
+                  onClick={() => {
+                    setStoppingId(row.componentId)
                     void operate(
                       (expectedWorkspace) =>
                         api.stop({ threadId, expectedWorkspace, id: row.componentId }),
                       accept
                     )
-                  }
+                  }}
                 >
-                  停止此组件试用
+                  {stoppingId === row.componentId || row.phase === "retiring"
+                    ? "正在停止试用…" : "停止此组件试用"}
                 </button>
               )}
-              {row.phase === "unknown" && (
+              {!row.historical && row.phase === "unknown" && (
                 <p>尚未确认是否停止。请先刷新状态；确认停止前不会开始新的试用。</p>
               )}
-              {row.error && row.phase !== "failed" && (
+              {!row.historical && row.error && row.phase !== "failed" && (
                 <p role="status">
                   {row.phase === "queued" && row.error === "MODS_DEVELOPMENT_BUSY"
                     ? "等待当前界面操作结束；已生效的旧版仍保留。"

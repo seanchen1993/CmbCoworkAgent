@@ -3,7 +3,7 @@ import type { FunctionUiSite } from "../../../shared/mods/v2/sites"
 type Priority = "ordinary" | "background" | "visible" | "interactive"
 
 export function functionSitePriority(component: FunctionUiSite, visible: boolean): Priority {
-  if (["AbovePrompt", "PromptHint", "SessionMode", "Spinner", "AskUserQuestion"].includes(component))
+  if (["ChatHeader", "AbovePrompt", "PromptHint", "SessionMode", "Spinner", "AskUserQuestion"].includes(component))
     return "interactive"
   // Transcript text takes precedence over optional elapsed-time labels during scrolling.
   return component !== "TurnDuration" && visible ? "visible" : "background"

@@ -8,6 +8,16 @@ import {
 } from "./development-trial-view"
 
 describe("development trial explanations", () => {
+  it("does not prescribe refresh or stop for historical trial observations", () => {
+    const row: DevelopmentTrialStatus = { componentId: "ui", draftId: "d", revision: 1,
+      bundleDigest: "source", compiledDigest: "compiled", phase: "unknown", capabilities: [],
+      historical: true }
+    expect(developmentNextStep(row)).toContain("会话灵件管理")
+    expect(developmentNextStep(row)).not.toContain("刷新")
+    expect(developmentNextStep(row)).toContain("历史外部操作的结果仍需单独核对")
+    delete row.historical
+    expect(developmentNextStep(row)).toContain("刷新")
+  })
   it("summarizes the permission set without dropping a new unknown capability", () => {
     expect(
       developmentCapabilitySummary([

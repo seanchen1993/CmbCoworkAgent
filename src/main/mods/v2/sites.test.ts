@@ -720,13 +720,13 @@ it("aborts an in-flight action on unmount and prevents its deferred write", asyn
   expect(state.has("completed")).toBe(false)
 })
 
-it("routes AbovePrompt focus to the first autoFocus and scroll through the proper site", async () => {
+it.each(["AbovePrompt", "ChatHeader"] as const)("routes %s focus and scroll through the proper site", async component => {
   const { session, state } = await fixture(`
-    on("ui.render",{component:"AbovePrompt"},($,e)=>$.ui.resolve(e).Button({key:"first",label:"Focus",autoFocus:true,onPress(){}}));
+    on("ui.render",{component:${JSON.stringify(component)}},($,e)=>$.ui.resolve(e).Button({key:"first",label:"Focus",autoFocus:true,onPress(){}}));
     on("ui.focus",async($,e,next)=>{await $.store.set("focus",e.component);return next(e)});
     on("ui.scroll",async($,e,next)=>{await $.store.set("scroll",e.component);return next(e)});
   `)
-  const owner = await session.sites.mount("AbovePrompt")
+  const owner = await session.sites.mount(component)
   const drawing = await session.sites.render(owner, {
     isWorking: false,
     bodyColumns: 80,
@@ -742,8 +742,8 @@ it("routes AbovePrompt focus to the first autoFocus and scroll through the prope
     kind: "scroll",
     value: { deltaX: 0, deltaY: 10, top: 0, left: 0 }
   })
-  expect(state.get("focus")).toBe("AbovePrompt")
-  expect(state.get("scroll")).toBe("AbovePrompt")
+  expect(state.get("focus")).toBe(component)
+  expect(state.get("scroll")).toBe(component)
 })
 
 it("loads the installation fixture and runs its real AbovePrompt controls, hint rewrite and notice", async () => {

@@ -1,5 +1,8 @@
+import { developmentNativeComponentId } from "../mods/v2/development-native-authority"
+import { ModApprovalInbox, registerModApprovalInbox } from "./mods-approval-inbox"
 import { projectDependencyImpact, summarizeProjectDependencyImpact } from "../mods/devtools/project-dependency-impact"
 import { createDesktopGitInspectionProvider } from "../mods/v2/platform-git-desktop"
+import { confirmNativeModApproval } from "./mods-native-approval"
 import { createNativeCodePlatformProvider } from "../mods/v2/platform-code-native"
 import { createDesktopWorkspacePlatformProvider } from "../mods/v2/platform-workspace-desktop"
 import { createWorkspaceReadPolicy } from "../mods/v2/platform-workspace-policy"
@@ -217,6 +220,13 @@ import { describeDevClawBuiltins } from "../mods/builtins/registry"
 import { readBuiltinProjectBinding, readBuiltinProjectFacts } from "../mods/builtins/project-facts"
 
 export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWindow | null): void {
+  const approvalInbox = new ModApprovalInbox(() => {
+    const owner = window()
+    if (owner && !owner.isDestroyed() && !owner.webContents.isDestroyed())
+      owner.webContents.send("mods:approval-changed")
+  })
+  registerModApprovalInbox(ipcMain, approvalInbox, trusted)
+
   let reconcileCreatorReuse: ((threadId?: string) => void) | undefined
   const snapshotAudit = (root: string) =>
     auditProjectSnapshotReferences(getOpenworkDir(), root, () => auditNativeSnapshotReferences(getDb()))
@@ -236,12 +246,19 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
     manager = new ModsManager(
       join(getOpenworkDir(), "mods-control.sqlite"),
       getPlugins,
-      async (_threadId, modId, toolId, args, signal, reason) => {
+      async (threadId, modId, toolId, args, signal, reason, access) => {
         const owner = window()
         if (!owner || owner.isDestroyed()) return false
-        const result = await dialog.showMessageBox(owner, {
-          signal,
-          type: "question",
+        if (!access) throw new ModError("MODS_APPROVAL_SCOPE_REQUIRED")
+        const approvalSignal = signal ?? new AbortController().signal
+        const guard = () => {
+          access.assertCurrent()
+          if (owner !== window() || owner.isDestroyed()) throw new ModError("MODS_APPROVAL_UNAVAILABLE")
+        }
+        guard()
+        const options = {
+          signal: approvalSignal,
+          type: "question" as const,
           title: modId.startsWith("flow:") ? "批准流程操作" : "批准插件操作",
           message: modId.startsWith("flow:")
             ? `当前 DIY 流程请求执行 ${toolId}`
@@ -251,7 +268,14 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
           defaultId: 0,
           cancelId: 0,
           noLink: true
-        })
+        }
+        // Keep ordinary engine/DIY confirmation behavior; only plugin-owned effects use the inbox.
+        const result = modId === "engine" || modId.startsWith("flow:")
+          ? await dialog.showMessageBox(owner, options)
+          : await withTrustedFunctionWait("user-approval", approvalSignal, () => approvalInbox.request({
+            workspace: access.workspace, threadId, modId: access.modId
+          }, options, guard))
+        guard()
         return result.response === 1
       },
       (threadId, scope) => window()?.webContents.send("mods:cards-changed", { threadId, ...(scope === undefined ? {} : { scope }) }),
@@ -539,30 +563,29 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
   const functions = new FunctionModsManager(
     manager.store,
     {
-      platformNativeProviders: () => [createDesktopGitInspectionProvider(manager, window),
+      platformNativeProviders: () => [createDesktopGitInspectionProvider(manager, (context, root) =>
+        confirmNativeModApproval(approvalInbox, context, {
+          title: "查看代码变更",
+          message: `允许 ${context.caller.name} 读取此仓库的代码变更？`,
+          detail: `${root}\n仅对当前会话和插件生效；不会提交、合并或清理代码。`,
+          allowLabel: "允许读取"
+        })),
         createNativeCodePlatformProvider({ authorizePath: workspaceReadPolicy }),
         createDesktopWorkspacePlatformProvider(manager),
         createDesktopEditorPlatformProvider(manager, editorNavigation, editorRendererScope),
         ...nativePlatformProviders(async (context, runId) => {
         context.assertCurrent()
-        const owner = window()
-        if (!owner || owner.isDestroyed()) return false
-        const result = await dialog.showMessageBox(owner, {
-          signal: context.signal, type: "question", title: "取消工作流",
+        return confirmNativeModApproval(approvalInbox, context, {
+          title: "取消工作流",
           message: `插件 ${context.caller.name} 请求取消当前会话的工作流`,
           detail: `运行：${runId}\n取消后会等待原执行器完成资源清理，已产生的文件将按原规则保留。`,
-          buttons: ["取消工作流", "保留运行"], defaultId: 1, cancelId: 1
+          allowLabel: "取消工作流"
         })
-        context.assertCurrent()
-        return result.response === 0
       }), createNativeProjectRuntimePlatformProvider(async request => {
         request.assertCurrent()
-        const owner = window()
-        if (!owner || owner.isDestroyed()) return { status: "rejected" }
         const labels = { continue: "连续执行项目", cancel: "停止当前步骤", reconcile: "核对执行结果" }
-        const result = await dialog.showMessageBox(owner, {
-          signal: request.context.signal,
-          type: "question", title: labels[request.kind],
+        const allowed = await confirmNativeModApproval(approvalInbox, request.context, {
+          title: labels[request.kind],
           message: `插件 ${request.context.caller.name} 请求${labels[request.kind]}`,
           detail: `项目：${request.projectId}\n版本：${request.expectedVersion}\n` +
             (request.kind === "continue"
@@ -570,10 +593,10 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
               : request.kind === "cancel"
                 ? "请求停止不代表撤销已发生的文件修改或外部操作。"
                 : "只核对已有执行事实与成果，不会授权重新执行。"),
-          buttons: [labels[request.kind], "暂不处理"], defaultId: 1, cancelId: 1
-        })
+          allowLabel: labels[request.kind]
+        }, request.assertCurrent)
         request.assertCurrent()
-        if (result.response !== 0) return { status: "rejected" }
+        if (!allowed) return { status: "rejected" }
         return executeProjectRuntimeNativeCommand(request)
       }), createProjectStageDebugPlatformProvider({
         creator: context => {
@@ -717,6 +740,10 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
         })
       },
       authorizeHttp: async (workspace, threadId, grant, request, signal) => {
+        const approvalSource = {
+          workspace, threadId, modId: developmentNativeComponentId(manager.store, grant) ?? grant.modId
+        }
+        approvalInbox.assertAllowed(approvalSource)
         const assertLive = () => {
           signal.throwIfAborted()
           manager.store.assertGrant(grant)
@@ -733,21 +760,29 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
         assertLive()
         const owner = window()
         if (!owner || owner.isDestroyed()) throw new ModError("MODS_HTTP_APPROVAL_UNAVAILABLE")
-        const choice = await dialog.showMessageBox(owner, {
+        const choice = await withTrustedFunctionWait("user-approval", signal, () => approvalInbox.request(
+          approvalSource, {
           signal,
           type: "question",
           title: "批准插件网络请求",
-          message: `插件 ${grant.modId} 请求 ${request.method} ${request.url}`,
+          message: `插件 ${approvalSource.modId} 请求 ${request.method} ${request.url}`,
           detail: JSON.stringify(request, null, 2),
           buttons: ["拒绝", "允许本次请求"],
           defaultId: 0,
           cancelId: 0,
           noLink: true
-        })
+        }, () => {
+          assertLive()
+          if (owner !== window() || owner.isDestroyed()) throw new ModError("MODS_HTTP_APPROVAL_UNAVAILABLE")
+        }))
         assertLive()
         if (choice.response !== 1) throw new ModError("MODS_HTTP_DENIED")
       },
       authorizeProcess: async (workspace, threadId, grant, request, signal) => {
+        const approvalSource = {
+          workspace, threadId, modId: developmentNativeComponentId(manager.store, grant) ?? grant.modId
+        }
+        approvalInbox.assertAllowed(approvalSource)
         const resourceGuard = assertWorkflowResourceProcess(workspace, threadId, request)
         const assertLive = () => {
           resourceGuard?.()
@@ -773,7 +808,7 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
         const owner = window()
         if (!owner || owner.isDestroyed()) throw new ModError("MODS_PROCESS_APPROVAL_UNAVAILABLE")
         try {
-          await confirmFunctionProcess(grant.modId, request, {
+          await confirmFunctionProcess(approvalSource.modId, request, {
             signal,
             tempRoot: app.getPath("userData"),
             assertCurrent: () => {
@@ -787,7 +822,13 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
                 assertLive()
                 if (owner !== window() || owner.isDestroyed())
                   throw new ModError("MODS_PROCESS_APPROVAL_UNAVAILABLE")
-                const choice = await dialog.showMessageBox(owner, options)
+                const choice = await approvalInbox.request(
+                  approvalSource, options, () => {
+                    assertLive()
+                    if (owner !== window() || owner.isDestroyed())
+                      throw new ModError("MODS_PROCESS_APPROVAL_UNAVAILABLE")
+                  }
+                )
                 assertLive()
                 return choice
               })
@@ -1078,6 +1119,7 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
         window()?.webContents.send("mods:markdown-preview-invalidated", { threadId, receipt }),
       platformChanged: (threadId) => window()?.webContents.send("mods:platform-changed", { threadId }),
       changed: (threadId, scope) => {
+        approvalInbox.prune()
         getCreatorCompositionService()?.reconcile(threadId)
         reconcileCreatorReuse?.(threadId)
         window()?.webContents.send("mods:cards-changed", {
@@ -1376,6 +1418,7 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
   functions.configureDevelopmentAccess({
     assertScope: scope => development.assertScope(scope),
     changed: scope => {
+      approvalInbox.prune()
       const owner = window()
       if (owner && !owner.isDestroyed() && !owner.webContents.isDestroyed())
         owner.webContents.send("mods:development-changed", { threadId: scope.threadId })
@@ -2097,11 +2140,13 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
       } }
     },
     close: () => {
+      approvalInbox.reset()
       editorNavigation.invalidate()
       functions.close(); desktopBroker.close(); promptBroker.close()
     }
   })
   app.once("will-quit", () => {
+    approvalInbox.reset()
     editorNavigation.invalidate()
     stopEditorDesktop()
     stopPlatformFileEdits()

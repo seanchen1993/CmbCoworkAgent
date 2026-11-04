@@ -72,6 +72,7 @@ export class DevelopmentHistory {
       throw Error("MODS_DEVELOPMENT_HISTORY_INVALID")
     const uncertain = ["retiring", "active", "unknown"].includes(value.phase)
     return {
+      historical: true,
       componentId: value.componentId,
       draftId: value.draftId,
       turnId: value.turnId,

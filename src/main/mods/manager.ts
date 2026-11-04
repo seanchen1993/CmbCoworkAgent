@@ -116,7 +116,8 @@ import {
 } from "./v2/host-call"
 import { currentFunctionExecution, functionExecutionScope } from "./v2/execution-context"
 import type { DevelopmentActivation } from "./v2/development-session"
-import { withDevelopmentNativeAuthority, captureDevelopmentNativeResourceGuard } from "./v2/development-native-authority"
+import { withDevelopmentNativeAuthority, captureDevelopmentNativeResourceGuard, developmentNativeComponentId } from "./v2/development-native-authority"
+import type { ModOperationApprovalScope } from "./operation-approval"
 import { withFreshFunctionSessionActivity } from "./v2/session-activity"
 import type { FunctionSessionCompactor } from "../agent/mods-session-view"
 import {
@@ -800,7 +801,9 @@ export class ModsManager {
         "host:agent.spawn",
         approvedArgs,
         startupSignal,
-        "启动独立后台智能体；工具操作仍需原生授权"
+        "启动独立后台智能体；工具操作仍需原生授权",
+        { workspace, modId: developmentNativeComponentId(this.store, grant) ?? grant.modId,
+          assertCurrent: assertStartup }
       )
       assertStartup()
       if (!approved) throw new ModPermissionError("MODS_OPERATION_REJECTED")
@@ -3033,7 +3036,8 @@ export class ModsManager {
       toolId: string,
       args: Record<string, unknown>,
       signal?: AbortSignal,
-      reason?: string
+      reason?: string,
+      scope?: ModOperationApprovalScope
     ) => Promise<boolean>,
     private readonly notifyCards: (threadId: string, scope?: "cards") => void,
     private readonly hostEntry?: string,
@@ -4453,7 +4457,8 @@ export class ModsManager {
         toolId,
         args,
         signal,
-        checked.value.reason
+        checked.value.reason,
+        { workspace: identity.workspace, modId: identity.modId ?? "engine", assertCurrent: assertLive }
       )
       assertLive()
       if (!allowed) throw new ModError("MODS_USER_REJECTED")
@@ -4465,12 +4470,14 @@ export class ModsManager {
     modId: string,
     toolId: string,
     args: Record<string, unknown>,
-    signal?: AbortSignal,
-    reason?: string
+    signal: AbortSignal | undefined,
+    reason: string | undefined,
+    scope: ModOperationApprovalScope
   ): Promise<boolean> {
-    return reason
-      ? this.confirmOperation(threadId, modId, toolId, args, signal, reason)
-      : this.confirmOperation(threadId, modId, toolId, args, signal)
+    const grant = this.store.getGrant(scope.workspace, scope.modId)
+    const stableId = grant && developmentNativeComponentId(this.store, grant)
+    return this.confirmOperation(threadId, modId, toolId, args, signal, reason,
+      stableId ? { ...scope, modId: stableId } : scope)
   }
 
   /** Internal application adapter; no Function SDK tool can provide this host commit callback. */
@@ -5221,7 +5228,8 @@ export class ModsManager {
               target,
               finalArgs,
               binding.signal,
-              checked.value.reason
+              checked.value.reason,
+              { workspace: binding.workspace, modId: identity.modId ?? "engine", assertCurrent: assertEpoch }
             )
             assertEpoch()
             if (!approved) throw new ModError("MODS_USER_REJECTED")
@@ -5244,7 +5252,11 @@ export class ModsManager {
           target,
           finalArgs,
           binding.signal,
-          checked?.value.reason
+          checked?.value.reason,
+          { workspace: binding.workspace,
+            modId: (granted && developmentNativeComponentId(this.store, granted)) ||
+              identity.modId || `flow:${identity.flow!.runId}`,
+            assertCurrent: assertEpoch }
         )
         if (!approved) throw new ModError("MODS_USER_REJECTED")
         assertEpoch()

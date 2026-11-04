@@ -1,4 +1,5 @@
 import { expect, it } from "vitest"
+import type { ModObject } from "../../../shared/mods/types"
 import { retainsFunctionSitePresentation as retains } from "./function-site-transition"
 
 it("allows only AbovePrompt working progress with identical remaining facts", () => {
@@ -15,6 +16,16 @@ it("allows only AbovePrompt working progress with identical remaining facts", ()
   expect(retains("AbovePrompt", before, { isWorking: true, bodyColumns: 80, maxRows: 8 })).toBe(
     false
   )
+})
+it.each(["AbovePrompt", "ChatHeader"] as const)("retains %s across scroll offsets only within the same layout", component => {
+  const facts = { isWorking: false, bodyColumns: 80, maxRows: 8, offset: 0 }
+  const before = JSON.stringify(facts)
+  expect(retains(component, before, { ...facts, offset: 20 })).toBe(true)
+  expect(retains(component, before, { ...facts, offset: 20, isWorking: true })).toBe(true)
+  const invalid: ModObject[] = [{ offset: -1 }, { offset: 100001 }, { offset: 0.5 },
+    { offset: 20, bodyColumns: 40 }, { offset: 20, maxRows: 3 }, { offset: 20, extra: true }]
+  for (const patch of invalid)
+    expect(retains(component, before, { ...facts, ...patch })).toBe(false)
 })
 it("allows assistant tail appends but rejects replacements, rollback and other fact changes", () => {
   const before = JSON.stringify({ text: "protected prefix", isFirstOfReply: true })

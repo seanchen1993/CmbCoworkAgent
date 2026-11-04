@@ -39,6 +39,34 @@ function failure(code: string): ModFunctionError {
   return new ModFunctionError(code)
 }
 
+/** Only fixed diagnostic text crosses the guest boundary, never raw socket errors or URLs. */
+export function functionHttpNetworkFailure(error?: unknown): ModFunctionError {
+  const reasons: Record<string, string> = {
+    ECONNREFUSED: "连接被拒绝，请确认目标服务已启动、地址和端口正确",
+    ENOTFOUND: "无法解析服务器地址，请检查域名和 DNS",
+    EAI_AGAIN: "DNS 暂时无法解析服务器地址，请检查网络后再试",
+    ETIMEDOUT: "连接超时，请检查目标服务、网络和防火墙",
+    EHOSTUNREACH: "无法到达目标主机，请检查地址、网络或 VPN",
+    ENETUNREACH: "无法到达目标网络，请检查地址、网络或 VPN",
+    ECONNRESET: "连接被对方中断，请检查服务状态及 HTTP/HTTPS 协议是否正确",
+    EPIPE: "连接已关闭，请检查目标服务状态",
+    ERR_SSL_WRONG_VERSION_NUMBER: "HTTPS 握手失败，请检查目标服务是否实际使用 HTTP",
+    ERR_SSL_PACKET_LENGTH_TOO_LONG: "HTTPS 握手失败，请检查目标服务协议",
+    CERT_HAS_EXPIRED: "服务器证书已过期，请修复证书",
+    DEPTH_ZERO_SELF_SIGNED_CERT: "服务器使用未受信任的自签名证书，请配置受信任证书",
+    SELF_SIGNED_CERT_IN_CHAIN: "服务器证书链包含未受信任证书，请检查证书配置",
+    UNABLE_TO_VERIFY_LEAF_SIGNATURE: "无法验证服务器证书链，请检查证书配置",
+    UNABLE_TO_GET_ISSUER_CERT_LOCALLY: "缺少受信任的签发证书，请检查证书配置",
+    ERR_TLS_CERT_ALTNAME_INVALID: "服务器证书与请求域名不匹配，请检查地址和证书",
+    HPE_INVALID_CONSTANT: "服务器返回的内容不是有效 HTTP 响应，请检查协议和端口"
+  }
+  const candidate = error && typeof error === "object" && "code" in error ? error.code : undefined
+  const code = typeof candidate === "string" && Object.hasOwn(reasons, candidate) ? candidate : undefined
+  return new ModFunctionError("MODS_HTTP_NETWORK", code
+    ? `MODS_HTTP_NETWORK: ${reasons[code]}（${code}）。`
+    : "MODS_HTTP_NETWORK: 网络连接失败，请检查目标地址、服务状态及网络配置。")
+}
+
 function checkedUrl(raw: string): URL {
   if (raw.length > 8192) throw failure("MODS_HTTP_URL")
   let url: URL
@@ -186,8 +214,8 @@ function requestHop(
           return
         }
         response = incoming
-        incoming.once("error", () => finish(failure("MODS_HTTP_NETWORK")))
-        incoming.once("aborted", () => finish(failure("MODS_HTTP_NETWORK")))
+        incoming.once("error", error => finish(functionHttpNetworkFailure(error)))
+        incoming.once("aborted", () => finish(functionHttpNetworkFailure({ code: "ECONNRESET" })))
         try {
           assertActive(context, signal)
           const status = incoming.statusCode ?? 0
@@ -253,7 +281,7 @@ function requestHop(
           // Keep wire response headers for compatibility; text is always decoded UTF-8.
           pipeline([incoming, wireCounter, ...(decoder ? [decoder] : []), collector], (error) => {
             if (error) {
-              finish(error instanceof ModFunctionError ? error : failure("MODS_HTTP_NETWORK"))
+              finish(error instanceof ModFunctionError ? error : functionHttpNetworkFailure(error))
               return
             }
             try {
@@ -268,7 +296,7 @@ function requestHop(
         }
       }
     )
-    outgoing.once("error", () => finish(failure("MODS_HTTP_NETWORK")))
+    outgoing.once("error", error => finish(functionHttpNetworkFailure(error)))
     signal.addEventListener("abort", abort, { once: true })
     if (signal.aborted) {
       abort()

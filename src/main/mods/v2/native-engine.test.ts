@@ -3,6 +3,7 @@ import type { ModJson, ModObject } from "../../../shared/mods/types"
 import { isModObject } from "../../../shared/mods/v2/contracts"
 import type { FunctionUiElement } from "../../../shared/mods/v2/ui"
 import { FunctionNativeDrawing, functionNativePresentation } from "./native-engine"
+import { functionSiteProps } from "../../../shared/mods/v2/sites"
 
 const engine = (ref: number): FunctionUiElement => ({ type: "engine", ref })
 const input = (text = "private original"): ModObject => ({
@@ -12,6 +13,15 @@ const input = (text = "private original"): ModObject => ({
   props: { text, origin: { kind: "unclassified" }, isExpanded: false }
 })
 const unchanged = async (value: ModJson): Promise<ModJson> => value
+
+it.each(["AbovePrompt", "ChatHeader"] as const)("pins %s geometry through native publication", component => {
+  const props = functionSiteProps(component, { isWorking: false, bodyColumns: 80, maxRows: 6 })
+  expect(functionNativePresentation(component, props, props)).toEqual(props)
+  expect(() => functionNativePresentation(component, { ...props, maxRows: 100 }, props))
+    .toThrow("MODS_UI_NATIVE_PUBLICATION")
+  expect(() => functionSiteProps(component, { isWorking: false, bodyColumns: 80, maxRows: -1 }))
+    .toThrow("MODS_UI_SITE_PROPS")
+})
 
 it("rechecks publication policy on a later snapshot of the same drawing", async () => {
   const drawing = new FunctionNativeDrawing(input(), () => {})

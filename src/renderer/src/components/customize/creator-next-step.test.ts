@@ -6,6 +6,15 @@ const base = (): DevelopmentStatus => ({ threadId: "creator", workspace: "/autho
   mode: "creator", drafts: [], trials: [] })
 
 describe("creator next action remains a factual projection", () => {
+  it("distinguishes restart history from a live uncertain trial", () => {
+    const value = base()
+    value.trials = [{ componentId: "ui", draftId: "d", revision: 1, bundleDigest: "source",
+      compiledDigest: "compiled", phase: "unknown", capabilities: [], historical: true }]
+    expect(creatorNextStep(value).title).toBe("已保留上次创作记录")
+    expect(creatorNextStep(value).detail).toContain("会话灵件管理")
+    delete value.trials[0].historical
+    expect(creatorNextStep(value).title).toBe("试用结果待核对")
+  })
   it("does not invent a running creator from the existence of a draft", () => {
     const value = base()
     value.drafts = [{ id: "d", name: "report", revision: 2, digest: "new" }]

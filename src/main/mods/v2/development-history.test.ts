@@ -31,6 +31,7 @@ it("retains an interrupted activation across SQLite reopen without reviving auth
     store = new ModControlStore(path)
     const history = new DevelopmentHistory(store)
     expect(history.read(scope)).toMatchObject({
+      historical: true,
       phase: "unknown",
       error: "MODS_DEVELOPMENT_RESTART_UNCONFIRMED"
     })

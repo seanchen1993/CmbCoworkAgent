@@ -6,6 +6,7 @@ import { isFunctionPluginPromptOrigin } from "./plugin-prompt"
 import { validateFunctionTree, type FunctionUiElement } from "./ui"
 
 export const FUNCTION_UI_SITES = [
+  "ChatHeader",
   "AbovePrompt",
   "PromptHint",
   "InfoNotice",
@@ -21,6 +22,10 @@ export const FUNCTION_UI_SITES = [
   "AskUserQuestion"
 ] as const
 export type FunctionUiSite = (typeof FUNCTION_UI_SITES)[number]
+/** Desktop docks live outside the transcript and have their own bounded scroll area. */
+export function isFunctionDockedSite(site: string): site is "AbovePrompt" | "ChatHeader" {
+  return site === "AbovePrompt" || site === "ChatHeader"
+}
 export type FunctionUiRenderComponent = FunctionUiSite | "Pane" | "Placed"
 export function isFunctionUiRenderComponent(value: unknown): value is FunctionUiRenderComponent {
   return value === "Pane" || value === "Placed" || FUNCTION_UI_SITES.some(site => site === value)
@@ -290,7 +295,7 @@ export function functionSiteDefault(site: FunctionUiSite, props: ModObject): Fun
       ]
     }
   }
-  return site === "AbovePrompt"
+  return isFunctionDockedSite(site)
     ? { type: "Box", props: {}, children: [] }
     : {
         type: "Text",

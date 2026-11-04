@@ -547,21 +547,28 @@ export class FunctionPanes {
             }
             candidate.drawing = new FunctionNativeDrawing(input, () => assertCurrent(candidate),
               site?.requestId)
+            const controller = new AbortController()
+            this.active.set(controller, pane.key)
             const render = () => this.host.dispatch("ui.render", input, {
               generation: candidate.generation,
+              signal: controller.signal,
               core: async (received) => input.component === "Placed"
                 ? { type: "Box", props: {}, children: [] } : candidate.drawing.keep(received)
             })
             let tree: ModJson
-            if (this.host.withUiResolveDrawing) {
-              const drawing = new FunctionUiResolveDrawing(
-                (this.host.component ?? "Pane"), candidate.generation, pane.id,
-                () => assertCurrent(candidate)
-              )
-              candidate.constructorDrawing = drawing
-              pane.pendingConstructorDrawing = drawing
-              tree = await this.host.withUiResolveDrawing(drawing, render)
-            } else tree = await render()
+            try {
+              if (this.host.withUiResolveDrawing) {
+                const drawing = new FunctionUiResolveDrawing(
+                  (this.host.component ?? "Pane"), candidate.generation, pane.id,
+                  () => assertCurrent(candidate)
+                )
+                candidate.constructorDrawing = drawing
+                pane.pendingConstructorDrawing = drawing
+                tree = await this.host.withUiResolveDrawing(drawing, render)
+              } else tree = await render()
+            } finally {
+              this.active.delete(controller)
+            }
             assertCurrent(candidate)
             candidate.tree = checkedTree(tree, input.component as string, true)
             candidate.callbackTree = candidate.tree

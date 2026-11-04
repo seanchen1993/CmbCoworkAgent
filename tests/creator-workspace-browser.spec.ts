@@ -31,7 +31,8 @@ async function main() {
       const settings={globalEnabled:async()=>true,status:async()=>({workspace:"C:/creator",enabled:true,outputPolicy:true,mods:[],diagnostics:[]})};
       window.api={mods:{development:api,...settings,stageDebugReview:{current:async()=>{if(reviewIntent?.expiresAt<=Date.now())calls.push(["review-current-expired"]);return structuredClone(reviewIntent)},onRequested:fn=>{reviewListeners.add(fn);return()=>reviewListeners.delete(fn)}}}};
       const root=createRoot(document.getElementById("root"));
-      const renderMain=(mode="chat")=>root.render(<ModsDevelopmentPanel threadId="creator" workspaceHint="C:/creator" mode={mode} api={api} onReturnToChat={()=>document.getElementById("composer").focus()} onRequestRepair={async message=>{calls.push(["repair",message])}}/>);
+      let mainEpoch=0;const reviewReads=[];
+      const renderMain=(mode="chat")=>root.render(<ModsDevelopmentPanel key={mainEpoch} threadId="creator" workspaceHint="C:/creator" mode={mode} api={api} onReturnToChat={()=>document.getElementById("composer").focus()} onRequestRepair={async message=>{calls.push(["repair",message])}}/>);
       renderMain();
       const request={id:"request",draftId:"draft",name:"host-source",revision:3,digest:"b".repeat(64),goal:"验收"};
       let delivery;let persistentColdTrial;
@@ -94,7 +95,15 @@ async function main() {
         window.api.harnessBoard.localProjects.preview.stageDebug.list=async()=>({snapshots:[{id:"cold-input",projectId:"original",stageId:"review",stageTitle:"保留的阶段起点",sourceDigest:"c".repeat(64),createdAt:1,fileCount:1,totalBytes:2}],branches:[{id:"cold-branch",projectId:"cold-branch",sourceProjectId:"original",snapshotId:"cold-input",candidateDigest:"d".repeat(64),currentCandidateMatches:true,stageId:"review",mode:"stage",status:"passed",diagnostics:["冷启动保留的调试记录；本进程没有此分支的运行授权。"]}],diagnostics:[]});
         renderMain();listeners.forEach(fn=>fn({threadId:"creator"}));
       };
-      window.fixture={calls,cold: coldCreator,host:renderHost,journey:renderJourney,hostRoute:renderHostRoute,nativeReview:requestNativeReview,
+      window.fixture={calls,
+        beginReviewRace:()=>{requestNativeReview("matching");
+          window.api.mods.stageDebugReview.current=()=>new Promise(resolve=>reviewReads.push(()=>resolve(structuredClone(reviewIntent))));
+          mainEpoch++;renderMain()},
+        reviewReadCount:()=>reviewReads.length,
+        emitReview:()=>reviewListeners.forEach(fn=>fn(reviewIntent)),
+        finishReviewRead:index=>reviewReads[index](),
+        restoreReviewReads:()=>{window.api.mods.stageDebugReview.current=async()=>structuredClone(reviewIntent)},
+        cold: coldCreator,host:renderHost,journey:renderJourney,hostRoute:renderHostRoute,nativeReview:requestNativeReview,
         chatContinuity:()=>{
           reviewIntent=undefined;persistentColdTrial=undefined;
           useAppStore.setState({currentThreadId:"creator",showCustomizeView:false,threads:[{thread_id:"creator",title:"Creator",metadata:{workspacePath:"C:/creator"}}]});
@@ -170,6 +179,7 @@ async function main() {
     for (const file of readdirSync("out/renderer/assets").filter((name) => name.endsWith(".css")))
       await page.addStyleTag({ path: resolve("out/renderer/assets", file) })
     const workspace = page.getByRole("dialog", { name: "插件创作工作区", exact: true })
+    await page.locator('[data-app-guide="workspace"]').click()
     await workspace.waitFor()
     assert.equal(
       await page.getByRole("navigation", { name: "插件制作步骤" }).getByRole("button").count(),
@@ -335,6 +345,7 @@ async function main() {
     assert.equal(await page.getByRole("button", { name: "开始使用", exact: true }).count(), 0)
     assert.equal(await page.getByRole("region", { name: "已安装插件开始使用", exact: true }).count(), 0)
     await page.evaluate("window.fixture.modularize()")
+    await page.locator('[data-app-guide="workspace"]').click()
     await page.getByRole("article", { name: "原始插件首次模块化确认", exact: true }).waitFor()
     assert.equal(
       await page.evaluate("window.fixture.calls.filter(row=>row[0]==='modularize').length"),
@@ -400,6 +411,7 @@ async function main() {
       "A historical passed run cannot become the verdict for an invalidated source"
     )
     await page.evaluate("window.fixture.hostRoute('deferred')")
+    await page.locator('[data-app-guide="workspace"]').click()
     await workspace.waitFor()
     await workspace.getByRole("button", { name: "开始试用", exact: true }).click()
     const routeDialog = page.getByRole("dialog", { name: "插件试用与整轮验收", exact: true })
@@ -555,6 +567,21 @@ async function main() {
     assert.equal(await page.evaluate("window.fixture.calls.filter(row=>row[0]==='review-auto-prepare'||row[0]==='review-auto-create').length"), 0)
 
 
+    // A quiet restoration read cannot consume the reveal for a fresh native request.
+    await page.evaluate("window.fixture.beginReviewRace()")
+    await page.waitForFunction("window.fixture.reviewReadCount() === 1")
+    assert.equal(await workspace.count(), 0)
+    await page.evaluate("window.fixture.emitReview()")
+    await page.waitForFunction("window.fixture.reviewReadCount() === 2")
+    await page.evaluate("window.fixture.finishReviewRead(0)")
+    await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => resolve())))
+    assert.equal(await workspace.count(), 0, "quiet read cannot reopen the workspace")
+    await page.evaluate("window.fixture.finishReviewRead(1);window.fixture.restoreReviewReads()")
+    await workspace.waitFor()
+    await workspace.getByText("建议来自 Mod：独立调试助手", { exact: true }).waitFor()
+
+    await workspace.getByRole("button", { name: "返回聊天修改", exact: true }).click()
+    await workspace.waitFor({ state: "hidden" })
     await page.evaluate("window.fixture.cold()")
     const rail = page.getByLabel("聊天模式与 Mod 状态", { exact: true })
     await page.waitForFunction(() => document.querySelector('[aria-label="聊天模式"] button[aria-pressed="true"]')?.textContent?.trim() === "普通模式")

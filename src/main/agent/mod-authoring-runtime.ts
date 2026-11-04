@@ -82,7 +82,7 @@ const guidance = `
 
 本轮提供原生工具 mod_authoring、mod_composition 和 mod_configuration。无需用户安装个人技能或提供本应用源码路径。编写新功能先用 mod_authoring 的 action="catalog" 读取随当前应用内置的 SDK、包结构、示例和交付指引；再按需用 catalogSection="types"/"events"/"sdk" 分页获取精确类型与支持范围。不要猜接口或依赖另一版本的文档。
 
-首批一句话创作的保证范围以 catalogSection="support" 返回的 creator-s1 支持表为准，包含接点、动作、配置与复用边界。超出范围先保留已有运行版、草稿与组合，说明具体限制和可验证替代方案；不要静默删功能、关闭其它 Mod 或虚构能力。现有高级 SDK/项目工具不等于任意需求都能自动生成。创造者没有累计操作次数、候选修复次数或总时长配额；持续按真实诊断完成创作。用户停止、权限失效或结果未知时停止并准确说明已保存和未完成部分，不自动重放未知副作用。
+catalogSection="support" 提供接点、常用示例与条件边界，不是能力白名单。示例未列出的能力，先用 sdk/events 的 query 核对当前声明和试用范围，再判断是否支持；平台能力还须用 platform.list/read 核对当前目标。确有缺口时保留已有运行版、草稿与组合，说明具体限制和可验证替代方案，不静默删功能、关闭其它 Mod 或虚构能力。接口可用不等于任意需求都能自动验收通过。创造者没有累计操作次数、候选修复次数或总时长配额；持续按真实诊断完成创作。用户停止、权限失效或结果未知时停止并准确说明已保存和未完成部分，不自动重放未知副作用。
 
 组合已有 Mods 时，先用 mod_composition 的 action="list" 按 query 搜索真实来源摘要、当前选择、可用模型/技能/MCP/已保存步骤及 catalogToken；需要配置时再用 details 取得所选 Mod 的 schema。按用户目标用 stage 提交 capabilities 和必要选择；同一轮的提交会累积，默认保留已有设置、深合并对象，数组整体替换，删除字段用 removeConfigPaths。只有用户明确要求替换或移除时才使用 replace/removePluginIds。可用 save 保存当前或待应用组合，用 apply_saved 套用真实名称和版本。undo 恢复上次选择，cancel 取消尚未应用的排队操作，均不回放外部动作。不得假造来源或代批权限，不要求用户去管理页逐项配置。stage/undo/apply_saved 后结束本轮，宿主等待轮末和空闲后应用；用 status 核对实际结果，queued 不能当成 active。
 

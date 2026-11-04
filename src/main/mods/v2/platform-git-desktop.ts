@@ -1,31 +1,14 @@
-import { dialog, type BrowserWindow } from "electron"
 import { LocalSandbox } from "../../agent/local-sandbox"
 import { getWindowsSandboxMode } from "../../storage"
 import type { ModsManager } from "../manager"
-import { createGitInspectionPlatformProvider } from "./platform-git-provider"
+import { createGitInspectionPlatformProvider, type GitInspectionDependencies } from "./platform-git-provider"
 
 export function createDesktopGitInspectionProvider(
   manager: ModsManager,
-  window: () => BrowserWindow | null | undefined
+  confirmDirectory: GitInspectionDependencies["confirmDirectory"]
 ) {
   return createGitInspectionPlatformProvider({
-    async confirmDirectory(context, root) {
-      context.assertCurrent()
-      const owner = window()
-      if (!owner || owner.isDestroyed()) return false
-      const result = await dialog.showMessageBox(owner, {
-        signal: context.signal,
-        type: "question",
-        title: "查看代码变更",
-        message: `允许 ${context.caller.name} 读取此仓库的代码变更？`,
-        detail: `${root}\n仅对当前会话和插件生效；不会提交、合并或清理代码。`,
-        buttons: ["允许读取", "取消"],
-        defaultId: 1,
-        cancelId: 1
-      })
-      context.assertCurrent()
-      return result.response === 0
-    },
+    confirmDirectory,
     async authorizePath(context, root, path) {
       context.assertCurrent()
       const sandboxMode = process.platform === "win32" ? getWindowsSandboxMode() : "none"

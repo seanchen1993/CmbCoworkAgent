@@ -46,6 +46,7 @@ import { FunctionRegisteredTools } from "./v2/registered-tools"
 import { getModCallContext } from "./context"
 import type { McpCapabilityTool } from "../mcp/capability-types"
 import { beforeModToolExecution } from "./execution-error"
+import { ModApprovalInbox } from "../ipc/mods-approval-inbox"
 import { issueRuntimePluginSourceToken, withRuntimePluginSource } from "../plugins/runtime-source-scope"
 import type { PluginMetadata } from "../types"
 
@@ -224,7 +225,7 @@ async function fixture(
     on.ui({id:"summary",slot:"turn.summary"},async(e)=>[{type:"text",text:e.model.text}]);
   } }`
   )
-  const confirm = vi.fn(async () => true)
+  const confirm = vi.fn<ConstructorParameters<typeof ModsManager>[2]>(async () => true)
   const notify = vi.fn()
   const plugins = [{ id: "plugin", name: "Review", path: plugin, enabled: true }]
   const control = join(root, "control.sqlite")
@@ -470,7 +471,8 @@ describe("project Mods lifecycle and UI authority", () => {
           "host:read_file",
           { file_path: "final.txt" },
           undefined,
-          "permission explanation"
+          "permission explanation",
+          expect.objectContaining({ workspace, modId: "engine", assertCurrent: expect.any(Function) })
         )
     }
   )
@@ -596,6 +598,35 @@ describe("project Mods lifecycle and UI authority", () => {
     return { ...f, workspace, grant, tool, scope, actual, bind, release, controller, call }
   }
 
+  it.each(["revoke", "cancel", "replace-binding"] as const)(
+    "retires a pending plugin MCP approval on %s without executing the tool",
+    async (change) => {
+      const f = await mcpFixture()
+      const inbox = new ModApprovalInbox(() => {})
+      const entered = Promise.withResolvers<void>()
+      f.confirm.mockImplementation(async (threadId, _modId, _tool, _args, signal, _reason, access) => {
+        if (!access || !signal) throw Error("MISSING_APPROVAL_AUTHORITY")
+        const pending = inbox.request({ ...access, threadId }, {
+          message: "Send mail", signal, buttons: ["Reject", "Allow"]
+        }, access.assertCurrent)
+        entered.resolve()
+        return (await pending).response === 1
+      })
+      const call = withFunctionExecution(f.scope, () => f.call())
+      const rejected = expect(call).rejects.toThrow()
+      await entered.promise
+      const requestId = inbox.snapshot().current!.requestId
+      if (change === "revoke") f.manager.configure(f.workspace, false, false)
+      else if (change === "cancel") f.controller.abort(Error("USER_STOPPED"))
+      else f.bind()
+      inbox.prune()
+      expect(inbox.snapshot().current).toBeNull()
+      expect(() => inbox.decide({ requestId, decision: "allow" })).toThrow("MODS_APPROVAL_STALE")
+      await rejected
+      expect(f.actual).not.toHaveBeenCalled()
+    }
+  )
+
   it("routes MCP SDK through final approval with one real receipt and preserved structured output", async () => {
     const f = await mcpFixture()
     const result = await withFunctionExecution(f.scope, () => f.call())
@@ -609,7 +640,9 @@ describe("project Mods lifecycle and UI authority", () => {
       "function:mcp",
       `mcp:${f.tool.capabilityId}`,
       { text: "hello" },
-      expect.anything()
+      expect.anything(),
+      undefined,
+      expect.objectContaining({ workspace: f.workspace, modId: "function:mcp", assertCurrent: expect.any(Function) })
     )
     expect(f.actual).toHaveBeenCalledOnce()
     const rows = f.manager.store.audit(f.workspace)
@@ -693,7 +726,9 @@ describe("project Mods lifecycle and UI authority", () => {
       "function:mcp",
       `mcp:${f.tool.capabilityId}`,
       { text: "final" },
-      expect.anything()
+      expect.anything(),
+      undefined,
+      expect.objectContaining({ workspace: f.workspace, modId: "function:mcp", assertCurrent: expect.any(Function) })
     )
     expect(f.actual).toHaveBeenCalledOnce()
     expect(f.manager.store.audit(f.workspace)).toHaveLength(1)
@@ -863,7 +898,9 @@ describe("project Mods lifecycle and UI authority", () => {
       "function:sdk",
       "host:execute",
       args,
-      expect.any(AbortSignal)
+      expect.any(AbortSignal),
+      undefined,
+      expect.objectContaining({ workspace, modId: "function:sdk", assertCurrent: expect.any(Function) })
     )
     expect(f.executions).toEqual([args])
     const native = f.manager.store.audit(workspace).find((row) => row.toolId === "host:execute")!
@@ -1295,7 +1332,9 @@ describe("project Mods lifecycle and UI authority", () => {
       {
         command: "echo verified"
       },
-      expect.any(AbortSignal)
+      expect.any(AbortSignal),
+      undefined,
+      expect.objectContaining({ modId: "review", assertCurrent: expect.any(Function) })
     )
     expect(f.executions).toHaveLength(1)
     expect(f.button().actionId).toBeUndefined()

@@ -2,7 +2,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import type { Socket } from "node:net"
 import { brotliCompressSync, deflateRawSync, deflateSync, gzipSync, constants } from "node:zlib"
 import { afterEach, expect, it, vi } from "vitest"
-import { FunctionHttpHost, functionHttpRequest, type FunctionHttpContext } from "./http-sdk"
+import { FunctionHttpHost, functionHttpRequest, functionHttpNetworkFailure, type FunctionHttpContext } from "./http-sdk"
 import type { ModObject } from "../../../shared/mods/types"
 
 const cleanup: Array<() => Promise<void>> = []
@@ -38,6 +38,43 @@ function context(): FunctionHttpContext & { controller: AbortController } {
     publish: vi.fn(async (response) => response)
   }
 }
+
+it("reports a refused connection after approval without confusing it with an authorization failure", async () => {
+  const app = createServer()
+  await new Promise<void>(resolve => app.listen(0, "127.0.0.1", resolve))
+  const port = (app.address() as { port: number }).port
+  await new Promise<void>(resolve => app.close(() => resolve()))
+  const ctx = context()
+  const request = new FunctionHttpHost().fetch({ url: `http://127.0.0.1:${port}/private?token=hidden` }, ctx)
+  await expect(request).rejects.toMatchObject({ code: "MODS_HTTP_NETWORK",
+    message: expect.stringContaining("ECONNREFUSED") })
+  await expect(request).rejects.toThrow("请确认目标服务已启动")
+  expect(ctx.authorize).toHaveBeenCalledOnce()
+  expect(ctx.publish).not.toHaveBeenCalled()
+})
+
+it("preserves safe diagnostic categories without exposing raw errors or credentials", () => {
+  for (const code of ["ENOTFOUND", "EAI_AGAIN", "ECONNRESET", "ETIMEDOUT", "ENETUNREACH",
+    "CERT_HAS_EXPIRED", "ERR_TLS_CERT_ALTNAME_INVALID", "ERR_SSL_WRONG_VERSION_NUMBER"]) {
+    const error = functionHttpNetworkFailure({ code, message: "https://secret.invalid/?token=private" })
+    expect(error.code).toBe("MODS_HTTP_NETWORK")
+    expect(error.message).toContain(code)
+    expect(error.message).not.toContain("private")
+    expect(error.message).not.toContain("secret.invalid")
+  }
+  for (const code of ["SECRET_TOKEN", "__proto__", "constructor"])
+    expect(functionHttpNetworkFailure({ code, message: "private" }).message)
+      .toBe("MODS_HTTP_NETWORK: 网络连接失败，请检查目标地址、服务状态及网络配置。")
+})
+
+it("explains a peer reset without automatically repeating the request", async () => {
+  let calls = 0
+  const url = await server(req => { calls++; req.socket.destroy() })
+  await expect(new FunctionHttpHost().fetch({ url }, context())).rejects.toMatchObject({
+    code: "MODS_HTTP_NETWORK", message: expect.stringContaining("ECONNRESET")
+  })
+  expect(calls).toBe(1)
+})
 
 it("normalizes an immutable exact request and rejects unsupported or malformed requests", () => {
   const request = functionHttpRequest({

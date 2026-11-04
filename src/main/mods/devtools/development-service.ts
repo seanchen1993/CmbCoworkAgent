@@ -205,6 +205,7 @@ export class ModDevelopmentService {
   }
   private readonly enabled = new Map<string, EnabledSession>()
   private readonly creators = new Map<string, object>()
+  private readonly restoredModes = new Set<string>()
   private readonly busy = new Set<string>()
   private readonly prepared = new Map<
     string,
@@ -228,7 +229,7 @@ export class ModDevelopmentService {
       normalizeWorkspace?(workspace: string): string
       canRun?(scope: DevelopmentScope): boolean
       analyze?: typeof analyzeDevelopmentSource
-      /** Source observations only; never persists trial approval or executable authority. */
+      /** Source observations and editor preferences, never trial approval or execution grants. */
       historySettings?: AuthoringAtomicSettings
       /** Original host goal identity only. Models cannot choose or reset the accounting group. */
       requestGroup?(threadId: string): string | undefined
@@ -368,9 +369,44 @@ export class ModDevelopmentService {
     }
     this.cachePreviousTrial(scopedKey, row)
   }
+  private rememberModeRead(key: string): void {
+    this.restoredModes.add(key)
+    if (this.restoredModes.size > 256)
+      this.restoredModes.delete(this.restoredModes.values().next().value!)
+  }
+  private restoreMode(context: DevelopmentContext): void {
+    const key = identity(context.scope)
+    if (this.enabled.has(key) || this.restoredModes.has(key)) return
+    const mode = this.deps.historySettings?.getSetting(`development-mode:${key}`, "")
+    context.assertCurrent()
+    // Only a prior explicit native selection is restored. Drafts, installed effects and
+    // model messages cannot opt an ordinary chat into creator tools.
+    if (mode === "creator" || mode === "normal") {
+      if (this.enabled.size >= 16) throw Error("DEVELOPMENT_SESSION_LIMIT")
+      this.enabled.set(key, { scope: context.scope, guard: context.assertCurrent })
+      if (mode === "creator") this.creators.set(key, {})
+    }
+    this.rememberModeRead(key)
+  }
+  private persistMode(context: DevelopmentContext, mode: DevelopmentMode | "disabled"): void {
+    const key = identity(context.scope)
+    const settings = this.deps.historySettings
+    if (settings) {
+      const storageKey = `development-mode:${key}`
+      const absent = "\0development-mode-absent"
+      const previous = settings.getSetting(storageKey, absent)
+      context.assertCurrent()
+      if (!settings.compareAndSetSetting(storageKey,
+        previous === absent ? undefined : previous, mode))
+        throw Error("DEVELOPMENT_MODE_CHANGED")
+    }
+    context.assertCurrent()
+    this.rememberModeRead(key)
+  }
   private current(threadId: string, requireEnabled = true): DevelopmentContext {
     const current = this.deps.context(threadId)
     current.assertCurrent()
+    this.restoreMode(current)
     if (requireEnabled && !this.enabled.has(identity(current.scope)))
       throw Error("DEVELOPMENT_DISABLED")
     if (requireEnabled && this.deps.canRun && !this.deps.canRun(current.scope))
@@ -487,7 +523,8 @@ export class ModDevelopmentService {
     }
   }
   async setEnabled(threadId: string, expectedWorkspace: string, enabled: boolean) {
-    const { scope, assertCurrent } = this.current(threadId, false)
+    const context = this.current(threadId, false)
+    const { scope, assertCurrent } = context
     if (
       scope.workspace !== (this.deps.normalizeWorkspace?.(expectedWorkspace) ?? expectedWorkspace)
     )
@@ -497,12 +534,14 @@ export class ModDevelopmentService {
       if (this.deps.canRun && !this.deps.canRun(scope)) throw Error("DEVELOPMENT_MODS_DISABLED")
       if (!this.enabled.has(identity(scope)) && this.enabled.size >= 16)
         throw Error("DEVELOPMENT_SESSION_LIMIT")
+      this.persistMode(context, "creator")
       this.enabled.set(identity(scope), { scope, guard: assertCurrent })
       this.creators.set(identity(scope), {})
     } else {
       for (const trial of this.deps.runtime.developmentStatus(scope))
         await this.deps.runtime.stopDevelopment(scope, trial.componentId, assertCurrent)
       assertCurrent()
+      this.persistMode(context, "disabled")
       this.enabled.delete(identity(scope))
       this.creators.delete(identity(scope))
     }
@@ -510,7 +549,8 @@ export class ModDevelopmentService {
     return this.status(threadId)
   }
   async setMode(threadId: string, expectedWorkspace: string, mode: DevelopmentMode) {
-    const { scope } = this.current(threadId, false)
+    const context = this.current(threadId, false)
+    const { scope } = context
     if (
       scope.workspace !== (this.deps.normalizeWorkspace?.(expectedWorkspace) ?? expectedWorkspace)
     )
@@ -520,9 +560,11 @@ export class ModDevelopmentService {
       if (!this.enabled.has(identity(scope)))
         return this.setEnabled(threadId, expectedWorkspace, true)
       if (this.deps.canRun && !this.deps.canRun(scope)) throw Error("DEVELOPMENT_MODS_DISABLED")
+      this.persistMode(context, "creator")
       if (!this.creators.has(identity(scope))) this.creators.set(identity(scope), {})
     } else {
       // A mode switch controls authoring admission, never the authority of an approved live Mod.
+      this.persistMode(context, this.enabled.has(identity(scope)) ? "normal" : "disabled")
       this.creators.delete(identity(scope))
     }
     this.deps.changed(threadId)

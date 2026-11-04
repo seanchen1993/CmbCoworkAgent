@@ -150,6 +150,7 @@ function fixture(normalizeWorkspace?: (workspace: string) => string, workspace =
     save,
     analyze,
     recreate: () => new ModDevelopmentService(deps),
+    changeWorkspace: (value: string) => { workspace = value },
     setRequestGroup: (value: string | undefined) => {
       requestGroup = value
     },
@@ -359,6 +360,71 @@ function mockPreparedVersions() {
 }
 
 describe("conversational authoring scope", () => {
+  it("restores the explicitly selected creator mode and saved draft after restart without running a trial", async () => {
+    const f = fixture()
+    await f.service.setMode("one", "workspace", "creator")
+    const draft = f.save()
+    const resumed = f.recreate()
+    expect(resumed.isCreatorMode("one", "workspace")).toBe(true)
+    expect(resumed.status("one")).toMatchObject({ enabled: true, mode: "creator" })
+    expect(resumed.read("one", draft.id).revision).toBe(1)
+    expect(resumed.save("one", { id: draft.id, name: draft.name,
+      expectedRevision: 1, files: draft.source.files }).revision).toBe(2)
+    expect(f.runtime.stageDevelopment).not.toHaveBeenCalled()
+    expect(f.runtime.approveDevelopment).not.toHaveBeenCalled()
+    expect(f.runtime.stopDevelopment).not.toHaveBeenCalled()
+  })
+  it("remembers an explicit return to ordinary mode even with existing authoring drafts", async () => {
+    const f = fixture()
+    await f.service.setMode("one", "workspace", "creator")
+    f.save()
+    await f.service.setMode("one", "workspace", "normal")
+    const resumed = f.recreate()
+    expect(resumed.status("one")).toMatchObject({ enabled: true, mode: "normal" })
+    expect(resumed.isCreatorMode("one", "workspace")).toBe(false)
+    expect(f.runtime.stopDevelopment).not.toHaveBeenCalled()
+    await resumed.setEnabled("one", "workspace", false)
+    expect(f.recreate().status("one")).toMatchObject({ enabled: false, mode: "normal" })
+  })
+  it("does not transfer the saved mode to another chat, workspace or thread incarnation", async () => {
+    const f = fixture()
+    await f.service.setMode("one", "workspace", "creator")
+    const resumed = f.recreate()
+    expect(resumed.isCreatorMode("two", "workspace")).toBe(false)
+    f.changeWorkspace("different-workspace")
+    expect(resumed.isCreatorMode("one", "different-workspace")).toBe(false)
+    f.changeWorkspace("workspace")
+    f.changeIdentity()
+    expect(resumed.isCreatorMode("one", "workspace")).toBe(false)
+  })
+  it("restores the preference without enabling globally disabled Mods", async () => {
+    const f = fixture()
+    await f.service.setMode("one", "workspace", "creator")
+    f.disableMods()
+    const resumed = f.recreate()
+    expect(resumed.status("one").mode).toBe("creator")
+    expect(resumed.isCreatorMode("one", "workspace")).toBe(false)
+    expect(f.runtime.approveDevelopment).not.toHaveBeenCalled()
+  })
+  it("does not silently enable creator tools when the preference could not be saved", async () => {
+    const f = fixture()
+    vi.spyOn(f.storage, "compareAndSetSetting").mockReturnValue(false)
+    await expect(f.service.setMode("one", "workspace", "creator"))
+      .rejects.toThrow("DEVELOPMENT_MODE_CHANGED")
+    expect(f.service.isCreatorMode("one", "workspace")).toBe(false)
+    expect(f.recreate().isCreatorMode("one", "workspace")).toBe(false)
+  })
+  it("does not infer creator mode from legacy drafts when no explicit preference was stored", async () => {
+    const f = fixture()
+    await f.service.setMode("one", "workspace", "creator")
+    f.save()
+    const read = f.storage.getSetting
+    vi.spyOn(f.storage, "getSetting").mockImplementation((key, fallback) =>
+      key.startsWith("development-mode:") ? fallback ?? "" : read(key, fallback))
+    expect(f.recreate().status("one")).toMatchObject({
+      mode: "normal", enabled: false, drafts: [{ id: "demo" }]
+    })
+  })
   it("uses only the host's original goal identity for cumulative multi-turn repair accounting", async () => {
     const f = fixture()
     await f.service.setMode("one", "workspace", "creator")

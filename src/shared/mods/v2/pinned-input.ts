@@ -182,7 +182,7 @@ export function normalizeFunctionInput(
                   ? ["origin", "isExpanded", "task", "from", "onScreen"]
                   : original.component === "AssistantMessage"
                     ? ["isFirstOfReply", "onScreen"]
-                    : original.component === "AbovePrompt"
+                    : original.component === "AbovePrompt" || original.component === "ChatHeader"
                       ? ["hasSurvey", "isWorking", "maxRows", "bodyColumns", "scroll", "view"]
                       : original.component === "PromptHint"
                         ? ["isDraft", "isWorking"]

@@ -17,7 +17,8 @@ async function fixture(
   authorize: (r: Readonly<FunctionHttpRequest>) => Promise<void>,
   handle?: RequestListener,
   protect?: (value: ModJson) => ModJson,
-  assertLive?: () => void
+  assertLive?: () => void,
+  captureErrorMessage = false
 ) {
   const received: string[] = []
   const server = createServer((request, response) => {
@@ -34,7 +35,7 @@ async function fixture(
     });
     on("command.run",async($)=>{
       try{return {response:await $.http.fetch(${JSON.stringify(base + "/original")})}}
-      catch(error){return {error:error.code}}
+      catch(error){return {error:error.code${captureErrorMessage ? ",message:String(error)" : ""}}}
     });
     ${hook}
   }}`)
@@ -90,6 +91,18 @@ it("a refused HTTP operation sends no network request", async () => {
   expect(await session.run("fetch", "")).toEqual({ error: "MODS_OPERATION_DENIED" })
   expect(authorize).not.toHaveBeenCalled()
   expect(received).toEqual([])
+})
+
+it("delivers the safe network explanation through the actual guest SDK after approval", async () => {
+  const authorize = vi.fn(async () => {})
+  const { session, received } = await fixture("", authorize,
+    request => request.socket.destroy(), undefined, undefined, true)
+  expect(await session.run("fetch", "")).toMatchObject({
+    error: "MODS_HTTP_NETWORK",
+    message: expect.stringContaining("ECONNRESET")
+  })
+  expect(authorize).toHaveBeenCalledOnce()
+  expect(received).toEqual(["/original"])
 })
 
 it.each([

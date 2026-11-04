@@ -2,7 +2,9 @@ import { execFileSync } from "node:child_process"
 import { mkdtemp, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { basename, dirname, join, resolve } from "node:path"
-import { afterEach, describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
+import { ModApprovalInbox } from "../../ipc/mods-approval-inbox"
+import { confirmNativeModApproval } from "../../ipc/mods-native-approval"
 import type { ModObject } from "../../../shared/mods/types"
 import type { NativePlatformCallContext } from "./platform-capabilities-types"
 import {
@@ -12,6 +14,30 @@ import {
 
 const roots: string[] = []
 const providers: ReturnType<typeof createGitInspectionPlatformProvider>[] = []
+
+it("denied Git binding cannot keep prompting, and explicit resume still requires approval", async () => {
+  const changed = vi.fn()
+  const inbox = new ModApprovalInbox(changed)
+  const f = await fixture({ confirmDirectory: (context, root) => confirmNativeModApproval(inbox,
+    context, { message: "Read changes?", detail: root, allowLabel: "允许读取" }) })
+  const first = f.bind()
+  const rejected = expect(first).rejects.toThrow("MODS_GIT_DIRECTORY_DENIED")
+  await vi.waitFor(() => expect(inbox.snapshot().current).not.toBeNull())
+  inbox.decide({ requestId: inbox.snapshot().current!.requestId, decision: "deny" })
+  await rejected
+  const notifications = changed.mock.calls.length
+  await expect(f.bind()).rejects.toThrow("MODS_APPROVAL_PAUSED")
+  expect(changed).toHaveBeenCalledTimes(notifications)
+  inbox.resume(inbox.snapshot().paused[0].id)
+  expect(inbox.snapshot().current).toBeNull()
+  const allowed = f.bind()
+  await vi.waitFor(() => expect(inbox.snapshot().current).not.toBeNull())
+  inbox.decide({ requestId: inbox.snapshot().current!.requestId, decision: "allow" })
+  const bound = await allowed
+  const afterApproval = changed.mock.calls.length
+  expect(await f.bind()).toEqual(bound)
+  expect(changed).toHaveBeenCalledTimes(afterApproval)
+}, 30_000)
 const env = {
   ...process.env,
   GIT_CONFIG_NOSYSTEM: "1",

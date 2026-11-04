@@ -7,6 +7,7 @@ import type { ModJson, ModObject } from "../../../../shared/mods/types"
 import { isModSiteChangeScope } from "../../../../shared/mods/types"
 import {
   functionQuestionPresentation,
+  isFunctionDockedSite,
   functionSiteDefault,
   validateFunctionSiteTree,
   type FunctionUiSite
@@ -181,7 +182,7 @@ export function FunctionSite(props: Parameters<typeof FunctionSiteSurface>[0]): 
     <section
       data-function-site={props.component}
       className={props.className ?? DEFAULT_SITE_CLASS_NAME}
-      style={props.component === "AbovePrompt" ? { maxHeight: 192 } : undefined}
+      style={isFunctionDockedSite(props.component) ? { maxHeight: 192 } : undefined}
       onClickCapture={blockRevokedInteraction}
       onKeyDownCapture={blockRevokedInteraction}
       onSubmitCapture={blockRevokedInteraction}
@@ -255,7 +256,7 @@ function FunctionSiteSurface({
   const redrawPresentation = useRef<{
     frame: NonNullable<typeof frame>; revision: number; inputKey: string
   } | null>(null)
-  const input = component === "AbovePrompt" ? { ...facts, ...geometry } : facts
+  const input = isFunctionDockedSite(component) ? { ...facts, ...geometry } : facts
   const inputKey = JSON.stringify(input)
   const presentationIdentity = presentationId ?? messageId
   const viewportWidth = typeof window === "undefined" ? 0 : window.innerWidth
@@ -502,14 +503,15 @@ function FunctionSiteSurface({
 
   useEffect(() => {
     const node = section.current
-    if (component !== "AbovePrompt" || !node) return
+    if (!isFunctionDockedSite(component) || !node) return
     const measure = (): void => {
       // Measure the allocated slot, not its content-dependent border/scrollbar interior.
       // Clearing an obsolete drawing can remove its frame; clientWidth then changes and
       // invalidates the replacement again, creating an endless empty/render resize loop.
       const bodyColumns = Math.max(1, Math.min(1000,
         Math.floor(node.getBoundingClientRect().width / 8)))
-      const maxRows = Math.max(1, Math.min(12, Math.floor(window.innerHeight / 48)))
+      const maxRows = Math.max(1, Math.min(component === "ChatHeader" ? 6 : 12,
+        Math.floor(window.innerHeight / (component === "ChatHeader" ? 96 : 72))))
       setGeometry((old) =>
         old.bodyColumns === bodyColumns && old.maxRows === maxRows
           ? old
@@ -994,9 +996,9 @@ function FunctionSiteSurface({
   return (
     <section
       ref={section}
-      data-function-hotkey-scope={component === "AbovePrompt" ? true : undefined}
+      data-function-hotkey-scope={isFunctionDockedSite(component) ? true : undefined}
       data-function-plugin={snapshot?.plugin}
-      onKeyDown={component === "AbovePrompt" ? event => { pressFunctionHotkey(event) } : undefined}
+      onKeyDown={isFunctionDockedSite(component) ? event => { pressFunctionHotkey(event) } : undefined}
       data-function-site={component}
       aria-busy={reading || (!snapshot && !projected && !isInactive && !error) || undefined}
       data-function-request-id={
@@ -1009,16 +1011,17 @@ function FunctionSiteSurface({
               : undefined
       }
       tabIndex={
-        component === "AbovePrompt" && snapshot && functionFocusTargets(snapshot).length
+        isFunctionDockedSite(component) && snapshot && functionFocusTargets(snapshot).length
           ? 0
           : undefined
       }
       className={className ?? DEFAULT_SITE_CLASS_NAME}
       style={{ position: "relative", isolation: "isolate", contain: "layout paint",
-        ...(component === "AbovePrompt" ? { maxHeight: geometry.maxRows * 24 } : {}) }}
+        ...(isFunctionDockedSite(component) ? { maxHeight: geometry.maxRows * 24,
+          minHeight: 0, flexShrink: 0, overflow: "auto", overscrollBehavior: "contain" } : {}) }}
       onFocus={(event) => {
         if (
-          component === "AbovePrompt" &&
+          isFunctionDockedSite(component) &&
           event.target === event.currentTarget &&
           !applyingFocus.current
         )
@@ -1026,19 +1029,19 @@ function FunctionSiteSurface({
       }}
       onBlur={(event) => {
         if (
-          component !== "AbovePrompt" ||
+          !isFunctionDockedSite(component) ||
           (event.relatedTarget instanceof Node && event.currentTarget.contains(event.relatedTarget))
         )
           return
         void act(undefined, "focus", { focused: false })
       }}
       onScroll={(event) => {
-        if (component !== "AbovePrompt") return
+        if (!isFunctionDockedSite(component)) return
         const offset = Math.max(0, Math.min(100000, Math.floor(event.currentTarget.scrollTop / 24)))
         setGeometry((old) => (old.offset === offset ? old : { ...old, offset }))
       }}
       onWheel={(event) => {
-        if (component !== "AbovePrompt") return
+        if (!isFunctionDockedSite(component)) return
         const clamp = (n: number): number => Math.max(-100000, Math.min(100000, n))
         void act(undefined, "scroll", {
           deltaX: clamp(event.deltaX),

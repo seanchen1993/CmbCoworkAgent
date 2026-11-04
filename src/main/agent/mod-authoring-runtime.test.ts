@@ -2,8 +2,10 @@ import { afterEach, expect, it, vi } from "vitest"
 import { createModAuthoringRuntimeTools, modAuthoringRuntimePrompt } from "./mod-authoring-runtime"
 import {
   setModDevelopmentService,
-  type ModDevelopmentService
+  ModDevelopmentService
 } from "../mods/devtools/development-service"
+import { AuthoringDraftStore } from "../mods/devtools/authoring-store"
+import { createAuthoringTemplate } from "../mods/devtools/authoring-templates"
 import { claimLocalThreadRunLease, releaseLocalThreadRunLease } from "./thread-run-lease"
 
 vi.mock("../storage", () => ({ getPlugins: () => [] }))
@@ -125,6 +127,43 @@ it("fences creator tools in ordinary mode while the session remains enabled for 
     error: "DEVELOPMENT_TURN_CHANGED"
   })
   expect(createModAuthoringRuntimeTools(scope)).toEqual([])
+})
+
+it("offers the real authoring tool after service restart and can update the original draft", async () => {
+  fixture()
+  const values = new Map<string, string>()
+  const settings = {
+    getSetting: (key: string, fallback = "") => values.get(key) ?? fallback,
+    compareAndSetSetting: (key: string, expected: string | undefined, value: string) => {
+      if (values.get(key) !== expected) return false
+      values.set(key, value)
+      return true
+    }
+  }
+  const execute = vi.fn()
+  const createService = () => new ModDevelopmentService({
+    drafts: new AuthoringDraftStore(settings), historySettings: settings,
+    versionsRoot: "unused-mode-test", workerEntry: "unused-mode-test.js", changed: () => {},
+    canRun: () => true,
+    context: () => ({ scope: { threadId, workspace,
+      incarnation: { token: "original-chat", legacyCreatedAt: 1 } }, assertCurrent: () => {} }),
+    runtime: { developmentStatus: () => [],
+      developmentRetention: () => ({ releasable: true, revisions: [] }),
+      stageDevelopment: execute, approveDevelopment: execute, stopDevelopment: execute }
+  })
+  const original = createService()
+  await original.setMode(threadId, workspace, "creator")
+  const source = createAuthoringTemplate({ id: "restart", name: "Restart", instruction: "Demo", kind: "command" })
+  original.save(threadId, { id: "restart", name: "Restart", expectedRevision: 0, files: source.files })
+  setModDevelopmentService(createService())
+  const tools = createModAuthoringRuntimeTools(scope)
+  expect(tools.map(tool => tool.name)).toContain("mod_authoring")
+  expect(JSON.parse(await tools[0].invoke({ action: "read", id: "restart" })))
+    .toMatchObject({ ok: true, result: { revision: 1 } })
+  expect(JSON.parse(await tools[0].invoke({ action: "save", id: "restart", name: "Restart",
+    revision: 1, files: source.files })))
+    .toMatchObject({ ok: true, result: { revision: 2 } })
+  expect(execute).not.toHaveBeenCalled()
 })
 
 it("describes only the creator tools retained by the actual runtime allowlist", () => {

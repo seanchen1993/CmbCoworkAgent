@@ -289,6 +289,16 @@ function ActiveUserInputRequestDialog({
     })
   }
 
+  const handleAnswerKeyDown = (event: React.KeyboardEvent<HTMLInputElement>): void => {
+    if (event.key !== "Enter" || event.defaultPrevented || event.nativeEvent.isComposing ||
+      event.nativeEvent.keyCode === 229) return
+    // These answer fields live inside the chat form. Native implicit submission would
+    // send that unrelated draft while this question still owns the input surface.
+    event.preventDefault()
+    event.stopPropagation()
+    if (!event.shiftKey && !event.repeat) handleSubmit()
+  }
+
   const renderQuestions = (shownQuestions: UserInputRequest["questions"]): React.ReactNode => {
     if (collapsed) return null
     const activeQuestion = shownQuestions[Math.min(activeIndex, request.questions.length - 1)]
@@ -374,6 +384,7 @@ function ActiveUserInputRequestDialog({
                               className="min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-muted-foreground"
                               value={activeDraft.additionalText ?? ""}
                               aria-label={`${option.label}的补充说明`}
+                              onKeyDown={handleAnswerKeyDown}
                               onChange={(event) =>
                                 updateAdditionalText(
                                   activeQuestion.id,
@@ -408,6 +419,7 @@ function ActiveUserInputRequestDialog({
                   className="min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-muted-foreground"
                   value={activeDraft?.type === "other" ? activeDraft.text : ""}
                   aria-label="自定义回答"
+                  onKeyDown={handleAnswerKeyDown}
                   placeholder="以上都不是我想要的，我希望："
                   onFocus={() => {
                     if (activeDraft?.type !== "other") {

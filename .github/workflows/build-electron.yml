@@ -762,6 +762,11 @@ jobs:
       - name: Verify creator continuation and passive surface lookup
         run: npx vitest run src/main/mods/devtools/creator-request-budget.test.ts src/main/agent/tools/mod-authoring-tool.test.ts src/main/agent/tools/mod-composition-tool.test.ts src/main/agent/tools/mod-business-tool.test.ts src/main/agent/tools/mod-configuration-tool.test.ts src/main/agent/tools/mod-authoring-budget.integration.test.ts src/main/mods/devtools/development-service.test.ts src/main/ipc/mods-platform.test.ts src/main/mods/v2/platform-manager.integration.test.ts src/preload/mods-platform.test.ts
 
+      - name: Verify non-modal Mods approvals and cancellation (Windows)
+        if: matrix.platform == 'win'
+        timeout-minutes: 5
+        run: npm run test:mods:approvals
+
       - name: Validate Mods in Windows package
         if: matrix.platform == 'win'
         timeout-minutes: 20

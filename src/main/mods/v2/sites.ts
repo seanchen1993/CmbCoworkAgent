@@ -7,6 +7,7 @@ import {
   functionQuestionPresentation,
   functionSiteProps,
   functionUiSite,
+  isFunctionDockedSite,
   FUNCTION_DURATION_SITE_LIMIT,
   FUNCTION_COMMAND_OUTPUT_SITE_LIMIT,
   validateFunctionSiteTree,
@@ -197,7 +198,7 @@ export class FunctionUiSites {
     if (
       action.pane !== `engine:${owner}` ||
       action.kind === "close" ||
-      ((action.kind === "focus" || action.kind === "scroll") && site.component !== "AbovePrompt")
+      ((action.kind === "focus" || action.kind === "scroll") && !isFunctionDockedSite(site.component))
     )
       throw new ModFunctionError("MODS_UI_ACTION_INVALID")
     const guard = () => {

@@ -52,6 +52,7 @@ export function developmentCapabilitySummary(capabilities: readonly string[]): s
 }
 
 export function developmentNextStep(row: DevelopmentTrialStatus): string {
+  if (row.historical) return "这是重启前的试用记录，不能用于停止当前灵件。若聊天中仍有效果，请到会话灵件管理中查看并停用；历史外部操作的结果仍需单独核对。"
   if (row.phase === "needs-approval") return "核对用途、当前目标和新增权限，再确认试用。"
   if (row.phase === "queued") return row.waitingReason === "turn-interrupted"
     ? "回到聊天继续完成制作；不会重放中断的操作。" : "等待当前任务安全结束，再刷新试用状态。"

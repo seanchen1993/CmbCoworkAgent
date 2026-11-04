@@ -110,6 +110,9 @@ declare namespace DevClawMods {
   export interface FileStat {kind:"file"|"dir"|"other";size:number;mtimeMs:number;realPath?:string}
   export interface ToolInfo {name:string;description:string;mcp:boolean}
   export interface ToolResult {result:Json;text?:string;isError?:true;context?:string[];ref?:number}
+  /** ChatHeader is docked at the chat top; AbovePrompt above the composer. Both scroll independently.
+   * props.bodyColumns/maxRows/scroll describe the bounded area; full DOM forms must not slice by scroll.offset.
+   * Pane supports larger workspaces via ui.open or capability sidebar/page surfaces. */
   export interface UiEvent {component:string;requestId?:string;surface:"desktop";props:JsonObject;viewport?:{columns:number;rows:number}}
   export type UiTree = unknown
   export type UiSpace = number|"xs"|"sm"|"md"|"lg"|"xl"
@@ -411,7 +414,8 @@ export function functionAuthoringDeclarations(protocol: FunctionModelProtocol): 
   const forkOutput = modern ? "ForkResult" : "{text:string;usage?:Partial<ModelUsage>}|null"
   const hooks = [
     ["model.complete", completeInput, completeOutput],
-    ["model.fork", forkInput, forkOutput]
+    ["model.fork", forkInput, forkOutput],
+    ["model.classify", "{text:string;labels:string[];model:string;maxTokens?:number}", "string|null"]
   ]
     .map(
       ([event, input, output]) =>

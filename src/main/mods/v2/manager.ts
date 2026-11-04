@@ -731,6 +731,14 @@ export class FunctionModsManager {
         }
         if (this.entryDrains.has(previous)) { await this.entryDrains.get(previous); return }
         if (waitForIdle) {
+          // Explicit stop has already revoked this trial. Cancel its UI reads before
+          // waiting for foreground settlement: a drawing can be waiting for permission
+          // in a now-hidden surface, and cannot settle until its signal is aborted.
+          // Actual native cleanup is still awaited; commands and business work retain
+          // their original foreground ownership. Replacement preflight stays untouched.
+          this.retireSiteEntry(previous)
+          previous.session?.sites.close()
+          previous.session?.panes.close()
           try { await previous.activity.pauseAndWaitForRetirement() }
           catch (error) {
             const external = this.entryDrains.get(previous)

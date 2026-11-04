@@ -1,5 +1,5 @@
 import type { ModObject } from "../../../shared/mods/types"
-import type { FunctionUiSite } from "../../../shared/mods/v2/sites"
+import { isFunctionDockedSite, type FunctionUiSite } from "../../../shared/mods/v2/sites"
 
 /** Only a previously protected presentation may bridge these non-authority progress updates. */
 export function retainsFunctionSitePresentation(
@@ -11,6 +11,15 @@ export function retainsFunctionSitePresentation(
   const same = (left: unknown, right: unknown): boolean =>
     JSON.stringify(left) === JSON.stringify(right)
   if (previousKey === JSON.stringify(next)) return false
+  // Scrolling changes presentation geometry only. Keep the already protected DOM (inert
+  // until the new read completes), otherwise clearing a tall form resets scrollTop to 0.
+  if (isFunctionDockedSite(component) &&
+    Object.keys(previous).length === 4 && Object.keys(next).length === 4 &&
+    ["isWorking", "bodyColumns", "maxRows", "offset"].every(key => Object.hasOwn(next, key)) &&
+    typeof previous.isWorking === "boolean" && typeof next.isWorking === "boolean" &&
+    same(previous.bodyColumns, next.bodyColumns) && same(previous.maxRows, next.maxRows) &&
+    [previous.offset, next.offset].every(value => typeof value === "number" &&
+      Number.isSafeInteger(value) && value >= 0 && value <= 100000)) return true
   if (component === "Spinner")
     return (
       Object.keys(previous).length === 4 &&
@@ -89,7 +98,7 @@ export function retainsFunctionSitePresentation(
     })
   }
   const field =
-    component === "AbovePrompt"
+    isFunctionDockedSite(component)
       ? "isWorking"
       : component === "AssistantMessage"
         ? "text"

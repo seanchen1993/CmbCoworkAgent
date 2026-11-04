@@ -443,6 +443,78 @@ async function compositionFixture(options: Parameters<typeof fixture>[0] = {}) {
   return { ...f, claws, identity, initial, installed, apply, render }
 }
 
+it("stopping a trial cancels its pending display permission before waiting for retirement", async () => {
+  const entered = Promise.withResolvers<void>()
+  let authorizationSignal: AbortSignal | undefined
+  const authorize = vi.fn(async (_workspace: string, _threadId: string, _grant: unknown,
+    _request: unknown, signal: AbortSignal) => {
+    authorizationSignal = signal
+    entered.resolve()
+    await new Promise<void>((_resolve, reject) => {
+      if (signal.aborted) reject(signal.reason)
+      else signal.addEventListener("abort", () => reject(signal.reason), { once: true })
+    })
+  })
+  const f = await fixture({ realCapabilities: ["http.fetch"], host: {
+    protects: () => true,
+    captureSiteGuard: () => () => {},
+    authorizeHttp: authorize,
+    runEffect: async (_workspace, _thread, _grant, _method, _input, _signal, run) => run()
+  } })
+  await f.activate(1, `export function register(on) {
+    on("ui.render", {component:"AbovePrompt"}, async ($, e) => {
+      await $.http.fetch("https://example.invalid/pending-display");
+      return $.ui.resolve(e).Text({children:"unreachable"})
+    })
+  }`)
+  const owner = (await f.manager.siteMount(f.root, f.scope.threadId, "AbovePrompt"))!
+  const drawing = withFunctionExecution({ workspace: f.root, threadId: f.scope.threadId,
+    userInitiated: false, leased: false, immediate: true }, () =>
+    f.manager.siteRender(f.root, f.scope.threadId, owner, {
+      isWorking: false, bodyColumns: 80, maxRows: 10
+    })).then(() => "drawn", () => "cancelled")
+  try {
+    await entered.promise
+    const stopping = f.manager.stopDevelopment(f.scope, f.componentId, () => {})
+    await vi.waitFor(() => expect(authorizationSignal?.aborted).toBe(true), { timeout: 1500 })
+    await stopping
+    expect(await drawing).toBe("cancelled")
+    expect(f.manager.developmentStatus(f.scope)[0].phase).toBe("stopped")
+    const history = await f.manager.siteRead(f.root, f.scope.threadId, "AssistantMessage",
+      { text: "Native history remains available", isFirstOfReply: true }, "history-1")
+    expect(history.state).toBe("mounted")
+    expect(JSON.stringify(history)).toContain("Native history remains available")
+    const question = await f.manager.siteRead(f.root, f.scope.threadId, "UserMessage",
+      { text: "My original question", isExpanded: false }, "history-user", "user-1")
+    expect(question.state).toBe("mounted")
+    expect(JSON.stringify(question)).toContain("My original question")
+    await expect(f.manager.siteRender(f.root, f.scope.threadId, owner, {
+      isWorking: false, bodyColumns: 80, maxRows: 10
+    })).rejects.toThrow("MODS_UI_SITE_CLOSED")
+    expect(authorize).toHaveBeenCalledOnce()
+  } finally {
+    f.manager.closeThread(f.scope.threadId)
+    await drawing
+  }
+}, 10000)
+
+it("retiring a trial keeps the installed history presentation after fresh admission", async () => {
+  const f = await compositionFixture({ host: {
+    protects: () => true, captureSiteGuard: () => () => {}
+  } })
+  const { target } = await f.installed(`export function register(on) {
+    on("ui.render", {component:"AssistantMessage"}, ($,e) =>
+      $.ui.resolve(e).Text({children:"Installed presentation remains active"}))
+  }`)
+  await f.apply(target)
+  await f.activate(1, source("Trial UI"))
+  await f.manager.stopDevelopment(f.scope, f.componentId, () => {})
+  const history = await f.manager.siteRead(f.root, f.scope.threadId, "AssistantMessage",
+    { text: "Original body", isFirstOfReply: true }, "history-installed")
+  expect(history.state).toBe("mounted")
+  expect(JSON.stringify(history)).toContain("Installed presentation remains active")
+})
+
 const compositionCommand = (name: string) => `export function register(on) {
   on("session.start",async($,e,next)=>{
     await $.command.register({name:${JSON.stringify(name)},description:"Installed command"});return next(e)
@@ -1005,6 +1077,7 @@ it.each(["*", "!ui.render", "prompt.context", "model.request"])(
 it("can disable a recreated authoring service with unknown history and never reloads its guest", async () => {
   const f = await fixture()
   await f.activate(1, source("previous process"))
+  expect(f.manager.developmentStatus(f.scope)[0].historical).toBeUndefined()
   f.manager.close()
   const createClient = vi.fn(() => {
     throw Error("must not reload historical code")
@@ -1029,9 +1102,12 @@ it("can disable a recreated authoring service with unknown history and never rel
   })
   restarted.configureDevelopmentAccess({ assertScope: (scope) => service.assertScope(scope) })
   try {
-    expect(service.status(f.scope.threadId).trials[0].phase).toBe("unknown")
+    expect(service.status(f.scope.threadId).trials[0]).toMatchObject({
+      phase: "unknown", historical: true, error: "MODS_DEVELOPMENT_RESTART_UNCONFIRMED"
+    })
     await service.setEnabled(f.scope.threadId, f.root, true)
-    await service.stop(f.scope.threadId, f.root, f.componentId)
+    const stopped = await service.stop(f.scope.threadId, f.root, f.componentId)
+    expect(stopped.trials[0]).toMatchObject({ phase: "unknown", historical: true })
     const disabled = await service.setEnabled(f.scope.threadId, f.root, false)
     expect(disabled.enabled).toBe(false)
     expect(disabled.trials[0].phase).toBe("unknown")

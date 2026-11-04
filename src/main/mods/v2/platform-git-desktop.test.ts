@@ -50,7 +50,7 @@ for (const channel of ["sandbox", "original-runtime"] as const) {
       const manager = { functionRuntimeScope: () => runtime } as unknown as ModsManager
       const dependencies = createDesktopGitInspectionProvider(
         manager,
-        () => null
+        async () => false
       ) as unknown as GitInspectionDependencies
       const context = {
         workspace: "/workspace",

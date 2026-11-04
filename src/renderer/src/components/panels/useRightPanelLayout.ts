@@ -51,8 +51,24 @@ export function useRightPanelLayout({ rightModule }: UseRightPanelLayoutOptions)
   const rightWidthRef = useRef(rightWidth)
   const browserRightWidthRef = useRef(browserRightWidth)
   const browserFullscreenRightPercentRef = useRef(browserFullscreenRightPercent)
-  const [previewFullscreen, setPreviewFullscreen] = useState(false)
-  const [browserFullscreen, setBrowserFullscreen] = useState(false)
+  const [fullscreen, setFullscreen] = useState({ module: rightModule, preview: false, browser: false })
+  // The task sidebar keeps a separate mounted host. Leaving a resource panel can
+  // unmount its fullscreen-reset effect, so fullscreen belongs to this module
+  // selection rather than to whichever resource happened to render previously.
+  if (fullscreen.module !== rightModule)
+    setFullscreen({ module: rightModule, preview: false, browser: false })
+  const previewFullscreen = fullscreen.module === rightModule &&
+    rightModule === "preview" && fullscreen.preview
+  const browserFullscreen = fullscreen.module === rightModule &&
+    rightModule === "browser" && fullscreen.browser
+  const setPreviewFullscreen = useCallback((value: boolean) => {
+    setFullscreen(current => current.module === rightModule && current.preview === value
+      ? current : { module: rightModule, preview: value, browser: false })
+  }, [rightModule])
+  const setBrowserFullscreen = useCallback((value: boolean) => {
+    setFullscreen(current => current.module === rightModule && current.browser === value
+      ? current : { module: rightModule, browser: value, preview: false })
+  }, [rightModule])
 
   const isFullscreen = previewFullscreen || browserFullscreen
   const showRightResizeHandle = !previewFullscreen
