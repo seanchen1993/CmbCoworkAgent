@@ -98,7 +98,7 @@ it("continues real authoring tools across reconstruction while preserving origin
   expect(f.runtime.stageDevelopment).not.toHaveBeenCalled()
 })
 
-it("keeps drafts readable when accounting is corrupt and never restores authoring admission", async () => {
+it("restores creator mode and readable drafts but blocks authoring when accounting is corrupt", async () => {
   const f = fixture()
   const service = f.make()
   await service.setEnabled(threadId, workspace, true)
@@ -114,17 +114,25 @@ it("keeps drafts readable when accounting is corrupt and never restores authorin
   f.values.set(key, "corrupt")
   const restored = f.make()
   expect(restored.status(threadId)).toMatchObject({
-    enabled: false,
+    enabled: true,
+    mode: "creator",
     request: { error: "DEVELOPMENT_BUDGET_UNCONFIRMED" },
     drafts: [{ id: "demo", revision: 1 }]
   })
   expect(() => restored.claimAuthoringBudget(threadId, "native-run", "operation")).toThrow(
-    "DEVELOPMENT_DISABLED"
+    "DEVELOPMENT_BUDGET_UNCONFIRMED"
   )
   await restored.setEnabled(threadId, workspace, true)
   expect(() => restored.claimAuthoringBudget(threadId, "native-run", "operation")).toThrow(
     "DEVELOPMENT_BUDGET_UNCONFIRMED"
   )
   expect(restored.read(threadId, "demo").currentRevision).toBe(1)
+  setModDevelopmentService(restored)
+  claimLocalThreadRunLease({ threadId, owner: "desktop", runId: "native-run" })
+  const trial = await createModAuthoringTool({ threadId, workspace }).invoke({
+    action: "request_trial", id: "demo", revision: 1
+  })
+  expect(JSON.parse(trial)).toMatchObject({ ok: false, error: "DEVELOPMENT_BUDGET_UNCONFIRMED" })
   expect(f.runtime.stageDevelopment).not.toHaveBeenCalled()
+  expect(f.runtime.approveDevelopment).not.toHaveBeenCalled()
 })
