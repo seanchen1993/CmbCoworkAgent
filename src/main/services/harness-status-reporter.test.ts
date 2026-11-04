@@ -55,6 +55,26 @@ describe("test-project snapshot reporting", () => {
     }
   )
 
+  it("converts saved Beijing lifecycle times before sending the snapshot through the relay", async () => {
+    service.listHarnessProjects.mockResolvedValue([
+      {
+        ...project(true),
+        lifecycle: {
+          status: "active",
+          createAt: "2026-11-04 09:00:00",
+          updateAt: "2026-11-04 15:19:16"
+        }
+      }
+    ])
+    await reportProjectSnapshotNow("p1")
+    const [, request] = fetchMock.mock.calls[0] as unknown as [string, RequestInit]
+    expect(JSON.parse(request.body as string).document.properties).toMatchObject({
+      isTestProject: true,
+      lifecycleCreatedAt: "2026-11-04T01:00:00.000Z",
+      lifecycleUpdatedAt: "2026-11-04T07:19:16.000Z"
+    })
+  })
+
   it.each([true, false])(
     "changes classification to %s while preserving a non-empty snapshot on inspect failure",
     async (flag) => {
@@ -100,18 +120,30 @@ describe("test-project snapshot reporting", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 
-  it("writes a new empty project with the flag after 404", async () => {
+  it("writes a new empty project with its flag and valid lifecycle times after 404", async () => {
     vi.stubEnv("VITE_API_TRACE_BASE_URL", "")
-    service.listHarnessProjects.mockResolvedValue([project(true)])
+    service.listHarnessProjects.mockResolvedValue([
+      {
+        ...project(true),
+        lifecycle: {
+          status: "archived",
+          createAt: "invalid legacy date",
+          updateAt: "2026-11-04T07:19:16.000Z"
+        }
+      }
+    ])
     fetchMock.mockResolvedValueOnce(new Response("{}", { status: 404 }))
     await reportProjectSnapshotNow("p1")
     const [url, request] = fetchMock.mock.calls[1] as unknown as [string, RequestInit]
     expect(url).toContain("/_doc/harness_project_p1")
     expect(request.method).toBe("PUT")
-    expect(JSON.parse(request.body as string).properties).toMatchObject({
+    const properties = JSON.parse(request.body as string).properties
+    expect(properties).toMatchObject({
       isTestProject: true,
+      lifecycleUpdatedAt: "2026-11-04T07:19:16.000Z",
       featureCount: 0,
       features: []
     })
+    expect(properties).not.toHaveProperty("lifecycleCreatedAt")
   })
 })
