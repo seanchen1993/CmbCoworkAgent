@@ -53,6 +53,20 @@ async function main(): Promise<void> {
       await page.setContent('<div id="root"></div>')
       await page.addScriptTag({ content: bundle.outputFiles[0].text })
       await page.evaluate(() => window.fixture.render(undefined))
+      await page.evaluate(async () => {
+        await new Promise<void>(done => requestAnimationFrame(() => done()))
+        await new Promise<void>(done => requestAnimationFrame(() => done()))
+      })
+      assert.deepEqual(await page.evaluate(() => window.fixture.pending()), [],
+        "an unresolved workspace must not spawn a default-directory Git probe")
+      await page.evaluate(() => window.fixture.render(null))
+      await page.evaluate(async () => {
+        await new Promise<void>(done => requestAnimationFrame(() => done()))
+        await new Promise<void>(done => requestAnimationFrame(() => done()))
+      })
+      assert.deepEqual(await page.evaluate(() => window.fixture.pending()), [],
+        "a chat without a workspace must not probe the application's directory")
+      await page.evaluate(() => window.fixture.render("old"))
       await page.waitForFunction(() => window.fixture.pending().length === 1)
       if (scenario === "unmount") {
         await page.evaluate(() => {
@@ -195,7 +209,7 @@ async function main(): Promise<void> {
 }
 
 interface BranchFixture {
-  render(path: string | undefined): void
+  render(path: string | null | undefined): void
   pending(): (string | null)[]
   finish(index: number, value: Record<string, unknown>): void
   fail(index: number): void

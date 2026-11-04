@@ -47,6 +47,10 @@ afterAll(() => {
 })
 
 describe("discoverWorkspaceGitRepositories", () => {
+  it("returns no root or child repositories for an ordinary empty workspace", async () => {
+    await expect(discoverWorkspaceGitRepositories(createWorkspace())).resolves.toEqual([])
+  })
+
   it("finds sibling Git repositories below a non-Git workspace", async () => {
     const workspace = createWorkspace()
     initRepo(join(workspace, "B"))

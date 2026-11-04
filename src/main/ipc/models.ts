@@ -4640,8 +4640,11 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
         "probe",
         threadId ?? folderPath,
         async () => {
-          const gitRoot = await getGitRoot(folderPath)
-          const repositories = gitRoot ? [] : await discoverWorkspaceGitRepositories(folderPath)
+          // Discovery already checks the workspace root before its bounded child scan.
+          // Probing it separately starts a second Git process for every non-repository.
+          const discovered = await discoverWorkspaceGitRepositories(folderPath)
+          const gitRoot = discovered.find((repo) => repo.isWorkspaceRoot)?.gitRoot ?? null
+          const repositories = gitRoot ? [] : discovered
           const isGit = Boolean(gitRoot || repositories.length > 0)
           const isWorktreePath = isGit ? await detectIsWorktreePath(folderPath) : false
           const worktrees = isGit && includeWorktrees && gitRoot ? await listWorktrees(gitRoot) : []

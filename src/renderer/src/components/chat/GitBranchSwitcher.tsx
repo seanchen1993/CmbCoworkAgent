@@ -75,9 +75,15 @@ function GitBranchSwitcherImpl({
     if (workspacePathRef.current !== workspacePath) return
     const request = ++detectionRequestRef.current
     const isCurrent = () => request === detectionRequestRef.current
+    // Workspace hydration may not have finished yet. An omitted cwd probes the
+    // application's unrelated default directory and starts unnecessary Git processes.
+    if (!workspacePath) {
+      setGitRepoChecked(true)
+      return
+    }
     setGitRepoChecked(false)
     try {
-      const result = await window.api.git.currentBranch(workspacePath ?? undefined)
+      const result = await window.api.git.currentBranch(workspacePath)
       if (!isCurrent()) return
       setIsGitRepo(result.isGitRepo)
       setIsMultiRepo(Boolean(result.isMultiRepo))
