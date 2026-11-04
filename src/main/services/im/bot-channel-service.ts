@@ -1,4 +1,5 @@
 import { deliverBotImFile } from "./bot-file-delivery"
+import { botImReplyText } from "./bot-reply-text"
 import { botInteractionRoutes } from "./bot-interaction-route"
 import { submitFormattedImReply } from "./submit-formatted-reply"
 import { conversationSwitchedToText } from "./withheld-text-notices"
@@ -594,10 +595,16 @@ export class BotImChannelService {
         host.settleImDelivery(reply.id, "blocked")
         return
       }
-      const messages = reply.text.trim() ? buildImProactiveReplies({
-        deliveryId: reply.id,
+      const workspace = reply.workId
+        ? host.getWork(reply.botId, reply.workId).workspace?.path
+        : undefined
+      const text = botImReplyText(reply.text, reply.files, workspace ? [workspace] : [])
+      const messages = text.trim() ? buildImProactiveReplies({
+        // A retained pre-upgrade reply may already have an unredacted text receipt.
+        // Version only changed text; keep attachment IDs stable so files are never resent.
+        deliveryId: text === reply.text ? reply.id : `${reply.id}:public-text-v1`,
         conversationKey: registered.binding.conversationKey,
-        text: reply.text,
+        text,
         format: "markdown"
       }) : []
       for (const message of messages) {

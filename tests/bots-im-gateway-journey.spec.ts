@@ -96,9 +96,17 @@ async function main() {
           if (task.origin.kind === "work_result")
             return { state: "completed", result: "已回报：" + JSON.parse(task.message).result }
           if (task.workId && host.getWork(task.botId, task.workId).goal === "media:work")
-            return { state: "completed", result: "任务文件已交付", files: mediaFiles }
+            return {
+              state: "completed",
+              result: `任务文件已交付：${mediaFiles[0].filePath}`,
+              files: mediaFiles
+            }
           if (task.message === "media:direct")
-            return { state: "completed", result: "图片和文档已准备", files: mediaFiles }
+            return {
+              state: "completed",
+              result: mediaFiles.map((file) => `[${file.name}](${file.filePath})`).join("\n"),
+              files: mediaFiles
+            }
           if (task.message === "media:upload-failure")
             return { state: "completed", result: "开始交付图片", files: [rejectedImage!] }
           if (task.message === "media:work") {
@@ -300,6 +308,10 @@ async function main() {
           (await mediaMessages()).length,
           before + mediaFiles.length,
           "no duplicate publication"
+        )
+        assert(
+          !(await messages()).some((message) => message.content?.includes(mediaRoot!)),
+          "IM replies must not expose host paths"
         )
       }
       await bind("group")

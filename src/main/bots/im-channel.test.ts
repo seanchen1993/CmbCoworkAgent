@@ -1,6 +1,6 @@
 import type { BotWorkHistoryPort } from "../../shared/bots/work-history"
 import { botMemoryContext } from "../../shared/bots/memory-scope"
-import { mkdtemp, writeFile, rm } from "node:fs/promises"
+import { mkdtemp, writeFile, readFile, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { execFileSync } from "node:child_process"
@@ -2810,8 +2810,8 @@ it.each(["dm", "group"] as const)("delivers independent-work attachments only to
   const { snapshotBotDeliveryFile } = await import("./file-copy")
   const file = { name: "任务成果.xlsx", filePath, ...await snapshotBotDeliveryFile(root, filePath, new AbortController().signal) }
   const f = fixture(async (task, host) => {
-    if (task.workId) return { state: "completed", result: "任务文件已生成", files: [file] }
-    if (task.origin.kind === "work_result") return { state: "completed", result: "任务已返回结果" }
+    if (task.workId) return { state: "completed", result: `任务文件已生成：${file.filePath}`, files: [file] }
+    if (task.origin.kind === "work_result") return { state: "completed", result: `任务已返回结果：${file.filePath}` }
     await host.createWork({ botId: task.botId, operationId: task.id, title: "文件任务", goal: "生成表格" },
       { taskId: task.id, callId: "create", key: "create" })
     return { state: "completed", result: "已创建任务" }
@@ -2836,6 +2836,32 @@ it.each(["dm", "group"] as const)("delivers independent-work attachments only to
   // A result-summary round must not resend the original attachment.
   await new Promise(resolve => setTimeout(resolve, 1100))
   expect(finished).toHaveLength(1)
+  expect(f.client.submitReply.mock.calls.map(([reply]) => reply.message.content).join("\n")).not.toContain(root)
+  expect(await readFile(file.attachmentPath, "utf8")).toBe("verified task bytes")
+})
+
+it.each(["group", "dm", "mirror"] as const)("hides host paths in %s replies while retaining local attachment records", async (kind) => {
+  const file = { name: "hello.txt", filePath: String.raw`C:\Users\alice\.cmbcoworkagent\bots\workspaces\bot-id\hello.txt`, size: 3,
+    attachmentPath: join(tmpdir(), ".bot-deliveries", "a".repeat(64), "hello.txt") }
+  const text = `已创建：\`${file.filePath}\`，请查看附件。`
+  const f = fixture(async () => ({ state: "completed", result: text, files: [file] }))
+  const binding = await f.binding(kind === "group" ? "group" : "dm")
+  f.client.supportsMarkdownReplies.mockReturnValue(kind !== "dm")
+  const upload = vi.fn(async (_request: import("../../shared/bots/im-file").BotImFileCommand) => ({ state: "accepted" as const }))
+  Object.assign(f.client, { supportsBotFiles: () => true, botFileCommand: upload })
+  // Saved attachment references stay internal; the gateway only gets the name and bytes.
+  if (kind === "mirror") f.host.send({ botId: f.bot.id, requestId: "local-file", message: "create file" })
+  else await f.service.receive(f.event(binding, "file", "create file"))
+  await eventually(() => upload.mock.calls.length === 1)
+  const replies = f.client.submitReply.mock.calls.map(([reply]) => reply)
+  expect(replies.some(reply => reply.message.content === "已创建：`hello.txt`，请查看附件。")).toBe(true)
+  expect(replies.every(reply => !reply.message.content.includes("C:") && !reply.message.content.includes(".cmbcoworkagent"))).toBe(true)
+  expect(replies.every(reply => reply.deliveryId.endsWith(":public-text-v1"))).toBe(true)
+  const stored = f.db.exec("SELECT text,files_json FROM bot_im_outbox WHERE text=?", [text])[0].values[0]
+  expect(stored[0]).toBe(text)
+  expect(JSON.parse(String(stored[1])).files).toEqual([file])
+  expect(upload.mock.calls[0][0]).toMatchObject({ action: "begin", name: "hello.txt", conversationKey: binding.conversationKey })
+  expect(f.errors).toEqual([])
 })
 
 it("keeps the local file and reports an old gateway's missing attachment capability", async () => {

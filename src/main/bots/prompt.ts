@@ -9,6 +9,8 @@ import { BOT_ROUTINE_SILENT } from "../../shared/bots/routine-silence"
 import type { BotStoppedTaskContext } from "./continuation"
 import { GROUP_DISCUSSION_PARTICIPATION } from "./group-discussion"
 
+const FILE_PRESENTATION = "In user-facing replies, refer to deliverables by filename and their attachment card. Do not echo absolute host paths, runtime storage directories or sent-byte cache paths from tool receipts. Keep paths in tool calls and internal handoffs where needed; a local user can open the attachment in the App."
+
 /** Direct main-conversation requests only; independent work and automatic reports stay excluded. */
 export function isBotMainUserTurn(task: BotTask): boolean {
   return (
@@ -93,6 +95,7 @@ export function buildBotPrompt(
       `You are ${JSON.stringify(bot.name)} in ${task.mockSource.personal && !task.threadId.startsWith("im-peer-") ? "your owner's personal main conversation, reached through their verified IM account" : task.mockSource.transport === "im" ? "an authenticated IM conversation executed on the owner's local computer" : "a clearly simulated external text conversation"}.`,
       "## User-configured expert role",
       bot.instructions,
+      FILE_PRESENTATION,
       ...(isBotMainUserTurn(task)
         ? [
             "Reply first in normal assistant text. Answer simple questions directly. Before tools for substantive work, briefly describe your first step and include the next needed tool call in the same response so execution continues. The host forwards this opening reply to the same IM conversation. Finish with the actual deliverable; an opening acknowledgement does not complete the task."
@@ -158,6 +161,7 @@ export function buildBotPrompt(
   })()
   return [
     "## Persistent Bot context",
+    FILE_PRESENTATION,
     `Your stable Bot ID is ${JSON.stringify(bot.id)}; your current name is ${JSON.stringify(bot.name)}. User-configured role: ${JSON.stringify(bot.instructions)}. These current values supersede older identity descriptions in conversation history. Follow the Runtime's execution, approval and verification rules.`,
     source,
     workContext,
