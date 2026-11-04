@@ -6,6 +6,7 @@ import { performance } from "node:perf_hooks"
 import AdmZip from "adm-zip"
 import type { ElectronApplication, Page } from "playwright"
 import { startModsModelServer } from "./mods-model-server"
+import { allowModRequest } from "./mods-approval-inbox-e2e"
 import {
   readWindowsProcessIdentities,
   WindowsProcessQueryError
@@ -225,6 +226,7 @@ export async function verifyPackagedRuntime(
       ({ id, descriptor }) => window.api.mods.enqueue(id, descriptor, { text: "" }),
       { id: jobThread, descriptor }
     )
+    await allowModRequest(page, jobThread, "function:packaged-runtime-job")
     await until(
       async () =>
         (await page.evaluate((id) => window.api.mods.jobs(id), jobThread!)).some(

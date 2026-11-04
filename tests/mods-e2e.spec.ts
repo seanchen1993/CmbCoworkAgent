@@ -82,6 +82,7 @@ import { createRequire } from "node:module"
 import { _electron, type ElectronApplication, type Page } from "playwright"
 import { startModsModelServer } from "./support/mods-model-server"
 import { verifyPackagedFunctions } from "./support/mods-packaged-functions"
+import { allowModRequest } from "./support/mods-approval-inbox-e2e"
 import { verifyPackagedRuntime } from "./support/mods-packaged-runtime"
 import { verifyPackagedCommunityExamples } from "./support/mods-community-examples-e2e"
 import { createModsCoreLauncher } from "./support/mods-core-packaged-launch"
@@ -817,17 +818,12 @@ async function runMain(failures: unknown[]): Promise<void> {
       const approved = await page!.evaluate((id) => window.api.mods.status(id), threadId)
       assert(approved.mods.every((mod) => mod.state === "ready"))
       pass("packaged esbuild and QuickJS compile and validate both bundled examples")
-      await app.evaluate(({ dialog }) => {
-        dialog.showMessageBox = (async () => ({
-          response: 1,
-          checkboxChecked: false
-        })) as typeof dialog.showMessageBox
-      })
       await page!.reload({ waitUntil: "domcontentloaded" })
       await page!.getByText("Mods E2E", { exact: true }).first().click()
       await openModsResults(page!)
       await page!.locator("textarea.composer-textarea").fill("/mod project-quality:verify {}")
       await page!.locator("textarea.composer-textarea").press("Enter")
+      await allowModRequest(page!, threadId, "project-quality")
       await until(
         async () => existsSync(join(workspace, "verified.txt")),
         "packaged cold command writes through real native tool"

@@ -5,6 +5,7 @@ import { resolve } from "node:path"
 import { build } from "esbuild"
 import { chromium } from "playwright"
 import { ModApprovalInbox } from "../src/main/ipc/mods-approval-inbox"
+import { allowModRequest } from "./support/mods-approval-inbox-e2e"
 
 async function main() {
   const bundle = await build({
@@ -17,6 +18,7 @@ async function main() {
     const api={snapshot:()=>window.nativeSnapshot(),decide:input=>window.nativeDecision(input),
       resume:id=>window.nativeResume(id),onChanged:fn=>{window.addEventListener("approval-changed",fn);return()=>window.removeEventListener("approval-changed",fn)}};
     const root=createRoot(document.getElementById("root"));
+    window.api={mods:{approvalInbox:api}};
     window.replaceInboxApi=()=>root.render(<ModApprovalInbox api={{...api}}/>);
     root.render(<ModApprovalInbox api={api}/>);
   `
@@ -94,7 +96,7 @@ async function main() {
     await badge.click()
     await composer.fill("仍可继续输入")
     await page.screenshot({ path: "output/mods-approval-inbox/pending-nonmodal.png" })
-    await page.getByRole("button", { name: "允许本次命令" }).click()
+    await allowModRequest(page, scope.threadId, scope.modId)
     assert.deepEqual(await first, { response: 1 })
     const second = request()
     await page.getByRole("button", { name: "拒绝并暂停" }).click()
