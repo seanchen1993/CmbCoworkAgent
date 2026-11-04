@@ -79,14 +79,20 @@ async function main() {
     await page.evaluate("window.visibilityProbe.close();window.scrollTo(0,1200)")
     await page.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))))
     assert.equal(await page.evaluate("window.visibilityProbe.visible()"), false)
-    await page.evaluate(`window.scrollTo(0,0);window.transcriptProbe =
-      FunctionSiteVisibility.observeFunctionSiteVisibility(document.getElementById('transcript-site'))`)
+    await page.evaluate(`window.scrollTo(0,0);window.transcriptVisibilityChanges=0;window.transcriptProbe =
+      FunctionSiteVisibility.observeFunctionSiteVisibility(document.getElementById('transcript-site'),
+        () => { window.transcriptVisibilityChanges++ })`)
     assert.equal(await page.evaluate("window.transcriptProbe.visible()"), false)
     await page.evaluate("document.getElementById('transcript').scrollTop=400")
     await page.waitForFunction("window.transcriptProbe.visible()")
+    assert.equal(await page.evaluate("window.transcriptVisibilityChanges"), 1)
     await page.evaluate("document.getElementById('transcript').scrollTop=0")
     await page.waitForFunction("!window.transcriptProbe.visible()")
+    assert.equal(await page.evaluate("window.transcriptVisibilityChanges"), 2)
     await page.evaluate("window.transcriptProbe.close()")
+    await page.evaluate("document.getElementById('transcript').scrollTop=400")
+    await page.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))))
+    assert.equal(await page.evaluate("window.transcriptVisibilityChanges"), 2)
     console.log("PASS actual contents/ancestor-clipping/viewport scheduling geometry")
   } finally {
     await browser.close()

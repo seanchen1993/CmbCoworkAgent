@@ -738,6 +738,8 @@ jobs:
         timeout-minutes: 5
         shell: pwsh
         run: |
+          npx vitest run src/main/utils/current-utf8-file.test.ts src/main/storage-plugin-registry.test.ts src/renderer/src/lib/function-site-presentation.test.ts
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           npx vitest run src/renderer/src/lib/chat-plugin-selection.test.ts src/renderer/src/lib/chat-plugin-candidates.test.ts src/renderer/src/lib/function-site-queue.test.ts src/renderer/src/lib/chat-initial-presentation.test.ts src/renderer/src/lib/markdown-highlight.test.ts
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node --import tsx tests/mods-idle-refresh-browser.spec.ts

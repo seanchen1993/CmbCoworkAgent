@@ -1,6 +1,27 @@
 import { expect, it, vi } from "vitest"
 import { createFunctionSiteQueue, functionSitePriority } from "./function-site-queue"
 
+it("starts a newly visible row in the reserved slot without waiting for slow overscan reads", async () => {
+  const queue = createFunctionSiteQueue()
+  let release!: () => void
+  const gate = new Promise<void>(resolve => { release = resolve })
+  let started = 0, visible = false
+  const background = Array.from({ length: 3 }, () => queue.run(() => true, async () => {
+    started++
+    await gate
+  }, "background"))
+  const next = queue.run(() => true, async () => { started++; return "visible text" },
+    () => visible ? "visible" : "background")
+  expect(started).toBe(1)
+  visible = true
+  queue.refresh()
+  expect(await next).toBe("visible text")
+  expect(started).toBe(2)
+  release()
+  await Promise.all(background)
+  expect(started).toBe(4)
+})
+
 it("reads visible message bodies before queued elapsed-time labels without dropping labels", async () => {
   const queue = createFunctionSiteQueue()
   let release!: () => void
@@ -14,6 +35,29 @@ it("reads visible message bodies before queued elapsed-time labels without dropp
   release()
   await Promise.all([...active, ...labels, body])
   expect(started).toEqual(["body", "label-0", "label-1", "label-2"])
+})
+
+it("leaves three physical slots for visible text when overscan cannot finish", async () => {
+  const queue = createFunctionSiteQueue()
+  let release!: () => void
+  const gate = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  const started: string[] = []
+  const run = (name: string, priority: "background" | "visible") => queue.run(
+    () => true,
+    async () => {
+      started.push(name)
+      await gate
+    },
+    priority
+  )
+  const jobs = Array.from({ length: 5 }, (_, index) => run(`overscan-${index}`, "background"))
+  jobs.push(...Array.from({ length: 4 }, (_, index) => run(`text-${index}`, "visible")))
+  expect(started).toEqual(["overscan-0", "text-0", "text-1", "text-2"])
+  release()
+  await Promise.all(jobs)
+  expect(started).toHaveLength(9)
 })
 
 it("promotes newly visible rows and demotes rows scrolled away while waiting", async () => {

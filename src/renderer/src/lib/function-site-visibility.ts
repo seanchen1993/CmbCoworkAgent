@@ -49,7 +49,7 @@ const observations = new Map<Element, Set<(visible: boolean) => void>>()
 let observer: IntersectionObserver | undefined
 
 /** One observer for mounted sites; queued reads consult a boolean, never scroll-time layout. */
-export function observeFunctionSiteVisibility(element: HTMLElement | null) {
+export function observeFunctionSiteVisibility(element: HTMLElement | null, onChange?: () => void) {
   const row = element?.closest<HTMLElement>("[data-chat-message-row]")
   const viewport = row?.closest<HTMLElement>("[data-radix-scroll-area-viewport]")
   let visible = false
@@ -69,7 +69,11 @@ export function observeFunctionSiteVisibility(element: HTMLElement | null) {
   const view = element?.ownerDocument.defaultView
   while (!row && target && view?.getComputedStyle(target).display === "contents")
     target = target.parentElement
-  const changed = (value: boolean) => { visible = value }
+  const changed = (value: boolean) => {
+    if (visible === value) return
+    visible = value
+    onChange?.()
+  }
   if (target && typeof IntersectionObserver !== "undefined") {
     observer ??= new IntersectionObserver((entries) => {
       for (const entry of entries) {

@@ -1,18 +1,20 @@
 import type { FunctionUiSite } from "../../../shared/mods/v2/sites"
 
-type Priority = "ordinary" | "visible" | "interactive"
+type Priority = "ordinary" | "background" | "visible" | "interactive"
 
 export function functionSitePriority(component: FunctionUiSite, visible: boolean): Priority {
   if (["AbovePrompt", "PromptHint", "SessionMode", "Spinner", "AskUserQuestion"].includes(component))
     return "interactive"
   // Transcript text takes precedence over optional elapsed-time labels during scrolling.
-  return component !== "TurnDuration" && visible ? "visible" : "ordinary"
+  return component !== "TurnDuration" && visible ? "visible" : "background"
 }
 
 /** Bounds UI-only IPC across virtualized rows; native tools and permission requests never use it. */
 export function createFunctionSiteQueue() {
   let active = 0
   let activeInteractive = 0
+  let activeBackground = 0
+  let refreshQueued = false
   let interactiveStreak = 0
   let visibleStreak = 0
   const pending: Array<{
@@ -28,26 +30,22 @@ export function createFunctionSiteQueue() {
     for (const entry of pending)
       if (entry.readPriority) entry.priority = entry.readPriority()
     while (active < 4 && pending.length) {
-      const interactive = pending.findIndex((entry) => entry.priority === "interactive")
+      const interactive = activeInteractive < 3
+        ? pending.findIndex((entry) => entry.priority === "interactive") : -1
       const visible = pending.findIndex((entry) => entry.priority === "visible")
-      const ordinary = pending.findIndex((entry) => entry.priority === "ordinary")
+      // Speculative overscan and elapsed-time reads share one lane. During a thumb
+      // drag they often expire before publication; do not let them occupy the three
+      // slots needed by the newly visible text and composer.
+      const ordinary = pending.findIndex((entry) => entry.priority === "ordinary" ||
+        (entry.priority === "background" && activeBackground < 1))
       const history = visible >= 0 && (visibleStreak < 2 || ordinary < 0) ? visible : ordinary
+      if (interactive < 0 && history < 0) break
       const index =
         interactive >= 0 && (interactiveStreak < 2 || history < 0)
           ? interactive
           : history >= 0
             ? history
             : 0
-      // Slow optional decorations must leave a physical slot for transcript content.
-      // Keep the original four-request ceiling, including stale work still in flight.
-      if (pending[index].priority === "interactive" && activeInteractive >= 3) {
-        if (history < 0) break
-        const [entry] = pending.splice(history, 1)
-        visibleStreak = entry.priority === "visible" ? visibleStreak + 1 : 0
-        interactiveStreak = 0
-        entry.start()
-        continue
-      }
       const [entry] = pending.splice(index, 1)
       interactiveStreak = entry.priority === "interactive" ? interactiveStreak + 1 : 0
       // A visible backlog cannot starve overscan forever; composer fairness is independent.
@@ -57,6 +55,14 @@ export function createFunctionSiteQueue() {
     }
   }
   return {
+    refresh(): void {
+      if (refreshQueued) return
+      refreshQueued = true
+      queueMicrotask(() => {
+        refreshQueued = false
+        pump()
+      })
+    },
     run<T>(
       current: () => boolean,
       work: () => Promise<T>,
@@ -85,13 +91,16 @@ export function createFunctionSiteQueue() {
             }
             active++
             const interactive = entry.priority === "interactive"
+            const background = entry.priority === "background"
             if (interactive) activeInteractive++
+            if (background) activeBackground++
             // Preserve even a late mount token: the caller must unmount it when its ticket expired.
             void (async () => work())()
               .then(resolve, reject)
               .finally(() => {
                 active--
                 if (interactive) activeInteractive--
+                if (background) activeBackground--
                 pump()
               })
           }

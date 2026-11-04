@@ -325,9 +325,9 @@ export class FunctionSitePresentationCache {
     }
     if (heights.length < 3) return
     heights.sort((a, b) => a - b)
-    // A cold estimate must not fill several screens with one unresolved row.
-    // Exact per-row measurements above remain uncapped.
-    return Math.min(480, heights[Math.floor(heights.length / 2)])
+    // Keep the observed height: truncating tall placeholders makes the virtual scroll
+    // position jump again as soon as their protected body arrives.
+    return heights[Math.floor(heights.length / 2)]
   }
 
   measuredHeight(key: string | null, layoutWidth: number): number | undefined {

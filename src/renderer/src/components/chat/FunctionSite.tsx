@@ -529,7 +529,7 @@ function FunctionSiteSurface({
   useEffect(() => {
     live.current = true
     const lifetime = new FunctionSiteLifetime()
-    const siteVisibility = observeFunctionSiteVisibility(section.current)
+    const siteVisibility = observeFunctionSiteVisibility(section.current, () => functionSiteQueue.refresh())
     lifetimeRef.current = lifetime
     let stopped = false
     let owner: string | null = null

@@ -54,7 +54,7 @@ it("estimates only neutral cold-row geometry from current same-width message mea
   for (let index = 0; index < 3; index++)
     cache.measure(key(`tall-${index}`), "AssistantMessage",
       { height: 5000, width: 700, layoutWidth: 700 })
-  expect(cache.placeholderHeight(cold, "AssistantMessage", 700)).toBe(480)
+  expect(cache.placeholderHeight(cold, "AssistantMessage", 700)).toBe(5000)
   cache.measure(cold, "AssistantMessage", { height: 1500, width: 600, layoutWidth: 600 })
   expect(cache.placeholderHeight(cold, "AssistantMessage", 600)).toBe(1500)
   authorized = false

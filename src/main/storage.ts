@@ -39,6 +39,7 @@ import {
 import type { AgentAutoCommitSettings, AgentAutoCommitWorkspaceCard } from "./types"
 import { normalizeWorkspacePathKey } from "../shared/workspace-path"
 import { normalizeWindowCloseBehavior, type WindowCloseBehavior } from "../shared/close-to-tray"
+import { CurrentUtf8File } from "./utils/current-utf8-file"
 import { readdir, rm, mkdir, readFile, writeFile } from "fs/promises"
 import {
   isAgentGraphRecursionLimit,
@@ -3246,6 +3247,7 @@ export async function saveBrowserCdpConfigAsync(
 
 const PLUGINS_DIR = join(OPENWORK_DIR, "plugins")
 const PLUGINS_FILE = join(OPENWORK_DIR, "plugins.json")
+const pluginRegistryFile = new CurrentUtf8File(PLUGINS_FILE)
 const SKILL_HOOKS_FILE = "hooks.json"
 const SKILL_HOOKS_FOLDER_FILE = "hooks/hooks.json"
 const SKILL_HOOKS_FILES = [SKILL_HOOKS_FILE, SKILL_HOOKS_FOLDER_FILE] as const
@@ -3277,9 +3279,9 @@ export function getInstalledPluginIds(): ReadonlySet<string> {
 
 export function getPlugins(): PluginMetadata[] {
   try {
-    // Authority readers need current bytes on every call. A successful read already proves
-    // existence; do not add two filesystem probes to every native source/owner check.
-    const content = readFileSync(PLUGINS_FILE, "utf-8")
+    // Every authority check still reads current bytes. Reuse only the open descriptor
+    // during nested synchronous guards, avoiding repeated Windows file-open overhead.
+    const content = pluginRegistryFile.read()
     const parsed = JSON.parse(content) as unknown
     if (!Array.isArray(parsed)) return []
     return parsed.filter(
