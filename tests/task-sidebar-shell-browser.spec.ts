@@ -191,6 +191,7 @@ async function main() {
         ).shellFixture
         fixture[`${mode}Fullscreen`](true)
       }, mode)
+      await page.waitForFunction("window.shellFixture.fullscreen().includes(true)")
       assert(
         ((await page.evaluate("window.shellFixture.fullscreen()")) as boolean[]).includes(true)
       )

@@ -748,6 +748,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node --import tsx tests/mods-presentation-layout-performance-browser.spec.ts
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node --import tsx tests/task-sidebar-shell-browser.spec.ts
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node --import tsx tests/chat-plugin-controls-browser.spec.ts
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node --import tsx tests/git-branch-switcher-browser.spec.ts

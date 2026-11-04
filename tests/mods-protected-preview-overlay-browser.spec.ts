@@ -61,6 +61,7 @@ async function fixture(page: Page, module = "claw", collapsed = false, focused =
         const [focus,setFocus]=useState(${JSON.stringify(focused)}),[thread,setThread]=useState('thread');
         window.overlayFixture={ready:()=>ready,facts,focus:setFocus,thread:setThread,
           manual:mode=>openResourcePanelOverlay(mode),
+          module:()=>useAppStore.getState().rightModule,
           source:()=>({mounts:sourceMounts,unmounts:sourceUnmounts}),
           old:()=>emitOpenResourcePreview({threadId:'thread',filePath:'C:/workspace/old.txt'}),
           invalidate:()=>{for(const fn of invalidated)fn({threadId:'thread',receipt:'actual-native-receipt'})}};
@@ -146,13 +147,24 @@ async function main() {
     pass("existing resource-preview events use the same corrected Claw overlay route")
 
     await fixture(page)
-    for (const [mode, title] of [["preview", "文件预览"], ["browser", "内置浏览器"], ["git", "Git 面板"]]) {
+    for (const mode of ["preview", "browser", "git"]) {
       await page.evaluate((value) => Reflect.get(window, "overlayFixture").manual(value), mode)
-      await page.getByRole("dialog", { name: title, exact: true }).waitFor()
-      await page.evaluate("window.overlayFixture.invalidate()")
-      assert(await page.getByRole("dialog", { name: title, exact: true }).isVisible())
+      await page.waitForFunction((value) => Reflect.get(window, "overlayFixture").module() === value, mode)
+      assert.equal(await page.getByRole("dialog").count(), 0)
+      assert.deepEqual(await page.evaluate("window.overlayFixture.source()"), { mounts: 1, unmounts: 0 })
     }
-    pass("explicit preview, browser and Git drawers remain open without a protected request")
+    pass("explicit module navigation updates the native sidebar selection without an overlay or unmounting the task portal")
+
+    for (const [collapsed, focused] of [[true, false], [false, true]]) {
+      await fixture(page, "claw", collapsed, focused)
+      for (const [mode, title] of [["preview", "文件预览"], ["browser", "内置浏览器"], ["git", "Git 面板"]]) {
+        await page.evaluate((value) => Reflect.get(window, "overlayFixture").manual(value), mode)
+        await page.getByRole("dialog", { name: title, exact: true }).waitFor()
+        await page.evaluate("window.overlayFixture.invalidate()")
+        assert(await page.getByRole("dialog", { name: title, exact: true }).isVisible())
+      }
+    }
+    pass("collapsed/focused explicit preview, browser and Git drawers remain open without a protected request")
 
     await fixture(page, "work")
     await page.getByRole("link", { name: "Workspace report", exact: true }).click()
