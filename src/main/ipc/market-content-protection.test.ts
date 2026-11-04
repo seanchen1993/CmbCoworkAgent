@@ -1,4 +1,5 @@
 import AdmZip from "adm-zip"
+import { execFileSync } from "node:child_process"
 import {
   existsSync,
   mkdirSync,
@@ -209,7 +210,7 @@ describe("market content IPC regression", () => {
       storage.getEnabledPluginHookMetadata().some((hook) => hook.command === "echo private-hook")
     ).toBe(true)
     const mcp = storage.getEnabledPluginMcpConfigs()[`plugin:${plugin.id}/local`]
-    expect(mcp.args?.[0]).toBe(join(plugin.path, "run.cjs"))
+    expect(mcp.args?.[0]).not.toBe(join(plugin.path, "run.cjs"))
     expect(readFileSync(mcp.args![0], "utf8")).toBe("console.log('working')")
     for (const [channel, payload] of [
       ["plugins:listFiles", plugin.id],
@@ -272,6 +273,83 @@ describe("market content IPC regression", () => {
     expect(copied.error).toContain("受保护")
     expect(existsSync(skill.path)).toBe(true)
   })
+
+  it.each(["plugin", "skill"])(
+    "keeps workspace reports plain when a market %s script copies Markdown templates",
+    async (kind) => {
+      const { LocalSandbox } = await import("../agent/local-sandbox")
+      const name = `markdown-output-${kind}`
+      const zip = new AdmZip()
+      zip.addFile("SKILL.md", Buffer.from(original(name)))
+      zip.addFile("template.md", Buffer.from("# 工作报告\n模板内容\n"))
+      zip.addFile(
+        "run.cjs",
+        Buffer.from(`const fs = require("node:fs"), path = require("node:path")
+fs.copyFileSync(path.join(__dirname, "template.md"), path.join(process.cwd(), "copied.md"))
+fs.writeFileSync(path.join(process.cwd(), "rendered.md"), fs.readFileSync(path.join(__dirname, "template.md"), "utf8") + "Result")
+if (process.env.PLUGIN_ROOT) fs.copyFileSync(path.join(process.env.PLUGIN_ROOT, "template.md"), path.join(process.cwd(), "env.md"))`)
+      )
+      if (kind === "plugin") {
+        zip.addFile("plugin.json", Buffer.from(JSON.stringify({ name })))
+        zip.addFile(
+          ".mcp.json",
+          Buffer.from(
+            JSON.stringify({
+              mcpServers: {
+                local: {
+                  command: process.execPath,
+                  args: ["./run.cjs"],
+                  env: { PLUGIN_ROOT: "${PLUGIN_ROOT}" }
+                }
+              }
+            })
+          )
+        )
+      }
+      const installed = await invoke(kind === "plugin" ? "plugins:install" : "skills:upload", {
+        buffer: bytes(zip.toBuffer()),
+        fileName: `${name}.zip`,
+        ...(kind === "plugin" ? { origin: "market" } : { options: { origin: "market" } })
+      })
+      expect(installed.success, installed.error).toBe(true)
+      const plugin = storage.getPlugins().find((item) => item.name === name)
+      const root = plugin?.path ?? join(storage.getCustomSkillsDir(), name)
+      const workspace = join(home, `${name}-workspace`)
+      mkdirSync(workspace)
+      const sandbox = new LocalSandbox({
+        rootDir: workspace,
+        runId: name,
+        windowsSandbox: "none",
+        ...(plugin ? { pluginRoot: plugin.path } : {})
+      })
+      const prefix = /(?:pwsh|powershell)(?:\.exe)?$/i.test(LocalSandbox.resolvedShell())
+        ? "& "
+        : ""
+      const result = await sandbox.executeRaw(
+        `${prefix}"${process.execPath}" "${join(root, "run.cjs")}"`
+      )
+      expect(result.exitCode, result.output).toBe(0)
+      expect(readFileSync(join(workspace, "copied.md"), "utf8")).toBe("# 工作报告\n模板内容\n")
+      expect(readFileSync(join(workspace, "rendered.md"), "utf8")).toBe(
+        "# 工作报告\n模板内容\nResult"
+      )
+      if (plugin) {
+        expect(readFileSync(join(workspace, "env.md"), "utf8")).toBe("# 工作报告\n模板内容\n")
+        const mcpWorkspace = join(home, `${name}-mcp-workspace`)
+        mkdirSync(mcpWorkspace)
+        const mcp = storage.getEnabledPluginMcpConfigs()[`plugin:${plugin.id}/local`]
+        execFileSync(mcp.command!, mcp.args!, {
+          cwd: mcpWorkspace,
+          env: { ...process.env, ...mcp.env }
+        })
+        expect(readFileSync(join(mcpWorkspace, "copied.md"), "utf8")).toBe("# 工作报告\n模板内容\n")
+        expect(readFileSync(join(mcpWorkspace, "env.md"), "utf8")).toBe("# 工作报告\n模板内容\n")
+      }
+      expect(readFileSync(join(root, "template.md"), "utf8")).toContain(MARKET_CONTENT_PREFIX)
+      expect(readFileSync(join(root, "run.cjs"), "utf8")).not.toContain(MARKET_CONTENT_PREFIX)
+    },
+    60_000
+  )
 
   it("permits original plugin evolution before any standalone skill is installed", async () => {
     const customDir = storage.getCustomSkillsDir()
@@ -362,13 +440,13 @@ describe("market content IPC regression", () => {
     ).toBe(false)
   })
 
-  it("executes hooks from the installed directory with their original resource paths", async () => {
+  it("lets hooks copy decoded Markdown into the workspace via environment and payload paths", async () => {
     const { runHooks } = await import("../hooks/runner")
     const root = mkdtempSync(join(home, "hook-runtime-"))
-    writeFileSync(join(root, "notes.txt"), "hook-runtime-secret")
+    writeFileSync(join(root, "notes.md"), "hook-runtime-secret")
     writeFileSync(
       join(root, "hook.cjs"),
-      `const fs = require("fs"), path = require("path"); let input = ""; process.stdin.on("data", value => input += value); process.stdin.on("end", () => { const payload = JSON.parse(input); console.log(fs.readFileSync(path.join(process.env.PLUGIN_ROOT, "notes.txt"), "utf8")); console.log(fs.readFileSync(path.join(payload.plugin_root, "notes.txt"), "utf8")); });`
+      `const fs = require("fs"), path = require("path"); let input = ""; process.stdin.on("data", value => input += value); process.stdin.on("end", () => { const payload = JSON.parse(input); fs.copyFileSync(path.join(process.env.PLUGIN_ROOT, "notes.md"), path.join(process.cwd(), "hook-env.md")); fs.copyFileSync(path.join(payload.plugin_root, "notes.md"), path.join(process.cwd(), "hook-payload.md")); console.log(fs.readFileSync(path.join(__dirname, "notes.md"), "utf8")); });`
     )
     protectMarketDirectory(root)
     let hookOutput = ""
@@ -392,7 +470,10 @@ describe("market content IPC regression", () => {
       }
     )
     expect(result?.exitCode, result?.stderr).toBe(0)
-    expect(hookOutput.match(/hook-runtime-secret/g)).toHaveLength(2)
+    expect(hookOutput).toContain("hook-runtime-secret")
+    expect(readFileSync(join(home, "hook-env.md"), "utf8")).toBe("hook-runtime-secret")
+    expect(readFileSync(join(home, "hook-payload.md"), "utf8")).toBe("hook-runtime-secret")
+    expect(readFileSync(join(root, "notes.md"), "utf8")).toContain(MARKET_CONTENT_PREFIX)
     expect(readFileSync(join(root, "hook.cjs"), "utf8")).not.toContain(MARKET_CONTENT_PREFIX)
   })
 
