@@ -37,9 +37,12 @@ export function installChatDetachedLayoutAnchor({
   const enabled = (): boolean => {
     const next = readLease()
     const navigating = isChatScrollNavigationActive(viewport)
-    if (next !== lease || next === null || navigating) anchor = null
+    // At the absolute head the history boundary owns the position. Anchoring a later
+    // readable row while earlier protected rows expand would scroll that boundary away.
+    const atHead = viewport.scrollTop <= 0.5
+    if (next !== lease || next === null || navigating || atHead) anchor = null
     lease = next
-    return next !== null && !navigating && root.isConnected && viewport.isConnected
+    return next !== null && !navigating && !atHead && root.isConnected && viewport.isConnected
   }
   const sampleAnchor = (): VisibleAnchor | null => {
     const bounds = viewport.getBoundingClientRect()

@@ -733,12 +733,14 @@ jobs:
 
       # Validate the exact Windows package produced above; do not rebuild or install the app here.
       # A failed check blocks uploads/release. Linux keeps its existing native/GLIBC checks.
-      - name: Verify chat display and inline Mods controls (Windows)
+      - name: Verify chat display, plugin installation and inline Mods controls (Windows)
         if: matrix.platform == 'win'
         timeout-minutes: 5
         shell: pwsh
         run: |
-          npx vitest run src/main/utils/current-utf8-file.test.ts src/main/storage-plugin-registry.test.ts src/renderer/src/lib/function-site-presentation.test.ts
+          npx vitest run src/main/storage-plugin-registry.test.ts src/renderer/src/lib/function-site-presentation.test.ts
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node --import tsx tests/mods-authoring-install-runtime.spec.ts
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           npx vitest run src/renderer/src/lib/chat-plugin-selection.test.ts src/renderer/src/lib/chat-plugin-candidates.test.ts src/renderer/src/lib/function-site-queue.test.ts src/renderer/src/lib/chat-initial-presentation.test.ts src/renderer/src/lib/markdown-highlight.test.ts
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -749,6 +751,8 @@ jobs:
           node --import tsx tests/chat-plugin-controls-browser.spec.ts
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node --import tsx tests/mods-site-visibility-browser.spec.ts
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node --import tsx tests/chat-detached-head-browser.spec.ts
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node --import tsx tests/chat-highlight-performance.spec.ts
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

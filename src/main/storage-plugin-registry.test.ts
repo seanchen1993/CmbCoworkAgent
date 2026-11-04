@@ -33,17 +33,11 @@ async function fixture(present = true) {
   const original = await vi.importActual<typeof import("fs")>("fs")
   const read = vi.fn(original.readFileSync),
     exists = vi.fn(original.existsSync)
-  const readBytes = vi.fn(original.readSync),
-    open = vi.fn(original.openSync),
-    stat = vi.fn(original.statSync)
   const create = vi.fn(original.mkdirSync)
   vi.resetModules()
   vi.doMock("fs", () => ({
     ...original,
     readFileSync: read,
-    readSync: readBytes,
-    openSync: open,
-    statSync: stat,
     existsSync: exists,
     mkdirSync: create
   }))
@@ -51,16 +45,29 @@ async function fixture(present = true) {
   read.mockClear()
   exists.mockClear()
   create.mockClear()
-  return { home, file, storage, read, readBytes, open, stat, exists, create }
+  return { home, file, storage, read, exists, create }
 }
 const plugin = { id: "original-id", name: "original", path: "C:/original", enabled: true }
+
+it("allows atomic catalog replacement immediately after an authority read", async () => {
+  const f = await fixture()
+  await writeFile(f.file, JSON.stringify([plugin]))
+  const { PluginCatalogIndex } = await import("./plugins/catalog-index")
+  const index = new PluginCatalogIndex(f.file)
+  const before = index.capture()
+  const next = { ...plugin, path: "C:/replacement" }
+  // No async boundary: a retained reader would lock the Windows rename target.
+  expect(f.storage.getPlugins()).toEqual([plugin])
+  index.replace(before, JSON.stringify([next]))
+  expect(f.storage.getPlugins()).toEqual([next])
+})
 
 it("reads current registry bytes on every successful call without redundant existence probes", async () => {
   const f = await fixture()
   await writeFile(f.file, JSON.stringify([plugin]))
   for (let index = 0; index < 100; index++) expect(f.storage.getPlugins()).toEqual([plugin])
-  expect(f.readBytes.mock.calls.length).toBeGreaterThanOrEqual(100)
-  expect(f.open.mock.calls.filter(([path]) => path === f.file)).toHaveLength(1)
+  expect(f.read).toHaveBeenCalledTimes(100)
+  expect(f.read.mock.calls.every(([path]) => path === f.file)).toBe(true)
   expect(f.exists).not.toHaveBeenCalled()
   expect(f.create).not.toHaveBeenCalled()
 })
@@ -75,7 +82,7 @@ it("observes enablement changes, same-length UUID replacement and removal on the
   expect(f.storage.getPlugins()).toEqual([])
   await writeFile(f.file, JSON.stringify([plugin]))
   expect(f.storage.getPlugins()).toEqual([plugin])
-  expect(f.stat.mock.calls.filter(([path]) => path === f.file).length).toBeGreaterThanOrEqual(5)
+  expect(f.read).toHaveBeenCalledTimes(5)
 })
 
 it("preserves permissive display filtering while strict reconciliation still rejects unreadable inventory", async () => {
@@ -94,7 +101,7 @@ it("creates only the original missing home after a failed read and never invents
   const f = await fixture(false)
   expect(f.storage.getPlugins()).toEqual([])
   expect(f.create).toHaveBeenCalledWith(f.home, { recursive: true })
-  expect(f.stat).toHaveBeenCalledWith(f.file, { bigint: true })
+  expect(f.read).toHaveBeenCalledWith(f.file, "utf-8")
   expect(() => f.storage.getInstalledPluginIds()).toThrow()
 })
 
@@ -105,7 +112,7 @@ it("keeps directory and unreadable registry failures empty without weakening roo
   await rm(f.file, { recursive: true })
   await writeFile(f.file, "[]")
   const denied = Object.assign(Error("fixture registry denied"), { code: "EACCES" })
-  f.readBytes.mockImplementationOnce(() => {
+  f.read.mockImplementationOnce(() => {
     throw denied
   })
   expect(f.storage.getPlugins()).toEqual([])
