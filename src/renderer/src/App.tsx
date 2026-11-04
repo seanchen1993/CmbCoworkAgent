@@ -25,7 +25,6 @@ import {
   PanelLeftOpen,
   PanelRightClose,
   PanelRightOpen,
-  Palette,
   Workflow
 } from "lucide-react"
 import { ThreadSidebar } from "@/components/sidebar/ThreadSidebar"
@@ -37,6 +36,7 @@ import { useRightPanelLayout } from "@/components/panels/useRightPanelLayout"
 import { WorkerStreamPanel } from "@/components/chat/WorkerStreamPanel"
 import { SubagentStreamPanel } from "@/components/chat/SubagentStreamPanel"
 import { WorkflowAgentStreamPanel } from "@/components/chat/WorkflowAgentStreamPanel"
+import { ProductModeNavigation } from "@/components/requirement/ProductModeNavigation"
 const KanbanView = lazy(() =>
   import("@/components/kanban").then((m) => ({ default: m.KanbanView }))
 )
@@ -76,6 +76,7 @@ import { openResourcePanelOverlay } from "@/lib/resource-panel-overlay-events"
 import { PetStateBridge } from "@/components/pet/PetStateBridge"
 import { DEFAULT_BROWSER_CDP_CONFIG, useAppStore } from "@/lib/store"
 import {
+  REQUIREMENT_CONVERSATION_ENTRY_KEY,
   REQUIREMENT_CONVERSATION_NAVIGATE_EVENT,
   REQUIREMENT_DESIGN_NAVIGATE_EVENT
 } from "@/lib/requirement-design-entry"
@@ -409,27 +410,41 @@ function App(): React.JSX.Element {
   const sidebarToggleText = sidebarCollapsed ? "显示侧边栏" : "隐藏侧边栏"
   const rightPanelToggleText = rightPanelCollapsed ? "显示右侧面板" : "隐藏右侧面板"
   const projectModeEnabled = true
-  const [activeModeTab, setActiveModeTab] = useState<"design" | "requirements">("design")
+  const [activeModeTab, setActiveModeTab] = useState<"design" | "requirements">("requirements")
+  const [productEntryKey, setProductEntryKey] = useState(0)
+  const [openDesignGallery, setOpenDesignGallery] = useState(false)
+  const [productNavigationVisible, setProductNavigationVisible] = useState(true)
   const selectDesignProjectMode = useCallback(() => {
     if (!projectModeEnabled) return
     setMainView("harness")
   }, [projectModeEnabled, setMainView])
-  const selectDesignHistory = useCallback(() => {
-    setActiveModeTab("design")
-    setMainView("design")
-  }, [setMainView])
-
   const selectRequirementHistory = useCallback(() => {
+    localStorage.removeItem(REQUIREMENT_CONVERSATION_ENTRY_KEY)
+    setProductNavigationVisible(true)
+    setProductEntryKey((current) => current + 1)
     setActiveModeTab("requirements")
     setMainView("design")
   }, [setMainView])
+  const selectProductModeTab = useCallback((tab: "design" | "requirements") => {
+    setProductNavigationVisible(true)
+    if (tab === "design") {
+      setOpenDesignGallery(true)
+    } else {
+      localStorage.removeItem(REQUIREMENT_CONVERSATION_ENTRY_KEY)
+      setProductEntryKey((current) => current + 1)
+    }
+    setActiveModeTab(tab)
+  }, [])
 
   useEffect(() => {
     const navigateToDesign = (): void => {
+      setProductNavigationVisible(false)
+      setOpenDesignGallery(false)
       setActiveModeTab("design")
       setMainView("design")
     }
     const navigateToRequirement = (): void => {
+      setProductNavigationVisible(false)
       setActiveModeTab("requirements")
       setMainView("design")
     }
@@ -1143,30 +1158,14 @@ function App(): React.JSX.Element {
               <button
                 type="button"
                 role="tab"
-                aria-selected={mainView === "design" && activeModeTab === "design"}
-                onClick={selectDesignHistory}
-                className={`${panelToggleBaseClass} ${
-                  mainView === "design" && activeModeTab === "design"
-                    ? moduleActiveClass
-                    : moduleInactiveClass
-                }`}
-              >
-                <Palette size={16} className="shrink-0" strokeWidth={1.8} />
-                <span>设计模式</span>
-              </button>
-              <button
-                type="button"
-                role="tab"
-                aria-selected={mainView === "design" && activeModeTab === "requirements"}
+                aria-selected={mainView === "design"}
                 onClick={selectRequirementHistory}
                 className={`${panelToggleBaseClass} ${
-                  mainView === "design" && activeModeTab === "requirements"
-                    ? moduleActiveClass
-                    : moduleInactiveClass
+                  mainView === "design" ? moduleActiveClass : moduleInactiveClass
                 }`}
               >
                 <ClipboardList size={16} className="shrink-0" strokeWidth={1.8} />
-                <span>需求模式</span>
+                <span>产品模式</span>
               </button>
             </div>
           </div>
@@ -1422,29 +1421,41 @@ function App(): React.JSX.Element {
                   </>
                 )}
               </div>
-          ) : null}
+            ) : null}
 
-          {renderedMainView === "design" && (
-            <div className="relative flex flex-1 overflow-hidden bg-grid-subtle">
-              <main className="relative flex flex-1 flex-col min-w-0 overflow-hidden">
-                <Suspense
-                  fallback={
-                    <div className="flex flex-1 items-center justify-center">
-                      <Loader2 className="size-6 animate-spin text-muted-foreground" />
-                    </div>
-                  }
-                >
-                  {activeModeTab === "requirements" ? (
-                    <RequirementEntryView />
-                  ) : (
-                    <DesignModeEntryView />
-                  )}
-                </Suspense>
-              </main>
-            </div>
-          )}
+            {renderedMainView === "design" && (
+              <div className="relative flex flex-1 overflow-hidden bg-grid-subtle">
+                <main className="relative flex flex-1 flex-col min-w-0 overflow-hidden">
+                  {productNavigationVisible ? (
+                    <ProductModeNavigation
+                      activeTab={activeModeTab}
+                      onTabChange={selectProductModeTab}
+                    />
+                  ) : null}
+                  <Suspense
+                    fallback={
+                      <div className="flex flex-1 items-center justify-center">
+                        <Loader2 className="size-6 animate-spin text-muted-foreground" />
+                      </div>
+                    }
+                  >
+                    {activeModeTab === "requirements" ? (
+                      <RequirementEntryView
+                        key={productEntryKey}
+                        onListVisibilityChange={setProductNavigationVisible}
+                      />
+                    ) : (
+                      <DesignModeEntryView
+                        initialScreen={openDesignGallery ? "gallery" : "restore"}
+                        onListVisibilityChange={setProductNavigationVisible}
+                      />
+                    )}
+                  </Suspense>
+                </main>
+              </div>
+            )}
 
-          {/* Dashboard 面板 */}
+            {/* Dashboard 面板 */}
             {renderedMainView === "dashboard" && dashboardAllowed === true && (
               <div className="relative flex flex-1 overflow-hidden bg-grid-subtle">
                 {!sidebarCollapsed && (
@@ -1479,21 +1490,21 @@ function App(): React.JSX.Element {
                 ref={isHarnessAgentFocusActive ? workerSplitRef : rightPanelSplitRef}
                 className="relative flex flex-1 overflow-hidden bg-grid-subtle"
               >
-              {!sidebarCollapsed && !isHarnessAgentFocusActive && (
-                <>
-                  <div
-                    id="harness-sidebar-portal"
-                    data-app-route-control
-                    style={{ width: leftWidth }}
-                    className={
-                      browserFullscreen
-                        ? "hidden"
-                        : "relative z-[60] flex h-full min-h-0 shrink-0 flex-col"
-                    }
-                  />
-                  {!browserFullscreen && <ResizeHandle onDrag={handleLeftResize} />}
-                </>
-              )}
+                {!sidebarCollapsed && !isHarnessAgentFocusActive && (
+                  <>
+                    <div
+                      id="harness-sidebar-portal"
+                      data-app-route-control
+                      style={{ width: leftWidth }}
+                      className={
+                        browserFullscreen
+                          ? "hidden"
+                          : "relative z-[60] flex h-full min-h-0 shrink-0 flex-col"
+                      }
+                    />
+                    {!browserFullscreen && <ResizeHandle onDrag={handleLeftResize} />}
+                  </>
+                )}
                 <main
                   ref={isHarnessAgentFocusActive ? undefined : rightPanelMainRef}
                   key="harness-main"

@@ -1420,16 +1420,25 @@ function injectIntoIframe(iframe: HTMLIFrameElement | null, script: string) {
 // Main Component
 // ─────────────────────────────────────────────────────────
 
-export function DesignView(): React.JSX.Element {
+export function DesignView({
+  initialScreen = "restore",
+  onListVisibilityChange
+}: {
+  initialScreen?: "gallery" | "restore"
+  onListVisibilityChange?: (visible: boolean) => void
+}): React.JSX.Element {
   // ── Session / gallery state ───────────────────────────────
   const requirementDesignPending = Boolean(localStorage.getItem(REQUIREMENT_DESIGN_ENTRY_KEY))
   const [sessionIndex, setSessionIndex] = useState<SessionMeta[]>(() => loadIndex())
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(
-    () => (requirementDesignPending ? null : localStorage.getItem(SESSION_LAST_KEY) ?? null)
+    () =>
+      initialScreen === "gallery" || requirementDesignPending
+        ? null
+        : localStorage.getItem(SESSION_LAST_KEY) ?? null
   )
 
   const [_init] = useState<ReturnType<typeof loadSessionById>>(() => {
-    if (requirementDesignPending) return defaultSession()
+    if (initialScreen === "gallery" || requirementDesignPending) return defaultSession()
     const sid = localStorage.getItem(SESSION_LAST_KEY)
     return sid ? loadSessionById(sid) : defaultSession()
   })
@@ -1454,8 +1463,16 @@ export function DesignView(): React.JSX.Element {
   const [workspaceLoading, setWorkspaceLoading] = useState(false)
   // Open the creation workspace when there is no editor session to restore.
   const [creationPageOpen, setCreationPageOpen] = useState(
-    () => !requirementDesignPending && !localStorage.getItem(SESSION_LAST_KEY)
+    () =>
+      initialScreen !== "gallery" &&
+      !requirementDesignPending &&
+      !localStorage.getItem(SESSION_LAST_KEY)
   )
+  useEffect(() => {
+    onListVisibilityChange?.(
+      sessionReady && !sessionOpening && !creationPageOpen && currentSessionId === null
+    )
+  }, [creationPageOpen, currentSessionId, onListVisibilityChange, sessionOpening, sessionReady])
   const [codeModalOpen, setCodeModalOpen] = useState(false)
   const [linkModalOpen, setLinkModalOpen] = useState(false)
   const [linkModalText, setLinkModalText] = useState("")

@@ -80,7 +80,9 @@ function fromRequirementSpaceItem(
         description: "",
         file: "",
         currentStep: 5,
-        needDesign: ""
+        needDesign: "",
+        htmlFile: "",
+        htmlId: ""
       },
       functions: []
     },
@@ -94,7 +96,11 @@ function fromRequirementSpaceItem(
   }
 }
 
-export function RequirementEntryView(): React.JSX.Element {
+export function RequirementEntryView({
+  onListVisibilityChange
+}: {
+  onListVisibilityChange?: (visible: boolean) => void
+}): React.JSX.Element {
   const [screen, setScreen] = useState<EntryScreen>("history")
   const [selectedRequirement, setSelectedRequirement] = useState<RequirementRecord | null>(null)
   const [selectedRequirementThreadId, setSelectedRequirementThreadId] = useState<string | null>(
@@ -118,6 +124,10 @@ export function RequirementEntryView(): React.JSX.Element {
   const createThread = useAppStore((state) => state.createThread)
   const deleteThread = useAppStore((state) => state.deleteThread)
   const selectThread = useAppStore((state) => state.selectThread)
+
+  useEffect(() => {
+    onListVisibilityChange?.(screen === "history")
+  }, [onListVisibilityChange, screen])
 
   const loadRequirements = useCallback(async (): Promise<RequirementRecord[]> => {
     // 需求列表与系统列表并行加载，互不影响
@@ -174,20 +184,17 @@ export function RequirementEntryView(): React.JSX.Element {
         setRequirements(nextRequirements)
         const returnRequirementId = localStorage.getItem(REQUIREMENT_CONVERSATION_ENTRY_KEY)
         localStorage.removeItem(REQUIREMENT_CONVERSATION_ENTRY_KEY)
-        const firstLocalRequirement =
-          nextRequirements.find((item) => item.origin !== "space") ?? null
-        const initialRequirement =
-          nextRequirements.find((item) => item.id === returnRequirementId) ?? firstLocalRequirement
-        if (returnRequirementId && initialRequirement?.id !== returnRequirementId) {
+        const initialRequirement = returnRequirementId
+          ? (nextRequirements.find((item) => item.id === returnRequirementId) ?? null)
+          : null
+        if (returnRequirementId && !initialRequirement) {
           toast.error("未找到关联的需求会话")
         }
-        setSelectedRequirement((current) => current ?? initialRequirement)
         if (initialRequirement) {
-          if (initialRequirement.id === returnRequirementId) {
-            const threadId = getRequirementThreadIds(initialRequirement)[0] ?? null
-            setSelectedRequirementThreadId(threadId)
-            if (threadId) void selectThread(threadId, { preserveView: true })
-          }
+          setSelectedRequirement(initialRequirement)
+          const threadId = getRequirementThreadIds(initialRequirement)[0] ?? null
+          setSelectedRequirementThreadId(threadId)
+          if (threadId) void selectThread(threadId, { preserveView: true })
           setScreen("conversation")
         }
         setRequirementsLoaded(true)
@@ -304,7 +311,7 @@ export function RequirementEntryView(): React.JSX.Element {
         toast.error("该需求缺少需求编号，无法读取需求文档")
         return
       }
-      const toastId = toast.loading("正在加载需求文档")
+      const toastId = toast.loading("正在加载需求文档", { duration: 5000 })
       try {
         const document =
           await leanstarRequirementsApi.getRequirementDocumentContent(requirementCode)

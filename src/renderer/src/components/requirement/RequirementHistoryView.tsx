@@ -1,5 +1,5 @@
 import { useDeferredValue, useEffect, useState } from "react"
-import { ArrowDownWideNarrow, Command, Plus, Search, Trash2 } from "lucide-react"
+import { Command, Plus, Search } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { TooltipProvider } from "@/components/ui/tooltip"
@@ -31,9 +31,8 @@ export function RequirementHistoryView({
 }): React.JSX.Element {
   const [searchInput, setSearchInput] = useState("")
   const [query, setQuery] = useState("")
-  const [sourceFilter, setSourceFilter] = useState<RequirementSourceFilter>("local")
+  const [sourceFilter, setSourceFilter] = useState<RequirementSourceFilter>("all")
   const [mineOnly, setMineOnly] = useState(false)
-  const [selectionMode, setSelectionMode] = useState(false)
   const deferredQuery = useDeferredValue(query)
   const selectedSystemId = useRequirementStore((state) => state.selectedSystemId)
 
@@ -79,7 +78,7 @@ export function RequirementHistoryView({
           <div className="mx-auto flex h-full min-h-0 w-full max-w-[2200px] flex-col">
             <header className="mb-4 flex flex-wrap items-center gap-3">
               <div className="mr-2 flex items-center gap-2.5">
-                <h1 className="text-[18px] font-bold tracking-tight text-foreground">
+                <h1 className="text-[16px] font-bold tracking-tight text-foreground">
                   全部需求/特性
                 </h1>
                 <span className="rounded-md bg-muted px-2 py-1 text-xs font-semibold tabular-nums text-muted-foreground">
@@ -138,14 +137,6 @@ export function RequirementHistoryView({
                   全部
                 </button>
               </div>
-              <button
-                type="button"
-                className="flex h-9 items-center gap-2 rounded-lg bg-background-interactive px-3 text-xs font-medium text-muted-foreground"
-                aria-label="按更新时间倒序排列"
-              >
-                <ArrowDownWideNarrow className="size-4" />
-                更新时间
-              </button>
               <form
                 className="relative min-w-[240px] flex-1 xl:max-w-[420px]"
                 onSubmit={(event) => {
@@ -173,16 +164,6 @@ export function RequirementHistoryView({
               <div className="ml-auto flex items-center gap-2">
                 <Button
                   type="button"
-                  variant="outline"
-                  size="sm"
-                  onClick={() => setSelectionMode(true)}
-                  className="h-9 rounded-lg px-3 text-xs"
-                >
-                  <Trash2 className="size-4" />
-                  批量删除
-                </Button>
-                <Button
-                  type="button"
                   size="sm"
                   onClick={onNew}
                   className="h-9 rounded-lg px-3.5 text-xs"
@@ -202,8 +183,6 @@ export function RequirementHistoryView({
                 systemId={selectedSystemId}
                 onOpen={onOpenRequirement}
                 onDelete={onDeleteRequirement}
-                selectionMode={selectionMode}
-                onSelectionModeChange={setSelectionMode}
               />
             </div>
           </div>

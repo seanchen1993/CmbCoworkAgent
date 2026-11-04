@@ -3,9 +3,9 @@ import { toast } from "sonner"
 import {
   AlertTriangle,
   Brain,
-  CheckCircle2,
   ChevronRight,
   Eye,
+  FileCheck2,
   FileText,
   Info,
   KeyRound,
@@ -45,13 +45,9 @@ import {
 } from "./RequirementFunctionCard"
 import { RequirementFunctionWorkspace } from "./RequirementFunctionWorkspace"
 import { RequirementPrdSummaryCard } from "./RequirementPrdSummaryCard"
+import { RequirementStatusTags } from "./RequirementStatusTags"
 
-export type RequirementPreviewTab =
-  | "expert-process"
-  | "source"
-  | "prd"
-  | "prototype"
-  | "requirement-space"
+export type RequirementPreviewTab = "expert-process" | "source" | "prd"
 export type RequirementPrototypeStatus = {
   functionInfo: RequirementPrdManifest["functions"][number]
   prototypePath: string
@@ -61,12 +57,11 @@ export type RequirementPrototypeStatus = {
   choiceMade: boolean
 }
 
-type RequirementStepsPanelProps = {
+type RequirementDetailsPanelProps = {
   requirement: RequirementRecord
   manifest: RequirementPrdManifest | null
   prototypeStatuses: RequirementPrototypeStatus[]
   previewTab: RequirementPreviewTab
-  prototypeRoute: "design" | "skip" | null
   collapsed: boolean
   threadId: string | null
   workspacePath: string
@@ -81,20 +76,14 @@ type RequirementStepsPanelProps = {
   tokenSaving: boolean
   hasStoredToken: boolean
   publishRequestQueued: boolean
-  expertAnalysisStarted: boolean
-  expertAnalysisCompleted: boolean
-  expertProcessRunning: boolean
   prdGenerationCompleted: boolean
-  prototypeStepEnabled: boolean
-  prototypeStepCompleted: boolean
+  prototypeCompleted: boolean
   fullPrdDesignEntry: RequirementDesignEntry | null
-  requirementSpaceStepEnabled: boolean
   requirementSpacePublished: boolean
   allPrototypeFunctionsCompleted: boolean
   completedPrototypeCount: number
   generatedPrototypeCount: number
   skippedPrototypeCount: number
-  prdFileCount: number
   prdPreviewReloadToken: number
   showExpertProcess: boolean
   onPreviewTabChange: (tab: RequirementPreviewTab) => void
@@ -105,7 +94,6 @@ type RequirementStepsPanelProps = {
   onReloadSource: () => void | Promise<void>
   onReloadManifest: () => void | Promise<unknown>
   onOpenWorkspaceFilePreview: (filePath: string) => void
-  onChoosePrototypeRoute: (route: "design" | "skip") => void
   onRevealRequirementFile: (filePath: string) => void
   onRequestPrototypeDesign: (functionInfo: RequirementPrdManifest["functions"][number]) => void
   onStartBatchPrototypeDesign: (
@@ -120,7 +108,6 @@ type RequirementStepsPanelProps = {
     functionInfo: RequirementPrdManifest["functions"][number],
     needDesign: NeedDesignChoice
   ) => void
-  onCompletePrototypeDesign: () => Promise<void>
   onPublishToRequirementSpace: () => void
   onSendLeanstarToken: () => void | Promise<void>
 }
@@ -323,12 +310,11 @@ function FullPrdPrototypeCard({
   )
 }
 
-export function RequirementStepsPanel({
+export function RequirementDetailsPanel({
   requirement,
   manifest: requirementSpaceManifest,
   prototypeStatuses,
   previewTab,
-  prototypeRoute,
   collapsed,
   threadId,
   workspacePath,
@@ -343,20 +329,14 @@ export function RequirementStepsPanel({
   tokenSaving,
   hasStoredToken,
   publishRequestQueued,
-  expertAnalysisStarted,
-  expertAnalysisCompleted,
-  expertProcessRunning,
   prdGenerationCompleted,
-  prototypeStepEnabled,
-  prototypeStepCompleted,
+  prototypeCompleted,
   fullPrdDesignEntry,
-  requirementSpaceStepEnabled,
   requirementSpacePublished,
   allPrototypeFunctionsCompleted,
   completedPrototypeCount,
   generatedPrototypeCount,
   skippedPrototypeCount,
-  prdFileCount,
   prdPreviewReloadToken,
   showExpertProcess,
   onPreviewTabChange,
@@ -367,17 +347,15 @@ export function RequirementStepsPanel({
   onReloadSource: loadSourcePreview,
   onReloadManifest: loadRequirementSpaceManifest,
   onOpenWorkspaceFilePreview: openWorkspaceFilePreview,
-  onChoosePrototypeRoute: choosePrototypeRoute,
   onRevealRequirementFile: revealRequirementFile,
   onRequestPrototypeDesign: requestPrototypeDesign,
   onStartBatchPrototypeDesign: startBatchPrototypeDesign,
   onClearPrototypeDesign: clearPrototypeDesign,
   onClearPrototypeFunction: clearPrototypeFunction,
   onUpdatePrototypeFunctionDesign: updatePrototypeFunctionDesign,
-  onCompletePrototypeDesign: completePrototypeDesign,
   onPublishToRequirementSpace: handlePublishToRequirementSpace,
   onSendLeanstarToken: handleSendLeanstarToken
-}: RequirementStepsPanelProps): React.JSX.Element {
+}: RequirementDetailsPanelProps): React.JSX.Element {
   const [batchDialogOpen, setBatchDialogOpen] = useState(false)
   const [batchSelection, setBatchSelection] = useState<Set<string>>(() => new Set())
   const [batchDesignMode, setBatchDesignMode] = useState<"functions" | "full-prd">("functions")
@@ -432,7 +410,7 @@ export function RequirementStepsPanel({
       await startBatchPrototypeDesign(functionInfos, mode)
       return true
     } catch (error) {
-      console.error("[RequirementStepsPanel] Failed to start batch design:", error)
+      console.error("[RequirementDetailsPanel] Failed to start batch design:", error)
       toast.error(error instanceof Error ? error.message : "批量创建设计会话失败")
       return false
     } finally {
@@ -484,15 +462,7 @@ export function RequirementStepsPanel({
         value={previewTab}
         onValueChange={(value) => {
           const nextTab: RequirementPreviewTab =
-            value === "expert-process"
-              ? "expert-process"
-              : value === "prd"
-                ? "prd"
-                : value === "prototype"
-                  ? "prototype"
-                  : value === "requirement-space"
-                    ? "requirement-space"
-                    : "source"
+            value === "expert-process" ? "expert-process" : value === "prd" ? "prd" : "source"
           onPreviewTabChange(nextTab)
           setSelectedFunction(null)
           if (nextTab === "expert-process") {
@@ -502,114 +472,45 @@ export function RequirementStepsPanel({
         className="flex min-h-0 flex-1 flex-col"
       >
         {!selectedFunction && !fullPrdWorkspaceOpen ? (
-          <div className="flex shrink-0 items-start justify-between gap-2 border-b border-border/70 bg-white px-3 shadow-[0_1px_0_rgba(15,23,42,0.02)]">
+          <div className="flex shrink-0 items-center justify-between gap-3 border-b border-border/70 bg-white px-4 py-1.5 shadow-[0_1px_0_rgba(15,23,42,0.02)]">
             <TabsList
-              aria-label="需求处理步骤"
-              className="grid h-[76px] min-w-0 flex-1 grid-cols-5 rounded-none bg-transparent p-0"
+              aria-label="需求信息分类"
+              className="h-8 min-w-0 justify-start gap-5 rounded-none bg-transparent p-0 -mb-2"
             >
               {[
                 {
                   value: "source",
-                  number: 1,
-                  label: "提供需求",
-                  enabled: true,
-                  complete: expertAnalysisStarted,
-                  connectorComplete: false,
-                  active: previewTab === "source",
-                  running: false
+                  label: "初始需求信息",
+                  enabled: true
                 },
                 {
                   value: "expert-process",
-                  number: 2,
-                  label: "Agent分析",
-                  enabled: expertAnalysisStarted,
-                  complete: expertAnalysisCompleted,
-                  connectorComplete: expertAnalysisStarted,
-                  active: previewTab === "expert-process",
-                  running: previewTab === "expert-process" && expertProcessRunning
+                  label: "专家思考过程",
+                  enabled: true
                 },
                 {
                   value: "prd",
-                  number: 3,
-                  label: "规范PRD",
-                  enabled: prdGenerationCompleted,
-                  complete: prdGenerationCompleted,
-                  connectorComplete: prdGenerationCompleted,
-                  active: previewTab === "prd",
-                  running: false
-                },
-                {
-                  value: "prototype",
-                  number: 4,
-                  label: "原型设计",
-                  enabled: prototypeStepEnabled,
-                  complete: prototypeStepCompleted,
-                  connectorComplete: prototypeStepEnabled,
-                  active: previewTab === "prototype",
-                  running: previewTab === "prototype" && !prototypeStepCompleted
-                },
-                {
-                  value: "requirement-space",
-                  number: 5,
-                  label: "发布需求空间3.0",
-                  enabled: requirementSpaceStepEnabled,
-                  complete: requirementSpacePublished,
-                  connectorComplete: requirementSpaceStepEnabled,
-                  active: previewTab === "requirement-space",
-                  running: previewTab === "requirement-space" && !requirementSpacePublished
+                  label: "规范PRD文件",
+                  enabled: true
                 }
-              ].map((step, index) => (
-                <div key={step.value} className="relative flex min-w-0 items-start justify-center">
-                  {index > 0 ? (
-                    <span
-                      className={cn(
-                        "absolute left-0 right-[calc(50%+24px)] top-6 h-[2px] -translate-y-1/2",
-                        step.connectorComplete ? "bg-primary/75" : "bg-slate-200"
-                      )}
-                    />
-                  ) : null}
-                  {index < 4 ? (
-                    <span
-                      className={cn(
-                        "absolute left-[calc(50%+24px)] right-0 top-6 h-[2px] -translate-y-1/2",
-                        step.complete ? "bg-primary/75" : "bg-slate-200"
-                      )}
-                    />
-                  ) : null}
+              ].map((tab) => (
+                <div key={tab.value} className="min-w-0">
                   <TabsTrigger
-                    value={step.value}
-                    disabled={!step.enabled}
-                    aria-label={`步骤 ${step.number}：${step.label}${!step.enabled ? "，尚未解锁" : ""}`}
-                    className="group relative z-10 flex h-[72px] min-w-0 flex-col justify-start gap-1.5 rounded-none bg-transparent px-1 pt-2.5 text-xs font-semibold text-slate-400 shadow-none transition-colors data-[state=active]:bg-transparent data-[state=active]:text-primary data-[state=active]:shadow-none disabled:cursor-not-allowed disabled:opacity-60"
+                    value={tab.value}
+                    disabled={!tab.enabled}
+                    className="relative -mb-px h-8 rounded-none border-b-2 border-transparent bg-transparent px-0.5 text-xs font-semibold text-muted-foreground shadow-none transition-colors hover:text-foreground data-[state=active]:border-[#c99366] data-[state=active]:bg-transparent data-[state=active]:text-[#b97843] data-[state=active]:shadow-none"
                   >
-                    <span
-                      className={cn(
-                        "relative flex size-7 items-center justify-center rounded-full border-2 bg-white text-[11px] font-semibold transition-all",
-                        step.complete
-                          ? "border-primary bg-primary text-primary-foreground"
-                          : step.enabled
-                            ? "border-primary bg-white text-primary"
-                            : "border-slate-100 bg-slate-100 text-slate-400"
-                      )}
-                    >
-                      {step.running ? (
-                        <span className="absolute -inset-1 rounded-full border-2 border-transparent border-t-primary border-r-primary/40 motion-safe:animate-spin" />
-                      ) : null}
-                      {step.number}
-                    </span>
-                    <span
-                      className={cn(
-                        "max-w-full truncate leading-4",
-                        step.complete && !step.active && "text-foreground"
-                      )}
-                    >
-                      {step.label}
-                    </span>
+                    {tab.label}
                   </TabsTrigger>
                 </div>
               ))}
             </TabsList>
-            <div className="flex shrink-0 items-center gap-0.5">
+            <div className="flex shrink-0 items-center gap-2">
+              <RequirementStatusTags
+                standardized={prdGenerationCompleted}
+                hasPrototype={prototypeCompleted}
+                published={requirementSpacePublished}
+              />
               <TooltipProvider delayDuration={180}>
                 <Tooltip>
                   <TooltipTrigger asChild>
@@ -897,337 +798,6 @@ export function RequirementStepsPanel({
         <TabsContent
           value="prd"
           className={cn(
-            "m-0 flex min-h-0 flex-1 flex-col",
-            (selectedFunction || fullPrdWorkspaceOpen) && "hidden"
-          )}
-        >
-          <div className="min-h-0 flex-1 space-y-3 overflow-y-auto bg-[#fbfcfe] p-4">
-            <div className="flex min-h-5 items-center gap-3">
-              <h2 className="text-sm font-semibold leading-5 text-foreground">规范 PRD</h2>
-              <p className="text-xs leading-4 text-muted-foreground">
-                PRD 已生成，可进入功能详情查看
-              </p>
-              <span className="ml-auto rounded-full bg-status-info/10 px-2 py-0.5 text-[11px] font-medium text-status-info">
-                PRD 已生成
-              </span>
-            </div>
-
-            {requirementSpaceManifest ? (
-              <RequirementPrdSummaryCard
-                prd={requirementSpaceManifest.prd}
-                fallbackName={requirement.title}
-                onOpenFile={() =>
-                  openWorkspaceFilePreview(normalizePrdFilePath(requirementSpaceManifest.prd.file))
-                }
-                onRevealFile={() => revealRequirementFile(requirementSpaceManifest.prd.file)}
-                onOpenDetails={() => setFullPrdWorkspaceOpen(true)}
-              >
-                <div className="mt-3 flex flex-wrap items-center justify-between gap-3 border-t border-border/70 pt-3">
-                  <div>
-                    <h4 className="text-xs font-semibold text-foreground">
-                      {prototypeRoute || requirementSpacePublished
-                        ? "原型路径已选择"
-                        : "下一步：是否需要设计原型？"}
-                    </h4>
-                    <p className="mt-1 text-xs leading-5 text-muted-foreground">
-                      {prototypeRoute === "design"
-                        ? "已选择“需要设计原型”，当前流程进入原型设计步骤。"
-                        : prototypeRoute === "skip"
-                          ? "已选择“无需设计原型”，原型设计步骤已标记为完成。"
-                          : requirementSpacePublished
-                            ? "当前流程已经进入发布阶段，原型路径不可重新选择。"
-                            : "选择后将进入对应步骤；跳过原型时，原型设计步骤会直接标记为完成。"}
-                    </p>
-                  </div>
-                  {prototypeRoute === null && !requirementSpacePublished ? (
-                    <div className="flex shrink-0 items-center gap-2">
-                      <Button
-                        type="button"
-                        size="sm"
-                        className="h-8"
-                        onClick={() => choosePrototypeRoute("design")}
-                      >
-                        需要设计原型
-                      </Button>
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="outline"
-                        className="h-8 bg-white"
-                        onClick={() => choosePrototypeRoute("skip")}
-                      >
-                        无需设计原型
-                      </Button>
-                    </div>
-                  ) : (
-                    <span className="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-status-nominal/25 bg-status-nominal/10 px-3 py-1.5 text-xs font-semibold text-status-nominal">
-                      <CheckCircle2 className="size-3.5" />
-                      {prototypeRoute === "design"
-                        ? "已选择：需要设计原型"
-                        : prototypeRoute === "skip"
-                          ? "已选择：无需设计原型"
-                          : "已进入发布阶段"}
-                    </span>
-                  )}
-                </div>
-              </RequirementPrdSummaryCard>
-            ) : null}
-
-            <section>
-              <div className="mb-2 flex items-center justify-between">
-                <h3 className="text-sm font-semibold text-foreground">功能清单</h3>
-                <span className="text-[11px] text-muted-foreground">
-                  {requirementSpaceManifest?.functions.length ?? 0} 项
-                </span>
-              </div>
-              <div className="space-y-2">
-                {(requirementSpaceManifest?.functions ?? []).map((functionInfo) => (
-                  <RequirementFunctionCard
-                    key={`${functionInfo.fr}-${functionInfo.file}`}
-                    functionInfo={functionInfo}
-                    onRevealFile={revealRequirementFile}
-                    onPreviewFile={(filePath) =>
-                      openWorkspaceFilePreview(normalizePrdFilePath(filePath))
-                    }
-                    onOpenDetails={
-                      functionInfo.file ? () => setSelectedFunction(functionInfo) : undefined
-                    }
-                  />
-                ))}
-                {(requirementSpaceManifest?.functions.length ?? 0) === 0 ? (
-                  <div className="rounded-xl border border-dashed border-border bg-white px-4 py-8 text-center text-sm text-muted-foreground">
-                    {prdFileCount > 0 ? "正在读取 PRD 功能清单" : "暂无功能数据"}
-                  </div>
-                ) : null}
-              </div>
-            </section>
-          </div>
-        </TabsContent>
-
-        <TabsContent
-          value="prototype"
-          className={cn(
-            "m-0 min-h-0 flex-1 overflow-y-auto bg-[#fbfcfe] p-4",
-            (selectedFunction || fullPrdWorkspaceOpen) && "hidden"
-          )}
-        >
-          <div className="space-y-3">
-            <div className="flex min-h-5 items-center gap-3">
-              <h2 className="text-sm font-semibold leading-5 text-foreground">原型设计</h2>
-              <p className="text-xs leading-4 text-muted-foreground">
-                按功能逐个设计原型，支持查看设计状态
-              </p>
-              {hasPrototypeDesignState ? (
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="sm"
-                  className="ml-auto h-7 px-2 text-xs text-destructive hover:bg-destructive/10 hover:text-destructive"
-                  disabled={conversationLoading || batchStarting || clearStarting}
-                  onClick={() => {
-                    setClearTargetFunction(null)
-                    setClearDialogOpen(true)
-                  }}
-                >
-                  <Trash2 className="size-3.5" />
-                  重置设计
-                </Button>
-              ) : null}
-            </div>
-            {requirementSpaceManifest ? (
-              <RequirementPrdSummaryCard
-                prd={requirementSpaceManifest.prd}
-                fallbackName={requirement.title}
-                onOpenFile={() =>
-                  openWorkspaceFilePreview(normalizePrdFilePath(requirementSpaceManifest.prd.file))
-                }
-                onRevealFile={() => revealRequirementFile(requirementSpaceManifest.prd.file)}
-                onOpenDetails={() => setFullPrdWorkspaceOpen(true)}
-              >
-                <div className="mt-3 flex items-center justify-between gap-3 border-t border-border/70 pt-3">
-                  <div>
-                    <div className="flex flex-wrap items-center gap-2">
-                      <h4 className="text-xs font-semibold text-foreground">原型设计进度</h4>
-                      <span
-                        className={cn(
-                          "inline-flex rounded-full px-2.5 py-1 text-[11px] font-semibold",
-                          prototypeDesignCompleted
-                            ? "bg-status-nominal/10 text-status-nominal"
-                            : "bg-[#fff3dc] text-[#d97706]"
-                        )}
-                      >
-                        {hasFullPrdDesignSession
-                          ? fullPrdPrototypeGenerated
-                            ? "整个需求原型已设计 · 已完成"
-                            : "整个需求原型待生成 · 步骤未完成"
-                          : `${completedPrototypeCount}/${prototypeStatuses.length} 已设计${!allPrototypeFunctionsCompleted ? " · 步骤未完成" : " · 已完成"}`}
-                      </span>
-                    </div>
-                    <p className="mt-1 text-xs text-muted-foreground">
-                      {hasFullPrdDesignSession
-                        ? "当前按完整 PRD 统一设计，无需逐个设置功能的设计状态"
-                        : "全部功能“已设计”或“无需原型设计”后，本步骤才算完成"}
-                    </p>
-                  </div>
-                  <div className="flex shrink-0 items-center gap-2">
-                    {!prototypeDesignCompleted ? (
-                      <TooltipProvider delayDuration={200}>
-                        <Tooltip>
-                          <TooltipTrigger asChild>
-                            <span className="inline-flex">
-                              <Button
-                                type="button"
-                                size="sm"
-                                disabled={
-                                  conversationLoading ||
-                                  batchStarting ||
-                                  (!hasFullPrdDesignSession &&
-                                    !prototypeStatuses.some((item) => !item.complete))
-                                }
-                                onClick={() => {
-                                  const existingSelections = prototypeStatuses.filter(
-                                    (item) => item.functionInfo.needDesign === "1" || item.generated
-                                  )
-                                  if (hasPrototypeDesignSession) {
-                                    void runBatchPrototypeDesign(
-                                      existingSelections.map((item) => item.functionInfo),
-                                      hasFullPrdDesignSession ? "full-prd" : "functions"
-                                    )
-                                    return
-                                  }
-                                  setBatchSelection(new Set())
-                                  setBatchDialogOpen(true)
-                                }}
-                              >
-                                <WandSparkles className="size-3.5" />
-                                {hasPrototypeDesignSession ? "继续原型设计" : "批量设计全部原型"}
-                              </Button>
-                            </span>
-                          </TooltipTrigger>
-                          <TooltipContent side="top" className="max-w-72">
-                            {hasPrototypeDesignSession
-                              ? "已关联设计会话，点击可跳转并继续设计未完成的原型"
-                              : "选择需要设计的功能，并为它们批量创建设计会话"}
-                          </TooltipContent>
-                        </Tooltip>
-                      </TooltipProvider>
-                    ) : (
-                      <Button
-                        type="button"
-                        size="sm"
-                        disabled={conversationLoading}
-                        onClick={() => {
-                          void completePrototypeDesign().catch((error) => {
-                            console.error(
-                              "[RequirementConversation] Failed to complete prototype step:",
-                              error
-                            )
-                            toast.error("保存原型设计完成状态失败")
-                          })
-                        }}
-                      >
-                        已完成原型设计
-                      </Button>
-                    )}
-                  </div>
-                </div>
-              </RequirementPrdSummaryCard>
-            ) : null}
-            {fullPrdDesignEntry?.htmlFile && threadId ? (
-              <FullPrdPrototypeCard
-                filePath={fullPrdDesignEntry.htmlFile}
-                threadId={threadId}
-                reloadToken={prdPreviewReloadToken}
-                workspacePath={workspacePath}
-                description="基于完整 PRD 生成，展示整个需求的页面结构和主要流程"
-              />
-            ) : null}
-            <section>
-              <div className="mb-2 flex items-center justify-between">
-                <h3 className="text-sm font-semibold text-foreground">功能清单</h3>
-                <span className="text-[11px] text-muted-foreground">
-                  {hasFullPrdDesignSession
-                    ? `${prototypeStatuses.length} 项 · 统一包含在整个需求原型中`
-                    : `${prototypeStatuses.length} 项 · ${completedPrototypeCount} 已设计 · ${prototypeStatuses.length - completedPrototypeCount} 待设计`}
-                </span>
-              </div>
-              <div className="space-y-2">
-                {prototypeStatuses.map(({ functionInfo, prototypePath, generated, choiceMade }) => (
-                  <RequirementFunctionCard
-                    key={`prototype-${functionInfo.fr}`}
-                    functionInfo={functionInfo}
-                    onRevealFile={revealRequirementFile}
-                    onPreviewFile={(filePath) =>
-                      openWorkspaceFilePreview(normalizePrdFilePath(filePath))
-                    }
-                    onOpenDetails={
-                      functionInfo.file ? () => setSelectedFunction(functionInfo) : undefined
-                    }
-                    actions={
-                      hasFullPrdDesignSession ? (
-                        <FullPrdModeFunctionNotice />
-                      ) : generated && threadId && !selectedFunction ? (
-                        <div className="absolute inset-0 overflow-hidden bg-white">
-                          <PrototypeHtmlPreview
-                            filePath={prototypePath}
-                            threadId={threadId}
-                            reloadToken={prdPreviewReloadToken}
-                            workspacePath={workspacePath}
-                          />
-                          <div className="absolute left-1.5 top-1.5 z-10">
-                            <PrototypeScopeBadge scope="function" />
-                          </div>
-                          <RequirementPrototypeMenu
-                            needDesign={functionInfo.needDesign}
-                            disabled={conversationLoading}
-                            onChange={(needDesign) =>
-                              updatePrototypeFunctionDesign(functionInfo, needDesign)
-                            }
-                            onDesign={() => {
-                              updatePrototypeFunctionDesign(functionInfo, "1")
-                              requestPrototypeDesign(functionInfo)
-                            }}
-                            onClear={() => {
-                              setClearTargetFunction(functionInfo)
-                              setClearDialogOpen(true)
-                            }}
-                            className="absolute right-1 top-1 z-10 bg-white/90 shadow-sm backdrop-blur-sm"
-                          />
-                        </div>
-                      ) : (
-                        <RequirementPrototypeAction
-                          needDesign={functionInfo.needDesign}
-                          choiceMade={choiceMade}
-                          disabled={conversationLoading}
-                          onChange={(needDesign) =>
-                            updatePrototypeFunctionDesign(functionInfo, needDesign)
-                          }
-                          onClear={() => {
-                            setClearTargetFunction(functionInfo)
-                            setClearDialogOpen(true)
-                          }}
-                          onDesign={() => {
-                            updatePrototypeFunctionDesign(functionInfo, "1")
-                            requestPrototypeDesign(functionInfo)
-                          }}
-                        />
-                      )
-                    }
-                  />
-                ))}
-                {prototypeStatuses.length === 0 ? (
-                  <div className="rounded-xl border border-dashed border-border bg-white px-4 py-8 text-center text-sm text-muted-foreground">
-                    暂无可设计的功能
-                  </div>
-                ) : null}
-              </div>
-            </section>
-          </div>
-        </TabsContent>
-
-        <TabsContent
-          value="requirement-space"
-          className={cn(
             "m-0 min-h-0 flex-1 overflow-y-auto",
             (selectedFunction || fullPrdWorkspaceOpen) && "hidden"
           )}
@@ -1253,14 +823,28 @@ export function RequirementStepsPanel({
                 </Button>
               </div>
             </div>
+          ) : !prdGenerationCompleted ? (
+            <div className="flex h-full min-h-[260px] items-center justify-center px-6 py-10 text-center">
+              <div className="flex max-w-xs flex-col items-center">
+                <div className="mb-4 flex size-14 items-center justify-center rounded-full border border-primary/20 bg-primary/10 text-primary">
+                  {conversationLoading ? (
+                    <Loader2 className="size-6 animate-spin" />
+                  ) : (
+                    <FileCheck2 className="size-7" strokeWidth={1.7} />
+                  )}
+                </div>
+                <div className="text-sm font-semibold text-foreground">
+                  {conversationLoading ? "正在生成规范 PRD" : "规范 PRD 尚未生成"}
+                </div>
+                <div className="mt-1.5 text-xs leading-5 text-muted-foreground">
+                  {conversationLoading
+                    ? "Agent 正在整理需求信息并生成规范 PRD，完成后将在这里展示需求信息、功能清单和原型设计入口。"
+                    : "完成需求沟通和专家分析后，将在这里生成规范 PRD，并展示功能清单、原型设计与需求空间发布操作。"}
+                </div>
+              </div>
+            </div>
           ) : requirementSpaceManifest ? (
             <div className="space-y-3 bg-[#fbfcfe] p-4">
-              <div className="flex min-h-5 items-center gap-3">
-                <h2 className="text-sm font-semibold leading-5 text-foreground">发布需求空间3.0</h2>
-                <p className="text-xs leading-4 text-muted-foreground">
-                  发布后写入需求空间，供研发与测试查阅
-                </p>
-              </div>
               <RequirementPrdSummaryCard
                 prd={requirementSpaceManifest.prd}
                 fallbackName={requirement.title}
@@ -1270,13 +854,94 @@ export function RequirementStepsPanel({
                 onRevealFile={() => revealRequirementFile(requirementSpaceManifest.prd.file)}
                 onOpenDetails={() => setFullPrdWorkspaceOpen(true)}
               >
-                <div className="mt-3 flex flex-wrap items-center justify-between gap-3 border-t border-border/70 pt-3">
+                <div className="mt-3 border-t border-border/70 pt-3">
+                  <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border/60 bg-background px-3 py-2.5">
+                    <div className="min-w-0">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <h4 className="text-xs font-semibold text-foreground">原型设计</h4>
+                        <span
+                          className={cn(
+                            "inline-flex rounded-full px-2 py-0.5 text-[10px] font-semibold",
+                            prototypeDesignCompleted
+                              ? "bg-status-nominal/10 text-status-nominal"
+                              : "bg-muted text-muted-foreground"
+                          )}
+                        >
+                          {hasFullPrdDesignSession
+                            ? fullPrdPrototypeGenerated
+                              ? "整个需求原型已完成"
+                              : "整个需求原型待生成"
+                            : `${completedPrototypeCount}/${prototypeStatuses.length} 已完成`}
+                        </span>
+                      </div>
+                      <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
+                        {hasFullPrdDesignSession
+                          ? "当前按完整 PRD 统一设计原型"
+                          : "可以批量设计全部功能，也可以在下方功能清单中逐项设计"}
+                      </p>
+                    </div>
+                    <div className="flex shrink-0 flex-wrap items-center justify-end gap-1.5">
+                      {hasPrototypeDesignState ? (
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          className="h-7 gap-1 px-2 text-[11px] text-destructive hover:bg-destructive/10 hover:text-destructive"
+                          disabled={conversationLoading || batchStarting || clearStarting}
+                          onClick={() => {
+                            setClearTargetFunction(null)
+                            setClearDialogOpen(true)
+                          }}
+                        >
+                          <Trash2 className="size-3" />
+                          重置原型
+                        </Button>
+                      ) : null}
+                      <Button
+                        type="button"
+                        size="sm"
+                        className="h-7 gap-1 px-2 text-[11px]"
+                        disabled={
+                          conversationLoading ||
+                          batchStarting ||
+                          (!hasPrototypeDesignSession && prototypeStatuses.length === 0)
+                        }
+                        onClick={() => {
+                          const existingSelections = prototypeStatuses.filter(
+                            (item) => item.functionInfo.needDesign === "1" || item.generated
+                          )
+                          if (hasPrototypeDesignSession) {
+                            void runBatchPrototypeDesign(
+                              existingSelections.map((item) => item.functionInfo),
+                              hasFullPrdDesignSession ? "full-prd" : "functions"
+                            )
+                            return
+                          }
+                          setBatchSelection(new Set())
+                          setBatchDialogOpen(true)
+                        }}
+                      >
+                        {batchStarting ? (
+                          <Loader2 className="size-3 animate-spin" />
+                        ) : (
+                          <WandSparkles className="size-3" />
+                        )}
+                        {hasPrototypeDesignSession
+                          ? prototypeDesignCompleted
+                            ? "查看原型设计"
+                            : "继续原型设计"
+                          : "批量设计原型"}
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+                <div className="mt-2 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border/60 bg-background px-3 py-2.5">
                   <div>
                     <div className="flex flex-wrap items-center gap-2">
-                      <h4 className="text-xs font-semibold text-foreground">需求空间发布状态</h4>
+                      <h4 className="text-xs font-semibold text-foreground">需求空间3.0发布</h4>
                       <span
                         className={cn(
-                          "inline-flex rounded-full px-2.5 py-1 text-[11px] font-semibold",
+                          "inline-flex rounded-full px-2 py-0.5 text-[10px] font-semibold",
                           isRequirementSpacePublished(requirementSpaceManifest)
                             ? "bg-status-nominal/10 text-status-nominal"
                             : "bg-[#fff3dc] text-[#d97706]"
@@ -1289,13 +954,13 @@ export function RequirementStepsPanel({
                             : "待发布"}
                       </span>
                     </div>
-                    <p className="mt-1 text-xs text-muted-foreground">
+                    <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
                       {isRequirementSpacePublished(requirementSpaceManifest)
                         ? "需求已写入需求空间3.0，可进入详情页查看。"
                         : "完成身份验证后，将需求与原型发布到需求空间3.0。"}
                     </p>
                   </div>
-                  <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
+                  <div className="flex shrink-0 flex-wrap items-center justify-end gap-1.5">
                     {!isRequirementSpacePublished(requirementSpaceManifest) ? (
                       <>
                         <TooltipProvider delayDuration={180}>
@@ -1307,13 +972,13 @@ export function RequirementStepsPanel({
                                   size="sm"
                                   variant="outline"
                                   disabled={conversationLoading || tokenSaving}
-                                  className="h-8 gap-1.5 rounded-[7px] px-3 text-sm"
+                                  className="h-7 gap-1 rounded-md px-2 text-[11px]"
                                   onClick={() => void handleSendLeanstarToken()}
                                 >
                                   {tokenSaving ? (
-                                    <Loader2 className="size-3.5 animate-spin" />
+                                    <Loader2 className="size-3 animate-spin" />
                                   ) : (
-                                    <KeyRound className="size-3.5" />
+                                    <KeyRound className="size-3" />
                                   )}
                                   {hasStoredToken ? "发送Token身份令牌" : "获取Token身份令牌"}
                                 </Button>
@@ -1339,13 +1004,13 @@ export function RequirementStepsPanel({
                                   type="button"
                                   size="sm"
                                   disabled={publishRequestQueued || conversationLoading}
-                                  className="h-8 gap-1.5 rounded-[7px] px-3 text-sm"
+                                  className="h-7 gap-1 rounded-md px-2 text-[11px]"
                                   onClick={handlePublishToRequirementSpace}
                                 >
                                   {publishRequestQueued ? (
-                                    <Loader2 className="size-3.5 animate-spin" />
+                                    <Loader2 className="size-3 animate-spin" />
                                   ) : (
-                                    <Send className="size-3.5" />
+                                    <Send className="size-3" />
                                   )}
                                   {publishRequestQueued ? "发布请求已发送" : "发布到需求空间3.0"}
                                 </Button>
@@ -1370,14 +1035,14 @@ export function RequirementStepsPanel({
                         type="button"
                         size="sm"
                         variant="outline"
-                        className="h-8 gap-1.5 rounded-[7px] px-3 text-sm"
+                        className="h-7 gap-1 rounded-md px-2 text-[11px]"
                         title={requirementSpaceManifest.prd.prDetailUrl}
                         onClick={() => {
                           const url = requirementSpaceManifest.prd.prDetailUrl
                           if (url) void window.electron.openExternal(url)
                         }}
                       >
-                        <Eye className="size-3.5 shrink-0" />
+                        <Eye className="size-3 shrink-0" />
                         查看需求详情
                       </Button>
                     ) : null}
@@ -1713,7 +1378,7 @@ export function RequirementStepsPanel({
                     toast.success("设计已重置")
                   })
                   .catch((error) => {
-                    console.error("[RequirementStepsPanel] Failed to clear design:", error)
+                    console.error("[RequirementDetailsPanel] Failed to clear design:", error)
                     toast.error(error instanceof Error ? error.message : "重置设计失败")
                   })
                   .finally(() => setClearStarting(false))

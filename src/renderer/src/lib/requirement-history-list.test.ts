@@ -28,7 +28,16 @@ function requirementAtStep(
     initialDescription: "",
     needDesign: "",
     prdManifest: {
-      prd: { name: "测试需求", status, description: "", file: "", currentStep, needDesign: "" },
+      prd: {
+        name: "测试需求",
+        status,
+        description: "",
+        file: "",
+        currentStep,
+        needDesign: "",
+        htmlFile: "",
+        htmlId: ""
+      },
       functions: []
     },
     prd: "是"

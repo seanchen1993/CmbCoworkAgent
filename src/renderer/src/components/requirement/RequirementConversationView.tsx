@@ -50,7 +50,7 @@ import {
   enableRequirementSessionExperts,
   getRequirementSessionCapabilities
 } from "./requirement-session-capabilities"
-import { RequirementStepsPanel } from "./RequirementStepsPanel"
+import { RequirementDetailsPanel } from "./RequirementDetailsPanel"
 import { getSelectedRequirementSystem } from "./requirement-store"
 import { getDesignSessionClient } from "@/components/design/session-client"
 
@@ -58,12 +58,10 @@ const REQUIREMENT_SPACE_PUBLISH_MESSAGE = "发布到需求空间"
 const LEANSTAR_TOKEN_MESSAGE_PREFIX = "精益之星身份令牌-Token："
 const REQUIREMENT_CONTINUATION_MESSAGE = "基于该需求已有资料和历史结论继续沟通。"
 
-type PreviewTab = "expert-process" | "source" | "prd" | "prototype" | "requirement-space"
+type PreviewTab = "expert-process" | "source" | "prd"
 type PrototypeRoute = "design" | "skip" | null
 
 function getPreviewTabForStep(currentStep: number): PreviewTab {
-  if (currentStep >= 5) return "requirement-space"
-  if (currentStep >= 4) return "prototype"
   if (currentStep >= 3) return "prd"
   if (currentStep >= 2) return "expert-process"
   return "source"
@@ -261,7 +259,6 @@ function RequirementConversationSession({
   const threadState = useThreadState(threadId)
   const setWorkspaceFiles = threadState?.setWorkspaceFiles
   const subagents = useMemo(() => threadState?.subagents ?? [], [threadState?.subagents])
-  const expertProcessRunning = subagents.some((item) => item.status === "running")
   const observedSubagentStatesRef = useRef(new Map<string, string>())
   // ChatContainer treats this stream state as the source of truth for an active turn.
   const streamLoading = useThreadStream(threadId ?? "").isLoading
@@ -343,13 +340,6 @@ function RequirementConversationSession({
     if (previewTab !== "expert-process" || subagentFocusView?.threadId === threadId) return
     focusExpertProcess()
   }, [focusExpertProcess, previewTab, subagentFocusView?.threadId, threadId])
-  const prdFiles = useMemo(
-    () =>
-      (threadState?.workspaceFiles ?? []).filter(
-        (file) => file.path === "/prd" || file.path.startsWith("/prd/")
-      ),
-    [threadState?.workspaceFiles]
-  )
   const sourceFiles = useMemo(
     () =>
       (threadState?.workspaceFiles ?? []).filter(
@@ -361,7 +351,6 @@ function RequirementConversationSession({
     () => sourceFiles.filter((file) => !file.is_dir),
     [sourceFiles]
   )
-  const prdFileCount = prdFiles.filter((file) => !file.is_dir).length
   const manifestBelongsToCurrentThread = manifestThreadId === threadId
   const prdGenerationCompleted =
     manifestBelongsToCurrentThread && isRequirementPrdGenerationCompleted(requirementSpaceManifest)
@@ -415,20 +404,12 @@ function RequirementConversationSession({
       htmlFile: prd.htmlFile || undefined
     }
   }, [requirement, requirementSpaceManifest?.prd, threadId, threadState?.workspacePath])
-  const expertAnalysisStarted = subagents.length > 0 || prdGenerationCompleted
-  const expertAnalysisCompleted =
-    prdGenerationCompleted || (subagents.length > 0 && !expertProcessRunning)
   const prototypeStepCompleted = isRequirementPrototypeStepComplete({
     skipped: prototypeRoute === "skip",
     allFunctionsComplete: allPrototypeFunctionsCompleted,
     fullPrdHtmlFile: fullPrdDesignEntry?.htmlFile,
     published: requirementSpacePublished
   })
-  const prototypeStepEnabled =
-    prdGenerationCompleted && (prototypeRoute !== null || requirementSpacePublished)
-  const requirementSpaceStepEnabled =
-    (requirementSpaceManifest?.prd.currentStep ?? 0) >= 5 ||
-    (prdGenerationCompleted && (prototypeStepCompleted || requirementSpacePublished))
   const conversationLoading = streamLoading || threadState?.scheduledTaskLoading === true
   const persistPrototypeState = useCallback(
     async (
@@ -481,17 +462,6 @@ function RequirementConversationSession({
       requirementSpaceManifest?.prd.currentStep
     ]
   )
-  const choosePrototypeRoute = useCallback(
-    (route: Exclude<PrototypeRoute, null>): void => {
-      setPrototypeRoute(route)
-      setPreviewTab(route === "design" ? "prototype" : "requirement-space")
-      void persistPrototypeState(route, route === "design" ? 4 : 5).catch((error) => {
-        console.error("[RequirementConversation] Failed to save prototype route:", error)
-        toast.error("保存原型选择失败")
-      })
-    },
-    [persistPrototypeState]
-  )
   const updatePrototypeFunctionDesign = useCallback(
     (functionInfo: { fr: string; file: string }, needDesign: NeedDesignChoice): void => {
       const functionKey = getPrototypeFunctionKey(functionInfo)
@@ -505,10 +475,6 @@ function RequirementConversationSession({
     },
     [persistPrototypeState]
   )
-  const completePrototypeDesign = useCallback(async (): Promise<void> => {
-    await persistPrototypeState("design", 5)
-    setPreviewTab("requirement-space")
-  }, [persistPrototypeState])
   const buildPrototypeDesignEntry = useCallback(
     (functionInfo: {
       fr: string
@@ -690,6 +656,8 @@ function RequirementConversationSession({
       requirement.requirementPath,
       requirementSpaceManifest?.prd.currentStep,
       requirementSpaceManifest?.prd.file,
+      requirementSpaceManifest?.prd.htmlFile,
+      requirementSpaceManifest?.prd.htmlId,
       threadId,
       threadState?.workspacePath
     ]
@@ -827,18 +795,6 @@ function RequirementConversationSession({
     setPrototypeRoute(route)
     setPreviewTab(getPreviewTabForStep(currentStep))
   }, [manifestBelongsToCurrentThread, manifestThreadId, requirementSpaceManifest])
-
-  useEffect(() => {
-    if (!manifestBelongsToCurrentThread || !requirementSpaceManifest) return
-    if (
-      requirementSpaceManifest.prd.status === "generated" &&
-      requirementSpaceManifest.prd.currentStep === 3 &&
-      prototypeRoute === null &&
-      (previewTab === "prototype" || previewTab === "requirement-space")
-    ) {
-      setPreviewTab("prd")
-    }
-  }, [manifestBelongsToCurrentThread, previewTab, prototypeRoute, requirementSpaceManifest])
 
   useEffect(() => {
     setSelectedThreadId(
@@ -1239,11 +1195,7 @@ function RequirementConversationSession({
   }, [])
 
   useEffect(() => {
-    if (
-      (previewTab !== "prd" && previewTab !== "source" && previewTab !== "prototype") ||
-      !threadId
-    )
-      return
+    if ((previewTab !== "prd" && previewTab !== "source") || !threadId) return
     void window.api.workspace.loadFromDisk(threadId).then((result) => {
       if (result.success) setWorkspaceFiles?.(result.files)
     })
@@ -1336,12 +1288,16 @@ function RequirementConversationSession({
       // retried and the UI can remain on step 2 even though the manifest has
       // already advanced to generated/currentStep 3.
       conversationLoadingObservedRef.current = false
-      if (isRequirementPrdGenerationCompleted(manifest)) {
-        setPreviewTab(isRequirementSpacePublished(manifest) ? "requirement-space" : "prd")
+      const refreshesWorkspaceOnTabChange =
+        isRequirementPrdGenerationCompleted(manifest) && previewTab !== "prd"
+      if (refreshesWorkspaceOnTabChange) {
+        setPreviewTab("prd")
       }
-      const workspaceResult = await window.api.workspace.loadFromDisk(threadId)
-      if (!cancelled && workspaceResult.success) {
-        threadState.setWorkspaceFiles(workspaceResult.files)
+      if (!refreshesWorkspaceOnTabChange) {
+        const workspaceResult = await window.api.workspace.loadFromDisk(threadId)
+        if (!cancelled && workspaceResult.success) {
+          threadState.setWorkspaceFiles(workspaceResult.files)
+        }
       }
       // Reset publish queue when the conversation ended without a successful publish
       if (!isRequirementSpacePublished(manifest)) {
@@ -1361,17 +1317,12 @@ function RequirementConversationSession({
     conversationLoading,
     hasThreadState,
     loadRequirementSpaceManifest,
+    previewTab,
     requirement.coreFilesMissing,
     requirement.workspaceMissing,
     threadId,
     threadState
   ])
-
-  useEffect(() => {
-    if (!prdGenerationCompleted && (previewTab === "prd" || previewTab === "requirement-space")) {
-      setPreviewTab("source")
-    }
-  }, [prdGenerationCompleted, previewTab])
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-background">
@@ -1440,12 +1391,11 @@ function RequirementConversationSession({
             )}
           </main>
 
-          <RequirementStepsPanel
+          <RequirementDetailsPanel
             requirement={requirement}
             manifest={requirementSpaceManifest}
             prototypeStatuses={prototypeStatuses}
             previewTab={previewTab}
-            prototypeRoute={prototypeRoute}
             collapsed={rightPanelCollapsed}
             threadId={threadId}
             workspacePath={threadState?.workspacePath ?? requirement.requirementPath}
@@ -1460,20 +1410,14 @@ function RequirementConversationSession({
             tokenSaving={tokenSaving}
             hasStoredToken={hasStoredToken}
             publishRequestQueued={publishRequestQueued}
-            expertAnalysisStarted={expertAnalysisStarted}
-            expertAnalysisCompleted={expertAnalysisCompleted}
-            expertProcessRunning={expertProcessRunning}
             prdGenerationCompleted={prdGenerationCompleted}
-            prototypeStepEnabled={prototypeStepEnabled}
-            prototypeStepCompleted={prototypeStepCompleted}
+            prototypeCompleted={prototypeStepCompleted}
             fullPrdDesignEntry={fullPrdDesignEntry}
-            requirementSpaceStepEnabled={requirementSpaceStepEnabled}
             requirementSpacePublished={requirementSpacePublished}
             allPrototypeFunctionsCompleted={allPrototypeFunctionsCompleted}
             completedPrototypeCount={completedPrototypeCount}
             generatedPrototypeCount={generatedPrototypeCount}
             skippedPrototypeCount={skippedPrototypeCount}
-            prdFileCount={prdFileCount}
             prdPreviewReloadToken={prdPreviewReloadToken}
             showExpertProcess={subagentFocusView?.threadId === threadId}
             onPreviewTabChange={setPreviewTab}
@@ -1486,14 +1430,12 @@ function RequirementConversationSession({
             onReloadSource={loadSourcePreview}
             onReloadManifest={loadRequirementSpaceManifest}
             onOpenWorkspaceFilePreview={openWorkspaceFilePreview}
-            onChoosePrototypeRoute={choosePrototypeRoute}
             onRevealRequirementFile={revealRequirementFile}
             onRequestPrototypeDesign={requestPrototypeDesign}
             onStartBatchPrototypeDesign={startBatchPrototypeDesign}
             onClearPrototypeDesign={clearPrototypeDesign}
             onClearPrototypeFunction={clearPrototypeFunction}
             onUpdatePrototypeFunctionDesign={updatePrototypeFunctionDesign}
-            onCompletePrototypeDesign={completePrototypeDesign}
             onPublishToRequirementSpace={handlePublishToRequirementSpace}
             onSendLeanstarToken={handleSendLeanstarToken}
           />

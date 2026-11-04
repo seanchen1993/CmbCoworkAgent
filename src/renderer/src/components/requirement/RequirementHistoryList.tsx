@@ -6,8 +6,7 @@ import {
   EllipsisVertical,
   Loader2,
   Share2,
-  Trash2,
-  X
+  Trash2
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Avatar, AvatarFallback, AvatarGroup } from "@/components/ui/avatar"
@@ -30,17 +29,15 @@ import {
 } from "@/components/ui/dropdown-menu"
 import { cn } from "@/lib/utils"
 import {
-  getRequirementThreadIds,
-  getRequirementCompletedSteps,
   isRequirementGenerated,
   isRequirementPublished,
   type RequirementRecord,
   type RequirementUser
 } from "./requirement-data"
 import { isRequirementMine } from "./requirement-history-filter"
+import { RequirementStatusTags } from "./RequirementStatusTags"
 
 const PAGE_SIZE = 10
-const STEPS = ["提供需求", "Agent分析", "规范PRD", "原型设计", "发布3.0"]
 export type RequirementSourceFilter = "all" | "local" | "remote" | "space"
 
 const REMOTE_MOCK_REQUIREMENT: RequirementRecord = {
@@ -70,6 +67,8 @@ const REMOTE_MOCK_REQUIREMENT: RequirementRecord = {
       file: "mock-prd.md",
       currentStep: 5,
       needDesign: "1",
+      htmlFile: "",
+      htmlId: "",
       prDetailUrl: "https://example.invalid/requirements/mock"
     },
     functions: [
@@ -97,72 +96,34 @@ const REMOTE_MOCK_REQUIREMENT: RequirementRecord = {
   mock: true
 }
 
-function SelectionCheckbox({
-  checked,
-  indeterminate = false,
-  onChange,
-  ariaLabel
-}: {
-  checked: boolean
-  indeterminate?: boolean
-  onChange: () => void
-  ariaLabel: string
-}): React.JSX.Element {
-  const ref = useRef<HTMLInputElement>(null)
-  useEffect(() => {
-    if (ref.current) ref.current.indeterminate = indeterminate
-  }, [indeterminate])
-  return (
-    <input
-      ref={ref}
-      type="checkbox"
-      checked={checked}
-      onChange={onChange}
-      aria-label={ariaLabel}
-      className="size-4 cursor-pointer rounded accent-primary"
-    />
-  )
-}
-
-function ProgressSteps({ completed }: { completed: number }): React.JSX.Element {
-  return (
-    <div
-      className="ml-auto w-[280px] max-w-full shrink-0"
-      aria-label={`需求进度：已完成 ${completed} / ${STEPS.length} 步`}
-    >
-      <div className="flex items-center px-2">
-        {STEPS.map((step, index) => (
-          <div key={step} className="contents">
-            <span
-              className={cn(
-                "relative z-[1] size-3.5 shrink-0 rounded-full border-2",
-                index < completed ? "border-primary bg-primary" : "border-border bg-muted"
-              )}
-            />
-            {index < STEPS.length - 1 ? (
-              <span
-                className={cn(
-                  "h-0.5 min-w-5 flex-1",
-                  index + 1 < completed ? "bg-primary" : "bg-border"
-                )}
-              />
-            ) : null}
-          </div>
-        ))}
-      </div>
-      <div className="mt-1.5 grid grid-cols-5 text-center text-[10px] leading-4 text-muted-foreground">
-        {STEPS.map((step) => (
-          <span key={step} className="whitespace-nowrap">
-            {step}
-          </span>
-        ))}
-      </div>
-    </div>
-  )
-}
-
 function initials(value: string): string {
   return (value.trim().slice(0, 1) || "需").toUpperCase()
+}
+
+const AVATAR_TONE_CLASSES = [
+  "bg-blue-100 text-blue-700 dark:bg-blue-500/20 dark:text-blue-300",
+  "bg-emerald-100 text-emerald-700 dark:bg-emerald-500/20 dark:text-emerald-300",
+  "bg-violet-100 text-violet-700 dark:bg-violet-500/20 dark:text-violet-300",
+  "bg-amber-100 text-amber-700 dark:bg-amber-500/20 dark:text-amber-300",
+  "bg-rose-100 text-rose-700 dark:bg-rose-500/20 dark:text-rose-300",
+  "bg-cyan-100 text-cyan-700 dark:bg-cyan-500/20 dark:text-cyan-300",
+  "bg-orange-100 text-orange-700 dark:bg-orange-500/20 dark:text-orange-300",
+  "bg-fuchsia-100 text-fuchsia-700 dark:bg-fuchsia-500/20 dark:text-fuchsia-300",
+  "bg-lime-100 text-lime-700 dark:bg-lime-500/20 dark:text-lime-300",
+  "bg-teal-100 text-teal-700 dark:bg-teal-500/20 dark:text-teal-300",
+  "bg-indigo-100 text-indigo-700 dark:bg-indigo-500/20 dark:text-indigo-300",
+  "bg-purple-100 text-purple-700 dark:bg-purple-500/20 dark:text-purple-300",
+  "bg-pink-100 text-pink-700 dark:bg-pink-500/20 dark:text-pink-300",
+  "bg-sky-100 text-sky-700 dark:bg-sky-500/20 dark:text-sky-300",
+  "bg-red-100 text-red-700 dark:bg-red-500/20 dark:text-red-300",
+  "bg-yellow-100 text-yellow-700 dark:bg-yellow-500/20 dark:text-yellow-300"
+] as const
+
+function avatarToneClass(value: string): string {
+  const label = initials(value)
+  let hash = 0
+  for (const character of label) hash = (hash * 31 + (character.codePointAt(0) ?? 0)) >>> 0
+  return AVATAR_TONE_CLASSES[hash % AVATAR_TONE_CLASSES.length]
 }
 
 function sourceTagClass(origin: RequirementRecord["origin"]): string {
@@ -208,15 +169,10 @@ function RequirementAvatars({ users }: { users: RequirementUser[] }): React.JSX.
           aria-label={`远端用户 ${users.length} 人：${users.map((user) => user.name).join("、")}`}
         >
           <AvatarGroup>
-            {users.slice(0, 3).map((user, index) => (
-              <Avatar key={user.id} className="size-5">
+            {users.slice(0, 3).map((user) => (
+              <Avatar key={user.id} className="size-6 ring-2 ring-background-elevated">
                 <AvatarFallback
-                  className={cn(
-                    "text-[9px] font-semibold",
-                    index % 3 === 0 && "bg-primary text-primary-foreground",
-                    index % 3 === 1 && "bg-status-info text-primary-foreground",
-                    index % 3 === 2 && "bg-status-nominal text-primary-foreground"
-                  )}
+                  className={cn("text-[10px] font-semibold", avatarToneClass(user.name))}
                 >
                   {initials(user.name)}
                 </AvatarFallback>
@@ -239,16 +195,11 @@ function RequirementAvatars({ users }: { users: RequirementUser[] }): React.JSX.
           远端用户 · {users.length}
         </div>
         <div className="space-y-1.5">
-          {users.map((user, index) => (
+          {users.map((user) => (
             <div key={user.id} className="flex items-center gap-2 rounded-md px-1 py-0.5">
               <Avatar className="size-6">
                 <AvatarFallback
-                  className={cn(
-                    "text-[10px] font-semibold",
-                    index % 3 === 0 && "bg-primary/15 text-primary",
-                    index % 3 === 1 && "bg-status-info/15 text-status-info",
-                    index % 3 === 2 && "bg-status-nominal/15 text-status-nominal"
-                  )}
+                  className={cn("text-[10px] font-semibold", avatarToneClass(user.name))}
                 >
                   {initials(user.name)}
                 </AvatarFallback>
@@ -272,9 +223,7 @@ export function RequirementHistoryList({
   mineOnly,
   systemId,
   onOpen,
-  onDelete,
-  selectionMode,
-  onSelectionModeChange
+  onDelete
 }: {
   requirements: RequirementRecord[]
   currentUser: RequirementUser | null
@@ -284,13 +233,10 @@ export function RequirementHistoryList({
   systemId: string | null
   onOpen: (requirement: RequirementRecord) => void
   onDelete: (requirement: RequirementRecord) => Promise<void>
-  selectionMode: boolean
-  onSelectionModeChange: (enabled: boolean) => void
 }): React.JSX.Element {
   const filterKey = `${systemId ?? "all"}\u0000${sourceFilter}\u0000${mineOnly}\u0000${query}`
   const [pageState, setPageState] = useState({ filterKey: "", page: 1 })
-  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
-  const [toDelete, setToDelete] = useState<RequirementRecord[]>([])
+  const [toDelete, setToDelete] = useState<RequirementRecord | null>(null)
   const [toOpen, setToOpen] = useState<RequirementRecord | null>(null)
   const [isDeleting, setIsDeleting] = useState(false)
   const [deleteError, setDeleteError] = useState<string | null>(null)
@@ -325,43 +271,16 @@ export function RequirementHistoryList({
   const totalPages = Math.max(1, Math.ceil(visibleItems.length / PAGE_SIZE))
   const currentPage = Math.min(page, totalPages)
   const pageItems = visibleItems.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE)
-  const selected = requirements.filter((item) => selectedIds.has(item.id) && !item.readOnly)
-  const allPageSelected =
-    pageItems.length > 0 && pageItems.every((item) => selectedIds.has(item.id))
-  const somePageSelected = pageItems.some((item) => selectedIds.has(item.id))
-
-  useEffect(() => {
-    const available = new Set(requirements.map((item) => item.id))
-    setSelectedIds((current) => new Set([...current].filter((id) => available.has(id))))
-  }, [requirements])
-
-  const togglePage = (): void =>
-    setSelectedIds((current) => {
-      const next = new Set(current)
-      pageItems.forEach((item) => (allPageSelected ? next.delete(item.id) : next.add(item.id)))
-      return next
-    })
-  const toggleOne = (id: string): void =>
-    setSelectedIds((current) => {
-      const next = new Set(current)
-      next.has(id) ? next.delete(id) : next.add(id)
-      return next
-    })
   const confirmDelete = async (): Promise<void> => {
+    if (!toDelete) return
     setIsDeleting(true)
     setDeleteError(null)
-    const completed = new Set<string>()
     try {
-      for (const item of toDelete) {
-        await onDelete(item)
-        completed.add(item.id)
-      }
-      setToDelete([])
+      await onDelete(toDelete)
+      setToDelete(null)
     } catch (error) {
-      setToDelete((current) => current.filter((item) => !completed.has(item.id)))
       setDeleteError(error instanceof Error ? error.message : "删除需求失败，请重试")
     } finally {
-      setSelectedIds((current) => new Set([...current].filter((id) => !completed.has(id))))
       setIsDeleting(false)
     }
   }
@@ -369,46 +288,9 @@ export function RequirementHistoryList({
   return (
     <>
       <section className="flex h-full min-h-0 flex-1 flex-col overflow-hidden">
-        {selectionMode ? (
-          <div className="mb-3 flex min-h-11 items-center gap-3 rounded-xl border border-border bg-background-elevated px-4 text-xs text-muted-foreground">
-            <SelectionCheckbox
-              checked={allPageSelected}
-              indeterminate={somePageSelected && !allPageSelected}
-              onChange={togglePage}
-              ariaLabel="全选当前页"
-            />
-            <span>批量选择需求{selected.length ? ` · 已选 ${selected.length} 项` : ""}</span>
-            {selected.length ? (
-              <Button
-                type="button"
-                variant="destructive"
-                size="sm"
-                className="ml-auto h-7 text-xs"
-                onClick={() => setToDelete(selected)}
-              >
-                <Trash2 className="size-3.5" />
-                删除所选
-              </Button>
-            ) : (
-              <span className="ml-auto" />
-            )}
-            <button
-              type="button"
-              onClick={() => {
-                onSelectionModeChange(false)
-                setSelectedIds(new Set())
-              }}
-              className="flex size-7 items-center justify-center rounded-md hover:bg-background-interactive"
-              aria-label="退出批量选择"
-            >
-              <X className="size-4" />
-            </button>
-          </div>
-        ) : null}
-
         <div className="min-h-0 flex-1 overflow-y-auto pr-1">
           {pageItems.length ? (
-            <div className="grid gap-3 [grid-template-columns:repeat(auto-fill,minmax(min(100%,560px),1fr))]">
+            <div className="grid grid-cols-1 gap-3 lg:grid-cols-2 xl:grid-cols-3">
               {pageItems.map((item) => {
                 const generated = isRequirementGenerated(item) || isRequirementPublished(item)
                 const owner = item.owner ?? (item.origin === "local" ? currentUser : null)
@@ -421,38 +303,26 @@ export function RequirementHistoryList({
                 return (
                   <article
                     key={item.id}
-                    role={item.origin === "space" ? "button" : undefined}
-                    tabIndex={item.origin === "space" ? 0 : undefined}
+                    role="button"
+                    tabIndex={0}
                     className={cn(
-                      "group relative flex min-h-[150px] flex-col rounded-xl border border-border bg-background-elevated p-4 ring-primary/20 transition-[border-color,box-shadow] duration-200 hover:border-primary/70 hover:ring-1",
-                      item.origin === "space" && "cursor-pointer"
+                      "group relative flex min-h-[152px] cursor-pointer flex-col rounded-xl border border-border bg-background-elevated px-5 py-3 ring-primary/20 transition-[border-color,box-shadow] duration-200 hover:border-primary/70 hover:ring-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                     )}
                     onClick={(event) => {
-                      if (item.origin !== "space") return
                       if ((event.target as HTMLElement).closest("button, a, input")) return
-                      onOpen(item)
+                      item.workspaceMissing ? setToOpen(item) : onOpen(item)
                     }}
                     onKeyDown={(event) => {
                       if (
-                        item.origin !== "space" ||
                         event.target !== event.currentTarget ||
                         (event.key !== "Enter" && event.key !== " ")
                       )
                         return
                       event.preventDefault()
-                      onOpen(item)
+                      item.workspaceMissing ? setToOpen(item) : onOpen(item)
                     }}
                   >
-                    {selectionMode && !item.readOnly ? (
-                      <span className="absolute left-2 top-2">
-                        <SelectionCheckbox
-                          checked={selectedIds.has(item.id)}
-                          onChange={() => toggleOne(item.id)}
-                          ariaLabel={`选择需求 ${item.title}`}
-                        />
-                      </span>
-                    ) : null}
-                    <div className={cn("flex items-start gap-1.5 pr-8", selectionMode && "pl-3")}>
+                    <div className="flex items-center gap-2 pr-9">
                       <span className="mt-0.5 shrink-0 rounded-md bg-muted px-2 py-0.5 text-[10px] font-medium text-muted-foreground">
                         {item.system}
                       </span>
@@ -485,18 +355,6 @@ export function RequirementHistoryList({
                           需求空间3.0
                         </span>
                       ) : null}
-                      {collaborators.length ? <RequirementAvatars users={collaborators} /> : null}
-                      <div className="ml-auto flex shrink-0 items-center gap-1.5">
-                        {!item.readOnly ? (
-                          <button
-                            type="button"
-                            onClick={() => (item.workspaceMissing ? setToOpen(item) : onOpen(item))}
-                            className="inline-flex h-7 items-center rounded-md border border-border px-2.5 text-[11px] font-medium text-foreground transition-colors hover:bg-background-interactive"
-                          >
-                            需求 →
-                          </button>
-                        ) : null}
-                      </div>
                     </div>
                     <DropdownMenu>
                       <DropdownMenuTrigger asChild>
@@ -528,7 +386,7 @@ export function RequirementHistoryList({
                         <DropdownMenuItem
                           variant="destructive"
                           disabled={item.readOnly}
-                          onSelect={() => setToDelete([item])}
+                          onSelect={() => setToDelete(item)}
                         >
                           <Trash2 />
                           删除
@@ -536,15 +394,20 @@ export function RequirementHistoryList({
                       </DropdownMenuContent>
                     </DropdownMenu>
                     <p
-                      className="mt-2 line-clamp-2 text-xs leading-5 text-muted-foreground"
+                      className="mt-2 line-clamp-1 text-xs leading-5 text-muted-foreground"
                       title={description}
                     >
                       {description}
                     </p>
-                    <div className="mt-auto flex flex-wrap items-end justify-between gap-4 pt-6">
+                    <div className="mt-auto pt-1">
                       <div className="flex min-w-0 items-center gap-2 text-[11px] text-muted-foreground">
                         <Avatar className="size-6">
-                          <AvatarFallback className="bg-primary/12 text-[10px] text-primary">
+                          <AvatarFallback
+                            className={cn(
+                              "text-[10px] font-semibold",
+                              avatarToneClass(owner?.name ?? "需求")
+                            )}
+                          >
                             {initials(owner?.name ?? "需求")}
                           </AvatarFallback>
                         </Avatar>
@@ -566,7 +429,23 @@ export function RequirementHistoryList({
                           />
                         ) : null}
                       </div>
-                      <ProgressSteps completed={getRequirementCompletedSteps(item)} />
+                      <div className="mt-2 flex min-h-7 items-end justify-between gap-3">
+                        <RequirementStatusTags
+                          standardized={isRequirementGenerated(item)}
+                          hasPrototype={
+                            Boolean(item.prdManifest.prd.htmlFile?.trim()) ||
+                            item.prdManifest.functions.some((entry) =>
+                              Boolean(entry.htmlFile?.trim())
+                            )
+                          }
+                          published={isRequirementPublished(item)}
+                        />
+                        {collaborators.length ? (
+                          <RequirementAvatars users={collaborators} />
+                        ) : (
+                          <span />
+                        )}
+                      </div>
                     </div>
                   </article>
                 )
@@ -622,23 +501,19 @@ export function RequirementHistoryList({
       </section>
 
       <Dialog
-        open={toDelete.length > 0}
+        open={toDelete !== null}
         onOpenChange={(open) => {
           if (!open && !isDeleting) {
-            setToDelete([])
+            setToDelete(null)
             setDeleteError(null)
           }
         }}
       >
         <DialogContent className="sm:max-w-lg">
           <DialogHeader>
-            <DialogTitle>{toDelete.length > 1 ? "确认批量删除需求" : "确认删除需求"}</DialogTitle>
+            <DialogTitle>确认删除需求</DialogTitle>
             <DialogDescription className="leading-6">
-              确定删除
-              {toDelete.length > 1
-                ? `所选 ${toDelete.length} 项需求及其关联的 ${toDelete.reduce((sum, item) => sum + getRequirementThreadIds(item).length, 0)} 个会话`
-                : `「${toDelete[0]?.title ?? ""}」`}
-              吗？相关需求文件夹也会被删除，且不可恢复。
+              确定删除「{toDelete?.title ?? ""}」吗？相关需求文件夹也会被删除，且不可恢复。
             </DialogDescription>
           </DialogHeader>
           {deleteError ? (
@@ -654,7 +529,7 @@ export function RequirementHistoryList({
               type="button"
               variant="outline"
               disabled={isDeleting}
-              onClick={() => setToDelete([])}
+              onClick={() => setToDelete(null)}
             >
               取消
             </Button>
