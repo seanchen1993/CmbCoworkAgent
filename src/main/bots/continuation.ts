@@ -39,6 +39,29 @@ export function canSteerBotTask(source: BotTask, incoming: BotTask): boolean {
   )
 }
 
+/** A peer feedback joins only the explicitly addressed physical task. */
+export function canDeliverBotFeedback(target: BotTask, feedback: BotTask): boolean {
+  if (
+    feedback.origin.kind !== "bot" ||
+    !feedback.origin.feedbackForTaskId ||
+    feedback.origin.feedbackForTaskId !== target.id ||
+    feedback.origin.expectsReply ||
+    feedback.botId !== target.botId ||
+    feedback.threadId !== target.threadId ||
+    feedback.workId !== target.workId ||
+    target.mockSource ||
+    feedback.mockSource
+  )
+    return false
+  const root = target.origin.kind === "bot" ? target.origin.rootTaskId : target.id
+  return (
+    feedback.origin.rootTaskId === root &&
+    (target.origin.kind === "group" ||
+      (target.origin.kind === "bot" && target.origin.expectsReply)) &&
+    feedback.origin.groupId === target.origin.groupId
+  )
+}
+
 /** Workflow receipts need their instance fence; legacy receipts and coordinator claims stay unchanged. */
 export function canDeferBotTask(task: Pick<BotTask, "origin">): boolean {
   return (
@@ -58,7 +81,16 @@ export function botContinuationMessageId(taskId: string, checkpointId: string): 
 }
 
 /** Bot notification retry classification; policy/user stops are decisions, not transient failures. */
-export function isRetryableNotificationTerminal(terminal: { outcome: string; code: string; coordinatorNotificationDelivered?: boolean }): boolean {
-  return !terminal.coordinatorNotificationDelivered && terminal.outcome !== "success" &&
-    !["cancelled", "hook_halt", "failure_fuse", "prompt_blocked", "recovery_interrupted"].includes(terminal.code)
+export function isRetryableNotificationTerminal(terminal: {
+  outcome: string
+  code: string
+  coordinatorNotificationDelivered?: boolean
+}): boolean {
+  return (
+    !terminal.coordinatorNotificationDelivered &&
+    terminal.outcome !== "success" &&
+    !["cancelled", "hook_halt", "failure_fuse", "prompt_blocked", "recovery_interrupted"].includes(
+      terminal.code
+    )
+  )
 }

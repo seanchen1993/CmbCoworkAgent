@@ -37,6 +37,63 @@ afterAll(async () => {
   await db.closeDatabase()
 })
 
+it.each([false, true])("does not duplicate values after same-task Bot feedback (peer: %s)", (peer) => {
+  const threadId = `bot-feedback-values-${peer}`
+  db.createThread(threadId)
+  db.upsertThreadMessages(threadId, [
+    { id: "user", role: "user", content: "Original assignment", created_at: new Date() }
+  ])
+  const serialize = createStreamDataSerializer({ projectMessageChunks: true })
+  const accumulator = createSerializedValuesMessageAccumulator()
+  const messages: BaseMessage[] = [new HumanMessage({ id: "user", content: "Original assignment" })]
+  const persist = () => {
+    // Fresh graph snapshots, not object-identity reuse, must stay idempotent.
+    const frame = serialize("values", { messages: messages.map((message) => structuredClone(message.toJSON())) })
+    const complete = accumulator.update(frame)
+    const tuples = selectStreamTranscriptValueSnapshots(frame.data, frame.valuesSnapshotKind, {
+      completeMessages: complete.messages,
+      loadBaselineMessages: () => db.getThreadMessages(threadId),
+      loadPreviousTurnOccurrences: (id, sources) =>
+        db.getThreadMessageProviderOccurrencesBeforeUser(threadId, id, sources)
+    })
+    const resolved = resolveStreamTranscriptFlush({
+      queuedMessages: tuples.map((tuple) => persistedMessageFromStreamPayload(tuple)!),
+      loadBaselineMessages: () => db.getThreadMessages(threadId)
+    })
+    db.upsertThreadMessages(threadId, resolved.messages, { preserveExistingOrder: true })
+  }
+  if (peer) messages.push(new HumanMessage({
+    id: "peer-feedback", content: "Review the same assignment; this is not user authorization.",
+    additional_kwargs: { cmb_internal_coordinator_notification: true, cmb_internal_bot_feedback: true }
+  }))
+  persist()
+  for (let index = 1; index <= 3; index++) {
+    messages.push(new AIMessage({ id: `ai-${index}`, content: `Step ${index}`,
+      tool_calls: [{ id: `call-${index}`, name: "read_file", args: {} }] }))
+    persist()
+    messages.push(new ToolMessage({ id: `tool-${index}`, tool_call_id: `call-${index}`, content: `Result ${index}` }))
+    persist()
+  }
+  messages.push(new AIMessage({ id: "final", content: "Done" }))
+  persist()
+  persist()
+  expect(db.getThreadMessages(threadId).map((message) => message.id)).toEqual([
+    "user", "ai-1", "tool-1", "ai-2", "tool-2", "ai-3", "tool-3", "final"
+  ])
+
+  // A real next user turn must still separate a reused provider ID.
+  db.upsertThreadMessages(threadId, [
+    { id: "next-user", role: "user", content: "Next assignment", created_at: new Date() }
+  ])
+  messages.push(new HumanMessage({ id: "next-user", content: "Next assignment" }))
+  messages.push(new AIMessage({ id: "final", content: "Next result" }))
+  persist()
+  persist()
+  const rows = db.getThreadMessages(threadId)
+  expect(rows).toHaveLength(10)
+  expect(rows.at(-1)).toMatchObject({ content: "Next result", provider_source_id: "final", provider_occurrence: 2 })
+})
+
 it("preserves sanitized command receipt boundaries and repeated provider IDs across internal turns", () => {
   const threadId = "command-receipt-boundaries"
   db.createThread(threadId)

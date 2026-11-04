@@ -41,6 +41,8 @@ export interface CurrentRunQueuedMessage {
   id: string
   content: string
   displayContent?: string
+  /** Trusted Bot-only data, never a user instruction or permission grant. */
+  peerFeedback?: { senderBotId: string; sourceTaskId: string; targetTaskId: string }
   /** Trusted host receipt, called synchronously before durable transcript/model injection.
    * False withdraws a cancelled inbox message. Throws fail the turn before model side effects. */
   beforeInject?: () => boolean
@@ -505,7 +507,18 @@ async function drainCurrentRunMessagesForInjection(
         return new HumanMessage({
           id: message.id,
           content: message.content,
-          ...(visibleContent !== message.content
+          ...(message.peerFeedback
+            ? {
+                additional_kwargs: {
+                  // The historical marker is shared by workflow/internal Human inputs.
+                  // Reuse its history, StopHook and compaction authority protections.
+                  cmb_internal_coordinator_notification: true,
+                  cmb_internal_bot_feedback: true,
+                  cmb_peer_feedback_source: message.peerFeedback
+                }
+              }
+            : {}),
+          ...(visibleContent !== message.content && !message.peerFeedback
             ? {
                 additional_kwargs: {
                   [VISIBLE_USER_MESSAGE_KEY]: visibleContent

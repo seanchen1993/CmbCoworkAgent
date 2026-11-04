@@ -935,6 +935,17 @@ export function getOrCreateApprovalStore(threadId: string): ApprovalStore {
 // were steered into the running turn (drop them from the queue, render them as
 // committed user turns).
 setCurrentRunInjectionNotifier(async (threadId, messages, context) => {
+  // Peer data stays in the Bot inbox/checkpoint. At afterModel, the preceding
+  // assistant still needs the normal durable identity before another model call.
+  const peerOnly = messages.length > 0 && messages.every((message) => message.peerFeedback)
+  if (peerOnly) {
+    if (!context?.runToken || !isCurrentRunMessageQueueOwner(threadId, context.runToken)) {
+      const ownershipError = new Error("Current-run feedback owner changed before injection")
+      ownershipError.name = "AbortError"
+      throw ownershipError
+    }
+    if (!context.completedAssistantMessage) return
+  }
   // This strict DB flush is the durable acknowledgement boundary. The
   // renderer may remove its localStorage draft only after this succeeds; if it
   // throws, the queue middleware restores the messages for a later retry.
@@ -984,7 +995,8 @@ setCurrentRunInjectionNotifier(async (threadId, messages, context) => {
         context.anchorMessage
       )
     : undefined
-  if (context.anchorMessage && !durableAnchorMessageId) {
+  // Bot-only tools may have a checkpoint entry but no visible transcript row.
+  if (context.anchorMessage && !durableAnchorMessageId && !peerOnly) {
     throw new Error("Cannot resolve current-run injection predecessor in durable transcript")
   }
   const completedAssistantIdentity = completedAssistantMessage
@@ -1030,7 +1042,9 @@ setCurrentRunInjectionNotifier(async (threadId, messages, context) => {
           }
         ]
       : []),
-    ...messages.map((message) => ({
+    // Internal feedback remains in its durable Bot inbox and graph checkpoint,
+    // never in the ordinary user transcript.
+    ...messages.filter((message) => !message.peerFeedback).map((message) => ({
       id: message.id,
       role: "user" as const,
       // Keep the durable transcript aligned with the user bubble. The prepared
@@ -1089,7 +1103,7 @@ setCurrentRunInjectionNotifier(async (threadId, messages, context) => {
         }
       : undefined
   const payload = {
-    messages: messages.map((message) => ({
+    messages: messages.filter((message) => !message.peerFeedback).map((message) => ({
       id: message.id,
       content: message.displayContent || message.content
     })),
@@ -1123,7 +1137,7 @@ setCurrentRunInjectionNotifier(async (threadId, messages, context) => {
       // Guided input starts a new user/assistant boundary inside the same run.
       // Reset the renderer's live assistant accumulator before the model is
       // invoked again so coordinator output cannot append to the prior reply.
-      win.webContents.send(`agent:stream:${threadId}`, {
+      if (payload.messages.length) win.webContents.send(`agent:stream:${threadId}`, {
         type: "custom",
         data: {
           type: "current_run_user_injected",
@@ -1137,7 +1151,7 @@ setCurrentRunInjectionNotifier(async (threadId, messages, context) => {
           messages: payload.messages
         }
       })
-      win.webContents.send(`agent:queueInjected:${threadId}`, payload)
+      if (payload.messages.length) win.webContents.send(`agent:queueInjected:${threadId}`, payload)
     } catch (error) {
       // Persistence is the acknowledgement boundary. A renderer can disappear
       // after the durable write (reload/window close); notification failure must

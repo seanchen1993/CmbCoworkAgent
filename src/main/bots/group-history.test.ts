@@ -39,6 +39,47 @@ function historyFixture() {
 }
 
 describe("bounded group history windows", () => {
+  it("looks up visible question states by task identity without scanning unrelated history", () => {
+    const db = new NativeSqliteAdapter(new DatabaseSync(":memory:"))
+    databases.push(db)
+    const store = new BotStore(db)
+    const bot = store.create({ name: "A", instructions: "", color: "#ea2845", modelRef: null })
+    const group = store.saveGroup({ name: "Room", memberIds: [bot.id] })
+    store.sendGroup({ groupId: group.id, requestId: "question-root", text: "Ask", targetBotIds: [bot.id] })
+    const task = store.recentTasks()[0]
+    store.transition(task.id, "running")
+    store.recordGroupQuestion(task.id, {
+      requestId: "question-state", threadId: task.threadId,
+      createdAt: new Date().toISOString(),
+      questions: [{ id: "q", header: "Choice", question: "Next?", options: [] }]
+    })
+    const prepare = vi.spyOn(db, "prepare")
+    expect(store.groupMessages(group.id).find(message => message.question)?.question?.state).toBe("running")
+    store.groupMessages(group.id, undefined, false)
+    const queries = prepare.mock.calls.map(([sql]) => sql).filter(sql => sql.startsWith("WITH page AS"))
+    expect(queries).toHaveLength(2)
+    for (const sql of queries) {
+      const statement = db.prepare(`EXPLAIN QUERY PLAN ${sql}`)
+      statement.bind([group.id, Number.MAX_SAFE_INTEGER])
+      const details: string[] = []
+      while (statement.step()) details.push(String(statement.getAsObject().detail))
+      statement.free()
+      expect(details.join("\n")).not.toMatch(/SCAN (?:bot_tasks|bot_exchange_archive)/)
+      expect(details.join("\n")).not.toContain("AUTOMATIC COVERING INDEX")
+    }
+    store.settle(task.id, "completed", null)
+    expect(store.groupMessages(group.id).find(message => message.question)?.question?.state).toBe("completed")
+    // Archived state is still available after disposable task bodies are removed.
+    db.run(`INSERT INTO bot_exchange_archive
+      (id,bot_id,request_id,message,state,error,created_at,updated_at,origin_json,thread_id,work_id,audience_key)
+      SELECT id,bot_id,request_id,message,state,error,created_at,updated_at,origin_json,thread_id,work_id,'desktop'
+      FROM bot_tasks WHERE id=?`, [task.id])
+    db.run("DELETE FROM bot_tasks WHERE id=?", [task.id])
+    expect(store.groupMessages(group.id).find(message => message.question)?.question?.state).toBe("completed")
+    db.run("DELETE FROM bot_exchange_archive WHERE id=?", [task.id])
+    expect(store.groupMessages(group.id).find(message => message.question)?.question?.state).toBeNull()
+  })
+
   it("resolves a delayed group handoff to its original request beyond the latest history page", () => {
     const db = new NativeSqliteAdapter(new DatabaseSync(":memory:"))
     databases.push(db)

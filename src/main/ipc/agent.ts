@@ -5329,6 +5329,18 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       console.warn("[Agent][Queue] rejected invalid queue payload", { threadId })
       return { queued: false, reason: "invalid_payload" }
     }
+    // Opt-in only from the trusted Bot owner. Renderer/desktop steering cannot
+    // turn arbitrary text into an internal peer message or bypass user hooks.
+    const peerFeedback = message.peerFeedback
+    if (
+      peerFeedback &&
+      (request.owner !== "bot" ||
+        peerFeedback.targetTaskId !== request.runId ||
+        !peerFeedback.senderBotId ||
+        !peerFeedback.sourceTaskId ||
+        typeof message.beforeInject !== "function")
+    )
+      return { queued: false, reason: "invalid_peer_feedback" }
     const messageId = message.id
     const messageContent = message.content
     const messageDisplayContent = message.displayContent
@@ -5365,10 +5377,12 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         }
         let prepared: CurrentRunMessagePreparation
         try {
-          prepared = await preparer.prepare({
-            content: messageContent,
-            displayContent: messageDisplayContent
-          })
+          prepared = peerFeedback
+            ? { accepted: true, content: messageContent }
+            : await preparer.prepare({
+                content: messageContent,
+                displayContent: messageDisplayContent
+              })
         } catch (error) {
           const preparationError = error instanceof Error ? error.message : "引导消息预处理失败"
           console.warn("[Agent][Queue] current-run prompt preparation failed:", error)
@@ -5406,9 +5420,13 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             id: messageId,
             beforeInject: message.beforeInject,
             content: prepared.content,
-            displayContent: neutralizeWorkflowPlumbingUserText(
-              messageDisplayContent || messageContent
-            )
+            ...(peerFeedback
+              ? { peerFeedback }
+              : {
+                  displayContent: neutralizeWorkflowPlumbingUserText(
+                    messageDisplayContent || messageContent
+                  )
+                })
           },
           preparer.runToken
         )
@@ -5428,7 +5446,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           `[Agent][Queue] queued current-run message ${messageId} for thread ${threadId}`
         )
         // Only the trusted Bot path opts into process handoff. Desktop queue semantics stay unchanged.
-        if (request.owner === "bot")
+        if (request.owner === "bot" && !peerFeedback)
           LocalSandbox.yieldForegroundCommands(
             activeController.signal,
             () =>

@@ -58,6 +58,8 @@ function assertSourceOrder(value: string, before: string, after: string, label: 
 const queueMiddlewareCall = "createCurrentRunMessageQueueMiddleware(\n        currentRunMessageQueueOwnerToken,\n        onPrimaryModelRequestState\n      )"
 const runtime = read("src/main/agent/runtime.ts")
 const queueModule = read("src/main/agent/current-run-message-queue.ts")
+assertIncludes(runtime, "messages.filter((message) => !message.peerFeedback)", "peer feedback cannot enter the ordinary user transcript")
+
 const standardTurn = read("src/main/agent/standard-thread-turn.ts")
 const physicalStreamRunSetup = read("src/main/agent/physical-stream-run-setup.ts")
 const runSettlementFence = read("src/main/agent/run-settlement-fence.ts")
@@ -2312,7 +2314,7 @@ function testAfterModelSteerPersistsPrecedingAssistantReply(): void {
   assertSourceOrder(
     notifierBody,
     "const completedAssistantMessage = context?.completedAssistantMessage",
-    "...messages.map((message) => ({",
+    "...messages.filter((message) => !message.peerFeedback).map((message) => ({",
     "the final assistant reply is persisted before the steered user turn"
   )
   assertIncludes(

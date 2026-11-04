@@ -52,6 +52,7 @@ import type {
   BotTask
 } from "../../../../shared/bots/contracts"
 import { BotRuntimeAvatar } from "./BotRuntimeAvatar"
+import { BotAvatar } from "./BotAvatar"
 import { BotMessageFilePreview } from "./BotMessageFilePreview"
 import { BotDeliveredFile } from "./BotDeliveredFile"
 import { BotConversationTools } from "./BotConversationTools"
@@ -272,12 +273,6 @@ export function BotGroupConversation({
       }
     }
   }
-  const latestByAuthor = useMemo(() => {
-    const latest = new Map<string, string>()
-    for (const message of messages)
-      if (message.authorBotId) latest.set(message.authorBotId, message.id)
-    return latest
-  }, [messages])
   const running = botGroupActiveTasks(group.id, tasks)
   const backgroundMembers = group.memberIds.filter((id) =>
     backgroundThreads.includes(`group-${group.id}-${id}`)
@@ -501,9 +496,6 @@ export function BotGroupConversation({
         >
           <BotGroupAvatar
             memberIds={group.memberIds}
-            groupId={group.id}
-            tasks={tasks}
-            backgroundThreads={backgroundThreads}
             bots={bots}
             userInitials={userInitials}
             size={26}
@@ -670,8 +662,6 @@ export function BotGroupConversation({
                     const author = item.authorBotId
                       ? bots.find((bot) => bot.id === item.authorBotId)
                       : null
-                    const authorTask = running.find((task) => task.botId === item.authorBotId)
-                    const isLatestByAuthor = author && latestByAuthor.get(author.id) === item.id
                     const replyText = (
                       displayText.trim()
                         ? displayText
@@ -743,20 +733,11 @@ export function BotGroupConversation({
                                   aria-label={`查看 ${author.name}`}
                                   onClick={() => onOpenBot(author)}
                                 >
-                                  <BotRuntimeAvatar
-                                    threadId={`group-${group.id}-${author.id}`}
+                                  <BotAvatar
+                                    animated={false}
                                     color={author.color}
                                     shape={author.shape}
                                     size={23}
-                                    busy={Boolean(
-                                      isLatestByAuthor &&
-                                      (authorTask?.state === "running" ||
-                                        backgroundMembers.includes(author.id))
-                                    )}
-                                    waiting={Boolean(
-                                      isLatestByAuthor && authorTask?.state === "waiting_user"
-                                    )}
-                                    taskCreatedAt={authorTask?.createdAt}
                                   />
                                 </button>
                               )}

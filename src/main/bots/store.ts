@@ -58,13 +58,14 @@ import {
   boundGroupReferences,
   GROUP_DISCUSSION_MAX_DISPATCHES,
   GROUP_DISCUSSION_MAX_POSTS,
+  GROUP_DISCUSSION_MAX_ROUNDS,
   groupDiscussionSchema,
   isGroupDiscussionBudgetExhausted,
   nextGroupDiscussionSpeaker,
   type GroupDiscussion
 } from "./group-discussion"
 import { createBotAppearance } from "../../shared/bots/appearance"
-import { canDeferBotTask, canSteerBotTask, type BotStoppedTaskContext } from "./continuation"
+import { canDeferBotTask, canSteerBotTask, canDeliverBotFeedback, type BotStoppedTaskContext } from "./continuation"
 import { botContinuationTaskId } from "../../shared/bots/task-continuation"
 import { botWorkResultLabel, type BotWorkResultOrigin } from "../../shared/bots/work-result"
 import {
@@ -355,6 +356,10 @@ export class BotStore {
       db.run(
         "CREATE INDEX IF NOT EXISTS bot_tasks_family ON bot_tasks(COALESCE(json_extract(origin_json,'$.rootTaskId'),id),state,updated_at)"
       )
+      db.run(`CREATE INDEX IF NOT EXISTS bot_tasks_feedback ON bot_tasks(json_extract(origin_json,'$.feedbackForTaskId'))
+        WHERE json_extract(origin_json,'$.feedbackForTaskId') IS NOT NULL`)
+      db.run(`CREATE INDEX IF NOT EXISTS bot_tasks_feedback_message ON bot_tasks(json_extract(origin_json,'$.feedbackMessageId'),bot_id)
+        WHERE json_extract(origin_json,'$.feedbackMessageId') IS NOT NULL`)
       if (!columns.some((column) => column.name === "work_id"))
         db.run("ALTER TABLE bot_tasks ADD COLUMN work_id TEXT")
       if (
@@ -781,6 +786,7 @@ export class BotStore {
       botId: String(row.bot_id),
       threadId: String(row.thread_id),
       requestId: String(row.request_id),
+      ...(row.injected_into == null ? {} : { injectedInto: String(row.injected_into) }),
       ...(row.work_id == null ? {} : { workId: String(row.work_id) }),
       ...(row.mock_source_json == null
         ? {}
@@ -2929,7 +2935,7 @@ export class BotStore {
       THEN substr(message,instr(message,${boundary})+length(${boundary}),600)
       ELSE substr(message,1,600) END`
     const projection = previewsOnly
-      ? `id,bot_id,thread_id,work_id,request_id,${preview} AS message,state,error,created_at,updated_at,origin_json,mock_source_json`
+      ? `id,bot_id,thread_id,work_id,request_id,injected_into,${preview} AS message,state,error,created_at,updated_at,origin_json,mock_source_json`
       : "*"
     return this.rows(
       `SELECT ${projection} FROM bot_tasks WHERE state IN ('queued','running','waiting_user')
@@ -3092,14 +3098,15 @@ export class BotStore {
     const row = this.rows(
       `SELECT t.* FROM bot_tasks t JOIN bots b ON b.id=t.bot_id
       WHERE t.state='queued' AND b.archived=0 AND b.deleting=0 ${exclusion}
+      AND json_extract(t.origin_json,'$.feedbackForTaskId') IS NULL
       AND ${this.mock.runnableSql("t")} AND ${this.im.runnableSql("t")}
       AND (t.work_id IS NULL OR EXISTS(SELECT 1 FROM bot_work_items own WHERE own.id=t.work_id AND own.bot_id=t.bot_id AND own.state='active' AND own.detached=0 AND (own.conversation_json IS NULL OR json_extract(own.conversation_json,'$.state')='bound')))
       AND (json_extract(t.origin_json,'$.rootWorkId') IS NULL OR EXISTS(SELECT 1 FROM bot_work_items root JOIN bots owner ON owner.id=root.bot_id WHERE root.id=json_extract(t.origin_json,'$.rootWorkId') AND root.state='active' AND owner.archived=0 AND owner.deleting=0))
       ${allowWork ? "" : "AND t.work_id IS NULL AND json_extract(t.origin_json,'$.rootWorkId') IS NULL"}
-      AND NOT EXISTS (SELECT 1 FROM bot_tasks a WHERE a.thread_id=t.thread_id AND a.state IN ('running','waiting_user'))
+      AND NOT EXISTS (SELECT 1 FROM bot_tasks a WHERE a.thread_id=t.thread_id AND a.state IN ('running','waiting_user') AND NOT (a.injected_into IS NOT NULL AND a.injected_into=t.id AND json_extract(a.origin_json,'$.feedbackForTaskId') IS NOT NULL))
       AND NOT (json_extract(t.origin_json,'$.kind') IN ('group','discussion') AND EXISTS (
-        SELECT 1 FROM bot_tasks turn JOIN bots member ON member.id=turn.bot_id
-        WHERE turn.state IN ('queued','running')
+        SELECT 1 FROM bot_tasks turn INDEXED BY bot_tasks_queue JOIN bots member ON member.id=turn.bot_id
+        WHERE turn.state IN ('queued','running') AND turn.injected_into IS NULL
         AND json_extract(turn.origin_json,'$.groupId')=json_extract(t.origin_json,'$.groupId')
         AND json_extract(turn.origin_json,'$.kind') IN ('group','discussion')
         AND NOT (json_extract(t.origin_json,'$.kind') IN ('group','discussion')
@@ -3181,7 +3188,10 @@ export class BotStore {
     return this.transaction(() => {
       const current = this.getTask(id)
       if (current.state === state) return current
-      if (!TRANSITIONS[current.state].includes(state))
+      // A checkpoint owner is queued while its real background command runs.
+      // Failed cancellation must retain uncertainty, not claim it was stopped.
+      const uncertainContinuation = current.state === "queued" && state === "outcome_unknown" && Boolean(this.taskCheckpoint(id))
+      if (!TRANSITIONS[current.state].includes(state) && !uncertainContinuation)
         throw new BotError("CONFLICT", `任务状态已改变：${current.state}`)
       this.db.run("UPDATE bot_tasks SET state=?, error=?, updated_at=? WHERE id=?", [
         state,
@@ -3324,11 +3334,19 @@ export class BotStore {
         [reason, this.now(), ...ACTIVE_STATES]
       )
       if (this.db.getRowsModified()) this.changed()
+      this.db.run(`UPDATE bot_tasks SET state='interrupted',error=?,updated_at=?
+        WHERE state='queued' AND json_extract(origin_json,'$.feedbackForTaskId') IS NOT NULL
+        AND NOT EXISTS(SELECT 1 FROM bot_tasks target WHERE target.id=json_extract(bot_tasks.origin_json,'$.feedbackForTaskId')
+          AND target.state IN ('queued','running','waiting_user'))`, [reason, this.now()])
       const workflowInterruptions = new Map<string, BotTask>()
       // Fence every interrupted parent first. Reuse normal terminal results/outbox,
       // never replaying the interrupted work.
       for (const row of awaitingOutcomes) {
         const task = this.getTask(String(row.id))
+        // The bulk fence already interrupted these inputs. Only their owner
+        // reports the physical execution's interruption to the room.
+        if (task.origin.kind === "group" && task.injectedInto) continue
+        if (task.origin.kind === "bot" && task.origin.feedbackForTaskId) continue
         // This exact workflow interruption is reported once below before it can be acked.
         if (task.origin.kind === "notification" && task.origin.notificationKind === "workflow" && task.origin.runStartedAt) {
           workflowInterruptions.set(task.id, task)
@@ -3766,12 +3784,74 @@ export class BotStore {
     this.db.run("UPDATE bot_commands SET pending_notification=NULL WHERE id=?", [row.id])
   }
 
+  /** Same original human group instruction, never merely similar peer text. */
+  sameGroupAssignment(source: BotTask, target: BotTask): boolean {
+    if (source.mockSource || target.mockSource) return false
+    const root = (task: BotTask): BotTask | undefined => {
+      if (task.origin.kind === "group" || task.origin.kind === "discussion") return task
+      if (task.origin.kind !== "bot") return undefined
+      const row = this.rows("SELECT id FROM bot_tasks WHERE id=?", [task.origin.rootTaskId])[0]
+      return row ? this.getTask(String(row.id)) : undefined
+    }
+    const a = root(source), b = root(target)
+    if (!((a?.origin.kind === "group" || a?.origin.kind === "discussion") && b?.origin.kind === "group" &&
+      !a.mockSource && !b.mockSource && a.origin.groupId === b.origin.groupId &&
+      a.origin.messageId === b.origin.messageId &&
+      this.rows("SELECT id FROM bot_group_messages WHERE id=? AND group_id=? AND author_bot_id IS NULL",
+        [a.origin.messageId, a.origin.groupId]).length)) return false
+    // A physical run keeps its original origin after receiving new user input.
+    // Do not use that stale identity to inject old peer data, or rebind its
+    // descendants to a request they may never have received. Public posts and
+    // ordinary result delivery remain available through their existing paths.
+    // Consumption remains a boundary even if the receiving run later fails;
+    // injected_into records that fact independently of the input's final state.
+    const owners = [...new Set([source.id, target.id, a.id, b.id])]
+    return !this.rows(
+      `SELECT 1 FROM bot_tasks input JOIN bot_tasks owner ON owner.id=input.injected_into
+       JOIN bot_group_messages message ON message.id=json_extract(input.origin_json,'$.messageId')
+       JOIN bot_group_messages original ON original.id=? AND original.group_id=message.group_id
+       WHERE input.injected_into IN (${owners.map(() => "?").join(",")})
+         AND input.bot_id=owner.bot_id AND input.thread_id=owner.thread_id
+         AND json_extract(input.origin_json,'$.kind')='group'
+         AND json_extract(input.origin_json,'$.groupId')=message.group_id
+         AND message.group_id=? AND message.author_bot_id IS NULL AND message.ordinal>original.ordinal LIMIT 1`,
+      [a.origin.messageId, ...owners, a.origin.groupId]
+    ).length
+  }
+
+  /** Reuse the durable task inbox for a directed public review; no new work. */
+  groupFeedback(sourceId: string, messageId: string, targetId: string): BotTask | undefined {
+    return this.transaction(() => {
+      const source = this.getTask(sourceId), target = this.getTask(targetId)
+      const groupId = botTaskGroupId(source)
+      if (!groupId || source.botId === target.botId || !this.sameGroupAssignment(source, target) ||
+          !["running", "waiting_user"].includes(target.state) || this.taskRootCancelled(source) ||
+          this.taskRootCancelled(target) ||
+          !(target.origin.kind === "group" || (target.origin.kind === "bot" && target.origin.expectsReply))) return
+      const row = this.rows("SELECT text,mentions_json FROM bot_group_messages WHERE id=? AND group_id=? AND author_bot_id=?",
+        [messageId, groupId, source.botId])[0]
+      const mentions = row?.mentions_json ? JSON.parse(String(row.mentions_json)) as NonNullable<BotGroupMessage["mentions"]> : []
+      // Only a named recipient, not open chatter or @everyone, steers live work.
+      if (!row || String(row.text).length > 30_000 || !mentions.some(mention => mention.botId === target.botId)) return
+      const prior = this.rows("SELECT id FROM bot_tasks WHERE bot_id=? AND json_extract(origin_json,'$.feedbackMessageId')=?",
+        [target.botId, messageId])[0]
+      if (prior) return this.getTask(String(prior.id))
+      // Keep the public message available for normal discussion if the inbox is full.
+      const root = target.origin.kind === "bot" ? target.origin.rootTaskId : target.id
+      if (Number(this.rows("SELECT COUNT(*) AS n FROM bot_tasks WHERE state='queued'")[0].n) >= 500 ||
+          Number(this.rows("SELECT COUNT(*) AS n FROM bot_tasks WHERE json_extract(origin_json,'$.rootTaskId')=?", [root])[0].n) >= 24) return
+      return this.delegate(sourceId, target.botId, String(row.text), `${messageId}:${target.botId}`, [], targetId, messageId)
+    })
+  }
+
   delegate(
     fromTaskId: string,
     targetBotId: string,
     message: string,
     key: string,
-    outputFiles: string[] = []
+    outputFiles: string[] = [],
+    feedbackForTaskId?: string,
+    feedbackMessageId?: string
   ): BotTask {
     const outputs = parseBotOutputFiles(outputFiles)
     return this.transaction(() => {
@@ -3783,7 +3863,7 @@ export class BotStore {
       }
       if (!ACTIVE_STATES.includes(source.state as (typeof ACTIVE_STATES)[number]))
         throw new BotError("CONFLICT", "当前任务已结束，不能继续交办")
-      if (source.origin.kind === "discussion")
+      if (source.origin.kind === "discussion" && !feedbackForTaskId)
         throw new BotError("CONFLICT", "后续讨论请直接在本群回复，由群轮次交给其他成员")
       if (targetBotId === source.botId) throw new BotError("INVALID_INPUT", "不能向自己交办任务")
       const groupId = botTaskGroupId(source)
@@ -3798,14 +3878,31 @@ export class BotStore {
       }
       const depthSource = this.workflowHandoffSource(source)
       if (!depthSource) throw new BotError("CONFLICT", "Workflow 协作来源已失效")
-      const depth = depthSource.origin.kind === "bot" ? depthSource.origin.depth + 1 : 1
+      const depth = feedbackForTaskId ? 1 : depthSource.origin.kind === "bot" ? depthSource.origin.depth + 1 : 1
       if (depth > 4) throw new BotError("CONFLICT", "协作层数已达上限，请汇总进展交由用户决定")
       const requestId = `delegate-${source.id}-${createHash("sha256").update(key).digest("hex").slice(0, 24)}`
-      const rootTaskId = (source.origin.kind === "bot" || source.origin.kind === "notification")
+      let rootTaskId = (source.origin.kind === "bot" || source.origin.kind === "notification")
         ? source.origin.rootTaskId ?? source.id : source.id
       const prior = this.rows("SELECT id FROM bot_tasks WHERE request_id=?", [requestId])[0]
+      if (feedbackForTaskId) {
+        const target = this.getTask(feedbackForTaskId)
+        const targetRoot = target.origin.kind === "bot" ? target.origin.rootTaskId : target.id
+        if (!groupId || source.mockSource || target.mockSource || outputs.length ||
+          target.botId !== targetBotId || !this.sameGroupAssignment(source, target) ||
+          botTaskGroupId(target) !== groupId || this.taskRootCancelled(source) ||
+          this.taskRootCancelled(target) ||
+          !(target.origin.kind === "group" || (target.origin.kind === "bot" && target.origin.expectsReply)) ||
+          (!prior && !["queued", "running", "waiting_user"].includes(target.state)))
+          throw new BotError("CONFLICT", "反馈仅能补充当前群同一任务链的未结束任务；不能新增任务或文件要求")
+        rootTaskId = targetRoot
+      }
       if (prior) {
-        const origin = this.getTask(String(prior.id)).origin
+        const previous = this.getTask(String(prior.id))
+        const origin = previous.origin
+        if ((feedbackForTaskId || (origin.kind === "bot" && origin.feedbackForTaskId)) &&
+          (origin.kind !== "bot" || origin.feedbackForTaskId !== feedbackForTaskId ||
+          previous.botId !== targetBotId || previous.message !== message))
+          throw new BotError("CONFLICT", "同一交办标识的内容或目标已改变")
         if (
           origin.kind !== "bot" ||
           JSON.stringify(origin.outputFiles ?? []) !== JSON.stringify(outputs)
@@ -3834,7 +3931,9 @@ export class BotStore {
             ? { upstreamTaskId: source.id }
             : {}),
           depth,
-          expectsReply: true,
+          expectsReply: !feedbackForTaskId,
+          ...(feedbackForTaskId ? { feedbackForTaskId, upstreamTaskId: feedbackForTaskId, sourceTaskId: source.id } : {}),
+          ...(feedbackMessageId ? { feedbackMessageId } : {}),
           ...(outputs.length ? { outputFiles: outputs } : {}),
           ...(groupId ? { groupId } : {})
         },
@@ -3852,6 +3951,7 @@ export class BotStore {
     // A result turn resumes the original handoff, including unfinished siblings
     // and work dispatched by earlier result turns. Reuse the cancellation ancestry.
     const members = [owner, ...this.taskDescendants(owner.id)]
+      .filter(member => !(member.origin.kind === "bot" && member.origin.feedbackForTaskId))
     if (members.some(member => member.id !== task.id &&
         ["queued", "running", "waiting_user"].includes(member.state))) return true
     const family = members.map(member => member.id)
@@ -3933,13 +4033,27 @@ export class BotStore {
     })
   }
 
-  injectIntoRun(id: string, parentId: string): void {
-    this.transaction(() => {
+  injectIntoRun(id: string, parentId: string): boolean {
+    return this.transaction(() => {
       const source = this.getTask(parentId),
         child = this.getTask(id)
+      if (child.origin.kind === "bot" && child.origin.feedbackForTaskId) {
+        const sender = child.origin.sourceTaskId &&
+          this.rows("SELECT id FROM bot_tasks WHERE id=?", [child.origin.sourceTaskId])[0]
+        const senderTask = sender ? this.getTask(String(sender.id)) : undefined
+        const groupId = child.origin.groupId
+        const group = groupId && this.groups().find(item => item.id === groupId)
+        if (!senderTask || ["cancelled", "superseded", "interrupted"].includes(senderTask.state) || this.taskRootCancelled(senderTask) ||
+          !this.sameGroupAssignment(senderTask, source) || !group || group.deleting ||
+          !group.memberIds.includes(child.origin.fromBotId) || !group.memberIds.includes(source.botId)) {
+          this.transition(id, "cancelled", "反馈来源已失效，未送达")
+          return false
+        }
+      }
       if (
         id === parentId ||
-        !canSteerBotTask(source, child) ||
+        !(canSteerBotTask(source, child) || canDeliverBotFeedback(source, child)) ||
+        this.taskRootCancelled(source) || this.taskRootCancelled(child) ||
         !ACTIVE_STATES.includes(source.state as (typeof ACTIVE_STATES)[number]) ||
         child.state !== "queued"
       )
@@ -3949,6 +4063,7 @@ export class BotStore {
         [parentId, this.now(), id]
       )
       this.changed()
+      return true
     })
   }
 
@@ -3968,14 +4083,14 @@ export class BotStore {
         const child = this.getTask(childId)
         if (
           childId === id ||
-          !canSteerBotTask(source, child) ||
+          !(canSteerBotTask(source, child) || canDeliverBotFeedback(source, child)) ||
           this.rows("SELECT injected_into FROM bot_tasks WHERE id=?", [childId])[0]
             ?.injected_into !== id
         )
           throw new BotError("CONFLICT", "补充消息不属于当前会话")
         // One physical group run has one actual reply. Do not publish a second
         // generic "completed; no result" message for its consumed inbox entry.
-        if (child.origin.kind === "group") this.transition(childId, state, error)
+        if (child.origin.kind === "group" || (child.origin.kind === "bot" && child.origin.feedbackForTaskId)) this.transition(childId, state, error)
         else this.settle(childId, state, error)
       }
       // Preserve the actual final result as the sidebar preview, not a child's generic status.
@@ -3994,6 +4109,16 @@ export class BotStore {
   ): void {
     this.transaction(() => {
       const priorTask = this.getTask(id)
+      if (priorTask.origin.kind === "bot" && priorTask.origin.feedbackForTaskId) {
+        this.transition(id, state, error)
+        return // Feedback has no independent public result, files or return route.
+      }
+      if (["completed", "failed", "cancelled", "interrupted", "outcome_unknown", "superseded"].includes(state)) {
+        this.db.run(`UPDATE bot_tasks SET state=CASE WHEN injected_into=? THEN ? ELSE 'cancelled' END,
+          error=CASE WHEN injected_into=? THEN ? ELSE '目标任务已结束，反馈未送达' END, updated_at=?
+          WHERE json_extract(origin_json,'$.feedbackForTaskId')=? AND state IN ('queued','running','waiting_user')`,
+          [id, state, id, error, this.now(), id])
+      }
       const alreadySettled = priorTask.state === state
       const groupId = botTaskGroupId(priorTask)
       const departed = groupId ? !this.getGroup(groupId).memberIds.includes(priorTask.botId) : false
@@ -5268,6 +5393,21 @@ export class BotStore {
           if (candidate.botId === authorBotId && botTaskGroupId(candidate) === groupId &&
               this.peerHandoffSource(candidate)?.id === owner.id) taskIds.add(candidate.id)
         }
+      } else if (source?.origin.kind === "group" && source.botId === authorBotId &&
+                 botTaskGroupId(source) === groupId) {
+        // The caller can publish after one peer returns, before another peer's
+        // receipt arrives. Those result turns belong to this same user request.
+        // Use the existing family index, never unrelated history or peer prose.
+        for (const row of this.rows(
+          `SELECT * FROM bot_tasks
+           WHERE COALESCE(json_extract(origin_json,'$.rootTaskId'),id)=?
+             AND bot_id=? AND thread_id=?`,
+          [source.id, authorBotId, source.threadId]
+        )) {
+          const candidate = this.task(row)
+          if (candidate.origin.kind === "bot" && !candidate.origin.expectsReply &&
+              botTaskGroupId(candidate) === groupId) taskIds.add(candidate.id)
+        }
       }
     }
     return [...taskIds].flatMap((id) => this.rows(
@@ -5314,7 +5454,10 @@ export class BotStore {
        SELECT m.*, COALESCE(d.id,da.id,r.id,ra.id) AS exchange_id,
         COALESCE(d.bot_id,da.bot_id,r.bot_id,ra.bot_id) AS recipient_id,
         COALESCE(d.origin_json,da.origin_json,r.origin_json,ra.origin_json) AS exchange_origin,
-        (SELECT state FROM bot_exchange_records WHERE id=json_extract(m.question_json,'$.taskId') LIMIT 1) AS question_state,
+        COALESCE(
+          (SELECT state FROM bot_tasks WHERE id=json_extract(m.question_json,'$.taskId')),
+          (SELECT state FROM bot_exchange_archive WHERE id=json_extract(m.question_json,'$.taskId'))
+        ) AS question_state,
         q.id AS reply_id,q.ordinal AS reply_ordinal,q.author_bot_id AS reply_author,
         substr(q.text,1,1000) AS reply_text,q.files_json AS reply_files
        FROM page m
@@ -5732,7 +5875,7 @@ export class BotStore {
         const excludedTaskIds = [...held, ...(initialRunning ? state.initialTaskIds : [])]
         if (
           this.rows(
-            `SELECT id FROM bot_tasks WHERE json_extract(origin_json,'$.groupId')=? AND state IN ('queued','running','waiting_user')${excludedTaskIds.length ? ` AND id NOT IN (${excludedTaskIds.map(() => "?").join(",")})` : ""} LIMIT 1`,
+            `SELECT id FROM bot_tasks WHERE json_extract(origin_json,'$.groupId')=? AND json_extract(origin_json,'$.feedbackForTaskId') IS NULL AND state IN ('queued','running','waiting_user')${excludedTaskIds.length ? ` AND id NOT IN (${excludedTaskIds.map(() => "?").join(",")})` : ""} LIMIT 1`,
             [groupId, ...excludedTaskIds]
           ).length
         )
@@ -5741,6 +5884,14 @@ export class BotStore {
         // supply work for a different user request that replaced its round.
         const recent = botPost ? postMessages : recentMessages.filter((m) =>
           !independent.has(m.id) && this.isGroupPostEvidence(m, groupId, state.messageId, true))
+        // Suppress only the exact public post consumed by this recipient. Moving
+        // its room watermark here would skip older, unrelated unread messages.
+        const consumed = new Set<string>()
+        if (recent.length) for (const row of this.rows(
+          `SELECT bot_id,json_extract(origin_json,'$.feedbackMessageId') AS message_id FROM bot_tasks
+           WHERE json_extract(origin_json,'$.feedbackMessageId') IN (${recent.map(() => "?").join(",")}) AND injected_into IS NOT NULL`,
+          recent.map(message => message.id))) consumed.add(JSON.stringify([row.bot_id, row.message_id]))
+        const alreadyDelivered = (botId: string, messageId: string) => consumed.has(JSON.stringify([botId, messageId]))
         const backgroundOwners = this.groupBackgroundOwners(groupId)
         if (initialRunning || backgroundOwners.size) {
           // Active work need not hold up a direct handoff to an idle peer. Keep
@@ -5769,11 +5920,13 @@ export class BotStore {
         const previouslySeen = { ...state.seen }
         // A named peer post wakes its audience, not every member selected for the
         // original request. Open posts and @everyone still reach the room.
-        const hasUnreadPeerMessage = (id: string) =>
+        const hasUnreadPeerMessage = (id: string, explicitOnly = false) =>
           recent.some((message) => {
             if (
               (!botPost && message.id === state.messageId) ||
               message.authorBotId === id ||
+              (explicitOnly && !message.authorBotId) ||
+              alreadyDelivered(id, message.id) ||
               message.ordinal <= (state.seen[id] ?? 0)
             )
               return false
@@ -5783,12 +5936,13 @@ export class BotStore {
                 (mention.botId !== message.authorBotId && state.memberIds.includes(mention.botId))
             )
             return (
-              !audience?.length ||
-              audience.some((mention) => mention.botId === null || mention.botId === id)
+              (!explicitOnly && !audience?.length) ||
+              audience?.some((mention) => mention.botId === null || mention.botId === id)
             )
           })
         for (const id of eligible) if (!hasUnreadPeerMessage(id)) eligible.delete(id)
-        const botId = latest && nextGroupDiscussionSpeaker(state, latest, eligible)
+        const explicitlyCalled = new Set([...eligible].filter(id => hasUnreadPeerMessage(id, true)))
+        const botId = latest && nextGroupDiscussionSpeaker(state, latest, eligible, explicitlyCalled)
         if (!botId) {
           if (initialRunning || backgroundOwners.size) return
           finish()
@@ -5802,7 +5956,8 @@ export class BotStore {
           (item) =>
             item.ordinal > (previouslySeen[botId] ?? 0) &&
             item.authorBotId !== botId &&
-            item.id !== state.messageId
+            item.id !== state.messageId &&
+            !alreadyDelivered(botId, item.id)
         )
         const references = unseen.map((item) => ({
           source: item.authorBotId ? `Bot ${item.authorBotId}` : "user",
@@ -5817,7 +5972,9 @@ export class BotStore {
           {
             botId,
             requestId: `discussion-${createHash("sha256")
-              .update(JSON.stringify([groupId, state.messageId, state.round, botId]))
+              .update(JSON.stringify(state.round >= GROUP_DISCUSSION_MAX_ROUNDS
+                ? [groupId, state.messageId, "handoff", state.turns, botId]
+                : [groupId, state.messageId, state.round, botId]))
               .digest("hex")}`,
             message: botPost
               ? buildBotGroupDiscussionMessage(

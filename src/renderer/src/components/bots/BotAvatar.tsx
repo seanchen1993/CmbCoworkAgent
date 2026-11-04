@@ -159,7 +159,9 @@ function observe(node: SVGSVGElement, host: SVGGElement, target: AvatarTarget): 
       invalidatePointer()
     })
     loop = createBudgetedLoop(paint, {
-      fps: 60,
+      // Multiple working faces share the page with scrolling and streamed text.
+      // Budget decorative SVG work; motion still advances by elapsed time.
+      fps: 30,
       idleWhen: () => {
         for (const value of targets.values()) {
           if (!value.visible) continue
