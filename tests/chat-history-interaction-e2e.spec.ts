@@ -1300,6 +1300,9 @@ ipcMain.handle=function(channel,listener){return originalHistoryHandle.call(this
     const observation = await page.evaluate(() =>
       (window as unknown as HistoryWindow).historyInteraction.stop()
     )
+    // Persist the measurements even when a threshold fails, so the failing interval
+    // can be diagnosed instead of losing all blank/pending episode evidence.
+    record({ kind: "interaction-results", inputMs, releaseToReadableMs, observation })
     assert(observation.peakMountedRows < 100, "persisted history must keep a bounded DOM window")
     assert(observation.seenMessages.length > 8, "real drags must expose distinct history regions")
     assert(observation.maxBlankMs < 1500, "history must not remain an empty visible window")
@@ -1314,7 +1317,6 @@ ipcMain.handle=function(channel,listener){return originalHistoryHandle.call(this
         performance.now() - intervalStarted
       )
     })
-    record({ kind: "interaction-results", inputMs, releaseToReadableMs, observation })
     await Promise.all(captures)
     await page.screenshot({ path: join(fixture.isolated, "history-thumb.png") })
     passed = true

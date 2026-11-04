@@ -50,12 +50,24 @@ let observer: IntersectionObserver | undefined
 
 /** One observer for mounted sites; queued reads consult a boolean, never scroll-time layout. */
 export function observeFunctionSiteVisibility(element: HTMLElement | null) {
-  let visible = isFunctionSiteInViewport(element)
+  const row = element?.closest<HTMLElement>("[data-chat-message-row]")
+  const viewport = row?.closest<HTMLElement>("[data-radix-scroll-area-viewport]")
+  let visible = false
+  if (row && viewport && element?.isConnected && !element.ownerDocument.hidden) {
+    // Chat rows have a real layout box. A scheduling hint needs only their intersection,
+    // not repeated style/range reads through the same ancestor chain for every cold site.
+    const box = row.getBoundingClientRect()
+    const area = viewport.getBoundingClientRect()
+    visible = box.width > 0 && box.height > 0 && box.bottom > area.top && box.top < area.bottom &&
+      box.right > area.left && box.left < area.right
+  } else {
+    visible = isFunctionSiteInViewport(element)
+  }
   // Transcript sites use display:contents. Observe the nearest layout box instead:
   // observing the section itself would report zero area even when its text is visible.
-  let target = element
+  let target = row ?? element
   const view = element?.ownerDocument.defaultView
-  while (target && view?.getComputedStyle(target).display === "contents")
+  while (!row && target && view?.getComputedStyle(target).display === "contents")
     target = target.parentElement
   const changed = (value: boolean) => { visible = value }
   if (target && typeof IntersectionObserver !== "undefined") {

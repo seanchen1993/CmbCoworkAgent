@@ -1,4 +1,13 @@
+import type { FunctionUiSite } from "../../../shared/mods/v2/sites"
+
 type Priority = "ordinary" | "visible" | "interactive"
+
+export function functionSitePriority(component: FunctionUiSite, visible: boolean): Priority {
+  if (["AbovePrompt", "PromptHint", "SessionMode", "Spinner", "AskUserQuestion"].includes(component))
+    return "interactive"
+  // Transcript text takes precedence over optional elapsed-time labels during scrolling.
+  return component !== "TurnDuration" && visible ? "visible" : "ordinary"
+}
 
 /** Bounds UI-only IPC across virtualized rows; native tools and permission requests never use it. */
 export function createFunctionSiteQueue() {

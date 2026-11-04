@@ -30,7 +30,13 @@ async function main() {
         <section id="clipped" style="display:contents"><span>clipped contents</span></section>
       </section>
       <div style="opacity:0"><section id="transparent" class="row">transparent</section></div>
-      <section id="hidden" class="row" style="visibility:hidden">hidden</section>`)
+      <section id="hidden" class="row" style="visibility:hidden">hidden</section>
+      <div id="transcript" data-radix-scroll-area-viewport style="height:100px;overflow:auto">
+        <div style="height:400px"></div>
+        <div data-chat-message-row style="height:50px">
+          <section id="transcript-site" style="display:contents">protected transcript</section>
+        </div>
+      </div>`)
     await page.addScriptTag({ content: bundle.outputFiles[0].text })
     const result = await page.evaluate(() => {
       const api = (
@@ -73,6 +79,14 @@ async function main() {
     await page.evaluate("window.visibilityProbe.close();window.scrollTo(0,1200)")
     await page.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))))
     assert.equal(await page.evaluate("window.visibilityProbe.visible()"), false)
+    await page.evaluate(`window.scrollTo(0,0);window.transcriptProbe =
+      FunctionSiteVisibility.observeFunctionSiteVisibility(document.getElementById('transcript-site'))`)
+    assert.equal(await page.evaluate("window.transcriptProbe.visible()"), false)
+    await page.evaluate("document.getElementById('transcript').scrollTop=400")
+    await page.waitForFunction("window.transcriptProbe.visible()")
+    await page.evaluate("document.getElementById('transcript').scrollTop=0")
+    await page.waitForFunction("!window.transcriptProbe.visible()")
+    await page.evaluate("window.transcriptProbe.close()")
     console.log("PASS actual contents/ancestor-clipping/viewport scheduling geometry")
   } finally {
     await browser.close()

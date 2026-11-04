@@ -307,6 +307,29 @@ export class FunctionSitePresentationCache {
     }
   }
 
+  /** Neutral layout only: a new row may borrow recent geometry, never another row's text. */
+  placeholderHeight(key: string | null, component: FunctionUiSite, layoutWidth: number): number | undefined {
+    const exact = this.measuredHeight(key, layoutWidth)
+    if (exact !== undefined) return exact
+    if (!key || !Number.isFinite(layoutWidth) || layoutWidth <= 0 || !this.authorized() ||
+      !["UserMessage", "AssistantMessage", "CommandOutput"].includes(component)) return
+    const now = Date.now()
+    const heights: number[] = []
+    // Measurements already have a bounded lifetime and budget. Use a small recent sample
+    // so cold placeholders do not collapse a long transcript into two-line rows during drag.
+    for (const measurement of this.measurements.values()) {
+      if (measurement.component !== component || measurement.expires <= now ||
+        Math.abs(layoutWidth - measurement.layoutWidth) >= 1) continue
+      heights.push(measurement.height)
+      if (heights.length > 16) heights.shift()
+    }
+    if (heights.length < 3) return
+    heights.sort((a, b) => a - b)
+    // A cold estimate must not fill several screens with one unresolved row.
+    // Exact per-row measurements above remain uncapped.
+    return Math.min(480, heights[Math.floor(heights.length / 2)])
+  }
+
   measuredHeight(key: string | null, layoutWidth: number): number | undefined {
     if (!key || !Number.isFinite(layoutWidth) || layoutWidth <= 0 || !this.authorized()) return
     const measurement = this.measurements.get(key)

@@ -23,7 +23,7 @@ import { FunctionClient } from "./FunctionClient"
 import { paneFocusElement } from "../../lib/function-pane-focus"
 import { functionFocusTargets } from "../../../../shared/mods/v2/focus"
 import { FunctionSiteLifetime, type FunctionSiteTicket } from "../../lib/function-site-lifecycle"
-import { functionSiteQueue } from "../../lib/function-site-queue"
+import { functionSitePriority, functionSiteQueue } from "../../lib/function-site-queue"
 import { observeFunctionSiteVisibility } from "../../lib/function-site-visibility"
 import { retainsFunctionSitePresentation } from "../../lib/function-site-transition"
 import { FunctionSiteRecovery, functionSiteErrorCode,
@@ -60,13 +60,13 @@ function FunctionSitePending({ component, slow = false, quiet = false, cache, pr
     const container = slot ? functionSiteLayoutContainer(slot) : null
     if (!container) return
     const width = observeFunctionSiteLayoutWidth(container, layoutWidth => {
-      const height = cache.measuredHeight(presentationKey, layoutWidth)
+      const height = cache.placeholderHeight(presentationKey, component, layoutWidth)
       const minHeight = height === undefined ? "" : `${height}px`
       if (node.style.minHeight !== minHeight) node.style.minHeight = minHeight
     })
     const stop = cache.subscribe(width.refresh, presentationKey)
     return () => { width.dispose(); stop() }
-  }, [cache, presentationKey, quiet])
+  }, [cache, presentationKey, component, quiet])
   if (quiet) return null
   const message = ["UserMessage", "AssistantMessage", "CommandOutput"].includes(component)
   // Optional decorations should not introduce bars or layout rows while they are unknown.
@@ -614,9 +614,7 @@ function FunctionSiteSurface({
         }
       }
       // Read geometry only for cold admission, never for each appended token/redraw.
-      const queuePriority = () => ["AbovePrompt", "PromptHint", "SessionMode", "Spinner", "AskUserQuestion"]
-        .includes(component) ? "interactive" :
-        siteVisibility.visible() ? "visible" : "ordinary"
+      const queuePriority = () => functionSitePriority(component, siteVisibility.visible())
       try {
         // Keep admission and its first drawing in one fair queue job. Requeueing a mounted
         // owner behind every other cold mount needlessly delayed the first readable message.

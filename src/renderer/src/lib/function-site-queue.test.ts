@@ -1,5 +1,20 @@
 import { expect, it, vi } from "vitest"
-import { createFunctionSiteQueue } from "./function-site-queue"
+import { createFunctionSiteQueue, functionSitePriority } from "./function-site-queue"
+
+it("reads visible message bodies before queued elapsed-time labels without dropping labels", async () => {
+  const queue = createFunctionSiteQueue()
+  let release!: () => void
+  const gate = new Promise<void>(resolve => { release = resolve })
+  const active = Array.from({ length: 4 }, () => queue.run(() => true, () => gate))
+  const started: string[] = []
+  const labels = Array.from({ length: 3 }, (_, index) => queue.run(() => true,
+    async () => { started.push(`label-${index}`) }, () => functionSitePriority("TurnDuration", true)))
+  const body = queue.run(() => true, async () => { started.push("body") },
+    () => functionSitePriority("AssistantMessage", true))
+  release()
+  await Promise.all([...active, ...labels, body])
+  expect(started).toEqual(["body", "label-0", "label-1", "label-2"])
+})
 
 it("promotes newly visible rows and demotes rows scrolled away while waiting", async () => {
   const queue = createFunctionSiteQueue()

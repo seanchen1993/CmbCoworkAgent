@@ -39,6 +39,32 @@ const key = (id = "message", text = "raw", width = 800) =>
 
 afterEach(() => vi.useRealTimers())
 
+it("estimates only neutral cold-row geometry from current same-width message measurements", () => {
+  vi.useFakeTimers()
+  let authorized = true
+  const cache = new FunctionSitePresentationCache(() => authorized)
+  const cold = key("cold")
+  for (const [index, height] of [350, 400, 450, 20000].entries())
+    cache.measure(key(String(index)), "AssistantMessage", { height, width: 600, layoutWidth: 600 })
+  expect(cache.placeholderHeight(cold, "AssistantMessage", 600)).toBe(450)
+  expect(cache.read(cold)).toBeNull()
+  expect(cache.placeholderHeight(cold, "UserMessage", 600)).toBeUndefined()
+  expect(cache.placeholderHeight(cold, "AssistantMessage", 700)).toBeUndefined()
+  expect(cache.placeholderHeight(cold, "AssistantMessage", Number.NaN)).toBeUndefined()
+  for (let index = 0; index < 3; index++)
+    cache.measure(key(`tall-${index}`), "AssistantMessage",
+      { height: 5000, width: 700, layoutWidth: 700 })
+  expect(cache.placeholderHeight(cold, "AssistantMessage", 700)).toBe(480)
+  cache.measure(cold, "AssistantMessage", { height: 1500, width: 600, layoutWidth: 600 })
+  expect(cache.placeholderHeight(cold, "AssistantMessage", 600)).toBe(1500)
+  authorized = false
+  expect(cache.placeholderHeight(cold, "AssistantMessage", 600)).toBeUndefined()
+  authorized = true
+  vi.advanceTimersByTime(120001)
+  expect(cache.placeholderHeight(cold, "AssistantMessage", 600)).toBeUndefined()
+  cache.invalidate()
+})
+
 it("keeps neutral measured heights after drawing LRU eviction, with exact facts and width", () => {
   const cache = new FunctionSitePresentationCache(() => true)
   const measuredKey = key("measured")
