@@ -577,6 +577,12 @@ export class BotImChannelService {
     try {
       reply = host.beginImDelivery()
       if (!reply) return
+      console.info("[Bot IM] reply delivery started", {
+        deliveryId: reply.id,
+        fileCount: reply.files?.length ?? 0,
+        hasText: Boolean(reply.text.trim()),
+        fileTransportAvailable: this.client.supportsBotFiles?.() === true
+      })
       const registered = host.imGateway.binding(reply.bindingId)
       if (
         !registered ||

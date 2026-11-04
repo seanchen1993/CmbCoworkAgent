@@ -881,7 +881,10 @@ export function createLocalBotRunPort(
                 (task.origin.kind === "notification" &&
                   task.origin.notificationKind === "command")))
           const captureReplyFiles = (files: BotDeliveredFile[]): void => {
-            if (!task.workId && !routineDelivery && !peerResultOwner) return
+            // Direct chat deliveries also need a terminal receipt for the IM outbox.
+            // Keep unowned peer/notification returns out of this handoff path.
+            const directDelivery = ["user", "introduction", "mock"].includes(task.origin.kind)
+            if (!task.workId && !routineDelivery && !peerResultOwner && !directDelivery) return
             for (const file of files) {
               replyFiles.delete(file.filePath)
               replyFiles.set(file.filePath, file)

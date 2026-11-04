@@ -1,4 +1,4 @@
-import { afterEach, expect, it, vi } from "vitest"
+import { afterEach, beforeEach, expect, it, vi } from "vitest"
 import { createHash } from "node:crypto"
 import { BOT_IM_FILE_MAX_BYTES, BOT_IM_FILE_CHUNK_BYTES } from "../../../shared/bots/im-file"
 import { mkdtemp, rm, writeFile } from "node:fs/promises"
@@ -7,9 +7,15 @@ import { join } from "node:path"
 import { snapshotBotDeliveryFile } from "../../bots/file-copy"
 import { deliverBotImFile } from "./bot-file-delivery"
 import type { BotImFileCommand, BotImFileResult } from "../../../shared/bots/im-file"
+import { ImGatewayCommandError } from "./gateway-ws-client"
 const folders: string[] = []
+beforeEach(() => {
+  vi.spyOn(console, "info").mockImplementation(() => {})
+  vi.spyOn(console, "warn").mockImplementation(() => {})
+})
 afterEach(async () => {
   for (const root of folders.splice(0)) await rm(root, { recursive: true, force: true })
+  vi.restoreAllMocks()
 })
 async function attachment(size = 75000) {
   const root = await mkdtemp(join(tmpdir(), "bot-im-file-"))
@@ -51,6 +57,21 @@ it("streams the sent snapshot, not the subsequently edited workspace original", 
     name: file.name
   })
   expect(JSON.stringify(t.command.mock.calls)).not.toContain(file.filePath)
+  expect(console.info).toHaveBeenCalledWith(
+    "[Bot IM file] receipt",
+    expect.objectContaining({
+      deliveryRef: `sha256:${createHash("sha256").update("reply:file:0").digest("hex").slice(0, 12)}`,
+      stage: "platform_upload_and_enqueue",
+      uploadId: "upload",
+      state: "accepted",
+      reused: false
+    })
+  )
+  const logs = JSON.stringify(vi.mocked(console.info).mock.calls)
+  expect(logs).not.toContain(file.name)
+  expect(logs).not.toContain(file.attachmentPath)
+  expect(logs).not.toContain(bytes.toString("base64"))
+  expect(logs).not.toContain('"state":"sent"')
 })
 it("rejects tampered copies and aborts before posting a file", async () => {
   const { file } = await attachment(),
@@ -74,6 +95,51 @@ it("keeps uncertain delivery unknown and does not upload another copy", async ()
   const command = vi.fn(async (): Promise<BotImFileResult> => ({ state: "unknown" }))
   expect(await deliverBotImFile(command, "id", "group", file, () => {})).toBe("unknown")
   expect(command).toHaveBeenCalledTimes(1)
+  expect(console.info).toHaveBeenCalledWith(
+    "[Bot IM file] receipt",
+    expect.objectContaining({
+      state: "unknown",
+      reused: true
+    })
+  )
+})
+it("logs whether failure happened during gateway begin or platform upload without exposing errors", async () => {
+  const { file } = await attachment()
+  const rejection = new ImGatewayCommandError(
+    "private-name.docx https://files.local/?Signature=secret",
+    {
+      reasonCode: "FILE_UPLOAD_FAILED",
+      permanent: true
+    }
+  )
+  const t = transport()
+  const command = vi.fn(async (request: BotImFileCommand): Promise<BotImFileResult> => {
+    if (request.action === "finish") throw rejection
+    return t.command(request)
+  })
+  await expect(deliverBotImFile(command, "id", "group", file, () => {})).rejects.toBe(rejection)
+  expect(console.warn).toHaveBeenLastCalledWith(
+    "[Bot IM file] failed",
+    expect.objectContaining({
+      stage: "platform_upload_and_enqueue",
+      reasonCode: "FILE_UPLOAD_FAILED",
+      permanent: true
+    })
+  )
+  expect(command.mock.calls.at(-1)?.[0].action).toBe("abort")
+  expect(JSON.stringify(vi.mocked(console.warn).mock.calls)).not.toContain("Signature=secret")
+  expect(console.info).not.toHaveBeenCalledWith("[Bot IM file] receipt", expect.anything())
+  const beginRejected = vi.fn(async (): Promise<BotImFileResult> => {
+    throw rejection
+  })
+  await expect(deliverBotImFile(beginRejected, "id", "group", file, () => {})).rejects.toBe(
+    rejection
+  )
+  expect(console.warn).toHaveBeenLastCalledWith(
+    "[Bot IM file] failed",
+    expect.objectContaining({ stage: "gateway_begin" })
+  )
+  expect(beginRejected).toHaveBeenCalledTimes(1)
 })
 it("rejects oversized files and unverified paths before transmitting", async () => {
   const { file } = await attachment(),
