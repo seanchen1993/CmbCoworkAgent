@@ -1,10 +1,18 @@
-import { BrowserWindow } from "electron"
+import { BrowserWindow, powerMonitor } from "electron"
+import {
+  assertIdleModelServiceHours,
+  getIdleModelServiceWindow,
+  isIdleModelOutsideServiceHours,
+  IDLE_MODEL_OUTSIDE_HOURS_MESSAGE
+} from "../../shared/idle-model-service-window"
 import type { RemoteModelCatalog, RemoteModelCatalogItem } from "../../shared/model-catalog"
 import {
   IDLE_MODEL_ID,
   IDLE_MODEL_MODE,
   IDLE_MODEL_MAX_TOKENS,
   IDLE_MODEL_NOTICE,
+  IDLE_MODEL_UAT_NOTICE,
+  IDLE_MODEL_SAP_REQUIRED_MESSAGE,
   isModelAvailable,
   isValidSapId,
   type BuiltinModelLockedField
@@ -79,6 +87,24 @@ let remoteDefinitions: BuiltinModelDefinition[] | null = null
 let catalogLoaded = false
 let catalogRequest: Promise<void> | null = null
 let refreshTimer: ReturnType<typeof setInterval> | null = null
+let serviceWindowTimer: ReturnType<typeof setTimeout> | null = null
+let lastServiceWindowOpen: boolean | undefined
+
+function refreshServiceWindow(): void {
+  if (serviceWindowTimer) clearTimeout(serviceWindowTimer)
+  const now = Date.now()
+  const window = getIdleModelServiceWindow(now)
+  if (lastServiceWindowOpen !== undefined && lastServiceWindowOpen !== window.available) {
+    notifyModelChanges()
+  }
+  lastServiceWindowOpen = window.available
+  // Also recover from clock changes; request admission never depends on this timer.
+  serviceWindowTimer = setTimeout(
+    refreshServiceWindow,
+    Math.max(1, Math.min(window.nextChangeAt - now, 60_000))
+  )
+  serviceWindowTimer.unref?.()
+}
 
 function notifyModelChanges(): void {
   for (const win of BrowserWindow.getAllWindows()) {
@@ -259,10 +285,12 @@ function getBaseDefinitions(): BuiltinModelDefinition[] {
     : FALLBACK_CATALOG.map((item) => normalizeDefinition(item, "fallback"))
   const environment = getStoredIdleModelUseUat()
     ? {
+        idleModelEnvironment: "uat" as const,
         baseUrl: import.meta.env.MAIN_VITE_IDLE_MODEL_UAT_BASE_URL,
         apiKey: import.meta.env.MAIN_VITE_IDLE_MODEL_UAT_API_KEY
       }
     : {
+        idleModelEnvironment: "production" as const,
         baseUrl: import.meta.env.MAIN_VITE_IDLE_MODEL_PROD_BASE_URL,
         apiKey: import.meta.env.MAIN_VITE_IDLE_MODEL_PROD_API_KEY
       }
@@ -282,7 +310,8 @@ function getBaseDefinitions(): BuiltinModelDefinition[] {
       "local"
     ),
     transport: "idle-gateway",
-    notice: IDLE_MODEL_NOTICE
+    idleModelEnvironment: environment.idleModelEnvironment,
+    notice: environment.idleModelEnvironment === "uat" ? IDLE_MODEL_UAT_NOTICE : IDLE_MODEL_NOTICE
   }
   return [...definitions.filter((item) => item.id !== IDLE_MODEL_ID), idleModel]
 }
@@ -364,8 +393,10 @@ export function getBuiltinModelConfigs(): ResolvedModelConfig[] {
         : base.apiKey?.trim() ||
           getBuiltinModelApiKey({ allowBundledFallback: base.model === BUNDLED_CREDENTIAL_MODEL }),
       ...(isIdle && !isValidSapId(getUserInfo()?.sapId)
-        ? { unavailableReason: "请先完善当前用户的八位 SAP 员工编号" }
-        : {}),
+        ? { unavailableReason: IDLE_MODEL_SAP_REQUIRED_MESSAGE }
+        : isIdleModelOutsideServiceHours(base)
+          ? { unavailableReason: IDLE_MODEL_OUTSIDE_HOURS_MESSAGE }
+          : {}),
       ref: `builtin:${base.id}`,
       source: "builtin",
       origin: base.origin
@@ -472,6 +503,7 @@ export function getAvailableModelConfigOrDefault(
   value?: string | null
 ): ResolvedModelConfig | null {
   const requested = getModelConfigByRef(value)
+  assertIdleModelServiceHours(requested)
   if (isModelAvailable(requested)) return requested
   const selectedDefault = getDefaultModelConfig()
   if (isModelAvailable(selectedDefault)) return selectedDefault
@@ -577,11 +609,18 @@ export function startBuiltinModelCatalogRefresh(): Promise<void> {
   const initialRefresh = refreshBuiltinModelCatalog()
   if (refreshTimer) return initialRefresh
   refreshTimer = setInterval(() => void refreshBuiltinModelCatalog(true), MODEL_CATALOG_REFRESH_MS)
+  refreshServiceWindow()
+  powerMonitor.on("resume", refreshServiceWindow)
   return initialRefresh
 }
 
 export function stopBuiltinModelCatalogRefresh(): void {
-  if (!refreshTimer) return
-  clearInterval(refreshTimer)
+  if (refreshTimer) clearInterval(refreshTimer)
   refreshTimer = null
+  if (serviceWindowTimer) clearTimeout(serviceWindowTimer)
+  serviceWindowTimer = null
+  if (lastServiceWindowOpen !== undefined) {
+    powerMonitor.removeListener("resume", refreshServiceWindow)
+  }
+  lastServiceWindowOpen = undefined
 }

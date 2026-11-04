@@ -1,8 +1,14 @@
 import { createHash, randomUUID } from "node:crypto"
 import { IDLE_MODEL_MODE, isValidSapId, type ModelTransport } from "../../shared/model-catalog"
 import { getUserInfo } from "../storage"
+import {
+  isIdleModelOutsideServiceHours,
+  IDLE_MODEL_OUTSIDE_HOURS_CODE,
+  IDLE_MODEL_OUTSIDE_HOURS_MESSAGE,
+  type IdleModelServiceHoursConfig
+} from "../../shared/idle-model-service-window"
 
-interface ModelConnectionConfig {
+interface ModelConnectionConfig extends IdleModelServiceHoursConfig {
   baseUrl: string
   apiKey?: string
   transport?: ModelTransport
@@ -14,6 +20,23 @@ interface ModelConnectionOptions {
 }
 
 const MAX_IDLE_SESSION_ID_LENGTH = 36
+
+/** A local non-retryable response: no network call, failover, or compaction recovery. */
+export function getIdleModelServiceHoursRejection(
+  config: IdleModelServiceHoursConfig
+): Response | undefined {
+  if (!isIdleModelOutsideServiceHours(config)) return
+  return new Response(
+    JSON.stringify({
+      error: {
+        message: IDLE_MODEL_OUTSIDE_HOURS_MESSAGE,
+        code: IDLE_MODEL_OUTSIDE_HOURS_CODE,
+        type: "invalid_request_error"
+      }
+    }),
+    { status: 400, headers: { "content-type": "application/json" } }
+  )
+}
 
 export function getModelClientOptions(
   config: ModelConnectionConfig,
@@ -56,6 +79,8 @@ export function getModelConnection(
   return {
     baseURL: config.baseUrl,
     fetch: async (input, init) => {
+      const rejection = getIdleModelServiceHoursRejection(config)
+      if (rejection) return rejection
       let sapId: string
       try {
         sapId = requireIdleModelSapId()

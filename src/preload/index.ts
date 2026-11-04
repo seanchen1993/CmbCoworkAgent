@@ -3516,9 +3516,10 @@ const api = {
       fileName: string,
       origin?: "market" | "local",
       version?: string,
-      requireMods?: PluginInstallMode
+      requireMods?: PluginInstallMode,
+      marketplace?: PluginMetadata["marketplace"]
     ): Promise<PluginInstallResult> =>
-      ipcRenderer.invoke("plugins:install", { buffer, fileName, origin, version, requireMods }) as Promise<PluginInstallResult>,
+      ipcRenderer.invoke("plugins:install", { buffer, fileName, origin, version, requireMods, marketplace }) as Promise<PluginInstallResult>,
     installFromDir: (requireMods?: PluginInstallMode): Promise<PluginInstallResult> =>
       ipcRenderer.invoke("plugins:installFromDir", requireMods) as Promise<PluginInstallResult>,
     exportForMarket: (

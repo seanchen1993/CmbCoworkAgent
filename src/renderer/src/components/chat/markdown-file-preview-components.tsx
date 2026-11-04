@@ -176,7 +176,8 @@ function MarkdownFilePreviewLink({
   const link = (
     <a
       href={href}
-      className="relative inline-block text-primary hover:text-primary/80 after:absolute after:bottom-0 after:left-0 after:right-0 after:h-px after:origin-bottom after:scale-y-50 after:bg-primary/20 hover:after:bg-primary/30"
+      className="cursor-pointer font-medium transition-opacity hover:opacity-80"
+      style={{ color: "var(--primary)", textDecoration: "none" }}
       onClick={(event) => {
         event.preventDefault()
         event.stopPropagation()

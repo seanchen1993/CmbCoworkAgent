@@ -1,6 +1,7 @@
 import { getThreadCore } from "../db"
 import { getModelConfigByRef } from "../models/registry"
 import { isModelAvailable } from "../../shared/model-catalog"
+import { assertIdleModelServiceHours } from "../../shared/idle-model-service-window"
 import { MANAGED_ULTRA_MODEL_REF } from "../../shared/managed-run-model"
 import { managedRunStore } from "./managed-run-store"
 import { readHarnessFeatureMetadata } from "./service"
@@ -33,6 +34,7 @@ export function getManagedRunModelOverride(
   // A new session is already bound to the run before currentSession is updated.
   // The existing managedExecution launch marker covers that first turn only.
   const config = getModelConfigByRef(MANAGED_ULTRA_MODEL_REF)
+  assertIdleModelServiceHours(config)
   const unavailableReason = config?.unavailableReason
   if (!isModelAvailable(config)) {
     throw new Error(

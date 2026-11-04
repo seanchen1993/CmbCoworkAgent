@@ -1,5 +1,6 @@
 import { getModelClientOptions } from "../models/connection"
 import { isModelAvailable } from "../../shared/model-catalog"
+import { assertIdleModelServiceHours } from "../../shared/idle-model-service-window"
 import { createHash } from "crypto"
 import { ChatOpenAI } from "@langchain/openai"
 import { HumanMessage, SystemMessage } from "@langchain/core/messages"
@@ -988,6 +989,8 @@ export async function resolveModel(ctx: RoutingContext): Promise<RoutingResult> 
     const t0 = Date.now()
     const requestedId = ctx.requestedModelId
     const requestedConfig = requestedId ? getModelConfigByRef(requestedId) : null
+    // A user's fixed idle model must not silently become another model at closing time.
+    assertIdleModelServiceHours(requestedConfig)
     const selectedConfig =
       (isModelAvailable(requestedConfig) ? requestedConfig : null) ??
       getAvailableModelConfigOrDefault()

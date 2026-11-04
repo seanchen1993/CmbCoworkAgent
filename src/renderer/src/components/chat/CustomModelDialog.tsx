@@ -388,6 +388,40 @@ export function CustomModelDialog({
     }
   }, [open, selectedModelId])
 
+  useEffect(() => {
+    if (!open) return
+    let cancelled = false
+    let generation = 0
+    const unsubscribe = window.api.models.onChanged(() => {
+      const requestGeneration = ++generation
+      void window.api.models
+        .getBuiltinConfigs()
+        .then((items) => {
+          if (cancelled || requestGeneration !== generation) return
+          const availability = (id: string | undefined) => items.find((item) => item.id === id)
+          setConfig((previous) => {
+            const item = previous.source === "builtin" ? availability(previous.id) : undefined
+            return item
+              ? { ...previous, notice: item.notice, unavailableReason: item.unavailableReason }
+              : previous
+          })
+          setAllConfigs((previous) =>
+            previous.map((item) => {
+              const next = item.source === "builtin" ? availability(item.id) : undefined
+              return next
+                ? { ...item, notice: next.notice, unavailableReason: next.unavailableReason }
+                : item
+            })
+          )
+        })
+        .catch((error) => console.error("[CustomModelDialog] Failed to refresh availability:", error))
+    })
+    return () => {
+      cancelled = true
+      unsubscribe()
+    }
+  }, [open])
+
   const selectedConfigKey = config.id ? `${config.source}:${config.id}` : ""
 
   async function selectConfigToEdit(id: string, source: "builtin" | "custom"): Promise<void> {

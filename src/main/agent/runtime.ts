@@ -156,9 +156,10 @@ import {
   type CmbContextController
 } from "./context-summarization-middleware"
 import { hasSameCompactionEvidence } from "./context-compaction-hooks"
-import { getModelClientOptions } from "../models/connection"
+import { getIdleModelServiceHoursRejection, getModelClientOptions } from "../models/connection"
 import type { ModelTransport } from "../../shared/model-catalog"
 import { isGatewayContextOverflow } from "./context-summarization-middleware"
+import type { IdleModelEnvironment } from "../../shared/idle-model-service-window"
 import {
   createTurnCompletionGateMiddleware,
   type TurnCompletionRecoveryCallback
@@ -4720,7 +4721,8 @@ function createRetryingFetch(
   maxAttempts: number = DEFAULT_RETRY_MAX_ATTEMPTS,
   capture?: { threadId?: string },
   completionBudget = true,
-  creatorAccounting?: CreatorModelAccounting
+  creatorAccounting?: CreatorModelAccounting,
+  beforeAttempt?: () => Response | undefined
 ): typeof fetch {
   const totalAttempts = Math.max(1, maxAttempts)
   const maxRetries = totalAttempts - 1
@@ -4770,6 +4772,14 @@ function createRetryingFetch(
         const requestedStream =
           typeof init?.body === "string" && init.body.includes('"stream":true')
         const attemptStartedAt = Date.now()
+        // Recheck after backoff, immediately before each actual HTTP attempt.
+        const rejection = beforeAttempt?.()
+        if (rejection) {
+          cleanup()
+          await captureFetchError(rejection)
+          if (attempt > 1) hooks?.onRetrySuccess?.()
+          return rejection
+        }
         // Observe only attempts submitted to fetch, after cancellation checks.
         const rawFetch = capture ? withRawApiCallCapture(fetch, capture.threadId) : fetch
         const sendFetch = withCompletionModelBudget(rawFetch, creatorAccounting, completionBudget)
@@ -5100,6 +5110,7 @@ export function getModelInstance(
     enableThinkingEffort?: boolean
     thinkingEffort?: "low" | "high" | "max"
     transport?: ModelTransport
+    idleModelEnvironment?: IdleModelEnvironment
   },
   retryHooks?: ModelRetryHooks,
   maxRetryAttempts?: number,
@@ -5135,14 +5146,18 @@ export function getModelInstance(
   const enableThinking = thinkingConfigured && (purpose === "agent" ||
     (purpose === "function-completion" && customConfig.enableThinkingEffort === true))
   const enableThinkingEffort = enableThinking && customConfig.enableThinkingEffort === true
+  const beforeAttempt =
+    customConfig.transport === "idle-gateway"
+      ? () => getIdleModelServiceHoursRejection(customConfig)
+      : undefined
   const modelFetch =
     purpose === "function-completion"
       ? // SDK complete/classify/fork already reserve and settle at FunctionModels.
-        createRetryingFetch(retryHooks, maxRetryAttempts, undefined, false, creatorAccounting)
+        createRetryingFetch(retryHooks, maxRetryAttempts, undefined, false, creatorAccounting, beforeAttempt)
       : purpose === "agent"
-        ? createRetryingFetch(retryHooks, maxRetryAttempts, { threadId: captureThreadId }, true, creatorAccounting)
-        : retryHooks || maxRetryAttempts !== undefined || creatorAccounting
-          ? createRetryingFetch(retryHooks, maxRetryAttempts, undefined, true, creatorAccounting)
+        ? createRetryingFetch(retryHooks, maxRetryAttempts, { threadId: captureThreadId }, true, creatorAccounting, beforeAttempt)
+        : retryHooks || maxRetryAttempts !== undefined || creatorAccounting || beforeAttempt
+          ? createRetryingFetch(retryHooks, maxRetryAttempts, undefined, true, creatorAccounting, beforeAttempt)
           : defaultRetryingFetch
 
   const baseFields = {

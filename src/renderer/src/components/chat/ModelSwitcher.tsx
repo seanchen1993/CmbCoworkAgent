@@ -18,6 +18,7 @@ import {
 import { CustomModelDialog } from "./CustomModelDialog"
 import { openClawSidebar } from "@/lib/claw-sidebar"
 import { resolveModelDisplay } from "@/lib/model-display"
+import { IDLE_MODEL_OUTSIDE_HOURS_MESSAGE } from "../../../../shared/idle-model-service-window"
 import {
   invalidateModelCatalogCache,
   readModelCatalogCache,
@@ -493,9 +494,9 @@ function ModelSwitcherImpl({
                 <button
                   key={model.id}
                   onClick={() => {
-                    if (model.available) handleModelSelect(model.id)
+                    if (model.selectable ?? model.available) handleModelSelect(model.id)
                   }}
-                  disabled={!model.available}
+                  disabled={!(model.selectable ?? model.available)}
                   title={
                     model.unavailableReason ??
                     (model.available ? model.notice : "请先在模型配置中填写 API 密钥")
@@ -504,7 +505,7 @@ function ModelSwitcherImpl({
                     "w-full flex items-center gap-1.5 px-2 py-1.5 rounded-sm text-xs transition-colors text-left font-mono disabled:cursor-not-allowed disabled:opacity-50",
                     baseReference === model.id
                       ? "bg-muted text-foreground"
-                      : model.available
+                      : (model.selectable ?? model.available)
                         ? "text-muted-foreground hover:text-foreground hover:bg-muted/50"
                         : "text-muted-foreground"
                   )}
@@ -513,9 +514,11 @@ function ModelSwitcherImpl({
                   <span className="flex-1 truncate">
                     {model.name}
                     {!model.available
-                      ? model.unavailableReason
-                        ? "（用户信息不完整）"
-                        : "（未配置密钥）"
+                      ? model.unavailableReason === IDLE_MODEL_OUTSIDE_HOURS_MESSAGE
+                        ? "（非服务时段）"
+                        : model.unavailableReason
+                          ? "（用户信息不完整）"
+                          : "（未配置密钥）"
                       : ""}
                   </span>
                   <span className="shrink-0 rounded bg-muted px-1 py-0.5 text-[9px] text-muted-foreground">

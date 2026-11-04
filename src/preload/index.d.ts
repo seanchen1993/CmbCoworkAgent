@@ -2374,7 +2374,8 @@ interface CustomAPI {
       fileName: string,
       origin?: "market" | "local",
       version?: string,
-      requireMods?: PluginInstallMode
+      requireMods?: PluginInstallMode,
+      marketplace?: PluginMetadata["marketplace"]
     ) => Promise<PluginInstallResult>
     installFromDir: (requireMods?: PluginInstallMode) => Promise<PluginInstallResult>
     exportForMarket: (

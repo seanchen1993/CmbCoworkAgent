@@ -4,9 +4,12 @@ import { AppErrorBoundary } from "../../src/renderer/src/components/app/AppError
 import { ModelSwitcher } from "../../src/renderer/src/components/chat/ModelSwitcher"
 import { CustomModelDialog } from "../../src/renderer/src/components/chat/CustomModelDialog"
 import { IDLE_MODEL_NOTICE } from "../../src/shared/model-catalog"
+import { IDLE_MODEL_OUTSIDE_HOURS_MESSAGE } from "../../src/shared/idle-model-service-window"
 import * as store from "./model-switcher-store"
 
 const root = createRoot(document.getElementById("root")!)
+let idleAvailable = true
+const modelChangeListeners = new Set<() => void>()
 const idle = {
   id: "idle-ultra",
   ref: "builtin:idle-ultra" as const,
@@ -25,11 +28,14 @@ const idle = {
   lockedFields: ["baseUrl", "model", "apiKey", "maxTokens"] as const
 }
 const fixture = {
-  idleCatalog() {
+  idleCatalog(available = true, selectable = true) {
+    idleAvailable = available
     store.setModels([
       ...store.localModels,
-      { ...idle, id: idle.ref, provider: "builtin", available: true }
+      { ...idle, id: idle.ref, provider: "builtin", available, selectable,
+        unavailableReason: available ? undefined : IDLE_MODEL_OUTSIDE_HOURS_MESSAGE }
     ])
+    for (const listener of modelChangeListeners) listener()
   },
   showIdleSettings() {
     flushSync(() => root.render(null))
@@ -60,7 +66,12 @@ Object.assign(window, {
   api: {
     routing: { setMode: store.persistRoutingMode },
     models: {
-      getBuiltinConfigs: async () => [idle],
+      onChanged: (listener: () => void) => {
+        modelChangeListeners.add(listener)
+        return () => { modelChangeListeners.delete(listener) }
+      },
+      getBuiltinConfigs: async () => [{ ...idle,
+        unavailableReason: idleAvailable ? undefined : IDLE_MODEL_OUTSIDE_HOURS_MESSAGE }],
       getCustomConfigs: async () => [],
       getDefault: async () => idle.ref,
       getTokenLimits: async () => ({

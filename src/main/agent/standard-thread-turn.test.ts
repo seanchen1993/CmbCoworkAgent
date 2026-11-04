@@ -36,6 +36,7 @@ import { extractErrorDetail } from "./failover"
 import { resolve } from "node:path"
 import type { PluginMetadata } from "../types"
 import { issueRuntimePluginSourceToken, withRuntimePluginSource } from "../plugins/runtime-source-scope"
+import { IdleModelServiceHoursError } from "../../shared/idle-model-service-window"
 import type { CreateAgentRuntimeOptions } from "./runtime"
 import {
   HarnessDeployUnitContextLimitError,
@@ -47,6 +48,14 @@ describe("managed model routing", () => {
   beforeEach(() => {
     routingMocks.managedModel.mockReset()
     routingMocks.resolveModel.mockReset()
+  })
+
+  it("preserves service-hours rejections instead of treating them as routing failures", async () => {
+    routingMocks.resolveModel.mockRejectedValue(new IdleModelServiceHoursError())
+    await expect(resolveStandardTurnRouting({
+      taskSource: "chat", threadId: "ordinary", requestedModelId: "builtin:idle-ultra",
+      routingMode: "pinned"
+    })).rejects.toMatchObject({ status: 400, code: "idle_model_outside_service_hours" })
   })
 
   it.each([undefined, "resume", "interrupt"] as const)(

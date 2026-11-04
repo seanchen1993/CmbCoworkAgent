@@ -1,5 +1,6 @@
 import { readNativeHarnessFeature } from "../harness-board/native-harness"
 import { reviewProjectUse, projectUseIpcOwner } from "../harness-board/project-use-authorization"
+import { authorizeKnowledgePreview } from "../harness-board/knowledge-preview-grant"
 import { requireHarnessFeatureWorkspace } from "../harness-board/service"
 import { validateProjectDirectorySelection } from "../harness-board/project-workspace"
 import {
@@ -368,26 +369,7 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
       const scope = `harness-knowledge:${event.sender.id}:${normalizedAdapterId}`
       const authorizedKnowledge = await getHarnessKnowledgePreviewBinding(normalizedAdapterId, target)
       const preview = await readHarnessKnowledgePreviewInWorker(normalizedAdapterId, scope, authorizedKnowledge)
-      if (!preview.exists || !preview.path) return preview
-      const previewablePaths = preview.files.filter((file) => !file.is_dir).map((file) => file.path)
-      if (previewablePaths.length === 0) return preview
-
-      // The knowledge root comes from the main-process Harness adapter config.
-      // The renderer receives only a sender-bound capability, never a path-to-
-      // capability minting primitive.
-      const issued = issueExternalFileReadGrant(
-        preview.path,
-        event.sender.id,
-        previewablePaths,
-        `harness-knowledge:${adapterId}`
-      )
-      if ("error" in issued) {
-        return {
-          ...preview,
-          error: preview.error ? `${preview.error}；${issued.error}` : issued.error
-        }
-      }
-      return { ...preview, previewGrant: issued.grant }
+      return authorizeKnowledgePreview(preview, event.sender.id)
     }
   )
 

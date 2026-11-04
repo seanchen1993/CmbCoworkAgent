@@ -34,6 +34,7 @@ import type {
   HarnessProjectDetailViewModel,
   HarnessProjectListItem
 } from "../../shared/harness-board-types"
+import { parseHookTimestamp } from "../../shared/hook-time"
 import { buildEvent } from "./event-reporter"
 
 /** Poll cadence: report project status every 20 minutes. */
@@ -128,6 +129,11 @@ function projectDocId(projectId: string): string {
 // Snapshot building
 // ─────────────────────────────────────────────────────────
 
+/** Local metadata uses Beijing wall time or ISO. ES date ranges use UTC ISO. */
+function serializeLifecycleTime(value: string | undefined): string | undefined {
+  return value ? parseHookTimestamp(value)?.toISOString() : undefined
+}
+
 /** Shape of a feature entry within the snapshot's `properties.features`. */
 function toFeatureSnapshot(feature: HarnessFeatureSummary): Record<string, unknown> {
   return {
@@ -191,9 +197,9 @@ async function buildProjectDoc(
     creatorUpperOrgLv1: project.creator?.upperOrgLv1,
     lifecycleStatus: project.lifecycle?.status,
     // 项目创建时间（项目本地元数据 createAt）；用于运营项目列表按新建时间排序。
-    lifecycleCreatedAt: project.lifecycle?.createAt,
+    lifecycleCreatedAt: serializeLifecycleTime(project.lifecycle?.createAt),
     // 生命周期最近变更时间（元数据编辑 / 归档时写入）；用于「已归档」列表按归档时间倒序。
-    lifecycleUpdatedAt: project.lifecycle?.updateAt,
+    lifecycleUpdatedAt: serializeLifecycleTime(project.lifecycle?.updateAt),
     compatible: project.boardCompatibility?.compatible,
     compatibilityStatus: project.boardCompatibility?.status,
     // Monotonic runtime fact: once a feature session has successfully loaded

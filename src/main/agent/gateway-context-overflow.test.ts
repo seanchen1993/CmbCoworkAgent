@@ -61,18 +61,30 @@ function finalResponse(): Response {
 }
 
 beforeEach(() => {
+  vi.useFakeTimers({ toFake: ["Date"] })
+  vi.setSystemTime(new Date("2026-11-03T22:30:00+08:00"))
   vi.spyOn(storage, "getUserInfo").mockReturnValue({ sapId: "12345678" })
 })
 
 afterEach(() => {
+  vi.useRealTimers()
   vi.restoreAllMocks()
   vi.unstubAllGlobals()
 })
 
 describe("gateway context overflow through the real agent transport", () => {
-  it.each([485, 580])(
-    "compacts and resends status %s without an unchanged HTTP retry",
-    async (status) => {
+  it.each([
+    { status: 485, environment: "production" as const },
+    { status: 580, environment: "production" as const },
+    { status: 485, environment: "uat" as const },
+    { status: 580, environment: "uat" as const }
+  ])(
+    "compacts and resends $environment status $status without an unchanged HTTP retry",
+    async ({ status, environment }) => {
+      if (environment === "uat") {
+        vi.setSystemTime(new Date("2026-11-03T12:00:00+08:00"))
+      }
+      const environmentConfig = { ...config, idleModelEnvironment: environment }
       const requests: Array<{
         headers: Headers
         body: { stream?: boolean; messages: Array<{ role: string; content?: unknown }> }
@@ -89,9 +101,9 @@ describe("gateway context overflow through the real agent transport", () => {
       const onFetchError = vi.fn()
       const hooks = { onRetry, onFetchError }
       const threadId = "12345678-1234-1234-1234-123456789012__wf_run12345_a0"
-      const agentModel = getModelInstance(config, hooks, 6, "agent", threadId)
+      const agentModel = getModelInstance(environmentConfig, hooks, 6, "agent", threadId)
       const summaryModel = getModelInstance(
-        config,
+        environmentConfig,
         hooks,
         6,
         "context-compaction",

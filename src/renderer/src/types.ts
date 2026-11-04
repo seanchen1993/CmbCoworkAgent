@@ -66,6 +66,8 @@ export interface ModelConfig {
   model: string
   description?: string
   available: boolean
+  /** Selection is separate from whether a request can be sent right now. */
+  selectable?: boolean
   source: ProviderId
   origin?: "remote" | "fallback" | "local"
   notice?: string

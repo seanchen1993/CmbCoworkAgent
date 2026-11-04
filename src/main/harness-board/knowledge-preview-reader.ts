@@ -332,7 +332,7 @@ export function readHarnessKnowledgePreview(
 
   const knowledgePath = approvedRoot ? resolve(approvedRoot) : resolveKnowledgePath(template, plugin, source)
   const pluginRoot = resolve(plugin.path)
-  if (!approvedRoot && !isPathInside(pluginRoot, knowledgePath)) {
+  if (pluginRoot === knowledgePath || (!approvedRoot && !isPathInside(pluginRoot, knowledgePath))) {
     return {
       ...resultBase,
       configured: true,
@@ -357,8 +357,9 @@ export function readHarnessKnowledgePreview(
       realpathSync(pluginRoot),
       realpathSync(knowledgePath)
     ]
-    if (approvedRoot ? !isSameWorkspacePath(resolve(approvedRoot), realKnowledgePath)
-      : !isPathInside(realPluginRoot, realKnowledgePath)) {
+    if (realPluginRoot === realKnowledgePath || (approvedRoot
+      ? !isSameWorkspacePath(resolve(approvedRoot), realKnowledgePath)
+      : !isPathInside(realPluginRoot, realKnowledgePath))) {
       return {
         ...resultBase,
         configured: true,

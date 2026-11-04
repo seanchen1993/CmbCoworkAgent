@@ -151,6 +151,8 @@ export interface ModelConfig {
   model: string
   description?: string
   available: boolean
+  /** May be selected now, even if a configured idle model is outside service hours. */
+  selectable?: boolean
   source: ProviderId
   origin?: "remote" | "fallback" | "local"
   notice?: string
@@ -855,6 +857,8 @@ export interface PluginMetadata {
    * and stop relying on the heuristic.
    */
   origin?: "market" | "local"
+  /** Market identity may differ from the name inside the uploaded ZIP manifest. */
+  marketplace?: { name: string; id?: string }
   createdAt: string
   updatedAt: string
 }

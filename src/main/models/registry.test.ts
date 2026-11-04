@@ -1,4 +1,9 @@
-import { beforeEach, describe, expect, it, vi } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+import {
+  assertIdleModelServiceHours,
+  IDLE_MODEL_OUTSIDE_HOURS_MESSAGE
+} from "../../shared/idle-model-service-window"
+import { isModelAvailable, isModelSelectable } from "../../shared/model-catalog"
 
 const state = vi.hoisted(() => ({
   manifest: {} as Record<string, unknown>,
@@ -10,11 +15,22 @@ const state = vi.hoisted(() => ({
   bundledApiKey: "bundled-test-key",
   sapId: "12345678" as string | undefined,
   idleModelUseUat: false,
-  fetchGate: null as Promise<void> | null
+  fetchGate: null as Promise<void> | null,
+  send: vi.fn(),
+  powerOn: vi.fn(),
+  powerOff: vi.fn()
 }))
 
 vi.mock("electron", () => ({
-  BrowserWindow: { getAllWindows: () => [] }
+  BrowserWindow: {
+    getAllWindows: () => [
+      {
+        isDestroyed: () => false,
+        webContents: { isDestroyed: () => false, send: state.send }
+      }
+    ]
+  },
+  powerMonitor: { on: state.powerOn, removeListener: state.powerOff }
 }))
 
 vi.mock("../storage", () => ({
@@ -70,6 +86,7 @@ import {
   getDefaultModelConfig,
   getModelConfigByRef,
   getModelConfigs,
+  getModelByTier,
   refreshBuiltinModelCatalog,
   startBuiltinModelCatalogRefresh,
   stopBuiltinModelCatalogRefresh,
@@ -93,6 +110,16 @@ beforeEach(() => {
   state.bundledApiKey = "bundled-test-key"
   state.fetchGate = null
   vi.restoreAllMocks()
+  vi.useFakeTimers({ toFake: ["Date"] })
+  vi.setSystemTime(new Date("2026-11-03T22:30:00+08:00"))
+  state.send.mockClear()
+  state.powerOn.mockClear()
+  state.powerOff.mockClear()
+})
+
+afterEach(() => {
+  stopBuiltinModelCatalogRefresh()
+  vi.useRealTimers()
 })
 
 describe("builtin model registry", () => {
@@ -125,17 +152,42 @@ describe("builtin model registry", () => {
     configureIdleModel()
     expect(getModelConfigByRef("builtin:idle-ultra")).toMatchObject({
       baseUrl: "http://idle.example.test/pattern/llm/v1",
-      apiKey: "idle-test-key"
+      apiKey: "idle-test-key",
+      idleModelEnvironment: "production"
     })
     state.idleModelUseUat = true
     expect(getModelConfigByRef("builtin:idle-ultra")).toMatchObject({
       baseUrl: "http://idle-uat.example.test/pattern/llm/v1",
       apiKey: "idle-uat-test-key",
+      idleModelEnvironment: "uat",
       model: "ultra",
       maxTokens: 128_000
     })
     state.idleModelUseUat = false
     expect(getModelConfigByRef("builtin:idle-ultra")?.apiKey).toBe("idle-test-key")
+  })
+
+  it("keeps UAT available all day and binds the exemption to the selected connection", () => {
+    configureIdleModel()
+    vi.setSystemTime(new Date("2026-11-03T12:00:00+08:00"))
+    const production = getModelConfigByRef("builtin:idle-ultra")!
+    state.idleModelUseUat = true
+    const uat = getAvailableModelConfigOrDefault("builtin:idle-ultra")!
+    expect(isModelAvailable(uat)).toBe(true)
+    expect(isModelSelectable(uat)).toBe(true)
+    expect(uat.unavailableReason).toBeUndefined()
+    expect(uat.notice).toBe("当前使用 UAT 测试环境，不受闲时服务时段限制。")
+    state.storedDefault = "builtin:idle-ultra"
+    expect(getModelByTier("premium")?.id).toBe("idle-ultra")
+    expect(() => assertIdleModelServiceHours(production)).toThrow("非服务时段")
+
+    state.idleModelUseUat = false
+    expect(() => assertIdleModelServiceHours(uat)).not.toThrow()
+    expect(() => getAvailableModelConfigOrDefault("builtin:idle-ultra")).toThrow("非服务时段")
+    state.idleModelUseUat = true
+    state.sapId = undefined
+    expect(isModelAvailable(getModelConfigByRef("builtin:idle-ultra"))).toBe(false)
+    expect(getModelConfigByRef("builtin:idle-ultra")?.unavailableReason).toContain("SAP")
   })
 
   it.each([false, true])("does not borrow credentials across environments (UAT %s)", (useUat) => {
@@ -146,9 +198,9 @@ describe("builtin model registry", () => {
       ""
     )
     expect(getModelConfigByRef("builtin:idle-ultra")?.apiKey).toBeUndefined()
-    expect(
-      getBuiltinModelPublicConfigs().find((item) => item.id === "idle-ultra")?.hasApiKey
-    ).toBe(false)
+    expect(getBuiltinModelPublicConfigs().find((item) => item.id === "idle-ultra")?.hasApiKey).toBe(
+      false
+    )
   })
 
   it.each([false, true])("does not fall back to another environment's URL (UAT %s)", (useUat) => {
@@ -203,21 +255,52 @@ describe("builtin model registry", () => {
     expect(getModelConfigByRef("builtin:idle-ultra")?.apiKey).toBeUndefined()
   })
 
-  it("requires an eight-digit SAP identity but imposes no time restriction", () => {
+  it("requires an eight-digit SAP identity and excludes idle from auto routing outside hours", () => {
     configureIdleModel()
     state.sapId = undefined
     expect(getModelConfigByRef("builtin:idle-ultra")?.unavailableReason).toContain("SAP")
     expect(getAvailableModelConfigOrDefault("builtin:idle-ultra")?.id).not.toBe("idle-ultra")
     state.sapId = "12345678"
-    vi.useFakeTimers()
-    try {
-      for (const hour of [0, 6, 7, 12, 21, 22, 23]) {
-        vi.setSystemTime(new Date(`2026-10-28T${String(hour).padStart(2, "0")}:00:00+08:00`))
-        expect(getAvailableModelConfigOrDefault("builtin:idle-ultra")?.id).toBe("idle-ultra")
-      }
-    } finally {
-      vi.useRealTimers()
+    for (const hour of [0, 6, 22, 23]) {
+      vi.setSystemTime(new Date(`2026-10-28T${String(hour).padStart(2, "0")}:00:00+08:00`))
+      expect(getAvailableModelConfigOrDefault("builtin:idle-ultra")?.id).toBe("idle-ultra")
     }
+    state.storedDefault = "builtin:idle-ultra"
+    for (const hour of [7, 12, 21]) {
+      vi.setSystemTime(new Date(`2026-10-28T${String(hour).padStart(2, "0")}:00:00+08:00`))
+      expect(getModelConfigByRef("builtin:idle-ultra")?.unavailableReason).toBe(
+        IDLE_MODEL_OUTSIDE_HOURS_MESSAGE
+      )
+      expect(getDefaultModelConfig()?.id).toBe("idle-ultra")
+      expect(getAvailableModelConfigOrDefault()?.id).not.toBe("idle-ultra")
+      expect(getModelByTier("premium")?.id).not.toBe("idle-ultra")
+      expect(() => getAvailableModelConfigOrDefault("builtin:idle-ultra")).toThrow("非服务时段")
+    }
+  })
+
+  it("notifies the UI at closing and rechecks on resume, then disposes its timers", async () => {
+    configureIdleModel()
+    vi.useRealTimers()
+    vi.useFakeTimers({
+      toFake: ["Date", "setTimeout", "clearTimeout", "setInterval", "clearInterval"]
+    })
+    vi.setSystemTime(new Date("2026-11-04T06:59:59.990+08:00"))
+    await startBuiltinModelCatalogRefresh()
+    state.send.mockClear()
+    await vi.advanceTimersByTimeAsync(10)
+    expect(state.send).toHaveBeenCalledWith("models:changed")
+    expect(getModelConfigByRef("builtin:idle-ultra")?.unavailableReason).toBe(
+      IDLE_MODEL_OUTSIDE_HOURS_MESSAGE
+    )
+    state.send.mockClear()
+    vi.setSystemTime(new Date("2026-11-04T22:00:00+08:00"))
+    const resume = state.powerOn.mock.calls.find(([event]) => event === "resume")![1]
+    resume()
+    expect(state.send).toHaveBeenCalledTimes(1)
+    expect(getModelConfigByRef("builtin:idle-ultra")?.unavailableReason).toBeUndefined()
+    stopBuiltinModelCatalogRefresh()
+    expect(state.powerOff).toHaveBeenCalledWith("resume", resume)
+    expect(vi.getTimerCount()).toBe(0)
   })
   it("uses MiniMax as the only local fallback when the manifest has no catalog", async () => {
     await refreshBuiltinModelCatalog(true)

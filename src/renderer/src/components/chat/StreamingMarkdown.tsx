@@ -1,6 +1,7 @@
 import ReactMarkdown, { defaultUrlTransform, type Components } from "react-markdown"
 import { rehypeChatHighlight } from "../../lib/markdown-highlight"
 import remarkGfm from "remark-gfm"
+import remarkWindowsFileLinks from "@/lib/remark-windows-file-links"
 import type { ChatSearchLocation } from "../../../../shared/chat-search-types"
 import { ChatSearchContext } from "./ChatSearchContext"
 import { Check, Copy } from "lucide-react"
@@ -79,9 +80,9 @@ function MarkdownCodeBlock({
 
 // Hoisted to module scope so the prop identities stay stable across renders
 // (recreating these every render makes react-markdown redo work and churns GC).
-const REMARK_PLUGINS = [remarkGfm, remarkStreamingMarkdownParse]
-const COMPLETED_REMARK_PLUGINS = [remarkGfm, remarkCompletedMarkdownParseCache]
-const STABLE_PREFIX_REMARK_PLUGINS = [remarkGfm, remarkStableMarkdownPrefixCache]
+const REMARK_PLUGINS = [remarkGfm, remarkWindowsFileLinks, remarkStreamingMarkdownParse]
+const COMPLETED_REMARK_PLUGINS = [remarkGfm, remarkWindowsFileLinks, remarkCompletedMarkdownParseCache]
+const STABLE_PREFIX_REMARK_PLUGINS = [remarkGfm, remarkWindowsFileLinks, remarkStableMarkdownPrefixCache]
 const REHYPE_PLUGINS = [rehypeChatHighlight]
 // While streaming we skip syntax highlighting (the expensive rehype pass) and
 // reuse a single empty array identity so react-markdown doesn't see a new prop.
