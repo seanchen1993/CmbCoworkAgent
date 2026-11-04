@@ -71,6 +71,127 @@ afterAll(() => {
 })
 
 describe("market content IPC regression", () => {
+  it("persists market identity across renamed project plugin updates and clears it for originals", async () => {
+    const marketplace = { name: "市场项目模式插件", id: "project-market-id" }
+    const install = async (name: string, origin = "market") => {
+      const zip = new AdmZip()
+      zip.addFile("plugin.json", Buffer.from(JSON.stringify({ name, author: "uploader" })))
+      zip.addFile("skills/action/SKILL.md", Buffer.from(original(name)))
+      return invoke("plugins:install", {
+        buffer: bytes(zip.toBuffer()),
+        fileName: "project.zip",
+        origin,
+        marketplace
+      })
+    }
+    expect((await install("internal-project-plugin")).success).toBe(true)
+    const first = storage.getPlugins().find((p) => p.marketplace?.id === marketplace.id)!
+    expect(first.marketplace).toEqual(marketplace)
+    expect((await install("renamed-internal-project-plugin")).success).toBe(true)
+    const installed = storage.getPlugins().filter((p) => p.marketplace?.id === marketplace.id)
+    expect(installed).toHaveLength(1)
+    expect(installed[0]).toMatchObject({
+      id: first.id,
+      path: first.path,
+      name: "renamed-internal-project-plugin"
+    })
+    expect(
+      JSON.parse(readFileSync(join(home, "plugins.json"), "utf8")).find(
+        (p: { id: string }) => p.id === first.id
+      ).marketplace
+    ).toEqual(marketplace)
+    expect((await install("renamed-internal-project-plugin", "local")).success).toBe(true)
+    expect(storage.getPlugins().find((p) => p.id === first.id)?.marketplace).toBeUndefined()
+    expect((await invoke("plugins:delete", first.id)).success).toBe(true)
+    expect(storage.getPlugins().some((p) => p.id === first.id)).toBe(false)
+  })
+
+  it("pulls project constraints into the plugin directory and previews them after runtime cleanup", async () => {
+    const { syncHarnessProjectConstraints } = await import("../harness-board/service")
+    const { readHarnessKnowledgePreview } =
+      await import("../harness-board/knowledge-preview-reader")
+    const { authorizeKnowledgePreview } = await import("../harness-board/knowledge-preview-grant")
+    const { resolveExternalFileReadGrant, revokeExternalFileReadGrantsForOwner } =
+      await import("../services/external-file-read-tokens")
+    const { readPreviewTextPage } = await import("../workspace-file-preview/reader")
+    const zip = new AdmZip()
+    zip.addFile("plugin.json", Buffer.from('{"name":"public-constraints-plugin"}'))
+    zip.addFile("skills/action/SKILL.md", Buffer.from(original("public-constraints-plugin")))
+    zip.addFile(
+      "board_core/board_config.json",
+      Buffer.from(
+        JSON.stringify({
+          apiVersion: 1,
+          inspectCommands: {
+            [process.platform]: {
+              knowledge_path: "${pluginPath}/knowledge",
+              pull_knowledge: `"${process.execPath}" "\${pluginPath}/pull.cjs"`
+            }
+          }
+        })
+      )
+    )
+    zip.addFile(
+      "pull.cjs",
+      Buffer.from(`const fs=require("node:fs"),path=require("node:path")
+const root=path.join(__dirname,"knowledge")
+fs.mkdirSync(root,{recursive:true})
+fs.writeFileSync(path.join(root,"AGENTS.md"),"# 公共系统约束\\n可预览")
+console.log(JSON.stringify({ok:true,path:root}))`)
+    )
+    expect(
+      (
+        await invoke("plugins:install", {
+          buffer: bytes(zip.toBuffer()),
+          fileName: "public.zip",
+          origin: "market"
+        })
+      ).success
+    ).toBe(true)
+    const plugin = storage.getPlugins().find((p) => p.name === "public-constraints-plugin")!
+    const result = await syncHarnessProjectConstraints(plugin.id)
+    expect(result.path).toBe(join(plugin.path, "knowledge"))
+    const stored = join(plugin.path, "knowledge", "AGENTS.md")
+    expect(readFileSync(stored, "utf8")).toContain(MARKET_CONTENT_PREFIX)
+    cleanupMarketRuntimeContent()
+    const preview = authorizeKnowledgePreview(
+      readHarnessKnowledgePreview(
+        plugin.id,
+        {
+          openworkDir: home,
+          pluginStorePath: join(home, "plugins.json"),
+          leanTokenStorePath: join(home, "leanstar-config.json")
+        },
+        512 * 1024
+      ),
+      92
+    )
+    expect(preview.error).toBeUndefined()
+    expect(preview.previewGrant).toBeTruthy()
+    const resolved = await resolveExternalFileReadGrant(preview.previewGrant, 92, stored)
+    expect(resolved).not.toHaveProperty("error")
+    if ("error" in resolved) throw new Error(resolved.error)
+    const page = await readPreviewTextPage(
+      { externalFullPath: resolved.filePath, trustedRootPath: resolved.rootPath },
+      undefined,
+      0,
+      new Int32Array(new SharedArrayBuffer(4))
+    )
+    expect(page.result.content).toBe("# 公共系统约束\n可预览")
+    expect(await resolveExternalFileReadGrant(preview.previewGrant, 93, stored)).toHaveProperty(
+      "error",
+      "Sender mismatch"
+    )
+    expect(
+      await resolveExternalFileReadGrant(
+        preview.previewGrant,
+        92,
+        join(plugin.path, "skills/action/SKILL.md")
+      )
+    ).toHaveProperty("error")
+    revokeExternalFileReadGrantsForOwner(92)
+  }, 60_000)
+
   it("protects market skills and rejects all original-file access endpoints", async () => {
     const zip = new AdmZip()
     zip.addFile("SKILL.md", Buffer.from(original("market-analysis")))

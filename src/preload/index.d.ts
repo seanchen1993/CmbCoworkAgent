@@ -2228,7 +2228,8 @@ interface CustomAPI {
       buffer: ArrayBuffer,
       fileName: string,
       origin?: "market" | "local",
-      version?: string
+      version?: string,
+      marketplace?: PluginMetadata["marketplace"]
     ) => Promise<{ success: boolean; pluginName?: string; error?: string }>
     installFromDir: () => Promise<{ success: boolean; pluginName?: string; error?: string }>
     exportForMarket: (

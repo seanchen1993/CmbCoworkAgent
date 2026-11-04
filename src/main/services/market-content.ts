@@ -241,6 +241,72 @@ export function cleanupMarketRuntimeContent(): void {
   projections.clear()
 }
 
+/** Persist a known generated directory only inside its protected installation. */
+export function persistMarketRuntimeDirectory(pluginRoot: string, directory: string): void {
+  const root = findProtectedMarketRoot(pluginRoot)
+  if (!root) return
+  const realRoot = realpathSync(root)
+  const runtime = projections.get(realRoot)
+  if (!runtime) return
+  const subpath = relative(root, resolve(directory))
+  if (!subpath || subpath.startsWith("..") || isAbsolute(subpath)) {
+    throw new Error("公共系统约束必须位于插件的独立子目录")
+  }
+  const source = join(runtime, subpath)
+  if (!existsSync(source)) return
+  const requireInside = (parent: string, target: string): void => {
+    let existing = target
+    while (!existsSync(existing)) existing = dirname(existing)
+    const rel = relative(realpathSync(parent), realpathSync(existing))
+    if (rel.startsWith("..") || isAbsolute(rel)) throw new Error(MARKET_CONTENT_DENIED)
+  }
+  requireInside(runtime, source)
+  requireInside(realRoot, directory)
+  if (lstatSync(source).isSymbolicLink()) throw new Error(MARKET_CONTENT_DENIED)
+  if (existsSync(directory) && lstatSync(directory).isSymbolicLink())
+    throw new Error(MARKET_CONTENT_DENIED)
+  mkdirSync(directory, { recursive: true })
+  const copied = new Set<string>()
+  walkFiles(
+    source,
+    (file) => {
+      const rel = relative(source, file)
+      const target = join(directory, rel)
+      requireInside(directory, target)
+      if (existsSync(target) && lstatSync(target).isSymbolicLink())
+        throw new Error(MARKET_CONTENT_DENIED)
+      mkdirSync(dirname(target), { recursive: true })
+      const content = readFileSync(file)
+      const gitMetadata = rel.split(/[\\/]/).some((part) => part.toLowerCase() === ".git")
+      const stored =
+        !gitMetadata && isMarketMarkdownFile(file)
+          ? encodeMarketContent(decodeMarketContent(content))
+          : content
+      if (existsSync(target) && readFileSync(target).equals(stored)) {
+        copied.add(rel)
+        return
+      }
+      const temporary = `${target}.cmb-encoding-${randomUUID()}`
+      try {
+        writeFileSync(temporary, stored, { flag: "wx", mode: statSync(file).mode })
+        renameSync(temporary, target)
+      } finally {
+        rmSync(temporary, { force: true })
+      }
+      copied.add(rel)
+    },
+    true
+  )
+  // The configured knowledge directory is generated state, so remove stale files there only.
+  walkFiles(
+    directory,
+    (file) => {
+      if (!copied.has(relative(directory, file))) rmSync(file)
+    },
+    true
+  )
+}
+
 export function resolveMarketRuntimePath(filePath: string): string {
   const root = findProtectedMarketRoot(filePath)
   if (!root) return filePath

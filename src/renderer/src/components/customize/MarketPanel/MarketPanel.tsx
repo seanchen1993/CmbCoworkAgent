@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useSta
 import { useShallow } from "zustand/react/shallow"
 import { revalidateSkillCatalog, subscribeSkillCatalogInvalidation } from "@/lib/app-catalog-cache"
 import { onMarketPublished, onMcpInstallationChanged } from "@/lib/market-change-events"
+import { canManageMarketItem } from "@/lib/market-plugin-identity"
 import {
   Search,
   ShoppingBag,
@@ -364,16 +365,6 @@ function getMarketAdminYstIds(): Set<string> {
 
 const MARKET_ADMIN_YST_IDS = getMarketAdminYstIds()
 
-function canCurrentUserEditOrDeleteMarketItem(
-  item: Pick<MarketItem, "canDelete" | "ip">,
-  localIp?: string | null,
-  isCurrentUserMarketAdmin = false
-): boolean {
-  return Boolean(
-    isCurrentUserMarketAdmin || item.canDelete || (item.ip && localIp && item.ip === localIp)
-  )
-}
-
 function doesMarketUserIdMatchCurrentUser(
   rawUserId: string | null | undefined,
   currentUserIdCandidates: Iterable<string>,
@@ -512,7 +503,7 @@ interface MarketItemCardProps {
   showProjectModeTag?: boolean
 }
 
-function MarketItemCard({
+export function MarketItemCard({
   item,
   onOpenDetail,
   onDelete,
@@ -553,7 +544,6 @@ function MarketItemCard({
     onUninstall(item)
   }
 
-  const ip = localStorage.getItem("localIp")
   const isFeatured = item.featured === "精品"
   const itemTag = item.tag?.trim()
   const isSkillCard = skillCallCount !== null || skillUserCount !== null
@@ -798,7 +788,7 @@ function MarketItemCard({
                   卸载
                 </Button>
               )}
-              {canCurrentUserEditOrDeleteMarketItem(item, ip) && (
+              {canManageMarketItem(item) && (
                 <>
                   <Button
                     variant="outline"
@@ -910,7 +900,7 @@ export const MarketPanel = React.memo(function MarketPanel(): React.JSX.Element 
   const [updatingItems, setUpdatingItems] = useState<Set<string>>(new Set()) // 新增更新中状态
   const [installedSkills, setInstalledSkills] = useState<string[]>([]) // 新增已安装skills列表
   const [installedMcps, setInstalledMcps] = useState<string[]>([]) // 新增已安装MCPs列表
-  const [installedPlugins, setInstalledPlugins] = useState<string[]>([]) // 新增已安装Plugins列表
+  const [installedPlugins, setInstalledPlugins] = useState<PluginMetadata[]>([])
   const [deleteDialog, setDeleteDialog] = useState<{ open: boolean; item: MarketItem | null }>({
     open: false,
     item: null
@@ -969,7 +959,7 @@ export const MarketPanel = React.memo(function MarketPanel(): React.JSX.Element 
   const shouldRestoreListScrollRef = useRef(false)
   const installedSkillsRef = useRef<string[]>([])
   const installedMcpsRef = useRef<string[]>([])
-  const installedPluginsRef = useRef<string[]>([])
+  const installedPluginsRef = useRef<PluginMetadata[]>([])
   const updateNoticeShownRef = useRef<Set<string>>(new Set())
   const uploaderProfilesRequestIdRef = useRef(0)
   const openItemDetailRef = useRef<(item: MarketItem) => Promise<void>>(async () => {})
@@ -978,7 +968,6 @@ export const MarketPanel = React.memo(function MarketPanel(): React.JSX.Element 
     () => new Set(currentUserUploadCandidates),
     [currentUserUploadCandidates]
   )
-  const currentLocalIp = localStorage.getItem("localIp")
   const isAdminModeActive = isCurrentUserMarketAdmin && adminModeEnabled
   const uploadedSkillDisabledReason = "这个技能已经存在于“我上传的技能”里，无需重复安装。"
   const uploadedSkillNameSetRef = useRef<Set<string>>(uploadedSkillNames)
@@ -1360,8 +1349,7 @@ export const MarketPanel = React.memo(function MarketPanel(): React.JSX.Element 
       if (window.api?.plugins?.list) {
         const pluginsMetadata = await window.api.plugins.list()
         if (request !== installationRequests.current.plugin) return
-        const pluginNames = pluginsMetadata.map((plugin) => plugin.name)
-        setInstalledPlugins(pluginNames)
+        setInstalledPlugins(pluginsMetadata)
       }
     } catch (error) {
       console.error("Failed to load installed plugins:", error)
@@ -1531,7 +1519,9 @@ export const MarketPanel = React.memo(function MarketPanel(): React.JSX.Element 
       prev.map((item) => ({
         ...item,
         canDelete: localStorageHelper.canDeleteItem(item.name, "plugin"),
-        ...buildMarketInstalledFlags(item, "plugin", installedPlugins.includes(item.name))
+        ...buildMarketInstalledFlags(
+          item, "plugin", Boolean(findInstalledPluginForMarketItem(installedPlugins, item))
+        )
       }))
     )
   }, [installedPlugins])
@@ -1674,7 +1664,7 @@ export const MarketPanel = React.memo(function MarketPanel(): React.JSX.Element 
               )
             : type === "mcp"
               ? installedMcpsRef.current.includes(item.name)
-              : installedPluginsRef.current.includes(item.name)
+              : Boolean(findInstalledPluginForMarketItem(installedPluginsRef.current, item))
 
         return {
           ...item,
@@ -2714,11 +2704,7 @@ export const MarketPanel = React.memo(function MarketPanel(): React.JSX.Element 
         <MarketDetailView
           activeTab={activeTab}
           selectedItem={selectedItem}
-          canManageSelectedItem={canCurrentUserEditOrDeleteMarketItem(
-            selectedItem,
-            currentLocalIp,
-            isAdminModeActive
-          )}
+          canManageSelectedItem={canManageMarketItem(selectedItem, isAdminModeActive)}
           detailFilePanel={renderDetailFilePanel()}
           canViewSkillUserDetail={canViewSkillUserDetail}
           selectedSkillCallCount={selectedSkillCallCount}

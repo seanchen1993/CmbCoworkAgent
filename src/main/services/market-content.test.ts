@@ -26,6 +26,7 @@ import {
   MARKET_CONTENT_PREFIX,
   materializeMarketRuntimeRoot,
   prepareMarketCommand,
+  persistMarketRuntimeDirectory,
   protectMarketDirectory,
   readContentFile,
   readContentFileSync,
@@ -54,6 +55,55 @@ afterEach(() => {
 })
 
 describe("market content storage and runtime", () => {
+  it("limits encoding and generated knowledge persistence to the plugin directory", () => {
+    const parent = fixture()
+    const plugin = join(parent, "plugin")
+    const workspace = join(parent, "workspace")
+    mkdirSync(join(plugin, "knowledge"), { recursive: true })
+    mkdirSync(workspace)
+    writeFileSync(join(workspace, "report.md"), "outside report")
+    const untouched = encodeMarketContent(Buffer.from("outside existing envelope"))
+    writeFileSync(join(workspace, "existing.md"), untouched)
+    writeFileSync(join(plugin, "SKILL.md"), "instructions")
+    writeFileSync(join(plugin, "knowledge", "old.md"), "old")
+    protectMarketDirectory(plugin)
+    const runtime = materializeMarketRuntimeRoot(plugin)
+    rmSync(join(runtime, "knowledge", "old.md"))
+    writeFileSync(join(runtime, "knowledge", "new.md"), "new knowledge")
+    writeFileSync(join(runtime, "knowledge", "data.json"), "{}")
+    persistMarketRuntimeDirectory(plugin, join(plugin, "knowledge"))
+    expect(readFileSync(join(plugin, "knowledge", "new.md"), "utf8")).toContain(
+      MARKET_CONTENT_PREFIX
+    )
+    expect(readFileSync(join(plugin, "knowledge", "data.json"), "utf8")).toBe("{}")
+    expect(existsSync(join(plugin, "knowledge", "old.md"))).toBe(false)
+    expect(() => persistMarketRuntimeDirectory(plugin, workspace)).toThrow()
+    expect(() => persistMarketRuntimeDirectory(plugin, plugin)).toThrow()
+    expect(readFileSync(join(workspace, "report.md"), "utf8")).toBe("outside report")
+    expect(readFileSync(join(workspace, "existing.md"))).toEqual(untouched)
+    cleanupMarketRuntimeContent()
+    expect(readContentFileSync(join(plugin, "knowledge", "new.md"), "utf8")).toBe("new knowledge")
+  })
+
+  it("refuses knowledge persistence through a junction into another directory", () => {
+    const parent = fixture()
+    const plugin = join(parent, "plugin")
+    const outside = join(parent, "outside")
+    mkdirSync(plugin)
+    mkdirSync(outside)
+    writeFileSync(join(outside, "report.md"), "outside")
+    protectMarketDirectory(plugin)
+    const runtime = materializeMarketRuntimeRoot(plugin)
+    mkdirSync(join(runtime, "knowledge"))
+    writeFileSync(join(runtime, "knowledge", "report.md"), "generated")
+    symlinkSync(
+      outside,
+      join(plugin, "knowledge"),
+      process.platform === "win32" ? "junction" : "dir"
+    )
+    expect(() => persistMarketRuntimeDirectory(plugin, join(plugin, "knowledge"))).toThrow("受保护")
+    expect(readFileSync(join(outside, "report.md"), "utf8")).toBe("outside")
+  })
   it("round-trips Unicode, empty content and every binary byte without guessing plain text", () => {
     for (const content of [
       Buffer.from("企业知识\n🦀"),

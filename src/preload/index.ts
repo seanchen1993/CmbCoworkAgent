@@ -3092,9 +3092,10 @@ const api = {
       buffer: ArrayBuffer,
       fileName: string,
       origin?: "market" | "local",
-      version?: string
+      version?: string,
+      marketplace?: PluginMetadata["marketplace"]
     ): Promise<{ success: boolean; pluginName?: string; error?: string }> =>
-      ipcRenderer.invoke("plugins:install", { buffer, fileName, origin, version }) as Promise<{
+      ipcRenderer.invoke("plugins:install", { buffer, fileName, origin, version, marketplace }) as Promise<{
         success: boolean
         pluginName?: string
         error?: string

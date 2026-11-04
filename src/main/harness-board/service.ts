@@ -1,4 +1,4 @@
-import { prepareMarketCommand } from "../services/market-content"
+import { prepareMarketCommand, persistMarketRuntimeDirectory } from "../services/market-content"
 import { markHarnessStageAttributionDirty } from "../services/harness-stage-attribution"
 import {
   assertHarnessConfigAvailable,
@@ -3647,11 +3647,13 @@ export async function syncHarnessProjectConstraints(
   if (!parsed.ok) {
     throw new Error(message || "公共系统约束同步失败")
   }
+  const knowledgePath = resolveProjectKnowledgePath(commandProject, plugin.path, config)
+  if (knowledgePath) persistMarketRuntimeDirectory(plugin.path, knowledgePath)
   return {
     adapterId: adapter.id,
     adapterName: adapter.name,
     ...(message ? { message } : {}),
-    ...(outputPath ? { path: outputPath } : {})
+    ...(knowledgePath || outputPath ? { path: knowledgePath || outputPath } : {})
   }
 }
 

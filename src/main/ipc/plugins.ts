@@ -279,7 +279,8 @@ async function installPluginFromDir(
   dirPath: string,
   fallbackName?: string,
   origin?: "market" | "local",
-  versionOverride?: string
+  versionOverride?: string,
+  marketplace?: PluginMetadata["marketplace"]
 ): Promise<{ success: boolean; pluginName?: string; error?: string }> {
   try {
     assertOriginalDirectory(dirPath)
@@ -294,9 +295,18 @@ async function installPluginFromDir(
 
     const pluginsDir = getPluginsDir()
 
-    // Check for existing plugin with same name AND author (update scenario)
+    // Prefer persisted market identity; legacy/local installs use manifest name and author.
     const newAuthor = formatAuthor(parsed.manifest?.author)
-    const existing = getPlugins().find((p) => p.name === parsed.name && p.author === newAuthor)
+    const installed = getPlugins()
+    const identified = marketplace && installed.find((p) =>
+      p.marketplace && (
+        (marketplace.id && marketplace.id === p.marketplace.id) ||
+        marketplace.name === p.marketplace.name
+      )
+    )
+    const existing = identified || installed.find((p) =>
+      (!marketplace || !p.marketplace) && p.name === parsed.name && p.author === newAuthor
+    )
 
     // Determine unique directory name — avoid collision with other plugins' directories
     let pluginDirName = sanitizePluginName(parsed.name)
@@ -392,6 +402,9 @@ async function installPluginFromDir(
       hookCount: parsed.hookCount,
       hookPath: parsed.hookPath,
       origin: resolvedOrigin,
+      ...(resolvedOrigin === "market" && (marketplace ?? existing?.marketplace)
+        ? { marketplace: marketplace ?? existing?.marketplace }
+        : {}),
       createdAt: existing?.createdAt ?? now,
       updatedAt: now
     }
@@ -630,7 +643,8 @@ async function installPluginFromZip(
   buffer: ArrayBuffer,
   fileName?: string,
   origin?: "market" | "local",
-  versionOverride?: string
+  versionOverride?: string,
+  marketplace?: PluginMetadata["marketplace"]
 ): Promise<{ success: boolean; pluginName?: string; error?: string }> {
   try {
     const extracted = await extractZipToTemp(buffer, getPluginsDir(), "_temp_")
@@ -648,7 +662,7 @@ async function installPluginFromZip(
           : rootName
 
       // Parse and install (the real copy lands in getPluginsDir() via installPluginFromDir)
-      return await installPluginFromDir(pluginRoot, fallbackName, origin, versionOverride)
+      return await installPluginFromDir(pluginRoot, fallbackName, origin, versionOverride, marketplace)
     } finally {
       // Clean up temp directory regardless of install outcome
       if (existsSync(tempDir)) {
@@ -733,9 +747,10 @@ export function registerPluginHandlers(ipcMain: IpcMain): void {
         fileName: string
         origin?: "market" | "local"
         version?: string
+        marketplace?: PluginMetadata["marketplace"]
       }
     ): Promise<{ success: boolean; pluginName?: string; error?: string }> => {
-      const { buffer, fileName, origin, version } = payload
+      const { buffer, fileName, origin, version, marketplace } = payload
       if (!buffer || !fileName) {
         return { success: false, error: "无效的文件" }
       }
@@ -749,9 +764,26 @@ export function registerPluginHandlers(ipcMain: IpcMain): void {
       // marketApi.downloadItem.
       const sanitizedOrigin: "market" | "local" =
         origin === "market" || origin === "local" ? origin : "local"
+      let marketIdentity: PluginMetadata["marketplace"]
+      if (sanitizedOrigin === "market" && marketplace !== undefined) {
+        if (
+          !marketplace ||
+          typeof marketplace.name !== "string" ||
+          !marketplace.name.trim() ||
+          marketplace.name.length > 512 ||
+          (marketplace.id !== undefined &&
+            (typeof marketplace.id !== "string" || marketplace.id.length > 512))
+        ) {
+          return { success: false, error: "无效的市场插件标识" }
+        }
+        marketIdentity = {
+          name: marketplace.name.trim(),
+          ...(marketplace.id?.trim() ? { id: marketplace.id.trim() } : {})
+        }
+      }
       await pluginMutex.acquire()
       try {
-        return await installPluginFromZip(buffer, fileName, sanitizedOrigin, version)
+        return await installPluginFromZip(buffer, fileName, sanitizedOrigin, version, marketIdentity)
       } finally {
         pluginMutex.release()
       }

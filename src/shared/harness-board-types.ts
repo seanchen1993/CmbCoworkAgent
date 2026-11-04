@@ -118,6 +118,7 @@ export interface HarnessKnowledgePreviewResult {
   path?: string
   /** Sender-bound capability for previewing descendants of `path`. */
   previewGrant?: string
+  previewGrantExpiresAt?: number
   files: HarnessKnowledgePreviewFile[]
   error?: string
 }
