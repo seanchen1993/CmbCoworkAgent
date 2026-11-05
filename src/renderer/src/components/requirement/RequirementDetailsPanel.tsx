@@ -4,6 +4,7 @@ import {
   AlertTriangle,
   Brain,
   ChevronRight,
+  Code2,
   Eye,
   FileCheck2,
   FileText,
@@ -1078,6 +1079,23 @@ export function RequirementDetailsPanel({
                       </Button>
                     ) : null}
                   </div>
+                </div>
+                <div className="mt-2 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border/60 bg-background px-3 py-2.5">
+                  <div>
+                    <h4 className="text-xs font-semibold text-foreground">需求开发</h4>
+                    <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
+                      基于当前需求内容进入开发流程。
+                    </p>
+                  </div>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    className="h-7 gap-1 px-2 text-[11px]"
+                  >
+                    <Code2 className="size-3" />
+                    去开发
+                  </Button>
                 </div>
               </RequirementPrdSummaryCard>
 

@@ -495,6 +495,14 @@ async function updateRequirementFunctionHtml(
 
 async function readRequirementToken(): Promise<string> {
   await ensureRequirementDirs()
+  const projectModeConfig = await readJson<{ leanToken?: unknown }>(
+    path.join(getOpenworkDir(), "leanstar-config.json"),
+    {}
+  )
+  const projectModeToken =
+    typeof projectModeConfig.leanToken === "string" ? projectModeConfig.leanToken.trim() : ""
+  if (projectModeToken) return projectModeToken
+
   const data = await readJson<RequirementsIndexFile>(
     path.join(getRequirementsRoot(), REQUIREMENTS_INDEX_FILENAME),
     {}

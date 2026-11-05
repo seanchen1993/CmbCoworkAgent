@@ -1,9 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import { ClipboardList } from "lucide-react"
 import { toast } from "sonner"
+import { LeanstarTokenDialog } from "./LeanstarTokenDialog"
 import { NewRequirementDialog } from "./NewRequirementDialog"
 import { RequirementConversationView } from "./RequirementConversationView"
 import { RequirementHistoryView } from "./RequirementHistoryView"
+import type { RequirementSourceFilter } from "./RequirementHistoryList"
+import { RequirementSpaceDetailView } from "./RequirementSpaceDetailView"
 import { SystemSelectionDialog } from "./SystemSelectionDialog"
 import {
   fromPersistedRequirement,
@@ -19,7 +22,6 @@ import {
 import { getSelectedRequirementSystem, useRequirementStore } from "./requirement-store"
 import type { DesignSystemInfo } from "../design/types"
 import { useAppStore } from "@/lib/store"
-import { openResourcePanelOverlay } from "@/lib/resource-panel-overlay-events"
 import { REQUIREMENT_CONVERSATION_ENTRY_KEY } from "@/lib/requirement-design-entry"
 import {
   leanstarRequirementsApi,
@@ -27,7 +29,7 @@ import {
   type ProductRequirement
 } from "@/api/leanstar-requirements"
 
-type EntryScreen = "history" | "system" | "conversation"
+type EntryScreen = "history" | "system" | "conversation" | "space-detail"
 
 type CurrentRequirementUser = { id: string; name: string }
 
@@ -110,6 +112,11 @@ export function RequirementEntryView({
   const [autoGeneratePrd, setAutoGeneratePrd] = useState(false)
   const [requirements, setRequirements] = useState<RequirementRecord[]>([])
   const [requirementsLoaded, setRequirementsLoaded] = useState(false)
+  const [sourceFilter, setSourceFilter] = useState<RequirementSourceFilter>("local")
+  const [tokenDialogOpen, setTokenDialogOpen] = useState(false)
+  const [tokenDraft, setTokenDraft] = useState("")
+  const [tokenSaving, setTokenSaving] = useState(false)
+  const [requirementSpaceRetryToken, setRequirementSpaceRetryToken] = useState(0)
   const [currentUser, setCurrentUser] = useState<CurrentRequirementUser | null>(null)
   const [currentUserPathName, setCurrentUserPathName] = useState("")
   const requirementSpaceLoadedRef = useRef(false)
@@ -214,7 +221,7 @@ export function RequirementEntryView({
     if (
       screen !== "history" ||
       !requirementsLoaded ||
-      !currentUserPathName ||
+      (sourceFilter !== "all" && sourceFilter !== "space") ||
       requirementSpaceLoadedRef.current
     )
       return
@@ -222,6 +229,10 @@ export function RequirementEntryView({
     void leanstarRequirementsApi
       .getNamespaceTree()
       .then(async ({ namespaceTreeList = [] }) => {
+        if (!currentUserPathName) {
+          requirementSpaceLoadedRef.current = false
+          return []
+        }
         const namespace = findRequirementSpaceNamespace(namespaceTreeList, currentUserPathName)
         if (!namespace) return []
         const page = await leanstarRequirementsApi.listProductRequirements(
@@ -238,9 +249,35 @@ export function RequirementEntryView({
       })
       .catch((error: unknown) => {
         requirementSpaceLoadedRef.current = false
+        if (error instanceof Error && error.message.includes("Leanstar Access Token")) {
+          setTokenDraft("")
+          setTokenDialogOpen(true)
+          return
+        }
         console.warn("加载需求空间3.0列表失败", error)
       })
-  }, [currentUserPathName, requirementsLoaded, screen])
+  }, [currentUserPathName, requirementSpaceRetryToken, requirementsLoaded, screen, sourceFilter])
+
+  const saveLeanstarTokenAndRetry = async (): Promise<void> => {
+    const token = tokenDraft.trim()
+    if (!token) {
+      toast.error("请填写精益之星身份令牌-Token")
+      return
+    }
+    setTokenSaving(true)
+    try {
+      const result = await window.api.requirements.saveToken(token)
+      if (!result.success) throw new Error(result.error || "保存 Token 失败")
+      requirementSpaceLoadedRef.current = false
+      setTokenDialogOpen(false)
+      setRequirementSpaceRetryToken((value) => value + 1)
+      toast.success("Token 已保存，正在重新加载需求空间数据")
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "保存 Token 失败")
+    } finally {
+      setTokenSaving(false)
+    }
+  }
 
   const startNewRequirement = (): void => {
     if (!selectedSystem) {
@@ -306,29 +343,13 @@ export function RequirementEntryView({
   ): Promise<void> => {
     const requestId = ++openRequirementRequestRef.current
     if (requirement.readOnly) {
-      const requirementCode = requirement.sourceName.trim()
-      if (!requirementCode) {
+      if (!requirement.sourceName.trim()) {
         toast.error("该需求缺少需求编号，无法读取需求文档")
         return
       }
-      const toastId = toast.loading("正在加载需求文档", { duration: 5000 })
-      try {
-        const document =
-          await leanstarRequirementsApi.getRequirementDocumentContent(requirementCode)
-        if (requestId !== openRequirementRequestRef.current) return
-        openResourcePanelOverlay("preview", {
-          inlinePreview: {
-            title: document?.title?.trim() || requirement.title,
-            content: document?.documentTextContent ?? ""
-          }
-        })
-      } catch (error) {
-        if (requestId === openRequirementRequestRef.current) {
-          toast.error(error instanceof Error ? error.message : "加载需求文档失败")
-        }
-      } finally {
-        toast.dismiss(toastId)
-      }
+      setSelectedRequirement(requirement)
+      setSelectedRequirementThreadId(null)
+      setScreen("space-detail")
       return
     }
     try {
@@ -432,6 +453,8 @@ export function RequirementEntryView({
         <RequirementHistoryView
           requirements={requirements}
           currentUser={currentUser}
+          sourceFilter={sourceFilter}
+          onSourceFilterChange={setSourceFilter}
           onNew={startNewRequirement}
           onOpenRequirement={openRequirement}
           onDeleteRequirement={deleteRequirement}
@@ -451,6 +474,24 @@ export function RequirementEntryView({
           autoGeneratePrd={autoGeneratePrd}
         />
       )}
+
+      {screen === "space-detail" && selectedRequirement && (
+        <RequirementSpaceDetailView
+          requirement={selectedRequirement}
+          onBack={() => setScreen("history")}
+        />
+      )}
+
+      <LeanstarTokenDialog
+        open={tokenDialogOpen}
+        onOpenChange={setTokenDialogOpen}
+        value={tokenDraft}
+        onValueChange={setTokenDraft}
+        saving={tokenSaving}
+        onConfirm={saveLeanstarTokenAndRetry}
+        description="加载需求空间3.0需要身份令牌。保存后将自动重新加载当前列表。"
+        confirmLabel="保存并加载"
+      />
 
       {systemDialogOpen && (
         <SystemSelectionDialog

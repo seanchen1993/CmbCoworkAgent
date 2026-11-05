@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
-import { Bot, ExternalLink, Loader2, PanelRightOpen } from "lucide-react"
+import { Bot, PanelRightOpen } from "lucide-react"
 import { toast } from "sonner"
 import { ChatContainer } from "@/components/chat/ChatContainer"
 import {
@@ -7,15 +7,6 @@ import {
   type RequirementSidebarMode
 } from "@/components/sidebar/RequirementThreadSidebar"
 import { Button } from "@/components/ui/button"
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle
-} from "@/components/ui/dialog"
-import { Input } from "@/components/ui/input"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { useAppStore } from "@/lib/store"
 import { assembleBoundedTextPreview } from "@/lib/text-preview-pages"
@@ -53,6 +44,7 @@ import {
 import { RequirementDetailsPanel } from "./RequirementDetailsPanel"
 import { getSelectedRequirementSystem } from "./requirement-store"
 import { getDesignSessionClient } from "@/components/design/session-client"
+import { LeanstarTokenDialog } from "./LeanstarTokenDialog"
 
 const REQUIREMENT_SPACE_PUBLISH_MESSAGE = "发布到需求空间"
 const LEANSTAR_TOKEN_MESSAGE_PREFIX = "精益之星身份令牌-Token："
@@ -1193,15 +1185,6 @@ function RequirementConversationSession({
     }
   }, [queueLeanstarToken, tokenDraft])
 
-  const handleOpenLeanstarTokenPage = useCallback((): void => {
-    const url = import.meta.env.VITE_LEANSTAR_PERSONAL_TOKEN_URL?.trim() || ""
-    if (!url) {
-      toast.error("未配置精益之星 Token 获取链接")
-      return
-    }
-    void window.electron.openExternal(url).catch(() => toast.error("打开 Token 获取页面失败"))
-  }, [])
-
   useEffect(() => {
     if ((previewTab !== "prd" && previewTab !== "source") || !threadId) return
     void window.api.workspace.loadFromDisk(threadId).then((result) => {
@@ -1451,56 +1434,15 @@ function RequirementConversationSession({
           />
         </div>
       </div>
-      <Dialog open={tokenDialogOpen} onOpenChange={setTokenDialogOpen}>
-        <DialogContent className="sm:max-w-md">
-          <DialogHeader>
-            <DialogTitle>精益之星身份令牌-Token</DialogTitle>
-            <DialogDescription>
-              填写 Token 后会保存到本地需求配置，并自动发送到当前会话。
-            </DialogDescription>
-          </DialogHeader>
-          <div className="space-y-2">
-            <Input
-              value={tokenDraft}
-              onChange={(event) => setTokenDraft(event.target.value)}
-              placeholder="请输入 Token"
-              autoFocus
-              onKeyDown={(event) => {
-                if (event.key === "Enter") {
-                  event.preventDefault()
-                  void handleConfirmLeanstarToken()
-                }
-              }}
-            />
-            <button
-              type="button"
-              className="inline-flex items-center gap-1 text-sm text-primary underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
-              onClick={handleOpenLeanstarTokenPage}
-            >
-              打开链接获取 Token
-              <ExternalLink className="size-3" />
-            </button>
-          </div>
-          <DialogFooter>
-            <Button
-              type="button"
-              variant="outline"
-              onClick={() => setTokenDialogOpen(false)}
-              disabled={tokenSaving}
-            >
-              取消
-            </Button>
-            <Button
-              type="button"
-              onClick={() => void handleConfirmLeanstarToken()}
-              disabled={tokenSaving}
-            >
-              {tokenSaving ? <Loader2 className="size-3.5 animate-spin" /> : null}
-              确定
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <LeanstarTokenDialog
+        open={tokenDialogOpen}
+        onOpenChange={setTokenDialogOpen}
+        value={tokenDraft}
+        onValueChange={setTokenDraft}
+        saving={tokenSaving}
+        onConfirm={handleConfirmLeanstarToken}
+        description="填写 Token 后会保存到本地需求配置，并自动发送到当前会话。"
+      />
     </div>
   )
 }

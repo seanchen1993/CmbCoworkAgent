@@ -1,10 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from "react"
 import {
   AlertTriangle,
+  Code2,
   ChevronLeft,
   ChevronRight,
   EllipsisVertical,
   Loader2,
+  PenTool,
   Share2,
   Trash2
 } from "lucide-react"
@@ -37,7 +39,7 @@ import {
 import { isRequirementMine } from "./requirement-history-filter"
 import { RequirementStatusTags } from "./RequirementStatusTags"
 
-const PAGE_SIZE = 10
+const PAGE_SIZE = 15
 export type RequirementSourceFilter = "all" | "local" | "remote" | "space"
 
 const REMOTE_MOCK_REQUIREMENT: RequirementRecord = {
@@ -399,6 +401,30 @@ export function RequirementHistoryList({
                     >
                       {description}
                     </p>
+                    {item.origin === "space" ? (
+                      <div className="mt-2 flex items-center gap-1.5">
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          className="h-7 gap-1 px-2 text-[11px]"
+                          onClick={(event) => event.stopPropagation()}
+                        >
+                          <PenTool className="size-3" />
+                          去设计
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          className="h-7 gap-1 px-2 text-[11px]"
+                          onClick={(event) => event.stopPropagation()}
+                        >
+                          <Code2 className="size-3" />
+                          去开发
+                        </Button>
+                      </div>
+                    ) : null}
                     <div className="mt-auto pt-1">
                       <div className="flex min-w-0 items-center gap-2 text-[11px] text-muted-foreground">
                         <Avatar className="size-6">

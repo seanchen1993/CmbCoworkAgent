@@ -19,19 +19,22 @@ const sourceFilters: Array<{ value: RequirementSourceFilter; label: string }> = 
 export function RequirementHistoryView({
   requirements,
   currentUser,
+  sourceFilter,
+  onSourceFilterChange,
   onNew,
   onOpenRequirement,
   onDeleteRequirement
 }: {
   requirements: RequirementRecord[]
   currentUser: RequirementUser | null
+  sourceFilter: RequirementSourceFilter
+  onSourceFilterChange: (filter: RequirementSourceFilter) => void
   onNew: () => void
   onOpenRequirement: (requirement: RequirementRecord) => void
   onDeleteRequirement: (requirement: RequirementRecord) => Promise<void>
 }): React.JSX.Element {
   const [searchInput, setSearchInput] = useState("")
   const [query, setQuery] = useState("")
-  const [sourceFilter, setSourceFilter] = useState<RequirementSourceFilter>("all")
   const [mineOnly, setMineOnly] = useState(false)
   const deferredQuery = useDeferredValue(query)
   const selectedSystemId = useRequirementStore((state) => state.selectedSystemId)
@@ -94,7 +97,7 @@ export function RequirementHistoryView({
                     key={filter.value}
                     type="button"
                     aria-pressed={sourceFilter === filter.value}
-                    onClick={() => setSourceFilter(filter.value)}
+                    onClick={() => onSourceFilterChange(filter.value)}
                     className={cn(
                       "h-7 rounded-md px-3 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
                       sourceFilter === filter.value
