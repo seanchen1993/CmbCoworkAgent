@@ -21,6 +21,14 @@ const {
 const TIME_RANGE = { range: { eventTime: { gte: "2026-09-01", lte: "2026-09-30" } } }
 
 describe("托管运行次数的查询条件", () => {
+  it("支持项目累计，并保留项目及权限范围", () => {
+    const org = { term: { upperOrgLv1: "本室" } }
+    expect(buildProjectModeManagedRunFilters(["p1"], null, [org])).toEqual([
+      { term: { eventName: MANAGED_RUN_STARTED_EVENT } },
+      { terms: { "properties.harnessProjectId": ["p1"] } },
+      org
+    ])
+  })
   it("过滤上报出去的那个事件名，不是另写一个字符串", () => {
     // 写死字符串的话，上报侧改名这里不会报错，只会悄悄查不到数据。
     const filters = buildProjectModeManagedRunFilters(["p1"], TIME_RANGE)

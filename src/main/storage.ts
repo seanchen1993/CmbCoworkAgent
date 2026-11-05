@@ -1,3 +1,10 @@
+import {
+  readContentFileSync,
+  encodeMarketContent,
+  findProtectedMarketRoot,
+  isMarketMarkdownFile,
+  resolveMarketRuntimePath
+} from "./services/market-content"
 import { basename, isAbsolute, join, relative, resolve } from "path"
 import { createHash } from "crypto"
 import { v4 as uuid } from "uuid"
@@ -385,11 +392,6 @@ export function getThreadCheckpointPath(threadId: string): string {
   const directory = getThreadCheckpointDir()
   registerCheckpointThreadId(checkpointArtifactIndexForDirectory(directory), threadId)
   return threadCheckpointPath(directory, threadId)
-}
-
-/** Read-only discovery must not create directories or register a new durable artifact. */
-export function peekThreadCheckpointPath(threadId: string): string {
-  return threadCheckpointPath(join(OPENWORK_DIR, "threads"), threadId)
 }
 
 export function deleteThreadCheckpoint(threadId: string): void {
@@ -1615,6 +1617,12 @@ export interface CustomModelConfig {
   enableThinkingEffort?: boolean
   thinkingEffort?: ThinkingEffort
   tier?: "premium" | "economy"
+  /** Assigned by the built-in registry; never accepted from custom model storage. */
+  transport?: import("../shared/model-catalog").ModelTransport
+  /** Bound to the built-in connection's URL and credential; not a user model override. */
+  idleModelEnvironment?: import("../shared/idle-model-service-window").IdleModelEnvironment
+  notice?: string
+  unavailableReason?: string
 }
 
 export interface BuiltinModelOverride {
@@ -1987,6 +1995,15 @@ function getSettingsStore(): Store {
   return _settingsStore
 }
 
+export function getStoredIdleModelUseUat(): boolean {
+  try {
+    return getSettingsStore().get("idleModelUseUat", false) === true
+  } catch (error) {
+    console.warn("[Storage] Failed to load idle model environment; using production:", error)
+    return false
+  }
+}
+
 const BUILTIN_MODEL_OVERRIDES_KEY = "builtinModelOverrides"
 
 export function getBuiltinModelOverrides(): Record<string, BuiltinModelOverride> {
@@ -2022,23 +2039,6 @@ export function setStoredDefaultModelId(modelId: string): void {
 
 const WINDOW_CLOSE_BEHAVIOR_KEY = "windowCloseBehavior"
 const GIT_CHANGE_NOTICE_ENABLED_KEY = "gitChangeNoticeEnabled"
-const MODS_GLOBAL_ENABLED_KEY = "modsGlobalEnabled"
-
-/** Application-level safety switch for both legacy Mods and Function Mods. */
-export function getModsGlobalEnabled(): boolean {
-  try {
-    return getSettingsStore().get(MODS_GLOBAL_ENABLED_KEY, false) === true
-  } catch (error) {
-    console.warn("[Storage] Failed to load Mods global switch; using disabled:", error)
-    return false
-  }
-}
-
-export function setModsGlobalEnabled(enabled: boolean): boolean {
-  const normalized = Boolean(enabled)
-  getSettingsStore().set(MODS_GLOBAL_ENABLED_KEY, normalized)
-  return normalized
-}
 
 export function getGitChangeNoticeEnabled(): boolean {
   try {
@@ -3297,7 +3297,7 @@ export function setPluginOriginsBatch(
   let changed = false
   const next = items.map((item) => {
     const desired = byId.get(item.id)
-    if (!desired || item.origin === desired) return item
+    if (!desired || item.origin === desired || item.origin === "market") return item
     changed = true
     return { ...item, origin: desired }
   })
@@ -3374,7 +3374,34 @@ export function getEnabledPluginMcpConfigs(): Record<string, PluginMcpServerConf
     const servers = parseMcpJsonFile(mcpJsonPath)
     if (!servers) continue
     for (const [name, cfg] of Object.entries(servers)) {
-      configs[`plugin:${plugin.id}/${name}`] = cfg
+      const runtimeRoot = cfg.command ? resolveMarketRuntimePath(plugin.path) : plugin.path
+      if (!cfg.command || (runtimeRoot === plugin.path && !findProtectedMarketRoot(plugin.path))) {
+        configs[`plugin:${plugin.id}/${name}`] = cfg
+        continue
+      }
+      const replaceRoot = (value: string): string =>
+        value
+          .replaceAll("${CLAUDE_PLUGIN_ROOT}", runtimeRoot)
+          .replaceAll("${PLUGIN_ROOT}", runtimeRoot)
+          .replaceAll(plugin.path, runtimeRoot)
+      configs[`plugin:${plugin.id}/${name}`] = {
+        ...cfg,
+        ...(cfg.command ? { command: replaceRoot(cfg.command) } : {}),
+        ...(cfg.args
+          ? {
+              args: cfg.args.map((arg) =>
+                replaceRoot(arg.startsWith("./") ? join(runtimeRoot, arg) : arg)
+              )
+            }
+          : {}),
+        ...(cfg.env
+          ? {
+              env: Object.fromEntries(
+                Object.entries(cfg.env).map(([key, value]) => [key, replaceRoot(value)])
+              )
+            }
+          : {})
+      }
     }
   }
   _pluginMcpCache = configs
@@ -3384,7 +3411,7 @@ export function getEnabledPluginMcpConfigs(): Record<string, PluginMcpServerConf
 export function parseMcpJsonFile(filePath: string): Record<string, PluginMcpServerConfig> | null {
   if (!existsSync(filePath)) return null
   try {
-    const content = readFileSync(filePath, "utf-8")
+    const content = readContentFileSync(filePath, "utf-8")
     const parsed = JSON.parse(content) as unknown
     if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return null
     const obj = parsed as Record<string, unknown>
@@ -4237,7 +4264,7 @@ function parsePluginHooks(plugin: PluginMetadata): PluginHookMetadata[] {
     })) as PluginHookMetadata[]
 
   try {
-    const parsed = JSON.parse(readFileSync(hooksFilePath, "utf-8"))
+    const parsed = JSON.parse(readContentFileSync(hooksFilePath, "utf-8"))
     const meta = {
       enabled: plugin.enabled,
       ...getHookFileDates(hooksFilePath)
@@ -4351,7 +4378,7 @@ function buildSkillHookId(
 function readSkillFrontmatterHooksSettings(skillMdPath: string): Record<string, unknown> | null {
   if (!existsSync(skillMdPath)) return null
   try {
-    const { frontmatter } = parseSkillFrontmatter(readFileSync(skillMdPath, "utf-8"))
+    const { frontmatter } = parseSkillFrontmatter(readContentFileSync(skillMdPath, "utf-8"))
     const hooksRaw = frontmatter.hooks
     if (!hooksRaw || typeof hooksRaw !== "object" || Array.isArray(hooksRaw)) return null
 
@@ -4465,7 +4492,7 @@ function parseSkillHooks(skillDir: string, skillName: string, hooksRelPath: stri
   if (!existsSync(hooksFilePath)) return []
 
   try {
-    const parsed = JSON.parse(readFileSync(hooksFilePath, "utf-8"))
+    const parsed = JSON.parse(readContentFileSync(hooksFilePath, "utf-8"))
     const dates = getHookFileDates(hooksFilePath)
     const meta = { enabled: true, ...dates }
     const idPrefix =
@@ -4611,7 +4638,7 @@ export function setPluginHookEnabled(pluginId: string, hookId: string, enabled: 
     throw new Error("插件 hooks 配置文件不存在")
   }
 
-  const parsed = JSON.parse(readFileSync(hooksFilePath, "utf-8"))
+  const parsed = JSON.parse(readContentFileSync(hooksFilePath, "utf-8"))
   const fmt = detectHooksFileFormat(parsed)
 
   if (fmt === "flat") {
@@ -4626,7 +4653,13 @@ export function setPluginHookEnabled(pluginId: string, hookId: string, enabled: 
       return { ...record, enabled }
     })
     if (!found) throw new Error("插件 Hook 不存在")
-    writeFileSync(hooksFilePath, JSON.stringify(next, null, 2), "utf-8")
+    const content = Buffer.from(JSON.stringify(next, null, 2))
+    writeFileSync(
+      hooksFilePath,
+      isMarketMarkdownFile(hooksFilePath) && findProtectedMarketRoot(hooksFilePath)
+        ? encodeMarketContent(content)
+        : content
+    )
   } else if (fmt === "cc_plugin" || fmt === "cc_settings") {
     // ── CC format: ID = plugin:pluginId/EventName:matcherIdx:hookIdx ──
     // We inject `enabled` into the individual hook object (extension field, non-destructive).
@@ -4657,7 +4690,13 @@ export function setPluginHookEnabled(pluginId: string, hookId: string, enabled: 
     settingsObj[eventName] = matchers
     if (fmt === "cc_plugin") root.hooks = settingsObj
 
-    writeFileSync(hooksFilePath, JSON.stringify(root, null, 2), "utf-8")
+    const content = Buffer.from(JSON.stringify(root, null, 2))
+    writeFileSync(
+      hooksFilePath,
+      isMarketMarkdownFile(hooksFilePath) && findProtectedMarketRoot(hooksFilePath)
+        ? encodeMarketContent(content)
+        : content
+    )
   } else {
     throw new Error("插件 hooks 配置格式无效")
   }

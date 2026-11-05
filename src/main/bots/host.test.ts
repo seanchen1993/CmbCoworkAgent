@@ -6,7 +6,7 @@ import { LocalBotHost, type BotRunPort } from "./host"
 import { parseCreateBot, parseSendBotMessage, parseUpdateBot } from "../../shared/bots/validation"
 import { BOT_ROUTINE_SILENT } from "../../shared/bots/routine-silence"
 import { botContinuationMessageId } from "./continuation"
-import { functionExecutionAgent, withFunctionExecution } from "../mods/v2/execution-context"
+import { AsyncLocalStorage } from "node:async_hooks"
 import { groupMessageRecipients } from "../../renderer/src/lib/bot-group-mentions"
 
 const databases: NativeSqliteAdapter[] = []
@@ -372,13 +372,14 @@ describe("Bot control state", () => {
     const db = store(),
       bot = db.create(input)
     const identities: string[] = []
+    const wakingScope = new AsyncLocalStorage<string>()
     const runtime: BotRunPort = {
       onAvailable: () => () => {},
       acquire: () => ({
         release: vi.fn(),
         execute: async () => {
           await new Promise<void>((resolve) => setImmediate(resolve))
-          identities.push(functionExecutionAgent())
+          identities.push((wakingScope.getStore() ?? "main"))
           return { state: "completed", result: "Independent result" }
         }
       })
@@ -387,17 +388,10 @@ describe("Bot control state", () => {
     hosts.push(host)
     // Let the initial empty tick end, so this new wake really originates in a tool.
     await new Promise<void>((resolve) => setImmediate(resolve))
-    await withFunctionExecution(
-      {
-        workspace: "/waking-tool",
-        threadId: "other-thread",
-        agentId: "temporary-worker",
-        userInitiated: false,
-        leased: true,
-        immediate: false
-      },
+    await wakingScope.run(
+      "temporary-worker",
       async () => {
-        expect(functionExecutionAgent()).toBe("temporary-worker")
+        expect((wakingScope.getStore() ?? "main")).toBe("temporary-worker")
         host.send({ botId: bot.id, requestId: "fresh-independent-run", message: "Check" })
       }
     )

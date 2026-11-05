@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useSta
 import { useShallow } from "zustand/react/shallow"
 import { revalidateSkillCatalog, subscribeSkillCatalogInvalidation } from "@/lib/app-catalog-cache"
 import { onMarketPublished, onMcpInstallationChanged } from "@/lib/market-change-events"
+import { canManageMarketItem } from "@/lib/market-plugin-identity"
 import {
   Search,
   ShoppingBag,
@@ -164,25 +165,6 @@ interface UploadedItemRecord {
 interface LocalUploadedSkillPathRecord {
   path: string
   uploadedAt?: string
-}
-
-function parseMarkdownFrontmatterMetadata(content: string | null): Record<string, string> | undefined {
-  if (typeof content !== "string") return undefined
-
-  const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/)
-  if (!match) return undefined
-
-  const metadata: Record<string, string> = {}
-  for (const line of match[1].split(/\r?\n/)) {
-    const colonIndex = line.indexOf(":")
-    if (colonIndex <= 0) continue
-    const key = line.slice(0, colonIndex).trim()
-    const rawValue = line.slice(colonIndex + 1).trim()
-    const value = rawValue.replace(/^['"]|['"]$/g, "")
-    if (key && value) metadata[key] = value
-  }
-
-  return Object.keys(metadata).length > 0 ? metadata : undefined
 }
 
 function formatMarketVersionLabel(version?: string | null): string {
@@ -383,16 +365,6 @@ function getMarketAdminYstIds(): Set<string> {
 
 const MARKET_ADMIN_YST_IDS = getMarketAdminYstIds()
 
-function canCurrentUserEditOrDeleteMarketItem(
-  item: Pick<MarketItem, "canDelete" | "ip">,
-  localIp?: string | null,
-  isCurrentUserMarketAdmin = false
-): boolean {
-  return Boolean(
-    isCurrentUserMarketAdmin || item.canDelete || (item.ip && localIp && item.ip === localIp)
-  )
-}
-
 function doesMarketUserIdMatchCurrentUser(
   rawUserId: string | null | undefined,
   currentUserIdCandidates: Iterable<string>,
@@ -531,7 +503,7 @@ interface MarketItemCardProps {
   showProjectModeTag?: boolean
 }
 
-function MarketItemCard({
+export function MarketItemCard({
   item,
   onOpenDetail,
   onDelete,
@@ -572,7 +544,6 @@ function MarketItemCard({
     onUninstall(item)
   }
 
-  const ip = localStorage.getItem("localIp")
   const isFeatured = item.featured === "精品"
   const itemTag = item.tag?.trim()
   const isSkillCard = skillCallCount !== null || skillUserCount !== null
@@ -817,7 +788,7 @@ function MarketItemCard({
                   卸载
                 </Button>
               )}
-              {canCurrentUserEditOrDeleteMarketItem(item, ip) && (
+              {canManageMarketItem(item) && (
                 <>
                   <Button
                     variant="outline"
@@ -929,7 +900,7 @@ export const MarketPanel = React.memo(function MarketPanel(): React.JSX.Element 
   const [updatingItems, setUpdatingItems] = useState<Set<string>>(new Set()) // 新增更新中状态
   const [installedSkills, setInstalledSkills] = useState<string[]>([]) // 新增已安装skills列表
   const [installedMcps, setInstalledMcps] = useState<string[]>([]) // 新增已安装MCPs列表
-  const [installedPlugins, setInstalledPlugins] = useState<string[]>([]) // 新增已安装Plugins列表
+  const [installedPlugins, setInstalledPlugins] = useState<PluginMetadata[]>([])
   const [deleteDialog, setDeleteDialog] = useState<{ open: boolean; item: MarketItem | null }>({
     open: false,
     item: null
@@ -988,7 +959,7 @@ export const MarketPanel = React.memo(function MarketPanel(): React.JSX.Element 
   const shouldRestoreListScrollRef = useRef(false)
   const installedSkillsRef = useRef<string[]>([])
   const installedMcpsRef = useRef<string[]>([])
-  const installedPluginsRef = useRef<string[]>([])
+  const installedPluginsRef = useRef<PluginMetadata[]>([])
   const updateNoticeShownRef = useRef<Set<string>>(new Set())
   const uploaderProfilesRequestIdRef = useRef(0)
   const openItemDetailRef = useRef<(item: MarketItem) => Promise<void>>(async () => {})
@@ -997,7 +968,6 @@ export const MarketPanel = React.memo(function MarketPanel(): React.JSX.Element 
     () => new Set(currentUserUploadCandidates),
     [currentUserUploadCandidates]
   )
-  const currentLocalIp = localStorage.getItem("localIp")
   const isAdminModeActive = isCurrentUserMarketAdmin && adminModeEnabled
   const uploadedSkillDisabledReason = "这个技能已经存在于“我上传的技能”里，无需重复安装。"
   const uploadedSkillNameSetRef = useRef<Set<string>>(uploadedSkillNames)
@@ -1118,53 +1088,6 @@ export const MarketPanel = React.memo(function MarketPanel(): React.JSX.Element 
     setSkillTracesLoading(false)
     setSkillTracesError(null)
     setSkillTraceDialogOpen(false)
-  }
-
-  const applySkillDetailMarkdown = useCallback(
-    (baseSkill: SkillMetadata, filePath: string, markdownContent: string) => {
-      const metadata = parseMarkdownFrontmatterMetadata(markdownContent)
-      setSkillDetailSelectedFile(filePath)
-      setSkillDetailContent(markdownContent)
-      setSkillDetailSkill({
-        ...baseSkill,
-        path: filePath,
-        version: metadata?.version?.trim() || baseSkill.version,
-        metadata
-      })
-    },
-    []
-  )
-
-  const loadSkillPreviewFromInstallFile = async (
-    baseSkill: SkillMetadata,
-    filename: string,
-    blob: Blob
-  ) => {
-    setSkillDetailSelectedFile(filename)
-    setSkillDetailContent(null)
-    setSkillDetailBinaryBase64(null)
-    setSkillDetailBinaryMimeType(null)
-
-    const ext = getFileExt(filename)
-    if (ext === "md") {
-      setSkillDetailPreviewKind("text")
-      const text = await blob.text()
-      applySkillDetailMarkdown(baseSkill, filename, text)
-      return
-    }
-    if (ext === "zip") {
-      setSkillDetailPreviewKind("text")
-      const arrayBuffer = await blob.arrayBuffer()
-      const extracted = await window.api.skills.extractMarkdownFromZip(arrayBuffer, filename)
-      if (extracted.success && extracted.content) {
-        applySkillDetailMarkdown(baseSkill, extracted.filePath || "SKILL.md", extracted.content)
-      } else {
-        setSkillDetailContent(extracted.error || "Zip 中未找到可预览的 markdown 文件。")
-      }
-      return
-    }
-    setSkillDetailPreviewKind("text")
-    setSkillDetailContent(`文件类型 .${ext || "未知"} 已通过安装接口获取，当前不支持直接内容预览。`)
   }
 
   const triggerReload = () => {
@@ -1426,8 +1349,7 @@ export const MarketPanel = React.memo(function MarketPanel(): React.JSX.Element 
       if (window.api?.plugins?.list) {
         const pluginsMetadata = await window.api.plugins.list()
         if (request !== installationRequests.current.plugin) return
-        const pluginNames = pluginsMetadata.map((plugin) => plugin.name)
-        setInstalledPlugins(pluginNames)
+        setInstalledPlugins(pluginsMetadata)
       }
     } catch (error) {
       console.error("Failed to load installed plugins:", error)
@@ -1597,7 +1519,9 @@ export const MarketPanel = React.memo(function MarketPanel(): React.JSX.Element 
       prev.map((item) => ({
         ...item,
         canDelete: localStorageHelper.canDeleteItem(item.name, "plugin"),
-        ...buildMarketInstalledFlags(item, "plugin", installedPlugins.includes(item.name))
+        ...buildMarketInstalledFlags(
+          item, "plugin", Boolean(findInstalledPluginForMarketItem(installedPlugins, item))
+        )
       }))
     )
   }, [installedPlugins])
@@ -1740,7 +1664,7 @@ export const MarketPanel = React.memo(function MarketPanel(): React.JSX.Element 
               )
             : type === "mcp"
               ? installedMcpsRef.current.includes(item.name)
-              : installedPluginsRef.current.includes(item.name)
+              : Boolean(findInstalledPluginForMarketItem(installedPluginsRef.current, item))
 
         return {
           ...item,
@@ -1986,33 +1910,27 @@ export const MarketPanel = React.memo(function MarketPanel(): React.JSX.Element 
     setDetailLoading(true)
     resetDetailState()
     try {
-      const installFile =
-        activeTab === "orgSkill"
-          ? await marketApi.fetchOrgSkillInstallFile(item)
-          : await marketApi.fetchInstallFile(item.name, activeTab)
+      if (activeTab === "skill" || activeTab === "orgSkill") {
+        setSkillDetailSkill({
+          name: item.name,
+          description: item.description || "",
+          path: "",
+          source: "user",
+          contentOrigin: "market",
+          version: item.version || "v1.0.0"
+        })
+        return
+      }
+      const installFile = await marketApi.fetchInstallFile(item.name, activeTab)
       const installFilename = installFile.filename || item.filename || `${item.name}`
 
       if (!isAllowedDetailFile(activeTab, installFilename)) {
         throw new Error(
-          activeTab === "skill"
-            ? "Skill 详情文件仅支持 .zip 或 .md"
-            : activeTab === "plugin"
-              ? "Plugin 详情文件仅支持 .zip"
-              : "MCP 详情文件仅支持 .json"
+          activeTab === "plugin" ? "Plugin 详情文件仅支持 .zip" : "MCP 详情文件仅支持 .json"
         )
       }
 
-      if (activeTab === "skill" || activeTab === "orgSkill") {
-        const baseSkill: SkillMetadata = {
-          name: item.name,
-          description: item.description || "Market skill",
-          path: installFilename,
-          source: "user",
-          version: item.version ? formatMarketVersionLabel(item.version) : "v1.0.0"
-        }
-        setSkillDetailSkill(baseSkill)
-        await loadSkillPreviewFromInstallFile(baseSkill, installFilename, installFile.blob)
-      } else if (activeTab === "mcp") {
+      if (activeTab === "mcp") {
         const text = await installFile.blob.text()
         const parsed = JSON.parse(text)
         const mcpServerConfig = parsed?.mcpServers
@@ -2632,7 +2550,7 @@ export const MarketPanel = React.memo(function MarketPanel(): React.JSX.Element 
       if (activeTab === "skill" && selectedItem.featured === "精品") {
         return (
           <div className="rounded-xl border border-status-warning/30 bg-status-warning/10 p-6 text-sm text-status-warning">
-            精品技能暂不支持查看详情文件内容，请直接安装后使用。
+            市场技能内容受保护，请直接安装后使用。
           </div>
         )
       }
@@ -2656,6 +2574,7 @@ export const MarketPanel = React.memo(function MarketPanel(): React.JSX.Element 
             onToggleEnabled={() => undefined}
             contentOnly={activeTab === "skill"}
             hideActions
+            hideContentPreview
           />
         </div>
       )
@@ -2785,11 +2704,7 @@ export const MarketPanel = React.memo(function MarketPanel(): React.JSX.Element 
         <MarketDetailView
           activeTab={activeTab}
           selectedItem={selectedItem}
-          canManageSelectedItem={canCurrentUserEditOrDeleteMarketItem(
-            selectedItem,
-            currentLocalIp,
-            isAdminModeActive
-          )}
+          canManageSelectedItem={canManageMarketItem(selectedItem, isAdminModeActive)}
           detailFilePanel={renderDetailFilePanel()}
           canViewSkillUserDetail={canViewSkillUserDetail}
           selectedSkillCallCount={selectedSkillCallCount}

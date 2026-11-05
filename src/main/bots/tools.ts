@@ -176,11 +176,13 @@ function createBotFileTools(
                 reference = peer.files.find((file) => file.filePath === original)
               }
               if (!reference) throw error
-              const source = await resolveBotWorkspaceFile(
-                peer.workspacePath,
-                reference.attachmentPath ?? reference.filePath,
-                { allowAbsolute: true }
-              )
+              const authorizedPath = reference.attachmentPath ?? reference.filePath
+              const source = await resolveBotWorkspaceFile(peer.workspacePath, authorizedPath, {
+                allowAbsolute: true
+              })
+              // Host receipts contain canonical paths. Replacing an authorized file
+              // with a link must not authorize a different private file in the same root.
+              if (source !== authorizedPath) throw new Error("The shared file target has changed")
               selected.push({ path: source, peer: true })
             }
           }

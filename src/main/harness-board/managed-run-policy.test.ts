@@ -58,11 +58,188 @@ const successTerminal = {
 }
 
 describe("resolveManagedRunDecision", () => {
+  it("returns a terminal decision when the local provider retry budget is exhausted", () => {
+    expect(
+      resolveManagedRunDecision({
+        run: runWithBaseline({ providerRetryCount: 3, totalRetryCount: 3 }),
+        feature: {
+          ...feature,
+          isFinalNode: true,
+          featureStatus: "done",
+          currentNodeStatus: "done"
+        },
+        terminal: { outcome: "error", endReason: { code: "provider_error", retryable: true } }
+      }).policyResult
+    ).toMatchObject({
+      proposedAction: "fail_managed_run",
+      reasonCode: "provider_retry_limit_exceeded"
+    })
+  })
+
+  it.each([0, 5])(
+    "does not complete a final feature after a transient model error, retries=%s",
+    (totalRetryCount) => {
+      const decision = resolveManagedRunDecision({
+        run: runWithBaseline({ totalRetryCount }),
+        feature: {
+          ...feature,
+          isFinalNode: true,
+          featureStatus: "done",
+          currentNodeStatus: "done"
+        },
+        terminal: { outcome: "error", endReason: { code: "provider_error", retryable: true } }
+      })
+      expect(decision.policyResult.proposedAction).toBe(
+        totalRetryCount === 5 ? "fail_managed_run" : "schedule_provider_retry"
+      )
+    }
+  )
+
+  it("does not hide a non-provider execution failure behind the feature terminal state", () => {
+    expect(
+      resolveManagedRunDecision({
+        run: runWithBaseline(),
+        feature: {
+          ...feature,
+          isFinalNode: true,
+          featureStatus: "done",
+          currentNodeStatus: "done"
+        },
+        terminal: {
+          outcome: "error",
+          endReason: { code: "unknown", message: "Agent turn ended without a terminal outcome" }
+        }
+      }).policyResult.reasonCode
+    ).toBe("agent_error")
+  })
+
+  it("retains bounded retry behavior for older terminal events without retryable metadata", () => {
+    const terminal = { outcome: "error" as const, endReason: { code: "provider_error" as const } }
+    expect(
+      resolveManagedRunDecision({ run: runWithBaseline(), feature, terminal }).policyResult.type
+    ).toBe("provider_retry")
+    expect(
+      resolveManagedRunDecision({ run: runWithBaseline({ totalRetryCount: 5 }), feature, terminal })
+        .policyResult.reasonCode
+    ).toBe("total_retry_limit_exceeded")
+  })
+
+  it.each(["done", "archived", "skipped"] as const)(
+    "never advances a completed stage after a provider error: %s",
+    (currentNodeStatus) => {
+      for (const retryable of [true, false]) {
+        const decision = resolveManagedRunDecision({
+          run: runWithBaseline(),
+          feature: { ...feature, currentNodeStatus },
+          terminal: {
+            outcome: "error",
+            endReason: { code: "provider_error", retryable, message: "当前时段不允许调用该接口" }
+          }
+        })
+        expect(decision.policyResult.proposedAction).toBe(
+          retryable ? "schedule_provider_retry" : "fail_managed_run"
+        )
+      }
+    }
+  )
+
+  it("handles a non-retryable model error before even a changed or final stage", () => {
+    const decision = resolveManagedRunDecision({
+      run: runWithBaseline(),
+      feature: {
+        ...feature,
+        currentNodeId: "final",
+        isFinalNode: true,
+        featureStatus: "done",
+        currentNodeStatus: "done"
+      },
+      terminal: { outcome: "error", endReason: { code: "provider_error", retryable: false } }
+    })
+    expect(decision.policyResult.reasonCode).toBe("provider_error_not_retryable")
+  })
+
+  it("retries a transient model failure in the same thread even when the stage changed", () => {
+    expect(
+      resolveManagedRunDecision({
+        run: runWithBaseline(),
+        feature: { ...feature, currentNodeId: "dev.code" },
+        terminal: { outcome: "error", endReason: { code: "provider_error", retryable: true } }
+      }).policyResult.type
+    ).toBe("provider_retry")
+  })
+
+  it("does not count changes between completed states as normal progress", () => {
+    const run = runWithBaseline()
+    run.decisionBaseline!.nodeStatus = "done"
+    expect(
+      resolveManagedRunDecision({
+        run,
+        feature: { ...feature, currentNodeStatus: "archived" },
+        terminal: successTerminal
+      }).policyResult.type
+    ).toBe("biz_retry")
+  })
+
+  it.each(["provider", "business"])("bounds cumulative %s retries at five", (kind) => {
+    const terminal =
+      kind === "provider"
+        ? {
+            outcome: "error" as const,
+            endReason: { code: "provider_error" as const, retryable: true }
+          }
+        : successTerminal
+    const allowed = resolveManagedRunDecision({
+      run: runWithBaseline({ totalRetryCount: 4 }),
+      feature,
+      terminal
+    })
+    expect(allowed.policyResult.proposedAction).not.toBe("fail_managed_run")
+    const blocked = resolveManagedRunDecision({
+      run: runWithBaseline({ totalRetryCount: 5 }),
+      feature,
+      terminal
+    })
+    expect(blocked.policyResult).toMatchObject({
+      proposedAction: "fail_managed_run",
+      reasonCode: "total_retry_limit_exceeded"
+    })
+  })
+
+  it("allows genuine progress and completion after the retry budget has been used", () => {
+    const run = runWithBaseline({ totalRetryCount: 5 })
+    expect(
+      resolveManagedRunDecision({
+        run,
+        feature: { ...feature, currentNodeId: "dev.code" },
+        terminal: successTerminal
+      }).policyResult.type
+    ).toBe("biz_progress")
+    expect(
+      resolveManagedRunDecision({
+        run,
+        feature: {
+          ...feature,
+          isFinalNode: true,
+          featureStatus: "done",
+          currentNodeStatus: "done"
+        },
+        terminal: successTerminal
+      }).policyResult.proposedAction
+    ).toBe("complete_managed_run")
+  })
+
   it("uses bounded provider retry backoff", () => {
     expect(resolveProviderRetryPlan(0)).toEqual({ retryNumber: 1, delayMs: 5_000 })
     expect(resolveProviderRetryPlan(1)).toEqual({ retryNumber: 2, delayMs: 30_000 })
     expect(resolveProviderRetryPlan(2)).toEqual({ retryNumber: 3, delayMs: 120_000 })
     expect(resolveProviderRetryPlan(3)).toBeNull()
+    expect(
+      resolveManagedRunDecision({
+        run: runWithBaseline({ providerRetryCount: 2 }),
+        feature,
+        terminal: { outcome: "error", endReason: { code: "provider_error", retryable: true } }
+      }).providerRetryPlan
+    ).toEqual({ retryNumber: 3, delayMs: 120_000 })
   })
 
   it("calculates reusable context only from valid token limits", () => {

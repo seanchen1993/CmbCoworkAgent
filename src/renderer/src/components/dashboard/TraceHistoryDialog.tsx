@@ -43,6 +43,8 @@ import type {
   DashboardTraceViewMode
 } from "./use-dashboard"
 import { unwrapThreadTracesResponse } from "./thread-traces-response"
+import { DrilldownArrow } from "./DrilldownArrow"
+import { ThreadSkillUsageMetric } from "./ThreadSkillUsageMetric"
 
 function fmtDuration(ms: number): string {
   if (ms < 1000) return `${Math.round(ms)}ms`
@@ -401,7 +403,7 @@ function outcomeLabel(outcome: string): string {
   if (outcome === "success") return "成功"
   if (outcome === "error") return "错误"
   if (outcome === "cancelled") return "取消"
-  if (outcome === "unknown") return "未定"
+  if (outcome === "unknown") return "未确认完成"
   return outcome || "未知"
 }
 
@@ -559,6 +561,7 @@ function TraceCard({
             parent {shortTraceId(trace.parentTraceId)}
           </span>
         )}
+        <DrilldownArrow className="ml-auto" />
       </div>
       <p
         className={cn(
@@ -1136,6 +1139,18 @@ export function TraceExplorer({
       ? selectedTrace.rawError || "该 trace 缺少完整 raw 内容，无法还原完整对话"
       : null
 
+  const enriched = selectedThreadGroup?.traces.find(
+    (trace) => trace.threadSkillUsage !== undefined || trace.threadSkillUsageError
+  )
+  const metricSkills = Array.from(
+    new Set(
+      metricMode === "thread"
+        ? (enriched?.threadSkillUsage?.map((entry) => entry.skill) ??
+            selectedThreadGroup?.traces.flatMap((trace) => trace.usedSkills) ??
+            [])
+        : (selectedTrace?.usedSkills ?? [])
+    )
+  ).filter((skill) => skill.trim())
   const conversationContent = (
     <>
       {rawMissingNotice && (
@@ -1221,6 +1236,19 @@ export function TraceExplorer({
                     </p>
                   </div>
                 </div>
+                <ThreadSkillUsageMetric
+                  skills={metricSkills}
+                  loading={metricMode === "thread" && threadLoading}
+                  error={metricMode === "thread" ? enriched?.threadSkillUsageError : undefined}
+                  onRetry={() => {
+                    if (!selectedThreadGroup) return
+                    setThreadCacheState((prev) => {
+                      const next = { ...prev.traces }
+                      delete next[selectedThreadGroup.threadId]
+                      return { ...prev, traces: next }
+                    })
+                  }}
+                />
                 <div className="flex shrink-0 items-center gap-2 border-r border-border px-4 py-2.5">
                   <Hash className="size-3.5 shrink-0 text-muted-foreground" />
                   <div>
@@ -1357,7 +1385,8 @@ export function TraceHistoryDialog({
   exporting = false,
   loading,
   error,
-  onPageChange
+  onPageChange,
+  loadThreadTraces
 }: {
   open: boolean
   onOpenChange: (open: boolean) => void
@@ -1378,6 +1407,7 @@ export function TraceHistoryDialog({
   loading: boolean
   error: string | null
   onPageChange?: (page: number) => void
+  loadThreadTraces?: (threadId: string) => Promise<DashboardTraceDetail[]>
 }): React.JSX.Element {
   const displayTotalTraces = Math.max(totalTraces, traces.length)
   const totalPages = Math.max(1, Math.ceil(displayTotalTraces / Math.max(1, tracePageSize)))
@@ -1405,6 +1435,7 @@ export function TraceHistoryDialog({
           </div>
         </DialogHeader>
         <TraceExplorer
+          loadThreadTraces={loadThreadTraces}
           traces={traces}
           codeStats={codeStats}
           loading={loading}

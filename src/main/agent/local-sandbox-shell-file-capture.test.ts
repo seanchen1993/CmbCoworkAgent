@@ -276,7 +276,7 @@ describe.skipIf(process.platform === "win32")("LocalSandbox Shell generation pip
     expect(vi.mocked(recordShellEdit).mock.calls[0][0].threadId).toBe(child.threadId)
   })
 
-  it("deduplicates file-tool edits against an overlapping Shell window", async () => {
+  it("serializes file creation behind Shell and counts the generated file once", async () => {
     const { root, sandbox } = await fixture()
     installOrchestrator(sandbox, true)
     const fileTools = new LocalSandbox({
@@ -290,9 +290,11 @@ describe.skipIf(process.platform === "win32")("LocalSandbox Shell generation pip
     await vi.waitFor(async () =>
       expect(await readFile(path.join(root, "started.flag"), "utf8")).toBe("ready")
     )
-    expect((await fileTools.write(path.join(root, "new.ts"), "file tool\n")).error).toBeUndefined()
+    const writeResult = await fileTools.write(path.join(root, "new.ts"), "file tool\n")
+    expect(writeResult.error).toContain("already exists")
+    expect(await readFile(path.join(root, "new.ts"), "utf8")).toBe("file tool\n")
     await command
-    expect(recordGen).toHaveBeenCalledTimes(1)
-    expect(recordShellEdit).not.toHaveBeenCalled()
+    expect(recordGen).not.toHaveBeenCalled()
+    expect(recordShellEdit).toHaveBeenCalledTimes(1)
   })
 })

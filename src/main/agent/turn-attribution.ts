@@ -63,52 +63,44 @@ export interface ResolvedAttributionSkills {
  * thread, so the child's adoption context is what `recordGen` reads — and a
  * child that never re-reads a SKILL.md has nothing of its own to report.
  *
- * Falls back down the ownership chain: this run's skills → the child thread's
- * sticky set (it may have used a skill on an earlier turn) → the parent
- * thread's sticky set. Without the last hop, delegating work to a sub-agent
- * silently drops the plugin attribution the parent had already established.
+ * Capture the parent's active set once per task, including an empty set. A
+ * concurrent worker reading a Skill later must not change this task's origin.
+ * Continuations construct a new synchronizer and capture the latest parent set.
+ * A child's own reads override its inherited snapshot and contribute back to
+ * the parent for subsequent tasks. Only code attribution is shared: callers
+ * still report the detector's own reads on the child's Trace.
+ * Construct before the task's first await; publish after Trace creation resets
+ * adoption context, and again only when the child's own Skill detector changes.
  */
-export function resolveSubagentAttributionSkills(input: {
+export function createSubagentSkillAttribution(input: {
   threadId: string
   parentThreadId?: string
-  currentRunSkills: string[]
-  currentRunSkillSource: string[]
-}): ResolvedAttributionSkills {
-  const { threadId, parentThreadId, currentRunSkills, currentRunSkillSource } = input
-  if (currentRunSkills.length > 0) {
-    return { usedSkills: currentRunSkills, skillSource: currentRunSkillSource }
+}): (skills: ResolvedAttributionSkills) => void {
+  const { threadId, parentThreadId } = input
+  const sourceThreadId = parentThreadId ?? threadId
+  const inherited: ResolvedAttributionSkills = {
+    usedSkills: getThreadActiveSkills(sourceThreadId),
+    skillSource: getThreadActiveSkillSource(sourceThreadId)
   }
-  const own = getThreadActiveSkills(threadId)
-  if (own.length > 0) {
-    return { usedSkills: own, skillSource: getThreadActiveSkillSource(threadId) }
+  return ({ usedSkills, skillSource }) => {
+    if (usedSkills.length > 0) {
+      // The durable parent set survives restarts; avoid redundant child rows in
+      // the sql.js database, which is serialized whole on each save.
+      setThreadActiveSkills(threadId, usedSkills, skillSource, { persist: false })
+      if (parentThreadId) {
+        syncTaskSubagentSkillAttribution({
+          parentThreadId,
+          currentRunSkills: usedSkills,
+          currentRunSkillSource: skillSource
+        })
+      }
+    }
+    const effective = usedSkills.length > 0 ? { usedSkills, skillSource } : inherited
+    setAdoptionContext(threadId, {
+      usedSkills: [...effective.usedSkills],
+      skillSource: [...effective.skillSource]
+    })
   }
-  if (!parentThreadId) return { usedSkills: [], skillSource: [] }
-  return {
-    usedSkills: getThreadActiveSkills(parentThreadId),
-    skillSource: getThreadActiveSkillSource(parentThreadId)
-  }
-}
-
-/**
- * Publish a sub-agent's attribution to its own thread's adoption context,
- * resolving the fallback chain first. Mirrors `syncTurnSkillAttribution` for
- * paths that drive their own detector instead of the standard graph stream.
- */
-export function syncSubagentSkillAttribution(input: {
-  threadId: string
-  parentThreadId?: string
-  currentRunSkills: string[]
-  currentRunSkillSource: string[]
-}): void {
-  const { threadId, currentRunSkills, currentRunSkillSource } = input
-  // A sub-agent that used a skill of its own keeps it for its later turns, but
-  // in memory only: these thread ids are minted per run and never resumed, so a
-  // persisted row would be dead weight in a database that is re-serialized
-  // whole on every save. Across a restart the parent chain answers instead.
-  if (currentRunSkills.length > 0) {
-    setThreadActiveSkills(threadId, currentRunSkills, currentRunSkillSource, { persist: false })
-  }
-  setAdoptionContext(threadId, resolveSubagentAttributionSkills(input))
 }
 
 /**
@@ -135,6 +127,8 @@ export function syncSubagentSkillAttribution(input: {
  * would change a rule the whole attribution chain rests on, and a mistake there
  * fails silently, so the trade is not worth it without data showing how often
  * parent and child really run different skills in one turn.
+ * Team and Workflow workers also use this merge when contributing their own
+ * reads to the parent; their inherited snapshot is never passed here.
  */
 export function syncTaskSubagentSkillAttribution(input: {
   parentThreadId: string

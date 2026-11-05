@@ -1,5 +1,3 @@
-import type { FunctionSessionCheckpoint } from "../../shared/mods/v2/session"
-
 export interface CheckpointRuntimeProjectionStats {
   sourceBytes: number
   projectionBytes: number
@@ -16,7 +14,8 @@ export interface LegacyCheckpointTranscriptMigrationStats {
   payloadBytes: number
 }
 
-export const CHECKPOINT_RUNTIME_PROJECTION_CANCELLED = "CHECKPOINT_RUNTIME_PROJECTION_CANCELLED"
+export const CHECKPOINT_RUNTIME_PROJECTION_CANCELLED =
+  "CHECKPOINT_RUNTIME_PROJECTION_CANCELLED"
 export const CHECKPOINT_RUNTIME_PROJECTION_SCHEMA_NOT_READY =
   "CHECKPOINT_RUNTIME_PROJECTION_SCHEMA_NOT_READY"
 
@@ -78,15 +77,6 @@ export type CheckpointRuntimeProjectionWorkerRequest =
   | LegacyCheckpointTranscriptBootstrapRequest
   | CheckpointTranscriptPresenceRequest
   | CheckpointRuntimeProjectionShutdownRequest
-  | {
-      type: "read-session-transcript"
-      projection: "messages" | "turns" | "usage"
-      requestId: number
-      databasePath: string
-      threadId: string
-      checkpointNs: string
-      cancellationBuffer: SharedArrayBuffer
-    }
 
 export interface CheckpointRuntimeProjectionEnsureSuccess {
   type: "ensure-runtime-projection-result"
@@ -131,7 +121,6 @@ export interface CheckpointRuntimeProjectionFailure {
     | "read-latest-runtime-tuple-result"
     | "bootstrap-legacy-transcript-result"
     | "inspect-transcript-presence-result"
-    | "read-session-transcript-result"
   requestId: number
   ok: false
   error: {
@@ -153,9 +142,3 @@ export type CheckpointRuntimeProjectionWorkerResponse =
   | CheckpointTranscriptPresenceSuccess
   | CheckpointRuntimeProjectionFailure
   | CheckpointRuntimeProjectionShutdownComplete
-  | {
-      type: "read-session-transcript-result"
-      requestId: number
-      ok: true
-      transcript: FunctionSessionCheckpoint | null
-    }

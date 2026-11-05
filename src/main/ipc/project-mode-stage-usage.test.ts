@@ -6,7 +6,7 @@ import {
 import { queryWithStageUsageMappingFallback } from "./project-mode-stage-usage"
 
 describe("mixed-version stage cost queries", () => {
-  it("uses exclusive new/legacy scopes, while durations remain on turn-start stages", () => {
+  it("uses exclusive new/legacy scopes for call costs and split stage durations", () => {
     const json = JSON.stringify(buildProjectModeStageAnalysisAggs("未归因", 50))
     expect(json).toContain('"nested":{"path":"stageUsage"}')
     expect(json).toContain('"reverse_nested":{}')
@@ -14,13 +14,16 @@ describe("mixed-version stage cost queries", () => {
       by_node: {
         aggs: {
           legacy_cost: { filter: { bool: { must_not: unknown[] } } }
-          main_agent_conversations: unknown
+          legacy_conversations: { filter: { bool: { must_not: unknown[] } } }
         }
       }
       stage_usage: { filter: unknown }
+      stage_duration: { filter: { bool: { filter: unknown[] } } }
     }
     expect(aggs.by_node.aggs.legacy_cost.filter.bool.must_not).toEqual([aggs.stage_usage.filter])
-    expect(aggs.by_node.aggs.main_agent_conversations).toBeDefined()
+    expect(aggs.by_node.aggs.legacy_conversations.filter.bool.must_not).toEqual([
+      aggs.stage_duration.filter.bool.filter[1]
+    ])
   })
 
   it("merges legacy costs and call-stage costs once, including stages with no starting conversations", () => {

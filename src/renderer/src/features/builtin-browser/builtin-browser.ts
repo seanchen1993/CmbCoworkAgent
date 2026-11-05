@@ -2,8 +2,11 @@
 // don't resolve the "@/" path alias for runtime values.
 import {
   BOT_BROWSER_PROMPT_PREFIX,
+  LEGACY_BUILTIN_BROWSER_PROMPT_PREFIX as PREVIOUS_BROWSER_PROMPT_PREFIX,
+  LEGACY_BUILTIN_BROWSER_NO_SCREENSHOT_PROMPT_PREFIX,
   BUILTIN_BROWSER_NO_SCREENSHOT_PROMPT_PREFIX,
-  BUILTIN_BROWSER_PROMPT_PREFIX
+  BUILTIN_BROWSER_PROMPT_PREFIX,
+  stripBuiltinBrowserInstructions
 } from "../../../../shared/user-input-transport"
 
 export { BUILTIN_BROWSER_NO_SCREENSHOT_PROMPT_PREFIX, BUILTIN_BROWSER_PROMPT_PREFIX }
@@ -64,26 +67,19 @@ export function parseBuiltinBrowserPrompt(input: string): {
   visibleText: string
   browserSelected: boolean
 } {
-  if (input.startsWith(BOT_BROWSER_PROMPT_PREFIX)) {
-    return { visibleText: input.slice(BOT_BROWSER_PROMPT_PREFIX.length), browserSelected: true }
+  const wrappedText = stripBuiltinBrowserInstructions(input)
+  if (wrappedText !== null) {
+    return { visibleText: wrappedText, browserSelected: true }
   }
-  if (input.startsWith(BUILTIN_BROWSER_NO_SCREENSHOT_PROMPT_PREFIX)) {
-    return {
-      visibleText: input.slice(BUILTIN_BROWSER_NO_SCREENSHOT_PROMPT_PREFIX.length),
-      browserSelected: true
+  for (const prefix of [
+    BOT_BROWSER_PROMPT_PREFIX,
+    LEGACY_BUILTIN_BROWSER_NO_SCREENSHOT_PROMPT_PREFIX,
+    PREVIOUS_BROWSER_PROMPT_PREFIX,
+    LEGACY_BUILTIN_BROWSER_PROMPT_PREFIX
+  ]) {
+    if (input.startsWith(prefix)) {
+      return { visibleText: input.slice(prefix.length), browserSelected: true }
     }
   }
-  if (input.startsWith(LEGACY_BUILTIN_BROWSER_PROMPT_PREFIX)) {
-    return {
-      visibleText: input.slice(LEGACY_BUILTIN_BROWSER_PROMPT_PREFIX.length),
-      browserSelected: true
-    }
-  }
-  if (!input.startsWith(BUILTIN_BROWSER_PROMPT_PREFIX)) {
-    return { visibleText: input, browserSelected: false }
-  }
-  return {
-    visibleText: input.slice(BUILTIN_BROWSER_PROMPT_PREFIX.length),
-    browserSelected: true
-  }
+  return { visibleText: input, browserSelected: false }
 }

@@ -28,8 +28,6 @@ function copyResources(): { name: string; closeBundle: () => void } {
       const srcSkills = resolve("skills")
       const destSkills = resolve("out/skills")
       mirrorRequiredDirectorySync(srcSkills, destSkills)
-      mirrorRequiredDirectorySync(resolve("resources/mods"), resolve("out/resources/mods"))
-      copyFileSync(resolve("resources/mods-policy.json"), resolve("out/resources/mods-policy.json"))
 
       // Preserve the original notices for adapted Bot code in packaged builds.
       const botNotices = resolve("out/resources/notices")
@@ -108,17 +106,12 @@ export default defineConfig({
           "browser-native-host": "src/main/browser/chrome/browser-native-host-entry.ts",
           "pty-host": "src/main/pty-host.ts",
           "code-exec-helper": "src/main/code-exec/helper-entry.ts",
-          "mod-host": "src/main/mods/host-entry.ts",
-          "function-mod-host": "src/main/mods/v2/host-entry.ts",
-          "mods-cli": "src/main/mods/devtools/cli-entry.ts",
-          ...(process.env.CMB_BOTS_E2E === "1" ? { "bots-browser-e2e": "tests/support/bots-browser-e2e-entry.ts" } : {}),
-          // Test-only exports share the production module instances. Absent in normal builds.
-          ...(process.env.CMB_MODS_E2E === "1" ? { "mods-e2e": "tests/support/mods-e2e-entry.ts" } : {})
+          ...(process.env.CMB_BOTS_E2E === "1" ? { "bots-browser-e2e": "tests/support/bots-browser-e2e-entry.ts" } : {})
         },
         formats: ["cjs"]
       },
       rollupOptions: {
-        external: ["electron", "node-pty", "quickjs-emscripten", "esbuild"],
+        external: ["electron", "node-pty"],
         plugins: [copyResources()]
       }
     }

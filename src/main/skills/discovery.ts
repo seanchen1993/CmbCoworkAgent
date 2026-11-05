@@ -1,5 +1,6 @@
-import { existsSync, readFileSync, readdirSync } from "fs"
-import { readdir, readFile } from "fs/promises"
+import { readContentFileSync, readContentFile } from "../services/market-content"
+import { existsSync, readdirSync } from "fs"
+import { readdir } from "fs/promises"
 import { basename, dirname, join, relative } from "path"
 import { parseSkillNameFromFrontmatterYaml } from "./frontmatter"
 
@@ -53,7 +54,7 @@ export async function discoverSkills(
   async function walk(dirPath: string, depth: number): Promise<void> {
     const skillMdPath = join(dirPath, "SKILL.md")
     try {
-      const content = await readFile(skillMdPath, "utf-8")
+      const content = await readContentFile(skillMdPath, "utf-8")
       result.push(makeDiscoveredSkill(sourceDir, dirPath, content, depth))
     } catch {
       /* not a skill directory */
@@ -89,7 +90,7 @@ export function discoverSkillsSync(
   function walk(dirPath: string, depth: number): void {
     const skillMdPath = join(dirPath, "SKILL.md")
     try {
-      const content = readFileSync(skillMdPath, "utf-8")
+      const content = readContentFileSync(skillMdPath, "utf-8")
       result.push(makeDiscoveredSkill(sourceDir, dirPath, content, depth))
     } catch {
       /* not a skill directory */

@@ -1,4 +1,5 @@
 .bot-im-connect[data-cmb-modal-dialog] {
+  --im-online: #31916b;
   --im-muted: var(--muted-foreground);
   --im-line: color-mix(in srgb, var(--foreground) 10%, transparent);
   --im-soft: color-mix(in srgb, var(--foreground) 3%, var(--background));
@@ -70,7 +71,7 @@
   background: var(--im-muted);
 }
 .bot-im-connect-dot[data-online="true"] {
-  background: #31916b;
+  background: var(--im-online);
 }
 .bot-im-connect-status-copy {
   min-width: 0;

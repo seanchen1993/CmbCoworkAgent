@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "crypto"
+import { createHash } from "crypto"
 import { join } from "path"
 import { MultiServerMCPClient } from "@langchain/mcp-adapters"
 import { shouldSuppressInAppBrowserMcpTool } from "../browser/cdp/in-app-browser-mcp-tools"
@@ -18,12 +18,6 @@ import { resolveMcpHeaders } from "./headers"
 import { normalizeMcpInvocationResult } from "./result-utils"
 import { SchemaCache } from "./schema-cache"
 import { recordSuccessfulToolExample } from "./tool-example-store"
-import { withRawModMcp, publishCurrentModResult } from "../mods/adapters"
-import { getModCallContext } from "../mods/context"
-import { authorizeCurrentModInput } from "../mods/manager"
-import { invokeMcpToolWithRetry } from "./invocation-retry"
-import { ModError } from "../mods/errors"
-import { beforeModToolExecution } from "../mods/execution-error"
 
 interface CapabilitySource {
   kind: "connector" | "plugin"
@@ -72,9 +66,7 @@ function toPluginSources(): CapabilitySource[] {
   return sources
 }
 
-function normalizeFallbackPolicy(
-  policy: PluginMcpServerConfig["fallback"]
-): McpFallbackPolicy | undefined {
+function normalizeFallbackPolicy(policy: PluginMcpServerConfig["fallback"]): McpFallbackPolicy | undefined {
   if (!policy?.enabled || policy.safeToRetry !== true) return undefined
   return {
     enabled: true,
@@ -170,6 +162,31 @@ function buildFingerprint(sources: CapabilitySource[]): string {
   return createHash("sha256").update(payload).digest("hex")
 }
 
+function shouldRetryMcpInvocationError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error)
+  return (
+    message.includes("terminated") ||
+    message.includes("disconnected") ||
+    message.includes("ECONN")
+  )
+}
+
+async function invokeToolWithRetry(
+  callTool: (request: { name: string; arguments: Record<string, unknown> }) => Promise<unknown>,
+  request: { name: string; arguments: Record<string, unknown> },
+  retries = 1
+): Promise<unknown> {
+  try {
+    return await callTool(request)
+  } catch (error) {
+    if (retries <= 0 || !shouldRetryMcpInvocationError(error)) {
+      throw error
+    }
+    await new Promise((resolve) => setTimeout(resolve, 500))
+    return invokeToolWithRetry(callTool, request, retries - 1)
+  }
+}
+
 async function listServerTools(
   client: MultiServerMCPClient,
   providerKey: string
@@ -181,13 +198,9 @@ async function listServerTools(
   let cursor: string | undefined
 
   do {
-    const response = await (
-      serverClient as {
-        listTools(input?: {
-          cursor?: string
-        }): Promise<{ tools?: Array<Record<string, unknown>>; nextCursor?: string }>
-      }
-    ).listTools(cursor ? { cursor } : undefined)
+    const response = await (serverClient as {
+      listTools(input?: { cursor?: string }): Promise<{ tools?: Array<Record<string, unknown>>; nextCursor?: string }>
+    }).listTools(cursor ? { cursor } : undefined)
 
     tools.push(...(response.tools ?? []))
     cursor = response.nextCursor
@@ -200,15 +213,6 @@ class ManagedMcpCapabilityService implements McpCapabilityService {
   private cache: CapabilityCache | null = null
   private initPromise: Promise<void> | null = null
   private readonly schemaCache = new SchemaCache()
-
-  configuredServerNames(): string[] {
-    return this.readSources().map((source) => source.providerDisplayName)
-  }
-
-  peekTools(): McpCapabilityTool[] | null {
-    if (!this.cache || this.cache.fingerprint !== buildFingerprint(this.readSources())) return null
-    return structuredClone(this.cache.tools)
-  }
 
   async listTools(): Promise<McpCapabilityTool[]> {
     await this.ensureInitialized()
@@ -237,8 +241,7 @@ class ManagedMcpCapabilityService implements McpCapabilityService {
       throw new Error(`MCP tool not found: ${idOrAlias}`)
     }
 
-    const connection = this.cache
-    const client = connection?.client
+    const client = this.cache?.client
     if (!client) {
       throw new Error("MCP runtime is not initialized")
     }
@@ -248,50 +251,27 @@ class ManagedMcpCapabilityService implements McpCapabilityService {
       throw new Error(`MCP client is unavailable for provider ${tool.providerDisplayName}`)
     }
 
-    return withRawModMcp(tool, args, async (args) => {
-      await authorizeCurrentModInput(`mcp:${tool.capabilityId}`, args)
-      await beforeModToolExecution(() => {
-        getModCallContext()?.assertMcpTool?.(tool)
-        // Approval can await UI while settings change. Never send to a replaced connection,
-        // even when the server still advertises the same name and schema.
-        if (
-          getModCallContext()?.assertMcpTool &&
-          (this.cache !== connection ||
-            buildFingerprint(this.readSources()) !== connection?.fingerprint)
-        )
-          throw new ModError("MODS_MCP_CONTEXT_EXPIRED")
-      })
-      const callClient = serverClient as {
+    const raw = await invokeToolWithRetry(
+      (serverClient as {
         callTool(
-          request: { name: string; arguments: Record<string, unknown> },
-          resultSchema?: undefined,
-          options?: { signal?: AbortSignal }
+          request: { name: string; arguments: Record<string, unknown> }
         ): Promise<unknown>
+      }).callTool.bind(serverClient),
+      {
+        name: tool.toolName,
+        arguments: args
       }
-      const signal = getModCallContext()?.signal
-      const raw = await invokeMcpToolWithRetry(
-        (request) =>
-          signal
-            ? callClient.callTool(request, undefined, { signal })
-            : callClient.callTool(request),
-        {
-          name: tool.toolName,
-          arguments: args
-        }
-      )
+    )
 
-      const result = await publishCurrentModResult(
-        normalizeMcpInvocationResult(tool.capabilityId, raw)
-      )
+    const result = normalizeMcpInvocationResult(tool.capabilityId, raw)
 
-      try {
-        if (!getModCallContext()) recordSuccessfulToolExample(tool, result)
-      } catch (error) {
-        console.warn(`[MCP] failed to persist tool example for "${tool.toolId}":`, error)
-      }
+    try {
+      recordSuccessfulToolExample(tool, result)
+    } catch (error) {
+      console.warn(`[MCP] failed to persist tool example for "${tool.toolId}":`, error)
+    }
 
-      return result
-    })
+    return result
   }
 
   async invalidate(reason?: string): Promise<void> {
@@ -429,8 +409,6 @@ class ManagedMcpCapabilityService implements McpCapabilityService {
       })
 
       const previous = this.cache
-      const connectionGeneration = randomUUID()
-      for (const tool of tools) tool.connectionGeneration = connectionGeneration
       this.cache = {
         fingerprint,
         client,

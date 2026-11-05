@@ -845,7 +845,7 @@ try {
     "scriptSha256", "args", "status", "phases", "currentPhase", "agents",
     "worktrees", "logs", "journal", "result", "resultSidecarStatus", "error",
     "warning", "stats", "startedAt", "updatedAt", "completedAt",
-    "notificationDelivered", "resumed", "endedAt"
+    "notificationDelivered", "notificationOwner", "resumed", "endedAt"
   ])
   for (const key of Object.keys(parsed)) {
     if (!knownKeys.has(key)) throw new Error("workflow run JSON contains an unknown field")

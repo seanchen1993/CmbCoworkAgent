@@ -4,11 +4,8 @@ import { parseBotMessageMentions } from "../../../../shared/bots/message-mention
 import type { BotDefinition, BotGroup, BotMessageReply } from "../../../../shared/bots/contracts"
 import { parseBotMessageReply } from "../../../../shared/bots/message-reply"
 import { projectHumanGate } from "../../../../shared/harness-notifications"
-import { useModCommands } from "../../features/slash-commands/useModCommands"
-import { ModCommandJobs } from "./ModCommandJobs"
-import { FunctionPanes } from "./FunctionPanes"
-import { useFunctionTurnNotices } from "@/lib/use-function-turn-notices"
-import { ModCards } from "./ModCards"
+import { IDLE_MODEL_OUTSIDE_HOURS_MESSAGE } from "../../../../shared/idle-model-service-window"
+import { IDLE_MODEL_SAP_REQUIRED_MESSAGE } from "../../../../shared/model-catalog"
 import { useHarnessNotifications } from "@/lib/harness-notifications"
 import { BizRetryDecisionCard } from "@/components/harness-board/BizRetryNotice"
 import React, {
@@ -1096,6 +1093,8 @@ const RECOVERABLE_QUEUE_ERRORS = new Set([
   QUEUE_MODEL_REQUIRED_ERROR,
   QUEUE_MODEL_MISSING_ERROR,
   QUEUE_MODEL_UNAVAILABLE_ERROR,
+  IDLE_MODEL_OUTSIDE_HOURS_MESSAGE,
+  IDLE_MODEL_SAP_REQUIRED_MESSAGE,
   QUEUE_WORKSPACE_REQUIRED_ERROR
 ])
 const CHAT_REPORT_UPLOAD_DEBOUNCE_MS = 250
@@ -1739,7 +1738,6 @@ export function ChatContainer({
   onHarnessSessionCreated,
   managedTurn
 }: ChatContainerProps): React.JSX.Element {
-  const functionTurnNotices = useFunctionTurnNotices(threadId)
   const remoteThread = useAppStore(
     (state) => state.threads.find((thread) => thread.thread_id === threadId) ?? null
   )
@@ -1750,7 +1748,7 @@ export function ChatContainer({
     (remoteThreadInfo?.historical
       ? "设备接管前的远程历史 Thread 仅可查看"
       : remoteThreadInfo?.kind === "inbox"
-        ? "远程收件箱在桌面仅可查看；请从招乎继续发送消息"
+        ? "招乎默认聊天在桌面仅可查看；请从招乎继续发送消息"
         : null)
   const surfaceConfig = CHAT_SURFACE_CONFIG[surface]
   const [threadProjectionRuntime] = useState(() => getChatThreadProjectionRuntime(threadId))
@@ -5423,14 +5421,11 @@ export function ChatContainer({
     threadMessages.length
   ])
 
-  const modCommands = useModCommands(threadId)
-  const isModCommandInput = modCommands.handles(input.trim())
   const slash = useSlashCommands({
     input: managedTurn?.textOnlyReason ? "" : input,
     skills: managedTurn?.textOnlyReason ? [] : enabledSkillsForSlash,
     skillSelected: selectedSkill !== null,
     browserSelected: selectedBuiltinBrowser,
-    modCommands: managedTurn ? undefined : modCommands.items,
     generalCommands: managedTurn?.textOnlyReason
       ? []
       : managedTurn
@@ -5715,7 +5710,7 @@ export function ChatContainer({
         return
       }
       if (!selectedModel.available) {
-        setError("当前模型不可用，请先在模型配置中设置 API 密钥。")
+        setError(selectedModel.unavailableReason || QUEUE_MODEL_UNAVAILABLE_ERROR)
         return
       }
       if (!workspacePath) {
@@ -5872,11 +5867,11 @@ export function ChatContainer({
     // popover branch returns before reaching handleSubmit. Kept here so any
     // future invoker (hotkey, programmatic call) can't accidentally ship the
     // literal "/xxx" text as a message.
-    if (managedTurn && (isGoalSlashInput || modCommands.handles(trimmedInput))) {
+    if (managedTurn && isGoalSlashInput) {
       setError(
         managedTurn.ownerConversation
-          ? "关联任务由同一 Bot 调度。使用 Goal 或 Mods 控制前，请在会话顶部解除任务关联；原消息与设置会保留。"
-          : "Bot 工作区暂不支持 Goal 和 Mods 控制命令。请直接描述任务，或在原工作台使用这些命令。"
+          ? "关联任务由同一 Bot 调度。使用 Goal 控制前，请在会话顶部解除任务关联；原消息与设置会保留。"
+          : "Bot 工作区暂不支持 Goal 控制命令。请直接描述任务，或在原工作台使用这些命令。"
       )
       return
     }
@@ -5886,22 +5881,6 @@ export function ChatContainer({
     if (managedTurn?.submitDraft && queuedMessages.length >= (managedTurn.maxPendingDrafts ?? 32)) {
       setError("待确认消息已满，请先处理已有消息后再发送。")
       return
-    }
-    if (!managedTurn && modCommands.mayHandle(trimmedInput)) {
-      if (historyLoading) return
-      try {
-        const handled = await modCommands.submit(trimmedInput, () => {
-          if (hasPendingFilePayload || selectedSkill || selectedBuiltinBrowser)
-            throw new Error("Mods 命令接收文本参数，请先移除附件、技能和浏览器选择。")
-        })
-        if (handled) {
-          setInput("")
-          return
-        }
-      } catch (error) {
-        setError(error instanceof Error ? error.message : "Mods 命令提交失败")
-        return
-      }
     }
     // A plain (non-/goal) message submitted while the thread is busy — running,
     // or a tool approval is pending — is parked in the draft queue instead of
@@ -6047,7 +6026,7 @@ export function ChatContainer({
         }
 
         if (!selectedModel.available) {
-          setError("当前模型不可用，请先在模型配置中设置 API 密钥。")
+          setError(selectedModel.unavailableReason || QUEUE_MODEL_UNAVAILABLE_ERROR)
           return
         }
 
@@ -6257,6 +6236,8 @@ export function ChatContainer({
         attachmentModelBlocks,
         attachmentDisplayPrefix,
         skillBlock,
+        skillName: skill?.name,
+        skillDescription: skill?.description,
         builtinBrowser: browser,
         modelId: currentModel,
         created_at: new Date(),
@@ -6400,7 +6381,7 @@ export function ChatContainer({
             titleSource = getBuiltinBrowserTitleSource(browser)
           }
           if (titleSource) {
-            generateTitleForFirstMessage(threadId, titleSource)
+            generateTitleForFirstMessage(threadId, titleSource, skill?.name, skill?.description)
           }
         }
       }
@@ -6760,7 +6741,7 @@ export function ChatContainer({
         if (!queued.modelId && !currentModel) {
           setError(QUEUE_MODEL_REQUIRED_ERROR)
         } else if (queuedModel || currentSelectedModel) {
-          setError(QUEUE_MODEL_UNAVAILABLE_ERROR)
+          setError((queuedModel || currentSelectedModel)?.unavailableReason || QUEUE_MODEL_UNAVAILABLE_ERROR)
         } else {
           setError(QUEUE_MODEL_MISSING_ERROR)
         }
@@ -6859,7 +6840,12 @@ export function ChatContainer({
         const hasDefaultTitle = currentThread?.title?.startsWith("Thread ")
         const titleSource = queued.text.trim() || (queued.skillBlock ? "使用技能" : "")
         if (hasDefaultTitle && titleSource) {
-          generateTitleForFirstMessage(threadId, titleSource)
+          generateTitleForFirstMessage(
+            threadId,
+            titleSource,
+            queued.skillName,
+            queued.skillDescription
+          )
         }
       }
       const startTime = Date.now()
@@ -7306,7 +7292,7 @@ export function ChatContainer({
       try {
         await Promise.all([stream?.stop(), window.api.agent.cancel(threadId)])
         if (isManagedRunSessionActive) {
-          toast.success("已退出托管模式")
+          toast.success("已退出托管模式", { duration: 1200 })
         }
       } finally {
         if (goalUi.goal) {
@@ -8115,7 +8101,7 @@ export function ChatContainer({
   const interruptionNotice = hookInterruption
     ? interruptionNoticeCopy(hookInterruption.event, hookInterruption.action)
     : null
-  const remoteThreadTipLabel = remoteThreadInfo?.kind === "inbox" ? "远程收件箱" : "远程会话"
+  const remoteThreadTipLabel = remoteThreadInfo?.kind === "inbox" ? "招乎默认聊天" : "远程会话"
   const handleDismissRemoteThreadTip = useCallback(() => {
     setDismissedRemoteTipThreadIds((current) => {
       const next = new Set(current)
@@ -8277,7 +8263,7 @@ export function ChatContainer({
           <div className="min-w-0 flex-1 space-y-0.5">
             <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
               <span className="rounded bg-status-info/15 px-1.5 py-0.5 font-medium text-status-info-foreground">
-                {remoteThreadInfo.kind === "inbox" ? "远程收件箱" : "远程会话"}
+                {remoteThreadInfo.kind === "inbox" ? "招乎默认聊天" : "远程会话"}
               </span>
               {remoteThreadInfo.kind === "feature" && remoteThreadInfo.featureLabel ? (
                 <span className="font-medium">{remoteThreadInfo.featureLabel}</span>
@@ -8288,7 +8274,7 @@ export function ChatContainer({
               {remoteThreadInfo.kind === "inbox"
                 ? remoteThreadInfo.historical
                   ? "此 Thread 已停用，仅保留历史，不会接收新消息。"
-                  : "桌面仅用于查看历史和运行状态；请从招乎继续聊天。"
+                  : "这是招乎的默认聊天，桌面仅用于查看。要在招乎继续其他会话，请先在“接入招乎”中开启，再发送 /会话 切换。"
                 : remoteThreadInfo.historical
                   ? "此远程会话已停用，仅保留历史；请重新绑定。"
                   : isLoading
@@ -8535,7 +8521,6 @@ export function ChatContainer({
                       <ChatMessageVirtualList
                         historyReady={!historyLoading && !historyPageLoading}
                         canAnimateMessages={chatScrollUiState.mode === "following"}
-                        functionTurnNotices={functionTurnNotices}
                         messageAttempts={streamData.messageAttempts}
                         searchReveal={searchOpen ? searchReveal : null}
                         messages={displayMessages}
@@ -8957,11 +8942,6 @@ export function ChatContainer({
               )}
             >
               <GitChangeNotice threadId={threadId} />
-              <div className="max-w-3xl mx-auto">
-                <ModCards threadId={threadId} slot="turn.summary" />
-              </div>
-              <ModCommandJobs key={threadId} threadId={threadId} />
-              <FunctionPanes key={`panes:${threadId}`} threadId={threadId} />
               <form onSubmit={handleSubmit} className="max-w-3xl mx-auto relative">
                 <ChatScrollToBottomButton
                   visible={chatScrollUiState.mode === "detached"}
@@ -9745,25 +9725,20 @@ export function ChatContainer({
                             <>
                               {((managedTurn &&
                                 (surface !== "bot" || input.trim() || totalPendingFileCount > 0)) ||
-                                canSubmitGoalCommandWhileLoading ||
-                                isModCommandInput) && (
+                                canSubmitGoalCommandWhileLoading) && (
                                 <button
                                   type="submit"
                                   disabled={
                                     !stream ||
                                     (managedTurn
                                       ? !input.trim() && totalPendingFileCount === 0
-                                      : isModCommandInput
-                                        ? slash.mode.kind === "slash"
-                                        : goalSendButtonDisabledWhileLoading)
+                                      : goalSendButtonDisabledWhileLoading)
                                   }
                                   title={!stream ? "会话准备中，请稍后发送" : undefined}
                                   aria-label={
                                     managedTurn
                                       ? (managedTurn.busySubmitLabel ?? "加入待办")
-                                      : isModCommandInput
-                                        ? "执行 Mods 命令"
-                                        : "发送 goal 命令"
+                                      : "发送 goal 命令"
                                   }
                                   className="flex size-8 shrink-0 items-center justify-center rounded-full bg-button text-button-foreground transition-colors hover:bg-button/90 disabled:cursor-not-allowed disabled:opacity-40"
                                 >

@@ -1,3 +1,7 @@
+import {
+  resolveManagedRunModelSelection,
+  type ManagedRunModelSelection
+} from "../../shared/managed-run-model"
 import { formatGmt8Timestamp } from "../../shared/gmt8-time"
 import { randomUUID } from "crypto"
 import {
@@ -307,7 +311,10 @@ function isOptionalNonNegativeNumber(value: unknown): boolean {
 
 function isAgentEndReason(value: unknown): boolean {
   if (!isPlainRecord(value) || !AGENT_END_REASON_CODES.has(value.code as string)) return false
-  return isOptionalText(value.message, EVENT_SUMMARY_MAX_LENGTH)
+  return (
+    isOptionalText(value.message, EVENT_SUMMARY_MAX_LENGTH) &&
+    (value.retryable === undefined || typeof value.retryable === "boolean")
+  )
 }
 
 function isManagedRunDecisionFacts(value: unknown): value is ManagedRunDecisionFacts {
@@ -322,6 +329,7 @@ function isManagedRunDecisionFacts(value: unknown): value is ManagedRunDecisionF
     value.changedFields.every((field) => MANAGED_RUN_CHANGED_FIELDS.has(field as string)) &&
     typeof value.initialInspection === "boolean" &&
     isNonNegativeInteger(value.providerRetryCount) &&
+    (value.totalRetryCount === undefined || isNonNegativeInteger(value.totalRetryCount)) &&
     isOptionalText(value.slashSkill, 256) &&
     isOptionalText(value.previousNodeId, 512) &&
     isOptionalNonNegativeNumber(value.contextInputTokens) &&
@@ -398,7 +406,12 @@ function isManagedRunPolicyResult(value: unknown): value is ManagedRunPolicyResu
   ) {
     return false
   }
-  if (value.type === "biz_progress") return value.proposedAction === "start_new_thread"
+  if (value.type === "biz_progress") {
+    return (
+      value.proposedAction === "start_new_thread" ||
+      value.proposedAction === "continue_current_thread"
+    )
+  }
   if (value.type === "biz_retry") {
     return ["continue_current_thread", "start_new_thread", "fail_managed_run"].includes(
       value.proposedAction as string
@@ -435,10 +448,14 @@ function normalizeSnapshot(value: unknown): ManagedRunSnapshot {
     !snapshot.featureId.trim() ||
     !MANAGED_RUN_STATUSES.has(snapshot.status as string) ||
     !isOptionalText(snapshot.workspacePath, 4096) ||
+    (snapshot.modelSelection !== undefined &&
+      snapshot.modelSelection !== "default" &&
+      snapshot.modelSelection !== "ultra") ||
     !isManagedRunCurrentSession(snapshot.currentSession) ||
     !isManagedRunDecisionBaseline(snapshot.decisionBaseline) ||
     (snapshot.currentSession === undefined) !== (snapshot.decisionBaseline === undefined) ||
     !isNonNegativeInteger(snapshot.providerRetryCount) ||
+    (snapshot.totalRetryCount !== undefined && !isNonNegativeInteger(snapshot.totalRetryCount)) ||
     (snapshot.nextRetryAt !== undefined &&
       (typeof snapshot.nextRetryAt !== "string" ||
         !MANAGED_RUN_TIME_PATTERN.test(snapshot.nextRetryAt))) ||
@@ -455,7 +472,7 @@ function normalizeSnapshot(value: unknown): ManagedRunSnapshot {
   ) {
     throw new ManagedRunCorruptError("ManagedRun run.json has an invalid snapshot")
   }
-  return snapshot as ManagedRunSnapshot
+  return { ...snapshot, totalRetryCount: snapshot.totalRetryCount ?? 0 } as ManagedRunSnapshot
 }
 
 function readSnapshot(path: string): ManagedRunSnapshot {
@@ -723,6 +740,9 @@ export class ManagedRunStore {
       endReason: event.endReason
         ? {
             code: event.endReason.code,
+            ...(event.endReason.retryable !== undefined
+              ? { retryable: event.endReason.retryable }
+              : {}),
             ...(endReasonMessage ? { message: endReasonMessage } : {})
           }
         : undefined,
@@ -744,7 +764,12 @@ export class ManagedRunStore {
     return validated
   }
 
-  createRun(projectId: string, featureId: string, workspacePath?: string): ManagedRunSnapshot {
+  createRun(
+    projectId: string,
+    featureId: string,
+    workspacePath?: string,
+    modelSelection?: ManagedRunModelSelection
+  ): ManagedRunSnapshot {
     const runId = `mr_${randomUUID().replace(/-/gu, "")}`
     const now = formatGmt8Timestamp()
     const snapshot: ManagedRunSnapshot = {
@@ -753,8 +778,10 @@ export class ManagedRunStore {
       projectId,
       featureId,
       status: "running",
+      modelSelection: resolveManagedRunModelSelection(modelSelection),
       ...(workspacePath?.trim() ? { workspacePath: workspacePath.trim() } : {}),
       providerRetryCount: 0,
+      totalRetryCount: 0,
       startedAt: now,
       updatedAt: now
     }
@@ -926,6 +953,25 @@ export class ManagedRunStore {
     } catch {
       return { ...record.snapshot, status: "corrupt", corrupt: true }
     }
+  }
+
+  listFeatureRunSummaries(projectId: string, featureId: string): ManagedRunSummary[] {
+    return this.listFeatureRuns(projectId, featureId)
+      .map((record): ManagedRunSummary => {
+        if (record.snapshot && !record.corrupt) return record.snapshot
+        return {
+          version: 2.5,
+          runId: record.runId,
+          projectId: record.projectId,
+          featureId: record.featureId,
+          status: "corrupt",
+          corrupt: true,
+          providerRetryCount: 0,
+          startedAt: "",
+          updatedAt: ""
+        }
+      })
+      .sort((left, right) => right.startedAt.localeCompare(left.startedAt))
   }
 
   validateRunEvents(identity: ManagedRunIdentity): { repaired: boolean } {

@@ -1,10 +1,8 @@
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { basename, isAbsolute, join, resolve } from "node:path"
+import { join, resolve } from "node:path"
 import { runInNewContext } from "node:vm"
 import { ToolMessage } from "@langchain/core/messages"
-import { tool } from "langchain"
-import { z } from "zod"
 import ts from "typescript"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import {
@@ -29,16 +27,12 @@ import { botMemoryContext } from "../../shared/bots/memory-scope"
 import { isBotMainUserTurn } from "../bots/prompt"
 import { botWorkResultLabel } from "../../shared/bots/work-result"
 import { WORKFLOW_NOTIFICATION_TURN_PROMPT } from "../../shared/internal-notification-turn"
-import { MAIN_TURN_ONLY_TOOL_METADATA_KEY } from "../agent/runtime-tool-catalog"
+import { createBotDeliveryTools as createDeliveryTools } from "../bots/tools"
 import { canDeferBotTask } from "../bots/continuation"
-import { snapshotBotDeliveryFile } from "../bots/file-copy"
 import { createBotGroupDeliveryCheck, createBotGroupMessageTool } from "../bots/group-delivery"
 import type { BotRunPort, LocalBotHost } from "../bots/host"
 import { botTextOnlyRemotePolicy } from "../bots/mock-runtime-policy"
-import { resolveBotWorkspaceFile } from "../bots/workspace-file"
-import { getHookAgentIdFromRequest } from "../hooks/execution-context"
 import { notifyIfBackground } from "../services/notify"
-import { openStableFileHandle } from "../services/stable-file-handle"
 
 const desktop = vi.hoisted(() => ({
   focused: false,
@@ -142,25 +136,6 @@ const nativeFailure = transpile(nativeGuard("notifyIfBackground", "❌ 任务失
 const adapterFactory = transpile(
   `(function() { ${functions(adapter, ["createLocalBotRunPort", "memoryUserText"])}; return createLocalBotRunPort; })()`
 )
-const fileTools = source("src/main/bots/tools.ts")
-const createDeliveryTools = runInNewContext(
-  transpile(`(function() {
-  ${functions(fileTools, ["assertParentBot", "verifyBotDeliveryFiles", "createBotDeliveryTools", "createBotFileTools"])}
-  return createBotDeliveryTools;
-})()`),
-  {
-    tool,
-    z,
-    ToolMessage,
-    basename,
-    isAbsolute,
-    getHookAgentIdFromRequest,
-    MAIN_TURN_ONLY_TOOL_METADATA_KEY,
-    resolveBotWorkspaceFile,
-    openStableFileHandle,
-    snapshotBotDeliveryFile
-  }
-) as typeof import("../bots/tools").createBotDeliveryTools
 
 let workspace: string
 beforeEach(() => {
@@ -261,6 +236,7 @@ async function complete({
         args: { files: ["report.csv"], ...(botTaskGroupId(task) ? { content: "" } : {}) }
       })
       expect(ToolMessage.isInstance(receipt)).toBe(true)
+      expect((receipt as ToolMessage).status, String((receipt as ToolMessage).content)).not.toBe("error")
       expect(parseBotFileDelivery(String((receipt as ToolMessage).content))).toHaveLength(1)
     }
     await context.onFinalAssistant?.({ messageId: "synthetic-final", finalText: result })
@@ -334,6 +310,7 @@ async function complete({
       associatedWorks: () => ({ items: [], hasMore: false }),
       publishGroupMessage: publishedText,
       publishGroupFiles: publishedFiles,
+      publishImFiles: vi.fn(),
       peers: () => []
     } as unknown as LocalBotHost
     const emptyTools = () => []
@@ -352,6 +329,7 @@ async function complete({
       canDeferBotTask,
       parseBotFileDelivery,
       botTextOnlyRemotePolicy,
+      resolveCoordinatorModeRequest: () => ({ agentMode: "normal" }),
       coordinatorWorkerManager: { hasAutoRunnableNotifications: () => true },
       localBotWorkspaces: {},
       createLocalBotWorkHistory: () => ({}),

@@ -4,6 +4,7 @@ import { ChevronLeft } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import type { UserStatsData } from "../use-dashboard"
+import { DrilldownArrow } from "../DrilldownArrow"
 
 const COLORS = [
   "#3b82f6",
@@ -53,7 +54,14 @@ function PiePanel({
     <div className="rounded-xl border border-border bg-card p-4">
       <div className="mb-3 flex flex-wrap items-start justify-between gap-2">
         <div className="min-w-0 flex-1">
-          <h3 className="text-xs font-medium text-muted-foreground">{title}</h3>
+          <h3 className="flex items-center gap-1 text-xs font-medium text-muted-foreground">
+            {title}
+            {onSliceClick && data.length > 0 ? (
+              <span title="点击扇区查看明细">
+                <DrilldownArrow />
+              </span>
+            ) : null}
+          </h3>
           {helperText ? (
             <p className="mt-1 text-[11px] text-muted-foreground/80">{helperText}</p>
           ) : null}
@@ -246,6 +254,7 @@ function VersionPanel({ data }: { data: UserStatsData }) {
             )}
             <p className="mt-2 text-center text-[11px] text-muted-foreground/80">
               点击饼图分片查看该版本 Top {VERSION_USER_LIMIT} 用户明细
+              {data.byVersion.length > 0 ? <DrilldownArrow className="ml-1" /> : null}
             </p>
           </>
         ) : (
@@ -336,7 +345,12 @@ export function UserPanel({
                     <span className="text-muted-foreground ml-1">({u.sapId})</span>
                   </td>
                   <td className="py-1.5 px-2 text-muted-foreground">{u.orgName || "—"}</td>
-                  <td className="py-1.5 px-2 text-right font-medium text-foreground">{u.count}</td>
+                  <td className="py-1.5 px-2 text-right font-medium text-foreground">
+                    <span className="inline-flex items-center gap-1">
+                      {u.count}
+                      {onUserClick ? <DrilldownArrow /> : null}
+                    </span>
+                  </td>
                 </tr>
               ))}
               {data.topUsers.length === 0 && (

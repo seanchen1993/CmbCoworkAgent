@@ -1,4 +1,22 @@
 import { localBotsApi } from "./bots"
+import type {
+  ManagedRunSchedule,
+  ManagedRunScheduleInput,
+  ManagedRunScheduleUpdateInput,
+  ManagedRunScheduleIdentity,
+  ManagedRunScheduleChange
+} from "../shared/managed-run-schedule"
+import type {
+  KnowledgeAccumulationData,
+  KnowledgeActiveDetails,
+  KnowledgeFileReaders,
+  KnowledgeProjectStats,
+  KnowledgeReadDetails,
+  KnowledgeReadFileRef,
+  KnowledgeRecentConstraintFiles
+} from "../shared/dashboard-knowledge-overview"
+import type { EfficiencyPluginFilter } from "../shared/dashboard-efficiency-compute"
+import type { ProjectCodeTraceRequest } from "../shared/project-code-trace"
 import type { DashboardThreadTraceScope } from "../shared/dashboard-thread-trace-scope"
 import type {
   AppNotification,
@@ -9,7 +27,6 @@ import type { SubagentExportTarget } from "../shared/subagent-session-export"
 import type { UiGuideConfig, UiGuideState } from "../shared/ui-guides"
 import { contextBridge, ipcRenderer, shell } from "electron"
 import { randomUUID } from "node:crypto"
-import type { ModCard, ModProjection, ModWorkspaceStatus } from "../shared/mods/types"
 import type { UpdateSourceInfo } from "../main/updater/channel-config"
 import {
   isWindowCloseBehavior,
@@ -1335,8 +1352,11 @@ const api = {
         }>
       }>
     },
-    generateTitle: (message: string): Promise<string> => {
-      return ipcRenderer.invoke("threads:generateTitle", message)
+    generateTitle: (
+      message: string,
+      context?: { threadId: string; skillName?: string; skillDescription?: string }
+    ): Promise<string> => {
+      return ipcRenderer.invoke("threads:generateTitle", message, context)
     },
     onThreadsChanged: (callback: () => void): (() => void) => {
       const handler = (): void => {
@@ -1487,7 +1507,7 @@ const api = {
         id: string
         ref: `builtin:${string}`
         source: "builtin"
-        origin: "remote" | "fallback"
+        origin: "remote" | "fallback" | "local"
         name: string
         baseUrl: string
         model: string
@@ -1502,7 +1522,9 @@ const api = {
         enableThinkingEffort?: boolean
         thinkingEffort?: "low" | "high" | "max"
         tier?: "premium" | "economy"
-        lockedFields: Array<"baseUrl" | "model" | "apiKey">
+        notice?: string
+        unavailableReason?: string
+        lockedFields: Array<"baseUrl" | "model" | "apiKey" | "maxTokens">
       }>
     > => {
       return ipcRenderer.invoke("models:getBuiltinConfigs")
@@ -2408,7 +2430,7 @@ const api = {
     upload: (
       buffer: ArrayBuffer,
       fileName: string,
-      options?: { allowNestedNameDuplicates?: boolean }
+      options?: { allowNestedNameDuplicates?: boolean; origin?: "market" | "local" }
     ): Promise<{
       success: boolean
       skillName?: string
@@ -3065,60 +3087,7 @@ const api = {
       }
     }
   },
-  mods: {
-    globalEnabled: (): Promise<boolean> => ipcRenderer.invoke("mods:global-enabled"),
-    configureGlobal: (enabled: boolean): Promise<boolean> =>
-      ipcRenderer.invoke("mods:configure-global", enabled),
-    functionUnlocked: (): Promise<boolean> => ipcRenderer.invoke("mods:function-unlocked"),
-    unlockFunction: (password: string): Promise<boolean> =>
-      ipcRenderer.invoke("mods:unlock-function", password),
-    turnNotices: (
-      threadId: string
-    ): Promise<import("../shared/mods/v2/turn").FunctionTurnNotice[]> =>
-      ipcRenderer.invoke("mods:function-turn-notices", threadId),
-    panes: (threadId: string): Promise<import("../shared/mods/v2/ui").FunctionPaneSnapshot[]> =>
-      ipcRenderer.invoke("mods:function-panes", threadId),
-    paneAct: (
-      threadId: string,
-      action: import("../shared/mods/v2/ui").FunctionUiAction
-    ): Promise<void> => ipcRenderer.invoke("mods:function-ui-act", { threadId, action }),
-    clientAct: (
-      threadId: string,
-      action: import("../shared/mods/v2/ui").FunctionClientAction
-    ): Promise<void> => ipcRenderer.invoke("mods:function-client-act", { threadId, action }),
-    approveFunction: (threadId: string, pluginId: string, digest: string): Promise<void> => ipcRenderer.invoke("mods:approve-function", { threadId, pluginId, digest }),
-    revokeFunction: (threadId: string, name: string): Promise<void> => ipcRenderer.invoke("mods:revoke-function", { threadId, name }),
-    status: (threadId: string): Promise<ModWorkspaceStatus> => ipcRenderer.invoke("mods:status", threadId),
-    configure: (threadId: string, enabled: boolean, outputPolicy: boolean): Promise<void> =>
-      ipcRenderer.invoke("mods:configure", { threadId, enabled, outputPolicy }),
-    approve: (threadId: string, pluginId: string, digest: string): Promise<void> =>
-      ipcRenderer.invoke("mods:approve", { threadId, pluginId, digest }),
-    revoke: (threadId: string, modId: string): Promise<void> => ipcRenderer.invoke("mods:revoke", { threadId, modId }),
-    cards: (threadId: string, callId: string): Promise<ModCard[]> => ipcRenderer.invoke("mods:cards", { threadId, callId }),
-    act: (threadId: string, actionId: string): Promise<ModProjection> => ipcRenderer.invoke("mods:act", { threadId, actionId }),
-    installExamples: (): Promise<void> => ipcRenderer.invoke("mods:install-examples"),
-    audit: (threadId: string, before?: number): Promise<import("../shared/mods/types").ModAuditEntry[]> => ipcRenderer.invoke("mods:audit", { threadId, before }),
-    reconcile: (threadId: string, callId: string, resolution: "confirmed-success" | "confirmed-failure"): Promise<void> => ipcRenderer.invoke("mods:reconcile", { threadId, callId, resolution }),
-    backup: (): Promise<boolean> => ipcRenderer.invoke("mods:backup"),
-    artifact: (threadId: string, id: string): Promise<{ label: string; text: string }> => ipcRenderer.invoke("mods:artifact", { threadId, id }),
-    saveArtifact: (threadId: string, id: string): Promise<boolean> => ipcRenderer.invoke("mods:save-artifact", { threadId, id }),
-    commands: (threadId: string): Promise<import("../shared/mods/types").ModCommandDescriptor[]> => ipcRenderer.invoke("mods:commands", threadId),
-    enqueue: (threadId: string, descriptor: import("../shared/mods/types").ModCommandDescriptor, args: import("../shared/mods/types").ModObject): Promise<import("../shared/mods/types").ModCommandJob> => ipcRenderer.invoke("mods:enqueue", { threadId, descriptor, args }),
-    jobs: (threadId: string): Promise<import("../shared/mods/types").ModCommandJob[]> => ipcRenderer.invoke("mods:jobs", threadId),
-    cancelJob: (threadId: string, id: string): Promise<void> => ipcRenderer.invoke("mods:cancel-job", { threadId, id }),
-    onJobsChanged: (callback: (event: { threadId: string }) => void): (() => void) => {
-      const listener = (_event: Electron.IpcRendererEvent, payload: { threadId: string }): void => callback(payload)
-      ipcRenderer.on("mods:jobs-changed", listener)
-      return () => ipcRenderer.removeListener("mods:jobs-changed", listener)
-    },
-    onCardsChanged: (callback: (event: { threadId: string }) => void): (() => void) => {
-      const listener = (_event: Electron.IpcRendererEvent, value: { threadId: string }): void => callback(value)
-      ipcRenderer.on("mods:cards-changed", listener)
-      return () => ipcRenderer.removeListener("mods:cards-changed", listener)
-    }
-  },
   plugins: {
-    // Existing plugin APIs remain independent of project-scoped module grants.
     list: (): Promise<PluginMetadata[]> =>
       ipcRenderer.invoke("plugins:list") as Promise<PluginMetadata[]>,
     install: (
@@ -3126,15 +3095,15 @@ const api = {
       fileName: string,
       origin?: "market" | "local",
       version?: string,
-      requireMods?: boolean
+      marketplace?: PluginMetadata["marketplace"]
     ): Promise<{ success: boolean; pluginName?: string; error?: string }> =>
-      ipcRenderer.invoke("plugins:install", { buffer, fileName, origin, version, requireMods }) as Promise<{
+      ipcRenderer.invoke("plugins:install", { buffer, fileName, origin, version, marketplace }) as Promise<{
         success: boolean
         pluginName?: string
         error?: string
       }>,
-    installFromDir: (requireMods?: boolean): Promise<{ success: boolean; pluginName?: string; error?: string }> =>
-      ipcRenderer.invoke("plugins:installFromDir", requireMods) as Promise<{
+    installFromDir: (): Promise<{ success: boolean; pluginName?: string; error?: string }> =>
+      ipcRenderer.invoke("plugins:installFromDir") as Promise<{
         success: boolean
         pluginName?: string
         error?: string
@@ -3916,6 +3885,7 @@ const api = {
     isAllowed: (): Promise<boolean> => ipcRenderer.invoke("dashboard:isAllowed"),
     isProjectModeAllowed: (): Promise<boolean> =>
       ipcRenderer.invoke("dashboard:isProjectModeAllowed"),
+    orgFilterDefaults: (): Promise<string[]> => ipcRenderer.invoke("dashboard:orgFilterDefaults"),
     isAnalysisAgentAllowed: (): Promise<boolean> =>
       ipcRenderer.invoke("dashboard:isAnalysisAgentAllowed"),
     isTraceEvolverReviewAdmin: (): Promise<boolean> =>
@@ -3972,7 +3942,13 @@ const api = {
     projectMode: (
       range: { from: string; to: string },
       granularity: "day" | "week" | "month" | "custom",
-      opts?: { upperOrgLv1?: string | string[] | null }
+      opts?: {
+        upperOrgLv1?: string | string[] | null
+        fromLeanOnly?: boolean | null
+        createdInRangeOnly?: boolean | null
+        refreshProjects?: boolean
+        skipProjectList?: boolean
+      }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:projectMode", range, granularity, opts),
     projectModeCodeStats: (
@@ -3987,6 +3963,56 @@ const api = {
       source: string | null
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:projectModeCodeStats", range, opts, source),
+    knowledgeAccumulation: (opts?: {
+      upperOrgLv1?: string | string[] | null
+    }): Promise<{
+      success: boolean
+      data?: KnowledgeAccumulationData
+      error?: string
+      cancelled?: boolean
+    }> => ipcRenderer.invoke("dashboard:knowledgeAccumulation", opts),
+    knowledgeActiveDetails: (opts?: {
+      upperOrgLv1?: string | string[] | null
+    }): Promise<{
+      success: boolean
+      data?: KnowledgeActiveDetails
+      error?: string
+      cancelled?: boolean
+    }> => ipcRenderer.invoke("dashboard:knowledgeActiveDetails", opts),
+    knowledgeReadDetails: (opts?: {
+      upperOrgLv1?: string | string[] | null
+    }): Promise<{
+      success: boolean
+      data?: KnowledgeReadDetails
+      error?: string
+      cancelled?: boolean
+    }> => ipcRenderer.invoke("dashboard:knowledgeReadDetails", opts),
+    knowledgeReadReaders: (
+      file: KnowledgeReadFileRef,
+      opts?: { upperOrgLv1?: string | string[] | null }
+    ): Promise<{
+      success: boolean
+      data?: KnowledgeFileReaders
+      error?: string
+      cancelled?: boolean
+    }> => ipcRenderer.invoke("dashboard:knowledgeReadReaders", file, opts),
+    knowledgeProjectStats: (
+      range: { from: string; to: string },
+      opts?: { upperOrgLv1?: string | string[] | null }
+    ): Promise<{
+      success: boolean
+      data?: KnowledgeProjectStats
+      error?: string
+      cancelled?: boolean
+    }> => ipcRenderer.invoke("dashboard:knowledgeProjectStats", range, opts),
+    knowledgeRecentConstraintFiles: (opts?: {
+      upperOrgLv1?: string | string[] | null
+    }): Promise<{
+      success: boolean
+      data?: KnowledgeRecentConstraintFiles
+      error?: string
+      cancelled?: boolean
+    }> => ipcRenderer.invoke("dashboard:knowledgeRecentConstraintFiles", opts),
     knowledgeCommitRate: (
       range: { from: string; to: string },
       opts?: { upperOrgLv1?: string | string[] | null }
@@ -3994,7 +4020,7 @@ const api = {
       ipcRenderer.invoke("dashboard:knowledgeCommitRate", range, opts),
     efficiency: (
       range: { from: string; to: string },
-      opts?: { upperOrgLv1?: string | string[] | null }
+      opts?: { upperOrgLv1?: string | string[] | null } & EfficiencyPluginFilter
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:efficiency", range, opts),
     projectMetricGroupOptions: (
@@ -4037,9 +4063,11 @@ const api = {
       }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:projectModeExportData", range, opts),
+    projectCodeTrace: (input: ProjectCodeTraceRequest) =>
+      ipcRenderer.invoke("dashboard:projectCodeTrace", input),
     projectModeTraces: (
       projectId: string,
-      range: { from: string; to: string },
+      range: { from: string; to: string } | null,
       options?: {
         limit?: number
         page?: number
@@ -4058,19 +4086,20 @@ const api = {
     projectModeFeatureNodes: (
       projectId: string,
       featureSlug: string,
-      range: { from: string; to: string }
+      range: { from: string; to: string } | null,
+      opts?: { upperOrgLv1?: string | string[] | null }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
-      ipcRenderer.invoke("dashboard:projectModeFeatureNodes", projectId, featureSlug, range),
+      ipcRenderer.invoke("dashboard:projectModeFeatureNodes", projectId, featureSlug, range, opts),
     projectModeOperationalDetails: (
       scope: { projectId: string; featureSlug?: string; nodeName?: string },
-      range: { from: string; to: string },
+      range: { from: string; to: string } | null,
       opts?: { upperOrgLv1?: string | string[] | null }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:projectModeOperationalDetails", scope, range, opts),
     projectModeStageAnalysis: (
       projectId: string,
-      range: { from: string; to: string },
-      opts?: { upperOrgLv1?: string | string[] | null }
+      range: { from: string; to: string } | null,
+      opts?: { upperOrgLv1?: string | string[] | null; featureSlug?: string }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:projectModeStageAnalysis", projectId, range, opts),
     pluginAggregate: (
@@ -4081,7 +4110,7 @@ const api = {
     projectModeFeatureCommits: (
       projectId: string,
       featureSlug: string,
-      range: { from: string; to: string },
+      range: { from: string; to: string } | null,
       options?: {
         page?: number
         pageSize?: number
@@ -4100,7 +4129,7 @@ const api = {
       ),
     projectModeProjectCommits: (
       projectId: string,
-      range: { from: string; to: string },
+      range: { from: string; to: string } | null,
       options?: {
         page?: number
         pageSize?: number
@@ -4303,6 +4332,7 @@ const api = {
       options?:
         | number
         | {
+            projectMode?: boolean
             page?: number
             pageSize?: number
             limit?: number
@@ -4344,11 +4374,14 @@ const api = {
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:commitAdoptionEvents", commitSha),
     exportSkillTraces: (payload: {
+      projectMode?: boolean
       skill: string
       range: { from: string; to: string }
       page: number
       pageSize: number
       totalTraces: number
+      viewMode?: "thread" | "trace"
+      triggerScope?: "active" | "all"
       traces: unknown[]
     }): Promise<{ success: boolean; canceled?: boolean; filePath?: string; error?: string }> =>
       ipcRenderer.invoke("dashboard:exportSkillTraces", payload),
@@ -4445,6 +4478,11 @@ const api = {
       ) as Promise<HarnessKnowledgePreviewResult>,
     cancelKnowledgePreviewRequests: (): Promise<void> =>
       ipcRenderer.invoke("harnessBoard:cancelKnowledgePreviewRequests") as Promise<void>,
+    selectProjectDirectory: (): Promise<{
+      workspacePath: string
+      projectDir: string
+      validationError: string | null
+    } | null> => ipcRenderer.invoke("harnessBoard:selectProjectDirectory"),
     createProject: (input: HarnessProjectCreateInput): Promise<HarnessProjectMetadata> =>
       ipcRenderer.invoke("harnessBoard:createProject", input) as Promise<HarnessProjectMetadata>,
     searchEnterpriseProjects: (
@@ -4520,6 +4558,27 @@ const api = {
         "harnessBoard:ensureFeatureThreadImGrant",
         input
       ) as Promise<HarnessFeatureThreadGrantResult>,
+    getActiveManagedRunSchedules: (): Promise<ManagedRunSchedule[]> =>
+      ipcRenderer.invoke("harnessBoard:getActiveManagedRunSchedules"),
+    getManagedRunSchedule: (
+      projectId: string,
+      featureId: string
+    ): Promise<ManagedRunSchedule | null> =>
+      ipcRenderer.invoke("harnessBoard:getManagedRunSchedule", projectId, featureId),
+    scheduleManagedRun: (input: ManagedRunScheduleInput): Promise<ManagedRunSchedule> =>
+      ipcRenderer.invoke("harnessBoard:scheduleManagedRun", input),
+    cancelManagedRunSchedule: (input: ManagedRunScheduleIdentity): Promise<void> =>
+      ipcRenderer.invoke("harnessBoard:cancelManagedRunSchedule", input),
+    updateManagedRunSchedule: (input: ManagedRunScheduleUpdateInput): Promise<void> =>
+      ipcRenderer.invoke("harnessBoard:updateManagedRunSchedule", input),
+    onManagedRunScheduleChanged: (
+      callback: (event: ManagedRunScheduleChange) => void
+    ): (() => void) => {
+      const handler = (_event: unknown, payload: ManagedRunScheduleChange): void =>
+        callback(payload)
+      ipcRenderer.on("harnessBoard:managedRunScheduleChanged", handler)
+      return () => ipcRenderer.removeListener("harnessBoard:managedRunScheduleChanged", handler)
+    },
     validateManagedRunStart: (input: ManagedRunStartValidationInput): Promise<void> =>
       ipcRenderer.invoke("harnessBoard:validateManagedRunStart", input) as Promise<void>,
     startManagedRun: (input: ManagedRunStartInput): Promise<ManagedRunSummary> =>
@@ -4604,6 +4663,8 @@ const api = {
         "harnessBoard:getManagedRunEvents",
         input
       ) as Promise<ManagedRunEventsPage>,
+    getManagedRuns: (projectId: string, featureId: string): Promise<ManagedRunSummary[]> =>
+      ipcRenderer.invoke("harnessBoard:getManagedRuns", projectId, featureId),
     getLatestManagedRun: (
       projectId: string,
       featureId: string

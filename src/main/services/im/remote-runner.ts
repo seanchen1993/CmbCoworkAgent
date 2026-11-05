@@ -1,3 +1,4 @@
+import { clearTurnCompletionGateState } from "../../agent/turn-completion-integrity"
 import {
   COORDINATOR_NOTIFICATION_RECEIPTS_KEY,
   coordinatorNotificationReceipt,
@@ -5,12 +6,6 @@ import {
 } from "../../agent/coordinator-notification-delivery"
 import { HumanMessage } from "@langchain/core/messages"
 import { randomUUID } from "node:crypto"
-import { FunctionTurnRun } from "../../mods/v2/turn-run"
-import {
-  assertNoTurnModelRefusal,
-  clearTurnCompletionGateState,
-  readTurnCompletionGateReport
-} from "../../agent/turn-completion-integrity"
 import { getAgentGraphRecursionLimit } from "../../../shared/agent-runtime-limits"
 import {
   closeCheckpointer,
@@ -83,9 +78,9 @@ import {
   type ImGatewayClientPort
 } from "./gateway-client"
 import {
+  buildImReplyContinuationHint,
   imProjectModeReplyPrefix,
-  imTargetReplyPrefix,
-  SWITCHED_TARGET_MARK
+  imTargetReplyPrefix
 } from "./reply-context"
 import { buildImEventReplies, buildImProactiveReplies, eventShortCode } from "./reply-segmentation"
 import {
@@ -93,6 +88,7 @@ import {
   type ImProjectModeReplyContext
 } from "./project-reply-context"
 import { projectThreadAliasParts } from "./thread-alias"
+import { prepareImSessionLink } from "./session-link-store"
 import {
   imRemoteInteractionRouteRegistry,
   type ImRemoteInteractionRouteRegistry
@@ -358,7 +354,7 @@ export async function executePreparedRemoteStandardTurn(
     runOwner,
     source,
     routingTaskSource,
-    signal: parentSignal,
+    signal,
     remotePolicy,
     interactionWaitHooks,
     explicitSkill,
@@ -374,8 +370,6 @@ export async function executePreparedRemoteStandardTurn(
     onDetachedResultAvailable
   } = input
   const coordinatorNotificationWrites = createCoordinatorNotificationWriteTracker()
-  const localAbortController = new AbortController()
-  const signal = AbortSignal.any([parentSignal, localAbortController.signal])
   const agentMode = requestedAgentMode ?? getAgentModeFromMetadata(metadata)
   const channel = `scheduler:stream:${threadId}`
   const hookScope = createPersistentThreadHookScope(threadId)
@@ -458,16 +452,6 @@ export async function executePreparedRemoteStandardTurn(
   let agent: DeepAgent | null = null
   let completionSucceeded = false
   let terminalError: unknown = null
-  const functionTurn = new FunctionTurnRun({
-    workspace: workspacePath,
-    threadId,
-    runId,
-    turnId: userMessageId,
-    text: rawMessage,
-    owner: runOwner,
-    signal,
-    cancel: () => localAbortController.abort()
-  })
   updateThread(threadId, { status: "busy" })
   notifyRemoteThreadChanged()
   mirrorStandardTurnStreamToRenderer(threadId, { type: "started" })
@@ -481,7 +465,7 @@ export async function executePreparedRemoteStandardTurn(
     threadId,
     (streamEvent) => mirrorStandardTurnStreamToRenderer(threadId, streamEvent),
     tracer,
-    { attribution, onStreamChunk: (mode, payload) => functionTurn.observeStream(mode, payload) }
+    { attribution }
   )
 
   try {
@@ -563,7 +547,6 @@ export async function executePreparedRemoteStandardTurn(
       const modelId = candidates[index]
       try {
         agent = await runtimeFactory.create(modelId)
-        await functionTurn.start()
         if (modelId) {
           tracer.setModelId(modelId)
           // Fallback name until the API reports its own: config.model is the
@@ -599,7 +582,6 @@ export async function executePreparedRemoteStandardTurn(
           }
         )
         await streamConsumer.consume(stream, signal)
-        signal.throwIfAborted()
         lastError = undefined
         break
       } catch (error) {
@@ -611,13 +593,11 @@ export async function executePreparedRemoteStandardTurn(
     }
     if (lastError) throw lastError
     if (!agent) throw new Error("No IM runtime could be created")
-    assertNoTurnModelRefusal(threadId, runId)
 
     let revision = 0
     const completion = internalNotificationTurn
       ? "passed"
       : await runCompletionHooksWithRevision({
-          hasTerminalModelRefusal: () => !!readTurnCompletionGateReport(threadId, runId)?.refusal,
           threadId,
           workspacePath,
           turnId: userMessageId,
@@ -673,7 +653,6 @@ export async function executePreparedRemoteStandardTurn(
     }
 
     await streamConsumer.flush()
-    assertNoTurnModelRefusal(threadId, runId)
     const finalText = streamConsumer.getFinalAssistantText().trim() || "处理完成。"
     attribution.sync()
     await tracer.finish("success")
@@ -685,7 +664,6 @@ export async function executePreparedRemoteStandardTurn(
         snapshot
       }).catch((error) => console.warn("[IM] Auto-commit finalize failed:", error))
     }
-    signal.throwIfAborted()
     completionSucceeded = true
     return finalText
   } catch (error) {
@@ -699,7 +677,6 @@ export async function executePreparedRemoteStandardTurn(
     throw error
   } finally {
     await coordinatorNotificationWrites.settle()
-    functionTurn.finish(completionSucceeded ? "answer" : "error")
     clearTurnCompletionGateState(threadId, runId)
     if (!completionSucceeded) discardAgentAutoCommitTracking(threadId)
     releasePin()
@@ -1411,63 +1388,63 @@ export class ImRemoteRunner {
     return Boolean(title?.startsWith("Thread ") || / · 远程会话 \d+$/u.test(title ?? ""))
   }
 
-  /**
-   * Prefix for a turn's LAST reply, with the way back when it is not the
-   * session the person is currently bound to.
-   *
-   * The mark alone says the target is not the bound one, but not what that
-   * typed under this message goes to whatever is bound now, not to the session
-   * that produced it. The name is the one already printed in the prefix, and
-   * /切换 takes exactly that, so the instruction needs nothing the reader has
-   * to look up. Numbers are deliberately not offered — /会话 numbering expires
-   * in five minutes and is rebuilt by every /会话, so a number printed here
-   * would be stale or point somewhere else by the time it is read.
-   *
-   * Only the terminal reply carries it. Mid-turn notices (waiting for
-   * approval, asking a question) are already long, and the turn is not over.
-   */
+  /** Only final replies need switch-back instructions; pending gates have their own actions. */
   private terminalPrefixForEvent(
     event: ImEventRecord,
     projectContext?: ImProjectModeReplyContext | null
   ): string | undefined {
-    const prefix = this.targetPrefixForEvent(event, projectContext)
-    if (!prefix || !prefix.includes(SWITCHED_TARGET_MARK)) return prefix
-    const snapshot = event.targetSnapshot
-    if (!snapshot || snapshot.kind !== "thread") return prefix
-    // A deleted Thread cannot be switched back to; say nothing rather than
-    // point at it. A revoked grant still reaches /切换, which explains itself.
-    const thread = this.dependencies.getThread(snapshot.threadId)
-    if (!thread) return prefix
-    if (projectThreadAliasParts(thread)) {
-      return [prefix, "回复不会发到这个会话。要继续它，请发送 /会话 后选择。"].join("\n")
-    }
-    const name = (thread.title?.trim() || snapshot.title || "").trim()
-    if (!name) return prefix
-    return [prefix, `回复不会发到这个会话。要继续它，请发送 /切换 ${name}`].join("\n")
+    return this.targetPrefixForEvent(event, projectContext, true)
   }
 
   private targetPrefixForEvent(
     event: ImEventRecord,
-    projectContext?: ImProjectModeReplyContext | null
+    projectContext?: ImProjectModeReplyContext | null,
+    includeContinuationHint = false
   ): string | undefined {
     const snapshot = event.targetSnapshot
     if (!snapshot) return undefined
+    const thread =
+      snapshot.kind === "thread" ? this.dependencies.getThread(snapshot.threadId) : null
     const threadTitle =
-      snapshot.kind === "thread"
-        ? this.dependencies.getThread(snapshot.threadId)?.title?.trim() || snapshot.title
-        : undefined
+      snapshot.kind === "thread" ? thread?.title?.trim() || snapshot.title : undefined
     try {
       // getSelectedTarget 而不是 getActiveTarget:后者在目标不是 active 时抛异常，下面的
       // catch 会把整个 switched 判断丢掉，于是绑定的授权一失效就不再标注——最该标注的
       // 时候反而没有。绑定关系和它可不可用是两件事，这里要判的是身份。
       const bound = this.dependencies.conversationState.getSelectedTarget(event.conversationKey)
-      const switched = Boolean(bound && bound.snapshot.targetId !== snapshot.targetId)
+      const switched = Boolean(bound && bound.snapshot.threadId !== snapshot.threadId)
+      const sessionCode =
+        includeContinuationHint && switched && (snapshot.kind !== "thread" || thread)
+          ? prepareImSessionLink(this.dependencies.eventStore.sessionLinks, {
+              principalId: event.principalId,
+              conversationKey: event.conversationKey,
+              threadId: snapshot.threadId,
+              kind: snapshot.kind,
+              label:
+                threadTitle ||
+                (snapshot.kind === "inbox"
+                  ? "默认聊天"
+                  : projectContext?.featureName || "项目会话"),
+              deliveryId: `${event.eventId}:reply`
+            })
+          : undefined
+      const continuationHint =
+        includeContinuationHint && (snapshot.kind !== "thread" || thread)
+          ? buildImReplyContinuationHint({
+              switched,
+              kind: snapshot.kind,
+              threadTitle,
+              sessionCode,
+              requiresSelection: !sessionCode || Boolean(thread && projectThreadAliasParts(thread))
+            })
+          : undefined
       if (projectContext) {
-        return imProjectModeReplyPrefix({ ...projectContext, switched })
+        return imProjectModeReplyPrefix({ ...projectContext, switched, continuationHint })
       }
       return imTargetReplyPrefix(snapshot, {
         switched,
-        threadTitle
+        threadTitle,
+        continuationHint
       })
     } catch {
       if (projectContext) return imProjectModeReplyPrefix(projectContext)

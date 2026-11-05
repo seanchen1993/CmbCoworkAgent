@@ -15,6 +15,9 @@
  */
 
 import assert from "node:assert/strict"
+import { AIMessage, AIMessageChunk, HumanMessage, ToolMessage } from "@langchain/core/messages"
+import { resolveDiscardedLiveMessageIds } from "../src/renderer/src/lib/message-discard-identities"
+import type { LiveStreamMessage } from "../src/renderer/src/lib/live-stream-messages"
 import {
   announceManagedTurnUserMessage,
   createManagedTransportAgentRunDelivery,
@@ -101,6 +104,76 @@ function testErrorDetailsBelongToTheirOwnManagedRun(): void {
   delivery.send("agent:stream:t1", { type: "done" })
   delivery.send("agent:stream:t1", { type: "error", error: "later error" })
   assert.deepEqual(mirrored.at(-1)?.event, { type: "error", error: "later error" })
+}
+
+function testRetryResetNormalizesCheckpointAndClearsFailedToolArguments(): void {
+  const { mirrored, deps } = recorder()
+  const delivery = createManagedTransportAgentRunDelivery(deps)
+  const send = (payload: unknown) => delivery.send("agent:stream:t1", payload)
+  const chunk = (args: string) =>
+    send({
+      type: "stream",
+      mode: "messages",
+      data: [
+        new AIMessageChunk({
+          id: "failed",
+          content: "",
+          tool_call_chunks: [{ id: "retry-call", index: 0, name: "execute", args }]
+        }).toJSON(),
+        {}
+      ]
+    })
+  chunk('{"bad":')
+  send({
+    type: "custom",
+    data: {
+      type: "stream_retry_reset",
+      discardedMessageIds: ["failed"],
+      messages: [
+        new HumanMessage({ id: "u", content: "question" }).toJSON(),
+        new AIMessage({
+          id: "complete",
+          content: "run",
+          tool_calls: [{ id: "c", name: "execute", args: {} }]
+        }).toJSON(),
+        new ToolMessage({
+          id: "tool",
+          content: "done",
+          tool_call_id: "c",
+          status: "error"
+        }).toJSON()
+      ]
+    }
+  })
+  const reset = mirrored.at(-1)!.event
+  assert.equal(reset.type, "custom")
+  if (reset.type !== "custom") throw new Error("Missing reset")
+  const messages = reset.data.messages as LiveStreamMessage[]
+  assert.deepEqual(
+    messages.map((message) => [message.id, message.type]),
+    [
+      ["u", "human"],
+      ["complete", "ai"],
+      ["tool", "tool"]
+    ]
+  )
+  assert.deepEqual(
+    resolveDiscardedLiveMessageIds(
+      new Set(["failed"]),
+      [{ id: "failed", type: "ai", content: "partial" }],
+      messages
+    ),
+    new Set(["failed"])
+  )
+  assert.equal((messages[2] as unknown as { is_error: boolean }).is_error, true)
+  chunk('{"good":true}')
+  const resumed = mirrored.at(-1)!.event
+  assert.equal(resumed.type, "message-delta")
+  if (resumed.type === "message-delta") {
+    assert.deepEqual(resumed.toolCalls, [
+      { id: "retry-call", name: "execute", args: { good: true } }
+    ])
+  }
 }
 
 function testOnlyTheThreadWideChannelIsTranslated(): void {
@@ -301,6 +374,7 @@ async function main(): Promise<void> {
     testStreamFramesReachTheChannelTheRendererListensOn,
     testLifecycleAndCustomEventsSurviveTranslation,
     testErrorDetailsBelongToTheirOwnManagedRun,
+    testRetryResetNormalizesCheckpointAndClearsFailedToolArguments,
     testOnlyTheThreadWideChannelIsTranslated,
     testTheCoordinatorInternalChannelReachesTheThreadStream,
     testWindowShimRoutesThroughTheSameTranslation,

@@ -9,7 +9,6 @@ import {
 } from "@/components/ui/context-menu"
 import type { Message, HITLRequest, ToolCallState, ToolCallStatus } from "@/types"
 import { ToolCallRenderer } from "./ToolCallRenderer"
-import { ModCards } from "./ModCards"
 import { StreamingMarkdown } from "./StreamingMarkdown"
 import { useReasoningExpansion } from "./reasoning-expansion-context"
 import { getCollapsedToolCallSummary } from "../../../../shared/tool-call-summary"
@@ -1320,7 +1319,6 @@ function MessageBubbleImpl({
                 return (
                   <React.Fragment key={toolId}>
                     {presented}
-                    <ModCards threadId={threadId} callId={resolvedToolCall.id ?? ""} />
                   </React.Fragment>
                 )
 
@@ -1354,7 +1352,6 @@ function MessageBubbleImpl({
                         threadId={threadId}
                       />
                     )}
-                    <ModCards threadId={threadId} callId={resolvedToolCall.id ?? ""} />
                   </div>
                 )
 
@@ -1368,17 +1365,13 @@ function MessageBubbleImpl({
                     inferredStatus === "awaiting_approval")) ||
                   (foldedToolCalls.has(toolId) && result && inferredStatus === "completed"))
               )
-                return (
-                  <ModCards key={toolId} threadId={threadId} callId={resolvedToolCall.id ?? ""} />
-                )
+                return null
 
               // Bot chat has explicit product cards above; unknown tool families
               // must never fall back to the developer transcript UI. Full details
               // remain available through the existing execution-process toggle.
               if (presentation === "bot" && !showExecutionDetails)
-                return (
-                  <ModCards key={toolId} threadId={threadId} callId={resolvedToolCall.id ?? ""} />
-                )
+                return null
 
               // 工具执行完成后，显示折叠的标题
               return (
@@ -1494,7 +1487,6 @@ function MessageBubbleImpl({
                       />
                     </div>
                   )}
-                  <ModCards threadId={threadId} callId={resolvedToolCall.id ?? ""} />
                 </div>
               )
             })}

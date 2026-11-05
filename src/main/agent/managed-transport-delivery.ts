@@ -93,7 +93,13 @@ function toRendererEvents(converter: StreamConverter, payload: unknown): Schedul
     return [{ type: "error", error: String(envelope.error ?? "Agent run failed") }]
   }
   if (envelope.type === "custom") {
-    return [{ type: "custom", data: (envelope.data ?? {}) as Record<string, unknown> }]
+    const data = (envelope.data ?? {}) as Record<string, unknown>
+    return [
+      {
+        type: "custom",
+        data: data.type === "stream_retry_reset" ? converter.resetStreamAttempt(data) : data
+      }
+    ]
   }
   return []
 }

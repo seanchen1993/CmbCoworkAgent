@@ -1,5 +1,3 @@
-import { getModCallContext, modPermissionReason } from "../mods/context"
-import { hasModOperationApproval } from "../mods/manager"
 /**
  * Tool Orchestrator: approval + sandbox + retry pipeline.
  *
@@ -43,7 +41,6 @@ import {
   getGitRootForPath
 } from "../services/git-repository-discovery"
 import type { ExecuteResponse } from "deepagents"
-import type { ToolPermissionResult } from "../../shared/tool-permission"
 
 /** Raw execution function signature (no approval logic). */
 export type RawExecuteFn = (
@@ -254,73 +251,6 @@ export class ToolOrchestrator {
     private workspacePath?: string
   ) {}
 
-  /** No dialog, tool execution, cache mutation, or one-shot Mod approval is consulted here. */
-  queryFileOp(
-    operation: "write_file" | "edit_file",
-    filePath: string,
-    cwd: string
-  ): ToolPermissionResult {
-    if (this.readYoloMode() || this.autoApproveFileEdits) return { decision: "allow" }
-    const key = this.approvalStore.makeKey(`${operation}:${filePath}`, cwd, "file")
-    const hit = this.approvalStore.peekApproval(
-      key,
-      `file:${operation}:${filePath.replace(/\\/g, "/")}`
-    )
-    return hit
-      ? { decision: "allow", ...(hit.rule ? { rule: hit.rule } : {}) }
-      : { decision: "ask", reason: "FILE_APPROVAL_REQUIRED" }
-  }
-
-  queryExecute(
-    command: string,
-    cwd: string,
-    sandboxMode: string,
-    shellSyntax: CommandShellSyntax
-  ): ToolPermissionResult {
-    const safety = assessCommandSafety(command, cwd, {
-      windowsShell:
-        process.platform === "win32" && sandboxMode !== "none" ? "powershell" : "unknown",
-      nativeGitWorktree: !this.sandboxEscapeAllowed,
-      shellSyntax
-    })
-    if (safety.level === "forbidden") return { decision: "deny", reason: "COMMAND_FORBIDDEN" }
-    if (this.sandboxEscapeAllowed && isGitCommitCommand(command, shellSyntax)) {
-      if (
-        isChainedShellCommand(command, shellSyntax) ||
-        isAmendOrFixupCommit(command, shellSyntax) ||
-        hasUnsupportedGitCommitScope(command, shellSyntax) ||
-        extractGitCommitPathspecs(command, shellSyntax).length === 0
-      )
-        return { decision: "deny", reason: "GIT_COMMIT_SCOPE_UNSUPPORTED" }
-      return { decision: "ask", reason: "GIT_TASK_CARD_REQUIRED" }
-    }
-    if (!this.sandboxEscapeAllowed) {
-      if (containsIndirectGitPush(command, shellSyntax))
-        return { decision: "deny", reason: "GIT_PUSH_MUST_BE_DIRECT" }
-      if (isGitPushCommand(command, shellSyntax))
-        return isForcePushCommand(command, shellSyntax)
-          ? { decision: "deny", reason: "GIT_FORCE_PUSH_FORBIDDEN" }
-          : { decision: "ask", reason: "GIT_PUSH_APPROVAL_REQUIRED" }
-    }
-    if (this.readYoloMode()) return { decision: "allow" }
-    if (
-      this.sandboxEscapeAllowed &&
-      isGitPushCommand(command, shellSyntax) &&
-      !isForcePushCommand(command, shellSyntax) &&
-      !isChainedShellCommand(command, shellSyntax) &&
-      isPathInsideOrSame(resolveGitPushCommandCwd(command, cwd, shellSyntax), cwd)
-    )
-      return { decision: "ask", reason: "GIT_PUSH_APPROVAL_REQUIRED" }
-    if (safety.level === "safe") return { decision: "allow" }
-    const hit = this.approvalStore.peekApproval(
-      this.approvalStore.makeKey(command, cwd, sandboxMode),
-      command
-    )
-    return hit
-      ? { decision: "allow", ...(hit.rule ? { rule: hit.rule } : {}) }
-      : { decision: "ask", reason: "COMMAND_APPROVAL_REQUIRED" }
-  }
-
   /**
    * Execute a command through the full approval + sandbox pipeline.
    *
@@ -341,8 +271,7 @@ export class ToolOrchestrator {
     canRetry: () => boolean = () => true
   ): Promise<ExecuteResponse> {
     {
-      const modApproved = hasModOperationApproval("host:execute", { command, cwd })
-      const yoloMode = this.readYoloMode() || modApproved
+      const yoloMode = this.readYoloMode()
       console.log(
         `[Orchestrator] execute: "${command}" cwd=${cwd} sandbox=${sandboxMode} yolo=${yoloMode}`
       )
@@ -443,9 +372,7 @@ export class ToolOrchestrator {
           operation: "execute",
           command,
           cwd,
-          reason: modPermissionReason(
-            "Push the assigned isolated workflow branch to its matching remote branch?"
-          ),
+          reason: "Push the assigned isolated workflow branch to its matching remote branch?",
           allowed_decisions: ["approve", "reject"],
           allowed_approval_types: ["approve", "reject"]
         })
@@ -512,7 +439,7 @@ export class ToolOrchestrator {
             operation: "execute",
             command,
             cwd,
-            reason: modPermissionReason(safety.reason),
+            reason: safety.reason,
             allowed_decisions: ["approve", "reject"],
             // Always offer permanent approval — for known executables it uses prefix match,
             // for unknown executables it uses exact match (still useful for repeated commands).
@@ -690,7 +617,7 @@ export class ToolOrchestrator {
       suggestedGitWorktreePath: operationTarget,
       suggestedGitRepositories,
       suggestedCommitFileSelectionSource: "pathspec",
-      reason: modPermissionReason("Git 提交需要选择任务卡片并确认"),
+      reason: "Git 提交需要选择任务卡片并确认",
       allowed_decisions: ["approve", "reject"],
       allowed_approval_types: ["approve", "reject"]
     })
@@ -753,9 +680,7 @@ export class ToolOrchestrator {
       command,
       cwd,
       suggestedGitWorktreePath: gitCommandCwd,
-      reason: modPermissionReason(
-        "Git 推送将通过 Git 面板的推送机制执行（push -u origin <当前分支>）"
-      ),
+      reason: "Git 推送将通过 Git 面板的推送机制执行（push -u origin <当前分支>）",
       allowed_decisions: ["approve", "reject"],
       allowed_approval_types: ["approve", "reject"]
     })
@@ -797,7 +722,6 @@ export class ToolOrchestrator {
     outsideShellSyntax: CommandShellSyntax = process.platform === "win32" ? "powershell" : "posix"
   ): Promise<ExecuteResponse> {
     if (sandboxMode === "none") return result
-    if (getModCallContext()) return result
     if (!this.sandboxEscapeAllowed) return result
     // Single Codex-style bypass check — covers piped-spawn EPERM, git .git writes,
     // dubious ownership, ssh auth, generic EACCES/Access-is-denied/拒绝访问, etc.
@@ -890,7 +814,6 @@ export class ToolOrchestrator {
     cwd: string
   ): Promise<boolean> {
     {
-      if (hasModOperationApproval(`host:${operation}`, { filePath })) return true
       if (this.readYoloMode() || this.autoApproveFileEdits) return true
 
       const key = this.approvalStore.makeKey(`${operation}:${filePath}`, cwd, "file")
@@ -911,9 +834,7 @@ export class ToolOrchestrator {
             operation,
             filePath,
             cwd,
-            reason: modPermissionReason(
-              operation === "write_file" ? "文件写入操作需要审批" : "文件编辑操作需要审批"
-            ),
+            reason: operation === "write_file" ? "文件写入操作需要审批" : "文件编辑操作需要审批",
             allowed_decisions: ["approve", "reject"],
             allowed_approval_types: ["approve", "approve_session", "approve_permanent", "reject"]
           })

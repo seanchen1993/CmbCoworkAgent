@@ -1,6 +1,6 @@
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { dirname, join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import {
   getHarnessStoreQueueSizeForTests,
@@ -9,6 +9,7 @@ import {
   withHarnessStoreMutation,
   writeHarnessJsonFileAtomic
 } from "./async-json-store"
+import { protectMarketDirectory } from "../services/market-content"
 
 const directories: string[] = []
 
@@ -23,6 +24,18 @@ async function makeStorePath(): Promise<string> {
 }
 
 describe("Harness async JSON store", () => {
+  it("keeps decoded byte limits when reading protected plugin configuration", async () => {
+    const path = await makeStorePath()
+    await writeFile(path, JSON.stringify({ value: "x".repeat(900) }))
+    protectMarketDirectory(dirname(path))
+    await expect(readHarnessJsonFileBounded(path, 1024, "market config")).resolves.toMatchObject({
+      value: "x".repeat(900)
+    })
+    await expect(readHarnessJsonFileBounded(path, 910, "market config")).rejects.toBeInstanceOf(
+      HarnessStoreLimitError
+    )
+  })
+
   it("rejects a giant file from asynchronous metadata without allocating or parsing it", async () => {
     const path = await makeStorePath()
     await writeFile(path, Buffer.alloc(8 * 1024 * 1024, 0x20))

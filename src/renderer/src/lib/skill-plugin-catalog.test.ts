@@ -15,6 +15,11 @@ afterEach(() => {
 
 describe("renderer skill/plugin catalog pagination", () => {
   it("reads only one Worker row for collapsed header summaries", async () => {
+    const migration = vi.fn(() => {
+      throw new Error("Existing installations must not be migrated")
+    })
+    const getItem = vi.fn(() => JSON.stringify({ skill: { "legacy-market": {} } }))
+    vi.stubGlobal("localStorage", { getItem })
     const read = vi.fn(
       async (
         input: {
@@ -48,7 +53,12 @@ describe("renderer skill/plugin catalog pagination", () => {
       }
     )
     vi.stubGlobal("window", {
-      api: { skills: { catalog: { read, cancel: vi.fn(async () => undefined) } } }
+      api: {
+        skills: {
+          protectMarketInstalls: migration,
+          catalog: { read, cancel: vi.fn(async () => undefined) }
+        }
+      }
     })
 
     await expect(loadSkillCatalogSummary("revision", "summary")).resolves.toEqual({
@@ -66,6 +76,8 @@ describe("renderer skill/plugin catalog pagination", () => {
       ["skills", 1, "summary:skills"],
       ["plugins", 1, "summary:plugins"]
     ])
+    expect(migration).not.toHaveBeenCalled()
+    expect(getItem).not.toHaveBeenCalled()
   })
 
   it("accumulates 20k entries through bounded context-bridge pages", async () => {

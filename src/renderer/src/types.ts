@@ -59,8 +59,12 @@ export interface ModelConfig {
   model: string
   description?: string
   available: boolean
+  /** Selection is separate from whether a request can be sent right now. */
+  selectable?: boolean
   source: ProviderId
-  origin?: "remote" | "fallback"
+  origin?: "remote" | "fallback" | "local"
+  notice?: string
+  unavailableReason?: string
   maxTokens?: number
   /** Routing tier — absent means premium */
   tier?: "premium" | "economy"
@@ -368,6 +372,8 @@ export interface QueuedMessage {
   attachmentModelBlocks?: string
   attachmentDisplayPrefix?: string
   skillBlock?: string
+  skillName?: string
+  skillDescription?: string
   builtinBrowser?: boolean
   modelId?: string
   /** Explicit link/unlink parks old drafts across remount/restart. */
@@ -516,6 +522,7 @@ export interface GrepMatch {
 }
 
 export interface SkillMetadata {
+  contentOrigin?: "local" | "market" | "builtin"
   id?: string
   name: string
   description: string

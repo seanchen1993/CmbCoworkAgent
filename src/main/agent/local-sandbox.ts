@@ -1,8 +1,11 @@
-import { attachModBackend, protectCurrentModData, publishCurrentModResult } from "../mods/adapters"
-import { authorizeCurrentModInput } from "../mods/manager"
-import { getModCallContext } from "../mods/context"
-import type { ModRuntimeAuthority } from "../mods/runtime-instance"
-import { currentFunctionExecution } from "../mods/v2/execution-context"
+import {
+  decodeMarketContent,
+  findProtectedMarketRoot,
+  prepareMarketCommand,
+  resolveMarketRuntimePath,
+  MARKET_CONTENT_DENIED
+} from "../services/market-content"
+import { getCustomSkillsDir, getPlugins } from "../storage"
 /**
  * LocalSandbox: Execute shell commands locally on the host machine.
  *
@@ -37,6 +40,7 @@ import {
   type GrepMatch,
   type FileInfo,
   type FileUploadResponse,
+  type FileDownloadResponse,
   type FileOperationError
 } from "deepagents"
 import fg from "fast-glob"
@@ -48,6 +52,7 @@ import {
   renderPluginSkillMarkdownPlaceholders
 } from "./markdown-placeholders"
 import { replace } from "./replace"
+import { withFileOperation, withWorkspaceExecution } from "./file-operation-lock"
 import type { ToolOrchestrator } from "./tool-orchestrator"
 import {
   assessCommandSafety,
@@ -128,10 +133,8 @@ import {
   trimReadFileOutputLines
 } from "./read-file-output"
 import { resolveWindowsBackgroundJobControllerPath } from "./windows-background-job-controller-path"
-import type { ToolPermissionResult } from "../../shared/tool-permission"
 
 const execFileP = promisify(execFile)
-const permissionProbe = Symbol("permission-probe")
 
 // DeepAgents keeps these helpers private even though LocalSandbox must wrap
 // them to preserve its virtual-path and ripgrep behavior. Keep the compatibility
@@ -355,16 +358,6 @@ export interface LocalSandboxOptions {
   backgroundCommandLifecycle?: import("./background-command-lifecycle").BackgroundCommandLifecycle
   /** Foreground handoff only; explicit background commands retain their existing policy. */
   foregroundCommandLifecycle?: import("./background-command-lifecycle").BackgroundCommandLifecycle
-  /** Host grant/policy realm; file operations still use rootDir. */
-  modWorkspace?: string
-  /** Runtime capabilities must also constrain SDK calls that bypass model middleware. */
-  modBlockedToolNames?: ReadonlySet<string>
-  modDelegatedBlockedToolNames?: ReadonlySet<string>
-  modReadOnly?: boolean
-  modRuntimeAuthority?: ModRuntimeAuthority
-  /** Host-created command-only context; a model turn replaces it with its own full runtime. */
-  modCommandOnly?: boolean
-  onModBinding?: (release: () => void) => void
   /** Root directory for file operations and command execution (default: process.cwd()) */
   rootDir?: string
   /** Dynamic-workflow checkout identity and best-effort Git/path guards. */
@@ -766,8 +759,6 @@ export class LocalSandbox
   private readonly _virtualMode: boolean
   private readonly _cwd: string
   private readonly _maxFileSizeBytes: number
-  /** Per-file Promise chain lock to serialize concurrent read-write operations */
-  private readonly _fileLocks = new Map<string, Promise<void>>()
   /** mtime recorded after each successful read/write, for external-modification detection */
   private readonly _fileReadTimes = new Map<string, number>()
   private readonly _onFileMutation?: (filePath: string, kind: AgentFileMutationKind) => void
@@ -1992,7 +1983,7 @@ export class LocalSandbox
     return LocalSandbox.isPythonCliTool(command)
   }
 
-  constructor(options: LocalSandboxOptions = {}, mode?: typeof permissionProbe) {
+  constructor(options: LocalSandboxOptions = {}) {
     super({
       rootDir: options.rootDir,
       virtualMode: options.virtualMode,
@@ -2029,7 +2020,7 @@ export class LocalSandbox
     if (systemId) baseEnv.SYSTEM_ID = systemId
     const agentId = options.agentId?.trim()
     const pluginRoot = options.pluginRoot?.trim()
-    if (pluginRoot) baseEnv.PLUGIN_ROOT = pluginRoot
+    if (pluginRoot) baseEnv.PLUGIN_ROOT = resolveMarketRuntimePath(pluginRoot)
     const pluginId = options.pluginId?.trim()
     if (pluginId) baseEnv.PLUGIN_ID = pluginId
     const pluginName = options.pluginName?.trim()
@@ -2114,13 +2105,13 @@ export class LocalSandbox
       baseEnv,
       path.resolve(this.workingDir)
     )
-    this._sandboxCacheRootPromise =
-      mode === permissionProbe
-        ? Promise.resolve(this._sandboxCacheRoot)
-        : LocalSandbox.buildSandboxCacheRoot(baseEnv, this.workingDir).catch((err) => {
-            console.warn("[LocalSandbox] failed to canonicalize sandbox cache root:", err)
-            return this._sandboxCacheRoot
-          })
+    this._sandboxCacheRootPromise = LocalSandbox.buildSandboxCacheRoot(
+      baseEnv,
+      this.workingDir
+    ).catch((err) => {
+      console.warn("[LocalSandbox] failed to canonicalize sandbox cache root:", err)
+      return this._sandboxCacheRoot
+    })
     this._sharedSandboxCacheRoot = LocalSandbox.buildSharedSandboxCacheRoot(baseEnv)
     this.abortSignal = options.abortSignal
     this.backgroundCommandLifecycle = options.backgroundCommandLifecycle
@@ -2128,8 +2119,7 @@ export class LocalSandbox
 
     // Prewarm sandbox state during construction so command execution avoids
     // kicking off expensive setup work on the hot path.
-    if (mode !== permissionProbe)
-      LocalSandbox.prewarmForWorkspace(this.workingDir, this.windowsSandbox, baseEnv)
+    LocalSandbox.prewarmForWorkspace(this.workingDir, this.windowsSandbox, baseEnv)
 
     // Redirect deepagents' virtual eviction paths (e.g. /large_tool_results/)
     // to app-managed storage, since virtualMode=false treats "/" as absolute
@@ -2143,133 +2133,6 @@ export class LocalSandbox
     this._virtualMode = this.virtualMode
     this._cwd = this.cwd
     this._maxFileSizeBytes = (options.maxFileSizeMb ?? 10) * 1024 * 1024
-    if (mode !== permissionProbe) {
-      const owner = {
-        commandOnly: options.modCommandOnly,
-        workspace: options.modWorkspace ?? this.workingDir,
-        executionWorkspace: this.workingDir,
-        blockedToolNames: options.modBlockedToolNames,
-        delegatedBlockedToolNames: options.modDelegatedBlockedToolNames,
-        threadId: this.runId,
-        turnId: this._hookTurnId ?? this.runId,
-        agentId: this.agentId,
-        signal: this.abortSignal,
-        activePluginIds: this._hookScope?.activePluginIds
-      }
-      const runtimeAuthority = options.modRuntimeAuthority
-      const binding = () => {
-        const call = getModCallContext(),
-          execution = currentFunctionExecution()
-        return {
-          ...owner,
-          runtimeAuthority: call
-            ? call.runtimeAuthority
-            : execution
-              ? execution.runtimeAuthority
-              : runtimeAuthority,
-          agentId: call?.identity.agentId ?? execution?.agentId ?? owner.agentId,
-          turnId: call?.identity.turnId ?? execution?.turnId ?? owner.turnId,
-          readOnly:
-            options.modReadOnly === true ||
-            this.readOnlyShellEnforced ||
-            readOnlyShellExecutionContext.getStore() === true
-        }
-      }
-      const release = attachModBackend(this, binding, {
-        ...owner,
-        runtimeAuthority,
-        readOnly: options.modReadOnly === true || this.readOnlyShellEnforced
-      })
-      options.onModBinding?.(release)
-    }
-  }
-
-  /** The probe exposes only a query closure: no setup, hooks, ACLs, adapter binding or tools. */
-  static createPermissionProbe(
-    options: LocalSandboxOptions
-  ): (tool: string, input: Record<string, unknown>) => Promise<ToolPermissionResult> {
-    const sandbox = new LocalSandbox(options, permissionProbe)
-    return (tool, input) => sandbox.queryToolPermission(tool, input)
-  }
-
-  /** Inspect the same sandbox/path/command predicates used below, without running a tool. */
-  async queryToolPermission(
-    tool: string,
-    input: Record<string, unknown>
-  ): Promise<ToolPermissionResult> {
-    this.abortSignal?.throwIfAborted()
-    const deny = (reason: string): ToolPermissionResult => ({ decision: "deny", reason })
-    const readOnly = this.readOnlyShellEnforced || readOnlyShellExecutionContext.getStore() === true
-    if (tool === "execute") {
-      if (typeof input.command !== "string" || !input.command.trim())
-        return deny("COMMAND_ARGUMENTS_INVALID")
-      if (input.cwd !== undefined && typeof input.cwd !== "string")
-        return deny("COMMAND_ARGUMENTS_INVALID")
-      const cwd = this.resolveExecutionCwd(input.cwd as string | undefined)
-      if (this.validateExecutionCwd(cwd)) return deny("COMMAND_CWD_DENIED")
-      const syntax = await LocalSandbox.resolveCommandShellSyntax(this.windowsSandbox)
-      this.abortSignal?.throwIfAborted()
-      if (
-        this.worktreeIsolation &&
-        getWorktreeShellIsolationViolation(
-          input.command,
-          cwd,
-          this.worktreeIsolation,
-          this.worktreeAdditionalExecutionRoots(cwd),
-          syntax
-        )
-      )
-        return deny("WORKTREE_COMMAND_DENIED")
-      const windowsShell =
-        process.platform === "win32" && this.windowsSandbox !== "none" ? "powershell" : "unknown"
-      const safety = assessCommandSafety(input.command, cwd, {
-        windowsShell,
-        enforceGitWorkflowCommitOnly: this.enforceGitWorkflowCommitOnly,
-        nativeGitWorktree: Boolean(this.worktreeIsolation),
-        shellSyntax: syntax
-      })
-      if (safety.level === "forbidden") return deny("COMMAND_FORBIDDEN")
-      if (readOnly && !isReadOnlyShellCommand(input.command, cwd, windowsShell))
-        return deny("READ_ONLY_COMMAND_DENIED")
-      if (readOnly && this.commandReadsSensitivePath(input.command, cwd))
-        return deny("SENSITIVE_PATH_DENIED")
-      return (
-        this.orchestrator?.queryExecute(input.command, cwd, this.windowsSandbox, syntax) ?? {
-          decision: "allow"
-        }
-      )
-    }
-    if (tool === "task_output") {
-      const task =
-        typeof input.task_id === "string"
-          ? LocalSandbox.backgroundTasks.get(input.task_id)
-          : undefined
-      const context = getModCallContext()
-      return task?.threadId === this.runId &&
-        (!context || !task.modAgentId || context.identity.agentId === task.modAgentId)
-        ? { decision: "allow" }
-        : deny("TASK_CONTEXT_UNAVAILABLE")
-    }
-    const write = tool === "write_file" || tool === "edit_file"
-    const file = write || tool === "read_file"
-    if (!file && !["ls", "glob", "grep"].includes(tool)) return deny("TOOL_UNAVAILABLE")
-    const requested = file ? (input.file_path ?? input.filePath) : (input.path ?? ".")
-    if (typeof requested !== "string" || !requested) return deny("FILE_ARGUMENTS_INVALID")
-    const target = tool === "ls" && requested === "/" ? "." : requested
-    try {
-      this._resolvePath(target)
-    } catch {
-      return deny("FILE_PATH_DENIED")
-    }
-    if (this.isBlockedBySandbox(target)) return deny("SANDBOX_PATH_DENIED")
-    if (this.isHiddenSkillPath(target)) return deny("DISABLED_SKILL_PATH")
-    if (!write) return { decision: "allow" }
-    if (readOnly) return deny("READ_ONLY_FILE_DENIED")
-    if (this.isMemoryStorageWritePath(target)) return deny("MANAGED_MEMORY_WRITE_DENIED")
-    if (await this.isWorktreeFileWriteBlocked(target)) return deny("WORKTREE_FILE_DENIED")
-    if (await this.isWriteBlocked(target)) return deny("SANDBOX_FILE_WRITE_DENIED")
-    this.abortSignal?.throwIfAborted()
-    return this.orchestrator?.queryFileOp(tool, target, this.workingDir) ?? { decision: "allow" }
   }
 
   /**
@@ -3013,11 +2876,9 @@ export class LocalSandbox
   }
 
   private async runHooks(event: HookEvent, context: HookContext): Promise<HookResult | null> {
-    if (event !== "PreToolUse" && context.toolResult !== undefined) {
-      context = { ...context, toolResult: await publishCurrentModResult(context.toolResult) }
-    }
     const hookContext: HookContext = {
       ...context,
+      abortSignal: this.abortSignal,
       ...(this.pluginOutputDir && !context.pluginOutputDir
         ? { pluginOutputDir: this.pluginOutputDir }
         : {}),
@@ -3187,12 +3048,6 @@ export class LocalSandbox
     }
     const preResult = await this.runHooks("PreToolUse", context)
     throwIfHookHalt("PreToolUse", preResult, `${toolName} was stopped by a PreToolUse hook`)
-    if (toolName !== "execute" && !preResult?.blocked && preResult?.decision !== "block") {
-      await authorizeCurrentModInput(
-        `host:${toolName}`,
-        LocalSandbox.mergeUpdatedInput(toolArgs, preResult?.updatedInput)
-      )
-    }
     return preResult
   }
 
@@ -3217,7 +3072,7 @@ export class LocalSandbox
     })
     throwIfHookHalt("PostToolUse", postResult, `${toolName} was stopped by a PostToolUse hook`)
     const feedback = LocalSandbox.formatPostHookTextFeedback(postResult)
-    return publishCurrentModResult(feedback ? `${toolResult}\n\n${feedback}` : toolResult)
+    return feedback ? `${toolResult}\n\n${feedback}` : toolResult
   }
 
   private getSkillHookKey(skill: SkillLifecycleMatch): string {
@@ -3357,145 +3212,158 @@ export class LocalSandbox
       return []
     }
 
-    // Resolve the base path once for reuse
-    let baseFull: string
-    try {
-      baseFull = this._resolvePath(effectivePath === "/" ? "." : effectivePath || ".")
-    } catch {
-      return []
-    }
-    // Early exit if path doesn't exist; cache stat for reuse below
-    let baseStat: Awaited<ReturnType<typeof fs.lstat>>
-    try {
-      baseStat = await fs.lstat(baseFull)
-    } catch {
-      return []
-    }
-    if (baseStat.isSymbolicLink()) return []
-    if (this.isHiddenSkillPath(baseFull, realpathCache)) {
-      return []
-    }
-    const isFile = baseStat.isFile()
-
-    // Call parent's private ripgrepSearch directly to distinguish
-    // "rg found nothing" ({}) from "rg unavailable" (null)
-    const ripgrepSearch = getFilesystemBackendInternals(this).ripgrepSearch
-
-    const t0 = Date.now()
-    let rgResult: Record<string, Array<[number, string]>> | null | undefined
-    if (typeof ripgrepSearch === "function") {
-      try {
-        rgResult = await ripgrepSearch.call(this, effectivePattern, baseFull, effectiveGlob ?? null)
-      } catch (error) {
-        console.warn("[LocalSandbox] ripgrepSearch failed, falling back:", error)
-        rgResult = undefined
-      }
-    }
-    const rgMs = Date.now() - t0
-    // undefined = method missing (upstream API changed), treat same as unavailable
-    const rgAvailable = rgResult !== null && rgResult !== undefined
-
-    // Convert ripgrep dict → flat array
-    let results: GrepMatch[] = []
-    if (rgResult) {
-      for (const [fpath, items] of Object.entries(rgResult)) {
-        for (const [lineNum, lineText] of items) {
-          results.push({ path: fpath, line: lineNum, text: lineText })
+    const capped = await withWorkspaceExecution<GrepMatch[]>(
+      this.workingDir,
+      "read",
+      async () => {
+        // Resolve the base path once for reuse
+        let baseFull: string
+        try {
+          baseFull = this._resolvePath(effectivePath === "/" ? "." : effectivePath || ".")
+        } catch {
+          return []
         }
-      }
-    }
-
-    // When path points to a specific file, filter results to only include
-    // matches from the intended file (ripgrep may return broader results).
-    if (results.length > 0 && effectivePath !== "/" && isFile) {
-      let expectedPath: string
-      if (this._virtualMode) {
-        const relative = path.relative(this._cwd, baseFull)
-        expectedPath = "/" + relative.split(path.sep).join("/")
-      } else {
-        expectedPath = baseFull
-      }
-      results = results.filter((m) => m.path === expectedPath)
-    }
-
-    let source = results.length > 0 ? "ripgrep" : "none"
-
-    // Fall back to encoding-aware literal search when:
-    // - ripgrep is unavailable (null/undefined), OR
-    // - ripgrep returned empty for a single file (may be non-UTF-8 / binary-detected,
-    //   e.g. GBK/Shift-JIS files that ripgrep skips as "binary")
-    // For directory-level searches, empty ripgrep results are normal — skip fallback
-    // to keep grep performance aligned with rg-first tools like Claude Code.
-    let fallbackStoppedEarly = false
-    if (!rgAvailable || (results.length === 0 && isFile)) {
-      const t1 = Date.now()
-      const fallbackResult = await this.encodingAwareLiteralSearch(
-        effectivePattern,
-        baseFull,
-        effectiveGlob ?? null,
-        realpathCache
-      )
-      fallbackStoppedEarly = fallbackResult.stoppedEarly
-      const fallbackMs = Date.now() - t1
-      for (const [fpath, items] of Object.entries(fallbackResult.results)) {
-        for (const [lineNum, lineText] of items) {
-          results.push({ path: fpath, line: lineNum, text: lineText })
+        // Early exit if path doesn't exist; cache stat for reuse below
+        let baseStat: Awaited<ReturnType<typeof fs.lstat>>
+        try {
+          baseStat = await fs.lstat(baseFull)
+        } catch {
+          return []
         }
-      }
-      if (results.length > 0) source = "encoding-aware-fallback"
-      console.log(
-        `[LocalSandbox] grepRaw fallback: pattern="${effectivePattern}", results=${results.length}, fallbackMs=${fallbackMs}`
-      )
-    }
+        if (baseStat.isSymbolicLink()) return []
+        if (this.isHiddenSkillPath(baseFull, realpathCache)) {
+          return []
+        }
+        const isFile = baseStat.isFile()
 
-    console.log(
-      `[LocalSandbox] grepRaw: source=${source}, pattern="${effectivePattern}", results=${results.length}, rgMs=${rgMs}`
+        // Call parent's private ripgrepSearch directly to distinguish
+        // "rg found nothing" ({}) from "rg unavailable" (null)
+        const ripgrepSearch = getFilesystemBackendInternals(this).ripgrepSearch
+
+        const t0 = Date.now()
+        let rgResult: Record<string, Array<[number, string]>> | null | undefined
+        if (typeof ripgrepSearch === "function" && !findProtectedMarketRoot(baseFull)) {
+          try {
+            rgResult = await ripgrepSearch.call(
+              this,
+              effectivePattern,
+              baseFull,
+              effectiveGlob ?? null
+            )
+          } catch (error) {
+            console.warn("[LocalSandbox] ripgrepSearch failed, falling back:", error)
+            rgResult = undefined
+          }
+        }
+        const rgMs = Date.now() - t0
+        // undefined = method missing (upstream API changed), treat same as unavailable
+        const rgAvailable = rgResult !== null && rgResult !== undefined
+
+        // Convert ripgrep dict → flat array
+        let results: GrepMatch[] = []
+        if (rgResult) {
+          for (const [fpath, items] of Object.entries(rgResult)) {
+            for (const [lineNum, lineText] of items) {
+              results.push({ path: fpath, line: lineNum, text: lineText })
+            }
+          }
+        }
+
+        // When path points to a specific file, filter results to only include
+        // matches from the intended file (ripgrep may return broader results).
+        if (results.length > 0 && effectivePath !== "/" && isFile) {
+          let expectedPath: string
+          if (this._virtualMode) {
+            const relative = path.relative(this._cwd, baseFull)
+            expectedPath = "/" + relative.split(path.sep).join("/")
+          } else {
+            expectedPath = baseFull
+          }
+          results = results.filter((m) => m.path === expectedPath)
+        }
+
+        let source = results.length > 0 ? "ripgrep" : "none"
+
+        // Fall back to encoding-aware literal search when:
+        // - ripgrep is unavailable (null/undefined), OR
+        // - ripgrep returned empty for a single file (may be non-UTF-8 / binary-detected,
+        //   e.g. GBK/Shift-JIS files that ripgrep skips as "binary")
+        // For directory-level searches, empty ripgrep results are normal — skip fallback
+        // to keep grep performance aligned with rg-first tools like Claude Code.
+        let fallbackStoppedEarly = false
+        if (!rgAvailable || (results.length === 0 && isFile)) {
+          const t1 = Date.now()
+          const fallbackResult = await this.encodingAwareLiteralSearch(
+            effectivePattern,
+            baseFull,
+            effectiveGlob ?? null,
+            realpathCache
+          )
+          fallbackStoppedEarly = fallbackResult.stoppedEarly
+          const fallbackMs = Date.now() - t1
+          for (const [fpath, items] of Object.entries(fallbackResult.results)) {
+            for (const [lineNum, lineText] of items) {
+              results.push({ path: fpath, line: lineNum, text: lineText })
+            }
+          }
+          if (results.length > 0) source = "encoding-aware-fallback"
+          console.log(
+            `[LocalSandbox] grepRaw fallback: pattern="${effectivePattern}", results=${results.length}, fallbackMs=${fallbackMs}`
+          )
+        }
+
+        console.log(
+          `[LocalSandbox] grepRaw: source=${source}, pattern="${effectivePattern}", results=${results.length}, rgMs=${rgMs}`
+        )
+
+        // Filter out matches inside disabled skills so their content cannot leak via grep.
+        if (this._hiddenSkillDirKeys.size > 0) {
+          results = results.filter((m) => !this.isHiddenSkillPath(m.path, realpathCache))
+        }
+
+        // Filter out any results from sensitive directories
+        if (this.windowsSandbox === "elevated") {
+          results = results.filter((m) => {
+            return !this.isSensitiveSandboxPath(m.path, realpathCache)
+          })
+        }
+
+        const capped: GrepMatch[] = []
+        let charCount = 0
+
+        for (const match of results) {
+          if (capped.length >= LocalSandbox.MAX_GREP_MATCHES) break
+          // Truncate overly long lines (e.g. minified JS) to avoid blowing the char budget
+          const text = LocalSandbox.truncateGrepLine(match.text)
+          const estChars = match.path.length + text.length + 16
+          if (charCount + estChars > LocalSandbox.MAX_GREP_CHARS) break
+          capped.push(text !== match.text ? { ...match, text } : match)
+          charCount += estChars
+        }
+
+        if (capped.length < results.length) {
+          const omitted = results.length - capped.length
+          console.log(
+            "[LocalSandbox] grepRaw capped results:",
+            `${capped.length}/${results.length}`,
+            `(omitted ${omitted}, chars=${charCount})`
+          )
+          capped.push({
+            path: "(truncated)",
+            line: 0,
+            text: `Found ${results.length} total matches, showing first ${capped.length}. ${omitted} omitted — refine pattern/path/glob.`
+          })
+        } else if (fallbackStoppedEarly) {
+          capped.push({
+            path: "(truncated)",
+            line: 0,
+            text: `Fallback search stopped after reaching scan/output limits. Showing first ${capped.length} matches — refine pattern/path/glob.`
+          })
+        }
+        return capped
+      },
+      this.abortSignal
     )
-
-    // Filter out matches inside disabled skills so their content cannot leak via grep.
-    if (this._hiddenSkillDirKeys.size > 0) {
-      results = results.filter((m) => !this.isHiddenSkillPath(m.path, realpathCache))
-    }
-
-    // Filter out any results from sensitive directories
-    if (this.windowsSandbox === "elevated") {
-      results = results.filter((m) => {
-        return !this.isSensitiveSandboxPath(m.path, realpathCache)
-      })
-    }
-
-    const capped: GrepMatch[] = []
-    let charCount = 0
-
-    for (const match of results) {
-      if (capped.length >= LocalSandbox.MAX_GREP_MATCHES) break
-      // Truncate overly long lines (e.g. minified JS) to avoid blowing the char budget
-      const text = LocalSandbox.truncateGrepLine(match.text)
-      const estChars = match.path.length + text.length + 16
-      if (charCount + estChars > LocalSandbox.MAX_GREP_CHARS) break
-      capped.push(text !== match.text ? { ...match, text } : match)
-      charCount += estChars
-    }
-
-    if (capped.length < results.length) {
-      const omitted = results.length - capped.length
-      console.log(
-        "[LocalSandbox] grepRaw capped results:",
-        `${capped.length}/${results.length}`,
-        `(omitted ${omitted}, chars=${charCount})`
-      )
-      capped.push({
-        path: "(truncated)",
-        line: 0,
-        text: `Found ${results.length} total matches, showing first ${capped.length}. ${omitted} omitted — refine pattern/path/glob.`
-      })
-    } else if (fallbackStoppedEarly) {
-      capped.push({
-        path: "(truncated)",
-        line: 0,
-        text: `Fallback search stopped after reaching scan/output limits. Showing first ${capped.length} matches — refine pattern/path/glob.`
-      })
-    }
 
     const postResult = await this.runHooks("PostToolUse", {
       toolName: "grep",
@@ -4172,10 +4040,13 @@ export class LocalSandbox
       throw new Error(`Cannot read binary file type: ${ext}`)
     }
 
-    if (stat.size < LocalSandbox.READ_FAST_PATH_MAX_SIZE) {
+    const protectedContent = Boolean(findProtectedMarketRoot(resolvedPath))
+    if (protectedContent || stat.size < LocalSandbox.READ_FAST_PATH_MAX_SIZE) {
       const { buffer, resolvedPath: fastPathResolved } = await this.readFileBuffer(
         filePath,
-        LocalSandbox.READ_FAST_PATH_MAX_SIZE
+        protectedContent
+          ? Math.ceil((this._maxFileSizeBytes * 4) / 3) + 64
+          : LocalSandbox.READ_FAST_PATH_MAX_SIZE
       )
       const encoding = this.detectEncoding(buffer, path.extname(fastPathResolved).toLowerCase())
       const content = iconv.decode(buffer, encoding)
@@ -4350,8 +4221,22 @@ export class LocalSandbox
         truncatedWithinLine,
         truncatedBeforeLine,
         lastVisibleSourceLine
-      } = await this.formatReadRange(effectiveFilePath, effectiveOffset, effectiveLimit, options)
-      await this.recordReadTime(resolvedPath)
+      } = await withFileOperation(
+        this.workingDir,
+        this._resolvePath(effectiveFilePath),
+        "read",
+        async () => {
+          const result = await this.formatReadRange(
+            effectiveFilePath,
+            effectiveOffset,
+            effectiveLimit,
+            options
+          )
+          await this.recordReadTime(result.resolvedPath)
+          return result
+        },
+        this.abortSignal
+      )
 
       if (!hasNonWhitespace) {
         recordTrustedToolFilePreviewSource(resolvedPath, "read")
@@ -4502,7 +4387,7 @@ export class LocalSandbox
       }
     }
 
-    return { buffer, resolvedPath }
+    return { buffer: decodeMarketContent(buffer), resolvedPath }
   }
 
   private static async readFileHandleBuffer(
@@ -4539,23 +4424,7 @@ export class LocalSandbox
    * Different file paths run in parallel; same path is FIFO-queued.
    */
   private async withFileLock<T>(resolvedPath: string, fn: () => Promise<T>): Promise<T> {
-    const lockKey = this.fileIdentityKey(resolvedPath)
-    const prev = this._fileLocks.get(lockKey) ?? Promise.resolve()
-    let release: () => void = () => {}
-    const gate = new Promise<void>((r) => {
-      release = r
-    })
-    const tail = prev.then(() => gate)
-    this._fileLocks.set(lockKey, tail)
-    try {
-      await prev
-      return await fn()
-    } finally {
-      release()
-      if (this._fileLocks.get(lockKey) === tail) {
-        this._fileLocks.delete(lockKey)
-      }
-    }
+    return withFileOperation(this.workingDir, resolvedPath, "write", fn, this.abortSignal)
   }
 
   private fileIdentityKey(resolvedPath: string): string {
@@ -4677,6 +4546,7 @@ export class LocalSandbox
    * case-insensitive path comparison.
    */
   private async isWriteBlocked(filePath: string): Promise<boolean> {
+    if (findProtectedMarketRoot(this._resolvePath(filePath))) return true
     if (this.windowsSandbox !== "readonly") return false
     if (!(await LocalSandbox.getElevationState())) return true
     if (await this.resolveEditableWorkflowScriptPath(filePath)) return false
@@ -4770,6 +4640,7 @@ export class LocalSandbox
 
   /** Build a readonly-sandbox block error message for the given file and action verb. */
   private async readonlyBlockedError(filePath: string, action: string): Promise<string> {
+    if (findProtectedMarketRoot(this._resolvePath(filePath))) return MARKET_CONTENT_DENIED
     return (await LocalSandbox.getElevationState())
       ? `只读沙箱模式下仅允许${action}工作目录内的文件。'${filePath}' 不在工作目录 '${this.workingDir}' 内。`
       : `只读沙箱模式下禁止${action}文件 '${filePath}'。如需${action}请以管理员身份运行或切换沙箱模式。`
@@ -4867,20 +4738,6 @@ export class LocalSandbox
     }
   }
 
-  /** Remove a staged application artifact during a failed checkpoint commit. */
-  async removeInternalArtifact(filePath: string): Promise<WriteResult> {
-    const resolvedPath = await this.validateInternalArtifactPath(filePath)
-    if (!resolvedPath) return { error: `Invalid internal artifact path: ${filePath}` }
-    return this.withFileLock(resolvedPath, async () => {
-      try {
-        await fs.rm(resolvedPath, { force: true })
-        return {}
-      } catch (error) {
-        return { error: error instanceof Error ? error.message : String(error) }
-      }
-    })
-  }
-
   /** Append to an app-managed artifact under the same path and symlink checks. */
   async appendInternalArtifact(filePath: string, content: string): Promise<WriteResult> {
     const resolvedPath = await this.validateInternalArtifactPath(filePath)
@@ -4901,6 +4758,8 @@ export class LocalSandbox
    * Override write to enforce readonly sandbox restrictions.
    */
   async write(filePath: string, content: string): Promise<WriteResult> {
+    if (findProtectedMarketRoot(this._resolvePath(filePath)))
+      return { error: MARKET_CONTENT_DENIED }
     // DeepAgents' automatic result eviction writes to this reserved logical
     // path after the public tool call completes. A model-issued write_file is
     // marked by the runtime and continues through the regular approval flow.
@@ -4993,7 +4852,6 @@ export class LocalSandbox
       if (this.isAborted) {
         return { error: "文件写入已取消。" }
       }
-      getModCallContext()?.assertLive?.()
       const r = await super.write(effectiveFilePath, effectiveContent)
       if (!r.error) {
         await this.recordReadTime(resolvedPath)
@@ -5041,8 +4899,21 @@ export class LocalSandbox
   }
 
   /**
-   * Override uploadFiles to enforce readonly sandbox restrictions on each file.
+   * Decode SDK skill discovery downloads without exposing a renderer file-read endpoint.
    */
+  async downloadFiles(paths: string[]): Promise<FileDownloadResponse[]> {
+    const files = await super.downloadFiles(paths)
+    return files.map((file) => {
+      if (!file.content || file.error) return file
+      try {
+        return { ...file, content: decodeMarketContent(Buffer.from(file.content)) }
+      } catch {
+        return { path: file.path, content: null, error: "invalid_path" }
+      }
+    })
+  }
+
+  /** Enforce readonly restrictions on every batch-upload target. */
   async uploadFiles(files: [string, Uint8Array][]): Promise<FileUploadResponse[]> {
     const denied: FileOperationError = "permission_denied"
     if (!this.worktreeIsolation) {
@@ -5298,11 +5169,9 @@ export class LocalSandbox
             }
           }
           if (managedCapability) {
-            getModCallContext()?.assertLive?.()
             await this.writeStableFileHandleEncoded(managedCapability, expectedContent, encoding)
             await this.recordStableReadTime(managedCapability)
           } else {
-            getModCallContext()?.assertLive?.()
             await this.writeFileEncoded(resolvedPath, expectedContent, encoding)
             await this.recordReadTime(resolvedPath)
           }
@@ -6818,7 +6687,6 @@ export class LocalSandbox
     {
       id: string
       threadId: string
-      modAgentId?: string
       command: string
       cwd: string
       startedAt: number
@@ -7101,7 +6969,6 @@ export class LocalSandbox
     if (taskAbortController.signal.aborted) {
       return LocalSandbox.backgroundStartCancelledMessage()
     }
-    await authorizeCurrentModInput("host:execute", { command: effectiveCommand, cwd: effectiveCwd })
     // The parent owns acceptance only. Once accepted, this process survives normal turn completion.
     if (this.backgroundCommandLifecycle) this.abortSignal?.throwIfAborted()
     if (taskAbortController.signal.aborted) return LocalSandbox.backgroundStartCancelledMessage()
@@ -7110,7 +6977,6 @@ export class LocalSandbox
       id: taskId,
       threadId: this.runId,
       command: effectiveCommand,
-      modAgentId: getModCallContext()?.identity.agentId,
       cwd: effectiveCwd,
       startedAt: Date.now(),
       completed: false as boolean,
@@ -7242,9 +7108,7 @@ export class LocalSandbox
         try {
           this.backgroundCommandLifecycle?.settled({
             id: taskId, threadId: this.runId,
-            output: task.result?.truncated && getModCallContext()?.protectedOutput
-              ? "[Truncated output suppressed]"
-              : protectCurrentModData(task.result?.output) ?? "Command ended without an execution result.",
+            output: task.result?.output ?? "Command ended without an execution result.",
             exitCode: task.result?.exitCode ?? null,
             truncated: task.result?.truncated ?? false,
             cancelled: taskAbortController.signal.aborted
@@ -7328,30 +7192,22 @@ export class LocalSandbox
     capReached?: boolean
   } | null {
     const task = LocalSandbox.backgroundTasks.get(taskId)
-    if (!task || task.threadId !== this.runId) return null
-    const modContext = getModCallContext()
-    if (modContext && task.modAgentId && task.modAgentId !== modContext.identity.agentId)
-      return null
+    if (!task) return null
     const elapsedSeconds = Math.round((Date.now() - task.startedAt) / 1000)
     if (!task.completed) {
       return {
         completed: false,
         elapsedSeconds,
-        command: protectCurrentModData(task.command),
+        command: task.command,
         cwd: task.cwd,
-        partialOutput: getModCallContext()?.protectedOutput
-          ? "[Output pending policy check]"
-          : task.partialOutput,
+        partialOutput: task.partialOutput,
         partialTruncated: task.partialTruncated,
         idleSeconds: Math.round((Date.now() - task.lastOutputAt) / 1000)
       }
     }
     return {
       completed: true,
-      output:
-        task.result?.truncated && getModCallContext()?.protectedOutput
-          ? "[Truncated output suppressed]"
-          : protectCurrentModData(task.result?.output),
+      output: task.result?.output,
       exitCode: task.result?.exitCode,
       elapsedSeconds,
       capReached: task.result?.capReached
@@ -7431,7 +7287,6 @@ export class LocalSandbox
     const task = {
       id: randomUUID(),
       threadId: this.runId,
-      modAgentId: getModCallContext()?.identity.agentId,
       command: "",
       cwd: this.workingDir,
       startedAt: Date.now(),
@@ -7575,11 +7430,7 @@ export class LocalSandbox
           lifecycle.settled({
             id: task.id,
             threadId: task.threadId,
-            output:
-              task.result?.truncated && getModCallContext()?.protectedOutput
-                ? "[Truncated output suppressed]"
-                : (protectCurrentModData(task.result?.output) ??
-                  "Command ended without an execution result."),
+            output: task.result?.output ?? "Command ended without an execution result.",
             exitCode: task.result?.exitCode ?? null,
             truncated: task.result?.truncated ?? false,
             cancelled: task.abortController.signal.aborted
@@ -7689,8 +7540,7 @@ export class LocalSandbox
       (this.foregroundCommandLifecycle ?? this.backgroundCommandLifecycle) &&
       this.abortSignal &&
       !this.worktreeIsolation &&
-      readOnlyShellExecutionContext.getStore() !== true &&
-      (!getModCallContext() || getModCallContext()?.identity.agentId === "main")
+      readOnlyShellExecutionContext.getStore() !== true
     ) {
       return this.executeWithForegroundHandoff(
         () => this.executeAfterPreToolUse(command, requestedCwd, requestedArgs, preResult),
@@ -7800,7 +7650,6 @@ export class LocalSandbox
 
     // If an orchestrator is configured, delegate to it for approval + sandbox retry.
     // The orchestrator calls back into executeRaw() for actual execution.
-    await authorizeCurrentModInput("host:execute", { command: effectiveCommand, cwd: effectiveCwd })
     if (this.orchestrator) {
       const result = await shellFileCaptureContext.run(true, () =>
         this.orchestrator!.execute(
@@ -7952,7 +7801,7 @@ export class LocalSandbox
     if (!this.pluginRoot) return false
 
     const hooksRoot = path.win32
-      .normalize(path.win32.join(this.pluginRoot, "hooks"))
+      .normalize(path.win32.join(resolveMarketRuntimePath(this.pluginRoot), "hooks"))
       .replace(/\\+$/, "")
       .replace(/\\+/g, "\\")
       .toLowerCase()
@@ -7968,10 +7817,24 @@ export class LocalSandbox
     cwd?: string,
     options?: ExecuteRawOptions
   ): Promise<LocalExecuteResponse> {
-    getModCallContext()?.assertLive?.()
     const effectiveSandboxMode = (sandboxModeOverride ?? this.windowsSandbox) as WindowsSandboxMode
     const effectiveTimeout = timeoutMs ?? this.timeout
-    const effectiveCwd = this.resolveExecutionCwd(cwd)
+    let effectiveCwd = this.resolveExecutionCwd(cwd)
+    const marketRoots = [getCustomSkillsDir(), ...getPlugins().map((plugin) => plugin.path)]
+    const customEntries = await fs
+      .readdir(getCustomSkillsDir(), { withFileTypes: true })
+      .catch((error: NodeJS.ErrnoException) => {
+        if (error.code === "ENOENT") return []
+        throw error
+      })
+    marketRoots.push(
+      ...customEntries
+        .filter((entry) => entry.isDirectory())
+        .map((entry) => path.join(getCustomSkillsDir(), entry.name))
+    )
+    const prepared = prepareMarketCommand(command, effectiveCwd, marketRoots)
+    command = prepared.command
+    effectiveCwd = prepared.cwd
     console.log(
       `[LocalSandbox] executeRaw: command="${command}" cwd="${effectiveCwd}" effectiveMode=${effectiveSandboxMode} override=${sandboxModeOverride} timeout=${effectiveTimeout}ms overrideAbort=${!!overrideAbortSignal}`
     )
@@ -7983,11 +7846,7 @@ export class LocalSandbox
           `[HarnessMode][LocalSandbox] project plugin hook sandbox bypass check: allowed=${shouldBypassSandboxForProjectPluginHook} mode=${effectiveSandboxMode} pluginRoot="${this.pluginRoot}"`
         )
       }
-      if (
-        shouldBypassSandboxForProjectPluginHook &&
-        !this.worktreeIsolation &&
-        !getModCallContext()
-      ) {
+      if (shouldBypassSandboxForProjectPluginHook && !this.worktreeIsolation) {
         const outsideShellSyntax = await LocalSandbox.resolveCommandShellSyntax("none")
         const outsideSafety = assessCommandSafety(command, effectiveCwd, {
           shellSyntax: outsideShellSyntax
@@ -8046,7 +7905,7 @@ export class LocalSandbox
 
     // On Windows, spawn can transiently fail with EPERM (antivirus file lock, handle
     // contention). Retry up to SPAWN_RETRY_COUNT times with a short delay.
-    const maxAttempts = isWindows && !getModCallContext() ? LocalSandbox.SPAWN_RETRY_COUNT + 1 : 1
+    const maxAttempts = isWindows ? LocalSandbox.SPAWN_RETRY_COUNT + 1 : 1
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       const result = await this.executeOnce(
         effectiveCommand,
@@ -8087,11 +7946,6 @@ export class LocalSandbox
       overrideAbortSignal,
       options
     )
-    const modSignal = getModCallContext()?.signal
-    if (modSignal)
-      overrideAbortSignal = overrideAbortSignal
-        ? AbortSignal.any([overrideAbortSignal, modSignal])
-        : modSignal
     const effectiveCwd = this.resolveExecutionCwd(options?.cwd)
     const cwdError = this.validateExecutionCwd(effectiveCwd)
     if (cwdError) {
@@ -8126,7 +7980,7 @@ export class LocalSandbox
       this._shellFileTelemetry &&
       !backgroundExecution &&
       shellFileCaptureContext.getStore() === true
-    const runUnserialized = (): Promise<LocalExecuteResponse> => {
+    const runCommand = (): Promise<LocalExecuteResponse> => {
       const foreground = foregroundCommandContext.getStore()
       const adoptable = foreground?.sandbox === this && !backgroundExecution ? foreground : undefined
       const leave = adoptable?.enter(command, effectiveCwd)
@@ -8147,6 +8001,20 @@ export class LocalSandbox
         )
       ).finally(leave)
     }
+    const commandConcurrency = classifyCommandConcurrency(command)
+    const signal = overrideAbortSignal ?? this.abortSignal
+    // Classify the effective post-hook command here, including unsandboxed
+    // execution. Runtime classification alone cannot protect against hook rewrites
+    // or another workflow agent using its own LocalSandbox instance.
+    const runUnserialized = (): Promise<LocalExecuteResponse> =>
+      backgroundExecution
+        ? runCommand()
+        : withWorkspaceExecution(
+            this.workingDir,
+            commandConcurrency === "parallel_safe" ? "read" : "write",
+            runCommand,
+            signal
+          )
     if (
       process.platform !== "win32" ||
       effectiveSandboxMode === "none" ||
@@ -8161,7 +8029,6 @@ export class LocalSandbox
       sandboxWorkspaceRoot,
       effectiveSandboxMode
     )
-    const commandConcurrency = classifyCommandConcurrency(command)
     if (commandConcurrency === "parallel_safe") {
       return LocalSandbox.runParallelSafeExecution(queueKey, runUnserialized)
     }

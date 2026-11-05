@@ -53,7 +53,6 @@ import type {
 } from "./types"
 import { NoopTraceReporter, TRACE_OBSERVABILITY_SCHEMA_VERSION } from "./types"
 import { hasSuspectedTechnicalDetailSupplement } from "./technical-detail-supplement"
-import { summarizeTraceCacheTokens } from "./token-usage"
 import { app, safeStorage } from "electron"
 import { getLocalIP } from "../../net-utils"
 import { getUserInfo } from "../../storage"
@@ -436,6 +435,9 @@ export interface TraceCollectorOptions extends Partial<TraceObservabilityContext
   triggerSource?: TraceTriggerSource
   harnessFeature?: TraceHarnessFeatureContext
   includeSkillEval?: boolean
+  /** Supplied by the turn entry point; not persisted as another analytics field. */
+  isFirstProjectTurn?: boolean
+  hasExplicitSkill?: boolean
 }
 
 function compactUndefined<T extends Record<string, unknown>>(record: T): T {
@@ -760,6 +762,7 @@ export class TraceCollector {
   private observedInputTokens = 0
   private observedOutputTokens = 0
   private observedTotalTokens = 0
+  private observedCacheReadTokens = 0
 
   constructor(
     threadId: string,
@@ -769,7 +772,10 @@ export class TraceCollector {
   ) {
     this.traceId = clampText(options.traceId ?? uuid(), 256)
     this.threadId = clampText(threadId, 256)
-    this.suspectedTechnicalDetailSupplement = hasSuspectedTechnicalDetailSupplement(userMessage)
+    this.suspectedTechnicalDetailSupplement = hasSuspectedTechnicalDetailSupplement(userMessage, {
+      isFirstProjectTurn: Boolean(options.harnessFeature && options.isFirstProjectTurn),
+      hasExplicitSkill: options.hasExplicitSkill
+    })
     this.userMessage = clampText(userMessage, 64 * 1024)
     this.modelId = clampText(modelId, 1024)
     this.triggerSource = options.triggerSource ?? "chat"
@@ -1232,11 +1238,13 @@ export class TraceCollector {
       this.observedInputTokens += input
       this.observedOutputTokens += output
       this.observedTotalTokens += usage.totalTokens ?? input + output
+      const cacheRead = usage.cacheReadTokens ?? 0
+      if (Number.isFinite(cacheRead) && cacheRead > 0) this.observedCacheReadTokens += cacheRead
     }
     if (this.modelCalls.length >= TRACE_MAX_MODEL_CALL_SKELETONS) return
-    // Token totals are summed off this array by the dashboard, and per-call
-    // usage is worth keeping on its own. Neither a spent budget nor the
-    // full-entry cap should cost the entry: they cost its messages.
+    // Per-call usage is worth keeping alongside the independent totals.
+    // Neither a spent budget nor the full-entry cap should cost the entry:
+    // they cost its messages.
     if (this.modelCalls.length >= TRACE_MAX_MODEL_CALLS || !this.collectionBudget.canAdd(512)) {
       // Only when this turn has an llm node. The conversation view reads
       // assistant text off nodes first, so once nodes hit their cap the same
@@ -1572,7 +1580,17 @@ export class TraceCollector {
     // Finishing touches several non-idempotent side channels (skill-eval
     // windows, local persistence, cloud reporting, and adoption cleanup). Keep
     // the documented first-call-wins contract even when two teardown paths race.
-    this.finishPromise ??= this.finishOnce(outcome, errorMessage)
+    if (!this.finishPromise) {
+      // Tool writes already capture attribution synchronously in recordGen.
+      // Release execution state now, before potentially slow/hung metadata
+      // enrichment in finishOnce. A late finish cannot clear a newer turn.
+      try {
+        clearAdoptionContext(this.threadId, this.traceId)
+      } catch {
+        // Attribution cleanup must not mask the original finish result.
+      }
+      this.finishPromise = this.finishOnce(outcome, errorMessage)
+    }
     return this.finishPromise
   }
 
@@ -1738,10 +1756,8 @@ export class TraceCollector {
       appVersion: getAppVersionForTrace(),
       steps: this.steps,
       modelCalls: this.modelCalls,
-      // Flattened for dashboard aggregation — `sum` cannot reach into the
-      // per-call array above.
-      ...summarizeTraceCacheTokens(this.modelCalls),
-      // Counted as the turn ran, so these stay right past TRACE_MAX_MODEL_CALLS.
+      // Counted as the turn ran, independent of the retained model-call array.
+      cacheReadTokens: this.observedCacheReadTokens,
       totalInputTokens: this.observedInputTokens,
       totalOutputTokens: this.observedOutputTokens,
       totalTokens: this.observedTotalTokens,
@@ -1812,26 +1828,15 @@ export class TraceCollector {
       : trace
 
     try {
-      try {
-        flushSystemConstraintReadSummaries(this.traceId, outcome)
-      } catch (error) {
-        console.warn("[Tracer] Failed to flush system-constraint read telemetry:", error)
-      }
-      writeTraceFile(traceWithEval)
-
-      // Keep reporting off the main run path, but track it so graceful app
-      // shutdown can wait for already-scheduled uploads within a hard bound.
-      reportTraceInBackground(traceWithEval)
-    } finally {
-      // A child trace may finish in the background after a continuation has
-      // installed a newer context on the same worker thread. Only clear the
-      // context still owned by this trace, even when persistence fails.
-      try {
-        clearAdoptionContext(this.threadId, this.traceId)
-      } catch {
-        // ignore
-      }
+      flushSystemConstraintReadSummaries(this.traceId, outcome)
+    } catch (error) {
+      console.warn("[Tracer] Failed to flush system-constraint read telemetry:", error)
     }
+    writeTraceFile(traceWithEval)
+
+    // Keep reporting off the main run path, but track it so graceful app
+    // shutdown can wait for already-scheduled uploads within a hard bound.
+    reportTraceInBackground(traceWithEval)
 
     return traceWithEval
   }

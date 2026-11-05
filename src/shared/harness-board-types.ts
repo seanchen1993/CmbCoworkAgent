@@ -1,3 +1,5 @@
+import type { ManagedRunModelSelection } from "./managed-run-model"
+
 export type HarnessUiKind =
   | "pending"
   | "active"
@@ -116,6 +118,7 @@ export interface HarnessKnowledgePreviewResult {
   path?: string
   /** Sender-bound capability for previewing descendants of `path`. */
   previewGrant?: string
+  previewGrantExpiresAt?: number
   files: HarnessKnowledgePreviewFile[]
   error?: string
 }
@@ -232,6 +235,7 @@ export interface HarnessProjectMetadata {
   description: string
   projectCode: string
   projectFromLean: boolean
+  isTestProject?: boolean
   projectDir: string
   systemId: string
   systemName: string
@@ -255,6 +259,7 @@ export interface HarnessProjectCreateInput {
   name: string
   projectCode: string
   projectFromLean: boolean
+  isTestProject?: boolean
   projectDir: string
   description: string
   systemId: string
@@ -425,6 +430,8 @@ export interface ManagedRunStartInput {
   featureId: string
   workspacePath: string
   initialUserMessage?: string
+  existingThreadId?: string
+  modelSelection?: ManagedRunModelSelection
 }
 
 export interface ManagedRunStartValidationInput {
@@ -473,6 +480,7 @@ export interface HarnessProjectMetadataUpdateInput {
   name: string
   projectCode: string
   projectFromLean: boolean
+  isTestProject?: boolean
   projectDir: string
   description: string
   systemId: string
@@ -486,6 +494,7 @@ export interface HarnessProjectListItem {
   description: string
   projectCode: string
   projectFromLean: boolean
+  isTestProject?: boolean
   projectDir: string
   systemId: string
   systemName: string
@@ -580,6 +589,7 @@ export interface ManagedRunSnapshot {
   featureId: string
   status: ManagedRunStatus
   workspacePath?: string
+  modelSelection?: ManagedRunModelSelection
   currentSession?: {
     threadId: string
     workspacePath?: string
@@ -592,6 +602,8 @@ export interface ManagedRunSnapshot {
     nextActionHash: string
   }
   providerRetryCount: number
+  /** Absent in historical records; the store normalizes it to zero on read. */
+  totalRetryCount?: number
   nextRetryAt?: string
   failureReason?: string
   cancellationReason?: string
@@ -625,6 +637,7 @@ export interface ManagedRunDecisionFacts {
   initialInspection: boolean
   previousNodeId?: string
   providerRetryCount: number
+  totalRetryCount?: number
   contextInputTokens?: number
   contextMaxTokens?: number
   contextUsageRatio?: number
@@ -637,7 +650,7 @@ export interface ManagedRunDecisionFacts {
 export type ManagedRunPolicyResult =
   | {
       type: "biz_progress"
-      proposedAction: "start_new_thread"
+      proposedAction: "start_new_thread" | "continue_current_thread"
       reasonCode: string
       facts?: ManagedRunDecisionFacts
       rule?: string
@@ -809,6 +822,7 @@ export interface HarnessFeatureSummary {
   featureStatus: HarnessFeatureStatus
   featureStatusLabel?: string
   managedRunStatus?: ManagedRunViewStatus
+  managedRunThreadId?: string
   /**
    * Feature-level status for summary cards. Plugins can provide it explicitly;
    * otherwise the framework derives it from the current node and workflow.
@@ -896,6 +910,7 @@ export interface AgentTurnEndEvent extends AutoModeEventBase {
   endReason: {
     code: "normal" | "provider_error" | "hook_halt" | "failure_fuse" | "unknown"
     message?: string
+    retryable?: boolean
   }
   contextUsage?: {
     inputTokens: number
@@ -1019,6 +1034,10 @@ export interface HarnessRunNode {
 }
 
 export interface HarnessRunDetailViewModel {
+  artifactAccumulation?: {
+    syncType: "invoke_session"
+    nextAction: HarnessWorkflowNextAction
+  }
   /** Main-issued, sender-bound capability for generated run artifacts. */
   artifactPreviewGrant?: string
   /** Absolute epoch milliseconds; the renderer renews lazily near this boundary. */

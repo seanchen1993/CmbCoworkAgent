@@ -260,7 +260,7 @@ describe("StreamingMarkdown 空链接渲染", () => {
     )
 
     expect(html).toContain("index.ts")
-    expect(html).toMatch(/<a href="C:(?:%5C|\\)workspace/)
+    expect(html).toMatch(/<a href="C:(?:%5C|\\|\/)workspace/)
     threadState.workspacePath = null
   })
 })

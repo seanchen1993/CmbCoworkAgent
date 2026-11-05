@@ -299,6 +299,13 @@ async function main() {
     await page.getByText("Bots", { exact: true }).first().click()
     await page.getByText("本机协作专家", { exact: true }).first().click()
     const composer = () => page.locator(".bots-conversation").locator('textarea, [role="textbox"][contenteditable="true"]').last()
+    const fillComposer = async (text: string) => {
+      await composer().click()
+      await composer().press(process.platform === "darwin" ? "Meta+a" : "Control+a")
+      await composer().press("Backspace")
+      if (text) await page.keyboard.insertText(text)
+      await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))))
+    }
     const composerValue = () => composer().evaluate((element) => element instanceof HTMLTextAreaElement ? element.value : element.textContent ?? "")
     const send = async () => {
       // Let the controlled textarea commit before activating its actual submit button.
@@ -315,7 +322,7 @@ async function main() {
       await button.click()
     }
     await composer().waitFor()
-    await composer().fill("M05_PRIVATE_MAIN：先讨论其他话题，不要建工作。")
+    await fillComposer("M05_PRIVATE_MAIN：先讨论其他话题，不要建工作。")
     await composer().press("Enter")
     await waitForBotAppState(
       page,
@@ -331,7 +338,7 @@ async function main() {
       { timeout: 90000 }
     )
     await page.getByText("这是主对话的其他讨论，不交办工作。", { exact: true }).last().waitFor()
-    await composer().fill("M05_CREATE_WORK：请独立交办一份季度安排草稿。")
+    await fillComposer("M05_CREATE_WORK：请独立交办一份季度安排草稿。")
     await send()
     await page
       .getByRole("button", { name: /季度安排草稿/ })
@@ -372,7 +379,7 @@ async function main() {
       .first()
       .click()
     await page.locator(`[data-chat-thread-id="${bot.threadId}"]`).waitFor()
-    await composer().fill("M05_MAIN_PING：工作等待时主对话能继续吗？")
+    await fillComposer("M05_MAIN_PING：工作等待时主对话能继续吗？")
     await send()
     await page.getByText("主对话仍然可用。", { exact: true }).last().waitFor({ timeout: 90000 })
     await page
@@ -526,7 +533,7 @@ async function main() {
     await checkReturned(1)
     if (explicitWorkspace) {
       // Keep direct task-local edits covered in the explicit-directory variant.
-      await composer().fill("M05_EDIT_WORK：把第一版改为第二版。")
+      await fillComposer("M05_EDIT_WORK：把第一版改为第二版。")
       await send()
     } else {
       await page
@@ -535,7 +542,7 @@ async function main() {
         .first()
         .click()
       await page.locator(`[data-chat-thread-id="${bot.threadId}"]`).waitFor()
-      await composer().fill("M05_PARENT_EDIT：把刚才那份改成第二版，继续原任务。")
+      await fillComposer("M05_PARENT_EDIT：把刚才那份改成第二版，继续原任务。")
       await send()
       await page
         .getByText("已将修改要求交办给原任务。", { exact: true })
@@ -583,7 +590,7 @@ async function main() {
     )
     assert.equal(thread.metadata.workspacePath, work.workspace.path)
     assert.match(await readFile(join(work.workspace.path, "report.md"), "utf8"), /第二版安排/)
-    await composer().fill("这个工作的未发送草稿")
+    await fillComposer("这个工作的未发送草稿")
     await page
       .locator(".bots-conversation")
       .getByRole("button", { name: /主对话$/ })
@@ -591,7 +598,7 @@ async function main() {
       .click()
     await page.locator(`[data-chat-thread-id="${bot.threadId}"]`).waitFor()
     assert.equal(await composerValue(), "")
-    await composer().fill("M05_MAIN_PING：主对话能继续吗？")
+    await fillComposer("M05_MAIN_PING：主对话能继续吗？")
     await send()
     await page.getByText("主对话仍然可用。", { exact: true }).last().waitFor({ timeout: 90000 })
     await page
@@ -600,7 +607,7 @@ async function main() {
       .click()
     await page.locator(`[data-chat-thread-id="${work.threadId}"]`).waitFor()
     assert.equal(await composerValue(), "这个工作的未发送草稿")
-    await composer().fill("")
+    await fillComposer("")
     await page.getByText("第二版安排", { exact: false }).last().waitFor({ timeout: 30000 })
     // Hold the real work-get IPC while the resource tabs remain selected. No fallback to main is permitted.
     await page

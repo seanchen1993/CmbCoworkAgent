@@ -4,20 +4,9 @@ import { tmpdir } from "node:os"
 import { AIMessage, AIMessageChunk, HumanMessage, ToolMessage } from "@langchain/core/messages"
 import { afterAll, beforeAll, beforeEach, expect, it, vi } from "vitest"
 import type { ScheduledTask } from "../types"
-import { BaseChatModel } from "@langchain/core/language_models/chat_models"
-import type { ChatResult } from "@langchain/core/outputs"
-import { createAgent } from "langchain"
-import type { CreateAgentRuntimeOptions } from "../agent/runtime"
-import type { ModsManager } from "../mods/manager"
-import { ModRuntimeAuthorities } from "../mods/runtime-instance"
-import { FunctionTurnLifecycle, type FunctionTurnLifecycleHost } from "../mods/v2/turn-lifecycle"
-import { createFunctionSessionViewMiddleware } from "../agent/mods-session-view"
-import { getLocalThreadRunLease, onLocalThreadRunLeaseReleased } from "../agent/thread-run-lease"
 
 const fixture = vi.hoisted(() => ({
   path: "",
-  manager: undefined as unknown,
-  runtime: undefined as undefined | ((options: CreateAgentRuntimeOptions) => unknown),
   task: {} as ScheduledTask,
   stream: undefined as
     | undefined
@@ -68,15 +57,13 @@ vi.mock("../agent/trace/collector", () => ({
   }
 }))
 vi.mock("../agent/runtime", () => ({
-  createAgentRuntime: async (options: CreateAgentRuntimeOptions) =>
-    fixture.runtime?.(options) ?? {
-      stream: async (input: { messages: HumanMessage[] }) => fixture.stream!(input)
-    },
+  createAgentRuntime: async () => ({
+    stream: async (input: { messages: HumanMessage[] }) => fixture.stream!(input)
+  }),
   pinCheckpointer: () => () => {},
   closeCheckpointer: fixture.close,
   retireThreadCheckpointers: vi.fn()
 }))
-vi.mock("../mods/manager", () => ({ getModsManager: () => fixture.manager }))
 vi.mock("./notify", () => ({ notifyAlways: vi.fn(), stripThink: (text: string) => text }))
 vi.mock("../pet", () => ({ showPetCompletedTaskNotice: vi.fn() }))
 vi.mock("../app-attention-events", () => ({ emitAppAttention: vi.fn() }))
@@ -87,7 +74,10 @@ vi.mock("./trusted-tool-file-preview", () => ({
 }))
 
 import * as db from "../db"
-import { cancelTask, isTaskRunning, runTaskNow } from "./scheduler"
+import { cancelTask, isTaskRunning, runTaskNow, startScheduler, stopScheduler } from "./scheduler"
+import { ManagedRunScheduleStore } from "../db/managed-run-schedules"
+import { ManagedRunScheduler } from "../harness-board/managed-run-scheduler"
+import type { ManagedRunSummary } from "../../shared/harness-board-types"
 
 beforeAll(async () => {
   fixture.path = join(mkdtempSync(join(tmpdir(), "cmb-scheduler-transcript-")), "threads.sqlite")
@@ -98,8 +88,6 @@ afterAll(async () => {
 })
 beforeEach(() => {
   vi.restoreAllMocks()
-  fixture.manager = undefined
-  fixture.runtime = undefined
   fixture.events = []
   fixture.terminalMessages = []
   fixture.result.mockClear()
@@ -123,108 +111,6 @@ function currentThreadId(): string {
     .find((event) => event.channel.startsWith("scheduler:stream:"))!
     .channel.slice("scheduler:stream:".length)
 }
-
-it.each(["answer", "cancel", "error"])(
-  "settles the real scheduled graph lifecycle as %s after checkpointer and lease cleanup",
-  async (ending) => {
-    const authorities = new ModRuntimeAuthorities()
-    const start = vi.fn<FunctionTurnLifecycleHost["start"]>(async () => {})
-    const complete = vi.fn<FunctionTurnLifecycleHost["complete"]>(async () => {
-      expect(getLocalThreadRunLease(currentThreadId())).toBeUndefined()
-      expect(fixture.close).toHaveBeenCalledTimes(1)
-      expect(isTaskRunning(fixture.task.id)).toBe(false)
-    })
-    const lifecycle = new FunctionTurnLifecycle({
-      start,
-      complete,
-      error: (error) => {
-        throw error
-      },
-      isBusy: (threadId) => !!getLocalThreadRunLease(threadId),
-      onIdle: (listener) => onLocalThreadRunLeaseReleased((lease) => listener(lease.threadId))
-    })
-    const manager = {
-      startFunctionTurn: lifecycle.start.bind(lifecycle),
-      functionTurns: lifecycle,
-      releaseExpiredRuntimeBindings: vi.fn(),
-      bindFunctionSession: vi.fn(),
-      updateFunctionSessionMessages: vi.fn(),
-      updateFunctionSessionRequest: vi.fn()
-    }
-    fixture.manager = manager
-    let runtimeOptions: CreateAgentRuntimeOptions | undefined
-    let modelCalls = 0
-    class ScheduledModel extends BaseChatModel {
-      bindTools(): this {
-        return this
-      }
-      _llmType() {
-        return "scheduled-real-graph"
-      }
-      async _generate(): Promise<ChatResult> {
-        modelCalls++
-        expect(start).toHaveBeenCalledTimes(1)
-        if (ending === "error") throw new Error("controlled graph failure")
-        if (ending === "cancel") {
-          const binding = start.mock.calls[0][0]
-          lifecycle.abort(binding.workspace, binding.threadId, binding.turnId)
-          runtimeOptions!.abortSignal!.throwIfAborted()
-        }
-        const message = new AIMessage({
-          id: "scheduled-answer",
-          content: "actual graph answer",
-          usage_metadata: { input_tokens: 7, output_tokens: 3, total_tokens: 10 },
-          response_metadata: { model_name: "scheduled-provider" }
-        })
-        return { generations: [{ message, text: "actual graph answer" }] }
-      }
-    }
-    fixture.runtime = (options) => {
-      runtimeOptions = options
-      const { authority } = authorities.create({
-        workspace: options.workspacePath!,
-        threadId: options.threadId!,
-        turnId: options.hookTurnId!
-      })
-      return createAgent({
-        model: new ScheduledModel({}),
-        tools: [],
-        middleware: [
-          createFunctionSessionViewMiddleware(
-            manager as unknown as ModsManager,
-            authority,
-            "scheduled-provider",
-            options.modTurnRunId
-          )
-        ]
-      })
-    }
-    try {
-      await runTaskNow(fixture.task.id)
-      await vi.waitFor(() => expect(complete).toHaveBeenCalledTimes(1))
-      expect(modelCalls).toBe(1)
-      const facts = complete.mock.calls[0][1]
-      expect(facts.reason).toBe(ending === "cancel" ? "aborted" : ending)
-      expect(facts.turnId).toBe(db.getThreadMessages(currentThreadId())[0].id)
-      expect(runtimeOptions?.hookTurnId).toBe(facts.turnId)
-      expect(runtimeOptions?.modTurnRunId).toBe(start.mock.calls[0][0].runId)
-      expect(runtimeOptions?.currentRunMessageQueueOwnerToken).toBeUndefined()
-      if (ending === "answer") {
-        expect(facts.answer).toBe("actual graph answer")
-        expect(facts.usage).toEqual({
-          model: "scheduled-provider",
-          input_tokens: 7,
-          output_tokens: 3,
-          cache_read_input_tokens: 0,
-          cache_creation_input_tokens: 0
-        })
-      } else expect(facts.usage).toBeUndefined()
-    } finally {
-      lifecycle.close()
-      authorities.close()
-    }
-  }
-)
 
 it.each(["complete", "cancel", "error"])(
   "persists displayed answer and reasoning before %s settles an already hydrated task",
@@ -376,4 +262,59 @@ it("holds the task busy until transcript and checkpoint settlement finish", asyn
   release()
   await running
   expect(isTaskRunning(fixture.task.id)).toBe(false)
+})
+
+it("starts SQLite-backed managed reservations on the shared minute tick and stops checking on shutdown", async () => {
+  vi.useFakeTimers()
+  vi.setSystemTime(new Date("2026-10-28T13:59:30Z"))
+  const managed = new ManagedRunScheduler(new ManagedRunScheduleStore(() => db.getDb()))
+  const start = vi.fn(async () => ({ status: "running" }) as ManagedRunSummary)
+  const onTick = vi.fn((now: Date) => managed.tick(now))
+  managed.initialize({ start, changed: vi.fn() })
+  managed.create({
+    projectId: "minute-tick-project",
+    featureId: "feature",
+    workspacePath: "fixture",
+    scheduledAt: "2026-10-28 22:00:00"
+  })
+  try {
+    startScheduler(onTick)
+    expect(start).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(59_999)
+    expect(start).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(1)
+    expect(start).toHaveBeenCalledTimes(1)
+    expect(managed.get("minute-tick-project", "feature")).toBeNull()
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(start).toHaveBeenCalledTimes(1)
+    stopScheduler()
+    const count = onTick.mock.calls.length
+    await vi.advanceTimersByTimeAsync(120_000)
+    expect(onTick).toHaveBeenCalledTimes(count)
+  } finally {
+    stopScheduler()
+    managed.removeProject("minute-tick-project")
+    vi.useRealTimers()
+  }
+})
+
+it("continues minute checks when additional scheduled work fails", async () => {
+  vi.useFakeTimers()
+  const errorLog = vi.spyOn(console, "error").mockImplementation(() => {})
+  const onTick = vi.fn(async () => {
+    throw new Error("database unavailable")
+  })
+  try {
+    startScheduler(onTick)
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(onTick).toHaveBeenCalledTimes(2)
+    expect(errorLog).toHaveBeenCalledWith(
+      "[Scheduler] Additional scheduled work failed:",
+      expect.any(Error)
+    )
+  } finally {
+    stopScheduler()
+    vi.useRealTimers()
+    errorLog.mockRestore()
+  }
 })

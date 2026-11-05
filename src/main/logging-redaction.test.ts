@@ -16,12 +16,55 @@ const tempRoots: string[] = []
 afterEach(() => {
   vi.resetModules()
   vi.restoreAllMocks()
+  vi.unstubAllEnvs()
   for (const root of tempRoots.splice(0)) {
     rmSync(root, { recursive: true, force: true })
   }
 })
 
 describe("logging redaction integration", () => {
+  it("keeps forwarded errors at ERROR so packaged renderer logging cannot sample them out", async () => {
+    const root = mkdtempSync(join(tmpdir(), "logging-console-level-"))
+    tempRoots.push(root)
+    const logsDir = join(root, "logs")
+    mkdirSync(logsDir, { recursive: true })
+    const mainLog = join(logsDir, "main.log")
+    const rendererLog = join(logsDir, "renderer.log")
+    vi.stubEnv("CMB_LOG_LEVEL", "INFO")
+    vi.doMock("electron", () => ({ app: { isPackaged: true } }))
+    vi.doMock("./storage", () => ({
+      getLogsDir: () => logsDir,
+      getMainLogPath: () => mainLog,
+      getRendererLogPath: () => rendererLog,
+      resolveHookLogDir: () => logsDir
+    }))
+    const { flushLogs, writeMainLog, writeRendererLog } = await import("./logging")
+    const { createSafeLogMethod, getRendererConsoleLevelName } =
+      await import("./main-log-forwarding")
+    // Model console.warn/error -> main log -> renderer console -> console-message.
+    for (const [level, electronLevel] of [
+      ["WARN", 2],
+      ["ERROR", 3]
+    ] as const) {
+      createSafeLogMethod({
+        level,
+        persist: writeMainLog,
+        processingGuard: { processing: false },
+        sink: () => undefined,
+        forward: (_level, args) =>
+          writeRendererLog(getRendererConsoleLevelName(electronLevel), `[main] ${args.join(" ")}`)
+      })(`[Dashboard] ${level} query failure`)
+    }
+    await flushLogs()
+    const main = readFileSync(mainLog, "utf8")
+    const renderer = readFileSync(rendererLog, "utf8")
+    for (const level of ["WARN", "ERROR"]) {
+      expect(main).toContain(`[${level}] [Dashboard] ${level} query failure`)
+      expect(renderer).toContain(`[${level}] [main] [Dashboard] ${level} query failure`)
+    }
+    expect(renderer).not.toContain("[DEBUG]")
+  })
+
   it("keeps undefined console arguments from crashing the caller", async () => {
     const root = mkdtempSync(join(tmpdir(), "logging-undefined-"))
     tempRoots.push(root)

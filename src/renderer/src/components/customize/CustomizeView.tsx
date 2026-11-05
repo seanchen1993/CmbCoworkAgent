@@ -13,13 +13,13 @@ import {
   Plug,
   Puzzle,
   Sparkles,
+  Webhook,
   Shield,
   Cpu,
   CircleUser,
   PawPrint,
   Settings2,
   Users,
-  Webhook,
   Wrench,
   type LucideIcon
 } from "lucide-react"
@@ -39,7 +39,6 @@ const HeartbeatPanel = lazy(() =>
   import("./HeartbeatPanel").then((m) => ({ default: m.HeartbeatPanel }))
 )
 const PluginsPanel = lazy(() => import("./PluginsPanel").then((m) => ({ default: m.PluginsPanel })))
-const ModsPanel = lazy(() => import("./ModsPanel").then((m) => ({ default: m.ModsPanel })))
 const SandboxPanel = lazy(() => import("./SandboxPanel").then((m) => ({ default: m.SandboxPanel })))
 const EvolutionPanel = lazy(() =>
   import("./EvolutionPanel").then((m) => ({ default: m.EvolutionPanel }))
@@ -66,7 +65,6 @@ type CustomizeTab =
   | "skills"
   | "connectors"
   | "plugins"
-  | "mods"
   | "heartbeat"
   | "memory"
   | "taskMmd"
@@ -105,7 +103,6 @@ const MENU_GROUPS: MenuGroup[] = [
       { tab: "skills", label: "技能", icon: Sparkles },
       { tab: "connectors", label: "MCP 连接器", icon: Plug },
       { tab: "plugins", label: "插件", icon: Puzzle },
-      { tab: "mods", label: "Function Mods", icon: Webhook },
       { tab: "sandbox", label: "沙盒环境", icon: Shield }
     ]
   },
@@ -286,10 +283,6 @@ export function CustomizeView(): React.JSX.Element {
         ) : activeTab === "plugins" ? (
           <div className="flex flex-1 min-w-0 min-h-0 overflow-hidden">
             <PluginsPanel />
-          </div>
-        ) : activeTab === "mods" ? (
-          <div className="flex flex-1 min-w-0 min-h-0 overflow-y-auto">
-            <ModsPanel threadId={currentThreadId} />
           </div>
         ) : activeTab === "heartbeat" ? (
           <HeartbeatPanel />

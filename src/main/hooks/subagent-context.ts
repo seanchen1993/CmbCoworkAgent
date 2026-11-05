@@ -62,6 +62,7 @@ export interface SubagentStopHookContextInput extends SubagentStopHarnessContext
   threadId: string
   turnId?: string
   toolCallId: string
+  subagentType?: string
   failed: boolean
 }
 
@@ -106,6 +107,7 @@ export function buildSubagentStopHookContext(input: SubagentStopHookContextInput
     turnId: input.turnId,
     subagent: {
       id: input.toolCallId,
+      name: input.subagentType,
       status: input.failed ? "failed" : "completed"
     }
   }

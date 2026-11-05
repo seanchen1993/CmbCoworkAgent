@@ -1,12 +1,9 @@
-import { protectCurrentModData, publishCurrentModResult } from "../mods/adapters"
-import { getModCallContext } from "../mods/context"
 import { DynamicStructuredTool } from "@langchain/core/tools"
 import { ToolMessage } from "@langchain/core/messages"
 import { CallbackManager, parseCallbackConfigArg } from "@langchain/core/callbacks/manager"
 import type { McpCapabilityService, McpCapabilityTool } from "./capability-types"
 import { toEagerToolResponse } from "./result-utils"
 import { isHookHaltError } from "../hooks/halt"
-const invocationErrors = new WeakSet<object>()
 
 function getRequiredMcpArgs(schema?: Record<string, unknown>): string[] {
   if (!schema || typeof schema !== "object") return []
@@ -44,7 +41,6 @@ function formatToolOutput(params: {
   toolCallId?: string
   name: string
   metadata?: Record<string, unknown>
-  isError?: boolean
 }): ToolMessage | unknown {
   const { content, artifact, toolCallId, name, metadata } = params
   if (!toolCallId) return content
@@ -54,7 +50,7 @@ function formatToolOutput(params: {
     (Array.isArray(content) && content.every((item) => typeof item === "object"))
   ) {
     return new ToolMessage({
-      status: params.isError ? "error" : "success",
+      status: "success",
       content,
       artifact,
       tool_call_id: toolCallId,
@@ -64,7 +60,7 @@ function formatToolOutput(params: {
   }
 
   return new ToolMessage({
-    status: params.isError ? "error" : "success",
+    status: "success",
     content: stringifyContent(content),
     artifact,
     tool_call_id: toolCallId,
@@ -75,7 +71,9 @@ function formatToolOutput(params: {
 
 class NonValidatingMcpTool extends DynamicStructuredTool {
   async call(arg: unknown, configArg?: unknown, tags?: string[]): Promise<unknown> {
-    const config = parseCallbackConfigArg(configArg as Parameters<typeof parseCallbackConfigArg>[0])
+    const config = parseCallbackConfigArg(
+      configArg as Parameters<typeof parseCallbackConfigArg>[0]
+    )
     if (config.runName === undefined) {
       config.runName = this.name
     }
@@ -93,14 +91,12 @@ class NonValidatingMcpTool extends DynamicStructuredTool {
     )
 
     const toolCallId =
-      (isToolCallLike(arg) ? arg.id : undefined) ??
-      (config as { toolCall?: { id?: string } }).toolCall?.id
+      (isToolCallLike(arg) ? arg.id : undefined)
+      ?? ((config as { toolCall?: { id?: string } }).toolCall?.id)
 
     const runManager = await callbackManager?.handleToolStart(
       this.toJSON(),
-      typeof arg === "string"
-        ? protectCurrentModData(arg)
-        : JSON.stringify(protectCurrentModData(arg)),
+      typeof arg === "string" ? arg : JSON.stringify(arg),
       config.runId,
       undefined,
       undefined,
@@ -128,21 +124,18 @@ class NonValidatingMcpTool extends DynamicStructuredTool {
           `Tool response format is "content_and_artifact" but the output was not a two-tuple.\nResult: ${JSON.stringify(result)}`
         )
       }
-      ;[content, artifact] = result
+      [content, artifact] = result
     } else {
       content = result
     }
 
-    const formattedOutput = await publishCurrentModResult(
-      formatToolOutput({
-        content,
-        artifact,
-        isError: typeof result === "object" && result !== null && invocationErrors.has(result),
-        toolCallId,
-        name: this.name,
-        metadata: this.metadata
-      })
-    )
+    const formattedOutput = formatToolOutput({
+      content,
+      artifact,
+      toolCallId,
+      name: this.name,
+      metadata: this.metadata
+    })
 
     await runManager?.handleToolEnd(formattedOutput)
     return formattedOutput
@@ -161,20 +154,12 @@ export function createEagerMcpTool(
     func: async (args) => {
       try {
         const result = await capabilityService.invoke(tool.capabilityId, args ?? {})
-        const response = toEagerToolResponse(result)
-        if (result.isError) invocationErrors.add(response)
-        return response
+        return toEagerToolResponse(result)
       } catch (error) {
         if (isHookHaltError(error)) throw error
-        const message = getModCallContext()?.protectedOutput
-          ? "MCP invocation failed; output withheld by project policy"
-          : error instanceof Error
-            ? error.message
-            : String(error)
+        const message = error instanceof Error ? error.message : String(error)
         console.warn(`[Runtime] MCP tool "${tool.toolName}" error (non-fatal):`, message)
-        const response = [`MCP tool error: ${message}`, []]
-        invocationErrors.add(response)
-        return response
+        return [`MCP tool error: ${message}`, []]
       }
     }
   })

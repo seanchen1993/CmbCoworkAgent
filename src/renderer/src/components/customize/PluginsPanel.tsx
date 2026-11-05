@@ -446,12 +446,9 @@ export function PluginsPanel(): React.JSX.Element {
   const [errorMsg, setErrorMsg] = useState<string | null>(null)
   const [fileEditorOpen, setFileEditorOpen] = useState(false)
 
-  // 市场下载的 Plugin 不再隐藏 Skill/Hook/MCP 详情，统一展示组件详情。
-  // 历史上这里会对 origin === "market" 的插件隐藏详情；现按需求恒为可见。
-  // 保留入参以兼容调用点签名（恒返回 false）。
+  // Source access follows the origin persisted by the main process.
   const shouldHidePluginDetails = useCallback((plugin: PluginMetadata | null): boolean => {
-    void plugin
-    return false
+    return !!plugin && plugin.origin !== "local"
   }, [])
 
   // Clean up debounce timer on unmount
@@ -944,7 +941,7 @@ export function PluginsPanel(): React.JSX.Element {
         onToggleHookEnabled={handleToggleHookEnabled}
         onDelete={handleDeleteRequest}
         onPublish={
-          selectedPlugin && !shouldHideSelectedPluginDetails
+          selectedPlugin?.origin === "local" && !shouldHideSelectedPluginDetails
             ? () => openPublishDialog(selectedPlugin)
             : undefined
         }
@@ -960,7 +957,7 @@ export function PluginsPanel(): React.JSX.Element {
         }
         hideComponentDetails={shouldHideSelectedPluginDetails}
         onEditFiles={
-          selectedPlugin && !shouldHideSelectedPluginDetails
+          selectedPlugin?.origin === "local" && !shouldHideSelectedPluginDetails
             ? () => setFileEditorOpen(true)
             : undefined
         }
@@ -1044,10 +1041,11 @@ export function PluginDetailPanel(props: {
     onPublish,
     publishLabel = "发布到市场",
     hideActions = false,
-    hideComponentDetails = false,
+    hideComponentDetails: requestedHideComponentDetails = false,
     isMarketPlugin = false,
     onEditFiles
   } = props
+  const hideComponentDetails = requestedHideComponentDetails || plugin?.origin !== "local"
 
   if (!plugin) {
     return (
@@ -1062,7 +1060,6 @@ export function PluginDetailPanel(props: {
               <p className="mt-1 text-sm text-muted-foreground leading-relaxed">
                 插件是一个可分发的功能包，可以把技能、MCP 服务、Hooks 和静态资源放在一起安装、启用、禁用和卸载。
                 适合把一套完整工作流交给团队复用，而不是让每个人分别添加技能、连接器和 Hook 规则。
-                如果插件包含 Function Mods，安装完成后请到“Function Mods”页面单独授权和控制其运行能力。
               </p>
             </div>
           </div>

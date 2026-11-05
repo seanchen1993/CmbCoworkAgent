@@ -7,11 +7,7 @@ import {
   SystemMessage,
   ToolMessage
 } from "@langchain/core/messages"
-import { FakeChatModel, FakeListChatModel } from "@langchain/core/utils/testing"
-import { readLiveContextUsage } from "./context-usage"
-import { createFunctionSessionViewMiddleware } from "./mods-session-view"
-import { ModRuntimeAuthorities } from "../mods/runtime-instance"
-import type { ModsManager } from "../mods/manager"
+import { FakeListChatModel } from "@langchain/core/utils/testing"
 import { Command, MemorySaver } from "@langchain/langgraph"
 import { createAgent, FakeToolCallingModel } from "langchain"
 import { describe, expect, it, vi } from "vitest"
@@ -23,7 +19,6 @@ import {
 } from "../../shared/checkpoint-transcript"
 import {
   createCmbSummarizationMiddleware,
-  createCmbContextController,
   isCmbContextOverflow,
   SUMMARIZATION_STATE_OWNER_KEY
 } from "./context-summarization-middleware"
@@ -148,105 +143,6 @@ function largeToolResult(start: string, end: string): string {
   return `${start}\n${"x".repeat(23_900)}\n${end}`
 }
 
-it("prepares explicit compaction without invoking the outer model or archiving", async () => {
-  const writes: string[] = []
-  const controller = createCmbContextController({
-    model: new FakeListChatModel({ responses: [validSummary("manual compaction")] }),
-    backend: {
-      write: async (_path: string, content?: string) => {
-        writes.push(content ?? "")
-        return { path: _path }
-      },
-      downloadFiles: async () => []
-    } as never,
-    maxInputTokens: 32_000
-  })
-  const plan = await controller.prepare(
-    {
-      messages: [
-        new HumanMessage("MANUAL_COMPACT_ORIGINAL"),
-        new AIMessage("MANUAL_COMPACT_PROGRESS"),
-        new HumanMessage("MANUAL_COMPACT_LATEST")
-      ],
-      state: {}
-    },
-    "Keep the latest user intent and exact file paths.",
-    new AbortController().signal
-  )
-  expect("skip" in plan).toBe(false)
-  if ("skip" in plan) return
-  expect(plan.messages).toHaveLength(1)
-  expect(plan.messages[0].additional_kwargs).toMatchObject({ lc_source: "summarization" })
-  expect(plan.update._summarizationEvent.filePath).toBeNull()
-  expect(plan.summaryAttempts).toBe(1)
-  expect(writes).toEqual([])
-  expect(plan.commitArchive).toBeDefined()
-  const committed = await plan.commitArchive!(new AbortController().signal)
-  expect(committed.filePath).toContain("/conversation_history/")
-  expect(committed.update._summarizationEvent.filePath).toBe(committed.filePath)
-  expect(writes).toHaveLength(1)
-  await plan.commitArchive!(new AbortController().signal)
-  expect(writes).toHaveLength(1)
-})
-
-it("stages an explicit archive once and exposes compensation for a failed checkpoint", async () => {
-  const write = vi.fn(async (path: string) => ({ path }))
-  const remove = vi.fn(async () => ({}))
-  const controller = createCmbContextController({
-    model: new FakeListChatModel({ responses: [validSummary("compensation summary")] }),
-    backend: { write, removeInternalArtifact: remove, downloadFiles: async () => [] } as never,
-    maxInputTokens: 32_000
-  })
-  const plan = await controller.prepare(
-    { messages: [new HumanMessage("archive me")], state: {} },
-    "Keep the request.",
-    new AbortController().signal
-  )
-  if ("skip" in plan) throw Error("expected a compaction plan")
-  const committed = await plan.commitArchive!(new AbortController().signal)
-  await plan.commitArchive!(new AbortController().signal)
-  expect(write).toHaveBeenCalledTimes(1)
-  await plan.rollbackArchive!(new AbortController().signal)
-  expect(remove).toHaveBeenCalledWith(committed.filePath)
-  const retried = await plan.commitArchive!(new AbortController().signal)
-  expect(retried.filePath).not.toBe(committed.filePath)
-  expect(write).toHaveBeenCalledTimes(2)
-})
-
-it("removes an explicit archive when cancellation arrives during archive staging", async () => {
-  let releaseWrite!: () => void
-  let markWriteStarted!: () => void
-  const writeStarted = new Promise<void>((resolve) => {
-    markWriteStarted = resolve
-  })
-  const write = vi.fn(async () => {
-    markWriteStarted()
-    await new Promise<void>((release) => {
-      releaseWrite = release
-    })
-    return { path: "/conversation_history/compact-cancelled.md" }
-  })
-  const remove = vi.fn(async () => ({}))
-  const controller = createCmbContextController({
-    model: new FakeListChatModel({ responses: [validSummary("cancelled archive")] }),
-    backend: { write, removeInternalArtifact: remove, downloadFiles: async () => [] } as never,
-    maxInputTokens: 32_000
-  })
-  const plan = await controller.prepare(
-    { messages: [new HumanMessage("archive cancellation")], state: {} },
-    "Keep the request.",
-    new AbortController().signal
-  )
-  if ("skip" in plan) throw Error("expected a compaction plan")
-  const abort = new AbortController()
-  const pending = plan.commitArchive!(abort.signal)
-  await writeStarted
-  abort.abort()
-  releaseWrite()
-  await expect(pending).rejects.toMatchObject({ name: "AbortError" })
-  expect(remove).toHaveBeenCalledTimes(1)
-})
-
 function realFailureShapeMessages(): SummaryRequest["messages"] {
   const toolCalls = [1, 2, 3, 4].map((index) => ({
     name: "read_file",
@@ -290,6 +186,17 @@ describe("OpenAI-compatible context overflow classification", () => {
     }),
     new Error("outer middleware", {
       cause: Object.assign(new Error("maximum context length is 128000 tokens"), { status: 400 })
+    }),
+    { status: 485, errorMsg: "模型服务内部异常或当前任务上下文超过最大限度" },
+    { statusCode: 580, errorMsg: "当前任务上下文超过最大限度，请缩短上下文" },
+    { returnCode: "XCDZB485", errorMsg: "模型服务内部异常或当前任务上下文超过最大限度" },
+    { error: { code: "XCDZB580", message: "当前任务上下文超过最大限度" } },
+    {
+      status: 580,
+      responseBody: '{"returnCode":"XCDZB580","errorMsg":"当前任务上下文超过最大限度"}'
+    },
+    new Error("outer middleware", {
+      cause: Object.assign(new Error("485 当前任务上下文超过最大限度"), { status: 485 })
     })
   ])("recognises an established overflow shape", (error) => {
     expect(isCmbContextOverflow(error)).toBe(true)
@@ -299,7 +206,19 @@ describe("OpenAI-compatible context overflow classification", () => {
     Object.assign(new Error("tool_calls must be followed by tool messages"), { status: 400 }),
     Object.assign(new Error("invalid API key"), { status: 401 }),
     Object.assign(new Error("rate limit exceeded"), { status: 429 }),
-    new Error("maximum retries exceeded")
+    new Error("maximum retries exceeded"),
+    { status: 485, errorMsg: "模型服务内部异常" },
+    { status: 580, errorMsg: "模型服务内部异常" },
+    { status: 500, errorMsg: "当前任务上下文超过最大限度" },
+    { status: 434, errorMsg: "当前任务上下文超过最大限度", returnCode: "XCDZB580" },
+    { status: 401, errorMsg: "当前任务上下文超过最大限度" },
+    { status: 429, errorMsg: "当前任务上下文超过最大限度" },
+    { errorMsg: "当前任务上下文超过最大限度" },
+    { returnCode: "XCDZB485", errorMsg: "模型服务内部异常" },
+    {
+      status: 580,
+      responseBody: '{"errorMsg":"模型服务内部异常","request":{"text":"任务上下文超过最大限度"}}'
+    }
   ])("does not turn unrelated provider failures into compaction", (error) => {
     expect(isCmbContextOverflow(error)).toBe(false)
   })
@@ -310,177 +229,6 @@ describe("OpenAI-compatible context overflow classification", () => {
 })
 
 describe("CmbCowork context compaction middleware", () => {
-  it("clears live usage before the post-compaction response arrives", async () => {
-    const authorities = new ModRuntimeAuthorities()
-    const { authority } = authorities.create({
-      workspace: "/root",
-      threadId: "live",
-      turnId: "turn"
-    })
-    let observedMessages: readonly unknown[] = []
-    let observedState: unknown
-    let checked = false
-    const manager = {
-      bindFunctionSession: vi.fn(),
-      updateFunctionSessionMessages(
-        _authority: unknown,
-        messages: readonly unknown[],
-        state: unknown
-      ) {
-        observedMessages = messages
-        observedState = state
-      },
-      updateFunctionSessionRequest: vi.fn()
-    }
-    class Model extends FakeChatModel {
-      bindTools() {
-        return this
-      }
-      async _generate() {
-        // The actual model is in flight; no new response or checkpoint has been produced.
-        expect(
-          await readLiveContextUsage(
-            observedMessages,
-            observedState,
-            new AbortController().signal,
-            () => {}
-          )
-        ).toBeUndefined()
-        checked = true
-        const message = new AIMessage({
-          content: "new",
-          usage_metadata: {
-            input_tokens: 50,
-            output_tokens: 2,
-            total_tokens: 52
-          }
-        })
-        return { generations: [{ message, text: "new" }] }
-      }
-    }
-    try {
-      const agent = createAgent({
-        model: new Model({}),
-        tools: [],
-        middleware: [
-          createCmbSummarizationMiddleware({
-            model: new FakeListChatModel({ responses: [validSummary("live window")] }),
-            backend: createBackend() as never,
-            trigger: { type: "messages", value: 2 },
-            keep: { type: "messages", value: 1 },
-            maxInputTokens: 32000
-          }),
-          createFunctionSessionViewMiddleware(
-            manager as unknown as ModsManager,
-            authority,
-            "actual",
-            undefined,
-            32000
-          )
-        ]
-      })
-      await agent.invoke({
-        messages: [
-          new HumanMessage("old"),
-          new AIMessage({
-            content: "old answer",
-            usage_metadata: {
-              input_tokens: 900,
-              output_tokens: 3,
-              total_tokens: 903
-            }
-          }),
-          new HumanMessage("continue")
-        ]
-      })
-      expect(checked).toBe(true)
-      expect(
-        (
-          await readLiveContextUsage(
-            observedMessages,
-            observedState,
-            new AbortController().signal,
-            () => {}
-          )
-        )?.input_tokens
-      ).toBe(50)
-    } finally {
-      authorities.close()
-    }
-  })
-
-  it.each([false, true])(
-    "persists the real usage boundary and response across compaction (legacy=%s)",
-    async (legacy) => {
-      class Model extends FakeChatModel {
-        bindTools() {
-          return this
-        }
-        async _generate() {
-          const message = new AIMessage({
-            content: "actual new answer",
-            usage_metadata: { input_tokens: 50, output_tokens: 2, total_tokens: 52 }
-          })
-          return { generations: [{ message, text: "actual new answer" }] }
-        }
-      }
-      const middleware = createCmbSummarizationMiddleware({
-        model: new FakeListChatModel({ responses: [validSummary("usage boundary")] }),
-        backend: createBackend() as never,
-        trigger: { type: "messages", value: legacy ? 100 : 2 },
-        keep: { type: "messages", value: 1 },
-        maxInputTokens: 32000
-      })
-      const agent = createAgent({
-        model: new Model({}),
-        tools: [],
-        middleware: [middleware],
-        checkpointer: new MemorySaver()
-      })
-      const config = { configurable: { thread_id: "usage-boundary" } }
-      const history = [
-        new HumanMessage("old"),
-        new AIMessage({
-          content: "old answer",
-          usage_metadata: { input_tokens: 900, output_tokens: 3, total_tokens: 903 }
-        })
-      ]
-      if (legacy)
-        await agent.updateState(
-          config,
-          {
-            messages: history,
-            _summarizationEvent: {
-              cutoffIndex: 1,
-              summaryMessage: new HumanMessage({
-                content: "legacy summary",
-                additional_kwargs: { lc_source: "summarization" }
-              }),
-              filePath: null
-            }
-          },
-          "model_request"
-        )
-      await agent.invoke(
-        { messages: [...(legacy ? [] : history), new HumanMessage("continue")] },
-        config
-      )
-      const state = (
-        (await agent.getState(config)) as unknown as {
-          values: {
-            messages: BaseMessage[]
-            _summarizationEvent: { usageStartIndex: number }
-          }
-        }
-      ).values
-      expect(state._summarizationEvent.usageStartIndex).toBe(3)
-      expect(state.messages.at(-1)?.content).toBe("actual new answer")
-      expect(
-        (await readLiveContextUsage(state.messages, state, new AbortController().signal, () => {}))
-          ?.input_tokens
-      ).toBe(50)
-    }
-  )
   it("restores a summarized HumanMessage through MemorySaver on the next invocation", async () => {
     const summaryModel = new FakeListChatModel({
       responses: Array(4).fill(validSummary("MemorySaver restore"))
@@ -832,8 +580,7 @@ describe("CmbCowork context compaction middleware", () => {
       handler
     )
 
-    expect(result).toBeInstanceOf(Command)
-    expect((result as Command).update).toHaveProperty("_summarizationEvent.usageStartIndex", 1)
+    expect(result).toBeInstanceOf(AIMessage)
     expect(invoke).not.toHaveBeenCalled()
     expect(write).not.toHaveBeenCalled()
     expect(handler).toHaveBeenCalledTimes(1)
@@ -874,8 +621,7 @@ describe("CmbCowork context compaction middleware", () => {
       handler
     )
 
-    expect(result).toBeInstanceOf(Command)
-    expect((result as Command).update).toHaveProperty("_summarizationEvent.usageStartIndex", 2)
+    expect(result).toBeInstanceOf(AIMessage)
     expect(invoke).not.toHaveBeenCalled()
     expect(handler).toHaveBeenCalledTimes(1)
   })
@@ -951,6 +697,68 @@ describe("CmbCowork context compaction middleware", () => {
     expect(handler).toHaveBeenCalledTimes(2)
     expect(invoke).toHaveBeenCalledTimes(1)
   })
+
+  it.each([485, 580])(
+    "bounds recovery when every gateway request still overflows with status %s",
+    async (status) => {
+      const error = Object.assign(new Error("模型服务内部异常或当前任务上下文超过最大限度"), {
+        status
+      })
+      const invoke = vi.fn(async () => new AIMessage(validSummary("gateway recovery")))
+      const handler = vi.fn(async () => {
+        throw error
+      })
+      const middleware = createTestMiddleware(invoke, {
+        trigger: { type: "messages", value: 100 },
+        keepTokens: 1
+      })
+
+      await expect(
+        middleware.wrapModelCall(
+          {
+            messages: [
+              new HumanMessage(`OLD_CONTEXT ${"x".repeat(4_000)}`),
+              new HumanMessage("RECENT_MESSAGE_TO_KEEP")
+            ],
+            state: {},
+            tools: []
+          },
+          handler
+        )
+      ).rejects.toBe(error)
+
+      expect(handler).toHaveBeenCalledTimes(3)
+      expect(invoke).toHaveBeenCalledTimes(2)
+    }
+  )
+
+  it.each([485, 580])(
+    "bounds gateway overflow failures in the summary model itself with status %s",
+    async (status) => {
+      const error = Object.assign(new Error("模型服务内部异常或当前任务上下文超过最大限度"), {
+        status
+      })
+      const invoke = vi.fn(async () => {
+        throw error
+      })
+      const handler = vi.fn(async () => new AIMessage("handled"))
+      const middleware = createTestMiddleware(invoke, {
+        keepTokens: 1,
+        trimTokensToSummarize: 8_000
+      })
+      const messages = Array.from(
+        { length: 80 },
+        (_, index) => new HumanMessage(`ROUND_${index} ${"x".repeat(800)}`)
+      )
+
+      await expect(
+        middleware.wrapModelCall({ messages, state: {}, tools: [] }, handler)
+      ).rejects.toBe(error)
+      expect(invoke.mock.calls.length).toBeGreaterThan(1)
+      expect(invoke.mock.calls.length).toBeLessThanOrEqual(4)
+      expect(handler).not.toHaveBeenCalled()
+    }
+  )
 
   it("does not apply a parent cutoff event to an isolated task-subagent prompt", async () => {
     const ownerConfigKey = "cmb_test_subagent_owner"

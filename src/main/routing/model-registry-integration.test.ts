@@ -1,5 +1,18 @@
 import { beforeEach, describe, expect, it, vi } from "vitest"
 
+const idle = vi.hoisted(() => ({
+  id: "idle-ultra",
+  ref: "builtin:idle-ultra",
+  source: "builtin",
+  tier: "premium",
+  model: "ultra",
+  baseUrl: "http://idle.example.test/v1",
+  apiKey: "idle-key",
+  transport: "idle-gateway" as const,
+  idleModelEnvironment: undefined as "production" | "uat" | undefined,
+  unavailableReason: "outside service hours" as string | undefined
+}))
+
 const state = vi.hoisted(() => ({
   metadata: null as string | null,
   defaultLookup: vi.fn()
@@ -59,6 +72,7 @@ vi.mock("../models/registry", () => ({
   getModelByTier: (tier: "premium" | "economy") =>
     configs.find((config) => config.tier === tier) ?? configs[0] ?? null,
   getModelConfigByRef: (value: string) =>
+    (value === idle.ref ? idle : null) ??
     configs.find((config) => config.ref === value) ??
     configs.find((config) => config.source === "custom" && config.id === value) ??
     null,
@@ -75,6 +89,8 @@ import { resolveModel } from "./index"
 beforeEach(() => {
   state.metadata = null
   state.defaultLookup.mockClear()
+  idle.idleModelEnvironment = undefined
+  idle.unavailableReason = "outside service hours"
 })
 
 describe("routing with managed model refs", () => {
@@ -120,6 +136,38 @@ describe("routing with managed model refs", () => {
     expect(state.defaultLookup).toHaveBeenCalledTimes(3)
   })
 
+  it("keeps a pinned UAT idle model outside production service hours", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] })
+    vi.setSystemTime(new Date("2026-11-03T12:00:00+08:00"))
+    idle.idleModelEnvironment = "uat"
+    idle.unavailableReason = undefined
+    try {
+      const result = await resolveModel({
+        taskSource: "chat",
+        routingMode: "pinned",
+        requestedModelId: idle.ref
+      })
+      expect(result.resolvedModelId).toBe(idle.ref)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it("rejects an explicitly pinned idle model outside hours instead of replacing it", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] })
+    vi.setSystemTime(new Date("2026-11-03T07:00:00+08:00"))
+    try {
+      await expect(
+        resolveModel({
+          taskSource: "chat",
+          routingMode: "pinned",
+          requestedModelId: idle.ref
+        })
+      ).rejects.toMatchObject({ status: 400, code: "idle_model_outside_service_hours" })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
   it("reroutes a continuation when its previous managed model no longer exists", async () => {
     state.metadata = JSON.stringify({
       routingState: {

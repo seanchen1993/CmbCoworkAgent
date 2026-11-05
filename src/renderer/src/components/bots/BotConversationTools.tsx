@@ -3,15 +3,7 @@ import { toast } from "sonner"
 import { parseBotWorkHistoryHref } from "../../../../shared/bots/work-history"
 import { botHistoryReceipt } from "@/lib/bot-history-receipt"
 import { useChatSourceNavigation } from "@/lib/chat-source-navigation"
-import {
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-  useSyncExternalStore,
-  type ReactNode
-} from "react"
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react"
 import { ChevronRight, Clock, Hand } from "lucide-react"
 import type { Message, ToolCall, ToolResult } from "@/types"
 import type {
@@ -30,7 +22,6 @@ import {
   ChatActivityPresentationContext,
   ChatExecutionDetailsContext,
   ChatFoldedToolCallsContext,
-  ChatExecutionCardCallIdsContext,
   ChatFilePresentationContext,
   ChatMessageVisibilityContext,
   ChatMessagePresentationContext,
@@ -61,7 +52,6 @@ import {
 import { BotQuestionHistory } from "./BotQuestionHistory"
 import { parseBotMessageReply } from "../../../../shared/bots/message-reply"
 import { botDeliveredFileReferences } from "@/lib/bot-delivered-file-references"
-import { getModCards, subscribeModCards } from "@/lib/mod-cards-store"
 import { useBotViewStore } from "./view-store"
 import { BotActivity } from "./BotActivity"
 import { botConversationState } from "@/lib/bot-task-view"
@@ -110,13 +100,6 @@ export function BotConversationTools({
     Boolean(state.hosts[client.hostId]?.showExecutionDetails)
   )
   const showExecutionDetails = executionDetails ?? savedExecutionDetails
-  const subscribeCards = useCallback(
-    (listener: () => void) => (threadId ? subscribeModCards(threadId, listener) : () => {}),
-    [threadId]
-  )
-  const getCards = useCallback(() => getModCards(threadId ?? ""), [threadId])
-  const cards = useSyncExternalStore(subscribeCards, getCards)
-  const cardCallIds = useMemo(() => new Set(cards.map((card) => card.callId)), [cards])
   // The window identity is stable during streamed token updates; source lookups need no per-token work.
   const windowKey = useThreadStateSelector(
     threadId,
@@ -158,7 +141,9 @@ export function BotConversationTools({
   }, [client, botId, groupId, threadId, windowKey, context])
   const taskByMessage = useMemo(() => mergeBotMessageOrigins(origins, tasks), [tasks, origins])
   const mentionProjectionWarnings = useRef(new Set<string>())
-  useEffect(() => { mentionProjectionWarnings.current.clear() }, [windowKey, threadId])
+  useEffect(() => {
+    mentionProjectionWarnings.current.clear()
+  }, [windowKey, threadId])
   const replySource = useMemo(
     () =>
       groupId
@@ -179,34 +164,61 @@ export function BotConversationTools({
           },
     [client, botId, groupId, taskByMessage]
   )
-  const presentUserText = useCallback((message: Message, text: string) => {
-    if (groupId || typeof message.content !== "string") return text
-    const origin = taskByMessage.get(message.id)?.origin
-    if (origin?.kind !== "user" || !origin.mentions?.length) return text
-    const { mentions, reason } = projectPrivateBotMentions(origin, message.content, text)
-    if (reason && !mentionProjectionWarnings.current.has(message.id)) {
-      mentionProjectionWarnings.current.add(message.id)
-      console.warn("[Bots] Private mention display unavailable:", reason)
-    }
-    if (!mentions.length) return text
-    const nodes: ReactNode[] = []
-    let offset = 0
-    for (const mention of mentions) {
-      nodes.push(text.slice(offset, mention.start))
-      const peer = mention.kind === "group" ? undefined : bots.find((item) => item.id === mention.botId && !item.deleting)
-      const mentionedGroup = mention.kind === "group" ? groups.find((item) => item.id === mention.groupId && !item.deleting) : undefined
-      const label = <BotMentionLabel mention={mention} bot={peer} />
-      const open = mentionedGroup && onOpenGroup ? () => onOpenGroup(mentionedGroup.id)
-        : peer && onOpenBot ? () => onOpenBot(peer.id) : undefined
-      const identity = mention.kind === "group" ? `group:${mention.groupId}` : `bot:${mention.botId}`
-      nodes.push(open
-        ? <button key={`${mention.start}:${identity}`} type="button" className="bot-inline-mention" onClick={open}>{label}</button>
-        : <span key={`${mention.start}:${identity}`} className="bot-inline-mention">{label}</span>)
-      offset = mention.end
-    }
-    nodes.push(text.slice(offset))
-    return <>{nodes}</>
-  }, [groupId, taskByMessage, bots, groups, onOpenBot, onOpenGroup])
+  const presentUserText = useCallback(
+    (message: Message, text: string) => {
+      if (groupId || typeof message.content !== "string") return text
+      const origin = taskByMessage.get(message.id)?.origin
+      if (origin?.kind !== "user" || !origin.mentions?.length) return text
+      const { mentions, reason } = projectPrivateBotMentions(origin, message.content, text)
+      if (reason && !mentionProjectionWarnings.current.has(message.id)) {
+        mentionProjectionWarnings.current.add(message.id)
+        console.warn("[Bots] Private mention display unavailable:", reason)
+      }
+      if (!mentions.length) return text
+      const nodes: ReactNode[] = []
+      let offset = 0
+      for (const mention of mentions) {
+        nodes.push(text.slice(offset, mention.start))
+        const peer =
+          mention.kind === "group"
+            ? undefined
+            : bots.find((item) => item.id === mention.botId && !item.deleting)
+        const mentionedGroup =
+          mention.kind === "group"
+            ? groups.find((item) => item.id === mention.groupId && !item.deleting)
+            : undefined
+        const label = <BotMentionLabel mention={mention} bot={peer} />
+        const open =
+          mentionedGroup && onOpenGroup
+            ? () => onOpenGroup(mentionedGroup.id)
+            : peer && onOpenBot
+              ? () => onOpenBot(peer.id)
+              : undefined
+        const identity =
+          mention.kind === "group" ? `group:${mention.groupId}` : `bot:${mention.botId}`
+        nodes.push(
+          open ? (
+            <button
+              key={`${mention.start}:${identity}`}
+              type="button"
+              className="bot-inline-mention"
+              onClick={open}
+            >
+              {label}
+            </button>
+          ) : (
+            <span key={`${mention.start}:${identity}`} className="bot-inline-mention">
+              {label}
+            </span>
+          )
+        )
+        offset = mention.end
+      }
+      nodes.push(text.slice(offset))
+      return <>{nodes}</>
+    },
+    [groupId, taskByMessage, bots, groups, onOpenBot, onOpenGroup]
+  )
   const deliveredReferences = useMemo(
     () => botDeliveredFileReferences(threadId ? context.getThreadState(threadId).messages : []),
     [context, threadId, windowKey]
@@ -225,7 +237,7 @@ export function BotConversationTools({
       const running = tasks.some((task) =>
         ["queued", "running", "waiting_user"].includes(task.state)
       )
-      view = projectBotExecution(messages, running, cardCallIds)
+      view = projectBotExecution(messages, running)
     }
     return {
       ...view,
@@ -241,8 +253,7 @@ export function BotConversationTools({
     windowKey,
     streamingQuietMessage,
     showExecutionDetails,
-    tasks,
-    cardCallIds
+    tasks
   ])
   useEffect(() => {
     if (!exchangeId && exchangeTrigger.current?.isConnected) exchangeTrigger.current.focus()
@@ -268,7 +279,7 @@ export function BotConversationTools({
     (tool: ToolCall, result?: Pick<ToolResult, "content" | "is_error">) => {
       if (!result) {
         const stoppedQuestion =
-          !showExecutionDetails && tool.name === "request_user_input" && !cardCallIds.has(tool.id)
+          !showExecutionDetails && tool.name === "request_user_input"
             ? executionView.stoppedQuestions.get(tool.id)
             : undefined
         if (stoppedQuestion) return <BotQuestionHistory history={stoppedQuestion} />
@@ -284,7 +295,13 @@ export function BotConversationTools({
         return (
           <BotBrowserHelpCard
             client={client}
-            scopeId={imConversationId ? botImBrowserScope(imConversationId, botId) : groupId ? botGroupBrowserScope(groupId, botId) : botId}
+            scopeId={
+              imConversationId
+                ? botImBrowserScope(imConversationId, botId)
+                : groupId
+                  ? botGroupBrowserScope(groupId, botId)
+                  : botId
+            }
             instruction={tool.args.instruction.trim()}
           />
         )
@@ -295,7 +312,8 @@ export function BotConversationTools({
           <div className="bot-browser-help" role="note" data-bot-browser-help-history>
             <Hand size={16} aria-hidden="true" />
             <span>
-              电脑 · {browserHelpHistory.status === "skipped" ? "已跳过" : "协助已结束"} · {browserHelpHistory.instruction}
+              电脑 · {browserHelpHistory.status === "skipped" ? "已跳过" : "协助已结束"} ·{" "}
+              {browserHelpHistory.instruction}
             </span>
           </div>
         )
@@ -310,12 +328,7 @@ export function BotConversationTools({
         )
       const history = botHistoryReceipt(tool, result)
       if (history?.entries.length && !groupId)
-        return (
-          <BotHistorySources
-            page={history}
-            onOpen={openHistorySource}
-          />
-        )
+        return <BotHistorySources page={history} onOpen={openHistorySource} />
       const workReceipt = botWorkReceipt(tool, result, botId)
       if (workReceipt && onOpenWork)
         return (
@@ -375,8 +388,15 @@ export function BotConversationTools({
         const files = parseBotFileDelivery(result.content)
         if (!files) return null
         return (
-          <BotDeliveredFiles files={files} callId={tool.id} client={client} botId={botId}
-            groupId={groupId} imConversationId={imConversationId} threadId={threadId} />
+          <BotDeliveredFiles
+            files={files}
+            callId={tool.id}
+            client={client}
+            botId={botId}
+            groupId={groupId}
+            imConversationId={imConversationId}
+            threadId={threadId}
+          />
         )
       }
       const receipt = delegatedTaskReceipt(tool, result)
@@ -410,7 +430,6 @@ export function BotConversationTools({
       botId,
       threadId,
       showExecutionDetails,
-      cardCallIds,
       executionView.stoppedQuestions
     ]
   )
@@ -502,7 +521,15 @@ export function BotConversationTools({
   const presentFile = useCallback(
     (file: { filePath: string; threadId: string; label: ReactNode; messageId?: string }) => {
       if (file.messageId && deliveredReferences.get(file.messageId)?.has(file.filePath)) return null
-      return <BotDeliveredFile {...file} client={client} botId={botId} groupId={groupId} imConversationId={imConversationId} />
+      return (
+        <BotDeliveredFile
+          {...file}
+          client={client}
+          botId={botId}
+          groupId={groupId}
+          imConversationId={imConversationId}
+        />
+      )
     },
     [client, botId, groupId, imConversationId, deliveredReferences]
   )
@@ -515,28 +542,26 @@ export function BotConversationTools({
               <ChatPresentationContext.Provider value="bot">
                 <ChatExecutionDetailsContext.Provider value={showExecutionDetails}>
                   <ChatFoldedToolCallsContext.Provider value={executionView.foldedTools}>
-                    <ChatExecutionCardCallIdsContext.Provider value={cardCallIds}>
-                      <ChatFilePresentationContext.Provider value={presentFile}>
-                        <ChatActivityPresentationContext.Provider
-                          value={
-                            !showExecutionDetails && bot && threadId ? (
-                              <BotActivity
-                                bot={bot}
-                                threadId={threadId}
-                                taskCreatedAt={botActiveTaskCreatedAt(tasks, threadId)}
-                                waiting={botConversationState(tasks) === "waiting_user"}
-                              />
-                            ) : null
-                          }
-                        >
-                          <ChatReplySourceContext.Provider value={replySource}>
-                            <ChatUserTextPresentationContext.Provider value={presentUserText}>
-                              {children}
-                            </ChatUserTextPresentationContext.Provider>
-                          </ChatReplySourceContext.Provider>
-                        </ChatActivityPresentationContext.Provider>
-                      </ChatFilePresentationContext.Provider>
-                    </ChatExecutionCardCallIdsContext.Provider>
+                    <ChatFilePresentationContext.Provider value={presentFile}>
+                      <ChatActivityPresentationContext.Provider
+                        value={
+                          !showExecutionDetails && bot && threadId ? (
+                            <BotActivity
+                              bot={bot}
+                              threadId={threadId}
+                              taskCreatedAt={botActiveTaskCreatedAt(tasks, threadId)}
+                              waiting={botConversationState(tasks) === "waiting_user"}
+                            />
+                          ) : null
+                        }
+                      >
+                        <ChatReplySourceContext.Provider value={replySource}>
+                          <ChatUserTextPresentationContext.Provider value={presentUserText}>
+                            {children}
+                          </ChatUserTextPresentationContext.Provider>
+                        </ChatReplySourceContext.Provider>
+                      </ChatActivityPresentationContext.Provider>
+                    </ChatFilePresentationContext.Provider>
                   </ChatFoldedToolCallsContext.Provider>
                 </ChatExecutionDetailsContext.Provider>
               </ChatPresentationContext.Provider>

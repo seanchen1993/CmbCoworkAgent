@@ -1,5 +1,6 @@
 import { createHash } from "crypto"
 import { queryDashboardEsInWorkerWithStats } from "./dashboard-es-client"
+import { prepareDashboardFieldCapsRequest } from "./dashboard-es-field-caps-request"
 
 export type DashboardEsIndexAlias = "event" | "trace"
 export type DashboardEsQueryOperation = "search" | "msearch" | "count" | "mapping" | "field_caps"
@@ -349,8 +350,11 @@ export function prepareDashboardEsQuery(
     method = "GET"
     path = `/${encodedIndex}/_mapping`
   } else if (input.operation === "field_caps") {
-    path = `/${encodedIndex}/_field_caps`
-    bodyText = JSON.stringify(sanitizeFieldCapsBody(input.body))
+    const body = sanitizeFieldCapsBody(input.body)
+    assertBodySize(JSON.stringify(body))
+    const prepared = prepareDashboardFieldCapsRequest(encodedIndex, body)
+    path = prepared.path
+    bodyText = prepared.bodyText
   } else if (input.operation === "count") {
     path = `/${encodedIndex}/_count`
     bodyText = JSON.stringify(sanitizeCountBody(input.body, injectedFilters))
@@ -375,7 +379,7 @@ export function prepareDashboardEsQuery(
       indexAlias: input.indexAlias,
       index,
       operation: input.operation,
-      bodyHash: hashBody(auditBody),
+      bodyHash: hashBody(input.operation === "field_caps" ? `${path}\n${auditBody}` : auditBody),
       bodyBytes: byteLength(auditBody),
       injectedFilterCount: injectedFilters.length,
       warnings: [...warnings],

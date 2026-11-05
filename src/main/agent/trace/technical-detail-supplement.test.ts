@@ -34,6 +34,35 @@ describe("hasSuspectedTechnicalDetailSupplement", () => {
     ).toBe(true)
   })
 
+  it("excludes the first Skill-started project turn, including its initial requirements", () => {
+    const prompt = `根据 feature plan 实现当前需求\n\n${SKILL_BLOCK}`
+    expect(hasSuspectedTechnicalDetailSupplement(prompt)).toBe(true)
+    expect(hasSuspectedTechnicalDetailSupplement(prompt, { isFirstProjectTurn: true })).toBe(false)
+    expect(hasSuspectedTechnicalDetailSupplement(prompt, { isFirstProjectTurn: false })).toBe(true)
+    expect(
+      hasSuspectedTechnicalDetailSupplement("/auto_dev_code 根据 feature plan 开始", {
+        isFirstProjectTurn: true
+      })
+    ).toBe(false)
+  })
+
+  it("handles trusted remote Skill selection without hiding ordinary first-turn technical text", () => {
+    const prompt = "请调整 get_user_ids 的返回值"
+    expect(hasSuspectedTechnicalDetailSupplement(prompt, { isFirstProjectTurn: true })).toBe(true)
+    expect(
+      hasSuspectedTechnicalDetailSupplement(prompt, {
+        isFirstProjectTurn: true,
+        hasExplicitSkill: true
+      })
+    ).toBe(false)
+    expect(hasSuspectedTechnicalDetailSupplement(prompt, { hasExplicitSkill: true })).toBe(true)
+    expect(
+      hasSuspectedTechnicalDetailSupplement("/Users/demo/project/src 看下", {
+        isFirstProjectTurn: true
+      })
+    ).toBe(true)
+  })
+
   it("ignores attachment and @file blocks, including the file body they carry", () => {
     expect(
       hasSuspectedTechnicalDetailSupplement(

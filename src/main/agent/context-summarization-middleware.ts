@@ -17,14 +17,11 @@ import {
 import { initChatModel } from "langchain/chat_models/universal"
 import type { ClientTool, ServerTool } from "@langchain/core/tools"
 import { z } from "zod"
-import { randomUUID } from "node:crypto"
 import {
   repairModelRequestToolCallParity,
   sanitizeModelRequestMessages
 } from "./malformed-tool-call-recovery"
 import { isWorkflowNotificationPrompt } from "../../shared/internal-notification-turn"
-import { withCompactedContext } from "./context-usage"
-import { ModError } from "../mods/errors"
 
 export interface ContextSize {
   type: "messages" | "tokens" | "fraction"
@@ -88,7 +85,6 @@ type InternalArtifactBackend = BackendProtocol & {
   writeInternalArtifact?: (filePath: string, content: string) => Promise<{ error?: string }>
   appendInternalArtifact?: (filePath: string, content: string) => Promise<{ error?: string }>
   internalArtifactExists?: (filePath: string) => Promise<boolean>
-  removeInternalArtifact?: (filePath: string) => Promise<{ error?: string }>
 }
 
 /** State marker used to bind a summarization event to one task-subagent invocation. */
@@ -154,23 +150,40 @@ const INTERNAL_COORDINATOR_NOTIFICATION_KEY = "cmb_internal_coordinator_notifica
 // message contract used by checkpoint transcripts.
 const VISIBLE_USER_MESSAGE_KEY = "cmb_visible_user_message"
 
-function overflowCandidateStrings(value: unknown): string[] {
+function overflowCandidateStrings(value: unknown, depth = 0): string[] {
+  if (depth > 4) return []
   if (typeof value === "string") return [value]
   if (!value || typeof value !== "object") return []
   const record = value as Record<string, unknown>
   const candidates: string[] = []
-  for (const key of ["message", "code", "type", "responseBody"]) {
+  for (const key of ["message", "code", "type", "errorMsg", "returnCode"]) {
     const candidate = record[key]
     if (typeof candidate === "string") candidates.push(candidate)
   }
-  const nested = record.error
-  if (nested && typeof nested === "object") {
-    for (const key of ["message", "code", "type"]) {
-      const candidate = (nested as Record<string, unknown>)[key]
-      if (typeof candidate === "string") candidates.push(candidate)
+  candidates.push(...overflowCandidateStrings(record.error, depth + 1))
+  if (typeof record.responseBody === "string") {
+    try {
+      candidates.push(...overflowCandidateStrings(JSON.parse(record.responseBody), depth + 1))
+    } catch {
+      candidates.push(record.responseBody)
     }
   }
   return candidates
+}
+
+/** The gateway shares 485/580 with internal failures; require its exact overflow text. */
+export function isGatewayContextOverflow(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false
+  const record = error as Record<string, unknown>
+  const candidates = overflowCandidateStrings(error)
+  const status = record.status ?? record.statusCode
+  const matchesStatus =
+    status != null
+      ? status === 485 || status === 580
+      : candidates.some((candidate) => /^XCDZB(?:485|580)$/.test(candidate.trim()))
+  return (
+    matchesStatus && candidates.some((candidate) => candidate.includes("任务上下文超过最大限度"))
+  )
 }
 
 /** Recognise context overflow across LangChain and known OpenAI-compatible
@@ -181,6 +194,7 @@ export function isCmbContextOverflow(error: unknown): boolean {
   while (current && !seen.has(current)) {
     seen.add(current)
     if (ContextOverflowError.isInstance(current)) return true
+    if (isGatewayContextOverflow(current)) return true
 
     if (typeof current === "object") {
       const record = current as Record<string, unknown>
@@ -224,10 +238,8 @@ Use concise, high-information bullets. Preserve exact file paths, commands, erro
 const SUMMARY_TEXT_ONLY_INSTRUCTION =
   "Do not call, request, or imitate any tool. Do not emit tool-call markup or arguments. Return only the continuation handoff as text in the final content field."
 
-export const SummarizationEventSchema = z.object({
+const SummarizationEventSchema = z.object({
   cutoffIndex: z.number(),
-  // First response in the new context window, including when old responses are kept as tail.
-  usageStartIndex: z.number().int().nonnegative().optional(),
   // Checkpointers can restore a valid message through a different module or
   // serialization boundary. LangChain's branded guard is cross-runtime safe;
   // JavaScript instanceof can reject "HumanMessage received HumanMessage".
@@ -236,62 +248,6 @@ export const SummarizationEventSchema = z.object({
 })
 
 export type SummarizationEvent = z.infer<typeof SummarizationEventSchema>
-
-export interface CmbContextRequest {
-  messages: BaseMessage[]
-  state: Record<string, unknown>
-  systemMessage?: unknown
-  tools?: unknown[]
-  runtime?: { signal?: AbortSignal; configurable?: Record<string, unknown> }
-}
-
-export interface CmbCompactionPlan {
-  messages: BaseMessage[]
-  update: {
-    _summarizationEvent: SummarizationEvent
-    _summarizationSessionId: string
-    _cmbSummarizationOwner?: string
-  }
-  estimatedTokensBefore: number
-  estimatedTokensAfter: number
-  summaryAttempts: number
-  /** Explicit compaction commits its archive only after the caller validates the checkpoint. */
-  commitArchive?: (
-    signal: AbortSignal
-  ) => Promise<{
-    filePath: string
-    messages: BaseMessage[]
-    update: CmbCompactionPlan["update"]
-  }>
-  /** Compensates a staged archive when checkpoint mutation fails before commit. */
-  rollbackArchive?: (signal: AbortSignal) => Promise<void>
-}
-
-export interface CmbContextController {
-  middleware: ReturnType<typeof createMiddleware>
-  prepare(
-    request: CmbContextRequest,
-    instructions: string,
-    signal: AbortSignal
-  ): Promise<CmbCompactionPlan | { skip: string }>
-  prepareLatest(
-    messages: BaseMessage[],
-    state: Record<string, unknown>,
-    instructions: string,
-    signal: AbortSignal
-  ): Promise<CmbCompactionPlan | { skip: string }>
-}
-
-function isPreparedCompactionPlan(value: unknown): value is CmbCompactionPlan {
-  if (!value || typeof value !== "object") return false
-  const candidate = value as Record<string, unknown>
-  return (
-    Array.isArray(candidate.messages) &&
-    typeof candidate.summaryAttempts === "number" &&
-    typeof candidate.estimatedTokensBefore === "number" &&
-    typeof candidate.estimatedTokensAfter === "number"
-  )
-}
 
 const SummarizationStateSchema = z.object({
   _summarizationSessionId: z.string().optional(),
@@ -838,13 +794,6 @@ function computeSummarizationDefaults(resolvedModel: BaseChatModel): {
  * compaction), bounded invalid-handoff retries, and a no-text fallback model.
  */
 export function createCmbSummarizationMiddleware(options: CmbSummarizationMiddlewareOptions) {
-  return createCmbContextController(options).middleware
-}
-
-/** Native preparation is shared by automatic model middleware and explicit compaction. */
-export function createCmbContextController(
-  options: CmbSummarizationMiddlewareOptions
-): CmbContextController {
   const {
     model,
     fallbackModel,
@@ -1431,8 +1380,7 @@ export function createCmbContextController(
     latestUserRequest: string | null,
     signal?: AbortSignal,
     targetSummaryTokens?: number,
-    maxAdditionalAttempts?: number,
-    instructions?: string
+    maxAdditionalAttempts?: number
   ): Promise<string> {
     let attemptMessages = messages
     let overflowRetries = 0
@@ -1466,7 +1414,6 @@ export function createCmbContextController(
               targetSummaryTokens,
               conversationTranscript
             ),
-            instructions,
             qualityCorrection
           ]
             .filter(Boolean)
@@ -1595,9 +1542,7 @@ ${summary}
     signal?: AbortSignal,
     owner?: string,
     initialOwnerSessionId?: string,
-    historyMessages: BaseMessage[] = messagesToSummarize,
-    instructions?: string,
-    persistArchive = true
+    historyMessages: BaseMessage[] = messagesToSummarize
   ): Promise<{
     summary: string
     summaryMessage: HumanMessage
@@ -1614,27 +1559,22 @@ ${summary}
       attemptBudget,
       initialUserRequest,
       latestUserRequest,
-      signal,
-      undefined,
-      undefined,
-      instructions
+      signal
     )
     signal?.throwIfAborted()
     const resolvedBackend = getBackend(state)
-    const filePath = persistArchive
-      ? await offloadToBackend(
-          resolvedBackend,
-          historyMessages,
-          state,
-          owner,
-          initialOwnerSessionId
-        )
-      : null
+    const filePath = await offloadToBackend(
+      resolvedBackend,
+      historyMessages,
+      state,
+      owner,
+      initialOwnerSessionId
+    )
     // Local archival writes are intentionally allowed to finish once started,
     // but a cancellation that arrives during that short window must prevent
     // the outer model handler from running afterward.
     signal?.throwIfAborted()
-    if (persistArchive && filePath == null) {
+    if (filePath == null) {
       console.warn(
         "[SummarizationMiddleware] Backend offload failed during summarization. Proceeding with summary generation."
       )
@@ -1648,18 +1588,23 @@ ${summary}
     }
   }
 
-  async function performSummarization<TRequest extends CmbContextRequest, TResult>(
-    request: TRequest,
-    handler: ((request: TRequest) => Promise<TResult> | TResult) | undefined,
+  async function performSummarization(
+    request: {
+      messages: BaseMessage[]
+      state: Record<string, unknown>
+      systemMessage?: SystemMessage | unknown
+      tools?: (ServerTool | ClientTool)[] | unknown[]
+      runtime?: { signal?: AbortSignal; configurable?: Record<string, unknown> }
+      [key: string]: unknown
+    },
+    handler: (request: any) => any,
     truncatedMessages: BaseMessage[],
     resolvedModel: BaseChatModel,
     fallbackModel: BaseChatModel | undefined,
     maxInputTokens: number | undefined,
     owner?: string,
-    historySourceMessages: BaseMessage[] = truncatedMessages,
-    instructions?: string,
-    persistArchive = true
-  ): Promise<TResult | CmbCompactionPlan> {
+    historySourceMessages: BaseMessage[] = truncatedMessages
+  ): Promise<any> {
     const initialOwnerSessionId =
       owner &&
       (!stateBelongsToOwner(request.state, owner) ||
@@ -1668,9 +1613,7 @@ ${summary}
         ? `session_${crypto.randomUUID().substring(0, 8)}`
         : undefined
     const previousEvent = getValidSummarizationEvent(request.state, owner)
-    const cutoffIndex = handler
-      ? determineCutoffIndex(truncatedMessages, maxInputTokens)
-      : truncatedMessages.length
+    const cutoffIndex = determineCutoffIndex(truncatedMessages, maxInputTokens)
     // DeepAgents Python refuses token-based compaction when it cannot preserve
     // any message. CmbCowork intentionally still supports summarizing one
     // oversized raw user/tool message, but a chained cutoff of 1 is different:
@@ -1681,7 +1624,7 @@ ${summary}
     // that request genuinely overflows, surface the overflow instead of
     // committing a no-progress summarization event.
     const advancesStateCutoff = previousEvent == null || cutoffIndex > 1
-    if (handler && (cutoffIndex <= 0 || !advancesStateCutoff)) {
+    if (cutoffIndex <= 0 || !advancesStateCutoff) {
       return handler({ ...request, messages: truncatedMessages })
     }
 
@@ -1702,7 +1645,7 @@ ${summary}
         countTotalTokens(messages, request.systemMessage, request.tools) * tokenEstimationMultiplier
       )
 
-    if (handler && preservedMessages.length === 0 && maxInputTokens) {
+    if (preservedMessages.length === 0 && maxInputTokens) {
       const compact = compactToolResults(
         truncatedMessages,
         maxInputTokens,
@@ -1732,31 +1675,21 @@ ${summary}
       request.runtime?.signal,
       owner,
       initialOwnerSessionId,
-      historyMessagesToSummarize,
-      instructions,
-      persistArchive
+      historyMessagesToSummarize
     )
 
     let finalSummaryMessage = summaryResult.summaryMessage
-    let finalSummaryText = summaryResult.summary
     let finalFilePath = summaryResult.filePath
     let finalStateCutoffIndex = summaryResult.stateCutoffIndex
     let modifiedMessages = [summaryResult.summaryMessage, ...preservedMessages]
-    const invokeCompactedModel = () =>
-      withCompactedContext(
-        Array.isArray(request.state.messages)
-          ? request.state.messages.length
-          : request.messages.length,
-        async () => handler!({ ...request, messages: modifiedMessages })
-      )
     const modifiedTokens = countTotalTokens(modifiedMessages, request.systemMessage, request.tools)
     const estimatedModifiedTokens = Math.ceil(modifiedTokens * tokenEstimationMultiplier)
     let needsWholeConversationRetry =
       outerInputBudget != null && estimatedModifiedTokens > outerInputBudget
 
-    if (!needsWholeConversationRetry && handler) {
+    if (!needsWholeConversationRetry) {
       try {
-        await invokeCompactedModel()
+        await handler({ ...request, messages: modifiedMessages })
       } catch (error) {
         if (!isCmbContextOverflow(error)) throw error
         needsWholeConversationRetry = true
@@ -1767,53 +1700,46 @@ ${summary}
           }
         }
       }
-    } else if (needsWholeConversationRetry) {
+    } else {
       console.warn(
         `[SummarizationMiddleware] Compacted request remains above the outer model input budget (${estimatedModifiedTokens} estimated tokens > ${outerInputBudget}); retrying with a whole-conversation summary before invoking the model.`
       )
     }
 
     if (needsWholeConversationRetry) {
-      // Explicit preparation already summarized the full conversation; do not repeat
-      // that model request or append the same archive while tightening its budget.
-      if (handler) {
-        const retryResult = await summarizeMessages(
-          [...messagesToSummarize, ...preservedMessages],
-          resolvedModel,
-          fallbackModel,
-          summaryAttemptBudget,
-          request.state,
-          previousEvent?.cutoffIndex,
-          truncatedMessages.length,
-          initialUserRequest,
-          // The retry summarizes the complete effective conversation, so the
-          // latest user request is already present as a structured message.
-          // Repeating it in the instruction wastes context and, for a very large
-          // request, can defeat the overflow compaction applied to that message.
-          null,
-          request.runtime?.signal,
-          owner,
-          initialOwnerSessionId,
-          // The first successful summary has already archived the summarized
-          // head. On the whole-conversation retry, append only the tail that was
-          // previously retained; otherwise the historical head is duplicated.
-          summaryResult.filePath ? preservedHistoryMessages : historySourceMessages,
-          instructions,
-          persistArchive
-        )
-        // The head may already be durably archived even if this best-effort tail
-        // append fails. Never discard that valid recovery pointer because a
-        // later write returned null.
-        finalFilePath = retryResult.filePath ?? summaryResult.filePath
-        finalSummaryText = retryResult.summary
-        finalSummaryMessage = buildSummaryMessage(
-          retryResult.summary,
-          finalFilePath,
-          initialUserRequest
-        )
-        finalStateCutoffIndex = retryResult.stateCutoffIndex
-        modifiedMessages = [finalSummaryMessage]
-      }
+      const retryResult = await summarizeMessages(
+        [...messagesToSummarize, ...preservedMessages],
+        resolvedModel,
+        fallbackModel,
+        summaryAttemptBudget,
+        request.state,
+        previousEvent?.cutoffIndex,
+        truncatedMessages.length,
+        initialUserRequest,
+        // The retry summarizes the complete effective conversation, so the
+        // latest user request is already present as a structured message.
+        // Repeating it in the instruction wastes context and, for a very large
+        // request, can defeat the overflow compaction applied to that message.
+        null,
+        request.runtime?.signal,
+        owner,
+        initialOwnerSessionId,
+        // The first successful summary has already archived the summarized
+        // head. On the whole-conversation retry, append only the tail that was
+        // previously retained; otherwise the historical head is duplicated.
+        summaryResult.filePath ? preservedHistoryMessages : historySourceMessages
+      )
+      // The head may already be durably archived even if this best-effort tail
+      // append fails. Never discard that valid recovery pointer because a
+      // later write returned null.
+      finalFilePath = retryResult.filePath ?? summaryResult.filePath
+      finalSummaryMessage = buildSummaryMessage(
+        retryResult.summary,
+        finalFilePath,
+        initialUserRequest
+      )
+      finalStateCutoffIndex = retryResult.stateCutoffIndex
+      modifiedMessages = [finalSummaryMessage]
 
       const retryEstimatedTokens = estimateOuterInputTokens(modifiedMessages)
       if (outerInputBudget != null && retryEstimatedTokens > outerInputBudget) {
@@ -1841,15 +1767,13 @@ ${summary}
           null,
           request.runtime?.signal,
           targetSummaryTokens,
-          1,
-          instructions
+          1
         )
         const shortenedSummaryMessage = buildSummaryMessage(
           shortenedSummary,
           finalFilePath,
           initialUserRequest
         )
-        finalSummaryText = shortenedSummary
         const shortenedEstimatedTokens = estimateOuterInputTokens([shortenedSummaryMessage])
         if (shortenedEstimatedTokens > outerInputBudget) {
           throw new Error(
@@ -1859,311 +1783,77 @@ ${summary}
         finalSummaryMessage = shortenedSummaryMessage
         modifiedMessages = [shortenedSummaryMessage]
       }
-      if (handler) await invokeCompactedModel()
+      await handler({ ...request, messages: modifiedMessages })
     }
 
-    const update: CmbCompactionPlan["update"] = {
+    return new Command({
+      update: {
         _summarizationEvent: {
-          cutoffIndex: handler ? finalStateCutoffIndex : 1,
-          usageStartIndex: handler
-            ? Array.isArray(request.state.messages)
-              ? request.state.messages.length
-              : request.messages.length
-            : modifiedMessages.length,
+          cutoffIndex: finalStateCutoffIndex,
           summaryMessage: finalSummaryMessage,
           filePath: finalFilePath
         } satisfies SummarizationEvent,
         _summarizationSessionId: getSessionId(request.state, owner, initialOwnerSessionId),
         ...(owner ? { [SUMMARIZATION_STATE_OWNER_KEY]: owner } : {})
-    }
-    if (handler) return new Command({ update }) as TResult
-    request.runtime?.signal?.throwIfAborted()
-    const plan: CmbCompactionPlan = {
-      messages: modifiedMessages,
-      update,
-      estimatedTokensBefore: countTotalTokens(
-        historySourceMessages,
-        request.systemMessage,
-        request.tools
-      ),
-      estimatedTokensAfter: countTotalTokens(
-        modifiedMessages,
-        request.systemMessage,
-        request.tools
-      ),
-      summaryAttempts: summaryAttemptBudget.used
-    }
-    if (!handler && !persistArchive) {
-      let committed:
-        | {
-            filePath: string
-            messages: BaseMessage[]
-            update: CmbCompactionPlan["update"]
-        }
-        | undefined
-      let commitPromise:
-        | Promise<{
-            filePath: string
-            messages: BaseMessage[]
-            update: CmbCompactionPlan["update"]
-          }>
-        | undefined
-      let rollback: (() => Promise<void>) | undefined
-      const resolvedBackend = getBackend(request.state)
-      plan.commitArchive = async (commitSignal) => {
-        if (committed) return committed
-        commitPromise ??= (async () => {
-          commitSignal.throwIfAborted()
-          const staged = await stageExplicitArchive(
-            resolvedBackend,
-            historySourceMessages,
-            request.state,
-            owner,
-            initialOwnerSessionId,
-            commitSignal
-          )
-          if (!staged) throw new ModError("MODS_CONTEXT_ARCHIVE_FAILED")
-          rollback = staged.rollback
-          try {
-            commitSignal.throwIfAborted()
-            const committedSummaryMessage = buildSummaryMessage(
-              finalSummaryText,
-              staged.filePath,
-              initialUserRequest
-            )
-            const result = {
-              filePath: staged.filePath,
-              messages: [committedSummaryMessage, ...preservedMessages],
-              update: {
-                ...update,
-                _summarizationEvent: {
-                  ...update._summarizationEvent,
-                  summaryMessage: committedSummaryMessage,
-                  filePath: staged.filePath,
-                  cutoffIndex: 1,
-                  usageStartIndex: 1 + preservedMessages.length
-                }
-              }
-            }
-            committed = result
-            return result
-          } catch (error) {
-            if (rollback) await rollback()
-            rollback = undefined
-            throw error
-          }
-        })()
-        try {
-          return await commitPromise
-        } catch (error) {
-          commitPromise = undefined
-          throw error
-        }
       }
-      plan.rollbackArchive = async (rollbackSignal) => {
-        void rollbackSignal
-        if (rollback) {
-          await rollback()
-          rollback = undefined
-          committed = undefined
-          commitPromise = undefined
-        }
-      }
-    }
-    return plan
+    })
   }
 
-  let latestModelRequest: CmbContextRequest | undefined
-  const captureModelRequest = (request: CmbContextRequest): void => {
-    latestModelRequest = {
-      ...request,
-      messages: [...request.messages],
-      state: request.state
-    }
-  }
-
-  /**
-   * Explicit compact archives are staged under a fresh path.  Keeping them
-   * separate from the rolling automatic history makes checkpoint compensation
-   * possible and prevents a failed commit from truncating an existing file.
-   */
-  async function stageExplicitArchive(
-    resolvedBackend: BackendProtocol,
-    messages: BaseMessage[],
-    state: Record<string, unknown>,
-    owner?: string,
-    initialOwnerSessionId?: string,
-    signal?: AbortSignal
-  ): Promise<{ filePath: string; rollback?: () => Promise<void> } | null> {
-    const historyPath = getHistoryPath(state, owner, initialOwnerSessionId)
-    const parent = historyPath.slice(0, historyPath.lastIndexOf("/")) || "/conversation_history"
-    const filePath = `${parent}/compact-${randomUUID()}.md`
-    const filteredMessages = messages.filter((message) => !isSummaryMessage(message))
-    const content = `## Explicit compaction at ${new Date().toISOString()}\n\n${renderMessagesAsSummaryXml(prepareHistoryArchiveMessages(filteredMessages))}\n\n`
-    const internal = resolvedBackend as InternalArtifactBackend
-    const remove = internal.removeInternalArtifact
-    try {
-      signal?.throwIfAborted()
-      const result = internal.writeInternalArtifact
-        ? await internal.writeInternalArtifact(filePath, content)
-        : await resolvedBackend.write(filePath, content)
-      if (result.error) return null
-      signal?.throwIfAborted()
-      return {
-        filePath,
-        ...(remove
-          ? {
-              rollback: async () => {
-                const removed = await remove(filePath)
-                if (removed.error) throw new Error(removed.error)
-              }
-            }
-          : {})
-      }
-    } catch (error) {
-      if (signal?.aborted) {
-        if (remove) {
-          try {
-            await remove(filePath)
-          } catch {
-            // Preserve the cancellation reason; the caller will not publish a pointer.
-          }
-        }
-        throw error
-      }
-      return null
-    }
-  }
-
-  const middleware = createMiddleware({
+  return createMiddleware({
     name: "SummarizationMiddleware",
     stateSchema: SummarizationStateSchema,
     async wrapModelCall(request, handler) {
-      captureModelRequest(request as CmbContextRequest)
       const owner = getStateOwner(request)
-      const execute = async () => {
-        const effectiveMessages = getEffectiveMessages(request.messages ?? [], request.state, owner)
-        if (effectiveMessages.length === 0) return handler(request)
+      const effectiveMessages = getEffectiveMessages(request.messages ?? [], request.state, owner)
+      if (effectiveMessages.length === 0) return handler(request)
 
-        const resolvedModel = await getChatModel()
-        const resolvedFallbackModel = await getFallbackChatModel()
-        const maxInputTokens = getMaxInputTokens(resolvedModel)
-        applyModelDefaults(resolvedModel)
-        const initialTokens = countTotalTokens(
-          effectiveMessages,
-          request.systemMessage,
-          request.tools
-        )
-        const { messages: truncatedMessages, modified: truncateModified } = truncateArgs(
-          effectiveMessages,
-          initialTokens,
-          maxInputTokens
-        )
-        // Match DeepAgents Python's count-once behavior: tool schema conversion
-        // is comparatively expensive, so share the initial count across argument
-        // truncation and trigger checks. Recount only when truncation changed the
-        // actual outbound messages.
-        const totalTokens = truncateModified
-          ? countTotalTokens(truncatedMessages, request.systemMessage, request.tools)
-          : initialTokens
-        const triggerTokens = countTokensForTrigger(truncatedMessages, totalTokens)
+      const resolvedModel = await getChatModel()
+      const resolvedFallbackModel = await getFallbackChatModel()
+      const maxInputTokens = getMaxInputTokens(resolvedModel)
+      applyModelDefaults(resolvedModel)
+      const initialTokens = countTotalTokens(
+        effectiveMessages,
+        request.systemMessage,
+        request.tools
+      )
+      const { messages: truncatedMessages, modified: truncateModified } = truncateArgs(
+        effectiveMessages,
+        initialTokens,
+        maxInputTokens
+      )
+      // Match DeepAgents Python's count-once behavior: tool schema conversion
+      // is comparatively expensive, so share the initial count across argument
+      // truncation and trigger checks. Recount only when truncation changed the
+      // actual outbound messages.
+      const totalTokens = truncateModified
+        ? countTotalTokens(truncatedMessages, request.systemMessage, request.tools)
+        : initialTokens
+      const triggerTokens = countTokensForTrigger(truncatedMessages, totalTokens)
 
-        if (!shouldSummarize(truncatedMessages, triggerTokens, maxInputTokens)) {
-          try {
-            return await handler({ ...request, messages: truncatedMessages })
-          } catch (error) {
-            if (!isCmbContextOverflow(error)) throw error
-            if (maxInputTokens && totalTokens > 0) {
-              const observedRatio = maxInputTokens / totalTokens
-              if (observedRatio > tokenEstimationMultiplier) {
-                tokenEstimationMultiplier = observedRatio * 1.1
-              }
+      if (!shouldSummarize(truncatedMessages, triggerTokens, maxInputTokens)) {
+        try {
+          return await handler({ ...request, messages: truncatedMessages })
+        } catch (error) {
+          if (!isCmbContextOverflow(error)) throw error
+          if (maxInputTokens && totalTokens > 0) {
+            const observedRatio = maxInputTokens / totalTokens
+            if (observedRatio > tokenEstimationMultiplier) {
+              tokenEstimationMultiplier = observedRatio * 1.1
             }
           }
         }
-
-        const compacted = await performSummarization(
-          request,
-          handler,
-          truncatedMessages,
-          resolvedModel,
-          resolvedFallbackModel,
-          maxInputTokens,
-          owner,
-          effectiveMessages
-        )
-        if (isPreparedCompactionPlan(compacted))
-          throw new Error("CONTEXT_COMPACTION_INTERNAL_RESULT")
-        return compacted
       }
-      const result = await execute()
-      const previous = getValidSummarizationEvent(request.state, owner)
-      if (previous && previous.usageStartIndex === undefined && AIMessage.isInstance(result)) {
-        // The framework keeps the actual handler response when collecting this state update.
-        // Upgrade an old checkpoint on its first new response without guessing its old window.
-        return new Command({
-          update: {
-            _summarizationEvent: {
-              ...previous,
-              usageStartIndex: Array.isArray(request.state.messages)
-                ? request.state.messages.length
-                : request.messages.length
-            }
-          }
-        })
-      }
-      return result
-    }
-  })
 
-  return {
-    middleware,
-    /** Produces a plan without calling the conversation model or writing its checkpoint. */
-    async prepare(
-      request: CmbContextRequest,
-      instructions: string,
-      signal: AbortSignal
-    ): Promise<CmbCompactionPlan | { skip: string }> {
-      signal.throwIfAborted()
-      if (typeof instructions !== "string" || instructions.length > 32000)
-        throw new Error("CONTEXT_COMPACTION_INSTRUCTIONS_INVALID")
-      const owner = getStateOwner(request)
-      const effectiveMessages = getEffectiveMessages(request.messages, request.state, owner)
-      if (effectiveMessages.length === 0) return { skip: "No messages to compact" }
-      const resolvedModel = await getChatModel()
-      const resolvedFallbackModel = await getFallbackChatModel()
-      signal.throwIfAborted()
-      applyModelDefaults(resolvedModel)
-      // Explicit compaction summarizes the full effective context. Unlike the auto path,
-      // it cannot "succeed" by calling the outer model with transient tool truncation.
       return performSummarization(
-        { ...request, runtime: { ...request.runtime, signal } },
-        undefined,
-        effectiveMessages,
+        request as any,
+        handler,
+        truncatedMessages,
         resolvedModel,
         resolvedFallbackModel,
-        getMaxInputTokens(resolvedModel),
+        maxInputTokens,
         owner,
-        effectiveMessages,
-        instructions,
-        false
+        effectiveMessages
       )
-    },
-    async prepareLatest(
-      messages: BaseMessage[],
-      state: Record<string, unknown>,
-      instructions: string,
-      signal: AbortSignal
-    ): Promise<CmbCompactionPlan | { skip: string }> {
-      const request = latestModelRequest
-        ? {
-            ...latestModelRequest,
-            messages,
-            state,
-            runtime: { ...latestModelRequest.runtime, signal }
-          }
-        : { messages, state, runtime: { signal } }
-      return this.prepare(request, instructions, signal)
     }
-  }
+  })
 }

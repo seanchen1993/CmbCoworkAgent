@@ -32,6 +32,7 @@ import {
   type CodeStatsTooltipData
 } from "./dashboard-shared"
 import type { OverviewData } from "../use-dashboard"
+import { DrilldownArrow } from "../DrilldownArrow"
 
 function StatCard({
   icon: Icon,
@@ -79,6 +80,7 @@ function StatCard({
           {labelRow}
           {body}
         </div>
+        <DrilldownArrow className="ml-auto" />
       </button>
     )
   }

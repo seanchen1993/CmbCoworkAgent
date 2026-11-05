@@ -5,6 +5,7 @@ import {
 } from "recharts"
 import { Tooltip as UITooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import type { ProductivityData } from "../use-dashboard"
+import { DrilldownArrow } from "../DrilldownArrow"
 
 function StatCard({
   icon: Icon,
@@ -55,6 +56,7 @@ function StatCard({
         onClick={onClick}
       >
         {content}
+        <DrilldownArrow className="ml-auto" />
       </button>
     )
   }
@@ -147,7 +149,14 @@ export function ProductivityPanel({
 
       {/* Commit trend */}
       <div className="rounded-xl border border-border bg-card p-4">
-        <h3 className="text-xs font-medium text-muted-foreground mb-3">Commit 趋势</h3>
+        <h3 className="mb-3 flex items-center gap-1 text-xs font-medium text-muted-foreground">
+          Commit 趋势
+          {onCommitBucketClick && trendData.length > 0 ? (
+            <span title="点击柱形查看提交明细">
+              <DrilldownArrow />
+            </span>
+          ) : null}
+        </h3>
         {trendData.length > 0 ? (
           <ResponsiveContainer width="100%" height={200}>
             <BarChart data={trendData}>

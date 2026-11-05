@@ -1,19 +1,6 @@
-export type PetWindowLayoutMetrics = {
-  petLeft: number
-  petTop: number
-}
-
-export type PetWindowBounds = {
-  x: number
-  y: number
-  width: number
-  height: number
-}
-
 export type PetWindowPlatformPolicy = {
   alwaysOnTopLevel: "floating" | "screen-saver"
   backgroundThrottling: boolean
-  compactWhenBubbleHidden: boolean
   forwardIgnoredMouseMoves: boolean
   hoverPollIntervalMs: number
   idleFpsCap: number | null
@@ -33,7 +20,6 @@ export function getPetWindowPlatformPolicy(platform: NodeJS.Platform): PetWindow
     return {
       alwaysOnTopLevel: "floating",
       backgroundThrottling: true,
-      compactWhenBubbleHidden: false,
       forwardIgnoredMouseMoves: false,
       hoverPollIntervalMs: 100,
       idleFpsCap: 2,
@@ -45,7 +31,6 @@ export function getPetWindowPlatformPolicy(platform: NodeJS.Platform): PetWindow
   return {
     alwaysOnTopLevel: "screen-saver",
     backgroundThrottling: false,
-    compactWhenBubbleHidden: false,
     forwardIgnoredMouseMoves: true,
     hoverPollIntervalMs: 250,
     idleFpsCap: null,
@@ -72,21 +57,4 @@ export function getPetWindowRefreshAction(
   if (!next.enabled) return previous.enabled ? "close" : "none"
   if (!previous.enabled) return "create"
   return previous.selectedPetKey === next.selectedPetKey ? "none" : "recreate"
-}
-
-export function resizeWindowAroundPetBody(
-  currentBounds: PetWindowBounds,
-  currentLayout: PetWindowLayoutMetrics,
-  nextLayout: PetWindowLayoutMetrics,
-  nextSize: Pick<PetWindowBounds, "width" | "height">
-): PetWindowBounds {
-  const petX = currentBounds.x + currentLayout.petLeft
-  const petY = currentBounds.y + currentLayout.petTop
-
-  return {
-    x: petX - nextLayout.petLeft,
-    y: petY - nextLayout.petTop,
-    width: nextSize.width,
-    height: nextSize.height
-  }
 }

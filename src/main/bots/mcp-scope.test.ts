@@ -17,8 +17,6 @@ describe("Bot connector scope", () => {
       docs = make("documents")
     let alias = docs
     const base: McpCapabilityService = {
-      configuredServerNames: () => [browser.providerKey, docs.providerKey],
-      peekTools: () => [browser, docs],
       listTools: async () => [browser, docs],
       getSnapshot: async () => ({ fingerprint: "v1", tools: [browser, docs] }),
       getTool: async (id) =>
@@ -30,8 +28,6 @@ describe("Bot connector scope", () => {
       close: vi.fn(async () => {})
     }
     const scoped = createBotMcpScope(base)
-    expect(scoped.configuredServerNames!()).toEqual(["documents"])
-    expect(scoped.peekTools!()).toEqual([docs])
     expect(await scoped.listTools()).toEqual([docs])
     expect((await scoped.getSnapshot!()).tools).toEqual([docs])
     expect(await scoped.getTool(browser.capabilityId)).toBeNull()

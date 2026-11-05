@@ -97,6 +97,7 @@ import {
   getProjectThreadDataDirectory
 } from "../agent/context-history-path"
 import { generateTitle } from "../services/title-generator"
+import { generateProjectThreadTitle } from "../services/project-thread-title"
 import { imRemoteAccessService } from "../services/im/remote-access-service"
 import {
   finalizeWorkflowWorktreeRecord,
@@ -3753,7 +3754,6 @@ export function registerThreadHandlers(ipcMain: IpcMain): ThreadDeletionService 
         // Avoid a worker startup per item in batches of empty/small tasks.
         dbDeleteThread(threadId)
       }
-      getModsManager()?.closeFunctionThread(threadId)
       clearTrustedToolFilePreviewSourcesForThread(threadId, previewScopeKeys)
       forgetLegacySubagentTranscriptMigration(threadId)
       // Detach the deleted task from its shared physical workspace watcher so
@@ -4094,7 +4094,7 @@ export function registerThreadHandlers(ipcMain: IpcMain): ThreadDeletionService 
       if (!row) return { success: false, error: "Thread not found" }
       if (
         target &&
-        (target.threadId !== threadId || !["multi", "workflow"].includes(target.kind))
+        (target.threadId !== threadId || !["multi", "workflow", "worker"].includes(target.kind))
       ) {
         return { success: false, error: "无效的子代理导出目标" }
       }
@@ -4241,9 +4241,29 @@ export function registerThreadHandlers(ipcMain: IpcMain): ThreadDeletionService 
   )
 
   // Generate a title from a message
-  ipcMain.handle("threads:generateTitle", async (_event, message: string) => {
-    return generateTitle(message)
-  })
+  ipcMain.handle(
+    "threads:generateTitle",
+    async (
+      _event,
+      message: string,
+      context?: { threadId: string; skillName?: string; skillDescription?: string }
+    ) => {
+      try {
+        if (context?.threadId) {
+          const thread = getThreadCore(context.threadId)
+          const metadata = thread?.metadata ? JSON.parse(thread.metadata) : undefined
+          return await generateProjectThreadTitle(
+            message,
+            context.skillName,
+            metadata?.harnessFeature,
+            context.skillDescription
+          )
+        }
+      } catch (error) {
+        console.warn("[Threads] Failed to resolve title context:", error)
+      }
+      return generateTitle(message)
+    }
+  )
   return deleteThread
 }
-import { getModsManager } from "../mods/manager"

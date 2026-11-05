@@ -27,6 +27,7 @@ import {
 } from "lucide-react"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
+import { ManagedRunIcon } from "@/components/ui/managed-run-icon"
 import { IconPopoverButton } from "@/components/ui/icon-popover-button"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { ScrollArea } from "@/components/ui/scroll-area"
@@ -159,6 +160,7 @@ function formatCompactTime(date: Date | string): string {
 }
 
 function getDisplayThreadTitle(thread: Thread): string {
+  if (isRemoteInboxThread(thread)) return REMOTE_INBOX_WORKSPACE_NAME
   const title = thread.title?.trim()
 
   if (!title || title === "..." || title === "…") {
@@ -238,6 +240,7 @@ function ThreadListItemImpl({
   isSelected,
   isEditing,
   isUnread,
+  isManagedRunning = false,
   editingTitle,
   onSelect,
   onDelete,
@@ -264,6 +267,7 @@ function ThreadListItemImpl({
   isSelected: boolean
   isEditing: boolean
   isUnread: boolean
+  isManagedRunning?: boolean
   editingTitle: string
   onSelect: () => void
   onDelete: () => void
@@ -350,7 +354,7 @@ function ThreadListItemImpl({
                       {remoteThreadHistorical
                         ? "远程历史"
                         : remoteThreadKind === "inbox"
-                          ? "远程收件箱"
+                          ? "默认聊天"
                           : "远程会话"}
                     </span>
                     <span className="min-w-0 flex-1 truncate">{displayTitle}</span>
@@ -379,17 +383,26 @@ function ThreadListItemImpl({
               </div>
             )}
           </div>
+          {isManagedRunning && (
+            <span
+              className="inline-flex shrink-0 text-violet-500 dark:text-violet-400"
+              title="托管运行中"
+              aria-label="托管运行中"
+            >
+              <ManagedRunIcon />
+            </span>
+          )}
           {hasContextReminder && !isRunning ? (
             <span className="size-2 rounded-full bg-status-warning-foreground shrink-0" />
           ) : (
             isUnread &&
             !isRunning && <span className="size-2 rounded-full bg-status-info shrink-0" />
           )}
-          <span className="relative ml-auto flex h-6 w-14 shrink-0 items-center justify-end overflow-hidden">
-            <span className="absolute right-0 text-[10px] text-muted-foreground transition-opacity group-hover:opacity-0">
+          <span className="relative ml-auto flex h-6 shrink-0 items-center justify-end overflow-hidden">
+            <span className="text-[10px] text-muted-foreground group-hover:hidden group-focus-within:hidden">
               {formatCompactTime(thread.updated_at)}
             </span>
-            <span className="pointer-events-none absolute right-0 flex items-center justify-end gap-0.5 opacity-0 transition-opacity group-hover:pointer-events-auto group-hover:opacity-100">
+            <span className="pointer-events-none absolute right-0 flex items-center justify-end gap-0.5 opacity-0 transition-opacity group-hover:pointer-events-auto group-hover:static group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:static group-focus-within:opacity-100">
               <IconPopoverButton
                 icon={<Pencil className="size-3" />}
                 popoverContent="重命名会话"
@@ -478,6 +491,7 @@ function areThreadListItemPropsEqual(
     prev.isSelected !== next.isSelected ||
     prev.isEditing !== next.isEditing ||
     prev.isUnread !== next.isUnread ||
+    prev.isManagedRunning !== next.isManagedRunning ||
     Boolean(prev.onForkFromCheckpoint) !== Boolean(next.onForkFromCheckpoint) ||
     prev.hoverTitle !== next.hoverTitle
   ) {
@@ -1524,7 +1538,7 @@ export const ThreadSidebar = memo(function ThreadSidebar(): React.JSX.Element {
                                       canRenameProject
                                         ? "修改工作区名称"
                                         : project.isManagedInbox
-                                          ? "远程收件箱名称由应用管理"
+                                          ? "招乎默认聊天名称由应用管理"
                                           : "未关联工作区无法重命名"
                                     }
                                     disabled={!canRenameProject}
@@ -1540,7 +1554,7 @@ export const ThreadSidebar = memo(function ThreadSidebar(): React.JSX.Element {
                                     popoverContent={
                                       canCreateProjectThread
                                         ? "新增任务"
-                                        : "远程收件箱不支持新增任务"
+                                        : "请从招乎默认聊天发送消息"
                                     }
                                     disabled={!canCreateProjectThread}
                                     stopPropagation

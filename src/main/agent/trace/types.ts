@@ -508,7 +508,8 @@ export interface AgentTrace extends Partial<TraceStageUsageSnapshot> {
   /** The user message that triggered this run */
   userMessage: string
   /**
-   * Whether the full user input contains at least ten ASCII English letters.
+   * Whether actual user text contains at least ten ASCII English letters,
+   * excluding the initial Skill-started turn of a project conversation.
    * Missing on traces produced before this forward-only heuristic was introduced.
    */
   suspectedTechnicalDetailSupplement?: boolean
@@ -542,9 +543,9 @@ export interface AgentTrace extends Partial<TraceStageUsageSnapshot> {
   /** Ordered model-call runs (request + response) */
   modelCalls?: TraceModelCall[]
   /**
-   * Σ cache-hit input tokens, flattened from `modelCalls[].tokenUsage` at
-   * finish time so the operations dashboard can aggregate it directly — a
-   * `sum` agg cannot reach into the nested per-call array.
+   * Σ cache-hit input tokens across every model call, counted as calls arrive
+   * independently of the retained `modelCalls` array. Flattened so the
+   * operations dashboard can aggregate it directly.
    *
    * A subset of the trace's input tokens, never an addition to them: the
    * LangChain adapters fold cache counts into `input_tokens`.
@@ -553,7 +554,7 @@ export interface AgentTrace extends Partial<TraceStageUsageSnapshot> {
   /**
    * Σ token usage across every model call the turn actually made, counted as
    * calls arrive rather than summed from `modelCalls`. That array stops at
-   * TRACE_MAX_MODEL_CALLS, so summing it understates long turns by exactly the
+   * TRACE_MAX_MODEL_CALL_SKELETONS, so summing it understates long turns by exactly the
    * amount that makes them interesting. Flattened for the same reason
    * cacheReadTokens is: a `sum` agg cannot reach into a nested array.
    */

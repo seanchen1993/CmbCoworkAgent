@@ -7,6 +7,7 @@ import { ToolMessage } from "@langchain/core/messages"
 import ts from "typescript"
 import { describe, expect, it, vi } from "vitest"
 import { NativeSqliteAdapter } from "../db/native-sqlite-adapter"
+import { AsyncRWLock, AsyncSemaphore } from "./async-lock"
 import { LocalBotHost, type BotRunPort } from "../bots/host"
 import { BotStore } from "../bots/store"
 
@@ -22,6 +23,8 @@ type Gate = Middleware & {
   forQueue(queueId: string, workflowThreadId?: string): Middleware
 }
 
+// File tools now use LocalSandbox per-file locks (covered by resource-concurrency tests).
+// Use code_exec for opaque mutations that still require the runtime writer gate.
 // Execute the owning middleware and lock directly without booting the Electron/model runtime.
 const runtime = ts.createSourceFile(
   "runtime.ts",
@@ -91,6 +94,7 @@ function createGate(
   const context = {
     console,
     exports: {},
+    AsyncRWLock, AsyncSemaphore,
     createMiddleware: (config: Middleware) => config,
     ToolMessage,
     workflowRunManager: {
@@ -151,7 +155,7 @@ describe("shared Bot workspaces", () => {
     const a = gate.forQueue(`workspace:${dir}`, "private-thread")
     const b = gate.forQueue(`workspace:${dir}`, "group-task-thread")
     const other = gate.forQueue(`workspace:${dir}/other`, "other-group-thread")
-    const writer = a.wrapToolCall(request("write_file", "a"), async () => {
+    const writer = a.wrapToolCall(request("code_exec", "a"), async () => {
       const before = readFileSync(file, "utf8")
       entered.resolve()
       await finish.promise
@@ -159,9 +163,9 @@ describe("shared Bot workspaces", () => {
     })
     await entered.promise
     const next = vi.fn(async () => writeFileSync(file, readFileSync(file, "utf8") + "B"))
-    const blocked = b.wrapToolCall(request("write_file", "b"), next)
+    const blocked = b.wrapToolCall(request("code_exec", "b"), next)
     try {
-      await other.wrapToolCall(request("write_file", "c"), async () =>
+      await other.wrapToolCall(request("code_exec", "c"), async () =>
         writeFileSync(join(dir, "other.txt"), "C")
       )
       expect(next).not.toHaveBeenCalled()
@@ -195,7 +199,7 @@ describe("active workflow rejection", () => {
       const leaf = gate.forQueue(queueId, `${threadId}-leaf`)
       const entered = deferred(),
         finish = deferred()
-      const writer = leaf.wrapToolCall(request("write_file"), async () => {
+      const writer = leaf.wrapToolCall(request("code_exec"), async () => {
         entered.resolve()
         await finish.promise
       })
@@ -215,7 +219,7 @@ describe("active workflow rejection", () => {
             "Tool execution failed: A dynamic workflow (wf_existing_run) is already running in this thread. Wait for its task-notification, or the user can cancel it from the workflow panel.\nPlease adjust your approach and try again if appropriate."
         })
         const laterWriter = vi.fn(async () => "later write")
-        const later = leaf.wrapToolCall(request("write_file", "later-writer"), laterWriter)
+        const later = leaf.wrapToolCall(request("code_exec", "later-writer"), laterWriter)
         await turn()
         expect(laterWriter).not.toHaveBeenCalled()
         finish.resolve()
@@ -237,7 +241,7 @@ describe("active workflow rejection", () => {
     const leaf = gate.forQueue("bot-group-room", "other-member-thread-leaf")
     const entered = deferred(),
       finish = deferred()
-    const writer = leaf.wrapToolCall(request("write_file"), async () => {
+    const writer = leaf.wrapToolCall(request("code_exec"), async () => {
       entered.resolve()
       await finish.promise
     })
@@ -262,7 +266,7 @@ describe("active workflow rejection", () => {
       })
       const entered = deferred(),
         finish = deferred()
-      const writer = gate.wrapToolCall(request("write_file", "holder"), async () => {
+      const writer = gate.wrapToolCall(request("code_exec", "holder"), async () => {
         entered.resolve()
         await finish.promise
       })
@@ -317,8 +321,8 @@ describe("shared-workspace user input", () => {
     await entered.promise
     const sameWrite = vi.fn(async () => "same")
     const otherWrite = vi.fn(async () => "other")
-    const samePending = sameMember.wrapToolCall(request("write_file", "same"), sameWrite)
-    const otherPending = otherMember.wrapToolCall(request("write_file", "other"), otherWrite)
+    const samePending = sameMember.wrapToolCall(request("code_exec", "same"), sameWrite)
+    const otherPending = otherMember.wrapToolCall(request("code_exec", "other"), otherWrite)
     try {
       await turn()
       expect(otherWrite).toHaveBeenCalledOnce()
@@ -349,7 +353,7 @@ describe("shared-workspace user input", () => {
         release() {},
         execute: async (signal) => {
           started.push(task.id)
-          await gate.wrapToolCall(request("write_file", task.id), async () => {
+          await gate.wrapToolCall(request("code_exec", task.id), async () => {
             entered.push(task.id)
             appendFileSync(file, `start:${task.id}\n`)
             if (entered.length === 1) await release.promise
@@ -407,7 +411,7 @@ describe("shared-workspace user input", () => {
       acquire: (bot, task) => ({
         release() {},
         execute: async (signal) => {
-          await gate.wrapToolCall(request("write_file", task.id), async () => {
+          await gate.wrapToolCall(request("code_exec", task.id), async () => {
             if (bot.id === a.id) {
               writeFileSync(file, "A_STARTED\n")
               entered.resolve()
@@ -489,11 +493,11 @@ describe("shared-workspace user input", () => {
         finish = deferred()
       let sent = false,
         secondWrite = false
-      const first = gate.wrapToolCall(request("write_file", "first"), () => finish.promise)
+      const first = gate.wrapToolCall(request("code_exec", "first"), () => finish.promise)
       const message = gate.wrapToolCall(request("bot_send_message"), async () => {
         sent = true
       })
-      const second = gate.wrapToolCall(request("write_file", "second"), async () => {
+      const second = gate.wrapToolCall(request("code_exec", "second"), async () => {
         secondWrite = true
       })
       try {
@@ -535,7 +539,7 @@ describe("shared-workspace user input", () => {
       expect(peerRead).toBe(true)
       returned.resolve()
       await attached.promise
-      write = gate.wrapToolCall(request("write_file"), async () => {
+      write = gate.wrapToolCall(request("code_exec"), async () => {
         writerRan = true
       })
       await turn()
@@ -572,7 +576,7 @@ describe("shared-workspace user input", () => {
       const peer = gate.wrapToolCall(request("read_file"), async () => {
         read = true
       })
-      const writer = gate.wrapToolCall(request("write_file"), async () => {
+      const writer = gate.wrapToolCall(request("code_exec"), async () => {
         write = true
       })
       try {
@@ -618,11 +622,11 @@ describe("shared-workspace user input", () => {
       const peer = gate.wrapToolCall(request("read_file"), async () => {
         read = true
       })
-      const writer = gate.wrapToolCall(request("write_file", "first"), async () => {
+      const writer = gate.wrapToolCall(request("code_exec", "first"), async () => {
         firstWrite = true
         await written.promise
       })
-      const nextWriter = gate.wrapToolCall(request("write_file", "second"), async () => {
+      const nextWriter = gate.wrapToolCall(request("code_exec", "second"), async () => {
         secondWrite = true
       })
       try {
@@ -656,7 +660,7 @@ describe("shared-workspace user input", () => {
         const peer = gate.wrapToolCall(request("read_file"), async () => {
           read = true
         })
-        const writer = gate.wrapToolCall(request("write_file"), async () => {
+        const writer = gate.wrapToolCall(request("code_exec"), async () => {
           write = true
         })
         try {
@@ -689,8 +693,8 @@ describe("shared-workspace user input", () => {
         peerRead = true
         return "peer-read"
       })
-      const firstWrite = gate.wrapToolCall(request("write_file", "first"), () => writer.promise)
-      const nextWrite = gate.wrapToolCall(request("write_file", "second"), async () => {
+      const firstWrite = gate.wrapToolCall(request("code_exec", "first"), () => writer.promise)
+      const nextWrite = gate.wrapToolCall(request("code_exec", "second"), async () => {
         secondWriter = true
       })
       try {

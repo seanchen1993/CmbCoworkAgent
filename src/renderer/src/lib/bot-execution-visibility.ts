@@ -16,7 +16,7 @@ export function isBotExecutionTool(
   tool: ToolCall,
   result?: Pick<ToolResult, "content" | "is_error">
 ): boolean {
-  // Questions and handoff controls have a live presentation. Approvals and Mod
+  // Questions and handoff controls have a live presentation. Approvals and custom
   // cards are protected separately by the caller, independently of the tool name.
   if (!result)
     return !(
@@ -38,11 +38,11 @@ export function isBotExecutionTool(
   )
 }
 
-/** View projection only: preserve approvals, failures, deliveries, collaboration and Mod cards. */
+/** View projection only: preserve approvals, failures, deliveries, collaboration and custom cards. */
 export function projectBotExecution(
   messages: readonly Message[],
   keepActiveTurn: boolean,
-  cardCallIds: ReadonlySet<string>,
+  cardCallIds: ReadonlySet<string> = new Set(),
   pendingQuestionCallId: string | null = null,
   liveToolStates?: ReadonlyMap<string, Pick<ToolCallState, "status">>
 ): { hiddenMessages: Set<string>; foldedTools: Set<string> } {
@@ -61,7 +61,7 @@ export function projectBotExecution(
         continue
       }
       // MessageBubble suppresses ordinary running tools too. Exclude their empty virtual
-      // rows, but retain approval/failed/interrupted states and interactive or Mod cards.
+      // rows, but retain approval/failed/interrupted states and interactive or custom cards.
       const status = liveToolStates?.get(key)?.status
       if (
         !result &&

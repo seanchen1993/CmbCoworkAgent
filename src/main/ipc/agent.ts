@@ -7,9 +7,10 @@ import {
 import { assertWorkConversationEntry } from "../bots/conversation-link-authority"
 import { isPersonalMemoryEnabled } from "../agent/personal-context"
 import { foregroundToolPolicy } from "../agent/foreground-tool-policy"
+import { isModelAvailable } from "../../shared/model-catalog"
+import { getModelClientOptions } from "../models/connection"
 import { managedBizRetryService } from "../harness-board/biz-retry-service"
 import { IpcMain, BrowserWindow, dialog } from "electron"
-import { getModsManager } from "../mods/manager"
 import {
   StopHookContextCollector,
   STOP_HOOK_REVISION_PROMPT_PREFIX,
@@ -68,7 +69,7 @@ import {
 } from "../../shared/project-mode-agent-team"
 import { HumanMessage, SystemMessage, type BaseMessage } from "@langchain/core/messages"
 import { getDurableRuntimeTail } from "./thread-runtime-tail"
-import { Command } from "@langchain/langgraph"
+import { Command, isCommand } from "@langchain/langgraph"
 import {
   getCapturedSystemPromptPreview,
   getSkillEvolutionThreshold,
@@ -93,8 +94,10 @@ import type { CheckpointMetadata } from "@langchain/langgraph-checkpoint"
 import {
   addThreadGoalEvent,
   appendThreadMessageTextDelta,
+  ThreadMessageStreamAttempt,
   flushStrict,
   getThreadCore,
+  isFirstThreadUserMessage,
   getThreadMessageIdentityContext,
   getThreadMessageProviderOccurrencesBeforeUser,
   captureThreadMessageProviderOccurrenceBoundary,
@@ -169,11 +172,7 @@ import {
   isWorkflowPlumbingTranscriptContent,
   neutralizeWorkflowPlumbingUserText
 } from "../../shared/checkpoint-transcript"
-import {
-  childTurnStreamOwner,
-  isCoordinatorWorkerStreamChunk,
-  isMainTurnMessageStream
-} from "../agent/main-turn-stream"
+import { isSerializedSummarizationMessage } from "../../shared/context-compaction-messages"
 import {
   CONTEXT_COMPACTION_EVENT_TYPE,
   isContextCompactionStreamPayload,
@@ -298,6 +297,7 @@ import {
 } from "../agent/coordinator-worker-manager"
 import {
   isRetryableApiError,
+  isRetryableManagedProviderError,
   isEmptyModelResponseError,
   isResumableStreamFailure,
   extractErrorDetail,
@@ -318,13 +318,24 @@ import { createHookScope } from "../hooks/scope"
 import { assertBotMockThreadEntry } from "../bots/mock-runtime-policy"
 import type { HookConfig, HookEvent, HookResult } from "../hooks/types"
 import { fireSessionStartOnce } from "../hooks/session-lifecycle"
+import {
+  createSubagentBaselineGate,
+  createSubagentValuesTracker,
+  runSubagentStopHookOnce
+} from "../hooks/subagent-values"
+import type { SubagentLifecycleCallbacks } from "../agent/subagent-lifecycle-middleware"
 import { runHooksEnriched } from "../hooks/required-skill"
 import {
   buildSubagentStartHookContext,
   buildSubagentStopHookContext,
   extractSubagentStartToolCallsFromStreamPayload
 } from "../hooks/subagent-context"
-import { isHookHaltError, throwIfHookHalt, type HookHaltError } from "../hooks/halt"
+import {
+  getHookHaltError,
+  isHookHaltError,
+  throwIfHookHalt,
+  type HookHaltError
+} from "../hooks/halt"
 import {
   getFailureFuseHaltError,
   shouldSendFailureFuseNotice,
@@ -582,12 +593,23 @@ type AutoModeTerminalCode = AgentTurnEndEvent["endReason"]["code"]
 function createAutoModeTerminal(
   outcome: AgentTurnEndEvent["outcome"],
   code: AutoModeTerminalCode,
-  message?: string
+  message?: string,
+  error?: unknown
 ): AutoModeTerminal {
+  const retryable = code === "provider_error" ? isRetryableManagedProviderError(error) : undefined
+  if (code === "provider_error") {
+    const detail = extractErrorDetail(error)
+    console.warn("[AutoMode] Provider failure classified:", {
+      category: detail.code,
+      status: detail.status,
+      retryable
+    })
+  }
   return {
     outcome,
     endReason: {
       code,
+      ...(retryable !== undefined ? { retryable } : {}),
       ...(message?.trim() ? { message: message.trim() } : {})
     }
   }
@@ -1061,7 +1083,7 @@ function sendDesktopForeignOwnerBusy(
   channel: string,
   lease: LocalThreadRunLease
 ): void {
-  const sourceLabel = lease.owner === "im" ? "招乎远程任务" : lease.owner === "mods" ? "Mods 命令" : "定时任务"
+  const sourceLabel = lease.owner === "im" ? "招乎远程任务" : "定时任务"
   safeSendToWindow(window, channel, {
     type: "error",
     error: "THREAD_RUN_OWNED_BY_ANOTHER_SOURCE",
@@ -1157,7 +1179,7 @@ function rejectDesktopRunForRemoteReadOnlyThread(
     error: "REMOTE_INBOX_DESKTOP_READ_ONLY",
     message: historical
       ? "设备接管前的远程历史 Thread 仅可查看。"
-      : "远程收件箱在桌面仅可查看，请从招乎继续发送消息。"
+      : "招乎默认聊天在桌面仅可查看，请从招乎继续发送消息。"
   })
   safeSendToWindow(window, channel, { type: "done" })
   return true
@@ -1220,35 +1242,6 @@ export async function cancelAndWaitForAgentThreadRun(
   controller.abort()
   if (window && channel) safeSendToWindow(window, channel, { type: "done" })
   return waitForReplacedRunToSettle(threadId)
-}
-
-function cancelFunctionAgentTurn(
-  threadId: string,
-  runToken: string,
-  controller: AbortController,
-  window: BrowserWindow | null,
-  channel: string
-): void {
-  throwIfPhysicalStreamRunIsInactive(threadId, runToken, controller.signal)
-  try {
-    LocalSandbox.cancelBackgroundTasks(threadId)
-  } catch (error) {
-    console.warn("[Agent] Failed to cancel background tasks for function turn:", error)
-  }
-  try {
-    flushPendingStreamTranscriptMessages(threadId, runToken)
-  } catch (error) {
-    console.warn("[Agent] Failed to flush function turn transcript:", error)
-  }
-  // Keep the controller registered until settlement; a new message must await cleanup.
-  controller.abort()
-  try {
-    handleAutoModeAgentCancelled(threadId)
-  } catch (error) {
-    console.warn("[Agent] Failed to pause auto mode after function turn cancellation:", error)
-  }
-  // SDK cancellation has no local stop-button handler to complete the renderer stream.
-  if (window) safeSendToWindow(window, channel, { type: "done" })
 }
 
 async function waitForReplacedRunToSettle(threadId: string): Promise<"settled" | "timed_out"> {
@@ -1941,7 +1934,6 @@ function releaseAbandonedContinuationTurnState(
 }
 
 interface PhysicalAgentRunSettlementOptions {
-  functionTurnReason?: "answer" | "error"
   kind: "invoke" | "resume" | "interrupt"
   threadId: string
   runToken: string
@@ -1960,7 +1952,6 @@ interface PhysicalAgentRunSettlementOptions {
 }
 
 async function settlePhysicalAgentRun({
-  functionTurnReason,
   kind,
   threadId,
   runToken,
@@ -2023,26 +2014,6 @@ async function settlePhysicalAgentRun({
         run: cleanupNotificationSkills
       },
       ...criticalBeforeReleasePhases,
-      {
-        name: "settle-function-turn-facts",
-        run: () => {
-          const turns = getModsManager()?.functionTurns
-          if (functionTurnReason || controller.signal.aborted || turnStateShouldDispose)
-            turns?.finish(threadId, runToken, {
-              reason: functionTurnReason ?? (controller.signal.aborted ? "aborted" : "error")
-            })
-          else turns?.suspend(threadId, runToken)
-        }
-      },
-      {
-        name: "render-mod-turn-summary",
-        shouldRun: terminalRunOwnsSharedResources,
-        run: () => getModsManager()?.finishTurn(threadId)
-      },
-      {
-        name: "release-expired-mod-runtime-bindings",
-        run: () => getModsManager()?.releaseExpiredRuntimeBindings(threadId)
-      },
       {
         name: "release-active-controller",
         run: () => {
@@ -2137,6 +2108,8 @@ async function maybeRunSubagentStopHooksFromStreamPayload(params: {
   turnId?: string
   hookScope: HookScopeController
   firedToolCallIds: Set<string>
+  stopHooks: Map<string, Promise<void>>
+  subagentTypes: Map<string, string>
   onHookResult?: HookResultCallback
   /** Diagnostic-only callback for "matched event but filtered out by scope". */
   onHookSkipped?: ScopeSkipCallback
@@ -2154,44 +2127,44 @@ async function maybeRunSubagentStopHooksFromStreamPayload(params: {
   const isTool = className.includes("Tool") || kwargs.type === "tool"
   const toolCallId = typeof kwargs.tool_call_id === "string" ? kwargs.tool_call_id : ""
   if (!isTool || kwargs.name !== "task" || !toolCallId) return
-  if (params.firedToolCallIds.has(toolCallId)) return
-  params.firedToolCallIds.add(toolCallId)
-
-  const additionalKwargs = kwargs.additional_kwargs as Record<string, unknown> | undefined
-  const isErr =
-    kwargs.status === "error" || kwargs.is_error === true || additionalKwargs?.is_error === true
-  const subagentStopContext = buildSubagentStopHookContext({
-    workspacePath: params.workspacePath,
-    pluginOutputDir: params.pluginOutputDir,
-    systemId: params.systemId,
-    pluginWorkspace: params.pluginWorkspace,
-    featureId: params.featureId,
-    harnessProjectId: params.harnessProjectId,
-    harnessAdapterId: params.harnessAdapterId,
-    harnessAdapterName: params.harnessAdapterName,
-    harnessAdapterVersion: params.harnessAdapterVersion,
-    harnessNodeName: params.harnessNodeName,
-    harnessNodeStatus: params.harnessNodeStatus,
-    projectCode: params.projectCode,
-    projectDir: params.projectDir,
-    threadId: params.threadId,
-    turnId: params.turnId,
-    toolCallId,
-    failed: isErr
-  })
-  const result = await runHooksEnriched(
-    resolveEnabledHooksForRun(
-      params.workspacePath,
+  await runSubagentStopHookOnce(params.firedToolCallIds, params.stopHooks, toolCallId, async () => {
+    const additionalKwargs = kwargs.additional_kwargs as Record<string, unknown> | undefined
+    const isErr =
+      kwargs.status === "error" || kwargs.is_error === true || additionalKwargs?.is_error === true
+    const subagentStopContext = buildSubagentStopHookContext({
+      workspacePath: params.workspacePath,
+      pluginOutputDir: params.pluginOutputDir,
+      systemId: params.systemId,
+      pluginWorkspace: params.pluginWorkspace,
+      featureId: params.featureId,
+      harnessProjectId: params.harnessProjectId,
+      harnessAdapterId: params.harnessAdapterId,
+      harnessAdapterName: params.harnessAdapterName,
+      harnessAdapterVersion: params.harnessAdapterVersion,
+      harnessNodeName: params.harnessNodeName,
+      harnessNodeStatus: params.harnessNodeStatus,
+      projectCode: params.projectCode,
+      projectDir: params.projectDir,
+      threadId: params.threadId,
+      turnId: params.turnId,
+      toolCallId,
+      subagentType: params.subagentTypes.get(toolCallId),
+      failed: isErr
+    })
+    const result = await runHooksEnriched(
+      resolveEnabledHooksForRun(
+        params.workspacePath,
+        "SubagentStop",
+        subagentStopContext,
+        params.hookScope,
+        params.onHookSkipped
+      ),
       "SubagentStop",
       subagentStopContext,
-      params.hookScope,
-      params.onHookSkipped
-    ),
-    "SubagentStop",
-    subagentStopContext,
-    params.onHookResult
-  )
-  throwIfHookHalt("SubagentStop", result, "SubagentStop hook stopped the turn")
+      params.onHookResult
+    )
+    throwIfHookHalt("SubagentStop", result, "SubagentStop hook stopped the turn")
+  })
 }
 
 /**
@@ -2214,6 +2187,7 @@ function maybeRunSubagentStartHooksFromToolCalls(params: {
   harnessAdapterName?: string
   hookScope: HookScopeController
   firedStartIds: Set<string>
+  subagentTypes: Map<string, string>
   onHookResult?: HookResultCallback
   onHookSkipped?: ScopeSkipCallback
 }): void {
@@ -2221,10 +2195,12 @@ function maybeRunSubagentStartHooksFromToolCalls(params: {
   for (const tc of params.toolCalls) {
     if (tc?.name !== "task") continue
     const id = typeof tc.id === "string" ? tc.id : ""
-    if (!id || params.firedStartIds.has(id)) continue
-    params.firedStartIds.add(id)
+    if (!id) continue
     const args = (tc.args ?? {}) as Record<string, unknown>
     const subagentType = typeof args.subagent_type === "string" ? args.subagent_type : undefined
+    if (subagentType !== undefined) params.subagentTypes.set(id, subagentType)
+    if (params.firedStartIds.has(id)) continue
+    params.firedStartIds.add(id)
     const taskDescription = typeof args.description === "string" ? args.description : undefined
     const context = buildSubagentStartHookContext({
       workspacePath: params.workspacePath,
@@ -2256,8 +2232,8 @@ function maybeRunSubagentStartHooksFromToolCalls(params: {
 /**
  * Apply the paired subagent lifecycle hooks for one serialized stream message.
  * All physical stream entry points (initial, resume, and interrupt-continue)
- * use this bridge so a resumed turn cannot emit SubagentStop without first
- * observing the corresponding task tool call as SubagentStart.
+ * use this bridge for both messages and values, sharing task identity and
+ * dedupe. Resume baselines remember pending starts without replaying them.
  */
 async function maybeRunSubagentLifecycleHooksFromStreamPayload(params: {
   payload: unknown
@@ -2279,6 +2255,8 @@ async function maybeRunSubagentLifecycleHooksFromStreamPayload(params: {
   hookScope: HookScopeController
   firedStartIds: Set<string>
   firedStopIds: Set<string>
+  stopHooks: Map<string, Promise<void>>
+  subagentTypes: Map<string, string>
   onHookResult?: HookResultCallback
   onStartHookSkipped?: ScopeSkipCallback
   onStopHookSkipped?: ScopeSkipCallback
@@ -2294,6 +2272,7 @@ async function maybeRunSubagentLifecycleHooksFromStreamPayload(params: {
     harnessAdapterName: params.harnessAdapterName,
     hookScope: params.hookScope,
     firedStartIds: params.firedStartIds,
+    subagentTypes: params.subagentTypes,
     onHookResult: params.onHookResult,
     onHookSkipped: params.onStartHookSkipped
   })
@@ -2317,9 +2296,68 @@ async function maybeRunSubagentLifecycleHooksFromStreamPayload(params: {
     turnId: params.turnId,
     hookScope: params.hookScope,
     firedToolCallIds: params.firedStopIds,
+    stopHooks: params.stopHooks,
+    subagentTypes: params.subagentTypes,
     onHookResult: params.onHookResult,
     onHookSkipped: params.onStopHookSkipped
   })
+}
+
+/** Share event claims with the producer gate, including across model failover. */
+function createSubagentLifecycleBridge(
+  params: Omit<
+    Parameters<typeof maybeRunSubagentLifecycleHooksFromStreamPayload>[0],
+    "payload" | "firedStartIds" | "firedStopIds" | "subagentTypes" | "stopHooks"
+  > & { signal: AbortSignal }
+) {
+  const state = {
+    firedStartIds: new Set<string>(),
+    firedStopIds: new Set<string>(),
+    subagentTypes: new Map<string, string>(),
+    stopHooks: new Map<string, Promise<void>>()
+  }
+  const processPayload = (payload: unknown): Promise<void> =>
+    maybeRunSubagentLifecycleHooksFromStreamPayload({ ...params, ...state, payload })
+  const baseline = createSubagentBaselineGate(params.signal)
+  const trackValues = createSubagentValuesTracker(state, baseline.markReady)
+  const callbacks: SubagentLifecycleCallbacks = {
+    pendingStops: new Map(),
+    onStart: async (toolCall) => {
+      // The graph producer can outrun delivery of its initial checkpoint.
+      // Seed pending task identities before deciding whether Start is new.
+      await baseline.wait()
+      maybeRunSubagentStartHooksFromToolCalls({
+        ...params,
+        ...state,
+        toolCalls: [toolCall],
+        onHookSkipped: params.onStartHookSkipped
+      })
+    },
+    onStop: async (toolCall, result) => {
+      const update = isCommand(result) ? result.update : undefined
+      const messages =
+        update && !Array.isArray(update) ? (update as { messages?: unknown[] }).messages : undefined
+      const message = Array.isArray(messages)
+        ? messages.find(
+            (item) => (item as { tool_call_id?: unknown } | null)?.tool_call_id === toolCall.id
+          )
+        : result
+      const tool = message as Record<string, unknown> | undefined
+      await processPayload([
+        {
+          id: ["langchain_core", "messages", "ToolMessage"],
+          kwargs: {
+            name: "task",
+            tool_call_id: toolCall.id,
+            status: tool?.status,
+            is_error: tool?.is_error,
+            additional_kwargs: tool?.additional_kwargs
+          }
+        }
+      ])
+    }
+  }
+  return { processPayload, callbacks, trackValues }
 }
 
 /**
@@ -3340,6 +3378,13 @@ function buildNormalModeGuardMessage(state: NormalModeGuardState): string {
   )
 }
 
+function shouldDisableNormalModeSubagents(
+  agentMode: AgentMode,
+  metadata: Record<string, unknown>
+): boolean {
+  return agentMode === "normal" && metadata.subagentsEnabled === false
+}
+
 function getRequestedOutputStyle(metadata: Record<string, unknown>): AgentOutputStyle {
   return resolveThreadOutputStyle(metadata)
 }
@@ -3722,6 +3767,37 @@ function asPlainRecord(value: unknown): Record<string, unknown> | undefined {
     : undefined
 }
 
+function messageStreamMetadata(
+  mode: string,
+  payload: unknown
+): Record<string, unknown> | undefined {
+  if (mode !== "messages" || !Array.isArray(payload)) return undefined
+  return asPlainRecord(payload[1])
+}
+
+function isCoordinatorWorkerStreamChunk(mode: string, payload: unknown, threadId: string): boolean {
+  const metadata = messageStreamMetadata(mode, payload)
+  if (!metadata) return false
+  if (threadId.includes("__worker__")) return false
+
+  const workerThreadPrefix = `${threadId}__worker__`
+  const valuesToCheck = [
+    metadata.langgraph_checkpoint_ns,
+    metadata.checkpoint_ns,
+    metadata.thread_id,
+    metadata.langgraph_thread_id,
+    asPlainRecord(metadata.configurable)?.thread_id
+  ]
+
+  if (
+    valuesToCheck.some((value) => typeof value === "string" && value.includes(workerThreadPrefix))
+  ) {
+    return true
+  }
+
+  return false
+}
+
 function setSerializedMessageIdentity(
   payload: unknown,
   identity: { stableId: string; providerSourceId: string; providerOccurrence: number }
@@ -3749,7 +3825,22 @@ function shouldSkipMainTranscriptStreamPayload(
   payload: unknown,
   threadId: string
 ): boolean {
-  return !isMainTurnMessageStream(mode, payload, threadId)
+  if (mode !== "messages") return true
+  if (isContextCompactionStreamPayload(mode, payload)) return true
+  if (Array.isArray(payload) && isSerializedSummarizationMessage(payload[0])) return true
+  if (isCoordinatorWorkerStreamChunk(mode, payload, threadId)) return true
+  const metadata = messageStreamMetadata(mode, payload)
+  const checkpointNs =
+    typeof metadata?.langgraph_checkpoint_ns === "string"
+      ? metadata.langgraph_checkpoint_ns
+      : typeof metadata?.checkpoint_ns === "string"
+        ? metadata.checkpoint_ns
+        : ""
+  // Deep-agent/subagent interiors are scoped under tools namespaces. Normal
+  // visible tool results are re-persisted by the renderer's filtered transcript
+  // flush, so the main process intentionally stays conservative here.
+  if (checkpointNs.includes("tools:")) return true
+  return false
 }
 
 const STREAM_TRANSCRIPT_FLUSH_DEBOUNCE_MS = 250
@@ -3882,6 +3973,7 @@ const streamTranscriptToolCallAccumulators = new Map<
 >()
 
 const streamTranscriptAssistantIdentities = new Map<string, StreamTranscriptAssistantIdentity>()
+const streamTranscriptAttempts = new Map<string, ThreadMessageStreamAttempt>()
 
 function pendingStreamTranscriptKey(threadId: string, runToken: string): string {
   return `${threadId}\u0000${runToken}`
@@ -3924,10 +4016,14 @@ function discardStreamTranscriptToolCallAccumulators(threadId: string, runToken:
   const runKey = pendingStreamTranscriptKey(threadId, runToken)
   streamTranscriptToolCallAccumulators.delete(runKey)
   streamTranscriptAssistantIdentities.delete(runKey)
+  streamTranscriptAttempts.delete(runKey)
 }
 
 function discardStreamTranscriptToolCallAccumulatorsForThread(threadId: string): void {
   const prefix = `${threadId}\u0000`
+  for (const key of streamTranscriptAttempts.keys()) {
+    if (key.startsWith(prefix)) streamTranscriptAttempts.delete(key)
+  }
   for (const key of streamTranscriptToolCallAccumulators.keys()) {
     if (key.startsWith(prefix)) streamTranscriptToolCallAccumulators.delete(key)
   }
@@ -3936,7 +4032,7 @@ function discardStreamTranscriptToolCallAccumulatorsForThread(threadId: string):
 function flushPendingStreamTranscriptMessages(
   threadId: string,
   runToken: string,
-  options: { throwOnError?: boolean } = {}
+  options: { throwOnError?: boolean; checkpoint?: boolean } = {}
 ): void {
   const pendingKey = pendingStreamTranscriptKey(threadId, runToken)
   const pending = pendingStreamTranscriptMessages.get(pendingKey)
@@ -3976,9 +4072,14 @@ function flushPendingStreamTranscriptMessages(
     })
     const { messages, preserveExistingOrder } = resolved
     if (messages.length === 0) return
+    let streamAttempt = options.checkpoint ? undefined : streamTranscriptAttempts.get(pendingKey)
+    if (!options.checkpoint && !streamAttempt) {
+      streamAttempt = new ThreadMessageStreamAttempt(threadId)
+      streamTranscriptAttempts.set(pendingKey, streamAttempt)
+    }
     let persistedCount: number
     if (resolved.appendTextDelta && messages.length === 1) {
-      if (!appendThreadMessageTextDelta(threadId, messages[0])) {
+      if (!appendThreadMessageTextDelta(threadId, messages[0], streamAttempt)) {
         // This payload is a suffix, not an authoritative snapshot. Falling
         // through to upsert would replace/create the durable row with only the
         // suffix. Retain it in the pending buffer until a safe snapshot arrives.
@@ -3991,7 +4092,10 @@ function flushPendingStreamTranscriptMessages(
       }
       persistedCount = 1
     } else {
-      persistedCount = upsertThreadMessages(threadId, messages, { preserveExistingOrder })
+      persistedCount = upsertThreadMessages(threadId, messages, {
+        preserveExistingOrder,
+        streamAttempt
+      })
     }
     if (persistedCount !== messages.length) {
       throw new Error(
@@ -4035,6 +4139,9 @@ function flushPendingStreamTranscriptMessagesForThread(
     if (key.startsWith(prefix)) owners.add(key.slice(prefix.length))
   }
   for (const key of streamTranscriptAssistantIdentities.keys()) {
+    if (key.startsWith(prefix)) owners.add(key.slice(prefix.length))
+  }
+  for (const key of streamTranscriptAttempts.keys()) {
     if (key.startsWith(prefix)) owners.add(key.slice(prefix.length))
   }
 
@@ -4238,22 +4345,6 @@ function persistAndForwardPhysicalRunStreamChunk(
   // every chunk until a values/terminal event lets a long answer accumulate
   // thousands of deltas and makes final coalescing quadratic in output length.
   const messageId = persistStreamTranscriptChunk(threadId, runToken, mode, payload)
-  const child = childTurnStreamOwner(mode, payload)
-  if (child)
-    getModsManager()?.functionTurns.observeChildStream(
-      threadId,
-      runToken,
-      child,
-      payload,
-      streamPayloadContentMode(payload)
-    )
-  if (!shouldSkipMainTranscriptStreamPayload(mode, payload, threadId))
-    getModsManager()?.functionTurns.observeStream(
-      threadId,
-      runToken,
-      payload,
-      streamPayloadContentMode(payload)
-    )
   if (mode === "values") {
     // Graph values are the ordered authority for final fields. Persist them at
     // the active-run fence so delayed renderer echoes cannot restore old text,
@@ -4277,7 +4368,12 @@ function persistAndForwardPhysicalRunStreamChunk(
     for (const snapshot of snapshots) {
       persistStreamTranscriptChunk(threadId, runToken, "messages", snapshot, { deferFlush: true })
     }
-    flushPendingStreamTranscriptMessages(threadId, runToken)
+    flushPendingStreamTranscriptMessages(threadId, runToken, {
+      throwOnError: true,
+      checkpoint: true
+    })
+    // Values are the committed graph boundary, not part of the next failed attempt.
+    streamTranscriptAttempts.delete(pendingStreamTranscriptKey(threadId, runToken))
   }
   safeSendToWindow(window, channel, {
     type: "stream",
@@ -4744,10 +4840,20 @@ function resetFailedStreamAttempt(
     inFlightMessageIds.clear()
     return
   }
+  if (!isCurrentRunMessageQueueOwner(threadId, runToken)) {
+    discardPendingStreamTranscriptMessages(threadId, runToken)
+    discardStreamTranscriptToolCallAccumulators(threadId, runToken)
+    inFlightMessageIds.clear()
+    return
+  }
+  const rollback = streamTranscriptAttempts
+    .get(pendingStreamTranscriptKey(threadId, runToken))
+    ?.rollback()
   discardStreamTranscriptToolCallAccumulators(threadId, runToken)
   const discardedMessageIds = [
     ...new Set([
       ...inFlightMessageIds,
+      ...(rollback?.discardedMessageIds ?? []),
       ...discardPendingStreamTranscriptMessages(threadId, runToken)
     ])
   ]
@@ -4758,7 +4864,9 @@ function resetFailedStreamAttempt(
     data: {
       type: "stream_retry_reset",
       messages: stableMessages,
-      discardedMessageIds
+      discardedMessageIds,
+      discardedPersistedMessageIds: rollback?.discardedMessageIds ?? [],
+      restoredMessages: rollback?.restoredMessages ?? []
     }
   })
 }
@@ -4912,7 +5020,7 @@ async function judgeSkillWorthiness(
   context: SkillProposalWindowContext
 ): Promise<WorthinessResult | null> {
   const config = getDefaultModelConfig()
-  if (!config?.apiKey) {
+  if (!isModelAvailable(config)) {
     console.log(
       `[SkillEvolution][${threadId}] Worthiness LLM skipped: missing model config or API key`
     )
@@ -4922,7 +5030,7 @@ async function judgeSkillWorthiness(
   const model = new ChatOpenAI({
     model: config.model,
     apiKey: config.apiKey,
-    configuration: { baseURL: config.baseUrl },
+    ...getModelClientOptions(config, { sessionId: threadId }),
     maxTokens: config.maxOutputTokens,
     ...samplingFields(config.model, { temperature: config.temperature, topP: config.topP }),
     modelKwargs: {
@@ -4994,7 +5102,7 @@ async function generateSkillProposal(
   emitSkillGenerating(threadId, "start")
 
   const config = getDefaultModelConfig()
-  if (!config?.apiKey) {
+  if (!isModelAvailable(config)) {
     emitSkillGenerating(threadId, "error", "未配置模型或 API Key，无法生成技能草稿")
     return null
   }
@@ -5013,7 +5121,7 @@ Based on this conversation, generate a reusable skill. Output JSON only.`
     const model = new ChatOpenAI({
       model: config.model,
       apiKey: config.apiKey,
-      configuration: { baseURL: config.baseUrl },
+      ...getModelClientOptions(config, { sessionId: threadId }),
       maxTokens: config.maxOutputTokens,
       ...samplingFields(config.model, { temperature: config.temperature, topP: config.topP }),
       modelKwargs: {
@@ -6669,6 +6777,12 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           rawMessage: rootUserPrompt,
           requestedModelId: modelId,
           options: {
+            // The visible user message is already persisted at this point.
+            // Read only indexed message IDs, not the full conversation body.
+            isFirstProjectTurn: Boolean(
+              harnessFeatureBinding && isFirstThreadUserMessage(threadId, userMessageId)
+            ),
+            hasExplicitSkill: Boolean(runExecutionContext.trustedExplicitSkill),
             triggerSource: isInternalNotificationTrace
               ? INTERNAL_NOTIFICATION_TRIGGER_SOURCE
               : "chat",
@@ -7045,7 +7159,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           terminalMessage?: string,
           terminalError?: unknown
         ): void => {
-          autoModeTerminal = createAutoModeTerminal(outcome, code, terminalMessage)
+          autoModeTerminal = createAutoModeTerminal(outcome, code, terminalMessage, terminalError)
           // Failures are reported to the renderer and then swallowed, so this
           // run resolves normally either way. A managed transport has no stream
           // to read: without this it can only infer failure from "no final
@@ -8037,6 +8151,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             message: routingDecisionMessage || effectiveMessage,
             threadId,
             requestedModelId,
+            managedExecution,
             routingMode: runExecutionContext.modelRoutingMode ?? getGlobalRoutingMode()
           })
           throwIfInvokeAborted()
@@ -8160,6 +8275,19 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           // Expose this turn's attempts to the catch handler (same array ref).
           lastFailoverByChannel.set(channel, failoverAttempts)
           const coordinatorWorkerTurnPlanning = createCoordinatorWorkerTurnPlanningState()
+          const subagentLifecycle = createSubagentLifecycleBridge({
+            signal: abortController.signal,
+            workspacePath: sessionWorkspacePath,
+            threadId,
+            turnId: turnState.turnId,
+            hookScope,
+            pluginOutputDir: harnessAgentContext.pluginOutputDir,
+            systemId: harnessAgentContext.systemId,
+            ...getHarnessHookContext(harnessAgentContext),
+            onHookResult,
+            onStartHookSkipped: onHookSkippedFactory("SubagentStart"),
+            onStopHookSkipped: onHookSkippedFactory("SubagentStop")
+          })
           const invokeRuntimeFactory = prepareStandardThreadRuntimeFactory({
             source: runExecutionContext.source,
             runLease: {
@@ -8167,6 +8295,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               runId: runToken
             },
             baseOptions: () => ({
+              subagentLifecycle: subagentLifecycle.callbacks,
               threadId,
               outputStyle: getRequestedOutputStyle(metadata),
               currentRunMessageQueueOwnerToken: runToken,
@@ -8215,6 +8344,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 runExecutionContext.source === "bot" && runExecutionContext.botBrowserToolsOwnFileLock,
               capabilityService: runExecutionContext.capabilityService,
               agentMode: effectiveAgentMode,
+              disableSubagents: shouldDisableNormalModeSubagents(effectiveAgentMode, metadata),
               traceContext: runtimeTraceContext,
               soloTaskTraceManager,
               retryHooks: buildModelRetryHooks(window, channel, () =>
@@ -8272,6 +8402,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           let agent: Awaited<ReturnType<typeof invokeRuntimeFactory.create>> | null = null
           let stream: AsyncIterable<unknown> | null = null
 
+          let lastInitializationError: unknown
           for (const candidateId of orderedChain) {
             if (abortController.signal.aborted) break
             try {
@@ -8301,19 +8432,6 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 )
                   throw new Error("Bot 续办来源未能保存，已停止自动续办，请检查原任务。")
               }
-              if (workspacePath && messageControlsEnabled)
-                await getModsManager()?.startFunctionTurn({
-                  workspace: workspacePath,
-                  threadId,
-                  runId: runToken,
-                  turnId: ensureTurnId(turnState, threadId, "invoke"),
-                  text: effectiveMessage,
-                  signal: abortController.signal,
-                  cancel: () =>
-                    cancelFunctionAgentTurn(threadId, runToken, abortController, window, channel),
-                  assertCurrent: () =>
-                    throwIfPhysicalStreamRunIsInactive(threadId, runToken, abortController.signal)
-                })
               throwIfInvokeAborted()
               // First attempt sends the message; subsequent attempts resume from checkpoint
               const input = isFirstAttempt && !resumeCheckpointId ? { messages: humanMessages } : null
@@ -8323,6 +8441,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               break
             } catch (err) {
               if (!isRetryableApiError(err)) throw err
+              lastInitializationError = err
               failoverAttempts.push({
                 modelId: candidateId,
                 error: String(err),
@@ -8347,7 +8466,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
           if (!stream || !agent) {
             const allErrors = failoverAttempts.map((a) => `${a.modelId}: ${a.error}`).join("; ")
-            throw new Error(`All models failed: ${allErrors}`)
+            throw new Error(`All models failed: ${allErrors}`, { cause: lastInitializationError })
           }
 
           // Notify frontend if failover happened — update model display + context window
@@ -8417,9 +8536,6 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           const _countedToolResultMsgIds = new Set<string>()
           const _soloTaskAiMessageIds = new Set<string>()
           const _soloTaskToolCallIds = new Set<string>()
-          // Track which subagent tool-call IDs we've already emitted SubagentStop for (dedupe)
-          const _subagentStopFired = new Set<string>()
-          const _subagentStartFired = new Set<string>()
           const _llmNodeByMessageId = new Map<string, string>()
           const _reasoningByAiMessageId = new Map<string, string>()
           const _toolNodeByRef = new Map<string, string>()
@@ -8471,26 +8587,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             )
           }
 
-          const processMessagesSideEffects = async (payload: unknown): Promise<void> => {
-            // Lifecycle hooks have control-flow semantics (SubagentStop can halt
-            // the parent turn), so keep them outside the best-effort metrics/
-            // tracing catch below. A HookHaltError must reach the stream owner.
-            await maybeRunSubagentLifecycleHooksFromStreamPayload({
-              payload,
-              workspacePath: sessionWorkspacePath,
-              threadId,
-              turnId: turnState.turnId,
-              hookScope,
-              pluginOutputDir: harnessAgentContext.pluginOutputDir,
-              systemId: harnessAgentContext.systemId,
-              ...getHarnessHookContext(harnessAgentContext),
-              firedStartIds: _subagentStartFired,
-              firedStopIds: _subagentStopFired,
-              onHookResult,
-              onStartHookSkipped: onHookSkippedFactory("SubagentStart"),
-              onStopHookSkipped: onHookSkippedFactory("SubagentStop")
-            })
 
+          const processMessagesSideEffects = async (payload: unknown): Promise<void> => {
+            await subagentLifecycle.processPayload(payload)
             try {
               // eslint-disable-next-line @typescript-eslint/no-explicit-any
               const [msgChunk] = payload as [any]
@@ -8825,6 +8924,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               return
             }
             if (mode === "values") {
+              for (const tuple of subagentLifecycle.trackValues(payload)) {
+                await subagentLifecycle.processPayload(tuple)
+              }
               processValuesSideEffects(payload, valuesSnapshotKind)
             }
           }
@@ -9090,8 +9192,6 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           if (!abortController.signal.aborted) {
             while (!abortController.signal.aborted) {
               const completionOutcome = await runCompletionHooksWithRevision({
-                hasTerminalModelRefusal: () =>
-                  !!readTurnCompletionGateReport(threadId, runToken)?.refusal,
                 threadId,
                 workspacePath: workspacePath ?? undefined,
                 turnId: turnState.turnId,
@@ -9137,10 +9237,6 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 }
               })
               throwIfInvokeAborted()
-              if (readTurnCompletionGateReport(threadId, runToken)?.refusal) {
-                pauseActiveGoalForRuntimeStop("Model provider refused the request.")
-                break
-              }
 
               if (completionOutcome === "failed") {
                 clearCoordinatorNotificationSelectedSkillsOnExit = true
@@ -9824,14 +9920,14 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                       }).catch(() => null)
                       const memModelId = memRoutingResult?.resolvedModelId ?? modelId
                       const config = getModelConfigByRef(memModelId) ?? getDefaultModelConfig()
-                      if (!config?.apiKey) {
+                      if (!isModelAvailable(config)) {
                         console.warn("[Agent] No model config available — skipping memory tasks")
                         return null
                       }
                       return new ChatOpenAI({
                         model: config.model,
                         apiKey: config.apiKey,
-                        configuration: { baseURL: config.baseUrl },
+                        ...getModelClientOptions(config, { sessionId: threadId }),
                         maxTokens: config.maxOutputTokens,
                         ...samplingFields(config.model, {
                           temperature: config.temperature,
@@ -9986,13 +10082,14 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             turnStateShouldDispose = true
             return
           }
-          if (isHookHaltError(error)) {
+          const hookHalt = getHookHaltError(error)
+          if (hookHalt) {
             clearCoordinatorNotificationSelectedSkillsOnExit = true
-            console.warn("[Agent] Hook halted turn:", error.reason)
-            pauseActiveGoalForRuntimeStop(error.reason)
-            sendHookHalt(window, channel, error)
+            console.warn("[Agent] Hook halted turn:", hookHalt.reason)
+            pauseActiveGoalForRuntimeStop(hookHalt.reason)
+            sendHookHalt(window, channel, hookHalt)
             syncUsedSkillsContext()
-            finishTraceInBackground(tracer, "cancelled", error.reason, "Agent")
+            finishTraceInBackground(tracer, "cancelled", hookHalt.reason, "Agent")
             if (invokeRoutingResult) {
               rememberRoutingFeedback(threadId, {
                 resolvedTier: invokeRoutingResult.resolvedTier,
@@ -10004,7 +10101,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               })
             }
             turnStateShouldDispose = true
-            markAutoModeTerminal("error", "hook_halt", error.reason, error)
+            markAutoModeTerminal("error", "hook_halt", hookHalt.reason, error)
             return
           }
           const actionStationarityHalt = getActionStationarityHaltError(error)
@@ -10205,11 +10302,6 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           // catch's documented halt semantics; the run stays re-discoverable.
           await settlePhysicalAgentRun({
             kind: "invoke",
-            functionTurnReason: autoModeTerminal
-              ? autoModeTerminal.outcome === "success"
-                ? "answer"
-                : "error"
-              : undefined,
             threadId,
             runToken,
             controller: abortController,
@@ -10263,9 +10355,15 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                     isWorkflowNotificationInvoke &&
                     workflowNotificationTerminalEligibleForManaged &&
                     isActiveManagedRunSession(threadId)
+                  const shouldReportCoordinatorNotificationTerminal =
+                    isTrustedCoordinatorNotificationInvoke &&
+                    isCoordinatorNotificationTurn &&
+                    Boolean(autoModeTerminal) &&
+                    isActiveManagedRunSession(threadId)
                   if (
                     abortController.signal.aborted ||
-                    isTrustedCoordinatorNotificationInvoke ||
+                    (isTrustedCoordinatorNotificationInvoke &&
+                      !shouldReportCoordinatorNotificationTerminal) ||
                     (isWorkflowNotificationInvoke && !shouldReportWorkflowNotificationTerminal) ||
                     (managedExecution !== true && !isActiveManagedRunSession(threadId))
                   ) {
@@ -11145,10 +11243,24 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           const resumeFailoverAttempts: FailoverAttempt[] = []
           lastFailoverByChannel.set(channel, resumeFailoverAttempts)
           const resumeCoordinatorWorkerTurnPlanning = createCoordinatorWorkerTurnPlanningState()
+          const resumeSubagentLifecycle = createSubagentLifecycleBridge({
+            signal: abortController.signal,
+            workspacePath,
+            threadId,
+            turnId: turnState.turnId,
+            hookScope,
+            pluginOutputDir: harnessAgentContext.pluginOutputDir,
+            systemId: harnessAgentContext.systemId,
+            ...getHarnessHookContext(harnessAgentContext),
+            onHookResult,
+            onStartHookSkipped: onHookSkippedFactory("SubagentStart"),
+            onStopHookSkipped: onHookSkippedFactory("SubagentStop")
+          })
           const resumeRuntimeFactory = prepareStandardThreadRuntimeFactory({
             source: "desktop",
             runLease: { owner: "desktop", runId: runToken },
             baseOptions: () => ({
+              subagentLifecycle: resumeSubagentLifecycle.callbacks,
               threadId,
               currentRunMessageQueueOwnerToken: runToken,
               onTurnCompletionRecovery: (input) => {
@@ -11190,23 +11302,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           let resumeAgentRuntime: Awaited<ReturnType<typeof resumeRuntimeFactory.create>> | null =
             null
 
+          let lastInitializationError: unknown
           for (const candidateId of resumeOrderedChain) {
             if (abortController.signal.aborted) break
             try {
               const resumeAgent = await resumeRuntimeFactory.create(candidateId)
-              if (workspacePath)
-                await getModsManager()?.startFunctionTurn({
-                  workspace: workspacePath,
-                  threadId,
-                  runId: runToken,
-                  turnId: ensureTurnId(turnState, threadId, "resume"),
-                  text: "",
-                  signal: abortController.signal,
-                  cancel: () =>
-                    cancelFunctionAgentTurn(threadId, runToken, abortController, window, channel),
-                  assertCurrent: () =>
-                    throwIfPhysicalStreamRunIsInactive(threadId, runToken, abortController.signal)
-                })
               throwIfPhysicalStreamRunIsInactive(threadId, runToken, abortController.signal)
               resumeStream = await resumeAgent.stream(
                 new Command({ resume: resumeValue }),
@@ -11219,6 +11319,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               break
             } catch (err) {
               if (!isRetryableApiError(err)) throw err
+              lastInitializationError = err
               resumeFailoverAttempts.push({
                 modelId: candidateId,
                 error: String(err),
@@ -11243,7 +11344,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             const allErrors = resumeFailoverAttempts
               .map((a) => `${a.modelId}: ${a.error}`)
               .join("; ")
-            throw new Error(`All models failed during resume: ${allErrors}`)
+            throw new Error(`All models failed during resume: ${allErrors}`, {
+              cause: lastInitializationError
+            })
           }
 
           // Notify frontend + persist routing state if failover happened
@@ -11295,8 +11398,6 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           let resumeStableStreamMessages: unknown[] = []
           const resumeInFlightMessageIds = new Set<string>()
           const pendingResumeMessagePayloads = createStreamMessageSideEffectBuffer()
-          const resumeSubagentStartFired = new Set<string>()
-          const resumeSubagentStopFired = new Set<string>()
 
           const consumeResumeStream = async (source: AsyncIterable<unknown>): Promise<void> => {
             const serializeForRun = createStreamDataSerializer({ projectMessageChunks: true })
@@ -11307,21 +11408,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             }
             const commitPendingResumeMessageSideEffects = async (): Promise<void> => {
               for (const payload of pendingResumeMessagePayloads.drain()) {
-                await maybeRunSubagentLifecycleHooksFromStreamPayload({
-                  payload,
-                  workspacePath,
-                  threadId,
-                  turnId: turnState.turnId,
-                  hookScope,
-                  pluginOutputDir: harnessAgentContext.pluginOutputDir,
-                  systemId: harnessAgentContext.systemId,
-                  ...getHarnessHookContext(harnessAgentContext),
-                  firedStartIds: resumeSubagentStartFired,
-                  firedStopIds: resumeSubagentStopFired,
-                  onHookResult,
-                  onStartHookSkipped: onHookSkippedFactory("SubagentStart"),
-                  onStopHookSkipped: onHookSkippedFactory("SubagentStop")
-                })
+                await resumeSubagentLifecycle.processPayload(payload)
                 stopContextCollector.processStreamChunk("messages", payload)
               }
             }
@@ -11366,6 +11453,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   pendingResumeMessagePayloads.push(serialized)
                 } else {
                   await commitPendingResumeMessageSideEffects()
+                  if (mode === "values") {
+                    for (const payload of resumeSubagentLifecycle.trackValues(serialized)) {
+                      await resumeSubagentLifecycle.processPayload(payload)
+                    }
+                  }
                   stopContextCollector.processStreamChunk(mode, serialized)
                 }
               }
@@ -11458,8 +11550,6 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
           if (!abortController.signal.aborted) {
             const completionOutcome = await runCompletionHooksWithRevision({
-              hasTerminalModelRefusal: () =>
-                !!readTurnCompletionGateReport(threadId, runToken)?.refusal,
               threadId,
               workspacePath: workspacePath ?? undefined,
               turnId: turnState.turnId,
@@ -11584,19 +11674,20 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             turnStateShouldDispose = true
             return
           }
-          if (isHookHaltError(error)) {
-            resumeAutoModeTerminal = createAutoModeTerminal("error", "hook_halt", error.reason)
+          const hookHalt = getHookHaltError(error)
+          if (hookHalt) {
+            resumeAutoModeTerminal = createAutoModeTerminal("error", "hook_halt", hookHalt.reason)
             clearResumeCoordinatorNotificationSelectedSkillsOnExit = true
-            console.warn("[Agent] Resume hook halted turn:", error.reason)
+            console.warn("[Agent] Resume hook halted turn:", hookHalt.reason)
             pauseActiveGoalAfterBoundary(
               threadId,
               window,
               channel,
-              error.reason,
+              hookHalt.reason,
               boundaryGoalId,
               boundaryGoalActiveWindowId
             )
-            sendHookHalt(window, channel, error)
+            sendHookHalt(window, channel, hookHalt)
             turnStateShouldDispose = true
             return
           }
@@ -11654,7 +11745,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             resumeAutoModeTerminal = createAutoModeTerminal(
               "error",
               "provider_error",
-              error instanceof Error ? error.message : "Unknown error"
+              error instanceof Error ? error.message : "Unknown error",
+              error
             )
             clearResumeCoordinatorNotificationSelectedSkillsOnExit = true
             console.error("[Agent] Resume error:", error)
@@ -11688,11 +11780,6 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           clearTurnCompletionGateState(threadId, runToken)
           await settlePhysicalAgentRun({
             kind: "resume",
-            functionTurnReason: resumeAutoModeTerminal
-              ? resumeAutoModeTerminal.outcome === "success"
-                ? "answer"
-                : "error"
-              : undefined,
             threadId,
             runToken,
             controller: abortController,
@@ -12310,10 +12397,24 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           const intFailoverAttempts: FailoverAttempt[] = []
           lastFailoverByChannel.set(channel, intFailoverAttempts)
           const interruptCoordinatorWorkerTurnPlanning = createCoordinatorWorkerTurnPlanningState()
+          const interruptSubagentLifecycle = createSubagentLifecycleBridge({
+            signal: abortController.signal,
+            workspacePath,
+            threadId,
+            turnId: turnState.turnId,
+            hookScope,
+            pluginOutputDir: harnessAgentContext.pluginOutputDir,
+            systemId: harnessAgentContext.systemId,
+            ...getHarnessHookContext(harnessAgentContext),
+            onHookResult,
+            onStartHookSkipped: onHookSkippedFactory("SubagentStart"),
+            onStopHookSkipped: onHookSkippedFactory("SubagentStop")
+          })
           const interruptRuntimeFactory = prepareStandardThreadRuntimeFactory({
             source: "desktop",
             runLease: { owner: "desktop", runId: runToken },
             baseOptions: () => ({
+              subagentLifecycle: interruptSubagentLifecycle.callbacks,
               threadId,
               outputStyle: getRequestedOutputStyle(metadata),
               currentRunMessageQueueOwnerToken: runToken,
@@ -12356,23 +12457,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           let intAgentRuntime: Awaited<ReturnType<typeof interruptRuntimeFactory.create>> | null =
             null
 
+          let lastInitializationError: unknown
           for (const candidateId of intOrderedChain) {
             if (abortController.signal.aborted) break
             try {
               const intAgent = await interruptRuntimeFactory.create(candidateId)
-              if (workspacePath)
-                await getModsManager()?.startFunctionTurn({
-                  workspace: workspacePath,
-                  threadId,
-                  runId: runToken,
-                  turnId: ensureTurnId(turnState, threadId, "interrupt"),
-                  text: "",
-                  signal: abortController.signal,
-                  cancel: () =>
-                    cancelFunctionAgentTurn(threadId, runToken, abortController, window, channel),
-                  assertCurrent: () =>
-                    throwIfPhysicalStreamRunIsInactive(threadId, runToken, abortController.signal)
-                })
               throwIfPhysicalStreamRunIsInactive(threadId, runToken, abortController.signal)
               intStream = await intAgent.stream(null, interruptStreamConfig)
               throwIfPhysicalStreamRunIsInactive(threadId, runToken, abortController.signal)
@@ -12382,6 +12471,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               break
             } catch (err) {
               if (!isRetryableApiError(err)) throw err
+              lastInitializationError = err
               intFailoverAttempts.push({
                 modelId: candidateId,
                 error: String(err),
@@ -12404,7 +12494,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
           if (!intStream) {
             const allErrors = intFailoverAttempts.map((a) => `${a.modelId}: ${a.error}`).join("; ")
-            throw new Error(`All models failed during interrupt-continue: ${allErrors}`)
+            throw new Error(`All models failed during interrupt-continue: ${allErrors}`, {
+              cause: lastInitializationError
+            })
           }
 
           // Notify frontend + persist routing state if failover happened
@@ -12454,8 +12546,6 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           let intStableStreamMessages: unknown[] = []
           const intInFlightMessageIds = new Set<string>()
           const pendingIntMessagePayloads = createStreamMessageSideEffectBuffer()
-          const interruptSubagentStartFired = new Set<string>()
-          const interruptSubagentStopFired = new Set<string>()
 
           const consumeInterruptStream = async (source: AsyncIterable<unknown>): Promise<void> => {
             const serializeForRun = createStreamDataSerializer({ projectMessageChunks: true })
@@ -12466,21 +12556,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             }
             const commitPendingInterruptMessageSideEffects = async (): Promise<void> => {
               for (const payload of pendingIntMessagePayloads.drain()) {
-                await maybeRunSubagentLifecycleHooksFromStreamPayload({
-                  payload,
-                  workspacePath,
-                  threadId,
-                  turnId: turnState.turnId,
-                  hookScope,
-                  pluginOutputDir: harnessAgentContext.pluginOutputDir,
-                  systemId: harnessAgentContext.systemId,
-                  ...getHarnessHookContext(harnessAgentContext),
-                  firedStartIds: interruptSubagentStartFired,
-                  firedStopIds: interruptSubagentStopFired,
-                  onHookResult,
-                  onStartHookSkipped: onHookSkippedFactory("SubagentStart"),
-                  onStopHookSkipped: onHookSkippedFactory("SubagentStop")
-                })
+                await interruptSubagentLifecycle.processPayload(payload)
                 stopContextCollector.processStreamChunk("messages", payload)
               }
             }
@@ -12525,6 +12601,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   pendingIntMessagePayloads.push(serialized)
                 } else {
                   await commitPendingInterruptMessageSideEffects()
+                  if (mode === "values") {
+                    for (const payload of interruptSubagentLifecycle.trackValues(serialized)) {
+                      await interruptSubagentLifecycle.processPayload(payload)
+                    }
+                  }
                   stopContextCollector.processStreamChunk(mode, serialized)
                 }
               }
@@ -12610,8 +12691,6 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
           if (!abortController.signal.aborted) {
             const completionOutcome = await runCompletionHooksWithRevision({
-              hasTerminalModelRefusal: () =>
-                !!readTurnCompletionGateReport(threadId, runToken)?.refusal,
               threadId,
               workspacePath: workspacePath ?? undefined,
               turnId: turnState.turnId,
@@ -12753,19 +12832,20 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           turnStateShouldDispose = true
           return
         }
-        if (isHookHaltError(error)) {
-          interruptAutoModeTerminal = createAutoModeTerminal("error", "hook_halt", error.reason)
-          console.warn("[Agent] Interrupt hook halted turn:", error.reason)
+        const hookHalt = getHookHaltError(error)
+        if (hookHalt) {
+          interruptAutoModeTerminal = createAutoModeTerminal("error", "hook_halt", hookHalt.reason)
+          console.warn("[Agent] Interrupt hook halted turn:", hookHalt.reason)
           pauseActiveGoalAfterBoundary(
             threadId,
             window,
             channel,
-            error.reason,
+            hookHalt.reason,
             boundaryGoalId,
             boundaryGoalActiveWindowId
           )
           turnStateShouldDispose = true
-          sendHookHalt(window, channel, error)
+          sendHookHalt(window, channel, hookHalt)
           return
         }
         const actionStationarityHalt = getActionStationarityHaltError(error)
@@ -12821,7 +12901,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           interruptAutoModeTerminal = createAutoModeTerminal(
             "error",
             "provider_error",
-            error instanceof Error ? error.message : "Unknown error"
+            error instanceof Error ? error.message : "Unknown error",
+            error
           )
           clearInterruptCoordinatorNotificationSelectedSkillsOnExit = true
           console.error("[Agent] Interrupt error:", error)
@@ -12854,11 +12935,6 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         clearTurnCompletionGateState(threadId, runToken)
         await settlePhysicalAgentRun({
           kind: "interrupt",
-          functionTurnReason: interruptAutoModeTerminal
-            ? interruptAutoModeTerminal.outcome === "success"
-              ? "answer"
-              : "error"
-            : undefined,
           threadId,
           runToken,
           controller: abortController,
@@ -13013,6 +13089,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         }
         const cancelled = Boolean(controller && !cancelWorkers)
         if (cancelled) handleAutoModeAgentCancelled(threadId)
+        else if (workers.length > 0) handleAutoModeAgentCancelled(threadId, "background")
         return cancelled
       })
     }

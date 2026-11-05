@@ -223,9 +223,9 @@ export async function saveBrowserScriptLibraryEntry(
 export async function listBrowserScriptLibraryEntries(
   options: BrowserScriptLibraryListOptions = {}
 ): Promise<BrowserScriptLibraryEntry[]> {
-  void options
   const manifest = await readManifest()
   const entries = [...manifest.entries].sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+  if (options.includeVariableInfo === false) return entries
   return Promise.all(
     entries.map(async (entry) => {
       try {

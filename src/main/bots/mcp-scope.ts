@@ -10,10 +10,6 @@ function allowed(tool: McpCapabilityTool): boolean {
 
 export function createBotMcpScope(base: McpCapabilityService): McpCapabilityService {
   return {
-    configuredServerNames: base.configuredServerNames
-      ? () => base.configuredServerNames!().filter((name) => !isWorkbenchComputer(name))
-      : undefined,
-    peekTools: base.peekTools ? () => base.peekTools!()?.filter(allowed) ?? null : undefined,
     listTools: async () => (await base.listTools()).filter(allowed),
     getSnapshot: base.getSnapshot
       ? async () => {

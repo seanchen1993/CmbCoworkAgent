@@ -64,11 +64,16 @@ async function waitFor(
   }
 }
 
-function conversations() {
+function conversations(switched = false) {
   return {
     listConversations: () => [],
     listTargets: () => [],
-    getActiveTarget: () => target
+    getActiveTarget: () => target,
+    getSelectedTarget: () => ({
+      snapshot: switched
+        ? { ...target, targetId: "other-target", threadId: "other-thread" }
+        : target
+    })
   }
 }
 
@@ -80,7 +85,7 @@ async function testCoordinatorResultIsFoldedAndAcknowledged(): Promise<void> {
   const deliveries: Array<{ deliveryId: string; content: string }> = []
   const executions: PreparedRemoteStandardTurnInput[] = []
   const pump = new ImRemoteModeNotificationPump({
-    conversations: conversations() as never,
+    conversations: conversations(true) as never,
     capabilityGuard: { evaluate: async () => allowed("coordinator") } as never,
     getThread: () => thread("coordinator"),
     coordinator: {
@@ -118,6 +123,7 @@ async function testCoordinatorResultIsFoldedAndAcknowledged(): Promise<void> {
       return "两个并行任务均已完成。"
     },
     events: {
+      sessionLinks: { prepare: () => "ABCDEFGH" } as never,
       enqueueProactiveReplies: async (replies) => {
         deliveries.push({
           deliveryId: replies[0].deliveryId,
@@ -137,6 +143,8 @@ async function testCoordinatorResultIsFoldedAndAcknowledged(): Promise<void> {
     assert.deepEqual(acknowledged, [[first, second]])
     assert.match(deliveries[0].content, /【会话：并行任务】/u)
     assert.match(deliveries[0].content, /两个并行任务均已完成/u)
+    assert(deliveries[0].content.includes("先单独发送：/切换 @ABCDEFGH"))
+    assert(deliveries[0].content.includes("切换成功后再发送你的问题"))
   } finally {
     pump.stop()
   }
@@ -181,7 +189,7 @@ async function testWorkflowResultIsFoldedAndSettled(): Promise<void> {
   let lifecycleWaited = 0
   const deliveries: string[] = []
   const pump = new ImRemoteModeNotificationPump({
-    conversations: conversations() as never,
+    conversations: conversations(true) as never,
     capabilityGuard: { evaluate: async () => allowed("workflow") } as never,
     getThread: () => thread("workflow"),
     coordinator: {} as never,
@@ -215,6 +223,7 @@ async function testWorkflowResultIsFoldedAndSettled(): Promise<void> {
       return "工作流检查完成，没有发现问题。"
     },
     events: {
+      sessionLinks: { prepare: () => "ABCDEFGH" } as never,
       enqueueProactiveReplies: async (replies) => {
         deliveries.push(replies.map((reply) => reply.message.content).join(""))
         return []
@@ -231,6 +240,8 @@ async function testWorkflowResultIsFoldedAndSettled(): Promise<void> {
     assert.equal(marked, 1)
     assert.equal(cleared, 1)
     assert.match(deliveries[0], /工作流检查完成/u)
+    assert(deliveries[0].includes("先单独发送：/切换 @ABCDEFGH"))
+    assert(deliveries[0].includes("切换成功后再发送你的问题"))
   } finally {
     pump.stop()
   }

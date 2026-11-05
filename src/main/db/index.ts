@@ -1,3 +1,4 @@
+import { ensureManagedRunSchedulesSchema } from "./managed-run-schedules"
 import { ensureAppNotificationsSchema } from "./app-notifications-schema"
 import { ensureUiGuideSchema } from "./ui-guide-store"
 import {
@@ -956,6 +957,7 @@ export async function initializeDatabase(): Promise<NativeSqliteAdapter> {
 
   ensureAppNotificationsSchema(db)
   ensureUiGuideSchema(db)
+  ensureManagedRunSchedulesSchema(db)
   ensureImServiceSchema(db)
 
   migrateLegacyMemorySessionOptIn(db)
@@ -1021,6 +1023,7 @@ interface ThreadMessageBucketRow {
 }
 
 export interface UpsertThreadMessagesOptions {
+  streamAttempt?: ThreadMessageStreamAttempt
   touchThreadUpdatedAt?: boolean
   /**
    * Streaming deltas are already in durable append order. Keep existing ordinals
@@ -1028,6 +1031,87 @@ export interface UpsertThreadMessagesOptions {
    * transcript on every flush.
    */
   preserveExistingOrder?: boolean
+}
+
+/** Undo only rows written since the last graph values boundary, using resolved DB ids.
+ * Each preimage is read once; ordinary text suffix flushes keep their bounded append path.
+ */
+export class ThreadMessageStreamAttempt {
+  private readonly before = new Map<string, ThreadMessageRow | null>()
+
+  constructor(private readonly threadId: string) {}
+
+  capture(messageId: string): void {
+    if (this.before.has(messageId)) return
+    const database = getDb()
+    const row = getThreadMessageRows(database, this.threadId, [messageId]).get(messageId)
+    if (!row) {
+      this.before.set(messageId, null)
+      return
+    }
+    // Fold pre-existing fragments into the preimage once, preserving every other
+    // column (including ordinal, timestamps, authority and recovery integrity).
+    const content = parseMessageContent(row.content_json)
+    const suffix =
+      typeof content === "string"
+        ? getThreadMessageTextFragments(database, this.threadId, [messageId]).get(messageId)
+        : undefined
+    this.before.set(messageId, {
+      ...row,
+      content_json: suffix ? safeJsonStringify(`${content}${suffix}`) : row.content_json
+    })
+  }
+
+  rollback(): { discardedMessageIds: string[]; restoredMessages: Message[] } {
+    const discardedMessageIds: string[] = []
+    const restoredMessages: Message[] = []
+    if (this.before.size === 0) return { discardedMessageIds, restoredMessages }
+    const database = getDb()
+    database.run("BEGIN")
+    try {
+      let removedCount = 0
+      for (const [id, row] of this.before) {
+        const existed = getThreadMessageRows(database, this.threadId, [id]).has(id)
+        database.run(
+          "DELETE FROM thread_message_fragments WHERE thread_id = ? AND message_id = ?",
+          [this.threadId, id]
+        )
+        database.run(
+          "DELETE FROM thread_message_fragment_states WHERE thread_id = ? AND message_id = ?",
+          [this.threadId, id]
+        )
+        database.run("DELETE FROM thread_messages WHERE thread_id = ? AND message_id = ?", [
+          this.threadId,
+          id
+        ])
+        if (row) {
+          const columns = Object.keys(row)
+          database.run(
+            `INSERT INTO thread_messages (${columns.join(", ")}) VALUES (${columns.map(() => "?").join(", ")})`,
+            Object.values(row)
+          )
+          if (!existed) removedCount -= 1
+          restoredMessages.push(threadMessageRowToMessage(row))
+        } else {
+          if (existed) removedCount += 1
+          discardedMessageIds.push(id)
+        }
+      }
+      // Keep next_ordinal monotonic. Other messages (for example injected user
+      // input) can have arrived since this attempt began and must stay intact.
+      database.run(
+        "UPDATE thread_message_buckets SET message_count = MAX(0, message_count - ?), updated_at = ? WHERE thread_id = ?",
+        [removedCount, Date.now(), this.threadId]
+      )
+      database.run("COMMIT")
+    } catch (error) {
+      database.run("ROLLBACK")
+      throw error
+    }
+    this.before.clear()
+    saveToDisk()
+    return { discardedMessageIds, restoredMessages }
+  }
 }
 
 function isMessageRole(value: unknown): value is Message["role"] {
@@ -1420,6 +1504,26 @@ export function getThreadMessageCount(threadId: string): number {
 
 export function hasThreadMessages(threadId: string): boolean {
   return getThreadMessageCount(threadId) > 0
+}
+
+/** Indexed identity-only lookup; queued later messages must not hide the first turn. */
+export function isFirstThreadUserMessage(threadId: string, messageId?: string): boolean {
+  const stmt = getDb().prepare(
+    `SELECT message_id FROM thread_messages
+     WHERE thread_id = ? AND role = 'user'
+     ORDER BY ordinal ASC, created_at ASC, message_id ASC LIMIT 2`
+  )
+  try {
+    stmt.bind([threadId])
+    if (!stmt.step()) return false
+    const firstId = String(stmt.getAsObject().message_id)
+    if (messageId?.trim()) return firstId === messageId.trim()
+    // Legacy callers do not always supply an ID. Only a single persisted user
+    // message proves this is the initial turn; otherwise keep the heuristic.
+    return !stmt.step()
+  } finally {
+    stmt.free()
+  }
 }
 
 /**
@@ -4507,7 +4611,11 @@ function applyThreadMessageIdAliases(
  * accumulated content. The caller must already own a run-scoped stable provider
  * tuple; structural snapshots/tool boundaries continue through full upsert.
  */
-export function appendThreadMessageTextDelta(threadId: string, message: Message): boolean {
+export function appendThreadMessageTextDelta(
+  threadId: string,
+  message: Message,
+  streamAttempt?: ThreadMessageStreamAttempt
+): boolean {
   const messageId = typeof message.id === "string" ? message.id.trim() : ""
   const providerSourceId = message.provider_source_id?.trim()
   const providerOccurrence = getMessageProviderOccurrence(message)
@@ -4592,6 +4700,7 @@ export function appendThreadMessageTextDelta(threadId: string, message: Message)
   }
 
   const remainingChars = Math.max(0, THREAD_MESSAGE_TEXT_LIMIT - totalChars)
+  streamAttempt?.capture(messageId)
   const delta = message.content.slice(0, remainingChars)
   if (delta.length !== message.content.length && row.recovery_integrity !== 0) {
     database.run(
@@ -4767,6 +4876,8 @@ export function upsertThreadMessages(
         if (aliasSourceId) {
           const sourceRows = getThreadMessageRows(database, threadId, [aliasSourceId])
           if (!sourceRows.has(aliasSourceId)) {
+            options.streamAttempt?.capture(normalized.id)
+            options.streamAttempt?.capture(aliasSourceId)
             database.run(
               "UPDATE thread_messages SET message_id = ? WHERE thread_id = ? AND message_id = ?",
               [aliasSourceId, threadId, normalized.id]
@@ -4827,6 +4938,7 @@ export function upsertThreadMessages(
         }
       }
       resolvedIncomingIds.push(normalized.id)
+      options.streamAttempt?.capture(normalized.id)
 
       const existingContentPriority =
         typeof existing?.content_priority === "number" && existing.content_priority > 0

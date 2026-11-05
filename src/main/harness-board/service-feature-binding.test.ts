@@ -7,6 +7,7 @@ const state = vi.hoisted(() => ({
   supportsPlugin: true,
   featureExists: true,
   projectExists: true,
+  artifactConfig: undefined as unknown,
   inspect: vi.fn()
 }))
 vi.mock("../storage", () => ({ getOpenworkDir: () => state.root }))
@@ -28,15 +29,18 @@ vi.mock("./catalog-client", () => ({
               "harness-adapter": { id: "plugin", name: "plugin", type: "plugin" }
             },
             plugin: { id: "plugin", name: "plugin", path: state.root },
+            leanToken: "test-token",
             projectDirectoryExists: true,
             selectedDeployUnits: [],
             configSnapshot: {
               error: null,
               value: {
                 apiVersion: 1,
+                artifact_sync: state.artifactConfig,
                 inspectCommands: {
                   [process.platform]: {
                     project_status: `${process.execPath} --version`,
+                    feature_status: `${process.execPath} --version`,
                     system_prompt_inject: "workspace=${sessionWorkspacePath}"
                   }
                 }
@@ -53,6 +57,10 @@ vi.mock("./catalog-client", () => ({
 }))
 vi.mock("./adapter-detail-client", () => ({
   cancelHarnessAdapterDetailScope: () => undefined,
+  parseHarnessAdapterRunInWorker: async () => ({
+    workflow: { nodes: [], states: [] },
+    run: { slug: "f", title: "Feature", nodes: [], watchRefs: [], hookLogRefs: [] }
+  }),
   parseHarnessAdapterDetailBatchInWorker: async () => {
     state.inspect()
     return {
@@ -69,7 +77,8 @@ vi.mock("./adapter-detail-client", () => ({
 import {
   updateHarnessFeatureDeployUnits,
   buildHarnessFeatureAgentContext,
-  archiveHarnessProject
+  archiveHarnessProject,
+  getHarnessRunDetail
 } from "./service"
 import { FEATURE_V2_FILE, DEPLOY_UNIT_V2_FILE, initializeHarnessConfigV2 } from "./config-v2"
 
@@ -91,6 +100,7 @@ beforeEach(async () => {
   state.supportsPlugin = true
   state.featureExists = true
   state.projectExists = true
+  state.artifactConfig = undefined
   state.inspect.mockClear()
 })
 afterAll(() => rm(state.root, { recursive: true, force: true }))
@@ -101,6 +111,39 @@ const update = () =>
     selectedDeployUnits: [],
     sessionWorkspace: { source: "directory", path: state.root }
   })
+
+describe("artifact accumulation sessions", () => {
+  it("resolves the configured action with project, feature, token and workspace placeholders", async () => {
+    await update()
+    state.artifactConfig = {
+      sync_type: "invoke_session",
+      nextAction: {
+        slashSkill: "artifact-sync",
+        userMessage: "${projectCode}|${feature}|${leanToken}|${sessionWorkspacePath}",
+        dialogTips: "沉淀 ${feature}"
+      }
+    }
+    const detail = await getHarnessRunDetail("p", "f")
+    expect(detail.artifactAccumulation).toEqual({
+      syncType: "invoke_session",
+      nextAction: {
+        slashSkill: "artifact-sync",
+        userMessage: `project|f|test-token|${state.root}`,
+        dialogTips: "沉淀 f"
+      }
+    })
+    expect(detail.run.resolvedSessionWorkspacePath).toBe(state.root)
+  })
+
+  it.each([
+    undefined,
+    { sync_type: "other", nextAction: { slashSkill: "artifact-sync" } },
+    { sync_type: "invoke_session", nextAction: {} }
+  ])("omits unavailable artifact actions: %j", async (config) => {
+    state.artifactConfig = config
+    expect((await getHarnessRunDetail("p", "f")).artifactAccumulation).toBeUndefined()
+  })
+})
 
 describe("editing historical feature bindings", () => {
   it.each([true, false])(

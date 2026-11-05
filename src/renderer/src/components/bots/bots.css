@@ -1,3 +1,17 @@
+/* Shared Bot tokens also reach dialogs and tooltips portaled outside the workspace. */
+:root {
+  --bot-popup-canvas: #fafafa;
+  --bot-tooltip-canvas: #fafafa;
+  --bot-preview-canvas: #fff;
+  --bot-preview-scrim: #000000e5;
+  --bot-unread-control: #4a96ff;
+  --bot-unread-control-hover: #5da1ff;
+}
+.dark {
+  --bot-popup-canvas: #1f1f1f;
+  --bot-tooltip-canvas: #252525;
+  --bot-preview-canvas: #111;
+}
 /* Scoped to the Bots workspace; the existing workbench keeps its theme and layout. */
 /* Surface and base colors follow Grok's sand-light / sand-dark theme tokens. */
 .bots-workspace {
@@ -347,7 +361,7 @@
   height: 32px;
   padding: 0 12px;
   border-radius: 999px;
-  background: #4a96ff;
+  background: var(--bot-unread-control);
   color: white;
   font-size: 12px;
   white-space: nowrap;
@@ -363,7 +377,7 @@
   bottom: 8px;
 }
 .bot-unread-jump:hover {
-  background: #5da1ff;
+  background: var(--bot-unread-control-hover);
 }
 .bot-unread-jump:active {
   scale: 0.95;
@@ -826,11 +840,11 @@
 /* The preview is portaled outside the workspace; keep its original file viewer themed locally. */
 /* DialogContent renders its existing overlay immediately before the content. */
 div[data-state]:has(+ .bot-file-preview) {
-  background: #000000e5;
+  background: var(--bot-preview-scrim);
   animation: none;
 }
 .bot-file-preview {
-  --background: #fff;
+  --background: var(--bot-preview-canvas);
   --background-secondary: #f5f5f5;
   --background-elevated: #fff;
   --background-interactive: #f1f1f1;
@@ -854,7 +868,7 @@ div[data-state]:has(+ .bot-file-preview) {
   box-shadow: 0 32px 80px #0000008c;
 }
 .dark .bot-file-preview {
-  --background: #111;
+  --background: var(--bot-preview-canvas);
   --background-secondary: #171717;
   --background-elevated: #1f1f1f;
   --background-interactive: #2b2b2b;
@@ -1003,7 +1017,7 @@ button.bot-json-caret:focus-visible {
 .bot-control-tooltip {
   --accent: #ececec;
   --accent-foreground: #242424;
-  background: #fafafa;
+  background: var(--bot-popup-canvas);
   color: #242424;
   border-color: #e4e4e4;
 }
@@ -1013,7 +1027,7 @@ button.bot-json-caret:focus-visible {
 .dark .bot-control-tooltip {
   --accent: #2b2b2b;
   --accent-foreground: #ededed;
-  background: #1f1f1f;
+  background: var(--bot-popup-canvas);
   color: #ededed;
   border-color: #303030;
 }
@@ -1032,7 +1046,7 @@ button.bot-json-caret:focus-visible {
 }
 /* Creation follows the name/character-first flow; existing edit dialogs keep their layout. */
 .bot-create-dialog {
-  --background: #fafafa;
+  --background: var(--bot-popup-canvas);
   --foreground: #242424;
   --muted-foreground: #828282;
   --border: #e4e4e4;
@@ -1047,7 +1061,7 @@ button.bot-json-caret:focus-visible {
   color: var(--foreground);
 }
 .dark .bot-create-dialog {
-  --background: #1f1f1f;
+  --background: var(--bot-popup-canvas);
   --foreground: #ededed;
   --muted-foreground: #aaa;
   --border: #343434;
@@ -2474,7 +2488,7 @@ button.bot-json-caret:focus-visible {
   --foreground: #242424;
   --muted-foreground: #828282;
   --border: #e4e4e4;
-  background: #fafafa;
+  background: var(--bot-popup-canvas);
   color: var(--foreground);
   border-color: var(--border);
   width: min(280px, calc(100vw - 32px));
@@ -2487,7 +2501,7 @@ button.bot-json-caret:focus-visible {
   --foreground: #ededed;
   --muted-foreground: #aaa;
   --border: #303030;
-  background: #1f1f1f;
+  background: var(--bot-popup-canvas);
 }
 .bot-appearance-heading {
   display: flex;
@@ -3130,7 +3144,7 @@ button.bot-json-caret:focus-visible {
   line-height: 18px;
   overflow-wrap: anywhere;
   color: #242424;
-  background: #fafafa;
+  background: var(--bot-tooltip-canvas);
   border-color: #e4e4e4;
 }
 .bot-sidebar-tooltip-heading {
@@ -3164,7 +3178,7 @@ button.bot-json-caret:focus-visible {
 }
 .dark .bot-sidebar-tooltip {
   color: #ededed;
-  background: #252525;
+  background: var(--bot-tooltip-canvas);
   border-color: #373737;
 }
 .dark .bot-sidebar-tooltip-preview {

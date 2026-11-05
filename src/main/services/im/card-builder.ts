@@ -284,8 +284,18 @@ const OTHER_INPUT_FIX_LINE = 3
  */
 export const QUESTION_OTHER_SUFFIX = "__other"
 
+function questionTitle(header: string, index: number): string {
+  return `${index + 1}. ${header}`
+}
+
 export function buildQuestionCard(input: QuestionCardInput): CardComponent[] {
-  const unanswered = input.questions.filter((question) => !question.answered)
+  // Number before filtering: answering question 1 by text must not renumber
+  // question 2 or change the feedback key that identifies its answer.
+  const numbered = input.questions.map((question, index) => ({
+    question,
+    title: questionTitle(question.header, index)
+  }))
+  const unanswered = numbered.filter(({ question }) => !question.answered)
   const components: CardComponent[] = [
     titleComponent("需要你的选择"),
     statusComponent("待回答", STATUS_STYLE.orange),
@@ -293,12 +303,12 @@ export function buildQuestionCard(input: QuestionCardInput): CardComponent[] {
     textModeHintComponent()
   ]
 
-  const answered = input.questions.filter((question) => question.answered)
+  const answered = numbered.filter(({ question }) => question.answered)
   if (answered.length > 0) {
     components.push(
       kvComponent(
-        answered.map((question) => ({
-          title: question.header,
+        answered.map(({ question, title }) => ({
+          title,
           value: question.answeredLabel ?? "已回答"
         }))
       )
@@ -306,39 +316,56 @@ export function buildQuestionCard(input: QuestionCardInput): CardComponent[] {
   }
 
   const controls: CardComponent[] = []
-  for (const question of unanswered) {
+  for (const { question, title } of unanswered) {
+    // Native form controls have no body-text slot. Keep questions in supported
+    // content components, with matching numbered labels on the single form.
+    // Do not hide the only copy in promptText, which is replaced on selection.
+    components.push(
+      { type: "content", model: 0, list: [{ type: [1], content: title }] },
+      contentComponent([
+        question.question,
+        ...(question.allowMultiple
+          ? question.options.map(
+              (option, index) =>
+                `${index + 1}. ${option.label}${option.description ? `（${option.description}）` : ""}`
+            )
+          : [])
+      ])
+    )
     // The gateway contract defines string feedback, but not native multi-selector
     // encoding. Use the supported text input with an explicit numbered format.
-    controls.push(question.allowMultiple ? {
-      subType: "inputBox",
-      title: question.header,
-      promptText: [question.question, ...question.options.map((option, index) =>
-        `${index + 1}. ${option.label}${option.description ? `（${option.description}）` : ""}`
-      ), "填写编号，多个编号用逗号分隔，如 1,2"].join("\n"),
-      feedbackKey: question.key,
-      required: false,
-      minLine: 1,
-      maxLine: 2,
-      fixLine: 1
-    } : {
-      subType: "listSelector",
-      title: question.header,
-      promptText: question.question,
-      feedbackKey: question.key,
-      required: false,
-      selectModel: LIST_SELECT_CUSTOM_OPTIONS,
-      isMultiple: false,
-      optionArray: question.options.map((option, index) => ({
-        text: option.description ? `${option.label}（${option.description}）` : option.label,
-        value: String(index)
-      }))
-    })
+    controls.push(
+      question.allowMultiple
+        ? {
+            subType: "inputBox",
+            title,
+            promptText: "填写编号，多个编号用逗号分隔，如 1,2",
+            feedbackKey: question.key,
+            required: false,
+            minLine: 1,
+            maxLine: 2,
+            fixLine: 1
+          }
+        : {
+            subType: "listSelector",
+            title,
+            promptText: "请选择",
+            feedbackKey: question.key,
+            required: false,
+            selectModel: LIST_SELECT_CUSTOM_OPTIONS,
+            isMultiple: false,
+            optionArray: question.options.map((option, index) => ({
+              text: option.description ? `${option.label}（${option.description}）` : option.label,
+              value: String(index)
+            }))
+          }
+    )
     // The client caps this box at 1000 characters, where the typed
     // `其他 <回答>` path accepts 4000. An answer longer than the box holds
     // belongs in a message, and the short code under the card still takes it.
     controls.push({
       subType: "inputBox",
-      title: `${question.header} · 其他`,
+      title: `${title} · 其他`,
       promptText: "以上选项都不合适时填写",
       feedbackKey: `${question.key}${QUESTION_OTHER_SUFFIX}`,
       required: false,
@@ -379,7 +406,12 @@ export function buildAnsweredCard(input: AnsweredCardInput): CardComponent[] {
   ]
   if (input.answers.length > 0) {
     components.push(
-      kvComponent(input.answers.map((entry) => ({ title: entry.header, value: entry.answer })))
+      kvComponent(
+        input.answers.map((entry, index) => ({
+          title: questionTitle(entry.header, index),
+          value: entry.answer
+        }))
+      )
     )
   }
   return components
@@ -591,6 +623,7 @@ export function buildTargetBindCard(input: TargetBindCardInput): CardComponent[]
   const components: CardComponent[] = [
     titleComponent(CARD_TITLE.target_bind),
     statusComponent("待选择", STATUS_STYLE.orange),
+    contentComponent(["显示不全？发送 /文字模式 开，再发送 /会话 查看完整文字列表。"], 1),
     kvComponent([{ title: "当前", value: input.currentLabel }])
   ]
 
@@ -614,10 +647,20 @@ export function buildTargetBindCard(input: TargetBindCardInput): CardComponent[]
   // session a mode word is refused by the typed path, and offering a control
   // whose every use is an error is worse than not offering it.
   if (input.modeChoices.length > 0) {
+    components.push(
+      contentComponent(
+        [
+          "选择已有会话会直接切换；选择特性会在其下新建会话。",
+          "新建会话模式仅在特性下新建时生效，已有会话请忽略；不选则跟随特性配置。",
+          "Solo：单代理；Multi：可调用子代理；Team：团队协作；Workflow：工作流。"
+        ],
+        1
+      )
+    )
     controls.push({
       subType: "listSelector",
       title: "新建会话模式",
-      promptText: "仅在特性下新建会话时生效，已有会话请忽略",
+      promptText: "请选择",
       feedbackKey: TARGET_BIND_MODE_KEY,
       required: false,
       selectModel: LIST_SELECT_CUSTOM_OPTIONS,
@@ -649,6 +692,33 @@ export interface BoundCardInput {
   targetLabel: string
   outcome: string
   detail?: string
+}
+
+/** One action uses a normal button, not the paired accept/reject component. */
+export function buildSessionSwitchCard(input: {
+  label: string
+  code: string
+  tag: string
+}): CardComponent[] {
+  return [
+    titleComponent("继续此会话"),
+    kvComponent([{ title: "来源会话", value: input.label }]),
+    contentComponent(["点击下方按钮后，新消息将发到此会话；其他任务会继续执行。"], 1),
+    contentComponent([`也可发送：/切换 @${input.code}`], 1),
+    {
+      type: "operate",
+      arrange: 0,
+      list: [
+        {
+          content: "切换到此会话",
+          action: BUTTON_ACTION_FEEDBACK,
+          tag: input.tag,
+          style: 1,
+          disable: 0
+        }
+      ]
+    }
+  ]
 }
 
 /** The terminal card that replaces a live target list once something bound. */

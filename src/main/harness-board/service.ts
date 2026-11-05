@@ -1,3 +1,4 @@
+import { prepareMarketCommand, persistMarketRuntimeDirectory } from "../services/market-content"
 import { markHarnessStageAttributionDirty } from "../services/harness-stage-attribution"
 import {
   assertHarnessConfigAvailable,
@@ -19,7 +20,8 @@ import { formatGmt8Timestamp } from "../../shared/gmt8-time"
 import { harnessNotifications } from "./notifications"
 import { spawn, type ChildProcess } from "child_process"
 import { createHash } from "crypto"
-import { access, mkdir, stat } from "node:fs/promises"
+import { access, stat } from "node:fs/promises"
+import { assertEmptyProjectDirectory } from "./project-workspace"
 import { basename, isAbsolute, join, relative, resolve } from "path"
 import { serialize } from "node:v8"
 import * as chardet from "jschardet"
@@ -113,7 +115,6 @@ import type {
   HarnessSkipNodeResult,
   HarnessFeatureSummary,
   ManagedFeatureStatusSnapshot,
-  ManagedRunViewStatus,
   HarnessStatus,
   HarnessWatchRef,
   HarnessWorkflow,
@@ -1247,8 +1248,11 @@ async function runHarnessInvocationAsync(
     const { cwd, invocation } = configured
     if (logOptions) logHarnessInvocationStart(configured, logOptions)
     const stdoutBuffer = await new Promise<Buffer>((resolvePromise, rejectPromise) => {
-      const child = spawn(invocation.executable, invocation.args, {
-        cwd,
+      const roots = [cwd]
+      const executable = prepareMarketCommand(invocation.executable, cwd, roots)
+      const args = invocation.args.map((arg) => prepareMarketCommand(arg, cwd, roots).command)
+      const child = spawn(executable.command, args, {
+        cwd: executable.cwd,
         env: {
           ...process.env,
           PYTHONIOENCODING: "utf-8",
@@ -1748,6 +1752,7 @@ function normalizeProject(value: unknown): HarnessProjectMetadata | null {
     description: normalizeText(value.description).slice(0, HARNESS_PROJECT_DESCRIPTION_MAX_CHARS),
     projectCode,
     projectFromLean: value.projectFromLean === true,
+    ...(typeof value.isTestProject === "boolean" ? { isTestProject: value.isTestProject } : {}),
     projectDir,
     systemId: normalizeText(value.systemId).slice(0, HARNESS_PROJECT_TEXT_MAX_CHARS),
     systemName: normalizeText(value.systemName).slice(0, HARNESS_PROJECT_TEXT_MAX_CHARS),
@@ -2182,6 +2187,9 @@ function validateCreateInput(input: HarnessProjectCreateInput): void {
   if (required.some((value) => typeof value !== "string" || value.trim().length === 0)) {
     throw new Error("Project name, code, system and workspace are required")
   }
+  if (typeof input.isTestProject !== "boolean") {
+    throw new Error("请选择是否作为测试项目")
+  }
   if (typeof input.description !== "string") {
     throw new Error("Project description must be a string")
   }
@@ -2202,6 +2210,9 @@ function validateProjectMetadataInput(input: HarnessProjectMetadataUpdateInput):
   ]
   if (required.some((value) => typeof value !== "string" || value.trim().length === 0)) {
     throw new Error("Project name, code, system and workspace are required")
+  }
+  if (typeof input.isTestProject !== "boolean") {
+    throw new Error("请选择是否作为测试项目")
   }
   if (typeof input.description !== "string") {
     throw new Error("Project description must be a string")
@@ -2230,25 +2241,6 @@ function validateProjectCodeUnique(
   )
   if (duplicate) {
     throw new Error(`已有项目使用项目编号：${trimmed} ，请更换`)
-  }
-}
-
-function validateProjectDirUnique(
-  projectDir: string,
-  workspacePath: string,
-  store: HarnessProjectStoreFile,
-  excludeProjectId?: string
-): void {
-  const trimmedProjectDir = projectDir.trim()
-  const resolvedWorkspacePath = resolve(workspacePath)
-  const duplicate = store.projects.find(
-    (item) =>
-      resolve(item.workspacePath) === resolvedWorkspacePath &&
-      projectDirectoryName(item) === trimmedProjectDir &&
-      item.projectId !== excludeProjectId
-  )
-  if (duplicate) {
-    throw new Error(`插件工作目录下已有文件夹：${trimmedProjectDir}`)
   }
 }
 
@@ -2570,6 +2562,28 @@ function resolveSystemConstraintUpdateConfig(
   }
 }
 
+function resolveArtifactAccumulationConfig(
+  project: HarnessProjectMetadata,
+  context: HarnessProjectConfigContext,
+  feature: string,
+  sessionWorkspacePath?: string
+): HarnessRunDetailViewModel["artifactAccumulation"] {
+  if (!context.plugin || context.configSnapshot?.error) return undefined
+  const config = context.configSnapshot?.value?.artifact_sync
+  if (!isObject(config) || normalizeText(config.sync_type).trim() !== "invoke_session") {
+    return undefined
+  }
+  const nextAction = resolveHarnessNextActionTemplate(
+    config.nextAction,
+    project,
+    "run",
+    context.plugin.path,
+    { feature, sessionWorkspacePath, leanToken: context.leanToken },
+    { replaceUserMessagePlaceholders: true }
+  )
+  return nextAction ? { syncType: "invoke_session", nextAction } : undefined
+}
+
 function makeProjectDetailViewModel(
   project: HarnessProjectMetadata,
   data: {
@@ -2583,11 +2597,15 @@ function makeProjectDetailViewModel(
 ): HarnessProjectDetailViewModel {
   const systemConstraintUpdate = resolveSystemConstraintUpdateConfig(project, context)
   const runs = data.runs.map((run) => {
-    const managedRunStatus: ManagedRunViewStatus | undefined = managedRunStore.getLatestRun(
-      project.projectId,
-      run.slug
-    )?.status
-    return managedRunStatus ? { ...run, managedRunStatus } : run
+    const managedRun = managedRunStore.getLatestRun(project.projectId, run.slug)
+    return managedRun
+      ? {
+          ...run,
+          managedRunStatus: managedRun.status,
+          managedRunThreadId:
+            managedRun.status === "running" ? managedRun.currentSession?.threadId : undefined
+        }
+      : run
   })
   return {
     project: {
@@ -2617,16 +2635,8 @@ function makeProjectDetailViewModel(
 async function initializeHarnessProject(project: HarnessProjectMetadata): Promise<void> {
   try {
     const projectPath = projectDirectoryPath(project)
-    try {
-      await access(projectPath)
-      throw new Error(`项目目录已存在：${projectPath}`)
-    } catch (error) {
-      if (error instanceof Error && error.message.startsWith("项目目录已存在")) throw error
-    }
-
     const configured = await buildConfiguredHarnessInvocation(project, "createProject")
-
-    await mkdir(projectPath, { recursive: true })
+    await assertEmptyProjectDirectory(projectPath)
     await runHarnessInvocationAsync(
       configured,
       harnessCommandLogOptions("createProject"),
@@ -2634,9 +2644,6 @@ async function initializeHarnessProject(project: HarnessProjectMetadata): Promis
     )
   } catch (error) {
     const raw = error instanceof Error ? error.message : String(error)
-    if (raw.includes("已存在")) {
-      throw new Error("该项目文件夹已在所选工作区存在")
-    }
     throw new Error(`创建项目失败：${raw}`)
   }
 }
@@ -3039,7 +3046,8 @@ export async function buildHarnessFeatureAgentContext(
  */
 export async function resolveHarnessFeatureCurrentStage(
   projectId: string,
-  slug: string
+  slug: string,
+  options: { labelOnly?: boolean } = {}
 ): Promise<{ name: string; status: string | null } | null> {
   try {
     const normalizedProjectId = normalizeText(projectId).trim()
@@ -3052,7 +3060,7 @@ export async function resolveHarnessFeatureCurrentStage(
       "run",
       normalizedSlug
     )
-    return resolveCurrentStageFromSnapshot(snapshot)
+    return resolveCurrentStageFromSnapshot(snapshot, options.labelOnly)
   } catch {
     return null
   }
@@ -3107,7 +3115,8 @@ export async function inspectHarnessManagedFeatureStatus(
 }
 
 function resolveCurrentStageFromSnapshot(
-  snapshot: Record<string, unknown>
+  snapshot: Record<string, unknown>,
+  labelOnly = false
 ): { name: string; status: string | null } | null {
   const run = isObject(snapshot.run) ? snapshot.run : {}
   const currentNodeId = normalizeText(run.currentNodeId).trim()
@@ -3122,20 +3131,22 @@ function resolveCurrentStageFromSnapshot(
   return resolveCurrentStageFromWorkflow(
     workflow,
     currentNodeId,
-    runNode?.nodeStatus ?? run.currentNodeStatus
+    runNode?.nodeStatus ?? run.currentNodeStatus,
+    labelOnly
   )
 }
 
 function resolveCurrentStageFromWorkflow(
   workflow: HarnessWorkflow,
   currentNodeId: string,
-  rawStatus: unknown
+  rawStatus: unknown,
+  labelOnly = false
 ): { name: string; status: string | null } | null {
   const node = workflow.nodes.find((item) => item.id === currentNodeId)
   const label = normalizeText(node?.label).trim()
   if (!label) return null
   const group = normalizeText(node?.group).trim()
-  const name = group ? `${group}-${label}` : label
+  const name = group && !labelOnly ? `${group}-${label}` : label
   const nodeStatus = normalizeNodeStatus(rawStatus)
   const status = nodeStatus === UNKNOWN_NODE_STATUS ? null : DEFAULT_NODE_STATUS_LABELS[nodeStatus]
 
@@ -3263,7 +3274,6 @@ export async function createHarnessProject(
   validateCreateInput(input)
   const store = await readProjectStore()
   validateProjectCodeUnique(input.projectCode, store)
-  validateProjectDirUnique(input.projectDir, input.workspacePath, store)
   const harnessAdapter = await resolveHarnessAdapter(input.adapterId, input.adapterType)
   const project: HarnessProjectMetadata = {
     projectId: uuid(),
@@ -3271,6 +3281,7 @@ export async function createHarnessProject(
     description: input.description.trim(),
     projectCode: input.projectCode.trim(),
     projectFromLean: input.projectFromLean === true,
+    isTestProject: input.isTestProject,
     projectDir: input.projectDir.trim(),
     systemId: input.systemId.trim(),
     systemName: input.systemName.trim(),
@@ -3279,7 +3290,7 @@ export async function createHarnessProject(
     creator: getCurrentProjectCreator(),
     lifecycle: {
       status: "active",
-      createAt: new Date().toISOString()
+      createAt: formatGmt8Timestamp()
     }
   }
   normalizeProject(project)
@@ -3287,7 +3298,6 @@ export async function createHarnessProject(
   await initializeHarnessProject(project)
   await mutateProjectStore((latest) => {
     validateProjectCodeUnique(input.projectCode, latest)
-    validateProjectDirUnique(input.projectDir, input.workspacePath, latest)
     latest.projects.unshift(project)
   })
   return project
@@ -3511,12 +3521,13 @@ export async function updateHarnessProjectMetadata(
       description: input.description.trim(),
       projectCode: input.projectCode.trim(),
       projectFromLean: input.projectFromLean === true,
+      isTestProject: input.isTestProject,
       projectDir: existingProjectDir,
       systemId: input.systemId.trim(),
       systemName: input.systemName.trim(),
       workspacePath: existing.workspacePath,
       "harness-adapter": harnessAdapter,
-      lifecycle: { ...existing.lifecycle, updateAt: new Date().toISOString() }
+      lifecycle: { ...existing.lifecycle, updateAt: formatGmt8Timestamp() }
     }
     store.projects[index] = updated
     return normalizeProject(updated)!
@@ -3636,11 +3647,13 @@ export async function syncHarnessProjectConstraints(
   if (!parsed.ok) {
     throw new Error(message || "公共系统约束同步失败")
   }
+  const knowledgePath = resolveProjectKnowledgePath(commandProject, plugin.path, config)
+  if (knowledgePath) persistMarketRuntimeDirectory(plugin.path, knowledgePath)
   return {
     adapterId: adapter.id,
     adapterName: adapter.name,
     ...(message ? { message } : {}),
-    ...(outputPath ? { path: outputPath } : {})
+    ...(knowledgePath || outputPath ? { path: knowledgePath || outputPath } : {})
   }
 }
 
@@ -3992,7 +4005,14 @@ async function loadHarnessRunDetail(
   const selectedDeployUnits = workerContext.selectedDeployUnits ?? []
   const featureBinding = await findFeatureDeployUnitBinding(project.projectId, slug)
   const managedRun = managedRunStore.getLatestRun(projectId, slug)
+  const artifactAccumulation = resolveArtifactAccumulationConfig(
+    project,
+    context,
+    slug,
+    resolveFeatureWorkspace(featureBinding?.sessionWorkspace, selectedDeployUnits)
+  )
   const detail: HarnessRunDetailViewModel = {
+    ...(artifactAccumulation ? { artifactAccumulation } : {}),
     project: {
       projectId: project.projectId,
       name: project.name,

@@ -1,3 +1,4 @@
+import type { ManagedRunModelSelection } from "../../../../shared/managed-run-model"
 import { RepositoryBranchHint, RepositoryPathsField } from "./RepositoryPathField"
 import projectModeGuideImage from "@/assets/guides/feature-create-guide-v5.png"
 import {
@@ -8,6 +9,7 @@ import { projectHumanGate } from "../../../../shared/harness-notifications"
 import { useHarnessNotifications } from "@/lib/harness-notifications"
 import { BizRetryNotice } from "./BizRetryNotice"
 import { ProjectWorkspaceField } from "./ProjectWorkspaceField"
+import { ProjectTestField } from "./ProjectTestField"
 import {
   Fragment,
   startTransition,
@@ -36,6 +38,7 @@ import {
   CircleDot,
   CircleDashed,
   CircleHelp,
+  Clock,
   FileText,
   FolderOpen,
   GitBranch,
@@ -87,7 +90,13 @@ import { ThreadForkCheckpointDialog } from "@/components/sidebar/ThreadForkCheck
 import { ThreadGroupDeleteDialog } from "@/components/sidebar/ThreadGroupDeleteDialog"
 import { KnowledgePreviewPanel } from "@/components/harness-board/KnowledgePreviewPanel"
 import { KnowledgeDialog } from "@/components/harness-board/KnowledgeDialog"
-import { ManagedRunTimeline } from "@/components/harness-board/ManagedRunPanel"
+import { ArtifactAccumulationButton } from "./ArtifactAccumulationButton"
+import { ManagedRunIcon } from "@/components/ui/managed-run-icon"
+import { ManagedRunHistory } from "@/components/harness-board/ManagedRunHistory"
+import { ManagedRunScheduleBadge } from "./ManagedRunScheduleBadge"
+import { useManagedRunSchedule, useManagedRunScheduleIndex } from "@/lib/use-managed-run-schedule"
+import { ManagedRunStartDialog } from "./ManagedRunStartDialog"
+import { buildManagedRunSessionOptions } from "@/lib/managed-run-session-options"
 import {
   createBoundedLatestTaskQueue,
   type BoundedTaskContext
@@ -462,6 +471,7 @@ interface ProjectFeatureSessionGroup {
   slug: string
   title: string
   sessions: HarnessSessionBinding[]
+  managedRunThreadId?: string
   section: ProjectFeatureSessionGroupSection
   deleted?: boolean
 }
@@ -641,10 +651,6 @@ function getThreadWorkspacePath(thread: Thread | null | undefined): string | nul
 
 function sanitizeHarnessNameInput(value: string): string {
   return value.replace(/\s+/g, "")
-}
-
-function sanitizeProjectDirFromProjectName(value: string): string {
-  return value.replace(/[^\u4e00-\u9fffA-Za-z0-9_-]/gu, "")
 }
 
 function readThreadHarnessFeature(thread: Thread): HarnessFeatureThreadMetadata | null {
@@ -946,6 +952,7 @@ async function createHarnessSession(params: CreateHarnessSessionParams): Promise
 }
 
 function metadataRequiredMissing(form: HarnessProjectMetadataUpdateInput): boolean {
+  if (typeof form.isTestProject !== "boolean") return true
   return [
     form.adapterId,
     form.adapterType,
@@ -999,6 +1006,7 @@ function toProjectMetadataForm(project: HarnessProjectListItem): HarnessProjectM
     name: project.name,
     projectCode: project.projectCode,
     projectFromLean: project.projectFromLean ?? false,
+    isTestProject: project.isTestProject,
     projectDir: project.projectDir,
     description: project.description,
     systemId: project.systemId,
@@ -2849,6 +2857,8 @@ function DeployUnitSearchInput({
 function ProjectFormDialog({
   open,
   creating,
+  workspaceValidating,
+  workspaceError,
   form,
   registry,
   installingPluginNames,
@@ -2862,6 +2872,8 @@ function ProjectFormDialog({
 }: {
   open: boolean
   creating: boolean
+  workspaceValidating: boolean
+  workspaceError: string | null
   form: HarnessProjectCreateInput
   registry: ProjectModeAdapterItem[]
   installingPluginNames: Set<string>
@@ -2874,13 +2886,10 @@ function ProjectFormDialog({
   onSubmit: () => void
 }): React.JSX.Element {
   const [dialogPortalContainer, setDialogPortalContainer] = useState<HTMLDivElement | null>(null)
-  const projectDirEditedRef = useRef(false)
-  useEffect(() => {
-    if (!open) projectDirEditedRef.current = false
-  }, [open])
   const projectDirError =
     getHarnessNameError("项目文件夹", form.projectDir) ??
-    getTextLengthError("项目文件夹", form.projectDir, PROJECT_DIR_MAX_CHARS)
+    getTextLengthError("项目文件夹", form.projectDir, PROJECT_DIR_MAX_CHARS) ??
+    workspaceError
   const projectCodeError = getHarnessNameError("项目编号", form.projectCode)
   const projectNameLengthError = getTextLengthError("项目名称", form.name, PROJECT_NAME_MAX_CHARS)
   const projectCodeLengthError = getTextLengthError(
@@ -2936,10 +2945,7 @@ function ProjectFormDialog({
                         name: project.projectName,
                         projectCode: project.projectCode,
                         systemId: project.systemId || form.systemId,
-                        systemName: project.systemName || form.systemName,
-                        projectDir: !projectDirEditedRef.current
-                          ? sanitizeProjectDirFromProjectName(project.projectName)
-                          : form.projectDir
+                        systemName: project.systemName || form.systemName
                       })
                     }}
                     portalContainer={dialogPortalContainer}
@@ -2958,10 +2964,7 @@ function ProjectFormDialog({
                     onValueChange={(name) => {
                       onChange({
                         ...form,
-                        name,
-                        projectDir: !projectDirEditedRef.current
-                          ? sanitizeProjectDirFromProjectName(name)
-                          : form.projectDir
+                        name
                       })
                     }}
                     onSelect={(project) => {
@@ -2970,10 +2973,7 @@ function ProjectFormDialog({
                         name: project.projectName,
                         projectCode: project.projectCode,
                         systemId: project.systemId || form.systemId,
-                        systemName: project.systemName || form.systemName,
-                        projectDir: !projectDirEditedRef.current
-                          ? sanitizeProjectDirFromProjectName(project.projectName)
-                          : form.projectDir
+                        systemName: project.systemName || form.systemName
                       })
                     }}
                     portalContainer={dialogPortalContainer}
@@ -2983,7 +2983,7 @@ function ProjectFormDialog({
                     <span className="text-status-critical">{projectNameLengthError}</span>
                   )}
                 </label>
-                <label className="col-span-2 grid gap-1.5 text-xs font-medium text-muted-foreground">
+                <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
                   项目描述
                   <Input
                     value={form.description}
@@ -2996,6 +2996,10 @@ function ProjectFormDialog({
                     <span className="text-status-critical">{projectDescriptionLengthError}</span>
                   )}
                 </label>
+                <ProjectTestField
+                  value={form.isTestProject}
+                  onChange={(isTestProject) => onChange({ ...form, isTestProject })}
+                />
                 <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
                   系统编号 *
                   <Input
@@ -3038,18 +3042,9 @@ function ProjectFormDialog({
                 workspacePath={form.workspacePath}
                 projectDir={form.projectDir}
                 error={projectDirError}
+                disabled={creating || workspaceValidating}
                 onPickWorkspace={onPickWorkspace}
-                onProjectDirChange={(value) => {
-                  const projectDir = sanitizeHarnessNameInput(value)
-                  projectDirEditedRef.current = Boolean(projectDir.trim())
-                  onChange({ ...form, projectDir })
-                }}
               />
-              {form.workspacePath.trim() && form.projectDir.trim() && (
-                <p className="mt-1.5 break-all text-xs leading-relaxed text-muted-foreground">
-                  将在 {resolveProjectRootPath(form)} 路径下创建本项目的插件工作目录。
-                </p>
-              )}
             </section>
 
             {error && (
@@ -3060,13 +3055,19 @@ function ProjectFormDialog({
           </div>
         </div>
         <DialogFooter>
-          <Button variant="ghost" onClick={() => onOpenChange(false)} disabled={creating}>
+          <Button
+            variant="ghost"
+            onClick={() => onOpenChange(false)}
+            disabled={creating || workspaceValidating}
+          >
             取消
           </Button>
           <Button
             onClick={onSubmit}
             disabled={
               creating ||
+              workspaceValidating ||
+              Boolean(workspaceError) ||
               verification.pending ||
               metadataRequiredMissing(form) ||
               metadataNameInvalid(form) ||
@@ -3198,7 +3199,7 @@ function ProjectEditDialog({
                     <span className="text-status-critical">{projectNameLengthError}</span>
                   )}
                 </label>
-                <label className="col-span-2 grid gap-1.5 text-xs font-medium text-muted-foreground">
+                <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
                   项目描述
                   <Input
                     value={form.description}
@@ -3211,6 +3212,10 @@ function ProjectEditDialog({
                     <span className="text-status-critical">{projectDescriptionLengthError}</span>
                   )}
                 </label>
+                <ProjectTestField
+                  value={form.isTestProject}
+                  onChange={(isTestProject) => onChange({ ...form, isTestProject })}
+                />
                 <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
                   系统编号 *
                   <Input
@@ -4516,11 +4521,13 @@ function FeatureCard({
   projectId,
   run,
   workflowNodes,
+  scheduledAt,
   onOpen
 }: {
   projectId: string
   run: HarnessFeatureSummary
   workflowNodes: Array<{ id: string; label: string }>
+  scheduledAt?: string
   onOpen: () => void
 }): React.JSX.Element {
   const pendingDecision = useHarnessNotifications().some(
@@ -4557,9 +4564,17 @@ function FeatureCard({
         <div className="flex shrink-0 flex-wrap items-center justify-end gap-1">
           {pendingDecision ? (
             <StatusPill status={{ label: "待人工确认", uiKind: "warning" }} />
-          ) : (
-            managedRunStatus && <StatusPill status={managedRunStatus} />
-          )}
+          ) : managedRunStatus ? (
+            <StatusPill status={managedRunStatus} />
+          ) : scheduledAt ? (
+            <span
+              className="inline-flex h-6 max-w-full shrink-0 items-center gap-1.5 rounded border border-status-nominal/50 bg-status-nominal/10 px-2 text-[11px] font-medium text-status-nominal"
+              title={`预约启动时间：${scheduledAt}`}
+            >
+              <Clock className="size-3.5 shrink-0" aria-hidden="true" />
+              <span className="truncate">已预约托管运行</span>
+            </span>
+          ) : null}
           <StatusPill status={run.overallStatus} />
         </div>
       </div>
@@ -5345,54 +5360,6 @@ function FeatureConversationPanel({
   )
 }
 
-function FeatureDeployUnitsPanel({
-  deployUnits
-}: {
-  deployUnits: HarnessDeployUnitMapping[]
-}): React.JSX.Element {
-  return (
-    <section className={cn(harnessSurfaceClassName, "overflow-hidden bg-background-elevated")}>
-      <div className="flex min-w-0 items-center gap-2 border-b border-border/70 px-4 py-3 text-sm font-semibold">
-        <FolderOpen className="size-4 shrink-0 text-muted-foreground" />
-        <span className="truncate">当前特性绑定的发布单元</span>
-      </div>
-      {deployUnits?.length === 0 ? (
-        <div className="px-4 py-8 text-sm text-muted-foreground">当前特性没有绑定发布单元。</div>
-      ) : (
-        <div className="divide-y divide-border/70">
-          {deployUnits?.map((deployUnit) => (
-            <div key={deployUnit.deployUnitIdMapping} className="px-4 py-3">
-              <div className="truncate text-sm font-medium" title={deployUnit.deployUnitId}>
-                {deployUnit.deployUnitId}
-              </div>
-              <div className="mt-1 flex min-w-0 items-center gap-2">
-                <div
-                  className="min-w-0 flex-1 truncate text-xs text-muted-foreground"
-                  title={deployUnit.localRepoPath}
-                >
-                  {deployUnit.localRepoPath}
-                </div>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon-sm"
-                  className="size-7 shrink-0"
-                  title="打开代码库路径"
-                  onClick={() =>
-                    void openPathInFileManager(deployUnit.localRepoPath, "无法打开代码库路径")
-                  }
-                >
-                  <FolderOpen className="size-3.5" />
-                </Button>
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
-    </section>
-  )
-}
-
 function FeatureWorkspaceChangesPanel({
   sessions,
   threadsById
@@ -6023,6 +5990,7 @@ function ProjectDetailPage({
   onCreateFeature,
   onOpenSystemConstraintUpdate,
   onRefresh,
+  managedScheduleRefreshRevision,
   onEditProject,
   onUpdatePlugin,
   onOpenLeanTokenSettings,
@@ -6046,11 +6014,13 @@ function ProjectDetailPage({
     config: NonNullable<HarnessProjectDetailViewModel["systemConstraintUpdate"]>
   ) => void
   onRefresh: (projectId: string) => void
+  managedScheduleRefreshRevision: number
   onEditProject: (project: HarnessProjectListItem) => void
   onUpdatePlugin: (project: HarnessProjectListItem, updateInfo: MarketPluginUpdateInfo) => void
   onOpenLeanTokenSettings: () => void
   onOpenFeature: (projectId: string, slug: string) => void
 }): React.JSX.Element {
+  const managedScheduleIndex = useManagedRunScheduleIndex(managedScheduleRefreshRevision)
   const runs = detail?.runs ?? []
   const activeCount = runs.filter((run) => run.overallStatus.uiKind === "active").length
   const archived = project.lifecycle.status === "archived"
@@ -6325,6 +6295,9 @@ function ProjectDetailPage({
                               projectId={project.projectId}
                               key={run.slug}
                               run={run}
+                              scheduledAt={managedScheduleIndex.get(
+                                JSON.stringify([project.projectId, run.slug])
+                              )}
                               workflowNodes={workflowForProjectRun(detail, run).nodes}
                               onOpen={() => onOpenFeature(project.projectId, run.slug)}
                             />
@@ -6551,6 +6524,7 @@ function FeatureDetailPage({
   onBackToProject,
   onEditDeployUnits,
   onRefresh,
+  managedScheduleRefreshRevision,
   onFeatureImManagementSaved,
   onActiveSessionChange,
   onSessionViewChange,
@@ -6568,6 +6542,7 @@ function FeatureDetailPage({
   onBackToProject: () => void
   onEditDeployUnits: () => void
   onRefresh: () => void | Promise<void>
+  managedScheduleRefreshRevision: number
   onFeatureImManagementSaved: (projectId: string, featureId: string, enabled: boolean) => void
   onActiveSessionChange?: (threadId: string) => void
   onSessionViewChange?: (viewing: boolean) => void
@@ -6594,9 +6569,6 @@ function FeatureDetailPage({
     detail?.run.nodes.find((node) => node.id === effectiveSelectedNodeId) ??
     detail?.run.nodes[0] ??
     null
-  const completedArtifactCount =
-    selectedNode?.artifacts?.filter((artifact) => artifact.artifactStatus === "generated").length ??
-    0
   const selectedNodeHooks = useMemo(
     () => [...(selectedNode?.hooks ?? [])].sort((a, b) => (b.ts || "").localeCompare(a.ts || "")),
     [selectedNode]
@@ -6620,6 +6592,11 @@ function FeatureDetailPage({
     selectedNode?.status ?? { label: "读取中", uiKind: "unknown" as const }
   const managedRun = detail?.run.managedRun
   const managedRunIsRunning = managedRun?.status === "running"
+  const managedSchedule = useManagedRunSchedule(
+    projectDeleted ? undefined : detail?.project.projectId,
+    detail?.run.slug,
+    managedScheduleRefreshRevision
+  )
   const managedRunSessionThreadId = managedRun?.currentSession?.threadId
   const managedRunStatus = managedRun ? managedRunStatusToHarnessStatus(managedRun.status) : null
   const nodeGroups = useMemo(() => groupStageNodes(detail?.run.nodes ?? []), [detail])
@@ -6680,12 +6657,19 @@ function FeatureDetailPage({
     null
   )
   const [managedRunDialogOpen, setManagedRunDialogOpen] = useState(false)
-  const [managedRunWorkspacePath, setManagedRunWorkspacePath] = useState("")
-  const [managedRunUserMessage, setManagedRunUserMessage] = useState("")
-  const managedRunDefaultUserMessageRef = useRef("")
-  const [managedRunImEnabled, setManagedRunImEnabled] = useState(true)
+  const managedRunSessionOptions = useMemo(
+    () =>
+      managedRunDialogOpen
+        ? buildManagedRunSessionOptions(
+            detail?.sessions ?? [],
+            threadsById,
+            allThreadStates,
+            allStreamLoadingStates
+          )
+        : [],
+    [managedRunDialogOpen, detail?.sessions, threadsById, allThreadStates, allStreamLoadingStates]
+  )
   const [openingManagedRunDialog, setOpeningManagedRunDialog] = useState(false)
-  const [pickingManagedRunWorkspace, setPickingManagedRunWorkspace] = useState(false)
   const managedRunActionInFlightRef = useRef(false)
   const [selectedSessionState, setSelectedSessionState] = useState<{
     detailKey: string
@@ -6815,33 +6799,43 @@ function FeatureDetailPage({
     void selectThread(activeSessionThreadIdForView, { preserveView: true })
   }, [activeSessionThreadIdForView, selectThread])
 
-  const handleCreateSession = useCallback(async (): Promise<void> => {
-    if (!detail || sessionBusy || projectInteractionDisabled) return
-    setSessionBusy("create")
-    try {
-      const thread = await createHarnessSession({
-        projectId: detail.project.projectId,
-        slug: detail.run.slug,
-        sessionWorkspacePath: detail.run.resolvedSessionWorkspacePath,
-        nextAction: getHarnessRunNextAction(detail),
-        createThread
-      })
-      setSelectedSessionState({ detailKey, threadId: thread.thread_id })
-      onActiveSessionChange?.(thread.thread_id)
-      setActiveDetailTab("session")
-    } catch (error) {
-      toast.error(cleanIpcError(error))
-    } finally {
-      setSessionBusy(null)
-    }
-  }, [
-    createThread,
-    detail,
-    detailKey,
-    onActiveSessionChange,
-    projectInteractionDisabled,
-    sessionBusy
-  ])
+  const handleCreateSession = useCallback(
+    async (nextAction?: HarnessWorkflowNextAction, initialAgentMode?: "multi"): Promise<void> => {
+      if (!detail || sessionBusy || projectInteractionDisabled) return
+      setSessionBusy("create")
+      try {
+        const thread = await createHarnessSession({
+          projectId: detail.project.projectId,
+          slug: detail.run.slug,
+          sessionWorkspacePath: detail.run.resolvedSessionWorkspacePath,
+          nextAction: nextAction ?? getHarnessRunNextAction(detail),
+          createThread:
+            initialAgentMode === "multi"
+              ? (metadata, options) =>
+                  createThread(
+                    { ...metadata, agentMode: "normal", subagentsEnabled: true },
+                    options
+                  )
+              : createThread
+        })
+        setSelectedSessionState({ detailKey, threadId: thread.thread_id })
+        onActiveSessionChange?.(thread.thread_id)
+        setActiveDetailTab("session")
+      } catch (error) {
+        toast.error(cleanIpcError(error))
+      } finally {
+        setSessionBusy(null)
+      }
+    },
+    [
+      createThread,
+      detail,
+      detailKey,
+      onActiveSessionChange,
+      projectInteractionDisabled,
+      sessionBusy
+    ]
+  )
 
   const setCombinedFeatureImManagement = useCallback(
     async (enabled: boolean): Promise<void> => {
@@ -6937,19 +6931,6 @@ function FeatureDetailPage({
     [detail, setCombinedFeatureImManagement, updatingFeatureImManagement]
   )
 
-  const handlePickManagedRunWorkspace = useCallback(async (): Promise<void> => {
-    if (pickingManagedRunWorkspace) return
-    setPickingManagedRunWorkspace(true)
-    try {
-      const workspacePath = normalizeWorkspacePath(await window.api.workspace.select())
-      if (workspacePath) setManagedRunWorkspacePath(workspacePath)
-    } catch (error) {
-      toast.error(cleanIpcError(error))
-    } finally {
-      setPickingManagedRunWorkspace(false)
-    }
-  }, [pickingManagedRunWorkspace])
-
   const handleOpenManagedRunDialog = useCallback(async (): Promise<void> => {
     if (!detail || updatingManagedRun || openingManagedRunDialog || projectInteractionDisabled)
       return
@@ -6961,32 +6942,23 @@ function FeatureDetailPage({
       })
       const defaultWorkspacePath = normalizeWorkspacePath(detail.run.resolvedSessionWorkspacePath)
       if (!defaultWorkspacePath) throw new Error(MISSING_FEATURE_WORKSPACE)
-      setManagedRunWorkspacePath(defaultWorkspacePath)
-      const defaultUserMessage = getHarnessRunNextAction(detail)?.userMessage ?? ""
-      managedRunDefaultUserMessageRef.current = defaultUserMessage
-      setManagedRunUserMessage(defaultUserMessage)
-      setManagedRunImEnabled(featureImManagementAvailable)
-      setPickingManagedRunWorkspace(false)
       setManagedRunDialogOpen(true)
     } catch (error) {
       toast.error(cleanIpcError(error))
     } finally {
       setOpeningManagedRunDialog(false)
     }
-  }, [
-    detail,
-    featureImManagementAvailable,
-    openingManagedRunDialog,
-    projectInteractionDisabled,
-    updatingManagedRun
-  ])
+  }, [detail, openingManagedRunDialog, projectInteractionDisabled, updatingManagedRun])
 
   const handleManagedRunChange = useCallback(
     async (
       shouldStart: boolean,
       workspacePath?: string,
       enableImManagement = true,
-      initialUserMessage?: string
+      initialUserMessage?: string,
+      existingThreadId?: string,
+      scheduledAt?: string,
+      modelSelection?: ManagedRunModelSelection
     ): Promise<boolean> => {
       if (
         !detail ||
@@ -7006,12 +6978,35 @@ function FeatureDetailPage({
           const confirmedWorkspacePath = normalizeWorkspacePath(workspacePath)
           if (!confirmedWorkspacePath) throw new Error("请选择本次托管使用的会话工作区")
           await setCombinedFeatureImManagement(enableImManagement)
+          if (scheduledAt) {
+            await window.api.harnessBoard.scheduleManagedRun({
+              projectId: detail.project.projectId,
+              featureId: detail.run.slug,
+              workspacePath: confirmedWorkspacePath,
+              initialUserMessage,
+              existingThreadId,
+              modelSelection,
+              scheduledAt
+            })
+            toast.success("已预约托管运行")
+            return true
+          }
           const startedRun = await window.api.harnessBoard.startManagedRun({
             projectId: detail.project.projectId,
             featureId: detail.run.slug,
             workspacePath: confirmedWorkspacePath,
-            initialUserMessage
+            initialUserMessage,
+            existingThreadId,
+            modelSelection
           })
+          if (existingThreadId) {
+            void window.api.threads
+              .get(existingThreadId)
+              .then((thread) => {
+                if (thread) useAppStore.getState().addThreadSummary(thread)
+              })
+              .catch((error) => console.warn("[ManagedRun] Failed to refresh session:", error))
+          }
           startStatus = startedRun.status
           startFailureReason = startedRun.failureReason
         } else {
@@ -7051,21 +7046,6 @@ function FeatureDetailPage({
       updatingManagedRun
     ]
   )
-
-  const handleConfirmManagedRun = useCallback(async (): Promise<void> => {
-    const userMessage = managedRunUserMessage.trim()
-    const initialUserMessage =
-      userMessage && userMessage !== managedRunDefaultUserMessageRef.current.trim()
-        ? userMessage
-        : undefined
-    const started = await handleManagedRunChange(
-      true,
-      managedRunWorkspacePath,
-      managedRunImEnabled,
-      initialUserMessage
-    )
-    if (started) setManagedRunDialogOpen(false)
-  }, [handleManagedRunChange, managedRunImEnabled, managedRunUserMessage, managedRunWorkspacePath])
 
   const handleContextReminderSessionCreated = useCallback(
     (threadId: string): void => {
@@ -7376,11 +7356,17 @@ function FeatureDetailPage({
                       !detail ||
                       projectInteractionDisabled ||
                       openingManagedRunDialog ||
-                      updatingManagedRun
+                      updatingManagedRun ||
+                      (!managedRunIsRunning &&
+                        (managedSchedule.loading ||
+                          Boolean(managedSchedule.schedule) ||
+                          Boolean(managedSchedule.error)))
                     }
                   >
-                    {(openingManagedRunDialog || updatingManagedRun) && (
+                    {openingManagedRunDialog || updatingManagedRun ? (
                       <Loader2 className="size-4 animate-spin" />
+                    ) : (
+                      <ManagedRunIcon />
                     )}
                     {managedRunIsRunning ? "停止托管运行" : "托管运行当前特性"}
                   </Button>
@@ -7402,6 +7388,15 @@ function FeatureDetailPage({
                   )}
                 </div>
               </TooltipProvider>
+              {detail?.artifactAccumulation && (
+                <ArtifactAccumulationButton
+                  disabled={loading || projectInteractionDisabled}
+                  creating={sessionBusy !== null}
+                  onClick={() =>
+                    void handleCreateSession(detail.artifactAccumulation?.nextAction, "multi")
+                  }
+                />
+              )}
               <Button
                 type="button"
                 variant="ghost"
@@ -7558,15 +7553,26 @@ function FeatureDetailPage({
                       {detail.run.title}
                     </h2>
                     <StatusPill status={featureOverallStatus} />
-                    {managedRunStatus && (
-                      <StatusPill
-                        status={managedRunStatus}
-                        onClick={
-                          managedRun?.status === "running" && managedRunSessionThreadId
-                            ? () => handleHookSessionSelect(managedRunSessionThreadId)
-                            : undefined
-                        }
+                    {managedSchedule.schedule || managedSchedule.error ? (
+                      <ManagedRunScheduleBadge
+                        key={`${detailKey}:${managedSchedule.schedule?.scheduleId ?? ""}`}
+                        schedule={managedSchedule.schedule}
+                        error={managedSchedule.error}
+                        onRetry={managedSchedule.reload}
+                        disabled={projectDeleted}
                       />
+                    ) : (
+                      !managedSchedule.loading &&
+                      managedRunStatus && (
+                        <StatusPill
+                          status={managedRunStatus}
+                          onClick={
+                            managedRun?.status === "running" && managedRunSessionThreadId
+                              ? () => handleHookSessionSelect(managedRunSessionThreadId)
+                              : undefined
+                          }
+                        />
+                      )
                     )}
                     {unbound && (
                       <span className="rounded-full border border-status-warning/30 bg-status-warning/10 px-2 py-0.5 text-[11px] text-status-warning">
@@ -7621,8 +7627,8 @@ function FeatureDetailPage({
                     暂无阶段数据。
                   </section>
                 )}
-                <ManagedRunTimeline
-                  key={detail.run.managedRun?.runId ?? "no-managed-run"}
+                <ManagedRunHistory
+                  key={`${detail.project.projectId}:${detail.run.slug}`}
                   run={detail.run.managedRun}
                   projectId={detail.project.projectId}
                   featureId={detail.run.managedRun?.featureId ?? detail.run.slug}
@@ -7648,43 +7654,6 @@ function FeatureDetailPage({
                   }
                   onOpenThread={handleHookSessionSelect}
                 />
-                <section className={cn(harnessSurfaceClassName, "p-3")}>
-                  <div className={harnessKickerClassName}>Current stage</div>
-                  <div className="mt-2.5 flex min-w-0 items-start gap-2.5">
-                    <div className="mt-0.5 flex size-9 shrink-0 items-center justify-center rounded-lg border border-status-info/20 bg-status-info/10">
-                      {selectedNode ? (
-                        statusIcon(selectedNode.status, shouldAnimateStageNode(selectedNode))
-                      ) : (
-                        <Circle className="size-4 text-muted-foreground" />
-                      )}
-                    </div>
-                    <div className="min-w-0 flex-1">
-                      <div className="truncate text-[13px] font-semibold">
-                        {selectedNode?.label ?? "暂无阶段"}
-                      </div>
-                      <div className="mt-1 text-[11px] text-muted-foreground">
-                        {selectedNode?.status.label ?? "等待阶段数据"}
-                      </div>
-                    </div>
-                    {selectedNode && <StatusPill status={selectedNode.status} />}
-                  </div>
-                  <div className="mt-3 grid grid-cols-2 gap-2 text-[11px] text-muted-foreground">
-                    <div className="rounded-lg border border-border/70 bg-background/70 px-2.5 py-2">
-                      产物(已完成/预期)
-                      <strong className="mt-0.5 block text-sm text-foreground">
-                        {completedArtifactCount}/{selectedNode?.artifacts?.length ?? 0}
-                      </strong>
-                    </div>
-                    <div className="rounded-lg border border-border/70 bg-background/70 px-2.5 py-2">
-                      事件
-                      <strong className="mt-0.5 block text-sm text-foreground">
-                        {selectedNodeHooks.length}
-                      </strong>
-                    </div>
-                  </div>
-                </section>
-
-                <FeatureDeployUnitsPanel deployUnits={detail.run.selectedDeployUnits} />
                 <FeatureWorkspaceChangesPanel
                   sessions={detail.sessions}
                   threadsById={threadsById}
@@ -7721,130 +7690,44 @@ function FeatureDetailPage({
           </div>
         </div>
       )}
-      <Dialog
-        open={managedRunDialogOpen}
-        onOpenChange={(open) => {
-          if (!updatingManagedRun) setManagedRunDialogOpen(open)
-        }}
-      >
-        <DialogContent
-          className={harnessDialogContentClassName}
-          onPointerDownOutside={preventHarnessDialogOutsideClose}
-        >
-          <DialogHeader>
-            <DialogTitle>开启托管运行</DialogTitle>
-          </DialogHeader>
-          <div className="grid gap-2 py-2">
-            <div className="flex items-center gap-1.5 text-sm font-medium">
-              <span>会话工作区</span>
-              <TooltipProvider delayDuration={150}>
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <span
-                      aria-label="托管模式会话工作区提示"
-                      className="inline-flex size-4 items-center justify-center rounded-full text-muted-foreground transition-colors hover:text-foreground"
-                    >
-                      <Info className="size-3.5" />
-                    </span>
-                  </TooltipTrigger>
-                  <TooltipContent side="top" className="z-[70] max-w-72">
-                    该路径将作为本次托管模式自动创建会话时使用的会话工作区
-                  </TooltipContent>
-                </Tooltip>
-              </TooltipProvider>
-            </div>
-            <Input
-              value={managedRunWorkspacePath}
-              readOnly
-              title={managedRunWorkspacePath}
-              placeholder="请选择文件夹"
-              aria-label="会话工作区"
-              disabled={pickingManagedRunWorkspace || updatingManagedRun}
-              className="min-w-0 cursor-pointer text-foreground"
-              onClick={() => void handlePickManagedRunWorkspace()}
-              onKeyDown={(event) => {
-                if (event.key === "Enter" || event.key === " ") {
-                  event.preventDefault()
-                  void handlePickManagedRunWorkspace()
-                }
-              }}
-            />
-            <label className="mt-2 grid gap-2 text-sm font-medium">
-              启动会话的初始用户消息
-              <textarea
-                value={managedRunUserMessage}
-                onChange={(event) => setManagedRunUserMessage(event.target.value)}
-                placeholder="留空则使用当前步骤的默认用户消息"
-                rows={4}
-                disabled={updatingManagedRun}
-                className="w-full resize-y rounded-md border border-input bg-transparent px-3 py-2 text-sm font-normal shadow-sm outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
-              />
-            </label>
-            <div className="mt-2 flex items-start justify-between gap-4 rounded-lg border border-border/70 bg-background/70 px-3 py-2.5">
-              <div>
-                <div className="flex items-center gap-1.5 text-sm font-medium">
-                  <span>通过招乎管理托管运行</span>
-                  <TooltipProvider delayDuration={150}>
-                    <Tooltip>
-                      <TooltipTrigger asChild>
-                        <button
-                          type="button"
-                          className="inline-flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                          aria-label="查看通过招乎管理托管运行的说明"
-                        >
-                          <Info className="size-3.5" />
-                        </button>
-                      </TooltipTrigger>
-                      <TooltipContent side="top" className="z-[70] max-w-80 text-xs leading-5">
-                        托管模式需要人工介入的决策可经由招乎审批
-                      </TooltipContent>
-                    </Tooltip>
-                  </TooltipProvider>
-                </div>
-                <div className="mt-1 text-xs text-muted-foreground">
-                  {featureImUnavailableReason
-                    ? featureImUnavailableReason
-                    : "确认后同步更新“通过招乎管理特性”开关"}
-                </div>
-              </div>
-              <Switch
-                aria-label="通过招乎管理托管运行"
-                checked={managedRunImEnabled}
-                disabled={
-                  updatingManagedRun || (!managedRunImEnabled && !featureImManagementAvailable)
-                }
-                onCheckedChange={setManagedRunImEnabled}
-              />
-            </div>
-          </div>
-          <DialogFooter>
-            <Button
-              type="button"
-              variant="outline"
-              onClick={() => setManagedRunDialogOpen(false)}
-              disabled={updatingManagedRun}
-            >
-              取消
-            </Button>
-            <Button
-              type="button"
-              onClick={() => void handleConfirmManagedRun()}
-              disabled={
-                !managedRunWorkspacePath.trim() || updatingManagedRun || pickingManagedRunWorkspace
-              }
-            >
-              {updatingManagedRun && <Loader2 className="size-4 animate-spin" />}
-              确认并开启托管
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      {managedRunDialogOpen && detail && (
+        <ManagedRunStartDialog
+          key={detailKey}
+          sessions={managedRunSessionOptions}
+          previousThreadId={detail.run.managedRun?.currentSession?.threadId}
+          defaultWorkspacePath={detail.run.resolvedSessionWorkspacePath ?? ""}
+          defaultUserMessage={getHarnessRunNextAction(detail)?.userMessage ?? ""}
+          featureImManagementAvailable={featureImManagementAvailable}
+          featureImUnavailableReason={featureImUnavailableReason}
+          updatingManagedRun={updatingManagedRun}
+          onClose={() => setManagedRunDialogOpen(false)}
+          onConfirm={({
+            workspacePath,
+            initialUserMessage,
+            existingThreadId,
+            imEnabled,
+            scheduledAt,
+            modelSelection
+          }) =>
+            handleManagedRunChange(
+              true,
+              workspacePath,
+              imEnabled,
+              initialUserMessage,
+              existingThreadId,
+              scheduledAt,
+              modelSelection
+            )
+          }
+        />
+      )}
     </div>
   )
 }
 
 function ProjectFeatureSidebar({
   groups,
+  managedScheduleRefreshRevision,
   collapsedKeys,
   pinnedProjectIds,
   pinnedFeatureKeys,
@@ -7883,6 +7766,7 @@ function ProjectFeatureSidebar({
   onEditingTitleChange
 }: {
   groups: ProjectSessionProjectGroup[]
+  managedScheduleRefreshRevision: number
   collapsedKeys: Set<string>
   pinnedProjectIds: Set<string>
   pinnedFeatureKeys: Set<string>
@@ -7929,6 +7813,7 @@ function ProjectFeatureSidebar({
         loadMoreThreads: state.loadMoreThreads
       }))
     )
+  const managedScheduleIndex = useManagedRunScheduleIndex(managedScheduleRefreshRevision)
   const highlightThreadId = isViewingSession ? currentThreadId : null
   const scrollAreaRef = useRef<HTMLDivElement | null>(null)
   const pendingScrollRestoreRef = useRef<number | null>(null)
@@ -8056,7 +7941,8 @@ function ProjectFeatureSidebar({
   const renderThreadItem = (
     thread: Thread,
     hoverTitle: string,
-    onSelect: () => void
+    onSelect: () => void,
+    isManagedRunning = false
   ): React.JSX.Element => {
     const threadState = allThreadStates[thread.thread_id]
     const isLoading =
@@ -8079,6 +7965,7 @@ function ProjectFeatureSidebar({
         isSelected={highlightThreadId === thread.thread_id}
         isEditing={editingThreadId === thread.thread_id}
         isUnread={unreadIds.has(thread.thread_id)}
+        isManagedRunning={isManagedRunning}
         hasPendingUserInput={hasPendingUserInput}
         editingTitle={editingTitle}
         hoverTitle={hoverTitle}
@@ -8350,7 +8237,7 @@ function ProjectFeatureSidebar({
                           {visibleProjectSessions.map((session) => {
                             const thread = threadsById.get(session.threadId)
                             if (!thread) return null
-                            return renderThreadItem(thread, `所属项目：${group.project.name}`, () =>
+                            return renderThreadItem(thread, getThreadTitle(thread), () =>
                               onSelectProjectSession(
                                 group.project.projectId,
                                 thread.thread_id,
@@ -8367,6 +8254,12 @@ function ProjectFeatureSidebar({
                       )
                     })()}
                     {group.featureGroups.map((featureGroup) => {
+                      const managedScheduleAt =
+                        !projectDeleted && !featureGroup.deleted
+                          ? managedScheduleIndex.get(
+                              JSON.stringify([group.project.projectId, featureGroup.slug])
+                            )
+                          : undefined
                       const featureCollapsed = collapsedKeys.has(featureGroup.key)
                       const featurePinned =
                         !projectDeleted && pinnedFeatureKeys.has(featureGroup.key)
@@ -8429,6 +8322,15 @@ function ProjectFeatureSidebar({
                             >
                               {featureGroup.title}
                             </span>
+                            {managedScheduleAt && (
+                              <span
+                                className="inline-flex shrink-0 text-status-nominal"
+                                title={`已预约托管：${managedScheduleAt}`}
+                                aria-label={`已预约托管：${managedScheduleAt}`}
+                              >
+                                <ManagedRunIcon />
+                              </span>
+                            )}
                             {hasUnreadFeatureSession && (
                               <span className="size-2 rounded-full bg-status-info shrink-0" />
                             )}
@@ -8520,14 +8422,15 @@ function ProjectFeatureSidebar({
                                     if (!thread) return null
                                     return renderThreadItem(
                                       thread,
-                                      `所属项目：${group.project.name} / ${featureGroup.title}`,
+                                      getThreadTitle(thread),
                                       () =>
                                         onSelectSession(
                                           group.project.projectId,
                                           session.slug,
                                           thread.thread_id,
                                           projectDeleted
-                                        )
+                                        ),
+                                      featureGroup.managedRunThreadId === thread.thread_id
                                     )
                                   })}
                                   {renderSessionVisibilityControls(
@@ -8642,6 +8545,8 @@ export function HarnessBoardView({
   const [creating, setCreating] = useState(false)
   const [form, setForm] = useState<HarnessProjectCreateInput>(() => createEmptyProjectForm())
   const [formError, setFormError] = useState<string | null>(null)
+  const [workspaceValidating, setWorkspaceValidating] = useState(false)
+  const [workspaceError, setWorkspaceError] = useState<string | null>(null)
   const [editingProject, setEditingProject] = useState<HarnessProjectListItem | null>(null)
   const [editForm, setEditForm] = useState<HarnessProjectMetadataUpdateInput>(() =>
     createEmptyProjectMetadataForm()
@@ -9981,12 +9886,19 @@ export function HarnessBoardView({
 
   useEffect(() => {
     return window.api.harnessBoard.onManagedRunChanged((event) => {
-      if (event.run.status === "running") {
-        patchCachedProjectRuns(event.projectId, (run) => {
-          if (run.slug !== event.featureId || run.managedRunStatus === event.run.status) return run
-          return { ...run, managedRunStatus: event.run.status }
-        })
-      } else {
+      const managedRunThreadId =
+        event.run.status === "running" ? event.run.currentSession?.threadId : undefined
+      patchCachedProjectRuns(event.projectId, (run) => {
+        if (
+          run.slug !== event.featureId ||
+          (run.managedRunStatus === event.run.status &&
+            run.managedRunThreadId === managedRunThreadId)
+        ) {
+          return run
+        }
+        return { ...run, managedRunStatus: event.run.status, managedRunThreadId }
+      })
+      if (event.run.status !== "running") {
         void loadProjectDetail(event.projectId, { showLoading: false, reportError: false })
       }
 
@@ -10033,8 +9945,10 @@ export function HarnessBoardView({
     []
   )
 
+  const [managedScheduleRefreshRevision, setManagedScheduleRefreshRevision] = useState(0)
   const refreshSelectedRunDetail = useCallback(
     async (options: { rethrow?: boolean } = {}): Promise<void> => {
+      setManagedScheduleRefreshRevision((revision) => revision + 1)
       if (!selectedFeature || selectedFeature.deleted) return
       setLoadingRun(true)
       setLoadError(null)
@@ -10115,11 +10029,13 @@ export function HarnessBoardView({
   const resetCreateForm = useCallback(() => {
     setForm(createEmptyProjectForm())
     setFormError(null)
+    setWorkspaceError(null)
   }, [])
 
   const openCreateDialog = useCallback(() => {
     setForm(createEmptyProjectForm())
     setFormError(null)
+    setWorkspaceError(null)
     openProjectDialogAdapterSession()
     setDialogOpen(true)
   }, [openProjectDialogAdapterSession])
@@ -10130,24 +10046,42 @@ export function HarnessBoardView({
         openCreateDialog()
         return
       }
-      if (!creating) {
+      if (!creating && !workspaceValidating) {
         setDialogOpen(false)
         closeProjectDialogAdapterSession()
         resetCreateForm()
       }
     },
-    [closeProjectDialogAdapterSession, creating, openCreateDialog, resetCreateForm]
+    [
+      closeProjectDialogAdapterSession,
+      creating,
+      workspaceValidating,
+      openCreateDialog,
+      resetCreateForm
+    ]
   )
 
   const handlePickWorkspace = async (): Promise<void> => {
-    const workspacePath = await window.api.workspace.select()
-    if (workspacePath) {
-      setForm((current) => ({ ...current, workspacePath }))
+    if (creating || workspaceValidating) return
+    setWorkspaceValidating(true)
+    try {
+      const selected = await window.api.harnessBoard.selectProjectDirectory()
+      if (selected) {
+        const { workspacePath, projectDir, validationError } = selected
+        setForm((current) => ({ ...current, workspacePath, projectDir }))
+        setWorkspaceError(validationError)
+        setFormError(null)
+      }
+    } catch (error) {
+      setWorkspaceError(cleanIpcError(error))
+    } finally {
+      setWorkspaceValidating(false)
     }
   }
 
   const handleSubmit = async (): Promise<void> => {
-    if (creating || createProjectVerification.pending) return
+    if (creating || createProjectVerification.pending || workspaceValidating || workspaceError)
+      return
     setFormError(null)
     if (metadataRequiredMissing(form)) {
       setFormError("所有字段均为必填")
@@ -11302,6 +11236,10 @@ export function HarnessBoardView({
           slug,
           title: slug,
           sessions,
+          managedRunThreadId: deleted
+            ? undefined
+            : detailsByProjectId[project.projectId]?.runs.find((run) => run.slug === slug)
+                ?.managedRunThreadId,
           section,
           ...(deleted ? { deleted: true } : {})
         }))
@@ -11829,6 +11767,7 @@ export function HarnessBoardView({
           </div>
           <ProjectFeatureSidebar
             groups={projectSidebarGroups}
+            managedScheduleRefreshRevision={managedScheduleRefreshRevision}
             collapsedKeys={collapsedFeatureKeys}
             pinnedProjectIds={pinnedProjectIds}
             pinnedFeatureKeys={pinnedFeatureKeys}
@@ -11940,6 +11879,7 @@ export function HarnessBoardView({
           onBackToProject={handleBackToProject}
           onEditDeployUnits={openFeatureDeployUnitEditDialog}
           onRefresh={refreshSelectedRunDetail}
+          managedScheduleRefreshRevision={managedScheduleRefreshRevision}
           onFeatureImManagementSaved={handleFeatureImManagementSaved}
           onActiveSessionChange={handleActiveSessionChange}
           onSessionViewChange={handleSessionViewChange}
@@ -12020,7 +11960,11 @@ export function HarnessBoardView({
           onOpenSystemConstraintUpdate={(project, config) => {
             void handleOpenSystemConstraintUpdate(project, config)
           }}
-          onRefresh={(projectId) => void loadProjectDetail(projectId)}
+          onRefresh={(projectId) => {
+            setManagedScheduleRefreshRevision((revision) => revision + 1)
+            void loadProjectDetail(projectId)
+          }}
+          managedScheduleRefreshRevision={managedScheduleRefreshRevision}
           onEditProject={handleEditProject}
           onUpdatePlugin={(project, updateInfo) => {
             void handleUpdateProjectPlugin(project, updateInfo)
@@ -12395,6 +12339,8 @@ export function HarnessBoardView({
       <ProjectFormDialog
         open={dialogOpen}
         creating={creating}
+        workspaceValidating={workspaceValidating}
+        workspaceError={workspaceError}
         form={form}
         registry={projectDialogAdapterRegistry}
         installingPluginNames={updatingPluginNames}

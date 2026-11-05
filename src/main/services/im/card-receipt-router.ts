@@ -12,6 +12,7 @@ import type { ImReplyClient } from "./reply-client"
 import { buildImProactiveReplies } from "./reply-segmentation"
 import { imHumanGateAdapter, type ImHumanGateAdapter } from "./human-gate-adapter"
 import { imBizRetryAdapter, type ImBizRetryAdapter } from "./biz-retry-adapter"
+import type { ImSessionSwitchCards } from "./session-switch-cards"
 
 /**
  * Turns a Zhaohu card click into the same decision a typed command would make.
@@ -49,6 +50,7 @@ export class ImCardReceiptRouter {
   private readonly dependencies: CardReceiptDependencies
   private replyDrainer: ReplyDrainer | null = null
   private commands: TargetBindResolver | null = null
+  private sessionSwitchCards: Pick<ImSessionSwitchCards, "handleReceipt"> | null = null
   /**
    * A platform retry must not apply the same click twice.
    *
@@ -95,6 +97,13 @@ export class ImCardReceiptRouter {
     }
   }
 
+  registerSessionSwitchCards(cards: Pick<ImSessionSwitchCards, "handleReceipt">): () => void {
+    this.sessionSwitchCards = cards
+    return () => {
+      if (this.sessionSwitchCards === cards) this.sessionSwitchCards = null
+    }
+  }
+
   async handle(receipt: RemoteImCardReceiptV1): Promise<void> {
     // Serialized: `handle` is driven straight from the socket's message event,
     // so two deliveries of one receipt can both clear the seen-check before
@@ -132,6 +141,8 @@ export class ImCardReceiptRouter {
   }
 
   private async apply(receipt: RemoteImCardReceiptV1): Promise<string | null> {
+    const sessionSwitch = await this.sessionSwitchCards?.handleReceipt(receipt)
+    if (sessionSwitch !== undefined) return sessionSwitch
     const resolved = this.dependencies.cards.interactions.resolveTag(receipt.tag)
     if (!resolved) {
       // The card outlived its request: the desktop restarted, or the run ended

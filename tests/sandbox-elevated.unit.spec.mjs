@@ -398,7 +398,7 @@ test("sandbox cache roots canonicalize workspace symlinks asynchronously", () =>
   )
   const constructorSection = sectionBetween(
     localSandboxSource,
-    "constructor(options: LocalSandboxOptions = {}",
+    "constructor(options: LocalSandboxOptions = {})",
     "    // Redirect deepagents' virtual eviction paths"
   )
   const executeWindowsSection = sectionBetween(
@@ -424,8 +424,8 @@ test("sandbox cache roots canonicalize workspace symlinks asynchronously", () =>
   )
   assert.match(
     constructorSection,
-    /this\._sandboxCacheRoot = LocalSandbox\.buildSandboxCacheRootFromCanonical[\s\S]*this\._sandboxCacheRootPromise =\s*mode === permissionProbe\s*\? Promise\.resolve\(this\._sandboxCacheRoot\)\s*: LocalSandbox\.buildSandboxCacheRoot/,
-    "normal construction should precompute canonical roots while the inert permission probe uses the fallback"
+    /this\._sandboxCacheRoot = LocalSandbox\.buildSandboxCacheRootFromCanonical[\s\S]*this\._sandboxCacheRootPromise = LocalSandbox\.buildSandboxCacheRoot/,
+    "constructor should keep a synchronous fallback while precomputing the canonical cache root"
   )
   assert.match(
     executeWindowsSection,
@@ -502,7 +502,7 @@ test("elevated command routing avoids unconditional Python lookup waits", () => 
   const preferUnelevatedSection = sectionBetween(
     localSandboxSource,
     "private static async shouldPreferUnelevated(",
-    "  constructor(options: LocalSandboxOptions = {}"
+    "  constructor(options: LocalSandboxOptions = {})"
   )
   const barePythonIndex = preferUnelevatedSection.indexOf("const isBarePythonCommand")
   const resolvePythonIndex = preferUnelevatedSection.indexOf(
@@ -2070,26 +2070,16 @@ test("user-pasted V1 workflow marker is de-weaponized, not swallowed (#5)", () =
   )
 })
 
-test("workflow script writeFile shares the run-level write lock with subagent tool writes (#2)", () => {
-  // Script writeFile() used its own fileWriteChain while subagent tool writes used
-  // the threadId tool-concurrency lock — two silos that could clobber the same file
-  // on a concurrent script+agent write. runtime injects the SAME lock
-  // (explicit shared-workspace queue, or threadId by default); the engine's writeFile routes through
-  // it; run-manager threads it down.
+test("workflow script writes share admission and backend file locks with agents", () => {
   assert.match(
     runtimeSource,
-    /runExclusiveFileWrite:[\s\S]*?getToolConcurrencyLock\(options\.toolConcurrencyQueueId \?\? threadId\)\.write\(fn\)/,
-    "runtime preserves an explicit shared-workspace lock and otherwise uses the original thread lock"
-  )
-  assert.match(
-    runtimeSource,
-    /toolConcurrencyQueueId: worktreeIsolation\?\.workspaceRoot \?\? options\.toolConcurrencyQueueId \?\? threadId/,
-    "shared-workspace subagents use that same lock; isolated worktrees retain their own lock"
+    /runExclusiveFileWrite:[\s\S]*?getToolConcurrencyLock\(options\.toolConcurrencyQueueId \?\? threadId\)\.read\(fn, signal\)/,
+    "runtime shares file admission while excluding unknown tools"
   )
   assert.match(
     workflowEngineSource,
-    /context\.runExclusiveFileWrite/,
-    "engine writeFile routes through the injected run-level write lock"
+    /withFileOperation\(context\.workspacePath, resolved, "write", performWrite, signal\)/,
+    "engine uses the same per-file protection as sandbox writes"
   )
   assert.match(
     workflowRunManagerSource,
@@ -2718,7 +2708,7 @@ test("workflow run IPC strips the (tens-of-MB) journal before sending a run to t
   // drop it before IPC. `script` is kept (the run dialog renders it).
   assert.match(
     workflowsIpcSource,
-    /function stripJournalForRenderer\(run: PersistedWorkflowRun \| null\)/,
+    /function stripJournalForRenderer\(\s*run: WorkflowRunForRenderer \| null\s*\)/,
     "workflows IPC exposes a journal-stripping projection"
   )
   assert.match(

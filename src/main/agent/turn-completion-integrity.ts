@@ -45,7 +45,6 @@
 import { AIMessage, HumanMessage, ToolMessage, type BaseMessage } from "@langchain/core/messages"
 import { createMiddleware } from "langchain"
 import { TURN_COMPLETION_GATE_MARKER_PREFIX } from "../../shared/checkpoint-transcript"
-import { ModelRefusalError, readModelRefusal, type ModelRefusal } from "./model-refusal"
 
 /** Protocol-level defects in a model's FINAL (tool-call-free) message. */
 export type TurnCompletionDefect =
@@ -131,7 +130,6 @@ const DSML_TOOL_TAIL_RE =
 const modelsWithObservedFinishSignal = new Set<string>()
 
 interface GateRunState {
-  refusal?: ModelRefusal
   retriesUsed: number
   todoNudgesUsed: number
   unresolved: TurnCompletionInspection | null
@@ -156,7 +154,6 @@ function runScopedKey(threadId: string, ownerRunToken: string): string {
  * valid message ends the sub-turn.
  */
 function settleRunState(state: GateRunState): void {
-  state.refusal = undefined
   state.retriesUsed = 0
   state.todoNudgesUsed = 0
   state.unresolved = null
@@ -177,7 +174,6 @@ function ensureRunState(key: string): GateRunState {
 }
 
 export interface TurnCompletionGateReport {
-  refusal?: ModelRefusal
   retriesUsed: number
   todoNudgesUsed: number
   /** Non-null when the model never produced a valid final message. */
@@ -196,17 +192,11 @@ export function readTurnCompletionGateReport(
   const state = gateStateByRun.get(runScopedKey(threadId, ownerRunToken))
   if (!state) return null
   return {
-    ...(state.refusal ? { refusal: { ...state.refusal } } : {}),
     retriesUsed: state.retriesUsed,
     todoNudgesUsed: state.todoNudgesUsed,
     unresolved: state.unresolved,
     unfinishedTodos: [...state.unfinishedTodos]
   }
-}
-
-/** Managed transports must settle provider refusals before success-only effects. */
-export function assertNoTurnModelRefusal(threadId: string, runId: string): void {
-  if (gateStateByRun.get(runScopedKey(threadId, runId))?.refusal) throw new ModelRefusalError()
 }
 
 /** Drop a run's gate state. Must run on EVERY exit of a physical run (success,
@@ -364,7 +354,6 @@ export function inspectFinalAssistantMessage(
   const finishSignal = readFinishSignal(message)
   const modelKey = readModelKey(message)
   if (finishSignal) modelsWithObservedFinishSignal.add(modelKey)
-  if (readModelRefusal(message)) return { defect: null, detail: "" }
 
   const invalidToolCalls = Array.isArray(message.invalid_tool_calls)
     ? message.invalid_tool_calls.length
@@ -499,7 +488,6 @@ export function collectUnfinishedTodos(todos: unknown): string[] {
 
 /** User-facing reason for a turn the gate refused to call successful. */
 export function describeTurnCompletionFailure(report: TurnCompletionGateReport): string | null {
-  if (report.refusal) return "模型提供商拒绝了本次请求，本回合按未完成处理。"
   if (report.unresolved) {
     return `模型未能给出有效的最终结果：${report.unresolved.detail}（已重试 ${report.retriesUsed} 次）。本回合按未完成处理。`
   }
@@ -525,10 +513,9 @@ export type TurnCompletionRecoveryCallback = (input: {
 export type TurnFinalDeliveryCheck = (messages: readonly BaseMessage[]) => string | undefined
 
 export interface TurnCompletionGateOptions {
-  /** Foreground physical run token that enables completion and todo recovery. */
+  /** Physical run token; without one the gate is inert (subagent/task graphs
+   * that the IPC layer does not settle on their own). */
   ownerRunToken?: string
-  /** Records refusal for managed transports without enabling foreground retries or queue access. */
-  observationRunToken?: string
   maxRetries?: number
   maxTodoNudges?: number
   todoGateEnabled?: boolean
@@ -554,7 +541,6 @@ export function createTurnCompletionGateMiddleware(
 ): ReturnType<typeof createMiddleware> {
   const {
     ownerRunToken,
-    observationRunToken,
     maxRetries = DEFAULT_MAX_COMPLETION_RETRIES,
     maxTodoNudges = DEFAULT_MAX_TODO_NUDGES,
     todoGateEnabled = true,
@@ -565,14 +551,13 @@ export function createTurnCompletionGateMiddleware(
   return createMiddleware({
     name: "turnCompletionGate",
     afterModel: {
-      canJumpTo: ["model", "end"],
+      canJumpTo: ["model"],
       hook: async (state, runtime) => {
         const threadId =
           typeof runtime.configurable?.thread_id === "string"
             ? runtime.configurable.thread_id
             : undefined
-        const runId = ownerRunToken ?? observationRunToken
-        if (!threadId || !runId) return undefined
+        if (!threadId || !ownerRunToken) return undefined
 
         const messages = Array.isArray((state as GateGraphState).messages)
           ? ((state as GateGraphState).messages as BaseMessage[])
@@ -580,15 +565,7 @@ export function createTurnCompletionGateMiddleware(
         const lastMessage = messages.at(-1)
         if (!AIMessage.isInstance(lastMessage)) return undefined
 
-        const key = runScopedKey(threadId, runId)
-        const refusal = readModelRefusal(lastMessage)
-        if (refusal) {
-          const runState = ensureRunState(key)
-          settleRunState(runState)
-          runState.refusal = refusal
-          return { jumpTo: "end" as const }
-        }
-        if (!ownerRunToken) return undefined
+        const key = runScopedKey(threadId, ownerRunToken)
 
         // Tools were requested: the loop continues on its own. Record the finish
         // signal (a tool-call turn is the most reliable place to learn that this

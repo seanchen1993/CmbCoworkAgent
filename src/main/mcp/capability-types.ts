@@ -10,8 +10,6 @@ export interface McpFallbackPolicy {
 }
 
 export interface McpCapabilityTool {
-  /** Opaque host connection snapshot, never a credential or a server-provided annotation. */
-  connectionGeneration?: string
   capabilityId: string
   toolId: string
   canonicalToolId?: string
@@ -41,10 +39,6 @@ export interface McpInvocationResult {
 }
 
 export interface McpCapabilityService {
-  /** Configured provider names only; no credentials, connection initialization or discovery. */
-  configuredServerNames?(): string[]
-  /** Current discovered metadata only; must not open/reconnect a server for a permission query. */
-  peekTools?(): McpCapabilityTool[] | null
   listTools(): Promise<McpCapabilityTool[]>
   getSnapshot?(): Promise<{ fingerprint: string; tools: McpCapabilityTool[] }>
   getTool(idOrAlias: string): Promise<McpCapabilityTool | null>

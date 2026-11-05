@@ -21,6 +21,7 @@ vi.mock("../models/registry", () => ({
 vi.mock("../db", () => ({ getThreadCore: () => null, updateThread: vi.fn() }))
 vi.mock("./runtime", () => ({ createAgentRuntime: vi.fn() }))
 vi.mock("../harness-board/service", () => ({}))
+vi.mock("../harness-board/managed-run-model", () => ({ getManagedRunModelOverride: () => undefined }))
 import { resolveStandardTurnRouting, type StandardTurnRoutingInput } from "./standard-thread-turn"
 
 // Exercise the routing input actually wired in Agent IPC, then the real routing/failover
@@ -39,7 +40,7 @@ function visit(node: ts.Node): void {
 visit(source)
 if (!routingInput) throw new Error("Agent invocation routing entry not found")
 const inputFor = new Function("runExecutionContext", "getGlobalRoutingMode", "requestedModelId",
-  "routingDecisionMessage", "effectiveMessage", "threadId", `return (${routingInput})`) as
+  "routingDecisionMessage", "effectiveMessage", "threadId", `const managedExecution = false; return (${routingInput})`) as
   (context: Partial<AgentRunExecutionContext>, globalMode: () => string, model: string,
     routingMessage: string, message: string, thread: string) => StandardTurnRoutingInput
 

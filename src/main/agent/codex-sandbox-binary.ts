@@ -6,7 +6,7 @@ import { createGunzip } from "node:zlib"
 
 const pending = new Map<string, Promise<void>>()
 
-/** App-owned resource only. Share extraction between model turns and explicit Mods commands. */
+/** App-owned resource only. Share extraction between concurrent model turns. */
 export function ensureCodexExe(exePath: string): Promise<void> {
   const existing = pending.get(exePath)
   if (existing) return existing

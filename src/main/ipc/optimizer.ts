@@ -1,3 +1,6 @@
+import { isModelAvailable } from "../../shared/model-catalog"
+import { getModelClientOptions } from "../models/connection"
+import { assertOriginalContent } from "../services/market-content"
 /**
  * IPC handlers for the Skill Optimizer (offline evolution loop).
  *
@@ -130,11 +133,11 @@ function traceObservabilityFields(trace: AgentTrace): Partial<AgentTrace> {
 
 function getDefaultModel(): ChatOpenAI | null {
   const config = getDefaultModelConfig()
-  if (!config || !config.apiKey) return null
+  if (!isModelAvailable(config)) return null
   return new ChatOpenAI({
     model: config.model,
     apiKey: config.apiKey,
-    configuration: { baseURL: config.baseUrl },
+    ...getModelClientOptions(config),
     maxTokens: config.maxOutputTokens,
     ...samplingFields(config.model, { temperature: config.temperature, topP: config.topP }),
     modelKwargs: {
@@ -175,6 +178,7 @@ function applyCandidate(
 ): { success: boolean; error?: string } {
   try {
     const skillDir = join(getCustomSkillsDir(), skillId)
+    assertOriginalContent(skillDir)
     if (action === "create") {
       const existingSkill = findExistingSkillById(skillId)
       if (existingSkill) {
