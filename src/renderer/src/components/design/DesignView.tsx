@@ -1796,6 +1796,9 @@ export function DesignView({
         if (currentSessionIdRef.current)
           await getDesignSessionClient().setWorkspace(currentSessionIdRef.current, selectedPath)
         setWorkspacePath(selectedPath)
+        if (requirementEntry?.source === "space") {
+          setRequirementEntry({ ...requirementEntry, workspacePath: selectedPath })
+        }
         showToast(`工作目录已切换：${getPathName(selectedPath)}`)
       }
     } catch (err) {
@@ -1803,7 +1806,7 @@ export function DesignView({
     } finally {
       setWorkspaceLoading(false)
     }
-  }, [showToast])
+  }, [requirementEntry, setRequirementEntry, showToast])
 
   // ── Keep refs in sync ────────────────────────────────────
   useEffect(() => {

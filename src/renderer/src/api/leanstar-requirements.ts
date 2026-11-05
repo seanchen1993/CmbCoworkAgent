@@ -1,18 +1,16 @@
 const LEANSTAR_GATEWAY_URL = import.meta.env.VITE_LEANSTAR_REVIEW_GATEWAY_URL?.trim() || ""
-const USE_MOCK = import.meta.env.DEV || import.meta.env.VITE_LEANSTAR_REQUIREMENTS_MOCK === "true"
-
-export type DigitalProduct = {
-  id: string
-  name: string
-}
+// 需求空间 Mock 只服务本地开发，生产构建始终请求真实接口。
+export const USE_LEANSTAR_REQUIREMENTS_MOCK = import.meta.env.DEV
 
 export type ProductRequirement = {
-  id?: string
+  id?: string | number
   code: string
   title: string
   status?: string
   priority?: string
   owner?: string | { id?: string; name?: string }
+  ownerSapId?: string
+  ownerName?: string
   createTime?: string
   updateTime?: string
   updatedAt?: string
@@ -106,15 +104,15 @@ type ApiDocumentContentResponse = {
   body?: RequirementDocumentContent | null
 }
 
+type DeliveryRequirementsResponse = {
+  returnCode?: string
+  errorMsg?: string | null
+  body?: PageResponse<ProductRequirement>
+}
+
 type NamespaceTreeResponse = {
   namespaceTreeList?: NamespaceTreeNode[]
 }
-
-const MOCK_PRODUCTS: DigitalProduct[] = [
-  { id: "dp-wplus", name: "Mock 数字产品 A" },
-  { id: "dp-mobile-bank", name: "Mock 数字产品 B" },
-  { id: "dp-credit", name: "Mock 数字产品 C" }
-]
 
 const MOCK_REQUIREMENTS: Record<string, ProductRequirement[]> = {
   "org-wplus": [
@@ -384,19 +382,11 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 }
 
 export const leanstarRequirementsApi = {
-  listDigitalProducts(): Promise<PageResponse<DigitalProduct>> {
-    if (USE_MOCK) return Promise.resolve({ content: MOCK_PRODUCTS, total: MOCK_PRODUCTS.length })
-    return request<PageResponse<DigitalProduct>>("/api/requirement/digital-products/person/page", {
-      method: "POST",
-      body: JSON.stringify({ pageIndex: 1, pageSize: 50 })
-    })
-  },
-
   listProductRequirements(
     domainId: string,
     domainType: string
   ): Promise<PageResponse<ProductRequirement>> {
-    if (USE_MOCK) {
+    if (USE_LEANSTAR_REQUIREMENTS_MOCK) {
       const content = MOCK_REQUIREMENTS[domainId] ?? []
       return Promise.resolve({ content, total: content.length })
     }
@@ -413,8 +403,31 @@ export const leanstarRequirementsApi = {
     ).then((result) => result.body ?? result)
   },
 
+  listDeliveryRequirements(
+    implementGroupDevopsOrgId: string
+  ): Promise<PageResponse<ProductRequirement>> {
+    if (USE_LEANSTAR_REQUIREMENTS_MOCK) {
+      const content = MOCK_REQUIREMENTS["org-wplus"] ?? []
+      return Promise.resolve({ content, total: content.length })
+    }
+    return request<DeliveryRequirementsResponse>("/api/delivery/requirements", {
+      method: "POST",
+      body: JSON.stringify({
+        implementGroupDevopsOrgId,
+        category: "BY_REQUIREMENT",
+        page: 0,
+        size: 15
+      })
+    }).then((result) => {
+      if (result.returnCode && result.returnCode !== "SUC0000") {
+        throw new Error(result.errorMsg || `查询需求列表失败：${result.returnCode}`)
+      }
+      return result.body ?? { content: [], total: 0 }
+    })
+  },
+
   getImplementationDetail(code: string): Promise<{ subFrs?: ImplementationDetail[] }> {
-    if (USE_MOCK) return Promise.resolve({ subFrs: MOCK_DETAILS[code] ?? [] })
+    if (USE_LEANSTAR_REQUIREMENTS_MOCK) return Promise.resolve({ subFrs: MOCK_DETAILS[code] ?? [] })
     return request<{ subFrs?: ImplementationDetail[] }>(
       `/api/requirement/product-requirements/${encodeURIComponent(code)}/impl-detail`,
       { method: "GET" }
@@ -423,7 +436,8 @@ export const leanstarRequirementsApi = {
 
   // 第三步：需求整体详情
   getRequirementDetail(code: string): Promise<RequirementDetail | null> {
-    if (USE_MOCK) return Promise.resolve(MOCK_REQUIREMENT_DETAIL[code] ?? null)
+    if (USE_LEANSTAR_REQUIREMENTS_MOCK)
+      return Promise.resolve(MOCK_REQUIREMENT_DETAIL[code] ?? null)
     return request<RequirementDetail | ApiDetailResponse>(
       `/api/requirement/product-requirements/${encodeURIComponent(code)}/detail`,
       { method: "GET" }
@@ -436,7 +450,7 @@ export const leanstarRequirementsApi = {
   },
 
   getRequirementDocumentContent(code: string): Promise<RequirementDocumentContent | null> {
-    if (USE_MOCK) {
+    if (USE_LEANSTAR_REQUIREMENTS_MOCK) {
       const detail = MOCK_REQUIREMENT_DETAIL[code]
       return Promise.resolve(
         detail
@@ -455,7 +469,8 @@ export const leanstarRequirementsApi = {
   },
 
   getNamespaceTree(): Promise<NamespaceTreeResponse> {
-    if (USE_MOCK) return Promise.resolve({ namespaceTreeList: MOCK_NAMESPACE_TREE })
+    if (USE_LEANSTAR_REQUIREMENTS_MOCK)
+      return Promise.resolve({ namespaceTreeList: MOCK_NAMESPACE_TREE })
     return request<NamespaceTreeResponse>("/api/leanstar/namespaces/tree", {
       method: "GET"
     })

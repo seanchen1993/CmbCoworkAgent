@@ -38,6 +38,8 @@ import {
 } from "./requirement-data"
 import { isRequirementMine } from "./requirement-history-filter"
 import { RequirementStatusTags } from "./RequirementStatusTags"
+import { RequirementListLoading } from "./RequirementListLoading"
+import { findRequirementDesignEntry } from "@/lib/requirement-design-entry"
 
 const PAGE_SIZE = 15
 export type RequirementSourceFilter = "all" | "local" | "remote" | "space"
@@ -138,6 +140,17 @@ function sourceTagClass(origin: RequirementRecord["origin"]): string {
   return "bg-[#edf1ff] text-[#5570f6] dark:bg-[#5570f6]/16 dark:text-[#9eafff]"
 }
 
+function requirementSpaceStatusClass(status: string): string {
+  if (status === "审批通过")
+    return "bg-emerald-100 text-emerald-700 dark:bg-emerald-500/20 dark:text-emerald-300"
+  if (status === "审批中")
+    return "bg-amber-100 text-amber-700 dark:bg-amber-500/20 dark:text-amber-300"
+  if (status === "开发中") return "bg-blue-100 text-blue-700 dark:bg-blue-500/20 dark:text-blue-300"
+  if (status === "实施中")
+    return "bg-violet-100 text-violet-700 dark:bg-violet-500/20 dark:text-violet-300"
+  return "bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300"
+}
+
 function RequirementAvatars({ users }: { users: RequirementUser[] }): React.JSX.Element {
   const [open, setOpen] = useState(false)
   const closeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -222,18 +235,22 @@ export function RequirementHistoryList({
   currentUser,
   query,
   sourceFilter,
+  loading,
   mineOnly,
   systemId,
   onOpen,
+  onDesign,
   onDelete
 }: {
   requirements: RequirementRecord[]
   currentUser: RequirementUser | null
   query: string
   sourceFilter: RequirementSourceFilter
+  loading: boolean
   mineOnly: boolean
   systemId: string | null
   onOpen: (requirement: RequirementRecord) => void
+  onDesign: (requirement: RequirementRecord) => Promise<void>
   onDelete: (requirement: RequirementRecord) => Promise<void>
 }): React.JSX.Element {
   const filterKey = `${systemId ?? "all"}\u0000${sourceFilter}\u0000${mineOnly}\u0000${query}`
@@ -291,11 +308,15 @@ export function RequirementHistoryList({
     <>
       <section className="flex h-full min-h-0 flex-1 flex-col overflow-hidden">
         <div className="min-h-0 flex-1 overflow-y-auto pr-1">
-          {pageItems.length ? (
+          {loading ? (
+            <RequirementListLoading label="正在加载需求空间3.0列表" />
+          ) : pageItems.length ? (
             <div className="grid grid-cols-1 gap-3 lg:grid-cols-2 xl:grid-cols-3">
               {pageItems.map((item) => {
                 const generated = isRequirementGenerated(item) || isRequirementPublished(item)
                 const owner = item.owner ?? (item.origin === "local" ? currentUser : null)
+                const spaceDesign =
+                  item.origin === "space" ? findRequirementDesignEntry(item.id) : null
                 const collaborators = item.collaborators ?? []
                 const description =
                   item.prdManifest.prd.description ||
@@ -358,73 +379,51 @@ export function RequirementHistoryList({
                         </span>
                       ) : null}
                     </div>
-                    <DropdownMenu>
-                      <DropdownMenuTrigger asChild>
-                        <button
-                          type="button"
-                          className="absolute right-3 top-3 flex size-7 items-center justify-center rounded-md text-muted-foreground outline-none transition-colors hover:bg-background-interactive hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
-                          aria-label={`${item.title} 更多操作`}
-                        >
-                          <EllipsisVertical className="size-4" />
-                        </button>
-                      </DropdownMenuTrigger>
-                      <DropdownMenuContent align="end">
-                        <Tooltip>
-                          <TooltipTrigger asChild>
-                            <DropdownMenuItem
-                              aria-disabled
-                              onSelect={(event) => event.preventDefault()}
-                              className="text-muted-foreground opacity-60"
-                            >
-                              <Share2 />
-                              分享
-                            </DropdownMenuItem>
-                          </TooltipTrigger>
-                          <TooltipContent side="left">
-                            {generated ? "分享功能敬请期待" : "生成规范 PRD 后才能分享"}
-                          </TooltipContent>
-                        </Tooltip>
-                        <DropdownMenuSeparator />
-                        <DropdownMenuItem
-                          variant="destructive"
-                          disabled={item.readOnly}
-                          onSelect={() => setToDelete(item)}
-                        >
-                          <Trash2 />
-                          删除
-                        </DropdownMenuItem>
-                      </DropdownMenuContent>
-                    </DropdownMenu>
+                    {item.origin !== "space" ? (
+                      <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                          <button
+                            type="button"
+                            className="absolute right-3 top-3 flex size-7 items-center justify-center rounded-md text-muted-foreground outline-none transition-colors hover:bg-background-interactive hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
+                            aria-label={`${item.title} 更多操作`}
+                          >
+                            <EllipsisVertical className="size-4" />
+                          </button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent align="end">
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <DropdownMenuItem
+                                aria-disabled
+                                onSelect={(event) => event.preventDefault()}
+                                className="text-muted-foreground opacity-60"
+                              >
+                                <Share2 />
+                                分享
+                              </DropdownMenuItem>
+                            </TooltipTrigger>
+                            <TooltipContent side="left">
+                              {generated ? "分享功能敬请期待" : "生成规范 PRD 后才能分享"}
+                            </TooltipContent>
+                          </Tooltip>
+                          <DropdownMenuSeparator />
+                          <DropdownMenuItem
+                            variant="destructive"
+                            disabled={item.readOnly}
+                            onSelect={() => setToDelete(item)}
+                          >
+                            <Trash2 />
+                            删除
+                          </DropdownMenuItem>
+                        </DropdownMenuContent>
+                      </DropdownMenu>
+                    ) : null}
                     <p
                       className="mt-2 line-clamp-1 text-xs leading-5 text-muted-foreground"
                       title={description}
                     >
                       {description}
                     </p>
-                    {item.origin === "space" ? (
-                      <div className="mt-2 flex items-center gap-1.5">
-                        <Button
-                          type="button"
-                          variant="outline"
-                          size="sm"
-                          className="h-7 gap-1 px-2 text-[11px]"
-                          onClick={(event) => event.stopPropagation()}
-                        >
-                          <PenTool className="size-3" />
-                          去设计
-                        </Button>
-                        <Button
-                          type="button"
-                          variant="outline"
-                          size="sm"
-                          className="h-7 gap-1 px-2 text-[11px]"
-                          onClick={(event) => event.stopPropagation()}
-                        >
-                          <Code2 className="size-3" />
-                          去开发
-                        </Button>
-                      </div>
-                    ) : null}
                     <div className="mt-auto pt-1">
                       <div className="flex min-w-0 items-center gap-2 text-[11px] text-muted-foreground">
                         <Avatar className="size-6">
@@ -457,7 +456,31 @@ export function RequirementHistoryList({
                       </div>
                       <div className="mt-2 flex min-h-7 items-end justify-between gap-3">
                         {item.origin === "space" ? (
-                          <span />
+                          <div className="flex items-center gap-1.5">
+                            <Button
+                              type="button"
+                              variant="outline"
+                              size="sm"
+                              className="h-7 gap-1 px-2 text-[11px]"
+                              onClick={(event) => {
+                                event.stopPropagation()
+                                void onDesign(item)
+                              }}
+                            >
+                              <PenTool className="size-3" />
+                              {spaceDesign?.htmlId ? "继续设计" : "去设计"}
+                            </Button>
+                            <Button
+                              type="button"
+                              variant="outline"
+                              size="sm"
+                              className="h-7 gap-1 px-2 text-[11px]"
+                              onClick={(event) => event.stopPropagation()}
+                            >
+                              <Code2 className="size-3" />
+                              去开发
+                            </Button>
+                          </div>
                         ) : (
                           <RequirementStatusTags
                             standardized={isRequirementGenerated(item)}
@@ -470,7 +493,16 @@ export function RequirementHistoryList({
                             published={isRequirementPublished(item)}
                           />
                         )}
-                        {collaborators.length ? (
+                        {item.origin === "space" && item.status ? (
+                          <span
+                            className={cn(
+                              "shrink-0 rounded-md px-2 py-1 text-[10px] font-semibold",
+                              requirementSpaceStatusClass(item.status)
+                            )}
+                          >
+                            {item.status}
+                          </span>
+                        ) : collaborators.length ? (
                           <RequirementAvatars users={collaborators} />
                         ) : (
                           <span />
@@ -525,7 +557,7 @@ export function RequirementHistoryList({
             <ChevronRight className="size-4" />
           </button>
           <span className="ml-1 rounded-lg border border-border bg-background-elevated px-3 py-2">
-            10 条/页
+            15 条/页
           </span>
         </div>
       </section>

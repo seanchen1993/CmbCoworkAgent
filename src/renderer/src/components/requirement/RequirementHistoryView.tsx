@@ -20,17 +20,21 @@ export function RequirementHistoryView({
   requirements,
   currentUser,
   sourceFilter,
+  requirementSpaceLoading,
   onSourceFilterChange,
   onNew,
   onOpenRequirement,
+  onDesignRequirement,
   onDeleteRequirement
 }: {
   requirements: RequirementRecord[]
   currentUser: RequirementUser | null
   sourceFilter: RequirementSourceFilter
+  requirementSpaceLoading: boolean
   onSourceFilterChange: (filter: RequirementSourceFilter) => void
   onNew: () => void
   onOpenRequirement: (requirement: RequirementRecord) => void
+  onDesignRequirement: (requirement: RequirementRecord) => Promise<void>
   onDeleteRequirement: (requirement: RequirementRecord) => Promise<void>
 }): React.JSX.Element {
   const [searchInput, setSearchInput] = useState("")
@@ -182,9 +186,11 @@ export function RequirementHistoryView({
                 currentUser={currentUser}
                 query={deferredQuery}
                 sourceFilter={sourceFilter}
+                loading={sourceFilter === "space" && requirementSpaceLoading}
                 mineOnly={mineOnly}
                 systemId={selectedSystemId}
                 onOpen={onOpenRequirement}
+                onDesign={onDesignRequirement}
                 onDelete={onDeleteRequirement}
               />
             </div>

@@ -6,14 +6,16 @@ export const REQUIREMENT_CONVERSATION_ENTRY_KEY = "pending-requirement-conversat
 export const REQUIREMENT_CONVERSATION_NAVIGATE_EVENT = "requirement-conversation:navigate"
 
 export type RequirementDesignEntry = {
+  source?: "local" | "space"
   scope?: "function" | "full-prd"
   requirementId: string
   requirementName?: string
   functionName?: string
-  workspacePath: string
+  workspacePath?: string
   previewThreadId?: string
   requirementOverviewFilePath?: string
   requirementFilePath: string
+  requirementContent?: string
   designSystemId?: string
   prompt: string
   htmlId: string
@@ -60,6 +62,15 @@ export function buildFullPrdDesignPrompt(requirementFile: string): string {
   ].join("\n")
 }
 
+export function buildSpaceRequirementDesignPrompt(requirementName: string): string {
+  const target = requirementName.trim() || "当前需求"
+  return [
+    `请根据已附加的需求文档，为「${target}」生成高保真交互原型。`,
+    "",
+    "需求文档是业务范围、流程和规则的唯一依据。请覆盖核心用户流程、关键页面以及必要的空状态和异常状态，输出可独立运行、主要流程可交互的单页 HTML。不要只输出说明或代码片段，必须生成完整原型文件。"
+  ].join("\n")
+}
+
 export function openRequirementDesign(entry: RequirementDesignEntry): void {
   localStorage.setItem(REQUIREMENT_DESIGN_ENTRY_KEY, JSON.stringify(entry))
   window.dispatchEvent(new Event(REQUIREMENT_DESIGN_NAVIGATE_EVENT))
@@ -87,8 +98,11 @@ export function storeActiveRequirementDesignEntry(
   const associationId = entry ? entry.htmlId : sessionId
   if (!associationId) return
   const associations = readRequirementDesignAssociations(storage)
-  if (entry) associations[associationId] = entry
-  else delete associations[associationId]
+  if (entry) {
+    const persistedEntry = { ...entry }
+    delete persistedEntry.requirementContent
+    associations[associationId] = persistedEntry
+  } else delete associations[associationId]
   if (Object.keys(associations).length > 0) {
     storage.setItem(REQUIREMENT_DESIGN_ASSOCIATIONS_KEY, JSON.stringify(associations))
   } else {
@@ -102,7 +116,11 @@ export function storeRequirementDesignEntries(
 ): void {
   const associations = readRequirementDesignAssociations(storage)
   for (const entry of entries) {
-    if (entry.htmlId) associations[entry.htmlId] = entry
+    if (entry.htmlId) {
+      const persistedEntry = { ...entry }
+      delete persistedEntry.requirementContent
+      associations[entry.htmlId] = persistedEntry
+    }
   }
   if (Object.keys(associations).length > 0) {
     storage.setItem(REQUIREMENT_DESIGN_ASSOCIATIONS_KEY, JSON.stringify(associations))
@@ -161,6 +179,16 @@ export function listAllRequirementDesignEntries(
   )
 }
 
+export function findRequirementDesignEntry(
+  requirementId: string,
+  storage: RequirementEntryStorage = localStorage
+): RequirementDesignEntry | null {
+  const matches = Object.values(readRequirementDesignAssociations(storage)).filter(
+    (entry) => entry.requirementId === requirementId
+  )
+  return matches.at(-1) ?? null
+}
+
 function readRequirementDesignAssociations(
   storage: RequirementEntryStorage
 ): Record<string, RequirementDesignEntry> {
@@ -173,7 +201,7 @@ function readRequirementDesignAssociations(
       if (
         entry?.htmlId === id &&
         entry.requirementId &&
-        entry.workspacePath &&
+        (entry.source === "space" || entry.workspacePath) &&
         entry.requirementFilePath
       ) {
         valid[id] = entry

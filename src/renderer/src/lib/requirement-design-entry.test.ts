@@ -4,6 +4,8 @@ import {
   REQUIREMENT_DESIGN_ASSOCIATIONS_KEY,
   buildRequirementDesignPrompt,
   buildFullPrdDesignPrompt,
+  buildSpaceRequirementDesignPrompt,
+  findRequirementDesignEntry,
   listRequirementDesignEntries,
   loadActiveRequirementDesignEntry,
   isRequirementPrototypeStepComplete,
@@ -88,6 +90,28 @@ describe("active requirement design entry", () => {
     expect(loadActiveRequirementDesignEntry(second.htmlId, storage)).toEqual(second)
   })
 
+  it("stores a requirement-space association without persisting document content", () => {
+    const spaceEntry: RequirementDesignEntry = {
+      source: "space",
+      requirementId: "space:org:REQ-1",
+      requirementName: "远端需求",
+      requirementFilePath: "space://REQ-1",
+      requirementContent: "完整需求正文",
+      prompt: "生成原型",
+      htmlId: "design-space-1"
+    }
+
+    storeActiveRequirementDesignEntry(spaceEntry, spaceEntry.htmlId, storage)
+
+    const restored = findRequirementDesignEntry(spaceEntry.requirementId, storage)
+    expect(restored).toMatchObject({
+      requirementId: spaceEntry.requirementId,
+      htmlId: spaceEntry.htmlId
+    })
+    expect(restored?.requirementContent).toBeUndefined()
+    expect(storage.getItem(REQUIREMENT_DESIGN_ASSOCIATIONS_KEY)).not.toContain("完整需求正文")
+  })
+
   it("removes successful session mappings while preserving failed ones for retry", async () => {
     const failed = { ...entry, htmlId: "design-session-failed" }
     storeRequirementDesignEntries([entry, failed], storage)
@@ -133,6 +157,14 @@ describe("requirement design prompt", () => {
     expect(prompt).toContain("完整 PRD 文档「prd/product.md」")
     expect(prompt).toContain("整个产品")
     expect(prompt).toContain("信息架构")
+  })
+
+  it("builds a prototype prompt for a requirement-space document attachment", () => {
+    const prompt = buildSpaceRequirementDesignPrompt("资金结算")
+
+    expect(prompt).toContain("为「资金结算」生成高保真交互原型")
+    expect(prompt).toContain("需求文档是业务范围、流程和规则的唯一依据")
+    expect(prompt).toContain("完整原型文件")
   })
 })
 

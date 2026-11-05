@@ -112,16 +112,25 @@ export function RequirementDesignContextBar({
 
       await window.api.design.storeHtml(artifactId, html)
       await getDesignSessionClient().patch(htmlId, { artifactPath: htmlFile })
-      const synced = await window.api.requirements.updateFunctionHtml({
-        reqId: entry.requirementId,
-        workspacePath: entry.workspacePath,
-        requirementFilePath: entry.requirementFilePath,
-        htmlFile,
+      const sessionWorkspacePath = getDesignSessionClient().get(htmlId)?.workspacePath || undefined
+      if (entry.source !== "space") {
+        const synced = await window.api.requirements.updateFunctionHtml({
+          reqId: entry.requirementId,
+          workspacePath: entry.workspacePath!,
+          requirementFilePath: entry.requirementFilePath,
+          htmlFile,
+          htmlId,
+          fullPrd: entry.scope === "full-prd"
+        })
+        if (!synced.success) throw new Error(synced.error || "同步需求数据失败")
+      }
+      onEntryChange({
+        ...entry,
+        workspacePath: sessionWorkspacePath ?? entry.workspacePath,
         htmlId,
-        fullPrd: entry.scope === "full-prd"
+        htmlFile,
+        bindingReady: true
       })
-      if (!synced.success) throw new Error(synced.error || "同步需求数据失败")
-      onEntryChange({ ...entry, htmlId, htmlFile, bindingReady: true })
       showToast(entry.scope === "full-prd" ? "整个需求原型已保存" : "功能原型已保存")
     } catch (error) {
       showToast(error instanceof Error ? error.message : "保存需求设计失败")

@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react"
-import { ClipboardList } from "lucide-react"
 import { toast } from "sonner"
 import { LeanstarTokenDialog } from "./LeanstarTokenDialog"
 import { NewRequirementDialog } from "./NewRequirementDialog"
 import { RequirementConversationView } from "./RequirementConversationView"
 import { RequirementHistoryView } from "./RequirementHistoryView"
+import { RequirementListLoading } from "./RequirementListLoading"
 import type { RequirementSourceFilter } from "./RequirementHistoryList"
 import { RequirementSpaceDetailView } from "./RequirementSpaceDetailView"
 import { SystemSelectionDialog } from "./SystemSelectionDialog"
@@ -22,10 +22,15 @@ import {
 import { getSelectedRequirementSystem, useRequirementStore } from "./requirement-store"
 import type { DesignSystemInfo } from "../design/types"
 import { useAppStore } from "@/lib/store"
-import { REQUIREMENT_CONVERSATION_ENTRY_KEY } from "@/lib/requirement-design-entry"
 import {
+  REQUIREMENT_CONVERSATION_ENTRY_KEY,
+  buildSpaceRequirementDesignPrompt,
+  findRequirementDesignEntry,
+  openRequirementDesign
+} from "@/lib/requirement-design-entry"
+import {
+  USE_LEANSTAR_REQUIREMENTS_MOCK,
   leanstarRequirementsApi,
-  type NamespaceTreeNode,
   type ProductRequirement
 } from "@/api/leanstar-requirements"
 
@@ -33,23 +38,41 @@ type EntryScreen = "history" | "system" | "conversation" | "space-detail"
 
 type CurrentRequirementUser = { id: string; name: string }
 
-function findRequirementSpaceNamespace(
-  nodes: NamespaceTreeNode[],
-  pathName: string
-): NamespaceTreeNode | null {
-  for (const node of nodes) {
-    if (node.pathName.trim() === pathName && node.accessible !== false) return node
-    const match = findRequirementSpaceNamespace(node.children ?? [], pathName)
-    if (match) return match
-  }
-  return null
+const REQUIREMENT_SPACE_STATUS_LABELS: Record<string, string> = {
+  CREATED: "已创建",
+  IN_ANALYSIS: "分析中",
+  TO_BE_SUPPLEMENTED: "待补充",
+  TO_BE_REVIEWED: "待评审",
+  IN_REVIEW: "评审中",
+  REVIEWED: "评审通过",
+  TO_BE_CHECKED: "待送审",
+  CHECKING: "审批中",
+  CHECKED_FAILURE: "审批不通过",
+  CHECKED_SUCCESS: "审批通过",
+  PROJECT_INITIATING: "立项中",
+  PROJECT_REJECTED: "立项不通过",
+  IN_OPERATION: "实施中",
+  ABANDONED: "已删除",
+  ARCHIVED: "已归档",
+  PARTIALLY_RELEASED: "部分上线",
+  RELEASED: "已交付",
+  COMPLETED: "已完成",
+  UNKNOWN: "未知",
+  // 兼容旧接口曾返回的状态值。
+  DEVELOPING: "开发中",
+  CHECKING_SUCCESS: "审批通过"
 }
 
 function fromRequirementSpaceItem(
   item: ProductRequirement,
-  namespace: NamespaceTreeNode
+  implementGroupDevopsOrgId: string,
+  organizationName: string
 ): RequirementRecord {
-  const owner = typeof item.owner === "string" ? { id: item.owner, name: item.owner } : item.owner
+  const owner = item.ownerName
+    ? { id: item.ownerSapId || item.ownerName, name: item.ownerName }
+    : typeof item.owner === "string"
+      ? { id: item.owner, name: item.owner }
+      : item.owner
   const sourceTime = item.updateTime || item.updatedAt || item.createTime || ""
   const parsedTime = sourceTime ? new Date(sourceTime) : null
   const hasValidTime = parsedTime !== null && Number.isFinite(parsedTime.getTime())
@@ -57,9 +80,9 @@ function fromRequirementSpaceItem(
     ? parsedTime.toLocaleString("zh-CN", { hour12: false })
     : sourceTime
   return {
-    id: `space:${namespace.devopsOrgId}:${item.code}`,
+    id: `space:${implementGroupDevopsOrgId}:${item.code}`,
     threadIds: [],
-    systemId: `space:${namespace.devopsOrgId}`,
+    systemId: `space:${implementGroupDevopsOrgId}`,
     title: item.title,
     requirementPath: "",
     workspaceMissing: false,
@@ -67,8 +90,8 @@ function fromRequirementSpaceItem(
     coreFilesMissingReason: null,
     updatedAt: displayTime,
     updatedAtTimestamp: hasValidTime ? parsedTime.getTime() : 0,
-    system: namespace.pathName.split("/").filter(Boolean).at(-1) || namespace.pathName,
-    status: "",
+    system: organizationName || "需求空间3.0",
+    status: REQUIREMENT_SPACE_STATUS_LABELS[item.status || ""] || item.status || "",
     fileName: "",
     link: "",
     sourceType: "link",
@@ -112,13 +135,15 @@ export function RequirementEntryView({
   const [autoGeneratePrd, setAutoGeneratePrd] = useState(false)
   const [requirements, setRequirements] = useState<RequirementRecord[]>([])
   const [requirementsLoaded, setRequirementsLoaded] = useState(false)
+  const [requirementSpaceLoading, setRequirementSpaceLoading] = useState(false)
   const [sourceFilter, setSourceFilter] = useState<RequirementSourceFilter>("local")
   const [tokenDialogOpen, setTokenDialogOpen] = useState(false)
   const [tokenDraft, setTokenDraft] = useState("")
   const [tokenSaving, setTokenSaving] = useState(false)
   const [requirementSpaceRetryToken, setRequirementSpaceRetryToken] = useState(0)
   const [currentUser, setCurrentUser] = useState<CurrentRequirementUser | null>(null)
-  const [currentUserPathName, setCurrentUserPathName] = useState("")
+  const [currentUserOriginOrgId, setCurrentUserOriginOrgId] = useState("")
+  const [currentUserOrgName, setCurrentUserOrgName] = useState("")
   const requirementSpaceLoadedRef = useRef(false)
   const [systemDialogOpen, setSystemDialogOpen] = useState(false)
   const [requirementDialogOpen, setRequirementDialogOpen] = useState(false)
@@ -179,7 +204,8 @@ export function RequirementEntryView({
         id: userInfo.sapId?.trim() || userInfo.ystId?.trim() || "current-user",
         name: userInfo.userName?.trim() || userInfo.sapId?.trim() || "当前用户"
       })
-      setCurrentUserPathName(userInfo.pathName?.trim() || "")
+      setCurrentUserOriginOrgId(userInfo.originOrgId?.trim() || "")
+      setCurrentUserOrgName(userInfo.orgName?.trim() || "")
     })
   }, [])
 
@@ -226,21 +252,21 @@ export function RequirementEntryView({
     )
       return
     requirementSpaceLoadedRef.current = true
+    const implementGroupDevopsOrgId = USE_LEANSTAR_REQUIREMENTS_MOCK
+      ? currentUserOriginOrgId || "mock-origin-org"
+      : currentUserOriginOrgId
+    if (!implementGroupDevopsOrgId) {
+      requirementSpaceLoadedRef.current = false
+      return
+    }
+    setRequirementSpaceLoading(true)
     void leanstarRequirementsApi
-      .getNamespaceTree()
-      .then(async ({ namespaceTreeList = [] }) => {
-        if (!currentUserPathName) {
-          requirementSpaceLoadedRef.current = false
-          return []
-        }
-        const namespace = findRequirementSpaceNamespace(namespaceTreeList, currentUserPathName)
-        if (!namespace) return []
-        const page = await leanstarRequirementsApi.listProductRequirements(
-          namespace.devopsOrgId,
-          namespace.namespaceType ?? ""
+      .listDeliveryRequirements(implementGroupDevopsOrgId)
+      .then((page) =>
+        (page.content ?? []).map((item) =>
+          fromRequirementSpaceItem(item, implementGroupDevopsOrgId, currentUserOrgName)
         )
-        return (page.content ?? []).map((item) => fromRequirementSpaceItem(item, namespace))
-      })
+      )
       .then((spaceRequirements) => {
         setRequirements((current) => [
           ...current.filter((item) => item.origin !== "space"),
@@ -256,7 +282,15 @@ export function RequirementEntryView({
         }
         console.warn("加载需求空间3.0列表失败", error)
       })
-  }, [currentUserPathName, requirementSpaceRetryToken, requirementsLoaded, screen, sourceFilter])
+      .finally(() => setRequirementSpaceLoading(false))
+  }, [
+    currentUserOrgName,
+    currentUserOriginOrgId,
+    requirementSpaceRetryToken,
+    requirementsLoaded,
+    screen,
+    sourceFilter
+  ])
 
   const saveLeanstarTokenAndRetry = async (): Promise<void> => {
     const token = tokenDraft.trim()
@@ -373,6 +407,39 @@ export function RequirementEntryView({
     }
   }
 
+  const designSpaceRequirement = useCallback(
+    async (requirement: RequirementRecord, suppliedContent?: string): Promise<void> => {
+      try {
+        const content =
+          suppliedContent?.trim() ||
+          (
+            await leanstarRequirementsApi.getRequirementDocumentContent(
+              requirement.sourceName.trim()
+            )
+          )?.documentTextContent?.trim() ||
+          ""
+        if (!content) throw new Error("需求文档内容为空，无法开始设计")
+        const existing = findRequirementDesignEntry(requirement.id)
+        openRequirementDesign({
+          source: "space",
+          scope: "full-prd",
+          requirementId: requirement.id,
+          requirementName: requirement.title,
+          functionName: requirement.title,
+          workspacePath: existing?.workspacePath,
+          requirementFilePath: `space://${requirement.sourceName.trim()}`,
+          requirementContent: content,
+          prompt: buildSpaceRequirementDesignPrompt(requirement.title),
+          htmlId: existing?.htmlId ?? "",
+          htmlFile: existing?.htmlFile
+        })
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : "打开需求设计失败")
+      }
+    },
+    []
+  )
+
   const deleteRequirement = async (requirement: RequirementRecord): Promise<void> => {
     const deletedRequirementIndex = requirements.findIndex((item) => item.id === requirement.id)
     const remainingRequirements = requirements.filter((item) => item.id !== requirement.id)
@@ -410,41 +477,7 @@ export function RequirementEntryView({
   }
 
   if (!requirementsLoaded) {
-    return (
-      <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-8 bg-gradient-to-b from-background to-muted/30 px-6 py-10">
-        <div className="flex flex-col items-center gap-4">
-          <div className="relative flex size-16 items-center justify-center">
-            <div className="absolute inset-0 animate-ping rounded-2xl bg-primary/15" />
-            <div className="absolute inset-1 rounded-2xl bg-primary/8" />
-            <div className="relative flex size-16 items-center justify-center rounded-2xl bg-primary/8 ring-1 ring-primary/15">
-              <ClipboardList className="size-7 text-primary/70" strokeWidth={1.8} />
-            </div>
-          </div>
-          <div className="flex flex-col items-center gap-2">
-            <p className="text-sm font-medium text-foreground/80">正在加载需求列表</p>
-            <div className="flex items-center gap-1.5">
-              <span className="size-1.5 rounded-full bg-primary/50 animate-bounce [animation-delay:-0.3s]" />
-              <span className="size-1.5 rounded-full bg-primary/50 animate-bounce [animation-delay:-0.15s]" />
-              <span className="size-1.5 rounded-full bg-primary/50 animate-bounce" />
-            </div>
-          </div>
-        </div>
-        <div className="flex w-full max-w-md flex-col gap-2">
-          {[0, 1, 2, 3].map((i) => (
-            <div
-              key={i}
-              className="flex items-center gap-3 rounded-lg border border-border/60 bg-card/50 px-3 py-3"
-              style={{ animationDelay: `${i * 80}ms` }}
-            >
-              <div className="size-2 shrink-0 rounded-full bg-muted animate-pulse" />
-              <div className="h-2.5 w-20 shrink-0 rounded bg-muted animate-pulse" />
-              <div className="h-2.5 flex-1 rounded bg-muted animate-pulse" />
-              <div className="h-2.5 w-12 shrink-0 rounded bg-muted animate-pulse" />
-            </div>
-          ))}
-        </div>
-      </div>
-    )
+    return <RequirementListLoading />
   }
 
   return (
@@ -454,9 +487,11 @@ export function RequirementEntryView({
           requirements={requirements}
           currentUser={currentUser}
           sourceFilter={sourceFilter}
+          requirementSpaceLoading={requirementSpaceLoading}
           onSourceFilterChange={setSourceFilter}
           onNew={startNewRequirement}
           onOpenRequirement={openRequirement}
+          onDesignRequirement={designSpaceRequirement}
           onDeleteRequirement={deleteRequirement}
         />
       )}
@@ -478,6 +513,7 @@ export function RequirementEntryView({
       {screen === "space-detail" && selectedRequirement && (
         <RequirementSpaceDetailView
           requirement={selectedRequirement}
+          onDesignRequirement={designSpaceRequirement}
           onBack={() => setScreen("history")}
         />
       )}

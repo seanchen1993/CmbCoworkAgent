@@ -43,6 +43,20 @@ async function readRequirementAttachment(filePath: string): Promise<FileAttachme
   }
 }
 
+function createSpaceRequirementAttachment(entry: RequirementDesignEntry): FileAttachment {
+  const content = entry.requirementContent?.trim() || ""
+  if (!content) throw new Error("需求文档内容为空，无法开始设计")
+  const clipped = content.slice(0, REQUIREMENT_ATTACHMENT_MAX_CHARS)
+  return {
+    filename: `${entry.requirementName?.trim() || "需求"}-需求文档.md`,
+    filePath: entry.requirementFilePath,
+    content: clipped,
+    mimeType: "text/markdown",
+    size: new TextEncoder().encode(content).byteLength,
+    truncated: content.length > REQUIREMENT_ATTACHMENT_MAX_CHARS
+  }
+}
+
 export function useRequirementDesignEntry({
   sessionReady,
   createSession,
@@ -72,14 +86,17 @@ export function useRequirementDesignEntry({
         if (
           entries.length === 0 ||
           entries.some(
-            (entry) => !entry.requirementId || !entry.workspacePath || !entry.requirementFilePath
+            (entry) =>
+              !entry.requirementId ||
+              !entry.requirementFilePath ||
+              (entry.source !== "space" && !entry.workspacePath)
           )
         ) {
           throw new Error("需求设计入口无效")
         }
         const firstEntry = entries[0]
         onEntryChange({ ...firstEntry, bindingReady: false })
-        setWorkspacePath(firstEntry.workspacePath)
+        if (firstEntry.workspacePath) setWorkspacePath(firstEntry.workspacePath)
         const client = getDesignSessionClient()
         for (const entry of entries) {
           let readyEntry: ActiveRequirementDesignEntry
@@ -95,28 +112,37 @@ export function useRequirementDesignEntry({
             }
           }
           if (!reuseExisting) {
-            const requirementAttachment = await readRequirementAttachment(entry.requirementFilePath)
+            const requirementAttachment =
+              entry.source === "space"
+                ? createSpaceRequirementAttachment(entry)
+                : await readRequirementAttachment(entry.requirementFilePath)
             const sessionId = createSession(
               { title: entry.functionName?.trim() || "需求原型" },
               {
                 designSystemId: entry.designSystemId ?? null,
                 initialInputValue: entry.prompt,
                 initialAttachedFiles: [requirementAttachment],
-                workspacePath: entry.workspacePath
+                // 空字符串用于阻止 DesignView 回退到其他会话或全局工作区。
+                workspacePath: entry.workspacePath || ""
               }
             )
             await client.waitUntilReady(sessionId)
-            const updated = await window.api.requirements.updateFunctionHtml({
-              reqId: entry.requirementId,
-              workspacePath: entry.workspacePath,
-              requirementFilePath: entry.requirementFilePath,
-              htmlId: sessionId,
-              fullPrd: entry.scope === "full-prd"
-            })
-            if (!updated.success) throw new Error(updated.error || "同步设计会话失败")
             readyEntry = { ...entry, htmlId: sessionId, bindingReady: true }
+            if (entry.source !== "space") {
+              const updated = await window.api.requirements.updateFunctionHtml({
+                reqId: entry.requirementId,
+                workspacePath: entry.workspacePath!,
+                requirementFilePath: entry.requirementFilePath,
+                htmlId: sessionId,
+                fullPrd: entry.scope === "full-prd"
+              })
+              if (!updated.success) throw new Error(updated.error || "同步设计会话失败")
+            }
           } else {
-            if (client.get(entry.htmlId)?.workspacePath !== entry.workspacePath) {
+            if (
+              entry.workspacePath &&
+              client.get(entry.htmlId)?.workspacePath !== entry.workspacePath
+            ) {
               await client.setWorkspace(entry.htmlId, entry.workspacePath)
             }
             // 继续已有设计时保留用户当前的草稿状态。需求附件只在首次创建会话时注入；
