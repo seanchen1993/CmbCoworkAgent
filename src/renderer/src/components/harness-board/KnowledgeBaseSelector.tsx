@@ -137,12 +137,23 @@ export function KnowledgeBaseSelector({
                 <span className="min-w-0 truncate">{formatKnowledgeBaseLabel(item)}</span>
               </button>
             ))}
-            {selectable.length === 0 && (
-              <div role="status" className="px-3 py-6 text-center text-sm text-muted-foreground">
-                暂无可用知识库
-              </div>
-            )}
           </div>
+          {selectable.length === 0 && (
+            <div role="status" className="px-3 py-6 text-center">
+              <Button
+                type="button"
+                variant="link"
+                className="h-auto whitespace-normal p-0 text-sm"
+                disabled={disabled}
+                onClick={() => {
+                  setOpen(false)
+                  onOpenSystemConstraints()
+                }}
+              >
+                暂无可用系统约束，请联系你所在组织的管理员。
+              </Button>
+            </div>
+          )}
           <div className="border-t p-1">
             <Button
               type="button"

@@ -33,8 +33,8 @@ import {
   validateKnowledgeRepositorySource
 } from "./knowledge-repository"
 
-const BACKGROUND_REFRESH_DELAY_MS = 10 * 60 * 1_000
-const MIN_REFRESH_INTERVAL_MS = 75 * 60 * 1_000
+const BACKGROUND_REFRESH_DELAY_MS = 30 * 60 * 1_000
+const MIN_REFRESH_INTERVAL_MS = 225 * 60 * 1_000
 const REFRESH_INTERVAL_JITTER_MS = 30 * 60 * 1_000
 const QUERY_PATH = "/devclaw/knowledge-config/query"
 const QUERY_TIMEOUT_MS = 5_000
@@ -106,7 +106,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value)
 }
 
-function errorMessage(error: unknown, item?: KnowledgeBaseStateItem): string {
+function errorMessage(
+  error: unknown,
+  item?: Pick<KnowledgeBaseStateItem, "repoUrl" | "sshUrl">
+): string {
   let message =
     error instanceof AggregateError
       ? errorMessage(error.errors[0], item)
@@ -121,6 +124,7 @@ function errorMessage(error: unknown, item?: KnowledgeBaseStateItem): string {
 }
 
 async function queryCloudKnowledgeBases(): Promise<ReturnType<typeof parseCloudKnowledgeItems>> {
+  const startedAt = Date.now()
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), QUERY_TIMEOUT_MS)
   try {
@@ -159,7 +163,9 @@ async function queryCloudKnowledgeBases(): Promise<ReturnType<typeof parseCloudK
       }
     } else {
       const user = getUserInfo()
-      const response = await fetch(`${apiBaseUrl()}${QUERY_PATH}`, {
+      const url = `${apiBaseUrl()}${QUERY_PATH}`
+      console.log("[knowledge_manage] 开始查询知识库配置", { url })
+      const response = await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json", Accept: "application/json" },
         body: JSON.stringify({
@@ -169,27 +175,24 @@ async function queryCloudKnowledgeBases(): Promise<ReturnType<typeof parseCloudK
         }),
         signal: controller.signal
       })
+      console.log("[knowledge_manage] 收到知识库配置响应", {
+        status: response.status,
+        elapsedMs: Date.now() - startedAt
+      })
       if (response.status !== 200) throw new Error(`知识库配置查询失败：HTTP ${response.status}`)
       body = (await response.json()) as unknown
     }
+    clearTimeout(timeout)
     if (!isRecord(body) || body.code !== 200 || !isRecord(body.data)) {
       const message =
         isRecord(body) && typeof body.message === "string" ? body.message : "响应格式无效"
       throw new Error(`知识库配置查询失败：${message}`)
     }
     const items = parseCloudKnowledgeItems(body.data.items)
-    for (const item of items) {
-      await validateKnowledgeRepositorySource(
-        {
-          idKey: item.idKey,
-          role: "read",
-          url: item.repoUrl,
-          ref: item.gitRef,
-          sshUrl: item.sshUrl ?? undefined
-        },
-        controller.signal
-      )
-    }
+    console.log("[knowledge_manage] 知识库配置读取完成", {
+      count: items.length,
+      elapsedMs: Date.now() - startedAt
+    })
     return items
   } catch (error) {
     if (controller.signal.aborted)
@@ -198,6 +201,37 @@ async function queryCloudKnowledgeBases(): Promise<ReturnType<typeof parseCloudK
   } finally {
     clearTimeout(timeout)
   }
+}
+
+async function validateCloudKnowledgeBases(items: ReturnType<typeof parseCloudKnowledgeItems>) {
+  const validItems: typeof items = []
+  const failedIds = new Set<string>()
+  const errors: string[] = []
+  for (const item of items) {
+    const startedAt = Date.now()
+    console.log(`[knowledge_manage] ${item.idKey} 开始 Git 分支配置检查`)
+    try {
+      await validateKnowledgeRepositorySource({
+        idKey: item.idKey,
+        role: "read",
+        url: item.repoUrl,
+        ref: item.gitRef,
+        sshUrl: item.sshUrl ?? undefined
+      })
+      validItems.push(item)
+      console.log(`[knowledge_manage] ${item.idKey} Git 分支配置检查完成`, {
+        elapsedMs: Date.now() - startedAt
+      })
+    } catch (error) {
+      failedIds.add(item.idKey)
+      const message = `${item.idKey} Git 分支配置检查失败：${errorMessage(error, item)}`
+      errors.push(message)
+      console.warn(`[knowledge_manage] ${message}，跳过本次更新并保留已有本地配置`, {
+        elapsedMs: Date.now() - startedAt
+      })
+    }
+  }
+  return { validItems, failedIds, errors }
 }
 
 async function updateWorkspace(idKey: string, workspace: KnowledgeWorkspaceState): Promise<void> {
@@ -344,17 +378,24 @@ export async function refreshKnowledgeBases(): Promise<KnowledgeBaseListResult> 
   refreshing = true
   try {
     let state = await readKnowledgeState()
+    let skippedIds = new Set<string>()
     try {
       const items = await queryCloudKnowledgeBases()
-      state = mergeCloudKnowledgeState(state, items)
+      const { validItems, failedIds, errors } = await validateCloudKnowledgeBases(items)
+      skippedIds = failedIds
+      const previousById = new Map(state?.knowledgeBases.map((item) => [item.idKey, item]))
+      state = mergeCloudKnowledgeState(state, validItems)
+      state.knowledgeBases = state.knowledgeBases.map((item) =>
+        failedIds.has(item.idKey) ? previousById.get(item.idKey)! : item
+      )
       await writeKnowledgeState(state)
-      queryError = null
+      queryError = errors.length ? errors.join("；") : null
     } catch (error) {
       queryError = errorMessage(error)
       console.warn(`[knowledge_manage] ${queryError}，保留本地配置`)
     }
     for (const item of state?.knowledgeBases ?? []) {
-      if (item.visibility !== "visible") continue
+      if (item.visibility !== "visible" || skippedIds.has(item.idKey)) continue
       syncingId = item.idKey
       try {
         await syncStateItem(item)

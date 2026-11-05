@@ -10,6 +10,7 @@ import { knowledgeDirectory } from "./knowledge-base-state"
 const execFileAsync = promisify(execFile)
 const GIT_TIMEOUT_MS = 120_000
 const HTTPS_CLONE_TIMEOUT_MS = 20_000
+const BRANCH_VALIDATION_TIMEOUT_MS = 10_000
 
 export interface KnowledgeRepositorySource {
   idKey: string
@@ -92,8 +93,21 @@ export async function validateKnowledgeRepositorySource(
   signal?: AbortSignal
 ): Promise<KnowledgeRepositorySource & { ref: string }> {
   const normalized = normalizeSource(source)
-  await git(["check-ref-format", "--branch", normalized.ref], process.cwd(), signal)
-  return normalized
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), BRANCH_VALIDATION_TIMEOUT_MS)
+  try {
+    await git(
+      ["check-ref-format", "--branch", normalized.ref],
+      process.cwd(),
+      signal ? AbortSignal.any([signal, controller.signal]) : controller.signal
+    )
+    return normalized
+  } catch (error) {
+    if (controller.signal.aborted) throw new Error("Git 分支配置检查超时（10 秒）")
+    throw error
+  } finally {
+    clearTimeout(timeout)
+  }
 }
 
 async function getReusableLocalCommit(

@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "fs/promises"
 import { tmpdir } from "os"
 import { join } from "path"
 import { afterEach, beforeEach, expect, it, vi } from "vitest"
-import { syncKnowledgeRepository } from "./knowledge-repository"
+import { syncKnowledgeRepository, validateKnowledgeRepositorySource } from "./knowledge-repository"
 
 const { runGit } = vi.hoisted(() => ({ runGit: vi.fn() }))
 vi.mock("child_process", async () => {
@@ -56,9 +56,36 @@ beforeEach(async () => {
 })
 
 afterEach(async () => {
+  vi.useRealTimers()
   vi.restoreAllMocks()
   vi.unstubAllEnvs()
   await rm(root, { recursive: true, force: true })
+})
+
+it("cancels a hanging branch validation after ten seconds without cancelling the next validation", async () => {
+  vi.useFakeTimers()
+  let firstSignal: AbortSignal | undefined
+  runGit.mockImplementationOnce(async (_file, _args, options) => {
+    firstSignal = options.signal
+    return new Promise((_resolve, reject) => {
+      firstSignal!.addEventListener(
+        "abort",
+        () => reject(new DOMException("aborted", "AbortError")),
+        { once: true }
+      )
+    })
+  })
+  const pending = validateKnowledgeRepositorySource(source)
+  const assertion = expect(pending).rejects.toThrow("Git 分支配置检查超时（10 秒）")
+  await vi.advanceTimersByTimeAsync(9_999)
+  expect(firstSignal?.aborted).toBe(false)
+  await vi.advanceTimersByTimeAsync(1)
+  await assertion
+  expect(firstSignal?.aborted).toBe(true)
+
+  await expect(validateKnowledgeRepositorySource(source)).resolves.toMatchObject(source)
+  expect(runGit.mock.calls[1][2].signal.aborted).toBe(false)
+  expect(vi.getTimerCount()).toBe(0)
 })
 
 it("uses a 20 second HTTPS clone timeout and does not fall back on success", async () => {

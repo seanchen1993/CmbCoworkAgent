@@ -42,6 +42,7 @@ import {
   writeKnowledgeState
 } from "./knowledge-base-state"
 import { KnowledgeRepositoryLocalChangesError } from "./knowledge-repository"
+import * as knowledgeRepository from "./knowledge-repository"
 import { claimLocalThreadRunLease, releaseLocalThreadRunLease } from "../agent/thread-run-lease"
 
 let root: string
@@ -265,12 +266,7 @@ it("blocks unbound or missing write workspaces and never falls back to read", as
   await expect(prepareKnowledgeDeposition([item.idKey])).rejects.toThrow("工作区不可用")
 })
 
-it.each([
-  { gitRef: 42 },
-  { gitRef: "invalid..branch" },
-  { sshUrl: {} },
-  { repoUrl: "--invalid-source" }
-])(
+it.each([{ gitRef: 42 }, { sshUrl: {} }, { repoUrl: "--invalid-source" }])(
   "retains cached configuration and still updates Git on an invalid cloud response: %j",
   async (invalid) => {
     await seed(true)
@@ -279,6 +275,111 @@ it.each([
     expect(result.queryError).toBeTruthy()
     expect((await readKnowledgeState())?.knowledgeBases[0].name).toBe(item.name)
     expect(mocks.syncKnowledgeRepository).toHaveBeenCalledTimes(2)
+  }
+)
+
+it("isolates an invalid Git branch and preserves its cached configuration without syncing it", async () => {
+  const previous = await seed(true)
+  const healthy = { ...item, idKey: "healthy", name: "Healthy" }
+  cloud([{ ...item, name: "Changed", gitRef: "invalid..branch" }, healthy])
+
+  const result = await refreshKnowledgeBases()
+
+  expect(result.queryError).toContain(`${item.idKey} Git 分支配置检查失败`)
+  expect(result.queryError).not.toContain("知识库配置查询超时")
+  expect(result.knowledgeBases.map((entry) => entry.idKey)).toEqual([healthy.idKey, item.idKey])
+  expect(
+    (await readKnowledgeState())?.knowledgeBases.find((entry) => entry.idKey === item.idKey)
+  ).toEqual(previous.knowledgeBases[0])
+  expect(mocks.syncKnowledgeRepository).toHaveBeenCalledTimes(2)
+  expect(
+    mocks.syncKnowledgeRepository.mock.calls.every(([source]) => source.idKey === healthy.idKey)
+  ).toBe(true)
+})
+
+it("allows cumulative Git validation to exceed five seconds after the response is read", async () => {
+  cloud([item, { ...item, idKey: "another" }])
+  const validate = vi
+    .spyOn(knowledgeRepository, "validateKnowledgeRepositorySource")
+    .mockImplementation(async (source) => {
+      await new Promise((resolve) => setTimeout(resolve, 6_000))
+      return { ...source, ref: source.ref || "main" }
+    })
+  vi.useFakeTimers()
+  const pending = refreshKnowledgeBases()
+  await vi.waitFor(() => expect(validate).toHaveBeenCalledTimes(1))
+  await vi.advanceTimersByTimeAsync(6_000)
+  expect(validate).toHaveBeenCalledTimes(2)
+  await vi.advanceTimersByTimeAsync(6_000)
+
+  await expect(pending).resolves.toMatchObject({ queryError: null })
+  const signal = vi.mocked(globalThis.fetch).mock.calls[0][1]?.signal
+  expect(signal?.aborted).toBe(false)
+  expect(mocks.syncKnowledgeRepository).toHaveBeenCalledTimes(4)
+})
+
+it.each(["Git 分支配置检查超时（10 秒）", "Permission denied"])(
+  "skips a new configuration after validation failure and still updates later repositories: %s",
+  async (message) => {
+    cloud([item, { ...item, idKey: "healthy" }])
+    vi.spyOn(knowledgeRepository, "validateKnowledgeRepositorySource").mockRejectedValueOnce(
+      new Error(message)
+    )
+
+    const result = await refreshKnowledgeBases()
+
+    expect(result.queryError).toContain(message)
+    expect(result.knowledgeBases.map((entry) => entry.idKey)).toEqual(["healthy"])
+    expect(mocks.syncKnowledgeRepository).toHaveBeenCalledTimes(2)
+  }
+)
+
+it("keeps failed cached configurations unavailable and still marks removed configurations unavailable", async () => {
+  const state = mergeCloudKnowledgeState(null, [item, { ...item, idKey: "removed" }])
+  state.knowledgeBases[0].visibility = "unavailable"
+  await writeKnowledgeState(state)
+  cloud([
+    { ...item, gitRef: "invalid..branch" },
+    { ...item, idKey: "healthy" }
+  ])
+
+  const result = await refreshKnowledgeBases()
+
+  expect(result.knowledgeBases.find((entry) => entry.idKey === item.idKey)?.visibility).toBe(
+    "unavailable"
+  )
+  expect(result.knowledgeBases.find((entry) => entry.idKey === "removed")?.visibility).toBe(
+    "unavailable"
+  )
+  expect(mocks.syncKnowledgeRepository).toHaveBeenCalledTimes(2)
+})
+
+it.each(["Permission denied (publickey)", "Connection timed out"])(
+  "continues syncing later repositories after remote Git failure: %s",
+  async (message) => {
+    cloud([item, { ...item, idKey: "healthy" }])
+    mocks.syncKnowledgeRepository.mockImplementation(async (source) => {
+      if (source.idKey === item.idKey) throw new Error(message)
+      await mkdir(join(knowledgeDirectory(source.idKey, source.role), ".git"), { recursive: true })
+      return { ...source, updated: true }
+    })
+
+    const result = await refreshKnowledgeBases()
+
+    expect(result.queryError).toBeNull()
+    expect(result.knowledgeBases.find((entry) => entry.idKey === item.idKey)?.workspaces).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ role: "read", status: "failed" }),
+        expect.objectContaining({ role: "write", status: "failed" })
+      ])
+    )
+    expect(result.knowledgeBases.find((entry) => entry.idKey === "healthy")?.workspaces).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ role: "read", status: "success" }),
+        expect.objectContaining({ role: "write", status: "success" })
+      ])
+    )
+    expect(mocks.syncKnowledgeRepository).toHaveBeenCalledTimes(4)
   }
 )
 
@@ -396,12 +497,12 @@ it("uses only the normal periodic refresh for failures", async () => {
   vi.spyOn(Math, "random").mockReturnValue(0.5)
   startKnowledgeBaseManager()
   expect(globalThis.fetch).not.toHaveBeenCalled()
-  await vi.advanceTimersByTimeAsync(5 * 60_000)
+  await vi.advanceTimersByTimeAsync(15 * 60_000)
   await vi.waitFor(() => expect(globalThis.fetch).toHaveBeenCalledTimes(1))
   await vi.waitFor(async () => expect((await listKnowledgeBases()).refreshing).toBe(false))
   await vi.advanceTimersByTimeAsync(60_000)
   expect(globalThis.fetch).toHaveBeenCalledTimes(1)
-  await vi.advanceTimersByTimeAsync(83 * 60_000)
+  await vi.advanceTimersByTimeAsync(223 * 60_000)
   expect(globalThis.fetch).toHaveBeenCalledTimes(1)
   await vi.advanceTimersByTimeAsync(60_000)
   await vi.waitFor(() => expect(globalThis.fetch).toHaveBeenCalledTimes(2))
@@ -420,12 +521,12 @@ it("reuses pending automatic refreshes without postponing them and keeps manual 
   refreshKnowledgeBasesInBackground()
   await refreshKnowledgeBases()
   expect(fetchMock).toHaveBeenCalledTimes(1)
-  await vi.advanceTimersByTimeAsync(3 * 60_000 - 1)
+  await vi.advanceTimersByTimeAsync(13 * 60_000 - 1)
   expect(fetchMock).toHaveBeenCalledTimes(1)
   await vi.advanceTimersByTimeAsync(1)
   await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
   await vi.waitFor(async () => expect((await listKnowledgeBases()).refreshing).toBe(false))
-  await vi.advanceTimersByTimeAsync(10 * 60_000)
+  await vi.advanceTimersByTimeAsync(30 * 60_000)
   expect(fetchMock).toHaveBeenCalledTimes(2)
 })
 
@@ -443,18 +544,18 @@ it("randomizes every periodic interval and merges a pending automatic refresh at
   await vi.advanceTimersByTimeAsync(1)
   await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
   await vi.waitFor(async () => expect((await listKnowledgeBases()).refreshing).toBe(false))
-  await vi.advanceTimersByTimeAsync(75 * 60_000 - 2)
+  await vi.advanceTimersByTimeAsync(225 * 60_000 - 2)
   expect(fetchMock).toHaveBeenCalledTimes(1)
   await vi.advanceTimersByTimeAsync(1)
   await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
   await vi.waitFor(async () => expect((await listKnowledgeBases()).refreshing).toBe(false))
-  await vi.advanceTimersByTimeAsync(104 * 60_000)
+  await vi.advanceTimersByTimeAsync(254 * 60_000)
   expect(fetchMock).toHaveBeenCalledTimes(2)
   refreshKnowledgeBasesInBackground()
   await vi.advanceTimersByTimeAsync(60_000)
   await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3))
   await vi.waitFor(async () => expect((await listKnowledgeBases()).refreshing).toBe(false))
-  await vi.advanceTimersByTimeAsync(5 * 60_000)
+  await vi.advanceTimersByTimeAsync(15 * 60_000)
   expect(fetchMock).toHaveBeenCalledTimes(3)
 })
 
@@ -468,7 +569,7 @@ it("skips an automatic refresh while a manual refresh is still running", async (
   const pending = refreshKnowledgeBases()
   await vi.waitFor(() => expect(finishRead).toBeDefined())
   refreshKnowledgeBasesInBackground()
-  await vi.advanceTimersByTimeAsync(5 * 60_000)
+  await vi.advanceTimersByTimeAsync(15 * 60_000)
   expect(globalThis.fetch).toHaveBeenCalledTimes(1)
   expect(mocks.syncKnowledgeRepository).toHaveBeenCalledTimes(1)
   finishRead()
@@ -483,11 +584,11 @@ it("cancels pending startup, identity and periodic refreshes when stopped", asyn
   )
   startKnowledgeBaseManager()
   stopKnowledgeBaseManager()
-  await vi.advanceTimersByTimeAsync(120 * 60_000)
+  await vi.advanceTimersByTimeAsync(300 * 60_000)
   expect(fetchMock).not.toHaveBeenCalled()
   refreshKnowledgeBasesInBackground()
   stopKnowledgeBaseManager()
-  await vi.advanceTimersByTimeAsync(10 * 60_000)
+  await vi.advanceTimersByTimeAsync(30 * 60_000)
   expect(fetchMock).not.toHaveBeenCalled()
 })
 
