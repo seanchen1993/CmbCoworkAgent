@@ -63,7 +63,6 @@ export function RequirementFunctionWorkspace({
   prototypeCoveredByFullPrd = false,
   prototypeSkipped,
   prototypePreview,
-  conversationLoading,
   reloadToken,
   onBack,
   navigationItems,
@@ -80,7 +79,6 @@ export function RequirementFunctionWorkspace({
   prototypeCoveredByFullPrd?: boolean
   prototypeSkipped: boolean
   prototypePreview?: ReactNode
-  conversationLoading: boolean
   reloadToken: number
   onBack: () => void
   navigationItems?: Array<{ value: string; label: string }>
@@ -289,7 +287,6 @@ export function RequirementFunctionWorkspace({
                         variant="ghost"
                         size="sm"
                         className="h-7 gap-1 px-2 text-xs text-primary hover:text-primary"
-                        disabled={conversationLoading}
                         onClick={onRequestPrototypeDesign}
                       >
                         <ExternalLink className="size-3" />
@@ -346,12 +343,7 @@ export function RequirementFunctionWorkspace({
                     <Tooltip>
                       <TooltipTrigger asChild>
                         <span className="mt-5 inline-flex">
-                          <Button
-                            type="button"
-                            size="sm"
-                            disabled={conversationLoading}
-                            onClick={onRequestPrototypeDesign}
-                          >
+                          <Button type="button" size="sm" onClick={onRequestPrototypeDesign}>
                             {prototypeSkipped || !hasPrototypeDesignSession ? "去设计" : "继续设计"}
                           </Button>
                         </span>

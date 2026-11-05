@@ -1011,9 +1011,6 @@ async function saveRequirementStepState(
       })
     }
   }
-  if (state.needDesign === "1" && reachedStep >= 4) {
-    await fs.mkdir(path.join(getRequirementPrdDir(list[index]), "原型设计"), { recursive: true })
-  }
   const next: RequirementIndexItem = {
     ...list[index],
     updatedAt: new Date().toISOString(),

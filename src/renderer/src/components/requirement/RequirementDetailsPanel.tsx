@@ -403,7 +403,7 @@ export function RequirementDetailsPanel({
     functionInfos: RequirementPrdManifest["functions"],
     mode: "functions" | "full-prd"
   ): Promise<boolean> => {
-    if (batchStartingRef.current || conversationLoading) return false
+    if (batchStartingRef.current) return false
     batchStartingRef.current = true
     setBatchStarting(true)
     try {
@@ -575,7 +575,6 @@ export function RequirementDetailsPanel({
               ) : undefined
             }
             reloadToken={prdPreviewReloadToken}
-            conversationLoading={conversationLoading}
             onBack={() => setFullPrdWorkspaceOpen(false)}
             navigationValue="full-prd"
             navigationItems={[
@@ -606,8 +605,13 @@ export function RequirementDetailsPanel({
             title={selectedFunction.name || "未命名功能"}
             filePath={normalizePrdFilePath(selectedFunction.file)}
             threadId={threadId}
-            prototypeGenerated={selectedPrototypeStatus?.generated ?? false}
-            hasPrototypeDesignSession={Boolean(selectedFunction.htmlId?.trim())}
+            prototypeGenerated={
+              (selectedPrototypeStatus?.generated ?? false) ||
+              (hasFullPrdDesignSession && fullPrdPrototypeGenerated)
+            }
+            hasPrototypeDesignSession={
+              Boolean(selectedFunction.htmlId?.trim()) || hasFullPrdDesignSession
+            }
             prototypeCoveredByFullPrd={hasFullPrdDesignSession}
             prototypeSkipped={selectedPrototypeStatus?.skipped ?? false}
             prototypePreview={
@@ -619,10 +623,22 @@ export function RequirementDetailsPanel({
                   workspacePath={workspacePath}
                   fit="fill"
                 />
+              ) : hasFullPrdDesignSession && fullPrdDesignEntry?.htmlFile && threadId ? (
+                <div className="relative h-full w-full">
+                  <PrototypeHtmlPreview
+                    threadId={threadId}
+                    filePath={fullPrdDesignEntry.htmlFile}
+                    reloadToken={prdPreviewReloadToken}
+                    workspacePath={workspacePath}
+                    fit="fill"
+                  />
+                  <div className="absolute left-2 top-2 z-10">
+                    <PrototypeScopeBadge scope="full-prd" />
+                  </div>
+                </div>
               ) : undefined
             }
             reloadToken={prdPreviewReloadToken}
-            conversationLoading={conversationLoading}
             onBack={() => setSelectedFunction(null)}
             navigationValue={getPrototypeFunctionKey(selectedFunction)}
             navigationItems={
@@ -887,7 +903,7 @@ export function RequirementDetailsPanel({
                           variant="outline"
                           size="sm"
                           className="h-7 gap-1 px-2 text-[11px] text-destructive hover:bg-destructive/10 hover:text-destructive"
-                          disabled={conversationLoading || batchStarting || clearStarting}
+                          disabled={batchStarting || clearStarting}
                           onClick={() => {
                             setClearTargetFunction(null)
                             setClearDialogOpen(true)
@@ -902,7 +918,6 @@ export function RequirementDetailsPanel({
                         size="sm"
                         className="h-7 gap-1 px-2 text-[11px]"
                         disabled={
-                          conversationLoading ||
                           batchStarting ||
                           (!hasPrototypeDesignSession && prototypeStatuses.length === 0)
                         }
@@ -932,6 +947,22 @@ export function RequirementDetailsPanel({
                             : "继续原型设计"
                           : "批量设计原型"}
                       </Button>
+                      {!hasPrototypeDesignSession ? (
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          className="h-7 px-2 text-[11px]"
+                          disabled={batchStarting}
+                          onClick={() => {
+                            setBatchDesignMode("functions")
+                            setBatchSelection(new Set())
+                            setBatchDialogOpen(true)
+                          }}
+                        >
+                          无需设计
+                        </Button>
+                      ) : null}
                     </div>
                   </div>
                 </div>
@@ -971,7 +1002,7 @@ export function RequirementDetailsPanel({
                                   type="button"
                                   size="sm"
                                   variant="outline"
-                                  disabled={conversationLoading || tokenSaving}
+                                  disabled={tokenSaving}
                                   className="h-7 gap-1 rounded-md px-2 text-[11px]"
                                   onClick={() => void handleSendLeanstarToken()}
                                 >
@@ -984,7 +1015,7 @@ export function RequirementDetailsPanel({
                                 </Button>
                               </span>
                             </TooltipTrigger>
-                            {conversationLoading || tokenSaving ? (
+                            {tokenSaving ? (
                               <TooltipContent
                                 side="top"
                                 className="max-w-56 text-xs leading-relaxed"
@@ -1003,7 +1034,7 @@ export function RequirementDetailsPanel({
                                 <Button
                                   type="button"
                                   size="sm"
-                                  disabled={publishRequestQueued || conversationLoading}
+                                  disabled={publishRequestQueued}
                                   className="h-7 gap-1 rounded-md px-2 text-[11px]"
                                   onClick={handlePublishToRequirementSpace}
                                 >
@@ -1016,7 +1047,7 @@ export function RequirementDetailsPanel({
                                 </Button>
                               </span>
                             </TooltipTrigger>
-                            {publishRequestQueued || conversationLoading ? (
+                            {publishRequestQueued ? (
                               <TooltipContent
                                 side="top"
                                 className="max-w-56 text-xs leading-relaxed"
@@ -1102,7 +1133,7 @@ export function RequirementDetailsPanel({
                                 </div>
                                 <RequirementPrototypeMenu
                                   needDesign={functionInfo.needDesign}
-                                  disabled={conversationLoading}
+                                  disabled={false}
                                   onChange={(needDesign) =>
                                     updatePrototypeFunctionDesign(functionInfo, needDesign)
                                   }
@@ -1121,7 +1152,7 @@ export function RequirementDetailsPanel({
                               <RequirementPrototypeAction
                                 needDesign={functionInfo.needDesign}
                                 choiceMade={prototypeStatus?.choiceMade ?? false}
-                                disabled={conversationLoading}
+                                disabled={false}
                                 onChange={(needDesign) =>
                                   updatePrototypeFunctionDesign(functionInfo, needDesign)
                                 }
@@ -1311,7 +1342,7 @@ export function RequirementDetailsPanel({
               <Button
                 type="button"
                 className="h-9 px-5 text-sm font-semibold"
-                disabled={batchStarting || conversationLoading}
+                disabled={batchStarting}
                 onClick={() => {
                   const selectedFunctions = prototypeStatuses
                     .filter((item) =>

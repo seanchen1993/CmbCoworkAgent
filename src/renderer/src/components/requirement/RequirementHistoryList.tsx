@@ -430,16 +430,20 @@ export function RequirementHistoryList({
                         ) : null}
                       </div>
                       <div className="mt-2 flex min-h-7 items-end justify-between gap-3">
-                        <RequirementStatusTags
-                          standardized={isRequirementGenerated(item)}
-                          hasPrototype={
-                            Boolean(item.prdManifest.prd.htmlFile?.trim()) ||
-                            item.prdManifest.functions.some((entry) =>
-                              Boolean(entry.htmlFile?.trim())
-                            )
-                          }
-                          published={isRequirementPublished(item)}
-                        />
+                        {item.origin === "space" ? (
+                          <span />
+                        ) : (
+                          <RequirementStatusTags
+                            standardized={isRequirementGenerated(item)}
+                            hasPrototype={
+                              Boolean(item.prdManifest.prd.htmlFile?.trim()) ||
+                              item.prdManifest.functions.some((entry) =>
+                                Boolean(entry.htmlFile?.trim())
+                              )
+                            }
+                            published={isRequirementPublished(item)}
+                          />
+                        )}
                         {collaborators.length ? (
                           <RequirementAvatars users={collaborators} />
                         ) : (

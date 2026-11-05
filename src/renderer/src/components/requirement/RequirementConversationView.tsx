@@ -19,7 +19,7 @@ import { Input } from "@/components/ui/input"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { useAppStore } from "@/lib/store"
 import { assembleBoundedTextPreview } from "@/lib/text-preview-pages"
-import { useThreadState, useThreadStream } from "@/lib/thread-context"
+import { useAllThreadStates, useThreadState, useThreadStream } from "@/lib/thread-context"
 import { cn } from "@/lib/utils"
 import {
   beginOpenResourcePreviewIntent,
@@ -257,8 +257,22 @@ function RequirementConversationSession({
   const currentThreadIdRef = useRef(threadId)
   currentThreadIdRef.current = threadId
   const threadState = useThreadState(threadId)
+  const allThreadStates = useAllThreadStates()
   const setWorkspaceFiles = threadState?.setWorkspaceFiles
-  const subagents = useMemo(() => threadState?.subagents ?? [], [threadState?.subagents])
+  const expertProcessThreadId = useMemo(() => {
+    if (threadId && (allThreadStates[threadId]?.subagents.length ?? 0) > 0) return threadId
+    return (
+      [...requirement.threadIds]
+        .reverse()
+        .find(
+          (candidateThreadId) => (allThreadStates[candidateThreadId]?.subagents.length ?? 0) > 0
+        ) ?? threadId
+    )
+  }, [allThreadStates, requirement.threadIds, threadId])
+  const subagents = useMemo(
+    () => allThreadStates[expertProcessThreadId ?? ""]?.subagents ?? [],
+    [allThreadStates, expertProcessThreadId]
+  )
   const observedSubagentStatesRef = useRef(new Map<string, string>())
   // ChatContainer treats this stream state as the source of truth for an active turn.
   const streamLoading = useThreadStream(threadId ?? "").isLoading
@@ -298,7 +312,7 @@ function RequirementConversationSession({
     if (open) setRightPanelCollapsed(false)
   }, [])
   const focusExpertProcess = useCallback((): boolean => {
-    if (!threadId || subagents.length === 0) return false
+    if (!expertProcessThreadId || subagents.length === 0) return false
     const isAnalyst = (item: (typeof subagents)[number]): boolean => {
       const identity = `${item.subagentType ?? ""} ${item.name}`.toLowerCase()
       return identity.includes("analyst")
@@ -311,14 +325,14 @@ function RequirementConversationSession({
       subagents[subagents.length - 1]
 
     openSubagentFocusView({
-      threadId,
+      threadId: expertProcessThreadId,
       subagentId: subagent.id,
       name: subagent.name,
       description: subagent.description,
       status: subagent.status
     })
     return true
-  }, [openSubagentFocusView, subagents, threadId])
+  }, [expertProcessThreadId, openSubagentFocusView, subagents])
   useEffect(() => {
     const previous = observedSubagentStatesRef.current
     const runningSubagents = subagents.filter((item) => item.status === "running")
@@ -337,9 +351,10 @@ function RequirementConversationSession({
     )
   }, [focusExpertProcess, subagents])
   useEffect(() => {
-    if (previewTab !== "expert-process" || subagentFocusView?.threadId === threadId) return
+    if (previewTab !== "expert-process" || subagentFocusView?.threadId === expertProcessThreadId)
+      return
     focusExpertProcess()
-  }, [focusExpertProcess, previewTab, subagentFocusView?.threadId, threadId])
+  }, [expertProcessThreadId, focusExpertProcess, previewTab, subagentFocusView?.threadId])
   const sourceFiles = useMemo(
     () =>
       (threadState?.workspaceFiles ?? []).filter(
@@ -529,7 +544,6 @@ function RequirementConversationSession({
       htmlId?: string
       htmlFile?: string
     }): void => {
-      if (conversationLoading) return
       const designEntry = buildPrototypeDesignEntry(functionInfo)
       const existingEntry = listRequirementDesignEntries(requirement.id).find(
         (entry) => entry.requirementFilePath === designEntry.requirementFilePath
@@ -539,14 +553,13 @@ function RequirementConversationSession({
         htmlId: designEntry.htmlId || existingEntry?.htmlId || ""
       })
     },
-    [buildPrototypeDesignEntry, conversationLoading, requirement.id]
+    [buildPrototypeDesignEntry, requirement.id]
   )
   const startBatchPrototypeDesign = useCallback(
     async (
       functionInfos: RequirementPrdManifest["functions"],
       mode: "functions" | "full-prd"
     ): Promise<void> => {
-      if (conversationLoading) throw new Error("当前会话正在处理中，请稍后再试")
       const existingEntries = new Map(
         listRequirementDesignEntries(requirement.id).map((entry) => [
           entry.requirementFilePath,
@@ -646,7 +659,6 @@ function RequirementConversationSession({
     },
     [
       buildPrototypeDesignEntry,
-      conversationLoading,
       onRequirementUpdated,
       prototypeFunctions,
       requirement.id,
@@ -663,7 +675,6 @@ function RequirementConversationSession({
     ]
   )
   const clearPrototypeDesign = useCallback(async (): Promise<void> => {
-    if (conversationLoading) throw new Error("当前会话正在处理中，请稍后再试")
     const mappedEntries = listAllRequirementDesignEntries(requirement.id)
     const sessionIds = new Set([
       requirementSpaceManifest?.prd.htmlId ?? "",
@@ -687,7 +698,6 @@ function RequirementConversationSession({
     setPrototypeRoute(null)
     setPreviewTab("prd")
   }, [
-    conversationLoading,
     onRequirementUpdated,
     prototypeFunctions,
     requirement.id,
@@ -696,7 +706,6 @@ function RequirementConversationSession({
   ])
   const clearPrototypeFunction = useCallback(
     async (functionInfo: RequirementPrdManifest["functions"][number]): Promise<void> => {
-      if (conversationLoading) throw new Error("当前会话正在处理中，请稍后再试")
       const designEntry = buildPrototypeDesignEntry(functionInfo)
       const mappedEntries = listAllRequirementDesignEntries(requirement.id).filter(
         (entry) => entry.requirementFilePath === designEntry.requirementFilePath
@@ -725,13 +734,7 @@ function RequirementConversationSession({
         )
       }
     },
-    [
-      buildPrototypeDesignEntry,
-      conversationLoading,
-      onRequirementUpdated,
-      requirement.id,
-      requirement.system
-    ]
+    [buildPrototypeDesignEntry, onRequirementUpdated, requirement.id, requirement.system]
   )
   const revealRequirementFile = useCallback(
     (filePath: string): void => {
@@ -793,8 +796,14 @@ function RequirementConversationSession({
             : null
         : null
     setPrototypeRoute(route)
-    setPreviewTab(getPreviewTabForStep(currentStep))
-  }, [manifestBelongsToCurrentThread, manifestThreadId, requirementSpaceManifest])
+    const restoredTab = getPreviewTabForStep(currentStep)
+    if (restoredTab !== "prd" || !conversationLoading) setPreviewTab(restoredTab)
+  }, [
+    conversationLoading,
+    manifestBelongsToCurrentThread,
+    manifestThreadId,
+    requirementSpaceManifest
+  ])
 
   useEffect(() => {
     setSelectedThreadId(
@@ -1103,7 +1112,6 @@ function RequirementConversationSession({
   const handlePublishToRequirementSpace = useCallback(async (): Promise<void> => {
     if (
       !threadState ||
-      conversationLoading ||
       isRequirementSpacePublished(requirementSpaceManifest) ||
       publishRequestQueuedRef.current
     ) {
@@ -1129,7 +1137,7 @@ function RequirementConversationSession({
       updated_at: new Date()
     })
     toast.success("已向对话发送发布到需求空间请求")
-  }, [conversationLoading, requirementSpaceManifest, threadState])
+  }, [requirementSpaceManifest, threadState])
 
   const queueLeanstarToken = useCallback(
     (token: string): void => {
@@ -1147,7 +1155,7 @@ function RequirementConversationSession({
   )
 
   const handleSendLeanstarToken = useCallback(async (): Promise<void> => {
-    if (!threadState || conversationLoading) return
+    if (!threadState) return
     setTokenSaving(true)
     try {
       const result = await window.api.requirements.getToken()
@@ -1163,7 +1171,7 @@ function RequirementConversationSession({
     } finally {
       setTokenSaving(false)
     }
-  }, [conversationLoading, queueLeanstarToken, threadState])
+  }, [queueLeanstarToken, threadState])
 
   const handleConfirmLeanstarToken = useCallback(async (): Promise<void> => {
     const token = tokenDraft.trim()
@@ -1419,7 +1427,9 @@ function RequirementConversationSession({
             generatedPrototypeCount={generatedPrototypeCount}
             skippedPrototypeCount={skippedPrototypeCount}
             prdPreviewReloadToken={prdPreviewReloadToken}
-            showExpertProcess={subagentFocusView?.threadId === threadId}
+            showExpertProcess={
+              subagents.length > 0 && subagentFocusView?.threadId === expertProcessThreadId
+            }
             onPreviewTabChange={setPreviewTab}
             onFunctionWorkspaceChange={handleFunctionWorkspaceChange}
             onFocusExpertProcess={() => {

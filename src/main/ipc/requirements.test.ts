@@ -510,7 +510,7 @@ describe("requirement source preview", () => {
     }
     expect(updated).toMatchObject({ success: true, manifestStatus: "updated" })
     expect(updated.manifest.prd.currentStep).toBe(4)
-    expect(existsSync(join(created.requirement.requirementPath, "prd", "原型设计"))).toBe(true)
+    expect(existsSync(join(created.requirement.requirementPath, "prd", "原型设计"))).toBe(false)
     expect(JSON.parse(readFileSync(manifestPath, "utf-8"))).toMatchObject({
       prd: { currentStep: 4, needDesign: "1", custom: "preserved" },
       functions: [
