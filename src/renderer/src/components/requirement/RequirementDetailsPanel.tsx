@@ -237,7 +237,7 @@ function PrototypeScopeBadge({ scope }: { scope: "function" | "full-prd" }): Rea
         <TooltipTrigger asChild>
           <span
             className={cn(
-              "inline-flex cursor-help items-center rounded-full border px-2 py-1 text-[10px] font-semibold shadow-sm backdrop-blur-sm",
+              "inline-flex cursor-help items-center rounded-full border px-2 py-1 text-[10px] font-semibold backdrop-blur-sm",
               isFullPrd
                 ? "border-violet-200 bg-violet-50/95 text-violet-700"
                 : "border-blue-200 bg-blue-50/95 text-blue-700"
@@ -262,7 +262,7 @@ function FullPrdModeFunctionNotice(): React.JSX.Element {
       <Tooltip>
         <TooltipTrigger asChild>
           <div className="flex h-full min-h-[88px] w-full cursor-help items-center justify-center bg-violet-50/60 px-3 py-2">
-            <span className="rounded-full border border-violet-200 bg-white px-2.5 py-1.5 text-[11px] font-medium text-violet-700 shadow-sm">
+            <span className="rounded-full border border-violet-200 bg-white px-2.5 py-1.5 text-[11px] font-medium text-violet-700">
               已包含在整个需求原型中
             </span>
           </div>
