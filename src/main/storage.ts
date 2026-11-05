@@ -2,6 +2,7 @@ import {
   readContentFileSync,
   encodeMarketContent,
   findProtectedMarketRoot,
+  isMarketMarkdownFile,
   resolveMarketRuntimePath
 } from "./services/market-content"
 import { basename, isAbsolute, join, relative, resolve } from "path"
@@ -1615,6 +1616,12 @@ export interface CustomModelConfig {
   enableThinkingEffort?: boolean
   thinkingEffort?: ThinkingEffort
   tier?: "premium" | "economy"
+  /** Assigned by the built-in registry; never accepted from custom model storage. */
+  transport?: import("../shared/model-catalog").ModelTransport
+  /** Bound to the built-in connection's URL and credential; not a user model override. */
+  idleModelEnvironment?: import("../shared/idle-model-service-window").IdleModelEnvironment
+  notice?: string
+  unavailableReason?: string
 }
 
 export interface BuiltinModelOverride {
@@ -1985,6 +1992,15 @@ function getSettingsStore(): Store {
     _settingsStore = new Store({ name: "settings", cwd: getOpenworkDir() })
   }
   return _settingsStore
+}
+
+export function getStoredIdleModelUseUat(): boolean {
+  try {
+    return getSettingsStore().get("idleModelUseUat", false) === true
+  } catch (error) {
+    console.warn("[Storage] Failed to load idle model environment; using production:", error)
+    return false
+  }
 }
 
 const BUILTIN_MODEL_OVERRIDES_KEY = "builtinModelOverrides"
@@ -3344,7 +3360,7 @@ export function getEnabledPluginMcpConfigs(): Record<string, PluginMcpServerConf
     if (!servers) continue
     for (const [name, cfg] of Object.entries(servers)) {
       const runtimeRoot = cfg.command ? resolveMarketRuntimePath(plugin.path) : plugin.path
-      if (runtimeRoot === plugin.path) {
+      if (!cfg.command || (runtimeRoot === plugin.path && !findProtectedMarketRoot(plugin.path))) {
         configs[`plugin:${plugin.id}/${name}`] = cfg
         continue
       }
@@ -4625,7 +4641,9 @@ export function setPluginHookEnabled(pluginId: string, hookId: string, enabled: 
     const content = Buffer.from(JSON.stringify(next, null, 2))
     writeFileSync(
       hooksFilePath,
-      findProtectedMarketRoot(hooksFilePath) ? encodeMarketContent(content) : content
+      isMarketMarkdownFile(hooksFilePath) && findProtectedMarketRoot(hooksFilePath)
+        ? encodeMarketContent(content)
+        : content
     )
   } else if (fmt === "cc_plugin" || fmt === "cc_settings") {
     // ── CC format: ID = plugin:pluginId/EventName:matcherIdx:hookIdx ──
@@ -4660,7 +4678,9 @@ export function setPluginHookEnabled(pluginId: string, hookId: string, enabled: 
     const content = Buffer.from(JSON.stringify(root, null, 2))
     writeFileSync(
       hooksFilePath,
-      findProtectedMarketRoot(hooksFilePath) ? encodeMarketContent(content) : content
+      isMarketMarkdownFile(hooksFilePath) && findProtectedMarketRoot(hooksFilePath)
+        ? encodeMarketContent(content)
+        : content
     )
   } else {
     throw new Error("插件 hooks 配置格式无效")

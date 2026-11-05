@@ -66,8 +66,12 @@ export interface ModelConfig {
   model: string
   description?: string
   available: boolean
+  /** Selection is separate from whether a request can be sent right now. */
+  selectable?: boolean
   source: ProviderId
-  origin?: "remote" | "fallback"
+  origin?: "remote" | "fallback" | "local"
+  notice?: string
+  unavailableReason?: string
   maxTokens?: number
   /** Routing tier — absent means premium */
   tier?: "premium" | "economy"
@@ -370,6 +374,7 @@ export interface QueuedMessage {
   attachmentDisplayPrefix?: string
   skillBlock?: string
   skillName?: string
+  skillDescription?: string
   builtinBrowser?: boolean
   modelId?: string
   handoffRequestedAt?: Date

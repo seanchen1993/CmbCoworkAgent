@@ -5,6 +5,7 @@
  */
 import { KnowledgeOverviewPanel } from "./panels/KnowledgeOverviewPanel"
 import { useKnowledgeOverview } from "./use-knowledge-overview"
+import { DashboardOrgScope } from "./DashboardOrgScope"
 import {
   isValidElement,
   memo,
@@ -990,6 +991,7 @@ function OrgFilterBar({
             variant="outline"
             size="sm"
             className="h-7 w-[240px] justify-between gap-1 text-xs font-normal"
+            title={triggerLabel}
             disabled={loading && options.length === 0}
           >
             <span className={cn("truncate", value.length === 0 && "text-muted-foreground")}>
@@ -2760,6 +2762,18 @@ const SkillEvalDashboardPanel = memo(function SkillEvalDashboardPanel({
 })
 
 export function DashboardView(): React.JSX.Element {
+  return (
+    <DashboardOrgScope>
+      {(rooms) => <DashboardContent initialOrgLv1List={rooms} />}
+    </DashboardOrgScope>
+  )
+}
+
+function DashboardContent({
+  initialOrgLv1List
+}: {
+  initialOrgLv1List: string[]
+}): React.JSX.Element {
   const {
     granularity,
     range,
@@ -2811,7 +2825,7 @@ export function DashboardView(): React.JSX.Element {
     setOrgFilter,
     drillDownUserOrg,
     resetUserOrgDrilldown
-  } = useDashboard()
+  } = useDashboard(initialOrgLv1List)
 
   const [exporting, setExporting] = useState(false)
   const [projectMetricRefreshKey, setProjectMetricRefreshKey] = useState(0)
@@ -3701,6 +3715,7 @@ export function DashboardView(): React.JSX.Element {
       setSkillTracesLoading(true)
       try {
         const result = await window.api.dashboard.skillDetail(skill, range, {
+          projectMode: activeMainTab === "project-mode",
           page,
           pageSize: SKILL_TRACE_PAGE_SIZE,
           mode: traceViewMode,
@@ -3714,7 +3729,7 @@ export function DashboardView(): React.JSX.Element {
         setSkillTracesLoading(false)
       }
     },
-    [range, skillTraceViewMode, skillTraceTriggerScope]
+    [activeMainTab, range, skillTraceViewMode, skillTraceTriggerScope]
   )
 
   const handleSkillClick = useCallback(
@@ -4088,6 +4103,7 @@ export function DashboardView(): React.JSX.Element {
     setSkillTraceExporting(true)
     try {
       const result = await window.api.dashboard.exportSkillTraces({
+        projectMode: activeMainTab === "project-mode",
         skill: selectedSkill,
         range,
         page: skillTracePage,
@@ -4105,7 +4121,15 @@ export function DashboardView(): React.JSX.Element {
     } finally {
       setSkillTraceExporting(false)
     }
-  }, [range, selectedSkill, skillDetail, skillTracePage, skillTraceTriggerScope, skillTraceViewMode])
+  }, [
+    activeMainTab,
+    range,
+    selectedSkill,
+    skillDetail,
+    skillTracePage,
+    skillTraceTriggerScope,
+    skillTraceViewMode
+  ])
 
   const loadUserList = useCallback(
     async (
@@ -4383,6 +4407,17 @@ export function DashboardView(): React.JSX.Element {
         })
       ),
     [range, userDetailTraceTriggerScope]
+  )
+  const loadProjectSkillThreadTraces = useCallback(
+    async (threadId: string): Promise<DashboardTraceDetail[]> =>
+      unwrapThreadTracesResponse(
+        await window.api.dashboard.threadTraces(threadId, {
+          scope: "project",
+          range,
+          triggerScope: skillTraceTriggerScope
+        })
+      ),
+    [range, skillTraceTriggerScope]
   )
   const loadProjectThreadTraces = useCallback(
     async (threadId: string): Promise<DashboardTraceDetail[]> => {
@@ -5598,6 +5633,9 @@ export function DashboardView(): React.JSX.Element {
           if (!open) setSkillTracePage(1)
         }}
         skill={selectedSkill}
+        loadThreadTraces={
+          activeMainTab === "project-mode" ? loadProjectSkillThreadTraces : undefined
+        }
         traces={skillDetail?.traces ?? []}
         codeStats={skillDetail?.stats ?? null}
         tracePage={skillTracePage}

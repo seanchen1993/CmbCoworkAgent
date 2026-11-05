@@ -148,7 +148,7 @@ describe("market download → install → detail (e2e)", () => {
     expect(installed!.hookCount).toBe(2)
     // Files actually copied into the (temp) plugins dir
     expect(existsSync(installed!.path)).toBe(true)
-    expect(readFileSync(join(installed!.path, "plugin.json"), "utf-8")).toMatch(
+    expect(readFileSync(join(installed!.path, "plugin.json"), "utf-8")).not.toMatch(
       new RegExp(`^${MARKET_CONTENT_PREFIX}`)
     )
     const manifest = JSON.parse(

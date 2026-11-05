@@ -1742,6 +1742,7 @@ function normalizeProject(value: unknown): HarnessProjectMetadata | null {
     description: normalizeText(value.description).slice(0, HARNESS_PROJECT_DESCRIPTION_MAX_CHARS),
     projectCode,
     projectFromLean: value.projectFromLean === true,
+    ...(typeof value.isTestProject === "boolean" ? { isTestProject: value.isTestProject } : {}),
     projectDir,
     systemId: normalizeText(value.systemId).slice(0, HARNESS_PROJECT_TEXT_MAX_CHARS),
     systemName: normalizeText(value.systemName).slice(0, HARNESS_PROJECT_TEXT_MAX_CHARS),
@@ -2181,6 +2182,9 @@ function validateCreateInput(input: HarnessProjectCreateInput): void {
   if (required.some((value) => typeof value !== "string" || value.trim().length === 0)) {
     throw new Error("Project name, code, system and workspace are required")
   }
+  if (typeof input.isTestProject !== "boolean") {
+    throw new Error("请选择是否作为测试项目")
+  }
   if (typeof input.description !== "string") {
     throw new Error("Project description must be a string")
   }
@@ -2201,6 +2205,9 @@ function validateProjectMetadataInput(input: HarnessProjectMetadataUpdateInput):
   ]
   if (required.some((value) => typeof value !== "string" || value.trim().length === 0)) {
     throw new Error("Project name, code, system and workspace are required")
+  }
+  if (typeof input.isTestProject !== "boolean") {
+    throw new Error("请选择是否作为测试项目")
   }
   if (typeof input.description !== "string") {
     throw new Error("Project description must be a string")
@@ -3312,6 +3319,7 @@ export async function createHarnessProject(
     description: input.description.trim(),
     projectCode: input.projectCode.trim(),
     projectFromLean: input.projectFromLean === true,
+    isTestProject: input.isTestProject,
     projectDir: input.projectDir.trim(),
     systemId: input.systemId.trim(),
     systemName: input.systemName.trim(),
@@ -3561,6 +3569,7 @@ export async function updateHarnessProjectMetadata(
       description: input.description.trim(),
       projectCode: input.projectCode.trim(),
       projectFromLean: input.projectFromLean === true,
+      isTestProject: input.isTestProject,
       projectDir: existingProjectDir,
       systemId: input.systemId.trim(),
       systemName: input.systemName.trim(),

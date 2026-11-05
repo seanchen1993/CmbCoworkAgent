@@ -1,3 +1,5 @@
+import type { ManagedRunModelSelection } from "./managed-run-model"
+
 export type HarnessUiKind =
   | "pending"
   | "active"
@@ -104,8 +106,6 @@ export interface HarnessKnowledgePreviewFile {
 export interface HarnessKnowledgePreviewResult {
   exists: boolean
   path?: string
-  /** Sender-bound capability for previewing descendants of `path`. */
-  previewGrant?: string
   files: HarnessKnowledgePreviewFile[]
   error?: string
 }
@@ -222,6 +222,7 @@ export interface HarnessProjectMetadata {
   description: string
   projectCode: string
   projectFromLean: boolean
+  isTestProject?: boolean
   projectDir: string
   systemId: string
   systemName: string
@@ -246,6 +247,7 @@ export interface HarnessProjectCreateInput {
   name: string
   projectCode: string
   projectFromLean: boolean
+  isTestProject?: boolean
   projectDir: string
   description: string
   systemId: string
@@ -418,6 +420,7 @@ export interface ManagedRunStartInput {
   workspacePath: string
   initialUserMessage?: string
   existingThreadId?: string
+  modelSelection?: ManagedRunModelSelection
 }
 
 export interface ManagedRunStartValidationInput {
@@ -466,6 +469,7 @@ export interface HarnessProjectMetadataUpdateInput {
   name: string
   projectCode: string
   projectFromLean: boolean
+  isTestProject?: boolean
   projectDir: string
   description: string
   systemId: string
@@ -480,6 +484,7 @@ export interface HarnessProjectListItem {
   description: string
   projectCode: string
   projectFromLean: boolean
+  isTestProject?: boolean
   projectDir: string
   systemId: string
   systemName: string
@@ -576,6 +581,7 @@ export interface ManagedRunSnapshot {
   featureId: string
   status: ManagedRunStatus
   workspacePath?: string
+  modelSelection?: ManagedRunModelSelection
   currentSession?: {
     threadId: string
     workspacePath?: string
@@ -588,6 +594,8 @@ export interface ManagedRunSnapshot {
     nextActionHash: string
   }
   providerRetryCount: number
+  /** Absent in historical records; the store normalizes it to zero on read. */
+  totalRetryCount?: number
   nextRetryAt?: string
   failureReason?: string
   cancellationReason?: string
@@ -621,6 +629,7 @@ export interface ManagedRunDecisionFacts {
   initialInspection: boolean
   previousNodeId?: string
   providerRetryCount: number
+  totalRetryCount?: number
   contextInputTokens?: number
   contextMaxTokens?: number
   contextUsageRatio?: number
@@ -894,6 +903,7 @@ export interface AgentTurnEndEvent extends AutoModeEventBase {
   endReason: {
     code: "normal" | "provider_error" | "hook_halt" | "failure_fuse" | "unknown"
     message?: string
+    retryable?: boolean
   }
   contextUsage?: {
     inputTokens: number

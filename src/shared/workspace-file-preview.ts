@@ -40,11 +40,20 @@ export type WorkspaceFilePreviewSource =
       filePath: string
       workspacePathKind?: WorkspaceFilePreviewWorkspacePathKind
       externalGrant?: never
+      knowledgeBaseId?: never
     }
   | {
       externalGrant: string
+      knowledgeBaseId?: never
       filePath: string
       threadId?: never
+      workspacePathKind?: never
+    }
+  | {
+      knowledgeBaseId: string
+      filePath: string
+      threadId?: never
+      externalGrant?: never
       workspacePathKind?: never
     }
 

@@ -26,9 +26,12 @@ import {
   MARKET_CONTENT_PREFIX,
   materializeMarketRuntimeRoot,
   prepareMarketCommand,
+  persistMarketRuntimeDirectory,
   protectMarketDirectory,
   readContentFile,
-  readContentFileSync
+  readContentFileSync,
+  resolveMarketRuntimePath,
+  upgradeMarkedMarketDirectories
 } from "./market-content"
 import { discoverSkills, discoverSkillsSync } from "../skills/discovery"
 import { SkillUsageDetector } from "../agent/skill-evolution/usage-detector"
@@ -52,6 +55,55 @@ afterEach(() => {
 })
 
 describe("market content storage and runtime", () => {
+  it("limits encoding and generated knowledge persistence to the plugin directory", () => {
+    const parent = fixture()
+    const plugin = join(parent, "plugin")
+    const workspace = join(parent, "workspace")
+    mkdirSync(join(plugin, "knowledge"), { recursive: true })
+    mkdirSync(workspace)
+    writeFileSync(join(workspace, "report.md"), "outside report")
+    const untouched = encodeMarketContent(Buffer.from("outside existing envelope"))
+    writeFileSync(join(workspace, "existing.md"), untouched)
+    writeFileSync(join(plugin, "SKILL.md"), "instructions")
+    writeFileSync(join(plugin, "knowledge", "old.md"), "old")
+    protectMarketDirectory(plugin)
+    const runtime = materializeMarketRuntimeRoot(plugin)
+    rmSync(join(runtime, "knowledge", "old.md"))
+    writeFileSync(join(runtime, "knowledge", "new.md"), "new knowledge")
+    writeFileSync(join(runtime, "knowledge", "data.json"), "{}")
+    persistMarketRuntimeDirectory(plugin, join(plugin, "knowledge"))
+    expect(readFileSync(join(plugin, "knowledge", "new.md"), "utf8")).toContain(
+      MARKET_CONTENT_PREFIX
+    )
+    expect(readFileSync(join(plugin, "knowledge", "data.json"), "utf8")).toBe("{}")
+    expect(existsSync(join(plugin, "knowledge", "old.md"))).toBe(false)
+    expect(() => persistMarketRuntimeDirectory(plugin, workspace)).toThrow()
+    expect(() => persistMarketRuntimeDirectory(plugin, plugin)).toThrow()
+    expect(readFileSync(join(workspace, "report.md"), "utf8")).toBe("outside report")
+    expect(readFileSync(join(workspace, "existing.md"))).toEqual(untouched)
+    cleanupMarketRuntimeContent()
+    expect(readContentFileSync(join(plugin, "knowledge", "new.md"), "utf8")).toBe("new knowledge")
+  })
+
+  it("refuses knowledge persistence through a junction into another directory", () => {
+    const parent = fixture()
+    const plugin = join(parent, "plugin")
+    const outside = join(parent, "outside")
+    mkdirSync(plugin)
+    mkdirSync(outside)
+    writeFileSync(join(outside, "report.md"), "outside")
+    protectMarketDirectory(plugin)
+    const runtime = materializeMarketRuntimeRoot(plugin)
+    mkdirSync(join(runtime, "knowledge"))
+    writeFileSync(join(runtime, "knowledge", "report.md"), "generated")
+    symlinkSync(
+      outside,
+      join(plugin, "knowledge"),
+      process.platform === "win32" ? "junction" : "dir"
+    )
+    expect(() => persistMarketRuntimeDirectory(plugin, join(plugin, "knowledge"))).toThrow("受保护")
+    expect(readFileSync(join(outside, "report.md"), "utf8")).toBe("outside")
+  })
   it("round-trips Unicode, empty content and every binary byte without guessing plain text", () => {
     for (const content of [
       Buffer.from("企业知识\n🦀"),
@@ -80,7 +132,7 @@ describe("market content storage and runtime", () => {
     protectMarketDirectory(root)
     expect(isMarketProtectionComplete(root)).toBe(true)
     expect(readContentFileSync(join(root, "SKILL.md"), "utf8")).toBe("encoded")
-    expect(readFileSync(join(root, "notes.txt"), "utf8")).toContain(MARKET_CONTENT_PREFIX)
+    expect(readFileSync(join(root, "notes.txt"), "utf8")).toBe("not encoded yet")
   })
 
   it("preserves packed Git metadata and read-only indexes in newly protected bundles", () => {
@@ -118,7 +170,8 @@ describe("market content storage and runtime", () => {
     expect(statSync(index).mode & 0o200).toBe(0)
     expect(git("rev-parse", "HEAD")).toBe(head)
     git("fsck", "--full")
-    expect(readFileSync(join(repo, "script.cjs"), "utf8")).toContain(MARKET_CONTENT_PREFIX)
+    expect(readFileSync(join(repo, "script.cjs"), "utf8")).toBe("console.log('market-script')\n")
+    expect(git("status", "--porcelain")).toBe("")
     const runtime = materializeMarketRuntimeRoot(root)
     expect(
       execFileSync("git", ["-C", join(runtime, "sys"), "rev-parse", "HEAD"], { encoding: "utf8" })
@@ -140,7 +193,7 @@ describe("market content storage and runtime", () => {
     )
   })
 
-  it("encodes every asset once and preserves nested skill discovery and decoded runtime reads", async () => {
+  it("encodes Markdown once and preserves plain assets and nested skill discovery", async () => {
     const root = fixture()
     mkdirSync(join(root, "child"))
     const md = "---\nname: 企业分析\ndescription: 分析报告\n---\n机密步骤"
@@ -150,7 +203,7 @@ describe("market content storage and runtime", () => {
     protectMarketDirectory(root)
     const encoded = readFileSync(join(root, "SKILL.md"))
     expect(encoded.toString()).not.toContain("机密步骤")
-    expect(readFileSync(join(root, "asset.bin"), "utf8")).toContain(MARKET_CONTENT_PREFIX)
+    expect(readFileSync(join(root, "asset.bin"))).toEqual(Buffer.from([0, 128, 255]))
     protectMarketDirectory(root)
     expect(readFileSync(join(root, "SKILL.md"))).toEqual(encoded)
     expect(readContentFileSync(join(root, "SKILL.md"), "utf8")).toBe(md)
@@ -176,11 +229,152 @@ describe("market content storage and runtime", () => {
       "企业知识\n00ff\n"
     )
     const prepared = prepareMarketCommand(`node "${join(root, "run.cjs")}"`, root, [root])
-    expect(prepared.command).toContain(runtime)
+    expect(prepared.command).toBe(`node "${join(runtime, "run.cjs")}"`)
     expect(prepared.cwd).toBe(runtime)
-    expect(readFileSync(join(root, "run.cjs"), "utf8")).toContain(MARKET_CONTENT_PREFIX)
+    expect(execFileSync(process.execPath, [join(runtime, "run.cjs")], { encoding: "utf8" })).toBe(
+      "企业知识\n00ff\n"
+    )
+    expect(resolveMarketRuntimePath(root)).toBe(runtime)
+    expect(resolveMarketRuntimePath(join(root, "run.cjs"))).toBe(join(runtime, "run.cjs"))
+    expect(readFileSync(join(root, "run.cjs"), "utf8")).not.toContain(MARKET_CONTENT_PREFIX)
     cleanupMarketRuntimeContent()
     expect(existsSync(runtime)).toBe(false)
+  })
+
+  it("encodes only .md files case-insensitively, including nested Markdown", () => {
+    const root = fixture()
+    mkdirSync(join(root, "nested"))
+    const files = [
+      "SKILL.md",
+      "README.MD",
+      "nested/guide.Md",
+      "script.js",
+      "run.py",
+      "hooks.json",
+      "image.png",
+      "notes.mdx",
+      "empty",
+      ".env"
+    ]
+    for (const file of files) writeFileSync(join(root, file), Buffer.from([0, 1, 128, 255]))
+    protectMarketDirectory(root)
+    for (const file of files) {
+      const stored = readFileSync(join(root, file))
+      if (file.toLowerCase().endsWith(".md")) {
+        expect(stored.toString()).toContain(MARKET_CONTENT_PREFIX)
+        expect(decodeMarketContent(stored)).toEqual(Buffer.from([0, 1, 128, 255]))
+      } else expect(stored).toEqual(Buffer.from([0, 1, 128, 255]))
+    }
+  })
+
+  it("keeps workspace Markdown plain when scripts copy and render market templates", () => {
+    const parent = fixture()
+    const root = join(parent, "plugin")
+    // A similar prefix must not redirect the user's output directory.
+    const workspace = join(parent, "plugin-output")
+    mkdirSync(root)
+    mkdirSync(workspace)
+    const template = "# 报告模板\n企业分析内容\n"
+    writeFileSync(join(root, "template.md"), template)
+    writeFileSync(join(root, "asset.bin"), Buffer.from([0, 128, 255]))
+    writeFileSync(
+      join(root, "run.cjs"),
+      `const fs = require("node:fs"), path = require("node:path")
+const output = process.argv[2]
+fs.writeFileSync(path.join(output, "fresh.md"), "# New report")
+fs.copyFileSync(path.join(__dirname, "template.md"), path.join(output, "copied.md"))
+fs.writeFileSync(path.join(output, "rendered.md"), fs.readFileSync(path.join(__dirname, "template.md"), "utf8") + "Result")
+fs.copyFileSync(path.join(__dirname, "asset.bin"), path.join(output, "asset.bin"))
+console.log(process.cwd())`
+    )
+    protectMarketDirectory(root)
+    const encodedTemplate = readFileSync(join(root, "template.md"))
+    const script = prepareMarketCommand(join(root, "run.cjs"), workspace, [root])
+    const output = prepareMarketCommand(workspace, workspace, [root])
+    expect(script.cwd).toBe(workspace)
+    expect(output).toEqual({ command: workspace, cwd: workspace })
+    expect(
+      execFileSync(process.execPath, [script.command, output.command], {
+        cwd: script.cwd,
+        encoding: "utf8"
+      }).trim()
+    ).toBe(workspace)
+    expect(readFileSync(join(workspace, "fresh.md"), "utf8")).toBe("# New report")
+    expect(readFileSync(join(workspace, "copied.md"), "utf8")).toBe(template)
+    expect(readFileSync(join(workspace, "rendered.md"), "utf8")).toBe(template + "Result")
+    expect(readFileSync(join(workspace, "asset.bin"))).toEqual(Buffer.from([0, 128, 255]))
+    expect(findProtectedMarketRoot(workspace)).toBeNull()
+    expect(readFileSync(join(root, "template.md"))).toEqual(encodedTemplate)
+    expect(encodedTemplate.toString()).toContain(MARKET_CONTENT_PREFIX)
+    cleanupMarketRuntimeContent()
+    expect(readFileSync(join(workspace, "copied.md"), "utf8")).toBe(template)
+  })
+
+  it("maps shell and JSON paths without changing sibling paths or workspace cwd", () => {
+    const parent = fixture()
+    const root = join(parent, "plugin")
+    const workspace = join(parent, "plugin-output")
+    mkdirSync(root)
+    mkdirSync(workspace)
+    writeFileSync(join(root, "template.md"), "template")
+    protectMarketDirectory(root)
+    const runtime = materializeMarketRuntimeRoot(root)
+    for (const format of [
+      (value: string) => value,
+      (value: string) => value.replaceAll("\\", "/"),
+      (value: string) => value.replaceAll("\\", "\\\\")
+    ]) {
+      const command = `copy "${format(join(root, "template.md"))}" "${format(join(workspace, "report.md"))}"`
+      expect(prepareMarketCommand(command, workspace, [root])).toEqual({
+        command: `copy "${format(join(runtime, "template.md"))}" "${format(join(workspace, "report.md"))}"`,
+        cwd: workspace
+      })
+      const unrelated = `echo "prefix${format(root)}"`
+      expect(prepareMarketCommand(unrelated, workspace, [root]).command).toBe(unrelated)
+    }
+    expect(prepareMarketCommand("node run.cjs", root, [root]).cwd).toBe(runtime)
+    expect(resolveMarketRuntimePath(runtime)).toBe(runtime)
+  })
+
+  it("upgrades only marked encoded installs and restores every non-Markdown byte", () => {
+    const root = fixture()
+    mkdirSync(join(root, "nested"))
+    const files = ["SKILL.md", "nested/Guide.MD", "run.cjs", "config.json", "asset.bin"]
+    const original = Buffer.from([0, 1, 128, 255])
+    for (const file of files) writeFileSync(join(root, file), encodeMarketContent(original))
+    writeFileSync(
+      join(root, MARKET_CONTENT_MARKER),
+      '{"version":1,"origin":"market","complete":true}'
+    )
+    expect(isMarketProtectionComplete(root)).toBe(false)
+    expect(upgradeMarkedMarketDirectories([root])).toBe(true)
+    expect(isMarketProtectionComplete(root)).toBe(true)
+    for (const file of files) {
+      expect(readFileSync(join(root, file))).toEqual(
+        file.toLowerCase().endsWith(".md") ? encodeMarketContent(original) : original
+      )
+    }
+    expect(upgradeMarkedMarketDirectories([root])).toBe(false)
+    const plainRoot = fixture()
+    writeFileSync(join(plainRoot, "SKILL.md"), "legacy plain")
+    expect(upgradeMarkedMarketDirectories([plainRoot])).toBe(false)
+    expect(readFileSync(join(plainRoot, "SKILL.md"), "utf8")).toBe("legacy plain")
+  })
+
+  it("retries incomplete upgrades after an encoded asset is repaired", () => {
+    const root = fixture()
+    writeFileSync(join(root, "SKILL.md"), encodeMarketContent(Buffer.from("private")))
+    writeFileSync(join(root, "config.json"), MARKET_CONTENT_PREFIX + "broken!")
+    writeFileSync(
+      join(root, MARKET_CONTENT_MARKER),
+      '{"version":1,"origin":"market","complete":false}'
+    )
+    expect(() => protectMarketDirectory(root)).toThrow("损坏")
+    expect(isMarketProtectionComplete(root)).toBe(false)
+    writeFileSync(join(root, "config.json"), encodeMarketContent(Buffer.from("{}")))
+    expect(upgradeMarkedMarketDirectories([root])).toBe(true)
+    expect(readFileSync(join(root, "config.json"), "utf8")).toBe("{}")
+    expect(readContentFileSync(join(root, "SKILL.md"), "utf8")).toBe("private")
   })
 
   it("keeps originals readable and refuses encoded copies uploaded as originals", () => {

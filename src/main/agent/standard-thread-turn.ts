@@ -36,6 +36,8 @@ import {
   buildInternalGoalPromptFromHookResult
 } from "./goals/internal-prompt"
 import { buildOrderedChain } from "./failover"
+import { getManagedRunModelOverride } from "../harness-board/managed-run-model"
+import { IdleModelServiceHoursError } from "../../shared/idle-model-service-window"
 import { activateSkillLifecycle, formatSkillHookContext } from "./skill-lifecycle/activation"
 import { parseSkillUseBlock, type ParsedSkillUseBlock } from "./skill-lifecycle/marker"
 import { SkillLifecycleRegistry, type SkillLifecycleMatch } from "./skill-lifecycle/registry"
@@ -694,6 +696,7 @@ export interface StandardTurnRoutingInput {
   message?: string
   threadId: string
   requestedModelId?: string
+  managedExecution?: boolean
   continuation?: RoutingContext["continuation"]
   routingMode?: RoutingContext["routingMode"]
 }
@@ -708,6 +711,21 @@ export interface PreparedStandardTurnRouting {
 export async function resolveStandardTurnRouting(
   input: StandardTurnRoutingInput
 ): Promise<PreparedStandardTurnRouting> {
+  const managedModelId = getManagedRunModelOverride(input.threadId, input.managedExecution)
+  if (managedModelId) {
+    return {
+      result: {
+        resolvedModelId: managedModelId,
+        resolvedTier: "premium",
+        routeReason: "managed-ultra",
+        fallbackChain: [],
+        layer: "pinned"
+      },
+      effectiveModelId: managedModelId,
+      primaryTier: "premium",
+      orderedModelIds: [managedModelId]
+    }
+  }
   const result = await resolveModel({
     taskSource: input.taskSource,
     message: input.message,
@@ -715,7 +733,10 @@ export async function resolveStandardTurnRouting(
     requestedModelId: input.requestedModelId,
     continuation: input.continuation,
     routingMode: input.routingMode ?? getGlobalRoutingMode()
-  }).catch(() => null)
+  }).catch((error) => {
+    if (error instanceof IdleModelServiceHoursError) throw error
+    return null
+  })
   const effectiveModelId = result?.resolvedModelId ?? input.requestedModelId
   const primaryTier = result?.resolvedTier ?? "premium"
   return {

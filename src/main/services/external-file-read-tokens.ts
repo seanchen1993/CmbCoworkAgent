@@ -1,4 +1,8 @@
-import { findProtectedMarketRoot, MARKET_CONTENT_DENIED } from "./market-content"
+import {
+  findProtectedMarketRoot,
+  MARKET_CONTENT_DENIED,
+  resolveMarketRuntimePath
+} from "./market-content"
 import { randomUUID } from "node:crypto"
 import { realpath } from "node:fs/promises"
 import path from "node:path"
@@ -19,6 +23,7 @@ interface ExternalFileReadGrantEntry {
   senderId: number
   scopeKey: string
   createdAt: number
+  marketKnowledge: boolean
 }
 
 const externalFileGrants = new Map<string, ExternalFileReadGrantEntry>()
@@ -74,7 +79,8 @@ function normalizeRelativePathKey(relativePath: string): string {
 
 function buildAllowedRelativePaths(
   rootPath: string,
-  trustedRelativePaths: readonly string[]
+  trustedRelativePaths: readonly string[],
+  marketKnowledge: boolean
 ): Set<string> | null {
   if (trustedRelativePaths.length === 0 || trustedRelativePaths.length > 2_000) return null
   const allowed = new Set<string>()
@@ -84,7 +90,7 @@ function buildAllowedRelativePaths(
     if (
       !isPathInside(rootPath, candidate) ||
       isProtectedPath(candidate) ||
-      findProtectedMarketRoot(candidate)
+      (!marketKnowledge && findProtectedMarketRoot(candidate))
     )
       return null
     allowed.add(normalizeRelativePathKey(path.relative(rootPath, candidate)))
@@ -97,7 +103,8 @@ export function issueExternalFileReadGrant(
   trustedRootPath: string,
   senderId: number,
   trustedRelativePaths: readonly string[],
-  scopeKey: string
+  scopeKey: string,
+  policy?: "market-knowledge"
 ): { grant: string } | { error: string } {
   if (
     typeof trustedRootPath !== "string" ||
@@ -112,12 +119,23 @@ export function issueExternalFileReadGrant(
     return { error: "Invalid external preview root" }
   }
 
-  if (findProtectedMarketRoot(trustedRootPath)) return { error: MARKET_CONTENT_DENIED }
+  const marketKnowledge = policy === "market-knowledge"
+  const marketRoot = findProtectedMarketRoot(trustedRootPath)
+  if (
+    marketRoot &&
+    (!marketKnowledge || path.resolve(trustedRootPath) === path.resolve(marketRoot))
+  ) {
+    return { error: MARKET_CONTENT_DENIED }
+  }
   const rootPath = path.resolve(trustedRootPath)
   if (!path.isAbsolute(rootPath) || isProtectedPath(rootPath)) {
     return { error: "Access denied: path is protected" }
   }
-  const allowedRelativePaths = buildAllowedRelativePaths(rootPath, trustedRelativePaths)
+  const allowedRelativePaths = buildAllowedRelativePaths(
+    rootPath,
+    trustedRelativePaths,
+    marketKnowledge
+  )
   if (!allowedRelativePaths) return { error: "Invalid external preview allowlist" }
 
   pruneExpired()
@@ -127,7 +145,8 @@ export function issueExternalFileReadGrant(
     if (
       entry.senderId === senderId &&
       entry.rootPath === rootPath &&
-      entry.scopeKey === scopeKey
+      entry.scopeKey === scopeKey &&
+      entry.marketKnowledge === marketKnowledge
     ) {
       entry.allowedRelativePaths = allowedRelativePaths
       entry.createdAt = Date.now()
@@ -144,7 +163,8 @@ export function issueExternalFileReadGrant(
     allowedRelativePaths,
     senderId,
     scopeKey,
-    createdAt: Date.now()
+    createdAt: Date.now(),
+    marketKnowledge
   })
   return { grant }
 }
@@ -159,11 +179,7 @@ export async function resolveExternalFileReadGrant(
   requestedPath: unknown
 ): Promise<{ filePath: string; rootPath: string } | { error: string }> {
   if (!grant || typeof grant !== "string") return { error: "Missing or invalid grant" }
-  if (
-    typeof requestedPath !== "string" ||
-    !requestedPath ||
-    requestedPath.length > 32_768
-  ) {
+  if (typeof requestedPath !== "string" || !requestedPath || requestedPath.length > 32_768) {
     return { error: "Missing or invalid external preview path" }
   }
 
@@ -181,7 +197,7 @@ export async function resolveExternalFileReadGrant(
   if (
     !isPathInside(entry.rootPath, candidate) ||
     isProtectedPath(candidate) ||
-    findProtectedMarketRoot(candidate)
+    (!entry.marketKnowledge && findProtectedMarketRoot(candidate))
   ) {
     return { error: "Access denied: path outside trusted preview root" }
   }
@@ -198,11 +214,16 @@ export async function resolveExternalFileReadGrant(
     if (
       !isPathInside(realRoot, realCandidate) ||
       isProtectedPath(realCandidate) ||
-      findProtectedMarketRoot(realCandidate)
+      (!entry.marketKnowledge && findProtectedMarketRoot(realCandidate))
     ) {
       return { error: "Access denied: symlink target outside trusted preview root" }
     }
-    return { filePath: realCandidate, rootPath: realRoot }
+    return entry.marketKnowledge
+      ? {
+          filePath: resolveMarketRuntimePath(realCandidate),
+          rootPath: resolveMarketRuntimePath(realRoot)
+        }
+      : { filePath: realCandidate, rootPath: realRoot }
   } catch (error) {
     return {
       error: error instanceof Error ? error.message : "External preview path is unavailable"

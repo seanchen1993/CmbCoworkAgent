@@ -52,6 +52,7 @@ import {
   renderPluginSkillMarkdownPlaceholders
 } from "./markdown-placeholders"
 import { replace } from "./replace"
+import { withFileOperation, withWorkspaceExecution } from "./file-operation-lock"
 import type { ToolOrchestrator } from "./tool-orchestrator"
 import {
   assessCommandSafety,
@@ -744,8 +745,6 @@ export class LocalSandbox
   private readonly _virtualMode: boolean
   private readonly _cwd: string
   private readonly _maxFileSizeBytes: number
-  /** Per-file Promise chain lock to serialize concurrent read-write operations */
-  private readonly _fileLocks = new Map<string, Promise<void>>()
   /** mtime recorded after each successful read/write, for external-modification detection */
   private readonly _fileReadTimes = new Map<string, number>()
   private readonly _onFileMutation?: (filePath: string, kind: AgentFileMutationKind) => void
@@ -2863,6 +2862,7 @@ export class LocalSandbox
   private async runHooks(event: HookEvent, context: HookContext): Promise<HookResult | null> {
     const hookContext: HookContext = {
       ...context,
+      abortSignal: this.abortSignal,
       ...(this.pluginOutputDir && !context.pluginOutputDir
         ? { pluginOutputDir: this.pluginOutputDir }
         : {}),
@@ -3196,145 +3196,158 @@ export class LocalSandbox
       return []
     }
 
-    // Resolve the base path once for reuse
-    let baseFull: string
-    try {
-      baseFull = this._resolvePath(effectivePath === "/" ? "." : effectivePath || ".")
-    } catch {
-      return []
-    }
-    // Early exit if path doesn't exist; cache stat for reuse below
-    let baseStat: Awaited<ReturnType<typeof fs.lstat>>
-    try {
-      baseStat = await fs.lstat(baseFull)
-    } catch {
-      return []
-    }
-    if (baseStat.isSymbolicLink()) return []
-    if (this.isHiddenSkillPath(baseFull, realpathCache)) {
-      return []
-    }
-    const isFile = baseStat.isFile()
-
-    // Call parent's private ripgrepSearch directly to distinguish
-    // "rg found nothing" ({}) from "rg unavailable" (null)
-    const ripgrepSearch = getFilesystemBackendInternals(this).ripgrepSearch
-
-    const t0 = Date.now()
-    let rgResult: Record<string, Array<[number, string]>> | null | undefined
-    if (typeof ripgrepSearch === "function" && !findProtectedMarketRoot(baseFull)) {
-      try {
-        rgResult = await ripgrepSearch.call(this, effectivePattern, baseFull, effectiveGlob ?? null)
-      } catch (error) {
-        console.warn("[LocalSandbox] ripgrepSearch failed, falling back:", error)
-        rgResult = undefined
-      }
-    }
-    const rgMs = Date.now() - t0
-    // undefined = method missing (upstream API changed), treat same as unavailable
-    const rgAvailable = rgResult !== null && rgResult !== undefined
-
-    // Convert ripgrep dict → flat array
-    let results: GrepMatch[] = []
-    if (rgResult) {
-      for (const [fpath, items] of Object.entries(rgResult)) {
-        for (const [lineNum, lineText] of items) {
-          results.push({ path: fpath, line: lineNum, text: lineText })
+    const capped = await withWorkspaceExecution<GrepMatch[]>(
+      this.workingDir,
+      "read",
+      async () => {
+        // Resolve the base path once for reuse
+        let baseFull: string
+        try {
+          baseFull = this._resolvePath(effectivePath === "/" ? "." : effectivePath || ".")
+        } catch {
+          return []
         }
-      }
-    }
-
-    // When path points to a specific file, filter results to only include
-    // matches from the intended file (ripgrep may return broader results).
-    if (results.length > 0 && effectivePath !== "/" && isFile) {
-      let expectedPath: string
-      if (this._virtualMode) {
-        const relative = path.relative(this._cwd, baseFull)
-        expectedPath = "/" + relative.split(path.sep).join("/")
-      } else {
-        expectedPath = baseFull
-      }
-      results = results.filter((m) => m.path === expectedPath)
-    }
-
-    let source = results.length > 0 ? "ripgrep" : "none"
-
-    // Fall back to encoding-aware literal search when:
-    // - ripgrep is unavailable (null/undefined), OR
-    // - ripgrep returned empty for a single file (may be non-UTF-8 / binary-detected,
-    //   e.g. GBK/Shift-JIS files that ripgrep skips as "binary")
-    // For directory-level searches, empty ripgrep results are normal — skip fallback
-    // to keep grep performance aligned with rg-first tools like Claude Code.
-    let fallbackStoppedEarly = false
-    if (!rgAvailable || (results.length === 0 && isFile)) {
-      const t1 = Date.now()
-      const fallbackResult = await this.encodingAwareLiteralSearch(
-        effectivePattern,
-        baseFull,
-        effectiveGlob ?? null,
-        realpathCache
-      )
-      fallbackStoppedEarly = fallbackResult.stoppedEarly
-      const fallbackMs = Date.now() - t1
-      for (const [fpath, items] of Object.entries(fallbackResult.results)) {
-        for (const [lineNum, lineText] of items) {
-          results.push({ path: fpath, line: lineNum, text: lineText })
+        // Early exit if path doesn't exist; cache stat for reuse below
+        let baseStat: Awaited<ReturnType<typeof fs.lstat>>
+        try {
+          baseStat = await fs.lstat(baseFull)
+        } catch {
+          return []
         }
-      }
-      if (results.length > 0) source = "encoding-aware-fallback"
-      console.log(
-        `[LocalSandbox] grepRaw fallback: pattern="${effectivePattern}", results=${results.length}, fallbackMs=${fallbackMs}`
-      )
-    }
+        if (baseStat.isSymbolicLink()) return []
+        if (this.isHiddenSkillPath(baseFull, realpathCache)) {
+          return []
+        }
+        const isFile = baseStat.isFile()
 
-    console.log(
-      `[LocalSandbox] grepRaw: source=${source}, pattern="${effectivePattern}", results=${results.length}, rgMs=${rgMs}`
+        // Call parent's private ripgrepSearch directly to distinguish
+        // "rg found nothing" ({}) from "rg unavailable" (null)
+        const ripgrepSearch = getFilesystemBackendInternals(this).ripgrepSearch
+
+        const t0 = Date.now()
+        let rgResult: Record<string, Array<[number, string]>> | null | undefined
+        if (typeof ripgrepSearch === "function" && !findProtectedMarketRoot(baseFull)) {
+          try {
+            rgResult = await ripgrepSearch.call(
+              this,
+              effectivePattern,
+              baseFull,
+              effectiveGlob ?? null
+            )
+          } catch (error) {
+            console.warn("[LocalSandbox] ripgrepSearch failed, falling back:", error)
+            rgResult = undefined
+          }
+        }
+        const rgMs = Date.now() - t0
+        // undefined = method missing (upstream API changed), treat same as unavailable
+        const rgAvailable = rgResult !== null && rgResult !== undefined
+
+        // Convert ripgrep dict → flat array
+        let results: GrepMatch[] = []
+        if (rgResult) {
+          for (const [fpath, items] of Object.entries(rgResult)) {
+            for (const [lineNum, lineText] of items) {
+              results.push({ path: fpath, line: lineNum, text: lineText })
+            }
+          }
+        }
+
+        // When path points to a specific file, filter results to only include
+        // matches from the intended file (ripgrep may return broader results).
+        if (results.length > 0 && effectivePath !== "/" && isFile) {
+          let expectedPath: string
+          if (this._virtualMode) {
+            const relative = path.relative(this._cwd, baseFull)
+            expectedPath = "/" + relative.split(path.sep).join("/")
+          } else {
+            expectedPath = baseFull
+          }
+          results = results.filter((m) => m.path === expectedPath)
+        }
+
+        let source = results.length > 0 ? "ripgrep" : "none"
+
+        // Fall back to encoding-aware literal search when:
+        // - ripgrep is unavailable (null/undefined), OR
+        // - ripgrep returned empty for a single file (may be non-UTF-8 / binary-detected,
+        //   e.g. GBK/Shift-JIS files that ripgrep skips as "binary")
+        // For directory-level searches, empty ripgrep results are normal — skip fallback
+        // to keep grep performance aligned with rg-first tools like Claude Code.
+        let fallbackStoppedEarly = false
+        if (!rgAvailable || (results.length === 0 && isFile)) {
+          const t1 = Date.now()
+          const fallbackResult = await this.encodingAwareLiteralSearch(
+            effectivePattern,
+            baseFull,
+            effectiveGlob ?? null,
+            realpathCache
+          )
+          fallbackStoppedEarly = fallbackResult.stoppedEarly
+          const fallbackMs = Date.now() - t1
+          for (const [fpath, items] of Object.entries(fallbackResult.results)) {
+            for (const [lineNum, lineText] of items) {
+              results.push({ path: fpath, line: lineNum, text: lineText })
+            }
+          }
+          if (results.length > 0) source = "encoding-aware-fallback"
+          console.log(
+            `[LocalSandbox] grepRaw fallback: pattern="${effectivePattern}", results=${results.length}, fallbackMs=${fallbackMs}`
+          )
+        }
+
+        console.log(
+          `[LocalSandbox] grepRaw: source=${source}, pattern="${effectivePattern}", results=${results.length}, rgMs=${rgMs}`
+        )
+
+        // Filter out matches inside disabled skills so their content cannot leak via grep.
+        if (this._hiddenSkillDirKeys.size > 0) {
+          results = results.filter((m) => !this.isHiddenSkillPath(m.path, realpathCache))
+        }
+
+        // Filter out any results from sensitive directories
+        if (this.windowsSandbox === "elevated") {
+          results = results.filter((m) => {
+            return !this.isSensitiveSandboxPath(m.path, realpathCache)
+          })
+        }
+
+        const capped: GrepMatch[] = []
+        let charCount = 0
+
+        for (const match of results) {
+          if (capped.length >= LocalSandbox.MAX_GREP_MATCHES) break
+          // Truncate overly long lines (e.g. minified JS) to avoid blowing the char budget
+          const text = LocalSandbox.truncateGrepLine(match.text)
+          const estChars = match.path.length + text.length + 16
+          if (charCount + estChars > LocalSandbox.MAX_GREP_CHARS) break
+          capped.push(text !== match.text ? { ...match, text } : match)
+          charCount += estChars
+        }
+
+        if (capped.length < results.length) {
+          const omitted = results.length - capped.length
+          console.log(
+            "[LocalSandbox] grepRaw capped results:",
+            `${capped.length}/${results.length}`,
+            `(omitted ${omitted}, chars=${charCount})`
+          )
+          capped.push({
+            path: "(truncated)",
+            line: 0,
+            text: `Found ${results.length} total matches, showing first ${capped.length}. ${omitted} omitted — refine pattern/path/glob.`
+          })
+        } else if (fallbackStoppedEarly) {
+          capped.push({
+            path: "(truncated)",
+            line: 0,
+            text: `Fallback search stopped after reaching scan/output limits. Showing first ${capped.length} matches — refine pattern/path/glob.`
+          })
+        }
+        return capped
+      },
+      this.abortSignal
     )
-
-    // Filter out matches inside disabled skills so their content cannot leak via grep.
-    if (this._hiddenSkillDirKeys.size > 0) {
-      results = results.filter((m) => !this.isHiddenSkillPath(m.path, realpathCache))
-    }
-
-    // Filter out any results from sensitive directories
-    if (this.windowsSandbox === "elevated") {
-      results = results.filter((m) => {
-        return !this.isSensitiveSandboxPath(m.path, realpathCache)
-      })
-    }
-
-    const capped: GrepMatch[] = []
-    let charCount = 0
-
-    for (const match of results) {
-      if (capped.length >= LocalSandbox.MAX_GREP_MATCHES) break
-      // Truncate overly long lines (e.g. minified JS) to avoid blowing the char budget
-      const text = LocalSandbox.truncateGrepLine(match.text)
-      const estChars = match.path.length + text.length + 16
-      if (charCount + estChars > LocalSandbox.MAX_GREP_CHARS) break
-      capped.push(text !== match.text ? { ...match, text } : match)
-      charCount += estChars
-    }
-
-    if (capped.length < results.length) {
-      const omitted = results.length - capped.length
-      console.log(
-        "[LocalSandbox] grepRaw capped results:",
-        `${capped.length}/${results.length}`,
-        `(omitted ${omitted}, chars=${charCount})`
-      )
-      capped.push({
-        path: "(truncated)",
-        line: 0,
-        text: `Found ${results.length} total matches, showing first ${capped.length}. ${omitted} omitted — refine pattern/path/glob.`
-      })
-    } else if (fallbackStoppedEarly) {
-      capped.push({
-        path: "(truncated)",
-        line: 0,
-        text: `Fallback search stopped after reaching scan/output limits. Showing first ${capped.length} matches — refine pattern/path/glob.`
-      })
-    }
 
     const postResult = await this.runHooks("PostToolUse", {
       toolName: "grep",
@@ -4192,8 +4205,22 @@ export class LocalSandbox
         truncatedWithinLine,
         truncatedBeforeLine,
         lastVisibleSourceLine
-      } = await this.formatReadRange(effectiveFilePath, effectiveOffset, effectiveLimit, options)
-      await this.recordReadTime(resolvedPath)
+      } = await withFileOperation(
+        this.workingDir,
+        this._resolvePath(effectiveFilePath),
+        "read",
+        async () => {
+          const result = await this.formatReadRange(
+            effectiveFilePath,
+            effectiveOffset,
+            effectiveLimit,
+            options
+          )
+          await this.recordReadTime(result.resolvedPath)
+          return result
+        },
+        this.abortSignal
+      )
 
       if (!hasNonWhitespace) {
         recordTrustedToolFilePreviewSource(resolvedPath, "read")
@@ -4381,23 +4408,7 @@ export class LocalSandbox
    * Different file paths run in parallel; same path is FIFO-queued.
    */
   private async withFileLock<T>(resolvedPath: string, fn: () => Promise<T>): Promise<T> {
-    const lockKey = this.fileIdentityKey(resolvedPath)
-    const prev = this._fileLocks.get(lockKey) ?? Promise.resolve()
-    let release: () => void = () => {}
-    const gate = new Promise<void>((r) => {
-      release = r
-    })
-    const tail = prev.then(() => gate)
-    this._fileLocks.set(lockKey, tail)
-    try {
-      await prev
-      return await fn()
-    } finally {
-      release()
-      if (this._fileLocks.get(lockKey) === tail) {
-        this._fileLocks.delete(lockKey)
-      }
-    }
+    return withFileOperation(this.workingDir, resolvedPath, "write", fn, this.abortSignal)
   }
 
   private fileIdentityKey(resolvedPath: string): string {
@@ -7638,7 +7649,7 @@ export class LocalSandbox
       this._shellFileTelemetry &&
       !backgroundExecution &&
       shellFileCaptureContext.getStore() === true
-    const runUnserialized = (): Promise<LocalExecuteResponse> =>
+    const runCommand = (): Promise<LocalExecuteResponse> =>
       this.runWithShellFileCapture(command, effectiveCwd, captureFileEffects, shellSyntax, () =>
         this.executeRawUnserialized(
           command,
@@ -7649,6 +7660,20 @@ export class LocalSandbox
           options
         )
       )
+    const commandConcurrency = classifyCommandConcurrency(command)
+    const signal = overrideAbortSignal ?? this.abortSignal
+    // Classify the effective post-hook command here, including unsandboxed
+    // execution. Runtime classification alone cannot protect against hook rewrites
+    // or another workflow agent using its own LocalSandbox instance.
+    const runUnserialized = (): Promise<LocalExecuteResponse> =>
+      backgroundExecution
+        ? runCommand()
+        : withWorkspaceExecution(
+            this.workingDir,
+            commandConcurrency === "parallel_safe" ? "read" : "write",
+            runCommand,
+            signal
+          )
     if (
       process.platform !== "win32" ||
       effectiveSandboxMode === "none" ||
@@ -7663,7 +7688,6 @@ export class LocalSandbox
       sandboxWorkspaceRoot,
       effectiveSandboxMode
     )
-    const commandConcurrency = classifyCommandConcurrency(command)
     if (commandConcurrency === "parallel_safe") {
       return LocalSandbox.runParallelSafeExecution(queueKey, runUnserialized)
     }

@@ -1,4 +1,11 @@
 import type {
+  ManagedRunSchedule,
+  ManagedRunScheduleInput,
+  ManagedRunScheduleUpdateInput,
+  ManagedRunScheduleIdentity,
+  ManagedRunScheduleChange
+} from "../shared/managed-run-schedule"
+import type {
   KnowledgeAccumulationData,
   KnowledgeActiveDetails,
   KnowledgeFileReaders,
@@ -1296,7 +1303,7 @@ interface CustomAPI {
     }>
     generateTitle: (
       message: string,
-      context?: { threadId: string; skillName?: string }
+      context?: { threadId: string; skillName?: string; skillDescription?: string }
     ) => Promise<string>
     onThreadsChanged: (callback: () => void) => () => void
   }
@@ -1369,7 +1376,7 @@ interface CustomAPI {
         id: string
         ref: `builtin:${string}`
         source: "builtin"
-        origin: "remote" | "fallback"
+        origin: "remote" | "fallback" | "local"
         name: string
         baseUrl: string
         model: string
@@ -1384,7 +1391,9 @@ interface CustomAPI {
         enableThinkingEffort?: boolean
         thinkingEffort?: "low" | "high" | "max"
         tier?: "premium" | "economy"
-        lockedFields: Array<"baseUrl" | "model" | "apiKey">
+        notice?: string
+        unavailableReason?: string
+        lockedFields: Array<"baseUrl" | "model" | "apiKey" | "maxTokens">
       }>
     >
     updateBuiltinConfig: (
@@ -2223,7 +2232,8 @@ interface CustomAPI {
       buffer: ArrayBuffer,
       fileName: string,
       origin?: "market" | "local",
-      version?: string
+      version?: string,
+      marketplace?: PluginMetadata["marketplace"]
     ) => Promise<{ success: boolean; pluginName?: string; error?: string }>
     installFromDir: () => Promise<{ success: boolean; pluginName?: string; error?: string }>
     exportForMarket: (
@@ -2628,6 +2638,7 @@ interface CustomAPI {
     cancelRequests: (families?: string[]) => Promise<{ cancelled: number }>
     isAllowed: () => Promise<boolean>
     isProjectModeAllowed: () => Promise<boolean>
+    orgFilterDefaults: () => Promise<string[]>
     isAnalysisAgentAllowed: () => Promise<boolean>
     isTraceEvolverReviewAdmin: () => Promise<boolean>
     isUncommittedAnalysisAllowed: () => Promise<boolean>
@@ -2949,6 +2960,7 @@ interface CustomAPI {
       options?:
         | number
         | {
+            projectMode?: boolean
             page?: number
             pageSize?: number
             limit?: number
@@ -2979,6 +2991,7 @@ interface CustomAPI {
       commitSha: string
     ) => Promise<{ success: boolean; data?: DashboardCommitAdoptionEvents; error?: string }>
     exportSkillTraces: (payload: {
+      projectMode?: boolean
       skill: string
       range: { from: string; to: string }
       page: number
@@ -3083,6 +3096,15 @@ interface CustomAPI {
     ensureFeatureThreadImGrant: (
       input: HarnessFeatureThreadGrantInput
     ) => Promise<HarnessFeatureThreadGrantResult>
+    getActiveManagedRunSchedules: () => Promise<ManagedRunSchedule[]>
+    getManagedRunSchedule: (
+      projectId: string,
+      featureId: string
+    ) => Promise<ManagedRunSchedule | null>
+    scheduleManagedRun: (input: ManagedRunScheduleInput) => Promise<ManagedRunSchedule>
+    cancelManagedRunSchedule: (input: ManagedRunScheduleIdentity) => Promise<void>
+    updateManagedRunSchedule: (input: ManagedRunScheduleUpdateInput) => Promise<void>
+    onManagedRunScheduleChanged: (callback: (event: ManagedRunScheduleChange) => void) => () => void
     validateManagedRunStart: (input: ManagedRunStartValidationInput) => Promise<void>
     startManagedRun: (input: ManagedRunStartInput) => Promise<ManagedRunSummary>
     stopManagedRun: (input: ManagedRunStopInput) => Promise<boolean>

@@ -1,4 +1,6 @@
 import { projectHumanGate } from "../../../../shared/harness-notifications"
+import { IDLE_MODEL_OUTSIDE_HOURS_MESSAGE } from "../../../../shared/idle-model-service-window"
+import { IDLE_MODEL_SAP_REQUIRED_MESSAGE } from "../../../../shared/model-catalog"
 import { useHarnessNotifications } from "@/lib/harness-notifications"
 import { BizRetryDecisionCard } from "@/components/harness-board/BizRetryNotice"
 import React, {
@@ -1020,6 +1022,8 @@ const RECOVERABLE_QUEUE_ERRORS = new Set([
   QUEUE_MODEL_REQUIRED_ERROR,
   QUEUE_MODEL_MISSING_ERROR,
   QUEUE_MODEL_UNAVAILABLE_ERROR,
+  IDLE_MODEL_OUTSIDE_HOURS_MESSAGE,
+  IDLE_MODEL_SAP_REQUIRED_MESSAGE,
   QUEUE_WORKSPACE_REQUIRED_ERROR
 ])
 const CHAT_REPORT_UPLOAD_DEBOUNCE_MS = 250
@@ -1674,7 +1678,7 @@ export function ChatContainer({
     (remoteThreadInfo?.historical
       ? "设备接管前的远程历史 Thread 仅可查看"
       : remoteThreadInfo?.kind === "inbox"
-        ? "远程收件箱在桌面仅可查看；请从招乎继续发送消息"
+        ? "招乎默认聊天在桌面仅可查看；请从招乎继续发送消息"
         : null)
   const surfaceConfig = CHAT_SURFACE_CONFIG[surface]
   const [threadProjectionRuntime] = useState(() => getChatThreadProjectionRuntime(threadId))
@@ -5287,7 +5291,7 @@ export function ChatContainer({
         return
       }
       if (!selectedModel.available) {
-        setError("当前模型不可用，请先在模型配置中设置 API 密钥。")
+        setError(selectedModel.unavailableReason || QUEUE_MODEL_UNAVAILABLE_ERROR)
         return
       }
       if (!workspacePath) {
@@ -5575,7 +5579,7 @@ export function ChatContainer({
         }
 
         if (!selectedModel.available) {
-          setError("当前模型不可用，请先在模型配置中设置 API 密钥。")
+          setError(selectedModel.unavailableReason || QUEUE_MODEL_UNAVAILABLE_ERROR)
           return
         }
 
@@ -5778,6 +5782,7 @@ export function ChatContainer({
         attachmentDisplayPrefix,
         skillBlock,
         skillName: skill?.name,
+        skillDescription: skill?.description,
         builtinBrowser: browser,
         modelId: currentModel,
         created_at: new Date(),
@@ -5887,7 +5892,7 @@ export function ChatContainer({
             titleSource = getBuiltinBrowserTitleSource(browser)
           }
           if (titleSource) {
-            generateTitleForFirstMessage(threadId, titleSource, skill?.name)
+            generateTitleForFirstMessage(threadId, titleSource, skill?.name, skill?.description)
           }
         }
       }
@@ -6232,7 +6237,7 @@ export function ChatContainer({
         if (!queued.modelId && !currentModel) {
           setError(QUEUE_MODEL_REQUIRED_ERROR)
         } else if (queuedModel || currentSelectedModel) {
-          setError(QUEUE_MODEL_UNAVAILABLE_ERROR)
+          setError((queuedModel || currentSelectedModel)?.unavailableReason || QUEUE_MODEL_UNAVAILABLE_ERROR)
         } else {
           setError(QUEUE_MODEL_MISSING_ERROR)
         }
@@ -6330,7 +6335,12 @@ export function ChatContainer({
         const hasDefaultTitle = currentThread?.title?.startsWith("Thread ")
         const titleSource = queued.text.trim() || (queued.skillBlock ? "使用技能" : "")
         if (hasDefaultTitle && titleSource) {
-          generateTitleForFirstMessage(threadId, titleSource, queued.skillName)
+          generateTitleForFirstMessage(
+            threadId,
+            titleSource,
+            queued.skillName,
+            queued.skillDescription
+          )
         }
       }
       const startTime = Date.now()
@@ -7551,7 +7561,7 @@ export function ChatContainer({
   const interruptionNotice = hookInterruption
     ? interruptionNoticeCopy(hookInterruption.event, hookInterruption.action)
     : null
-  const remoteThreadTipLabel = remoteThreadInfo?.kind === "inbox" ? "远程收件箱" : "远程会话"
+  const remoteThreadTipLabel = remoteThreadInfo?.kind === "inbox" ? "招乎默认聊天" : "远程会话"
   const handleDismissRemoteThreadTip = useCallback(() => {
     setDismissedRemoteTipThreadIds((current) => {
       const next = new Set(current)
@@ -7665,7 +7675,7 @@ export function ChatContainer({
           <div className="min-w-0 flex-1 space-y-0.5">
             <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
               <span className="rounded bg-status-info/15 px-1.5 py-0.5 font-medium text-status-info-foreground">
-                {remoteThreadInfo.kind === "inbox" ? "远程收件箱" : "远程会话"}
+                {remoteThreadInfo.kind === "inbox" ? "招乎默认聊天" : "远程会话"}
               </span>
               {remoteThreadInfo.kind === "feature" && remoteThreadInfo.featureLabel ? (
                 <span className="font-medium">{remoteThreadInfo.featureLabel}</span>
@@ -7676,7 +7686,7 @@ export function ChatContainer({
               {remoteThreadInfo.kind === "inbox"
                 ? remoteThreadInfo.historical
                   ? "此 Thread 已停用，仅保留历史，不会接收新消息。"
-                  : "桌面仅用于查看历史和运行状态；请从招乎继续聊天。"
+                  : "这是招乎的默认聊天，桌面仅用于查看。要在招乎继续其他会话，请先在“接入招乎”中开启，再发送 /会话 切换。"
                 : remoteThreadInfo.historical
                   ? "此远程会话已停用，仅保留历史；请重新绑定。"
                   : isLoading

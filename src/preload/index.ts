@@ -1,4 +1,11 @@
 import type {
+  ManagedRunSchedule,
+  ManagedRunScheduleInput,
+  ManagedRunScheduleUpdateInput,
+  ManagedRunScheduleIdentity,
+  ManagedRunScheduleChange
+} from "../shared/managed-run-schedule"
+import type {
   KnowledgeAccumulationData,
   KnowledgeActiveDetails,
   KnowledgeFileReaders,
@@ -1349,7 +1356,7 @@ const api = {
     },
     generateTitle: (
       message: string,
-      context?: { threadId: string; skillName?: string }
+      context?: { threadId: string; skillName?: string; skillDescription?: string }
     ): Promise<string> => {
       return ipcRenderer.invoke("threads:generateTitle", message, context)
     },
@@ -1502,7 +1509,7 @@ const api = {
         id: string
         ref: `builtin:${string}`
         source: "builtin"
-        origin: "remote" | "fallback"
+        origin: "remote" | "fallback" | "local"
         name: string
         baseUrl: string
         model: string
@@ -1517,7 +1524,9 @@ const api = {
         enableThinkingEffort?: boolean
         thinkingEffort?: "low" | "high" | "max"
         tier?: "premium" | "economy"
-        lockedFields: Array<"baseUrl" | "model" | "apiKey">
+        notice?: string
+        unavailableReason?: string
+        lockedFields: Array<"baseUrl" | "model" | "apiKey" | "maxTokens">
       }>
     > => {
       return ipcRenderer.invoke("models:getBuiltinConfigs")
@@ -3087,9 +3096,10 @@ const api = {
       buffer: ArrayBuffer,
       fileName: string,
       origin?: "market" | "local",
-      version?: string
+      version?: string,
+      marketplace?: PluginMetadata["marketplace"]
     ): Promise<{ success: boolean; pluginName?: string; error?: string }> =>
-      ipcRenderer.invoke("plugins:install", { buffer, fileName, origin, version }) as Promise<{
+      ipcRenderer.invoke("plugins:install", { buffer, fileName, origin, version, marketplace }) as Promise<{
         success: boolean
         pluginName?: string
         error?: string
@@ -3877,6 +3887,7 @@ const api = {
     isAllowed: (): Promise<boolean> => ipcRenderer.invoke("dashboard:isAllowed"),
     isProjectModeAllowed: (): Promise<boolean> =>
       ipcRenderer.invoke("dashboard:isProjectModeAllowed"),
+    orgFilterDefaults: (): Promise<string[]> => ipcRenderer.invoke("dashboard:orgFilterDefaults"),
     isAnalysisAgentAllowed: (): Promise<boolean> =>
       ipcRenderer.invoke("dashboard:isAnalysisAgentAllowed"),
     isTraceEvolverReviewAdmin: (): Promise<boolean> =>
@@ -4317,6 +4328,7 @@ const api = {
       options?:
         | number
         | {
+            projectMode?: boolean
             page?: number
             pageSize?: number
             limit?: number
@@ -4358,6 +4370,7 @@ const api = {
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:commitAdoptionEvents", commitSha),
     exportSkillTraces: (payload: {
+      projectMode?: boolean
       skill: string
       range: { from: string; to: string }
       page: number
@@ -4552,6 +4565,27 @@ const api = {
         "harnessBoard:ensureFeatureThreadImGrant",
         input
       ) as Promise<HarnessFeatureThreadGrantResult>,
+    getActiveManagedRunSchedules: (): Promise<ManagedRunSchedule[]> =>
+      ipcRenderer.invoke("harnessBoard:getActiveManagedRunSchedules"),
+    getManagedRunSchedule: (
+      projectId: string,
+      featureId: string
+    ): Promise<ManagedRunSchedule | null> =>
+      ipcRenderer.invoke("harnessBoard:getManagedRunSchedule", projectId, featureId),
+    scheduleManagedRun: (input: ManagedRunScheduleInput): Promise<ManagedRunSchedule> =>
+      ipcRenderer.invoke("harnessBoard:scheduleManagedRun", input),
+    cancelManagedRunSchedule: (input: ManagedRunScheduleIdentity): Promise<void> =>
+      ipcRenderer.invoke("harnessBoard:cancelManagedRunSchedule", input),
+    updateManagedRunSchedule: (input: ManagedRunScheduleUpdateInput): Promise<void> =>
+      ipcRenderer.invoke("harnessBoard:updateManagedRunSchedule", input),
+    onManagedRunScheduleChanged: (
+      callback: (event: ManagedRunScheduleChange) => void
+    ): (() => void) => {
+      const handler = (_event: unknown, payload: ManagedRunScheduleChange): void =>
+        callback(payload)
+      ipcRenderer.on("harnessBoard:managedRunScheduleChanged", handler)
+      return () => ipcRenderer.removeListener("harnessBoard:managedRunScheduleChanged", handler)
+    },
     validateManagedRunStart: (input: ManagedRunStartValidationInput): Promise<void> =>
       ipcRenderer.invoke("harnessBoard:validateManagedRunStart", input) as Promise<void>,
     startManagedRun: (input: ManagedRunStartInput): Promise<ManagedRunSummary> =>

@@ -17,6 +17,7 @@ const FileViewer = lazy(() =>
 )
 
 interface KnowledgePreviewPanelProps {
+  knowledgeBaseId: string
   preview: HarnessKnowledgePreviewResult | null
   loading: boolean
   selectedPath: string | null
@@ -98,6 +99,7 @@ function joinKnowledgePath(rootPath: string, relativePath: string): string {
 }
 
 export function KnowledgePreviewPanel({
+  knowledgeBaseId,
   preview,
   loading,
   selectedPath,
@@ -254,7 +256,7 @@ export function KnowledgePreviewPanel({
                 <FileViewer
                   filePath={selectedFile?.path ?? selectedFullPath}
                   externalFullPath={selectedFullPath}
-                  externalPreviewGrant={preview?.previewGrant}
+                  knowledgeBaseId={knowledgeBaseId}
                 />
               </Suspense>
             ) : (

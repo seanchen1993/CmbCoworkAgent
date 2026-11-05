@@ -14,6 +14,7 @@ import {
   type ToolFilePreviewGrantRequest,
   type ToolFilePreviewGrantResult
 } from "../../shared/workspace-file-preview"
+import { listKnowledgeBases } from "../services/knowledge-base-manager"
 import { readThreadWorkspacePathInWorker } from "../thread-metadata-hydration/client"
 import {
   resolveExternalFileReadGrant,
@@ -47,7 +48,15 @@ function validateSource(source: unknown): source is WorkspaceFilePreviewSource {
   const filePath = validBoundedString(record.filePath, 32_768)
   const hasThreadId = Object.prototype.hasOwnProperty.call(record, "threadId")
   const hasExternalGrant = Object.prototype.hasOwnProperty.call(record, "externalGrant")
-  if (hasThreadId === hasExternalGrant) return false
+  const hasKnowledgeBaseId = Object.prototype.hasOwnProperty.call(record, "knowledgeBaseId")
+  if ([hasThreadId, hasExternalGrant, hasKnowledgeBaseId].filter(Boolean).length !== 1) return false
+  if (hasKnowledgeBaseId) {
+    return (
+      validBoundedString(record.knowledgeBaseId, 512) &&
+      filePath &&
+      record.workspacePathKind === undefined
+    )
+  }
   const workspacePathKind = record.workspacePathKind
   const validWorkspacePathKind =
     workspacePathKind === undefined ||
@@ -123,6 +132,16 @@ async function prepareWorkerSource(
   workspacePath?: string
   trustedRootPath: string
 }> {
+  if (source.knowledgeBaseId !== undefined) {
+    const item = (await listKnowledgeBases()).knowledgeBases.find(
+      (candidate) => candidate.idKey === source.knowledgeBaseId
+    )
+    if (!item) throw new Error("知识库配置不存在")
+    return {
+      source: { knowledgeBaseRootPath: item.localPath, filePath: source.filePath },
+      trustedRootPath: item.localPath
+    }
+  }
   if ("externalGrant" in source) {
     const resolved = await resolveExternalFileReadGrant(
       source.externalGrant,

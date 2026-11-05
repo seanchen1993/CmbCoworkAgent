@@ -486,6 +486,40 @@ describe("bounded trace telemetry", () => {
     expect(persisted.split("\n").filter(Boolean)).toHaveLength(1)
   })
 
+  it("releases attribution even when finalization fails before persistence", async () => {
+    process.env.CMB_COWORK_TRACES_DIR = makeRoot("trace-finish-failure-")
+    mockCollectorDependencies()
+    const { TraceCollector } = await import("./collector")
+    const tracer = new TraceCollector("failed-finish", "message", "model", {
+      includeSkillEval: false
+    })
+    expect(adoptionContexts.has("failed-finish")).toBe(true)
+    Object.defineProperty(tracer, "finalizeNodes", {
+      value: () => {
+        throw new Error("finalization failed")
+      }
+    })
+    await expect(tracer.finish("success")).rejects.toThrow("finalization failed")
+    expect(adoptionContexts.has("failed-finish")).toBe(false)
+  })
+
+  it("releases attribution before waiting for deferred metadata enrichment", async () => {
+    process.env.CMB_COWORK_TRACES_DIR = makeRoot("trace-finish-deferred-")
+    process.env.CMB_COWORK_TRACE_STORAGE_MODE = "plaintext"
+    mockCollectorDependencies()
+    const { TraceCollector, flushTraceWriteQueue } = await import("./collector")
+    const tracer = new TraceCollector("deferred-finish", "message", "model", {
+      includeSkillEval: false,
+      harnessFeature: { projectId: "deferred-project", slug: "feature" }
+    })
+    const pending = tracer.finish("success")
+    expect(adoptionContexts.has("deferred-finish")).toBe(false)
+    adapterResolvers.get("deferred-project")?.({ id: "adapter", name: "adapter", version: "1" })
+    await pending
+    await flushTraceWriteQueue()
+    expect(adoptionContexts.has("deferred-finish")).toBe(false)
+  })
+
   it("reads and deletes asynchronously under file, byte and directory-entry budgets", async () => {
     const root = makeRoot("trace-reader-bounds-")
     const threadId = "thread-reader"

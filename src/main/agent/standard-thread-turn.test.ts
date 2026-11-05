@@ -1,5 +1,17 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
+const routingMocks = vi.hoisted(() => ({
+  managedModel: vi.fn<() => string | undefined>(),
+  resolveModel: vi.fn()
+}))
+vi.mock("../harness-board/managed-run-model", () => ({
+  getManagedRunModelOverride: routingMocks.managedModel
+}))
+vi.mock("../routing", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../routing")>()),
+  resolveModel: routingMocks.resolveModel
+}))
+
 const harnessServiceMocks = vi.hoisted(() => ({
   buildHarnessFeatureAgentContext: vi.fn(),
   getHarnessProjectAdapterSnapshot: vi.fn(),
@@ -20,14 +32,77 @@ import {
   HarnessAgentContextUnavailableError,
   getHarnessAgentContext,
   getHarnessHookContext,
+  resolveStandardTurnRouting,
   prepareStandardThreadRuntimeFactory
 } from "./standard-thread-turn"
 import { extractErrorDetail } from "./failover"
+import { IdleModelServiceHoursError } from "../../shared/idle-model-service-window"
 import type { CreateAgentRuntimeOptions } from "./runtime"
 import {
   HarnessDeployUnitContextLimitError,
   HarnessSessionContextLimitError
 } from "../harness-board/context-integrity"
+
+describe("managed model routing", () => {
+  beforeEach(() => {
+    routingMocks.managedModel.mockReset()
+    routingMocks.resolveModel.mockReset()
+  })
+
+  it("preserves service-hours rejections instead of treating them as routing failures", async () => {
+    routingMocks.resolveModel.mockRejectedValue(new IdleModelServiceHoursError())
+    await expect(resolveStandardTurnRouting({
+      taskSource: "chat", threadId: "ordinary", requestedModelId: "builtin:idle-ultra",
+      routingMode: "pinned"
+    })).rejects.toMatchObject({ status: 400, code: "idle_model_outside_service_hours" })
+  })
+
+  it.each([undefined, "resume", "interrupt"] as const)(
+    "pins Ultra without automatic routing or failover for continuation %s",
+    async (continuation) => {
+      routingMocks.managedModel.mockReturnValue("builtin:idle-ultra")
+      const routing = await resolveStandardTurnRouting({
+        taskSource: "chat",
+        threadId: "managed",
+        requestedModelId: "original-model",
+        routingMode: "auto",
+        continuation
+      })
+      expect(routing.effectiveModelId).toBe("builtin:idle-ultra")
+      expect(routing.orderedModelIds).toEqual(["builtin:idle-ultra"])
+      expect(routing.result).toMatchObject({ layer: "pinned", fallbackChain: [] })
+      expect(routingMocks.resolveModel).not.toHaveBeenCalled()
+    }
+  )
+
+  it("preserves ordinary routing when the managed run does not override the model", async () => {
+    routingMocks.resolveModel.mockResolvedValue({
+      resolvedModelId: "original-model",
+      resolvedTier: "premium",
+      layer: "pinned"
+    })
+    const routing = await resolveStandardTurnRouting({
+      taskSource: "chat",
+      threadId: "ordinary",
+      requestedModelId: "original-model",
+      routingMode: "pinned"
+    })
+    expect(routing.effectiveModelId).toBe("original-model")
+    expect(routingMocks.resolveModel).toHaveBeenCalledWith(
+      expect.objectContaining({ requestedModelId: "original-model", routingMode: "pinned" })
+    )
+  })
+
+  it("surfaces an unavailable Ultra error without falling back to ordinary routing", async () => {
+    routingMocks.managedModel.mockImplementation(() => {
+      throw new Error("内置 Ultra 模型不可用")
+    })
+    await expect(
+      resolveStandardTurnRouting({ taskSource: "chat", threadId: "managed" })
+    ).rejects.toThrow("Ultra 模型不可用")
+    expect(routingMocks.resolveModel).not.toHaveBeenCalled()
+  })
+})
 
 describe("getHarnessAgentContext", () => {
   beforeEach(() => {

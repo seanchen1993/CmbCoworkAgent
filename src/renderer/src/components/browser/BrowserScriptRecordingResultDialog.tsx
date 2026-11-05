@@ -1,4 +1,4 @@
-import { Download, FileCode2, Loader2, Save, Sparkles } from "lucide-react"
+import { Download, FileCode2, Loader2, Play, Save, Sparkles } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
@@ -9,6 +9,7 @@ import {
   DialogTitle
 } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { cn } from "@/lib/utils"
 import { BrowserScriptEditor } from "./BrowserScriptEditor"
 import type {
@@ -38,6 +39,8 @@ interface BrowserScriptRecordingResultDialogProps {
   isSaveSubmitting: boolean
   hasWorkspace: boolean
   hasUnnamedVariableActions: boolean
+  isTestPlaybackRunning: boolean
+  onTestPlayback: () => void
   onConfirmSave: () => void
 }
 
@@ -117,6 +120,52 @@ function canScriptRecordedActionUseVariable(action: BrowserRecordedAction): bool
   }
 }
 
+function SaveRecommendationTooltip({ children }: { children: React.ReactNode }): React.JSX.Element {
+  return (
+    <TooltipProvider delayDuration={150}>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <span className="inline-flex">{children}</span>
+        </TooltipTrigger>
+        <TooltipContent side="top" sideOffset={6} className="max-w-64 text-xs leading-relaxed">
+          建议先测试回放，确认脚本运行没有问题后再保存。
+        </TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
+  )
+}
+
+function TestPlaybackButton({
+  scriptReady,
+  hasUnnamedVariableActions,
+  isRunning,
+  onClick
+}: {
+  scriptReady: boolean
+  hasUnnamedVariableActions: boolean
+  isRunning: boolean
+  onClick: () => void
+}): React.JSX.Element {
+  return (
+    <Button
+      type="button"
+      size="sm"
+      variant="outline"
+      className="h-9 shrink-0 rounded-lg bg-background"
+      disabled={!scriptReady || hasUnnamedVariableActions || isRunning}
+      onClick={onClick}
+      title={hasUnnamedVariableActions ? "请先填写变量名" : "使用变量默认值测试回放"}
+    >
+      {isRunning ? (
+        <Loader2 className="size-3.5 animate-spin" strokeWidth={1.8} />
+      ) : (
+        <Play className="size-3.5" strokeWidth={1.8} />
+      )}
+      {isRunning ? "回放中" : "测试回放"}
+    </Button>
+  )
+}
+
 export function BrowserScriptRecordingResultDialog({
   open,
   onOpenChange,
@@ -139,6 +188,8 @@ export function BrowserScriptRecordingResultDialog({
   isSaveSubmitting,
   hasWorkspace,
   hasUnnamedVariableActions,
+  isTestPlaybackRunning,
+  onTestPlayback,
   onConfirmSave
 }: BrowserScriptRecordingResultDialogProps): React.JSX.Element {
   const actionCount = scriptRecording.actions.length
@@ -183,12 +234,12 @@ export function BrowserScriptRecordingResultDialog({
                   <Sparkles className="size-4" strokeWidth={1.9} />
                 </div>
                 <div className="min-w-0">
-                  <DialogTitle className="text-base">录制脚本结果</DialogTitle>
+                  <DialogTitle className="text-base">操作录制结果</DialogTitle>
                   <DialogDescription className="mt-1 text-[12px] leading-5">
                     {scriptRecording.status === "recording"
                       ? "你在内置浏览器里的真实操作会实时沉淀为 Playwright 草稿。"
                       : scriptRecording.status === "paused"
-                        ? "当前录制已暂停，你可以继续录制、终止录制，或先检查当前脚本草稿。"
+                        ? "当前录制已暂停，你可以继续录制、终止录制，或先检查当前自动化草稿。"
                         : `下面是最近一次${recordingLabel}生成的步骤和 Playwright 脚本初稿。`}
                   </DialogDescription>
                 </div>
@@ -224,7 +275,7 @@ export function BrowserScriptRecordingResultDialog({
                   <div className="mb-3 flex size-9 items-center justify-center rounded-lg border border-border/70 bg-muted/40 text-muted-foreground">
                     <Sparkles className="size-4" strokeWidth={1.8} />
                   </div>
-                  还没有采集到可生成脚本的操作。先开始录制脚本，再在内置浏览器里手动导航、点击、输入或选择。
+                  还没有采集到可生成自动化脚本的操作。先开始录制操作，再在内置浏览器里手动导航、点击、输入或选择。
                 </div>
               ) : (
                 scriptRecording.actions.map((action, index) => {
@@ -315,7 +366,11 @@ export function BrowserScriptRecordingResultDialog({
                                   <p className="text-[11px] text-status-warning">
                                     变量名必填，复制执行提示时会展示给用户。
                                   </p>
-                                ) : null}
+                                ) : (
+                                  <p className="text-[11px] text-muted-foreground">
+                                    测试回放会使用这个步骤录制时的原值作为默认值。
+                                  </p>
+                                )}
                               </div>
                             ) : null}
                           </div>
@@ -343,14 +398,14 @@ export function BrowserScriptRecordingResultDialog({
                           ? `${recordingLabel}草稿支持直接编辑；暂停时可先保存草稿，后续继续录制会沿用当前内容。`
                           : showExistingLibraryUpdateControls
                             ? `${recordingLabel}终止后会直接保存到当前继续录制所基于的原脚本。`
-                            : `${recordingLabel}草稿支持直接编辑；终止后可填写文件中文名并保存到录制列表。`}
+                            : `${recordingLabel}草稿支持直接编辑；终止后可填写中文名称并保存为可复用操作。`}
                       </p>
                     </div>
                   </div>
                 </div>
 
                 {showExistingLibraryUpdateControls ? (
-                  <div className="flex flex-1 items-center justify-between gap-3 rounded-xl border border-border/70 bg-muted/25 p-3 xl:max-w-[420px]">
+                  <div className="flex flex-1 items-center justify-between gap-3 rounded-xl border border-border/70 bg-muted/25 p-3 xl:max-w-[540px]">
                     <div className="min-w-0">
                       <p className="text-xs font-medium text-foreground">保存到原脚本</p>
                       <p className="mt-1 break-all text-[11px] text-muted-foreground">
@@ -360,50 +415,66 @@ export function BrowserScriptRecordingResultDialog({
                         {scriptRecording.libraryFileName}
                       </p>
                     </div>
-                    <div className="flex shrink-0 items-center justify-between gap-3">
-                      <Button
-                        type="button"
-                        size="sm"
-                        className="h-9 shrink-0 rounded-lg"
-                        disabled={baseSaveDisabled}
-                        onClick={onConfirmSave}
-                      >
-                        {isSaveSubmitting ? (
-                          <Loader2 className="size-3.5 animate-spin" strokeWidth={1.8} />
-                        ) : (
-                          <Save className="size-3.5" strokeWidth={1.8} />
-                        )}
-                        保存
-                      </Button>
+                    <div className="flex shrink-0 items-center gap-2">
+                      <SaveRecommendationTooltip>
+                        <Button
+                          type="button"
+                          size="sm"
+                          className="h-9 shrink-0 rounded-lg"
+                          disabled={baseSaveDisabled}
+                          onClick={onConfirmSave}
+                        >
+                          {isSaveSubmitting ? (
+                            <Loader2 className="size-3.5 animate-spin" strokeWidth={1.8} />
+                          ) : (
+                            <Save className="size-3.5" strokeWidth={1.8} />
+                          )}
+                          保存
+                        </Button>
+                      </SaveRecommendationTooltip>
+                      <TestPlaybackButton
+                        scriptReady={scriptReady}
+                        hasUnnamedVariableActions={hasUnnamedVariableActions}
+                        isRunning={isTestPlaybackRunning}
+                        onClick={onTestPlayback}
+                      />
                     </div>
                   </div>
                 ) : null}
 
                 {showLibrarySaveControls ? (
-                  <div className="flex flex-1 gap-2 rounded-xl border border-border/70 bg-muted/25 p-3 xl:max-w-[360px]">
+                  <div className="flex flex-1 gap-2 rounded-xl border border-border/70 bg-muted/25 p-3 xl:max-w-[520px]">
                     <Input
                       autoFocus
                       type="text"
                       value={saveDisplayName}
                       onChange={(event) => onSaveDisplayNameChange(event.target.value)}
-                      placeholder="文件中文名（必填）"
+                      placeholder="操作名称（必填）"
                       className="h-9 rounded-lg border-border/80 bg-background text-xs shadow-none placeholder:text-muted-foreground/80"
                     />
-                    <div className="flex items-center justify-between gap-3">
-                      <Button
-                        type="button"
-                        size="sm"
-                        className="h-9 shrink-0 rounded-lg"
-                        disabled={saveDisabled}
-                        onClick={onConfirmSave}
-                      >
-                        {isSaveSubmitting ? (
-                          <Loader2 className="size-3.5 animate-spin" strokeWidth={1.8} />
-                        ) : (
-                          <Download className="size-3.5" strokeWidth={1.8} />
-                        )}
-                        保存
-                      </Button>
+                    <div className="flex items-center gap-2">
+                      <SaveRecommendationTooltip>
+                        <Button
+                          type="button"
+                          size="sm"
+                          className="h-9 shrink-0 rounded-lg"
+                          disabled={saveDisabled}
+                          onClick={onConfirmSave}
+                        >
+                          {isSaveSubmitting ? (
+                            <Loader2 className="size-3.5 animate-spin" strokeWidth={1.8} />
+                          ) : (
+                            <Download className="size-3.5" strokeWidth={1.8} />
+                          )}
+                          保存
+                        </Button>
+                      </SaveRecommendationTooltip>
+                      <TestPlaybackButton
+                        scriptReady={scriptReady}
+                        hasUnnamedVariableActions={hasUnnamedVariableActions}
+                        isRunning={isTestPlaybackRunning}
+                        onClick={onTestPlayback}
+                      />
                     </div>
                     {!hasWorkspace ? (
                       <p className="text-[11px] text-status-warning">
@@ -418,12 +489,12 @@ export function BrowserScriptRecordingResultDialog({
                 ) : null}
 
                 {showDraftSaveControls ? (
-                  <div className="flex flex-1 items-center justify-between gap-3 rounded-xl border border-border/70 bg-muted/25 p-3 xl:max-w-[360px]">
+                  <div className="flex flex-1 items-center justify-between gap-3 rounded-xl border border-border/70 bg-muted/25 p-3 xl:max-w-[520px]">
                     <div className="min-w-0">
                       <p className="text-xs font-medium text-foreground">当前草稿</p>
                       <p className="mt-1 text-[11px] text-muted-foreground">
                         {isDraftDirty
-                          ? "你修改过当前脚本，保存后继续录制会沿用这份内容。"
+                          ? "你修改过当前草稿，保存后继续录制会沿用这份内容。"
                           : "当前草稿已经保存，继续录制会沿用这份内容。"}
                       </p>
                     </div>
@@ -439,21 +510,29 @@ export function BrowserScriptRecordingResultDialog({
                         >
                           {isDraftDirty ? "未保存" : "已保存"}
                         </span>
-                        <Button
-                          type="button"
-                          size="sm"
-                          variant="secondary"
-                          className="h-9 rounded-lg px-3 shadow-none"
-                          disabled={!isDraftDirty || !scriptReady || isDraftSaveSubmitting}
-                          onClick={onSaveDraft}
-                        >
-                          {isDraftSaveSubmitting ? (
-                            <Loader2 className="size-3.5 animate-spin" strokeWidth={1.8} />
-                          ) : (
-                            <Save className="size-3.5" strokeWidth={1.8} />
-                          )}
-                          保存草稿
-                        </Button>
+                        <SaveRecommendationTooltip>
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="secondary"
+                            className="h-9 rounded-lg px-3 shadow-none"
+                            disabled={!isDraftDirty || !scriptReady || isDraftSaveSubmitting}
+                            onClick={onSaveDraft}
+                          >
+                            {isDraftSaveSubmitting ? (
+                              <Loader2 className="size-3.5 animate-spin" strokeWidth={1.8} />
+                            ) : (
+                              <Save className="size-3.5" strokeWidth={1.8} />
+                            )}
+                            保存草稿
+                          </Button>
+                        </SaveRecommendationTooltip>
+                        <TestPlaybackButton
+                          scriptReady={scriptReady}
+                          hasUnnamedVariableActions={hasUnnamedVariableActions}
+                          isRunning={isTestPlaybackRunning}
+                          onClick={onTestPlayback}
+                        />
                       </div>
                     ) : null}
                   </div>

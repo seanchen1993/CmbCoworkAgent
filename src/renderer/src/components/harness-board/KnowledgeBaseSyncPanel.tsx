@@ -299,6 +299,7 @@ export function KnowledgeBaseSyncPanel({
                 </div>
                 {expanded && (
                   <KnowledgePreviewPanel
+                    knowledgeBaseId={item.idKey}
                     preview={previews[item.idKey] ?? null}
                     loading={loadingPreviewIds.has(item.idKey)}
                     selectedPath={selectedPreviewPaths[item.idKey] ?? null}

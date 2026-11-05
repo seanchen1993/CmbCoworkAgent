@@ -4,6 +4,7 @@ import {
   assertOriginalUpload,
   findProtectedMarketRoot,
   protectMarketDirectory,
+  upgradeMarkedMarketDirectories,
   MARKET_CONTENT_DENIED
 } from "../services/market-content"
 import AdmZip from "adm-zip"
@@ -11,7 +12,7 @@ import { BrowserWindow, IpcMain, shell } from "electron"
 import { randomUUID } from "node:crypto"
 import * as fs from "fs/promises"
 import * as path from "path"
-import { existsSync, mkdirSync, rmSync } from "fs"
+import { existsSync, mkdirSync, readdirSync, rmSync } from "fs"
 import * as chardet from "jschardet"
 import * as iconv from "iconv-lite"
 import {
@@ -792,6 +793,13 @@ export async function listPluginSkills(): Promise<SkillMetadata[]> {
 }
 
 export function registerSkillsHandlers(ipcMain: IpcMain): void {
+  const customDir = getCustomSkillsDir()
+  const roots = existsSync(customDir)
+    ? readdirSync(customDir, { withFileTypes: true })
+        .filter((entry) => entry.isDirectory())
+        .map((entry) => path.join(customDir, entry.name))
+    : []
+  if (upgradeMarkedMarketDirectories([customDir, ...roots])) invalidateEnabledSkillsCache()
   console.log("[Skills] Registering skills handlers...")
 
   ipcMain.handle(

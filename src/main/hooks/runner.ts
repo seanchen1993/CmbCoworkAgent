@@ -1,3 +1,5 @@
+import { isModelAvailable } from "../../shared/model-catalog"
+import { getModelClientOptions } from "../models/connection"
 import { prepareMarketCommand, resolveMarketRuntimePath } from "../services/market-content"
 import { spawn } from "node:child_process"
 import { ChatOpenAI } from "@langchain/openai"
@@ -16,6 +18,7 @@ import { persistHookResultRecord } from "./log-record"
 import { trackEvent } from "../services/event-reporter"
 import { getCurrentHookAgentId } from "./execution-context"
 import { samplingFields, topKModelKwargs } from "../models/sampling-params"
+import { withWorkspaceExecution } from "../agent/file-operation-lock"
 
 /**
  * Resolve the effective timeout (ms) for a hook by consulting the handler-type
@@ -66,6 +69,8 @@ export interface HookContext {
   toolArgs?: Record<string, unknown>
   toolResult?: string
   workspacePath?: string
+  /** Internal cancellation for queued synchronous command hooks; never sent to the hook process. */
+  abortSignal?: AbortSignal
   /** Session / thread identifier — exposed to hooks as SESSION_ID and session_id in stdin JSON */
   sessionId?: string
   /** Optional system identifier exposed to hook commands as SYSTEM_ID. */
@@ -861,7 +866,7 @@ function getPromptHookModel(modelId: string | undefined, timeout: number): ChatO
     ? (getModelConfigByRef(modelId) ?? getAvailableModelConfigOrDefault())
     : getAvailableModelConfigOrDefault()
 
-  if (!config?.apiKey) return null
+  if (!isModelAvailable(config)) return null
 
   return new ChatOpenAI({
     model: config.model,
@@ -873,7 +878,7 @@ function getPromptHookModel(modelId: string | undefined, timeout: number): ChatO
     modelKwargs: {
       ...topKModelKwargs(config.model, config.topK)
     },
-    configuration: { baseURL: config.baseUrl }
+    ...getModelClientOptions(config)
   })
 }
 
@@ -1284,7 +1289,23 @@ async function executeSyncHook(
   } else {
     const builtPayload = buildHookStdinPayload(event, context, hook)
     if (diagnostic) stdinPayload = builtPayload
-    result = await executeCommandHook(hook, env, builtPayload, getCommandCwd(context))
+    const runCommand = () => executeCommandHook(hook, env, builtPayload, getCommandCwd(context))
+    // Synchronous formatters and other command hooks may read/modify any file.
+    // Coordinate their actual process lifetime with tool IO, without acquiring
+    // the runtime gate again. Detached hooks retain their existing async policy.
+    const synchronous =
+      hook.async !== true ||
+      event === "Setup" ||
+      (context.hookSourceType === "workspace" && context.forceSyncWorkspaceHooks)
+    result =
+      context.workspacePath && synchronous
+        ? await withWorkspaceExecution(
+            context.workspacePath,
+            "write",
+            runCommand,
+            context.abortSignal
+          )
+        : await runCommand()
   }
   const finalized = applyConfiguredOnBlock(
     normalizeHumanGateDecisionForEvent(parseHookJsonOutput(result), hook, event),

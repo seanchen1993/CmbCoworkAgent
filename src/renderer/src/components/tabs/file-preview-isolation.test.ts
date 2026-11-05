@@ -24,6 +24,7 @@ const resourcePanelOverlay = readFileSync(
   new URL("../panels/ResourcePanelOverlay.tsx", import.meta.url),
   "utf8"
 )
+const overlayDrawer = readFileSync(new URL("../panels/OverlayDrawer.tsx", import.meta.url), "utf8")
 const latestCompletedResource = readFileSync(
   new URL("../../lib/latest-completed-resource.ts", import.meta.url),
   "utf8"
@@ -158,8 +159,13 @@ describe("persisted active file preview isolation", () => {
     expect(fileViewer).toContain("externalPreviewGrant")
     expect(fileViewer).toContain("await resolveExternalPreviewGrant()")
     expect(fileViewer).not.toContain("requestExternalFileRead")
-    expect(harnessIpc).toContain("const previewablePaths = preview.files")
-    expect(harnessIpc).toContain("issueExternalFileReadGrant(")
+    const knowledgeHandler = harnessIpc.slice(
+      harnessIpc.indexOf('"harnessBoard:getKnowledgePreview"'),
+      harnessIpc.indexOf('"harnessBoard:cancelKnowledgePreviewRequests"')
+    )
+    expect(knowledgeHandler).toContain("return readKnowledgeBasePreviewInWorker(")
+    expect(knowledgeHandler).not.toContain("issueExternalFileReadGrant")
+    expect(knowledgeHandler).not.toContain("authorizeKnowledgePreview")
     expect(externalGrants).toContain("realpath(entry.rootPath)")
     expect(externalGrants).toContain("realpath(candidate)")
     expect(previewIpc).toContain('"workspace:authorizeToolFilePreview"')
@@ -202,6 +208,19 @@ describe("persisted active file preview isolation", () => {
     expect(resourcePanelOverlay).toMatch(
       /if \(standardRightPanelMounted\) \{\s*setOpen\(false\)\s*setRightModule\(nextMode\)/
     )
+  })
+
+  it("keeps the resource drawer resizable and closes it only from the close button", () => {
+    expect(overlayDrawer).toContain('role="separator"')
+    expect(overlayDrawer).toContain('aria-orientation="vertical"')
+    expect(overlayDrawer).toContain('document.body.style.cursor = "col-resize"')
+    expect(overlayDrawer).toContain(
+      "setWidth(clampWidth(start.width - (latestClientX - start.clientX)))"
+    )
+    expect(overlayDrawer).toContain('className="pointer-events-none absolute inset-0')
+    expect(overlayDrawer).toContain("onClick={onClose}")
+    expect(overlayDrawer).not.toContain("handleBackdropClick")
+    expect(overlayDrawer).not.toContain("suppressBackdropCloseRef")
   })
 
   it("defers ambiguous POSIX path intent until main applies the authoritative boundary", () => {

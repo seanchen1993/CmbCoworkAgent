@@ -47,6 +47,7 @@ const TICK_INTERVAL_MS = 60_000
 const ONCE_EXPIRE_MS = 30 * 60_000 // once tasks older than 30 min are auto-disabled instead of executed
 let tickTimer: ReturnType<typeof setTimeout> | null = null
 let shuttingDown = false
+let additionalTick: ((now: Date) => Promise<void>) | undefined
 const runningTasks = new Set<string>()
 const activeAbortControllers = new Map<string, AbortController>()
 
@@ -85,7 +86,8 @@ function showTaskNotification(taskName: string, status: "ok" | "error", body?: s
   notifyAlways(title, text)
 }
 
-export function startScheduler(): void {
+export function startScheduler(onTick?: (now: Date) => Promise<void>): void {
+  additionalTick = onTick
   console.log("[Scheduler] Starting scheduler service")
   shuttingDown = false
   tick()
@@ -135,6 +137,9 @@ function tick(): void {
   if (shuttingDown) return
   try {
     const now = new Date()
+    additionalTick?.(now).catch((error) => {
+      console.error("[Scheduler] Additional scheduled work failed:", error)
+    })
     const tasks = getScheduledTasks()
 
     for (const task of tasks) {

@@ -1,5 +1,7 @@
+import { useMemo } from "react"
 import { FileCode2 } from "lucide-react"
 import { cn } from "@/lib/utils"
+import { countTextLines } from "@/lib/browser-script-text"
 
 const VARIABLE_USAGE_HINT = `如果有变量，需要按照这个格式，否则不生效，案例如下：
 const 变量_分支 = "";
@@ -30,7 +32,10 @@ export function BrowserScriptEditor({
   textareaClassName,
   headerRight
 }: BrowserScriptEditorProps): React.JSX.Element {
-  const lineCount = value.trim().length > 0 ? value.split(/\r?\n/u).length : 0
+  const lineCount = useMemo(
+    () => (headerRight === undefined ? countTextLines(value) : 0),
+    [headerRight, value]
+  )
 
   return (
     <div

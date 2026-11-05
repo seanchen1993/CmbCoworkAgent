@@ -1,3 +1,4 @@
+import type { ManagedRunModelSelection } from "../../../../shared/managed-run-model"
 import { RepositoryBranchHint, RepositoryPathsField } from "./RepositoryPathField"
 import projectModeGuideImage from "@/assets/guides/feature-create-guide-v5.png"
 import {
@@ -8,6 +9,7 @@ import { projectHumanGate } from "../../../../shared/harness-notifications"
 import { useHarnessNotifications } from "@/lib/harness-notifications"
 import { BizRetryNotice } from "./BizRetryNotice"
 import { ProjectWorkspaceField } from "./ProjectWorkspaceField"
+import { ProjectTestField } from "./ProjectTestField"
 import {
   Fragment,
   startTransition,
@@ -36,6 +38,7 @@ import {
   CircleDot,
   CircleDashed,
   CircleHelp,
+  Clock,
   FileText,
   FolderOpen,
   GitBranch,
@@ -93,6 +96,8 @@ import { KnowledgeDialog } from "@/components/harness-board/KnowledgeDialog"
 import { ArtifactAccumulationButton } from "./ArtifactAccumulationButton"
 import { ManagedRunIcon } from "@/components/ui/managed-run-icon"
 import { ManagedRunHistory } from "@/components/harness-board/ManagedRunHistory"
+import { ManagedRunScheduleBadge } from "./ManagedRunScheduleBadge"
+import { useManagedRunSchedule, useManagedRunScheduleIndex } from "@/lib/use-managed-run-schedule"
 import { ManagedRunStartDialog } from "./ManagedRunStartDialog"
 import { buildManagedRunSessionOptions } from "@/lib/managed-run-session-options"
 import {
@@ -952,6 +957,7 @@ async function createHarnessSession(params: CreateHarnessSessionParams): Promise
 }
 
 function metadataRequiredMissing(form: HarnessProjectMetadataUpdateInput): boolean {
+  if (typeof form.isTestProject !== "boolean") return true
   return [
     form.adapterId,
     form.adapterType,
@@ -1005,6 +1011,7 @@ function toProjectMetadataForm(project: HarnessProjectListItem): HarnessProjectM
     name: project.name,
     projectCode: project.projectCode,
     projectFromLean: project.projectFromLean ?? false,
+    isTestProject: project.isTestProject,
     projectDir: project.projectDir,
     description: project.description,
     systemId: project.systemId,
@@ -2986,7 +2993,7 @@ function ProjectFormDialog({
                     <span className="text-status-critical">{projectNameLengthError}</span>
                   )}
                 </label>
-                <label className="col-span-2 grid gap-1.5 text-xs font-medium text-muted-foreground">
+                <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
                   项目描述
                   <Input
                     value={form.description}
@@ -2999,6 +3006,10 @@ function ProjectFormDialog({
                     <span className="text-status-critical">{projectDescriptionLengthError}</span>
                   )}
                 </label>
+                <ProjectTestField
+                  value={form.isTestProject}
+                  onChange={(isTestProject) => onChange({ ...form, isTestProject })}
+                />
                 <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
                   系统编号 *
                   <Input
@@ -3214,7 +3225,7 @@ function ProjectEditDialog({
                     <span className="text-status-critical">{projectNameLengthError}</span>
                   )}
                 </label>
-                <label className="col-span-2 grid gap-1.5 text-xs font-medium text-muted-foreground">
+                <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
                   项目描述
                   <Input
                     value={form.description}
@@ -3227,6 +3238,10 @@ function ProjectEditDialog({
                     <span className="text-status-critical">{projectDescriptionLengthError}</span>
                   )}
                 </label>
+                <ProjectTestField
+                  value={form.isTestProject}
+                  onChange={(isTestProject) => onChange({ ...form, isTestProject })}
+                />
                 <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
                   系统编号 *
                   <Input
@@ -4524,11 +4539,13 @@ function FeatureCard({
   projectId,
   run,
   workflowNodes,
+  scheduledAt,
   onOpen
 }: {
   projectId: string
   run: HarnessFeatureSummary
   workflowNodes: Array<{ id: string; label: string }>
+  scheduledAt?: string
   onOpen: () => void
 }): React.JSX.Element {
   const pendingDecision = useHarnessNotifications().some(
@@ -4565,9 +4582,17 @@ function FeatureCard({
         <div className="flex shrink-0 flex-wrap items-center justify-end gap-1">
           {pendingDecision ? (
             <StatusPill status={{ label: "待人工确认", uiKind: "warning" }} />
-          ) : (
-            managedRunStatus && <StatusPill status={managedRunStatus} />
-          )}
+          ) : managedRunStatus ? (
+            <StatusPill status={managedRunStatus} />
+          ) : scheduledAt ? (
+            <span
+              className="inline-flex h-6 max-w-full shrink-0 items-center gap-1.5 rounded border border-status-nominal/50 bg-status-nominal/10 px-2 text-[11px] font-medium text-status-nominal"
+              title={`预约启动时间：${scheduledAt}`}
+            >
+              <Clock className="size-3.5 shrink-0" aria-hidden="true" />
+              <span className="truncate">已预约托管运行</span>
+            </span>
+          ) : null}
           <StatusPill status={run.overallStatus} />
         </div>
       </div>
@@ -5803,6 +5828,7 @@ function ProjectDetailPage({
   onCreateFeature,
   onOpenSystemConstraintUpdate,
   onRefresh,
+  managedScheduleRefreshRevision,
   onEditProject,
   onUpdatePlugin,
   onOpenLeanTokenSettings,
@@ -5828,11 +5854,13 @@ function ProjectDetailPage({
     config: NonNullable<HarnessProjectDetailViewModel["systemConstraintUpdate"]>
   ) => void
   onRefresh: (projectId: string) => void
+  managedScheduleRefreshRevision: number
   onEditProject: (project: HarnessProjectListItem) => void
   onUpdatePlugin: (project: HarnessProjectListItem, updateInfo: MarketPluginUpdateInfo) => void
   onOpenLeanTokenSettings: () => void
   onOpenFeature: (projectId: string, slug: string) => void
 }): React.JSX.Element {
+  const managedScheduleIndex = useManagedRunScheduleIndex(managedScheduleRefreshRevision)
   const runs = detail?.runs ?? []
   const activeCount = runs.filter((run) => run.overallStatus.uiKind === "active").length
   const archived = project.lifecycle.status === "archived"
@@ -6116,6 +6144,9 @@ function ProjectDetailPage({
                               projectId={project.projectId}
                               key={run.slug}
                               run={run}
+                              scheduledAt={managedScheduleIndex.get(
+                                JSON.stringify([project.projectId, run.slug])
+                              )}
                               workflowNodes={workflowForProjectRun(detail, run).nodes}
                               onOpen={() => onOpenFeature(project.projectId, run.slug)}
                             />
@@ -6342,6 +6373,7 @@ function FeatureDetailPage({
   onBackToProject,
   onEditDeployUnits,
   onRefresh,
+  managedScheduleRefreshRevision,
   onFeatureImManagementSaved,
   onActiveSessionChange,
   onSessionViewChange,
@@ -6359,6 +6391,7 @@ function FeatureDetailPage({
   onBackToProject: () => void
   onEditDeployUnits: () => void
   onRefresh: () => void | Promise<void>
+  managedScheduleRefreshRevision: number
   onFeatureImManagementSaved: (projectId: string, featureId: string, enabled: boolean) => void
   onActiveSessionChange?: (threadId: string) => void
   onSessionViewChange?: (viewing: boolean) => void
@@ -6408,6 +6441,11 @@ function FeatureDetailPage({
     selectedNode?.status ?? { label: "读取中", uiKind: "unknown" as const }
   const managedRun = detail?.run.managedRun
   const managedRunIsRunning = managedRun?.status === "running"
+  const managedSchedule = useManagedRunSchedule(
+    projectDeleted ? undefined : detail?.project.projectId,
+    detail?.run.slug,
+    managedScheduleRefreshRevision
+  )
   const managedRunSessionThreadId = managedRun?.currentSession?.threadId
   const managedRunStatus = managedRun ? managedRunStatusToHarnessStatus(managedRun.status) : null
   const nodeGroups = useMemo(() => groupStageNodes(detail?.run.nodes ?? []), [detail])
@@ -6767,7 +6805,9 @@ function FeatureDetailPage({
       workspacePath?: string,
       enableImManagement = true,
       initialUserMessage?: string,
-      existingThreadId?: string
+      existingThreadId?: string,
+      scheduledAt?: string,
+      modelSelection?: ManagedRunModelSelection
     ): Promise<boolean> => {
       if (
         !detail ||
@@ -6787,12 +6827,26 @@ function FeatureDetailPage({
           const confirmedWorkspacePath = normalizeWorkspacePath(workspacePath)
           if (!confirmedWorkspacePath) throw new Error("请选择本次托管使用的会话工作区")
           await setCombinedFeatureImManagement(enableImManagement)
+          if (scheduledAt) {
+            await window.api.harnessBoard.scheduleManagedRun({
+              projectId: detail.project.projectId,
+              featureId: detail.run.slug,
+              workspacePath: confirmedWorkspacePath,
+              initialUserMessage,
+              existingThreadId,
+              modelSelection,
+              scheduledAt
+            })
+            toast.success("已预约托管运行")
+            return true
+          }
           const startedRun = await window.api.harnessBoard.startManagedRun({
             projectId: detail.project.projectId,
             featureId: detail.run.slug,
             workspacePath: confirmedWorkspacePath,
             initialUserMessage,
-            existingThreadId
+            existingThreadId,
+            modelSelection
           })
           if (existingThreadId) {
             void window.api.threads
@@ -7151,7 +7205,11 @@ function FeatureDetailPage({
                       !detail ||
                       projectInteractionDisabled ||
                       openingManagedRunDialog ||
-                      updatingManagedRun
+                      updatingManagedRun ||
+                      (!managedRunIsRunning &&
+                        (managedSchedule.loading ||
+                          Boolean(managedSchedule.schedule) ||
+                          Boolean(managedSchedule.error)))
                     }
                   >
                     {openingManagedRunDialog || updatingManagedRun ? (
@@ -7344,15 +7402,26 @@ function FeatureDetailPage({
                       {detail.run.title}
                     </h2>
                     <StatusPill status={featureOverallStatus} />
-                    {managedRunStatus && (
-                      <StatusPill
-                        status={managedRunStatus}
-                        onClick={
-                          managedRun?.status === "running" && managedRunSessionThreadId
-                            ? () => handleHookSessionSelect(managedRunSessionThreadId)
-                            : undefined
-                        }
+                    {managedSchedule.schedule || managedSchedule.error ? (
+                      <ManagedRunScheduleBadge
+                        key={`${detailKey}:${managedSchedule.schedule?.scheduleId ?? ""}`}
+                        schedule={managedSchedule.schedule}
+                        error={managedSchedule.error}
+                        onRetry={managedSchedule.reload}
+                        disabled={projectDeleted}
                       />
+                    ) : (
+                      !managedSchedule.loading &&
+                      managedRunStatus && (
+                        <StatusPill
+                          status={managedRunStatus}
+                          onClick={
+                            managedRun?.status === "running" && managedRunSessionThreadId
+                              ? () => handleHookSessionSelect(managedRunSessionThreadId)
+                              : undefined
+                          }
+                        />
+                      )
                     )}
                     {unbound && (
                       <span className="rounded-full border border-status-warning/30 bg-status-warning/10 px-2 py-0.5 text-[11px] text-status-warning">
@@ -7481,13 +7550,22 @@ function FeatureDetailPage({
           featureImUnavailableReason={featureImUnavailableReason}
           updatingManagedRun={updatingManagedRun}
           onClose={() => setManagedRunDialogOpen(false)}
-          onConfirm={({ workspacePath, initialUserMessage, existingThreadId, imEnabled }) =>
+          onConfirm={({
+            workspacePath,
+            initialUserMessage,
+            existingThreadId,
+            imEnabled,
+            scheduledAt,
+            modelSelection
+          }) =>
             handleManagedRunChange(
               true,
               workspacePath,
               imEnabled,
               initialUserMessage,
-              existingThreadId
+              existingThreadId,
+              scheduledAt,
+              modelSelection
             )
           }
         />
@@ -7498,6 +7576,7 @@ function FeatureDetailPage({
 
 function ProjectFeatureSidebar({
   groups,
+  managedScheduleRefreshRevision,
   collapsedKeys,
   pinnedProjectIds,
   pinnedFeatureKeys,
@@ -7536,6 +7615,7 @@ function ProjectFeatureSidebar({
   onEditingTitleChange
 }: {
   groups: ProjectSessionProjectGroup[]
+  managedScheduleRefreshRevision: number
   collapsedKeys: Set<string>
   pinnedProjectIds: Set<string>
   pinnedFeatureKeys: Set<string>
@@ -7582,6 +7662,7 @@ function ProjectFeatureSidebar({
         loadMoreThreads: state.loadMoreThreads
       }))
     )
+  const managedScheduleIndex = useManagedRunScheduleIndex(managedScheduleRefreshRevision)
   const highlightThreadId = isViewingSession ? currentThreadId : null
   const scrollAreaRef = useRef<HTMLDivElement | null>(null)
   const pendingScrollRestoreRef = useRef<number | null>(null)
@@ -8022,6 +8103,12 @@ function ProjectFeatureSidebar({
                       )
                     })()}
                     {group.featureGroups.map((featureGroup) => {
+                      const managedScheduleAt =
+                        !projectDeleted && !featureGroup.deleted
+                          ? managedScheduleIndex.get(
+                              JSON.stringify([group.project.projectId, featureGroup.slug])
+                            )
+                          : undefined
                       const featureCollapsed = collapsedKeys.has(featureGroup.key)
                       const featurePinned =
                         !projectDeleted && pinnedFeatureKeys.has(featureGroup.key)
@@ -8084,6 +8171,15 @@ function ProjectFeatureSidebar({
                             >
                               {featureGroup.title}
                             </span>
+                            {managedScheduleAt && (
+                              <span
+                                className="inline-flex shrink-0 text-status-nominal"
+                                title={`已预约托管：${managedScheduleAt}`}
+                                aria-label={`已预约托管：${managedScheduleAt}`}
+                              >
+                                <ManagedRunIcon />
+                              </span>
+                            )}
                             {hasUnreadFeatureSession && (
                               <span className="size-2 rounded-full bg-status-info shrink-0" />
                             )}
@@ -9569,8 +9665,10 @@ export function HarnessBoardView({
     []
   )
 
+  const [managedScheduleRefreshRevision, setManagedScheduleRefreshRevision] = useState(0)
   const refreshSelectedRunDetail = useCallback(
     async (options: { rethrow?: boolean } = {}): Promise<void> => {
+      setManagedScheduleRefreshRevision((revision) => revision + 1)
       if (!selectedFeature || selectedFeature.deleted) return
       setLoadingRun(true)
       setLoadError(null)
@@ -11383,6 +11481,7 @@ export function HarnessBoardView({
           </div>
           <ProjectFeatureSidebar
             groups={projectSidebarGroups}
+            managedScheduleRefreshRevision={managedScheduleRefreshRevision}
             collapsedKeys={collapsedFeatureKeys}
             pinnedProjectIds={pinnedProjectIds}
             pinnedFeatureKeys={pinnedFeatureKeys}
@@ -11486,6 +11585,7 @@ export function HarnessBoardView({
           onBackToProject={handleBackToProject}
           onEditDeployUnits={openFeatureDeployUnitEditDialog}
           onRefresh={refreshSelectedRunDetail}
+          managedScheduleRefreshRevision={managedScheduleRefreshRevision}
           onFeatureImManagementSaved={handleFeatureImManagementSaved}
           onActiveSessionChange={handleActiveSessionChange}
           onSessionViewChange={handleSessionViewChange}
@@ -11582,7 +11682,11 @@ export function HarnessBoardView({
           onOpenSystemConstraintUpdate={(project, config) => {
             void handleOpenSystemConstraintUpdate(project, config)
           }}
-          onRefresh={(projectId) => void loadProjectDetail(projectId)}
+          onRefresh={(projectId) => {
+            setManagedScheduleRefreshRevision((revision) => revision + 1)
+            void loadProjectDetail(projectId)
+          }}
+          managedScheduleRefreshRevision={managedScheduleRefreshRevision}
           onEditProject={handleEditProject}
           onUpdatePlugin={(project, updateInfo) => {
             void handleUpdateProjectPlugin(project, updateInfo)

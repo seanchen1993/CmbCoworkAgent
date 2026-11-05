@@ -15,6 +15,10 @@ import { generateProjectThreadTitle } from "../services/project-thread-title"
 import { getDisabledSkills } from "../storage"
 import type { AgentInvokeParams, SkillMetadata, Thread } from "../types"
 import { getHarnessProjectAdapterSnapshot } from "./service"
+import {
+  MANAGED_ULTRA_MODEL_REF,
+  type ManagedRunModelSelection
+} from "../../shared/managed-run-model"
 import { resolveAgentStreamRequestChannel } from "../../shared/agent-stream-channel"
 import { formatSkillUseBlock } from "../../shared/skill-use-block"
 import {
@@ -34,6 +38,7 @@ interface PreparedHarnessMessage {
   displayMessage: string
   userMessageId: string
   skillName?: string
+  skillDescription?: string
 }
 
 interface PreparedManagedAgentRun {
@@ -59,6 +64,7 @@ export interface CreateManagedHarnessSessionInput {
   nodeId: string
   nextAction: ManagedRunSessionAction
   workspacePath: string
+  modelSelection?: ManagedRunModelSelection
   delivery: AgentRunDelivery
   imRoute?: ImGrantRouteIdentity
 }
@@ -157,7 +163,8 @@ async function prepareHarnessMessage(
     modelMessage,
     displayMessage: modelMessage,
     userMessageId: uuid(),
-    skillName: skill.name
+    skillName: skill.name,
+    skillDescription: skill.description
   }
 }
 
@@ -257,11 +264,11 @@ export async function startPreparedManagedAgentRun(
   })
 }
 
-export async function sendManagedProviderRetry(
+export function prepareManagedProviderRetryRun(
   threadId: string,
   delivery: AgentRunDelivery
-): Promise<void> {
-  const prepared = prepareManagedAgentRun(
+): PreparedManagedAgentRun {
+  return prepareManagedAgentRun(
     threadId,
     {
       modelMessage: "继续当前任务",
@@ -270,7 +277,6 @@ export async function sendManagedProviderRetry(
     },
     delivery
   )
-  await startPreparedManagedAgentRun(prepared)
 }
 
 export function prepareManagedBizRetryRun(
@@ -294,7 +300,11 @@ export async function createAndStartManagedHarnessSession(
   input: CreateManagedHarnessSessionInput
 ): Promise<{ threadId: string; thread: Thread }> {
   const prepared = await prepareManagedHarnessSession(input)
-  const thread = await createManagedHarnessSession(input, prepared.skillName)
+  const thread = await createManagedHarnessSession(
+    input,
+    prepared.skillName,
+    prepared.skillDescription
+  )
   await startManagedHarnessSession(input, thread.threadId, prepared)
   return thread
 }
@@ -340,18 +350,22 @@ export async function startManagedHarnessSession(
 
 export async function createManagedHarnessSession(
   input: CreateManagedHarnessSessionInput,
-  skillName?: string
+  skillName?: string,
+  skillDescription?: string
 ): Promise<{ threadId: string; thread: Thread }> {
   const titleSource = input.nextAction.userMessage?.trim() ?? ""
   const title = titleSource
-    ? await generateProjectThreadTitle(titleSource, skillName, {
-        projectId: input.projectId,
-        slug: input.featureId
-      })
+    ? await generateProjectThreadTitle(
+        titleSource,
+        skillName,
+        { projectId: input.projectId, slug: input.featureId },
+        skillDescription
+      )
     : undefined
   const thread = await createThreadService(
     {
       workspacePath: input.workspacePath,
+      ...(input.modelSelection === "ultra" ? { model: MANAGED_ULTRA_MODEL_REF } : {}),
       ...(title ? { title } : {}),
       harnessFeature: {
         projectId: input.projectId,
