@@ -488,6 +488,7 @@ export function BotImConversation({
                           client={client}
                           botId={bot.id}
                           imConversationId={conversation.id}
+                          workId={entry.workId ?? undefined}
                           threadId={entry.threadId!}
                           filePath={file.filePath}
                           attachmentPath={file.attachmentPath}

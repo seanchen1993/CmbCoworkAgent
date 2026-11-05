@@ -90,6 +90,7 @@ const f = ((window as any).fixture = {
   calls: [] as any[],
   reads: [] as any[],
   opened: [] as any[],
+  exported: [] as any[],
   manage: 0,
   tasks: [] as any[],
   backgroundThreads: [] as string[],
@@ -205,6 +206,7 @@ const client = {
     }
   },
   im: {
+    exportFile: async (...args: any[]) => { f.exported.push(args); return true },
     retryFile: async (botId: string, id: string) => {
       if (botId !== bot.id) throw Error("wrong owner")
       const row = f.latest.find((item: any) => item.delivery?.id === id) as any

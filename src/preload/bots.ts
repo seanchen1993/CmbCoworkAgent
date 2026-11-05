@@ -16,8 +16,8 @@ export const localBotsApi: BotClient = {
   im: {
     fileStatuses: (botId, threadId, callId) => ipcRenderer.invoke("bots:im:file-statuses", LOCAL_BOT_HOST_ID, botId, threadId, callId),
     retryFile: (botId, id) => ipcRenderer.invoke("bots:im:file-retry", LOCAL_BOT_HOST_ID, botId, id),
-    exportFile: (botId, id, fileId) =>
-      ipcRenderer.invoke("bots:files:export-im", LOCAL_BOT_HOST_ID, botId, id, fileId),
+    exportFile: (botId, id, fileId, workId) =>
+      ipcRenderer.invoke("bots:files:export-im", LOCAL_BOT_HOST_ID, botId, id, fileId, workId),
     stopConversation: (botId, id) => ipcRenderer.invoke("bots:im:conversation-stop", LOCAL_BOT_HOST_ID, botId, id),
     conversationWorks: (botId, id, cursor, query) =>
       ipcRenderer.invoke("bots:im:conversation-works", LOCAL_BOT_HOST_ID, botId, id, cursor, query),

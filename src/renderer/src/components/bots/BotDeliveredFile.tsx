@@ -13,6 +13,7 @@ export function BotDeliveredFile({
   botId,
   groupId,
   imConversationId,
+  workId,
   threadId,
   filePath,
   attachmentPath,
@@ -24,6 +25,7 @@ export function BotDeliveredFile({
   botId: string
   groupId?: string
   imConversationId?: string
+  workId?: string
   threadId: string
   filePath: string
   attachmentPath?: string
@@ -43,7 +45,7 @@ export function BotDeliveredFile({
     try {
       if (imConversationId) {
         if (!client.im?.exportFile) throw new Error("当前主机不支持 IM 文件导出")
-        await client.im.exportFile(botId, imConversationId, openedPath)
+        await client.im.exportFile(botId, imConversationId, openedPath, workId)
       } else if (groupId) await client.exportGroupFile(groupId, openedPath)
       else await client.exportFile(botId, openedPath)
     } catch (cause) {

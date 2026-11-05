@@ -374,18 +374,48 @@ export function registerBotFileHandlers(
   )
   ipcMain.handle(
     "bots:files:export-im",
-    async (event, hostId: unknown, botId: unknown, conversationId: unknown, id: unknown) => {
-      const host = hostFor(hostId), bot = botIdentifier(botId), bindingId = botIdentifier(conversationId)
+    async (
+      event,
+      hostId: unknown,
+      botId: unknown,
+      conversationId: unknown,
+      id: unknown,
+      workId?: unknown
+    ) => {
+      const host = hostFor(hostId),
+        bot = botIdentifier(botId),
+        bindingId = botIdentifier(conversationId)
+      const workKey = workId === undefined ? undefined : botIdentifier(workId)
+      const defaultWorkspace = botDirectory(
+        join(getCmbCoworkAgentDataRoot(), "bots"),
+        "workspaces",
+        `mock-${bindingId}`
+      )
       const validate = () => {
         host.getBot(bot)
         const route = host.imGateway.binding(bindingId)
         if (!route || route.binding.botId !== bot || route.binding.kind !== "group")
           throw new BotError("NOT_FOUND", "招乎群会话不存在")
+        if (workKey) {
+          const work = host.getWork(bot, workKey)
+          if (
+            work.botId !== bot ||
+            work.source?.transport !== "im" ||
+            work.source.bindingId !== bindingId ||
+            work.source.personal
+          )
+            throw new BotError("NOT_FOUND", "任务不属于当前 Bot 和招乎群")
+          // Read the host-pinned directory, never a workspace supplied by the renderer.
+          return work.workspace?.path ?? defaultWorkspace
+        }
+        return defaultWorkspace
       }
-      validate()
       // Local retained history remains readable after revoke; this grants no IM execution.
-      const workspace = botDirectory(join(getCmbCoworkAgentDataRoot(), "bots"), "workspaces", `mock-${bindingId}`)
-      return exportFile(event, workspace, id, validate)
+      const workspace = validate()
+      return exportFile(event, workspace, id, () => {
+        if (validate() !== workspace)
+          throw new BotError("CONFLICT", "任务工作目录已变化，请重新打开附件")
+      })
     }
   )
   ipcMain.handle(

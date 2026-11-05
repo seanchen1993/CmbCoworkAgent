@@ -539,6 +539,27 @@ async function main() {
     await page.getByText("等待发送到招乎",{exact:true}).waitFor()
     assert.equal(await page.getByRole("button", {name:/重试发送/}).count(),0)
     assert.equal(await page.getByText("已送达招乎",{exact:true}).count(),1)
+    // A task card in the group feed must retain its task identity for native export.
+    await page.evaluate(() => {
+      const f = (window as any).fixture
+      const file = {
+        filePath: "/selected-project/任务报告.xlsx",
+        attachmentPath: "/selected-project/.bot-deliveries/hash/任务报告.xlsx",
+        name: "任务报告.xlsx", size: 1024
+      }
+      f.latest.push({ id: "task-attachment", kind: "bot", text: "", senderId: "Bot",
+        state: "sent", createdAt: Date.now() + 10, workId: "work-a", threadId: "task-a",
+        files: [file], delivery: { id: "task-attachment", file, state: "sent", progress: 100 } })
+      f.bump()
+    })
+    await page.getByRole("button", { name: "保存 任务报告.xlsx", exact: true }).click()
+    assert.deepEqual(await page.evaluate(() => (window as any).fixture.exported), [
+      ["bot", "group-a", "/selected-project/.bot-deliveries/hash/任务报告.xlsx", "work-a"]
+    ])
+    await page.getByRole("button", { name: "保存 report-1.docx", exact: true }).click()
+    assert.deepEqual(await page.evaluate(() => (window as any).fixture.exported[1]), [
+      "bot", "group-a", "/workspace/.bot-deliveries/hash/report-1.docx", undefined
+    ])
     await page.getByRole("button",{name:"招乎群聊：体验优化小组",exact:true}).click()
     await page.getByText("接入已解除，历史消息仍可查看",{exact:true}).waitFor()
     assert.equal(await page.locator(".bot-delivered-file").count(),0)
