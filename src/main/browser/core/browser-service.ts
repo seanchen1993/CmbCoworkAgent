@@ -39,6 +39,8 @@ import type {
   BrowserSessionImportCounts
 } from "./browser-session-data"
 
+import { readWpsDocumentText } from "./wps-document"
+
 const MAX_BROWSER_CONSOLE_ENTRIES = 200
 const MAX_BROWSER_CONSOLE_MESSAGE_CHARS = 4_000
 const MIN_BROWSER_ZOOM_FACTOR = 0.25
@@ -72,20 +74,6 @@ function buildIframeExtractionScript(options: {
     }
   })()`
 }
-
-const READ_WPS_DOCUMENT_TEXT_SCRIPT = `(async () => {
-  const wpsOpenApi = window.WPSOpenApi
-  if (!wpsOpenApi?.Application?.ActiveDocument) {
-    throw new Error("WPS OpenAPI is unavailable in office-iframe")
-  }
-  const activeDocument = await wpsOpenApi.Application.ActiveDocument
-  const documentRange = await activeDocument.GetDocumentRange()
-  const text = await documentRange.Text
-  if (typeof text !== "string") {
-    throw new Error("WPS document range Text did not resolve to a string")
-  }
-  return text
-})()`
 
 interface BrowserIframeInformation {
   index: number
@@ -369,6 +357,18 @@ function getChannel(sessionId: string): string {
 }
 
 export class BrowserService {
+  private readonly profileImportListeners = new Set<() => Promise<void>>()
+
+  /** Internal consumers only; no Cookie values are exposed through renderer or model tools. */
+  onProfileImported(listener: () => Promise<void>): () => void {
+    this.profileImportListeners.add(listener)
+    return () => this.profileImportListeners.delete(listener)
+  }
+
+  readProfileCookies() {
+    return electronSession.fromPartition(BROWSER_PROFILE_PARTITION).cookies.get({})
+  }
+
   private activeSession: BrowserSession | null = null
 
   constructor(private readonly getMainWindow: () => BrowserWindow | null) {}
@@ -488,25 +488,8 @@ export class BrowserService {
   async readWpsDocumentText(): Promise<{ text: string }> {
     const session = this.requireSession()
     await session.targetReady
-    const mainFrame = session.view.webContents.mainFrame
-    const iframeFrames = mainFrame.framesInSubtree.filter((frame) => frame !== mainFrame)
-    const prioritizedFrames = [
-      ...iframeFrames.filter((frame) => frame.name === "office-iframe"),
-      ...iframeFrames.filter((frame) => frame.name !== "office-iframe")
-    ]
-    if (prioritizedFrames.length === 0) throw new Error("当前页面未找到 WPS office-iframe")
-
-    let firstError: string | undefined
-    for (const frame of prioritizedFrames) {
-      try {
-        const text = (await frame.executeJavaScript(READ_WPS_DOCUMENT_TEXT_SCRIPT)) as unknown
-        if (typeof text !== "string") throw new Error("WPS 文档正文不是文本")
-        return { text }
-      } catch (error) {
-        firstError ??= formatError(error)
-      }
-    }
-    throw new Error(`读取 WPS 文档全文失败：${firstError ?? "WPS OpenAPI 不可用"}`)
+    const { text } = await readWpsDocumentText(session.view.webContents)
+    return { text }
   }
 
   detach(): BrowserState {
@@ -687,6 +670,11 @@ export class BrowserService {
     }
     await runCookieImportPool(data.cookies, importOneCookie)
 
+    const synced = await Promise.allSettled(
+      [...this.profileImportListeners].map((listener) => listener())
+    )
+    if (synced.some((result) => result.status === "rejected"))
+      console.warn("[BrowserProfile] Bot login sync failed; manual browser login remains available")
     const skippedLocalStorage = data.localStorage.length
     if (this.activeSession && !this.activeSession.view.webContents.isDestroyed()) {
       const currentUrl = this.activeSession.view.webContents.getURL()

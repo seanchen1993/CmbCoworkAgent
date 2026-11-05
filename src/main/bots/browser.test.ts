@@ -115,6 +115,7 @@ beforeEach(() => {
       ({
         context,
         createPage: () => context.newPage(),
+        readWpsDocument: vi.fn(async () => ({ text: "synthetic WPS text", totalChars: 18, textOffset: 0 })),
         getTitle: async () => "Test page",
         getPageState: async () => ({ title: "Test page", canGoBack: false, canGoForward: false }),
         capturePage: vi.fn<(page: TestPage) => Promise<Buffer>>(async () => Buffer.from("fixture")),
@@ -143,6 +144,21 @@ afterEach(async () => {
 })
 
 describe("Bot browser ownership and control", () => {
+  it("reads WPS only in its owned page, and respects human control before reading", async () => {
+    const a = JSON.parse(await service.act("a", { action: "observe" }, signal()))
+    const b = JSON.parse(await service.act("b", { action: "observe" }, signal()))
+    const engine = await launch.mock.results[0].value as BotBrowserEngine
+    await expect(service.act("a", { action: "read_wps_document", pageId: b.pageId }, signal())).rejects.toThrow("不属于此 Bot")
+    expect(engine.readWpsDocument).not.toHaveBeenCalled()
+    expect(JSON.parse(await service.act("a", { action: "read_wps_document", pageId: a.pageId, textOffset: 4, maxTextChars: 8 }, signal()))).toMatchObject({ pageId: a.pageId, text: "synthetic WPS text" })
+    expect(engine.readWpsDocument).toHaveBeenCalledExactlyOnceWith(context.entries[0], { textOffset: 4, maxTextChars: 8 })
+    await service.takeOver("a", a.pageId)
+    const pending = service.act("a", { action: "read_wps_document", pageId: a.pageId }, signal())
+    await service.giveBack("a")
+    expect(JSON.parse(await pending).note).toContain("not replayed")
+    expect(engine.readWpsDocument).toHaveBeenCalledTimes(1)
+  })
+
   it("bounds a stuck evaluate, closes only its page and allows a fresh page", async () => {
     const a = JSON.parse(await service.act("a", { action: "observe" }, signal()))
     const sameBot = JSON.parse(await service.act("a", { action: "navigate", newTab: true, url: "https://example.test/other" }, signal()))

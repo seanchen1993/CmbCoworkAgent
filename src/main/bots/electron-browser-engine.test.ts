@@ -3,7 +3,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import type { BotBrowserEngine } from "./browser-engine"
 import { startElectronBotBrowser } from "./electron-browser-engine"
 
-const fixture = vi.hoisted(() => ({ spawn: vi.fn(), connect: vi.fn() }))
+const fixture = vi.hoisted(() => ({ spawn: vi.fn(), connect: vi.fn(), disconnect: vi.fn(), profile: vi.fn() }))
+vi.mock("./browser-profile", () => ({ connectBotBrowserProfile: fixture.profile }))
 vi.mock("node:child_process", () => ({ spawn: fixture.spawn }))
 vi.mock("node:fs/promises", () => ({ mkdir: vi.fn(async () => {}) }))
 vi.mock("electron", () => ({ app: { isPackaged: true } }))
@@ -19,6 +20,7 @@ let holdCapture: boolean
 beforeEach(() => {
   vi.clearAllMocks()
   vi.spyOn(console, "warn").mockImplementation(() => {})
+  fixture.profile.mockImplementation(async () => fixture.disconnect)
   engine = undefined
   captureValue = Buffer.from("native-jpeg").toString("base64")
   holdCapture = false
@@ -80,6 +82,17 @@ afterEach(async () => {
 })
 
 describe("Electron Bot browser native capture RPC", () => {
+  it("routes WPS reads to the exact native target and releases profile sync on close", async () => {
+    engine = await startElectronBotBrowser("/synthetic-profile")
+    const page = await engine.createPage()
+    await engine.readWpsDocument(page, { textOffset: 20, maxTextChars: 10 })
+    expect(child.send).toHaveBeenCalledWith(expect.objectContaining({ action: "read-wps-document", targetId: "owned-1", readOptions: { textOffset: 20, maxTextChars: 10 } }), expect.any(Function))
+    expect(fixture.profile).toHaveBeenCalledOnce()
+    await engine.close()
+    engine = undefined
+    expect(fixture.disconnect).toHaveBeenCalledOnce()
+  })
+
   it("uses the Page's exact native target without showing or changing the page", async () => {
     engine = await startElectronBotBrowser("/synthetic-profile")
     const first = await engine.createPage()

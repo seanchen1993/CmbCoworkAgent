@@ -245,9 +245,9 @@ export function BrowserCdpConfigCard({
 
             <div className="flex items-center justify-between gap-4 rounded-lg border border-border bg-muted/50 px-3 py-2.5">
               <div className="min-w-0">
-                <p className="text-xs font-medium text-foreground">开启 导入已有Chrome登陆数据</p>
+                <p className="text-xs font-medium text-foreground">导入 Chrome 登录状态</p>
                 <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
-                  开启后，支持加载导入已有Chrome浏览器数据所需能力。
+                  内置浏览器和 Bot 浏览器复用 Chrome 登录状态，减少重复登录。
                 </p>
               </div>
               <Switch

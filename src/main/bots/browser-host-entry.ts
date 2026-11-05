@@ -2,6 +2,8 @@ import { app, ipcMain, session } from "electron"
 import { BotBrowserWindow as BrowserWindow } from "./browser-host-window"
 import { isAbsolute } from "node:path"
 
+import { readWpsDocumentText } from "../browser/core/wps-document"
+
 const profile = process.env.CMB_BOT_BROWSER_PROFILE
 // This is an app-owned child, never a second interactive application instance.
 if (!process.send || !profile || !isAbsolute(profile)) app.exit(1)
@@ -135,7 +137,7 @@ else {
         })
         process.on("message", (message: unknown) => {
           if (!message || typeof message !== "object" || Array.isArray(message)) return
-          const { id, action, targetId, generation, instruction, requestId, error } =
+          const { id, action, targetId, generation, instruction, requestId, error, readOptions } =
             message as Record<string, unknown>
           if (action === "toolbar-result" && typeof requestId === "number") {
             const pending = toolbarRequests.get(requestId)
@@ -177,7 +179,8 @@ else {
               return targets.has(targetId)
             }
             if (
-              (action === "show" ||
+              (action === "read-wps-document" ||
+                action === "show" ||
                 action === "get-title" ||
                 action === "get-state" ||
                 action === "capture") &&
@@ -218,6 +221,17 @@ else {
                   clearTimeout(timer)
                   if (!contents.isDestroyed()) contents.setBackgroundThrottling(throttled)
                 }
+              }
+              if (action === "read-wps-document") {
+                if (!readOptions || typeof readOptions !== "object") throw new Error("文档读取范围无效")
+                const { textOffset, maxTextChars } = readOptions as {
+                  textOffset?: number
+                  maxTextChars?: number
+                }
+                return readWpsDocumentText(window.webContents, {
+                  textOffset,
+                  maxTextChars: maxTextChars ?? 20_000
+                })
               }
               if (action === "get-title") return window.webContents.getTitle()
               if (action === "get-state")

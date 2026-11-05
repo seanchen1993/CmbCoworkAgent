@@ -2,7 +2,9 @@ import { spawn } from "node:child_process"
 import { mkdir } from "node:fs/promises"
 import { join } from "node:path"
 import { app } from "electron"
+import { connectBotBrowserProfile } from "./browser-profile"
 import type { Browser, Page } from "playwright"
+import type { WpsDocumentReadOptions, WpsDocumentText } from "../browser/core/wps-document"
 import type { BotBrowserEngine, BotBrowserToolbarAction } from "./browser-engine"
 
 /** Reuses this installation's Electron/Chromium. No browser download or application-wide CDP connection. */
@@ -19,6 +21,7 @@ export async function startElectronBotBrowser(profile: string): Promise<BotBrows
   let browser: Browser | undefined,
     sequence = 0,
     closed = false
+  let disconnectProfile: (() => void) | undefined
   const pagesByTarget = new Map<string, Page>()
   let toolbarListener:
     | ((page: Page, generation: number, action: BotBrowserToolbarAction) => Promise<void>)
@@ -35,6 +38,8 @@ export async function startElectronBotBrowser(profile: string): Promise<BotBrows
   const exited = new Promise<void>((resolve) => child.once("close", () => resolve()))
   const fail = (error: Error) => {
     closed = true
+    disconnectProfile?.()
+    disconnectProfile = undefined
     pagesByTarget.clear()
     hiddenListeners.clear()
     toolbarListener = undefined
@@ -124,11 +129,20 @@ export async function startElectronBotBrowser(profile: string): Promise<BotBrows
     else request.resolve(reply.value)
   })
   const call = (
-    action: "create" | "show" | "hide" | "get-title" | "get-state" | "capture" | "is-content",
+    action:
+      | "read-wps-document"
+      | "create"
+      | "show"
+      | "hide"
+      | "get-title"
+      | "get-state"
+      | "capture"
+      | "is-content",
     targetId?: string,
     generation?: number,
     timeoutMs = 15_000,
-    instruction?: string
+    instruction?: string,
+    readOptions?: WpsDocumentReadOptions
   ): Promise<unknown> => {
     if (closed || !child.connected) return Promise.reject(new Error("Bot 浏览器未连接"))
     if (pending.size >= 16) return Promise.reject(new Error("浏览器请求过多，请稍候"))
@@ -139,7 +153,7 @@ export async function startElectronBotBrowser(profile: string): Promise<BotBrows
         reject(new Error("Bot 浏览器响应超时"))
       }, timeoutMs)
       pending.set(id, { resolve, reject, timer })
-      child.send({ id, action, targetId, generation, instruction }, (error) => {
+      child.send({ id, action, targetId, generation, instruction, readOptions }, (error) => {
         if (error) {
           clearTimeout(timer)
           pending.delete(id)
@@ -149,6 +163,8 @@ export async function startElectronBotBrowser(profile: string): Promise<BotBrows
     })
   }
   const close = async () => {
+    disconnectProfile?.()
+    disconnectProfile = undefined
     if (child.connected) child.send({ id: ++sequence, action: "quit" }, () => {})
     const force = setTimeout(() => child.kill(), 4000)
     try {
@@ -215,6 +231,13 @@ export async function startElectronBotBrowser(profile: string): Promise<BotBrows
     browser = await chromium.connectOverCDP(endpoint, { timeout: 15_000 })
     const context = browser.contexts()[0]
     if (!context) throw new Error("Bot 浏览器上下文不可用")
+    try {
+      disconnectProfile = await connectBotBrowserProfile(context)
+      if (closed) disconnectProfile()
+    } catch {
+      console.warn("[BotBrowser] Login import unavailable; browser takeover remains available")
+    }
+    if (closed) throw new Error("Bot 浏览器未连接")
     const identities = new WeakMap<Page, string>()
     const captures = new WeakMap<Page, Promise<Buffer>>()
     const targetOf = async (page: Page): Promise<string> => {
@@ -243,6 +266,11 @@ export async function startElectronBotBrowser(profile: string): Promise<BotBrows
           await new Promise((resolve) => setTimeout(resolve, 25))
         } while (!closed && Date.now() < deadline)
         throw new Error("未能绑定 Bot 浏览器页面")
+      },
+      async readWpsDocument(page, options) {
+        return (await call(
+          "read-wps-document", await targetOf(page), undefined, 15_000, undefined, options
+        )) as WpsDocumentText
       },
       async getTitle(page) {
         return (await call("get-title", await targetOf(page))) as string

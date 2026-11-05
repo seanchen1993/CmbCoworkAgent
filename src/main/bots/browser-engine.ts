@@ -1,5 +1,7 @@
 import type { BrowserContext, Page } from "playwright"
 
+import type { WpsDocumentReadOptions, WpsDocumentText } from "../browser/core/wps-document"
+
 export type BotBrowserToolbarAction = {
   action: "back" | "forward" | "reload" | "new" | "close" | "navigate" | "return"
   url?: string
@@ -9,6 +11,7 @@ export type BotBrowserToolbarAction = {
 export interface BotBrowserEngine {
   context: BrowserContext
   createPage(): Promise<Page>
+  readWpsDocument(page: Page, options: WpsDocumentReadOptions): Promise<WpsDocumentText>
   /** Browser-owned metadata must remain readable while a page's JavaScript dialog is open. */
   getTitle(page: Page): Promise<string>
   getPageState(page: Page): Promise<{ title: string; canGoBack: boolean; canGoForward: boolean }>

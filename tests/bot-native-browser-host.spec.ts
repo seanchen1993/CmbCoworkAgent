@@ -23,7 +23,7 @@ const { app, nativeImage } = require('electron');
 app.setPath('userData', ${JSON.stringify(join(root, "parent-profile"))});
 app.on('window-all-closed', () => {});
 app.whenReady().then(async () => {
-  const { startElectronBotBrowser, BotBrowserService } = require(${JSON.stringify(resolve(process.env.BOT_TEST_APP_OUT ?? "out", "main/bots-browser-e2e.js"))});
+  const { startElectronBotBrowser, BotBrowserService, BrowserService, syncBotBrowserProfile } = require(${JSON.stringify(resolve(process.env.BOT_TEST_APP_OUT ?? "out", "main/bots-browser-e2e.js"))});
   let engine;
   const workspace = bot => path.join(${JSON.stringify(root)}, 'workspaces', bot);
   await fs.mkdir(workspace('a'), { recursive: true });
@@ -253,6 +253,7 @@ app.whenReady().then(async () => {
     assert.equal(await pages[0].getByRole('button', { name: 'closed-dialog', exact: true }).count(), 1);
     console.log('BOT_NATIVE_DIALOG_CLOSE_PASS: accept/dismiss/alert, preview, return, input and same-page HTML5 drag');
     await (await import(${JSON.stringify(pathToFileURL(resolve("tests/support/bot-browser-automation-journey.mjs")).href)})).default(service, engine, fixtureUrl, workspace);
+    await (await import(${JSON.stringify(pathToFileURL(resolve("tests/support/bot-browser-wps-journey.mjs")).href)})).default(service, engine, BrowserService, syncBotBrowserProfile);
     // Do not wait for Chromium's periodic cookie flush before closing the host.
     await service.act('a', { action: 'navigate', url: fixtureUrl + '/login' }, new AbortController().signal);
     await service.close();
@@ -291,6 +292,7 @@ app.whenReady().then(async () => {
       })
       assert.equal(code, 0, output)
       assert.ok(output.includes("BOT_NATIVE_HOST_PASS"), output)
+      assert.ok(output.includes("BOT_WPS_LOGIN_PASS"), output)
       assert.ok(output.includes("BOT_OWNED_AUTOMATION_PASS"), output)
       assert.ok(output.includes("BOT_NATIVE_DIALOG_CLOSE_PASS"), output)
       console.log(

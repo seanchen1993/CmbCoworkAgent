@@ -40,7 +40,10 @@ export interface BotBrowserAction {
     | "fill_form"
     | "wait"
     | "evaluate"
+    | "read_wps_document"
     | "back"
+  textOffset?: number
+  maxTextChars?: number
   pageId?: string
   newTab?: boolean
   url?: string
@@ -742,6 +745,18 @@ export class BotBrowserService {
             text: action.text,
             textGone: action.textGone
           })
+        } else if (action.action === "read_wps_document") {
+          let document: Awaited<ReturnType<BotBrowserEngine["readWpsDocument"]>> | undefined
+          await this.input(entry, async () => {
+            check()
+            document = await this.engine!.readWpsDocument(page, {
+              textOffset: action.textOffset,
+              maxTextChars: action.maxTextChars ?? 20_000
+            })
+            check()
+          })
+          check()
+          return JSON.stringify({ pageId: entry.id, url: page.url(), ...document })
         } else if (action.action === "evaluate") {
           await run("browser_evaluate", {
             function: action.function,
