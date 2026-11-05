@@ -19,6 +19,7 @@ import { Badge, badgeVariants, type BadgeProps } from "@/components/ui/badge"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { KnowledgePreviewPanel } from "./KnowledgePreviewPanel"
 import { KnowledgeBaseDeleteDialog } from "./KnowledgeBaseDeleteDialog"
+import { SystemConstraintsGuideButton } from "./SystemConstraintsGuideButton"
 
 function knowledgeStatus(
   item: KnowledgeBaseListItem,
@@ -121,6 +122,7 @@ export function KnowledgeBaseSyncPanel({
               </TooltipContent>
             </Tooltip>
           </TooltipProvider>
+          <SystemConstraintsGuideButton />
         </div>
         <Button variant="outline" size="sm" disabled={operationBusy} onClick={onRefreshAll}>
           {loading || result?.refreshing ? (

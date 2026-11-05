@@ -4,6 +4,7 @@ import type { KnowledgeBaseListItem } from "../../../../shared/knowledge-base-ty
 import { Button } from "@/components/ui/button"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { cn } from "@/lib/utils"
+import { SystemConstraintsGuideButton } from "./SystemConstraintsGuideButton"
 
 function formatKnowledgeBaseLabel(item: KnowledgeBaseListItem): string {
   return `${item.name}（${item.gitRef}）`
@@ -47,16 +48,19 @@ export function KnowledgeBaseSelector({
     <div className="mt-3 grid gap-1.5 text-xs font-medium text-muted-foreground">
       <div className="flex items-center justify-between gap-3">
         <span>系统约束</span>
-        <Button
-          type="button"
-          variant="link"
-          size="sm"
-          className="h-auto px-0 py-0 text-xs"
-          disabled={disabled}
-          onClick={onOpenSystemConstraints}
-        >
-          查看系统约束
-        </Button>
+        <div className="flex items-center gap-3">
+          <SystemConstraintsGuideButton disabled={disabled} />
+          <Button
+            type="button"
+            variant="link"
+            size="sm"
+            className="h-auto px-0 py-0 text-xs"
+            disabled={disabled}
+            onClick={onOpenSystemConstraints}
+          >
+            查看系统约束
+          </Button>
+        </div>
       </div>
       <Popover open={open} onOpenChange={setOpen}>
         <PopoverTrigger asChild>
