@@ -2867,6 +2867,7 @@ function ProjectFormDialog({
   onOpenChange,
   onChange,
   onInstallPlugin,
+  onOpenSystemConstraints,
   onPickWorkspace,
   onSubmit
 }: {
@@ -2884,6 +2885,7 @@ function ProjectFormDialog({
   onChange: (form: HarnessProjectCreateInput) => void
   onInstallPlugin: (adapter: HarnessAdapterRegistryItem) => void | Promise<void>
   onPickWorkspace: () => void
+  onOpenSystemConstraints: () => void
   onSubmit: () => void
 }): React.JSX.Element {
   const [dialogPortalContainer, setDialogPortalContainer] = useState<HTMLDivElement | null>(null)
@@ -3044,6 +3046,7 @@ function ProjectFormDialog({
                 }
                 disabled={creating}
                 portalContainer={dialogPortalContainer}
+                onOpenSystemConstraints={onOpenSystemConstraints}
                 onChange={(knowledgeBaseIds) => onChange({ ...form, knowledgeBaseIds })}
               />
               <ProjectWorkspaceField
@@ -3105,6 +3108,7 @@ function ProjectEditDialog({
   onOpenChange,
   onChange,
   onInstallPlugin,
+  onOpenSystemConstraints,
   onSubmit
 }: {
   open: boolean
@@ -3118,6 +3122,7 @@ function ProjectEditDialog({
   onOpenChange: (open: boolean) => void
   onChange: (form: HarnessProjectMetadataUpdateInput) => void
   onInstallPlugin: (adapter: HarnessAdapterRegistryItem) => void | Promise<void>
+  onOpenSystemConstraints: () => void
   onSubmit: () => void
 }): React.JSX.Element {
   const [dialogPortalContainer, setDialogPortalContainer] = useState<HTMLDivElement | null>(null)
@@ -3269,6 +3274,7 @@ function ProjectEditDialog({
                 }
                 disabled={saving}
                 portalContainer={dialogPortalContainer}
+                onOpenSystemConstraints={onOpenSystemConstraints}
                 onChange={(knowledgeBaseIds) => onChange({ ...form, knowledgeBaseIds })}
               />
               <ProjectWorkspaceField
@@ -9748,6 +9754,26 @@ export function HarnessBoardView({
     [closeProjectDialogAdapterSession, savingEdit]
   )
 
+  const handleOpenSystemConstraints = useCallback((): void => {
+    if (creating || workspaceValidating || savingEdit) return
+    if (dialogOpen) handleCreateDialogOpenChange(false)
+    if (editingProject) handleEditDialogOpenChange(false)
+    setSelectedProjectSession(null)
+    setSelectedFeature(null)
+    setSelectedProjectId(null)
+    setIsViewingSession(false)
+    handleProjectModeTabChange("constraint-sync")
+  }, [
+    creating,
+    workspaceValidating,
+    savingEdit,
+    dialogOpen,
+    editingProject,
+    handleCreateDialogOpenChange,
+    handleEditDialogOpenChange,
+    handleProjectModeTabChange
+  ])
+
   const requestArchiveProject = useCallback(
     (project: HarnessProjectListItem): void => {
       if (archivingProjectId || confirmingProjectAction || project.lifecycle.status === "archived")
@@ -11603,6 +11629,7 @@ export function HarnessBoardView({
           onOpenChange={handleEditDialogOpenChange}
           onChange={setEditForm}
           onInstallPlugin={handleInstallMarketPlugin}
+          onOpenSystemConstraints={handleOpenSystemConstraints}
           onSubmit={() => void handleSubmitEdit()}
         />
         <KnowledgeDialog
@@ -11944,6 +11971,7 @@ export function HarnessBoardView({
         onOpenChange={handleCreateDialogOpenChange}
         onChange={setForm}
         onInstallPlugin={handleInstallMarketPlugin}
+        onOpenSystemConstraints={handleOpenSystemConstraints}
         onPickWorkspace={() => void handlePickWorkspace()}
         onSubmit={() => void handleSubmit()}
       />
@@ -11959,6 +11987,7 @@ export function HarnessBoardView({
         onOpenChange={handleEditDialogOpenChange}
         onChange={setEditForm}
         onInstallPlugin={handleInstallMarketPlugin}
+        onOpenSystemConstraints={handleOpenSystemConstraints}
         onSubmit={() => void handleSubmitEdit()}
       />
       <ProjectActionConfirmDialog

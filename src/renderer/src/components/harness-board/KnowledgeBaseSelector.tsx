@@ -15,6 +15,7 @@ export function KnowledgeBaseSelector({
   supportsKnowledgeBaseContext,
   disabled,
   portalContainer,
+  onOpenSystemConstraints,
   onChange
 }: {
   items: KnowledgeBaseListItem[]
@@ -22,6 +23,7 @@ export function KnowledgeBaseSelector({
   supportsKnowledgeBaseContext: boolean
   disabled?: boolean
   portalContainer?: HTMLElement | null
+  onOpenSystemConstraints: () => void
   onChange: (ids: string[]) => void
 }): React.JSX.Element {
   const [open, setOpen] = useState(false)
@@ -43,7 +45,19 @@ export function KnowledgeBaseSelector({
 
   return (
     <div className="mt-3 grid gap-1.5 text-xs font-medium text-muted-foreground">
-      <span>系统约束</span>
+      <div className="flex items-center justify-between gap-3">
+        <span>系统约束</span>
+        <Button
+          type="button"
+          variant="link"
+          size="sm"
+          className="h-auto px-0 py-0 text-xs"
+          disabled={disabled}
+          onClick={onOpenSystemConstraints}
+        >
+          查看系统约束
+        </Button>
+      </div>
       <Popover open={open} onOpenChange={setOpen}>
         <PopoverTrigger asChild>
           <Button
