@@ -23,6 +23,42 @@ const request: UserInputRequest = {
 }
 
 describe("group question ownership", () => {
+  it.each(["running", "waiting_user"] as const)(
+    "keeps the %s owner selectable after consuming an ordinary group message",
+    state => {
+      const owner: BotTask = { ...task, id: "owner", state }
+      const input: BotTask = { ...task, id: "input", state: "running", injectedInto: owner.id }
+      expect(botGroupActiveTasks("room", [input, owner])).toEqual([owner])
+      expect(botGroupActiveTasks("room", [owner, input])).toEqual([owner])
+      expect(botGroupActiveTasks("room", [input])).toEqual([])
+    }
+  )
+
+  it.each(["queued", "running", "waiting_user"] as const)(
+    "selects the real %s owner instead of its consumed internal feedback",
+    (state) => {
+      const owner: BotTask = { ...task, id: "owner", state }
+      const feedback: BotTask = {
+        ...task,
+        id: "feedback",
+        state: "running",
+        origin: {
+          kind: "bot",
+          fromBotId: "reviewer",
+          sourceTaskId: "review",
+          rootTaskId: "owner",
+          depth: 1,
+          expectsReply: false,
+          groupId: "room",
+          feedbackForTaskId: "owner"
+        }
+      }
+      expect(botGroupActiveTasks("room", [feedback, owner])).toEqual([owner])
+      expect(botGroupActiveTasks("room", [owner, feedback])).toEqual([owner])
+      expect(botGroupActiveTasks("room", [feedback])).toEqual([])
+    }
+  )
+
   it("shows one activity per member and never masks an active question with a queued receipt", () => {
     const queued = { ...task, id: "queued", state: "queued" as const }
     const running = { ...task, id: "running", state: "running" as const }

@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest"
 import {
   createStreamDataSerializer,
   createSerializedValuesMessageAccumulator,
+  isStreamUserTurnBoundary,
   sanitizeStreamDataForRenderer,
   serializeStreamData
 } from "./stream-data-serialization"
@@ -13,6 +14,21 @@ import {
 } from "../../shared/stream-message-wire-mode"
 
 describe("stream data serialization", () => {
+  it("only treats marked Bot feedback as internal across live and serialized messages", () => {
+    for (const marker of [undefined, false, true]) {
+      const message = new HumanMessage({
+        id: "input", content: "[Internal Bot feedback] quoted user text",
+        additional_kwargs: marker === undefined ? {} : { cmb_internal_bot_feedback: marker }
+      })
+      expect(isStreamUserTurnBoundary(message)).toBe(marker !== true)
+      expect(isStreamUserTurnBoundary(message.toJSON())).toBe(marker !== true)
+      expect(isStreamUserTurnBoundary({
+        type: "human", id: message.id, content: message.content,
+        additional_kwargs: message.additional_kwargs
+      })).toBe(marker !== true)
+    }
+  })
+
   it.each([
     ["哈", "哈", "，你好"],
     ["a", "ab", "abc"],

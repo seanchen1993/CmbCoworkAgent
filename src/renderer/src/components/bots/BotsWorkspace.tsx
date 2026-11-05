@@ -1601,9 +1601,6 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
         avatar={
           <BotGroupAvatar
             memberIds={group.memberIds}
-            groupId={group.id}
-            tasks={snapshot?.tasks ?? []}
-            backgroundThreads={snapshot?.backgroundThreads}
             bots={snapshot?.bots ?? []}
             userInitials={userInitials}
             size={18}
@@ -1627,9 +1624,6 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
         >
           <BotGroupAvatar
             memberIds={group.memberIds}
-            groupId={group.id}
-            tasks={snapshot?.tasks ?? []}
-            backgroundThreads={snapshot?.backgroundThreads}
             bots={snapshot?.bots ?? []}
             userInitials={userInitials}
           />
@@ -2472,9 +2466,6 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
               <div className="bot-profile">
                 <BotGroupAvatar
                   memberIds={selectedGroup.memberIds}
-                  groupId={selectedGroup.id}
-                  tasks={snapshot?.tasks ?? []}
-                  backgroundThreads={snapshot?.backgroundThreads}
                   bots={snapshot?.bots ?? []}
                   userInitials={userInitials}
                   size={64}

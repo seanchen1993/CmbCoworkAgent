@@ -110,6 +110,8 @@ export type BotTaskState =
   | "outcome_unknown"
 
 export interface BotTask {
+  /** Persisted owner of a consumed input receipt; not a separate execution. */
+  injectedInto?: string
   id: string
   botId: string
   threadId: string
@@ -211,6 +213,9 @@ export type BotTaskOrigin =
       upstreamTaskId?: string
       depth: number
       expectsReply: boolean
+      /** Host-owned feedback delivery, not a model-selected task or user grant. */
+      feedbackForTaskId?: string
+      feedbackMessageId?: string
       groupId?: string
       /** Declared by the dispatch tool; verified by the host before a successful file reply. */
       outputFiles?: string[]

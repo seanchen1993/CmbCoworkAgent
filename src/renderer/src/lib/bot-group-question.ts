@@ -10,6 +10,9 @@ export function botGroupActiveTasks(groupId: string, tasks: readonly BotTask[]):
   }
   const members = new Map<string, BotTask>()
   for (const task of tasks) {
+    // Consumed inputs are inbox receipts, not independently stoppable runs.
+    // Select the physical execution rather than one of its consumed inputs.
+    if (task.injectedInto || (task.origin.kind === "bot" && task.origin.feedbackForTaskId)) continue
     const rank = priority[task.state] ?? 0
     if (botTaskGroupId(task) !== groupId || !rank) continue
     const previous = members.get(task.botId)

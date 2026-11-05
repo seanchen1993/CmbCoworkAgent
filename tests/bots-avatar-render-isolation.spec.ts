@@ -13,12 +13,15 @@ async function main() {
       contents: `
 import React from 'react'; import {createRoot} from 'react-dom/client';
 import {BotAvatar} from './src/renderer/src/components/bots/BotAvatar';
+import {BotGroupAvatar} from './src/renderer/src/components/bots/BotGroupAvatar';
 const root=createRoot(document.getElementById('root'));
 let nextId=0,now=0; const frames=new Map();
 window.requestAnimationFrame=fn=>{frames.set(++nextId,fn);return nextId};
 window.cancelAnimationFrame=id=>frames.delete(id);
-window.IntersectionObserver=class { constructor(fn){this.fn=fn} observe(target){queueMicrotask(()=>this.fn([{target,isIntersecting:true}]))}unobserve(){}disconnect(){} };
-window.avatarFixture={paints:{},render(color='#123456',busy=false){root.render(<><div data-probe='unchanged'><BotAvatar color='#ff2850' shape='flower'/></div><div data-probe='changed'><BotAvatar color={color} busy={busy}/></div></>)},step(count){for(let i=0;i<count;i++){now+=20;const batch=[...frames.values()];frames.clear();for(const fn of batch)fn(now)}},pending(){return frames.size},unmount(){root.unmount()}};
+let visibility='visible';
+Object.defineProperty(document,'visibilityState',{configurable:true,get:()=>visibility});
+window.setFixtureVisibility=value=>{visibility=value;document.dispatchEvent(new Event('visibilitychange'))};
+window.avatarFixture={paints:{},render(color='#123456',busy=false,animated=true){root.render(<><div data-probe='unchanged'><BotAvatar color='#ff2850' shape='flower'/></div><div data-probe='changed'><BotAvatar color={color} busy={busy} animated={animated}/></div></>)},renderGroup(){root.render(<><div data-probe='group'><BotGroupAvatar memberIds={['a','b']} bots={[{id:'a',color:'#123456',shape:'drop'},{id:'b',color:'#123456',shape:'flower'}]} userInitials='U'/></div><div data-probe='changed'><BotAvatar color='#00aabb' busy/></div></>)},step(count,interval=20){for(let i=0;i<count;i++){now+=interval;const batch=[...frames.values()];frames.clear();for(const fn of batch)fn(now)}},pending(){return frames.size},unmount(){root.unmount()}};
 window.avatarFixture.render();`
     },
     bundle: true,
@@ -78,7 +81,13 @@ window.avatarFixture.render();`
     assert(after.changed > before.changed, "changed avatar is still painted")
     await page.evaluate(() => (window as any).avatarFixture.render("#00aabb", true))
     await page.waitForTimeout(50)
-    await page.evaluate(() => (window as any).avatarFixture.step(30))
+    const activeStart = await page.evaluate(() => (window as any).avatarFixture.paints.changed)
+    await page.evaluate(() => (window as any).avatarFixture.step(120, 1000 / 120))
+    const activePaints = await page.evaluate(() => (window as any).avatarFixture.paints.changed)
+    assert(
+      activePaints - activeStart >= 29 && activePaints - activeStart <= 31,
+      "active SVG painting stays within 30 fps even on a 120 Hz display"
+    )
     assert(
       (await page.evaluate(() => (window as any).avatarFixture.paints.changed)) > after.changed + 1,
       "active animation continues"
@@ -87,6 +96,64 @@ window.avatarFixture.render();`
       await page.evaluate(() => (window as any).avatarFixture.paints.unchanged),
       before.unchanged
     )
+    // Use Chromium's actual IntersectionObserver: a working face leaving the
+    // viewport must stop drawing, then resume without changing its task state.
+    await page.locator("#root").evaluate((node) => { node.style.marginTop = "2000px" })
+    await page.waitForTimeout(100)
+    await page.evaluate(() => (window as any).avatarFixture.step(10))
+    const offscreenPaints = await page.evaluate(() => (window as any).avatarFixture.paints.changed)
+    await page.evaluate(() => (window as any).avatarFixture.step(120))
+    assert.equal(await page.evaluate(() => (window as any).avatarFixture.paints.changed), offscreenPaints)
+    assert.equal(await page.evaluate(() => (window as any).avatarFixture.pending()), 0)
+    await page.locator("#root").evaluate((node) => { node.style.marginTop = "0px" })
+    await page.waitForTimeout(100)
+    await page.evaluate(() => (window as any).avatarFixture.step(60))
+    assert((await page.evaluate(() => (window as any).avatarFixture.paints.changed)) > offscreenPaints)
+
+    // Window visibility is controlled input here, not a claim that the native
+    // OS minimize/restore path was exercised by this component test.
+    await page.evaluate(() => (window as any).setFixtureVisibility("hidden"))
+    const hiddenPaints = await page.evaluate(() => (window as any).avatarFixture.paints.changed)
+    await page.evaluate(() => (window as any).avatarFixture.step(120))
+    assert.equal(await page.evaluate(() => (window as any).avatarFixture.paints.changed), hiddenPaints)
+    assert.equal(await page.evaluate(() => (window as any).avatarFixture.pending()), 0)
+    await page.evaluate(() => (window as any).setFixtureVisibility("visible"))
+    await page.evaluate(() => (window as any).avatarFixture.step(60))
+    assert((await page.evaluate(() => (window as any).avatarFixture.paints.changed)) > hiddenPaints)
+    await page.evaluate(() => (window as any).avatarFixture.render("#00aabb", false))
+    await page.waitForTimeout(50)
+    await page.evaluate(() => (window as any).avatarFixture.step(300))
+    const stoppedPaints = await page.evaluate(() => (window as any).avatarFixture.paints.changed)
+    await page.evaluate(() => (window as any).avatarFixture.step(300))
+    assert.equal(
+      await page.evaluate(() => (window as any).avatarFixture.paints.changed),
+      stoppedPaints,
+      "returning to idle settles the animation instead of continuing to paint"
+    )
+    assert.equal(await page.evaluate(() => (window as any).avatarFixture.pending()), 0)
+    await page.evaluate(() => (window as any).avatarFixture.render("#00aabb", true, false))
+    await page.waitForTimeout(50)
+    await page.evaluate(() => (window as any).avatarFixture.step(60))
+    const staticPaints = await page.evaluate(() => (window as any).avatarFixture.paints.changed)
+    await page.evaluate(() => (window as any).avatarFixture.step(300))
+    assert.equal(
+      await page.evaluate(() => (window as any).avatarFixture.paints.changed),
+      staticPaints,
+      "a static working avatar does not keep painting"
+    )
+    assert.equal(await page.evaluate(() => (window as any).avatarFixture.pending()), 0)
+    await page.evaluate(() => (window as any).avatarFixture.renderGroup())
+    await page.waitForTimeout(100)
+    await page.evaluate(() => (window as any).avatarFixture.step(120))
+    const groupShape = await page.locator("[data-probe='group']").innerHTML()
+    const groupPaints = await page.evaluate(() => (window as any).avatarFixture.paints.group)
+    const indicatorPaints = await page.evaluate(() => (window as any).avatarFixture.paints.changed)
+    await page.evaluate(() => (window as any).avatarFixture.step(120))
+    assert.equal(await page.locator("[data-probe='group']").innerHTML(), groupShape,
+      "group identity stays fixed while the work indicator animates")
+    assert.equal(await page.evaluate(() => (window as any).avatarFixture.paints.group), groupPaints)
+    assert((await page.evaluate(() => (window as any).avatarFixture.paints.changed)) > indicatorPaints,
+      "the separate working indicator retains its animation")
     await page.evaluate(() => (window as any).avatarFixture.unmount())
     assert.equal(
       await page.evaluate(() => (window as any).avatarFixture.pending()),
@@ -95,7 +162,7 @@ window.avatarFixture.render();`
     )
     assert.equal(await page.locator("svg.bot-avatar").count(), 0)
     console.log(
-      "PASS: real avatar paint is local; unrelated settled avatars stay dormant; active animation continues; unmount cancels the clock"
+      "PASS: real avatar paint is local; 30fps budget; actual offscreen pause/resume; hidden pause/resume; idle/unmount cancel the clock"
     )
   } finally {
     await browser.close()

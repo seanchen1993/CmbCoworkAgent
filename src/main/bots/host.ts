@@ -43,7 +43,7 @@ import {
 } from "../../shared/bots/contracts"
 import type { BotStore, BotWorkflowReference } from "./store"
 import type { WorkflowRunReference } from "../agent/workflow/run-manager"
-import { canDeferBotTask, canSteerBotTask, isRetryableNotificationTerminal } from "./continuation"
+import { canDeferBotTask, canSteerBotTask, canDeliverBotFeedback, isRetryableNotificationTerminal } from "./continuation"
 import type { BotDeliveredFile } from "../../shared/bots/file-delivery"
 import type { BackgroundCommandLifecycle } from "../agent/background-command-lifecycle"
 import type { UserInputRequest } from "../types"
@@ -760,11 +760,11 @@ export class LocalBotHost {
 
   peers(taskId?: string): Array<{ id: string; name: string }> {
     this.requireRunning()
-    const groupId = taskId ? botTaskGroupId(this.store.getTask(taskId)) : undefined
+    const source = taskId ? this.store.getTask(taskId) : undefined
+    const groupId = source ? botTaskGroupId(source) : undefined
     const members = groupId ? this.store.getGroup(groupId).memberIds : undefined
-    return this.store
-      .listBots()
-      .filter((bot) => !bot.archived && !bot.deleting && (!members || members.includes(bot.id)))
+    return this.store.listBots()
+      .filter(bot => !bot.archived && !bot.deleting && (!members || members.includes(bot.id)))
       .map(({ id, name }) => ({ id, name }))
   }
 
@@ -840,7 +840,15 @@ export class LocalBotHost {
         ? this.store.publishGroupMessage(taskId, callId, text)
         : this.store.publishGroupMessage(taskId, callId, text, targetGroupId)
     this.changed()
-    if (targetGroupId !== undefined) this.wake()
+    // A directed public review joins only an already-running assignment of the
+    // same human request. The model never selects a physical task or return route.
+    for (const target of this.active.values()) {
+      if (target.controller.signal.aborted || target.task.id === taskId ||
+          botTaskGroupId(target.task) !== receipt.groupId) continue
+      const feedback = this.store.groupFeedback(taskId, receipt.messageId, target.task.id)
+      if (feedback) this.steerUserMessage(feedback)
+    }
+    this.wake()
     return receipt
   }
   publishGroupFiles(taskId: string, callId: string, files: BotDeliveredFile[], content = ""): void {
@@ -893,6 +901,7 @@ export class LocalBotHost {
       throw new BotError("CONFLICT", "任务已停止，不能继续交办")
     const task = this.store.delegate(taskId, target, message, key, outputFiles)
     this.changed()
+    this.steerUserMessage(task)
     this.wake()
     return task
   }
@@ -1326,14 +1335,15 @@ export class LocalBotHost {
   }
 
   private steerUserMessage(task: BotTask): void {
+    const peerFeedback = task.origin.kind === "bot" && Boolean(task.origin.feedbackForTaskId)
     if (
       task.state !== "queued" ||
-      (!["user", "group"].includes(task.origin.kind) &&
+      (!peerFeedback && !["user", "group"].includes(task.origin.kind) &&
         !(task.origin.kind === "work" && botTaskAcceptsUserInput(task)))
     )
       return
     const groupId = task.origin.kind === "group" ? task.origin.groupId : undefined
-    const backgroundRun = [...this.active.values()].find(
+    const backgroundRun = peerFeedback ? undefined : [...this.active.values()].find(
       (candidate) =>
         candidate.botId === task.botId &&
         candidate.task.threadId === task.threadId &&
@@ -1358,7 +1368,7 @@ export class LocalBotHost {
       )
       return
     }
-    const run = [...this.active.values()].find((candidate) => canSteerBotTask(candidate.task, task))
+    const run = [...this.active.values()].find((candidate) => canSteerBotTask(candidate.task, task) || canDeliverBotFeedback(candidate.task, task))
     if (
       !run?.lease.steer ||
       !run.steeringReady ||
@@ -1382,7 +1392,7 @@ export class LocalBotHost {
           return false
         if (run.steered.has(task.id)) return true // transcript flush retry
         if (this.store.getTask(task.id).state !== "queued") return false
-        this.store.injectIntoRun(task.id, run.task.id)
+        if (!this.store.injectIntoRun(task.id, run.task.id)) return false
         run.steered.add(task.id)
         this.changed()
         if (this.store.hasPendingCommandNotifications()) this.wake()

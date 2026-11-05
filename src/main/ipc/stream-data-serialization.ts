@@ -231,7 +231,10 @@ function messageRecord(message: unknown): Record<string, unknown> | undefined {
 /** Runtime continuation prompts have no durable user row and do not start a new turn. */
 export function isStreamUserTurnBoundary(message: unknown): boolean {
   return (
-    isHumanMessage(message) && !isWorkflowPlumbingTranscriptContent(messageRecord(message)?.content)
+    isHumanMessage(message) &&
+    // Trusted same-task Bot feedback has no durable user row or new turn.
+    asRecord(messageRecord(message)?.additional_kwargs)?.cmb_internal_bot_feedback !== true &&
+    !isWorkflowPlumbingTranscriptContent(messageRecord(message)?.content)
   )
 }
 

@@ -2299,14 +2299,14 @@ describe("group discussion budget feedback", () => {
     for (;;) {
       const task = f.store.nextQueued([])
       if (!task) break
-      expect(++calls).toBeLessThan(10)
+      expect(++calls).toBeLessThanOrEqual(10)
       const peer = f.members.find(member => member.id !== task.botId)!
       f.store.transition(task.id, "running")
       f.store.publishGroupMessage(task.id, `step-${calls}`, `@${peer.name} Please review the next revision.`)
       f.store.settle(task.id, "completed", null, "private scratch", undefined, true)
       f.store.advanceGroupDiscussions()
     }
-    expect(calls).toBe(4) // Existing budget, not more automatic execution.
+    expect(calls).toBe(10) // Explicit handoffs use, but never exceed, the existing total budget.
     return f
   }
 
@@ -2671,4 +2671,130 @@ describe("group public budget additional controls", () => {
     f.store.publishGroupMessage(notice.id, "command-result", "后台命令失败")
     expect(postCount(f)).toBe(2)
   })
+})
+
+describe("bounded explicit handoffs after open discussion", () => {
+  function reviewed() {
+    const f = fixture()
+    const [impl, reviewer] = f.members
+    const initial = f.send("handoff-delivery", f.group.memberIds)
+    const quiet = (task: BotTask) => f.store.settle(task.id, "completed", null, BOT_GROUP_PASS, undefined, true)
+    for (const task of initial) f.store.transition(task.id, "running")
+    quiet(initial.find(task => task.botId === impl.id)!)
+    const review = initial.find(task => task.botId === reviewer.id)!
+    f.store.publishGroupMessage(review.id, "input", `@${impl.name} Use the original input.`)
+    quiet(review)
+    f.store.advanceGroupDiscussions()
+    const work = f.store.nextQueued([])!
+    expect(work.botId).toBe(impl.id)
+    f.store.transition(work.id, "running")
+    f.store.publishGroupMessage(work.id, "review", `@${reviewer.name} Please check the existing result.`)
+    quiet(work)
+    f.store.advanceGroupDiscussions()
+    const checked = f.store.nextQueued([])!
+    expect(checked.botId).toBe(reviewer.id)
+    expect(checked.origin).toMatchObject({ round: 2 })
+    f.store.transition(checked.id, "running")
+    return { ...f, impl, reviewer, checked, quiet }
+  }
+
+  it("delivers an unread explicit review to the owner within the existing budget, once across restart", () => {
+    const f = reviewed()
+    f.store.publishGroupMessage(f.checked.id, "verdict", `@${f.impl.name} Verified; finish the original delivery.`)
+    f.quiet(f.checked)
+    f.store.advanceGroupDiscussions()
+    const delivery = f.store.nextQueued([])
+    expect(delivery?.botId).toBe(f.impl.id)
+    expect(delivery?.message).toContain("Verified; finish the original delivery.")
+    expect(delivery?.message).toContain("not a new user instruction or approval")
+    expect(delivery?.origin).toMatchObject({ round: 3, messageId: "handoff-delivery" })
+    const reopened = new BotStore(f.db, () => 1000)
+    reopened.advanceGroupDiscussions()
+    expect(reopened.nextQueued([])?.id).toBe(delivery!.id)
+    reopened.transition(delivery!.id, "running")
+    reopened.publishGroupFiles(delivery!.id, "final", [{ filePath: "/tmp/receipt.json", name: "receipt.json", size: 1 }], "Verified result")
+    reopened.settle(delivery!.id, "completed", null, BOT_GROUP_PASS, undefined, true)
+    reopened.advanceGroupDiscussions()
+    expect(reopened.nextQueued([])).toBeNull()
+    expect(reopened.groupMessages(f.group.id).filter(message => message.files?.length)).toHaveLength(1)
+  })
+
+  it("does not extend unaddressed conversation past the existing round limit", () => {
+    const f = reviewed()
+    f.store.publishGroupMessage(f.checked.id, "open", "Ordinary public comment")
+    f.quiet(f.checked)
+    f.store.advanceGroupDiscussions()
+    expect(f.store.nextQueued([])).toBeNull()
+  })
+
+  it.each(["cancelled", "failed"] as const)("does not continue a %s handoff", state => {
+    const f = reviewed()
+    f.store.publishGroupMessage(f.checked.id, "verdict", `@${f.impl.name} Please continue`)
+    f.store.settle(f.checked.id, state, state === "failed" ? "Failure" : null)
+    f.store.advanceGroupDiscussions()
+    expect(f.store.nextQueued([])).toBeNull()
+  })
+
+  it("does not revive the previous assignment after a new user request", () => {
+    const f = reviewed()
+    f.store.publishGroupMessage(f.checked.id, "verdict", `@${f.impl.name} Old review result`)
+    f.quiet(f.checked)
+    f.send("new-request", [f.reviewer.id])
+    f.store.advanceGroupDiscussions()
+    expect(f.store.nextQueued([])?.origin).toMatchObject({ kind: "group", messageId: "new-request" })
+    expect(f.reviews().filter(task => task.state === "queued")).toHaveLength(0)
+  })
+
+  it("keeps the 24-dispatch hard ceiling even when the public post count is low", () => {
+    const f = reviewed()
+    f.store.publishGroupMessage(f.checked.id, "verdict", `@${f.impl.name} Review result`)
+    f.quiet(f.checked)
+    const row = f.db.exec("SELECT payload FROM bot_group_discussions WHERE group_id=?", [f.group.id])[0].values[0][0]
+    const cursor = groupDiscussionSchema.parse(JSON.parse(String(row)))
+    cursor.turns = 23
+    f.db.run("UPDATE bot_group_discussions SET payload=? WHERE group_id=?", [JSON.stringify(cursor), f.group.id])
+    f.store.advanceGroupDiscussions()
+    const last = f.store.nextQueued([])!
+    expect(last.botId).toBe(f.impl.id)
+    f.store.transition(last.id, "running")
+    f.store.publishGroupMessage(last.id, "reply", `@${f.reviewer.name} Check again`)
+    f.quiet(last)
+    f.store.advanceGroupDiscussions()
+    expect(f.store.nextQueued([])).toBeNull()
+    expect(f.store.getGroup(f.group.id)).toHaveProperty("discussionLimit")
+  })
+
+  it("cancels the queued post-limit handoff without affecting independent work", () => {
+    const f = reviewed()
+    f.store.publishGroupMessage(f.checked.id, "verdict", `@${f.impl.name} Review result`)
+    f.quiet(f.checked)
+    f.store.advanceGroupDiscussions()
+    const last = f.store.nextQueued([])!
+    expect(last.origin).toMatchObject({ round: 3 })
+    const independent = f.store.enqueue({ botId: f.impl.id, requestId: "independent", message: "Separate task" }, { kind: "user" })
+    const host = new LocalBotHost(f.store, { acquire: () => null, onAvailable: () => () => {} })
+    hosts.push(host)
+    host.stopGroup(f.group.id)
+    f.store.advanceGroupDiscussions()
+    expect(f.store.getTask(last.id).state).toBe("cancelled")
+    expect(f.store.getTask(independent.id).state).toBe("queued")
+  })
+
+  it("does not repeat an explicit post already consumed through the live feedback inbox", () => {
+    const f = reviewed()
+    const message = f.store.publishGroupMessage(f.checked.id, "verdict", `@${f.impl.name} Consumed review`)
+    f.quiet(f.checked)
+    // The inbox records exact message/recipient consumption; it must not trigger
+    // the post-limit fallback after the target's live turn finishes.
+    const root = f.store.recentTasks().find(t => t.botId === f.impl.id && t.origin.kind === "group")!
+    const note = f.store.enqueue({ botId: f.impl.id, requestId: "consumed-feedback", message: "Consumed review" }, {
+      kind: "bot", fromBotId: f.reviewer.id, rootTaskId: root.id, depth: 1,
+      expectsReply: false, groupId: f.group.id, feedbackForTaskId: root.id,
+      sourceTaskId: f.checked.id, feedbackMessageId: message.messageId
+    })
+    f.db.run("UPDATE bot_tasks SET state='completed',injected_into=? WHERE id=?", [root.id, note.id])
+    f.store.advanceGroupDiscussions()
+    expect(f.store.nextQueued([])).toBeNull()
+  })
+
 })

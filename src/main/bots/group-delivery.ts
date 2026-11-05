@@ -77,7 +77,7 @@ export function createBotGroupMessageTool(
       name: "bot_send_message",
       metadata: { [MAIN_TURN_ONLY_TOOL_METADATA_KEY]: true },
       description: currentGroupId
-        ? "Send a real standalone text message to the current shared group. Ordinary assistant text and private collaboration results are not posted. Use this for concise replies, meaningful progress, and text-only results; an acknowledgement is not the result. For public handoffs, address @ followed by a current member's exact name in content; the existing room routes that mention after your turn. Do not also privately delegate that same public handoff. Use bot_deliver_files for real attachments and request_user_input for decisions. Do not relay a peer result already visible in the room unless the user assigned you further analysis or integration. A successful receipt means this message was posted, not that the task's acceptance criteria passed."
+        ? "Send a real standalone text message to the current shared group. Ordinary assistant text and private collaboration results are not posted. Use this for concise replies, meaningful progress, and text-only results; an acknowledgement is not the result. For public handoffs, address @ followed by a current member's exact name in content; the host routes that mention to its recipient. Do not also privately delegate that same public handoff. Use bot_deliver_files for real attachments and request_user_input for decisions. Do not relay a peer result already visible in the room unless the user assigned you further analysis or integration. A successful receipt means this message was posted, not that the task's acceptance criteria passed."
         : "Post one real text message as this Bot to an existing group the user explicitly asked you to contact. Supply its exact host-confirmed groupId, never a name or Bot ID. Group posting can wake members: do not fan out or share private conversation unless the user explicitly requested that audience and content; ask first when this is missing. Only content is published, not the private request or history. For public handoffs use @ followed by a current member's exact name; do not also privately delegate the same work. A receipt confirms posting, not member answers or task completion. Report the actual result privately. This text tool does not attach files or move private question cards into the group.",
       schema: currentGroupId
         ? z.object({ content: contentSchema }).strict()
@@ -110,6 +110,7 @@ export function createBotGroupDeliveryCheck(
       const message = messages[i]
       if (
         HumanMessage.isInstance(message) &&
+        message.additional_kwargs.cmb_internal_bot_feedback !== true &&
         // Gate recovery continues this turn; a workflow notification starts a
         // new result turn and must not inherit an older delivery receipt.
         !(typeof message.content === "string" &&
@@ -123,7 +124,9 @@ export function createBotGroupDeliveryCheck(
     for (let i = start; i < messages.length; i++) {
       const message = messages[i]
       if (AIMessage.isInstance(message))
-        for (const call of message.tool_calls ?? []) if (call.id) calls.set(call.id, call.name)
+        for (const call of message.tool_calls ?? []) if (call.id) {
+          calls.set(call.id, call.name)
+        }
       if (
         !ToolMessage.isInstance(message) ||
         message.status === "error" ||
