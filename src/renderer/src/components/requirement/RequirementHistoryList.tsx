@@ -459,7 +459,6 @@ export function RequirementHistoryList({
                           <div className="flex items-center gap-1.5">
                             <Button
                               type="button"
-                              variant="outline"
                               size="sm"
                               className="h-7 gap-1 px-2 text-[11px]"
                               onClick={(event) => {
@@ -472,7 +471,6 @@ export function RequirementHistoryList({
                             </Button>
                             <Button
                               type="button"
-                              variant="outline"
                               size="sm"
                               className="h-7 gap-1 px-2 text-[11px]"
                               onClick={(event) => event.stopPropagation()}

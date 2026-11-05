@@ -36,6 +36,12 @@ export const requirementsApi = {
       error?: string
     }>,
   getWorkDir: (): Promise<string | null> => ipcRenderer.invoke("requirements:get-work-dir"),
+  createDesignWorkspace: (payload: { requirementId: string; title: string }) =>
+    ipcRenderer.invoke("requirements:create-design-workspace", payload) as Promise<{
+      success: boolean
+      workspacePath?: string | null
+      error?: string
+    }>,
   selectWorkDir: (): Promise<{ success: boolean; workDir?: string | null; error?: string }> =>
     ipcRenderer.invoke("requirements:select-work-dir"),
   delete: (reqId: string): Promise<{ success: boolean; error?: string }> =>

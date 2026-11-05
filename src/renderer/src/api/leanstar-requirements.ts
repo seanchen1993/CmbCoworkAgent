@@ -114,6 +114,10 @@ type NamespaceTreeResponse = {
   namespaceTreeList?: NamespaceTreeNode[]
 }
 
+function leanstarApiError(code: string, message?: string | null): Error & { code: string } {
+  return Object.assign(new Error(message || `Leanstar 请求失败：${code}`), { code })
+}
+
 const MOCK_REQUIREMENTS: Record<string, ProductRequirement[]> = {
   "org-wplus": [
     {
@@ -443,7 +447,11 @@ export const leanstarRequirementsApi = {
       { method: "GET" }
     ).then((result) => {
       if (result && typeof result === "object" && "returnCode" in result) {
-        return (result as ApiDetailResponse).body ?? null
+        const response = result as ApiDetailResponse
+        if (response.returnCode && response.returnCode !== "SUC0000") {
+          throw leanstarApiError(response.returnCode, response.errorMsg)
+        }
+        return response.body ?? null
       }
       return result as RequirementDetail
     })
@@ -465,7 +473,12 @@ export const leanstarRequirementsApi = {
     return request<ApiDocumentContentResponse>(
       `/api/requirement/document-content/${encodeURIComponent(code)}`,
       { method: "GET" }
-    ).then((result) => result.body ?? null)
+    ).then((result) => {
+      if (result.returnCode && result.returnCode !== "SUC0000") {
+        throw leanstarApiError(result.returnCode, result.errorMsg)
+      }
+      return result.body ?? null
+    })
   },
 
   getNamespaceTree(): Promise<NamespaceTreeResponse> {

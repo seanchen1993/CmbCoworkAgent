@@ -2495,6 +2495,14 @@ interface CustomAPI {
       error?: string
     }>
     getWorkDir: () => Promise<string | null>
+    createDesignWorkspace: (payload: {
+      requirementId: string
+      title: string
+    }) => Promise<{
+      success: boolean
+      workspacePath?: string | null
+      error?: string
+    }>
     selectWorkDir: () => Promise<{ success: boolean; workDir?: string | null; error?: string }>
     delete: (reqId: string) => Promise<{ success: boolean; error?: string }>
     openWorkDir: (reqId: string) => Promise<{ success: boolean; error?: string }>

@@ -1326,6 +1326,27 @@ export function registerRequirementHandlers(ipcMain: IpcMain): void {
     }
   })
   ipcMain.handle("requirements:get-work-dir", async () => getLastRequirementWorkDir())
+  ipcMain.handle(
+    "requirements:create-design-workspace",
+    async (_event, payload: { requirementId: string; title: string }) => {
+      try {
+        const workDir = await getLastRequirementWorkDir()
+        if (!workDir) return { success: true, workspacePath: null }
+        const workspacePath = getRequirementWorkspacePath(
+          workDir,
+          payload.requirementId,
+          payload.title
+        )
+        await fs.mkdir(workspacePath, { recursive: true })
+        return { success: true, workspacePath }
+      } catch (error) {
+        return {
+          success: false,
+          error: error instanceof Error ? error.message : "创建设计工作区失败"
+        }
+      }
+    }
+  )
   ipcMain.handle("requirements:select-work-dir", async () => {
     try {
       return { success: true, workDir: await selectRequirementWorkDir() }

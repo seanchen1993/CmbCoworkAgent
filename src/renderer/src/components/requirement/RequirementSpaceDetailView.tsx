@@ -24,6 +24,7 @@ export function RequirementSpaceDetailView({
   const [document, setDocument] = useState<RequirementDocumentContent | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [permissionDenied, setPermissionDenied] = useState(false)
   const [reloadToken, setReloadToken] = useState(0)
   const [prototypeHtml, setPrototypeHtml] = useState("")
   const designBinding = findRequirementDesignEntry(requirement.id)
@@ -43,14 +44,26 @@ export function RequirementSpaceDetailView({
   useEffect(() => {
     let cancelled = false
     const code = requirement.sourceName.trim()
-    void Promise.all([
+    void Promise.allSettled([
       leanstarRequirementsApi.getRequirementDetail(code),
       leanstarRequirementsApi.getRequirementDocumentContent(code)
     ])
-      .then(([nextDetail, nextDocument]) => {
+      .then(([detailResult, documentResult]) => {
         if (cancelled) return
-        setDetail(nextDetail)
-        setDocument(nextDocument)
+        const denied = [detailResult, documentResult].some(
+          (result) =>
+            result.status === "rejected" &&
+            (result.reason as { code?: unknown })?.code === "LRDFA02"
+        )
+        setPermissionDenied(denied)
+        if (detailResult.status === "fulfilled") setDetail(detailResult.value)
+        if (documentResult.status === "fulfilled") setDocument(documentResult.value)
+        const unexpectedError = [detailResult, documentResult].find(
+          (result) =>
+            result.status === "rejected" &&
+            (result.reason as { code?: unknown })?.code !== "LRDFA02"
+        )
+        if (unexpectedError?.status === "rejected") throw unexpectedError.reason
       })
       .catch((reason: unknown) => {
         if (!cancelled) setError(reason instanceof Error ? reason.message : "加载需求详情失败")
@@ -65,6 +78,7 @@ export function RequirementSpaceDetailView({
 
   const title = document?.title?.trim() || detail?.title?.trim() || requirement.title
   const content = document?.documentTextContent?.trim() || ""
+  const ownerName = requirement.owner?.name.trim()
 
   return (
     <div className="flex min-h-0 flex-1 flex-col bg-[#f7f8fa] dark:bg-background">
@@ -102,6 +116,7 @@ export function RequirementSpaceDetailView({
             onClick={() => {
               setLoading(true)
               setError(null)
+              setPermissionDenied(false)
               setReloadToken((value) => value + 1)
             }}
           >
@@ -118,7 +133,21 @@ export function RequirementSpaceDetailView({
               <span className="ml-auto text-[11px] text-muted-foreground">只读</span>
             </div>
             <div className="min-h-0 flex-1 overflow-y-auto">
-              {content ? (
+              {permissionDenied ? (
+                <div className="flex h-full items-center justify-center px-8 text-center">
+                  <div className="max-w-lg text-sm leading-7 text-muted-foreground">
+                    <p className="font-medium text-foreground">暂时无法预览该需求文件</p>
+                    <p className="mt-2">
+                      需求空间平台目前暂不支持无权限成员查看此内容，我们已向平台反馈并推动后续支持。
+                    </p>
+                    <p className="mt-2">
+                      现阶段可联系需求负责人
+                      {ownerName ? `“${ownerName}”` : ""}，请其将你添加为该需求的参与人，
+                      获得权限后即可查看需求文件。
+                    </p>
+                  </div>
+                </div>
+              ) : content ? (
                 <MarkdownPreview
                   content={content}
                   showHeader={false}

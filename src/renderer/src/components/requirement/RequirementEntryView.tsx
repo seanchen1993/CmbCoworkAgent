@@ -434,13 +434,22 @@ export function RequirementEntryView({
           ""
         if (!content) throw new Error("需求文档内容为空，无法开始设计")
         const existing = findRequirementDesignEntry(requirement.id)
+        const createdWorkspace = existing?.workspacePath
+          ? null
+          : await window.api.requirements.createDesignWorkspace({
+              requirementId: requirement.id,
+              title: requirement.title
+            })
+        if (createdWorkspace && !createdWorkspace.success) {
+          throw new Error(createdWorkspace.error || "创建设计工作区失败")
+        }
         openRequirementDesign({
           source: "space",
           scope: "full-prd",
           requirementId: requirement.id,
           requirementName: requirement.title,
           functionName: requirement.title,
-          workspacePath: existing?.workspacePath,
+          workspacePath: existing?.workspacePath || createdWorkspace?.workspacePath || undefined,
           requirementFilePath: `space://${requirement.sourceName.trim()}`,
           requirementContent: content,
           prompt: buildSpaceRequirementDesignPrompt(requirement.title),
