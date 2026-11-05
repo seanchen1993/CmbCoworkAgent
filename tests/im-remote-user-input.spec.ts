@@ -765,11 +765,12 @@ async function testBotGroupCardRoundtripAndRouteRevocation(): Promise<void> {
     assert.match(
       await context.service.resolveAnswer({
         ...ROUTE,
+        principalId: "another-account",
         conversationKey: "bot-group",
         botSenderId: "other",
         argument: "A1B2C3 1"
       }),
-      /群成员/
+      /不属于/
     )
     assert.equal(context.responses.length, 0)
     assert.match(
@@ -782,6 +783,15 @@ async function testBotGroupCardRoundtripAndRouteRevocation(): Promise<void> {
       /已从招乎提交/
     )
     assert.equal(context.responses.length, 1)
+    assert.match(
+      await context.service.resolveAnswer({
+        ...ROUTE,
+        conversationKey: "bot-group",
+        botSenderId: "another-member",
+        argument: "A1B2C3 2"
+      }),
+      /不存在|不再/
+    )
     assert.match(
       await context.service.resolveCardAnswers({
         ...ROUTE,
@@ -816,8 +826,62 @@ async function testBotGroupCardRoundtripAndRouteRevocation(): Promise<void> {
   }
 }
 
+async function testBotGroupTextAnswerFromAnotherMemberWinsOnce(): Promise<void> {
+  const context = await createContext()
+  const disconnect = botInteractionRoutes.setTransport(() => true)
+  const detach = botInteractionRoutes.register({
+    realm: "gateway-a",
+    ...ROUTE,
+    conversationKey: "bot-group-text",
+    kind: "group",
+    threadId: "thread-1",
+    prefix: "【群任务】",
+    botEventId: "source-event",
+    senderId: "requester",
+    isCurrent: () => true
+  })
+  try {
+    const request = userInputRequest({ requestId: "group-text-question" })
+    await context.publish(request)
+    const results = await Promise.all([
+      context.service.resolveAnswer({
+        ...ROUTE,
+        conversationKey: "bot-group-text",
+        botSenderId: "other-member",
+        argument: "A1B2C3 2"
+      }),
+      context.service.resolveCardAnswers({
+        ...ROUTE,
+        conversationKey: "bot-group-text",
+        requestId: request.requestId,
+        feedback: [{ key: "q0", value: "0" }]
+      })
+    ])
+    assert.match(results[0], /已从招乎提交/)
+    assert.match(results[1], /不存在|不再/)
+    assert.equal(context.responses.length, 1)
+    const answer = context.responses[0].answers.export_format
+    assert.equal(answer.type, "option")
+    assert.equal(answer.type === "option" && answer.optionIndex, 1)
+    assert.match(await context.service.resolveAnswer({
+      ...ROUTE,
+      conversationKey: "bot-group-text",
+      botSenderId: "requester",
+      argument: "A1B2C3 1"
+    }), /不存在|不再/)
+    assert.equal(context.responses.length, 1)
+  } finally {
+    detach()
+    disconnect()
+    context.service.dispose()
+    context.database.close()
+    await rm(context.root, { recursive: true, force: true })
+  }
+}
+
 async function main(): Promise<void> {
   await testBotGroupCardRoundtripAndRouteRevocation()
+  await testBotGroupTextAnswerFromAnotherMemberWinsOnce()
   await testAHeldBackQuestionIsResentOnceAsText()
   await testAnAnsweredQuestionIsNotResent()
   await testAQuestionBeingAnsweredIsNotResent()

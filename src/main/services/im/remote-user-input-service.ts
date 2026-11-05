@@ -290,7 +290,13 @@ export class ImRemoteUserInputService {
       this.removeSession(session.request.requestId)
       return "这项补充输入已在桌面处理或不再有效。"
     }
-    if (session.route.senderId && input.botSenderId !== session.route.senderId)
+    // Group questions can be answered by any member of the same conversation.
+    // Keep the route/grant checks above and private-route identity checks intact.
+    if (
+      session.route.kind !== "group" &&
+      session.route.senderId &&
+      input.botSenderId !== session.route.senderId
+    )
       return "请由提出这项问题的群成员回答。"
     const question = session.request.questions[session.questionIndex]
     if (!question) {
