@@ -216,11 +216,14 @@ export function RequirementEntryView({
         if (cancelled) return
         setRequirements(nextRequirements)
         const returnRequirementId = localStorage.getItem(REQUIREMENT_CONVERSATION_ENTRY_KEY)
-        localStorage.removeItem(REQUIREMENT_CONVERSATION_ENTRY_KEY)
-        const initialRequirement = returnRequirementId
-          ? (nextRequirements.find((item) => item.id === returnRequirementId) ?? null)
-          : null
-        if (returnRequirementId && !initialRequirement) {
+        const returningToSpaceRequirement = returnRequirementId?.startsWith("space:") ?? false
+        if (returningToSpaceRequirement) setSourceFilter("space")
+        else localStorage.removeItem(REQUIREMENT_CONVERSATION_ENTRY_KEY)
+        const initialRequirement =
+          returnRequirementId && !returningToSpaceRequirement
+            ? (nextRequirements.find((item) => item.id === returnRequirementId) ?? null)
+            : null
+        if (returnRequirementId && !returningToSpaceRequirement && !initialRequirement) {
           toast.error("未找到关联的需求会话")
         }
         if (initialRequirement) {
@@ -272,6 +275,17 @@ export function RequirementEntryView({
           ...current.filter((item) => item.origin !== "space"),
           ...spaceRequirements
         ])
+        const returnRequirementId = localStorage.getItem(REQUIREMENT_CONVERSATION_ENTRY_KEY)
+        if (!returnRequirementId?.startsWith("space:")) return
+        const returnRequirement = spaceRequirements.find((item) => item.id === returnRequirementId)
+        localStorage.removeItem(REQUIREMENT_CONVERSATION_ENTRY_KEY)
+        if (!returnRequirement) {
+          toast.error("未找到关联的需求")
+          return
+        }
+        setSelectedRequirement(returnRequirement)
+        setSelectedRequirementThreadId(null)
+        setScreen("space-detail")
       })
       .catch((error: unknown) => {
         requirementSpaceLoadedRef.current = false
