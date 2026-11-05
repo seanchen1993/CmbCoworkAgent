@@ -538,8 +538,30 @@ export class LocalBotHost {
     if (revision !== this.store.revision()) this.changed()
     return result
   }
-  beginImDelivery() {
-    return this.updateImState(() => this.store.im.beginDelivery())
+  publishImFiles(taskId: string, callId: string, files: import("../../shared/bots/file-delivery").BotDeliveredFile[]): void {
+    this.requireRunning()
+    const task = this.store.getTask(taskId)
+    if (task.state !== "running") throw new BotError("CONFLICT", "执行已结束，不能继续交付附件")
+    this.updateImState(() => this.store.im.publishFiles(task, callId, files))
+  }
+  imFileStatuses(botId: string, threadId: string, callId: string) {
+    return this.store.im.fileStatuses(botId, threadId, callId)
+  }
+  retryImFile(botId: string, id: string): void {
+    this.requireRunning()
+    this.updateImState(() => this.store.im.retryFile(botId, id))
+  }
+  updateImFileReceiptVersion(id: string, version: number): void {
+    this.store.im.receiptVersion(id, version)
+  }
+  updateImFileProgress(id: string, percent: number): void {
+    this.updateImState(() => this.store.im.progress(id, percent))
+  }
+  settleImFileReceipt(id: string, state: "sent" | "failed" | "unknown", reason?: string, version?: number): void {
+    this.updateImState(() => this.store.im.receipt(id, state, reason, version))
+  }
+  beginImDelivery(lane?: "text" | "file") {
+    return this.updateImState(() => this.store.im.beginDelivery(lane))
   }
   setImOffline(): void {
     this.updateImState(() => this.store.im.setAllOffline())
@@ -547,8 +569,8 @@ export class LocalBotHost {
   mayDeliverImReply(id: string) {
     return this.updateImState(() => this.store.im.mayDeliver(id))
   }
-  settleImDelivery(id: string, state: Parameters<BotStore["im"]["delivered"]>[1]): void {
-    this.updateImState(() => this.store.im.delivered(id, state))
+  settleImDelivery(id: string, state: Parameters<BotStore["im"]["delivered"]>[1], reason?: string): void {
+    this.updateImState(() => this.store.im.delivered(id, state, reason))
   }
   mockBindings(botId: string, before?: string) {
     this.requireRunning()

@@ -5,6 +5,7 @@ import type { BotDeliveredFile } from "../../../shared/bots/file-delivery"
 import {
   BOT_IM_FILE_MAX_BYTES,
   BOT_IM_FILE_CHUNK_BYTES,
+  BOT_IM_FILE_WINDOW,
   type BotImFileCommand,
   type BotImFileResult
 } from "../../../shared/bots/im-file"
@@ -15,8 +16,14 @@ export async function deliverBotImFile(
   deliveryId: string,
   conversationKey: string,
   file: BotDeliveredFile,
-  assertCurrent: () => void
-): Promise<"accepted" | "unknown"> {
+  assertCurrent: () => void,
+  options: {
+    windowed?: boolean
+    retryVersion?: number
+    onReceipt?: (result: BotImFileResult) => void
+    progress?: (percent: number) => void
+  } = {}
+): Promise<"accepted" | "unknown" | "sent"> {
   // Match the gateway's SafeLog reference without logging names, paths or file bytes.
   const deliveryRef = `sha256:${createHash("sha256").update(deliveryId).digest("hex").slice(0, 12)}`
   let stage = "validate"
@@ -44,9 +51,11 @@ export async function deliverBotImFile(
       conversationKey,
       name: file.name,
       size: file.size,
-      sha256
+      sha256,
+      ...(options.retryVersion === undefined ? {} : { retryVersion: options.retryVersion })
     })
-    if (start.state === "accepted" || start.state === "unknown") {
+    options.onReceipt?.(start)
+    if (start.state === "accepted" || start.state === "unknown" || start.state === "sent") {
       console.info("[Bot IM file] receipt", { ...fields(), state: start.state, reused: true })
       return start.state
     }
@@ -70,30 +79,51 @@ export async function deliverBotImFile(
         const digest = createHash("sha256")
         const buffer = Buffer.alloc(BOT_IM_FILE_CHUNK_BYTES)
         let offset = 0
+        const windowSize = options.windowed ? BOT_IM_FILE_WINDOW : 1
+        // At most four 32 KiB chunks are in flight. Drain every promise before
+        // abort/finish so failed windows cannot race a replacement upload.
         while (offset < file.size) {
-          assertCurrent()
-          const { bytesRead } = await stable.handle.read(
-            buffer,
-            0,
-            Math.min(buffer.length, file.size - offset),
-            offset
-          )
-          if (!bytesRead) fail("附件内容不完整")
-          const chunk = buffer.subarray(0, bytesRead)
-          digest.update(chunk)
-          const result = await command({
-            action: "chunk",
-            uploadId,
-            offset,
-            data: chunk.toString("base64")
-          })
-          offset += bytesRead
-          if (
-            result.state !== "uploading" ||
-            result.offset !== offset ||
-            result.uploadId !== uploadId
-          )
-            fail("附件分块回执不匹配")
+          const pending: Promise<void>[] = []
+          try {
+            for (let index = 0; index < windowSize && offset < file.size; index++) {
+              assertCurrent()
+              const { bytesRead } = await stable.handle.read(
+                buffer,
+                0,
+                Math.min(buffer.length, file.size - offset),
+                offset
+              )
+              if (!bytesRead) fail("附件内容不完整")
+              const chunk = buffer.subarray(0, bytesRead)
+              digest.update(chunk)
+              const expected = offset + bytesRead
+              const request = command({
+                action: "chunk",
+                uploadId,
+                offset,
+                data: chunk.toString("base64")
+              }).then((result) => {
+                if (
+                  result.state !== "uploading" ||
+                  result.offset !== expected ||
+                  result.uploadId !== uploadId
+                )
+                  fail("附件分块回执不匹配")
+              })
+              // Attach rejection immediately while the next disk read is awaiting.
+              void request.catch(() => {})
+              pending.push(request)
+              offset = expected
+            }
+            const results = await Promise.allSettled(pending)
+            const failure = results.find(
+              (result): result is PromiseRejectedResult => result.status === "rejected"
+            )
+            if (failure) throw failure.reason
+            options.progress?.(file.size ? (offset / file.size) * 100 : 100)
+          } finally {
+            await Promise.allSettled(pending)
+          }
         }
         if (digest.digest("hex") !== sha256) fail("附件内容已变化，请重新交付")
         await stable.assertPathIdentity()
@@ -101,6 +131,7 @@ export async function deliverBotImFile(
         stage = "platform_upload_and_enqueue"
         console.info("[Bot IM file] transferred to gateway", fields())
         const result = await command({ action: "finish", uploadId })
+        options.onReceipt?.(result)
         if (result.state !== "accepted" && result.state !== "unknown")
           fail(
             `附件未能发送：${result.reasonCode ?? result.state}`,

@@ -2823,7 +2823,7 @@ it.each(["dm", "group"] as const)("delivers independent-work attachments only to
     botFileCommand: async (request: import("../../shared/bots/im-file").BotImFileCommand) => {
       if (request.action === "begin") { routes.push(request.conversationKey); offset = 0; return { state: "uploading", uploadId: request.deliveryId, offset } }
       if (request.action === "chunk") { offset += Buffer.from(request.data, "base64").length; return { state: "uploading", uploadId: request.uploadId, offset } }
-      finished.push(request.uploadId)
+      if (request.action === "finish") finished.push(request.uploadId)
       return { state: "accepted" }
     }
   })
@@ -2859,7 +2859,9 @@ it.each(["group", "dm", "mirror"] as const)("hides host paths in %s replies whil
   expect(replies.every(reply => reply.deliveryId.endsWith(":public-text-v1"))).toBe(true)
   const stored = f.db.exec("SELECT text,files_json FROM bot_im_outbox WHERE text=?", [text])[0].values[0]
   expect(stored[0]).toBe(text)
-  expect(JSON.parse(String(stored[1])).files).toEqual([file])
+  expect(stored[1]).toBeNull()
+  const attachment = f.db.exec("SELECT files_json FROM bot_im_outbox WHERE file_delivery_id IS NOT NULL")[0].values[0]
+  expect(JSON.parse(String(attachment[0])).files).toEqual([file])
   expect(upload.mock.calls[0][0]).toMatchObject({ action: "begin", name: "hello.txt", conversationKey: binding.conversationKey })
   expect(f.errors).toEqual([])
 })
@@ -2871,5 +2873,96 @@ it("keeps the local file and reports an old gateway's missing attachment capabil
   await f.service.receive(f.event(binding))
   await eventually(() => f.client.submitReply.mock.calls.some(([reply]) => reply.message.content.includes("附件未全部发送成功")))
   expect(f.errors.some(error => String(error).includes("升级网关"))).toBe(true)
-  expect(f.store.im.history(f.bot.id, botImScopeId("realm", "owner", binding.id)).items.some(row => row.state === "blocked")).toBe(true)
+  expect(f.store.im.history(f.bot.id, botImScopeId("realm", "owner", binding.id)).items.some(row => row.state === "failed")).toBe(true)
+})
+
+it("keeps text responsive during a file upload, records final receipts and retries only the failed file", async () => {
+  const file = { name: "report.docx", filePath: "/workspace/report.docx", size: 3,
+    attachmentPath: join(tmpdir(), ".bot-deliveries", "a".repeat(64), "report.docx") }
+  const f = fixture(async (task, host) => {
+    if (task.message === "files") host.publishImFiles(task.id,"batch",[file,{...file,name:"other.docx",filePath:"/workspace/other.docx"}])
+    return {state:"completed",result:`reply:${task.message}`}
+  })
+  let release!: () => void
+  const held = new Promise<void>(resolve => { release=resolve })
+  const begins: string[] = [], retryIds: string[] = []
+  const command = vi.fn(async (request: import("../../shared/bots/im-file").BotImFileCommand): Promise<import("../../shared/bots/im-file").BotImFileResult> => {
+    if (request.action === "begin") {
+      begins.push(request.deliveryId)
+      if (begins.length === 1) await held
+      if (request.retryVersion === 2) retryIds.push(request.deliveryId)
+      return {state:"accepted"}
+    }
+    if (request.action === "status") return {state:"receipts", receipts:request.deliveries.map((item,index)=>({
+      deliveryId:item.deliveryId, state:retryIds.length || index===1 ? "sent" : "failed", reasonCode:index===0 ? "FORBIDDEN" : undefined, version:2
+    }))}
+    throw new Error("unexpected bytes: begin already has a durable receipt")
+  })
+  Object.assign(f.client,{supportsBotFiles:()=>true,supportsBotFileReceipts:()=>true,botFileCommand:command})
+  const group = await f.binding("group"), dm = await f.binding("dm")
+  try {
+    await f.service.receive(f.event(group,"files","files"))
+    await eventually(()=>begins.length===1)
+    await f.service.receive(f.event(dm,"text","hello while uploading"))
+    await eventually(()=>f.client.submitReply.mock.calls.some(([reply])=>reply.message.content.includes("hello while uploading")))
+    expect(begins).toHaveLength(1)
+  } finally { release() }
+  await eventually(()=>begins.length===2)
+  const task = f.calls.find(task=>task.message==="files")!
+  const status = () => f.host.imFileStatuses(f.bot.id,task.threadId,"batch")
+  await eventually(()=>status().every(item=>item.state==="accepted"))
+  await (f.service as unknown as {checkFileReceipts():Promise<void>}).checkFileReceipts()
+  expect(status().map(item=>item.state).sort()).toEqual(["failed","sent"])
+  const failed = status().find(item=>item.state==="failed")!, sent=status().find(item=>item.state==="sent")!
+  expect(()=>f.host.retryImFile(f.bot.id,sent.id)).toThrow("不能重试")
+  const other = f.store.create({name:"Other",instructions:"",color:"#123456",modelRef:null})
+  expect(()=>f.host.retryImFile(other.id,failed.id)).toThrow("不能重试")
+  expect(f.host.imFileStatuses(other.id,task.threadId,"batch")).toEqual([])
+  f.host.retryImFile(f.bot.id,failed.id)
+  await eventually(()=>begins.length===3)
+  expect(retryIds).toEqual([`${failed.id}:file:0`])
+  expect(begins.filter(id=>id===`${sent.id}:file:0`)).toHaveLength(1)
+  f.db.run("UPDATE bot_im_outbox SET receipt_checked_at=0 WHERE state='accepted'")
+  await (f.service as unknown as {checkFileReceipts():Promise<void>}).checkFileReceipts()
+  expect(status().every(item=>item.state==="sent")).toBe(true)
+  expect(f.errors).toEqual([])
+})
+
+it("retains uncertain file receipts without automatic or manual resend", async () => {
+  const file={name:"x.txt",filePath:"/workspace/x.txt",size:1,attachmentPath:join(tmpdir(),".bot-deliveries","a".repeat(64),"x.txt")}
+  const f=fixture(async(task,host)=>{host.publishImFiles(task.id,"unknown-batch",[file]);return {state:"completed",result:"ready"}})
+  const command=vi.fn(async()=>({state:"unknown" as const}))
+  Object.assign(f.client,{supportsBotFiles:()=>true,botFileCommand:command})
+  const binding=await f.binding("group")
+  await f.service.receive(f.event(binding))
+  await eventually(()=>command.mock.calls.length===1)
+  const task=f.calls[0], status=f.host.imFileStatuses(f.bot.id,task.threadId,"unknown-batch")[0]
+  expect(status.state).toBe("unknown")
+  expect(()=>f.host.retryImFile(f.bot.id,status.id)).toThrow("不能重试")
+  expect(f.host.beginImDelivery("file")).toBeNull()
+})
+
+it("backs off only a transiently failed file while the next file can be delivered", async () => {
+  const files = ["a.txt", "b.txt"].map(name=>({name,filePath:`/workspace/${name}`,size:1,
+    attachmentPath:join(tmpdir(),".bot-deliveries","a".repeat(64),name)}))
+  const f=fixture(async(task,host)=>{
+    host.publishImFiles(task.id,"two-files",files)
+    host.publishImFiles(task.id,"two-files",files) // Same tool receipt cannot duplicate either file.
+    return {state:"completed",result:"ready"}
+  })
+  const command=vi.fn(async(request:import("../../shared/bots/im-file").BotImFileCommand)=>{
+    if (request.action!=="begin") throw Error("unexpected transfer")
+    if (request.name==="a.txt") throw Error("temporary network failure")
+    return {state:"accepted" as const}
+  })
+  Object.assign(f.client,{supportsBotFiles:()=>true,botFileCommand:command})
+  const binding=await f.binding("group")
+  await f.service.receive(f.event(binding))
+  await eventually(()=>command.mock.calls.length===2)
+  const statuses=f.host.imFileStatuses(f.bot.id,f.calls[0].threadId,"two-files")
+  expect(statuses).toHaveLength(2)
+  expect(statuses.find(row=>row.file.name==="a.txt")?.state).toBe("pending")
+  expect(statuses.find(row=>row.file.name==="b.txt")?.state).toBe("accepted")
+  expect(f.host.beginImDelivery("file")).toBeNull()
+  expect(f.errors).toHaveLength(1)
 })

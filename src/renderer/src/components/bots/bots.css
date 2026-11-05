@@ -3615,3 +3615,11 @@ button.bot-inline-mention:focus-visible {
   line-height: 1.4;
   color: var(--muted-foreground);
 }
+
+/* Delivery remains secondary to the file; no additional banner or dialog. */
+.bot-file-delivery-status {
+  display: block;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--bot-muted);
+}

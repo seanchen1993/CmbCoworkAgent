@@ -148,6 +148,14 @@ export function registerBotHandlers(
       version
     )
   })
+  ipcMain.handle("bots:im:file-statuses", (event, hostId, botId, threadId, callId) => {
+    if (typeof callId !== "string" || !callId || callId.length > 40000)
+      throw new BotError("INVALID_INPUT", "附件交付标识无效")
+    return desktopHost(event, hostId).imFileStatuses(botIdentifier(botId), botIdentifier(threadId), callId)
+  })
+  ipcMain.handle("bots:im:file-retry", (event, hostId, botId, id) =>
+    desktopHost(event, hostId).retryImFile(botIdentifier(botId), botImExternalId(id))
+  )
   ipcMain.handle("bots:im:status", (event, hostId) => {
     desktopHost(event, hostId)
     return im?.botChannelStatus() ?? { connected: false, available: false }

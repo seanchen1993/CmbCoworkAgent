@@ -200,3 +200,47 @@ it("transfers a full 50 MiB attachment with bounded chunks and unchanged bytes",
   )
   expect(chunks).toBe(1600)
 })
+
+it("bounds a slow transport to four chunks in flight and verifies every acknowledgement", async () => {
+  const { file, bytes } = await attachment(32768 * 12)
+  let active = 0, peak = 0, expectedOffset = 0
+  const chunks: Buffer[] = []
+  const progress: number[] = []
+  const command = vi.fn(async (request: BotImFileCommand): Promise<BotImFileResult> => {
+    if (request.action === "begin") return { state: "uploading", uploadId: "window", offset: 0 }
+    if (request.action === "chunk") {
+      expect(request.offset).toBe(expectedOffset)
+      const buffer = Buffer.from(request.data, "base64"); chunks.push(buffer)
+      expectedOffset += buffer.length
+      const acknowledged = expectedOffset
+      active++; peak = Math.max(peak, active)
+      await new Promise(resolve => setTimeout(resolve, 20))
+      active--
+      return { state: "uploading", uploadId: "window", offset: acknowledged }
+    }
+    expect(active).toBe(0)
+    return { state: "accepted" }
+  })
+  await deliverBotImFile(command, "window-id", "group", file, () => {}, { windowed: true, progress: value => progress.push(value) })
+  expect(peak).toBe(4)
+  expect(Buffer.concat(chunks)).toEqual(bytes)
+  expect(progress.map(Math.round)).toEqual([33, 67, 100])
+})
+it("drains a failed transfer window before aborting and never finishes partial bytes", async () => {
+  const { file } = await attachment(32768 * 8)
+  let active = 0
+  const command = vi.fn(async (request: BotImFileCommand): Promise<BotImFileResult> => {
+    if (request.action === "begin") return { state: "uploading", uploadId: "window", offset: 0 }
+    if (request.action === "chunk") {
+      active++
+      await new Promise(resolve => setTimeout(resolve, request.offset === 0 ? 1 : 15))
+      active--
+      if (request.offset === 0) throw new Error("disconnected")
+      return { state: "uploading", uploadId: "window", offset: request.offset + Buffer.from(request.data,"base64").length }
+    }
+    expect(request.action).toBe("abort"); expect(active).toBe(0)
+    return { state: "aborted" }
+  })
+  await expect(deliverBotImFile(command,"failed-window","group",file,()=>{}, {windowed:true})).rejects.toThrow("disconnected")
+  expect(command.mock.calls.filter(([request])=>request.action==="chunk")).toHaveLength(4)
+})

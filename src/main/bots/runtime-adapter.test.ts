@@ -376,6 +376,7 @@ function port(
         continuationCommandIds: fixture.commandIds,
         stoppedTaskContext: fixture.stoppedTasks,
         associatedWorks: () => ({ items: [], hasMore: false }),
+        publishImFiles: vi.fn(),
         publishGroupFiles: fixture.publishFiles,
         publishGroupMessage: fixture.publishMessage,
         groupMessages: fixture.groupMessages,
@@ -1200,7 +1201,7 @@ describe("Bot Runtime integration", () => {
   })
 
   it.each(["group", "dm", "app"] as const)(
-    "delivers direct %s files from the real tool through Runtime and the IM outbox",
+    "delivers both eight-file batches from the real tool through %s Runtime and IM exactly once",
     async (source) => {
       const { LocalBotHost } = await import("./host")
       const { BotImChannelService } = await import("../services/im/bot-channel-service")
@@ -1235,6 +1236,7 @@ describe("Bot Runtime integration", () => {
           expiresAt: new Date(Date.now() + 900000).toISOString()
         }
         const chunks: Buffer[] = []
+        let uploadOffset = 0
         const errors: unknown[] = []
         const client: BotImGatewayClient = {
           getStatus: () => ({ principalId: "owner" }) as ReturnType<BotImGatewayClient["getStatus"]>,
@@ -1253,17 +1255,19 @@ describe("Bot Runtime integration", () => {
             async (request) => {
               if (request.action === "begin") {
                 expect(request.conversationKey).toBe(binding.conversationKey)
-                expect(request.name).toBe("截图.png")
+                expect(request.name).toMatch(/^截图-\d+\.png$/)
+                uploadOffset = 0
                 expect(request.sha256).toBe(createHash("sha256").update(bytes).digest("hex"))
                 return { state: "uploading", uploadId: "upload", offset: 0 }
               }
               if (request.action === "chunk") {
-                expect(request.offset).toBe(Buffer.concat(chunks).length)
+                expect(request.offset).toBe(uploadOffset)
+                uploadOffset += Buffer.from(request.data, "base64").length
                 chunks.push(Buffer.from(request.data, "base64"))
                 return {
                   state: "uploading",
                   uploadId: "upload",
-                  offset: Buffer.concat(chunks).length
+                  offset: uploadOffset
                 }
               }
               expect(request.action).toBe("finish")
@@ -1329,7 +1333,8 @@ describe("Bot Runtime integration", () => {
           "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=",
           "base64"
         )
-        await writeFile(join(root, "截图.png"), bytes)
+        const names = Array.from({ length: 16 }, (_, index) => `截图-${index}.png`)
+        for (const name of names) await writeFile(join(root, name), bytes)
         fixture.directory.mockReturnValue(root)
         fixture.thread.mockReturnValue(undefined)
         fixture.getBot.mockImplementation((id) => store.getBot(id))
@@ -1340,9 +1345,12 @@ describe("Bot Runtime integration", () => {
           const deliver = context.additionalTools!.find(
             (tool) => tool.name === "bot_deliver_files"
           ) as ReturnType<typeof actual.createBotDeliveryTools>[number]
-          const receipt = JSON.parse(String(await deliver.invoke({ files: ["截图.png"] })))
-          expect(receipt.kind).toBe("bot-file-delivery")
-          expect(await readFile(receipt.files[0].attachmentPath)).toEqual(bytes)
+          for (const files of [names.slice(0,8), names.slice(8)]) {
+            const receipt = JSON.parse(String(await deliver.invoke({ files })))
+            expect(receipt.kind).toBe("bot-file-delivery")
+            expect(receipt.files).toHaveLength(8)
+            expect(await readFile(receipt.files[0].attachmentPath)).toEqual(bytes)
+          }
           context.onFinalAssistant?.({ messageId: "file-reply", finalText: "Screenshot ready" })
           context.onRunTerminated?.({ outcome: "success", code: "done" })
           return { completion: Promise.resolve() }
@@ -1356,23 +1364,18 @@ describe("Bot Runtime integration", () => {
         const lease = runtime.acquire(owner, current)!
         const result = await lease.execute(new AbortController().signal, () => {})
         lease.release()
-        expect(result).toMatchObject({
-          state: "completed",
-          files: [expect.objectContaining({ name: "截图.png", size: bytes.length })]
-        })
+        expect(result.state).toBe("completed")
+        expect(store.im.history(owner.id, localBinding.id).items.filter(row => row.files?.length)).toHaveLength(16)
         if (result.state !== "completed") throw new Error("Expected completed file delivery")
         store.settle(current.id, result.state, null, result.result, result.files)
         service.start()
         await vi.waitFor(
           () => {
-            expect(client.botFileCommand).toHaveBeenCalledWith({
-              action: "finish",
-              uploadId: "upload"
-            })
+            expect(vi.mocked(client.botFileCommand!).mock.calls.filter(([request]) => request.action === "finish")).toHaveLength(16)
           },
           { timeout: 3000 }
         )
-        expect(Buffer.concat(chunks)).toEqual(bytes)
+        expect(Buffer.concat(chunks)).toEqual(Buffer.concat(names.map(() => bytes)))
         expect(client.submitReply).toHaveBeenCalledWith(
           expect.objectContaining({ conversationKey: binding.conversationKey })
         )
@@ -1384,7 +1387,7 @@ describe("Bot Runtime integration", () => {
           vi
             .mocked(client.botFileCommand!)
             .mock.calls.filter(([request]) => request.action === "finish")
-        ).toHaveLength(1)
+        ).toHaveLength(16)
       } finally {
         service?.stop()
         await host.stop()

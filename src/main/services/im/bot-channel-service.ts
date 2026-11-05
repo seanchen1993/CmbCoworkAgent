@@ -25,7 +25,16 @@ export type BotImGatewayClient = Pick<
   | "renewBotPermit"
   | "submitReply"
 > &
-  Partial<Pick<ImGatewayWsClient, "supportsMarkdownReplies" | "supportsBotCards" | "supportsBotFiles" | "botFileCommand">>
+  Partial<
+    Pick<
+      ImGatewayWsClient,
+      | "supportsMarkdownReplies"
+      | "supportsBotCards"
+      | "supportsBotFiles"
+      | "supportsBotFileReceipts"
+      | "botFileCommand"
+    >
+  >
 
 /** Authenticated IM -> local Bot adapter. Renderer has no event injection API. */
 export class BotImChannelService {
@@ -36,9 +45,9 @@ export class BotImChannelService {
   private nextGroupSync = 0
   private readonly groupsToSync = new Set<string>()
   private syncing = false
-  private delivering = false
+  private delivering = new Set<"text" | "file">()
+  private checkingReceipts = false
   private epoch = 0
-  private nextDelivery = 0
   private resolvedHost?: LocalBotHost
   private getHost(): LocalBotHost {
     return (this.resolvedHost ??= this.resolveHost())
@@ -73,7 +82,9 @@ export class BotImChannelService {
       this.expirePermits()
       void this.pump()
       void this.syncBindings()
-      void this.deliver()
+      void this.deliver("text")
+      void this.deliver("file")
+      void this.checkFileReceipts()
     }, 1000)
     this.timer.unref?.()
   }
@@ -563,20 +574,14 @@ export class BotImChannelService {
       this.pumping = false
     }
   }
-  private async deliver(): Promise<void> {
-    if (
-      this.delivering ||
-      this.stopped ||
-      !this.client.supportsBotChannel() ||
-      Date.now() < this.nextDelivery
-    )
-      return
-    this.delivering = true
+  private async deliver(lane: "text" | "file"): Promise<void> {
+    if (this.delivering.has(lane) || this.stopped || !this.client.supportsBotChannel()) return
+    this.delivering.add(lane)
     const epoch = this.epoch
     const host = this.getHost()
     let reply: ReturnType<typeof host.beginImDelivery> = null
     try {
-      reply = host.beginImDelivery()
+      reply = host.beginImDelivery(lane)
       if (!reply) return
       console.info("[Bot IM] reply delivery started", {
         deliveryId: reply.id,
@@ -599,14 +604,16 @@ export class BotImChannelService {
         ? host.getWork(reply.botId, reply.workId).workspace?.path
         : undefined
       const text = botImReplyText(reply.text, reply.files, workspace ? [workspace] : [])
-      const messages = text.trim() ? buildImProactiveReplies({
-        // A retained pre-upgrade reply may already have an unredacted text receipt.
-        // Version only changed text; keep attachment IDs stable so files are never resent.
-        deliveryId: text === reply.text ? reply.id : `${reply.id}:public-text-v1`,
-        conversationKey: registered.binding.conversationKey,
-        text,
-        format: "markdown"
-      }) : []
+      const messages = text.trim()
+        ? buildImProactiveReplies({
+            // A retained pre-upgrade reply may already have an unredacted text receipt.
+            // Version only changed text; keep attachment IDs stable so files are never resent.
+            deliveryId: text === reply.text ? reply.id : `${reply.id}:public-text-v1`,
+            conversationKey: registered.binding.conversationKey,
+            text,
+            format: "markdown"
+          })
+        : []
       for (const message of messages) {
         if (this.stopped || epoch !== this.epoch) throw new Error("IM 连接已变化")
         if (!host.mayDeliverImReply(reply.id)) return
@@ -624,25 +631,60 @@ export class BotImChannelService {
       }
       for (const [index, file] of (reply.files ?? []).entries()) {
         if (!this.client.supportsBotFiles?.() || !this.client.botFileCommand)
-          throw new ImGatewayCommandError("当前网关不支持发送附件，请升级网关；文件可在 App 中查看", { permanent: true })
+          throw new ImGatewayCommandError(
+            "当前网关不支持发送附件，请升级网关；文件可在 App 中查看",
+            { permanent: true }
+          )
+        let progressAt = 0
         const state = await deliverBotImFile(
-          this.client.botFileCommand.bind(this.client), `${reply.id}:file:${index}`,
-          registered.binding.conversationKey, file,
+          this.client.botFileCommand.bind(this.client),
+          reply.fileDeliveryId ?? `${reply.id}:file:${index}`,
+          registered.binding.conversationKey,
+          file,
           () => {
             if (this.stopped || epoch !== this.epoch || !host.mayDeliverImReply(reply!.id))
               throw new ImGatewayCommandError("附件发送已暂停，连接或绑定发生变化")
+          },
+          {
+            windowed: this.client.supportsBotFileReceipts?.() === true,
+            retryVersion:
+              reply.retryRequested && this.client.supportsBotFileReceipts?.() === true
+                ? reply.receiptVersion
+                : undefined,
+            onReceipt: (result) => {
+              if (result.version !== undefined)
+                host.updateImFileReceiptVersion(reply!.id, result.version)
+            },
+            progress: (percent) => {
+              if (percent === 100 || Date.now() - progressAt >= 250) {
+                progressAt = Date.now()
+                host.updateImFileProgress(reply!.id, percent)
+              }
+            }
           }
         )
-        if (state === "unknown") { host.settleImDelivery(reply.id, "unknown"); return }
+        if (state === "unknown" || state === "sent") {
+          host.settleImDelivery(reply.id, state)
+          return
+        }
       }
       host.settleImDelivery(reply.id, "accepted")
     } catch (error) {
-      if (reply?.files?.length && error instanceof ImGatewayCommandError && error.permanent &&
-          !this.stopped && epoch === this.epoch && host.mayDeliverImReply(reply.id)) {
+      if (
+        reply?.files?.length &&
+        error instanceof ImGatewayCommandError &&
+        error.permanent &&
+        !this.stopped &&
+        epoch === this.epoch &&
+        host.mayDeliverImReply(reply.id)
+      ) {
         const route = host.imGateway.binding(reply.bindingId)
         if (route?.binding.conversationKey) {
-          const notice = buildImProactiveReplies({ deliveryId: `${reply.id}:file-error`, conversationKey: route.binding.conversationKey,
-            text: "附件未全部发送成功，请在 App 中查看或重新交付。" })
+          const notice = buildImProactiveReplies({
+            deliveryId: `${reply.id}:file-error`,
+            conversationKey: route.binding.conversationKey,
+            text: "附件未全部发送成功，请在 App 中查看或重新交付。"
+          })
           for (const message of notice) await this.client.submitReply(message).catch(() => {})
         }
       }
@@ -652,13 +694,62 @@ export class BotImChannelService {
           error instanceof ImGatewayCommandError && error.resultUnknown
             ? "unknown"
             : error instanceof ImGatewayCommandError && error.permanent
-              ? "blocked"
-              : "pending"
+              ? reply.fileDeliveryId
+                ? "failed"
+                : "blocked"
+              : "pending",
+          error instanceof ImGatewayCommandError ? error.reasonCode : undefined
         )
-      this.nextDelivery = Date.now() + 5000
       this.reportError(error)
     } finally {
-      this.delivering = false
+      this.delivering.delete(lane)
+      if (reply && !this.stopped) setImmediate(() => void this.deliver(lane))
+    }
+  }
+  private async checkFileReceipts(): Promise<void> {
+    if (
+      this.checkingReceipts ||
+      this.stopped ||
+      !this.client.supportsBotFileReceipts?.() ||
+      !this.client.botFileCommand
+    )
+      return
+    this.checkingReceipts = true
+    const epoch = this.epoch
+    try {
+      const host = this.getHost(),
+        principal = this.identity()
+      const rows = host.imChannel.receiptBatch().filter((reply) => {
+        const route = host.imGateway.binding(reply.bindingId)
+        return (
+          route?.realm === this.realm &&
+          route.principal === principal &&
+          Boolean(route.binding.conversationKey)
+        )
+      })
+      if (!rows.length) return
+      const result = await this.client.botFileCommand({
+        action: "status",
+        deliveries: rows.map((reply) => ({
+          deliveryId: reply.fileDeliveryId!,
+          conversationKey: host.imGateway.binding(reply.bindingId)!.binding.conversationKey!
+        }))
+      })
+      if (this.stopped || epoch !== this.epoch || principal !== this.identity()) return
+      if (result.state !== "receipts" || !Array.isArray(result.receipts))
+        throw new Error("附件送达回执无效")
+      for (const receipt of result.receipts) {
+        const row = rows.find((row) => row.fileDeliveryId === receipt.deliveryId)
+        if (!row) continue
+        if (receipt.state === "sent" || receipt.state === "failed" || receipt.state === "unknown")
+          host.settleImFileReceipt(row.id, receipt.state, receipt.reasonCode, receipt.version)
+        else if (receipt.state === "missing")
+          host.settleImFileReceipt(row.id, "unknown", "FILE_RECEIPT_MISSING")
+      }
+    } catch (error) {
+      this.reportError(error)
+    } finally {
+      this.checkingReceipts = false
     }
   }
   disconnected(): void {

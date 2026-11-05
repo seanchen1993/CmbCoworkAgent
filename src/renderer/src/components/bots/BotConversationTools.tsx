@@ -46,7 +46,7 @@ import { BOT_ROUTINE_SILENT } from "../../../../shared/bots/routine-silence"
 import { splitBotInlineReasoning } from "../../../../shared/bots/inline-reasoning"
 import { BotBrowserHelpCard } from "./BotBrowserHelpCard"
 import { botBrowserHelpHistory } from "@/lib/bot-browser-help-history"
-import { BotDeliveredFile } from "./BotDeliveredFile"
+import { BotDeliveredFile, BotDeliveredFiles } from "./BotDeliveredFile"
 import { parseBotFileDelivery } from "../../../../shared/bots/file-delivery"
 import { botGroupBrowserScope } from "../../../../shared/bots/contracts"
 import { botImBrowserScope } from "../../../../shared/bots/im-channel"
@@ -375,21 +375,8 @@ export function BotConversationTools({
         const files = parseBotFileDelivery(result.content)
         if (!files) return null
         return (
-          <div className="bot-delivered-files">
-            {files.map((file) => (
-              <BotDeliveredFile
-                key={file.filePath}
-                client={client}
-                botId={botId}
-                groupId={groupId}
-                imConversationId={imConversationId}
-                threadId={threadId}
-                filePath={file.filePath}
-                attachmentPath={file.attachmentPath}
-                size={file.size}
-              />
-            ))}
-          </div>
+          <BotDeliveredFiles files={files} callId={tool.id} client={client} botId={botId}
+            groupId={groupId} imConversationId={imConversationId} threadId={threadId} />
         )
       }
       const receipt = delegatedTaskReceipt(tool, result)

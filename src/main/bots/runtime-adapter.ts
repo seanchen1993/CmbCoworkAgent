@@ -871,8 +871,8 @@ export function createLocalBotRunPort(
             !groupId &&
             !work &&
             (task.origin.kind === "user" || task.origin.kind === "introduction")
-          // Carry only outputs actually verified by the delivery tools.
-          // The existing terminal/outbox transaction persists the reply; no second file store.
+          // Public IM deliveries are journaled per tool call. This bounded terminal
+          // projection is only a summary for work/peer handoffs, never the send queue.
           const replyFiles = new Map<string, BotDeliveredFile>()
           const routineDelivery =
             (task.origin.kind === "notification" && task.origin.notificationKind === "reaction") ||
@@ -881,7 +881,7 @@ export function createLocalBotRunPort(
                 (task.origin.kind === "notification" &&
                   task.origin.notificationKind === "command")))
           const captureReplyFiles = (files: BotDeliveredFile[]): void => {
-            // Direct chat deliveries also need a terminal receipt for the IM outbox.
+            // Keep a bounded summary of verified public and private outputs.
             // Keep unowned peer/notification returns out of this handoff path.
             const directDelivery = ["user", "introduction", "mock"].includes(task.origin.kind)
             if (!task.workId && !routineDelivery && !peerResultOwner && !directDelivery) return
@@ -891,7 +891,8 @@ export function createLocalBotRunPort(
               if (replyFiles.size > 8) replyFiles.delete(replyFiles.keys().next().value!)
             }
           }
-          const captureDeliveredFiles = (files: BotDeliveredFile[]): void => {
+          const captureDeliveredFiles = (files: BotDeliveredFile[], callId: string): void => {
+            if (!peerResultOwner) getHost().publishImFiles(task.id, callId, files)
             if (peerResultOwner) getHost().recordPeerDelivery(task.id, files)
             captureReplyFiles(files)
           }
@@ -1384,7 +1385,7 @@ export function createLocalBotRunPort(
                               if (content === undefined)
                                 getHost().publishGroupFiles(task.id, callId, files)
                               else getHost().publishGroupFiles(task.id, callId, files, content)
-                              captureDeliveredFiles(files)
+                              captureDeliveredFiles(files, callId)
                               if (files.length) hasPublicContribution = true
                             },
                             undefined,

@@ -1,4 +1,4 @@
-import { BOT_IM_FILE_EXTENSION, type BotImFileCommand, type BotImFileResult } from "../../../shared/bots/im-file"
+import { BOT_IM_FILE_EXTENSION, BOT_IM_FILE_RECEIPTS_EXTENSION, type BotImFileCommand, type BotImFileResult } from "../../../shared/bots/im-file"
 import {
   BOT_IM_EXTENSION,
   assertBotImEvent,
@@ -191,6 +191,7 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
   private markdownReplies = false
   private botChannel = false
   private botCards = false
+  private botFileReceipts = false
   private botFiles = false
   private readonly fileCommands = new Map<string, PendingCommand<BotImFileResult>>()
   private readonly botCommands = new Map<
@@ -240,6 +241,8 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
   supportsBotCards(): boolean {
     return this.supportsBotChannel() && this.botCards
   }
+
+  supportsBotFileReceipts(): boolean { return this.supportsBotFiles() && this.botFileReceipts }
 
   supportsBotFiles(): boolean { return this.supportsBotChannel() && this.botFiles }
 
@@ -327,6 +330,7 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
     this.botChannel = false
     this.botCards = false
     this.botFiles = false
+    this.botFileReceipts = false
     this.clearTimers()
     this.rejectPending(
       new ImGatewayCommandError("统一机器人连接已断开", { reasonCode: "DESKTOP_OFFLINE" })
@@ -668,6 +672,7 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
     this.botChannel = false
     this.botCards = false
     this.botFiles = false
+    this.botFileReceipts = false
     const url = this.options.url()?.trim()
     const token = this.options.token()?.trim()
     if (!url || !token) {
@@ -745,7 +750,7 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
         protocolExtensions: [
           DEFAULT_ROUTE_SYNC_EXTENSION,
           IM_MARKDOWN_REPLY_EXTENSION,
-          ...(this.options.onBotEvent ? [BOT_IM_EXTENSION, "bot-cards-v1", BOT_IM_FILE_EXTENSION] : [])
+          ...(this.options.onBotEvent ? [BOT_IM_EXTENSION, "bot-cards-v1", BOT_IM_FILE_EXTENSION, BOT_IM_FILE_RECEIPTS_EXTENSION] : [])
         ]
       })
     })
@@ -904,6 +909,7 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
           Array.isArray(extensions) &&
           extensions.includes(BOT_IM_EXTENSION)
         )
+        this.botFileReceipts = Array.isArray(extensions) && extensions.includes(BOT_IM_FILE_RECEIPTS_EXTENSION)
         this.botFiles = this.botChannel && Array.isArray(extensions) && extensions.includes(BOT_IM_FILE_EXTENSION)
         this.botCards =
           this.botChannel && Array.isArray(extensions) && extensions.includes("bot-cards-v1")
@@ -937,10 +943,19 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
       case "BOT_FILE_RESULT": {
         const pending = commandId ? this.fileCommands.get(commandId) : undefined
         if (!pending || !commandId) return
-        if (!["uploading", "accepted", "aborted", "unknown", "failed"].includes(String(payload.state)) ||
+        if (!["uploading", "accepted", "aborted", "unknown", "failed", "sent", "receipts"].includes(String(payload.state)) ||
             (payload.uploadId !== undefined && !nonEmptyString(payload.uploadId)) ||
+            (payload.version !== undefined && (!Number.isSafeInteger(payload.version) || Number(payload.version) < 0)) ||
             (payload.offset !== undefined && (!Number.isSafeInteger(payload.offset) || Number(payload.offset) < 0)))
           throw new ImGatewayProtocolError("附件回执格式无效")
+        if (payload.state === "receipts" && (!Array.isArray(payload.receipts) || payload.receipts.length > 16 ||
+            payload.receipts.some((item: unknown) => {
+              if (!item || typeof item !== "object") return true
+              const receipt = item as Record<string, unknown>
+              return (receipt.version !== undefined && (!Number.isSafeInteger(receipt.version) || Number(receipt.version) < 0)) || !nonEmptyString(receipt.deliveryId) || String(receipt.deliveryId).length > 128 ||
+                !["accepted", "sent", "failed", "unknown", "missing"].includes(String(receipt.state)) ||
+                (receipt.reasonCode !== undefined && (typeof receipt.reasonCode !== "string" || !/^[A-Z0-9_]{1,80}$/.test(receipt.reasonCode)))
+            }))) throw new ImGatewayProtocolError("附件送达回执格式无效")
         clearTimeout(pending.timer); this.fileCommands.delete(commandId)
         pending.resolve(payload as unknown as BotImFileResult)
         break

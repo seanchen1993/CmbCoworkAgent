@@ -160,6 +160,12 @@ export interface BotImReplacement {
 }
 
 export interface BotImClient {
+  fileStatuses?(
+    botId: string,
+    threadId: string,
+    callId: string
+  ): Promise<import("./mock-channel").BotFileDeliveryStatus[]>
+  retryFile?(botId: string, id: string): Promise<void>
   /** Local save of a retained group artifact, scoped by the host's binding ID. */
   exportFile?(botId: string, conversationId: string, fileId: string): Promise<boolean>
   stopConversation(botId: string, conversationId: string): Promise<void>

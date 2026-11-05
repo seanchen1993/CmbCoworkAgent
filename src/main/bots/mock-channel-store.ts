@@ -4,6 +4,7 @@ import type { NativeSqliteAdapter } from "../db/native-sqlite-adapter"
 import type { BotStore } from "./store"
 import { BotError, type BotTask, type BotTaskState } from "../../shared/bots/contracts"
 import type {
+  BotFileDeliveryStatus,
   BotMockBinding,
   BotMockEvent,
   BotMockEventReceipt,
@@ -56,9 +57,17 @@ export class BotMockChannelStore {
         CREATE INDEX IF NOT EXISTS bot_mock_outbox_page ON bot_mock_outbox(binding_id,created_at,id);`)
       // Old continuation rows claimed initialized; preserve their missing-history
       // fence. Newly admitted peer threads start false until native creation succeeds.
-      if (!this.rows("PRAGMA table_info(bot_im_continuations)").some((row) => row.name === "initialized"))
-        this.run("ALTER TABLE bot_im_continuations ADD COLUMN initialized INTEGER NOT NULL DEFAULT 1")
-      this.run("CREATE INDEX IF NOT EXISTS bot_im_continuations_thread ON bot_im_continuations(thread_id)")
+      if (
+        !this.rows("PRAGMA table_info(bot_im_continuations)").some(
+          (row) => row.name === "initialized"
+        )
+      )
+        this.run(
+          "ALTER TABLE bot_im_continuations ADD COLUMN initialized INTEGER NOT NULL DEFAULT 1"
+        )
+      this.run(
+        "CREATE INDEX IF NOT EXISTS bot_im_continuations_thread ON bot_im_continuations(thread_id)"
+      )
       // Preserve existing receipts while allowing one opening and one final reply per task.
       if (
         !this.rows("PRAGMA table_info(bot_mock_outbox)").some((row) => row.name === "delivery_kind")
@@ -76,6 +85,33 @@ export class BotMockChannelStore {
       }
       if (!this.rows("PRAGMA table_info(bot_mock_outbox)").some((row) => row.name === "files_json"))
         this.run("ALTER TABLE bot_mock_outbox ADD COLUMN files_json TEXT")
+      const columns = this.rows("PRAGMA table_info(bot_mock_outbox)")
+      for (const [column, type] of Object.entries({
+        file_delivery_id: "TEXT",
+        thread_id: "TEXT",
+        receipt_version: "INTEGER",
+        call_key: "TEXT",
+        progress: "INTEGER NOT NULL DEFAULT 0",
+        reason_code: "TEXT",
+        retry_requested: "INTEGER NOT NULL DEFAULT 0",
+        attempts: "INTEGER NOT NULL DEFAULT 0",
+        next_attempt_at: "INTEGER NOT NULL DEFAULT 0",
+        receipt_checked_at: "INTEGER NOT NULL DEFAULT 0"
+      }))
+        if (!columns.some((row) => row.name === column))
+          this.run(`ALTER TABLE bot_mock_outbox ADD COLUMN ${column} ${type}`)
+      this.run(
+        "CREATE INDEX IF NOT EXISTS bot_mock_outbox_call ON bot_mock_outbox(bot_id,call_key)"
+      )
+      this.run(
+        "CREATE INDEX IF NOT EXISTS bot_mock_outbox_due ON bot_mock_outbox(state,next_attempt_at,created_at,id)"
+      )
+      this.run(
+        "CREATE INDEX IF NOT EXISTS bot_mock_outbox_receipt ON bot_mock_outbox(state,receipt_checked_at,id) WHERE file_delivery_id IS NOT NULL"
+      )
+      this.run(
+        "CREATE INDEX IF NOT EXISTS bot_mock_outbox_legacy_files ON bot_mock_outbox(created_at,id) WHERE files_json IS NOT NULL AND file_delivery_id IS NULL"
+      )
       for (const [table, column] of [
         ["bot_tasks", "mock_source_json"],
         ["bot_task_receipts", "mock_source_json"],
@@ -272,17 +308,14 @@ export class BotMockChannelStore {
       throw new BotError("CONFLICT", "后台任务来源已改变")
     const owner = this.continuationOwner(parent)
     this.validateSource(task.mockSource, owner)
-    const initialized = this.rows(
-      "SELECT 1 FROM bot_im_continuations WHERE thread_id=? AND initialized=1 LIMIT 1",
-      [task.threadId]
-    ).length > 0
-    this.run("INSERT OR IGNORE INTO bot_im_continuations(task_id,source_task_id,owner_bot_id,thread_id,initialized) VALUES(?,?,?,?,?)", [
-      task.id,
-      parent.id,
-      owner,
-      task.threadId,
-      initialized ? 1 : 0
-    ])
+    const initialized =
+      this.rows("SELECT 1 FROM bot_im_continuations WHERE thread_id=? AND initialized=1 LIMIT 1", [
+        task.threadId
+      ]).length > 0
+    this.run(
+      "INSERT OR IGNORE INTO bot_im_continuations(task_id,source_task_id,owner_bot_id,thread_id,initialized) VALUES(?,?,?,?,?)",
+      [task.id, parent.id, owner, task.threadId, initialized ? 1 : 0]
+    )
     this.run("INSERT OR IGNORE INTO bot_im_local_execution VALUES(?)", [task.id])
   }
   continuationOwner(task: BotTask): string {
@@ -432,7 +465,10 @@ export class BotMockChannelStore {
       const threadInitialized = task.workId
         ? this.owner.getWork(task.botId, task.workId).threadInitialized
         : task.threadId.startsWith("im-peer-")
-          ? this.rows("SELECT 1 FROM bot_im_continuations WHERE thread_id=? AND initialized=1 LIMIT 1", [task.threadId]).length > 0
+          ? this.rows(
+              "SELECT 1 FROM bot_im_continuations WHERE thread_id=? AND initialized=1 LIMIT 1",
+              [task.threadId]
+            ).length > 0
           : true
       return { source, threadId: task.threadId, threadInitialized, label: binding.label }
     }
@@ -670,20 +706,23 @@ export class BotMockChannelStore {
     )
       return
     const source = this.validateSource(task.mockSource, task.botId)
-    this.run("INSERT OR IGNORE INTO bot_mock_outbox(id,bot_id,binding_id,grant_version,conversation_id,reply_to_message_id,source_task_id,work_id,text,state,created_at,delivery_kind) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", [
-      `im-opening-${task.id}`,
-      task.botId,
-      source.bindingId,
-      source.grantVersion,
-      source.conversationId,
-      source.messageId,
-      task.id,
-      null,
-      text.trim().slice(0, 6000),
-      "pending",
-      this.now(),
-      "opening"
-    ])
+    this.run(
+      "INSERT OR IGNORE INTO bot_mock_outbox(id,bot_id,binding_id,grant_version,conversation_id,reply_to_message_id,source_task_id,work_id,text,state,created_at,delivery_kind) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+      [
+        `im-opening-${task.id}`,
+        task.botId,
+        source.bindingId,
+        source.grantVersion,
+        source.conversationId,
+        source.messageId,
+        task.id,
+        null,
+        text.trim().slice(0, 6000),
+        "pending",
+        this.now(),
+        "opening"
+      ]
+    )
     if (this.db.getRowsModified()) this.changed()
   }
   settle(task: BotTask, state: BotTaskState, text: string, files?: BotDeliveredFile[]): void {
@@ -691,9 +730,15 @@ export class BotMockChannelStore {
     const owner = this.continuationOwner(task)
     const source = this.validateSource(task.mockSource, owner, false)
     // A collaborator returns to its caller through the existing Bot reply outbox.
-    if (task.origin.kind === "bot" && (task.origin.expectsReply || task.origin.upstreamTaskId)) return
-    if (task.origin.kind === "notification" && task.origin.notificationKind === "workflow" &&
-        this.isContinuation(task) && task.threadId.startsWith("im-peer-")) return
+    if (task.origin.kind === "bot" && (task.origin.expectsReply || task.origin.upstreamTaskId))
+      return
+    if (
+      task.origin.kind === "notification" &&
+      task.origin.notificationKind === "workflow" &&
+      this.isContinuation(task) &&
+      task.threadId.startsWith("im-peer-")
+    )
+      return
     this.run("UPDATE bot_mock_events SET execution_state=? WHERE task_id=?", [state, task.id])
     if (state !== "completed")
       this.run(
@@ -703,7 +748,10 @@ export class BotMockChannelStore {
     // Personal work reports once through the existing main-conversation result notification.
     if (source.personal && task.workId && !files?.length) return
     const binding = this.get(owner, source.bindingId)
-    const output = source.personal && task.workId ? "" : text.trim() || "本轮没有可确认的文字结果，请查看执行状态。"
+    const output =
+      source.personal && task.workId
+        ? ""
+        : text.trim() || "本轮没有可确认的文字结果，请查看执行状态。"
     this.run(
       "INSERT OR IGNORE INTO bot_mock_outbox(id,bot_id,binding_id,grant_version,conversation_id,reply_to_message_id,source_task_id,work_id,text,state,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
       [
@@ -730,7 +778,13 @@ export class BotMockChannelStore {
     if (
       this.transport !== "im" ||
       task.mockSource ||
-      (task.workId ? !files?.length || !work || Boolean(work.source) || work.parentThreadId !== mainThread || (work.conversation && work.conversation.state !== "bound") : task.threadId !== mainThread) ||
+      (task.workId
+        ? !files?.length ||
+          !work ||
+          Boolean(work.source) ||
+          work.parentThreadId !== mainThread ||
+          (work.conversation && work.conversation.state !== "bound")
+        : task.threadId !== mainThread) ||
       this.rows("SELECT injected_into FROM bot_tasks WHERE id=?", [task.id])[0]?.injected_into ||
       !text.trim()
     )
@@ -762,11 +816,207 @@ export class BotMockChannelStore {
     this.freezeFiles(`im-personal-${task.id}`, files)
     this.changed()
   }
+  publishFiles(task: BotTask, callId: string, files: BotDeliveredFile[]): void {
+    if (this.transport !== "im" || !files.length) return
+    if (!parseBotFileDelivery(JSON.stringify({ kind: "bot-file-delivery", files })))
+      throw new BotError("INVALID_INPUT", "交付附件记录无效")
+    if (task.origin.kind === "bot" && (task.origin.expectsReply || task.origin.upstreamTaskId))
+      return
+    const work = task.workId ? this.owner.workForThread(task.botId, task.threadId) : null
+    let bindingId: string, conversationId: string, messageId: string, version: number
+    if (task.mockSource?.transport === "im") {
+      const source = this.validateSource(task.mockSource, this.continuationOwner(task), false)
+      bindingId = source.bindingId
+      conversationId = source.conversationId
+      messageId = source.messageId
+      version = source.grantVersion
+    } else {
+      if (
+        task.mockSource ||
+        (task.workId
+          ? !work ||
+            Boolean(work.source) ||
+            work.parentThreadId !== this.owner.getBot(task.botId).threadId ||
+            (work.conversation && work.conversation.state !== "bound")
+          : task.threadId !== this.owner.getBot(task.botId).threadId)
+      )
+        return
+      if (this.rows("SELECT injected_into FROM bot_tasks WHERE id=?", [task.id])[0]?.injected_into)
+        return
+      const route = this.owner.imGateway.personalBinding(task.botId, task.createdAt)
+      if (!route) return
+      const binding = this.get(task.botId, route.id)
+      if (binding.revoked || binding.kind !== "dm") return
+      const convo = this.rows("SELECT id FROM bot_mock_conversations WHERE binding_id=?", [
+        route.id
+      ])[0]
+      if (!convo) return
+      bindingId = route.id
+      conversationId = String(convo.id)
+      messageId = `app-${task.id}`
+      version = binding.grantVersion
+    }
+    const callKey = createHash("sha256").update(callId).digest("hex")
+    this.transaction(() => {
+      files.forEach((file, index) => {
+        const id = `im-file-${createHash("sha256").update(`${task.id}:${callId}:${index}`).digest("hex")}`
+        const json = JSON.stringify({ kind: "bot-file-delivery", files: [file] })
+        const old = this.rows("SELECT files_json FROM bot_mock_outbox WHERE id=?", [id])[0]
+        if (old && old.files_json !== json)
+          throw new BotError("CONFLICT", "附件交付标识已用于其他内容")
+        this.run(
+          `INSERT OR IGNORE INTO bot_mock_outbox(id,bot_id,binding_id,grant_version,conversation_id,reply_to_message_id,source_task_id,work_id,text,state,created_at,delivery_kind,files_json,file_delivery_id,call_key,thread_id)
+          VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+          [
+            id,
+            task.botId,
+            bindingId,
+            version,
+            conversationId,
+            messageId,
+            task.id,
+            task.workId ?? null,
+            "",
+            "pending",
+            this.now(),
+            `file:${callKey}:${index}`,
+            json,
+            `${id}:file:0`,
+            callKey,
+            task.threadId
+          ]
+        )
+      })
+      this.changed()
+    })
+  }
+  fileStatuses(botId: string, threadId: string, callId: string): BotFileDeliveryStatus[] {
+    this.owner.getBot(botId)
+    const callKey = createHash("sha256").update(callId).digest("hex")
+    return this.rows(
+      `SELECT o.* FROM bot_mock_outbox o
+      WHERE o.bot_id=? AND o.call_key=? AND o.thread_id=? ORDER BY o.created_at,o.id`,
+      [botId, callKey, threadId]
+    )
+      .map((row) => this.fileStatus(row))
+      .filter((row): row is BotFileDeliveryStatus => Boolean(row))
+  }
+  private fileStatus(row: Record<string, unknown>): BotFileDeliveryStatus | undefined {
+    const file = parseBotFileDelivery(row.files_json)?.[0]
+    return file
+      ? {
+          id: String(row.id),
+          file,
+          state: row.state as BotMockOutbox["state"],
+          progress: Number(row.progress ?? 0),
+          ...(row.reason_code ? { reasonCode: String(row.reason_code) } : {})
+        }
+      : undefined
+  }
+  retryFile(botId: string, id: string): void {
+    const row = this.rows(
+      `SELECT o.*,b.revoked,b.online,b.grant_version AS current_version FROM bot_mock_outbox o
+      JOIN bot_mock_bindings b ON b.id=o.binding_id WHERE o.id=? AND o.bot_id=? AND o.file_delivery_id IS NOT NULL`,
+      [id, botId]
+    )[0]
+    if (!row || row.state !== "failed" || row.revoked || row.grant_version !== row.current_version)
+      throw new BotError(
+        "CONFLICT",
+        "此附件不能重试，请检查接入状态；送达不确定的附件请先在招乎核对"
+      )
+    this.run(
+      "UPDATE bot_mock_outbox SET state='pending',retry_requested=1,next_attempt_at=0,progress=0,reason_code=NULL WHERE id=?",
+      [id]
+    )
+    this.changed()
+  }
+  receiptVersion(id: string, version: number): void {
+    if (!Number.isSafeInteger(version) || version < 0) return
+    this.run("UPDATE bot_mock_outbox SET receipt_version=? WHERE id=? AND state='sending'", [
+      version,
+      id
+    ])
+  }
+  progress(id: string, percent: number): void {
+    const value = Math.max(0, Math.min(100, Math.floor(percent)))
+    this.run(
+      "UPDATE bot_mock_outbox SET progress=? WHERE id=? AND state='sending' AND progress<>?",
+      [value, id, value]
+    )
+    if (this.db.getRowsModified()) this.changed()
+  }
+  receiptBatch(): BotMockOutbox[] {
+    const rows = this.rows(
+      `SELECT * FROM bot_mock_outbox WHERE state='accepted' AND file_delivery_id IS NOT NULL
+      AND receipt_checked_at<=? ORDER BY receipt_checked_at,id LIMIT 16`,
+      [this.now() - 5000]
+    )
+    for (const row of rows)
+      this.run("UPDATE bot_mock_outbox SET receipt_checked_at=? WHERE id=?", [this.now(), row.id])
+    return rows.map((row) => this.outbox(row))
+  }
+  receipt(
+    id: string,
+    state: "sent" | "failed" | "unknown",
+    reason?: string,
+    version?: number
+  ): void {
+    this.run(
+      "UPDATE bot_mock_outbox SET state=?,reason_code=?,receipt_version=COALESCE(?,receipt_version) WHERE id=? AND state='accepted'",
+      [state, reason ?? null, version ?? null, id]
+    )
+    if (this.db.getRowsModified()) this.changed()
+  }
+  /** Split retained legacy batches atomically, preserving their original wire identities. */
+  private splitLegacyFiles(): void {
+    const rows = this.rows(
+      "SELECT * FROM bot_mock_outbox WHERE files_json IS NOT NULL AND file_delivery_id IS NULL AND state IN ('pending','accepted','unknown') ORDER BY created_at,id LIMIT 16"
+    )
+    for (const row of rows) {
+      const files = parseBotFileDelivery(row.files_json) ?? []
+      files.forEach((file, index) => {
+        const id = `${row.id}:file:${index}`
+        this.run(
+          `INSERT OR IGNORE INTO bot_mock_outbox(id,bot_id,binding_id,grant_version,conversation_id,reply_to_message_id,source_task_id,work_id,text,state,created_at,delivery_kind,files_json,file_delivery_id)
+          VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+          [
+            id,
+            row.bot_id,
+            row.binding_id,
+            row.grant_version,
+            row.conversation_id,
+            row.reply_to_message_id,
+            row.source_task_id,
+            row.work_id,
+            "",
+            row.state,
+            row.created_at,
+            `file:legacy:${index}`,
+            JSON.stringify({ kind: "bot-file-delivery", files: [file] }),
+            id
+          ]
+        )
+      })
+      this.run("UPDATE bot_mock_outbox SET files_json=NULL WHERE id=?", [row.id])
+    }
+  }
   private freezeFiles(id: string, files?: BotDeliveredFile[]): void {
     if (this.transport !== "im" || !files?.length) return
+    const task = this.rows("SELECT source_task_id FROM bot_mock_outbox WHERE id=?", [id])[0]
+    if (
+      task &&
+      this.rows(
+        "SELECT 1 FROM bot_mock_outbox WHERE source_task_id=? AND call_key IS NOT NULL LIMIT 1",
+        [task.source_task_id]
+      ).length
+    )
+      return
     const json = JSON.stringify({ kind: "bot-file-delivery", files })
     if (!parseBotFileDelivery(json)) throw new BotError("INVALID_INPUT", "交付附件记录无效")
-    this.run("UPDATE bot_mock_outbox SET files_json=? WHERE id=? AND files_json IS NULL", [json, id])
+    this.run("UPDATE bot_mock_outbox SET files_json=? WHERE id=? AND files_json IS NULL", [
+      json,
+      id
+    ])
   }
   outbox(row: Record<string, unknown>): BotMockOutbox {
     return {
@@ -776,17 +1026,29 @@ export class BotMockChannelStore {
       conversationId: String(row.conversation_id),
       replyToMessageId: String(row.reply_to_message_id),
       sourceTaskId: String(row.source_task_id),
-      ...(row.delivery_kind !== "opening" && row.files_json ? { files: parseBotFileDelivery(row.files_json) ?? [] } : {}),
+      ...(row.receipt_version != null ? { receiptVersion: Number(row.receipt_version) } : {}),
+      ...(row.file_delivery_id
+        ? {
+            fileDeliveryId: String(row.file_delivery_id),
+            progress: Number(row.progress),
+            retryRequested: Boolean(row.retry_requested)
+          }
+        : {}),
+      ...(row.reason_code ? { reasonCode: String(row.reason_code) } : {}),
+      ...(row.delivery_kind !== "opening" && row.files_json
+        ? { files: parseBotFileDelivery(row.files_json) ?? [] }
+        : {}),
       ...(row.work_id ? { workId: String(row.work_id) } : {}),
       text: String(row.text),
       state: row.state as BotMockOutbox["state"],
       createdAt: Number(row.created_at)
     }
   }
-  beginDelivery(): BotMockOutbox | null {
+  beginDelivery(lane?: "text" | "file"): BotMockOutbox | null {
     return this.transaction(() => {
+      if (this.transport === "im" && lane) this.splitLegacyFiles()
       const row = this.rows(
-        `SELECT o.* FROM bot_mock_outbox o JOIN bot_mock_bindings b ON b.id=o.binding_id JOIN bots bot ON bot.id=o.bot_id WHERE o.state='pending' AND b.revoked=0 AND b.online=1 AND b.grant_version=o.grant_version AND bot.archived=0 AND bot.deleting=0 ORDER BY o.created_at,o.id LIMIT 1`
+        `SELECT o.* FROM bot_mock_outbox o JOIN bot_mock_bindings b ON b.id=o.binding_id JOIN bots bot ON bot.id=o.bot_id WHERE o.state='pending' AND o.next_attempt_at<=${this.now()} ${lane ? `AND o.file_delivery_id IS ${lane === "text" ? "" : "NOT "}NULL` : ""} AND b.revoked=0 AND b.online=1 AND b.grant_version=o.grant_version AND bot.archived=0 AND bot.deleting=0 ORDER BY o.created_at,o.id LIMIT 1`
       )[0]
       if (!row) return null
       this.run("UPDATE bot_mock_outbox SET state='sending' WHERE id=? AND state='pending'", [
@@ -813,8 +1075,13 @@ export class BotMockChannelStore {
     }
     return false
   }
-  delivered(id: string, state: "sent" | "unknown" | "accepted" | "pending" | "blocked"): void {
-    this.run("UPDATE bot_mock_outbox SET state=? WHERE id=? AND state='sending'", [state, id])
+  delivered(id: string, state: BotMockOutbox["state"], reason?: string): void {
+    this.run(
+      `UPDATE bot_mock_outbox SET state=?,reason_code=?,attempts=attempts+1,
+      next_attempt_at=CASE WHEN ?='pending' THEN ?+MIN(300000,5000*(1 << MIN(attempts,6))) ELSE 0 END
+      WHERE id=? AND state='sending'`,
+      [state, reason ?? null, state, this.now(), id]
+    )
     this.changed()
   }
   private recoveryAfterId = ""
@@ -901,15 +1168,22 @@ export class BotMockChannelStore {
       }
     const rows = this.rows(
       `SELECT * FROM (
-        SELECT * FROM (SELECT 'event-'||e.event_id AS id,'user' AS kind,json_extract(e.payload_json,'$.text') AS text,json_extract(e.payload_json,'$.senderId') AS sender,json_extract(e.payload_json,'$.replyToMessageId') AS reply,COALESCE(t.state,e.execution_state) AS state,t.work_id,e.created_at
+        SELECT * FROM (SELECT 'event-'||e.event_id AS id,'user' AS kind,json_extract(e.payload_json,'$.text') AS text,json_extract(e.payload_json,'$.senderId') AS sender,json_extract(e.payload_json,'$.replyToMessageId') AS reply,COALESCE(t.state,e.execution_state) AS state,t.work_id,e.created_at,NULL AS files_json,t.thread_id,NULL AS progress,NULL AS reason_code
           FROM bot_mock_events e LEFT JOIN bot_tasks t ON t.id=e.task_id WHERE e.binding_id=? AND (e.created_at<? OR (e.created_at=? AND 'event-'||e.event_id<?)) ORDER BY e.created_at DESC,e.event_id DESC LIMIT 41)
-        UNION ALL SELECT * FROM (SELECT id,'bot',text,'Bot',reply_to_message_id,state,work_id,created_at FROM bot_mock_outbox WHERE binding_id=? AND (created_at<? OR (created_at=? AND id<?)) ORDER BY created_at DESC,id DESC LIMIT 41)
+        UNION ALL SELECT * FROM (SELECT id,'bot',text,'Bot',reply_to_message_id,state,work_id,created_at,files_json,COALESCE(thread_id,(SELECT thread_id FROM bot_tasks WHERE id=source_task_id),(SELECT thread_id FROM bot_work_items WHERE id=work_id),(SELECT thread_id FROM bot_mock_conversations WHERE id=conversation_id)),progress,reason_code FROM bot_mock_outbox WHERE binding_id=? AND (created_at<? OR (created_at=? AND id<?)) ORDER BY created_at DESC,id DESC LIMIT 41)
       ) ORDER BY created_at DESC,id DESC LIMIT 41`,
       [bindingId, time, time, key, bindingId, time, time, key]
     )
     const items: BotMockFeedEntry[] = rows.slice(0, 40).map((row) => ({
       id: String(row.id),
       kind: row.kind as "user" | "bot",
+      ...(row.files_json
+        ? {
+            files: parseBotFileDelivery(row.files_json) ?? [],
+            threadId: String(row.thread_id),
+            delivery: this.fileStatus(row)
+          }
+        : {}),
       text: String(row.text),
       senderId: String(row.sender),
       replyToMessageId: row.reply == null ? null : String(row.reply),

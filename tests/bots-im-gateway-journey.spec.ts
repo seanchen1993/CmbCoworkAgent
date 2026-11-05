@@ -206,6 +206,7 @@ async function main() {
     assert.equal(client.getStatus().principalId, "local-bot-owner")
     if (process.env.BOT_IM_MEDIA_ONLY === "1") {
       assert(client.supportsBotFiles())
+      assert(client.supportsBotFileReceipts())
       mediaRoot = await mkdtemp(join(tmpdir(), "bot-media-journey-"))
       const png = Buffer.from(
         "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGPQb3gLAAJ+AZ1KaAMtAAAAAElFTkSuQmCC",
@@ -273,11 +274,13 @@ async function main() {
       const mediaMessages = async () => (await messages()).filter((m) => m.imageId || m.fileId)
       const checkDelivery = async (kind: "dm" | "group", send: () => Promise<void> | void) => {
         const before = (await mediaMessages()).length
+        const beforeSent = Number(db.exec("SELECT COUNT(*) FROM bot_im_outbox WHERE file_delivery_id IS NOT NULL AND state='sent'")[0].values[0][0])
         await send()
         await wait(
           async () => (await mediaMessages()).length === before + mediaFiles.length,
           kind + " media delivery"
         )
+        await wait(() => Number(db.exec("SELECT COUNT(*) FROM bot_im_outbox WHERE file_delivery_id IS NOT NULL AND state='sent'")[0].values[0][0]) === beforeSent + mediaFiles.length, "App final delivery receipts")
         const received = (await mediaMessages()).slice(before)
         const resources = await uploads()
         assert.equal(received.filter((m) => m.imageId).length, 1)
@@ -328,6 +331,20 @@ async function main() {
         host.send({ botId: bot.id, requestId: randomUUID(), message: "media:direct" })
       })
       assert.deepEqual(errors, [])
+      const originalFiles = mediaFiles
+      mediaFiles = [await save("retry-send.docx", office(false))]
+      const countBeforeFailure = (await mediaMessages()).length
+      await post("group", "media:direct")
+      await wait(() => Boolean(db.exec("SELECT id FROM bot_im_outbox WHERE state='failed' AND file_delivery_id IS NOT NULL")[0]?.values.length), "definitive platform failure returned to App")
+      const failedId = String(db.exec("SELECT id FROM bot_im_outbox WHERE state='failed' AND file_delivery_id IS NOT NULL")[0].values[0][0])
+      assert.equal((await mediaMessages()).length, countBeforeFailure)
+      const uploadCount = (await uploads()).length
+      host.retryImFile(bot.id, failedId)
+      await wait(() => db.exec("SELECT state FROM bot_im_outbox WHERE id=?", [failedId])[0].values[0][0] === "sent", "failed file retry final receipt")
+      assert.equal((await mediaMessages()).length, countBeforeFailure + 1)
+      assert.equal((await uploads()).length, uploadCount, "retry must reuse the durable upload and message identity")
+      assert.throws(() => host.retryImFile(bot.id, failedId))
+      mediaFiles = originalFiles
       // Upload rejection must remain visible, with no IMAGE message and no automatic retry.
       const beforeFailure = (await mediaMessages()).length
       await post("group", "media:upload-failure")

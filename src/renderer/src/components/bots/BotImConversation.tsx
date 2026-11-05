@@ -1,3 +1,4 @@
+import { BotDeliveredFile } from "./BotDeliveredFile"
 import { useEffect, useLayoutEffect, useRef, useState } from "react"
 import {
   ArrowLeft,
@@ -451,35 +452,56 @@ export function BotImConversation({
                       })}
                     </time>
                   </div>
-                  <div className="bot-group-bubble bot-im-bubble">
-                    <ReactMarkdown
-                      remarkPlugins={[remarkGfm]}
-                      components={{
-                        a: ({ href, children }) =>
-                          href && parseBotWorkHistoryHref(href) ? (
-                            <button
-                              className="bot-im-text-button"
-                              onClick={() => void openHistory(href)}
-                            >
-                              {children}
-                              <ArrowUpRight size={13} />
-                            </button>
-                          ) : href && /^https?:\/\//i.test(href) ? (
-                            <a href={href} target="_blank" rel="noreferrer">
-                              {children}
-                            </a>
-                          ) : (
-                            <span>{children}</span>
-                          ),
-                        img: ({ alt }) => <span>{alt || "图片"}</span>
-                      }}
-                    >
-                      {entry.text}
-                    </ReactMarkdown>
-                  </div>
+                  {entry.text && (
+                    <div className="bot-group-bubble bot-im-bubble">
+                      <ReactMarkdown
+                        remarkPlugins={[remarkGfm]}
+                        components={{
+                          a: ({ href, children }) =>
+                            href && parseBotWorkHistoryHref(href) ? (
+                              <button
+                                className="bot-im-text-button"
+                                onClick={() => void openHistory(href)}
+                              >
+                                {children}
+                                <ArrowUpRight size={13} />
+                              </button>
+                            ) : href && /^https?:\/\//i.test(href) ? (
+                              <a href={href} target="_blank" rel="noreferrer">
+                                {children}
+                              </a>
+                            ) : (
+                              <span>{children}</span>
+                            ),
+                          img: ({ alt }) => <span>{alt || "图片"}</span>
+                        }}
+                      >
+                        {entry.text}
+                      </ReactMarkdown>
+                    </div>
+                  )}
+                  {entry.files?.length && entry.threadId ? (
+                    <div className="bot-delivered-files">
+                      {entry.files.map((file) => (
+                        <BotDeliveredFile
+                          key={file.filePath}
+                          client={client}
+                          botId={bot.id}
+                          imConversationId={conversation.id}
+                          threadId={entry.threadId!}
+                          filePath={file.filePath}
+                          attachmentPath={file.attachmentPath}
+                          size={file.size}
+                          delivery={entry.delivery}
+                        />
+                      ))}
+                    </div>
+                  ) : null}
                   {(entry.workId || stateLabels[entry.state]) && (
                     <div className="bot-im-message-meta">
-                      {stateLabels[entry.state] && <span>{stateLabels[entry.state]}</span>}
+                      {!entry.files?.length && stateLabels[entry.state] && (
+                        <span>{stateLabels[entry.state]}</span>
+                      )}
                       {entry.workId && (
                         <button onClick={() => onWork(entry.workId!)}>
                           查看独立任务 <ArrowUpRight size={13} />

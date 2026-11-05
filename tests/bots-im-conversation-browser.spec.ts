@@ -90,6 +90,7 @@ async function main() {
                 if (
                   [
                     "./BotImConversation",
+                    "./BotDeliveredFile",
                     "./BotBrowserPanel",
                     "./BotSchedulePanel",
                     "./BotAvatar",
@@ -518,6 +519,29 @@ async function main() {
       await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth),
       false
     )
+    // File cards use the same compact component as private/work conversations.
+    await page.evaluate(() => {
+      const f = (window as any).fixture
+      for (const [index, state] of ["sending", "sent", "failed", "unknown"].entries()) {
+        const file = {filePath: `/workspace/report-${index}.docx`, attachmentPath: `/workspace/.bot-deliveries/hash/report-${index}.docx`, name: `report-${index}.docx`, size: 28672}
+        f.latest.push({id:`attachment-${index}`,kind:"bot",text:"",senderId:"Bot",state,createdAt:Date.now()+index,
+          threadId:"im-a",files:[file],delivery:{id:`attachment-${index}`,file,state,progress:43}})
+      }
+      f.bump()
+    })
+    await page.getByText("上传中 43%", {exact:true}).waitFor()
+    await page.getByText("已送达招乎", {exact:true}).waitFor()
+    await page.getByText("送达待核对 · 请查看招乎", {exact:true}).waitFor()
+    assert.equal(await page.getByRole("button", {name:/重试发送/}).count(),1)
+    await page.getByRole("button",{name:"重试发送 report-2.docx"}).scrollIntoViewIfNeeded()
+    await page.screenshot({animations:"disabled",path:join(artifacts,"bot-im-file-delivery.png")})
+    await page.getByRole("button",{name:"重试发送 report-2.docx"}).click()
+    await page.getByText("等待发送到招乎",{exact:true}).waitFor()
+    assert.equal(await page.getByRole("button", {name:/重试发送/}).count(),0)
+    assert.equal(await page.getByText("已送达招乎",{exact:true}).count(),1)
+    await page.getByRole("button",{name:"招乎群聊：体验优化小组",exact:true}).click()
+    await page.getByText("接入已解除，历史消息仍可查看",{exact:true}).waitFor()
+    assert.equal(await page.locator(".bot-delivered-file").count(),0)
     assert.deepEqual(errors, [])
     console.log(
       "PASS: IM group workspace routing, private/work return links, scoped read state, paging, late responses, offline/revoked history, management, retry and light/dark/compact layout"

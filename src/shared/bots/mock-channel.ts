@@ -59,13 +59,21 @@ export interface BotMockOutbox {
   conversationId: string
   replyToMessageId: string
   sourceTaskId: string
+  fileDeliveryId?: string
+  progress?: number
+  reasonCode?: string
+  retryRequested?: boolean
+  receiptVersion?: number
   files?: import("./file-delivery").BotDeliveredFile[]
   workId?: string
   text: string
-  state: "pending" | "sending" | "sent" | "accepted" | "unknown" | "blocked"
+  state: "pending" | "sending" | "sent" | "accepted" | "unknown" | "blocked" | "failed"
   createdAt: number
 }
 export interface BotMockFeedEntry {
+  files?: import("./file-delivery").BotDeliveredFile[]
+  threadId?: string
+  delivery?: BotFileDeliveryStatus
   id: string
   kind: "user" | "bot"
   text: string
@@ -86,3 +94,12 @@ export interface BotMockTransport {
   send(reply: BotMockOutbox): Promise<"sent" | "unknown">
 }
 export type BotMockTask = BotTask & { mockSource: BotMockSource }
+
+/** Local projection; never contains platform URLs or recipient credentials. */
+export interface BotFileDeliveryStatus {
+  id: string
+  file: import("./file-delivery").BotDeliveredFile
+  state: BotMockOutbox["state"]
+  progress: number
+  reasonCode?: string
+}

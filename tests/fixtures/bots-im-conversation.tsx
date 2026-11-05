@@ -205,6 +205,12 @@ const client = {
     }
   },
   im: {
+    retryFile: async (botId: string, id: string) => {
+      if (botId !== bot.id) throw Error("wrong owner")
+      const row = f.latest.find((item: any) => item.delivery?.id === id) as any
+      if (!row || row.delivery.state !== "failed") throw Error("not retryable")
+      row.delivery.state = "pending"; f.bump()
+    },
     stopConversation: async (_bot: string, id: string) => {
       for (const task of f.tasks.filter(
         (task) =>
