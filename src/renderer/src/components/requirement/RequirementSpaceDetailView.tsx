@@ -11,6 +11,12 @@ import { MarkdownPreview } from "@/components/ui/MarkdownPreview/MarkdownPreview
 import { findRequirementDesignEntry } from "@/lib/requirement-design-entry"
 import type { RequirementRecord } from "./requirement-data"
 
+function isPermissionDeniedError(reason: unknown): boolean {
+  if ((reason as { code?: unknown })?.code === "LRDFA02") return true
+  const message = reason instanceof Error ? reason.message : String(reason ?? "")
+  return message.includes("无权限") || message.includes("操作无权限")
+}
+
 export function RequirementSpaceDetailView({
   requirement,
   onDesignRequirement,
@@ -51,17 +57,13 @@ export function RequirementSpaceDetailView({
       .then(([detailResult, documentResult]) => {
         if (cancelled) return
         const denied = [detailResult, documentResult].some(
-          (result) =>
-            result.status === "rejected" &&
-            (result.reason as { code?: unknown })?.code === "LRDFA02"
+          (result) => result.status === "rejected" && isPermissionDeniedError(result.reason)
         )
         setPermissionDenied(denied)
         if (detailResult.status === "fulfilled") setDetail(detailResult.value)
         if (documentResult.status === "fulfilled") setDocument(documentResult.value)
         const unexpectedError = [detailResult, documentResult].find(
-          (result) =>
-            result.status === "rejected" &&
-            (result.reason as { code?: unknown })?.code !== "LRDFA02"
+          (result) => result.status === "rejected" && !isPermissionDeniedError(result.reason)
         )
         if (unexpectedError?.status === "rejected") throw unexpectedError.reason
       })
