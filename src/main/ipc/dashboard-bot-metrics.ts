@@ -85,7 +85,8 @@ export function buildBotMetricsQuery(filters: Record<string, unknown>[]) {
       works_completed: metric(BOT_EVENTS.workCompleted),
       works_reopened: metric(BOT_EVENTS.workReopened),
       connected: metric(BOT_EVENTS.connected),
-      revoked: metric(BOT_EVENTS.revoked)
+      revoked: metric(BOT_EVENTS.revoked),
+      attachments_sent: metric(BOT_EVENTS.attachmentSent)
     }
   }
 }
@@ -123,6 +124,7 @@ export function parseBotMetrics(raw: unknown): BotOverviewData {
     worksReopened: count("works_reopened"),
     connected: count("connected"),
     revoked: count("revoked"),
+    attachmentsSent: count("attachments_sent"),
     channels: Object.keys(BOT_CHANNELS).map((key) => ({
       key: key as keyof typeof BOT_CHANNELS,
       count: number(record(channels[key]).doc_count)
@@ -184,6 +186,7 @@ export function makeMockBotOverview(
     worksReopened: Math.round(worksCreated * 0.15),
     connected: Math.round(3 * days * weight),
     revoked: Math.round(days * weight),
+    attachmentsSent: Math.round(started * 0.24),
     channels: distribute(
       Object.keys(BOT_CHANNELS) as (keyof typeof BOT_CHANNELS)[],
       [0.53, 0.17, 0.18, 0.12]

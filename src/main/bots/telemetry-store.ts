@@ -120,6 +120,20 @@ export class BotTelemetryStore {
         time,
         bindingProps
       )
+    // IM batches are split into one durable delivery per file before sending. Observe
+    // only the platform's final receipt, never upload acceptance or local card creation.
+    // The stable wire identity deduplicates retries, reconnects and legacy batch splitting.
+    this.trigger(
+      "attachment_sent",
+      "UPDATE OF state",
+      "bot_im_outbox",
+      "OLD.state!='sent' AND NEW.state='sent' AND NEW.file_delivery_id IS NOT NULL",
+      BOT_EVENTS.attachmentSent,
+      "NEW.file_delivery_id",
+      time,
+      "'botId',NEW.bot_id,'botTaskId',NEW.source_task_id,'botWorkId',NEW.work_id," +
+        "'botChannel',(SELECT CASE WHEN kind='group' THEN 'zhaohu_group' ELSE 'zhaohu_private' END FROM bot_im_bindings WHERE id=NEW.binding_id)"
+    )
   }
 
   private trigger(

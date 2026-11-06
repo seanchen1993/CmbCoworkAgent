@@ -211,6 +211,22 @@ export function BotMetrics({ data }: { data: BotOverviewData }) {
             </p>
           }
         />
+        <span className="inline-flex items-center gap-1">
+          招乎附件
+          <strong className="ml-1 font-medium tabular-nums">
+            已发送 {count(data.attachmentsSent)} 份
+          </strong>
+          <InfoHint
+            content={
+              <p className="max-w-xs">
+                本期收到招乎发送成功回执的文件和图片，私聊、群聊及独立任务均计入。
+                批量发送按文件份数统计；同一交付重试不重复计数。
+                仅上传成功、发送失败或送达不确定的不计入；App 本地附件卡片不另计。
+                从升级后开始统计，不回填历史记录。
+              </p>
+            }
+          />
+        </span>
       </div>
     </div>
   )

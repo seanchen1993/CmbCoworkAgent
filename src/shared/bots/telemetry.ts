@@ -9,7 +9,8 @@ export const BOT_EVENTS = {
   workCompleted: "bot.work.completed",
   workReopened: "bot.work.reopened",
   connected: "bot.im.connected",
-  revoked: "bot.im.revoked"
+  revoked: "bot.im.revoked",
+  attachmentSent: "bot.attachment.sent"
 } as const
 export const BOT_CHANNELS = {
   app_private: "App 私聊",
@@ -44,6 +45,8 @@ export interface BotOverviewData {
   worksReopened: number
   connected: number
   revoked: number
+  /** Individual files/images confirmed sent by Zhaohu; not local cards or accepted uploads. */
+  attachmentsSent: number
   channels: { key: keyof typeof BOT_CHANNELS; count: number }[]
   runKinds: { key: keyof typeof BOT_RUN_KINDS; count: number }[]
 }

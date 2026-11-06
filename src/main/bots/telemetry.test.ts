@@ -202,6 +202,126 @@ describe("Bot operational facts", () => {
     )
   })
 
+  it.each(["dm", "group"] as const)(
+    "counts individual confirmed %s attachments, excluding acceptance, failures and retry duplicates",
+    (kind) => {
+      const f = fixture()
+      const binding = f.store.im.create({
+        simulation: true,
+        botId: f.bot.id,
+        operationId: "files",
+        kind,
+        channelKey: "private-channel",
+        label: "Secret group",
+        allowedSenderIds: ["sender"]
+      })
+      const events = () => f.events().filter((e) => e.eventName === BOT_EVENTS.attachmentSent)
+      for (const [index, name] of ["report.docx", "screenshot.png", "sheet.xlsx"].entries()) {
+        f.db.run(
+          `INSERT INTO bot_im_outbox(id,bot_id,binding_id,grant_version,conversation_id,
+            reply_to_message_id,source_task_id,work_id,text,state,created_at,delivery_kind,files_json,file_delivery_id)
+           VALUES(?,?,?,1,'conversation','request','task','work','','pending',1,?,?,?)`,
+          [
+            String(index),
+            f.bot.id,
+            binding.id,
+            `file:${index}`,
+            JSON.stringify({
+              kind: "bot-file-delivery",
+              files: [{ name, filePath: `/private/${name}`, size: 1 }]
+            }),
+            `wire-${index}`
+          ]
+        )
+        f.db.run("UPDATE bot_im_outbox SET state='sending' WHERE id=?", [String(index)])
+        f.store.im.delivered(String(index), "accepted")
+      }
+      expect(events()).toEqual([])
+      f.store.im.receipt("0", "failed")
+      f.store.im.receipt("1", "sent")
+      f.store.im.receipt("2", "unknown")
+      expect(events()).toHaveLength(1)
+      f.store.im.retryFile(f.bot.id, "0")
+      f.db.run("UPDATE bot_im_outbox SET state='sending' WHERE id='0'")
+      f.store.im.delivered("0", "sent") // Gateways may return a final receipt immediately.
+      f.store.im.receipt("1", "sent") // Repeated status polling must not inflate the total.
+      f.db.run("UPDATE bot_im_outbox SET state='accepted' WHERE id='1'")
+      f.store.im.receipt("1", "sent") // The durable wire identity also survives state replay.
+      expect(events()).toHaveLength(2)
+      expect(new Set(events().map((e) => e.eventId)).size).toBe(2)
+      expect(events()[0].properties).toEqual({
+        botMetricsVersion: 1,
+        botId: f.bot.id,
+        botTaskId: "task",
+        botWorkId: "work",
+        botChannel: kind === "group" ? "zhaohu_group" : "zhaohu_private"
+      })
+      expect(JSON.stringify(events())).not.toMatch(
+        /Secret|\/private|report\.docx|screenshot\.png|wire-/
+      )
+      f.db.run("BEGIN")
+      f.db.run("UPDATE bot_im_outbox SET state='sent' WHERE id='2'")
+      f.db.run("ROLLBACK")
+      expect(events()).toHaveLength(2)
+
+      // Text receipts, local simulation and already-sent history are not new attachment sends.
+      f.db.run("UPDATE bot_im_outbox SET file_delivery_id=NULL,state='sending' WHERE id='2'")
+      f.store.im.delivered("2", "sent")
+      f.db.run("INSERT INTO bot_mock_outbox SELECT * FROM bot_im_outbox")
+      f.db.run("UPDATE bot_mock_outbox SET state='accepted'")
+      f.db.run("UPDATE bot_mock_outbox SET state='sent'")
+      expect(events()).toHaveLength(2)
+      const plan = JSON.stringify(
+        f.db.exec("EXPLAIN QUERY PLAN SELECT kind FROM bot_im_bindings WHERE id=?", [binding.id])
+      )
+      expect(plan).toContain("USING INDEX")
+      expect(plan).not.toContain("SCAN bot_im_bindings")
+    }
+  )
+
+  it("keeps attachment send receipts through restart without backfilling old sent files", () => {
+    const dir = mkdtempSync(join(tmpdir(), "bot-file-metrics-"))
+    closes.push(() => rmSync(dir, { recursive: true, force: true }))
+    const path = join(dir, "bots.db"),
+      f = fixture(path)
+    f.db.run(
+      `INSERT INTO bot_im_outbox(id,bot_id,binding_id,grant_version,conversation_id,
+      reply_to_message_id,source_task_id,text,state,created_at,delivery_kind,file_delivery_id)
+      VALUES('file',?,'binding',1,'conversation','request','task','','accepted',1,'file:0','wire')`,
+      [f.bot.id]
+    )
+    f.store.im.receipt("file", "sent")
+    const event = f.events().find((e) => e.eventName === BOT_EVENTS.attachmentSent)!
+    // Pre-upgrade sent records may exist without telemetry; opening the database must not backfill them.
+    f.db.run(
+      `INSERT INTO bot_im_outbox(id,bot_id,binding_id,grant_version,conversation_id,
+        reply_to_message_id,source_task_id,text,state,created_at,delivery_kind,file_delivery_id)
+        VALUES('old-file',?,'binding',1,'conversation','request','old-task','','sent',1,'file:0','old-wire')`,
+      [f.bot.id]
+    )
+    f.close()
+    const db = new NativeSqliteAdapter(new DatabaseSync(path))
+    closes.push(() => db.close())
+    const reloaded = new BotStore(db)
+    expect(
+      reloaded.telemetry
+        .due(Number.MAX_SAFE_INTEGER)
+        .filter((row) => row.event.eventName === BOT_EVENTS.attachmentSent)
+        .map((row) => row.event)
+    ).toEqual([event])
+    const receipt = reloaded.telemetry
+      .due(Number.MAX_SAFE_INTEGER)
+      .find((row) => row.event.eventName === BOT_EVENTS.attachmentSent)!
+    reloaded.telemetry.settle(receipt.id, { ok: true, status: 200 }, 0, Date.now())
+    db.run("UPDATE bot_im_outbox SET state='accepted' WHERE id='file'")
+    reloaded.im.receipt("file", "sent")
+    expect(
+      reloaded.telemetry
+        .due(Number.MAX_SAFE_INTEGER)
+        .filter((row) => row.event.eventName === BOT_EVENTS.attachmentSent)
+    ).toEqual([])
+  })
+
   it("retains original event identity across retries/restart and lets older Apps reopen the database", () => {
     const dir = mkdtempSync(join(tmpdir(), "bot-metrics-")),
       path = join(dir, "bots.db")

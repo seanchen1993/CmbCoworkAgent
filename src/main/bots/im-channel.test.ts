@@ -22,6 +22,7 @@ import type { BotTask } from "../../shared/bots/contracts"
 import { buildBotPrompt } from "./prompt"
 import { parseBotMockSource } from "./mock-channel-validation"
 import { canSteerBotTask } from "./continuation"
+import { BOT_EVENTS } from "../../shared/bots/telemetry"
 
 const interactionCommand = vi.hoisted(() => vi.fn(async () => undefined))
 vi.mock("../services/im/bot-interaction-command", () => ({
@@ -2820,9 +2821,11 @@ it.each(["dm", "group"] as const)("delivers independent-work attachments only to
   let offset = 0
   Object.assign(f.client, {
     supportsBotFiles: () => true,
+    supportsBotFileReceipts: () => true,
     botFileCommand: async (request: import("../../shared/bots/im-file").BotImFileCommand) => {
       if (request.action === "begin") { routes.push(request.conversationKey); offset = 0; return { state: "uploading", uploadId: request.deliveryId, offset } }
       if (request.action === "chunk") { offset += Buffer.from(request.data, "base64").length; return { state: "uploading", uploadId: request.uploadId, offset } }
+      if (request.action === "status") return { state: "receipts", receipts: request.deliveries.map(item => ({ deliveryId: item.deliveryId, state: "sent", version: 1 })) }
       if (request.action === "finish") finished.push(request.uploadId)
       return { state: "accepted" }
     }
@@ -2836,6 +2839,15 @@ it.each(["dm", "group"] as const)("delivers independent-work attachments only to
   // A result-summary round must not resend the original attachment.
   await new Promise(resolve => setTimeout(resolve, 1100))
   expect(finished).toHaveLength(1)
+  await (f.service as unknown as {checkFileReceipts():Promise<void>}).checkFileReceipts()
+  const attachmentEvents = f.store.telemetry.due(Number.MAX_SAFE_INTEGER)
+    .filter(row => row.event.eventName === BOT_EVENTS.attachmentSent)
+  expect(attachmentEvents).toHaveLength(1)
+  expect(attachmentEvents[0].event.properties).toMatchObject({
+    botId: f.bot.id,
+    botWorkId: f.calls.find(task => task.workId)!.workId,
+    botChannel: kind === "group" ? "zhaohu_group" : "zhaohu_private"
+  })
   expect(f.client.submitReply.mock.calls.map(([reply]) => reply.message.content).join("\n")).not.toContain(root)
   expect(await readFile(file.attachmentPath, "utf8")).toBe("verified task bytes")
 })
@@ -2910,9 +2922,14 @@ it("keeps text responsive during a file upload, records final receipts and retri
   await eventually(()=>begins.length===2)
   const task = f.calls.find(task=>task.message==="files")!
   const status = () => f.host.imFileStatuses(f.bot.id,task.threadId,"batch")
+  const attachmentEvents = () => f.store.telemetry.due(Number.MAX_SAFE_INTEGER)
+    .filter(row => row.event.eventName === BOT_EVENTS.attachmentSent)
   await eventually(()=>status().every(item=>item.state==="accepted"))
+  expect(attachmentEvents()).toHaveLength(0)
   await (f.service as unknown as {checkFileReceipts():Promise<void>}).checkFileReceipts()
   expect(status().map(item=>item.state).sort()).toEqual(["failed","sent"])
+  expect(attachmentEvents()).toHaveLength(1)
+  expect(attachmentEvents()[0].event.properties?.botChannel).toBe("zhaohu_group")
   const failed = status().find(item=>item.state==="failed")!, sent=status().find(item=>item.state==="sent")!
   expect(()=>f.host.retryImFile(f.bot.id,sent.id)).toThrow("不能重试")
   const other = f.store.create({name:"Other",instructions:"",color:"#123456",modelRef:null})
@@ -2925,6 +2942,9 @@ it("keeps text responsive during a file upload, records final receipts and retri
   f.db.run("UPDATE bot_im_outbox SET receipt_checked_at=0 WHERE state='accepted'")
   await (f.service as unknown as {checkFileReceipts():Promise<void>}).checkFileReceipts()
   expect(status().every(item=>item.state==="sent")).toBe(true)
+  expect(attachmentEvents()).toHaveLength(2)
+  await (f.service as unknown as {checkFileReceipts():Promise<void>}).checkFileReceipts()
+  expect(attachmentEvents()).toHaveLength(2)
   expect(f.errors).toEqual([])
 })
 
@@ -2938,6 +2958,8 @@ it("retains uncertain file receipts without automatic or manual resend", async (
   await eventually(()=>command.mock.calls.length===1)
   const task=f.calls[0], status=f.host.imFileStatuses(f.bot.id,task.threadId,"unknown-batch")[0]
   expect(status.state).toBe("unknown")
+  expect(f.store.telemetry.due(Number.MAX_SAFE_INTEGER)
+    .some(row => row.event.eventName === BOT_EVENTS.attachmentSent)).toBe(false)
   expect(()=>f.host.retryImFile(f.bot.id,status.id)).toThrow("不能重试")
   expect(f.host.beginImDelivery("file")).toBeNull()
 })

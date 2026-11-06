@@ -30,7 +30,8 @@ function response() {
       works_completed: { doc_count: 120 },
       works_reopened: { doc_count: 40 },
       connected: { doc_count: 50 },
-      revoked: { doc_count: 4 }
+      revoked: { doc_count: 4 },
+      attachments_sent: { doc_count: 12_345_678 }
     }
   }
 }
@@ -45,6 +46,8 @@ describe("Bot overview ES aggregation", () => {
       const data = makeMockBotOverview(range)
       expect(data.source).toBe("mock")
       expect(data.started).toBeGreaterThan(0)
+      expect(data.attachmentsSent).toBeGreaterThan(0)
+      expect(makeMockBotOverview(range, 0).attachmentsSent).toBe(0)
       expect(data.channels.reduce((sum, row) => sum + row.count, 0)).toBe(data.started)
       expect(data.runKinds.reduce((sum, row) => sum + row.count, 0)).toBe(data.started)
       expect(data.completed + data.failed + data.cancelled + data.superseded).toBe(data.started)
@@ -68,6 +71,9 @@ describe("Bot overview ES aggregation", () => {
     expect(Object.keys(query.aggs.started.aggs.channels.filters.filters)).toHaveLength(4)
     expect(Object.keys(query.aggs.started.aggs.kinds.filters.filters)).toHaveLength(5)
     expect(query.aggs.started.aggs.bots.cardinality.precision_threshold).toBe(40000)
+    expect(query.aggs.attachments_sent).toEqual({
+      filter: { term: { eventName: BOT_EVENTS.attachmentSent } }
+    })
     expect(JSON.stringify(query.aggs)).not.toMatch(
       /"terms":\{"field"|"script"|"top_hits"|"_source"|"_raw"|"date_histogram"/
     )
@@ -86,6 +92,15 @@ describe("Bot overview ES aggregation", () => {
     expect(parsed.worksCompleted).toBe(120) // not clipped to 100 newly created works
     expect(parsed.avgDurationMs).toBe(65000)
     expect(parsed.failed).toBe(1_000_000)
+    expect(parsed.attachmentsSent).toBe(12_345_678)
+  })
+
+  it("returns zero for older data without attachment events but rejects a missing aggregation", () => {
+    const raw = response()
+    raw.aggregations.attachments_sent.doc_count = 0
+    expect(parseBotMetrics(raw).attachmentsSent).toBe(0)
+    const { attachments_sent: _, ...olderAggregations } = raw.aggregations
+    expect(() => parseBotMetrics({ ...raw, aggregations: olderAggregations })).toThrow("不完整")
   })
 
   it("distinguishes no completed observations from a zero success rate", () => {

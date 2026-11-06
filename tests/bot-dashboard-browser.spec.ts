@@ -22,7 +22,7 @@ import React, {useState} from 'react';import {createRoot} from 'react-dom/client
 import {BotOverviewPanel} from './src/renderer/src/components/dashboard/panels/BotOverviewPanel';
 import {applyThemePreference} from './src/renderer/src/lib/theme-preference';
 window.setTheme=applyThemePreference;applyThemePreference('cmbdevclaw-white');
-const data={source:'mock',hasData:true,activeBots:128,activeOwners:76,createdBots:23,started:2468,completed:2320,failed:48,cancelled:28,superseded:72,successRate:2320/2368,avgDurationMs:42000,worksCreated:186,worksCompleted:142,worksReopened:32,connected:18,revoked:3,
+const data={source:'mock',hasData:true,activeBots:128,activeOwners:76,createdBots:23,started:2468,completed:2320,failed:48,cancelled:28,superseded:72,successRate:2320/2368,avgDurationMs:42000,worksCreated:186,worksCompleted:142,worksReopened:32,connected:18,revoked:3,attachmentsSent:84,
 channels:[{key:'app_private',count:1420},{key:'app_group',count:368},{key:'zhaohu_private',count:428},{key:'zhaohu_group',count:252}],
 runKinds:[{key:'chat',count:1832},{key:'work',count:386},{key:'schedule',count:120},{key:'collaboration',count:72},{key:'notification',count:58}]};
 const state=window.fixture={calls:[],cancelled:[],mode:'ok',pending:[],data};
@@ -76,6 +76,7 @@ function Demo(){const [settings,setSettings]=useState({range:{from:'2026-10-26T0
       )
     await page.getByText("2,468", { exact: true }).waitFor()
     await ready()
+    await panel.getByText("已发送 84 份", { exact: true }).waitFor()
     await panel.getByText("示例数据", { exact: true }).waitFor()
     assert.equal(await page.evaluate(() => (window as any).fixture.calls.length), 1)
     await page.screenshot({
@@ -86,6 +87,17 @@ function Demo(){const [settings,setSettings]=useState({range:{from:'2026-10-26T0
     await page
       .getByRole("tooltip")
       .getByText("统计当前时间范围及可见组织内的新埋点。旧版本数据不回填。")
+      .waitFor()
+    await page.mouse.move(0, 0)
+    await page.keyboard.press("Escape")
+    await panel
+      .getByText("已发送 84 份", { exact: true })
+      .locator("..")
+      .getByRole("button", { name: "查看说明" })
+      .hover()
+    await page
+      .getByRole("tooltip")
+      .getByText(/本期收到招乎发送成功回执的文件和图片/)
       .waitFor()
     await page.mouse.move(0, 0)
     await page.keyboard.press("Escape")
