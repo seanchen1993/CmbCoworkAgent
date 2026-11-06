@@ -889,6 +889,7 @@ it("exposes human browser help as a dedicated scope-bound tool with original err
   const controller = new AbortController(),
     waiting = vi.fn()
   const act = vi.fn().mockResolvedValue("fresh page evidence")
+  const helpChanged = vi.fn()
   const fileLock = vi.fn(async (operation: () => Promise<string>) => operation())
   const help = createBotBrowserTools(
     { id: "private" } as BotDefinition,
@@ -896,7 +897,8 @@ it("exposes human browser help as a dedicated scope-bound tool with original err
     controller.signal,
     waiting,
     "group-g--member",
-    fileLock
+    fileLock,
+    helpChanged
   ).find((entry) => entry.name === "bot_request_browser_help")!
   const call = {
     type: "tool_call" as const,
@@ -911,7 +913,8 @@ it("exposes human browser help as a dedicated scope-bound tool with original err
     { action: "request_help", ...call.args },
     controller.signal,
     waiting,
-    fileLock
+    fileLock,
+    helpChanged
   )
   act.mockRejectedValue(new Error("页面不属于此 Bot"))
   const failed = await help.invoke(call)
@@ -963,7 +966,7 @@ it("passes an explicit browser new-tab request through the original conversation
   )
   const args = { action: "navigate", newTab: true, url: "https://example.test/preview" }
   expect(await browser.invoke(args)).toBe("new owned page evidence")
-  expect(act).toHaveBeenCalledWith("group-g--member", args, controller.signal, waiting, undefined)
+  expect(act).toHaveBeenCalledWith("group-g--member", args, controller.signal, waiting, undefined, undefined)
 })
 
 it("returns the owned target for authorized cleanup while keeping a failed action an error", async () => {
@@ -1018,6 +1021,7 @@ it("preserves browser failure status through the standard Runtime tool-result fo
     expect.anything(),
     expect.any(AbortSignal),
     expect.any(Function),
+    undefined,
     undefined
   )
 })

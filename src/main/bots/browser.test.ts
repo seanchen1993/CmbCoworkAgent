@@ -1352,14 +1352,16 @@ describe("Bot browser ownership and control", () => {
     await service.giveBack("a", current.generation)
     const waiting = vi.fn()
     let completed = false
+    const notice = vi.fn()
     const help = service
-      .act("a", { action: "request_help", pageId: a.pageId, instruction: "Confirm this form" }, signal(), waiting)
+      .act("a", { action: "request_help", pageId: a.pageId, instruction: "Confirm this form" }, signal(), waiting, undefined, notice)
       .then((value) => {
         completed = true
         return value
       })
     await vi.waitFor(() => expect(waiting).toHaveBeenCalledWith(true))
     const requested = await service.preview("a", a.pageId)
+    expect(notice).toHaveBeenCalledExactlyOnceWith(true, { generation: requested.generation, instruction: "Confirm this form" })
     hidden!(context.entries[0], requested.generation)
     expect(await service.preview("a", a.pageId)).toMatchObject({
       control: "human",
@@ -1369,6 +1371,7 @@ describe("Bot browser ownership and control", () => {
     expect(completed).toBe(false)
     await service.giveBack("a", requested.generation)
     expect(JSON.parse(await help).pageId).toBe(a.pageId)
+    expect(notice).toHaveBeenLastCalledWith(false, { generation: requested.generation, instruction: "Confirm this form" })
     expect(context.entries[0].isClosed()).toBe(false)
     expect(context.entries).toHaveLength(2)
   })

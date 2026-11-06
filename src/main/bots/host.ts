@@ -544,6 +544,9 @@ export class LocalBotHost {
     if (task.state !== "running") throw new BotError("CONFLICT", "执行已结束，不能继续交付附件")
     this.updateImState(() => this.store.im.publishFiles(task, callId, files))
   }
+  browserHelpNotice(taskId: string, help: import("./browser").BotBrowserHelp, active: boolean): void {
+    this.updateImState(() => this.store.im.browserHelpNotice(this.store.getTask(taskId), help, active))
+  }
   imFileStatuses(botId: string, threadId: string, callId: string) {
     return this.store.im.fileStatuses(botId, threadId, callId)
   }

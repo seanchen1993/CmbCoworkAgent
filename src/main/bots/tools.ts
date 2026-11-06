@@ -15,6 +15,7 @@ import type { LocalBotHost } from "./host"
 import {
   BotBrowserActionError,
   type BotBrowserAction,
+  type BotBrowserHelp,
   type BotBrowserService,
   type BotBrowserUploadLock
 } from "./browser"
@@ -412,11 +413,14 @@ export function createBotBrowserTools(
   signal: AbortSignal,
   waiting: (active: boolean) => void,
   scopeId = bot.id,
-  withUploadFileLock?: BotBrowserUploadLock
+  withUploadFileLock?: BotBrowserUploadLock,
+  helpChanged?: (active: boolean, help: BotBrowserHelp) => void
 ): DynamicStructuredTool[] {
   const run = async (input: BotBrowserAction, callId?: string, name = "bot_browser") => {
     try {
-      const content = await browser.act(scopeId, input, signal, waiting, withUploadFileLock)
+      const content = await browser.act(
+        scopeId, input, signal, waiting, withUploadFileLock, helpChanged
+      )
       if (callId && content.startsWith("{") && JSON.parse(content).ok === false)
         return new ToolMessage({ content, status: "error", tool_call_id: callId, name })
       return content

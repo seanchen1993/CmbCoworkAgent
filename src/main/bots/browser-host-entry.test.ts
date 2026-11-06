@@ -48,6 +48,7 @@ vi.mock("electron", async () => {
     jpeg = Buffer.from(`native-${this.targetId}`)
     toJPEG = vi.fn(() => this.jpeg)
     webContents = Object.assign(new EventEmitter(), {
+      focus: vi.fn(),
       getTitle: () => "Synthetic browser page",
       isDestroyed: () => this.destroyed,
       getBackgroundThrottling: () => this.throttled,
@@ -85,6 +86,9 @@ vi.mock("electron", async () => {
     isMinimized = () => false
     restore = vi.fn()
     focus = vi.fn()
+    moveTop = vi.fn()
+    isAlwaysOnTop = () => false
+    setAlwaysOnTop = vi.fn()
     show = () => {
       this.visible = true
     }

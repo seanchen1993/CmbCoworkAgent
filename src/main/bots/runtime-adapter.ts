@@ -53,7 +53,7 @@ import {
   createBotReactionTools,
   verifyBotDeliveryFiles
 } from "./tools"
-import type { BotBrowserService } from "./browser"
+import type { BotBrowserService, BotBrowserHelp } from "./browser"
 import type { BotMemoryService } from "./memory"
 import type { BotMemoryMaintainer } from "./memory-maintainer"
 import { createBotMcpScope } from "./mcp-scope"
@@ -717,6 +717,13 @@ export function createLocalBotRunPort(
             interactionWaits = Math.max(0, interactionWaits + (active ? 1 : -1))
             onWaiting(active)
           }
+          const browserHelpChanged = (active: boolean, help: BotBrowserHelp): void => {
+            try {
+              getHost().browserHelpNotice(task.id, help, active)
+            } catch (error) {
+              console.warn("[Bots] Browser help IM notice unavailable", error)
+            }
+          }
           signal.throwIfAborted()
           if ((work?.source || task.origin.kind === "mock") && !task.mockSource)
             throw new Error("外部渠道来源证明缺失")
@@ -1376,7 +1383,8 @@ export function createLocalBotRunPort(
                                 async (upload) => {
                                   const { withToolFileWriteLock } = await import("../agent/runtime")
                                   return withToolFileWriteLock(toolConcurrencyQueueId, upload)
-                                }
+                                },
+                                browserHelpChanged
                               )
                             ]
                           : [])
@@ -1421,7 +1429,8 @@ export function createLocalBotRunPort(
                             async (upload) => {
                               const { withToolFileWriteLock } = await import("../agent/runtime")
                               return withToolFileWriteLock(toolConcurrencyQueueId, upload)
-                            }
+                            },
+                            browserHelpChanged
                           ),
                           ...(task.origin.kind === "discussion"
                             ? []
@@ -1464,7 +1473,8 @@ export function createLocalBotRunPort(
                             async (upload) => {
                               const { withToolFileWriteLock } = await import("../agent/runtime")
                               return withToolFileWriteLock(toolConcurrencyQueueId, upload)
-                            }
+                            },
+                            browserHelpChanged
                           ),
                           ...createBotCollaborationTools(task.id, getHost, signal),
                           ...createBotScheduleTools(bot, task, getHost, signal)

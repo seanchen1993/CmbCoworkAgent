@@ -62,6 +62,7 @@ const fixture = vi.hoisted(() => ({
   managedDelivery: vi.fn<(...args: unknown[]) => object>(() => ({})),
   mirror: vi.fn(),
   imOpening: vi.fn(),
+  browserHelpNotice: vi.fn(),
   steer: vi.fn(),
   activeLease: vi.fn<() => LocalThreadRunLease | undefined>(),
   pendingQuestion: vi.fn<() => UserInputRequest | null>(),
@@ -352,6 +353,7 @@ function port(
       ({
         imGateway,
         imChannel: { openingReply: fixture.imOpening },
+        browserHelpNotice: fixture.browserHelpNotice,
         getBot: fixture.getBot,
         getGroupReference: fixture.groupReference,
         workToolSource: fixture.workToolSource,
@@ -1015,6 +1017,11 @@ describe("Bot Runtime integration", () => {
       const context = fixture.start.mock.calls[0][2]
       expect(context.remotePolicy).toEqual({ disableScheduler: true, blockedToolNames: ["workflow"] })
       expect(context.additionalTools).toContain("owned-browser")
+      const browserHelp = fixture.browserTools.mock.calls.at(-1)![6] as (active: boolean, help: { generation: number; instruction: string }) => void
+      const help = { generation: 3, instruction: "请确认登录" }
+      browserHelp(true, help)
+      browserHelp(false, help)
+      expect(fixture.browserHelpNotice.mock.calls).toEqual([[incoming.id, help, true], [incoming.id, help, false]])
       expect(botInteractionRoutes.get(task.threadId)).toMatchObject({
         conversationKey: "bot-dm",
         botEventId: "wire-event"
@@ -4448,6 +4455,7 @@ describe("Bot Runtime integration", () => {
       expect.any(AbortSignal),
       expect.any(Function),
       "group-g--a",
+      expect.any(Function),
       expect.any(Function)
     )
     expect(context.allowTrustedTransportSkillMarker).toBe(false)

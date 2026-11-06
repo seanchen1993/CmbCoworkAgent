@@ -1,4 +1,5 @@
 import { app, ipcMain, session } from "electron"
+import { showBotBrowserWindow } from "./browser-window-focus"
 import { BotBrowserWindow as BrowserWindow } from "./browser-host-window"
 import { isAbsolute } from "node:path"
 
@@ -250,9 +251,7 @@ else {
                 target!.generation,
                 typeof instruction === "string" ? instruction : undefined
               )
-              if (window.isMinimized()) window.restore()
-              window.show()
-              window.focus()
+              showBotBrowserWindow(window)
               return
             }
             throw new Error("Unsupported browser host operation")

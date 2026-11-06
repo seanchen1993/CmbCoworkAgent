@@ -2966,3 +2966,65 @@ it("backs off only a transiently failed file while the next file can be delivere
   expect(f.host.beginImDelivery("file")).toBeNull()
   expect(f.errors).toHaveLength(1)
 })
+
+
+it.each(["dm", "group"] as const)("delivers browser takeover notices for %s direct and independent runs to their original audience", async (kind) => {
+  let finish!: () => void
+  let activeTask!: BotTask
+  const f = fixture(async (task, host, signal, waiting) => {
+    if (task.origin.kind === "work_result") return { state: "completed", result: "Result reported" }
+    if (task.message === "create help task" && !task.workId) {
+      await host.createWork({ botId: task.botId, operationId: task.id, title: "PRD task", goal: "Login needed" }, { taskId: task.id, callId: task.id, key: task.id })
+      return { state: "completed", result: "Task created" }
+    }
+    activeTask = task
+    waiting(true)
+    const help = { generation: 7, instruction: "请确认登录，然后继续读取文档。" }
+    host.browserHelpNotice(task.id, help, true)
+    host.browserHelpNotice(task.id, help, true)
+    await new Promise<void>(resolve => { finish = resolve; signal.addEventListener("abort", () => resolve(), { once: true }) })
+    host.browserHelpNotice(task.id, help, false)
+    waiting(false)
+    return { state: "completed", result: "Continued" }
+  })
+  const binding = await f.binding(kind)
+  if (kind === "group") await f.binding("group")
+  for (const text of ["direct browser", "create help task"]) {
+    const before = f.client.submitReply.mock.calls.length
+    await f.service.receive(f.event(binding, text, text))
+    await eventually(() => f.client.submitReply.mock.calls.slice(before).some(([reply]) => reply.message.content.includes("需要你操作浏览器")))
+    const notices = f.client.submitReply.mock.calls.slice(before).map(([reply]) => reply).filter(reply => reply.message.content.includes("需要你操作浏览器"))
+    expect(notices).toHaveLength(1)
+    expect(notices[0].conversationKey).toBe(binding.conversationKey)
+    expect(notices[0].message.content).toContain("运行 CMBDevClaw 的电脑")
+    expect(notices[0].message.content).toContain(text === "direct browser" ? (kind === "group" ? "原招乎群聊会话" : "当前 Bot 会话") : "PRD task")
+    expect(f.store.getTask(activeTask.id).state).toBe("waiting_user")
+    const finishedTaskId = activeTask.id
+    finish()
+    await eventually(() => f.store.getTask(finishedTaskId).state === "completed")
+  }
+  expect(f.errors).toEqual([])
+}, 10000)
+
+it("cancels unsent browser notices on return and blocks revoked audiences", async () => {
+  const f = fixture(async (_task, _host, signal) => {
+    await new Promise<void>(resolve => signal.addEventListener("abort", () => resolve(), { once: true }))
+    return { state: "failed" }
+  })
+  const binding = await f.binding()
+  await f.service.receive(f.event(binding))
+  await eventually(() => f.calls.length === 1)
+  const task = f.calls[0]
+  const help = { generation: 10, instruction: "Confirm login" }
+  f.host.browserHelpNotice(task.id, help, true)
+  f.host.browserHelpNotice(task.id, help, false)
+  expect(f.host.beginImDelivery("text")).toBeNull()
+  f.host.browserHelpNotice(task.id, { ...help, generation: 11 }, true)
+  const second = f.host.beginImDelivery("text")!
+  expect(second).not.toBeNull()
+  expect(second.text).toContain("Confirm login")
+  f.host.settleImDelivery(second.id, "pending")
+  const source = task.mockSource!
+  f.host.revokeImBinding(task.botId, source.bindingId, source.grantVersion)
+  expect(f.host.beginImDelivery("text")).toBeNull()
+})

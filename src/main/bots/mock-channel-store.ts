@@ -727,6 +727,7 @@ export class BotMockChannelStore {
   }
   settle(task: BotTask, state: BotTaskState, text: string, files?: BotDeliveredFile[]): void {
     if (!task.mockSource) return
+    this.run("UPDATE bot_mock_outbox SET state='blocked' WHERE source_task_id=? AND delivery_kind LIKE 'browser_help:%' AND state IN ('pending','sending')", [task.id])
     const owner = this.continuationOwner(task)
     const source = this.validateSource(task.mockSource, owner, false)
     // A collaborator returns to its caller through the existing Bot reply outbox.
@@ -816,12 +817,9 @@ export class BotMockChannelStore {
     this.freezeFiles(`im-personal-${task.id}`, files)
     this.changed()
   }
-  publishFiles(task: BotTask, callId: string, files: BotDeliveredFile[]): void {
-    if (this.transport !== "im" || !files.length) return
-    if (!parseBotFileDelivery(JSON.stringify({ kind: "bot-file-delivery", files })))
-      throw new BotError("INVALID_INPUT", "交付附件记录无效")
-    if (task.origin.kind === "bot" && (task.origin.expectsReply || task.origin.upstreamTaskId))
-      return
+  /** Use the same source/realm and personal-link rules for files and browser notices. */
+  private deliveryTarget(task: BotTask) {
+    if (task.origin.kind === "bot" && (task.origin.expectsReply || task.origin.upstreamTaskId)) return
     const work = task.workId ? this.owner.workForThread(task.botId, task.threadId) : null
     let bindingId: string, conversationId: string, messageId: string, version: number
     if (task.mockSource?.transport === "im") {
@@ -856,6 +854,45 @@ export class BotMockChannelStore {
       messageId = `app-${task.id}`
       version = binding.grantVersion
     }
+    return { bindingId, conversationId, messageId, version }
+  }
+  browserHelpNotice(task: BotTask, help: import("./browser").BotBrowserHelp, active: boolean): void {
+    if (this.transport !== "im") return
+    const id = `im-browser-help-${task.id}-${help.generation}`
+    if (!active) {
+      this.run("UPDATE bot_mock_outbox SET state='blocked' WHERE id=? AND state IN ('pending','sending')", [id])
+      if (this.db.getRowsModified()) this.changed()
+      return
+    }
+    if (!["running", "waiting_user"].includes(task.state)) return
+    const target = this.deliveryTarget(task)
+    if (!target) return
+    const work = task.workId ? this.owner.workForThread(task.botId, task.threadId) : null
+    const name = work?.title || this.owner.getBot(task.botId).name
+    const location = work
+      ? `打开「${name}」独立任务`
+      : task.mockSource && !task.mockSource.personal
+        ? "打开原招乎群聊会话"
+        : "打开当前 Bot 会话"
+    const text = `【${name}】需要你操作浏览器
+
+${help.instruction.slice(0, 500)}
+
+请前往运行 CMBDevClaw 的电脑，在 App 中${location}，点击「打开浏览器」。完成后点击「归还并继续」或浏览器中的「归还 Bot」，任务会继续。请勿在招乎中发送密码或验证码。`
+    this.run(
+      "INSERT OR IGNORE INTO bot_mock_outbox(id,bot_id,binding_id,grant_version,conversation_id,reply_to_message_id,source_task_id,work_id,text,state,created_at,delivery_kind) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+      [id, task.botId, target.bindingId, target.version, target.conversationId, target.messageId,
+        task.id, task.workId ?? null, text, "pending", this.now(), `browser_help:${help.generation}`]
+    )
+    if (this.db.getRowsModified()) this.changed()
+  }
+  publishFiles(task: BotTask, callId: string, files: BotDeliveredFile[]): void {
+    if (this.transport !== "im" || !files.length) return
+    if (!parseBotFileDelivery(JSON.stringify({ kind: "bot-file-delivery", files })))
+      throw new BotError("INVALID_INPUT", "交付附件记录无效")
+    const target = this.deliveryTarget(task)
+    if (!target) return
+    const { bindingId, conversationId, messageId, version } = target
     const callKey = createHash("sha256").update(callId).digest("hex")
     this.transaction(() => {
       files.forEach((file, index) => {
@@ -1094,6 +1131,7 @@ export class BotMockChannelStore {
         [this.transport]
       )[0].id
     )
+    this.run("UPDATE bot_mock_outbox SET state='blocked' WHERE delivery_kind LIKE 'browser_help:%' AND state IN ('pending','sending')")
     this.run("UPDATE bot_mock_outbox SET state=? WHERE state='sending'", [
       this.transport === "im" ? "pending" : "unknown"
     ])

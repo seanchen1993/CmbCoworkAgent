@@ -23,7 +23,19 @@ const { app, nativeImage } = require('electron');
 app.setPath('userData', ${JSON.stringify(join(root, "parent-profile"))});
 app.on('window-all-closed', () => {});
 app.whenReady().then(async () => {
-  const { startElectronBotBrowser, BotBrowserService, BrowserService, syncBotBrowserProfile } = require(${JSON.stringify(resolve(process.env.BOT_TEST_APP_OUT ?? "out", "main/bots-browser-e2e.js"))});
+  const { startElectronBotBrowser, BotBrowserService, BrowserService, syncBotBrowserProfile, BotBrowserWindow, showBotBrowserWindow } = require(${JSON.stringify(resolve(process.env.BOT_TEST_APP_OUT ?? "out", "main/bots-browser-e2e.js"))});
+  const foregroundWindow = new BotBrowserWindow();
+  showBotBrowserWindow(foregroundWindow);
+  await new Promise(resolve => setTimeout(resolve, 100));
+  foregroundWindow.minimize();
+  for (let i = 0; i < 50 && !foregroundWindow.isMinimized(); i++) await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(foregroundWindow.isMinimized(), true, 'fixture must reach minimized state');
+  showBotBrowserWindow(foregroundWindow);
+  for (let i = 0; i < 50 && foregroundWindow.isMinimized(); i++) await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(foregroundWindow.isMinimized(), false, 'open browser must restore minimized state');
+  assert.equal(foregroundWindow.isVisible(), true);
+  assert.equal(foregroundWindow.isAlwaysOnTop(), false);
+  foregroundWindow.destroy();
   let engine;
   const workspace = bot => path.join(${JSON.stringify(root)}, 'workspaces', bot);
   await fs.mkdir(workspace('a'), { recursive: true });
@@ -140,6 +152,8 @@ app.whenReady().then(async () => {
       throw new Error('Active native toolbar not found: ' + address);
     };
     let toolbar = await toolbarFor(fixtureUrl + '/');
+
+
     assert.equal((await service.preview('a')).pages.length, 1, 'trusted toolbar must never become an owned content page');
     assert.equal(await pages[0].evaluate(() => typeof window.require), 'undefined');
     await toolbar.getByRole('textbox', { name: '网页地址' }).fill(fixtureUrl + '/toolbar-one');

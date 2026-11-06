@@ -85,6 +85,10 @@ interface OwnedPage {
 }
 
 export type BotBrowserUploadLock = (operation: () => Promise<string>) => Promise<string>
+export interface BotBrowserHelp {
+  generation: number
+  instruction: string
+}
 
 /** Retain the exact still-owned target when a native operation fails before its observation. */
 export class BotBrowserActionError extends Error {
@@ -490,7 +494,8 @@ export class BotBrowserService {
     action: BotBrowserAction,
     signal: AbortSignal,
     waiting: (active: boolean) => void = () => {},
-    withUploadFileLock?: BotBrowserUploadLock
+    withUploadFileLock?: BotBrowserUploadLock,
+    helpChanged?: (active: boolean, help: BotBrowserHelp) => void
   ): Promise<string> {
     signal.throwIfAborted()
     if (action.action === "fill" && typeof action.text !== "string")
@@ -532,11 +537,18 @@ export class BotBrowserService {
         }
       }
       // Reuse the existing abortable control wait. After return, observe instead of replaying input.
-      return this.act(botId, { action: "observe", pageId: entry.id }, signal, waiting)
+      return this.act(
+        botId, { action: "observe", pageId: entry.id }, signal, waiting,
+        withUploadFileLock, helpChanged
+      )
     }
     if (this.human?.botId === botId) {
       const handoff = this.human
+      const help = handoff.instruction
+        ? { generation: handoff.generation, instruction: handoff.instruction }
+        : undefined
       waiting(true)
+      if (help) helpChanged?.(true, help)
       try {
         await new Promise<void>((resolve, reject) => {
           const cleanup = () => {
@@ -557,6 +569,7 @@ export class BotBrowserService {
         })
       } finally {
         waiting(false)
+        if (help) helpChanged?.(false, help)
       }
       const skippedNote = handoff.helpSkipped
         ? "The user skipped your browser help request without confirming the requested step. Treat that step as declined, do not assume it happened, and do not immediately ask for the same step again. Continue without it when possible; otherwise explain what is blocked and wait for the user."
