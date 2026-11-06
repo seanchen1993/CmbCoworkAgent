@@ -2,8 +2,7 @@ import { prepareMarketCommand, resolveMarketRuntimePath } from "../services/mark
 import { spawn } from "node:child_process"
 import { ChatOpenAI } from "@langchain/openai"
 import { HumanMessage, SystemMessage } from "@langchain/core/messages"
-import * as chardet from "jschardet"
-import * as iconv from "iconv-lite"
+import { decodeHookOutput } from "./output-encoding"
 import type { HookConfig, HookEvent, HookResult, HookUserContextField } from "./types"
 import { getHookModelRef, getTimeoutBounds } from "./types"
 import { executeHttpHook } from "./http-runner"
@@ -29,8 +28,6 @@ function getEffectiveTimeout(hook: HookConfig): number {
   return hook.timeout ?? bounds.default
 }
 const MAX_OUTPUT_BYTES = 1_000_000 // 1 MB per hook
-const CHARDET_CONFIDENCE_THRESHOLD = 0.8
-const CHARDET_SAMPLE_BYTES = 8_192
 const MAX_HOOK_ENV_JSON_CHARS = 4_096
 const ONCE_HOOK_KEY_SEPARATOR = "\u0000"
 const INVOCATION_CONTEXT_ENV_KEYS = new Set([
@@ -577,71 +574,6 @@ function applyForcedOutcome(result: HookResult, hook: HookConfig): HookResult {
     // explicitly opts back into revision — clear the halt signal.
     continue: undefined,
     stopReason: undefined
-  }
-}
-
-function isValidUtf8(buf: Buffer): boolean {
-  try {
-    new TextDecoder("utf-8", { fatal: true }).decode(buf)
-    return true
-  } catch {
-    return false
-  }
-}
-
-function detectHookOutputEncoding(buf: Buffer): string {
-  if (buf.length === 0) return "utf-8"
-  const detected = chardet.detect(buf)
-  if (!detected) return "utf-8"
-
-  const encoding = typeof detected === "string" ? detected : detected.encoding
-  const confidence = typeof detected === "object" ? detected.confidence : 1
-
-  if (!encoding || encoding.toLowerCase() === "ascii" || !iconv.encodingExists(encoding)) {
-    return "utf-8"
-  }
-
-  if (confidence >= CHARDET_CONFIDENCE_THRESHOLD) {
-    return encoding
-  }
-
-  // On Chinese Windows, short GBK/GB18030 output often comes back with low confidence
-  // even though the bytes are definitely not UTF-8. In that case, trust the detector.
-  if (!isValidUtf8(buf)) {
-    return encoding
-  }
-
-  return "utf-8"
-}
-
-function decodeHookOutput(
-  stdoutBuf: Buffer,
-  stderrBuf: Buffer
-): { stdout: string; stderr: string } {
-  if (process.platform !== "win32") {
-    return {
-      stdout: stdoutBuf.length > 0 ? stdoutBuf.toString("utf-8") : "",
-      stderr: stderrBuf.length > 0 ? stderrBuf.toString("utf-8") : ""
-    }
-  }
-  // Sample both streams in bounded chunks so stderr-only Chinese diagnostics still
-  // influence detection when stdout contains ASCII / JSON.
-  const perStreamSampleBytes = Math.floor(CHARDET_SAMPLE_BYTES / 2)
-  const sample = Buffer.concat([
-    stdoutBuf.subarray(0, perStreamSampleBytes),
-    stderrBuf.subarray(0, CHARDET_SAMPLE_BYTES - perStreamSampleBytes)
-  ])
-  const encoding = detectHookOutputEncoding(sample)
-  try {
-    return {
-      stdout: stdoutBuf.length > 0 ? iconv.decode(stdoutBuf, encoding) : "",
-      stderr: stderrBuf.length > 0 ? iconv.decode(stderrBuf, encoding) : ""
-    }
-  } catch {
-    return {
-      stdout: stdoutBuf.toString("utf-8"),
-      stderr: stderrBuf.toString("utf-8")
-    }
   }
 }
 
