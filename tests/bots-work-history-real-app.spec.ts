@@ -234,7 +234,7 @@ async function main() {
     await dialog.getByLabel("任务名称").fill("社区读书会 · 筹备")
     await dialog.getByLabel("任务目标").fill("继续跟进社区读书会的筹备安排。")
     await dialog.getByRole("button", { name: "关联此会话", exact: true }).click()
-    await page.getByRole("button", { name: "解除任务关联", exact: true }).waitFor()
+    await page.getByRole("button", { name: "更多任务操作", exact: true }).waitFor()
     const linked = await page.evaluate(
       async (id) => (window as ApiWindow).api.bots.conversations.resolve(id),
       threadId
@@ -379,6 +379,7 @@ async function main() {
     await sourceVisible(threadId, sourceReceipt.receipt.entries[0].source.messageId)
     await page.getByRole("button", { name: "打开原会话", exact: true }).click()
     page.once("dialog", (dialog) => void dialog.accept())
+    await page.getByRole("button", { name: "更多任务操作", exact: true }).click()
     await page.getByRole("button", { name: "解除任务关联", exact: true }).click()
     await page.getByRole("button", { name: "关联为 Bot 任务", exact: true }).waitFor()
     const stale = await page.evaluate(

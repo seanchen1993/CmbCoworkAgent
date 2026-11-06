@@ -23,7 +23,8 @@ import {
   HeartPulse,
   Clock,
   ShoppingBag,
-  Settings
+  Settings,
+  Bot as BotIcon
 } from "lucide-react"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
@@ -64,7 +65,12 @@ import {
   listCompleteThreadGroupSelection,
   type ThreadGroupSelectionEntry
 } from "@/lib/thread-group-selection"
-import { isHarnessFeatureThread, isHarnessProjectModeThread, isRegularChatThread, isLocalWorkConversation } from "@/lib/thread-classification"
+import {
+  isHarnessFeatureThread,
+  isHarnessProjectModeThread,
+  isRegularChatThread,
+  isLocalWorkConversation
+} from "@/lib/thread-classification"
 import { isRemoteInboxThread, REMOTE_INBOX_WORKSPACE_NAME } from "@/lib/remote-thread-display"
 import { FEATURE_GATES } from "../../../../shared/feature-gates"
 import {
@@ -78,6 +84,8 @@ import { WorkspaceRenameDialog } from "./WorkspaceRenameDialog"
 import type { Thread } from "@/types"
 import { selectBoundedSidebarWindow } from "./thread-sidebar-window"
 import { readStoredStringSet, sortPinnedFirst, toggleStoredStringSet } from "@/lib/sidebar-pinning"
+import { botDefaultWorkspaceOwner, botWorkspaceDisplay } from "@/lib/bot-workspace-display"
+import { useBotWorkspaceProfiles } from "../bots/use-bot-workspace-profiles"
 
 const NO_WORKSPACE_PROJECT_KEY = "__no_workspace__"
 const COLLAPSED_PROJECTS_STORAGE_KEY = "threads:collapsedProjects"
@@ -100,6 +108,7 @@ interface ThreadProject {
   path: string | null
   threads: Thread[]
   isManagedInbox: boolean
+  botWorkspace?: ReturnType<typeof botWorkspaceDisplay>
   isPinned: boolean
   hasCustomName: boolean
   sortIndex: number
@@ -254,7 +263,8 @@ function ThreadListItemImpl({
   onEditingTitleChange,
   isExporting,
   isForking = false,
-  hoverTitle
+  hoverTitle,
+  botOwnerName
 }: {
   thread: Thread
   isLoading: boolean
@@ -280,6 +290,7 @@ function ThreadListItemImpl({
   onCancelEditing: () => void
   onEditingTitleChange: (value: string) => void
   hoverTitle?: string
+  botOwnerName?: string
 }): React.JSX.Element {
   const isRunning = isLoading || scheduledTaskLoading
   const forkDisabled = isRunning || hasPendingApproval || hasPendingUserInput || isForking
@@ -380,6 +391,15 @@ function ThreadListItemImpl({
                     {pendingUserInputBadge}
                   </>
                 )}
+              </div>
+            )}
+            {!isEditing && isLocalWorkConversation(thread) && (
+              <div
+                className="mt-0.5 flex min-w-0 items-center gap-1 text-[10px] text-muted-foreground"
+                title={`${botOwnerName || "Bot"} · 独立任务`}
+              >
+                <BotIcon className="size-3 shrink-0" aria-hidden="true" />
+                <span className="truncate">{botOwnerName || "Bot"} · 独立任务</span>
               </div>
             )}
           </div>
@@ -493,7 +513,8 @@ function areThreadListItemPropsEqual(
     prev.isUnread !== next.isUnread ||
     prev.isManagedRunning !== next.isManagedRunning ||
     Boolean(prev.onForkFromCheckpoint) !== Boolean(next.onForkFromCheckpoint) ||
-    prev.hoverTitle !== next.hoverTitle
+    prev.hoverTitle !== next.hoverTitle ||
+    prev.botOwnerName !== next.botOwnerName
   ) {
     return false
   }
@@ -765,12 +786,30 @@ export const ThreadSidebar = memo(function ThreadSidebar(): React.JSX.Element {
     [persistUnread]
   )
 
+  const needsBotProfiles = useMemo(
+    () =>
+      threads.some(
+        (thread) =>
+          isLocalWorkConversation(thread) ||
+          botDefaultWorkspaceOwner(getThreadWorkspacePath(thread))
+      ),
+    [threads]
+  )
+  const botProfiles = useBotWorkspaceProfiles(needsBotProfiles)
+  const botProfilesById = useMemo(
+    () => new Map(botProfiles.map((bot) => [bot.id, bot])),
+    [botProfiles]
+  )
   const threadProjects = useMemo<ThreadProject[]>(() => {
     const projectMap = new Map<string, ThreadProject>()
     let sortIndex = 0
 
     for (const thread of threads) {
-      if (isHarnessProjectModeThread(thread) || (thread.metadata?.botId && !isLocalWorkConversation(thread))) continue
+      if (
+        isHarnessProjectModeThread(thread) ||
+        (thread.metadata?.botId && !isLocalWorkConversation(thread))
+      )
+        continue
       const path = getThreadWorkspacePath(
         thread,
         threadStateSummaries[thread.thread_id]?.workspacePath
@@ -778,7 +817,6 @@ export const ThreadSidebar = memo(function ThreadSidebar(): React.JSX.Element {
       const key = path || NO_WORKSPACE_PROJECT_KEY
       const existing = projectMap.get(key)
       const isManagedInbox = isRemoteInboxThread(thread)
-
       if (existing) {
         existing.threads.push(thread)
         if (isManagedInbox && !existing.isManagedInbox) {
@@ -786,13 +824,22 @@ export const ThreadSidebar = memo(function ThreadSidebar(): React.JSX.Element {
           existing.defaultName = REMOTE_INBOX_WORKSPACE_NAME
           existing.name = REMOTE_INBOX_WORKSPACE_NAME
           existing.hasCustomName = false
+          existing.botWorkspace = undefined
         }
       } else {
-        const { defaultName, name, hasCustomName } = getProjectDisplayName(
+        const defaultOwner = !isManagedInbox && path ? botDefaultWorkspaceOwner(path) : null
+        const botWorkspace =
+          path && defaultOwner
+            ? botWorkspaceDisplay(path, [], undefined, botProfilesById.get(defaultOwner))
+            : undefined
+        const display = getProjectDisplayName(
           path,
           projectNameOverrides,
           isManagedInbox ? REMOTE_INBOX_WORKSPACE_NAME : undefined
         )
+        const defaultName = botWorkspace?.name ?? display.defaultName
+        const name = botWorkspace && !display.hasCustomName ? defaultName : display.name
+        const { hasCustomName } = display
         projectMap.set(key, {
           key,
           name,
@@ -800,6 +847,7 @@ export const ThreadSidebar = memo(function ThreadSidebar(): React.JSX.Element {
           path,
           threads: [thread],
           isManagedInbox,
+          botWorkspace,
           isPinned: pinnedProjectKeys.has(key),
           hasCustomName,
           sortIndex: sortIndex++
@@ -808,7 +856,7 @@ export const ThreadSidebar = memo(function ThreadSidebar(): React.JSX.Element {
     }
 
     return sortPinnedFirst(projectMap.values(), (project) => project.isPinned)
-  }, [pinnedProjectKeys, projectNameOverrides, threadStateSummaries, threads])
+  }, [pinnedProjectKeys, projectNameOverrides, threadStateSummaries, threads, botProfilesById])
 
   const currentThread = useMemo(() => {
     if (!currentThreadId) return null
@@ -1493,6 +1541,11 @@ export const ThreadSidebar = memo(function ThreadSidebar(): React.JSX.Element {
                                     className="size-4 shrink-0 text-primary"
                                     aria-hidden="true"
                                   />
+                                ) : project.botWorkspace ? (
+                                  <BotIcon
+                                    className="size-4 shrink-0 text-muted-foreground"
+                                    aria-hidden="true"
+                                  />
                                 ) : (
                                   <FolderOpen className="size-4 shrink-0 text-muted-foreground" />
                                 )}
@@ -1589,13 +1642,20 @@ export const ThreadSidebar = memo(function ThreadSidebar(): React.JSX.Element {
                           onMouseLeave={() => setHoveredProjectKey(null)}
                         >
                           <div className="mb-1 font-medium text-muted-foreground">
-                            {project.isManagedInbox ? "工作区说明" : "工作区路径"}
+                            {project.isManagedInbox
+                              ? "工作区说明"
+                              : (project.botWorkspace?.name ?? "工作区路径")}
                           </div>
                           <div className="break-all text-foreground">
                             {project.isManagedInbox
                               ? "应用托管目录，路径已隐藏"
                               : project.path || "未关联工作区"}
                           </div>
+                          {project.botWorkspace && (
+                            <p className="mt-2 text-muted-foreground">
+                              Bot 自动管理的默认目录，用于保存任务文件。
+                            </p>
+                          )}
                         </PopoverContent>
                       </Popover>
                       <ContextMenuContent>
@@ -1655,6 +1715,9 @@ export const ThreadSidebar = memo(function ThreadSidebar(): React.JSX.Element {
                             <ThreadListItem
                               key={thread.thread_id}
                               thread={thread}
+                              botOwnerName={
+                                botProfilesById.get(String(thread.metadata?.botId ?? ""))?.name
+                              }
                               isLoading={isLoading}
                               hasPendingApproval={hasPendingApproval}
                               hasPendingUserInput={hasPendingUserInput}

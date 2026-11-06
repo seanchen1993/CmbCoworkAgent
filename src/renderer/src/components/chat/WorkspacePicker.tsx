@@ -27,6 +27,8 @@ import {
 } from "@/lib/workspace-file-load"
 import { canChangeThreadWorkspace } from "@/lib/workspace-switch-availability"
 import { isRemoteInboxThread, REMOTE_INBOX_WORKSPACE_NAME } from "@/lib/remote-thread-display"
+import { botDefaultWorkspaceOwner, botWorkspaceDisplay } from "@/lib/bot-workspace-display"
+import { useBotWorkspaceProfiles } from "../bots/use-bot-workspace-profiles"
 
 interface WorkspacePickerProps {
   threadId: string
@@ -128,6 +130,7 @@ function WorkspacePickerImpl({
     (state) => state.threads.find((candidate) => candidate.thread_id === threadId) ?? null
   )
   const concealWorkspacePath = isRemoteInboxThread(thread)
+  const botProfiles = useBotWorkspaceProfiles(Boolean(botDefaultWorkspaceOwner(workspacePath)))
   const [open, setOpen] = useState(false)
   const [loading, setLoading] = useState(false)
   const worktreeCreateInFlightRef = useRef(false)
@@ -446,7 +449,11 @@ function WorkspacePickerImpl({
     }
   }
 
-  const folderName = getFolderName(workspacePath)
+  const botWorkspace =
+    workspacePath && botDefaultWorkspaceOwner(workspacePath)
+      ? botWorkspaceDisplay(workspacePath, botProfiles)
+      : null
+  const folderName = botWorkspace?.name ?? getFolderName(workspacePath)
   const workspaceName = concealWorkspacePath ? REMOTE_INBOX_WORKSPACE_NAME : folderName
 
   return (

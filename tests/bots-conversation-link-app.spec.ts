@@ -375,13 +375,22 @@ async function main() {
     await dialog.getByLabel("任务名称").fill("原讨论的持续任务")
     await dialog.getByLabel("任务目标").fill("保留既有讨论与目录继续修改。")
     await dialog.getByRole("button", { name: "关联此会话", exact: true }).click()
-    await page.getByRole("button", { name: "解除任务关联", exact: true }).waitFor()
+    await page.getByRole("button", { name: "更多任务操作", exact: true }).waitFor()
     const linked = await page.evaluate(
       async (id) => (window as any).api.bots.conversations.resolve(id),
       threadId
     )
     assert.equal(linked.work.threadId, threadId)
     assert.equal(linked.workspacePath, originalWorkspace)
+    const taskHeader = page.locator("[data-bot-task-header]")
+    assert.ok(!(await taskHeader.innerText()).includes(originalWorkspace))
+    await taskHeader.getByRole("button", { name: "工作目录：original-workspace", exact: true }).click()
+    await page.getByText(originalWorkspace, { exact: true }).last().waitFor()
+    await page.getByRole("button", { name: "打开文件夹", exact: true }).last().waitFor()
+    await page.getByRole("button", { name: "复制路径", exact: true }).click()
+    await page.getByRole("button", { name: "已复制", exact: true }).waitFor()
+    await page.keyboard.press("Escape")
+    await page.screenshot({ path: join(out, "artifacts", "bot-task-custom-workspace.png"), fullPage: true })
     assert.equal(
       await page.evaluate(async () => (await (window as any).api.bots.snapshot()).tasks.length),
       before,
@@ -663,6 +672,7 @@ async function main() {
       fullPage: true
     })
     page.once("dialog", (dialog) => void dialog.accept())
+    await page.getByRole("button", { name: "更多任务操作", exact: true }).click()
     await page.getByRole("button", { name: "解除任务关联", exact: true }).click()
     await page.getByRole("button", { name: "关联为 Bot 任务", exact: true }).waitFor()
     assert.equal(
@@ -731,6 +741,14 @@ async function main() {
       created.work.threadId
     )
     assert.equal(newLink.work.id, created.work.id)
+    const defaultLabel = `${setup.bot.name} · 默认工作区`
+    await page.getByRole("button", { name: `工作目录：${defaultLabel}`, exact: true }).waitFor()
+    await page.getByText(defaultLabel, { exact: true }).first().waitFor()
+    assert.ok(!(await page.locator("[data-bot-task-header]").innerText()).includes(newLink.workspacePath))
+    await page.getByRole("button", { name: `工作目录：${defaultLabel}`, exact: true }).click()
+    await page.getByText(newLink.workspacePath, { exact: true }).last().waitFor()
+    await page.screenshot({ path: join(out, "artifacts", "bot-task-default-workspace-detail.png"), fullPage: true })
+    await page.keyboard.press("Escape")
     await page
       .getByText(/LINK_NEW_REPLY/)
       .last()
@@ -744,6 +762,29 @@ async function main() {
       path: join(out, "artifacts", "m05-06-created-conversation.png"),
       fullPage: true
     })
+    await page.setViewportSize({ width: 980, height: 760 })
+    await page.evaluate(() => {
+      const settings = JSON.stringify({ mode: "dark", lightTheme: "codex-light", darkTheme: "codex-dark" })
+      localStorage.setItem("cmb:theme-settings", settings)
+      window.dispatchEvent(new StorageEvent("storage", { key: "cmb:theme-settings", newValue: settings }))
+    })
+    await page.locator('html[data-theme="codex-dark"]').waitFor()
+    const headerFits = await page.locator("[data-bot-task-header]").evaluate((element) => {
+      const rect = element.getBoundingClientRect()
+      return element.scrollWidth <= element.clientWidth + 1 &&
+        [...element.querySelectorAll("button")].every((button) => {
+          const bounds = button.getBoundingClientRect()
+          return bounds.left >= rect.left && bounds.right <= rect.right + 1
+        })
+    })
+    assert.ok(headerFits, "task controls remain usable in a narrow conversation pane")
+    const backBounds = await page.getByRole("button", { name: "返回 Bot 任务", exact: true }).boundingBox()
+    const moreBounds = await page.getByRole("button", { name: "更多任务操作", exact: true }).boundingBox()
+    assert.ok(backBounds && moreBounds && Math.abs(backBounds.y - moreBounds.y) < 10, "header actions stay together on one line")
+    await page.getByRole("button", { name: `工作目录：${defaultLabel}`, exact: true }).click()
+    await page.getByRole("button", { name: "复制路径", exact: true }).waitFor()
+    await page.screenshot({ path: join(out, "artifacts", "bot-task-workspace-dark-compact.png"), fullPage: true })
+    await page.keyboard.press("Escape")
     console.log(
       "stage: both-entrances-complete-continue-unlink",
       JSON.stringify({
@@ -756,6 +797,13 @@ async function main() {
     assert.deepEqual(errors, [])
   } catch (error) {
     console.error("fixture artifacts", dir)
+    if (app) {
+      const state = await (await app.firstWindow()).evaluate(async () => {
+        const snapshot = await (window as any).api.bots.snapshot()
+        return snapshot.tasks.map((task: any) => ({ id: task.id, state: task.state, origin: task.origin, error: task.error, workId: task.workId }))
+      }).catch(() => [])
+      await writeFile(join(out, "artifacts", "bot-link-failure-tasks.json"), JSON.stringify(state, null, 2))
+    }
     if (app)
       await (await app.firstWindow())
         .screenshot({ path: join(out, "artifacts", "m05-06-link-app-failure.png"), fullPage: true })
