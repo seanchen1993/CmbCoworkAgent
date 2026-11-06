@@ -55,6 +55,7 @@ import {
   botPinDropTarget,
   botSidebarDropPatch,
   orderBotConversations,
+  filterImConversations,
   type BotSidebarDrag,
   type BotSidebarDrop
 } from "@/lib/bot-sidebar-view"
@@ -113,11 +114,9 @@ import { botWorkClient } from "@/lib/bot-work-client"
 import { useBotWorks } from "./use-bot-works"
 import { BotWorkPanel } from "./BotWorkPanel"
 import { BotImChannelDialog } from "./BotImChannelDialog"
-import {
-  BotImConversation,
-  BotImConversationDetails,
-  BotImConversationRows
-} from "./BotImConversation"
+import { BotImConversation, BotImConversationDetails } from "./BotImConversation"
+import { BotImConversationRows, SidebarTime } from "./BotImConversationRows"
+import { useHeldSidebarUnread, useStableSidebarOrder } from "./use-bot-sidebar-order"
 import { botChatAccent } from "@/lib/bot-chat-accent"
 import { BotWorkspaceMenu } from "./BotWorkspaceMenu"
 import { BotPanelDivider } from "./BotPanelDivider"
@@ -550,6 +549,11 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
   const view = useBotViewStore((state) => state.hosts[client.hostId] ?? DEFAULT_BOT_VIEW)
   const updateView = (patch: Partial<typeof view>) =>
     useBotViewStore.getState().update(client.hostId, patch)
+  const setImHistoryCollapsed = useCallback(
+    (imHistoryCollapsed: boolean) =>
+      useBotViewStore.getState().update(client.hostId, { imHistoryCollapsed }),
+    [client.hostId]
+  )
   const { groupId, showArchived, detailOpen, detailTab } = view
   // Old service routes are view preferences, never local Bot identities.
   const legacySelection =
@@ -570,6 +574,8 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
   const [query, setQuery] = useState("")
   const [showHidden, setShowHidden] = useState(false)
   const [suppressedRead, setSuppressedRead] = useState<string | null>(null)
+  const [sidebarScrolling, setSidebarScrolling] = useState(false)
+  const [sidebarMenuOpen, setSidebarMenuOpen] = useState(false)
   const sectionFocus = useRef(false)
   const [sectionEditor, setSectionEditor] = useState<{
     id?: string
@@ -814,19 +820,19 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
     [snapshot?.bots, showArchived, query, view.hiddenBotIds, showHidden]
   )
   const pinnedIds = view.pinnedBotIds ?? []
-  const visibleImConversations = showHidden
+  const botById = useMemo(
+    () => new Map((snapshot?.bots ?? []).map((bot) => [bot.id, bot])),
+    [snapshot?.bots]
+  )
+  const visibleImConversations = showArchived
     ? []
-    : (snapshot?.imConversations ?? []).filter((group) => {
-        const bot = snapshot?.bots.find((item) => item.id === group.botId)
-        return (
-          bot &&
-          !bot.deleting &&
-          bot.archived === showArchived &&
-          `${group.title} ${bot.name}`
-            .toLocaleLowerCase()
-            .includes(query.trim().toLocaleLowerCase())
-        )
-      })
+    : filterImConversations(
+        snapshot?.imConversations ?? [],
+        botById,
+        query,
+        view.hiddenImConversationIds,
+        showHidden
+      )
   const pinnedBots = pinnedIds.flatMap((id) => {
     const bot = visible.find((candidate) => candidate.id === id && !candidate.archived)
     return bot ? [bot] : []
@@ -860,6 +866,31 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
     }
     return result
   }, [mainActivityByConversation, snapshot?.workActivity])
+  const sidebarSelectionKey = newChat
+    ? null
+    : selectedIm
+      ? `im:${selectedIm.id}`
+      : selectedGroup
+        ? `group:${selectedGroup.id}`
+        : selected
+          ? `bot:${selected.id}`
+          : null
+  const heldUnread = useHeldSidebarUnread(
+    sidebarSelectionKey ? `${client.hostId}:${sidebarSelectionKey}` : null,
+    Boolean(sidebarSelectionKey && activityByConversation.get(sidebarSelectionKey)?.unread)
+  )
+  const sortingPaused = sidebarScrolling || sidebarMenuOpen || Boolean(sidebarDrag)
+  const orderedConversations = useStableSidebarOrder(
+    orderBotConversations(
+      snapshot?.bots ?? [],
+      snapshot?.groups ?? [],
+      activityByConversation,
+      heldUnread?.slice(client.hostId.length + 1)
+    ),
+    (item) => `${item.kind}:${item.value.id}`,
+    sortingPaused,
+    `${client.hostId}:${query}:${showHidden}:${showArchived}`
+  )
   const tasksByBot = useMemo(
     () => privateBotTasksByBot(snapshot?.bots ?? [], snapshot?.tasks ?? []),
     [snapshot?.bots, snapshot?.tasks]
@@ -1589,6 +1620,7 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
     return (
       <BotRowMenu
         key={`group:${group.id}`}
+        onMenuOpenChange={setSidebarMenuOpen}
         compact={view.sidebarWidth < 180}
         {...groupActions(group)}
         waiting={state === "waiting_user"}
@@ -1628,7 +1660,12 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
             userInitials={userInitials}
           />
           <span className={pinned ? "bot-pinned-name" : "min-w-0 flex-1"}>
-            <span className={pinned ? undefined : "bot-list-name"}>{group.name}</span>
+            <span className={pinned ? undefined : "bot-list-heading"}>
+              <span className={pinned ? undefined : "bot-list-name"}>{group.name}</span>
+              {!pinned && (
+                <SidebarTime value={activityByConversation.get(`group:${group.id}`)?.updatedAt} />
+              )}
+            </span>
             {!pinned && (
               <span className="bot-list-preview">
                 {state
@@ -1657,6 +1694,7 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
     return (
       <BotRowMenu
         key={bot.id}
+        onMenuOpenChange={setSidebarMenuOpen}
         compact={view.sidebarWidth < 180}
         {...rowActions(bot)}
         waiting={current === "waiting_user"}
@@ -1699,6 +1737,7 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
                   {bot.label}
                 </span>
               )}
+              <SidebarTime value={activity?.updatedAt} />
             </span>
             <span className="bot-list-preview">
               {current
@@ -1715,10 +1754,15 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
       </BotRowMenu>
     )
   }
-  const renderConversations = (bots: BotDefinition[], groups: BotGroup[]) =>
-    orderBotConversations(bots, groups, activityByConversation).map((item) =>
-      item.kind === "bot" ? renderBotRow(item.value) : renderGroupRow(item.value)
-    )
+  const renderConversations = (bots: BotDefinition[], groups: BotGroup[]) => {
+    const keys = new Set([
+      ...bots.map((bot) => `bot:${bot.id}`),
+      ...groups.map((group) => `group:${group.id}`)
+    ])
+    return orderedConversations
+      .filter((item) => keys.has(`${item.kind}:${item.value.id}`))
+      .map((item) => (item.kind === "bot" ? renderBotRow(item.value) : renderGroupRow(item.value)))
+  }
   const sidebarCollapsed = clampBotPanelWidth("sidebar", view.sidebarWidth) < 180
   const footerActions = [
     <BotWorkspaceMenu
@@ -1827,7 +1871,7 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
             >
               <Search size={19} />
             </button>
-            <ContextMenu>
+            <ContextMenu onOpenChange={setSidebarMenuOpen}>
               <ContextMenuTrigger asChild>
                 <button
                   ref={newConversationTrigger}
@@ -1912,7 +1956,10 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
               <span>操作</span>
             </button>
           )}
-          <BotConversationList label={showArchived ? "已归档 Bot" : "Bot 会话"}>
+          <BotConversationList
+            label={showArchived ? "已归档 Bot" : "Bot 会话"}
+            onScrolling={setSidebarScrolling}
+          >
             {(pinnedConversations.length > 0 ||
               (sidebarDragging && sidebarDragging.kind !== "section")) && (
               <div
@@ -1933,6 +1980,7 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
                   )
                   return (
                     <BotRowMenu
+                      onMenuOpenChange={setSidebarMenuOpen}
                       key={`bot:${bot.id}`}
                       compact={view.sidebarWidth < 180}
                       {...rowActions(bot)}
@@ -2023,7 +2071,7 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
                       }}
                     />
                   ) : (
-                    <ContextMenu>
+                    <ContextMenu onOpenChange={setSidebarMenuOpen}>
                       <ContextMenuTrigger asChild>
                         <button
                           draggable
@@ -2140,12 +2188,47 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
                     !sections.some((section) => section.groupIds?.includes(group.id)))
               )
             )}
-            {!showHidden && (
+            {!showArchived && (
               <BotImConversationRows
+                hostId={client.hostId}
                 conversations={visibleImConversations}
                 bots={snapshot?.bots ?? []}
+                tasks={snapshot?.tasks}
+                backgroundThreads={snapshot?.backgroundThreads}
+                threadSummaries={threadSummaries}
                 selectedId={newChat ? null : selectedIm?.id}
+                pinnedIds={view.pinnedImConversationIds}
+                hiddenIds={view.hiddenImConversationIds}
+                historyCollapsed={view.imHistoryCollapsed}
+                query={query}
+                showHidden={showHidden}
+                sortingPaused={sortingPaused}
                 onSelect={openImConversation}
+                onMenuOpenChange={setSidebarMenuOpen}
+                onHistoryCollapsed={setImHistoryCollapsed}
+                onPin={(id) => {
+                  const prefs = useBotViewStore.getState().hosts[client.hostId]
+                  const pins = prefs?.pinnedImConversationIds ?? []
+                  updateView({
+                    pinnedImConversationIds: pins.includes(id)
+                      ? pins.filter((item) => item !== id)
+                      : [...pins, id]
+                  })
+                }}
+                onRead={(group) => {
+                  void client
+                    .markRead("im", group.id, group.activity.version)
+                    .catch((cause) => toast.error(botErrorMessage(cause)))
+                }}
+                onVisibility={(id) => {
+                  const hidden =
+                    useBotViewStore.getState().hosts[client.hostId]?.hiddenImConversationIds ?? []
+                  updateView({
+                    hiddenImConversationIds: hidden.includes(id)
+                      ? hidden.filter((item) => item !== id)
+                      : [...hidden, id]
+                  })
+                }}
               />
             )}
             {!snapshot && !error && <Loader2 className="mx-auto mt-12 size-5 animate-spin" />}
@@ -2382,7 +2465,9 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
                   bots={snapshot?.bots ?? []}
                   schedules={snapshot?.schedules ?? []}
                   tasks={tasks}
-                  collaborationPending={Boolean(snapshot?.collaborationThreads?.includes(selectedThreadId))}
+                  collaborationPending={Boolean(
+                    snapshot?.collaborationThreads?.includes(selectedThreadId)
+                  )}
                   backgroundBusy={Boolean(
                     snapshot?.backgroundThreads?.includes(selectedThreadId) ||
                     threadSummaries[selectedThreadId]?.workflowRunning ||

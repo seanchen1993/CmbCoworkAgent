@@ -2,6 +2,7 @@ import { BotDeliveredFile } from "./BotDeliveredFile"
 import { useEffect, useLayoutEffect, useRef, useState } from "react"
 import {
   ArrowLeft,
+  ArrowDown,
   ArrowUpRight,
   ChevronRight,
   Loader2,
@@ -42,6 +43,7 @@ import { BotConversationTools } from "./BotConversationTools"
 import { BotMessageFilePreview } from "./BotMessageFilePreview"
 import { BotExecutionDetailsToggle } from "./BotExecutionDetailsToggle"
 import { useBotViewStore } from "./view-store"
+import { useThreadStateSelector } from "@/lib/thread-context"
 import "./bot-im-conversation.css"
 
 const stateLabels: Record<string, string> = {
@@ -57,7 +59,7 @@ const stateLabels: Record<string, string> = {
   unknown: "送达待核对",
   outcome_unknown: "结果待核对"
 }
-export const imConversationStatus = (value: Conversation) =>
+const imConversationStatus = (value: Conversation) =>
   value.state === "revoked" ? "已解除接入" : value.connected ? "已连接招乎" : "离线 · 保留本地记录"
 
 function GroupAvatar({ small = false }: { small?: boolean }) {
@@ -65,48 +67,6 @@ function GroupAvatar({ small = false }: { small?: boolean }) {
     <span className="bot-im-avatar" data-small={small}>
       <UsersRound size={small ? 19 : 30} strokeWidth={1.6} />
     </span>
-  )
-}
-
-export function BotImConversationRows({
-  conversations,
-  bots,
-  selectedId,
-  onSelect
-}: {
-  conversations: Conversation[]
-  bots: BotDefinition[]
-  selectedId?: string | null
-  onSelect(id: string): void
-}) {
-  if (!conversations.length) return null
-  return (
-    <section className="bot-im-list" aria-label="招乎群聊">
-      <h3>招乎群聊</h3>
-      {conversations.map((group) => (
-        <button
-          key={group.id}
-          className="bot-list-item"
-          data-selected={selectedId === group.id}
-          aria-label={`招乎群聊：${group.title}`}
-          data-bot-row-key={`im:${group.id}`}
-          data-bot-unread-count={group.activity.unread ? 1 : 0}
-          onClick={() => onSelect(group.id)}
-          title={group.title}
-        >
-          <GroupAvatar small />
-          <span className="bot-im-row-copy">
-            <span className="bot-im-row-title">{group.title}</span>
-            <span className="bot-list-preview">{group.activity.preview || "尚无群消息"}</span>
-            <span className="bot-im-row-caption">
-              {bots.find((bot) => bot.id === group.botId)?.name}
-              {group.state === "revoked" ? " · 已解除" : !group.connected ? " · 离线" : ""}
-            </span>
-          </span>
-          {group.activity.unread && <span className="bot-unread-dot" aria-label="群聊有未读消息" />}
-        </button>
-      ))}
-    </section>
   )
 }
 
@@ -141,6 +101,11 @@ export function BotImConversation({
     Boolean(state.hosts[client.hostId]?.showExecutionDetails)
   )
   const executionThreadId = showExecutionDetails ? conversation.threadId : undefined
+  const executionReady = useThreadStateSelector(
+    executionThreadId ?? null,
+    (state) =>
+      !state.historyLoading && !state.dehydrated && state.historyConversationPresence !== "unknown"
+  )
   const [stopping, setStopping] = useState(false)
   const [controlError, setControlError] = useState<string | null>(null)
   const groupTasks = tasks.filter(
@@ -178,6 +143,7 @@ export function BotImConversation({
   const [gap, setGap] = useState(false)
   const [retry, setRetry] = useState(0)
   const [presented, setPresented] = useState<BotConversationActivity>()
+  const [latestVisible, setLatestVisible] = useState(true)
   const windowRef = useRef<{ items: BotMockFeedEntry[]; before: string | null }>({
     items: [],
     before: null
@@ -245,6 +211,7 @@ export function BotImConversation({
           if (!next.overlap) {
             setGap(true)
             atBottom.current = true
+            setLatestVisible(true)
           }
           setPresented(conversation.activity)
         },
@@ -258,7 +225,11 @@ export function BotImConversation({
   }, [client, bot.id, conversation.id, revision, retry, executionThreadId])
   // Execution details use the native thread instead of loading the IM feed.
   // Acknowledge this selected group in either view, with the same focus/version guards.
-  useBotReadState(client, executionThreadId ? conversation.activity : presented)
+  useBotReadState(
+    client,
+    executionThreadId ? conversation.activity : presented,
+    executionThreadId ? executionReady === true : latestVisible
+  )
   useLayoutEffect(() => {
     const node = scroll.current
     if (!node || executionThreadId) return
@@ -331,7 +302,10 @@ export function BotImConversation({
       </header>
       <div className="bot-im-context">
         <span>
-          <span className="bot-im-connection-dot" data-online={conversation.connected} />
+          <span
+            className="bot-im-connection-dot"
+            data-online={conversation.state === "active" && conversation.connected}
+          />
           {imConversationStatus(conversation)}
         </span>
         <button onClick={onManage} aria-label="管理群接入">
@@ -390,6 +364,7 @@ export function BotImConversation({
           const node = scroll.current
           if (node && !executionThreadId) {
             atBottom.current = node.scrollHeight - node.scrollTop - node.clientHeight < 100
+            setLatestVisible(atBottom.current)
             scrollTop.current = node.scrollTop
           }
         }}
@@ -516,6 +491,20 @@ export function BotImConversation({
           )
         })}
       </div>
+      {!executionThreadId && !latestVisible && conversation.activity.unread && (
+        <button
+          className="bot-im-new-messages"
+          onClick={() => {
+            const node = scroll.current
+            if (node) node.scrollTop = node.scrollHeight
+            atBottom.current = true
+            setLatestVisible(true)
+          }}
+        >
+          <ArrowDown size={14} />
+          查看新消息
+        </button>
+      )}
       {(activeTasks.length > 0 || backgroundBusy) && (
         <div className="bot-im-execution-bar" role="status">
           <span>

@@ -4,6 +4,7 @@ import type {
   BotConversationActivity
 } from "../../../shared/bots/contracts"
 import type { BotViewState } from "../components/bots/view-store"
+import type { BotImConversation } from "../../../shared/bots/im-channel"
 
 type Conversation = { kind: "bot"; value: BotDefinition } | { kind: "group"; value: BotGroup }
 
@@ -19,18 +20,88 @@ export function botSidebarPreview(preview: string, draft: string, waiting: boole
 export function orderBotConversations(
   bots: readonly BotDefinition[],
   groups: readonly BotGroup[],
-  activities: ReadonlyMap<string, BotConversationActivity>
+  activities: ReadonlyMap<string, BotConversationActivity>,
+  heldUnreadKey?: string | null
 ): Conversation[] {
   const conversations: Conversation[] = [
     ...bots.map((value) => ({ kind: "bot" as const, value })),
     ...groups.map((value) => ({ kind: "group" as const, value }))
   ]
+  const key = (item: Conversation) => `${item.kind}:${item.value.id}`
+  const unread = (item: Conversation) =>
+    Number(Boolean(activities.get(key(item))?.unread || heldUnreadKey === key(item)))
   const time = (item: Conversation) =>
-    activities.get(`${item.kind}:${item.value.id}`)?.updatedAt ??
-    (item.kind === "bot" ? item.value.createdAt : 0)
+    activities.get(key(item))?.updatedAt ?? (item.kind === "bot" ? item.value.createdAt : 0)
   return conversations.sort(
+    (a, b) => unread(b) - unread(a) || time(b) - time(a) || key(a).localeCompare(key(b))
+  )
+}
+
+/** Binding identity, never the title, owns pins, read state and retained history. */
+export function orderImConversations(
+  conversations: readonly BotImConversation[],
+  pinnedIds: readonly string[] = [],
+  heldUnreadKey?: string | null
+) {
+  const pins = new Map(pinnedIds.map((id, index) => [id, index]))
+  const active = conversations.filter((item) => item.state === "active")
+  const history = conversations.filter((item) => item.state === "revoked")
+  const recent = (a: BotImConversation, b: BotImConversation) =>
+    b.activity.updatedAt - a.activity.updatedAt || a.id.localeCompare(b.id)
+  active.sort((a, b) => {
+    const pa = pins.get(a.id),
+      pb = pins.get(b.id)
+    if (pa !== undefined || pb !== undefined)
+      return (pa ?? Number.MAX_SAFE_INTEGER) - (pb ?? Number.MAX_SAFE_INTEGER)
+    return (
+      Number(b.activity.unread || heldUnreadKey === `im:${b.id}`) -
+        Number(a.activity.unread || heldUnreadKey === `im:${a.id}`) || recent(a, b)
+    )
+  })
+  history.sort(recent)
+  return { active, history }
+}
+
+/** List metadata is already bounded; no transcript fetches for sorting or search. */
+export function filterImConversations(
+  conversations: readonly BotImConversation[],
+  bots: ReadonlyMap<string, BotDefinition>,
+  query: string,
+  hiddenIds: readonly string[] = [],
+  showHidden = false
+) {
+  const search = query.trim().toLocaleLowerCase(),
+    hidden = new Set(hiddenIds)
+  return conversations.filter(
+    (item) =>
+      (search || hidden.has(item.id) === showHidden) &&
+      `${item.title} ${bots.get(item.botId)?.name ?? ""}`.toLocaleLowerCase().includes(search)
+  )
+}
+
+export function botSidebarTime(value: number | undefined, now = Date.now()): string {
+  if (!value || !Number.isFinite(value)) return ""
+  const date = new Date(value),
+    today = new Date(now),
+    yesterday = new Date(now)
+  if (!Number.isFinite(date.getTime())) return ""
+  yesterday.setDate(today.getDate() - 1)
+  if (date.toDateString() === today.toDateString())
+    return date.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false })
+  if (date.toDateString() === yesterday.toDateString()) return "昨天"
+  return `${date.getFullYear() === today.getFullYear() ? "" : `${date.getFullYear()}/`}${date.getMonth() + 1}/${date.getDate()}`
+}
+
+/** Keep existing rows under the pointer while a list interaction is in progress. */
+export function retainSidebarOrder<T>(
+  items: readonly T[],
+  previous: readonly string[],
+  key: (item: T) => string
+): T[] {
+  const rank = new Map(previous.map((id, index) => [id, index]))
+  return [...items].sort(
     (a, b) =>
-      time(b) - time(a) || `${a.kind}:${a.value.id}`.localeCompare(`${b.kind}:${b.value.id}`)
+      (rank.get(key(a)) ?? Number.MAX_SAFE_INTEGER) - (rank.get(key(b)) ?? Number.MAX_SAFE_INTEGER)
   )
 }
 

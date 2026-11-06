@@ -50,6 +50,9 @@ export interface BotViewState {
   hiddenBotIds: string[]
   pinnedGroupIds: string[]
   hiddenGroupIds: string[]
+  pinnedImConversationIds?: string[]
+  hiddenImConversationIds?: string[]
+  imHistoryCollapsed?: boolean
   sections: BotSidebarSection[]
 }
 export const DEFAULT_BOT_VIEW: BotViewState = {
@@ -70,6 +73,9 @@ export const DEFAULT_BOT_VIEW: BotViewState = {
   hiddenBotIds: [],
   pinnedGroupIds: [],
   hiddenGroupIds: [],
+  pinnedImConversationIds: [],
+  hiddenImConversationIds: [],
+  imHistoryCollapsed: true,
   sections: []
 }
 // Leaves room for the native macOS traffic lights, including their hit targets.

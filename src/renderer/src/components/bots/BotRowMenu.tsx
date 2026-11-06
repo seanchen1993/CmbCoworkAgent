@@ -49,7 +49,8 @@ export function BotRowMenu({
   onReadState,
   sections,
   onMove,
-  onNewSection
+  onNewSection,
+  onMenuOpenChange
 }: {
   bot: Pick<BotDefinition, "id" | "name" | "deleting"> & { archived?: boolean }
   kind?: "bot" | "group"
@@ -72,6 +73,7 @@ export function BotRowMenu({
   onArchive?(): void
   onDelete(trigger: HTMLElement | null): void
   onCopy(): void
+  onMenuOpenChange?(open: boolean): void
 }) {
   const inlineFocus = useRef(false)
   const trigger = useRef<HTMLSpanElement>(null)
@@ -81,7 +83,12 @@ export function BotRowMenu({
       delayDuration={250}
       open={(compact || (pinned && !bot.archived)) && !menuOpen ? undefined : false}
     >
-      <ContextMenu onOpenChange={setMenuOpen}>
+      <ContextMenu
+        onOpenChange={(open) => {
+          setMenuOpen(open)
+          onMenuOpenChange?.(open)
+        }}
+      >
         <ContextMenuTrigger asChild ref={trigger}>
           <TooltipTrigger asChild>{children}</TooltipTrigger>
         </ContextMenuTrigger>

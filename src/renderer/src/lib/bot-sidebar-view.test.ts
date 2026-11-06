@@ -9,8 +9,13 @@ import {
   botPinnedConversationIds,
   botSidebarDropPatch,
   botPinDropTarget,
-  orderBotConversations
+  orderBotConversations,
+  orderImConversations,
+  filterImConversations,
+  retainSidebarOrder,
+  botSidebarTime
 } from "./bot-sidebar-view"
+import type { BotImConversation } from "../../../shared/bots/im-channel"
 import type { BotViewState } from "../components/bots/view-store"
 
 it("prioritizes pending questions over drafts and drafts over history, with bounded Unicode previews", () => {
@@ -26,7 +31,7 @@ it("prioritizes pending questions over drafts and drafts over history, with boun
   expect(botSidebarPreview("😀".repeat(141), "", false).text).toBe("😀".repeat(140) + "…")
 })
 
-it("mixes groups and Bots by actual activity without moving a chat just because it was renamed or marked unread", () => {
+it("mixes groups and Bots with unread first, retaining the selected tier until leaving and ignoring rename/version clocks", () => {
   const bot = { id: "a", createdAt: 10, updatedAt: 900 } as BotDefinition
   const group = { id: "g" } as BotGroup
   const activity = (
@@ -46,6 +51,14 @@ it("mixes groups and Bots by actual activity without moving a chat just because 
   ])
   activities.set("bot:a", { ...activities.get("bot:a")!, unread: true, version: 100 })
   expect(orderBotConversations(bots, groups, activities).map((item) => item.value.id)).toEqual([
+    "a",
+    "g"
+  ])
+  activities.set("bot:a", activity("bot", "a", 20))
+  expect(
+    orderBotConversations(bots, groups, activities, "bot:a").map((item) => item.value.id)
+  ).toEqual(["a", "g"])
+  expect(orderBotConversations(bots, groups, activities).map((item) => item.value.id)).toEqual([
     "g",
     "a"
   ])
@@ -56,6 +69,90 @@ it("mixes groups and Bots by actual activity without moving a chat just because 
   ])
   expect(bots).toEqual([bot])
   expect(groups).toEqual([group])
+})
+
+const im = (
+  id: string,
+  time: number,
+  unread = false,
+  state: "active" | "revoked" = "active"
+): BotImConversation => ({
+  id,
+  botId: "bot",
+  bindingId: `remote-${id}`,
+  title: "同名群聊",
+  state,
+  connected: false,
+  activity: { kind: "im", id, version: 1, updatedAt: time, preview: "", unread }
+})
+
+it("keeps manual pins first, then unread and recent groups; revoked pins always go to history", () => {
+  const rooms = [
+    im("recent", 100),
+    im("old-unread", 20, true),
+    im("new-unread", 30, true),
+    im("pin-a", 2),
+    im("pin-b", 1),
+    im("revoked", 200, true, "revoked")
+  ]
+  const { active, history } = orderImConversations(rooms, ["revoked", "pin-b", "missing", "pin-a"])
+  expect(active.map((room) => room.id)).toEqual([
+    "pin-b",
+    "pin-a",
+    "new-unread",
+    "old-unread",
+    "recent"
+  ])
+  expect(history.map((room) => room.id)).toEqual(["revoked"])
+  expect(active.every((room) => !room.connected)).toBe(true) // offline is not unbound
+  expect(orderImConversations([im("z", 1), im("a", 1)]).active.map((room) => room.id)).toEqual([
+    "a",
+    "z"
+  ])
+  expect(rooms[0].id).toBe("recent")
+})
+
+it("holds the selected unread tier without fabricating unread and keeps separate binding identities", () => {
+  const old = im("old", 1, false, "revoked"),
+    rebound = im("new", 2)
+  expect(
+    orderImConversations([old, rebound, im("newer", 3)], [], "im:new").active.map((room) => room.id)
+  ).toEqual(["new", "newer"])
+  expect(rebound.activity.unread).toBe(false)
+  expect(orderImConversations([old, rebound]).history.map((room) => room.id)).toEqual(["old"])
+})
+
+it("searches retained/hidden groups by group or Bot name, even when the serving Bot is archived", () => {
+  const bots = new Map([["bot", { name: "项目助手", archived: true } as BotDefinition]])
+  const rooms = [im("live", 2), im("history", 1, false, "revoked")]
+  expect(filterImConversations(rooms, bots, "", ["history"]).map((item) => item.id)).toEqual([
+    "live"
+  ])
+  expect(filterImConversations(rooms, bots, "", ["history"], true).map((item) => item.id)).toEqual([
+    "history"
+  ])
+  expect(
+    filterImConversations(rooms, bots, "项目助手", ["history"]).map((item) => item.id)
+  ).toEqual(["live", "history"])
+  expect(filterImConversations(rooms, bots, "同名群聊", ["history"])).toHaveLength(2)
+  expect(filterImConversations(rooms, bots, "无匹配")).toHaveLength(0)
+})
+
+it("defers reorder during interaction, drops removed rows and appends new rows without duplicates", () => {
+  expect(retainSidebarOrder(["new", "b", "a"], ["a", "gone", "b"], (id) => id)).toEqual([
+    "a",
+    "b",
+    "new"
+  ])
+})
+
+it("shows bounded local calendar times instead of heartbeat or relative-second churn", () => {
+  const now = new Date(2026, 10, 6, 14, 20).getTime()
+  expect(botSidebarTime(new Date(2026, 10, 6, 9, 5).getTime(), now)).toBe("09:05")
+  expect(botSidebarTime(new Date(2026, 10, 5, 23, 50).getTime(), now)).toBe("昨天")
+  expect(botSidebarTime(new Date(2026, 9, 10).getTime(), now)).toBe("10/10")
+  expect(botSidebarTime(new Date(2025, 9, 10).getTime(), now)).toBe("2025/10/10")
+  expect(botSidebarTime(undefined, now)).toBe("")
 })
 
 const sidebarView = (): BotViewState => ({

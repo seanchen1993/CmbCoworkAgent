@@ -3,9 +3,13 @@ import { toast } from "sonner"
 import type { BotClient, BotConversationActivity } from "../../../../shared/bots/contracts"
 
 /** Acknowledge only the version actually presented in a visible, focused conversation. */
-export function useBotReadState(client: BotClient, activity: BotConversationActivity | undefined) {
+export function useBotReadState(
+  client: BotClient,
+  activity: BotConversationActivity | undefined,
+  presented = true
+) {
   useEffect(() => {
-    if (!activity?.unread) return
+    if (!activity?.unread || !presented) return
     let disposed = false,
       pending = false,
       acknowledged = false
@@ -34,5 +38,5 @@ export function useBotReadState(client: BotClient, activity: BotConversationActi
       window.removeEventListener("focus", acknowledge)
       document.removeEventListener("visibilitychange", acknowledge)
     }
-  }, [client, activity?.kind, activity?.id, activity?.version, activity?.unread])
+  }, [client, activity?.kind, activity?.id, activity?.version, activity?.unread, presented])
 }

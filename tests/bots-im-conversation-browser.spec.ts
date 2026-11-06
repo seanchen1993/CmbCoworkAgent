@@ -90,6 +90,7 @@ async function main() {
                 if (
                   [
                     "./BotImConversation",
+                    "./BotImConversationRows",
                     "./BotDeliveredFile",
                     "./BotBrowserPanel",
                     "./BotSchedulePanel",
@@ -115,7 +116,7 @@ async function main() {
               if (a.path === "@/lib/store")
                 contents = `const state={models:[],threads:[],mainView:'bots',showCustomizeView:false,loadThreads:()=>{}};export const useAppStore=Object.assign(selector=>selector(state),{getState:()=>state});`
               else if (a.path === "@/lib/thread-context")
-                contents = `const state={messages:[],draftInput:'',draftAttachments:[],queuedMessages:[],pendingApprovals:[],coordinatorWorkers:[]};const context={initializeThread:()=>{},getThreadState:()=>state,getStreamData:()=>({isLoading:false,liveMessages:[]}),getThreadActions:()=>({setDraftInput:()=>{},setDraftAttachments:()=>{}}),subscribeToThreadState:()=>()=>{},subscribeToStream:()=>()=>{}};export const useThreadContext=()=>context;export const useThreadStateSummaries=()=>({});`
+                contents = `const state={messages:[],draftInput:'',draftAttachments:[],queuedMessages:[],pendingApprovals:[],coordinatorWorkers:[]};const context={initializeThread:()=>{},getThreadState:()=>state,getStreamData:()=>({isLoading:false,liveMessages:[]}),getThreadActions:()=>({setDraftInput:()=>{},setDraftAttachments:()=>{}}),subscribeToThreadState:()=>()=>{},subscribeToStream:()=>()=>{}};export const useThreadContext=()=>context;export const useThreadStateSummaries=()=>({});export const useThreadStateSelector=(id,selector)=>id?selector({...state,historyLoading:window.fixture.executionReady===false,historyConversationPresence:window.fixture.executionReady===false?"unknown":"nonempty"}):null;`
               else if (a.path === "@/components/chat/ChatContainer")
                 contents = `export const ChatContainer=({threadId,readOnlyReason})=><div data-testid="native-execution" data-thread={threadId}>{readOnlyReason}</div>;`
               else if (a.path === "./BotConversationTools")
@@ -207,6 +208,15 @@ async function main() {
     const unread = (id: string) => page.locator(`[data-bot-row-key="im:${id}"] .bot-unread-dot`)
     await unread("group-a").waitFor({ state: "detached" })
     assert.equal(await unread("group-b").count(), 1)
+    const imOrder = () =>
+      page
+        .locator('.bot-im-list [data-bot-row-key^="im:group-"]')
+        .evaluateAll((rows) => rows.map((row) => row.getAttribute("data-bot-row-key")))
+    assert.deepEqual(
+      await imOrder(),
+      ["im:group-a", "im:group-b"],
+      "Reading the selected row clears its dot without immediately moving it"
+    )
     const artifacts = join(process.env.BOT_TEST_APP_OUT!, "artifacts")
     assert.equal(await page.getByRole("button", { name: "执行详情", exact: true }).count(), 0)
     await page.getByRole("button", { name: "查看执行过程", exact: true }).click()
@@ -249,6 +259,21 @@ async function main() {
       0,
       "Execution details must not load a second copy of the IM history just to mark it read"
     )
+    // Native execution details wait for their own history, without fetching the IM feed twice.
+    await page.evaluate(() => {
+      const f = (window as any).fixture
+      f.executionReady = false
+      f.groups[1].activity.version++
+      f.groups[1].activity.unread = true
+      f.bump()
+    })
+    await unread("group-b").waitFor({ state: "visible" })
+    await page.evaluate(() => {
+      const f = (window as any).fixture
+      f.executionReady = true
+      f.bump()
+    })
+    await unread("group-b").waitFor({ state: "detached" })
     // Background updates stay unread until the window regains focus.
     await page.evaluate(() => {
       Object.defineProperty(document, "hasFocus", {
@@ -264,7 +289,7 @@ async function main() {
     assert.equal(
       await page.evaluate(() =>
         (window as any).fixture.reads.some(
-          ([kind, id, version]: any[]) => kind === "im" && id === "group-b" && version === 4
+          ([kind, id, version]: any[]) => kind === "im" && id === "group-b" && version === 5
         )
       ),
       false
@@ -392,6 +417,17 @@ async function main() {
     assert.equal(await page.getByRole("button", { name: "查看更早消息", exact: true }).count(), 0)
     await page.getByRole("button", { name: "查看独立任务", exact: true }).click()
     await page.getByTestId("private-conversation").getByText("任务对话：演示准备清单").waitFor()
+    await page.evaluate(() => {
+      const f = (window as any).fixture
+      f.groups[0].activity.version++
+      f.groups[0].activity.unread = true
+      f.bump()
+    })
+    await unread("group-a").waitFor({ state: "visible" })
+    assert.equal(
+      await page.locator('[data-bot-row-key="im:group-a"]').getAttribute("data-selected"),
+      "true"
+    )
     const details = page.getByLabel("招乎群详情", { exact: true })
     await details.getByRole("heading", { name: "群内任务" }).waitFor()
     await details.getByRole("button", { name: "返回群聊", exact: true }).waitFor()
@@ -413,6 +449,7 @@ async function main() {
     await details.getByRole("button", { name: "完成任务", exact: true }).waitFor()
     await page.getByRole("button", { name: "← 产品协作群", exact: true }).click()
     await page.getByLabel("产品协作群消息记录").waitFor()
+    await unread("group-a").waitFor({ state: "detached" })
     await details.getByRole("button", { name: "记忆", exact: true }).click()
     await details.getByText("团队写作格式", { exact: true }).waitFor()
     await details.getByText("演示约定", { exact: true }).waitFor()
@@ -501,14 +538,24 @@ async function main() {
     await page.evaluate(() => {
       const f = (window as any).fixture
       f.fail = true
+      f.groups[0].activity.version++
+      f.groups[0].activity.unread = true
       f.bump()
     })
     await page.getByRole("alert").getByText("本地记录读取失败", { exact: false }).waitFor()
+    assert.equal(
+      await unread("group-a").count(),
+      1,
+      "A failed refresh must not acknowledge an unseen version"
+    )
     await page.evaluate(() => {
       ;(window as any).fixture.fail = false
     })
     await page.getByRole("button", { name: "重试", exact: true }).click()
     await page.waitForFunction(() => !document.querySelector('.bot-im-transcript [role="alert"]'))
+    if (await page.getByRole("button", { name: "查看新消息", exact: true }).isVisible())
+      await page.getByRole("button", { name: "查看新消息", exact: true }).click()
+    await unread("group-a").waitFor({ state: "detached" })
     await page.evaluate(() => document.documentElement.classList.remove("dark"))
     await page.setViewportSize({ width: 1100, height: 820 })
     await page.screenshot({
@@ -523,33 +570,60 @@ async function main() {
     await page.evaluate(() => {
       const f = (window as any).fixture
       for (const [index, state] of ["sending", "sent", "failed", "unknown"].entries()) {
-        const file = {filePath: `/workspace/report-${index}.docx`, attachmentPath: `/workspace/.bot-deliveries/hash/report-${index}.docx`, name: `report-${index}.docx`, size: 28672}
-        f.latest.push({id:`attachment-${index}`,kind:"bot",text:"",senderId:"Bot",state,createdAt:Date.now()+index,
-          threadId:"im-a",files:[file],delivery:{id:`attachment-${index}`,file,state,progress:43}})
+        const file = {
+          filePath: `/workspace/report-${index}.docx`,
+          attachmentPath: `/workspace/.bot-deliveries/hash/report-${index}.docx`,
+          name: `report-${index}.docx`,
+          size: 28672
+        }
+        f.latest.push({
+          id: `attachment-${index}`,
+          kind: "bot",
+          text: "",
+          senderId: "Bot",
+          state,
+          createdAt: Date.now() + index,
+          threadId: "im-a",
+          files: [file],
+          delivery: { id: `attachment-${index}`, file, state, progress: 43 }
+        })
       }
       f.bump()
     })
-    await page.getByText("上传中 43%", {exact:true}).waitFor()
-    await page.getByText("已送达招乎", {exact:true}).waitFor()
-    await page.getByText("送达待核对 · 请查看招乎", {exact:true}).waitFor()
-    assert.equal(await page.getByRole("button", {name:/重试发送/}).count(),1)
-    await page.getByRole("button",{name:"重试发送 report-2.docx"}).scrollIntoViewIfNeeded()
-    await page.screenshot({animations:"disabled",path:join(artifacts,"bot-im-file-delivery.png")})
-    await page.getByRole("button",{name:"重试发送 report-2.docx"}).click()
-    await page.getByText("等待发送到招乎",{exact:true}).waitFor()
-    assert.equal(await page.getByRole("button", {name:/重试发送/}).count(),0)
-    assert.equal(await page.getByText("已送达招乎",{exact:true}).count(),1)
+    await page.getByText("上传中 43%", { exact: true }).waitFor()
+    await page.getByText("已送达招乎", { exact: true }).waitFor()
+    await page.getByText("送达待核对 · 请查看招乎", { exact: true }).waitFor()
+    assert.equal(await page.getByRole("button", { name: /重试发送/ }).count(), 1)
+    await page.getByRole("button", { name: "重试发送 report-2.docx" }).scrollIntoViewIfNeeded()
+    await page.screenshot({
+      animations: "disabled",
+      path: join(artifacts, "bot-im-file-delivery.png")
+    })
+    await page.getByRole("button", { name: "重试发送 report-2.docx" }).click()
+    await page.getByText("等待发送到招乎", { exact: true }).waitFor()
+    assert.equal(await page.getByRole("button", { name: /重试发送/ }).count(), 0)
+    assert.equal(await page.getByText("已送达招乎", { exact: true }).count(), 1)
     // A task card in the group feed must retain its task identity for native export.
     await page.evaluate(() => {
       const f = (window as any).fixture
       const file = {
         filePath: "/selected-project/任务报告.xlsx",
         attachmentPath: "/selected-project/.bot-deliveries/hash/任务报告.xlsx",
-        name: "任务报告.xlsx", size: 1024
+        name: "任务报告.xlsx",
+        size: 1024
       }
-      f.latest.push({ id: "task-attachment", kind: "bot", text: "", senderId: "Bot",
-        state: "sent", createdAt: Date.now() + 10, workId: "work-a", threadId: "task-a",
-        files: [file], delivery: { id: "task-attachment", file, state: "sent", progress: 100 } })
+      f.latest.push({
+        id: "task-attachment",
+        kind: "bot",
+        text: "",
+        senderId: "Bot",
+        state: "sent",
+        createdAt: Date.now() + 10,
+        workId: "work-a",
+        threadId: "task-a",
+        files: [file],
+        delivery: { id: "task-attachment", file, state: "sent", progress: 100 }
+      })
       f.bump()
     })
     await page.getByRole("button", { name: "保存 任务报告.xlsx", exact: true }).click()
@@ -558,11 +632,261 @@ async function main() {
     ])
     await page.getByRole("button", { name: "保存 report-1.docx", exact: true }).click()
     assert.deepEqual(await page.evaluate(() => (window as any).fixture.exported[1]), [
-      "bot", "group-a", "/workspace/.bot-deliveries/hash/report-1.docx", undefined
+      "bot",
+      "group-a",
+      "/workspace/.bot-deliveries/hash/report-1.docx",
+      undefined
     ])
-    await page.getByRole("button",{name:"招乎群聊：体验优化小组",exact:true}).click()
-    await page.getByText("接入已解除，历史消息仍可查看",{exact:true}).waitFor()
-    assert.equal(await page.locator(".bot-delivered-file").count(),0)
+    await page.getByRole("button", { name: "招乎群聊：体验优化小组", exact: true }).click()
+    await page.getByText("接入已解除，历史消息仍可查看", { exact: true }).waitFor()
+    assert.equal(await page.locator(".bot-delivered-file").count(), 0)
+
+    // Real sidebar controls: pin order, unread priority, retained selection and history.
+    await page.evaluate(() => {
+      const f = (window as any).fixture,
+        now = Date.now()
+      f.setView({
+        selectedId: "bot",
+        imConversationId: null,
+        imHistoryCollapsed: true,
+        pinnedImConversationIds: [],
+        hiddenImConversationIds: [],
+        sidebarWidth: 280
+      })
+      f.tasks = []
+      f.backgroundThreads = []
+      Object.assign(f.groups[0], { state: "active", connected: true })
+      Object.assign(f.groups[0].activity, { unread: false, updatedAt: now - 60000 })
+      Object.assign(f.groups[1], { state: "active" }) // offline still belongs in active list
+      Object.assign(f.groups[1].activity, { unread: true, updatedAt: now - 180000, version: 20 })
+      f.groups.push({
+        ...f.groups[0],
+        id: "group-c",
+        bindingId: "remote-c",
+        threadId: "im-c",
+        title: "需求评审群",
+        activity: {
+          kind: "im",
+          id: "group-c",
+          version: 20,
+          unread: true,
+          updatedAt: now - 120000,
+          preview: "请确认本次演示范围。"
+        }
+      })
+      f.groups.push({
+        ...f.groups[0],
+        id: "group-old",
+        bindingId: "remote-old",
+        threadId: "im-old",
+        state: "revoked",
+        activity: {
+          kind: "im",
+          id: "group-old",
+          version: 1,
+          unread: false,
+          updatedAt: now,
+          preview: "历史接入记录"
+        }
+      })
+      f.bump()
+    })
+    const waitOrder = async (ids: string[]) =>
+      page
+        .waitForFunction((expected) => {
+          const actual = [
+            ...document.querySelectorAll('.bot-im-list [data-bot-row-key^="im:group-"]')
+          ].map((row) => row.getAttribute("data-bot-row-key"))
+          return JSON.stringify(actual) === JSON.stringify(expected.map((id) => `im:${id}`))
+        }, ids)
+        .catch(async (error) => {
+          console.error("Sidebar order mismatch", {
+            expected: ids,
+            actual: await imOrder(),
+            history: await page.locator(".bot-im-history-toggle").getAttribute("aria-expanded")
+          })
+          await page.screenshot({ path: join(artifacts, "bot-sidebar-failure.png") })
+          throw error
+        })
+    await waitOrder(["group-c", "group-b", "group-a"])
+    assert.equal(
+      await page
+        .getByRole("button", { name: "已解绑 · 1", exact: true })
+        .getAttribute("aria-expanded"),
+      "false"
+    )
+    await page.locator('[data-bot-row-key="im:group-a"]').hover()
+    await page.getByRole("button", { name: "产品协作群 的操作", exact: true }).click()
+    await page.getByRole("menuitem", { name: "置顶", exact: true }).click()
+    await waitOrder(["group-a", "group-c", "group-b"])
+    await page.locator('[data-bot-row-key="im:group-c"]').click()
+    await unread("group-c").waitFor({ state: "detached" })
+    await waitOrder(["group-a", "group-c", "group-b"])
+    await page.getByRole("button", { name: "返回 Bot 主对话", exact: true }).click()
+    await waitOrder(["group-a", "group-b", "group-c"])
+    // Marking read is local view state and does not open or execute a group.
+    await page.locator('[data-bot-row-key="im:group-b"]').click({ button: "right" })
+    await page.evaluate(() => {
+      const f = (window as any).fixture
+      f.groups[2].activity.version++
+      f.groups[2].activity.unread = true
+      f.bump()
+    })
+    await unread("group-c").waitFor({ state: "visible" })
+    assert.deepEqual(
+      await imOrder(),
+      ["im:group-a", "im:group-b", "im:group-c"],
+      "A new message must not reorder rows under an open menu"
+    )
+    await page.getByRole("menuitem", { name: "标为已读", exact: true }).click()
+    await unread("group-b").waitFor({ state: "detached" })
+    await waitOrder(["group-a", "group-c", "group-b"])
+    await page.getByTestId("private-conversation").waitFor()
+    // An explicit user question remains pending after its blue dot clears.
+    await page.evaluate(() => {
+      const f = (window as any).fixture
+      f.tasks = [
+        {
+          id: "question-c",
+          botId: "bot",
+          threadId: "im-c",
+          state: "waiting_user",
+          createdAt: 1,
+          updatedAt: 1,
+          origin: { kind: "mock" },
+          mockSource: { transport: "im", bindingId: "group-c" }
+        }
+      ]
+      f.groups[2].activity.version++
+      f.groups[2].activity.unread = true
+      f.bump()
+    })
+    await page.locator('[data-bot-row-key="im:group-c"]').click()
+    await unread("group-c").waitFor({ state: "detached" })
+    await page
+      .locator('[data-bot-row-key="im:group-c"] .bot-im-row-caption')
+      .getByText(/待你处理/)
+      .waitFor()
+    await page.screenshot({
+      animations: "disabled",
+      path: join(artifacts, "bot-sidebar-active.png")
+    })
+    // Revocation demotes even a pinned room, without removing its messages or merging same-name rooms.
+    await page.evaluate(() => {
+      const f = (window as any).fixture
+      f.groups[0].state = "revoked"
+      f.bump()
+    })
+    await waitOrder(["group-c", "group-b"])
+    await page.getByRole("button", { name: "已解绑 · 2", exact: true }).click()
+    await waitOrder(["group-c", "group-b", "group-old", "group-a"])
+    await page.locator('[data-bot-row-key="im:group-old"]').click({ button: "right" })
+    await page.getByRole("menuitem", { name: "从侧边栏隐藏", exact: true }).click()
+    await waitOrder(["group-c", "group-b", "group-a"])
+    await page.getByRole("button", { name: "搜索 Bot", exact: true }).click()
+    await page.getByRole("textbox", { name: "搜索 Bot", exact: true }).fill("产品协作群")
+    await waitOrder(["group-old", "group-a"])
+    await page.locator('[data-bot-row-key="im:group-old"]').click({ button: "right" })
+    await page.getByRole("menuitem", { name: "显示在侧边栏", exact: true }).click()
+    await page.getByRole("textbox", { name: "搜索 Bot", exact: true }).fill("招乎T")
+    await waitOrder(["group-c", "group-b", "group-old", "group-a"])
+    await page.getByRole("textbox", { name: "搜索 Bot", exact: true }).fill("")
+    await page.locator('[data-bot-row-key="im:group-a"]').click()
+    await page.getByText("接入已解除，历史消息仍可查看", { exact: true }).waitFor()
+    await page.getByRole("button", { name: "查看独立任务", exact: true }).first().click()
+    await page.getByTestId("private-conversation").getByText("任务对话：演示准备清单").waitFor()
+    await details.getByRole("button", { name: "返回群聊", exact: true }).click()
+    await page.getByLabel("产品协作群消息记录").waitFor()
+    assert.equal(
+      await page.locator('[data-bot-row-key="im:group-a"]').getAttribute("data-selected"),
+      "true"
+    )
+    await page.screenshot({
+      animations: "disabled",
+      path: join(artifacts, "bot-sidebar-history.png")
+    })
+    // While reading older messages, new content stays unread until explicitly revealed.
+    await page.getByLabel("产品协作群消息记录").evaluate((element) => {
+      element.scrollTop = 0
+      element.dispatchEvent(new Event("scroll"))
+    })
+    await page.evaluate(() => {
+      const f = (window as any).fixture
+      f.latest.push({
+        id: "new-at-bottom",
+        kind: "bot",
+        senderId: "Bot",
+        text: "新的交付已准备好。",
+        state: "sent",
+        createdAt: Date.now() + 1000
+      })
+      f.groups[0].activity.version++
+      f.groups[0].activity.unread = true
+      f.bump()
+    })
+    await page.getByRole("button", { name: "查看新消息", exact: true }).waitFor()
+    await page.getByText("新的交付已准备好。", { exact: true }).waitFor({ state: "attached" })
+    assert.equal(await unread("group-a").count(), 1)
+    await page.getByRole("button", { name: "查看新消息", exact: true }).click()
+    await unread("group-a").waitFor({ state: "detached" })
+    await page.getByText("新的交付已准备好。", { exact: true }).waitFor()
+    // Bot conversations above the IM section use the same read priority, within existing sections/pins.
+    await page.evaluate(() => {
+      const f = (window as any).fixture,
+        now = Date.now()
+      f.bots.push(
+        { ...f.bots[0], id: "bot-recent", name: "文档助手", threadId: "private-recent" },
+        { ...f.bots[0], id: "bot-unread", name: "项目助手", threadId: "private-unread" }
+      )
+      f.activities.push(
+        {
+          kind: "bot",
+          id: "bot-recent",
+          unread: false,
+          updatedAt: now,
+          version: 1,
+          preview: "[文件] prd.md"
+        },
+        {
+          kind: "bot",
+          id: "bot-unread",
+          unread: true,
+          updatedAt: now - 60000,
+          version: 1,
+          preview: "评审清单已准备好。"
+        }
+      )
+      f.bump()
+    })
+    const botOrder = () =>
+      page
+        .locator('.bots-list [data-bot-row-key^="bot:"]')
+        .evaluateAll((rows) => rows.map((row) => row.getAttribute("data-bot-row-key")))
+    await page.locator('[data-bot-row-key="bot:bot-unread"]').waitFor()
+    assert.deepEqual(await botOrder(), ["bot:bot-unread", "bot:bot-recent", "bot:bot"])
+    await page.locator('[data-bot-row-key="bot:bot-unread"]').click()
+    await page
+      .locator('[data-bot-row-key="bot:bot-unread"] .bot-unread-dot')
+      .waitFor({ state: "detached" })
+    assert.deepEqual(await botOrder(), ["bot:bot-unread", "bot:bot-recent", "bot:bot"])
+    await page.locator('[data-bot-row-key="im:group-c"]').click()
+    await page.waitForFunction(
+      () =>
+        document
+          .querySelector('.bots-list [data-bot-row-key^="bot:"]')
+          ?.getAttribute("data-bot-row-key") === "bot:bot-recent"
+    )
+    // Archiving the serving Bot cannot hide the group's retained history.
+    await page.evaluate(() => {
+      const f = (window as any).fixture
+      f.bots[0].archived = true
+      f.bump()
+    })
+    await page.locator('[data-bot-row-key="im:group-c"]').waitFor()
+    await page
+      .locator('[data-bot-row-key="im:group-c"] .bot-im-row-caption')
+      .getByText(/Bot 已归档/)
+      .waitFor()
     assert.deepEqual(errors, [])
     console.log(
       "PASS: IM group workspace routing, private/work return links, scoped read state, paging, late responses, offline/revoked history, management, retry and light/dark/compact layout"

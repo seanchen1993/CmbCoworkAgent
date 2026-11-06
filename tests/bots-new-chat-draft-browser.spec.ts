@@ -103,6 +103,7 @@ createRoot(document.getElementById('root')).render(<Fixture/>);
                 "BotImChannelDialog",
                 "BotImConversation",
                 "BotImConversationRows",
+                "SidebarTime",
                 "BotImConversationDetails",
                 "BotPanelDivider",
                 "CustomModelDialog"

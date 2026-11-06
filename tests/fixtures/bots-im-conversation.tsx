@@ -100,9 +100,21 @@ const f = ((window as any).fixture = {
   release: null as any,
   fail: false,
   groups,
+  bots: [bot],
+  activities: [
+    {
+      kind: "bot",
+      id: "bot",
+      version: 1,
+      unread: true,
+      updatedAt: Date.now() - 3600000,
+      preview: "私人主对话"
+    }
+  ],
   latest,
   work,
-  bump: () => {}
+  bump: () => {},
+  setView: (patch: any) => useBotViewStore.getState().update("local", patch)
 })
 const listeners = new Set<Function>()
 let revision = 1
@@ -154,14 +166,12 @@ const client = {
   },
   snapshot: async () => ({
     host: { id: "local", kind: "local", name: "本机", capabilities: {} },
-    bots: [bot],
+    bots: f.bots.map((bot) => ({ ...bot })),
     groups: [],
     imConversations: groups.map((g) => ({ ...g, activity: { ...g.activity } })),
     tasks: f.tasks.map((task) => ({ ...task })),
     backgroundThreads: [...f.backgroundThreads],
-    activities: [
-      { kind: "bot", id: "bot", version: 1, unread: true, updatedAt: 1, preview: "私人主对话" }
-    ],
+    activities: f.activities.map((activity) => ({ ...activity })),
     workActivity: [],
     schedules: [],
     revision
@@ -176,6 +186,11 @@ const client = {
     const group = kind === "im" ? groups.find((item) => item.id === id) : undefined
     if (group?.activity.unread && version >= group.activity.version) {
       group.activity.unread = false
+      f.bump()
+    }
+    const activity = kind === "bot" ? f.activities.find((item) => item.id === id) : undefined
+    if (activity?.unread && version >= activity.version) {
+      activity.unread = false
       f.bump()
     }
   },
@@ -206,12 +221,16 @@ const client = {
     }
   },
   im: {
-    exportFile: async (...args: any[]) => { f.exported.push(args); return true },
+    exportFile: async (...args: any[]) => {
+      f.exported.push(args)
+      return true
+    },
     retryFile: async (botId: string, id: string) => {
       if (botId !== bot.id) throw Error("wrong owner")
       const row = f.latest.find((item: any) => item.delivery?.id === id) as any
       if (!row || row.delivery.state !== "failed") throw Error("not retryable")
-      row.delivery.state = "pending"; f.bump()
+      row.delivery.state = "pending"
+      f.bump()
     },
     stopConversation: async (_bot: string, id: string) => {
       for (const task of f.tasks.filter(
@@ -237,6 +256,13 @@ const client = {
         await new Promise((resolve) => (f.release = resolve))
       }
       if (f.fail) throw Error("本地记录读取失败")
+      if (id !== "group-a" && id !== "group-b")
+        return {
+          items: [
+            entry("c1", groups.find((group) => group.id === id)?.activity.preview ?? "历史群消息")
+          ],
+          before: null
+        }
       return id === "group-b"
         ? { items: [entry("b1", "三个界面问题，已整理为改进清单。")], before: null }
         : before

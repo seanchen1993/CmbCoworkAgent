@@ -2625,6 +2625,19 @@ button.bot-json-caret:focus-visible {
 .bots-workspace .bot-list-heading .bot-list-name {
   min-width: 0;
 }
+.bot-sidebar-time {
+  margin-left: auto;
+  flex-shrink: 0;
+  color: var(--bot-muted);
+  font-size: 10px;
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+}
+@container bot-sidebar (max-width: 240px) {
+  .bot-sidebar-time {
+    display: none;
+  }
+}
 .bots-workspace .bot-list-label {
   display: block;
   flex-shrink: 0;

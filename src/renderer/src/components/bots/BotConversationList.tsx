@@ -3,10 +3,36 @@ import { ArrowDown, ArrowUp } from "lucide-react"
 import { botSidebarUnreadJumps } from "@/lib/bot-sidebar-unreads"
 
 /** Grok's offscreen-unread jump behavior, using the existing Bot read-state projection. */
-export function BotConversationList({ children, label }: { children: ReactNode; label: string }) {
+export function BotConversationList({
+  children,
+  label,
+  onScrolling
+}: {
+  children: ReactNode
+  label: string
+  onScrolling?(scrolling: boolean): void
+}) {
   const viewport = useRef<HTMLDivElement>(null)
   const content = useRef<HTMLDivElement>(null)
   const frame = useRef(0)
+  const scrollTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  const anchor = useRef<{ key: string; top: number; scrollTop: number } | null>(null)
+  const saveAnchor = () => {
+    const el = viewport.current
+    if (!el) return
+    const bounds = el.getBoundingClientRect()
+    const row = Array.from(el.querySelectorAll<HTMLElement>("[data-bot-row-key]")).find(
+      (row) => row.getBoundingClientRect().bottom > bounds.top
+    )
+    anchor.current =
+      row && el.scrollTop > 0
+        ? {
+            key: row.dataset.botRowKey!,
+            top: row.getBoundingClientRect().top - bounds.top,
+            scrollTop: el.scrollTop
+          }
+        : null
+  }
   const expanding = useRef<{ section: HTMLElement; direction: "above" | "below" } | null>(null)
   const [jumps, setJumps] = useState<ReturnType<typeof botSidebarUnreadJumps>>({
     above: null,
@@ -54,6 +80,15 @@ export function BotConversationList({ children, label }: { children: ReactNode; 
   // Read status and order can change without resizing the list. After opening a
   // collapsed section, reveal its nearest unread row rather than just its header.
   useLayoutEffect(() => {
+    const el = viewport.current,
+      saved = anchor.current
+    if (el && saved && Math.abs(el.scrollTop - saved.scrollTop) < 2) {
+      const row = Array.from(el.querySelectorAll<HTMLElement>("[data-bot-row-key]")).find(
+        (row) => row.dataset.botRowKey === saved.key
+      )
+      if (row)
+        el.scrollTop += row.getBoundingClientRect().top - el.getBoundingClientRect().top - saved.top
+    }
     const pending = expanding.current
     if (pending) {
       expanding.current = null
@@ -64,6 +99,7 @@ export function BotConversationList({ children, label }: { children: ReactNode; 
       if (row?.isConnected) reveal(row)
     }
     measure()
+    saveAnchor()
   }, [children, measure])
   useEffect(() => {
     const observer = new ResizeObserver(scheduleMeasure)
@@ -73,11 +109,23 @@ export function BotConversationList({ children, label }: { children: ReactNode; 
       observer.disconnect()
       cancelAnimationFrame(frame.current)
       frame.current = 0
+      clearTimeout(scrollTimer.current)
     }
   }, [scheduleMeasure])
   return (
     <div className="bot-list-viewport">
-      <div ref={viewport} className="bots-list" aria-label={label} onScroll={scheduleMeasure}>
+      <div
+        ref={viewport}
+        className="bots-list"
+        aria-label={label}
+        onScroll={() => {
+          saveAnchor()
+          scheduleMeasure()
+          onScrolling?.(true)
+          clearTimeout(scrollTimer.current)
+          scrollTimer.current = setTimeout(() => onScrolling?.(false), 160)
+        }}
+      >
         <div ref={content}>{children}</div>
       </div>
       {(["above", "below"] as const).map((direction) => {

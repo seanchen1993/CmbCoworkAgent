@@ -14,6 +14,9 @@
   justify-self: end;
 }
 .bot-im-list > h3 {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   padding: 0 20px 8px;
   color: var(--bot-muted);
   font-size: 11px;
@@ -44,6 +47,7 @@
   text-align: left;
 }
 .bot-im-row-title {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -56,6 +60,100 @@
   white-space: nowrap;
   color: var(--bot-muted);
   font-size: 11px;
+}
+.bot-im-row-caption > svg {
+  display: inline;
+  margin-right: 4px;
+  vertical-align: -1px;
+}
+.bot-im-unread-total {
+  color: var(--bot-text);
+  font-variant-numeric: tabular-nums;
+}
+.bot-im-sidebar-row {
+  position: relative;
+}
+.bot-im-sidebar-row .bot-list-item {
+  padding-right: 22px;
+}
+.bot-im-sidebar-row .bot-unread-dot {
+  position: absolute;
+  right: 8px;
+  top: 24px;
+  width: 6px;
+  height: 6px;
+}
+.bot-im-row-more {
+  position: absolute;
+  right: 3px;
+  bottom: 11px;
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 6px;
+  color: var(--bot-muted);
+  opacity: 0;
+}
+.bot-im-sidebar-row:hover .bot-im-row-more,
+.bot-im-sidebar-row:focus-within .bot-im-row-more,
+.bot-im-row-more[data-state="open"] {
+  opacity: 1;
+}
+.bot-im-row-more:hover {
+  background: var(--bot-hover);
+  color: var(--bot-text);
+}
+.bot-im-menu-action {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 9px;
+  border-radius: 6px;
+  font-size: 13px;
+}
+.bot-im-menu-action > svg {
+  width: 15px;
+  height: 15px;
+}
+.bot-im-menu-action:hover,
+.bot-im-menu-action:focus-visible {
+  background: var(--accent);
+  outline: none;
+}
+.bot-im-history-toggle {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  width: 100%;
+  padding: 12px 14px 8px;
+  text-align: left;
+  font-size: 11px;
+  color: var(--bot-muted);
+}
+.bot-im-history-toggle:hover {
+  color: var(--bot-text);
+}
+.bot-im-history-toggle svg[data-expanded="true"] {
+  transform: rotate(90deg);
+}
+.bot-im-sidebar-row[data-revoked="true"] .bot-im-row-title,
+.bot-im-sidebar-row[data-revoked="true"] .bot-im-avatar {
+  color: var(--bot-muted);
+}
+.bot-im-new-messages {
+  align-self: center;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 4px 0 10px;
+  padding: 7px 12px;
+  border: 1px solid var(--bot-line);
+  border-radius: 20px;
+  font-size: 12px;
+  color: var(--bot-text);
+  background: var(--bot-panel);
 }
 .bot-im-context {
   display: flex;
@@ -331,8 +429,16 @@
 }
 @container bot-sidebar (max-width: 179px) {
   .bot-im-list > h3,
-  .bot-im-row-copy {
+  .bot-im-row-copy,
+  .bot-im-row-more,
+  .bot-im-history-toggle > span {
     display: none;
+  }
+  .bot-im-history-toggle {
+    justify-content: center;
+  }
+  .bot-im-sidebar-row .bot-list-item {
+    padding-right: 0;
   }
   .bot-im-list {
     margin-top: 12px;
