@@ -4,14 +4,38 @@ import {
   type HarnessStageAttribution
 } from "./harness-stage-attribution-cache"
 
-const cache = new HarnessStageAttributionCache({
+async function resolveCurrentStage(projectId: string, featureSlug: string) {
   // Keep the generic hook/runtime import path lightweight. The board service is
-  // loaded only when a dirty code-generation entry actually needs inspection.
-  resolver: async (projectId, featureSlug) => {
-    const { resolveHarnessFeatureCurrentStage } = await import("../harness-board/service")
-    return resolveHarnessFeatureCurrentStage(projectId, featureSlug)
+  // loaded only when a bound invocation or dirty attribution needs inspection.
+  const { resolveHarnessFeatureCurrentStage } = await import("../harness-board/service")
+  return resolveHarnessFeatureCurrentStage(projectId, featureSlug)
+}
+
+const cache = new HarnessStageAttributionCache({ resolver: resolveCurrentStage })
+
+/**
+ * Commands and hooks need the stage immediately before execution, even when an
+ * external change has not invalidated telemetry's short-lived cache yet.
+ * Undefined means unbound (keep explicit caller context); null fields mean a
+ * bound feature could not be resolved (clear the previous turn's stage).
+ * Do not prime/invalidate telemetry here: overlapping calls retain their own
+ * call-start attribution and must not be invalidated by this lookup.
+ */
+export async function resolveHarnessExecutionStage(
+  projectId?: string,
+  featureSlug?: string
+): Promise<HarnessStageAttribution | undefined> {
+  const project = projectId?.trim()
+  const feature = featureSlug?.trim()
+  if (!project || !feature) return undefined
+  try {
+    const stage = await resolveCurrentStage(project, feature)
+    const nodeName = stage?.name.trim() || null
+    return { nodeName, nodeStatus: nodeName ? stage?.status?.trim() || null : null }
+  } catch {
+    return { nodeName: null, nodeStatus: null }
   }
-})
+}
 
 type StageObserver = (at: number, nodeName: string | null) => void
 const observers = new Map<string, Set<StageObserver>>()
