@@ -22,7 +22,7 @@ interface HarnessStageCacheEntry {
   resolvedAt: number
   lastAccessAt: number
   inFlight?: Promise<RefreshOutcome>
-  callRetryAfter?: number
+  retryAfter?: number
 }
 
 interface HarnessStageAttributionCacheOptions {
@@ -35,9 +35,11 @@ interface HarnessStageAttributionCacheOptions {
 type RefreshOutcome = "resolved" | "unavailable" | "invalidated"
 
 const DEFAULT_MAX_CLEAN_AGE_MS = 30_000
+// Execution env tolerates only a short gap when an external change has no watcher.
+const EXECUTION_MAX_CLEAN_AGE_MS = 1_000
 const DEFAULT_MAX_ENTRIES = 256
 const MAX_REFRESH_ATTEMPTS = 2
-const CALL_RETRY_BACKOFF_MS = 1_000
+const RETRY_BACKOFF_MS = 1_000
 
 function normalizeIdentity(
   projectId: string,
@@ -78,11 +80,11 @@ function copyAttribution(snapshot: HarnessStageAttribution): HarnessStageAttribu
 }
 
 /**
- * Point-in-time Harness stage cache for code-generation attribution.
+ * Point-in-time Harness stage cache for execution context and attribution.
  *
  * Clean entries are reused briefly. Mutating commands, plugin hooks and run-state
- * file changes only increment a cheap version counter; the next generated code
- * mutation performs one async adapter lookup. Concurrent writers share that
+ * file changes increment a cheap version counter; the next consumer performs
+ * one async adapter lookup. Concurrent execution and telemetry consumers share that
  * lookup, and a state change during an in-flight lookup forces one trailing
  * refresh instead of accepting the stale result.
  */
@@ -125,9 +127,22 @@ export class HarnessStageAttributionCache {
     entry.lastAccessAt = this.now()
   }
 
-  async getForCodeGeneration(
+  getForCodeGeneration(projectId: string, featureSlug: string): Promise<HarnessStageAttribution> {
+    return this.getLatest(projectId, featureSlug, this.maxCleanAgeMs)
+  }
+
+  getForExecution(projectId: string, featureSlug: string): Promise<HarnessStageAttribution> {
+    return this.getLatest(
+      projectId,
+      featureSlug,
+      Math.min(this.maxCleanAgeMs, EXECUTION_MAX_CLEAN_AGE_MS)
+    )
+  }
+
+  private async getLatest(
     projectId: string,
-    featureSlug: string
+    featureSlug: string,
+    maxCleanAgeMs: number
   ): Promise<HarnessStageAttribution> {
     const identity = normalizeIdentity(projectId, featureSlug)
     if (!identity) return emptyAttribution()
@@ -135,19 +150,20 @@ export class HarnessStageAttributionCache {
     entry.lastAccessAt = this.now()
 
     for (let attempt = 0; attempt < MAX_REFRESH_ATTEMPTS; attempt += 1) {
-      if (this.isFresh(entry)) {
+      if (this.isFresh(entry, maxCleanAgeMs)) {
         return copyAttribution(entry.snapshot as HarnessStageAttribution)
       }
+      if (!entry.inFlight && this.now() < (entry.retryAfter ?? 0)) return emptyAttribution()
 
       const outcome = await this.refresh(entry)
-      if (outcome === "resolved" && this.isFresh(entry)) {
+      if (outcome === "resolved" && this.isFresh(entry, maxCleanAgeMs)) {
         return copyAttribution(entry.snapshot as HarnessStageAttribution)
       }
       if (outcome !== "invalidated") break
     }
 
     // Never attach the previous stage after a failed/continually invalidated
-    // refresh. Keeping the entry dirty lets a later code mutation retry.
+    // refresh. A later consumer can retry after the shared failure backoff.
     return emptyAttribution()
   }
 
@@ -166,7 +182,7 @@ export class HarnessStageAttributionCache {
     const entry = this.getOrCreate(identity)
     entry.lastAccessAt = this.now()
     if (this.isFresh(entry)) return copyAttribution(entry.snapshot as HarnessStageAttribution)
-    if (!entry.inFlight && this.now() < (entry.callRetryAfter ?? 0)) return emptyAttribution()
+    if (!entry.inFlight && this.now() < (entry.retryAfter ?? 0)) return emptyAttribution()
 
     const callVersion = entry.version
     for (let attempt = 0; attempt < MAX_REFRESH_ATTEMPTS; attempt += 1) {
@@ -174,11 +190,7 @@ export class HarnessStageAttributionCache {
       if (outcome === "resolved" && entry.cleanVersion === callVersion && entry.snapshot) {
         return copyAttribution(entry.snapshot)
       }
-      if (outcome === "unavailable") {
-        // One inspection per backoff window while the adapter is down, not one per call.
-        entry.callRetryAfter = this.now() + CALL_RETRY_BACKOFF_MS
-        return emptyAttribution()
-      }
+      if (outcome === "unavailable") return emptyAttribution()
       // Invalidated after this call started: anything read now is a later stage. An
       // inspection that was already stale when the call started gets one retry.
       if (entry.version !== callVersion) return emptyAttribution()
@@ -186,11 +198,11 @@ export class HarnessStageAttributionCache {
     return emptyAttribution()
   }
 
-  private isFresh(entry: HarnessStageCacheEntry): boolean {
+  private isFresh(entry: HarnessStageCacheEntry, maxCleanAgeMs = this.maxCleanAgeMs): boolean {
     return (
       entry.snapshot !== undefined &&
       entry.cleanVersion === entry.version &&
-      this.now() - entry.resolvedAt < this.maxCleanAgeMs
+      this.now() - entry.resolvedAt < maxCleanAgeMs
     )
   }
 
@@ -211,19 +223,27 @@ export class HarnessStageAttributionCache {
     entry: HarnessStageCacheEntry,
     startedVersion: number
   ): Promise<RefreshOutcome> {
+    let resolved: HarnessStageAttribution | null
     try {
-      const resolved = normalizeStage(await this.resolver(entry.projectId, entry.featureSlug))
-      if (entry.version !== startedVersion) return "invalidated"
-      if (!resolved) return "unavailable"
-
-      entry.snapshot = resolved
-      entry.resolvedAt = this.now()
-      entry.lastAccessAt = entry.resolvedAt
-      entry.cleanVersion = startedVersion
-      return "resolved"
+      resolved = normalizeStage(await this.resolver(entry.projectId, entry.featureSlug))
     } catch {
+      resolved = null
+    }
+    if (entry.version !== startedVersion) return "invalidated"
+    if (!resolved) {
+      // Share failure backoff across env, model/tool attribution and observers.
+      // Further dirty notifications must not create an adapter failure storm.
+      entry.retryAfter = this.now() + RETRY_BACKOFF_MS
+      entry.snapshot = undefined
       return "unavailable"
     }
+
+    entry.snapshot = resolved
+    entry.resolvedAt = this.now()
+    entry.lastAccessAt = entry.resolvedAt
+    entry.cleanVersion = startedVersion
+    entry.retryAfter = undefined
+    return "resolved"
   }
 
   private getOrCreate(identity: {

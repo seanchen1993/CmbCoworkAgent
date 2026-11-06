@@ -19,7 +19,11 @@ import { trackEvent } from "../services/event-reporter"
 import { getCurrentHookAgentId } from "./execution-context"
 import { samplingFields, topKModelKwargs } from "../models/sampling-params"
 import { withWorkspaceExecution } from "../agent/file-operation-lock"
-import { resolveHarnessExecutionStage } from "../services/harness-stage-attribution"
+import { isReadOnlyShellCommand } from "../agent/exec-policy"
+import {
+  markHarnessStageAttributionDirty,
+  resolveHarnessExecutionStage
+} from "../services/harness-stage-attribution"
 
 /**
  * Resolve the effective timeout (ms) for a hook by consulting the handler-type
@@ -1305,7 +1309,12 @@ async function executeSyncHook(
     await refreshStage()
     const builtPayload = buildHookStdinPayload(event, context, hook)
     if (diagnostic) stdinPayload = builtPayload
-    result = await executeHttpHook(hook, builtPayload, getEffectiveTimeout(hook))
+    try {
+      result = await executeHttpHook(hook, builtPayload, getEffectiveTimeout(hook))
+    } finally {
+      // HTTP hooks can advance remotely managed workflows, even on failure.
+      markHarnessStageAttributionDirty(context.harnessProjectId, context.featureId)
+    }
   } else {
     const runCommand = async (): Promise<HookResult> => {
       // Resolve after workspace admission: a command ahead of this hook may
@@ -1313,12 +1322,20 @@ async function executeSyncHook(
       await refreshStage()
       const builtPayload = buildHookStdinPayload(event, context, hook)
       if (diagnostic) stdinPayload = builtPayload
-      return executeCommandHook(
-        hook,
-        buildHookEnv(event, context, hook),
-        builtPayload,
-        getCommandCwd(context)
-      )
+      const cwd = getCommandCwd(context)
+      const mayMutateStage =
+        context.harnessProjectId &&
+        context.featureId &&
+        !isReadOnlyShellCommand(hook.command ?? "", cwd)
+      try {
+        return await executeCommandHook(hook, buildHookEnv(event, context, hook), builtPayload, cwd)
+      } finally {
+        // Invalidate before releasing the workspace lock or starting the next
+        // hook. Async hooks invalidate on actual completion, not their placeholder.
+        if (mayMutateStage) {
+          markHarnessStageAttributionDirty(context.harnessProjectId, context.featureId)
+        }
+      }
     }
     // Synchronous formatters and other command hooks may read/modify any file.
     // Coordinate their actual process lifetime with tool IO, without acquiring

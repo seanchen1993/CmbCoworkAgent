@@ -116,35 +116,39 @@ describe("HarnessStageAttributionCache", () => {
     ])
   })
 
-  it("runs one trailing refresh when state changes during an in-flight lookup", async () => {
-    const firstLookup = deferred<HarnessResolvedStage | null>()
-    const secondLookup = deferred<HarnessResolvedStage | null>()
-    const resolver = vi
-      .fn<() => Promise<HarnessResolvedStage | null>>()
-      .mockImplementationOnce(() => firstLookup.promise)
-      .mockImplementationOnce(() => secondLookup.promise)
-    const cache = new HarnessStageAttributionCache({ resolver })
+  it.each(["getForCodeGeneration", "getForExecution"] as const)(
+    "%s runs one trailing refresh when state changes during an in-flight lookup",
+    async (method) => {
+      const firstLookup = deferred<HarnessResolvedStage | null>()
+      const secondLookup = deferred<HarnessResolvedStage | null>()
+      const resolver = vi
+        .fn<() => Promise<HarnessResolvedStage | null>>()
+        .mockImplementationOnce(() => firstLookup.promise)
+        .mockImplementationOnce(() => secondLookup.promise)
+      const cache = new HarnessStageAttributionCache({ resolver })
 
-    const pending = cache.getForCodeGeneration("project-1", "feature-1")
-    cache.markDirty("project-1", "feature-1")
-    firstLookup.resolve({ name: "Dev-旧节点", status: "进行中" })
-    await Promise.resolve()
-    await Promise.resolve()
-    expect(resolver).toHaveBeenCalledTimes(2)
+      const pending = cache[method]("project-1", "feature-1")
+      cache.markDirty("project-1", "feature-1")
+      firstLookup.resolve({ name: "Dev-旧节点", status: "进行中" })
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(resolver).toHaveBeenCalledTimes(2)
 
-    secondLookup.resolve({ name: "Test-新节点", status: "进行中" })
-    await expect(pending).resolves.toEqual({
-      nodeName: "Test-新节点",
-      nodeStatus: "进行中"
-    })
-  })
+      secondLookup.resolve({ name: "Test-新节点", status: "进行中" })
+      await expect(pending).resolves.toEqual({
+        nodeName: "Test-新节点",
+        nodeStatus: "进行中"
+      })
+    }
+  )
 
-  it("fails closed on an unavailable lookup and retries on the next generation", async () => {
+  it("fails closed on an unavailable lookup and retries after backoff", async () => {
+    let now = 0
     const resolver = vi
       .fn<() => Promise<HarnessResolvedStage | null>>()
       .mockResolvedValueOnce(null)
       .mockResolvedValueOnce({ name: "Dev-代码实现", status: "已完成" })
-    const cache = new HarnessStageAttributionCache({ resolver })
+    const cache = new HarnessStageAttributionCache({ resolver, now: () => now })
     cache.prime("project-1", "feature-1", {
       name: "Dev-旧节点",
       status: "进行中"
@@ -155,6 +159,12 @@ describe("HarnessStageAttributionCache", () => {
       nodeName: null,
       nodeStatus: null
     })
+    cache.markDirty("project-1", "feature-1")
+    await cache.getForCodeGeneration("project-1", "feature-1")
+    await cache.getForExecution("project-1", "feature-1")
+    await cache.getForCall("project-1", "feature-1")
+    expect(resolver).toHaveBeenCalledTimes(1)
+    now = 1000
     await expect(cache.getForCodeGeneration("project-1", "feature-1")).resolves.toEqual({
       nodeName: "Dev-代码实现",
       nodeStatus: "已完成"
@@ -162,18 +172,20 @@ describe("HarnessStageAttributionCache", () => {
   })
 
   it("clears single-flight state even when a resolver throws synchronously", async () => {
+    let now = 0
     const resolver = vi
       .fn<() => Promise<HarnessResolvedStage | null>>()
       .mockImplementationOnce(() => {
         throw new Error("adapter setup failed")
       })
       .mockResolvedValueOnce({ name: "Dev-代码实现", status: "进行中" })
-    const cache = new HarnessStageAttributionCache({ resolver })
+    const cache = new HarnessStageAttributionCache({ resolver, now: () => now })
 
     await expect(cache.getForCodeGeneration("project-1", "feature-1")).resolves.toEqual({
       nodeName: null,
       nodeStatus: null
     })
+    now = 1000
     await expect(cache.getForCodeGeneration("project-1", "feature-1")).resolves.toEqual({
       nodeName: "Dev-代码实现",
       nodeStatus: "进行中"

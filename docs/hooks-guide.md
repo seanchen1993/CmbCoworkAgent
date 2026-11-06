@@ -264,9 +264,9 @@ Agent 身份的调用不会生成占位值，而是省略 `agent_id` / `AGENT_ID
 
 `AGENT_ID`、`WORKSPACE_PATH`、`CLAUDE_PROJECT_DIR` 只取本次 Hook 调用上下文；上下文缺失时不会继承 Electron 宿主进程中的同名旧值。HTTP Hook 不存在子进程环境变量，请从请求体的 `agent_id`、`workspace` / `workspace_path` 读取。
 
-绑定 Harness 项目和特性的对话中，`HARNESS_NODE_NAME` 与 `HARNESS_NODE_STATUS` 会在每次 Shell 命令或 Hook 实际执行前重新读取；排队结束后再取值，前一个 Hook 推进节点后，后续 Hook 和命令也会读到新值。Hook 的 stdin / HTTP 请求体使用同一快照，字段为 `harness_node_name`、`harness_node_status`。
+绑定 Harness 项目和特性的对话中，`HARNESS_NODE_NAME` 与 `HARNESS_NODE_STATUS` 会在每次 Shell 命令或 Hook 实际执行前、排队结束后取值。取值复用共享缓存；可能修改状态的命令或 Hook 完成、状态文件变更通知到达时会立即使缓存失效，后续执行重新查询，连续只读操作无需反复启动插件查询。同一特性的并发取值合并为一次查询，执行快照最多复用 1 秒，未被通知覆盖的外部变更在缓存到期后的下一次执行查询。Hook 的 stdin / HTTP 请求体使用同一快照，字段为 `harness_node_name`、`harness_node_status`。
 
-查询失败或当前节点不存在时，这两个字段和环境变量会清空；仅状态未知时只清空状态，避免沿用旧值。未绑定项目特性的调用保留显式传入的节点上下文。已经启动的进程保留启动时的环境变量，新值从下一次执行生效。
+查询失败或当前节点不存在时，这两个字段和环境变量会清空，并退避 1 秒后再尝试查询；仅状态未知时只清空状态，避免沿用旧值。未绑定项目特性的调用保留显式传入的节点上下文。已经启动的进程保留启动时的环境变量，新值从下一次执行生效。
 
 ### 3.3 cwd 优先级
 

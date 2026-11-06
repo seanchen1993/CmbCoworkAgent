@@ -2927,18 +2927,6 @@ export class LocalSandbox
 
     const hooks = this.resolveHooks(event, hookContext)
     let result = await runHooksEnriched(hooks, event, hookContext, this._onHookResult)
-    const hasHarnessOwnedHook = hooks.some(
-      (hook) =>
-        hook.hookSourceType === "plugin" ||
-        hook.hookSourceType === "skill" ||
-        Boolean(hook.pluginRoot)
-    )
-    if (hasHarnessOwnedHook && (result || (event !== "PreToolUse" && hooks.length > 0))) {
-      // Plugin lifecycle hooks may advance the workflow without going through
-      // LocalSandbox.execute(). Invalidation is cheap; the next code mutation
-      // performs the actual adapter refresh.
-      this.markHarnessStageAttributionDirty()
-    }
     if (result) {
       this._hookScope?.activatePersistentHooks(hooks)
     }
@@ -4864,6 +4852,7 @@ export class LocalSandbox
       }
       const r = await super.write(effectiveFilePath, effectiveContent)
       if (!r.error) {
+        if (!isCodeFile(effectiveFilePath)) this.markHarnessStageAttributionDirty()
         await this.recordReadTime(resolvedPath)
         await noteFileToolWrite(resolvedPath, effectiveContent)
       }
@@ -4872,7 +4861,6 @@ export class LocalSandbox
     if (!result.error) {
       recordTrustedToolFilePreviewSource(resolvedPath, "write")
       this._onFileMutation?.(effectiveFilePath, "write")
-      if (!isCodeFile(effectiveFilePath)) this.markHarnessStageAttributionDirty()
       // Adoption tracking (side-effect only, never throws)
       try {
         recordAdoptionGen({
@@ -5186,6 +5174,9 @@ export class LocalSandbox
             await this.recordReadTime(resolvedPath)
           }
           await noteFileToolWrite(resolvedPath, () => iconv.encode(expectedContent, encoding))
+          if (!managedWorkflowScriptEdit && !isCodeFile(effectiveFilePath)) {
+            this.markHarnessStageAttributionDirty()
+          }
           return { path: effectiveFilePath, filesUpdate: null, occurrences }
         } finally {
           await managedCapability?.handle.close().catch(() => undefined)
@@ -5198,7 +5189,6 @@ export class LocalSandbox
         // auto-commit, Harness attribution, or generated-code adoption.
         if (!managedWorkflowScriptEdit) {
           this._onFileMutation?.(effectiveFilePath, "edit")
-          if (!isCodeFile(effectiveFilePath)) this.markHarnessStageAttributionDirty()
           // Adoption tracking (side-effect only, never throws).
           // Only successful edits should be counted as generated code adoption.
           try {
@@ -6923,9 +6913,6 @@ export class LocalSandbox
           outsideShellSyntax
         )
       )
-      if (this.commandMayMutateHarnessState(effectiveCommand, effectiveCwd)) {
-        this.markHarnessStageAttributionDirty()
-      }
       return result.output || (result.exitCode === 0 ? "操作成功" : "操作失败")
     }
 
@@ -7037,9 +7024,6 @@ export class LocalSandbox
           : rawResult
         if (task.completed) return
         task.result = result
-        if (this.commandMayMutateHarnessState(effectiveCommand, effectiveCwd)) {
-          this.markHarnessStageAttributionDirty()
-        }
         // Append final output to chunks for completeness
         if (result.output) task.outputChunks.push(result.output)
         task.completed = true
@@ -7050,9 +7034,6 @@ export class LocalSandbox
       .catch((err) => {
         // Guard: if already completed (e.g. cancelled via cancelBackgroundTasks), don't overwrite.
         if (task.completed) return
-        if (this.commandMayMutateHarnessState(effectiveCommand, effectiveCwd)) {
-          this.markHarnessStageAttributionDirty()
-        }
         task.result = {
           output: `Error: ${err instanceof Error ? err.message : String(err)}`,
           exitCode: 1,
@@ -7356,9 +7337,6 @@ export class LocalSandbox
           outsideShellSyntax
         )
       )
-      if (this.commandMayMutateHarnessState(effectiveCommand, effectiveCwd)) {
-        this.markHarnessStageAttributionDirty()
-      }
       // Adoption tracking: react to agent rm/mv of generated files (side-effect
       // only, never throws). Only successful commands act (exitCode === 0).
       recordAdoptionShellFileOps(effectiveCommand, effectiveCwd, result.exitCode)
@@ -7378,9 +7356,6 @@ export class LocalSandbox
         cwd: effectiveCwd
       })
     )
-    if (this.commandMayMutateHarnessState(effectiveCommand, effectiveCwd)) {
-      this.markHarnessStageAttributionDirty()
-    }
     recordAdoptionShellFileOps(effectiveCommand, effectiveCwd, result.exitCode)
     this.recordShellReadTelemetry(effectiveCommand, effectiveCwd, result, shellSyntax)
     const postResult = await this.runHooks("PostToolUse", {
@@ -7688,17 +7663,31 @@ export class LocalSandbox
       this._shellFileTelemetry &&
       !backgroundExecution &&
       shellFileCaptureContext.getStore() === true
-    const runCommand = (): Promise<LocalExecuteResponse> =>
-      this.runWithShellFileCapture(command, effectiveCwd, captureFileEffects, shellSyntax, () =>
-        this.executeRawUnserialized(
+    const runCommand = async (): Promise<LocalExecuteResponse> => {
+      try {
+        return await this.runWithShellFileCapture(
           command,
-          sandboxModeOverride,
-          timeoutMs,
-          overrideAbortSignal,
           effectiveCwd,
-          options
+          captureFileEffects,
+          shellSyntax,
+          () =>
+            this.executeRawUnserialized(
+              command,
+              sandboxModeOverride,
+              timeoutMs,
+              overrideAbortSignal,
+              effectiveCwd,
+              options
+            )
         )
-      )
+      } finally {
+        // Cover raw/orchestrated/background execution once, before releasing
+        // workspace admission so the next queued invocation sees the change.
+        if (this.commandMayMutateHarnessState(command, effectiveCwd)) {
+          this.markHarnessStageAttributionDirty()
+        }
+      }
+    }
     const commandConcurrency = classifyCommandConcurrency(command)
     const signal = overrideAbortSignal ?? this.abortSignal
     // Classify the effective post-hook command here, including unsandboxed

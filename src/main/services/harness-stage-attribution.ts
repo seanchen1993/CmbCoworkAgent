@@ -14,12 +14,13 @@ async function resolveCurrentStage(projectId: string, featureSlug: string) {
 const cache = new HarnessStageAttributionCache({ resolver: resolveCurrentStage })
 
 /**
- * Commands and hooks need the stage immediately before execution, even when an
- * external change has not invalidated telemetry's short-lived cache yet.
+ * Commands and hooks read after queue admission. Reuse the shared snapshot and
+ * in-flight lookup, but cap execution freshness at one second for changes that
+ * have no watcher. Known mutations invalidate it immediately.
  * Undefined means unbound (keep explicit caller context); null fields mean a
  * bound feature could not be resolved (clear the previous turn's stage).
- * Do not prime/invalidate telemetry here: overlapping calls retain their own
- * call-start attribution and must not be invalidated by this lookup.
+ * Reading does not increment the version: overlapping calls retain their own
+ * call-start attribution and must not be invalidated just by another reader.
  */
 export async function resolveHarnessExecutionStage(
   projectId?: string,
@@ -28,13 +29,7 @@ export async function resolveHarnessExecutionStage(
   const project = projectId?.trim()
   const feature = featureSlug?.trim()
   if (!project || !feature) return undefined
-  try {
-    const stage = await resolveCurrentStage(project, feature)
-    const nodeName = stage?.name.trim() || null
-    return { nodeName, nodeStatus: nodeName ? stage?.status?.trim() || null : null }
-  } catch {
-    return { nodeName: null, nodeStatus: null }
-  }
+  return cache.getForExecution(project, feature)
 }
 
 type StageObserver = (at: number, nodeName: string | null) => void

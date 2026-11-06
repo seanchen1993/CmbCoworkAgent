@@ -5,14 +5,19 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 vi.mock("../services/harness-stage-attribution", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../services/harness-stage-attribution")>()),
-  resolveHarnessExecutionStage: vi.fn()
+  resolveHarnessExecutionStage: vi.fn(),
+  markHarnessStageAttributionDirty: vi.fn()
 }))
 vi.mock("../services/event-reporter", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../services/event-reporter")>()),
   trackEvent: vi.fn()
 }))
 
-import { resolveHarnessExecutionStage } from "../services/harness-stage-attribution"
+import {
+  markHarnessStageAttributionDirty,
+  resolveHarnessExecutionStage
+} from "../services/harness-stage-attribution"
+import { HarnessStageAttributionCache } from "../services/harness-stage-attribution-cache"
 import { runHooks, type HookContext } from "../hooks/runner"
 import type { HookConfig, HookEvent } from "../hooks/types"
 import { LocalSandbox } from "./local-sandbox"
@@ -73,6 +78,7 @@ async function fixture() {
 
 beforeEach(() => {
   stageLookup.mockReset().mockResolvedValue(undefined)
+  vi.mocked(markHarnessStageAttributionDirty).mockReset()
 })
 afterEach(async () => {
   vi.unstubAllEnvs()
@@ -141,10 +147,12 @@ describe("Harness process environment", () => {
     const state = join(root, "stage.json")
     const output = join(root, "hooks.jsonl")
     await writeFile(state, JSON.stringify({ name: "plan", status: "进行中" }))
-    stageLookup.mockImplementation(async () => {
-      const stage = JSON.parse(await readFile(state, "utf8"))
-      return { nodeName: stage.name, nodeStatus: stage.status }
+    const cache = new HarnessStageAttributionCache({
+      resolver: async () => JSON.parse(await readFile(state, "utf8")),
+      now: () => 0
     })
+    stageLookup.mockImplementation(async () => cache.getForExecution("p", "f"))
+    vi.mocked(markHarnessStageAttributionDirty).mockImplementation(() => cache.markDirty("p", "f"))
     const record = `require('fs').appendFileSync(${JSON.stringify(output)},JSON.stringify({env:${readEnv},input:JSON.parse(require('fs').readFileSync(0,'utf8'))})+String.fromCharCode(10));`
     const changeStage = (name: string, status: string) =>
       `require('fs').writeFileSync(${JSON.stringify(state)},${JSON.stringify(JSON.stringify({ name, status }))});`
@@ -180,6 +188,31 @@ describe("Harness process environment", () => {
       expect(row.input.harness_node_name).toBe(row.env.name)
       expect(row.input.harness_node_status).toBe(row.env.status)
     }
+  })
+
+  it("reuses one inspection across read-only plugin hooks and Shell commands", async () => {
+    const { root } = await fixture()
+    const resolver = vi.fn(async () => ({ name: "dev", status: "进行中" }))
+    const cache = new HarnessStageAttributionCache({ resolver, now: () => 0 })
+    stageLookup.mockImplementation(async () => cache.getForExecution("p", "f"))
+    vi.mocked(markHarnessStageAttributionDirty).mockImplementation(() => cache.markDirty("p", "f"))
+    const sandbox = new LocalSandbox({
+      rootDir: root,
+      windowsSandbox: "none",
+      harnessProjectId: "p",
+      featureId: "f",
+      hooks: ["PreToolUse", "PostToolUse"].map((event) => ({
+        ...hook(event as HookEvent, ""),
+        command: "echo ready",
+        hookSourceType: "plugin" as const
+      }))
+    })
+    for (let i = 0; i < 10; i++) {
+      expect((await sandbox.execute("echo ready")).exitCode).toBe(0)
+    }
+    expect(stageLookup).toHaveBeenCalledTimes(30)
+    expect(resolver).toHaveBeenCalledTimes(1)
+    expect(markHarnessStageAttributionDirty).not.toHaveBeenCalled()
   })
 
   it.each(["command", "hook"])(
@@ -227,6 +260,53 @@ describe("Harness process environment", () => {
       })
     }
   )
+
+  it("invalidates cached state before admitting a hook queued behind a raw command", async () => {
+    const { root, context, sandbox } = await fixture()
+    const state = join(root, "raw-stage.json")
+    const entered = join(root, "entered")
+    const release = join(root, "release")
+    const output = join(root, "after-raw.json")
+    await writeFile(state, JSON.stringify({ name: "before", status: "进行中" }))
+    const cache = new HarnessStageAttributionCache({
+      resolver: async () => JSON.parse(await readFile(state, "utf8")),
+      now: () => 0
+    })
+    stageLookup.mockImplementation(async () => cache.getForExecution("p", "f"))
+    vi.mocked(markHarnessStageAttributionDirty).mockImplementation(() => cache.markDirty("p", "f"))
+    const running = sandbox.executeRaw(
+      command(`const fs=require('fs');
+        fs.writeFileSync(${JSON.stringify(entered)},'ready');
+        const timer=setInterval(()=>{
+          if(!fs.existsSync(${JSON.stringify(release)})) return;
+          clearInterval(timer);
+          fs.writeFileSync(${JSON.stringify(state)},JSON.stringify({name:'after',status:'已完成'}));
+        },10);`)
+    )
+    try {
+      await vi.waitFor(async () => expect(await readFile(entered, "utf8")).toBe("ready"))
+      const pending = runHooks(
+        [
+          hook(
+            "PreToolUse",
+            `require('fs').writeFileSync(${JSON.stringify(output)},JSON.stringify(${readEnv}))`
+          )
+        ],
+        "PreToolUse",
+        context
+      )
+      await writeFile(release, "go")
+      await running
+      await pending
+      expect(JSON.parse(await readFile(output, "utf8"))).toEqual({
+        name: "after",
+        status: "已完成"
+      })
+    } finally {
+      await writeFile(release, "go")
+      await running
+    }
+  })
 
   it("keeps simultaneous background command environments independent", async () => {
     const { sandbox } = await fixture()
@@ -295,6 +375,7 @@ describe("Harness process environment", () => {
         asyncHook,
         expect.objectContaining({ asyncStatus: "pending" })
       )
+      expect(markHarnessStageAttributionDirty).not.toHaveBeenCalled()
     } finally {
       lookup.resolve({ nodeName: "async-current", nodeStatus: "已完成" })
     }
@@ -310,6 +391,7 @@ describe("Harness process environment", () => {
       status: "已完成"
     })
     expect(context.harnessNodeName).toBe("old")
+    expect(markHarnessStageAttributionDirty).toHaveBeenCalledExactlyOnceWith("p", "f")
   })
 
   it.skipIf(process.platform === "win32")(
