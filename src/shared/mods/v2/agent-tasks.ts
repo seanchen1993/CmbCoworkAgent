@@ -44,6 +44,7 @@ export interface AgentViewIntent {
   mode?: "readonly" | "interactive"
 }
 export interface AgentViewApi {
+  onAgentViewRequested(callback: (event: { threadId: string }) => void): () => void
   agentViewPending(threadId: string): Promise<AgentViewIntent | null>
   agentViewRead(input: { threadId: string; intentId: string; cursor?: string }): Promise<{ status: AgentTaskStatus; messages: AgentTaskMessages }>
   agentViewStop(input: { threadId: string; intentId: string }): Promise<{ agentId: string; stopRequested: boolean; status: string }>

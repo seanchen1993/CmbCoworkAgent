@@ -190,7 +190,6 @@ const MarkdownFragment = memo(function MarkdownFragment({
   const components = useMarkdownFilePreviewComponents({
     baseComponents: MARKDOWN_COMPONENTS,
     threadId,
-    text,
     renderCodeBlock
   })
 

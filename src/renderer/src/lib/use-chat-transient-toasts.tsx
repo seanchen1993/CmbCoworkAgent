@@ -51,7 +51,7 @@ export function useChatTransientToasts(thread: string, enabled: boolean) {
   )
   useLayoutEffect(() => routing.activate(queue), [routing, queue])
   useLayoutEffect(() => () => routing.close(), [routing])
-  const version = useSyncExternalStore(
+  useSyncExternalStore(
     queue?.subscribe ?? (() => () => {}),
     queue?.snapshot ?? (() => 0)
   )
@@ -64,8 +64,10 @@ export function useChatTransientToasts(thread: string, enabled: boolean) {
     getThemePreference,
     getThemePreference
   )
+  useEffect(() => () => queue?.close(), [queue])
+  const pending = Boolean(queue?.pending)
   useEffect(() => {
-    if (!queue) return
+    if (!queue || !pending) return
     let frame = 0,
       closed = false
     const read = () => {
@@ -137,9 +139,8 @@ export function useChatTransientToasts(thread: string, enabled: boolean) {
       for (const name of ["pointerover", "pointerout", "focusin", "focusout", "scroll"])
         document.removeEventListener(name, schedule, true)
       window.removeEventListener("resize", schedule)
-      queue.close()
     }
-  }, [queue, thread])
+  }, [queue, thread, pending])
   const methods = useMemo(() => {
     const method = (kind: ChatToastKind) => (text: string, options?: ExternalToast) => {
       const { live, queue } = routing.current()
@@ -164,7 +165,6 @@ export function useChatTransientToasts(thread: string, enabled: boolean) {
     }
   }, [routing, thread])
   const held = presentation.held
-  void version
   return {
     toast: methods,
     toaster: queue

@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react"
-import { isModSiteChangeScope } from "../../../shared/mods/types"
+import { modUiChangeAffects } from "../../../shared/mods/types"
+import { createLatestDisplayRead } from "./latest-display-read"
 import type { FunctionTurnNotice } from "../../../shared/mods/v2/turn"
 
 const EMPTY_NOTICES: readonly FunctionTurnNotice[] = []
@@ -11,29 +12,23 @@ export function useFunctionTurnNotices(
   const [snapshot, setSnapshot] = useState<{ threadId: string; notices: FunctionTurnNotice[] }>()
   useEffect(() => {
     if (!enabled) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- Retire notices from the disabled scope before a later activation.
       setSnapshot(undefined)
       return
     }
-    let live = true
-    let sequence = 0
-    const refresh = () => {
-      const request = ++sequence
-      void window.api.mods.turnNotices(threadId).then(
-        (notices) => {
-          if (live && sequence === request) setSnapshot({ threadId, notices })
-        },
-        () => {
-          if (live && sequence === request) setSnapshot({ threadId, notices: [] })
-        }
-      )
-    }
+    const reader = createLatestDisplayRead({
+      read: () => window.api.mods.turnNotices(threadId),
+      publish: notices => setSnapshot({ threadId, notices }),
+      failed: () => setSnapshot({ threadId, notices: [] })
+    })
+    const refresh = reader.refresh
     const stop = window.api.mods.onCardsChanged((event) => {
-      if (event.threadId === threadId && !isModSiteChangeScope(event.scope)) refresh()
+      if (event.threadId === threadId && modUiChangeAffects(event.scope, "records")) refresh()
     })
     window.addEventListener("mods:configuration-changed", refresh)
     refresh()
     return () => {
-      live = false
+      reader.close()
       stop()
       window.removeEventListener("mods:configuration-changed", refresh)
     }

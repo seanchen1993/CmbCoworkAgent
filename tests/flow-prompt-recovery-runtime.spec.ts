@@ -8,8 +8,24 @@ import { tmpdir } from "node:os"
 import { basename, delimiter, dirname, join, resolve } from "node:path"
 import { fileURLToPath, pathToFileURL } from "node:url"
 import { build } from "esbuild"
+import { powerMonitor } from "./fixtures/flow-prompt-electron-platform"
 
 async function main(): Promise<void> {
+  let resumes = 0
+  const onResume = () => { resumes++ }
+  const initialListeners = powerMonitor.listenerCount("resume")
+  assert.equal(powerMonitor.getSystemIdleTime(), 0)
+  powerMonitor.on("resume", onResume)
+  try {
+    assert.equal(resumes, 0)
+    powerMonitor.emit("resume")
+    assert.equal(resumes, 1)
+  } finally {
+    powerMonitor.removeListener("resume", onResume)
+  }
+  powerMonitor.emit("resume")
+  assert.equal(resumes, 1)
+  assert.equal(powerMonitor.listenerCount("resume"), initialListeners)
   const root = resolve(dirname(fileURLToPath(import.meta.url)), "..")
   assert(existsSync(join(root, "src/main/agent/flow-prompt-runtime.ts")))
   const temporaryRoot = resolve(tmpdir())

@@ -4,7 +4,7 @@ import { useModsChatScope, useModsChatReady, useModsChatLoadError, useModsChatCu
   useModsChatPresentationCache } from "../../lib/mods-chat-scope"
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type SyntheticEvent } from "react"
 import type { ModJson, ModObject } from "../../../../shared/mods/types"
-import { isModSiteChangeScope } from "../../../../shared/mods/types"
+import { isModSiteChangeScope, modUiChangeAffects } from "../../../../shared/mods/types"
 import {
   functionQuestionPresentation,
   isFunctionDockedSite,
@@ -74,12 +74,8 @@ function FunctionSitePending({ component, slow = false, quiet = false, cache, pr
   if (!message && !slow && component !== "AskUserQuestion") return null
   return (
     <div ref={placeholder} data-function-site-pending className={message
-      ? `space-y-2 py-1${component === "UserMessage" ? " w-40 max-w-full" : ""}` : undefined}
+      ? `min-h-10 py-1${component === "UserMessage" ? " w-40 max-w-full" : ""}` : undefined}
       aria-label="正在读取内容">
-      {message && <div aria-hidden="true" className="space-y-2">
-        <div className="h-3 w-3/4 rounded bg-muted" />
-        <div className="h-3 w-1/2 rounded bg-muted" />
-      </div>}
       {slow && <p role="status" aria-live="polite" className="mt-2">内容加载较慢，请稍候…</p>}
       {component === "AskUserQuestion" && !slow && (
         <p role="status" className="px-4 py-3">正在读取问题和选项…</p>
@@ -439,8 +435,8 @@ function FunctionSiteSurface({
       setShowReading(false)
       return
     }
-    // The first protected paint uses a stable skeleton, not a repeated refresh announcement.
-    // Genuine slow reads remain observable without replacing the skeleton's geometry.
+    // Reserve row geometry without flashing bars on every virtual mount.
+    // Genuine slow reads remain observable.
     const timer = setTimeout(() => setShowReading(true), 5000)
     return () => clearTimeout(timer)
   }, [reading])
@@ -531,6 +527,7 @@ function FunctionSiteSurface({
   useEffect(() => {
     live.current = true
     const lifetime = new FunctionSiteLifetime()
+    const pendingReads = new AbortController()
     const siteVisibility = observeFunctionSiteVisibility(section.current, () => functionSiteQueue.refresh())
     lifetimeRef.current = lifetime
     let stopped = false
@@ -678,7 +675,7 @@ function FunctionSiteSurface({
           const capturedOwner = owner
           const result = await window.api.mods.siteRender(threadId, capturedOwner, capturedInput)
           return { capturedOwner, result }
-        }, queuePriority)
+        }, queuePriority, pendingReads.signal)
         if (!drawing) return
         const { capturedOwner, result } = drawing
         if (!current() || owner !== capturedOwner) return
@@ -872,7 +869,7 @@ function FunctionSiteSurface({
         reset()
         return
       }
-      if (event.threadId === threadId && event.scope !== "panes" && event.scope !== "records" && event.scope !== "cards" && event.scope !== "feedback") {
+      if (event.threadId === threadId && modUiChangeAffects(event.scope)) {
         // Unknown/global changes keep their original fail-closed read path.
         sourceRetiring = false
         // Revoke publication immediately, while coalescing notification-driven reads.
@@ -894,9 +891,18 @@ function FunctionSiteSurface({
     })
     window.addEventListener("mods:configuration-changed", reset)
     if (typeof document !== "undefined") document.addEventListener("visibilitychange", visibility)
-    update()
+    // Start the cold read for on-screen text after this commit, before timers from
+    // overscan rows. Keep the shared IPC queue, revocation and retry limits intact.
+    if (["UserMessage", "AssistantMessage", "CommandOutput"].includes(component) && siteVisibility.visible()) {
+      queueMicrotask(() => {
+        if (stopped || running || timer !== undefined) return
+        if (hidden()) update()
+        else void refresh()
+      })
+    } else update()
     return () => {
       stopped = true
+      pendingReads.abort()
       siteVisibility.close()
       cancelTimer()
       live.current = false

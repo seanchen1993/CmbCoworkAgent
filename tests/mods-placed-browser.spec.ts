@@ -219,6 +219,12 @@ async function main() {
     await page.waitForFunction(
       () => window.placedFixture.ops.filter((op) => op[0] === "read").length > 2
     )
+    const heldReadCount = await page.evaluate(() =>
+      window.placedFixture.ops.filter(op => op[0] === "read").length)
+    await page.evaluate(() => { for (let i = 0; i < 40; i++) window.placedFixture.refresh() })
+    await page.waitForTimeout(50)
+    assert.equal(await page.evaluate(() => window.placedFixture.ops.filter(op => op[0] === "read").length),
+      heldReadCount, "placed redraw bursts must wait for the one active read")
     await page.evaluate(() => window.placedFixture.replace())
     await page.getByText("卡片 replacement：0", { exact: true }).waitFor()
     await page.evaluate(() => window.placedFixture.finishRead())

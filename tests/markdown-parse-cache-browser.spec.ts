@@ -56,7 +56,7 @@ async function main() {
           }))
           builder.onLoad({ filter: /.*/, namespace: "workspace" }, () => ({
             contents:
-              "const files=[{path:'report.md',is_dir:false}];export const useThreadStateSelector=(id,select)=>select({workspacePath:id==='b'?'/workspace-b':'/workspace-a',workspaceFiles:files})"
+              "const files=[{path:'report.md',is_dir:false}];export const useThreadStateSelector=(id,select)=>id==='missing'?undefined:select({workspacePath:id==='b'?'/workspace-b':'/workspace-a',workspaceFiles:files})"
           }))
         }
       }
@@ -125,6 +125,7 @@ async function main() {
     )
     const first = await inspect()
     assert.equal(first.stats.parses, 1)
+    assert.equal(first.stats.hits, 0, "file-index completion must not reprocess the whole Markdown document")
     assert.deepEqual(first.copies, ["const value = 1"])
     assert.equal(first.previews[0].threadId, "a")
     assert.equal(first.previews[0].filePath, "/workspace-a/report.md")
@@ -145,6 +146,8 @@ async function main() {
     const second = await inspect()
     assert.equal(second.stats.parses, 1)
     assert(second.stats.hits > first.stats.hits)
+    assert.equal(second.stats.hits, first.stats.hits + 1,
+      "a warm history remount should process its document once")
     assert.equal(second.previews.at(-1)!.threadId, "b")
     assert.equal(second.previews.at(-1)!.filePath, "/workspace-b/report.md")
     assert.deepEqual(second.copies, ["const value = 1", "const value = 1"])
@@ -154,6 +157,12 @@ async function main() {
     await page.getByText("Different final text", { exact: true }).waitFor()
     const changed = await inspect()
     assert.equal(changed.stats.parses, 2)
+    await command("thread", "missing")
+    await page.getByRole("link", { name: "report.md", exact: true }).waitFor({ state: "detached" })
+    const absent = await inspect()
+    await page.waitForTimeout(150)
+    assert.deepEqual((await inspect()).stats, absent.stats,
+      "an unavailable thread must not rebuild empty file indexes and re-render repeatedly")
     assert.deepEqual(errors, [])
     const evidence = {
       first,

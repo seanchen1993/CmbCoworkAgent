@@ -71,6 +71,22 @@ async function main() {
     assert.equal(await page.getByText("Plugin waiting", { exact: true }).count(), 0)
     assert.equal(await page.getByText("Status remains", { exact: true }).count(), 1)
     pass("actually visible panel holds another mod toast while status and composer remain")
+    const idleScans = await page.evaluate(async () => {
+      let scans = 0
+      const original = document.querySelector.bind(document)
+      document.querySelector = ((selector: string) => {
+        if (selector.startsWith("[data-chat-thread-id=")) scans++
+        return original(selector)
+      }) as typeof document.querySelector
+      try {
+        for (let i = 0; i < 30; i++) {
+          document.dispatchEvent(new Event("scroll"))
+          await new Promise<void>(resolve => requestAnimationFrame(() => resolve()))
+        }
+        return scans
+      } finally { document.querySelector = original }
+    })
+    assert.equal(idleScans, 0, "an empty native toast queue must not scan the chat during scrolling")
     await page.evaluate(
       "window.holdFixture.engine('one','Engine first',350);window.holdFixture.engine('two','Engine second',350);window.holdFixture.global()"
     )

@@ -1019,6 +1019,19 @@ function getCachedPromise<T>(
   ttlMs: number,
   compute: () => Promise<T>
 ): Promise<T> {
+  const pruneSettled = () => {
+    const now = Date.now()
+    for (const [key, entry] of cache) {
+      if (entry.settledAt !== null && now - entry.settledAt >= ttlMs) cache.delete(key)
+    }
+    // Keep pending reads available for deduplication. Their completion trims the
+    // settled results; trimming must not cancel work or replace its AbortSignal.
+    for (const [key, entry] of cache) {
+      if (cache.size <= 64) break
+      if (entry.settledAt !== null) cache.delete(key)
+    }
+  }
+  pruneSettled()
   // 设计重点：缓存 Promise 而不是缓存值。
   // 这样同一时刻并发请求同一个 key 时，会复用同一条执行链，避免“缓存击穿”触发 N 次 Git 子进程。
   const now = Date.now()
@@ -1044,6 +1057,7 @@ function getCachedPromise<T>(
   const promise = compute()
     .then((result) => {
       entry.settledAt = Date.now()
+      pruneSettled()
       return result
     })
     .catch((error) => {
@@ -1055,6 +1069,7 @@ function getCachedPromise<T>(
 
   entry.promise = promise
   cache.set(cacheKey, entry)
+  pruneSettled()
   return promise
 }
 
@@ -1126,6 +1141,33 @@ const worktreeCache = new Map<string, TimedPromiseCacheEntry<boolean>>()
 const summaryCache = new Map<string, TimedPromiseCacheEntry<GitPanelSummaryStats>>()
 const branchCache = new Map<string, TimedPromiseCacheEntry<string | null>>()
 const headCommitCache = new Map<string, TimedPromiseCacheEntry<string | null>>()
+const workspaceProbeCache = new Map<string, TimedPromiseCacheEntry<{
+  gitRoot: string | null
+  repositories: DiscoveredGitRepository[]
+  isGit: boolean
+  isWorktreePath: boolean
+}>>()
+
+/** Display-only mount probe. Explicit pickers and Git operations inspect current repositories. */
+async function probeWorkspaceGitContext(folderPath: string, reuse: boolean) {
+  const inspect = async () => {
+    const discovered = await discoverWorkspaceGitRepositories(folderPath)
+    const gitRoot = discovered.find(repo => repo.isWorkspaceRoot)?.gitRoot ?? null
+    const repositories = gitRoot ? [] : discovered
+    const isGit = Boolean(gitRoot || repositories.length > 0)
+    const isWorktreePath = isGit ? await detectIsWorktreePath(folderPath) : false
+    throwIfGitReadCancelled()
+    return { gitRoot, repositories, isGit, isWorktreePath }
+  }
+  const key = getCacheKeyForPath(folderPath)
+  if (!reuse) {
+    workspaceProbeCache.delete(key)
+    return inspect()
+  }
+  // Cancellable in-flight reads retain separate signals. Only their settled result
+  // can serve another chat showing the same workspace during rapid navigation.
+  return getCachedPromise(workspaceProbeCache, key, 10_000, inspect)
+}
 
 type ThreadGitContextCache = {
   isGitRepo: boolean
@@ -4235,6 +4277,7 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
               return store.get("workspacePath", null) as string | null
             }
             store.set("workspacePath", newPath)
+            workspaceProbeCache.delete(getCacheKeyForPath(newPath))
           } else {
             store.delete("workspacePath")
           }
@@ -4286,6 +4329,7 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
               mutateLatestThreadMetadata(threadId, (current) => {
                 bindThreadWorkspace(current, newPath)
               })
+              workspaceProbeCache.delete(getCacheKeyForPath(newPath))
               // Calling startWatching here advances its generation before releasing the lease. The
               // potentially slow worker startup is awaited outside so workspace B can supersede A.
               watcherStart = startWatching(threadId, newPath)
@@ -4461,6 +4505,7 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
               mutateLatestThreadMetadata(threadId, (current) => {
                 bindThreadWorkspace(current, selectedPath)
               })
+              workspaceProbeCache.delete(getCacheKeyForPath(selectedPath))
               watcherStart = startWatching(threadId, selectedPath)
               committed = true
             })
@@ -4491,6 +4536,7 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
       // Thread-scoped selections publish their recent workspace immediately after
       // watcher revalidation above. Only the legacy global path reaches here.
       store.set("workspacePath", selectedPath)
+      workspaceProbeCache.delete(getCacheKeyForPath(selectedPath))
 
       return selectedPath
     } finally {
@@ -4643,11 +4689,8 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
         async () => {
           // Discovery already checks the workspace root before its bounded child scan.
           // Probing it separately starts a second Git process for every non-repository.
-          const discovered = await discoverWorkspaceGitRepositories(folderPath)
-          const gitRoot = discovered.find((repo) => repo.isWorkspaceRoot)?.gitRoot ?? null
-          const repositories = gitRoot ? [] : discovered
-          const isGit = Boolean(gitRoot || repositories.length > 0)
-          const isWorktreePath = isGit ? await detectIsWorktreePath(folderPath) : false
+          const { gitRoot, repositories, isGit, isWorktreePath } =
+            await probeWorkspaceGitContext(folderPath, Boolean(threadId) && !includeWorktrees)
           const worktrees = isGit && includeWorktrees && gitRoot ? await listWorktrees(gitRoot) : []
 
           // This mount-time probe intentionally has no persistence side effect. Persisting the

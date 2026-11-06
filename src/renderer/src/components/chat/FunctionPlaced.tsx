@@ -9,6 +9,7 @@ import type { ModJson } from "../../../../shared/mods/types"
 import { useFunctionDesktopOwner } from "../../lib/function-desktop-owner"
 import { useModsChatCurrent } from "../../lib/mods-chat-scope"
 import { flowDraftId } from "../../lib/flow-draft-id"
+import { createLatestDisplayRead } from "../../lib/latest-display-read"
 import { FunctionSiteContent } from "./FunctionSite"
 
 export function FunctionPlacedRows({
@@ -54,40 +55,29 @@ function FunctionPlacedRow({
   const live = useRef(false)
   const pending = useRef(false)
   const closing = useRef(false)
-  const queued = useRef(false)
-  const serial = useRef(0)
+  const readerRef = useRef<{ refresh(): void } | null>(null)
   const latest = useRef({ current, entry, owner, binding })
   latest.current = { current, entry, owner, binding }
   const refresh = useCallback(() => {
-    if (pending.current) {
-      queued.current = true
-      return
-    }
+    if (pending.current) return
     if (!live.current || !latest.current.current()) return
-    const request = ++serial.current,
-      captured = latest.current
-    void window.api.mods.placedRead(threadId, owner, entry.requestId, lease).then(
-      (drawing) => {
-        if (
-          live.current &&
-          request === serial.current &&
-          latest.current.binding === captured.binding &&
-          latest.current.current()
-        ) {
-          setSnapshot(drawing)
-          setError("")
-        }
-      },
-      () => {
-        if (live.current && request === serial.current) {
-          setSnapshot(null)
-          setError("这张插件卡片已失效或暂时无法绘制。")
-        }
-      }
-    )
-  }, [threadId, owner, entry.requestId, lease])
+    readerRef.current?.refresh()
+  }, [])
   useEffect(() => {
     live.current = true
+    const reader = createLatestDisplayRead({
+      read: () => window.api.mods.placedRead(threadId, owner, entry.requestId, lease),
+      publish: drawing => {
+        if (latest.current.binding !== binding || !latest.current.current()) return
+        setSnapshot(drawing)
+        setError("")
+      },
+      failed: () => {
+        setSnapshot(null)
+        setError("这张插件卡片已失效或暂时无法绘制。")
+      }
+    })
+    readerRef.current = reader
     setSnapshot(null)
     refresh()
     const stop = window.api.mods.onCardsChanged((event) => {
@@ -95,7 +85,8 @@ function FunctionPlacedRow({
     })
     return () => {
       live.current = false
-      serial.current++
+      reader.close()
+      if (readerRef.current === reader) readerRef.current = null
       stop()
       void window.api.mods.placedRelease(threadId, owner, entry.requestId, lease).catch(() => {})
     }
@@ -132,7 +123,6 @@ function FunctionPlacedRow({
       if (live.current) setError("操作未完成，请重新读取卡片后再试。")
     } finally {
       pending.current = false
-      queued.current = false
       if (live.current) {
         setBusy(false)
         refresh()

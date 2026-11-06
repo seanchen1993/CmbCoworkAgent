@@ -16,6 +16,8 @@ import {
   type PersistedRuntimeMessageOptions
 } from "./persisted-runtime-message"
 import { ModFunctionError } from "../../shared/mods/v2/contracts"
+import { modErrorCode } from "../mods/errors"
+import { CheckpointMessageSnapshotRecoveryError } from "../checkpointer/sqljs-saver"
 import { getModsManager } from "../mods/manager"
 import { captureThreadIncarnation, matchesThreadIncarnation } from "../services/thread-incarnation"
 import { nativeFunctionConversationWorkspace } from "../checkpointer/function-conversation-main-recovery"
@@ -67,6 +69,10 @@ async function getLatestCheckpoint(
       return null
     })
   } catch (error) {
+    // A refused protected checkpoint is not an absent checkpoint. Preserve its first
+    // failure instead of letting the next step attempt to start with an empty tail.
+    if (modErrorCode(error).startsWith("MODS_CONVERSATION_") ||
+      error instanceof CheckpointMessageSnapshotRecoveryError) throw error
     console.warn("[Agent] Failed to inspect checkpoint for durable transcript tail:", error)
     return null
   }

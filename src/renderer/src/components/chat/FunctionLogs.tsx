@@ -1,5 +1,6 @@
 import { withModsChatScope } from "../../lib/mods-chat-scope"
-import { isModSiteChangeScope } from "../../../../shared/mods/types"
+import { modUiChangeAffects } from "../../../../shared/mods/types"
+import { createLatestDisplayRead } from "../../lib/latest-display-read"
 import { useEffect, useState } from "react"
 import type { FunctionLogEntry } from "../../../../shared/mods/v2/ui-log"
 import { functionUiTextProjection } from "../../../../shared/mods/v2/ui-text"
@@ -45,24 +46,16 @@ function FunctionLogsSurface({
   }>()
   const [retry, setRetry] = useState(0)
   useEffect(() => {
-    let live = true
-    let sequence = 0
-    const refresh = () => {
-      const request = ++sequence
-      void window.api.mods.logs(threadId).then(
-        (entries) => {
-          if (live && sequence === request) setSnapshot({ threadId, entries })
-        },
-        () => {
-          if (live && sequence === request) setSnapshot({ threadId, entries: [], failed: true })
-        }
-      )
-    }
+    const reader = createLatestDisplayRead({
+      read: () => window.api.mods.logs(threadId),
+      publish: entries => setSnapshot({ threadId, entries }),
+      failed: () => setSnapshot({ threadId, entries: [], failed: true })
+    })
+    const refresh = reader.refresh
     const stop = window.api.mods.onCardsChanged((event) => {
       if (
         event.threadId === threadId &&
-        event.scope !== "panes" &&
-        !isModSiteChangeScope(event.scope)
+        modUiChangeAffects(event.scope, "records")
       )
         refresh()
     })
@@ -70,7 +63,7 @@ function FunctionLogsSurface({
     window.addEventListener("mods:configuration-changed", refresh)
     refresh()
     return () => {
-      live = false
+      reader.close()
       stop()
       stopConfiguration()
       window.removeEventListener("mods:configuration-changed", refresh)

@@ -5,7 +5,8 @@ import { fileURLToPath } from "node:url"
 import { Worker } from "node:worker_threads"
 import { DatabaseSync } from "node:sqlite"
 import { build } from "esbuild"
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest"
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest"
+import { NativeSqliteAdapter } from "../db/native-sqlite-adapter"
 import {
   THREAD_MESSAGE_HYDRATION_MAX_ACTIVE_REQUESTS,
   THREAD_MESSAGE_HYDRATION_WORKER_RESOURCE_LIMITS,
@@ -16,7 +17,8 @@ import {
 import { isThreadMessagePageContinuousWithBoundary } from "../../renderer/src/lib/thread-message-pages"
 import {
   THREAD_CONVERSATION_PRESENCE_SCAN_BYTE_BUDGET,
-  THREAD_CONVERSATION_PRESENCE_SCAN_LIMIT
+  THREAD_CONVERSATION_PRESENCE_SCAN_LIMIT,
+  readThreadMessagesPage
 } from "./page-reader"
 
 const temporaryDirectories: string[] = []
@@ -180,6 +182,34 @@ it("keeps a bounded host plugin source through actual worker paging and rejects 
   expect(result.messages.filter((row) => row.id !== "human").every((row) =>
     row.prompt_origin === undefined)).toBe(true)
   expect(result.messages).toHaveLength(rows.length)
+})
+
+it("checks all marker sources once per page snapshot and notices a newly added ledger entry", () => {
+  const { database } = createDatabase()
+  database.exec(`ALTER TABLE thread_messages ADD COLUMN function_row_json TEXT;
+    CREATE TABLE function_conversation_projection_receipts(thread_id TEXT, uuid TEXT);
+    CREATE TABLE function_conversation_presentation_dispositions(thread_id TEXT, uuid TEXT);
+    WITH RECURSIVE rows(i) AS (VALUES(0) UNION ALL SELECT i + 1 FROM rows WHERE i < 399)
+    INSERT INTO thread_messages(thread_id, message_id, role, content_json, created_at, ordinal)
+    SELECT 'chat', 'id-' || i, 'assistant', '"text"', i, i FROM rows;`)
+  let checks = 0
+  const prepare = NativeSqliteAdapter.prototype.prepareReadOne
+  const spy = vi.spyOn(NativeSqliteAdapter.prototype, "prepareReadOne").mockImplementation(function (
+    this: NativeSqliteAdapter, sql: string
+  ) {
+    const read = prepare.call(this, sql)
+    return bindings => { checks++; return read(bindings) }
+  })
+  const read = () => readThreadMessagesPage(database, {
+    type: "read-page", requestId: 1, databasePath: "", threadId: "chat",
+    cancellationBuffer: new SharedArrayBuffer(4), options: { limit: 400 }
+  })
+  try {
+    expect(read().page.messages).toHaveLength(400)
+    expect(checks).toBeLessThanOrEqual(4)
+    database.exec("INSERT INTO function_conversation_presentation_dispositions VALUES('chat','id-199')")
+    expect(read).toThrow()
+  } finally { spy.mockRestore() }
 })
 
 function insertShapeFixture(database: DatabaseSync): void {

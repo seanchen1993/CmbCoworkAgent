@@ -50,6 +50,20 @@ describe("physical stream run failure disposition", () => {
 })
 
 describe("physical stream run handoff", () => {
+  it("explains a refused recovery without exposing history in the diagnostic", () => {
+    const error = Error("MODS_CONVERSATION_RECOVERY_REQUIRED")
+    error.stack = "private content at persistedMessageToRuntimeMessage"
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
+    const events: string[] = []
+    try {
+      failPhysicalStreamRunBeforeSetupPublication({
+        error, sendError: message => events.push(message), sendDone: () => events.push("done")
+      })
+      expect(events).toEqual([expect.stringContaining("请保留原会话"), "done"])
+      expect(warn.mock.calls.flat()).toEqual(["[Agent] Conversation recovery stopped:",
+        error.message, "persistedMessageToRuntimeMessage"])
+    } finally { warn.mockRestore() }
+  })
   it("reports a complete pre-publication terminal outcome", () => {
     const events: string[] = []
 

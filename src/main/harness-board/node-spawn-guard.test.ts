@@ -29,6 +29,7 @@ function syncEntry(deps: Record<string, unknown>) {
   const declarations = [
     "resolveHarnessKnowledgeWorkspace",
     "createKnowledgeCommandProject",
+    "resolveProjectKnowledgePath",
     "syncHarnessProjectConstraints"
   ].map((name) => {
     const node = source.statements.find(
@@ -116,6 +117,7 @@ describe("native create verification at the process queue boundary", () => {
         writeFileSync(board, '{"source":"retained"}')
         const queue = queueFixture()
         const launch = vi.fn(startOwnedHookCommand)
+        const persistRuntimeDirectory = vi.fn()
         const invoke = runner({
           harnessInvocationSemaphore: queue,
           startOwnedHookCommand: launch
@@ -134,7 +136,9 @@ describe("native create verification at the process queue boundary", () => {
             adapter: { id: "fixture", name: "Fixture" },
             config: {}
           }),
-          readBoardConfigPlatformTextFromValue: () => "fixture sync",
+          readBoardConfigPlatformTextFromValue: (_config: unknown, key: string) =>
+            key === "pull_knowledge" ? "fixture sync" : "",
+          persistMarketRuntimeDirectory: persistRuntimeDirectory,
           getOpenworkDir: () => root,
           pluginToHarnessAdapterSnapshot: (plugin: { id: string }) => ({
             id: plugin.id,
@@ -163,6 +167,9 @@ describe("native create verification at the process queue boundary", () => {
           expect(launch).toHaveBeenCalledOnce()
         }
         expect(readFileSync(board, "utf8")).toBe('{"source":"retained"}')
+        // This command reports no knowledge directory; the real resolver must not
+        // invent or persist a runtime path after a successful unprotected sync.
+        expect(persistRuntimeDirectory).not.toHaveBeenCalled()
         expect(queue.released).toHaveBeenCalledOnce()
       } finally {
         rmSync(root, { recursive: true, force: true })

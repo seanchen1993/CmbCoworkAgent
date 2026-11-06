@@ -3915,11 +3915,18 @@ export class FunctionModsManager {
       this.sessions.get(JSON.stringify([entry.workspace, entry.threadId])) !== entry) return
     context.signal.throwIfAborted()
     context.assertCurrent()
-    this.host.activateConversationOwner?.(Object.freeze({ ...context, readOnly: false }))
+    // Keep live authority checks above inside session admission so revocation
+    // retires the old owner. Writable owners only skip redundant host activation.
+    if (!context.readOnly) return
+    const active = Object.freeze({ ...context, readOnly: false })
+    this.host.activateConversationOwner?.(active)
+    entry.conversationOwner = active
   }
 
   private ensureConversationOwner(entry: SessionEntry): void {
-    if (entry.conversationOwner || !entry.session ||
+    // Discovery may create an empty session (e.g. all installed sources are unapproved).
+    // It owns no conversation. Existing saved history is resolved separately by the coordinator.
+    if (entry.conversationOwner || !entry.session?.plugins.length ||
       developmentUiOnly(entry.session.plugins, entry.developmentPlugins)) return
     const context: FunctionConversationOwnerContext = Object.freeze({ owner: entry,
       workspace: entry.workspace, threadId: entry.threadId, signal: entry.session.lifecycleSignal,
@@ -5609,14 +5616,7 @@ export class FunctionModsManager {
             publish: (value, signal) => this.host.publish(workspace, value, signal)
           })
           current.conversationGuard = () => { current.session?.lifecycleSignal.throwIfAborted(); assertLive() }
-          if (!registrationOnly && !developmentUiOnly(plugins, current.developmentPlugins)) {
-            current.conversationOwner = Object.freeze({
-              owner: current, workspace, threadId, signal: current.session.lifecycleSignal,
-              readOnly: !current.initializer.allowsStartupEffects,
-              assertCurrent: current.conversationGuard
-            })
-            current.closeConversationOwner = this.host.openConversationOwner?.(current.conversationOwner)
-          }
+          if (!registrationOnly) this.ensureConversationOwner(current)
           if (this.classicEndDrain) current.session.prepareQuitDrain(this.classicEndDrain)
           current.session = trackFunctionSession(current.session, current.activity)
           if (!registrationOnly) await this.startEntry(current)

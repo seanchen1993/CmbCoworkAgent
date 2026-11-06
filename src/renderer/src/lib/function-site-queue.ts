@@ -25,6 +25,9 @@ export function createFunctionSiteQueue() {
     start: () => void
   }> = []
   function pump(): void {
+    // A full physical queue cannot admit work. Read current priorities only when a
+    // slot actually opens; repeated virtual mounts otherwise rescan the entire backlog.
+    if (active === 4) return
     // Scroll can move an overscan row on screen while it waits. Reclassify pending
     // work using observer state, without forcing layout or increasing IPC concurrency.
     for (const entry of pending)
@@ -66,8 +69,10 @@ export function createFunctionSiteQueue() {
     run<T>(
       current: () => boolean,
       work: () => Promise<T>,
-      priority: Priority | (() => Priority) = "ordinary"
+      priority: Priority | (() => Priority) = "ordinary",
+      signal?: AbortSignal
     ): Promise<T | null> {
+      if (signal?.aborted) return Promise.resolve(null)
       // Revoked virtualized rows do not consume admission capacity for new visible rows.
       if (pending.length >= 256)
         for (let index = pending.length - 1; index >= 0; index--) {
@@ -79,12 +84,22 @@ export function createFunctionSiteQueue() {
         }
       if (pending.length >= 256) return Promise.reject(new Error("MODS_UI_SITE_QUEUE_LIMIT"))
       return new Promise<T | null>((resolve, reject) => {
+        const cancelPending = () => {
+          const index = pending.indexOf(entry)
+          if (index < 0) return
+          pending.splice(index, 1)
+          entry.stale()
+        }
         const entry = {
           priority: typeof priority === "function" ? priority() : priority,
           readPriority: typeof priority === "function" ? priority : undefined,
           current,
-          stale: () => resolve(null),
+          stale: () => {
+            signal?.removeEventListener("abort", cancelPending)
+            resolve(null)
+          },
           start: () => {
+            signal?.removeEventListener("abort", cancelPending)
             if (!current()) {
               resolve(null)
               return
@@ -106,6 +121,7 @@ export function createFunctionSiteQueue() {
           }
         }
         pending.push(entry)
+        signal?.addEventListener("abort", cancelPending, { once: true })
         pump()
       })
     }

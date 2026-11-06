@@ -58,14 +58,26 @@ function fixture(ready = Promise.resolve()) {
   return {
     presentation,
     mods,
-    notify: () => {
-      for (const listener of listeners) listener({ threadId: "thread", scope: "feedback" })
+    notify: (scope = "feedback") => {
+      for (const listener of listeners) listener({ threadId: "thread", scope })
     }
   }
 }
 
 const snapshot = (text: string): FunctionPresentationSnapshot => ({
   entries: [{ id: text, plugin: "test", kind: "status", text }]
+})
+
+it("does not reread feedback for repeated card or message rendering", async () => {
+  const f = fixture()
+  await vi.waitFor(() => expect(f.mods.desktopFeedback).toHaveBeenCalledTimes(1))
+  for (let i = 0; i < 100; i++) {
+    f.notify("placed")
+    f.notify("site-presentations:AssistantMessage")
+    f.notify("cards")
+  }
+  await Promise.resolve()
+  expect(f.mods.desktopFeedback).toHaveBeenCalledTimes(1)
 })
 
 it("coalesces concurrent card notifications and publishes the latest feedback", async () => {

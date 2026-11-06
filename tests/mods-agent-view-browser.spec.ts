@@ -37,11 +37,13 @@ async function main() {
       import {SubagentStreamPanel} from ${JSON.stringify(resolve(renderer, "components/chat/SubagentStreamPanel.tsx"))};
       import {useModsAgentInputTarget} from ${JSON.stringify(resolve(renderer, "lib/mods-agent-input-target.ts"))};
       useAppStore.setState({accountRevision:1,currentThreadId:'a',mainView:'thread',threads:[{thread_id:'a',created_at:1,metadata:{workspacePath:'a',cmb_thread_incarnation:'birth'}}]});
-      let pending=null, serial=0, status='running', defer=false, finish, broken=false;const viewAgents=new Map();
-      const childCalls=[]; window.childFixture={calls:childCalls,open:(id='child',mode='readonly')=>{status='running';pending={id:'intent-'+(++serial),threadId:'a',workspace:'a',agentId:id,parentIncarnation:'birth',sourceDigest:'digest',mode};viewAgents.set(pending.id,id)},
+      let pending=null, serial=0, status='running', defer=false, finish, broken=false;const viewAgents=new Map(),viewRequests=new Set();
+      let pendingReads=0;
+      window.api.mods.onAgentViewRequested=fn=>{viewRequests.add(fn);return()=>viewRequests.delete(fn)};
+      const childCalls=[]; window.childFixture={calls:childCalls,reads:()=>pendingReads,open:(id='child',mode='readonly')=>{status='running';pending={id:'intent-'+(++serial),threadId:'a',workspace:'a',agentId:id,parentIncarnation:'birth',sourceDigest:'digest',mode};viewAgents.set(pending.id,id);for(const fn of viewRequests)fn({threadId:'a'})},
         defer:()=>{defer=true},finish:()=>finish?.(),broken:()=>{broken=true},account:()=>useAppStore.setState({accountRevision:2}),
         replace:()=>useAppStore.setState({threads:[{thread_id:'a',created_at:2,metadata:{workspacePath:'a',cmb_thread_incarnation:'new'}}]})};
-      window.api.mods.agentViewPending=async()=>{const value=pending;pending=null;return value};
+      window.api.mods.agentViewPending=async()=>{pendingReads++;const value=pending;pending=null;return value};
       window.api.mods.agentViewRead=async input=>{const agentId=viewAgents.get(input.intentId);childCalls.push(['read',input]);if(defer){defer=false;window.childFixture.waiting=true;await new Promise(resolve=>finish=resolve);window.childFixture.waiting=false};if(broken)throw Error('MODS_PLUGIN_CHANGED');return {status:{agentId,status,model:'test',description:'受控真实记录展示夹具',startedAt:1,scope:{workspace:'a',readOnly:true,blockedTools:[]}},
         messages:{agentId,messages:[{role:'assistant',text:agentId==='other'?'另一任务原文':input.cursor?'后续原文':'已有原文',toolUses:[],toolResults:[]}],history:'partial',truncated:!input.cursor,skippedMessages:input.cursor?0:1,...(input.cursor?{}:{nextCursor:'page-two'})}}};
       window.api.mods.agentViewStop=async input=>{childCalls.push(['stop',input]);status='stopping';return {agentId:'child',stopRequested:true,status}};
@@ -91,6 +93,9 @@ async function main() {
     )
     console.log("Mounted child viewer fixture")
     await page.addStyleTag({ content: style })
+    await page.waitForFunction("window.childFixture.reads() === 1")
+    await page.waitForTimeout(1200)
+    assert.equal(await page.evaluate("window.childFixture.reads()"), 1, "idle chat must not poll for view requests")
     const panel = page.getByRole("region", { name: "插件子任务只读记录" })
     await page.getByRole("button", { name: "模拟已验证的原生查看意图" }).click()
     await panel.getByText("已有原文", { exact: true }).waitFor()

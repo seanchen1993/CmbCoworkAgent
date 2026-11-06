@@ -7,7 +7,7 @@ import {
 } from "./function-completion-summary"
 import { publishClawNotice } from "@/lib/claw-sidebar"
 import { withModsChatScope } from "../../lib/mods-chat-scope"
-import { isModSiteChangeScope } from "../../../../shared/mods/types"
+import { modUiChangeAffects } from "../../../../shared/mods/types"
 import { useEffect, useState } from "react"
 import { invalidateModsGlobalEnabled, readModsGlobalEnabled } from "../../lib/mods-global-enabled"
 import type { CompletionEvidenceRecord } from "../../../../main/mods/v2/completion-evidence"
@@ -199,8 +199,7 @@ function FunctionCompletionEvidenceSurface({
     const stopCards = window.api.mods.onCardsChanged((event) => {
       if (
         event.threadId === threadId &&
-        event.scope !== "panes" &&
-        !isModSiteChangeScope(event.scope)
+        modUiChangeAffects(event.scope, "records")
       )
         void refresh()
     })

@@ -16,7 +16,7 @@ import { normalizeTranscriptReasoning } from "../../shared/transcript-reasoning"
 import { isFunctionPluginPromptOrigin } from "../../shared/mods/v2/plugin-prompt"
 import { functionConversationTranscriptFields } from "../../shared/mods/v2/conversation-transcript"
 import { NativeSqliteAdapter } from "../db/native-sqlite-adapter"
-import { hasFunctionConversationProjectionMarker, hasFunctionConversationProjectionReceiptSchema }
+import { findFunctionConversationProjectionMarkers, hasFunctionConversationProjectionReceiptSchema }
   from "../db/function-conversation-projection-read"
 import type { FunctionConversationProjectionColumns } from "../db/function-conversation-projection-receipt"
 import { captureThreadIncarnation, matchesThreadIncarnation } from "../services/thread-incarnation"
@@ -440,12 +440,17 @@ export function formatSealedThreadMessageColumns(columns: FunctionConversationPr
 }
 
 const canonicalAdapters = new WeakMap<DatabaseSync, NativeSqliteAdapter>()
-function canonicalPageMessage(database: DatabaseSync, row: ThreadMessageRow,
-  cancellation: Int32Array): { message?: Message; truncated: boolean;
-    witness: CanonicalThreadDisplayWitness } | undefined {
+function canonicalPageAdapter(database: DatabaseSync): NativeSqliteAdapter {
   let adapter = canonicalAdapters.get(database)
-  if (!adapter) { adapter = new NativeSqliteAdapter(database); canonicalAdapters.set(database, adapter) }
-  if (!hasFunctionConversationProjectionMarker(adapter, row.thread_id, row.message_id)) return undefined
+  if (!adapter) {
+    adapter = new NativeSqliteAdapter(database)
+    canonicalAdapters.set(database, adapter)
+  }
+  return adapter
+}
+function canonicalPageMessage(database: DatabaseSync, adapter: NativeSqliteAdapter, row: ThreadMessageRow,
+  cancellation: Int32Array): { message?: Message; truncated: boolean;
+    witness: CanonicalThreadDisplayWitness } {
   if (!hasFunctionConversationProjectionReceiptSchema(adapter))
     throw Error("MODS_CONVERSATION_MIGRATION_REQUIRED")
   const thread = database.prepare("SELECT created_at,metadata FROM threads WHERE thread_id=?")
@@ -1035,12 +1040,20 @@ export function readThreadMessagesPage(
     const returnedCandidates: CandidateRow[] = []
     const truncatedMessageIds: string[] = []
     const canonicalWitnesses: CanonicalThreadDisplayWitness[] = []
+    // All rows and both private ledgers are in this same read transaction. Check page
+    // membership in batches, then run the complete seal on every marked row.
+    const adapter = canonicalPageAdapter(database)
+    const markedIds = rowsById.size
+      ? findFunctionConversationProjectionMarkers(adapter, request.threadId, [...rowsById.keys()])
+      : new Set<string>()
     let responseBytes = THREAD_MESSAGE_HYDRATION_RESPONSE_OVERHEAD
     for (const candidate of selected) {
       throwIfCancelled(cancellation)
       const row = rowsById.get(candidate.message_id)
       if (!row) continue
-      const canonical = canonicalPageMessage(database, row, cancellation)
+      const canonical = markedIds.has(row.message_id)
+        ? canonicalPageMessage(database, adapter, row, cancellation)
+        : undefined
       if (canonical && !canonical.message) {
         canonicalWitnesses.push(canonical.witness)
         // The cursor advances across omitted physical rows, including an entirely hidden page.

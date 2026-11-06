@@ -1,6 +1,6 @@
 import { FunctionSiteLifetime } from "./function-site-lifecycle"
 import { FunctionSitePresentationCache } from "./function-site-presentation"
-import { isModSiteChangeScope } from "../../../shared/mods/types"
+import { modUiChangeAffects } from "../../../shared/mods/types"
 import { createContext, useContext, useEffect, useCallback, useMemo, useRef, useState, type ComponentType } from "react"
 
 export const ModsChatScope = createContext<{
@@ -84,8 +84,7 @@ export function useModsChatState(
         presentationCache.current?.invalidateProjection(event.scope.slice("site-projection:".length))
       else if (event.scope?.startsWith("site-presentations:"))
         presentationCache.current?.invalidate(event.scope.slice("site-presentations:".length))
-      else if (!isModSiteChangeScope(event.scope) &&
-        !["panes", "records", "cards", "feedback"].includes(event.scope ?? ""))
+      else if (modUiChangeAffects(event.scope))
         presentationCache.current?.invalidate()
     })
     window.addEventListener("mods:configuration-changed", refresh)

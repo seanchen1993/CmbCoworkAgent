@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import { createLiveDisplayMessageProjector } from "./live-display-message-projection"
 import type { LiveStreamMessage } from "./live-stream-messages"
 import type { Message } from "../types"
@@ -60,6 +60,48 @@ describe("live display native identity", () => {
     const next = project(baseline, [{ ...original, content: "answer extended" }])
     expect(next.structureVersion).toBe(first.structureVersion)
     expect(next.contentVersion).toBeGreaterThan(first.contentVersion)
+  })
+
+  it("retains fallback dates while their rows remain live or in resident history", () => {
+    vi.useFakeTimers()
+    try {
+      vi.setSystemTime(1000)
+      const project = createLiveDisplayMessageProjector()
+      const live: LiveStreamMessage = { id: "retained", type: "ai", content: "answer" }
+      const baseline: Message[] = []
+      const first = project(baseline, [live]).messages[0]
+      vi.setSystemTime(2000)
+      const next = project(baseline, [{ ...live, content: "answer extended" },
+        { id: "next", type: "ai", content: "next answer" }])
+      expect(next.messages[0].created_at).toBe(first.created_at)
+      const history = [first]
+      project(history, [])
+      vi.setSystemTime(3000)
+      expect(project(history, [live]).messages[0].created_at).toBe(first.created_at)
+    } finally { vi.useRealTimers() }
+  })
+
+  it("releases fallback dates after their rows leave both live output and resident history", () => {
+    vi.useFakeTimers()
+    try {
+      const project = createLiveDisplayMessageProjector()
+      const baseline: Message[] = []
+      for (let turn = 0; turn < 64; turn++) {
+        vi.setSystemTime(1000 + turn)
+        project(baseline, [{ id: `turn-${turn}`, type: "ai", content: "answer" }])
+      }
+      const last = project(baseline, [{ id: "last", type: "ai", content: "answer" }]).messages[0]
+      project([last], [])
+      project(baseline, [])
+      vi.setSystemTime(5000)
+      for (const id of ["turn-0", "turn-63", "last"]) {
+        expect(project(baseline, [{ id, type: "ai", content: "answer" }]).messages[0]
+          .created_at.getTime()).toBe(5000)
+      }
+      const authoritative = new Date(900)
+      expect(project(baseline, [{ id: "last", type: "ai", content: "answer",
+        start_at: authoritative }]).messages[0].created_at).toBe(authoritative)
+    } finally { vi.useRealTimers() }
   })
 
   it("invalidates structure when provenance is added or removed at the same ID", () => {

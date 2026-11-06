@@ -92,8 +92,21 @@ async function main() {
     await load()
     const workspace = page.getByRole("dialog", { name: "插件创作工作区", exact: true })
     const guide = page.locator('[aria-label="插件创作使用指引"]')
-    // A native candidate opens its workspace; the first-use guide starts without a help click.
-    await workspace.waitFor()
+    const openRestoredWorkspace = async () => {
+      const entry = page.locator('[data-app-guide="workspace"]')
+      await entry.waitFor()
+      await page.evaluate(() => new Promise(done =>
+        requestAnimationFrame(() => requestAnimationFrame(done))))
+      assert.equal(await workspace.isVisible(), false,
+        "Restored creator records must expose an entry without reopening the workspace")
+      assert.equal(await guide.count(), 0,
+        "Restored records must not consume or reopen the guide before an explicit workspace click")
+      await entry.click()
+      await workspace.waitFor()
+    }
+    // Restored native candidates stay quiet. The first explicit workspace open starts
+    // first-use guidance without requiring a second click on the help button.
+    await openRestoredWorkspace()
     try {
       await guide.getByRole("heading", { name: "一个聊天，完成插件创作" }).waitFor()
     } catch (error) {
@@ -156,7 +169,7 @@ async function main() {
       []
     )
     await load()
-    await workspace.waitFor()
+    await openRestoredWorkspace()
     assert.equal(
       await guide.count(),
       0,
@@ -258,8 +271,8 @@ async function main() {
     )
     assert.equal(await page.locator('[data-app-guide="workspace"]').count(), 0)
     await page.evaluate("window.fixture.nativeDelivery()")
-    // An unresolved native delivery opens the workspace directly at its saved-result controls.
-    await workspace.waitFor()
+    // Historical delivery remains quiet until explicitly opened, then selects saved results.
+    await openRestoredWorkspace()
     assert.equal(
       await workspace
         .getByRole("button", { name: "3 · 保存插件", exact: true })

@@ -647,20 +647,28 @@ describe("失效注册清理的缓存和并发保护", () => {
     expect(existsSync(join(bucketFor(root), "processed", "snapshot"))).toBe(true)
   })
 
-  it.each([false, true])("保留扫描期间同路径的新注册（再次删除=%s）", async (removeAgain) => {
-    const root = missingRoot()
-    const slow = git(makeRepo().repoRoot, "rev-parse", "--show-toplevel")
-    writeRegistry([root, slow])
-    let updatedAt: string | undefined
-    await duringPausedSweep(slow, async () => {
-      recreate(root)
-      await autoRegister(root)
-      updatedAt = readRegistry().find((repo) => repo.gitRoot === root)?.updatedAt
-      if (removeAgain) await removeOwnedRecreatedRoot(root)
+  describe("扫描期间同路径的新注册", () => {
+    let root: string, slow: string
+    beforeEach(() => {
+      // Real Git fixture creation is setup, not part of the paused-sweep race.
+      // Both setup and the actual race retain the original default time limit.
+      root = missingRoot()
+      slow = git(makeRepo().repoRoot, "rev-parse", "--show-toplevel")
+      writeRegistry([root, slow])
     })
 
-    expect(readRegistry().find((repo) => repo.gitRoot === root)?.updatedAt).toBe(updatedAt)
-    expect(readRegistry().map((repo) => repo.gitRoot)).toContain(root)
+    it.each([false, true])("保留新注册（再次删除=%s）", async (removeAgain) => {
+      let updatedAt: string | undefined
+      await duringPausedSweep(slow, async () => {
+        recreate(root)
+        await autoRegister(root)
+        updatedAt = readRegistry().find((repo) => repo.gitRoot === root)?.updatedAt
+        if (removeAgain) await removeOwnedRecreatedRoot(root)
+      })
+
+      expect(readRegistry().find((repo) => repo.gitRoot === root)?.updatedAt).toBe(updatedAt)
+      expect(readRegistry().map((repo) => repo.gitRoot)).toContain(root)
+    })
   })
 
   it("保留扫描期间恢复但尚未重新注册的目录", async () => {

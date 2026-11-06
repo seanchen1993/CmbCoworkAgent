@@ -3168,6 +3168,11 @@ const api = {
       ipcRenderer.on("mods:editor-navigation", listener)
       return () => ipcRenderer.removeListener("mods:editor-navigation", listener)
     }),
+    onAgentViewRequested: (callback: (event: { threadId: string }) => void): (() => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, value: { threadId: string }) => callback(value)
+      ipcRenderer.on("mods:agent-view-requested", listener)
+      return () => ipcRenderer.removeListener("mods:agent-view-requested", listener)
+    },
     agentViewPending: (threadId: string): Promise<import("../shared/mods/v2/agent-tasks").AgentViewIntent | null> =>
       ipcRenderer.invoke("mods:agent-view-pending", threadId),
     agentViewRead: (input: { threadId: string; intentId: string; cursor?: string }): Promise<{

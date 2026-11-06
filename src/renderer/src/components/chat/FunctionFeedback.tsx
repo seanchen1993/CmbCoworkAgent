@@ -1,5 +1,6 @@
 import { withModsChatScope } from "../../lib/mods-chat-scope"
-import { isModSiteChangeScope } from "../../../../shared/mods/types"
+import { modUiChangeAffects } from "../../../../shared/mods/types"
+import { createLatestDisplayRead } from "../../lib/latest-display-read"
 import { useCallback, useEffect, useState, useSyncExternalStore } from "react"
 import { X } from "lucide-react"
 import {
@@ -29,27 +30,20 @@ function FunctionFeedbackSurface({
   const nativePresentation = !requestId && nativeApi && Boolean(presentation.owner)
   useEffect(() => {
     if (nativePresentation) return
-    let live = true
-    let sequence = 0
-    const refresh = () => {
-      const request = ++sequence
-      void window.api.mods.feedback(threadId).then(
-        (entries) => {
-          if (live && request === sequence) setSnapshot({ threadId, entries })
-        },
-        () => {
-          if (live && request === sequence) setSnapshot({ threadId, entries: [] })
-        }
-      )
-    }
+    const reader = createLatestDisplayRead({
+      read: () => window.api.mods.feedback(threadId),
+      publish: entries => setSnapshot({ threadId, entries }),
+      failed: () => setSnapshot({ threadId, entries: [] })
+    })
+    const refresh = reader.refresh
     const unsubscribe = window.api.mods.onCardsChanged((event) => {
-      if (event.threadId === threadId && event.scope !== "panes" && event.scope !== "records" && !isModSiteChangeScope(event.scope)) refresh()
+      if (event.threadId === threadId && modUiChangeAffects(event.scope, "feedback")) refresh()
     })
     const stopConfiguration = window.api.mods.onConfigurationChanged(refresh)
     window.addEventListener("mods:configuration-changed", refresh)
     refresh()
     return () => {
-      live = false
+      reader.close()
       unsubscribe()
       stopConfiguration()
       window.removeEventListener("mods:configuration-changed", refresh)

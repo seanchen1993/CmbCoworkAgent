@@ -430,13 +430,23 @@ export class FunctionNativeDisplayProjection {
       key,
       proof,
       async () => {
-        const assertCurrent = current
+        // This drawing has no guest callbacks or actions. Its local copies need only
+        // the row identity; check the full source, permission and scope on both sides
+        // of every external publication and again before handing data to the cache.
+        const assertRow = () => {
+          this.lifetime.signal.throwIfAborted()
+          if (this.rows.get(scope)?.get(key) !== row)
+            throw new ModFunctionError("MODS_DISPLAY_ROW_CHANGED")
+        }
+        const assertPublication = () => {
+          this.scopes.assertCurrent(scope)
+          admission.assertCurrent()
+          assertRow()
+        }
         const publish = async (value: ModJson): Promise<ModJson> => {
-          assertCurrent()
-          admission.assertCurrent()
+          assertPublication()
           const result = await this.host.publish(workspace, value, this.lifetime.signal)
-          admission.assertCurrent()
-          assertCurrent()
+          assertPublication()
           return result
         }
         if (
@@ -447,7 +457,7 @@ export class FunctionNativeDisplayProjection {
           // Existing oversized/empty messages have never entered the guest render API.
           // Keep that ceiling and whole-Markdown semantics, but protect both boundaries.
           const result = await this.protectHostMessage(component, input, publish)
-          assertCurrent()
+          current()
           return result
         }
         const received: ModObject = {
@@ -456,7 +466,7 @@ export class FunctionNativeDisplayProjection {
           requestId: randomUUID(),
           props: input
         }
-        const drawing = new FunctionNativeDrawing(received, assertCurrent)
+        const drawing = new FunctionNativeDrawing(received, assertRow)
         const tree = drawing.keep(received)
         validateFunctionSiteTree(tree)
         drawing.beginPublication()
@@ -467,7 +477,7 @@ export class FunctionNativeDisplayProjection {
           throw new ModFunctionError("MODS_UI_PUBLICATION")
         validateFunctionSiteTree(output.tree)
         const nativeContent = await drawing.protect(output.tree, publish)
-        assertCurrent()
+        current()
         return { component, tree: output.tree, nativeContent }
       },
       retain

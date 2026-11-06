@@ -3,6 +3,7 @@ import { resolve } from "node:path"
 import { runInNewContext } from "node:vm"
 import ts from "typescript"
 import { expect, it, vi } from "vitest"
+import { modUiChangeAffects } from "../../shared/mods/types"
 
 function productionExpression(file: string, select: (node: ts.Node) => boolean, scope: object) {
   const source = ts.createSourceFile(
@@ -43,7 +44,7 @@ it("preserves native site and Pane scopes through the actual main/preload notifi
     expect(channel).toBe("mods:cards-changed")
     listener!({}, payload)
   })
-  const reconcileComposition = vi.fn(), reconcileCreatorReuse = vi.fn()
+  const reconcileComposition = vi.fn(), reconcileCreatorReuse = vi.fn(), prune = vi.fn()
   const changed = productionExpression(
     "src/main/ipc/mods.ts",
     (node) =>
@@ -53,12 +54,17 @@ it("preserves native site and Pane scopes through the actual main/preload notifi
       node.initializer.parameters.length === 2 &&
       node.initializer.getText().includes('"mods:cards-changed"'),
     {
+      modUiChangeAffects,
+      approvalInbox: { prune },
       getCreatorCompositionService: () => ({ reconcile: reconcileComposition }),
       reconcileCreatorReuse,
       window: () => ({ webContents: { send } })
     }
   )
-  for (const scope of ["site:actual-owner", "site:second-owner", "site-invalidated:actual-owner", "site-redraw:actual-owner", "panes", "records", "cards", "source-retiring:1", "source-replaced:2", undefined]) {
+  const scopes = ["site:actual-owner", "site:second-owner", "site-invalidated:actual-owner",
+    "site-redraw:actual-owner", "site-projection:row", "site-presentations:AssistantMessage",
+    "panes", "placed", "feedback", "records", "cards", "source-retiring:1", "source-replaced:2", undefined]
+  for (const scope of scopes) {
     changed("actual-thread", scope)
     expect(received).toHaveBeenLastCalledWith({
       threadId: "actual-thread",
@@ -66,13 +72,48 @@ it("preserves native site and Pane scopes through the actual main/preload notifi
     })
   }
   expect(on).toHaveBeenCalledWith("mods:cards-changed", expect.any(Function))
-  expect(received).toHaveBeenCalledTimes(10)
-  expect(reconcileComposition).toHaveBeenCalledTimes(10)
-  expect(reconcileCreatorReuse).toHaveBeenCalledTimes(10)
-  expect(reconcileComposition.mock.calls).toEqual(Array.from({ length: 10 }, () => ["actual-thread"]))
-  expect(reconcileCreatorReuse.mock.calls).toEqual(Array.from({ length: 10 }, () => ["actual-thread"]))
+  expect(received).toHaveBeenCalledTimes(scopes.length)
+  expect(prune).toHaveBeenCalledTimes(3)
+  expect(reconcileComposition.mock.calls).toEqual(Array.from({ length: 3 }, () => ["actual-thread"]))
+  expect(reconcileCreatorReuse.mock.calls).toEqual(Array.from({ length: 3 }, () => ["actual-thread"]))
   unsubscribe()
   expect(removeListener).toHaveBeenCalledWith("mods:cards-changed", listener)
+})
+
+it("notifies a child view only after native admission and removes the preload listener", async () => {
+  let listener: ((event: object, payload: unknown) => void) | undefined
+  const removeListener = vi.fn()
+  const subscribe = productionExpression("src/preload/index.ts", node =>
+    ts.isPropertyAssignment(node) && node.name.getText() === "onAgentViewRequested", {
+    ipcRenderer: {
+      on: (channel: string, callback: typeof listener) => {
+        expect(channel).toBe("mods:agent-view-requested")
+        listener = callback
+      },
+      removeListener
+    }
+  })
+  const received = vi.fn()
+  const unsubscribe = subscribe(received)
+  const native = vi.fn(async () => ({ requested: true }))
+  const send = vi.fn((channel: string, payload: unknown) => {
+    expect(channel).toBe("mods:agent-view-requested")
+    listener!({}, payload)
+  })
+  const agentTask = productionExpression("src/main/ipc/mods.ts", node =>
+    ts.isPropertyAssignment(node) && node.name.getText() === "agentTask", {
+    manager: { functionAgentTask: native },
+    window: () => ({ isDestroyed: () => false, webContents: { send, isDestroyed: () => false } })
+  })
+  await agentTask("workspace", "thread", {}, "agent.status")
+  expect(send).not.toHaveBeenCalled()
+  native.mockRejectedValueOnce(Error("DENIED"))
+  await expect(agentTask("workspace", "thread", {}, "ui.view")).rejects.toThrow("DENIED")
+  expect(send).not.toHaveBeenCalled()
+  await expect(agentTask("workspace", "thread", {}, "ui.view")).resolves.toEqual({ requested: true })
+  expect(received).toHaveBeenCalledExactlyOnceWith({ threadId: "thread" })
+  unsubscribe()
+  expect(removeListener).toHaveBeenCalledWith("mods:agent-view-requested", listener)
 })
 
 

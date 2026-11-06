@@ -1,4 +1,6 @@
 import { readFileSync } from "node:fs"
+import { runInNewContext } from "node:vm"
+import ts from "typescript"
 import { describe, expect, it } from "vitest"
 
 const fileViewer = readFileSync(new URL("./FileViewer.tsx", import.meta.url), "utf8")
@@ -65,6 +67,31 @@ const mediaProtocol = readFileSync(
   new URL("../../../../main/workspace-file-preview/media-protocol.ts", import.meta.url),
   "utf8"
 )
+
+/** Run the production routing predicates and callback without unrelated Electron panes. */
+function resourceDrawerSelection(context: Record<string, unknown>) {
+  const source = ts.createSourceFile("ResourcePanelOverlay.tsx", resourcePanelOverlay,
+    ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX)
+  const component = source.statements.find(node => ts.isFunctionDeclaration(node) &&
+    node.name?.text === "ResourcePanelOverlay") as ts.FunctionDeclaration
+  const declarations = component.body!.statements.flatMap(statement =>
+    ts.isVariableStatement(statement) ? [...statement.declarationList.declarations] : [])
+  const initializer = (name: string): ts.Expression => {
+    const declaration = declarations.find(node => node.name.getText(source) === name)
+    if (!declaration?.initializer) throw Error(`Missing overlay routing declaration: ${name}`)
+    return declaration.initializer
+  }
+  const selectMode = initializer("selectMode") as ts.CallExpression
+  const code = ["standardRightPanelAvailable", "standardRightPanelMounted"]
+    .map(name => `const ${name} = ${initializer(name).getText(source)}`).join("\n")
+  return runInNewContext(ts.transpileModule(`${code}\n;({
+    mounted: standardRightPanelMounted,
+    select: ${selectMode.arguments[0].getText(source)}
+  })`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, context) as {
+    mounted: boolean
+    select(mode: string): void
+  }
+}
 
 describe("persisted active file preview isolation", () => {
   it("routes the active tab through one stable latest-wins lane with generation cleanup", () => {
@@ -206,9 +233,32 @@ describe("persisted active file preview isolation", () => {
     expect(resourcePanelOverlay).toContain("if (!standardRightPanelMounted) return")
     expect(resourcePanelOverlay).toContain("setOpen(false)")
     expect(resourcePanelOverlay).toContain("clearPreviewRequest()")
-    expect(resourcePanelOverlay).toMatch(
-      /if \(standardRightPanelMounted\) \{\s*setOpen\(false\)\s*setRightModule\(nextMode\)/
-    )
+    for (const renderedMainView of ["thread", "harness", "settings"]) {
+      for (const rightModule of ["claw", "preview"]) {
+        for (const rightPanelCollapsed of [false, true]) {
+          for (const isAgentFocusActive of [false, true]) {
+            for (const renderedPanelThreadId of ["thread-a", null]) {
+              const calls: unknown[][] = []
+              const routing = resourceDrawerSelection({
+                renderedMainView, rightModule, rightPanelCollapsed,
+                isAgentFocusActive, renderedPanelThreadId,
+                setProtectedOnlyOpen: (value: boolean) => calls.push(["protected", value]),
+                setOpen: (value: boolean) => calls.push(["open", value]),
+                setRightModule: (value: string) => calls.push(["rightModule", value]),
+                setMode: (value: string) => calls.push(["drawerMode", value])
+              })
+              const available = renderedMainView !== "settings" && !!renderedPanelThreadId &&
+                !rightPanelCollapsed && !isAgentFocusActive
+              expect(routing.mounted).toBe(available && rightModule !== "claw")
+              routing.select("git")
+              expect(calls).toEqual(available
+                ? [["protected", false], ["open", false], ["rightModule", "git"]]
+                : [["protected", false], ["drawerMode", "git"], ["open", true]])
+            }
+          }
+        }
+      }
+    }
   })
 
   it("keeps the resource drawer resizable and closes it only from the close button", () => {

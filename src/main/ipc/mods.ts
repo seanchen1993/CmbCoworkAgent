@@ -16,6 +16,7 @@ import { setProjectRuntimeFunctions } from "../harness-board/project-runtime-fun
 import { ApplicationCompletionPolicies } from "../mods/v2/application-completion-policy"
 import { createHostProjectInputIdentity } from "../harness-board/project-runtime/package-input-identity"
 import { readModsChatDisplayCapability } from "./mods-display-capability"
+import { captureDirectDisplayScope } from "./mods-display-thread-scope"
 import { registerBuiltinAdvisorHandlers } from "./builtin-advisor"
 import { registerCommunityExampleHandlers } from "./mods-community-examples"
 import { registerPluginStartUseHandlers } from "./plugin-start-use"
@@ -124,7 +125,7 @@ import {
 import { functionCallTurn, functionCallIdentity, functionCallAuthority, functionCallAgent,
   withFunctionTransportExecution, runFunctionHostCall, observeFunctionProcess } from "../mods/v2/host-call"
 import { encodeModJson, parseModJson } from "../../shared/mods/validation"
-import type { ModCommandDescriptor, ModJson, ModObject } from "../../shared/mods/types"
+import { modUiChangeAffects, type ModCommandDescriptor, type ModJson, type ModObject } from "../../shared/mods/types"
 import { resolveAgentModeFromMetadata } from "../../shared/agent-mode-metadata"
 import { FunctionModsManager } from "../mods/v2/manager"
 import { FunctionRuntimeClient } from "../mods/v2/runtime-client"
@@ -693,7 +694,15 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
       projectCheck: (...args) => manager.runCompletionProjectCheck(...args),
       dialogs: nativeFunctionDialogAccess,
       sendPeer: (...args) => manager.sendFunctionPeer(...args),
-      agentTask: (...args) => manager.functionAgentTask(...args),
+      agentTask: async (...args) => {
+        const result = await manager.functionAgentTask(...args)
+        if (args[3] === "ui.view") {
+          const owner = window()
+          if (owner && !owner.isDestroyed() && !owner.webContents.isDestroyed())
+            owner.webContents.send("mods:agent-view-requested", { threadId: args[1] })
+        }
+        return result
+      },
       prepareAgent: (workspace, threadId, grant, input, signal) =>
         runAgentCommand(workspace, threadId, grant, signal, () =>
           manager.prepareFunctionAgentSpawn(workspace, threadId, grant, input, signal)
@@ -1007,30 +1016,12 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
             assertFunctionDataScope(workspace, threadId)
           }
         }
-        const database = getDb()
-        const row = getThreadRuntimeScope(threadId)
-        if (!row || writableThreadScope(threadId) !== workspace)
-          throw new ModError("MODS_CALL_SCOPE_CHANGED")
-        const incarnation = captureThreadIncarnation(row)
-        return () => {
-          if (getDb() !== database || !matchesThreadIncarnation(getThreadRuntimeScope(threadId), incarnation) ||
-            writableThreadScope(threadId) !== workspace)
-            throw new ModError("MODS_CALL_SCOPE_CHANGED")
-        }
+        return directDisplayScope(workspace, threadId).assertCurrent
       },
       captureDisplayScope: (workspace, threadId) => {
         // Native child execution keeps its separate host identity protocol.
         if (readNativeChildModsContext(threadId)) return undefined
-        const database = getDb(), row = getThreadRuntimeScope(threadId)
-        if (!row || writableThreadScope(threadId) !== workspace)
-          throw new ModError("MODS_CALL_SCOPE_CHANGED")
-        const incarnation = captureThreadIncarnation(row)
-        return { database, workspace, threadId, incarnation, assertCurrent: () => {
-          if (getDb() !== database ||
-            !matchesThreadIncarnation(getThreadRuntimeScope(threadId), incarnation) ||
-            writableThreadScope(threadId) !== workspace)
-            throw new ModError("MODS_CALL_SCOPE_CHANGED")
-        } }
+        return directDisplayScope(workspace, threadId)
       },
       creatorHook: (workspace, threadId) =>
         manager.functionModelHookSource(functionCallAuthority(workspace, threadId)),
@@ -1119,9 +1110,14 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
         window()?.webContents.send("mods:markdown-preview-invalidated", { threadId, receipt }),
       platformChanged: (threadId) => window()?.webContents.send("mods:platform-changed", { threadId }),
       changed: (threadId, scope) => {
-        approvalInbox.prune()
-        getCreatorCompositionService()?.reconcile(threadId)
-        reconcileCreatorReuse?.(threadId)
+        // A display-only redraw changes neither grants nor the creator's selected sources.
+        // Keep revocation/source and legacy notifications eager; avoid rescanning the
+        // author's installed source set on each scrolling row or live widget update.
+        if (modUiChangeAffects(scope)) {
+          approvalInbox.prune()
+          getCreatorCompositionService()?.reconcile(threadId)
+          reconcileCreatorReuse?.(threadId)
+        }
         window()?.webContents.send("mods:cards-changed", {
           threadId,
           ...(scope === undefined ? {} : { scope })
@@ -2228,6 +2224,13 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
     const workspace = readThreadWorkspacePath(threadId)
     return manager.workspaceKey(workspace)
   }
+  function directDisplayScope(workspace: string, threadId: string) {
+    return captureDirectDisplayScope(workspace, threadId, {
+      database: getDb, read: getThreadRuntimeScope,
+      canonical: path => manager.workspaceKey(path),
+      isChild: id => Boolean(readNativeChildModsContext(id))
+    })
+  }
   function readThreadWorkspacePath(threadId: string): string {
     if (typeof threadId !== "string" || threadId.length > 200)
       throw new ModError("MODS_THREAD_INVALID")
@@ -2282,11 +2285,14 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
     return writableThreadScope(threadId)
   }
   function writableThreadScope(threadId: string): string {
-    const workspace = threadScope(threadId)
+    if (typeof threadId !== "string" || threadId.length > 200)
+      throw new ModError("MODS_THREAD_INVALID")
     const { thread } = readNativeChildModsThread(threadId, getThreadRuntimeScope)
     if (!thread) throw new ModError("MODS_THREAD_MISSING")
     const metadata =
       typeof thread.metadata === "string" ? JSON.parse(thread.metadata) : thread.metadata
+    if (typeof metadata?.workspacePath !== "string") throw new ModError("MODS_WORKSPACE_REQUIRED")
+    const workspace = manager.workspaceKey(metadata.workspacePath)
     if (
       metadata?.remoteState === "historical" ||
       (metadata?.targetKind === "inbox" && metadata?.remoteReadOnly === true)

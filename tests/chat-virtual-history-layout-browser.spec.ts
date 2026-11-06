@@ -12,6 +12,7 @@ interface LayoutSnapshot {
   visibleEmptyFrames: number
   maxMountedRows: number
   mounts: number
+  maskedMounts: number
   unmounts: number
   anomalies: unknown[]
 }
@@ -35,7 +36,7 @@ async function main() {
       window.layoutDetached=false;window.layoutAnchorLease=0;
       const readLease=()=>window.layoutDetached?window.layoutAnchorLease:null;
       let phase='initial';
-      const counters={mounts:0,unmounts:0,frames:0,emptyFrames:0,visibleEmptyFrames:0,maxMountedRows:0,anomalies:[],trace:[]};window.layoutCounters=counters;
+      const counters={mounts:0,maskedMounts:0,unmounts:0,frames:0,emptyFrames:0,visibleEmptyFrames:0,maxMountedRows:0,anomalies:[],trace:[]};window.layoutCounters=counters;
       const make=(start,count,tall=false)=>Array.from({length:count},(_,i)=>({id:'row-'+(start+i),
         role:i%2?'assistant':'user',content:String(tall?820:[90,950,160,620,55][i%5])}));
       function Fixture(){
@@ -188,9 +189,12 @@ async function main() {
             loader: "tsx",
             resolveDir: process.cwd(),
             contents: args.path.endsWith("MessageBubble")
-              ? `import React,{useEffect}from'react';export function MessageBubble({message}){
+              ? `import React,{useEffect,useLayoutEffect,useRef}from'react';export function MessageBubble({message}){
+              const node=useRef(null);
+              useLayoutEffect(()=>{if(node.current.closest('[inert],[aria-hidden="true"],[style*="clip-path: inset(50%)"]'))
+                window.layoutCounters.maskedMounts++},[]);
               useEffect(()=>{window.layoutCounters.mounts++;return()=>{window.layoutCounters.unmounts++}},[]);
-              return <div style={{height:Number(message.content),boxSizing:'border-box',background:'#ddd'}}>{message.id}</div>}`
+              return <div ref={node} style={{height:Number(message.content),boxSizing:'border-box',background:'#ddd'}}>{message.id}</div>}`
               : "export const HookLogChip=()=>null,FunctionTurnNotices=()=>null,ChatSearchContext=()=>null"
           }))
         }
@@ -256,6 +260,7 @@ async function main() {
     await settle()
     await phase("drag")
     const beforeDrag = await snapshot()
+    assert.equal(beforeDrag.maskedMounts, 0, "Readable rows must not mount behind a transcript-wide mask")
     const bar = page.locator('[data-scroll-area-scrollbar][data-orientation="vertical"]')
     const thumb = bar.locator("[data-state]")
     const thumbBox = await thumb.boundingBox()
@@ -538,6 +543,7 @@ async function main() {
     writeFileSync(resolve(output, "delayed-range-anchor-evidence.json"), JSON.stringify({
       materialized, afterMaterializedGrowth
     }, null, 2) + "\n")
+    assert.equal((await snapshot()).maskedMounts, 0, "Scrolling and switching threads never re-mask readable rows")
     assert.deepEqual(errors, [])
     const evidence = {
       beforeDrag,

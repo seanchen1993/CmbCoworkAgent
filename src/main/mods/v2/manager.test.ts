@@ -708,6 +708,8 @@ async function fixture(
   let publish = async (value: ModJson): Promise<ModJson> => value
   const changed = vi.fn<(threadId: string, scope?: ModUiChangeScope) => void>()
   const allGuests = new Set<FunctionGuestRuntime>()
+  const openConversationOwner = vi.fn(() => () => {})
+  const activateConversationOwner = vi.fn()
   const manager = new FunctionModsManager(
     store,
     {
@@ -717,6 +719,8 @@ async function fixture(
       enabled: () => enabled,
       clawApplicable: (threadId) => threadId !== "harness",
       readSession,
+      openConversationOwner,
+      activateConversationOwner,
       prepareSessionTitle,
       registeredTool: async (_workspace, _threadId, _grant, _input, _origin, _signal, run) => run(),
       publish: async (_, value) => publish(value),
@@ -751,6 +755,8 @@ async function fixture(
     root,
     plugin,
     manager,
+    openConversationOwner,
+    activateConversationOwner,
     control: store,
     changed,
     setPublication(value: typeof publish) {
@@ -776,6 +782,38 @@ async function fixture(
     }
   }
 }
+
+it("keeps a failed ordinary model step and its retry outside Mods history with no admitted plugin", async () => {
+  const f = await fixture()
+  const signal = new AbortController().signal
+  const step = (core: Parameters<typeof f.manager.turnStep>[3]) => f.manager.turnStep(
+    f.root, "ordinary", { turnId: "turn", index: 0, messageCount: 1, model: "fixture" }, core, signal
+  )
+  const failed = await step(async function* () { yield* []; throw Error("MODEL_UNAVAILABLE") })
+  await expect(async () => { for await (const _chunk of failed) void _chunk }).rejects.toThrow("MODEL_UNAVAILABLE")
+  const retry = await step(async function* () {
+    yield { kind: "text", text: "retry" }
+    return { answer: "retry" }
+  })
+  for await (const chunk of retry) expect(chunk).toEqual({ kind: "text", text: "retry" })
+  await expect(retry.result).resolves.toEqual({ answer: "retry" })
+  expect(f.openConversationOwner).not.toHaveBeenCalled()
+  await f.approve()
+  await f.manager.commands(f.root, "plugin-thread")
+  expect(f.openConversationOwner).toHaveBeenCalledTimes(1)
+})
+
+it("reuses a writable owner without reactivating it and still rechecks revocation", async () => {
+  const f = await fixture()
+  const digest = await f.approve()
+  const before = await f.manager.commands(f.root, "thread")
+  expect(before.length).toBeGreaterThan(0)
+  expect(await f.manager.commands(f.root, "thread")).toEqual(before)
+  expect(f.openConversationOwner).toHaveBeenCalledTimes(1)
+  expect(f.activateConversationOwner).not.toHaveBeenCalled()
+  f.control.grant(f.root, "function:function-commands", digest, false)
+  await expect(f.manager.commands(f.root, "thread")).rejects.toThrow("MODS_GRANT_REVOKED")
+})
 
 it("native presentation reads only resident sessions and retains actual instance revocation", async () => {
   const f = await fixture()

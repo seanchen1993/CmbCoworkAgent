@@ -6803,11 +6803,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               activeRunSettledPromise,
               resolveActiveRunSettled
             ),
-          onActiveError: (error) => {
-            const errorMessage = error instanceof Error ? error.message : String(error)
-            safeSendToWindow(window, channel, { type: "error", error: errorMessage })
-            safeSendToWindow(window, channel, { type: "done" })
-          },
+          onActiveError: (error) => closePhysicalStreamRunBeforeSetupPublication(window, channel, error),
           ...(runExecutionContext.fileComposerSubmission
             ? { onOwnedCancellation: () => safeSendToWindow(window, channel, { type: "done" }) }
             : {})
@@ -11202,11 +11198,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               resumeRunSettledPromise,
               resolveResumeRunSettled
             ),
-          onActiveError: (error) => {
-            const errorMessage = error instanceof Error ? error.message : String(error)
-            safeSendToWindow(window, channel, { type: "error", error: errorMessage })
-            safeSendToWindow(window, channel, { type: "done" })
-          }
+          onActiveError: (error) => closePhysicalStreamRunBeforeSetupPublication(window, channel, error)
         })
         pendingPhysicalStreamRunSetupGuard = physicalStreamRunSetupGuard
         const abortNativeResume = () => { nativeContext?.onRunCancelled?.(); abortController.abort() }
@@ -12458,11 +12450,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             interruptRunSettledPromise,
             resolveInterruptRunSettled
           ),
-        onActiveError: (error) => {
-          const errorMessage = error instanceof Error ? error.message : String(error)
-          safeSendToWindow(window, channel, { type: "error", error: errorMessage })
-          safeSendToWindow(window, channel, { type: "done" })
-        }
+        onActiveError: (error) => closePhysicalStreamRunBeforeSetupPublication(window, channel, error)
       })
       pendingPhysicalStreamRunSetupGuard = physicalStreamRunSetupGuard
       physicalStreamRunSetupGuard.addCleanup((_wasActive, wasOwner) => {

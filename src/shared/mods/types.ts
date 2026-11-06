@@ -12,6 +12,22 @@ export function isModSiteChangeScope(scope: unknown): scope is `site:${string}` 
       (scope.startsWith("site-redraw:") && scope.length > 12) ||
       (scope.startsWith("site-projection:") && scope.length > 16))
 }
+/** Named UI changes concern that surface only. Unknown/legacy changes still refresh all consumers. */
+export function modUiChangeAffects(scope: ModUiChangeScope | undefined,
+  surface?: "panes" | "placed" | "records" | "cards" | "feedback"): boolean {
+  if (isModSiteChangeScope(scope) || (typeof scope === "string" && scope.startsWith("site-presentations:") &&
+    scope.length > "site-presentations:".length)) return false
+  switch (scope) {
+    case "panes":
+    case "placed":
+    case "records":
+    case "cards":
+    case "feedback":
+      return scope === surface
+    default:
+      return true
+  }
+}
 /** Only a configuration form schema refresh; missing/unknown payload still revokes display authority. */
 export interface ModConfigurationChangeEvent { scope: "schema" }
 

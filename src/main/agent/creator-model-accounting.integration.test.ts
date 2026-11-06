@@ -362,7 +362,14 @@ it("charges real provider attempts across main, compaction, function completion 
     traceIds: ["parent", "child"]
   })
   expect(f.model()?.cost).not.toHaveProperty("amount")
-  expect(f.values.size).toBe(1)
+  // The explicit creator mode is persisted independently of the shared request ledger.
+  expect(
+    [...f.values.keys()].filter((key) => key.startsWith("creator-request-budget:"))
+  ).toHaveLength(1)
+  expect(
+    [...f.values].filter(([key]) => key.startsWith("development-mode:")).map(([, value]) => value)
+  ).toEqual(["creator"])
+  expect(f.values.size).toBe(2)
 })
 
 it("charges each HTTP retry and preserves unknown failed usage after a successful attempt", async () => {

@@ -19,7 +19,8 @@ async function main() {
       import {CustomModelDialog} from './src/renderer/src/components/chat/CustomModelDialog';
       const item={id:'fixture',name:'Budget fixture',model:'fixture',baseUrl:'https://example.invalid',
         hasApiKey:true,maxTokens:128000,maxOutputTokens:81920,temperature:0.1,topP:0.95,topK:40};
-      window.saved=[];window.api={models:{
+      window.saved=[];window.modelListeners=new Set();window.api={models:{
+        onChanged:listener=>{window.modelListeners.add(listener);return()=>window.modelListeners.delete(listener)},
         getBuiltinConfigs:async()=>[],getCustomConfigs:async()=>[item],getDefault:async()=>'custom:fixture',
         getTokenLimits:async()=>({defaultMaxTokens:128000,minMaxTokens:32000,maxMaxTokens:1000000,
           defaultMaxOutputTokens:8192,minMaxOutputTokens:1,maxMaxOutputTokens:100000,
@@ -28,7 +29,9 @@ async function main() {
         upsertCustomConfig:async value=>{window.saved.push(value);Object.assign(item,value);return {id:'fixture'}},
         setDefault:async()=>{}
       }};
-      createRoot(document.getElementById('root')).render(<CustomModelDialog open
+      const root=createRoot(document.getElementById('root'));
+      window.closeModelFixture=()=>root.unmount();
+      root.render(<CustomModelDialog open
         selectedModelId='custom:fixture' onOpenChange={()=>{}}/>);
     `
     },
@@ -87,6 +90,9 @@ async function main() {
       1
     )
     await budget.screenshot({ path: resolve(output, "budget-explanation.png") })
+    assert.equal(await page.evaluate("window.modelListeners.size"), 1)
+    await page.evaluate("window.closeModelFixture()")
+    assert.equal(await page.evaluate("window.modelListeners.size"), 0)
     assert.deepEqual(errors, [])
     console.log("PASS model input budget explanation and unchanged explicit output", output)
   } finally {

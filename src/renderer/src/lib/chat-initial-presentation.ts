@@ -7,7 +7,7 @@ export function isFirstLiveChatUserRow(
   return loading && !releasedHistory && visibleCount === 1 && firstRole === "user"
 }
 
-/** Presentation only: never changes site authorization, data or scrolling. */
+/** Scroll-readiness observation only. It must never hide approved content. */
 export interface InitialChatPresentationSample {
   ready: boolean
   geometry: string
@@ -118,8 +118,6 @@ export function sampleInitialChatPresentation(
   // Virtual overscan can keep refining total height after visible text has settled.
   // Only viewport/visible-row geometry belongs to the initial presentation barrier.
   const geometry: unknown[] = [viewport.scrollTop, viewport.clientHeight]
-  let count = 0
-  let ready = true
   // Rows share most ancestors. Read each style once per sample; later frames must recheck it.
   const visibility = new WeakMap<HTMLElement, boolean>()
   const isPresented = (element: HTMLElement): boolean => {
@@ -156,10 +154,11 @@ export function sampleInitialChatPresentation(
     // Overscan sites are not part of this presentation barrier.
     if (box.bottom <= bounds.top || box.top >= bounds.bottom || box.width <= 0 || box.height <= 0)
       continue
-    count++
+    // This hint is for scroll restoration, not permission to paint the list. Measure
+    // one readable anchor; unrelated pending/overscan rows must not delay it.
+    if (site.querySelector("[data-function-site-pending]") || !isPresented(site)) continue
     geometry.push(box.x, box.y, box.width, box.height, site.dataset.functionSite)
-    if (site.querySelector("[data-function-site-pending]")) ready = false
-    if (!isPresented(site)) ready = false
+    return { ready: true, geometry: JSON.stringify(geometry) }
   }
   // System/tool/hook rows legitimately bypass FunctionSite. They must not pay the stall deadline.
   for (const row of root.querySelectorAll<HTMLElement>("[data-item-index]")) {
@@ -173,9 +172,9 @@ export function sampleInitialChatPresentation(
       !row.textContent?.trim()
     )
       continue
-    count++
+    if (!isPresented(row)) continue
     geometry.push("native-row", box.x, box.y, box.width, box.height)
-    if (!isPresented(row)) ready = false
+    return { ready: true, geometry: JSON.stringify(geometry) }
   }
-  return { ready: ready && count > 0, geometry: JSON.stringify(geometry) }
+  return { ready: false, geometry: "" }
 }

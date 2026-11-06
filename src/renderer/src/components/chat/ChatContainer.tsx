@@ -4551,29 +4551,53 @@ export function ChatContainer({
         }
       }
     }
-    const cancelPendingHistoryAnchorFromUserGesture = (): void => {
+    const cancelPendingHistoryAnchorFromUserGesture = (direction?: "up" | "down"): void => {
       pendingChatSessionAnchorRef.current = null
       invalidateDurableMessageReveal()
       const anchor = pendingDurableHistoryAnchorRef.current
-      if (!anchor) return
+      const state = chatScrollStateRef.current
+      // Native wheel/touch movement and its scroll event need not arrive in the same frame.
+      // Yield an in-flight initial/follow positioning write before it can undo that movement.
+      // A gesture at the corresponding boundary still keeps the existing following behavior.
+      const interruptsPositioning = state?.programmaticScrollGuard && direction &&
+        (direction === "up" ? scrollParent.scrollTop > 0 :
+          scrollParent.scrollTop + scrollParent.clientHeight < scrollParent.scrollHeight)
+      if (!anchor && !interruptsPositioning) return
       dispatchChatScrollEvent({
         type: "USER_DETACH",
         source: "user-input",
-        generation: anchor.generation
+        generation: anchor?.generation ?? state?.generation
       })
     }
-    const detachFromExplicitWheel = (event: WheelEvent): void => {
-      if (event.deltaY < 0) {
+    const recordDirectionalScrollGesture = (event: Event, direction: "up" | "down"): void => {
+      if (event.defaultPrevented) return
+      // A scrollable code block or tool pane consumes its own gesture. At its edge,
+      // only the browser's normal scroll chaining can hand the gesture to this viewport.
+      for (const target of event.composedPath()) {
+        if (target === scrollParent) break
+        if (!(target instanceof HTMLElement) || target.scrollHeight <= target.clientHeight) continue
+        const style = window.getComputedStyle(target)
+        if (!/^(auto|scroll|overlay)$/.test(style.overflowY)) continue
+        if ((direction === "up" ? target.scrollTop > 0 :
+          target.scrollTop + target.clientHeight < target.scrollHeight) ||
+          /^(contain|none)$/.test(style.overscrollBehaviorY)) return
+      }
+      if (direction === "up") {
         downwardUserScrollIntentUntilRef.current = 0
         upwardUserScrollIntentUntilRef.current =
           performance.now() + CHAT_USER_SCROLL_INTENT_WINDOW_MS
-        cancelPendingHistoryAnchorFromUserGesture()
-      } else if (event.deltaY > 0) {
+        cancelPendingHistoryAnchorFromUserGesture("up")
+      } else {
         upwardUserScrollIntentUntilRef.current = 0
         downwardUserScrollIntentUntilRef.current =
           performance.now() + CHAT_USER_SCROLL_INTENT_WINDOW_MS
-        cancelPendingHistoryAnchorFromUserGesture()
+        cancelPendingHistoryAnchorFromUserGesture("down")
       }
+    }
+    const detachFromExplicitWheel = (event: WheelEvent): void => {
+      if (event.ctrlKey) return
+      if (event.deltaY < 0) recordDirectionalScrollGesture(event, "up")
+      else if (event.deltaY > 0) recordDirectionalScrollGesture(event, "down")
     }
     const scrollRoot = scrollRef.current
     const detachFromScrollbarPointer = (event: PointerEvent): void => {
@@ -4615,15 +4639,9 @@ export function ChatContainer({
     const detachFromTouchScroll = (event: TouchEvent): void => {
       const nextTouchY = event.touches[0]?.clientY ?? null
       if (lastTouchY !== null && nextTouchY !== null && nextTouchY > lastTouchY + 1) {
-        downwardUserScrollIntentUntilRef.current = 0
-        upwardUserScrollIntentUntilRef.current =
-          performance.now() + CHAT_USER_SCROLL_INTENT_WINDOW_MS
-        cancelPendingHistoryAnchorFromUserGesture()
+        recordDirectionalScrollGesture(event, "up")
       } else if (lastTouchY !== null && nextTouchY !== null && nextTouchY < lastTouchY - 1) {
-        upwardUserScrollIntentUntilRef.current = 0
-        downwardUserScrollIntentUntilRef.current =
-          performance.now() + CHAT_USER_SCROLL_INTENT_WINDOW_MS
-        cancelPendingHistoryAnchorFromUserGesture()
+        recordDirectionalScrollGesture(event, "down")
       }
       lastTouchY = nextTouchY
     }
@@ -4650,20 +4668,14 @@ export function ChatContainer({
         event.key === "Home" ||
         (event.key === " " && event.shiftKey)
       ) {
-        downwardUserScrollIntentUntilRef.current = 0
-        upwardUserScrollIntentUntilRef.current =
-          performance.now() + CHAT_USER_SCROLL_INTENT_WINDOW_MS
-        cancelPendingHistoryAnchorFromUserGesture()
+        recordDirectionalScrollGesture(event, "up")
       } else if (
         event.key === "ArrowDown" ||
         event.key === "PageDown" ||
         event.key === "End" ||
         (event.key === " " && !event.shiftKey)
       ) {
-        upwardUserScrollIntentUntilRef.current = 0
-        downwardUserScrollIntentUntilRef.current =
-          performance.now() + CHAT_USER_SCROLL_INTENT_WINDOW_MS
-        cancelPendingHistoryAnchorFromUserGesture()
+        recordDirectionalScrollGesture(event, "down")
       }
     }
 

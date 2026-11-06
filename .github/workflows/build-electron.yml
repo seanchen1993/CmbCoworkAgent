@@ -733,6 +733,22 @@ jobs:
 
       # Validate the exact Windows package produced above; do not rebuild or install the app here.
       # A failed check blocks uploads/release. Linux keeps its existing native/GLIBC checks.
+      - name: Verify chat first paint, scrolling and ordinary retry (Windows)
+        if: matrix.platform == 'win'
+        timeout-minutes: 5
+        env:
+          COMPOSITION_E2E_PACKAGED_DIR: dist/win-unpacked
+        shell: pwsh
+        run: |
+          npx vitest run src/main/ipc/mods-display-thread-scope.test.ts src/main/ipc/mods-display-execution.test.ts src/main/ipc/thread-runtime-tail.test.ts
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node --import tsx tests/mods-first-paint-browser.spec.ts
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node --import tsx tests/chat-virtual-history-layout-browser.spec.ts
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node --import tsx tests/chat-ordinary-retry-native-e2e.spec.ts
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Verify chat display, plugin installation and inline Mods controls (Windows)
         if: matrix.platform == 'win'
         timeout-minutes: 5
@@ -795,6 +811,17 @@ jobs:
           COMPOSITION_E2E_PACKAGED_DIR: dist/win-unpacked
           COMPOSITION_E2E_ARTIFACT_ROOT: output/chat-history-package-validation
         run: node --import tsx tests/chat-history-interaction-e2e.spec.ts
+
+      # Continuous HTTP output while switching and scrolling; isolated local model only.
+      - name: Validate chat interactions while a model is running (Windows)
+        if: matrix.platform == 'win'
+        timeout-minutes: 10
+        shell: pwsh
+        env:
+          COMPOSITION_E2E_PACKAGED_DIR: dist/win-unpacked
+          COMPOSITION_E2E_ARTIFACT_ROOT: output/chat-running-package-validation
+          CHAT_RUNNING_DISPLAY_GUEST: "1"
+        run: node --import tsx tests/chat-running-workload-e2e.spec.ts
 
       - name: Verify asynchronous Mods compilation and compiler lifecycle
         if: matrix.platform == 'win'

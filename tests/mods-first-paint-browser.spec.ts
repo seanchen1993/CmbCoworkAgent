@@ -40,7 +40,7 @@ async function main() {
       window.api.mods.onCardsChanged=()=>()=>{};
       window.api.mods.siteMountOutcome=async(thread,component)=>{const owner='first-'+(++seq);
         calls.push(['mount',owner]);owners.set(owner,component);return {state:'mounted',owner}};
-      window.api.mods.siteRender=async(thread,owner,props)=>{calls.push(['render',owner,owners.get(owner)]);
+      window.api.mods.siteRender=async(thread,owner,props)=>{calls.push(['render',owner,owners.get(owner),String(props.index)]);
         await new Promise(r=>pending.push(r));return {key:owner,id:owner,plugin:'engine',
         generation:owner,title:'message',rows:2,closeOnEscape:false,
         tree:{type:'Text',props:{},children:['SAFE '+props.index]},
@@ -66,7 +66,7 @@ async function main() {
                 <div className='relative min-w-0 max-w-full overflow-hidden'>{site}</div>
               </div>
             </div>
-          </div>:site
+          </div>:index===1?<div key={index} style={{position:'absolute',top:3000}}>{site}</div>:site
         })}</div>}</ModsChatScope.Provider>}
       window.first={calls,held:()=>pending.length,release:()=>pending.splice(0).forEach(r=>r()),
         configure:(enabled,hold=false)=>{capability=enabled;holdCapability=hold;for(const fn of configs)fn()},
@@ -82,11 +82,10 @@ async function main() {
       const geometry = await page.locator("[data-user-message-geometry]").evaluate(row => {
         const bubble = row.querySelector("[data-user-bubble]") as HTMLElement
         const pending = row.querySelector("[data-function-site-pending]") as HTMLElement
-        const firstBar = pending.querySelector('[aria-hidden="true"] > div') as HTMLElement
         const r = row.getBoundingClientRect(), b = bubble.getBoundingClientRect()
-        const p = pending.getBoundingClientRect(), bar = firstBar.getBoundingClientRect()
+        const p = pending.getBoundingClientRect()
         return { display: getComputedStyle(row).display, rowWidth: r.width,
-          bubbleWidth: b.width, pendingWidth: p.width, barWidth: bar.width, pendingHeight: p.height,
+          bubbleWidth: b.width, pendingWidth: p.width, paintsBars: pending.childElementCount > 0, pendingHeight: p.height,
           rowLeft: r.left, rowRight: r.right, bubbleLeft: b.left, bubbleRight: b.right,
           pendingLeft: p.left, pendingRight: p.right, scrollWidth: bubble.scrollWidth,
           clientWidth: bubble.clientWidth, viewport: innerWidth }
@@ -95,7 +94,7 @@ async function main() {
       assert(geometry.pendingWidth >= (width >= 374 ? 144 : 48),
         `UserMessage pending must not collapse inside its shrink-to-fit bubble: ${JSON.stringify(geometry)}`)
       assert(geometry.pendingWidth <= 176 && geometry.pendingHeight > 0)
-      assert(geometry.barWidth > 0 && geometry.barWidth <= geometry.pendingWidth)
+      assert.equal(geometry.paintsBars, false, "A protected row must reserve space without flashing grey bars")
       assert(geometry.bubbleWidth <= geometry.rowWidth * 0.8 + 1)
       assert(geometry.pendingLeft >= geometry.bubbleLeft && geometry.pendingRight <= geometry.bubbleRight + 1)
       assert(geometry.bubbleLeft >= geometry.rowLeft && geometry.bubbleRight <= geometry.rowRight + 1)
@@ -103,10 +102,12 @@ async function main() {
       assert(geometry.scrollWidth <= geometry.clientWidth + 1, "Narrow user bubble must not overflow")
     }
     await page.setViewportSize({ width: 1280, height: 900 })
-    console.log("PASS actual application CSS keeps user skeleton nonzero in shrink-to-fit desktop and narrow bubbles")
+    console.log("PASS protected rows reserve geometry without grey bars or unverified text at all three widths")
     const firstCalls = await page.evaluate("window.first.calls.filter(c=>c[0]==='mount'||c[0]==='render')") as string[][]
     assert.equal(firstCalls.filter(call => call[0] === "mount").length, 4)
     assert.equal(firstCalls.filter(call => call[0] === "render").length, 4)
+    assert(!firstCalls.some(call => call[0] === "render" && call[3] === "1"),
+      "An earlier offscreen mount must not take one of the first four visible message reads")
     for (const [, owner] of firstCalls.filter(call => call[0] === "mount")) {
       assert(firstCalls.findIndex(call => call[0] === "render" && call[1] === owner) >
         firstCalls.findIndex(call => call[0] === "mount" && call[1] === owner))

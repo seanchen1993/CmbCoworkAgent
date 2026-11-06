@@ -76,7 +76,17 @@ export function failPhysicalStreamRunBeforeSetupPublication({
   sendError: (message: string) => void
   sendDone: () => void
 }): void {
-  sendError(error instanceof Error ? error.message : String(error))
+  const message = error instanceof Error ? error.message : String(error)
+  if (message === "MODS_CONVERSATION_RECOVERY_REQUIRED") {
+    // Only record a known code and a fixed stage, never a prompt or transcript row.
+    const stack = error instanceof Error ? error.stack ?? "" : ""
+    const stage = ["persistedMessageToRuntimeMessage", "compactedBoundary",
+      "recoverMainCheckpointMessages", "recoverFunctionConversationMessages"]
+      .find(name => stack.includes(name)) ?? "checkpoint"
+    console.warn("[Agent] Conversation recovery stopped:", message, stage)
+    sendError("暂时无法核对此会话的历史消息，已停止本次运行。请保留原会话；" +
+      "如需继续工作，可以新建普通会话。诊断代码：" + message)
+  } else sendError(message)
   sendDone()
 }
 

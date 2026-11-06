@@ -83,6 +83,9 @@ async function main() {
       FunctionSiteVisibility.observeFunctionSiteVisibility(document.getElementById('transcript-site'),
         () => { window.transcriptVisibilityChanges++ })`)
     assert.equal(await page.evaluate("window.transcriptProbe.visible()"), false)
+    // Scroll restoration can still be settling while the user scrolls. Newly visible
+    // messages must be promoted in the read queue during that window too.
+    await page.locator("#transcript").evaluate(node => node.setAttribute("data-chat-initial-presentation", "pending"))
     await page.evaluate("document.getElementById('transcript').scrollTop=400")
     await page.waitForFunction("window.transcriptProbe.visible()")
     assert.equal(await page.evaluate("window.transcriptVisibilityChanges"), 1)

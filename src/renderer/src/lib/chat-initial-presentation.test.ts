@@ -113,12 +113,10 @@ describe("initial chat presentation barrier", () => {
     f.viewport.scrollTop = 30
     expect(f.sample().geometry).not.toBe(original.geometry)
   })
-  it("reads shared ancestor styles once per sample across site and native rows", () => {
+  it("stops measuring once the first readable anchor is found", () => {
     const f = samplingFixture(12, 4, 5)
     expect(f.sample().ready).toBe(true)
-    // Sixteen rows previously traversed six elements each (96 reads); only 21 are distinct.
-    expect(f.getComputedStyle).toHaveBeenCalledTimes(21)
-    expect(new Set(f.getComputedStyle.mock.calls.map(([element]) => element)).size).toBe(21)
+    expect(f.getComputedStyle).toHaveBeenCalledTimes(6)
   })
   it("rechecks changed ancestor visibility on every frame", () => {
     const f = samplingFixture(2, 1, 2)
@@ -132,13 +130,13 @@ describe("initial chat presentation barrier", () => {
     f.displayNone.delete(parent)
     expect(f.sample().ready).toBe(true)
   })
-  it("keeps hidden children blocked despite a cached visible parent and visible siblings", () => {
+  it("uses a visible sibling as the anchor without admitting a hidden common ancestor", () => {
     const f = samplingFixture(2, 1, 2)
     f.hidden.add(f.sites[1])
-    expect(f.sample().ready).toBe(false)
+    expect(f.sample().ready).toBe(true)
     f.hidden.clear()
     f.displayNone.add(f.nativeRows[0])
-    expect(f.sample().ready).toBe(false)
+    expect(f.sample().ready).toBe(true)
     f.displayNone.clear()
     // A child reporting visible still cannot bypass its hidden shared ancestor.
     f.hidden.add(f.ancestors[1])
@@ -351,6 +349,8 @@ describe("initial chat presentation barrier", () => {
         root as unknown as HTMLElement,
         viewport as unknown as HTMLElement
       )
+    expect(sample().ready).toBe(true)
+    sites = [site(30, true), site(90, false)]
     expect(sample().ready).toBe(true)
     sites = [site(30, true), site(600, true)]
     expect(sample().ready).toBe(false)

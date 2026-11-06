@@ -49,7 +49,7 @@ function currentScope(threadId: string, workspace: string, account: number) {
   )
 }
 
-/** Receives only main-issued intents. Polling reads state; it never runs a task. */
+/** A notification triggers a fresh main-owned intent read. Mount catches requests sent while away. */
 export function AgentViewReceiver({
   threadId,
   workspace
@@ -65,13 +65,19 @@ export function AgentViewReceiver({
   const [error, setError] = useState("")
   useEffect(() => {
     let live = true,
-      pending = false
+      pending = false,
+      queued = false
     const owner = captureSurfaceNavigationScope(threadId, workspace)
     const current = () =>
       !!owner && surfaceNavigationScopeCurrent(owner) && currentScope(threadId, workspace, account)
     setError("")
     const read = async () => {
-      if (pending || !window.api.mods.agentViewPending || !current()) return
+      if (!live || document.hidden || !window.api.mods.agentViewPending || !current()) return
+      if (pending) {
+        queued = true
+        return
+      }
+      queued = false
       pending = true
       try {
         const intent = await window.api.mods.agentViewPending(threadId)
@@ -93,13 +99,19 @@ export function AgentViewReceiver({
         if (live && current()) setError("子任务查看入口暂不可用，请回原插件重新打开。")
       } finally {
         pending = false
+        if (queued && live) void read()
       }
     }
+    const stop = window.api.mods.onAgentViewRequested?.(event => {
+      if (event.threadId === threadId) void read()
+    })
+    const visible = () => { if (!document.hidden) void read() }
+    document.addEventListener("visibilitychange", visible)
     void read()
-    const timer = setInterval(() => void read(), 1000)
     return () => {
       live = false
-      clearInterval(timer)
+      stop?.()
+      document.removeEventListener("visibilitychange", visible)
     }
   }, [threadId, workspace, account, birth])
   return error ? (
@@ -211,7 +223,7 @@ export function ModsAgentTranscriptPanel({ intent }: { intent: AgentViewIntent }
     live.current = true
     void load()
     const timer = setInterval(() => {
-      if (!paged.current) void load()
+      if (!document.hidden && !paged.current) void load()
     }, 2000)
     return () => {
       activationLifetime.current.abort()

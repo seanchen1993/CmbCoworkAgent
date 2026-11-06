@@ -37,12 +37,16 @@ export function installChatDetachedLayoutAnchor({
   const enabled = (): boolean => {
     const next = readLease()
     const navigating = isChatScrollNavigationActive(viewport)
+    if (next !== lease || next === null || navigating) anchor = null
+    lease = next
+    // Following output needs no detached measurements. Reading scrollTop here can
+    // force layout for every streamed DOM mutation before the browser's frame.
+    if (next === null || navigating || !root.isConnected || !viewport.isConnected) return false
     // At the absolute head the history boundary owns the position. Anchoring a later
     // readable row while earlier protected rows expand would scroll that boundary away.
     const atHead = viewport.scrollTop <= 0.5
-    if (next !== lease || next === null || navigating || atHead) anchor = null
-    lease = next
-    return next !== null && !navigating && !atHead && root.isConnected && viewport.isConnected
+    if (atHead) anchor = null
+    return !atHead
   }
   const sampleAnchor = (): VisibleAnchor | null => {
     const bounds = viewport.getBoundingClientRect()
@@ -169,6 +173,7 @@ export function installChatDetachedLayoutAnchor({
     }
   }
   const onMutation = (records: MutationRecord[]): void => {
+    if (!enabled()) return
     if (records.some(record => (record.target instanceof Element ? record.target :
       record.target.parentElement)?.closest("[data-chat-message-row]"))) {
       awaitingSizes = true

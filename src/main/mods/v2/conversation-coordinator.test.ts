@@ -496,6 +496,22 @@ describe("actual owner conversation coordinator", () => {
     expect(appDb.getDb().exec("SELECT COUNT(*) FROM function_logical_sessions")).toEqual(before)
   })
 
+  it("does not look up another chat's checkpoint on repeated ordinary sends in the same workspace", async () => {
+    const active = fixture()
+    const other = randomUUID()
+    appDb.createThread(other, { workspacePath: active.context.workspace })
+    try {
+      await active.append("private to the active chat")
+      const before = active.checkpointReads()
+      for (let i = 0; i < 2; i++) {
+        expect(await active.coordinator.prepareNativeRuntime(active.context.workspace, other,
+          new AbortController().signal, () => {})).toBeUndefined()
+      }
+      expect(active.checkpointReads()).toBe(before)
+      expect(appDb.getThreadMessages(other)).toEqual([])
+    } finally { active.close() }
+  })
+
   it("keeps saved notes available to the actual native graph after the SDK owner retires", async () => {
     const f = fixture()
     const note = await f.append("saved before revoke")

@@ -1,7 +1,9 @@
-import { createElement } from "react"
+import { createElement, type ComponentProps, type MouseEvent, type ReactElement } from "react"
 import { renderToStaticMarkup } from "react-dom/server"
-import { describe, expect, it, vi } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 import { StreamingMarkdown } from "../components/chat/StreamingMarkdown"
+import { onOpenResourcePreview } from "./resource-preview-events"
+import { onOpenResourcePanelOverlay } from "./resource-panel-overlay-events"
 
 const threadState = vi.hoisted(() => ({
   workspacePath: null as string | null,
@@ -12,6 +14,24 @@ vi.mock("@/lib/thread-context", () => ({
   useThreadStateSelector: (_threadId: string | null, selector: (state: typeof threadState) => unknown) =>
     selector(threadState)
 }))
+
+const renderedLink = vi.hoisted(() => ({ current: null as ReactElement<ComponentProps<"a">> | null }))
+vi.mock("@/components/ui/tooltip", async importOriginal => {
+  const actual = await importOriginal<typeof import("../components/ui/tooltip")>()
+  return {
+    ...actual,
+    TooltipTrigger: (props: ComponentProps<typeof actual.TooltipTrigger>) => {
+      renderedLink.current = props.children as ReactElement<ComponentProps<"a">>
+      return createElement(actual.TooltipTrigger, props)
+    }
+  }
+})
+
+afterEach(() => {
+  threadState.workspacePath = null
+  renderedLink.current = null
+  vi.unstubAllGlobals()
+})
 
 const WINDOWS_CASE_FILE = "【团队级-研发中台】CmbDevClaw内置浏览器的录制与回放_测试案例.xlsx"
 const WINDOWS_CASE_PATH = `D:\\my-projects\\CmbCowork\\test\\${WINDOWS_CASE_FILE}`
@@ -68,7 +88,26 @@ describe("StreamingMarkdown 空链接渲染", () => {
     )
 
     expect(html).toContain("index.ts")
-    expect(html).toMatch(/<a href="C:(?:%5C|\\)workspace/)
-    threadState.workspacePath = null
+    // remarkWindowsFileLinks restores raw Markdown destinations and normalizes separators.
+    expect(html).toContain('<a href="C:/workspace/src/index.ts:12"')
+    const click = renderedLink.current?.props.onClick
+    expect(click).toBeTypeOf("function")
+    vi.stubGlobal("window", new EventTarget())
+    const preview = vi.fn(), overlay = vi.fn()
+    const stopPreview = onOpenResourcePreview(preview)
+    const stopOverlay = onOpenResourcePanelOverlay(overlay)
+    const preventDefault = vi.fn(), stopPropagation = vi.fn(), stopImmediatePropagation = vi.fn()
+    try {
+      click!({ preventDefault, stopPropagation,
+        nativeEvent: { stopImmediatePropagation } } as unknown as MouseEvent<HTMLAnchorElement>)
+      expect(preventDefault).toHaveBeenCalledOnce()
+      expect(stopPropagation).toHaveBeenCalledOnce()
+      expect(stopImmediatePropagation).toHaveBeenCalledOnce()
+      expect(overlay).toHaveBeenCalledExactlyOnceWith("preview")
+      expect(preview).toHaveBeenCalledExactlyOnceWith({
+        threadId: "thread-preview", filePath: "C:/workspace/src/index.ts",
+        workspacePathKind: "absolute", intentId: expect.any(Number)
+      })
+    } finally { stopPreview(); stopOverlay() }
   })
 })

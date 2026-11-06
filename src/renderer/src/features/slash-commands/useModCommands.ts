@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react"
 import type { ModCommandDescriptor } from "../../../../shared/mods/types"
-import { isModSiteChangeScope } from "../../../../shared/mods/types"
+import { modUiChangeAffects } from "../../../../shared/mods/types"
+import { createLatestDisplayRead } from "../../lib/latest-display-read"
 import { parseFunctionCommandInput } from "../../../../shared/mods/v2/command-input"
 import type { SlashCommandItem } from "./useSlashCommands"
 import { mayBeModCommand, resolveScopedModSubmission } from "./mod-submission"
@@ -31,33 +32,28 @@ export function useModCommands(threadId: string, enabled: boolean, workspace?: s
         if (currentThread.current === threadId) currentThread.current = ""
       }
     }
-    let live = true
-    let sequence = 0
     setCommands([])
     setReadyScope(null)
+    const reader = createLatestDisplayRead({
+      read: () => window.api.mods.commands(threadId),
+      publish: values => { setCommands(values); setReadyScope(catalogScope) },
+      failed: () => { setCommands([]); setReadyScope(null) }
+    })
     const refresh = (): void => {
       setReadyScope(null)
-      const current = ++sequence
-      void window.api.mods.commands(threadId).then(
-        (values) => {
-          if (live && current === sequence) { setCommands(values); setReadyScope(catalogScope) }
-        },
-        () => {
-          if (live && current === sequence) { setCommands([]); setReadyScope(null) }
-        }
-      )
+      reader.refresh()
     }
     refresh()
     window.addEventListener("focus", refresh)
     window.addEventListener("mods:configuration-changed", refresh)
     const stop = window.api.mods.onCardsChanged((event) => {
-      if (event.threadId === threadId && event.scope !== "records" && !isModSiteChangeScope(event.scope)) refresh()
+      if (event.threadId === threadId && modUiChangeAffects(event.scope)) refresh()
     })
     const stopJobs = window.api.mods.onJobsChanged((event) => {
       if (event.threadId === threadId) refresh()
     })
     return () => {
-      live = false
+      reader.close()
       if (currentThread.current === threadId) currentThread.current = ""
       stop()
       stopJobs()

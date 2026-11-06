@@ -513,8 +513,12 @@ function testClearOnEveryRunExit(): void {
     3,
     "invoke, resume, and interrupt close strict flush failures before setup publication"
   )
+  const activeSetupFailureHandler =
+    "onActiveError: (error) => closePhysicalStreamRunBeforeSetupPublication(window, channel, error)"
+  assertOccurrences(agentIpc, activeSetupFailureHandler, 3,
+    "invoke, resume, and interrupt preserve terminal diagnostics for active setup errors")
   assertOccurrences(
-    agentIpc,
+    agentIpc.replaceAll(activeSetupFailureHandler, ""),
     "closePhysicalStreamRunBeforeSetupPublication(window, channel, error)",
     3,
     "every pre-publication strict flush failure reports a terminal renderer outcome"

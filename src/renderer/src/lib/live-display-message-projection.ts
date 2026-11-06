@@ -94,7 +94,8 @@ export function createLiveDisplayMessageProjector(): (
   let structureVersion = 0
   let lastUserMessageId: string | null = null
 
-  const reconcile = (normalized: readonly LiveStreamMessage[]): LiveDisplayMessageProjection => {
+  const reconcile = (normalized: readonly LiveStreamMessage[],
+    baselineIds: ReadonlySet<string>): LiveDisplayMessageProjection => {
     const nextMessages: Message[] = []
     const nextIndexById = new Map<string, number>()
     let nextLastUserMessageId: string | null = null
@@ -108,6 +109,11 @@ export function createLiveDisplayMessageProjector(): (
       nextIndexById.set(projected.id, nextMessages.length)
       nextMessages.push(projected)
       if (projected.role === "user") nextLastUserMessageId = projected.id
+    }
+    // Fallback dates only belong to resident history/current live rows. Keeping every
+    // past turn's ID here would grow for as long as this thread's projector stays warm.
+    for (const id of createdAtById.keys()) {
+      if (!nextIndexById.has(id) && !baselineIds.has(id)) createdAtById.delete(id)
     }
     messages = nextMessages
     indexById = nextIndexById
@@ -133,18 +139,19 @@ export function createLiveDisplayMessageProjector(): (
       () => normalizeMessageIds(() => transcriptIndex.messageIdentities, incoming, transcriptIndex),
       transcriptIndex
     )
-    if (frame.completeReconcile) return reconcile(frame.messages)
+    if (frame.completeReconcile) return reconcile(frame.messages, transcriptIndex.messageIds)
 
     const changedMessages: Message[] = []
     for (const streamMessage of frame.changedMessages) {
       const id = streamMessage.id
-      if (!id) return reconcile(frame.messages)
+      if (!id) return reconcile(frame.messages, transcriptIndex.messageIds)
       const displayIndex = indexById.get(id)
       const previous = displayIndex === undefined ? undefined : messages[displayIndex]
       const projected = projectLiveDisplayMessage(streamMessage, previous, createdAtById)
       // A content update that changes whether the row is displayable changes
       // layout and must use the canonical full projection.
-      if (!projected || displayIndex === undefined) return reconcile(frame.messages)
+      if (!projected || displayIndex === undefined)
+        return reconcile(frame.messages, transcriptIndex.messageIds)
       // Identity changes must invalidate consumers' structural caches even when the
       // display ID and text are unchanged (for example a raw row acquiring provenance).
       if (previous && (previous.role !== projected.role ||
@@ -154,7 +161,7 @@ export function createLiveDisplayMessageProjector(): (
         Boolean(previous.function_row) !== Boolean(projected.function_row) ||
         (previous.function_row && projected.function_row &&
           !sameFunctionConversationTranscriptStamp(previous.function_row, projected.function_row))))
-        return reconcile(frame.messages)
+        return reconcile(frame.messages, transcriptIndex.messageIds)
       messages[displayIndex] = projected
       changedMessages.push(projected)
     }

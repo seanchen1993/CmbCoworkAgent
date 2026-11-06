@@ -1,3 +1,11 @@
+import { EventEmitter } from "node:events"
+
+// Node fixtures have no desktop idle clock or OS wake events. Tests can emit
+// resume explicitly, and production subscriptions retain real listener cleanup.
+export const powerMonitor = Object.assign(new EventEmitter(), {
+  getSystemIdleTime: () => 0
+})
+
 export const app = {
   isPackaged: false,
   getAppPath: () => process.cwd(),

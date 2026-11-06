@@ -1,6 +1,33 @@
 import { expect, it, vi } from "vitest"
 import { createFunctionSiteQueue, functionSitePriority } from "./function-site-queue"
 
+it("releases unmounted queued rows even while all physical reads are held", async () => {
+  const queue = createFunctionSiteQueue()
+  const gate = Promise.withResolvers<void>()
+  const active = Array.from({ length: 4 }, () => queue.run(() => true, () => gate.promise))
+  const work = vi.fn(async () => "obsolete")
+  for (let index = 0; index < 100; index++) {
+    const lifetime = new AbortController()
+    const pending = queue.run(() => true, work, "visible", lifetime.signal)
+    lifetime.abort()
+    expect(await pending).toBeNull()
+  }
+  expect(work).not.toHaveBeenCalled()
+  gate.resolve()
+  await Promise.all(active)
+})
+
+it("does not rescan a saturated backlog on each virtual mount", async () => {
+  const queue = createFunctionSiteQueue()
+  const gate = Promise.withResolvers<void>()
+  const active = Array.from({ length: 4 }, () => queue.run(() => true, () => gate.promise))
+  const priority = vi.fn(() => "visible" as const)
+  const pending = Array.from({ length: 100 }, () => queue.run(() => true, async () => "row", priority))
+  expect(priority).toHaveBeenCalledTimes(100)
+  gate.resolve()
+  await Promise.all([...active, ...pending])
+})
+
 it("starts a newly visible row in the reserved slot without waiting for slow overscan reads", async () => {
   const queue = createFunctionSiteQueue()
   let release!: () => void

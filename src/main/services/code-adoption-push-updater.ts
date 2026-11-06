@@ -213,6 +213,9 @@ export function buildCodeAdoptionPushedUpdateBody(
 }
 
 export function scheduleMarkCodeAdoptionCommitsPushed(args: MarkCodeAdoptionPushedArgs): void {
+  // Missing build-time endpoints cannot recover through retries. Local adoption
+  // recording remains independent; avoid idle timers and repeated error stacks.
+  if (!getEventRelayBaseUrl() && getEsNodes().length === 0) return
   const commitShas = normalizeCommitShas(args.commitShas)
   if (commitShas.length === 0) {
     console.log("[CodeAdoptionPushUpdater] no commit SHAs to mark as pushed")

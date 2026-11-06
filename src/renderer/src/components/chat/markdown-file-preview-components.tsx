@@ -1,4 +1,4 @@
-import { isValidElement, useEffect, useMemo, useState, type ReactNode } from "react"
+import { isValidElement, useEffect, useMemo, useState, type ComponentPropsWithoutRef, type ReactNode } from "react"
 import type { Components } from "react-markdown"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { openResourcePanelOverlay } from "@/lib/resource-panel-overlay-events"
@@ -70,6 +70,7 @@ const workspaceFilePreviewIndexCache = new WeakMap<
   }
 >()
 const EMPTY_FILE_PREVIEW_INDEX = new Map<string, string>()
+const EMPTY_WORKSPACE_FILES: FileInfo[] = []
 const FILE_PREVIEW_INDEX_BATCH_SIZE = 512
 const yieldResolvers: Array<() => void> = []
 let cooperativeYieldCount = 0
@@ -135,13 +136,15 @@ async function buildWorkspaceFilePreviewIndex(
       }
       if (end < files.length) await yieldFilePreviewIndexTask()
     }
-    workspaceFilePreviewIndexCache.set(files, { workspacePath, index })
     return index
   })()
 
   workspaceFilePreviewIndexCache.set(files, { workspacePath, pending })
   try {
-    return await pending
+    const complete = await pending
+    if (workspaceFilePreviewIndexCache.get(files)?.pending === pending)
+      workspaceFilePreviewIndexCache.set(files, { workspacePath, index: complete })
+    return complete
   } catch (error) {
     const latest = workspaceFilePreviewIndexCache.get(files)
     if (latest?.pending === pending) workspaceFilePreviewIndexCache.delete(files)
@@ -213,94 +216,93 @@ function MarkdownFilePreviewLink({
   )
 }
 
-export function useMarkdownFilePreviewComponents({
-  baseComponents,
+function MarkdownInlineCode({
   threadId,
-  text,
-  renderCodeBlock
-}: {
-  baseComponents: Components
-  threadId?: string
-  text: string
-  renderCodeBlock: CodeRenderer
-}): Components {
-  const shouldResolveInlineFiles = Boolean(threadId && text.includes("`"))
+  rawCode,
+  children,
+  ...props
+}: ComponentPropsWithoutRef<"span"> & { threadId?: string; rawCode: string }): React.JSX.Element {
   const workspacePath = useThreadStateSelector(
     threadId ?? null,
     (state) => state.workspacePath
   )
   const workspaceFiles =
     useThreadStateSelector(
-      shouldResolveInlineFiles ? (threadId ?? null) : null,
+      threadId ?? null,
       (state) => state.workspaceFiles
-    ) ?? []
-  const [filePreviewIndex, setFilePreviewIndex] = useState<Map<string, string>>(
-    EMPTY_FILE_PREVIEW_INDEX
-  )
+    ) ?? EMPTY_WORKSPACE_FILES
+  const cached = workspaceFilePreviewIndexCache.get(workspaceFiles)
+  const [resolved, setResolved] = useState<{
+    files: FileInfo[]
+    workspacePath: string | null | undefined
+    index: Map<string, string>
+  } | null>(null)
+  const filePreviewIndex = cached?.workspacePath === workspacePath && cached?.index
+    ? cached.index
+    : resolved?.files === workspaceFiles && resolved.workspacePath === workspacePath
+      ? resolved.index
+      : EMPTY_FILE_PREVIEW_INDEX
 
   useEffect(() => {
-    if (!shouldResolveInlineFiles) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect -- Synchronize local draft/loading state with this external selection before its asynchronous work.
-      setFilePreviewIndex(EMPTY_FILE_PREVIEW_INDEX)
-      return
-    }
-
+    if (!threadId || !workspacePath || !workspaceFiles.length) return
+    if (workspaceFilePreviewIndexCache.get(workspaceFiles)?.workspacePath === workspacePath &&
+      workspaceFilePreviewIndexCache.get(workspaceFiles)?.index) return
     let cancelled = false
-    const cached = workspaceFilePreviewIndexCache.get(workspaceFiles)
-    if (cached?.workspacePath === workspacePath && cached.index) {
-      setFilePreviewIndex(cached.index)
-      return
-    }
-
-    setFilePreviewIndex(EMPTY_FILE_PREVIEW_INDEX)
     void buildWorkspaceFilePreviewIndex(workspacePath, workspaceFiles)
       .then((index) => {
-        if (!cancelled) setFilePreviewIndex(index)
+        if (!cancelled) setResolved({ files: workspaceFiles, workspacePath, index })
       })
-      .catch(() => {
-        if (!cancelled) setFilePreviewIndex(EMPTY_FILE_PREVIEW_INDEX)
-      })
+      .catch(() => {})
 
     return () => {
       cancelled = true
     }
-  }, [shouldResolveInlineFiles, workspaceFiles, workspacePath])
+  }, [threadId, workspaceFiles, workspacePath])
 
+  const previewPath = threadId ? resolveInlinePreviewPath(rawCode, filePreviewIndex, workspacePath) : null
+  return threadId && previewPath
+    ? <MarkdownFilePreviewLink href={previewPath} previewPath={previewPath} threadId={threadId}>
+        <span {...props}>{children}</span>
+      </MarkdownFilePreviewLink>
+    : <code className="streaming-markdown-inline-code" {...props}>{children}</code>
+}
+
+function MarkdownPreviewAnchor({
+  threadId,
+  href,
+  children,
+  ...props
+}: ComponentPropsWithoutRef<"a"> & { threadId?: string }): React.JSX.Element {
+  const workspacePath = useThreadStateSelector(threadId ?? null, state => state.workspacePath)
+  if (!href) return <span>{children}</span>
+  const previewPath = normalizePreviewFileHref(href, workspacePath)
+  if (threadId && previewPath) {
+    return <MarkdownFilePreviewLink href={href} previewPath={previewPath} threadId={threadId}>
+      {children}
+    </MarkdownFilePreviewLink>
+  }
+  return isLocalFileLikeHref(href)
+    ? <span title="文件路径暂不可预览" {...props}>{children}</span>
+    : <a href={href} {...props}>{children}</a>
+}
+
+/** File-index updates rerender only inline links, not the whole parsed Markdown document. */
+export function useMarkdownFilePreviewComponents({
+  baseComponents,
+  threadId,
+  renderCodeBlock
+}: {
+  baseComponents: Components
+  threadId?: string
+  renderCodeBlock: CodeRenderer
+}): Components {
   return useMemo<Components>(
     () => ({
       ...baseComponents,
       a({ node: _node, href, children, ...props }) {
-        // [文件](D:\...) 这类 Windows 本地路径会被 react-markdown 默认 URL 安全规则
-        // 清空 href。与其渲染成看似可用、点击无反应的 <a href="">，不如退化为普通文本。
-        if (!href) {
-          return <span>{children}</span>
-        }
-
-        const previewPath = normalizePreviewFileHref(href, workspacePath)
-        if (!threadId || !previewPath) {
-          if (isLocalFileLikeHref(href)) {
-            return (
-              <span title="文件路径暂不可预览" {...props}>
-                {children}
-              </span>
-            )
-          }
-          return (
-            <a href={href} {...props}>
-              {children}
-            </a>
-          )
-        }
-
-        return (
-          <MarkdownFilePreviewLink
-            href={href ?? previewPath}
-            previewPath={previewPath}
-            threadId={threadId}
-          >
-            {children}
-          </MarkdownFilePreviewLink>
-        )
+        return <MarkdownPreviewAnchor threadId={threadId} href={href} {...props}>
+          {children}
+        </MarkdownPreviewAnchor>
       },
       code({ node: _node, className, children, ...props }) {
         const rawCode = getMarkdownNodeText(children)
@@ -311,24 +313,11 @@ export function useMarkdownFilePreviewComponents({
           return renderCodeBlock({ rawCode, language, className, children })
         }
 
-        const previewPath = threadId
-          ? resolveInlinePreviewPath(rawCode, filePreviewIndex, workspacePath)
-          : null
-        if (threadId && previewPath) {
-          return (
-            <MarkdownFilePreviewLink href={previewPath} previewPath={previewPath} threadId={threadId}>
-              <span {...props}>{children}</span>
-            </MarkdownFilePreviewLink>
-          )
-        }
-
-        return (
-          <code className="streaming-markdown-inline-code" {...props}>
-            {children}
-          </code>
-        )
+        return <MarkdownInlineCode threadId={threadId} rawCode={rawCode} {...props}>
+          {children}
+        </MarkdownInlineCode>
       }
     }),
-    [baseComponents, filePreviewIndex, renderCodeBlock, threadId, workspacePath]
+    [baseComponents, renderCodeBlock, threadId]
   )
 }

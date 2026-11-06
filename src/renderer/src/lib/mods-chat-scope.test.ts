@@ -355,6 +355,9 @@ it("routes projection invalidation to the exact cached row without resetting the
   cache.saveData("first", data, 10, cache.capture("AssistantMessage"), 0, "host-first")
   cache.saveData("second", data, 10, cache.capture("AssistantMessage"), 0, "host-second")
   const first = cache.read("first")!, second = cache.read("second")!
+  for (let i = 0; i < 100; i++) f.notifyCards("placed")
+  expect(first.current()).toBe(true)
+  expect(second.current()).toBe(true)
   f.notifyCards("site-projection:host-first", "other-thread")
   expect(first.current()).toBe(true)
   f.notifyCards("site-projection:host-first")

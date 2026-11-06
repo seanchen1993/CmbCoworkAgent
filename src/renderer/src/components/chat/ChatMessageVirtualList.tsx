@@ -799,10 +799,8 @@ export const ChatMessageVirtualList = React.memo(function ChatMessageVirtualList
       <Virtuoso<ChatVirtualMessageRow, ChatVirtualListContext>
         key={virtualWindow.key}
         firstItemIndex={virtualWindow.firstItemIndex}
-        // Clip paint only; keep authorized site scheduling, geometry and scroll measurement live.
-        style={presentationReady ? undefined : { clipPath: "inset(50%)" }}
-        inert={!presentationReady}
-        aria-hidden={!presentationReady || undefined}
+        // Virtuoso hides its own positioning probe. Scroll restoration still observes
+        // initial geometry, but a slow sibling must not mask an already authorized row.
         ref={virtuosoRef}
         data={virtualRows}
         customScrollParent={customScrollParent}
@@ -831,10 +829,6 @@ export const ChatMessageVirtualList = React.memo(function ChatMessageVirtualList
             : renderMessage(visibleIndex, visibleMessageIndexes[visibleIndex])
         }}
       />
-      {!presentationReady && <div aria-hidden="true" className="pointer-events-none absolute inset-x-3 top-3 space-y-3">
-        <div className="h-3 w-1/2 rounded bg-muted" />
-        <div className="h-3 w-1/3 rounded bg-muted" />
-      </div>}
       </div>
     </UserMessageExpansionContext.Provider>
     </ReasoningExpansionContext.Provider>

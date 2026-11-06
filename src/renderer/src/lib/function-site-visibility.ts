@@ -77,9 +77,6 @@ export function observeFunctionSiteVisibility(element: HTMLElement | null, onCha
   if (target && typeof IntersectionObserver !== "undefined") {
     observer ??= new IntersectionObserver((entries) => {
       for (const entry of entries) {
-        // The initial transcript is intentionally clipped until protected rows are ready.
-        // Preserve its initial geometry hint; clipping must not demote all cold visible rows.
-        if (entry.target.closest('[data-chat-initial-presentation="pending"]')) continue
         for (const update of observations.get(entry.target) ?? [])
           update(entry.isIntersecting && entry.intersectionRatio > 0)
       }

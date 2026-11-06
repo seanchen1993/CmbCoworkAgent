@@ -1,5 +1,5 @@
 import type { FunctionFeedbackEntry } from "../../../shared/mods/v2/ui-feedback"
-import { isModSiteChangeScope } from "../../../shared/mods/types"
+import { modUiChangeAffects } from "../../../shared/mods/types"
 import { functionSiteErrorCode } from "./function-site-recovery"
 import type { FunctionPresentationSnapshot } from "../../../shared/mods/v2/presentation"
 import {
@@ -104,9 +104,9 @@ export class FunctionPresentation {
     document.addEventListener("visibilitychange", this.visibility)
     window.addEventListener("resize", this.schedule)
     this.stopCards = window.api.mods.onCardsChanged((event) => {
-      if (event.threadId !== thread || event.scope === "records" || isModSiteChangeScope(event.scope)) return
+      if (event.threadId !== thread) return
       if (event.scope === "panes") this.schedule()
-      else this.refresh()
+      else if (modUiChangeAffects(event.scope, "feedback")) this.refresh()
     })
     this.refresh()
   }

@@ -20,6 +20,7 @@ import {
 import type { ModJson, ModObject } from "../../../shared/mods/types"
 import type { FunctionSessionActivity } from "./session-activity"
 import type { FunctionSession } from "./session"
+import type { FunctionConversationOwnerContext } from "./session-conversation-host"
 
 const cleanup: Array<() => Promise<void>> = []
 afterEach(async () => {
@@ -83,6 +84,8 @@ async function fixture(startup = 'await $.store.set("startup",options.tone)', ho
   })
   const authorizeProcess = vi.fn(async () => {})
   const drain = vi.fn()
+  const openConversationOwner = vi.fn((_context: FunctionConversationOwnerContext) => () => {})
+  const activateConversationOwner = vi.fn((_context: FunctionConversationOwnerContext) => {})
   const manager = new FunctionModsManager(
     store,
     {
@@ -91,6 +94,8 @@ async function fixture(startup = 'await $.store.set("startup",options.tone)', ho
       enabled: () => state.enabled,
       publish: async (workspace, value) => publish(workspace, value),
       changed: () => {},
+      openConversationOwner,
+      activateConversationOwner,
       assertThread: () => {
         if (!state.writable) throw Error("OWNER_LOST")
       },
@@ -173,6 +178,8 @@ async function fixture(startup = 'await $.store.set("startup",options.tone)', ho
     completeModel,
     authorizeProcess,
     drain,
+    openConversationOwner,
+    activateConversationOwner,
     compiled,
     values,
     sources,
@@ -182,6 +189,34 @@ async function fixture(startup = 'await $.store.set("startup",options.tone)', ho
     reload
   }
 }
+
+it.each([false, true])("activates the real read-only candidate once after configuration adoption (failure=%s)", async failed => {
+  const f = await fixture("")
+  await f.manager.commands(f.root, f.threadId)
+  expect(f.openConversationOwner.mock.calls[0][0].readOnly).toBe(false)
+  expect(f.activateConversationOwner).not.toHaveBeenCalled()
+  if (failed) {
+    f.activateConversationOwner.mockImplementation(() => { throw Error("ACTIVATION_FAILED") })
+  }
+  f.save("updated")
+  if (failed) {
+    await expect(f.manager.commands(f.root, f.threadId)).rejects.toThrow("ACTIVATION_FAILED")
+    expect(f.activateConversationOwner.mock.calls.length).toBeGreaterThan(0)
+    // The failed startup is retired by the real command entry. It must not leave
+    // a supposedly activated resident for the next command to reuse.
+    const current = (f.manager as unknown as { sessions: Map<string, object> }).sessions
+    expect(current.has(JSON.stringify([f.root, f.threadId]))).toBe(false)
+    f.activateConversationOwner.mockImplementation(() => {})
+  }
+  const failedAttempts = f.activateConversationOwner.mock.calls.length
+  expect((await f.manager.commands(f.root, f.threadId))[0].name).toBe("updated")
+  expect(f.openConversationOwner.mock.calls.some(([context]) => context.readOnly)).toBe(true)
+  const expectedActivations = failed ? failedAttempts : 1
+  expect(f.activateConversationOwner).toHaveBeenCalledTimes(expectedActivations)
+  expect(f.openConversationOwner).toHaveBeenCalledTimes(failed ? 3 : 2)
+  await f.manager.commands(f.root, f.threadId)
+  expect(f.activateConversationOwner).toHaveBeenCalledTimes(expectedActivations)
+})
 
 it("a new catalog generation never inherits the rejected build of an invalidated source", async () => {
   const f = await fixture()
