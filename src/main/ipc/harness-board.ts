@@ -78,6 +78,7 @@ import {
   HARNESS_ADAPTER_DETAIL_MAX_PROJECTS_PER_BATCH
 } from "../harness-board/adapter-detail-protocol"
 import {
+  getHarnessStageAttributionVersion,
   harnessStageWatches,
   primeHarnessStageAttribution
 } from "../services/harness-stage-attribution"
@@ -719,6 +720,7 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
       const watchScopeKey = `run:${payload.projectId}:${payload.slug}`
       desireWatchScope(event.sender.id, watchScopeKey)
       activeRunScopeBySender.set(event.sender.id, watchScopeKey)
+      const stageVersion = getHarnessStageAttributionVersion(payload.projectId, payload.slug)
       const detail = await getHarnessRunDetail(payload.projectId, payload.slug, {
         scope: `harness-run-detail:${event.sender.id}`
       })
@@ -728,7 +730,8 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
       primeHarnessStageAttribution(
         payload.projectId,
         payload.slug,
-        resolveHarnessRunDetailCurrentStage(detail)
+        resolveHarnessRunDetailCurrentStage(detail),
+        stageVersion
       )
       harnessStageWatches.remember(
         payload.projectId,

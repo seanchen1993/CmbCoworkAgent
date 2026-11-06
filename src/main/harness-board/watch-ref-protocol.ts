@@ -14,6 +14,7 @@ export interface HarnessWatchRefStartRequest {
   scopeKey: string
   generation: number
   maxScopes?: number
+  notifyChanges?: boolean
   workspacePath: string
   refs: HarnessWatchRef[]
   attributionTarget?: HarnessRunAttributionTarget
@@ -54,6 +55,8 @@ export interface HarnessWatchRefDirtyEvent {
   scopeKey: string
   generation: number
   attributionTarget: HarnessRunAttributionTarget
+  /** Non-state refs invalidate raw inspection data without invalidating node attribution. */
+  stageChanged?: boolean
 }
 
 export interface HarnessWatchRefInstalledEvent {
@@ -61,6 +64,7 @@ export interface HarnessWatchRefInstalledEvent {
   scopeKey: string
   generation: number
   watcherCount: number
+  sharedWatcherCount?: number
   cancelled: boolean
 }
 

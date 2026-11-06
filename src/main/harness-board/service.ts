@@ -4,6 +4,7 @@ import {
   markHarnessStageAttributionDirty
 } from "../services/harness-stage-attribution"
 import { normalizeHarnessAdapterWatchRefs } from "./adapter-detail-normalizer"
+import { harnessRunInspections } from "./run-inspect-cache"
 import {
   assertHarnessConfigAvailable,
   readHarnessConfigV2File,
@@ -1375,17 +1376,21 @@ async function runInspectAdapter(
   project: HarnessProjectMetadata,
   context: HarnessProjectConfigContext,
   mode: "project" | "run",
-  feature?: string
+  feature?: string,
+  reuseInspection = false
 ): Promise<Record<string, unknown>> {
   const invocation = buildConfiguredHarnessInvocationFromContext(project, context, mode, {
     feature
   })
   const configKey = HARNESS_INSPECT_COMMAND_CONFIG_KEYS[mode]
-  const stdoutBuffer = await runHarnessInvocationAsync(
-    invocation,
-    harnessCommandLogOptions(mode),
-    HARNESS_ADAPTER_TIMEOUT_MS
-  )
+  const stdoutBuffer =
+    reuseInspection && mode === "run" && feature
+      ? await runSharedRunInspection(project.projectId, feature, invocation)
+      : await runHarnessInvocationAsync(
+          invocation,
+          harnessCommandLogOptions(mode),
+          HARNESS_ADAPTER_TIMEOUT_MS
+        )
 
   return parseInspectAdapterOutput(invocation, configKey, stdoutBuffer)
 }
@@ -2495,13 +2500,29 @@ async function runInspectAdapterBufferFromContext(
   const configured = buildConfiguredHarnessInvocationFromContext(project, context, mode, {
     feature
   })
-  const buffer = await runHarnessInvocationAsync(
-    configured,
-    harnessCommandLogOptions(mode),
-    HARNESS_ADAPTER_TIMEOUT_MS,
+  const buffer = await runSharedRunInspection(project.projectId, feature, configured, signal)
+  return { buffer, configured }
+}
+
+function runSharedRunInspection(
+  projectId: string,
+  feature: string,
+  configured: ConfiguredHarnessInvocation,
+  signal?: AbortSignal
+): Promise<Buffer> {
+  return harnessRunInspections.run(
+    projectId,
+    feature,
+    JSON.stringify(configured),
+    (sharedSignal) =>
+      runHarnessInvocationAsync(
+        configured,
+        harnessCommandLogOptions("run"),
+        HARNESS_ADAPTER_TIMEOUT_MS,
+        sharedSignal
+      ),
     signal
   )
-  return { buffer, configured }
 }
 
 function projectConfigContextFromWorker(
@@ -3062,7 +3083,8 @@ export async function resolveHarnessFeatureCurrentStage(
       context.project,
       projectConfigContextFromWorker(context),
       "run",
-      normalizedSlug
+      normalizedSlug,
+      true
     )
     if (options.watch) {
       const run = isObject(snapshot.run) ? snapshot.run : {}
@@ -4001,7 +4023,11 @@ async function loadHarnessRunDetail(
   throwIfHarnessDetailCancelled(signal)
   let projection: HarnessAdapterRunProjection
   try {
-    projection = await parseHarnessAdapterRunInWorker(buffer, project, slug, `${scope}:adapter`)
+    // The worker transfers/detaches its input. Keep the shared inspection buffer
+    // intact for stage consumers and the short UI handoff window.
+    const ownedBuffer = Buffer.allocUnsafeSlow(buffer.byteLength)
+    buffer.copy(ownedBuffer)
+    projection = await parseHarnessAdapterRunInWorker(ownedBuffer, project, slug, `${scope}:adapter`)
     throwIfHarnessDetailCancelled(signal)
   } catch (error) {
     if (signal.aborted) throw harnessDetailCancelledError()

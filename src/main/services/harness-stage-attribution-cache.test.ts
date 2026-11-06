@@ -99,6 +99,125 @@ describe("HarnessStageAttributionCache", () => {
     expect(resolver).not.toHaveBeenCalled()
   })
 
+  it("rejects a Feature-page snapshot started before a newer state notification", async () => {
+    const resolver = vi.fn(async () => ({ name: "dev", status: "已完成" }))
+    const cache = new HarnessStageAttributionCache({ resolver })
+    cache.prime("p", "f", { name: "plan", status: "进行中" })
+    const pageVersion = cache.getVersion("p", "f")
+
+    cache.markDirty("p", "f")
+    await cache.getForExecution("p", "f")
+    expect(cache.prime("p", "f", { name: "plan", status: "进行中" }, pageVersion)).toBe(false)
+    expect(cache.markDirty("p", "f", pageVersion)).toBe(false)
+    await expect(cache.getForExecution("p", "f")).resolves.toEqual({
+      nodeName: "dev",
+      nodeStatus: "已完成"
+    })
+    expect(resolver).toHaveBeenCalledTimes(1)
+  })
+
+  it("does not reuse a page snapshot token after LRU eviction", async () => {
+    const resolver = vi.fn(async () => ({ name: "current", status: "进行中" }))
+    const cache = new HarnessStageAttributionCache({ resolver, maxEntries: 1 })
+    const pageVersion = cache.getVersion("p", "evicted")
+    cache.getVersion("p", "other")
+
+    expect(cache.prime("p", "evicted", { name: "old", status: "进行中" }, pageVersion)).toBe(false)
+    expect(cache.getVersion("p", "evicted")).not.toBe(pageVersion)
+    await expect(cache.getForExecution("p", "evicted")).resolves.toEqual({
+      nodeName: "current",
+      nodeStatus: "进行中"
+    })
+    expect(resolver).toHaveBeenCalledTimes(1)
+  })
+
+  it("rejects a late page snapshot after a newer fallback refresh without a notification", async () => {
+    let now = 0
+    const resolver = vi.fn(async () => ({ name: "new", status: "已完成" }))
+    const cache = new HarnessStageAttributionCache({ resolver, now: () => now })
+    cache.prime("p", "f", { name: "old", status: "进行中" })
+    now = 299_999
+    const pageVersion = cache.getVersion("p", "f")
+
+    now = 301_001
+    await expect(cache.getForCall("p", "f")).resolves.toEqual({
+      nodeName: "new",
+      nodeStatus: "已完成"
+    })
+    expect(cache.prime("p", "f", { name: "old", status: "进行中" }, pageVersion)).toBe(false)
+    await expect(cache.getForExecution("p", "f")).resolves.toEqual({
+      nodeName: "new",
+      nodeStatus: "已完成"
+    })
+    expect(resolver).toHaveBeenCalledTimes(1)
+  })
+
+  it("rejects a late page snapshot after a newer lookup confirms the stage is unavailable", async () => {
+    let now = 0
+    const resolver = vi.fn(async () => null)
+    const cache = new HarnessStageAttributionCache({ resolver, now: () => now })
+    cache.prime("p", "f", { name: "old", status: "进行中" })
+    now = 299_999
+    const pageVersion = cache.getVersion("p", "f")
+
+    now = 301_001
+    await expect(cache.getForExecution("p", "f")).resolves.toEqual({
+      nodeName: null,
+      nodeStatus: null
+    })
+    expect(cache.prime("p", "f", { name: "old", status: "进行中" }, pageVersion)).toBe(false)
+    await expect(cache.getForExecution("p", "f")).resolves.toEqual({
+      nodeName: null,
+      nodeStatus: null
+    })
+    await expect(cache.getForCall("p", "f")).resolves.toEqual({
+      nodeName: null,
+      nodeStatus: null
+    })
+    expect(resolver).toHaveBeenCalledTimes(1)
+  })
+
+  it("preserves in-flight call attribution when the page primes the same clean stage", async () => {
+    let now = 0
+    const lookup = deferred<HarnessResolvedStage | null>()
+    const resolver = vi.fn(() => lookup.promise)
+    const cache = new HarnessStageAttributionCache({
+      resolver,
+      now: () => now,
+      maxCleanAgeMs: 10
+    })
+    cache.prime("p", "f", { name: "dev", status: "进行中" })
+    const pageVersion = cache.getVersion("p", "f")
+    now = 10
+    const call = cache.getForCall("p", "f")
+    expect(cache.prime("p", "f", { name: " dev ", status: "进行中" }, pageVersion)).toBe(true)
+    expect(cache.getVersion("p", "f")).toBe(pageVersion)
+
+    lookup.resolve({ name: "dev", status: "进行中" })
+    await expect(call).resolves.toEqual({ nodeName: "dev", nodeStatus: "进行中" })
+    expect(resolver).toHaveBeenCalledTimes(1)
+    const refreshedVersion = cache.getVersion("p", "f")
+    expect(cache.prime("p", "f", { name: "dev", status: "已完成" }, refreshedVersion)).toBe(true)
+    expect(cache.getVersion("p", "f")).not.toBe(refreshedVersion)
+  })
+
+  it("clears failure backoff after an authoritative page snapshot succeeds", async () => {
+    const resolver = vi
+      .fn<() => Promise<HarnessResolvedStage | null>>()
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({ name: "test", status: "进行中" })
+    const cache = new HarnessStageAttributionCache({ resolver, now: () => 0 })
+    await cache.getForExecution("p", "f")
+    cache.prime("p", "f", { name: "dev", status: "已完成" }, cache.getVersion("p", "f"))
+    cache.markDirty("p", "f")
+
+    await expect(cache.getForExecution("p", "f")).resolves.toEqual({
+      nodeName: "test",
+      nodeStatus: "进行中"
+    })
+    expect(resolver).toHaveBeenCalledTimes(2)
+  })
+
   it("shares one refresh across concurrent code mutations", async () => {
     const lookup = deferred<HarnessResolvedStage | null>()
     const resolver = vi.fn(() => lookup.promise)

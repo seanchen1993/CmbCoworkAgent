@@ -10,18 +10,25 @@ interface StageWatch {
   touch: () => void
   dispose: () => void
   watcherCount?: number
+  retryAt?: number
 }
+
+interface StageWatchConfiguration {
+  workspacePath: string
+  refs: HarnessWatchRef[]
+  signature: string
+}
+
+const FAILED_INSTALL_RETRY_MS = 30_000
 
 /** Session-side state notifications, independent of the Feature page's watchers.
  * All filesystem probes and watcher installation stay in the existing worker.
  */
 export class HarnessStageWatchRegistry {
   private readonly scopes = new Map<string, StageWatch>()
-  private readonly configurations = new Map<
-    string,
-    { workspacePath: string; refs: HarnessWatchRef[] }
-  >()
+  private readonly configurations = new Map<string, StageWatchConfiguration>()
   private readonly client: HarnessWatchRefWorkerClient
+  private closed = false
 
   constructor(
     private readonly onChanged: (projectId: string, featureSlug: string) => void,
@@ -30,7 +37,6 @@ export class HarnessStageWatchRegistry {
   ) {
     this.client = new HarnessWatchRefWorkerClient(
       {
-        onChanged: () => undefined,
         onDirty: ({ attributionTarget }) =>
           onChanged(attributionTarget.projectId, attributionTarget.featureSlug),
         onInstalled: ({ scopeKey, watcherCount }) =>
@@ -48,56 +54,88 @@ export class HarnessStageWatchRegistry {
     workspacePath: string,
     refs: HarnessWatchRef[]
   ): void {
-    if (!projectId.trim() || !featureSlug.trim()) return
+    if (this.closed || !projectId.trim() || !featureSlug.trim()) return
     const key = JSON.stringify([projectId, featureSlug])
+    const stateRefs = refs.filter((ref) => ref.purpose === "run-state").slice(0, 16)
+    if (!stateRefs.length) {
+      this.configurations.delete(key)
+      this.remove(key)
+      return
+    }
+    const signature = JSON.stringify([workspacePath, stateRefs.map((ref) => ref.path)])
+    if (this.configurations.get(key)?.signature === signature) return
+    const wasActive = this.scopes.has(key)
+    this.remove(key)
     this.configurations.delete(key)
-    this.configurations.set(key, {
+    const config = {
       workspacePath,
-      refs: refs.filter((ref) => ref.purpose === "run-state").slice(0, 16)
-    })
+      refs: stateRefs.map((ref) => ({ ...ref })),
+      signature
+    }
+    this.configurations.set(key, config)
     if (this.configurations.size > HARNESS_STAGE_WATCH_MAX_SCOPES) {
       this.configurations.delete(this.configurations.keys().next().value!)
     }
+    if (wasActive) {
+      void this.install(projectId, featureSlug, key, config)
+      this.onChanged(projectId, featureSlug)
+    }
   }
 
-  async activate(projectId: string, featureSlug: string): Promise<void> {
+  activate(projectId: string, featureSlug: string): void | Promise<void> {
+    if (this.closed) return
     const key = JSON.stringify([projectId, featureSlug])
     const config = this.configurations.get(key)
     if (!config?.refs.length) return
     const scope = this.scopes.get(key)
-    if (scope?.signature === JSON.stringify([config.workspacePath, config.refs])) {
+    if (scope && this.canReuse(scope, config.signature)) {
       scope.touch()
-      await scope.ready
-      return
+      this.scopes.delete(key)
+      this.scopes.set(key, scope)
+      return scope.watcherCount === undefined ? scope.ready : undefined
     }
-    const installing = this.configure(projectId, featureSlug, config.workspacePath, config.refs)
+    const installing = this.install(projectId, featureSlug, key, config)
     // The page snapshot may predate this install. Invalidate before yielding so
     // concurrent readers also recover once after the gap.
     this.onChanged(projectId, featureSlug)
-    await installing
+    return installing
   }
 
-  async configure(
+  configure(
     projectId: string,
     featureSlug: string,
     workspacePath: string,
     refs: HarnessWatchRef[]
   ): Promise<void> {
-    if (!projectId.trim() || !featureSlug.trim()) return
+    if (this.closed || !projectId.trim() || !featureSlug.trim()) return Promise.resolve()
     this.remember(projectId, featureSlug, workspacePath, refs)
     const key = JSON.stringify([projectId, featureSlug])
-    const stateRefs = refs.filter((ref) => ref.purpose === "run-state").slice(0, 16)
-    const signature = JSON.stringify([workspacePath, stateRefs])
+    const config = this.configurations.get(key)
+    return config ? this.install(projectId, featureSlug, key, config) : Promise.resolve()
+  }
+
+  private canReuse(scope: StageWatch, signature: string): boolean {
+    return (
+      scope.signature === signature &&
+      (scope.watcherCount !== 0 || Date.now() < (scope.retryAt ?? 0))
+    )
+  }
+
+  private install(
+    projectId: string,
+    featureSlug: string,
+    key: string,
+    { workspacePath, refs: stateRefs, signature }: StageWatchConfiguration
+  ): Promise<void> {
     const previous = this.scopes.get(key)
     // Reuse the installed scope. No timers launch inspect or poll files.
-    if (previous?.signature === signature && previous.watcherCount !== 0) {
+    if (previous && this.canReuse(previous, signature)) {
       previous.touch()
       this.scopes.delete(key)
       this.scopes.set(key, previous)
       return previous.ready
     }
     this.remove(key)
-    if (!stateRefs.length) return
     while (this.scopes.size >= HARNESS_STAGE_WATCH_MAX_SCOPES) {
       this.remove(this.scopes.keys().next().value!)
     }
@@ -126,6 +164,7 @@ export class HarnessStageWatchRegistry {
       },
       installed: (count) => {
         scope.watcherCount = count
+        scope.retryAt = count === 0 ? Date.now() + FAILED_INSTALL_RETRY_MS : undefined
         clearTimeout(installTimeout)
         // A late install or worker restart may have missed changes. Invalidate
         // once so the next consumer recovers; never inspect inside this callback.
@@ -142,7 +181,7 @@ export class HarnessStageWatchRegistry {
     let scopeInstalled = false
     this.scopes.set(key, scope)
     this.client.start(key, workspacePath, stateRefs, { projectId, featureSlug })
-    await ready
+    return ready
   }
 
   private remove(key: string): void {
@@ -154,6 +193,7 @@ export class HarnessStageWatchRegistry {
   }
 
   async close(): Promise<void> {
+    this.closed = true
     this.configurations.clear()
     for (const key of this.scopes.keys()) this.remove(key)
     await this.client.close()

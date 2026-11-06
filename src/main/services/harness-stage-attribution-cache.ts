@@ -17,6 +17,7 @@ interface HarnessStageCacheEntry {
   projectId: string
   featureSlug: string
   version: number
+  revision: number
   cleanVersion: number
   snapshot?: HarnessStageAttribution
   resolvedAt: number
@@ -94,6 +95,7 @@ export class HarnessStageAttributionCache {
   private readonly maxCleanAgeMs: number
   private readonly maxEntries: number
   private readonly entries = new Map<string, HarnessStageCacheEntry>()
+  private nextRevision = 1
 
   constructor(options: HarnessStageAttributionCacheOptions) {
     this.resolver = options.resolver
@@ -102,29 +104,56 @@ export class HarnessStageAttributionCache {
     this.maxEntries = Math.max(1, Math.floor(options.maxEntries ?? DEFAULT_MAX_ENTRIES))
   }
 
-  prime(projectId: string, featureSlug: string, stage: HarnessResolvedStage): void {
+  getVersion(projectId: string, featureSlug: string): number | undefined {
     const identity = normalizeIdentity(projectId, featureSlug)
-    if (!identity) return
+    if (!identity) return undefined
+    const entry = this.getOrCreate(identity)
+    entry.lastAccessAt = this.now()
+    return entry.revision
+  }
+
+  prime(
+    projectId: string,
+    featureSlug: string,
+    stage: HarnessResolvedStage,
+    expectedVersion?: number
+  ): boolean {
+    const identity = normalizeIdentity(projectId, featureSlug)
+    if (!identity) return false
+    const entry = this.getOrCreate(identity)
+    if (expectedVersion !== undefined && entry.revision !== expectedVersion) return false
     const snapshot = normalizeStage(stage)
     if (!snapshot) {
-      this.markDirty(projectId, featureSlug)
-      return
+      return this.markDirty(projectId, featureSlug, expectedVersion)
     }
 
-    const entry = this.getOrCreate(identity)
-    entry.version += 1
+    // A second reader of the same clean snapshot must not invalidate call-start
+    // attribution or another inspection already in flight.
+    if (
+      entry.cleanVersion !== entry.version ||
+      entry.snapshot?.nodeName !== snapshot.nodeName ||
+      entry.snapshot?.nodeStatus !== snapshot.nodeStatus
+    ) {
+      entry.version += 1
+      entry.revision = this.nextRevision++
+    }
     entry.cleanVersion = entry.version
     entry.snapshot = snapshot
     entry.resolvedAt = this.now()
     entry.lastAccessAt = entry.resolvedAt
+    entry.retryAfter = undefined
+    return true
   }
 
-  markDirty(projectId: string, featureSlug: string): void {
+  markDirty(projectId: string, featureSlug: string, expectedVersion?: number): boolean {
     const identity = normalizeIdentity(projectId, featureSlug)
-    if (!identity) return
+    if (!identity) return false
     const entry = this.getOrCreate(identity)
+    if (expectedVersion !== undefined && entry.revision !== expectedVersion) return false
     entry.version += 1
+    entry.revision = this.nextRevision++
     entry.lastAccessAt = this.now()
+    return true
   }
 
   getForCodeGeneration(projectId: string, featureSlug: string): Promise<HarnessStageAttribution> {
@@ -231,10 +260,14 @@ export class HarnessStageAttributionCache {
       // Further dirty notifications must not create an adapter failure storm.
       entry.retryAfter = this.now() + RETRY_BACKOFF_MS
       entry.snapshot = undefined
+      entry.revision = this.nextRevision++
       return "unavailable"
     }
 
     entry.snapshot = resolved
+    // A later successful read supersedes pending page results even when no
+    // notification arrived. Keep call-start attribution's version unchanged.
+    entry.revision = this.nextRevision++
     entry.resolvedAt = this.now()
     entry.lastAccessAt = entry.resolvedAt
     entry.cleanVersion = startedVersion
@@ -256,6 +289,8 @@ export class HarnessStageAttributionCache {
       projectId: identity.projectId,
       featureSlug: identity.featureSlug,
       version: 0,
+      // Page revisions remain unique after an entry is evicted and recreated.
+      revision: this.nextRevision++,
       cleanVersion: -1,
       resolvedAt: 0,
       lastAccessAt: now

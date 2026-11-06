@@ -11,6 +11,7 @@ import { resolveHarnessFeatureCurrentStage } from "../harness-board/service"
 import {
   getHarnessStageAttributionForCall,
   getHarnessStageAttributionForCodeGeneration,
+  getHarnessStageAttributionVersion,
   markHarnessStageAttributionDirty,
   observeHarnessStage,
   primeHarnessStageAttribution,
@@ -90,6 +91,77 @@ describe("execution-time Harness stage", () => {
       await vi.advanceTimersByTimeAsync(250)
       expect(resolver).toHaveBeenCalledTimes(1)
       await resolveHarnessExecutionStage("p", "burst-notifications")
+      expect(resolver).toHaveBeenCalledTimes(1)
+    } finally {
+      stop()
+    }
+  })
+
+  it("waits until notifications stop and keeps settlement pending across timer resets", async () => {
+    resolver.mockResolvedValue({ name: "test", status: "进行中" })
+    const observer = vi.fn()
+    const stop = observeHarnessStage("p", "trailing-notifications", observer)
+    try {
+      markHarnessStageAttributionDirty("p", "trailing-notifications")
+      let settled = false
+      const settlement = settleHarnessStageObservations("p", "trailing-notifications", 2_000).then(
+        (result) => {
+          settled = true
+          return result
+        }
+      )
+      for (let i = 0; i < 2; i++) {
+        await vi.advanceTimersByTimeAsync(200)
+        markHarnessStageAttributionDirty("p", "trailing-notifications")
+      }
+      await vi.advanceTimersByTimeAsync(249)
+      expect(resolver).not.toHaveBeenCalled()
+      expect(settled).toBe(false)
+      await vi.advanceTimersByTimeAsync(1)
+      await expect(settlement).resolves.toBe(true)
+      expect(resolver).toHaveBeenCalledTimes(1)
+      expect(observer).toHaveBeenCalledExactlyOnceWith(0, "test")
+      await expect(settleHarnessStageObservations("p", "trailing-notifications", 1)).resolves.toBe(
+        true
+      )
+    } finally {
+      stop()
+    }
+  })
+
+  it("settles a cancelled notification without inspecting after the last observer unsubscribes", async () => {
+    const stop = observeHarnessStage("p", "cancelled-notifications", vi.fn())
+    markHarnessStageAttributionDirty("p", "cancelled-notifications")
+    const settlement = settleHarnessStageObservations("p", "cancelled-notifications", 1_000)
+    stop()
+    await expect(settlement).resolves.toBe(true)
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(resolver).not.toHaveBeenCalled()
+  })
+
+  it("does not publish a late page result or clear a newer snapshot with a late empty result", async () => {
+    primeHarnessStageAttribution("p", "late-page", { name: "plan", status: "进行中" })
+    const pageVersion = getHarnessStageAttributionVersion("p", "late-page")
+    markHarnessStageAttributionDirty("p", "late-page")
+    resolver.mockResolvedValue({ name: "dev", status: "已完成" })
+    await resolveHarnessExecutionStage("p", "late-page")
+    const observer = vi.fn()
+    const stop = observeHarnessStage("p", "late-page", observer)
+    try {
+      expect(
+        primeHarnessStageAttribution(
+          "p",
+          "late-page",
+          { name: "plan", status: "进行中" },
+          pageVersion
+        )
+      ).toBe(false)
+      expect(primeHarnessStageAttribution("p", "late-page", null, pageVersion)).toBe(false)
+      expect(observer).not.toHaveBeenCalled()
+      await expect(resolveHarnessExecutionStage("p", "late-page")).resolves.toEqual({
+        nodeName: "dev",
+        nodeStatus: "已完成"
+      })
       expect(resolver).toHaveBeenCalledTimes(1)
     } finally {
       stop()

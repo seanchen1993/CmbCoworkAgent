@@ -42,6 +42,36 @@ function registry(changed: (project: string, feature: string) => void) {
 }
 const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
+class FakeStageWorker extends EventEmitter {
+  readonly requests: Array<Record<string, unknown>> = []
+  watcherCount = 1
+  terminations = 0
+
+  unref(): this {
+    return this
+  }
+
+  async terminate(): Promise<number> {
+    this.terminations += 1
+    return 0
+  }
+
+  postMessage(message: Record<string, unknown>): void {
+    this.requests.push(message)
+    if (message.type === "start") {
+      Promise.resolve().then(() =>
+        this.emit("message", {
+          type: "installed",
+          scopeKey: message.scopeKey,
+          generation: message.generation,
+          watcherCount: this.watcherCount,
+          cancelled: false
+        })
+      )
+    }
+  }
+}
+
 describe("project conversation stage notifications", () => {
   it("refreshes node/status changes and atomic replacements while ignoring ordinary file writes", async () => {
     const workspace = await root()
@@ -131,29 +161,7 @@ describe("project conversation stage notifications", () => {
 
   it("reuses watchers, renews their lease and releases idle scopes", async () => {
     vi.useFakeTimers()
-    class FakeWorker extends EventEmitter {
-      requests: Array<Record<string, unknown>> = []
-      unref() {
-        return this
-      }
-      async terminate() {
-        return 0
-      }
-      postMessage(message: Record<string, unknown>) {
-        this.requests.push(message)
-        if (message.type === "start")
-          Promise.resolve().then(() =>
-            this.emit("message", {
-              type: "installed",
-              scopeKey: message.scopeKey,
-              generation: message.generation,
-              watcherCount: 1,
-              cancelled: false
-            })
-          )
-      }
-    }
-    const worker = new FakeWorker()
+    const worker = new FakeStageWorker()
     const watches = new HarnessStageWatchRegistry(
       vi.fn(),
       async () => worker as unknown as Worker,
@@ -172,5 +180,102 @@ describe("project conversation stage notifications", () => {
     expect(worker.requests.filter((r) => r.type === "stop")).toHaveLength(1)
     await configure()
     expect(worker.requests.filter((r) => r.type === "start")).toHaveLength(2)
+  })
+
+  it("keeps 1,000 hot activations synchronous without repeated starts or timers", async () => {
+    vi.useFakeTimers()
+    const worker = new FakeStageWorker()
+    const factory = vi.fn(async () => worker as unknown as Worker)
+    const changed = vi.fn()
+    const watches = new HarnessStageWatchRegistry(changed, factory)
+    registries.push(watches)
+    await watches.configure("p", "f", "/workspace", [{ path: "state", purpose: "run-state" }])
+    const timerCount = vi.getTimerCount()
+
+    for (let index = 0; index < 1_000; index += 1) {
+      expect(watches.activate("p", "f")).toBeUndefined()
+    }
+
+    expect(worker.requests.filter((request) => request.type === "start")).toHaveLength(1)
+    expect(factory).toHaveBeenCalledTimes(1)
+    expect(changed).not.toHaveBeenCalled()
+    expect(vi.getTimerCount()).toBe(timerCount)
+  })
+
+  it("reconfigures active page paths immediately and releases subscriptions when state refs disappear", async () => {
+    vi.useFakeTimers()
+    const worker = new FakeStageWorker()
+    const changed = vi.fn()
+    const watches = new HarnessStageWatchRegistry(changed, async () => worker as unknown as Worker)
+    registries.push(watches)
+    await watches.configure("p", "f", "/workspace", [{ path: "old-state", purpose: "run-state" }])
+    const firstStart = worker.requests[0]
+
+    watches.remember("p", "f", "/workspace", [{ path: "new-state", purpose: "run-state" }])
+    await vi.advanceTimersByTimeAsync(0)
+    const starts = worker.requests.filter((request) => request.type === "start")
+    expect(starts).toHaveLength(2)
+    expect(starts[1].refs).toEqual([{ path: "new-state", purpose: "run-state" }])
+    expect(new Int32Array(firstStart.cancelBuffer as SharedArrayBuffer)[0]).toBe(1)
+    expect(changed).toHaveBeenCalledExactlyOnceWith("p", "f")
+    expect(watches.activate("p", "f")).toBeUndefined()
+
+    watches.remember("p", "f", "/workspace", [{ path: ".", purpose: "artifacts" }])
+    expect(new Int32Array(starts[1].cancelBuffer as SharedArrayBuffer)[0]).toBe(1)
+    expect(worker.requests.filter((request) => request.type === "stop")).toHaveLength(2)
+    expect(watches.activate("p", "f")).toBeUndefined()
+    watches.remember("p", "f", "/workspace", [{ path: "later-state", purpose: "run-state" }])
+    await vi.advanceTimersByTimeAsync(0)
+    expect(worker.requests.filter((request) => request.type === "start")).toHaveLength(2)
+  })
+
+  it("retries failed installations on demand after 30 seconds without a hot-path retry storm", async () => {
+    vi.useFakeTimers()
+    const worker = new FakeStageWorker()
+    worker.watcherCount = 0
+    const changed = vi.fn()
+    const watches = new HarnessStageWatchRegistry(changed, async () => worker as unknown as Worker)
+    registries.push(watches)
+    const configure = () =>
+      watches.configure("p", "f", "/workspace", [{ path: "state", purpose: "run-state" }])
+    await configure()
+    for (let index = 0; index < 1_000; index += 1) {
+      expect(watches.activate("p", "f")).toBeUndefined()
+    }
+    await vi.advanceTimersByTimeAsync(29_999)
+    expect(watches.activate("p", "f")).toBeUndefined()
+    await configure()
+    expect(worker.requests.filter((request) => request.type === "start")).toHaveLength(1)
+    expect(changed).not.toHaveBeenCalled()
+
+    worker.watcherCount = 1
+    await vi.advanceTimersByTimeAsync(1)
+    expect(worker.requests.filter((request) => request.type === "start")).toHaveLength(1)
+    const retry = watches.activate("p", "f")
+    expect(retry).toBeInstanceOf(Promise)
+    await retry
+
+    expect(worker.requests.filter((request) => request.type === "start")).toHaveLength(2)
+    expect(changed).toHaveBeenCalledExactlyOnceWith("p", "f")
+    expect(watches.activate("p", "f")).toBeUndefined()
+  })
+
+  it("cannot recreate subscriptions after close", async () => {
+    vi.useFakeTimers()
+    const worker = new FakeStageWorker()
+    const factory = vi.fn(async () => worker as unknown as Worker)
+    const watches = new HarnessStageWatchRegistry(vi.fn(), factory)
+    registries.push(watches)
+    await watches.configure("p", "f", "/workspace", [{ path: "state", purpose: "run-state" }])
+    await watches.close()
+
+    watches.remember("p", "f", "/workspace", [{ path: "new-state", purpose: "run-state" }])
+    expect(watches.activate("p", "f")).toBeUndefined()
+    await watches.configure("p", "f", "/workspace", [{ path: "new-state", purpose: "run-state" }])
+    await vi.advanceTimersByTimeAsync(20 * 60_000)
+
+    expect(worker.requests.filter((request) => request.type === "start")).toHaveLength(1)
+    expect(worker.terminations).toBe(1)
+    expect(factory).toHaveBeenCalledTimes(1)
   })
 })

@@ -1,6 +1,7 @@
 import { BrowserWindow } from "electron"
 import type { HarnessWatchRef } from "../../shared/harness-board-types"
 import { markHarnessStageAttributionDirty } from "../services/harness-stage-attribution"
+import { invalidateHarnessRunInspection } from "./run-inspect-cache"
 import { HarnessWatchRefWorkerClient } from "./watch-ref-client"
 import type { HarnessRunAttributionTarget } from "./watch-ref-protocol"
 
@@ -16,6 +17,13 @@ const client = new HarnessWatchRefWorkerClient({
     }
   },
   onDirty: (event) => {
+    if (event.stageChanged === false) {
+      invalidateHarnessRunInspection(
+        event.attributionTarget.projectId,
+        event.attributionTarget.featureSlug
+      )
+      return
+    }
     markHarnessStageAttributionDirty(
       event.attributionTarget.projectId,
       event.attributionTarget.featureSlug

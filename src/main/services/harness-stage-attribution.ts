@@ -4,6 +4,7 @@ import {
   type HarnessStageAttribution
 } from "./harness-stage-attribution-cache"
 import { HarnessStageWatchRegistry } from "./harness-stage-watch"
+import { invalidateHarnessRunInspection } from "../harness-board/run-inspect-cache"
 
 async function resolveCurrentStage(projectId: string, featureSlug: string) {
   // Keep the generic hook/runtime import path lightweight. The board service is
@@ -31,14 +32,20 @@ export async function resolveHarnessExecutionStage(
   const project = projectId?.trim()
   const feature = featureSlug?.trim()
   if (!project || !feature) return undefined
-  await harnessStageWatches.activate(project, feature)
+  const installing = harnessStageWatches.activate(project, feature)
+  if (installing) await installing
   return cache.getForExecution(project, feature)
 }
 
 type StageObserver = (at: number, nodeName: string | null) => void
 const observers = new Map<string, Set<StageObserver>>()
 const pendingObservations = new Map<string, Set<Promise<unknown>>>()
-const scheduledObservations = new Set<string>()
+interface ScheduledObservation {
+  at: number
+  timer?: ReturnType<typeof setTimeout>
+  complete: () => void
+}
+const scheduledObservations = new Map<string, ScheduledObservation>()
 const observerKey = (projectId: string, featureSlug: string): string =>
   `${projectId}\0${featureSlug}`
 
@@ -86,7 +93,15 @@ export function observeHarnessStage(
   observers.set(key, listeners)
   return () => {
     listeners.delete(observer)
-    if (listeners.size === 0) observers.delete(key)
+    if (listeners.size === 0) {
+      observers.delete(key)
+      const scheduled = scheduledObservations.get(key)
+      if (scheduled) {
+        clearTimeout(scheduled.timer)
+        scheduledObservations.delete(key)
+        scheduled.complete()
+      }
+    }
   }
 }
 
@@ -123,42 +138,60 @@ export function getHarnessStageAttributionForCall(
 export function primeHarnessStageAttribution(
   projectId: string,
   featureSlug: string,
-  stage: HarnessResolvedStage | null
-): void {
-  if (stage) {
-    cache.prime(projectId, featureSlug, stage)
-    publish(projectId, featureSlug, Date.now(), stage.name)
-  } else {
-    cache.markDirty(projectId, featureSlug)
-    publish(projectId, featureSlug, Date.now(), null)
+  stage: HarnessResolvedStage | null,
+  expectedVersion?: number
+): boolean {
+  const accepted = stage
+    ? cache.prime(projectId, featureSlug, stage, expectedVersion)
+    : cache.markDirty(projectId, featureSlug, expectedVersion)
+  if (accepted) {
+    publish(projectId, featureSlug, Date.now(), stage?.name.trim() || null)
   }
+  return accepted
+}
+
+export function getHarnessStageAttributionVersion(
+  projectId: string,
+  featureSlug: string
+): number | undefined {
+  return cache.getVersion(projectId, featureSlug)
 }
 
 export function markHarnessStageAttributionDirty(
   projectId: string | undefined,
   featureSlug: string | undefined
 ): void {
-  if (!projectId || !featureSlug) return
-  cache.markDirty(projectId, featureSlug)
-  const key = observerKey(projectId, featureSlug)
-  if (observers.has(key) && !scheduledObservations.has(key)) {
-    const at = Date.now()
-    scheduledObservations.add(key)
-    // Collapse filesystem bursts. An execution before this timer can refresh
-    // immediately; this observer then reuses its result without another inspect.
+  const project = projectId?.trim()
+  const feature = featureSlug?.trim()
+  if (!project || !feature || project.includes("\0") || feature.includes("\0")) return
+  invalidateHarnessRunInspection(project, feature)
+  cache.markDirty(project, feature)
+  const key = observerKey(project, feature)
+  if (!observers.has(key)) return
+  let scheduled = scheduledObservations.get(key)
+  if (!scheduled) {
+    let complete!: () => void
     const pending = new Promise<void>((resolve) => {
-      const timer = setTimeout(() => {
-        scheduledObservations.delete(key)
-        if (!observers.has(key)) return resolve()
-        void cache.getForCodeGeneration(projectId, featureSlug).then((stage) => {
-          publish(projectId, featureSlug, at, stage.nodeName)
-          resolve()
-        })
-      }, 250)
-      timer.unref?.()
+      complete = resolve
     })
-    trackObservation(projectId, featureSlug, pending)
+    scheduled = { at: Date.now(), complete }
+    scheduledObservations.set(key, scheduled)
+    trackObservation(project, feature, pending)
+  } else {
+    clearTimeout(scheduled.timer)
   }
+  // Wait for the final filesystem event in a burst. Keep one tracked promise
+  // across timer resets so telemetry settlement also waits for the trailing read.
+  const observation = scheduled
+  observation.timer = setTimeout(() => {
+    scheduledObservations.delete(key)
+    if (!observers.has(key)) return observation.complete()
+    void cache.getForCodeGeneration(project, feature).then((stage) => {
+      publish(project, feature, observation.at, stage.nodeName)
+      observation.complete()
+    }, observation.complete)
+  }, 250)
+  observation.timer.unref?.()
 }
 
 export function getHarnessStageAttributionForCodeGeneration(
