@@ -600,12 +600,15 @@ async function main() {
     )
     await page.getByRole("button", { name: "更多 Bot 操作", exact: true }).click()
     assert.equal(await page.getByRole("button", { name: "模拟 IM 接入", exact: true }).count(), 0)
-    await page.getByRole("button", { name: "招乎接入", exact: true }).waitFor()
+    const imMenuEntry = page
+      .locator("[data-bot-popup]")
+      .getByRole("button", { name: "招乎接入", exact: true })
+    await imMenuEntry.waitFor()
     await page.screenshot({
       animations: "disabled",
       path: join(artifacts, "bot-im-menu.png")
     })
-    await page.getByRole("button", { name: "招乎接入", exact: true }).click()
+    await imMenuEntry.click()
     await page.getByRole("heading", { name: "招乎接入 · 招乎T", exact: true }).waitFor()
     const dialog = page.getByRole("dialog")
     await dialog.getByRole("button", { name: "删除已撤销测试群接入记录", exact: true }).waitFor()
@@ -620,8 +623,10 @@ async function main() {
     await dialog.getByRole("button", { name: "删除已过期测试群接入记录", exact: true }).click()
     await dialog.getByText("已过期测试群", { exact: true }).waitFor({ state: "detached" })
     await page.keyboard.press("Escape")
-    await page.getByRole("button", { name: "更多 Bot 操作", exact: true }).click()
-    await page.getByRole("button", { name: "招乎接入", exact: true }).click()
+    await privateDetails
+      .locator(".bot-detail-section")
+      .getByRole("button", { name: "招乎接入", exact: true })
+      .click()
     await page.getByRole("heading", { name: "招乎接入 · 招乎T", exact: true }).waitFor()
     await dialog.getByRole("button", { name: "撤销", exact: true }).waitFor()
     assert.equal(await dialog.getByRole("button", { name: /删除.*接入记录/ }).count(), 0)

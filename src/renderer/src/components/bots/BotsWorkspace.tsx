@@ -2895,6 +2895,17 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
                         >
                           管理记忆
                         </button>
+                        {client.im && (
+                          <button
+                            className="ml-4"
+                            onClick={() => {
+                              setImBindingId(null)
+                              setImBot(selected)
+                            }}
+                          >
+                            招乎接入
+                          </button>
+                        )}
                       </section>
                       <BotWorkPanel
                         key={`${client.hostId}:${selected.id}`}
