@@ -68,12 +68,15 @@ export function filterImConversations(
   bots: ReadonlyMap<string, BotDefinition>,
   query: string,
   hiddenIds: readonly string[] = [],
-  showHidden = false
+  showHidden = false,
+  deletedIds: readonly string[] = []
 ) {
   const search = query.trim().toLocaleLowerCase(),
-    hidden = new Set(hiddenIds)
+    hidden = new Set(hiddenIds),
+    deleted = new Set(deletedIds)
   return conversations.filter(
     (item) =>
+      !(item.state === "revoked" && deleted.has(item.id)) &&
       (search || hidden.has(item.id) === showHidden) &&
       `${item.title} ${bots.get(item.botId)?.name ?? ""}`.toLocaleLowerCase().includes(search)
   )
@@ -90,6 +93,31 @@ export function botSidebarTime(value: number | undefined, now = Date.now()): str
     return date.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false })
   if (date.toDateString() === yesterday.toDateString()) return "昨天"
   return `${date.getFullYear() === today.getFullYear() ? "" : `${date.getFullYear()}/`}${date.getMonth() + 1}/${date.getDate()}`
+}
+
+/** Local list deletion never changes the channel binding, transcripts or task ownership. */
+export function removeImConversationFromView(
+  view: BotViewState,
+  group: BotImConversation
+): Partial<BotViewState> | null {
+  if (group.state !== "revoked") return null
+  const activeWorks = { ...view.activeImWorkIdByConversation }
+  delete activeWorks[group.id]
+  return {
+    deletedImConversationIds: [...new Set([...(view.deletedImConversationIds ?? []), group.id])],
+    pinnedImConversationIds: (view.pinnedImConversationIds ?? []).filter((id) => id !== group.id),
+    hiddenImConversationIds: (view.hiddenImConversationIds ?? []).filter((id) => id !== group.id),
+    activeImWorkIdByConversation: activeWorks,
+    ...(view.imConversationId === group.id
+      ? {
+          selectedId: group.botId,
+          groupId: null,
+          imConversationId: null,
+          activeWorkIdByBot: { ...view.activeWorkIdByBot, [group.botId]: null },
+          detailTab: "details" as const
+        }
+      : {})
+  }
 }
 
 /** Keep existing rows under the pointer while a list interaction is in progress. */

@@ -760,6 +760,24 @@
 .bot-detail-section > button:hover {
   color: var(--bot-text);
 }
+.bot-memory-navigation {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 22px;
+  font-size: 12px;
+  color: var(--bot-muted);
+}
+.bot-memory-navigation > button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 0;
+}
+.bot-memory-navigation > button:hover:not(:disabled) {
+  color: var(--bot-text);
+}
 .bot-memory-config {
   margin-bottom: 20px;
   padding-bottom: 18px;
@@ -3636,11 +3654,12 @@ button.bot-inline-mention:focus-visible {
   color: var(--muted-foreground);
 }
 .bot-memory-scope-label {
-  display: inline-block;
+  display: block;
   margin: 4px 0 6px;
   font-size: 11px;
-  line-height: 1.4;
+  line-height: 1.6;
   color: var(--muted-foreground);
+  overflow-wrap: anywhere;
 }
 
 /* Delivery remains secondary to the file; no additional banner or dialog. */

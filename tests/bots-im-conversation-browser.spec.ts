@@ -74,6 +74,7 @@ async function main() {
       format: "iife",
       platform: "browser",
       jsx: "automatic",
+      loader: { ".svg": "dataurl" },
       outfile: join(dir, "harness.js"),
       alias: { "@": resolve("src/renderer/src") },
       define: { "process.env.NODE_ENV": '"production"' },
@@ -95,6 +96,7 @@ async function main() {
                     "./BotBrowserPanel",
                     "./BotSchedulePanel",
                     "./BotAvatar",
+                    "./BotAppearancePicker",
                     "./BotRuntimeAvatar",
                     "./BotStorefrontIcon",
                     "./BotGroupAvatar",
@@ -177,7 +179,7 @@ async function main() {
     )
     await writeFile(
       join(dir, "main.cjs"),
-      `const {app,BrowserWindow,session}=require('electron');app.setPath('userData',${JSON.stringify(join(dir, "profile"))});app.whenReady().then(()=>{session.defaultSession.webRequest.onBeforeRequest((req,done)=>done({cancel:!req.url.startsWith('file:')&&!req.url.startsWith('data:')}));new BrowserWindow({show:true,width:1440,height:960,webPreferences:{backgroundThrottling:false}}).loadFile(${JSON.stringify(join(dir, "index.html"))})})`
+      `const {app,BrowserWindow,session}=require('electron');app.setPath('userData',${JSON.stringify(join(dir, "profile"))});app.whenReady().then(()=>{session.defaultSession.webRequest.onBeforeRequest((req,done)=>done({cancel:!req.url.startsWith('file:')&&!req.url.startsWith('data:')}));new BrowserWindow({show:true,width:1440,height:960,titleBarStyle:'hiddenInset',webPreferences:{backgroundThrottling:false}}).loadFile(${JSON.stringify(join(dir, "index.html"))})})`
     )
     const env = { ...process.env }
     delete env.ELECTRON_RUN_AS_NODE
@@ -450,11 +452,33 @@ async function main() {
     await page.getByRole("button", { name: "← 产品协作群", exact: true }).click()
     await page.getByLabel("产品协作群消息记录").waitFor()
     await unread("group-a").waitFor({ state: "detached" })
+    await page.evaluate(() => {
+      ;(window as any).fixture.holdWork = true
+    })
+    await details.getByRole("button", { name: /演示准备清单/ }).click()
+    await page.waitForFunction(() => typeof (window as any).fixture.releaseWork === "function")
+    // The destination is still the group while its task details are loading.
+    assert.equal(
+      await details.getByRole("button", { name: "前往私人主对话", exact: true }).count(),
+      0
+    )
+    await details.getByRole("button", { name: "返回群主对话", exact: true }).click()
+    await page.evaluate(() => (window as any).fixture.releaseWork())
+    await page.getByLabel("产品协作群消息记录").waitFor()
+    assert.equal(await page.getByTestId("private-conversation").count(), 0)
+    await details.getByRole("button", { name: "前往私人主对话", exact: true }).waitFor()
     await details.getByRole("button", { name: "记忆", exact: true }).click()
     await details.getByText("团队写作格式", { exact: true }).waitFor()
     await details.getByText("演示约定", { exact: true }).waitFor()
     assert.equal(await details.getByText("私人偏好", { exact: true }).count(), 0)
     assert.equal(await details.getByText("体验组约定", { exact: true }).count(), 0)
+    await details.getByText("群内 · 产品协作群", { exact: true }).waitFor()
+    // Memory is a detail subview; returning keeps the same group and restores keyboard focus.
+    await details.getByRole("button", { name: "返回详情", exact: true }).click()
+    await details.getByRole("button", { name: "记忆", exact: true }).waitFor()
+    await page.waitForFunction(() => document.activeElement?.textContent?.trim() === "记忆")
+    await page.getByLabel("产品协作群消息记录").waitFor()
+    await details.getByRole("button", { name: "记忆", exact: true }).click()
     await details.getByRole("button", { name: "编辑 演示约定", exact: true }).click()
     await details.getByRole("combobox", { name: "记忆使用范围", exact: true }).click()
     await page.getByRole("option", { name: "Bot 共享", exact: true }).click()
@@ -464,9 +488,116 @@ async function main() {
       animations: "disabled",
       path: join(artifacts, "bot-im-memory-scope.png")
     })
-    await page.getByRole("button", { name: "返回 Bot 主对话", exact: true }).click()
+    await details.getByRole("button", { name: "返回详情", exact: true }).click()
+    await page.evaluate(() =>
+      (window as any).fixture.setView({
+        detailTab: "memory",
+        activeWorkIdByBot: { bot: "previous-private-work" }
+      })
+    )
+    await details.getByRole("button", { name: "前往私人主对话", exact: true }).click()
+    await page.getByTestId("private-conversation").getByText("私人主对话").waitFor()
+    const privateDetails = page
+      .getByLabel("Bot 详情", { exact: true })
+      .filter({ has: page.locator(".bot-profile") })
+    await privateDetails.getByRole("heading", { name: "职责", exact: true }).waitFor()
+    await privateDetails.getByRole("button", { name: "管理记忆", exact: true }).click()
+    await privateDetails.getByText("私人偏好", { exact: true }).waitFor()
+    await privateDetails.getByText("群内 · 体验优化小组", { exact: true }).waitFor()
+    await privateDetails.getByText("群内 · 本地方案讨论组", { exact: true }).waitFor()
+    await privateDetails.getByText("群内 · 原群聊（记录不可用）", { exact: true }).waitFor()
+    const memoryReads = await page.evaluate(() => (window as any).fixture.memoryReads.length)
+    await page.evaluate(() => {
+      const f = (window as any).fixture
+      f.groups[1].title = "体验优化小组 · 产品与研发跨团队讨论、评审和复盘"
+      f.groups[1].state = "revoked"
+      f.bump()
+    })
+    await privateDetails
+      .getByText("群内 · 体验优化小组 · 产品与研发跨团队讨论、评审和复盘（已解绑）", {
+        exact: true
+      })
+      .waitFor()
+    assert.equal(
+      await page.evaluate(() => (window as any).fixture.memoryReads.length),
+      memoryReads,
+      "Group label updates reuse the snapshot, without re-reading memories or per-entry requests"
+    )
+    await privateDetails.screenshot({
+      animations: "disabled",
+      path: join(artifacts, "bot-memory-provenance.png")
+    })
+    await privateDetails.getByText("本地讨论约定", { exact: true }).scrollIntoViewIfNeeded()
+    await privateDetails.screenshot({
+      animations: "disabled",
+      path: join(artifacts, "bot-memory-group-labels.png")
+    })
+    await privateDetails.getByRole("button", { name: "编辑 原群保留经验", exact: true }).click()
+    await privateDetails
+      .getByText("所属群：原群聊（记录不可用）。仅用于该群及其任务。", { exact: true })
+      .waitFor()
+    await privateDetails.getByRole("button", { name: "保存", exact: true }).click()
+    await privateDetails.getByText("原群保留经验", { exact: true }).waitFor()
+    assert.equal(
+      await page.evaluate(() => "scope" in (window as any).fixture.memoryWrites.at(-1)),
+      false,
+      "Editing a retained group memory must not change its audience"
+    )
+    await page.evaluate(() => document.documentElement.classList.add("dark"))
+    await privateDetails.screenshot({
+      animations: "disabled",
+      path: join(artifacts, "bot-memory-provenance-dark.png")
+    })
+    await page.evaluate(() => {
+      document.documentElement.classList.remove("dark")
+      const f = (window as any).fixture
+      f.groups[1].title = "体验优化小组"
+      f.groups[1].state = "active"
+      f.bump()
+    })
+    await privateDetails.getByRole("button", { name: "返回详情", exact: true }).click()
+    await privateDetails.getByRole("heading", { name: "职责", exact: true }).waitFor()
+    await page.waitForFunction(() => document.activeElement?.textContent?.trim() === "管理记忆")
     await page.getByTestId("private-conversation").getByText("私人主对话").waitFor()
     assert.equal(await page.getByRole("button", { name: /演示准备清单/ }).count(), 0)
+    // A tall, portalled editor overlaps the native title-bar drag strip.
+    // CDP clicks bypass native hit-testing, so also verify the exclusion regions.
+    const previousSize = await app.evaluate(({ BrowserWindow }) => {
+      const window = BrowserWindow.getAllWindows()[0]
+      const size = window.getContentSize()
+      window.setContentSize(1440, 700)
+      return size
+    })
+    await page.waitForFunction(() => window.innerHeight === 700)
+    for (const closeWith of ["Close", "取消", "Escape"]) {
+      await privateDetails.getByRole("button", { name: "编辑职责", exact: true }).click()
+      const editor = page.getByRole("dialog", { name: "编辑 Bot", exact: true })
+      await editor.waitFor()
+      assert.equal(await editor.getByLabel("Bot 名称", { exact: true }).inputValue(), "招乎T")
+      assert.equal(
+        await editor.evaluate((element) =>
+          getComputedStyle(element).getPropertyValue("-webkit-app-region")
+        ),
+        "no-drag"
+      )
+      assert.equal(
+        await page
+          .locator('[data-state="open"].fixed.inset-0')
+          .evaluate((element) => getComputedStyle(element).getPropertyValue("-webkit-app-region")),
+        "no-drag"
+      )
+      await editor.getByLabel("Bot 名称", { exact: true }).fill("未保存的名称")
+      if (closeWith === "Escape") await page.keyboard.press("Escape")
+      else await editor.getByRole("button", { name: closeWith, exact: true }).click()
+      await editor.waitFor({ state: "detached" })
+      await page.waitForFunction(() => document.activeElement?.textContent?.trim() === "编辑职责")
+    }
+    await app.evaluate(({ BrowserWindow }, size) => {
+      BrowserWindow.getAllWindows()[0].setContentSize(size[0], size[1])
+    }, previousSize)
+    console.log(
+      "PASS: Bot editor X, Cancel and Escape dismiss without saving; modal excludes native drag regions"
+    )
     await page.getByRole("button", { name: "更多 Bot 操作", exact: true }).click()
     assert.equal(await page.getByRole("button", { name: "模拟 IM 接入", exact: true }).count(), 0)
     await page.getByRole("button", { name: "招乎接入", exact: true }).waitFor()
@@ -887,6 +1018,124 @@ async function main() {
       .locator('[data-bot-row-key="im:group-c"] .bot-im-row-caption')
       .getByText(/Bot 已归档/)
       .waitFor()
+    // Local deletion is available only after unbinding, in both sidebar menus.
+    await page.locator('[data-bot-row-key="im:group-b"]').click({ button: "right" })
+    assert.equal(await page.getByRole("menuitem", { name: "删除会话", exact: true }).count(), 0)
+    await page.keyboard.press("Escape")
+    await page.evaluate(() => {
+      const f = (window as any).fixture
+      f.bots[0].archived = false
+      f.setView({
+        selectedId: "bot",
+        imConversationId: "group-a",
+        imHistoryCollapsed: false,
+        activeImWorkIdByConversation: { "group-a": "work-a" }
+      })
+      f.bump()
+    })
+    await page.getByTestId("private-conversation").getByText("任务对话：演示准备清单").waitFor()
+    const deletedRow = page.locator('[data-bot-row-key="im:group-a"]')
+    await deletedRow.click({ button: "right" })
+    await page.getByRole("menuitem", { name: "删除会话", exact: true }).click()
+    const deletion = page.getByRole("dialog", { name: "删除「产品协作群」的会话？", exact: true })
+    await deletion.getByRole("button", { name: "取消", exact: true }).click()
+    await deletion.waitFor({ state: "detached" })
+    await deletedRow.waitFor()
+    await page.waitForFunction(
+      () => (document.activeElement as HTMLElement)?.dataset.botRowKey === "im:group-a"
+    )
+    await deletedRow.hover()
+    await deletedRow
+      .locator("..")
+      .getByRole("button", { name: "产品协作群 的操作", exact: true })
+      .click()
+    await page.screenshot({
+      path: join(artifacts, "bot-im-delete-menu.png"),
+      animations: "disabled"
+    })
+    await page.getByRole("menuitem", { name: "删除会话", exact: true }).click()
+    await deletion.getByText(/永久移除此会话，无法撤销/).waitFor()
+    await deletion.screenshot({
+      path: join(artifacts, "bot-im-delete-confirm.png"),
+      animations: "disabled"
+    })
+    // A bind-state update while the confirmation is open must also prevent deletion.
+    await page.evaluate(() => {
+      const f = (window as any).fixture
+      f.groups[0].state = "active"
+      f.bump()
+    })
+    await deletion.getByRole("button", { name: "删除会话", exact: true }).click()
+    await deletion.waitFor({ state: "detached" })
+    assert.equal(await deletedRow.count(), 1)
+    await page.evaluate(() => {
+      const f = (window as any).fixture
+      f.groups[0].state = "revoked"
+      f.bump()
+    })
+    await deletedRow.click({ button: "right" })
+    await page.getByRole("menuitem", { name: "删除会话", exact: true }).click()
+    await deletion.getByRole("button", { name: "删除会话", exact: true }).click()
+    await deletedRow.waitFor({ state: "detached" })
+    await page
+      .getByTestId("private-conversation")
+      .getByText("私人主对话", { exact: true })
+      .waitFor()
+    assert.equal(await page.getByRole("button", { name: /演示准备清单/ }).count(), 0)
+    await deletion.waitFor({ state: "detached" })
+    await page.waitForFunction(() => getComputedStyle(document.body).pointerEvents !== "none")
+    await page.screenshot({ path: join(artifacts, "bot-im-deleted.png"), animations: "disabled" })
+    await page.getByText("已从列表删除会话", { exact: true }).waitFor()
+    assert.equal(await page.getByRole("button", { name: "撤销", exact: true }).count(), 0)
+    assert.deepEqual(
+      await page.evaluate(
+        () =>
+          JSON.parse(localStorage.getItem("cmb-bots-view-v1")!).state.hosts.local
+            .deletedImConversationIds
+      ),
+      ["group-a"]
+    )
+    await page.reload()
+    await page.getByTestId("private-conversation").waitFor()
+    await page.evaluate(() => {
+      const f = (window as any).fixture
+      f.groups[0].state = "revoked"
+      f.groups[0].activity.version += 100 // later receipts must not bring a deleted, unbound room back
+      f.bump()
+    })
+    await deletedRow.waitFor({ state: "detached" })
+    await page.getByRole("button", { name: "搜索 Bot", exact: true }).click()
+    await page.getByRole("textbox", { name: "搜索 Bot", exact: true }).fill("产品协作群")
+    assert.equal(await deletedRow.count(), 0)
+    await page.getByRole("textbox", { name: "搜索 Bot", exact: true }).fill("")
+    // Retained tasks keep their group context without restoring the deleted sidebar entry.
+    await page.evaluate(() =>
+      (window as any).fixture.setView({
+        selectedId: "bot",
+        imConversationId: "group-a",
+        activeImWorkIdByConversation: { "group-a": "work-a" }
+      })
+    )
+    await page.getByTestId("private-conversation").getByText("任务对话：演示准备清单").waitFor()
+    assert.equal(await deletedRow.count(), 0)
+    await details.getByRole("button", { name: "返回群聊", exact: true }).click()
+    await page
+      .getByLabel("产品协作群消息记录")
+      .getByText("已整理好本周的项目进展。", { exact: true })
+      .last()
+      .waitFor()
+    assert.equal(await deletedRow.count(), 0)
+    assert.deepEqual(
+      await page.evaluate(
+        () =>
+          JSON.parse(localStorage.getItem("cmb-bots-view-v1")!).state.hosts.local
+            .deletedImConversationIds
+      ),
+      ["group-a"]
+    )
+    console.log(
+      "PASS: revoked-only group deletion, cancellation, state-change guard, no undo, persistence and retained task return without restoring the list entry"
+    )
     assert.deepEqual(errors, [])
     console.log(
       "PASS: IM group workspace routing, private/work return links, scoped read state, paging, late responses, offline/revoked history, management, retry and light/dark/compact layout"

@@ -1,6 +1,7 @@
 /** Synthetic transport; render the production workspace and group conversation components. */
 import React from "react"
 import { createRoot } from "react-dom/client"
+import { Toaster } from "sonner"
 import { BotsWorkspace } from "../../src/renderer/src/components/bots/BotsWorkspace"
 import { useBotViewStore } from "../../src/renderer/src/components/bots/view-store"
 
@@ -97,9 +98,16 @@ const f = ((window as any).fixture = {
   stoppedBackgroundThreads: [] as string[],
   cancelled: [] as string[],
   hold: false,
+  holdWork: false,
+  releaseWork: null as any,
   release: null as any,
   fail: false,
   groups,
+  nativeGroups: [
+    { id: "local-group", hostId: "local", name: "本地方案讨论组", memberIds: [bot.id], version: 1 }
+  ],
+  memoryReads: [] as any[],
+  memoryWrites: [] as any[],
   bots: [bot],
   activities: [
     {
@@ -150,6 +158,20 @@ const memories: any[] = [
     content: "每周三评审。",
     scope: { kind: "group", groupId: "group-b" },
     version: "1"
+  },
+  {
+    id: "local-memory",
+    name: "本地讨论约定",
+    content: "先讨论再实施。",
+    scope: { kind: "group", groupId: "local-group" },
+    version: "1"
+  },
+  {
+    id: "retained-memory",
+    name: "原群保留经验",
+    content: "已移除群聊的记录仍可管理。",
+    scope: { kind: "group", groupId: "removed-group" },
+    version: "1"
   }
 ]
 const client = {
@@ -167,7 +189,7 @@ const client = {
   snapshot: async () => ({
     host: { id: "local", kind: "local", name: "本机", capabilities: {} },
     bots: f.bots.map((bot) => ({ ...bot })),
-    groups: [],
+    groups: f.nativeGroups.map((group) => ({ ...group })),
     imConversations: groups.map((g) => ({ ...g, activity: { ...g.activity } })),
     tasks: f.tasks.map((task) => ({ ...task })),
     backgroundThreads: [...f.backgroundThreads],
@@ -196,14 +218,20 @@ const client = {
   },
   open: async () => {},
   requestReceipts: async () => [],
-  listMemory: async (_bot: string, groupId?: string) =>
-    memories.filter(
-      (entry) =>
-        entry.scope.kind === "shared" ||
-        (groupId ? entry.scope.groupId === groupId : entry.scope.kind === "private")
-    ),
+  listMemory: async (_bot: string, groupId?: string) => {
+    f.memoryReads.push([_bot, groupId])
+    return memories.filter(
+      (entry) => !groupId || entry.scope.kind === "shared" || entry.scope.groupId === groupId
+    )
+  },
   writeMemory: async (_bot: string, input: any) => {
-    const entry = { ...input, id: input.id ?? String(memories.length), version: "2" }
+    f.memoryWrites.push(input)
+    const entry = {
+      ...memories.find((entry) => entry.id === input.id),
+      ...input,
+      id: input.id ?? String(memories.length),
+      version: "2"
+    }
     const prior = memories.findIndex((entry) => entry.id === input.id)
     if (prior < 0) memories.push(entry)
     else memories[prior] = entry
@@ -211,7 +239,13 @@ const client = {
   },
   works: {
     list: async () => ({ items: [], priority: [], nextCursor: null }),
-    get: async () => work,
+    get: async () => {
+      if (f.holdWork) {
+        f.holdWork = false
+        await new Promise((resolve) => (f.releaseWork = resolve))
+      }
+      return work
+    },
     summaries: async () => [work],
     lifecycle: async ({ action }: { action: string }) => {
       work.state = action === "complete" ? "completed" : "active"
@@ -311,7 +345,13 @@ const client = {
   system: { getPlatform: async () => "darwin" }
 }
 ;(window as any).electron = { onNotifyMsg: () => () => {} }
-useBotViewStore
-  .getState()
-  .update("local", { selectedId: "bot", imConversationId: "group-a", detailOpen: true })
-createRoot(document.getElementById("root")!).render(<BotsWorkspace client={client as any} />)
+if (!useBotViewStore.getState().hosts.local)
+  useBotViewStore
+    .getState()
+    .update("local", { selectedId: "bot", imConversationId: "group-a", detailOpen: true })
+createRoot(document.getElementById("root")!).render(
+  <>
+    <BotsWorkspace client={client as any} />
+    <Toaster />
+  </>
+)

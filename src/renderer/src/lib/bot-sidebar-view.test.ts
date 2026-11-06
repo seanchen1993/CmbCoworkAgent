@@ -12,6 +12,7 @@ import {
   orderBotConversations,
   orderImConversations,
   filterImConversations,
+  removeImConversationFromView,
   retainSidebarOrder,
   botSidebarTime
 } from "./bot-sidebar-view"
@@ -144,6 +145,53 @@ it("defers reorder during interaction, drops removed rows and appends new rows w
     "b",
     "new"
   ])
+})
+
+it("only removes revoked IM rows, including search/hidden lists, without confusing re-bound groups", () => {
+  const bots = new Map([["bot", { name: "项目助手" } as BotDefinition]])
+  const rooms = [im("active", 2), im("old", 1, false, "revoked"), im("rebound", 3)]
+  for (const query of ["", "同名群聊"])
+    expect(
+      filterImConversations(rooms, bots, query, [], false, ["old", "active"]).map((g) => g.id)
+    ).toEqual(["active", "rebound"])
+  expect(filterImConversations(rooms, bots, "", ["old"], true, ["old"])).toEqual([])
+  rooms[1].activity.version++ // late replies/read-state updates must not resurrect revoked rows
+  expect(filterImConversations(rooms, bots, "", [], false, ["old"])).toHaveLength(2)
+  rooms[1].state = "active"
+  expect(filterImConversations(rooms, bots, "", [], false, ["old"])).toHaveLength(3)
+})
+
+it("clears only the deleted group's navigation and refuses a still-bound group", () => {
+  const view = {
+    ...sidebarView(),
+    imConversationId: "old",
+    selectedId: "bot",
+    activeWorkIdByBot: { bot: "private-task" },
+    activeImWorkIdByConversation: { old: "group-task", other: "other-task" },
+    pinnedImConversationIds: ["old", "other"],
+    hiddenImConversationIds: ["old"],
+    deletedImConversationIds: ["previous"]
+  }
+  expect(removeImConversationFromView(view, im("old", 1))).toBeNull()
+  const patch = removeImConversationFromView(view, im("old", 1, true, "revoked"))!
+  expect(patch).toMatchObject({
+    imConversationId: null,
+    selectedId: "bot",
+    detailTab: "details",
+    activeWorkIdByBot: { bot: null },
+    activeImWorkIdByConversation: { other: "other-task" },
+    deletedImConversationIds: ["previous", "old"],
+    pinnedImConversationIds: ["other"],
+    hiddenImConversationIds: []
+  })
+  expect(view.imConversationId).toBe("old")
+  expect(view.activeImWorkIdByConversation.old).toBe("group-task")
+  expect(
+    removeImConversationFromView(
+      { ...view, imConversationId: "other" },
+      im("old", 1, false, "revoked")
+    )
+  ).not.toHaveProperty("selectedId")
 })
 
 it("shows bounded local calendar times instead of heartbeat or relative-second churn", () => {

@@ -1,7 +1,7 @@
 import { botMemoryScopeLabel, type BotMemoryScope } from "../../../../shared/bots/memory-scope"
 import { botErrorMessage } from "@/lib/bot-error-message"
 import { useEffect, useId, useRef, useState } from "react"
-import { Check, Loader2, Pencil, Plus, Share2, Trash2, X } from "lucide-react"
+import { ArrowLeft, Check, Loader2, Pencil, Plus, Share2, Trash2, X } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import {
   Select,
@@ -27,12 +27,16 @@ export function BotMemoryPanel({
   bot,
   client,
   peers,
-  groupId
+  groupId,
+  groupLabels,
+  onBack
 }: {
   bot: BotDefinition
   client: BotClient
   peers: BotDefinition[]
   groupId?: string
+  groupLabels?: ReadonlyMap<string, string>
+  onBack?(): void
 }) {
   const botId = bot.id
   const memoryMode = bot.memoryMode ?? "inherit"
@@ -52,8 +56,20 @@ export function BotMemoryPanel({
   const refreshRef = useRef<() => void>(() => {})
   const lock = useRef(false)
   const mounted = useRef(true)
+  const backRef = useRef<HTMLButtonElement>(null)
   const recipients = peers.filter((bot) => bot.id !== botId && !bot.archived)
   const recipientAvailable = recipients.some((bot) => bot.id === recipient)
+  const groupLabel = (id: string) => groupLabels?.get(id) ?? "原群聊（记录不可用）"
+  const scopeLabel = (scope?: BotMemoryScope) =>
+    scope?.kind === "group" ? `群内 · ${groupLabel(scope.groupId)}` : botMemoryScopeLabel(scope)
+  const editingGroupId =
+    groupId ??
+    (editing && editing !== "new" && editing.scope?.kind === "group"
+      ? editing.scope.groupId
+      : undefined)
+  useEffect(() => {
+    backRef.current?.focus()
+  }, [])
   useEffect(() => {
     mounted.current = true
     let disposed = false
@@ -143,6 +159,14 @@ export function BotMemoryPanel({
   }
   return (
     <section className="bot-detail-section">
+      {onBack && (
+        <div className="bot-memory-navigation">
+          <button ref={backRef} type="button" disabled={busy} onClick={onBack}>
+            <ArrowLeft size={14} /> 返回详情
+          </button>
+          <span>记忆管理</span>
+        </div>
+      )}
       <div className="bot-memory-config">
         <div className="bot-memory-config-row">
           <span className="font-medium">记忆配置</span>
@@ -205,12 +229,18 @@ export function BotMemoryPanel({
           className="space-y-3"
           onSubmit={(event) => {
             event.preventDefault()
-            const previous = editing === "new" ? undefined : editing.scope ?? { kind: "private" }
-            const scope: BotMemoryScope = scopeKind === "group"
-              ? { kind: "group", groupId: groupId ?? (previous?.kind === "group" ? previous.groupId : "") }
-              : { kind: scopeKind }
-            const unchanged = previous?.kind === scope.kind &&
-              (scope.kind !== "group" || (previous.kind === "group" && previous.groupId === scope.groupId))
+            const previous = editing === "new" ? undefined : (editing.scope ?? { kind: "private" })
+            const scope: BotMemoryScope =
+              scopeKind === "group"
+                ? {
+                    kind: "group",
+                    groupId: groupId ?? (previous?.kind === "group" ? previous.groupId : "")
+                  }
+                : { kind: scopeKind }
+            const unchanged =
+              previous?.kind === scope.kind &&
+              (scope.kind !== "group" ||
+                (previous.kind === "group" && previous.groupId === scope.groupId))
             void mutate(() =>
               client.writeMemory(botId, {
                 name,
@@ -249,7 +279,7 @@ export function BotMemoryPanel({
             {scopeKind === "shared"
               ? "此 Bot 的私聊和各群均可使用。"
               : scopeKind === "group"
-                ? "仅所属群及其任务使用；群已删除或 Bot 已离群时保留供你管理。"
+                ? `所属群：${editingGroupId ? groupLabel(editingGroupId) : "原群聊"}。仅用于该群及其任务。`
                 : "仅私聊及其任务使用。"}
           </p>
           <label className="bot-field">
@@ -332,7 +362,9 @@ export function BotMemoryPanel({
                   </button>
                 </div>
               </div>
-              <span className="bot-memory-scope-label">{botMemoryScopeLabel(entry.scope)}</span>
+              <span className="bot-memory-scope-label" title={scopeLabel(entry.scope)}>
+                {scopeLabel(entry.scope)}
+              </span>
               <p>{entry.content}</p>
               {sharing === entry.id && (
                 <div className="mt-3 space-y-3">

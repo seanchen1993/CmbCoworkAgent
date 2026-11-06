@@ -56,6 +56,7 @@ import {
   botSidebarDropPatch,
   orderBotConversations,
   filterImConversations,
+  removeImConversationFromView,
   type BotSidebarDrag,
   type BotSidebarDrop
 } from "@/lib/bot-sidebar-view"
@@ -378,11 +379,13 @@ function BotEditor({
 function GroupMemory({
   group,
   bots,
-  client
+  client,
+  groupLabels
 }: {
   group: BotGroup
   bots: BotDefinition[]
   client: BotClient
+  groupLabels: ReadonlyMap<string, string>
 }) {
   const [open, setOpen] = useState(false)
   const [memberId, setMemberId] = useState(group.memberIds[0])
@@ -421,6 +424,7 @@ function GroupMemory({
           client={client}
           peers={[]}
           groupId={group.id}
+          groupLabels={groupLabels}
         />
       )}
     </>
@@ -571,11 +575,18 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
     updateView({ detailOpen })
   }
   const setDetailTab = (detailTab: typeof view.detailTab) => updateView({ detailTab })
+  const memoryTriggerRef = useRef<HTMLButtonElement>(null)
   const [query, setQuery] = useState("")
   const [showHidden, setShowHidden] = useState(false)
   const [suppressedRead, setSuppressedRead] = useState<string | null>(null)
   const [sidebarScrolling, setSidebarScrolling] = useState(false)
   const [sidebarMenuOpen, setSidebarMenuOpen] = useState(false)
+  const [deletingIm, setDeletingIm] = useState<{
+    hostId: string
+    id: string
+    title: string
+    trigger: HTMLElement | null
+  } | null>(null)
   const sectionFocus = useRef(false)
   const [sectionEditor, setSectionEditor] = useState<{
     id?: string
@@ -696,6 +707,17 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
     setGroupEditor(group)
   }
   const selectedGroup = snapshot?.groups.find((group) => group.id === groupId) ?? null
+  const memoryGroupLabels = useMemo(
+    () =>
+      new Map([
+        ...(snapshot?.groups ?? []).map((group) => [group.id, group.name] as const),
+        ...(snapshot?.imConversations ?? []).map(
+          (group) =>
+            [group.id, `${group.title}${group.state === "revoked" ? "（已解绑）" : ""}`] as const
+        )
+      ]),
+    [snapshot?.groups, snapshot?.imConversations]
+  )
   const selectedIm = !selectedGroup
     ? snapshot?.imConversations?.find(
         (group) => group.id === view.imConversationId && group.botId === selectedId
@@ -716,6 +738,19 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
     if (!selectedIm || selectedIm.botId !== botId) return
     updateView({
       activeImWorkIdByConversation: { ...view.activeImWorkIdByConversation, [selectedIm.id]: id }
+    })
+  }
+  const openPrivateMain = (botId: string) => {
+    closeNewChat()
+    updateView({
+      selectedId: botId,
+      groupId: null,
+      imConversationId: null,
+      detailTab: "details",
+      activeWorkIdByBot: {
+        ...useBotViewStore.getState().hosts[client.hostId]?.activeWorkIdByBot,
+        [botId]: null
+      }
     })
   }
   const [deleting, setDeleting] = useState<BotDefinition | null>(null)
@@ -831,7 +866,8 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
         botById,
         query,
         view.hiddenImConversationIds,
-        showHidden
+        showHidden,
+        view.deletedImConversationIds
       )
   const pinnedBots = pinnedIds.flatMap((id) => {
     const bot = visible.find((candidate) => candidate.id === id && !candidate.archived)
@@ -2229,6 +2265,17 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
                       : [...hidden, id]
                   })
                 }}
+                onDelete={(group) => {
+                  setDeletingIm({
+                    hostId: client.hostId,
+                    id: group.id,
+                    title: group.title,
+                    trigger:
+                      Array.from(document.querySelectorAll<HTMLElement>("[data-bot-row-key]")).find(
+                        (row) => row.dataset.botRowKey === `im:${group.id}`
+                      ) ?? null
+                  })
+                }}
               />
             )}
             {!snapshot && !error && <Loader2 className="mx-auto mt-12 size-5 animate-spin" />}
@@ -2336,13 +2383,7 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
                 setImBindingId(selectedIm.bindingId)
                 setImBot(selected)
               }}
-              onMain={() =>
-                updateView({
-                  selectedId: selected.id,
-                  groupId: null,
-                  activeWorkIdByBot: { ...view.activeWorkIdByBot, [selected.id]: null }
-                })
-              }
+              onMain={() => openPrivateMain(selected.id)}
               onWork={(id) => openImWork(selected.id, id)}
             />
           ) : selectedGroup ? (
@@ -2359,9 +2400,7 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
               onDetails={() => setDetailOpen(!detailOpen)}
               detailOpen={detailOpen}
               detailsTriggerRef={detailTriggerRef}
-              onOpenBot={(bot) =>
-                updateView({ selectedId: bot.id, groupId: null, detailTab: "details" })
-              }
+              onOpenBot={(bot) => openPrivateMain(bot.id)}
               onBrowser={() => {
                 updateView({ groupDetailTab: "computer", detailOpen: true })
               }}
@@ -2431,8 +2470,9 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
               )}
               {selectedWork?.source && (
                 <div className="bot-work-source" role="note">
-                  {selectedWork.source.transport === "im" ? "IM 任务" : "模拟渠道任务"} ·
-                  此处文字与结果将回到原接入会话。可使用 Bot 共享与本群记忆，不提供本机文件和电脑。
+                  {selectedWork.source.transport === "im"
+                    ? "来自招乎群聊 · 回复和结果会回到原群，使用 Bot 共享与本群记忆。"
+                    : "模拟渠道任务 · 此处文字与结果将回到原接入会话。可使用 Bot 共享与本群记忆，不提供本机文件和电脑。"}
                 </div>
               )}
               {activeWorkId && !selectedWork ? (
@@ -2447,17 +2487,7 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
                   work={selectedWork}
                   onConfigureModel={() => openBotEditor(selected)}
                   onOpenWork={(id) => selectWork(id)}
-                  onOpenBot={(id) =>
-                    updateView({
-                      selectedId: id,
-                      groupId: null,
-                      detailTab: "details",
-                      activeWorkIdByBot: {
-                        ...useBotViewStore.getState().hosts[client.hostId]?.activeWorkIdByBot,
-                        [id]: null
-                      }
-                    })
-                  }
+                  onOpenBot={openPrivateMain}
                   groups={snapshot?.groups ?? []}
                   onOpenGroup={(id) =>
                     updateView({ groupId: id, selectedId: null, groupDetailTab: "details" })
@@ -2508,22 +2538,18 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
                 schedules={snapshot?.schedules ?? []}
                 bot={selected}
                 client={client}
+                memoryGroupLabels={memoryGroupLabels}
                 revision={snapshot?.revision ?? 0}
                 onClose={() => setDetailOpen(false)}
                 onManage={() => {
                   setImBindingId(selectedIm.bindingId)
                   setImBot(selected)
                 }}
-                onMain={() =>
-                  updateView({
-                    selectedId: selected.id,
-                    groupId: null,
-                    activeWorkIdByBot: { ...view.activeWorkIdByBot, [selected.id]: null }
-                  })
-                }
+                onMain={() => openPrivateMain(selected.id)}
                 onWork={(id) => openImWork(selected.id, id)}
                 controller={works}
                 selectedWork={selectedWork}
+                workOpen={Boolean(activeWorkId)}
                 onBack={() => selectWork(null)}
               />
             </BotDetailsPane>
@@ -2624,6 +2650,7 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
                     group={selectedGroup}
                     bots={snapshot?.bots ?? []}
                     client={client}
+                    groupLabels={memoryGroupLabels}
                   />
                 </TabsContent>
                 <TabsContent value="members" className="mt-0">
@@ -2632,9 +2659,7 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
                     group={selectedGroup}
                     bots={snapshot?.bots ?? []}
                     client={client}
-                    onOpen={(bot) =>
-                      updateView({ selectedId: bot.id, groupId: null, detailTab: "details" })
-                    }
+                    onOpen={(bot) => openPrivateMain(bot.id)}
                   />
                 </TabsContent>
                 <TabsContent value="files" className="mt-0">
@@ -2846,6 +2871,11 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
                       bot={selected}
                       client={client}
                       peers={snapshot?.bots ?? []}
+                      groupLabels={memoryGroupLabels}
+                      onBack={() => {
+                        setDetailTab("details")
+                        requestAnimationFrame(() => memoryTriggerRef.current?.focus())
+                      }}
                     />
                   ) : (
                     <>
@@ -2858,7 +2888,11 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
                         <button onClick={(event) => openBotEditor(selected, event.currentTarget)}>
                           编辑职责
                         </button>
-                        <button className="ml-4" onClick={() => setDetailTab("memory")}>
+                        <button
+                          ref={memoryTriggerRef}
+                          className="ml-4"
+                          onClick={() => setDetailTab("memory")}
+                        >
                           管理记忆
                         </button>
                       </section>
@@ -2901,6 +2935,57 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
               </Tabs>
             </BotDetailsPane>
           </>
+        )}
+        {deletingIm?.hostId === client.hostId && (
+          <Dialog
+            open
+            onOpenChange={(open) => {
+              if (!open) setDeletingIm(null)
+            }}
+          >
+            <DialogContent
+              className="sm:max-w-[420px]"
+              onCloseAutoFocus={(event) => {
+                if (!deletingIm.trigger?.isConnected) return
+                event.preventDefault()
+                deletingIm.trigger.focus({ preventScroll: true })
+              }}
+            >
+              <DialogHeader>
+                <DialogTitle>删除「{deletingIm.title}」的会话？</DialogTitle>
+                <DialogDescription>
+                  此群已解除绑定。将从 App 列表永久移除此会话，无法撤销。
+                  聊天记录、群任务、记忆和文件仍保留。
+                </DialogDescription>
+              </DialogHeader>
+              <DialogFooter>
+                <Button variant="outline" onClick={() => setDeletingIm(null)}>
+                  取消
+                </Button>
+                <Button
+                  variant="destructive"
+                  onClick={() => {
+                    const group = snapshot?.imConversations?.find(
+                      (item) => item.id === deletingIm.id
+                    )
+                    const prefs =
+                      useBotViewStore.getState().hosts[client.hostId] ?? DEFAULT_BOT_VIEW
+                    const patch = group && removeImConversationFromView(prefs, group)
+                    if (!patch) {
+                      toast.error("群聊状态已变化，仅已解除绑定的群聊可以删除")
+                      setDeletingIm(null)
+                      return
+                    }
+                    updateView(patch)
+                    setDeletingIm(null)
+                    toast.success("已从列表删除会话")
+                  }}
+                >
+                  删除会话
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
         )}
         {renamingGroup && (
           <BotGroupEditor

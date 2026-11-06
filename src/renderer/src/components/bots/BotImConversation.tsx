@@ -542,6 +542,8 @@ export function BotImConversationDetails({
   onWork,
   controller,
   selectedWork,
+  workOpen,
+  memoryGroupLabels,
   schedules = [],
   onBack
 }: {
@@ -555,11 +557,15 @@ export function BotImConversationDetails({
   onWork(id: string): void
   controller: ReturnType<typeof useBotWorks>
   selectedWork: BotWorkItem | null
+  workOpen: boolean
+  memoryGroupLabels: ReadonlyMap<string, string>
   schedules?: BotSchedule[]
   onBack(): void
 }) {
   const [memoryOpen, setMemoryOpen] = useState(false)
   const [computerOpen, setComputerOpen] = useState(false)
+  const memoryTriggerRef = useRef<HTMLButtonElement>(null)
+  const mainLabel = workOpen ? "返回群主对话" : "前往私人主对话"
   return (
     <>
       <div className="bot-detail-actions">
@@ -572,85 +578,98 @@ export function BotImConversationDetails({
         <h2>{conversation.title}</h2>
         <span className="bot-im-type-label">招乎群聊</span>
       </div>
-      <div className="bot-im-details-section">
-        <h3>服务 Bot</h3>
-        <button className="bot-im-owner" onClick={onMain}>
-          <BotAvatar color={bot.color} shape={bot.shape} size={32} />
-          <span>
-            <strong>{bot.name}</strong>
-            <small>打开私人主对话</small>
-          </span>
-          <ChevronRight size={16} />
-        </button>
-      </div>
-      <BotWorkPanel
-        key={conversation.id}
-        client={client}
-        botId={bot.id}
-        controller={controller}
-        selected={selectedWork}
-        onSelect={(id) => (id ? onWork(id) : onBack())}
-        onBack={onBack}
-        heading="群内任务"
-        backLabel="返回群聊"
-        allowCreate={false}
-        disabled={Boolean(bot.archived || bot.deleting)}
-      />
-      <div className="bot-im-details-section">
-        <button
-          className="bot-im-text-button"
-          aria-expanded={memoryOpen}
-          onClick={() => setMemoryOpen(!memoryOpen)}
-        >
-          记忆 <ChevronRight size={14} />
-        </button>
-        {!memoryOpen && <p>使用 Bot 共享记忆与本群记忆。</p>}
-      </div>
-      {memoryOpen && (
+      {memoryOpen ? (
         <BotMemoryPanel
           key={conversation.id}
           bot={bot}
           client={client}
           peers={[]}
           groupId={conversation.id}
+          groupLabels={memoryGroupLabels}
+          onBack={() => {
+            setMemoryOpen(false)
+            requestAnimationFrame(() => memoryTriggerRef.current?.focus())
+          }}
         />
-      )}
-      <div className="bot-im-details-section">
-        <button
-          className="bot-im-text-button"
-          aria-expanded={computerOpen}
-          onClick={() => setComputerOpen(!computerOpen)}
-        >
-          电脑 <ChevronRight size={14} />
-        </button>
-        {computerOpen && (
-          <BotBrowserPanel
-            key={selectedWork?.id ?? conversation.id}
+      ) : (
+        <>
+          <div className="bot-im-details-section">
+            <h3>服务 Bot</h3>
+            <button
+              className="bot-im-owner"
+              aria-label={mainLabel}
+              title={`${mainLabel} · ${workOpen ? conversation.title : bot.name}`}
+              onClick={workOpen ? onBack : onMain}
+            >
+              <BotAvatar color={bot.color} shape={bot.shape} size={32} />
+              <span className="bot-im-owner-copy">
+                <strong>{bot.name}</strong>
+                <small>{mainLabel}</small>
+              </span>
+              {workOpen ? <ArrowLeft size={16} /> : <ArrowUpRight size={16} />}
+            </button>
+          </div>
+          <BotWorkPanel
+            key={conversation.id}
             client={client}
-            botId={
-              selectedWork
-                ? botWorkBrowserScope(selectedWork.id, bot.id)
-                : botImBrowserScope(conversation.id, bot.id)
-            }
+            botId={bot.id}
+            controller={controller}
+            selected={selectedWork}
+            onSelect={(id) => (id ? onWork(id) : onBack())}
+            onBack={onBack}
+            heading="群内任务"
+            backLabel="返回群聊"
+            allowCreate={false}
+            disabled={Boolean(bot.archived || bot.deleting)}
           />
-        )}
-      </div>
-      <BotSchedulePanel
-        botId={bot.id}
-        client={client}
-        allowCreate={false}
-        schedules={schedules.filter(
-          (item) => item.botId === bot.id && item.audienceKey === `im:${conversation.id}`
-        )}
-      />
-      <div className="bot-im-details-section bot-im-connection-section">
-        <h3>接入</h3>
-        <p>{imConversationStatus(conversation)}</p>
-        <p>这里展示本机收到的群消息和 Bot 回复，不包含未发送给机器人的群消息。</p>
-        <button className="bot-im-text-button" onClick={onManage}>
-          管理接入 <ChevronRight size={14} />
-        </button>
-      </div>
+          <div className="bot-im-details-section">
+            <button
+              className="bot-im-text-button"
+              ref={memoryTriggerRef}
+              onClick={() => setMemoryOpen(true)}
+            >
+              记忆 <ChevronRight size={14} />
+            </button>
+            <p>使用 Bot 共享记忆与本群记忆。</p>
+          </div>
+          <div className="bot-im-details-section">
+            <button
+              className="bot-im-text-button"
+              aria-expanded={computerOpen}
+              onClick={() => setComputerOpen(!computerOpen)}
+            >
+              电脑 <ChevronRight size={14} />
+            </button>
+            {computerOpen && (
+              <BotBrowserPanel
+                key={selectedWork?.id ?? conversation.id}
+                client={client}
+                botId={
+                  selectedWork
+                    ? botWorkBrowserScope(selectedWork.id, bot.id)
+                    : botImBrowserScope(conversation.id, bot.id)
+                }
+              />
+            )}
+          </div>
+          <BotSchedulePanel
+            botId={bot.id}
+            client={client}
+            allowCreate={false}
+            schedules={schedules.filter(
+              (item) => item.botId === bot.id && item.audienceKey === `im:${conversation.id}`
+            )}
+          />
+          <div className="bot-im-details-section bot-im-connection-section">
+            <h3>接入</h3>
+            <p>{imConversationStatus(conversation)}</p>
+            <p>这里展示本机收到的群消息和 Bot 回复，不包含未发送给机器人的群消息。</p>
+            <button className="bot-im-text-button" onClick={onManage}>
+              管理接入 <ChevronRight size={14} />
+            </button>
+          </div>
+        </>
+      )}
     </>
   )
 }

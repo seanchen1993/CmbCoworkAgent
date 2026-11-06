@@ -117,6 +117,9 @@
   width: 15px;
   height: 15px;
 }
+.bot-im-menu-action[data-destructive] {
+  color: var(--destructive);
+}
 .bot-im-menu-action:hover,
 .bot-im-menu-action:focus-visible {
   background: var(--accent);
@@ -351,7 +354,7 @@
   font-size: 12px;
 }
 .bot-im-details-section {
-  margin: 0 24px 32px;
+  margin: 0 4px 28px;
 }
 .bot-im-details-section h3 {
   margin-bottom: 14px;
@@ -369,12 +372,13 @@
   display: flex;
   align-items: center;
   gap: 11px;
-  width: 100%;
-  padding: 11px 0;
+  width: calc(100% + 16px);
+  margin: 0 -8px;
+  padding: 11px 8px;
   border-radius: 10px;
   text-align: left;
 }
-.bot-im-owner > span {
+.bot-im-owner-copy {
   flex: 1;
   min-width: 0;
 }
@@ -413,10 +417,15 @@
   padding: 13px 0;
   border-bottom: 1px solid var(--bot-line);
 }
-.bot-im-work:hover strong,
-.bot-im-owner:hover strong {
+.bot-im-work:hover strong {
   text-decoration: underline;
   text-underline-offset: 3px;
+}
+.bot-im-owner:hover {
+  background: var(--bot-hover);
+}
+.bot-im-text-button[aria-expanded="true"] > svg {
+  transform: rotate(90deg);
 }
 .bot-im-text-button {
   font-size: 12px;

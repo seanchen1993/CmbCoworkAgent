@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 import {
   ChevronRight,
   Eye,
@@ -7,6 +7,7 @@ import {
   MoreHorizontal,
   Pin,
   PinOff,
+  Trash2,
   UsersRound
 } from "lucide-react"
 import type { BotDefinition, BotTask } from "../../../../shared/bots/contracts"
@@ -41,6 +42,7 @@ export function BotImConversationRows({
   onPin,
   onRead,
   onVisibility,
+  onDelete,
   onHistoryCollapsed,
   onMenuOpenChange
 }: {
@@ -61,10 +63,19 @@ export function BotImConversationRows({
   onPin(id: string): void
   onRead(group: BotImConversation): void
   onVisibility(id: string): void
+  onDelete(group: BotImConversation): void
   onHistoryCollapsed(collapsed: boolean): void
   onMenuOpenChange(open: boolean): void
 }) {
   const [openMenu, setOpenMenu] = useState<string | null>(null)
+  const pendingDelete = useRef<BotImConversation | null>(null)
+  const finishMenuClose = (event: Event, group: BotImConversation) => {
+    if (pendingDelete.current?.id !== group.id) return
+    // Let the menu release its native focus/pointer lock before mounting a modal.
+    event.preventDefault()
+    pendingDelete.current = null
+    onDelete(group)
+  }
   const botById = useMemo(() => new Map(bots.map((bot) => [bot.id, bot])), [bots])
   const tasksByGroup = useMemo(() => {
     const result = new Map<string, BotTask[]>()
@@ -118,29 +129,42 @@ export function BotImConversationRows({
                   : !group.connected
                     ? "离线"
                     : ""
-    const actions = [
-      ...(group.state === "active"
-        ? [
-            {
-              label: pinned ? "取消置顶" : "置顶",
-              Icon: pinned ? PinOff : Pin,
-              run: () => onPin(group.id)
-            }
-          ]
-        : []),
-      ...(group.activity.unread
-        ? [{ label: "标为已读", Icon: MailOpen, run: () => onRead(group) }]
-        : []),
-      ...(group.state === "revoked" || hiddenIds.includes(group.id)
-        ? [
-            {
-              label: hiddenIds.includes(group.id) ? "显示在侧边栏" : "从侧边栏隐藏",
-              Icon: hiddenIds.includes(group.id) ? Eye : EyeOff,
-              run: () => onVisibility(group.id)
-            }
-          ]
-        : [])
-    ]
+    const actions: Array<{ label: string; Icon: typeof Pin; run(): void; destructive?: boolean }> =
+      [
+        ...(group.state === "active"
+          ? [
+              {
+                label: pinned ? "取消置顶" : "置顶",
+                Icon: pinned ? PinOff : Pin,
+                run: () => onPin(group.id)
+              }
+            ]
+          : []),
+        ...(group.activity.unread
+          ? [{ label: "标为已读", Icon: MailOpen, run: () => onRead(group) }]
+          : []),
+        ...(group.state === "revoked" || hiddenIds.includes(group.id)
+          ? [
+              {
+                label: hiddenIds.includes(group.id) ? "显示在侧边栏" : "从侧边栏隐藏",
+                Icon: hiddenIds.includes(group.id) ? Eye : EyeOff,
+                run: () => onVisibility(group.id)
+              }
+            ]
+          : []),
+        ...(group.state === "revoked"
+          ? [
+              {
+                label: "删除会话",
+                Icon: Trash2,
+                destructive: true,
+                run: () => {
+                  pendingDelete.current = group
+                }
+              }
+            ]
+          : [])
+      ]
     return (
       <ContextMenu key={group.id} onOpenChange={onMenuOpenChange}>
         <ContextMenuTrigger asChild>
@@ -193,6 +217,7 @@ export function BotImConversationRows({
                 data-bot-popup
                 className="bot-workspace-menu w-40 rounded-xl p-1.5"
                 role="menu"
+                onCloseAutoFocus={(event) => finishMenuClose(event, group)}
                 onKeyDown={(event) => {
                   if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return
                   event.preventDefault()
@@ -211,11 +236,12 @@ export function BotImConversationRows({
                 }}
                 align="end"
               >
-                {actions.map(({ label, Icon, run }) => (
+                {actions.map(({ label, Icon, run, destructive }) => (
                   <button
                     key={label}
                     role="menuitem"
                     className="bot-im-menu-action"
+                    data-destructive={destructive || undefined}
                     onClick={() => {
                       setOpenMenu(null)
                       onMenuOpenChange(false)
@@ -230,9 +256,17 @@ export function BotImConversationRows({
             </Popover>
           </div>
         </ContextMenuTrigger>
-        <ContextMenuContent data-bot-popup className="bot-workspace-menu rounded-xl">
-          {actions.map(({ label, Icon, run }) => (
-            <ContextMenuItem key={label} onSelect={run}>
+        <ContextMenuContent
+          data-bot-popup
+          className="bot-workspace-menu rounded-xl"
+          onCloseAutoFocus={(event) => finishMenuClose(event, group)}
+        >
+          {actions.map(({ label, Icon, run, destructive }) => (
+            <ContextMenuItem
+              key={label}
+              onSelect={run}
+              variant={destructive ? "destructive" : "default"}
+            >
               <Icon />
               {label}
             </ContextMenuItem>

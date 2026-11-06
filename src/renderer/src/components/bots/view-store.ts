@@ -52,6 +52,8 @@ export interface BotViewState {
   hiddenGroupIds: string[]
   pinnedImConversationIds?: string[]
   hiddenImConversationIds?: string[]
+  /** Permanently removed list entries for revoked groups; source records and tasks stay intact. */
+  deletedImConversationIds?: string[]
   imHistoryCollapsed?: boolean
   sections: BotSidebarSection[]
 }
