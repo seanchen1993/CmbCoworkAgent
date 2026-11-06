@@ -9,8 +9,7 @@ import {
   buildHarnessFeatureAgentContext,
   getHarnessProjectAdapterSnapshot,
   readHarnessFeatureMetadata,
-  resolveHarnessFeaturePluginIdentity,
-  resolveHarnessFeatureCurrentStage
+  resolveHarnessFeaturePluginIdentity
 } from "../harness-board/service"
 import {
   getDisabledSkillDirs,
@@ -47,7 +46,7 @@ import { getAgentModeFromMetadata, type AgentMode } from "./coordinator-mode"
 import { TraceCollector, type TraceCollectorOptions } from "./trace/collector"
 import { createAgentRuntime, type CreateAgentRuntimeOptions, type DeepAgent } from "./runtime"
 import { assertLocalThreadRunLease, type LocalThreadRunOwner } from "./thread-run-lease"
-import { primeHarnessStageAttribution } from "../services/harness-stage-attribution"
+import { resolveHarnessExecutionStage } from "../services/harness-stage-attribution"
 import {
   formatSkillUseBlock as formatTrustedSkillUseBlock,
   type SkillUseBlockMetadata
@@ -175,12 +174,11 @@ async function resolveHarnessCurrentStageForContext(
   slug?: string
 ): Promise<Pick<HarnessAgentContext, "harnessNodeName" | "harnessNodeStatus">> {
   if (!projectId || !slug) return {}
-  const currentStage = await resolveHarnessFeatureCurrentStage(projectId, slug)
-  primeHarnessStageAttribution(projectId, slug, currentStage)
-  if (!currentStage?.name) return {}
+  const currentStage = await resolveHarnessExecutionStage(projectId, slug)
+  if (!currentStage?.nodeName) return {}
   return {
-    harnessNodeName: currentStage.name,
-    ...(currentStage.status ? { harnessNodeStatus: currentStage.status } : {})
+    harnessNodeName: currentStage.nodeName,
+    ...(currentStage.nodeStatus ? { harnessNodeStatus: currentStage.nodeStatus } : {})
   }
 }
 
@@ -190,12 +188,11 @@ export async function resolveHarnessFeatureBindingContext(
   try {
     const binding = readHarnessFeatureMetadata(metadata)
     if (!binding) return undefined
-    const currentStage = await resolveHarnessFeatureCurrentStage(binding.projectId, binding.slug)
-    primeHarnessStageAttribution(binding.projectId, binding.slug, currentStage)
+    const currentStage = await resolveHarnessExecutionStage(binding.projectId, binding.slug)
     return {
       ...binding,
-      ...(currentStage?.name ? { nodeName: currentStage.name } : {}),
-      ...(currentStage?.status ? { nodeStatus: currentStage.status } : {})
+      ...(currentStage?.nodeName ? { nodeName: currentStage.nodeName } : {}),
+      ...(currentStage?.nodeStatus ? { nodeStatus: currentStage.nodeStatus } : {})
     }
   } catch {
     return undefined

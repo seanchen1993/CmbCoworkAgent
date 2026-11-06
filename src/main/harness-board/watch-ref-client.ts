@@ -3,6 +3,7 @@ import type { HarnessWatchRef } from "../../shared/harness-board-types"
 import {
   HARNESS_WATCH_REF_MAX_REFS,
   HARNESS_WATCH_REF_MAX_SCOPES,
+  HARNESS_STAGE_WATCH_MAX_SCOPES,
   type HarnessRunAttributionTarget,
   type HarnessWatchRefInstalledEvent,
   type HarnessWatchRefWorkerResponse
@@ -41,7 +42,8 @@ export class HarnessWatchRefWorkerClient {
 
   constructor(
     private readonly handlers: HarnessWatchRefClientHandlers,
-    private readonly workerFactory: WatchRefWorkerFactory = createBundledWorker
+    private readonly workerFactory: WatchRefWorkerFactory = createBundledWorker,
+    private readonly maxScopes = HARNESS_WATCH_REF_MAX_SCOPES
   ) {}
 
   private readonly handleMessage = (response: HarnessWatchRefWorkerResponse): void => {
@@ -58,6 +60,7 @@ export class HarnessWatchRefWorkerClient {
       type: "start",
       scopeKey: desired.scopeKey,
       generation: desired.generation,
+      maxScopes: Math.max(1, Math.min(this.maxScopes, HARNESS_STAGE_WATCH_MAX_SCOPES)),
       workspacePath: desired.workspacePath,
       refs: desired.refs,
       ...(desired.attributionTarget ? { attributionTarget: desired.attributionTarget } : {}),
@@ -119,7 +122,10 @@ export class HarnessWatchRefWorkerClient {
   ): void {
     if (this.closing) return
     this.stop(scopeKey)
-    while (this.desiredScopes.size >= HARNESS_WATCH_REF_MAX_SCOPES) {
+    while (
+      this.desiredScopes.size >=
+      Math.max(1, Math.min(this.maxScopes, HARNESS_STAGE_WATCH_MAX_SCOPES))
+    ) {
       const oldestScope = this.desiredScopes.keys().next().value as string | undefined
       if (!oldestScope) break
       this.stop(oldestScope)

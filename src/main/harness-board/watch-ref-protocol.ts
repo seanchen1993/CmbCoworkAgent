@@ -2,6 +2,7 @@ import type { HarnessWatchRef } from "../../shared/harness-board-types"
 
 export const HARNESS_WATCH_REF_MAX_REFS = 64
 export const HARNESS_WATCH_REF_MAX_SCOPES = 4
+export const HARNESS_STAGE_WATCH_MAX_SCOPES = 64
 
 export interface HarnessRunAttributionTarget {
   projectId: string
@@ -12,6 +13,7 @@ export interface HarnessWatchRefStartRequest {
   type: "start"
   scopeKey: string
   generation: number
+  maxScopes?: number
   workspacePath: string
   refs: HarnessWatchRef[]
   attributionTarget?: HarnessRunAttributionTarget

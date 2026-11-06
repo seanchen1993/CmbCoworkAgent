@@ -74,7 +74,7 @@ describe("HarnessStageAttributionCache", () => {
     const cache = new HarnessStageAttributionCache({ resolver, now: () => now })
     for (let i = 0; i < 20; i++) await cache.getForCall("p", "f")
     expect(resolver).toHaveBeenCalledTimes(1)
-    now = 1001
+    now = 30_001
     await cache.getForCall("p", "f")
     expect(resolver).toHaveBeenCalledTimes(2)
   })
@@ -164,7 +164,7 @@ describe("HarnessStageAttributionCache", () => {
     await cache.getForExecution("project-1", "feature-1")
     await cache.getForCall("project-1", "feature-1")
     expect(resolver).toHaveBeenCalledTimes(1)
-    now = 1000
+    now = 30_000
     await expect(cache.getForCodeGeneration("project-1", "feature-1")).resolves.toEqual({
       nodeName: "Dev-代码实现",
       nodeStatus: "已完成"
@@ -185,7 +185,7 @@ describe("HarnessStageAttributionCache", () => {
       nodeName: null,
       nodeStatus: null
     })
-    now = 1000
+    now = 30_000
     await expect(cache.getForCodeGeneration("project-1", "feature-1")).resolves.toEqual({
       nodeName: "Dev-代码实现",
       nodeStatus: "进行中"

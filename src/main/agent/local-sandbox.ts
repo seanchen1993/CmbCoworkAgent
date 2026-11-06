@@ -121,7 +121,6 @@ import {
 } from "../services/stable-file-handle"
 import {
   getHarnessStageAttributionForCodeGeneration,
-  markHarnessStageAttributionDirty,
   resolveHarnessExecutionStage,
   type HarnessStageAttribution
 } from "../services/harness-stage-attribution"
@@ -2796,14 +2795,11 @@ export class LocalSandbox
     return `Memory storage is managed by the background summarizer. Direct ${action} to '${filePath}' is blocked; use the Memory panel or let the conversation summary persist it.`
   }
 
-  private markHarnessStageAttributionDirty(): void {
-    markHarnessStageAttributionDirty(this.harnessProjectId, this.featureId)
-  }
-
   private async buildExecutionEnv(
     signal?: AbortSignal
   ): Promise<Record<string, string> | undefined> {
     if (signal?.aborted) return undefined
+    if (!this.harnessProjectId || !this.featureId) return this.env
     const stage = await LocalSandbox.raceWithAbort(
       resolveHarnessExecutionStage(this.harnessProjectId, this.featureId),
       signal
@@ -2877,12 +2873,6 @@ export class LocalSandbox
     } catch (error) {
       console.warn("[SystemConstraintRead] Failed to record read telemetry:", error)
     }
-  }
-
-  private commandMayMutateHarnessState(command: string, cwd: string): boolean {
-    const windowsShell =
-      process.platform === "win32" && this.windowsSandbox !== "none" ? "powershell" : "unknown"
-    return !isReadOnlyShellCommand(command, cwd, windowsShell)
   }
 
   private async runHooks(event: HookEvent, context: HookContext): Promise<HookResult | null> {
@@ -4852,7 +4842,6 @@ export class LocalSandbox
       }
       const r = await super.write(effectiveFilePath, effectiveContent)
       if (!r.error) {
-        if (!isCodeFile(effectiveFilePath)) this.markHarnessStageAttributionDirty()
         await this.recordReadTime(resolvedPath)
         await noteFileToolWrite(resolvedPath, effectiveContent)
       }
@@ -4889,7 +4878,6 @@ export class LocalSandbox
       })
       return LocalSandbox.applyPostHookContext(result, postResult, "write_file")
     } catch (e) {
-      this.markHarnessStageAttributionDirty()
       if (isHookHaltError(e) || isFailureFuseHaltError(e)) throw e
       console.warn("[Hooks] PostToolUse write error:", e)
       return result
@@ -5174,9 +5162,6 @@ export class LocalSandbox
             await this.recordReadTime(resolvedPath)
           }
           await noteFileToolWrite(resolvedPath, () => iconv.encode(expectedContent, encoding))
-          if (!managedWorkflowScriptEdit && !isCodeFile(effectiveFilePath)) {
-            this.markHarnessStageAttributionDirty()
-          }
           return { path: effectiveFilePath, filesUpdate: null, occurrences }
         } finally {
           await managedCapability?.handle.close().catch(() => undefined)
@@ -5228,7 +5213,6 @@ export class LocalSandbox
         })
         return LocalSandbox.applyPostHookContext(result, postResult, "edit_file")
       } catch (e) {
-        this.markHarnessStageAttributionDirty()
         if (isHookHaltError(e) || isFailureFuseHaltError(e)) throw e
         console.warn("[Hooks] PostToolUse edit error:", e)
         return result
@@ -6952,9 +6936,6 @@ export class LocalSandbox
       termination: undefined as Promise<void> | undefined
     }
     LocalSandbox.backgroundTasks.set(taskId, task)
-    if (this.commandMayMutateHarnessState(effectiveCommand, effectiveCwd)) {
-      this.markHarnessStageAttributionDirty()
-    }
 
     // Fire and forget — don't await. Uses extended timeout for background execution.
     // Background tasks use their own AbortController (not the conversation's abortSignal)
@@ -7663,31 +7644,17 @@ export class LocalSandbox
       this._shellFileTelemetry &&
       !backgroundExecution &&
       shellFileCaptureContext.getStore() === true
-    const runCommand = async (): Promise<LocalExecuteResponse> => {
-      try {
-        return await this.runWithShellFileCapture(
+    const runCommand = (): Promise<LocalExecuteResponse> =>
+      this.runWithShellFileCapture(command, effectiveCwd, captureFileEffects, shellSyntax, () =>
+        this.executeRawUnserialized(
           command,
+          sandboxModeOverride,
+          timeoutMs,
+          overrideAbortSignal,
           effectiveCwd,
-          captureFileEffects,
-          shellSyntax,
-          () =>
-            this.executeRawUnserialized(
-              command,
-              sandboxModeOverride,
-              timeoutMs,
-              overrideAbortSignal,
-              effectiveCwd,
-              options
-            )
+          options
         )
-      } finally {
-        // Cover raw/orchestrated/background execution once, before releasing
-        // workspace admission so the next queued invocation sees the change.
-        if (this.commandMayMutateHarnessState(command, effectiveCwd)) {
-          this.markHarnessStageAttributionDirty()
-        }
-      }
-    }
+      )
     const commandConcurrency = classifyCommandConcurrency(command)
     const signal = overrideAbortSignal ?? this.abortSignal
     // Classify the effective post-hook command here, including unsandboxed

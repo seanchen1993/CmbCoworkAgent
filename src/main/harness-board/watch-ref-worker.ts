@@ -1,10 +1,11 @@
 import { existsSync, statSync, watch, type FSWatcher } from "node:fs"
-import { dirname, isAbsolute, relative, resolve } from "node:path"
+import { basename, dirname, isAbsolute, relative, resolve } from "node:path"
 import { parentPort } from "node:worker_threads"
 import type { HarnessWatchRef } from "../../shared/harness-board-types"
 import {
   HARNESS_WATCH_REF_MAX_REFS,
   HARNESS_WATCH_REF_MAX_SCOPES,
+  HARNESS_STAGE_WATCH_MAX_SCOPES,
   type HarnessWatchRefStartRequest,
   type HarnessWatchRefWorkerRequest,
   type HarnessWatchRefWorkerResponse
@@ -20,6 +21,7 @@ interface ActiveScope {
   entries: WatchEntry[]
   changeTimer: NodeJS.Timeout | null
   dirtyTimer: NodeJS.Timeout | null
+  dirtyAgain: boolean
   latestRef: HarnessWatchRef | null
 }
 
@@ -84,7 +86,11 @@ function post(response: HarnessWatchRefWorkerResponse): void {
 
 function startScope(request: HarnessWatchRefStartRequest): void {
   stopScope(request.scopeKey)
-  while (activeScopes.size >= HARNESS_WATCH_REF_MAX_SCOPES) {
+  const maxScopes = Math.max(
+    1,
+    Math.min(request.maxScopes ?? HARNESS_WATCH_REF_MAX_SCOPES, HARNESS_STAGE_WATCH_MAX_SCOPES)
+  )
+  while (activeScopes.size >= maxScopes) {
     const oldestScope = activeScopes.keys().next().value as string | undefined
     if (!oldestScope) break
     stopScope(oldestScope)
@@ -101,7 +107,7 @@ function startScope(request: HarnessWatchRefStartRequest): void {
 
     try {
       const entry: WatchEntry = {
-        watcher: watch(watchPath, { recursive: false }, () => {
+        watcher: watch(watchPath, { recursive: false }, (_event, filename) => {
           const active = activeScopes.get(request.scopeKey)
           if (
             !active ||
@@ -110,16 +116,32 @@ function startScope(request: HarnessWatchRefStartRequest): void {
           ) {
             return
           }
-          if (request.attributionTarget && !active.dirtyTimer) {
-            post({
-              type: "dirty",
-              scopeKey: request.scopeKey,
-              generation: request.generation,
-              attributionTarget: request.attributionTarget
-            })
-            active.dirtyTimer = setTimeout(() => {
-              active.dirtyTimer = null
-            }, 100)
+          const targetPath = resolve(request.workspacePath, ref.path)
+          const fold = (value: string) =>
+            process.platform === "win32" ? value.toLowerCase() : value
+          const stateChanged =
+            ref.purpose === "run-state" &&
+            (watchPath === targetPath ||
+              !filename ||
+              fold(filename.toString()) === fold(basename(targetPath)))
+          const attributionTarget = request.attributionTarget
+          if (attributionTarget && stateChanged) {
+            const notifyDirty = () =>
+              post({
+                type: "dirty",
+                scopeKey: request.scopeKey,
+                generation: request.generation,
+                attributionTarget
+              })
+            if (active.dirtyTimer) active.dirtyAgain = true
+            else {
+              notifyDirty()
+              active.dirtyTimer = setTimeout(() => {
+                active.dirtyTimer = null
+                if (active.dirtyAgain) notifyDirty()
+                active.dirtyAgain = false
+              }, 100)
+            }
           }
           active.latestRef = ref
           if (active.changeTimer) clearTimeout(active.changeTimer)
@@ -146,7 +168,16 @@ function startScope(request: HarnessWatchRefStartRequest): void {
           }, DEBOUNCE_MS)
         })
       }
-      entry.watcher.on("error", () => stopScope(request.scopeKey, request.generation))
+      entry.watcher.on("error", () => {
+        stopScope(request.scopeKey, request.generation)
+        post({
+          type: "installed",
+          scopeKey: request.scopeKey,
+          generation: request.generation,
+          watcherCount: 0,
+          cancelled: false
+        })
+      })
       entries.push(entry)
     } catch {
       // Missing or inaccessible watch paths are non-fatal. Manual refresh remains available.
@@ -163,6 +194,7 @@ function startScope(request: HarnessWatchRefStartRequest): void {
       entries,
       changeTimer: null,
       dirtyTimer: null,
+      dirtyAgain: false,
       latestRef: null
     })
   }

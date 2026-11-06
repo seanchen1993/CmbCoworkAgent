@@ -1,4 +1,5 @@
 import { cleanupMarketRuntimeContent } from "./services/market-content"
+import { harnessStageWatches } from "./services/harness-stage-attribution"
 import { initializeHarnessConfigV2 } from "./harness-board/config-v2"
 import { initializeNotificationRuntime } from "./notification-runtime"
 import { notificationService } from "./services/notification-service"
@@ -1804,6 +1805,9 @@ if (browserNativeMessagingHostLaunch) {
       ),
       closeHarnessWatchRefWorker().catch((err) =>
         console.warn("[Main] closeHarnessWatchRefWorker error:", err)
+      ),
+      harnessStageWatches.close().catch((err) =>
+        console.warn("[Main] closeHarnessStageWatches error:", err)
       ),
       closeDashboardEsWorker().catch((err) =>
         console.warn("[Main] closeDashboardEsWorker error:", err)

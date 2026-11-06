@@ -19,11 +19,7 @@ import { trackEvent } from "../services/event-reporter"
 import { getCurrentHookAgentId } from "./execution-context"
 import { samplingFields, topKModelKwargs } from "../models/sampling-params"
 import { withWorkspaceExecution } from "../agent/file-operation-lock"
-import { isReadOnlyShellCommand } from "../agent/exec-policy"
-import {
-  markHarnessStageAttributionDirty,
-  resolveHarnessExecutionStage
-} from "../services/harness-stage-attribution"
+import { resolveHarnessExecutionStage } from "../services/harness-stage-attribution"
 
 /**
  * Resolve the effective timeout (ms) for a hook by consulting the handler-type
@@ -40,13 +36,7 @@ const CHARDET_CONFIDENCE_THRESHOLD = 0.8
 const CHARDET_SAMPLE_BYTES = 8_192
 const MAX_HOOK_ENV_JSON_CHARS = 4_096
 const ONCE_HOOK_KEY_SEPARATOR = "\u0000"
-const INVOCATION_CONTEXT_ENV_KEYS = new Set([
-  "AGENT_ID",
-  "WORKSPACE_PATH",
-  "CLAUDE_PROJECT_DIR",
-  "HARNESS_NODE_NAME",
-  "HARNESS_NODE_STATUS"
-])
+const INVOCATION_CONTEXT_ENV_KEYS = new Set(["AGENT_ID", "WORKSPACE_PATH", "CLAUDE_PROJECT_DIR"])
 const DEFAULT_USER_CONTEXT_FIELDS = [
   "sap_id",
   "yst_id",
@@ -389,12 +379,20 @@ function addHookUserContextEnv(env: Record<string, string>, hook: HookConfig): v
   }
 }
 
-function clearInheritedInvocationContextEnv(env: Record<string, string>): void {
+function clearInheritedInvocationContextEnv(
+  env: Record<string, string>,
+  projectFeature = false
+): void {
   for (const key of Object.keys(env)) {
     // Environment names are case-insensitive on Windows. POSIX permits distinct
     // mixed-case names, so retain its exact-key behaviour.
     const comparableKey = process.platform === "win32" ? key.toUpperCase() : key
-    if (INVOCATION_CONTEXT_ENV_KEYS.has(comparableKey)) delete env[key]
+    if (
+      INVOCATION_CONTEXT_ENV_KEYS.has(comparableKey) ||
+      (projectFeature &&
+        (comparableKey === "HARNESS_NODE_NAME" || comparableKey === "HARNESS_NODE_STATUS"))
+    )
+      delete env[key]
   }
 }
 
@@ -409,7 +407,7 @@ function buildHookEnv(
   // These keys describe the current hook invocation, not the Electron host.
   // Remove inherited values first so a parent process cannot leak stale context
   // into a hook whose invocation does not provide the corresponding field.
-  clearInheritedInvocationContextEnv(env)
+  clearInheritedInvocationContextEnv(env, Boolean(context.harnessProjectId && context.featureId))
   env.HOOK_EVENT = event
   if (context.toolName) env.TOOL_NAME = context.toolName
   if (context.hookSourceType) env.HOOK_SOURCE_TYPE = context.hookSourceType
@@ -1288,6 +1286,9 @@ async function executeSyncHook(
   let result: HookResult
   let stdinPayload: string | undefined
   const refreshStage = async (): Promise<void> => {
+    // A feature binding is the runtime's project-mode identity. Ordinary chats
+    // and project sessions without a feature never enter the stage lookup path.
+    if (!context.harnessProjectId || !context.featureId) return
     signal?.throwIfAborted()
     const stage = await resolveHarnessExecutionStage(context.harnessProjectId, context.featureId)
     signal?.throwIfAborted()
@@ -1309,12 +1310,7 @@ async function executeSyncHook(
     await refreshStage()
     const builtPayload = buildHookStdinPayload(event, context, hook)
     if (diagnostic) stdinPayload = builtPayload
-    try {
-      result = await executeHttpHook(hook, builtPayload, getEffectiveTimeout(hook))
-    } finally {
-      // HTTP hooks can advance remotely managed workflows, even on failure.
-      markHarnessStageAttributionDirty(context.harnessProjectId, context.featureId)
-    }
+    result = await executeHttpHook(hook, builtPayload, getEffectiveTimeout(hook))
   } else {
     const runCommand = async (): Promise<HookResult> => {
       // Resolve after workspace admission: a command ahead of this hook may
@@ -1323,19 +1319,7 @@ async function executeSyncHook(
       const builtPayload = buildHookStdinPayload(event, context, hook)
       if (diagnostic) stdinPayload = builtPayload
       const cwd = getCommandCwd(context)
-      const mayMutateStage =
-        context.harnessProjectId &&
-        context.featureId &&
-        !isReadOnlyShellCommand(hook.command ?? "", cwd)
-      try {
-        return await executeCommandHook(hook, buildHookEnv(event, context, hook), builtPayload, cwd)
-      } finally {
-        // Invalidate before releasing the workspace lock or starting the next
-        // hook. Async hooks invalidate on actual completion, not their placeholder.
-        if (mayMutateStage) {
-          markHarnessStageAttributionDirty(context.harnessProjectId, context.featureId)
-        }
-      }
+      return executeCommandHook(hook, buildHookEnv(event, context, hook), builtPayload, cwd)
     }
     // Synchronous formatters and other command hooks may read/modify any file.
     // Coordinate their actual process lifetime with tool IO, without acquiring

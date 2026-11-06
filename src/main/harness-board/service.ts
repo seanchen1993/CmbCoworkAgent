@@ -1,5 +1,9 @@
 import { prepareMarketCommand, persistMarketRuntimeDirectory } from "../services/market-content"
-import { markHarnessStageAttributionDirty } from "../services/harness-stage-attribution"
+import {
+  harnessStageWatches,
+  markHarnessStageAttributionDirty
+} from "../services/harness-stage-attribution"
+import { normalizeHarnessAdapterWatchRefs } from "./adapter-detail-normalizer"
 import {
   assertHarnessConfigAvailable,
   readHarnessConfigV2File,
@@ -3047,7 +3051,7 @@ export async function buildHarnessFeatureAgentContext(
 export async function resolveHarnessFeatureCurrentStage(
   projectId: string,
   slug: string,
-  options: { labelOnly?: boolean } = {}
+  options: { labelOnly?: boolean; watch?: boolean } = {}
 ): Promise<{ name: string; status: string | null } | null> {
   try {
     const normalizedProjectId = normalizeText(projectId).trim()
@@ -3060,6 +3064,17 @@ export async function resolveHarnessFeatureCurrentStage(
       "run",
       normalizedSlug
     )
+    if (options.watch) {
+      const run = isObject(snapshot.run) ? snapshot.run : {}
+      await harnessStageWatches.configure(
+        normalizedProjectId,
+        normalizedSlug,
+        projectDirectoryPath(context.project),
+        normalizeHarnessAdapterWatchRefs(context.project, run.watchRefs, [
+          { path: ".autobizdevops/STATE.md", purpose: "run-state" }
+        ])
+      )
+    }
     return resolveCurrentStageFromSnapshot(snapshot, options.labelOnly)
   } catch {
     return null

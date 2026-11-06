@@ -78,7 +78,7 @@ import {
   HARNESS_ADAPTER_DETAIL_MAX_PROJECTS_PER_BATCH
 } from "../harness-board/adapter-detail-protocol"
 import {
-  markHarnessStageAttributionDirty,
+  harnessStageWatches,
   primeHarnessStageAttribution
 } from "../services/harness-stage-attribution"
 import type {
@@ -730,6 +730,12 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
         payload.slug,
         resolveHarnessRunDetailCurrentStage(detail)
       )
+      harnessStageWatches.remember(
+        payload.projectId,
+        payload.slug,
+        detail.project.projectRootPath,
+        detail.run.watchRefs
+      )
       if (desiredWatchScopesBySender.get(event.sender.id)?.has(watchScopeKey)) {
         startHarnessWatchRefs(watchScopeKey, detail.project.projectRootPath, detail.run.watchRefs, {
           projectId: payload.projectId,
@@ -848,9 +854,7 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
   ipcMain.handle(
     "harnessBoard:skipNode",
     async (_event, input: HarnessSkipNodeInput): Promise<HarnessSkipNodeResult> => {
-      const result = await skipHarnessRunNode(input)
-      markHarnessStageAttributionDirty(result.projectId, result.slug)
-      return result
+      return skipHarnessRunNode(input)
     }
   )
 

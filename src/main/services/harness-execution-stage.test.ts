@@ -72,6 +72,7 @@ describe("execution-time Harness stage", () => {
         nodeName: "dev",
         nodeStatus: "已完成"
       })
+      await vi.advanceTimersByTimeAsync(250)
       await settleHarnessStageObservations("p", "observed", 100)
       expect(observer).toHaveBeenCalledWith(0, "dev")
       expect(resolver).toHaveBeenCalledTimes(1)
@@ -80,13 +81,28 @@ describe("execution-time Harness stage", () => {
     }
   })
 
-  it("refreshes unobserved external changes on the first execution after one second", async () => {
+  it("coalesces state-notification bursts instead of inspecting on each notification", async () => {
+    resolver.mockResolvedValue({ name: "test", status: "进行中" })
+    const stop = observeHarnessStage("p", "burst-notifications", vi.fn())
+    try {
+      for (let i = 0; i < 50; i++) markHarnessStageAttributionDirty("p", "burst-notifications")
+      expect(resolver).not.toHaveBeenCalled()
+      await vi.advanceTimersByTimeAsync(250)
+      expect(resolver).toHaveBeenCalledTimes(1)
+      await resolveHarnessExecutionStage("p", "burst-notifications")
+      expect(resolver).toHaveBeenCalledTimes(1)
+    } finally {
+      stop()
+    }
+  })
+
+  it("refreshes unobserved external changes on the first execution after five minutes", async () => {
     primeHarnessStageAttribution("p", "external", { name: "dev", status: "进行中" })
     resolver.mockResolvedValue({ name: "test", status: "已完成" })
-    vi.setSystemTime(999)
+    vi.setSystemTime(299_999)
     expect((await resolveHarnessExecutionStage("p", "external"))?.nodeName).toBe("dev")
     expect(resolver).not.toHaveBeenCalled()
-    vi.setSystemTime(1000)
+    vi.setSystemTime(300_000)
     await expect(resolveHarnessExecutionStage("p", "external")).resolves.toEqual({
       nodeName: "test",
       nodeStatus: "已完成"
@@ -104,7 +120,7 @@ describe("execution-time Harness stage", () => {
       .mockRejectedValueOnce(new Error("adapter unavailable"))
       .mockResolvedValueOnce({ name: " ", status: "进行中" })
     for (let attempt = 0; attempt < 3; attempt++) {
-      vi.setSystemTime(attempt * 1000)
+      vi.setSystemTime(attempt * 30_000)
       for (let read = 0; read < 20; read++) {
         markHarnessStageAttributionDirty("p", "unavailable")
         await expect(resolveHarnessExecutionStage("p", "unavailable")).resolves.toEqual({
@@ -119,7 +135,7 @@ describe("execution-time Harness stage", () => {
   it("does not serve an older telemetry snapshot after an execution refresh fails", async () => {
     primeHarnessStageAttribution("p", "failed-refresh", { name: "old", status: "进行中" })
     resolver.mockResolvedValue(null)
-    vi.setSystemTime(1000)
+    vi.setSystemTime(300_000)
     await expect(resolveHarnessExecutionStage("p", "failed-refresh")).resolves.toEqual({
       nodeName: null,
       nodeStatus: null

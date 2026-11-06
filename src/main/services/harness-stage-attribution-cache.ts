@@ -34,12 +34,12 @@ interface HarnessStageAttributionCacheOptions {
 
 type RefreshOutcome = "resolved" | "unavailable" | "invalidated"
 
-const DEFAULT_MAX_CLEAN_AGE_MS = 30_000
-// Execution env tolerates only a short gap when an external change has no watcher.
-const EXECUTION_MAX_CLEAN_AGE_MS = 1_000
+// State notifications invalidate immediately. This is an on-demand fallback for
+// adapters without watch refs or missed filesystem events, not a polling timer.
+const DEFAULT_MAX_CLEAN_AGE_MS = 5 * 60_000
 const DEFAULT_MAX_ENTRIES = 256
 const MAX_REFRESH_ATTEMPTS = 2
-const RETRY_BACKOFF_MS = 1_000
+const RETRY_BACKOFF_MS = 30_000
 
 function normalizeIdentity(
   projectId: string,
@@ -82,8 +82,8 @@ function copyAttribution(snapshot: HarnessStageAttribution): HarnessStageAttribu
 /**
  * Point-in-time Harness stage cache for execution context and attribution.
  *
- * Clean entries are reused briefly. Mutating commands, plugin hooks and run-state
- * file changes increment a cheap version counter; the next consumer performs
+ * Clean entries survive ordinary tool/hook execution. Run-state notifications
+ * increment a cheap version counter; the next consumer performs
  * one async adapter lookup. Concurrent execution and telemetry consumers share that
  * lookup, and a state change during an in-flight lookup forces one trailing
  * refresh instead of accepting the stale result.
@@ -132,11 +132,7 @@ export class HarnessStageAttributionCache {
   }
 
   getForExecution(projectId: string, featureSlug: string): Promise<HarnessStageAttribution> {
-    return this.getLatest(
-      projectId,
-      featureSlug,
-      Math.min(this.maxCleanAgeMs, EXECUTION_MAX_CLEAN_AGE_MS)
-    )
+    return this.getLatest(projectId, featureSlug, this.maxCleanAgeMs)
   }
 
   private async getLatest(
