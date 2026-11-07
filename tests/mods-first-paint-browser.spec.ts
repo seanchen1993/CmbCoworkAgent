@@ -129,8 +129,14 @@ async function main() {
     await page.evaluate("window.first.configure(false)")
     await page.getByRole("button", { name: "RAW 0", exact: true }).click()
     assert.equal(await page.evaluate("window.first.calls.filter(c=>c[0]==='native').length"), 1)
-    await page.evaluate("const old=document.querySelector('[data-function-site] button');window.first.configure(true,true);old.click()")
-    assert.equal(await page.evaluate("window.first.calls.filter(c=>c[0]==='native').length"), 1)
+    assert.equal(await page.evaluate(`{
+      const old=document.querySelector('[data-function-site] button');
+      window.first.configure(true,true);old.click();
+      window.first.calls.filter(c=>c[0]==='native').length
+    }`), 1, "Revocation must block the old button in the same task, before React commits")
+    // The capability promise stays held. Wait for React's pending commit, rather than
+    // assuming the next Playwright RPC runs after its concurrently scheduled render.
+    await page.waitForFunction("document.querySelectorAll('[data-function-site-pending]').length===8")
     assert.equal(await page.getByText(/RAW /).count(), 0)
     await page.evaluate("window.first.reject()")
     await page.getByRole("alert").first().waitFor()
