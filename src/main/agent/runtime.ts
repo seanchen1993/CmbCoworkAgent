@@ -3554,7 +3554,7 @@ function assembleDeepAgent(
   }) : undefined
   const deliveredCheckpointer = conversation && checkpointer instanceof SqlJsSaver
     ? new FunctionConversationDeliveryBridge(conversation.store,
-      () => conversation.binding).wrap(checkpointer) : checkpointer
+      () => conversation.binding, nativeConversationRuntime).wrap(checkpointer) : checkpointer
   const conversationCheckpointer = nativeConversationHost && nativeConversationRuntime &&
     checkpointer instanceof SqlJsSaver && deliveredCheckpointer instanceof SqlJsSaver && conversationBinding
     ? wrapNativeLegacyHistory(checkpointer, deliveredCheckpointer, {
@@ -3805,7 +3805,8 @@ function assembleDeepAgent(
         ...(nativeConversationHost && nativeConversationRuntime && checkpointer instanceof SqlJsSaver ? {
           history: { saver: checkpointer,
             assertCurrent: nativeConversationRuntime.assertCurrent.bind(nativeConversationRuntime),
-            register: nativeConversationHost.registerHistorical },
+            register: nativeConversationHost.registerHistorical,
+            registerAsync: nativeConversationHost.registerHistoricalAsync },
           onIntakeNotes: nativeConversationHost.registerIntake
         } : {}) }) : agent
   return nativeConversationHost && nativeConversationRuntime

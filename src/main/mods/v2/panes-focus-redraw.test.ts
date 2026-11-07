@@ -88,8 +88,8 @@ describe("admitted Pane focus across a handler-triggered redraw", () => {
     const [after] = await f.panes.snapshot()
     expect(after.generation).not.toBe(before.generation)
     expect(JSON.stringify(after.tree)).toContain("focus:1 focused:true")
-    // The identical person intent is replay-safe; a new intent with the old drawing is stale.
-    await expect(f.panes.act(action)).resolves.toEqual({ focused: true })
+    // Passive observations are retired with their drawing; neither replay can invoke it again.
+    await expect(f.panes.act(action)).rejects.toThrow("MODS_UI_STALE_ACTION")
     await expect(f.panes.act({ ...action, intentId: randomUUID() })).rejects.toThrow(
       "MODS_UI_STALE_ACTION"
     )

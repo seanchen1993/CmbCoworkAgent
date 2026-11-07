@@ -48,25 +48,32 @@ function FunctionLogsSurface({
   useEffect(() => {
     const reader = createLatestDisplayRead({
       read: () => window.api.mods.logs(threadId),
-      publish: entries => setSnapshot({ threadId, entries }),
+      publish: (entries) => setSnapshot({ threadId, entries }),
       failed: () => setSnapshot({ threadId, entries: [], failed: true })
     })
     const refresh = reader.refresh
+    const invalidate = () => {
+      reader.invalidate()
+      setSnapshot(undefined)
+      refresh()
+    }
     const stop = window.api.mods.onCardsChanged((event) => {
-      if (
-        event.threadId === threadId &&
-        modUiChangeAffects(event.scope, "records")
-      )
-        refresh()
+      if (event.threadId === threadId && modUiChangeAffects(event.scope, "records")) {
+        if (event.scope === "records") refresh()
+        else invalidate()
+      }
     })
-    const stopConfiguration = window.api.mods.onConfigurationChanged(refresh)
-    window.addEventListener("mods:configuration-changed", refresh)
+    const stopConfiguration = window.api.mods.onConfigurationChanged((event) => {
+      if (event?.scope === "schema") refresh()
+      else invalidate()
+    })
+    window.addEventListener("mods:configuration-changed", invalidate)
     refresh()
     return () => {
       reader.close()
       stop()
       stopConfiguration()
-      window.removeEventListener("mods:configuration-changed", refresh)
+      window.removeEventListener("mods:configuration-changed", invalidate)
     }
   }, [threadId, retry])
   const current = snapshot?.threadId === threadId ? snapshot : undefined

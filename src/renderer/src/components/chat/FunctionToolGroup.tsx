@@ -31,7 +31,9 @@ export function FunctionToolGroup({
       component="ToolGroup"
       presentationId={functionSiteRowIdentity(
         "ToolGroup",
-        (facts.calls as ModObject[]).map((call) => call.tool_use_id as string)
+        // The first call anchors this group while subsequent calls stream in.
+        // Facts lineage separately rejects deletion, replacement and reordering.
+        (facts.calls as ModObject[]).slice(0, 1).map((call) => call.tool_use_id as string)
       )}
       facts={facts}
       fallback={children(false)}

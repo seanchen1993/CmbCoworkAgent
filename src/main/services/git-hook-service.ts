@@ -179,6 +179,8 @@ const repoRemoteRefsSig = new Map<string, string>()
 // Reuse it while the root exists, without spawning git again on idle sweeps.
 const gitRootCache = new Map<string, string>()
 let registeredSyncTimer: ReturnType<typeof setInterval> | null = null
+let registeredSweep: Promise<void> | null = null
+let registeredSweepPending = false
 let registeredRepoWriteQueue: Promise<void> = Promise.resolve()
 
 const AUTO_INSTALL_HOOK_TTL_MS = 10 * 60 * 1000
@@ -2447,7 +2449,7 @@ async function applyRepoSweepOutcomes(outcomes: Map<string, RepoSweepOutcome>): 
   return retired
 }
 
-export async function syncRegisteredGitHookEvents(): Promise<void> {
+async function runRegisteredGitHookEventSweep(): Promise<void> {
   const repos = await readRegisteredRepos()
   const outcomes = new Map<string, RepoSweepOutcome>()
   for (const repo of repos) {
@@ -2487,24 +2489,43 @@ export async function syncRegisteredGitHookEvents(): Promise<void> {
   }
 }
 
+/** A slow sweep never overlaps a new one, including explicit/manual callers. */
+export function syncRegisteredGitHookEvents(): Promise<void> {
+  if (registeredSweep) {
+    registeredSweepPending = true
+    return registeredSweep
+  }
+  const sweep = async () => {
+    do {
+      registeredSweepPending = false
+      await runRegisteredGitHookEventSweep()
+    } while (registeredSweepPending)
+  }
+  registeredSweep = sweep().finally(() => {
+    registeredSweep = null
+    registeredSweepPending = false
+  })
+  return registeredSweep
+}
+
 export function startRegisteredGitHookEventSync(): void {
   if (registeredSyncTimer) return
   void refreshGitHookHelper()
-  void syncRegisteredGitHookEvents().catch((e) => {
-    console.warn("[GitHook] registered repo sync failed:", e)
-  })
-  registeredSyncTimer = setInterval(() => {
+  const refresh = () => {
     void syncRegisteredGitHookEvents().catch((e) => {
       console.warn("[GitHook] registered repo sync failed:", e)
     })
-  }, REGISTERED_REPO_SYNC_INTERVAL_MS)
+  }
+  registeredSyncTimer = setInterval(refresh, REGISTERED_REPO_SYNC_INTERVAL_MS)
   registeredSyncTimer.unref?.()
+  refresh()
 }
 
 export function stopRegisteredGitHookEventSync(): void {
-  if (!registeredSyncTimer) return
-  clearInterval(registeredSyncTimer)
+  if (registeredSyncTimer) clearInterval(registeredSyncTimer)
   registeredSyncTimer = null
+  // Let the current Git/accounting write finish, but do not start queued sweeps.
+  registeredSweepPending = false
 }
 
 export function scheduleGitHookEventSync(workspacePath: string, delayMs = 500): void {

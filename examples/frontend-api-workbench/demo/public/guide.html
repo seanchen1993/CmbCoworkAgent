@@ -1,0 +1,257 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>体验前后端联调工作台</title>
+    <link rel="stylesheet" href="/style.css" />
+    <script defer src="/guide.js"></script>
+    <style>
+      main {
+        margin: 0 auto;
+        max-width: 1080px;
+        padding: 30px 24px;
+      }
+      .intro {
+        padding: 38px 0 24px;
+      }
+      h1 {
+        font-size: 34px;
+      }
+      .lead {
+        max-width: 700px;
+        margin: 12px 0 24px;
+        font-size: 15px;
+        color: #65768a;
+      }
+      .steps {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 16px;
+        margin: 22px 0;
+      }
+      .step {
+        padding: 22px;
+        background: white;
+        border: 1px solid #e0e8e5;
+        border-radius: 12px;
+      }
+      .number {
+        display: inline-grid;
+        place-items: center;
+        background: #e7f3ee;
+        color: #278770;
+        border-radius: 50%;
+        width: 28px;
+        height: 28px;
+        margin-bottom: 10px;
+      }
+      .step h2 {
+        margin: 0 0 10px;
+      }
+      .step p {
+        font-size: 12px;
+        color: #718092;
+      }
+      .links {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px;
+        margin-top: 18px;
+      }
+      .links a {
+        display: inline-block;
+        padding: 10px 15px;
+        border-radius: 7px;
+        background: #258a73;
+        color: white;
+      }
+      .links a.secondary {
+        background: #eaf0f4;
+        color: #506275;
+      }
+      .inputs {
+        padding: 0 24px 24px;
+      }
+      .inputs label {
+        display: block;
+        margin: 15px 0 6px;
+        font-size: 12px;
+        color: #63778a;
+      }
+      .copy-row {
+        display: flex;
+        gap: 8px;
+      }
+      .copy-row input {
+        flex: 1;
+      }
+      .inputs textarea {
+        width: 100%;
+        min-height: 155px;
+        padding: 12px;
+        border: 1px solid #dce3eb;
+        border-radius: 7px;
+        font: 12px/1.8 inherit;
+        resize: vertical;
+      }
+      .checks {
+        padding: 0 24px 24px;
+        color: #556b7e;
+      }
+      .checks li {
+        margin: 9px 0;
+      }
+      .tip {
+        font-size: 12px;
+        padding: 14px 18px;
+        border-left: 3px solid #64b7a2;
+        background: #edf5f1;
+        color: #426b5d;
+      }
+      .copy-status {
+        min-height: 24px;
+        font-size: 12px;
+        color: #278770;
+      }
+      .phase {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 18px;
+        padding: 0 24px 24px;
+      }
+      .phase h3 {
+        font-size: 14px;
+      }
+      .phase p {
+        font-size: 12px;
+        color: #6c7d90;
+      }
+      code {
+        font-size: 12px;
+      }
+      .footer {
+        color: #93a0ae;
+        font-size: 11px;
+        text-align: center;
+        padding: 20px;
+      }
+      @media (max-width: 680px) {
+        .steps,
+        .phase {
+          grid-template-columns: 1fr;
+        }
+        .intro {
+          padding-top: 12px;
+        }
+        h1 {
+          font-size: 27px;
+        }
+        .copy-row {
+          flex-wrap: wrap;
+        }
+        .copy-row input {
+          width: 100%;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <div class="eyebrow">DEVCLAW · MODS 场景演示</div>
+      <section class="intro">
+        <h1>让模型带着证据做联调</h1>
+        <p class="lead">
+          一个 Vue
+          订单运营台、一份接口文档、一张聊天顶部工作台。让当前模型操作真实页面，对照网络响应，说明哪里有问题、哪些功能已经验证。
+        </p>
+        <div class="links">
+          <a href="/orders" target="_blank" rel="noopener">打开被测 Vue 页面 ↗</a
+          ><a class="secondary" href="/api-docs" target="_blank" rel="noopener"
+            >查看第一轮接口文档 ↗</a
+          >
+        </div>
+      </section>
+      <section class="steps" aria-label="演示步骤">
+        <article class="step">
+          <span class="number">1</span>
+          <h2>打开工作台</h2>
+          <p>在 DevClaw 普通聊天启用“前后端联调工作台”。表单直接出现在聊天顶部，可展开或收起。</p>
+        </article>
+        <article class="step">
+          <span class="number">2</span>
+          <h2>填入演示，开始分析</h2>
+          <p>
+            点击“填入演示案例”，再点“开始联调分析”。填入动作本身不会调用模型。右侧浏览器用来观察实际页面。
+          </p>
+        </article>
+        <article class="step">
+          <span class="number">3</span>
+          <h2>在聊天里看证据</h2>
+          <p>检查报告是否给出请求、响应和页面现象。可继续追问，也可换正确文档做第二轮对照。</p>
+        </article>
+      </section>
+      <div class="tip">
+        本地服务已能返回此页面。首次使用内置浏览器控制时，请在应用“浏览器 → 控制配置”开启 Agent
+        控制并按提示重启。保持启动脚本窗口打开。
+      </div>
+      <section class="card" style="margin-top: 24px">
+        <div class="card-title">
+          <div>
+            <h2>直接复制到工作台</h2>
+            <p>默认端口可使用工作台的一键填入；更换端口时，以此处实际地址为准。</p>
+          </div>
+        </div>
+        <div class="inputs">
+          <label for="target">页面地址</label>
+          <div class="copy-row">
+            <input id="target" readonly /><button data-copy="target">复制页面地址</button>
+          </div>
+          <label for="contract">接口文档</label>
+          <div class="copy-row">
+            <input id="contract" readonly /><button data-copy="contract">复制文档地址</button>
+          </div>
+          <label for="scope">检查范围</label
+          ><textarea id="scope" readonly>
+请使用内置浏览器实际检查订单运营台。允许执行只读查询、筛选、翻页、详情、切仓和刷新通知。
+核对概览、列表金额与首笔详情；翻至第二页并返回；筛选已发货；搜索阅读台灯和不存在的客户；切换华南仓；检查趋势与通知。
+区分页面问题、文档与真实接口的冲突、服务异常，列出已验证正常的功能。每项给出复现动作、实际请求与响应证据、页面现象和最小建议。归因不确定时标明待确认。
+只使用本轮提供的文档，不预先读取正确对照版或验收答案；不要修改代码或业务数据。</textarea
+          ><button data-copy="scope">复制检查范围</button>
+          <p class="copy-status" role="status" id="copy-status"></p>
+        </div>
+      </section>
+      <section class="card">
+        <div class="card-title"><h2>按这个顺序展示，效果更清楚</h2></div>
+        <ol class="checks">
+          <li>先打开订单页：确认这是能筛选、翻页、查详情的 Vue 应用。</li>
+          <li>回到聊天顶部，填入示例，点击一次开始；观察任务进入聊天。</li>
+          <li>看右侧浏览器实际操作，并在报告中找到对应的请求与页面证据。</li>
+          <li>追问：“哪些是文档冲突？哪些页面本身正常？请不要把所有差异都归因于后端。”</li>
+          <li>换正确文档再测：对照报告变化，而不是重复输出第一轮结论。</li>
+        </ol>
+      </section>
+      <section class="card">
+        <div class="card-title"><h2>同一页面，两轮对照</h2></div>
+        <div class="phase">
+          <article>
+            <h3>第一轮 · 混合文档</h3>
+            <p>一部分契约正确，一部分有偏差。检验模型能否发现差异，同时保留正常功能的结论。</p>
+            <a href="/api-docs" target="_blank" rel="noopener">打开第一轮文档 ↗</a>
+          </article>
+          <article>
+            <h3>第二轮 · 正确文档</h3>
+            <p>
+              在工作台点击“换正确文档对照”，然后再次开始。页面保持不变，检验模型是否能区分文档修订与代码修复。
+            </p>
+            <a href="/api-docs-correct" target="_blank" rel="noopener">打开正确对照文档 ↗</a>
+          </article>
+        </div>
+      </section>
+      <p class="tip">
+        演示数据全部虚构，业务操作均为只读。完成后再自行查看材料包中的“验收答案-请勿提交给模型.txt”；这个页面不会展示答案。没有实际打开页面、没有响应证据的部分，应明确写为未验证。
+      </p>
+      <div class="footer">Vue 3 · 9 类本地接口 · 当前聊天模型 · 无外网 CDN</div>
+    </main>
+  </body>
+</html>

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react"
+import { createLatestDisplayRead } from "../../lib/latest-display-read"
 import { Button } from "@/components/ui/button"
 import type {
   FunctionRuntimeSession,
@@ -28,46 +29,61 @@ export function RuntimeSessions({
     action: "release" | "resume"
     session: FunctionRuntimeSession
   } | null>(null)
+  const readerRef = useRef<ReturnType<
+    typeof createLatestDisplayRead<{
+      next: FunctionRuntimeSessions
+      clearError: boolean
+    }>
+  > | null>(null)
+  const clearOnRefresh = useRef(true)
   const revision = useRef(0)
   const controlling = useRef<number | null>(null)
   const invalidateRequests = useCallback(() => {
     revision.current++
     controlling.current = null
   }, [])
-  const refresh = useCallback(
-    async (clearError = true) => {
-      if (controlling.current !== null) return
-      const id = ++revision.current
-      try {
-        const next = await window.api.mods.runtimeSessions(threadId ?? undefined)
-        if (id === revision.current) {
-          setView(next)
-          if (clearError) setError(null)
-        }
-      } catch (failure) {
-        if (id === revision.current) setError(String(failure))
-      }
-    },
-    [threadId]
-  )
+  const refresh = useCallback((clearError = true) => {
+    if (controlling.current !== null) return
+    clearOnRefresh.current = clearError
+    readerRef.current?.refresh()
+  }, [])
   useEffect(() => {
     if (!active) return
+    setView(null)
     setPending(false)
     setConfirm(null)
     setError(null)
-    void refresh()
-    const timer = window.setInterval(() => void refresh(), 5000)
-    const stop = window.api.mods.onConfigurationChanged(() => void refresh())
+    const reader = createLatestDisplayRead({
+      read: async () => {
+        const clearError = clearOnRefresh.current
+        return { next: await window.api.mods.runtimeSessions(threadId ?? undefined), clearError }
+      },
+      publish: ({ next, clearError }) => {
+        setView(next)
+        if (clearError) setError(null)
+      },
+      failed: (failure) => setError(String(failure))
+    })
+    readerRef.current = reader
+    refresh()
+    const timer = window.setInterval(() => refresh(), 5000)
+    const stop = window.api.mods.onConfigurationChanged(() => {
+      reader.invalidate()
+      refresh()
+    })
     return () => {
+      reader.close()
+      if (readerRef.current === reader) readerRef.current = null
       invalidateRequests()
       window.clearInterval(timer)
       stop()
     }
-  }, [active, refresh, invalidateRequests])
+  }, [active, threadId, refresh, invalidateRequests])
   const act = async () => {
     if (!confirm || pending) return
     setPending(true)
     setError(null)
+    readerRef.current?.invalidate()
     const id = ++revision.current
     controlling.current = id
     try {

@@ -5,10 +5,15 @@ import { ModFunctionError } from "../../shared/mods/v2/contracts"
 import type { FunctionConversationRef, FunctionConversationStore } from "../db/function-conversation-store"
 import { SqlJsSaver, type SqlJsSaverCommittedCheckpointReceipt } from "./sqljs-saver"
 import type { ThreadIncarnation } from "../services/thread-incarnation"
+import type { FunctionNativeConversationRuntime } from "../mods/manager"
+import { isFunctionConversationNativeMainRuntime } from "../mods/native-conversation-policy-source"
+import { createNativeCommittedMembershipAdmission } from "./committed-checkpoint-native-capture"
+import { nativeConversationFairness } from "../utils/native-conversation-fairness"
 import {
   captureCommittedConversationMembership,
   captureConversationCheckpointRead,
   functionConversationMembershipDigest,
+  isNativeCommittedConversationMembership,
   readFunctionConversationCheckpointMembership,
   type FunctionConversationCanonicalCut,
   type FunctionConversationCheckpointMembershipProof
@@ -54,6 +59,7 @@ export interface FunctionConversationDeliveryBinding {
 
 const committedBrand = Symbol("function-conversation-committed-checkpoint")
 const preparedBrand = Symbol("function-conversation-prepared-checkpoint")
+const receiptDelete = WeakMap.prototype.delete, receiptApply = Reflect.apply
 export interface FunctionConversationPreparedCheckpoint {
   readonly [preparedBrand]: true
 }
@@ -66,6 +72,11 @@ type Capture = (config: RunnableConfig, state: FunctionConversationState) =>
 
 /** Native successful put/read receipts authenticate delivery. Stream values cannot enter this path. */
 export class FunctionConversationDeliveryBridge {
+  private readonly cooperativeObservers = new WeakMap<object, {
+    observed: (prepared: FunctionConversationPreparedCheckpoint, receipt: SqlJsSaverCommittedCheckpointReceipt) => void
+    cooperate: (prepared: FunctionConversationPreparedCheckpoint, receipt: SqlJsSaverCommittedCheckpointReceipt) =>
+      void | Promise<void>
+  }>()
   private readonly receipts = new WeakMap<FunctionConversationCommittedCheckpoint, {
     binding: FunctionConversationDeliveryBinding
     state: FunctionConversationState
@@ -75,7 +86,8 @@ export class FunctionConversationDeliveryBridge {
     assertNative?: () => void
   }>()
 
-  constructor(private readonly store: FunctionConversationStore, private readonly capture: Capture) {}
+  constructor(private readonly store: FunctionConversationStore, private readonly capture: Capture,
+    private readonly nativeRuntime?: FunctionNativeConversationRuntime) {}
 
   private assertBinding(binding: FunctionConversationDeliveryBinding, config: RunnableConfig,
     state: FunctionConversationState): void {
@@ -114,18 +126,26 @@ export class FunctionConversationDeliveryBridge {
       if (!incarnation) throw new ModFunctionError("MODS_CONVERSATION_CHECKPOINT_SCOPE")
       return Object.freeze({ ...incarnation })
     }
-    const freezeBinding = (actual: FunctionConversationDeliveryBinding) => Object.freeze({
-      target: actual.target, checkpointThreadId: actual.checkpointThreadId,
-      checkpointIncarnation: physicalIncarnation(actual), signal: actual.signal,
-      assertCurrent: actual.assertCurrent.bind(actual)
-    })
+    const nativeBindings = new WeakMap<FunctionConversationDeliveryBinding, FunctionConversationDeliveryBinding>()
+    const freezeBinding = (actual: FunctionConversationDeliveryBinding) => {
+      const frozen = Object.freeze({ target: actual.target, checkpointThreadId: actual.checkpointThreadId,
+        checkpointIncarnation: physicalIncarnation(actual), signal: actual.signal,
+        assertCurrent: actual.assertCurrent.bind(actual) })
+      const runtime = this.nativeRuntime
+      if (runtime && isFunctionConversationNativeMainRuntime(runtime) && runtime.binding === actual)
+        nativeBindings.set(frozen, actual)
+      return frozen
+    }
     const membershipAdmission = (binding: FunctionConversationDeliveryBinding,
-      state: FunctionConversationState, cut: FunctionConversationCanonicalCut) => ({
-      target: binding.target, checkpointThreadId: binding.checkpointThreadId,
-      checkpointIncarnation: physicalIncarnation(binding), cut, frontier: state.frontier,
-      stateDigest: functionConversationMembershipDigest(state),
-      assertCurrent: () => { binding.signal.throwIfAborted(); binding.assertCurrent() }
-    })
+      state: FunctionConversationState, cut: FunctionConversationCanonicalCut) => {
+      const data = { target: binding.target, checkpointThreadId: binding.checkpointThreadId,
+        checkpointIncarnation: physicalIncarnation(binding), cut, frontier: state.frontier,
+        stateDigest: functionConversationMembershipDigest(state) }
+      const original = nativeBindings.get(binding), runtime = this.nativeRuntime
+      const native = original && runtime && createNativeCommittedMembershipAdmission(runtime, original, data)
+      return native ?? { ...data,
+        assertCurrent: () => { binding.signal.throwIfAborted(); binding.assertCurrent() } }
+    }
     const mintTuple = (config: RunnableConfig, actual: FunctionConversationDeliveryBinding,
       tuple: CheckpointTuple | undefined, membership: FunctionConversationCheckpointMembershipProof,
       expected?: FunctionConversationState,
@@ -206,7 +226,20 @@ export class FunctionConversationDeliveryBridge {
         throw new ModFunctionError("MODS_CONVERSATION_CHECKPOINT_SCOPE")
       return actual
     }
-    return {
+    const prepareObserved = (prepared: FunctionConversationPreparedCheckpoint,
+      receipt: SqlJsSaverCommittedCheckpointReceipt) => {
+      const read = () => SqlJsSaver.prototype.readCommittedCheckpoint.call(saver, receipt)
+      const tuple = read()
+      const actual = consume(prepared, tuple.config)
+      const membership = captureCommittedConversationMembership(this.store, saver, receipt,
+        membershipAdmission(actual.binding, actual.state, actual.cut))
+      const proof = mintTuple(tuple.config, actual.binding, tuple, membership, actual.state, () => {
+        if (read() !== tuple) throw new ModFunctionError("MODS_CONVERSATION_CHECKPOINT_CHANGED")
+      })
+      if (!proof) throw new ModFunctionError("MODS_CONVERSATION_CHECKPOINT_CHANGED")
+      return { proof, membership, target: actual.binding.target }
+    }
+    const observer: ReturnType<FunctionConversationDeliveryBridge["bindSaver"]> = {
       prepare: (config, checkpoint) => {
         const raw = checkpoint.channel_values[FUNCTION_CONVERSATION_CHANNEL]
         if (raw === undefined) return
@@ -230,16 +263,7 @@ export class FunctionConversationDeliveryBridge {
         this.acknowledge(captured.committed)
       },
       observed: (prepared, receipt) => {
-        const read = () => SqlJsSaver.prototype.readCommittedCheckpoint.call(saver, receipt)
-        const tuple = read()
-        const actual = consume(prepared, tuple.config)
-        const membership = captureCommittedConversationMembership(this.store, saver, receipt,
-          membershipAdmission(actual.binding, actual.state, actual.cut))
-        const proof = mintTuple(tuple.config, actual.binding, tuple, membership, actual.state, () => {
-          if (read() !== tuple) throw new ModFunctionError("MODS_CONVERSATION_CHECKPOINT_CHANGED")
-        })
-        if (!proof) throw new ModFunctionError("MODS_CONVERSATION_CHECKPOINT_CHANGED")
-        this.acknowledge(proof)
+        this.acknowledge(prepareObserved(prepared, receipt).proof)
       },
       recover: async (config, binding) => {
         // Ordinary checkpoints without this host channel have no conversation delivery.
@@ -263,6 +287,32 @@ export class FunctionConversationDeliveryBridge {
         return captured.tuple
       }
     }
+    this.cooperativeObservers.set(observer, { observed: observer.observed, cooperate: (prepared, receipt) => {
+      const actual = prepareObserved(prepared, receipt)
+      if (!isNativeCommittedConversationMembership(actual.membership, this.store, actual.target)) {
+        // Keep custom/unsupported observers synchronous, including their return/throw behavior.
+        this.acknowledge(actual.proof)
+        return
+      }
+      const settle = async () => {
+        try {
+          const current = () => {
+            if (!this.receipts.has(actual.proof))
+              throw new ModFunctionError("MODS_CONVERSATION_CHECKPOINT_PROOF")
+            readFunctionConversationCheckpointMembership(actual.membership, this.store, actual.target)
+          }
+          // Capture/mint is finished and ACK has not started. Saver awaits this promise while
+          // retaining the namespace gate and COMMIT receipt; no transaction/read scope is open.
+          await nativeConversationFairness(undefined, current)(true)
+          this.acknowledge(actual.proof)
+        } finally {
+          // acknowledge also deletes it, but an abort/close/mutation at the pause can fail first.
+          receiptApply(receiptDelete, this.receipts, [actual.proof])
+        }
+      }
+      return settle()
+    } })
+    return observer
   }
 
   acknowledge(proof: FunctionConversationCommittedCheckpoint): void {
@@ -291,11 +341,18 @@ export class FunctionConversationDeliveryBridge {
   /** Host convenience adapter; only the actual SqlJsSaver implementation performs put. */
   wrap(saver: SqlJsSaver, assertCurrent?: () => void, onCommitted?: () => void): SqlJsSaver {
     const observer = this.bindSaver(saver), methods = new Map<PropertyKey, unknown>()
+    const observe = (prepared: FunctionConversationPreparedCheckpoint,
+      receipt: SqlJsSaverCommittedCheckpointReceipt) => {
+      const native = this.cooperativeObservers.get(observer)
+      const field = Object.getOwnPropertyDescriptor(observer, "observed")
+      return native && field && "value" in field && field.value === native.observed
+        ? native.cooperate(prepared, receipt) : observer.observed(prepared, receipt)
+    }
     const put = async (config: RunnableConfig, checkpoint: Checkpoint, metadata: CheckpointMetadata) => {
       const prepared = observer.prepare(config, checkpoint)
       if (!prepared) return SqlJsSaver.prototype.put.call(saver, config, checkpoint, metadata)
       return SqlJsSaver.prototype.putWithCommitObserver.call(saver, config, checkpoint, metadata,
-        (receipt) => observer.observed(prepared, receipt), assertCurrent, onCommitted)
+        (receipt) => observe(prepared, receipt), assertCurrent, onCommitted)
     }
     return new Proxy(saver, { get(target, key) {
       if (key === "put") return put

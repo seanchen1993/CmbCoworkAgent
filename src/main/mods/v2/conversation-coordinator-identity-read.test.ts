@@ -2,7 +2,59 @@ import { randomUUID } from "node:crypto"
 import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, relative, resolve } from "node:path"
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+
+// Preserve actual native dispatch while observing a real indexed read. Installing a spy
+// after these methods are captured would correctly disable the path under test.
+const identityProbe = vi.hoisted(() => ({
+  prepared: undefined as (() => void) | undefined,
+  read: undefined as (() => void) | undefined,
+  hits: 0,
+  rawPrepares: 0,
+  indexedReads: 0,
+  restore: undefined as (() => void) | undefined
+}))
+vi.mock("node:sqlite", async importOriginal => {
+  const actual = await importOriginal<typeof import("node:sqlite")>()
+  const prepareDescriptor = Object.getOwnPropertyDescriptor(actual.DatabaseSync.prototype, "prepare")!
+  const getDescriptor = Object.getOwnPropertyDescriptor(actual.StatementSync.prototype, "get")!
+  const prepare = actual.DatabaseSync.prototype.prepare
+  const queries = new WeakMap<import("node:sqlite").StatementSync, string>()
+  const selected = (sql: string | undefined) => !!sql && sql.startsWith("SELECT created_at,") &&
+    sql.includes("INDEXED BY idx_threads_runtime_scope_v1")
+  Object.defineProperty(actual.DatabaseSync.prototype, "prepare", { ...prepareDescriptor,
+    value: function(this: import("node:sqlite").DatabaseSync, sql: string) {
+      const statement = Reflect.apply(prepare, this, [sql])
+      if (sql === "SELECT created_at, metadata FROM threads WHERE thread_id = ? LIMIT 1")
+        identityProbe.rawPrepares++
+      queries.set(statement, sql)
+      if (selected(sql) && identityProbe.prepared) {
+        const callback = identityProbe.prepared
+        identityProbe.prepared = undefined
+        identityProbe.hits++
+        callback()
+      }
+      return statement
+    } })
+  Object.defineProperty(actual.StatementSync.prototype, "get", { ...getDescriptor,
+    value: function(this: import("node:sqlite").StatementSync, ...args: unknown[]) {
+      const row = Reflect.apply(getDescriptor.value, this, args)
+      if (selected(queries.get(this))) identityProbe.indexedReads++
+      if (selected(queries.get(this)) && identityProbe.read) {
+        const callback = identityProbe.read
+        identityProbe.read = undefined
+        identityProbe.hits++
+        callback()
+      }
+      return row
+    } })
+  identityProbe.restore = () => {
+    Object.defineProperty(actual.DatabaseSync.prototype, "prepare", prepareDescriptor)
+    Object.defineProperty(actual.StatementSync.prototype, "get", getDescriptor)
+  }
+  return actual
+})
+afterAll(() => identityProbe.restore?.())
 
 const paths = vi.hoisted(() => ({ database: "" }))
 vi.mock("../../storage", () => ({
@@ -11,6 +63,8 @@ vi.mock("../../storage", () => ({
   markMemorySessionOptInMigrated: vi.fn()
 }))
 import * as appDb from "../../db"
+import * as identityReads from "../../db/function-conversation-thread-identity-read"
+import * as incarnations from "../../services/thread-incarnation"
 import { FunctionConversationStore } from "../../db/function-conversation-store"
 import { ModRuntimeAuthorities } from "../runtime-instance"
 import {
@@ -31,6 +85,11 @@ beforeEach(async () => {
 })
 
 afterEach(async () => {
+  identityProbe.prepared = undefined
+  identityProbe.read = undefined
+  identityProbe.hits = 0
+  identityProbe.rawPrepares = 0
+  identityProbe.indexedReads = 0
   const failures: unknown[] = []
   for (const close of owners.splice(0)) {
     try {
@@ -133,6 +192,130 @@ function observeIdentity() {
 }
 
 describe("native Coordinator fresh identity guard", () => {
+  function largeHistory(f: ReturnType<typeof fixture>) {
+    const metadata = JSON.stringify({ ...JSON.parse(f.thread.metadata ?? "{}"),
+      llmFileHistory: "完整文件历史".repeat(20000) })
+    appDb.getDb().run("UPDATE threads SET metadata=? WHERE thread_id=?", [metadata, f.threadId])
+    return metadata
+  }
+
+  it.each([
+    ["delete", false], ["recreate", false], ["delete", true], ["recreate", true]
+  ] as const)("rejects source-callback %s through an actual indexed read (warm %s)", async (mode, warm) => {
+    const f = fixture()
+    largeHistory(f)
+    let mutate = !warm, calls = 0
+    const callback = () => {
+      calls++
+      if (!mutate) return
+      if (mode === "recreate") f.replace()
+      else appDb.getDb().run("DELETE FROM threads WHERE thread_id=?", [f.threadId])
+    }
+    const runtime = warm ? await f.prepare(callback) : undefined
+    const beforeReads = identityProbe.indexedReads
+    const beforeRawPrepares = identityProbe.rawPrepares
+    const beforeCalls = calls
+    mutate = true
+    if (warm) {
+      if (!runtime) throw Error("Actual native runtime required")
+      expect(() => runtime.assertCurrent()).toThrow("MODS_CONVERSATION_THREAD_CHANGED")
+    } else await expect(f.prepare(callback)).rejects.toThrow("MODS_CONVERSATION_THREAD_CHANGED")
+    expect(calls).toBe(beforeCalls + 1)
+    expect(identityProbe.indexedReads).toBe(beforeReads + 1)
+    expect(identityProbe.rawPrepares).toBe(beforeRawPrepares)
+    if (mode === "recreate") expect(appDb.getThreadCore(f.threadId)?.created_at).toBe(f.thread.created_at)
+  })
+
+  it.each(["raw", "matcher"] as const)(
+    "retains complete input for a replaced %s binding after native preparation",
+    async kind => {
+      const f = fixture(), metadata = largeHistory(f)
+      const runtime = await f.prepare()
+      if (!runtime) throw Error("Actual native runtime required")
+      const rows: Array<string | null | undefined> = []
+      if (kind === "raw") {
+        const original = identityReads.readFunctionConversationThreadIdentityCurrent
+        vi.spyOn(identityReads, "readFunctionConversationThreadIdentityCurrent").mockImplementation((db, id) => {
+          const row = original(db, id)
+          rows.push(row?.metadata)
+          return row
+        })
+      } else {
+        const original = incarnations.matchesThreadIncarnation
+        vi.spyOn(incarnations, "matchesThreadIncarnation").mockImplementation((row, expected) => {
+          rows.push(row?.metadata)
+          return original(row, expected)
+        })
+      }
+      runtime.assertCurrent()
+      expect(rows).toEqual([metadata])
+    }
+  )
+
+  it.each(["raw", "matcher"] as const)(
+    "rereads complete public input when %s changes during an actual indexed get",
+    async kind => {
+      const f = fixture(), metadata = largeHistory(f)
+      const runtime = await f.prepare()
+      if (!runtime) throw Error("Actual native runtime required")
+      const rows: Array<string | null | undefined> = []
+      identityProbe.read = () => {
+        if (kind === "raw") {
+          const original = identityReads.readFunctionConversationThreadIdentityCurrent
+          vi.spyOn(identityReads, "readFunctionConversationThreadIdentityCurrent").mockImplementation((db, id) => {
+            const row = original(db, id)
+            rows.push(row?.metadata)
+            return row
+          })
+        } else {
+          const original = incarnations.matchesThreadIncarnation
+          vi.spyOn(incarnations, "matchesThreadIncarnation").mockImplementation((row, expected) => {
+            rows.push(row?.metadata)
+            return original(row, expected)
+          })
+        }
+      }
+      runtime.assertCurrent()
+      expect(identityProbe.hits).toBe(1)
+      expect(rows).toEqual([metadata])
+    }
+  )
+
+  it.each(["prepared", "read"] as const)(
+    "falls back to complete data after a parser change during native %s",
+    phase => {
+      const f = fixture(), metadata = largeHistory(f)
+      identityProbe[phase] = () => {
+        const original = JSON.parse
+        vi.spyOn(JSON, "parse").mockImplementation((text, reviver) => original(text, reviver))
+      }
+      const row = identityReads.readFunctionConversationThreadIncarnationCurrent(appDb.getDb(), f.threadId)
+      expect(identityProbe.hits).toBe(1)
+      expect(row?.metadata).toBe(metadata)
+    }
+  )
+
+  it("keeps a failed nested temporary reader from deleting the outer raw cache or busy marker", () => {
+    const f = fixture(), metadata = largeHistory(f), database = appDb.getDb()
+    expect(identityReads.readFunctionConversationThreadIdentityCurrent(database, f.threadId)?.metadata).toBe(metadata)
+    const rawPrepares = identityProbe.rawPrepares
+    let rejected = false, reason: unknown = "not caught"
+    identityProbe.prepared = () => {
+      const factory = vi.spyOn(database, "prepareReadOne").mockImplementation(() => () => { throw undefined })
+      try { identityReads.readFunctionConversationThreadIncarnationCurrent(database, f.threadId) }
+      catch (error) { rejected = true; reason = error }
+      finally { factory.mockRestore() }
+    }
+    const row = identityReads.readFunctionConversationThreadIncarnationCurrent(database, f.threadId)
+    expect(identityProbe.hits).toBe(1)
+    expect(rejected).toBe(true)
+    expect(reason).toBeUndefined()
+    expect(row?.metadata).not.toBe(metadata)
+    expect(identityReads.readFunctionConversationThreadIdentityCurrent(database, f.threadId)?.metadata).toBe(metadata)
+    expect(identityProbe.rawPrepares).toBe(rawPrepares)
+    expect(identityReads.readFunctionConversationThreadIncarnationCurrent(database, f.threadId)).toEqual(row)
+  })
+
   it("keeps complete metadata fresh and the public six-field thread shape", async () => {
     const f = fixture(),
       observation = observeIdentity()

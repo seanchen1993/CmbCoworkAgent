@@ -18,6 +18,15 @@ export class FunctionDesktopNotifications {
   private readonly recent = new Map<string, number[]>()
   constructor(private readonly adapter: DesktopNotificationAdapter) {}
 
+  /** Retiring a workspace must not reset its active notifications or rate-limit window. */
+  idleRetirementDelay(now = Date.now()): number {
+    if (this.active.size) return 30000
+    let delay = 0
+    for (const times of this.recent.values())
+      for (const time of times) delay = Math.max(delay, time + 10000 - now)
+    return delay
+  }
+
   async show(
     source: string,
     input: ModObject,

@@ -1,0 +1,8 @@
+Vue 3.5.24 — MIT
+Source: https://registry.npmjs.org/vue/-/vue-3.5.24.tgz
+Official source: https://github.com/vuejs/core
+npm package integrity: sha512-uTHDOpVQTMjcGgrqFPSb8iO2m1DUvo+WbGqoXQz8Y1CeBYQ0FXf2z1gLRaBtHjlRz7zZUBHxjVB5VTLzYkvftg==
+Vendored file: public/vendor/vue.global.prod.js
+SHA256: 9847847474877fae5997b30db1674c99d3f8ae36b475af3224a1f79c274530a9
+License: public/vendor/VUE-LICENSE.txt
+Downloaded from npm package with --ignore-scripts. No changes to the Vue runtime.

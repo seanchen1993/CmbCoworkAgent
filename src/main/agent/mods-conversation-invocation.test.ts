@@ -1,3 +1,4 @@
+import { performance } from "node:perf_hooks"
 import { HumanMessage } from "@langchain/core/messages"
 import { Command } from "@langchain/langgraph"
 import { describe, expect, it, vi } from "vitest"
@@ -39,6 +40,34 @@ function fixture() {
 }
 
 describe("native conversation invocation admission", () => {
+  it.each(["live", "retire", "cancel"])("services pending event-loop work before admission (%s)", async mode => {
+    const f = fixture()
+    const cancellation = new AbortController()
+    let clock = 0, serviced = false
+    const now = vi.spyOn(performance, "now").mockImplementation(() => clock += 10)
+    f.native.getState.mockImplementation(async () => {
+      setImmediate(() => {
+        serviced = true
+        if (mode === "retire") f.expire()
+        if (mode === "cancel") cancellation.abort(new Error("PREPARATION_CANCELED"))
+      })
+      return { values: {} }
+    })
+    try {
+      const invocation = f.graph.invoke({ messages: [new HumanMessage("hello")] },
+        { ...f.config, signal: cancellation.signal })
+      if (mode !== "live") {
+        await expect(invocation).rejects.toThrow(mode === "retire"
+          ? "ORIGINAL_RUNTIME_RETIRED" : "PREPARATION_CANCELED")
+        expect(f.native.invoke).not.toHaveBeenCalled()
+      } else {
+        await invocation
+        expect(f.native.invoke).toHaveBeenCalledOnce()
+      }
+      expect(serviced).toBe(true)
+    } finally { now.mockRestore() }
+  })
+
   it("keeps streamEvents version/rest and pins input/config before its preparation await", async () => {
     const f = fixture()
     let release: () => void = () => undefined

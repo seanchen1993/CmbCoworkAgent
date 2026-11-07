@@ -5,8 +5,10 @@ import { ModError } from "../mods/errors"
 import { getDurableRuntimeTail } from "./thread-runtime-tail"
 
 const checkpoint = vi.hoisted(() => vi.fn())
+const readDatabase = vi.hoisted(() => vi.fn())
 vi.mock("../agent/runtime", () => ({ withCheckpointer: checkpoint }))
-vi.mock("../db", () => ({}))
+// Native checkpoint helpers capture this function at import time without reading the DB.
+vi.mock("../db", () => ({ getDb: readDatabase }))
 vi.mock("../mods/manager", () => ({}))
 afterEach(() => vi.resetAllMocks())
 
@@ -17,6 +19,7 @@ it.each([
 ])("does not convert a refused history read into a new empty chat", async (error) => {
   checkpoint.mockRejectedValueOnce(error)
   await expect(getDurableRuntimeTail("ordinary")).rejects.toBe(error)
+  expect(readDatabase).not.toHaveBeenCalled()
 })
 
 it("keeps the first-send path for a chat with no checkpoint", async () => {
@@ -26,4 +29,5 @@ it("keeps the first-send path for a chat with no checkpoint", async () => {
     persistedMessages: [],
     checkpointHasInterrupt: false
   })
+  expect(readDatabase).not.toHaveBeenCalled()
 })

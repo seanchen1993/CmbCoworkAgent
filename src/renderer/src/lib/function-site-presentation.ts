@@ -47,6 +47,8 @@ interface Entry extends PresentationBudgetRecord {
   bytes: number
   expires: number
   valid: boolean
+  queryable: boolean
+  leaseToken?: object
 }
 
 interface Admission extends PresentationBudgetRecord {
@@ -63,6 +65,11 @@ export interface CachedFunctionSitePresentation {
   presentation: FunctionSitePresentation
   expiresAt: number
   current(): boolean
+}
+
+export interface FunctionSiteProgressLease extends CachedFunctionSitePresentation {
+  key: string
+  release(): void
 }
 
 /** Drawing data only. Owners, generations, callback handles and Client instances never survive. */
@@ -137,6 +144,21 @@ export class FunctionSitePresentationCache {
     return () => {
       this.listeners.delete(subscription)
     }
+  }
+
+  /** Only host projections retain dependency proofs after their original owner is unmounted. */
+  releaseView(): void {
+    this.admissionRevision++
+    for (const [identity, admission] of this.admissions) this.removeAdmission(identity, admission)
+    const removed = new Set<string>()
+    for (const [key, entry] of this.entries) {
+      if (entry.hostKey) continue
+      this.remove(key, entry)
+      removed.add(key)
+    }
+    // Dimensions reveal no drawing data and may still prevent scroll position jumps.
+    this.releaseEmptyMetadata()
+    if (removed.size) this.notify(removed)
   }
 
   /** Close the first-read/event race without retaining an unbounded per-row event history. */
@@ -250,6 +272,7 @@ export class FunctionSitePresentationCache {
       this.releaseEmptyMetadata()
       return null
     }
+    if (!entry.queryable) return null
     this.entries.delete(key)
     this.entries.set(key, entry)
     budget.touch(entry)
@@ -258,7 +281,42 @@ export class FunctionSitePresentationCache {
       ...(entry.hostKey ? { hostKey: entry.hostKey } : {}),
       presentation: entry.presentation,
       expiresAt: entry.expires,
-      current: () => this.authorized() && entry.valid && entry.expires > Date.now()
+      current: () => this.authorized() && entry.valid && entry.queryable && entry.expires > Date.now()
+    }
+  }
+
+  /** Consume a committed exact view for one mounted progress lineage, never a new read authority. */
+  consumeProgress(
+    key: string | null,
+    cached: CachedFunctionSitePresentation,
+    rowIdentity: string | undefined
+  ): FunctionSiteProgressLease | null {
+    if (!key || !rowIdentity || rowIdentity.length > 2048 || !this.authorized()) return null
+    const entry = this.entries.get(key)
+    if (!entry || !entry.valid || !entry.queryable || entry.leaseToken ||
+      !["AssistantMessage", "ToolGroup"].includes(entry.component) ||
+      entry.presentation !== cached.presentation || !cached.current() ||
+      entry.expires <= Date.now()) return null
+    // Revoke pending cache publication without releasing this still-valid display entry.
+    this.admissionRevision++
+    const admission = this.admissions.get(rowIdentity)
+    if (admission) this.removeAdmission(rowIdentity, admission)
+    const token = {}
+    entry.queryable = false
+    entry.leaseToken = token
+    return {
+      key,
+      ...(entry.hostKey ? { hostKey: entry.hostKey } : {}),
+      presentation: entry.presentation,
+      expiresAt: entry.expires,
+      current: () => this.authorized() && this.entries.get(key) === entry && entry.valid &&
+        entry.leaseToken === token && entry.expires > Date.now(),
+      release: () => {
+        if (entry.leaseToken !== token) return
+        entry.leaseToken = undefined
+        this.remove(key, entry)
+        this.releaseEmptyMetadata()
+      }
     }
   }
 
@@ -429,6 +487,7 @@ export class FunctionSitePresentationCache {
       bytes,
       expires: Date.now() + MAX_AGE_MS,
       valid: true,
+      queryable: true,
       evict: () => {
         this.remove(key, entry)
         this.releaseEmptyMetadata()

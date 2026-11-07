@@ -69,6 +69,11 @@ import {
 import { registerPathOpenersHandlers } from "./ipc/path-openers"
 import { scheduleHardDeadline, waitBestEffort } from "./shutdown-deadline"
 import { createNativeClosePrompt } from "./native-close-prompt"
+import {
+  createWindowFailureRecovery,
+  createWindowPageLoader,
+  showStartupFailure
+} from "./window-failure-recovery"
 import { shouldBlockEmbeddedNavigation } from "./html-preview-navigation"
 import {
   clearAppAttention,
@@ -126,6 +131,7 @@ const nativeClosePrompt = createNativeClosePrompt()
 const mainLogForwardingGate = createMainLogForwardingGate()
 let mainWindow: BrowserWindow | null = null
 let mainWindowStartupReady = false
+let applicationShutdownRequested = false
 let mainWindowUnresponsive = false
 const trustedMainRendererUrl = resolveTrustedAppRendererUrl(
   app.isPackaged,
@@ -660,9 +666,9 @@ function saveWindowCloseBehavior(behavior: WindowCloseBehavior): WindowCloseBeha
   return savedBehavior
 }
 
-function requestNativeWindowCloseChoice(window: BrowserWindow): void {
+function requestNativeWindowCloseChoice(window: BrowserWindow): Promise<void> {
   clearCloseToTrayPromptState()
-  void nativeClosePrompt
+  return nativeClosePrompt
     .request({
       isAvailable: () => !window.isDestroyed() && mainWindow === window && !isAppQuitting(),
       hasActiveRuns: hasActiveForegroundRuns,
@@ -758,8 +764,59 @@ function createWindow(): void {
     console.warn("[Main] BrowserWindow became unresponsive")
   })
 
-  /** One recovery per window: see the render-process-gone handler below. */
-  let rendererRecovered = false
+  const recoveryWindow = mainWindow
+  const loadApplicationPage = createWindowPageLoader(
+    () => {
+      const renderUrl =
+        (isDev && process.env["ELECTRON_RENDERER_URL"]) || import.meta.env.VITE_RENDER_URL
+      return renderUrl
+        ? recoveryWindow.loadURL(renderUrl)
+        : recoveryWindow.loadFile(join(__dirname, "../renderer/index.html"))
+    },
+    (error) => {
+      console.error("[Main] Application page load rejected:", error)
+      const code = (error as { errno?: number } | null)?.errno
+      windowRecovery.failed(code ?? -2, true)
+    }
+  )
+  const windowRecovery = createWindowFailureRecovery({
+    isAvailable: () =>
+      !applicationShutdownRequested &&
+      !isAppQuitting() &&
+      mainWindow === recoveryWindow &&
+      !recoveryWindow.isDestroyed() &&
+      !recoveryWindow.webContents.isDestroyed(),
+    show: (options) => {
+      recoveryWindow.show()
+      return dialog.showMessageBox(recoveryWindow, options)
+    },
+    reload: loadApplicationPage,
+    pendingClose: () => nativeClosePrompt.pending,
+    canRecoverAfterClose: () =>
+      !recoveryWindow.isDestroyed() && recoveryWindow.isVisible() && !recoveryWindow.isMinimized(),
+    restart: () => {
+      app.relaunch()
+      setAppQuitting(true)
+      app.quit()
+    },
+    quit: () => {
+      setAppQuitting(true)
+      app.quit()
+    },
+    reportError: (error) => {
+      console.error("[Main] Window recovery failed:", error)
+      if (!applicationShutdownRequested && !isAppQuitting()) {
+        dialog.showErrorBox("界面恢复失败", "请退出并重新打开 CMBDevClaw。错误已记录到 main.log。")
+      }
+    }
+  })
+
+  // All show paths (tray, second instance, pet, dock) resume the same deferred intent.
+  // Background failures stay quiet until the user brings this window back.
+  recoveryWindow.on("hide", () => windowRecovery.hidden())
+  recoveryWindow.on("minimize", () => windowRecovery.hidden())
+  recoveryWindow.on("show", () => windowRecovery.shown())
+  recoveryWindow.on("restore", () => windowRecovery.shown())
 
   mainWindow.on("responsive", () => {
     mainWindowUnresponsive = false
@@ -827,17 +884,19 @@ function createWindow(): void {
 
   mainWindow.webContents.on(
     "did-fail-load",
-    (_event, errorCode, errorDescription, validatedURL) => {
+    (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
       clearCloseToTrayPromptState()
       console.error("[Main] Renderer failed to load:", {
         errorCode,
         errorDescription,
         validatedURL
       })
+      windowRecovery.failed(errorCode, isMainFrame)
     }
   )
 
   mainWindow.webContents.on("did-start-loading", () => {
+    if (recoveryWindow.webContents.isLoadingMainFrame()) windowRecovery.loading()
     mainLogForwardingGate.disableForLifecycle()
     nativeClosePrompt.cancel()
     clearCloseToTrayPromptState()
@@ -847,32 +906,15 @@ function createWindow(): void {
     mainLogForwardingGate.disableForLifecycle()
     const hadClosePrompt = closeToTrayPromptOpen
     clearCloseToTrayPromptState()
-    if (hadClosePrompt && mainWindow) requestNativeWindowCloseChoice(mainWindow)
     disposeBrowserServiceForMainWindow(`the renderer process ended with ${details.reason}`)
     console.error("[Main] Renderer process gone:", details)
 
-    // Reload once. A dead renderer leaves the window blank with no way back,
-    // and the process is gone so nothing in it can offer one. `reason` is the
-    // part worth keeping: "oom" and "crashed" look identical on screen and
-    // point at completely different causes.
-    //
-    // Once, not always: a fault that recurs on load would otherwise reload
-    // forever, and each cycle costs the log line that identifies it. A window
-    // that has already been recovered stays blank until the user restarts.
-    if (rendererRecovered) {
-      console.error(
-        `[Main] Renderer process gone again (${details.reason}); not reloading a second time`
-      )
-      return
-    }
-    rendererRecovered = true
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      console.warn(`[Main] Reloading the renderer after ${details.reason}`)
-      mainWindow.webContents.reload()
-    }
+    if (hadClosePrompt) void requestNativeWindowCloseChoice(recoveryWindow)
+    windowRecovery.crashed(details.reason)
   })
 
   mainWindow.webContents.on("did-finish-load", () => {
+    windowRecovery.loaded()
     const version = app.getVersion()
     console.log("version---------------", version)
     console.log("getLocalIP", getLocalIP())
@@ -883,20 +925,7 @@ function createWindow(): void {
     }
   })
 
-  // HMR for renderer based on electron-vite cli
-  if (isDev && process.env["ELECTRON_RENDERER_URL"]) {
-    console.log("local render")
-    mainWindow.loadURL(process.env["ELECTRON_RENDERER_URL"])
-  } else {
-    console.log("url render")
-    // mainWindow.loadFile(join(__dirname, "../renderer/index.html"))
-    const renderUrl = import.meta.env.VITE_RENDER_URL
-    if (!renderUrl) {
-      mainWindow.loadFile(join(__dirname, "../renderer/index.html"))
-    } else {
-      mainWindow.loadURL(renderUrl)
-    }
-  }
+  loadApplicationPage()
 
   mainWindow.on("close", (event) => {
     console.warn("[Main] Main window close requested", {
@@ -1035,7 +1064,7 @@ if (browserNativeMessagingHostLaunch) {
     ensureMainWindowVisible()
   })
 
-  app.whenReady().then(async () => {
+  const startup = app.whenReady().then(async () => {
     configureAgentGraphRecursionLimit(getStoredAgentGraphRecursionLimit())
     configureAgentToolStrategy(getStoredAgentToolStrategy())
     configureWorkflowWorktreeTimeoutMinutes(getStoredWorkflowWorktreeTimeoutMinutes())
@@ -1668,6 +1697,28 @@ if (browserNativeMessagingHostLaunch) {
       }
     })
   })
+  void startup.catch(async (error: unknown) => {
+    mainWindowStartupReady = false
+    console.error("[Main] Application startup failed:", error)
+    flushLogsSync()
+    await showStartupFailure({
+      isAvailable: () => !applicationShutdownRequested && !isAppQuitting(),
+      show: (options) => dialog.showMessageBox(options),
+      restart: () => {
+        app.relaunch()
+        setAppQuitting(true)
+        app.quit()
+      },
+      quit: () => {
+        setAppQuitting(true)
+        app.quit()
+      },
+      reportError: (failure) => {
+        console.error("[Main] Startup recovery failed:", failure)
+        dialog.showErrorBox("CMBDevClaw 启动失败", "请重新打开应用。错误已记录到 main.log。")
+      }
+    })
+  })
 
   app.on("window-all-closed", () => {
     console.warn("[Main] window-all-closed", {
@@ -1685,6 +1736,7 @@ if (browserNativeMessagingHostLaunch) {
   let sessionEndDone = false
   let sessionEndInProgress = false
   app.on("before-quit", (event) => {
+    applicationShutdownRequested = true
     const activeSessions = hasActiveSessions()
     const activeTasks = hasActiveForegroundRuns()
     const pendingTraceReports = hasPendingTraceReports()

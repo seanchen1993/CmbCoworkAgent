@@ -5,6 +5,7 @@ import { join } from "node:path"
 import { DatabaseSync } from "node:sqlite"
 import { afterAll, afterEach, describe, expect, it, vi } from "vitest"
 import { openNativeSqliteDatabase } from "./native-sqlite-adapter"
+import { THREAD_RUNTIME_SCOPE_INDEX, THREAD_RUNTIME_SCOPE_EXPRESSION } from "./thread-runtime-scope-query"
 import {
   FunctionConversationStore,
   type FunctionConversationCommit,
@@ -17,19 +18,34 @@ import {
 // Observe the real native prepare before the adapter/Store capture their method identities.
 // Wrapping prepareReadOne after import would change eligibility and only test the fallback path.
 const sqlProbe = vi.hoisted(() => ({
-  enabled: false, statements: [] as string[], restore: undefined as (() => void) | undefined
+  enabled: false, statements: [] as string[], reads: [] as string[],
+  restore: undefined as (() => void) | undefined
 }))
 vi.mock("node:sqlite", async importOriginal => {
   const actual = await importOriginal<typeof import("node:sqlite")>()
   const prototype = actual.DatabaseSync.prototype
   const descriptor = Object.getOwnPropertyDescriptor(prototype, "prepare")!
   const prepare = prototype.prepare
+  const getDescriptor = Object.getOwnPropertyDescriptor(actual.StatementSync.prototype, "get")!
+  const get = actual.StatementSync.prototype.get
+  const queries = new WeakMap<import("node:sqlite").StatementSync, string>()
   Object.defineProperty(prototype, "prepare", { ...descriptor,
     value: function(this: import("node:sqlite").DatabaseSync, sql: string) {
       if (sqlProbe.enabled && /^\s*SELECT\b/i.test(sql)) sqlProbe.statements.push(sql)
-      return Reflect.apply(prepare, this, [sql])
+      const statement = Reflect.apply(prepare, this, [sql])
+      queries.set(statement, sql)
+      return statement
     } })
-  sqlProbe.restore = () => Object.defineProperty(prototype, "prepare", descriptor)
+  Object.defineProperty(actual.StatementSync.prototype, "get", { ...getDescriptor,
+    value: function(this: import("node:sqlite").StatementSync, ...args: unknown[]) {
+      const sql = queries.get(this)
+      if (sqlProbe.enabled && sql && /^\s*SELECT\b/i.test(sql)) sqlProbe.reads.push(sql)
+      return Reflect.apply(get, this, args)
+    } })
+  sqlProbe.restore = () => {
+    Object.defineProperty(prototype, "prepare", descriptor)
+    Object.defineProperty(actual.StatementSync.prototype, "get", getDescriptor)
+  }
   return actual
 })
 afterAll(() => { sqlProbe.enabled = false; sqlProbe.restore?.() })
@@ -565,31 +581,75 @@ describe("FunctionConversationStore current identity JOIN", () => {
   })
 })
 
-it("compiles one fresh identity SELECT for a genuine current execution", () => {
+it.each([false, true])("executes one fresh joined identity read (scope index: %s)", indexed => {
   const f = fixture()
+  const mutate = (sql: string) => {
+    const enabled = sqlProbe.enabled
+    sqlProbe.enabled = false
+    try { f.db.run(sql) } finally { sqlProbe.enabled = enabled }
+  }
+  if (indexed) f.db.run(`CREATE INDEX ${THREAD_RUNTIME_SCOPE_INDEX}
+    ON threads(thread_id, ${THREAD_RUNTIME_SCOPE_EXPRESSION})`)
   f.reopen()
   sqlProbe.statements = []
+  sqlProbe.reads = []
   sqlProbe.enabled = true
   try {
     f.store.assertCurrent(f.ref)
-    expect(sqlProbe.statements).toHaveLength(1)
-    expect(sqlProbe.statements[0]).toContain("physical_thread_id")
-    expect(sqlProbe.statements[0]).toContain("LEFT JOIN function_conversations")
-    expect(sqlProbe.statements[0]).toContain("LEFT JOIN function_conversation_branches")
+    // Preparing the optional indexed projection and its raw fallback is not two reads.
+    expect(sqlProbe.statements).toHaveLength(2)
+    for (const sql of sqlProbe.statements) {
+      expect(sql).toContain("physical_thread_id")
+      expect(sql).toContain("LEFT JOIN function_conversations")
+      expect(sql).toContain("LEFT JOIN function_conversation_branches")
+      expect(sql).toContain("LEFT JOIN function_logical_sessions")
+    }
+    expect(sqlProbe.statements[0]).not.toContain("INDEXED BY")
+    expect(sqlProbe.statements[1]).toContain(`INDEXED BY ${THREAD_RUNTIME_SCOPE_INDEX}`)
+    const currentQuery = sqlProbe.statements[indexed ? 1 : 0]
+    expect(sqlProbe.reads).toEqual([currentQuery])
+    f.store.assertCurrent(f.ref)
+    expect(sqlProbe.reads).toEqual([currentQuery, currentQuery])
+    expect(sqlProbe.statements).toHaveLength(2)
+
+    for (const [mutation, error] of [
+      ["UPDATE function_logical_sessions SET workspace='changed'", "MODS_CONVERSATION_TARGET_CHANGED"],
+      ["UPDATE threads SET metadata='{}'", "MODS_CONVERSATION_THREAD_CHANGED"]
+    ]) {
+      mutate("SAVEPOINT changed_joined_identity")
+      try {
+        mutate(mutation)
+        sqlProbe.reads = []
+        expect(() => f.store.assertCurrent(f.ref)).toThrow(error)
+        expect(sqlProbe.reads).toEqual([currentQuery])
+      } finally {
+        mutate("ROLLBACK TO changed_joined_identity")
+        mutate("RELEASE changed_joined_identity")
+      }
+      sqlProbe.reads = []
+      expect(() => f.store.assertCurrent(f.ref)).not.toThrow()
+      expect(sqlProbe.reads).toEqual([currentQuery])
+      expect(sqlProbe.statements).toHaveLength(2)
+    }
   } finally { sqlProbe.enabled = false }
   class GenericStore extends FunctionConversationStore {}
   const generic = new GenericStore(f.db)
   sqlProbe.statements = []
+  sqlProbe.reads = []
   sqlProbe.enabled = true
   try {
     generic.assertCurrent(f.ref)
     expect(sqlProbe.statements).toHaveLength(2)
     expect(sqlProbe.statements[0]).toBe("SELECT created_at, metadata FROM threads WHERE thread_id = ?")
     expect(sqlProbe.statements[1]).toContain("FROM function_conversations c JOIN function_logical_sessions")
+    expect(sqlProbe.reads).toEqual(sqlProbe.statements)
+    const originalQueries = [...sqlProbe.statements]
+    mutate("UPDATE function_logical_sessions SET workspace='changed'")
+    sqlProbe.reads = []
+    expect(() => generic.assertCurrent(f.ref)).toThrow("MODS_CONVERSATION_TARGET_CHANGED")
+    expect(sqlProbe.reads).toEqual(originalQueries)
+    expect(sqlProbe.statements).toEqual(originalQueries)
   } finally { sqlProbe.enabled = false }
-  f.db.run("UPDATE function_logical_sessions SET workspace='changed'")
-  expect(() => f.store.assertCurrent(f.ref)).toThrow("MODS_CONVERSATION_TARGET_CHANGED")
-  expect(sqlProbe.statements).toHaveLength(2)
 })
 
 it("keeps a fresh target read after a typed-array row-copy callback", () => {

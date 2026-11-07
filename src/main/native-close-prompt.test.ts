@@ -64,14 +64,18 @@ describe("native close fallback", () => {
           })
       )
       const pending = prompt.request(context)
-      await prompt.request(context)
+      const joined = prompt.request(context)
+      expect(joined).toBe(pending)
+      expect(prompt.pending).toBe(pending)
       expect(context.show).toHaveBeenCalledTimes(1)
       if (kind === "cancel") prompt.cancel()
       else context.isAvailable.mockReturnValue(false)
       finish({ response: 1 })
       await pending
+      await joined
       expect(context.quit).not.toHaveBeenCalled()
       expect(prompt.isOpen).toBe(false)
+      expect(prompt.pending).toBeUndefined()
     }
   )
 

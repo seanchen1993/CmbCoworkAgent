@@ -648,6 +648,7 @@ export class FunctionModsManager {
   private readonly candidateConstruction = new AsyncLocalStorage<SessionEntry | undefined>()
   private readonly startupModels = new FunctionStartupModelRoute()
   private readonly uiResolveQuotas = new Map<string, FunctionUiResolveMainQuota>()
+  private idleUiResourcesTimer?: ReturnType<typeof setTimeout>
   private readonly applying = new Map<string, Promise<void>>()
   private readonly reloadControl = new FunctionConfigurationReloadControl()
   private readonly releasedSessions = new Map<string, RuntimeStopReceipt>()
@@ -2487,7 +2488,10 @@ export class FunctionModsManager {
         return
       }
     }
-    if (this.runtimeReservations.get(key) === reservation) this.runtimeReservations.delete(key)
+    if (this.runtimeReservations.get(key) === reservation) {
+      this.runtimeReservations.delete(key)
+      this.reclaimIdleUiResources()
+    }
   }
 
   private runtimeReleaseBlocker(entry: SessionEntry): string | undefined {
@@ -3790,6 +3794,7 @@ export class FunctionModsManager {
           return // Preserve ordinary close(false) result while keeping the source protected.
         }
         this.retiringEntries.delete(entry)
+        this.reclaimIdleUiResources()
         if (!this.closed) this.publishConfigurationIdle(entry.threadId)
       }
     })
@@ -3797,6 +3802,42 @@ export class FunctionModsManager {
     // A failed physical acknowledgement intentionally retains source references.
     void drained.catch(() => {})
     return drained
+  }
+
+  /** Only physically retired scopes may release their UI accounting containers. */
+  private reclaimIdleUiResources(): void {
+    if (this.closed || (!this.uiResolveQuotas.size && !this.desktopNotifiers.size)) return
+    const occupied = new Set([
+      ...this.sessions.keys(), ...this.pendingSessionBuilds.keys(),
+      ...this.runtimeReservations.keys(), ...this.endingEntries.keys(),
+      ...[...this.candidates, ...this.retiringEntries].map(entry =>
+        JSON.stringify([entry.workspace, entry.threadId]))
+    ])
+    for (const [key, quota] of this.uiResolveQuotas) {
+      // A quarantined lease or unconfirmed host effect must continue consuming capacity.
+      if (occupied.has(key) || quota.stats.leases) continue
+      quota.close()
+      this.uiResolveQuotas.delete(key)
+    }
+    const workspaces = new Set([...occupied].map(key => (JSON.parse(key) as string[])[0]))
+    let retryIn: number | undefined
+    for (const [workspace, notifier] of this.desktopNotifiers) {
+      if (workspaces.has(workspace)) continue
+      const delay = notifier.idleRetirementDelay()
+      if (delay > 0) retryIn = Math.min(retryIn ?? delay, delay)
+      else {
+        notifier.close()
+        this.desktopNotifiers.delete(workspace)
+      }
+    }
+    // One idle-only retry for the manager, never a timer per thread/workspace.
+    if (retryIn !== undefined && !this.idleUiResourcesTimer) {
+      this.idleUiResourcesTimer = setTimeout(() => {
+        this.idleUiResourcesTimer = undefined
+        this.reclaimIdleUiResources()
+      }, retryIn)
+      this.idleUiResourcesTimer.unref()
+    }
   }
 
   private retireRemovedEntry(
@@ -4075,6 +4116,7 @@ export class FunctionModsManager {
           void entry.activity.cleanup(() => this.retireRemovedEntry(entry, false)).catch(() => {})
           this.host.changed(entry.threadId)
         }
+        this.reclaimIdleUiResources()
       }
     })
   }
@@ -4465,6 +4507,7 @@ export class FunctionModsManager {
     } finally {
       if (this.pendingSessionBuilds.get(key) === pending) {
         this.pendingSessionBuilds.delete(key)
+        this.reclaimIdleUiResources()
         this.publishConfigurationIdle(threadId)
       }
     }
@@ -8361,6 +8404,8 @@ export class FunctionModsManager {
   }
 
   close(): void {
+    clearTimeout(this.idleUiResourcesTimer)
+    this.idleUiResourcesTimer = undefined
     for (const client of this.creatorPlanningClients) client.stop()
     this.creatorPlanningClients.clear()
     this.development?.close()

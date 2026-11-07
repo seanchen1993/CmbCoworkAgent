@@ -10,7 +10,7 @@ import type {
   FunctionUiNode
 } from "../../../shared/mods/v2/ui"
 import type { ModJson, ModObject } from "../../../shared/mods/types"
-import { FUNCTION_UI_SITES, type FunctionUiSite } from "../../../shared/mods/v2/sites"
+import { FUNCTION_PASSIVE_DISPLAY_SITES, FUNCTION_UI_SITES, type FunctionUiSite } from "../../../shared/mods/v2/sites"
 import { compileFunctionPlugin } from "./loader"
 import type { UserInputRequest } from "../../types"
 
@@ -35,7 +35,7 @@ it("notifies only the current native site when its drawing dependency is invalid
   expect(changes).toEqual([])
 })
 
-it.each(["UserMessage", "AssistantMessage", "CommandOutput"])(
+it.each(FUNCTION_PASSIVE_DISPLAY_SITES)(
   "invalidates retained %s presentations even while virtual rows have no mounted owner",
   async (component) => {
     const changes: unknown[] = []
@@ -58,7 +58,7 @@ it.each(["UserMessage", "AssistantMessage", "CommandOutput"])(
 it.each([
   "Pane",
   ...FUNCTION_UI_SITES.filter(
-    (component) => !["UserMessage", "AssistantMessage", "CommandOutput"].includes(component)
+    (component) => !FUNCTION_PASSIVE_DISPLAY_SITES.includes(component)
   )
 ])("adds no retained-message notification for non-cacheable %s redraws", async (component) => {
   const changes: unknown[] = []
@@ -184,6 +184,20 @@ it("keeps unrelated transcript generations when an AbovePrompt-only guest invali
 })
 const invalidationTurn = { turnId: "refresh-test", answer: "done", durationMs: 1,
   isAborted: false, reason: "answer" }
+it.each(["ToolUse", "ToolResult", "ToolGroup", "TurnDuration"])(
+  "notifies dormant %s through the public SDK's inferred redraw dependency",
+  async component => {
+    const changes: unknown[] = []
+    const { session } = await fixture(`
+      on("ui.render", {component:${JSON.stringify(component)}}, ($,e,next)=>next(e));
+      on("turn.complete", ($)=>{$.ui.invalidate("ui.render");return {text:"done"}});
+    `, undefined, async value => value, (...args) => changes.push(...args))
+    changes.length = 0
+    await dispatchTest(session, "turn.complete", invalidationTurn)
+    expect(changes).toContain(`site-presentations:${component}`)
+    expect(changes).not.toContain("site-presentations:AssistantMessage")
+  }
+)
 it("redraws all broad dependencies without global clearing and rejects old actions before redraw", async () => {
   const changes: unknown[] = []
   let hold = false

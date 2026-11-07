@@ -14,6 +14,7 @@ import { captureConversationCheckpointRead, readFunctionConversationCheckpointMe
   type FunctionConversationCheckpointMembershipProof } from
   "../checkpointer/function-conversation-checkpoint-membership"
 import { createNativeEventStream } from "./native-event-stream"
+import { nativeConversationFairness } from "./function-conversation-native-fairness"
 import { readFunctionConversationNativeAgentDerivation,
   type FunctionNativeAgentDerivation } from "./native-agent-factory"
 
@@ -33,6 +34,8 @@ interface Host {
     readonly saver: SqlJsSaver
     assertCurrent(): void
     register(messages: readonly BaseMessage[], proof: FunctionConversationCheckpointMembershipProof): void
+    registerAsync?(messages: readonly BaseMessage[], proof: FunctionConversationCheckpointMembershipProof,
+      signal: AbortSignal): void | Promise<void>
   }
   onIntakeNotes?(publication: FunctionConversationIntakePublication): void
 }
@@ -94,8 +97,12 @@ export function wrapFunctionConversationInvocation<T extends object>(graph: T, h
         (config.configurable?.checkpoint_ns ?? "") !== binding.runtimeCheckpointNamespace)
         throw new ModFunctionError("MODS_CONVERSATION_CHECKPOINT_SCOPE")
     }
+    const yieldPhase = nativeConversationFairness(signal, assertCurrent)
     assertCurrent()
     const snapshot = await getState(config)
+    // Validate retained mutable snapshot messages only after yielding.
+    // Keep history registration and its following intake/publication checks together.
+    await yieldPhase()
     assertCurrent()
     const values = snapshot.values
     if (!values || typeof values !== "object" || Array.isArray(values))
@@ -141,7 +148,10 @@ export function wrapFunctionConversationInvocation<T extends object>(graph: T, h
         if (!captured.proof || readFunctionConversationCheckpointMembership(captured.proof,
           host.store, binding.target).snapshotDigest !== recovery.snapshotDigest)
           throw new ModFunctionError("MODS_CONVERSATION_CHECKPOINT_MEMBERSHIP")
-        host.history.register(existing, captured.proof)
+        const registration = host.history.registerAsync
+          ? host.history.registerAsync(existing, captured.proof, signal)
+          : host.history.register(existing, captured.proof)
+        if (registration !== undefined) await registration
         assertCurrent()
       }
     }

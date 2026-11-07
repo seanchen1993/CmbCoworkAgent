@@ -19,6 +19,9 @@ export default defineConfig(
       "**/out",
       // Ignored validation artifacts, downloaded runtimes and unpacked installers.
       "output/**",
+      // Unmodified Vue distribution; checked by its recorded SHA256 and upstream license.
+      "examples/frontend-api-workbench/demo/public/vendor/**",
+      "examples/frontend-api-starter/public/vendor/**",
       // Byte-identical official compatibility fixtures; provenance hashes guard these sources.
       "tests/fixtures/mods-upstream/**",
       "resources/mods/community-originals/**",

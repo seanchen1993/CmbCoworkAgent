@@ -12,7 +12,8 @@ import { serializeFunctionConversationNativeMessage } from "../agent/function-co
 import { functionConversationNoteMessage } from "../agent/mods-conversation"
 import { FunctionConversationDeliveryBridge, FUNCTION_CONVERSATION_CHANNEL,
   type FunctionConversationDeliveryBinding } from "./function-conversation-delivery"
-import { functionConversationCanonicalStamp } from "./function-conversation-checkpoint-membership"
+import { captureCommittedConversationMembership, functionConversationCanonicalStamp,
+  functionConversationMembershipDigest } from "./function-conversation-checkpoint-membership"
 import { SqlJsSaver } from "./sqljs-saver"
 import { CheckpointSnapshotInterpretations } from "../db/checkpoint-snapshot-interpretation"
 
@@ -141,6 +142,77 @@ function fixture() {
 }
 
 describe("exact native checkpoint membership and same AppDB delivery transaction", () => {
+  it.each([1, 4])("keeps every custom admission callback for %i committed messages", async count => {
+    const f = fixture(), kept = Array.from({ length: count }, (_, index) => f.note(`custom-${index}`))
+    const checkpoint = f.checkpoint(count, kept.map(row => f.marked(row)))
+    const cut = f.store.captureCheckpointCanonicalCut(f.target, f.guard)
+    const guard = vi.fn(f.guard)
+    await f.saver.putWithCommitObserver(f.config(), checkpoint, metadata, receipt => {
+      captureCommittedConversationMembership(f.store, f.saver, receipt, {
+        target: f.target, checkpointThreadId: "thread", checkpointIncarnation: f.target.incarnation,
+        cut, frontier: count,
+        stateDigest: functionConversationMembershipDigest(checkpoint.channel_values[FUNCTION_CONVERSATION_CHANNEL]),
+        assertCurrent: guard
+      })
+    })
+    // Initial/final boundary plus both sides of every original readRowAtCut. An arbitrary
+    // callback never becomes a batched admission just because its Store/messages are native.
+    expect(guard).toHaveBeenCalledTimes(2 + 2 * count)
+  })
+
+  it.each([1, 32, 128])("reads %i members with constant source-guard work", async count => {
+    const f = fixture(), natives = Array.from({ length: count }, (_, index) =>
+      new AIMessage({ id: randomUUID(), content: `batch-${index}` }))
+    const kept = natives.map(native => f.keep(native))
+    const checkpoint = f.checkpoint(count, kept.map((row, index) => f.marked(row, natives[index])))
+    await f.bridge().wrap(f.saver).put(f.config(), checkpoint, metadata)
+    const proof = await f.bridge().bindSaver(f.saver).captureRecovery(f.config(checkpoint.id), f.binding())
+    const guard = vi.fn(f.guard)
+    memberSqlProbe.queries = []
+    memberSqlProbe.enabled = true
+    try {
+      expect(f.store.readCheckpointMembers(f.target, proof, kept.map(row => row.uuid), guard)).toEqual(kept)
+      expect(memberSqlProbe.queries.filter(sql =>
+        sql.includes("SELECT * FROM function_conversation_checkpoint_receipts"))).toHaveLength(2)
+    } finally { memberSqlProbe.enabled = false }
+    expect(guard).toHaveBeenCalledTimes(2)
+    expect(() => f.store.readCheckpointMembers(f.target, proof, [randomUUID()], guard))
+      .toThrow("MODS_CONVERSATION_ROW_OUTSIDE_CHECKPOINT")
+  })
+
+  it("authenticates an empty checkpoint-member batch at both boundaries", async () => {
+    const f = fixture(), row = f.note("empty selection")
+    const checkpoint = f.checkpoint(1, [f.marked(row)])
+    await f.bridge().wrap(f.saver).put(f.config(), checkpoint, metadata)
+    const proof = await f.bridge().bindSaver(f.saver).captureRecovery(f.config(checkpoint.id), f.binding())
+    const guard = vi.fn(f.guard)
+    expect(f.store.readCheckpointMembers(f.target, proof, [], guard)).toEqual([])
+    expect(guard).toHaveBeenCalledTimes(2)
+    f.controller.abort(Error("EMPTY_BATCH_RETIRED"))
+    expect(() => f.store.readCheckpointMembers(f.target, proof, [], guard)).toThrow("EMPTY_BATCH_RETIRED")
+  })
+
+  it.each(["member", "row", "cut", "cancel"] as const)(
+    "rejects changed %s during a synchronous multi-member batch", async change => {
+      const f = fixture(), kept = [f.note("first"), f.note("second")]
+      const checkpoint = f.checkpoint(2, kept.map(row => f.marked(row)))
+      await f.bridge().wrap(f.saver).put(f.config(), checkpoint, metadata)
+      const proof = await f.bridge().bindSaver(f.saver).captureRecovery(f.config(checkpoint.id), f.binding())
+      let mutated = false
+      memberSqlProbe.afterGet = sql => {
+        if (mutated || !sql.includes("SELECT ordinal,member_json")) return
+        mutated = true
+        if (change === "member") f.database.run(
+          "UPDATE function_conversation_checkpoint_members SET member_json='{}' WHERE uuid=?", [kept[1].uuid])
+        else if (change === "row") f.database.run(
+          "UPDATE function_conversation_rows SET payload_json='{}' WHERE uuid=?", [kept[1].uuid])
+        else if (change === "cut") f.database.run("UPDATE function_conversations SET next_sequence=1")
+        else f.controller.abort(Error("BATCH_CANCELLED"))
+      }
+      expect(() => f.store.readCheckpointMembers(f.target, proof, kept.map(row => row.uuid), f.guard)).toThrow()
+      expect(mutated).toBe(true)
+    })
+
   it("executes eleven fresh SELECTs with both cut windows per main checkpoint member without removing guards", async () => {
     const f = fixture(), row = f.note("count actual reads")
     const checkpoint = f.checkpoint(1, [f.marked(row)])

@@ -19,6 +19,7 @@ import {
 } from "./native-conversation-run"
 import { ModRuntimeAuthorities } from "./runtime-instance"
 import { matchesThreadIncarnation } from "../services/thread-incarnation"
+import { prepareNativeRunFactsRead } from "./native-conversation-run-facts"
 
 const paths = vi.hoisted(() => ({ database: "" }))
 const fsProbe = vi.hoisted(() => ({ zeroIdentityPaths: new Set<string>(),
@@ -127,6 +128,61 @@ function removeOwnedEmptyWorkspace(path: string): void {
 }
 
 describe("actual native conversation run proof", () => {
+  it.each(["array", "object"] as const)(
+    "does not admit the native transfer reader with an inherited %s index 1 setter", kind => {
+      const f = fixture(), database = appDb.getDb()
+      const prototype = kind === "array" ? Array.prototype : Object.prototype
+      const previous = Object.getOwnPropertyDescriptor(prototype, "1")
+      let calls = 0, read: unknown, error: unknown
+      Object.defineProperty(prototype, "1", { configurable: true,
+        set() { calls++; throw Error("INHERITED_SECOND_BINDING") } })
+      try { read = prepareNativeRunFactsRead(database, f.threadId) }
+      catch (caught) { error = caught }
+      finally {
+        if (previous) Object.defineProperty(prototype, "1", previous)
+        else Reflect.deleteProperty(prototype, "1")
+      }
+      expect(error).toBeUndefined()
+      expect(read).toBeUndefined()
+      expect(calls).toBe(0)
+    })
+
+  it("keeps large identity reads fresh across metadata changes and same-ID replacement", () => {
+    const f = fixture(), database = appDb.getDb()
+    const read = prepareNativeRunFactsRead(database, f.threadId)
+    expect(read).toBeTypeOf("function")
+    const metadata = JSON.stringify({ cmb_thread_incarnation: "first",
+      payload: "汉😀".repeat(20000) })
+    database.run("UPDATE threads SET metadata=? WHERE thread_id=?", [metadata, f.threadId])
+    const first = read!()!
+    expect(first.metadata).toBe(metadata)
+    first.metadata = "caller changed the returned row"
+    expect(read!()!.metadata).toBe(metadata)
+    database.run("UPDATE threads SET created_at=created_at+1 WHERE thread_id=?", [f.threadId])
+    expect(read!()!.created_at).toBe(first.created_at + 1)
+    const next = JSON.stringify({ cmb_thread_incarnation: "second", payload: "new" })
+    database.run("UPDATE threads SET metadata=? WHERE thread_id=?", [next, f.threadId])
+    expect(read!()!.metadata).toBe(next)
+    database.run("DELETE FROM threads WHERE thread_id=?", [f.threadId])
+    expect(read!()).toBeNull()
+    appDb.createThread(f.threadId, { workspacePath: f.path })
+    const recreated = read!()!
+    expect(recreated.metadata).not.toBe(next)
+    expect(matchesThreadIncarnation(recreated, { token: "second",
+      legacyCreatedAt: first.created_at })).toBe(false)
+  })
+
+  it("does not admit an overridden public identity adapter to the fixed native path", () => {
+    const f = fixture(), database = appDb.getDb()
+    const original = database.prepareReadOne
+    const override = vi.spyOn(database, "prepareReadOne").mockImplementation(sql =>
+      original.call(database, sql))
+    try {
+      expect(prepareNativeRunFactsRead(database, f.threadId)).toBeUndefined()
+      expect(override).not.toHaveBeenCalled()
+    } finally { override.mockRestore() }
+  })
+
   const shortPath = `${process.env.SystemDrive ?? "C:"}\\PROGRA~1`
   const hasShortPath = process.platform === "win32" && existsSync(shortPath) &&
     realpathSync(shortPath).toLowerCase() !== realpathSync.native(shortPath).toLowerCase()

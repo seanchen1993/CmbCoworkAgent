@@ -31,9 +31,16 @@ export interface FunctionConversationProjectionSelection {
 type SqlRow = Record<string, NativeSqliteValue>
 const TABLE = "function_conversation_projection_receipts"
 const readers = new WeakMap<NativeSqliteAdapter, Map<string, NativeSqliteReadOne>>()
+const SAME_PAYLOAD = "typeof(payload_json)='text' AND payload_json COLLATE BINARY=?3"
+const CURRENT_PAYLOAD_QUERY = `SELECT branch_id,sequence,receipt_id,input_digest,door,created_at,
+  payload_digest,bytes,CASE WHEN ${SAME_PAYLOAD} THEN 1 ELSE 0 END AS same_payload,
+  CASE WHEN ${SAME_PAYLOAD} THEN NULL ELSE payload_json END AS payload_json
+  FROM function_conversation_rows WHERE conversation_id=?1 AND uuid=?2`
+const includes = String.prototype.includes, isWellFormed = String.prototype.isWellFormed
+const apply = Reflect.apply
 interface PinnedSelection extends FunctionConversationProjectionSelection {
   readonly memo: {
-    payload?: { raw: string, digest: string, bytes: number }
+    payload?: { raw: string, digest: string, bytes: number, transferable: boolean }
     expected?: { columns: FunctionConversationProjectionColumns, value: SqlRow }
   }
 }
@@ -128,11 +135,19 @@ function current(db: NativeSqliteAdapter, selection: PinnedSelection): void {
     fail("MODS_CONVERSATION_THREAD_CHANGED")
   if (selection.row.branchId !== selection.target.branchId || !selection.row.uuid ||
     !selection.row.receiptId || selection.row.sequence < 1) fail()
-  const stored = readOne(db, `SELECT * FROM function_conversation_rows
-    WHERE conversation_id=? AND uuid=?`, [selection.target.conversationId, selection.row.uuid])
+  const previous = selection.memo.payload
+  // Re-read every field, but keep an identical native TEXT value on the SQLite side. This is
+  // only a transfer optimization within this pin; neither digests nor lengths certify equality.
+  const deduplicate = previous?.transferable &&
+    readFunctionConversationNativeSqliteCurrentExecution(db)
+  const stored = deduplicate
+    ? readOne(db, CURRENT_PAYLOAD_QUERY,
+      [selection.target.conversationId, selection.row.uuid, previous.raw])
+    : readOne(db, `SELECT * FROM function_conversation_rows
+      WHERE conversation_id=? AND uuid=?`, [selection.target.conversationId, selection.row.uuid])
+  if (deduplicate && stored?.same_payload === 1) stored.payload_json = previous.raw
   if (!stored || typeof stored.payload_json !== "string") fail()
   // A fresh read is mandatory even within a pin. Same length/digest alone cannot reuse validation.
-  const previous = selection.memo.payload
   const unchanged = previous?.raw === stored.payload_json
   const digest = unchanged ? previous.digest : hash(stored.payload_json)
   const bytes = unchanged ? previous.bytes : Buffer.byteLength(stored.payload_json)
@@ -149,7 +164,11 @@ function current(db: NativeSqliteAdapter, selection: PinnedSelection): void {
       JSON.stringify(values.origin) !== JSON.stringify(selection.row.origin) ||
       JSON.stringify(values.message) !== JSON.stringify(selection.row.message) ||
       JSON.stringify(values.orderAnchor) !== JSON.stringify(selection.row.orderAnchor)) fail()
-    selection.memo.payload = { raw: stored.payload_json, digest, bytes }
+    // Bindings cross UTF-8. Keep the full-read path when a string cannot round-trip exactly or
+    // the runtime cannot cheaply prove it. Capture intrinsics to avoid callback reentry here.
+    const transferable = typeof isWellFormed === "function" &&
+      !apply(includes, stored.payload_json, ["\0"]) && apply(isWellFormed, stored.payload_json, [])
+    selection.memo.payload = { raw: stored.payload_json, digest, bytes, transferable }
   }
 }
 

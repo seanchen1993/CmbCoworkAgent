@@ -5,6 +5,7 @@ import {
 } from "./message-snapshot-schema"
 import { resolve } from "node:path"
 import { randomUUID } from "node:crypto"
+import { nativeConversationFairness } from "../utils/native-conversation-fairness"
 import { sqliteFileSize } from "../utils/sqlite-durable-file"
 import { ensureCheckpointRuntimeProjectionInWorker } from "./runtime-projection-client"
 import {
@@ -2256,6 +2257,7 @@ export class SqlJsSaver extends BaseCheckpointSaver {
         (database && this.db !== database))
         throw new Error("SQLJS_SAVER_COMMIT_RECEIPT_EXPIRED")
     }
+    const yieldPhase = nativeConversationFairness(undefined, () => assertDatabase())
     try {
       assertDatabase()
       await this.initialize()
@@ -2264,6 +2266,10 @@ export class SqlJsSaver extends BaseCheckpointSaver {
       if (!database) throw new Error("SQLJS_SAVER_COMMIT_RECEIPT_EXPIRED")
       const result = await this.putUnlocked(fixedConfig, snapshot, fixedMetadata, assertCurrent,
         onCommitted)
+      // COMMIT and bookkeeping are complete. Keep the gate through the pause and observer;
+      // cancellation after COMMIT must not skip its ACK. Always yield here: a fast put can
+      // precede an expensive observer, whose work is outside this operation's budget check.
+      await yieldPhase(true)
       assertDatabase(database)
       if (result.configurable?.thread_id !== threadId ||
         (result.configurable?.checkpoint_ns ?? "") !== namespace ||

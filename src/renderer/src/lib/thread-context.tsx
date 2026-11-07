@@ -1884,6 +1884,10 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
   const threadHistoryLoadGenerationRef = useRef<Record<string, number>>({})
   const [messageWindowIntentCoordinator] = useState(createThreadMessageWindowIntentCoordinator)
   const firstTranscriptPublishedThreadIdsRef = useRef<Set<string>>(new Set())
+  // Main history and the potentially slow subagent sidecar have independent
+  // restoration lifetimes. Reopening a completed main history must not replace
+  // its selected window merely because the sidecar is still unavailable.
+  const mainHistoryHydratedThreadIdsRef = useRef<Set<string>>(new Set())
   const threadHistoryHydrationAttemptsRef = useRef<Record<string, ThreadHistoryHydrationAttempt>>(
     {}
   )
@@ -3582,6 +3586,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
               // retry succeeds, without blocking first paint or initial scroll.
               if (!isCurrentLoad()) return
               delete subagentTranscriptHydrationRetryCountsRef.current[threadId]
+              updateThreadState(threadId, (state) => (state.dehydrated ? { dehydrated: false } : {}))
               if (subagentTranscriptDirtyIdsRef.current[threadId]?.size) {
                 scheduleSubagentTranscriptsPersist(threadId)
               }
@@ -3600,7 +3605,8 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       foregroundHydrationGeneration,
       mergeHydratedSubagentTranscripts,
       scheduleSubagentTranscriptsPersist,
-      setDehydrationEligibilityRevision
+      setDehydrationEligibilityRevision,
+      updateThreadState
     ]
   )
 
@@ -5971,6 +5977,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       if (isThreadDeletionPending(threadId)) return
       const modelSelectionIntent = modelSelectionIntents.capture(threadId)
       const hadPublishedTranscript = firstTranscriptPublishedThreadIdsRef.current.has(threadId)
+      mainHistoryHydratedThreadIdsRef.current.delete(threadId)
       const transcriptHydrationIntent = messageWindowIntentCoordinator.begin(threadId, "hydrate")
       if (!hadPublishedTranscript) {
         firstTranscriptPublishedThreadIdsRef.current.delete(threadId)
@@ -6733,28 +6740,6 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         persistQueuedMessages(threadId, nextQueuedMessages)
         return { queuedMessages: nextQueuedMessages }
       })
-      const subagentTranscriptResult = await subagentTranscriptLoad
-      if (!isCurrentLoad()) return
-      if (subagentTranscriptResult.succeeded) {
-        persistedSubagentTranscripts = getSubagentTranscriptsFromThreadValues({
-          [SUBAGENT_TRANSCRIPTS_THREAD_VALUE_KEY]: subagentTranscriptResult.rawTranscripts
-        })
-        subagentTranscriptHydrationSucceeded = true
-      } else {
-        console.warn(
-          "[ThreadContext] Failed to hydrate subagent transcripts:",
-          subagentTranscriptResult.error
-        )
-      }
-      if (subagentTranscriptHydrationSucceeded) {
-        delete subagentTranscriptHydrationRetryCountsRef.current[threadId]
-        if (
-          !mergeHydratedSubagentTranscripts(threadId, persistedSubagentTranscripts, loadGeneration)
-        ) {
-          return
-        }
-        updateThreadState(threadId, (state) => (state.dehydrated ? { dehydrated: false } : {}))
-      }
       try {
         const goalUi = await window.api.threads.getGoalState(threadId, { includeEvents: false })
         if (!isCurrentLoad()) return
@@ -6787,14 +6772,6 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             )
           : restoredTranscript
       )
-      if (
-        subagentTranscriptHydrationSucceeded &&
-        subagentTranscriptDirtyIdsRef.current[threadId]?.size
-      ) {
-        scheduleSubagentTranscriptsPersist(threadId)
-      } else if (!subagentTranscriptHydrationSucceeded) {
-        scheduleSubagentTranscriptHydrationRetry(threadId, loadGeneration, foregroundToken)
-      }
       if (!isCurrentLoad()) return
       const pendingGoalSubturnMessages =
         liveStreamAccumulatorsRef.current[threadId]?.pendingGoalSubturnMessages.splice(0) ?? []
@@ -6812,6 +6789,35 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           preserveExistingBaseline: true,
           finalizeCachedSnapshot: !currentStreamData.isLoading
         })
+      }
+      if (!criticalHistoryHydrationFailed) mainHistoryHydratedThreadIdsRef.current.add(threadId)
+
+      const subagentTranscriptResult = await subagentTranscriptLoad
+      if (!isCurrentLoad()) return
+      if (subagentTranscriptResult.succeeded) {
+        persistedSubagentTranscripts = getSubagentTranscriptsFromThreadValues({
+          [SUBAGENT_TRANSCRIPTS_THREAD_VALUE_KEY]: subagentTranscriptResult.rawTranscripts
+        })
+        subagentTranscriptHydrationSucceeded = true
+      } else {
+        console.warn(
+          "[ThreadContext] Failed to hydrate subagent transcripts:",
+          subagentTranscriptResult.error
+        )
+      }
+      if (subagentTranscriptHydrationSucceeded) {
+        delete subagentTranscriptHydrationRetryCountsRef.current[threadId]
+        if (
+          !mergeHydratedSubagentTranscripts(threadId, persistedSubagentTranscripts, loadGeneration)
+        ) {
+          return
+        }
+        updateThreadState(threadId, (state) => (state.dehydrated ? { dehydrated: false } : {}))
+        if (subagentTranscriptDirtyIdsRef.current[threadId]?.size) {
+          scheduleSubagentTranscriptsPersist(threadId)
+        }
+      } else {
+        scheduleSubagentTranscriptHydrationRetry(threadId, loadGeneration, foregroundToken)
       }
     },
     [
@@ -7362,6 +7368,20 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           attempt?.loadGeneration === threadHistoryLoadGenerationRef.current[threadId] &&
           attemptMatchesForeground
         if (
+          state &&
+          !state.historyLoading &&
+          state.historyConversationPresence !== "unknown" &&
+          mainHistoryHydratedThreadIdsRef.current.has(threadId) &&
+          !state.subagentTranscriptBaselineReady &&
+          !subagentTranscriptRetryExhausted &&
+          !attemptIsCurrent
+        ) {
+          const loadGeneration = threadHistoryLoadGenerationRef.current[threadId] ?? 0
+          threadHistoryHydrationAttemptsRef.current[threadId] = { loadGeneration, foregroundToken }
+          scheduleSubagentTranscriptHydrationRetry(threadId, loadGeneration, foregroundToken)
+          return
+        }
+        if (
           (!state ||
             state.historyLoading ||
             state.historyConversationPresence === "unknown" ||
@@ -7711,6 +7731,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       getThreadActions,
       commitThreadStateChanges,
       foregroundHydrationGeneration,
+      scheduleSubagentTranscriptHydrationRetry,
       scheduleSubagentTranscriptsPersist
     ]
   )
@@ -7832,6 +7853,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         (threadHistoryLoadGenerationRef.current[threadId] ?? 0) + 1
       messageWindowIntentCoordinator.cancel(threadId)
       firstTranscriptPublishedThreadIdsRef.current.delete(threadId)
+      mainHistoryHydratedThreadIdsRef.current.delete(threadId)
       delete knownDurableMessageIdsRef.current[threadId]
       delete threadHistoryHydrationAttemptsRef.current[threadId]
       const historyHydrationRetryTimer = threadHistoryHydrationRetryTimersRef.current[threadId]
@@ -8070,6 +8092,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         (threadHistoryLoadGenerationRef.current[threadId] ?? 0) + 1
       messageWindowIntentCoordinator.cancel(threadId)
       firstTranscriptPublishedThreadIdsRef.current.delete(threadId)
+      mainHistoryHydratedThreadIdsRef.current.delete(threadId)
       delete knownDurableMessageIdsRef.current[threadId]
       delete threadHistoryHydrationAttemptsRef.current[threadId]
       delete subagentTranscriptHydrationRetryCountsRef.current[threadId]

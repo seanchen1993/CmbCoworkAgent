@@ -1,0 +1,244 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>青禾商贸 · 订单运营台</title>
+    <link rel="stylesheet" href="/style.css" />
+    <script defer src="/vendor/vue.global.prod.js"></script>
+    <script defer src="/app.js"></script>
+  </head>
+  <body>
+    <div id="app" v-cloak>
+      <aside class="sidebar">
+        <div class="brand">
+          <span class="mark">青</span>
+          <div>青禾商贸<small>QINGHE OPERATIONS</small></div>
+        </div>
+        <div class="nav-label">工作空间</div>
+        <a class="nav active" href="#orders">▦ 订单运营</a
+        ><a class="nav" href="#inventory">▤ 仓库库存</a> <a class="nav" href="#trends">↗ 经营趋势</a
+        ><a class="nav" href="/api-docs" target="_blank" rel="noopener">↗ 接口文档</a>
+        <div class="sidebar-bottom">
+          <span class="dot"></span>本机联调环境<small>所有订单、客户与金额均为虚构数据</small>
+        </div>
+      </aside>
+      <main>
+        <header>
+          <div class="breadcrumb">工作空间 <span>/</span> 订单运营</div>
+          <div class="user" v-if="session">
+            <span class="avatar">陈</span>{{ session.user.name }} · {{ session.user.role }}
+          </div>
+        </header>
+        <section class="heading">
+          <div>
+            <div class="eyebrow">OPERATIONS OVERVIEW</div>
+            <h1>订单运营台</h1>
+            <p>跟进订单履约，查看库存与经营趋势。</p>
+          </div>
+          <span class="environment">Vue 3 · 本地 API</span>
+        </section>
+        <div class="error" v-if="errors.session || errors.overview">
+          {{ errors.session || errors.overview }}
+        </div>
+        <section class="metrics" v-if="overview" aria-label="经营概览">
+          <article>
+            <span>本月销售额</span
+            ><strong data-testid="revenue">¥ {{ Number(overview.revenueCents).toFixed(2) }}</strong
+            ><small>较上月 <b>↑ 12.8%</b></small>
+          </article>
+          <article>
+            <span>本月订单</span><strong>{{ overview.orderCount }}<em>单</em></strong
+            ><small>全部销售渠道</small>
+          </article>
+          <article>
+            <span>待发货</span><strong>{{ overview.pendingShipment }}<em>单</em></strong
+            ><small>请及时安排履约</small>
+          </article>
+          <article>
+            <span>支付转化率</span
+            ><strong>{{ (overview.conversionRate * 100).toFixed(1) }}<em>%</em></strong
+            ><small>近 30 天访问转化</small>
+          </article>
+        </section>
+        <section id="orders" class="card">
+          <div class="card-title">
+            <div>
+              <h2>订单列表</h2>
+              <p>按客户、商品或订单号查找</p>
+            </div>
+            <span class="badge">共 {{ total }} 笔订单</span>
+          </div>
+          <form class="filters" @submit.prevent="search">
+            <input aria-label="搜索订单" v-model="query" placeholder="搜索订单号、客户、商品…" />
+            <select aria-label="订单状态" v-model="status">
+              <option value="">全部状态</option>
+              <option v-for="item in statuses" :key="item.value" :value="item.value">
+                {{ item.label }}
+              </option>
+            </select>
+            <button class="primary" :disabled="loading" type="submit">查询</button>
+          </form>
+          <div v-if="errors.orders" class="error" role="alert">{{ errors.orders }}</div>
+          <div class="table-wrap" :aria-busy="loading">
+            <table>
+              <thead>
+                <tr>
+                  <th>订单号 / 商品</th>
+                  <th>客户</th>
+                  <th>金额（元）</th>
+                  <th>状态</th>
+                  <th>操作</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="order in orders" :key="order.id">
+                  <td>
+                    <strong>{{ order.id }}</strong
+                    ><small>{{ order.product }} × {{ order.quantity }}</small>
+                  </td>
+                  <td>{{ order.customer }}</td>
+                  <td class="amount" data-testid="order-amount">
+                    {{ Number(order.amount || 0).toFixed(2) }}
+                  </td>
+                  <td>
+                    <span class="status" :class="order.status"
+                      >{{ statusLabel(order.status) }}</span
+                    >
+                  </td>
+                  <td>
+                    <button
+                      class="link"
+                      @click="openDetail(order.id)"
+                      :aria-label="'查看 ' + order.id + ' 详情'"
+                    >
+                      查看详情 →
+                    </button>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+            <p class="empty" v-if="!loading && !orders.length && !errors.orders">未找到匹配订单</p>
+          </div>
+          <div class="pagination">
+            <span role="status"
+              >{{ loading ? '正在加载订单…' : '已加载 ' + orders.length + ' 条订单' }}</span
+            >
+            <div>
+              <button :disabled="page <= 1 || loading" @click="movePage(page - 1)">上一页</button
+              ><span data-testid="page-number">第 {{ page }} / {{ totalPages }} 页</span
+              ><button :disabled="page >= totalPages || loading" @click="movePage(page + 1)">
+                下一页
+              </button>
+            </div>
+          </div>
+        </section>
+        <div class="grid">
+          <section id="inventory" class="card">
+            <div class="card-title">
+              <div>
+                <h2>商品库存</h2>
+                <p>仓库可售数量</p>
+              </div>
+              <select aria-label="库存仓库" v-model="warehouse" @change="loadInventory">
+                <option v-for="item in warehouses" :key="item.id" :value="item.id">
+                  {{ item.name }}
+                </option>
+              </select>
+            </div>
+            <div class="error" v-if="errors.warehouses || errors.statuses">
+              {{ errors.warehouses || errors.statuses }}
+            </div>
+            <div class="error" v-if="errors.inventory">{{ errors.inventory }}</div>
+            <ul class="inventory">
+              <li v-for="item in inventory" :key="item.sku">
+                <div><strong>{{ item.name }}</strong><small>{{ item.sku }}</small></div>
+                <span data-testid="stock">{{ item.quantity ?? 0 }} <small>件可售</small></span>
+              </li>
+            </ul>
+          </section>
+          <section id="trends" class="card">
+            <div class="card-title">
+              <div>
+                <h2>近 7 天销售趋势</h2>
+                <p>每日成交金额 · 元</p>
+              </div>
+              <span class="badge green">7 DAYS</span>
+            </div>
+            <div class="error" v-if="errors.trends">{{ errors.trends }}</div>
+            <div class="chart" aria-label="销售趋势柱状图">
+              <div class="bar-column" v-for="point in trends" :key="point.day">
+                <span>{{ money(point.revenueCents) }}</span>
+                <div class="bar-track">
+                  <div
+                    class="bar"
+                    :style="{ height: (point.revenueCents / maxTrend * 100) + '%' }"
+                  ></div>
+                </div>
+                <small>{{ point.day.slice(5) }}</small>
+              </div>
+            </div>
+          </section>
+        </div>
+        <section class="card notifications">
+          <div class="card-title">
+            <div>
+              <h2>业务通知</h2>
+              <p>库存与履约提醒</p>
+            </div>
+            <button @click="loadNotifications">刷新通知</button>
+          </div>
+          <p class="empty" v-if="!notifications.length">暂无通知</p>
+          <p v-for="notice in notifications" :key="notice.id">{{ notice.text }}</p>
+        </section>
+        <footer>
+          <span>{{ initialReady ? '页面数据加载结束' : '正在连接本地服务…' }}</span
+          ><a href="/api-docs" target="_blank" rel="noopener">查看当前接口文档 ↗</a>
+        </footer>
+      </main>
+      <div class="overlay" v-if="detailOpen" @click.self="closeDetail">
+        <section
+          class="drawer"
+          role="dialog"
+          aria-modal="true"
+          aria-label="订单详情"
+          @keydown.esc="closeDetail"
+        >
+          <div class="card-title">
+            <div>
+              <span class="eyebrow">ORDER DETAIL</span>
+              <h2>订单详情</h2>
+            </div>
+            <button @click="closeDetail">关闭详情</button>
+          </div>
+          <p v-if="errors.detail" class="error">{{ errors.detail }}</p>
+          <p v-else-if="!detail">正在加载详情…</p>
+          <template v-if="detail"
+            ><h3>{{ detail.id }}</h3>
+            <span class="status" :class="detail.status">{{ statusLabel(detail.status) }}</span>
+            <dl>
+              <dt>客户</dt>
+              <dd>{{ detail.customer }}</dd>
+              <dt>联系地址</dt>
+              <dd>{{ detail.shippingAddress }}</dd>
+              <dt>下单时间</dt>
+              <dd>
+                {{ new Date(detail.createdAt).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })
+                }}
+              </dd>
+            </dl>
+            <div class="detail-item" v-for="item in detail.items" :key="item.sku">
+              <strong>{{ item.name }}</strong>
+              <p>{{ item.sku }} · {{ item.quantity }} 件 × ¥ {{ money(item.unitPriceCents) }}</p>
+            </div>
+            <div class="detail-total">
+              订单合计
+              <strong data-testid="detail-total">¥ {{ money(detail.totalAmountCents) }}</strong>
+            </div>
+          </template>
+        </section>
+      </div>
+    </div>
+    <noscript>此页面需要启用 JavaScript 才能运行 Vue。</noscript>
+  </body>
+</html>

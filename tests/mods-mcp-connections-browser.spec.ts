@@ -7,12 +7,14 @@ import { Scanner } from "@tailwindcss/oxide"
 import { chromium } from "playwright"
 interface FixtureWindow extends Window {
   fixture: {
+    reads(): number
     calls: unknown[]
     state(value: string): void
     settings(): unknown[]
     reset(): void
     hold(): void
     release(): void
+    failDisconnect(): void
     holdDisconnect(): void
     releaseDisconnect(): void
     incarnation(): void
@@ -31,18 +33,18 @@ async function main() {
       import{McpConnectionStatus}from"./src/renderer/src/components/customize/McpConnectionStatus";
       import{McpPanel}from"./src/renderer/src/components/customize/McpPanel";
       import{useAppStore}from"@/lib/store";
-      let reads=0,held=false,release,holdDisconnect=false,releaseDisconnect;const calls=[];
+      let reads=0,held=false,release,holdDisconnect=false,releaseDisconnect,failDisconnect=false;const calls=[];
       let connection={server:"devclaw-mcp:one",sourceId:"connector-one",configDigest:"digest",
         owner:"owner-one",component:"资料助手",state:"connecting",toolCount:0};
       const view=()=>({workspace:"c:/work",connections:connection?[{...connection}]:[]});
       window.api={mods:{mcpConnections:async()=>{reads++;const value=view();if(held){held=false;await new Promise(r=>release=r)}return value},
-        mcpDisconnect:async(id,input)=>{calls.push(["disconnect",id,input]);const result={workspace:"c:/work",connections:[{...connection,state:"closed"}]};
+        mcpDisconnect:async(id,input)=>{calls.push(["disconnect",id,input]);if(failDisconnect){failDisconnect=false;throw Error("NETWORK_UNCONFIRMED")}const result={workspace:"c:/work",connections:[{...connection,state:"closed"}]};
           if(holdDisconnect){holdDisconnect=false;await new Promise(r=>releaseDisconnect=r)}else connection.state="closed";return result}},
         mcp:{list:async()=>[{id:"connector-one",name:"精确来源",url:"https://private.invalid",enabled:true},
           {id:"unrelated",name:"其他来源",url:"https://other.invalid",enabled:true}]}};
       window.fixture={calls,state:(state)=>{connection={...connection,state,toolCount:state==="connected"?1:0}},
         hold:()=>held=true,release:()=>release?.(),reads:()=>reads,
-        holdDisconnect:()=>holdDisconnect=true,releaseDisconnect:()=>releaseDisconnect?.(),
+        failDisconnect:()=>failDisconnect=true,holdDisconnect:()=>holdDisconnect=true,releaseDisconnect:()=>releaseDisconnect?.(),
         incarnation:()=>{connection={...connection,server:"devclaw-mcp:new-birth",state:"connected"};
           useAppStore.setState({threads:[{thread_id:"thread",created_at:"new-birth",metadata:{workspacePath:"c:/work"}}]})},
         account:()=>useAppStore.setState({accountRevision:2}),
@@ -93,6 +95,25 @@ async function main() {
       body: `<html><head><style>${styles}</style></head><body><div id="root"></div><script>${bundle.outputFiles[0].text}</script></body></html>` }))
     await page.goto("http://127.0.0.1/")
     await page.getByRole("button", { name: "取消连接", exact: true }).waitFor()
+    await page.clock.install()
+    await page.evaluate(() => (window as FixtureWindow).fixture.hold())
+    await page.getByRole("button", { name: "刷新连接状态" }).click()
+    const slowReadCount = await page.evaluate(() => (window as FixtureWindow).fixture.reads())
+    for (let i = 0; i < 8; i++) {
+      await page.clock.fastForward(6000)
+      assert.equal(await page.evaluate(() => (window as FixtureWindow).fixture.reads()), slowReadCount + i)
+      await page.evaluate((iteration) => {
+        const fixture = (window as FixtureWindow).fixture
+        fixture.state(iteration % 2 === 0 ? "connected" : "connecting")
+        fixture.hold()
+        fixture.release()
+      }, i)
+      await page.waitForFunction((expected) => (window as FixtureWindow).fixture.reads() === expected, slowReadCount + i + 1)
+      if (i > 0) await page.getByText(i % 2 === 0 ? "正在连接" : "已连接", { exact: false }).waitFor()
+    }
+    await page.evaluate(() => (window as FixtureWindow).fixture.release())
+    await page.clock.resume()
+    await page.getByRole("button", { name: "取消连接", exact: true }).waitFor()
     await page.getByRole("button", { name: "取消连接", exact: true }).click()
     await page.getByText("已断开", { exact: false }).waitFor()
     assert.deepEqual(await page.evaluate(() => (window as FixtureWindow).fixture.calls), [
@@ -105,6 +126,13 @@ async function main() {
     await page.evaluate(() => (window as FixtureWindow).fixture.state("connected"))
     await page.getByRole("button", { name: "刷新连接状态" }).click()
     await page.getByRole("button", { name: "断开连接", exact: true }).waitFor()
+    await page.evaluate(() => (window as FixtureWindow).fixture.failDisconnect())
+    await page.getByRole("button", { name: "断开连接", exact: true }).click()
+    await page.getByRole("alert").filter({ hasText: "断开结果未确认" }).waitFor()
+    await page.clock.fastForward(6000)
+    assert.match(await page.getByRole("alert").innerText(), /断开结果未确认/)
+    await page.getByRole("button", { name: "刷新连接状态" }).click()
+    await page.getByRole("alert").waitFor({ state: "detached" })
     await page.screenshot({ path: resolve(output, "connected.png"), fullPage: true })
     await page.getByRole("button", { name: "查看来源设置" }).click()
     await page.getByLabel("来源详情").filter({ hasText: "connector-one" }).waitFor()
@@ -116,7 +144,7 @@ async function main() {
       const button = [...document.querySelectorAll("button")].find(item => item.textContent === "断开连接")!
       button.click(); button.click()
     })
-    assert.equal(await page.evaluate(() => (window as FixtureWindow).fixture.calls.length), 2)
+    assert.equal(await page.evaluate(() => (window as FixtureWindow).fixture.calls.length), 3)
     await page.evaluate(() => (window as FixtureWindow).fixture.incarnation())
     await page.getByRole("button", { name: "断开连接", exact: true }).waitFor({ state: "visible" })
     await page.waitForFunction(() => !document.querySelector<HTMLButtonElement>('button[disabled]'))

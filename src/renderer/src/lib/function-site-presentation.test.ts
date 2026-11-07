@@ -39,6 +39,93 @@ const key = (id = "message", text = "raw", width = 800) =>
 
 afterEach(() => vi.useRealTimers())
 
+it("consumes a cached row without copying, renewing or retaining its exact-key admission", () => {
+  vi.useFakeTimers()
+  const cache = new FunctionSitePresentationCache(() => true)
+  const row = "assistant-row"
+  const pending = cache.capture("AssistantMessage", key(), row)
+  cache.save(key(), "AssistantMessage", drawing(), 30, pending)
+  const cached = cache.read(key())!
+  const bytes = budget.stats().bytes
+  vi.advanceTimersByTime(119000)
+  const lease = cache.consumeProgress(key(), cached, row)!
+  expect(lease.presentation).toBe(cached.presentation)
+  expect(lease.current()).toBe(true)
+  expect(cached.current()).toBe(false)
+  expect(pending()).toBe(false)
+  expect(cache.read(key())).toBeNull()
+  expect(cache.consumeProgress(key(), cached, row)).toBeNull()
+  expect(budget.stats().bytes).toBeLessThanOrEqual(bytes)
+  cache.save(key(), "AssistantMessage", drawing(), 30, pending)
+  expect(cache.read(key())).toBeNull()
+  vi.advanceTimersByTime(1001)
+  expect(lease.current()).toBe(false)
+  lease.release()
+  cache.invalidate()
+})
+
+it.each(["component", "projection", "source", "authority", "budget", "shared budget"] as const)(
+  "revokes a consumed presentation on %s without leaking a budget record",
+  reason => {
+    let authorized = true
+    const cache = new FunctionSitePresentationCache(() => authorized)
+    const before = budget.stats().bytes
+    const pane = drawing()
+    cache.saveData(key(), { component: "AssistantMessage", tree: { type: "engine", ref: 0 },
+      nativeContent: pane.nativeContent }, 30, cache.capture("AssistantMessage", key(), "row"), 800, "host-key")
+    const cached = cache.read(key())!
+    const lease = cache.consumeProgress(key(), cached, "row")!
+    expect(cache.matchesProjection(key(), "host-key")).toBe(true)
+    const notified = vi.fn()
+    cache.subscribe(notified, key())
+    const other = new FunctionSitePresentationCache(() => true)
+    if (reason === "component") cache.invalidate("AssistantMessage")
+    if (reason === "projection") cache.invalidateProjection("host-key")
+    if (reason === "source") cache.invalidate()
+    if (reason === "authority") authorized = false
+    if (reason === "budget") {
+      for (let i = 0; i < 100; i++)
+        cache.save(key(String(i)), "AssistantMessage", drawing(), 30, cache.capture("AssistantMessage"))
+    }
+    if (reason === "shared budget") {
+      for (let i = 0; i < 24; i++)
+        other.save(key(String(i)), "AssistantMessage", { ...drawing(),
+          tree: { type: "Text", props: {}, children: ["x".repeat(60000)] } }, 30,
+        other.capture("AssistantMessage"))
+    }
+    expect(lease.current()).toBe(false)
+    expect(cache.consumeProgress(key(), cached, "row")).toBeNull()
+    if (reason !== "authority") expect(notified).toHaveBeenCalled()
+    lease.release()
+    cache.invalidate()
+    other.invalidate()
+    expect(budget.stats().bytes).toBeLessThanOrEqual(before)
+  }
+)
+
+it("refuses a cache observation revoked before consumption", () => {
+  const cache = new FunctionSitePresentationCache(() => true)
+  cache.save(key(), "AssistantMessage", drawing(), 30, cache.capture("AssistantMessage"))
+  const cached = cache.read(key())!
+  cache.invalidate("AssistantMessage")
+  expect(cache.consumeProgress(key(), cached, "row")).toBeNull()
+  cache.invalidate()
+})
+
+it("does not let releasing an old lease delete a newly protected entry under the same key", () => {
+  const cache = new FunctionSitePresentationCache(() => true)
+  cache.save(key(), "AssistantMessage", drawing(), 30, cache.capture("AssistantMessage", key(), "row"))
+  const lease = cache.consumeProgress(key(), cache.read(key())!, "row")!
+  cache.save(key(), "AssistantMessage", drawing(), 30, cache.capture("AssistantMessage", key(), "row"))
+  const fresh = cache.read(key())!
+  expect(lease.current()).toBe(false)
+  lease.release()
+  lease.release()
+  expect(fresh.current()).toBe(true)
+  expect(cache.read(key())?.presentation).toBe(fresh.presentation)
+  cache.invalidate()
+})
+
 it("estimates only neutral cold-row geometry from current same-width message measurements", () => {
   vi.useFakeTimers()
   let authorized = true

@@ -18,19 +18,27 @@ export function useFunctionTurnNotices(
     }
     const reader = createLatestDisplayRead({
       read: () => window.api.mods.turnNotices(threadId),
-      publish: notices => setSnapshot({ threadId, notices }),
+      publish: (notices) => setSnapshot({ threadId, notices }),
       failed: () => setSnapshot({ threadId, notices: [] })
     })
     const refresh = reader.refresh
+    const invalidate = () => {
+      reader.invalidate()
+      setSnapshot(undefined)
+      refresh()
+    }
     const stop = window.api.mods.onCardsChanged((event) => {
-      if (event.threadId === threadId && modUiChangeAffects(event.scope, "records")) refresh()
+      if (event.threadId === threadId && modUiChangeAffects(event.scope, "records")) {
+        if (event.scope === "records") refresh()
+        else invalidate()
+      }
     })
-    window.addEventListener("mods:configuration-changed", refresh)
+    window.addEventListener("mods:configuration-changed", invalidate)
     refresh()
     return () => {
       reader.close()
       stop()
-      window.removeEventListener("mods:configuration-changed", refresh)
+      window.removeEventListener("mods:configuration-changed", invalidate)
     }
   }, [threadId, enabled])
   return enabled && snapshot?.threadId === threadId ? snapshot.notices : EMPTY_NOTICES

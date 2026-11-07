@@ -1,5 +1,7 @@
 import { FunctionSiteLifetime } from "./function-site-lifecycle"
 import { FunctionSitePresentationCache } from "./function-site-presentation"
+import { acquireRetainedFunctionSiteCache, discardRetainedFunctionSiteCache,
+  type RetainedFunctionSiteCache } from "./function-site-retained-cache"
 import { modUiChangeAffects } from "../../../shared/mods/types"
 import { createContext, useContext, useEffect, useCallback, useMemo, useRef, useState, type ComponentType } from "react"
 
@@ -33,10 +35,12 @@ export function useModsChatState(
     presentationCache?: FunctionSitePresentationCache
   }>()
   const presentationCache = useRef<FunctionSitePresentationCache | null>(null)
+  const retainedCache = useRef<RetainedFunctionSiteCache | null>(null)
   // React retries this render before committing. Returning to A creates a fresh identity.
   if (identity.key !== key) {
     // Revocation is conservative even if React abandons this render.
     scopeLifetime.invalidate()
+    retainedCache.current?.revoke()
     setIdentity({ key })
   }
   const requestRef = useRef<{ identity: typeof identity; current: () => boolean } | null>(null)
@@ -49,20 +53,32 @@ export function useModsChatState(
     }
     let live = true
     let generation = 0
+    let retained: RetainedFunctionSiteCache | null = null
     const refresh = () => {
       const revision = ++generation
+      retained?.revoke()
+      retained?.release()
+      retained = null
+      retainedCache.current = null
       presentationCache.current?.invalidate()
       presentationCache.current = null
       // Revocation is synchronous, including before React commits the pending state.
       const ticket = scopeLifetime.capture()
-      const current = () => live && generation === revision && ticket.current()
+      const current = () => live && generation === revision && ticket.current() &&
+        (!retained || retained.current())
       requestRef.current = { identity, current }
       setSnapshot(undefined)
       void (async () => window.api.mods.chatDisplayCapability(threadId, workspace))().then(
         (enabled) => {
           if (!current()) return
-          const cache = typeof window.api.mods.onCardsChanged === "function" && enabled === true
-            ? new FunctionSitePresentationCache(current) : undefined
+          // A remounted view still awaits this fresh host decision. Only passive drawings,
+          // kept under continuous invalidation subscriptions, can survive the previous view.
+          if (enabled === true) retained = acquireRetainedFunctionSiteCache(threadId, workspace)
+          else discardRetainedFunctionSiteCache(threadId)
+          retainedCache.current = retained
+          const cache = retained?.cache ??
+            (typeof window.api.mods.onCardsChanged === "function" && enabled === true
+              ? new FunctionSitePresentationCache(current) : undefined)
           presentationCache.current = cache ?? null
           setSnapshot(typeof enabled === "boolean" ? { identity, enabled, current, presentationCache: cache }
             : { identity, current, error: "无法确认当前显示保护，请重新读取。" })
@@ -79,6 +95,7 @@ export function useModsChatState(
       if (event?.scope !== "schema") refresh()
     })
     const stopPresentations = window.api.mods.onCardsChanged?.((event) => {
+      if (retained) return // The shared cache also observes invalidations while this view is absent.
       if (event.threadId !== threadId) return
       if (event.scope?.startsWith("site-projection:"))
         presentationCache.current?.invalidateProjection(event.scope.slice("site-projection:".length))
@@ -87,6 +104,7 @@ export function useModsChatState(
       else if (modUiChangeAffects(event.scope))
         presentationCache.current?.invalidate()
     })
+    const stopAccount = window.api.models?.onUserInfoChanged?.(refresh)
     window.addEventListener("mods:configuration-changed", refresh)
     refresh()
     return () => {
@@ -95,7 +113,10 @@ export function useModsChatState(
       retryRef.current = () => {}
       stop()
       stopPresentations?.()
-      presentationCache.current?.invalidate()
+      stopAccount?.()
+      if (retained) retained.release()
+      else presentationCache.current?.invalidate()
+      retainedCache.current = null
       presentationCache.current = null
       window.removeEventListener("mods:configuration-changed", refresh)
     }

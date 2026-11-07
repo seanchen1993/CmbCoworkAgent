@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>青禾运营台 · 前端接入实训</title>
+    <link rel="stylesheet" href="/style.css" />
+    <script src="/vendor/vue.global.prod.js"></script>
+  </head>
+  <body>
+    <div id="app" v-cloak>
+      <header>
+        <div>
+          <span class="eyebrow">FRONTEND INTEGRATION LAB</span>
+          <h1>青禾运营台</h1>
+          <p>页面骨架已完成，等待模型接入真实接口并完成交互。</p>
+        </div>
+        <div class="identity">
+          {{ user ? user.user.name + ' · ' + user.user.role + ' · ' + user.workspace :
+          '等待接入用户信息' }} <button @click="refresh" :disabled="loading">重新加载</button>
+        </div>
+      </header>
+      <aside class="guide">
+        <strong>从骨架到可用页面</strong> ① 接入 9 类接口　② 完成筛选、分页与详情　③ 浏览器验证
+        <a href="/api-docs-correct" target="_blank">正确接口文档 ↗</a>
+      </aside>
+      <p v-if="loading" role="status">正在加载数据…</p>
+      <p v-if="error" role="alert" class="error">{{ error }}</p>
+      <section class="metrics">
+        <article>
+          <span>营收 / 元</span
+          ><strong data-testid="revenue"
+            >{{ overview ? '¥ ' + money(overview.revenue) : '—' }}</strong
+          >
+        </article>
+        <article><span>订单总数</span><strong>{{ overview?.orderCount ?? '—' }}</strong></article>
+        <article>
+          <span>待发货</span><strong>{{ overview?.pendingShipment ?? '—' }}</strong>
+        </article>
+        <article>
+          <span>转化率</span
+          ><strong>{{ overview ? overview.conversionPercent + '%' : '—' }}</strong>
+        </article>
+      </section>
+      <main>
+        <section class="card" id="orders">
+          <div class="section-title">
+            <h2>订单管理</h2>
+            <span>{{ total }} 条记录</span>
+          </div>
+          <form @submit.prevent="search" class="filters">
+            <label
+              >搜索订单<input aria-label="搜索订单" v-model="q" placeholder="订单号、客户或商品"
+            /></label>
+            <label
+              >订单状态<select aria-label="订单状态" v-model="status">
+                <option value="">全部状态</option>
+                <option v-for="item in statuses" :value="item.value">{{ item.label }}</option>
+              </select></label
+            >
+            <button type="submit" :disabled="loading || orderLoading">查询</button>
+          </form>
+          <p v-if="orderLoading" role="status">正在加载订单…</p>
+          <table>
+            <thead>
+              <tr>
+                <th>订单 / 客户</th>
+                <th>商品</th>
+                <th>金额 / 元</th>
+                <th>状态</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="order in orders" :key="order.id">
+                <td><b>{{ order.id }}</b><small>{{ order.customer }}</small></td>
+                <td>{{ order.product }}</td>
+                <td data-testid="amount">{{ money(order.amount) }}</td>
+                <td>{{ statuses.find(s => s.value === order.status)?.label || order.status }}</td>
+                <td>
+                  <button @click="showDetail(order.id)" :aria-label="'查看 ' + order.id + ' 详情'">
+                    查看详情
+                  </button>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+          <p v-if="!orders.length && !orderLoading" class="empty">
+            暂无订单数据；完成接口接入后在此展示。
+          </p>
+          <div class="pagination">
+            <button @click="turnPage(-1)" :disabled="page <= 1 || orderLoading">上一页</button
+            ><span>第 {{ page }} / {{ Math.max(1, Math.ceil(total / 3)) }} 页</span
+            ><button @click="turnPage(1)" :disabled="page * 3 >= total || orderLoading">
+              下一页
+            </button>
+          </div>
+        </section>
+        <div class="columns">
+          <section class="card">
+            <div class="section-title">
+              <h2>库存概览</h2>
+              <label
+                >仓库<select aria-label="仓库" v-model="warehouse" @change="changeWarehouse">
+                  <option v-for="item in warehouses" :value="item.id">{{ item.name }}</option>
+                </select></label
+              >
+            </div>
+            <div v-for="row in inventory" class="stock">
+              <span>{{ row.name }}<small>{{ row.sku }}</small></span
+              ><strong :data-testid="'stock-' + row.sku"
+                >可用 {{ row.available }} · 预留 {{ row.reserved }}</strong
+              >
+            </div>
+            <p v-if="!inventory.length" class="empty">等待库存接口接入</p>
+          </section>
+          <section class="card">
+            <h2>近七日营收 / 元</h2>
+            <div v-for="point in trends" class="trend">
+              <span>{{ point.day }}</span
+              ><i :style="{ width: Math.max(2, point.revenue / 5) + 'px' }"></i
+              ><strong>{{ money(point.revenue) }}</strong>
+            </div>
+            <p v-if="!trends.length" class="empty">等待趋势接口接入</p>
+          </section>
+        </div>
+        <section class="card">
+          <h2>通知服务</h2>
+          <p v-if="notificationError" class="error" data-testid="notification-error">
+            {{ notificationError }}
+          </p>
+          <p v-else>通知服务已响应</p>
+          <small>此演示故意返回 503；前端应明确提示，不应展示“暂无通知”。</small>
+        </section>
+      </main>
+      <div v-if="detail" class="overlay" role="dialog" aria-label="订单详情">
+        <section class="card detail">
+          <button @click="detail = null">关闭详情</button>
+          <h2>{{ detail.id }}</h2>
+          <p>{{ detail.customer }}</p>
+          <strong data-testid="detail-total">¥ {{ money(detail.amount) }}</strong>
+          <p>{{ detail.shippingAddress }}</p>
+          <p v-for="item in detail.items">{{ item.name }} × {{ item.quantity }}</p>
+        </section>
+      </div>
+      <footer>本地虚构数据 · Vue 3 免安装示例（非 Vite/SFC 工程） · 仅提供只读 GET 接口</footer>
+    </div>
+    <script type="module" src="/src/app.js"></script>
+  </body>
+</html>

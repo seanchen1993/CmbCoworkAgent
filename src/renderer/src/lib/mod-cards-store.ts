@@ -1,3 +1,4 @@
+import { createLatestDisplayRead } from "./latest-display-read"
 import type { ModCard } from "../../../shared/mods/types"
 import { modUiChangeAffects } from "../../../shared/mods/types"
 
@@ -5,7 +6,6 @@ const empty: ModCard[] = []
 interface Entry {
   cards: ModCard[]
   listeners: Set<() => void>
-  sequence: number
   refresh: () => void
   stop: () => void
 }
@@ -18,51 +18,41 @@ export function subscribeModCards(threadId: string, listener: () => void): () =>
     const value: Entry = {
       cards: empty,
       listeners: new Set(),
-      sequence: 0,
       refresh: () => {},
       stop: () => {}
     }
-    let running = false
-    let pending = false
-    value.refresh = () => {
-      if (running) {
-        pending = true
-        value.sequence++
-        return
-      }
-      running = true
-      const sequence = ++value.sequence
-      void window.api.mods
-        .cards(threadId, "")
-        .then(
-          (cards) => {
-            if (threads.get(threadId) !== value || sequence !== value.sequence) return
-            value.cards = cards
-            for (const notify of value.listeners) notify()
-          },
-          () => {
-            if (threads.get(threadId) !== value || sequence !== value.sequence) return
-            value.cards = empty
-            for (const notify of value.listeners) notify()
-          }
-        )
-        .finally(() => {
-          running = false
-          if (pending && threads.get(threadId) === value) {
-            pending = false
-            value.refresh()
-          }
-        })
+    const publish = (cards: ModCard[]) => {
+      if (threads.get(threadId) !== value) return
+      value.cards = cards
+      for (const notify of value.listeners) notify()
+    }
+    const reader = createLatestDisplayRead({
+      read: () => window.api.mods.cards(threadId, ""),
+      publish,
+      failed: () => publish(empty)
+    })
+    value.refresh = reader.refresh
+    const invalidate = () => {
+      reader.invalidate()
+      publish(empty)
+      reader.refresh()
     }
     const stopCards = window.api.mods.onCardsChanged((event) => {
-      if (event.threadId === threadId && modUiChangeAffects(event.scope, "cards")) value.refresh()
+      if (event.threadId === threadId && modUiChangeAffects(event.scope, "cards")) {
+        if (event.scope === "cards") value.refresh()
+        else invalidate()
+      }
     })
-    const stopConfiguration = window.api.mods.onConfigurationChanged(value.refresh)
-    window.addEventListener("mods:configuration-changed", value.refresh)
+    const stopConfiguration = window.api.mods.onConfigurationChanged((event) => {
+      if (event?.scope === "schema") reader.refresh()
+      else invalidate()
+    })
+    window.addEventListener("mods:configuration-changed", invalidate)
     value.stop = () => {
+      reader.close()
       stopCards()
       stopConfiguration()
-      window.removeEventListener("mods:configuration-changed", value.refresh)
+      window.removeEventListener("mods:configuration-changed", invalidate)
     }
     threads.set(threadId, value)
     value.refresh()

@@ -23,20 +23,105 @@ const capturedMetadata = new WeakMap<
   }
 >()
 
+const metadataGlobal = globalThis
+const metadataJson = JSON,
+  metadataParse = JSON.parse
+const metadataArray = Array,
+  metadataArrayIsArray = Array.isArray
+const metadataDescriptor = Object.getOwnPropertyDescriptor
+const metadataPrototype = Object.getPrototypeOf
+const metadataObjectPrototype = Object.prototype
+const metadataHasOwn = Object.prototype.hasOwnProperty
+const metadataApply = Reflect.apply
+interface MetadataInterpretation {
+  raw: string
+  token: string | null
+  bytes: number
+  next: MetadataInterpretation | null
+}
+let interpretedMetadata: MetadataInterpretation | null = null
+let interpretedCount = 0
+let interpretedBytes = 0
+const MAX_INTERPRETATIONS = 8
+const MAX_INTERPRETATION_BYTES = 1024 * 1024
+const MAX_SINGLE_INTERPRETATION_BYTES = 512 * 1024
+
+function originalMetadataField(
+  descriptor: PropertyDescriptor | undefined,
+  value: unknown
+): boolean {
+  return (
+    !!descriptor &&
+    metadataApply(metadataHasOwn, descriptor, ["value"]) === true &&
+    descriptor.value === value
+  )
+}
+
+export function originalMetadataInterpretation(): boolean {
+  const json = metadataDescriptor(metadataGlobal, "JSON")
+  const parse = metadataDescriptor(metadataJson, "parse")
+  const array = metadataDescriptor(metadataGlobal, "Array")
+  const isArray = metadataDescriptor(metadataArray, "isArray")
+  return (
+    originalMetadataField(json, metadataJson) &&
+    originalMetadataField(parse, metadataParse) &&
+    originalMetadataField(array, metadataArray) &&
+    originalMetadataField(isArray, metadataArrayIsArray) &&
+    metadataPrototype(metadataObjectPrototype) === null &&
+    !metadataDescriptor(metadataObjectPrototype, THREAD_INCARNATION_METADATA_KEY)
+  )
+}
+
+/** Cache only a pure decoding of exact text, never a database row or an authority result. */
+function rememberMetadataInterpretation(raw: string, token: string | null): void {
+  const bytes = 2 * (raw.length + (token?.length ?? 0))
+  if (bytes > MAX_SINGLE_INTERPRETATION_BYTES || !originalMetadataInterpretation()) return
+  interpretedMetadata = { raw, token, bytes, next: interpretedMetadata }
+  interpretedCount++
+  interpretedBytes += bytes
+  while (
+    interpretedMetadata &&
+    (interpretedCount > MAX_INTERPRETATIONS || interpretedBytes > MAX_INTERPRETATION_BYTES)
+  ) {
+    let previous: MetadataInterpretation | null = null
+    let oldest = interpretedMetadata
+    while (oldest.next) {
+      previous = oldest
+      oldest = oldest.next
+    }
+    if (previous) previous.next = null
+    else interpretedMetadata = null
+    interpretedCount--
+    interpretedBytes -= oldest.bytes
+  }
+}
+
 export function createThreadIncarnationToken(): string {
   return randomUUID()
 }
 
 export function readThreadIncarnationToken(rawMetadata: string | null): string | null {
   if (!rawMetadata) return null
+  const ordinary = typeof rawMetadata === "string" && originalMetadataInterpretation()
+  if (ordinary) {
+    let entry = interpretedMetadata
+    while (entry) {
+      if (entry.raw === rawMetadata) return entry.token
+      entry = entry.next
+    }
+  }
+  let token: string | null = null
   try {
     const metadata = JSON.parse(rawMetadata) as unknown
-    if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) return null
-    const value = (metadata as Record<string, unknown>)[THREAD_INCARNATION_METADATA_KEY]
-    return typeof value === "string" && value.length > 0 ? value : null
+    if (metadata && typeof metadata === "object" && !Array.isArray(metadata)) {
+      const value = (metadata as Record<string, unknown>)[THREAD_INCARNATION_METADATA_KEY]
+      token = typeof value === "string" && value.length > 0 ? value : null
+    }
   } catch {
-    return null
+    // Preserve invalid/primitive metadata semantics without retaining an unbounded payload.
   }
+  if (ordinary) rememberMetadataInterpretation(rawMetadata, token)
+  return token
 }
 
 /**

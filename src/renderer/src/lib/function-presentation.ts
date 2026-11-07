@@ -61,6 +61,7 @@ export class FunctionPresentation {
   private revoked = false
   private refreshing = false
   private refreshPending = false
+  private awaitingPresentation = false
   private observer: MutationObserver
   private stopCards: () => void
   private root: () => HTMLElement | null
@@ -106,7 +107,16 @@ export class FunctionPresentation {
     this.stopCards = window.api.mods.onCardsChanged((event) => {
       if (event.threadId !== thread) return
       if (event.scope === "panes") this.schedule()
-      else if (modUiChangeAffects(event.scope, "feedback")) this.refresh()
+      else if (modUiChangeAffects(event.scope, "feedback")) {
+        if (event.scope !== "feedback") {
+          this.request++
+          this.awaitingPresentation = false
+          this.publication = { entries: [] }
+          this.snapshot = { ...this.snapshot, entries: [] }
+          notify(this.thread)
+        }
+        this.refresh()
+      }
     })
     this.refresh()
   }
@@ -122,6 +132,8 @@ export class FunctionPresentation {
   }
   rebind(ready: Promise<unknown>): void {
     if (this.closed) return
+    this.request++
+    this.awaitingPresentation = false
     this.ready = ready
     this.revoked = false
     this.publication = { entries: [] }
@@ -132,12 +144,18 @@ export class FunctionPresentation {
   }
   refresh = (): void => {
     if (this.closed || this.revoked) return
-    this.request++
     this.refreshPending = true
     this.readFeedback()
   }
   private readFeedback(): void {
-    if (this.closed || this.revoked || this.refreshing || !this.refreshPending) return
+    if (
+      this.closed ||
+      this.revoked ||
+      this.refreshing ||
+      this.awaitingPresentation ||
+      !this.refreshPending
+    )
+      return
     const request = this.request
     const ready = this.ready
     this.refreshPending = false
@@ -150,8 +168,11 @@ export class FunctionPresentation {
       })
       .then(
         (value) => {
-          if (!value || this.closed || request !== this.request) return
+          if (!value || this.closed || this.revoked || request !== this.request) return
           this.publication = value
+          // The next native read revokes this receipt. Give layout's report an IPC
+          // acknowledgement before issuing it, not merely one animation frame.
+          this.awaitingPresentation = Boolean(value.receipt)
           const retained = new Set(
             value.entries.filter((row) => row.kind === "toast").map((row) => row.id)
           )
@@ -163,7 +184,8 @@ export class FunctionPresentation {
           }
           this.fingerprint = ""
           notify(this.thread)
-          this.schedule()
+          if (document.visibilityState === "visible") this.schedule()
+          else this.layout()
         },
         (cause) => {
           // Reads are serialized, so this bind cannot supersede its own publisher revision.
@@ -176,6 +198,7 @@ export class FunctionPresentation {
             this.revoked = true
           if (this.closed || (request !== this.request && !this.revoked)) return
           this.publication = { entries: [] }
+          this.awaitingPresentation = false
           this.snapshot = { ...this.snapshot, entries: [] }
           notify(this.thread)
         }
@@ -266,8 +289,22 @@ export class FunctionPresentation {
       })
       // A void ACK may be an ignored old receipt. Retain cancellation until a protected
       // new publication confirms absence; otherwise retry it with that new receipt.
-      .catch(() => {
-        if (!this.closed && this.publication.receipt === receipt) this.refresh()
+      .catch((cause) => {
+        if (this.closed || this.publication.receipt !== receipt) return
+        this.fingerprint = ""
+        if (functionSiteErrorCode(cause) === "MODS_DESKTOP_OWNER") {
+          this.revoked = true
+          this.publication = { entries: [] }
+          this.snapshot = { ...this.snapshot, entries: [] }
+          notify(this.thread)
+        }
+        // A later content/layout event can retry a transient failure. Do not spin
+        // indefinitely when IPC keeps failing without any new user or plugin work.
+      })
+      .finally(() => {
+        if (this.closed || this.revoked || this.publication.receipt !== receipt) return
+        this.awaitingPresentation = false
+        this.readFeedback()
       })
   }
   close(): void {

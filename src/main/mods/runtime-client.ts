@@ -55,23 +55,28 @@ export class ModRuntimeClient {
     this.watchdogTickAt = Date.now()
     this.watchdogGapMs = 0
     this.heartbeatGraceUntil = undefined
-    this.ready = new Promise<void>((resolve, reject) => {
+    let resolveReady!: () => void
+    const ready = new Promise<void>((resolve, reject) => {
+      resolveReady = resolve
       this.rejectReady = reject
+    })
+    // Publish the promise before starting native work: a synchronous fork/setup failure
+    // must retire this attempt, rather than cache a rejected promise forever.
+    this.ready = ready
+    try {
       const child = utilityProcess.fork(this.entry, [], {
         env,
         stdio: "pipe",
         serviceName: "CMB Mods"
       })
       this.child = child
-      child.stdout?.resume()
-      child.stderr?.resume()
       child.on("message", (message: ModRuntimeResponse) => {
         if (this.child !== child) return
         if (message.type === "ready") {
           this.heartbeatAt = Date.now()
           this.heartbeatGraceUntil = undefined
           this.rejectReady = undefined
-          resolve()
+          resolveReady()
         } else {
           this.onMessage(message)
         }
@@ -79,16 +84,22 @@ export class ModRuntimeClient {
       child.on("exit", () => {
         if (this.child === child) this.stop("MODS_HOST_EXITED")
       })
-      child.on("error", () => this.stop("MODS_HOST_ERROR"))
-    })
-    this.timer = setInterval(() => {
-      const now = Date.now()
-      this.watchdogGapMs = now - this.watchdogTickAt
-      this.watchdogTickAt = now
-      if (Date.now() - this.heartbeatAt > 2000) this.recheckHeartbeat()
-    }, 250)
-    this.timer.unref()
-    return this.ready
+      child.on("error", () => {
+        if (this.child === child) this.stop("MODS_HOST_ERROR")
+      })
+      child.stdout?.resume()
+      child.stderr?.resume()
+      this.timer = setInterval(() => {
+        const now = Date.now()
+        this.watchdogGapMs = now - this.watchdogTickAt
+        this.watchdogTickAt = now
+        if (Date.now() - this.heartbeatAt > 2000) this.recheckHeartbeat()
+      }, 250)
+      this.timer.unref()
+    } catch {
+      this.stop("MODS_HOST_ERROR")
+    }
+    return ready
   }
 
   private recheckHeartbeat(): void {

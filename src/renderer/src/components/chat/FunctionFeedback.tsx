@@ -32,21 +32,32 @@ function FunctionFeedbackSurface({
     if (nativePresentation) return
     const reader = createLatestDisplayRead({
       read: () => window.api.mods.feedback(threadId),
-      publish: entries => setSnapshot({ threadId, entries }),
+      publish: (entries) => setSnapshot({ threadId, entries }),
       failed: () => setSnapshot({ threadId, entries: [] })
     })
     const refresh = reader.refresh
+    const invalidate = () => {
+      reader.invalidate()
+      setSnapshot(undefined)
+      refresh()
+    }
     const unsubscribe = window.api.mods.onCardsChanged((event) => {
-      if (event.threadId === threadId && modUiChangeAffects(event.scope, "feedback")) refresh()
+      if (event.threadId === threadId && modUiChangeAffects(event.scope, "feedback")) {
+        if (event.scope === "feedback") refresh()
+        else invalidate()
+      }
     })
-    const stopConfiguration = window.api.mods.onConfigurationChanged(refresh)
-    window.addEventListener("mods:configuration-changed", refresh)
+    const stopConfiguration = window.api.mods.onConfigurationChanged((event) => {
+      if (event?.scope === "schema") refresh()
+      else invalidate()
+    })
+    window.addEventListener("mods:configuration-changed", invalidate)
     refresh()
     return () => {
       reader.close()
       unsubscribe()
       stopConfiguration()
-      window.removeEventListener("mods:configuration-changed", refresh)
+      window.removeEventListener("mods:configuration-changed", invalidate)
     }
   }, [threadId, nativePresentation])
   const entries = (
@@ -59,7 +70,10 @@ function FunctionFeedbackSurface({
     .filter((entry) =>
       requestId ? entry.kind === "notice" && entry.requestId === requestId : entry.kind !== "notice"
     )
-    .filter((entry) => (!presentation.held && (!nativeApi || nativePresentation)) || entry.kind !== "toast")
+    .filter(
+      (entry) =>
+        (!presentation.held && (!nativeApi || nativePresentation)) || entry.kind !== "toast"
+    )
   if (!entries.length) return null
   return (
     <div
@@ -71,32 +85,40 @@ function FunctionFeedbackSurface({
       role="status"
       aria-live="polite"
     >
-      {entries.map((entry) => entry.kind === "toast" && nativePresentation ? (
-        <button key={entry.id} type="button" aria-label="关闭提示"
-          data-feedback-kind="toast" data-feedback-plugin={entry.plugin} data-feedback-id={entry.id}
-          className="flex w-full items-start gap-2 rounded px-1 py-0.5 text-left whitespace-pre-wrap break-words hover:bg-muted hover:text-foreground"
-          onClick={() => dismissFunctionToast(threadId, entry.id)}>
-          <span className="shrink-0 opacity-60">{entry.plugin}</span>
-          <span className="min-w-0 flex-1">{functionUiTextProjection(entry.text, 2000)}</span>
-          <X className="size-3.5 shrink-0" />
-        </button>
-      ) : (
-        <p
-          key={entry.id}
-          data-feedback-kind={entry.kind}
-          data-feedback-plugin={entry.plugin}
-          data-feedback-id={entry.kind === "toast" ? entry.id : undefined}
-          className={
-            requestId ? "truncate" : "flex items-start gap-2 whitespace-pre-wrap break-words"
-          }
-          title={requestId ? entry.text : undefined}
-        >
-          <span className="shrink-0 opacity-60">{entry.plugin}</span>
-          <span className="min-w-0 flex-1">
-            {entry.kind === "notice" ? entry.text : functionUiTextProjection(entry.text, 2000)}
-          </span>
-        </p>
-      ))}
+      {entries.map((entry) =>
+        entry.kind === "toast" && nativePresentation ? (
+          <button
+            key={entry.id}
+            type="button"
+            aria-label="关闭提示"
+            data-feedback-kind="toast"
+            data-feedback-plugin={entry.plugin}
+            data-feedback-id={entry.id}
+            className="flex w-full items-start gap-2 rounded px-1 py-0.5 text-left whitespace-pre-wrap break-words hover:bg-muted hover:text-foreground"
+            onClick={() => dismissFunctionToast(threadId, entry.id)}
+          >
+            <span className="shrink-0 opacity-60">{entry.plugin}</span>
+            <span className="min-w-0 flex-1">{functionUiTextProjection(entry.text, 2000)}</span>
+            <X className="size-3.5 shrink-0" />
+          </button>
+        ) : (
+          <p
+            key={entry.id}
+            data-feedback-kind={entry.kind}
+            data-feedback-plugin={entry.plugin}
+            data-feedback-id={entry.kind === "toast" ? entry.id : undefined}
+            className={
+              requestId ? "truncate" : "flex items-start gap-2 whitespace-pre-wrap break-words"
+            }
+            title={requestId ? entry.text : undefined}
+          >
+            <span className="shrink-0 opacity-60">{entry.plugin}</span>
+            <span className="min-w-0 flex-1">
+              {entry.kind === "notice" ? entry.text : functionUiTextProjection(entry.text, 2000)}
+            </span>
+          </p>
+        )
+      )}
     </div>
   )
 }

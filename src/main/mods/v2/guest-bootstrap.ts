@@ -333,7 +333,9 @@ export const FUNCTION_GUEST_BOOTSTRAP = String.raw`
       } catch(error){return new NativePromise((resolve,reject)=>reject(error));}
     }
     async function ordinaryCall(method, args, callSignal) {
-      if (scope.ended && scope.background && ["ui.log","ui.status","ui.toast"].includes(method))
+      if (scope.ended && scope.background &&
+        (["ui.log","ui.status","ui.toast"].includes(method) ||
+          (method === "ui.invalidate" && args[0] === "ui.render")))
         return resourceCall("resource.ui", {method,args});
       signal.throwIfAborted();
       const state = callSignal === undefined ? undefined : makeFunctionSignal.read(callSignal);

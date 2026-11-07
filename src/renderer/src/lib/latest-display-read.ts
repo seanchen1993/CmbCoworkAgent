@@ -1,10 +1,11 @@
 /** One physical read and one pending refresh per mounted UI owner.
- * Invalidations reject old replies immediately. Closing never starts queued work.
+ * Content refreshes keep making progress; authority invalidations reject old replies.
+ * Closing never starts queued work.
  */
 export function createLatestDisplayRead<T>(options: {
   read(): Promise<T>
   publish(value: T): void
-  failed(): void
+  failed(cause: unknown): void
 }) {
   let live = true
   let running = false
@@ -24,8 +25,8 @@ export function createLatestDisplayRead<T>(options: {
         try {
           const value = await options.read()
           if (live && started === revision) options.publish(value)
-        } catch {
-          if (live && started === revision) options.failed()
+        } catch (cause) {
+          if (live && started === revision) options.failed(cause)
         } finally {
           running = false
           schedule()
@@ -36,9 +37,12 @@ export function createLatestDisplayRead<T>(options: {
   return {
     refresh() {
       if (!live) return
-      revision++
       dirty = true
       schedule()
+    },
+    invalidate() {
+      revision++
+      dirty = false
     },
     close() {
       live = false

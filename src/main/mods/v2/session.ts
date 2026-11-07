@@ -821,6 +821,9 @@ export class FunctionSession {
       },
       clients: this.clients,
       plugins,
+      hasEventHooks: event => plugins.some(plugin => !plugin.guest.stats.disposed &&
+        plugin.guest.registrations.some(registration =>
+          matchesEventPattern(registration.pattern, event))),
       assertLive: () => this.assertLive(),
       changed: (scope) => this.host.uiChanged?.(scope),
       publish: (value) => this.host.publish(value, this.controller.signal),
@@ -981,7 +984,9 @@ export class FunctionSession {
             if (
               method === "resource.ui" &&
               typeof args.method === "string" &&
-              ["ui.log", "ui.status", "ui.toast"].includes(args.method)
+              (["ui.log", "ui.status", "ui.toast"].includes(args.method) ||
+                (args.method === "ui.invalidate" && Array.isArray(args.args) &&
+                  args.args[0] === "ui.render"))
             ) {
               const value = await this.capability(plugin, args.method, args.args, signal, {
                 event: "resource.callback",
@@ -4574,6 +4579,10 @@ export class FunctionSession {
             signal.throwIfAborted()
             this.assertLive(plugin)
             const target = value.event
+            // A completed background operation may redraw, but cannot borrow middleware
+            // rewriting to invalidate configuration, tool descriptions or prompt caches.
+            if (source.event === "resource.callback" && target !== "ui.render")
+              throw new ModFunctionError("MODS_UI_INVALIDATE_UNAVAILABLE")
             if (target === "config.describe") {
               this.configuration.invalidate()
               this.host.configChanged?.("schema")

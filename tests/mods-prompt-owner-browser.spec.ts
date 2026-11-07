@@ -18,7 +18,7 @@ async function main() {
   try {
     await mount(page, `
       const owners=new Map(), changes=new Set(), supports=[], edits=[], sent=[], reported=[];
-      let held, hold=false, fail=false, latestEdit;
+      let held, hold=false, fail=false, latestEdit, firstChanged, changedStable=true;
       window.api.mods.promptAttach=async(thread,id)=>{owners.set(thread,id)};
       window.api.mods.promptDetach=async(thread,id)=>{if(owners.get(thread)===id)owners.delete(thread)};
       window.api.mods.onPromptRequest=()=>()=>{};
@@ -46,7 +46,10 @@ async function main() {
           apply:(revision,value)=>{if(revision!==state.current.revision)return false;change(value);return true},
           onError:value=>reported.push(value)});
         latestEdit=edit;
+        firstChanged??=edit.changed;
+        changedStable=changedStable&&firstChanged===edit.changed;
         window.probe={supports,edits,sent,reported,owners,hold:()=>hold=true,release:()=>held(),
+          changedStable:()=>changedStable,
           enable:setEnabled,thread:setThread,fail:value=>fail=value,
           config:()=>{for(const fn of changes)fn()},
           submit:()=>{
@@ -57,7 +60,7 @@ async function main() {
               .then(()=>({ok:true}),cause=>({ok:false,error:cause.message}));
           }};
         return <textarea aria-label='draft' disabled={!enabled} ref={node} value={text}
-          onChange={event=>{change(event.target.value);edit.changed()}}/>;
+          onChange={event=>{change(event.target.value);firstChanged()}}/>;
       }
       host.render(<Fixture/>);
     `)
@@ -124,6 +127,8 @@ async function main() {
     })
     await page.waitForFunction("document.querySelector('textarea').value==='NEXT DRAFT'")
     scenarios.push("rule discovery validates Enter-time intent while preserving and separately validating the next draft")
+    assert.equal(await page.evaluate("window.probe.changedStable()"), true)
+    scenarios.push("retained changed callback stays stable and dispatches through the current editor across disable/re-enable, rule replacement and thread change")
     assert.deepEqual(errors, [])
     writeFileSync(resolve(output, "report.json"), JSON.stringify({ status: "passed", scenarios, errors }, null, 2))
     console.log("PASS original React prompt editor ownership, replacement, current failure, thread change and cleanup")

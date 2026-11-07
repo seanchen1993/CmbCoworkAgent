@@ -179,7 +179,8 @@ import {
   CHAT_MESSAGE_VIRTUALIZATION_THRESHOLD,
   ChatMessageVirtualList,
   shouldVirtualizeChatMessageList,
-  type ChatApprovalDecision
+  type ChatApprovalDecision,
+  type ChatMessageVirtualInitialLocation
 } from "./ChatMessageVirtualList"
 import { ChatScrollNavigator } from "./ChatScrollNavigator"
 import {
@@ -189,6 +190,7 @@ import {
   type DurableChatSearchPage
 } from "./ChatSearchOverlay"
 import { chatScrollSessionStore, type ChatScrollSessionAnchor } from "./chat-scroll-session-store"
+import { notifyChatDetachedAnchorOwnerReleased } from "./chat-detached-layout-anchor"
 import { WelcomeSkills } from "./WelcomeSkills"
 import { SkillCreateConfirmDialog, type SkillConfirmRequest } from "./SkillCreateConfirmDialog"
 import { UserInputRequestDialog, type UserInputRequestDialogLayout } from "./UserInputRequestDialog"
@@ -247,6 +249,7 @@ import { cleanUserAttachmentContentForDisplay } from "../../../../shared/user-at
 import { resolveChatSearchContiguousTailStart } from "@/lib/chat-search-gap-boundary"
 import { ChatBottomPresentationWait } from "./chat-bottom-presentation-wait"
 import { isChatRowPresented } from "./chat-row-presentation"
+import { observeChatViewportResize } from "./chat-viewport-resize"
 import { createMessageIdIndexLookup, type MessageIdIndexLookup } from "@/lib/lazy-message-id-index"
 import { BuiltinBrowserChip } from "@/features/builtin-browser/BuiltinBrowserChip"
 import { SkillChip } from "@/features/slash-commands/skill-chip"
@@ -4779,6 +4782,18 @@ export function ChatContainer({
     })
   }, [chatScrollUiState.generation, dispatchChatScrollEvent, visibleMessageIndexes.length])
 
+  const handleViewportResizeRef = useRef(handleContentHeightChanged)
+  useLayoutEffect(() => {
+    handleViewportResizeRef.current = handleContentHeightChanged
+  }, [handleContentHeightChanged])
+
+  useLayoutEffect(() => {
+    if (!scrollParent) return
+    // A restored header/composer can shrink the viewport while the list height stays fixed.
+    // Reuse the controller's follow gate, generation checks and coalesced positioning frame.
+    return observeChatViewportResize(scrollParent, () => handleViewportResizeRef.current())
+  }, [scrollParent])
+
   const handleVirtualAtBottomStateChange = useCallback(
     (atBottom: boolean): void => {
       const state = chatScrollStateRef.current
@@ -4831,6 +4846,8 @@ export function ChatContainer({
     const finish = (): void => {
       if (pendingChatSessionAnchorRef.current === anchor) {
         pendingChatSessionAnchorRef.current = null
+        const viewport = getViewport()
+        if (viewport) notifyChatDetachedAnchorOwnerReleased(viewport)
       }
     }
     const restore = (): void => {
@@ -5219,9 +5236,9 @@ export function ChatContainer({
     inputRef.current?.focus()
   }, [threadId])
 
-  const handleDismissError = (): void => {
+  const handleDismissError = useCallback((): void => {
     clearError()
-  }
+  }, [clearError])
 
   const isLocalSkillDisabled = useCallback(
     (skill: SkillMetadata): boolean => !skill.pluginId && isSkillDisabled(skill, disabledSkillIds),
@@ -8271,9 +8288,6 @@ export function ChatContainer({
                       : remoteThread?.status === "interrupted"
                         ? "已中止"
                         : "空闲"
-  const interruptionNotice = hookInterruption
-    ? interruptionNoticeCopy(hookInterruption.event, hookInterruption.action)
-    : null
   const remoteThreadTipLabel = remoteThreadInfo?.kind === "inbox" ? "招乎默认聊天" : "远程会话"
   const handleDismissRemoteThreadTip = useCallback(() => {
     setDismissedRemoteTipThreadIds((current) => {
@@ -8297,120 +8311,155 @@ export function ChatContainer({
       promptComposer.changed()
     inputRef.current?.focus({ preventScroll: true })
   }, [readPromptDraft, applyPromptDraft, promptComposer.changed])
-  const chatMessageListFooter = (
-    <div
-      className="space-y-4 pt-4 pb-4"
-      style={userInputScrollPadding ? { paddingBottom: `${userInputScrollPadding}px` } : undefined}
-    >
-      {!isOrdinaryFlowMetadata(currentThread?.metadata) && <FunctionLogs key={`logs:${threadId}`} threadId={threadId} />}
-      {contextCompaction && <ContextCompactionCard compaction={contextCompaction} />}
-      {modelRetry && (
-        <div className="flex items-start gap-2 rounded-md border border-status-warning/30 bg-status-warning/10 px-3 py-2 text-xs text-status-warning-foreground">
-          <span className="mt-0.5 inline-block size-3 shrink-0 animate-spin rounded-full border-2 border-status-warning border-t-transparent" />
-          <div className="min-w-0 flex-1">
-            {modelRetry.retryKind === "completion_gate" ? (
-              // 门禁那边的 reason 已经是一句完整的话（含 n/m），不要再套一层「模型暂时不可用」：
-              // 这一类重试不是模型不可用，是模型答了但答得不成立。
-              <span>{modelRetry.reason}</span>
-            ) : (
-              <span>
-                模型暂时不可用（{modelRetry.reason}），正在重试 {modelRetry.attempt}/
-                {modelRetry.maxRetries}
-                {modelRetry.delayMs > 0 && (
-                  <>（等待 {Math.round(modelRetry.delayMs / 100) / 10}s）</>
-                )}
-                …
-              </span>
-            )}
-          </div>
-        </div>
-      )}
-      {isLoading && (
-        <div className="space-y-3">
-          {contextCompaction?.phase !== "started" && (
-            <div className="flex items-center gap-2 text-sm">
-              <div className="rainbow-spinner" />
-              <FunctionSite
-                key={`spinner:${threadId}`}
-                threadId={threadId}
-                component="Spinner"
-                facts={functionSpinnerFacts(
-                  THINKING_MESSAGES[thinkingMessageIndex],
-                  liveDisplayMessages.at(-1),
-                  Object.values(toolCallStates).some((tool) => tool.status === "running")
-                )}
-                className="text-sm"
-                renderNative={(safe) => {
-                  const text = `${safe.message ?? safe.word}${safe.suffix}`
-                  return <span className="thinking-shimmer-text" data-text={text}>{text}</span>
-                }}
-                fallback={
-                  <span
-                    className="thinking-shimmer-text"
-                    data-text={THINKING_MESSAGES[thinkingMessageIndex]}
-                  >
-                    {THINKING_MESSAGES[thinkingMessageIndex]}
-                  </span>
-                }
-              />
-              {streamData.isLoading && (
-                <ProcessingDuration key={threadId} startTime={activeTurnStartTime} text="已处理" />
+  // Draft edits share this container with the transcript. Keep the list boundary intact
+  // until a footer fact changes; follow-ups still read the live draft when clicked.
+  const chatMessageListFooter = useMemo(() => {
+    const interruptionNotice = hookInterruption
+      ? interruptionNoticeCopy(hookInterruption.event, hookInterruption.action)
+      : null
+    return (
+      <div
+        className="space-y-4 pt-4 pb-4"
+        style={userInputScrollPadding ? { paddingBottom: `${userInputScrollPadding}px` } : undefined}
+      >
+        {!isOrdinaryFlowMetadata(currentThread?.metadata) && <FunctionLogs key={`logs:${threadId}`} threadId={threadId} />}
+        {contextCompaction && <ContextCompactionCard compaction={contextCompaction} />}
+        {modelRetry && (
+          <div className="flex items-start gap-2 rounded-md border border-status-warning/30 bg-status-warning/10 px-3 py-2 text-xs text-status-warning-foreground">
+            <span className="mt-0.5 inline-block size-3 shrink-0 animate-spin rounded-full border-2 border-status-warning border-t-transparent" />
+            <div className="min-w-0 flex-1">
+              {modelRetry.retryKind === "completion_gate" ? (
+                // 门禁那边的 reason 已经是一句完整的话（含 n/m），不要再套一层「模型暂时不可用」：
+                // 这一类重试不是模型不可用，是模型答了但答得不成立。
+                <span>{modelRetry.reason}</span>
+              ) : (
+                <span>
+                  模型暂时不可用（{modelRetry.reason}），正在重试 {modelRetry.attempt}/
+                  {modelRetry.maxRetries}
+                  {modelRetry.delayMs > 0 && (
+                    <>（等待 {Math.round(modelRetry.delayMs / 100) / 10}s）</>
+                  )}
+                  …
+                </span>
               )}
             </div>
-          )}
-          {todos.length > 0 && <ChatTodos todos={todos} />}
-        </div>
-      )}
-      <ChatFlowTaskCards flow={flowTaskState} onFollowUp={followUpFlowTask} />
-      {workflowRun ? (
-        <WorkflowRunPanel threadId={threadId} run={workflowRun} />
-      ) : isWorkflowModeMetadata(currentThread?.metadata) ? (
-        <WorkflowHistoryButton threadId={threadId} />
-      ) : null}
-      {hookInterruption && !isLoading && (
-        <div className="flex items-start gap-3 rounded-md border border-status-warning/30 bg-status-warning/10 p-4">
-          <ShieldCheck className="mt-0.5 size-5 shrink-0 text-status-warning-foreground" />
-          <div className="min-w-0 flex-1">
-            <div className="text-sm font-medium text-status-warning-foreground">
-              {interruptionNotice?.title}
-            </div>
-            <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-status-warning-foreground/80">
-              <span className="rounded border border-status-warning/40 px-1.5 py-0.5 font-mono">
-                {hookInterruption.event}
-              </span>
-              <span title={HOOK_TIME_ZONE_LABEL}>
-                {formatHookClockTime(hookInterruption.timestamp) ?? "时间无效"}
-              </span>
-            </div>
-            <div className="mt-2 break-words text-sm text-status-warning-foreground">
-              <FunctionSite key={`notice:${threadId}:${hookInterruption.timestamp}`}
-                threadId={threadId} component="InfoNotice" className="contents"
-                renderNative={(safe) => <>{String(safe.text)}{safe.command ? ` ${safe.command}` : ""}</>}
-                facts={{ text: hookInterruption.reason, command: null }} fallback={hookInterruption.reason} />
-            </div>
-            {hookInterruption.systemMessage && (
-              <div className="mt-2 break-words text-xs text-status-warning-foreground/80">
-                {hookInterruption.systemMessage}
+          </div>
+        )}
+        {isLoading && (
+          <div className="space-y-3">
+            {contextCompaction?.phase !== "started" && (
+              <div className="flex items-center gap-2 text-sm">
+                <div className="rainbow-spinner" />
+                <FunctionSite
+                  key={`spinner:${threadId}`}
+                  threadId={threadId}
+                  component="Spinner"
+                  facts={functionSpinnerFacts(
+                    THINKING_MESSAGES[thinkingMessageIndex],
+                    liveDisplayMessages.at(-1),
+                    Object.values(toolCallStates).some((tool) => tool.status === "running")
+                  )}
+                  className="text-sm"
+                  renderNative={(safe) => {
+                    const text = `${safe.message ?? safe.word}${safe.suffix}`
+                    return <span className="thinking-shimmer-text" data-text={text}>{text}</span>
+                  }}
+                  fallback={
+                    <span
+                      className="thinking-shimmer-text"
+                      data-text={THINKING_MESSAGES[thinkingMessageIndex]}
+                    >
+                      {THINKING_MESSAGES[thinkingMessageIndex]}
+                    </span>
+                  }
+                />
+                {streamData.isLoading && (
+                  <ProcessingDuration key={threadId} startTime={activeTurnStartTime} text="已处理" />
+                )}
               </div>
             )}
-            <div className="mt-2 text-xs text-muted-foreground">
-              {interruptionNotice?.explanation}
-            </div>
+            {todos.length > 0 && <ChatTodos todos={todos} />}
           </div>
-          <button
-            onClick={clearHookInterruption}
-            className="shrink-0 rounded p-1 transition-colors hover:bg-status-warning/20"
-            aria-label="Dismiss hook notice"
-          >
-            <X className="size-4 text-muted-foreground" />
-          </button>
-        </div>
-      )}
-      {threadError && !isLoading && (
-        <ChatErrorCard error={threadError} detail={errorDetail} onDismiss={handleDismissError}
-          onReviewComposition={chatWorkbenchAvailable ? () => openClawRecovery(threadId) : undefined} />
-      )}
-    </div>
+        )}
+        <ChatFlowTaskCards flow={flowTaskState} onFollowUp={followUpFlowTask} />
+        {workflowRun ? (
+          <WorkflowRunPanel threadId={threadId} run={workflowRun} />
+        ) : isWorkflowModeMetadata(currentThread?.metadata) ? (
+          <WorkflowHistoryButton threadId={threadId} />
+        ) : null}
+        {hookInterruption && !isLoading && (
+          <div className="flex items-start gap-3 rounded-md border border-status-warning/30 bg-status-warning/10 p-4">
+            <ShieldCheck className="mt-0.5 size-5 shrink-0 text-status-warning-foreground" />
+            <div className="min-w-0 flex-1">
+              <div className="text-sm font-medium text-status-warning-foreground">
+                {interruptionNotice?.title}
+              </div>
+              <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-status-warning-foreground/80">
+                <span className="rounded border border-status-warning/40 px-1.5 py-0.5 font-mono">
+                  {hookInterruption.event}
+                </span>
+                <span title={HOOK_TIME_ZONE_LABEL}>
+                  {formatHookClockTime(hookInterruption.timestamp) ?? "时间无效"}
+                </span>
+              </div>
+              <div className="mt-2 break-words text-sm text-status-warning-foreground">
+                <FunctionSite key={`notice:${threadId}:${hookInterruption.timestamp}`}
+                  threadId={threadId} component="InfoNotice" className="contents"
+                  renderNative={(safe) => <>{String(safe.text)}{safe.command ? ` ${safe.command}` : ""}</>}
+                  facts={{ text: hookInterruption.reason, command: null }} fallback={hookInterruption.reason} />
+              </div>
+              {hookInterruption.systemMessage && (
+                <div className="mt-2 break-words text-xs text-status-warning-foreground/80">
+                  {hookInterruption.systemMessage}
+                </div>
+              )}
+              <div className="mt-2 text-xs text-muted-foreground">
+                {interruptionNotice?.explanation}
+              </div>
+            </div>
+            <button
+              onClick={clearHookInterruption}
+              className="shrink-0 rounded p-1 transition-colors hover:bg-status-warning/20"
+              aria-label="Dismiss hook notice"
+            >
+              <X className="size-4 text-muted-foreground" />
+            </button>
+          </div>
+        )}
+        {threadError && !isLoading && (
+          <ChatErrorCard error={threadError} detail={errorDetail} onDismiss={handleDismissError}
+            onReviewComposition={chatWorkbenchAvailable ? () => openClawRecovery(threadId) : undefined} />
+        )}
+      </div>
+    )
+  }, [
+    userInputScrollPadding,
+    currentThread?.metadata,
+    threadId,
+    contextCompaction,
+    modelRetry,
+    isLoading,
+    thinkingMessageIndex,
+    liveDisplayMessages,
+    toolCallStates,
+    streamData.isLoading,
+    activeTurnStartTime,
+    todos,
+    flowTaskState,
+    followUpFlowTask,
+    workflowRun,
+    hookInterruption,
+    clearHookInterruption,
+    threadError,
+    errorDetail,
+    handleDismissError,
+    chatWorkbenchAvailable
+  ])
+  const initialMessageLocation = useMemo<ChatMessageVirtualInitialLocation | undefined>(
+    () => chatScrollUiState.mode === "initializing" || chatScrollUiState.mode === "following"
+      ? { index: "LAST", align: "end", behavior: "auto" }
+      : undefined,
+    [chatScrollUiState.mode]
   )
 
   return createElement(
@@ -8724,12 +8773,7 @@ export function ChatContainer({
                     customScrollParent={scrollParent}
                     virtuosoRef={virtuosoRef}
                     navigatorVirtualRangeRef={virtualRangeRef}
-                    initialTopMostItemIndex={
-                      chatScrollUiState.mode === "initializing" ||
-                      chatScrollUiState.mode === "following"
-                        ? { index: "LAST", align: "end", behavior: "auto" }
-                        : undefined
-                    }
+                    initialTopMostItemIndex={initialMessageLocation}
                     onInitialVirtualItemsRendered={handleInitialVirtualItemsRendered}
                     onContentHeightChanged={handleContentHeightChanged}
                     onAtBottomStateChange={handleVirtualAtBottomStateChange}

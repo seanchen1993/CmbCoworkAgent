@@ -1,6 +1,13 @@
 import { isChatRowPresented } from "./chat-row-presentation"
 import { CHAT_SCROLL_NAVIGATION_EVENT, isChatScrollNavigationActive } from "./chat-scroll-navigation"
 
+const CHAT_DETACHED_ANCHOR_OWNER_RELEASED = "chat-detached-anchor-owner-released"
+
+/** Capture the restored geometry before another content measurement can change it. */
+export function notifyChatDetachedAnchorOwnerReleased(viewport: HTMLElement): void {
+  viewport.dispatchEvent(new Event(CHAT_DETACHED_ANCHOR_OWNER_RELEASED))
+}
+
 interface DetachedLayoutAnchorOptions {
   root: HTMLElement
   viewport: HTMLElement
@@ -122,6 +129,15 @@ export function installChatDetachedLayoutAnchor({
     captureRequested = true
     schedule()
   }
+  const onOwnerReleased = (): void => {
+    if (!enabled() || performance.now() < wheelIntentUntil || scrollbarPointer !== null) return
+    // A queued capture must not replace this handoff with the next frame's changed geometry.
+    // Keep the size transaction barrier: only this read transfers ownership synchronously.
+    captureRequested = false
+    if (frame !== undefined) cancelAnimationFrame(frame)
+    frame = undefined
+    capture()
+  }
   const onNavigationChange = (): void => {
     // The index write and exact-occurrence centering can span several layout transactions.
     // Rebase only after their owner releases; an earlier reading row must not undo them.
@@ -208,6 +224,7 @@ export function installChatDetachedLayoutAnchor({
   })
   resize.observe(root)
   viewport.addEventListener("scroll", onScroll, { passive: true })
+  viewport.addEventListener(CHAT_DETACHED_ANCHOR_OWNER_RELEASED, onOwnerReleased)
   viewport.addEventListener(CHAT_SCROLL_NAVIGATION_EVENT, onNavigationChange)
   viewport.addEventListener("wheel", onWheelOrTouch, { passive: true })
   viewport.addEventListener("touchmove", onWheelOrTouch, { passive: true })
@@ -216,12 +233,15 @@ export function installChatDetachedLayoutAnchor({
   ownerDocument.addEventListener("pointerup", onPointerEnd, true)
   ownerDocument.addEventListener("pointercancel", onPointerEnd, true)
   ownerDocument.addEventListener("keydown", onKeyDown, true)
+  // A restoration can release before this observer mounts. Acquire its existing geometry now.
+  capture()
   return () => {
     mutation.disconnect()
     resize.disconnect()
     if (frame !== undefined) cancelAnimationFrame(frame)
     if (measurementFrame !== undefined) cancelAnimationFrame(measurementFrame)
     viewport.removeEventListener("scroll", onScroll)
+    viewport.removeEventListener(CHAT_DETACHED_ANCHOR_OWNER_RELEASED, onOwnerReleased)
     viewport.removeEventListener(CHAT_SCROLL_NAVIGATION_EVENT, onNavigationChange)
     viewport.removeEventListener("wheel", onWheelOrTouch)
     viewport.removeEventListener("touchmove", onWheelOrTouch)

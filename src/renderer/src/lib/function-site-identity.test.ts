@@ -3,6 +3,7 @@ import { expect, it, vi } from "vitest"
 vi.mock("../components/tabs/code-highlight-client", () => ({ requestCodeHighlight: vi.fn() }))
 import { functionSiteRowIdentity } from "./function-site-identity"
 import { functionSitePresentationKey } from "./function-site-presentation"
+import { retainsFunctionSitePresentation } from "./function-site-transition"
 import { FunctionCommandOutput } from "../components/chat/FunctionCommandOutput"
 import { FunctionToolGroup } from "../components/chat/FunctionToolGroup"
 import { FunctionToolDisplay } from "../components/chat/FunctionToolDisplay"
@@ -55,31 +56,71 @@ it("keys command output by durable job and output channel, independent of text/s
   ).toBe("large original")
 })
 
-it("preserves exact ordered tool IDs while replacing membership or order changes identity", () => {
+it("anchors a tool group to its first call while retaining only ordered progress", () => {
   const props = {
     threadId: "thread",
     calls: [call("native-one"), call("native-two")],
     blocked: false,
-    isActive: false,
+    isActive: true,
     children: () => null
   }
   const first = siteProps(FunctionToolGroup(props))
-  expect(JSON.parse(first.presentationId!)).toEqual(["ToolGroup", "native-one", "native-two"])
-  const progress = siteProps(
-    FunctionToolGroup({
-      ...props,
-      isActive: true,
-      calls: props.calls.map((row) => ({ ...row, input: { command: "changed" }, output: "later" }))
-    })
+  expect(JSON.parse(first.presentationId!)).toEqual(["ToolGroup", "native-one"])
+  expect((first.facts.calls as ModObject[]).map((row) => row.tool_use_id)).toEqual([
+    "native-one",
+    "native-two"
+  ])
+  const appended = siteProps(
+    FunctionToolGroup({ ...props, calls: [...props.calls, call("native-three")] })
   )
-  expect(progress.presentationId).toBe(first.presentationId)
+  expect(appended.presentationId).toBe(first.presentationId)
+  expect(
+    retainsFunctionSitePresentation("ToolGroup", JSON.stringify(first.facts), appended.facts)
+  ).toBe(true)
+  expect(
+    functionSitePresentationKey(
+      "thread",
+      "ToolGroup",
+      appended.presentationId!,
+      JSON.stringify(appended.facts),
+      800
+    )
+  ).not.toBe(
+    functionSitePresentationKey(
+      "thread",
+      "ToolGroup",
+      first.presentationId!,
+      JSON.stringify(first.facts),
+      800
+    )
+  )
   expect(
     siteProps(FunctionToolGroup({ ...props, calls: [...props.calls].reverse() })).presentationId
   ).not.toBe(first.presentationId)
+  // An unchanged anchor is not permission to retain replaced, removed or reordered rows.
+  for (const calls of [
+    [call("native-one"), call("other")],
+    [call("native-one")],
+    [call("native-one"), call("native-three"), call("native-two")],
+    props.calls.map((row) => ({ ...row, input: { command: "changed" } })),
+    props.calls.map((row) => ({ ...row, output: "later" }))
+  ]) {
+    const changed = siteProps(FunctionToolGroup({ ...props, calls }))
+    expect(changed.presentationId).toBe(first.presentationId)
+    expect(
+      retainsFunctionSitePresentation("ToolGroup", JSON.stringify(first.facts), changed.facts)
+    ).toBe(false)
+  }
+  const native = createElement("div", {}, "Native tool rows")
+  const children = vi.fn(() => native)
   expect(
-    siteProps(FunctionToolGroup({ ...props, calls: [call("native-one"), call("other")] }))
-      .presentationId
-  ).not.toBe(first.presentationId)
+    FunctionToolGroup({
+      ...props,
+      calls: [call("native-one"), call("native-two"), call("native-one")],
+      children
+    })
+  ).toBe(native)
+  expect(children).toHaveBeenCalledExactlyOnceWith(false)
   expect(first.presentationId).not.toContain("PRIVATE")
 })
 

@@ -158,12 +158,13 @@ async function main() {
             refreshGoalUi:asyncNoop}, {get:(target,name)=>target[name]??noop});
           export function useCurrentThread(){return new Proxy({...threadStore(),...actions},{get:(target,name)=>Object.hasOwn(target,name)?target[name]:actions[name]})}
           const stream={submit:(input,config)=>{fixture.sent.push({input,config});return Promise.resolve()},stop:noop};
-          const data={stream,isLoading:false,messages:[],liveMessages:[]};
-          export const useThreadStream=()=>data,useThreadActions=()=>actions;
+          const streamStore=create(()=>({stream,isLoading:false,messages:[],liveMessages:[]}));
+          export const useThreadStream=()=>streamStore(),useThreadActions=()=>actions;
           export const useThreadStateSelector=(_id,select)=>select(threadStore());
           const logs=[],context={getThreadState:()=>threadStore.getState(),getThreadActions:()=>actions,subscribeToHookLogs:()=>noop,getHookLogBuckets:()=>logs};
           export const useThreadContext=()=>context;
           fixture.state=()=>threadStore.getState();fixture.change=change;fixture.actions=actions;
+          fixture.stream=patch=>streamStore.setState(patch);
         `
           }))
           builder.onResolve({ filter: /.*/ }, (args) => {
@@ -182,7 +183,14 @@ async function main() {
             ${leaf.helpers.length ? `export {${leaf.helpers.join(",")}} from ${JSON.stringify(absolute)};` : ""}
             ${leaf.names
               .map((name) =>
-                name === "ChatMessageScrollArea"
+                name === "ChatMessageVirtualList"
+                  // Observe the real container's props at the production memo boundary;
+                  // row rendering costs are covered by the separate history browser suites.
+                  ? `export const ${name}=React.memo(p=>{window.fixture.listRenders=(window.fixture.listRenders??0)+1;
+                      window.fixture.listProps=p;return <section data-fixture-list>{p.footer}</section>});`
+                  : name === "ChatFlowTaskCards"
+                    ? `export const ${name}=p=><button data-fixture-follow-up onClick={()=>p.onFollowUp('FOLLOW_UP')}>Fixture follow-up</button>;`
+                  : name === "ChatMessageScrollArea"
                   ? `export const ${name}=React.forwardRef((p,ref)=><div ref={ref}>{p.children}</div>);`
                   : `export const ${name}=p=>p.fallback??p.children??null;`
               )
@@ -241,6 +249,49 @@ async function main() {
       )
     }
     const checks: string[] = []
+    const paint = () => page.evaluate(() => new Promise((done) =>
+      requestAnimationFrame(() => requestAnimationFrame(done))))
+    await reset()
+    const composer = page.locator("textarea.composer-textarea")
+    await composer.focus()
+    await paint()
+    const idleListRenders = await page.evaluate("window.fixture.listRenders")
+    await composer.pressSequentially("LOCAL_INTERACTION_DRAFT_1", { delay: 5 })
+    await paint()
+    assert.equal(await composer.inputValue(), "LOCAL_INTERACTION_DRAFT_1")
+    assert.equal(await page.evaluate("window.fixture.state().draftInput"), "LOCAL_INTERACTION_DRAFT_1")
+    assert.equal(await page.evaluate("window.fixture.listRenders"), idleListRenders,
+      "Typing must not invalidate the transcript memo boundary")
+    await page.locator("[data-fixture-follow-up]").click()
+    assert.equal(await composer.inputValue(), "LOCAL_INTERACTION_DRAFT_1\n\nFOLLOW_UP",
+      "A retained task callback must append to the current draft")
+    await composer.press("ControlOrMeta+A")
+    await composer.press("Backspace")
+    assert.equal(await page.evaluate("window.fixture.state().draftInput"), "")
+
+    await page.evaluate("window.fixture.change({error:'FRESH_ERROR'})")
+    const errorText = page.getByText("FRESH_ERROR", { exact: true })
+    await errorText.waitFor()
+    assert.equal(await errorText.innerText(), "FRESH_ERROR")
+    await page.getByRole("button", { name: "Dismiss error", exact: true }).click()
+    await errorText.waitFor({ state: "hidden" })
+    assert.equal(await page.evaluate("window.fixture.state().error"), null)
+    await page.evaluate("window.fixture.stream({isLoading:true})")
+    await page.waitForFunction("window.fixture.listProps.isLoading===true")
+    await composer.focus()
+    await paint()
+    const loadingListRenders = await page.evaluate("window.fixture.listRenders")
+    await composer.pressSequentially("LIVE_DRAFT", { delay: 5 })
+    await paint()
+    assert.equal(await composer.inputValue(), "LIVE_DRAFT")
+    assert.equal(await page.evaluate("window.fixture.listRenders"), loadingListRenders,
+      "Typing during a run must retain the footer and initial-location props")
+    await page.locator("[data-fixture-follow-up]").click()
+    assert.equal(await composer.inputValue(), "LIVE_DRAFT\n\nFOLLOW_UP")
+    await page.evaluate("window.fixture.stream({isLoading:false})")
+    await page.waitForFunction("window.fixture.listProps.isLoading===false")
+    checks.push("real ChatContainer idle/loading draft changes preserve the transcript memo boundary; retained follow-up reads current draft; clear and error dismissal stay live")
+
     for (const phase of ["file", "mode", "append"]) {
       await reset(phase)
       const draft = page.locator("textarea.composer-textarea")

@@ -24,13 +24,15 @@ function testTheWholeTreeSitsInsideABoundary(): void {
     "the renderer entry must mount a top-level error boundary"
   )
   const opening = entry.indexOf("<AppErrorBoundary>")
-  const closing = entry.indexOf("</AppErrorBoundary>")
+  const closing = entry.lastIndexOf("</AppErrorBoundary>")
   const app = entry.indexOf("<App />")
   assert(opening >= 0 && closing > opening, "the boundary must wrap, not merely be imported")
   assert(
     app > opening && app < closing,
     "App must render inside the boundary; outside it a throw is still a blank window"
   )
+  const tray = entry.indexOf("<CloseToTrayDialog />")
+  assert(tray > opening && tray < closing, "the tray sibling must also have a recovery boundary")
 
   const boundary = read("src/renderer/src/components/app/AppErrorBoundary.tsx")
   assert(
@@ -60,12 +62,12 @@ function testADeadRendererIsReloadedExactlyOnce(): void {
   )
   assert(handler.length > 0, "the render-process-gone handler must exist")
   assert(
-    handler.includes("reload()"),
-    "a dead renderer leaves a blank window; nothing inside it can recover on its own"
+    handler.includes("windowRecovery.crashed(details.reason)"),
+    "renderer failure must reach the native recovery controller"
   )
   assert(
-    handler.includes("rendererRecovered"),
-    "recovery must be guarded, or a fault that recurs on load reloads forever"
+    main.includes("createWindowFailureRecovery({"),
+    "install the bounded recovery controller for each window"
   )
   assert(
     handler.includes("details.reason"),

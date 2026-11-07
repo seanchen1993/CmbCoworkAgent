@@ -57,7 +57,7 @@ vi.mock("./event-reporter", () => ({
   trackEvent: vi.fn()
 }))
 // repos.json 的写入计数器：一轮扫描该只写一次，与仓库数无关。
-const reposWrites = { count: 0, bytes: 0 }
+const reposWrites = { count: 0, bytes: 0, failNext: false }
 vi.mock("fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof import("fs/promises")>()
   return {
@@ -66,6 +66,10 @@ vi.mock("fs/promises", async (importOriginal) => {
     stat: vi.fn(actual.stat),
     writeFile: async (path: unknown, data: unknown, ...rest: unknown[]) => {
       if (String(path).endsWith("repos.json")) {
+        if (reposWrites.failNext) {
+          reposWrites.failNext = false
+          throw Error("TEST_REGISTRY_WRITE_FAILED")
+        }
         reposWrites.count += 1
         reposWrites.bytes += Buffer.byteLength(String(data))
       }
@@ -86,6 +90,8 @@ import {
   markInAppCommitProcessed,
   scheduleAutoInstallGitHooksForPath,
   syncGitHookEvents,
+  startRegisteredGitHookEventSync,
+  stopRegisteredGitHookEventSync,
   syncRegisteredGitHookEvents
 } from "./git-hook-service"
 
@@ -627,6 +633,64 @@ describe("失效注册清理的缓存和并发保护", () => {
     }
   }
 
+  it("releases a failed global sweep so a later request can recover", async () => {
+    const { repoRoot } = makeRepo()
+    writeRegistry([git(repoRoot, "rev-parse", "--show-toplevel")])
+    reposWrites.failNext = true
+    try {
+      await expect(syncRegisteredGitHookEvents()).rejects.toThrow("TEST_REGISTRY_WRITE_FAILED")
+      await expect(syncRegisteredGitHookEvents()).resolves.toBeUndefined()
+      expect(readRegistry()[0].lastError).toBeUndefined()
+    } finally { reposWrites.failNext = false }
+  })
+
+  it.each([false, true])("coalesces slow global sweeps and cancels pending work on stop=%s", async stop => {
+    const { repoRoot } = makeRepo()
+    const root = git(repoRoot, "rev-parse", "--show-toplevel")
+    writeRegistry([root])
+    const readyPath = join(bucketFor(root), "ready")
+    mkdirSync(readyPath, { recursive: true })
+    const actual = await vi.importActual<typeof import("fs/promises")>("fs/promises")
+    let release!: () => void, reached!: () => void
+    const barrier = new Promise<void>(resolve => { release = resolve })
+    const blocked = new Promise<void>(resolve => { reached = resolve })
+    let reads = 0
+    vi.mocked(readdir).mockImplementation(async (...args) => {
+      if (String(args[0]) === readyPath && ++reads === 1) {
+        reached()
+        await barrier
+      }
+      return actual.readdir(...args)
+    })
+    // Capture the real service interval; run virtual ticks without faking native fs/Git.
+    let tick!: () => void
+    const interval = vi.spyOn(globalThis, "setInterval").mockImplementation(((callback) => {
+      tick = callback as () => void
+      return { unref() {} } as unknown as ReturnType<typeof setInterval>
+    }) as typeof setInterval)
+    const clear = vi.spyOn(globalThis, "clearInterval").mockImplementation(() => {})
+    let completion: Promise<void> | undefined
+    try {
+      startRegisteredGitHookEventSync()
+      await blocked
+      for (let index = 0; index < 20; index++) tick()
+      completion = syncRegisteredGitHookEvents()
+      await new Promise(resolve => setTimeout(resolve, 0))
+      expect(reads).toBe(1)
+      if (stop) stopRegisteredGitHookEventSync()
+      release()
+      await completion
+      expect(reads).toBe(stop ? 1 : 2)
+    } finally {
+      stopRegisteredGitHookEventSync()
+      release()
+      await completion
+      interval.mockRestore()
+      clear.mockRestore()
+      vi.mocked(readdir).mockImplementation(actual.readdir)
+    }
+  })
+
   it("清理已缓存且已消费完的 worktree，下一轮不再写注册表", async () => {
     const { repoRoot } = makeRepo()
     const worktree = missingRoot()
@@ -882,6 +946,8 @@ describe("snapshots whose repository disappeared entirely", () => {
  * installOneHook, and those repositories silently end up with no hooks at all.
  */
 describe("concurrent hook helper installs", () => {
+  // This exercises 20 real repositories and Git/Node subprocess startup, not a
+  // latency budget. Busy Windows runners can exceed Vitest's default five seconds.
   it("installs every repository when many install at once", async () => {
     const template = mkdtempSync(join(tmpdir(), "cmbdevclaw-parallel-template-"))
     tempRoots.push(template)
@@ -909,7 +975,7 @@ describe("concurrent hook helper installs", () => {
       name.endsWith(".tmp")
     )
     expect(leftovers).toEqual([])
-  })
+  }, 15_000)
 })
 
 /**

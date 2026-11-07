@@ -38,7 +38,7 @@ type IdeSettings = {
 }
 
 type ConfigurePreferredIdeResult = {
-  status: "configured" | "needs_executable_path"
+  status: "configured" | "needs_executable_path" | "superseded"
   settings: IdeSettings
   message?: string
 }
@@ -150,6 +150,19 @@ function OpenInIdeButton({
 }: OpenInIdeButtonProps): React.JSX.Element {
   const { settings, loading } = useIdeSettings()
   const [opening, setOpening] = React.useState(false)
+  const [configuring, setConfiguring] = React.useState(false)
+  const configuringRef = React.useRef(false)
+  const configurationAttempt = React.useRef(0)
+  React.useLayoutEffect(() => {
+    // A successful old lookup must not open the file/workspace from an obsolete render.
+    configurationAttempt.current += 1
+    configuringRef.current = false
+    setConfiguring(false)
+    return () => {
+      configurationAttempt.current += 1
+      configuringRef.current = false
+    }
+  }, [filePath, workspacePath, line])
   const [dialogOpen, setDialogOpen] = React.useState(false)
   const [selectedIde, setSelectedIde] = React.useState<SupportedIde>("vscode")
   const [manualExecutablePath, setManualExecutablePath] = React.useState("")
@@ -268,6 +281,10 @@ function OpenInIdeButton({
   )
 
   const handleConfirmPreferredIde = React.useCallback(async (): Promise<void> => {
+    if (configuringRef.current) return
+    configuringRef.current = true
+    const attempt = ++configurationAttempt.current
+    setConfiguring(true)
     const request = {
       preferredIde: selectedIde,
       executablePath: pathInputVisible ? manualExecutablePath.trim() : undefined
@@ -275,13 +292,21 @@ function OpenInIdeButton({
 
     try {
       const result = await window.api.ide.configurePreferred(request)
+      if (attempt !== configurationAttempt.current || result.status === "superseded") return
       applyConfigureResult(result)
       if (result.status === "configured") {
         await openWithIde(selectedIde)
       }
     } catch (error) {
-      setDialogMessage(error instanceof Error ? error.message : "保存 IDE 配置失败")
-      setPathInputVisible(true)
+      if (attempt === configurationAttempt.current) {
+        setDialogMessage(error instanceof Error ? error.message : "保存 IDE 配置失败")
+        setPathInputVisible(true)
+      }
+    } finally {
+      if (attempt === configurationAttempt.current) {
+        configuringRef.current = false
+        setConfiguring(false)
+      }
     }
   }, [applyConfigureResult, manualExecutablePath, openWithIde, pathInputVisible, selectedIde])
 
@@ -309,6 +334,8 @@ function OpenInIdeButton({
       <Dialog
         open={dialogOpen}
         onOpenChange={(nextOpen) => {
+          // Cover Escape, the close icon and the backdrop as well as the Cancel button.
+          if (!nextOpen && (configuringRef.current || opening)) return
           setDialogOpen(nextOpen)
           if (!nextOpen) resetDialogState()
         }}
@@ -324,6 +351,7 @@ function OpenInIdeButton({
           </DialogHeader>
 
           <Select
+            disabled={configuring || opening}
             value={selectedIde}
             onValueChange={(value) => {
               if (!isSupportedIde(value)) return
@@ -345,6 +373,7 @@ function OpenInIdeButton({
 
           {pathInputVisible ? (
             <Input
+              disabled={configuring || opening}
               value={manualExecutablePath}
               onChange={(event) => setManualExecutablePath(event.target.value)}
               placeholder={
@@ -361,14 +390,14 @@ function OpenInIdeButton({
           {dialogMessage ? <p className="text-sm text-muted-foreground">{dialogMessage}</p> : null}
 
           <DialogFooter>
-            <Button variant="outline" onClick={() => setDialogOpen(false)} disabled={opening}>
+            <Button variant="outline" onClick={() => setDialogOpen(false)} disabled={opening || configuring}>
               取消
             </Button>
             <Button
               onClick={() => void handleConfirmPreferredIde()}
-              disabled={opening || (pathInputVisible && manualExecutablePath.trim().length === 0)}
+              disabled={opening || configuring || (pathInputVisible && manualExecutablePath.trim().length === 0)}
             >
-              保存并打开
+              {configuring ? "正在查找 IDE…" : "保存并打开"}
             </Button>
           </DialogFooter>
         </DialogContent>

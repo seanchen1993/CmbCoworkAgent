@@ -36,18 +36,29 @@ export function useModCommands(threadId: string, enabled: boolean, workspace?: s
     setReadyScope(null)
     const reader = createLatestDisplayRead({
       read: () => window.api.mods.commands(threadId),
-      publish: values => { setCommands(values); setReadyScope(catalogScope) },
-      failed: () => { setCommands([]); setReadyScope(null) }
+      publish: (values) => {
+        setCommands(values)
+        setReadyScope(catalogScope)
+      },
+      failed: () => {
+        setCommands([])
+        setReadyScope(null)
+      }
     })
     const refresh = (): void => {
       setReadyScope(null)
       reader.refresh()
     }
+    const invalidate = () => {
+      reader.invalidate()
+      setCommands([])
+      refresh()
+    }
     refresh()
     window.addEventListener("focus", refresh)
-    window.addEventListener("mods:configuration-changed", refresh)
+    window.addEventListener("mods:configuration-changed", invalidate)
     const stop = window.api.mods.onCardsChanged((event) => {
-      if (event.threadId === threadId && modUiChangeAffects(event.scope)) refresh()
+      if (event.threadId === threadId && modUiChangeAffects(event.scope)) invalidate()
     })
     const stopJobs = window.api.mods.onJobsChanged((event) => {
       if (event.threadId === threadId) refresh()
@@ -58,7 +69,7 @@ export function useModCommands(threadId: string, enabled: boolean, workspace?: s
       stop()
       stopJobs()
       window.removeEventListener("focus", refresh)
-      window.removeEventListener("mods:configuration-changed", refresh)
+      window.removeEventListener("mods:configuration-changed", invalidate)
     }
   }, [threadId, enabled, workspace, catalogScope])
   const items = useMemo<SlashCommandItem[]>(

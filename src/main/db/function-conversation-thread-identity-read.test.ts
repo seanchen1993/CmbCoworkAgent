@@ -4,8 +4,12 @@ import { tmpdir } from "node:os"
 import { join, relative, resolve } from "node:path"
 import { DatabaseSync, type StatementSync } from "node:sqlite"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import type { NativeSqliteReadOne } from "./native-sqlite-adapter"
-import { readFunctionConversationThreadIdentityCurrent as readIdentity } from "./function-conversation-thread-identity-read"
+import { openNativeSqliteDatabase, type NativeSqliteReadOne } from "./native-sqlite-adapter"
+import { readFunctionConversationThreadIdentityCurrent as readIdentity,
+  readFunctionConversationThreadIncarnationCurrent as readIncarnation } from
+  "./function-conversation-thread-identity-read"
+import { captureThreadIncarnation, matchesThreadIncarnation } from "../services/thread-incarnation"
+import { THREAD_RUNTIME_SCOPE_EXPRESSION, THREAD_RUNTIME_SCOPE_INDEX } from "./thread-runtime-scope-query"
 
 const paths = vi.hoisted(() => ({ database: "" }))
 vi.mock("../storage", () => ({
@@ -21,6 +25,7 @@ beforeEach(async () => {
   paths.database = join(directory, "actual.sqlite")
   await appDb.initializeDatabase()
 })
+
 afterEach(async () => {
   vi.restoreAllMocks()
   await appDb.closeDatabase()
@@ -318,4 +323,176 @@ describe("fresh complete thread identity queries", () => {
       metadata: row.metadata
     })
   })
+})
+
+describe("native incarnation-only reads preserve the public raw reader", () => {
+  const metadata = () => JSON.stringify({ cmb_thread_incarnation: "current",
+    llmFileHistory: "完整🙂".repeat(20_000), workspacePath: "C:/same/workspace" })
+
+  it("projects only file history while raw fields, current tokens and non-TEXT values stay unchanged", () => {
+    const inserted = insert(metadata()), database = appDb.getDb()
+    const initial = captureThreadIncarnation(readIdentity(database, inserted.threadId)!)
+    expect(readIncarnation(database, inserted.threadId)).toEqual({ created_at: inserted.created_at,
+      metadata: '{"cmb_thread_incarnation":"current","workspacePath":"C:/same/workspace"}' })
+    const changed = captureThreadIncarnation({ created_at: inserted.created_at,
+      metadata: '{"cmb_thread_incarnation":"different"}' })
+    for (const next of [metadata(), null, "{broken", "[]", "42", 123,
+      '{"cmb_thread_incarnation":"first","cmb_thread_incarnation":"current","llmFileHistory":1}',
+      '{"cmb_thread_incarnation":null,"llmFileHistory":1}',
+      new Uint8Array(Buffer.from('{"cmb_thread_incarnation":"current","llmFileHistory":1}')),
+      new Uint8Array([0, 1, 255])]) {
+      database.run("UPDATE threads SET metadata=? WHERE thread_id=?", [next, inserted.threadId])
+      const persisted = database.prepareReadOne(QUERY)([inserted.threadId])
+      const raw = readIdentity(database, inserted.threadId)!
+      const projected = readIncarnation(database, inserted.threadId)!
+      // The production column has TEXT affinity: compare against what SQLite persisted,
+      // not the pre-binding JavaScript number (which SQLite may persist as text).
+      expect(raw).toEqual(persisted)
+      expect(projected.created_at).toBe(raw.created_at)
+      expect(matchesThreadIncarnation(projected, initial)).toBe(matchesThreadIncarnation(raw, initial))
+      expect(matchesThreadIncarnation(projected, changed)).toBe(matchesThreadIncarnation(raw, changed))
+      if (typeof raw.metadata !== "string") expect(projected.metadata).toEqual(raw.metadata)
+    }
+    database.run("UPDATE threads SET created_at=created_at+1,metadata=NULL WHERE thread_id=?",
+      [inserted.threadId])
+    expect(readIncarnation(database, inserted.threadId)?.created_at).toBe(inserted.created_at + 1)
+    database.run("DELETE FROM threads WHERE thread_id=?", [inserted.threadId])
+    expect(readIncarnation(database, inserted.threadId)).toBeNull()
+    insert('{"cmb_thread_incarnation":"recreated"}', inserted.threadId, inserted.created_at)
+    expect(matchesThreadIncarnation(readIncarnation(database, inserted.threadId), initial)).toBe(false)
+  })
+
+  it("preserves actual numeric metadata on a table without TEXT affinity", () => {
+    const database = openNativeSqliteDatabase(join(directory, "untyped.sqlite")).database
+    try {
+      database.run("CREATE TABLE threads(thread_id TEXT PRIMARY KEY, created_at INTEGER, metadata)")
+      database.run(`CREATE INDEX ${THREAD_RUNTIME_SCOPE_INDEX} ON threads(thread_id, ${THREAD_RUNTIME_SCOPE_EXPRESSION})`)
+      database.run("INSERT INTO threads VALUES('untyped',1234,0)")
+      for (const value of [123, 123.25, -4, null, new Uint8Array([0, 1, 255])]) {
+        database.run("UPDATE threads SET metadata=? WHERE thread_id='untyped'", [value])
+        const raw = readIdentity(database, "untyped")!
+        const projected = readIncarnation(database, "untyped")!
+        expect(raw.metadata).toEqual(value)
+        expect(projected).toEqual(raw)
+        if (typeof value === "number") expect(typeof projected.metadata).toBe("number")
+      }
+    } finally { database.close() }
+  })
+
+  it("observes independent writer commits, deletion and same-time recreation through the indexed path", () => {
+    const inserted = insert(metadata()), database = appDb.getDb()
+    const initial = captureThreadIncarnation(readIdentity(database, inserted.threadId)!)
+    expect(readIncarnation(database, inserted.threadId)?.metadata).not.toBe(inserted.metadata)
+    const writer = new DatabaseSync(paths.database)
+    try {
+      const next = JSON.stringify({ cmb_thread_incarnation: "external",
+        llmFileHistory: "新的文件历史".repeat(20000), workspacePath: "C:/external" })
+      writer.prepare("UPDATE threads SET metadata=? WHERE thread_id=?").run(next, inserted.threadId)
+      const actual = readIncarnation(database, inserted.threadId)!
+      expect(actual.metadata).toBe('{"cmb_thread_incarnation":"external","workspacePath":"C:/external"}')
+      expect(matchesThreadIncarnation(actual, initial)).toBe(false)
+      actual.metadata = "caller mutation"
+      expect(readIncarnation(database, inserted.threadId)?.metadata).not.toBe("caller mutation")
+      writer.prepare("DELETE FROM threads WHERE thread_id=?").run(inserted.threadId)
+      expect(readIncarnation(database, inserted.threadId)).toBeNull()
+      writer.prepare("INSERT INTO threads(thread_id,created_at,updated_at,metadata,status,title) VALUES(?,?,?,?,?,?)")
+        .run(inserted.threadId, inserted.created_at, 2000,
+          '{"cmb_thread_incarnation":"external-recreated","llmFileHistory":1}', "idle", "Recreated")
+      const recreated = readIncarnation(database, inserted.threadId)!
+      expect(recreated.created_at).toBe(inserted.created_at)
+      expect(recreated.metadata).toBe('{"cmb_thread_incarnation":"external-recreated"}')
+      expect(matchesThreadIncarnation(recreated, initial)).toBe(false)
+    } finally { writer.close() }
+  })
+
+  it.each([false, true])("honors a cached custom public closure after factory restoration (projected first %s)", projectedFirst => {
+    const inserted = insert(metadata()), database = appDb.getDb()
+    if (projectedFirst) expect(readIncarnation(database, inserted.threadId)?.metadata).not.toBe(inserted.metadata)
+    const prepare = database.prepareReadOne.bind(database)
+    let reads = 0
+    const factory = vi.spyOn(database, "prepareReadOne").mockImplementation(sql => {
+      const read = prepare(sql)
+      return bindings => { reads++; return read(bindings) }
+    })
+    expect(readIdentity(database, inserted.threadId)?.metadata).toBe(inserted.metadata)
+    factory.mockRestore()
+    expect(readIncarnation(database, inserted.threadId)?.metadata).toBe(inserted.metadata)
+    expect(reads).toBe(2)
+    database.run("UPDATE threads SET metadata='latest' WHERE thread_id=?", [inserted.threadId])
+    expect(readIncarnation(database, inserted.threadId)?.metadata).toBe("latest")
+    expect(reads).toBe(3)
+  })
+
+  it("never consults a custom core cache when its own public raw reader is native", () => {
+    const inserted = insert(metadata()), database = appDb.getDb()
+    const prepare = database.prepareReadOne.bind(database)
+    let coreReads = 0
+    const factory = vi.spyOn(database, "prepareReadOne").mockImplementation(sql => {
+      const read = prepare(sql)
+      return bindings => { coreReads++; return read(bindings) }
+    })
+    expect(appDb.getThreadCore(inserted.threadId)?.metadata).toBe(inserted.metadata)
+    factory.mockRestore()
+    expect(readIdentity(database, inserted.threadId)?.metadata).toBe(inserted.metadata)
+    expect(readIncarnation(database, inserted.threadId)?.metadata).not.toBe(inserted.metadata)
+    expect(coreReads).toBe(1)
+    expect(appDb.getThreadCore(inserted.threadId)?.metadata).toBe(inserted.metadata)
+    expect(coreReads).toBe(2)
+  })
+
+  it.each([
+    [RegExp.prototype, "test"], [RegExp.prototype, "exec"], [WeakMap.prototype, "get"],
+    [WeakMap.prototype, "set"], [WeakSet.prototype, "has"], [WeakSet.prototype, "add"],
+    [Reflect, "apply"], [JSON, "parse"]
+  ] as const)("uses complete raw metadata when a dispatch/interpreter field changes (%s.%s)", (owner, key) => {
+    const inserted = insert(metadata()), database = appDb.getDb()
+    readIdentity(database, inserted.threadId)
+    expect(readIncarnation(database, inserted.threadId)?.metadata).not.toBe(inserted.metadata)
+    const original = Object.getOwnPropertyDescriptor(owner, key)!
+    const invoke = Reflect.apply, define = Object.defineProperty
+    let actual: ReturnType<typeof readIncarnation>
+    try {
+      define(owner, key, { ...original, value: function(this: unknown, ...args: unknown[]) {
+        return invoke(original.value, this, args)
+      } })
+      actual = readIncarnation(database, inserted.threadId)
+    } finally { define(owner, key, original) }
+    expect(actual!.metadata).toBe(inserted.metadata)
+    expect(readIncarnation(database, inserted.threadId)?.metadata).not.toBe(inserted.metadata)
+  })
+
+  it("keeps missing and dropped optional indexes on fresh raw reads without changing identity", () => {
+    const inserted = insert(metadata()), database = appDb.getDb()
+    expect(readIncarnation(database, inserted.threadId)?.metadata).not.toBe(inserted.metadata)
+    database.run(`DROP INDEX ${THREAD_RUNTIME_SCOPE_INDEX}`)
+    expect(readIncarnation(database, inserted.threadId)?.metadata).toBe(inserted.metadata)
+    database.run(`CREATE INDEX ${THREAD_RUNTIME_SCOPE_INDEX} ON threads(thread_id, ${THREAD_RUNTIME_SCOPE_EXPRESSION})`)
+    expect(readIncarnation(database, inserted.threadId)?.metadata).toBe(inserted.metadata)
+    database.run("UPDATE threads SET metadata='after index recreation' WHERE thread_id=?", [inserted.threadId])
+    expect(readIncarnation(database, inserted.threadId)?.metadata).toBe("after index recreation")
+  })
+
+  it("handles an initially missing index and rejects closed connections while reopening independently", async () => {
+    const inserted = insert(metadata()), database = appDb.getDb()
+    database.run(`DROP INDEX ${THREAD_RUNTIME_SCOPE_INDEX}`)
+    expect(readIncarnation(database, inserted.threadId)?.metadata).toBe(inserted.metadata)
+    await appDb.closeDatabase()
+    expect(() => readIncarnation(database, inserted.threadId)).toThrow("Database is closed")
+    await appDb.initializeDatabase()
+    expect(readIncarnation(appDb.getDb(), inserted.threadId)?.metadata).not.toBe(inserted.metadata)
+  })
+
+  it.each([undefined, { code: "ERR_SQLITE_ERROR", message: `no such index: ${THREAD_RUNTIME_SCOPE_INDEX}` }])(
+    "propagates custom raw failures unchanged instead of treating them as an optional index (%s)", failure => {
+      const inserted = insert(metadata()), database = appDb.getDb()
+      const factory = vi.spyOn(database, "prepareReadOne").mockImplementation(() => () => { throw failure })
+      let rejected = false, actual: unknown = "not caught"
+      try { readIncarnation(database, inserted.threadId) }
+      catch (error) { rejected = true; actual = error }
+      factory.mockRestore()
+      expect(rejected).toBe(true)
+      expect(actual).toBe(failure)
+      expect(readIncarnation(database, inserted.threadId)?.metadata).not.toBe(inserted.metadata)
+    }
+  )
 })

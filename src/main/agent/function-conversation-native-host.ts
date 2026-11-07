@@ -949,11 +949,13 @@ export function createFunctionConversationNativeHost(input: {
     },
     retainInput: nativeInput.retainInput,
     registerHistorical: projection.registerHistorical,
+    registerHistoricalAsync: projection.registerHistoricalAsync,
     captureReturnMessageSource: projection.captureReturnMessageSource,
     registerIntake: projection.registerIntake,
     close,
     async whenDrained() {
       const drains = [
+        () => projection.whenDrained(),
         ...nativeNodes.map(node => () => node.whenDrained()),
         ...[...active].map(keeper => () => keeper.whenDrained()),
         ...[...toolLedgers].map(tools => () => tools.whenDrained()),

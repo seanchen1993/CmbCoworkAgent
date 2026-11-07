@@ -10,11 +10,11 @@ initializeThemePreference()
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   // <React.StrictMode>
-  <>
+  <AppErrorBoundary>
     <AppErrorBoundary>
       <App />
     </AppErrorBoundary>
     <CloseToTrayDialog />
-  </>
+  </AppErrorBoundary>
   // </React.StrictMode>
 )

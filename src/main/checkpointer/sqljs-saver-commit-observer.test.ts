@@ -1,3 +1,4 @@
+import { performance } from "node:perf_hooks"
 import { randomUUID } from "node:crypto"
 import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
@@ -64,6 +65,53 @@ async function fixture() {
 }
 
 describe("SqlJsSaver native same-gate commit observer", () => {
+  it("services event-loop work after COMMIT while holding the gate and preserving canceled ACKs", async () => {
+    const f = await fixture(), a = checkpoint(1), b = checkpoint(2)
+    let serviced = false, laterSettled = false
+    vi.spyOn(performance, "now").mockReturnValue(0)
+    const source = new AbortController()
+    let later: Promise<RunnableConfig> | undefined
+    let saved: SqlJsSaverCommittedCheckpointReceipt | undefined
+    await f.first.putWithCommitObserver(config(), a, metadata, receipt => {
+      saved = receipt
+      expect(serviced).toBe(true)
+      expect(source.signal.aborted).toBe(true)
+      expect(laterSettled).toBe(false)
+      expect(f.ids()).toEqual([a.id])
+      expect(f.first.readCommittedCheckpoint(receipt).checkpoint.id).toBe(a.id)
+    }, () => source.signal.throwIfAborted(), () => {
+      setImmediate(() => {
+        serviced = true
+        source.abort()
+        later = f.second.put(config("", a.id), b, metadata).then(result => {
+          laterSettled = true
+          return result
+        })
+      })
+    })
+    await later
+    expect(laterSettled).toBe(true)
+    expect(f.ids()).toEqual([b.id])
+    expect(() => f.first.readCommittedCheckpoint(saved!))
+      .toThrow("SQLJS_SAVER_COMMIT_RECEIPT_INVALID")
+  })
+
+  it("rejects a close during the post-COMMIT pause and releases the namespace", async () => {
+    const f = await fixture(), a = checkpoint(1), b = checkpoint(2)
+    vi.spyOn(performance, "now").mockReturnValue(0)
+    const observer = vi.fn()
+    let closing: Promise<void> | undefined
+    const saving = f.first.putWithCommitObserver(config(), a, metadata, observer, undefined, () => {
+      setImmediate(() => { closing = f.first.close() })
+    })
+    await expect(saving).rejects.toThrow("SQLJS_SAVER_COMMIT_RECEIPT_EXPIRED")
+    await closing
+    expect(observer).not.toHaveBeenCalled()
+    expect(f.ids()).toEqual([a.id])
+    await f.second.put(config("", a.id), b, metadata)
+    expect(f.ids()).toEqual([b.id])
+  })
+
   it("does not let a captured exact-read lifetime borrow a closed and reopened database", async () => {
     const f = await fixture(), a = checkpoint(1)
     const exact = await f.first.put(config(), a, metadata)

@@ -55,7 +55,7 @@ function FunctionPlacedRow({
   const live = useRef(false)
   const pending = useRef(false)
   const closing = useRef(false)
-  const readerRef = useRef<{ refresh(): void } | null>(null)
+  const readerRef = useRef<{ refresh(): void; invalidate(): void } | null>(null)
   const latest = useRef({ current, entry, owner, binding })
   latest.current = { current, entry, owner, binding }
   const refresh = useCallback(() => {
@@ -108,6 +108,7 @@ function FunctionPlacedRow({
     )
       return
     pending.current = true
+    readerRef.current?.invalidate()
     setBusy(true)
     try {
       await window.api.mods.placedAct(threadId, owner, entry.requestId, lease, {

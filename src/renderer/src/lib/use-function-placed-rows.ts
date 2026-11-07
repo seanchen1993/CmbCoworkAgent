@@ -16,7 +16,9 @@ export function useFunctionPlacedRows(
     if (!enabled || !binding || !window.api.mods.placedRows) return
     const reader = createLatestDisplayRead({
       read: () => window.api.mods.placedRows(threadId, binding.owner),
-      publish: rows => { if (current()) setState({ binding, rows }) },
+      publish: (rows) => {
+        if (current()) setState({ binding, rows })
+      },
       failed: () => setState({ binding, rows: [] })
     })
     const refresh = reader.refresh
@@ -24,8 +26,13 @@ export function useFunctionPlacedRows(
       if (
         event.threadId === threadId &&
         (event.scope === "placed" || !event.scope || event.scope.startsWith("source-"))
-      )
+      ) {
+        if (event.scope !== "placed") {
+          reader.invalidate()
+          setState(undefined)
+        }
         refresh()
+      }
     })
     refresh()
     return () => {

@@ -158,6 +158,7 @@ declare namespace DevClawMods {
     Button(props:({label:string;children?:UiTree[]}|{label?:string;children:UiTree[]|string})&{
       onPress:()=>unknown;key?:string;hotkey?:string;plain?:true;dimColor?:boolean;autoFocus?:true;
       variant?:"primary"|"secondary";role?:"dismiss";hover?:UiTextHover}):UiTree
+    /** submitLabel:"" hides the per-field submit button; use onInput with a separate action button. */
     Input(props:{key:string;label?:string;placeholder?:string;value?:string;submitLabel?:string;rows?:number;autoFocus?:true;onSubmit:(value:string)=>unknown;onInput?:(value:string)=>unknown}):UiTree
     Select(props:{key:string;label?:string;options:{value:string;label:string}[];value?:string;autoFocus?:true;onSelect:(value:string)=>unknown}):UiTree
     Code(props:{source:string;language?:string;path?:string;startLine?:number;format?:"source"|"diff";wrap?:"wrap"|"truncate-start"|"truncate-end"}):UiTree

@@ -5,6 +5,7 @@ import { getDb } from "../db"
 import { NativeSqliteAdapter, readFunctionConversationNativeSqliteCurrentExecution }
   from "../db/native-sqlite-adapter"
 import { readFunctionConversationThreadIdentityCurrent } from "../db/function-conversation-thread-identity-read"
+import { createNativeThreadIdentityReader } from "../db/native-thread-identity-reader"
 import { getLocalThreadRunLease } from "../agent/thread-run-lease"
 import { matchesThreadIncarnation, type ThreadIncarnationRow } from "../services/thread-incarnation"
 
@@ -57,7 +58,8 @@ export function nativeRunFactsCurrent(database: NativeSqliteAdapter): boolean {
     prototypeOf(typedConstructor) !== Function.prototype ||
     !same(Function.prototype, hasInstanceKey, functionHasInstance) ||
     prototypeOf(Array.prototype) !== Object.prototype || prototypeOf(Object.prototype) !== null ||
-    descriptor(Array.prototype, "0") || descriptor(Object.prototype, "0")) return false
+    descriptor(Array.prototype, "0") || descriptor(Object.prototype, "0") ||
+    descriptor(Array.prototype, "1") || descriptor(Object.prototype, "1")) return false
   if (statSync !== originalStat || realpathSync !== originalRealpath ||
     getDb !== originalDb || getLocalThreadRunLease !== originalLease ||
     readFunctionConversationThreadIdentityCurrent !== originalThread ||
@@ -103,7 +105,7 @@ export function prepareNativeRunFactsRead(database: NativeSqliteAdapter, threadI
   if (!nativeRunFactsCurrent(database)) return undefined
   const native = readFunctionConversationNativeSqliteCurrentExecution(database)
   if (!native) return undefined
-  const read = native.prepareReadOne("SELECT created_at, metadata FROM threads WHERE thread_id = ? LIMIT 1")
+  const read = createNativeThreadIdentityReader(native)
   return () => {
     native.assertDataCurrent()
     const row = read([threadId])

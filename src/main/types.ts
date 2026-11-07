@@ -522,7 +522,7 @@ export interface ConfigurePreferredIdeRequest {
 }
 
 export interface ConfigurePreferredIdeResult {
-  status: "configured" | "needs_executable_path"
+  status: "configured" | "needs_executable_path" | "superseded"
   settings: IdeSettings
   message?: string
 }

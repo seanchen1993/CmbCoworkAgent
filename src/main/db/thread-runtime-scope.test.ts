@@ -2,10 +2,12 @@ import { randomUUID } from "node:crypto"
 import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { performance } from "node:perf_hooks"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { captureThreadIncarnation, matchesThreadIncarnation } from "../services/thread-incarnation"
 import { resolveCapabilityContext } from "../mods/capability-context"
 import { resolveClawThread } from "../mods/claw-scope"
+import { withHostRuntimeTiming } from "../services/host-runtime-timing"
 
 const paths = vi.hoisted(() => ({ database: "" }))
 vi.mock("../storage", () => ({
@@ -50,6 +52,108 @@ function context(id: string, read = appDb.getThreadRuntimeScope) {
 }
 
 describe("fresh read-only thread runtime scope projection", () => {
+  it.each([1, 2])("keeps full metadata if timing callback %s changes its interpreter", turn => {
+    const raw = JSON.stringify({ cmb_thread_incarnation: "kept", llmFileHistory: "x".repeat(50000) })
+    const id = insert(raw), parse = JSON.parse, now = performance.now.bind(performance)
+    let calls = 0
+    vi.spyOn(performance, "now").mockImplementation(() => {
+      if (++calls === turn) JSON.parse = ((value: string) => value === raw
+        ? { cmb_thread_incarnation: "custom-interpreter" } : parse(value)) as typeof JSON.parse
+      return now()
+    })
+    try {
+      const identity = withHostRuntimeTiming(() => appDb.getThreadCanonicalIdentity(id))!
+      expect(identity.metadata).toBe(raw)
+      expect(captureThreadIncarnation(identity).token).toBe("custom-interpreter")
+    } finally { JSON.parse = parse }
+  })
+
+  it("keeps the original core reader when prepare's regexp callback changes interpretation", () => {
+    const raw = JSON.stringify({ cmb_thread_incarnation: "kept", llmFileHistory: "x".repeat(50000) })
+    const id = insert(raw), parse = JSON.parse, test = RegExp.prototype.test
+    let changed = false
+    vi.spyOn(RegExp.prototype, "test").mockImplementation(function (this: RegExp, value: string) {
+      if (!changed && value.includes("SELECT thread_id, created_at, updated_at, metadata")) {
+        changed = true
+        JSON.parse = ((text: string) => text === raw
+          ? { cmb_thread_incarnation: "prepare-interpreter" } : parse(text)) as typeof JSON.parse
+      }
+      return Reflect.apply(test, this, [value])
+    })
+    try {
+      const identity = appDb.getThreadCanonicalIdentity(id)!
+      expect(changed).toBe(true)
+      expect(identity.metadata).toBe(raw)
+      expect(captureThreadIncarnation(identity).token).toBe("prepare-interpreter")
+    } finally { JSON.parse = parse }
+  })
+
+  it("preserves canonical identity for duplicate keys, non-TEXT metadata and legacy timestamps", () => {
+    const id = insert(null)
+    const cases = [null, "{broken", "null", "[]", "42", "{}",
+      '{"cmb_thread_incarnation":null,"llmFileHistory":"large"}',
+      '{"cmb_thread_incarnation":"first","cmb_thread_incarnation":"last","llmFileHistory":1}',
+      '{"cmb_thread_incarnation":"first","cmb_thread_incarnation":null,"llmFileHistory":1}',
+      '{"llmFileHistory":1,"llmFileHistory":2,"cmb_thread_incarnation":"last"}',
+      '{"cmb_thread_incarnation":"\\ud800","llmFileHistory":1}',
+      new Uint8Array(Buffer.from('{"cmb_thread_incarnation":"blob-token","llmFileHistory":1}')),
+      new Uint8Array([0, 1, 255]), 123]
+    for (const metadata of cases) {
+      appDb.getDb().run("UPDATE threads SET metadata=?,created_at=100 WHERE thread_id=?", [metadata, id])
+      const full = appDb.getThreadCore(id)!, identity = appDb.getThreadCanonicalIdentity(id)!
+      const expected = captureThreadIncarnation(full)
+      expect(captureThreadIncarnation(identity)).toEqual(expected)
+      expect(matchesThreadIncarnation(identity, expected)).toBe(true)
+      if (typeof full.metadata !== "string") expect(identity.metadata).toEqual(full.metadata)
+      appDb.getDb().run("UPDATE threads SET created_at=101 WHERE thread_id=?", [id])
+      expect(matchesThreadIncarnation(appDb.getThreadCanonicalIdentity(id), expected))
+        .toBe(matchesThreadIncarnation(appDb.getThreadCore(id), expected))
+    }
+  })
+
+  it("returns the full original input when the metadata interpreter is overridden", () => {
+    const raw = JSON.stringify({ cmb_thread_incarnation: "kept", llmFileHistory: "x".repeat(50000) })
+    const id = insert(raw), original = JSON.parse
+    const parse = vi.spyOn(JSON, "parse").mockImplementation((value: string) => {
+      const result = original(value)
+      if (value === raw) return { ...result, cmb_thread_incarnation: "custom-interpreter" }
+      return result
+    })
+    const identity = appDb.getThreadCanonicalIdentity(id)!
+    expect(identity.metadata).toBe(raw)
+    expect(captureThreadIncarnation(identity).token).toBe("custom-interpreter")
+    expect(parse).toHaveBeenCalledWith(raw)
+  })
+
+  it("keeps a cached custom core reader after its public factory is restored", () => {
+    const raw = JSON.stringify({ cmb_thread_incarnation: "kept", llmFileHistory: "x".repeat(50000) })
+    const id = insert(raw), database = appDb.getDb(), prepare = database.prepareReadOne.bind(database)
+    let reads = 0
+    const wrapped = vi.spyOn(database, "prepareReadOne").mockImplementation(sql => {
+      const read = prepare(sql)
+      return bindings => { reads++; return read(bindings) }
+    })
+    expect(appDb.getThreadCore(id)?.metadata).toBe(raw)
+    wrapped.mockRestore()
+    const before = reads
+    expect(appDb.getThreadCanonicalIdentity(id)?.metadata).toBe(raw)
+    expect(reads).toBe(before + 1)
+  })
+
+  it("keeps canonical identity fresh after large history changes and same-ID recreation", () => {
+    const raw = JSON.stringify({ cmb_thread_incarnation: "kept", llmFileHistory: "x".repeat(100000) })
+    const id = insert(raw)
+    const identity = appDb.getThreadCanonicalIdentity(id)!
+    expect(identity.metadata!.length).toBeLessThan(100)
+    const expected = captureThreadIncarnation(identity)
+    update(id, { cmb_thread_incarnation: "kept", llmFileHistory: "changed".repeat(100000) })
+    expect(matchesThreadIncarnation(appDb.getThreadCanonicalIdentity(id), expected)).toBe(true)
+    appDb.getDb().run("DELETE FROM threads WHERE thread_id=?", [id])
+    expect(appDb.getThreadCanonicalIdentity(id)).toBeNull()
+    insert('{"cmb_thread_incarnation":"replacement"}', id)
+    expect(matchesThreadIncarnation(appDb.getThreadCanonicalIdentity(id), expected)).toBe(false)
+  })
+
   it("omits only top-level history while preserving complete scope values and the original persisted bytes", () => {
     const history = { adopted: "x".repeat(1024 * 1024) }
     const metadata = {

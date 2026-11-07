@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from "react"
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from "react"
 import {
   fillPromptSnapshot,
   validPromptSnapshot,
@@ -58,6 +58,9 @@ export function usePromptComposer(options: {
     }
   }, [threadId])
   const editor = useRef<Editor | null>(null)
+  // Read the installed editor at invocation time, including after a thread/scope replacement.
+  // Task-card callbacks can retain this function without retaining an old editor or draft.
+  const changed = useCallback(() => editor.current?.changed(), [])
   const generation = useMemo(() => ({ threadId, enabled, textarea }), [threadId, enabled, textarea])
   const committedGeneration = useRef<{
     scope: typeof generation
@@ -779,7 +782,7 @@ export function usePromptComposer(options: {
       ...(sourcePaint.text === options.read().text ? sourcePaint.decorations : [])] : [],
     suggestion: enabled && !options.working ? suggestion : "",
     acceptSuggestion: () => editor.current?.acceptSuggestion() ?? false,
-    changed: () => editor.current?.changed(),
+    changed,
     composition: (value: boolean) => editor.current?.composition(value),
     reset: () => editor.current?.reset(),
     isConfirmed: (draft: { text: string; revision: number }) =>

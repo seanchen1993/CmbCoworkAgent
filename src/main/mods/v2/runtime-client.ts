@@ -101,8 +101,15 @@ export class FunctionRuntimeClient {
     this.watchdogTickAt = performance.now()
     this.watchdogGapMs = 0
     this.heartbeatGraceUntil = undefined
-    this.ready = new Promise<void>((resolve, reject) => {
+    let resolveReady!: () => void
+    const ready = new Promise<void>((resolve, reject) => {
+      resolveReady = resolve
       this.rejectReady = reject
+    })
+    // Publish the promise before starting native work: a synchronous fork/setup failure
+    // must retire this attempt, rather than cache a rejected promise forever.
+    this.ready = ready
+    try {
       const child = utilityProcess.fork(this.entry, [], {
         env,
         stdio: "pipe",
@@ -111,15 +118,13 @@ export class FunctionRuntimeClient {
       this.child = child
       const lifetime = new FunctionUiResolveHostLifetime(child)
       this.physicalLifetime = lifetime
-      child.stdout?.resume()
-      child.stderr?.resume()
       child.on("message", (message: FunctionResponse) => {
         if (this.child !== child) return
         if (message.type === "ready") {
           this.heartbeatAt = performance.now()
           this.heartbeatGraceUntil = undefined
           this.rejectReady = undefined
-          resolve()
+          resolveReady()
         } else this.onMessage(message)
       })
       child.on("exit", () => {
@@ -129,17 +134,21 @@ export class FunctionRuntimeClient {
       child.on("error", () => {
         if (this.child === child) this.stop("MODS_HOST_ERROR")
       })
-    })
-    this.timer = setInterval(() => {
-      const now = performance.now()
-      this.watchdogGapMs = now - this.watchdogTickAt
-      this.watchdogTickAt = now
-      if ([...this.pending.values()].some((p) => p.expiresAt < performance.now()))
-        this.stop("MODS_HOST_TIMEOUT")
-      else if (performance.now() - this.heartbeatAt > 2000) this.recheckHeartbeat()
-    }, 250)
-    this.timer.unref()
-    return this.ready
+      child.stdout?.resume()
+      child.stderr?.resume()
+      this.timer = setInterval(() => {
+        const now = performance.now()
+        this.watchdogGapMs = now - this.watchdogTickAt
+        this.watchdogTickAt = now
+        if ([...this.pending.values()].some((p) => p.expiresAt < performance.now()))
+          this.stop("MODS_HOST_TIMEOUT")
+        else if (performance.now() - this.heartbeatAt > 2000) this.recheckHeartbeat()
+      }, 250)
+      this.timer.unref()
+    } catch {
+      this.stop("MODS_HOST_ERROR")
+    }
+    return ready
   }
 
   private recheckHeartbeat(): void {

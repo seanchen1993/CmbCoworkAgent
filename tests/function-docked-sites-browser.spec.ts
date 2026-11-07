@@ -20,7 +20,7 @@ async function main() {
       `
       import {ModsChatScope} from ${JSON.stringify(resolve("src/renderer/src/lib/mods-chat-scope.tsx"))};
       import {FunctionSite} from ${JSON.stringify(resolve("src/renderer/src/components/chat/FunctionSite.tsx"))};
-      const cards=new Set(), owners=new Map();let dockSequence=0, held=false, release;
+      const cards=new Set(), owners=new Map();let dockSequence=0, held=false, releases=[];window.dockReads=0;
       window.api.mods.onCardsChanged=fn=>{cards.add(fn);return()=>cards.delete(fn)};
       window.api.mods.onConfigurationChanged=()=>()=>{};
       window.api.mods.siteRead=undefined;
@@ -29,7 +29,7 @@ async function main() {
       };
       window.api.mods.siteUnmount=async(thread,owner)=>{owners.delete(owner)};
       window.api.mods.siteRender=async(thread,owner,props)=>{
-        const component=owners.get(owner);if(held)await new Promise(r=>release=r);
+        const component=owners.get(owner);window.dockReads++;if(held)await new Promise(r=>releases.push(r));
         return {key:'engine:'+owner,id:owner,plugin:'engine',title:component,generation:'g'+dockSequence,
           rows:12,closeOnEscape:false,nativeFallback:false,
           nativeContent:{component,entries:[{ref:0,props}]},
@@ -40,7 +40,7 @@ async function main() {
       window.api.mods.siteAct=async(thread,owner,action)=>{
         for(const fn of cards)fn({threadId:thread,scope:'site-redraw:'+owner})
       };
-      window.dock={hold:()=>{held=true},release:()=>{held=false;release?.()},
+      window.dock={hold:()=>{held=true},release:()=>{held=false;releases.splice(0).forEach(r=>r())},
         revoke:()=>{held=true;for(const fn of cards)fn({threadId:'a',scope:'source-retiring:1'})}};
       host.render(<ModsChatScope.Provider value={{threadId:'a',enabled:true}}>
         <main style={{height:'100vh',display:'flex',flexDirection:'column',overflow:'hidden'}}>
@@ -73,6 +73,8 @@ async function main() {
       await page.evaluate("window.dock.release()")
       await page.waitForTimeout(100)
       const before = await site.boundingBox()
+      assert(before && before.height <= Math.min(288, 800 / 3), "Both docks reserve transcript space")
+      if (component === "ChatHeader") assert(before.height > 144, "Expanded top forms have usable height")
       await page.locator("[data-transcript]").evaluate((node) => {
         node.scrollTop = 2500
       })
@@ -87,9 +89,31 @@ async function main() {
       )
       console.log(`PASS ${component}: retained form, independent scrolling, stable dock`)
     }
+    // During a delayed protected read, continuous resize must keep the old forms inert.
+    await page.evaluate("window.dock.hold()")
+    const readsBefore = await page.evaluate("window.dockReads") as number
+    for (let step = 0; step < 12; step++) {
+      await page.setViewportSize({ width: 700 + (step % 3) * 120, height: 620 + (step % 2) * 100 })
+      await page.waitForTimeout(35)
+      for (const component of ["AbovePrompt", "ChatHeader"]) {
+        const input = page.getByLabel(`${component} Field 0`)
+        assert.equal(await input.count(), 1, "Resize must retain verified dock content")
+        assert(await input.evaluate(node => Boolean(node.closest("[inert]"))),
+          "Old geometry grants no interaction while a fresh read waits")
+      }
+    }
+    await page.waitForTimeout(5100)
+    assert.equal(await page.getByText("内容加载较慢，请稍候…", { exact: true }).count(), 0)
+    assert((await page.evaluate("window.dockReads") as number) - readsBefore <= 2,
+      "Resize burst coalesces behind the one in-flight read per dock")
+    await page.evaluate("window.dock.release()")
+    await page.waitForFunction(() => [...document.querySelectorAll("input")].every(node =>
+      !node.closest("[inert]")))
+    console.log("PASS resize burst: retained inert forms, coalesced reads, current controls restored")
     mkdirSync("output/mods-docked-sites", { recursive: true })
     await page.screenshot({ path: "output/mods-docked-sites/long-form.png" })
     await page.evaluate("window.dock.revoke()")
+    await page.setViewportSize({ width: 1100, height: 900 })
     await page.waitForTimeout(100)
     assert.equal(
       await page.getByLabel("AbovePrompt Field 0").count(),

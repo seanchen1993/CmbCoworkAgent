@@ -10,6 +10,8 @@ import {
 } from "../storage"
 import { type NativeSqliteAdapter, type NativeSqliteReadOne, type NativeSqliteValue,
   openNativeSqliteDatabase } from "./native-sqlite-adapter"
+import { originalCurrentDispatch } from "./native-read-dispatch"
+import { THREAD_RUNTIME_SCOPE_INDEX, THREAD_RUNTIME_SCOPE_EXPRESSION } from "./thread-runtime-scope-query"
 import { mergeThreadValueObjects } from "../../shared/thread-values"
 import { ensureLegacyMessageTimeArchive } from "../checkpointer/legacy-message-times"
 import {
@@ -79,6 +81,7 @@ import {
   attachFreshThreadIncarnation,
   captureThreadIncarnation,
   matchesThreadIncarnation,
+  originalMetadataInterpretation,
   preserveThreadIncarnationMetadata
 } from "../services/thread-incarnation"
 import { assertFunctionConversationForkReady } from "./function-conversation-fork-gate"
@@ -560,12 +563,6 @@ function migrateLegacyMemorySessionOptIn(database: NativeSqliteAdapter): void {
     console.log(`[DB] Migrated ${updatedThreads} legacy thread(s) to explicit memory opt-in`)
   }
 }
-
-// SQLite maintains this read-only projection in the same transaction as every thread write.
-// Keep its expression identical in the index and SELECT: no authorization is cached here.
-const THREAD_RUNTIME_SCOPE_INDEX = "idx_threads_runtime_scope_v1"
-const THREAD_RUNTIME_SCOPE_EXPRESSION =
-  "CASE WHEN json_valid(metadata) THEN json_remove(metadata, '$.llmFileHistory') ELSE metadata END"
 
 export async function initializeDatabase(): Promise<NativeSqliteAdapter> {
   if (db) return db
@@ -5022,12 +5019,12 @@ function assertThreadMessageForkReady(threadId: string): void {
 
 function canonicalThreadMessageSealInput(database: NativeSqliteAdapter, threadId: string,
   messageId: string) {
-  const thread = getThreadCore(threadId)
+  const thread = getThreadCanonicalIdentity(threadId)
   if (!thread) throw Error("MODS_CONVERSATION_THREAD_CHANGED")
   const incarnation = captureThreadIncarnation(thread)
   return { threadId, messageId, incarnation,
     assertCurrent: () => {
-      const actual = getThreadCore(threadId)
+      const actual = getThreadCanonicalIdentity(threadId)
       const current = actual && captureThreadIncarnation(actual)
       if (getDb() !== database || !current || current.token !== incarnation.token ||
         (current.token === null && current.legacyCreatedAt !== incarnation.legacyCreatedAt))
@@ -5291,11 +5288,11 @@ function partitionCanonicalThreadMessageEchoesInScope(threadId: string,
   messages: readonly ThreadMessageWrite[], scope: FunctionConversationProjectionReadScope,
   finalChecks: Array<() => void>):
   CanonicalThreadMessageEchoPartition {
-  const database = getDb(), thread = getThreadCore(threadId)
+  const database = getDb(), thread = getThreadCanonicalIdentity(threadId)
   if (!thread) throw Error("MODS_CONVERSATION_THREAD_CHANGED")
   const incarnation = captureThreadIncarnation(thread)
   const assertCurrent = () => runFunctionConversationProjectionGuard(scope, () => {
-    const actual = getThreadCore(threadId)
+    const actual = getThreadCanonicalIdentity(threadId)
     if (getDb() !== database || !actual || !matchesThreadIncarnation(actual, incarnation))
       throw Error("MODS_CONVERSATION_THREAD_CHANGED")
   })
@@ -6602,17 +6599,41 @@ const THREAD_CORE_QUERY = `SELECT thread_id, created_at, updated_at, metadata, s
   FROM threads WHERE thread_id = ?`
 const threadCoreStatements = new WeakMap<NativeSqliteAdapter, NativeSqliteReadOne>()
 const threadCoreQueriesInUse = new WeakSet<NativeSqliteAdapter>()
+const originalCoreReaders = new WeakSet<NativeSqliteReadOne>()
+const coreWeakGet = WeakMap.prototype.get, coreWeakSet = WeakMap.prototype.set
+const coreWeakDelete = WeakMap.prototype.delete, coreUseHas = WeakSet.prototype.has
+const coreUseAdd = WeakSet.prototype.add, coreUseDelete = WeakSet.prototype.delete
+const coreApply = Reflect.apply, coreDescriptor = Object.getOwnPropertyDescriptor
+const coreReaderFields = [[WeakMap.prototype, "get", coreWeakGet], [WeakMap.prototype, "set", coreWeakSet],
+  [WeakMap.prototype, "delete", coreWeakDelete], [WeakSet.prototype, "has", coreUseHas],
+  [WeakSet.prototype, "add", coreUseAdd], [WeakSet.prototype, "delete", coreUseDelete],
+  [RegExp.prototype, "test", RegExp.prototype.test], [RegExp.prototype, "exec", RegExp.prototype.exec]] as const
+function originalCoreReadDispatch(database: NativeSqliteAdapter): boolean {
+  if (!originalCurrentDispatch(database)) return false
+  for (let index = 0; index < coreReaderFields.length; index++) {
+    const field = coreReaderFields[index], actual = coreDescriptor(field[0], field[1])
+    if (!actual || !("value" in actual) || actual.value !== field[2]) return false
+  }
+  return true
+}
 
 export function getThreadCore(threadId: string): ThreadSummaryRow | null {
   const finishTiming = startHostRuntimeTiming("threadRead")
-  const database = getDb()
+  try { return readThreadCore(getDb(), threadId) }
+  finally { finishTiming() }
+}
+
+function readThreadCore(database: NativeSqliteAdapter, threadId: string): ThreadSummaryRow | null {
   const temporary = threadCoreQueriesInUse.has(database)
   if (!temporary) threadCoreQueriesInUse.add(database)
   let read: NativeSqliteReadOne | undefined
   try {
     read = temporary ? database.prepareReadOne(THREAD_CORE_QUERY) : threadCoreStatements.get(database)
     if (!read) {
+      const original = originalCoreReadDispatch(database)
       read = database.prepareReadOne(THREAD_CORE_QUERY)
+      if (original && originalCoreReadDispatch(database))
+        coreApply(coreUseAdd, originalCoreReaders, [read])
       threadCoreStatements.set(database, read)
     }
     const row = read([threadId])
@@ -6623,8 +6644,53 @@ export function getThreadCore(threadId: string): ThreadSummaryRow | null {
     throw error
   } finally {
     if (!temporary) threadCoreQueriesInUse.delete(database)
-    finishTiming()
   }
+}
+
+// Only original native identity consumers use this projection. Non-TEXT metadata keeps the
+// original SQLite value: JSON text in a BLOB must not acquire a new incarnation token.
+const THREAD_CANONICAL_IDENTITY_QUERY = `SELECT thread_id, created_at, updated_at,
+  CASE WHEN typeof(metadata)='text' THEN ${THREAD_RUNTIME_SCOPE_EXPRESSION}
+    ELSE metadata END AS metadata, status, title
+  FROM threads INDEXED BY ${THREAD_RUNTIME_SCOPE_INDEX} WHERE thread_id = ?`
+const canonicalIdentityStatements = new WeakMap<NativeSqliteAdapter, NativeSqliteReadOne>()
+
+/** Fresh identity data only; custom readers/interpreters retain their full original input. */
+export function getThreadCanonicalIdentity(threadId: string): ThreadSummaryRow | null {
+  const finishTiming = startHostRuntimeTiming("threadRead")
+  const database = getDb()
+  const qualified = () => {
+    const prior = coreApply(coreWeakGet, threadCoreStatements, [database]) as NativeSqliteReadOne | undefined
+    return originalMetadataInterpretation() && originalCoreReadDispatch(database) &&
+      !coreApply(coreUseHas, threadCoreQueriesInUse, [database]) &&
+      (!prior || coreApply(coreUseHas, originalCoreReaders, [prior]))
+  }
+  let result: ThreadSummaryRow | null = null
+  try {
+    if (!qualified()) return readThreadCore(database, threadId)
+    coreApply(coreUseAdd, threadCoreQueriesInUse, [database])
+    let read: NativeSqliteReadOne | undefined
+    try {
+      read = coreApply(coreWeakGet, canonicalIdentityStatements, [database]) as NativeSqliteReadOne | undefined
+      if (!read) {
+        read = database.prepareReadOne(THREAD_CANONICAL_IDENTITY_QUERY)
+        if (!originalCoreReadDispatch(database) || !originalMetadataInterpretation())
+          return readThreadCore(database, threadId)
+        coreApply(coreWeakSet, canonicalIdentityStatements, [database, read])
+      }
+      const row = read([threadId])
+      result = row ? row as unknown as ThreadSummaryRow : null
+    } catch (error) {
+      if (coreApply(coreWeakGet, canonicalIdentityStatements, [database]) === read)
+        coreApply(coreWeakDelete, canonicalIdentityStatements, [database])
+      throw error
+    } finally {
+      coreApply(coreUseDelete, threadCoreQueriesInUse, [database])
+    }
+  } finally { finishTiming() }
+  // Timing hooks are observations, but can call replaceable platform functions. A changed
+  // interpreter must still receive the complete raw metadata after that final callback.
+  return getDb() === database && qualified() ? result : readThreadCore(getDb(), threadId)
 }
 
 // Authority consumers do not need file-adoption history. Keep every other field and

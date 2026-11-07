@@ -252,6 +252,51 @@ it("reads an existing runtime's catalog without a cold fallback or provider disc
   instance.authority.assertLive()
 })
 
+it("keeps a running catalog stable and discovers newly available browser tools after retirement", async () => {
+  const f = fixture()
+  const instance = f.manager.createRuntimeAuthority({
+    workspace: f.workspace,
+    threadId: "thread",
+    turnId: "before-browser-ready"
+  })
+  const runningCatalog = [{ name: "read_file", description: "Read a file", mcp: false }]
+  f.manager.bindFunctionToolCatalog(
+    {
+      workspace: f.workspace,
+      threadId: "thread",
+      turnId: "before-browser-ready",
+      runtimeAuthority: instance.authority
+    },
+    runningCatalog
+  )
+  expect(await f.query()).toEqual(runningCatalog)
+
+  mocks.fingerprint = "browser-ready"
+  mocks.tools = ["browser_navigate", "browser_snapshot"].map((toolName) => ({
+    ...mcp("eager"),
+    capabilityId: `connector:browser:${toolName}`,
+    toolId: `mcp__inAppBrowser__${toolName}`,
+    providerKey: "connector:browser",
+    providerAlias: "inAppBrowser",
+    providerDisplayName: "In-app-browser",
+    toolName,
+    description: toolName
+  }))
+  // A panel preflight describes this runtime, not the next conversation turn.
+  expect(await f.query()).toEqual(runningCatalog)
+  expect(mocks.snapshot).not.toHaveBeenCalled()
+  instance.authority.assertLive()
+
+  f.manager.closeFunctionThread("thread")
+  const names = (await f.query()).map((tool) => tool.name)
+  expect(names).toEqual(expect.arrayContaining([
+    "mcp__inAppBrowser__browser_navigate",
+    "mcp__inAppBrowser__browser_snapshot"
+  ]))
+  expect(mocks.snapshot).toHaveBeenCalled()
+  expect(mocks.invoke).not.toHaveBeenCalled()
+})
+
 it("expires a cold query on thread close even when it never owned a runtime", async () => {
   const f = fixture()
   mocks.snapshot.mockImplementationOnce(async () => {

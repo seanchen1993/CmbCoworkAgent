@@ -1,0 +1,82 @@
+青禾商贸 · 订单运营台接口文档 v1.0
+
+本地服务：http://127.0.0.1:4179
+页面：/orders
+全部接口均为 GET；无需认证。响应为 application/json。
+数据为虚构联调样本，日期固定，不随系统时间变化。
+本月概览与最近订单列表是不同口径：128 是全月全渠道订单数，列表只返回 8 笔最近订单。
+
+1. 用户与工作空间
+GET /api/session
+200 示例：
+{"user":{"name":"陈晓","role":"运营主管"},"workspace":"青禾商贸"}
+页面应显示用户姓名和角色。
+
+2. 经营概览
+GET /api/overview
+200 示例：
+{"revenueCents":982450,"orderCount":128,"pendingShipment":12,"conversionRate":0.126}
+revenueCents 为人民币分，展示为元（9824.50）。
+orderCount、pendingShipment 为整数。conversionRate 为 0 至 1 小数，0.126 展示为 12.6%。
+
+3. 订单列表
+GET /api/orders?page=1&pageSize=3&q=&status=
+page 从 1 开始，默认 1；兼容旧客户端的 page=0，按第一页处理。
+pageSize 默认 3，范围 1 至 20。q 匹配订单号、客户名或商品名，可为空。
+status 可为空，非空时使用状态枚举值。筛选后 total 返回匹配总数。
+200 示例：
+{"orders":[{"id":"DEMO-001","customer":"星野设计工作室","sku":"SKU-100","product":"桌面收纳套装","quantity":1,"totalAmountCents":12900,"currency":"CNY","status":"paid","createdAt":"2026-11-06T02:15:00Z"}],"page":1,"pageSize":3,"total":8}
+示例仅展示一项，默认第一页实际返回 3 项。
+金额字段 totalAmountCents，单位为分；12900 显示为 129.00 元。时间为 UTC ISO 字符串。
+第一页订单 DEMO-001 至 DEMO-003；第二页 DEMO-004 至 DEMO-006；第三页 DEMO-007 至 DEMO-008。
+无匹配结果返回 200，orders=[]、total=0。
+非法分页参数返回 400 INVALID_QUERY；未知状态返回 400 INVALID_STATUS，响应含 code/message。
+
+4. 订单状态字典
+GET /api/order-statuses
+200 示例：
+{"statuses":[{"value":"pending","label":"待支付"},{"value":"paid","label":"已支付"},{"value":"delivered","label":"已发货"},{"value":"cancelled","label":"已取消"}]}
+订单列表筛选及详情使用同一套 value/label；“已发货”传 delivered。
+
+5. 订单详情
+GET /api/orders/{id}
+id 示例 DEMO-001。
+200 响应最外层字段为 data，页面从 data 读取详情：
+{"data":{"id":"DEMO-001","customer":"星野设计工作室","totalAmountCents":12900,"currency":"CNY","status":"paid","createdAt":"2026-11-06T02:15:00Z","shippingAddress":"上海市 · 演示路 88 号（虚构地址）","contact":"演示客户","items":[{"sku":"SKU-100","name":"桌面收纳套装","quantity":1,"unitPriceCents":12900}]}}
+totalAmountCents、unitPriceCents 均为分。未知订单返回 404，{"code":"ORDER_NOT_FOUND","message":"订单不存在"}。
+
+6. 仓库字典
+GET /api/warehouses
+200 示例：
+{"warehouses":[{"id":"east","name":"华东仓"},{"id":"south","name":"华南仓"}]}
+切换仓库后重新读取库存。
+
+7. 库存查询
+GET /api/inventory?warehouse=east
+warehouse 默认 east，仅支持 east/south。
+200 示例：
+{"warehouse":"east","items":[{"sku":"SKU-100","name":"桌面收纳套装","quantity":28,"reservedStock":4}]}
+quantity 为可售件数，reservedStock 为已锁定件数，二者不能直接相减。
+华东仓四个 SKU 的可售数依次为 28、106、3、67；华南仓分别为 40、118、15、79。
+非法仓库返回 400，code=INVALID_WAREHOUSE。
+
+8. 近 7 天趋势
+GET /api/trends
+200 示例：
+{"days":7,"points":[{"date":"2026-10-31","sales":142.00},{"date":"2026-11-01","sales":219.00}]}
+points 共 7 项；横轴 date，纵轴 sales，单位为人民币元。
+日期覆盖 2026-10-31 至 2026-11-06。
+
+9. 业务通知
+GET /api/notifications
+正常响应为 {"items":[{"id":"N-1","text":"待发货提醒"}]}。
+此联调环境模拟通知服务不可用，实际固定返回 503，Retry-After: 30：
+{"code":"NOTIFICATION_UNAVAILABLE","message":"通知服务暂时不可用，请稍后重试","retryable":true}
+页面应展示服务异常，并允许用户手动重试；不应把 503 当成正常空列表。
+
+页面验收动作
+- 查看概览、列表金额与订单详情是否一致；金额按字段单位换算。
+- 翻至第二页再返回第一页；筛选“已发货”；搜索“阅读台灯”；搜索不存在的订单。
+- 切换华南仓，检查库存变化；检查趋势横轴日期与金额。
+- 刷新业务通知并检查 HTTP 状态与页面反馈。
+- 对文档、请求、响应和页面逐项核对；存在冲突时记录证据，不能仅凭文档判断某一方正确。

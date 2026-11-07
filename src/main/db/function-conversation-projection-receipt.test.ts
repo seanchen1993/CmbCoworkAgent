@@ -14,6 +14,7 @@ vi.mock("../storage", () => ({ getDbPath: () => paths.database,
   markMemorySessionOptInMigrated: vi.fn() }))
 import * as appDb from "./index"
 import { FunctionConversationStore } from "./function-conversation-store"
+import type { NativeSqliteAdapter } from "./native-sqlite-adapter"
 import { createFunctionConversationTranscriptAccess } from "./function-conversation-transcript"
 import { FUNCTION_CONVERSATION_PROJECTION_COLUMNS, readFunctionConversationProjectionReceipt,
   readFunctionConversationRawProjection, recordFunctionConversationProjectionReceipt } from
@@ -56,6 +57,51 @@ function fixture(text = "Actual canonical note", snapshot = false, beforeCommit?
 }
 
 describe("actual immutable native projection receipts", () => {
+  it("preserves large Unicode payloads and rechecks the final guard within the same pin", () => {
+    const f = fixture("精确载荷🙂".repeat(40000), true)
+    expect(readFunctionConversationProjectionReceipt(f.database, f.selection).message_id)
+      .toBe(f.row.uuid)
+    let calls = 0
+    const selection = { ...f.selection, assertCurrent: () => {
+      f.selection.assertCurrent()
+      if (++calls === 3) f.database.run(`UPDATE function_conversation_rows SET payload_digest=?
+        WHERE conversation_id=? AND uuid=?`, ["late change", f.target.conversationId, f.row.uuid])
+    } }
+    expect(() => readFunctionConversationProjectionReceipt(f.database, selection)).toThrow()
+    expect(calls).toBe(3)
+  })
+
+  it("does not equate a BLOB with the previous native TEXT even when its bytes are identical", () => {
+    const f = fixture()
+    let calls = 0
+    const selection = { ...f.selection, assertCurrent: () => {
+      f.selection.assertCurrent()
+      if (++calls === 2) f.database.run(`UPDATE function_conversation_rows
+        SET payload_json=CAST(payload_json AS BLOB) WHERE conversation_id=? AND uuid=?`,
+      [f.target.conversationId, f.row.uuid])
+    } }
+    expect(() => readFunctionConversationProjectionReceipt(f.database, selection)).toThrow()
+    expect(calls).toBe(2)
+  })
+
+  it("keeps complete fresh canonical reads for an adapter without native execution evidence", () => {
+    const f = fixture("Escaped text: \u0000 and \ud800 and 🙂")
+    const exec = vi.fn(f.database.exec.bind(f.database))
+    const adapter = { exec } as unknown as NativeSqliteAdapter
+    expect(readFunctionConversationProjectionReceipt(adapter, f.selection).message_id).toBe(f.row.uuid)
+    const canonicalReads = exec.mock.calls.filter(([sql]) => sql.includes("function_conversation_rows"))
+    expect(canonicalReads).toHaveLength(3)
+    expect(canonicalReads.every(([sql]) => /^SELECT \*/.test(sql))).toBe(true)
+    let calls = 0
+    const selection = { ...f.selection, assertCurrent: () => {
+      f.selection.assertCurrent()
+      if (++calls === 2) f.database.run(`UPDATE function_conversation_rows SET bytes=bytes+1
+        WHERE conversation_id=? AND uuid=?`, [f.target.conversationId, f.row.uuid])
+    } }
+    expect(() => readFunctionConversationProjectionReceipt(adapter, selection)).toThrow()
+    expect(calls).toBe(2)
+  })
+
   it.each(["payload_digest", "bytes", "input_digest", "receipt_id", "sequence", "branch_id",
     "door", "created_at"])("rechecks canonical %s after the first current guard", field => {
     const f = fixture()

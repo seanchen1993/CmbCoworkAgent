@@ -1,0 +1,14 @@
+{
+  "name": "frontend-api-starter",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node server.cjs",
+    "build": "node scripts/build.mjs",
+    "test": "node --test tests/acceptance.test.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

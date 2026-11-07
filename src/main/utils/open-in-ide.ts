@@ -1,4 +1,4 @@
-import { execFileSync, spawn } from "child_process"
+import { execFile, spawn } from "child_process"
 import { existsSync } from "fs"
 import { join, normalize } from "path"
 import { getConfiguredIdeExecutablePath, getIdeSettings, saveIdeSettings } from "../storage"
@@ -23,6 +23,18 @@ type OpenIdeResult = {
 }
 
 const FOLLOW_UP_OPEN_DELAY_MS = 500
+let configurationRevision = 0
+
+/** A direct preference change also supersedes any older asynchronous PATH probe. */
+export function invalidatePendingIdeConfiguration(): void {
+  configurationRevision += 1
+}
+function probeExecutable(command: string, args: string[], timeout: number): Promise<string> {
+  return new Promise((resolve, reject) => {
+    execFile(command, args, { encoding: "utf-8", windowsHide: true, timeout },
+      (error, stdout) => error ? reject(error) : resolve(stdout))
+  })
+}
 
 const IDE_LABELS: Record<SupportedIde, string> = {
   idea: "IntelliJ IDEA",
@@ -93,13 +105,9 @@ function looksLikePath(value: string): boolean {
   )
 }
 
-function findExecutableOnPath(command: string): string | null {
+async function findExecutableOnPath(command: string): Promise<string | null> {
   try {
-    const output = execFileSync(process.platform === "win32" ? "where.exe" : "which", [command], {
-      encoding: "utf-8",
-      stdio: ["ignore", "pipe", "ignore"],
-      timeout: 2000
-    })
+    const output = await probeExecutable(process.platform === "win32" ? "where.exe" : "which", [command], 2000)
     const candidates = output
       .split(/\r?\n/)
       .map((line) => trimWrappingQuotes(line))
@@ -111,15 +119,17 @@ function findExecutableOnPath(command: string): string | null {
   }
 }
 
-function resolveExecutablePathFromPathEnv(ide: SupportedIde): string | null {
+async function resolveExecutablePathFromPathEnv(ide: SupportedIde,
+  isCurrent: () => boolean): Promise<string | null> {
   for (const command of getIdeCommandCandidates(ide)) {
-    const resolved = findExecutableOnPath(command)
+    if (!isCurrent()) return null
+    const resolved = await findExecutableOnPath(command)
     if (resolved) return resolved
   }
   return null
 }
 
-function resolveLaunchTargetFromExplicitOverride(ide: SupportedIde): string | null {
+async function resolveLaunchTargetFromExplicitOverride(ide: SupportedIde): Promise<string | null> {
   const override = getExplicitLauncherOverride(ide)
   if (!override) return null
 
@@ -154,16 +164,12 @@ function getMacAppBundlePath(pathValue: string): string | null {
   return appPath.endsWith(".app") ? appPath : null
 }
 
-function findMacInstalledApps(appName: string): string[] {
+async function findMacInstalledApps(appName: string): Promise<string[]> {
   try {
-    const output = execFileSync(
+    const output = await probeExecutable(
       "mdfind",
       [`kMDItemFSName == "${appName}" && kMDItemContentTypeTree == "com.apple.application-bundle"`],
-      {
-        encoding: "utf-8",
-        stdio: ["ignore", "pipe", "ignore"],
-        timeout: 3000
-      }
+      3000
     )
 
     return output
@@ -175,14 +181,16 @@ function findMacInstalledApps(appName: string): string[] {
   }
 }
 
-function resolveExecutablePathFromInstalledApp(ide: SupportedIde): string | null {
+async function resolveExecutablePathFromInstalledApp(ide: SupportedIde,
+  isCurrent: () => boolean): Promise<string | null> {
   if (process.platform !== "darwin") return null
 
   const seen = new Set<string>()
 
   for (const appName of MAC_APP_NAMES[ide]) {
+    if (!isCurrent()) return null
     const candidates = [
-      ...findMacInstalledApps(appName),
+      ...(await findMacInstalledApps(appName)),
       join("/Applications", appName),
       join(process.env.HOME || "", "Applications", appName)
     ]
@@ -224,10 +232,15 @@ function validateProvidedExecutablePath(ide: SupportedIde, executablePath?: stri
   return trimmed
 }
 
-export function configurePreferredIde(
+export async function configurePreferredIde(
   request: ConfigurePreferredIdeRequest
-): ConfigurePreferredIdeResult {
+): Promise<ConfigurePreferredIdeResult> {
+  const revision = ++configurationRevision
   const preferredIde = request.preferredIde
+  const isCurrent = () => revision === configurationRevision
+  const superseded = (): ConfigurePreferredIdeResult => ({
+    status: "superseded", settings: getIdeSettings()
+  })
 
   try {
     const providedPath = validateProvidedExecutablePath(preferredIde, request.executablePath)
@@ -247,10 +260,12 @@ export function configurePreferredIde(
     }
   }
 
-  const resolvedPath =
-    resolveLaunchTargetFromExplicitOverride(preferredIde) ||
-    resolveExecutablePathFromPathEnv(preferredIde) ||
-    resolveExecutablePathFromInstalledApp(preferredIde)
+  let resolvedPath = await resolveLaunchTargetFromExplicitOverride(preferredIde)
+  if (!isCurrent()) return superseded()
+  if (!resolvedPath) resolvedPath = await resolveExecutablePathFromPathEnv(preferredIde, isCurrent)
+  if (!isCurrent()) return superseded()
+  if (!resolvedPath) resolvedPath = await resolveExecutablePathFromInstalledApp(preferredIde, isCurrent)
+  if (!isCurrent()) return superseded()
   if (!resolvedPath) {
     const settings = saveIdeSettings({ preferredIde })
     return {

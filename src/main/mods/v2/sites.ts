@@ -10,6 +10,7 @@ import {
   isFunctionDockedSite,
   FUNCTION_DURATION_SITE_LIMIT,
   FUNCTION_COMMAND_OUTPUT_SITE_LIMIT,
+  FUNCTION_PASSIVE_DISPLAY_SITES,
   validateFunctionSiteTree,
   type FunctionUiSite
 } from "../../../shared/mods/v2/sites"
@@ -236,7 +237,7 @@ export class FunctionUiSites {
     // presentation as well, before any pending renderer read can publish it again.
     if (!components) this.host.changed("site-presentations:*")
     else for (const component of components)
-      if (["UserMessage", "AssistantMessage", "CommandOutput"].includes(component))
+      if (FUNCTION_PASSIVE_DISPLAY_SITES.some(site => site === component))
         this.host.changed(`site-presentations:${component}`)
     // SDK redraw retains no action authority, but is distinct from source/permission revocation.
     // Notify every affected owner, including global dependency sets, without clearing unrelated UI.

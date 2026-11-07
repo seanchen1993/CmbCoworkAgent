@@ -33,6 +33,7 @@ import {
 import { assertFunctionConversationState, readFunctionConversationState } from
   "./function-conversation-delivery"
 import { SqlJsSaver } from "./sqljs-saver"
+import { captureCanonicalCheckpointMembershipEvidence } from "./canonical-checkpoint-membership-evidence"
 import { canonicalDisplayColumnsDigest, canonicalDisplayValueDigest, canonicalCheckpointValueDigest,
   copyCanonicalCheckpointDisplayJson, canonicalCheckpointDisplayMembershipFingerprint,
   createCanonicalCheckpointDisplayOmissionDigest, createCanonicalCheckpointDisplayVerifier,
@@ -438,21 +439,6 @@ export function verifyCanonicalCheckpointWorkerDisplay(value: unknown, threadId:
   if (completeCanonicalTranscript) onCompleteCanonicalTranscript?.()
   return tuple
 }
-/** Exact persisted membership rows, with no callback or public marker interpretation. */
-function membershipRows(input: FunctionConversationCanonicalDisplayInput,
-  target: FunctionConversationRef, snapshot: FunctionConversationCheckpointMembershipSnapshot): string {
-  const result = input.database.exec(`SELECT receipt.receipt_id,receipt.target_json,
-    receipt.snapshot_digest,receipt.snapshot_json,member.ordinal,member.uuid,member.member_json
-    FROM function_conversation_checkpoint_receipts receipt
-    LEFT JOIN function_conversation_checkpoint_members member ON member.receipt_id=receipt.receipt_id
-    WHERE receipt.conversation_id=? AND receipt.branch_id=? AND receipt.checkpoint_thread_id=?
-    AND receipt.checkpoint_incarnation=? AND receipt.checkpoint_namespace=? AND receipt.checkpoint_id=?
-    ORDER BY member.ordinal`, [target.conversationId, target.branchId, snapshot.checkpointThreadId,
-    snapshot.checkpointIncarnation, snapshot.namespace, snapshot.checkpointId])[0]
-  if (!result || !result.values.length) fail("MODS_CONVERSATION_CHECKPOINT_MEMBERSHIP")
-  return JSON.stringify(result)
-}
-
 /** Call inside the original native Saver borrowing scope. It never creates a data owner or ACK. */
 export async function prepareFunctionConversationCanonicalDisplay(input:
   FunctionConversationCanonicalDisplayInput): Promise<FunctionConversationCanonicalDisplaySource | undefined> {
@@ -502,7 +488,7 @@ export async function prepareFunctionConversationCanonicalDisplay(input:
       return { target, checkpointThreadId: input.threadId, checkpointIncarnation: incarnation,
         cut: persisted.cut, frontier: state.frontier,
         stateDigest: functionConversationMembershipDigest(state), assertCurrent: guard }
-    }, guard)
+    }, guard, true)
   if (!captured.proof) return undefined
   if (!tuple || !captures || !target || !persisted) fail()
   const membership = readFunctionConversationCheckpointMembership(captured.proof, input.store, target)
@@ -513,7 +499,7 @@ export async function prepareFunctionConversationCanonicalDisplay(input:
   guard()
   const source = Object.freeze({ [sourceBrand]: true as const })
   sources.set(source, { input, tuple, target, captures, proof: captured.proof, membership,
-    membershipRows: membershipRows(input, target, membership),
+    membershipRows: captureCanonicalCheckpointMembershipEvidence(input.database, target, membership),
     checkpointDigest: checkpointDigest(tuple, input.signal), guard, active: false })
   return source
 }
@@ -538,15 +524,17 @@ export function withFunctionConversationCanonicalDisplay<T>(source:
       reader.runGuard(record.guard)
       const messages = new Map<number, Message>(), members = new Map(record.membership.members.map(
         member => [member.ordinal, member]))
+      const rows = reader.runGuard(() => record.input.store.readCheckpointMembers(record.target,
+        record.proof, record.membership.members.map(member => member.uuid), record.guard))
+      const rowsById = new Map(rows.map(row => [row.uuid, row]))
       const display = record.captures.map((capture, index) => {
         const member = members.get(index), stamp = readFunctionConversationTranscriptStamp(capture.safe)
         if (!member) {
           if (stamp) fail()
           return capture.safe
         }
-        const row = reader.runGuard(() => record.input.store.readCheckpointMember(record.target,
-          record.proof, member.uuid, record.guard))
-        if (!stamp || capture.safe.id !== member.uuid || capture.payload !== row.nativePayload ||
+        const row = rowsById.get(member.uuid)
+        if (!row || !stamp || capture.safe.id !== member.uuid || capture.payload !== row.nativePayload ||
           !sameFunctionConversationTranscriptStamp(stamp, functionConversationCanonicalStamp(record.target, row)))
           fail()
         const snapshot = reader.readSnapshot(member.uuid)
@@ -590,7 +578,8 @@ export function withFunctionConversationCanonicalDisplay<T>(source:
       })
       // Pure checks only after the final source callback. The outer reader performs fresh B.
       assertRaw(record)
-      if (membershipRows(record.input, record.target, record.membership) !== record.membershipRows ||
+      if (captureCanonicalCheckpointMembershipEvidence(record.input.database, record.target,
+        record.membership) !== record.membershipRows ||
         displayCheckpointDigest(checkpoint, record, members) !== displayDigest ||
         getDb() !== record.input.database)
         fail()

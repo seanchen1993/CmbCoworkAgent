@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import type { SupportedIde } from "../types"
 
 const testState = vi.hoisted(() => ({
-  mockExecFileSync: vi.fn(),
+  mockExecFile: vi.fn(),
   mockSpawn: vi.fn(),
   configuredPaths: {} as Partial<Record<SupportedIde, string>>,
   macPaths: new Set<string>()
@@ -25,7 +25,7 @@ vi.mock("path", async importOriginal => {
 })
 
 vi.mock("child_process", () => ({
-  execFileSync: testState.mockExecFileSync,
+  execFile: testState.mockExecFile,
   spawn: testState.mockSpawn
 }))
 
@@ -35,9 +35,10 @@ vi.mock("../storage", () => ({
   saveIdeSettings: vi.fn()
 }))
 
-import { openIde } from "./open-in-ide"
+import { configurePreferredIde, invalidatePendingIdeConfiguration, openIde } from "./open-in-ide"
+import { saveIdeSettings } from "../storage"
 
-const { mockExecFileSync, mockSpawn } = testState
+const { mockExecFile, mockSpawn } = testState
 
 type MockChildProcess = EventEmitter & {
   unref: ReturnType<typeof vi.fn>
@@ -65,12 +66,74 @@ describe("openIde", () => {
       "/Applications/WebStorm.app", "/Applications/WebStorm.app/Contents/MacOS/webstorm"
     ])
     mockSpawn.mockReset()
-    mockExecFileSync.mockReset()
+    mockExecFile.mockReset()
   })
 
   afterEach(() => {
     setPlatform(originalPlatform)
   })
+
+  it("keeps the event loop free while PATH detection waits, preserving fallback order", async () => {
+    setPlatform("win32")
+    vi.stubEnv("CMB_WEBSTORM_BIN", "")
+    vi.stubEnv("CMB_LOCAL_IDE", "")
+    vi.stubEnv("OPENWORK_IDE", "")
+    const callbacks: Array<(error: Error | null, stdout: string, stderr: string) => void> = []
+    mockExecFile.mockImplementation((_cmd, _args, _options, callback) => { callbacks.push(callback) })
+    vi.mocked(saveIdeSettings).mockImplementation(settings => ({
+      preferredIde: settings.preferredIde ?? "webstorm", executablePaths: settings.executablePaths ?? {}
+    }))
+    try {
+      const result = configurePreferredIde({ preferredIde: "webstorm" })
+      await new Promise(resolve => setTimeout(resolve, 0))
+      expect(mockExecFile).toHaveBeenCalledTimes(1)
+      expect(mockExecFile.mock.calls[0].slice(0, 3)).toEqual([
+        "where.exe", ["webstorm64.exe"], { encoding: "utf-8", windowsHide: true, timeout: 2000 }
+      ])
+      callbacks[0](Error("lookup timed out"), "", "")
+      await new Promise(resolve => setTimeout(resolve, 0))
+      expect(mockExecFile.mock.calls[1][1]).toEqual(["webstorm.exe"])
+      callbacks[1](null, "D:\\IDE\\webstorm.exe\r\nD:\\other.exe", "")
+      await expect(result).resolves.toMatchObject({ status: "configured",
+        settings: { executablePaths: { webstorm: "D:\\IDE\\webstorm.exe" } } })
+      expect(mockExecFile).toHaveBeenCalledTimes(2)
+    } finally { vi.unstubAllEnvs() }
+  })
+
+  it.each(["saved", "invalid", "direct-preference"] as const)(
+    "does not let an older slow lookup overwrite a later %s intent", async latest => {
+      setPlatform("win32")
+      vi.stubEnv("CMB_WEBSTORM_BIN", "")
+      vi.stubEnv("CMB_LOCAL_IDE", "")
+      vi.stubEnv("OPENWORK_IDE", "")
+      let complete!: (error: Error | null, stdout: string) => void
+      mockExecFile.mockImplementation((_cmd, _args, _options, callback) => { complete = callback })
+      vi.mocked(saveIdeSettings).mockClear()
+      vi.mocked(saveIdeSettings).mockImplementation(settings => {
+        testState.configuredPaths = { ...testState.configuredPaths, ...settings.executablePaths }
+        return { preferredIde: settings.preferredIde ?? "webstorm",
+          executablePaths: testState.configuredPaths }
+      })
+      try {
+        const old = configurePreferredIde({ preferredIde: "webstorm" })
+        await new Promise(resolve => setTimeout(resolve, 0))
+        expect(mockExecFile).toHaveBeenCalledTimes(1)
+        const path = "C:\\IDE\\code.exe"
+        testState.macPaths.add(path)
+        if (latest === "direct-preference") invalidatePendingIdeConfiguration()
+        else await expect(configurePreferredIde({ preferredIde: "vscode",
+          executablePath: latest === "saved" ? path : "C:\\missing-ide.exe" }))
+          .resolves.toMatchObject({ status: latest === "saved" ? "configured" : "needs_executable_path" })
+        const writes = vi.mocked(saveIdeSettings).mock.calls.length
+        // Both success and failure of the old process must leave the later intent alone.
+        complete(latest === "invalid" ? Error("timeout") : null, "C:\\old-webstorm.exe")
+        await expect(old).resolves.toMatchObject({ status: "superseded" })
+        expect(saveIdeSettings).toHaveBeenCalledTimes(writes)
+        expect(mockExecFile).toHaveBeenCalledTimes(1)
+        expect(testState.configuredPaths.webstorm).toBeUndefined()
+        if (latest === "saved") expect(testState.configuredPaths.vscode).toBe(path)
+      } finally { vi.unstubAllEnvs() }
+    })
 
   it("treats spawned Windows IDE executables with exit code 1 as success", async () => {
     setPlatform("win32")

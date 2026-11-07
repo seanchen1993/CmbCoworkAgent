@@ -75,6 +75,8 @@ export interface PaneHost {
   markdownLinks?: FunctionMarkdownLinkRegistry
   markdownSiteOwner?: string
   plugins: readonly FunctionPlugin[]
+  /** Conservative hook presence; absent hosts retain the original redraw behavior. */
+  hasEventHooks?(event: string): boolean
   assertLive(): void
   changed(scope?: ModUiChangeScope): void
   publish(value: ModJson): Promise<ModJson>
@@ -103,6 +105,10 @@ export class FunctionPanes {
   private readonly intents = new Map<
     string,
     { input: string; result: Promise<void | FunctionFocusResult> }
+  >()
+  private readonly passiveIntents = new Map<
+    string,
+    { input: string; result: Promise<void | FunctionFocusResult>; generation: string }
   >()
   private serial: Promise<unknown> = Promise.resolve()
   private actions: Promise<unknown> = Promise.resolve()
@@ -452,6 +458,10 @@ export class FunctionPanes {
   }
 
   private async release(generation: string): Promise<void> {
+    // Observations belong to a drawing, unlike user control intents. Retired drawings reject
+    // their replays at admission, so scrolling must not consume the session's control budget.
+    for (const [id, intent] of this.passiveIntents)
+      if (intent.generation === generation) this.passiveIntents.delete(id)
     this.host.releaseState?.(generation)
     if (this.retained.has(generation)) {
       this.retired.add(generation)
@@ -823,7 +833,8 @@ export class FunctionPanes {
       return Promise.resolve()
     }
     const input = createHash("sha256").update(encodeModJson(action)).digest("hex")
-    const prior = this.intents.get(action.intentId)
+    const passive = action.kind === "focus" || action.kind === "scroll"
+    const prior = this.intents.get(action.intentId) ?? this.passiveIntents.get(action.intentId)
     if (prior)
       return prior.input === input
         ? prior.result
@@ -832,8 +843,10 @@ export class FunctionPanes {
     if (!admissionPane || admissionPane.generation !== action.generation ||
       admissionPane.actionsInvalidated)
       return Promise.reject(new ModFunctionError("MODS_UI_STALE_ACTION"))
-    // Keep settled IDs for the life of the session: evicting one could replay its action.
-    if (this.intents.size >= 4096)
+    const unobservedScroll = action.kind === "scroll" &&
+      this.host.hasEventHooks?.("ui.scroll") === false
+    // Keep control IDs for the session; drawing-scoped observations have a separate budget.
+    if (!unobservedScroll && (passive ? this.passiveIntents.size : this.intents.size) >= 4096)
       return Promise.reject(new ModFunctionError("MODS_UI_INTENT_LIMIT"))
     const perform = async (): Promise<void | FunctionFocusResult> => {
       this.host.assertLive()
@@ -884,6 +897,9 @@ export class FunctionPanes {
             ))
         )
           throw new ModFunctionError("MODS_UI_ACTION_INVALID")
+        // Native scrolling already happened. With no observer there is no guest operation,
+        // drawing mutation, or replay side effect to retain, but all ownership checks still apply.
+        if (unobservedScroll) return
         if (action.kind === "focus" && value.request !== undefined) {
           if (pane.focusRequest?.id !== value.request || !pane.focusRequest.pending)
             throw new ModFunctionError("MODS_UI_STALE_FOCUS")
@@ -985,10 +1001,15 @@ export class FunctionPanes {
             assertLifecycleCurrent()
             if (focusApplied) pane.focused = focusResult.focused
           }
-          this.cancelClientFaults(pane)
-          pane.stateEpoch = {}
-          pane.dirty = true
-          this.paneDataChanged()
+          // Native wheel observation has no render state of its own. Without middleware,
+          // redrawing here only retires still-visible controls while the snapshot is in IPC.
+          // Hooks may mutate closure state, so retain their automatic redraw conservatively.
+          if (action.kind !== "scroll" || this.host.hasEventHooks?.("ui.scroll") !== false) {
+            this.cancelClientFaults(pane)
+            pane.stateEpoch = {}
+            pane.dirty = true
+            this.paneDataChanged()
+          }
         } finally {
           this.active.delete(controller)
           const count = this.retained.get(action.generation)! - 1
@@ -1098,9 +1119,14 @@ export class FunctionPanes {
     }
     // Rendering and closing remain responsive while a callback waits for a queued command.
     // Mutating callbacks stay serial so read/modify/write closures do not lose updates.
-    const result = action.kind === "close" || query ? perform() : this.actions.then(perform)
-    if (action.kind !== "close" && !query) this.actions = result.catch(() => {})
-    this.intents.set(action.intentId, { input, result })
+    const result = action.kind === "close" || query || unobservedScroll
+      ? perform() : this.actions.then(perform)
+    if (action.kind !== "close" && !query && !unobservedScroll)
+      this.actions = result.catch(() => {})
+    if (unobservedScroll) return result
+    if (passive)
+      this.passiveIntents.set(action.intentId, { input, result, generation: action.generation })
+    else this.intents.set(action.intentId, { input, result })
     return result
   }
 
@@ -1122,5 +1148,6 @@ export class FunctionPanes {
     for (const pane of this.panes.values()) this.cancelClientFaults(pane)
     this.panes.clear()
     this.intents.clear()
+    this.passiveIntents.clear()
   }
 }

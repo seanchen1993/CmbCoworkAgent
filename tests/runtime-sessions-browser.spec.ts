@@ -55,6 +55,11 @@ const controls = (page: Page) =>
     Array<{ kind: "release" | "resume"; session: FunctionRuntimeSession }>
   >
 const readCount = (page: Page) => call(page, "window.fixture.reads().length") as Promise<number>
+const assertClockDrivesPolling = async (page: Page) => {
+  const before = await readCount(page)
+  await page.clock.fastForward(5000)
+  assert.equal(await readCount(page), before + 1, "the clock must drive the actual mounted poll")
+}
 const open = async (page: Page) => {
   if ((await page.locator("details").getAttribute("open")) === null)
     await page.locator("summary").click()
@@ -155,11 +160,15 @@ async function bundleFixture() {
 async function mount(
   browser: Browser,
   fixture: Awaited<ReturnType<typeof bundleFixture>>,
-  seed: { view: FunctionRuntimeSessions; threadId?: string; initialError?: string }
+  seed: { view: FunctionRuntimeSessions; threadId?: string; initialError?: string },
+  options: { controlledClock?: boolean } = {}
 ) {
   const page = await browser.newPage({ viewport: { width: 375, height: 850 } })
   page.setDefaultTimeout(5000)
   page.on("pageerror", (error) => browserErrors.push(error.message))
+  // The component registers its interval on mount. Installing later leaves that real timer
+  // outside fastForward and would make polling/cleanup assertions test the wrong clock.
+  if (options.controlledClock) await page.clock.install()
   await page.setContent('<div id="root" style="padding:12px;min-width:0"></div>')
   await page.addStyleTag({ content: fixture.css })
   await page.evaluate((value) => Object.assign(window, { runtimeSeed: value }), seed)
@@ -196,11 +205,14 @@ async function confirmedControls(
   browser: Browser,
   fixture: Awaited<ReturnType<typeof bundleFixture>>
 ) {
-  const page = await mount(browser, fixture, {
-    view: view([row("a", { title: "测试任务甲" })])
-  })
+  const page = await mount(
+    browser,
+    fixture,
+    { view: view([row("a", { title: "测试任务甲" })]) },
+    { controlledClock: true }
+  )
   try {
-    await page.clock.install()
+    await assertClockDrivesPolling(page)
     await call(
       page,
       "window.fixture.queueRead({hold:true,view:{...window.runtimeSeed.view,error:'OLD_POLL_RESPONSE'}});window.fixture.emit()"
@@ -301,9 +313,9 @@ async function confirmedControls(
 }
 
 async function staleReads(browser: Browser, fixture: Awaited<ReturnType<typeof bundleFixture>>) {
-  const page = await mount(browser, fixture, { view: view([row("a")]) })
+  const page = await mount(browser, fixture, { view: view([row("a")]) }, { controlledClock: true })
   try {
-    await page.clock.install()
+    await assertClockDrivesPolling(page)
     await call(
       page,
       "window.fixture.queueRead({hold:true,view:{...window.runtimeSeed.view,error:'OLD_A_READ'}});window.fixture.emit()"
@@ -489,6 +501,37 @@ async function reclamationLabels(
   }
 }
 
+async function congestedPolling(
+  browser: Browser,
+  fixture: Awaited<ReturnType<typeof bundleFixture>>
+) {
+  const page = await mount(browser, fixture, { view: view([row("a")]) }, { controlledClock: true })
+  try {
+    await assertClockDrivesPolling(page)
+    const baseline = await readCount(page)
+    await call(
+      page,
+      'window.fixture.queueRead({hold:true,view:{...window.runtimeSeed.view,error:"progress-0"}})'
+    )
+    await page.getByRole("button", { name: "刷新占用", exact: true }).click()
+    for (let i = 0; i < 12; i++) {
+      await page.waitForFunction("window.fixture.pending('read').length === 1")
+      await page.clock.fastForward(15000)
+      assert.equal(await readCount(page), baseline + i + 1, "slow polls must remain single flight")
+      // Queue the next slow read before completing this one: updates never become idle.
+      await call(
+        page,
+        `window.fixture.queueRead({hold:true,view:{...window.runtimeSeed.view,error:"progress-${i + 1}"}})`
+      )
+      await call(page, "window.fixture.finish(window.fixture.pending('read')[0])")
+      await page.getByText(`progress-${i}`, { exact: true }).waitFor()
+    }
+    pass("congested polling keeps one physical read and publishes progress before the next reply")
+  } finally {
+    await page.close()
+  }
+}
+
 async function main() {
   mkdirSync(output, { recursive: true })
   const fixture = await bundleFixture()
@@ -497,6 +540,7 @@ async function main() {
     ...(existsSync(chromium.executablePath()) ? {} : { channel: "msedge" })
   })
   try {
+    await congestedPolling(browser, fixture)
     await readRecovery(browser, fixture)
     await confirmedControls(browser, fixture)
     await staleReads(browser, fixture)

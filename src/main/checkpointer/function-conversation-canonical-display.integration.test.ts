@@ -552,6 +552,60 @@ describe("canonical Human display from actual Saver and native Worker sources", 
     })).toThrow("MODS_CONVERSATION_PRESENTATION_CONFLICT")
   })
 
+  it("rejects an already-read canonical row changed after the batched member read", async () => {
+    const f = await checkpointFixture(), source = await f.prepare()
+    expect(() => withFunctionConversationCanonicalDisplay(source, view => {
+      expect(view.read(1)?.id).toBe(f.uuid)
+      f.database.run("UPDATE function_conversation_rows SET payload_json='{}' WHERE uuid=?", [f.uuid])
+    })).toThrow()
+  })
+
+  it.each([8, 40])("keeps full %i-member preparation and display source checks bounded", async count => {
+    const f = await checkpointFixture(), target = f.runtime.target.ref
+    const natives = Array.from({ length: count }, (_, index) => {
+      const uuid = randomUUID(), content = [{ type: "text" as const, text: `notice-${index}` }]
+      const native = new SystemMessage({ id: uuid, content })
+      const access = createFunctionConversationTranscriptAccess((_target, row) => ({
+        id: row.uuid, role: "system", content, created_at: new Date(row.createdAt)
+      }))
+      const row = f.store.commit(target, { uuid, inputDigest: uuid, door: "note",
+        origin: { kind: "plugin", name: "BatchDisplayFixture" }, message: { type: "system", content },
+        nativePayload: serializeFunctionConversationNativeMessage(native),
+        orderAnchor: { kind: "sdk-note" }, inbox: false, sdk: true },
+      f.current, access.write, access.verify)
+      native.additional_kwargs = { function_row: functionConversationCanonicalStamp(target, row) }
+      return native
+    })
+    const checkpoint: Checkpoint = { ...f.checkpoint, id: randomUUID(),
+      ts: new Date(Date.parse(f.checkpoint.ts) + 1).toISOString(),
+      channel_values: { ...f.checkpoint.channel_values, messages: [f.saved.result.message, ...natives] } }
+    const bridge = new FunctionConversationDeliveryBridge(f.store, () => ({ target,
+      checkpointThreadId: f.threadId, checkpointIncarnation: f.incarnation,
+      signal: f.controller.signal, assertCurrent: f.current }))
+    await bridge.wrap(f.saver).put(f.config, checkpoint, { source: "loop", step: 2, parents: {} })
+    const originalThread = appDb.getThreadCore(f.threadId)!
+    const sourceGuard = vi.fn(f.current)
+    const started = performance.now()
+    const source = await prepareFunctionConversationCanonicalDisplay({ database: f.database,
+      store: f.store, saver: f.saver, threadId: f.threadId, workspace: target.workspace,
+      originalThread, checkpointId: checkpoint.id, signal: f.controller.signal,
+      assertCurrent: sourceGuard })
+    if (!source) throw Error("ACTUAL_DISPLAY_SOURCE_REQUIRED")
+    const preparationChecks = sourceGuard.mock.calls.length
+    // Work is bounded by the batch boundaries, rather than 4+ full copies per member.
+    expect(preparationChecks).toBeLessThan(64)
+    sourceGuard.mockClear()
+    withFunctionConversationCanonicalDisplay(source, view => {
+      expect(view.read(0)?.id).toBe(f.uuid)
+      for (let index = 0; index < count; index++) {
+        expect(view.read(index + 1)?.id).toBe(natives[index].id)
+      }
+    })
+    expect(sourceGuard.mock.calls.length).toBeLessThan(16)
+    console.log("[CanonicalBatchPerformance]", { members: count + 1, preparationChecks,
+      displayChecks: sourceGuard.mock.calls.length, elapsedMs: Math.round(performance.now() - started) })
+  }, 20_000)
+
   it("exports a real committed system notice while omitting its hidden SDK note", async () => {
     const f = await checkpointFixture(), target = f.runtime.target.ref
     const messages = ["user", "system"].map(type => {

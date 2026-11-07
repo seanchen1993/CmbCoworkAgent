@@ -12,6 +12,10 @@ examples/sparks-task-workbench/** text eol=lf
 examples/sparks-edit-reminder/** text eol=lf
 examples/sparks-stage-debugger/** text eol=lf
 examples/developer-workbench/** text eol=lf
+examples/frontend-api-workbench/demo/start-demo.cmd text eol=crlf
+examples/frontend-api-workbench/demo/public/vendor/** -text
+examples/frontend-api-starter/start-demo.cmd text eol=crlf
+examples/frontend-api-starter/public/vendor/** -text
 
 # Native composition resources carry provenance hashes and must retain LF bytes.
 resources/native-compositions/** text eol=lf

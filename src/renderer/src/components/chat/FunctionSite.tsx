@@ -33,6 +33,7 @@ import { validateFunctionNativeContent } from "../../../../shared/mods/v2/engine
 import { functionInlineLabel, functionInlineTree, functionNativeHint,
   functionNativeProps } from "../../lib/function-native-content"
 import { functionSitePresentationKey,
+  type CachedFunctionSitePresentation, type FunctionSiteProgressLease,
   type FunctionSitePresentationCache } from "../../lib/function-site-presentation"
 import { functionSiteLayoutContainer, observeFunctionSiteGeometry,
   type FunctionSiteGeometry } from "../../lib/function-site-geometry"
@@ -226,6 +227,7 @@ function FunctionSiteSurface({
     inputKey: string
     inputRevision: number
     owner: string
+    prefixEpoch: number
     presentationCurrent?: () => boolean
   } | null>(null)
   const [projection, setProjection] = useState<{
@@ -252,6 +254,14 @@ function FunctionSiteSurface({
   const redrawPresentation = useRef<{
     frame: NonNullable<typeof frame>; revision: number; inputKey: string
   } | null>(null)
+  // Redraw retires pending reads, but may retain an already committed inert drawing.
+  // Keep that drawing's progress lineage separate from its original read's epoch.
+  const committedProgressEpoch = useRef<{
+    frame: NonNullable<typeof frame>; epoch: number
+  } | null>(null)
+  const frameProgressEpoch = (value: NonNullable<typeof frame>): number =>
+    committedProgressEpoch.current?.frame === value
+      ? committedProgressEpoch.current.epoch : value.prefixEpoch
   const input = isFunctionDockedSite(component) ? { ...facts, ...geometry } : facts
   const inputKey = JSON.stringify(input)
   const presentationIdentity = presentationId ?? messageId
@@ -265,16 +275,60 @@ function FunctionSiteSurface({
     ? JSON.stringify([component, presentationIdentity]) : undefined
   const presentationKeyRef = useRef(presentationKey)
   presentationKeyRef.current = presentationKey
-  const presentationInput = useRef({ inputKey, key: presentationKey })
-  if (presentationInput.current.inputKey !== inputKey) {
-    // A -> B -> A must not resurrect A's cached data before its new protected read.
-    // Revoke synchronously without notifying other React components during render.
-    presentationCache?.invalidateKey(presentationInput.current.key, false, presentationRow)
+  // A pending first read may finish for an earlier assistant/tool progress prefix. Any intervening
+  // replacement (including A -> B -> A) irreversibly ends that prefix lineage.
+  const prefixLineage = useRef({ key: inputKey, epoch: 0 })
+  if (prefixLineage.current.key !== inputKey) {
+    const append = ["AssistantMessage", "ToolGroup"].includes(component) &&
+      retainsFunctionSitePresentation(component, prefixLineage.current.key, input)
+    prefixLineage.current = { key: inputKey, epoch: prefixLineage.current.epoch + (append ? 0 : 1) }
   }
-  presentationInput.current = { inputKey, key: presentationKey }
+  const committedCached = useRef<{
+    cached: CachedFunctionSitePresentation; key: string | null; inputKey: string
+    renderer: typeof renderNative; epoch: number; width: number
+    cache: FunctionSitePresentationCache; row: string | undefined
+  } | null>(null)
+  const progressLease = useRef<{
+    lease: FunctionSiteProgressLease; inputKey: string; renderer: typeof renderNative
+    epoch: number; width: number
+  } | null>(null)
+  const releaseProgressLease = (): void => {
+    progressLease.current?.lease.release()
+    progressLease.current = null
+    committedCached.current = null
+  }
+  const presentationInput = useRef({ inputKey, key: presentationKey, width: viewportWidth })
+  const leased = progressLease.current
+  if (leased && (!scopeCurrent() || !leased.lease.current() || leased.width !== viewportWidth ||
+    leased.epoch !== prefixLineage.current.epoch ||
+    !retainsFunctionSitePresentation(component, leased.inputKey, input))) releaseProgressLease()
+  if (presentationInput.current.inputKey !== inputKey) {
+    const previous = presentationInput.current
+    const committed = committedCached.current
+    const progress = ["AssistantMessage", "ToolGroup"].includes(component) &&
+      Boolean(renderNative || fallback === undefined) && previous.width === viewportWidth &&
+      retainsFunctionSitePresentation(component, previous.inputKey, input)
+    if (!progress) releaseProgressLease()
+    if (progress && !progressLease.current && committed && scopeCurrent() &&
+      committed.cache === presentationCache && committed.row === presentationRow &&
+      committed.key === previous.key && committed.inputKey === previous.inputKey &&
+      committed.width === viewportWidth && committed.epoch === prefixLineage.current.epoch) {
+      const lease = presentationCache?.consumeProgress(previous.key, committed.cached, presentationRow)
+      if (lease) progressLease.current = { lease, inputKey: committed.inputKey,
+        renderer: committed.renderer, epoch: committed.epoch, width: committed.width }
+    }
+    // Consumption already revoked the old exact key and pending cache admission. Other
+    // transitions retain the original fail-closed path, including A -> B -> A.
+    if (progressLease.current?.lease.key !== previous.key)
+      presentationCache?.invalidateKey(previous.key, false, presentationRow)
+  }
+  presentationInput.current = { inputKey, key: presentationKey, width: viewportWidth }
   const [presentationRevision, setPresentationRevision] = useState(0)
-  const cachedPresentation = useMemo(() => presentationCache?.read(presentationKey) ?? null,
+  const exactCachedPresentation = useMemo(() => presentationCache?.read(presentationKey) ?? null,
     [presentationCache, presentationKey, presentationRevision])
+  const cachedPresentation = progressLease.current?.lease ?? exactCachedPresentation
+  const cachedPresentationKey = progressLease.current?.lease.key ?? presentationKey
+  const cachedRenderer = progressLease.current ? progressLease.current.renderer : renderNative
   const cachedPresentationRef = useRef(cachedPresentation)
   cachedPresentationRef.current = cachedPresentation
   const cachedSection = useRef<HTMLDivElement>(null)
@@ -283,14 +337,6 @@ function FunctionSiteSurface({
     frame: NonNullable<typeof frame>
     geometry: FunctionSiteGeometry
   } | null>(null)
-  // A pending first read may finish for an earlier assistant prefix. Any intervening
-  // replacement (including A -> B -> A) irreversibly ends that prefix lineage.
-  const prefixLineage = useRef({ key: inputKey, epoch: 0 })
-  if (prefixLineage.current.key !== inputKey) {
-    const append = component === "AssistantMessage" &&
-      retainsFunctionSitePresentation(component, prefixLineage.current.key, input)
-    prefixLineage.current = { key: inputKey, epoch: prefixLineage.current.epoch + (append ? 0 : 1) }
-  }
   const pendingPrefix = useRef<{ key: string; epoch: number } | null>(null)
   const rendererRef = useRef(renderNative)
   rendererRef.current = renderNative
@@ -325,7 +371,9 @@ function FunctionSiteSurface({
       (!renderNative || nativePresentation.current?.frame === frame) &&
       (redrawPresentation.current?.frame === frame
         ? redrawPresentation.current.revision === inputRevision && redrawPresentation.current.inputKey === inputKey
-        : retainsFunctionSitePresentation(component, frame.inputKey, input))))
+        : (!["AssistantMessage", "ToolGroup"].includes(component) ||
+          frameProgressEpoch(frame) === prefixLineage.current.epoch) &&
+          retainsFunctionSitePresentation(component, frame.inputKey, input))))
     ? frame.snapshot : null
   // Cache admission is optional retention, not the authority of an already committed view.
   // Only an uninterrupted append lineage may retain protected data for an older input.
@@ -383,15 +431,25 @@ function FunctionSiteSurface({
   const applyingFocus = useRef(false)
   const pending = useRef(0)
   useLayoutEffect(() => {
+    // Only a cached DOM branch actually committed to the screen may seed a lease.
+    committedCached.current = !snapshot && !projected && !error &&
+      !(inactive?.ticket.current() && inactive.inputRevision === inputRevision) &&
+      !progressLease.current && cachedSection.current && presentationCache &&
+      exactCachedPresentation?.current()
+      ? { cached: exactCachedPresentation, key: presentationKey, inputKey, renderer: renderNative,
+          epoch: prefixLineage.current.epoch, width: viewportWidth, cache: presentationCache,
+          row: presentationRow } : null
+  })
+  useLayoutEffect(() => {
     if (snapshot || !presentationCache || !cachedPresentation) return
     const changed = () => {
       if (!cachedPresentation.current()) setPresentationRevision((revision) => revision + 1)
     }
-    const stop = presentationCache.subscribe(changed, presentationKey)
+    const stop = presentationCache.subscribe(changed, cachedPresentationKey)
     const expiry = setTimeout(changed, Math.max(0, cachedPresentation.expiresAt - Date.now()) + 1)
     if (!cachedPresentation.current()) changed()
     return () => { stop(); clearTimeout(expiry) }
-  }, [snapshot, presentationCache, cachedPresentation, presentationKey])
+  }, [snapshot, presentationCache, cachedPresentation, cachedPresentationKey])
   useLayoutEffect(() => {
     const node = cachedSection.current
     const presentation = cachedPresentation?.presentation
@@ -500,27 +558,39 @@ function FunctionSiteSurface({
   useEffect(() => {
     const node = section.current
     if (!isFunctionDockedSite(component) || !node) return
+    let scheduled: number | undefined
     const measure = (): void => {
       // Measure the allocated slot, not its content-dependent border/scrollbar interior.
       // Clearing an obsolete drawing can remove its frame; clientWidth then changes and
       // invalidates the replacement again, creating an endless empty/render resize loop.
       const bodyColumns = Math.max(1, Math.min(1000,
         Math.floor(node.getBoundingClientRect().width / 8)))
-      const maxRows = Math.max(1, Math.min(component === "ChatHeader" ? 6 : 12,
-        Math.floor(window.innerHeight / (component === "ChatHeader" ? 96 : 72))))
+      // Both docks support actual forms. This caps expanded content at 288px and one third
+      // of the viewport; compact decorations still occupy only their natural content height.
+      const maxRows = Math.max(1, Math.min(12, Math.floor(window.innerHeight / 72)))
       setGeometry((old) =>
         old.bodyColumns === bodyColumns && old.maxRows === maxRows
           ? old
           : { ...old, bodyColumns, maxRows }
       )
     }
-    const observer = new ResizeObserver(measure)
+    // ResizeObserver and window resize may describe the same layout. Publish once per
+    // frame, outside the observer delivery, instead of re-entering layout with React.
+    const schedule = (): void => {
+      if (scheduled !== undefined) return
+      scheduled = requestAnimationFrame(() => {
+        scheduled = undefined
+        measure()
+      })
+    }
+    const observer = new ResizeObserver(schedule)
     observer.observe(node)
-    window.addEventListener("resize", measure)
+    window.addEventListener("resize", schedule)
     measure()
     return () => {
       observer.disconnect()
-      window.removeEventListener("resize", measure)
+      window.removeEventListener("resize", schedule)
+      if (scheduled !== undefined) cancelAnimationFrame(scheduled)
     }
   }, [component])
 
@@ -557,6 +627,8 @@ function FunctionSiteSurface({
       cancelTimer()
       lifetime.invalidate()
       redrawPresentation.current = null
+      committedProgressEpoch.current = null
+      releaseProgressLease()
       setFrame(null)
       projectionRef.current = null
       setProjection(null)
@@ -594,7 +666,7 @@ function FunctionSiteSurface({
       const current = (): boolean => running === attempt && ticket.current() && !hidden() && !sourceRetiring && (
         (capturedInputRevision === inputVersion.current.revision &&
           capturedInputKey === JSON.stringify(inputRef.current)) ||
-        (component === "AssistantMessage" && canRetainRef.current &&
+        (["AssistantMessage", "ToolGroup"].includes(component) && canRetainRef.current &&
           capturedEpoch === prefixLineage.current.epoch &&
           retainsFunctionSitePresentation(component, capturedInputKey, inputRef.current)))
       let retryDelay: number | undefined
@@ -632,6 +704,7 @@ function FunctionSiteSurface({
               return
             }
             if (outcome.state === "inactive") {
+              releaseProgressLease()
               recovery.reset()
               setInactive({ ticket, inputKey: capturedInputKey, inputRevision: capturedInputRevision })
               setFrame(null)
@@ -646,10 +719,10 @@ function FunctionSiteSurface({
             }
             if (outcome.state === "projected") {
               validateFunctionDisplaySnapshot(outcome.snapshot, component, expectedRequestId)
-              // A passive frame is exact-input data. It cannot borrow an append-only
-              // allowance to publish an earlier prefix or regain a drawing callback.
-              if (capturedInputRevision !== inputVersion.current.revision ||
-                capturedInputKey !== JSON.stringify(inputRef.current)) return
+              // current() already limits older input to an uninterrupted display progress
+              // lineage. Commit its protected prefix with the captured renderer so a cold
+              // streaming message need not wait for tokens to stop. The view stays inert,
+              // and cache/geometry admission below still requires the exact input revision.
               if (projectionReadCurrent?.(outcome.snapshot.key) === false) {
                 // A dependency changed before this row knew its host key. Obtain a new
                 // read; do not publish the queued response or retire unrelated rows.
@@ -658,6 +731,7 @@ function FunctionSiteSurface({
                 return
               }
               recovery.reset()
+              releaseProgressLease()
               const nextProjection = { snapshot: outcome.snapshot, ticket, inputKey: capturedInputKey,
                 inputRevision: capturedInputRevision, prefixEpoch: capturedEpoch, presentationCurrent }
               projectionPresentation.current = { projection: nextProjection, renderNative: capturedRenderer }
@@ -683,10 +757,13 @@ function FunctionSiteSurface({
           validateFunctionSiteTree(result.tree)
           validateFunctionNativeContent(result.nativeContent, component, expectedRequestId)
           recovery.reset()
+          releaseProgressLease()
           const nextFrame = { snapshot: result, ticket, inputKey: capturedInputKey,
-            inputRevision: capturedInputRevision, owner: capturedOwner!, presentationCurrent }
+            inputRevision: capturedInputRevision, prefixEpoch: capturedEpoch,
+            owner: capturedOwner!, presentationCurrent }
           // Capture the delegate paired with this read, never a later raw-input closure.
           nativePresentation.current = { frame: nextFrame, renderNative: capturedRenderer }
+          committedProgressEpoch.current = null
           setFrame(nextFrame)
           projectionRef.current = null
           setProjection(null)
@@ -697,6 +774,7 @@ function FunctionSiteSurface({
         }
       } catch (cause) {
         if (current()) {
+          releaseProgressLease()
           if (projectionRef.current) {
             presentationCache?.invalidateKey(presentationKeyRef.current, true, presentationRow)
             invalidate()
@@ -776,11 +854,16 @@ function FunctionSiteSurface({
         previousProjection.prefixEpoch === prefixLineage.current.epoch &&
         retainsFunctionSitePresentation(component, previousProjection.inputKey, inputRef.current)
       const pending = pendingPrefix.current
-      const firstPrefix = !previous && component === "AssistantMessage" && canRetainRef.current &&
+      const firstPrefix = !previous && ["AssistantMessage", "ToolGroup"].includes(component) && canRetainRef.current &&
         pending && pending.epoch === prefixLineage.current.epoch &&
         retainsFunctionSitePresentation(component, pending.key, inputRef.current)
-      if (!retainedProjection && !firstPrefix && (!canRetainRef.current || !previous?.ticket.current() || previous.owner !== owner ||
-        !retainsFunctionSitePresentation(component, previous.inputKey, inputRef.current))) invalidate()
+      const retainedLease = progressLease.current && progressLease.current.lease.current() &&
+        progressLease.current.epoch === prefixLineage.current.epoch &&
+        retainsFunctionSitePresentation(component, progressLease.current.inputKey, inputRef.current)
+      if (!retainedLease && !retainedProjection && !firstPrefix && (!canRetainRef.current || !previous?.ticket.current() || previous.owner !== owner ||
+        (["AssistantMessage", "ToolGroup"].includes(component) &&
+          frameProgressEpoch(previous) !== prefixLineage.current.epoch ||
+          !retainsFunctionSitePresentation(component, previous.inputKey, inputRef.current)))) invalidate()
       setError("")
       update()
     }
@@ -788,7 +871,8 @@ function FunctionSiteSurface({
     const stop = subscribeFunctionSiteCardsChanged(window.api.mods, (event) => {
       if (event.threadId === threadId && event.scope?.startsWith("site-projection:")) {
         const hostKey = event.scope.slice("site-projection:".length)
-        if (projectionRef.current?.snapshot.key === hostKey ||
+        if (progressLease.current?.lease.hostKey === hostKey ||
+          projectionRef.current?.snapshot.key === hostKey ||
           cachedPresentationRef.current?.hostKey === hostKey ||
           presentationCache?.matchesProjection(presentationKeyRef.current, hostKey)) {
           ownerRequired = true
@@ -814,7 +898,7 @@ function FunctionSiteSurface({
         if (event.scope === `site-redraw:${owner}`) {
           // A redraw is a new protected presentation, not an append-only input update.
           // Even a compatible pending prefix must not publish across that revision.
-          prefixLineage.current.epoch++
+          const previousEpoch = prefixLineage.current.epoch++
           const previous = frameRef.current
           const currentRevision = inputVersion.current.revision
           const currentInputKey = JSON.stringify(inputRef.current)
@@ -825,13 +909,16 @@ function FunctionSiteSurface({
               (redrawPresentation.current?.frame === previous &&
                 redrawPresentation.current.revision === currentRevision &&
                 redrawPresentation.current.inputKey === currentInputKey) ||
-              retainsFunctionSitePresentation(component, previous.inputKey, inputRef.current))
+              ((!["AssistantMessage", "ToolGroup"].includes(component) ||
+                frameProgressEpoch(previous) === previousEpoch) &&
+                retainsFunctionSitePresentation(component, previous.inputKey, inputRef.current)))
           if (eligible && previous) {
             const revision = ++inputVersion.current.revision
             // This is a new drawing revision, not a facts change. Do not route it through
             // the facts-effect invalidation; queued/ongoing reads still use this revision.
             lastInputRevision.current = revision
             redrawPresentation.current = { frame: previous, revision, inputKey: currentInputKey }
+            committedProgressEpoch.current = { frame: previous, epoch: prefixLineage.current.epoch }
             setRedrawRevision(revision)
           } else invalidate()
           update()
@@ -907,6 +994,7 @@ function FunctionSiteSurface({
       cancelTimer()
       live.current = false
       lifetime.close()
+      releaseProgressLease()
       releaseOwner()
       refreshRef.current = () => {}
       inputRefreshRef.current = () => {}
@@ -1090,12 +1178,12 @@ function FunctionSiteSurface({
           onChangeCapture={blockCachedInteraction}>
           {cachedPresentation.presentation.hostMessage ? <FunctionDisplayContent
             data={{ component, hostMessage: cachedPresentation.presentation.hostMessage }}
-            renderNative={renderNative} /> : <Element node={cachedPresentation.presentation.tree!} busy act={async () => {}}
+            renderNative={cachedRenderer} /> : <Element node={cachedPresentation.presentation.tree!} busy act={async () => {}}
             renderEngine={(ref) => {
               const native = cachedPresentation.presentation.nativeContent
               const props = functionNativeProps(native, ref)
               if (!props) return null
-              if (renderNative) return renderNative(props)
+              if (cachedRenderer) return cachedRenderer(props)
               return native?.nativeUnchanged ? null :
                 <Element node={functionSiteDefault(component, props)} busy act={async () => {}} />
             }} />}

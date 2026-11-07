@@ -30,6 +30,7 @@ export const VITEST_TEST_INCLUDE = [
   "src/renderer/src/components/chat/chat-scroll-regressions.test.ts",
   "src/renderer/src/components/chat/chat-scroll-runtime-harness.test.ts",
   "src/renderer/src/components/chat/chat-scroll-navigator.test.ts",
+  "src/renderer/src/components/chat/chat-viewport-resize.test.ts",
   "src/renderer/src/components/chat/chat-virtual-window.test.ts",
   "src/renderer/src/components/chat/chat-bottom-presentation-wait.test.ts",
   "src/renderer/src/components/chat/chat-search-overlay.test.ts",

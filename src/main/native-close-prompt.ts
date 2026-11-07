@@ -13,20 +13,31 @@ interface NativeCloseContext {
  * when work starts or the tray disappears while the native dialog is open.
  */
 export function createNativeClosePrompt() {
-  let open = false
+  let pending: Promise<void> | undefined
   let generation = 0
   return {
     get isOpen() {
-      return open
+      return pending !== undefined
+    },
+    get pending() {
+      return pending
     },
     cancel() {
       generation += 1
     },
-    async request(context: NativeCloseContext): Promise<void> {
-      if (open || !context.isAvailable()) return
-      open = true
+    request(context: NativeCloseContext): Promise<void> {
+      if (pending) return pending
+      if (!context.isAvailable()) return Promise.resolve()
+      let resolve!: () => void
+      let reject!: (error: unknown) => void
+      const completion = new Promise<void>((accept, refuse) => {
+        resolve = accept
+        reject = refuse
+      })
+      // Publish before calling native code: every caller joins the actual choice.
+      pending = completion
       const requestGeneration = generation
-      try {
+      const run = async (): Promise<void> => {
         while (requestGeneration === generation && context.isAvailable()) {
           const activeRuns = context.hasActiveRuns()
           const tray = context.hasTray()
@@ -52,9 +63,18 @@ export function createNativeClosePrompt() {
           }
           return
         }
-      } finally {
-        open = false
       }
+      void run().then(
+        () => {
+          if (pending === completion) pending = undefined
+          resolve()
+        },
+        (error) => {
+          if (pending === completion) pending = undefined
+          reject(error)
+        }
+      )
+      return completion
     }
   }
 }

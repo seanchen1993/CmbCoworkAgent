@@ -4,8 +4,11 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { openNativeSqliteDatabase } from "./native-sqlite-adapter"
+import { THREAD_RUNTIME_SCOPE_INDEX, THREAD_RUNTIME_SCOPE_EXPRESSION } from "./thread-runtime-scope-query"
+import * as incarnations from "../services/thread-incarnation"
 import {
   FunctionConversationStore,
+  readFunctionConversationStoreCurrentExecution,
   type FunctionConversationCommit,
   type FunctionConversationRef,
   type FunctionConversationRow,
@@ -22,11 +25,13 @@ afterEach(() => {
   for (const close of cleanups.splice(0).reverse()) close()
 })
 
-function fixture() {
+function fixture(indexed = false) {
   const directory = mkdtempSync(join(tmpdir(), "cmb-function-row-cut-"))
   const path = join(directory, "app.sqlite")
   let db = openNativeSqliteDatabase(path).database
   db.run("CREATE TABLE threads (thread_id TEXT PRIMARY KEY, created_at INTEGER, metadata TEXT)")
+  if (indexed) db.run(`CREATE INDEX ${THREAD_RUNTIME_SCOPE_INDEX}
+    ON threads(thread_id, ${THREAD_RUNTIME_SCOPE_EXPRESSION})`)
   db.run(`CREATE TABLE projection (conversation_id TEXT, uuid TEXT, payload TEXT NOT NULL,
     PRIMARY KEY(conversation_id, uuid))`)
   const token = randomUUID()
@@ -82,6 +87,157 @@ function read(f: ReturnType<typeof fixture>, target: FunctionConversationRef,
 }
 
 describe("FunctionConversationStore exact canonical row at a fixed host cut", () => {
+  it.each(["parser", "matcher"] as const)(
+    "retains raw metadata when a warmed indexed identity %s is replaced", kind => {
+      const f = fixture(true)
+      const metadata = JSON.stringify({ cmb_thread_incarnation: f.input.incarnation.token,
+        llmFileHistory: "汉😀".repeat(20000) })
+      f.db.run("UPDATE threads SET metadata=? WHERE thread_id=?", [metadata, f.ref.threadId])
+      f.store.assertCurrent(f.ref)
+      let observed = false
+      if (kind === "parser") {
+        const parse = JSON.parse
+        vi.spyOn(JSON, "parse").mockImplementation((value: string) => {
+          const parsed = parse(value)
+          if (parsed?.cmb_thread_incarnation === f.input.incarnation.token) {
+            observed = true
+            if (value !== metadata) throw Error("RAW_METADATA_REQUIRED")
+          }
+          return parsed
+        })
+      } else {
+        const matches = incarnations.matchesThreadIncarnation
+        vi.spyOn(incarnations, "matchesThreadIncarnation").mockImplementation((row, expected) => {
+          observed = true
+          if (row?.metadata !== metadata) throw Error("RAW_METADATA_REQUIRED")
+          return matches(row, expected)
+        })
+      }
+      f.store.assertCurrent(f.ref)
+      expect(observed).toBe(true)
+    })
+
+  it.each(["array-fresh", "array-warm", "object-fresh", "object-warm"] as const)(
+    "keeps thread-failure precedence when execution fallback sees inherited index 1 (%s)", kind => {
+      const f = fixture()
+      const execution = readFunctionConversationStoreCurrentExecution(f.store, f.db)!
+      // A mutable target selects the original two-query execution path with intact intrinsics.
+      if (kind.endsWith("warm")) execution.assertCurrent({ ...f.ref })
+      f.db.run("UPDATE threads SET metadata='{}' WHERE thread_id=?", [f.ref.threadId])
+      const prototype = kind.startsWith("array") ? Array.prototype : Object.prototype
+      const previous = Object.getOwnPropertyDescriptor(prototype, "1")
+      let calls = 0, error: unknown
+      Object.defineProperty(prototype, "1", { configurable: true,
+        set() { calls++; throw Error("INHERITED_SECOND_BINDING") } })
+      try { execution.assertCurrent(f.ref) } catch (caught) { error = caught }
+      finally {
+        if (previous) Object.defineProperty(prototype, "1", previous)
+        else Reflect.deleteProperty(prototype, "1")
+      }
+      expect(error).toBeInstanceOf(Error)
+      expect((error as Error).message).toBe("MODS_CONVERSATION_THREAD_CHANGED")
+      expect(calls).toBe(0)
+    })
+
+  it("keeps joined identity and checkpoint high water fresh with retained large metadata", () => {
+    const f = fixture(true)
+    commit(f)
+    const metadata = JSON.stringify({ cmb_thread_incarnation: f.input.incarnation.token,
+      padding: "汉😀".repeat(20000) })
+    f.db.run("UPDATE threads SET metadata=? WHERE thread_id=?", [metadata, f.ref.threadId])
+    const cut = f.store.captureCheckpointCanonicalCut(f.ref, live)
+    f.store.assertCurrent(f.ref)
+    f.store.assertCheckpointCanonicalCut(f.ref, cut)
+    f.db.run("UPDATE function_conversations SET next_sequence=1 WHERE conversation_id=?",
+      [f.ref.conversationId])
+    expect(() => f.store.assertCheckpointCanonicalCut(f.ref, cut))
+      .toThrow("MODS_CONVERSATION_CHECKPOINT_MEMBERSHIP")
+    f.db.run("UPDATE function_conversations SET next_sequence=2 WHERE conversation_id=?",
+      [f.ref.conversationId])
+    f.store.assertCheckpointCanonicalCut(f.ref, cut)
+    f.db.run("UPDATE threads SET metadata=? WHERE thread_id=?", [
+      JSON.stringify({ cmb_thread_incarnation: randomUUID(), padding: "汉😀".repeat(20000) }),
+      f.ref.threadId])
+    expect(() => f.store.assertCurrent(f.ref)).toThrow("MODS_CONVERSATION_THREAD_CHANGED")
+    expect(() => f.store.assertCheckpointCanonicalCut(f.ref, cut))
+      .toThrow("MODS_CONVERSATION_THREAD_CHANGED")
+  })
+
+  it.each(["array", "object"] as const)(
+    "keeps the old read path when %s index 3 has an inherited setter", kind => {
+      const f = fixture()
+      f.store.assertCurrent(f.ref)
+      const prototype = kind === "array" ? Array.prototype : Object.prototype
+      const previous = Object.getOwnPropertyDescriptor(prototype, "3")
+      let calls = 0, error: unknown
+      Object.defineProperty(prototype, "3", { configurable: true,
+        set() { calls++; throw Error("INHERITED_FOURTH_BINDING") } })
+      try { f.store.assertCurrent(f.ref) } catch (caught) { error = caught }
+      finally {
+        if (previous) Object.defineProperty(prototype, "3", previous)
+        else Reflect.deleteProperty(prototype, "3")
+      }
+      expect(error).toBeUndefined()
+      expect(calls).toBe(0)
+    })
+
+  it("batches original rows while freezing the caller's UUIDs, target and cut", () => {
+    const f = fixture(), first = commit(f), second = commit(f), future = commit(f)
+    const cut = { frontier: second.sequence }, target = { ...f.ref }
+    const uuids = [first.uuid, second.uuid]
+    const guard = vi.fn(() => {
+      uuids.push(future.uuid)
+      cut.frontier = future.sequence
+      target.branchId = "changed-caller-target"
+    })
+    expect(f.store.readRowsAtCut(target, uuids, cut, guard)).toEqual([first, second])
+    expect(guard).toHaveBeenCalledTimes(2)
+    expect(() => f.store.readRowsAtCut(f.ref, [future.uuid], { frontier: second.sequence }, live))
+      .toThrow("MODS_CONVERSATION_ROW_OUTSIDE_CUT")
+  })
+
+  it.each(["transaction", "incarnation", "cut", "lineage"] as const)(
+    "rejects a batch when its last guard changes %s", change => {
+      const f = fixture(), first = commit(f), second = commit(f)
+      let calls = 0
+      expect(() => f.store.readRowsAtCut(f.ref, [first.uuid, second.uuid],
+        { frontier: second.sequence }, () => {
+          if (++calls !== 2) return
+          if (change === "transaction") f.db.run("BEGIN")
+          else if (change === "incarnation") f.db.run("UPDATE threads SET metadata='{}'")
+          else if (change === "cut") f.db.run("UPDATE function_conversations SET next_sequence=1")
+          else f.db.run("UPDATE function_conversation_branches SET parent_branch_id=branch_id")
+        })).toThrow()
+      expect(calls).toBe(2)
+    })
+
+  it("keeps timestamp and inherited branch limits for batched rows", () => {
+    const f = fixture(), now = vi.spyOn(Date, "now").mockReturnValue(100)
+    const first = commit(f)
+    now.mockReturnValue(200)
+    const second = commit(f)
+    expect(() => f.store.readRowsAtCut(f.ref, [first.uuid, second.uuid], {
+      frontier: second.sequence, notAfterCreatedAt: first.createdAt
+    }, live)).toThrow("MODS_CONVERSATION_ROW_OUTSIDE_CUT")
+    const branch = f.store.forkBranch(f.ref, {
+      parentFrontier: first.sequence, checkpointId: "batch-fork"
+    }, live)
+    expect(f.store.readRowsAtCut(branch, [first.uuid], { frontier: second.sequence }, live)).toEqual([first])
+    expect(() => f.store.readRowsAtCut(branch, [second.uuid], { frontier: second.sequence }, live))
+      .toThrow("MODS_CONVERSATION_ROW_OUTSIDE_CUT")
+  })
+
+  it("preserves source failure at either boundary of a batch", () => {
+    const f = fixture(), row = commit(f), failure = Error("BATCH_SOURCE_RETIRED")
+    for (const expireAt of [1, 2]) {
+      let calls = 0
+      expect(() => f.store.readRowsAtCut(f.ref, [row.uuid], { frontier: row.sequence }, () => {
+        if (++calls === expireAt) throw failure
+      })).toThrow(failure)
+      expect(calls).toBe(expireAt)
+    }
+  })
+
   it("returns the full native original, without the SDK or display content boundary", () => {
     const f = fixture()
     const text = "中".repeat(400_000)

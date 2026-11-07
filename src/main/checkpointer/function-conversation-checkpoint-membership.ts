@@ -18,6 +18,8 @@ import type {
 import type { ThreadIncarnation } from "../services/thread-incarnation"
 import { SqlJsSaver, type SqlJsSaverCommittedCheckpointReceipt,
   type SqlJsSaverFunctionConversationRecoveryReceipt } from "./sqljs-saver"
+import { isNativeCommittedMembershipAdmission, prepareNativeCommittedCheckpointCapture } from
+  "./committed-checkpoint-native-capture"
 
 export interface FunctionConversationCanonicalCut {
   readonly highWater: number
@@ -62,6 +64,9 @@ const proofs = new WeakMap<FunctionConversationCheckpointMembershipProof, {
   snapshot: FunctionConversationCheckpointMembershipSnapshot
   assertCurrent: () => void
 }>()
+const nativeCommittedProofs = new WeakSet<FunctionConversationCheckpointMembershipProof>()
+const nativeProofHas = WeakSet.prototype.has, nativeProofAdd = WeakSet.prototype.add
+const proofGet = WeakMap.prototype.get, proofApply = Reflect.apply
 const missingMessages = new WeakMap<FunctionConversationCheckpointMembershipProof, {
   messages: readonly BaseMessage[]
   verify: (messages?: readonly BaseMessage[]) => void
@@ -94,10 +99,16 @@ export interface FunctionConversationMembershipAdmission {
 }
 
 function captureTuple(store: FunctionConversationStore, tuple: CheckpointTuple,
-  admission: FunctionConversationMembershipAdmission, nativeGuard: () => void
+  admission: FunctionConversationMembershipAdmission, nativeGuard: () => void, batchRows = false,
+  assertNativeCopy?: () => void
 ): FunctionConversationCheckpointMembershipProof {
   const { target, cut } = admission
-  const guard = () => { nativeGuard(); admission.assertCurrent(); store.assertCurrent(target) }
+  const guard = () => {
+    nativeGuard(); admission.assertCurrent(); store.assertCurrent(target)
+    // A real source callback may mutate the tuple or dispatch. Recheck after its final call,
+    // before the synchronous batch can consume a private copy under changed qualifications.
+    assertNativeCopy?.()
+  }
   guard()
   if (tuple.config.configurable?.thread_id !== admission.checkpointThreadId ||
     (tuple.config.configurable?.checkpoint_ns ?? "") !== target.checkpointNamespace ||
@@ -118,6 +129,12 @@ function captureTuple(store: FunctionConversationStore, tuple: CheckpointTuple,
   if (!Array.isArray(messages)) fail()
   const members: FunctionConversationCheckpointMember[] = [], native: string[] = []
   const seen = new Set<string>()
+  // Full display captures verify their original tuple in the source guard. Keep that
+  // expensive guard at the two boundaries of one synchronous native-row batch.
+  const batch = batchRows ? new Map(store.readRowsAtCut(target, messages.flatMap(message => {
+    const stamp = readFunctionConversationTranscriptStamp(message)
+    return stamp ? [stamp.uuid] : []
+  }), { frontier: cut.highWater }, guard).map(row => [row.uuid, row])) : undefined
   for (let ordinal = 0; ordinal < messages.length; ordinal += 1) {
     const message: unknown = messages[ordinal]
     if (!BaseMessage.isInstance(message) || hasInvalidFunctionConversationTranscriptStamp(message)) fail()
@@ -132,7 +149,9 @@ function captureTuple(store: FunctionConversationStore, tuple: CheckpointTuple,
       (stamp.messageType === "assistant" && type !== "ai") ||
       (stamp.messageType === "system" && type !== "system")) fail()
     seen.add(stamp.uuid)
-    const row = store.readRowAtCut(target, stamp.uuid, { frontier: cut.highWater }, guard)
+    const row = batch ? batch.get(stamp.uuid) :
+      store.readRowAtCut(target, stamp.uuid, { frontier: cut.highWater }, guard)
+    if (!row) fail()
     if (stamp.messageType === "user" && ToolMessage.isInstance(message)) {
       const content = row.message.content
       if (!["tool-result", "tool-message"].includes(row.door) || row.message.isMeta === true ||
@@ -174,14 +193,38 @@ export function captureCommittedConversationMembership(store: FunctionConversati
 ): FunctionConversationCheckpointMembershipProof {
   const read = () => SqlJsSaver.prototype.readCommittedCheckpoint.call(saver, receipt)
   const tuple = read()
+  if (isNativeCommittedMembershipAdmission(admission, store)) {
+    const captured = prepareNativeCommittedCheckpointCapture(store, admission.target, tuple,
+      { target: admission.target, cut: admission.cut, incarnation: admission.checkpointIncarnation })
+    if (captured) {
+      const verify = () => {
+        if (!isNativeCommittedMembershipAdmission(admission, store)) fail()
+        captured.assertCurrent()
+      }
+      const proof = captureTuple(store, captured.tuple, admission,
+        () => { if (read() !== tuple) fail() }, true, verify)
+      proofApply(nativeProofAdd, nativeCommittedProofs, [proof])
+      return proof
+    }
+  }
   return captureTuple(store, tuple, admission, () => { if (read() !== tuple) fail() })
+}
+
+/** Classification only. These proofs retain the full live original/copy verifier after a pause. */
+export function isNativeCommittedConversationMembership(proof: FunctionConversationCheckpointMembershipProof,
+  store: FunctionConversationStore, target: FunctionConversationRef): boolean {
+  const actual = proofApply(proofGet, proofs, [proof]) as ReturnType<typeof proofs.get>
+  return proofApply(nativeProofHas, nativeCommittedProofs, [proof]) === true &&
+    actual?.store === store && actual.target === target
 }
 
 /** Exact native read only. The caller's real binding is checked on both sides of the await. */
 export async function captureConversationCheckpointRead(store: FunctionConversationStore,
   saver: SqlJsSaver, config: RunnableConfig,
   admit: (tuple: CheckpointTuple) => FunctionConversationMembershipAdmission | undefined,
-  assertCurrent: () => void
+  assertCurrent: () => void,
+  // Opt in only when assertCurrent checks the full original tuple at both batch boundaries.
+  batchRows = false
 ): Promise<{ proof?: FunctionConversationCheckpointMembershipProof; tuple: CheckpointTuple }> {
   const fixed = { ...config, configurable: { ...config.configurable } }
   if (typeof fixed.configurable.checkpoint_id !== "string" || !fixed.configurable.checkpoint_id) fail()
@@ -196,7 +239,7 @@ export async function captureConversationCheckpointRead(store: FunctionConversat
   if (!tuple || tuple.checkpoint.id !== fixed.configurable.checkpoint_id)
     throw new ModFunctionError("MODS_CONVERSATION_CHECKPOINT_NOT_COMMITTED")
   const admission = admit(tuple)
-  return { proof: admission ? captureTuple(store, tuple, admission, guard) : undefined, tuple }
+  return { proof: admission ? captureTuple(store, tuple, admission, guard, batchRows) : undefined, tuple }
 }
 
 /** Store-only authentication: copying a brand, JSON or a valid UUID collection does not work. */

@@ -1,6 +1,7 @@
 import { publishClawNotice, revealClawPanes, ClawResultsVisibility } from "@/lib/claw-sidebar"
 import { withModsChatScope } from "../../lib/mods-chat-scope"
 import { useFunctionPaneScroll } from "../../lib/function-pane-scroll"
+import { useFunctionPaneWheel } from "../../lib/function-pane-wheel"
 import { createContext, useContext, Fragment, useCallback, useEffect, useId, useRef, useState,
   type CSSProperties } from "react"
 import { pressFunctionHotkey } from "../../lib/function-ui-hotkey"
@@ -146,18 +147,20 @@ function Field({
           }}
         />
       </label>
-      <Button
-        type="submit"
-        variant="outline"
-        size="sm"
-        disabled={busy && !retainFocusWhileBusy}
-        aria-disabled={busy || undefined}
-        data-function-control={String(node.props.key)}
-        data-function-plugin={node.press?.plugin}
-        data-function-handle={node.press?.handle}
-      >
-        {String(node.props.submitLabel ?? "提交")}
-      </Button>
+      {node.props.submitLabel !== "" && (
+        <Button
+          type="submit"
+          variant="outline"
+          size="sm"
+          disabled={busy && !retainFocusWhileBusy}
+          aria-disabled={busy || undefined}
+          data-function-control={String(node.props.key)}
+          data-function-plugin={node.press?.plugin}
+          data-function-handle={node.press?.handle}
+        >
+          {String(node.props.submitLabel ?? "提交")}
+        </Button>
+      )}
     </form>
   )
 }
@@ -403,11 +406,19 @@ function FunctionPanesSurface({ threadId, revealInSidebar = true }: {
         const columns = Math.max(1, Math.min(10000, Math.floor(body.clientWidth / unit)))
         const prior = measurements.current.get(pane.key)
         if (prior?.open === pane.openRequestId && prior.columns === columns) continue
+        const observation = { open: pane.openRequestId, columns }
+        // Reserve before sending: ResizeObserver, fonts.ready and the next snapshot can all
+        // observe this same width while the native acknowledgement is still in flight.
+        measurements.current.set(pane.key, observation)
         void window.api.mods.paneAct(threadId, { pane: pane.key, generation: pane.generation,
           plugin: pane.plugin, handle: 0, kind: "measure", intentId: crypto.randomUUID(),
-          value: { bodyColumns: columns, openRequestId: pane.openRequestId } }).then(() => {
-          if (!stopped) measurements.current.set(pane.key, { open: pane.openRequestId!, columns })
-        }).catch(() => {})
+          value: { bodyColumns: columns, openRequestId: pane.openRequestId } }).catch((cause) => {
+          if (measurements.current.get(pane.key) !== observation) return
+          measurements.current.delete(pane.key)
+          if (String(cause).includes("MODS_UI_STALE_ACTION") && loadedThread.current === threadId &&
+            panesRef.current.some(row => row.key === pane.key && row.openRequestId === pane.openRequestId))
+            refreshRef.current()
+        })
       }
     }
     const observer = new ResizeObserver(measure)
@@ -689,7 +700,8 @@ function FunctionPanesSurface({ threadId, revealInSidebar = true }: {
     ) => {
       pending.current++
       if (!["change", "focus", "scroll"].includes(kind)) setBusy(true)
-      setError("")
+      const passive = kind === "scroll" || kind === "focus"
+      if (!passive) setError("")
       try {
         await window.api.mods.paneAct(threadId, {
           pane: pane.key,
@@ -701,13 +713,17 @@ function FunctionPanesSurface({ threadId, revealInSidebar = true }: {
           ...(value === undefined ? {} : { value })
         })
         if (kind !== "change") refreshRef.current()
+        return "applied" as const
       } catch (cause) {
-        setError(
+        // Native scrolling has already happened. An observation from a retired drawing is
+        // expected during redraw; it must not add an error row and move the scroll viewport.
+        if (!(passive && String(cause).includes("MODS_UI_STALE_ACTION"))) setError(
           String(cause).includes("MODS_UI_STALE_ACTION")
             ? "面板已更新，请在当前面板重新操作。"
             : "面板操作未完成，请检查插件或重新打开面板。"
         )
         refreshRef.current()
+        return String(cause).includes("MODS_UI_STALE_ACTION") ? "stale" as const : "failed" as const
       } finally {
         pending.current--
         if (pending.current === 0) setBusy(false)
@@ -715,6 +731,8 @@ function FunctionPanesSurface({ threadId, revealInSidebar = true }: {
     },
     [threadId]
   )
+  const observeWheel = useFunctionPaneWheel(threadId, panes, panesRef,
+    (pane, value) => act(pane, undefined, "scroll", value))
   const focusPending = (pane: FunctionPaneSnapshot): boolean =>
     Boolean(pane.focusRequest?.pending) ||
     focusTransactions.some((row) =>
@@ -814,19 +832,19 @@ function FunctionPanesSurface({ threadId, revealInSidebar = true }: {
             onWheel={(event) => {
               const clamp = (value: number): number =>
                 Number.isFinite(value) ? Math.max(-100000, Math.min(100000, value)) : 0
-              void act(pane, undefined, "scroll", {
+              observeWheel(pane, {
                 deltaX: clamp(event.deltaX),
                 deltaY: clamp(event.deltaY),
                 top: clamp(event.currentTarget.scrollTop),
                 left: clamp(event.currentTarget.scrollLeft)
-              }).catch(() => {})
+              })
             }}
           >
             <Element
               node={pane.tree}
               busy={busy || focusPending(pane)}
               retainFocusWhileBusy
-              act={(node, kind, value) => act(pane, node, kind, value)}
+              act={async (node, kind, value) => { await act(pane, node, kind, value) }}
               markdown={{ threadId, address: { kind: "pane", pane: pane.key,
                 generation: pane.generation }, links: pane.markdownLinks ?? [],
                 refresh: () => refreshRef.current() }}

@@ -13,7 +13,8 @@ import {
 import { readFunctionConversationTranscriptStamp, sameFunctionConversationTranscriptStamp } from
   "../../../shared/mods/v2/conversation-transcript"
 import { getDb, getThreadCore, getThreadRuntimeScope } from "../../db"
-import { readFunctionConversationThreadIdentityCurrent } from
+import { readFunctionConversationThreadIdentityCurrent,
+  readFunctionConversationThreadIncarnationCurrent } from
   "../../db/function-conversation-thread-identity-read"
 import { captureLocalThreadRunLease } from "../../agent/thread-run-lease"
 import { FunctionConversationStore } from
@@ -67,6 +68,9 @@ import { recordFunctionConversationNativeDestinationInTransaction,
   type FunctionConversationNativeDestinationDataScope } from
   "../../db/function-conversation-native-destination"
 import { readFunctionConversationSharedRestore } from "./conversation-shared-restore"
+
+const originalNativeIdentityRead = readFunctionConversationThreadIdentityCurrent
+const originalNativeIdentityMatch = matchesThreadIncarnation
 
 /** Produced by a guarded actual checkpoint reader. Never accepted through IPC or Guest JSON. */
 export interface FunctionConversationCurrentCheckpoint {
@@ -1163,8 +1167,18 @@ export class FunctionConversationCoordinator implements FunctionConversationMana
     const guard = () => {
       signal.throwIfAborted()
       assertCurrent()
-      if (!matchesThreadIncarnation(
-        readFunctionConversationThreadIdentityCurrent(getDb(), threadId), incarnation))
+      const database = getDb()
+      const projected = readFunctionConversationThreadIdentityCurrent === originalNativeIdentityRead &&
+        matchesThreadIncarnation === originalNativeIdentityMatch
+      let actual = projected
+        ? readFunctionConversationThreadIncarnationCurrent(database, threadId)
+        : readFunctionConversationThreadIdentityCurrent(database, threadId)
+      // A replacement raw reader or matcher must receive its original complete input, even
+      // when replacement occurred during native preparation or reading.
+      if (projected && (readFunctionConversationThreadIdentityCurrent !== originalNativeIdentityRead ||
+        matchesThreadIncarnation !== originalNativeIdentityMatch))
+        actual = readFunctionConversationThreadIdentityCurrent(database, threadId)
+      if (!matchesThreadIncarnation(actual, incarnation))
         throw new ModFunctionError("MODS_CONVERSATION_THREAD_CHANGED")
     }
     guard()

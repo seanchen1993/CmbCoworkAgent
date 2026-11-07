@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto"
 import { types } from "node:util"
+import { performance } from "node:perf_hooks"
 import type { BaseMessage } from "@langchain/core/messages"
 import { ModFunctionError } from "../../shared/mods/v2/contracts"
 import { STREAM_MESSAGE_CONTENT_MODE_KEY, STREAM_MESSAGE_REASONING_MODE_KEY,
@@ -9,6 +10,8 @@ import { MESSAGE_PROVIDER_SOURCE_ID_METADATA_KEY, MESSAGE_PROVIDER_OCCURRENCE_ME
 import { getDb, withCanonicalThreadMessageReadScope, type CanonicalThreadMessageReadScope }
   from "../db"
 import { FunctionConversationStore, readFunctionConversationStoreCurrentExecution,
+  isFunctionConversationNativeCheckpointStore, readFunctionConversationCheckpointReadOrigins,
+  type FunctionConversationRef,
   type FunctionConversationRow }
   from "../db/function-conversation-store"
 import type { FunctionNativeConversationRuntime } from "../mods/manager"
@@ -16,7 +19,8 @@ import type { ThreadMessageWrite } from "../types"
 import type { FunctionConversationPresentationDisposition } from
   "../db/function-conversation-presentation-disposition"
 import { functionConversationCanonicalStamp, functionConversationMembershipDigest,
-  readFunctionConversationCheckpointMembership, type FunctionConversationCheckpointMembershipProof } from
+  readFunctionConversationCheckpointMembership, type FunctionConversationCheckpointMembershipProof,
+  type FunctionConversationCheckpointMember } from
   "../checkpointer/function-conversation-checkpoint-membership"
 import { captureNativeMessage, captureNativeMessageForOccurrence,
   constructCapturedNativeMessage } from "./native-message-capture"
@@ -33,6 +37,7 @@ import { readFunctionConversationNativeMainPolicySource, isFunctionConversationN
 import { matchesFunctionConversationNativeDestinationData,
   assertFunctionConversationNativeDestinationDataCurrent }
   from "../db/function-conversation-native-destination"
+import { nativeConversationFairness } from "./function-conversation-native-fairness"
 
 interface Entry {
   readonly message: BaseMessage
@@ -56,6 +61,9 @@ interface Owner {
   readonly signal: AbortSignal
   readonly shared?: FunctionConversationSharedProducerView
   assertSignalData(): void
+  initialHistoricalRead?: { failed: boolean }
+  pendingHistory?: { failed: boolean; drained: Promise<void> }
+  hasRegisteredHistory: boolean
   closed: boolean
 }
 interface Wire { readonly entry: Entry; readonly digest: string }
@@ -63,6 +71,8 @@ const natives = new WeakMap<object, Entry>()
 const wires = new WeakMap<object, Wire>()
 interface HistoricalFirstRead {
   readonly store: FunctionConversationStore
+  readonly target: FunctionConversationRef
+  readonly proof: FunctionConversationCheckpointMembershipProof
   readonly read: () => FunctionConversationRow
   readonly assertStoreDataCurrent: () => void
   reading: boolean
@@ -71,12 +81,13 @@ interface HistoricalFirstRead {
 // Only registerHistorical creates these closures. A caller-supplied read or a Store override
 // cannot claim that its first operation is the original complete runtime guard.
 const historicalFirstReads = new WeakMap<() => FunctionConversationRow, HistoricalFirstRead>()
-const originalStorePrototype = FunctionConversationStore.prototype
-const originalMemberDescriptor = Object.getOwnPropertyDescriptor(originalStorePrototype,
-  "readCheckpointMember")!
-const originalMemberRead = FunctionConversationStore.prototype.readCheckpointMember
+// Capture the hoisted accessor, not the not-yet-initialized class in a cyclic import. Its
+// immutable result was captured by the Store module itself immediately after defining the class.
+const checkpointReadOrigins = readFunctionConversationCheckpointReadOrigins
 const ownDescriptor = Object.getOwnPropertyDescriptor, prototypeOf = Object.getPrototypeOf
 function originalHistoricalStore(store: FunctionConversationStore): boolean {
+  const { prototype: originalStorePrototype, memberDescriptor: originalMemberDescriptor,
+    readMember: originalMemberRead } = checkpointReadOrigins()
   if (types.isProxy(store) || prototypeOf(store) !== originalStorePrototype ||
     ownDescriptor(store, "readCheckpointMember")) return false
   const current = ownDescriptor(originalStorePrototype, "readCheckpointMember")
@@ -86,6 +97,7 @@ function originalHistoricalStore(store: FunctionConversationStore): boolean {
     current.configurable === originalMemberDescriptor.configurable
 }
 const projectionWeakGet = WeakMap.prototype.get, projectionWeakSet = WeakMap.prototype.set
+const projectionSetConstructor = Set
 const projectionSetHas = Set.prototype.has, projectionSetAdd = Set.prototype.add
 const projectionSetDelete = Set.prototype.delete, projectionSetValues = Set.prototype.values
 const projectionSetNext = Object.getPrototypeOf(new Set().values()).next as
@@ -113,6 +125,9 @@ export interface NativeConversationStreamProjectionSharedSource {
 }
 
 function fail(): never { throw new ModFunctionError("MODS_CONVERSATION_STREAM_PROJECTION_INVALID") }
+function assertHistoryIdle(owner: Owner): void {
+  if (owner.pendingHistory) { owner.pendingHistory.failed = true; fail() }
+}
 function object(value: unknown): value is object {
   return value !== null && typeof value === "object"
 }
@@ -186,6 +201,7 @@ function assertEntryData(entry: Entry): void {
 }
 function current(entry: Entry, reader?: CanonicalThreadMessageReadScope, partitioned = false):
   { snapshot: ThreadMessageWrite; row: FunctionConversationRow } {
+  assertHistoryIdle(entry.owner)
   if (!reader) {
     const result = withOwnerRead(entry.owner, actual => current(entry, actual))
     assertEntryData(entry)
@@ -277,6 +293,130 @@ function validateMessage(value: unknown, owner: Owner, reader: CanonicalThreadMe
   } else if (marked(value)) fail()
 }
 
+interface HistoricalBatchItem { value: object; entry: Entry; first: HistoricalFirstRead }
+function selectHistoricalBatch(candidates: readonly { value: object; entry: Entry }[],
+  owner: Owner): HistoricalBatchItem[] | undefined {
+  if (owner.shared || !isFunctionConversationNativeMainRuntime(owner.runtime)) return
+  const selected: HistoricalBatchItem[] = []
+  for (let index = 0; index < candidates.length; index++) {
+    const { value, entry } = candidates[index]
+    if (entry.owner !== owner) return
+    if (!entry.readRow) continue
+    const first = privateValue(historicalFirstReads, entry.readRow)
+    // An unknown read may have observable callbacks. Keep its original ordering and guards.
+    if (!first || first.store !== owner.store) return
+    if (first.failed || first.reading) { first.failed = true; fail() }
+    if (selected.length && (first.target !== selected[0].first.target ||
+      first.proof !== selected[0].first.proof)) return
+    selected.push({ value, entry, first })
+  }
+  if (selected.length < 2 || !isFunctionConversationNativeCheckpointStore(owner.store,
+    selected[0].first.target)) return
+  return selected
+}
+
+function historicalBatch(values: readonly unknown[], owner: Owner): HistoricalBatchItem[] | undefined {
+  if (owner.shared || !isFunctionConversationNativeMainRuntime(owner.runtime)) return
+  const candidates: Array<{ value: object; entry: Entry }> = []
+  for (let index = 0; index < values.length; index++) {
+    const value = values[index]
+    if (!object(value)) continue
+    const entry = privateValue(natives, value) ?? privateValue(wires, value)?.entry
+    if (entry) candidates.push({ value, entry })
+  }
+  return selectHistoricalBatch(candidates, owner)
+}
+
+function readHistoricalBatchRows(batch: readonly HistoricalBatchItem[], owner: Owner,
+  reader: CanonicalThreadMessageReadScope, active: HistoricalFirstRead[]): FunctionConversationRow[] {
+  const uuids: string[] = []
+  const activeLookup = new projectionSetConstructor<HistoricalFirstRead>()
+  for (let index = 0; index < active.length; index++)
+    Reflect.apply(projectionSetAdd, activeLookup, [active[index]])
+  for (let index = 0; index < batch.length; index++) {
+    const { first, entry } = batch[index]
+    const alreadyActive = Reflect.apply(projectionSetHas, activeLookup, [first]) as boolean
+    if (first.failed || first.reading && !alreadyActive) { first.failed = true; fail() }
+    if (!alreadyActive) {
+      first.reading = true
+      active[active.length] = first
+      Reflect.apply(projectionSetAdd, activeLookup, [first])
+    }
+    uuids.push(entry.uuid)
+  }
+  // Latch the complete set before any source guard can re-enter. Callers retain these
+  // latches through the read scope's fresh-B seal and release them without callbacks.
+  for (let index = 0; index < batch.length; index++) batch[index].first.assertStoreDataCurrent()
+  const first = batch[0].first
+  const guard = () => {
+    owner.runtime.assertCurrent()
+    if (!isFunctionConversationNativeMainRuntime(owner.runtime) ||
+      !isFunctionConversationNativeCheckpointStore(owner.store, first.target)) fail()
+  }
+  const rows = reader.runGuard(() => Reflect.apply(checkpointReadOrigins().readMembers, owner.store,
+    [first.target, first.proof, uuids, guard]) as FunctionConversationRow[])
+  if (!isFunctionConversationNativeMainRuntime(owner.runtime) ||
+    !isFunctionConversationNativeCheckpointStore(owner.store, first.target) || rows.length !== batch.length)
+    fail()
+  for (let index = 0; index < batch.length; index++) if (batch[index].first.failed) fail()
+  return rows
+}
+
+function readInitialHistoricalRows(owner: Owner, target: FunctionConversationRef,
+  proof: FunctionConversationCheckpointMembershipProof, members: readonly { uuid: string }[],
+  reader: CanonicalThreadMessageReadScope): Array<FunctionConversationRow | undefined> | undefined {
+  if (owner.shared || target.kind !== "main" || members.length < 2 ||
+    !isFunctionConversationNativeMainRuntime(owner.runtime) || !originalHistoricalStore(owner.store) ||
+    !isFunctionConversationNativeCheckpointStore(owner.store, target)) return
+  const execution = readFunctionConversationStoreCurrentExecution(owner.store, owner.runtime.database)
+  if (!execution) return
+  const operation = { failed: false }, uuids: string[] = []
+  for (let index = 0; index < members.length; index++) uuids[index] = members[index].uuid
+  owner.initialHistoricalRead = operation
+  const data = () => {
+    if (operation.failed || owner.initialHistoricalRead !== operation || owner.closed ||
+      getDb() !== owner.runtime.database || !isFunctionConversationNativeMainRuntime(owner.runtime) ||
+      !isFunctionConversationNativeCheckpointStore(owner.store, target)) fail()
+    execution.assertDataCurrent()
+  }
+  const guard = () => { owner.runtime.assertCurrent(); data() }
+  try {
+    data()
+    const rows = reader.runGuard(() => Reflect.apply(checkpointReadOrigins().readMembers, owner.store,
+      [target, proof, uuids, guard]) as FunctionConversationRow[])
+    data()
+    if (rows.length !== members.length) fail()
+    for (let index = 0; index < rows.length; index++)
+      if (rows[index].uuid !== uuids[index]) fail()
+    return rows
+  } catch (error) { operation.failed = true; throw error }
+  finally { owner.initialHistoricalRead = undefined }
+}
+
+function validateHistoricalBatch(batch: readonly HistoricalBatchItem[], owner: Owner,
+  reader: CanonicalThreadMessageReadScope, checkedWires: Array<{ value: object; wire: Wire }>,
+  checkedEntries: Set<Entry>, active: HistoricalFirstRead[]): void {
+  const rows = readHistoricalBatchRows(batch, owner, reader, active)
+  // No source callback separates these checks. The original batch checks every live member/cut;
+  // the caller retains the final runtime guard and all native/wire checks before fresh seal B.
+  for (let index = 0; index < batch.length; index++) {
+    const { value, entry, first: source } = batch[index]
+    if (source.failed) fail()
+    assertEntryData(entry)
+    if (decodedDigest(rows[index]) !== entry.rowDigest) fail()
+    const observed = reader.requireSnapshotAndPresentation(entry.uuid)
+    if (!observed || snapshotDigest(observed.snapshot) !== entry.snapshotDigest ||
+      observed.presentation.kind !== entry.presentation.kind ||
+      observed.presentation.fingerprint !== entry.presentation.fingerprint) fail()
+    Reflect.apply(projectionSetAdd, checkedEntries, [entry])
+    const wire = privateValue(wires, value)
+    if (wire) {
+      if (wire.entry !== entry || digest(value) !== wire.digest) fail()
+      checkedWires.push({ value, wire })
+    }
+  }
+}
+
 function prepareEntry(owner: Owner, message: BaseMessage, row: FunctionConversationRow,
   reader: CanonicalThreadMessageReadScope, readRow?: () => FunctionConversationRow,
   reuse = false): PreparedEntry {
@@ -324,12 +464,31 @@ function prepareEntry(owner: Owner, message: BaseMessage, row: FunctionConversat
 }
 
 function finishEntryGuards(owner: Owner, prepared: readonly PreparedEntry[],
-  reader: CanonicalThreadMessageReadScope): void {
+  reader: CanonicalThreadMessageReadScope, active?: HistoricalFirstRead[]): void {
   const { runtime } = owner
   reader.runGuard(() => runtime.assertCurrent())
-  for (const { entry } of prepared) if (entry.readRow) {
-    const row = reader.runGuard(entry.readRow)
-    if (decodedDigest(row) !== entry.rowDigest) fail()
+  if (active) {
+    // New entries have not been published to natives. Select their private prepared values
+    // directly; reused entries must retain their original owner and membership provenance.
+    const candidates: Array<{ value: object; entry: Entry }> = []
+    for (let index = 0; index < prepared.length; index++) {
+      const { entry } = prepared[index]
+      candidates.push({ value: entry.message, entry })
+    }
+    const batch = selectHistoricalBatch(candidates, owner)
+    if (batch) {
+      const rows = readHistoricalBatchRows(batch, owner, reader, active)
+      for (let index = 0; index < batch.length; index++)
+        if (decodedDigest(rows[index]) !== batch[index].entry.rowDigest) fail()
+      return
+    }
+  }
+  for (let index = 0; index < prepared.length; index++) {
+    const { entry } = prepared[index]
+    if (entry.readRow) {
+      const row = reader.runGuard(entry.readRow)
+      if (decodedDigest(row) !== entry.rowDigest) fail()
+    }
   }
 }
 function adoptEntries(owner: Owner, prepared: readonly PreparedEntry[]): void {
@@ -349,6 +508,190 @@ function adoptEntries(owner: Owner, prepared: readonly PreparedEntry[]): void {
   for (let index = 0; index < prepared.length; index++) {
     const entry = prepared[index].entry
     publishPrivate(natives, entry.message, entry)
+  }
+}
+
+interface HistoricalInput {
+  message: BaseMessage
+  serialized: string
+  fingerprint: string
+  member: boolean
+  originalId?: string
+}
+function captureHistoricalInput(message: BaseMessage,
+  member: FunctionConversationCheckpointMember | undefined, signal: AbortSignal,
+  abort = () => Reflect.apply(throwIfAborted, signal, [])): HistoricalInput {
+  if (member) {
+    const captured = captureNativeMessage(message, abort)
+    if (captured.executionSuppressed || captured.data.id !== member.uuid) fail()
+    return { message, member: true, fingerprint: captured.digest,
+      serialized: serializeFunctionConversationNativeMessage(constructCapturedNativeMessage(
+        captured.type, { ...captured.data })) }
+  }
+  if (marked(message)) fail()
+  const captured = captureNativeMessageForOccurrence(message, "unmarked-history-copy", abort)
+  if (captured.snapshot.executionSuppressed) fail()
+  const safe = constructCapturedNativeMessage(captured.snapshot.type, { ...captured.snapshot.data })
+  Object.defineProperty(safe, "id", { value: captured.originalId, enumerable: true,
+    writable: true, configurable: true })
+  return { message, member: false, fingerprint: captured.originalDigest,
+    originalId: captured.originalId, serialized: stringify(safe.toDict()) }
+}
+function assertHistoricalInputData(messages: readonly BaseMessage[], inputs: readonly HistoricalInput[],
+  signal: AbortSignal): void {
+  if (types.isProxy(messages) || Object.getPrototypeOf(messages) !== Array.prototype ||
+    ownData(messages, "length") !== inputs.length) fail()
+  const abort = () => Reflect.apply(throwIfAborted, signal, [])
+  for (let index = 0; index < inputs.length; index++) {
+    const value = inputs[index]
+    if (ownData(messages, String(index)) !== value.message) fail()
+    if (value.member) {
+      const captured = captureNativeMessage(value.message, abort)
+      if (captured.executionSuppressed || captured.digest !== value.fingerprint) fail()
+    } else {
+      const captured = captureNativeMessageForOccurrence(value.message, "unmarked-history-copy", abort)
+      if (captured.snapshot.executionSuppressed || captured.originalDigest !== value.fingerprint ||
+        captured.originalId !== value.originalId) fail()
+    }
+  }
+}
+function prepareHistoricalMember(owner: Owner, message: BaseMessage,
+  member: FunctionConversationCheckpointMember, row: FunctionConversationRow,
+  target: FunctionConversationRef, proof: FunctionConversationCheckpointMembershipProof,
+  reader: CanonicalThreadMessageReadScope,
+  bridge?: ReturnType<typeof readFunctionConversationSharedHistoricalTarget>): PreparedEntry {
+  const { runtime, store } = owner
+  const readRow = () => {
+    bridge?.assertCurrent()
+    const current = store.readCheckpointMember(target, proof, member.uuid,
+      runtime.assertCurrent.bind(runtime))
+    bridge?.assertDataCurrent()
+    return current
+  }
+  if (!bridge && !owner.shared && target.kind === "main" && originalHistoricalStore(store)) {
+    const actualStore = readFunctionConversationStoreCurrentExecution(store, runtime.database)
+    if (actualStore) publishPrivate(historicalFirstReads, readRow, {
+      store, reading: false, failed: false, assertStoreDataCurrent: actualStore.assertDataCurrent,
+      target, proof,
+      read: () => Reflect.apply(checkpointReadOrigins().readMember, store,
+        [target, proof, member.uuid, () => runtime.assertCurrent()]) as FunctionConversationRow })
+  }
+  return prepareEntry(owner, message, row, reader, readRow, true)
+}
+
+async function prepareNativeHistoricalAsync(owner: Owner, messages: readonly BaseMessage[],
+  proof: FunctionConversationCheckpointMembershipProof, signal: AbortSignal,
+  operation: NonNullable<Owner["pendingHistory"]>, drained: () => void): Promise<void> {
+  const { runtime, store } = owner, target = runtime.target.ref
+  const active: HistoricalFirstRead[] = []
+  const data = () => {
+    Reflect.apply(throwIfAborted, signal, [])
+    owner.assertSignalData()
+    if (operation.failed || owner.pendingHistory !== operation || owner.closed || owner.hasRegisteredHistory ||
+      getDb() !== runtime.database || !isFunctionConversationNativeMainRuntime(runtime) ||
+      !isFunctionConversationNativeCheckpointStore(store, target)) fail()
+  }
+  const current = () => { data(); runtime.assertCurrent(); data() }
+  try {
+    const fairness = nativeConversationFairness(signal, current)
+    const fixed = arrayItems(messages)
+    const admitted = withOwnerRead(owner, reader => {
+      reader.runGuard(current)
+      const membership = reader.runGuard(() => readFunctionConversationCheckpointMembership(proof, store, target))
+      const kept = reader.runGuard(() => store.readCheckpointRecoverySnapshot(target, {
+        checkpointThreadId: runtime.target.checkpointThreadId,
+        checkpointIncarnation: runtime.destination.incarnation,
+        checkpointId: membership.checkpointId
+      }, current))
+      if (fixed.length !== membership.nativeMessageCount ||
+        kept.snapshot.snapshotDigest !== membership.snapshotDigest) fail()
+      const initialRows = readInitialHistoricalRows(owner, target, proof, membership.members, reader)
+      data()
+      return { membership, initialRows }
+    })
+    await fairness()
+    const { membership, initialRows } = admitted
+    const members = new Map(membership.members.map(member => [member.ordinal, member]))
+    const prepared: PreparedEntry[] = [], inputs: HistoricalInput[] = []
+    let index = 0, initialIndex = 0
+    while (index < fixed.length) {
+      withOwnerRead(owner, reader => {
+        reader.runGuard(current)
+        if (reader.runGuard(() => readFunctionConversationCheckpointMembership(proof, store, target)) !== membership)
+          fail()
+        const since = performance.now()
+        do {
+          const value = fixed[index], member = members.get(index)
+          if (!object(value) || ownData(messages, "length") !== fixed.length ||
+            ownData(messages, String(index)) !== value) fail()
+          const message = value as BaseMessage
+          const captured = captureHistoricalInput(message, member, signal)
+          inputs.push(captured)
+          if (member) {
+            const row = initialRows ? initialRows[initialIndex]! :
+              reader.runGuard(() => store.readCheckpointMember(target, proof, member.uuid, current))
+            if (initialRows) {
+              if (!row || row.uuid !== member.uuid) fail()
+              initialRows[initialIndex++] = undefined
+            }
+            prepared.push(prepareHistoricalMember(owner, message, member, row, target, proof, reader))
+          }
+          index++
+        } while (index < fixed.length && performance.now() - since < 8)
+        reader.runGuard(current)
+        data()
+      })
+      // Every canonical A/B scope is complete before servicing another event-loop turn.
+      await fairness()
+    }
+    withOwnerRead(owner, reader => {
+      reader.runGuard(current)
+      if (reader.runGuard(() => readFunctionConversationCheckpointMembership(proof, store, target)) !== membership)
+        fail()
+      const candidates: Array<{ value: object; entry: Entry }> = []
+      for (let item = 0; item < prepared.length; item++)
+        candidates.push({ value: prepared[item].entry.message, entry: prepared[item].entry })
+      const batch = selectHistoricalBatch(candidates, owner)
+      if (batch) validateHistoricalBatch(batch, owner, reader, [], new Set<Entry>(), active)
+      else {
+        // The one-member case still authenticates its original row and complete canonical view.
+        for (let item = 0; item < prepared.length; item++) {
+          const entry = prepared[item].entry
+          const row = reader.runGuard(entry.readRow!)
+          if (decodedDigest(row) !== entry.rowDigest) fail()
+          const observed = reader.requireSnapshotAndPresentation(entry.uuid)
+          if (snapshotDigest(observed.snapshot) !== entry.snapshotDigest ||
+            observed.presentation.kind !== entry.presentation.kind ||
+            observed.presentation.fingerprint !== entry.presentation.fingerprint) fail()
+        }
+      }
+      const snapshots: ThreadMessageWrite[] = [], native: string[] = []
+      for (let item = 0; item < prepared.length; item++)
+        snapshots.push(reader.requireSnapshotAndPresentation(prepared[item].entry.uuid).snapshot)
+      const partition = reader.partition(snapshots)
+      if (partition.canonicalCount !== prepared.length || partition.ordinary.length !== 0) fail()
+      for (let item = 0; item < inputs.length; item++) native.push(inputs[item].serialized)
+      if (functionConversationMembershipDigest(native) !== membership.nativeSnapshotDigest) fail()
+      reader.runGuard(current)
+      // No construction/toDict or source callback follows this final source guard.
+      assertHistoricalInputData(messages, inputs, signal)
+      data()
+    })
+    // A scope's final read cannot publish a subset. Recheck all raw inputs, including
+    // unmarked history, then retain the existing all-entry CAS before the first publication.
+    assertHistoricalInputData(messages, inputs, signal)
+    data()
+    for (let item = 0; item < active.length; item++) if (active[item].failed) fail()
+    adoptEntries(owner, prepared)
+    owner.hasRegisteredHistory = true
+  } catch (error) {
+    operation.failed = true
+    for (let item = 0; item < active.length; item++) active[item].failed = true
+    throw error
+  } finally {
+    for (let item = 0; item < active.length; item++) active[item].reading = false
+    if (owner.pendingHistory === operation) owner.pendingHistory = undefined
+    drained()
   }
 }
 
@@ -379,7 +722,8 @@ export function createNativeConversationStreamProjection(input: {
     runtime.owner !== shared.owner || runtime.run !== shared.invocation ||
     runtime.database !== shared.database || signal !== shared.signal ||
     runtime.destination.threadId !== shared.destination.destinationThreadId)) fail()
-  const owner: Owner = { runtime, store: input.store, signal, assertSignalData, shared, closed: false }
+  const owner: Owner = { runtime, store: input.store, signal, assertSignalData, shared,
+    hasRegisteredHistory: false, closed: false }
   const omitSharedChild = (message: object, entry: Entry, wire: Wire | undefined): true => {
     const child = entry.owner.shared
     const relation = () => {
@@ -425,9 +769,10 @@ export function createNativeConversationStreamProjection(input: {
   }>()
   const historicalOperations = new WeakMap<FunctionConversationSharedHistoricalTarget,
     { reading: boolean; failed: boolean }>()
-  return Object.freeze({
+  const projection = Object.freeze({
     /** Return classification only. The caller must still validate the whole native batch. */
     captureReturnMessageSource(message: BaseMessage) {
+      assertHistoryIdle(owner)
       if (!object(message) || types.isProxy(message)) fail()
       const entry = privateValue(natives, message)
       if (!entry) {
@@ -452,6 +797,7 @@ export function createNativeConversationStreamProjection(input: {
     },
     /** An exact native address owned by this factory, never generic validate's ordinary branch. */
     captureOwnedMessage(message: BaseMessage) {
+      assertHistoryIdle(owner)
       if (!object(message) || types.isProxy(message)) fail()
       const entry = privateValue(natives, message)
       if (!entry || entry.owner !== owner || entry.message !== message) fail()
@@ -498,6 +844,7 @@ export function createNativeConversationStreamProjection(input: {
       return proof
     },
     assertFinalizedData(message: BaseMessage): void {
+      assertHistoryIdle(owner)
       const entry = privateValue(natives, message)
       if (!entry || entry.owner !== owner || entry.readRow) fail()
       assertEntryData(entry)
@@ -520,6 +867,7 @@ export function createNativeConversationStreamProjection(input: {
       assertEntryData(entry)
     },
     register(message: BaseMessage, row: FunctionConversationRow): void {
+      assertHistoryIdle(owner)
       if (row.branchId !== input.runtime.target.ref.branchId) fail()
       const prepared = withOwnerRead(owner, reader => {
         const value = prepareEntry(owner, message, row, reader)
@@ -531,10 +879,15 @@ export function createNativeConversationStreamProjection(input: {
     registerHistorical(messages: readonly BaseMessage[],
       proof: FunctionConversationCheckpointMembershipProof,
       historicalTarget?: FunctionConversationSharedHistoricalTarget): void {
+      assertHistoryIdle(owner)
+      // Only an in-flight native initial batch installs this latch. A nested fallback
+      // must not evade it; ordinary custom/shared registrations retain their old path.
+      if (owner.initialHistoricalRead) { owner.initialHistoricalRead.failed = true; fail() }
       const bridge = historicalTarget === undefined ? undefined :
         readFunctionConversationSharedHistoricalTarget(historicalTarget, messages, proof,
           owner.store, owner.runtime.target.ref)
       const target = bridge?.target ?? owner.runtime.target.ref
+      const activeBatch: HistoricalFirstRead[] = []
       let operation = historicalTarget === undefined ? undefined :
         privateValue(historicalOperations, historicalTarget)
       if (historicalTarget !== undefined && !operation) {
@@ -566,45 +919,30 @@ export function createNativeConversationStreamProjection(input: {
             kept.snapshot.snapshotDigest !== membership.snapshotDigest ||
             messages.length !== membership.nativeMessageCount) fail()
           const members = new Map(membership.members.map(member => [member.ordinal, member]))
+          const initialRows = bridge ? undefined :
+            readInitialHistoricalRows(owner, target, proof, membership.members, reader)
+          let initialIndex = 0
           const native: string[] = [], prepared: PreparedEntry[] = []
           for (let index = 0; index < messages.length; index += 1) {
             const value = ownData(messages, String(index)), member = members.get(index)
             if (!object(value)) fail()
             const message = value as BaseMessage
             if (member) {
-              const row = reader.runGuard(() => store.readCheckpointMember(target, proof, member.uuid,
-                runtime.assertCurrent.bind(runtime)))
-              const captured = captureNativeMessage(message, () => runtime.signal.throwIfAborted())
-              if (captured.executionSuppressed || captured.data.id !== member.uuid) fail()
-              native.push(serializeFunctionConversationNativeMessage(constructCapturedNativeMessage(
-                captured.type, { ...captured.data })))
-              const readRow = () => {
-                bridge?.assertCurrent()
-                const current = store.readCheckpointMember(target, proof, member.uuid,
-                  runtime.assertCurrent.bind(runtime))
-                bridge?.assertDataCurrent()
-                return current
+              const row = initialRows ? initialRows[initialIndex]! :
+                reader.runGuard(() => store.readCheckpointMember(target, proof, member.uuid,
+                  runtime.assertCurrent.bind(runtime)))
+              // A prefetched row is only the initial comparison value. prepareEntry still
+              // performs its own original fresh read, and the final full seal is unchanged.
+              if (initialRows) {
+                if (!row || row.uuid !== member.uuid) fail()
+                initialRows[initialIndex++] = undefined
               }
-              if (!bridge && !owner.shared && target.kind === "main" && originalHistoricalStore(store)) {
-                const actualStore = readFunctionConversationStoreCurrentExecution(store, runtime.database)
-                if (actualStore) publishPrivate(historicalFirstReads, readRow, {
-                  store, reading: false, failed: false, assertStoreDataCurrent: actualStore.assertDataCurrent,
-                  read: () => Reflect.apply(originalMemberRead, store,
-                    [target, proof, member.uuid, () => runtime.assertCurrent()]) as FunctionConversationRow })
-              }
-              prepared.push(prepareEntry(owner, message, row, reader, readRow, true))
+              native.push(captureHistoricalInput(message, member, runtime.signal,
+                () => runtime.signal.throwIfAborted()).serialized)
+              prepared.push(prepareHistoricalMember(owner, message, member, row, target, proof, reader, bridge))
             } else {
-              if (marked(message)) fail()
-              // Old unmarked history may lack an ID. Copy first, then restore that missing fact on
-              // the safe instance only; no raw toDict/toJSON is called for the whole-array digest.
-              const captured = captureNativeMessageForOccurrence(message, "unmarked-history-copy",
-                () => runtime.signal.throwIfAborted())
-              if (captured.snapshot.executionSuppressed) fail()
-              const safe = constructCapturedNativeMessage(captured.snapshot.type,
-                { ...captured.snapshot.data })
-              Object.defineProperty(safe, "id", { value: captured.originalId, enumerable: true,
-                writable: true, configurable: true })
-              native.push(stringify(safe.toDict()))
+              native.push(captureHistoricalInput(message, undefined, runtime.signal,
+                () => runtime.signal.throwIfAborted()).serialized)
             }
           }
           if (functionConversationMembershipDigest(native) !== membership.nativeSnapshotDigest) fail()
@@ -612,20 +950,61 @@ export function createNativeConversationStreamProjection(input: {
           if (owner.closed || reader.runGuard(() =>
             readFunctionConversationCheckpointMembership(proof, store, target)) !== membership)
             fail()
-          finishEntryGuards(owner, prepared, reader)
+          finishEntryGuards(owner, prepared, reader, activeBatch)
           bridge?.assertDataCurrent()
           if (operation?.failed) fail()
           return prepared
         })
         bridge?.assertDataCurrent()
         if (operation?.failed) fail()
+        for (let index = 0; index < activeBatch.length; index++) if (activeBatch[index].failed) fail()
         adoptEntries(owner, prepared)
         bridge?.assertDataCurrent()
         if (operation?.failed) fail()
-      } catch (error) { if (operation) operation.failed = true; throw error }
-      finally { if (operation) operation.reading = false }
+        owner.hasRegisteredHistory = true
+      } catch (error) {
+        if (operation) operation.failed = true
+        for (let index = 0; index < activeBatch.length; index++) activeBatch[index].failed = true
+        throw error
+      } finally {
+        if (operation) operation.reading = false
+        for (let index = 0; index < activeBatch.length; index++) activeBatch[index].reading = false
+      }
+    },
+    registerHistoricalAsync(messages: readonly BaseMessage[],
+      proof: FunctionConversationCheckpointMembershipProof, invocationSignal: AbortSignal): void | Promise<void> {
+      assertHistoryIdle(owner)
+      if (owner.initialHistoricalRead) { owner.initialHistoricalRead.failed = true; fail() }
+      // Classification is data-only. Install pending before the first source guard/scope;
+      // repeated, shared and custom registrations keep their original synchronous contract.
+      if (owner.hasRegisteredHistory || owner.shared || runtime.target.ref.kind !== "main" ||
+        !isFunctionConversationNativeMainRuntime(runtime) || !originalHistoricalStore(owner.store) ||
+        !isFunctionConversationNativeCheckpointStore(owner.store, runtime.target.ref))
+        return projection.registerHistorical(messages, proof)
+      // retainInput has already published this turn's input before history preparation.
+      // It is independent of the checkpoint history. Only reusing an entry in this actual
+      // history would require current(previous) and must keep the synchronous source path.
+      const values = arrayItems(messages)
+      for (let index = 0; index < values.length; index++) {
+        const value = values[index]
+        if (object(value) && privateValue(natives, value)?.owner === owner)
+          return projection.registerHistorical(messages, proof)
+      }
+      let drained!: () => void
+      const operation = { failed: false, drained: new Promise<void>(resolve => { drained = resolve }) }
+      owner.pendingHistory = operation
+      try {
+        const signal = AbortSignal.any([invocationSignal, owner.signal, runtime.target.signal])
+        return prepareNativeHistoricalAsync(owner, messages, proof, signal, operation, drained)
+      } catch (error) {
+        operation.failed = true
+        owner.pendingHistory = undefined
+        drained()
+        throw error
+      }
     },
     registerIntake(publication: FunctionConversationIntakePublication): void {
+      assertHistoryIdle(owner)
       const prepared = withOwnerRead(owner, reader => {
         const { runtime, store } = owner, target = runtime.target.ref
         const intake = reader.runGuard(() => readFunctionConversationIntakePublication(publication, store, target))
@@ -646,6 +1025,7 @@ export function createNativeConversationStreamProjection(input: {
       adoptEntries(owner, prepared)
     },
     omitMessage(message: unknown): boolean {
+      assertHistoryIdle(owner)
       if (!object(message)) return false
       const entry = privateValue(natives, message) ?? privateValue(wires, message)?.entry
       if (!entry) return false
@@ -658,9 +1038,11 @@ export function createNativeConversationStreamProjection(input: {
       return entry.presentation.kind !== "visible"
     },
     validate(mode: string, payload: unknown): void {
+      assertHistoryIdle(owner)
       const checkedWires: Array<{ value: object; wire: Wire }> = []
       const checkedEntries = new Set<Entry>()
-      withOwnerRead(owner, reader => {
+      const activeBatch: HistoricalFirstRead[] = []
+      try { withOwnerRead(owner, reader => {
         if (owner.closed) fail()
         reader.runGuard(() => input.runtime.assertCurrent())
         const values: unknown[] = []
@@ -696,21 +1078,44 @@ export function createNativeConversationStreamProjection(input: {
           const partition = reader.partition(snapshots)
           if (partition.canonicalCount !== snapshots.length || partition.ordinary.length !== 0) fail()
         }
-        for (const value of values)
+        const batch = historicalBatch(values, owner)
+        if (batch) {
+          for (const value of values) if (!batch.some(item => item.value === value))
+            validateMessage(value, owner, reader, checkedWires, checkedEntries)
+          // Any preceding original callback can change methods, source state or membership.
+          const currentBatch = historicalBatch(values, owner)
+          if (currentBatch) validateHistoricalBatch(currentBatch, owner, reader,
+            checkedWires, checkedEntries, activeBatch)
+          else for (const { value } of batch)
+            validateMessage(value, owner, reader, checkedWires, checkedEntries)
+        } else for (const value of values)
           validateMessage(value, owner, reader, checkedWires, checkedEntries)
         reader.runGuard(() => input.runtime.assertCurrent())
-        if (owner.closed) fail()
+        if (owner.closed || activeBatch.some(first => first.failed)) fail()
         eachPrivateSet(checkedEntries, assertEntryData)
         for (const { value, wire } of checkedWires) if (digest(value) !== wire.digest) fail()
       })
       eachPrivateSet(checkedEntries, assertEntryData)
-      for (const { value, wire } of checkedWires) {
+      for (let index = 0; index < checkedWires.length; index++) {
+        const { value, wire } = checkedWires[index]
         if (digest(value) !== wire.digest) fail()
         assertEntryData(wire.entry)
       }
+      } catch (error) {
+        for (let index = 0; index < activeBatch.length; index++) activeBatch[index].failed = true
+        throw error
+      } finally {
+        // The fresh-B seal has completed: cleanup must not invoke a replaced array iterator.
+        for (let index = 0; index < activeBatch.length; index++) activeBatch[index].reading = false
+      }
     },
-    close(): void { owner.closed = true }
+    close(): void {
+      owner.closed = true
+      if (owner.pendingHistory) owner.pendingHistory.failed = true
+    },
+    whenDrained(): Promise<void> { return owner.pendingHistory?.drained ?? Promise.resolve() }
   })
+  return projection
 }
 
 /** Runs before the first toJSON. Unknown ordinary messages keep their original serializer. */

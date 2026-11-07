@@ -1,6 +1,12 @@
 import { createHash, randomUUID } from "node:crypto"
 import { types } from "node:util"
-import { DatabaseSync, StatementSync } from "node:sqlite"
+import { createNativeThreadIdentityReader, createNativeJoinedThreadIdentityReader,
+  NATIVE_JOINED_CURRENT_QUERY as JOINED_CURRENT_QUERY,
+  NATIVE_JOINED_CURRENT_HIGH_WATER_QUERY as JOINED_CURRENT_HIGH_WATER_QUERY }
+  from "./native-thread-identity-reader"
+import { originalCurrentDispatch } from "./native-read-dispatch"
+import { createNativeJoinedIncarnationReader, NATIVE_JOINED_INCARNATION_QUERY,
+  NATIVE_JOINED_INCARNATION_HIGH_WATER_QUERY } from "./native-joined-incarnation-reader"
 import { CheckpointSnapshotInterpretations } from "./checkpoint-snapshot-interpretation"
 import type { ModObject } from "../../shared/mods/types"
 import { encodeModJson } from "../../shared/mods/validation"
@@ -8,6 +14,7 @@ import { ModFunctionError } from "../../shared/mods/v2/contracts"
 import {
   captureThreadIncarnation,
   matchesThreadIncarnation,
+  originalMetadataInterpretation,
   type ThreadIncarnation
 } from "../services/thread-incarnation"
 import { deleteFunctionConversationThreadDataInTransaction } from "./function-conversation-cleanup"
@@ -147,19 +154,7 @@ function rows(db: NativeSqliteAdapter, sql: string, args: readonly unknown[] = [
 }
 
 const CURRENT_THREAD_QUERY = "SELECT created_at, metadata FROM threads WHERE thread_id = ?"
-const JOINED_CURRENT_QUERY = `SELECT t.thread_id AS physical_thread_id,t.created_at AS physical_created_at,
-  t.metadata AS physical_metadata,s.thread_id,s.incarnation_key,s.workspace,
-  c.logical_session_id,c.kind,c.checkpoint_namespace
-  FROM threads t
-  LEFT JOIN function_conversations c ON c.conversation_id=?
-  LEFT JOIN function_conversation_branches b ON b.branch_id=?
-    AND b.conversation_id=c.conversation_id
-  LEFT JOIN function_logical_sessions s ON s.logical_session_id=c.logical_session_id
-    AND b.branch_id IS NOT NULL WHERE t.thread_id=?`
 const CURRENT_HIGH_WATER_QUERY = "SELECT next_sequence FROM function_conversations WHERE conversation_id = ?"
-const JOINED_CURRENT_HIGH_WATER_QUERY = JOINED_CURRENT_QUERY.replace(
-  "c.logical_session_id,c.kind,c.checkpoint_namespace",
-  "c.logical_session_id,c.kind,c.checkpoint_namespace,c.next_sequence")
 const CURRENT_TARGET_QUERY = `SELECT s.thread_id, s.incarnation_key, s.workspace,
   c.logical_session_id, c.kind, c.checkpoint_namespace, b.conversation_id
   FROM function_conversations c JOIN function_logical_sessions s
@@ -171,64 +166,19 @@ const pureCurrentReaders = new WeakSet<NativeSqliteReadOne>()
 const currentDescriptor = Object.getOwnPropertyDescriptor, currentPrototype = Object.getPrototypeOf
 const currentFrozen = Object.isFrozen, currentApply = Reflect.apply
 const currentWeakHas = WeakSet.prototype.has, currentWeakAdd = WeakSet.prototype.add
-const nativePrepare = DatabaseSync.prototype.prepare, nativeGet = StatementSync.prototype.get
-const publicReadOne = NativeSqliteAdapter.prototype.prepareReadOne
 const currentJson = JSON, currentParse = JSON.parse, currentStringify = JSON.stringify
-const currentArrayIsArray = Array.isArray, currentNumber = Number
+const currentNumber = Number
 const currentSafeInteger = Number.isSafeInteger
-const currentEntries = Object.entries, currentDefine = Object.defineProperty
-const currentObject = Object, currentArray = Array, currentReflect = Reflect
-const currentUint8Array = Uint8Array, currentFunction = Function, currentIsProxy = types.isProxy
+const currentIsProxy = types.isProxy
+const originalMatches = matchesThreadIncarnation
+const incarnationRegexPrototype = RegExp.prototype
+const incarnationRegexTest = RegExp.prototype.test, incarnationRegexExec = RegExp.prototype.exec
 const currentMap = Map, currentSet = Set
-const currentHasInstanceKey = Symbol.hasInstance
-const currentTypedConstructor = currentPrototype(currentUint8Array)
-const currentHasInstance = currentDescriptor(currentFunction.prototype, currentHasInstanceKey)!.value
 function currentDataField(receiver: object, key: PropertyKey, value: unknown): boolean {
   const field = currentDescriptor(receiver, key)
   return !!field && "value" in field && field.value === value
 }
 
-function originalCurrentDispatch(database: NativeSqliteAdapter): boolean {
-  // Fixed readers still traverse these origin/row helpers; an override must keep the old windows.
-  if (!currentDataField(globalThis, "Object", currentObject) ||
-    !currentDataField(globalThis, "Array", currentArray) ||
-    !currentDataField(globalThis, "Reflect", currentReflect) ||
-    !currentDataField(globalThis, "Uint8Array", currentUint8Array) ||
-    !currentDataField(globalThis, "Function", currentFunction) ||
-    !currentDataField(currentObject, "getOwnPropertyDescriptor", currentDescriptor) ||
-    !currentDataField(currentObject, "getPrototypeOf", currentPrototype) ||
-    !currentDataField(currentNumber, "isSafeInteger", currentSafeInteger)) return false
-  if (types.isProxy !== currentIsProxy ||
-    currentDescriptor(currentUint8Array, currentHasInstanceKey) ||
-    currentPrototype(currentUint8Array) !== currentTypedConstructor ||
-    currentDescriptor(currentTypedConstructor, currentHasInstanceKey) ||
-    currentPrototype(currentTypedConstructor) !== currentFunction.prototype ||
-    !currentDataField(currentFunction.prototype, currentHasInstanceKey, currentHasInstance) ||
-    currentPrototype(currentArray.prototype) !== currentObject.prototype ||
-    currentPrototype(currentObject.prototype) !== null) return false
-  // The joined query binds exactly three primitives; array normalization must not call a setter.
-  for (let index = 0; index < 3; index++)
-    if (currentDescriptor(currentArray.prototype, index) ||
-      currentDescriptor(currentObject.prototype, index)) return false
-  if (types.isProxy(database) || currentPrototype(database) !== NativeSqliteAdapter.prototype) return false
-  const field = currentDescriptor(database, "native")
-  if (!field || !("value" in field) || !field.value ||
-    types.isProxy(field.value) || currentPrototype(field.value) !== DatabaseSync.prototype ||
-    currentDescriptor(field.value, "prepare") || currentDescriptor(database, "prepareReadOne")) return false
-  const prepare = currentDescriptor(DatabaseSync.prototype, "prepare")
-  const get = currentDescriptor(StatementSync.prototype, "get")
-  const read = currentDescriptor(NativeSqliteAdapter.prototype, "prepareReadOne")
-  const apply = currentDescriptor(Reflect, "apply")
-  const entries = currentDescriptor(Object, "entries"), define = currentDescriptor(Object, "defineProperty")
-  const array = currentDescriptor(Array, "isArray")
-  return !!prepare && "value" in prepare && prepare.value === nativePrepare &&
-    !!get && "value" in get && get.value === nativeGet &&
-    !!read && "value" in read && read.value === publicReadOne &&
-    !!apply && "value" in apply && apply.value === currentApply &&
-    !!entries && "value" in entries && entries.value === currentEntries &&
-    !!define && "value" in define && define.value === currentDefine &&
-    !!array && "value" in array && array.value === currentArrayIsArray
-}
 
 function joinedCurrentTarget(target: FunctionConversationRef): boolean {
   const parse = currentDescriptor(currentJson, "parse"), stringify = currentDescriptor(currentJson, "stringify")
@@ -259,8 +209,20 @@ function joinedCurrentTarget(target: FunctionConversationRef): boolean {
 
 function assertJoinedCurrent(database: NativeSqliteAdapter, target: FunctionConversationRef,
   execution: NativeSqliteCurrentExecution, sql = JOINED_CURRENT_QUERY): SqlRow {
-  const row = readCurrentExecution(database, execution, sql,
-    [target.conversationId, target.branchId, target.threadId])
+  const qualified = () => originalCurrentDispatch(database) && originalMetadataInterpretation() &&
+    matchesThreadIncarnation === originalMatches &&
+    currentDataField(incarnationRegexPrototype, "test", incarnationRegexTest) &&
+    currentDataField(incarnationRegexPrototype, "exec", incarnationRegexExec)
+  const args = [target.conversationId, target.branchId, target.threadId]
+  let row: SqlRow | undefined
+  if (qualified()) {
+    const indexed = sql === JOINED_CURRENT_HIGH_WATER_QUERY
+      ? NATIVE_JOINED_INCARNATION_HIGH_WATER_QUERY : NATIVE_JOINED_INCARNATION_QUERY
+    row = readCurrentExecution(database, execution, indexed, args)
+    // A preparation/SQLite callback may change interpretation. Only full raw metadata may
+    // cross to that replacement; do not reuse the projected row under a changed interpreter.
+    if (!qualified()) row = readCurrentExecution(database, execution, sql, args)
+  } else row = readCurrentExecution(database, execution, sql, args)
   if (!row || row.physical_thread_id !== target.threadId ||
     !matchesThreadIncarnation({ created_at: currentNumber(row.physical_created_at),
       metadata: typeof row.physical_metadata === "string" ? row.physical_metadata : null },
@@ -365,6 +327,11 @@ function readCurrent(db: NativeSqliteAdapter, sql: string, args: readonly unknow
 
 function readCurrentExecution(db: NativeSqliteAdapter, adapter: NativeSqliteCurrentExecution,
   sql: string, args: readonly unknown[]): SqlRow | undefined {
+  // The execution's compatibility branch may reach this reader after native qualification
+  // changes. Preserve its original one-parameter query instead of reusing a two-parameter
+  // transfer reader whose extra normalization position could invoke inherited code.
+  if (sql === CURRENT_THREAD_QUERY && !originalCurrentDispatch(db))
+    return adapter.prepareReadOne(sql)(args)
   let busy = Reflect.apply(storeWeakGet, executionReadsInUse, [db]) as Set<string> | undefined
   if (!busy) { busy = new Set(); Reflect.apply(storeWeakSet, executionReadsInUse, [db, busy]) }
   const temporary = Reflect.apply(storeSetHas, busy, [sql]) === true
@@ -373,9 +340,16 @@ function readCurrentExecution(db: NativeSqliteAdapter, adapter: NativeSqliteCurr
   if (!reads) { reads = new Map(); Reflect.apply(storeWeakSet, executionReads, [db, reads]) }
   let read: NativeSqliteReadOne | undefined
   try {
-    read = temporary ? adapter.prepareReadOne(sql) :
+    const prepare = () => sql === CURRENT_THREAD_QUERY
+      ? createNativeThreadIdentityReader(adapter)
+      : sql === NATIVE_JOINED_INCARNATION_QUERY || sql === NATIVE_JOINED_INCARNATION_HIGH_WATER_QUERY
+        ? createNativeJoinedIncarnationReader(adapter, sql === NATIVE_JOINED_INCARNATION_HIGH_WATER_QUERY)
+      : sql === JOINED_CURRENT_QUERY || sql === JOINED_CURRENT_HIGH_WATER_QUERY
+        ? createNativeJoinedThreadIdentityReader(adapter, sql === JOINED_CURRENT_HIGH_WATER_QUERY)
+        : adapter.prepareReadOne(sql)
+    read = temporary ? prepare() :
       Reflect.apply(storeMapGet, reads, [sql]) as NativeSqliteReadOne | undefined
-    if (!read) { read = adapter.prepareReadOne(sql); Reflect.apply(storeMapSet, reads, [sql, read]) }
+    if (!read) { read = prepare(); Reflect.apply(storeMapSet, reads, [sql, read]) }
     return read(args)
   } catch (error) {
     if (!temporary && Reflect.apply(storeMapGet, reads, [sql]) === read)
@@ -1079,9 +1053,49 @@ export class FunctionConversationStore {
     guard()
     if (this.database.inTransaction) fail("MODS_CONVERSATION_NOT_COMMITTED")
     const snapshot = readFunctionConversationCheckpointMembership(proof, this, target)
+    const row = this.checkpointMember(target, proof, snapshot, uuid,
+      this.checkedCheckpointReceipt(target, snapshot))
+    guard()
+    readFunctionConversationCheckpointMembership(proof, this, target)
+    if (this.database.inTransaction) fail("MODS_CONVERSATION_NOT_COMMITTED")
+    return row
+  }
+
+  /**
+   * One synchronous read scope for a whole checkpoint. Expensive source guards run at
+   * both boundaries, not once per row. The persisted receipt is checked at both ends;
+   * every row verifies indexed membership, digest and live cut without cached authorization.
+   */
+  readCheckpointMembers(target: FunctionConversationRef,
+    proof: FunctionConversationCheckpointMembershipProof, uuids: readonly string[], guard: Guard
+  ): FunctionConversationRow[] {
+    const fixedUuids = [...uuids]
+    guard()
+    if (this.database.inTransaction) fail("MODS_CONVERSATION_NOT_COMMITTED")
+    const snapshot = readFunctionConversationCheckpointMembership(proof, this, target)
+    const receipt = this.checkedCheckpointReceipt(target, snapshot)
+    const result = fixedUuids.map(uuid => this.checkpointMember(target, proof, snapshot, uuid, receipt))
+    guard()
+    readFunctionConversationCheckpointMembership(proof, this, target)
+    if (this.database.inTransaction) fail("MODS_CONVERSATION_NOT_COMMITTED")
+    if (this.checkedCheckpointReceipt(target, snapshot).receipt_id !== receipt.receipt_id)
+      fail("MODS_CONVERSATION_CHECKPOINT_MEMBERSHIP")
+    return result
+  }
+
+  private checkedCheckpointReceipt(target: FunctionConversationRef,
+    snapshot: FunctionConversationCheckpointMembershipSnapshot): SqlRow {
     const receipt = this.checkpointReceipt(target, snapshot)
     if (!receipt || this.decodeCheckpointSnapshot(target, receipt, true).snapshotDigest !== snapshot.snapshotDigest)
       fail("MODS_CONVERSATION_CHECKPOINT_MEMBERSHIP")
+    return receipt
+  }
+
+  private checkpointMember(target: FunctionConversationRef,
+    proof: FunctionConversationCheckpointMembershipProof,
+    snapshot: FunctionConversationCheckpointMembershipSnapshot, uuid: string, receipt: SqlRow
+  ): FunctionConversationRow {
+    if (this.database.inTransaction) fail("MODS_CONVERSATION_NOT_COMMITTED")
     const member = checkpointApply(indexedCheckpointMember, checkpointInterpreter(this),
       [proof, snapshot, uuid]) as ReturnType<CheckpointSnapshotInterpretations["member"]>
     if (!member)
@@ -1093,9 +1107,6 @@ export class FunctionConversationStore {
     const row = this.rowWithinCheckpointCut(target, uuid, snapshot.cut)
     if (functionConversationRowDigest(row) !== member.rowDigest)
       fail("MODS_CONVERSATION_CHECKPOINT_MEMBERSHIP")
-    guard()
-    readFunctionConversationCheckpointMembership(proof, this, target)
-    if (this.database.inTransaction) fail("MODS_CONVERSATION_NOT_COMMITTED")
     return row
   }
 
@@ -1144,6 +1155,61 @@ export class FunctionConversationStore {
     guard()
     if (this.database.inTransaction) fail("MODS_CONVERSATION_NOT_COMMITTED")
     this.assertCurrent(fixedTarget)
+    return result
+  }
+
+  /** Read a complete synchronous batch at one fixed cut, guarding both ends of the batch. */
+  readRowsAtCut(target: FunctionConversationRef, uuids: readonly string[],
+    cut: FunctionConversationRowReadCut, guard: Guard
+  ): FunctionConversationRow[] {
+    if (!cut || typeof cut !== "object" || Array.isArray(cut) || typeof guard !== "function")
+      fail("MODS_CONVERSATION_READ_CUT_INVALID")
+    const frontierDescriptor = Object.getOwnPropertyDescriptor(cut, "frontier")
+    const timeDescriptor = Object.getOwnPropertyDescriptor(cut, "notAfterCreatedAt")
+    const frontier: unknown = frontierDescriptor?.value
+    const time: unknown = timeDescriptor?.value
+    if (!frontierDescriptor || !("value" in frontierDescriptor) ||
+      typeof frontier !== "number" || !Number.isSafeInteger(frontier) || frontier < 0 ||
+      (timeDescriptor && (!("value" in timeDescriptor) || (time !== undefined &&
+        (typeof time !== "number" || !Number.isSafeInteger(time) || time < 0)))))
+      fail("MODS_CONVERSATION_READ_CUT_INVALID")
+    // A guard may reenter native code; never let it expand the caller's captured cut.
+    const fixedCut = Object.freeze({ frontier,
+      notAfterCreatedAt: typeof time === "number" ? time : undefined })
+    const fixedTarget = Object.freeze({ ...target,
+      incarnation: Object.freeze({ ...target.incarnation }) })
+    const fixedUuids = [...uuids]
+    guard()
+    if (this.database.inTransaction) fail("MODS_CONVERSATION_NOT_COMMITTED")
+    this.assertCurrent(fixedTarget)
+    if (fixedCut.frontier > this.highWater(fixedTarget))
+      fail("MODS_CONVERSATION_READ_CUT_INVALID")
+    const lineage = this.lineage(fixedTarget, fixedCut.frontier)
+    const predicates = lineage.map(() => "(branch_id = ? AND sequence >= 1 AND sequence <= ?)")
+      .join(" OR ")
+    const result = fixedUuids.map(uuid => {
+      if (typeof uuid !== "string" || !uuid.length)
+        fail("MODS_CONVERSATION_ROW_OUTSIDE_CUT")
+      const selected = rows(this.database, `SELECT * FROM function_conversation_rows
+        WHERE conversation_id = ? AND uuid = ? AND (${predicates})
+        ${fixedCut.notAfterCreatedAt === undefined ? "" : "AND created_at <= ?"} LIMIT 1`, [
+        fixedTarget.conversationId, uuid, ...lineage.flatMap((entry) => [entry.branchId, entry.cut]),
+        ...(fixedCut.notAfterCreatedAt === undefined ? [] : [fixedCut.notAfterCreatedAt])
+      ])[0]
+      if (!selected) fail("MODS_CONVERSATION_ROW_OUTSIDE_CUT")
+      const result = this.decode(selected)
+      const branch = lineage.find((entry) => entry.branchId === result.branchId)
+      if (result.uuid !== uuid || !branch || result.sequence < 1 || result.sequence > branch.cut ||
+        (fixedCut.notAfterCreatedAt !== undefined && result.createdAt > fixedCut.notAfterCreatedAt))
+        fail("MODS_CONVERSATION_ROW_OUTSIDE_CUT")
+      return result
+    })
+    guard()
+    if (this.database.inTransaction) fail("MODS_CONVERSATION_NOT_COMMITTED")
+    this.assertCurrent(fixedTarget)
+    if (fixedCut.frontier > this.highWater(fixedTarget) ||
+      JSON.stringify(this.lineage(fixedTarget, fixedCut.frontier)) !== JSON.stringify(lineage))
+      fail("MODS_CONVERSATION_READ_CUT_INVALID")
     return result
   }
 
@@ -1289,6 +1355,76 @@ const originalAssertCurrent = Object.getOwnPropertyDescriptor(FunctionConversati
   "assertCurrent")!.value
 const originalHighWater = Object.getOwnPropertyDescriptor(FunctionConversationStore.prototype,
   "highWater")!.value
+const nativeCheckpointReadOrigins = Object.freeze({ prototype: FunctionConversationStore.prototype,
+  memberDescriptor: Object.freeze(Object.getOwnPropertyDescriptor(FunctionConversationStore.prototype,
+    "readCheckpointMember")!),
+  readMember: FunctionConversationStore.prototype.readCheckpointMember,
+  readMembers: FunctionConversationStore.prototype.readCheckpointMembers })
+
+/** Captured with the Store class, never sampled lazily from a potentially customized prototype. */
+export function readFunctionConversationCheckpointReadOrigins(): typeof nativeCheckpointReadOrigins {
+  return nativeCheckpointReadOrigins
+}
+
+const checkpointOwnNames = Reflect.ownKeys
+const checkpointMapForEach = Map.prototype.forEach
+const checkpointStorePrototype = FunctionConversationStore.prototype
+const checkpointAdapterPrototype = NativeSqliteAdapter.prototype
+function checkpointDescriptors(prototype: object): readonly [PropertyKey, PropertyDescriptor][] {
+  return checkpointOwnNames(prototype).map(name => [name, currentDescriptor(prototype, name)!])
+}
+const checkpointStoreFields = checkpointDescriptors(checkpointStorePrototype)
+const checkpointAdapterFields = checkpointDescriptors(checkpointAdapterPrototype)
+const checkpointArrayFields = checkpointDescriptors(Array.prototype)
+const checkpointObjectFields = checkpointDescriptors(Object.prototype)
+const checkpointArrayConstructorFields = checkpointDescriptors(Array)
+function checkpointSameDescriptor(actual: PropertyDescriptor | undefined,
+  expected: PropertyDescriptor): boolean {
+  if (!actual || actual.enumerable !== expected.enumerable ||
+    actual.configurable !== expected.configurable) return false
+  const data = !!currentDescriptor(expected, "value")
+  if (!!currentDescriptor(actual, "value") !== data) return false
+  return data ? actual.value === expected.value && actual.writable === expected.writable :
+    actual.get === expected.get && actual.set === expected.set
+}
+function checkpointPrototypeCurrent(prototype: object,
+  fields: readonly [PropertyKey, PropertyDescriptor][]): boolean {
+  if (checkpointOwnNames(prototype).length !== fields.length) return false
+  for (let index = 0; index < fields.length; index++)
+    if (!checkpointSameDescriptor(currentDescriptor(prototype, fields[index][0]), fields[index][1]))
+      return false
+  return true
+}
+function checkpointOriginalFields(value: object, prototype: object,
+  fields: readonly [PropertyKey, PropertyDescriptor][]): boolean {
+  if (currentIsProxy(value) || currentPrototype(value) !== prototype ||
+    !checkpointPrototypeCurrent(prototype, fields)) return false
+  for (let index = 0; index < fields.length; index++) {
+    if (currentDescriptor(value, fields[index][0])) return false
+  }
+  return true
+}
+
+/** Classification only: batching never lends a cached row or an authorization result. */
+export function isFunctionConversationNativeCheckpointStore(store: FunctionConversationStore,
+  target: FunctionConversationRef): boolean {
+  const record = currentApply(storeWeakGet, storeCurrentOrigins, [store]) as StoreCurrentOrigin | undefined
+  if (!record || record.failed ||
+    !checkpointPrototypeCurrent(Array.prototype, checkpointArrayFields) ||
+    !checkpointPrototypeCurrent(Object.prototype, checkpointObjectFields) ||
+    !checkpointPrototypeCurrent(Array, checkpointArrayConstructorFields) ||
+    !checkpointOriginalFields(store, checkpointStorePrototype,
+    checkpointStoreFields) || !checkpointOriginalFields(record.database, checkpointAdapterPrototype,
+    checkpointAdapterFields) || !originalCurrentDispatch(record.database) || !joinedCurrentTarget(target))
+    return false
+  const reads = currentApply(storeWeakGet, currentReads, [record.database]) as
+    Map<string, NativeSqliteReadOne> | undefined
+  let pure = true
+  if (reads) currentApply(checkpointMapForEach, reads, [(read: NativeSqliteReadOne) => {
+    if (!currentApply(currentWeakHas, pureCurrentReaders, [read])) pure = false
+  }])
+  return pure
+}
 
 /** Only the two callback-free identity/high-water reads inside one cut share a SQL row. */
 function currentCutHighWater(store: FunctionConversationStore, target: FunctionConversationRef,

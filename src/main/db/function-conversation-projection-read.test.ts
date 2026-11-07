@@ -116,6 +116,7 @@ describe("fresh joined canonical read and exact private composition", () => {
     const writes = vi.spyOn(f.database, "run")
     const read = () => appDb.withCanonicalThreadMessageReadScope(f.threadId, reader => {
       const result = reader.requireSnapshotAndPresentation(f.uuid)
+      expect(reader.partition([result.snapshot]).canonicalCount).toBe(1)
       if (recreate) reader.runGuard(() => {
         f.database.run("DELETE FROM threads WHERE thread_id=?", [f.threadId])
         appDb.createThread(f.threadId, { workspacePath: directory })

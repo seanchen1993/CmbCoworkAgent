@@ -11,13 +11,16 @@ export function retainsFunctionSitePresentation(
   const same = (left: unknown, right: unknown): boolean =>
     JSON.stringify(left) === JSON.stringify(right)
   if (previousKey === JSON.stringify(next)) return false
-  // Scrolling changes presentation geometry only. Keep the already protected DOM (inert
-  // until the new read completes), otherwise clearing a tall form resets scrollTop to 0.
+  // Resize and scrolling change presentation geometry only. Keep the protected DOM inert
+  // until the latest read completes; clearing it can reset scroll and amplify resize work.
   if (isFunctionDockedSite(component) &&
     Object.keys(previous).length === 4 && Object.keys(next).length === 4 &&
     ["isWorking", "bodyColumns", "maxRows", "offset"].every(key => Object.hasOwn(next, key)) &&
     typeof previous.isWorking === "boolean" && typeof next.isWorking === "boolean" &&
-    same(previous.bodyColumns, next.bodyColumns) && same(previous.maxRows, next.maxRows) &&
+    [previous.bodyColumns, next.bodyColumns].every(value => typeof value === "number" &&
+      Number.isSafeInteger(value) && value >= 1 && value <= 1000) &&
+    [previous.maxRows, next.maxRows].every(value => typeof value === "number" &&
+      Number.isSafeInteger(value) && value >= 1 && value <= 12) &&
     [previous.offset, next.offset].every(value => typeof value === "number" &&
       Number.isSafeInteger(value) && value >= 0 && value <= 100000)) return true
   if (component === "Spinner")
@@ -47,9 +50,23 @@ export function retainsFunctionSitePresentation(
       !Array.isArray(previous.calls) ||
       !Array.isArray(next.calls) ||
       !previous.calls.length ||
-      previous.calls.length !== next.calls.length
+      previous.calls.length > next.calls.length
     )
       return false
+    // Append-only groups retain just their previously protected rows. Every new ID
+    // must be unique, and malformed/error/interrupted additions cannot bridge a read.
+    const ids = new Set<string>()
+    for (const value of next.calls) {
+      const call = value as ModObject
+      if (!call || typeof call !== "object" || Array.isArray(call) ||
+        typeof call.tool_use_id !== "string" || !call.tool_use_id ||
+        ids.has(call.tool_use_id) || typeof call.tool !== "string" || !call.tool ||
+        typeof call.isRunning !== "boolean" || call.isErrored !== false ||
+        call.isInterrupted !== false || !Object.hasOwn(call, "input") ||
+        Object.keys(call).some(key => !["tool_use_id", "tool", "input", "isRunning",
+          "isErrored", "isInterrupted", "output"].includes(key))) return false
+      ids.add(call.tool_use_id)
+    }
     return previous.calls.every((value, index) => {
       const old = value as ModObject,
         current = (next.calls as ModObject[])[index]

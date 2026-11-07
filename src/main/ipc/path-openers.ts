@@ -9,7 +9,7 @@ import type {
   OpenIdeRequest,
   PreferredIde
 } from "../types"
-import { configurePreferredIde, openIde } from "../utils/open-in-ide"
+import { configurePreferredIde, invalidatePendingIdeConfiguration, openIde } from "../utils/open-in-ide"
 
 function isWindowsReservedDevicePath(filePath: string): boolean {
   if (process.platform !== "win32") return false
@@ -67,8 +67,10 @@ export function registerPathOpenersHandlers(ipcMain: IpcMain): void {
 
   ipcMain.handle(
     "ide:setPreferred",
-    async (_event, preferredIde: PreferredIde): Promise<PreferredIde> =>
-      setPreferredIde(preferredIde)
+    async (_event, preferredIde: PreferredIde): Promise<PreferredIde> => {
+      invalidatePendingIdeConfiguration()
+      return setPreferredIde(preferredIde)
+    }
   )
 
   ipcMain.handle(
