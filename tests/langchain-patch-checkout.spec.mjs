@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
 import { execFileSync } from "node:child_process"
 import { createHash } from "node:crypto"
-import { cp, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises"
+import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
 import { test } from "node:test"
@@ -51,9 +51,15 @@ test("native patch artifacts retain their manifest hashes after real Git checkou
     ).trim()
     git(source, "update-ref", "refs/heads/main", commit)
 
-    const names = await readdir(join(source, "patches"))
+    // Include nested patch packages without treating their directories as files.
+    const names = git(source, "ls-files", "-z", "--", "patches")
+      .split("\0")
+      .filter(Boolean)
+      .map((name) => name.slice("patches/".length))
     const manifests = names.filter((name) => name.endsWith(".manifest.json"))
     assert.equal(manifests.length, 4, "cover the base, overlay, core and graph patches")
+    assert.ok(names.includes("react-virtuoso-scroll-cancel/manifest.json"))
+    assert.ok(names.includes("react-virtuoso-scroll-cancel/react-virtuoso-4.18.12.patch"))
 
     for (const autocrlf of ["true", "false", "input"]) {
       const checkout = join(root, `checkout-${autocrlf}`)
@@ -96,6 +102,20 @@ test("native patch artifacts retain their manifest hashes after real Git checkou
           assert.equal(JSON.parse(base).patchSha256, manifest.basePatchSha256)
         }
       }
+      const virtuosoDirectory = join(checkout, "patches", "react-virtuoso-scroll-cancel")
+      const virtuosoManifest = JSON.parse(
+        await readFile(join(virtuosoDirectory, "manifest.json"), "utf8")
+      )
+      assert.equal(
+        hash(await readFile(join(virtuosoDirectory, "react-virtuoso-4.18.12.patch"))),
+        virtuosoManifest.patchSha256,
+        `${autocrlf}: nested Virtuoso patch checksum`
+      )
+      assert.equal(
+        hash(await readFile(join(virtuosoDirectory, "LICENSE"))),
+        virtuosoManifest.licenseSha256,
+        `${autocrlf}: nested Virtuoso license checksum`
+      )
     }
   } finally {
     await rm(root, { recursive: true, force: true })
