@@ -10,6 +10,7 @@ const file = path.join(root, "src/renderer/src/components/chat/ChatContainer.tsx
 const raw = fs.readFileSync(file, "utf8")
 const ast = ts.createSourceFile(file, raw, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX)
 const names = [
+  "clearHistoryRestore",
   "getVirtualTail",
   "hasReadyVirtualTail",
   "scheduleBottomScrollEffect",
@@ -41,11 +42,22 @@ const chatScrollStateRef={current:null},pendingBottomScrollEffectRef={current:nu
   bottomSettleAttemptRef={current:0},bottomSettleEffectKeyRef={current:""},lastVisibleMessageIndexRef={current:1},
   lastVisibleMessageIdRef={current:null},contentMessageRefs={current:new Map()},
   messageVirtualizationEnabledRef={current:false},virtuosoRef={current:null},pendingDurableHistoryAnchorRef={current:null},
+  releaseHistoryAnchorRef={current:null},
   lastObservedScrollTopRef={current:0},upwardUserScrollIntentUntilRef={current:0},
   downwardUserScrollIntentUntilRef={current:Infinity},scrollbarUserIntentActiveRef={current:false}
 const bottomPresentationWait=new ChatBottomPresentationWait()
 const applyChatScrollEvent=event=>{const t=transitionChatScroll(chatScrollStateRef.current,event);chatScrollStateRef.current=t.state;return t}
 ${names.map((name) => "const " + name + "=" + bodies.get(name)).join("\n")}
+window.actualTailHint=()=>{
+  const row=document.createElement('div');row.style.height='30px';row.textContent='Approved tail';
+  viewport.append(row);viewport.dataset.chatInitialPresentation='pending';
+  messageVirtualizationEnabledRef.current=true;lastVisibleMessageIdRef.current='tail';
+  contentMessageRefs.current.set('tail',row);
+  const values=[hasReadyVirtualTail(viewport)];row.style.visibility='hidden';
+  values.push(hasReadyVirtualTail(viewport));row.remove();delete viewport.dataset.chatInitialPresentation;
+  contentMessageRefs.current.clear();lastVisibleMessageIdRef.current=null;
+  messageVirtualizationEnabledRef.current=false;return values;
+}
 window.actualNearBottom={async run(options={}){
   bottomPresentationWait.clear()
   if(bottomScrollFrameRef.current!==null)cancelAnimationFrame(bottomScrollFrameRef.current)
@@ -119,6 +131,8 @@ async function main() {
       [],
       "Actual callbacks must initialize with their production dependencies"
     )
+    assert.deepEqual(await page.evaluate("window.actualTailHint()"), [true, false],
+      "Visible approved tails remain ready under the hint; actual hidden probes do not")
     for (const options of [
       {},
       { pointer: true },

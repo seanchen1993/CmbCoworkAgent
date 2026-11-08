@@ -1,12 +1,18 @@
 import { resolve } from "path"
+import { createHash } from "node:crypto"
 import { readFileSync, copyFileSync, existsSync, mkdirSync, readdirSync, statSync } from "fs"
 import { defineConfig } from "electron-vite"
 import react from "@vitejs/plugin-react"
 import tailwindcss from "@tailwindcss/vite"
 import { mirrorRequiredDirectorySync } from "./src/main/build/directory-mirror"
 import { mirrorBundledModExamples } from "./src/main/build/bundled-mod-examples"
+import { checkReactVirtuosoScrollCancel } from "./scripts/apply-react-virtuoso-scroll-cancel.mjs"
 // import {app} from "electron"
 
+checkReactVirtuosoScrollCancel({ workspaceRoot: resolve(".") })
+const virtuosoPatchDigest = createHash("sha256")
+  .update(readFileSync(resolve("patches/react-virtuoso-scroll-cancel/react-virtuoso-4.18.12.patch")))
+  .digest("hex")
 const pkg = JSON.parse(readFileSync("./package.json", "utf-8"))
 
 // Plugin to copy resources to output
@@ -135,6 +141,13 @@ export default defineConfig({
   preload: {},
   renderer: {
     cacheDir: resolve("node_modules/.vite/renderer"),
+    // Vite hashes optimizer options, but not arbitrary renderer.define entries.
+    // A local dependency patch must invalidate prebundles even when the lockfile is unchanged.
+    optimizeDeps: {
+      esbuildOptions: {
+        define: { __REACT_VIRTUOSO_PATCH_SHA256__: JSON.stringify(virtuosoPatchDigest) }
+      }
+    },
     define: {
       __APP_VERSION__: JSON.stringify(pkg.version)
       // __APP_VERSION__: app.getVersion(),

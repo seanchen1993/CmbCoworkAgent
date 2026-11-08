@@ -1,7 +1,7 @@
-/** A measured box may still belong to Virtuoso's hidden initial probe. */
+/** Readiness hints do not hide approved text; Virtuoso's actual hidden probe still does. */
 export function isChatRowPresented(row: HTMLElement): boolean {
   if (!row.isConnected || row.closest(
-    '[data-chat-initial-presentation="pending"], [aria-hidden="true"], [inert]'
+    '[aria-hidden="true"], [inert]'
   )) return false
   if (typeof row.checkVisibility === "function") {
     return row.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })

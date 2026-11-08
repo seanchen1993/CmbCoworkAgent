@@ -75,6 +75,8 @@ interface ChatSearchOverlayProps {
   getSearchCorpus: (signal?: AbortSignal) => ChatSearchCorpus | Promise<ChatSearchCorpus>
   /** Ensures a virtualized message row is mounted before highlighting it. */
   onRevealMessage: (messageId: string) => void
+  /** Hands off index navigation before positioning an exact, mounted text occurrence. */
+  onBeforePreciseScroll?: () => void
   /** Searches durable pages beyond the currently loaded renderer window. */
   searchDurableMessages?: SearchDurableMessages
   /** Loads an unloaded durable result before the overlay asks to paint it. */
@@ -528,6 +530,7 @@ export function ChatSearchOverlay({
   getViewport,
   getSearchCorpus,
   onRevealMessage,
+  onBeforePreciseScroll,
   searchDurableMessages,
   onRevealDurableMessage,
   onCancelDurableReveal,
@@ -562,6 +565,7 @@ export function ChatSearchOverlay({
   const contextRefreshFrameRef = useRef<number | null>(null)
   const revealCallbacksRef = useRef({
     onRevealMessage,
+    onBeforePreciseScroll,
     onRevealDurableMessage,
     onRevealSearchContext,
     validateSearchLocation
@@ -571,11 +575,18 @@ export function ChatSearchOverlay({
     // the callbacks from that commit, not the map captured before hydration began.
     revealCallbacksRef.current = {
       onRevealMessage,
+      onBeforePreciseScroll,
       onRevealDurableMessage,
       onRevealSearchContext,
       validateSearchLocation
     }
-  }, [onRevealMessage, onRevealDurableMessage, onRevealSearchContext, validateSearchLocation])
+  }, [
+    onRevealMessage,
+    onBeforePreciseScroll,
+    onRevealDurableMessage,
+    onRevealSearchContext,
+    validateSearchLocation
+  ])
 
   const searchGenerationRef = useRef(0)
   const searchMatcherRef = useRef(createChatSearchMatcher(CHAT_SEARCH_RESULT_LIMIT + 1))
@@ -801,6 +812,7 @@ export function ChatSearchOverlay({
             viewport.scrollHeight === previousScrollHeight
               ? stableFrames + 1
               : 0
+          revealCallbacksRef.current.onBeforePreciseScroll?.()
           scrollChatSearchRangeIntoView(viewport, activeRange)
           previousRangeTop = activeRange.getBoundingClientRect().top
           previousScrollHeight = viewport.scrollHeight

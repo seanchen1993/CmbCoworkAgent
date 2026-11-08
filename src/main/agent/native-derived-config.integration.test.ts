@@ -252,7 +252,10 @@ async function fixture(controller: AbortController, options: { hook?: boolean;
         appends++; return functions.appendConversation(key, id, ticket)
       } })
     const [status] = await functions.status(workspace)
-    if (!status?.digest) throw Error("ACTUAL_DERIVED_APPROVED_DIGEST_REQUIRED")
+    if (!status?.digest) throw Error(
+      `ACTUAL_DERIVED_APPROVED_DIGEST_REQUIRED: ${status?.state ?? "missing-source"}` +
+      (status?.error ? `: ${status.error}` : "")
+    )
     await functions.approve(workspace, "actual-derived-hook", status.digest)
     const commands = await functions.commands(workspace, threadId)
     const command = commands.find(value => value.command === "derived-note")

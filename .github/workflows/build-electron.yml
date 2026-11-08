@@ -382,6 +382,13 @@ jobs:
       - name: Verify native JavaScript foundations
         run: node scripts/apply-langchain-native-foundations.mjs --check
 
+      - name: Install Virtuoso scroll cancellation patch (Linux)
+        if: runner.os == 'Linux'
+        run: node scripts/apply-react-virtuoso-scroll-cancel.mjs
+
+      - name: Verify Virtuoso scroll cancellation patch
+        run: node scripts/apply-react-virtuoso-scroll-cancel.mjs --check
+
       - name: Verify organization skill response contracts
         timeout-minutes: 5
         run: >-

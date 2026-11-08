@@ -190,7 +190,12 @@ import {
   type DurableChatSearchPage
 } from "./ChatSearchOverlay"
 import { chatScrollSessionStore, type ChatScrollSessionAnchor } from "./chat-scroll-session-store"
+import { resolveChatSessionInitialLocation, type ChatSessionRestoreSeed } from "./chat-session-initial-location"
 import { notifyChatDetachedAnchorOwnerReleased } from "./chat-detached-layout-anchor"
+import { acquireChatExternalScrollAnchor } from "./chat-external-scroll-anchor"
+import { selectChatSessionSaveAnchor } from "./chat-session-save-anchor"
+import { createChatSessionRestorePosition } from "./chat-session-restore-position"
+import { hasUncommittedChatItemSizes, needsChatItemSizeRefresh, positionChatVirtualAnchor } from "./chat-virtual-item-measurement"
 import { WelcomeSkills } from "./WelcomeSkills"
 import { SkillCreateConfirmDialog, type SkillConfirmRequest } from "./SkillCreateConfirmDialog"
 import { UserInputRequestDialog, type UserInputRequestDialogLayout } from "./UserInputRequestDialog"
@@ -412,6 +417,7 @@ interface PendingDurableHistoryAnchor {
   attempt: number
   stableFrames: number
   lastRevealAttempt?: number
+  targetMounted?: boolean
 }
 
 interface PendingChatSessionAnchor extends ChatScrollSessionAnchor {
@@ -419,6 +425,7 @@ interface PendingChatSessionAnchor extends ChatScrollSessionAnchor {
   attempt: number
   stableFrames: number
   lastRevealAttempt?: number
+  targetMounted?: boolean
 }
 
 function interruptionNoticeCopy(
@@ -1519,9 +1526,12 @@ function ChatErrorCard({
       <AlertCircle className="size-5 text-destructive shrink-0 mt-0.5" />
       <div className="flex-1 min-w-0">
         <div className="font-medium text-destructive text-sm">{title}</div>
-        {compositionRecovery && (onReviewComposition
-          ? <ModCompositionRecoveryNotice onReview={onReviewComposition} />
-          : <p className="mt-1 text-sm text-muted-foreground">请在项目的插件配置中核对参数和开关后重试。</p>)}
+        {compositionRecovery &&
+          (onReviewComposition ? <ModCompositionRecoveryNotice onReview={onReviewComposition} /> : (
+            <p className="mt-1 text-sm text-muted-foreground">
+              请在项目的插件配置中核对参数和开关后重试。
+            </p>
+          ))}
         {!compositionRecovery && reason && (
           <div className="text-sm text-muted-foreground mt-1 break-words whitespace-pre-wrap">
             {reason}
@@ -1782,6 +1792,25 @@ export function ChatContainer({
         }
       : null
   )
+  const [sessionRestoreSeed, setSessionRestoreSeed] = useState<ChatSessionRestoreSeed | null>(
+    () => initialChatScrollSession?.anchor && initialChatScrollSession.state.threadId === threadId
+      ? { ...initialChatScrollSession.anchor, threadId }
+      : null
+  )
+  const correctSessionAnchorLayoutRef = useRef<(() => void) | null>(null)
+  const releaseSessionAnchorRef = useRef<(() => void) | null>(null)
+  const sessionRestorePositionRef = useRef<{
+    anchor: PendingChatSessionAnchor
+    position: ReturnType<typeof createChatSessionRestorePosition>
+  } | null>(null)
+  const clearSessionRestore = useCallback((): void => {
+    pendingChatSessionAnchorRef.current = null
+    correctSessionAnchorLayoutRef.current = null
+    sessionRestorePositionRef.current = null
+    setSessionRestoreSeed(null)
+    releaseSessionAnchorRef.current?.()
+    releaseSessionAnchorRef.current = null
+  }, [])
   const [chatScrollUiState, setChatScrollUiState] = useState(() => ({
     generation: chatScrollStateRef.current?.generation ?? 0,
     mode: chatScrollStateRef.current?.mode ?? "initializing",
@@ -1810,6 +1839,23 @@ export function ChatContainer({
     structureVersion: number
   } | null>(initialChatScrollSession?.contentSnapshot ?? null)
   const pendingDurableHistoryAnchorRef = useRef<PendingDurableHistoryAnchor | null>(null)
+  const correctHistoryAnchorLayoutRef = useRef<(() => void) | null>(null)
+  const releaseHistoryAnchorRef = useRef<(() => void) | null>(null)
+  const clearHistoryRestore = useCallback((): void => {
+    pendingDurableHistoryAnchorRef.current = null
+    correctHistoryAnchorLayoutRef.current = null
+    releaseHistoryAnchorRef.current?.()
+    releaseHistoryAnchorRef.current = null
+  }, [])
+  const hasPendingAnchorLayout = useCallback((): boolean =>
+    correctSessionAnchorLayoutRef.current !== null || correctHistoryAnchorLayoutRef.current !== null,
+  [])
+  const correctPendingAnchorLayout = useCallback((): boolean => {
+    const correct = correctSessionAnchorLayoutRef.current ?? correctHistoryAnchorLayoutRef.current
+    if (!correct) return false
+    correct()
+    return true
+  }, [])
   const pendingDurableSearchRevealIdRef = useRef<string | null>(
     initialPendingDurableRevealMessageId
   )
@@ -4122,6 +4168,7 @@ export function ChatContainer({
       pendingChatSessionAnchorRef.current = restored?.anchor
         ? { ...restored.anchor, threadId, attempt: 0, stableFrames: 0 }
         : null
+      setSessionRestoreSeed(restored?.anchor ? { ...restored.anchor, threadId } : null)
       chatContentSnapshotRef.current = restored?.contentSnapshot ?? null
       pendingDurableSearchRevealIdRef.current = opened.pendingRevealMessageId
       setChatScrollUiState({
@@ -4160,8 +4207,8 @@ export function ChatContainer({
   lastVisibleMessageIdRef.current = lastContentMessageId
   messageVirtualizationEnabledRef.current = isMessageVirtualizationEnabled
   useEffect(() => {
-    pendingDurableHistoryAnchorRef.current = null
-  }, [threadId])
+    clearHistoryRestore()
+  }, [threadId, clearHistoryRestore])
 
   const getVirtualTail = useCallback((viewport: HTMLElement): HTMLElement | undefined => {
     const messageId = lastVisibleMessageIdRef.current
@@ -4266,6 +4313,7 @@ export function ChatContainer({
         } else {
           // The viewport write includes Virtuoso's measured footer (queued rows, approvals, and
           // user-input cards). It deliberately runs on a different frame from virtual tail priming.
+          virtuosoRef.current?.cancelScrollToIndex()
           const bottom = Math.max(0, viewport.scrollHeight - viewport.clientHeight)
           if (Math.abs(viewport.scrollTop - bottom) > 1) {
             viewport.scrollTo({ top: bottom, behavior: "auto" })
@@ -4362,14 +4410,14 @@ export function ChatContainer({
       // session immediately so its next animation frame cannot pull the reader back to the old
       // anchor after wheel/touch/keyboard navigation.
       if (event.type === "USER_DETACH" && pendingDurableHistoryAnchorRef.current) {
-        pendingDurableHistoryAnchorRef.current = null
+        clearHistoryRestore()
         nextState = runChatScrollTransition(
           applyChatScrollEvent({ type: "RESTORE_END", generation: nextState.generation })
         )
       }
       return nextState
     },
-    [applyChatScrollEvent, runChatScrollTransition]
+    [applyChatScrollEvent, runChatScrollTransition, clearHistoryRestore]
   )
 
   const waitForTranscriptCommit = useCallback(
@@ -4385,7 +4433,8 @@ export function ChatContainer({
     durableMessageWindowGenerationRef.current = revealGeneration
     setPendingDurableRevealMessageId(null)
     cancelMessageWindowLoad()
-    pendingChatSessionAnchorRef.current = null
+    clearSessionRestore()
+    virtuosoRef.current?.cancelScrollToIndex()
     // Persist the user's intent before waiting for disk. If the chat unmounts while the latest
     // page is loading (for example, a file tab opens), cleanup must save `following`, not the
     // detached state that existed before the click.
@@ -4416,6 +4465,7 @@ export function ChatContainer({
     })()
   }, [toast, 
     cancelMessageWindowLoad,
+    clearSessionRestore,
     dispatchChatScrollEvent,
     historyPageLoading,
     historyWindowGap,
@@ -4437,19 +4487,7 @@ export function ChatContainer({
         // A durable reveal that is still loading owns the remount destination. Saving the old
         // viewport anchor here would race it and pull the reopened chat back to stale content.
         if (viewport && isChatScrollDetached(state) && !pendingDurableSearchRevealIdRef.current) {
-          const viewportTop = viewport.getBoundingClientRect().top
-          let closestDistance = Number.POSITIVE_INFINITY
-          for (const candidate of viewport.querySelectorAll<HTMLElement>(
-            "[data-chat-message-id]"
-          )) {
-            const messageId = candidate.dataset.chatMessageId
-            if (!messageId) continue
-            const offsetFromViewportTop = candidate.getBoundingClientRect().top - viewportTop
-            const distance = Math.abs(offsetFromViewportTop)
-            if (distance >= closestDistance) continue
-            closestDistance = distance
-            anchor = { messageId, offsetFromViewportTop }
-          }
+          anchor = selectChatSessionSaveAnchor(viewport)
         }
         chatScrollSessionStore.save(sessionLease, {
           state,
@@ -4479,7 +4517,8 @@ export function ChatContainer({
       }
       const revealGeneration = durableMessageWindowGenerationRef.current + 1
       durableMessageWindowGenerationRef.current = revealGeneration
-      pendingChatSessionAnchorRef.current = null
+      clearSessionRestore()
+      virtuosoRef.current?.cancelScrollToIndex()
       setPendingDurableRevealMessageId(match.messageId)
       dispatchChatScrollEvent({ type: "USER_DETACH", source: "user-input" })
       const loaded = await loadMessageWindowAround(match)
@@ -4496,6 +4535,7 @@ export function ChatContainer({
       await waitForTranscriptCommit()
     },
     [
+      clearSessionRestore,
       dispatchChatScrollEvent,
       loadMessageWindowAround,
       setPendingDurableRevealMessageId,
@@ -4555,7 +4595,8 @@ export function ChatContainer({
       }
     }
     const cancelPendingHistoryAnchorFromUserGesture = (direction?: "up" | "down"): void => {
-      pendingChatSessionAnchorRef.current = null
+      virtuosoRef.current?.cancelScrollToIndex()
+      clearSessionRestore()
       invalidateDurableMessageReveal()
       const anchor = pendingDurableHistoryAnchorRef.current
       const state = chatScrollStateRef.current
@@ -4707,6 +4748,7 @@ export function ChatContainer({
       window.removeEventListener("blur", cancelScrollbarPointerIntent)
     }
   }, [
+    clearSessionRestore,
     dispatchChatScrollEvent,
     hasReadyVirtualTail,
     invalidateDurableMessageReveal,
@@ -4718,6 +4760,8 @@ export function ChatContainer({
     (messageId: string): void => {
       const index = visibleMessageIndexById.get(messageId)
       if (index === undefined) return
+      clearSessionRestore()
+      virtuosoRef.current?.cancelScrollToIndex()
       invalidateDurableMessageReveal()
       dispatchChatScrollEvent({ type: "USER_DETACH", source: "user-input" })
       const targetElement = contentMessageRefs.current.get(messageId)
@@ -4733,24 +4777,35 @@ export function ChatContainer({
       }
       virtuosoRef.current?.scrollToIndex({ index, align: "start", behavior: "smooth" })
     },
-    [dispatchChatScrollEvent, getViewport, invalidateDurableMessageReveal, visibleMessageIndexById]
+    [clearSessionRestore, dispatchChatScrollEvent, getViewport, invalidateDurableMessageReveal,
+      visibleMessageIndexById]
   )
   const revealMessage = useCallback(
     (messageId: string): void => {
       const index = visibleMessageIndexById.get(messageId)
       if (index === undefined) return
+      clearSessionRestore()
+      virtuosoRef.current?.cancelScrollToIndex()
       invalidateDurableMessageReveal()
       dispatchChatScrollEvent({ type: "USER_DETACH", source: "user-input" })
       const targetElement = contentMessageRefs.current.get(messageId)
       if (targetElement) return
       virtuosoRef.current?.scrollToIndex({ index, align: "center", behavior: "auto" })
     },
-    [dispatchChatScrollEvent, invalidateDurableMessageReveal, visibleMessageIndexById]
+    [clearSessionRestore, dispatchChatScrollEvent, invalidateDurableMessageReveal,
+      visibleMessageIndexById]
   )
   const handleScrollToQuestion = useCallback((): void => {
+    clearSessionRestore()
+    virtuosoRef.current?.cancelScrollToIndex()
     invalidateDurableMessageReveal()
     dispatchChatScrollEvent({ type: "USER_DETACH", source: "user-input" })
-  }, [dispatchChatScrollEvent, invalidateDurableMessageReveal])
+  }, [clearSessionRestore, dispatchChatScrollEvent, invalidateDurableMessageReveal])
+
+  const handleBeforePreciseSearchScroll = useCallback((): void => {
+    clearSessionRestore()
+    virtuosoRef.current?.cancelScrollToIndex()
+  }, [clearSessionRestore])
 
   const handleInitialVirtualItemsRendered = useCallback((): void => {
     if (historyLoading) return
@@ -4815,15 +4870,19 @@ export function ChatContainer({
 
   useLayoutEffect(() => {
     const messageId = pendingDurableSearchRevealIdRef.current
-    if (!messageId || historyPageLoading) return
+    if (!messageId || historyLoading || historyPageLoading || !scrollParent ||
+      !virtuosoRef.current) return
     const index = visibleMessageIndexById.get(messageId)
     if (index === undefined) {
       setPendingDurableRevealMessageId(null)
       return
     }
+    clearSessionRestore()
+    virtuosoRef.current?.cancelScrollToIndex()
     setPendingDurableRevealMessageId(null)
     virtuosoRef.current?.scrollToIndex({ index, align: "center", behavior: "auto" })
-  }, [historyPageLoading, setPendingDurableRevealMessageId, visibleMessageIndexById])
+  }, [clearSessionRestore, historyLoading, historyPageLoading, scrollParent,
+    setPendingDurableRevealMessageId, visibleMessageIndexById])
 
   useLayoutEffect(() => {
     const anchor = pendingChatSessionAnchorRef.current
@@ -4838,44 +4897,102 @@ export function ChatContainer({
     }
     const visibleIndex = visibleMessageIndexById.get(anchor.messageId)
     if (visibleIndex === undefined) {
-      pendingChatSessionAnchorRef.current = null
+      clearSessionRestore()
       return
     }
 
+    const releaseAnchor = acquireChatExternalScrollAnchor(virtuosoRef.current)
+    releaseSessionAnchorRef.current = releaseAnchor
+    if (sessionRestorePositionRef.current?.anchor !== anchor) {
+      sessionRestorePositionRef.current = { anchor, position: createChatSessionRestorePosition() }
+    }
+    const position = sessionRestorePositionRef.current.position
     let frame: number | null = null
     const finish = (): void => {
       if (pendingChatSessionAnchorRef.current === anchor) {
+        // Transfer the restored geometry before releasing the old owner's token.
         pendingChatSessionAnchorRef.current = null
         const viewport = getViewport()
         if (viewport) notifyChatDetachedAnchorOwnerReleased(viewport)
+        clearSessionRestore()
       }
     }
-    const restore = (): void => {
+    const restore = (layoutOnly = false): void => {
       if (pendingChatSessionAnchorRef.current !== anchor) return
       const viewport = getViewport()
-      const target =
-        contentMessageRefs.current.get(anchor.messageId) ??
-        Array.from(viewport?.querySelectorAll<HTMLElement>("[data-chat-message-id]") ?? []).find(
+      const transactionTop = viewport?.scrollTop
+      const findTarget = (): HTMLElement | undefined => {
+        const current = contentMessageRefs.current.get(anchor.messageId)
+        return current && viewport?.contains(current)
+          ? current
+          : Array.from(viewport?.querySelectorAll<HTMLElement>("[data-chat-message-id]") ?? []).find(
           (candidate) => candidate.dataset.chatMessageId === anchor.messageId
         )
+      }
+      let target = findTarget()
+      // Layout delivery must never consume a missing-target navigation or its frame budget.
+      if (layoutOnly && (!viewport?.isConnected || !target)) return
+      const previouslyMounted = anchor.targetMounted === true || Boolean(target)
+      let destination = viewport && position.resolve(viewport, target, anchor.offsetFromViewportTop)
+      if (layoutOnly && (!destination || !viewport ||
+        Math.abs(destination.element.getBoundingClientRect().top -
+          viewport.getBoundingClientRect().top - destination.offset) <= 1)) return
       if (viewport && target) {
+        if (needsChatItemSizeRefresh(viewport, target, destination || null)) {
+          virtuosoRef.current?.refreshItemSizes()
+        }
+        // Native size publication can retry an index or recycle a row; no old delta is reusable.
+        if (pendingChatSessionAnchorRef.current !== anchor || !viewport.isConnected) return
+        target = findTarget()
+        destination = position.resolve(viewport, target, anchor.offsetFromViewportTop)
+        // Publish first, then let a hidden probe's measured DOM commit before releasing its gate.
+        // Until a reading anchor can take over, native initialization completes independently.
+        // Explicit user navigation still cancels immediately.
+        if (target) {
+          if (hasUncommittedChatItemSizes(target)) destination = null
+          else if (destination) virtuosoRef.current?.cancelScrollToIndex()
+        }
+      }
+      // A real recycle is a new reveal event, not a continuation of the initial missing probe.
+      const targetWasRecycled = previouslyMounted && !target
+      if (!layoutOnly) anchor.targetMounted = Boolean(target)
+      if (viewport && destination) {
         const viewportTop = viewport.getBoundingClientRect().top
-        const currentOffset = target.getBoundingClientRect().top - viewportTop
-        const delta = currentOffset - anchor.offsetFromViewportTop
-        if (Math.abs(delta) > 1) viewport.scrollTop += delta
+        const currentOffset = destination.element.getBoundingClientRect().top - viewportTop
+        const delta = currentOffset - destination.offset
+        if (Math.abs(delta) > 1 && !positionChatVirtualAnchor(
+          destination.element, destination.offset, virtuosoRef.current
+        )) viewport.scrollTop += delta
+        if (viewport.scrollTop !== transactionTop) virtuosoRef.current?.refreshItemSizes()
+        if (layoutOnly) {
+          if (pendingChatSessionAnchorRef.current !== anchor) return
+          anchor.stableFrames = 0
+          return
+        }
         const pendingPresentation = viewport.querySelector(
           "[data-function-site-pending], [data-function-site][aria-busy='true']"
         )
-        anchor.stableFrames = Math.abs(delta) <= 1 && !pendingPresentation
-          ? anchor.stableFrames + 1 : 0
+        anchor.stableFrames =
+          viewport.scrollTop === transactionTop &&
+          !destination.temporary &&
+          Math.abs(delta) <= 1 &&
+          !pendingPresentation
+            ? anchor.stableFrames + 1
+            : 0
         if (anchor.stableFrames >= CHAT_SESSION_ANCHOR_STABLE_FRAMES) {
           finish()
           return
         }
       } else {
+        if (viewport && viewport.scrollTop !== transactionTop)
+          virtuosoRef.current?.refreshItemSizes()
+        if (layoutOnly) return
         anchor.stableFrames = 0
-        if (anchor.attempt - (anchor.lastRevealAttempt ?? Number.NEGATIVE_INFINITY) >=
-          CHAT_HISTORY_ANCHOR_STABLE_FRAMES) {
+        if (
+          !target &&
+          (targetWasRecycled || anchor.attempt - (anchor.lastRevealAttempt ?? Number.NEGATIVE_INFINITY) >=
+          CHAT_HISTORY_ANCHOR_STABLE_FRAMES)
+        ) {
           anchor.lastRevealAttempt = anchor.attempt
           virtuosoRef.current?.scrollToIndex({
             index: visibleIndex,
@@ -4887,16 +5004,32 @@ export function ChatContainer({
 
       anchor.attempt += 1
       if (anchor.attempt <= CHAT_HISTORY_ANCHOR_MAX_FRAMES) {
-        frame = window.requestAnimationFrame(restore)
+        frame = window.requestAnimationFrame(() => restore())
       } else {
+        virtuosoRef.current?.cancelScrollToIndex()
         finish()
       }
     }
-    frame = window.requestAnimationFrame(restore)
+    let correctingLayout = false
+    const correctLayout = (): void => {
+      if (correctingLayout || pendingChatSessionAnchorRef.current !== anchor) return
+      correctingLayout = true
+      try {
+        restore(true)
+      } finally {
+        correctingLayout = false
+      }
+    }
+    correctSessionAnchorLayoutRef.current = correctLayout
+    frame = window.requestAnimationFrame(() => restore())
     return () => {
+      if (correctSessionAnchorLayoutRef.current === correctLayout) correctSessionAnchorLayoutRef.current = null
       if (frame !== null) window.cancelAnimationFrame(frame)
+      releaseAnchor()
+      if (releaseSessionAnchorRef.current === releaseAnchor) releaseSessionAnchorRef.current = null
     }
   }, [
+    clearSessionRestore,
     getViewport,
     historyLoading,
     historyPageLoading,
@@ -4923,6 +5056,8 @@ export function ChatContainer({
 
   const loadEarlierHistoryPage = useCallback(async (): Promise<void> => {
     if (historyPageLoading || !historyHasMore) return
+    clearSessionRestore()
+    virtuosoRef.current?.cancelScrollToIndex()
     const generation = chatScrollStateRef.current?.generation
     dispatchChatScrollEvent({ type: "USER_DETACH", source: "user-input", generation })
     dispatchChatScrollEvent({ type: "RESTORE_BEGIN", generation })
@@ -4957,18 +5092,20 @@ export function ChatContainer({
       const prependedCount = await loadEarlierMessages()
       if (prependedCount === 0 || !request) {
         if (pendingDurableHistoryAnchorRef.current === request) {
-          pendingDurableHistoryAnchorRef.current = null
+          clearHistoryRestore()
         }
         dispatchChatScrollEvent({ type: "RESTORE_END", generation })
       }
     } catch (error) {
       if (pendingDurableHistoryAnchorRef.current === request) {
-        pendingDurableHistoryAnchorRef.current = null
+        clearHistoryRestore()
       }
       dispatchChatScrollEvent({ type: "RESTORE_END", generation })
       toast.error(error instanceof Error ? error.message : "加载更早消息失败")
     }
   }, [toast, 
+    clearHistoryRestore,
+    clearSessionRestore,
     dispatchChatScrollEvent,
     displayMessages.length,
     getViewport,
@@ -4983,7 +5120,8 @@ export function ChatContainer({
     if (!targetMessageId || historyPageLoading) return
     const revealGeneration = durableMessageWindowGenerationRef.current + 1
     durableMessageWindowGenerationRef.current = revealGeneration
-    pendingChatSessionAnchorRef.current = null
+    clearSessionRestore()
+    virtuosoRef.current?.cancelScrollToIndex()
     setPendingDurableRevealMessageId(targetMessageId)
     dispatchChatScrollEvent({ type: "USER_DETACH", source: "user-input" })
     try {
@@ -5010,6 +5148,7 @@ export function ChatContainer({
       }
     }
   }, [toast, 
+    clearSessionRestore,
     dispatchChatScrollEvent,
     historyPageLoading,
     historyWindowGap?.reloadTargetMessageId,
@@ -5028,44 +5167,91 @@ export function ChatContainer({
     ) {
       return
     }
+    const releaseAnchor = acquireChatExternalScrollAnchor(virtuosoRef.current)
+    releaseHistoryAnchorRef.current = releaseAnchor
     let frame: number | null = null
     const finishRestore = (): void => {
       if (pendingDurableHistoryAnchorRef.current !== anchor) return
       pendingDurableHistoryAnchorRef.current = null
       dispatchChatScrollEvent({ type: "RESTORE_END", generation: anchor.generation })
+      const viewport = getViewport()
+      if (viewport) notifyChatDetachedAnchorOwnerReleased(viewport)
+      clearHistoryRestore()
     }
-    const restoreAnchor = (): void => {
+    const restoreAnchor = (layoutOnly = false): void => {
       if (pendingDurableHistoryAnchorRef.current !== anchor) return
       const viewport = getViewport()
-      const target =
-        contentMessageRefs.current.get(anchor.messageId) ??
-        Array.from(viewport?.querySelectorAll<HTMLElement>("[data-chat-message-id]") ?? []).find(
+      const transactionTop = viewport?.scrollTop
+      const findTarget = (): HTMLElement | undefined => {
+        const current = contentMessageRefs.current.get(anchor.messageId)
+        return current && viewport?.contains(current)
+          ? current
+          : Array.from(viewport?.querySelectorAll<HTMLElement>("[data-chat-message-id]") ?? []).find(
           (candidate) => candidate.dataset.chatMessageId === anchor.messageId
         )
+      }
+      let target = findTarget()
+      // Layout delivery must never consume a missing-target navigation or its frame budget.
+      if (layoutOnly && (!viewport?.isConnected || !target)) return
+      const previouslyMounted = anchor.targetMounted === true || Boolean(target)
+      if (layoutOnly && (!target ||
+        Math.abs(target.getBoundingClientRect().top - anchor.viewportTop) <= 1)) return
+      if (viewport && target) {
+        if (
+          needsChatItemSizeRefresh(viewport, target, {
+            element: target,
+            offset: anchor.viewportTop - viewport.getBoundingClientRect().top
+          })
+        )
+          virtuosoRef.current?.refreshItemSizes()
+        if (pendingDurableHistoryAnchorRef.current !== anchor || !viewport.isConnected) return
+        virtuosoRef.current?.cancelScrollToIndex()
+        target = findTarget()
+      }
+      const targetWasRecycled = previouslyMounted && !target
+      if (!layoutOnly) anchor.targetMounted = Boolean(target)
       if (viewport && target) {
         const delta = target.getBoundingClientRect().top - anchor.viewportTop
-        if (Math.abs(delta) > 1) viewport.scrollTop += delta
+        if (Math.abs(delta) > 1 && !positionChatVirtualAnchor(
+          target, anchor.viewportTop - viewport.getBoundingClientRect().top, virtuosoRef.current
+        )) viewport.scrollTop += delta
+        if (viewport.scrollTop !== transactionTop) virtuosoRef.current?.refreshItemSizes()
+        if (layoutOnly) {
+          if (pendingDurableHistoryAnchorRef.current !== anchor) return
+          anchor.stableFrames = 0
+          return
+        }
         // A stable skeleton/cached frame can still change height when its protected
         // read completes. Keep restoration alive until mounted presentations settle.
         const pendingPresentation = viewport.querySelector(
           "[data-function-site-pending], [data-function-site][aria-busy='true']"
         )
-        anchor.stableFrames = Math.abs(delta) <= 1 && !pendingPresentation
-          ? anchor.stableFrames + 1 : 0
+        anchor.stableFrames =
+          viewport.scrollTop === transactionTop && Math.abs(delta) <= 1 && !pendingPresentation
+            ? anchor.stableFrames + 1
+            : 0
         if (anchor.stableFrames >= CHAT_HISTORY_ANCHOR_STABLE_FRAMES) {
           finishRestore()
           return
         }
       }
+      if (layoutOnly) {
+        if (viewport && viewport.scrollTop !== transactionTop) virtuosoRef.current?.refreshItemSizes()
+        anchor.stableFrames = 0
+        return
+      }
       const visibleIndex = visibleMessageIndexById.get(anchor.messageId)
-      if (!target) anchor.stableFrames = 0
-      // Resize/prepend compensation can evict an anchor after the first frame.
-      // Reveal it again through the public relative-index API, with enough spacing
-      // for Virtuoso's own short measurement retry to finish before another request.
-      // Keep the last attempt on this anchor across streaming-driven effect restarts.
+      if (!target) {
+        if (viewport && viewport.scrollTop !== transactionTop)
+          virtuosoRef.current?.refreshItemSizes()
+        anchor.stableFrames = 0
+      }
+      // Recover a newly recycled anchor immediately; continuous misses retain the spacing
+      // for Virtuoso's own short measurement retry. Both fields stay on this anchor
+      // across streaming-driven effect restarts.
       if (!target && visibleIndex !== undefined &&
-        anchor.attempt - (anchor.lastRevealAttempt ?? Number.NEGATIVE_INFINITY) >=
-          CHAT_HISTORY_ANCHOR_STABLE_FRAMES) {
+        (targetWasRecycled || anchor.attempt - (anchor.lastRevealAttempt ?? Number.NEGATIVE_INFINITY) >=
+          CHAT_HISTORY_ANCHOR_STABLE_FRAMES)) {
         anchor.lastRevealAttempt = anchor.attempt
         virtuosoRef.current?.scrollToIndex({
           index: visibleIndex,
@@ -5075,16 +5261,31 @@ export function ChatContainer({
       }
       anchor.attempt += 1
       if (anchor.attempt <= CHAT_HISTORY_ANCHOR_MAX_FRAMES) {
-        frame = window.requestAnimationFrame(restoreAnchor)
+        frame = window.requestAnimationFrame(() => restoreAnchor())
       } else {
         finishRestore()
       }
     }
-    frame = window.requestAnimationFrame(restoreAnchor)
+    let correctingLayout = false
+    const correctLayout = (): void => {
+      if (correctingLayout || pendingDurableHistoryAnchorRef.current !== anchor) return
+      correctingLayout = true
+      try {
+        restoreAnchor(true)
+      } finally {
+        correctingLayout = false
+      }
+    }
+    correctHistoryAnchorLayoutRef.current = correctLayout
+    frame = window.requestAnimationFrame(() => restoreAnchor())
     return () => {
+      if (correctHistoryAnchorLayoutRef.current === correctLayout) correctHistoryAnchorLayoutRef.current = null
       if (frame !== null) window.cancelAnimationFrame(frame)
+      releaseAnchor()
+      if (releaseHistoryAnchorRef.current === releaseAnchor) releaseHistoryAnchorRef.current = null
     }
   }, [
+    clearHistoryRestore,
     dispatchChatScrollEvent,
     displayMessages.length,
     getViewport,
@@ -8362,7 +8563,11 @@ export function ChatContainer({
                   className="text-sm"
                   renderNative={(safe) => {
                     const text = `${safe.message ?? safe.word}${safe.suffix}`
-                    return <span className="thinking-shimmer-text" data-text={text}>{text}</span>
+                    return (
+                      <span className="thinking-shimmer-text" data-text={text}>
+                        {text}
+                      </span>
+                    )
                   }}
                   fallback={
                     <span
@@ -8403,10 +8608,20 @@ export function ChatContainer({
                 </span>
               </div>
               <div className="mt-2 break-words text-sm text-status-warning-foreground">
-                <FunctionSite key={`notice:${threadId}:${hookInterruption.timestamp}`}
-                  threadId={threadId} component="InfoNotice" className="contents"
-                  renderNative={(safe) => <>{String(safe.text)}{safe.command ? ` ${safe.command}` : ""}</>}
-                  facts={{ text: hookInterruption.reason, command: null }} fallback={hookInterruption.reason} />
+                <FunctionSite
+                  key={`notice:${threadId}:${hookInterruption.timestamp}`}
+                  threadId={threadId}
+                  component="InfoNotice"
+                  className="contents"
+                  renderNative={(safe) => (
+                    <>
+                      {String(safe.text)}
+                      {safe.command ? ` ${safe.command}` : ""}
+                    </>
+                  )}
+                  facts={{ text: hookInterruption.reason, command: null }}
+                  fallback={hookInterruption.reason}
+                />
               </div>
               {hookInterruption.systemMessage && (
                 <div className="mt-2 break-words text-xs text-status-warning-foreground/80">
@@ -8458,8 +8673,9 @@ export function ChatContainer({
   const initialMessageLocation = useMemo<ChatMessageVirtualInitialLocation | undefined>(
     () => chatScrollUiState.mode === "initializing" || chatScrollUiState.mode === "following"
       ? { index: "LAST", align: "end", behavior: "auto" }
-      : undefined,
-    [chatScrollUiState.mode]
+      : resolveChatSessionInitialLocation(threadId, chatScrollUiState.mode,
+        sessionRestoreSeed, visibleMessageIndexById),
+    [chatScrollUiState.mode, sessionRestoreSeed, threadId, visibleMessageIndexById]
   )
 
   return createElement(
@@ -8520,13 +8736,14 @@ export function ChatContainer({
         getViewport={getViewport}
         getSearchCorpus={getSearchCorpus}
         onRevealMessage={revealMessage}
+        onBeforePreciseScroll={handleBeforePreciseSearchScroll}
         searchDurableMessages={searchDurableMessages}
         onRevealDurableMessage={revealDurableMessage}
         onCancelDurableReveal={invalidateDurableMessageReveal}
         recomputeKey={searchRecomputeKey}
       />
 
-      {/* Skill creation confirmation dialog */}
+      {/* In-session keyword search (Ctrl/Cmd+F) */}
       <SkillCreateConfirmDialog
         request={skillConfirmRequest}
         visible={!showCustomizeView}
@@ -8778,6 +8995,8 @@ export function ChatContainer({
                     onContentHeightChanged={handleContentHeightChanged}
                     onAtBottomStateChange={handleVirtualAtBottomStateChange}
                     readDetachedAnchorLease={readDetachedAnchorLease}
+                    correctPendingAnchorLayout={correctPendingAnchorLayout}
+                    hasPendingAnchorLayout={hasPendingAnchorLayout}
                     footer={chatMessageListFooter}
                   />
                 </div>
@@ -8828,7 +9047,7 @@ export function ChatContainer({
                 </div>
               </div>
             )}
-            {/* Orchestrator approval bar — placed outside ScrollArea so it's always visible */}
+            {/* In-session keyword search (Ctrl/Cmd+F) */}
             {pendingApproval &&
               Boolean(
                 (pendingApproval as unknown as Record<string, unknown>)._orchestratorRequestId
@@ -9127,7 +9346,7 @@ export function ChatContainer({
                 />
               </div>
             )}
-            {/* Input */}
+            {/* In-session keyword search (Ctrl/Cmd+F) */}
             <div
               className={cn(
                 "px-4 pb-4",
@@ -9135,26 +9354,44 @@ export function ChatContainer({
                 reserveLeftSpace && "md:pl-[20px]"
               )}
             >
-              {chatWorkbenchAvailable && firstTask && <section aria-label="在这段聊天使用" className="mx-auto mb-3 max-w-3xl space-y-2 rounded-xl border p-3 text-sm">
-                <p>{firstTask.flow ? "已应用。选择本次步骤，在聊天输入框描述任务并发送。" : "已应用。把任务填入输入框，检查后再发送。"}</p>
-                {input.trim() && <p className="text-muted-foreground">{firstTask.kind === "command" ? "请先保存或处理原输入，再填入插件命令。" : "你的原输入会保留，新任务附加在后面。"}</p>}
-                <button type="button" className="mr-4 underline" disabled={preparingFirstTask || isLoading || chatFlow.active || chatFlow.busy}
-                  onClick={() => void prepareFirstTask()}>{preparingFirstTask ? "正在核对…" : firstTask.flow ? "选择本次步骤" : firstTask.kind === "command" ? "填入插件命令" : input.trim() ? "保留原输入并添加任务" : "填入参考任务"}</button>
-                <button type="button" className="underline" onClick={() => dismissSimpleAuthoringTask(firstTask.id)}>稍后再用</button>
-              </section>}
+              {chatWorkbenchAvailable && firstTask && (
+                <section aria-label="在这段聊天使用" className="mx-auto mb-3 max-w-3xl space-y-2 rounded-xl border p-3 text-sm">
+                  <p>
+                    {firstTask.flow ? "已应用。选择本次步骤，在聊天输入框描述任务并发送。" : "已应用。把任务填入输入框，检查后再发送。"}
+                  </p>
+                  {input.trim() && (
+                    <p className="text-muted-foreground">
+                      {firstTask.kind === "command" ? "请先保存或处理原输入，再填入插件命令。" : "你的原输入会保留，新任务附加在后面。"}
+                    </p>
+                  )}
+                  <button type="button" className="mr-4 underline" disabled={preparingFirstTask || isLoading || chatFlow.active || chatFlow.busy}
+                  onClick={() => void prepareFirstTask()}>
+                    {preparingFirstTask ? "正在核对…" : firstTask.flow ? "选择本次步骤" : firstTask.kind === "command" ? "填入插件命令" : input.trim() ? "保留原输入并添加任务" : "填入参考任务"}
+                  </button>
+                  <button type="button" className="underline" onClick={() => dismissSimpleAuthoringTask(firstTask.id)}>
+                    稍后再用
+                  </button>
+                </section>
+              )}
               <BuiltinNavigationPanel threadId={threadId} workspace={currentForkWorkspacePath ?? null} />
               <GitChangeNotice threadId={threadId} />
               {Boolean(currentThread?.metadata?.hostProjectRuntime) && <ProjectRunDetails key={`project-run:${threadId}`}
                 threadId={threadId} workspace={currentForkWorkspacePath} />}
-              <div className="max-w-3xl mx-auto"><ModCards threadId={threadId} slot="turn.summary" /></div>
+              <div className="max-w-3xl mx-auto">
+                <ModCards threadId={threadId} slot="turn.summary" />
+              </div>
               <FunctionPeerMessages key={`peers:${threadId}`} threadId={threadId} />
-              {chatWorkbenchAvailable && isOrdinaryFlowMetadata(currentThread?.metadata) ? <ClawSidebar key={`claw:${threadId}`} threadId={threadId} flow={chatFlow}
-                workspace={currentForkWorkspacePath}
-                onRequestCreator={enterCreatorFromChat}
-                onStart={goal => modsAgentInputActive(threadId, useAppStore.getState().accountRevision)
+              {chatWorkbenchAvailable && isOrdinaryFlowMetadata(currentThread?.metadata) ? (
+                <ClawSidebar
+                  key={`claw:${threadId}`}
+                  threadId={threadId}
+                  flow={chatFlow}
+                  workspace={currentForkWorkspacePath}
+                  onRequestCreator={enterCreatorFromChat}
+                  onStart={goal => modsAgentInputActive(threadId, useAppStore.getState().accountRevision)
                   ? Promise.resolve(false) : startChatFlow(goal)}
-                taskWorking={isLoading}
-                taskOverview={!chatFlow.active ? <ChatTaskOverview
+                  taskWorking={isLoading}
+                  taskOverview={!chatFlow.active ? <ChatTaskOverview
                   working={isLoading}
                   waitingApproval={Boolean(pendingApproval) || approvalQueue.length > 0}
                   waitingInput={Boolean(pendingUserInput)}
@@ -9176,30 +9413,40 @@ export function ChatContainer({
                   })}
                   onContinue={() => void applyGoalPanelCommand("/goal resume")}
                 /> : undefined}
-                disabled={readOnly || parentInputPaused || isLoading || historyLoading || hasActiveGoalRunning || Boolean(pendingApproval)}
-                records={<>
-                  <ModCommandJobs key={threadId} threadId={threadId} />
-                  <FunctionCompletionEvidence key={`evidence:${threadId}`} threadId={threadId} isWorking={isLoading} />
-                  <details className="rounded-lg border p-3 text-xs">
-                    <summary className="cursor-pointer">灵件日志 · 查看补充说明</summary>
-                    <FunctionLogs key={`logs:${threadId}`} threadId={threadId} showEmpty />
-                  </details>
-                </>}
-                onFollowUp={(text) => {
+                  disabled={readOnly || parentInputPaused || isLoading || historyLoading || hasActiveGoalRunning || Boolean(pendingApproval)}
+                  records={
+                    <>
+                      <ModCommandJobs key={threadId} threadId={threadId} />
+                      <FunctionCompletionEvidence key={`evidence:${threadId}`} threadId={threadId} isWorking={isLoading} />
+                      <details className="rounded-lg border p-3 text-xs">
+                        <summary className="cursor-pointer">灵件日志 · 查看补充说明</summary>
+                        <FunctionLogs key={`logs:${threadId}`} threadId={threadId} showEmpty />
+                      </details>
+                    </>
+                  }
+                  onFollowUp={(text) => {
                   setInput([inputRef.current?.value ?? input, text].filter(Boolean).join("\n\n"))
-                }}>
-                <FunctionPanes key={`panes:${threadId}`} threadId={threadId} revealInSidebar={chatWorkbenchAvailable} />
-              </ClawSidebar> : <>
-                <ModCommandJobs key={threadId} threadId={threadId} />
-                <FunctionPanes key={`panes:${threadId}`} threadId={threadId} revealInSidebar={chatWorkbenchAvailable} />
-                <FunctionCompletionEvidence key={`evidence:${threadId}`} threadId={threadId} isWorking={isLoading} />
-              </>}
+                }}
+                >
+                  <FunctionPanes key={`panes:${threadId}`} threadId={threadId} revealInSidebar={chatWorkbenchAvailable} />
+                </ClawSidebar>
+              ) : (
+                <>
+                  <ModCommandJobs key={threadId} threadId={threadId} />
+                  <FunctionPanes key={`panes:${threadId}`} threadId={threadId} revealInSidebar={chatWorkbenchAvailable} />
+                  <FunctionCompletionEvidence key={`evidence:${threadId}`} threadId={threadId} isWorking={isLoading} />
+                </>
+              )}
               {modsChatScope.error && (
                 <p role={currentForkWorkspacePath ? "alert" : "status"}
                   className="mx-auto w-full max-w-3xl px-3 text-xs text-muted-foreground">
                   {modsChatScope.error}
-                  {modsChatScope.retry && <button type="button" className="ml-2 underline"
-                    onClick={modsChatScope.retry}>重试读取</button>}
+                  {modsChatScope.retry && (
+                    <button type="button" className="ml-2 underline"
+                    onClick={modsChatScope.retry}>
+                      重试读取
+                    </button>
+                  )}
                 </p>
               )}
               <FunctionSite key={`above:${threadId}`} threadId={threadId} component="AbovePrompt"
@@ -9207,8 +9454,9 @@ export function ChatContainer({
                 className="sparks-inline-surface mx-auto w-full max-w-3xl overflow-auto text-xs text-muted-foreground" />
               <form onSubmit={handleSubmit} className="max-w-3xl mx-auto relative">
                 {!readOnly && isOrdinaryFlowMetadata(currentThread?.metadata) && currentForkWorkspacePath && <AgentViewReceiver threadId={threadId} workspace={currentForkWorkspacePath} />}
-                {chatWorkbenchAvailable && <ClawComposerBar threadId={threadId} flow={chatFlow}>
-                  {!readOnly && isDevelopmentThreadMetadata(currentThread?.metadata) && (
+                {chatWorkbenchAvailable && (
+                  <ClawComposerBar threadId={threadId} flow={chatFlow}>
+                    {!readOnly && isDevelopmentThreadMetadata(currentThread?.metadata) && (
                     <ModsDevelopmentPanel threadId={threadId} workspaceHint={currentForkWorkspacePath}
                       mode="chat" onReturnToChat={(context) => {
                         if (context) {
@@ -9227,7 +9475,8 @@ export function ChatContainer({
                         useAppStore.getState().setShowCustomizeView(true, "mods")
                       }} />
                   )}
-                </ClawComposerBar>}
+                  </ClawComposerBar>
+                )}
                 <SlashCommandPopover
                   mode={parentInputPaused || chatFlow.choice ? { kind: "closed" } : slash.mode}
                   selectedIdx={slash.selectedIdx}
@@ -9398,7 +9647,7 @@ export function ChatContainer({
                       </div>
                     </div>
                   )}
-                  {/* Composer environment rail, visually tucked behind the primary input card. */}
+                  {/* In-session keyword search (Ctrl/Cmd+F) */}
                   <div
                     aria-hidden={composerEnvironmentRailCollapsed}
                     className={cn(
@@ -9651,7 +9900,7 @@ export function ChatContainer({
                       </TooltipProvider>
                     </div>
                   </div>
-                  {/* Composer environment rail end. */}
+                  {/* In-session keyword search (Ctrl/Cmd+F) */}
                   <div className="relative z-10 flex items-end gap-2">
                     <div
                       ref={dropZoneRef}
@@ -9709,7 +9958,7 @@ export function ChatContainer({
                           </Tooltip>
                         </TooltipProvider>
                       )}
-                      {/* Selected chips sit above the textarea inside the composer shell. */}
+                      {/* In-session keyword search (Ctrl/Cmd+F) */}
                       {selectedSkill && (
                         <div
                           className={cn(
@@ -9754,7 +10003,7 @@ export function ChatContainer({
                           <span className="text-sm text-primary">拖放文件到这里</span>
                         </div>
                       )}
-                      {/* File chips inside input box */}
+                      {/* In-session keyword search (Ctrl/Cmd+F) */}
                       {(mentionedFiles.length > 0 || attachments.length > 0) && (
                         <div
                           className={cn(
@@ -9814,19 +10063,21 @@ export function ChatContainer({
                           </div>
                         </div>
                       )}
-                      {/* Textarea */}
+                      {/* In-session keyword search (Ctrl/Cmd+F) */}
                       <div className="relative">
-                      {promptComposer.suggestion && !input && !effectiveInputDisabled && <div aria-hidden="true"
+                        {promptComposer.suggestion && !input && !effectiveInputDisabled && (
+                          <div aria-hidden="true"
                         data-prompt-suggestion className={cn(
                           "pointer-events-none absolute inset-0 mr-2 overflow-hidden whitespace-pre-wrap break-words p-4 text-sm text-muted-foreground/60",
                           hasPendingFilePayload && "pt-1.5", composerRightClearanceClass)}>
-                        {promptComposer.suggestion}
-                      </div>}
-                      <PromptDecorations text={input} decorations={promptComposer.decorations}
+                            {promptComposer.suggestion}
+                          </div>
+                        )}
+                        <PromptDecorations text={input} decorations={promptComposer.decorations}
                         textarea={inputRef} className={cn(
                           "composer-textarea mr-2 w-[calc(100%-0.5rem)] p-4 text-sm text-foreground",
                           hasPendingFilePayload && "pt-1.5", composerRightClearanceClass)} />
-                      <textarea
+                        <textarea
                         ref={inputRef}
                         value={input}
                         onChange={(e) => { setInput(e.target.value); promptComposer.changed() }}
@@ -9854,13 +10105,17 @@ export function ChatContainer({
                           ...(promptComposer.decorations.length ? { fontFamily: "ui-monospace, monospace" } : {}) }}
                       />
                       </div>
-                      {effectiveInputDisabled && <p role="status" className="px-4 pb-2 text-xs text-muted-foreground">
-                        {inputPlaceholder}
-                      </p>}
-                      {promptComposer.suggestion && !input && !effectiveInputDisabled && <div className="px-4 pb-1 text-xs text-muted-foreground">
-                        按 Tab 或 → 接受建议，确认后再发送
-                      </div>}
-                      {/* Bottom bar: primary execution controls left, send button right */}
+                      {effectiveInputDisabled && (
+                        <p role="status" className="px-4 pb-2 text-xs text-muted-foreground">
+                          {inputPlaceholder}
+                        </p>
+                      )}
+                      {promptComposer.suggestion && !input && !effectiveInputDisabled && (
+                        <div className="px-4 pb-1 text-xs text-muted-foreground">
+                          按 Tab 或 → 接受建议，确认后再发送
+                        </div>
+                      )}
+                      {/* In-session keyword search (Ctrl/Cmd+F) */}
                       <div className="flex items-center justify-between px-3 pb-2 w-full">
                         <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto">
                           <IconPopoverButton
@@ -9990,7 +10245,7 @@ export function ChatContainer({
                           )}
                         </div>
                       </div>
-                      <AgentGitCommitDialog
+                      {agentCommitApproval && <AgentGitCommitDialog
                         key={agentCommitApproval?.id ?? "agent-commit-idle"}
                         // Portal 不受工作区 inert 限制；设置期间只隐藏，保留待审批请求。
                         open={Boolean(agentCommitApproval) && !showCustomizeView}
@@ -10006,9 +10261,9 @@ export function ChatContainer({
                         }
                         onCommitted={handleAgentCommitCommitted}
                         onCancel={handleAgentCommitCancel}
-                      />
+                      />}
                     </div>
-                    {/* Keep the upward-opening request panel outside the composer's clipped shell. */}
+                    {/* In-session keyword search (Ctrl/Cmd+F) */}
                     <UserInputRequestDialog
                       request={pendingUserInput}
                       onSubmit={handleUserInputSubmit}

@@ -23,6 +23,7 @@ interface Metrics {
   started: number
   beforeParent?: { renders: number; milliseconds: number }
   reveals: boolean[]
+  preciseScrolls: number
 }
 
 declare global {
@@ -37,6 +38,7 @@ declare global {
       tick?: () => void
       finishHydration?: () => void
       finishLayout?: () => void
+      startLayout?: () => void
       searchNavigationActive?: () => boolean
       stressSearch(): Promise<{
         preparationMs: number
@@ -103,7 +105,7 @@ function SearchFixture({ kind }: { kind: SearchCase }): React.JSX.Element {
     if (kind !== "scrollbar-highlight") return
     let frame = 0
     let step = 0
-    let active = true
+    let active = false
     const changeLayout = (): void => {
       if (!active) return
       if (layoutSpacer.current) layoutSpacer.current.style.height = `${500 + (++step % 2) * 40}px`
@@ -111,7 +113,13 @@ function SearchFixture({ kind }: { kind: SearchCase }): React.JSX.Element {
     }
     const finish = (): void => { active = false; cancelAnimationFrame(frame) }
     window.chatNavigationFixture.finishLayout = finish
-    frame = requestAnimationFrame(changeLayout)
+    // Radix debounces its first scrollbar size measurement by 10ms. Starting an
+    // every-frame resize before that measurement can starve it on a 144Hz display.
+    window.chatNavigationFixture.startLayout = () => {
+      if (active) return
+      active = true
+      frame = requestAnimationFrame(changeLayout)
+    }
     return finish
   }, [kind])
   const hydrationResolve = useRef<(() => void) | null>(null)
@@ -236,6 +244,7 @@ function SearchFixture({ kind }: { kind: SearchCase }): React.JSX.Element {
         onRevealMessage={() => {
           window.chatNavigationMetrics.reveals.push(visible)
         }}
+        onBeforePreciseScroll={() => { window.chatNavigationMetrics.preciseScrolls++ }}
         searchDurableMessages={delayed ? searchDurable : undefined}
         onRevealDurableMessage={revealDurable}
         recomputeKey={`${revision}:${visible}`}
@@ -331,9 +340,11 @@ function FileLinkFixture(): React.JSX.Element {
 let root: Root | undefined
 function mount(component: React.ReactNode): void {
   root?.unmount()
-  window.chatNavigationMetrics = { renders: 0, started: performance.now(), reveals: [] }
+  window.chatNavigationMetrics = { renders: 0, started: performance.now(), reveals: [],
+    preciseScrolls: 0 }
   delete window.chatNavigationFixture.finishHydration
   delete window.chatNavigationFixture.finishLayout
+  delete window.chatNavigationFixture.startLayout
   delete window.chatNavigationFixture.searchNavigationActive
   root = createRoot(document.getElementById("root")!)
   root.render(component)

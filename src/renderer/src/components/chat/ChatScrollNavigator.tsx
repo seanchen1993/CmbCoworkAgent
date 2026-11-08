@@ -1079,8 +1079,8 @@ export function ChatScrollNavigator({
 
       const mountedTarget = userMessageRefs.current.get(messageId)
       if (!mountedTarget && scrollToMessageByIdRef.current) {
-        scrollToMessageByIdRef.current(messageId)
         onScrollToQuestionRef.current?.()
+        scrollToMessageByIdRef.current(messageId)
         return
       }
 
@@ -1090,8 +1090,8 @@ export function ChatScrollNavigator({
         if (nextViewport && targetElement) {
           pendingRevealFrameRef.current = null
           const targetTop = Math.max(0, getElementTopInViewport(targetElement, nextViewport) - 8)
-          nextViewport.scrollTo({ top: targetTop, behavior: "smooth" })
           onScrollToQuestionRef.current?.()
+          nextViewport.scrollTo({ top: targetTop, behavior: "smooth" })
           return
         }
         if (attempt >= 8) {

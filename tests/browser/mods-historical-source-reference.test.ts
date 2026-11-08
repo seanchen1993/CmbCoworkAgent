@@ -64,7 +64,8 @@ afterEach(() => {
 describe("immutable historical source evidence", () => {
   it("keeps evidence usable after source evolves while the current execution fence still rejects old builds", () => {
     const f = fixture()
-    expect(readModsSourceCandidate(f.path).execution).toBe("source-isolated")
+    // Old evidence stays inspectable, but lacks the patched-dependency proof for new execution.
+    expect(() => readModsSourceCandidate(f.path)).toThrow("SOURCE_VIRTUOSO_PROOF_REQUIRED")
     writeFileSync(join(f.root, "src/example.ts"), "new source")
     const historical = readHistoricalSourceWrapper(f.path, f.root)
     expect(historical.execution).toBe("historical-source-reference")

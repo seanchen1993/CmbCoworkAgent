@@ -45,7 +45,8 @@ for (const node of parsed.statements) {
     source.includes("ModsAgentTranscriptPanel") ||
     source.includes("ContextReminderController") ||
     source.includes("ChatScrollNavigator") ||
-    source.includes("ChatMessageScrollArea")
+    source.includes("ChatMessageScrollArea") ||
+    source.includes("AgentGitCommitDialog")
   )
     continue
   const values = node.importClause.namedBindings.elements.filter((item) => !item.isTypeOnly)
@@ -78,6 +79,8 @@ async function main() {
       import {ChatContainer} from ${JSON.stringify(chatFile)};
       import {useAppStore} from '@/lib/store';import {fixture,threadStore} from 'fixture:thread';
       import {reserveModsAgentInput,releaseModsAgentInput} from '@/lib/mods-agent-input-target';
+      import {chatScrollSessionStore} from '@/components/chat/chat-scroll-session-store';
+      import {createChatScrollState} from './src/shared/chat-scroll-controller';
       const root=createRoot(document.getElementById('root'));
       if(!crypto.randomUUID)Object.defineProperty(crypto,'randomUUID',{value:()=>
         '10000000-1000-4000-8000-100000000000'.replace(/[018]/g,c=>(Number(c)^(crypto.getRandomValues(new Uint8Array(1))[0]&15)>>Number(c)/4).toString(16))});
@@ -93,6 +96,8 @@ async function main() {
           if(path.endsWith('.skills.getDisabled'))return Promise.resolve([]);
           if(path.endsWith('.mods.chatDisplayCapability'))return Promise.resolve(false);
           if(path.endsWith('.mods.commands'))return Promise.resolve([]);
+          if(path.endsWith('.autoCommit.getWorkspaceCard')){fixture.cardReads=(fixture.cardReads??0)+1;return Promise.resolve({cardNumber:'CARD-1'})}
+          if(path.endsWith('.workspace.getGitPanelDiffs')){fixture.diffReads=(fixture.diffReads??0)+1;return Promise.resolve({success:true,files:[],changedFiles:[],totals:{fileCount:0,additions:0,deletions:0},omittedFileCount:0})}
           if(path.endsWith('.hooks.logging.get'))return Promise.resolve({enabled:false,diagnostic:false});
           if(path.endsWith('.appNotifications.list'))return Promise.resolve([]);
           if(path.endsWith('.agent.isCoordinatorModeForced'))return fixture.delay('mode',false);
@@ -107,6 +112,15 @@ async function main() {
         fixture.activation=reservation.ready(new AbortController().signal).then(()=>{fixture.activated=reservation.activate()},()=>{fixture.cancelled=true})};
       fixture.returnParent=()=>releaseModsAgentInput(intent.id);
       window.fixture=fixture;fixture.mount=()=>root.render(<ChatContainer threadId='a'/>);
+      fixture.customize=value=>useAppStore.setState({showCustomizeView:value});
+      if(window.restoreSessionFixture){
+        const lease=chatScrollSessionStore.open('a').lease;
+        chatScrollSessionStore.save(lease,{state:{...createChatScrollState('a'),mode:'detached'},
+          anchor:{messageId:'saved-5',offsetFromViewportTop:28},contentSnapshot:null});
+        if(window.restoreSessionFixture==='durable')chatScrollSessionStore.setPendingRevealMessageId(lease,'saved-12');
+        fixture.change({messages:Array.from({length:20},(_,i)=>({id:'saved-'+i,role:'assistant',content:'Message '+i})),
+          historyConversationPresence:'nonempty',historyLoadedMessageCount:20,historyMessageTotal:20});
+      }
       fixture.mount();
     `
     },
@@ -129,6 +143,14 @@ async function main() {
       {
         name: "real-chat-transport-backend",
         setup(builder) {
+          // Keep the actual approval dialog and task-card hook; omit only the unrelated picker.
+          builder.onResolve({ filter: /^@\/components\/git\/TaskCardPicker$/ }, () => ({
+            path: "task-card-picker",
+            namespace: "commit-picker"
+          }))
+          builder.onLoad({ filter: /.*/, namespace: "commit-picker" }, () => ({
+            contents: "export const TaskCardPicker=()=>null"
+          }))
           builder.onResolve({ filter: /^fixture:thread$|(?:^|\/)thread-context$/ }, () => ({
             path: "thread",
             namespace: "fixture"
@@ -184,15 +206,26 @@ async function main() {
             ${leaf.names
               .map((name) =>
                 name === "ChatMessageVirtualList"
-                  // Observe the real container's props at the production memo boundary;
-                  // row rendering costs are covered by the separate history browser suites.
-                  ? `export const ${name}=React.memo(p=>{window.fixture.listRenders=(window.fixture.listRenders??0)+1;
+                  ? // Observe the real container's props at the production memo boundary;
+                    // row rendering costs are covered by the separate history browser suites.
+                    `export const ${name}=React.memo(p=>{window.fixture.listRenders=(window.fixture.listRenders??0)+1;
+                      React.useLayoutEffect(()=>{const handle={scrollToIndex:value=>{window.fixture.indexCalls??=[];window.fixture.indexCalls.push(value)},scrollIntoView:()=>{},
+                        refreshItemSizes:()=>{window.fixture.refreshCalls=(window.fixture.refreshCalls??0)+1;
+                          window.fixture.measurementOrder??=[];window.fixture.measurementOrder.push('refresh');
+                          window.fixture.onRefresh?.()},
+                        cancelScrollToIndex:()=>{window.fixture.cancelScrollCalls=(window.fixture.cancelScrollCalls??0)+1;
+                          window.fixture.measurementOrder??=[];window.fixture.measurementOrder.push('cancel')},
+                        setExternalScrollAnchor:({owner,active})=>{window.fixture.anchorOwners??=new Set();
+                          active?window.fixture.anchorOwners.add(owner):window.fixture.anchorOwners.delete(owner)}};
+                        p.virtuosoRef.current=handle;return()=>{if(p.virtuosoRef.current===handle)p.virtuosoRef.current=null}},[p.virtuosoRef]);
                       window.fixture.listProps=p;return <section data-fixture-list>{p.footer}</section>});`
                   : name === "ChatFlowTaskCards"
                     ? `export const ${name}=p=><button data-fixture-follow-up onClick={()=>p.onFollowUp('FOLLOW_UP')}>Fixture follow-up</button>;`
-                  : name === "ChatMessageScrollArea"
-                  ? `export const ${name}=React.forwardRef((p,ref)=><div ref={ref}>{p.children}</div>);`
-                  : `export const ${name}=p=>p.fallback??p.children??null;`
+                    : name === "ChatSearchOverlay"
+                      ? `export const ${name}=p=>{window.fixture.searchProps=p;return null};`
+                      : name === "ChatMessageScrollArea"
+                        ? `export const ${name}=React.forwardRef((p,ref)=><div ref={ref}>{p.children}</div>);`
+                        : `export const ${name}=p=>p.fallback??p.children??null;`
               )
               .join("\n")}`
             }
@@ -232,9 +265,15 @@ async function main() {
     console.error(cause.stack)
   })
   try {
-    const reset = async (hold?: string) => {
+    const reset = async (hold?: string, restored: boolean | "durable" = false) => {
       await page.goto("about:blank")
       await page.setContent("<div id='root'></div>")
+      await page.addScriptTag({ content: "window.__name=value=>value" })
+      await page.evaluate((value) => {
+        ;(
+          window as unknown as { restoreSessionFixture: boolean | "durable" }
+        ).restoreSessionFixture = value
+      }, restored)
       await page.evaluate((value) => {
         ;(window as unknown as { initialHold?: string }).initialHold = value
       }, hold)
@@ -242,6 +281,7 @@ async function main() {
       await page.waitForFunction("document.querySelector('textarea.composer-textarea')", null, {
         timeout: 15000
       })
+      if (restored) return
       await page.getByRole("button", { name: "添加文件", exact: true }).click()
       await page.locator('[aria-label="移除附件 upload.txt"]').waitFor()
       await page.evaluate(
@@ -249,8 +289,362 @@ async function main() {
       )
     }
     const checks: string[] = []
-    const paint = () => page.evaluate(() => new Promise((done) =>
-      requestAnimationFrame(() => requestAnimationFrame(done))))
+    const paint = () =>
+      page.evaluate(
+        () => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)))
+      )
+    await reset(undefined, true)
+    assert.deepEqual(
+      await page.evaluate("window.fixture.listProps.initialTopMostItemIndex"),
+      { index: 5, align: "start", behavior: "auto", offset: -28 },
+      "A restored detached ChatContainer starts at the saved relative index and offset"
+    )
+    await page.evaluate(`{
+      const viewport=document.querySelector('[data-radix-scroll-area-viewport]');
+      viewport.style.height='300px';viewport.style.width='500px';
+      const top=viewport.getBoundingClientRect().top;
+      const target=document.createElement('div');target.dataset.chatMessageId='saved-5';
+      target.style.cssText='position:fixed;top:'+(top+200)+'px;height:40px;width:100px;visibility:hidden';
+      target.innerHTML='<div data-function-site="AssistantMessage"><i data-function-site-pending></i></div>';
+      const body=document.createElement('div');body.dataset.chatMessageId='saved-6';
+      body.style.cssText='position:fixed;top:'+(top+60)+'px;height:100px;width:100px;visibility:hidden';
+      body.innerHTML='<div data-function-site="AssistantMessage">Readable neighbor</div>';
+      viewport.append(target,body);
+      const descriptor=Object.getOwnPropertyDescriptor(Element.prototype,'scrollTop');
+      window.fixture.restoreWrites=0;
+      Object.defineProperty(viewport,'scrollTop',{configurable:true,
+        get(){return descriptor.get.call(viewport)},
+        set(value){window.fixture.restoreWrites++;descriptor.set.call(viewport,value)}});
+    }`)
+    await page.evaluate(`{
+      const target=document.querySelector('[data-chat-message-id="saved-5"]');
+      const list=document.createElement('div');list.dataset.testid='virtuoso-item-list';
+      list.style.visibility='hidden';target.parentElement.append(list);
+      const item=document.createElement('div');item.dataset.index='5';item.dataset.knownSize='40';item.style.height='80px';list.append(item);item.append(target);
+      window.fixture.measurementOrder=[];
+      window.fixture.onRefresh=()=>{window.fixture.onRefresh=undefined};
+    }`)
+    let cancelBeforeCold = (await page.evaluate("window.fixture.cancelScrollCalls??0")) as number
+    await paint()
+    assert.deepEqual(
+      await page.evaluate("window.fixture.measurementOrder.slice(0,1)"),
+      ["refresh"],
+      "Hidden probe sizes are published while native initialization retains ownership"
+    )
+    assert(
+      ((await page.evaluate("window.fixture.cancelScrollCalls??0")) as number) === cancelBeforeCold,
+      "Without a visible reading destination the native initial request must remain active"
+    )
+    assert.equal(
+      await page.evaluate("window.fixture.restoreWrites"),
+      0,
+      "A hidden probe must not precisely align its unready body"
+    )
+    await page.evaluate("document.querySelector('[data-index=\"5\"]').dataset.knownSize='80'")
+    cancelBeforeCold = (await page.evaluate("window.fixture.cancelScrollCalls??0")) as number
+    await paint()
+    assert(
+      ((await page.evaluate("window.fixture.cancelScrollCalls??0")) as number) === cancelBeforeCold,
+      "Committed hidden sizes retain native initialization until a visible reading anchor can take over"
+    )
+    assert.equal(await page.evaluate("window.fixture.restoreWrites"), 0)
+    await page.evaluate("document.querySelector('[data-testid=\"virtuoso-item-list\"]').style.visibility='';document.querySelector('[data-chat-message-id=\"saved-5\"]').style.visibility=''")
+    const settledRefreshes = await page.evaluate("window.fixture.refreshCalls")
+    await page.evaluate(
+      "document.querySelector('[data-chat-message-id=\"saved-6\"]').style.visibility=''"
+    )
+    await paint()
+    await paint()
+    assert(((await page.evaluate("window.fixture.cancelScrollCalls??0")) as number) > cancelBeforeCold,
+      "A readable neighbor immediately takes ownership from native initialization")
+    assert.equal(
+      await page.evaluate("window.fixture.restoreWrites"),
+      0,
+      "Actual Container must not align a cold saved row at the expense of its readable neighbor"
+    )
+    assert.equal(
+      await page.evaluate("window.fixture.refreshCalls"),
+      settledRefreshes,
+      "Stable restore frames do not repeatedly scan native item sizes"
+    )
+    const stableLayoutCallbacks = await page.evaluate(`{
+      const fixture=window.fixture, before=[fixture.refreshCalls,fixture.cancelScrollCalls,fixture.restoreWrites];
+      const pending=fixture.listProps.hasPendingAnchorLayout();
+      for(let i=0;i<20;i++)fixture.listProps.correctPendingAnchorLayout();
+      ({pending,before,after:[fixture.refreshCalls,fixture.cancelScrollCalls,fixture.restoreWrites]});
+    }`) as { pending: boolean; before: number[]; after: number[] }
+    assert.equal(stableLayoutCallbacks.pending, true)
+    assert.deepEqual(stableLayoutCallbacks.after, stableLayoutCallbacks.before,
+      "Stable pending layout delivery performs no native measurement, cancellation, or write")
+    await page.evaluate(`{
+      const row=document.querySelector('[data-chat-message-id="saved-6"]');
+      const top=document.querySelector('[data-radix-scroll-area-viewport]').getBoundingClientRect().top;
+      row.style.top=(top+90)+'px';window.fixture.measurementOrder=[];
+      window.fixture.onRefresh=()=>{row.style.top=(top+60)+'px';window.fixture.onRefresh=undefined};
+    }`)
+    await paint()
+    assert.deepEqual(await page.evaluate("window.fixture.measurementOrder.slice(0,2)"), [
+      "refresh",
+      "cancel"
+    ])
+    assert.equal(
+      await page.evaluate("window.fixture.restoreWrites"),
+      0,
+      "A refresh that changes geometry cannot reuse the preliminary 30px delta"
+    )
+    const beforeRecycleCalls = (await page.evaluate(
+      "window.fixture.indexCalls?.length??0"
+    )) as number
+    const cancelBeforeMissing = (await page.evaluate(`{
+      document.querySelector('[data-chat-message-id="saved-5"]').remove();
+      window.fixture.cancelScrollCalls??0;
+    }`)) as number
+    await page.waitForFunction(`(window.fixture.indexCalls?.length??0)>${beforeRecycleCalls}`)
+    assert.equal(
+      await page.evaluate("window.fixture.indexCalls.at(-1).index"),
+      5,
+      "Recycling the cold target retains the existing bounded index reacquisition"
+    )
+    await paint()
+    assert.equal(
+      await page.evaluate("window.fixture.cancelScrollCalls??0"),
+      cancelBeforeMissing,
+      "A missing target must not cancel the fresh index reveal needed to remount it"
+    )
+    const cancelBeforeSearch = (await page.evaluate(
+      "window.fixture.cancelScrollCalls??0"
+    )) as number
+    assert.equal(
+      await page.evaluate("window.fixture.anchorOwners.size"),
+      1,
+      "Pending session restore owns native resize compensation"
+    )
+    await page.evaluate("window.fixture.searchProps.onRevealMessage('saved-12')")
+    await paint()
+    assert(
+      ((await page.evaluate("window.fixture.cancelScrollCalls??0")) as number) > cancelBeforeSearch,
+      "Explicit search cancels the native initial RAF as well as the platform restore"
+    )
+    assert.equal(await page.evaluate("window.fixture.listProps.hasPendingAnchorLayout()"), false,
+      "Search immediately clears the pending layout callback without waiting for observer cleanup")
+    assert.equal(
+      await page.evaluate("window.fixture.listProps.initialTopMostItemIndex"),
+      undefined,
+      "Explicit search takes over the pending session restore"
+    )
+    assert.equal(
+      await page.evaluate("window.fixture.anchorOwners.size"),
+      0,
+      "Explicit navigation releases the captured restore owner"
+    )
+    const searchCalls = await page.evaluate("window.fixture.indexCalls.length")
+    assert.equal(await page.evaluate("window.fixture.indexCalls.at(-1).index"), 12)
+    await paint()
+    await paint()
+    assert.equal(
+      await page.evaluate("window.fixture.indexCalls.length"),
+      searchCalls,
+      "The old session restore frame must not pull a new search back"
+    )
+    await page.evaluate(
+      `window.fixture.change({messages:[{id:'replacement',role:'assistant',content:'Other window'}]})`
+    )
+    await paint()
+    await page.evaluate(
+      `window.fixture.change({messages:Array.from({length:20},(_,i)=>({id:'saved-'+i,role:'assistant',content:'Message '+i}))})`
+    )
+    await paint()
+    assert.equal(
+      await page.evaluate("window.fixture.listProps.initialTopMostItemIndex"),
+      undefined,
+      "A later history window reset cannot replay the consumed session seed"
+    )
+    checks.push(
+      "real ChatContainer seeds a detached restore; search cancels its frame and later windows do not replay it"
+    )
+    await reset(undefined, "durable")
+    await page.waitForFunction("window.fixture.indexCalls?.some(call=>call.index===12)")
+    await paint()
+    assert.equal(
+      await page.evaluate("window.fixture.listProps.initialTopMostItemIndex"),
+      undefined,
+      "A resumed durable search consumes the session seed only when its virtual handle is ready"
+    )
+    const durableCalls = await page.evaluate("window.fixture.indexCalls.length")
+    await paint()
+    await paint()
+    assert.equal(await page.evaluate("window.fixture.indexCalls.length"), durableCalls)
+    assert.equal(await page.evaluate("window.fixture.indexCalls.at(-1).index"), 12)
+    await reset(undefined, true)
+    await page.evaluate(() => {
+      const viewport = document.querySelector<HTMLElement>("[data-radix-scroll-area-viewport]")!
+      const row = document.createElement("div")
+      row.dataset.chatMessageId = "saved-5"
+      row.style.cssText = `position:fixed;top:${viewport.getBoundingClientRect().top + 28}px;height:32px;width:100px`
+      row.innerHTML =
+        '<div data-function-site="AssistantMessage"><i data-function-site-pending></i></div>'
+      viewport.append(row)
+      ;(
+        window as unknown as {
+          fixture: {
+            listProps: {
+              contentMessageRefs: { current: Map<string, HTMLElement> }
+            }
+          }
+        }
+      ).fixture.listProps.contentMessageRefs.current.set("saved-5", row)
+    })
+    await paint()
+    assert.notEqual(
+      await page.evaluate("window.fixture.listProps.initialTopMostItemIndex"),
+      undefined,
+      "A mounted pending target cannot finish the saved session restoration"
+    )
+    await page.evaluate(`document.querySelector('[data-chat-message-id="saved-5"]').innerHTML=
+      '<div data-function-site="AssistantMessage">Target answer</div>'`)
+    await page.waitForFunction(
+      "window.fixture.listProps.initialTopMostItemIndex===undefined",
+      undefined,
+      { timeout: 1000 }
+    )
+    assert.equal(
+      await page.evaluate("window.fixture.anchorOwners.size"),
+      0,
+      "Completed session restoration releases its native lease"
+    )
+    await page.evaluate(
+      `window.fixture.change({messages:[{id:'replacement',role:'assistant',content:'Other window'}]})`
+    )
+    await paint()
+    await page.evaluate(
+      `window.fixture.change({messages:Array.from({length:20},(_,i)=>({id:'saved-'+i,role:'assistant',content:'Message '+i}))})`
+    )
+    await paint()
+    assert.equal(
+      await page.evaluate("window.fixture.listProps.initialTopMostItemIndex"),
+      undefined,
+      "A completed restore cannot seed a subsequent rebuilt virtual window"
+    )
+    checks.push(
+      "resumed durable navigation waits for its handle; completed restores clear their initial seed"
+    )
+    await reset(undefined, true)
+    const hiddenGestureCancelCount = await page.evaluate(`{
+      const viewport=document.querySelector('[data-radix-scroll-area-viewport]');
+      const list=document.createElement('div');list.dataset.testid='virtuoso-item-list';list.style.visibility='hidden';
+      list.innerHTML='<div data-index="5" data-known-size="40" style="height:80px"><div data-chat-message-id="saved-5">System probe</div></div>';
+      viewport.append(list);window.fixture.cancelScrollCalls??0;
+    }`)
+    await paint()
+    assert.equal(await page.evaluate("window.fixture.cancelScrollCalls??0"), hiddenGestureCancelCount,
+      "Automatic restoration waits for a hidden measurement commit")
+    await page.locator("[data-radix-scroll-area-viewport]").dispatchEvent("wheel", { deltaY: -100 })
+    assert(((await page.evaluate("window.fixture.cancelScrollCalls??0")) as number) > hiddenGestureCancelCount,
+      "A real Container user gesture cancels immediately even while hidden measurements are uncommitted")
+    await paint()
+    assert.equal(await page.evaluate("window.fixture.listProps.hasPendingAnchorLayout()"), false,
+      "A user gesture synchronously disables pending layout corrections")
+    assert.equal(
+      await page.evaluate("window.fixture.listProps.initialTopMostItemIndex"),
+      undefined,
+      "A user wheel consumes a pending restore seed"
+    )
+    assert.equal(
+      await page.evaluate("window.fixture.anchorOwners.size"),
+      0,
+      "A user wheel releases native compensation ownership synchronously"
+    )
+    await reset()
+    const cancellationWiring = await page.evaluate(() => {
+      const fixture = (window as unknown as { fixture: { cancelScrollCalls?: number } }).fixture
+      const viewport = document.querySelector<HTMLElement>("[data-radix-scroll-area-viewport]")!
+      const count = () => fixture.cancelScrollCalls ?? 0
+      const deltas: Record<string, number> = {}
+      const check = (name: string, act: () => void) => {
+        const before = count()
+        act()
+        deltas[name] = count() - before
+      }
+      const wheel = (target: HTMLElement, options: WheelEventInit = {}) =>
+        target.dispatchEvent(new WheelEvent("wheel", { bubbles: true, deltaY: -100, ...options }))
+      check("wheel", () => wheel(viewport))
+      check("ctrlWheel", () => wheel(viewport, { ctrlKey: true }))
+      check("horizontalWheel", () => wheel(viewport, { deltaY: 0, deltaX: 100 }))
+      const nested = document.createElement("div")
+      nested.style.cssText = "height:40px;overflow-y:auto;overscroll-behavior-y:contain"
+      nested.innerHTML = '<div style="height:200px"></div>'
+      viewport.append(nested)
+      nested.scrollTop = 50
+      check("nestedWheel", () => wheel(nested))
+      nested.remove()
+      const textarea = document.querySelector<HTMLTextAreaElement>("textarea.composer-textarea")!
+      textarea.focus()
+      check("composerKey", () =>
+        textarea.dispatchEvent(
+          new KeyboardEvent("keydown", {
+            key: "ArrowUp",
+            bubbles: true
+          })
+        )
+      )
+      textarea.blur()
+      check("scrollKey", () =>
+        document.body.dispatchEvent(
+          new KeyboardEvent("keydown", {
+            key: "PageUp",
+            bubbles: true
+          })
+        )
+      )
+      const touch = (type: string, y: number) => {
+        const event = new Event(type, { bubbles: true })
+        Object.defineProperty(event, "touches", { value: [{ clientY: y }] })
+        viewport.dispatchEvent(event)
+      }
+      check("touchStart", () => touch("touchstart", 100))
+      check("touchMove", () => touch("touchmove", 120))
+      // The real container owns the capture listener; the marker models its Radix sibling.
+      const scrollbar = document.createElement("div")
+      scrollbar.setAttribute("data-scroll-area-scrollbar", "")
+      viewport.parentElement!.append(scrollbar)
+      check("scrollbarPointer", () =>
+        scrollbar.dispatchEvent(
+          new PointerEvent("pointerdown", {
+            bubbles: true,
+            pointerId: 1
+          })
+        )
+      )
+      scrollbar.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, pointerId: 1 }))
+      scrollbar.remove()
+      check("preciseSearch", () =>
+        (
+          window as unknown as {
+            fixture: { searchProps: { onBeforePreciseScroll(): void } }
+          }
+        ).fixture.searchProps.onBeforePreciseScroll()
+      )
+      return deltas
+    })
+    assert.deepEqual(
+      cancellationWiring,
+      {
+        wheel: 1,
+        ctrlWheel: 0,
+        horizontalWheel: 0,
+        nestedWheel: 0,
+        composerKey: 0,
+        scrollKey: 1,
+        touchStart: 0,
+        touchMove: 1,
+        scrollbarPointer: 1,
+        preciseSearch: 1
+      },
+      "Real ChatContainer cancels pending index navigation only for accepted scroll gestures"
+    )
+    checks.push(
+      "real ChatContainer gesture handlers call the cancellation handle; nested scrolling, zoom and composer input retain their filters"
+    )
     await reset()
     const composer = page.locator("textarea.composer-textarea")
     await composer.focus()
@@ -259,12 +653,21 @@ async function main() {
     await composer.pressSequentially("LOCAL_INTERACTION_DRAFT_1", { delay: 5 })
     await paint()
     assert.equal(await composer.inputValue(), "LOCAL_INTERACTION_DRAFT_1")
-    assert.equal(await page.evaluate("window.fixture.state().draftInput"), "LOCAL_INTERACTION_DRAFT_1")
-    assert.equal(await page.evaluate("window.fixture.listRenders"), idleListRenders,
-      "Typing must not invalidate the transcript memo boundary")
+    assert.equal(
+      await page.evaluate("window.fixture.state().draftInput"),
+      "LOCAL_INTERACTION_DRAFT_1"
+    )
+    assert.equal(
+      await page.evaluate("window.fixture.listRenders"),
+      idleListRenders,
+      "Typing must not invalidate the transcript memo boundary"
+    )
     await page.locator("[data-fixture-follow-up]").click()
-    assert.equal(await composer.inputValue(), "LOCAL_INTERACTION_DRAFT_1\n\nFOLLOW_UP",
-      "A retained task callback must append to the current draft")
+    assert.equal(
+      await composer.inputValue(),
+      "LOCAL_INTERACTION_DRAFT_1\n\nFOLLOW_UP",
+      "A retained task callback must append to the current draft"
+    )
     await composer.press("ControlOrMeta+A")
     await composer.press("Backspace")
     assert.equal(await page.evaluate("window.fixture.state().draftInput"), "")
@@ -284,13 +687,65 @@ async function main() {
     await composer.pressSequentially("LIVE_DRAFT", { delay: 5 })
     await paint()
     assert.equal(await composer.inputValue(), "LIVE_DRAFT")
-    assert.equal(await page.evaluate("window.fixture.listRenders"), loadingListRenders,
-      "Typing during a run must retain the footer and initial-location props")
+    assert.equal(
+      await page.evaluate("window.fixture.listRenders"),
+      loadingListRenders,
+      "Typing during a run must retain the footer and initial-location props"
+    )
     await page.locator("[data-fixture-follow-up]").click()
     assert.equal(await composer.inputValue(), "LIVE_DRAFT\n\nFOLLOW_UP")
     await page.evaluate("window.fixture.stream({isLoading:false})")
     await page.waitForFunction("window.fixture.listProps.isLoading===false")
-    checks.push("real ChatContainer idle/loading draft changes preserve the transcript memo boundary; retained follow-up reads current draft; clear and error dismissal stay live")
+    checks.push(
+      "real ChatContainer idle/loading draft changes preserve the transcript memo boundary; retained follow-up reads current draft; clear and error dismissal stay live"
+    )
+
+    assert.equal(
+      await page.evaluate("window.fixture.cardReads??0"),
+      0,
+      "No commit approval must avoid mounting the dialog and reading its task card"
+    )
+    assert.equal(await page.evaluate("window.fixture.diffReads??0"), 0)
+    await page.evaluate(`window.fixture.change({pendingApproval:{id:'commit-one',
+      operation:'git_commit',suggestedCommitMessage:'CARD-1 #comment fix:first suggested message #CMBDevClaw'}})`)
+    const commitMessage = page.locator("#agent-commit-message")
+    await commitMessage.waitFor()
+    assert.equal(await commitMessage.inputValue(), "first suggested message")
+    await commitMessage.fill("edited approval draft")
+    await page.waitForFunction("window.fixture.cardReads===1")
+    await page.evaluate("window.fixture.customize(true)")
+    await commitMessage.waitFor({ state: "hidden" })
+    await paint()
+    assert.equal(await page.evaluate("window.fixture.cardReads"), 1)
+    await page.evaluate("window.fixture.customize(false)")
+    await commitMessage.waitFor()
+    assert.equal(
+      await commitMessage.inputValue(),
+      "edited approval draft",
+      "Settings must hide the pending approval without unmounting its draft"
+    )
+    assert.equal(await page.evaluate("window.fixture.cardReads"), 1)
+    await page.evaluate(`window.fixture.change({pendingApproval:{id:'commit-two',
+      operation:'git_commit',suggestedCommitMessage:'CARD-1 #comment feat:second suggested message #CMBDevClaw'}})`)
+    await page.waitForFunction(
+      "document.querySelector('#agent-commit-message')?.value==='second suggested message'"
+    )
+    assert.equal(
+      await page.evaluate("window.fixture.cardReads"),
+      2,
+      "A different approval ID must mount a fresh dialog and task-card state"
+    )
+    await page.evaluate("window.fixture.change({pendingApproval:null})")
+    await commitMessage.waitFor({ state: "detached" })
+    await paint()
+    assert.equal(
+      await page.evaluate("window.fixture.cardReads"),
+      2,
+      "Finishing approval must not create a replacement idle dialog"
+    )
+    checks.push(
+      "real approval dialog mounts only for a request, keeps drafts through settings, and resets on a new approval ID"
+    )
 
     for (const phase of ["file", "mode", "append"]) {
       await reset(phase)

@@ -34,16 +34,19 @@ async function main() {
         const original=Array.from({length:200},(_,index)=>({id:'question-'+index,role:'user',content:'Question '+index}));
         const noop=()=>{};
         function Fixture(){
-          const root=useRef(null),[revision,setRevision]=useState(0),[prepended,setPrepended]=useState(false);
+          const root=useRef(null),[revision,setRevision]=useState(0),[prepended,setPrepended]=useState(false),[hidden,setHidden]=useState(null);
+          const navigation=useRef([]);
           const messages=prepended?[{id:'earlier',role:'user',content:'Earlier'},...original]:original.slice();
-          window.navigatorFixture={stats,token:()=>setRevision(value=>value+1),prepend:()=>setPrepended(true),
+          window.navigatorFixture={stats,navigation:navigation.current,hide:id=>setHidden(id),token:()=>setRevision(value=>value+1),prepend:()=>setPrepended(true),
             scroll:top=>{const viewport=root.current.querySelector('[data-radix-scroll-area-viewport]');viewport.scrollTop=top;viewport.dispatchEvent(new Event('scroll'))}};
           return <ChatScrollNavigator messages={messages} questionStructureRevision={prepended?2:1}
             historyGapBeforeMessageId={null} canLoadReleasedHistory={false} onLoadReleasedHistoryWindow={noop}
-            onRevealMessage={noop} scrollContainerRef={root} rightPanelCollapsed={false}>
+            onRevealMessage={noop} onScrollToQuestion={()=>navigation.current.push('cancel')}
+            scrollToMessageById={id=>navigation.current.push('index:'+id)}
+            scrollContainerRef={root} rightPanelCollapsed={false}>
             {({setMessageRef})=>{stats.children++;return <div ref={root} data-revision={revision}>
               <div data-radix-scroll-area-viewport style={{height:400,width:600,overflow:'auto'}}>
-                {messages.map(message=><div data-question-row key={message.id} ref={setMessageRef(message.id,'user')}
+                {messages.filter(message=>message.id!==hidden).map(message=><div data-question-row key={message.id} ref={setMessageRef(message.id,'user')}
                   style={{height:100,boxSizing:'border-box',borderBottom:'1px solid gray'}}>{message.content}</div>)}
               </div></div>}}
           </ChatScrollNavigator>
@@ -136,6 +139,12 @@ async function main() {
         "Prepending history must invalidate mounted question positions"
       )
       assert.deepEqual(errors, [])
+      await page.evaluate("window.navigatorFixture.scroll(0);window.navigatorFixture.hide('question-0')")
+      await page.locator('[data-question-row]').filter({ hasText: /^Question 0$/ }).waitFor({ state: "detached" })
+      await page.getByRole("button", { name: "滚动到第 2 次提问", exact: true }).click()
+      assert.deepEqual(await page.evaluate("window.navigatorFixture.navigation"),
+        ["cancel", "index:question-0"],
+        "Question navigation cancels the old request before starting its new missing-row index request")
     }
     console.log(JSON.stringify({ baseline, ...evidence, errors }))
   } finally {

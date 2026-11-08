@@ -8,6 +8,7 @@ import { captureThreadIncarnation, matchesThreadIncarnation } from "../services/
 import { resolveCapabilityContext } from "../mods/capability-context"
 import { resolveClawThread } from "../mods/claw-scope"
 import { withHostRuntimeTiming } from "../services/host-runtime-timing"
+import { denyFunctionConversationForkReady } from "./function-conversation-fork-gate"
 
 const paths = vi.hoisted(() => ({ database: "" }))
 vi.mock("../storage", () => ({
@@ -52,6 +53,56 @@ function context(id: string, read = appDb.getThreadRuntimeScope) {
 }
 
 describe("fresh read-only thread runtime scope projection", () => {
+  it("keeps large-history display fences current after fork denial and same-ID recreation", () => {
+    const raw = JSON.stringify({ cmb_thread_incarnation: "original", llmFileHistory: "x".repeat(5 * 1024 * 1024) })
+    const id = insert(raw), database = appDb.getDb()
+    const target = { threadId: id, incarnation: captureThreadIncarnation(appDb.getThreadCore(id)!) }
+    expect(appDb.withCanonicalThreadMessageReadScope(id, () => "ready")).toBe("ready")
+    expect(() => appDb.withCanonicalThreadMessageReadScope(id, reader => {
+      reader.runGuard(() => denyFunctionConversationForkReady(database, target))
+      return "must not publish"
+    })).toThrow("MODS_CONVERSATION_FORK_PREPARING")
+    expect(appDb.getThreadCore(id)?.metadata).toBe(raw)
+    database.run("DELETE FROM threads WHERE thread_id=?", [id])
+    insert('{"cmb_thread_incarnation":"replacement"}', id)
+    expect(appDb.withCanonicalThreadMessageReadScope(id, () => "replacement")).toBe("replacement")
+  })
+
+  it("preserves the full metadata interpreter at the ordinary writer's fork gate", () => {
+    const raw = JSON.stringify({ cmb_thread_incarnation: "stored", llmFileHistory: "x".repeat(50000) })
+    const id = insert(raw), parse = JSON.parse
+    denyFunctionConversationForkReady(appDb.getDb(), {
+      threadId: id, incarnation: { token: "custom-interpreter", legacyCreatedAt: 100 }
+    })
+    vi.spyOn(JSON, "parse").mockImplementation((value: string) => value === raw
+      ? { cmb_thread_incarnation: "custom-interpreter" } : parse(value))
+    expect(() => appDb.upsertThreadMessages(id, [{ id: randomUUID(), role: "user",
+      content: "must not write", created_at: new Date(100) }]))
+      .toThrow("MODS_CONVERSATION_FORK_PREPARING")
+  })
+
+  it("preserves a cached custom core reader at the ordinary writer's fork gate", () => {
+    const raw = JSON.stringify({ cmb_thread_incarnation: "stored", llmFileHistory: "x".repeat(50000) })
+    const id = insert(raw), database = appDb.getDb(), prepare = database.prepareReadOne.bind(database)
+    const custom = JSON.stringify({ cmb_thread_incarnation: "custom-reader" })
+    const factory = vi.spyOn(database, "prepareReadOne").mockImplementation(sql => {
+      const read = prepare(sql)
+      return bindings => {
+        const row = read(bindings)
+        return row && sql.includes("SELECT thread_id, created_at, updated_at, metadata")
+          ? { ...row, metadata: custom } : row
+      }
+    })
+    expect(appDb.getThreadCore(id)?.metadata).toBe(custom)
+    factory.mockRestore()
+    denyFunctionConversationForkReady(database, {
+      threadId: id, incarnation: { token: "custom-reader", legacyCreatedAt: 100 }
+    })
+    expect(() => appDb.upsertThreadMessages(id, [{ id: randomUUID(), role: "assistant",
+      content: "must not write", created_at: new Date(100) }]))
+      .toThrow("MODS_CONVERSATION_FORK_PREPARING")
+  })
+
   it.each([1, 2])("keeps full metadata if timing callback %s changes its interpreter", turn => {
     const raw = JSON.stringify({ cmb_thread_incarnation: "kept", llmFileHistory: "x".repeat(50000) })
     const id = insert(raw), parse = JSON.parse, now = performance.now.bind(performance)

@@ -202,10 +202,11 @@ describe("chat scroll render/runtime harness", () => {
     expect(virtuoso?.followOutput).toBe(false)
   })
 
-  it("reports item resizes before the next host follow frame", () => {
+  it("defers native measurement so the host anchor can publish its layout transaction first", () => {
     const runtime = new ChatScrollRuntimeHarness()
     const virtuoso = renderVirtualList(500, runtime)
-    expect(virtuoso?.skipAnimationFrameInResizeObserver).toBe(true)
+    // Actual following, footer, composer and viewport paints are covered by the deferred browser suite.
+    expect(virtuoso?.skipAnimationFrameInResizeObserver).toBe(false)
   })
 
   it("hydrates 0 to 500 rows at LAST and survives out-of-order layout callbacks", async () => {

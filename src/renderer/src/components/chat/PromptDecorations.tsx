@@ -1,4 +1,4 @@
-import { useEffect, useState, type CSSProperties, type RefObject } from "react"
+import { useEffect, useLayoutEffect, useState, type CSSProperties, type RefObject } from "react"
 import type { FunctionPromptDecoration } from "../../../../shared/mods/v2/prompt-edit"
 import { clampPromptDecorationGraphemes } from "@/lib/prompt-decoration"
 
@@ -27,14 +27,23 @@ export function PromptDecorations({
   className: string
 }) {
   const [scroll, setScroll] = useState(0)
+  const hasDecorations = decorations.length > 0
+  useLayoutEffect(() => {
+    if (!hasDecorations) return
+    const node = textarea.current
+    // Synchronize external DOM scroll before paint when decorations are re-enabled.
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- Prevent a stale overlay position.
+    if (node) setScroll(node.scrollTop)
+  }, [textarea, hasDecorations])
   useEffect(() => {
+    if (!hasDecorations) return
     const node = textarea.current
     const update = () => setScroll(node?.scrollTop ?? 0)
     update()
     node?.addEventListener("scroll", update)
     return () => node?.removeEventListener("scroll", update)
-  }, [textarea])
-  if (!decorations.length) return null
+  }, [textarea, hasDecorations])
+  if (!hasDecorations) return null
   const spans = clampPromptDecorationGraphemes(text, decorations)
   const boundaries = [
     ...new Set([0, text.length, ...spans.flatMap((span) => [span.start, span.end])])

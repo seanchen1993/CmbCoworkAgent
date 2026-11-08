@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs"
 import { fileURLToPath } from "node:url"
 import { describe, expect, it } from "vitest"
+import { resolveChatSessionInitialLocation } from "./chat-session-initial-location"
 import {
   CHAT_MESSAGE_VIRTUALIZATION_THRESHOLD,
   resolveChatMessageVirtualInitialLocation,
@@ -57,5 +58,31 @@ describe("chat message virtual list initial location", () => {
     expect(source).toMatch(/computeItemKey=\{\(_index, row\) => row\.identity\}/)
     expect(source).toMatch(/totalListHeightChanged=\{onContentHeightChanged\}/)
     expect(source).toMatch(/followOutput=\{false\}/)
+  })
+})
+
+describe("restored session initial location", () => {
+  const indexes = new Map([["anchor", 37]])
+  const seed = { threadId: "one", messageId: "anchor", offsetFromViewportTop: 28 }
+
+  it("uses the current window's relative index and the inverse saved offset", () => {
+    expect(resolveChatSessionInitialLocation("one", "detached", seed, indexes))
+      .toEqual({ index: 37, align: "start", behavior: "auto", offset: -28 })
+    expect(resolveChatSessionInitialLocation("one", "detached",
+      { ...seed, offsetFromViewportTop: -90 }, indexes)?.offset).toBe(90)
+  })
+
+  it("does not replay a cleared restore on another window or another thread", () => {
+    expect(resolveChatSessionInitialLocation("two", "detached", seed, indexes)).toBeUndefined()
+    expect(resolveChatSessionInitialLocation("one", "detached", null, indexes)).toBeUndefined()
+    expect(resolveChatSessionInitialLocation("one", "detached", seed, new Map())).toBeUndefined()
+  })
+
+  it("keeps following, fresh initialization and active history restoration on their own paths", () => {
+    for (const mode of ["following", "initializing", "restoring"] as const)
+      expect(resolveChatSessionInitialLocation("one", mode, seed, indexes)).toBeUndefined()
+    for (const offsetFromViewportTop of [NaN, Infinity, -Infinity])
+      expect(resolveChatSessionInitialLocation("one", "detached",
+        { ...seed, offsetFromViewportTop }, indexes)).toBeUndefined()
   })
 })

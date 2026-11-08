@@ -1,0 +1,32 @@
+{
+  "name": "react-virtuoso",
+  "version": "4.18.12",
+  "upstreamTarball": "https://registry.npmjs.org/react-virtuoso/-/react-virtuoso-4.18.12.tgz",
+  "lockedTarball": "https://registry.npmmirror.com/react-virtuoso/-/react-virtuoso-4.18.12.tgz",
+  "upstreamIntegrity": "sha512-6c1SnRicSBfG+WnbhcyJUxzDHvvxD3vsux/EpcfVbgB7clyP1Od2r81TAGTgwbL7U2qP889RR4u+CH6WjgpW0g==",
+  "upstreamTarballSha256": "a9a3b4e28b22507b75ba930aa16d43c41d1f3983c74458ea70c7f8cf723dc413",
+  "license": "MIT",
+  "licenseSha256": "0c53d51ef7f29a43470f7c3132faf161fb72ea3b99ffa9e928981cd8681be6b8",
+  "packageSha256": "e27cdbc04ebb580df8d5a8fe1326e969ba43ea514f318bd6fb7c0ba7b1509bae",
+  "sourcePullRequest": "https://github.com/petyosi/react-virtuoso/pull/1551",
+  "sourceDiffSha256": "e1e37b6ab931727b708fc3383fecaed5a7badb094955e31bef30fba53ffe8085",
+  "patchSha256": "15c9bf7d40ab92cfc3073adea732a15d7b7496d9614cf7aec325a2de0a7ac17d",
+  "files": [
+    {
+      "path": "dist/index.mjs",
+      "beforeSha256": "e60743f5be07e88b8e5a1d02546cfc982c3902feb87b06ef512393c36dfb5b80",
+      "afterSha256": "57b9fac2e9d07ce58abb41eab4bfffc754c3798e3c16e0c17943a659e3a7ebe7"
+    },
+    {
+      "path": "dist/index.cjs",
+      "beforeSha256": "68f94c375366deb3f95dd65b80206deb658d6a167639c0b79f685d45bd755058",
+      "afterSha256": "d24c78ceee88ee27f70012c574aa9c864261a753f760e6b8e75ef1f9475221af"
+    },
+    {
+      "path": "dist/index.d.ts",
+      "beforeSha256": "30f2f3a5d889b7aff8c4b361effab8d15b2e1d257e1a1d2add0bd0c2c2268006",
+      "afterSha256": "5faa4cc69741ec2e81c14fa447d05c17255548ab397818bb39accd023a988532"
+    }
+  ],
+  "localExtension": "Cancelled initialization lifecycle; tokenized external anchor ownership with iOS/prepend provenance; explicit current-list native measurement refresh without caller-supplied indices."
+}

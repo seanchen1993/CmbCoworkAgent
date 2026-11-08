@@ -5011,7 +5011,9 @@ export function upsertThreadMessages(
 }
 
 function assertThreadMessageForkReady(threadId: string): void {
-  const thread = getThreadCore(threadId)
+  // Fork readiness consumes only incarnation. Avoid transferring file-adoption history
+  // on every stream flush and canonical display fence; custom readers retain raw input.
+  const thread = getThreadCanonicalIdentity(threadId)
   if (thread) assertFunctionConversationForkReady(getDb(), {
     threadId, incarnation: captureThreadIncarnation(thread)
   })

@@ -6,6 +6,9 @@ import { setTimeout as delay } from "node:timers/promises"
 import { writeFileSync } from "node:fs"
 import { releaseGuideConfig } from "../src/renderer/src/components/guides/release-guide-content"
 import { withModsMainCpuProfile } from "./support/mods-main-cpu-profile-diagnostic"
+import { startChatRunningObservation } from "./support/chat-running-observation"
+import { installChatScrollWriteDiagnostic } from "./support/chat-scroll-write-diagnostic"
+import { withChatRunningRendererProfile } from "./support/chat-running-renderer-profile"
 import {
   createHeadlessProjectCompositionLaunch,
   projectCompositionCandidate,
@@ -66,8 +69,10 @@ async function main() {
     const app = await createHeadlessProjectCompositionLaunch(root, fixture, {
       unobtrusivePresentation: true
     })()
+    let observation: Awaited<ReturnType<typeof startChatRunningObservation>> | undefined
     try {
       const page = await app.firstWindow()
+      const nativeWindow = await app.browserWindow(page)
       await page.waitForFunction(() => !!window.api?.threads)
       page.on("pageerror", (e) => errors.push(e.message))
       const ids = await page.evaluate(
@@ -135,6 +140,8 @@ async function main() {
           }
         }, ids)
       await page.reload({ waitUntil: "domcontentloaded" })
+      if (process.env.CHAT_RUNNING_SCROLL_WRITE_DIAGNOSTICS === "1")
+        await installChatScrollWriteDiagnostic(page)
       if (process.env.CHAT_RUNNING_SCROLL_DIAGNOSTICS === "1")
         await page.evaluate(() => {
           const samples: unknown[] = []
@@ -145,26 +152,35 @@ async function main() {
               const target = event.target instanceof Element ? event.target : null
               const viewport = target?.closest("[data-radix-scroll-area-viewport]")
               const sample = {
+                at: performance.now(),
                 delta: event.deltaY,
                 target: target?.tagName,
                 thread: target
                   ?.closest("[data-chat-thread-id]")
                   ?.getAttribute("data-chat-thread-id"),
                 top: viewport?.scrollTop,
-                firstFrame: 0,
-                secondFrame: 0,
-                settled: 0
+                firstFrame: null as number | null,
+                firstFrameAt: null as number | null,
+                secondFrame: null as number | null,
+                secondFrameAt: null as number | null,
+                settled: null as number | null,
+                settledAt: null as number | null,
+                connectedAtSettlement: null as boolean | null
               }
               samples.push(sample)
               if (samples.length > 12) samples.shift()
               requestAnimationFrame(() => {
                 sample.firstFrame = viewport?.scrollTop ?? -1
+                sample.firstFrameAt = performance.now()
                 requestAnimationFrame(() => {
                   sample.secondFrame = viewport?.scrollTop ?? -1
+                  sample.secondFrameAt = performance.now()
                 })
               })
               setTimeout(() => {
                 sample.settled = viewport?.scrollTop ?? -1
+                sample.settledAt = performance.now()
+                sample.connectedAtSettlement = viewport?.isConnected ?? false
               }, 200)
             },
             { capture: true, passive: true }
@@ -176,8 +192,9 @@ async function main() {
           .first()
           .click()
       const scope = (which: number) => page.locator('[data-chat-thread-id="' + ids[which] + '"]')
-      const ready = (which: number) =>
-        page.waitForFunction((id) => {
+      const ready = (which: number) => observation
+        ? observation.waitForReady(ids[which])
+        : page.waitForFunction((id) => {
           const root = document.querySelector('[data-chat-thread-id="' + id + '"]')
           const view = root?.querySelector("[data-radix-scroll-area-viewport]")
           if (!view) return false
@@ -226,6 +243,9 @@ async function main() {
       // A guest may hold model output until its publication check. Exercise navigation
       // during the physical run, including that interval, then verify the final durable body.
       const record = async (kind: string, round: number, run: () => Promise<unknown>) => {
+        // Navigation legitimately changes scope; same-thread actions must retain
+        // readiness so a disappearance during scrolling/resizing is still detected.
+        await observation?.setPhase(kind, kind !== "switch")
         const start = performance.now()
         await run()
         samples.push({ kind, round, ms: Math.round(performance.now() - start) })
@@ -259,6 +279,9 @@ async function main() {
         }
       }
       await heapSample("heap-before")
+      if (process.env.CHAT_RUNNING_OBSERVE === "1") {
+        observation = await startChatRunningObservation(app, page)
+      }
       const beforeProcesses = await app.evaluate(({ app }) =>
         app.getAppMetrics().map((m) => ({
           pid: m.pid,
@@ -268,7 +291,7 @@ async function main() {
         }))
       )
       telemetry.push({ phase: "before", processes: beforeProcesses })
-      await withModsMainCpuProfile(app, fixture.isolated, async () => {
+      const runWorkload = async () => {
         for (let round = 0; round < rounds; round++) {
           const before = chunks
           for (const which of [1, 0]) {
@@ -282,9 +305,28 @@ async function main() {
                 has: page.locator("[data-chat-message-row]")
               })
               .first()
+            const hoverStart = process.env.CHAT_RUNNING_SCROLL_DIAGNOSTICS === "1"
+              ? await viewport.evaluate(el => ({ at: performance.now(), top: el.scrollTop }))
+              : undefined
             await viewport.hover()
+            if (hoverStart) {
+              telemetry.push({
+                phase: "hover-diagnostic",
+                round,
+                threadId: ids[which],
+                before: hoverStart,
+                after: await viewport.evaluate(el => ({ at: performance.now(), top: el.scrollTop }))
+              })
+            }
             const prior = await viewport.evaluate((el) => el.scrollTop)
-            lastInteraction = { kind: "scroll", round, threadId: ids[which], prior }
+            const pointerTarget = process.env.CHAT_RUNNING_SCROLL_DIAGNOSTICS === "1"
+              ? await viewport.evaluate(el => {
+                const box = el.getBoundingClientRect()
+                const target = document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2)
+                return { tag: target?.tagName, classes: target?.className,
+                  thread: target?.closest("[data-chat-thread-id]")?.getAttribute("data-chat-thread-id") }
+              }) : undefined
+            lastInteraction = { kind: "scroll", round, threadId: ids[which], prior, pointerTarget }
             await record("scroll", round, async () => {
               await page.mouse.wheel(0, prior > 1200 ? -1050 : 1050)
               await page.waitForFunction(
@@ -299,6 +341,25 @@ async function main() {
               )
               await ready(which)
             })
+            // Exercise native window resizing while the HTTP response is still producing
+            // tokens, including a detached reading position and the inactive run's history.
+            if (round % 3 === 0) {
+              const size = which === 1 ? { width: 1320, height: 800 }
+                : { width: 1440, height: 960 }
+              await record("resize", round, async () => {
+                const previous = await page.evaluate(() => ({ width: innerWidth, height: innerHeight }))
+                await nativeWindow.evaluate((window, size) => {
+                  window.setContentSize(size.width, size.height, false)
+                }, size)
+                // Windows DPI/native window constraints can adjust the requested size.
+                // Verify the actual renderer resized, without equating native and CSS pixels.
+                await page.waitForFunction(({ width, height }) =>
+                  innerWidth !== width || innerHeight !== height, previous)
+                await ready(which)
+                await page.evaluate(() => new Promise<void>((done) =>
+                  requestAnimationFrame(() => requestAnimationFrame(() => done()))))
+              })
+            }
             if (which === 1) {
               const edit = scope(1).locator("textarea.composer-textarea")
               await record("type", round, async () => {
@@ -320,7 +381,9 @@ async function main() {
             }))
           )
         }
-      })
+      }
+      await withChatRunningRendererProfile(page, fixture.isolated, () =>
+        withModsMainCpuProfile(app, fixture.isolated, runWorkload))
       const afterProcesses = await app.evaluate(({ app }) =>
         app.getAppMetrics().map((m) => ({
           pid: m.pid,
@@ -330,7 +393,16 @@ async function main() {
         }))
       )
       telemetry.push({ phase: "after", processes: afterProcesses })
+      if (process.env.CHAT_RUNNING_SCROLL_DIAGNOSTICS === "1") {
+        telemetry.push({ phase: "wheel-diagnostic", samples: await page.evaluate(() =>
+          Reflect.get(window, "runningWheelSamples")) })
+      }
+      if (process.env.CHAT_RUNNING_SCROLL_WRITE_DIAGNOSTICS === "1") {
+        telemetry.push({ phase: "scroll-write-diagnostic", writes: await page.evaluate(() =>
+          Reflect.get(window, "chatScrollWriteDiagnostic")) })
+      }
       await page.screenshot({ path: join(fixture.isolated, "running-workload.png") })
+      await observation?.setPhase("settlement")
       clearInterval(ticker)
       frame({ content: " END_RUN_LOAD" }, "stop")
       answer!.end("data: [DONE]\n\n")
@@ -348,7 +420,17 @@ async function main() {
         await heapSample("heap-after-idle")
       }
       assert.deepEqual(errors, [])
-      for (const kind of ["switch", "scroll", "type"]) {
+      if (observation) {
+        const observed = await observation.snapshot()
+        // Preserve the checked snapshot even if failure diagnostics later lose the CDP context.
+        telemetry.push({ phase: "observation-check", ...observed })
+        assert.deepEqual(observed.errors, [])
+        for (const [phase, stats] of Object.entries(observed.renderer?.phases ?? {})) {
+          assert.equal(stats.visibility?.postReadyBlankSamples ?? 0, 0,
+            `readable content disappeared after ${phase} was ready`)
+        }
+      }
+      for (const kind of ["switch", "scroll", "resize", "type"]) {
         const values = samples
           .filter((s) => s.kind === kind)
           .map((s) => s.ms)
@@ -383,6 +465,7 @@ async function main() {
       await page.screenshot({ path: join(fixture.isolated, "running-workload-failure.png") })
       throw error
     } finally {
+      if (observation) telemetry.push({ phase: "observation", ...(await observation.stop()) })
       await app.close()
     }
   } finally {
@@ -392,7 +475,10 @@ async function main() {
     writeFileSync(
       join(fixture.isolated, "running-workload.json"),
       JSON.stringify(
-        { passed, candidate, withGuest, rounds, chunks, samples, telemetry, errors },
+        { passed, candidate, withGuest, rounds, chunks, samples, telemetry, errors,
+          ...(process.env.CHAT_RUNNING_RENDERER_PROFILE === "1" ||
+            process.env.CHAT_RUNNING_SCROLL_WRITE_DIAGNOSTICS === "1"
+            ? { diagnosticOnly: true } : {}) },
         null,
         2
       )

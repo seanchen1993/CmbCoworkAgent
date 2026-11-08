@@ -17,6 +17,27 @@ import { startIsolatedAppRenderer } from "./isolated-app-renderer"
 import { modsSourceNodeWorkers } from "./mods-source-node-workers"
 import { captureModsSourceSnapshot, verifyModsSourceSnapshot } from "./mods-source-snapshot"
 import { PLATFORM_EXAMPLES } from "../../src/main/mods/community-examples"
+import { checkReactVirtuosoScrollCancel } from "../../scripts/apply-react-virtuoso-scroll-cancel.mjs"
+
+export const MODS_VIRTUOSO_PATCH_SOURCE_ROOTS = [
+  "scripts/apply-react-virtuoso-scroll-cancel.mjs",
+  "scripts/apply-react-virtuoso-scroll-cancel.d.mts",
+  "scripts/langchain-native-patch-text.mjs",
+  "patches/react-virtuoso-scroll-cancel"
+] as const
+
+const virtuosoFiles = ["index.mjs", "index.cjs", "index.d.ts"].map(
+  (name) => `node_modules/react-virtuoso/dist/${name}`
+)
+
+/** Installed bytes, not just the lockfile, identify a patched dependency. Never installs. */
+export function captureModsVirtuosoDependencyProof(repository: string) {
+  checkReactVirtuosoScrollCancel({ workspaceRoot: repository })
+  return {
+    version: "4.18.12" as const,
+    files: Object.fromEntries(virtuosoFiles.map((file) => [file, hash(join(repository, file))]))
+  }
+}
 
 export interface ModsSourceManifest {
   execution: "source-isolated"
@@ -29,6 +50,7 @@ export interface ModsSourceManifest {
   sources: Record<string, string>
   sourceRoots: string[]
   dependencies: string
+  reactVirtuosoScrollCancel: ReturnType<typeof captureModsVirtuosoDependencyProof>
 }
 const hash = (file: string) => createHash("sha256").update(readFileSync(file)).digest("hex")
 export function readModsSourceCandidate(path: string) {
@@ -49,11 +71,22 @@ export function readModsSourceCandidate(path: string) {
   )
   assert(Array.isArray(value.sourceRoots) && value.sourceRoots.length, "SOURCE_ROOTS_REQUIRED")
   verifyModsSourceSnapshot(value.repository, value.sourceRoots, value.sources)
+  assert(value.reactVirtuosoScrollCancel, "SOURCE_VIRTUOSO_PROOF_REQUIRED")
+  for (const source of MODS_VIRTUOSO_PATCH_SOURCE_ROOTS)
+    assert(value.sourceRoots.includes(source), `SOURCE_VIRTUOSO_PATCH_SOURCE_REQUIRED:${source}`)
+  assert.deepEqual(
+    captureModsVirtuosoDependencyProof(value.repository),
+    value.reactVirtuosoScrollCancel,
+    "SOURCE_VIRTUOSO_DEPENDENCY_CHANGED"
+  )
   return value
 }
 
 /** Test compilation only: never invokes electron-vite, packages an app, or writes root/out. */
 export async function prepareModsSourceCandidate(repository: string, directory: string) {
+  // Fail before creating candidate output if npm ci skipped the dependency patch.
+  const reactVirtuosoScrollCancel = captureModsVirtuosoDependencyProof(repository)
+  const dependencies = hash(join(repository, "package-lock.json"))
   const root = resolve(directory)
   assert(!existsSync(root), "SOURCE_CANDIDATE_REQUIRES_NEW_DIRECTORY")
   assert(!["out", "dist", "build"].includes(relative(repository, root).split(/[\\/]/)[0]))
@@ -68,6 +101,7 @@ export async function prepareModsSourceCandidate(repository: string, directory: 
   const sourceRoots = [
     "src",
     "package.json",
+    ...MODS_VIRTUOSO_PATCH_SOURCE_ROOTS,
     "resources/mods",
     "resources/native-compositions",
     "resources/mods-policy.json",
@@ -210,6 +244,16 @@ export async function prepareModsSourceCandidate(repository: string, directory: 
     }
     walk(root)
     verifyModsSourceSnapshot(repository, sourceRoots, sources)
+    assert.deepEqual(
+      captureModsVirtuosoDependencyProof(repository),
+      reactVirtuosoScrollCancel,
+      "SOURCE_VIRTUOSO_DEPENDENCY_CHANGED_DURING_BUILD"
+    )
+    assert.equal(
+      hash(join(repository, "package-lock.json")),
+      dependencies,
+      "SOURCE_DEPENDENCIES_CHANGED_DURING_BUILD"
+    )
     const manifest: ModsSourceManifest = {
       execution: "source-isolated",
       root,
@@ -223,7 +267,8 @@ export async function prepareModsSourceCandidate(repository: string, directory: 
       files,
       sources,
       sourceRoots,
-      dependencies: hash(join(repository, "package-lock.json"))
+      dependencies,
+      reactVirtuosoScrollCancel
     }
     const path = join(root, "source-candidate.json")
     writeFileSync(path, JSON.stringify(manifest, null, 2))

@@ -11,12 +11,14 @@ import { dirname, join, relative, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import { build } from "esbuild"
 import { _electron, type Page } from "playwright"
+import { browserWorkerPlugin } from "./support/browser-worker-plugin.mjs"
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..")
 const require = createRequire(import.meta.url)
 const binary = require("electron") as string
 const baseline = process.env.CHAT_NAVIGATION_BASELINE_REF
 const scrollbarCancelOnly = process.argv.includes("--scrollbar-cancel-only")
+const preciseScrollOnly = process.argv.includes("--precise-scroll-only")
 const artifacts = join(projectRoot, "output/chat-navigation", baseline ? "baseline" : "current")
 mkdirSync(artifacts, { recursive: true })
 
@@ -78,6 +80,7 @@ async function main(): Promise<void> {
     define: { "process.env.NODE_ENV": '"production"' },
     alias: { "@": join(projectRoot, "src/renderer/src") },
     plugins: [
+      browserWorkerPlugin(),
       {
         name: "navigation-fixture",
         setup(builder) {
@@ -164,6 +167,8 @@ async function main(): Promise<void> {
   })
   const check = async (name: string, run: () => Promise<unknown>): Promise<void> => {
     if (scrollbarCancelOnly && !name.startsWith("real sibling scrollbar")) return
+    if (preciseScrollOnly && !["different occurrences in one tall message",
+      "durable hydration uses committed callbacks despite local repaint"].includes(name)) return
     try {
       results.push({ name, passed: true, details: await run() })
     } catch (error) {
@@ -274,6 +279,12 @@ async function main(): Promise<void> {
       }
       // Let the search's initial focus/selection frame finish before entering the query.
       await page.evaluate(() => new Promise<void>((done) => requestAnimationFrame(() => done())))
+      if (kind === "scrollbar-highlight") {
+        // Start the hostile layout changes only after the real scrollbar has measured.
+        // Keep changing layout through search and pointerdown; cancellation still owns it.
+        await page.getByTestId("search-real-scrollbar-thumb").waitFor({ state: "visible" })
+        await page.evaluate(() => window.chatNavigationFixture.startLayout!())
+      }
       await page.getByPlaceholder("在当前会话中搜索").fill("needle")
       await page.waitForFunction(() =>
         document.querySelector("[aria-live]")?.textContent?.includes("1/")
@@ -283,6 +294,8 @@ async function main(): Promise<void> {
       await open("occurrences")
       await waitForActiveMatch(page)
       const first = await activeMatch(page)
+      assert(await page.evaluate(() => window.chatNavigationMetrics.preciseScrolls > 0),
+        "Exact occurrence positioning hands off the old index transaction")
       await page.getByRole("button", { name: "下一个匹配" }).click()
       await waitForActiveMatch(page)
       const second = await activeMatch(page)
@@ -452,6 +465,8 @@ async function main(): Promise<void> {
       await waitForActiveMatch(page)
       const reveals = await page.evaluate(() => window.chatNavigationMetrics.reveals)
       assert.deepEqual(reveals, [true])
+      assert(await page.evaluate(() => window.chatNavigationMetrics.preciseScrolls > 0),
+        "An asynchronously mounted result hands off before precise positioning")
       assert((await activeMatch(page)).visible)
     })
     await check("closing search invalidates an outstanding durable reveal", async () => {
@@ -551,7 +566,8 @@ async function main(): Promise<void> {
   } finally {
     writeFileSync(
       join(artifacts, "browser-results.json"),
-      JSON.stringify({ baseline, scope: scrollbarCancelOnly ? "scrollbar-cancel-only" : "all", results, errors }, null, 2)
+      JSON.stringify({ baseline, scope: scrollbarCancelOnly ? "scrollbar-cancel-only" :
+        preciseScrollOnly ? "precise-scroll-only" : "all", results, errors }, null, 2)
     )
     await app.close()
   }

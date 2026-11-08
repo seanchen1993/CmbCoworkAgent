@@ -32,7 +32,10 @@ import {
 } from "./user-message-expansion-context"
 import { subscribeToMessageDiscard, type MessageAttempts } from "@/lib/message-discard-events"
 import { projectChatVirtualWindow } from "./chat-virtual-window"
+import { measureChatVirtualItem, positionChatVirtualAnchor } from "./chat-virtual-item-measurement"
+import { CHAT_VIRTUAL_OVERSCAN } from "./chat-virtual-overscan"
 import { installChatDetachedLayoutAnchor } from "./chat-detached-layout-anchor"
+import { acquireChatExternalScrollAnchor } from "./chat-external-scroll-anchor"
 import { ChatVirtualPrependLayout, type ChatVirtualPrependLayoutContext } from "./chat-virtual-prepend-layout"
 import type { ChatSearchLocation, ChatSearchReveal } from "../../../../shared/chat-search-types"
 import type {
@@ -160,6 +163,8 @@ export interface ChatMessageVirtualListProps {
   onContentHeightChanged: () => void
   onAtBottomStateChange: (atBottom: boolean) => void
   readDetachedAnchorLease?: () => number | null
+  correctPendingAnchorLayout?: () => boolean
+  hasPendingAnchorLayout?: () => boolean
   footer: React.ReactNode
 }
 
@@ -416,6 +421,8 @@ export const ChatMessageVirtualList = React.memo(function ChatMessageVirtualList
   onContentHeightChanged,
   onAtBottomStateChange,
   readDetachedAnchorLease,
+  correctPendingAnchorLayout,
+  hasPendingAnchorLayout,
   footer
 }: ChatMessageVirtualListProps): React.JSX.Element | null {
   const virtualRows = useMemo(() => visibleMessageIndexes.map(messageIndex => {
@@ -432,6 +439,7 @@ export const ChatMessageVirtualList = React.memo(function ChatMessageVirtualList
     projectChatVirtualWindow(null, threadId, virtualIdentities))
   const virtualWindow = projectChatVirtualWindow(previousVirtualWindow, threadId, virtualIdentities)
   if (virtualWindow !== previousVirtualWindow) setVirtualWindow(virtualWindow)
+  const shouldVirtualize = shouldVirtualizeChatMessageList(visibleMessageIndexes.length)
   const turnNoticePlacements = useMemo(
     () =>
       placeFunctionTurnNotices(
@@ -445,7 +453,6 @@ export const ChatMessageVirtualList = React.memo(function ChatMessageVirtualList
   const placedRows = useMemo(() => placeFunctionRows(messages, visibleMessageIndexes,
     functionPlacedRows ?? [], !historyHasMore && !historyGapBeforeMessageId),
   [messages, visibleMessageIndexes, functionPlacedRows, historyHasMore, historyGapBeforeMessageId])
-  const shouldVirtualize = shouldVirtualizeChatMessageList(visibleMessageIndexes.length)
   useLayoutEffect(() => {
     if (!shouldVirtualize || !customScrollParent) return
     return claimVirtualizedChatScrollAnchor(customScrollParent)
@@ -479,10 +486,31 @@ export const ChatMessageVirtualList = React.memo(function ChatMessageVirtualList
   useLayoutEffect(() => {
     if (!shouldVirtualize || !customScrollParent || !presentationRoot.current ||
       !readDetachedAnchorLease) return
-    return installChatDetachedLayoutAnchor({ root: presentationRoot.current,
-      viewport: customScrollParent, readLease: readDetachedAnchorLease })
-  }, [shouldVirtualize, customScrollParent, readDetachedAnchorLease,
-    virtualWindow.key, virtualWindow.firstItemIndex])
+    const handle = virtuosoRef.current
+    return installChatDetachedLayoutAnchor({
+      root: presentationRoot.current,
+      viewport: customScrollParent,
+      readLease: readDetachedAnchorLease,
+      correctPendingAnchorLayout,
+      hasPendingAnchorLayout,
+      acquireScrollAnchor: () => acquireChatExternalScrollAnchor(handle),
+      prepareCorrection: () => {
+        handle?.refreshItemSizes()
+        handle?.cancelScrollToIndex()
+      },
+      commitCorrection: () => handle?.refreshItemSizes(),
+      positionAnchor: (element, offset) => positionChatVirtualAnchor(element, offset, handle)
+    })
+  }, [
+    shouldVirtualize,
+    customScrollParent,
+    readDetachedAnchorLease,
+    correctPendingAnchorLayout,
+    hasPendingAnchorLayout,
+    virtualWindow.key,
+    virtualWindow.firstItemIndex,
+    virtuosoRef
+  ])
   const [presentedThread, setPresentedThread] = useState<string | null>(null)
   // Only a first live user row bypasses history settling. A running history still needs the barrier.
   const firstLiveUserRow = isFirstLiveChatUserRow(isLoading, canLoadReleasedHistory,
@@ -808,11 +836,12 @@ export const ChatMessageVirtualList = React.memo(function ChatMessageVirtualList
         alignToBottom
         atBottomThreshold={32}
         followOutput={false}
-        skipAnimationFrameInResizeObserver
+        skipAnimationFrameInResizeObserver={false}
+        itemSize={measureChatVirtualItem}
         atBottomStateChange={onAtBottomStateChange}
         // Probe the actual initial row instead of estimating a tall transcript from a
         // fixed short-message height. Pending content is still measured independently.
-        increaseViewportBy={{ top: 600, bottom: 900 }}
+        increaseViewportBy={CHAT_VIRTUAL_OVERSCAN}
         computeItemKey={(_index, row) => row.identity}
         itemsRendered={handleItemsRendered}
         rangeChanged={handleVirtualRangeChanged}

@@ -1,13 +1,18 @@
 import { describe, expect, it } from "vitest"
 import { execFileSync } from "node:child_process"
 import { createHash } from "node:crypto"
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs"
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createRequire } from "node:module"
 import { build } from "esbuild"
 import { modsGitTree } from "../support/mods-git-tree"
-import { readModsSourceCandidate } from "../support/mods-source-candidate"
+import {
+  MODS_VIRTUOSO_PATCH_SOURCE_ROOTS,
+  prepareModsSourceCandidate,
+  readModsSourceCandidate
+} from "../support/mods-source-candidate"
+import { sourceDependencyFixture } from "./mods-source-dependency-fixture"
 import { modsSourceNodeWorkers } from "../support/mods-source-node-workers"
 import { creatorLiveBudgetObservation } from "../support/creator-live-budget-observation"
 import {
@@ -142,13 +147,13 @@ describe("immutable complete baseline source", () => {
       await worker.terminate()
     }
   })
-  it("rejects tampered candidate bundles and changed checkout sources", () => {
+  it("rejects tampered candidate bundles and changed checkout sources", async () => {
     const root = mkdtempSync(join(tmpdir(), "phase3-source-proof-"))
     mkdirSync(join(root, "out/main"), { recursive: true })
     const entry = join(root, "out/main/index.js")
     const digest = (text: string) => createHash("sha256").update(text).digest("hex")
     writeFileSync(entry, "fixture")
-    writeFileSync(join(root, "package-lock.json"), "{}")
+    const reactVirtuosoScrollCancel = await sourceDependencyFixture(root)
     writeFileSync(join(root, "source.ts"), "source")
     const manifest = join(root, "source-candidate.json")
     writeFileSync(
@@ -161,9 +166,13 @@ describe("immutable complete baseline source", () => {
         entry,
         rendererUrl: "http://127.0.0.1:1/",
         files: { "out/main/index.js": digest("fixture") },
-        sources: { "source.ts": digest("source") },
-        sourceRoots: ["source.ts"],
-        dependencies: digest("{}")
+        sources: captureModsSourceSnapshot(root, [
+          "source.ts",
+          ...MODS_VIRTUOSO_PATCH_SOURCE_ROOTS
+        ]),
+        sourceRoots: ["source.ts", ...MODS_VIRTUOSO_PATCH_SOURCE_ROOTS],
+        dependencies: digest(readFileSync(join(root, "package-lock.json"), "utf8")),
+        reactVirtuosoScrollCancel
       })
     )
     expect(readModsSourceCandidate(manifest).entry).toBe(entry)
@@ -172,5 +181,71 @@ describe("immutable complete baseline source", () => {
     writeFileSync(entry, "fixture")
     writeFileSync(join(root, "source.ts"), "changed")
     expect(() => readModsSourceCandidate(manifest)).toThrow("SOURCE_CHECKOUT_CHANGED")
+    writeFileSync(join(root, "source.ts"), "source")
+
+    const original = readFileSync(manifest, "utf8")
+    const receipt = JSON.parse(original)
+    delete receipt.reactVirtuosoScrollCancel
+    writeFileSync(manifest, JSON.stringify(receipt))
+    expect(() => readModsSourceCandidate(manifest)).toThrow("SOURCE_VIRTUOSO_PROOF_REQUIRED")
+    writeFileSync(manifest, original)
+    for (const file of Object.keys(reactVirtuosoScrollCancel.files)) {
+      const target = join(root, file)
+      const bytes = readFileSync(target)
+      writeFileSync(target, Buffer.concat([bytes, Buffer.from("\n// changed")]))
+      expect(() => readModsSourceCandidate(manifest)).toThrow()
+      const forged = JSON.parse(original)
+      forged.reactVirtuosoScrollCancel.files[file] = digest(readFileSync(target, "utf8"))
+      writeFileSync(manifest, JSON.stringify(forged))
+      expect(() => readModsSourceCandidate(manifest)).toThrow()
+      writeFileSync(manifest, original)
+      writeFileSync(target, bytes)
+    }
+    const source = join(root, MODS_VIRTUOSO_PATCH_SOURCE_ROOTS[0])
+    const patchSource = readFileSync(source)
+    writeFileSync(source, readFileSync(source, "utf8") + "\n// changed patch source")
+    expect(() => readModsSourceCandidate(manifest)).toThrow("SOURCE_CHECKOUT_CHANGED")
+    writeFileSync(source, patchSource)
+    restorePristineVirtuoso(root)
+    expect(() => readModsSourceCandidate(manifest)).toThrow(
+      "REACT_VIRTUOSO_SCROLL_CANCEL_NOT_INSTALLED"
+    )
+  })
+  it("rejects skipped dependency installation before creating candidate output", async () => {
+    const root = mkdtempSync(join(tmpdir(), "phase3-unpatched-source-"))
+    await sourceDependencyFixture(root)
+    restorePristineVirtuoso(root)
+    const candidate = join(root, "candidate")
+    await expect(prepareModsSourceCandidate(root, candidate)).rejects.toThrow(
+      "REACT_VIRTUOSO_SCROLL_CANCEL_NOT_INSTALLED"
+    )
+    expect(existsSync(candidate)).toBe(false)
   })
 })
+
+function restorePristineVirtuoso(root: string) {
+  const patchDirectory = join(root, "patches/react-virtuoso-scroll-cancel")
+  execFileSync(
+    "git",
+    [
+      "-c",
+      "core.autocrlf=false",
+      "apply",
+      "--reverse",
+      join(patchDirectory, "react-virtuoso-4.18.12.patch")
+    ],
+    {
+      cwd: join(root, "node_modules/react-virtuoso"),
+      windowsHide: true
+    }
+  )
+  const evidence = JSON.parse(readFileSync(join(patchDirectory, "manifest.json"), "utf8")) as {
+    files: Array<{ path: string; beforeSha256: string }>
+  }
+  for (const file of evidence.files) {
+    const actual = createHash("sha256")
+      .update(readFileSync(join(root, "node_modules/react-virtuoso", file.path)))
+      .digest("hex")
+    expect(actual).toBe(file.beforeSha256)
+  }
+}
