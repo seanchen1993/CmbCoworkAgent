@@ -1,6 +1,6 @@
 import { types } from "node:util"
 import { readFunctionConversationNativeMainPolicySource } from "../mods/native-conversation-policy-source"
-import { getDb, getThreadCore, withCanonicalThreadMessageReadScope } from "../db"
+import { getDb, getThreadCanonicalIdentity, withCanonicalThreadMessageReadScope } from "../db"
 import { matchesThreadIncarnation } from "../services/thread-incarnation"
 import { captureLocalThreadRunLease, getLocalThreadRunLease } from "./thread-run-lease"
 import { readFunctionNativeModelPartial, type FunctionNativeModelPartial } from
@@ -42,7 +42,7 @@ function assertDestination(receipt: Receipt, threadId: string, runId: string): v
   if (threadId !== receipt.threadId || runId !== receipt.runId ||
     (lease && (lease.runId !== runId || !receipt.ownsLease())) ||
     getDb() !== receipt.database ||
-    !matchesThreadIncarnation(getThreadCore(threadId), receipt.incarnation)) fail()
+    !matchesThreadIncarnation(getThreadCanonicalIdentity(threadId), receipt.incarnation)) fail()
 }
 function assertIdentity(receipt: Receipt, message: QueuedStreamTranscriptMessage): void {
   if (message.id !== receipt.uuid || message.role !== "assistant" ||

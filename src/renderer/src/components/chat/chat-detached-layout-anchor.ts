@@ -1,4 +1,5 @@
 import { isChatRowPresented } from "./chat-row-presentation"
+import { canChatViewportConsumeScrollGesture, isChatViewportScrollKey } from "./chat-scroll-gesture"
 import {
   CHAT_SCROLL_NAVIGATION_EVENT,
   isChatScrollNavigationActive
@@ -307,22 +308,36 @@ export function installChatDetachedLayoutAnchor({
     }, 120)
     requestCapture()
   }
+  const onWheel = (event: WheelEvent): void => {
+    if (event.ctrlKey || event.deltaY === 0 || !canChatViewportConsumeScrollGesture(
+      event, viewport, event.deltaY < 0 ? "up" : "down"
+    )) return
+    onWheelOrTouch()
+  }
+  let lastTouchY: number | null = null
+  const onTouchStart = (event: TouchEvent): void => {
+    lastTouchY = event.touches.length === 1 ? event.touches[0].clientY : null
+  }
+  const onTouchMove = (event: TouchEvent): void => {
+    const nextY = event.touches.length === 1 ? event.touches[0].clientY : null
+    const previousY = lastTouchY
+    lastTouchY = nextY
+    if (previousY === null || nextY === null || Math.abs(nextY - previousY) <= 1) return
+    if (!canChatViewportConsumeScrollGesture(
+      event, viewport, nextY > previousY ? "up" : "down"
+    )) return
+    onWheelOrTouch()
+  }
   const onKeyDown = (event: KeyboardEvent): void => {
-    const target = event.target
     if (
       ownerDocument.activeElement !== ownerDocument.body &&
       !scrollRoot.contains(ownerDocument.activeElement)
     )
       return
-    if (
-      target instanceof HTMLInputElement ||
-      target instanceof HTMLTextAreaElement ||
-      (target instanceof HTMLElement && target.isContentEditable)
-    )
-      return
-    if (["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(event.key)) {
-      onWheelOrTouch()
-    }
+    if (!isChatViewportScrollKey(event)) return
+    const up = ["ArrowUp", "PageUp", "Home"].includes(event.key) ||
+      (event.key === " " && event.shiftKey)
+    if (canChatViewportConsumeScrollGesture(event, viewport, up ? "up" : "down")) onWheelOrTouch()
   }
   const correctPendingLayout = (rowsChanged = false): void => {
     const active = root.isConnected && viewport.isConnected &&
@@ -417,13 +432,15 @@ export function installChatDetachedLayoutAnchor({
   viewport.addEventListener("scroll", onScroll, { passive: true })
   viewport.addEventListener(CHAT_DETACHED_ANCHOR_OWNER_RELEASED, onOwnerReleased)
   viewport.addEventListener(CHAT_SCROLL_NAVIGATION_EVENT, onNavigationChange)
-  viewport.addEventListener("wheel", onWheelOrTouch, { passive: true })
-  viewport.addEventListener("touchmove", onWheelOrTouch, { passive: true })
+  viewport.addEventListener("wheel", onWheel, { passive: true })
+  viewport.addEventListener("touchstart", onTouchStart, { passive: true })
+  viewport.addEventListener("touchmove", onTouchMove, { passive: true })
   scrollRoot.addEventListener("pointerdown", onPointerDown, { capture: true, passive: true })
   ownerDocument.addEventListener("pointermove", onPointerMove, { capture: true, passive: true })
   ownerDocument.addEventListener("pointerup", onPointerEnd, true)
   ownerDocument.addEventListener("pointercancel", onPointerEnd, true)
-  ownerDocument.addEventListener("keydown", onKeyDown, true)
+  // Bubble after controls can cancel/consume their own key before yielding transcript ownership.
+  ownerDocument.addEventListener("keydown", onKeyDown)
   ownerDocument.defaultView?.addEventListener("blur", onBlur)
   // A restoration can release before this observer mounts. Acquire its existing geometry now.
   capture()
@@ -438,13 +455,14 @@ export function installChatDetachedLayoutAnchor({
     viewport.removeEventListener("scroll", onScroll)
     viewport.removeEventListener(CHAT_DETACHED_ANCHOR_OWNER_RELEASED, onOwnerReleased)
     viewport.removeEventListener(CHAT_SCROLL_NAVIGATION_EVENT, onNavigationChange)
-    viewport.removeEventListener("wheel", onWheelOrTouch)
-    viewport.removeEventListener("touchmove", onWheelOrTouch)
+    viewport.removeEventListener("wheel", onWheel)
+    viewport.removeEventListener("touchstart", onTouchStart)
+    viewport.removeEventListener("touchmove", onTouchMove)
     scrollRoot.removeEventListener("pointerdown", onPointerDown, true)
     ownerDocument.removeEventListener("pointermove", onPointerMove, true)
     ownerDocument.removeEventListener("pointerup", onPointerEnd, true)
     ownerDocument.removeEventListener("pointercancel", onPointerEnd, true)
-    ownerDocument.removeEventListener("keydown", onKeyDown, true)
+    ownerDocument.removeEventListener("keydown", onKeyDown)
     ownerDocument.defaultView?.removeEventListener("blur", onBlur)
     anchor = null
   }

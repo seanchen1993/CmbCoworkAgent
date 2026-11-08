@@ -22,6 +22,18 @@ async function main() {
   const rounds = Number(process.env.CHAT_RUNNING_ROUNDS ?? "12")
   assert(Number.isSafeInteger(rounds) && rounds >= 3 && rounds <= 120)
   const withGuest = process.env.CHAT_RUNNING_DISPLAY_GUEST === "1"
+  const interactionStress = process.env.CHAT_RUNNING_INTERACTION_STRESS === "1"
+  const richStream = process.env.CHAT_RUNNING_RICH_STREAM === "1"
+  const richChunks = [
+    "\n\n### Interface review\n\n",
+    "Check **response fields**, `status`, and the empty state.\n\n",
+    "```typescript\nexport async function load() {\n",
+    "  const response = await fetch('/api/items')\n",
+    "  return response.json()\n}\n```\n\n",
+    "| Field | Expected |\n| --- | --- |\n",
+    "| items | Array |\n| total | Number |\n\n",
+    "- Verify success\n- Verify failure\n- Repeat the browser check\n"
+  ]
   let chunks = 0,
     answer: ServerResponse | undefined,
     ticker: NodeJS.Timeout | undefined
@@ -54,7 +66,10 @@ async function main() {
     answer = res
     res.writeHead(200, { "content-type": "text/event-stream" })
     frame({ role: "assistant", content: "LIVE_WORKLOAD " })
-    ticker = setInterval(() => frame({ content: "word" + ++chunks + " " }), 40)
+    ticker = setInterval(() => {
+      const index = chunks++
+      frame({ content: richStream ? richChunks[index % richChunks.length] : "word" + chunks + " " })
+    }, 40)
     res.on("close", () => clearInterval(ticker))
   })
   await new Promise<void>((done) => server.listen(0, "127.0.0.1", done))
@@ -245,7 +260,7 @@ async function main() {
       const record = async (kind: string, round: number, run: () => Promise<unknown>) => {
         // Navigation legitimately changes scope; same-thread actions must retain
         // readiness so a disappearance during scrolling/resizing is still detected.
-        await observation?.setPhase(kind, kind !== "switch")
+        await observation?.setPhase(kind, kind !== "switch" && kind !== "switch-burst")
         const start = performance.now()
         await run()
         samples.push({ kind, round, ms: Math.round(performance.now() - start) })
@@ -359,6 +374,19 @@ async function main() {
                 await page.evaluate(() => new Promise<void>((done) =>
                   requestAnimationFrame(() => requestAnimationFrame(() => done()))))
               })
+              if (interactionStress) {
+                await record("zoom", round, async () => {
+                  const previous = await page.evaluate(() => devicePixelRatio)
+                  const factor = which === 1 ? 1.25 : 1
+                  await nativeWindow.evaluate((window, factor) => {
+                    window.webContents.setZoomFactor(factor)
+                  }, factor)
+                  await page.waitForFunction((previous) => devicePixelRatio !== previous, previous)
+                  await ready(which)
+                  await page.evaluate(() => new Promise<void>((done) =>
+                    requestAnimationFrame(() => requestAnimationFrame(() => done()))))
+                })
+              }
             }
             if (which === 1) {
               const edit = scope(1).locator("textarea.composer-textarea")
@@ -372,6 +400,38 @@ async function main() {
                 assert.equal(await edit.inputValue(), text)
               })
             }
+          }
+          if (interactionStress && round % 3 === 0) {
+            // Deliver actual sidebar click events while earlier restoration is pending.
+            // Do not wait for each destination to become readable before the next click.
+            await observation?.setPhase("switch-burst")
+            const burstStart = performance.now()
+            let finalClickStart = burstStart
+            const dispatches: Array<{ threadId: string; startMs: number; durationMs: number }> = []
+            const destinations = [1, 0, 1, 0]
+            for (let index = 0; index < destinations.length; index++) {
+              const which = destinations[index]
+              const start = performance.now()
+              if (index === destinations.length - 1) finalClickStart = start
+              await page.getByText(which ? "History workload" : "Active workload", {
+                exact: true
+              }).first().dispatchEvent("click")
+              dispatches.push({ threadId: ids[which], startMs: start - burstStart,
+                durationMs: performance.now() - start })
+              if (index < destinations.length - 1) await delay(35)
+            }
+            await ready(0)
+            await page.evaluate(() => new Promise<void>((done) =>
+              requestAnimationFrame(() => requestAnimationFrame(() => done()))))
+            assert.equal(await page.locator("[data-chat-thread-id]").first()
+              .getAttribute("data-chat-thread-id"), ids[0])
+            const complete = performance.now()
+            // Keep aggregate latency, but compare the final click's complete dispatch-to-body
+            // latency to the same 1500 ms threshold as a single navigation.
+            samples.push({ kind: "switch-burst", round, ms: Math.round(complete - finalClickStart) })
+            samples.push({ kind: "switch-burst-total", round, ms: Math.round(complete - burstStart) })
+            telemetry.push({ phase: "burst-dispatch", round, dispatches,
+              readyAtMs: complete - burstStart })
           }
           assert(chunks > before, "HTTP stream must still be active")
           telemetry.push(
@@ -430,7 +490,8 @@ async function main() {
             `readable content disappeared after ${phase} was ready`)
         }
       }
-      for (const kind of ["switch", "scroll", "resize", "type"]) {
+      for (const kind of ["switch", "scroll", "resize", "type",
+        ...(interactionStress ? ["zoom", "switch-burst"] : [])]) {
         const values = samples
           .filter((s) => s.kind === kind)
           .map((s) => s.ms)
@@ -475,7 +536,8 @@ async function main() {
     writeFileSync(
       join(fixture.isolated, "running-workload.json"),
       JSON.stringify(
-        { passed, candidate, withGuest, rounds, chunks, samples, telemetry, errors,
+        { passed, candidate, withGuest, interactionStress, richStream,
+          rounds, chunks, samples, telemetry, errors,
           ...(process.env.CHAT_RUNNING_RENDERER_PROFILE === "1" ||
             process.env.CHAT_RUNNING_SCROLL_WRITE_DIAGNOSTICS === "1"
             ? { diagnosticOnly: true } : {}) },

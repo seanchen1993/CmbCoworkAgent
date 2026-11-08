@@ -168,6 +168,63 @@ function installMonitor(options: {
       element.checkVisibility({ checkVisibilityCSS: true, checkOpacity: true })
     )
   }
+  const visibleText = (node: Node, area: DOMRect): boolean => {
+    const parent = node.parentElement
+    if (
+      node.nodeType !== Node.TEXT_NODE ||
+      !parent ||
+      parent.closest("button,svg,[role=status],[data-function-site-pending]") ||
+      !node.nodeValue?.trim() ||
+      !visible(parent, area)
+    )
+      return false
+    const range = document.createRange()
+    range.selectNodeContents(node)
+    const box = range.getBoundingClientRect()
+    range.detach()
+    return (
+      box.width > 0 &&
+      box.height > 0 &&
+      box.bottom > area.top &&
+      box.top < area.bottom &&
+      box.right > area.left &&
+      box.left < area.right
+    )
+  }
+  const visibleTextAtViewport = (viewport: Element, area: DOMRect): boolean => {
+    // A long Markdown body may have thousands of earlier offscreen text nodes.
+    // Use at most 15 native caret hit tests to reach the visible tail without
+    // traversing that history. This is positive evidence only: candidates must
+    // still belong to a presented message body and pass the same text geometry.
+    const left = Math.max(0, area.left),
+      top = Math.max(0, area.top)
+    const right = Math.min(innerWidth, area.right),
+      bottom = Math.min(innerHeight, area.bottom)
+    if (right - left <= 2 || bottom - top <= 2) return false
+    for (const y of [0.01, 0.25, 0.5, 0.75, 0.99]) {
+      for (const x of [0.125, 0.5, 0.875]) {
+        const range = document.caretRangeFromPoint(
+          left + (right - left) * x,
+          top + (bottom - top) * y
+        )
+        const node = range?.startContainer
+        range?.detach()
+        const body = node?.parentElement?.closest("[data-chat-search-text]")
+        const row = body?.closest("[data-chat-message-row]")
+        if (
+          node &&
+          body &&
+          row &&
+          viewport.contains(row) &&
+          visible(row, area) &&
+          visible(body, area) &&
+          visibleText(node, area)
+        )
+          return true
+      }
+    }
+    return false
+  }
   const readVisibility = (now: number, trigger: RunningVisibilitySample["trigger"]) => {
     const root = document.querySelector("[data-chat-thread-id]")
     const viewport = root?.querySelector("[data-radix-scroll-area-viewport]")
@@ -198,30 +255,16 @@ function installMonitor(options: {
             node && count < 128;
             node = walker.nextNode(), count++
           ) {
-            const parent = node.parentElement
-            if (!parent || parent.closest("button,svg,[role=status],[data-function-site-pending]"))
-              continue
             // Body ownership excludes avatars/toolbars and permits visible continuation
             // paragraphs after the fixture marker has scrolled away. Retain no body text.
-            if (!node.nodeValue?.trim() || !visible(parent, area)) continue
-            const range = document.createRange()
-            range.selectNodeContents(node)
-            const box = range.getBoundingClientRect()
-            range.detach()
-            if (
-              box.width > 0 &&
-              box.height > 0 &&
-              box.bottom > area.top &&
-              box.top < area.bottom &&
-              box.right > area.left &&
-              box.left < area.right
-            ) {
+            if (visibleText(node, area)) {
               visibleBodyCount++
               break
             }
           }
         }
       }
+      if (!visibleBodyCount && visibleTextAtViewport(viewport, area)) visibleBodyCount = 1
       const placeholders = viewport.querySelectorAll("[data-function-site-pending]")
       for (let index = 0; index < Math.min(placeholders.length, 64); index++) {
         const placeholder = placeholders[index]

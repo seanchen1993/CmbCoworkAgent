@@ -299,21 +299,20 @@ function FunctionSiteSurface({
   }
   const presentationInput = useRef({ inputKey, key: presentationKey, width: viewportWidth })
   const leased = progressLease.current
-  if (leased && (!scopeCurrent() || !leased.lease.current() || leased.width !== viewportWidth ||
+  if (leased && (!scopeCurrent() || !leased.lease.current() ||
     leased.epoch !== prefixLineage.current.epoch ||
     !retainsFunctionSitePresentation(component, leased.inputKey, input))) releaseProgressLease()
   if (presentationInput.current.inputKey !== inputKey) {
     const previous = presentationInput.current
     const committed = committedCached.current
     const progress = ["AssistantMessage", "ToolGroup"].includes(component) &&
-      Boolean(renderNative || fallback === undefined) && previous.width === viewportWidth &&
+      Boolean(renderNative || fallback === undefined) &&
       retainsFunctionSitePresentation(component, previous.inputKey, input)
     if (!progress) releaseProgressLease()
     if (progress && !progressLease.current && committed && scopeCurrent() &&
       committed.cache === presentationCache && committed.row === presentationRow &&
-      committed.key === previous.key && committed.inputKey === previous.inputKey &&
-      committed.width === viewportWidth && committed.epoch === prefixLineage.current.epoch) {
-      const lease = presentationCache?.consumeProgress(previous.key, committed.cached, presentationRow)
+      committed.inputKey === previous.inputKey && committed.epoch === prefixLineage.current.epoch) {
+      const lease = presentationCache?.consumeProgress(committed.key, committed.cached, presentationRow)
       if (lease) progressLease.current = { lease, inputKey: committed.inputKey,
         renderer: committed.renderer, epoch: committed.epoch, width: committed.width }
     }
@@ -321,14 +320,31 @@ function FunctionSiteSurface({
     // transitions retain the original fail-closed path, including A -> B -> A.
     if (progressLease.current?.lease.key !== previous.key)
       presentationCache?.invalidateKey(previous.key, false, presentationRow)
+    // A committed drawing may still belong to an earlier width's exact key. Input
+    // replacement must retire that original key too, so resizing back cannot revive it.
+    if (committed && committed.key !== previous.key &&
+      progressLease.current?.lease.key !== committed.key)
+      presentationCache?.invalidateKey(committed.key, false, presentationRow)
   }
   presentationInput.current = { inputKey, key: presentationKey, width: viewportWidth }
   const [presentationRevision, setPresentationRevision] = useState(0)
   const exactCachedPresentation = useMemo(() => presentationCache?.read(presentationKey) ?? null,
     [presentationCache, presentationKey, presentationRevision])
-  const cachedPresentation = progressLease.current?.lease ?? exactCachedPresentation
-  const cachedPresentationKey = progressLease.current?.lease.key ?? presentationKey
-  const cachedRenderer = progressLease.current ? progressLease.current.renderer : renderNative
+  // Width is renderer geometry, not a new host input for these message sites. Preserve
+  // only this mounted, already committed inert drawing while it reflows. Cold mounts
+  // still use the exact width-keyed cache; every original expiry/revocation stays live.
+  const committed = committedCached.current
+  const layoutCached = committed && committed.width !== viewportWidth &&
+    committed.cache === presentationCache && committed.row === presentationRow &&
+    committed.inputKey === inputKey && committed.epoch === prefixLineage.current.epoch &&
+    scopeCurrent() && committed.cached.current() ? committed : null
+  const cachedPresentation = progressLease.current?.lease ?? exactCachedPresentation ?? layoutCached?.cached
+  const cachedPresentationKey = progressLease.current?.lease.key ??
+    (exactCachedPresentation ? presentationKey : layoutCached?.key ?? presentationKey)
+  const cachedRenderer = progressLease.current ? progressLease.current.renderer :
+    exactCachedPresentation ? renderNative : layoutCached?.renderer ?? renderNative
+  const cachedViewportWidth = progressLease.current?.width ??
+    (exactCachedPresentation ? viewportWidth : layoutCached?.width ?? viewportWidth)
   const cachedPresentationRef = useRef(cachedPresentation)
   cachedPresentationRef.current = cachedPresentation
   const cachedSection = useRef<HTMLDivElement>(null)
@@ -435,10 +451,10 @@ function FunctionSiteSurface({
     committedCached.current = !snapshot && !projected && !error &&
       !(inactive?.ticket.current() && inactive.inputRevision === inputRevision) &&
       !progressLease.current && cachedSection.current && presentationCache &&
-      exactCachedPresentation?.current()
-      ? { cached: exactCachedPresentation, key: presentationKey, inputKey, renderer: renderNative,
+      cachedPresentation?.current()
+      ? exactCachedPresentation ? { cached: exactCachedPresentation, key: presentationKey, inputKey, renderer: renderNative,
           epoch: prefixLineage.current.epoch, width: viewportWidth, cache: presentationCache,
-          row: presentationRow } : null
+          row: presentationRow } : layoutCached : null
   })
   useLayoutEffect(() => {
     if (snapshot || !presentationCache || !cachedPresentation) return
@@ -1170,7 +1186,8 @@ function FunctionSiteSurface({
       </div>}
       {!snapshot && !projected && !isInactive && !error && (cachedPresentation?.current() ?
         <div ref={cachedSection} data-function-site-cached inert aria-disabled="true"
-          style={cachedGeometry?.presentation === cachedPresentation.presentation &&
+          style={cachedViewportWidth === viewportWidth &&
+            cachedGeometry?.presentation === cachedPresentation.presentation &&
             Math.abs(cachedGeometry.width - cachedPresentation.presentation.width) < 1
             ? { minHeight: cachedPresentation.presentation.height } : undefined}
           onClickCapture={blockCachedInteraction} onKeyDownCapture={blockCachedInteraction}

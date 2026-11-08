@@ -2340,6 +2340,75 @@ function actualPartialDebounce(f: Awaited<ReturnType<typeof fixture>>) {
 }
 
 describe("actual native partial debounce and canonical commit race", () => {
+  it.each(["bounded identity", "custom interpreter", "recreated identity"] as const)(
+    "keeps large-metadata partial receipts safe with %s", async scenario => {
+    const f = await fixture({ hook: false })
+    const model = new ActualModel("stream", "reused")
+    const graph = createAgent({ model, middleware: [f.host.middleware], checkpointer: f.saver })
+    f.host.install(graph.graph)
+    const serialize = createStreamDataSerializer({ projectMessageChunks: true })
+    let payload: unknown
+    const stream = await graph.stream({ messages: [new HumanMessage("partial identity check")] },
+      f.host.configure({ configurable: { thread_id: f.threadId },
+        streamMode: ["messages", "values"] as ("messages" | "values")[] }))
+    for await (const event of stream) {
+      if (payload || !Array.isArray(event) || event[0] !== "messages") continue
+      const tuple = event[1]
+      if (!Array.isArray(tuple) || !(tuple[0] instanceof AIMessageChunk) ||
+        !model.rawChunks.has(tuple[0])) continue
+      const display = f.host.message(tuple)
+      if (display) payload = serialize("messages", display).data
+    }
+    expect(payload).toBeDefined()
+    const message = persistedMessageFromStreamPayload(payload)!
+    expect(message).toBeDefined()
+    const originalMetadata = appDb.getThreadCore(f.threadId)!.metadata!
+    const metadata = JSON.parse(originalMetadata)
+    const raw = JSON.stringify({ ...metadata, llmFileHistory: "x".repeat(1024 * 1024) })
+    f.database.run("UPDATE threads SET metadata=? WHERE thread_id=?", [raw, f.threadId])
+    const parse = JSON.parse
+    const fullReads = vi.spyOn(appDb, "getThreadCore")
+    const identityReads = vi.spyOn(appDb, "getThreadCanonicalIdentity")
+    try {
+      if (scenario === "custom interpreter") {
+        let interpretedFullMetadata = false
+        JSON.parse = ((value: string, reviver?: Parameters<typeof JSON.parse>[1]) => {
+          if (value === raw) {
+            interpretedFullMetadata = true
+            return { ...metadata, cmb_thread_incarnation: "custom-replacement" }
+          }
+          return parse(value, reviver)
+        }) as typeof JSON.parse
+        expect(() => bindNativePartialQueuedMessage(payload, message, f.threadId, f.physicalRunId))
+          .toThrow("MODS_NATIVE_PARTIAL_PERSISTENCE_INVALID")
+        expect(interpretedFullMetadata).toBe(true)
+      } else {
+        bindNativePartialQueuedMessage(payload, message, f.threadId, f.physicalRunId)
+        expect(reconcileNativePartialQueuedMessages([message], f.threadId, f.physicalRunId))
+          .toEqual([])
+        if (scenario === "bounded identity") {
+          const returnedMetadata = [...fullReads.mock.results, ...identityReads.mock.results]
+            .filter(result => result.type === "return" && result.value)
+            .map(result => result.value.metadata as string)
+          expect(returnedMetadata.length).toBeGreaterThan(0)
+          expect(Math.max(...returnedMetadata.map(value => value.length))).toBeLessThan(1024)
+        } else {
+          f.database.run("UPDATE threads SET metadata=? WHERE thread_id=?",
+            [JSON.stringify({ ...metadata, cmb_thread_incarnation: "recreated" }), f.threadId])
+          expect(() => bindNativePartialQueuedMessage(payload, message, f.threadId, f.physicalRunId))
+            .toThrow("MODS_NATIVE_PARTIAL_PERSISTENCE_INVALID")
+          expect(() => reconcileNativePartialQueuedMessages([message], f.threadId, f.physicalRunId))
+            .toThrow()
+        }
+      }
+    } finally {
+      JSON.parse = parse
+      fullReads.mockRestore()
+      identityReads.mockRestore()
+      f.database.run("UPDATE threads SET metadata=? WHERE thread_id=?", [originalMetadata, f.threadId])
+    }
+  })
+
   it.each(["authentic", "cloned", "tampered", "mixed ordinary", "ordinary first", "late canonical callback"] as const)(
     "handles %s late partial through real timer after canonical commit", async scenario => {
     const targeted: { flush?: (uuid: string) => void } = {}

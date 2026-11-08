@@ -45,6 +45,36 @@ async function main() {
           sample.trigger === "ready" && sample.ready && !sample.blank && sample.visibleBodyCount > 0
       )
     )
+    await observation.setPhase("long-body-tail")
+    await page.locator("[data-radix-scroll-area-viewport]").evaluate((element) => {
+      element.innerHTML =
+        "<div data-chat-message-row><div data-chat-search-text>" +
+        Array.from(
+          { length: 300 },
+          (_, index) => `<p style="margin:0;height:30px">Paragraph ${index}</p>`
+        ).join("") +
+        "</div></div>"
+      element.scrollTop = element.scrollHeight
+    })
+    await observation.waitForReady("controlled", 500)
+    evidence = await observation.snapshot()
+    assert.equal(
+      evidence.renderer?.visibilitySamples?.at(-1)?.blank,
+      false,
+      "A long body's visible tail must count beyond the bounded prefix text scan"
+    )
+    await observation.setPhase("long-body-hidden-tail")
+    await page.locator("[data-chat-search-text]").evaluate((body) => {
+      for (const paragraph of [...body.children].slice(-10))
+        (paragraph as HTMLElement).style.visibility = "hidden"
+    })
+    await assert.rejects(observation.waitForReady("controlled", 150), /Timeout/)
+    evidence = await observation.snapshot()
+    assert.equal(
+      evidence.renderer?.visibilitySamples?.at(-1)?.blankReason,
+      "no-body",
+      "Nearby hidden tail text must not make an empty viewport readable"
+    )
     await observation.setPhase("switch")
     await page.locator("[data-radix-scroll-area-viewport]").evaluate((element) => {
       element.scrollTop = 0

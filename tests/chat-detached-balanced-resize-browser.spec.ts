@@ -3,6 +3,7 @@ import assert from "node:assert/strict"
 import { existsSync } from "node:fs"
 import { build } from "esbuild"
 import { chromium } from "playwright"
+import { verifyDetachedScrollGestures } from "./support/chat-detached-scroll-gesture-browser"
 
 async function main(): Promise<void> {
   const bundle = await build({
@@ -131,6 +132,7 @@ async function main(): Promise<void> {
     console.log(
       "PASS balanced resize and bounded observation lifecycle " + JSON.stringify(lifecycle)
     )
+    await verifyDetachedScrollGestures(browser)
   } finally {
     await browser.close()
   }

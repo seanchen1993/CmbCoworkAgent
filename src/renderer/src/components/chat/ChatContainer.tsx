@@ -192,6 +192,7 @@ import {
 import { chatScrollSessionStore, type ChatScrollSessionAnchor } from "./chat-scroll-session-store"
 import { resolveChatSessionInitialLocation, type ChatSessionRestoreSeed } from "./chat-session-initial-location"
 import { notifyChatDetachedAnchorOwnerReleased } from "./chat-detached-layout-anchor"
+import { canChatViewportConsumeScrollGesture, isChatViewportScrollKey } from "./chat-scroll-gesture"
 import { acquireChatExternalScrollAnchor } from "./chat-external-scroll-anchor"
 import { selectChatSessionSaveAnchor } from "./chat-session-save-anchor"
 import { createChatSessionRestorePosition } from "./chat-session-restore-position"
@@ -4614,18 +4615,7 @@ export function ChatContainer({
       })
     }
     const recordDirectionalScrollGesture = (event: Event, direction: "up" | "down"): void => {
-      if (event.defaultPrevented) return
-      // A scrollable code block or tool pane consumes its own gesture. At its edge,
-      // only the browser's normal scroll chaining can hand the gesture to this viewport.
-      for (const target of event.composedPath()) {
-        if (target === scrollParent) break
-        if (!(target instanceof HTMLElement) || target.scrollHeight <= target.clientHeight) continue
-        const style = window.getComputedStyle(target)
-        if (!/^(auto|scroll|overlay)$/.test(style.overflowY)) continue
-        if ((direction === "up" ? target.scrollTop > 0 :
-          target.scrollTop + target.clientHeight < target.scrollHeight) ||
-          /^(contain|none)$/.test(style.overscrollBehaviorY)) return
-      }
+      if (!canChatViewportConsumeScrollGesture(event, scrollParent, direction)) return
       if (direction === "up") {
         downwardUserScrollIntentUntilRef.current = 0
         upwardUserScrollIntentUntilRef.current =
@@ -4678,10 +4668,10 @@ export function ChatContainer({
     }
     let lastTouchY: number | null = null
     const rememberTouchPosition = (event: TouchEvent): void => {
-      lastTouchY = event.touches[0]?.clientY ?? null
+      lastTouchY = event.touches.length === 1 ? event.touches[0].clientY : null
     }
     const detachFromTouchScroll = (event: TouchEvent): void => {
-      const nextTouchY = event.touches[0]?.clientY ?? null
+      const nextTouchY = event.touches.length === 1 ? event.touches[0].clientY : null
       if (lastTouchY !== null && nextTouchY !== null && nextTouchY > lastTouchY + 1) {
         recordDirectionalScrollGesture(event, "up")
       } else if (lastTouchY !== null && nextTouchY !== null && nextTouchY < lastTouchY - 1) {
@@ -4698,14 +4688,7 @@ export function ChatContainer({
       ) {
         return
       }
-      const target = event.target
-      if (
-        target instanceof HTMLInputElement ||
-        target instanceof HTMLTextAreaElement ||
-        (target instanceof HTMLElement && target.isContentEditable)
-      ) {
-        return
-      }
+      if (!isChatViewportScrollKey(event)) return
       if (
         event.key === "ArrowUp" ||
         event.key === "PageUp" ||
@@ -4731,7 +4714,7 @@ export function ChatContainer({
     })
     scrollParent.addEventListener("touchstart", rememberTouchPosition, { passive: true })
     scrollParent.addEventListener("touchmove", detachFromTouchScroll, { passive: true })
-    window.addEventListener("keydown", detachFromKeyboardScroll, true)
+    window.addEventListener("keydown", detachFromKeyboardScroll)
     window.addEventListener("pointerup", finishScrollbarPointerIntent, true)
     window.addEventListener("pointercancel", cancelScrollbarPointerIntent, true)
     window.addEventListener("blur", cancelScrollbarPointerIntent)
@@ -4742,7 +4725,7 @@ export function ChatContainer({
       scrollRoot?.removeEventListener("pointerdown", detachFromScrollbarPointer, true)
       scrollParent.removeEventListener("touchstart", rememberTouchPosition)
       scrollParent.removeEventListener("touchmove", detachFromTouchScroll)
-      window.removeEventListener("keydown", detachFromKeyboardScroll, true)
+      window.removeEventListener("keydown", detachFromKeyboardScroll)
       window.removeEventListener("pointerup", finishScrollbarPointerIntent, true)
       window.removeEventListener("pointercancel", cancelScrollbarPointerIntent, true)
       window.removeEventListener("blur", cancelScrollbarPointerIntent)
