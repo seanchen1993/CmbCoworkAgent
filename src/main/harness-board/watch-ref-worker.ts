@@ -1,17 +1,51 @@
 import { existsSync, statSync, watch, type FSWatcher } from "node:fs"
-import { dirname, isAbsolute, relative, resolve } from "node:path"
+import { basename, dirname, isAbsolute, relative, resolve } from "node:path"
 import { parentPort } from "node:worker_threads"
 import type { HarnessWatchRef } from "../../shared/harness-board-types"
 import {
   HARNESS_WATCH_REF_MAX_REFS,
   HARNESS_WATCH_REF_MAX_SCOPES,
+  HARNESS_STAGE_WATCH_MAX_SCOPES,
   type HarnessWatchRefStartRequest,
   type HarnessWatchRefWorkerRequest,
   type HarnessWatchRefWorkerResponse
 } from "./watch-ref-protocol"
 
 interface WatchEntry {
-  watcher: FSWatcher
+  close: () => void
+}
+
+interface WatchListener {
+  changed: (filename: string | Buffer | null) => void
+  failed: () => void
+}
+
+const sharedWatches = new Map<string, { watcher: FSWatcher; listeners: Set<WatchListener> }>()
+
+function subscribeWatch(path: string, listener: WatchListener): WatchEntry {
+  let shared = sharedWatches.get(path)
+  if (!shared) {
+    const listeners = new Set<WatchListener>()
+    const watcher = watch(path, { recursive: false }, (_event, filename) => {
+      for (const subscriber of listeners) subscriber.changed(filename)
+    })
+    shared = { watcher, listeners }
+    sharedWatches.set(path, shared)
+    watcher.on("error", () => {
+      for (const subscriber of [...listeners]) subscriber.failed()
+    })
+  }
+  const subscription = shared
+  subscription.listeners.add(listener)
+  return {
+    close: () => {
+      subscription.listeners.delete(listener)
+      if (!subscription.listeners.size) {
+        subscription.watcher.close()
+        if (sharedWatches.get(path) === subscription) sharedWatches.delete(path)
+      }
+    }
+  }
 }
 
 interface ActiveScope {
@@ -20,6 +54,8 @@ interface ActiveScope {
   entries: WatchEntry[]
   changeTimer: NodeJS.Timeout | null
   dirtyTimer: NodeJS.Timeout | null
+  dirtyAgain: boolean
+  dirtyStageAgain: boolean
   latestRef: HarnessWatchRef | null
 }
 
@@ -60,7 +96,7 @@ function isCancelled(request: HarnessWatchRefStartRequest): boolean {
 
 function closeEntries(entries: WatchEntry[]): void {
   for (const entry of entries) {
-    entry.watcher.close()
+    entry.close()
   }
 }
 
@@ -83,8 +119,24 @@ function post(response: HarnessWatchRefWorkerResponse): void {
 }
 
 function startScope(request: HarnessWatchRefStartRequest): void {
+  const existing = activeScopes.get(request.scopeKey)
+  if (existing?.generation === request.generation && Atomics.load(existing.cancelFlag, 0) === 0) {
+    post({
+      type: "installed",
+      scopeKey: request.scopeKey,
+      generation: request.generation,
+      watcherCount: existing.entries.length,
+      sharedWatcherCount: sharedWatches.size,
+      cancelled: false
+    })
+    return
+  }
   stopScope(request.scopeKey)
-  while (activeScopes.size >= HARNESS_WATCH_REF_MAX_SCOPES) {
+  const maxScopes = Math.max(
+    1,
+    Math.min(request.maxScopes ?? HARNESS_WATCH_REF_MAX_SCOPES, HARNESS_STAGE_WATCH_MAX_SCOPES)
+  )
+  while (activeScopes.size >= maxScopes) {
     const oldestScope = activeScopes.keys().next().value as string | undefined
     if (!oldestScope) break
     stopScope(oldestScope)
@@ -98,10 +150,13 @@ function startScope(request: HarnessWatchRefStartRequest): void {
     const watchPath = resolveWatchPath(request.workspacePath, ref.path)
     if (isCancelled(request)) break
     if (!watchPath) continue
+    const targetPath = resolve(request.workspacePath, ref.path)
+    const fold = (value: string) => (process.platform === "win32" ? value.toLowerCase() : value)
+    const targetName = fold(basename(targetPath))
 
     try {
-      const entry: WatchEntry = {
-        watcher: watch(watchPath, { recursive: false }, () => {
+      const entry = subscribeWatch(watchPath, {
+        changed: (filename) => {
           const active = activeScopes.get(request.scopeKey)
           if (
             !active ||
@@ -110,17 +165,33 @@ function startScope(request: HarnessWatchRefStartRequest): void {
           ) {
             return
           }
-          if (request.attributionTarget && !active.dirtyTimer) {
-            post({
-              type: "dirty",
-              scopeKey: request.scopeKey,
-              generation: request.generation,
-              attributionTarget: request.attributionTarget
-            })
-            active.dirtyTimer = setTimeout(() => {
-              active.dirtyTimer = null
-            }, 100)
+          if (watchPath !== targetPath && filename && fold(filename.toString()) !== targetName)
+            return
+          const stateChanged = ref.purpose === "run-state"
+          const attributionTarget = request.attributionTarget
+          if (attributionTarget) {
+            const notifyDirty = (stageChanged: boolean) =>
+              post({
+                type: "dirty",
+                scopeKey: request.scopeKey,
+                generation: request.generation,
+                attributionTarget,
+                stageChanged
+              })
+            if (active.dirtyTimer) {
+              active.dirtyAgain = true
+              active.dirtyStageAgain ||= stateChanged
+            } else {
+              notifyDirty(stateChanged)
+              active.dirtyTimer = setTimeout(() => {
+                active.dirtyTimer = null
+                if (active.dirtyAgain) notifyDirty(active.dirtyStageAgain)
+                active.dirtyAgain = false
+                active.dirtyStageAgain = false
+              }, 100)
+            }
           }
+          if (request.notifyChanges === false) return
           active.latestRef = ref
           if (active.changeTimer) clearTimeout(active.changeTimer)
           active.changeTimer = setTimeout(() => {
@@ -144,9 +215,22 @@ function startScope(request: HarnessWatchRefStartRequest): void {
               at: new Date().toISOString()
             })
           }, DEBOUNCE_MS)
-        })
-      }
-      entry.watcher.on("error", () => stopScope(request.scopeKey, request.generation))
+        },
+        failed: () => {
+          // Several refs can share this directory. Closing the first listener
+          // removes the scope; notify its failure only once.
+          if (activeScopes.get(request.scopeKey)?.generation !== request.generation) return
+          stopScope(request.scopeKey, request.generation)
+          post({
+            type: "installed",
+            scopeKey: request.scopeKey,
+            generation: request.generation,
+            watcherCount: 0,
+            sharedWatcherCount: sharedWatches.size,
+            cancelled: false
+          })
+        }
+      })
       entries.push(entry)
     } catch {
       // Missing or inaccessible watch paths are non-fatal. Manual refresh remains available.
@@ -163,6 +247,8 @@ function startScope(request: HarnessWatchRefStartRequest): void {
       entries,
       changeTimer: null,
       dirtyTimer: null,
+      dirtyAgain: false,
+      dirtyStageAgain: false,
       latestRef: null
     })
   }
@@ -171,6 +257,7 @@ function startScope(request: HarnessWatchRefStartRequest): void {
     scopeKey: request.scopeKey,
     generation: request.generation,
     watcherCount: cancelled ? 0 : entries.length,
+    sharedWatcherCount: sharedWatches.size,
     cancelled
   })
 }

@@ -19,6 +19,7 @@ import { trackEvent } from "../services/event-reporter"
 import { getCurrentHookAgentId } from "./execution-context"
 import { samplingFields, topKModelKwargs } from "../models/sampling-params"
 import { withWorkspaceExecution } from "../agent/file-operation-lock"
+import { resolveHarnessExecutionStage } from "../services/harness-stage-attribution"
 
 /**
  * Resolve the effective timeout (ms) for a hook by consulting the handler-type
@@ -35,11 +36,7 @@ const CHARDET_CONFIDENCE_THRESHOLD = 0.8
 const CHARDET_SAMPLE_BYTES = 8_192
 const MAX_HOOK_ENV_JSON_CHARS = 4_096
 const ONCE_HOOK_KEY_SEPARATOR = "\u0000"
-const INVOCATION_CONTEXT_ENV_KEYS = new Set([
-  "AGENT_ID",
-  "WORKSPACE_PATH",
-  "CLAUDE_PROJECT_DIR"
-])
+const INVOCATION_CONTEXT_ENV_KEYS = new Set(["AGENT_ID", "WORKSPACE_PATH", "CLAUDE_PROJECT_DIR"])
 const DEFAULT_USER_CONTEXT_FIELDS = [
   "sap_id",
   "yst_id",
@@ -133,7 +130,8 @@ export interface HookContext {
   harnessAdapterName?: string
   harnessAdapterVersion?: string
   /**
-   * Harness workflow node name/status current at turn start. Exposed to hooks as
+   * Harness workflow node name/status, refreshed immediately before each hook
+   * executes when project/feature identity is available. Exposed to hooks as
    * `HARNESS_NODE_NAME` / `HARNESS_NODE_STATUS` env and `harness_node_name` /
    * `harness_node_status` in stdin JSON.
    */
@@ -381,12 +379,20 @@ function addHookUserContextEnv(env: Record<string, string>, hook: HookConfig): v
   }
 }
 
-function clearInheritedInvocationContextEnv(env: Record<string, string>): void {
+function clearInheritedInvocationContextEnv(
+  env: Record<string, string>,
+  projectFeature = false
+): void {
   for (const key of Object.keys(env)) {
     // Environment names are case-insensitive on Windows. POSIX permits distinct
     // mixed-case names, so retain its exact-key behaviour.
     const comparableKey = process.platform === "win32" ? key.toUpperCase() : key
-    if (INVOCATION_CONTEXT_ENV_KEYS.has(comparableKey)) delete env[key]
+    if (
+      INVOCATION_CONTEXT_ENV_KEYS.has(comparableKey) ||
+      (projectFeature &&
+        (comparableKey === "HARNESS_NODE_NAME" || comparableKey === "HARNESS_NODE_STATUS"))
+    )
+      delete env[key]
   }
 }
 
@@ -401,7 +407,7 @@ function buildHookEnv(
   // These keys describe the current hook invocation, not the Electron host.
   // Remove inherited values first so a parent process cannot leak stale context
   // into a hook whose invocation does not provide the corresponding field.
-  clearInheritedInvocationContextEnv(env)
+  clearInheritedInvocationContextEnv(env, Boolean(context.harnessProjectId && context.featureId))
   env.HOOK_EVENT = event
   if (context.toolName) env.TOOL_NAME = context.toolName
   if (context.hookSourceType) env.HOOK_SOURCE_TYPE = context.hookSourceType
@@ -1215,7 +1221,6 @@ function applyConfiguredOnBlock(result: HookResult, hook: HookConfig): HookResul
  */
 async function executeHook(
   hook: HookConfig,
-  env: Record<string, string>,
   context: HookContext,
   event: HookEvent,
   onLateHookResult?: HookResultCallback
@@ -1233,7 +1238,7 @@ async function executeHook(
     event !== "Setup" &&
     !(context.hookSourceType === "workspace" && context.forceSyncWorkspaceHooks)
   ) {
-    void executeSyncHook(hook, env, context, event)
+    void executeSyncHook(hook, context, event)
       .then((late) => {
         const finalLate: HookResult = {
           ...applyForcedOutcome(late, hook),
@@ -1262,41 +1267,63 @@ async function executeHook(
       asyncStatus: "pending"
     }
   }
-  return executeSyncHook(hook, env, context, event)
+  return executeSyncHook(hook, context, event)
 }
 
 async function executeSyncHook(
   hook: HookConfig,
-  env: Record<string, string>,
   context: HookContext,
   event: HookEvent
 ): Promise<HookResult> {
   const startedAt = Date.now()
   const diagnostic = getHookLoggingConfig().diagnostic
   const hookType = hook.type ?? "command"
+  const synchronous =
+    hook.async !== true ||
+    event === "Setup" ||
+    (context.hookSourceType === "workspace" && context.forceSyncWorkspaceHooks)
+  const signal = synchronous ? context.abortSignal : undefined
   let result: HookResult
   let stdinPayload: string | undefined
+  const refreshStage = async (): Promise<void> => {
+    // A feature binding is the runtime's project-mode identity. Ordinary chats
+    // and project sessions without a feature never enter the stage lookup path.
+    if (!context.harnessProjectId || !context.featureId) return
+    signal?.throwIfAborted()
+    const stage = await resolveHarnessExecutionStage(context.harnessProjectId, context.featureId)
+    signal?.throwIfAborted()
+    if (stage) {
+      // enrichContextFromHook creates a private object for every invocation.
+      // Keep env, stdin, diagnostics and telemetry on that same stage snapshot.
+      context.harnessNodeName = stage.nodeName ?? undefined
+      context.harnessNodeStatus = stage.nodeStatus ?? undefined
+    }
+  }
   if (hookType === "prompt") {
+    await refreshStage()
     if (diagnostic) {
       const policy = hook.prompt?.trim()
       if (policy) stdinPayload = buildPromptHookUserMessage(event, policy, context, hook)
     }
     result = await executePromptHook(hook, context, event)
   } else if (hookType === "http") {
+    await refreshStage()
     const builtPayload = buildHookStdinPayload(event, context, hook)
     if (diagnostic) stdinPayload = builtPayload
     result = await executeHttpHook(hook, builtPayload, getEffectiveTimeout(hook))
   } else {
-    const builtPayload = buildHookStdinPayload(event, context, hook)
-    if (diagnostic) stdinPayload = builtPayload
-    const runCommand = () => executeCommandHook(hook, env, builtPayload, getCommandCwd(context))
+    const runCommand = async (): Promise<HookResult> => {
+      // Resolve after workspace admission: a command ahead of this hook may
+      // advance the workflow while the hook is queued.
+      await refreshStage()
+      const builtPayload = buildHookStdinPayload(event, context, hook)
+      if (diagnostic) stdinPayload = builtPayload
+      const cwd = getCommandCwd(context)
+      return executeCommandHook(hook, buildHookEnv(event, context, hook), builtPayload, cwd)
+    }
     // Synchronous formatters and other command hooks may read/modify any file.
     // Coordinate their actual process lifetime with tool IO, without acquiring
     // the runtime gate again. Detached hooks retain their existing async policy.
-    const synchronous =
-      hook.async !== true ||
-      event === "Setup" ||
-      (context.hookSourceType === "workspace" && context.forceSyncWorkspaceHooks)
     result =
       context.workspacePath && synchronous
         ? await withWorkspaceExecution(
@@ -1546,13 +1573,7 @@ export async function runHooks(
     for (const hook of matched) {
       const hookContext = enrichContextFromHook(hook, context)
       const result = applyForcedOutcome(
-        await executeHook(
-          hook,
-          buildHookEnv(event, hookContext, hook),
-          hookContext,
-          event,
-          onHookResult
-        ),
+        await executeHook(hook, hookContext, event, onHookResult),
         hook
       )
       console.log(
@@ -1665,13 +1686,7 @@ export async function runHooks(
     for (const hook of matched) {
       const hookContext = enrichContextFromHook(hook, context)
       const result = applyForcedOutcome(
-        await executeHook(
-          hook,
-          buildHookEnv(event, hookContext, hook),
-          hookContext,
-          event,
-          onHookResult
-        ),
+        await executeHook(hook, hookContext, event, onHookResult),
         hook
       )
       console.log(
@@ -1713,13 +1728,7 @@ export async function runHooks(
     for (const hook of matched) {
       const hookContext = enrichContextFromHook(hook, context)
       const result = applyForcedOutcome(
-        await executeHook(
-          hook,
-          buildHookEnv(event, hookContext, hook),
-          hookContext,
-          event,
-          onHookResult
-        ),
+        await executeHook(hook, hookContext, event, onHookResult),
         hook
       )
       console.log(
@@ -1785,13 +1794,7 @@ export async function runHooks(
     for (const hook of matched) {
       const hookContext = enrichContextFromHook(hook, context)
       const result = applyForcedOutcome(
-        await executeHook(
-          hook,
-          buildHookEnv(event, hookContext, hook),
-          hookContext,
-          event,
-          onHookResult
-        ),
+        await executeHook(hook, hookContext, event, onHookResult),
         hook
       )
       console.log(
@@ -1858,13 +1861,7 @@ export async function runHooks(
     for (const hook of matched) {
       const hookContext = enrichContextFromHook(hook, context)
       const result = applyForcedOutcome(
-        await executeHook(
-          hook,
-          buildHookEnv(event, hookContext, hook),
-          hookContext,
-          event,
-          onHookResult
-        ),
+        await executeHook(hook, hookContext, event, onHookResult),
         hook
       )
       console.log(
@@ -1928,13 +1925,7 @@ export async function runHooks(
     const tasks = matched.map(async (hook): Promise<HookResult> => {
       const hookContext = enrichContextFromHook(hook, context)
       try {
-        const rawResult = await executeHook(
-          hook,
-          buildHookEnv(event, hookContext, hook),
-          hookContext,
-          event,
-          onHookResult
-        )
+        const rawResult = await executeHook(hook, hookContext, event, onHookResult)
         const result = applyForcedOutcome(rawResult, hook)
         console.log(
           `[Hooks] ${event} hook (${hook.type ?? "command"}) → exit=${result.exitCode}, decision=${result.decision ?? "-"}, continue=${result.continue}`
@@ -2014,7 +2005,7 @@ export async function runHooks(
   // Notification / SessionStart: fire-and-forget
   for (const hook of matched) {
     const hookContext = enrichContextFromHook(hook, context)
-    executeHook(hook, buildHookEnv(event, hookContext, hook), hookContext, event, onHookResult)
+    executeHook(hook, hookContext, event, onHookResult)
       .then((rawResult) => {
         const result = applyForcedOutcome(rawResult, hook)
         console.log(

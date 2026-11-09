@@ -220,8 +220,19 @@ async function buildProjectDoc(
 }
 
 // ─────────────────────────────────────────────────────────
-// ES upsert (PUT _doc/{id} overwrites the whole document)
+// ES upsert (replace App-owned data, preserve the manual classification)
 // ─────────────────────────────────────────────────────────
+
+// The relay uses the same atomic replacement. Never copy a flag from a prior GET.
+const replaceProjectSnapshotScript = `def manual = ctx._source.properties?.manuallyMarkedTestProject;
+ctx._source.clear();
+ctx._source.putAll(params.snapshot);
+if (manual != null) {
+  if (ctx._source.properties == null) { ctx._source.properties = [:]; }
+  ctx._source.properties.manuallyMarkedTestProject = manual;
+} else if (ctx._source.properties != null) {
+  ctx._source.properties.remove('manuallyMarkedTestProject');
+}`
 
 async function upsertProjectDoc(
   docId: string,
@@ -238,14 +249,23 @@ async function upsertProjectDoc(
       "Basic " + Buffer.from(`${auth.username}:${auth.password}`).toString("base64")
   }
 
+  const body = JSON.stringify(
+    partial
+      ? { doc }
+      : {
+          script: { source: replaceProjectSnapshotScript, params: { snapshot: doc } },
+          scripted_upsert: true,
+          upsert: {}
+        }
+  )
   let lastError: Error | null = null
   for (const node of nodes) {
-    const url = `${node}/${getEventIndex()}/${partial ? "_update" : "_doc"}/${encodeURIComponent(docId)}`
+    const url = `${node}/${getEventIndex()}/_update/${encodeURIComponent(docId)}?retry_on_conflict=3`
     try {
       const resp = await fetch(url, {
-        method: partial ? "POST" : "PUT",
+        method: "POST",
         headers,
-        body: JSON.stringify(partial ? { doc } : doc),
+        body,
         signal: AbortSignal.timeout(WRITE_TIMEOUT_MS)
       })
       if (!resp.ok) {
@@ -351,7 +371,7 @@ async function reportOneProject(
   const props = (doc as { properties?: { featureCount?: unknown } }).properties
   const newFeatureCount = typeof props?.featureCount === "number" ? props.featureCount : 0
 
-  // The snapshot is a full-document overwrite built from a *local* probe of the
+  // The App-owned snapshot data comes from a *local* probe of the
   // workspace. If the workspace was manually altered (or the inspect failed),
   // the probe can come back with 0 features even though the project still
   // exists and previously reported features. Don't let that empty result
