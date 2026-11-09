@@ -1,12 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from "react"
 import {
   AlertTriangle,
-  Code2,
   ChevronLeft,
   ChevronRight,
   EllipsisVertical,
   Loader2,
-  PenTool,
   Share2,
   Trash2
 } from "lucide-react"
@@ -40,6 +38,8 @@ import { isRequirementMine } from "./requirement-history-filter"
 import { RequirementStatusTags } from "./RequirementStatusTags"
 import { RequirementListLoading } from "./RequirementListLoading"
 import { findRequirementDesignEntry } from "@/lib/requirement-design-entry"
+import { useAppStore } from "@/lib/store"
+import { getRequirementDevelopmentMetadata } from "@/lib/requirement-development"
 
 const PAGE_SIZE = 15
 export type RequirementSourceFilter = "all" | "local" | "remote" | "space"
@@ -47,6 +47,7 @@ export type RequirementSourceFilter = "all" | "local" | "remote" | "space"
 const REMOTE_MOCK_REQUIREMENT: RequirementRecord = {
   id: "mock:remote:shared-membership-migration",
   threadIds: [],
+  developmentThreadIds: [],
   systemId: "mock-membership",
   title: "【Mock 数据】远端会员等级迁移需求",
   requirementPath: "",
@@ -239,7 +240,6 @@ export function RequirementHistoryList({
   mineOnly,
   systemId,
   onOpen,
-  onDesign,
   onDelete
 }: {
   requirements: RequirementRecord[]
@@ -250,9 +250,17 @@ export function RequirementHistoryList({
   mineOnly: boolean
   systemId: string | null
   onOpen: (requirement: RequirementRecord) => void
-  onDesign: (requirement: RequirementRecord) => Promise<void>
   onDelete: (requirement: RequirementRecord) => Promise<void>
 }): React.JSX.Element {
+  const threads = useAppStore((state) => state.threads)
+  const developingRequirementIds = useMemo(() => {
+    const ids = new Set<string>()
+    for (const thread of threads) {
+      const requirementId = getRequirementDevelopmentMetadata(thread)?.requirementId
+      if (requirementId) ids.add(requirementId)
+    }
+    return ids
+  }, [threads])
   const filterKey = `${systemId ?? "all"}\u0000${sourceFilter}\u0000${mineOnly}\u0000${query}`
   const [pageState, setPageState] = useState({ filterKey: "", page: 1 })
   const [toDelete, setToDelete] = useState<RequirementRecord | null>(null)
@@ -318,6 +326,10 @@ export function RequirementHistoryList({
                 const spaceDesign =
                   item.origin === "space" ? findRequirementDesignEntry(item.id) : null
                 const collaborators = item.collaborators ?? []
+                const developmentStatus =
+                  item.developmentThreadIds.length > 0 || developingRequirementIds.has(item.id)
+                    ? "in-progress"
+                    : "not-started"
                 const description =
                   item.prdManifest.prd.description ||
                   item.initialDescription ||
@@ -458,42 +470,21 @@ export function RequirementHistoryList({
                         ) : null}
                       </div>
                       <div className="mt-2 flex min-h-7 items-end justify-between gap-3">
-                        {item.origin === "space" ? (
-                          <div className="flex items-center gap-1.5">
-                            <Button
-                              type="button"
-                              size="sm"
-                              className="h-7 gap-1 px-2 text-[11px]"
-                              onClick={(event) => {
-                                event.stopPropagation()
-                                void onDesign(item)
-                              }}
-                            >
-                              <PenTool className="size-3" />
-                              {spaceDesign?.htmlId ? "继续设计" : "去设计"}
-                            </Button>
-                            <Button
-                              type="button"
-                              size="sm"
-                              className="h-7 gap-1 px-2 text-[11px]"
-                              onClick={(event) => event.stopPropagation()}
-                            >
-                              <Code2 className="size-3" />
-                              去开发
-                            </Button>
-                          </div>
-                        ) : (
-                          <RequirementStatusTags
-                            standardized={isRequirementGenerated(item)}
-                            hasPrototype={
-                              Boolean(item.prdManifest.prd.htmlFile?.trim()) ||
-                              item.prdManifest.functions.some((entry) =>
-                                Boolean(entry.htmlFile?.trim())
-                              )
-                            }
-                            published={isRequirementPublished(item)}
-                          />
-                        )}
+                        <RequirementStatusTags
+                          standardized={
+                            item.origin === "space" ? true : isRequirementGenerated(item)
+                          }
+                          hasPrototype={
+                            item.origin === "space"
+                              ? Boolean(spaceDesign?.htmlFile?.trim())
+                              : Boolean(item.prdManifest.prd.htmlFile?.trim()) ||
+                                item.prdManifest.functions.some((entry) =>
+                                  Boolean(entry.htmlFile?.trim())
+                                )
+                          }
+                          published={item.origin === "space" || isRequirementPublished(item)}
+                          developmentStatus={developmentStatus}
+                        />
                         {item.origin === "space" && item.status ? (
                           <span
                             className={cn(

@@ -1,7 +1,11 @@
 import type { DesignUrlImportApi } from "../shared/design-url-import"
 import type { DesignSessionApi, DesignSessionChange } from "../shared/managed-design-session"
 import type { DesignTemplateApi } from "../shared/design-template"
-import { DESIGN_SYSTEM_EXTRACTION_PROGRESS, type DesignSystemLibraryApi, type DesignSystemInfo } from "../shared/design-system"
+import {
+  DESIGN_SYSTEM_EXTRACTION_PROGRESS,
+  type DesignSystemLibraryApi,
+  type DesignSystemInfo
+} from "../shared/design-system"
 import type {
   KnowledgeAccumulationData,
   KnowledgeActiveDetails,
@@ -3117,33 +3121,59 @@ const api = {
       threadId: string,
       action: import("../shared/mods/v2/ui").FunctionClientAction
     ): Promise<void> => ipcRenderer.invoke("mods:function-client-act", { threadId, action }),
-    approveFunction: (threadId: string, pluginId: string, digest: string): Promise<void> => ipcRenderer.invoke("mods:approve-function", { threadId, pluginId, digest }),
-    revokeFunction: (threadId: string, name: string): Promise<void> => ipcRenderer.invoke("mods:revoke-function", { threadId, name }),
-    status: (threadId: string): Promise<ModWorkspaceStatus> => ipcRenderer.invoke("mods:status", threadId),
+    approveFunction: (threadId: string, pluginId: string, digest: string): Promise<void> =>
+      ipcRenderer.invoke("mods:approve-function", { threadId, pluginId, digest }),
+    revokeFunction: (threadId: string, name: string): Promise<void> =>
+      ipcRenderer.invoke("mods:revoke-function", { threadId, name }),
+    status: (threadId: string): Promise<ModWorkspaceStatus> =>
+      ipcRenderer.invoke("mods:status", threadId),
     configure: (threadId: string, enabled: boolean, outputPolicy: boolean): Promise<void> =>
       ipcRenderer.invoke("mods:configure", { threadId, enabled, outputPolicy }),
     approve: (threadId: string, pluginId: string, digest: string): Promise<void> =>
       ipcRenderer.invoke("mods:approve", { threadId, pluginId, digest }),
-    revoke: (threadId: string, modId: string): Promise<void> => ipcRenderer.invoke("mods:revoke", { threadId, modId }),
-    cards: (threadId: string, callId: string): Promise<ModCard[]> => ipcRenderer.invoke("mods:cards", { threadId, callId }),
-    act: (threadId: string, actionId: string): Promise<ModProjection> => ipcRenderer.invoke("mods:act", { threadId, actionId }),
+    revoke: (threadId: string, modId: string): Promise<void> =>
+      ipcRenderer.invoke("mods:revoke", { threadId, modId }),
+    cards: (threadId: string, callId: string): Promise<ModCard[]> =>
+      ipcRenderer.invoke("mods:cards", { threadId, callId }),
+    act: (threadId: string, actionId: string): Promise<ModProjection> =>
+      ipcRenderer.invoke("mods:act", { threadId, actionId }),
     installExamples: (): Promise<void> => ipcRenderer.invoke("mods:install-examples"),
-    audit: (threadId: string, before?: number): Promise<import("../shared/mods/types").ModAuditEntry[]> => ipcRenderer.invoke("mods:audit", { threadId, before }),
-    reconcile: (threadId: string, callId: string, resolution: "confirmed-success" | "confirmed-failure"): Promise<void> => ipcRenderer.invoke("mods:reconcile", { threadId, callId, resolution }),
+    audit: (
+      threadId: string,
+      before?: number
+    ): Promise<import("../shared/mods/types").ModAuditEntry[]> =>
+      ipcRenderer.invoke("mods:audit", { threadId, before }),
+    reconcile: (
+      threadId: string,
+      callId: string,
+      resolution: "confirmed-success" | "confirmed-failure"
+    ): Promise<void> => ipcRenderer.invoke("mods:reconcile", { threadId, callId, resolution }),
     backup: (): Promise<boolean> => ipcRenderer.invoke("mods:backup"),
-    artifact: (threadId: string, id: string): Promise<{ label: string; text: string }> => ipcRenderer.invoke("mods:artifact", { threadId, id }),
-    saveArtifact: (threadId: string, id: string): Promise<boolean> => ipcRenderer.invoke("mods:save-artifact", { threadId, id }),
-    commands: (threadId: string): Promise<import("../shared/mods/types").ModCommandDescriptor[]> => ipcRenderer.invoke("mods:commands", threadId),
-    enqueue: (threadId: string, descriptor: import("../shared/mods/types").ModCommandDescriptor, args: import("../shared/mods/types").ModObject): Promise<import("../shared/mods/types").ModCommandJob> => ipcRenderer.invoke("mods:enqueue", { threadId, descriptor, args }),
-    jobs: (threadId: string): Promise<import("../shared/mods/types").ModCommandJob[]> => ipcRenderer.invoke("mods:jobs", threadId),
-    cancelJob: (threadId: string, id: string): Promise<void> => ipcRenderer.invoke("mods:cancel-job", { threadId, id }),
+    artifact: (threadId: string, id: string): Promise<{ label: string; text: string }> =>
+      ipcRenderer.invoke("mods:artifact", { threadId, id }),
+    saveArtifact: (threadId: string, id: string): Promise<boolean> =>
+      ipcRenderer.invoke("mods:save-artifact", { threadId, id }),
+    commands: (threadId: string): Promise<import("../shared/mods/types").ModCommandDescriptor[]> =>
+      ipcRenderer.invoke("mods:commands", threadId),
+    enqueue: (
+      threadId: string,
+      descriptor: import("../shared/mods/types").ModCommandDescriptor,
+      args: import("../shared/mods/types").ModObject
+    ): Promise<import("../shared/mods/types").ModCommandJob> =>
+      ipcRenderer.invoke("mods:enqueue", { threadId, descriptor, args }),
+    jobs: (threadId: string): Promise<import("../shared/mods/types").ModCommandJob[]> =>
+      ipcRenderer.invoke("mods:jobs", threadId),
+    cancelJob: (threadId: string, id: string): Promise<void> =>
+      ipcRenderer.invoke("mods:cancel-job", { threadId, id }),
     onJobsChanged: (callback: (event: { threadId: string }) => void): (() => void) => {
-      const listener = (_event: Electron.IpcRendererEvent, payload: { threadId: string }): void => callback(payload)
+      const listener = (_event: Electron.IpcRendererEvent, payload: { threadId: string }): void =>
+        callback(payload)
       ipcRenderer.on("mods:jobs-changed", listener)
       return () => ipcRenderer.removeListener("mods:jobs-changed", listener)
     },
     onCardsChanged: (callback: (event: { threadId: string }) => void): (() => void) => {
-      const listener = (_event: Electron.IpcRendererEvent, value: { threadId: string }): void => callback(value)
+      const listener = (_event: Electron.IpcRendererEvent, value: { threadId: string }): void =>
+        callback(value)
       ipcRenderer.on("mods:cards-changed", listener)
       return () => ipcRenderer.removeListener("mods:cards-changed", listener)
     }
@@ -3159,12 +3189,20 @@ const api = {
       version?: string,
       requireMods?: boolean
     ): Promise<{ success: boolean; pluginName?: string; error?: string }> =>
-      ipcRenderer.invoke("plugins:install", { buffer, fileName, origin, version, requireMods }) as Promise<{
+      ipcRenderer.invoke("plugins:install", {
+        buffer,
+        fileName,
+        origin,
+        version,
+        requireMods
+      }) as Promise<{
         success: boolean
         pluginName?: string
         error?: string
       }>,
-    installFromDir: (requireMods?: boolean): Promise<{ success: boolean; pluginName?: string; error?: string }> =>
+    installFromDir: (
+      requireMods?: boolean
+    ): Promise<{ success: boolean; pluginName?: string; error?: string }> =>
       ipcRenderer.invoke("plugins:installFromDir", requireMods) as Promise<{
         success: boolean
         pluginName?: string
@@ -4718,17 +4756,51 @@ const api = {
     }
   },
   design: {
-    importTemplate: ((source) => ipcRenderer.invoke("design:import-template", source)) satisfies DesignTemplateApi["importTemplate"],
-    listImportedTemplates: (() => ipcRenderer.invoke("design:list-imported-templates")) satisfies DesignTemplateApi["listImportedTemplates"],
-    readTemplate: ((reference) => ipcRenderer.invoke("design:read-template", reference)) satisfies DesignTemplateApi["readTemplate"],
-    readSystem: ((id) => ipcRenderer.invoke("design:read-system", id)) satisfies DesignSystemLibraryApi["readSystem"],
-    saveSystem: ((draft) => ipcRenderer.invoke("design:save-system", draft)) satisfies DesignSystemLibraryApi["saveSystem"],
-    selectSystemFile: (() => ipcRenderer.invoke("design:select-system-file")) satisfies DesignSystemLibraryApi["selectSystemFile"],
-    exportSystem: ((content) => ipcRenderer.invoke("design:export-system", content)) satisfies DesignSystemLibraryApi["exportSystem"],
-    extractSystem: ((request) => ipcRenderer.invoke("design:extract-system", request)) satisfies DesignSystemLibraryApi["extractSystem"],
-    cancelSystemExtraction: ((requestId) => ipcRenderer.invoke("design:cancel-system-extraction", requestId)) satisfies DesignSystemLibraryApi["cancelSystemExtraction"],
+    importTemplate: ((source) =>
+      ipcRenderer.invoke(
+        "design:import-template",
+        source
+      )) satisfies DesignTemplateApi["importTemplate"],
+    listImportedTemplates: (() =>
+      ipcRenderer.invoke(
+        "design:list-imported-templates"
+      )) satisfies DesignTemplateApi["listImportedTemplates"],
+    readTemplate: ((reference) =>
+      ipcRenderer.invoke(
+        "design:read-template",
+        reference
+      )) satisfies DesignTemplateApi["readTemplate"],
+    readSystem: ((id) =>
+      ipcRenderer.invoke("design:read-system", id)) satisfies DesignSystemLibraryApi["readSystem"],
+    saveSystem: ((draft) =>
+      ipcRenderer.invoke(
+        "design:save-system",
+        draft
+      )) satisfies DesignSystemLibraryApi["saveSystem"],
+    selectSystemFile: (() =>
+      ipcRenderer.invoke(
+        "design:select-system-file"
+      )) satisfies DesignSystemLibraryApi["selectSystemFile"],
+    exportSystem: ((content) =>
+      ipcRenderer.invoke(
+        "design:export-system",
+        content
+      )) satisfies DesignSystemLibraryApi["exportSystem"],
+    extractSystem: ((request) =>
+      ipcRenderer.invoke(
+        "design:extract-system",
+        request
+      )) satisfies DesignSystemLibraryApi["extractSystem"],
+    cancelSystemExtraction: ((requestId) =>
+      ipcRenderer.invoke(
+        "design:cancel-system-extraction",
+        requestId
+      )) satisfies DesignSystemLibraryApi["cancelSystemExtraction"],
     onSystemExtractionProgress: ((callback) => {
-      const listener = (_event: Electron.IpcRendererEvent, progress: Parameters<typeof callback>[0]) => callback(progress)
+      const listener = (
+        _event: Electron.IpcRendererEvent,
+        progress: Parameters<typeof callback>[0]
+      ) => callback(progress)
       ipcRenderer.on(DESIGN_SYSTEM_EXTRACTION_PROGRESS, listener)
       return () => ipcRenderer.removeListener(DESIGN_SYSTEM_EXTRACTION_PROGRESS, listener)
     }) satisfies DesignSystemLibraryApi["onSystemExtractionProgress"],
@@ -4736,8 +4808,10 @@ const api = {
       inspectEditable: (id) => ipcRenderer.invoke("design:inspect-editable", id),
       edit: (id, command) => ipcRenderer.invoke("design:direct-edit", { id, command }),
       tweak: (id, command) => ipcRenderer.invoke("design:session-tweak", { id, command }),
-      patchHistory: (id, operation, revision) => ipcRenderer.invoke("design:patch-history", { id, operation, revision }),
-      previewVisible: (id, runId, revision) => ipcRenderer.invoke("design:preview-visible", { id, runId, revision }),
+      patchHistory: (id, operation, revision) =>
+        ipcRenderer.invoke("design:patch-history", { id, operation, revision }),
+      previewVisible: (id, runId, revision) =>
+        ipcRenderer.invoke("design:preview-visible", { id, runId, revision }),
       migrate: (seeds) => ipcRenderer.invoke("design:sessions-migrate", seeds),
       list: () => ipcRenderer.invoke("design:sessions-list"),
       create: (seed) => ipcRenderer.invoke("design:session-create", seed),
@@ -4831,12 +4905,30 @@ const api = {
         filePath?: string
         error?: string
       }>,
-    importFromUrl: ((request) => ipcRenderer.invoke("design:import-url", request)) satisfies DesignUrlImportApi["importFromUrl"],
-    cancelUrlImport: ((requestId) => ipcRenderer.invoke("design:cancel-url-import", requestId)) satisfies DesignUrlImportApi["cancelUrlImport"],
-    finishUrlImport: ((requestId, keep) => ipcRenderer.invoke("design:finish-url-import", requestId, keep)) satisfies DesignUrlImportApi["finishUrlImport"],
-    openImportBrowser: ((url) => ipcRenderer.invoke("design:open-import-browser", url)) satisfies DesignUrlImportApi["openImportBrowser"],
+    importFromUrl: ((request) =>
+      ipcRenderer.invoke(
+        "design:import-url",
+        request
+      )) satisfies DesignUrlImportApi["importFromUrl"],
+    cancelUrlImport: ((requestId) =>
+      ipcRenderer.invoke(
+        "design:cancel-url-import",
+        requestId
+      )) satisfies DesignUrlImportApi["cancelUrlImport"],
+    finishUrlImport: ((requestId, keep) =>
+      ipcRenderer.invoke(
+        "design:finish-url-import",
+        requestId,
+        keep
+      )) satisfies DesignUrlImportApi["finishUrlImport"],
+    openImportBrowser: ((url) =>
+      ipcRenderer.invoke(
+        "design:open-import-browser",
+        url
+      )) satisfies DesignUrlImportApi["openImportBrowser"],
     onUrlImportProgress: ((callback) => {
-      const listener = (_event: unknown, progress: Parameters<typeof callback>[0]) => callback(progress)
+      const listener = (_event: unknown, progress: Parameters<typeof callback>[0]) =>
+        callback(progress)
       ipcRenderer.on("design:import-url-progress", listener)
       return () => ipcRenderer.removeListener("design:import-url-progress", listener)
     }) satisfies DesignUrlImportApi["onUrlImportProgress"],
@@ -5017,7 +5109,12 @@ const api = {
     askQuestions: (
       sessionId: string,
       prompt: string,
-      onEvent: (event: { type: string; question?: unknown; questions?: unknown[]; error?: string }) => void,
+      onEvent: (event: {
+        type: string
+        question?: unknown
+        questions?: unknown[]
+        error?: string
+      }) => void,
       modelId?: string,
       designSystemId?: string
     ): (() => void) => {

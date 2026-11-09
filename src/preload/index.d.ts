@@ -1066,13 +1066,24 @@ interface CustomAPI {
     cards(threadId: string, callId: string): Promise<import("../shared/mods/types").ModCard[]>
     act(threadId: string, actionId: string): Promise<import("../shared/mods/types").ModProjection>
     installExamples(): Promise<void>
-    audit(threadId: string, before?: number): Promise<import("../shared/mods/types").ModAuditEntry[]>
-    reconcile(threadId: string, callId: string, resolution: "confirmed-success" | "confirmed-failure"): Promise<void>
+    audit(
+      threadId: string,
+      before?: number
+    ): Promise<import("../shared/mods/types").ModAuditEntry[]>
+    reconcile(
+      threadId: string,
+      callId: string,
+      resolution: "confirmed-success" | "confirmed-failure"
+    ): Promise<void>
     backup(): Promise<boolean>
     artifact(threadId: string, id: string): Promise<{ label: string; text: string }>
     saveArtifact(threadId: string, id: string): Promise<boolean>
     commands(threadId: string): Promise<import("../shared/mods/types").ModCommandDescriptor[]>
-    enqueue(threadId: string, descriptor: import("../shared/mods/types").ModCommandDescriptor, args: import("../shared/mods/types").ModObject): Promise<import("../shared/mods/types").ModCommandJob>
+    enqueue(
+      threadId: string,
+      descriptor: import("../shared/mods/types").ModCommandDescriptor,
+      args: import("../shared/mods/types").ModObject
+    ): Promise<import("../shared/mods/types").ModCommandJob>
     jobs(threadId: string): Promise<import("../shared/mods/types").ModCommandJob[]>
     cancelJob(threadId: string, id: string): Promise<void>
     onJobsChanged(callback: (event: { threadId: string }) => void): () => void
@@ -2269,7 +2280,9 @@ interface CustomAPI {
       version?: string,
       requireMods?: boolean
     ) => Promise<{ success: boolean; pluginName?: string; error?: string }>
-    installFromDir: (requireMods?: boolean) => Promise<{ success: boolean; pluginName?: string; error?: string }>
+    installFromDir: (
+      requireMods?: boolean
+    ) => Promise<{ success: boolean; pluginName?: string; error?: string }>
     exportForMarket: (
       id: string,
       options?: { version?: string | null }
@@ -2455,7 +2468,12 @@ interface CustomAPI {
     askQuestions: (
       sessionId: string,
       prompt: string,
-      onEvent: (event: { type: string; question?: unknown; questions?: unknown[]; error?: string }) => void,
+      onEvent: (event: {
+        type: string
+        question?: unknown
+        questions?: unknown[]
+        error?: string
+      }) => void,
       modelId?: string,
       designSystemId?: string
     ) => () => void
@@ -2495,10 +2513,7 @@ interface CustomAPI {
       error?: string
     }>
     getWorkDir: () => Promise<string | null>
-    createDesignWorkspace: (payload: {
-      requirementId: string
-      title: string
-    }) => Promise<{
+    createDesignWorkspace: (payload: { requirementId: string; title: string }) => Promise<{
       success: boolean
       workspacePath?: string | null
       error?: string
@@ -2511,7 +2526,7 @@ interface CustomAPI {
       content?: string
       error?: string
     }>
-    attachThread: (payload: { reqId: string; threadId: string }) => Promise<{
+    attachThread: (payload: { reqId: string; threadId: string; development?: boolean }) => Promise<{
       success: boolean
       requirement?: Awaited<ReturnType<NonNullable<CustomAPI["requirements"]>["list"]>>[number]
       error?: string
@@ -2519,6 +2534,12 @@ interface CustomAPI {
     detachThread: (payload: { reqId: string; threadId: string }) => Promise<{
       success: boolean
       requirement?: Awaited<ReturnType<NonNullable<CustomAPI["requirements"]>["list"]>>[number]
+      error?: string
+    }>
+    resetDevelopment: (reqId: string) => Promise<{
+      success: boolean
+      requirement?: Awaited<ReturnType<NonNullable<CustomAPI["requirements"]>["list"]>>[number]
+      threadIds?: string[]
       error?: string
     }>
     beginManifestSync: (payload: {
@@ -3049,9 +3070,7 @@ interface CustomAPI {
       data?: { codeStats: DashboardCodeStats | null; skillCodeStats: DashboardCodeStats | null }
       error?: string
     }>
-    knowledgeAccumulation: (opts?: {
-      upperOrgLv1?: string | string[] | null
-    }) => Promise<{
+    knowledgeAccumulation: (opts?: { upperOrgLv1?: string | string[] | null }) => Promise<{
       success: boolean
       data?: KnowledgeAccumulationData
       error?: string
@@ -3087,9 +3106,7 @@ interface CustomAPI {
       error?: string
       cancelled?: boolean
     }>
-    knowledgeRecentConstraintFiles: (opts?: {
-      upperOrgLv1?: string | string[] | null
-    }) => Promise<{
+    knowledgeRecentConstraintFiles: (opts?: { upperOrgLv1?: string | string[] | null }) => Promise<{
       success: boolean
       data?: KnowledgeRecentConstraintFiles
       error?: string

@@ -36,6 +36,7 @@ export type RequirementPrdManifest = {
 export type RequirementRecord = {
   id: string
   threadIds: string[]
+  developmentThreadIds: string[]
   systemId: string
   title: string
   requirementPath: string
@@ -95,6 +96,7 @@ export function fromPersistedRequirement(
   return {
     id: item.reqId,
     threadIds: getRequirementThreadIds(item),
+    developmentThreadIds: [...new Set(item.developmentThreadIds ?? [])],
     systemId: item.systemId,
     title: item.title,
     requirementPath: item.requirementPath,

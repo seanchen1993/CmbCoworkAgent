@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react"
-import { ArrowLeft, Code2, FileText, Loader2, PenTool, RefreshCw } from "lucide-react"
+import { ArrowLeft, FileText, Loader2, PenTool, RefreshCw } from "lucide-react"
 import {
   leanstarRequirementsApi,
   type RequirementDetail,
@@ -169,16 +169,17 @@ export function RequirementSpaceDetailView({
             <div className="flex h-8 shrink-0 items-center gap-2 border-b border-border px-4 ">
               <PenTool className="size-4 text-primary" />
               <h3 className="text-sm font-semibold">原型预览</h3>
-              {designBinding?.htmlId ? (
+              <div className="ml-auto flex items-center gap-2">
                 <Button
                   type="button"
                   size="sm"
-                  className="ml-auto h-7 text-xs"
+                  className="h-7 text-xs"
                   onClick={() => void onDesignRequirement(requirement, content)}
                 >
-                  继续设计
+                  <PenTool className="mr-1.5 size-3.5" />
+                  {designBinding?.htmlFile ? "继续设计" : "去设计"}
                 </Button>
-              ) : null}
+              </div>
             </div>
             {prototypeHtml && designBinding?.htmlFile ? (
               <HtmlThumbnailPreview
@@ -196,21 +197,8 @@ export function RequirementSpaceDetailView({
                 </div>
                 <h4 className="mt-4 text-sm font-semibold">暂无原型</h4>
                 <p className="mt-1.5 max-w-sm text-xs leading-5 text-muted-foreground">
-                  你可以先设计原型，也可以跳过原型设计直接进入开发。
+                  完成原型设计后，可在本地需求详情中进入开发。
                 </p>
-                <div className="mt-5 flex flex-wrap justify-center gap-2">
-                  <Button
-                    type="button"
-                    onClick={() => void onDesignRequirement(requirement, content)}
-                  >
-                    <PenTool className="mr-1.5 size-4" />
-                    {designBinding?.htmlId ? "继续设计" : "去设计原型"}
-                  </Button>
-                  <Button type="button" variant="outline">
-                    <Code2 className="mr-1.5 size-4" />
-                    去开发
-                  </Button>
-                </div>
               </div>
             )}
           </section>

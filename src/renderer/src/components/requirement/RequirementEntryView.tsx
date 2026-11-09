@@ -82,6 +82,7 @@ function fromRequirementSpaceItem(
   return {
     id: `space:${implementGroupDevopsOrgId}:${item.code}`,
     threadIds: [],
+    developmentThreadIds: [],
     systemId: `space:${implementGroupDevopsOrgId}`,
     title: item.title,
     requirementPath: "",
@@ -514,7 +515,6 @@ export function RequirementEntryView({
           onSourceFilterChange={setSourceFilter}
           onNew={startNewRequirement}
           onOpenRequirement={openRequirement}
-          onDesignRequirement={designSpaceRequirement}
           onDeleteRequirement={deleteRequirement}
         />
       )}

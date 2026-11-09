@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react"
-import { FileCheck2, PanelsTopLeft, Send, type LucideIcon } from "lucide-react"
+import { Code2, FileCheck2, PanelsTopLeft, Send, type LucideIcon } from "lucide-react"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { cn } from "@/lib/utils"
 
@@ -90,11 +90,13 @@ function RequirementStatusTag({
 export function RequirementStatusTags({
   standardized,
   hasPrototype,
-  published
+  published,
+  developmentStatus = "not-started"
 }: {
   standardized: boolean
   hasPrototype: boolean
   published: boolean
+  developmentStatus?: "not-started" | "in-progress"
 }): React.JSX.Element {
   const tags: RequirementStatusTagProps[] = [
     {
@@ -124,6 +126,14 @@ export function RequirementStatusTags({
       activeDescription: "这个需求特性已经发布到需求空间 3.0，相关成员可以进入需求详情查看。",
       inactiveDescription:
         "这个需求特性还没有发布到需求空间 3.0。确认内容无误后，可以在需求详情中完成发布。"
+    },
+    {
+      active: developmentStatus !== "not-started",
+      inactiveLabel: "未开发",
+      activeLabel: "开发中",
+      icon: Code2,
+      activeDescription: "这个需求已经创建开发会话，可以继续进入项目模式推进实现。",
+      inactiveDescription: "这个需求尚未创建开发会话。点击“去开发”可以选择代码目录并开始开发。"
     }
   ]
 

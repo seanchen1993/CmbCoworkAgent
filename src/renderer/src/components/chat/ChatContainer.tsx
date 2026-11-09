@@ -260,6 +260,7 @@ import { createChatSearchIndexer } from "@/lib/chat-search-indexer"
 import { createChatSearchPlan, appendChatSearchToolSummaries } from "../../../../shared/chat-search-plan"
 import { areChatSearchPlansEqual, type ChatSearchReveal } from "../../../../shared/chat-search-types"
 import { getChatThreadProjectionRuntime } from "@/lib/chat-thread-projection-cache"
+import { useRequirementAutoPrompt } from "./use-requirement-auto-prompt"
 import {
   chatScrollTailMessageIdentity,
   classifyChatScrollTailChange,
@@ -1686,6 +1687,17 @@ export function ChatContainer({
   const remoteThread = useAppStore(
     (state) => state.threads.find((thread) => thread.thread_id === threadId) ?? null
   )
+  // 需求开发会话会在元数据中暂存首轮提示词；消费标记用于避免会话重开后重复发送。
+  const requirementDevelopmentMetadata =
+    remoteThread?.metadata?.requirementDevelopment &&
+    typeof remoteThread.metadata.requirementDevelopment === "object"
+      ? (remoteThread.metadata.requirementDevelopment as Record<string, unknown>)
+      : null
+  const automaticRequirementPrompt =
+    requirementDevelopmentMetadata?.autoSendPromptConsumed !== true &&
+    typeof requirementDevelopmentMetadata?.autoSendPrompt === "string"
+      ? requirementDevelopmentMetadata.autoSendPrompt.trim()
+      : ""
   const setGitWorkspaceStatus = useAppStore((state) => state.setGitWorkspaceStatus)
   const remoteThreadInfo = useMemo(() => getRemoteThreadDisplayInfo(remoteThread), [remoteThread])
   const resolvedReadOnlyReason =
@@ -5455,7 +5467,12 @@ export function ChatContainer({
     ]
   )
 
-  const handleSubmit = async (e: React.FormEvent, defaultText = ""): Promise<void> => {
+  const handleSubmit = async (
+    e: React.FormEvent,
+    defaultText = "",
+    // 消息被流层接受后触发，供自动提示安全地持久化“一次性消费”状态。
+    onCommitted?: () => void | Promise<void>
+  ): Promise<void> => {
     e.preventDefault()
     const trimmedInput = defaultText || input.trim()
     const isGoalSlashInput = /^\/goal(?:\s|$)/i.test(trimmedInput)
@@ -5954,7 +5971,8 @@ export function ChatContainer({
       // before useStream propagates isLoading.
       if (shouldLockSubmit) liveSubmitPreparingThreads.delete(threadId)
       try {
-        await stream.submit(
+        // 先取得流提交 Promise，再持久化提交状态；元数据写入失败不能中断已经开始的对话。
+        const submission = stream.submit(
           {
             messages: [{ type: "human", content: fullMessage }]
           },
@@ -5969,6 +5987,13 @@ export function ChatContainer({
             }
           }
         )
+        try {
+          await onCommitted?.()
+        } catch (error) {
+          // 此时消息已经开始发送，元数据持久化失败只记录日志，不能终止本轮对话。
+          console.error("[ChatContainer] Failed to persist committed submit state:", error)
+        }
+        await submission
       } finally {
         setActiveTurnStartTime(null)
       }
@@ -5982,6 +6007,23 @@ export function ChatContainer({
       releaseSubmitInFlightLock(submitInFlightRef, shouldLockSubmit, threadId)
     }
   }
+
+  // 等历史、模型和工作区全部就绪后，再自动提交需求开发会话的首轮提示词。
+  useRequirementAutoPrompt({
+    threadId,
+    prompt: automaticRequirementPrompt,
+    metadata: requirementDevelopmentMetadata,
+    ready:
+      !historyLoading &&
+      !isLoading &&
+      Boolean(stream && currentModel && workspacePath) &&
+      models.some((model) => model.id === currentModel && model.available),
+    submit: handleSubmit,
+    patchMetadata: async (targetThreadId, patch) => {
+      // 首轮对话启动期间只更新持久化元数据，避免替换正在使用的实时线程对象。
+      await window.api.threads.patchMetadata(targetThreadId, patch)
+    }
+  })
 
   const startEditingQueuedMessage = useCallback((message: QueuedMessage): void => {
     setEditingQueueId(message.id)

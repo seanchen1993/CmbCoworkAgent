@@ -9,6 +9,7 @@ type CreateHarnessThread = (
   config: {
     workspacePath: string | null
     harnessFeature: { projectId: string; slug: string; source: string }
+    requirementDevelopment?: Record<string, unknown>
   },
   options?: { preserveView?: boolean }
 ) => Promise<Thread>
@@ -20,6 +21,7 @@ interface CreateHarnessFeatureThreadParams {
   createThread: CreateHarnessThread
   nextAction?: HarnessWorkflowNextAction
   runDetail?: HarnessRunDetailViewModel | null
+  requirementDevelopment?: Record<string, unknown>
 }
 
 type CreateHarnessFeatureThreadFromLatestRunParams = Omit<
@@ -33,12 +35,14 @@ export async function createHarnessFeatureThread({
   workspacePath,
   createThread,
   nextAction,
-  runDetail
+  runDetail,
+  requirementDevelopment
 }: CreateHarnessFeatureThreadParams): Promise<Thread> {
   const thread = await createThread(
     {
       workspacePath,
-      harnessFeature: { projectId, slug, source: HARNESS_SOURCE }
+      harnessFeature: { projectId, slug, source: HARNESS_SOURCE },
+      ...(requirementDevelopment ? { requirementDevelopment } : {})
     },
     { preserveView: true }
   )

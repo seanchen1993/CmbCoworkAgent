@@ -12,6 +12,7 @@ function requirementAtStep(
   return {
     id: "test",
     threadIds: [],
+    developmentThreadIds: [],
     systemId: "system",
     title: "测试需求",
     requirementPath: "",

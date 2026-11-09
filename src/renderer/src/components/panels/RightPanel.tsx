@@ -79,6 +79,7 @@ import {
   type WorkspaceFileTreeNode
 } from "@/lib/workspace-file-tree-projection"
 import { Badge } from "@/components/ui/badge"
+import { RequirementDevelopmentBar } from "@/components/chat/RequirementDevelopmentBar"
 import {
   beginOpenResourcePreviewIntent,
   emitOpenResourcePreview,
@@ -2049,6 +2050,9 @@ export function RightPanel({
           moduleMode={moduleMode}
           onApplyPreview={applyStreamPreview}
         />
+      )}
+      {moduleMode === "work" && currentThreadId && (
+        <RequirementDevelopmentBar threadId={currentThreadId} />
       )}
       {moduleMode === "browser" && (
         <div className="flex h-full min-h-0 flex-col bg-background">

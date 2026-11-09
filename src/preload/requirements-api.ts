@@ -54,7 +54,7 @@ export const requirementsApi = {
       content?: string
       error?: string
     }>,
-  attachThread: (payload: { reqId: string; threadId: string }) =>
+  attachThread: (payload: { reqId: string; threadId: string; development?: boolean }) =>
     ipcRenderer.invoke("requirements:attach-thread", payload) as Promise<{
       success: boolean
       requirement?: RequirementRuntimeItem
@@ -64,6 +64,13 @@ export const requirementsApi = {
     ipcRenderer.invoke("requirements:detach-thread", payload) as Promise<{
       success: boolean
       requirement?: RequirementRuntimeItem
+      error?: string
+    }>,
+  resetDevelopment: (reqId: string) =>
+    ipcRenderer.invoke("requirements:reset-development", reqId) as Promise<{
+      success: boolean
+      requirement?: RequirementRuntimeItem
+      threadIds?: string[]
       error?: string
     }>,
   beginManifestSync: (payload: { reqId: string; threadId: string; requestId: string }) =>

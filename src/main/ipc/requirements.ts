@@ -19,6 +19,7 @@ export type RequirementSource = {
 export type RequirementIndexItem = {
   reqId: string
   threadIds: string[]
+  developmentThreadIds: string[]
   systemId: string
   title: string
   requirementPath?: string
@@ -156,6 +157,19 @@ function getRequirementThreadIds(item: { threadIds?: unknown; threadId?: unknown
         .filter(Boolean)
     )
   ]
+}
+
+function getRequirementDevelopmentThreadIds(item: { developmentThreadIds?: unknown }): string[] {
+  return Array.isArray(item.developmentThreadIds)
+    ? [
+        ...new Set(
+          item.developmentThreadIds
+            .filter((value): value is string => typeof value === "string")
+            .map((value) => value.trim())
+            .filter(Boolean)
+        )
+      ]
+    : []
 }
 
 function safeSegment(value: string, fallback: string): string {
@@ -316,6 +330,7 @@ async function readRequirementIndex(): Promise<RequirementIndexItem[]> {
     return {
       ...item,
       threadIds: normalizedThreadIds,
+      developmentThreadIds: getRequirementDevelopmentThreadIds(item),
       needDesign: normalizeNeedDesign(item.needDesign),
       source: {
         ...item.source,
@@ -842,6 +857,7 @@ async function createRequirement(
   const item: RequirementIndexItem = {
     reqId,
     threadIds: [],
+    developmentThreadIds: [],
     systemId,
     title,
     requirementPath: getRequirementWorkspacePath(workDir, reqId, title),
@@ -901,19 +917,25 @@ async function createRequirement(
 
 async function attachRequirementThread(
   reqId: string,
-  threadId: string
+  threadId: string,
+  development = false
 ): Promise<RequirementRuntimeItem> {
   const list = await readRequirementIndex()
   const index = list.findIndex((item) => item.reqId === reqId)
   if (index < 0) throw new Error(`需求不存在：${reqId}`)
   const normalizedThreadId = threadId.trim()
   const currentThreadIds = getRequirementThreadIds(list[index])
+  const currentDevelopmentThreadIds = getRequirementDevelopmentThreadIds(list[index])
   const next = {
     ...list[index],
     // Binding a thread only enables conversation. It is not a requirement content update.
     threadIds: normalizedThreadId
       ? Array.from(new Set([...currentThreadIds, normalizedThreadId]))
-      : currentThreadIds
+      : currentThreadIds,
+    developmentThreadIds:
+      development && normalizedThreadId
+        ? Array.from(new Set([...currentDevelopmentThreadIds, normalizedThreadId]))
+        : currentDevelopmentThreadIds
   }
   list[index] = next
   await writeRequirementIndex(list)
@@ -932,10 +954,38 @@ async function detachRequirementThread(
   if (index < 0) throw new Error(`需求不存在：${normalizedReqId}`)
   const currentThreadIds = getRequirementThreadIds(list[index])
   const threadIds = currentThreadIds.filter((value) => value !== normalizedThreadId)
-  const next = { ...list[index], threadIds }
+  const next = {
+    ...list[index],
+    threadIds,
+    developmentThreadIds: getRequirementDevelopmentThreadIds(list[index]).filter(
+      (value) => value !== normalizedThreadId
+    )
+  }
   list[index] = next
   await writeRequirementIndex(list)
   return toRuntimeRequirement(next)
+}
+
+async function resetRequirementDevelopment(
+  reqId: string
+): Promise<{ requirement: RequirementRuntimeItem; threadIds: string[] }> {
+  const normalizedReqId = reqId?.trim()
+  if (!normalizedReqId) throw new Error("需求编号不能为空")
+  const list = await readRequirementIndex()
+  const index = list.findIndex((item) => item.reqId === normalizedReqId)
+  if (index < 0) throw new Error(`需求不存在：${normalizedReqId}`)
+  const developmentThreadIds = getRequirementDevelopmentThreadIds(list[index])
+  const developmentThreadIdSet = new Set(developmentThreadIds)
+  const next = {
+    ...list[index],
+    threadIds: getRequirementThreadIds(list[index]).filter(
+      (threadId) => !developmentThreadIdSet.has(threadId)
+    ),
+    developmentThreadIds: []
+  }
+  list[index] = next
+  await writeRequirementIndex(list)
+  return { requirement: await toRuntimeRequirement(next), threadIds: developmentThreadIds }
 }
 
 async function renameRequirement(reqId: string, title: string): Promise<RequirementRuntimeItem> {
@@ -1395,9 +1445,15 @@ export function registerRequirementHandlers(ipcMain: IpcMain): void {
   })
   ipcMain.handle(
     "requirements:attach-thread",
-    async (_event, { reqId, threadId }: { reqId: string; threadId: string }) => {
+    async (
+      _event,
+      { reqId, threadId, development }: { reqId: string; threadId: string; development?: boolean }
+    ) => {
       try {
-        return { success: true, requirement: await attachRequirementThread(reqId, threadId) }
+        return {
+          success: true,
+          requirement: await attachRequirementThread(reqId, threadId, development === true)
+        }
       } catch (error) {
         return {
           success: false,
@@ -1419,6 +1475,16 @@ export function registerRequirementHandlers(ipcMain: IpcMain): void {
       }
     }
   )
+  ipcMain.handle("requirements:reset-development", async (_event, reqId: string) => {
+    try {
+      return { success: true, ...(await resetRequirementDevelopment(reqId)) }
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : "重置需求开发失败"
+      }
+    }
+  })
   ipcMain.handle(
     "requirements:rename",
     async (_event, { reqId, title }: { reqId: string; title: string }) => {

@@ -10,7 +10,12 @@ import { Button } from "@/components/ui/button"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { useAppStore } from "@/lib/store"
 import { assembleBoundedTextPreview } from "@/lib/text-preview-pages"
-import { useAllThreadStates, useThreadState, useThreadStream } from "@/lib/thread-context"
+import {
+  useAllThreadStates,
+  useThreadContext,
+  useThreadState,
+  useThreadStream
+} from "@/lib/thread-context"
 import { cn } from "@/lib/utils"
 import {
   beginOpenResourcePreviewIntent,
@@ -45,6 +50,15 @@ import { RequirementDetailsPanel } from "./RequirementDetailsPanel"
 import { getSelectedRequirementSystem } from "./requirement-store"
 import { getDesignSessionClient } from "@/components/design/session-client"
 import { LeanstarTokenDialog } from "./LeanstarTokenDialog"
+import {
+  buildRequirementDevelopmentPrompt,
+  getRequirementDevelopmentMetadata,
+  REQUIREMENT_DEVELOPMENT_AUTO_SEND_KEY,
+  REQUIREMENT_DEVELOPMENT_ONBOARDING_EVENT,
+  REQUIREMENT_DEVELOPMENT_ONBOARDING_KEY,
+  resolveRequirementDevelopmentFiles,
+  writeRequirementDevelopmentIntent
+} from "@/lib/requirement-development"
 
 const REQUIREMENT_SPACE_PUBLISH_MESSAGE = "发布到需求空间"
 const LEANSTAR_TOKEN_MESSAGE_PREFIX = "精益之星身份令牌-Token："
@@ -233,8 +247,10 @@ function RequirementConversationSession({
   const selectThread = useAppStore((state) => state.selectThread)
   const createThread = useAppStore((state) => state.createThread)
   const deleteThread = useAppStore((state) => state.deleteThread)
+  const setShowHarnessBoardView = useAppStore((state) => state.setShowHarnessBoardView)
   const openSubagentFocusView = useAppStore((state) => state.openSubagentFocusView)
   const subagentFocusView = useAppStore((state) => state.subagentFocusView)
+  const threadContext = useThreadContext()
   const [selectedThreadId, setSelectedThreadId] = useState<string | null>(
     activeThreadId && requirement.threadIds.includes(activeThreadId)
       ? activeThreadId
@@ -299,6 +315,89 @@ function RequirementConversationSession({
   const [rightPanelCollapsed, setRightPanelCollapsed] = useState(false)
   const [functionWorkspaceOpen, setFunctionWorkspaceOpen] = useState(false)
   const [statusRefreshing, setStatusRefreshing] = useState(false)
+  const startRequirementDevelopment = useCallback((): void => {
+    const files = resolveRequirementDevelopmentFiles(
+      requirement,
+      requirementSpaceManifest,
+      threadState?.workspacePath ?? requirement.requirementPath
+    )
+    const prompt = buildRequirementDevelopmentPrompt({
+      title: requirement.title,
+      ...files
+    })
+    const developmentManifest = requirementSpaceManifest ?? requirement.prdManifest
+    writeRequirementDevelopmentIntent({
+      action: "create-development",
+      requirementId: requirement.id,
+      requirementTitle: requirement.title,
+      prompt,
+      functionCount: developmentManifest.functions.length,
+      hasPrototype: files.prototypeFilePaths.length > 0,
+      ...files
+    })
+    setShowHarnessBoardView(true)
+    window.dispatchEvent(new Event(REQUIREMENT_DEVELOPMENT_ONBOARDING_EVENT))
+  }, [requirement, requirementSpaceManifest, setShowHarnessBoardView, threadState?.workspacePath])
+  const continueRequirementDevelopment = useCallback(
+    (developmentThreadId: string): void => {
+      window.sessionStorage.setItem(
+        REQUIREMENT_DEVELOPMENT_ONBOARDING_KEY,
+        JSON.stringify({
+          action: "open-session",
+          threadId: developmentThreadId,
+          requirementTitle: requirement.title
+        })
+      )
+      setShowHarnessBoardView(true)
+      window.dispatchEvent(new Event(REQUIREMENT_DEVELOPMENT_ONBOARDING_EVENT))
+    },
+    [requirement.title, setShowHarnessBoardView]
+  )
+  const resetRequirementDevelopment = useCallback(async (): Promise<void> => {
+    const threadIds = new Set(requirement.developmentThreadIds)
+    useAppStore.getState().threads.forEach((thread) => {
+      if (getRequirementDevelopmentMetadata(thread)?.requirementId === requirement.id) {
+        threadIds.add(thread.thread_id)
+      }
+    })
+    const ids = [...threadIds]
+    const deletions = await Promise.allSettled(ids.map((threadId) => deleteThread(threadId)))
+    const deletedThreadIds = ids.filter((_, index) => deletions[index].status === "fulfilled")
+    const pendingAutoSendThreadId = window.sessionStorage.getItem(
+      REQUIREMENT_DEVELOPMENT_AUTO_SEND_KEY
+    )
+    if (pendingAutoSendThreadId && deletedThreadIds.includes(pendingAutoSendThreadId)) {
+      window.sessionStorage.removeItem(REQUIREMENT_DEVELOPMENT_AUTO_SEND_KEY)
+    }
+    deletedThreadIds.forEach((threadId) => threadContext.cleanupThread(threadId))
+    const failedCount = deletions.length - deletedThreadIds.length
+    if (failedCount > 0) {
+      const detachments = await Promise.all(
+        deletedThreadIds.map((threadId) =>
+          window.api.requirements.detachThread({ reqId: requirement.id, threadId })
+        )
+      )
+      const latestRequirement = detachments.findLast((item) => item.success && item.requirement)
+      if (latestRequirement?.requirement) {
+        onRequirementUpdated(
+          fromPersistedRequirement(latestRequirement.requirement, requirement.system)
+        )
+      }
+      throw new Error(`${failedCount} 个开发会话删除失败`)
+    }
+    const result = await window.api.requirements.resetDevelopment(requirement.id)
+    if (!result.success || !result.requirement) {
+      throw new Error(result.error || "重置需求开发失败")
+    }
+    onRequirementUpdated(fromPersistedRequirement(result.requirement, requirement.system))
+  }, [
+    deleteThread,
+    onRequirementUpdated,
+    requirement.developmentThreadIds,
+    requirement.id,
+    requirement.system,
+    threadContext
+  ])
   const handleFunctionWorkspaceChange = useCallback((open: boolean) => {
     setFunctionWorkspaceOpen(open)
     if (open) setRightPanelCollapsed(false)
@@ -1431,6 +1530,9 @@ function RequirementConversationSession({
             onUpdatePrototypeFunctionDesign={updatePrototypeFunctionDesign}
             onPublishToRequirementSpace={handlePublishToRequirementSpace}
             onSendLeanstarToken={handleSendLeanstarToken}
+            onStartDevelopment={startRequirementDevelopment}
+            onContinueDevelopment={continueRequirementDevelopment}
+            onResetDevelopment={resetRequirementDevelopment}
           />
         </div>
       </div>
