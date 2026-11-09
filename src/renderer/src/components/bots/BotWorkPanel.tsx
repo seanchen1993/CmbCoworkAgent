@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react"
+import { useRef, useState } from "react"
 import { useAppStore } from "@/lib/store"
 import { Plus, ArrowLeft, ArrowUpRight, Check, RotateCcw } from "lucide-react"
 import type { BotClient } from "../../../../shared/bots/contracts"
@@ -51,33 +51,6 @@ export function BotWorkPanel({
     [error, setError] = useState<string | null>(null),
     [limit, setLimit] = useState(6)
   const operation = useRef<{ fingerprint: string; id: string } | null>(null)
-  const threadWorkspace = useAppStore(
-    (state) =>
-      state.threads.find((thread) => thread.thread_id === selected?.threadId)?.metadata
-        ?.workspacePath
-  )
-  const [workspace, setWorkspace] = useState<{ id: string; path: string } | null>(null)
-  useEffect(() => {
-    let disposed = false
-    setWorkspace(null)
-    if (selected && !selected.source)
-      void window.api.threads
-        .get(selected.threadId)
-        .then((row) => {
-          const path = row?.metadata?.workspacePath
-          if (!disposed && typeof path === "string") setWorkspace({ id: selected.id, path })
-        })
-        .catch(() => {})
-    return () => {
-      disposed = true
-    }
-  }, [
-    selected?.id,
-    selected?.threadId,
-    selected?.threadInitialized,
-    selected?.conversation?.state,
-    threadWorkspace
-  ])
   const openConversation = async () => {
     if (!selected || !client.conversations) return
     const owner = botId,
@@ -166,8 +139,6 @@ export function BotWorkPanel({
     ...controller.priority,
     ...controller.items.filter((item) => !controller.priority.some((v) => v.id === item.id))
   ]
-  const selectedPath =
-    selected?.workspace?.path ?? (workspace?.id === selected?.id ? workspace?.path : undefined)
   const sourceLabel = selected?.source
     ? selected.source.transport === "im"
       ? "IM 渠道交办"
@@ -210,7 +181,7 @@ export function BotWorkPanel({
           </div>
           <div className="bot-work-origin" aria-label="任务来源">
             <span>来源 · {sourceLabel}</span>
-            {!selected.source && client.conversations && (
+            {(!selected.source || selected.source.transport === "im") && client.conversations && (
               <button disabled={saving} onClick={() => void openConversation()}>
                 {selected.conversation?.origin === "existing" ||
                 selected.conversation?.state === "detached"
@@ -220,18 +191,6 @@ export function BotWorkPanel({
               </button>
             )}
           </div>
-          {selectedPath && (
-            <small className="block truncate" title={selectedPath}>
-              工作目录：{selectedPath}
-              {selected.workspace?.kind === "project"
-                ? `（项目：${selected.workspace.projectName}）`
-                : selected.workspace?.kind === "directory"
-                  ? "（指定目录）"
-                  : selected.conversation?.origin === "existing"
-                    ? ""
-                    : "（Bot默认目录）"}
-            </small>
-          )}
         </div>
       )}
       {editing && (

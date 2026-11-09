@@ -821,6 +821,7 @@ export class BotStore {
       createdAt: Number(row.created_at),
       updatedAt: Number(row.updated_at),
       executionState: (row.execution_state ?? null) as BotWorkItem["executionState"],
+      lastExecution: row.last_execution == null ? null : JSON.parse(String(row.last_execution)),
       pendingPeers: Number(row.pending_peers ?? 0),
       backgroundBusy: Boolean(row.background_busy),
       ...(row.workspace_json == null
@@ -860,6 +861,9 @@ export class BotStore {
         (json_extract(t.origin_json,'$.rootWorkId')=+w.id AND t.state IN ('queued','running','waiting_user'))
       ORDER BY CASE t.state WHEN 'waiting_user' THEN 0 WHEN 'running' THEN 1 WHEN 'queued' THEN 2 ELSE 3 END,
       t.created_at DESC,t.rowid DESC LIMIT 1) AS execution_state,
+      (SELECT json_object('taskId',t.id,'state',t.state,'updatedAt',t.updated_at,'error',substr(t.error,1,1000))
+        FROM bot_tasks t WHERE t.work_id=w.id AND t.injected_into IS NULL
+        ORDER BY t.created_at DESC,t.rowid DESC LIMIT 1) AS last_execution,
       (SELECT COUNT(*) FROM bot_tasks p WHERE json_extract(p.origin_json,'$.rootWorkId')=+w.id
         AND p.work_id IS NULL AND p.state IN ('queued','running','waiting_user')) AS pending_peers,
       (EXISTS(SELECT 1 FROM bot_commands c LEFT JOIN bot_tasks p ON p.id=c.source_task_id
@@ -932,8 +936,10 @@ export class BotStore {
       hasMore: rows.length > 8
     }
   }
-  listWorks(botId: string, cursor?: string, query = "", audience?: string): BotWorkPage {
+  listWorks(botId: string, cursor?: string, query = "", audience?: string, pageSize = 40): BotWorkPage {
     this.getBot(botId)
+    if (!Number.isInteger(pageSize) || pageSize < 1 || pageSize > 40)
+      throw new BotError("INVALID_INPUT", "工作摘要批次无效")
     if (typeof query !== "string" || query.length > 160)
       throw new BotError("INVALID_INPUT", "工作搜索无效")
     let before = Number.MAX_SAFE_INTEGER
@@ -958,11 +964,11 @@ export class BotStore {
     const rows = this.rows(
       `SELECT w.ordinal,w.id,w.bot_id,w.thread_id,w.parent_thread_id,w.title,w.state,w.version,w.created_at,w.updated_at,w.source_json,w.conversation_json,w.workspace_json,
       ${this.workActivityProjection()}
-      FROM bot_work_items w WHERE w.detached=0 AND w.bot_id=? AND (? IS NULL OR w.audience_key=?) AND w.ordinal<? AND (?='' OR instr(lower(w.title),lower(?))>0) ORDER BY w.ordinal DESC LIMIT 41`,
-      [botId, audience ?? null, audience ?? null, before, query, query]
+      FROM bot_work_items w WHERE w.detached=0 AND w.bot_id=? AND (? IS NULL OR w.audience_key=?) AND w.ordinal<? AND (?='' OR instr(lower(w.title),lower(?))>0) ORDER BY w.ordinal DESC LIMIT ?`,
+      [botId, audience ?? null, audience ?? null, before, query, query, pageSize + 1]
     )
     return {
-      items: rows.slice(0, 40).map((row) => this.workSummary(row)),
+      items: rows.slice(0, pageSize).map((row) => this.workSummary(row)),
       priority: this.rows(
         `SELECT w.id,w.bot_id,w.thread_id,w.parent_thread_id,w.title,w.state,w.version,w.created_at,w.updated_at,w.source_json,w.conversation_json,w.workspace_json,
         ${this.workActivityProjection()} FROM bot_work_items w WHERE w.detached=0 AND w.bot_id=? AND (? IS NULL OR w.audience_key=?) AND w.state='active'
@@ -976,9 +982,9 @@ export class BotStore {
         [botId, audience ?? null, audience ?? null, query, query]
       ).map((row) => this.workSummary(row)),
       nextCursor:
-        rows.length > 40
+        rows.length > pageSize
           ? Buffer.from(
-              JSON.stringify([botId, query, audience ?? null, Number(rows[39].ordinal)])
+              JSON.stringify([botId, query, audience ?? null, Number(rows[pageSize - 1].ordinal)])
             ).toString("base64url")
           : null
     }

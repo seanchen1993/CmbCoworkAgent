@@ -30,8 +30,12 @@ export function isLocalWorkConversation(thread: Thread | null | undefined): bool
   return Boolean(
     m?.botHostId === "local" &&
     typeof m.botWorkId === "string" &&
-    m.botAudienceKey === "desktop" &&
-    !m.botMockBindingId &&
+    ((m.botAudienceKey === "desktop" && !m.botMockBindingId) ||
+      (typeof m.botMockBindingId === "string" &&
+        (m.botMockTransport === "im" ||
+          (m.botMockTransport == null &&
+            typeof m.botAudienceKey === "string" &&
+            m.botAudienceKey.startsWith("im:"))))) &&
     !m.botGroupId
   )
 }

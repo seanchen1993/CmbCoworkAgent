@@ -652,6 +652,10 @@ function shouldFastRejectActiveWorkflow(
 const toolConcurrencyLocks = new Map<string, AsyncRWLock>()
 const taskConcurrencyLimiters = new Map<string, AsyncSemaphore>()
 
+// These bounded Host/SQLite observations never access workspace files. They must remain
+// callable while another Bot conversation owns the workspace gate and awaits approval.
+const BOT_WORK_OBSERVATION_TOOLS = new Set(["bot_work_list", "bot_work_read", "bot_work_search"])
+
 function getToolConcurrencyLock(queueId: string): AsyncRWLock {
   let lock = toolConcurrencyLocks.get(queueId)
   if (!lock) {
@@ -722,6 +726,7 @@ function createGradedToolConcurrencyMiddleware(
       if (
         (userInputWithoutToolLock &&
           (toolCall?.name === "bot_send_message" ||
+            (toolCall?.name !== undefined && BOT_WORK_OBSERVATION_TOOLS.has(toolCall.name)) ||
             toolCall?.name === "request_user_input" ||
             toolCall?.name === "bot_request_browser_help" ||
             (toolCall?.name === "bot_browser" &&

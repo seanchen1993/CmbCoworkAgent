@@ -9,7 +9,7 @@ import { DatabaseSync } from "node:sqlite"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { NativeSqliteAdapter } from "../db/native-sqlite-adapter"
 import { BotStore } from "./store"
-import { LocalBotHost, type BotRunLease } from "./host"
+import { LocalBotHost, type BotRunLease, type BotRunPort } from "./host"
 import { BotImChannelService, type BotImGatewayClient } from "../services/im/bot-channel-service"
 import { BotImGatewayStore, botImScopeId } from "./im-gateway-store"
 import {
@@ -54,7 +54,8 @@ function fixture(
   available: () => boolean = () => true,
   workspaces?: BotWorkWorkspacePort,
   workHistory?: BotWorkHistoryPort,
-  concurrency = 2
+  concurrency = 2,
+  workRuntimeStatus?: BotRunPort["workRuntimeStatus"]
 ) {
   const db = new NativeSqliteAdapter(new DatabaseSync(":memory:")),
     store = new BotStore(db)
@@ -76,6 +77,7 @@ function fixture(
     {
       workspaces,
       workHistory,
+      workRuntimeStatus,
       cancelBackground,
       cancelBackgroundCommands,
       cancelWorkflowInstances,
@@ -731,7 +733,10 @@ describe("authenticated IM on the existing Bot host", () => {
         if (task.message === "read") {
           const own = works.get(task.mockSource!.bindingId)!
           const foreign = [...works.values()].find((id) => id !== own)!
-          await host.workHistory(task.id, { workId: own })
+          const history = await host.workHistory(task.id, { workId: own })
+          expect(history.work.execution.phase).toBe("idle")
+          expect(host.workStatusContext(task.id).items.map(item => item.workId)).toEqual([own])
+          expect(host.workTargets(task.id).items.map(item => item.id)).toEqual([own])
           await expect(host.workHistory(task.id, { workId: foreign })).rejects.toThrow("私有历史")
         }
         return { state: "completed", result: "done" }
@@ -739,7 +744,9 @@ describe("authenticated IM on the existing Bot host", () => {
       undefined,
       undefined,
       undefined,
-      { query, resolve: vi.fn() }
+      { query, resolve: vi.fn() },
+      2,
+      () => ({ available: true, threadExists: true, runActive: false, userInput: { count: 0, questions: [] }, approval: false, commands: false, workflow: false, workers: false, pendingResults: false })
     )
     const a = await f.binding(),
       b = await f.binding()
@@ -747,6 +754,7 @@ describe("authenticated IM on the existing Bot host", () => {
     await eventually(() => works.size === 1)
     await f.service.receive(f.event(b, "b-create", "create"))
     await eventually(() => works.size === 2)
+    await eventually(() => [...works.values()].every(id => f.store.getWork(f.bot.id, id).executionState === "completed"))
     await f.service.receive(f.event(a, "read", "read"))
     await eventually(
       () =>

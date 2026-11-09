@@ -5,6 +5,7 @@ vi.mock("electron", () => ({ BrowserWindow: { getAllWindows: () => [] } }))
 vi.mock("../app-attention-events", () => ({ emitAppAttention: vi.fn() }))
 import {
   requestUserInput,
+  summarizePendingUserInputForRuntimeThread,
   getPendingUserInputForThread,
   submitUserInputResponse,
   cancelUserInputsForThread
@@ -48,6 +49,29 @@ afterEach(() => {
 })
 
 describe("Bot multiple choice on the existing pending-input lifecycle", () => {
+  it("reports live parent/child questions, bounds descriptions and clears answered/cancelled requests", async () => {
+    const root = "work-status"
+    for (const id of [root, `${root}__child`, `${root}-sibling`]) {
+      threads.push(id)
+      void requestUserInput({ threadId: id, questions, allowDeferredRenderer: true }).catch(() => {})
+    }
+    expect(summarizePendingUserInputForRuntimeThread(root)).toEqual({ count: 2, questions: ["选择格式", "选择格式"] })
+    const request = getPendingUserInputForThread(root)!
+    expect(submitUserInputResponse({ requestId: request.requestId, answers: { format: answer } } as UserInputResponse)).toBe(true)
+    expect(summarizePendingUserInputForRuntimeThread(root).count).toBe(1)
+    cancelUserInputsForThread(`${root}__child`, "stopped")
+    expect(summarizePendingUserInputForRuntimeThread(root)).toEqual({ count: 0, questions: [] })
+    expect(summarizePendingUserInputForRuntimeThread(`${root}-sibling`).count).toBe(1)
+    for (let i = 0; i < 6; i++) {
+      const id = `${root}__${i}`
+      threads.push(id)
+      void requestUserInput({ threadId: id, questions: [{ ...questions[0], question: "a".repeat(1000) }], allowDeferredRenderer: true }).catch(() => {})
+    }
+    const summary = summarizePendingUserInputForRuntimeThread(root)
+    expect(summary.count).toBe(6)
+    expect(summary.questions).toHaveLength(3)
+    expect(summary.questions.every(q => q.length === 500)).toBe(true)
+  })
   it("settles a real selection once, preserving both selected options", async () => {
     const { request, result } = pending()
     const response = {

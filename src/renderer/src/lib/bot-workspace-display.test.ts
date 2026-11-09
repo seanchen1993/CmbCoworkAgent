@@ -40,3 +40,23 @@ describe("Bot workspace presentation", () => {
     expect(botWorkspaceDisplay("D:\\业务资料\\需求分析").name).toBe("需求分析")
   })
 })
+
+it("labels group default workspaces without exposing technical IDs and preserves chosen folders", () => {
+  const bot = {
+    id: "b",
+    name: "需求助手",
+    color: "red",
+    imGroups: [{ id: "im-123", title: "产品协作群" }]
+  }
+  expect(botWorkspaceDisplay("C:\\data\\bots\\workspaces\\mock-im-123", [bot]).name).toBe(
+    "产品协作群 · 默认工作区"
+  )
+  expect(botWorkspaceDisplay("/data/bots/workspaces/mock-im-123").name).toBe(
+    "招乎群聊 · 默认工作区"
+  )
+  expect(
+    botWorkspaceDisplay("/code/backend", [bot], { kind: "directory", path: "/code/backend" }, bot, {
+      title: "产品协作群"
+    }).name
+  ).toBe("backend")
+})

@@ -106,7 +106,8 @@ async function main() {
                     "./BotWorkPanel",
                     "./BotMemoryPanel",
                     "./BotExecutionDetailsToggle",
-                    "./BotImChannelDialog"
+                    "./BotImChannelDialog",
+                    "./BotTaskWorkspaceButton"
                   ].includes(a.path)
                 )
                   return
@@ -116,7 +117,7 @@ async function main() {
             b.onLoad({ filter: /.*/, namespace: "fixture" }, (a) => {
               let contents = ""
               if (a.path === "@/lib/store")
-                contents = `const state={models:[],threads:[],mainView:'bots',showCustomizeView:false,loadThreads:()=>{}};export const useAppStore=Object.assign(selector=>selector(state),{getState:()=>state});`
+                contents = `import {create} from 'zustand';export const useAppStore=create(set=>({models:[],threads:[],mainView:'bots',showCustomizeView:false,loadThreads:async()=>{window.fixture.calls.push(['load-threads'])},selectThread:async id=>{window.fixture.calls.push(['select-thread',id]);set({mainView:'thread'})},setMainView:mainView=>set({mainView})}));`
               else if (a.path === "@/lib/thread-context")
                 contents = `const state={messages:[],draftInput:'',draftAttachments:[],queuedMessages:[],pendingApprovals:[],coordinatorWorkers:[]};const context={initializeThread:()=>{},getThreadState:()=>state,getStreamData:()=>({isLoading:false,liveMessages:[]}),getThreadActions:()=>({setDraftInput:()=>{},setDraftAttachments:()=>{}}),subscribeToThreadState:()=>()=>{},subscribeToStream:()=>()=>{}};export const useThreadContext=()=>context;export const useThreadStateSummaries=()=>({});export const useThreadStateSelector=(id,selector)=>id?selector({...state,historyLoading:window.fixture.executionReady===false,historyConversationPresence:window.fixture.executionReady===false?"unknown":"nonempty"}):null;`
               else if (a.path === "@/components/chat/ChatContainer")
@@ -434,6 +435,21 @@ async function main() {
     await details.getByRole("heading", { name: "群内任务" }).waitFor()
     await details.getByRole("button", { name: "返回群聊", exact: true }).waitFor()
     assert.equal(await details.getByText("返回主对话", { exact: true }).count(), 0)
+    await details.getByRole("button", { name: "在对话模式打开", exact: true }).click()
+    const ordinary = page.getByTestId("ordinary-workbench")
+    await ordinary.waitFor()
+    await ordinary.getByText("招乎T · 产品协作群", { exact: true }).waitFor()
+    assert.equal(await ordinary.getByRole("button", { name: "任务更多操作" }).count(), 0)
+    assert.deepEqual(await page.evaluate(() => (window as any).fixture.opened.at(-1)), ["expose", "bot", "work-a"])
+    assert.ok((await page.evaluate(() => (window as any).fixture.calls)).some((c: any[]) => c[0] === "select-thread" && c[1] === "task-a"))
+    await ordinary.getByRole("button", { name: "工作目录：产品协作群 · 默认工作区", exact: true }).click()
+    await page.getByText("产品协作群 · 默认工作区", { exact: true }).waitFor()
+    await page.keyboard.press("Escape")
+    await page.screenshot({ animations: "disabled", path: join(artifacts, "bot-im-task-ordinary-workbench.png") })
+    await ordinary.getByRole("button", { name: "返回群内任务", exact: true }).click()
+    await page.getByTestId("private-conversation").getByText("任务对话：演示准备清单").waitFor()
+    await details.getByRole("button", { name: "返回群聊", exact: true }).waitFor()
+    assert.equal(await page.locator('[data-bot-row-key="im:group-a"]').getAttribute("data-selected"), "true")
     await details.getByRole("button", { name: "完成任务", exact: true }).click()
     await details.getByRole("button", { name: "继续处理", exact: true }).waitFor()
     await page.screenshot({

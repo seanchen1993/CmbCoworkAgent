@@ -490,3 +490,115 @@ it("does not finish a historical preparing Team association through expose", asy
   expect(f.update).not.toHaveBeenCalled()
   expect(x.store.conversations.record(work.id)?.state).toBe("preparing")
 })
+
+
+/** Real IM store/source proof with an isolated thread store; no network or user data. */
+function imWorkFixture(legacy = false, specified = false) {
+  const x = fixture()
+  const route = x.store.imGateway.register("realm", "owner", {
+    id: "external-group", botId: x.bot.id, kind: "group", label: x.bot.name,
+    peerLabel: "产品协作群", version: 1, state: "active", conversationKey: "group-chat",
+    createdAt: new Date().toISOString(), expiresAt: new Date().toISOString()
+  })
+  x.store.im.importImBinding({ id: route.id, botId: x.bot.id, kind: "group",
+    label: x.bot.name, channelKey: "group-chat", version: 1 })
+  x.store.im.setOnline(x.bot.id, route.id, true)
+  const ingress = x.store.imGateway.receive("realm", "owner", {
+    route: { bindingId: route.binding.id, botId: x.bot.id, kind: "group", label: x.bot.name, version: 1, senderId: "member" },
+    event: { schemaVersion: 1, eventId: "im-request", platformMessageId: "group-message",
+      principalId: "owner", conversationKey: "group-chat", conversationSeq: 1,
+      message: { type: "text", text: "创建独立任务" }, occurredAt: new Date().toISOString(),
+      redelivered: false, lease: { id: "test-lease", expiresAt: new Date(Date.now() + 90000).toISOString() } }
+  })
+  x.store.imGateway.settle(ingress.id, "active", undefined, Date.now() + 90000)
+  const event = x.store.im.inject({ simulation: true, bindingId: route.id,
+    eventId: ingress.id, messageId: "group-message", senderId: "member",
+    text: "创建独立任务", mentionsBotIds: [x.bot.id] })
+  x.store.transition(event.taskId!, "running")
+  const workspacePath = specified ? "C:\\code\\业务系统" : `/fixture/bots/workspaces/mock-${route.id}`
+  const receipt = x.store.createWork({ botId: x.bot.id, operationId: "group-work",
+    title: "群内需求梳理", goal: "延续群内讨论" },
+    { taskId: event.taskId!, callId: "create-work", key: "create-work" },
+    { kind: specified ? "directory" : "default", path: workspacePath })
+  x.store.settle(event.taskId!, "completed", null, "已交办")
+  const source = receipt.work.source!
+  const metadata = { ...x.original, workspacePath, botId: x.bot.id, botHostId: "local",
+    botWorkId: receipt.work.id, botAudienceKey: source.audienceKey,
+    botMockBindingId: source.bindingId, botMockGrantVersion: source.grantVersion,
+    botMockConversationId: source.conversationId, ...(!legacy ? { botMockTransport: "im" } : { disableAgentsPrompt: true, allowedSkills: [], allowedExperts: [] }) }
+  f.rows.set(receipt.work.threadId, { ...x.row, thread_id: receipt.work.threadId,
+    metadata: JSON.stringify(metadata) })
+  return { ...x, receipt, metadata, route }
+}
+
+describe("IM work in the ordinary workbench", () => {
+  it.each([false, true])("opens the original IM thread with its group, workspace and model (legacy=%s)", async (legacy) => {
+    const x = imWorkFixture(legacy, legacy)
+    const opened = await resolveWorkConversation(x.host, x.receipt.work.threadId)
+    expect(opened).toMatchObject({ bot: { id: x.bot.id },
+      imConversation: { id: x.route.id, title: "产品协作群", state: "active" },
+      workspacePath: x.metadata.workspacePath,
+      work: { id: x.receipt.work.id, threadId: x.receipt.work.threadId,
+        audienceKey: x.receipt.work.audienceKey, source: x.receipt.work.source,
+        workspace: x.receipt.work.workspace, conversation: { origin: "created", state: "bound" } } })
+    const upgraded = { ...x.metadata } as Record<string, unknown>
+    delete upgraded.disableAgentsPrompt
+    delete upgraded.allowedSkills
+    delete upgraded.allowedExperts
+    const savedMetadata = JSON.parse(f.rows.get(x.receipt.work.threadId)!.metadata!)
+    expect(savedMetadata).toMatchObject({ ...upgraded, botMockTransport: "im", botLocalConversation: true })
+    expect(savedMetadata.allowedSkills).toBeUndefined()
+    expect(savedMetadata.disableAgentsPrompt).toBeUndefined()
+    expect(await resolveWorkConversation(x.host, x.receipt.work.threadId)).toEqual(opened)
+    expect(x.store.recentTasks()).toHaveLength(2) // opening does not execute or copy
+    expect(x.host.listWorks(x.bot.id).items).toHaveLength(0) // absent from private Bot
+    await expect(unlinkWorkConversation(x.host, x.bot.id, opened!.work.id, opened!.work.version))
+      .rejects.toThrow("不能解除为私人会话")
+    expect(() => x.store.conversations.beginDetach(x.bot.id, opened!.work.id, opened!.work.version))
+      .toThrow("不能解除为私人会话")
+
+    // Continue from the desktop workbench; still return results to the original group.
+    x.store.transition(x.receipt.task.id, "running")
+    x.store.settle(x.receipt.task.id, "completed", null, "第一轮结果")
+    const followup = x.host.send({ botId: x.bot.id, workId: opened!.work.id,
+      requestId: "workbench-followup", message: "继续完善" })
+    expect(followup.threadId).toBe(opened!.work.threadId)
+    expect(followup.mockSource).toEqual(opened!.work.source)
+    expect(x.host.mockExecution(followup)?.source).toEqual(opened!.work.source)
+    x.store.transition(followup.id, "running")
+    x.store.settle(followup.id, "completed", null, "第二轮结果")
+    const row = x.db.prepare("SELECT binding_id,work_id,text FROM bot_im_outbox WHERE source_task_id=?", [followup.id])
+    try {
+      expect(row.step()).toBe(true)
+      expect(row.getAsObject()).toMatchObject({ binding_id: x.route.id, work_id: opened!.work.id, text: "第二轮结果" })
+    } finally { row.free() }
+  })
+
+  it.each([
+    { botMockBindingId: "other-group" }, { botAudienceKey: "desktop" },
+    { botMockConversationId: "other-conversation" }, { botMockGrantVersion: 2 },
+    { botMockTransport: "mock" }, { workspacePath: "/other/workspace" }, { botId: "other-bot" }
+  ])("rejects mismatched identity before creating a link: %j", async (patch) => {
+    const x = imWorkFixture()
+    f.rows.set(x.receipt.work.threadId, { ...f.rows.get(x.receipt.work.threadId)!,
+      metadata: JSON.stringify({ ...x.metadata, ...patch }) })
+    await expect(resolveWorkConversation(x.host, x.receipt.work.threadId)).rejects.toThrow("身份不一致")
+    expect(x.store.conversations.record(x.receipt.work.id)).toBeUndefined()
+    expect(f.update).not.toHaveBeenCalled()
+  })
+
+  it("keeps revoked group history readable, follows group renames and blocks further execution", async () => {
+    const x = imWorkFixture()
+    await exposeWorkConversation(x.host, x.bot.id, x.receipt.work.id)
+    x.store.transition(x.receipt.task.id, "running")
+    x.store.settle(x.receipt.task.id, "completed", null, "旧结果")
+    x.store.imGateway.register(x.route.realm, x.route.principal,
+      { ...x.route.binding, peerLabel: "已改名的群", state: "revoked", version: 2 })
+    x.store.im.revoke(x.bot.id, x.route.id, 1)
+    const resolution = await resolveWorkConversation(x.host, x.receipt.work.threadId)
+    expect(resolution?.imConversation).toEqual({ id: x.route.id, title: "已改名的群", state: "revoked" })
+    expect(() => x.host.send({ botId: x.bot.id, workId: x.receipt.work.id,
+      requestId: "revoked-followup", message: "不能再执行" })).toThrow()
+    expect(resolution?.work.source).toEqual(x.receipt.work.source)
+  })
+})

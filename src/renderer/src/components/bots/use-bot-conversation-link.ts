@@ -28,6 +28,7 @@ export function useBotConversationLink(threadId: string, enabled: boolean) {
         while (dirty && !disposed) {
           dirty = false
           const value = await window.api.bots.conversations!.resolve(threadId)
+          if (!value) throw new Error("原 Bot 任务不可用，请返回所属 Bot 核对后重试。")
           if (!disposed) setState({ threadId, value, loading: false, error: null })
         }
       } catch (cause) {

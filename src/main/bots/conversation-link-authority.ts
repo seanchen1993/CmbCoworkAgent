@@ -1,37 +1,52 @@
 import { BotError } from "../../shared/bots/contracts"
-import type { BotWorkItem } from "../../shared/bots/work"
+import { isLocalBotWork, type BotWorkItem } from "../../shared/bots/work"
 import { matchesThreadIncarnation, type ThreadIncarnationRow } from "../services/thread-incarnation"
 import { getLocalThreadRunLease } from "../agent/thread-run-lease"
 import type { AgentRunExecutionContext } from "../agent/agent-run-service"
 
 let lookup: ((threadId: string) => BotWorkItem | null) | undefined
+type BotWorkIdentity = Pick<BotWorkItem, "id" | "botId" | "threadId" | "source" | "audienceKey" | "workspace" | "conversation">
 /** Installed by the original local Host; no metadata or renderer field grants execution. */
 export function setWorkConversationLookup(resolve: typeof lookup) {
   lookup = resolve
 }
+/** The Host's source remains authoritative in either UI; opening never changes its audience. */
+export function verifyWorkThreadMetadata(
+  work: BotWorkIdentity,
+  metadata: Record<string, unknown>
+): void {
+  const source = work.source
+  if (
+    !isLocalBotWork(work) ||
+    metadata.botId !== work.botId ||
+    metadata.botHostId !== "local" ||
+    metadata.botWorkId !== work.id ||
+    metadata.botAudienceKey !== work.audienceKey ||
+    metadata.botGroupId != null ||
+    (metadata.botMockBindingId ?? null) !== (source?.bindingId ?? null) ||
+    (source &&
+      (metadata.botMockConversationId !== source.conversationId ||
+        metadata.botMockGrantVersion !== source.grantVersion ||
+        (metadata.botMockTransport != null && metadata.botMockTransport !== "im"))) ||
+    typeof metadata.workspacePath !== "string" ||
+    !metadata.workspacePath.trim() ||
+    (work.workspace && metadata.workspacePath !== work.workspace.path)
+  )
+    throw new BotError("CONFLICT", "任务与原会话身份不一致，已停止以保护会话。")
+}
 export function verifyWorkConversationThread(
-  work: BotWorkItem,
+  work: BotWorkIdentity,
   row: ThreadIncarnationRow,
   metadata: Record<string, unknown>
 ): void {
+  verifyWorkThreadMetadata(work, metadata)
   const link = work.conversation
   if (
     !link ||
     link.ref.kind !== "local_thread" ||
     !matchesThreadIncarnation(row, link.ref.incarnation) ||
-    work.source ||
-    work.audienceKey !== "desktop" ||
     metadata.botLocalConversation !== true ||
-    metadata.botId !== work.botId ||
-    metadata.botHostId !== "local" ||
-    metadata.botWorkId !== work.id ||
-    metadata.botAudienceKey !== "desktop" ||
-    metadata.botWorkOrigin !== link.origin ||
-    metadata.botGroupId != null ||
-    metadata.botMockBindingId != null ||
-    typeof metadata.workspacePath !== "string" ||
-    !metadata.workspacePath.trim() ||
-    (work.workspace && metadata.workspacePath !== work.workspace.path)
+    metadata.botWorkOrigin !== link.origin
   )
     throw new BotError("CONFLICT", "任务与原会话身份不一致，已停止以保护会话。")
 }

@@ -10,6 +10,7 @@ import {
   botWorkBrowserScope,
   type BotWorkWorkspacePort,
   type BotWorkItem,
+  type BotWorkSummary,
   type CreateBotWorkInput
 } from "../../shared/bots/work"
 import type {
@@ -50,6 +51,8 @@ import type { UserInputRequest } from "../types"
 import { parseCreateBotWork } from "../../shared/bots/validation"
 import { parseBotReactionTarget, type BotReactionTarget } from "../../shared/bots/message-reactions"
 import type { BotImBinding } from "../../shared/bots/im-channel"
+import type { BotWorkRuntimeState } from "../../shared/bots/work-status"
+import { projectBotWorkStatus } from "./work-status"
 
 export interface BotRunLease {
   notificationTerminal?(): AgentRunTerminal | undefined
@@ -86,6 +89,7 @@ export interface BotRunLease {
 
 export interface BotRunPort {
   workHistory?: BotWorkHistoryPort
+  workRuntimeStatus?(work: BotWorkSummary): BotWorkRuntimeState
   browser?: boolean
   workspaces?: BotWorkWorkspacePort
   /** Existing workflow/coordinator managers remain authoritative, including durable pending results. */
@@ -132,6 +136,7 @@ export class LocalBotHost {
       launchedCommands: Set<string>
       preparingSteers: Set<string>
       steeringReady: boolean
+      browserHelp?: import("./browser").BotBrowserHelp
     }
   >()
   private readonly deletions = new Map<string, Promise<void>>()
@@ -449,12 +454,45 @@ export class LocalBotHost {
   }
   workTargets(taskId: string, cursor?: string, query?: string) {
     const task = this.workToolSource(taskId)
-    return this.store.listWorks(
+    const page = this.store.listWorks(
       task.botId,
       cursor,
       query,
       task.mockSource?.audienceKey ?? "desktop"
     )
+    const snapshots = new Map<string, ReturnType<LocalBotHost["workExecutionStatus"]>>()
+    const enrich = (work: BotWorkSummary) => {
+      let execution = snapshots.get(work.id)
+      if (!execution) {
+        execution = this.workExecutionStatus(work)
+        snapshots.set(work.id, execution)
+      }
+      return { ...work, execution }
+    }
+    return { ...page, items: page.items.map(enrich), priority: page.priority.map(enrich) }
+  }
+  private workExecutionStatus(work: BotWorkSummary) {
+    const runs = [...this.active.values()].filter(run => run.task.threadId === work.threadId && !run.controller.signal.aborted)
+    let runtime: BotWorkRuntimeState | undefined
+    try { runtime = this.runtime.workRuntimeStatus?.(work) } catch { /* Unknown is not idle. */ }
+    return projectBotWorkStatus(work, runtime, runs.length > 0, runs.find(run => run.browserHelp)?.browserHelp?.instruction)
+  }
+  /** A bounded, same-audience snapshot for each main Bot turn, including automatic reports. */
+  workStatusContext(taskId: string) {
+    const task = this.workToolSource(taskId)
+    const page = this.store.listWorks(task.botId, undefined, "", task.mockSource?.audienceKey ?? "desktop", 8)
+    const works = new Map<string, BotWorkSummary>()
+    if (task.origin.kind === "work_result") {
+      const work = this.historyTarget(taskId, task.origin.workId)
+      works.set(work.id, work)
+    }
+    for (const work of [...page.priority, ...page.items]) works.set(work.id, work)
+    return {
+      items: [...works.values()].slice(0, 8).map(work => ({
+        workId: work.id, title: work.title, execution: this.workExecutionStatus(work)
+      })),
+      hasMore: works.size > 8 || page.nextCursor !== null
+    }
   }
   associatedWorks(botId: string) {
     this.getBot(botId)
@@ -474,8 +512,9 @@ export class LocalBotHost {
     if (!this.runtime.workHistory) throw new BotError("CONFLICT", "此主机暂不支持历史查询")
     const work = this.historyTarget(taskId, input.workId)
     const result = await this.runtime.workHistory.query(work, input)
-    this.historyTarget(taskId, input.workId)
-    return result
+    // History hydration is async: sample status afterwards, after rechecking audience authority.
+    const current = this.historyTarget(taskId, input.workId)
+    return { ...result, work: { ...result.work, execution: this.workExecutionStatus(current) } }
   }
   async resolveWorkHistorySource(botId: string, source: BotWorkHistorySource) {
     if (!this.runtime.workHistory) throw new BotError("CONFLICT", "此主机暂不支持历史定位")
@@ -545,6 +584,11 @@ export class LocalBotHost {
     this.updateImState(() => this.store.im.publishFiles(task, callId, files))
   }
   browserHelpNotice(taskId: string, help: import("./browser").BotBrowserHelp, active: boolean): void {
+    const run = this.active.get(taskId)
+    if (run && !run.controller.signal.aborted) {
+      if (active) run.browserHelp = help
+      else if (run.browserHelp?.generation === help.generation) run.browserHelp = undefined
+    }
     this.updateImState(() => this.store.im.browserHelpNotice(this.store.getTask(taskId), help, active))
   }
   imFileStatuses(botId: string, threadId: string, callId: string) {

@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto"
 import type { NativeSqliteAdapter } from "../db/native-sqlite-adapter"
 import type { BotStore } from "./store"
 import { BotError } from "../../shared/bots/contracts"
+import { isLocalBotWork } from "../../shared/bots/work"
 import type {
   BotWorkConversationRef,
   LinkBotWorkConversationInput
@@ -127,7 +128,7 @@ export class BotWorkConversationJournal {
     const ref = localWorkConversationRef(conversation)
     return this.transaction(() => {
       const work = this.owner.getWork(botId, workId)
-      if (work.source || work.audienceKey !== "desktop" || work.threadId !== ref.threadId)
+      if (!isLocalBotWork(work) || work.threadId !== ref.threadId)
         throw new BotError("CONFLICT", "只有本机独立任务可在对话模式打开。")
       const old = this.record(workId)
       if (old) {
@@ -189,6 +190,7 @@ export class BotWorkConversationJournal {
     return this.transaction(() => {
       const work = this.owner.getWork(botId, workId),
         record = this.record(workId)
+      if (work.source) throw new BotError("CONFLICT", "招乎任务保留原会话归属，不能解除为私人会话。")
       if (!record) throw new BotError("CONFLICT", "此任务尚无可解除的本机会话关联。")
       if (record.state === "detached" || record.state === "detaching") return work
       if (work.version !== expectedVersion)

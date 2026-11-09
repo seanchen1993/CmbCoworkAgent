@@ -9,7 +9,7 @@ import {
 const thread = (id: string, metadata: Record<string, unknown> = {}) =>
   ({ thread_id: id, metadata }) as Thread
 describe("workspace thread selection", () => {
-  it("resolves only desktop work candidates, leaving unrelated/project/remote views independent of the Bot backend", () => {
+  it("resolves local work candidates, leaving unrelated/project/remote views independent of the Bot backend", () => {
     const local = {
       botId: "owner",
       botHostId: "local",
@@ -42,4 +42,28 @@ describe("workspace thread selection", () => {
     expect(isRegularChatThread(null)).toBe(false)
     expect(findFirstChatThread([chat, older])).toBe(chat)
   })
+})
+
+it("includes IM independent tasks, including legacy IM metadata, but not channel main threads or simulations", () => {
+  const metadata = {
+    botId: "owner",
+    botHostId: "local",
+    botWorkId: "work",
+    botMockBindingId: "group",
+    botAudienceKey: "im:group"
+  }
+  for (const m of [metadata, { ...metadata, botMockTransport: "im" }]) {
+    expect(isManagedLocalWorkConversation(thread("im-work", m))).toBe(true)
+    expect(isRegularChatThread(thread("im-work", m))).toBe(true)
+    expect(findFirstChatThread([thread("im-work", m)])?.thread_id).toBe("im-work")
+  }
+  for (const m of [
+    { ...metadata, botWorkId: undefined },
+    { ...metadata, botAudienceKey: "mock:group" },
+    { ...metadata, botHostId: "cloud" },
+    { ...metadata, botMockTransport: "mock" }
+  ]) {
+    expect(isRegularChatThread(thread("excluded", m))).toBe(false)
+    expect(isManagedLocalWorkConversation(thread("excluded", m))).toBe(false)
+  }
 })

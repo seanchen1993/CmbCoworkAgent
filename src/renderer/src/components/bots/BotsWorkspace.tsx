@@ -2845,7 +2845,7 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
                       <button onClick={() => void works.refresh()}>重试</button>
                       <button onClick={() => selectWork(null)}>返回主对话</button>
                     </div>
-                  ) : selectedWork?.source &&
+                  ) : selectedWork?.source && selectedWork.source.transport !== "im" &&
                     (detailTab === "files" || detailTab === "computer") ? (
                     <div className="bot-detail-section" role="note">
                       外部接入仅支持文字；此工作无法访问本机资料库和电脑。

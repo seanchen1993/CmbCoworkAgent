@@ -84,7 +84,7 @@ import { WorkspaceRenameDialog } from "./WorkspaceRenameDialog"
 import type { Thread } from "@/types"
 import { selectBoundedSidebarWindow } from "./thread-sidebar-window"
 import { readStoredStringSet, sortPinnedFirst, toggleStoredStringSet } from "@/lib/sidebar-pinning"
-import { botDefaultWorkspaceOwner, botWorkspaceDisplay } from "@/lib/bot-workspace-display"
+import { botDefaultWorkspaceOwner, botWorkspaceDisplay, botWorkOwnerLabel } from "@/lib/bot-workspace-display"
 import { useBotWorkspaceProfiles } from "../bots/use-bot-workspace-profiles"
 
 const NO_WORKSPACE_PROJECT_KEY = "__no_workspace__"
@@ -264,7 +264,7 @@ function ThreadListItemImpl({
   isExporting,
   isForking = false,
   hoverTitle,
-  botOwnerName
+  botOwnerLabel
 }: {
   thread: Thread
   isLoading: boolean
@@ -290,7 +290,7 @@ function ThreadListItemImpl({
   onCancelEditing: () => void
   onEditingTitleChange: (value: string) => void
   hoverTitle?: string
-  botOwnerName?: string
+  botOwnerLabel?: string
 }): React.JSX.Element {
   const isRunning = isLoading || scheduledTaskLoading
   const forkDisabled = isRunning || hasPendingApproval || hasPendingUserInput || isForking
@@ -309,6 +309,7 @@ function ThreadListItemImpl({
   }, [isRunning])
 
   const displayTitle = getDisplayThreadTitle(thread)
+  const managedWork = isLocalWorkConversation(thread)
   const remoteThreadKind = getRemoteThreadKind(thread)
   const remoteThreadHistorical = remoteThreadKind && thread.metadata?.remoteState === "historical"
   const pendingUserInputBadge = hasPendingUserInput ? (
@@ -396,10 +397,10 @@ function ThreadListItemImpl({
             {!isEditing && isLocalWorkConversation(thread) && (
               <div
                 className="mt-0.5 flex min-w-0 items-center gap-1 text-[10px] text-muted-foreground"
-                title={`${botOwnerName || "Bot"} · 独立任务`}
+                title={botOwnerLabel}
               >
                 <BotIcon className="size-3 shrink-0" aria-hidden="true" />
-                <span className="truncate">{botOwnerName || "Bot"} · 独立任务</span>
+                <span className="truncate">{botOwnerLabel || "Bot · 独立任务"}</span>
               </div>
             )}
           </div>
@@ -432,12 +433,12 @@ function ThreadListItemImpl({
               />
               <IconPopoverButton
                 icon={<Trash2 className="size-3" />}
-                popoverContent={isRunning ? "任务运行中，无法删除" : "删除会话"}
-                disabled={isRunning}
+                popoverContent={managedWork ? "请在所属 Bot 或群中管理任务" : isRunning ? "任务运行中，无法删除" : "删除会话"}
+                disabled={isRunning || managedWork}
                 stopPropagation
                 className={cn(
                   "size-6 rounded-sm p-0 hover:bg-accent/20",
-                  isRunning && "cursor-not-allowed !opacity-30"
+                  (isRunning || managedWork) && "cursor-not-allowed !opacity-30"
                 )}
                 onClick={onDelete}
               />
@@ -479,7 +480,7 @@ function ThreadListItemImpl({
           </ContextMenuItem>
         ) : null}
         <ContextMenuSeparator />
-        <ContextMenuItem variant="destructive" onClick={onDelete} disabled={isRunning}>
+        <ContextMenuItem variant="destructive" onClick={onDelete} disabled={isRunning || managedWork}>
           <Trash2 className="size-4 mr-2" />
           {isRunning ? "运行中，无法删除" : "删除"}
         </ContextMenuItem>
@@ -514,7 +515,7 @@ function areThreadListItemPropsEqual(
     prev.isManagedRunning !== next.isManagedRunning ||
     Boolean(prev.onForkFromCheckpoint) !== Boolean(next.onForkFromCheckpoint) ||
     prev.hoverTitle !== next.hoverTitle ||
-    prev.botOwnerName !== next.botOwnerName
+    prev.botOwnerLabel !== next.botOwnerLabel
   ) {
     return false
   }
@@ -830,7 +831,7 @@ export const ThreadSidebar = memo(function ThreadSidebar(): React.JSX.Element {
         const defaultOwner = !isManagedInbox && path ? botDefaultWorkspaceOwner(path) : null
         const botWorkspace =
           path && defaultOwner
-            ? botWorkspaceDisplay(path, [], undefined, botProfilesById.get(defaultOwner))
+            ? botWorkspaceDisplay(path, botProfiles, undefined, botProfilesById.get(defaultOwner))
             : undefined
         const display = getProjectDisplayName(
           path,
@@ -856,7 +857,7 @@ export const ThreadSidebar = memo(function ThreadSidebar(): React.JSX.Element {
     }
 
     return sortPinnedFirst(projectMap.values(), (project) => project.isPinned)
-  }, [pinnedProjectKeys, projectNameOverrides, threadStateSummaries, threads, botProfilesById])
+  }, [pinnedProjectKeys, projectNameOverrides, threadStateSummaries, threads, botProfilesById, botProfiles])
 
   const currentThread = useMemo(() => {
     if (!currentThreadId) return null
@@ -1715,9 +1716,10 @@ export const ThreadSidebar = memo(function ThreadSidebar(): React.JSX.Element {
                             <ThreadListItem
                               key={thread.thread_id}
                               thread={thread}
-                              botOwnerName={
-                                botProfilesById.get(String(thread.metadata?.botId ?? ""))?.name
-                              }
+                              botOwnerLabel={botWorkOwnerLabel(
+                                thread.metadata,
+                                botProfilesById.get(String(thread.metadata?.botId ?? ""))
+                              )}
                               isLoading={isLoading}
                               hasPendingApproval={hasPendingApproval}
                               hasPendingUserInput={hasPendingUserInput}

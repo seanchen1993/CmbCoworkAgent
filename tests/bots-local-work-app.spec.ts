@@ -28,6 +28,8 @@ async function main() {
       const body = JSON.parse(raw),
         messages = body.messages ?? []
       const text = (value: unknown) => (typeof value === "string" ? value : JSON.stringify(value))
+      const systemText = messages.filter((m: any) => m.role === "system")
+        .map((m: any) => Array.isArray(m.content) ? m.content.map((part: any) => part.text ?? "").join("\n") : text(m.content)).join("\n")
       let lastUser = -1
       messages.forEach((m: any, i: number) => {
         if (m.role === "user") lastUser = i
@@ -71,6 +73,8 @@ async function main() {
       )
       if (reporting) {
         assert.equal((body.tools ?? []).length, 0, "a result report may not execute the task again")
+        assert.ok(systemText.includes('"phase":"idle"'), "the automatic report must know the task runtime is idle")
+        assert.ok(systemText.includes('"businessState":"active"'), "a finished runtime is not business completion")
         const result = JSON.parse(user)
         assert.equal(result.files[0].name, "report.md")
         const requests = result.requestContext.messages.map((entry: any) => entry.text).join("\n")
@@ -132,7 +136,17 @@ async function main() {
           reply = edit
             ? "已按你的意见更新为**第二版安排**，文件已交付。"
             : "已写好**第一版安排**，可继续讨论和修改。\n\n- 分析材料\n- 起草建议\n\n| 阶段 | 内容 |\n| --- | --- |\n| 一 | 讨论 |\n| 二 | 修改 |"
-      } else if (user.includes("M05_MAIN_PING")) reply = "主对话仍然可用。"
+      } else if (user.includes("M05_MAIN_PING")) {
+        const expected = user.includes("等待时") ? "waiting_approval" : "idle"
+        if (!systemText.includes(`"phase":"${expected}"`)) await writeFile(join(dir, "unexpected-status-prompt.txt"), systemText)
+        assert.ok(systemText.includes(`"phase":"${expected}"`), `main prompt must expose actual ${expected} runtime state`)
+        if (!used.includes("bot_work_read")) call = { name: "bot_work_read", args: { workId: workIdForRevision } }
+        else {
+          const receipt = turn.filter((m: any) => m.role === "tool").map((m: any) => JSON.parse(text(m.content))).find((r: any) => r.operation === "bot_work_read")
+          assert.equal(receipt?.receipt.work.execution.phase, expected, "history tool must also return fresh, actual runtime status")
+          reply = "主对话仍然可用。"
+        }
+      }
       else if (user.includes("M05_PRIVATE_MAIN")) reply = "这是主对话的其他讨论，不交办工作。"
       else if (JSON.stringify(messages).includes("memory")) reply = "[]"
       const delta = call

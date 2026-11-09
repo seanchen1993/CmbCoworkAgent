@@ -288,7 +288,7 @@ export function BotConversation({
               bot.archived
                 ? "Bot 已归档，恢复后可以继续对话。"
                 : work?.state === "completed"
-                  ? "工作已完成，点击右侧「继续处理」可在原会话继续。"
+                  ? "工作已完成，点击「继续处理」可在原会话继续。"
                   : null
             }
           />

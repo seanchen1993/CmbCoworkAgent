@@ -110,7 +110,8 @@ export function registerBotHandlers(
     const host = desktopHost(event, hostId),
       bot = host.getBot(botIdentifier(botId)),
       work = host.getWork(bot.id, botIdentifier(workId))
-    if (work.source) throw new BotError("CONFLICT", "渠道任务不能转为本机私有对话。")
+    if (work.source && work.source.transport !== "im")
+      throw new BotError("CONFLICT", "模拟渠道任务不能在对话模式打开。")
     if (!work.conversation) {
       prepareBotThread(bot, { threadId: work.threadId, origin: { kind: "user" } }, work)
       host.initializeWorkThread(bot.id, work.id)

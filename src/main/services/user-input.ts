@@ -67,6 +67,23 @@ export function getPendingUserInputForThread(threadId: string): UserInputRequest
   return pendingUserInputs.get(requestId)?.request ?? null
 }
 
+/** Bounded descriptions for a parent's live status; includes only its own child runtimes. */
+export function summarizePendingUserInputForRuntimeThread(threadId: string): { count: number; questions: string[] } {
+  const questions: string[] = []
+  let count = 0
+  for (const [pendingThreadId, requestId] of pendingUserInputThreads) {
+    if (pendingThreadId !== threadId && !pendingThreadId.startsWith(`${threadId}__`)) continue
+    const request = pendingUserInputs.get(requestId)?.request
+    if (!request) continue
+    count++
+    for (const question of request.questions) {
+      if (questions.length === 3) break
+      questions.push(question.question.slice(0, 500))
+    }
+  }
+  return { count, questions }
+}
+
 export function subscribePendingUserInput(listener: PendingUserInputListener): () => void {
   pendingUserInputListeners.add(listener)
   return () => pendingUserInputListeners.delete(listener)

@@ -22,7 +22,20 @@ export function createBotWorkspaceProfiles(client: BotClient) {
       while (dirty && listeners.size) {
         dirty = false
         const snapshot = await client.snapshot()
-        const next = snapshot.bots.map(({ id, name, color, shape }) => ({ id, name, color, shape }))
+        const groups = new Map<string, { id: string; title: string }[]>()
+        for (const group of snapshot.imConversations ?? []) {
+          const items = groups.get(group.botId) ?? []
+          items.push({ id: group.id, title: group.title })
+          groups.set(group.botId, items)
+        }
+        for (const items of groups.values()) items.sort((a, b) => a.id.localeCompare(b.id))
+        const next = snapshot.bots.map(({ id, name, color, shape }) => ({
+          id,
+          name,
+          color,
+          shape,
+          ...(groups.has(id) ? { imGroups: groups.get(id) } : {})
+        }))
         if (JSON.stringify(next) !== JSON.stringify(profiles)) {
           profiles = next
           listeners.forEach((listener) => listener())

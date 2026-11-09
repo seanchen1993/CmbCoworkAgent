@@ -7,7 +7,13 @@ import type { BotWorkConversationResolution } from "../../../../shared/bots/conv
 
 export function BotTaskWorkspaceButton({ link }: { link: BotWorkConversationResolution }) {
   const [copied, setCopied] = useState(false)
-  const display = botWorkspaceDisplay(link.workspacePath, [], link.work.workspace, link.bot)
+  const display = botWorkspaceDisplay(
+    link.workspacePath,
+    [],
+    link.work.workspace,
+    link.bot,
+    link.imConversation
+  )
   const fail = (error: unknown) =>
     toast.error(error instanceof Error ? error.message : "无法打开工作目录")
   return (

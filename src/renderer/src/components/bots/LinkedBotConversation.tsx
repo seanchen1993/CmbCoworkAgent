@@ -37,9 +37,12 @@ export function LinkedBotConversation({ link }: { link: BotWorkConversationResol
           onOpenWork={(workId) => {
             void client
               .works!.get(link.bot.id, workId)
-              .then((work) => {
-                if (work.source) throw new Error("渠道任务不能改为本机私有会话。")
-                returnToBotTask({ ...link, work })
+              .then(async (work) => {
+                if (work.audienceKey !== link.work.audienceKey)
+                  throw new Error("此任务不属于当前会话。")
+                const resolved = await client.conversations!.resolve(work.threadId)
+                if (!resolved) throw new Error("原任务会话不可用。")
+                returnToBotTask(resolved)
               })
               .catch((error) =>
                 toast.error(error instanceof Error ? error.message : "无法打开原任务。")

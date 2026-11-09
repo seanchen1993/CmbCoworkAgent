@@ -17,8 +17,8 @@ import {
 import { workflowRunManager } from "../agent/workflow/run-manager"
 import { claimLocalThreadRunLease, releaseLocalThreadRunLease } from "../agent/thread-run-lease"
 import { isExternallyManagedThreadRunBusy } from "../services/thread-external-run-busy"
-import { verifyWorkConversationThread } from "./conversation-link-authority"
-import type { BotWorkItem } from "../../shared/bots/work"
+import { verifyWorkConversationThread, verifyWorkThreadMetadata } from "./conversation-link-authority"
+import { isLocalBotWork, type BotWorkItem } from "../../shared/bots/work"
 import { assertBotNonTeamConversation } from "../../shared/bots/team-policy"
 
 function metadataOf(raw: string | null): Record<string, unknown> {
@@ -109,15 +109,23 @@ async function mutate<T>(
   )
 }
 function bindMetadata(work: BotWorkItem, metadata: Record<string, unknown>) {
-  return {
+  const next: Record<string, unknown> = {
     ...metadata,
     botId: work.botId,
     botHostId: "local",
     botWorkId: work.id,
-    botAudienceKey: "desktop",
+    botAudienceKey: work.audienceKey,
+    ...(work.source?.transport === "im" ? { botMockTransport: "im" } : {}),
     botLocalConversation: true,
     botWorkOrigin: work.conversation!.origin
   }
+  if (work.source?.transport === "im" && metadata.botMockTransport !== "im") {
+    // Same verified legacy upgrade as prepareBotThread; ordinary-list entry skips that adapter.
+    delete next.disableAgentsPrompt
+    delete next.allowedSkills
+    delete next.allowedExperts
+  }
+  return next
 }
 export async function linkExistingConversation(
   host: LocalBotHost,
@@ -156,14 +164,7 @@ function finishBinding(
     throw new BotError("CONFLICT", "任务关联已变化，旧操作不会重新接管会话。")
   if (metadata.botLocalConversation === true) verifyWorkConversationThread(work, row, metadata)
   else if (link.origin === "existing") assertOrdinary(metadata)
-  else if (
-    metadata.botId !== work.botId ||
-    metadata.botWorkId !== work.id ||
-    metadata.botHostId !== "local" ||
-    metadata.botMockBindingId != null ||
-    metadata.botGroupId != null
-  )
-    throw new BotError("CONFLICT", "任务原会话身份已变化。")
+  else verifyWorkThreadMetadata(work, metadata)
   const boundMetadata = bindMetadata(work, metadata)
   verifyWorkConversationThread(work, row, boundMetadata)
   updateThread(row.thread_id, { metadata: JSON.stringify(boundMetadata) })
@@ -174,8 +175,8 @@ function finishBinding(
 /** Opening either entrance completes only the durable identity handshake, never a model turn. */
 export async function exposeWorkConversation(host: LocalBotHost, botId: string, workId: string) {
   const work = host.getWork(botId, workId)
-  if (work.source || work.audienceKey !== "desktop")
-    throw new BotError("CONFLICT", "模拟渠道任务不能转为本机私有会话。")
+  if (!isLocalBotWork(work))
+    throw new BotError("CONFLICT", "模拟渠道任务不能在对话模式打开。")
   const row = getThreadCore(work.threadId)
   if (!row) throw new BotError("NOT_FOUND", "请先打开原任务会话；原消息不存在时不会创建替代历史。")
   if (work.conversation?.state === "detached") {
@@ -200,6 +201,7 @@ export async function exposeWorkConversation(host: LocalBotHost, botId: string, 
   return workflowRunManager.withThreadTransitionLease(work.threadId, () =>
     withThreadMutationLeaseLock(lease, (latest) => {
       const metadata = metadataOf(latest.metadata)
+      verifyWorkThreadMetadata(work, metadata)
       const prepared = host.conversationLinks.prepareCreated(botId, workId, {
         kind: "local_thread",
         threadId: latest.thread_id,
@@ -241,6 +243,7 @@ async function unlinkConversation(
   forDeletion = false
 ) {
   const work = readWork()
+  if (work.source) throw new BotError("CONFLICT", "招乎任务保留原会话归属，不能解除为私人会话。")
   if (work.conversation?.state === "detached") return work
   return mutate(host, work.threadId, async (row, metadata) => {
     const current = readWork()
@@ -271,7 +274,8 @@ async function unlinkConversation(
 }
 export async function resolveWorkConversation(host: LocalBotHost, threadId: string) {
   let work = host.conversationLinks.forThread(threadId)
-  if (!work || work.source || work.audienceKey !== "desktop") return null
+  if (!work) return null
+  if (!isLocalBotWork(work)) throw new BotError("CONFLICT", "此任务不能在对话模式打开。")
   if (!work.conversation) work = await exposeWorkConversation(host, work.botId, work.id)
   if (work.conversation?.state === "detaching") {
     await unlinkWorkConversation(host, work.botId, work.id, work.version)
@@ -279,9 +283,18 @@ export async function resolveWorkConversation(host: LocalBotHost, threadId: stri
   }
   work = await exposeWorkConversation(host, work.botId, work.id)
   const row = getThreadCore(threadId)!
+  const route = work.source ? host.imGateway.binding(work.source.bindingId) : null
+  const imConversation = route?.binding.botId === work.botId && route.binding.kind === "group"
+    ? {
+        id: route.id,
+        title: route.binding.peerLabel || "招乎群聊",
+        state: route.binding.state === "active" ? "active" as const : "revoked" as const
+      }
+    : undefined
   return {
     bot: host.getBot(work.botId),
     work,
-    workspacePath: String(metadataOf(row.metadata).workspacePath)
+    workspacePath: String(metadataOf(row.metadata).workspacePath),
+    ...(imConversation ? { imConversation } : {})
   }
 }

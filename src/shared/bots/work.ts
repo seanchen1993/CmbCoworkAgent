@@ -30,6 +30,8 @@ export interface BotWorkSummary {
   createdAt: number
   updatedAt: number
   executionState: BotTaskState | null
+  /** Latest primary turn, excluding input injected into another live turn. */
+  lastExecution?: import("./work-status").BotWorkExecutionStatus["lastExecution"]
   pendingPeers: number
   backgroundBusy: boolean
   activity?: BotConversationActivity
@@ -42,6 +44,12 @@ export interface BotWorkItem extends BotWorkSummary {
   goal: string
   audienceKey: string
   threadInitialized: boolean
+}
+/** Both desktop and authenticated IM work run locally; simulated channels do not. */
+export function isLocalBotWork(work: Pick<BotWorkItem, "source" | "audienceKey">): boolean {
+  return work.source
+    ? work.source.transport === "im" && work.source.audienceKey === work.audienceKey
+    : work.audienceKey === "desktop"
 }
 export interface CreateBotWorkInput {
   botId: string

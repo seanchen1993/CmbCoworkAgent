@@ -61,6 +61,7 @@ const fixture = vi.hoisted(() => ({
   start: vi.fn(),
   managedDelivery: vi.fn<(...args: unknown[]) => object>(() => ({})),
   mirror: vi.fn(),
+  threadsChanged: vi.fn(),
   imOpening: vi.fn(),
   browserHelpNotice: vi.fn(),
   steer: vi.fn(),
@@ -194,7 +195,8 @@ vi.mock("../agent/managed-transport-delivery", () => ({
   announceManagedTurnUserMessage: fixture.announce
 }))
 vi.mock("../agent/renderer-stream-mirror", () => ({
-  mirrorStandardTurnStreamToRenderer: fixture.mirror
+  mirrorStandardTurnStreamToRenderer: fixture.mirror,
+  notifyRemoteThreadChanged: fixture.threadsChanged
 }))
 vi.mock("../agent/thread-run-lease", () => ({
   claimLocalThreadRunLease: () => ({ acquired: true }),
@@ -378,6 +380,7 @@ function port(
         continuationCommandIds: fixture.commandIds,
         stoppedTaskContext: fixture.stoppedTasks,
         associatedWorks: () => ({ items: [], hasMore: false }),
+        workStatusContext: () => ({ items: [], hasMore: false }),
         publishImFiles: vi.fn(),
         publishGroupFiles: fixture.publishFiles,
         publishGroupMessage: fixture.publishMessage,
@@ -797,7 +800,7 @@ describe("Bot Runtime integration", () => {
       expect(fixture.start.mock.calls[0][2].checkFinalDelivery).toBeUndefined()
     }
   )
-  it("upgrades a legacy IM group task in place and retains its selected directory", async () => {
+  it.each([false, true])("keeps IM task capabilities and directory across both UI entries (linked=%s)", async (linked) => {
     const source: BotMockExecution["source"] = {
       transport: "im",
       bindingId: "group-binding",
@@ -827,6 +830,10 @@ describe("Bot Runtime integration", () => {
       backgroundBusy: false,
       workspace: { kind: "directory", path: "/synthetic/repo" }
     }
+    if (linked) work.conversation = {
+      origin: "created", state: "bound", ref: { kind: "local_thread", threadId: work.threadId,
+        incarnation: { token: "im-token", legacyCreatedAt: 1 } }
+    }
     const old = {
       ...metadata(),
       botWorkId: work.id,
@@ -838,9 +845,12 @@ describe("Bot Runtime integration", () => {
       agentMode: "normal",
       disableAgentsPrompt: true,
       allowedSkills: [],
-      allowedExperts: []
+      allowedExperts: [],
+      ...(linked ? { botLocalConversation: true, botWorkOrigin: "created",
+        botMockTransport: "im", cmb_thread_incarnation: "im-token",
+        allowedSkills: undefined, allowedExperts: undefined, disableAgentsPrompt: undefined } : {})
     }
-    fixture.thread.mockReturnValue({ metadata: JSON.stringify(old) })
+    fixture.thread.mockReturnValue({ thread_id: work.threadId, created_at: 1, metadata: JSON.stringify(old) })
     const incoming = {
       ...task,
       threadId: work.threadId,
@@ -855,7 +865,8 @@ describe("Bot Runtime integration", () => {
       label: "Group"
     }).acquire(bot, incoming, work)!
     await lease.execute(new AbortController().signal, vi.fn())
-    const updated = JSON.parse(fixture.update.mock.calls[0][1].metadata)
+    const updated = linked ? old : JSON.parse(fixture.update.mock.calls[0][1].metadata)
+    if (linked) expect(fixture.update).not.toHaveBeenCalled()
     expect(updated).toMatchObject({
       botMockTransport: "im",
       workspacePath: "/synthetic/repo",
@@ -1368,6 +1379,8 @@ describe("Bot Runtime integration", () => {
           {} as BotBrowserService,
           { enqueue: () => {} } as unknown as BotMemoryMaintainer
         )
+        // This delivery fixture executes a Runtime lease directly, outside Host admission.
+        vi.spyOn(host, "workStatusContext").mockReturnValue({ items: [], hasMore: false })
         const lease = runtime.acquire(owner, current)!
         const result = await lease.execute(new AbortController().signal, () => {})
         lease.release()
@@ -2701,6 +2714,7 @@ describe("Bot Runtime integration", () => {
         "work-thread",
         expect.objectContaining({ workspacePath: "/chosen/project" })
       )
+      expect(fixture.threadsChanged).toHaveBeenCalledTimes(1)
       const original = {
         ...metadata(),
         botWorkId: "w",
@@ -2713,6 +2727,7 @@ describe("Bot Runtime integration", () => {
         .execute(new AbortController().signal, vi.fn())
       const context = fixture.start.mock.calls.at(-1)![2] as AgentRunExecutionContext
       expect(context.toolConcurrencyQueueId).toBe("workspace:/chosen/project")
+      expect(fixture.threadsChanged).toHaveBeenCalledTimes(1) // no reload per subsequent turn
       expect(
         context.verifyResolvedThread!({ workspacePath: "/chosen/project", metadata: original })
       ).toBeNull()
@@ -6249,6 +6264,8 @@ it("isolates authenticated IM peer browser owners while retaining their binding 
       { enqueue: () => {} } as any
     )
     const outputs: Array<{ thread: string; scope: unknown }> = []
+    // Browser-owner fixture likewise executes direct Runtime leases rather than Host turns.
+    vi.spyOn(host, "workStatusContext").mockReturnValue({ items: [], hasMore: false })
     const capture = async (t: BotTask) => {
       const lease = runtime.acquire(store.getBot(t.botId), t)!
       await lease.execute(new AbortController().signal, () => {})

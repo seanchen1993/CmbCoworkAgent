@@ -2,6 +2,8 @@
 import React from "react"
 import { createRoot } from "react-dom/client"
 import { Toaster } from "sonner"
+import { useAppStore } from "@/lib/store"
+import { ConversationTaskControls } from "../../src/renderer/src/components/bots/ConversationTaskControls"
 import { BotsWorkspace } from "../../src/renderer/src/components/bots/BotsWorkspace"
 import { useBotViewStore } from "../../src/renderer/src/components/bots/view-store"
 
@@ -237,6 +239,13 @@ const client = {
     else memories[prior] = entry
     return entry
   },
+  conversations: {
+    expose: async (botId: string, workId: string) => {
+      if (botId !== bot.id || workId !== work.id) throw Error("wrong task")
+      f.opened.push(["expose", botId, workId])
+      return work
+    }
+  },
   works: {
     list: async () => ({ items: [], priority: [], nextCursor: null }),
     get: async () => {
@@ -341,7 +350,8 @@ const client = {
 }
 ;(window as any).api = {
   models: { getUserInfo: async () => null },
-  threads: { get: async () => null },
+  bots: client,
+  threads: { get: async () => ({ metadata: { workspacePath: "/fixture/bots/workspaces/mock-group-a" } }) },
   system: { getPlatform: async () => "darwin" }
 }
 ;(window as any).electron = { onNotifyMsg: () => () => {} }
@@ -349,9 +359,14 @@ if (!useBotViewStore.getState().hosts.local)
   useBotViewStore
     .getState()
     .update("local", { selectedId: "bot", imConversationId: "group-a", detailOpen: true })
-createRoot(document.getElementById("root")!).render(
-  <>
-    <BotsWorkspace client={client as any} />
-    <Toaster />
-  </>
-)
+function FixtureRoot() {
+  const mainView = useAppStore((state) => state.mainView)
+  return <>{mainView === "thread"
+    ? <section data-testid="ordinary-workbench" className="w-full p-8">
+        <ConversationTaskControls threadId={work.threadId} refresh={() => {}} link={{ bot, work,
+          workspacePath: "/fixture/bots/workspaces/mock-group-a", imConversation: groups[0] } as any} />
+        <div className="mt-8 text-sm text-muted-foreground">任务对话：演示准备清单</div>
+      </section>
+    : <BotsWorkspace client={client as any} />}<Toaster /></>
+}
+createRoot(document.getElementById("root")!).render(<FixtureRoot />)

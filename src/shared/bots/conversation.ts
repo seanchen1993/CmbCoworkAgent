@@ -24,6 +24,8 @@ export interface BotWorkConversationResolution {
   bot: import("./contracts").BotDefinition
   work: import("./work").BotWorkItem
   workspacePath: string
+  /** Verified original group, retained when opening its task in the ordinary workbench. */
+  imConversation?: Pick<import("./im-channel").BotImConversation, "id" | "title" | "state">
 }
 export interface BotConversationClient {
   resolve(threadId: string): Promise<BotWorkConversationResolution | null>

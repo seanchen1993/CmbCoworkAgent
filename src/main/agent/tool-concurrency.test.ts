@@ -37,6 +37,7 @@ const declarations = new Set([
   "SHARED_TOOL_NAMES",
   "MAX_PARALLEL_TASK_SUBAGENTS",
   "BOT_BROWSER_ACTIONS",
+  "BOT_WORK_OBSERVATION_TOOLS",
   "isRecord",
   "executeCommandFromToolArgs",
   "classifyToolConcurrency",
@@ -145,6 +146,47 @@ const humanWaits = [
 ]
 
 describe("shared Bot workspaces", () => {
+  it.each(["write_file", "code_exec"])("keeps Bot status/history readable during a pending %s approval without unlocking mutations", async (tool) => {
+    const gate = createGate(true)
+    const entered = deferred(), finish = deferred()
+    const owner = gate.wrapToolCall(request(tool), async () => {
+      entered.resolve()
+      await finish.promise
+    })
+    await entered.promise
+    const mutation = vi.fn(async () => "sent")
+    const queued = gate.wrapToolCall(request("bot_work_send"), mutation)
+    try {
+      for (const name of ["bot_work_list", "bot_work_read", "bot_work_search"]) {
+        const observe = vi.fn(async () => "waiting_approval")
+        const read = gate.wrapToolCall(request(name), observe)
+        await turn()
+        expect(observe).toHaveBeenCalledOnce()
+        expect(await read).toBe("waiting_approval")
+      }
+      expect(mutation).not.toHaveBeenCalled()
+    } finally {
+      finish.resolve()
+      await Promise.all([owner, queued])
+    }
+    expect(mutation).toHaveBeenCalledOnce()
+  })
+
+  it("does not relax unknown or non-Bot tools' resource locking", async () => {
+    const gate = createGate(false)
+    const entered = deferred(), finish = deferred()
+    const owner = gate.wrapToolCall(request("code_exec"), async () => { entered.resolve(); await finish.promise })
+    await entered.promise
+    const observe = vi.fn(async () => "done")
+    const read = gate.wrapToolCall(request("bot_work_read"), observe)
+    try {
+      await turn()
+      expect(observe).not.toHaveBeenCalled()
+    } finally {
+      finish.resolve()
+      await Promise.all([owner, read])
+    }
+  })
   it("serializes writes across conversations sharing a directory while other directories proceed", async () => {
     const dir = mkdtempSync(join(tmpdir(), "bot-workspace-lock-"))
     const file = join(dir, "shared.txt")

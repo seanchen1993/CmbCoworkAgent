@@ -26,14 +26,25 @@ import {
 export function returnToBotTask(link: BotWorkConversationResolution) {
   const views = useBotViewStore.getState(),
     old = views.hosts.local
+  if (link.work.source && !link.imConversation) {
+    toast.error("原招乎会话暂不可用，请在 Bot 的招乎接入中核对。")
+    return
+  }
   views.update("local", {
     selectedId: link.bot.id,
     groupId: null,
-    imConversationId: null,
+    imConversationId: link.imConversation?.id ?? null,
     showArchived: link.bot.archived,
     detailOpen: true,
     detailTab: "details",
-    activeWorkIdByBot: { ...old?.activeWorkIdByBot, [link.bot.id]: link.work.id }
+    ...(link.imConversation
+      ? {
+          activeImWorkIdByConversation: {
+            ...old?.activeImWorkIdByConversation,
+            [link.imConversation.id]: link.work.id
+          }
+        }
+      : { activeWorkIdByBot: { ...old?.activeWorkIdByBot, [link.bot.id]: link.work.id } })
   })
   useAppStore.getState().setMainView("bots")
 }
@@ -197,40 +208,47 @@ export function ConversationTaskControls({
                     {link.work.state === "completed" ? "已完成" : "进行中"}
                   </span>
                 </div>
-                <p className="mt-0.5 truncate text-[11px]" title={link.bot.name}>
-                  {link.bot.name} · 独立任务
+                <p
+                  className="mt-0.5 truncate text-[11px]"
+                  title={link.imConversation?.title ?? link.bot.name}
+                >
+                  {link.bot.name} ·{" "}
+                  {link.imConversation?.title ?? (link.work.source ? "招乎任务" : "独立任务")}
                 </p>
               </div>
               <button
                 className="inline-flex shrink-0 items-center gap-1 rounded-md px-2 py-1.5 hover:bg-muted hover:text-foreground"
                 onClick={() => returnToBotTask(link)}
               >
-                返回 Bot 任务 <ArrowUpRight size={14} aria-hidden="true" />
+                {link.work.source ? "返回群内任务" : "返回 Bot 任务"}{" "}
+                <ArrowUpRight size={14} aria-hidden="true" />
               </button>
-              <Popover>
-                <PopoverTrigger asChild>
-                  <button
-                    className="inline-flex size-7 shrink-0 items-center justify-center rounded-md hover:bg-muted hover:text-foreground"
-                    aria-label="更多任务操作"
-                  >
-                    <MoreHorizontal size={16} />
-                  </button>
-                </PopoverTrigger>
-                <PopoverContent align="end" className="w-64 p-2 text-xs">
-                  <p className="px-2 py-2 leading-relaxed text-muted-foreground">
-                    与 Bot 入口共享消息、模型和工作目录，无需来回复制。Goal、Mods
-                    控制可在解除关联后使用，原设置和历史保留。
-                  </p>
-                  <button
-                    className="mt-1 flex w-full items-center gap-2 rounded-md px-2 py-2 text-left hover:bg-muted disabled:opacity-50"
-                    disabled={saving}
-                    onClick={() => void unlink()}
-                  >
-                    <Unlink size={14} />
-                    解除任务关联
-                  </button>
-                </PopoverContent>
-              </Popover>
+              {!link.work.source && (
+                <Popover>
+                  <PopoverTrigger asChild>
+                    <button
+                      className="inline-flex size-7 shrink-0 items-center justify-center rounded-md hover:bg-muted hover:text-foreground"
+                      aria-label="更多任务操作"
+                    >
+                      <MoreHorizontal size={16} />
+                    </button>
+                  </PopoverTrigger>
+                  <PopoverContent align="end" className="w-64 p-2 text-xs">
+                    <p className="px-2 py-2 leading-relaxed text-muted-foreground">
+                      与 Bot 入口共享消息、模型和工作目录，无需来回复制。Goal、Mods
+                      控制可在解除关联后使用，原设置和历史保留。
+                    </p>
+                    <button
+                      className="mt-1 flex w-full items-center gap-2 rounded-md px-2 py-2 text-left hover:bg-muted disabled:opacity-50"
+                      disabled={saving}
+                      onClick={() => void unlink()}
+                    >
+                      <Unlink size={14} />
+                      解除任务关联
+                    </button>
+                  </PopoverContent>
+                </Popover>
+              )}
             </div>
             <div className="flex flex-wrap items-center justify-between gap-2">
               <BotTaskWorkspaceButton key={threadId} link={link} />

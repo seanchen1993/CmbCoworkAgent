@@ -68,6 +68,7 @@ describe("work activity projection query boundaries", () => {
     try {
       const first = f.store.listWorks(f.owner.id)
       expect(first.items).toHaveLength(40)
+      expect(first.items.every(item => item.lastExecution?.state === "completed")).toBe(true)
       expect(first.nextCursor).not.toBeNull()
       expect(f.store.listWorks(f.owner.id, first.nextCursor!).items).toHaveLength(5)
       expect(f.store.getWork(f.owner.id, f.works[0].work.id).pendingPeers).toBe(1)
@@ -105,6 +106,8 @@ describe("work activity projection query boundaries", () => {
       // Workflow ownership also seeks exact source IDs; it must not scan unrelated task history.
       expect(plan.some(detail => detail.startsWith("SCAN wf_owner"))).toBe(false)
       expect(plan.some(detail => detail.startsWith("SEARCH r USING INDEX bot_workflow_refs_source"))).toBe(true)
+      expect(plan.some(detail => detail.startsWith("SEARCH t USING INDEX bot_tasks_work_history") && detail.includes("work_id=?"))).toBe(true)
+      expect(plan.some(detail => detail.startsWith("SCAN t"))).toBe(false)
       // Compare every projected field against the prior SQL, not only peer counts.
       const priorSql = sql.replaceAll("=+w.id", "=w.id")
       expect(f.db.exec(sql, bindings)).toEqual(f.db.exec(priorSql, bindings))
@@ -142,5 +145,36 @@ describe("work activity projection query boundaries", () => {
       executionState: "completed",
       pendingPeers: 0
     })
+  })
+
+  it("paginates smaller prompt snapshots without omissions or extra database requests", () => {
+    const f = fixture()
+    const ids: string[] = []
+    let cursor: string | undefined
+    do {
+      const page = f.store.listWorks(f.owner.id, cursor, "", "desktop", 8)
+      expect(page.items.length).toBeLessThanOrEqual(8)
+      ids.push(...page.items.map(item => item.id))
+      cursor = page.nextCursor ?? undefined
+    } while (cursor)
+    expect(ids).toHaveLength(45)
+    expect(new Set(ids).size).toBe(45)
+  })
+
+  it("retains the newest primary outcome for same-millisecond turns without reading result bodies", () => {
+    const db = new NativeSqliteAdapter(new DatabaseSync(":memory:"))
+    databases.push(db)
+    const store = new BotStore(db, () => 1000)
+    const bot = store.create({ name: "Owner", instructions: "", color: "#123456", modelRef: null })
+    const first = store.createWork({ botId: bot.id, operationId: "first", title: "Work", goal: "Start" })
+    store.transition(first.task.id, "running")
+    store.settle(first.task.id, "completed", null, "Old successful output")
+    const next = store.enqueue({ botId: bot.id, workId: first.work.id, requestId: "next", message: "Continue" })
+    store.transition(next.id, "running")
+    store.settle(next.id, "failed", "Error ".repeat(400), "Large output ".repeat(10000))
+    const current = store.getWork(bot.id, first.work.id)
+    expect(current.lastExecution).toMatchObject({ taskId: next.id, state: "failed", updatedAt: 1000 })
+    expect(current.lastExecution?.error).toHaveLength(1000)
+    expect(JSON.stringify(current.lastExecution)).not.toContain("Large output")
   })
 })

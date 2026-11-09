@@ -1,5 +1,5 @@
 import { createBotThreadReplyResolver } from "../bots/thread-message-replies"
-import { verifyWorkConversationThread } from "../bots/conversation-link-authority"
+import { verifyWorkConversationThread, verifyWorkThreadMetadata } from "../bots/conversation-link-authority"
 import { getCapturedSubagentSession, subagentExportKey } from "../services/subagent-session-capture"
 import type { SubagentExportTarget as ExportScope } from "../../shared/subagent-session-export"
 import { formatHookDateTime } from "../../shared/hook-time"
@@ -3913,7 +3913,10 @@ export function registerThreadHandlers(ipcMain: IpcMain): ThreadDeletionService 
       } catch {
         throw new Error("会话元数据异常，无法确认删除条件，请修复后重试。")
       }
-      if (metadata.botLocalConversation === true) {
+      if (metadata.botLocalConversation === true ||
+          (metadata.botHostId === "local" && typeof metadata.botWorkId === "string" &&
+            (metadata.botAudienceKey === "desktop" ||
+              (typeof metadata.botAudienceKey === "string" && metadata.botAudienceKey.startsWith("im:"))))) {
         // remove() owns a main-process deletion fence. Do not detach a created
         // conversation first: a failed cleanup must retain ownership for retry.
         let deletingCreated = false
@@ -3923,17 +3926,20 @@ export function registerThreadHandlers(ipcMain: IpcMain): ThreadDeletionService 
             String(metadata.botId),
             String(metadata.botWorkId)
           )
-          verifyWorkConversationThread(work, threadRow, metadata)
+          if (work.conversation) verifyWorkConversationThread(work, threadRow, metadata)
+          else verifyWorkThreadMetadata(work, metadata)
           deletingCreated =
             work.threadId === threadId &&
-            work.conversation?.origin === "created" &&
-            work.conversation.state === "bound"
+            (!work.conversation ||
+              (work.conversation.origin === "created" && work.conversation.state === "bound"))
         } catch {
           /* General renderer delete has no remove() fence. */
         }
         if (!deletingCreated)
           throw new Error(
-            "此会话已关联 Bot 任务，请先在会话顶部解除任务关联，再删除普通会话；历史会保留到你明确删除。"
+            metadata.botMockBindingId
+              ? "此会话属于招乎群内任务，请在所属群中管理，不能单独删除任务会话。"
+              : "此会话已关联 Bot 任务，请先在会话顶部解除任务关联，再删除普通会话；历史会保留到你明确删除。"
           )
         if (!matchesThreadIncarnation(getThreadCore(threadId), lease.incarnation))
           throw new Error("会话在删除检查期间已变化。")
