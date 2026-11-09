@@ -1,5 +1,13 @@
 import { useEffect, useState } from "react"
-import { ArrowLeft, FileText, Loader2, PenTool, RefreshCw } from "lucide-react"
+import {
+  ArrowLeft,
+  FileText,
+  Loader2,
+  LockKeyhole,
+  PenTool,
+  RefreshCw,
+  UserPlus
+} from "lucide-react"
 import {
   leanstarRequirementsApi,
   type RequirementDetail,
@@ -10,6 +18,7 @@ import { HtmlThumbnailPreview } from "@/components/ui/html-thumbnail-preview"
 import { MarkdownPreview } from "@/components/ui/MarkdownPreview/MarkdownPreview"
 import { findRequirementDesignEntry } from "@/lib/requirement-design-entry"
 import type { RequirementRecord } from "./requirement-data"
+import { RequirementDevelopmentActions } from "./RequirementDevelopmentActions"
 
 function isPermissionDeniedError(reason: unknown): boolean {
   if ((reason as { code?: unknown })?.code === "LRDFA02") return true
@@ -20,10 +29,16 @@ function isPermissionDeniedError(reason: unknown): boolean {
 export function RequirementSpaceDetailView({
   requirement,
   onDesignRequirement,
+  onStartDevelopment,
+  onContinueDevelopment,
+  onResetDevelopment,
   onBack
 }: {
   requirement: RequirementRecord
   onDesignRequirement: (requirement: RequirementRecord, content?: string) => Promise<void>
+  onStartDevelopment: () => void | Promise<void>
+  onContinueDevelopment: (threadId: string) => void | Promise<void>
+  onResetDevelopment: () => void | Promise<void>
   onBack: () => void
 }): React.JSX.Element {
   const [detail, setDetail] = useState<RequirementDetail | null>(null)
@@ -101,6 +116,14 @@ export function RequirementSpaceDetailView({
             需求空间3.0 · {requirement.sourceName}
           </p>
         </div>
+        <div className="ml-auto">
+          <RequirementDevelopmentActions
+            requirement={requirement}
+            onStartDevelopment={onStartDevelopment}
+            onContinueDevelopment={onContinueDevelopment}
+            onResetDevelopment={onResetDevelopment}
+          />
+        </div>
       </header>
 
       {loading ? (
@@ -136,17 +159,42 @@ export function RequirementSpaceDetailView({
             </div>
             <div className="min-h-0 flex-1 overflow-y-auto">
               {permissionDenied ? (
-                <div className="flex h-full items-center justify-center px-8 text-center">
-                  <div className="max-w-lg text-sm leading-7 text-muted-foreground">
-                    <p className="font-medium text-foreground">暂时无法预览该需求文件</p>
-                    <p className="mt-2">
-                      需求空间平台目前暂不支持无权限成员查看此内容，我们已向平台反馈并推动后续支持。
-                    </p>
-                    <p className="mt-2">
-                      现阶段可联系需求负责人
-                      {ownerName ? `“${ownerName}”` : ""}，请其将你添加为该需求的参与人，
-                      获得权限后即可查看需求文件。
-                    </p>
+                <div className="flex h-full items-center justify-center bg-muted/20 px-6 py-10">
+                  <div className="w-full max-w-lg overflow-hidden rounded-2xl border border-border/80 bg-background shadow-sm">
+                    <div className="flex flex-col items-center border-b border-border/60 px-6 py-6 text-center">
+                      <span className="flex size-11 items-center justify-center rounded-full bg-status-warning/10 text-status-warning ring-1 ring-status-warning/20">
+                        <LockKeyhole className="size-5" />
+                      </span>
+                      <h4 className="mt-3 text-base font-semibold text-foreground">
+                        暂时无法预览该需求文件
+                      </h4>
+                      <p className="mt-2 max-w-md text-sm leading-6 text-muted-foreground">
+                        需求空间平台目前暂不支持
+                        <strong className="px-0.5 font-semibold text-foreground">无权限成员</strong>
+                        查看此内容，我们已向平台反馈并推动后续支持。
+                      </p>
+                    </div>
+                    <div className="px-6 py-5">
+                      <div className="flex items-start gap-3 rounded-xl border border-primary/15 bg-primary/5 px-4 py-3.5 text-left">
+                        <span className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
+                          <UserPlus className="size-4" />
+                        </span>
+                        <div className="min-w-0 text-sm leading-6 text-muted-foreground">
+                          <p className="font-medium text-foreground">如何获得查看权限</p>
+                          <p className="mt-1">
+                            请联系需求负责人
+                            {ownerName ? (
+                              <strong className="mx-1 font-semibold text-primary">
+                                {ownerName}
+                              </strong>
+                            ) : null}
+                            ，请其将你添加为该需求的
+                            <strong className="px-0.5 font-semibold text-foreground">参与人</strong>
+                            。获得权限后，即可返回此处查看需求文件。
+                          </p>
+                        </div>
+                      </div>
+                    </div>
                   </div>
                 </div>
               ) : content ? (
@@ -197,7 +245,7 @@ export function RequirementSpaceDetailView({
                 </div>
                 <h4 className="mt-4 text-sm font-semibold">暂无原型</h4>
                 <p className="mt-1.5 max-w-sm text-xs leading-5 text-muted-foreground">
-                  完成原型设计后，可在本地需求详情中进入开发。
+                  可直接在当前页面进入开发，也可按需先补充原型设计。
                 </p>
               </div>
             )}

@@ -1,0 +1,118 @@
+import { useMemo, useState } from "react"
+import { Code2, Loader2, RotateCcw, Trash2 } from "lucide-react"
+import { toast } from "sonner"
+import { Button } from "@/components/ui/button"
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle
+} from "@/components/ui/dialog"
+import { useAppStore } from "@/lib/store"
+import { findRequirementDevelopmentThreads } from "@/lib/requirement-development"
+import type { RequirementRecord } from "./requirement-data"
+
+export function RequirementDevelopmentActions({
+  requirement,
+  onStartDevelopment,
+  onContinueDevelopment,
+  onResetDevelopment
+}: {
+  requirement: RequirementRecord
+  onStartDevelopment: () => void | Promise<void>
+  onContinueDevelopment: (threadId: string) => void | Promise<void>
+  onResetDevelopment: () => void | Promise<void>
+}): React.JSX.Element {
+  const threads = useAppStore((state) => state.threads)
+  const developmentThreads = useMemo(
+    () => findRequirementDevelopmentThreads(requirement.id, threads),
+    [requirement.id, threads]
+  )
+  const existingThreadId = developmentThreads[0]?.thread_id ?? requirement.developmentThreadIds[0]
+  const inProgress = Boolean(existingThreadId)
+  const [resetOpen, setResetOpen] = useState(false)
+  const [resetting, setResetting] = useState(false)
+
+  return (
+    <>
+      <div className="flex items-center gap-1.5">
+        {inProgress && (
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            className="h-7 gap-1 px-2 text-[11px] text-destructive hover:text-destructive"
+            onClick={() => setResetOpen(true)}
+          >
+            <RotateCcw className="size-3" />
+            重置
+          </Button>
+        )}
+        <Button
+          type="button"
+          size="sm"
+          className="h-7 gap-1 px-2 text-[11px]"
+          onClick={() => {
+            if (existingThreadId) void onContinueDevelopment(existingThreadId)
+            else void onStartDevelopment()
+          }}
+        >
+          <Code2 className="size-3" />
+          {inProgress ? "继续开发" : "去开发"}
+        </Button>
+      </div>
+
+      <Dialog
+        open={resetOpen}
+        onOpenChange={(open) => {
+          if (!resetting) setResetOpen(open)
+        }}
+      >
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>确认重置需求开发？</DialogTitle>
+            <DialogDescription>
+              重置后将解除需求与开发会话的关联，并永久删除对应的全部开发会话。此操作不可撤销。
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="secondary"
+              disabled={resetting}
+              onClick={() => setResetOpen(false)}
+            >
+              取消
+            </Button>
+            <Button
+              type="button"
+              variant="destructive"
+              disabled={resetting}
+              onClick={() => {
+                setResetting(true)
+                void Promise.resolve(onResetDevelopment())
+                  .then(() => {
+                    setResetOpen(false)
+                    toast.success("需求开发已重置")
+                  })
+                  .catch((error) => {
+                    toast.error(error instanceof Error ? error.message : "重置需求开发失败")
+                  })
+                  .finally(() => setResetting(false))
+              }}
+            >
+              {resetting ? (
+                <Loader2 className="size-3.5 animate-spin" />
+              ) : (
+                <Trash2 className="size-3.5" />
+              )}
+              确认重置
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
+  )
+}

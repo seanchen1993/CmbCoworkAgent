@@ -4,7 +4,6 @@ import {
   AlertTriangle,
   Brain,
   ChevronRight,
-  Code2,
   Eye,
   FileCheck2,
   FileText,
@@ -49,6 +48,7 @@ import {
 import { RequirementFunctionWorkspace } from "./RequirementFunctionWorkspace"
 import { RequirementPrdSummaryCard } from "./RequirementPrdSummaryCard"
 import { RequirementStatusTags } from "./RequirementStatusTags"
+import { RequirementDevelopmentActions } from "./RequirementDevelopmentActions"
 
 export type RequirementPreviewTab = "expert-process" | "source" | "prd"
 export type RequirementPrototypeStatus = {
@@ -374,8 +374,6 @@ export function RequirementDetailsPanel({
     requirement.developmentThreadIds.length > 0 || developmentThreads.length > 0
       ? "in-progress"
       : "not-started"
-  const [developmentResetOpen, setDevelopmentResetOpen] = useState(false)
-  const [developmentResetting, setDevelopmentResetting] = useState(false)
   const [batchDialogOpen, setBatchDialogOpen] = useState(false)
   const [batchSelection, setBatchSelection] = useState<Set<string>>(() => new Set())
   const [batchDesignMode, setBatchDesignMode] = useState<"functions" | "full-prd">("functions")
@@ -1107,38 +1105,12 @@ export function RequirementDetailsPanel({
                       基于当前需求内容进入开发流程。
                     </p>
                   </div>
-                  <div className="flex items-center gap-1.5">
-                    <Button
-                      type="button"
-                      size="sm"
-                      variant="outline"
-                      className="h-7 gap-1 px-2 text-[11px]"
-                      onClick={() => {
-                        const existingThreadId =
-                          developmentThreads[0]?.thread_id ?? requirement.developmentThreadIds[0]
-                        if (existingThreadId) {
-                          void onContinueDevelopment(existingThreadId)
-                        } else {
-                          void onStartDevelopment()
-                        }
-                      }}
-                    >
-                      <Code2 className="size-3" />
-                      {developmentStatus === "in-progress" ? "继续开发" : "去开发"}
-                    </Button>
-                    {developmentStatus === "in-progress" && (
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="outline"
-                        className="h-7 gap-1 px-2 text-[11px] text-destructive hover:text-destructive"
-                        onClick={() => setDevelopmentResetOpen(true)}
-                      >
-                        <RotateCcw className="size-3" />
-                        重置
-                      </Button>
-                    )}
-                  </div>
+                  <RequirementDevelopmentActions
+                    requirement={requirement}
+                    onStartDevelopment={onStartDevelopment}
+                    onContinueDevelopment={onContinueDevelopment}
+                    onResetDevelopment={onResetDevelopment}
+                  />
                 </div>
               </RequirementPrdSummaryCard>
 
@@ -1246,55 +1218,6 @@ export function RequirementDetailsPanel({
           )}
         </TabsContent>
       </Tabs>
-      <Dialog
-        open={developmentResetOpen}
-        onOpenChange={(open) => {
-          if (!developmentResetting) setDevelopmentResetOpen(open)
-        }}
-      >
-        <DialogContent className="sm:max-w-md">
-          <DialogHeader>
-            <DialogTitle>确认重置需求开发？</DialogTitle>
-            <DialogDescription>
-              重置后将解除需求与开发会话的关联，并永久删除对应的全部开发会话。此操作不可撤销。
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button
-              type="button"
-              variant="secondary"
-              disabled={developmentResetting}
-              onClick={() => setDevelopmentResetOpen(false)}
-            >
-              取消
-            </Button>
-            <Button
-              type="button"
-              variant="destructive"
-              disabled={developmentResetting}
-              onClick={() => {
-                setDevelopmentResetting(true)
-                void Promise.resolve(onResetDevelopment())
-                  .then(() => {
-                    setDevelopmentResetOpen(false)
-                    toast.success("需求开发已重置")
-                  })
-                  .catch((error) => {
-                    toast.error(error instanceof Error ? error.message : "重置需求开发失败")
-                  })
-                  .finally(() => setDevelopmentResetting(false))
-              }}
-            >
-              {developmentResetting ? (
-                <Loader2 className="size-3.5 animate-spin" />
-              ) : (
-                <Trash2 className="size-3.5" />
-              )}
-              确认重置
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
       <Dialog
         open={batchDialogOpen}
         onOpenChange={(open) => {

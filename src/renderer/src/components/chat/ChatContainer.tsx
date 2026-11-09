@@ -260,7 +260,6 @@ import { createChatSearchIndexer } from "@/lib/chat-search-indexer"
 import { createChatSearchPlan, appendChatSearchToolSummaries } from "../../../../shared/chat-search-plan"
 import { areChatSearchPlansEqual, type ChatSearchReveal } from "../../../../shared/chat-search-types"
 import { getChatThreadProjectionRuntime } from "@/lib/chat-thread-projection-cache"
-import { useRequirementAutoPrompt } from "./use-requirement-auto-prompt"
 import {
   chatScrollTailMessageIdentity,
   classifyChatScrollTailChange,
@@ -1687,17 +1686,6 @@ export function ChatContainer({
   const remoteThread = useAppStore(
     (state) => state.threads.find((thread) => thread.thread_id === threadId) ?? null
   )
-  // 需求开发会话会在元数据中暂存首轮提示词；消费标记用于避免会话重开后重复发送。
-  const requirementDevelopmentMetadata =
-    remoteThread?.metadata?.requirementDevelopment &&
-    typeof remoteThread.metadata.requirementDevelopment === "object"
-      ? (remoteThread.metadata.requirementDevelopment as Record<string, unknown>)
-      : null
-  const automaticRequirementPrompt =
-    requirementDevelopmentMetadata?.autoSendPromptConsumed !== true &&
-    typeof requirementDevelopmentMetadata?.autoSendPrompt === "string"
-      ? requirementDevelopmentMetadata.autoSendPrompt.trim()
-      : ""
   const setGitWorkspaceStatus = useAppStore((state) => state.setGitWorkspaceStatus)
   const remoteThreadInfo = useMemo(() => getRemoteThreadDisplayInfo(remoteThread), [remoteThread])
   const resolvedReadOnlyReason =
@@ -6007,23 +5995,6 @@ export function ChatContainer({
       releaseSubmitInFlightLock(submitInFlightRef, shouldLockSubmit, threadId)
     }
   }
-
-  // 等历史、模型和工作区全部就绪后，再自动提交需求开发会话的首轮提示词。
-  useRequirementAutoPrompt({
-    threadId,
-    prompt: automaticRequirementPrompt,
-    metadata: requirementDevelopmentMetadata,
-    ready:
-      !historyLoading &&
-      !isLoading &&
-      Boolean(stream && currentModel && workspacePath) &&
-      models.some((model) => model.id === currentModel && model.available),
-    submit: handleSubmit,
-    patchMetadata: async (targetThreadId, patch) => {
-      // 首轮对话启动期间只更新持久化元数据，避免替换正在使用的实时线程对象。
-      await window.api.threads.patchMetadata(targetThreadId, patch)
-    }
-  })
 
   const startEditingQueuedMessage = useCallback((message: QueuedMessage): void => {
     setEditingQueueId(message.id)

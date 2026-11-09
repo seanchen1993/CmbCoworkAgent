@@ -8,7 +8,6 @@ import { marketApi } from "@/api/market"
 export const REQUIREMENT_DEVELOPMENT_PLUGIN = "AutobizDevOps_Plugin_Kanban_fullstack"
 export const REQUIREMENT_DEVELOPMENT_ONBOARDING_KEY = "requirement-development:onboarding"
 export const REQUIREMENT_DEVELOPMENT_ONBOARDING_EVENT = "requirement-development:onboarding-change"
-export const REQUIREMENT_DEVELOPMENT_AUTO_SEND_KEY = "requirement-development:auto-send-thread"
 
 export type RequirementDevelopmentIntent = {
   action: "create-development"
@@ -161,6 +160,5 @@ export function buildRequirementDevelopmentPrompt(input: {
 2. 在遵循现有项目结构、编码规范和组件体系的前提下完成实现。
 3. 补充必要的测试或验证，并说明主要改动、验证结果及仍需确认的问题。
 4. 不要修改与本需求无关的功能；遇到信息缺失或实现存在歧义时，请先向我确认。
-
-现在请使用 /autobiz-requirement-discuss 继续推进当前 Feature。`
+`
 }

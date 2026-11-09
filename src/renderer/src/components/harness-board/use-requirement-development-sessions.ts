@@ -2,12 +2,15 @@ import { useEffect, useRef } from "react"
 import { toast } from "sonner"
 import { useAppStore } from "@/lib/store"
 import {
+  clearRequirementDevelopmentIntent,
+  ensureRequirementDevelopmentPlugin,
   getRequirementDevelopmentMetadata,
   REQUIREMENT_DEVELOPMENT_ONBOARDING_EVENT,
   REQUIREMENT_DEVELOPMENT_ONBOARDING_KEY,
   type RequirementDevelopmentIntent,
   type RequirementDevelopmentOnboardingIntent
 } from "@/lib/requirement-development"
+import type { HarnessProjectListItem } from "../../../../shared/harness-board-types"
 
 export function useRequirementDevelopmentSessionRestore(): void {
   const addThreadSummary = useAppStore((state) => state.addThreadSummary)
@@ -41,7 +44,10 @@ export function useRequirementDevelopmentSessionRestore(): void {
 
 export function useRequirementDevelopmentOnboarding(input: {
   openSession: (threadId: string, context: { projectId: string; featureSlug?: string }) => void
-  openProjectChoice: (intent: RequirementDevelopmentIntent) => void
+  openProjectChoice: (
+    intent: RequirementDevelopmentIntent,
+    projects: HarnessProjectListItem[]
+  ) => void
 }): void {
   useRequirementDevelopmentSessionRestore()
   const callbacksRef = useRef(input)
@@ -75,7 +81,13 @@ export function useRequirementDevelopmentOnboarding(input: {
         if (intent.action !== "create-development" || !intent.requirementId || !intent.prompt) {
           throw new Error("invalid requirement development intent")
         }
-        callbacksRef.current.openProjectChoice(intent)
+        void ensureRequirementDevelopmentPlugin()
+          .then(() => window.api.harnessBoard.listProjects())
+          .then((projects) => callbacksRef.current.openProjectChoice(intent, projects))
+          .catch((error) => {
+            clearRequirementDevelopmentIntent()
+            toast.error(error instanceof Error ? error.message : "无法准备需求开发环境")
+          })
       } catch {
         toast.error("无法读取需求开发上下文，请重试")
       }

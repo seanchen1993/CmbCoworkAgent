@@ -33,6 +33,13 @@ import {
   leanstarRequirementsApi,
   type ProductRequirement
 } from "@/api/leanstar-requirements"
+import {
+  buildRequirementDevelopmentPrompt,
+  findRequirementDevelopmentThreads,
+  REQUIREMENT_DEVELOPMENT_ONBOARDING_EVENT,
+  REQUIREMENT_DEVELOPMENT_ONBOARDING_KEY,
+  writeRequirementDevelopmentIntent
+} from "@/lib/requirement-development"
 
 type EntryScreen = "history" | "system" | "conversation" | "space-detail"
 
@@ -157,6 +164,7 @@ export function RequirementEntryView({
   const createThread = useAppStore((state) => state.createThread)
   const deleteThread = useAppStore((state) => state.deleteThread)
   const selectThread = useAppStore((state) => state.selectThread)
+  const setShowHarnessBoardView = useAppStore((state) => state.setShowHarnessBoardView)
 
   useEffect(() => {
     onListVisibilityChange?.(screen === "history")
@@ -349,6 +357,60 @@ export function RequirementEntryView({
     setSelectedRequirement((current) => (current?.id === requirement.id ? requirement : current))
   }, [])
 
+  const startSpaceRequirementDevelopment = useCallback(
+    (requirement: RequirementRecord): void => {
+      const requirementFilePath = `需求空间3.0：${requirement.sourceName}`
+      writeRequirementDevelopmentIntent({
+        action: "create-development",
+        requirementId: requirement.id,
+        requirementTitle: requirement.title,
+        prompt: buildRequirementDevelopmentPrompt({
+          title: requirement.title,
+          requirementFilePath,
+          prototypeFilePaths: []
+        }),
+        requirementFilePath,
+        prototypeFilePaths: [],
+        functionCount: 0,
+        hasPrototype: false
+      })
+      setShowHarnessBoardView(true)
+      window.dispatchEvent(new Event(REQUIREMENT_DEVELOPMENT_ONBOARDING_EVENT))
+    },
+    [setShowHarnessBoardView]
+  )
+
+  const continueSpaceRequirementDevelopment = useCallback(
+    (requirement: RequirementRecord, threadId: string): void => {
+      window.sessionStorage.setItem(
+        REQUIREMENT_DEVELOPMENT_ONBOARDING_KEY,
+        JSON.stringify({
+          action: "open-session",
+          threadId,
+          requirementTitle: requirement.title
+        })
+      )
+      setShowHarnessBoardView(true)
+      window.dispatchEvent(new Event(REQUIREMENT_DEVELOPMENT_ONBOARDING_EVENT))
+    },
+    [setShowHarnessBoardView]
+  )
+
+  const resetSpaceRequirementDevelopment = useCallback(
+    async (requirement: RequirementRecord): Promise<void> => {
+      const threads = findRequirementDevelopmentThreads(
+        requirement.id,
+        useAppStore.getState().threads
+      )
+      const results = await Promise.allSettled(
+        threads.map((thread) => deleteThread(thread.thread_id))
+      )
+      const failedCount = results.filter((result) => result.status === "rejected").length
+      if (failedCount > 0) throw new Error(`${failedCount} 个开发会话删除失败`)
+    },
+    [deleteThread]
+  )
+
   const ensureRequirementThread = async (
     requirement: RequirementRecord,
     capabilities: RequirementSessionCapabilities = getRequirementSessionCapabilities()
@@ -537,6 +599,11 @@ export function RequirementEntryView({
         <RequirementSpaceDetailView
           requirement={selectedRequirement}
           onDesignRequirement={designSpaceRequirement}
+          onStartDevelopment={() => startSpaceRequirementDevelopment(selectedRequirement)}
+          onContinueDevelopment={(threadId) =>
+            continueSpaceRequirementDevelopment(selectedRequirement, threadId)
+          }
+          onResetDevelopment={() => resetSpaceRequirementDevelopment(selectedRequirement)}
           onBack={() => setScreen("history")}
         />
       )}

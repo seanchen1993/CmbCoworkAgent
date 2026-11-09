@@ -53,7 +53,6 @@ import { LeanstarTokenDialog } from "./LeanstarTokenDialog"
 import {
   buildRequirementDevelopmentPrompt,
   getRequirementDevelopmentMetadata,
-  REQUIREMENT_DEVELOPMENT_AUTO_SEND_KEY,
   REQUIREMENT_DEVELOPMENT_ONBOARDING_EVENT,
   REQUIREMENT_DEVELOPMENT_ONBOARDING_KEY,
   resolveRequirementDevelopmentFiles,
@@ -363,12 +362,6 @@ function RequirementConversationSession({
     const ids = [...threadIds]
     const deletions = await Promise.allSettled(ids.map((threadId) => deleteThread(threadId)))
     const deletedThreadIds = ids.filter((_, index) => deletions[index].status === "fulfilled")
-    const pendingAutoSendThreadId = window.sessionStorage.getItem(
-      REQUIREMENT_DEVELOPMENT_AUTO_SEND_KEY
-    )
-    if (pendingAutoSendThreadId && deletedThreadIds.includes(pendingAutoSendThreadId)) {
-      window.sessionStorage.removeItem(REQUIREMENT_DEVELOPMENT_AUTO_SEND_KEY)
-    }
     deletedThreadIds.forEach((threadId) => threadContext.cleanupThread(threadId))
     const failedCount = deletions.length - deletedThreadIds.length
     if (failedCount > 0) {
