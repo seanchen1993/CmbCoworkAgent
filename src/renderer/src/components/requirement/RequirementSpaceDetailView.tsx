@@ -6,14 +6,24 @@ import {
   LockKeyhole,
   PenTool,
   RefreshCw,
+  Trash2,
   UserPlus
 } from "lucide-react"
+import { toast } from "sonner"
 import {
   leanstarRequirementsApi,
   type RequirementDetail,
   type RequirementDocumentContent
 } from "@/api/leanstar-requirements"
 import { Button } from "@/components/ui/button"
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle
+} from "@/components/ui/dialog"
 import { HtmlThumbnailPreview } from "@/components/ui/html-thumbnail-preview"
 import { MarkdownPreview } from "@/components/ui/MarkdownPreview/MarkdownPreview"
 import { findRequirementDesignEntry } from "@/lib/requirement-design-entry"
@@ -29,6 +39,7 @@ function isPermissionDeniedError(reason: unknown): boolean {
 export function RequirementSpaceDetailView({
   requirement,
   onDesignRequirement,
+  onResetDesign,
   onStartDevelopment,
   onContinueDevelopment,
   onResetDevelopment,
@@ -36,6 +47,7 @@ export function RequirementSpaceDetailView({
 }: {
   requirement: RequirementRecord
   onDesignRequirement: (requirement: RequirementRecord, content?: string) => Promise<void>
+  onResetDesign: () => void | Promise<void>
   onStartDevelopment: () => void | Promise<void>
   onContinueDevelopment: (threadId: string) => void | Promise<void>
   onResetDevelopment: () => void | Promise<void>
@@ -48,6 +60,8 @@ export function RequirementSpaceDetailView({
   const [permissionDenied, setPermissionDenied] = useState(false)
   const [reloadToken, setReloadToken] = useState(0)
   const [prototypeHtml, setPrototypeHtml] = useState("")
+  const [designResetOpen, setDesignResetOpen] = useState(false)
+  const [designResetting, setDesignResetting] = useState(false)
   const designBinding = findRequirementDesignEntry(requirement.id)
 
   useEffect(() => {
@@ -218,6 +232,18 @@ export function RequirementSpaceDetailView({
               <PenTool className="size-4 text-primary" />
               <h3 className="text-sm font-semibold">原型预览</h3>
               <div className="ml-auto flex items-center gap-2">
+                {designBinding?.htmlFile ? (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="h-7 gap-1 px-2 text-xs text-destructive hover:bg-destructive/10 hover:text-destructive"
+                    onClick={() => setDesignResetOpen(true)}
+                  >
+                    <Trash2 className="size-3" />
+                    重置原型
+                  </Button>
+                ) : null}
                 <Button
                   type="button"
                   size="sm"
@@ -245,13 +271,64 @@ export function RequirementSpaceDetailView({
                 </div>
                 <h4 className="mt-4 text-sm font-semibold">暂无原型</h4>
                 <p className="mt-1.5 max-w-sm text-xs leading-5 text-muted-foreground">
-                  可直接在当前页面进入开发，也可按需先补充原型设计。
+                  原型设计并非开发的必需步骤。你可以直接点击页面上方的“去开发”，前往项目模式开始开发；也可以先完善原型，再进入开发。
                 </p>
               </div>
             )}
           </section>
         </main>
       )}
+      <Dialog
+        open={designResetOpen}
+        onOpenChange={(open) => {
+          if (!designResetting) setDesignResetOpen(open)
+        }}
+      >
+        <DialogContent className="rounded-2xl sm:max-w-[460px]">
+          <DialogHeader>
+            <DialogTitle>确认重置原型设计？</DialogTitle>
+            <DialogDescription className="pt-2 leading-6">
+              重置后可以重新设计原型；之前的设计会话和历史记录都会被删除。
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="secondary"
+              disabled={designResetting}
+              onClick={() => setDesignResetOpen(false)}
+            >
+              取消
+            </Button>
+            <Button
+              type="button"
+              variant="destructive"
+              disabled={designResetting}
+              onClick={() => {
+                setDesignResetting(true)
+                void Promise.resolve(onResetDesign())
+                  .then(() => {
+                    setPrototypeHtml("")
+                    setReloadToken((value) => value + 1)
+                    setDesignResetOpen(false)
+                    toast.success("原型设计已重置")
+                  })
+                  .catch((error) => {
+                    toast.error(error instanceof Error ? error.message : "重置原型设计失败")
+                  })
+                  .finally(() => setDesignResetting(false))
+              }}
+            >
+              {designResetting ? (
+                <Loader2 className="size-3.5 animate-spin" />
+              ) : (
+                <Trash2 className="size-3.5" />
+              )}
+              确认重置
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }

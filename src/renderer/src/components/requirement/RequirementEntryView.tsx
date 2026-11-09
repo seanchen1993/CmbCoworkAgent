@@ -26,8 +26,11 @@ import {
   REQUIREMENT_CONVERSATION_ENTRY_KEY,
   buildSpaceRequirementDesignPrompt,
   findRequirementDesignEntry,
+  listAllRequirementDesignEntries,
+  removeRequirementDesignSessions,
   openRequirementDesign
 } from "@/lib/requirement-design-entry"
+import { getDesignSessionClient } from "@/components/design/session-client"
 import {
   USE_LEANSTAR_REQUIREMENTS_MOCK,
   leanstarRequirementsApi,
@@ -526,6 +529,22 @@ export function RequirementEntryView({
     []
   )
 
+  const resetSpaceRequirementDesign = useCallback(
+    async (requirement: RequirementRecord): Promise<void> => {
+      const sessionIds = listAllRequirementDesignEntries(requirement.id).map(
+        (entry) => entry.htmlId
+      )
+      const client = getDesignSessionClient()
+      const failedSessionIds = await removeRequirementDesignSessions(sessionIds, (sessionId) =>
+        client.remove(sessionId)
+      )
+      if (failedSessionIds.length > 0) {
+        throw new Error(`有 ${failedSessionIds.length} 个设计会话删除失败，请重试`)
+      }
+    },
+    []
+  )
+
   const deleteRequirement = async (requirement: RequirementRecord): Promise<void> => {
     const deletedRequirementIndex = requirements.findIndex((item) => item.id === requirement.id)
     const remainingRequirements = requirements.filter((item) => item.id !== requirement.id)
@@ -599,6 +618,7 @@ export function RequirementEntryView({
         <RequirementSpaceDetailView
           requirement={selectedRequirement}
           onDesignRequirement={designSpaceRequirement}
+          onResetDesign={() => resetSpaceRequirementDesign(selectedRequirement)}
           onStartDevelopment={() => startSpaceRequirementDevelopment(selectedRequirement)}
           onContinueDevelopment={(threadId) =>
             continueSpaceRequirementDevelopment(selectedRequirement, threadId)
