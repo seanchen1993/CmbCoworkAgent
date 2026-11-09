@@ -390,7 +390,10 @@ export function RequirementHistoryList({
                             <EllipsisVertical className="size-4" />
                           </button>
                         </DropdownMenuTrigger>
-                        <DropdownMenuContent align="end">
+                        <DropdownMenuContent
+                          align="end"
+                          onClick={(event) => event.stopPropagation()}
+                        >
                           <Tooltip>
                             <TooltipTrigger asChild>
                               <DropdownMenuItem
