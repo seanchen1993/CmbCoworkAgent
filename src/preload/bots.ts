@@ -3,6 +3,30 @@ import { LOCAL_BOT_HOST_ID, type BotChangeEvent, type BotClient } from "../share
 
 /** Narrow named operations only; no generic IPC invocation is exposed to renderer code. */
 export const localBotsApi: BotClient = {
+  features: {
+    projects: (botId, groupId) =>
+      ipcRenderer.invoke("bots:feature:projects", LOCAL_BOT_HOST_ID, botId, groupId),
+    catalog: (botId, projectId, groupId) =>
+      ipcRenderer.invoke("bots:feature:catalog", LOCAL_BOT_HOST_ID, botId, projectId, groupId),
+    follow: (botId, projectId, slug, groupId) =>
+      ipcRenderer.invoke("bots:feature:follow", LOCAL_BOT_HOST_ID, botId, projectId, slug, groupId),
+    list: (botId, groupId) =>
+      ipcRenderer.invoke("bots:feature:list", LOCAL_BOT_HOST_ID, botId, groupId),
+    lifecycle: (botId, id, action, version, groupId) =>
+      ipcRenderer.invoke(
+        "bots:feature:lifecycle",
+        LOCAL_BOT_HOST_ID,
+        botId,
+        id,
+        action,
+        version,
+        groupId
+      ),
+    detail: (botId, id, groupId) =>
+      ipcRenderer.invoke("bots:feature:detail", LOCAL_BOT_HOST_ID, botId, id, groupId),
+    link: (botId, id, threadId, groupId) =>
+      ipcRenderer.invoke("bots:feature:link", LOCAL_BOT_HOST_ID, botId, id, threadId, groupId)
+  },
   hostId: LOCAL_BOT_HOST_ID,
   conversations: {
     resolve: (threadId) =>

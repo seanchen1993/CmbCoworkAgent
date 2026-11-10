@@ -58,6 +58,7 @@ export class ManagedActionValidationError extends Error {
 }
 
 export interface CreateManagedHarnessSessionInput {
+  botOperationId?: string
   projectId: string
   featureId: string
   runId: string
@@ -216,34 +217,50 @@ export function prepareManagedAgentRun(
 /** The caller must finish preparation before entering this side-effecting submission step. */
 export async function startPreparedManagedAgentRun(
   input: PreparedManagedAgentRun,
-  context?: AgentRunExecutionContext
+  context?: AgentRunExecutionContext,
+  botOperationId?: string
 ): Promise<void> {
   const { request, message: prepared, delivery: resolvedDelivery } = input
   const threadId = request.threadId
-  const persistedCount = upsertThreadMessages(threadId, [
-    {
-      id: prepared.userMessageId,
-      role: "user",
-      content: prepared.displayMessage,
-      created_at: new Date()
-    }
-  ])
-  if (persistedCount !== 1) {
-    throw new Error(`无法保存托管用户消息：${threadId}`)
-  }
   const streamRequestId = request.streamRequestId
-  const streamStartEvent: ManagedAutoSendStreamStartEvent = {
-    runId: streamRequestId,
-    threadId,
-    streamRequestId,
-    ...(request.agentMode ? { agentMode: request.agentMode } : {})
+  let streamStarted = false
+  const startStream = () => {
+    const persistedCount = upsertThreadMessages(threadId, [
+      {
+        id: prepared.userMessageId,
+        role: "user",
+        content: prepared.displayMessage,
+        created_at: new Date()
+      }
+    ])
+    if (persistedCount !== 1) throw new Error(`无法保存托管用户消息：${threadId}`)
+    const streamStartEvent: ManagedAutoSendStreamStartEvent = {
+      runId: streamRequestId,
+      threadId,
+      streamRequestId,
+      ...(request.agentMode ? { agentMode: request.agentMode } : {})
+    }
+    resolvedDelivery.send(AUTO_MODE_MANAGED_STREAM_STARTED_CHANNEL, streamStartEvent)
+    streamStarted = true
   }
-  resolvedDelivery.send(AUTO_MODE_MANAGED_STREAM_STARTED_CHANNEL, streamStartEvent)
 
   let handle: Awaited<ReturnType<typeof startAgentRun>>
   try {
-    handle = await startAgentRun(request, resolvedDelivery, context)
+    if (botOperationId) {
+      const { startFeatureTurn } = await import("../bots/feature-service")
+      handle = await startFeatureTurn(
+        botOperationId,
+        request,
+        resolvedDelivery,
+        context,
+        startStream
+      )
+    } else {
+      startStream()
+      handle = await startAgentRun(request, resolvedDelivery, context)
+    }
   } catch (error) {
+    if (!streamStarted) throw error
     const requestChannel = resolveAgentStreamRequestChannel(
       `agent:stream:${threadId}`,
       streamRequestId
@@ -322,6 +339,11 @@ export async function prepareManagedHarnessSessionGrant(
   input: CreateManagedHarnessSessionInput,
   threadId: string
 ): Promise<void> {
+  if (input.botOperationId) {
+    const { bindManagedFeatureSession } = await import("../bots/feature-service")
+    bindManagedFeatureSession(input, threadId, input.botOperationId)
+    return
+  }
   const grant = await materializeHarnessFeatureThreadGrant({
     projectId: input.projectId,
     featureId: input.featureId,
@@ -340,7 +362,11 @@ export async function startManagedHarnessSession(
 ): Promise<void> {
   await prepareManagedHarnessSessionGrant(input, threadId)
   try {
-    await startPreparedManagedAgentRun(prepareManagedAgentRun(threadId, prepared, input.delivery))
+    await startPreparedManagedAgentRun(
+      prepareManagedAgentRun(threadId, prepared, input.delivery),
+      undefined,
+      input.botOperationId
+    )
   } catch (error) {
     throw new Error(
       `无法启动 ManagedRun 会话 ${threadId}：${error instanceof Error ? error.message : String(error)}`

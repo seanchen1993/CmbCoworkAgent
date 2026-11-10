@@ -927,6 +927,7 @@ export interface WorkflowAgentFocusView {
 }
 
 interface AppState {
+  botFeatureDestination?: { projectId: string; slug: string; threadId?: string }
   // Main content view routing
   mainView: MainView
 

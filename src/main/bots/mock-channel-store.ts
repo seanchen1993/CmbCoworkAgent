@@ -856,6 +856,18 @@ export class BotMockChannelStore {
     }
     return { bindingId, conversationId, messageId, version }
   }
+  featureNotice(task: BotTask, key: string, text: string): void {
+    const target = this.deliveryTarget(task)
+    if (!target) return
+    this.run(
+      `INSERT OR IGNORE INTO bot_mock_outbox
+        (id,bot_id,binding_id,grant_version,conversation_id,reply_to_message_id,source_task_id,text,state,created_at,delivery_kind)
+        VALUES(?,?,?,?,?,?,?,?,'pending',?,?)`,
+      [`im-feature-${key}`, task.botId, target.bindingId, target.version, target.conversationId,
+        target.messageId, task.id, text, this.now(), `feature:${key}`]
+    )
+    if (this.db.getRowsModified()) this.changed()
+  }
   browserHelpNotice(task: BotTask, help: import("./browser").BotBrowserHelp, active: boolean): void {
     if (this.transport !== "im") return
     const id = `im-browser-help-${task.id}-${help.generation}`

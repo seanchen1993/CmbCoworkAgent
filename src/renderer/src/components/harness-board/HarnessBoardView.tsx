@@ -11112,6 +11112,17 @@ export function HarnessBoardView({
     [detailsByProjectId, loadProjectDetail, loadingDetailIds]
   )
 
+  const botDestination = useAppStore((state) => state.botFeatureDestination)
+  useEffect(() => {
+    if (!botDestination || useAppStore.getState().botFeatureDestination !== botDestination) return
+    useAppStore.setState({ botFeatureDestination: undefined })
+    openFeatureDetail(botDestination.projectId, botDestination.slug, botDestination.threadId)
+    if (botDestination.threadId) {
+      markRead(botDestination.threadId)
+      void selectThread(botDestination.threadId, { preserveView: true })
+    }
+  }, [botDestination, openFeatureDetail, selectThread, markRead])
+
   const openProjectSession = useCallback(
     (projectId: string, threadId: string, deleted?: boolean): void => {
       setSelectedProjectId(projectId)

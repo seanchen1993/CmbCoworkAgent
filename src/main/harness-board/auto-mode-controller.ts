@@ -92,6 +92,19 @@ const providerRetryTimers = new Map<string, ReturnType<typeof setTimeout>>()
 const stopRequestedRunIds = new Set<string>()
 const MANAGED_RUN_REASON_MAX_LENGTH = 1024
 
+/** Serialize a Bot submission with native starts while preserving independent manual sessions. */
+export function withIdleManagedFeature<T>(
+  projectId: string,
+  featureId: string,
+  submit: () => Promise<T>
+): Promise<T> {
+  return featureLocks.withKey(featureKey(projectId, featureId), async () => {
+    if (managedRunStore.findRunningRun(projectId, featureId))
+      throw new Error("此 Feature 正在托管，请先处理当前阶段或停止自动推进")
+    return submit()
+  })
+}
+
 function featureKey(projectId: string, featureId: string): string {
   return `${projectId}\u0000${featureId}`
 }
@@ -136,6 +149,10 @@ export function isActiveManagedRunSession(threadId: string): boolean {
 }
 
 function publishManagedRunChanged(run: ManagedRunSummary): void {
+  if (run.botOperationId)
+    void import("../bots/feature-service")
+      .then(({ publishFeatureRun }) => publishFeatureRun(run))
+      .catch((error) => console.warn("[BotFeatures] 托管状态回传失败", error))
   const event: ManagedRunChangeEvent = {
     projectId: run.projectId,
     featureId: run.featureId,
@@ -531,7 +548,7 @@ async function processProviderRetry(
           sourceThreadId: currentThreadId
         })
         running = retryDecision.run
-        await startPreparedManagedAgentRun(prepared)
+        await startPreparedManagedAgentRun(prepared, undefined, running.botOperationId)
         const published = managedRunStore.updateSnapshot(running, {
           type: "session_continued",
           scope: "stage",
@@ -844,6 +861,7 @@ async function inspectAndLaunch(
     projectId: decidedRun.projectId,
     featureId: decidedRun.featureId,
     runId: decidedRun.runId,
+    botOperationId: decidedRun.botOperationId,
     nodeId: feature.currentNodeId,
     nextAction,
     workspacePath,
@@ -907,7 +925,7 @@ async function inspectAndLaunch(
             ? null
             : "所选会话的归属已变化，请重新选择后再开启托管"
         }
-      })
+      }, run.botOperationId)
       managedRunStore.appendEvent(launchingRun, {
         type: "session_continued",
         scope: "stage",
@@ -976,7 +994,14 @@ async function inspectAndLaunch(
   }
 }
 
-export async function startManagedRun(input: ManagedRunStartRequest): Promise<ManagedRunSummary> {
+export async function startManagedRun(
+  input: ManagedRunStartRequest,
+  bot?: {
+    operationId: string
+    authorize(): void
+    created(run: ManagedRunSnapshot): void
+  }
+): Promise<ManagedRunSummary> {
   return featureLocks.withKey(featureKey(input.projectId, input.featureId), async () => {
     // The persisted workspace is a configuration gate. A user-confirmed override remains valid.
     await requireHarnessFeatureWorkspace(input.projectId, input.featureId)
@@ -1011,11 +1036,13 @@ export async function startManagedRun(input: ManagedRunStartRequest): Promise<Ma
     managedRunScheduler.assertCanStart(input.projectId, input.featureId, input.scheduledStartId)
     assertManagedRunCanStart(input.projectId, input.featureId, !input.scheduledStartId)
 
+    bot?.authorize()
     const created = managedRunStore.createRun(
       input.projectId,
       input.featureId,
       workspacePath,
-      input.modelSelection
+      input.modelSelection,
+      ...(bot ? ([bot.operationId] as const) : [])
     )
     const sourceEvent = managedRunStore.appendEvent(created, {
       type: "run_started",
@@ -1027,8 +1054,9 @@ export async function startManagedRun(input: ManagedRunStartRequest): Promise<Ma
     reportManagedRunStarted(created)
     // 看板「托管运行」标签读的是项目元数据上的单调标记，不是事件，这样丢事件不影响标签。
     void markHarnessProjectManagedRunStarted(created.projectId)
-    publishManagedRunChanged(lastRunSummary(created))
     try {
+      bot?.created(created)
+      publishManagedRunChanged(lastRunSummary(created))
       await inspectAndLaunch(
         created,
         input.delivery,
@@ -1328,7 +1356,7 @@ export async function resolveManagedBizRetryDecision(
       const retryRun = await prepareManagedRetryAttempt(run, input.sourceEvent, "business")
       if (!retryRun) return { applied: false, message: "托管运行已停止，未执行重试。" }
       try {
-        await startPreparedManagedAgentRun(prepared)
+        await startPreparedManagedAgentRun(prepared, undefined, retryRun.botOperationId)
       } catch (error) {
         return failManagedBizRetryDecision(input, retryRun, error)
       }
@@ -1391,6 +1419,7 @@ export async function resolveManagedBizRetryDecision(
       nextAction,
       workspacePath,
       modelSelection: run.modelSelection,
+      botOperationId: run.botOperationId,
       delivery: input.delivery,
       imRoute: input.channel === "im" ? input.route : undefined
     }

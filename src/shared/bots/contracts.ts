@@ -404,6 +404,7 @@ export interface BotConversationActivity {
 }
 
 export interface BotChangeEvent {
+  featureScope?: { botId: string; audience: string }
   hostId: string
   revision: number
   /** Invalidate only this reaction view; no transcript or emoji payload travels in the event. */
@@ -475,6 +476,7 @@ export interface BotClient {
   im?: BotImClient
   readonly hostId: string
   readonly filePreview: BotFilePreviewTransport
+  readonly features?: import("./feature").BotFeatureClient
   readonly works?: BotWorkClient
   readonly conversations?: import("./conversation").BotConversationClient
   /** Optional group scope resolves to its shared workspace after validating current membership. */

@@ -1,0 +1,116 @@
+.bot-feature-links,
+.bot-feature-form > div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+.bot-feature-summary {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+.bot-feature-summary > .bot-work-row {
+  flex: 1;
+  min-width: 0;
+}
+.bot-feature-disclose {
+  display: grid;
+  place-items: center;
+  flex: 0 0 28px;
+  min-height: 28px;
+  color: var(--bot-muted);
+  border-radius: 6px;
+}
+.bot-feature-disclose:hover,
+.bot-feature-links button:hover {
+  background: var(--bot-hover);
+}
+.bot-feature-summary [data-attention="true"] {
+  color: var(--bot-text);
+  font-weight: 500;
+}
+.bot-task-picker {
+  display: flex;
+  gap: 3px;
+  width: fit-content;
+  padding: 3px;
+  border-radius: 8px;
+  background: var(--bot-hover);
+  margin-block: 8px;
+}
+.bot-task-picker > button {
+  padding: 4px 9px;
+  border-radius: 6px;
+  font-size: 12px;
+  color: var(--bot-muted);
+}
+.bot-task-picker > [aria-pressed="true"] {
+  color: var(--bot-text);
+  background: var(--bot-elevated);
+}
+.bot-feature-expanded {
+  margin: 2px 4px 10px 9px;
+  padding-inline-start: 10px;
+  border-inline-start: 1px solid var(--border);
+}
+.bot-feature-expanded p,
+.bot-feature-form p {
+  color: var(--muted-foreground);
+  font-size: 12px;
+  margin: 6px 0;
+}
+.bot-feature-session {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  padding: 5px 0;
+  text-align: start;
+  font-size: 13px;
+}
+.bot-feature-session span {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.bot-feature-session small {
+  flex-shrink: 0;
+  color: var(--muted-foreground);
+}
+.bot-feature-links {
+  justify-content: start;
+  flex-wrap: wrap;
+  font-size: 12px;
+  color: var(--muted-foreground);
+}
+.bot-feature-links button {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 4px 0;
+}
+.bot-feature-form {
+  display: grid;
+  gap: 8px;
+  margin-block: 8px;
+  font-size: 13px;
+}
+.bot-feature-form select {
+  width: 100%;
+  min-width: 0;
+  padding: 5px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--background);
+  color: inherit;
+}
+.bot-feature-form > div {
+  justify-content: end;
+}
+.bot-feature-links button:disabled,
+.bot-feature-session:disabled,
+.bot-feature-form button:disabled {
+  opacity: 0.45;
+}

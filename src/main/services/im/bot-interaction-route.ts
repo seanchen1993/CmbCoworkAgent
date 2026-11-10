@@ -9,6 +9,7 @@ export interface BotInteractionRoute {
   botEventId?: string
   senderId?: string
   isCurrent: () => boolean
+  onQuestionUndeliverable?: (requestId: string) => void
 }
 class BotInteractionRoutes {
   private routes = new Map<string, BotInteractionRoute>()
@@ -31,11 +32,22 @@ class BotInteractionRoutes {
       if (this.routes.get(route.threadId) === route) this.routes.delete(route.threadId)
     }
   }
+  private registered(threadId: string): BotInteractionRoute | undefined {
+    // Runtime subthreads append "__<scope>" to their owning conversation id.
+    let key = threadId
+    while (true) {
+      const route = this.routes.get(key)
+      if (route) return route
+      const parent = key.lastIndexOf("__")
+      if (parent < 0) return undefined
+      key = key.slice(0, parent)
+    }
+  }
   has(threadId: string): boolean {
-    return this.routes.has(threadId)
+    return this.registered(threadId) !== undefined
   }
   get(threadId: string): BotInteractionRoute | null {
-    const route = this.routes.get(threadId)
+    const route = this.registered(threadId)
     if (!route || !this.available(route)) return null
     try {
       return route.isCurrent() ? route : null

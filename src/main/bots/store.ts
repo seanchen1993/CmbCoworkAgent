@@ -1,6 +1,7 @@
 import type { AgentRunTerminal } from "../agent/agent-run-service"
 import { BotImGatewayStore } from "./im-gateway-store"
 import { BotTelemetryStore, type BotTelemetryContext } from "./telemetry-store"
+import { BotFeatureStore } from "./feature-store"
 import { BotWorkConversationJournal } from "./conversation-link-store"
 import { readWorkConversationRecord } from "./conversation-link-validation"
 import { upgradeWorkConversationSchema } from "./conversation-link-schema"
@@ -159,6 +160,7 @@ export interface BotWorkflowReference extends WorkflowRunReference {
 }
 
 export class BotStore {
+  readonly features: BotFeatureStore
   readonly telemetry: BotTelemetryStore
   readonly conversations: BotWorkConversationJournal
   readonly mock: BotMockChannelStore
@@ -478,6 +480,12 @@ export class BotStore {
       () => this.changed(),
       this.now,
       "im"
+    )
+    this.features = new BotFeatureStore(
+      db,
+      (sql, args) => this.rows(sql, args),
+      () => this.changed(),
+      this.now
     )
     this.im.setAllOffline()
     this.restoreImConversationActivities()
@@ -1746,6 +1754,7 @@ export class BotStore {
         "DELETE FROM bot_reply_outbox WHERE task_id IN (SELECT id FROM bot_tasks WHERE bot_id=?)",
         [id]
       )
+      this.features.deleteScope(id)
       this.imGateway.removeBot(id)
       this.db.run("DELETE FROM bot_workflow_refs WHERE source_task_id IN (SELECT id FROM bot_tasks WHERE bot_id=?)", [id])
       this.db.run("DELETE FROM bot_tasks WHERE bot_id=?", [id])
@@ -2991,6 +3000,7 @@ export class BotStore {
             WHERE COALESCE(json_extract(member.origin_json,'$.rootTaskId'),member.id)=COALESCE(json_extract(t.origin_json,'$.rootTaskId'),t.id)
               AND (member.state IN ('queued','running','waiting_user') OR member.updated_at >= ?)
           )
+          AND NOT EXISTS (SELECT 1 FROM bot_feature_ops op WHERE op.task_id=t.id AND op.state IN ('starting','active'))
           AND NOT EXISTS (
             SELECT 1 FROM bot_reply_outbox reply
             WHERE reply.task_id=t.id OR json_extract(reply.origin_json,'$.rootTaskId')=COALESCE(json_extract(t.origin_json,'$.rootTaskId'),t.id)

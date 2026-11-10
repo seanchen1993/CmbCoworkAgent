@@ -33,6 +33,7 @@ import {
 import { getThreadCore } from "../db"
 import type { ThreadDeletionService } from "./threads"
 import { registerBotFileHandlers } from "./bot-files"
+import { configureBotFeatureWindow } from "../bots/feature-window"
 import {
   exposeWorkConversation,
   linkExistingConversation,
@@ -58,8 +59,10 @@ function localHost(id: unknown) {
 export function registerBotHandlers(
   ipcMain: IpcMain,
   deleteThread?: ThreadDeletionService,
-  im?: Pick<BuiltinRobotManager, "setBotHostResolver" | "botChannelStatus" | "requireBotChannel">
+  im?: Pick<BuiltinRobotManager, "setBotHostResolver" | "botChannelStatus" | "requireBotChannel">,
+  getFeatureWindow?: () => BrowserWindow | null
 ): void {
+  if (getFeatureWindow) configureBotFeatureWindow(getFeatureWindow)
   initializeBotNotificationDispatch()
   im?.setBotHostResolver(getLocalBotHost)
   const imChannel = () => {
@@ -82,7 +85,12 @@ export function registerBotHandlers(
   }
   // Optional workspace initialization must not prevent the existing workbench from opening.
   try {
-    hostFor(LOCAL_BOT_HOST_ID)
+    const featureHost = hostFor(LOCAL_BOT_HOST_ID)
+    const unfinished = featureHost.featureStore.unfinished()
+    if (unfinished.length)
+      void import("../bots/feature-service")
+        .then(({ recoverFeatureOperations }) => recoverFeatureOperations(featureHost, unfinished))
+        .catch((error) => console.warn("[BotFeatures] 项目交办恢复失败", error))
   } catch (error) {
     console.error("[Bots] Local host unavailable", error)
   }
@@ -103,6 +111,81 @@ export function registerBotHandlers(
       throw new BotError("INVALID_INPUT", "会话游标无效")
     return value
   }
+  const featureCatalog = async (groupId: unknown) => {
+    const { desktopFeatureCatalog, imFeatureBindingService } =
+      await import("../services/im/feature-binding-service")
+    return groupId === undefined ? desktopFeatureCatalog : imFeatureBindingService
+  }
+  const featureText = (value: unknown) => {
+    if (typeof value !== "string" || !value.trim() || value.length > 160)
+      throw new BotError("INVALID_INPUT", "Feature 标识无效")
+    return value.trim()
+  }
+  const featureScope = (
+    host: ReturnType<typeof getLocalBotHost>,
+    botId: unknown,
+    groupId: unknown
+  ) =>
+    host.featureScope(
+      botIdentifier(botId),
+      groupId === undefined ? undefined : botIdentifier(groupId)
+    )
+  ipcMain.handle("bots:feature:projects", async (event, hostId, botId, groupId) => {
+    featureScope(desktopHost(event, hostId), botId, groupId)
+    return (await featureCatalog(groupId)).listRemoteProjects()
+  })
+  ipcMain.handle("bots:feature:catalog", async (event, hostId, botId, projectId, groupId) => {
+    featureScope(desktopHost(event, hostId), botId, groupId)
+    return (await featureCatalog(groupId)).listRemoteFeatures(featureText(projectId))
+  })
+  ipcMain.handle("bots:feature:follow", async (event, hostId, botId, projectId, slug, groupId) => {
+    const host = desktopHost(event, hostId)
+    const entry = await (
+      await featureCatalog(groupId)
+    ).featureAccess(featureText(projectId), featureText(slug))
+    if (!entry.valid) throw new BotError("CONFLICT", entry.message)
+    const scope = featureScope(host, botId, groupId)
+    const bot = host.getBot(scope.botId)
+    if (
+      bot.archived ||
+      bot.deleting ||
+      (groupId !== undefined &&
+        host.imGateway.binding(botIdentifier(groupId))?.binding.state !== "active")
+    )
+      throw new BotError("CONFLICT", "Bot 或群绑定当前不可用")
+    const owner = host.featureStore.follow(scope, {
+      projectId: entry.project.id,
+      projectName: entry.project.name,
+      slug: entry.feature.slug,
+      title: entry.feature.title
+    })
+    host.featureChanged(scope)
+    return owner
+  })
+  ipcMain.handle("bots:feature:list", (event, hostId, botId, groupId) => {
+    const host = desktopHost(event, hostId)
+    return host.featureTasks(featureScope(host, botId, groupId)).map(row => row.task)
+  })
+  ipcMain.handle("bots:feature:lifecycle", (event, hostId, botId, id, action, version, groupId) => {
+    const host = desktopHost(event, hostId)
+    if (!["complete","reopen"].includes(action) || !Number.isSafeInteger(version) || version < 1)
+      throw new BotError("INVALID_INPUT","无效的任务状态")
+    host.changeFeatureState(featureScope(host,botId,groupId), botIdentifier(id), action, version)
+  })
+  ipcMain.handle("bots:feature:detail", async (event, hostId, botId, id, groupId) => {
+    const host = desktopHost(event, hostId)
+    const owner = host.featureStore.owner(botIdentifier(id), featureScope(host, botId, groupId))
+    return (await import("../bots/feature-service")).featureDetail(host, owner)
+  })
+  ipcMain.handle("bots:feature:link", async (event, hostId, botId, id, threadId, groupId) => {
+    const host = desktopHost(event, hostId)
+    const owner = host.featureStore.owner(botIdentifier(id), featureScope(host, botId, groupId))
+    return (await import("../bots/feature-service")).linkExistingFeatureSession(
+      host,
+      owner,
+      botIdentifier(threadId)
+    )
+  })
   ipcMain.handle("bots:conversation:resolve", (event, hostId, threadId) =>
     resolveWorkConversation(desktopHost(event, hostId), botIdentifier(threadId))
   )

@@ -1162,7 +1162,7 @@ if (browserNativeMessagingHostLaunch) {
     registerAgentHandlers(ipcMain)
     registerWorkflowHandlers(ipcMain)
     const deleteThread = registerThreadHandlers(ipcMain)
-    registerBotHandlers(ipcMain, deleteThread, builtinRobotManager)
+    registerBotHandlers(ipcMain, deleteThread, builtinRobotManager, () => mainWindow)
     registerModelHandlers(ipcMain)
     registerWorkspaceFilePreviewHandlers(ipcMain)
     registerWorkspaceFilePreviewProtocol()

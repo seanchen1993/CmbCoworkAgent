@@ -110,10 +110,11 @@ async function streamBotFileCopy(
 export async function snapshotBotDeliveryFile(
   workspace: string,
   source: string,
-  signal: AbortSignal
+  signal: AbortSignal,
+  destinationWorkspace = workspace
 ): Promise<{ attachmentPath: string; size: number }> {
   signal.throwIfAborted()
-  const directory = join(await realpath(workspace), ".bot-deliveries")
+  const directory = join(await realpath(destinationWorkspace), ".bot-deliveries")
   const ensureDirectory = async (path: string) => {
     await mkdir(path, { recursive: true, mode: 0o700 })
     if ((await lstat(path)).isSymbolicLink() || (await realpath(path)) !== path)
@@ -149,7 +150,7 @@ export async function snapshotBotDeliveryFile(
       if (
         !existing.isFile() ||
         existing.isSymbolicLink() ||
-        (await hashBotFile(workspace, attachmentPath, signal)) !== hash
+        (await hashBotFile(destinationWorkspace, attachmentPath, signal)) !== hash
       )
         throw new Error("已保存的附件发生变化，请重新交付")
     }

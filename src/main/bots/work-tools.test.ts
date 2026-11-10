@@ -50,6 +50,14 @@ describe("work Runtime tools", () => {
     const tools = createBotWorkTools(f.source, () => f.host, new AbortController().signal)
     expect(filterTaskSubagentTools(tools)).toEqual([])
     const args: Record<string, object> = {
+      bot_feature_list: {},
+      bot_feature_read: { followId: "item" },
+      bot_feature_update: {
+        action: "follow",
+        projectId: "project",
+        slug: "feature",
+        requestKey: "child"
+      },
       bot_work_projects: { query: "Project" },
       bot_work_list: {},
       bot_work_search: { workId: "missing", query: "history" },

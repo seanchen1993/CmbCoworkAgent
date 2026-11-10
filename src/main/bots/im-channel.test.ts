@@ -217,6 +217,26 @@ function fixture(
 }
 
 describe("authenticated IM on the existing Bot host", () => {
+  it("delivers a Feature update after the dispatching turn ended, once and only to the originating group", async () => {
+    const f = fixture()
+    const group = await f.binding("group")
+    await f.binding("group")
+    await f.service.receive(f.event(group, "feature-source"))
+    await eventually(
+      () => f.calls.length === 1 && f.store.getTask(f.calls[0].id).state === "completed"
+    )
+    const task = f.store.getTask(f.calls[0].id)
+    f.host.imChannel.featureNotice(task, "decision-1", "项目正在等待字段确认")
+    f.host.imChannel.featureNotice(task, "decision-1", "项目正在等待字段确认")
+    await eventually(() =>
+      f.client.submitReply.mock.calls.some(([r]) => r.message.content === "项目正在等待字段确认")
+    )
+    const sent = f.client.submitReply.mock.calls
+      .map(([r]) => r)
+      .filter((r) => r.message.content === "项目正在等待字段确认")
+    expect(sent.map((r) => r.conversationKey)).toEqual([group.conversationKey])
+    expect(f.errors).toEqual([])
+  })
   it.each(["group", "personal", "work"] as const)("routes stopped background activity to the IM %s owner", async (scope) => {
     const f = fixture(undefined, undefined, () => false)
     const own = f.host.send({ botId: f.bot.id, requestId: "baseline", message: "Private baseline" })

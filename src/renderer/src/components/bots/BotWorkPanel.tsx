@@ -3,6 +3,7 @@ import { useAppStore } from "@/lib/store"
 import { Plus, ArrowLeft, ArrowUpRight, Check, RotateCcw } from "lucide-react"
 import type { BotClient } from "../../../../shared/bots/contracts"
 import type { BotWorkItem, BotWorkSummary } from "../../../../shared/bots/work"
+import { FeatureRow, FollowPicker, useBotFeatureTasks } from "./BotFeaturePanel"
 import type { useBotWorks } from "./use-bot-works"
 import { botErrorMessage } from "@/lib/bot-error-message"
 
@@ -27,7 +28,9 @@ export function BotWorkPanel({
   selected,
   onSelect,
   disabled,
-  heading = "独立任务",
+  groupId,
+  featureDisabled = disabled,
+  heading = "任务",
   allowCreate = true,
   backLabel = "返回主对话",
   onBack
@@ -37,6 +40,8 @@ export function BotWorkPanel({
   controller: ReturnType<typeof useBotWorks>
   selected: BotWorkItem | null
   onSelect(id: string | null): void
+  groupId?: string
+  featureDisabled?: boolean
   heading?: string
   allowCreate?: boolean
   backLabel?: string
@@ -50,6 +55,9 @@ export function BotWorkPanel({
   const [saving, setSaving] = useState(false),
     [error, setError] = useState<string | null>(null),
     [limit, setLimit] = useState(6)
+  const features = useBotFeatureTasks({ client, botId, groupId })
+  const [createKind, setCreateKind] = useState<"work" | "feature">(allowCreate ? "work" : "feature")
+  const canFollow = Boolean(client.features && !featureDisabled)
   const operation = useRef<{ fingerprint: string; id: string } | null>(null)
   const openConversation = async () => {
     if (!selected || !client.conversations) return
@@ -135,10 +143,30 @@ export function BotWorkPanel({
     }
   }
   if (!client.works) return null
-  const directory = [
+  const priority = new Set(controller.priority.map((item) => item.id))
+  const needle = controller.query.trim().toLocaleLowerCase()
+  const ordinary = [
     ...controller.priority,
-    ...controller.items.filter((item) => !controller.priority.some((v) => v.id === item.id))
+    ...controller.items.filter((item) => !priority.has(item.id))
   ]
+  const directory = [
+    ...ordinary.map((work) => ({
+      kind: "work" as const,
+      work,
+      priority: priority.has(work.id),
+      updatedAt: work.updatedAt
+    })),
+    ...features.items
+      .filter((f) =>
+        (f.title + " " + f.projectName + " " + f.slug).toLocaleLowerCase().includes(needle)
+      )
+      .map((feature) => ({
+        kind: "feature" as const,
+        feature,
+        priority: Boolean(feature.attentionThreadId),
+        updatedAt: feature.updatedAt
+      }))
+  ].sort((a, b) => Number(b.priority) - Number(a.priority) || b.updatedAt - a.updatedAt)
   const sourceLabel = selected?.source
     ? selected.source.transport === "im"
       ? "IM 渠道交办"
@@ -154,11 +182,12 @@ export function BotWorkPanel({
     <section className="bot-detail-section bot-works" aria-label={heading}>
       <div className="bot-works-heading">
         <h3>{heading}</h3>
-        {allowCreate && (
+        {(allowCreate || canFollow) && (
           <button
             disabled={disabled || saving}
             onClick={() => setEditing(!editing)}
-            aria-label="新建独立任务"
+            aria-label={allowCreate ? "添加任务" : "关联项目 Feature"}
+            aria-expanded={editing}
           >
             <Plus size={16} />
           </button>
@@ -193,7 +222,28 @@ export function BotWorkPanel({
           </div>
         </div>
       )}
-      {editing && (
+      {editing && allowCreate && canFollow && (
+        <div className="bot-task-picker" role="group" aria-label="任务类型">
+          <button aria-pressed={createKind === "work"} onClick={() => setCreateKind("work")}>
+            普通任务
+          </button>
+          <button aria-pressed={createKind === "feature"} onClick={() => setCreateKind("feature")}>
+            项目 Feature
+          </button>
+        </div>
+      )}
+      {editing && createKind === "feature" && canFollow && client.features && (
+        <FollowPicker
+          api={client.features}
+          botId={botId}
+          groupId={groupId}
+          done={() => {
+            setEditing(false)
+            features.refresh()
+          }}
+        />
+      )}
+      {editing && createKind === "work" && allowCreate && (
         <form
           onSubmit={(event) => {
             event.preventDefault()
@@ -249,38 +299,67 @@ export function BotWorkPanel({
           controller.setQuery(e.target.value)
         }}
       />
-      {(error || controller.error) && (
+      {(error || controller.error || features.error) && (
         <p role="alert">
-          {error || controller.error}
-          <button onClick={() => void controller.refresh()}>刷新</button>
+          {error || controller.error || features.error}
+          <button
+            onClick={() => {
+              void controller.refresh()
+              features.refresh()
+            }}
+          >
+            刷新
+          </button>
         </p>
       )}
       <div className="bot-work-list" aria-label="全部任务">
-        {directory.slice(0, limit).map((work) => (
-          <button
-            className="bot-work-row"
-            data-work-id={work.id}
-            key={work.id}
-            aria-pressed={selected?.id === work.id}
-            onClick={() => onSelect(work.id)}
-          >
-            <span>
-              {work.activity?.unread ? "● " : ""}
-              {work.title}
-            </span>
-            <small>
-              {work.source ? (work.source.transport === "im" ? "IM · " : "模拟渠道 · ") : ""}
-              {status(work)}
-            </small>
-          </button>
-        ))}
+        {directory.slice(0, limit).map((entry) => {
+          if (entry.kind === "feature")
+            return (
+              client.features && (
+                <FeatureRow
+                  key={entry.feature.id}
+                  feature={entry.feature}
+                  api={client.features}
+                  botId={botId}
+                  groupId={groupId}
+                  disabled={featureDisabled}
+                  revision={features.revision}
+                  refresh={features.refresh}
+                />
+              )
+            )
+          const work = entry.work
+          return (
+            <button
+              className="bot-work-row"
+              data-work-id={work.id}
+              key={work.id}
+              aria-pressed={selected?.id === work.id}
+              onClick={() => onSelect(work.id)}
+            >
+              <span>
+                {work.activity?.unread ? "● " : ""}
+                {work.title}
+              </span>
+              <small>
+                {work.source ? (work.source.transport === "im" ? "IM · " : "模拟渠道 · ") : ""}
+                {status(work)}
+              </small>
+            </button>
+          )
+        })}
       </div>
-      {!directory.length && !controller.loading && <p>明确交办的任务会在这里保留独立会话。</p>}
+      {!directory.length &&
+        !controller.loading &&
+        !features.loading &&
+        !controller.error &&
+        !features.error && <p>{needle ? "没有找到匹配的任务。" : "此对话的任务会显示在这里。"}</p>}
       {(directory.length > limit || controller.cursor) && (
         <button
           disabled={controller.loading}
           onClick={() => {
-            if (limit >= directory.length) void controller.more()
+            if (controller.cursor && limit + 40 >= ordinary.length) void controller.more()
             setLimit((v) => v + 40)
           }}
         >

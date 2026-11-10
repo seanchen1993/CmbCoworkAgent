@@ -57,6 +57,7 @@ interface RemoteUserInputRoute {
   botEventId?: string
   senderId?: string
   isCurrent?: () => boolean
+  onQuestionUndeliverable?: (requestId: string) => void
 }
 
 interface RemoteUserInputSession {
@@ -141,7 +142,7 @@ function renderQuestion(session: RemoteUserInputSession): string {
     ),
     "",
     ...(session.route.kind === "group"
-      ? ["请由发起这项工作的群成员在群内 @当前机器人，再发送以下回答指令："]
+      ? ["请在本群内 @当前机器人，再发送以下回答指令："]
       : []),
     `回复 /回答 ${session.code} ${question.allowMultiple ? "<编号，可用逗号分隔，如 1,2>" : "<编号>"}`,
     `如以上选项都不合适：/回答 ${session.code} 其他 <你的回答>`,
@@ -285,7 +286,7 @@ export class ImRemoteUserInputService {
 
     if (session.route.isCurrent && !session.route.isCurrent())
       return "该问题所属的 Bot 连接已变化，请重新发起。"
-    const pending = this.dependencies.getPendingForThread(session.route.threadId)
+    const pending = this.dependencies.getPendingForThread(session.request.threadId)
     if (!pending || pending.requestId !== session.request.requestId) {
       this.removeSession(session.request.requestId)
       return "这项补充输入已在桌面处理或不再有效。"
@@ -419,7 +420,7 @@ export class ImRemoteUserInputService {
     }
     if (session.route.isCurrent && !session.route.isCurrent())
       return "该问题所属的 Bot 连接已变化，请重新发起。"
-    const pending = this.dependencies.getPendingForThread(session.route.threadId)
+    const pending = this.dependencies.getPendingForThread(session.request.threadId)
     if (!pending || pending.requestId !== session.request.requestId) {
       this.removeSession(session.request.requestId)
       return "这项补充输入已在桌面处理或不再有效。"
@@ -552,6 +553,12 @@ export class ImRemoteUserInputService {
       this.dependencies.warn("Remote user-input card could not be published.", error)
     }
 
+    if (route.isCurrent && !route.isCurrent()) {
+      if (carded) this.resolveCardFor(session, "原连接已变化")
+      this.removeSession(request.requestId)
+      if (this.isStillPending(session)) route.onQuestionUndeliverable?.(request.requestId)
+      return
+    }
     const notice = buildImProactiveReplies({
       deliveryId: `user-input-request:${request.requestId}:0`,
       conversationKey: route.conversationKey,
@@ -601,6 +608,7 @@ export class ImRemoteUserInputService {
       this.drainReplies()
     } catch (error) {
       this.removeSession(request.requestId)
+      if (this.isStillPending(session)) route.onQuestionUndeliverable?.(request.requestId)
       throw error
     }
   }
@@ -819,7 +827,7 @@ export class ImRemoteUserInputService {
    */
   private pruneResolvedSessions(): void {
     for (const [requestId, session] of this.sessions) {
-      const pending = this.dependencies.getPendingForThread(session.route.threadId)
+      const pending = this.dependencies.getPendingForThread(session.request.threadId)
       if (!pending || pending.requestId !== session.request.requestId) {
         this.removeSession(requestId)
       }

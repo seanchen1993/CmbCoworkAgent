@@ -131,3 +131,52 @@ describe("Bot observes its task through real Host transitions and input registry
     expect(page.items.every(w => w.execution.observedAt > 0)).toBe(true)
   })
 })
+
+it("lists ordinary and Feature tasks together, scopes search and cursors, and separates business completion from a turn", async () => {
+  const f = await fixture()
+  const scope = { botId: f.bot.id, audience: "desktop" }
+  const follow = (scope: { botId: string; audience: string }, n: number) =>
+    f.store.features.follow(scope, {
+      projectId: "project",
+      slug: "export-" + n,
+      projectName: "客户服务",
+      title: "PRD " + n
+    })
+  const owner = follow(scope, 0)
+  for (let i = 1; i <= 22; i++) follow(scope, i)
+  const foreign = follow({ ...scope, audience: "im:other" }, 100)
+  const first = f.host.taskDirectory(f.source.id, undefined, "PRD")
+  const next = f.host.taskDirectory(f.source.id, first.nextCursor!, "PRD")
+  const items = [...first.items, ...next.items]
+  expect(new Set(items.map((t) => t.id)).size).toBe(24)
+  expect(items).toContainEqual(
+    expect.objectContaining({ id: f.created.work.id, kind: "conversation" })
+  )
+  expect(items).toContainEqual(
+    expect.objectContaining({ id: owner.id, kind: "feature", phase: "following" })
+  )
+  expect(items.map((t) => t.id)).not.toContain(foreign.id)
+  expect(next.nextCursor).toBeNull()
+  expect(() => f.host.taskDirectory(f.source.id, first.nextCursor!, "other")).toThrow("游标")
+  expect(() => f.host.changeFeatureState(scope, foreign.id, "complete", 1)).toThrow()
+  const op = f.store.features.begin(owner, f.source.id, "run", "session", {}).receipt
+  f.store.features.active(op.id, "native-thread")
+  expect(() => f.host.changeFeatureState(scope, owner.id, "complete", 1)).toThrow("仍在执行")
+  f.store.features.finish(op.id)
+  f.host.changeFeatureState(scope, owner.id, "complete", 1)
+  f.host.changeFeatureState(scope, owner.id, "complete", 1)
+  expect(f.host.featureTasks(scope, { query: "export-0" })[0].task).toMatchObject({
+    phase: "completed",
+    version: 2
+  })
+  expect(() => f.store.features.begin(owner, f.source.id, "new", "continue", {})).toThrow(
+    "已确认完成"
+  )
+  expect(() => f.host.changeFeatureState(scope, owner.id, "reopen", 1)).toThrow("状态已变化")
+  f.host.changeFeatureState(scope, owner.id, "reopen", 2)
+  expect(f.host.featureTasks(scope, { query: "export-0" })[0].task).toMatchObject({
+    phase: "replied",
+    state: "active",
+    version: 3
+  })
+})

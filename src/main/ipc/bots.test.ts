@@ -19,6 +19,7 @@ import {
 } from "../../shared/bots/im-channel"
 const fixture = vi.hoisted(() => ({
   getHost: vi.fn(),
+  featureStore: { unfinished: () => [] },
   conversationLinks: { forBot: () => [], forThread: () => null },
   introduce: vi.fn(),
   getThread: vi.fn(),

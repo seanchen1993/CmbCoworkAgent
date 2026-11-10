@@ -113,9 +113,17 @@ export function createBotDeliveryTools(
   signal: AbortSignal,
   publish?: (files: BotDeliveredFile[], callId: string, content?: string) => void,
   peer?: BotPeerDeliveryFiles,
-  publicGroup = false
+  publicGroup = false,
+  attachmentWorkspace = workspacePath
 ): DynamicStructuredTool[] {
-  return createBotFileTools(workspacePath, signal, publish, peer, publicGroup ? "group" : "private")
+  return createBotFileTools(
+    workspacePath,
+    signal,
+    publish,
+    peer,
+    publicGroup ? "group" : "private",
+    attachmentWorkspace
+  )
 }
 
 /** Private collaboration output is not a successful public delivery. */
@@ -132,7 +140,8 @@ function createBotFileTools(
   signal: AbortSignal,
   publish: ((files: BotDeliveredFile[], callId: string, content?: string) => void) | undefined,
   peer: BotPeerDeliveryFiles | undefined,
-  mode: "private" | "group" | "return"
+  mode: "private" | "group" | "return",
+  attachmentWorkspace = workspacePath
 ): DynamicStructuredTool[] {
   const publicGroup = mode === "group"
   const name = mode === "return" ? "bot_return_files" : "bot_deliver_files"
@@ -209,14 +218,19 @@ function createBotFileTools(
             for (const file of deliveredFiles)
               Object.assign(
                 file,
-                await snapshotBotDeliveryFile(workspacePath, file.filePath, signal)
+                await snapshotBotDeliveryFile(
+                  workspacePath,
+                  file.filePath,
+                  signal,
+                  attachmentWorkspace
+                )
               )
           }
           signal.throwIfAborted()
           const callId =
             config.toolCall?.id ?? JSON.stringify(deliveredFiles.map((file) => file.filePath))
-          if (content === undefined) publish?.(deliveredFiles, callId)
-          else publish?.(deliveredFiles, callId, content)
+          if (content === undefined) await publish?.(deliveredFiles, callId)
+          else await publish?.(deliveredFiles, callId, content)
           return JSON.stringify({
             kind: mode === "return" ? "bot-file-return" : "bot-file-delivery",
             files: deliveredFiles

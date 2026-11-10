@@ -43,6 +43,9 @@ import {
   type SendBotGroupMessageInput
 } from "../../shared/bots/contracts"
 import type { BotStore, BotWorkflowReference } from "./store"
+import { BotFeatureTurns } from "./feature-turns"
+import type { FeatureScope, FeatureTaskQuery } from "./feature-store"
+import type { BotFeatureTask } from "../../shared/bots/feature"
 import type { WorkflowRunReference } from "../agent/workflow/run-manager"
 import { canDeferBotTask, canSteerBotTask, canDeliverBotFeedback, isRetryableNotificationTerminal } from "./continuation"
 import type { BotDeliveredFile } from "../../shared/bots/file-delivery"
@@ -124,6 +127,7 @@ type BotProfileUpdateReceipt = BotDefinition & {
 
 /** No Electron or renderer dependency. The host owns the queue even with no open workspace. */
 export class LocalBotHost {
+  readonly featureTurns = new BotFeatureTurns()
   private readonly active = new Map<
     string,
     {
@@ -350,10 +354,15 @@ export class LocalBotHost {
     if (!this.stopping) this.changed(botId)
   }
 
-  private changed(memoryBotId?: string, reactionTarget?: BotReactionTarget): void {
+  private changed(
+    memoryBotId?: string,
+    reactionTarget?: BotReactionTarget,
+    featureScope?: BotChangeEvent["featureScope"]
+  ): void {
     const event = {
       hostId: LOCAL_BOT_HOST_ID,
       revision: this.store.revision(),
+      ...(featureScope ? { featureScope } : {}),
       ...(reactionTarget ? { reactionTarget } : {}),
       ...(memoryBotId ? { memoryBotId } : {})
     }
@@ -477,21 +486,126 @@ export class LocalBotHost {
     try { runtime = this.runtime.workRuntimeStatus?.(work) } catch { /* Unknown is not idle. */ }
     return projectBotWorkStatus(work, runtime, runs.length > 0, runs.find(run => run.browserHelp)?.browserHelp?.instruction)
   }
+  featureTasks(scope: FeatureScope, options?: FeatureTaskQuery) {
+    return this.featureStore.taskRows(scope, options).map((row) => {
+      const { ordinal, attentionThreadId, ...rest } = row
+      const live = this.featureTurns.activity(row.id)
+      const phase =
+        live &&
+        row.state === "active" &&
+        row.phase !== "decision" &&
+        (live.phase !== "running" || row.phase !== "managed")
+          ? live.phase
+          : row.phase
+      const target =
+        phase === "decision"
+          ? attentionThreadId
+          : phase === "question" || phase === "approval"
+            ? live?.threadId
+            : undefined
+      const task: BotFeatureTask = {
+        ...rest,
+        kind: "feature",
+        phase,
+        ...(target ? { attentionThreadId: target } : {})
+      }
+      return { task, ordinal }
+    })
+  }
+  taskDirectory(taskId: string, cursor?: string, query = "") {
+    const source = this.workToolSource(taskId)
+    if (source.workId || (source.mockSource && source.mockSource.transport !== "im"))
+      return this.workTargets(taskId, cursor, query)
+    const scope = { botId: source.botId, audience: source.mockSource?.audienceKey ?? "desktop" }
+    const key = createHash("sha256")
+      .update(JSON.stringify([scope, query]))
+      .digest("hex")
+      .slice(0, 24)
+    let before: number | undefined,
+      workCursor = cursor
+    if (cursor?.startsWith("tasks:")) {
+      const parts = /^tasks:([a-f0-9]{24}):(\d+):(.*)$/u.exec(cursor)
+      if (!parts || parts[1] !== key || !Number.isSafeInteger(Number(parts[2])))
+        throw new BotError("INVALID_INPUT", "任务列表游标已失效")
+      before = Number(parts[2])
+      workCursor = parts[3] || undefined
+    }
+    const works =
+      cursor?.startsWith("tasks:") && !workCursor
+        ? { items: [], priority: [], nextCursor: null }
+        : this.workTargets(taskId, workCursor, query)
+    const rows =
+      before === 0 ? [] : this.featureTasks(scope, { query: query.trim(), before, limit: 21 })
+    const features = rows.slice(0, 20).map((r) => r.task)
+    const next = rows.length > 20 ? rows[19].ordinal : 0
+    const ordinary = works.items.map((w) => ({ ...w, kind: "conversation" as const }))
+    return {
+      items: [...ordinary, ...features].sort((a, b) => b.updatedAt - a.updatedAt),
+      priority: [...works.priority, ...features.filter((f) => f.attentionThreadId)],
+      nextCursor: next || works.nextCursor ? `tasks:${key}:${next}:${works.nextCursor ?? ""}` : null
+    }
+  }
+  changeFeatureState(
+    scope: FeatureScope,
+    id: string,
+    action: "complete" | "reopen",
+    version: number
+  ) {
+    const owner = this.featureStore.owner(id, scope)
+    const bot = this.getBot(scope.botId)
+    if (
+      bot.archived ||
+      bot.deleting ||
+      (scope.audience !== "desktop" &&
+        this.imGateway.binding(scope.audience.slice(3))?.binding.state !== "active")
+    )
+      throw new BotError("CONFLICT", "Bot 或群绑定当前不可用")
+    if (action === "complete" && this.featureTurns.activity(owner.id))
+      throw new BotError("CONFLICT", "任务仍在执行")
+    this.featureStore.lifecycle(owner, action, version)
+    this.featureChanged(scope)
+  }
   /** A bounded, same-audience snapshot for each main Bot turn, including automatic reports. */
   workStatusContext(taskId: string) {
     const task = this.workToolSource(taskId)
-    const page = this.store.listWorks(task.botId, undefined, "", task.mockSource?.audienceKey ?? "desktop", 8)
+    const page = this.store.listWorks(
+      task.botId,
+      undefined,
+      "",
+      task.mockSource?.audienceKey ?? "desktop",
+      8
+    )
     const works = new Map<string, BotWorkSummary>()
     if (task.origin.kind === "work_result") {
       const work = this.historyTarget(taskId, task.origin.workId)
       works.set(work.id, work)
     }
     for (const work of [...page.priority, ...page.items]) works.set(work.id, work)
+    const projects =
+      !task.workId && (!task.mockSource || task.mockSource.transport === "im")
+        ? this.featureTasks(
+            { botId: task.botId, audience: task.mockSource?.audienceKey ?? "desktop" },
+            { limit: 5 }
+          )
+        : []
     return {
-      items: [...works.values()].slice(0, 8).map(work => ({
-        workId: work.id, title: work.title, execution: this.workExecutionStatus(work)
+      items: [...works.values()].slice(0, 8).map((work) => ({
+        workId: work.id,
+        title: work.title,
+        execution: this.workExecutionStatus(work)
       })),
-      hasMore: works.size > 8 || page.nextCursor !== null
+      ...(projects.length
+        ? {
+            projectTasks: projects.slice(0, 4).map(({ task: f }) => ({
+              followId: f.id,
+              title: f.title,
+              phase: f.phase,
+              state: f.state,
+              attentionThreadId: f.attentionThreadId
+            }))
+          }
+        : {}),
+      hasMore: works.size > 8 || page.nextCursor !== null || projects.length > 4
     }
   }
   associatedWorks(botId: string) {
@@ -525,6 +639,35 @@ export class LocalBotHost {
     this.getWork(botId, source.workId)
     return result
   }
+  get featureStore() {
+    return this.store.features
+  }
+  featureScope(botId: string, groupId?: string) {
+    this.getBot(botId)
+    if (groupId) {
+      const route = this.imGateway.binding(groupId)
+      if (route?.binding.kind !== "group" || route.binding.botId !== botId)
+        throw new BotError("NOT_FOUND", "此招乎群不属于当前 Bot")
+    }
+    return { botId, audience: groupId ? `im:${groupId}` : "desktop" }
+  }
+  featureTask(taskId: string) {
+    return this.store.getTask(taskId)
+  }
+  featureToolTask(taskId: string) {
+    const task = this.workToolSource(taskId)
+    if (
+      task.workId ||
+      (task.mockSource && task.mockSource.transport !== "im") ||
+      !this.store.hasWorkUserRequest(taskId)
+    )
+      throw new BotError("CONFLICT", "请从 Bot 主对话或已绑定的招乎群交办项目工作")
+    return task
+  }
+  featureChanged(scope: { botId: string; audience: string }) {
+    if (!this.stopping)
+      this.changed(undefined, undefined, { botId: scope.botId, audience: scope.audience })
+  }
   /** Main-process authenticated IM adapter only; not exposed as a renderer injection API. */
   get imChannel() {
     return this.store.im
@@ -545,11 +688,14 @@ export class LocalBotHost {
     this.requireRunning()
     const current = this.store.im.get(botId, id)
     if (!current.revoked) this.store.im.revoke(botId, id, version)
+    this.featureTurns.cancel(botId, id)
     const execution = this.store.suppressRevokedImExecution(botId, id)
     this.cancelWorkflows(execution.workflows)
     for (const task of execution.tasks) this.cancel(task.id, false)
     if (execution.commandIds.length)
-      void Promise.resolve(this.runtime.cancelBackgroundCommands?.(execution.commandIds)).catch(this.reportError)
+      void Promise.resolve(this.runtime.cancelBackgroundCommands?.(execution.commandIds)).catch(
+        this.reportError
+      )
     this.changed()
     this.wake()
   }
@@ -1072,12 +1218,17 @@ export class LocalBotHost {
 
   update(input: UpdateBotInput): BotDefinition {
     this.requireRunning()
-    if (input.archived && !this.store.getBot(input.id).archived && this.runtime.hasPendingCoordinator) {
+    if (
+      input.archived &&
+      !this.store.getBot(input.id).archived &&
+      this.runtime.hasPendingCoordinator
+    ) {
       if (!this.recoveryReady) throw new BotError("CONFLICT", "后台状态正在恢复，请稍后再归档。")
       if (this.runtime.hasPendingCoordinator(this.store.notificationThreadIds(input.id)))
         throw new BotError("CONFLICT", "请先处理此 Bot 的后台执行和待通知结果，再归档。")
     }
     const bot = this.store.update(input)
+    if (bot.archived) this.featureTurns.cancel(bot.id)
     this.changed()
     this.wake()
     return bot
@@ -1099,6 +1250,7 @@ export class LocalBotHost {
         throw new BotError("CONFLICT", "请先处理此 Bot 的后台执行和待通知结果，再删除。")
     }
     const threads = this.store.beginDeletion(id, expectedVersion)
+    this.featureTurns.cancel(id)
     this.changed()
     this.wake()
     this.armSchedules()
@@ -1967,6 +2119,7 @@ export class LocalBotHost {
       if (this.mockRecoveryTimer) clearTimeout(this.mockRecoveryTimer)
       this.mockRecoveryTimer = undefined
       this.lifecycle.abort()
+      this.featureTurns.cancel()
       clearTimeout(this.scheduleTimer)
       this.unsubscribe()
       for (const run of this.active.values()) run.controller.abort()

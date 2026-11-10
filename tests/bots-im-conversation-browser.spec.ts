@@ -104,6 +104,7 @@ async function main() {
                     "./BotConversationList",
                     "./BotPanelDivider",
                     "./BotWorkPanel",
+                    "./BotFeaturePanel",
                     "./BotMemoryPanel",
                     "./BotExecutionDetailsToggle",
                     "./BotImChannelDialog",

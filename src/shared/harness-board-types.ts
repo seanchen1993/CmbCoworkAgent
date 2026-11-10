@@ -584,6 +584,8 @@ export interface ManagedRunIdentity {
 
 export interface ManagedRunSnapshot {
   version: 2.5
+  /** Trusted desktop journal for runs started from a Bot conversation. */
+  botOperationId?: string
   runId: string
   projectId: string
   featureId: string
