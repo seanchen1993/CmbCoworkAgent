@@ -146,7 +146,6 @@ import { imDesktopCompletionObserver } from "../services/im/desktop-completion"
 import { showPetCompletedTaskNotice } from "../pet"
 import { trackEvent } from "../services/event-reporter"
 import { clearAdoptionContext } from "../services/adoption-tracker"
-import { markHarnessStageAttributionDirty } from "../services/harness-stage-attribution"
 import {
   GOAL_USER_MESSAGE_EVENT_PREFIX,
   RUNTIME_RESTORED_GOAL_PAUSE_NOTICE
@@ -452,23 +451,6 @@ import {
   type AgentRunExecutionContext
 } from "../agent/agent-run-service"
 import { isManagedTransportWindow } from "../agent/managed-transport-delivery"
-
-function withHarnessStageInvalidation(
-  callback: HookResultCallback,
-  projectId?: string,
-  featureSlug?: string
-): HookResultCallback {
-  return (event, hook, result): void => {
-    if (
-      hook.hookSourceType === "plugin" ||
-      hook.hookSourceType === "skill" ||
-      Boolean(hook.pluginRoot)
-    ) {
-      markHarnessStageAttributionDirty(projectId, featureSlug)
-    }
-    callback(event, hook, result)
-  }
-}
 
 const MIN_CHARS_FOR_MEMORY = 200
 const MAX_STOP_HOOK_REVISIONS = 2
@@ -6914,11 +6896,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           threadId,
           runToken,
           abortController.signal,
-          withHarnessStageInvalidation(
-            makeHookResultCallback(window, channel, turnState.turnId),
-            harnessFeatureBinding?.projectId,
-            harnessFeatureBinding?.slug
-          )
+          makeHookResultCallback(window, channel, turnState.turnId)
         )
         const onFailureFuseNotice = guardPhysicalStreamRunCallback(
           threadId,
@@ -10661,11 +10639,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           threadId,
           runToken,
           abortController.signal,
-          withHarnessStageInvalidation(
-            makeHookResultCallback(window, channel, turnState.turnId),
-            harnessAgentContext.harnessProjectId,
-            harnessAgentContext.featureId
-          )
+          makeHookResultCallback(window, channel, turnState.turnId)
         )
         const onFailureFuseNotice = guardPhysicalStreamRunCallback(
           threadId,
@@ -11833,11 +11807,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         threadId,
         runToken,
         abortController.signal,
-        withHarnessStageInvalidation(
-          makeHookResultCallback(window, channel, turnState.turnId),
-          harnessAgentContext.harnessProjectId,
-          harnessAgentContext.featureId
-        )
+        makeHookResultCallback(window, channel, turnState.turnId)
       )
       const onFailureFuseNotice = guardPhysicalStreamRunCallback(
         threadId,

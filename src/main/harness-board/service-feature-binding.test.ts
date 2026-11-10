@@ -12,7 +12,10 @@ const state = vi.hoisted(() => ({
   sessionContextCommand: "",
   supportedDeployUnits: ["legacy-unit"],
   knowledgeBaseIds: ["bound-knowledge"],
-  inspect: vi.fn()
+  inspect: vi.fn(),
+  featureCommand: undefined as string | undefined,
+  transferRunInput: false,
+  runInputs: [] as string[]
 }))
 vi.mock("../storage", () => ({ getOpenworkDir: () => state.root }))
 vi.mock("./notifications", () => ({ harnessNotifications: {} }))
@@ -47,7 +50,7 @@ vi.mock("./catalog-client", () => ({
                 inspectCommands: {
                   [process.platform]: {
                     project_status: `${process.execPath} --version`,
-                    feature_status: `${process.execPath} --version`,
+                    feature_status: state.featureCommand ?? `${process.execPath} --version`,
                     system_prompt_inject: "workspace=${sessionWorkspacePath}",
                     session_context_inject: state.sessionContextCommand
                   }
@@ -65,10 +68,17 @@ vi.mock("./catalog-client", () => ({
 }))
 vi.mock("./adapter-detail-client", () => ({
   cancelHarnessAdapterDetailScope: () => undefined,
-  parseHarnessAdapterRunInWorker: async () => ({
-    workflow: { nodes: [], states: [] },
-    run: { slug: "f", title: "Feature", nodes: [], watchRefs: [], hookLogRefs: [] }
-  }),
+  parseHarnessAdapterRunInWorker: async (buffer: Buffer) => {
+    state.runInputs.push(buffer.toString())
+    if (state.transferRunInput) {
+      // Match the real adapter worker's ownership transfer.
+      structuredClone(buffer.buffer, { transfer: [buffer.buffer] })
+    }
+    return {
+      workflow: { nodes: [], states: [] },
+      run: { slug: "f", title: "Feature", nodes: [], watchRefs: [], hookLogRefs: [] }
+    }
+  },
   parseHarnessAdapterDetailBatchInWorker: async () => {
     state.inspect()
     return {
@@ -88,13 +98,16 @@ import {
   archiveHarnessProject,
   prepareHarnessKnowledgeDeposition,
   getHarnessProjectPublicAgentmdDeployUnits,
-  getHarnessRunDetail
+  getHarnessRunDetail,
+  resolveHarnessFeatureCurrentStage,
+  inspectHarnessManagedFeatureStatus
 } from "./service"
 import {
   mergeCloudKnowledgeState,
   writeKnowledgeState,
   knowledgeDirectory
 } from "../services/knowledge-base-state"
+import { invalidateHarnessRunInspection } from "./run-inspect-cache"
 import { FEATURE_V2_FILE, DEPLOY_UNIT_V2_FILE, initializeHarnessConfigV2 } from "./config-v2"
 
 const binding = {
@@ -120,6 +133,10 @@ beforeEach(async () => {
   state.supportedDeployUnits = ["legacy-unit"]
   state.knowledgeBaseIds = ["bound-knowledge"]
   state.inspect.mockClear()
+  state.featureCommand = undefined
+  state.transferRunInput = false
+  state.runInputs = []
+  invalidateHarnessRunInspection("p", "f")
 })
 afterAll(() => rm(state.root, { recursive: true, force: true }))
 const update = () =>
@@ -228,6 +245,49 @@ describe("public system constraint indicators", () => {
     expect(await getHarnessProjectPublicAgentmdDeployUnits("p")).toEqual([])
     state.knowledgeBaseIds = []
     expect(await getHarnessProjectPublicAgentmdDeployUnits("p")).toEqual([])
+  })
+})
+
+describe("page and conversation inspection sharing", () => {
+  it("runs the adapter once, survives page buffer transfer and keeps managed decisions fresh", async () => {
+    const script = join(state.root, "inspect.cjs")
+    const countFile = join(state.root, "inspect-count")
+    const snapshotFile = join(state.root, "inspect-snapshot.json")
+    const snapshot = {
+      workflow: { nodes: [{ id: "dev", label: "Develop", group: "Work" }] },
+      run: { currentNodeId: "dev", currentNodeStatus: "in_progress" }
+    }
+    await writeFile(countFile, "")
+    await writeFile(snapshotFile, JSON.stringify(snapshot))
+    await writeFile(
+      script,
+      [
+        'const fs = require("node:fs")',
+        `fs.appendFileSync(${JSON.stringify(countFile)}, "x")`,
+        `process.stdout.write(fs.readFileSync(${JSON.stringify(snapshotFile)}))`
+      ].join("\n")
+    )
+    state.featureCommand = `"${process.execPath}" "${script}"`
+    state.transferRunInput = true
+    await getHarnessRunDetail("p", "f")
+    await expect(resolveHarnessFeatureCurrentStage("p", "f")).resolves.toEqual({
+      name: "Work-Develop",
+      status: "进行中"
+    })
+    await getHarnessRunDetail("p", "f")
+    expect(await readFile(countFile, "utf8")).toBe("x")
+    expect(state.runInputs).toEqual([JSON.stringify(snapshot), JSON.stringify(snapshot)])
+
+    snapshot.run.currentNodeStatus = "done"
+    await writeFile(snapshotFile, JSON.stringify(snapshot))
+    expect((await inspectHarnessManagedFeatureStatus("p", "f")).currentNodeStatus).toBe("done")
+    expect(await readFile(countFile, "utf8")).toBe("xx")
+    invalidateHarnessRunInspection("p", "f")
+    await expect(resolveHarnessFeatureCurrentStage("p", "f")).resolves.toEqual({
+      name: "Work-Develop",
+      status: "已完成"
+    })
+    expect(await readFile(countFile, "utf8")).toBe("xxx")
   })
 })
 

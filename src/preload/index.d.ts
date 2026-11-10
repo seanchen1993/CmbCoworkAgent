@@ -904,6 +904,10 @@ interface DashboardProjectModeAdapter {
   projectCount: number
   featureCount: number
   conversationCount: number
+  /** 所选范围内主 Agent 主动对话按非空 sapId 去重。 */
+  userCount: number
+  /** 插件名下跨版本去重的人数，不能累加各版本的 userCount。 */
+  allVersionsUserCount: number
   codeStats: DashboardCodeStats | null
   stageBuckets: DashboardStageBuckets
 }

@@ -1346,7 +1346,7 @@ test("unsandboxed git network commands allow Git Credential Manager UI prompts",
   )
   assert.match(
     executeOnceSection,
-    /const allowInteractiveGitAuth =[\s\S]*isWindows && LocalSandbox\.isGitInteractiveAuthCommand\(command\)[\s\S]*const spawnEnv = allowInteractiveGitAuth[\s\S]*LocalSandbox\.buildInteractiveGitEnv\(this\.env\)/,
+    /const allowInteractiveGitAuth =[\s\S]*isWindows && LocalSandbox\.isGitInteractiveAuthCommand\(command\)[\s\S]*const spawnEnv = allowInteractiveGitAuth[\s\S]*LocalSandbox\.buildInteractiveGitEnv\(executionEnv\)/,
     "executeOnce should opt Git network commands into the interactive credential environment"
   )
   assert.match(
