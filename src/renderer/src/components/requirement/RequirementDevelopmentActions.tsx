@@ -13,6 +13,7 @@ import {
 import { useAppStore } from "@/lib/store"
 import { findRequirementDevelopmentThreads } from "@/lib/requirement-development"
 import type { RequirementRecord } from "./requirement-data"
+import { shouldHideRequirementDevelopment } from "./requirement-persona"
 
 export function RequirementDevelopmentActions({
   requirement,
@@ -34,6 +35,8 @@ export function RequirementDevelopmentActions({
   const inProgress = Boolean(existingThreadId)
   const [resetOpen, setResetOpen] = useState(false)
   const [resetting, setResetting] = useState(false)
+
+  if (shouldHideRequirementDevelopment()) return <></>
 
   return (
     <>

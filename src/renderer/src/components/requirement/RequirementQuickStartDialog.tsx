@@ -20,16 +20,19 @@ import {
   DialogTitle
 } from "@/components/ui/dialog"
 import { cn } from "@/lib/utils"
+import {
+  readStoredRequirementPersona,
+  REQUIREMENT_PERSONA_CHANGED_EVENT,
+  REQUIREMENT_PERSONA_SKIP_STORAGE_KEY,
+  REQUIREMENT_PERSONA_STORAGE_KEY,
+  type RequirementPersona
+} from "./requirement-persona"
 
 export type RequirementQuickStartSelection = {
   source: "text" | "space" | "file" | "link"
   target: "conversation" | "design" | "development" | "space"
 }
 export const REQUIREMENT_QUICK_START_EVENT = "requirement:quick-start"
-const REQUIREMENT_PERSONA_STORAGE_KEY = "requirement:quick-start-persona"
-const REQUIREMENT_PERSONA_SKIP_STORAGE_KEY = "requirement:quick-start-skip-persona"
-
-type RequirementPersona = "business" | "design" | "development"
 
 const personas: Array<{
   value: RequirementPersona
@@ -66,8 +69,7 @@ const personas: Array<{
 ]
 
 function readStoredPersona(): RequirementPersona | null {
-  const stored = localStorage.getItem(REQUIREMENT_PERSONA_STORAGE_KEY)
-  return stored === "business" || stored === "design" || stored === "development" ? stored : null
+  return readStoredRequirementPersona()
 }
 
 function readSkipPersonaSelection(): boolean {
@@ -96,7 +98,7 @@ const quickStartItems: Array<{
   {
     source: "space",
     title: "使用需求空间3.0已有的需求",
-    description: "直接选择一条已沉淀的需求",
+    description: "直接选择一条已沉淀的需求，进行开发or设计",
     actions: [{ label: "去 Tab", target: "space" }],
     icon: FileText
   },
@@ -164,6 +166,7 @@ export function RequirementQuickStartDialog({
     if (!persona) return
     localStorage.setItem(REQUIREMENT_PERSONA_STORAGE_KEY, persona)
     localStorage.setItem(REQUIREMENT_PERSONA_SKIP_STORAGE_KEY, String(skipPersonaSelection))
+    window.dispatchEvent(new Event(REQUIREMENT_PERSONA_CHANGED_EVENT))
     if (persona === "business") {
       selectSource({ source: "text", target: "conversation" })
       return

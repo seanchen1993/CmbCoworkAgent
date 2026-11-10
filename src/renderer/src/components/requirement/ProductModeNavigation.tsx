@@ -10,6 +10,11 @@ import { Sparkles } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { ALL_REQUIREMENT_SYSTEMS_VALUE, useRequirementStore } from "./requirement-store"
 import { REQUIREMENT_QUICK_START_EVENT } from "./RequirementQuickStartDialog"
+import {
+  getRequirementPersonaWelcome,
+  readStoredRequirementPersona,
+  REQUIREMENT_PERSONA_CHANGED_EVENT
+} from "./requirement-persona"
 
 export function ProductModeNavigation({
   activeTab,
@@ -21,6 +26,17 @@ export function ProductModeNavigation({
   const selectedSystemId = useRequirementStore((state) => state.selectedSystemId)
   const systemList = useRequirementStore((state) => state.systemList)
   const setSelectedSystemId = useRequirementStore((state) => state.setSelectedSystemId)
+  const [personaWelcome, setPersonaWelcome] = useState(() =>
+    getRequirementPersonaWelcome(readStoredRequirementPersona())
+  )
+
+  useEffect(() => {
+    const updateWelcome = (): void => {
+      setPersonaWelcome(getRequirementPersonaWelcome(readStoredRequirementPersona()))
+    }
+    window.addEventListener(REQUIREMENT_PERSONA_CHANGED_EVENT, updateWelcome)
+    return () => window.removeEventListener(REQUIREMENT_PERSONA_CHANGED_EVENT, updateWelcome)
+  }, [])
 
   return (
     <div className="flex shrink-0 flex-wrap items-center gap-2 px-5 pt-3 lg:px-7">
@@ -69,17 +85,23 @@ export function ProductModeNavigation({
         </Select>
       )}
       {activeTab === "requirements" ? (
-        <Button
-          type="button"
-          size="sm"
-          variant="outline"
-          onClick={() => window.dispatchEvent(new Event(REQUIREMENT_QUICK_START_EVENT))}
-          className="ml-auto h-8 rounded-lg border-[#e4c8ad] bg-[#fdf8f3] px-3.5 text-xs text-[#a96736] shadow-sm hover:border-[#c99366] hover:bg-[#f8eee4] hover:text-[#92562b]"
-        >
-          <Sparkles className="size-3.5" />
-          快速开始一个新任务
-        </Button>
+        <div className="ml-auto flex items-center gap-3">
+          {personaWelcome ? (
+            <span className="text-xs font-medium text-muted-foreground">{personaWelcome}</span>
+          ) : null}
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            onClick={() => window.dispatchEvent(new Event(REQUIREMENT_QUICK_START_EVENT))}
+            className="h-8 rounded-lg border-[#e4c8ad] bg-[#fdf8f3] px-3.5 text-xs text-[#a96736] shadow-sm hover:border-[#c99366] hover:bg-[#f8eee4] hover:text-[#92562b]"
+          >
+            <Sparkles className="size-3.5" />
+            快速开始一个新任务
+          </Button>
+        </div>
       ) : null}
     </div>
   )
 }
+import { useEffect, useState } from "react"

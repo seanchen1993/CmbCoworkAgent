@@ -34,6 +34,7 @@ import type { RequirementDesignEntry } from "@/lib/requirement-design-entry"
 import { cn } from "@/lib/utils"
 import { useAppStore } from "@/lib/store"
 import { findRequirementDevelopmentThreads } from "@/lib/requirement-development"
+import { shouldHideRequirementDevelopment } from "./requirement-persona"
 import type { WorkspaceFilePreviewReadResult } from "../../../../shared/workspace-file-preview"
 import type {
   NeedDesignChoice,
@@ -1098,20 +1099,22 @@ export function RequirementDetailsPanel({
                     ) : null}
                   </div>
                 </div>
-                <div className="mt-2 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border/60 bg-background px-3 py-2.5">
-                  <div>
-                    <h4 className="text-xs font-semibold text-foreground">需求开发</h4>
-                    <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
-                      基于当前需求内容进入开发流程。
-                    </p>
+                {!shouldHideRequirementDevelopment() ? (
+                  <div className="mt-2 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border/60 bg-background px-3 py-2.5">
+                    <div>
+                      <h4 className="text-xs font-semibold text-foreground">需求开发</h4>
+                      <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
+                        基于当前需求内容进入开发流程。
+                      </p>
+                    </div>
+                    <RequirementDevelopmentActions
+                      requirement={requirement}
+                      onStartDevelopment={onStartDevelopment}
+                      onContinueDevelopment={onContinueDevelopment}
+                      onResetDevelopment={onResetDevelopment}
+                    />
                   </div>
-                  <RequirementDevelopmentActions
-                    requirement={requirement}
-                    onStartDevelopment={onStartDevelopment}
-                    onContinueDevelopment={onContinueDevelopment}
-                    onResetDevelopment={onResetDevelopment}
-                  />
-                </div>
+                ) : null}
               </RequirementPrdSummaryCard>
 
               {fullPrdDesignEntry?.htmlFile && threadId ? (

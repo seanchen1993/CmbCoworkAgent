@@ -29,6 +29,7 @@ import { MarkdownPreview } from "@/components/ui/MarkdownPreview/MarkdownPreview
 import { findRequirementDesignEntry } from "@/lib/requirement-design-entry"
 import type { RequirementRecord } from "./requirement-data"
 import { RequirementDevelopmentActions } from "./RequirementDevelopmentActions"
+import { shouldHideRequirementDevelopment } from "./requirement-persona"
 
 function isPermissionDeniedError(reason: unknown): boolean {
   if ((reason as { code?: unknown })?.code === "LRDFA02") return true
@@ -130,14 +131,16 @@ export function RequirementSpaceDetailView({
             需求空间3.0 · {requirement.sourceName}
           </p>
         </div>
-        <div className="ml-auto">
-          <RequirementDevelopmentActions
-            requirement={requirement}
-            onStartDevelopment={onStartDevelopment}
-            onContinueDevelopment={onContinueDevelopment}
-            onResetDevelopment={onResetDevelopment}
-          />
-        </div>
+        {!shouldHideRequirementDevelopment() ? (
+          <div className="ml-auto">
+            <RequirementDevelopmentActions
+              requirement={requirement}
+              onStartDevelopment={onStartDevelopment}
+              onContinueDevelopment={onContinueDevelopment}
+              onResetDevelopment={onResetDevelopment}
+            />
+          </div>
+        ) : null}
       </header>
 
       {loading ? (
@@ -271,7 +274,9 @@ export function RequirementSpaceDetailView({
                 </div>
                 <h4 className="mt-4 text-sm font-semibold">暂无原型</h4>
                 <p className="mt-1.5 max-w-sm text-xs leading-5 text-muted-foreground">
-                  原型设计并非开发的必需步骤。你可以直接点击页面上方的“去开发”，前往项目模式开始开发；也可以先完善原型，再进入开发。
+                  {shouldHideRequirementDevelopment()
+                    ? "你可以基于当前需求创建并持续完善原型设计。"
+                    : "原型设计并非开发的必需步骤。你可以直接点击页面上方的“去开发”，前往项目模式开始开发；也可以先完善原型，再进入开发。"}
                 </p>
               </div>
             )}
