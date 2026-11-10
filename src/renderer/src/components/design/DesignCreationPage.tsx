@@ -52,7 +52,7 @@ const CREATION_METHODS: Array<{
   {
     id: "import_url",
     label: "通过链接还原",
-    description: "抓取现有页面并进入可编辑画布。",
+    description: "抓取现有页面作为参考，补充需求后再发送。",
     icon: ExternalLink
   },
   {
@@ -247,7 +247,7 @@ export function DesignCreationPage({
                 <div>
                   <h2 className="text-sm font-semibold text-foreground">设计系统</h2>
                   <p className="mt-1 text-xs leading-5 text-muted-foreground">
-                    统一页面的色彩、字体、组件与交互规范，创建后固定使用所选版本。
+                    统一页面的色彩、字体、组件与交互规范，开始对话前仍可修改，对话开始后固定使用所选版本。
                   </p>
                 </div>
                 <Button type="button" variant="outline" onClick={() => onOpenSystemLibrary("select")}>

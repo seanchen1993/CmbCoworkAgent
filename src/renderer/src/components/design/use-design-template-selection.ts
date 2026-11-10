@@ -3,6 +3,7 @@ import {
   designSystemKey,
   isTemplateVisible,
   type DesignTemplatePackage,
+  type DesignTemplateReference,
   type DesignTemplateSummary
 } from "../../../../shared/design-template"
 import type { DesignSystemInfo } from "../../../../shared/design-system"
@@ -17,6 +18,7 @@ type TemplateOption = {
   html: string
   previewPath: string
   designSystemKey?: string | null
+  package?: DesignTemplateReference
 }
 const TEMPLATE_PAGE_SIZE = 4
 
@@ -46,7 +48,9 @@ export function useDesignTemplateSelection(
   const [templatePage, setTemplatePage] = useState(0)
   const [packageSelection, setUploadedTemplate] = useState<DesignTemplatePackage | null>(null)
   const [allImportedTemplates, setImportedTemplates] = useState<DesignTemplateSummary[]>([])
-  const [templateUploading, setTemplateUploading] = useState(Boolean(initial?.package))
+  const [templateUploading, setTemplateUploading] = useState(
+    Boolean(initial?.mode === "upload" && initial.package)
+  )
   const [templateError, setTemplateError] = useState<string | null>(null)
   const [templateNotice, setTemplateNotice] = useState<string | null>(null)
   const [association, setAssociation] = useState<string | null>(currentKey)
@@ -73,7 +77,8 @@ export function useDesignTemplateSelection(
           description: item.description,
           html: item.previewHtml,
           previewPath: item.previewPath,
-          designSystemKey: item.designSystemKey
+          designSystemKey: item.designSystemKey,
+          package: item.package
         }))
         const prior = initialRef.current
         // Only legacy inline snapshots need this fallback; a known catalog ID must not bypass filtering.
@@ -247,7 +252,7 @@ export function useDesignTemplateSelection(
     setTemplateNotice(null)
   }
   useEffect(() => {
-    const reference = initialRef.current?.package
+    const reference = initialRef.current?.mode === "upload" ? initialRef.current.package : undefined
     if (reference) void readImportedTemplate(reference.id, reference.entryPath)
   }, [readImportedTemplate])
 
@@ -293,9 +298,11 @@ export function useDesignTemplateSelection(
         ? `${uploadedTemplate.rootDir}/${uploadedTemplate.entryPath}`
         : null,
     package:
-      templateMode === "upload" && uploadedTemplate
-        ? { id: uploadedTemplate.id, entryPath: uploadedTemplate.entryPath }
-        : undefined,
+      templateMode === "select"
+        ? selectedTemplate?.package
+        : templateMode === "upload" && uploadedTemplate
+          ? { id: uploadedTemplate.id, entryPath: uploadedTemplate.entryPath }
+          : undefined,
     builtinPath:
       templateMode === "select" && selectedTemplate && selectedTemplate.id !== "session-template"
         ? selectedTemplate.id

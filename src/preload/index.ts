@@ -1,6 +1,6 @@
 import type { DesignUrlImportApi } from "../shared/design-url-import"
 import type { DesignSessionApi, DesignSessionChange } from "../shared/managed-design-session"
-import type { DesignTemplateApi } from "../shared/design-template"
+import type { DesignTemplateApi, DesignTemplateInfo } from "../shared/design-template"
 import {
   DESIGN_SYSTEM_EXTRACTION_PROGRESS,
   type DesignSystemLibraryApi,
@@ -5029,19 +5029,7 @@ const api = {
         error?: string
       }>,
     listSystems: (): Promise<DesignSystemInfo[]> => ipcRenderer.invoke("design:list-systems"),
-    listTemplates: (): Promise<
-      Array<{
-        name: string
-        description: string
-        path: string
-        mode: string
-        platform: string | null
-        scenario: string
-        previewHtml: string
-        previewPath: string
-        designSystemKey?: string | null
-      }>
-    > => ipcRenderer.invoke("design:list-templates"),
+    listTemplates: (): Promise<DesignTemplateInfo[]> => ipcRenderer.invoke("design:list-templates"),
     /**
      * Full Agent Runtime path — gives Design access to Skills, MCP tools,
      * Hooks, Approvals and context summarisation.

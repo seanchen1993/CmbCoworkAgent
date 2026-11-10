@@ -29,6 +29,19 @@ export interface DesignTemplateReference {
   entryPath: string
 }
 
+export interface DesignTemplateInfo {
+  designSystemKey?: string | null
+  name: string
+  description: string
+  path: string
+  mode: string
+  platform: string | null
+  scenario: string
+  previewHtml: string
+  previewPath: string
+  package?: DesignTemplateReference
+}
+
 export interface DesignTemplateSummary extends DesignTemplateReference {
   /** Missing on legacy packages, which are public. */
   designSystemKey?: string | null

@@ -5,3 +5,4 @@ package-lock.json
 LICENSE.md
 tsconfig.json
 tsconfig.*.json
+design-templates/market-wplus/cdn/

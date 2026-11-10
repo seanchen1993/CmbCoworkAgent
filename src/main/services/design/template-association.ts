@@ -36,6 +36,7 @@ export function validateTemplateSelection(
     name: string
     previewHtml: string
     designSystemKey?: string | null
+    package?: DesignTemplateReference
   }>
 ): void {
   if (!selection || selection.mode === "none") return
@@ -52,4 +53,9 @@ export function validateTemplateSelection(
   if (selection.builtinPath && !template) throw new Error("模板不存在，请刷新后重新选择")
   if (template && !isTemplateVisible(template, designSystemKey(currentSystem)))
     throw new Error("模板不属于当前设计系统，请刷新后重新选择")
+  if (selection.mode === "select" && template && "previewHtml" in template) {
+    // Use the host's package identity, never a renderer-supplied reference or preview base URL.
+    selection.package = template.package ? { ...template.package } : undefined
+    selection.html = template.previewHtml
+  }
 }

@@ -238,7 +238,7 @@ export function CreateDesignModal({
             <span style={{ fontSize: 20 }}>{loadingKind === "url" ? "⏳" : "🌐"}</span>
             <span style={{ fontSize: 14, fontWeight: 700, color: "#1a1a1a" }}>通过链接还原</span>
             <span style={{ fontSize: 12, color: "#8a8a8a", lineHeight: 1.6 }}>
-              复用内置浏览器登录态，将渲染后的页面还原为可编辑画布。
+              复用内置浏览器登录态，抓取页面作为参考，补充需求后再发送。
             </span>
           </button>
           <button
@@ -320,7 +320,7 @@ export function ImportUrlModal({
     }
   })()
   const title = "🌐 通过链接还原页面"
-  const description = "输入链接，在内置浏览器中完成登录并确认页面，再抓取当前页面还原为可编辑设计。"
+  const description = "输入链接，在内置浏览器中完成登录并确认页面，抓取后将作为参考附件。你可以补充设计需求后再发送。"
   const confirmLabel = loading ? "打开中..." : "在内置浏览器中打开"
 
   return (

@@ -227,6 +227,7 @@ function ContextCard({
 export function ContextPill({
   icon,
   label,
+  title,
   badge,
   color,
   onRemove,
@@ -234,6 +235,7 @@ export function ContextPill({
 }: {
   icon: string
   label: string
+  title?: string
   badge?: string
   color: { bg: string; border: string; text: string; dot: string }
   onRemove?: () => void
@@ -241,6 +243,7 @@ export function ContextPill({
 }) {
   return (
     <div
+      title={title}
       style={{
         display: "inline-flex",
         alignItems: "center",

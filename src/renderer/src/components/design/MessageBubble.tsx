@@ -566,7 +566,7 @@ export function MessageBubble({ message, hasLiveOutput = false }: { message: Mes
                   fontSize: 11, color: "rgba(255,255,255,0.92)", fontWeight: 500,
                   maxWidth: 220, overflow: "hidden",
                 }}>
-                  <span style={{ flexShrink: 0 }}>{att.kind === "code" ? "🗂️" : "📎"}</span>
+                  <span style={{ flexShrink: 0 }}>{att.kind === "code" ? "🗂️" : att.kind === "link" ? "🌐" : "📎"}</span>
                   <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                     {att.filename.length > 28 ? att.filename.slice(0, 25) + "..." + att.filename.slice(att.filename.lastIndexOf(".")) : att.filename}
                   </span>

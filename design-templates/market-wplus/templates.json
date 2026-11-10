@@ -1,0 +1,35 @@
+{
+  "designSystemKey": "builtin:wplus",
+  "templates": [
+    {
+      "name": "市场 W+ · 基础表单",
+      "description": "短表单与字段校验、条件字段、重置及本地保存反馈。",
+      "entryPath": "basic-form.html",
+      "skillPath": "pages/basic-form/SKILL.md"
+    },
+    {
+      "name": "市场 W+ · 批量导入",
+      "description": "Excel 拖拽上传、模板下载、解析进度及成功、部分错误、全部错误状态。",
+      "entryPath": "batch-import.html",
+      "skillPath": "pages/batch-import/SKILL.md"
+    },
+    {
+      "name": "市场 W+ · 复杂表单",
+      "description": "分步填写活动信息、奖品配置、确认发布与草稿恢复。",
+      "entryPath": "complex-form.html",
+      "skillPath": "pages/complex-form/SKILL.md"
+    },
+    {
+      "name": "市场 W+ · 筛选表格",
+      "description": "响应式筛选区、数据表格、排序分页、行编辑、列设置与密度切换。",
+      "entryPath": "filter-table.html",
+      "skillPath": "pages/filter-table/SKILL.md"
+    },
+    {
+      "name": "市场 W+ · 选择列表",
+      "description": "搜索、分页、单选与跨页多选弹窗，确认后回填选择结果。",
+      "entryPath": "select-list.html",
+      "skillPath": "pages/select-list/SKILL.md"
+    }
+  ]
+}

@@ -5,7 +5,10 @@ import type { DesignLiveOutput } from "../../../../shared/design-live-output"
 import type { DesignTweaksState } from "../../../../shared/design-tweaks"
 import type { DesignAppliedPatch, DesignPatchMetrics, DesignPatchStatus } from "../../../../shared/design-patch"
 
-export type FileAttachment = BaseFileAttachment
+export type FileAttachment = BaseFileAttachment & {
+  /** A captured page kept as a per-message reference, rather than a generated design. */
+  sourceUrl?: string
+}
 
 export interface ChatTab {
   id: string
@@ -17,7 +20,7 @@ export const SINGLE_DESIGN_TAB_LABEL = "Design"
 
 export interface MessageAttachment {
   filename: string
-  kind: "code" | "doc"
+  kind: "code" | "doc" | "link"
   meta?: string
 }
 

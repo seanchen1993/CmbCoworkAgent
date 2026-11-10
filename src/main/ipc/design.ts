@@ -12,6 +12,7 @@ import fs from "fs"
 import path from "path"
 import { ipcMain, BrowserWindow, app, dialog, type WebContents } from "electron"
 import { DesignTemplatePackages, buildTemplatePackageContext } from "../services/design/template-packages"
+import { listBuiltinTemplateBundle, prepareBuiltinTemplatePreview } from "../services/design/builtin-template-bundles"
 import { registerDesignUrlImportHandlers } from "./design-url-import"
 import { registerDesignSystemLibraryHandlers } from "./design-system-library"
 import { DesignSystemLibrary } from "../services/design/system-library"
@@ -21,7 +22,7 @@ import { createDesignArtifactZip } from "../services/design/artifact-package"
 import { writeDesignFilesAtomically } from "../services/design/artifact-storage"
 import { runBoundedDesignValidation, validateDesignBrowserWithRetry, isDesignValidationRepairable } from "../services/design/browser-validation-runner"
 import { designGenerationBrowserProbe } from "../services/design/generation-browser-probe"
-import type { DesignTemplateReference, DesignTemplateImportResult } from "../../shared/design-template"
+import type { DesignTemplateReference, DesignTemplateImportResult, DesignTemplateInfo } from "../../shared/design-template"
 import { normalizeTemplateSystemKey } from "../../shared/design-template"
 import { resolveTemplateAssociation, validateTemplateSelection } from "../services/design/template-association"
 import Store from "electron-store"
@@ -565,18 +566,6 @@ interface DesignContextFilesSyncParams {
   files: DesignContextFileSyncItem[]
 }
 
-interface DesignTemplateInfo {
-  designSystemKey?: string | null
-  name: string
-  description: string
-  path: string
-  mode: string
-  platform: string | null
-  scenario: string
-  previewHtml: string
-  previewPath: string
-}
-
 interface DesignArtifactMetadata {
   templatePackage?: DesignTemplateReference
   tweaks?: DesignTweaksState | null
@@ -781,13 +770,18 @@ function findDesignTemplatePreview(dirPath: string): string | null {
   return null
 }
 
-function listDesignTemplates(): DesignTemplateInfo[] {
+function listDesignTemplates(packages: DesignTemplatePackages): DesignTemplateInfo[] {
   const root = firstExistingDir(candidateRepoResourceDirs(DESIGN_TEMPLATES_DIRNAME))
   if (!root) return []
   const templates: DesignTemplateInfo[] = []
   for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
     if (!entry.isDirectory()) continue
     const dirPath = path.join(root, entry.name)
+    try {
+      templates.push(...listBuiltinTemplateBundle(dirPath, packages))
+    } catch (error) {
+      console.warn(`[Design] Failed to load builtin template bundle: ${entry.name}`, error)
+    }
     const skillPath = path.join(dirPath, "SKILL.md")
     if (!fs.existsSync(skillPath)) continue
     try {
@@ -2579,6 +2573,8 @@ function sleepDesignRetryDelay(ms: number, signal: AbortSignal): Promise<void> {
 
 export function registerDesignHandlers(): void {
   const templatePackages = new DesignTemplatePackages(path.join(getOpenworkDir(), "design-template-packages"))
+  // Register bundled packages before restoring sessions that may reference them.
+  listDesignTemplates(templatePackages)
   const templatePreview = new DesignTemplatePreview()
   app.on("will-quit", () => templatePreview.close())
   const readTemplate = async (reference: DesignTemplateReference): Promise<DesignTemplateImportResult> => {
@@ -2604,7 +2600,7 @@ export function registerDesignHandlers(): void {
   })
   const validateSelection = (state: Pick<TabState, "creationSelection" | "selectedDesignSystemId">) =>
     validateTemplateSelection(state.creationSelection?.template,
-      listDesignSystems().find((item) => item.id === state.selectedDesignSystemId), templatePackages, listDesignTemplates())
+      listDesignSystems().find((item) => item.id === state.selectedDesignSystemId), templatePackages, listDesignTemplates(templatePackages))
   ipcMain.handle("design:import-template", async (event, source: "file" | "directory", key?: unknown): Promise<DesignTemplateImportResult> => {
     try {
       if (source !== "file" && source !== "directory") throw new Error("模板来源无效")
@@ -3395,7 +3391,9 @@ export function registerDesignHandlers(): void {
   ipcMain.handle("design:list-systems", async (): Promise<DesignSystemInfo[]> => listDesignSystems())
   registerDesignSystemLibraryHandlers(personalDesignSystemLibrary, getDesignSystemById)
 
-  ipcMain.handle("design:list-templates", async (): Promise<DesignTemplateInfo[]> => listDesignTemplates())
+  ipcMain.handle("design:list-templates", async (): Promise<DesignTemplateInfo[]> =>
+    Promise.all(listDesignTemplates(templatePackages).map((item) =>
+      prepareBuiltinTemplatePreview(item, templatePackages, templatePreview))))
 
   // ─────────────────────────────────────────────────────────
   // design:agent-generate — routes through the full Agent Runtime so Design
@@ -3614,9 +3612,10 @@ export function registerDesignHandlers(): void {
             : storedHtml
         const isNewDesign = !hasExistingArtifactHtml && !htmlForIteration
         if (isNewDesign && !resumeFromDraft && selectedSkill) {
-          const builtin = listDesignTemplates().find((item) => item.path === selectedSkill.path)
+          const builtin = listDesignTemplates(templatePackages).find((item) => item.path === selectedSkill.path)
           if (builtin) validateTemplateSelection({ mode: "select", builtinPath: builtin.path },
             listDesignSystems().find((item) => item.id === designSystemId), templatePackages, [builtin])
+          if (builtin?.package) templatePackage = builtin.package
         }
         if (isNewDesign && !resumeFromDraft && templatePackage)
           validateTemplateSelection({ mode: "upload", package: templatePackage },

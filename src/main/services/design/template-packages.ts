@@ -102,7 +102,48 @@ function entryRank(file: string): number {
 
 /** Imported bytes are immutable; sessions keep references instead of embedding vendor bundles. */
 export class DesignTemplatePackages {
+  private readonly builtins = new Map<string, { rootDir: string; manifest: DesignTemplateSummary }>()
+
   constructor(readonly storageDir: string) {}
+
+  /** Bundled resources stay in the app until materialized into a design's own directory. */
+  registerBuiltin(id: string, sourceDir: string, designSystemKey: string | null): void {
+    if (!/^builtin_[a-z0-9_-]+$/.test(id)) throw new Error("内置模板 ID 无效")
+    const rootDir = path.resolve(sourceDir)
+    if (this.builtins.get(id)?.rootDir === rootDir) return
+    const files: string[] = []
+    let totalBytes = 0
+    const visit = (directory: string, depth: number) => {
+      if (depth > 30) throw new Error("模板目录层级过深")
+      for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+        if (SKIP.has(entry.name)) continue
+        const full = path.join(directory, entry.name)
+        if (entry.isSymbolicLink()) throw new Error("内置模板不支持符号链接")
+        if (entry.isDirectory()) visit(full, depth + 1)
+        else if (entry.isFile()) {
+          const relative = templateRelativePath(path.relative(rootDir, full).replace(/\\/g, "/"))
+          const bytes = fs.statSync(full).size
+          totalBytes += bytes
+          if (bytes > MAX_FILE_BYTES || totalBytes > MAX_TOTAL_BYTES || files.length >= MAX_FILES)
+            throw new Error("内置模板资源超过大小限制")
+          files.push(relative)
+        }
+      }
+    }
+    visit(rootDir, 0)
+    files.sort()
+    const pages = files.filter((file) => /\.html?$/i.test(file))
+    if (!pages.length) throw new Error("内置模板缺少 HTML 页面")
+    this.builtins.set(id, {
+      rootDir,
+      manifest: {
+        id, entryPath: pages[0], name: path.basename(rootDir), sourceKind: "directory",
+        importedAt: "", designSystemKey: normalizeTemplateSystemKey(designSystemKey),
+        pages, files, totalBytes,
+        framework: detectFramework(fs.readFileSync(path.join(rootDir, pages[0]), "utf8"))
+      }
+    })
+  }
 
   private directory(id: string): string {
     if (!/^tpl_[a-f\d-]{36}$/.test(id)) throw new Error("模板 ID 无效")
@@ -138,10 +179,11 @@ export class DesignTemplatePackages {
   }
 
   read(reference: DesignTemplateReference): DesignTemplatePackage {
-    const manifest = this.manifest(reference.id)
+    const builtin = this.builtins.get(reference.id)
+    const manifest = builtin?.manifest ?? this.manifest(reference.id)
     const entryPath = templateRelativePath(reference.entryPath)
     if (!manifest.pages.includes(entryPath)) throw new Error("请选择模板包内的 HTML 页面")
-    const rootDir = path.join(this.directory(reference.id), "files")
+    const rootDir = builtin?.rootDir ?? path.join(this.directory(reference.id), "files")
     const html = fs.readFileSync(this.checkedFile(rootDir, entryPath), "utf8")
     const warnings = new Set<string>()
     for (const ref of htmlReferences(html)) {
@@ -172,6 +214,7 @@ export class DesignTemplatePackages {
     reference: DesignTemplateReference,
     designSystemKey: string | null
   ): DesignTemplatePackage {
+    if (this.builtins.has(reference.id)) throw new Error("内置模板的设计系统关联不可修改")
     const template = this.read(reference)
     const manifest = {
       ...this.manifest(reference.id),

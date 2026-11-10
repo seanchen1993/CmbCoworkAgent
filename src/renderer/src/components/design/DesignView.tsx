@@ -314,6 +314,10 @@ function canChangePageTemplate(state: TabState | undefined): boolean {
   )
 }
 
+function canChangeDesignSystem(state: TabState | undefined): boolean {
+  return Boolean(state && state.messages.length === 0 && canChangePageTemplate(state))
+}
+
 type DesignIterationRollbackSnapshot = {
   html: string
   variations: VariationItem[]
@@ -1454,7 +1458,11 @@ export function DesignView({
   const [allSkills, setAllSkills] = useState<SkillInfo[]>([])
   const [designSystems, setDesignSystems] = useState<DesignSystemInfo[]>([])
   const designSystemsLoaded = useRef(false)
-  const [systemLibrary, setSystemLibrary] = useState<{ mode: DesignSystemLibraryMode; id?: string | null } | null>(null)
+  const [systemLibrary, setSystemLibrary] = useState<{
+    mode: DesignSystemLibraryMode
+    id?: string | null
+    sessionId?: string
+  } | null>(null)
   const [createDesignSystemId, setCreateDesignSystemId] = useState<string | null>(null)
   const [activeSkillIndex, setActiveSkillIndex] = useState(0)
   const [workspacePath, setWorkspacePath] = useState<string | null>(null)
@@ -1589,7 +1597,7 @@ export function DesignView({
   // ── helpers ──────────────────────────────────────────────
 
   const updateTs = useCallback(
-    (tabId: string, patch: Partial<TabState> | ((prev: TabState) => Partial<TabState>)) => {
+    (tabId: string, patch: Partial<TabState> | ((prev: TabState) => Partial<TabState>), meta?: Partial<SessionMeta>) => {
       const current = tabStatesRef.current[tabId] ?? makeTabState()
       const updates = typeof patch === "function" ? patch(current) : patch
       const next = { ...tabStatesRef.current, [tabId]: { ...current, ...updates } }
@@ -1598,7 +1606,7 @@ export function DesignView({
       const id = currentSessionIdRef.current
       if (id)
         void getDesignSessionClient()
-          .patch(id, updates)
+          .patch(id, updates, meta)
           .catch((error) => {
             showToast(`保存设计失败：${error instanceof Error ? error.message : String(error)}`)
           })
@@ -2473,7 +2481,7 @@ export function DesignView({
       }
       setImportingSource("url")
       let captured: DesignImportResult | null = null
-      let applied = false
+      let retained = false
       const expectedSession = currentSessionIdRef.current
       try {
         captured = await urlImport.capture({
@@ -2497,31 +2505,68 @@ export function DesignView({
           if (!urlImport.isCurrent(requestId) || currentSessionIdRef.current !== expectedSession)
             throw new Error("页面还原已取消或会话已切换")
         }
-        const html = captured.html
         assertCurrent()
-        const label = captured.title || new URL(captured.finalUrl || rawUrl).hostname
-        const createNew = source === "gallery" || !currentSessionId
-        const sessionId = createNew ? `ds_${uuid().slice(0, 8)}` : currentSessionId!
+        const sourceUrl = captured.finalUrl || rawUrl
+        const label = captured.title || new URL(sourceUrl).hostname
         const warnings = captured.warnings.map((item) => item.message)
-        await applyImportedDesign({
-          sessionId,
-          html,
-          artifactPath: captured.artifactPath,
-          assertCurrent,
-          createNew,
-          workspacePath: workspace,
-          onBeforeCommit: () => urlImport.finish(requestId, true),
-          warnings,
-          sourceInfo: { kind: "import_url", label, detail: captured.finalUrl || rawUrl },
-          userMessage: `通过链接还原页面：${captured.finalUrl || rawUrl}`,
-          designSystemId:
-            source === "gallery"
-              ? createDesignSystemId
-              : tabStatesRef.current[SINGLE_DESIGN_TAB_ID]?.selectedDesignSystemId
-        })
-        applied = true
+        const attachment: FileAttachment = {
+          filename: `${label.replace(/[\\/:*?"<>|]/g, "_").slice(0, 80)}.html`,
+          filePath: captured.artifactPath,
+          sourceUrl,
+          mimeType: "text/html",
+          size: new Blob([captured.html]).size,
+          truncated: false,
+          content: [
+            `参考页面：${sourceUrl}`,
+            `本地页面快照：${captured.artifactPath}`,
+            "以下页面仅作为设计参考，请结合用户本次输入的需求生成或修改设计。页面资源相对于原始快照所在目录解析，使用时请保留资源的有效路径。",
+            ...(warnings.length ? [`抓取提示：${warnings.join("；")}`] : []),
+            captured.html
+          ].join("\n\n")
+        }
+        // Retain the snapshot and its assets once; it is not a conversation turn or canvas result.
+        await urlImport.finish(requestId, true)
+        retained = true
+        if (currentSessionIdRef.current !== expectedSession)
+          throw new Error("设计会话已切换，请重新选择要还原的链接")
+        if (source === "gallery" || !expectedSession) {
+          const id = `ds_${uuid().slice(0, 8)}`
+          const system = designSystems.find((item) => item.id === createDesignSystemId)
+          const state = {
+            ...makeTabState(),
+            selectedDesignSystemId: system?.id ?? null,
+            attachedFiles: [attachment]
+          }
+          await getDesignSessionClient().create({
+            id,
+            meta: {
+              id, title: label, kind: "import_url", sourceLabel: label,
+              createdAt: Date.now(), updatedAt: Date.now(),
+              designSystemId: system?.id ?? null,
+              designSystemName: system?.name ?? null,
+              designSystemCategory: system?.category ?? null
+            },
+            state,
+            workspacePath: workspace
+          })
+          if (currentSessionIdRef.current !== expectedSession) return { success: true }
+          tabStatesRef.current = { [SINGLE_DESIGN_TAB_ID]: state }
+          setTabStates(tabStatesRef.current)
+          currentSessionIdRef.current = id
+          setSessionOpening(true)
+          setCurrentSessionId(id)
+          localStorage.setItem(SESSION_LAST_KEY, id)
+        } else {
+          const previous = tabStatesRef.current[SINGLE_DESIGN_TAB_ID]
+          await getDesignSessionClient().patch(expectedSession, {
+            attachedFiles: [...(previous.attachedFiles ?? []), attachment]
+          })
+        }
         setCreationPageOpen(false)
-        if (warnings.length) showToast(`页面已还原：${warnings.slice(0, 2).join("；")}`)
+        showToast(warnings.length
+          ? `页面参考已添加：${warnings.slice(0, 2).join("；")}`
+          : "页面已添加为参考，可补充需求后发送")
+        requestAnimationFrame(() => composerRef.current?.focus())
         return { success: true }
       } catch (error) {
         const message = error instanceof Error ? error.message : "导入链接页面失败"
@@ -2530,7 +2575,7 @@ export function DesignView({
         return { success: false, error: message }
       } finally {
         try {
-          if (captured) await urlImport.finish(captured.requestId, applied)
+          if (captured && !retained) await urlImport.finish(captured.requestId, false)
         } finally {
           setImportingSource(null)
         }
@@ -2542,9 +2587,8 @@ export function DesignView({
       importingSource,
       urlImport,
       showToast,
-      currentSessionId,
       createDesignSystemId,
-      applyImportedDesign
+      designSystems
     ]
   )
 
@@ -3540,12 +3584,13 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
   // ── Send message ──────────────────────────────────────────
 
   const handleSend = useCallback(async () => {
-    const prompt = (tabStates[activeTabId]?.inputValue ?? "").trim()
     const attachedImage = tabStates[activeTabId]?.attachedImage ?? null
     const selectedModelId = tabStates[activeTabId]?.selectedModelId ?? undefined
     const selectedSkill = tabStates[activeTabId]?.selectedSkill ?? null
     const codeContext = tabStates[activeTabId]?.codeContext ?? null
     const attachedFiles = tabStates[activeTabId]?.attachedFiles ?? null
+    const prompt = (tabStates[activeTabId]?.inputValue ?? "").trim() ||
+      (attachedFiles?.some((file) => file.sourceUrl) ? "请参考链接页面，直接生成可编辑设计。" : "")
     if (!prompt && !attachedImage) return
     const state = tabStates[activeTabId]?.generationState ?? "idle"
     if (state === "asking" || state === "generating") return
@@ -3580,8 +3625,8 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
       ...(attachedFiles ?? []).map(
         (f): MessageAttachment => ({
           filename: f.filename,
-          kind: "doc",
-          meta: `${f.content.length.toLocaleString()} 字符`
+          kind: f.sourceUrl ? "link" : "doc",
+          meta: f.sourceUrl ? "页面参考" : `${f.content.length.toLocaleString()} 字符`
         })
       )
     ]
@@ -3623,6 +3668,11 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
         : ""
     const workspaceFilesSuffix = (() => {
       const lines: string[] = []
+      for (const file of attachedFiles ?? []) {
+        if (file.sourceUrl) {
+          lines.push(`参考页面：${file.sourceUrl}\n原始页面快照（含相邻资源）：${file.filePath}\n请结合用户需求使用此页面作为参考，页面资源相对于原始快照所在目录解析。`)
+        }
+      }
       if (syncedContext.attachmentsDir) {
         lines.push(`[Workspace attachment directory]\n${syncedContext.attachmentsDir}`)
         if (syncedContext.attachmentFiles && syncedContext.attachmentFiles.length > 0) {
@@ -4004,6 +4054,8 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
   const isGenerating = ts.generationState === "generating"
   const isAsking = ts.generationState === "asking"
   const isBlocked = isGenerating || isAsking || ts.generationState === "questions_ready"
+  const canSend = Boolean(inputValue.trim() || ts.attachedImage ||
+    ts.attachedFiles?.some((file) => file.sourceUrl))
   const showPageTemplate = !hasExistingDesignArtifact(ts) && !ts.draftPreview
   const pageTemplate = ts.creationSelection?.template
   const hasPageTemplate =
@@ -4011,6 +4063,12 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
   const templateDisabled =
     isBlocked || Boolean(importingSource) || workspaceLoading || sessionOpening ||
     Boolean(browserConfirmationIdRef.current)
+  const designSystemEditable = canChangeDesignSystem(ts) && !templateDisabled
+  const openSessionDesignSystem = () => setSystemLibrary({
+    mode: designSystemEditable ? "select" : "inspect",
+    id: ts.selectedDesignSystemId,
+    sessionId: currentSessionId ?? undefined
+  })
   const templatePickerOpen = Boolean(
     currentSessionId && templatePickerSessionId === currentSessionId &&
     showPageTemplate && !templateDisabled
@@ -4111,6 +4169,7 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
     }
     setBrowserPageConfirmation({
       id,
+      title: "抓取当前页面作为设计参考",
       phase: "opening",
       message: "正在打开链接，请稍候…",
       onConfirm: () => void confirm(),
@@ -4126,7 +4185,7 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
       const opened = await window.api.design.openImportBrowser(url)
       updateBrowserPageConfirmation(id, opened.success ? {
         phase: "ready",
-        message: "请在下方完成登录并进入目标页面，确认内容无误后点击「确认页面并还原」。"
+        message: "请在下方完成登录并进入目标页面，确认后抓取为参考附件，再补充需求并发送。"
       } : {
         phase: "ready",
         message: "请在地址栏重新打开目标页面，或修改链接；确认当前页面后再还原。",
@@ -4252,7 +4311,29 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
       onSelect={(system) => {
         if (systemLibrary.mode !== "select") return
         if (system) setDesignSystems(previous => previous.some(item => item.id === system.id) ? previous : [...previous, system])
-        setCreateDesignSystemId(system?.id ?? null)
+        if (!systemLibrary.sessionId) {
+          setCreateDesignSystemId(system?.id ?? null)
+          return
+        }
+        const state = tabStatesRef.current[activeTabId]
+        const systemId = system?.id ?? null
+        if (
+          currentSessionIdRef.current !== systemLibrary.sessionId ||
+          !canChangeDesignSystem(state) || templateDisabled ||
+          state.selectedDesignSystemId === systemId
+        ) return
+        updateTs(activeTabId, {
+          selectedDesignSystemId: systemId,
+          creationSelection: state.creationSelection ? {
+            ...state.creationSelection,
+            designSystemId: systemId,
+            template: { mode: "none", name: null, html: null, path: null }
+          } : null
+        }, {
+          designSystemId: systemId,
+          designSystemName: system?.name ?? null,
+          designSystemCategory: system?.category ?? null
+        })
       }}
       onClose={() => setSystemLibrary(null)}
     />
@@ -4510,12 +4591,14 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
           )}
         </div>
         <div style={S.titleActions}>
-          {selectedDesignSystem && (
+          {(selectedDesignSystem || designSystemEditable) && (
             <button
               type="button"
-              aria-label={`查看设计系统：${selectedDesignSystem.name}`}
-              onClick={() => setSystemLibrary({ mode: "inspect", id: selectedDesignSystem.id })}
-              title={`设计系统: ${selectedDesignSystem.path}`}
+              aria-label={designSystemEditable
+                ? `更换设计风格：${selectedDesignSystem?.name || "未选择"}`
+                : `查看设计系统：${selectedDesignSystem?.name}`}
+              onClick={openSessionDesignSystem}
+              title={designSystemEditable ? "更换设计风格后将清除已选页面模板" : `设计系统: ${selectedDesignSystem?.path}`}
               style={{
                 maxWidth: 210,
                 height: 30,
@@ -4538,8 +4621,9 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
             >
               <span style={{ flexShrink: 0 }}>▦</span>
               <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>
-                {selectedDesignSystem.name}{selectedDesignSystem.ownership === "user" ? ` · v${selectedDesignSystem.version || 1}` : ""}
+                {selectedDesignSystem?.name || "选择设计风格"}{selectedDesignSystem?.ownership === "user" ? ` · v${selectedDesignSystem.version || 1}` : ""}
               </span>
+              {designSystemEditable && <ChevronDown size={12} />}
             </button>
           )}
           <button
@@ -4878,6 +4962,7 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
                       label={selectedDesignSystem.name}
                       badge="DESIGN.md"
                       color={{ bg: "#eef7f3", border: "#b9d8cc", text: "#1f5f4a", dot: "#4b9b7a" }}
+                      onClick={openSessionDesignSystem}
                     />
                   )}
                   {ts.selectedSkill && (
@@ -4917,7 +5002,8 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
                     ts.attachedFiles.map((f, idx) => (
                       <ContextPill
                         key={f.filePath}
-                        icon="📄"
+                        icon={f.sourceUrl ? "🌐" : "📄"}
+                        title={f.sourceUrl}
                         label={
                           (f.filename.length > 28
                             ? f.filename.slice(0, 25) +
@@ -4925,7 +5011,7 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
                               f.filename.slice(f.filename.lastIndexOf("."))
                             : f.filename) + (f.truncated ? " ⚠️" : "")
                         }
-                        badge={`${f.content.length.toLocaleString()} 字符`}
+                        badge={f.sourceUrl ? "页面参考" : `${f.content.length.toLocaleString()} 字符`}
                         color={{
                           bg: "#f5f5ff",
                           border: "#d0d0ef",
@@ -5030,11 +5116,11 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
                     </button>
                     <button
                       onClick={handleSend}
-                      disabled={!inputValue.trim() && !ts.attachedImage}
+                      disabled={!canSend}
                       style={{
                         ...S.sendBtn,
-                        background: inputValue.trim() || ts.attachedImage ? "#cc785c" : "#e8b9a8",
-                        cursor: inputValue.trim() || ts.attachedImage ? "pointer" : "default"
+                        background: canSend ? "#cc785c" : "#e8b9a8",
+                        cursor: canSend ? "pointer" : "default"
                       }}
                     >
                       ▶ 发送
@@ -5043,15 +5129,15 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
                 ) : (
                   <button
                     onClick={handleSend}
-                    disabled={(!inputValue.trim() && !ts.attachedImage) || isBlocked}
+                    disabled={!canSend || isBlocked}
                     style={{
                       ...S.sendBtn,
                       background:
-                        (inputValue.trim() || ts.attachedImage) && !isBlocked
+                        canSend && !isBlocked
                           ? "#cc785c"
                           : "#e8b9a8",
                       cursor:
-                        (inputValue.trim() || ts.attachedImage) && !isBlocked
+                        canSend && !isBlocked
                           ? "pointer"
                           : "default"
                     }}

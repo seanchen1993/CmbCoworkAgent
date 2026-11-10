@@ -1,1 +1,5 @@
 .env filter=envcrypt
+
+# Preserve the original offline bundle, including its line endings and vendor whitespace.
+design-templates/market-wplus/** -text whitespace=cr-at-eol
+design-templates/market-wplus/cdn/* whitespace=cr-at-eol,-blank-at-eol,-blank-at-eof

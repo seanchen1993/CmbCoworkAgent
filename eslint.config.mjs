@@ -17,6 +17,8 @@ export default defineConfig(
       "**/.vite",
       "**/dist",
       "**/out",
+      // Original offline framework distributions shipped with the W+ templates.
+      "design-templates/market-wplus/cdn/**",
       // Ignored validation artifacts, downloaded runtimes and unpacked installers.
       "output/**",
       // Runtime conversations, generated workflow scripts, caches and traces.

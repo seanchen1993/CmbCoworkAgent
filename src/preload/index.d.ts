@@ -1,6 +1,6 @@
 import type { DesignUrlImportApi } from "../shared/design-url-import"
 import type { DesignSessionApi } from "../shared/managed-design-session"
-import type { DesignTemplateApi } from "../shared/design-template"
+import type { DesignTemplateApi, DesignTemplateInfo } from "../shared/design-template"
 import type { DesignSystemLibraryApi, DesignSystemInfo } from "../shared/design-system"
 import type {
   KnowledgeAccumulationData,
@@ -2430,19 +2430,7 @@ interface CustomAPI {
       error?: string
     }>
     listSystems: () => Promise<DesignSystemInfo[]>
-    listTemplates: () => Promise<
-      Array<{
-        designSystemKey?: string | null
-        name: string
-        description: string
-        path: string
-        mode: string
-        platform: string | null
-        scenario: string
-        previewHtml: string
-        previewPath: string
-      }>
-    >
+    listTemplates: () => Promise<DesignTemplateInfo[]>
     agentGenerate: (
       sessionId: string,
       prompt: string,
