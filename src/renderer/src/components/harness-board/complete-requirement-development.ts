@@ -53,7 +53,7 @@ export async function completeRequirementDevelopment(input: {
     }
   })
 
-  if (!intent.requirementId.startsWith("space:")) {
+  if (!intent.requirementId.startsWith("space:") && !intent.requirementId.startsWith("quick-")) {
     const attached = await window.api.requirements.attachThread({
       reqId: intent.requirementId,
       threadId: thread.thread_id,

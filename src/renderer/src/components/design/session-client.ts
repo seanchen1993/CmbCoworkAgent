@@ -1,14 +1,16 @@
-import type {
-  DesignSessionApi,
-  DesignSessionSnapshot,
-  DesignSessionSeed,
-  DesignSessionChange,
-  DesignRunRequest,
-  SessionMeta,
-  TabState
+import {
+  createDesignState,
+  type DesignSessionChange,
+  type DesignSessionApi,
+  type DesignSessionSnapshot,
+  type DesignSessionSeed,
+  type DesignRunRequest,
+  type SessionMeta,
+  type TabState
 } from "../../../../shared/managed-design-session"
 import type { DesignTweakCommand } from "../../../../shared/design-tweaks"
 import type { DesignEditCommand, DesignEditableDocument } from "../../../../shared/design-edit"
+import type { FileAttachment } from "./types"
 
 /** One client per renderer, not per DesignView. Sequenced snapshots make reconnect idempotent. */
 export class DesignSessionClient {
@@ -238,4 +240,34 @@ export class DesignSessionClient {
 let client: DesignSessionClient | undefined
 export function getDesignSessionClient(): DesignSessionClient {
   return (client ??= new DesignSessionClient(window.api.design.sessions))
+}
+
+export async function createPromptDesignSession(input: {
+  title: string
+  prompt: string
+  attachment?: FileAttachment
+}): Promise<string> {
+  const id = `ds_${crypto.randomUUID().slice(0, 8)}`
+  const now = Date.now()
+  const state = createDesignState()
+  state.inputValue = input.prompt
+  state.attachedFiles = input.attachment ? [input.attachment] : null
+  await getDesignSessionClient().create({
+    id,
+    meta: {
+      id,
+      title: input.title,
+      createdAt: now,
+      updatedAt: now,
+      kind: "prompt",
+      designSystemId: null,
+      designSystemName: null,
+      designSystemCategory: null
+    },
+    state,
+    workspacePath: null
+  })
+  localStorage.setItem("design_last_session", id)
+  window.dispatchEvent(new Event("requirement-design:navigate"))
+  return id
 }

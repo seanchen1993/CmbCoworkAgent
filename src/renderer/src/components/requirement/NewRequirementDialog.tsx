@@ -41,7 +41,7 @@ import {
 } from "./requirement-session-capabilities"
 import type { DesignSystemInfo } from "../design/types"
 
-type UploadSource = "file" | "text" | "link"
+export type UploadSource = "file" | "text" | "link"
 
 async function ensureRequirementSkills(): Promise<void> {
   const boundSkills = REQUIREMENT_BOUND_SKILLS.map((skill) => ({
@@ -128,18 +128,20 @@ export function NewRequirementDialog({
   onOpenChange,
   system,
   onChangeSystem,
+  initialSource = "file",
   onStartConversation
 }: {
   open: boolean
   onOpenChange: (open: boolean) => void
   system: DesignSystemInfo
   onChangeSystem: () => void
+  initialSource?: UploadSource
   onStartConversation: (
     requirement: RequirementRecord,
     options?: { autoGeneratePrd?: boolean } & Partial<RequirementSessionCapabilities>
   ) => void | Promise<void>
 }): React.JSX.Element {
-  const [source, setSource] = useState<UploadSource>("file")
+  const [source, setSource] = useState<UploadSource>(initialSource)
   const [file, setFile] = useState<File | null>(null)
   const [attachments, setAttachments] = useState<File[]>([])
   const [title, setTitle] = useState("")
@@ -336,9 +338,7 @@ export function NewRequirementDialog({
               <div className="min-w-0 flex-1">
                 <div className="text-xs font-medium text-muted-foreground">业务系统</div>
                 <div className="truncate text-sm font-semibold text-foreground">{system.name}</div>
-                <div className="mt-0.5 text-xs text-muted-foreground">
-                  默认沿用上次选择的系统
-                </div>
+                <div className="mt-0.5 text-xs text-muted-foreground">默认沿用上次选择的系统</div>
               </div>
               <Button
                 type="button"

@@ -2,6 +2,16 @@ import { useCallback, useEffect, useRef, useState } from "react"
 import { toast } from "sonner"
 import { LeanstarTokenDialog } from "./LeanstarTokenDialog"
 import { NewRequirementDialog } from "./NewRequirementDialog"
+import type { UploadSource } from "./NewRequirementDialog"
+import {
+  RequirementQuickStartDialog,
+  REQUIREMENT_QUICK_START_EVENT,
+  type RequirementQuickStartSelection
+} from "./RequirementQuickStartDialog"
+import {
+  RequirementQuickStartPreparationDialog,
+  type QuickStartPreparedInput
+} from "./RequirementQuickStartPreparationDialog"
 import { RequirementConversationView } from "./RequirementConversationView"
 import { RequirementHistoryView } from "./RequirementHistoryView"
 import { RequirementListLoading } from "./RequirementListLoading"
@@ -24,13 +34,17 @@ import type { DesignSystemInfo } from "../design/types"
 import { useAppStore } from "@/lib/store"
 import {
   REQUIREMENT_CONVERSATION_ENTRY_KEY,
+  buildRequirementDesignPrompt,
   buildSpaceRequirementDesignPrompt,
   findRequirementDesignEntry,
   listAllRequirementDesignEntries,
   removeRequirementDesignSessions,
   openRequirementDesign
 } from "@/lib/requirement-design-entry"
-import { getDesignSessionClient } from "@/components/design/session-client"
+import {
+  createPromptDesignSession,
+  getDesignSessionClient
+} from "@/components/design/session-client"
 import {
   USE_LEANSTAR_REQUIREMENTS_MOCK,
   leanstarRequirementsApi,
@@ -158,6 +172,12 @@ export function RequirementEntryView({
   const requirementSpaceLoadedRef = useRef(false)
   const [systemDialogOpen, setSystemDialogOpen] = useState(false)
   const [requirementDialogOpen, setRequirementDialogOpen] = useState(false)
+  const [quickStartDialogOpen, setQuickStartDialogOpen] = useState(false)
+  const [newRequirementSource, setNewRequirementSource] = useState<UploadSource>("file")
+  const [quickStartPreparation, setQuickStartPreparation] = useState<{
+    source: "file" | "link"
+    target: "design" | "development"
+  } | null>(null)
   const selectedSystemId = useRequirementStore((state) => state.selectedSystemId)
   const setSelectedSystemId = useRequirementStore((state) => state.setSelectedSystemId)
   const setSystemList = useRequirementStore((state) => state.setSystemList)
@@ -172,6 +192,12 @@ export function RequirementEntryView({
   useEffect(() => {
     onListVisibilityChange?.(screen === "history")
   }, [onListVisibilityChange, screen])
+
+  useEffect(() => {
+    const openQuickStart = (): void => setQuickStartDialogOpen(true)
+    window.addEventListener(REQUIREMENT_QUICK_START_EVENT, openQuickStart)
+    return () => window.removeEventListener(REQUIREMENT_QUICK_START_EVENT, openQuickStart)
+  }, [])
 
   const loadRequirements = useCallback(async (): Promise<RequirementRecord[]> => {
     // 需求列表与系统列表并行加载，互不影响
@@ -339,12 +365,82 @@ export function RequirementEntryView({
     }
   }
 
-  const startNewRequirement = (): void => {
+  const startNewRequirement = (source: UploadSource = "file"): void => {
+    setNewRequirementSource(source)
     if (!selectedSystem) {
       setSystemDialogOpen(true)
       return
     }
     setRequirementDialogOpen(true)
+  }
+
+  const selectQuickStartSource = (selection: RequirementQuickStartSelection): void => {
+    if (selection.target === "space") {
+      setSourceFilter("space")
+      return
+    }
+    if (
+      (selection.source === "file" || selection.source === "link") &&
+      (selection.target === "design" || selection.target === "development")
+    ) {
+      setQuickStartPreparation({ source: selection.source, target: selection.target })
+      return
+    }
+    startNewRequirement("text")
+  }
+
+  const completeQuickStart = async (prepared: QuickStartPreparedInput): Promise<void> => {
+    if (quickStartPreparation?.target === "design") {
+      const prompt = prepared.url
+        ? [
+            "请先使用内置浏览器打开以下在线需求文档：",
+            prepared.url,
+            "",
+            "完整读取并逐字输出全部需求内容，不得总结、改写、压缩或遗漏。然后继续执行以下任务：",
+            "",
+            "上述需求内容是业务范围、流程和规则的主要依据；其他资料仅作补充，冲突时以需求内容为准。请覆盖核心流程及必要的空状态、异常状态，输出可独立运行、主要流程可交互的单页 HTML。关键信息缺失时先提问确认。"
+          ].join("\n")
+        : buildRequirementDesignPrompt(prepared.title, prepared.sourceName)
+      await createPromptDesignSession({
+        title: prepared.title,
+        prompt,
+        ...(prepared.url
+          ? {}
+          : {
+              attachment: {
+                filename: prepared.sourceName,
+                filePath: prepared.sourceName,
+                content: prepared.content,
+                mimeType: "text/markdown",
+                size: new TextEncoder().encode(prepared.content).byteLength,
+                truncated: false
+              }
+            })
+      })
+      setQuickStartPreparation(null)
+      return
+    }
+    const prompt = prepared.url
+      ? [
+          "请先使用内置浏览器打开并完整读取以下在线 PRD：",
+          prepared.url,
+          "",
+          "必须读取全部需求内容，不得总结、改写、压缩或遗漏。读取完成后，结合当前工作区确认功能范围、交互和验收要求，并完成开发与必要验证；信息不足或存在歧义时先向我确认。"
+        ].join("\n")
+      : `PRD需求文档的地址：${prepared.sourcePath || prepared.sourceName}`
+    writeRequirementDevelopmentIntent({
+      action: "create-development",
+      requirementId: prepared.id,
+      requirementTitle: prepared.title,
+      prompt,
+      requirementFilePath: prepared.url || prepared.sourcePath || prepared.sourceName,
+      prototypeFilePaths: [],
+      functionCount: 0,
+      hasPrototype: false
+    })
+    setQuickStartPreparation(null)
+    setShowHarnessBoardView(true)
+    window.dispatchEvent(new Event(REQUIREMENT_DEVELOPMENT_ONBOARDING_EVENT))
   }
 
   const replaceRequirement = useCallback((requirement: RequirementRecord): void => {
@@ -594,7 +690,7 @@ export function RequirementEntryView({
           sourceFilter={sourceFilter}
           requirementSpaceLoading={requirementSpaceLoading}
           onSourceFilterChange={setSourceFilter}
-          onNew={startNewRequirement}
+          onNew={() => startNewRequirement()}
           onOpenRequirement={openRequirement}
           onDeleteRequirement={deleteRequirement}
         />
@@ -609,7 +705,7 @@ export function RequirementEntryView({
           onRequirementUpdated={replaceRequirement}
           onDeleteRequirement={deleteRequirement}
           onBack={() => setScreen("history")}
-          onNew={startNewRequirement}
+          onNew={() => startNewRequirement()}
           autoGeneratePrd={autoGeneratePrd}
         />
       )}
@@ -639,6 +735,24 @@ export function RequirementEntryView({
         confirmLabel="保存并加载"
       />
 
+      <RequirementQuickStartDialog
+        open={quickStartDialogOpen}
+        onOpenChange={setQuickStartDialogOpen}
+        onSelect={selectQuickStartSource}
+      />
+
+      {quickStartPreparation ? (
+        <RequirementQuickStartPreparationDialog
+          source={quickStartPreparation.source}
+          target={quickStartPreparation.target}
+          onBack={() => {
+            setQuickStartPreparation(null)
+            setQuickStartDialogOpen(true)
+          }}
+          onPrepared={completeQuickStart}
+        />
+      ) : null}
+
       {systemDialogOpen && (
         <SystemSelectionDialog
           initialSystemId={selectedSystemId}
@@ -662,6 +776,7 @@ export function RequirementEntryView({
         <NewRequirementDialog
           open
           system={selectedSystem}
+          initialSource={newRequirementSource}
           onChangeSystem={() => setSystemDialogOpen(true)}
           onOpenChange={setRequirementDialogOpen}
           onStartConversation={async (requirement, options) => {

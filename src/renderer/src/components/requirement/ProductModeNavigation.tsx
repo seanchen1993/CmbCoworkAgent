@@ -6,7 +6,10 @@ import {
   SelectValue
 } from "@/components/ui/select"
 import { cn } from "@/lib/utils"
+import { Sparkles } from "lucide-react"
+import { Button } from "@/components/ui/button"
 import { ALL_REQUIREMENT_SYSTEMS_VALUE, useRequirementStore } from "./requirement-store"
+import { REQUIREMENT_QUICK_START_EVENT } from "./RequirementQuickStartDialog"
 
 export function ProductModeNavigation({
   activeTab,
@@ -60,6 +63,18 @@ export function ProductModeNavigation({
           ))}
         </SelectContent>
       </Select>
+      {activeTab === "requirements" ? (
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          onClick={() => window.dispatchEvent(new Event(REQUIREMENT_QUICK_START_EVENT))}
+          className="ml-auto h-8 rounded-lg border-[#e4c8ad] bg-[#fdf8f3] px-3.5 text-xs text-[#a96736] shadow-sm hover:border-[#c99366] hover:bg-[#f8eee4] hover:text-[#92562b]"
+        >
+          <Sparkles className="size-3.5" />
+          快速开始
+        </Button>
+      ) : null}
     </div>
   )
 }

@@ -1911,7 +1911,7 @@ export function DesignView({
         state.iframeScrollY = previous.iframeScrollY
       }
       sourceHtml = snapshot.state.html
-      if (initial && snapshot.workspacePath) setWorkspacePath(snapshot.workspacePath)
+      if (initial) setWorkspacePath(snapshot.workspacePath)
       initial = false
       tabStatesRef.current = { [SINGLE_DESIGN_TAB_ID]: state }
       setTabStates(tabStatesRef.current)
