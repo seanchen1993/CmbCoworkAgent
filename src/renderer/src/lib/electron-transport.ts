@@ -871,6 +871,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
     const agentMode = payload.config?.configurable?.agent_mode as TransportAgentMode | undefined
     const coordinatorInternalNotification =
       payload.config?.configurable?.coordinator_internal_notification === true
+    const rawUserInput = payload.config?.configurable?.raw_user_input as string | undefined
     const userMessageId = payload.config?.configurable?.hook_turn_id as string | undefined
     const managedAutoSendRunId = this.options.managedAutoSendRunId
     if (!threadId) {
@@ -906,7 +907,8 @@ export class ElectronIPCTransport implements UseStreamTransport {
       agentMode,
       coordinatorInternalNotification,
       userMessageId,
-      managedAutoSendRunId
+      managedAutoSendRunId,
+      rawUserInput
     )
   }
 
@@ -1346,7 +1348,8 @@ export class ElectronIPCTransport implements UseStreamTransport {
     agentMode?: TransportAgentMode,
     coordinatorInternalNotification = false,
     userMessageId?: string,
-    managedAutoSendRunId?: string
+    managedAutoSendRunId?: string,
+    rawUserInput?: string
   ): AsyncGenerator<StreamEvent> {
     // Create a queue to buffer events from IPC
     const eventQueue = new CursorQueue<QueuedStreamEvent>()
@@ -1436,7 +1439,8 @@ export class ElectronIPCTransport implements UseStreamTransport {
             modelId,
             agentMode,
             coordinatorInternalNotification,
-            userMessageId
+            userMessageId,
+            rawUserInput
           )
     const cleanup = subscribeToIPCEvents((ipcEvent) => {
       if (terminalReceived) return

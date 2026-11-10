@@ -370,6 +370,8 @@ export interface Message {
  *                               current run (awaiting injection); cleared on run end
  */
 export interface QueuedMessage {
+  /** Composer text before trimming, file resolution or prompt wrapping. */
+  rawUserInput?: string
   id: string
   text: string
   attachmentModelBlocks?: string

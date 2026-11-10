@@ -154,6 +154,7 @@ export interface ImDetachedResultNotice extends ImDetachedResultSignal {
 }
 
 export interface PreparedRemoteStandardTurnInput {
+  rawUserInput?: string
   rawMessage: string
   userMessageId: string
   threadId: string
@@ -398,6 +399,7 @@ export async function executePreparedRemoteStandardTurn(
   if (!internalNotificationTurn) {
     const preparedPrompt = await prepareStandardUserPrompt({
       rawMessage,
+      rawUserInput: input.rawUserInput,
       initialModelInput: rawMessage,
       trustedExplicitSkill: explicitSkill,
       allowExplicitSkillFromMessage: source !== "im",
@@ -721,6 +723,7 @@ async function executePreparedImStandardTurn(
   }
   const turn: PreparedRemoteStandardTurnInput = {
     rawMessage: preparedMessage.visibleText,
+    rawUserInput: event.messageText,
     userMessageId: `im:${event.eventId}:user`,
     threadId: target.threadId,
     targetKind: target.kind,

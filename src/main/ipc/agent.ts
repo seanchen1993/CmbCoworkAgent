@@ -808,6 +808,7 @@ type CurrentRunMessagePreparer = {
   prepare: (message: {
     content: string
     displayContent?: string
+    rawUserInput?: string
   }) => Promise<CurrentRunMessagePreparation>
 }
 const currentRunMessagePreparers = new Map<string, CurrentRunMessagePreparer>()
@@ -2447,6 +2448,7 @@ function registerCurrentRunMessagePreparer({
       const initialQueuedModelInput = neutralizeWorkflowPlumbingUserText(queuedMessage.content)
       const prepared = await prepareStandardUserPrompt({
         rawMessage: queuedMessage.content,
+        rawUserInput: queuedMessage.rawUserInput,
         initialModelInput: initialQueuedModelInput,
         threadId,
         workspacePath,
@@ -5394,7 +5396,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       _event,
       payload: {
         threadId?: string
-        message?: { id?: string; content?: string; displayContent?: string }
+        message?: { id?: string; content?: string; displayContent?: string; rawUserInput?: string }
       }
     ): Promise<{ queued: boolean; reason?: string; message?: string }> => {
       const threadId = payload?.threadId
@@ -5440,6 +5442,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           try {
             prepared = await preparer.prepare({
               content: messageContent,
+              rawUserInput: message.rawUserInput,
               displayContent: messageDisplayContent
             })
           } catch (error) {
@@ -6348,6 +6351,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               isTrustedCoordinatorNotificationInvoke ? undefined : message,
               userMessageId
             )
+            nextTurnState.hookScope.rawUserInput = isTrustedCoordinatorNotificationInvoke
+              ? undefined
+              : typeof request.rawUserInput === "string" ? request.rawUserInput : undefined
             const nextRunToken = startTurnStateRun(nextTurnState, nextInvokeRunToken)
             const nextAbortController = new AbortController()
             activeRuns.set(threadId, nextAbortController)
@@ -7301,6 +7307,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           ): Promise<PreparedUserPrompt> =>
             prepareStandardUserPrompt({
               rawMessage,
+              rawUserInput: request.rawUserInput,
               initialModelInput,
               trustedExplicitSkill: runExecutionContext.trustedExplicitSkill,
               allowExplicitSkillFromMessage:

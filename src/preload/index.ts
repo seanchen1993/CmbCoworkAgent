@@ -682,7 +682,8 @@ const api = {
       modelId?: string,
       agentMode?: "normal" | "coordinator" | "workflow",
       coordinatorInternalNotification?: boolean,
-      userMessageId?: string
+      userMessageId?: string,
+      rawUserInput?: string
     ): (() => void) => {
       const ambientChannel = coordinatorInternalNotification
         ? `agent:stream:${threadId}:coordinator-internal`
@@ -703,7 +704,8 @@ const api = {
         modelId,
         agentMode,
         coordinatorInternalNotification,
-        userMessageId
+        userMessageId,
+        rawUserInput
       })
 
       return cleanup
@@ -716,7 +718,8 @@ const api = {
       modelId?: string,
       agentMode?: "normal" | "coordinator" | "workflow",
       coordinatorInternalNotification?: boolean,
-      userMessageId?: string
+      userMessageId?: string,
+      rawUserInput?: string
     ): (() => void) => {
       const ambientChannel = command
         ? `agent:stream:${threadId}`
@@ -749,7 +752,8 @@ const api = {
           modelId,
           agentMode,
           coordinatorInternalNotification,
-          userMessageId
+          userMessageId,
+          rawUserInput
         })
       }
 
@@ -860,7 +864,7 @@ const api = {
     // { queued:false, reason } when there is no active foreground run.
     queueCurrentRunMessage: (
       threadId: string,
-      message: { id: string; content: string; displayContent?: string }
+      message: { id: string; content: string; displayContent?: string; rawUserInput?: string }
     ): Promise<{ queued: boolean; reason?: string; message?: string }> => {
       return ipcRenderer.invoke("agent:queueCurrentRunMessage", { threadId, message }) as Promise<{
         queued: boolean

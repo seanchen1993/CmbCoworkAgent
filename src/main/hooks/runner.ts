@@ -36,7 +36,7 @@ const CHARDET_CONFIDENCE_THRESHOLD = 0.8
 const CHARDET_SAMPLE_BYTES = 8_192
 const MAX_HOOK_ENV_JSON_CHARS = 4_096
 const ONCE_HOOK_KEY_SEPARATOR = "\u0000"
-const INVOCATION_CONTEXT_ENV_KEYS = new Set(["AGENT_ID", "WORKSPACE_PATH", "CLAUDE_PROJECT_DIR"])
+const INVOCATION_CONTEXT_ENV_KEYS = new Set(["AGENT_ID", "WORKSPACE_PATH", "CLAUDE_PROJECT_DIR", "RAW_USER_INPUT"])
 const DEFAULT_USER_CONTEXT_FIELDS = [
   "sap_id",
   "yst_id",
@@ -89,6 +89,8 @@ export interface HookContext {
   forceSyncWorkspaceHooks?: boolean
   /** User prompt text for UserPromptSubmit — exposed as USER_PROMPT env and prompt in stdin JSON */
   userPrompt?: string
+  /** Unmodified human input; undefined when the source cannot supply it. */
+  rawUserInput?: string
   /** Skill lifecycle context for PreSkillUse/PostSkillUse. */
   skillName?: string
   skillPath?: string
@@ -445,6 +447,7 @@ function buildHookEnv(
   if (context.sessionId) env.SESSION_ID = context.sessionId
   if (context.systemId) env.SYSTEM_ID = context.systemId
   if (context.userPrompt) env.USER_PROMPT = context.userPrompt
+  if (typeof context.rawUserInput === "string") env.RAW_USER_INPUT = context.rawUserInput
   addHookUserContextEnv(env, hook)
   // PR-01: Claude Code-compatible env vars. Only set when context provides them
   // — keeps zero-context invocations byte-identical with prior versions.

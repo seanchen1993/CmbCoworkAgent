@@ -512,6 +512,7 @@ async function activateExplicitSkillFromMessage({
 
 export async function prepareStandardUserPrompt({
   rawMessage,
+  rawUserInput,
   initialModelInput,
   trustedExplicitSkill,
   allowExplicitSkillFromMessage = true,
@@ -526,6 +527,7 @@ export async function prepareStandardUserPrompt({
   isPreparationCurrent
 }: {
   rawMessage: string
+  rawUserInput?: string
   initialModelInput: string
   /**
    * Host-resolved explicit skill. Remote transports use this instead of
@@ -544,6 +546,7 @@ export async function prepareStandardUserPrompt({
   onSystemMessage?: (message: string) => void
   isPreparationCurrent?: () => boolean
 }): Promise<PreparedUserPrompt> {
+  turnState.hookScope.rawUserInput = typeof rawUserInput === "string" ? rawUserInput : undefined
   let preparedMessage = initialModelInput
   const trustedExplicitSkillBlock = trustedExplicitSkill
     ? formatTrustedSkillUseBlock(trustedExplicitSkill)

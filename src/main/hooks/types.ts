@@ -324,6 +324,7 @@ export interface HookEnv {
   HARNESS_NODE_STATUS?: string // current project-mode workflow node/stage status label
   PROJECT_CODE?: string
   PROJECT_DIR?: string
+  RAW_USER_INPUT?: string // Original human input, without generated prompt content
   USER_PROMPT?: string // UserPromptSubmit event
   SESSION_ID?: string // threadId
   SYSTEM_ID?: string

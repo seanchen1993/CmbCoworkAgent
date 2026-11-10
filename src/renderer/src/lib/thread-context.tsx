@@ -960,6 +960,7 @@ function normalizeQueuedMessage(raw: unknown): QueuedMessage | null {
   return {
     id: item.id,
     text: item.text,
+    rawUserInput: typeof item.rawUserInput === "string" ? item.rawUserInput : undefined,
     attachmentModelBlocks:
       typeof item.attachmentModelBlocks === "string" ? item.attachmentModelBlocks : undefined,
     attachmentDisplayPrefix:

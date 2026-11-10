@@ -4090,7 +4090,7 @@ async function applyWorkerPromptSubmitHooks({
   workspacePath: string
   onHookResult?: HookResultCallback
   metadata?: Record<string, unknown>
-  isolatedHookContext?: Pick<HookContext, "workspaceHookCwd" | "forceSyncWorkspaceHooks">
+  isolatedHookContext?: Pick<HookContext, "workspaceHookCwd" | "forceSyncWorkspaceHooks" | "rawUserInput">
 }): Promise<string> {
   let effectivePrompt = prompt
   const promptSubmitResult = await runHooksEnriched(
@@ -4165,7 +4165,7 @@ async function runWorkerStopHooksWithRevision({
   sendNotice: (message: string) => void
   sendError: (message: string) => void
   onHookResult?: HookResultCallback
-  isolatedHookContext?: Pick<HookContext, "workspaceHookCwd" | "forceSyncWorkspaceHooks">
+  isolatedHookContext?: Pick<HookContext, "workspaceHookCwd" | "forceSyncWorkspaceHooks" | "rawUserInput">
 }): Promise<boolean> {
   let revisionCount = 0
   while (!abortSignal.aborted) {
@@ -6013,6 +6013,7 @@ ${workerAccessPrompt}
 
 Use the same worker thread context for follow-up instructions. ${scratchpadGuidance} Return a concise handoff with output files, commands run, evidence, risks, and verifier notes when applicable.`
 
+    const workerRawUserInput = hookScope.rawUserInput
     console.log("[CoordinatorWorker] run turn", {
       parentThreadId: workerInput.parentThreadId,
       workerId: workerInput.workerId,
@@ -6114,7 +6115,7 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
         agentId: workerInput.workerId,
         workspacePath,
         onHookResult: workerOnHookResult,
-        isolatedHookContext: isolatedWorkspaceHookContext,
+        isolatedHookContext: { ...isolatedWorkspaceHookContext, rawUserInput: workerRawUserInput },
         metadata: {
           coordinatorWorkerId: workerInput.workerId,
           coordinatorWorkerRole: workerInput.role,
@@ -6292,6 +6293,7 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
       // launched. Trade-off: activations a worker makes during its run stay local
       // to that worker and are not reflected back to the coordinator.
       const workerHookScope = createInheritedHookScope(hookScope)
+      workerHookScope.rawUserInput = workerRawUserInput
 
       for (const candidateId of workerOrderedChain) {
         if (workerInput.abortSignal.aborted) break
@@ -6506,7 +6508,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
           console.warn("[CoordinatorWorker][StopHook]", message)
         },
         onHookResult: workerOnHookResult,
-        isolatedHookContext: isolatedWorkspaceHookContext
+        isolatedHookContext: { ...isolatedWorkspaceHookContext, rawUserInput: workerRawUserInput }
       })
       if (!stopPassed) {
         throw new Error(workerStopHookFailure ?? "Stop hook blocked worker completion.")

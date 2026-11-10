@@ -1059,7 +1059,8 @@ interface CustomAPI {
       modelId?: string,
       agentMode?: "normal" | "coordinator" | "workflow",
       coordinatorInternalNotification?: boolean,
-      userMessageId?: string
+      userMessageId?: string,
+      rawUserInput?: string
     ) => () => void
     streamAgent: (
       threadId: string,
@@ -1069,7 +1070,8 @@ interface CustomAPI {
       modelId?: string,
       agentMode?: "normal" | "coordinator" | "workflow",
       coordinatorInternalNotification?: boolean,
-      userMessageId?: string
+      userMessageId?: string,
+      rawUserInput?: string
     ) => () => void
     interrupt: (
       threadId: string,
@@ -1100,7 +1102,7 @@ interface CustomAPI {
     cancel: (threadId: string, options?: { cancelWorkers?: boolean }) => Promise<void>
     queueCurrentRunMessage: (
       threadId: string,
-      message: { id: string; content: string; displayContent?: string }
+      message: { id: string; content: string; displayContent?: string; rawUserInput?: string }
     ) => Promise<{ queued: boolean; reason?: string; message?: string }>
     deleteCurrentRunQueuedMessage: (threadId: string, messageId: string) => Promise<void>
     reconcileCurrentRunQueuedMessages: (

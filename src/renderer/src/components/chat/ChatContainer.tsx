@@ -5641,6 +5641,7 @@ export function ChatContainer({
       // Claim the current composer payload before @file IO. A second Enter sees
       // the preparation guard, while text typed during the await goes into a
       // fresh composer and is not cleared when this draft is enqueued.
+      const rawUserInput = input
       const skill = selectedSkill
       const browser = selectedBuiltinBrowser
       const claimedAttachments = attachments
@@ -5788,6 +5789,7 @@ export function ChatContainer({
         : ""
 
       const composedDraft: QueuedMessage = {
+        rawUserInput,
         id: crypto.randomUUID(),
         text: userText,
         attachmentModelBlocks,
@@ -5933,6 +5935,7 @@ export function ChatContainer({
             config: {
               configurable: {
                 thread_id: threadId,
+                raw_user_input: composedDraft.rawUserInput,
                 model_id: currentModel,
                 agent_mode: submitAgentMode === "multi" ? "normal" : submitAgentMode,
                 ...(visibleUserMessage?.id ? { hook_turn_id: visibleUserMessage.id } : {})
@@ -6045,12 +6048,12 @@ export function ChatContainer({
       )
       return
     }
-    const updatedMessage = { ...message, text: nextText }
+    const updatedMessage = { ...message, text: nextText, rawUserInput: editingQueueText }
     setEditingQueueId(null)
     setEditingQueueText("")
 
     if (!message.handoffRequestedAt) {
-      updateQueuedMessage(message.id, { text: nextText })
+      updateQueuedMessage(message.id, { text: nextText, rawUserInput: editingQueueText })
       return
     }
 
@@ -6096,11 +6099,12 @@ export function ChatContainer({
       const result = await window.api.agent.queueCurrentRunMessage(threadId, {
         id: message.id,
         content: getQueuedModelContent(updatedMessage),
+        rawUserInput: updatedMessage.rawUserInput,
         displayContent: guardCoordinatorPlainText(getQueuedDisplayContent(updatedMessage))
       })
       if (!isCurrentRequest() || !getUnchangedGuidedMessage()) return
       if (result.queued) {
-        updateQueuedMessage(message.id, { text: nextText })
+        updateQueuedMessage(message.id, { text: nextText, rawUserInput: editingQueueText })
         return
       }
 
@@ -6182,6 +6186,7 @@ export function ChatContainer({
         const result = await window.api.agent.queueCurrentRunMessage(threadId, {
           id: current.id,
           content: getQueuedModelContent(current),
+          rawUserInput: current.rawUserInput,
           displayContent: guardCoordinatorPlainText(getQueuedDisplayContent(current))
         })
         if (result.queued) {
@@ -6414,6 +6419,7 @@ export function ChatContainer({
             config: {
               configurable: {
                 thread_id: threadId,
+                raw_user_input: queued.rawUserInput,
                 model_id: queuedModelId,
                 agent_mode: submitAgentMode === "multi" ? "normal" : submitAgentMode,
                 ...(visibleUserMessage?.id ? { hook_turn_id: visibleUserMessage.id } : {})

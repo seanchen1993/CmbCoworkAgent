@@ -30,6 +30,8 @@ export type ThreadStatus = "idle" | "busy" | "interrupted" | "error"
 
 // Agent IPC
 export interface AgentInvokeParams {
+  /** Original human input, before transport decorations and hook rewrites. */
+  rawUserInput?: string
   threadId: string
   streamRequestId?: string
   message: string

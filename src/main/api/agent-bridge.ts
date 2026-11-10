@@ -266,6 +266,7 @@ export async function runApiAgentTurn(
   const run = await startAgentRun({
     threadId,
     message,
+    rawUserInput: message,
     modelId,
     userMessageId: uuid()
   }, createBrowserWindowAgentRunDelivery(window))

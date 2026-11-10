@@ -12,8 +12,7 @@ import { ProjectWorkspaceField } from "./ProjectWorkspaceField"
 import { ProjectTestField } from "./ProjectTestField"
 import {
   defaultWorkflowTemplateId,
-  requiredWorkflowNodeIds,
-  resolveHarnessSessionWorkspace
+  requiredWorkflowNodeIds
 } from "../../../../shared/harness-feature-defaults"
 import {
   Fragment,

@@ -128,6 +128,7 @@ export async function executeRemoteStandardTurnOnDesktopRunBody(
     {
       threadId: input.threadId,
       message: input.rawMessage,
+      rawUserInput: input.internalNotificationTurn ? undefined : input.rawUserInput,
       userMessageId: input.userMessageId,
       ...(input.agentMode ? { agentMode: input.agentMode } : {}),
       ...(input.internalNotificationTurn ? { coordinatorInternalNotification: true } : {})

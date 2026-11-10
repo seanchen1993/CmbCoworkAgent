@@ -21,6 +21,8 @@ export interface HookScopeSnapshot {
 }
 
 export interface HookScopeController {
+  /** Human input for this invocation; never inferred from model-facing text. */
+  rawUserInput?: string
   readonly activePluginIds: ReadonlySet<string>
   readonly activeSkillNames: ReadonlySet<string>
   readonly activeSkillPaths: ReadonlySet<string>
@@ -234,6 +236,7 @@ export function mergeHookScopeSnapshot(
  */
 export function createInheritedHookScope(parent: HookScopeController): HookScopeController {
   const child = createHookScope()
+  child.rawUserInput = parent.rawUserInput
   mergeHookScopeSnapshot(child, parent.snapshot())
   return child
 }
@@ -438,6 +441,7 @@ export function resolveEnabledHooksForRun(
   scope?: HookScopeController,
   onSkipped?: ScopeSkipCallback
 ): HookConfig[] {
+  if (context.rawUserInput === undefined) context.rawUserInput = scope?.rawUserInput
   return filterScopedHooks(
     {
       baseHooks: getEnabledHooks(workspacePath),
