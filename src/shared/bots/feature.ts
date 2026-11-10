@@ -1,3 +1,5 @@
+import type { BotAvatarShape } from "./contracts"
+
 /** A follow belongs to one Bot conversation. Native project threads and runs retain their own identities. */
 export interface BotFeatureFollow {
   id: string
@@ -59,7 +61,20 @@ export interface BotFeatureDetail extends BotFeatureTask {
   }
 }
 
+/** Local desktop picker metadata. A group uses its local IM conversation ID. */
+export interface BotFeatureTarget {
+  botId: string
+  botName: string
+  color: string
+  shape?: BotAvatarShape
+  groupId?: string
+  label: string
+  linked: boolean
+  unavailable?: "archived" | "revoked"
+}
+
 export interface BotFeatureClient {
+  targets(feature?: Pick<BotFeatureFollow, "projectId" | "slug">): Promise<BotFeatureTarget[]>
   projects(botId: string, groupId?: string): Promise<{ id: string; name: string }[]>
   catalog(
     botId: string,

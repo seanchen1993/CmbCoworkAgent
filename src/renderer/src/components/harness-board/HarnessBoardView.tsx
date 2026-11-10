@@ -95,7 +95,8 @@ import { ManagedRunIcon } from "@/components/ui/managed-run-icon"
 import { ManagedRunHistory } from "@/components/harness-board/ManagedRunHistory"
 import { ManagedRunScheduleBadge } from "./ManagedRunScheduleBadge"
 import { useManagedRunSchedule, useManagedRunScheduleIndex } from "@/lib/use-managed-run-schedule"
-import { FeatureBotLinkButton, linkFeatureToBot, type FeatureBotTarget } from "./FeatureBotLinkButton"
+import { FeatureBotLinkButton, linkFeatureToBot } from "./FeatureBotLinkButton"
+import type { BotFeatureTarget } from "../../../../shared/bots/feature"
 import { ManagedRunStartDialog } from "./ManagedRunStartDialog"
 import { buildManagedRunSessionOptions } from "@/lib/managed-run-session-options"
 import {
@@ -3581,13 +3582,13 @@ function FeatureCreateDialog({
   onDeployUnitToggle: (deployUnitIdMapping: string, checked: boolean) => void
   onOpenDeployUnitSettings: () => void
   onSyncPublicConstraints: () => void
-  onSubmit: (target: FeatureBotTarget | null) => void
+  onSubmit: (target: BotFeatureTarget | null) => void
 }): React.JSX.Element {
   const [pathPickerId, setPathPickerId] = useState<string | null>(null)
   const [dialogContentElement, setDialogContentElement] = useState<HTMLDivElement | null>(null)
   const workspaceInputRef = useRef<HTMLInputElement>(null)
   const dialogTitleRef = useRef<HTMLHeadingElement>(null)
-  const [botTarget, setBotTarget] = useState<FeatureBotTarget | null>(null)
+  const [botTarget, setBotTarget] = useState<BotFeatureTarget | null>(null)
   useEffect(() => {
     setBotTarget(null)
   }, [project?.projectId, mode])
@@ -7605,6 +7606,7 @@ function FeatureDetailPage({
                         mode="detail"
                         projectId={detail.project.projectId}
                         slug={detail.run.slug}
+                        title={detail.run.title}
                         disabled={projectInteractionDisabled || detail.run.featureStatus === "archived"}
                       />
                     </div>
@@ -10460,7 +10462,7 @@ export function HarnessBoardView({
     [featureMappings, featureWorkspace, handleSelectFeaturePath]
   )
 
-  const handleSubmitFeature = useCallback(async (target: FeatureBotTarget | null): Promise<void> => {
+  const handleSubmitFeature = useCallback(async (target: BotFeatureTarget | null): Promise<void> => {
     if (!featureDialogProject || creatingFeatureRef.current) return
     const feature = sanitizeHarnessNameInput(featureName).trim()
     if (!feature) {
@@ -10926,7 +10928,7 @@ export function HarnessBoardView({
   ])
   const featureDialogSubmitting =
     featureDialogMode === "edit" ? updatingFeatureDeployUnits : creatingFeatureProjectId !== null
-  const handleSubmitFeatureDialog = useCallback((target: FeatureBotTarget | null): void => {
+  const handleSubmitFeatureDialog = useCallback((target: BotFeatureTarget | null): void => {
     if (featureDialogMode === "edit") {
       void handleSubmitFeatureDeployUnits()
       return

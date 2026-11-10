@@ -53,6 +53,8 @@ export function isLocalBotWork(work: Pick<BotWorkItem, "source" | "audienceKey">
 }
 export interface CreateBotWorkInput {
   botId: string
+  /** Local binding selected in the desktop group panel. Tool calls inherit their own audience. */
+  imConversationId?: string
   operationId: string
   title: string
   goal: string

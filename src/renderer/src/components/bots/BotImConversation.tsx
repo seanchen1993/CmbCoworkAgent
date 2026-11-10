@@ -618,10 +618,9 @@ export function BotImConversationDetails({
             onSelect={(id) => (id ? onWork(id) : onBack())}
             onBack={onBack}
             groupId={conversation.id}
-            featureDisabled={Boolean(bot.archived || bot.deleting || conversation.state !== "active")}
+            readOnlyGroup={conversation.state !== "active"}
             heading="群内任务"
             backLabel="返回群聊"
-            allowCreate={false}
             disabled={Boolean(bot.archived || bot.deleting)}
           />
           <div className="bot-im-details-section">

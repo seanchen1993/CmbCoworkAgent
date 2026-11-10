@@ -95,6 +95,7 @@ function verifySessionAccess(
   return thread
 }
 export function checkFeatureThread(host: LocalBotHost, owner: FeatureOwner, threadId: string) {
+  host.featureStore.owner(owner.id)
   const grant = imRemoteAccessService.getThreadGrant(threadId)
   return verifySessionAccess(
     owner,
@@ -175,6 +176,7 @@ function sessionStatus(
   }
 }
 export function featureDetail(host: LocalBotHost, owner: FeatureOwner): BotFeatureDetail {
+  host.featureStore.owner(owner.id)
   const { id, projectId, slug } = owner
   const runId = host.featureStore.latestRun(id)
   const run = runId ? nativeRun(owner, runId) : null
@@ -309,8 +311,8 @@ function notice(
 export function publishFeatureRun(run: ManagedRunSummary) {
   if (!run.botOperationId) return
   const host = getLocalBotHost(),
-    op = host.featureStore.receipt(run.botOperationId)
-  if (op.runId !== run.runId || op.state !== "active") return
+    op = host.featureStore.findReceipt(run.botOperationId)
+  if (!op || op.runId !== run.runId || op.state !== "active") return
   let source: ReturnType<typeof executionOwner>
   try {
     source = executionOwner(host, op)
@@ -346,7 +348,7 @@ function observeDecisions() {
     const op = note.runId
       ? host.featureStore.operationForRun(note.runId)
       : active
-        ? host.featureStore.receipt(active)
+        ? host.featureStore.findReceipt(active)
         : undefined
     if (!op || op.state !== "active") return
     const { owner, task } = executionOwner(host, op)
@@ -369,7 +371,9 @@ function observeDecisions() {
   })
 }
 export function recoverFeatureOperations(host: LocalBotHost, operations: FeatureReceipt[]) {
-  for (const op of operations) {
+  for (const initial of operations) {
+    const op = host.featureStore.findReceipt(initial.id)
+    if (!op || (op.state !== "active" && op.state !== "starting")) continue
     try {
       if (op.runId) {
         const { owner } = executionOwner(host, op)
@@ -428,7 +432,7 @@ export async function startFeatureTurn(
     ? host.imGateway.binding(task.mockSource.bindingId)
     : host.imGateway.personalBinding(owner.botId, task.createdAt)
   const source = task.mockSource
-  const event = source ? host.imGateway.event(source.eventId) : undefined
+  const event = source?.eventId ? host.imGateway.event(source.eventId) : undefined
   const root = botDirectory(
     join(getCmbCoworkAgentDataRoot(), "bots"),
     "workspaces",

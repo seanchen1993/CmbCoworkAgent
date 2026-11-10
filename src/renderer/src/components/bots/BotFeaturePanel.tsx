@@ -29,11 +29,13 @@ export function FollowPicker({
   api,
   botId,
   groupId,
+  followed,
   done
 }: {
   api: BotFeatureClient
   botId: string
   groupId?: string
+  followed?: readonly BotFeatureFollow[]
   done: () => void
 }) {
   const [projects, setProjects] = useState<{ id: string; name: string }[]>()
@@ -42,6 +44,10 @@ export function FollowPicker({
     [slug, setSlug] = useState(""),
     [error, setError] = useState(""),
     [busy, setBusy] = useState(false)
+  const linkedSlugs = new Set(followed?.filter((f) => f.projectId === project).map((f) => f.slug))
+  const canFollow = Boolean(
+    followed && features?.some((f) => f.slug === slug) && !linkedSlugs.has(slug)
+  )
   useEffect(() => {
     let current = true
     api
@@ -78,7 +84,7 @@ export function FollowPicker({
       className="bot-feature-form"
       onSubmit={async (e) => {
         e.preventDefault()
-        if (busy || !slug) return
+        if (busy || !canFollow) return
         setBusy(true)
         setError("")
         try {
@@ -108,24 +114,29 @@ export function FollowPicker({
         ))}
       </select>
       {project && (
-        <select aria-label="选择 Feature" value={slug} onChange={(e) => setSlug(e.target.value)}>
+        <select
+          aria-label="选择 Feature"
+          value={linkedSlugs.has(slug) ? "" : slug}
+          onChange={(e) => setSlug(e.target.value)}
+        >
           <option value="">
             {!features ? "正在读取…" : features.length ? "选择 Feature" : "没有可跟进的 Feature"}
           </option>
           {features?.map((f) => (
-            <option key={f.slug} value={f.slug}>
+            <option key={f.slug} value={f.slug} disabled={linkedSlugs.has(f.slug)}>
               {f.title}
+              {linkedSlugs.has(f.slug) ? " · 已关联" : ""}
             </option>
           ))}
         </select>
       )}
-      {groupId && slug && <p>关联后，本群可查看并继续此 Feature 的普通项目会话。</p>}
+      {groupId && canFollow && <p>关联后，本群可查看并继续此 Feature 的普通项目会话。</p>}
       {error && <p role="alert">{error}</p>}
       <div>
         <button type="button" onClick={done}>
           取消
         </button>
-        <button type="submit" disabled={!slug || busy}>
+        <button type="submit" disabled={!canFollow || busy}>
           跟进
         </button>
       </div>

@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto"
-import type { BotFeatureFollow, BotFeatureTask } from "../../shared/bots/feature"
+import type { BotFeatureFollow, BotFeatureTarget, BotFeatureTask } from "../../shared/bots/feature"
 import type { NativeSqliteAdapter } from "../db/native-sqlite-adapter"
 
 export interface FeatureScope {
@@ -40,6 +40,7 @@ export class BotFeatureStore {
   constructor(
     private db: NativeSqliteAdapter,
     private rows: Rows,
+    private transaction: <T>(body: () => T) => T,
     private changed: () => void,
     private now = Date.now
   ) {
@@ -47,6 +48,7 @@ export class BotFeatureStore {
       id TEXT PRIMARY KEY,bot_id TEXT NOT NULL,audience TEXT NOT NULL,project_id TEXT NOT NULL,
       slug TEXT NOT NULL,project_name TEXT NOT NULL,title TEXT NOT NULL,
       UNIQUE(bot_id,audience,project_id,slug));
+      CREATE INDEX IF NOT EXISTS bot_feature_follows_project ON bot_feature_follows(project_id,slug);
       CREATE TABLE IF NOT EXISTS bot_feature_sessions (
       thread_id TEXT PRIMARY KEY,follow_id TEXT NOT NULL,incarnation TEXT NOT NULL,node_id TEXT);
       CREATE INDEX IF NOT EXISTS bot_feature_sessions_owner ON bot_feature_sessions(follow_id);
@@ -102,6 +104,41 @@ export class BotFeatureStore {
       "SELECT id,project_id AS projectId,slug,project_name AS projectName,title FROM bot_feature_follows WHERE bot_id=? AND audience=? ORDER BY title,id",
       [scope.botId, scope.audience]
     ) as unknown as BotFeatureFollow[]
+  }
+  targets(feature?: Pick<BotFeatureFollow, "projectId" | "slug">): BotFeatureTarget[] {
+    // Look up each conversation's follow by the existing (bot, audience, project, slug)
+    // unique key. The project picker needs neither transcripts nor a full Bot snapshot.
+    const rows = this.rows(
+      `WITH conversations(bot_id, audience, group_id, group_name) AS (
+        SELECT id, 'desktop', NULL, NULL FROM bots
+        UNION ALL
+        SELECT r.bot_id, 'im:' || r.id, r.id,
+          COALESCE(NULLIF(json_extract(r.binding_json,'$.peerLabel'), ''), '招乎群聊')
+        FROM bot_im_routes r JOIN bot_im_bindings b ON b.id=r.id AND b.bot_id=r.bot_id
+        WHERE b.kind='group' AND b.revoked=0 AND json_extract(r.binding_json,'$.state')='active'
+      )
+      SELECT bot.id AS botId, bot.name AS botName, bot.color, bot.shape, c.group_id AS groupId,
+        COALESCE(c.group_name, bot.name) AS label, f.id IS NOT NULL AS linked,
+        CASE WHEN bot.archived THEN 'archived' END AS unavailable
+      FROM conversations c JOIN bots bot ON bot.id=c.bot_id
+      LEFT JOIN bot_feature_follows f ON f.bot_id=c.bot_id AND f.audience=c.audience
+        AND f.project_id=? AND f.slug=?
+      WHERE bot.deleting=0 AND (f.id IS NOT NULL OR bot.archived=0)
+      ORDER BY f.rowid DESC, label COLLATE NOCASE, bot.id, c.audience`,
+      [feature?.projectId ?? null, feature?.slug ?? null]
+    )
+    return rows.map((row) => ({
+      botId: String(row.botId),
+      botName: String(row.botName),
+      color: String(row.color),
+      shape: row.shape as BotFeatureTarget["shape"],
+      ...(row.groupId ? { groupId: String(row.groupId) } : {}),
+      label: String(row.label),
+      linked: Boolean(row.linked),
+      ...(row.unavailable
+        ? { unavailable: row.unavailable as BotFeatureTarget["unavailable"] }
+        : {})
+    }))
   }
   owner(id: string, scope?: FeatureScope): FeatureOwner {
     const row = this.rows(`SELECT ${followColumns} FROM bot_feature_follows WHERE id=?`, [
@@ -171,11 +208,13 @@ export class BotFeatureStore {
     ])
     this.touch(owner.id)
   }
+  private followState(id: string) {
+    const follow = this.rows("SELECT state FROM bot_feature_follows WHERE id=?", [id])[0]
+    if (!follow) throw new Error("当前对话未跟进此 Feature")
+    return follow.state
+  }
   addSession(owner: FeatureOwner, threadId: string, incarnation: string, nodeId?: string) {
-    if (
-      this.rows("SELECT 1 FROM bot_feature_follows WHERE id=? AND state='completed'", [owner.id])
-        .length
-    )
+    if (this.followState(owner.id) === "completed")
       throw new Error("这项任务已确认完成，请先选择继续处理")
     this.db.run(
       `INSERT INTO bot_feature_sessions VALUES(?,?,?,?)
@@ -224,10 +263,9 @@ export class BotFeatureStore {
       .update(JSON.stringify([owner.id, action, input]))
       .digest("hex")
     if (
+      this.followState(owner.id) === "completed" &&
       action !== "stop" &&
       action !== "interrupt" &&
-      this.rows("SELECT 1 FROM bot_feature_follows WHERE id=? AND state='completed'", [owner.id])
-        .length &&
       !this.rows("SELECT 1 FROM bot_feature_ops WHERE id=?", [id]).length
     )
       throw new Error("这项任务已确认完成，请先选择继续处理")
@@ -243,10 +281,15 @@ export class BotFeatureStore {
     if (fingerprint !== hash) throw new Error("此请求标识已用于其他 Feature 操作")
     return { fresh, receipt: record as unknown as FeatureReceipt }
   }
+  findReceipt(id: string): FeatureReceipt | undefined {
+    return this.rows(`SELECT ${operationColumns} FROM bot_feature_ops WHERE id=?`, [
+      id
+    ])[0] as unknown as FeatureReceipt | undefined
+  }
   receipt(id: string): FeatureReceipt {
-    const row = this.rows(`SELECT ${operationColumns} FROM bot_feature_ops WHERE id=?`, [id])[0]
+    const row = this.findReceipt(id)
     if (!row) throw new Error("Feature 操作记录不存在")
-    return row as unknown as FeatureReceipt
+    return row
   }
   active(id: string, threadId?: string, runId?: string) {
     this.db.run(
@@ -281,11 +324,34 @@ export class BotFeatureStore {
       `SELECT ${operationColumns} FROM bot_feature_ops WHERE state IN ('starting','active')`
     ) as unknown as FeatureReceipt[]
   }
+  followedProjects(): string[] {
+    return this.rows("SELECT DISTINCT project_id FROM bot_feature_follows").map((row) =>
+      String(row.project_id)
+    )
+  }
+  removeMissingFeatures(projectId: string, retained: ReadonlySet<string>): FeatureOwner[] {
+    const follows = this.rows(
+      `SELECT ${followColumns} FROM bot_feature_follows WHERE project_id=?`,
+      [projectId]
+    ) as unknown as FeatureOwner[]
+    const removed = follows.filter((f) => !retained.has(f.slug))
+    if (removed.length)
+      this.transaction(() => {
+        this.deleteFollows("SELECT value FROM json_each(?)", [
+          JSON.stringify(removed.map((f) => f.id))
+        ])
+        this.changed()
+      })
+    return removed
+  }
   deleteScope(botId: string, audience?: string) {
     const where =
       "SELECT id FROM bot_feature_follows WHERE bot_id=?" +
       (audience === undefined ? "" : " AND audience=?")
     const args = audience === undefined ? [botId] : [botId, audience]
+    this.deleteFollows(where, args)
+  }
+  private deleteFollows(where: string, args: string[]) {
     // The native project thread outlives the Bot. Keep its exclusive claim so its
     // history cannot become an ordinary Feature session for another conversation.
     this.db.run(`DELETE FROM bot_feature_ops WHERE follow_id IN (${where})`, args)

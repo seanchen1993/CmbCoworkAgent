@@ -19,6 +19,11 @@ import {
 } from "./feature-service"
 import { LocalBotHost } from "./host"
 import { runBotFeatureCommand } from "./feature-command"
+import {
+  beginHarnessFeatureCatalogRead,
+  harnessProjectDeleted,
+  onHarnessFeatureCatalogChange
+} from "../harness-board/feature-catalog-lifecycle"
 import { approvalDecisionBroker } from "../agent/approval-decision-broker"
 import { requestUserInput, getPendingUserInputForThread } from "../services/user-input"
 import { notificationService } from "../services/notification-service"
@@ -144,7 +149,7 @@ const incoming = {
     eventId: "event-a"
   }
 }
-let root: string, db: NativeSqliteAdapter, host: LocalBotHost
+let root: string, db: NativeSqliteAdapter, store: BotStore, host: LocalBotHost
 let resolveTurn: () => void = () => {},
   context: AgentRunExecutionContext,
   disconnect: () => void
@@ -170,12 +175,12 @@ beforeEach(() => {
   vi.resetAllMocks()
   root = mkdtempSync(join(tmpdir(), "bot-feature-"))
   db = new NativeSqliteAdapter(new DatabaseSync(":memory:"))
-  const features = new BotStore(db).features
+  store = new BotStore(db)
   rows.clear()
   child("parent")
   rows.get("parent")!.metadata = JSON.stringify({ botId: "bot" })
   host = {
-    featureStore: features,
+    featureStore: store.features,
     featureTasks: LocalBotHost.prototype.featureTasks,
     featureTurns: new BotFeatureTurns(),
     featureChanged: vi.fn(),
@@ -239,6 +244,80 @@ afterEach(async () => {
   disconnect()
   db.close()
   rmSync(root, { recursive: true, force: true })
+})
+
+it("unlinks deleted Features in every owning conversation, aborts only their turns and retains exclusive history", async () => {
+  const featureStore = host.featureStore
+  const owners = [privateScope, groupScope, { botId: "other-bot", audience: "im:group-b" }].map(
+    (scope) => featureStore.follow(scope, feature)
+  )
+  const [privateOwner, groupOwner] = owners
+  const sibling = featureStore.follow(groupScope, { ...feature, slug: "other" })
+  const otherProject = featureStore.follow(groupScope, { ...feature, projectId: "other-project" })
+  const otherTurn = host.featureTurns.begin(sibling, "other-thread", "other-op")
+  const op = featureStore.begin(groupOwner, "job", "managed", "manage", []).receipt
+  featureStore.active(op.id, undefined, "old-run")
+  const turn = host.featureTurns.begin(groupOwner, "child-thread", op.id)
+  featureStore.addSession(privateOwner, "private-thread", "incarnation")
+  const stop = onHarnessFeatureCatalogChange((id, slugs) =>
+    LocalBotHost.prototype.reconcileProjectFeatures.call(host, id, slugs)
+  )
+  try {
+    const older = beginHarnessFeatureCatalogRead([feature.projectId])
+    const current = beginHarnessFeatureCatalogRead([feature.projectId])
+    current.observed(feature.projectId, [sibling])
+    current.finish()
+    older.observed(feature.projectId, [])
+    older.finish()
+    expect(
+      featureStore
+        .list(groupScope)
+        .map((it) => it.id)
+        .sort()
+    ).toEqual([sibling.id, otherProject.id].sort())
+    expect(featureStore.list(privateScope)).toEqual([])
+    expect(host.featureChanged).toHaveBeenCalledTimes(3)
+    for (const owner of owners) {
+      expect(() => featureStore.owner(owner.id)).toThrow("未跟进")
+      expect(host.featureChanged).toHaveBeenCalledWith(owner, owner)
+    }
+    expect(turn.signal.aborted).toBe(true)
+    expect(otherTurn.signal.aborted).toBe(false)
+    expect(featureStore.findReceipt(op.id)).toBeUndefined()
+    expect(() => featureStore.addSession(groupOwner, "late", "instance")).toThrow("未跟进")
+    expect(() => featureStore.begin(groupOwner, "job", "again", "session", [])).toThrow("未跟进")
+    expect(featureStore.sessionClaims(["private-thread"]).get("private-thread")?.followId).toBe(
+      privateOwner.id
+    )
+    publishFeatureRun({ botOperationId: op.id, runId: "old-run" } as Parameters<
+      typeof publishFeatureRun
+    >[0])
+    expect(notice).not.toHaveBeenCalled()
+    harnessProjectDeleted(feature.projectId)
+    harnessProjectDeleted(feature.projectId)
+    expect(otherTurn.signal.aborted).toBe(true)
+    expect(featureStore.list(groupScope).map((it) => it.id)).toEqual([otherProject.id])
+    expect(host.featureChanged).toHaveBeenCalledTimes(4)
+  } finally {
+    stop()
+    turn.release()
+    otherTurn.release()
+  }
+})
+
+it("does not recreate a follow if deletion wins an in-flight access check", async () => {
+  let finish!: () => void
+  io.access.mockImplementationOnce(async () => {
+    await new Promise<void>((resolve) => {
+      finish = resolve
+    })
+    return { valid: true, feature, project: { id: feature.projectId, name: feature.projectName } }
+  })
+  const pending = runBotFeatureCommand(host, "job", { action: "follow", ...feature })
+  harnessProjectDeleted(feature.projectId)
+  finish()
+  await expect(pending).rejects.toThrow("已删除")
+  expect(host.featureStore.list(groupScope)).toEqual([])
 })
 
 it("creates one native project thread per instruction, sends its questions and attachments to its owner, and continues that thread", async () => {
@@ -330,6 +409,74 @@ it("follows without configuring a workspace and checks current access before a r
     runBotFeatureCommand(host, "job", { action: "read", followId: follow.id })
   ).rejects.toThrow("远程访问已关闭")
   expect(io.page).not.toHaveBeenCalled()
+})
+
+it("projects persisted Feature links to the exact private and group conversations in the desktop picker", () => {
+  const profile = { name: "项目助手", instructions: "", modelRef: null, color: "#168bea" }
+  const bot = store.create(profile)
+  const group = {
+    id: "remote-group",
+    botId: bot.id,
+    kind: "group" as const,
+    state: "active" as const,
+    label: "绑定",
+    peerLabel: "项目群",
+    conversationKey: "room",
+    version: 1,
+    expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    createdAt: new Date().toISOString()
+  }
+  const route = store.imGateway.register("realm", "owner", group)
+  store.im.importImBinding({ ...group, id: route.id, channelKey: group.conversationKey })
+  store.features.follow({ botId: bot.id, audience: "desktop" }, feature)
+  store.features.follow({ botId: bot.id, audience: "im:" + route.id }, feature)
+  expect(store.features.targets(feature)).toMatchObject([
+    { linked: true, groupId: route.id, label: "项目群", botId: bot.id },
+    { linked: true, label: bot.name, botId: bot.id }
+  ])
+  expect(store.features.targets({ ...feature, projectId: "other" }).every((t) => !t.linked)).toBe(
+    true
+  )
+  expect(store.features.targets({ ...feature, slug: "other" }).every((t) => !t.linked)).toBe(true)
+  store.imGateway.register("realm", "owner", { ...group, peerLabel: "新群名" })
+  expect(store.features.targets(feature)[0].label).toBe("新群名")
+  store.im.revoke(bot.id, route.id, 1)
+  expect(store.features.targets(feature).filter((t) => t.groupId)).toEqual([])
+  store.imGateway.register("realm", "owner", { ...group, state: "revoked", version: 2 })
+  // The gateway gives a rebound group a new binding AND conversation key.
+  const rebound = { ...group, id: "replacement", conversationKey: "room-2" }
+  const newRoute = store.imGateway.register("realm", "owner", rebound)
+  store.im.importImBinding({ ...rebound, id: newRoute.id, channelKey: rebound.conversationKey })
+  const newScope = { botId: bot.id, audience: "im:" + newRoute.id }
+  expect(store.features.targets(feature).filter((t) => t.groupId)).toMatchObject([
+    { groupId: newRoute.id, linked: false }
+  ])
+  const first = store.features.follow(newScope, feature)
+  expect(store.features.follow(newScope, feature).id).toBe(first.id)
+  const otherGroup = { ...group, id: "different-room", conversationKey: "room-3" }
+  const otherRoute = store.imGateway.register("realm", "owner", otherGroup)
+  store.im.importImBinding({ ...otherGroup, id: otherRoute.id, channelKey: otherGroup.conversationKey })
+  expect(store.features.targets(feature).filter((t) => t.groupId)).toMatchObject([
+    { groupId: newRoute.id, label: "项目群", linked: true },
+    { groupId: otherRoute.id, label: "项目群", linked: false }
+  ])
+  expect(store.features.list({ botId: bot.id, audience: "im:" + route.id })).toHaveLength(1)
+  expect(store.features.list(newScope)).toHaveLength(1)
+  store.update({ ...bot, expectedVersion: bot.version, archived: true })
+  expect(store.features.targets()).toEqual([])
+  expect(store.features.targets(feature).map((t) => t.unavailable)).toEqual(["archived", "archived"])
+})
+
+it("reuses the same group task for concurrent Bot follow requests and desktop retries", async () => {
+  const follow = () => runBotFeatureCommand(host, "job", { action: "follow", ...feature })
+  const requests = [follow(), follow()]
+  const owner = store.features.follow(groupScope, feature)
+  await expect(Promise.all(requests)).resolves.toMatchObject([{ id: owner.id }, { id: owner.id }])
+  store.features.lifecycle(owner, "complete", 1)
+  await follow()
+  expect(store.features.taskRows(groupScope)).toMatchObject([
+    { id: owner.id, state: "completed", version: 2 }
+  ])
 })
 
 it("keeps two groups and private follows separate even when they follow the same Feature", async () => {

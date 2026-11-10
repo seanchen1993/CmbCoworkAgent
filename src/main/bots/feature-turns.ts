@@ -65,4 +65,8 @@ export class BotFeatureTurns {
       if ((!botId || turn.botId === botId) && (!bindingId || turn.bindingId === bindingId))
         turn.controller.abort()
   }
+  cancelFollow(followId: string) {
+    for (const turn of this.turns.values())
+      if (turn.followId === followId) turn.controller.abort()
+  }
 }

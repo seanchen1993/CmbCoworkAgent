@@ -110,7 +110,12 @@ export class BotImGatewayStore {
       "INSERT INTO bot_im_routes VALUES(?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET binding_json=excluded.binding_json",
       [id, realm, principal, binding.botId, JSON.stringify(binding)]
     )
-    if (binding.kind === "group" && old?.binding.peerLabel !== binding.peerLabel) this.changed()
+    if (
+      binding.kind === "group" &&
+      (old?.binding.peerLabel !== binding.peerLabel ||
+        (old?.binding.state === "active") !== (binding.state === "active"))
+    )
+      this.changed()
     return { id, realm, principal, binding }
   }
   /** Remove only the local configuration entry; retain routing proofs and conversation history. */

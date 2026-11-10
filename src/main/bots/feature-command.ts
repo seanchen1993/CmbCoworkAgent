@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto"
+import { withCurrentHarnessFeature } from "../harness-board/feature-catalog-lifecycle"
 import { HARNESS_SOURCE } from "../../shared/harness-board-types"
 import type { LocalBotHost } from "./host"
 import type { FeatureOperation, FeatureOwner } from "./feature-store"
@@ -114,24 +115,32 @@ export async function runBotFeatureCommand(
     if (!followed) throw new Error("当前对话未跟进此 Feature")
     owner = store.owner(followed.id, scope)
   } else {
-    const feature =
-      input.action === "follow"
-        ? await catalog.featureAccess(input.projectId, input.slug)
-        : await catalog.validateFeature(input.projectId, input.slug)
-    authorize()
-    if (!feature.valid) throw new Error(feature.message)
-    if ("workspacePath" in feature) workspace = String(feature.workspacePath)
-    owner = store.follow(scope, {
-      projectId: input.projectId,
-      slug: input.slug,
-      projectName: feature.project.name,
-      title: feature.feature.title
-    })
-    host.featureChanged(owner)
+    owner = await withCurrentHarnessFeature(
+      input.projectId,
+      input.slug,
+      () =>
+        input.action === "follow"
+          ? catalog.featureAccess(input.projectId, input.slug)
+          : catalog.validateFeature(input.projectId, input.slug),
+      (feature) => {
+        authorize()
+        if (!feature.valid) throw new Error(feature.message)
+        if ("workspacePath" in feature) workspace = String(feature.workspacePath)
+        const follow = store.follow(scope, {
+          projectId: input.projectId,
+          slug: input.slug,
+          projectName: feature.project.name,
+          title: feature.feature.title
+        })
+        host.featureChanged(scope, follow)
+        return follow
+      }
+    )
   }
   if (input.action === "follow") return featureDetail(host, owner)
   const selected = input.threadId ? checkFeatureThread(host, owner, input.threadId) : undefined
   const verifySelected = () => {
+    store.owner(owner.id, scope)
     if (
       input.threadId &&
       checkFeatureThread(host, owner, input.threadId).incarnation !== selected?.incarnation
@@ -189,6 +198,7 @@ export async function runBotFeatureCommand(
       if (input.action === "continue" && !input.threadId) throw new Error("请选择要继续的项目会话")
       await withIdleManagedFeature(projectId, featureId, async () => {
         authorize()
+        verifySelected()
         const delivery = featureDelivery()
         let threadId = input.threadId
         if (input.action === "session") {

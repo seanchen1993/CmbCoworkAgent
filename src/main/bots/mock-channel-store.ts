@@ -411,17 +411,27 @@ export class BotMockChannelStore {
       "SELECT * FROM bot_mock_conversations WHERE id=? AND binding_id=? AND bot_id=?",
       [source.conversationId, source.bindingId, botId]
     )[0]
+    if (!convo || binding.botId !== botId ||
+        (requireActive && binding.grantVersion !== source.grantVersion))
+      throw new BotError("CONFLICT", "模拟来源与冻结授权不一致")
+    if (source.desktopWorkId !== undefined) {
+      const receipt = this.rows(
+        `SELECT source_json FROM bot_work_items WHERE id=? AND bot_id=? AND parent_thread_id=? AND audience_key=?`,
+        [source.desktopWorkId, botId, convo.thread_id, source.audienceKey]
+      )[0]
+      const saved = receipt?.source_json && parseBotMockSource(JSON.parse(String(receipt.source_json)))
+      if (binding.kind !== "group" || !saved || JSON.stringify(saved) !== JSON.stringify(source))
+        throw new BotError("CONFLICT", "手动群任务与所属群不一致")
+      return source
+    }
     const event = this.rows(
       "SELECT message_id,payload_json,fingerprint FROM bot_mock_events WHERE binding_id=? AND event_id=?",
       [source.bindingId, source.eventId]
     )[0]
     const payload = event ? parseBotMockEvent(JSON.parse(String(event.payload_json))) : null
     if (
-      !convo ||
       !event ||
       !payload ||
-      binding.botId !== botId ||
-      (requireActive && binding.grantVersion !== source.grantVersion) ||
       (this.transport === "mock" && !binding.allowedSenderIds.includes(source.senderId)) ||
       event.message_id !== source.messageId ||
       payload.senderId !== source.senderId ||
@@ -489,6 +499,7 @@ export class BotMockChannelStore {
       )
         throw new BotError("CONFLICT", "工作与模拟受众不一致")
       if (task.origin.kind === "mock") {
+        if (!source.eventId) throw new BotError("CONFLICT", "群任务缺少来源事件")
         const event = this.rows(
           "SELECT task_id FROM bot_mock_events WHERE binding_id=? AND event_id=?",
           [source.bindingId, source.eventId]
@@ -522,6 +533,7 @@ export class BotMockChannelStore {
         label: binding.label
       }
     }
+    if (!source.eventId) throw new BotError("CONFLICT", "手动群任务缺少所属任务会话")
     const convo = this.rows("SELECT * FROM bot_mock_conversations WHERE id=? AND binding_id=?", [
       source.conversationId,
       source.bindingId
@@ -714,7 +726,7 @@ export class BotMockChannelStore {
         source.bindingId,
         source.grantVersion,
         source.conversationId,
-        source.messageId,
+        source.messageId ?? `app-${task.id}`,
         task.id,
         null,
         text.trim().slice(0, 6000),
@@ -761,7 +773,7 @@ export class BotMockChannelStore {
         source.bindingId,
         source.grantVersion,
         source.conversationId,
-        source.messageId,
+        source.messageId ?? `app-${task.id}`,
         task.id,
         task.workId ?? null,
         output.slice(0, 60000),
@@ -826,7 +838,7 @@ export class BotMockChannelStore {
       const source = this.validateSource(task.mockSource, this.continuationOwner(task), false)
       bindingId = source.bindingId
       conversationId = source.conversationId
-      messageId = source.messageId
+      messageId = source.messageId ?? `app-${task.id}`
       version = source.grantVersion
     } else {
       if (

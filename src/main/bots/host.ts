@@ -121,6 +121,7 @@ export interface BotRunPort {
   ): void
 }
 
+type BotChangeDetail = Omit<BotChangeEvent, "hostId" | "revision">
 type BotProfileUpdateReceipt = BotDefinition & {
   changes: { name: boolean; instructions: boolean }
 }
@@ -351,20 +352,14 @@ export class LocalBotHost {
   }
 
   memoryChanged(botId: string): void {
-    if (!this.stopping) this.changed(botId)
+    if (!this.stopping) this.changed({ memoryBotId: botId })
   }
 
-  private changed(
-    memoryBotId?: string,
-    reactionTarget?: BotReactionTarget,
-    featureScope?: BotChangeEvent["featureScope"]
-  ): void {
+  private changed(detail?: BotChangeDetail): void {
     const event = {
       hostId: LOCAL_BOT_HOST_ID,
       revision: this.store.revision(),
-      ...(featureScope ? { featureScope } : {}),
-      ...(reactionTarget ? { reactionTarget } : {}),
-      ...(memoryBotId ? { memoryBotId } : {})
+      ...detail
     }
     for (const listener of this.listeners) {
       try {
@@ -642,6 +637,12 @@ export class LocalBotHost {
   get featureStore() {
     return this.store.features
   }
+  reconcileProjectFeatures(projectId: string, retained: ReadonlySet<string>) {
+    for (const owner of this.featureStore.removeMissingFeatures(projectId, retained)) {
+      this.featureTurns.cancelFollow(owner.id)
+      this.featureChanged(owner, owner)
+    }
+  }
   featureScope(botId: string, groupId?: string) {
     this.getBot(botId)
     if (groupId) {
@@ -664,9 +665,15 @@ export class LocalBotHost {
       throw new BotError("CONFLICT", "请从 Bot 主对话或已绑定的招乎群交办项目工作")
     return task
   }
-  featureChanged(scope: { botId: string; audience: string }) {
+  featureChanged(scope: FeatureScope, followed?: { projectId: string; slug: string }) {
     if (!this.stopping)
-      this.changed(undefined, undefined, { botId: scope.botId, audience: scope.audience })
+      this.changed({
+        featureScope: {
+          botId: scope.botId,
+          audience: scope.audience,
+          ...(followed ? { projectId: followed.projectId, slug: followed.slug } : {})
+        }
+      })
   }
   /** Main-process authenticated IM adapter only; not exposed as a renderer injection API. */
   get imChannel() {
@@ -681,7 +688,10 @@ export class LocalBotHost {
   /** Invalidate the group read model when authenticated binding metadata changes. */
   registerImBinding(realm: string, principal: string, binding: BotImBinding) {
     this.requireRunning()
-    return this.updateImState(() => this.store.imGateway.register(realm, principal, binding))
+    return this.updateImState(
+      () => this.store.imGateway.register(realm, principal, binding),
+      binding.kind === "group" ? { featureTargetsChanged: true } : undefined
+    )
   }
   /** Authenticated binding revocation; never stop a whole shared personal thread. */
   revokeImBinding(botId: string, id: string, version: number): void {
@@ -717,10 +727,10 @@ export class LocalBotHost {
     return result
   }
   /** Notify existing desktop subscribers only when authenticated IM state actually changes. */
-  private updateImState<T>(update: () => T): T {
+  private updateImState<T>(update: () => T, detail?: BotChangeDetail): T {
     const revision = this.store.revision()
     const result = update()
-    if (revision !== this.store.revision()) this.changed()
+    if (revision !== this.store.revision()) this.changed(detail)
     return result
   }
   publishImFiles(taskId: string, callId: string, files: import("../../shared/bots/file-delivery").BotDeliveredFile[]): void {
@@ -823,11 +833,11 @@ export class LocalBotHost {
     if (existing) return existing
     if (input.workspace && !this.runtime.workspaces)
       throw new BotError("CONFLICT", "当前主机不支持选择任务工作目录")
-    const workspace =
-      task?.mockSource && (task.mockSource.transport !== "im" ||
-        (!task.mockSource.personal && !input.workspace))
-        ? undefined
-        : await this.runtime.workspaces?.resolve(input.botId, input.workspace)
+    const groupDefault = !input.workspace &&
+      (input.imConversationId || (task?.mockSource && !task.mockSource.personal))
+    const workspace = groupDefault
+      ? undefined
+      : await this.runtime.workspaces?.resolve(input.botId, input.workspace)
     this.requireRunning()
     if (source) this.workToolSource(source.taskId)
     const receipt = this.store.createWork(input, source, workspace)
@@ -1502,7 +1512,7 @@ export class LocalBotHost {
     const before = this.store.revision()
     const result = this.store.setMessageReaction(canonicalTarget, messageId, emoji, present)
     if (result.revision !== before) {
-      this.changed(undefined, canonicalTarget)
+      this.changed({ reactionTarget: canonicalTarget })
       if (present) this.wake()
     }
     return result
@@ -1513,7 +1523,7 @@ export class LocalBotHost {
     const before = this.store.revision()
     const result = this.store.setBotMessageReaction(taskId, emoji, present)
     if (result.revision !== before)
-      this.changed(undefined, { kind: "bot", botId: this.store.getTask(taskId).botId })
+      this.changed({ reactionTarget: { kind: "bot", botId: this.store.getTask(taskId).botId } })
     return result
   }
 

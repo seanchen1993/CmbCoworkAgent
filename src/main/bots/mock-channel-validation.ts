@@ -93,6 +93,7 @@ export function parseBotChannelSource(input: unknown): BotMockSource {
     "audienceKey",
     "transport",
     "personal",
+    "desktopWorkId",
     "eventId",
     "messageId",
     "senderId"
@@ -106,13 +107,22 @@ export function parseBotChannelSource(input: unknown): BotMockSource {
     throw new BotError("CONFLICT", "个人会话来源无效")
   if (v.audienceKey !== (v.personal ? "desktop" : `${v.transport ?? "mock"}:${bindingId}`))
     throw new BotError("CONFLICT", "模拟来源受众不一致")
-  return {
-    ...(v.transport === "im" ? { transport: "im" as const } : {}),
-    ...(v.personal ? { personal: true as const } : {}),
+  const scope = {
     bindingId,
     grantVersion: Number(v.grantVersion),
     conversationId: botIdentifier(v.conversationId),
-    audienceKey: v.audienceKey,
+    audienceKey: v.audienceKey
+  }
+  if (v.desktopWorkId !== undefined) {
+    if (v.transport !== "im" || v.personal || v.eventId !== undefined ||
+        v.messageId !== undefined || v.senderId !== undefined)
+      throw new BotError("CONFLICT", "手动群任务来源无效")
+    return { transport: "im", ...scope, desktopWorkId: botIdentifier(v.desktopWorkId) }
+  }
+  return {
+    ...(v.transport === "im" ? { transport: "im" as const } : {}),
+    ...(v.personal ? { personal: true as const } : {}),
+    ...scope,
     eventId: botIdentifier(v.eventId),
     messageId: botIdentifier(v.messageId),
     senderId: botIdentifier(v.senderId)

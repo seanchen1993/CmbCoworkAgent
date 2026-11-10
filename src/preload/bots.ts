@@ -4,6 +4,7 @@ import { LOCAL_BOT_HOST_ID, type BotChangeEvent, type BotClient } from "../share
 /** Narrow named operations only; no generic IPC invocation is exposed to renderer code. */
 export const localBotsApi: BotClient = {
   features: {
+    targets: (feature) => ipcRenderer.invoke("bots:feature:targets", LOCAL_BOT_HOST_ID, feature),
     projects: (botId, groupId) =>
       ipcRenderer.invoke("bots:feature:projects", LOCAL_BOT_HOST_ID, botId, groupId),
     catalog: (botId, projectId, groupId) =>

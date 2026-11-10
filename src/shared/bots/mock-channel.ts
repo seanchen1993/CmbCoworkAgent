@@ -15,18 +15,31 @@ export interface BotMockBinding {
   createdAt: number
 }
 /** Persisted external source; omitted transport identifies existing local simulations. */
-export interface BotMockSource {
-  transport?: "im"
-  /** Host-verified owner DM shares the personal thread and local Bot capabilities. */
-  personal?: true
+interface BotChannelScope {
   bindingId: string
   grantVersion: number
   conversationId: string
   audienceKey: string
+}
+interface BotInboundSource extends BotChannelScope {
+  transport?: "im"
+  /** Host-verified owner DM shares the personal thread and local Bot capabilities. */
+  personal?: true
+  desktopWorkId?: never
   eventId: string
   messageId: string
   senderId: string
 }
+/** Desktop-created group work has no upstream event or sender. Its work row is the receipt. */
+interface BotDesktopGroupSource extends BotChannelScope {
+  transport: "im"
+  desktopWorkId: string
+  personal?: never
+  eventId?: never
+  messageId?: never
+  senderId?: never
+}
+export type BotMockSource = BotInboundSource | BotDesktopGroupSource
 export interface CreateBotMockBinding {
   simulation: true
   botId: string

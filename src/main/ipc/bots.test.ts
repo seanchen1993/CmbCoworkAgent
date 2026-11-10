@@ -19,7 +19,7 @@ import {
 } from "../../shared/bots/im-channel"
 const fixture = vi.hoisted(() => ({
   getHost: vi.fn(),
-  featureStore: { unfinished: () => [] },
+  featureStore: { unfinished: () => [], followedProjects: () => [] },
   conversationLinks: { forBot: () => [], forThread: () => null },
   introduce: vi.fn(),
   getThread: vi.fn(),
@@ -69,6 +69,7 @@ vi.mock("electron", () => ({
 }))
 vi.mock("../bots/local-service", () => ({
   initializeBotNotificationDispatch: vi.fn(),
+  refreshBotFeatureProjects: vi.fn(async () => {}),
   getLocalBotHost: fixture.getHost,
   getBotMemoryService: () => ({
     removeBot: fixture.removeBot,
@@ -533,15 +534,22 @@ describe("Bot IPC boundaries", () => {
       { ...input, threadId: "owner" },
       { ...input, sourceTaskId: "task" },
       { ...input, audienceKey: "desktop" },
+      { ...input, imConversationId: "../group" },
+      { ...input, desktopWorkId: "forged" },
       { ...input, workspacePath: "/private" },
       { ...input, contextMessageIds: ["m", "m"] },
       { ...input, contextMessageIds: Array.from({ length: 13 }, (_, i) => `m${i}`) }
     ])
       expect(() => call("bots:work:create", "local", invalid)).toThrow()
     expect(() => call("bots:work:create", "remote", input)).toThrow()
+    expect(() => call("bots:work:create", "local", { ...input, imConversationId: "group" })).toThrow("桌面")
     expect(fixture.createWork).not.toHaveBeenCalled()
     call("bots:work:create", "local", input)
     expect(fixture.createWork).toHaveBeenCalledWith(input)
+    const frame = {}
+    const desktop = register(undefined, { senderFrame: frame, sender: { mainFrame: frame } })
+    desktop("bots:work:create", "local", { ...input, imConversationId: "group" })
+    expect(fixture.createWork).toHaveBeenCalledWith({ ...input, imConversationId: "group" })
     for (const ids of ["work", Array(41).fill("w"), ["w", "w"], ["../w"]])
       expect(() => call("bots:work:summaries", "local", "a", ids)).toThrow()
     expect(() => call("bots:work:get", "local", "a", "../w")).toThrow()

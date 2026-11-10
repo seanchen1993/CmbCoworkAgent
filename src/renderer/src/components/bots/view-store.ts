@@ -57,6 +57,31 @@ export interface BotViewState {
   imHistoryCollapsed?: boolean
   sections: BotSidebarSection[]
 }
+
+/** Enter the conversation itself, even if a task was last open in that conversation. */
+export function botMainConversationSelection(
+  current: BotViewState | undefined,
+  botId: string,
+  imConversationId?: string
+): Partial<BotViewState> {
+  return {
+    selectedId: botId,
+    groupId: null,
+    imConversationId: imConversationId ?? null,
+    ...(imConversationId
+      ? {
+          activeImWorkIdByConversation: {
+            ...current?.activeImWorkIdByConversation,
+            [imConversationId]: null
+          }
+        }
+      : {
+          detailTab: "details",
+          activeWorkIdByBot: { ...current?.activeWorkIdByBot, [botId]: null }
+        })
+  }
+}
+
 export const DEFAULT_BOT_VIEW: BotViewState = {
   activeWorkIdByBot: {},
   activeImWorkIdByConversation: {},

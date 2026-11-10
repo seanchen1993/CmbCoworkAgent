@@ -290,7 +290,7 @@ export function parseCreateBotWork(input: unknown): import("./work").CreateBotWo
   if (
     Object.keys(item).some(
       (key) =>
-        !["botId", "operationId", "title", "goal", "contextMessageIds", "workspace"].includes(key)
+        !["botId", "operationId", "title", "goal", "contextMessageIds", "workspace", "imConversationId"].includes(key)
     )
   )
     throw new BotError("INVALID_INPUT", "工作参数包含不支持字段")
@@ -305,6 +305,7 @@ export function parseCreateBotWork(input: unknown): import("./work").CreateBotWo
     operationId: botIdentifier(item.operationId),
     title: boundedString(item.title, "工作标题", 160),
     goal: boundedString(item.goal, "工作目标", 30000),
+    ...(item.imConversationId === undefined ? {} : { imConversationId: botIdentifier(item.imConversationId) }),
     ...(Array.isArray(ids) ? { contextMessageIds: ids.map(botIdentifier) } : {}),
     ...(item.workspace === undefined ? {} : { workspace: parseBotWorkWorkspace(item.workspace) })
   }

@@ -6,6 +6,7 @@ import { join } from "node:path"
 import { execFileSync } from "node:child_process"
 import type { BotWorkWorkspacePort } from "../../shared/bots/work"
 import { DatabaseSync } from "node:sqlite"
+import assert from "node:assert/strict"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { NativeSqliteAdapter } from "../db/native-sqlite-adapter"
 import { BotStore } from "./store"
@@ -217,6 +218,66 @@ function fixture(
 }
 
 describe("authenticated IM on the existing Bot host", () => {
+  it("creates desktop work in an empty bound group, executes once and returns results only there", async () => {
+    const resolve = vi.fn(async () => ({ kind: "directory" as const, path: "/projects/report" }))
+    const f = fixture(undefined, undefined, () => true, { resolve, projects: async () => ({ items: [], nextCursor: null }) })
+    const group = await f.binding(), other = await f.binding()
+    const groupId = botImScopeId("realm", "owner", group.id)
+    const otherId = botImScopeId("realm", "owner", other.id)
+    const input = { botId: f.bot.id, imConversationId: groupId, operationId: "desktop-group-create", title: "评审准备", goal: "整理评审要点" }
+    expect(f.host.imConversationHistory(f.bot.id, groupId).items).toEqual([])
+    const receipt = await f.host.createWork(input)
+    const source = receipt.work.source!
+    assert.ok(source.desktopWorkId)
+    expect(source).toMatchObject({ transport: "im", desktopWorkId: receipt.work.id, bindingId: groupId })
+    expect(source.eventId).toBeUndefined()
+    expect(source.senderId).toBeUndefined()
+    expect(receipt.work.parentThreadId).toBe(f.store.im.thread(source))
+    expect(botMemoryContext(receipt.task)).toEqual({ groupId })
+    expect(() => f.store.im.validateSource({ ...source, desktopWorkId: "missing" }, f.bot.id)).toThrow("所属群")
+    expect((await f.host.createWork(input)).work.id).toBe(receipt.work.id)
+    expect(resolve).not.toHaveBeenCalled()
+    await expect(f.host.createWork({ ...input, imConversationId: otherId })).rejects.toThrow()
+    await expect(f.host.createWork({ ...input, imConversationId: undefined })).rejects.toThrow()
+    await eventually(() => f.client.submitReply.mock.calls.some(([r]) => r.message.content === "reply:整理评审要点"))
+    expect(f.calls.filter((t) => t.workId === receipt.work.id)).toHaveLength(1)
+    expect(f.host.listWorks(f.bot.id).items).toEqual([])
+    expect(f.host.imConversationWorks(f.bot.id, otherId).items).toEqual([])
+    expect(f.host.imConversationWorks(f.bot.id, groupId).items.map(w => w.id)).toEqual([receipt.work.id])
+    expect(f.host.imConversationHistory(f.bot.id, groupId).items.every(m => m.kind !== "user")).toBe(true)
+
+    const custom = await f.host.createWork({ ...input, operationId: "custom-group-work", workspace: { kind: "directory", path: "/projects/report" } })
+    expect(custom.work.workspace?.path).toBe("/projects/report")
+    expect(resolve).toHaveBeenCalledTimes(1)
+    f.host.send({ botId: f.bot.id, workId: receipt.work.id, requestId: "desktop-group-more", message: "补充验收标准" })
+    await eventually(() => f.client.submitReply.mock.calls.some(([r]) => r.message.content === "reply:补充验收标准"))
+    expect(f.client.submitReply.mock.calls.every(([r]) => r.conversationKey === group.conversationKey)).toBe(true)
+    expect(f.client.acquireBotPermit).not.toHaveBeenCalled()
+    expect(f.errors).toEqual([])
+  })
+
+  it("rejects another Bot's group, personal routes and revoked bindings, including revocation during workspace selection", async () => {
+    let release!: () => void
+    const resolve = vi.fn(async () => {
+      await new Promise<void>(done => { release = done })
+      return { kind: "directory" as const, path: "/projects/report" }
+    })
+    const f = fixture(undefined, undefined, () => true, { resolve, projects: async () => ({ items: [], nextCursor: null }) })
+    const group = await f.binding(), dm = await f.binding("dm")
+    const groupId = botImScopeId("realm", "owner", group.id)
+    const input = { botId: f.bot.id, imConversationId: groupId, operationId: "scope-check", title: "核对范围", goal: "汇总要点" }
+    const otherBot = f.store.create({ name: "另一个 Bot", instructions: "", color: "#123456", modelRef: null })
+    await expect(f.host.createWork({ ...input, botId: otherBot.id })).rejects.toThrow("招乎群会话不存在")
+    await expect(f.host.createWork({ ...input, imConversationId: botImScopeId("realm", "owner", dm.id) })).rejects.toThrow("招乎群会话不存在")
+    const creating = f.host.createWork({ ...input, workspace: { kind: "directory", path: "/projects/report" } })
+    await f.service.revoke(f.bot.id, group.id, group.version)
+    release()
+    await expect(creating).rejects.toThrow("请先绑定此招乎群")
+    await expect(f.host.createWork(input)).rejects.toThrow("请先绑定此招乎群")
+    expect(f.host.imConversationWorks(f.bot.id, groupId).items).toEqual([])
+    expect(f.calls).toEqual([])
+  })
+
   it("delivers a Feature update after the dispatching turn ended, once and only to the originating group", async () => {
     const f = fixture()
     const group = await f.binding("group")
@@ -2165,7 +2226,9 @@ describe("authenticated IM on the existing Bot host", () => {
     ).toThrow("另一登录身份")
     await f.service.receive(f.event(group))
     await eventually(() => f.calls.length === 1)
-    const forged = { ...f.calls[0].mockSource!, personal: true as const, audienceKey: "desktop" }
+    const inbound = f.calls[0].mockSource!
+    assert.ok(inbound.eventId)
+    const forged = { ...inbound, personal: true as const, audienceKey: "desktop" }
     expect(() => f.store.im.validateSource(forged, f.bot.id)).toThrow("未经身份验证")
     expect(() => parseBotMockSource(forged)).toThrow("真实 IM")
     expect(f.errors).toEqual([])

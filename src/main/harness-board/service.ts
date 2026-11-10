@@ -5,6 +5,7 @@ import {
 } from "../services/harness-stage-attribution"
 import { normalizeHarnessAdapterWatchRefs } from "./adapter-detail-normalizer"
 import { harnessRunInspections } from "./run-inspect-cache"
+import { beginHarnessFeatureCatalogRead, harnessProjectDeleted } from "./feature-catalog-lifecycle"
 import {
   assertHarnessConfigAvailable,
   readHarnessConfigV2File,
@@ -3589,12 +3590,51 @@ export async function archiveHarnessProject(projectId: string): Promise<HarnessP
 }
 
 export async function deleteHarnessProject(projectId: string): Promise<HarnessProjectMetadata> {
-  return mutateProjectStore((store) => {
+  const project = await mutateProjectStore((store) => {
     const index = store.projects.findIndex((item) => item.projectId === projectId)
     if (index === -1) throw new Error("Project not found")
     const [deleted] = store.projects.splice(index, 1)
     return normalizeProject(deleted)!
   })
+  harnessProjectDeleted(project.projectId)
+  return project
+}
+
+/** Recover links left by older versions or offline plugin changes. Only an intact local registry
+ * can confirm a missing project; normal UI catalog searches can be filtered or unavailable. */
+export async function refreshFollowedHarnessProjects(projectIds: readonly string[]): Promise<void> {
+  if (!projectIds.length) return
+  assertHarnessConfigAvailable()
+  const raw = await readHarnessJsonFileBounded(
+    HARNESS_BOARD_FILE,
+    HARNESS_PROJECT_STORE_MAX_BYTES,
+    "Harness project store"
+  )
+  if (
+    !isObject(raw) ||
+    !Array.isArray(raw.projects) ||
+    raw.projects.length > HARNESS_PROJECT_STORE_MAX_PROJECTS
+  )
+    return
+  const registered = new Set<string>()
+  for (const row of raw.projects) {
+    if (!isObject(row) || typeof row.projectId !== "string" || !row.projectId.trim()) return
+    registered.add(row.projectId)
+  }
+  const existing: string[] = []
+  for (const id of projectIds) {
+    if (registered.has(id)) existing.push(id)
+    else harnessProjectDeleted(id)
+  }
+  for (let i = 0; i < existing.length; i += HARNESS_ADAPTER_DETAIL_MAX_PROJECTS_PER_BATCH) {
+    try {
+      await getHarnessProjectDetails(
+        existing.slice(i, i + HARNESS_ADAPTER_DETAIL_MAX_PROJECTS_PER_BATCH)
+      )
+    } catch (error) {
+      console.warn("[HarnessBoard] Could not refresh followed Features", error)
+    }
+  }
 }
 
 async function findCompatibleKnowledgePlugin(adapterId: string): Promise<{
@@ -3814,14 +3854,24 @@ export async function getHarnessProjectDetails(
 ): Promise<Record<string, HarnessProjectDetailViewModel>> {
   const scope = options.scope ?? makeHarnessDetailScope("harness-project-details")
   const request = beginHarnessDetailRequest(scope)
+  const catalog = beginHarnessFeatureCatalogRead(projectIds)
+  const complete = new Set<string>()
   try {
-    return await loadHarnessProjectDetails(
+    const details = await loadHarnessProjectDetails(
       projectIds,
       scope,
       request.signal,
+      complete,
       options.maxResponseBytes
     )
+    throwIfHarnessDetailCancelled(request.signal)
+    for (const id of complete) {
+      const detail = details[id]
+      if (detail && !detail.error) catalog.observed(id, detail.runs)
+    }
+    return details
   } finally {
+    catalog.finish()
     request.finish()
   }
 }
@@ -3830,6 +3880,7 @@ async function loadHarnessProjectDetails(
   projectIds: string[],
   scope: string,
   signal: AbortSignal,
+  complete: Set<string>,
   maxResponseBytes?: number
 ): Promise<Record<string, HarnessProjectDetailViewModel>> {
   if (projectIds.length === 0) return {}
@@ -3963,6 +4014,7 @@ async function loadHarnessProjectDetails(
             },
             configContextByProjectId.get(project.projectId)
           )
+          if (!projectData.incompleteRuns) complete.add(project.projectId)
         }
       } catch (error) {
         if (signal.aborted) throw harnessDetailCancelledError()

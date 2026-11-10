@@ -26,6 +26,7 @@ import {
 import { prepareBotThread } from "../bots/runtime-adapter"
 import {
   initializeBotNotificationDispatch,
+  refreshBotFeatureProjects,
   getLocalBotHost,
   getBotMemoryService,
   getBotBrowserService
@@ -34,6 +35,7 @@ import { getThreadCore } from "../db"
 import type { ThreadDeletionService } from "./threads"
 import { registerBotFileHandlers } from "./bot-files"
 import { configureBotFeatureWindow } from "../bots/feature-window"
+import { withCurrentHarnessFeature } from "../harness-board/feature-catalog-lifecycle"
 import {
   exposeWorkConversation,
   linkExistingConversation,
@@ -86,11 +88,19 @@ export function registerBotHandlers(
   // Optional workspace initialization must not prevent the existing workbench from opening.
   try {
     const featureHost = hostFor(LOCAL_BOT_HOST_ID)
-    const unfinished = featureHost.featureStore.unfinished()
-    if (unfinished.length)
-      void import("../bots/feature-service")
-        .then(({ recoverFeatureOperations }) => recoverFeatureOperations(featureHost, unfinished))
+    const projects = featureHost.featureStore.followedProjects()
+    if (projects.length) {
+      const unfinished = featureHost.featureStore.unfinished()
+      void refreshBotFeatureProjects(projects)
+        .then(async () => {
+          if (unfinished.length)
+            (await import("../bots/feature-service")).recoverFeatureOperations(
+              featureHost,
+              unfinished
+            )
+        })
         .catch((error) => console.warn("[BotFeatures] 项目交办恢复失败", error))
+    }
   } catch (error) {
     console.error("[Bots] Local host unavailable", error)
   }
@@ -130,6 +140,14 @@ export function registerBotHandlers(
       botIdentifier(botId),
       groupId === undefined ? undefined : botIdentifier(groupId)
     )
+  ipcMain.handle("bots:feature:targets", (event, hostId, feature) => {
+    const host = desktopHost(event, hostId)
+    return host.featureStore.targets(
+      feature === undefined
+        ? undefined
+        : { projectId: featureText(feature?.projectId), slug: featureText(feature?.slug) }
+    )
+  })
   ipcMain.handle("bots:feature:projects", async (event, hostId, botId, groupId) => {
     featureScope(desktopHost(event, hostId), botId, groupId)
     return (await featureCatalog(groupId)).listRemoteProjects()
@@ -140,31 +158,42 @@ export function registerBotHandlers(
   })
   ipcMain.handle("bots:feature:follow", async (event, hostId, botId, projectId, slug, groupId) => {
     const host = desktopHost(event, hostId)
-    const entry = await (
-      await featureCatalog(groupId)
-    ).featureAccess(featureText(projectId), featureText(slug))
-    if (!entry.valid) throw new BotError("CONFLICT", entry.message)
-    const scope = featureScope(host, botId, groupId)
-    const bot = host.getBot(scope.botId)
-    if (
-      bot.archived ||
-      bot.deleting ||
-      (groupId !== undefined &&
-        host.imGateway.binding(botIdentifier(groupId))?.binding.state !== "active")
+    const id = featureText(projectId),
+      feature = featureText(slug)
+    const group = groupId === undefined ? undefined : botIdentifier(groupId)
+    const catalog = await featureCatalog(group)
+    return withCurrentHarnessFeature(
+      id,
+      feature,
+      () => catalog.featureAccess(id, feature),
+      (entry) => {
+        if (!entry.valid) throw new BotError("CONFLICT", entry.message)
+        const scope = host.featureScope(botIdentifier(botId), group)
+        const bot = host.getBot(scope.botId)
+        if (
+          bot.archived ||
+          bot.deleting ||
+          (group !== undefined &&
+            (host.imGateway.binding(group)?.binding.state !== "active" ||
+              host.imChannel.get(scope.botId, group).revoked))
+        )
+          throw new BotError("CONFLICT", "Bot 或群绑定当前不可用")
+        const owner = host.featureStore.follow(scope, {
+          projectId: entry.project.id,
+          projectName: entry.project.name,
+          slug: entry.feature.slug,
+          title: entry.feature.title
+        })
+        host.featureChanged(scope, owner)
+        return owner
+      }
     )
-      throw new BotError("CONFLICT", "Bot 或群绑定当前不可用")
-    const owner = host.featureStore.follow(scope, {
-      projectId: entry.project.id,
-      projectName: entry.project.name,
-      slug: entry.feature.slug,
-      title: entry.feature.title
-    })
-    host.featureChanged(scope)
-    return owner
   })
   ipcMain.handle("bots:feature:list", (event, hostId, botId, groupId) => {
     const host = desktopHost(event, hostId)
-    return host.featureTasks(featureScope(host, botId, groupId)).map(row => row.task)
+    const tasks = host.featureTasks(featureScope(host, botId, groupId)).map((row) => row.task)
+    if (tasks.length) void refreshBotFeatureProjects(tasks.map((task) => task.projectId))
+    return tasks
   })
   ipcMain.handle("bots:feature:lifecycle", (event, hostId, botId, id, action, version, groupId) => {
     const host = desktopHost(event, hostId)
@@ -463,9 +492,11 @@ export function registerBotHandlers(
   ipcMain.handle("bots:work:get", (_event, hostId: unknown, botId: unknown, workId: unknown) =>
     hostFor(hostId).getWork(botIdentifier(botId), botIdentifier(workId))
   )
-  ipcMain.handle("bots:work:create", (_event, hostId: unknown, input: unknown) =>
-    hostFor(hostId).createWork(parseCreateBotWork(input))
-  )
+  ipcMain.handle("bots:work:create", (event, hostId: unknown, input: unknown) => {
+    const work = parseCreateBotWork(input)
+    const host = work.imConversationId ? desktopHost(event, hostId) : hostFor(hostId)
+    return host.createWork(work)
+  })
   ipcMain.handle("bots:work:lifecycle", (_event, hostId: unknown, input: unknown) => {
     const v = parseBotWorkLifecycle(input)
     return hostFor(hostId).changeWork(v.botId, v.workId, v.expectedVersion, v.operationId, v.action)

@@ -404,7 +404,9 @@ export interface BotConversationActivity {
 }
 
 export interface BotChangeEvent {
-  featureScope?: { botId: string; audience: string }
+  /** Group routes available to the project's association picker have changed. */
+  featureTargetsChanged?: true
+  featureScope?: { botId: string; audience: string; projectId?: string; slug?: string }
   hostId: string
   revision: number
   /** Invalidate only this reaction view; no transcript or emoji payload travels in the event. */

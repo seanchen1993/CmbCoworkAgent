@@ -484,6 +484,7 @@ export class BotStore {
     this.features = new BotFeatureStore(
       db,
       (sql, args) => this.rows(sql, args),
+      (body) => this.transaction(body),
       () => this.changed(),
       this.now
     )
@@ -539,11 +540,34 @@ export class BotStore {
     })
   }
 
-  private requireImGroup(botId: string, id: string): void {
+  private requireImGroup(botId: string, id: string) {
     this.getBot(botId)
     const route = this.imGateway.binding(id)
     if (!route || route.binding.botId !== botId || route.binding.kind !== "group")
       throw new BotError("NOT_FOUND", "招乎群会话不存在")
+    return route.binding
+  }
+
+  private desktopWorkGroup(botId: string, bindingId: string) {
+    const binding = this.requireImGroup(botId, bindingId)
+    const group = this.rows(
+      `SELECT c.id, c.thread_id, b.grant_version FROM bot_im_conversations c
+       JOIN bot_im_bindings b ON b.id=c.binding_id AND b.bot_id=c.bot_id
+       WHERE c.binding_id=? AND c.bot_id=? AND b.kind='group' AND b.revoked=0`,
+      [bindingId, botId]
+    )[0]
+    if (!group || binding.state !== "active" || !binding.conversationKey)
+      throw new BotError("CONFLICT", "请先绑定此招乎群，再添加任务")
+    return {
+      threadId: String(group.thread_id),
+      scope: {
+        transport: "im" as const,
+        bindingId,
+        grantVersion: Number(group.grant_version),
+        conversationId: String(group.id),
+        audienceKey: `im:${bindingId}`
+      }
+    }
   }
 
   /** Upgrade retained groups once, without replaying a message or granting execution. */
@@ -1043,7 +1067,12 @@ export class BotStore {
   ) {
     const bot = this.getBot(input.botId)
     if (bot.archived || bot.deleting) throw new BotError("CONFLICT", "请先恢复 Bot")
-    let sourceThread = bot.threadId
+    if (source && input.imConversationId)
+      throw new BotError("CONFLICT", "Bot 交办任务只能沿用当前会话")
+    const desktopGroup = input.imConversationId
+      ? this.desktopWorkGroup(bot.id, input.imConversationId)
+      : undefined
+    let sourceThread = desktopGroup?.threadId ?? bot.threadId
     let mockSource: BotMockSource | undefined
     if (source) {
       const task = this.getTask(source.taskId)
@@ -1080,14 +1109,15 @@ export class BotStore {
           input.title,
           input.goal,
           ids,
-          ...(input.workspace ? [input.workspace] : [])
+          ...(input.workspace ? [input.workspace] : []),
+          ...(input.imConversationId ? [input.imConversationId] : [])
         ])
       )
       .digest("hex")
     const commandId = source
       ? `tool:${source.taskId}:${source.callId}`
       : `create:${input.operationId}`
-    return { bot, sourceThread, mockSource, ids, fingerprint, commandId }
+    return { bot, sourceThread, mockSource, desktopGroup, ids, fingerprint, commandId }
   }
   workCreationReceipt(
     input: CreateBotWorkInput,
@@ -1102,14 +1132,14 @@ export class BotStore {
     workspace?: BotWorkWorkspace
   ): BotWorkReceipt {
     return this.transaction(() => {
-      const { bot, sourceThread, mockSource, ids, fingerprint, commandId } = this.workCreation(
-        input,
-        source
-      )
+      const { bot, sourceThread, mockSource: inboundSource, desktopGroup, ids, fingerprint, commandId } =
+        this.workCreation(input, source)
       return this.workCommand(
         commandId,
         fingerprint,
         () => {
+          const id = randomUUID()
+          const mockSource = desktopGroup ? { ...desktopGroup.scope, desktopWorkId: id } : inboundSource
           if (
             (input.workspace && !workspace) ||
             (mockSource && mockSource.transport !== "im" && workspace)
@@ -1135,8 +1165,7 @@ export class BotStore {
             : ""
           const message = input.goal.trim() + (source ? "" : contextText)
           parseSendBotMessage({ botId: bot.id, requestId: input.operationId, message })
-          const id = randomUUID(),
-            now = this.now(),
+          const now = this.now(),
             threadId = `bot-work-${id}`
           this.db.run(
             "INSERT INTO bot_work_items(id,bot_id,thread_id,parent_thread_id,title,goal,audience_key,created_at,updated_at,source_json,workspace_json) VALUES(?,?,?,?,?,?,?,?,?,?,?)",

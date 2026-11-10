@@ -763,7 +763,7 @@ export function createLocalBotRunPort(
                 ? host.imGateway.personalBinding(bot.id, task.createdAt)
                 : null
           const imEvent =
-            imBinding && task.mockSource?.transport === "im"
+            imBinding && task.mockSource?.transport === "im" && task.mockSource.eventId
               ? host.imGateway.event(task.mockSource.eventId)
               : null
           const allowImInput = Boolean(

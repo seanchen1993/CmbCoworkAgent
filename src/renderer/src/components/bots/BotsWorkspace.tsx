@@ -123,6 +123,7 @@ import { BotWorkspaceMenu } from "./BotWorkspaceMenu"
 import { BotPanelDivider } from "./BotPanelDivider"
 import {
   useBotViewStore,
+  botMainConversationSelection,
   DEFAULT_BOT_VIEW,
   clampBotPanelWidth,
   createBotNewChatDraft
@@ -727,12 +728,7 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
     const group = snapshot?.imConversations?.find((item) => item.id === id)
     if (!group) return
     closeNewChat()
-    updateView({
-      selectedId: group.botId,
-      groupId: null,
-      imConversationId: id,
-      activeImWorkIdByConversation: { ...view.activeImWorkIdByConversation, [id]: null }
-    })
+    updateView(botMainConversationSelection(view, group.botId, id))
   }
   const openImWork = (botId: string, id: string) => {
     if (!selectedIm || selectedIm.botId !== botId) return
@@ -742,16 +738,7 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
   }
   const openPrivateMain = (botId: string) => {
     closeNewChat()
-    updateView({
-      selectedId: botId,
-      groupId: null,
-      imConversationId: null,
-      detailTab: "details",
-      activeWorkIdByBot: {
-        ...useBotViewStore.getState().hosts[client.hostId]?.activeWorkIdByBot,
-        [botId]: null
-      }
-    })
+    updateView(botMainConversationSelection(useBotViewStore.getState().hosts[client.hostId], botId))
   }
   const [deleting, setDeleting] = useState<BotDefinition | null>(null)
   const [deletingGroup, setDeletingGroup] = useState<BotGroup | null>(null)

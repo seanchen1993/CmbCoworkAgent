@@ -29,9 +29,8 @@ export function BotWorkPanel({
   onSelect,
   disabled,
   groupId,
-  featureDisabled = disabled,
+  readOnlyGroup = false,
   heading = "任务",
-  allowCreate = true,
   backLabel = "返回主对话",
   onBack
 }: {
@@ -41,9 +40,8 @@ export function BotWorkPanel({
   selected: BotWorkItem | null
   onSelect(id: string | null): void
   groupId?: string
-  featureDisabled?: boolean
+  readOnlyGroup?: boolean
   heading?: string
-  allowCreate?: boolean
   backLabel?: string
   onBack?(): void
   disabled: boolean
@@ -56,26 +54,28 @@ export function BotWorkPanel({
     [error, setError] = useState<string | null>(null),
     [limit, setLimit] = useState(6)
   const features = useBotFeatureTasks({ client, botId, groupId })
-  const [createKind, setCreateKind] = useState<"work" | "feature">(allowCreate ? "work" : "feature")
-  const canFollow = Boolean(client.features && !featureDisabled)
+  const [createKind, setCreateKind] = useState<"work" | "feature">("work")
+  const canAdd = !disabled && !readOnlyGroup
+  const isCurrentAudience = () =>
+    controller.current.current.botId === botId &&
+    controller.current.current.audience === (groupId ?? "desktop")
   const operation = useRef<{ fingerprint: string; id: string } | null>(null)
   const openConversation = async () => {
     if (!selected || !client.conversations) return
-    const owner = botId,
-      id = selected.id
+    const id = selected.id
     setSaving(true)
     setError(null)
     try {
-      const work = await client.conversations.expose(owner, id)
+      const work = await client.conversations.expose(botId, id)
       await useAppStore.getState().loadThreads()
       if (
-        controller.current.current.botId !== owner ||
+        !isCurrentAudience() ||
         controller.current.current.selectedId !== id
       )
         return
       await useAppStore.getState().selectThread(work.threadId)
     } catch (cause) {
-      if (controller.current.current.botId === owner) setError(botErrorMessage(cause))
+      if (isCurrentAudience()) setError(botErrorMessage(cause))
     } finally {
       setSaving(false)
     }
@@ -86,21 +86,21 @@ export function BotWorkPanel({
     return operation.current.id
   }
   const create = async () => {
-    if (!client.works || saving) return
-    const owner = botId
+    if (!client.works || saving || !canAdd) return
     setSaving(true)
     setError(null)
     try {
       const receipt = await client.works.create({
         botId,
-        operationId: command(JSON.stringify([botId, title, goal, directoryPath.trim()])),
+        operationId: command(JSON.stringify([botId, groupId, title, goal, directoryPath.trim()])),
+        ...(groupId ? { imConversationId: groupId } : {}),
         title,
         goal,
         ...(directoryPath.trim()
           ? { workspace: { kind: "directory" as const, path: directoryPath.trim() } }
           : {})
       })
-      if (controller.current.current.botId !== owner) return
+      if (!isCurrentAudience()) return
       operation.current = null
       setEditing(false)
       setTitle("")
@@ -109,15 +109,14 @@ export function BotWorkPanel({
       onSelect(receipt.work.id)
       void controller.refresh()
     } catch (cause) {
-      if (controller.current.current.botId === owner) setError(botErrorMessage(cause))
+      if (isCurrentAudience()) setError(botErrorMessage(cause))
     } finally {
       setSaving(false)
     }
   }
   const lifecycle = async () => {
     if (!client.works || !selected || saving) return
-    const owner = botId,
-      workId = selected.id,
+    const workId = selected.id,
       action = selected.state === "completed" ? "continue" : "complete"
     setSaving(true)
     setError(null)
@@ -130,14 +129,14 @@ export function BotWorkPanel({
         action
       })
       if (
-        controller.current.current.botId !== owner ||
+        !isCurrentAudience() ||
         controller.current.current.selectedId !== workId
       )
         return
       operation.current = null
       void controller.refresh()
     } catch (cause) {
-      if (controller.current.current.botId === owner) setError(botErrorMessage(cause))
+      if (isCurrentAudience()) setError(botErrorMessage(cause))
     } finally {
       setSaving(false)
     }
@@ -169,7 +168,7 @@ export function BotWorkPanel({
   ].sort((a, b) => Number(b.priority) - Number(a.priority) || b.updatedAt - a.updatedAt)
   const sourceLabel = selected?.source
     ? selected.source.transport === "im"
-      ? "IM 渠道交办"
+      ? selected.source.desktopWorkId ? "群内手动交办" : "IM 渠道交办"
       : "模拟渠道交办"
     : selected?.conversation?.origin === "existing"
       ? selected.conversation.ref.kind === "project_session"
@@ -182,11 +181,12 @@ export function BotWorkPanel({
     <section className="bot-detail-section bot-works" aria-label={heading}>
       <div className="bot-works-heading">
         <h3>{heading}</h3>
-        {(allowCreate || canFollow) && (
+        {!readOnlyGroup && (
           <button
-            disabled={disabled || saving}
+            disabled={!canAdd || saving}
             onClick={() => setEditing(!editing)}
-            aria-label={allowCreate ? "添加任务" : "关联项目 Feature"}
+            aria-label="添加任务"
+            title="添加任务"
             aria-expanded={editing}
           >
             <Plus size={16} />
@@ -222,7 +222,7 @@ export function BotWorkPanel({
           </div>
         </div>
       )}
-      {editing && allowCreate && canFollow && (
+      {editing && canAdd && client.features && (
         <div className="bot-task-picker" role="group" aria-label="任务类型">
           <button aria-pressed={createKind === "work"} onClick={() => setCreateKind("work")}>
             普通任务
@@ -232,18 +232,19 @@ export function BotWorkPanel({
           </button>
         </div>
       )}
-      {editing && createKind === "feature" && canFollow && client.features && (
+      {editing && canAdd && createKind === "feature" && client.features && (
         <FollowPicker
           api={client.features}
           botId={botId}
           groupId={groupId}
+          followed={features.loading || features.error ? undefined : features.items}
           done={() => {
             setEditing(false)
             features.refresh()
           }}
         />
       )}
-      {editing && createKind === "work" && allowCreate && (
+      {editing && canAdd && createKind === "work" && (
         <form
           onSubmit={(event) => {
             event.preventDefault()
@@ -276,7 +277,7 @@ export function BotWorkPanel({
               value={directoryPath}
               maxLength={4096}
               onChange={(e) => setDirectoryPath(e.target.value)}
-              placeholder="留空使用 Bot 默认目录"
+              placeholder={groupId ? "留空使用本群默认目录" : "留空使用 Bot 默认目录"}
             />
           </label>
           <div>
@@ -323,7 +324,7 @@ export function BotWorkPanel({
                   api={client.features}
                   botId={botId}
                   groupId={groupId}
-                  disabled={featureDisabled}
+                  disabled={!canAdd}
                   revision={features.revision}
                   refresh={features.refresh}
                 />

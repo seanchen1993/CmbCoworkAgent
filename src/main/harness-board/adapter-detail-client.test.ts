@@ -187,7 +187,8 @@ function makeSnapshot(
             featureStatus: "archived",
             featureStatusLabel: "Archived by plugin"
           },
-          { currentNodeStatus: "done" }
+          { currentNodeStatus: "done" },
+          { featureId: "  ", currentNodeStatus: "done" }
         ],
         watchRefs: [
           { path: ".autobizdevops/STATE.md", purpose: "run-list" },
@@ -243,7 +244,13 @@ describe("Harness adapter detail worker", () => {
     expect(result.projects["project-a"]?.watchRefs).toEqual([
       { path: ".autobizdevops/STATE.md", purpose: "run-list" }
     ])
-    expect(Object.keys(result.projects["project-a"] ?? {})).toEqual(["runs", "watchRefs"])
+    // A row with no identity was dropped. These rows can be displayed, but not used to unlink Bots.
+    expect(Object.keys(result.projects["project-a"] ?? {})).toEqual([
+      "runs",
+      "watchRefs",
+      "incompleteRuns"
+    ])
+    expect(result.projects["project-a"]?.incompleteRuns).toBe(true)
   }, 30_000)
 
   it("hard-caps project and run watch refs before main installs filesystem watchers", async () => {

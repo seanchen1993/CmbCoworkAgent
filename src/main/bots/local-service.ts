@@ -24,6 +24,7 @@ import type { BotMemoryMaintainer } from "./memory-maintainer"
 import { splitBotInlineReasoning } from "../../shared/bots/inline-reasoning"
 import { setWorkConversationLookup } from "./conversation-link-authority"
 import { parseBotFileDelivery } from "../../shared/bots/file-delivery"
+import { onHarnessFeatureCatalogChange } from "../harness-board/feature-catalog-lifecycle"
 
 let host: LocalBotHost | undefined
 let telemetry: BotTelemetryReporter | undefined
@@ -32,6 +33,32 @@ let memory: BotMemoryService | undefined
 let browser: BotBrowserService | undefined
 let summaries: BotMemoryMaintainer | undefined
 let shutdown: Promise<void> | undefined
+let stopFollowingCatalog: (() => void) | undefined
+let catalogRefresh = Promise.resolve()
+const nextFeatureCheck = new Map<string, number>()
+
+/** Opening several conversations should not launch duplicate plugin inspections. The board's
+ * own successful inspections and project deletes still reach the host immediately. */
+export function refreshBotFeatureProjects(projectIds: readonly string[]): Promise<void> {
+  if (shutdown || !projectIds.length) return Promise.resolve()
+  const now = Date.now()
+  for (const [id, until] of nextFeatureCheck) if (until <= now) nextFeatureCheck.delete(id)
+  const due = [...new Set(projectIds)].filter((id) => !nextFeatureCheck.has(id))
+  if (due.length) {
+    for (const id of due) nextFeatureCheck.set(id, Infinity)
+    catalogRefresh = catalogRefresh.then(async () => {
+      try {
+        if (!shutdown)
+          await (await import("../harness-board/service")).refreshFollowedHarnessProjects(due)
+      } catch (error) {
+        console.warn("[BotFeatures] Could not refresh followed projects", error)
+      } finally {
+        for (const id of due) nextFeatureCheck.set(id, Date.now() + 60_000)
+      }
+    })
+  }
+  return catalogRefresh
+}
 
 /** Read-only group file access does not depend on a member's execution thread. */
 export function getBotGroupFileWorkspace(groupId: string): string {
@@ -283,6 +310,11 @@ export function getLocalBotHost(): LocalBotHost {
     )
     telemetry = new BotTelemetryReporter(host.telemetry, getEventReporter)
     telemetry.start()
+    stopFollowingCatalog = onHarnessFeatureCatalogChange((id, slugs) => {
+      host?.reconcileProjectFeatures(id, slugs)
+      // A successful board inspection also satisfies a subsequent Bot panel refresh.
+      if (nextFeatureCheck.get(id) !== Infinity) nextFeatureCheck.set(id, Date.now() + 60_000)
+    })
     setWorkConversationLookup((threadId) => host?.conversationLinks.forThread(threadId) ?? null)
     return host
   } catch (error) {
@@ -344,6 +376,7 @@ export function removeLocalBotMessageReactionsForThreads(threadIds: readonly str
 
 export function stopLocalBotHost(): Promise<void> {
   if (shutdown) return shutdown
+  stopFollowingCatalog?.()
   shutdown = Promise.resolve().then(async () => {
     const results: PromiseSettledResult<unknown>[] = []
     results.push(...(await Promise.allSettled([host?.stop()])))

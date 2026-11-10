@@ -27,8 +27,8 @@ export function useBotWorks(
   const [loading, setLoading] = useState(false)
   const generation = useRef(0),
     expanded = useRef(false),
-    current = useRef({ botId, selectedId })
-  current.current = { botId, selectedId }
+    current = useRef({ botId, selectedId, audience })
+  current.current = { botId, selectedId, audience }
   const load = useCallback(async () => {
     const token = ++generation.current
     if (!botId || !client.works) {
@@ -112,7 +112,7 @@ export function useBotWorks(
     return () => {
       generation.current++
     }
-  }, [client, botId, query])
+  }, [client, botId, audience, query])
   useEffect(() => {
     setSelected(null)
   }, [botId, selectedId])

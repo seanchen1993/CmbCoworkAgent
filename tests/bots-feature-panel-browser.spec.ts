@@ -18,21 +18,22 @@ const root=createRoot(document.getElementById("root"));
 const item={kind:"feature",state:"active",version:1,updatedAt:2,phase:"question",attentionThreadId:"draft",id:"follow",projectId:"p",projectName:"客户服务",slug:"export",title:"报表导出"};
 const scopes=new Map();
 window.api={};
-const client={works:{},subscribe:()=>()=>{},features:{
+window.created=[];
+const client={works:{create:async input=>{window.created.push(input);return {work:{id:"created-"+input.operationId}}}},subscribe:()=>()=>{},features:{
   projects:async()=>[{id:"p",name:item.projectName}],
   catalog:async()=>[item],
   follow:async(bot,p,slug,group)=>{scopes.set(group,[item]);return item;},
   list:async(bot,group)=>scopes.get(group)||[],
   detail:async()=>({...item,sessions:[{threadId:"draft",title:"讨论导出范围",phase:"question"},{threadId:"review",title:"历史评审",phase:"idle"}]})
 }};
-function Panel({group}) {
+function Panel({group,revoked}) {
   const [query,setQuery]=useState("");
   const w={id:"regular",title:"周会通知",state:"active",executionState:"completed",updatedAt:1};
-  return <BotWorkPanel client={client} botId="bot" groupId={group} allowCreate={!group}
-    heading={group?"群内任务":"任务"} disabled={false} selected={null} onSelect={()=>{}}
-    controller={{query,setQuery,items:!query||w.title.includes(query)?[w]:[],priority:[],cursor:null,current:{current:{}},more(){},refresh(){}}}/>
+  return <BotWorkPanel client={client} botId="bot" groupId={group} readOnlyGroup={revoked}
+    heading={group?"群内任务":"任务"} disabled={false} selected={null} onSelect={id=>window.selected=id}
+    controller={{query,setQuery,items:!query||w.title.includes(query)?[w]:[],priority:[],cursor:null,current:{current:{botId:"bot",audience:group||"desktop"}},more(){},refresh(){}}}/>
 }
-window.scope=group=>root.render(<Panel key={group||"private"} group={group}/>);
+window.scope=(group,revoked=false)=>root.render(<Panel key={group||"private"} group={group} revoked={revoked}/>);
 window.scope("group-a");`
     },
     bundle: true,
@@ -69,18 +70,33 @@ window.scope("group-a");`
     const page = await browser.newPage({ viewport: { width: 320, height: 730 } })
     const errors: string[] = []
     page.on("pageerror", (error) => errors.push(error.message))
-    await page.setContent('<meta charset="utf-8"><div id="root"></div>')
+    await page.route("http://localhost/bot-panel", (route) =>
+      route.fulfill({ contentType: "text/html", body: '<meta charset="utf-8"><div id="root"></div>' })
+    )
+    await page.goto("http://localhost/bot-panel")
     await page.addStyleTag({
       content: result.outputFiles.find((f) => f.path.endsWith(".css"))!.text
     })
     await page.addScriptTag({
       content: result.outputFiles.find((f) => f.path.endsWith(".js"))!.text
     })
-    await page.getByRole("button", { name: "关联项目 Feature" }).click()
+    const addTask = page.getByRole("button", { name: "添加任务" })
+    const followFeature = page.getByRole("button", { name: "项目 Feature", exact: true })
+    await addTask.click()
+    await followFeature.click()
     await page.getByLabel("选择项目", { exact: true }).selectOption("p")
     await page.getByLabel("选择 Feature", { exact: true }).selectOption("export")
     await page.getByRole("button", { name: "跟进", exact: true }).click()
     const follow = page.getByRole("button", { name: /报表导出/ })
+    await follow.waitFor()
+    await addTask.click()
+    await followFeature.click()
+    await page.getByLabel("选择项目", { exact: true }).selectOption("p")
+    const linkedOption = page.getByRole("option", { name: "报表导出 · 已关联" })
+    await linkedOption.waitFor({ state: "attached", timeout: 3000 })
+    assert.equal(await linkedOption.isDisabled(), true)
+    assert.equal(await page.getByRole("button", { name: "跟进", exact: true }).isEnabled(), false)
+    await page.getByRole("button", { name: "取消", exact: true }).click()
     assert.equal(await page.getByRole("textbox", { name: "搜索任务" }).count(), 1)
     const search = page.getByRole("textbox", { name: "搜索任务" })
     await page.getByRole("button", { name: /周会通知/ }).waitFor()
@@ -104,11 +120,31 @@ window.scope("group-a");`
     for (const scope of ["group-b", undefined]) {
       await page.evaluate((group) => (window as any).scope(group), scope)
       await follow.waitFor({ state: "detached" })
-      await page.getByRole("button", { name: scope ? "关联项目 Feature" : "添加任务" }).waitFor()
+      await addTask.click()
+      assert.equal(await page.getByRole("button", { name: "普通任务" }).getAttribute("aria-pressed"), "true")
+      assert.equal(await followFeature.isVisible(), true)
+      const submit = page.getByRole("button", { name: "交办任务" })
+      assert.equal(await submit.isEnabled(), false)
+      await page.getByLabel("任务名称").fill("准备评审")
+      await page.getByLabel("交办目标").fill("列出讨论要点")
+      const path = page.getByLabel("工作目录（可选）")
+      assert.equal(await path.getAttribute("placeholder"), scope ? "留空使用本群默认目录" : "留空使用 Bot 默认目录")
+      if (scope) await path.fill("/projects/report")
+      await submit.click()
+      await submit.waitFor({ state: "detached" })
+      const { input, selected } = await page.evaluate(() => ({
+        input: (window as any).created.at(-1), selected: (window as any).selected
+      }))
+      assert.equal(input.imConversationId, scope)
+      assert.deepEqual(input.workspace, scope ? { kind: "directory", path: "/projects/report" } : undefined)
+      assert.equal(selected, "created-" + input.operationId)
     }
+    await page.evaluate(() => (window as any).scope("group-a", true))
+    await addTask.waitFor({ state: "detached" })
+    await follow.waitFor()
     assert.deepEqual(errors, [])
     console.log(
-      "PASS: follow a Feature, inspect a question, read existing sessions without a second association, navigate to session or Feature, and switch audiences"
+      "PASS: private and group manual task forms, group-scoped creation, read-only revoked group, Feature follow and session navigation"
     )
   } finally {
     await browser.close()
