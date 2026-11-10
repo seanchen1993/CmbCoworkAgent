@@ -55,6 +55,8 @@ beforeAll(async () => {
   home = mkdtempSync(join(tmpdir(), "cmb-market-ipc-"))
   process.env.CMB_COWORK_AGENT_HOME = home
   storage = await import("../storage")
+  // Fail before registering handlers if an eager import captured the real user's data root.
+  expect(storage.getOpenworkDir()).toBe(home)
   sourceAccessPolicy = await import("../services/market-source-access")
   skills = await import("./skills")
   const plugins = await import("./plugins")
