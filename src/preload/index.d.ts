@@ -1856,7 +1856,7 @@ interface CustomAPI {
     upload: (
       buffer: ArrayBuffer,
       fileName: string,
-      options?: { allowNestedNameDuplicates?: boolean; origin?: "market" | "local" }
+      options?: { allowNestedNameDuplicates?: boolean; origin?: "market" | "local"; marketplace?: { name: string; id?: string } }
     ) => Promise<{
       success: boolean
       skillName?: string
@@ -2227,6 +2227,7 @@ interface CustomAPI {
     onStatus: (callback: (status: BuiltinRobotStatus) => void) => () => void
   }
   plugins: {
+    marketSourceAccess: (type: "skill" | "plugin", name: string, id?: string) => Promise<"owner" | "whitelist" | undefined>
     list: () => Promise<PluginMetadata[]>
     install: (
       buffer: ArrayBuffer,

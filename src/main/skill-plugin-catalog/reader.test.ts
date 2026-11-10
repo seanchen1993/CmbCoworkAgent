@@ -30,6 +30,30 @@ afterEach(() => {
 })
 
 describe("skill/plugin catalog reader", () => {
+  it.each(["owner", "whitelist"] as const)("preserves %s source rights through catalog projection", (access) => {
+    const root = mkdtempSync(join(tmpdir(), "cmb-source-catalog-"))
+    temporaryDirectories.push(root)
+    const pluginPath = join(root, "plugin")
+    mkdirSync(join(pluginPath, "skills", "example"), { recursive: true })
+    writeFileSync(join(pluginPath, "plugin.json"), '{"name":"example","skills":"skills"}')
+    writeFileSync(join(pluginPath, "skills", "example", "SKILL.md"), "---\nname: example\n---\nplain")
+    const source: SkillPluginCatalogSourceConfig = {
+      builtinSkillsDir: join(root, "builtin"), customSkillsDir: join(root, "custom"),
+      pluginsStorePath: join(root, "plugins.json"), disabledSkillsPath: join(root, "disabled.json"),
+      disabledSkillsRevision: 0, globalRevision: 0
+    }
+    mkdirSync(source.builtinSkillsDir)
+    mkdirSync(source.customSkillsDir)
+    writeFileSync(source.pluginsStorePath, JSON.stringify([{
+      id: "example", name: "example", path: pluginPath, origin: "market",
+      sourceAccess: access, enabled: true, skillCount: 1, mcpServerCount: 0
+    }]))
+    const plugins = readSkillPluginCatalogPage(source, { kind: "plugins", limit: 10, revision: "source" })
+    expect(plugins.plugins[0]).toMatchObject({ origin: "market", sourceAccess: access })
+    const skills = readSkillPluginCatalogPage(source, { kind: "skills", limit: 10, revision: "source" })
+    expect(skills.skills[0]).toMatchObject({ pluginId: "example", contentOrigin: "local" })
+  })
+
   it("releases an old snapshot before a cache-miss scan allocates the replacement", () => {
     const source = readFileSync(new URL("./reader.ts", import.meta.url), "utf8")
     const build = source.slice(
