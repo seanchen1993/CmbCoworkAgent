@@ -95,6 +95,7 @@ import { ManagedRunIcon } from "@/components/ui/managed-run-icon"
 import { ManagedRunHistory } from "@/components/harness-board/ManagedRunHistory"
 import { ManagedRunScheduleBadge } from "./ManagedRunScheduleBadge"
 import { useManagedRunSchedule, useManagedRunScheduleIndex } from "@/lib/use-managed-run-schedule"
+import { FeatureBotLinkButton, linkFeatureToBot, type FeatureBotTarget } from "./FeatureBotLinkButton"
 import { ManagedRunStartDialog } from "./ManagedRunStartDialog"
 import { buildManagedRunSessionOptions } from "@/lib/managed-run-session-options"
 import {
@@ -3580,12 +3581,16 @@ function FeatureCreateDialog({
   onDeployUnitToggle: (deployUnitIdMapping: string, checked: boolean) => void
   onOpenDeployUnitSettings: () => void
   onSyncPublicConstraints: () => void
-  onSubmit: () => void
+  onSubmit: (target: FeatureBotTarget | null) => void
 }): React.JSX.Element {
   const [pathPickerId, setPathPickerId] = useState<string | null>(null)
   const [dialogContentElement, setDialogContentElement] = useState<HTMLDivElement | null>(null)
   const workspaceInputRef = useRef<HTMLInputElement>(null)
   const dialogTitleRef = useRef<HTMLHeadingElement>(null)
+  const [botTarget, setBotTarget] = useState<FeatureBotTarget | null>(null)
+  useEffect(() => {
+    setBotTarget(null)
+  }, [project?.projectId, mode])
   const editing = mode === "edit"
   const featureNameError = getHarnessNameError("特性名称", featureName)
   const selectedTemplate = selectedWorkflowTemplate(workflowConfig, workflowTemplate)
@@ -3913,7 +3918,7 @@ function FeatureCreateDialog({
           onSubmit={(event) => {
             event.preventDefault()
             if (syncingPublicConstraints || !workspacePath.trim()) return
-            onSubmit()
+            onSubmit(editing ? null : botTarget)
           }}
         >
           <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
@@ -4012,6 +4017,16 @@ function FeatureCreateDialog({
             </div>
           )}
           <DialogFooter>
+            {!editing && (
+              <div className="min-w-0 sm:mr-auto sm:max-w-[55%]">
+                <FeatureBotLinkButton
+                  mode="create"
+                  target={botTarget}
+                  onSelect={setBotTarget}
+                  disabled={creating}
+                />
+              </div>
+            )}
             <Button
               type="button"
               variant="ghost"
@@ -7584,6 +7599,15 @@ function FeatureDetailPage({
                         Mock
                       </span>
                     )}
+                    <div className="ml-auto">
+                      <FeatureBotLinkButton
+                        key={detailKey}
+                        mode="detail"
+                        projectId={detail.project.projectId}
+                        slug={detail.run.slug}
+                        disabled={projectInteractionDisabled || detail.run.featureStatus === "archived"}
+                      />
+                    </div>
                   </div>
                   <p className="mt-1.5 max-w-3xl text-xs leading-5 text-muted-foreground">
                     {detail.run.source?.label ? `${detail.run.source.label}` : ""}
@@ -10436,7 +10460,7 @@ export function HarnessBoardView({
     [featureMappings, featureWorkspace, handleSelectFeaturePath]
   )
 
-  const handleSubmitFeature = useCallback(async (): Promise<void> => {
+  const handleSubmitFeature = useCallback(async (target: FeatureBotTarget | null): Promise<void> => {
     if (!featureDialogProject || creatingFeatureRef.current) return
     const feature = sanitizeHarnessNameInput(featureName).trim()
     if (!feature) {
@@ -10504,6 +10528,17 @@ export function HarnessBoardView({
         ...(hasSelectedDeployUnits ? { selectedDeployUnits } : {}),
         ...workflowInput
       })
+
+      if (target) {
+        try {
+          await linkFeatureToBot(result.projectId, result.slug, target)
+          toast.success("特性已创建并关联到 " + target.label)
+        } catch (error) {
+          toast.error("特性已创建，关联失败：" + cleanIpcError(error), {
+            description: "可在特性详情中重新关联。"
+          })
+        }
+      }
 
       setFeatureDialogProject(null)
       setFeatureName("")
@@ -10891,12 +10926,12 @@ export function HarnessBoardView({
   ])
   const featureDialogSubmitting =
     featureDialogMode === "edit" ? updatingFeatureDeployUnits : creatingFeatureProjectId !== null
-  const handleSubmitFeatureDialog = useCallback((): void => {
+  const handleSubmitFeatureDialog = useCallback((target: FeatureBotTarget | null): void => {
     if (featureDialogMode === "edit") {
       void handleSubmitFeatureDeployUnits()
       return
     }
-    void handleSubmitFeature()
+    void handleSubmitFeature(target)
   }, [featureDialogMode, handleSubmitFeature, handleSubmitFeatureDeployUnits])
   const selectedProjectSessionThread = selectedProjectSession
     ? (threadsById.get(selectedProjectSession.threadId) ?? null)
