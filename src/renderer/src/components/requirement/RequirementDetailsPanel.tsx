@@ -911,9 +911,10 @@ export function RequirementDetailsPanel({
                         </span>
                       </div>
                       <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
-                        {hasFullPrdDesignSession
-                          ? "当前按完整 PRD 统一设计原型"
-                          : "可以批量设计全部功能，也可以在下方功能清单中逐项设计"}
+                        {/*{hasFullPrdDesignSession*/}
+                        {/*  ? "当前按完整 PRD 统一设计原型"*/}
+                        {/*  : "可以批量设计全部功能，也可以在下方功能清单中逐项设计"}*/}
+                        原型设计，可以帮助后续 UI设计师 or 开发人员 更好理解这个需求～
                       </p>
                     </div>
                     <div className="flex shrink-0 flex-wrap items-center justify-end gap-1.5">
@@ -1008,7 +1009,7 @@ export function RequirementDetailsPanel({
                     <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
                       {isRequirementSpacePublished(requirementSpaceManifest)
                         ? "需求已写入需求空间3.0，可进入详情页查看。"
-                        : "完成身份验证后，将需求与原型发布到需求空间3.0。"}
+                        : "发布到组织平台：需求空间3.0空间"}
                     </p>
                   </div>
                   <div className="flex shrink-0 flex-wrap items-center justify-end gap-1.5">
