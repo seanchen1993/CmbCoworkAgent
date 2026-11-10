@@ -1,4 +1,5 @@
 import { serialize } from "node:v8"
+import { splitMainProduct } from "./enterprise-project-system"
 import type {
   HarnessEnterpriseProjectDetailItem,
   HarnessEnterpriseProjectDetailResult,
@@ -98,8 +99,7 @@ function normalizeDetailItem(value: unknown): HarnessEnterpriseProjectDetailItem
   const projectName = text(value.prjName)
   if (!projectCode && !projectName) return null
   const mainProduct = text(value.mainProduct)
-  const systemId = mainProduct.length >= 7 ? mainProduct.slice(0, 7) : ""
-  const systemName = mainProduct.length >= 7 ? mainProduct.slice(7).trim() : ""
+  const { systemId, systemName } = splitMainProduct(mainProduct)
   return {
     projectCode,
     projectName,
