@@ -51,6 +51,12 @@ export interface ImGatewayClientPort {
   sendCard(card: RemoteImCardSendV1): Promise<ImCardSubmissionResult>
   updateCard(update: RemoteImCardUpdateV1): Promise<ImCardSubmissionResult>
   acknowledgeCardReceipt(receiptId: string): Promise<void>
+  /**
+   * True once the current connection's WELCOME agreed to markdown-reply-v1.
+   * Absent or false means text only — every gateway released before markdown
+   * refuses any other reply type outright.
+   */
+  supportsMarkdownReplies?(): boolean
 }
 
 export class ImGatewayUnavailableError extends Error {

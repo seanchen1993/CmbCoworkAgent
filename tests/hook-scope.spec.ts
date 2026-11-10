@@ -58,6 +58,31 @@ async function testNoScopeReturnsBaseOnly(): Promise<void> {
   assert(result[0].id === "base-1", `expected base hook, got ${result[0].id}`)
 }
 
+async function testProjectModeSkillHookVisibility(): Promise<void> {
+  const skillHooks = [
+    { id: "bound", pluginId: "bound", isProjectModePlugin: true },
+    { id: "foreign", pluginId: "foreign", isProjectModePlugin: true },
+    { id: "shared", pluginId: "foreign", isProjectModePlugin: false }
+  ].map((item) => ({
+    ...makeHook({ id: item.id, event: "Stop", command: "echo skill" }),
+    ...item,
+    skillName: item.id,
+    skillPath: `/skills/${item.id}`
+  }))
+  const scope = createHookScope()
+  for (const hook of skillHooks) {
+    scope.activateSkill(hook.skillName, hook.pluginId, hook.skillPath)
+  }
+  const candidates = { baseHooks: [], pluginHooks: [], skillHooks }
+  const projectContext: HookContext = {
+    harnessProjectId: "project-1",
+    harnessAdapterId: "bound"
+  }
+  const visible = filterScopedHooks(candidates, projectContext, scope)
+  assert(visible.map((hook) => hook.id).join(",") === "bound,shared", "project hook visibility")
+  assert(filterScopedHooks(candidates, emptyContext(), scope).length === 3, "normal hook visibility")
+}
+
 async function testPluginHookRequiresActivation(): Promise<void> {
   const plugin = {
     ...makeHook({ id: "p-1", event: "PreToolUse", command: "echo p" }),
@@ -477,6 +502,7 @@ async function testEmptyCandidatesProduceEmptyResult(): Promise<void> {
 
 async function run(): Promise<void> {
   await testNoScopeReturnsBaseOnly()
+  await testProjectModeSkillHookVisibility()
   console.log("PASS S1 no scope returns base hooks only")
   await testPluginHookRequiresActivation()
   console.log("PASS S2 plugin hook requires activation")

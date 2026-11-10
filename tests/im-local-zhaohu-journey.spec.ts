@@ -163,6 +163,7 @@ async function createJourney() {
   }
 
   const featureService = new ImFeatureBindingService({
+    getFeatureWorkspace: async () => root,
     conversationState: conversations,
     getSettings: () => ({ enabled: true, remoteAccess: "inbox-and-features" }) as never,
     projectModeEnabled: async () => true,
@@ -180,8 +181,7 @@ async function createJourney() {
         project: {
           projectId: "project-pay",
           name: "支付平台",
-          projectRootPath: root,
-          sessionWorkspacePath: root
+          projectRootPath: root
         },
         projectState: { label: "active", uiKind: "active" },
         runs: [
@@ -592,7 +592,7 @@ async function testSimulatedZhaohuUserJourney(): Promise<void> {
     await journey.waitForEventState(first.event.eventId, "completed")
     const inbox = journey.conversations.getActiveTarget(CONVERSATION_KEY)
     assert.equal(inbox?.kind, "inbox")
-    assert.equal(journey.threads.get(inbox!.threadId)?.title, "远程收件箱")
+    assert.equal(journey.threads.get(inbox!.threadId)?.title, "招乎默认聊天")
     assert(journey.eventReplyText(first.event.eventId).includes("模拟回答：你好，介绍一下你自己"))
 
     const help = await journey.send("/帮助", "zhaohu-help-stable-id")
@@ -608,7 +608,7 @@ async function testSimulatedZhaohuUserJourney(): Promise<void> {
     assert.equal(helpText.trimEnd().split("\n").at(-1)?.startsWith("/重试 "), true)
 
     const current = await journey.send("/当前")
-    assert(journey.eventReplyText(current.event.eventId).includes("当前目标：【收件箱】"))
+    assert(journey.eventReplyText(current.event.eventId).includes("当前目标：【默认聊天】"))
 
     journey.makeThread("desktop-debug-thread", {
       title: "桌面排障会话",
@@ -635,7 +635,7 @@ async function testSimulatedZhaohuUserJourney(): Promise<void> {
     const featureTarget = journey.conversations.getActiveTarget(CONVERSATION_KEY)
     assert.equal(featureTarget?.kind, "thread")
     if (featureTarget?.kind !== "thread") throw new Error("Feature Thread target expected")
-    assert(featureTarget.title.startsWith("Thread "))
+    assert.equal(featureTarget.title, "快捷支付")
     const featureMetadata = JSON.parse(
       journey.threads.get(featureTarget.threadId)!.metadata!
     ) as Record<string, unknown>
@@ -663,8 +663,9 @@ async function testSimulatedZhaohuUserJourney(): Promise<void> {
     await journey.waitForEventState(featureMessage.event.eventId, "completed")
     const featureReply = journey.eventReplyText(featureMessage.event.eventId)
     assert(
-      featureReply.startsWith("【项目模式会话返回】\n"),
-      `unexpected Feature reply prefix: ${JSON.stringify(featureReply)}`
+      journey
+        .eventReplyText(featureMessage.event.eventId)
+        .includes("模拟回答：检查 Feature 当前状态")
     )
     assert(featureReply.includes("项目：【project-pay】"))
     assert(featureReply.includes("特性：【feature-quick-pay】"))
@@ -685,14 +686,13 @@ async function testSimulatedZhaohuUserJourney(): Promise<void> {
     journey.releaseLongTask()
     await journey.waitForEventState(longTask.event.eventId, "completed")
     const longReply = journey.eventReplyText(longTask.event.eventId)
-    assert(longReply.startsWith("【项目模式会话返回】（非当前绑定会话）\n"))
-    assert(longReply.includes("特性：【feature-quick-pay】"))
+    assert(longReply.includes("Feature 长任务完成"))
     assert(longReply.includes("非当前绑定会话"))
     assert(!journey.eventReplyText(queuedInbox.event.eventId).includes("非当前绑定会话"))
 
     const sessions = await journey.send("/会话")
     const sessionsText = journey.eventReplyText(sessions.event.eventId)
-    assert(sessionsText.includes("检查 Feature 当前状态（项目会话）"))
+    assert(sessionsText.includes("快捷支付（项目会话）"))
     const ordinaryIndex = selectionIndexContaining(sessionsText, "桌面排障会话（普通会话）")
     const ordinaryBind = await journey.send(`/绑定 ${ordinaryIndex}`)
     assert(journey.eventReplyText(ordinaryBind.event.eventId).includes("桌面排障会话"))
@@ -732,7 +732,7 @@ async function testSimulatedZhaohuUserJourney(): Promise<void> {
       () => journey.gateway.replies.find((reply) => reply.message.content.includes("E5F6A7")),
       "inbox Thread remote user-input prompt"
     )
-    assert(inboxInputRequest.message.content.includes("【远程收件箱】"))
+    assert(inboxInputRequest.message.content.includes("【默认聊天】"))
 
     const answerInboxFirst = await journey.send("/回答 E5F6A7 2")
     assert(journey.eventReplyText(answerInboxFirst.event.eventId).includes("任务将继续执行"))

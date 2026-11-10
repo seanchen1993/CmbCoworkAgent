@@ -16,6 +16,8 @@
 // Primitive building blocks
 // ─────────────────────────────────────────────────────────
 
+import type { TraceCallStage, TraceStageUsageSnapshot } from "../../../shared/trace-stage-usage"
+
 /** A single tool invocation captured within a trace step. */
 export interface TraceToolCall {
   /** Tool name, e.g. "read_file", "manage_skill" */
@@ -85,6 +87,7 @@ export interface TraceTokenUsage {
 
 /** One LLM run (inputs -> output), similar to LangSmith run records. */
 export interface TraceModelCall {
+  stageAttribution?: TraceCallStage
   /** Stable AI message id when available */
   messageId?: string
   /** ISO timestamp when this call was recorded */
@@ -455,7 +458,7 @@ export interface TraceSkillEvalExtension {
  * readable and is migrated at startup) under:
  *   ~/.cmbcoworkagent/traces/{threadId}/{traceId}.jsonl
  */
-export interface AgentTrace {
+export interface AgentTrace extends Partial<TraceStageUsageSnapshot> {
   /** Unique trace ID (UUID v4) */
   traceId: string
   /** Thread the trace belongs to */
@@ -505,7 +508,8 @@ export interface AgentTrace {
   /** The user message that triggered this run */
   userMessage: string
   /**
-   * Whether the full user input contains at least ten ASCII English letters.
+   * Whether actual user text contains at least ten ASCII English letters,
+   * excluding the initial Skill-started turn of a project conversation.
    * Missing on traces produced before this forward-only heuristic was introduced.
    */
   suspectedTechnicalDetailSupplement?: boolean
@@ -539,9 +543,9 @@ export interface AgentTrace {
   /** Ordered model-call runs (request + response) */
   modelCalls?: TraceModelCall[]
   /**
-   * Σ cache-hit input tokens, flattened from `modelCalls[].tokenUsage` at
-   * finish time so the operations dashboard can aggregate it directly — a
-   * `sum` agg cannot reach into the nested per-call array.
+   * Σ cache-hit input tokens across every model call, counted as calls arrive
+   * independently of the retained `modelCalls` array. Flattened so the
+   * operations dashboard can aggregate it directly.
    *
    * A subset of the trace's input tokens, never an addition to them: the
    * LangChain adapters fold cache counts into `input_tokens`.
@@ -550,7 +554,7 @@ export interface AgentTrace {
   /**
    * Σ token usage across every model call the turn actually made, counted as
    * calls arrive rather than summed from `modelCalls`. That array stops at
-   * TRACE_MAX_MODEL_CALLS, so summing it understates long turns by exactly the
+   * TRACE_MAX_MODEL_CALL_SKELETONS, so summing it understates long turns by exactly the
    * amount that makes them interesting. Flattened for the same reason
    * cacheReadTokens is: a `sum` agg cannot reach into a nested array.
    */
@@ -563,6 +567,16 @@ export interface AgentTrace {
   nodes?: TraceNode[]
   /** Total number of tool calls across all steps */
   totalToolCalls: number
+  /** Versioned per-tool counts, independent of retained tool nodes. */
+  toolUsageSchemaVersion?: 1
+  toolUsageComplete?: boolean
+  toolUsage?: Array<{ name: string; count: number }>
+  /** Tool invocations, not the number of questions or submitted answers. */
+  userInputRequestCount?: number
+  /** Root-turn elapsed time by observed project stage; each row is counted once per turn. */
+  stageDurationSchemaVersion?: 1
+  stageDurationComplete?: boolean
+  stageDuration?: Array<{ nodeName: string; durationMs: number }>
   /** How the run ended */
   outcome: TraceOutcome
   /** Any error message if outcome === 'error' */

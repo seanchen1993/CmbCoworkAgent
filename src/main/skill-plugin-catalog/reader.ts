@@ -1,5 +1,11 @@
 import {
+  decodeMarketContent,
+  MARKET_CONTENT_PREFIX,
+  MARKET_CONTENT_MARKER
+} from "../services/market-content"
+import {
   closeSync,
+  existsSync,
   opendirSync,
   openSync,
   readdirSync,
@@ -9,7 +15,7 @@ import {
   type Dirent
 } from "node:fs"
 import { createHash } from "node:crypto"
-import { basename, isAbsolute, join, relative, resolve } from "node:path"
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path"
 import { getDiscoveredSkillAliases, getDiscoveredSkillId, normalizeSkillId } from "../skills/ids"
 import {
   DISABLED_SKILL_STORE_MISSING_FINGERPRINT,
@@ -25,6 +31,7 @@ import type {
   SkillPluginCatalogPageStats
 } from "../types"
 import type { SkillPreviewGrantRequest } from "../../shared/skill-preview"
+import { isProjectModePluginRoot } from "../harness-board/plugin-mode"
 import {
   SKILL_PLUGIN_CATALOG_CANCELLED,
   SKILL_PLUGIN_CATALOG_CURSOR_EXPIRED,
@@ -63,6 +70,7 @@ const MAX_SNAPSHOTS = 3
 interface MutableStats extends SkillPluginCatalogPageStats {}
 
 interface BuildContext {
+  marketRoots?: Map<string, string | null>
   cancelFlag?: Int32Array
   stats: MutableStats
   truncatedReasons: Set<string>
@@ -90,12 +98,14 @@ interface DiscoveredCatalogSkill {
 }
 
 interface SkillSource {
+  contentOrigin?: "local" | "market"
   sourceDir: string
   source: "project" | "user"
   kind: "builtin" | "custom" | "plugin"
   maxDepth?: number
   pluginId?: string
   pluginName?: string
+  isProjectModePlugin?: boolean
 }
 
 interface SkillPreviewCandidate {
@@ -232,6 +242,32 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value)
 }
 
+// A scan-local metadata cache avoids repeated ancestor probes for thousands of
+// files. Content access still revalidates real paths in the main IPC handlers.
+function catalogMarketRoot(filePath: string, context: BuildContext): string | null {
+  const cache = (context.marketRoots ??= new Map())
+  const visited: string[] = []
+  let current = dirname(filePath)
+  let root: string | null = null
+  while (true) {
+    if (cache.has(current)) {
+      root = cache.get(current) ?? null
+      break
+    }
+    visited.push(current)
+    if (existsSync(join(current, MARKET_CONTENT_MARKER))) {
+      root = current
+      break
+    }
+    const parent = dirname(current)
+    if (parent === current) break
+    current = parent
+  }
+  if (cache.size + visited.length > 1_024) cache.clear()
+  for (const directory of visited) cache.set(directory, root)
+  return root
+}
+
 function readBoundedText(
   filePath: string,
   maxBytes: number,
@@ -248,7 +284,10 @@ function readBoundedText(
   } catch {
     return null
   }
-  if (!options.allowPrefix && size > maxBytes) {
+  const storedMaxBytes = catalogMarketRoot(filePath, context)
+    ? Math.ceil(maxBytes / 3) * 4 + MARKET_CONTENT_PREFIX.length
+    : maxBytes
+  if (!options.allowPrefix && size > storedMaxBytes) {
     markTruncated(context, options.reason)
     return null
   }
@@ -257,11 +296,11 @@ function readBoundedText(
     markTruncated(context, "total-read-bytes")
     return null
   }
-  const byteLength = Math.min(size, maxBytes, remaining)
+  const byteLength = Math.min(size, storedMaxBytes, remaining)
   if (size > byteLength) {
     markTruncated(
       context,
-      remaining < Math.min(size, maxBytes) ? "total-read-bytes" : options.reason
+      remaining < Math.min(size, storedMaxBytes) ? "total-read-bytes" : options.reason
     )
   }
   const buffer = Buffer.allocUnsafe(byteLength)
@@ -276,7 +315,15 @@ function readBoundedText(
       offset += read
     }
     context.stats.readBytes += offset
-    return buffer.subarray(0, offset).toString("utf-8")
+    let content = buffer.subarray(0, offset)
+    if (
+      offset < size &&
+      content.subarray(0, MARKET_CONTENT_PREFIX.length).toString() === MARKET_CONTENT_PREFIX
+    ) {
+      const bodyBytes = Math.floor((offset - MARKET_CONTENT_PREFIX.length) / 4) * 4
+      content = content.subarray(0, MARKET_CONTENT_PREFIX.length + bodyBytes)
+    }
+    return decodeMarketContent(content).subarray(0, maxBytes).toString("utf-8")
   } catch {
     return null
   } finally {
@@ -399,6 +446,7 @@ function readPluginManifest(pluginRoot: string, context: BuildContext): Record<s
 function pluginSkillSources(plugin: PluginMetadata, context: BuildContext): SkillSource[] {
   if (!plugin.enabled) return []
   const sources: SkillSource[] = []
+  const isProjectModePlugin = isProjectModePluginRoot(plugin.path)
   const seen = new Set<string>()
   const add = (relativePath: string, maxDepth?: number): void => {
     if (sources.length >= MAX_PLUGIN_SKILL_SOURCES) {
@@ -421,10 +469,12 @@ function pluginSkillSources(plugin: PluginMetadata, context: BuildContext): Skil
     sources.push({
       sourceDir,
       source: "user",
+      contentOrigin: plugin.origin,
       kind: "plugin",
       maxDepth,
       pluginId: plugin.id,
-      pluginName: plugin.name
+      pluginName: plugin.name,
+      isProjectModePlugin
     })
   }
   const manifest = readPluginManifest(plugin.path, context)
@@ -610,13 +660,21 @@ function toSkillMetadata(
     description: boundedString(context, frontmatter.description, MAX_TEXT, "skill-description-bytes") ?? "",
     path: boundedString(context, skill.skillMdPath, MAX_PATH, "skill-path-bytes") || skill.skillMdPath,
     source: source.source,
+    contentOrigin: catalogMarketRoot(skill.skillMdPath, context)
+      ? "market"
+      : source.kind === "custom"
+        ? "local"
+        : source.kind === "plugin" && source.contentOrigin === "local"
+          ? "local"
+          : "builtin",
     version: boundedString(context, frontmatter.version, 256, "skill-version-bytes") || "v1.0.0",
     license: boundedString(context, frontmatter.license, 1_024, "skill-license-bytes") ?? null,
     compatibility: boundedString(context, frontmatter.compatibility, MAX_TEXT, "skill-compatibility-bytes") ?? null,
     metadata: frontmatter,
     ...(allowedTools && allowedTools.length > 0 ? { allowedTools } : {}),
     ...(source.pluginId ? { pluginId: source.pluginId } : {}),
-    ...(source.pluginName ? { pluginName: source.pluginName } : {})
+    ...(source.pluginName ? { pluginName: source.pluginName } : {}),
+    ...(source.isProjectModePlugin ? { isProjectModePlugin: true } : {})
   }
 }
 

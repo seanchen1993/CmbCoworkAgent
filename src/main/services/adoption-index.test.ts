@@ -28,6 +28,7 @@ vi.mock("../storage", () => ({ getOpenworkDir: () => h.tempDir }))
 
 import {
   closeAdoptionIndex,
+  commitAdoptionMeasurements,
   enqueueEventOutbox,
   finalizeGenMeasurement,
   findPendingGensForFile,
@@ -309,6 +310,50 @@ describe("adoption-index harness_node_name column", () => {
     expect(Array.from(fetched?.details_blob ?? [])).toEqual([10, 20, 30])
     expect(getGenRowByEventId("g_detail")?.measured).toBe(1)
     expect(getGenRowByEventId("g_detail")?.generated_lines_blob ?? null).toBeNull()
+  })
+
+  it("enqueues a file rollup only when every generation it read closes with it", () => {
+    insertGenEvent(makeRow({ event_id: "g_roll_a", file_path: "/repo/src/roll.ts" }))
+    insertGenEvent(makeRow({ event_id: "g_roll_b", file_path: "/repo/src/roll.ts" }))
+    const adoptA = {
+      eventId: "e_roll_adopt_a",
+      eventName: "code_adopt",
+      payloadJson: '{"eventId":"e_roll_adopt_a"}',
+      createdAt: 1
+    }
+    const fileEvent = {
+      genEventIds: ["g_roll_a", "g_roll_b"],
+      outboxEvent: {
+        eventId: "e_roll_file",
+        eventName: "code_commit_file",
+        payloadJson: '{"eventId":"e_roll_file"}',
+        createdAt: 1
+      }
+    }
+
+    // Another measurement closed g_roll_b first, so a rollup over both is stale.
+    expect(commitAdoptionMeasurements([{ genEventId: "g_roll_b" }])).toMatchObject({
+      success: true,
+      measuredCount: 1
+    })
+    expect(
+      commitAdoptionMeasurements(
+        [{ genEventId: "g_roll_a", outboxEvent: adoptA }, { genEventId: "g_roll_b" }],
+        undefined,
+        [fileEvent]
+      )
+    ).toMatchObject({ success: false })
+    expect(getGenRowByEventId("g_roll_a")?.measured).toBe(0)
+    expect(getOutboxEvent("e_roll_adopt_a")).toBeNull()
+    expect(getOutboxEvent("e_roll_file")).toBeNull()
+
+    // Re-measured without it, the adopt event and the rollup land together.
+    expect(
+      commitAdoptionMeasurements([{ genEventId: "g_roll_a", outboxEvent: adoptA }], undefined, [
+        { ...fileEvent, genEventIds: ["g_roll_a"] }
+      ])
+    ).toMatchObject({ success: true, measuredCount: 1, enqueuedCount: 2 })
+    expect(getOutboxEvent("e_roll_file")?.status).toBe("pending")
   })
 
   it("drops oldest pending source payloads without deleting attribution rows", () => {

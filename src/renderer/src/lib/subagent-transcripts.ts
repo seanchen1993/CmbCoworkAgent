@@ -244,6 +244,10 @@ export function restoreSubagentsFromTranscripts(
     }
     const firstMessage = messages[0]
     const lastMessage = messages[messages.length - 1]
+    const startedAt =
+      parsePersistedDate(prompt?.created_at) ?? parsePersistedDate(firstMessage.created_at)
+    const completedAt =
+      parsePersistedDate(final?.created_at) ?? parsePersistedDate(lastMessage.created_at)
     const subagentType = prompt?.subagent_type || "general-purpose"
     const promptContent = typeof prompt?.content === "string" ? prompt.content : ""
     const scopedExecutionMatch = /^(.*)::(?:execution-\d+|invocation-[a-z0-9-]+)$/.exec(
@@ -274,7 +278,7 @@ export function restoreSubagentsFromTranscripts(
         ...(prompt?.subagent_type && { subagentType: prompt.subagent_type }),
         ...(final && {
           status: terminalStatus,
-          completedAt: final.created_at,
+          ...(completedAt && { completedAt }),
           restoredFromPromptOnly: undefined
         })
       }
@@ -289,8 +293,8 @@ export function restoreSubagentsFromTranscripts(
         projectSubagentDescription(promptContent) ||
         "已恢复的子代理任务",
       status: terminalStatus,
-      startedAt: prompt?.created_at ?? firstMessage.created_at,
-      completedAt: final?.created_at ?? lastMessage.created_at,
+      ...(startedAt && { startedAt }),
+      ...(completedAt && { completedAt }),
       subagentType,
       spawnIndex,
       ...(!final && { restoredFromPromptOnly: true })
@@ -1584,13 +1588,40 @@ export function mergeSubagentTranscripts(
   }
 }
 
-function revivePersistedDate(value: unknown): Date {
+function parsePersistedDate(value: unknown): Date | null {
   if (value instanceof Date && Number.isFinite(value.getTime())) return value
   if (typeof value === "string" || typeof value === "number") {
     const parsed = new Date(value)
     if (Number.isFinite(parsed.getTime())) return parsed
   }
-  return new Date()
+  return null
+}
+
+function revivePersistedDate(value: unknown): Date {
+  // Missing legacy timestamps must stay unknown. Using `new Date()` here made
+  // opening a subagent transcript look like the execution start time.
+  return parsePersistedDate(value) ?? new Date(Number.NaN)
+}
+
+/**
+ * Anchor the first assistant row to the execution timestamp captured when the
+ * subagent was registered. This is an O(n) panel projection and never mutates
+ * or rewrites the persisted transcript.
+ */
+export function applySubagentTranscriptStartTime(
+  messages: Message[],
+  startedAt: Date | string | number | undefined
+): Message[] {
+  const actualStart = parsePersistedDate(startedAt)
+  if (!actualStart) return messages
+  const firstAssistantIndex = messages.findIndex((message) => message.role === "assistant")
+  if (firstAssistantIndex < 0) return messages
+  const firstAssistant = messages[firstAssistantIndex]
+  if (parsePersistedDate(firstAssistant.start_at)) return messages
+
+  const projected = messages.slice()
+  projected[firstAssistantIndex] = { ...firstAssistant, start_at: actualStart }
+  return projected
 }
 
 function revivePersistedSubagentMessage(value: unknown): Message | null {
@@ -1755,12 +1786,18 @@ export function getSubagentTranscriptsFromThreadValues(
 }
 
 function serializeSubagentMessage(message: Message): Record<string, unknown> {
+  const createdAt = parsePersistedDate(message.created_at)
+  const startAt = parsePersistedDate(message.start_at)
+  const endAt = parsePersistedDate(message.end_at)
   const serialized: Record<string, unknown> = {
     ...message,
-    created_at: message.created_at.toISOString(),
-    ...(message.start_at && { start_at: message.start_at.toISOString() }),
-    ...(message.end_at && { end_at: message.end_at.toISOString() })
+    ...(createdAt && { created_at: createdAt.toISOString() }),
+    ...(startAt && { start_at: startAt.toISOString() }),
+    ...(endAt && { end_at: endAt.toISOString() })
   }
+  if (!createdAt) delete serialized.created_at
+  if (!startAt) delete serialized.start_at
+  if (!endAt) delete serialized.end_at
   const contentPendingDelta =
     typeof message.content_pending_delta === "string" ? message.content_pending_delta : ""
   const reasoningPendingDelta =

@@ -1,4 +1,6 @@
 import { projectHumanGate } from "../../../../shared/harness-notifications"
+import { IDLE_MODEL_OUTSIDE_HOURS_MESSAGE } from "../../../../shared/idle-model-service-window"
+import { IDLE_MODEL_SAP_REQUIRED_MESSAGE } from "../../../../shared/model-catalog"
 import { useHarnessNotifications } from "@/lib/harness-notifications"
 import { BizRetryDecisionCard } from "@/components/harness-board/BizRetryNotice"
 import React, {
@@ -1020,6 +1022,8 @@ const RECOVERABLE_QUEUE_ERRORS = new Set([
   QUEUE_MODEL_REQUIRED_ERROR,
   QUEUE_MODEL_MISSING_ERROR,
   QUEUE_MODEL_UNAVAILABLE_ERROR,
+  IDLE_MODEL_OUTSIDE_HOURS_MESSAGE,
+  IDLE_MODEL_SAP_REQUIRED_MESSAGE,
   QUEUE_WORKSPACE_REQUIRED_ERROR
 ])
 const CHAT_REPORT_UPLOAD_DEBOUNCE_MS = 250
@@ -1636,8 +1640,18 @@ function SystemPromptPreviewButton({
         sideOffset={8}
         className="w-[420px] max-w-[calc(100vw-2rem)] overflow-hidden rounded-xl border-border bg-popover p-0 shadow-xl"
       >
-        <div className="border-b border-border/60 px-3 py-2 text-[11px] text-muted-foreground">
-          {loading ? "加载中..." : `更新时间：${updatedAtLabel}`}
+        <div className="flex items-center justify-between border-b border-border/60 px-3 py-2 text-[11px] text-muted-foreground">
+          <span>{loading ? "加载中..." : `更新时间：${updatedAtLabel}`}</span>
+          <button
+            type="button"
+            disabled={loading || !prompt}
+            onClick={() => void navigator.clipboard.writeText(prompt || "").catch(() => {})}
+            className="rounded p-1 hover:bg-muted/60 disabled:cursor-not-allowed disabled:opacity-50"
+            title="复制系统提示词"
+            aria-label="复制系统提示词"
+          >
+            <Copy className="size-3.5" />
+          </button>
         </div>
         <pre className="max-h-[50vh] overflow-auto whitespace-pre-wrap break-words p-3 font-mono text-[11px] leading-5 text-popover-foreground">
           {prompt || "暂无系统提示词；请先运行一次当前会话。"}
@@ -1664,7 +1678,7 @@ export function ChatContainer({
     (remoteThreadInfo?.historical
       ? "设备接管前的远程历史 Thread 仅可查看"
       : remoteThreadInfo?.kind === "inbox"
-        ? "远程收件箱在桌面仅可查看；请从招乎继续发送消息"
+        ? "招乎默认聊天在桌面仅可查看；请从招乎继续发送消息"
         : null)
   const surfaceConfig = CHAT_SURFACE_CONFIG[surface]
   const [threadProjectionRuntime] = useState(() => getChatThreadProjectionRuntime(threadId))
@@ -1889,6 +1903,7 @@ export function ChatContainer({
     patchThreadMetadata,
     generateTitleForFirstMessage,
     setShowCustomizeView,
+    showCustomizeView,
     rightPanelCollapsed,
     pluginVersion,
     requestOpenRightPanelSystemConstraints
@@ -1901,6 +1916,7 @@ export function ChatContainer({
       patchThreadMetadata: state.patchThreadMetadata,
       generateTitleForFirstMessage: state.generateTitleForFirstMessage,
       setShowCustomizeView: state.setShowCustomizeView,
+      showCustomizeView: state.showCustomizeView,
       rightPanelCollapsed: state.rightPanelCollapsed,
       pluginVersion: state.pluginVersion,
       requestOpenRightPanelSystemConstraints: state.requestOpenRightPanelSystemConstraints
@@ -4396,6 +4412,7 @@ export function ChatContainer({
       lastTouchY = nextTouchY
     }
     const detachFromKeyboardScroll = (event: KeyboardEvent): void => {
+      if (useAppStore.getState().showCustomizeView) return
       if (!chatRootRef.current || chatRootRef.current.offsetParent === null) return
       if (
         !chatRootRef.current.contains(document.activeElement) &&
@@ -4871,6 +4888,7 @@ export function ChatContainer({
   // only one ChatContainer is mounted per panel (keyed + conditionally rendered).
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent): void => {
+      if (useAppStore.getState().showCustomizeView) return
       if (!((event.ctrlKey || event.metaKey) && (event.key === "f" || event.key === "F"))) return
       const root = chatRootRef.current
       if (!root || root.offsetParent === null) return
@@ -4982,7 +5000,8 @@ export function ChatContainer({
       nextSkill = selectSkillForSlashName(
         enabledSkillsForSlash,
         slashSkill,
-        harnessFeatureBinding ? skillsHarnessPreferredPlugin : pendingPreferredPlugin
+        harnessFeatureBinding ? skillsHarnessPreferredPlugin : pendingPreferredPlugin,
+        isProjectModeAgentContext
       )
     }
 
@@ -4994,6 +5013,7 @@ export function ChatContainer({
     harnessFeatureBinding,
     historyLoading,
     input,
+    isProjectModeAgentContext,
     pendingHarnessNextAction,
     selectedSkill,
     setInput,
@@ -5283,7 +5303,7 @@ export function ChatContainer({
         return
       }
       if (!selectedModel.available) {
-        setError("当前模型不可用，请先在模型配置中设置 API 密钥。")
+        setError(selectedModel.unavailableReason || QUEUE_MODEL_UNAVAILABLE_ERROR)
         return
       }
       if (!workspacePath) {
@@ -5571,7 +5591,7 @@ export function ChatContainer({
         }
 
         if (!selectedModel.available) {
-          setError("当前模型不可用，请先在模型配置中设置 API 密钥。")
+          setError(selectedModel.unavailableReason || QUEUE_MODEL_UNAVAILABLE_ERROR)
           return
         }
 
@@ -5773,6 +5793,8 @@ export function ChatContainer({
         attachmentModelBlocks,
         attachmentDisplayPrefix,
         skillBlock,
+        skillName: skill?.name,
+        skillDescription: skill?.description,
         builtinBrowser: browser,
         modelId: currentModel,
         created_at: new Date(),
@@ -5882,7 +5904,7 @@ export function ChatContainer({
             titleSource = getBuiltinBrowserTitleSource(browser)
           }
           if (titleSource) {
-            generateTitleForFirstMessage(threadId, titleSource)
+            generateTitleForFirstMessage(threadId, titleSource, skill?.name, skill?.description)
           }
         }
       }
@@ -6274,7 +6296,7 @@ export function ChatContainer({
         if (!queued.modelId && !currentModel) {
           setError(QUEUE_MODEL_REQUIRED_ERROR)
         } else if (queuedModel || currentSelectedModel) {
-          setError(QUEUE_MODEL_UNAVAILABLE_ERROR)
+          setError((queuedModel || currentSelectedModel)?.unavailableReason || QUEUE_MODEL_UNAVAILABLE_ERROR)
         } else {
           setError(QUEUE_MODEL_MISSING_ERROR)
         }
@@ -6372,7 +6394,12 @@ export function ChatContainer({
         const hasDefaultTitle = currentThread?.title?.startsWith("Thread ")
         const titleSource = queued.text.trim() || (queued.skillBlock ? "使用技能" : "")
         if (hasDefaultTitle && titleSource) {
-          generateTitleForFirstMessage(threadId, titleSource)
+          generateTitleForFirstMessage(
+            threadId,
+            titleSource,
+            queued.skillName,
+            queued.skillDescription
+          )
         }
       }
       const startTime = Date.now()
@@ -6792,7 +6819,7 @@ export function ChatContainer({
       try {
         await Promise.all([stream?.stop(), window.api.agent.cancel(threadId)])
         if (isManagedRunSessionActive) {
-          toast.success("已退出托管模式")
+          toast.success("已退出托管模式", { duration: 1200 })
         }
       } finally {
         if (goalUi.goal) {
@@ -7593,7 +7620,7 @@ export function ChatContainer({
   const interruptionNotice = hookInterruption
     ? interruptionNoticeCopy(hookInterruption.event, hookInterruption.action)
     : null
-  const remoteThreadTipLabel = remoteThreadInfo?.kind === "inbox" ? "远程收件箱" : "远程会话"
+  const remoteThreadTipLabel = remoteThreadInfo?.kind === "inbox" ? "招乎默认聊天" : "远程会话"
   const handleDismissRemoteThreadTip = useCallback(() => {
     setDismissedRemoteTipThreadIds((current) => {
       const next = new Set(current)
@@ -7707,7 +7734,7 @@ export function ChatContainer({
           <div className="min-w-0 flex-1 space-y-0.5">
             <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
               <span className="rounded bg-status-info/15 px-1.5 py-0.5 font-medium text-status-info-foreground">
-                {remoteThreadInfo.kind === "inbox" ? "远程收件箱" : "远程会话"}
+                {remoteThreadInfo.kind === "inbox" ? "招乎默认聊天" : "远程会话"}
               </span>
               {remoteThreadInfo.kind === "feature" && remoteThreadInfo.featureLabel ? (
                 <span className="font-medium">{remoteThreadInfo.featureLabel}</span>
@@ -7718,7 +7745,7 @@ export function ChatContainer({
               {remoteThreadInfo.kind === "inbox"
                 ? remoteThreadInfo.historical
                   ? "此 Thread 已停用，仅保留历史，不会接收新消息。"
-                  : "桌面仅用于查看历史和运行状态；请从招乎继续聊天。"
+                  : "这是招乎的默认聊天，桌面仅用于查看。要在招乎继续其他会话，请先在“接入招乎”中开启，再发送 /会话 切换。"
                 : remoteThreadInfo.historical
                   ? "此远程会话已停用，仅保留历史；请重新绑定。"
                   : isLoading
@@ -7757,6 +7784,7 @@ export function ChatContainer({
       {/* Skill creation confirmation dialog */}
       <SkillCreateConfirmDialog
         request={skillConfirmRequest}
+        visible={!showCustomizeView}
         onApprove={handleSkillApprove}
         onReject={handleSkillReject}
       />
@@ -7769,7 +7797,7 @@ export function ChatContainer({
       />
 
       <Dialog
-        open={!!messageForkTarget}
+        open={!!messageForkTarget && !showCustomizeView}
         onOpenChange={(open) => {
           if (!open && !isMessageForkBusy) resetMessageForkDialog()
         }}
@@ -9092,7 +9120,8 @@ export function ChatContainer({
                       </div>
                       <AgentGitCommitDialog
                         key={agentCommitApproval?.id ?? "agent-commit-idle"}
-                        open={Boolean(agentCommitApproval)}
+                        // Portal 不受工作区 inert 限制；设置期间只隐藏，保留待审批请求。
+                        open={Boolean(agentCommitApproval) && !showCustomizeView}
                         threadId={threadId}
                         workspacePath={workspacePath}
                         suggestedMessage={agentCommitApproval?.suggestedCommitMessage}

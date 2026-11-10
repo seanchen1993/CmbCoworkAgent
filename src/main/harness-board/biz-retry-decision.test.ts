@@ -119,7 +119,16 @@ beforeEach(async () => {
     policyResult: {
       type: "biz_retry",
       proposedAction: "start_new_thread",
-      reasonCode: "no_progress"
+      reasonCode: "no_progress",
+      facts: {
+        currentNodeId: "dev.plan",
+        featureStatus: "in_progress",
+        currentNodeStatus: "in_progress",
+        changedFields: [],
+        initialInspection: false,
+        providerRetryCount: 0,
+        totalRetryCount: 0
+      }
     },
     summary: "需要人工决策",
     stageName: "dev.plan",
@@ -140,6 +149,75 @@ function choose(action = "new_thread") {
 }
 
 describe("Biz Retry decision failures and input liveness", () => {
+  it.each(["continue", "new_thread"])(
+    "records executed counts and local budget for %s",
+    async (choice) => {
+      runStore.updateSnapshot({ ...run, providerRetryCount: 2, totalRetryCount: 4 })
+      expect((await choose(choice)).applied).toBe(true)
+      const providerRetryCount = choice === "new_thread" ? 0 : 2
+      expect(runStore.getRun(run).snapshot).toMatchObject({
+        providerRetryCount,
+        totalRetryCount: 5
+      })
+      const execution = runStore
+        .listEvents(run)
+        .events.find(
+          (event) => event.type === "managed_run_decision" && event.decisionActor === "user"
+        )
+      expect(execution?.policyResult?.facts).toMatchObject({
+        providerRetryCount,
+        totalRetryCount: 5
+      })
+    }
+  )
+
+  it("passes the authoritative model selection into a new-session retry", async () => {
+    runStore.updateSnapshot({ ...run, modelSelection: "ultra" })
+    expect((await choose("new_thread")).applied).toBe(true)
+    expect(dependencies.createSession.mock.calls[0][0]).toMatchObject({ modelSelection: "ultra" })
+  })
+
+  it.each(["continue", "new_thread"])("counts a confirmed %s retry only once", async (choice) => {
+    expect(runStore.getRun(run).snapshot?.totalRetryCount).toBe(0)
+    expect(service.blocksThread("origin")).toBe(true)
+    expect(runStore.getRun(run).snapshot?.totalRetryCount).toBe(0)
+    expect((await choose(choice)).applied).toBe(true)
+    expect(runStore.getRun(run).snapshot?.totalRetryCount).toBe(1)
+    expect((await choose(choice)).applied).toBe(false)
+    expect(runStore.getRun(run).snapshot?.totalRetryCount).toBe(1)
+  })
+
+  it.each(["continue", "new_thread"])(
+    "allows a fifth %s retry without clearing the count",
+    async (choice) => {
+      runStore.updateSnapshot({ ...run, totalRetryCount: 4 })
+      expect((await choose(choice)).applied).toBe(true)
+      expect(runStore.getRun(run).snapshot?.totalRetryCount).toBe(5)
+    }
+  )
+
+  it.each(["continue", "new_thread"])(
+    "stops before a sixth %s retry can launch",
+    async (choice) => {
+      runStore.updateSnapshot({ ...run, totalRetryCount: 5 })
+      expect((await choose(choice)).applied).toBe(false)
+      expect(runStore.getRun(run).snapshot).toMatchObject({
+        status: "failed",
+        totalRetryCount: 5,
+        failureReason: expect.stringContaining("累计重试上限")
+      })
+      expect(dependencies.createSession).not.toHaveBeenCalled()
+      expect(dependencies.startSession).not.toHaveBeenCalled()
+      expect(dependencies.startPrepared).not.toHaveBeenCalled()
+      expect(service.blocksThread("origin")).toBe(false)
+    }
+  )
+
+  it("does not count stopping as a retry", async () => {
+    expect((await choose("stop")).applied).toBe(true)
+    expect(runStore.getRun(run).snapshot).toMatchObject({ status: "cancelled", totalRetryCount: 0 })
+  })
+
   it("refreshes APP once for persisted completion and still removes execution resources", async () => {
     notifications.finish(notificationId, {
       status: "resolved",

@@ -6,6 +6,8 @@ import { join, resolve } from "node:path"
 import initSqlJs from "sql.js"
 import { ApprovalDecisionBroker } from "../src/main/agent/approval-decision-broker"
 import type { ThreadRow } from "../src/main/db"
+import { ImCardInteractionStore } from "../src/main/services/im/card-interaction-store"
+import { ImCardPublisher } from "../src/main/services/im/card-publisher"
 import type { ApprovalDecision, ApprovalRequest } from "../src/main/types"
 import { ImCommandRouter, parseImCommand } from "../src/main/services/im/command-router"
 import { ImConversationStateStore } from "../src/main/services/im/conversation-state"
@@ -65,6 +67,8 @@ async function createContext(
   options: {
     remoteApprovalEnabled?: boolean
     agentMode?: "normal" | "coordinator" | "workflow"
+    /** Omitted, the module publisher has no gateway and every gate goes out as text. */
+    cards?: ImCardPublisher
   } = {}
 ) {
   const root = await mkdtemp(join(tmpdir(), "cmb-im-approval-"))
@@ -124,7 +128,8 @@ async function createContext(
       remoteApprovalEnabled: options.remoteApprovalEnabled !== false
     }),
     createCode: () => generatedCodes.shift() ?? "ABC123",
-    warn: (_message, error) => warnings.push(error)
+    warn: (_message, error) => warnings.push(error),
+    ...(options.cards ? { cards: options.cards } : {})
   })
   service.subscribeAudit((record) => {
     desktopAuditNotices.push(`${record.decision}:${record.summary}`)
@@ -164,6 +169,7 @@ async function createContext(
     clock,
     flushControl,
     broker,
+    conversations,
     events,
     audits,
     service,
@@ -779,7 +785,210 @@ async function testAdvancedModesCanPublishAndResolve(): Promise<void> {
   }
 }
 
+function acceptingCards(sent: string[]): ImCardPublisher {
+  return new ImCardPublisher({
+    interactions: new ImCardInteractionStore(),
+    createIdempotencyKey: () => `idem-${sent.length}`,
+    usesTextReplies: () => false,
+    gateway: {
+      isAuthenticated: () => true,
+      sendCard: async (card: { content: unknown }) => {
+        sent.push(JSON.stringify(card.content))
+        return { state: "accepted" } as const
+      }
+    } as never,
+    warn: () => undefined
+  })
+}
+
+/**
+ * Lets a publication finish. The card is sent synchronously inside register(),
+ * so waiting for the send is not waiting for the gate: the service is still
+ * inside handlePending, microtasks short of recording what the card stood for.
+ * A macrotask runs only once those have drained.
+ */
+function settle(): Promise<void> {
+  return new Promise<void>((resolve) => setTimeout(resolve, 0))
+}
+
+function writeRequest(root: string, id: string): ApprovalRequest {
+  return approvalRequest({
+    id,
+    operation: "write_file",
+    cwd: root,
+    filePath: join(root, "src", "billing.ts")
+  })
+}
+
+/**
+ * /文字模式 hands over the approval the card stood in for, once, and it works
+ * exactly as the text notice always has: same text, same code.
+ */
+async function testAHeldBackApprovalIsResentOnceAsText(): Promise<void> {
+  const sent: string[] = []
+  const context = await createContext({ cards: acceptingCards(sent) })
+  try {
+    const request = writeRequest(context.root, "request-card-held")
+    const decisions = context.register(request)
+    await waitFor(() => sent.length === 1, "approval card")
+    await settle()
+    assert.equal(context.deliveryText(request.id), "", "a delivered card sends no text")
+
+    assert.deepEqual(
+      await context.service.resendPendingAsText("conversation-other"),
+      { resent: 0, failed: 0 },
+      "only the conversation that switched gets its gates"
+    )
+    assert.deepEqual(await context.service.resendPendingAsText(ROUTE.conversationKey), {
+      resent: 1,
+      failed: 0
+    })
+    const text = context.deliveryText(request.id)
+    assert(text.includes("写入文件：src/billing.ts"), text)
+    assert(text.includes("/批准 A1B2C3"), "the resent text carries the card's own code")
+    assert(text.includes("短码单次有效"), text)
+
+    const segments = context.events
+      .listOutbox()
+      .filter((record) => record.deliveryId === `approval-request:${request.id}`).length
+    assert.deepEqual(
+      await context.service.resendPendingAsText(ROUTE.conversationKey),
+      { resent: 0, failed: 0 },
+      "switching back and forth never sends the same gate twice"
+    )
+    assert.equal(
+      context.events
+        .listOutbox()
+        .filter((record) => record.deliveryId === `approval-request:${request.id}`).length,
+      segments
+    )
+
+    // Answering the text answers the gate, as it always did.
+    const result = await context.service.resolveCode({
+      code: "A1B2C3",
+      decision: "approve",
+      ...ROUTE
+    })
+    assert(result.includes("一次性批准"), result)
+    assert.deepEqual(decisions, [{ type: "approve", tool_call_id: request.tool_call.id }])
+  } finally {
+    context.service.dispose()
+    context.database.close()
+    await rm(context.root, { recursive: true, force: true })
+  }
+}
+
+/** A gate decided before the switch has nothing to hand over. */
+async function testAnApprovalDecidedFirstIsNotResent(): Promise<void> {
+  const sent: string[] = []
+  const context = await createContext({ cards: acceptingCards(sent) })
+  try {
+    const request = writeRequest(context.root, "request-decided-first")
+    context.register(request)
+    await waitFor(() => sent.length === 1, "approval card")
+    await settle()
+    assert.equal(
+      context.broker.decide({
+        source: { kind: "desktop", webContentsId: 1 },
+        requestId: request.id,
+        decision: { type: "approve", tool_call_id: request.tool_call.id }
+      }).accepted,
+      true,
+      "precondition: the desktop decides the gate"
+    )
+    assert.deepEqual(await context.service.resendPendingAsText(ROUTE.conversationKey), {
+      resent: 0,
+      failed: 0
+    })
+    assert.equal(context.deliveryText(request.id), "", "a decided gate must not arrive looking open")
+  } finally {
+    context.service.dispose()
+    context.database.close()
+    await rm(context.root, { recursive: true, force: true })
+  }
+}
+
+/** A gate whose text already went out has nothing held back: it is in the chat. */
+async function testAnApprovalSentAsTextIsNotSentAgain(): Promise<void> {
+  const context = await createContext()
+  try {
+    const request = writeRequest(context.root, "request-text-already")
+    context.register(request)
+    await waitFor(() => context.deliveryText(request.id).includes("A1B2C3"), "approval text")
+    const before = context.events.listOutbox().length
+    assert.deepEqual(await context.service.resendPendingAsText(ROUTE.conversationKey), {
+      resent: 0,
+      failed: 0
+    })
+    assert.equal(context.events.listOutbox().length, before)
+  } finally {
+    context.service.dispose()
+    context.database.close()
+    await rm(context.root, { recursive: true, force: true })
+  }
+}
+
+/**
+ * The switch can land while a card is in flight. Its resend runs then and
+ * cannot see a gate not yet recorded, so the gate hands itself over once its
+ * card is confirmed — otherwise it would sit withheld in text mode until the
+ * reader happened to send /文字模式 开.
+ */
+async function testASwitchDuringTheCardSendStillHandsTheGateOver(): Promise<void> {
+  let release!: () => void
+  const held = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  const sent: string[] = []
+  const cards = new ImCardPublisher({
+    interactions: new ImCardInteractionStore(),
+    createIdempotencyKey: () => `idem-${sent.length}`,
+    // The card was already on its way when the mode changed.
+    usesTextReplies: () => false,
+    gateway: {
+      isAuthenticated: () => true,
+      sendCard: async (card: { content: unknown }) => {
+        sent.push(JSON.stringify(card.content))
+        await held
+        return { state: "accepted" } as const
+      }
+    } as never,
+    warn: () => undefined
+  })
+  const context = await createContext({ cards })
+  try {
+    const request = writeRequest(context.root, "request-in-flight")
+    context.register(request)
+    await waitFor(() => sent.length === 1, "card in flight")
+    await context.conversations.setReplyMode(ROUTE.conversationKey, "text")
+    assert.deepEqual(
+      await context.service.resendPendingAsText(ROUTE.conversationKey),
+      { resent: 0, failed: 0 },
+      "precondition: the switch's own resend cannot see this gate yet"
+    )
+    release()
+    await waitFor(
+      () => context.deliveryText(request.id).includes("/批准 A1B2C3"),
+      "the gate handing itself over once its card lands"
+    )
+    await settle()
+    assert.deepEqual(
+      await context.service.resendPendingAsText(ROUTE.conversationKey),
+      { resent: 0, failed: 0 },
+      "handed over once, not held back as well"
+    )
+  } finally {
+    context.service.dispose()
+    context.database.close()
+    await rm(context.root, { recursive: true, force: true })
+  }
+}
+
 async function main(): Promise<void> {
+  await testASwitchDuringTheCardSendStillHandsTheGateOver()
+  await testAHeldBackApprovalIsResentOnceAsText()
+  await testAnApprovalDecidedFirstIsNotResent()
+  await testAnApprovalSentAsTextIsNotSentAgain()
   await testDefaultOffDoesNotPublishOrResolve()
   testNoRemoteCodePromiseSurvivesAsCopyOnly()
   await testWorkspaceApprovalIsSingleUseAndAudited()

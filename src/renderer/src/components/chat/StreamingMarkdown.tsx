@@ -1,6 +1,7 @@
-import ReactMarkdown, { type Components } from "react-markdown"
+import ReactMarkdown, { defaultUrlTransform, type Components } from "react-markdown"
 import rehypeHighlight from "rehype-highlight"
 import remarkGfm from "remark-gfm"
+import remarkWindowsFileLinks from "@/lib/remark-windows-file-links"
 import type { ChatSearchLocation } from "../../../../shared/chat-search-types"
 import { ChatSearchContext } from "./ChatSearchContext"
 import { Check, Copy } from "lucide-react"
@@ -22,6 +23,7 @@ import {
   getMarkdownNodeText,
   useMarkdownFilePreviewComponents
 } from "./markdown-file-preview-components"
+import { isLocalFileLikeHref } from "@/lib/markdown-file-preview-links"
 
 interface StreamingMarkdownProps {
   children: string
@@ -79,11 +81,21 @@ function MarkdownCodeBlock({
 
 // Hoisted to module scope so the prop identities stay stable across renders
 // (recreating these every render makes react-markdown redo work and churns GC).
-const REMARK_PLUGINS = [remarkGfm]
+const REMARK_PLUGINS = [remarkGfm, remarkWindowsFileLinks]
 const REHYPE_PLUGINS = [rehypeHighlight]
 // While streaming we skip syntax highlighting (the expensive rehype pass) and
 // reuse a single empty array identity so react-markdown doesn't see a new prop.
 const NO_REHYPE_PLUGINS: typeof REHYPE_PLUGINS = []
+
+// react-markdown's default URL sanitizer treats a Windows drive letter and
+// custom local schemes as unsafe protocols (for example, `C:/repo/a.ts` and
+// `codex-file:///repo/a.ts`) and clears the href before our link component can
+// resolve it. Preserve only path-like hrefs for threaded messages; all other
+// URLs continue through the package's protocol allowlist.
+function transformStreamingMarkdownUrl(value: string, key: string): string {
+  if (key === "href" && isLocalFileLikeHref(value)) return value
+  return defaultUrlTransform(value)
+}
 
 // During streaming the parent re-renders on every token. Re-parsing the full
 // Markdown each time is ~O(n²) over a long answer, so the refresh interval grows
@@ -223,6 +235,7 @@ const MarkdownFragment = memo(function MarkdownFragment({
         remarkPlugins={REMARK_PLUGINS}
         rehypePlugins={isStreaming ? NO_REHYPE_PLUGINS : REHYPE_PLUGINS}
         components={components}
+        urlTransform={threadId ? transformStreamingMarkdownUrl : undefined}
       >
         {text}
       </ReactMarkdown>

@@ -1,3 +1,5 @@
+import { isModelAvailable } from "../../shared/model-catalog"
+import { getModelClientOptions } from "../models/connection"
 import { HumanMessage, SystemMessage } from "@langchain/core/messages"
 import { ChatOpenAI } from "@langchain/openai"
 import { sanitizeMcpExampleValue } from "../mcp/tool-example-store"
@@ -291,7 +293,7 @@ export async function generateSavedToolRewrite(input: {
   mcpCalls: CodeExecMcpCall[]
 }): Promise<SavedToolRewriteResult> {
   const config = resolveSidecarModelConfig(input.modelId)
-  if (!config?.apiKey) {
+  if (!isModelAvailable(config)) {
     const error = "缺少可用于工具改写的模型配置或 API Key"
     return { rewrite: null, error }
   }
@@ -299,7 +301,7 @@ export async function generateSavedToolRewrite(input: {
   const model = new ChatOpenAI({
     model: config.model,
     apiKey: config.apiKey,
-    configuration: { baseURL: config.baseUrl },
+    ...getModelClientOptions(config),
     maxTokens: config.maxOutputTokens,
     ...samplingFields(config.model, { temperature: config.temperature, topP: config.topP }),
     modelKwargs: {

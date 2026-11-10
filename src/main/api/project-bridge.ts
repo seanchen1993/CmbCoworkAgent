@@ -1,14 +1,12 @@
-import { readThreadWorkspacePathInWorker } from "../thread-metadata-hydration/client"
 import { stat } from "node:fs/promises"
 import { isAbsolute } from "node:path"
-import { getAllThreadSummaries } from "../db"
 import {
   listHarnessProjects,
   getHarnessProjectDetail,
   getHarnessRunDetail,
   getHarnessDynamicWorkflowConfig,
   resolveHarnessAdapterByName,
-  readHarnessFeatureMetadata
+  requireHarnessFeatureWorkspace
 } from "../harness-board/service"
 import { createProject, updateProject, createFeature } from "../harness-board/mutations"
 import { createThreadService } from "../services/thread-service"
@@ -20,8 +18,7 @@ import {
 } from "../../shared/harness-board-types"
 import {
   defaultWorkflowTemplateId,
-  requiredWorkflowNodeIds,
-  resolveHarnessSessionWorkspace
+  requiredWorkflowNodeIds
 } from "../../shared/harness-feature-defaults"
 import { resolveHarnessNextAction } from "../../shared/harness-run-next-action"
 import { notifyRenderer } from "../renderer-notifications"
@@ -93,8 +90,7 @@ async function projectInput(body: Record<string, unknown>): Promise<HarnessProje
     "description",
     "systemId",
     "systemName",
-    "workspacePath",
-    "sessionWorkspacePath"
+    "workspacePath"
   ])
   const fields = Object.fromEntries(
     [
@@ -106,18 +102,15 @@ async function projectInput(body: Record<string, unknown>): Promise<HarnessProje
       "systemName",
       "workspacePath"
     ].map((key) => [key, requiredText(body, key)])
-  )
+  ) as Pick<HarnessProjectCreateInput, "name" | "projectCode" | "projectDir" | "description" | "systemId" | "systemName" | "workspacePath">
   if (typeof body.projectFromLean !== "boolean")
     throw new ApiInputError(400, "invalid_request", "projectFromLean 必须是 boolean")
-  if (body.sessionWorkspacePath !== undefined && typeof body.sessionWorkspacePath !== "string")
-    throw new ApiInputError(400, "invalid_request", "sessionWorkspacePath 必须是 string")
   const adapter = await projectAdapterInput(body["harness-adapter"])
   return {
     ...fields,
     adapterId: adapter.id,
     adapterType: adapter.type,
-    projectFromLean: body.projectFromLean,
-    sessionWorkspacePath: body.sessionWorkspacePath
+    projectFromLean: body.projectFromLean
   } as HarnessProjectCreateInput
 }
 
@@ -139,8 +132,7 @@ export async function apiUpdateProject(projectId: string, body: Record<string, u
     "projectFromLean",
     "description",
     "systemId",
-    "systemName",
-    "sessionWorkspacePath"
+    "systemName"
   ])
   const existing = await requireProject(projectId)
   const input: HarnessProjectCreateInput = {
@@ -153,8 +145,7 @@ export async function apiUpdateProject(projectId: string, body: Record<string, u
     systemId: existing.systemId,
     systemName: existing.systemName,
     workspacePath: existing.workspacePath,
-    projectDir: existing.projectDir,
-    sessionWorkspacePath: existing.sessionWorkspacePath
+    projectDir: existing.projectDir
   }
   for (const key of ["name", "projectCode", "description", "systemId", "systemName"] as const) {
     if (key in body) input[key] = requiredText(body, key)
@@ -163,11 +154,6 @@ export async function apiUpdateProject(projectId: string, body: Record<string, u
     if (typeof body.projectFromLean !== "boolean")
       throw new ApiInputError(400, "invalid_request", "projectFromLean 必须是 boolean")
     input.projectFromLean = body.projectFromLean
-  }
-  if ("sessionWorkspacePath" in body) {
-    if (typeof body.sessionWorkspacePath !== "string")
-      throw new ApiInputError(400, "invalid_request", "sessionWorkspacePath 必须是 string")
-    input.sessionWorkspacePath = body.sessionWorkspacePath
   }
   if ("harness-adapter" in body) {
     const adapter = await projectAdapterInput(body["harness-adapter"])
@@ -180,7 +166,7 @@ export async function apiUpdateProject(projectId: string, body: Record<string, u
 }
 
 export async function apiCreateFeature(projectId: string, body: Record<string, unknown>) {
-  allowedKeys(body, ["feature", "selectedDeployUnits"])
+  allowedKeys(body, ["feature", "selectedDeployUnits", "workspacePath"])
   const feature = requiredText(body, "feature")
   const project = await requireProject(projectId)
   if (body.selectedDeployUnits !== undefined) {
@@ -204,6 +190,7 @@ export async function apiCreateFeature(projectId: string, body: Record<string, u
   const required = requiredWorkflowNodeIds(config, templateId)
   const template = config?.templates[0]
   const result = await createFeature({
+    sessionWorkspace: { source: "directory", path: await requireDirectory(body.workspacePath) },
     projectId,
     feature,
     sessionContextInjectionSource: project.supportsSessionContextInjection
@@ -244,7 +231,7 @@ export async function apiCreateFeatureThread(body: Record<string, unknown>) {
   ])
   const projectId = requiredText(body, "projectId")
   const slug = requiredText(body, "featureId")
-  const project = await requireProject(projectId)
+  await requireProject(projectId)
   const detail = await getHarnessProjectDetail(projectId)
   if (!detail.runs.some((run) => run.slug === slug))
     throw new ApiInputError(404, "feature_not_found")
@@ -266,35 +253,7 @@ export async function apiCreateFeatureThread(body: Record<string, unknown>) {
   const workspacePath =
     "workspacePath" in body
       ? await requireDirectory(body.workspacePath)
-      : await resolveHarnessSessionWorkspace(
-          project.sessionWorkspacePath,
-          (project.sessionWorkspacePath?.trim() ? [] : getAllThreadSummaries()).flatMap((row) => {
-            let stored: Record<string, unknown>
-            try {
-              const value: unknown = row.metadata ? JSON.parse(row.metadata) : {}
-              if (!value || typeof value !== "object" || Array.isArray(value)) return []
-              stored = value as Record<string, unknown>
-            } catch {
-              // An unrelated corrupt historical row must not block a new session.
-              return []
-            }
-            const binding = readHarnessFeatureMetadata(stored)
-            if (
-              stored.harnessProjectSession ||
-              binding?.projectId !== projectId ||
-              binding.slug !== slug
-            )
-              return []
-            return [
-              {
-                threadId: row.thread_id,
-                lastActiveAt: new Date(row.updated_at).toISOString(),
-                workspacePaths: [stored.workspacePath]
-              }
-            ]
-          }),
-          readThreadWorkspacePathInWorker
-        )
+      : await requireHarnessFeatureWorkspace(projectId, slug)
   const runDetail = await getHarnessRunDetail(projectId, slug)
   const node = runDetail.run.nodes.find((item) => item.id === runDetail.run.currentNodeId)
   const nextAction = node

@@ -32,6 +32,7 @@ import {
   type CodeStatsTooltipData
 } from "./dashboard-shared"
 import type { OverviewData } from "../use-dashboard"
+import { DrilldownArrow } from "../DrilldownArrow"
 
 function StatCard({
   icon: Icon,
@@ -79,6 +80,7 @@ function StatCard({
           {labelRow}
           {body}
         </div>
+        <DrilldownArrow className="ml-auto" />
       </button>
     )
   }
@@ -278,6 +280,7 @@ export function OverviewPanel({
           byToolAllFull={data.byToolAllFull}
           totalTools={data.totalTools}
           totalToolCalls={data.totalToolCalls}
+          toolUsageCoverage={data.toolUsageCoverage}
         />
       </div>
 

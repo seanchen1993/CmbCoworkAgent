@@ -1,19 +1,18 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
-import { tmpdir } from "node:os"
-import { basename, dirname, join, resolve } from "node:path"
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-
+import { beforeEach, describe, expect, it, vi } from "vitest"
 const mocks = vi.hoisted(() => ({
-  createThread: vi.fn((threadId: string, metadata: Record<string, unknown>) => ({
+  resolve: vi.fn(),
+  validate: vi.fn(async (workspace: string) => workspace),
+  stage: vi.fn(),
+  context: vi.fn(),
+  create: vi.fn((threadId: string, metadata: Record<string, unknown>) => ({
     thread_id: threadId,
     metadata: JSON.stringify(metadata),
-    created_at: 0,
-    updated_at: 0,
-    status: "idle"
-  })),
-  buildHarnessFeatureAgentContext: vi.fn(async () => null),
-  resolveRecentWorkspacePath: vi.fn(async (): Promise<string | null> => null)
+    title: "test",
+    created_at: Date.now(),
+    updated_at: Date.now()
+  }))
 }))
+vi.mock("./im/feature-thread-grant", () => ({ materializeHarnessFeatureThreadGrant: vi.fn() }))
 vi.mock("electron-store", () => ({
   default: class {
     get() {
@@ -21,76 +20,89 @@ vi.mock("electron-store", () => ({
     }
   }
 }))
-vi.mock("./im/feature-thread-grant", () => ({ materializeHarnessFeatureThreadGrant: vi.fn() }))
-vi.mock("../db", () => ({ createThread: mocks.createThread }))
-vi.mock("../storage", () => ({ getOpenworkDir: () => "unused" }))
-vi.mock("../ipc/models", () => ({ getDefaultModel: () => undefined }))
-vi.mock("../agent/coordinator-mode", () => ({ getAgentModeFromMetadata: () => "normal" }))
+vi.mock("./workspace-validation", () => ({ validateWorkspaceDirectory: mocks.validate }))
+vi.mock("../db", () => ({ createThread: mocks.create }))
+vi.mock("../storage", () => ({ getOpenworkDir: () => "/unused" }))
+vi.mock("../ipc/models", () => ({ getDefaultModel: () => null }))
+vi.mock("../ipc/recent-workspace", () => ({ resolveRecentWorkspacePath: async () => "/recent" }))
 vi.mock("../harness-board/service", () => ({
-  buildHarnessFeatureAgentContext: mocks.buildHarnessFeatureAgentContext,
+  requireHarnessFeatureWorkspace: mocks.resolve,
+  resolveHarnessFeatureCurrentStage: mocks.stage,
+  buildHarnessFeatureAgentContext: mocks.context,
   DEFAULT_HARNESS_REQUEST_USER_INPUT_CONFIG: {}
 }))
-vi.mock("../ipc/recent-workspace", () => ({
-  resolveRecentWorkspacePath: mocks.resolveRecentWorkspacePath
-}))
-
 import { createThreadService } from "./thread-service"
 
-let root: string
 beforeEach(() => {
   vi.clearAllMocks()
-  mocks.resolveRecentWorkspacePath.mockResolvedValue(null)
-  root = mkdtempSync(join(tmpdir(), "cmb-workspace-validation-"))
+  mocks.resolve.mockResolvedValue("/feature")
+  mocks.stage.mockResolvedValue({ name: "Dev-代码实现", status: "进行中" })
+  mocks.context.mockResolvedValue(null)
 })
-afterEach(() => {
-  if (
-    dirname(resolve(root)) !== resolve(tmpdir()) ||
-    !basename(root).startsWith("cmb-workspace-validation-")
-  )
-    throw new Error("Unexpected cleanup path")
-  rmSync(root, { recursive: true, force: true })
-})
-
-describe("thread workspace persistence boundary", () => {
-  it("rejects an explicit missing workspace before context loading or database writes", async () => {
-    await expect(
-      createThreadService({ workspacePath: join(root, "Users", "demo") })
-    ).rejects.toMatchObject({ code: "invalid_workspace_path" })
-    expect(mocks.resolveRecentWorkspacePath).not.toHaveBeenCalled()
-    expect(mocks.buildHarnessFeatureAgentContext).not.toHaveBeenCalled()
-    expect(mocks.createThread).not.toHaveBeenCalled()
+describe("new thread workspace policy", () => {
+  it("preserves explicit multi mode while ordinary creation follows the plugin mode", async () => {
+    mocks.context.mockResolvedValue({ agentConfig: { agentMode: "workflow" } })
+    const metadata = { harnessFeature: { projectId: "p", slug: "f" } }
+    await createThreadService({ ...metadata, agentMode: "normal", subagentsEnabled: true })
+    expect(mocks.create).toHaveBeenLastCalledWith(
+      expect.any(String),
+      expect.objectContaining({ agentMode: "normal", subagentsEnabled: true })
+    )
+    await createThreadService(metadata)
+    expect(mocks.create).toHaveBeenLastCalledWith(
+      expect.any(String),
+      expect.objectContaining({ agentMode: "workflow" })
+    )
   })
 
-  it("rejects a file and malformed explicit paths", async () => {
-    const file = join(root, "file.txt")
-    writeFileSync(file, "test")
-    for (const workspacePath of [file, "", "relative", 123]) {
-      await expect(createThreadService({ workspacePath })).rejects.toMatchObject({
-        code: "invalid_workspace_path"
+  it("uses current feature configuration rather than a stale renderer path", async () => {
+    await createThreadService({
+      workspacePath: "/old",
+      harnessFeature: { projectId: "p", slug: "f" }
+    })
+    expect(mocks.validate).toHaveBeenCalledWith("/feature")
+    expect(mocks.create).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({
+        workspacePath: "/feature",
+        harnessFeature: expect.objectContaining({ launchStageName: "Dev-代码实现" })
       })
-    }
-    expect(mocks.createThread).not.toHaveBeenCalled()
+    )
   })
-
-  it("persists an existing directory with spaces unchanged", async () => {
-    const workspacePath = join(root, "Project with spaces")
-    mkdirSync(workspacePath)
-    const thread = await createThreadService({ workspacePath })
-    expect(thread.metadata?.workspacePath).toBe(workspacePath)
-    expect(mocks.createThread).toHaveBeenCalledOnce()
+  it("rejects missing feature configuration before inserting any thread", async () => {
+    mocks.resolve.mockRejectedValue(new Error("missing workspace"))
+    await expect(
+      createThreadService({ harnessFeature: { projectId: "p", slug: "f" } })
+    ).rejects.toThrow("missing workspace")
+    expect(mocks.create).not.toHaveBeenCalled()
   })
-
-  it("rechecks an inherited workspace before persistence", async () => {
-    mocks.resolveRecentWorkspacePath.mockResolvedValue(join(root, "deleted"))
-    await expect(createThreadService()).rejects.toThrow("不存在或不可访问")
-    expect(mocks.createThread).not.toHaveBeenCalled()
+  it("does not allow metadata alone to bypass the creation check", async () => {
+    mocks.resolve.mockRejectedValue(new Error("missing workspace"))
+    await expect(
+      createThreadService({
+        workspacePath: "/other",
+        harnessFeature: { projectId: "p", slug: "f", runId: "run" }
+      })
+    ).rejects.toThrow()
   })
-
-  it.each([{}, { workspacePath: null }])(
-    "preserves workspace-less creation: %j",
-    async (metadata) => {
-      await createThreadService(metadata)
-      expect(mocks.createThread).toHaveBeenCalledOnce()
-    }
-  )
+  it("preserves an existing managed run's confirmed workspace without requiring current configuration", async () => {
+    mocks.resolve.mockRejectedValue(new Error("missing workspace"))
+    await createThreadService(
+      { workspacePath: "/confirmed", harnessFeature: { projectId: "p", slug: "f", runId: "run" } },
+      { managedWorkspace: true }
+    )
+    expect(mocks.resolve).not.toHaveBeenCalled()
+    expect(mocks.create).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ workspacePath: "/confirmed" })
+    )
+  })
+  it("leaves ordinary non-feature session defaults intact", async () => {
+    await createThreadService()
+    expect(mocks.resolve).not.toHaveBeenCalled()
+    expect(mocks.create).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ workspacePath: "/recent" })
+    )
+  })
 })

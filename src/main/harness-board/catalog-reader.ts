@@ -1,4 +1,5 @@
-import { existsSync, readFileSync, statSync } from "node:fs"
+import { getMarketContentStoredLimit, readContentFileSync } from "../services/market-content"
+import { existsSync, statSync } from "node:fs"
 import { basename, isAbsolute, join, relative, resolve } from "node:path"
 import { serialize } from "node:v8"
 import type { PluginMetadata } from "../types"
@@ -26,6 +27,8 @@ import {
 } from "./catalog-protocol"
 import {
   assertHarnessProjectFieldBudgets,
+  HARNESS_CONFIG_V2_STORE_MAX_BYTES,
+  HARNESS_FEATURE_BINDING_MAX_ENTRIES,
   HARNESS_PROJECT_DESCRIPTION_MAX_CHARS,
   HARNESS_PROJECT_PATH_MAX_CHARS,
   HARNESS_PROJECT_STORE_MAX_BYTES,
@@ -49,9 +52,6 @@ export const HARNESS_CONFIG_CACHE_MAX_ENTRIES = 128
 export const HARNESS_CONFIG_CACHE_MAX_BYTES = 8 * 1024 * 1024
 const MAX_LEAN_TOKEN_STORE_BYTES = 64 * 1024
 const MAX_LEAN_TOKEN_CHARS = 8 * 1024
-const MAX_FEATURE_BINDING_STORE_BYTES = 2 * 1024 * 1024
-const MAX_DEPLOY_UNIT_MAPPING_STORE_BYTES = 2 * 1024 * 1024
-const MAX_FEATURE_BINDINGS = 4_096
 const PROJECT_CONTEXT_COMMAND_KEYS = [
   "project_status",
   "feature_status",
@@ -82,7 +82,6 @@ interface ConfigCacheEntry extends FileCache<BoardConfigSnapshot> {
 const configCache = new Map<string, ConfigCacheEntry>()
 let configCacheBytes = 0
 let featureBindingCache: FileCache<unknown[]> | null = null
-let deployUnitMappingCache: FileCache<HarnessDeployUnitMapping[]> | null = null
 let leanTokenCache: FileCache<string> | null = null
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -114,14 +113,18 @@ function fileSignature(path: string): string {
 function assertFileWithin(path: string, maxBytes: number, label: string): void {
   if (!existsSync(path)) return
   const size = statSync(path).size
-  if (size > maxBytes) throw new Error(`${label} exceeded ${maxBytes} bytes`)
+  if (
+    size > getMarketContentStoredLimit(path, maxBytes) ||
+    (size > maxBytes && readContentFileSync(path).byteLength > maxBytes)
+  )
+    throw new Error(`${label} exceeded ${maxBytes} bytes`)
 }
 
 function readJsonArray(path: string, maxBytes: number, label: string): unknown[] {
   if (!existsSync(path)) return []
   assertFileWithin(path, maxBytes, label)
   try {
-    const parsed = JSON.parse(readFileSync(path, "utf8")) as unknown
+    const parsed = JSON.parse(readContentFileSync(path, "utf8")) as unknown
     return Array.isArray(parsed) ? parsed : []
   } catch {
     return []
@@ -135,7 +138,7 @@ function readProjects(path: string): unknown[] {
   let rows: unknown[] = []
   if (existsSync(path)) {
     try {
-      const parsed = JSON.parse(readFileSync(path, "utf8")) as unknown
+      const parsed = JSON.parse(readContentFileSync(path, "utf8")) as unknown
       rows = isRecord(parsed) && Array.isArray(parsed.projects) ? parsed.projects : []
     } catch {
       rows = []
@@ -268,6 +271,8 @@ function projectBoardConfigForDetails(
   }
   const knowledgeConfig = isRecord(config.knowledge_config) ? config.knowledge_config : null
   const nextAction = projectNextAction(knowledgeConfig?.nextAction)
+  const artifactConfig = isRecord(config.artifact_sync) ? config.artifact_sync : null
+  const artifactNextAction = projectNextAction(artifactConfig?.nextAction)
   const apiVersion =
     typeof config.apiVersion === "number" || typeof config.apiVersion === "string"
       ? config.apiVersion
@@ -281,6 +286,14 @@ function projectBoardConfigForDetails(
           knowledge_config: {
             sync_type: text(knowledgeConfig.sync_type, 256),
             ...(nextAction ? { nextAction } : {})
+          }
+        }
+      : {}),
+    ...(artifactConfig
+      ? {
+          artifact_sync: {
+            sync_type: text(artifactConfig.sync_type, 256),
+            ...(artifactNextAction ? { nextAction: artifactNextAction } : {})
           }
         }
       : {})
@@ -352,7 +365,7 @@ function readBoardConfig(pluginPath: string): BoardConfigSnapshot {
     return snapshot
   }
   try {
-    const parsed = JSON.parse(readFileSync(path, "utf8")) as unknown
+    const parsed = JSON.parse(readContentFileSync(path, "utf8")) as unknown
     const value = isRecord(parsed) ? parsed : null
     const snapshot = { value, error: null, exists: true }
     setConfigCache(path, signature, snapshot)
@@ -504,15 +517,15 @@ function toProjectMetadata(value: unknown): HarnessProjectMetadata | null {
     HARNESS_PROJECT_TEXT_MAX_CHARS,
     "Harness project code"
   )
-  const sessionWorkspacePath = boundedStoredText(
-    value.sessionWorkspacePath,
-    HARNESS_PROJECT_PATH_MAX_CHARS,
-    "Harness project session workspace path"
-  )
   const systemConstraintFirstLoadedAt = boundedStoredText(
     value.systemConstraintFirstLoadedAt,
     128,
     "Harness project system constraint timestamp"
+  )
+  const managedRunFirstStartedAt = boundedStoredText(
+    value.managedRunFirstStartedAt,
+    128,
+    "Harness project managed run timestamp"
   )
   const updatedAt = boundedStoredText(
     lifecycle.updateAt,
@@ -538,6 +551,7 @@ function toProjectMetadata(value: unknown): HarnessProjectMetadata | null {
     ),
     projectCode,
     projectFromLean: value.projectFromLean === true,
+    ...(typeof value.isTestProject === "boolean" ? { isTestProject: value.isTestProject } : {}),
     projectDir:
       boundedStoredText(
         value.projectDir,
@@ -565,8 +579,8 @@ function toProjectMetadata(value: unknown): HarnessProjectMetadata | null {
         HARNESS_PROJECT_PATH_MAX_CHARS,
         "Harness legacy project workspace path"
       ),
-    ...(sessionWorkspacePath ? { sessionWorkspacePath } : {}),
     ...(systemConstraintFirstLoadedAt ? { systemConstraintFirstLoadedAt } : {}),
+    ...(managedRunFirstStartedAt ? { managedRunFirstStartedAt } : {}),
     "harness-adapter": {
       id: adapterId,
       name: adapterName,
@@ -621,7 +635,7 @@ function readLeanToken(path: string): string {
   if (signature !== "missing") {
     assertFileWithin(path, MAX_LEAN_TOKEN_STORE_BYTES, "Harness Lean token store")
     try {
-      const parsed = JSON.parse(readFileSync(path, "utf8")) as unknown
+      const parsed = JSON.parse(readContentFileSync(path, "utf8")) as unknown
       leanToken = isRecord(parsed) ? text(parsed.leanToken, MAX_LEAN_TOKEN_CHARS).trim() : ""
     } catch {
       leanToken = ""
@@ -658,21 +672,21 @@ export function readHarnessLeanToken(
 
 function readFeatureBindingRows(path: string): unknown[] {
   const signature = fileSignature(path)
-  if (featureBindingCache?.signature === signature) return featureBindingCache.value
-  let rows: unknown[] = []
-  if (signature !== "missing") {
-    assertFileWithin(path, MAX_FEATURE_BINDING_STORE_BYTES, "Harness feature binding store")
-    const parsed = JSON.parse(readFileSync(path, "utf8")) as unknown
-    if (!isRecord(parsed) || !Array.isArray(parsed.bindings)) {
-      throw new Error("Harness feature binding store has an invalid bindings field")
-    }
-    if (parsed.bindings.length > MAX_FEATURE_BINDINGS) {
-      throw new Error(
-        `Harness feature binding store exceeded ${MAX_FEATURE_BINDINGS} bindings`
-      )
-    }
-    rows = parsed.bindings
+  if (signature === "missing") {
+    throw new Error(`项目模式配置缺失，请检查文件并重启：${path}`)
   }
+  if (featureBindingCache?.signature === signature) return featureBindingCache.value
+  assertFileWithin(path, HARNESS_CONFIG_V2_STORE_MAX_BYTES, "Harness feature binding store")
+  const parsed = JSON.parse(readContentFileSync(path, "utf8")) as unknown
+  if (!isRecord(parsed) || parsed.version !== 2 || !Array.isArray(parsed.bindings)) {
+    throw new Error("Harness feature binding store has an invalid bindings field")
+  }
+  if (parsed.bindings.length > HARNESS_FEATURE_BINDING_MAX_ENTRIES) {
+    throw new Error(
+      `Harness feature binding store exceeded ${HARNESS_FEATURE_BINDING_MAX_ENTRIES} bindings`
+    )
+  }
+  const rows = parsed.bindings
   featureBindingCache = { signature, value: rows }
   return rows
 }
@@ -721,36 +735,9 @@ function normalizeDeployUnitMappingRows(
   return result
 }
 
-function readDeployUnitMappings(path: string): HarnessDeployUnitMapping[] {
-  const signature = fileSignature(path)
-  if (deployUnitMappingCache?.signature === signature) return deployUnitMappingCache.value
-  let mappings: HarnessDeployUnitMapping[] = []
-  if (signature !== "missing") {
-    assertFileWithin(
-      path,
-      MAX_DEPLOY_UNIT_MAPPING_STORE_BYTES,
-      "Harness deploy unit mapping store"
-    )
-    const parsed = JSON.parse(readFileSync(path, "utf8")) as unknown
-    if (!isRecord(parsed) || !Array.isArray(parsed.mappings)) {
-      throw new Error("Harness deploy unit mapping store has an invalid mappings field")
-    }
-    if (parsed.mappings.length > HARNESS_DEPLOY_UNIT_MAPPING_MAX_ENTRIES) {
-      throw new Error(
-        `Harness deploy unit mapping store exceeded ` +
-          `${HARNESS_DEPLOY_UNIT_MAPPING_MAX_ENTRIES} mappings`
-      )
-    }
-    mappings = normalizeDeployUnitMappingRows(parsed.mappings)
-  }
-  deployUnitMappingCache = { signature, value: mappings }
-  return mappings
-}
-
 interface FeatureDeployUnitProjection {
   featureSlug: string
   featureBindingStorePath: string
-  deployUnitMappingStorePath: string
 }
 
 function selectedFeatureProjection(
@@ -791,21 +778,7 @@ function selectedFeatureProjection(
     )
     break
   }
-  if (snapshots.length === 0) {
-    return { selectedDeployUnits: [], sessionContextInjectionSource }
-  }
-  const configuredById = new Map(
-    readDeployUnitMappings(projection.deployUnitMappingStorePath).map((mapping) => [
-      mapping.deployUnitIdMapping,
-      mapping
-    ])
-  )
-  return {
-    selectedDeployUnits: snapshots.map(
-      (snapshot) => configuredById.get(snapshot.deployUnitIdMapping) ?? snapshot
-    ),
-    sessionContextInjectionSource
-  }
+  return { selectedDeployUnits: snapshots, sessionContextInjectionSource }
 }
 
 export function readHarnessDialogTips(
@@ -1036,15 +1009,16 @@ function toProjectListItem(
     description: project.description,
     projectCode: project.projectCode,
     projectFromLean: project.projectFromLean,
+    ...(typeof project.isTestProject === "boolean" ? { isTestProject: project.isTestProject } : {}),
     projectDir: project.projectDir,
     systemId: project.systemId,
     systemName: project.systemName,
     workspacePath: project.workspacePath,
-    ...(project.sessionWorkspacePath
-      ? { sessionWorkspacePath: project.sessionWorkspacePath }
-      : {}),
     ...(project.systemConstraintFirstLoadedAt
       ? { systemConstraintFirstLoadedAt: project.systemConstraintFirstLoadedAt }
+      : {}),
+    ...(project.managedRunFirstStartedAt
+      ? { managedRunFirstStartedAt: project.managedRunFirstStartedAt }
       : {}),
     harnessAdapter: {
       id: plugin?.id ?? adapterId,
@@ -1214,7 +1188,6 @@ export function resetHarnessCatalogReaderCacheForTests(): void {
   configCache.clear()
   configCacheBytes = 0
   featureBindingCache = null
-  deployUnitMappingCache = null
   leanTokenCache = null
 }
 

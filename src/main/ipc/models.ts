@@ -7,6 +7,7 @@ import {
   type IpcMainInvokeEvent
 } from "electron"
 import Store from "electron-store"
+import { userIdentityKey } from "../../shared/user-identity"
 import { randomUUID } from "crypto"
 import { getPersistedThreadWorkspaceBindings, getThreadCore as getThreadCoreSync } from "../db"
 import * as fs from "fs/promises"
@@ -16,6 +17,8 @@ import { promisify } from "util"
 import { getWindowsSandboxMode } from "../storage"
 import { workflowRunManager } from "../agent/workflow/run-manager"
 import type { ModelConfig, Provider, WorkspaceSetParams, WorkspaceLoadParams } from "../types"
+import { isModelAvailable, isModelSelectable } from "../../shared/model-catalog"
+import { getModelConnection } from "../models/connection"
 import { LocalSandbox } from "../agent/local-sandbox"
 import {
   recordWorkspaceDirectorySnapshotSet,
@@ -3825,6 +3828,7 @@ import {
   upsertCustomModelConfig,
   deleteCustomModelConfig,
   upsertUserInfoConfig,
+  type UserInfoConfig,
   getUserInfo,
   getStoredDefaultModelId,
   getGlobalRoutingMode,
@@ -3891,7 +3895,10 @@ function toRendererModelConfig(config: ReturnType<typeof getModelConfigs>[number
     source: config.source,
     model: config.model,
     description: config.baseUrl,
-    available: Boolean(config.apiKey),
+    available: isModelAvailable(config),
+    selectable: isModelSelectable(config),
+    notice: config.notice,
+    unavailableReason: config.unavailableReason,
     maxTokens: config.maxTokens,
     ...(config.origin !== undefined && { origin: config.origin }),
     ...(config.tier !== undefined && { tier: config.tier })
@@ -3970,8 +3977,22 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
 
   ipcMain.handle(
     "models:upsertUserInfo",
-    async (_event, config: Omit<CustomModelConfig, "id"> & { id?: string }) => {
+    async (_event, config: Omit<UserInfoConfig, "id"> & { id?: string }) => {
+      let previousIdentity = userIdentityKey(null)
+      try {
+        previousIdentity = userIdentityKey(getUserInfo())
+      } catch (error) {
+        if (!(error instanceof SyntaxError)) throw error
+      }
       const id = upsertUserInfoConfig(config)
+      if (previousIdentity !== userIdentityKey(config)) {
+        for (const win of BrowserWindow.getAllWindows()) {
+          if (!win.isDestroyed()) {
+            win.webContents.send("models:userInfoChanged")
+            win.webContents.send("models:changed")
+          }
+        }
+      }
       void builtinRobotManager.refreshIdentity()
       return { id }
     }
@@ -4062,6 +4083,7 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
       let enableThinking: boolean
       let enableThinkingEffort: boolean
       let thinkingEffort: ThinkingEffort
+      let connectionConfig: CustomModelConfig | undefined
 
       if (params.id) {
         // Built-in connection fields are resolved entirely in the main process;
@@ -4069,6 +4091,7 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
         const saved = getModelConfigByRef(params.id)
         if (!saved) return { success: false, error: "未找到该模型配置" }
         const builtin = saved.source === "builtin"
+        connectionConfig = saved
         baseUrl = builtin ? saved.baseUrl : params.baseUrl || saved.baseUrl
         model = builtin ? saved.model : params.model || saved.model
         apiKey = builtin ? saved.apiKey || "" : params.apiKey || saved.apiKey || ""
@@ -4117,7 +4140,8 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
       const controller = new AbortController()
       const timeout = setTimeout(() => controller.abort(), 30_000)
       try {
-        const res = await fetch(url, {
+        const connection = getModelConnection(connectionConfig ?? { baseUrl, apiKey })
+        const res = await (connection.fetch ?? fetch)(url, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
@@ -4147,7 +4171,7 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
           let detail = ""
           try {
             const json = JSON.parse(body)
-            detail = json.error?.message || json.message || ""
+            detail = json.error?.message || json.errorMsg || json.message || ""
           } catch {
             detail = body.slice(0, 200)
           }

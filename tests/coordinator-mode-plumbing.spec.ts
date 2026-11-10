@@ -3350,8 +3350,8 @@ async function testRuntimeKeepsNormalAndCoordinatorSeparate(): Promise<void> {
   )
   assertIncludes(
     runtime,
-    "callbacks: [],\n        signal: workerInput.abortSignal",
-    "async worker stream clears inherited callbacks before listening to background output"
+    "callbacks: subagentSessionCallbacks([]),\n        signal: workerInput.abortSignal",
+    "async worker stream uses only session capture callbacks without inherited callbacks"
   )
   assertSourceOrder(
     runtime,
@@ -3461,6 +3461,16 @@ async function testHookAgentIdentityPlumbing(): Promise<void> {
     "workflow leaf runtime receives the stable agent id"
   )
   assertIncludes(
+    runtime,
+    "onFileMutation: worktreeIsolation ? undefined : onFileMutation",
+    "shared workflow leaves report file mutations without polluting parent scope with isolated worktree paths"
+  )
+  assertIncludes(
+    runtime,
+    "agentId: workerInput.workerId,\n      onFileMutation,",
+    "coordinator runtime rebuilds retain the parent file mutation sink"
+  )
+  assertIncludes(
     agentIpc,
     "buildSubagentStopHookContext({",
     "SubagentStop production path uses the tested context builder"
@@ -3472,13 +3482,13 @@ async function testHookAgentIdentityPlumbing(): Promise<void> {
   )
   assertOccurrenceCount(
     agentIpc,
-    "maybeRunSubagentLifecycleHooksFromStreamPayload({",
+    "= createSubagentLifecycleBridge({",
     3,
     "initial, resume, and interrupt-continue streams share the paired lifecycle bridge"
   )
   assertMatches(
     agentIpc,
-    /const processMessagesSideEffects = async[\s\S]{0,300}?await maybeRunSubagentLifecycleHooksFromStreamPayload\(\{[\s\S]{0,900}?\}\)\s*\n\s*try \{/,
+    /const processMessagesSideEffects = async[\s\S]{0,150}?await subagentLifecycle.processPayload\(payload\)\s*try \{/,
     "initial stream runs lifecycle control flow outside the best-effort tracing catch"
   )
   assertMatches(
@@ -3496,15 +3506,28 @@ async function testHookAgentIdentityPlumbing(): Promise<void> {
       .length === 2,
     "resume and interrupt-continue must both bypass disconnect retry for Hook halts"
   )
+  for (const bridge of [
+    "subagentLifecycle",
+    "resumeSubagentLifecycle",
+    "interruptSubagentLifecycle"
+  ]) {
+    assertIncludes(
+      agentIpc,
+      `subagentLifecycle: ${bridge}.callbacks`,
+      `${bridge} shares decisions with the producer gate across runtime rebuilds`
+    )
+    assertMatches(
+      agentIpc,
+      new RegExp(
+        `for \\(const (tuple|payload) of ${bridge}\\.trackValues\\([^)]+\\)\\) \\{\\s*await ${bridge}\\.processPayload\\(`
+      ),
+      `${bridge} dispatches values-only lifecycle hooks with awaited halt semantics`
+    )
+  }
   assertMatches(
-    agentIpc,
-    /commitPendingResumeMessageSideEffects[\s\S]{0,1200}?firedStartIds:\s*resumeSubagentStartFired/,
-    "resume stream tracks and dispatches SubagentStart independently"
-  )
-  assertMatches(
-    agentIpc,
-    /commitPendingInterruptMessageSideEffects[\s\S]{0,1200}?firedStartIds:\s*interruptSubagentStartFired/,
-    "interrupt-continue stream tracks and dispatches SubagentStart independently"
+    runtime,
+    /gradedToolConcurrencyMiddleware,\s*(?:\/\/[^\n]+\n\s*)*\.\.\.\(subagentLifecycleMiddleware[^\n]+\n\s*\.\.\.\(toolHookMiddleware[^\n]+\n\s*toolErrorMiddleware/,
+    "parent lifecycle gate wraps rejected/recovered task results without sharing the child queue"
   )
   assertOccurrenceCount(
     subagentContext,

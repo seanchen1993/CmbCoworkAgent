@@ -4,6 +4,8 @@ import { readAll, readOne, withImTransaction } from "./persistence"
 
 export type ImConversationState = "active" | "suspended" | "revoked"
 export type ImTargetState = "pending" | "active" | "suspended" | "revoked"
+/** Whether gates reach this conversation as interactive cards or as text notices. */
+export type ImReplyMode = "card" | "text"
 
 export type ImTargetSnapshot =
   | {
@@ -189,6 +191,33 @@ export class ImConversationStateStore {
       [conversationKey]
     )
     return row ? hydrateConversation(row) : null
+  }
+
+  /**
+   * Kept out of ImConversationRecord on purpose: it is a reader's display
+   * preference, not routing state, and nothing that routes a message should be
+   * able to depend on it. An unknown conversation reads as the default.
+   */
+  getReplyMode(conversationKey: string): ImReplyMode {
+    const row = readOne<{ reply_mode: string | null }>(
+      this.dependencies.getDatabase(),
+      "SELECT reply_mode FROM im_conversations WHERE conversation_key = ?",
+      [conversationKey]
+    )
+    return row?.reply_mode === "text" ? "text" : "card"
+  }
+
+  async setReplyMode(conversationKey: string, mode: ImReplyMode): Promise<void> {
+    const database = this.dependencies.getDatabase()
+    database.run(
+      "UPDATE im_conversations SET reply_mode = ?, updated_at = ? WHERE conversation_key = ? AND state = 'active'",
+      [mode, this.dependencies.now(), conversationKey]
+    )
+    if (database.getRowsModified() !== 1) {
+      throw new ImConversationStateError("CONVERSATION_REVOKED", "Conversation is unavailable")
+    }
+    this.dependencies.markDirty()
+    await this.dependencies.flushStrict()
   }
 
   listConversations(): ImConversationRecord[] {

@@ -23,6 +23,8 @@ export const PROJECT_MODE_PROJECT_EXPORT_HEADER = [
   "插件",
   "插件版本",
   "是否加载项目约束",
+  // 终身标记，与下面按时间范围统计的次数不同源，可能「是」而次数为 0。
+  "是否开启过托管运行",
   "项目状态",
   "特性数",
   "主 Agent 主动会话数",
@@ -39,13 +41,27 @@ export const PROJECT_MODE_PROJECT_EXPORT_HEADER = [
   "DEV关联特性数",
   "Harness总量提交采纳率",
   "VibeCoding总量提交采纳率",
+  "Harness采纳行数",
+  "VibeCoding采纳行数",
+  "Harness采纳行数占比",
+  "未归因采纳行数",
   "系统约束有效读取次数",
   "运行时 Hook 触发次数",
+  "托管运行次数",
+  "工具调用次数",
+  "模型调用次数",
+  "请求输入次数（不完整时为下限）",
+  "请求输入统计完整",
+  "Token 总量",
+  // 输入 + 输出 < 总量：差额是缓存读取与缓存创建，三个是不同的量，不是对不上。
+  "输入 Token",
+  "输出 Token",
   "创建人",
   "创建人 SAP ID",
   "创建人 YST ID",
   "部门",
-  "创建时间"
+  "创建时间",
+  "最新执行时间"
 ]
 
 function formatPercent(value: number | null | undefined): string {
@@ -59,6 +75,15 @@ function formatAdoptionDetail(
 ): string {
   if (numerator === undefined || denominator === undefined) return "—"
   return `${numerator}/${denominator}`
+}
+
+/**
+ * Harness 采纳行数在 Harness + VibeCoding 两桶内的占比。未归因桶不进分母（它装的是
+ * 没有阶段状态的历史事件），所以「未归因采纳行数」单列一栏，避免读者按总量反推。
+ */
+function harnessAdoptedShare(harnessLines: number, vibecodingLines: number): number | null {
+  const compared = harnessLines + vibecodingLines
+  return compared > 0 ? harnessLines / compared : null
 }
 
 function lifecycleLabel(status?: string): string {
@@ -76,7 +101,7 @@ function lifecycleLabel(status?: string): string {
   }
 }
 
-function formatDateTime(value?: string): string {
+function formatDateTime(value?: string | null): string {
   if (!value) return "—"
   const date = new Date(value)
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString("zh-CN")
@@ -168,6 +193,9 @@ export function buildProjectModeProjectExportRows(
     })
     .map((project, index) => {
       const code = project.codeStats
+      const harnessAdoptedLines =
+        project.stageBuckets.pluginConstrained.codeStats?.adoptedLines ?? 0
+      const vibecodingAdoptedLines = project.stageBuckets.vibecoding.codeStats?.adoptedLines ?? 0
       return [
         index + 1,
         project.projectId,
@@ -176,6 +204,7 @@ export function buildProjectModeProjectExportRows(
         project.adapterName || "",
         project.adapterVersion || "",
         project.systemConstraintEverLoadedSuccessfully ? "是" : "否",
+        project.managedRunEverStarted ? "是" : "否",
         lifecycleLabel(project.lifecycleStatus),
         project.featureCount,
         project.conversationCount,
@@ -192,13 +221,29 @@ export function buildProjectModeProjectExportRows(
         project.devAssociatedFeatureCount,
         formatPercent(project.stageBuckets.pluginConstrained.codeStats?.inclusiveAdoptionRate),
         formatPercent(project.stageBuckets.vibecoding.codeStats?.inclusiveAdoptionRate),
+        harnessAdoptedLines,
+        vibecodingAdoptedLines,
+        formatPercent(harnessAdoptedShare(harnessAdoptedLines, vibecodingAdoptedLines)),
+        project.stageBuckets.unattributed.codeStats?.adoptedLines ?? 0,
         project.systemConstraintReads?.successfulReadCount ?? 0,
         project.hookExecutions?.executionCount ?? 0,
+        project.managedRunCount ?? 0,
+        project.runCost?.toolCalls ?? 0,
+        project.runCost?.modelCalls ?? 0,
+        project.userInputRequestCountComplete === true ||
+        (project.runCost?.userInputRequestDocs ?? 0) > 0
+          ? (project.runCost?.userInputRequests ?? 0)
+          : "",
+        project.userInputRequestCountComplete === true ? "是" : "否",
+        project.runCost?.totalTokens ?? 0,
+        project.runCost?.inputTokens ?? 0,
+        project.runCost?.outputTokens ?? 0,
         creatorName(project),
         project.creatorSapId || "",
         project.creatorYstId || "",
         creatorDepartment(project),
-        formatDateTime(project.lifecycleCreatedAt)
+        formatDateTime(project.lifecycleCreatedAt),
+        formatDateTime(project.lastExecutedAt)
       ]
     })
 }

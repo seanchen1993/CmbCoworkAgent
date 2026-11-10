@@ -16,6 +16,7 @@ import {
   type ModelRoutingMode
 } from "../../../../shared/thread-model-selection"
 import { CustomModelDialog } from "./CustomModelDialog"
+import { IDLE_MODEL_OUTSIDE_HOURS_MESSAGE } from "../../../../shared/idle-model-service-window"
 import {
   invalidateModelCatalogCache,
   readModelCatalogCache,
@@ -65,7 +66,6 @@ function ModelSwitcherImpl({ threadId }: ModelSwitcherProps): React.JSX.Element 
   const threadActions = useThreadActions(threadId)
   const restoreCurrentModel = threadActions?.restoreCurrentModel
   const setCurrentModel = threadActions?.setCurrentModel
-  const appliedHydratedModelRef = useRef<{ threadId: string; modelId: string } | null>(null)
 
   useEffect(() => {
     void loadModels()
@@ -97,41 +97,59 @@ function ModelSwitcherImpl({ threadId }: ModelSwitcherProps): React.JSX.Element 
         : { modelId: null },
     [routingMode, routingModeLoaded, threadSummary]
   )
-  const effectiveCurrentModel = currentModel || hydratedModel.modelId || ""
+  const restoredSelectionRef = useRef<{
+    threadId: string
+    routingMode: ModelRoutingMode
+    modelId: string | null
+  } | null>(null)
 
   useEffect(() => {
-    if (!hydratedModel.modelId) return
-    const applied = appliedHydratedModelRef.current
-    if (applied?.threadId === threadId && applied.modelId === hydratedModel.modelId) return
-    appliedHydratedModelRef.current = { threadId, modelId: hydratedModel.modelId }
-    if (hydratedModel.modelId !== currentModel) {
-      // Hydration only restores the model used by the current view. Persisting here
-      // would turn a read-only session open into an updated_at change.
-      restoreCurrentModel?.(hydratedModel.modelId)
-    }
-  }, [currentModel, hydratedModel.modelId, restoreCurrentModel, threadId])
+    if (!routingModeLoaded || !restoreCurrentModel || !setCurrentModel) return
 
-  useEffect(() => {
-    if (!routingModeLoaded || models.length === 0) return
+    const previous = restoredSelectionRef.current
+    const selectionChanged =
+      previous?.threadId !== threadId ||
+      previous.routingMode !== routingMode ||
+      previous.modelId !== hydratedModel.modelId
+    restoredSelectionRef.current = { threadId, routingMode, modelId: hydratedModel.modelId }
 
-    const hasValidSelection =
-      effectiveCurrentModel && models.some((m) => m.id === effectiveCurrentModel)
-    if (!hasValidSelection && effectiveCurrentModel.startsWith("custom:")) {
-      const legacyModelName = effectiveCurrentModel.slice("custom:".length)
-      const migrated = models.find((m) => m.model === legacyModelName)
-      if (migrated) {
-        setCurrentModel?.(migrated.id)
-        return
-      }
+    // Restore each persisted selection once. A fallback or manual choice updates
+    // local state before its metadata IPC completes; restoring the stale ID on
+    // every local change would fight that choice and can trigger React #185.
+    const candidate = selectionChanged
+      ? hydratedModel.modelId || currentModel
+      : currentModel || hydratedModel.modelId || ""
+    let resolvedModel = candidate
+
+    const hasValidSelection = candidate && models.some((model) => model.id === candidate)
+    if (!hasValidSelection && models.length > 0) {
+      const migrated = candidate.startsWith("custom:")
+        ? models.find((model) => model.model === candidate.slice("custom:".length))
+        : undefined
+      resolvedModel =
+        migrated?.id ??
+        models.find((model) => model.id === defaultModelId && model.available)?.id ??
+        models.find((model) => model.available)?.id ??
+        candidate
     }
 
-    if (!hasValidSelection) {
-      const preferred =
-        models.find((model) => model.id === defaultModelId && model.available) ??
-        models.find((model) => model.available)
-      if (preferred) setCurrentModel?.(preferred.id)
+    if (resolvedModel !== candidate) {
+      setCurrentModel(resolvedModel)
+    } else if (resolvedModel && resolvedModel !== currentModel) {
+      // Restoring an existing selection must not refresh the thread's updated_at.
+      restoreCurrentModel(resolvedModel)
     }
-  }, [defaultModelId, effectiveCurrentModel, models, routingModeLoaded, setCurrentModel])
+  }, [
+    currentModel,
+    defaultModelId,
+    hydratedModel.modelId,
+    models,
+    restoreCurrentModel,
+    routingMode,
+    routingModeLoaded,
+    setCurrentModel,
+    threadId
+  ])
 
   function handleModelSelect(modelId: string): void {
     setCurrentModel?.(modelId)
@@ -232,15 +250,18 @@ function ModelSwitcherImpl({ threadId }: ModelSwitcherProps): React.JSX.Element 
                 <button
                   key={model.id}
                   onClick={() => {
-                    if (model.available) handleModelSelect(model.id)
+                    if (model.selectable ?? model.available) handleModelSelect(model.id)
                   }}
-                  disabled={!model.available}
-                  title={model.available ? undefined : "请先在模型配置中填写 API 密钥"}
+                  disabled={!(model.selectable ?? model.available)}
+                  title={
+                    model.unavailableReason ??
+                    (model.available ? model.notice : "请先在模型配置中填写 API 密钥")
+                  }
                   className={cn(
                     "w-full flex items-center gap-1.5 px-2 py-1.5 rounded-sm text-xs transition-colors text-left font-mono disabled:cursor-not-allowed disabled:opacity-50",
                     currentModel === model.id
                       ? "bg-muted text-foreground"
-                      : model.available
+                      : (model.selectable ?? model.available)
                         ? "text-muted-foreground hover:text-foreground hover:bg-muted/50"
                         : "text-muted-foreground"
                   )}
@@ -248,7 +269,13 @@ function ModelSwitcherImpl({ threadId }: ModelSwitcherProps): React.JSX.Element 
                   <CustomIcon className="size-3.5 shrink-0" />
                   <span className="flex-1 truncate">
                     {model.name}
-                    {!model.available ? "（未配置密钥）" : ""}
+                    {!model.available
+                      ? model.unavailableReason === IDLE_MODEL_OUTSIDE_HOURS_MESSAGE
+                        ? "（非服务时段）"
+                        : model.unavailableReason
+                          ? "（用户信息不完整）"
+                          : "（未配置密钥）"
+                      : ""}
                   </span>
                   <span className="shrink-0 rounded bg-muted px-1 py-0.5 text-[9px] text-muted-foreground">
                     {model.source === "builtin" ? "内置" : "自定义"}
@@ -258,6 +285,11 @@ function ModelSwitcherImpl({ threadId }: ModelSwitcherProps): React.JSX.Element 
                   )}
                 </button>
               ))}
+              {selectedModel?.notice && (
+                <p className="px-2 py-1.5 text-[11px] leading-5 text-muted-foreground">
+                  {selectedModel.notice}
+                </p>
+              )}
 
               <button
                 onClick={() => {

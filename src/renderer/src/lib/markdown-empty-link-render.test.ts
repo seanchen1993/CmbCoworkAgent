@@ -3,8 +3,14 @@ import { renderToStaticMarkup } from "react-dom/server"
 import { describe, expect, it, vi } from "vitest"
 import { StreamingMarkdown } from "../components/chat/StreamingMarkdown"
 
+const threadState = vi.hoisted(() => ({
+  workspacePath: null as string | null,
+  workspaceFiles: [] as Array<{ path: string; is_dir: boolean }>
+}))
+
 vi.mock("@/lib/thread-context", () => ({
-  useThreadStateSelector: () => null
+  useThreadStateSelector: (_threadId: string | null, selector: (state: typeof threadState) => unknown) =>
+    selector(threadState)
 }))
 
 const WINDOWS_CASE_FILE = "【团队级-研发中台】CmbDevClaw内置浏览器的录制与回放_测试案例.xlsx"
@@ -31,5 +37,36 @@ describe("StreamingMarkdown 空链接渲染", () => {
 
     expect(html).toContain("<a ")
     expect(html).toContain('href="https://openai.com"')
+  })
+
+  it("无反引号的工作区绝对路径链接仍可进入文件预览", () => {
+    threadState.workspacePath = "/workspace"
+    const html = renderToStaticMarkup(
+      createElement(
+        StreamingMarkdown,
+        { threadId: "thread-preview", children: "查看 [index.ts](/workspace/src/index.ts:12)" }
+      )
+    )
+
+    expect(html).toContain("index.ts")
+    expect(html).toContain('<a href="/workspace/src/index.ts:12"')
+    threadState.workspacePath = null
+  })
+
+  it("线程消息保留 Windows 盘符链接，交给预览链接组件解析", () => {
+    threadState.workspacePath = "C:/workspace"
+    const html = renderToStaticMarkup(
+      createElement(
+        StreamingMarkdown,
+        {
+          threadId: "thread-preview",
+          children: String.raw`查看 [index.ts](C:\workspace\src\index.ts:12)`
+        }
+      )
+    )
+
+    expect(html).toContain("index.ts")
+    expect(html).toMatch(/<a href="C:(?:%5C|\\)workspace/)
+    threadState.workspacePath = null
   })
 })

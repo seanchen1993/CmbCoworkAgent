@@ -77,6 +77,20 @@ export function isDashboardEsResponseTooLarge(error: unknown): boolean {
   return false
 }
 
+/** HTTP errors may arrive through several Error / serialized-cause wrappers. */
+export function getDashboardEsHttpErrorStatus(error: unknown): number | null {
+  let current: unknown = error
+  for (let depth = 0; current && typeof current === "object" && depth < 6; depth += 1) {
+    const record = current as { code?: unknown; message?: unknown; cause?: unknown }
+    if (record.code === "DASHBOARD_ES_HTTP_ERROR" && typeof record.message === "string") {
+      const match = record.message.match(/^ES (\d{3})\b/)
+      if (match) return Number(match[1])
+    }
+    current = record.cause
+  }
+  return null
+}
+
 export function isDashboardEsRequestCancelled(error: unknown): boolean {
   return (
     error instanceof DashboardEsRequestCancelledError ||
@@ -265,7 +279,13 @@ export class DashboardEsWorkerClient {
       this.finishWorkerRequest(pending, { error: new DashboardEsRequestCancelledError() })
       return
     }
-    const error = new Error(response.error.message) as Error & { code?: string }
+    // cause 必须显式接回来：worker 侧已把链摊平成普通对象（见 protocol 的
+    // DashboardEsWorkerErrorCause），这里不接，esQuery 的 getErrorDetail 沿 cause
+    // 就找不到真实原因，日志只会剩下面向用户的那句提示语。
+    const error = new Error(
+      response.error.message,
+      response.error.cause ? { cause: response.error.cause } : undefined
+    ) as Error & { code?: string }
     error.name = response.error.code
     error.code = response.error.code
     this.finishWorkerRequest(pending, { error })

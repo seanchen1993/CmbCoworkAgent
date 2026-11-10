@@ -1,0 +1,67 @@
+{
+  "properties": {
+    "toolUsageSchemaVersion": {
+      "type": "integer"
+    },
+    "toolUsageComplete": {
+      "type": "boolean"
+    },
+    "toolUsage": {
+      "type": "nested",
+      "dynamic": "strict",
+      "properties": {
+        "name": {
+          "type": "keyword",
+          "ignore_above": 128
+        },
+        "count": {
+          "type": "long"
+        }
+      }
+    },
+    "userInputRequestCount": {
+      "type": "long"
+    },
+    "stageUsageSchemaVersion": {
+      "type": "integer"
+    },
+    "stageUsageComplete": {
+      "type": "boolean"
+    },
+    "stageUsage": {
+      "type": "nested",
+      "dynamic": "strict",
+      "properties": {
+        "nodeName": {
+          "type": "keyword",
+          "ignore_above": 1024
+        },
+        "nodeStatus": {
+          "type": "keyword",
+          "ignore_above": 256
+        },
+        "toolCalls": {
+          "type": "long"
+        },
+        "modelCalls": {
+          "type": "long"
+        },
+        "inputTokens": {
+          "type": "long"
+        },
+        "outputTokens": {
+          "type": "long"
+        },
+        "totalTokens": {
+          "type": "long"
+        },
+        "userInputRequests": {
+          "type": "long"
+        },
+        "tokenUsageReportedCalls": {
+          "type": "long"
+        }
+      }
+    }
+  }
+}

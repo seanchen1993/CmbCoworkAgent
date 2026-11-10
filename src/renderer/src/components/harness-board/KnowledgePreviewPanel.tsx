@@ -1,4 +1,5 @@
 import { lazy, Suspense, useEffect, useMemo, useRef, useState, type ReactNode } from "react"
+import { createKnowledgePreviewGrantResolver } from "@/lib/knowledge-preview-grant"
 import {
   AlertCircle,
   ChevronDown,
@@ -108,6 +109,14 @@ export function KnowledgePreviewPanel({
   onRefresh
 }: KnowledgePreviewPanelProps): React.JSX.Element {
   const [expandedDirs, setExpandedDirs] = useState<Set<string>>(new Set(["/"]))
+  const resolvePreviewGrant = useMemo(
+    () => preview
+      ? createKnowledgePreviewGrantResolver(
+          preview, (id) => window.api.harnessBoard.getKnowledgePreview(id)
+        )
+      : undefined,
+    [preview]
+  )
   const skipNextAutoSelectRef = useRef(false)
   const files = preview?.files ?? []
   const tree = useMemo(() => buildTree(files), [files])
@@ -276,6 +285,7 @@ export function KnowledgePreviewPanel({
                   filePath={selectedFile?.path ?? selectedFullPath}
                   externalFullPath={selectedFullPath}
                   externalPreviewGrant={preview?.previewGrant}
+                  resolveExternalPreviewGrant={resolvePreviewGrant}
                 />
               </Suspense>
             ) : (

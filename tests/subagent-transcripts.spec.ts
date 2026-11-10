@@ -6,6 +6,7 @@
  */
 
 import {
+  applySubagentTranscriptStartTime,
   applyPersistedSubagentTranscriptRefs,
   drainCoalescedSubagentTranscriptChanges,
   getSubagentTranscriptsFromThreadValues,
@@ -27,6 +28,55 @@ function assert(condition: unknown, message: string): void {
   if (!condition) {
     throw new Error(message)
   }
+}
+
+async function testMissingTimestampsUseExecutionStartWithoutUsingOpenTime(): Promise<void> {
+  const restored = getSubagentTranscriptsFromThreadValues({
+    subagentTranscripts: {
+      "sub-without-message-time": [
+        { id: "prompt-without-time", role: "user", content: "inspect" },
+        { id: "assistant-without-time", role: "assistant", content: "done" }
+      ]
+    }
+  })["sub-without-message-time"]
+  const restoredAssistant = restored?.find((message) => message.role === "assistant")
+  assert(
+    restoredAssistant !== undefined && Number.isNaN(restoredAssistant.created_at.getTime()),
+    "restoring a timestamp-less transcript must not substitute the panel-open time"
+  )
+  const restoredCards = restoreSubagentsFromTranscripts({
+    "sub-without-message-time": restored ?? []
+  })
+  assert(
+    restoredCards[0]?.startedAt === undefined && restoredCards[0]?.completedAt === undefined,
+    "timestamp-less legacy cards must keep unknown times instead of exposing invalid dates"
+  )
+  const reserialized = serializeSubagentTranscripts({
+    "sub-without-message-time": restored ?? []
+  })["sub-without-message-time"] as Array<Record<string, unknown>>
+  assert(
+    reserialized.every((message) => message.created_at === undefined),
+    "timestamp-less legacy rows must remain serializable without inventing a timestamp"
+  )
+
+  const actualStart = new Date("2026-09-24T01:02:03.000Z")
+  const projected = applySubagentTranscriptStartTime(restored ?? [], actualStart)
+  const projectedAssistant = projected.find((message) => message.role === "assistant")
+  assert(
+    projectedAssistant?.start_at?.getTime() === actualStart.getTime(),
+    "the first assistant row should use the subagent execution start time"
+  )
+  assert(
+    projected !== restored && projectedAssistant !== restoredAssistant,
+    "the display projection must not mutate the persisted transcript"
+  )
+
+  const recordedStart = new Date("2026-09-24T01:02:04.000Z")
+  const alreadyTimed = [{ ...assistantMessage({ id: "timed" }), start_at: recordedStart }]
+  assert(
+    applySubagentTranscriptStartTime(alreadyTimed, actualStart) === alreadyTimed,
+    "an existing message start time must remain authoritative and allocation-free"
+  )
 }
 
 function assistantMessage(input: {
@@ -1477,6 +1527,8 @@ async function testPersistedBlobRefsStayCompactAndInvalidateSafely(): Promise<vo
 }
 
 async function run(): Promise<void> {
+  await testMissingTimestampsUseExecutionStartWithoutUsingOpenTime()
+  console.log("PASS subagent transcript start time does not depend on panel open time")
   await testPersistDrainCoalescesBurstWhileWriteIsInFlight()
   console.log("PASS subagent transcript persist drain coalesces bursts")
   await testHydratedTranscriptsRestoreClickableSubagentCards()

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { notifyMarketPublished } from "@/lib/market-change-events"
 import {
   ExternalLink,
   FileEdit,
@@ -426,7 +427,7 @@ export function PluginsPanel(): React.JSX.Element {
   // "not market" so offline users still see their local plugins' internals.
   const [marketPluginsLoaded, setMarketPluginsLoaded] = useState(false)
   const [marketPluginsLoadFailed, setMarketPluginsLoadFailed] = useState(false)
-  const [uploadedPluginNames, setUploadedPluginNames] = useState<Set<string>>(() =>
+  const [uploadedPluginNames] = useState<Set<string>>(() =>
     readUploadedItemNamesFromStorage("plugin")
   )
   const [localUploadedPluginNames, setLocalUploadedPluginNames] = useState<Set<string>>(() =>
@@ -445,12 +446,9 @@ export function PluginsPanel(): React.JSX.Element {
   const [errorMsg, setErrorMsg] = useState<string | null>(null)
   const [fileEditorOpen, setFileEditorOpen] = useState(false)
 
-  // 市场下载的 Plugin 不再隐藏 Skill/Hook/MCP 详情，统一展示组件详情。
-  // 历史上这里会对 origin === "market" 的插件隐藏详情；现按需求恒为可见。
-  // 保留入参以兼容调用点签名（恒返回 false）。
+  // Source access follows the origin persisted by the main process.
   const shouldHidePluginDetails = useCallback((plugin: PluginMetadata | null): boolean => {
-    void plugin
-    return false
+    return !!plugin && plugin.origin !== "local"
   }, [])
 
   // Clean up debounce timer on unmount
@@ -943,7 +941,7 @@ export function PluginsPanel(): React.JSX.Element {
         onToggleHookEnabled={handleToggleHookEnabled}
         onDelete={handleDeleteRequest}
         onPublish={
-          selectedPlugin && !shouldHideSelectedPluginDetails
+          selectedPlugin?.origin === "local" && !shouldHideSelectedPluginDetails
             ? () => openPublishDialog(selectedPlugin)
             : undefined
         }
@@ -959,7 +957,7 @@ export function PluginsPanel(): React.JSX.Element {
         }
         hideComponentDetails={shouldHideSelectedPluginDetails}
         onEditFiles={
-          selectedPlugin && !shouldHideSelectedPluginDetails
+          selectedPlugin?.origin === "local" && !shouldHideSelectedPluginDetails
             ? () => setFileEditorOpen(true)
             : undefined
         }
@@ -1003,13 +1001,17 @@ export function PluginsPanel(): React.JSX.Element {
           if (!open) setPublishTarget(null)
         }}
         onSuccess={({ name, mode }) => {
-          setUploadedPluginNames(readUploadedItemNamesFromStorage("plugin"))
-          void loadMarketPlugins()
+          notifyMarketPublished("plugin")
           toast.success(
             mode === "update"
               ? `Plugin「${name}」更新发布成功，已跳转到应用市场。`
               : `Plugin「${name}」发布成功，已跳转到应用市场。`
           )
+          useAppStore.setState({
+            marketInitialTab: "plugin",
+            marketInitialSkillSearchQuery: name.trim(),
+            marketInitialSkillDetailName: null
+          })
           setShowCustomizeView(true, "market")
         }}
       />
@@ -1039,10 +1041,11 @@ export function PluginDetailPanel(props: {
     onPublish,
     publishLabel = "发布到市场",
     hideActions = false,
-    hideComponentDetails = false,
+    hideComponentDetails: requestedHideComponentDetails = false,
     isMarketPlugin = false,
     onEditFiles
   } = props
+  const hideComponentDetails = requestedHideComponentDetails || plugin?.origin !== "local"
 
   if (!plugin) {
     return (

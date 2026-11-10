@@ -3197,6 +3197,7 @@ function ResourcePreview({
   useEffect(() => {
     if (!isFullscreen) return
     const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.defaultPrevented || useAppStore.getState().showCustomizeView) return
       if (event.key === "Escape") {
         setIsFullscreen(false)
       }
@@ -4447,17 +4448,19 @@ function SkillsContent({
                       >
                         {displayName}
                       </span>
-                      <IconPopoverButton
-                        icon={<Eye className="size-3.5" />}
-                        popoverContent="可以预览完整信息"
-                        aria-label="预览完整技能信息"
-                        className="shrink-0 rounded-md p-1"
-                        stopPropagation
-                        onClick={() => {
-                          if (!node.skill) return
-                          void openSkillPreview(node.skill)
-                        }}
-                      />
+                      {node.skill?.contentOrigin === "local" && (
+                        <IconPopoverButton
+                          icon={<Eye className="size-3.5" />}
+                          popoverContent="可以预览完整信息"
+                          aria-label="预览完整技能信息"
+                          className="shrink-0 rounded-md p-1"
+                          stopPropagation
+                          onClick={() => {
+                            if (!node.skill) return
+                            void openSkillPreview(node.skill)
+                          }}
+                        />
+                      )}
                       {(node.skill.pluginName || node.skill.pluginId) && (
                         <div className="mt-1 flex min-w-0 items-center gap-1">
                           <Badge

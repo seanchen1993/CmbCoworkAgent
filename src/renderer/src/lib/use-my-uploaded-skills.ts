@@ -59,15 +59,17 @@ export function useMyUploadedSkills(): MyUploadedSkills {
 
   useEffect(() => {
     let cancelled = false
+    let latestRequest = 0
 
     async function load(): Promise<void> {
+      const request = ++latestRequest
       if (!cancelled) setLoading(true)
       try {
         const [currentUserCandidates, skills] = await Promise.all([
           loadCurrentUserCandidates(),
           marketApi.getSkills()
         ])
-        if (cancelled) return
+        if (cancelled || request !== latestRequest) return
         const keys = new Set<string>()
         const itemsByKey = new Map<string, MarketItem>()
         if (skills.success && skills.data && currentUserCandidates.size > 0) {
@@ -83,22 +85,29 @@ export function useMyUploadedSkills(): MyUploadedSkills {
         setOwnedSkillItemsByKey(itemsByKey)
       } catch (error) {
         console.warn("[useMyUploadedSkills] failed to resolve uploaded skills:", error)
-        if (!cancelled) {
+        if (!cancelled && request === latestRequest) {
           setOwnedSkillKeys(EMPTY_KEYS)
           setOwnedSkillItemsByKey(EMPTY_ITEMS_BY_KEY)
         }
       } finally {
-        if (!cancelled) setLoading(false)
+        if (!cancelled && request === latestRequest) setLoading(false)
       }
     }
 
     void load()
+    const unsubscribeIdentity = window.api.models.onUserInfoChanged(() => {
+      // Drop the previous login's ownership before resolving the new identity.
+      setOwnedSkillKeys(EMPTY_KEYS)
+      setOwnedSkillItemsByKey(EMPTY_ITEMS_BY_KEY)
+      void load()
+    })
     const unsubscribeLogin = window.electron?.ipcRenderer?.on?.("notify-login-msg", () => {
       void load()
     })
 
     return () => {
       cancelled = true
+      unsubscribeIdentity()
       unsubscribeLogin?.()
     }
   }, [])

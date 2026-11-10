@@ -203,6 +203,7 @@ export function SubagentCard({
               subagentId: subagent.id,
               name: subagent.name,
               description: subagent.description,
+              startedAt: subagent.startedAt,
               status: subagent.status
             })
           }}

@@ -1,3 +1,5 @@
+import type { ManagedRunModelSelection } from "./managed-run-model"
+
 export type HarnessUiKind =
   | "pending"
   | "active"
@@ -116,16 +118,30 @@ export interface HarnessKnowledgePreviewResult {
   path?: string
   /** Sender-bound capability for previewing descendants of `path`. */
   previewGrant?: string
+  previewGrantExpiresAt?: number
   files: HarnessKnowledgePreviewFile[]
   error?: string
 }
 
+/** Single-directory feature snapshot; never refreshed from the global repository catalog. */
 export interface HarnessDeployUnitMapping {
   deployUnitIdMapping: string
   deployUnitId: string
   localRepoPath: string
   description?: string
 }
+
+/** Global multi-directory catalog entry used when configuring a feature. */
+export interface HarnessDeployUnitConfig {
+  deployUnitIdMapping: string
+  deployUnitId: string
+  description?: string
+  repositoryPaths: Array<{ pathId: string; localRepoPath: string }>
+}
+
+export type HarnessSessionWorkspace =
+  | { source: "directory"; path: string }
+  | { source: "deployUnit"; deployUnitId: string }
 
 export interface HarnessLeanTokenConfig {
   leanToken: string
@@ -171,6 +187,7 @@ export interface HarnessFeatureDeployUnitBinding {
   projectId: string
   featureId: string
   selectedDeployUnitMappings: HarnessDeployUnitMapping[]
+  sessionWorkspace?: HarnessSessionWorkspace
   sessionContextInjectionSource: HarnessSessionContextInjectionSource
   imManagementEnabled?: boolean
 }
@@ -218,13 +235,15 @@ export interface HarnessProjectMetadata {
   description: string
   projectCode: string
   projectFromLean: boolean
+  isTestProject?: boolean
   projectDir: string
   systemId: string
   systemName: string
   workspacePath: string
-  sessionWorkspacePath?: string
   /** First feature-session run whose complete system-constraint set loaded successfully. */
   systemConstraintFirstLoadedAt?: string
+  /** 该项目第一次开启托管运行的时间。与上面那个约束标记同样是单调的，只写一次。 */
+  managedRunFirstStartedAt?: string
   "harness-adapter": HarnessAdapterSnapshot
   creator?: HarnessProjectCreatorMetadata
   lifecycle: {
@@ -240,12 +259,12 @@ export interface HarnessProjectCreateInput {
   name: string
   projectCode: string
   projectFromLean: boolean
+  isTestProject?: boolean
   projectDir: string
   description: string
   systemId: string
   systemName: string
   workspacePath: string
-  sessionWorkspacePath?: string
 }
 
 export interface HarnessEnterpriseProjectSearchInput {
@@ -364,6 +383,7 @@ export interface HarnessProjectReviewResult {
 }
 
 export interface HarnessFeatureCreateInput {
+  sessionWorkspace: HarnessSessionWorkspace
   projectId: string
   feature: string
   selectedDeployUnits?: HarnessDeployUnitMapping[]
@@ -381,6 +401,7 @@ export interface HarnessFeatureCreateResult {
 }
 
 export interface HarnessFeatureDeployUnitUpdateInput {
+  sessionWorkspace: HarnessSessionWorkspace
   projectId: string
   featureId: string
   selectedDeployUnits: HarnessDeployUnitMapping[]
@@ -408,6 +429,9 @@ export interface ManagedRunStartInput {
   projectId: string
   featureId: string
   workspacePath: string
+  initialUserMessage?: string
+  existingThreadId?: string
+  modelSelection?: ManagedRunModelSelection
 }
 
 export interface ManagedRunStartValidationInput {
@@ -456,12 +480,12 @@ export interface HarnessProjectMetadataUpdateInput {
   name: string
   projectCode: string
   projectFromLean: boolean
+  isTestProject?: boolean
   projectDir: string
   description: string
   systemId: string
   systemName: string
   workspacePath: string
-  sessionWorkspacePath?: string
 }
 
 export interface HarnessProjectListItem {
@@ -470,12 +494,13 @@ export interface HarnessProjectListItem {
   description: string
   projectCode: string
   projectFromLean: boolean
+  isTestProject?: boolean
   projectDir: string
   systemId: string
   systemName: string
   workspacePath: string
-  sessionWorkspacePath?: string
   systemConstraintFirstLoadedAt?: string
+  managedRunFirstStartedAt?: string
   harnessAdapter: {
     id: string
     name: string
@@ -564,6 +589,7 @@ export interface ManagedRunSnapshot {
   featureId: string
   status: ManagedRunStatus
   workspacePath?: string
+  modelSelection?: ManagedRunModelSelection
   currentSession?: {
     threadId: string
     workspacePath?: string
@@ -576,6 +602,8 @@ export interface ManagedRunSnapshot {
     nextActionHash: string
   }
   providerRetryCount: number
+  /** Absent in historical records; the store normalizes it to zero on read. */
+  totalRetryCount?: number
   nextRetryAt?: string
   failureReason?: string
   cancellationReason?: string
@@ -609,6 +637,7 @@ export interface ManagedRunDecisionFacts {
   initialInspection: boolean
   previousNodeId?: string
   providerRetryCount: number
+  totalRetryCount?: number
   contextInputTokens?: number
   contextMaxTokens?: number
   contextUsageRatio?: number
@@ -621,7 +650,7 @@ export interface ManagedRunDecisionFacts {
 export type ManagedRunPolicyResult =
   | {
       type: "biz_progress"
-      proposedAction: "start_new_thread"
+      proposedAction: "start_new_thread" | "continue_current_thread"
       reasonCode: string
       facts?: ManagedRunDecisionFacts
       rule?: string
@@ -793,6 +822,7 @@ export interface HarnessFeatureSummary {
   featureStatus: HarnessFeatureStatus
   featureStatusLabel?: string
   managedRunStatus?: ManagedRunViewStatus
+  managedRunThreadId?: string
   /**
    * Feature-level status for summary cards. Plugins can provide it explicitly;
    * otherwise the framework derives it from the current node and workflow.
@@ -817,7 +847,6 @@ export interface HarnessProjectDetailViewModel {
     systemId: string
     systemName: string
     workspacePath: string
-    sessionWorkspacePath?: string
     projectRootPath: string
   }
   adapterSnapshot: {
@@ -881,6 +910,7 @@ export interface AgentTurnEndEvent extends AutoModeEventBase {
   endReason: {
     code: "normal" | "provider_error" | "hook_halt" | "failure_fuse" | "unknown"
     message?: string
+    retryable?: boolean
   }
   contextUsage?: {
     inputTokens: number
@@ -1004,6 +1034,10 @@ export interface HarnessRunNode {
 }
 
 export interface HarnessRunDetailViewModel {
+  artifactAccumulation?: {
+    syncType: "invoke_session"
+    nextAction: HarnessWorkflowNextAction
+  }
   /** Main-issued, sender-bound capability for generated run artifacts. */
   artifactPreviewGrant?: string
   /** Absolute epoch milliseconds; the renderer renews lazily near this boundary. */
@@ -1015,7 +1049,6 @@ export interface HarnessRunDetailViewModel {
     projectDir: string
     systemId: string
     workspacePath: string
-    sessionWorkspacePath?: string
     projectRootPath: string
   }
   adapterSnapshot: {
@@ -1042,6 +1075,8 @@ export interface HarnessRunDetailViewModel {
     overallStatus?: HarnessStatus
     skipNodeAvailable: boolean
     selectedDeployUnits: HarnessDeployUnitMapping[]
+    sessionWorkspace?: HarnessSessionWorkspace
+    resolvedSessionWorkspacePath?: string
     currentNodeId: string
     nodes: HarnessRunNode[]
     unmatchedHooks: HarnessHookLogView[]

@@ -2,10 +2,18 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 const storageMocks = vi.hoisted(() => ({
   getUserInfo: vi.fn(),
-  upsertUserInfoConfig: vi.fn()
+  upsertUserInfoConfig: vi.fn(),
+  sendUserInfoChanged: vi.fn()
 }))
 
 vi.mock("../storage", () => storageMocks)
+vi.mock("electron", () => ({
+  BrowserWindow: {
+    getAllWindows: () => [
+      { isDestroyed: () => false, webContents: { send: storageMocks.sendUserInfoChanged } }
+    ]
+  }
+}))
 
 import { listCurrentUserTaskCards } from "./task-cards"
 
@@ -33,6 +41,7 @@ describe("task card access token refresh", () => {
     vi.spyOn(console, "error").mockImplementation(() => undefined)
     storageMocks.getUserInfo.mockReset()
     storageMocks.upsertUserInfoConfig.mockReset()
+    storageMocks.sendUserInfoChanged.mockReset()
     endpointSequence += 1
     process.env.CMB_TASK_CARDS_ENDPOINT = `https://task-cards.example.test/api/tasks-${endpointSequence}`
     process.env.CMB_LOGIN_INFO_ENDPOINT = "https://login.example.test/cowork/login-info"
@@ -131,6 +140,7 @@ describe("task card access token refresh", () => {
         ystAccessToken: "new-token"
       })
     )
+    expect(storageMocks.sendUserInfoChanged).toHaveBeenCalledWith("models:userInfoChanged")
 
     storageMocks.getUserInfo.mockReturnValue({
       sapId: "00000001",
@@ -164,7 +174,7 @@ describe("task card access token refresh", () => {
           returnCode: "SUC0000",
           body: {
             sapId: "00000001",
-            ystId: "yst-new",
+            ystId: "yst-old",
             userName: "Dev User",
             ystRefreshToken: "next-refresh-token",
             ystAccessToken: "new-token"
@@ -192,6 +202,7 @@ describe("task card access token refresh", () => {
     expect(result.success).toBe(true)
     expect(result.cards[0].taskKey).toBe("M10000749-10")
     expect(fetchMock).toHaveBeenCalledTimes(4)
+    expect(storageMocks.sendUserInfoChanged).not.toHaveBeenCalled()
 
     const retriedPost = fetchMock.mock.calls[2][1] as RequestInit
     expect(retriedPost.method).toBe("POST")

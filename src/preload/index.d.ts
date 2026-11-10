@@ -1,9 +1,35 @@
 import type {
+  ManagedRunSchedule,
+  ManagedRunScheduleInput,
+  ManagedRunScheduleUpdateInput,
+  ManagedRunScheduleIdentity,
+  ManagedRunScheduleChange
+} from "../shared/managed-run-schedule"
+import type {
+  KnowledgeAccumulationData,
+  KnowledgeActiveDetails,
+  KnowledgeFileReaders,
+  KnowledgeProjectStats,
+  KnowledgeReadDetails,
+  KnowledgeReadFileRef,
+  KnowledgeRecentConstraintFiles
+} from "../shared/dashboard-knowledge-overview"
+import type { ProjectAttentionSortKey } from "../shared/project-attention"
+import type { ProjectCodeTraceRequest, ProjectCodeTracePage } from "../shared/project-code-trace"
+import type {
+  EfficiencyDevComputeResult,
+  EfficiencyPluginFilter
+} from "../shared/dashboard-efficiency-compute"
+import type { DashboardToolUsageCoverage } from "../shared/dashboard-tool-usage"
+import type { DashboardThreadTraceScope } from "../shared/dashboard-thread-trace-scope"
+import type { DashboardKnowledgeCommitRate } from "../shared/dashboard-knowledge-commit-rate"
+import type {
   AppNotification,
   AppDecisionInput,
   AppDecisionResult
 } from "../shared/app-notifications"
 import type { SubagentExportTarget } from "../shared/subagent-session-export"
+import type { UiGuideConfig, UiGuideState } from "../shared/ui-guides"
 import type { UpdateSourceInfo } from "../main/updater/channel-config"
 import type {
   WorkflowWorktreeAction,
@@ -120,6 +146,7 @@ import type {
   HarnessRunArtifactRevealInput,
   HarnessRunArtifactRevealResult,
   HarnessDeployUnitMapping,
+  HarnessDeployUnitConfig,
   HarnessLeanTokenConfig,
   HarnessSkipNodeInput,
   HarnessSkipNodeResult,
@@ -234,7 +261,7 @@ interface ElectronAPI {
   setAgentRuntimeRecursionLimit: (value: number) => Promise<AgentRuntimeSettings>
   setWorkflowWorktreeTimeoutMinutes: (value: number) => Promise<AgentRuntimeSettings>
   setWorkflowWorktreeRemoveTimeoutMinutes: (value: number) => Promise<AgentRuntimeSettings>
-  onNotifyMsg: (callback: (msg: string) => void) => void
+  onNotifyMsg: (callback: (msg: string) => void) => () => void
   ipcRenderer: {
     send: (channel: string, ...args: unknown[]) => void
     on: (channel: string, listener: (...args: unknown[]) => void) => () => void
@@ -297,6 +324,8 @@ interface DashboardTraceNode {
 }
 
 interface DashboardTraceDetail {
+  threadSkillUsage?: import("../shared/dashboard-thread-skills").DashboardThreadSkill[]
+  threadSkillUsageError?: string
   traceId: string
   threadId: string
   startedAt: string
@@ -341,6 +370,7 @@ interface DashboardTraceDetail {
   totalToolCalls: number
   modelCallCount: number
   userInputRequestCount: number
+  userInputRequestCountComplete?: boolean
   totalInputTokens: number
   totalOutputTokens: number
   totalTokens: number
@@ -522,7 +552,7 @@ interface DashboardEfficiencyChangeKindStats extends DashboardCodeStats {
   changeKind: "new" | "legacy" | "unclassified"
 }
 
-interface DashboardEfficiencyData {
+interface DashboardEfficiencyData extends EfficiencyDevComputeResult {
   scalability: {
     slope: number | null
     pendingReason: string
@@ -532,18 +562,6 @@ interface DashboardEfficiencyData {
     byChangeKind: DashboardEfficiencyChangeKindStats[]
     newRatioHistogram: { from: number; docCount: number }[]
     unmeasuredRatio: number | null
-  }
-  compute: {
-    totalInputTokens: number
-    totalOutputTokens: number
-    totalTokens: number
-    cacheReadTokens: number
-    tokenTotalsConsistent: boolean
-    pushedAdoptedLines: number
-    tokensPerAdoptedLine: number | null
-    traceCount: number
-    codeProducingTraceCount: number
-    codeProducingTraceRatio: number | null
   }
   meta: {
     projectCount: number
@@ -691,6 +709,8 @@ interface DashboardUserDetailOptions {
 }
 
 interface DashboardProjectModeFeature {
+  totalDurationMs?: number | null
+  lastExecutedAt?: string | null
   slug: string
   title: string
   location?: string
@@ -717,6 +737,7 @@ interface DashboardProjectModeSkillAdoption extends DashboardCodeStats {
 }
 
 interface DashboardProjectModeToolUsage {
+  toolUsageCoverage?: DashboardToolUsageCoverage
   byTool: Array<{ tool: string; count: number }>
   byToolAll: Array<{ tool: string; count: number }>
   byToolFilteredAll: Array<{ tool: string; count: number }>
@@ -752,6 +773,7 @@ interface DashboardProjectModeAnalytics {
 }
 
 interface DashboardProjectModeProject {
+  lastExecutedAt?: string | null
   projectId: string
   name: string
   description?: string
@@ -773,6 +795,7 @@ interface DashboardProjectModeProject {
   featureCount: number
   conversationCount: number
   suspectedTechnicalDetailConversationCount?: number
+  attentionMetric?: number | null
   devStageConversationCount: number
   devAssociatedFeatureCount: number
   hasError: boolean
@@ -806,6 +829,7 @@ interface DashboardProjectModeProjectCounts {
 }
 
 type DashboardProjectModeProjectSortKey =
+  | ProjectAttentionSortKey
   | "featureCount"
   | "createdAt"
   | "conversationCount"
@@ -834,9 +858,18 @@ interface DashboardProjectModeProjectPageData {
   truncated: boolean
 }
 
-interface DashboardProjectModeProjectPageOptions {
+/**
+ * 项目运营概览的三个全局筛选口径。总览、代码指标换数、项目列表、导出共用同一组，
+ * 任何一处漏传都会让那块数据和其它块对不上。
+ */
+interface DashboardProjectModeFilterOptions {
   upperOrgLv1?: string | string[] | null
   fromLeanOnly?: boolean | null
+  /** 仅统计创建时间落在 range 内的项目；比较用的范围走同一次调用的 range 参数。 */
+  createdInRangeOnly?: boolean | null
+}
+
+interface DashboardProjectModeProjectPageOptions extends DashboardProjectModeFilterOptions {
   status?: DashboardProjectModeProjectStatus | null
   page?: number
   pageSize?: number
@@ -867,6 +900,10 @@ interface DashboardProjectModeAdapter {
   projectCount: number
   featureCount: number
   conversationCount: number
+  /** 所选范围内主 Agent 主动对话按非空 sapId 去重。 */
+  userCount: number
+  /** 插件名下跨版本去重的人数，不能累加各版本的 userCount。 */
+  allVersionsUserCount: number
   codeStats: DashboardCodeStats | null
   stageBuckets: DashboardStageBuckets
 }
@@ -892,7 +929,7 @@ interface DashboardProjectModeData {
   tools: DashboardProjectModeToolUsage
   analytics: DashboardProjectModeAnalytics
   projectCounts: DashboardProjectModeProjectCounts
-  projectPage: DashboardProjectModeProjectPageData
+  projectPage?: DashboardProjectModeProjectPageData
   projects: DashboardProjectModeProject[]
   /**
    * 「仅精益项目」开关下精益项目 id 集被截断、遥测汇总可能不完整。开关关闭时恒为 false。
@@ -953,6 +990,42 @@ interface DashboardProjectModeOperationalDetails {
   hookEvents: Array<{ event: string; count: number }>
 }
 
+interface DashboardProjectModeStageMetrics {
+  conversationCount: number
+  /** 归属到该阶段的 Agent 忙碌总时长，不是阶段的墙钟周期。 */
+  totalDurationMs: number
+  avgDurationMs: number
+  p95DurationMs: number
+  runCost: {
+    toolCalls: number
+    modelCalls: number
+    /** 模型上报的总量；缓存子集不重复相加。 */
+    totalTokens: number
+    inputTokens: number
+    outputTokens: number
+    userInputRequests: number
+    userInputRequestDocs: number
+    traceDocs?: number
+  }
+}
+
+interface DashboardProjectModeStageAnalysis {
+  costAttribution?: {
+    callStartTraceCount: number
+    turnStartTraceCount: number
+    tokenUsageReportedCalls: number
+    modelCalls: number
+    truncated: boolean
+  }
+  projectId: string
+  total: DashboardProjectModeStageMetrics
+  stages: Array<{
+    nodeName: string
+    group: string | null
+    metrics: DashboardProjectModeStageMetrics
+  }>
+}
+
 interface DashboardProjectModeFeatureNode {
   nodeName: string
   conversationCount: number
@@ -973,6 +1046,11 @@ interface DashboardPluginAggregate {
 }
 
 interface CustomAPI {
+  uiGuides: {
+    getState(config: UiGuideConfig): Promise<UiGuideState>
+    recordDisplay(config: UiGuideConfig): Promise<boolean>
+    acknowledge(config: UiGuideConfig): Promise<void>
+  }
   agent: {
     invoke: (
       threadId: string,
@@ -1223,7 +1301,10 @@ interface CustomAPI {
         created_at: Date | string | number
       }>
     }>
-    generateTitle: (message: string) => Promise<string>
+    generateTitle: (
+      message: string,
+      context?: { threadId: string; skillName?: string; skillDescription?: string }
+    ) => Promise<string>
     onApiFeatureCreated: (
       callback: (payload: { threadId: string; nextAction: unknown }) => void
     ) => () => void
@@ -1302,7 +1383,7 @@ interface CustomAPI {
         id: string
         ref: `builtin:${string}`
         source: "builtin"
-        origin: "remote" | "fallback"
+        origin: "remote" | "fallback" | "local"
         name: string
         baseUrl: string
         model: string
@@ -1317,7 +1398,9 @@ interface CustomAPI {
         enableThinkingEffort?: boolean
         thinkingEffort?: "low" | "high" | "max"
         tier?: "premium" | "economy"
-        lockedFields: Array<"baseUrl" | "model" | "apiKey">
+        notice?: string
+        unavailableReason?: string
+        lockedFields: Array<"baseUrl" | "model" | "apiKey" | "maxTokens">
       }>
     >
     updateBuiltinConfig: (
@@ -1375,6 +1458,7 @@ interface CustomAPI {
     }) => Promise<{ id: string }>
     upsertUserInfo: (config: UserInfoConfig) => Promise<{ id: string }>
     getUserInfo: () => Promise<UserInfoConfig | null>
+    onUserInfoChanged: (callback: () => void) => () => void
     deleteCustomConfig: (id: string) => Promise<void>
     testConnection: (params: {
       id?: string
@@ -1779,7 +1863,7 @@ interface CustomAPI {
     upload: (
       buffer: ArrayBuffer,
       fileName: string,
-      options?: { allowNestedNameDuplicates?: boolean }
+      options?: { allowNestedNameDuplicates?: boolean; origin?: "market" | "local" }
     ) => Promise<{
       success: boolean
       skillName?: string
@@ -2155,7 +2239,8 @@ interface CustomAPI {
       buffer: ArrayBuffer,
       fileName: string,
       origin?: "market" | "local",
-      version?: string
+      version?: string,
+      marketplace?: PluginMetadata["marketplace"]
     ) => Promise<{ success: boolean; pluginName?: string; error?: string }>
     installFromDir: () => Promise<{ success: boolean; pluginName?: string; error?: string }>
     exportForMarket: (
@@ -2560,6 +2645,7 @@ interface CustomAPI {
     cancelRequests: (families?: string[]) => Promise<{ cancelled: number }>
     isAllowed: () => Promise<boolean>
     isProjectModeAllowed: () => Promise<boolean>
+    orgFilterDefaults: () => Promise<string[]>
     isAnalysisAgentAllowed: () => Promise<boolean>
     isTraceEvolverReviewAdmin: () => Promise<boolean>
     isUncommittedAnalysisAllowed: () => Promise<boolean>
@@ -2607,21 +2693,77 @@ interface CustomAPI {
     projectMode: (
       range: { from: string; to: string },
       granularity: "day" | "week" | "month" | "custom",
-      opts?: { upperOrgLv1?: string | string[] | null; fromLeanOnly?: boolean | null }
+      opts?: DashboardProjectModeFilterOptions & {
+        refreshProjects?: boolean
+        skipProjectList?: boolean
+      }
     ) => Promise<{ success: boolean; data?: DashboardProjectModeData; error?: string }>
     projectModeCodeStats: (
       range: { from: string; to: string },
-      opts: { upperOrgLv1?: string | string[] | null; fromLeanOnly?: boolean | null } | undefined,
+      opts: DashboardProjectModeFilterOptions | undefined,
       source: string | null
     ) => Promise<{
       success: boolean
       data?: { codeStats: DashboardCodeStats | null; skillCodeStats: DashboardCodeStats | null }
       error?: string
     }>
-    efficiency: (
+    knowledgeAccumulation: (opts?: {
+      upperOrgLv1?: string | string[] | null
+    }) => Promise<{
+      success: boolean
+      data?: KnowledgeAccumulationData
+      error?: string
+      cancelled?: boolean
+    }>
+    knowledgeActiveDetails: (opts?: { upperOrgLv1?: string | string[] | null }) => Promise<{
+      success: boolean
+      data?: KnowledgeActiveDetails
+      error?: string
+      cancelled?: boolean
+    }>
+    knowledgeReadDetails: (opts?: { upperOrgLv1?: string | string[] | null }) => Promise<{
+      success: boolean
+      data?: KnowledgeReadDetails
+      error?: string
+      cancelled?: boolean
+    }>
+    knowledgeReadReaders: (
+      file: KnowledgeReadFileRef,
+      opts?: { upperOrgLv1?: string | string[] | null }
+    ) => Promise<{
+      success: boolean
+      data?: KnowledgeFileReaders
+      error?: string
+      cancelled?: boolean
+    }>
+    knowledgeProjectStats: (
       range: { from: string; to: string },
       opts?: { upperOrgLv1?: string | string[] | null }
+    ) => Promise<{
+      success: boolean
+      data?: KnowledgeProjectStats
+      error?: string
+      cancelled?: boolean
+    }>
+    knowledgeRecentConstraintFiles: (opts?: {
+      upperOrgLv1?: string | string[] | null
+    }) => Promise<{
+      success: boolean
+      data?: KnowledgeRecentConstraintFiles
+      error?: string
+      cancelled?: boolean
+    }>
+    knowledgeCommitRate: (
+      range: { from: string; to: string },
+      opts?: { upperOrgLv1?: string | string[] | null }
+    ) => Promise<{ success: boolean; data?: DashboardKnowledgeCommitRate; error?: string }>
+    efficiency: (
+      range: { from: string; to: string },
+      opts?: { upperOrgLv1?: string | string[] | null } & EfficiencyPluginFilter
     ) => Promise<{ success: boolean; data?: DashboardEfficiencyData; error?: string }>
+    projectMetricGroupOptions: (
+      filters: Pick<ProjectMetricFilters, "range" | "upperOrgLv1">
+    ) => Promise<{ success: boolean; data?: string[]; error?: string }>
     projectMetricSummary: (
       filters: ProjectMetricFilters
     ) => Promise<{ success: boolean; data?: ProjectMetricSummaryData; error?: string }>
@@ -2638,25 +2780,38 @@ interface CustomAPI {
     ) => Promise<{ success: boolean; data?: DashboardProjectModeProjectPageData; error?: string }>
     projectModeExportData: (
       range: { from: string; to: string },
-      opts?: { upperOrgLv1?: string | string[] | null; fromLeanOnly?: boolean | null }
+      opts?: DashboardProjectModeFilterOptions
     ) => Promise<{ success: boolean; data?: DashboardProjectModeExportData; error?: string }>
+    projectCodeTrace: (
+      input: ProjectCodeTraceRequest
+    ) => Promise<{ success: boolean; data?: ProjectCodeTracePage; error?: string }>
     projectModeTraces: (
       projectId: string,
-      range: { from: string; to: string },
+      range: { from: string; to: string } | null,
       options?: DashboardProjectModeTracesOptions
     ) => Promise<{ success: boolean; data?: DashboardProjectModeTracesData; error?: string }>
     projectModeFeatureNodes: (
       projectId: string,
       featureSlug: string,
-      range: { from: string; to: string }
+      range: { from: string; to: string } | null,
+      opts?: { upperOrgLv1?: string | string[] | null }
     ) => Promise<{ success: boolean; data?: DashboardProjectModeFeatureNode[]; error?: string }>
     projectModeOperationalDetails: (
       scope: { projectId: string; featureSlug?: string; nodeName?: string },
-      range: { from: string; to: string },
+      range: { from: string; to: string } | null,
       opts?: { upperOrgLv1?: string | string[] | null }
     ) => Promise<{
       success: boolean
       data?: DashboardProjectModeOperationalDetails
+      error?: string
+    }>
+    projectModeStageAnalysis: (
+      projectId: string,
+      range: { from: string; to: string } | null,
+      opts?: { upperOrgLv1?: string | string[] | null; featureSlug?: string }
+    ) => Promise<{
+      success: boolean
+      data?: DashboardProjectModeStageAnalysis
       error?: string
     }>
     pluginAggregate: (
@@ -2666,7 +2821,7 @@ interface CustomAPI {
     projectModeFeatureCommits: (
       projectId: string,
       featureSlug: string,
-      range: { from: string; to: string },
+      range: { from: string; to: string } | null,
       options?: DashboardCommitDetailsOptions
     ) => Promise<{
       success: boolean
@@ -2681,7 +2836,7 @@ interface CustomAPI {
     }>
     projectModeProjectCommits: (
       projectId: string,
-      range: { from: string; to: string },
+      range: { from: string; to: string } | null,
       options?: DashboardCommitDetailsOptions
     ) => Promise<{
       success: boolean
@@ -2797,7 +2952,7 @@ interface CustomAPI {
     ) => Promise<{ success: boolean; data?: DashboardTraceDetail[]; error?: string }>
     threadTraces: (
       threadId: string,
-      options?: { scope?: "platform" | "project" }
+      options?: DashboardThreadTraceScope
     ) => Promise<{ success: boolean; data?: DashboardTraceDetail[]; error?: string }>
     marketSkillRecentTraces: (
       skill: string,
@@ -2812,6 +2967,7 @@ interface CustomAPI {
       options?:
         | number
         | {
+            projectMode?: boolean
             page?: number
             pageSize?: number
             limit?: number
@@ -2842,11 +2998,14 @@ interface CustomAPI {
       commitSha: string
     ) => Promise<{ success: boolean; data?: DashboardCommitAdoptionEvents; error?: string }>
     exportSkillTraces: (payload: {
+      projectMode?: boolean
       skill: string
       range: { from: string; to: string }
       page: number
       pageSize: number
       totalTraces: number
+      viewMode?: DashboardTraceViewMode
+      triggerScope?: DashboardTraceTriggerScope
       traces: DashboardTraceDetail[]
     }) => Promise<{ success: boolean; canceled?: boolean; filePath?: string; error?: string }>
     exportUserTraces: (payload: {
@@ -2895,15 +3054,20 @@ interface CustomAPI {
     }>
     registry: () => Promise<HarnessAdapterRegistryItem[]>
     listProjects: () => Promise<HarnessProjectListItem[]>
-    getDeployUnitMappings: () => Promise<HarnessDeployUnitMapping[]>
+    getDeployUnitMappings: () => Promise<HarnessDeployUnitConfig[]>
     getLeanTokenConfig: () => Promise<HarnessLeanTokenConfig>
     saveDeployUnitMappings: (
-      mappings: HarnessDeployUnitMapping[]
-    ) => Promise<HarnessDeployUnitMapping[]>
+      mappings: HarnessDeployUnitConfig[]
+    ) => Promise<HarnessDeployUnitConfig[]>
     saveLeanTokenConfig: (input: HarnessLeanTokenConfig) => Promise<HarnessLeanTokenConfig>
     syncProjectConstraints: (adapterId: string) => Promise<HarnessProjectConstraintSyncResult>
     getKnowledgePreview: (adapterId: string) => Promise<HarnessKnowledgePreviewResult>
     cancelKnowledgePreviewRequests: () => Promise<void>
+    selectProjectDirectory: () => Promise<{
+      workspacePath: string
+      projectDir: string
+      validationError: string | null
+    } | null>
     createProject: (input: HarnessProjectCreateInput) => Promise<HarnessProjectMetadata>
     searchEnterpriseProjects: (
       input: HarnessEnterpriseProjectSearchInput
@@ -2933,6 +3097,15 @@ interface CustomAPI {
     ensureFeatureThreadImGrant: (
       input: HarnessFeatureThreadGrantInput
     ) => Promise<HarnessFeatureThreadGrantResult>
+    getActiveManagedRunSchedules: () => Promise<ManagedRunSchedule[]>
+    getManagedRunSchedule: (
+      projectId: string,
+      featureId: string
+    ) => Promise<ManagedRunSchedule | null>
+    scheduleManagedRun: (input: ManagedRunScheduleInput) => Promise<ManagedRunSchedule>
+    cancelManagedRunSchedule: (input: ManagedRunScheduleIdentity) => Promise<void>
+    updateManagedRunSchedule: (input: ManagedRunScheduleUpdateInput) => Promise<void>
+    onManagedRunScheduleChanged: (callback: (event: ManagedRunScheduleChange) => void) => () => void
     validateManagedRunStart: (input: ManagedRunStartValidationInput) => Promise<void>
     startManagedRun: (input: ManagedRunStartInput) => Promise<ManagedRunSummary>
     stopManagedRun: (input: ManagedRunStopInput) => Promise<boolean>
@@ -2963,6 +3136,7 @@ interface CustomAPI {
     getManagedRunEvents: (
       input: ManagedRunIdentity & { cursor?: ManagedRunEventCursor; limit?: number }
     ) => Promise<ManagedRunEventsPage>
+    getManagedRuns: (projectId: string, featureId: string) => Promise<ManagedRunSummary[]>
     getLatestManagedRun: (projectId: string, featureId: string) => Promise<ManagedRunSummary | null>
     cancelDialogTips: () => Promise<void>
     onWatchRefsChanged: (callback: (event: HarnessWatchRefChangedEvent) => void) => () => void

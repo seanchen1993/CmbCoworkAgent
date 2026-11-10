@@ -1,3 +1,11 @@
+import {
+  decodeMarketContent,
+  findProtectedMarketRoot,
+  prepareMarketCommand,
+  resolveMarketRuntimePath,
+  MARKET_CONTENT_DENIED
+} from "../services/market-content"
+import { getCustomSkillsDir, getPlugins } from "../storage"
 /**
  * LocalSandbox: Execute shell commands locally on the host machine.
  *
@@ -32,6 +40,7 @@ import {
   type GrepMatch,
   type FileInfo,
   type FileUploadResponse,
+  type FileDownloadResponse,
   type FileOperationError
 } from "deepagents"
 import fg from "fast-glob"
@@ -43,6 +52,7 @@ import {
   renderPluginSkillMarkdownPlaceholders
 } from "./markdown-placeholders"
 import { replace } from "./replace"
+import { withFileOperation, withWorkspaceExecution } from "./file-operation-lock"
 import type { ToolOrchestrator } from "./tool-orchestrator"
 import {
   assessCommandSafety,
@@ -96,15 +106,22 @@ import { isMemoryStoragePath } from "../memory/paths"
 import {
   isCodeFile,
   recordGen as recordAdoptionGen,
+  recordShellEdit as recordAdoptionShellEdit,
   recordShellFileOps as recordAdoptionShellFileOps
 } from "../services/adoption-tracker"
+import {
+  beginShellFileCapture,
+  noteFileToolWrite,
+  type ShellFileCapture
+} from "./shell-file-effects"
+import { extractShellCommandReadPaths } from "./shell-command-profile"
 import {
   openStableWritableFileHandle,
   type StableWritableFileHandle
 } from "../services/stable-file-handle"
 import {
   getHarnessStageAttributionForCodeGeneration,
-  markHarnessStageAttributionDirty,
+  resolveHarnessExecutionStage,
   type HarnessStageAttribution
 } from "../services/harness-stage-attribution"
 import { recordSystemConstraintRead } from "../services/system-constraint-read-reporter"
@@ -408,6 +425,8 @@ export interface LocalSandboxOptions {
   internalArtifactRoots?: string[]
   /** Records successful agent-owned file mutations for post-run automation. */
   onFileMutation?: (filePath: string, kind: AgentFileMutationKind) => void
+  /** Bash First file telemetry only; never changes execution permissions. */
+  shellFileTelemetry?: boolean
   /** Detects reads of skill files so skill lifecycle hooks can wrap the load. */
   skillLifecycleRegistry?: SkillLifecycleRegistry
   /** Shared run-scoped set used to avoid firing skill lifecycle hooks twice. */
@@ -647,6 +666,8 @@ export const readOnlyShellExecutionContext = new AsyncLocalStorage<boolean>()
  * logical /large_tool_results directory.
  */
 export const agentFileWriteContext = new AsyncLocalStorage<boolean>()
+const shellFileCaptureContext = new AsyncLocalStorage<boolean>()
+export const executeTraceContext = new AsyncLocalStorage<TraceContext>()
 
 export class LocalSandbox
   extends FilesystemBackend
@@ -724,11 +745,10 @@ export class LocalSandbox
   private readonly _virtualMode: boolean
   private readonly _cwd: string
   private readonly _maxFileSizeBytes: number
-  /** Per-file Promise chain lock to serialize concurrent read-write operations */
-  private readonly _fileLocks = new Map<string, Promise<void>>()
   /** mtime recorded after each successful read/write, for external-modification detection */
   private readonly _fileReadTimes = new Map<string, number>()
   private readonly _onFileMutation?: (filePath: string, kind: AgentFileMutationKind) => void
+  private readonly _shellFileTelemetry: boolean
   private _skillLifecycleRegistry?: SkillLifecycleRegistry
   private readonly _skillHooksFired: Set<string>
   private readonly _skillUseTracker?: SkillUseTracker
@@ -1986,7 +2006,7 @@ export class LocalSandbox
     if (systemId) baseEnv.SYSTEM_ID = systemId
     const agentId = options.agentId?.trim()
     const pluginRoot = options.pluginRoot?.trim()
-    if (pluginRoot) baseEnv.PLUGIN_ROOT = pluginRoot
+    if (pluginRoot) baseEnv.PLUGIN_ROOT = resolveMarketRuntimePath(pluginRoot)
     const pluginId = options.pluginId?.trim()
     if (pluginId) baseEnv.PLUGIN_ID = pluginId
     const pluginName = options.pluginName?.trim()
@@ -2063,6 +2083,7 @@ export class LocalSandbox
     this._humanGateThreadId = options.humanGateThreadId?.trim() || this.runId
     this._hookTurnId = options.hookTurnId
     this._onFileMutation = options.onFileMutation
+    this._shellFileTelemetry = options.shellFileTelemetry === true
     this._skillLifecycleRegistry = options.skillLifecycleRegistry
     this._skillHooksFired = options.skillHookKeys ?? new Set<string>()
     this._skillUseTracker = options.skillUseTracker
@@ -2218,7 +2239,7 @@ export class LocalSandbox
    * opens files, so a literal scan sees the REAL targets:
    *  - join adjacent quoted/unquoted parts into one word + remove quotes;
    *  - process POSIX backslash escapes (`\.` → `.`, `~/\.ssh` → `~/.ssh`);
-   *  - expand $VAR / ${VAR} from the SAME env the shell runs with (this.env), so
+   *  - expand $VAR / ${VAR} from the supplied execution env (base env by default), so
    *    $HOME, $USER, $KUBECONFIG, $AWS_SHARED_CREDENTIALS_FILE, $DOCKER_CONFIG …
    *    all resolve to their real paths (an undefined var → "", like the shell);
    *  - single quotes suppress expansion (so `'$HOME/x'` stays literal — this also
@@ -2226,9 +2247,8 @@ export class LocalSandbox
    * Tilde and globbing are handled by the caller. Best-effort: a determined
    * command can still evade a static scan — the only hard boundary is OS-level
    * sandboxing, which the chosen "block sensitive dirs" policy does not use. */
-  private expandShellWords(command: string): string[] {
+  private expandShellWords(command: string, env = this.env): string[] {
     const posix = process.platform !== "win32"
-    const env = this.env
     const lookup = (name: string): string => {
       if (env[name] != null) return String(env[name])
       // Windows env vars are case-insensitive (and PowerShell's $home).
@@ -2572,7 +2592,7 @@ export class LocalSandbox
    * `~/.ssh`, `~/x`), and we add tilde (~ / ~user) and globbing, then resolve each
    * variant against the effective cwd (so `cat ../../.ssh/id_rsa` is caught too)
    * and test isSensitivePath. */
-  private commandReadsSensitivePath(command: string, cwd: string): boolean {
+  private commandReadsSensitivePath(command: string, cwd: string, env = this.env): boolean {
     const home = homedir()
     const homeNorm = home.replace(/\\/g, "/").replace(/\/+$/, "")
     let currentUser = ""
@@ -2583,7 +2603,7 @@ export class LocalSandbox
     }
 
     const expandedWords: string[] = []
-    for (const word of this.expandShellWords(command)) {
+    for (const word of this.expandShellWords(command, env)) {
       const { words: variants, truncated } = LocalSandbox.braceExpand(word)
       // FAIL CLOSED: if a word has too many brace alternatives to fully enumerate,
       // a sensitive branch could hide past the cap while the shell still expands it.
@@ -2775,8 +2795,31 @@ export class LocalSandbox
     return `Memory storage is managed by the background summarizer. Direct ${action} to '${filePath}' is blocked; use the Memory panel or let the conversation summary persist it.`
   }
 
-  private markHarnessStageAttributionDirty(): void {
-    markHarnessStageAttributionDirty(this.harnessProjectId, this.featureId)
+  private async buildExecutionEnv(
+    signal?: AbortSignal
+  ): Promise<Record<string, string> | undefined> {
+    if (signal?.aborted) return undefined
+    if (!this.harnessProjectId || !this.featureId) return this.env
+    const stage = await LocalSandbox.raceWithAbort(
+      resolveHarnessExecutionStage(this.harnessProjectId, this.featureId),
+      signal
+    ).catch((error) => {
+      if (!LocalSandbox.isAbortError(error)) throw error
+      return undefined
+    })
+    if (signal?.aborted) return undefined
+    // Each process owns its snapshot; parallel commands must never mutate the
+    // sandbox's shared base environment or another invocation's stage.
+    const env = { ...this.env }
+    if (stage) {
+      for (const key of Object.keys(env)) {
+        const name = process.platform === "win32" ? key.toUpperCase() : key
+        if (name === "HARNESS_NODE_NAME" || name === "HARNESS_NODE_STATUS") delete env[key]
+      }
+      if (stage.nodeName) env.HARNESS_NODE_NAME = stage.nodeName
+      if (stage.nodeStatus) env.HARNESS_NODE_STATUS = stage.nodeStatus
+    }
+    return env
   }
 
   private async captureHarnessStageForCodeGeneration(
@@ -2832,15 +2875,10 @@ export class LocalSandbox
     }
   }
 
-  private commandMayMutateHarnessState(command: string, cwd: string): boolean {
-    const windowsShell =
-      process.platform === "win32" && this.windowsSandbox !== "none" ? "powershell" : "unknown"
-    return !isReadOnlyShellCommand(command, cwd, windowsShell)
-  }
-
   private async runHooks(event: HookEvent, context: HookContext): Promise<HookResult | null> {
     const hookContext: HookContext = {
       ...context,
+      abortSignal: this.abortSignal,
       ...(this.pluginOutputDir && !context.pluginOutputDir
         ? { pluginOutputDir: this.pluginOutputDir }
         : {}),
@@ -2853,6 +2891,7 @@ export class LocalSandbox
       ...(this.harnessProjectId && !context.harnessProjectId
         ? { harnessProjectId: this.harnessProjectId }
         : {}),
+      ...(this.pluginId && !context.harnessAdapterId ? { harnessAdapterId: this.pluginId } : {}),
       ...(this.harnessAdapterName && !context.harnessAdapterName
         ? { harnessAdapterName: this.harnessAdapterName }
         : {}),
@@ -2878,18 +2917,6 @@ export class LocalSandbox
 
     const hooks = this.resolveHooks(event, hookContext)
     let result = await runHooksEnriched(hooks, event, hookContext, this._onHookResult)
-    const hasHarnessOwnedHook = hooks.some(
-      (hook) =>
-        hook.hookSourceType === "plugin" ||
-        hook.hookSourceType === "skill" ||
-        Boolean(hook.pluginRoot)
-    )
-    if (hasHarnessOwnedHook && (result || (event !== "PreToolUse" && hooks.length > 0))) {
-      // Plugin lifecycle hooks may advance the workflow without going through
-      // LocalSandbox.execute(). Invalidation is cheap; the next code mutation
-      // performs the actual adapter refresh.
-      this.markHarnessStageAttributionDirty()
-    }
     if (result) {
       this._hookScope?.activatePersistentHooks(hooks)
     }
@@ -3173,145 +3200,158 @@ export class LocalSandbox
       return []
     }
 
-    // Resolve the base path once for reuse
-    let baseFull: string
-    try {
-      baseFull = this._resolvePath(effectivePath === "/" ? "." : effectivePath || ".")
-    } catch {
-      return []
-    }
-    // Early exit if path doesn't exist; cache stat for reuse below
-    let baseStat: Awaited<ReturnType<typeof fs.lstat>>
-    try {
-      baseStat = await fs.lstat(baseFull)
-    } catch {
-      return []
-    }
-    if (baseStat.isSymbolicLink()) return []
-    if (this.isHiddenSkillPath(baseFull, realpathCache)) {
-      return []
-    }
-    const isFile = baseStat.isFile()
-
-    // Call parent's private ripgrepSearch directly to distinguish
-    // "rg found nothing" ({}) from "rg unavailable" (null)
-    const ripgrepSearch = getFilesystemBackendInternals(this).ripgrepSearch
-
-    const t0 = Date.now()
-    let rgResult: Record<string, Array<[number, string]>> | null | undefined
-    if (typeof ripgrepSearch === "function") {
-      try {
-        rgResult = await ripgrepSearch.call(this, effectivePattern, baseFull, effectiveGlob ?? null)
-      } catch (error) {
-        console.warn("[LocalSandbox] ripgrepSearch failed, falling back:", error)
-        rgResult = undefined
-      }
-    }
-    const rgMs = Date.now() - t0
-    // undefined = method missing (upstream API changed), treat same as unavailable
-    const rgAvailable = rgResult !== null && rgResult !== undefined
-
-    // Convert ripgrep dict → flat array
-    let results: GrepMatch[] = []
-    if (rgResult) {
-      for (const [fpath, items] of Object.entries(rgResult)) {
-        for (const [lineNum, lineText] of items) {
-          results.push({ path: fpath, line: lineNum, text: lineText })
+    const capped = await withWorkspaceExecution<GrepMatch[]>(
+      this.workingDir,
+      "read",
+      async () => {
+        // Resolve the base path once for reuse
+        let baseFull: string
+        try {
+          baseFull = this._resolvePath(effectivePath === "/" ? "." : effectivePath || ".")
+        } catch {
+          return []
         }
-      }
-    }
-
-    // When path points to a specific file, filter results to only include
-    // matches from the intended file (ripgrep may return broader results).
-    if (results.length > 0 && effectivePath !== "/" && isFile) {
-      let expectedPath: string
-      if (this._virtualMode) {
-        const relative = path.relative(this._cwd, baseFull)
-        expectedPath = "/" + relative.split(path.sep).join("/")
-      } else {
-        expectedPath = baseFull
-      }
-      results = results.filter((m) => m.path === expectedPath)
-    }
-
-    let source = results.length > 0 ? "ripgrep" : "none"
-
-    // Fall back to encoding-aware literal search when:
-    // - ripgrep is unavailable (null/undefined), OR
-    // - ripgrep returned empty for a single file (may be non-UTF-8 / binary-detected,
-    //   e.g. GBK/Shift-JIS files that ripgrep skips as "binary")
-    // For directory-level searches, empty ripgrep results are normal — skip fallback
-    // to keep grep performance aligned with rg-first tools like Claude Code.
-    let fallbackStoppedEarly = false
-    if (!rgAvailable || (results.length === 0 && isFile)) {
-      const t1 = Date.now()
-      const fallbackResult = await this.encodingAwareLiteralSearch(
-        effectivePattern,
-        baseFull,
-        effectiveGlob ?? null,
-        realpathCache
-      )
-      fallbackStoppedEarly = fallbackResult.stoppedEarly
-      const fallbackMs = Date.now() - t1
-      for (const [fpath, items] of Object.entries(fallbackResult.results)) {
-        for (const [lineNum, lineText] of items) {
-          results.push({ path: fpath, line: lineNum, text: lineText })
+        // Early exit if path doesn't exist; cache stat for reuse below
+        let baseStat: Awaited<ReturnType<typeof fs.lstat>>
+        try {
+          baseStat = await fs.lstat(baseFull)
+        } catch {
+          return []
         }
-      }
-      if (results.length > 0) source = "encoding-aware-fallback"
-      console.log(
-        `[LocalSandbox] grepRaw fallback: pattern="${effectivePattern}", results=${results.length}, fallbackMs=${fallbackMs}`
-      )
-    }
+        if (baseStat.isSymbolicLink()) return []
+        if (this.isHiddenSkillPath(baseFull, realpathCache)) {
+          return []
+        }
+        const isFile = baseStat.isFile()
 
-    console.log(
-      `[LocalSandbox] grepRaw: source=${source}, pattern="${effectivePattern}", results=${results.length}, rgMs=${rgMs}`
+        // Call parent's private ripgrepSearch directly to distinguish
+        // "rg found nothing" ({}) from "rg unavailable" (null)
+        const ripgrepSearch = getFilesystemBackendInternals(this).ripgrepSearch
+
+        const t0 = Date.now()
+        let rgResult: Record<string, Array<[number, string]>> | null | undefined
+        if (typeof ripgrepSearch === "function" && !findProtectedMarketRoot(baseFull)) {
+          try {
+            rgResult = await ripgrepSearch.call(
+              this,
+              effectivePattern,
+              baseFull,
+              effectiveGlob ?? null
+            )
+          } catch (error) {
+            console.warn("[LocalSandbox] ripgrepSearch failed, falling back:", error)
+            rgResult = undefined
+          }
+        }
+        const rgMs = Date.now() - t0
+        // undefined = method missing (upstream API changed), treat same as unavailable
+        const rgAvailable = rgResult !== null && rgResult !== undefined
+
+        // Convert ripgrep dict → flat array
+        let results: GrepMatch[] = []
+        if (rgResult) {
+          for (const [fpath, items] of Object.entries(rgResult)) {
+            for (const [lineNum, lineText] of items) {
+              results.push({ path: fpath, line: lineNum, text: lineText })
+            }
+          }
+        }
+
+        // When path points to a specific file, filter results to only include
+        // matches from the intended file (ripgrep may return broader results).
+        if (results.length > 0 && effectivePath !== "/" && isFile) {
+          let expectedPath: string
+          if (this._virtualMode) {
+            const relative = path.relative(this._cwd, baseFull)
+            expectedPath = "/" + relative.split(path.sep).join("/")
+          } else {
+            expectedPath = baseFull
+          }
+          results = results.filter((m) => m.path === expectedPath)
+        }
+
+        let source = results.length > 0 ? "ripgrep" : "none"
+
+        // Fall back to encoding-aware literal search when:
+        // - ripgrep is unavailable (null/undefined), OR
+        // - ripgrep returned empty for a single file (may be non-UTF-8 / binary-detected,
+        //   e.g. GBK/Shift-JIS files that ripgrep skips as "binary")
+        // For directory-level searches, empty ripgrep results are normal — skip fallback
+        // to keep grep performance aligned with rg-first tools like Claude Code.
+        let fallbackStoppedEarly = false
+        if (!rgAvailable || (results.length === 0 && isFile)) {
+          const t1 = Date.now()
+          const fallbackResult = await this.encodingAwareLiteralSearch(
+            effectivePattern,
+            baseFull,
+            effectiveGlob ?? null,
+            realpathCache
+          )
+          fallbackStoppedEarly = fallbackResult.stoppedEarly
+          const fallbackMs = Date.now() - t1
+          for (const [fpath, items] of Object.entries(fallbackResult.results)) {
+            for (const [lineNum, lineText] of items) {
+              results.push({ path: fpath, line: lineNum, text: lineText })
+            }
+          }
+          if (results.length > 0) source = "encoding-aware-fallback"
+          console.log(
+            `[LocalSandbox] grepRaw fallback: pattern="${effectivePattern}", results=${results.length}, fallbackMs=${fallbackMs}`
+          )
+        }
+
+        console.log(
+          `[LocalSandbox] grepRaw: source=${source}, pattern="${effectivePattern}", results=${results.length}, rgMs=${rgMs}`
+        )
+
+        // Filter out matches inside disabled skills so their content cannot leak via grep.
+        if (this._hiddenSkillDirKeys.size > 0) {
+          results = results.filter((m) => !this.isHiddenSkillPath(m.path, realpathCache))
+        }
+
+        // Filter out any results from sensitive directories
+        if (this.windowsSandbox === "elevated") {
+          results = results.filter((m) => {
+            return !this.isSensitiveSandboxPath(m.path, realpathCache)
+          })
+        }
+
+        const capped: GrepMatch[] = []
+        let charCount = 0
+
+        for (const match of results) {
+          if (capped.length >= LocalSandbox.MAX_GREP_MATCHES) break
+          // Truncate overly long lines (e.g. minified JS) to avoid blowing the char budget
+          const text = LocalSandbox.truncateGrepLine(match.text)
+          const estChars = match.path.length + text.length + 16
+          if (charCount + estChars > LocalSandbox.MAX_GREP_CHARS) break
+          capped.push(text !== match.text ? { ...match, text } : match)
+          charCount += estChars
+        }
+
+        if (capped.length < results.length) {
+          const omitted = results.length - capped.length
+          console.log(
+            "[LocalSandbox] grepRaw capped results:",
+            `${capped.length}/${results.length}`,
+            `(omitted ${omitted}, chars=${charCount})`
+          )
+          capped.push({
+            path: "(truncated)",
+            line: 0,
+            text: `Found ${results.length} total matches, showing first ${capped.length}. ${omitted} omitted — refine pattern/path/glob.`
+          })
+        } else if (fallbackStoppedEarly) {
+          capped.push({
+            path: "(truncated)",
+            line: 0,
+            text: `Fallback search stopped after reaching scan/output limits. Showing first ${capped.length} matches — refine pattern/path/glob.`
+          })
+        }
+        return capped
+      },
+      this.abortSignal
     )
-
-    // Filter out matches inside disabled skills so their content cannot leak via grep.
-    if (this._hiddenSkillDirKeys.size > 0) {
-      results = results.filter((m) => !this.isHiddenSkillPath(m.path, realpathCache))
-    }
-
-    // Filter out any results from sensitive directories
-    if (this.windowsSandbox === "elevated") {
-      results = results.filter((m) => {
-        return !this.isSensitiveSandboxPath(m.path, realpathCache)
-      })
-    }
-
-    const capped: GrepMatch[] = []
-    let charCount = 0
-
-    for (const match of results) {
-      if (capped.length >= LocalSandbox.MAX_GREP_MATCHES) break
-      // Truncate overly long lines (e.g. minified JS) to avoid blowing the char budget
-      const text = LocalSandbox.truncateGrepLine(match.text)
-      const estChars = match.path.length + text.length + 16
-      if (charCount + estChars > LocalSandbox.MAX_GREP_CHARS) break
-      capped.push(text !== match.text ? { ...match, text } : match)
-      charCount += estChars
-    }
-
-    if (capped.length < results.length) {
-      const omitted = results.length - capped.length
-      console.log(
-        "[LocalSandbox] grepRaw capped results:",
-        `${capped.length}/${results.length}`,
-        `(omitted ${omitted}, chars=${charCount})`
-      )
-      capped.push({
-        path: "(truncated)",
-        line: 0,
-        text: `Found ${results.length} total matches, showing first ${capped.length}. ${omitted} omitted — refine pattern/path/glob.`
-      })
-    } else if (fallbackStoppedEarly) {
-      capped.push({
-        path: "(truncated)",
-        line: 0,
-        text: `Fallback search stopped after reaching scan/output limits. Showing first ${capped.length} matches — refine pattern/path/glob.`
-      })
-    }
 
     const postResult = await this.runHooks("PostToolUse", {
       toolName: "grep",
@@ -3988,10 +4028,13 @@ export class LocalSandbox
       throw new Error(`Cannot read binary file type: ${ext}`)
     }
 
-    if (stat.size < LocalSandbox.READ_FAST_PATH_MAX_SIZE) {
+    const protectedContent = Boolean(findProtectedMarketRoot(resolvedPath))
+    if (protectedContent || stat.size < LocalSandbox.READ_FAST_PATH_MAX_SIZE) {
       const { buffer, resolvedPath: fastPathResolved } = await this.readFileBuffer(
         filePath,
-        LocalSandbox.READ_FAST_PATH_MAX_SIZE
+        protectedContent
+          ? Math.ceil((this._maxFileSizeBytes * 4) / 3) + 64
+          : LocalSandbox.READ_FAST_PATH_MAX_SIZE
       )
       const encoding = this.detectEncoding(buffer, path.extname(fastPathResolved).toLowerCase())
       const content = iconv.decode(buffer, encoding)
@@ -4166,8 +4209,22 @@ export class LocalSandbox
         truncatedWithinLine,
         truncatedBeforeLine,
         lastVisibleSourceLine
-      } = await this.formatReadRange(effectiveFilePath, effectiveOffset, effectiveLimit, options)
-      await this.recordReadTime(resolvedPath)
+      } = await withFileOperation(
+        this.workingDir,
+        this._resolvePath(effectiveFilePath),
+        "read",
+        async () => {
+          const result = await this.formatReadRange(
+            effectiveFilePath,
+            effectiveOffset,
+            effectiveLimit,
+            options
+          )
+          await this.recordReadTime(result.resolvedPath)
+          return result
+        },
+        this.abortSignal
+      )
 
       if (!hasNonWhitespace) {
         recordTrustedToolFilePreviewSource(resolvedPath, "read")
@@ -4318,7 +4375,7 @@ export class LocalSandbox
       }
     }
 
-    return { buffer, resolvedPath }
+    return { buffer: decodeMarketContent(buffer), resolvedPath }
   }
 
   private static async readFileHandleBuffer(
@@ -4355,23 +4412,7 @@ export class LocalSandbox
    * Different file paths run in parallel; same path is FIFO-queued.
    */
   private async withFileLock<T>(resolvedPath: string, fn: () => Promise<T>): Promise<T> {
-    const lockKey = this.fileIdentityKey(resolvedPath)
-    const prev = this._fileLocks.get(lockKey) ?? Promise.resolve()
-    let release: () => void = () => {}
-    const gate = new Promise<void>((r) => {
-      release = r
-    })
-    const tail = prev.then(() => gate)
-    this._fileLocks.set(lockKey, tail)
-    try {
-      await prev
-      return await fn()
-    } finally {
-      release()
-      if (this._fileLocks.get(lockKey) === tail) {
-        this._fileLocks.delete(lockKey)
-      }
-    }
+    return withFileOperation(this.workingDir, resolvedPath, "write", fn, this.abortSignal)
   }
 
   private fileIdentityKey(resolvedPath: string): string {
@@ -4493,6 +4534,7 @@ export class LocalSandbox
    * case-insensitive path comparison.
    */
   private async isWriteBlocked(filePath: string): Promise<boolean> {
+    if (findProtectedMarketRoot(this._resolvePath(filePath))) return true
     if (this.windowsSandbox !== "readonly") return false
     if (!(await LocalSandbox.getElevationState())) return true
     if (await this.resolveEditableWorkflowScriptPath(filePath)) return false
@@ -4586,6 +4628,7 @@ export class LocalSandbox
 
   /** Build a readonly-sandbox block error message for the given file and action verb. */
   private async readonlyBlockedError(filePath: string, action: string): Promise<string> {
+    if (findProtectedMarketRoot(this._resolvePath(filePath))) return MARKET_CONTENT_DENIED
     return (await LocalSandbox.getElevationState())
       ? `只读沙箱模式下仅允许${action}工作目录内的文件。'${filePath}' 不在工作目录 '${this.workingDir}' 内。`
       : `只读沙箱模式下禁止${action}文件 '${filePath}'。如需${action}请以管理员身份运行或切换沙箱模式。`
@@ -4703,6 +4746,8 @@ export class LocalSandbox
    * Override write to enforce readonly sandbox restrictions.
    */
   async write(filePath: string, content: string): Promise<WriteResult> {
+    if (findProtectedMarketRoot(this._resolvePath(filePath)))
+      return { error: MARKET_CONTENT_DENIED }
     // DeepAgents' automatic result eviction writes to this reserved logical
     // path after the public tool call completes. A model-issued write_file is
     // marked by the runtime and continues through the regular approval flow.
@@ -4796,13 +4841,15 @@ export class LocalSandbox
         return { error: "文件写入已取消。" }
       }
       const r = await super.write(effectiveFilePath, effectiveContent)
-      if (!r.error) await this.recordReadTime(resolvedPath)
+      if (!r.error) {
+        await this.recordReadTime(resolvedPath)
+        await noteFileToolWrite(resolvedPath, effectiveContent)
+      }
       return r
     })
     if (!result.error) {
       recordTrustedToolFilePreviewSource(resolvedPath, "write")
       this._onFileMutation?.(effectiveFilePath, "write")
-      if (!isCodeFile(effectiveFilePath)) this.markHarnessStageAttributionDirty()
       // Adoption tracking (side-effect only, never throws)
       try {
         recordAdoptionGen({
@@ -4831,7 +4878,6 @@ export class LocalSandbox
       })
       return LocalSandbox.applyPostHookContext(result, postResult, "write_file")
     } catch (e) {
-      this.markHarnessStageAttributionDirty()
       if (isHookHaltError(e) || isFailureFuseHaltError(e)) throw e
       console.warn("[Hooks] PostToolUse write error:", e)
       return result
@@ -4839,8 +4885,21 @@ export class LocalSandbox
   }
 
   /**
-   * Override uploadFiles to enforce readonly sandbox restrictions on each file.
+   * Decode SDK skill discovery downloads without exposing a renderer file-read endpoint.
    */
+  async downloadFiles(paths: string[]): Promise<FileDownloadResponse[]> {
+    const files = await super.downloadFiles(paths)
+    return files.map((file) => {
+      if (!file.content || file.error) return file
+      try {
+        return { ...file, content: decodeMarketContent(Buffer.from(file.content)) }
+      } catch {
+        return { path: file.path, content: null, error: "invalid_path" }
+      }
+    })
+  }
+
+  /** Enforce readonly restrictions on every batch-upload target. */
   async uploadFiles(files: [string, Uint8Array][]): Promise<FileUploadResponse[]> {
     const denied: FileOperationError = "permission_denied"
     if (!this.worktreeIsolation) {
@@ -5102,6 +5161,7 @@ export class LocalSandbox
             await this.writeFileEncoded(resolvedPath, expectedContent, encoding)
             await this.recordReadTime(resolvedPath)
           }
+          await noteFileToolWrite(resolvedPath, () => iconv.encode(expectedContent, encoding))
           return { path: effectiveFilePath, filesUpdate: null, occurrences }
         } finally {
           await managedCapability?.handle.close().catch(() => undefined)
@@ -5114,7 +5174,6 @@ export class LocalSandbox
         // auto-commit, Harness attribution, or generated-code adoption.
         if (!managedWorkflowScriptEdit) {
           this._onFileMutation?.(effectiveFilePath, "edit")
-          if (!isCodeFile(effectiveFilePath)) this.markHarnessStageAttributionDirty()
           // Adoption tracking (side-effect only, never throws).
           // Only successful edits should be counted as generated code adoption.
           try {
@@ -5154,7 +5213,6 @@ export class LocalSandbox
         })
         return LocalSandbox.applyPostHookContext(result, postResult, "edit_file")
       } catch (e) {
-        this.markHarnessStageAttributionDirty()
         if (isHookHaltError(e) || isFailureFuseHaltError(e)) throw e
         console.warn("[Hooks] PostToolUse edit error:", e)
         return result
@@ -6830,16 +6888,15 @@ export class LocalSandbox
       (isGitCommitCommand(effectiveCommand, shellSyntax) ||
         isGitPushCommand(effectiveCommand, shellSyntax))
     ) {
-      const result = await this.orchestrator.execute(
-        effectiveCommand,
-        effectiveCwd,
-        this.windowsSandbox,
-        shellSyntax,
-        outsideShellSyntax
+      const result = await shellFileCaptureContext.run(true, () =>
+        this.orchestrator!.execute(
+          effectiveCommand,
+          effectiveCwd,
+          this.windowsSandbox,
+          shellSyntax,
+          outsideShellSyntax
+        )
       )
-      if (this.commandMayMutateHarnessState(effectiveCommand, effectiveCwd)) {
-        this.markHarnessStageAttributionDirty()
-      }
       return result.output || (result.exitCode === 0 ? "操作成功" : "操作失败")
     }
 
@@ -6879,9 +6936,6 @@ export class LocalSandbox
       termination: undefined as Promise<void> | undefined
     }
     LocalSandbox.backgroundTasks.set(taskId, task)
-    if (this.commandMayMutateHarnessState(effectiveCommand, effectiveCwd)) {
-      this.markHarnessStageAttributionDirty()
-    }
 
     // Fire and forget — don't await. Uses extended timeout for background execution.
     // Background tasks use their own AbortController (not the conversation's abortSignal)
@@ -6951,9 +7005,6 @@ export class LocalSandbox
           : rawResult
         if (task.completed) return
         task.result = result
-        if (this.commandMayMutateHarnessState(effectiveCommand, effectiveCwd)) {
-          this.markHarnessStageAttributionDirty()
-        }
         // Append final output to chunks for completeness
         if (result.output) task.outputChunks.push(result.output)
         task.completed = true
@@ -6964,9 +7015,6 @@ export class LocalSandbox
       .catch((err) => {
         // Guard: if already completed (e.g. cancelled via cancelBackgroundTasks), don't overwrite.
         if (task.completed) return
-        if (this.commandMayMutateHarnessState(effectiveCommand, effectiveCwd)) {
-          this.markHarnessStageAttributionDirty()
-        }
         task.result = {
           output: `Error: ${err instanceof Error ? err.message : String(err)}`,
           exitCode: 1,
@@ -7261,19 +7309,19 @@ export class LocalSandbox
     // If an orchestrator is configured, delegate to it for approval + sandbox retry.
     // The orchestrator calls back into executeRaw() for actual execution.
     if (this.orchestrator) {
-      const result = await this.orchestrator.execute(
-        effectiveCommand,
-        effectiveCwd,
-        this.windowsSandbox,
-        shellSyntax,
-        outsideShellSyntax
+      const result = await shellFileCaptureContext.run(true, () =>
+        this.orchestrator!.execute(
+          effectiveCommand,
+          effectiveCwd,
+          this.windowsSandbox,
+          shellSyntax,
+          outsideShellSyntax
+        )
       )
-      if (this.commandMayMutateHarnessState(effectiveCommand, effectiveCwd)) {
-        this.markHarnessStageAttributionDirty()
-      }
       // Adoption tracking: react to agent rm/mv of generated files (side-effect
       // only, never throws). Only successful commands act (exitCode === 0).
-      recordAdoptionShellFileOps(effectiveCommand, this.workingDir, result.exitCode)
+      recordAdoptionShellFileOps(effectiveCommand, effectiveCwd, result.exitCode)
+      this.recordShellReadTelemetry(effectiveCommand, effectiveCwd, result, shellSyntax)
       const postResult = await this.runHooks("PostToolUse", {
         toolName: "execute",
         toolArgs: { command: effectiveCommand, cwd: effectiveCwd },
@@ -7284,13 +7332,13 @@ export class LocalSandbox
       return LocalSandbox.applyPostHookToExecResult(result, postResult)
     }
 
-    const result = await this.executeRaw(effectiveCommand, undefined, undefined, undefined, {
-      cwd: effectiveCwd
-    })
-    if (this.commandMayMutateHarnessState(effectiveCommand, effectiveCwd)) {
-      this.markHarnessStageAttributionDirty()
-    }
-    recordAdoptionShellFileOps(effectiveCommand, this.workingDir, result.exitCode)
+    const result = await shellFileCaptureContext.run(true, () =>
+      this.executeRaw(effectiveCommand, undefined, undefined, undefined, {
+        cwd: effectiveCwd
+      })
+    )
+    recordAdoptionShellFileOps(effectiveCommand, effectiveCwd, result.exitCode)
+    this.recordShellReadTelemetry(effectiveCommand, effectiveCwd, result, shellSyntax)
     const postResult = await this.runHooks("PostToolUse", {
       toolName: "execute",
       toolArgs: { command: effectiveCommand, cwd: effectiveCwd },
@@ -7404,7 +7452,7 @@ export class LocalSandbox
     if (!this.pluginRoot) return false
 
     const hooksRoot = path.win32
-      .normalize(path.win32.join(this.pluginRoot, "hooks"))
+      .normalize(path.win32.join(resolveMarketRuntimePath(this.pluginRoot), "hooks"))
       .replace(/\\+$/, "")
       .replace(/\\+/g, "\\")
       .toLowerCase()
@@ -7422,7 +7470,22 @@ export class LocalSandbox
   ): Promise<LocalExecuteResponse> {
     const effectiveSandboxMode = (sandboxModeOverride ?? this.windowsSandbox) as WindowsSandboxMode
     const effectiveTimeout = timeoutMs ?? this.timeout
-    const effectiveCwd = this.resolveExecutionCwd(cwd)
+    let effectiveCwd = this.resolveExecutionCwd(cwd)
+    const marketRoots = [getCustomSkillsDir(), ...getPlugins().map((plugin) => plugin.path)]
+    const customEntries = await fs
+      .readdir(getCustomSkillsDir(), { withFileTypes: true })
+      .catch((error: NodeJS.ErrnoException) => {
+        if (error.code === "ENOENT") return []
+        throw error
+      })
+    marketRoots.push(
+      ...customEntries
+        .filter((entry) => entry.isDirectory())
+        .map((entry) => path.join(getCustomSkillsDir(), entry.name))
+    )
+    const prepared = prepareMarketCommand(command, effectiveCwd, marketRoots)
+    command = prepared.command
+    effectiveCwd = prepared.cwd
     console.log(
       `[LocalSandbox] executeRaw: command="${command}" cwd="${effectiveCwd}" effectiveMode=${effectiveSandboxMode} override=${sandboxModeOverride} timeout=${effectiveTimeout}ms overrideAbort=${!!overrideAbortSignal}`
     )
@@ -7495,6 +7558,18 @@ export class LocalSandbox
     // contention). Retry up to SPAWN_RETRY_COUNT times with a short delay.
     const maxAttempts = isWindows ? LocalSandbox.SPAWN_RETRY_COUNT + 1 : 1
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      const executionEnv = await this.buildExecutionEnv(overrideAbortSignal ?? this.abortSignal)
+      if (!executionEnv) return LocalSandbox.createAbortedExecuteResponse()
+      if (
+        (this.readOnlyShellEnforced || readOnlyShellExecutionContext.getStore() === true) &&
+        this.commandReadsSensitivePath(effectiveCommand, effectiveCwd, executionEnv)
+      ) {
+        return {
+          output: "execute blocked: reading sensitive credential directories is not allowed.",
+          exitCode: 1,
+          truncated: false
+        }
+      }
       const result = await this.executeOnce(
         effectiveCommand,
         shell,
@@ -7502,7 +7577,8 @@ export class LocalSandbox
         effectiveTimeout,
         overrideAbortSignal,
         effectiveCwd,
-        options
+        options,
+        executionEnv
       )
       const isSpawnEperm =
         result.exitCode === 1 &&
@@ -7561,30 +7637,15 @@ export class LocalSandbox
         truncated: false
       }
     }
-    if (
-      process.platform !== "win32" ||
-      effectiveSandboxMode === "none" ||
-      (backgroundExecution && !this.worktreeIsolation)
-    ) {
-      return this.executeRawUnserialized(
-        command,
-        sandboxModeOverride,
-        timeoutMs,
-        overrideAbortSignal,
-        effectiveCwd,
-        options
-      )
-    }
-
-    const sandboxWorkspaceRoot = path.resolve(this.workingDir)
-    const queueKey = LocalSandbox.buildSerializedExecutionKey(
-      this.runId,
-      sandboxWorkspaceRoot,
-      effectiveSandboxMode
-    )
-    const commandConcurrency = classifyCommandConcurrency(command)
-    if (commandConcurrency === "parallel_safe") {
-      return LocalSandbox.runParallelSafeExecution(queueKey, () =>
+    // Read the request flag here, in the caller's async context; the capture
+    // window itself starts after any Windows sandbox queue wait, right before
+    // the process starts.
+    const captureFileEffects =
+      this._shellFileTelemetry &&
+      !backgroundExecution &&
+      shellFileCaptureContext.getStore() === true
+    const runCommand = (): Promise<LocalExecuteResponse> =>
+      this.runWithShellFileCapture(command, effectiveCwd, captureFileEffects, shellSyntax, () =>
         this.executeRawUnserialized(
           command,
           sandboxModeOverride,
@@ -7594,17 +7655,148 @@ export class LocalSandbox
           options
         )
       )
+    const commandConcurrency = classifyCommandConcurrency(command)
+    const signal = overrideAbortSignal ?? this.abortSignal
+    // Classify the effective post-hook command here, including unsandboxed
+    // execution. Runtime classification alone cannot protect against hook rewrites
+    // or another workflow agent using its own LocalSandbox instance.
+    const runUnserialized = (): Promise<LocalExecuteResponse> =>
+      backgroundExecution
+        ? runCommand()
+        : withWorkspaceExecution(
+            this.workingDir,
+            commandConcurrency === "parallel_safe" ? "read" : "write",
+            runCommand,
+            signal
+          )
+    if (
+      process.platform !== "win32" ||
+      effectiveSandboxMode === "none" ||
+      (backgroundExecution && !this.worktreeIsolation)
+    ) {
+      return runUnserialized()
     }
 
-    return LocalSandbox.runSerializedExecution(queueKey, () =>
-      this.executeRawUnserialized(
+    const sandboxWorkspaceRoot = path.resolve(this.workingDir)
+    const queueKey = LocalSandbox.buildSerializedExecutionKey(
+      this.runId,
+      sandboxWorkspaceRoot,
+      effectiveSandboxMode
+    )
+    if (commandConcurrency === "parallel_safe") {
+      return LocalSandbox.runParallelSafeExecution(queueKey, runUnserialized)
+    }
+
+    return LocalSandbox.runSerializedExecution(queueKey, runUnserialized)
+  }
+
+  /**
+   * Bash First telemetry: compare the workspace around a foreground agent
+   * command and report the file effects the way write_file/edit_file report
+   * theirs. Commands that cannot write are not captured; capture failures never
+   * reach the command result.
+   */
+  private async runWithShellFileCapture(
+    command: string,
+    cwd: string,
+    captureFileEffects: boolean,
+    shellSyntax: CommandShellSyntax,
+    run: () => Promise<LocalExecuteResponse>
+  ): Promise<LocalExecuteResponse> {
+    if (!captureFileEffects) return run()
+    let capture: ShellFileCapture | null = null
+    try {
+      capture = await beginShellFileCapture({
+        workspaceRoot: this.workingDir,
         command,
-        sandboxModeOverride,
-        timeoutMs,
-        overrideAbortSignal,
-        effectiveCwd,
-        options
-      )
+        cwd,
+        shellSyntax,
+        isCodeFile
+      })
+    } catch (error) {
+      console.warn("[LocalSandbox] shell file capture unavailable:", error)
+    }
+    if (!capture) return run()
+    // Stage at command start, like write/edit capture it right before mutating.
+    const harnessStage = this.captureHarnessStageForShellEdit()
+    try {
+      return await run()
+    } finally {
+      await this.applyShellFileCapture(capture, harnessStage)
+    }
+  }
+
+  private captureHarnessStageForShellEdit(): Promise<HarnessStageAttribution | undefined> {
+    if (!this.harnessProjectId || !this.featureId) return Promise.resolve(undefined)
+    return getHarnessStageAttributionForCodeGeneration(this.harnessProjectId, this.featureId).catch(
+      () => undefined
+    )
+  }
+
+  private async applyShellFileCapture(
+    capture: ShellFileCapture,
+    harnessStagePromise: Promise<HarnessStageAttribution | undefined>
+  ): Promise<void> {
+    try {
+      const { changes } = await capture.finish()
+      for (const change of changes) {
+        if (change.decision !== "unattributed") this._onFileMutation?.(change.absPath, "shell")
+      }
+      const counted = changes.filter((change) => change.decision === "counted")
+      if (changes.length) {
+        console.info("[LocalSandbox] Shell file capture completed", {
+          threadId: executeTraceContext.getStore()?.threadId || this.runId,
+          counted: counted.length,
+          attributed: changes.filter((change) => change.decision === "attributed").length,
+          unattributed: changes.filter((change) => change.decision === "unattributed").length
+        })
+      }
+      if (counted.length > 0) {
+        const threadId = executeTraceContext.getStore()?.threadId || this.runId
+        for (const change of counted) {
+          void recordAdoptionShellEdit({
+            threadId,
+            filePath: change.absPath,
+            beforeContent: change.before ?? "",
+            afterContent: change.after ?? "",
+            workspacePath: this.workingDir,
+            harnessStagePromise
+          })
+        }
+      }
+    } catch (error) {
+      console.warn("[LocalSandbox] shell file capture failed:", error)
+    }
+  }
+
+  /**
+   * read_file reports constraint-file reads itself; a Bash First `cat` of the
+   * same file reports here once the command succeeded with output.
+   */
+  private recordShellReadTelemetry(
+    command: string,
+    cwd: string,
+    result: ExecuteResponse,
+    shellSyntax: CommandShellSyntax
+  ): void {
+    if (!this._shellFileTelemetry || !this.pluginRoot || result.exitCode !== 0) return
+    if (!LocalSandbox.hasStdoutContent(result.output)) return
+    const traceContext = executeTraceContext.getStore()
+    for (const readPath of extractShellCommandReadPaths(command, cwd, shellSyntax)) {
+      void this.recordPluginSystemConstraintRead(readPath, traceContext)
+    }
+  }
+
+  /** True when an execute result carries real stdout, not only markers or stderr. */
+  private static hasStdoutContent(output: string | undefined): boolean {
+    if (!output) return false
+    return (
+      output
+        .replace(/<execute_metadata>[\s\S]*?<\/execute_metadata>/g, "")
+        .split("\n")
+        .filter((line) => !line.startsWith("[stderr] ") && line.trim() !== "<no output>")
+        .join("\n")
+        .trim().length > 0
     )
   }
 
@@ -7955,7 +8147,19 @@ export class LocalSandbox
       if (effectiveAbortSignal?.aborted) {
         return LocalSandbox.createAbortedExecuteResponse()
       }
-      const sandboxEnv = await LocalSandbox.buildSandboxEnv(this.env)
+      const executionEnv = await this.buildExecutionEnv(effectiveAbortSignal)
+      if (!executionEnv) return LocalSandbox.createAbortedExecuteResponse()
+      if (
+        (this.readOnlyShellEnforced || readOnlyShellExecutionContext.getStore() === true) &&
+        this.commandReadsSensitivePath(command, executionCwd, executionEnv)
+      ) {
+        return {
+          output: "execute blocked: reading sensitive credential directories is not allowed.",
+          exitCode: 1,
+          truncated: false
+        }
+      }
+      const sandboxEnv = await LocalSandbox.buildSandboxEnv(executionEnv)
       const result = await new Promise<LocalExecuteResponse>((resolve) => {
         const stdoutChunks: Buffer[] = []
         const stderrChunks: Buffer[] = []
@@ -8275,7 +8479,8 @@ export class LocalSandbox
     timeoutMs?: number,
     overrideAbortSignal?: AbortSignal,
     cwd?: string,
-    options?: ExecuteRawOptions
+    options?: ExecuteRawOptions,
+    executionEnv: Record<string, string> = this.env
   ): Promise<LocalExecuteResponse> {
     const onceStartMs = Date.now()
     const effectiveCwd = this.resolveExecutionCwd(cwd)
@@ -8319,8 +8524,8 @@ export class LocalSandbox
       const isBashOnWin = isWindows && ["bash", "sh", "zsh"].includes(shellBase)
       const allowInteractiveGitAuth = isWindows && LocalSandbox.isGitInteractiveAuthCommand(command)
       const spawnEnv = allowInteractiveGitAuth
-        ? LocalSandbox.buildInteractiveGitEnv(this.env)
-        : this.env
+        ? LocalSandbox.buildInteractiveGitEnv(executionEnv)
+        : executionEnv
 
       const useWindowsBackgroundJob = isWindows && options?.background === true
       const windowsBackgroundShellKind = isBashOnWin

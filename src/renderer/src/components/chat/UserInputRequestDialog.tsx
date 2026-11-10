@@ -9,6 +9,7 @@ import {
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
+import { useAppStore } from "@/lib/store"
 import type { UserInputAnswer, UserInputRequest, UserInputResponse } from "@/types"
 
 type DraftAnswer =
@@ -83,6 +84,7 @@ export function UserInputRequestDialog({
   useEffect(() => {
     if (!request) return
     const handleKeyDown = (event: KeyboardEvent): void => {
+      if (event.defaultPrevented || useAppStore.getState().showCustomizeView) return
       if (event.key !== "Escape") return
       event.preventDefault()
       handleIgnore()

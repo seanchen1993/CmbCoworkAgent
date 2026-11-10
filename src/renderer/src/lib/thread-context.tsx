@@ -965,6 +965,7 @@ function normalizeQueuedMessage(raw: unknown): QueuedMessage | null {
     attachmentDisplayPrefix:
       typeof item.attachmentDisplayPrefix === "string" ? item.attachmentDisplayPrefix : undefined,
     skillBlock: typeof item.skillBlock === "string" ? item.skillBlock : undefined,
+    skillName: typeof item.skillName === "string" ? item.skillName : undefined,
     builtinBrowser: item.builtinBrowser === true,
     modelId: typeof item.modelId === "string" ? item.modelId : undefined,
     handoffRequestedAt:
@@ -1567,6 +1568,8 @@ interface CustomEventData {
   parentThreadId?: string
   messages?: LiveStreamMessage[]
   discardedMessageIds?: string[]
+  discardedPersistedMessageIds?: string[]
+  restoredMessages?: Message[]
   assistantMessage?: LiveStreamMessage
   fromId?: string
   toId?: string
@@ -1585,6 +1588,7 @@ interface CustomEventData {
 interface ThreadStreamHolderProps {
   threadId: string
   managedAutoSendRun?: ManagedAutoSendStreamStartEvent
+  onManagedAutoSendRunTerminal: (threadId: string, runId: string) => void
   messages: readonly Message[]
   checkpointFallbackIndexBaselines?: StreamFallbackIndexBaselines
   subagentTranscriptBaseline: Record<string, Message[]>
@@ -1596,12 +1600,17 @@ interface ThreadStreamHolderProps {
 
 const DEFAULT_THREAD_STATE = normalizeThreadState(createDefaultThreadState())
 const MAX_RETAINED_IDLE_STREAM_HOLDERS = 6
+type ManagedAutoSendRunState = {
+  start: ManagedAutoSendStreamStartEvent
+  terminal: boolean
+}
 
 // Component that holds a stream and notifies subscribers. memo keeps an update
 // to thread A from re-running useStream for every previously opened thread.
 const ThreadStreamHolder = memo(function ThreadStreamHolder({
   threadId,
   managedAutoSendRun,
+  onManagedAutoSendRunTerminal,
   messages,
   checkpointFallbackIndexBaselines,
   subagentTranscriptBaseline,
@@ -1628,7 +1637,13 @@ const ThreadStreamHolder = memo(function ThreadStreamHolder({
   // live values snapshot, so reused raw task IDs cannot claim a legacy bucket.
   const [transport] = useState(() => {
     const seededTransport = new ElectronIPCTransport(
-      managedAutoSendRun ? { managedAutoSendRunId: managedAutoSendRun.runId } : undefined
+      managedAutoSendRun
+        ? {
+            managedAutoSendRunId: managedAutoSendRun.runId,
+            onManagedAutoSendRunTerminal: (runId: string) =>
+              onManagedAutoSendRunTerminal(threadId, runId)
+          }
+        : undefined
     )
     seededTransport.seedSubagentTranscriptBaseline(threadId, subagentTranscriptBaseline)
     seededTransport.setFallbackIndexBaselines(fallbackIndexBaselines)
@@ -1728,8 +1743,15 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
   const [dehydrationEligibilityRevision, setDehydrationEligibilityRevision] = useState(0)
   const [activeThreadIds, setActiveThreadIds] = useState<Set<string>>(new Set())
   const [managedAutoSendRuns, setManagedAutoSendRuns] = useState<
-    Record<string, ManagedAutoSendStreamStartEvent>
+    Record<string, ManagedAutoSendRunState>
   >({})
+  const handleManagedAutoSendRunTerminal = useCallback((threadId: string, runId: string): void => {
+    setManagedAutoSendRuns((previous) => {
+      const current = previous[threadId]
+      if (!current || current.start.runId !== runId || current.terminal) return previous
+      return { ...previous, [threadId]: { ...current, terminal: true } }
+    })
+  }, [])
   const [loadingStates, setLoadingStates] = useState<Record<string, boolean>>({})
   const initializedThreadsRef = useRef<Set<string>>(new Set())
   const previousCurrentThreadIdRef = useRef<string | null>(null)
@@ -4160,6 +4182,37 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             getLiveStreamTranscriptIndex(threadStatesRef.current[threadId]?.messages ?? [])
               .messageIdentities
           )
+          // These are exact durable row ids from the native rollback, not raw
+          // provider ids. They can already be in the visible/history page.
+          const persistedDiscards = new Set(data.discardedPersistedMessageIds ?? [])
+          for (const id of persistedDiscards) discardedMessageIds.add(id)
+          const pendingCommits = pendingVisibleMessageCommitsRef.current[threadId]
+          if (pendingCommits) {
+            pendingVisibleMessageCommitsRef.current[threadId] = pendingCommits.filter(
+              ({ message }) => !discardedMessageIds.has(message.id)
+            )
+          }
+          const transitional = transitionalLiveMessagesRef.current[threadId]
+          if (transitional) {
+            transitionalLiveMessagesRef.current[threadId] = transitional.filter(
+              (message) => !message.id || !discardedMessageIds.has(message.id)
+            )
+          }
+          if (persistedDiscards.size > 0 || data.restoredMessages?.length) {
+            updateThreadState(threadId, (state) => {
+              const restored = new Map(
+                (data.restoredMessages ?? []).map((message) => [message.id, message])
+              )
+              const messages = state.messages
+                .filter((message) => !persistedDiscards.has(message.id))
+                .map((message) =>
+                  restored.has(message.id)
+                    ? { ...restored.get(message.id)!, created_at: message.created_at }
+                    : message
+                )
+              return { messages }
+            })
+          }
           accumulator.messages = []
           accumulator.normalizeMessageIds = createLiveStreamMessageIdNormalizer()
           accumulator.mergeMessages = createLiveStreamMessageMerger()
@@ -6713,6 +6766,41 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         // Reuse handleCustomEvent for workspace / subagents / token_usage / interrupt
         case "custom": {
           const data = event.data as CustomEventData
+          if (data?.type === "stream_retry_reset") {
+            // Scheduler messages live in thread state, rather than the foreground
+            // live accumulator. Drop its pending tail and trusted locations too.
+            const tracker = schedulerStreamingRef.current[threadId]
+            const failedTail = tracker?.assistantLocation?.tail
+            clearSchedulerMainStreamingForThread(threadId)
+            updateThreadState(threadId, (state) => {
+              const stable = (data.messages ?? []).map((message) => ({
+                ...message,
+                id: message.id!,
+                role: liveStreamMessageRole(message.type)
+              })) as Parameters<typeof mergeSchedulerTurnMessageSnapshot>[1]
+              const exactDiscards = new Set(data.discardedPersistedMessageIds ?? [])
+              // A sub-250ms attempt may never have had a durable row. Resolve
+              // only its owned live tail against the retained checkpoint/history.
+              if (failedTail) {
+                const tail = { ...failedTail, type: "ai" as const }
+                const retained = state.messages.filter((message) => message !== failedTail)
+                const liveDiscards = resolveDiscardedLiveMessageIds(
+                  new Set(data.discardedMessageIds ?? []),
+                  [tail],
+                  data.messages ?? [],
+                  getLiveStreamTranscriptIndex(retained).messageIdentities
+                )
+                for (const id of liveDiscards) exactDiscards.add(id)
+              }
+              const snapshot = mergeSchedulerTurnMessageSnapshot(
+                state.messages.filter((message) => !exactDiscards.has(message.id)),
+                stable
+              )
+              return { messages: snapshot.messages }
+            })
+            handleCustomEvent(threadId, data)
+            break
+          }
           if (data?.type === "coordinator_ai_snapshot_message") {
             const tracker = (schedulerStreamingRef.current[threadId] ||= {
               currentMsgId: null,
@@ -7450,10 +7538,11 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     return window.api.agent.onManagedAutoSendStreamStart((event) => {
-      setManagedAutoSendRuns((prev) => ({
-        ...prev,
-        [event.threadId]: event
-      }))
+      setManagedAutoSendRuns((previous) =>
+        previous[event.threadId]?.start.runId === event.runId
+          ? previous
+          : { ...previous, [event.threadId]: { start: event, terminal: false } }
+      )
       const wasInitialized = initializedThreadsRef.current.has(event.threadId)
       initializeThread(event.threadId)
       if (wasInitialized) {
@@ -7963,12 +8052,17 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       {Array.from(activeThreadIds).map((threadId) => {
         const state = threadStatesRef.current[threadId]
         if (!state?.subagentTranscriptBaselineReady) return null
-        const managedAutoSendRun = managedAutoSendRuns[threadId]
+        const managedAutoSendRunState = managedAutoSendRuns[threadId]
+        const managedAutoSendRun = managedAutoSendRunState?.terminal
+          ? undefined
+          : managedAutoSendRunState?.start
+        // Keep the holder mounted on terminal; a later remount must not replay the old run.
         return (
           <ThreadStreamHolder
-            key={`${threadId}:${managedAutoSendRun?.runId ?? "standard"}`}
+            key={`${threadId}:${managedAutoSendRunState?.start.runId ?? "standard"}`}
             threadId={threadId}
             managedAutoSendRun={managedAutoSendRun}
+            onManagedAutoSendRunTerminal={handleManagedAutoSendRunTerminal}
             messages={state.messages}
             checkpointFallbackIndexBaselines={checkpointFallbackIndexBaselinesRef.current[threadId]}
             subagentTranscriptBaseline={state.subagentTranscripts}

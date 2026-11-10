@@ -92,6 +92,10 @@ async function main(): Promise<void> {
   const receiptAcks: string[] = []
   let receiptSocket: WebSocket | null = null
   let defaultRouteExtensionHelloCount = 0
+  let markdownExtensionHelloCount = 0
+  let markdownTokenHelloCount = 0
+  let offerMarkdown = true
+  const replyTypes: unknown[] = []
   server.on("connection", (connected, request) => {
     socket = connected
     const connectionAuthorization = String(request.headers.authorization ?? "")
@@ -107,6 +111,10 @@ async function main(): Promise<void> {
         if (protocolExtensions.includes("sync-default-route-v1")) {
           defaultRouteExtensionHelloCount += 1
         }
+        if (protocolExtensions.includes("markdown-reply-v1")) {
+          markdownExtensionHelloCount += 1
+        }
+        if (connectionAuthorization === "Bearer markdown-token") markdownTokenHelloCount += 1
         if (connectionAuthorization === "Bearer missing-robot-token") {
           missingRobotHelloCount += 1
           connected.send(
@@ -131,7 +139,14 @@ async function main(): Promise<void> {
               sessionId: "session-1",
               principalId: "opaque-principal",
               serverTime: new Date().toISOString(),
-              heartbeatIntervalSeconds: 60
+              heartbeatIntervalSeconds: 60,
+              // Only a gateway with markdown answers the extension; every other
+              // WELCOME here is the released shape, with no such key at all.
+              ...(connectionAuthorization === "Bearer markdown-token" && offerMarkdown
+                ? { protocolExtensions: ["markdown-reply-v1"] }
+                : connectionAuthorization === "Bearer malformed-extension-token"
+                  ? { protocolExtensions: "markdown-reply-v1" }
+                  : {})
             }
           })
         )
@@ -217,6 +232,7 @@ async function main(): Promise<void> {
           })
         )
       } else if (envelope.type === "REMOTE_REPLY") {
+        replyTypes.push((envelope.payload.message as Record<string, unknown>).type)
         const segment = envelope.payload.segment as Record<string, unknown>
         connected.send(
           JSON.stringify({
@@ -265,6 +281,10 @@ async function main(): Promise<void> {
   assert.equal(client.getStatus().lastHandshakeStatus, 101)
   assert(receivedTypes.includes("HELLO"))
   assert.equal(defaultRouteExtensionHelloCount, 1)
+  // Asked for on every connection; a WELCOME that does not answer it — every
+  // gateway released before markdown — leaves the desktop on text.
+  assert.equal(markdownExtensionHelloCount, 1)
+  assert.equal(client.supportsMarkdownReplies(), false)
   await waitFor(() => client.getStatus().routes.length === 2, "route sync")
   assert.equal(client.getStatus().principalId, "opaque-principal")
   assert.equal(client.getStatus().routes[0].principalId, "opaque-principal")
@@ -716,6 +736,56 @@ async function main(): Promise<void> {
     "neither receipt may drop the session"
   )
   receiptClient.stop()
+
+  // A gateway that answers markdown-reply-v1 lets the desktop send markdown on
+  // that connection, and only that one: restarted with the switch off, it
+  // stops answering, and the very next connection is back to text.
+  const markdownClient = new ImGatewayWsClient({
+    url: () => `ws://127.0.0.1:${address.port}/ws/desktop`,
+    token: () => "markdown-token",
+    appVersion: "test",
+    onRemoteEvent: () => undefined
+  })
+  markdownClient.start()
+  await waitFor(
+    () => markdownClient.getStatus().connectionState === "online",
+    "the markdown client to come online"
+  )
+  assert.equal(markdownClient.supportsMarkdownReplies(), true)
+  await markdownClient.submitReply({
+    schemaVersion: 1,
+    deliveryId: "delivery-markdown",
+    conversationKey: "conversation-remote",
+    idempotencyKey: "delivery-markdown:reply:0",
+    segment: { index: 0, count: 1 },
+    message: { type: "markdown", content: "## 结论\n\n- 第一" }
+  })
+  assert.equal(replyTypes.at(-1), "markdown")
+  offerMarkdown = false
+  markdownClient.reconnect()
+  await waitFor(
+    () => markdownTokenHelloCount === 2 && markdownClient.getStatus().connectionState === "online",
+    "the markdown client to reconnect"
+  )
+  assert.equal(markdownClient.supportsMarkdownReplies(), false)
+  markdownClient.stop()
+
+  // Not an array of strings: the WELCOME is refused like any other malformed
+  // one, rather than read as a half-answer.
+  const malformedClient = new ImGatewayWsClient({
+    url: () => `ws://127.0.0.1:${address.port}/ws/desktop`,
+    token: () => "malformed-extension-token",
+    appVersion: "test",
+    onRemoteEvent: () => undefined
+  })
+  malformedClient.start()
+  await waitFor(
+    () => malformedClient.getStatus().lastCloseCode === 1007,
+    "the malformed WELCOME to be refused"
+  )
+  assert.equal(malformedClient.isAuthenticated(), false)
+  assert.equal(malformedClient.supportsMarkdownReplies(), false)
+  malformedClient.stop()
 
   await new Promise<void>((resolve) => server.close(() => resolve()))
   console.log("im-gateway-ws-client.spec.ts passed")

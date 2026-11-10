@@ -419,3 +419,8 @@ export function createSafeLogMethod(options: SafeLogMethodOptions): (...args: un
     }
   }
 }
+
+/** Electron console-message levels: verbose=0, info=1, warning=2, error=3. */
+export function getRendererConsoleLevelName(level: number): string {
+  return ["DEBUG", "INFO", "WARN", "ERROR"][level] ?? "LOG"
+}

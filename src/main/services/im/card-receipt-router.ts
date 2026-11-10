@@ -1,5 +1,5 @@
 import type { RemoteImCardReceiptV1 } from "../../../shared/im-gateway-contract"
-import { buildExpiredCard } from "./card-builder"
+import { BIZ_RETRY_CHOICE_KEY, BIZ_RETRY_MESSAGE_KEY, buildExpiredCard } from "./card-builder"
 import { imCardPublisher, type ImCardPublisher } from "./card-publisher"
 import type { ImCommandRouter } from "./command-router"
 import { imEventStore, type ImEventStore } from "./event-store"
@@ -10,6 +10,9 @@ import {
 } from "./remote-user-input-service"
 import type { ImReplyClient } from "./reply-client"
 import { buildImProactiveReplies } from "./reply-segmentation"
+import { imHumanGateAdapter, type ImHumanGateAdapter } from "./human-gate-adapter"
+import { imBizRetryAdapter, type ImBizRetryAdapter } from "./biz-retry-adapter"
+import type { ImSessionSwitchCards } from "./session-switch-cards"
 
 /**
  * Turns a Zhaohu card click into the same decision a typed command would make.
@@ -37,6 +40,8 @@ interface CardReceiptDependencies {
   cards: ImCardPublisher
   approvals: Pick<ImRemoteApprovalService, "resolveCardClick">
   userInput: Pick<ImRemoteUserInputService, "resolveCardAnswers">
+  humanGates: Pick<ImHumanGateAdapter, "resolveCardDecision">
+  managedBizRetries: Pick<ImBizRetryAdapter, "resolveCardDecision">
   events: Pick<ImEventStore, "enqueueProactiveReplies">
   warn: (message: string, error?: unknown) => void
 }
@@ -45,6 +50,7 @@ export class ImCardReceiptRouter {
   private readonly dependencies: CardReceiptDependencies
   private replyDrainer: ReplyDrainer | null = null
   private commands: TargetBindResolver | null = null
+  private sessionSwitchCards: Pick<ImSessionSwitchCards, "handleReceipt"> | null = null
   /**
    * A platform retry must not apply the same click twice.
    *
@@ -53,7 +59,7 @@ export class ImCardReceiptRouter {
    * oldest entries are the safest to forget — the gateway stops redelivering
    * once a receipt is acknowledged, so an id this old is not coming back.
    */
-  private readonly appliedReceipts = new Map<string, string>()
+  private readonly appliedReceipts = new Map<string, string | null>()
   /** Two frames for one receipt can arrive together; apply them in order. */
   private handling: Promise<void> = Promise.resolve()
 
@@ -62,6 +68,8 @@ export class ImCardReceiptRouter {
       cards: overrides.cards ?? imCardPublisher,
       approvals: overrides.approvals ?? imRemoteApprovalService,
       userInput: overrides.userInput ?? imRemoteUserInputService,
+      humanGates: overrides.humanGates ?? imHumanGateAdapter,
+      managedBizRetries: overrides.managedBizRetries ?? imBizRetryAdapter,
       events: overrides.events ?? imEventStore,
       warn: overrides.warn ?? ((message, error) => console.warn(`[IM] ${message}`, error ?? ""))
     }
@@ -89,6 +97,13 @@ export class ImCardReceiptRouter {
     }
   }
 
+  registerSessionSwitchCards(cards: Pick<ImSessionSwitchCards, "handleReceipt">): () => void {
+    this.sessionSwitchCards = cards
+    return () => {
+      if (this.sessionSwitchCards === cards) this.sessionSwitchCards = null
+    }
+  }
+
   async handle(receipt: RemoteImCardReceiptV1): Promise<void> {
     // Serialized: `handle` is driven straight from the socket's message event,
     // so two deliveries of one receipt can both clear the seen-check before
@@ -102,10 +117,8 @@ export class ImCardReceiptRouter {
   }
 
   private async handleOne(receipt: RemoteImCardReceiptV1): Promise<void> {
-    // The decision and its answer are acknowledged separately. Applying a click
-    // twice would decide twice; failing to tell the reader anything leaves them
-    // staring at a card that did nothing. So a redelivery re-sends the answer
-    // this receipt already earned, and never re-applies it.
+    // Applying a click twice would decide twice. Remember its result so a
+    // redelivery only retries an explanation when one is needed.
     let message = this.appliedReceipts.get(receipt.receiptId)
     if (message === undefined) {
       try {
@@ -121,14 +134,15 @@ export class ImCardReceiptRouter {
       }
     }
 
-    // Only acknowledged once the answer is durably queued. Acknowledging a
-    // reply that never persisted stops the gateway redelivering, and the press
-    // then looks to the reader like it did nothing at all.
-    if (!(await this.reply(receipt, message))) return
+    // Successful project decision card clicks are shown on the updated card.
+    // Other outcomes still need their explanation queued before acknowledgement.
+    if (message !== null && !(await this.reply(receipt, message))) return
     await this.dependencies.cards.acknowledgeReceipt(receipt.receiptId)
   }
 
-  private async apply(receipt: RemoteImCardReceiptV1): Promise<string> {
+  private async apply(receipt: RemoteImCardReceiptV1): Promise<string | null> {
+    const sessionSwitch = await this.sessionSwitchCards?.handleReceipt(receipt)
+    if (sessionSwitch !== undefined) return sessionSwitch
     const resolved = this.dependencies.cards.interactions.resolveTag(receipt.tag)
     if (!resolved) {
       // The card outlived its request: the desktop restarted, or the run ended
@@ -191,6 +205,35 @@ export class ImCardReceiptRouter {
         principalId: receipt.principalId,
         conversationKey: interaction.conversationKey,
         feedback: receipt.feedback
+      })
+    }
+
+    if (interaction.kind === "human_gate") {
+      if (suffix !== "approve" && suffix !== "reject") {
+        return "无法识别这次 Human Gate 决策，请使用消息里的短码。"
+      }
+      return this.dependencies.humanGates.resolveCardDecision({
+        notificationId: interaction.requestRef,
+        decision: suffix
+      })
+    }
+
+    if (interaction.kind === "biz_retry") {
+      const feedback = new Map(receipt.feedback.map((entry) => [entry.key, entry.value]))
+      const choice = feedback.get(BIZ_RETRY_CHOICE_KEY)?.trim()
+      if (choice !== "continue" && choice !== "new_thread" && choice !== "stop") {
+        return "请选择如何继续托管运行。"
+      }
+      const message = feedback.get(BIZ_RETRY_MESSAGE_KEY)?.trim()
+      if (choice !== "continue" && message) {
+        return "附加消息仅支持“在当前会话继续托管”，请清空消息后重新提交。"
+      }
+      return this.dependencies.managedBizRetries.resolveCardDecision({
+        notificationId: interaction.requestRef,
+        choice,
+        ...(choice === "continue" && message ? { message } : {}),
+        principalId: interaction.principalId,
+        conversationKey: interaction.conversationKey
       })
     }
 

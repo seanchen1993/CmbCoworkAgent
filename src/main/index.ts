@@ -1,6 +1,11 @@
+import { cleanupMarketRuntimeContent } from "./services/market-content"
+import { harnessStageWatches } from "./services/harness-stage-attribution"
+import { initializeHarnessConfigV2 } from "./harness-board/config-v2"
 import { initializeNotificationRuntime } from "./notification-runtime"
 import { notificationService } from "./services/notification-service"
 import { registerNotificationHandlers } from "./ipc/notifications"
+import type { UiGuideConfig } from "../shared/ui-guides"
+import { acknowledgeUiGuide, getUiGuideState, recordUiGuideDisplay } from "./db/ui-guide-store"
 import {
   app,
   BrowserWindow,
@@ -49,6 +54,7 @@ import {
 } from "./logging"
 import {
   createMainLogForwarder,
+  getRendererConsoleLevelName,
   createMainLogForwardingGate,
   createSafeLogMethod,
   createSafeLogProcessingGuard,
@@ -117,6 +123,7 @@ const CLOSE_TO_TRAY_PROMPT_TIMEOUT_MS = 15_000
 const nativeClosePrompt = createNativeClosePrompt()
 const mainLogForwardingGate = createMainLogForwardingGate()
 let mainWindow: BrowserWindow | null = null
+let mainWindowStartupReady = false
 let mainWindowUnresponsive = false
 const trustedMainRendererUrl = resolveTrustedRendererUrl(
   app.isPackaged
@@ -156,21 +163,6 @@ function isTrackEventPayload(payload: unknown): payload is {
       typeof record.properties === "object" &&
       !Array.isArray(record.properties))
   )
-}
-
-function getConsoleLevelName(level: number): string {
-  switch (level) {
-    case 0:
-      return "INFO"
-    case 1:
-      return "WARN"
-    case 2:
-      return "ERROR"
-    case 3:
-      return "DEBUG"
-    default:
-      return "LOG"
-  }
 }
 
 function shouldMirrorRendererBrowserLog(message: string): boolean {
@@ -381,11 +373,15 @@ import { registerAdoptionTraceHandlers } from "./ipc/adoption-trace"
 import { registerFeatureGateHandlers } from "./ipc/feature-gates"
 import { registerHarnessBoardHandlers } from "./ipc/harness-board"
 import { recoverManagedRunsAtStartup } from "./harness-board/managed-run-recovery"
+import { managedRunController } from "./harness-board/managed-run-controller"
+import { managedRunScheduler } from "./harness-board/managed-run-scheduler"
+import { createBrowserWindowAgentRunDelivery } from "./agent/agent-run-service"
 import { configureManagedRunProjectDirectories } from "./harness-board/managed-run-store"
 import {
   getHarnessProjectRootPath,
   initializeHarnessManagedRunProjectDirectories,
-  listHarnessManagedRunProjectDirectories
+  listHarnessManagedRunProjectDirectories,
+  markHarnessProjectManagedRunStarted
 } from "./harness-board/service"
 import { registerLspHandlers } from "./ipc/lsp"
 import { registerAutoCommitHandlers } from "./ipc/auto-commit"
@@ -424,7 +420,7 @@ import {
   startRegisteredGitHookEventSync,
   stopRegisteredGitHookEventSync
 } from "./services/git-hook-service"
-import { getAllThreadSummaries, initializeDatabase, flush } from "./db"
+import { getAllThreadSummaries, initializeDatabase, flush, getDb } from "./db"
 import { closeThreadMessageHydrationWorker } from "./thread-message-hydration/client"
 import { closeCheckpointRuntimeProjectionWorker } from "./checkpointer/runtime-projection-client"
 import { closeThreadMetadataHydrationWorker } from "./thread-metadata-hydration/client"
@@ -626,9 +622,6 @@ function hideMainWindowToTray(window: BrowserWindow): void {
   if (window.isDestroyed()) return
   window.hide()
   showPendingAppAttention()
-  if (process.platform === "darwin" && app.dock) {
-    app.dock.hide()
-  }
 }
 
 function clearCloseToTrayPromptState(): void {
@@ -814,7 +807,7 @@ function createWindow(): void {
   })
 
   mainWindow.webContents.on("console-message", (_event, level, message, line, sourceId) => {
-    writeRendererLog(getConsoleLevelName(level), message, { sourceId, line })
+    writeRendererLog(getRendererConsoleLevelName(level), message, { sourceId, line })
     if (shouldMirrorRendererBrowserLog(message)) {
       const location = sourceId ? `${sourceId}:${line}` : `line:${line}`
       console.log(`${formatMirroredRendererBrowserLog(message)} (${location})`)
@@ -944,6 +937,9 @@ function createWindow(): void {
  * 供单实例唤起、宠物窗口交互等入口复用，覆盖主窗口被销毁、最小化和隐藏三种情况。
  */
 function ensureMainWindowVisible(): BrowserWindow | null {
+  // A second launch may arrive while initialization is pending or after it failed.
+  // The normal startup path must create the first window after registering IPC.
+  if (!mainWindowStartupReady) return null
   clearAppAttention()
   if (!mainWindow || mainWindow.isDestroyed()) {
     createWindow()
@@ -957,6 +953,25 @@ function ensureMainWindowVisible(): BrowserWindow | null {
   }
   mainWindow.focus()
   return mainWindow
+}
+
+/**
+ * Pet 点击在主窗口的显示与隐藏状态之间切换。
+ */
+function toggleMainWindowVisibilityFromPet(): BrowserWindow | null {
+  if (
+    mainWindow &&
+    !mainWindow.isDestroyed() &&
+    mainWindow.isVisible() &&
+    !mainWindow.isMinimized()
+  ) {
+    hideMainWindowToTray(mainWindow)
+    // Pet 只切换主窗口显隐，macOS Dock 中的应用图标应始终保留。
+    applyMacDockIcon()
+    return mainWindow
+  }
+
+  return ensureMainWindowVisible()
 }
 
 function collectRecentWorkspacePathsForSandboxPrewarm(): string[] {
@@ -1023,7 +1038,7 @@ if (browserNativeMessagingHostLaunch) {
     // Set dock icon on macOS
     applyMacDockIcon()
     configurePetWindow({
-      ensureMainWindowVisible,
+      toggleMainWindowVisibility: toggleMainWindowVisibilityFromPet,
       applyMacDockIcon
     })
 
@@ -1102,7 +1117,15 @@ if (browserNativeMessagingHostLaunch) {
       console.log("[Main] HttpEventReporter registered, sending events to:", traceBaseUrl)
     }
 
-    await initializeHarnessManagedRunProjectDirectories()
+    let harnessConfigAvailable = false
+    try {
+      await initializeHarnessConfigV2(getOpenworkDir())
+      harnessConfigAvailable = true
+    } catch (error) {
+      // The project-mode readers surface this error; unrelated app features remain available.
+      console.error("[HarnessBoard] Configuration initialization failed:", error)
+    }
+    if (harnessConfigAvailable) await initializeHarnessManagedRunProjectDirectories()
     configureManagedRunProjectDirectories({
       resolveProjectDirectory: getHarnessProjectRootPath,
       listProjectDirectories: listHarnessManagedRunProjectDirectories
@@ -1112,13 +1135,20 @@ if (browserNativeMessagingHostLaunch) {
     // index. Prefers the backend event service (VITE_API_TRACE_BASE_URL) and
     // falls back to writing ES directly (VITE_ES_NODES); no-ops when neither is
     // configured.
-    startHarnessStatusReporter()
+    if (harnessConfigAvailable) startHarnessStatusReporter()
 
     // Initialize database
     await initializeDatabase()
     initializeNotificationRuntime()
     await notificationService.recover()
-    recoverManagedRunsAtStartup()
+    // 回填「托管运行」标签：磁盘上已有托管记录的项目，在本次升级之前跑过但没有标记。
+    // 标记是单调的，重复写是空操作，所以每次启动都跑一遍也没关系。不 await，不挡启动。
+    if (harnessConfigAvailable) {
+      const { projectIdsWithRuns } = recoverManagedRunsAtStartup()
+      for (const projectId of projectIdsWithRuns) {
+        void markHarnessProjectManagedRunStarted(projectId).catch(() => undefined)
+      }
+    }
     cleanupLegacySkillEvalRecords()
 
     // Initialize adoption tracker (side-effect only; never blocks startup)
@@ -1157,6 +1187,15 @@ if (browserNativeMessagingHostLaunch) {
     registerAdoptionTraceHandlers(ipcMain)
     registerFeatureGateHandlers(ipcMain)
     registerNotificationHandlers(ipcMain)
+    ipcMain.handle("uiGuides:getState", (_event, config: UiGuideConfig) =>
+      getUiGuideState(getDb(), config)
+    )
+    ipcMain.handle("uiGuides:recordDisplay", (_event, config: UiGuideConfig) =>
+      recordUiGuideDisplay(getDb(), config)
+    )
+    ipcMain.handle("uiGuides:acknowledge", (_event, config: UiGuideConfig) =>
+      acknowledgeUiGuide(getDb(), config)
+    )
     registerHarnessBoardHandlers(ipcMain)
     registerUpdaterHandlers()
     registerLspHandlers(ipcMain)
@@ -1530,6 +1569,34 @@ if (browserNativeMessagingHostLaunch) {
 
     const initialModelCatalogLoad = startBuiltinModelCatalogRefresh()
     createWindow()
+    mainWindowStartupReady = true
+    if (harnessConfigAvailable) {
+      managedRunScheduler.initialize({
+        async start(schedule) {
+          const window = mainWindow
+          if (!window || window.isDestroyed()) {
+            throw new Error("没有可用的应用主窗口，无法开始托管")
+          }
+          return managedRunController.start({
+            projectId: schedule.projectId,
+            featureId: schedule.featureId,
+            workspacePath: schedule.workspacePath,
+            initialUserMessage: schedule.initialUserMessage,
+            existingThreadId: schedule.existingThreadId,
+            modelSelection: schedule.modelSelection,
+            scheduledStartId: schedule.scheduleId,
+            delivery: createBrowserWindowAgentRunDelivery(window)
+          })
+        },
+        changed(event) {
+          for (const window of BrowserWindow.getAllWindows()) {
+            if (!window.isDestroyed() && !window.webContents.isDestroyed()) {
+              window.webContents.send("harnessBoard:managedRunScheduleChanged", event)
+            }
+          }
+        }
+      })
+    }
     // An IM turn must not depend on someone having the desktop open, and must
     // not be tied to whichever window happened to be focused when it arrived.
     // The managed delivery broadcasts on the thread-scoped channel the renderer
@@ -1555,7 +1622,7 @@ if (browserNativeMessagingHostLaunch) {
 
     // Start scheduled task scheduler and heartbeat service
     await builtinRobotManager.start(app.getVersion())
-    startScheduler()
+    startScheduler(harnessConfigAvailable ? (now) => managedRunScheduler.tick(now) : undefined)
     startHeartbeat()
     startHookConfigWatcher()
     startUpdateChecker()
@@ -1663,6 +1730,7 @@ if (browserNativeMessagingHostLaunch) {
       pet: getPetWindowDebugInfo()
     })
     if (quitCleanupDone) {
+      cleanupMarketRuntimeContent()
       // Cleanup already finished during a previous will-quit cycle.
       // Let Electron quit naturally — this gives Chromium time to properly
       // release the CDP debug socket, preventing zombie sockets on Windows.
@@ -1745,6 +1813,9 @@ if (browserNativeMessagingHostLaunch) {
       ),
       closeHarnessWatchRefWorker().catch((err) =>
         console.warn("[Main] closeHarnessWatchRefWorker error:", err)
+      ),
+      harnessStageWatches.close().catch((err) =>
+        console.warn("[Main] closeHarnessStageWatches error:", err)
       ),
       closeDashboardEsWorker().catch((err) =>
         console.warn("[Main] closeDashboardEsWorker error:", err)

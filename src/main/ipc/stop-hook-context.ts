@@ -1,6 +1,7 @@
 import { SkillUsageDetector } from "../agent/skill-evolution/usage-detector"
 import { ToolCallCounter } from "../agent/skill-evolution/tool-call-counter"
 import type { StopHookContext } from "../agent/skill-lifecycle/completion-hooks"
+import { readPathsForToolCall } from "../agent/tool-call-read-paths"
 import { StreamAssistantText } from "./stream-assistant-text"
 import {
   getSelectedStreamTranscriptValueSnapshots,
@@ -245,12 +246,9 @@ export class StopHookContextCollector {
     for (let index = 0; index < toolCalls.length; index++) {
       const toolCall = toolCalls[index]
       this.toolCallCounter.register(toolCall, aiMessageId, index)
-      if (toolCall.name !== "read_file") continue
-      const readPathRaw =
-        (typeof toolCall.args?.path === "string" && toolCall.args.path) ||
-        (typeof toolCall.args?.file_path === "string" && toolCall.args.file_path) ||
-        ""
-      if (readPathRaw) this.skillUsageDetector.onReadFilePath(readPathRaw)
+      for (const readPath of readPathsForToolCall(toolCall.name, toolCall.args)) {
+        this.skillUsageDetector.onReadFilePath(readPath)
+      }
     }
   }
 }

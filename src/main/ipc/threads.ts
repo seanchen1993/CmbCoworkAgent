@@ -11,10 +11,12 @@ import { v4 as uuid } from "uuid"
 import {
   copyThreadSubagentManifestRowsPage,
   getThreadCore,
+  getDb,
   getThreadHydrationCore,
   getThreadValuesJson,
   getThreadValuesJsonPage,
   getThreadMessages,
+  getThreadMessageCount,
   getThreadMessageIdentityContext,
   getThreadMessagesAfterAnyId,
   getThreadMessagesByIds,
@@ -93,6 +95,7 @@ import {
   getProjectThreadDataDirectory
 } from "../agent/context-history-path"
 import { generateTitle } from "../services/title-generator"
+import { generateProjectThreadTitle } from "../services/project-thread-title"
 import { imRemoteAccessService } from "../services/im/remote-access-service"
 import {
   finalizeWorkflowWorktreeRecord,
@@ -102,6 +105,8 @@ import {
 import { fireSessionEnd } from "../hooks/session-lifecycle"
 import { makeHookResultCallback } from "../hooks/result-callback"
 import { stopWatching } from "../services/workspace-watcher"
+import { assertThreadDeletionWorkspace, isThreadDeletionBusy } from "./thread-deletion-busy"
+import { checkpointWalInBackground } from "../db/wal-checkpoint"
 import { isExternallyManagedThreadRunBusy } from "../services/thread-external-run-busy"
 import { threadMetadataMatchesGroupSelector } from "../services/thread-group-selector"
 import type {
@@ -3568,6 +3573,7 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
     // After dbDeleteThread succeeds the thread is gone for good and the
     // tombstone must stay, whatever the later best-effort cleanups do.
     let workspacePath: string | undefined
+    let deletionCheckpoint: Promise<void> | undefined
     try {
       // Fallback workspace capture BEFORE cancelAndWait (which settles and
       // removes the active entry): if the thread's metadata lost its
@@ -3719,7 +3725,13 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
 
       // Delete from our metadata store — the point of no return.
       const previewScopeKeys = collectTrustedToolFilePreviewScopeKeysForThread(threadId)
-      dbDeleteThread(threadId)
+      if (getThreadMessageCount(threadId) >= 1_000) {
+        getDb().withoutAutomaticCheckpoint(() => dbDeleteThread(threadId))
+        deletionCheckpoint = checkpointWalInBackground(getDbPath())
+      } else {
+        // Avoid a worker startup per item in batches of empty/small tasks.
+        dbDeleteThread(threadId)
+      }
       clearTrustedToolFilePreviewSourcesForThread(threadId, previewScopeKeys)
       forgetLegacySubagentTranscriptMigration(threadId)
       // Detach the deleted task from its shared physical workspace watcher so
@@ -3847,6 +3859,7 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
     // walking/stat/removal stay outside the global write lock; only an
     // epoch-checked batch of canonical->quarantine renames holds it.
     scheduleTranscriptBlobGc()
+    await deletionCheckpoint
   }
 
   ipcMain.handle(
@@ -3861,35 +3874,39 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
       cancelSubagentTranscriptStartupRead(threadId)
       cancelLegacyCheckpointTranscriptBootstrap(threadId)
       return withThreadMutationLeaseLock(lease, async (threadRow) => {
-        let metadata: Record<string, unknown> | null = null
-        if (options?.groupGuard || options?.requireIdle) {
-          try {
-            const parsed = threadRow.metadata ? (JSON.parse(threadRow.metadata) as unknown) : {}
-            if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-              throw new Error("Thread metadata is not an object")
-            }
-            metadata = parsed as Record<string, unknown>
-          } catch {
-            // Malformed metadata is not safe to treat as idle for bulk deletion.
-            throw new Error("会话元数据异常，无法确认运行状态，请单独处理该会话。")
+        let metadata: Record<string, unknown>
+        try {
+          const parsed = threadRow.metadata ? (JSON.parse(threadRow.metadata) as unknown) : {}
+          if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+            throw new Error("Thread metadata is not an object")
           }
+          metadata = parsed as Record<string, unknown>
+        } catch {
+          throw new Error("会话元数据异常，无法确认删除条件，请修复后重试。")
         }
+        // Check before teardown: without a workspace the durable worktree guards
+        // below cannot prove that deleting a cold workflow/coordinator is safe.
+        // Apply this to individual deletion too, so retry cannot bypass protection.
+        assertThreadDeletionWorkspace(getAgentModeFromMetadata(metadata), metadata.workspacePath)
         if (
           options?.groupGuard &&
           (!matchesThreadIncarnation(threadRow, options.groupGuard.incarnation) ||
-            !threadMetadataMatchesGroupSelector(metadata!, options.groupGuard.selector))
+            !threadMetadataMatchesGroupSelector(metadata, options.groupGuard.selector))
         ) {
           throw new Error("会话已变更或已移出分组，请重新确认。")
         }
         if (options?.requireIdle) {
-          const workspacePath =
-            typeof metadata!.workspacePath === "string" ? metadata!.workspacePath : null
-          const agentMode = getAgentModeFromMetadata(metadata!)
           if (
-            isExternallyManagedThreadRunBusy(threadId, metadata!) ||
-            (await isThreadForkBusy({ threadId, workspacePath, agentMode }))
+            await isThreadDeletionBusy(threadId, {
+              hasActiveRun: hasActiveAgentRun,
+              isAborting: isActiveAgentRunAborting,
+              waitForSettlement: waitForActiveAgentRunToSettle,
+              hasExternalRun: (id) => isExternallyManagedThreadRunBusy(id, metadata),
+              hasWorkflowRun: (id) => workflowRunManager.isActive(id),
+              hasWorkerRun: (id) => coordinatorWorkerManager.hasRunningWorkersForThread(id)
+            })
           ) {
-            throw new Error("会话仍在运行或有待处理结果，已停止批量删除。")
+            throw new Error("会话仍在运行，已跳过该会话。")
           }
         }
         while (deletingThreads.has(threadId)) {
@@ -4023,7 +4040,7 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
       if (!row) return { success: false, error: "Thread not found" }
       if (
         target &&
-        (target.threadId !== threadId || !["multi", "workflow"].includes(target.kind))
+        (target.threadId !== threadId || !["multi", "workflow", "worker"].includes(target.kind))
       ) {
         return { success: false, error: "无效的子代理导出目标" }
       }
@@ -4170,7 +4187,28 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
   )
 
   // Generate a title from a message
-  ipcMain.handle("threads:generateTitle", async (_event, message: string) => {
-    return generateTitle(message)
-  })
+  ipcMain.handle(
+    "threads:generateTitle",
+    async (
+      _event,
+      message: string,
+      context?: { threadId: string; skillName?: string; skillDescription?: string }
+    ) => {
+      try {
+        if (context?.threadId) {
+          const thread = getThreadCore(context.threadId)
+          const metadata = thread?.metadata ? JSON.parse(thread.metadata) : undefined
+          return await generateProjectThreadTitle(
+            message,
+            context.skillName,
+            metadata?.harnessFeature,
+            context.skillDescription
+          )
+        }
+      } catch (error) {
+        console.warn("[Threads] Failed to resolve title context:", error)
+      }
+      return generateTitle(message)
+    }
+  )
 }

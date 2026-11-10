@@ -8,6 +8,90 @@ import {
 } from "./thread-group-deletion"
 
 describe("thread group deletion", () => {
+  it("attempts every item, reports progress, and retries only failed items", async () => {
+    const onProgress = vi.fn()
+    const cleanupThread = vi.fn()
+    const deleteThread = vi.fn(async (id: string) => {
+      if (id !== "b") throw new Error(`blocked: ${id}`)
+    })
+    const result = await deleteThreadGroupSequentially(["a", "b", "c", "d"], {
+      deleteThread,
+      cleanupThread,
+      markRead: () => undefined,
+      onProgress
+    })
+    expect(deleteThread.mock.calls.flat()).toEqual(["a", "b", "c", "d"])
+    expect(result).toMatchObject({
+      deletedIds: ["b"],
+      remainingIds: ["a", "c", "d"],
+      failedId: "a"
+    })
+    expect(cleanupThread.mock.calls.flat()).toEqual(["b"])
+    expect(onProgress).toHaveBeenNthCalledWith(1, {
+      completed: 0,
+      total: 4,
+      deleted: 0,
+      skipped: 0
+    })
+    expect(onProgress).toHaveBeenLastCalledWith({ completed: 4, total: 4, deleted: 1, skipped: 3 })
+    deleteThread.mockImplementation(async () => undefined)
+    deleteThread.mockClear()
+    const retry = await deleteThreadGroupSequentially(result.remainingIds, {
+      deleteThread,
+      cleanupThread,
+      markRead: () => undefined
+    })
+    expect(deleteThread.mock.calls.flat()).toEqual(["a", "c", "d"])
+    expect(retry.remainingIds).toEqual([])
+  })
+
+  it("yields to the event loop even when every deletion fails", async () => {
+    vi.useFakeTimers()
+    try {
+      const deleteThread = vi.fn(async () => {
+        throw new Error("busy")
+      })
+      const pending = deleteThreadGroupSequentially(["a", "b", "c"], {
+        deleteThread,
+        cleanupThread: vi.fn(),
+        markRead: vi.fn()
+      })
+      await Promise.resolve()
+      expect(deleteThread).toHaveBeenCalledTimes(1)
+      await vi.runAllTimersAsync()
+      expect((await pending).remainingIds).toEqual(["a", "b", "c"])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it("bounds progress updates for a large fast batch and always reports final counts", async () => {
+    vi.useFakeTimers()
+    try {
+      const onProgress = vi.fn()
+      const pending = deleteThreadGroupSequentially(
+        Array.from({ length: 200 }, (_, index) => `thread-${index}`),
+        {
+          deleteThread: async () => undefined,
+          cleanupThread: vi.fn(),
+          markRead: vi.fn(),
+          onProgress
+        }
+      )
+      await vi.runAllTimersAsync()
+      expect((await pending).deletedIds).toHaveLength(200)
+      expect(onProgress.mock.calls.length).toBeLessThan(10)
+      expect(onProgress).toHaveBeenLastCalledWith({
+        completed: 200,
+        total: 200,
+        deleted: 200,
+        skipped: 0
+      })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it("does not reopen a committed backend deletion when renderer cleanup fails", () => {
     const first = vi.fn(() => {
       throw new Error("localStorage unavailable")
@@ -75,11 +159,7 @@ describe("thread group deletion", () => {
   it("recognizes stream and scheduled-task activity while leaving idle groups deletable", () => {
     expect(hasRunningThreadForDeletion(["stream"], {}, { stream: true })).toBe(true)
     expect(
-      hasRunningThreadForDeletion(
-        ["scheduled"],
-        { scheduled: { scheduledTaskLoading: true } },
-        {}
-      )
+      hasRunningThreadForDeletion(["scheduled"], { scheduled: { scheduledTaskLoading: true } }, {})
     ).toBe(true)
     expect(
       hasRunningThreadForDeletion(
@@ -104,14 +184,14 @@ describe("thread group deletion", () => {
     })
 
     expect(result).toMatchObject({
-      deletedIds: ["a"],
-      remainingIds: ["b", "c"],
+      deletedIds: ["a", "c"],
+      remainingIds: ["b"],
       failedId: "b"
     })
-    expect(deleteThread.mock.calls.map(([threadId]) => threadId)).toEqual(["a", "b"])
-    expect(cleanupThread).toHaveBeenCalledTimes(1)
+    expect(deleteThread.mock.calls.map(([threadId]) => threadId)).toEqual(["a", "b", "c"])
+    expect(cleanupThread).toHaveBeenCalledTimes(2)
     expect(cleanupThread).toHaveBeenCalledWith("a")
-    expect(markRead).toHaveBeenCalledTimes(1)
+    expect(markRead).toHaveBeenCalledTimes(2)
   })
 
   it("deduplicates ids and preserves sequential deletion order", async () => {
@@ -125,14 +205,7 @@ describe("thread group deletion", () => {
     })
 
     expect(result).toEqual({ deletedIds: ["a", "b"], remainingIds: [] })
-    expect(order).toEqual([
-      "delete:a",
-      "cleanup:a",
-      "read:a",
-      "delete:b",
-      "cleanup:b",
-      "read:b"
-    ])
+    expect(order).toEqual(["delete:a", "cleanup:a", "read:a", "delete:b", "cleanup:b", "read:b"])
   })
 
   it("keeps committed deletions successful when local cleanup callbacks fail", async () => {

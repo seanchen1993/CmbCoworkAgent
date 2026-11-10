@@ -2,6 +2,7 @@ import {
   assertRemoteImEventV1,
   assertRemoteImReplyV1,
   type RemoteImEventV1,
+  type RemoteImReplyFormat,
   type RemoteImReplyV1
 } from "../../../shared/im-gateway-contract"
 import { flushStrict, getDb, saveToDisk } from "../../db"
@@ -9,6 +10,7 @@ import type { ImTargetSnapshot } from "./conversation-state"
 import { ImConversationStateError } from "./conversation-state"
 import type { ImPersistenceDependencies } from "./persistence"
 import { readAll, readOne, withImTransaction } from "./persistence"
+import { ImSessionLinkStore } from "./session-link-store"
 
 export type ImEventState =
   | "received"
@@ -59,6 +61,8 @@ export interface ImReplyOutboxRecord {
   segmentIndex: number
   segmentCount: number
   content: string
+  /** See REPLY_CONTENT_FORMAT_DECLARATION: markdown permits a card, never requires one. */
+  contentFormat: RemoteImReplyFormat
   state: ImReplyOutboxState
   platformReplyId: string | null
   attemptCount: number
@@ -103,6 +107,7 @@ interface ImReplyOutboxRow {
   segment_index: number
   segment_count: number
   content: string
+  content_format: RemoteImReplyFormat
   state: ImReplyOutboxState
   platform_reply_id: string | null
   attempt_count: number
@@ -206,6 +211,7 @@ function hydrateOutbox(row: ImReplyOutboxRow): ImReplyOutboxRecord {
     segmentIndex: Number(row.segment_index),
     segmentCount: Number(row.segment_count),
     content: row.content,
+    contentFormat: row.content_format === "markdown" ? "markdown" : "text",
     state: row.state,
     platformReplyId: row.platform_reply_id ?? null,
     attemptCount: Number(row.attempt_count),
@@ -228,6 +234,11 @@ function sameRemoteEvent(row: ImEventRow, event: RemoteImEventV1): boolean {
   )
 }
 
+/**
+ * The format is left out, as the gateway's own reply hash leaves out the type:
+ * the same content queued once as text and again as markdown — across an app
+ * upgrade, say — is one reply, and it keeps the form it was first queued in.
+ */
 function samePersistedReply(row: ImReplyOutboxRow, reply: RemoteImReplyV1): boolean {
   return (
     row.delivery_id === reply.deliveryId &&
@@ -312,7 +323,10 @@ function normalizeProactiveReplies(replies: readonly RemoteImReplyV1[]): RemoteI
 }
 
 export class ImEventStore {
-  constructor(private readonly dependencies: ImPersistenceDependencies) {}
+  readonly sessionLinks: ImSessionLinkStore
+  constructor(private readonly dependencies: ImPersistenceDependencies) {
+    this.sessionLinks = new ImSessionLinkStore(dependencies)
+  }
 
   getEvent(eventId: string): ImEventRecord | null {
     const row = readOne<ImEventRow>(
@@ -329,6 +343,26 @@ export class ImEventStore {
       "SELECT * FROM im_events WHERE conversation_key = ? ORDER BY conversation_seq ASC",
       [conversationKey]
     ).map(hydrateEvent)
+  }
+
+  countQueuedConversationEvents(conversationKey: string): number {
+    return Number(
+      readOne<{ count: number }>(
+        this.dependencies.getDatabase(),
+        "SELECT COUNT(*) AS count FROM im_events WHERE conversation_key = ? AND state = 'queued'",
+        [conversationKey]
+      )?.count ?? 0
+    )
+  }
+
+  hasReplyDelivery(deliveryId: string): boolean {
+    return Boolean(
+      readOne<{ found: number }>(
+        this.dependencies.getDatabase(),
+        "SELECT 1 AS found FROM im_reply_outbox WHERE delivery_id = ? LIMIT 1",
+        [deliveryId]
+      )
+    )
   }
 
   getNextQueuedEvent(conversationKey: string): ImEventRecord | null {
@@ -698,9 +732,9 @@ export class ImEventStore {
         database.run(
           `INSERT INTO im_reply_outbox (
              outbox_id, delivery_id, event_id, conversation_key,
-             idempotency_key, segment_index, segment_count, content, state,
+             idempotency_key, segment_index, segment_count, content, content_format, state,
              platform_reply_id, attempt_count, next_attempt_at, reason_code, created_at, updated_at
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, 0, ?, NULL, ?, ?)`,
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, 0, ?, NULL, ?, ?)`,
           [
             `${reply.deliveryId}:${reply.segment.index}`,
             reply.deliveryId,
@@ -710,6 +744,7 @@ export class ImEventStore {
             reply.segment.index,
             reply.segment.count,
             reply.message.content,
+            reply.message.type,
             now,
             now,
             now
@@ -775,9 +810,9 @@ export class ImEventStore {
         database.run(
           `INSERT INTO im_reply_outbox (
              outbox_id, delivery_id, event_id, conversation_key,
-             idempotency_key, segment_index, segment_count, content, state,
+             idempotency_key, segment_index, segment_count, content, content_format, state,
              platform_reply_id, attempt_count, next_attempt_at, reason_code, created_at, updated_at
-           ) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, 'pending', NULL, 0, ?, NULL, ?, ?)`,
+           ) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, 'pending', NULL, 0, ?, NULL, ?, ?)`,
           [
             `${reply.deliveryId}:${reply.segment.index}`,
             reply.deliveryId,
@@ -786,6 +821,7 @@ export class ImEventStore {
             reply.segment.index,
             reply.segment.count,
             reply.message.content,
+            reply.message.type,
             now,
             now,
             now
