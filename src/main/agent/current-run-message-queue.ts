@@ -37,6 +37,7 @@ import {
 } from "../../shared/message-role-collision"
 
 export interface CurrentRunQueuedMessage {
+  rawUserInput?: string
   id: string
   content: string
   displayContent?: string
@@ -450,6 +451,7 @@ async function drainCurrentRunMessagesForInjection(
 ): Promise<
   | {
       messages: HumanMessage[]
+      rawUserInput?: string
       completedAssistantIdentity?: CurrentRunCompletedAssistantIdentity
     }
   | undefined
@@ -485,6 +487,7 @@ async function drainCurrentRunMessagesForInjection(
   )
 
   return {
+    rawUserInput: queued.at(-1)?.rawUserInput,
     messages: queued.map(
       (message) => {
         const visibleContent = message.displayContent || message.content
@@ -548,7 +551,8 @@ function completedAssistantMessageForTranscript(
  * into a foreground run can never be drained by a differently-keyed background
  * run, even though they all share this exact middleware. */
 export function createCurrentRunMessageQueueMiddleware(
-  ownerRunToken?: string
+  ownerRunToken?: string,
+  onRawUserInputInjected?: (rawUserInput: string | undefined) => void
 ): ReturnType<typeof createMiddleware> {
   return createMiddleware({
     name: "currentRunMessageQueue",
@@ -581,6 +585,9 @@ export function createCurrentRunMessageQueueMiddleware(
         "beforeModel",
         { anchorMessage }
       )
+      if (injection && isCurrentRunMessageQueueOwner(threadId, ownerRunToken)) {
+        onRawUserInputInjected?.(injection.rawUserInput)
+      }
       return injection ? { messages: injection.messages } : undefined
     },
     afterModel: {
@@ -634,6 +641,9 @@ export function createCurrentRunMessageQueueMiddleware(
               [MESSAGE_PROVIDER_OCCURRENCE_METADATA_KEY]: completedIdentity.providerOccurrence
             }
           }
+        }
+        if (injection && isCurrentRunMessageQueueOwner(threadId, ownerRunToken)) {
+          onRawUserInputInjected?.(injection.rawUserInput)
         }
         return injection ? { messages: injection.messages, jumpTo: "model" as const } : undefined
       }

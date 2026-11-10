@@ -2449,6 +2449,7 @@ function registerCurrentRunMessagePreparer({
       const prepared = await prepareStandardUserPrompt({
         rawMessage: queuedMessage.content,
         rawUserInput: queuedMessage.rawUserInput,
+        deferRawUserInputCommit: true,
         initialModelInput: initialQueuedModelInput,
         threadId,
         workspacePath,
@@ -5480,6 +5481,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             {
               id: messageId,
               content: prepared.content,
+              rawUserInput: message.rawUserInput,
               displayContent: neutralizeWorkflowPlumbingUserText(
                 messageDisplayContent || messageContent
               )

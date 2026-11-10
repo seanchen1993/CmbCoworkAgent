@@ -35,6 +35,8 @@ import {
   type LocalThreadRunOwner
 } from "../src/main/agent/thread-run-lease"
 import type { ThreadRow } from "../src/main/db"
+import { ImGoalRunBridge } from "../src/main/services/im/goal-runner"
+import type { AgentRunRequest } from "../src/main/agent/agent-run-service"
 
 interface Context {
   database: Awaited<ReturnType<typeof initSqlJs>>["Database"]["prototype"]
@@ -299,6 +301,50 @@ async function testSuccessfulRunAndDurableOutbox(): Promise<void> {
     assert.equal(getLocalThreadRunLease(target.threadId), undefined)
   } finally {
     context.database.close()
+  }
+}
+
+async function testGoalRoutesPreserveOriginalInput(): Promise<void> {
+  for (const raw of ["  /goal 完成任务\n", "  继续处理\n"]) {
+    const context = await createContext()
+    const gateway = new TestGateway()
+    const requests: AgentRunRequest[] = []
+    const goalRuns = new ImGoalRunBridge({
+      hasActiveGoal: () => true,
+      getDelivery: () => ({ window: {} as never, isAvailable: () => true, send: () => {} }),
+      announceUserMessage: () => {},
+      startRun: async (request, _delivery, executionContext) => {
+        requests.push(request)
+        return {
+          threadId: request.threadId,
+          completion: Promise.resolve(executionContext.onFinalAssistant?.({
+            messageId: "goal-result", finalText: "完成回复"
+          }))
+        }
+      }
+    })
+    const runner = new ImRemoteRunner({
+      gateway,
+      eventStore: context.events,
+      conversationState: context.conversations,
+      capabilityGuard: capabilityGuard(context),
+      replyClient: new ImReplyClient(gateway, context.events, () => context.clock.now),
+      setThreadLifecycle: async () => {},
+      getThread: () => testThreadRow(),
+      goalRuns,
+      createRunId: () => "goal-original-input"
+    })
+    try {
+      const remote = eventFixture(1)
+      remote.message = { type: "text", text: raw }
+      await context.events.receiveEvent(remote, target)
+      const event = await context.events.queueEvent(remote.eventId)
+      assert.equal(await runner.invoke(event, new AbortController().signal), "completed")
+      assert.equal(requests.length, 1)
+      assert.equal(requests[0].rawUserInput, raw)
+    } finally {
+      context.database.close()
+    }
   }
 }
 
@@ -727,6 +773,7 @@ function testInboxSchedulerDeliveryContextIsExplicitAndStrict(): void {
 
 const tests: Array<[string, () => void | Promise<void>]> = [
   ["testSuccessfulRunAndDurableOutbox", testSuccessfulRunAndDurableOutbox],
+  ["testGoalRoutesPreserveOriginalInput", testGoalRoutesPreserveOriginalInput],
   ["testForeignOwnerDefersWithoutRuntime", testForeignOwnerDefersWithoutRuntime],
   [
     "testDesktopAndSchedulerReleaseWakeDeferredEvents",

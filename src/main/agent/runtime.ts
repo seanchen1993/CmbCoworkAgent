@@ -2130,6 +2130,7 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
     threadId,
     onTaskSubagentPromptsResolved,
     currentRunMessageQueueOwnerToken,
+    onCurrentRunInputInjected,
     soloTaskTraceManager,
     actionStationarityTurnId,
     // PR-12 — optional callback fired-and-forgotten by toolErrorMiddleware
@@ -2145,6 +2146,7 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
     toolStrategy = "standard",
     conciseModeEnabled = false
   }: {
+    onCurrentRunInputInjected?: (rawUserInput: string | undefined) => void
     onFinalSystemPrompt?: (prompt: string) => void
     onTaskSubagentPromptsResolved?: (prompts: Array<{ name: string; systemPrompt: string }>) => void
     onToolFailureSignal?: (input: {
@@ -2985,7 +2987,10 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
       // summarization (injected turns should participate in context management)
       // and BEFORE humanInTheLoop (a steered message must never race a pending
       // tool-approval interrupt). See createCurrentRunMessageQueueMiddleware.
-      createCurrentRunMessageQueueMiddleware(currentRunMessageQueueOwnerToken),
+      createCurrentRunMessageQueueMiddleware(
+        currentRunMessageQueueOwnerToken,
+        onCurrentRunInputInjected
+      ),
       createCmbSummarizationMiddleware(mainSummarizationOptions),
       anthropicPromptCachingMiddleware({ unsupportedModelBehavior: "ignore" }),
       // Recover from malformed/truncated tool-call JSON (deepseek et al.): promote
@@ -6896,6 +6901,9 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
     },
     threadId: options.threadId,
     currentRunMessageQueueOwnerToken: options.currentRunMessageQueueOwnerToken,
+    onCurrentRunInputInjected: (rawUserInput: string | undefined) => {
+      hookScope.rawUserInput = typeof rawUserInput === "string" ? rawUserInput : undefined
+    },
     onTurnCompletionRecovery: options.onTurnCompletionRecovery,
     turnCompletionTodoGateEnabled: options.turnCompletionTodoGateEnabled,
     soloTaskTraceManager,

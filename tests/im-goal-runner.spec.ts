@@ -16,9 +16,10 @@ async function main(): Promise<void> {
   let capturedRequest: AgentRunRequest | null = null
   let capturedContext: AgentRunExecutionContext | null = null
   let cancelNextRun = false
+  let activeGoal = false
   const bridge = new ImGoalRunBridge({
     getDelivery: () => delivery,
-    hasActiveGoal: () => false,
+    hasActiveGoal: () => activeGoal,
     // The real one reaches BrowserWindow, which no spec has.
     announceUserMessage: () => undefined,
     controlGoal: async (request, _delivery, context) => {
@@ -68,7 +69,7 @@ async function main(): Promise<void> {
     false
   )
 
-  const result = await bridge.run({
+  const goalInput: Parameters<ImGoalRunBridge["run"]>[0] = {
     threadId: "thread-1",
     target: {
       kind: "thread",
@@ -81,13 +82,16 @@ async function main(): Promise<void> {
     },
     metadata: { workspacePath: "/workspace", agentMode: "normal" },
     prepared: { kind: "ordinary", visibleText: "/goal 完成任务" },
+    rawUserInput: "  /goal 完成任务\n",
     runId: "im-run-1",
     signal: new AbortController().signal,
     userMessageId: "im:event-1:user",
     agentMode: "normal"
-  })
+  }
+  const result = await bridge.run(goalInput)
   assert.equal(result, "Goal 第一轮已完成")
   assert.equal(capturedRequest?.message, "/goal 完成任务")
+  assert.equal(capturedRequest?.rawUserInput, "  /goal 完成任务\n")
   assert.deepEqual(capturedContext?.localRunLease, {
     owner: "im",
     runId: "im-run-1",
@@ -95,6 +99,19 @@ async function main(): Promise<void> {
   })
   assert.equal(capturedContext?.source, "im")
   assert.equal(capturedContext?.allowTrustedTransportSkillMarker, true)
+
+  activeGoal = true
+  assert.equal(bridge.shouldUseGoalPipeline("thread-1", "继续执行"), true)
+  await bridge.run({
+    ...goalInput,
+    prepared: { kind: "ordinary", visibleText: "继续执行" },
+    rawUserInput: "  继续执行\n"
+  })
+  assert.equal(capturedRequest?.message, "继续执行")
+  assert.equal(capturedRequest?.rawUserInput, "  继续执行\n")
+
+  await bridge.run({ ...goalInput, coordinatorInternalNotification: true })
+  assert.equal(capturedRequest?.rawUserInput, undefined)
 
   const control = await bridge.runControl({
     threadId: "thread-1",

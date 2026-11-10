@@ -513,6 +513,7 @@ async function activateExplicitSkillFromMessage({
 export async function prepareStandardUserPrompt({
   rawMessage,
   rawUserInput,
+  deferRawUserInputCommit = false,
   initialModelInput,
   trustedExplicitSkill,
   allowExplicitSkillFromMessage = true,
@@ -528,6 +529,8 @@ export async function prepareStandardUserPrompt({
 }: {
   rawMessage: string
   rawUserInput?: string
+  /** Steering commits its original input only when the queue actually injects it. */
+  deferRawUserInputCommit?: boolean
   initialModelInput: string
   /**
    * Host-resolved explicit skill. Remote transports use this instead of
@@ -546,7 +549,11 @@ export async function prepareStandardUserPrompt({
   onSystemMessage?: (message: string) => void
   isPreparationCurrent?: () => boolean
 }): Promise<PreparedUserPrompt> {
-  turnState.hookScope.rawUserInput = typeof rawUserInput === "string" ? rawUserInput : undefined
+  // Submission hooks see this candidate while running hooks keep the accepted input.
+  const promptHookScope: HookScopeController = {
+    ...turnState.hookScope,
+    rawUserInput: typeof rawUserInput === "string" ? rawUserInput : undefined
+  }
   let preparedMessage = initialModelInput
   const trustedExplicitSkillBlock = trustedExplicitSkill
     ? formatTrustedSkillUseBlock(trustedExplicitSkill)
@@ -573,7 +580,7 @@ export async function prepareStandardUserPrompt({
     ...getHarnessHookContext(harnessAgentContext),
     sessionId: threadId,
     turnId: turnState.turnId,
-    hookScope: turnState.hookScope,
+    hookScope: promptHookScope,
     firedSkillKeys: turnState.skillHookKeys,
     skillUseTracker: turnState.skillUseTracker,
     onHookResult,
@@ -613,7 +620,7 @@ export async function prepareStandardUserPrompt({
       workspacePath,
       "UserPromptSubmit",
       promptSubmitContext,
-      turnState.hookScope,
+      promptHookScope,
       onHookSkippedFactory("UserPromptSubmit")
     ),
     "UserPromptSubmit",
@@ -677,6 +684,9 @@ export async function prepareStandardUserPrompt({
   }
   if (explicitSkillActivation?.skill) {
     onExplicitSkillActivated?.(explicitSkillActivation.skill)
+  }
+  if (!deferRawUserInputCommit) {
+    turnState.hookScope.rawUserInput = promptHookScope.rawUserInput
   }
   return {
     accepted: true,

@@ -20,6 +20,7 @@ import type { ImPreparedSkillMessage } from "./skill-command"
 type PreparedSkillTurn = Extract<ImPreparedSkillMessage, { kind: "ordinary" }>
 
 export interface ImGoalAgentRunInput {
+  rawUserInput?: string
   threadId: string
   target: ImTargetSnapshot
   metadata: Record<string, unknown>
@@ -132,6 +133,7 @@ export class ImGoalRunBridge {
   private async runAgent(input: {
     threadId: string
     message: string
+    rawUserInput?: string
     userMessageId: string
     agentMode?: AgentMode
     coordinatorInternalNotification?: boolean
@@ -166,6 +168,7 @@ export class ImGoalRunBridge {
       {
         threadId: input.threadId,
         message: input.message,
+        rawUserInput: input.coordinatorInternalNotification ? undefined : input.rawUserInput,
         userMessageId: input.userMessageId,
         ...(input.agentMode ? { agentMode: input.agentMode } : {}),
         ...(input.coordinatorInternalNotification ? { coordinatorInternalNotification: true } : {})

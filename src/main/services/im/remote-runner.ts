@@ -705,6 +705,7 @@ async function executePreparedImStandardTurn(
     })
   ) {
     return goalRuns.run({
+      rawUserInput: event.messageText,
       threadId: target.threadId,
       target,
       metadata,

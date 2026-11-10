@@ -82,7 +82,7 @@ function testMiddlewareOnlyOnMainStack(): void {
   // can't leak into a background subagent's loop.
   assertOccurrences(
     runtime,
-    "createCurrentRunMessageQueueMiddleware(currentRunMessageQueueOwnerToken)",
+    "createCurrentRunMessageQueueMiddleware(",
     1,
     "middleware invoked once (main stack only)"
   )
@@ -92,7 +92,7 @@ function testMiddlewareBeforeSummarizationAndHITL(): void {
   // Slice from the (single) main-stack invocation — summarization also appears in
   // the subagent stack earlier in the file, so a whole-file order check is wrong.
   const idx = runtime.indexOf(
-    "createCurrentRunMessageQueueMiddleware(currentRunMessageQueueOwnerToken)"
+    "createCurrentRunMessageQueueMiddleware("
   )
   assert(idx >= 0, "queue middleware present on the main stack")
   const after = runtime.slice(idx)
@@ -100,14 +100,14 @@ function testMiddlewareBeforeSummarizationAndHITL(): void {
   // context management): the queue middleware immediately precedes it in the array.
   assertMatches(
     after,
-    /createCurrentRunMessageQueueMiddleware\(currentRunMessageQueueOwnerToken\),\s*\n\s*mainSummarizationController\.middleware/,
+    /createCurrentRunMessageQueueMiddleware\(\s*currentRunMessageQueueOwnerToken,\s*onCurrentRunInputInjected\s*\),\s*\n\s*createCmbSummarizationMiddleware\(/,
     "queue middleware immediately precedes summarization on the main stack"
   )
   // afterModel must sit before HITL in the array so an approval interrupt preempts
   // injection.
   assertSourceOrder(
     after,
-    "createCurrentRunMessageQueueMiddleware(currentRunMessageQueueOwnerToken)",
+    "createCurrentRunMessageQueueMiddleware(",
     "humanInTheLoopMiddleware",
     "queue middleware before HITL on the main stack"
   )
@@ -306,7 +306,12 @@ function testClearOnEveryRunExit(): void {
   )
   const replacementStart = agentIpc.indexOf("const replacement = await withThreadRunMutationLock")
   assert(replacementStart >= 0, "new invoke replacement block exists")
-  const replacementBody = agentIpc.slice(replacementStart, replacementStart + 5000)
+  const replacementEnd = agentIpc.indexOf(
+    'if ("startRejectedDuringShutdown" in replacement)',
+    replacementStart
+  )
+  assert(replacementEnd > replacementStart, "replacement critical section has an end boundary")
+  const replacementBody = agentIpc.slice(replacementStart, replacementEnd)
   assertSourceOrder(
     replacementBody,
     "rejectAgentStartDuringShutdown(window, channel)",
@@ -648,7 +653,7 @@ function testClearOnEveryRunExit(): void {
   )
   assertIncludes(
     runtime,
-    "createCurrentRunMessageQueueMiddleware(currentRunMessageQueueOwnerToken)",
+    "createCurrentRunMessageQueueMiddleware(",
     "each middleware closure is bound to its physical run token"
   )
   assertOccurrences(
@@ -662,7 +667,12 @@ function testClearOnEveryRunExit(): void {
 function testInvokeWiresBoundedCheckpointRecoveryThroughSettlementFence(): void {
   const replacementStart = agentIpc.indexOf("const replacement = await withThreadRunMutationLock")
   assert(replacementStart >= 0, "new invoke replacement block exists")
-  const replacementBody = agentIpc.slice(replacementStart, replacementStart + 5000)
+  const replacementEnd = agentIpc.indexOf(
+    'if ("startRejectedDuringShutdown" in replacement)',
+    replacementStart
+  )
+  assert(replacementEnd > replacementStart, "replacement critical section has an end boundary")
+  const replacementBody = agentIpc.slice(replacementStart, replacementEnd)
 
   assertIncludes(
     replacementBody,
