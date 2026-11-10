@@ -11,6 +11,8 @@ import { notificationService } from "./notification-service"
 export interface NotificationActionContext {
   channel: Exclude<AppDecisionChannel, "system">
   context?: unknown
+  /** Recheck a live source binding inside the decision's serialization boundary. */
+  isCurrent?: () => boolean
 }
 type Handler = (notification: AppNotification, input: AppDecisionInput, context: NotificationActionContext) => Promise<AppDecisionResult>
 const handlers = new Map<string, Handler>()

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react"
-import { Bot } from "lucide-react"
+import { Bot, ChevronDown } from "lucide-react"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import {
@@ -65,10 +65,12 @@ export function FeatureBotLinkButton(props: Props) {
   const [error, setError] = useState("")
   const [busy, setBusy] = useState(false)
   const draft = props.mode === "create" ? props.target : null
-  const selected = options?.find((target) => keyOf(target) === key)
+  const creating = props.mode === "create"
+  const selectedKey = creating ? (draft ? keyOf(draft) : "") : key
+  const selected = options?.find((target) => keyOf(target) === selectedKey)
 
   useEffect(() => {
-    if (!open) return
+    if ((!open && !creating) || !window.api.bots?.features) return
     let current = true
     window.api.bots
       .snapshot()
@@ -81,16 +83,84 @@ export function FeatureBotLinkButton(props: Props) {
     return () => {
       current = false
     }
-  }, [open])
+  }, [open, creating])
 
   if (!window.api.bots?.features) return null
+  const selector = (
+    <select
+      aria-label={creating ? "关联到 Bot（可选）" : "目标对话"}
+      value={selectedKey}
+      disabled={props.disabled || busy || !options?.length}
+      onChange={(event) => {
+        const value = event.target.value
+        if (props.mode === "create")
+          props.onSelect(options?.find((item) => keyOf(item) === value) ?? null)
+        else setKey(value)
+        setError("")
+      }}
+      className={
+        creating
+          ? "h-8 max-w-full appearance-none truncate rounded-md border border-border bg-background pr-7 pl-8 text-sm"
+          : "h-9 w-full rounded-md border border-border bg-background px-2 text-sm"
+      }
+    >
+      <option value="">
+        {!options
+          ? error
+            ? "读取失败"
+            : "正在读取…"
+          : !options.length
+            ? "暂无可关联的 Bot"
+            : creating
+              ? "关联到 Bot（可选）"
+              : "选择对话"}
+      </option>
+      {[false, true].map((group) => {
+        const items = options?.filter((target) => Boolean(target.groupId) === group)
+        return items?.length ? (
+          <optgroup key={String(group)} label={group ? "招乎群聊" : "Bot 私聊"}>
+            {items.map((target) => (
+              <option key={keyOf(target)} value={keyOf(target)}>
+                {target.label}
+              </option>
+            ))}
+          </optgroup>
+        ) : null
+      })}
+    </select>
+  )
+  const scopeHint = selected?.groupId ? (
+    <p className="text-xs text-muted-foreground">本群可查看并继续此特性的普通项目会话。</p>
+  ) : null
+  if (creating)
+    return (
+      <div className="grid justify-items-start gap-1.5">
+        <div className="relative max-w-full">
+          <Bot
+            aria-hidden="true"
+            className="pointer-events-none absolute top-2 left-2 size-4 text-muted-foreground"
+          />
+          {selector}
+          <ChevronDown
+            aria-hidden="true"
+            className="pointer-events-none absolute top-2.5 right-2 size-3.5 text-muted-foreground"
+          />
+        </div>
+        {scopeHint}
+        {error && (
+          <p role="alert" className="text-xs text-status-critical">
+            {error}
+          </p>
+        )}
+      </div>
+    )
   return (
     <Dialog
       open={open}
       onOpenChange={(next) => {
         if (busy) return
         if (next) {
-          setKey(draft ? keyOf(draft) : "")
+          setKey("")
           setOptions(undefined)
           setError("")
         }
@@ -106,70 +176,22 @@ export function FeatureBotLinkButton(props: Props) {
           className="max-w-full"
         >
           <Bot aria-hidden="true" />
-          <span className="truncate">{draft ? "创建后关联 · " + draft.label : "关联到 Bot"}</span>
+          <span className="truncate">关联到 Bot</span>
         </Button>
       </DialogTrigger>
       <DialogContent className="z-[70] max-w-sm">
         <DialogHeader>
           <DialogTitle>关联到 Bot</DialogTitle>
-          <DialogDescription>
-            {props.mode === "create"
-              ? "创建特性后，可在所选对话的任务列表中跟进。"
-              : "选择要跟进这个特性的对话。"}
-          </DialogDescription>
+          <DialogDescription>选择要跟进这个特性的对话。</DialogDescription>
         </DialogHeader>
-        <label className="grid gap-2 text-sm">
-          目标对话
-          <select
-            value={key}
-            disabled={busy || !options?.length}
-            onChange={(e) => {
-              setKey(e.target.value)
-              setError("")
-            }}
-            className="h-9 w-full rounded-md border border-border bg-background px-2"
-          >
-            <option value="">
-              {!options
-                ? error
-                  ? "读取失败"
-                  : "正在读取…"
-                : options.length
-                  ? "选择对话"
-                  : "暂无可关联的 Bot"}
-            </option>
-            {[false, true].map((group) => {
-              const items = options?.filter((target) => Boolean(target.groupId) === group)
-              return items?.length ? (
-                <optgroup key={String(group)} label={group ? "招乎群聊" : "Bot 私聊"}>
-                  {items.map((target) => (
-                    <option key={keyOf(target)} value={keyOf(target)}>
-                      {target.label}
-                    </option>
-                  ))}
-                </optgroup>
-              ) : null
-            })}
-          </select>
-        </label>
+        <label className="grid gap-2 text-sm">目标对话{selector}</label>
+        {scopeHint}
         {error && (
           <p role="alert" className="text-sm text-status-critical">
             {error}
           </p>
         )}
         <DialogFooter>
-          {draft && props.mode === "create" && (
-            <Button
-              type="button"
-              variant="ghost"
-              onClick={() => {
-                props.onSelect(null)
-                setOpen(false)
-              }}
-            >
-              移除选择
-            </Button>
-          )}
           <Button type="button" variant="ghost" disabled={busy} onClick={() => setOpen(false)}>
             取消
           </Button>
@@ -180,11 +202,8 @@ export function FeatureBotLinkButton(props: Props) {
               if (!selected || busy) return
               setBusy(true)
               try {
-                if (props.mode === "create") props.onSelect(selected)
-                else {
-                  await linkFeatureToBot(props.projectId, props.slug, selected)
-                  toast.success("已关联到 " + selected.label)
-                }
+                await linkFeatureToBot(props.projectId, props.slug, selected)
+                toast.success("已关联到 " + selected.label)
                 setOpen(false)
               } catch (e) {
                 setError(botErrorMessage(e))
@@ -193,7 +212,7 @@ export function FeatureBotLinkButton(props: Props) {
               }
             }}
           >
-            {props.mode === "create" ? "选定对话" : busy ? "关联中…" : "确认关联"}
+            {busy ? "关联中…" : "确认关联"}
           </Button>
         </DialogFooter>
       </DialogContent>

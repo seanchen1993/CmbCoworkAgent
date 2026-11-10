@@ -16,15 +16,14 @@ import {BotWorkPanel} from "./src/renderer/src/components/bots/BotWorkPanel";
 import {useState} from "react";
 const root=createRoot(document.getElementById("root"));
 const item={kind:"feature",state:"active",version:1,updatedAt:2,phase:"question",attentionThreadId:"draft",id:"follow",projectId:"p",projectName:"客户服务",slug:"export",title:"报表导出"};
-const scopes=new Map(), linked=[];
-window.api={harnessBoard:{getRunDetail:async()=>({sessions:[{threadId:"draft",createdAt:0},{threadId:"review",createdAt:0}]})}};
+const scopes=new Map();
+window.api={};
 const client={works:{},subscribe:()=>()=>{},features:{
   projects:async()=>[{id:"p",name:item.projectName}],
   catalog:async()=>[item],
   follow:async(bot,p,slug,group)=>{scopes.set(group,[item]);return item;},
   list:async(bot,group)=>scopes.get(group)||[],
-  detail:async()=>({...item,sessions:[{threadId:"draft",title:"讨论导出范围",phase:"question"},...linked]}),
-  link:async(bot,id,threadId,group)=>{if(group!=="group-a")throw Error("wrong audience");linked.push({threadId,title:"历史评审",phase:"idle"});}
+  detail:async()=>({...item,sessions:[{threadId:"draft",title:"讨论导出范围",phase:"question"},{threadId:"review",title:"历史评审",phase:"idle"}]})
 }};
 function Panel({group}) {
   const [query,setQuery]=useState("");
@@ -88,16 +87,10 @@ window.scope("group-a");`
     await search.fill("客户服务")
     await page.getByRole("button", { name: /周会通知/ }).waitFor({ state: "detached" })
     await follow.click()
+    assert.equal(await follow.getAttribute("aria-expanded"), "true")
+    await page.getByRole("button", { name: /讨论导出范围.*等待回答/ }).click()
     assert.equal(await page.evaluate(() => (window as any).destination.threadId), "draft")
-    await search.fill("")
-    await page.getByRole("button", { name: "展开项目任务详情" }).click()
-    await page.getByText("等待回答", { exact: true }).waitFor()
-    await page.getByRole("button", { name: "关联已有会话" }).click()
-    const link = page.getByRole("button", { name: "确认关联" })
-    assert(await link.isDisabled())
-    await page.getByLabel("选择要关联的项目会话").selectOption("review")
-    await page.getByText("关联后，本群可通过 Bot 查询这段会话历史并继续交办。").waitFor()
-    await link.click()
+    assert.equal(await page.getByRole("button", { name: "关联已有会话" }).count(), 0)
     await page.getByRole("button", { name: /历史评审.*已空闲/ }).click()
     assert.deepEqual(
       await page.evaluate(() => [(window as any).board, (window as any).destination]),
@@ -115,7 +108,7 @@ window.scope("group-a");`
     }
     assert.deepEqual(errors, [])
     console.log(
-      "PASS: follow a Feature, inspect a question, explicitly share an existing session, navigate to session or Feature, and switch audiences"
+      "PASS: follow a Feature, inspect a question, read existing sessions without a second association, navigate to session or Feature, and switch audiences"
     )
   } finally {
     await browser.close()

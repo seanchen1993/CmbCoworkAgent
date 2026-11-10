@@ -26,6 +26,11 @@ export interface FeatureReceipt {
   decisionId?: string
 }
 type Rows = (sql: string, args?: readonly unknown[]) => Record<string, unknown>[]
+interface SessionClaim {
+  followId: string
+  incarnation: string
+  nodeId?: string
+}
 const followColumns =
   "id, bot_id AS botId, audience, project_id AS projectId, slug, project_name AS projectName, title"
 const operationColumns =
@@ -187,13 +192,23 @@ export class BotFeatureStore {
       [id]
     ) as unknown as { threadId: string; incarnation: string; nodeId?: string }[]
   }
-  session(id: string, threadId: string) {
-    const row = this.rows(
-      "SELECT incarnation FROM bot_feature_sessions WHERE follow_id=? AND thread_id=?",
-      [id, threadId]
-    )[0]
-    if (!row) throw new Error("当前对话未关联该项目会话")
-    return String(row.incarnation)
+  sessionClaims(threadIds: string[]) {
+    const result = new Map<string, SessionClaim>()
+    for (let i = 0; i < threadIds.length; i += 400) {
+      const batch = threadIds.slice(i, i + 400)
+      for (const row of this.rows(
+        `SELECT thread_id,follow_id,incarnation,node_id FROM bot_feature_sessions
+         WHERE thread_id IN (${batch.map(() => "?").join(",")})`,
+        batch
+      )) {
+        result.set(String(row.thread_id), {
+          followId: String(row.follow_id),
+          incarnation: String(row.incarnation),
+          nodeId: typeof row.node_id === "string" ? row.node_id : undefined
+        })
+      }
+    }
+    return result
   }
   begin(
     owner: FeatureOwner,
@@ -271,8 +286,9 @@ export class BotFeatureStore {
       "SELECT id FROM bot_feature_follows WHERE bot_id=?" +
       (audience === undefined ? "" : " AND audience=?")
     const args = audience === undefined ? [botId] : [botId, audience]
-    for (const table of ["bot_feature_sessions", "bot_feature_ops"])
-      this.db.run(`DELETE FROM ${table} WHERE follow_id IN (${where})`, args)
+    // The native project thread outlives the Bot. Keep its exclusive claim so its
+    // history cannot become an ordinary Feature session for another conversation.
+    this.db.run(`DELETE FROM bot_feature_ops WHERE follow_id IN (${where})`, args)
     this.db.run("DELETE FROM bot_feature_follows WHERE id IN (" + where + ")", args)
   }
 }

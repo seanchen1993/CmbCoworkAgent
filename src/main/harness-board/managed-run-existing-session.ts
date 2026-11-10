@@ -20,7 +20,7 @@ function assertIdleSession(threadId: string, status: string): void {
     coordinatorWorkerManager.hasTerminalWorkerAwaitingNotificationForThread(threadId) ||
     coordinatorWorkerManager.hasAutoRunnableNotifications(threadId)
   ) {
-    throw new Error("所选会话仍在运行或等待后台任务结果，请结束后再开启托管")
+    throw new Error("所选会话仍在运行或等待后台任务结果，请在结束后重试")
   }
 }
 
@@ -42,20 +42,20 @@ export async function requireIdleManagedSession(input: ExistingSessionInput) {
   if (!workspacePath) throw new Error("所选会话没有工作区，请重新选择")
   assertIdleSession(input.threadId, thread.status)
   if (await workflowRunManager.isBusyForThreadAsync(input.threadId, workspacePath)) {
-    throw new Error("所选会话仍在运行或等待后台任务结果，请结束后再开启托管")
+    throw new Error("所选会话仍在运行或等待后台任务结果，请在结束后重试")
   }
   if (
     input.launchWorkspacePath &&
     input.launchWorkspacePath !== workspacePath &&
     (await workflowRunManager.isBusyForThreadAsync(input.threadId, input.launchWorkspacePath))
   ) {
-    throw new Error("所选会话仍在运行或等待后台任务结果，请结束后再开启托管")
+    throw new Error("所选会话仍在运行或等待后台任务结果，请在结束后重试")
   }
   // Workflow inspection is asynchronous; confirm the session still exists and is idle afterwards.
   const current = getThreadCore(input.threadId)
   if (!current) throw new Error("所选会话已删除，请重新选择")
   if (current.metadata !== thread.metadata || current.status !== thread.status) {
-    throw new Error("所选会话状态已变化，请重新选择后再开启托管")
+    throw new Error("所选会话状态已变化，请重新选择后重试")
   }
   assertIdleSession(input.threadId, current.status)
   return { thread, metadata, workspacePath }

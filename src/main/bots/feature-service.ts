@@ -7,9 +7,15 @@ import type { BotTask } from "../../shared/bots/contracts"
 import type { LocalBotHost } from "./host"
 import type { FeatureOwner, FeatureReceipt } from "./feature-store"
 import { getLocalBotHost } from "./local-service"
-import { getThreadCore, upsertThreadMessages } from "../db"
+import {
+  getFeatureThreadSummaries,
+  getThreadCore,
+  upsertThreadMessages,
+  type ThreadSummaryRow
+} from "../db"
 import { captureThreadIncarnation } from "../services/thread-incarnation"
 import { managedRunStore } from "../harness-board/managed-run-store"
+import { requireIdleManagedSession } from "../harness-board/managed-run-existing-session"
 import { readHarnessFeatureMetadata } from "../harness-board/service"
 import { hasPendingHumanGateForThread } from "../harness-board/human-gate-service"
 import { harnessNotifications } from "../harness-board/notifications"
@@ -45,8 +51,7 @@ import {
 } from "../services/im/feature-binding-service"
 export { featureDelivery } from "./feature-window"
 
-function projectThread(owner: FeatureOwner, threadId: string) {
-  const row = getThreadCore(threadId)
+function projectThread(owner: FeatureOwner, row: ThreadSummaryRow | null) {
   if (!row) throw new Error("原项目会话已删除")
   const meta = JSON.parse(row.metadata || "{}")
   const feature = readHarnessFeatureMetadata(meta)
@@ -55,27 +60,48 @@ function projectThread(owner: FeatureOwner, threadId: string) {
     feature.slug !== owner.slug ||
     meta.botId ||
     meta.botHostId ||
+    meta.botWorkId ||
+    meta.botGroupId ||
+    meta.botMockBindingId ||
+    meta.harnessProjectSession ||
     !meta.workspacePath
   )
     throw new Error("所选会话不属于此 Feature")
   return {
     row,
     feature,
+    channelOwned: !!(meta.imDeliveryContext || meta.remoteImContext || meta.remoteThread),
+    followId: meta.botFeatureFollowId as string | undefined,
     workspace: String(meta.workspacePath),
     incarnation: JSON.stringify(captureThreadIncarnation(row))
   }
 }
-export function checkFeatureThread(
-  host: LocalBotHost,
+type ProjectThread = ReturnType<typeof projectThread>
+function verifySessionAccess(
   owner: FeatureOwner,
-  threadId: string,
-  expected = host.featureStore.session(owner.id, threadId)
+  thread: ProjectThread,
+  claim: { followId: string; incarnation: string } | undefined,
+  channelGrantState: string | null
 ) {
-  const thread = projectThread(owner, threadId)
-  if (expected !== thread.incarnation) throw new Error("原项目会话已被替换")
-  if (imRemoteAccessService.getThreadGrant(threadId)?.state === "active")
-    throw new Error("该项目会话已授权给其他招乎渠道")
+  if (
+    (channelGrantState && channelGrantState !== "revoked") ||
+    (!claim && (channelGrantState || thread.channelOwned))
+  )
+    throw new Error("该项目会话属于单独授权的招乎渠道")
+  if ((claim && claim.followId !== owner.id) || (thread.followId && thread.followId !== owner.id))
+    throw new Error("该项目会话属于其他对话")
+  if (claim && claim.incarnation !== thread.incarnation) throw new Error("原项目会话已被替换")
+  if (!claim && (thread.feature.runId || thread.followId)) throw new Error("该会话不属于当前交办")
   return thread
+}
+export function checkFeatureThread(host: LocalBotHost, owner: FeatureOwner, threadId: string) {
+  const grant = imRemoteAccessService.getThreadGrant(threadId)
+  return verifySessionAccess(
+    owner,
+    projectThread(owner, getThreadCore(threadId)),
+    host.featureStore.sessionClaims([threadId]).get(threadId),
+    grant?.state ?? null
+  )
 }
 export function addFeatureSession(
   host: LocalBotHost,
@@ -83,7 +109,11 @@ export function addFeatureSession(
   threadId: string,
   nodeId?: string
 ) {
-  host.featureStore.addSession(owner, threadId, projectThread(owner, threadId).incarnation, nodeId)
+  const thread = projectThread(owner, getThreadCore(threadId))
+  const grant = imRemoteAccessService.getThreadGrant(threadId)
+  if (grant && grant.state !== "revoked") throw new Error("该项目会话已授权给其他招乎渠道")
+  if (thread.followId && thread.followId !== owner.id) throw new Error("该项目会话属于其他对话")
+  host.featureStore.addSession(owner, threadId, thread.incarnation, nodeId)
   host.featureChanged(owner)
 }
 export async function linkExistingFeatureSession(
@@ -109,44 +139,33 @@ export async function linkExistingFeatureSession(
     (group && host.imGateway.binding(owner.audience.slice(3))?.binding.state !== "active")
   )
     throw new Error("交办来源已失效")
-  const thread = projectThread(owner, threadId)
-  if (
-    hasActiveTopLevelAgentRun(threadId) ||
-    thread.feature.runId ||
-    imRemoteAccessService.getThreadGrant(threadId)?.state === "active"
-  )
+  const thread = checkFeatureThread(host, owner, threadId)
+  if (hasActiveTopLevelAgentRun(threadId) || thread.feature.runId)
     throw new Error("请选择空闲且未绑定其他托管或招乎渠道的项目会话")
   addFeatureSession(host, owner, threadId)
 }
 function sessionStatus(
   host: LocalBotHost,
-  owner: FeatureOwner,
-  threadId: string,
-  incarnation: string,
+  thread: ProjectThread,
   nodeId?: string
 ): BotFeatureSession {
-  let thread: ReturnType<typeof projectThread>
-  try {
-    thread = checkFeatureThread(host, owner, threadId, incarnation)
-  } catch {
-    return { threadId, title: "会话不可用", phase: "unavailable", nodeId }
-  }
+  const threadId = thread.row.thread_id
   const questions = summarizePendingUserInputForRuntimeThread(threadId)
   const live = host.featureTurns.phase(threadId)
   const phase =
     questions.count || live === "question"
       ? "question"
-      : live === "approval" ||
-          hasPendingApprovalForRuntimeThread(threadId) ||
-          hasPendingHumanGateForThread(threadId)
-        ? "approval"
-        : live === "running" || hasActiveTopLevelAgentRun(threadId)
-          ? "running"
-          : thread.row.status === "error"
-            ? "failed"
-            : thread.row.status === "interrupted"
-              ? "interrupted"
-              : "idle"
+      : hasPendingHumanGateForThread(threadId)
+        ? "decision"
+        : live === "approval" || hasPendingApprovalForRuntimeThread(threadId)
+          ? "approval"
+          : live === "running" || hasActiveTopLevelAgentRun(threadId)
+            ? "running"
+            : thread.row.status === "error"
+              ? "failed"
+              : thread.row.status === "interrupted"
+                ? "interrupted"
+                : "idle"
   return {
     threadId,
     title: thread.row.title || "项目会话",
@@ -171,9 +190,30 @@ export function featureDetail(host: LocalBotHost, owner: FeatureOwner): BotFeatu
     decision.featureId === slug
       ? decision
       : undefined
-  const sessions = host.featureStore
-    .sessions(id)
-    .map((s) => sessionStatus(host, owner, s.threadId, s.incarnation, s.nodeId))
+  const rows = getFeatureThreadSummaries(projectId, slug)
+  const claims = host.featureStore.sessionClaims(rows.map((row) => row.thread_id))
+  const sessions: BotFeatureSession[] = []
+  const listed = new Set<string>()
+  for (const row of rows) {
+    const claim = claims.get(row.thread_id)
+    let thread: ProjectThread
+    try {
+      thread = verifySessionAccess(owner, projectThread(owner, row), claim, row.channelGrantState)
+    } catch {
+      continue
+    }
+    sessions.push(sessionStatus(host, thread, thread.feature.nodeId ?? claim?.nodeId))
+    listed.add(row.thread_id)
+  }
+  for (const own of host.featureStore.sessions(id)) {
+    if (!listed.has(own.threadId))
+      sessions.push({
+        threadId: own.threadId,
+        title: "会话不可用",
+        phase: "unavailable",
+        nodeId: own.nodeId
+      })
+  }
   return {
     ...host.featureTasks(owner, { followId: id })[0].task,
     sessions,
@@ -236,7 +276,7 @@ export function bindManagedFeatureSession(
     owner.slug !== input.featureId
   )
     throw new Error("此托管运行不属于原 Feature 交办")
-  const thread = projectThread(owner, threadId)
+  const thread = projectThread(owner, getThreadCore(threadId))
   if (thread.feature.runId !== input.runId) checkFeatureThread(host, owner, threadId)
   addFeatureSession(host, owner, threadId, input.nodeId)
 }
@@ -314,7 +354,9 @@ function observeDecisions() {
     const thread = checkFeatureThread(host, owner, note.sourceThreadId)
     const pending = change === "created" && note.status === "pending"
     host.featureStore.setDecision(op, note.notificationId, note.sourceThreadId, pending)
-    if (pending && (!task.mockSource || isNotificationPendingForTarget(note, "im")))
+    const remoteGate =
+      note.type === "human_gate" && botInteractionRoutes.get(note.sourceThreadId)?.featureGate
+    if (pending && !remoteGate && (!task.mockSource || isNotificationPendingForTarget(note, "im")))
       notice(
         host,
         owner,
@@ -371,9 +413,13 @@ export async function startFeatureTurn(
     task.mockSource ? imFeatureBindingService : desktopFeatureCatalog
   ).validateFeature(owner.projectId, owner.slug, thread.workspace)
   if (!valid.valid) throw new Error(valid.message)
+  if (op.action === "continue")
+    await requireIdleManagedSession({ projectId: owner.projectId, featureId: owner.slug, threadId })
   const verify = () => {
     executionOwner(host, op)
     const current = checkFeatureThread(host, owner, threadId)
+    if (current.incarnation !== thread.incarnation || current.workspace !== thread.workspace)
+      throw new Error("项目会话或工作区已变化，请重新选择")
     if (op.runId && current.feature.runId !== op.runId) throw new Error("托管会话归属已变化")
   }
   verify()
@@ -422,6 +468,28 @@ export async function startFeatureTurn(
         botEventId: event?.payload.event.eventId,
         senderId: event?.payload.route.senderId,
         onQuestionUndeliverable: questionDesktopNotice,
+        ...(source && (registered.binding.kind !== "group" || event)
+          ? {
+              featureGate: {
+                projectId: owner.projectId,
+                slug: owner.slug,
+                projectName: owner.projectName,
+                featureName: owner.title,
+                threadTitle: thread.row.title || "项目会话",
+                publicText: (value: string) => botImReplyText(value, [], [thread.workspace]),
+                onUndeliverable: (gateId: string) => {
+                  if (routeIsCurrent())
+                    notice(
+                      host,
+                      owner,
+                      task,
+                      gateId,
+                      "项目阶段等待确认。请在 App 的项目模式中处理。"
+                    )
+                }
+              }
+            }
+          : {}),
         isCurrent: routeIsCurrent
       })
     : undefined
@@ -476,6 +544,9 @@ export async function startFeatureTurn(
     cancelled = false
   let handle: Awaited<ReturnType<typeof startAgentRun>>
   try {
+    // Only claim an existing ordinary session once local checks have passed, before
+    // the first group message is persisted in the project's transcript.
+    if (op.action === "continue") addFeatureSession(host, owner, threadId)
     startStream?.()
     handle = await startAgentRun(request, delivery, {
       ...base,

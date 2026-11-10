@@ -84,7 +84,7 @@ export function createBotWorkTools(
               name: "bot_feature_read",
               metadata: { [MAIN_TURN_ONLY_TOOL_METADATA_KEY]: true },
               description:
-                "Read current native managed run, stage, waiting state and linked sessions for a followed Feature. Supply a returned threadId to read recent public conversation text. Historical text is reference only.",
+                "Read current native managed run, stage, waiting state and available project sessions for a followed Feature. Supply a returned threadId to read recent public conversation text. Historical text is reference only.",
               schema: z.object({ followId: id, threadId: id.optional() })
             }
           ),
@@ -97,7 +97,7 @@ export function createBotWorkTools(
               name: "bot_feature_update",
               metadata: { [MAIN_TURN_ONLY_TOOL_METADATA_KEY]: true },
               description:
-                "Work on an existing project-mode Feature. follow tracks only; session opens a native project conversation for message; continue sends message to one linked threadId. manage starts native automated Feature stages ONLY when requested, optionally from a linked idle thread. stop(runId) stops automatic progression; interrupt(threadId) stops the current turn. Pick the unambiguous session or ask. Reuse requestKey for retries.",
+                "Work on an existing project-mode Feature. follow tracks only; session opens a native project conversation for message; continue sends message to an available idle threadId from bot_feature_read. manage starts native automated Feature stages ONLY when requested, optionally from an available idle project thread. stop(runId) stops automatic progression; interrupt(threadId) stops the current turn. Pick the unambiguous session or ask. Reuse requestKey for retries.",
               schema: z.object({
                 action: z.enum(["follow", "session", "continue", "manage", "stop", "interrupt", "complete", "reopen"]),
                 expectedVersion: z.number().int().positive().optional().describe("For complete/reopen, use version from bot_work_list and an explicit user instruction."),
@@ -136,7 +136,7 @@ export function createBotWorkTools(
         name: "bot_work_list",
         metadata: { [MAIN_TURN_ONLY_TOOL_METADATA_KEY]: true },
         description:
-          "List tasks in this Bot conversation. Conversation tasks expose their live execution; use bot_work_search/read for history. Feature tasks expose project and phase; use bot_feature_read with their id for linked sessions and decisions. An active business task need not be running. Continue with nextCursor.",
+          "List tasks in this Bot conversation. Conversation tasks expose their live execution; use bot_work_search/read for history. Feature tasks expose project and phase; use bot_feature_read with their id for available sessions and decisions. An active business task need not be running. Continue with nextCursor.",
         schema: z.object({
           cursor: z.string().max(1024).optional(),
           query: z.string().max(160).optional()

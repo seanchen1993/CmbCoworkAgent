@@ -913,6 +913,10 @@ export async function initializeDatabase(): Promise<NativeSqliteAdapter> {
 
   ensureLegacyMessageTimeArchive(db)
   db.run(`CREATE INDEX IF NOT EXISTS idx_threads_updated_at ON threads(updated_at)`)
+  db.run(`CREATE INDEX IF NOT EXISTS idx_threads_feature_sessions ON threads(
+    json_extract(metadata, '$.harnessFeature.projectId'),
+    json_extract(metadata, '$.harnessFeature.slug'), updated_at DESC, thread_id
+  ) WHERE json_valid(metadata) AND json_extract(metadata, '$.harnessFeature.projectId') IS NOT NULL`)
   db.run(
     `CREATE INDEX IF NOT EXISTS idx_thread_messages_thread_order ON thread_messages(thread_id, ordinal, created_at)`
   )
@@ -5703,6 +5707,25 @@ export function getPersistedThreadWorkspaceBindings(): PersistedThreadWorkspaceB
     stmt.free()
   }
   return bindings
+}
+
+/** List native Feature threads without loading messages or execution traces. */
+export function getFeatureThreadSummaries(projectId: string, slug: string) {
+  const stmt = getDb().prepare(`SELECT t.thread_id, t.created_at, t.updated_at, t.metadata,
+    t.status, t.title, g.state AS channelGrantState
+    FROM threads t LEFT JOIN im_thread_grants g ON g.thread_id=t.thread_id
+    WHERE json_valid(t.metadata)
+      AND json_extract(t.metadata, '$.harnessFeature.projectId')=?
+      AND json_extract(t.metadata, '$.harnessFeature.slug')=?
+    ORDER BY t.updated_at DESC, t.thread_id`)
+  const rows: (ThreadSummaryRow & { channelGrantState: string | null })[] = []
+  try {
+    stmt.bind([projectId, slug])
+    while (stmt.step()) rows.push(stmt.getAsObject() as unknown as (typeof rows)[number])
+    return rows
+  } finally {
+    stmt.free()
+  }
 }
 
 /** Metadata/status projection for hot main-process paths. */

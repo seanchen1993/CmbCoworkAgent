@@ -752,3 +752,171 @@ for (const source of ["human_gate", "biz_retry"] as const) {
     })
   })
 }
+
+describe("Bot Feature stage decisions in the originating Zhaohu group", () => {
+  beforeEach(() => {
+    const snapshot = {
+      runId: "managed",
+      currentSession: { threadId: "thread" },
+      decisionBaseline: { nodeId: "review" }
+    }
+    vi.doMock("../harness-board/service", () => ({ getHarnessFeatureBinding: async () => ({}) }))
+    vi.doMock("../harness-board/managed-run-store", () => ({
+      managedRunStore: {
+        getRun: () => ({ snapshot }),
+        findRunningRun: () => ({ snapshot }),
+        appendEvent: vi.fn()
+      }
+    }))
+    vi.doMock("./event-reporter", () => ({ trackEvent: vi.fn() }))
+    vi.doMock("./im/remote-approval-service", () => ({ imRemoteApprovalService: {} }))
+    vi.doMock("./im/remote-user-input-service", () => ({ imRemoteUserInputService: {} }))
+    dependencies.enqueue.mockResolvedValue([])
+  })
+  afterEach(() => {
+    vi.doUnmock("../harness-board/service")
+    vi.doUnmock("../harness-board/managed-run-store")
+    vi.doUnmock("./event-reporter")
+    vi.doUnmock("./im/remote-approval-service")
+    vi.doUnmock("./im/remote-user-input-service")
+  })
+  async function request(card: boolean) {
+    dependencies.cardAccepted = card
+    const { botInteractionRoutes } = await import("./im/bot-interaction-route")
+    const { initializeImHumanGateChannel, imHumanGateAdapter: adapter } =
+      await import("./im/human-gate-adapter")
+    const { initializeHumanGateSource, requestHumanGate } =
+      await import("../harness-board/human-gate-service")
+    const recordDecision = vi.fn(async () => true)
+    initializeHumanGateSource({ recordDecision, failConflict: async () => true })
+    initializeImHumanGateChannel()
+    botInteractionRoutes.setTransport(() => true)
+    const destination = { principalId: "owner", conversationKey: "group-a" }
+    const release = botInteractionRoutes.register({
+      ...destination,
+      threadId: "thread",
+      realm: "gateway",
+      kind: "group",
+      prefix: "",
+      botEventId: "original-event",
+      isCurrent: () => true,
+      featureGate: {
+        projectId: "project",
+        slug: "feature",
+        projectName: "市场",
+        featureName: "周报",
+        threadTitle: "需求评审",
+        publicText: (text) => text.replace("/private/plan.md", "plan.md"),
+        onUndeliverable: vi.fn()
+      }
+    })
+    const outcome = requestHumanGate({
+      projectId: "project",
+      featureId: "feature",
+      threadId: "thread",
+      runtimeThreadId: "thread",
+      hookId: "review",
+      hookPluginId: "dev",
+      harnessPluginId: "dev",
+      message: "确认 /private/plan.md"
+    }).then(
+      (lease) => {
+        lease.release()
+        return "approved"
+      },
+      (error) => error.message
+    )
+    await vi.waitFor(() => expect(dependencies.cardPublish).toHaveBeenCalledTimes(1))
+    const id = service.pending()[0].notificationId
+    expect(dependencies.cardPublish).toHaveBeenCalledWith(
+      expect.objectContaining({
+        ...destination,
+        kind: "human_gate",
+        botEventId: "original-event",
+        requestRef: id
+      })
+    )
+    expect(dependencies.grant).not.toHaveBeenCalled()
+    return { adapter, destination, id, outcome, release, recordDecision }
+  }
+
+  it("advances the original run once despite a racing desktop rejection", async () => {
+    const { adapter, destination, id, outcome, recordDecision } = await request(true)
+    const rendered = JSON.stringify(dependencies.cardInteractions.get(id)?.content)
+    for (const word of ["市场", "周报", "批准推进", "拒绝并终止", "@机器人"])
+      expect(rendered).toContain(word)
+    expect(rendered).not.toContain("/private/")
+    const approve = (conversationKey: string) =>
+      adapter.resolveCardDecision({
+        ...destination,
+        conversationKey,
+        notificationId: id,
+        decision: "approve"
+      })
+    expect(await approve("group-b")).toContain("失效")
+    expect(service.get(id)?.status).toBe("pending")
+    const [card, desktop] = await Promise.all([
+      approve("group-a"),
+      actions.decideNotification({ notificationId: id, action: "reject" }, { channel: "desktop" })
+    ])
+    expect(card).toBeNull()
+    expect(desktop.applied).toBe(false)
+    expect(await outcome).toBe("approved")
+    expect(recordDecision).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({
+        runId: "managed",
+        threadId: "thread",
+        decision: "approve",
+        channel: "im"
+      })
+    )
+    expect(dependencies.cardResolveDetached).toHaveBeenCalledTimes(1)
+  })
+
+  it("falls back to a group short code when the gateway declines the card and rejects only the original run", async () => {
+    const { id, outcome, recordDecision } = await request(false)
+    const { handleBotImInteractionCommand } = await import("./im/bot-interaction-command")
+    const text = JSON.stringify(dependencies.enqueue.mock.calls[0])
+    const code = text.match(/门禁拒绝 ([A-F0-9]{6})/)?.[1]
+    expect(code).toBeDefined()
+    expect(text).toContain("@机器人")
+    expect(text).not.toContain("/private/")
+    const send = (conversationKey: string, command: string) =>
+      handleBotImInteractionCommand(
+        {
+          route: { kind: "group", senderId: "group-member" },
+          event: { conversationKey, message: { text: command } }
+        } as never,
+        "owner",
+        "incoming-" + command
+      )
+    await send("group-b", "/门禁拒绝 " + code)
+    await send("group-a", "/批准 " + code)
+    expect(service.get(id)?.status).toBe("pending")
+    await send("group-a", "/门禁拒绝 " + code)
+    expect(await outcome).toContain("终止")
+    await send("group-a", "/门禁拒绝 " + code)
+    expect(recordDecision).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({
+        runId: "managed",
+        decision: "reject",
+        channel: "im"
+      })
+    )
+  })
+
+  it("keeps desktop control after the source binding closes", async () => {
+    const { adapter, destination, id, release, outcome } = await request(true)
+    release()
+    expect(
+      await adapter.resolveCardDecision({ ...destination, notificationId: id, decision: "approve" })
+    ).toContain("失效")
+    expect(service.get(id)?.status).toBe("pending")
+    await actions.decideNotification(
+      { notificationId: id, action: "approve" },
+      { channel: "desktop" }
+    )
+    expect(await outcome).toBe("approved")
+    expect(service.get(id)?.channel).toBe("desktop")
+  })
+})

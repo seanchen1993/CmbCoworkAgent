@@ -116,8 +116,11 @@ const KV_SOURCE_TITLE = "来源"
  */
 export const IM_CARD_TEXT_MODE_HINT = "显示不全？发送 /文字模式 改为文字"
 
-function textModeHintComponent(): CardComponent {
-  return contentComponent([IM_CARD_TEXT_MODE_HINT], 1)
+function textModeHintComponent(group = false): CardComponent {
+  return contentComponent(
+    [group ? "显示不全？在本群 @机器人 发送 /文字模式 开" : IM_CARD_TEXT_MODE_HINT],
+    1
+  )
 }
 
 export interface ApprovalCardInput {
@@ -434,21 +437,22 @@ function harnessDecisionContext(context: HarnessDecisionCardContext): CardCompon
 export interface HumanGateCardInput extends HarnessDecisionCardContext {
   message: string
   tag: string
+  group?: boolean
 }
 
 export function buildHumanGateCard(input: HumanGateCardInput): CardComponent[] {
   return [
-    titleComponent("项目模式需要审批"),
+    titleComponent(input.group ? "项目阶段待确认" : "项目模式需要审批"),
     statusComponent("待处理", STATUS_STYLE.orange),
     harnessDecisionContext(input),
-    textModeHintComponent(),
+    textModeHintComponent(input.group),
     contentComponent(input.message.split("\n").filter((line) => line.length > 0)),
     {
       type: "exclusionOperate",
       style: EXCLUSION_STYLE_ACCEPT_REJECT,
       list: [
         {
-          content: "批准",
+          content: input.group ? "批准推进" : "批准",
           action: BUTTON_ACTION_FEEDBACK,
           tag: `${input.tag}:approve`,
           style: 1,
@@ -456,7 +460,7 @@ export function buildHumanGateCard(input: HumanGateCardInput): CardComponent[] {
           disable: 0
         },
         {
-          content: "拒绝",
+          content: input.group ? "拒绝并终止" : "拒绝",
           action: BUTTON_ACTION_FEEDBACK,
           tag: `${input.tag}:reject`,
           style: 2,

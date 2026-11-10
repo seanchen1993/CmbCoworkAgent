@@ -6,6 +6,7 @@ import {
 import { registerNotificationChannel } from "../notification-channels"
 import { decideNotification } from "../notification-actions"
 import { ImDecisionCodeRegistry } from "./decision-code-registry"
+import { botInteractionRoutes, type BotInteractionRoute } from "./bot-interaction-route"
 import { createDecisionReplyDrainer, resolveImDecisionRoute } from "./decision-delivery"
 import { getThread } from "../../db"
 import type { HarnessHumanGateSnapshot } from "../../../shared/harness-board-types"
@@ -39,13 +40,19 @@ export class ImHumanGateAdapter {
   private readonly replies = createDecisionReplyDrainer("Human Gate")
   private readonly cardContexts = new Map<string, HarnessDecisionCardContext>()
   private readonly withheld = new ImWithheldTextNotices()
+  private readonly botRoutes = new Map<string, BotInteractionRoute>()
   registerReplyDrainer = this.replies.register
+
+  private routeValid(gateId: string) {
+    const route = this.botRoutes.get(gateId)
+    return !route || botInteractionRoutes.get(route.threadId) === route
+  }
 
   /** See ImWithheldTextNotices: the notices whose cards went out instead. */
   async resendPendingAsText(conversationKey: string): Promise<ImTextResendResult> {
     const result = await this.withheld.resend({
       conversationKey,
-      isOpen: isOpenForIm,
+      isOpen: (id) => isOpenForIm(id) && this.routeValid(id),
       closedReasonCode: "HUMAN_GATE_ALREADY_RESOLVED",
       warn
     })
@@ -54,34 +61,43 @@ export class ImHumanGateAdapter {
   }
 
   async publish(gate: HarnessHumanGateSnapshot): Promise<void> {
-    const route = resolveImDecisionRoute(gate.sourceThreadId)
+    const bot = botInteractionRoutes.get(gate.sourceThreadId)
+    const feature = bot?.featureGate
+    if (
+      botInteractionRoutes.has(gate.sourceThreadId) &&
+      (!bot || !feature || feature.projectId !== gate.projectId || feature.slug !== gate.featureId)
+    )
+      return
+    const route = bot ?? resolveImDecisionRoute(gate.sourceThreadId)
     if (!route) return
+    if (bot) this.botRoutes.set(gate.gateId, bot)
     const code = this.codes.allocate({ notificationId: gate.gateId, ...route })
-    const threadTitle = getThread(gate.sourceThreadId)?.title?.trim() || "关联会话"
-    const featureGrant = imRemoteAccessService.getFeatureGrant(gate.projectId, gate.featureId)
-    const projectName =
-      featureGrant?.principalId === route.principalId
-        ? featureGrant.projectNameSnapshot
-        : gate.projectId
-    const featureName =
-      featureGrant?.principalId === route.principalId
-        ? featureGrant.featureTitleSnapshot
-        : gate.featureId
-    const context: HarnessDecisionCardContext = {
-      projectName,
-      featureName,
-      threadTitle
-    }
+    const grant = feature
+      ? null
+      : imRemoteAccessService.getFeatureGrant(gate.projectId, gate.featureId)
+    const ownGrant = grant?.principalId === route.principalId ? grant : null
+    const visible = (text: string) => (feature ? feature.publicText(text) : text)
+    const projectName = visible(
+      feature?.projectName ?? ownGrant?.projectNameSnapshot ?? gate.projectId
+    )
+    const featureName = visible(
+      feature?.featureName ?? ownGrant?.featureTitleSnapshot ?? gate.featureId
+    )
+    const threadTitle = visible(
+      feature?.threadTitle ?? (getThread(gate.sourceThreadId)?.title?.trim() || "关联会话")
+    )
+    const message = visible(gate.message)
+    const context: HarnessDecisionCardContext = { projectName, featureName, threadTitle }
     this.cardContexts.set(gate.gateId, context)
     const text = [
-      `【项目模式需要审批】`,
+      bot?.kind === "group" ? "【项目阶段待确认】" : "【项目模式需要审批】",
       `项目：【${projectName}】`,
       `特性：【${featureName}】`,
       `来源会话：【${threadTitle}】`,
       "",
-      gate.message,
+      message,
       "",
-      "可选操作:",
+      bot?.kind === "group" ? "请在本群 @机器人，发送以下一条指令：" : "可选操作:",
       `/门禁批准 ${code}`,
       `/门禁拒绝 ${code}`
     ].join("\n")
@@ -90,15 +106,26 @@ export class ImHumanGateAdapter {
       conversationKey: route.conversationKey,
       text
     })
-    const card = await imCardPublisher.publish({
-      kind: "human_gate",
-      threadId: gate.sourceThreadId,
-      principalId: route.principalId,
-      conversationKey: route.conversationKey,
-      requestRef: gate.gateId,
-      targetLabel: `特性：${featureName}`,
-      build: (tag) => buildHumanGateCard({ ...context, message: gate.message, tag })
-    })
+    let card
+    try {
+      card = await imCardPublisher.publish({
+        kind: "human_gate",
+        threadId: gate.sourceThreadId,
+        principalId: route.principalId,
+        conversationKey: route.conversationKey,
+        requestRef: gate.gateId,
+        targetLabel: `特性：${featureName}`,
+        botEventId: bot?.botEventId,
+        build: (tag) =>
+          buildHumanGateCard({ ...context, message, tag, group: bot?.kind === "group" })
+      })
+    } catch (error) {
+      warn("无法创建阶段确认卡片，改发文字指令。", error)
+    }
+    if (bot && !this.routeValid(gate.gateId)) {
+      if (isOpenForIm(gate.gateId)) feature?.onUndeliverable(gate.gateId)
+      return
+    }
     if (card) {
       const current = notificationService.get(gate.gateId)
       if (!isNotificationPendingForTarget(current, "im") || !isNotificationVisible(current)) {
@@ -131,11 +158,21 @@ export class ImHumanGateAdapter {
       return
     }
     try {
-      await imEventStore.enqueueProactiveReplies(notice)
+      const queued = await imEventStore.enqueueProactiveReplies(notice)
+      if (bot && (!isOpenForIm(gate.gateId) || !this.routeValid(gate.gateId))) {
+        await Promise.all(
+          queued.map((row) =>
+            imEventStore.markOutboxFailed(row.outboxId, "HUMAN_GATE_ROUTE_CLOSED")
+          )
+        )
+        if (isOpenForIm(gate.gateId)) feature?.onUndeliverable(gate.gateId)
+        return
+      }
       this.replies.drain()
     } catch (error) {
       this.codes.removeNotification(gate.gateId)
       this.cardContexts.delete(gate.gateId)
+      if (bot && isOpenForIm(gate.gateId)) feature?.onUndeliverable(gate.gateId)
       throw error
     }
   }
@@ -151,7 +188,9 @@ export class ImHumanGateAdapter {
     const { code, entry } = resolved
     const { applied, message } = await this.resolveDecision({
       notificationId: entry.notificationId,
-      decision: input.decision
+      decision: input.decision,
+      principalId: input.principalId,
+      conversationKey: input.conversationKey
     })
     this.codes.settle(code, applied)
     if (!applied) return message
@@ -161,20 +200,37 @@ export class ImHumanGateAdapter {
   async resolveCardDecision(input: {
     notificationId: string
     decision: "approve" | "reject"
+    principalId: string
+    conversationKey: string
   }): Promise<string | null> {
     const result = await this.resolveDecision(input)
     if (!result.applied) return result.message
     return null
   }
 
-  private resolveDecision(input: { notificationId: string; decision: "approve" | "reject" }) {
+  private resolveDecision(input: {
+    notificationId: string
+    decision: "approve" | "reject"
+    principalId: string
+    conversationKey: string
+  }) {
+    const route = this.botRoutes.get(input.notificationId)
+    const isCurrent =
+      route &&
+      (() =>
+        botInteractionRoutes.get(route.threadId) === route &&
+        route.principalId === input.principalId &&
+        route.conversationKey === input.conversationKey)
+    if (isCurrent && !isCurrent())
+      return { applied: false, message: "原招乎绑定或项目执行已失效，请在 App 中查看。" }
     return decideNotification(
       { notificationId: input.notificationId, action: input.decision },
-      { channel: "im" }
+      { channel: "im", isCurrent }
     )
   }
 
   endNotification(notification: AppNotification): void {
+    this.botRoutes.delete(notification.notificationId)
     this.codes.removeNotification(notification.notificationId)
     this.withheld.forget(notification.notificationId)
     const context = this.cardContexts.get(notification.notificationId)

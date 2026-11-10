@@ -241,14 +241,15 @@ export async function requestHumanGate(input: HumanGateRequestInput): Promise<Hu
 
 export async function approveHumanGate(
   input: HarnessHumanGateDecisionInput,
-  channel: "desktop" | "im" = "desktop"
+  channel: "desktop" | "im" = "desktop",
+  isCurrent?: () => boolean
 ): Promise<boolean> {
   const key = featureKey(input.projectId, input.featureId)
   let approvedGate: HarnessHumanGateSnapshot | undefined
   let approvedActive: ActiveGate | undefined
   const result = await featureLocks.withKey(key, async () => {
     const notification = harnessNotifications.get(input.gateId)
-    if (channel === "im" && notification?.disabledTargets?.im) return false
+    if (channel === "im" && (notification?.disabledTargets?.im || isCurrent?.() === false)) return false
     const active = activeGates.get(key)
     const persisted = projectHumanGate(notification)
     if (persisted?.projectId !== input.projectId || persisted.featureId !== input.featureId) return false
@@ -292,14 +293,15 @@ export async function approveHumanGate(
 export async function rejectHumanGate(
   input: HarnessHumanGateDecisionInput,
   reasonCode: "human_gate_rejected" | "source_run_aborted" = "human_gate_rejected",
-  channel: "desktop" | "im" | "system" = "desktop"
+  channel: "desktop" | "im" | "system" = "desktop",
+  isCurrent?: () => boolean
 ): Promise<boolean> {
   const key = featureKey(input.projectId, input.featureId)
   let rejectedGate: HarnessHumanGateSnapshot | undefined
   let rejectedActive: ActiveGate | undefined
   const result = await featureLocks.withKey(key, async () => {
     const notification = harnessNotifications.get(input.gateId)
-    if (channel === "im" && notification?.disabledTargets?.im) return false
+    if (channel === "im" && (notification?.disabledTargets?.im || isCurrent?.() === false)) return false
     const active = activeGates.get(key)
     const persisted = projectHumanGate(notification)
     if (persisted?.projectId !== input.projectId || persisted.featureId !== input.featureId) return false
@@ -378,8 +380,8 @@ export function initializeHumanGateSource(callbacks: HumanGateOperations): void 
       return { applied: false, message: "Human Gate 操作无效。" }
     }
     const applied = input.action === "approve"
-      ? await approveHumanGate(gate, origin.channel)
-      : await rejectHumanGate(gate, "human_gate_rejected", origin.channel)
+      ? await approveHumanGate(gate, origin.channel, origin.isCurrent)
+      : await rejectHumanGate(gate, "human_gate_rejected", origin.channel, origin.isCurrent)
     return { applied, message: applied ? "Human Gate 已处理。" : "该决策已处理或已失效。" }
   })
 }

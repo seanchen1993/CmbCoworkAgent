@@ -8,8 +8,8 @@ export interface BotFeatureFollow {
 }
 
 export const featureTaskLabels = {
-  following: "仅跟进",
-  linked: "已关联会话",
+  following: "跟进中",
+  linked: "跟进中",
   running: "正在处理",
   managed: "托管中",
   question: "待你回答",
@@ -33,7 +33,15 @@ export interface BotFeatureTask extends BotFeatureFollow {
 export interface BotFeatureSession {
   threadId: string
   title: string
-  phase: "idle" | "running" | "question" | "approval" | "interrupted" | "failed" | "unavailable"
+  phase:
+    | "idle"
+    | "running"
+    | "question"
+    | "approval"
+    | "decision"
+    | "interrupted"
+    | "failed"
+    | "unavailable"
   questions?: string[]
   nodeId?: string
 }
@@ -73,6 +81,6 @@ export interface BotFeatureClient {
     groupId?: string
   ): Promise<void>
   detail(botId: string, id: string, groupId?: string): Promise<BotFeatureDetail>
-  /** Only the desktop user can grant access to an existing project conversation. */
+  /** Compatibility entry for older clients that explicitly assigned a project conversation. */
   link(botId: string, id: string, threadId: string, groupId?: string): Promise<void>
 }

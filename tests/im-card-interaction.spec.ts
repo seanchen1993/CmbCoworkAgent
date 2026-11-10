@@ -1111,9 +1111,9 @@ async function testProjectDecisionReceiptsUseTheirExistingAdapters(): Promise<vo
   })
 
   assert.deepEqual(humanCalls, [
-    { notificationId: "gate-1", decision: "approve" },
-    { notificationId: "gate-2", decision: "reject" },
-    { notificationId: "gate-3", decision: "approve" }
+    { ...ROUTE, notificationId: "gate-1", decision: "approve" },
+    { ...ROUTE, notificationId: "gate-2", decision: "reject" },
+    { ...ROUTE, notificationId: "gate-3", decision: "approve" }
   ])
   assert.deepEqual(gateway.acknowledged.slice(0, 3), [
     "receipt-human-gate",

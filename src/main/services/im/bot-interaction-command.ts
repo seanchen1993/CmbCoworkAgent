@@ -1,6 +1,7 @@
 import type { BotImEvent } from "../../../shared/bots/im-channel"
 import { imRemoteUserInputService } from "./remote-user-input-service"
 import { imRemoteApprovalService } from "./remote-approval-service"
+import { imHumanGateAdapter } from "./human-gate-adapter"
 import { imConversationStateStore } from "./conversation-state"
 import { imEventStore } from "./event-store"
 import { buildImProactiveReplies } from "./reply-segmentation"
@@ -12,7 +13,9 @@ export async function handleBotImInteractionCommand(
   localEventId: string
 ): Promise<void> {
   const { event, route } = payload
-  const match = event.message.text.trim().match(/^\/(回答|批准|拒绝|文字模式)(?:\s+([\s\S]*))?$/u)
+  const match = event.message.text
+    .trim()
+    .match(/^\/(回答|批准|拒绝|门禁批准|门禁拒绝|文字模式)(?:\s+([\s\S]*))?$/u)
   if (!match) return
   const [, command, argument = ""] = match
   const context = { principalId, conversationKey: event.conversationKey }
@@ -22,6 +25,12 @@ export async function handleBotImInteractionCommand(
       ...context,
       argument,
       botSenderId: route.senderId
+    })
+  } else if (command === "门禁批准" || command === "门禁拒绝") {
+    text = await imHumanGateAdapter.resolveCode({
+      ...context,
+      code: argument,
+      decision: command === "门禁批准" ? "approve" : "reject"
     })
   } else if (command === "批准" || command === "拒绝") {
     text =
@@ -44,7 +53,8 @@ export async function handleBotImInteractionCommand(
       mode === "text"
         ? await Promise.all([
             imRemoteUserInputService.resendPendingAsText(event.conversationKey),
-            imRemoteApprovalService.resendPendingAsText(event.conversationKey)
+            imRemoteApprovalService.resendPendingAsText(event.conversationKey),
+            imHumanGateAdapter.resendPendingAsText(event.conversationKey)
           ])
         : []
     text = mode === "text" ? "已切到文字模式，可用短码回答待处理的问题。" : "已切回卡片模式。"

@@ -10,6 +10,16 @@ export interface BotInteractionRoute {
   senderId?: string
   isCurrent: () => boolean
   onQuestionUndeliverable?: (requestId: string) => void
+  /** Present only on a project execution delegated from this Bot conversation. */
+  featureGate?: {
+    projectId: string
+    slug: string
+    projectName: string
+    featureName: string
+    threadTitle: string
+    publicText: (value: string) => string
+    onUndeliverable: (gateId: string) => void
+  }
 }
 class BotInteractionRoutes {
   private routes = new Map<string, BotInteractionRoute>()

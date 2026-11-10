@@ -17,7 +17,6 @@ import {
   startPreparedManagedAgentRun
 } from "../harness-board/auto-mode-action-executor"
 import { createThreadService } from "../services/thread-service"
-import { hasActiveTopLevelAgentRun } from "../agent/agent-run-service"
 import { splitBotInlineReasoning } from "../../shared/bots/inline-reasoning"
 import { notifyRemoteThreadChanged } from "../agent/renderer-stream-mirror"
 import {
@@ -75,12 +74,10 @@ export async function runBotFeatureCommand(
       authorize()
       if (!access.valid) throw new Error(access.message)
     }
-    const detail = featureDetail(host, owner)
     const { resolveHarnessFeatureCurrentStage } = await import("../harness-board/service")
     const stage = await resolveHarnessFeatureCurrentStage(owner.projectId, owner.slug)
     authorize()
-    if (!input.threadId) return { ...detail, stage }
-    checkFeatureThread(host, owner, input.threadId)
+    if (!input.threadId) return { ...featureDetail(host, owner), stage }
     const { getThreadMessagesPage } = await import("../db")
     authorize()
     checkFeatureThread(host, owner, input.threadId)
@@ -97,7 +94,7 @@ export async function runBotFeatureCommand(
       const visible = m.role === "assistant" ? splitBotInlineReasoning(text).body.trim() : text
       return visible ? [{ role: m.role, text: visible.slice(0, 2000) }] : []
     })
-    return { detail, stage, history }
+    return { detail: featureDetail(host, owner), stage, history }
   }
   if (input.action === "complete" || input.action === "reopen") {
     const item = store.find(scope, input.projectId, input.slug)
@@ -133,7 +130,14 @@ export async function runBotFeatureCommand(
     host.featureChanged(owner)
   }
   if (input.action === "follow") return featureDetail(host, owner)
-  if (input.threadId) checkFeatureThread(host, owner, input.threadId)
+  const selected = input.threadId ? checkFeatureThread(host, owner, input.threadId) : undefined
+  const verifySelected = () => {
+    if (
+      input.threadId &&
+      checkFeatureThread(host, owner, input.threadId).incarnation !== selected?.incarnation
+    )
+      throw new Error("原项目会话已被替换")
+  }
   const { fresh, receipt } = store.begin(owner, taskId, input.requestKey, input.action, [
     input.threadId ?? null,
     input.message ?? null,
@@ -159,9 +163,12 @@ export async function runBotFeatureCommand(
           operationId: receipt.id,
           authorize: () => {
             authorize()
-            if (input.threadId) checkFeatureThread(host, owner, input.threadId)
+            verifySelected()
           },
-          created: (run) => store.active(receipt.id, undefined, run.runId)
+          created: (run) => {
+            if (input.threadId) addFeatureSession(host, owner, input.threadId)
+            store.active(receipt.id, undefined, run.runId)
+          }
         }
       )
       if (run.status === "failed" || run.status === "corrupt")
@@ -188,6 +195,7 @@ export async function runBotFeatureCommand(
           if (threadId) throw new Error("新建会话无需指定已有会话")
           const thread = await createThreadService({
             harnessFeature: { projectId, slug: featureId, source: HARNESS_SOURCE },
+            botFeatureFollowId: owner.id,
             title: message.split("\n")[0].slice(0, 80)
           })
           threadId = thread.thread_id
@@ -196,15 +204,13 @@ export async function runBotFeatureCommand(
         }
         if (!threadId) throw new Error("请选择项目会话")
         authorize()
-        checkFeatureThread(host, owner, threadId)
-        if (hasActiveTopLevelAgentRun(threadId))
-          throw new Error("该项目会话正在执行，请等待该轮结束")
-        store.active(receipt.id, threadId)
+        verifySelected()
         const prepared = prepareManagedAgentRun(
           threadId,
           { modelMessage: message, displayMessage: message, userMessageId: randomUUID() },
           delivery
         )
+        store.active(receipt.id, threadId)
         prepared.request.managedExecution = false
         await startPreparedManagedAgentRun(prepared, undefined, receipt.id)
       })

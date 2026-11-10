@@ -28,11 +28,13 @@ import type { ApprovalRequest } from "../types"
 const io = vi.hoisted(() => ({
   host: vi.fn(),
   thread: vi.fn(),
+  featureThreads: vi.fn(),
   page: vi.fn(),
   save: vi.fn(),
   start: vi.fn(),
   pending: vi.fn(),
   active: vi.fn(),
+  workflowBusy: vi.fn(),
   approval: vi.fn(),
   snapshot: vi.fn(),
   access: vi.fn(),
@@ -52,6 +54,7 @@ vi.mock("../db", () => ({
   flushStrict: vi.fn(),
   getThread: io.thread,
   getThreadCore: io.thread,
+  getFeatureThreadSummaries: io.featureThreads,
   getThreadMessagesPage: io.page,
   upsertThreadMessages: io.save
 }))
@@ -93,6 +96,9 @@ vi.mock("../agent/runtime", () => ({ hasPendingApprovalForRuntimeThread: io.appr
 vi.mock("../agent/agent-run-service", () => ({
   startAgentRun: io.start,
   hasActiveTopLevelAgentRun: io.active
+}))
+vi.mock("../agent/workflow/run-manager", () => ({
+  workflowRunManager: { isBusyForThreadAsync: io.workflowBusy }
 }))
 vi.mock("../services/im/remote-access-service", () => ({
   imRemoteAccessService: { getThreadGrant: io.grant }
@@ -167,6 +173,7 @@ beforeEach(() => {
   const features = new BotStore(db).features
   rows.clear()
   child("parent")
+  rows.get("parent")!.metadata = JSON.stringify({ botId: "bot" })
   host = {
     featureStore: features,
     featureTasks: LocalBotHost.prototype.featureTasks,
@@ -189,6 +196,18 @@ beforeEach(() => {
   io.host.mockReturnValue(host)
   io.dataRoot.mockReturnValue(root)
   io.thread.mockImplementation((id) => rows.get(id))
+  io.featureThreads.mockImplementation((projectId, slug) =>
+    [...rows.values()]
+      .reverse()
+      .filter((row) => {
+        const feature = JSON.parse(row.metadata).harnessFeature
+        return feature?.projectId === projectId && feature?.slug === slug
+      })
+      .map((row) => ({
+        ...row,
+        channelGrantState: io.grant(row.thread_id)?.state ?? null
+      }))
+  )
   io.access.mockResolvedValue({ valid: true, feature, project: { id: "project", name: "市场" } })
   io.validate.mockResolvedValue({
     valid: true,
@@ -347,6 +366,72 @@ it("keeps two groups and private follows separate even when they follow the same
   io.grant.mockReturnValue(null)
   rows.get("shared")!.created_at++
   expect(featureDetail(host, own).sessions[0].phase).toBe("unavailable")
+})
+
+it("discovers native sessions before and after following, and reserves a session only when a Bot continues it", async () => {
+  child("prior-review")
+  const owner = host.featureStore.follow(groupScope, feature)
+  const personal = host.featureStore.follow(privateScope, feature)
+  child("new-review")
+  child("foreign-managed", "another-run")
+  child("remote-grant")
+  child("revoked-grant")
+  child("remote-origin")
+  const remote = rows.get("remote-origin")!
+  remote.metadata = JSON.stringify({ ...JSON.parse(remote.metadata), remoteThread: true })
+  const grants: Record<string, string> = { "remote-grant": "suspended", "revoked-grant": "revoked" }
+  io.grant.mockImplementation((id: string) => (grants[id] ? { state: grants[id] } : null))
+  child("another-feature")
+  rows.get("another-feature")!.metadata = JSON.stringify({
+    harnessFeature: { projectId: "unrelated", slug: feature.slug },
+    workspacePath: root
+  })
+  io.page.mockReturnValue({ messages: [{ role: "user", content: "验收范围" }] })
+  const read = (threadId: string) =>
+    runBotFeatureCommand(host, "job", { action: "read", followId: owner.id, threadId })
+  for (const threadId of ["prior-review", "new-review"]) {
+    expect(await read(threadId)).toMatchObject({ history: [{ text: "验收范围" }] })
+    expect(featureDetail(host, personal).sessions.map((s) => s.threadId)).toContain(threadId)
+  }
+  for (const threadId of [
+    "another-feature",
+    "foreign-managed",
+    "remote-grant",
+    "revoked-grant",
+    "remote-origin",
+    "parent"
+  ])
+    await expect(read(threadId)).rejects.toThrow()
+  expect(io.page).toHaveBeenCalledTimes(2)
+  const resume = {
+    action: "continue" as const,
+    ...feature,
+    threadId: "prior-review",
+    message: "补充验收标准"
+  }
+  io.active.mockReturnValueOnce(true)
+  await expect(
+    runBotFeatureCommand(host, "job", { ...resume, requestKey: "busy" })
+  ).rejects.toThrow("仍在运行")
+  io.workflowBusy.mockResolvedValueOnce(true)
+  await expect(
+    runBotFeatureCommand(host, "job", { ...resume, requestKey: "workflow-busy" })
+  ).rejects.toThrow("等待后台任务")
+  io.validate
+    .mockResolvedValueOnce({ valid: true, workspacePath: root, feature, project: { name: "市场" } })
+    .mockResolvedValueOnce({ valid: false, message: "工作区已失效" })
+  await expect(
+    runBotFeatureCommand(host, "job", { ...resume, requestKey: "workspace-changed" })
+  ).rejects.toThrow("工作区已失效")
+  expect(host.featureStore.sessions(owner.id)).toEqual([])
+  await runBotFeatureCommand(host, "job", { ...resume, requestKey: "continue" })
+  expect(io.start.mock.calls[0][0].threadId).toBe("prior-review")
+  expect(featureDetail(host, personal).sessions.map((s) => s.threadId)).toEqual(["new-review"])
+  context.onRunTerminated?.({ outcome: "success", code: "normal" })
+  resolveTurn()
+  await vi.waitFor(() => expect(host.featureTurns.activity(owner.id)).toBeUndefined())
+  host.featureStore.deleteScope(owner.botId, owner.audience)
+  expect(featureDetail(host, personal).sessions.map((s) => s.threadId)).toEqual(["new-review"])
 })
 
 it("tracks new stage sessions under one owned managed run, distinguishes stopping progression from interrupting an owned turn", async () => {
@@ -685,8 +770,13 @@ it("notifies only the requesting group of local approval and tracks native manag
           runId: "owned-run"
         }
       })
-      expect(notice.mock.calls.at(-1)?.[0]).toBe(incoming)
-      expect(notice.mock.calls.at(-1)?.[2]).toContain("请在 App 的项目模式中处理")
+      if (type === "biz_retry") {
+        expect(notice.mock.calls.at(-1)?.[0]).toBe(incoming)
+        expect(notice.mock.calls.at(-1)?.[2]).toContain("请在 App 的项目模式中处理")
+      } else {
+        expect(botInteractionRoutes.get("stage")?.featureGate?.slug).toBe(feature.slug)
+        expect(notice).toHaveBeenCalledTimes(1)
+      }
       expect(host.featureStore.taskRows(groupScope)[0]).toMatchObject({
         phase: "decision",
         attentionThreadId: "stage"

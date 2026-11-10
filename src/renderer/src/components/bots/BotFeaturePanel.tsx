@@ -17,7 +17,8 @@ const phaseLabel = {
   idle: "已空闲",
   running: "正在执行",
   question: "等待回答",
-  approval: "等待审批",
+  approval: "待桌面审批",
+  decision: "待阶段确认",
   interrupted: "已中断",
   failed: "执行失败",
   unavailable: "不可用"
@@ -118,6 +119,7 @@ export function FollowPicker({
           ))}
         </select>
       )}
+      {groupId && slug && <p>关联后，本群可查看并继续此 Feature 的普通项目会话。</p>}
       {error && <p role="alert">{error}</p>}
       <div>
         <button type="button" onClick={done}>
@@ -156,10 +158,7 @@ export function FeatureRow({
   const [open, setOpen] = useState(false),
     [detail, setDetail] = useState<BotFeatureDetail>(),
     [error, setError] = useState("")
-  const [choices, setChoices] = useState<{ id: string; title: string }[] | null>(null),
-    [choice, setChoice] = useState(""),
-    [busy, setBusy] = useState(false)
-  const [reload, setReload] = useState(0)
+  const [busy, setBusy] = useState(false)
   useEffect(() => {
     if (!open) return
     let current = true
@@ -188,62 +187,25 @@ export function FeatureRow({
       current = false
       clearInterval(timer)
     }
-  }, [api, feature.id, botId, groupId, open, revision, reload])
-  async function choose() {
-    if (choices) {
-      setChoices(null)
-      return
-    }
-    setBusy(true)
-    setError("")
-    try {
-      const native = await window.api.harnessBoard.getRunDetail(feature.projectId, feature.slug)
-      const threads = useAppStore.getState().threads
-      const titles = new Map(threads.map((t) => [t.thread_id, t.title]))
-      setChoices(
-        native.sessions
-          .filter((s) => !detail?.sessions.some((existing) => existing.threadId === s.threadId))
-          .map((s) => ({
-            id: s.threadId,
-            title: titles.get(s.threadId) || `项目会话 · ${new Date(s.createdAt).toLocaleString()}`
-          }))
-      )
-      setChoice("")
-    } catch (e) {
-      setError(botErrorMessage(e))
-    } finally {
-      setBusy(false)
-    }
-  }
+  }, [api, feature.id, botId, groupId, open, revision])
   return (
     <div className="bot-feature-row">
-      <div className="bot-feature-summary">
-        <button
-          className="bot-work-row"
-          aria-expanded={feature.attentionThreadId ? undefined : open}
-          onClick={() =>
-            feature.attentionThreadId
-              ? openProject(feature, feature.attentionThreadId)
-              : setOpen(!open)
-          }
-        >
-          <span>{feature.title}</span>
-          <small>
-            <span data-attention={Boolean(feature.attentionThreadId)}>
-              {featureTaskLabels[feature.phase]}
-            </span>{" "}
-            · Feature · {feature.projectName}
-          </small>
-        </button>
-        <button
-          className="bot-feature-disclose"
-          aria-label={open ? "收起项目任务详情" : "展开项目任务详情"}
-          aria-expanded={open}
-          onClick={() => setOpen(!open)}
-        >
-          {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-        </button>
-      </div>
+      <button
+        type="button"
+        className="bot-work-row bot-feature-summary"
+        aria-expanded={open}
+        onClick={() => setOpen(!open)}
+      >
+        <span>{feature.title}</span>
+        <small>
+          <span data-attention={Boolean(feature.attentionThreadId)}>
+            {featureTaskLabels[feature.phase]}
+          </span>
+          {" · Feature · "}
+          {feature.projectName}
+        </small>
+        {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+      </button>
       {open && (
         <div className="bot-feature-expanded">
           {detail?.run && (
@@ -268,11 +230,6 @@ export function FeatureRow({
             <button onClick={() => openProject(feature)}>
               打开 Feature <ArrowUpRight size={13} />
             </button>
-            {!disabled && feature.state !== "completed" && (
-              <button disabled={busy || !detail} onClick={() => void choose()}>
-                关联已有会话
-              </button>
-            )}
             {!disabled && (
               <button
                 disabled={
@@ -290,7 +247,6 @@ export function FeatureRow({
                       feature.version,
                       groupId
                     )
-                    setChoices(null)
                     refresh()
                   } catch (e) {
                     setError(botErrorMessage(e))
@@ -303,53 +259,6 @@ export function FeatureRow({
               </button>
             )}
           </div>
-          {choices && feature.state !== "completed" && (
-            <form
-              className="bot-feature-form"
-              onSubmit={async (e) => {
-                e.preventDefault()
-                if (!choice || busy) return
-                setBusy(true)
-                try {
-                  await api.link(botId, feature.id, choice, groupId)
-                  setChoices(null)
-                  setReload((x) => x + 1)
-                } catch (e) {
-                  setError(botErrorMessage(e))
-                } finally {
-                  setBusy(false)
-                }
-              }}
-            >
-              <select
-                aria-label="选择要关联的项目会话"
-                value={choice}
-                onChange={(e) => setChoice(e.target.value)}
-              >
-                <option value="">{choices.length ? "选择已有会话" : "暂无其他项目会话"}</option>
-                {choices.map((c) => (
-                  <option key={c.id} value={c.id}>
-                    {c.title}
-                  </option>
-                ))}
-              </select>
-              {choice && (
-                <p>
-                  {groupId
-                    ? "关联后，本群可通过 Bot 查询这段会话历史并继续交办。"
-                    : "关联后，此 Bot 可查询这段会话历史并继续交办。"}
-                </p>
-              )}
-              <div>
-                <button type="button" onClick={() => setChoices(null)}>
-                  取消
-                </button>
-                <button type="submit" disabled={!choice || busy}>
-                  确认关联
-                </button>
-              </div>
-            </form>
-          )}
           {error && <p role="alert">{error}</p>}
         </div>
       )}
