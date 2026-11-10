@@ -90,11 +90,13 @@ function RequirementStatusTag({
 export function RequirementStatusTags({
   standardized,
   hasPrototype,
+  hasPrototypeDesignSession = false,
   published,
   developmentStatus = "not-started"
 }: {
   standardized: boolean
   hasPrototype: boolean
+  hasPrototypeDesignSession?: boolean
   published: boolean
   developmentStatus?: "not-started" | "in-progress"
 }): React.JSX.Element {
@@ -110,11 +112,13 @@ export function RequirementStatusTags({
         "这个需求特性还没有生成规范的 PRD 文件。完成需求沟通和专家分析后，就会变为“已规范”。"
     },
     {
-      active: hasPrototype,
+      active: hasPrototype || hasPrototypeDesignSession,
       inactiveLabel: "无原型",
-      activeLabel: "有原型",
+      activeLabel: hasPrototype ? "有原型" : "原型中",
       icon: PanelsTopLeft,
-      activeDescription: "这个需求特性已经有可查看的页面原型，可以用来确认页面样式和操作流程。",
+      activeDescription: hasPrototype
+        ? "这个需求特性已经有可查看的页面原型，可以用来确认页面样式和操作流程。"
+        : "这个需求特性已经创建设计会话，可以返回会话继续沟通和完善原型。",
       inactiveDescription:
         "这个需求特性还没有页面原型。完成原型设计后，就可以在这里查看并确认效果。"
     },

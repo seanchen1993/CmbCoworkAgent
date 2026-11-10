@@ -528,6 +528,7 @@ export function RequirementDetailsPanel({
               <RequirementStatusTags
                 standardized={prdGenerationCompleted}
                 hasPrototype={prototypeCompleted}
+                hasPrototypeDesignSession={hasPrototypeDesignSession}
                 published={requirementSpacePublished}
                 developmentStatus={developmentStatus}
               />

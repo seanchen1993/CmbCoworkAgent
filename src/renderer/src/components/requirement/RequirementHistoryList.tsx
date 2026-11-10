@@ -482,6 +482,14 @@ export function RequirementHistoryList({
                                   Boolean(entry.htmlFile?.trim())
                                 )
                           }
+                          hasPrototypeDesignSession={
+                            item.origin === "space"
+                              ? Boolean(spaceDesign?.htmlId?.trim())
+                              : Boolean(item.prdManifest.prd.htmlId?.trim()) ||
+                                item.prdManifest.functions.some((entry) =>
+                                  Boolean(entry.htmlId?.trim())
+                                )
+                          }
                           published={item.origin === "space" || isRequirementPublished(item)}
                           developmentStatus={developmentStatus}
                         />
