@@ -1546,7 +1546,7 @@ export function registerSkillsHandlers(ipcMain: IpcMain): void {
 
       try {
         const sourceAccess = options.origin === "market"
-          ? await resolveMarketSourceAccess("skill", options.marketplace)
+          ? await resolveMarketSourceAccess("skill", options.marketplace, buffer)
           : undefined
         assertOriginalUpload(Buffer.from(buffer), fileName)
         if (ext === ".md") {

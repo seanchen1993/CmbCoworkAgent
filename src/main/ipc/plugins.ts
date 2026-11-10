@@ -800,7 +800,7 @@ export function registerPluginHandlers(ipcMain: IpcMain): void {
         }
       }
       const sourceAccess = sanitizedOrigin === "market"
-        ? await resolveMarketSourceAccess("plugin", marketIdentity)
+        ? await resolveMarketSourceAccess("plugin", marketIdentity, buffer)
         : undefined
       await pluginMutex.acquire()
       try {

@@ -87,6 +87,7 @@ describe("market content IPC regression", () => {
     const payload = { buffer: bytes(zip.toBuffer()), fileName: "source.zip", origin: "market", marketplace,
       sourceAccess: "owner" } // Renderer claims must not bypass main's policy.
     expect((await invoke("plugins:install", payload)).success).toBe(true)
+    expect(policy).toHaveBeenCalledWith("plugin", marketplace, payload.buffer)
     const previous = storage.getPlugins().find((p) => p.marketplace?.id === marketplace.id)!
     expect(previous.sourceAccess).toBeUndefined()
     expect((await invoke("plugins:listFiles", previous.id)).success).toBe(false)
@@ -118,7 +119,7 @@ describe("market content IPC regression", () => {
     const buffer = access === "owner" ? Buffer.from(md) : zip.toBuffer()
     expect((await invoke("skills:upload", { buffer: bytes(buffer), fileName: access === "owner" ? "SKILL.md" : "skill.zip",
       options: { origin: "market", marketplace: { name } } })).success).toBe(true)
-    expect(policy).toHaveBeenCalledWith("skill", { name })
+    expect(policy).toHaveBeenCalledWith("skill", { name }, bytes(buffer))
     const skill = (await skills.listAllSkills()).find((item) => item.name === name)!
     expect(skill.contentOrigin).toBe("local")
     expect(readFileSync(skill.path, "utf8")).toBe(md)
