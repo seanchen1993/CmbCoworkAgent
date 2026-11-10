@@ -8,6 +8,7 @@ import {
   DialogTitle
 } from "@/components/ui/dialog"
 import { DesignTemplateSelector } from "./DesignTemplateSelector"
+import type { DesignSystemInfo } from "../../../../shared/design-system"
 import {
   useDesignTemplateSelection,
   type DesignPageTemplate
@@ -16,16 +17,20 @@ import {
 /** Mounted for one editor session so cancelled or late imports cannot change its selection. */
 export function DesignTemplateDialog({
   initial,
+  currentSystem,
+  systems,
   onConfirm,
   onClose,
   onRestoreFocus
 }: {
   initial?: DesignPageTemplate | null
+  currentSystem?: DesignSystemInfo | null
+  systems: DesignSystemInfo[]
   onConfirm: (template: DesignPageTemplate) => void
   onClose: () => void
   onRestoreFocus: () => void
 }) {
-  const picker = useDesignTemplateSelection(initial)
+  const picker = useDesignTemplateSelection(initial, currentSystem, systems)
   return (
     <Dialog
       open

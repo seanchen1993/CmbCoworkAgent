@@ -9,6 +9,7 @@ import type {
   DesignTemplateReference,
   DesignTemplateSummary
 } from "../../../shared/design-template"
+import { normalizeTemplateSystemKey } from "../../../shared/design-template"
 
 const MAX_FILES = 5000
 const MAX_FILE_BYTES = 30 * 1024 * 1024
@@ -119,7 +120,7 @@ export class DesignTemplatePackages {
       throw new Error("模板记录已损坏")
     manifest.files.forEach(templateRelativePath)
     manifest.pages.forEach(templateRelativePath)
-    return manifest
+    return { ...manifest, designSystemKey: normalizeTemplateSystemKey(manifest.designSystemKey) }
   }
 
   list(): DesignTemplateSummary[] {
@@ -167,7 +168,28 @@ export class DesignTemplatePackages {
     return file
   }
 
-  importSource(sourcePath: string): DesignTemplatePackage {
+  updateAssociation(
+    reference: DesignTemplateReference,
+    designSystemKey: string | null
+  ): DesignTemplatePackage {
+    const template = this.read(reference)
+    const manifest = {
+      ...this.manifest(reference.id),
+      designSystemKey: normalizeTemplateSystemKey(designSystemKey)
+    }
+    const directory = this.directory(reference.id)
+    const temporary = path.join(directory, `.manifest-${randomUUID()}.tmp`)
+    try {
+      fs.writeFileSync(temporary, JSON.stringify(manifest, null, 2), { flag: "wx" })
+      fs.renameSync(temporary, path.join(directory, "manifest.json"))
+    } finally {
+      fs.rmSync(temporary, { force: true })
+    }
+    return { ...template, designSystemKey: manifest.designSystemKey }
+  }
+
+  importSource(sourcePath: string, designSystemKey: string | null = null): DesignTemplatePackage {
+    designSystemKey = normalizeTemplateSystemKey(designSystemKey)
     const source = path.resolve(sourcePath)
     const stat = fs.lstatSync(source)
     if (stat.isSymbolicLink()) throw new Error("请选择实际文件或目录")
@@ -276,6 +298,7 @@ export class DesignTemplatePackages {
       const html = fs.readFileSync(path.join(rootDir, entryPath), "utf8")
       const framework = detectFramework(html)
       const manifest: DesignTemplateSummary = {
+        designSystemKey,
         id,
         name: path.basename(source, path.extname(source)),
         sourceKind,

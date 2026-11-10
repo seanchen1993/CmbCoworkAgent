@@ -98,7 +98,14 @@ export function DesignCreationPage({
   onImportHtml: () => void
   onImportPrototypeZip: () => void
 }): React.JSX.Element {
-  const templatePicker = useDesignTemplateSelection()
+  const selectedDesignSystem = designSystemGroups
+    .flatMap((group) => group.items)
+    .find((system) => system.id === selectedDesignSystemId)
+  const templatePicker = useDesignTemplateSelection(
+    undefined,
+    selectedDesignSystem,
+    designSystemGroups.flatMap((group) => group.items)
+  )
   const { templateMode, selectedTemplate, uploadedTemplate } = templatePicker
   const [requirementMode, setRequirementMode] = useState<SelectionMode>("select")
   const [requirementSelection, setRequirementSelection] = useState<NamespaceTreeSelection | null>(
@@ -135,9 +142,6 @@ export function DesignCreationPage({
     }
   }
 
-  const selectedDesignSystem = designSystemGroups
-    .flatMap((group) => group.items)
-    .find((system) => system.id === selectedDesignSystemId)
   const getTemplateSummary = (): string => {
     if (templateMode === "none") return "模板：不选择"
     if (templateMode === "upload") return `模板：上传 ${uploadedTemplate?.name || "尚未选择"}`

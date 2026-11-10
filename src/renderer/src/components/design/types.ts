@@ -73,6 +73,8 @@ export interface DesignCreationSelection {
     html: string | null
     path: string | null
     package?: DesignTemplateReference
+    builtinPath?: string
+    designSystemKey?: string | null
   }
   requirement: {
     mode: "select" | "upload" | "none"
@@ -211,6 +213,7 @@ export interface ModelOption {
 }
 
 export interface SkillInfo {
+  designSystemKey?: string | null
   name: string
   description: string
   path: string

@@ -52,6 +52,7 @@ import { DesignCreationPage } from "./DesignCreationPage"
 import { DesignSystemLibraryDialog, type DesignSystemLibraryMode } from "./DesignSystemLibraryDialog"
 import { DesignWorkspaceLayout } from "./DesignWorkspaceLayout"
 import { DesignTemplateDialog } from "./DesignTemplateDialog"
+import { designSystemKey, isTemplateVisible } from "../../../../shared/design-template"
 import type { DesignPageTemplate } from "./use-design-template-selection"
 import { buildDesignCreationContext } from "./creation-context"
 import { RequirementDesignContextBar } from "./RequirementDesignContextBar"
@@ -1711,6 +1712,7 @@ export function DesignView({
             description: template.description,
             path: template.path,
             source: "template" as const,
+            designSystemKey: template.designSystemKey,
             mode: template.mode,
             platform: template.platform,
             scenario: template.scenario
@@ -3906,10 +3908,11 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
   const filteredSkills = isSlashMode
     ? allSkills.filter(
         (s) =>
+          (s.source !== "template" || isTemplateVisible(s, designSystemKey(selectedDesignSystem))) && (
           !slashQuery ||
           s.name.toLowerCase().includes(slashQuery) ||
           (s.scenario ?? "").toLowerCase().includes(slashQuery) ||
-          (s.mode ?? "").toLowerCase().includes(slashQuery)
+          (s.mode ?? "").toLowerCase().includes(slashQuery))
       )
     : []
   const filteredSkillGroups = groupByLabel(filteredSkills, (skill) =>
@@ -4360,6 +4363,8 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
         <DesignTemplateDialog
           key={templatePickerSessionId}
           initial={pageTemplate}
+          currentSystem={selectedDesignSystem}
+          systems={designSystems}
           onConfirm={(template) => applyPageTemplate(template, templatePickerSessionId)}
           onClose={() => setTemplatePickerSessionId(null)}
           onRestoreFocus={() => composerRef.current?.focus()}

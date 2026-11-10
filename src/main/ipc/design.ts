@@ -22,6 +22,8 @@ import { writeDesignFilesAtomically } from "../services/design/artifact-storage"
 import { runBoundedDesignValidation, validateDesignBrowserWithRetry, isDesignValidationRepairable } from "../services/design/browser-validation-runner"
 import { designGenerationBrowserProbe } from "../services/design/generation-browser-probe"
 import type { DesignTemplateReference, DesignTemplateImportResult } from "../../shared/design-template"
+import { normalizeTemplateSystemKey } from "../../shared/design-template"
+import { resolveTemplateAssociation, validateTemplateSelection } from "../services/design/template-association"
 import Store from "electron-store"
 import { getDb } from "../db"
 import { DesignSessionStore } from "../services/design/session-store"
@@ -564,6 +566,7 @@ interface DesignContextFilesSyncParams {
 }
 
 interface DesignTemplateInfo {
+  designSystemKey?: string | null
   name: string
   description: string
   path: string
@@ -797,7 +800,11 @@ function listDesignTemplates(): DesignTemplateInfo[] {
       const mode = fm.match(/^\s*mode:\s*(.+)$/m)?.[1]?.trim() || "prototype"
       const platform = fm.match(/^\s*platform:\s*(.+)$/m)?.[1]?.trim() || null
       const scenario = fm.match(/^\s*scenario:\s*(.+)$/m)?.[1]?.trim() || "design"
+      const templateMeta = readJsonFile<{ designSystemKey: string | null }>(path.join(dirPath, "meta.json"))
       templates.push({
+        designSystemKey: normalizeTemplateSystemKey(
+          templateMeta?.designSystemKey !== undefined ? templateMeta.designSystemKey : parseSimpleYamlScalar(fm, "designSystemKey")
+        ),
         name,
         description,
         path: skillPath,
@@ -2585,16 +2592,31 @@ export function registerDesignHandlers(): void {
   }
   ipcMain.handle("design:list-imported-templates", () => templatePackages.list())
   ipcMain.handle("design:read-template", (_event, reference: DesignTemplateReference) => readTemplate(reference))
-  ipcMain.handle("design:import-template", async (event, source: "file" | "directory"): Promise<DesignTemplateImportResult> => {
+  ipcMain.handle("design:update-template-association", async (_event, reference: DesignTemplateReference, key: unknown): Promise<DesignTemplateImportResult> => {
+    try {
+      const association = resolveTemplateAssociation(key, listDesignSystems())
+      const template = templatePackages.updateAssociation(reference, association)
+      template.previewUrl = await templatePreview.url(template)
+      return { template }
+    } catch (error) {
+      return { error: error instanceof Error ? error.message : String(error) }
+    }
+  })
+  const validateSelection = (state: Pick<TabState, "creationSelection" | "selectedDesignSystemId">) =>
+    validateTemplateSelection(state.creationSelection?.template,
+      listDesignSystems().find((item) => item.id === state.selectedDesignSystemId), templatePackages, listDesignTemplates())
+  ipcMain.handle("design:import-template", async (event, source: "file" | "directory", key?: unknown): Promise<DesignTemplateImportResult> => {
     try {
       if (source !== "file" && source !== "directory") throw new Error("模板来源无效")
+      const association = resolveTemplateAssociation(key, listDesignSystems())
       const owner = BrowserWindow.fromWebContents(event.sender)
       const options: Electron.OpenDialogOptions = source === "directory"
         ? { title: "选择模板文件夹", properties: ["openDirectory"] }
         : { title: "选择 HTML 或 ZIP 模板", properties: ["openFile"], filters: [{ name: "模板", extensions: ["html", "htm", "zip"] }] }
       const picked = owner ? await dialog.showOpenDialog(owner, options) : await dialog.showOpenDialog(options)
       if (picked.canceled || !picked.filePaths[0]) return { canceled: true }
-      const template = templatePackages.importSource(picked.filePaths[0])
+      resolveTemplateAssociation(association, listDesignSystems())
+      const template = templatePackages.importSource(picked.filePaths[0], association)
       template.previewUrl = await templatePreview.url(template)
       return { template }
     } catch (error) {
@@ -2650,6 +2672,7 @@ export function registerDesignHandlers(): void {
         : null
     },
     execute: async (request, runId, emit, snapshot) => {
+      if (!snapshot.state.html && !snapshot.state.draftPreview) validateSelection(snapshot.state)
       if (request.kind === "patch" && snapshot.state.creationSelection?.template.package) {
         request = { ...request, kind: "agent", isIteration: true, currentHtml: materializeTweaks(snapshot.state.html, snapshot.state.tweaks, false) }
       }
@@ -2855,9 +2878,11 @@ export function registerDesignHandlers(): void {
     }
     return { ...seed, workspacePath }
   }
-  ipcMain.handle("design:session-create", (_event, seed: DesignSessionSeed) =>
-    manager.create(prepareSeed(seed)),
-  )
+  ipcMain.handle("design:session-create", (_event, seed: DesignSessionSeed) => {
+    const prepared = prepareSeed(seed)
+    if (!prepared.state.html && !prepared.state.draftPreview) validateSelection(prepared.state)
+    return manager.create(prepared)
+  })
   ipcMain.handle("design:session-open", (event, id: string) => {
     manager.syncArtifacts()
     let ids = subscribers.get(event.sender.id)
@@ -2881,7 +2906,12 @@ export function registerDesignHandlers(): void {
         patch,
         meta,
       }: { id: string; patch: Partial<TabState>; meta?: Partial<SessionMeta> },
-    ) => manager.patch(id, patch, meta),
+    ) => {
+      const current = manager.get(id).state
+      if (!current.html && !current.draftPreview && (patch.creationSelection || patch.selectedDesignSystemId !== undefined))
+        validateSelection({ ...current, ...patch })
+      return manager.patch(id, patch, meta)
+    },
   )
   ipcMain.handle("design:session-tweak", (_event, { id, command }: { id: string; command: DesignTweakCommand }) => {
     const snapshot = manager.tweak(id, command)
@@ -2894,9 +2924,11 @@ export function registerDesignHandlers(): void {
   ipcMain.handle("design:inspect-editable", (_event, id: string) => manager.inspectEditable(id))
   ipcMain.handle("design:direct-edit", (_event, { id, command }) => manager.edit(id, command))
   ipcMain.handle("design:patch-history", (_event, { id, operation, revision }: { id: string; operation: "undo" | "redo"; revision: number }) => manager.patchHistory(id, operation, revision))
-  ipcMain.handle("design:session-start", (_event, request: DesignRunRequest) =>
-    manager.start(request),
-  )
+  ipcMain.handle("design:session-start", (_event, request: DesignRunRequest) => {
+    const state = manager.get(request.designSessionId).state
+    if (!state.html && !state.draftPreview) validateSelection(state)
+    return manager.start(request)
+  })
   ipcMain.handle("design:session-stop", (_event, id: string) =>
     manager.stop(id),
   )
@@ -3581,6 +3613,14 @@ export function registerDesignHandlers(): void {
             ? currentHtml
             : storedHtml
         const isNewDesign = !hasExistingArtifactHtml && !htmlForIteration
+        if (isNewDesign && !resumeFromDraft && selectedSkill) {
+          const builtin = listDesignTemplates().find((item) => item.path === selectedSkill.path)
+          if (builtin) validateTemplateSelection({ mode: "select", builtinPath: builtin.path },
+            listDesignSystems().find((item) => item.id === designSystemId), templatePackages, [builtin])
+        }
+        if (isNewDesign && !resumeFromDraft && templatePackage)
+          validateTemplateSelection({ mode: "upload", package: templatePackage },
+            listDesignSystems().find((item) => item.id === designSystemId), templatePackages, [])
         const templateContext = templatePackage && !resumeFromDraft
           ? buildTemplatePackageContext(
             templatePackages.materialize(templatePackage, path.dirname(outputArtifactPath)),

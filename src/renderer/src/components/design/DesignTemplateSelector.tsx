@@ -2,6 +2,7 @@ import { ArrowLeft, ArrowRight, FileText, FolderOpen, LoaderCircle, Upload } fro
 import { Button } from "@/components/ui/button"
 import { HtmlThumbnailPreview } from "@/components/ui/html-thumbnail-preview"
 import { cn } from "@/lib/utils"
+import { designSystemKey } from "../../../../shared/design-template"
 import type { useDesignTemplateSelection } from "./use-design-template-selection"
 
 export function DesignTemplateSelector({
@@ -16,6 +17,9 @@ export function DesignTemplateSelector({
   const {
     templateMode,
     setTemplateMode,
+    templateScope,
+    setTemplateScope,
+    hasDesignSystem,
     templates,
     templatesLoading,
     templatesError,
@@ -27,6 +31,10 @@ export function DesignTemplateSelector({
     importedTemplates,
     templateUploading,
     templateError,
+    templateNotice,
+    association,
+    designSystemOptions,
+    setTemplateAssociation,
     selectTemplateFile,
     readImportedTemplate,
     templatePageCount,
@@ -69,6 +77,28 @@ export function DesignTemplateSelector({
 
       {templateMode === "select" && (
         <div className="mt-4">
+          <div
+            role="group"
+            aria-label="模板归属"
+            className="mb-4 inline-flex rounded-md border border-border bg-background p-0.5"
+          >
+            {(["exclusive", "public"] as const).map((scope) => (
+              <button
+                key={scope}
+                type="button"
+                aria-pressed={templateScope === scope}
+                onClick={() => setTemplateScope(scope)}
+                className={cn(
+                  "rounded px-2.5 py-1.5 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                  templateScope === scope
+                    ? "bg-primary text-primary-foreground"
+                    : "text-muted-foreground hover:bg-muted hover:text-foreground"
+                )}
+              >
+                {scope === "exclusive" ? "专属模板" : "公共模板"}
+              </button>
+            ))}
+          </div>
           {templatesLoading ? (
             <div className="flex h-48 items-center justify-center gap-2 rounded-lg border border-dashed border-border bg-muted/20 text-xs text-muted-foreground">
               <LoaderCircle className="size-3.5 animate-spin" /> 正在加载模板...
@@ -79,7 +109,11 @@ export function DesignTemplateSelector({
             </p>
           ) : templates.length === 0 ? (
             <p className="rounded-lg border border-dashed border-border bg-muted/20 px-4 py-3 text-xs text-muted-foreground">
-              未找到可预览的 HTML 模板。
+              {templateScope === "exclusive"
+                ? hasDesignSystem
+                  ? "当前设计系统暂无专属模板，可切换到公共模板。"
+                  : "请先选择设计系统，查看其专属模板。"
+                : "暂无可用的公共模板。"}
             </p>
           ) : (
             <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
@@ -188,6 +222,32 @@ export function DesignTemplateSelector({
           <p className="mt-2 text-xs leading-5 text-muted-foreground">
             整包保留页面、框架、样式和图片；支持浏览器可直接运行的模板。源码工程请先构建为静态页面。
           </p>
+          <label className="mt-3 flex items-center gap-2 text-xs text-muted-foreground">
+            关联设计系统
+            <select
+              aria-label="关联设计系统"
+              disabled={templateUploading}
+              value={association ?? ""}
+              className="min-w-0 flex-1 rounded border border-border bg-background px-2 py-1.5 text-foreground"
+              onChange={(event) => setTemplateAssociation(event.target.value || null)}
+            >
+              <option value="">公共模板（不关联设计系统）</option>
+              {(["builtin", "user"] as const).map((ownership) => (
+                <optgroup
+                  key={ownership}
+                  label={ownership === "builtin" ? "系统内置" : "我的设计系统"}
+                >
+                  {designSystemOptions
+                    .filter((system) => (system.ownership ?? "builtin") === ownership)
+                    .map((system) => (
+                      <option key={designSystemKey(system)} value={designSystemKey(system)!}>
+                        {system.name}
+                      </option>
+                    ))}
+                </optgroup>
+              ))}
+            </select>
+          </label>
           {importedTemplates.length > 0 && (
             <label className="mt-3 flex items-center gap-2 text-xs text-muted-foreground">
               已导入模板
@@ -262,6 +322,11 @@ export function DesignTemplateSelector({
       {templateMode === "none" && (
         <p className="mt-4 rounded-lg border border-dashed border-border bg-muted/20 px-4 py-3 text-xs text-muted-foreground">
           将根据设计描述从空白页面开始。
+        </p>
+      )}
+      {templateNotice && (
+        <p role="status" className="mt-2 text-xs text-muted-foreground">
+          {templateNotice}
         </p>
       )}
     </div>

@@ -45,24 +45,29 @@ export function ProductModeNavigation({
           </button>
         ))}
       </div>
-      <Select
-        value={selectedSystemId ?? ALL_REQUIREMENT_SYSTEMS_VALUE}
-        onValueChange={(value) =>
-          setSelectedSystemId(value === ALL_REQUIREMENT_SYSTEMS_VALUE ? null : value)
-        }
-      >
-        <SelectTrigger className="h-8 w-auto ml-4 min-w-[116px] rounded-md border border-border bg-background-elevated px-2.5 text-xs font-medium shadow-none transition-colors hover:border-[#c99366] focus:border-[#c99366] focus:ring-0">
-          <SelectValue placeholder="全部系统" />
-        </SelectTrigger>
-        <SelectContent>
-          <SelectItem value={ALL_REQUIREMENT_SYSTEMS_VALUE}>全部系统</SelectItem>
-          {systemList.map((system) => (
-            <SelectItem key={system.id} value={system.id}>
-              {system.name}
-            </SelectItem>
-          ))}
-        </SelectContent>
-      </Select>
+      {activeTab === "requirements" && (
+        <Select
+          value={selectedSystemId ?? ALL_REQUIREMENT_SYSTEMS_VALUE}
+          onValueChange={(value) =>
+            setSelectedSystemId(value === ALL_REQUIREMENT_SYSTEMS_VALUE ? null : value)
+          }
+        >
+          <SelectTrigger
+            aria-label="需求列表系统筛选"
+            className="h-8 w-auto ml-4 min-w-[116px] rounded-md border border-border bg-background-elevated px-2.5 text-xs font-medium shadow-none transition-colors hover:border-[#c99366] focus:border-[#c99366] focus:ring-0"
+          >
+            <SelectValue placeholder="全部系统" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value={ALL_REQUIREMENT_SYSTEMS_VALUE}>全部系统</SelectItem>
+            {systemList.map((system) => (
+              <SelectItem key={system.id} value={system.id}>
+                {system.name}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      )}
       {activeTab === "requirements" ? (
         <Button
           type="button"

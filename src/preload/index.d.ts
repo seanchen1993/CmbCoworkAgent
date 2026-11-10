@@ -2325,6 +2325,7 @@ interface CustomAPI {
   }
   design: {
     importTemplate: DesignTemplateApi["importTemplate"]
+    updateTemplateAssociation: DesignTemplateApi["updateTemplateAssociation"]
     listImportedTemplates: DesignTemplateApi["listImportedTemplates"]
     readTemplate: DesignTemplateApi["readTemplate"]
     readSystem: DesignSystemLibraryApi["readSystem"]
@@ -2431,6 +2432,7 @@ interface CustomAPI {
     listSystems: () => Promise<DesignSystemInfo[]>
     listTemplates: () => Promise<
       Array<{
+        designSystemKey?: string | null
         name: string
         description: string
         path: string

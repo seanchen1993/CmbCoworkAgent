@@ -28,6 +28,32 @@ function fixture(files: Record<string, string>) {
 }
 
 describe("template packages", () => {
+  it("persists association across reopening and changes only metadata when reassigned", () => {
+    const { archive, packages } = fixture({ "index.html": "<p>Original bytes</p>" })
+    const imported = packages.importSource(archive, "builtin:system-a")
+    expect(new DesignTemplatePackages(packages.storageDir).list()[0].designSystemKey).toBe("builtin:system-a")
+    const before = fs.readFileSync(path.join(imported.rootDir, "index.html"))
+    packages.updateAssociation(imported, "builtin:system-b")
+    expect(packages.read(imported).designSystemKey).toBe("builtin:system-b")
+    expect(fs.readFileSync(path.join(imported.rootDir, "index.html"))).toEqual(before)
+    expect(packages.updateAssociation(imported, null).designSystemKey).toBeNull()
+    expect(fs.readdirSync(path.dirname(imported.rootDir))).toEqual(expect.arrayContaining(["files", "manifest.json"]))
+  })
+
+  it("treats legacy manifests as public but rejects malformed associations without changing the package", () => {
+    const { archive, packages } = fixture({ "index.html": "<p>Legacy</p>" })
+    const template = packages.importSource(archive)
+    const manifestPath = path.join(path.dirname(template.rootDir), "manifest.json")
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"))
+    delete manifest.designSystemKey
+    fs.writeFileSync(manifestPath, JSON.stringify(manifest))
+    expect(packages.read(template).designSystemKey).toBeNull()
+    expect(() => packages.updateAssociation(template, "../system-a")).toThrow("无效")
+    expect(packages.read(template).designSystemKey).toBeNull()
+    expect(() => packages.importSource(archive, "")).toThrow("无效")
+    expect(packages.list()).toHaveLength(1)
+  })
+
   it("recognizes a non-index React entry, persists it, and materializes independent session resources", () => {
     const { dir, archive, packages } = fixture({
       "list.html":

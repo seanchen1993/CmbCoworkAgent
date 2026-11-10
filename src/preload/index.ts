@@ -4756,11 +4756,15 @@ const api = {
     }
   },
   design: {
-    importTemplate: ((source) =>
+    importTemplate: ((source, designSystemKey) =>
       ipcRenderer.invoke(
         "design:import-template",
-        source
+        source,
+        designSystemKey
       )) satisfies DesignTemplateApi["importTemplate"],
+    updateTemplateAssociation: ((reference, designSystemKey) =>
+      ipcRenderer.invoke("design:update-template-association", reference, designSystemKey)
+    ) satisfies DesignTemplateApi["updateTemplateAssociation"],
     listImportedTemplates: (() =>
       ipcRenderer.invoke(
         "design:list-imported-templates"
@@ -5035,6 +5039,7 @@ const api = {
         scenario: string
         previewHtml: string
         previewPath: string
+        designSystemKey?: string | null
       }>
     > => ipcRenderer.invoke("design:list-templates"),
     /**
