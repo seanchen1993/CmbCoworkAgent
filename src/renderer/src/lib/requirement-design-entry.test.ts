@@ -9,6 +9,7 @@ import {
   listRequirementDesignEntries,
   loadActiveRequirementDesignEntry,
   isRequirementPrototypeStepComplete,
+  removeRequirementDesignAssociations,
   removeRequirementDesignSessions,
   storeActiveRequirementDesignEntry,
   storeRequirementDesignEntries,
@@ -127,6 +128,16 @@ describe("active requirement design entry", () => {
     expect(failedIds).toEqual([failed.htmlId])
     expect(loadActiveRequirementDesignEntry(entry.htmlId, storage)).toBeNull()
     expect(loadActiveRequirementDesignEntry(failed.htmlId, storage)).toEqual(failed)
+  })
+
+  it("can unlink design sessions without deleting the sessions", () => {
+    const another = { ...entry, htmlId: "design-session-2" }
+    storeRequirementDesignEntries([entry, another], storage)
+
+    removeRequirementDesignAssociations([entry.htmlId], storage)
+
+    expect(loadActiveRequirementDesignEntry(entry.htmlId, storage)).toBeNull()
+    expect(loadActiveRequirementDesignEntry(another.htmlId, storage)).toEqual(another)
   })
 
   it("deduplicates function tabs while preferring the active historical session", () => {

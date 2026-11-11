@@ -81,6 +81,21 @@ export function getRequirementThreadIds(
   return [...new Set(requirement.threadIds.map((value) => value.trim()).filter(Boolean))]
 }
 
+/**
+ * Threads opened in project mode are retained in threadIds for requirement-level
+ * lifecycle operations, but they must not appear as requirement conversations.
+ */
+export function getRequirementConversationThreadIds(
+  requirement: Pick<RequirementRecord, "threadIds" | "developmentThreadIds">
+): string[] {
+  const developmentThreadIds = new Set(
+    requirement.developmentThreadIds.map((value) => value.trim()).filter(Boolean)
+  )
+  return getRequirementThreadIds(requirement).filter(
+    (threadId) => !developmentThreadIds.has(threadId)
+  )
+}
+
 function formatRequirementTime(value: string): string {
   const date = new Date(value)
   if (!Number.isFinite(date.getTime())) return value

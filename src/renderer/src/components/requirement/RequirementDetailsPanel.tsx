@@ -50,6 +50,10 @@ import { RequirementFunctionWorkspace } from "./RequirementFunctionWorkspace"
 import { RequirementPrdSummaryCard } from "./RequirementPrdSummaryCard"
 import { RequirementStatusTags } from "./RequirementStatusTags"
 import { RequirementDevelopmentActions } from "./RequirementDevelopmentActions"
+import {
+  REQUIREMENT_ACTION_HINTS,
+  RequirementActionButton
+} from "./RequirementActionButton"
 
 export type RequirementPreviewTab = "expert-process" | "source" | "prd"
 export type RequirementPrototypeStatus = {
@@ -920,11 +924,12 @@ export function RequirementDetailsPanel({
                     </div>
                     <div className="flex shrink-0 flex-wrap items-center justify-end gap-1.5">
                       {hasPrototypeDesignState ? (
-                        <Button
+                        <RequirementActionButton
                           type="button"
                           variant="outline"
                           size="sm"
                           className="h-7 gap-1 px-2 text-[11px] text-destructive hover:bg-destructive/10 hover:text-destructive"
+                          hint={REQUIREMENT_ACTION_HINTS.resetDesign}
                           disabled={batchStarting || clearStarting}
                           onClick={() => {
                             setClearTargetFunction(null)
@@ -933,12 +938,19 @@ export function RequirementDetailsPanel({
                         >
                           <Trash2 className="size-3" />
                           重置原型
-                        </Button>
+                        </RequirementActionButton>
                       ) : null}
-                      <Button
+                      <RequirementActionButton
                         type="button"
                         size="sm"
                         className="h-7 gap-1 px-2 text-[11px]"
+                        hint={
+                          hasPrototypeDesignSession
+                            ? prototypeDesignCompleted
+                              ? REQUIREMENT_ACTION_HINTS.viewDesign
+                              : REQUIREMENT_ACTION_HINTS.continueDesign
+                            : REQUIREMENT_ACTION_HINTS.startDesign
+                        }
                         disabled={
                           batchStarting ||
                           (!hasPrototypeDesignSession && prototypeStatuses.length === 0)
@@ -968,7 +980,7 @@ export function RequirementDetailsPanel({
                             ? "查看原型设计"
                             : "继续原型设计"
                           : "批量设计原型"}
-                      </Button>
+                      </RequirementActionButton>
                       {!hasPrototypeDesignSession ? (
                         <Button
                           type="button"
@@ -1010,7 +1022,7 @@ export function RequirementDetailsPanel({
                     <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
                       {isRequirementSpacePublished(requirementSpaceManifest)
                         ? "需求已写入需求空间3.0，可进入详情页查看。"
-                        : "发布到组织平台：需求空间3.0空间"}
+                        : "发布到 需求空间3.0，发布之后，其他同事可以在【需求空间3.0Tab】里选择到你的需求～"}
                     </p>
                   </div>
                   <div className="flex shrink-0 flex-wrap items-center justify-end gap-1.5">
@@ -1418,8 +1430,8 @@ export function RequirementDetailsPanel({
             </DialogTitle>
             <DialogDescription className="pt-2 leading-6">
               {clearTargetFunction
-                ? "重置后，你可以重新生成这个功能的设计原型；之前的设计会话和历史记录都会被删除。"
-                : "重置后，你可以重新生成设计原型；之前的所有设计会话和历史记录都会被删除。"}
+                ? "重置后仅解除这个功能与设计会话的关联；设计会话及其历史记录仍会保留。"
+                : "重置后仅解除当前需求与设计会话的关联；设计会话及其历史记录仍会保留。"}
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>

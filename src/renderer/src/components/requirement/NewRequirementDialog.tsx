@@ -495,6 +495,29 @@ export function NewRequirementDialog({
               </p>
             </div>
           )}
+          <div className="rounded-xl border-[1.5px] border-border bg-[#fdfbf7] p-5">
+            <label
+              className="mb-2 block text-sm font-semibold text-foreground"
+              htmlFor="requirement-title"
+            >
+              需求名称
+            </label>
+            <Input
+              id="requirement-title"
+              value={title}
+              onChange={(event) => setTitle(event.target.value)}
+              placeholder={
+                source === "file" ? "上传文件后会自动回填，也可手动输入" : "例如：支付流程优化需求"
+              }
+              className="h-10 bg-white"
+              disabled={saving}
+            />
+            <p className="mt-3 text-sm leading-5 text-muted-foreground">
+              {source === "file"
+                ? "上传需求文件后会默认带出文件名，支持继续编辑。"
+                : "建议填写一个便于检索和沟通的需求名称。"}
+            </p>
+          </div>
           <div className="rounded-xl border border-border bg-white p-4">
             <div className="flex items-center justify-between gap-3">
               <div>
@@ -552,29 +575,6 @@ export function NewRequirementDialog({
                 ))}
               </div>
             ) : null}
-          </div>
-          <div className="rounded-xl border-[1.5px] border-border bg-[#fdfbf7] p-5">
-            <label
-              className="mb-2 block text-sm font-semibold text-foreground"
-              htmlFor="requirement-title"
-            >
-              需求名称
-            </label>
-            <Input
-              id="requirement-title"
-              value={title}
-              onChange={(event) => setTitle(event.target.value)}
-              placeholder={
-                source === "file" ? "上传文件后会自动回填，也可手动输入" : "例如：支付流程优化需求"
-              }
-              className="h-10 bg-white"
-              disabled={saving}
-            />
-            <p className="mt-3 text-sm leading-5 text-muted-foreground">
-              {source === "file"
-                ? "上传需求文件后会默认带出文件名，支持继续编辑。"
-                : "建议填写一个便于检索和沟通的需求名称。"}
-            </p>
           </div>
           <div className="space-y-4 border-t border-border pt-4">
             <section className="rounded-xl border-[1.5px] border-border bg-[#fdfbf7] p-4">

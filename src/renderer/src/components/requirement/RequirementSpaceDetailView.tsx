@@ -30,6 +30,10 @@ import { findRequirementDesignEntry } from "@/lib/requirement-design-entry"
 import type { RequirementRecord } from "./requirement-data"
 import { RequirementDevelopmentActions } from "./RequirementDevelopmentActions"
 import { shouldHideRequirementDevelopment } from "./requirement-persona"
+import {
+  REQUIREMENT_ACTION_HINTS,
+  RequirementActionButton
+} from "./RequirementActionButton"
 
 function isPermissionDeniedError(reason: unknown): boolean {
   if ((reason as { code?: unknown })?.code === "LRDFA02") return true
@@ -236,26 +240,32 @@ export function RequirementSpaceDetailView({
               <h3 className="text-sm font-semibold">原型预览</h3>
               <div className="ml-auto flex items-center gap-2">
                 {designBinding?.htmlFile ? (
-                  <Button
+                  <RequirementActionButton
                     type="button"
                     variant="outline"
                     size="sm"
                     className="h-7 gap-1 px-2 text-xs text-destructive hover:bg-destructive/10 hover:text-destructive"
+                    hint={REQUIREMENT_ACTION_HINTS.resetDesign}
                     onClick={() => setDesignResetOpen(true)}
                   >
                     <Trash2 className="size-3" />
                     重置原型
-                  </Button>
+                  </RequirementActionButton>
                 ) : null}
-                <Button
+                <RequirementActionButton
                   type="button"
                   size="sm"
                   className="h-7 text-xs"
+                  hint={
+                    designBinding?.htmlFile
+                      ? REQUIREMENT_ACTION_HINTS.continueDesign
+                      : REQUIREMENT_ACTION_HINTS.startDesign
+                  }
                   onClick={() => void onDesignRequirement(requirement, content)}
                 >
                   <PenTool className="mr-1.5 size-3.5" />
                   {designBinding?.htmlFile ? "继续设计" : "去设计"}
-                </Button>
+                </RequirementActionButton>
               </div>
             </div>
             {prototypeHtml && designBinding?.htmlFile ? (
@@ -293,7 +303,7 @@ export function RequirementSpaceDetailView({
           <DialogHeader>
             <DialogTitle>确认重置原型设计？</DialogTitle>
             <DialogDescription className="pt-2 leading-6">
-              重置后可以重新设计原型；之前的设计会话和历史记录都会被删除。
+              重置后仅解除当前需求与设计会话的关联。设计会话及其历史记录仍会保留。
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>

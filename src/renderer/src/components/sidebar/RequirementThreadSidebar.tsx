@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import {
   ArrowLeft,
   ChevronDown,
@@ -29,9 +29,10 @@ import { useAppStore } from "@/lib/store"
 import type { Thread } from "@/types"
 import { useAllStreamLoadingStates, useAllThreadStates } from "@/lib/thread-context"
 import {
-  getRequirementThreadIds,
+  getRequirementConversationThreadIds,
   type RequirementRecord
 } from "@/components/requirement/requirement-data"
+import { getRequirementDevelopmentMetadata } from "@/lib/requirement-development"
 import { ThreadListItem } from "./ThreadListItem"
 
 const ListChevronsUpDown = createLucideIcon("ListChevronsUpDown", [
@@ -192,14 +193,31 @@ export function RequirementThreadSidebar({
     hoverCloseTimerRef.current = setTimeout(() => setHoveredRequirementId(null), 320)
   }
 
+  const developmentThreadIds = useMemo(
+    () =>
+      new Set(
+        threads
+          .filter((thread) => getRequirementDevelopmentMetadata(thread))
+          .map((thread) => thread.thread_id)
+      ),
+    [threads]
+  )
+  const getConversationThreadIds = useCallback(
+    (requirement: RequirementRecord): string[] =>
+      getRequirementConversationThreadIds(requirement).filter(
+        (threadId) => !developmentThreadIds.has(threadId)
+      ),
+    [developmentThreadIds]
+  )
+
   const requirementIdByThreadId = useMemo(() => {
     const result = new Map<string, string>()
     for (const requirement of mode.requirements) {
-      for (const threadId of getRequirementThreadIds(requirement))
+      for (const threadId of getConversationThreadIds(requirement))
         result.set(threadId, requirement.id)
     }
     return result
-  }, [mode.requirements])
+  }, [getConversationThreadIds, mode.requirements])
   const grouped = useMemo(() => {
     const requirementById = new Map(
       mode.requirements.map((requirement) => [requirement.id, requirement])
@@ -207,6 +225,7 @@ export function RequirementThreadSidebar({
     const byRequirement = new Map<string, Thread[]>()
     const threadById = new Map(threads.map((thread) => [thread.thread_id, thread]))
     for (const thread of threads) {
+      if (getRequirementDevelopmentMetadata(thread)) continue
       const metadataId =
         typeof thread.metadata?.requirementId === "string" ? thread.metadata.requirementId : ""
       const requirementId = metadataId || requirementIdByThreadId.get(thread.thread_id) || ""
@@ -224,7 +243,7 @@ export function RequirementThreadSidebar({
         )
       })
       .map((requirement) => {
-        const indexedIds = getRequirementThreadIds(requirement)
+        const indexedIds = getConversationThreadIds(requirement)
         const indexedIdSet = new Set(indexedIds)
         const indexedConversations = indexedIds.map<Thread>((threadId, index) => {
           const existing = threadById.get(threadId)
@@ -249,7 +268,7 @@ export function RequirementThreadSidebar({
           threads: [...indexedConversations, ...metadataConversations]
         }
       })
-  }, [mode.requirements, query, requirementIdByThreadId, threads])
+  }, [getConversationThreadIds, mode.requirements, query, requirementIdByThreadId, threads])
 
   const toggle = (id: string): void => {
     setExpanded((previous) => {
@@ -310,7 +329,7 @@ export function RequirementThreadSidebar({
         await mode.onDeleteConversation(requirement, threadId)
         await deleteThread(threadId)
       } else {
-        const ids = getRequirementThreadIds(requirement)
+        const ids = getConversationThreadIds(requirement)
         await mode.onDeleteAllConversations(requirement, ids)
       }
       setDeleteTarget(null)
@@ -737,7 +756,7 @@ export function RequirementThreadSidebar({
             <DialogDescription>
               {deleteTarget?.threadId
                 ? "删除后不可恢复，需求索引也会同步更新。"
-                : `将删除该需求下的 ${deleteTarget ? getRequirementThreadIds(deleteTarget.requirement).length : 0} 个会话。`}
+                : `将删除该需求下的 ${deleteTarget ? getConversationThreadIds(deleteTarget.requirement).length : 0} 个会话。`}
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>

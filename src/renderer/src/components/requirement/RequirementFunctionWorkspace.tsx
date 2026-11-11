@@ -23,6 +23,10 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 import { assembleBoundedTextPreview } from "@/lib/text-preview-pages"
 import type { WorkspaceFilePreviewReadResult } from "../../../../shared/workspace-file-preview"
 import type { RequirementRecord } from "./requirement-data"
+import {
+  REQUIREMENT_ACTION_HINTS,
+  RequirementActionButton
+} from "./RequirementActionButton"
 
 const PREVIEW_MAX_BYTES = 8 * 1024 * 1024
 const PREVIEW_MAX_PAGES = 64
@@ -339,22 +343,19 @@ export function RequirementFunctionWorkspace({
                         : "尚未创建设计会话，点击下方按钮开始设计原型。"}
                 </p>
                 {onRequestPrototypeDesign && !prototypeCoveredByFullPrd ? (
-                  <TooltipProvider delayDuration={200}>
-                    <Tooltip>
-                      <TooltipTrigger asChild>
-                        <span className="mt-5 inline-flex">
-                          <Button type="button" size="sm" onClick={onRequestPrototypeDesign}>
-                            {prototypeSkipped || !hasPrototypeDesignSession ? "去设计" : "继续设计"}
-                          </Button>
-                        </span>
-                      </TooltipTrigger>
-                      <TooltipContent side="top" className="max-w-72">
-                        {prototypeSkipped || !hasPrototypeDesignSession
-                          ? "尚未关联设计会话，点击可创建设计会话并开始原型设计"
-                          : "已创建设计会话，暂未生成可预览的原型 HTML，点击可跳转到会话继续设计"}
-                      </TooltipContent>
-                    </Tooltip>
-                  </TooltipProvider>
+                  <RequirementActionButton
+                    type="button"
+                    size="sm"
+                    className="mt-5"
+                    onClick={onRequestPrototypeDesign}
+                    hint={
+                      prototypeSkipped || !hasPrototypeDesignSession
+                        ? REQUIREMENT_ACTION_HINTS.startDesign
+                        : REQUIREMENT_ACTION_HINTS.continueDesign
+                    }
+                  >
+                    {prototypeSkipped || !hasPrototypeDesignSession ? "去设计" : "继续设计"}
+                  </RequirementActionButton>
                 ) : null}
               </div>
             )}

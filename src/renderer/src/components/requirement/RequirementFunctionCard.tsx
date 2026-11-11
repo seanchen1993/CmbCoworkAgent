@@ -19,6 +19,10 @@ import {
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { cn } from "@/lib/utils"
 import type { NeedDesignChoice, RequirementPrdManifest } from "./requirement-data"
+import {
+  REQUIREMENT_ACTION_HINTS,
+  RequirementActionButton
+} from "./RequirementActionButton"
 
 type RequirementFunctionInfo = RequirementPrdManifest["functions"][number]
 
@@ -110,25 +114,17 @@ export function RequirementPrototypeAction({
     return (
       <div className="flex w-full flex-wrap items-center justify-center gap-1.5 px-3 py-2">
         <TooltipProvider delayDuration={200}>
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <span className="inline-flex">
-                <Button
-                  type="button"
-                  size="sm"
-                  className="h-7 gap-1 rounded-md px-2.5 text-[11px] shadow-none"
-                  disabled={disabled}
-                  onClick={onDesign}
-                >
-                  <Palette className="size-3" />
-                  去设计
-                </Button>
-              </span>
-            </TooltipTrigger>
-            <TooltipContent side="top" className="max-w-64">
-              创建并进入设计会话，为此功能补充原型设计
-            </TooltipContent>
-          </Tooltip>
+          <RequirementActionButton
+            type="button"
+            size="sm"
+            className="h-7 gap-1 rounded-md px-2.5 text-[11px] shadow-none"
+            disabled={disabled}
+            onClick={onDesign}
+            hint={REQUIREMENT_ACTION_HINTS.startDesign}
+          >
+            <Palette className="size-3" />
+            去设计
+          </RequirementActionButton>
           <Tooltip>
             <TooltipTrigger asChild>
               <span className="inline-flex">
@@ -174,27 +170,17 @@ export function RequirementPrototypeAction({
       />
 
       {needsDesign ? (
-        <TooltipProvider delayDuration={200}>
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <span className="inline-flex">
-                <Button
-                  type="button"
-                  size="sm"
-                  disabled={disabled}
-                  onClick={onDesign}
-                  className="h-7 gap-1 rounded-md px-2.5 text-[11px] shadow-none"
-                >
-                  <Palette className="size-3" />
-                  继续设计
-                </Button>
-              </span>
-            </TooltipTrigger>
-            <TooltipContent side="top" className="max-w-64">
-              已创建设计会话，暂未生成可预览的原型 HTML，点击可跳转到会话继续设计
-            </TooltipContent>
-          </Tooltip>
-        </TooltipProvider>
+        <RequirementActionButton
+          type="button"
+          size="sm"
+          disabled={disabled}
+          onClick={onDesign}
+          className="h-7 gap-1 rounded-md px-2.5 text-[11px] shadow-none"
+          hint={REQUIREMENT_ACTION_HINTS.continueDesign}
+        >
+          <Palette className="size-3" />
+          继续设计
+        </RequirementActionButton>
       ) : (
         <div className="inline-flex items-center gap-1.5 rounded-md border border-status-nominal/20 bg-status-nominal/10 px-2.5 py-1.5 text-status-nominal">
           <span className="inline-flex items-center justify-center">

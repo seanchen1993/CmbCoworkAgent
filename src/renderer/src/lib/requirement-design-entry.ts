@@ -142,6 +142,15 @@ export async function removeRequirementDesignSessions(
   return ids.filter((_, index) => results[index].status === "rejected")
 }
 
+export function removeRequirementDesignAssociations(
+  sessionIds: Iterable<string>,
+  storage: RequirementEntryStorage = localStorage
+): void {
+  for (const sessionId of new Set(sessionIds)) {
+    if (sessionId) storeActiveRequirementDesignEntry(null, sessionId, storage)
+  }
+}
+
 export function loadActiveRequirementDesignEntry(
   sessionId: string | null,
   storage: RequirementEntryStorage = localStorage

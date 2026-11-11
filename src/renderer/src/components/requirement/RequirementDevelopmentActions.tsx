@@ -14,6 +14,10 @@ import { useAppStore } from "@/lib/store"
 import { findRequirementDevelopmentThreads } from "@/lib/requirement-development"
 import type { RequirementRecord } from "./requirement-data"
 import { shouldHideRequirementDevelopment } from "./requirement-persona"
+import {
+  REQUIREMENT_ACTION_HINTS,
+  RequirementActionButton
+} from "./RequirementActionButton"
 
 export function RequirementDevelopmentActions({
   requirement,
@@ -42,21 +46,27 @@ export function RequirementDevelopmentActions({
     <>
       <div className="flex items-center gap-1.5">
         {inProgress && (
-          <Button
+          <RequirementActionButton
             type="button"
             size="sm"
             variant="outline"
             className="h-7 gap-1 px-2 text-[11px] text-destructive hover:text-destructive"
+            hint={REQUIREMENT_ACTION_HINTS.resetDevelopment}
             onClick={() => setResetOpen(true)}
           >
             <RotateCcw className="size-3" />
             重置
-          </Button>
+          </RequirementActionButton>
         )}
-        <Button
+        <RequirementActionButton
           type="button"
           size="sm"
           className="h-7 gap-1 px-2 text-[11px]"
+          hint={
+            inProgress
+              ? REQUIREMENT_ACTION_HINTS.continueDevelopment
+              : REQUIREMENT_ACTION_HINTS.startDevelopment
+          }
           onClick={() => {
             if (existingThreadId) void onContinueDevelopment(existingThreadId)
             else void onStartDevelopment()
@@ -64,7 +74,7 @@ export function RequirementDevelopmentActions({
         >
           <Code2 className="size-3" />
           {inProgress ? "继续开发" : "去开发"}
-        </Button>
+        </RequirementActionButton>
       </div>
 
       <Dialog
@@ -77,7 +87,7 @@ export function RequirementDevelopmentActions({
           <DialogHeader>
             <DialogTitle>确认重置需求开发？</DialogTitle>
             <DialogDescription>
-              重置后将解除需求与开发会话的关联，并永久删除对应的全部开发会话。此操作不可撤销。
+              重置后仅解除需求与开发会话的关联。开发会话及其历史记录仍会保留。
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>

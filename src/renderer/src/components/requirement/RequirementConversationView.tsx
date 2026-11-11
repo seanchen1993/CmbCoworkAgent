@@ -12,7 +12,6 @@ import { useAppStore } from "@/lib/store"
 import { assembleBoundedTextPreview } from "@/lib/text-preview-pages"
 import {
   useAllThreadStates,
-  useThreadContext,
   useThreadState,
   useThreadStream
 } from "@/lib/thread-context"
@@ -39,7 +38,7 @@ import {
   isRequirementPrototypeStepComplete,
   openRequirementDesign,
   openRequirementDesignBatch,
-  removeRequirementDesignSessions,
+  removeRequirementDesignAssociations,
   type RequirementDesignEntry
 } from "@/lib/requirement-design-entry"
 import {
@@ -48,7 +47,6 @@ import {
 } from "./requirement-session-capabilities"
 import { RequirementDetailsPanel } from "./RequirementDetailsPanel"
 import { getSelectedRequirementSystem } from "./requirement-store"
-import { getDesignSessionClient } from "@/components/design/session-client"
 import { LeanstarTokenDialog } from "./LeanstarTokenDialog"
 import {
   buildRequirementDevelopmentPrompt,
@@ -249,7 +247,7 @@ function RequirementConversationSession({
   const setShowHarnessBoardView = useAppStore((state) => state.setShowHarnessBoardView)
   const openSubagentFocusView = useAppStore((state) => state.openSubagentFocusView)
   const subagentFocusView = useAppStore((state) => state.subagentFocusView)
-  const threadContext = useThreadContext()
+  const updateThread = useAppStore((state) => state.updateThread)
   const [selectedThreadId, setSelectedThreadId] = useState<string | null>(
     activeThreadId && requirement.threadIds.includes(activeThreadId)
       ? activeThreadId
@@ -359,37 +357,27 @@ function RequirementConversationSession({
         threadIds.add(thread.thread_id)
       }
     })
-    const ids = [...threadIds]
-    const deletions = await Promise.allSettled(ids.map((threadId) => deleteThread(threadId)))
-    const deletedThreadIds = ids.filter((_, index) => deletions[index].status === "fulfilled")
-    deletedThreadIds.forEach((threadId) => threadContext.cleanupThread(threadId))
-    const failedCount = deletions.length - deletedThreadIds.length
-    if (failedCount > 0) {
-      const detachments = await Promise.all(
-        deletedThreadIds.map((threadId) =>
-          window.api.requirements.detachThread({ reqId: requirement.id, threadId })
-        )
-      )
-      const latestRequirement = detachments.findLast((item) => item.success && item.requirement)
-      if (latestRequirement?.requirement) {
-        onRequirementUpdated(
-          fromPersistedRequirement(latestRequirement.requirement, requirement.system)
-        )
-      }
-      throw new Error(`${failedCount} 个开发会话删除失败`)
-    }
     const result = await window.api.requirements.resetDevelopment(requirement.id)
     if (!result.success || !result.requirement) {
       throw new Error(result.error || "重置需求开发失败")
     }
     onRequirementUpdated(fromPersistedRequirement(result.requirement, requirement.system))
+    const linkedThreads = useAppStore
+      .getState()
+      .threads.filter((thread) => threadIds.has(thread.thread_id))
+    await Promise.all(
+      linkedThreads.map((thread) => {
+        const metadata = { ...(thread.metadata ?? {}) }
+        delete metadata.requirementDevelopment
+        return updateThread(thread.thread_id, { metadata })
+      })
+    )
   }, [
-    deleteThread,
     onRequirementUpdated,
     requirement.developmentThreadIds,
     requirement.id,
     requirement.system,
-    threadContext
+    updateThread
   ])
   const handleFunctionWorkspaceChange = useCallback((open: boolean) => {
     setFunctionWorkspaceOpen(open)
@@ -772,13 +760,7 @@ function RequirementConversationSession({
     }
     setRequirementSpaceManifest(normalizeRequirementSpaceManifest(result.manifest))
     onRequirementUpdated(fromPersistedRequirement(result.requirement, requirement.system))
-    const client = getDesignSessionClient()
-    const failedSessionIds = await removeRequirementDesignSessions(sessionIds, (sessionId) =>
-      client.remove(sessionId)
-    )
-    if (failedSessionIds.length > 0) {
-      throw new Error(`设计已重置，但有 ${failedSessionIds.length} 个历史会话删除失败，请重试`)
-    }
+    removeRequirementDesignAssociations(sessionIds)
     setPrototypeRoute(null)
     setPreviewTab("prd")
   }, [
@@ -808,15 +790,7 @@ function RequirementConversationSession({
       }
       setRequirementSpaceManifest(normalizeRequirementSpaceManifest(result.manifest))
       onRequirementUpdated(fromPersistedRequirement(result.requirement, requirement.system))
-      const client = getDesignSessionClient()
-      const failedSessionIds = await removeRequirementDesignSessions(sessionIds, (sessionId) =>
-        client.remove(sessionId)
-      )
-      if (failedSessionIds.length > 0) {
-        throw new Error(
-          `功能设计已重置，但有 ${failedSessionIds.length} 个历史会话删除失败，请重试`
-        )
-      }
+      removeRequirementDesignAssociations(sessionIds)
     },
     [buildPrototypeDesignEntry, onRequirementUpdated, requirement.id, requirement.system]
   )

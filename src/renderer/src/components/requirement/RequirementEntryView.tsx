@@ -38,13 +38,10 @@ import {
   buildSpaceRequirementDesignPrompt,
   findRequirementDesignEntry,
   listAllRequirementDesignEntries,
-  removeRequirementDesignSessions,
+  removeRequirementDesignAssociations,
   openRequirementDesign
 } from "@/lib/requirement-design-entry"
-import {
-  createPromptDesignSession,
-  getDesignSessionClient
-} from "@/components/design/session-client"
+import { createPromptDesignSession } from "@/components/design/session-client"
 import {
   USE_LEANSTAR_REQUIREMENTS_MOCK,
   leanstarRequirementsApi,
@@ -501,13 +498,16 @@ export function RequirementEntryView({
         requirement.id,
         useAppStore.getState().threads
       )
-      const results = await Promise.allSettled(
-        threads.map((thread) => deleteThread(thread.thread_id))
+      const updateThread = useAppStore.getState().updateThread
+      await Promise.all(
+        threads.map((thread) => {
+          const metadata = { ...(thread.metadata ?? {}) }
+          delete metadata.requirementDevelopment
+          return updateThread(thread.thread_id, { metadata })
+        })
       )
-      const failedCount = results.filter((result) => result.status === "rejected").length
-      if (failedCount > 0) throw new Error(`${failedCount} 个开发会话删除失败`)
     },
-    [deleteThread]
+    []
   )
 
   const ensureRequirementThread = async (
@@ -630,13 +630,7 @@ export function RequirementEntryView({
       const sessionIds = listAllRequirementDesignEntries(requirement.id).map(
         (entry) => entry.htmlId
       )
-      const client = getDesignSessionClient()
-      const failedSessionIds = await removeRequirementDesignSessions(sessionIds, (sessionId) =>
-        client.remove(sessionId)
-      )
-      if (failedSessionIds.length > 0) {
-        throw new Error(`有 ${failedSessionIds.length} 个设计会话删除失败，请重试`)
-      }
+      removeRequirementDesignAssociations(sessionIds)
     },
     []
   )

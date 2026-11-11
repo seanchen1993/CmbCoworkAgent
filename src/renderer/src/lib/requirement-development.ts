@@ -153,12 +153,7 @@ export function buildRequirementDevelopmentPrompt(input: {
 
 - 需求名称：${input.title}
 - PRD 文件：${input.requirementFilePath}
-- 原型文件：${prototypeLines}
+- 原型设计文件：${prototypeLines}
 
-开发目标：
-1. 结合 PRD、原型和当前代码库，确认功能范围、页面交互及验收要求。
-2. 在遵循现有项目结构、编码规范和组件体系的前提下完成实现。
-3. 补充必要的测试或验证，并说明主要改动、验证结果及仍需确认的问题。
-4. 不要修改与本需求无关的功能；遇到信息缺失或实现存在歧义时，请先向我确认。
 `
 }
