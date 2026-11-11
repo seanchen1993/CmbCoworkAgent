@@ -2432,7 +2432,7 @@ const api = {
     upload: (
       buffer: ArrayBuffer,
       fileName: string,
-      options?: { allowNestedNameDuplicates?: boolean; origin?: "market" | "local" }
+      options?: { allowNestedNameDuplicates?: boolean; origin?: "market" | "local"; marketplace?: { name: string; id?: string } }
     ): Promise<{
       success: boolean
       skillName?: string
@@ -3090,6 +3090,8 @@ const api = {
     }
   },
   plugins: {
+    marketSourceAccess: (type: "skill" | "plugin", name: string, id?: string): Promise<"owner" | "whitelist" | undefined> =>
+      ipcRenderer.invoke("plugins:marketSourceAccess", { type, name, id }),
     list: (): Promise<PluginMetadata[]> =>
       ipcRenderer.invoke("plugins:list") as Promise<PluginMetadata[]>,
     install: (

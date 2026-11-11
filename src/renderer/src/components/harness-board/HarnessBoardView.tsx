@@ -1,3 +1,4 @@
+import { canReadPluginSource } from "../../../../shared/market-source-access"
 import type { ManagedRunModelSelection } from "../../../../shared/managed-run-model"
 import { RepositoryBranchHint, RepositoryPathsField } from "./RepositoryPathField"
 import projectModeGuideImage from "@/assets/guides/feature-create-guide-v5.png"
@@ -1498,7 +1499,7 @@ function findMarketPluginForAdapter(
   installedPlugin: PluginMetadata | undefined,
   adapter: HarnessAdapterRegistryItem
 ): MarketItem | undefined {
-  if (installedPlugin?.origin === "local") return undefined
+  if (canReadPluginSource(installedPlugin)) return undefined
 
   const adapterKeys = new Set(
     [adapter.id, adapter.name].map(normalizeAdapterMatchKey).filter(Boolean)

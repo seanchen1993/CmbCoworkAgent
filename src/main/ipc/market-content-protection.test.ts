@@ -11,7 +11,7 @@ import {
 } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest"
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest"
 import {
   cleanupMarketRuntimeContent,
   encodeMarketContent,
@@ -42,6 +42,7 @@ type Handler = (event: unknown, ...args: unknown[]) => Promise<IpcResult>
 const handlers = new Map<string, Handler>()
 const previousHome = process.env.CMB_COWORK_AGENT_HOME
 let home: string
+let sourceAccessPolicy: typeof import("../services/market-source-access")
 let storage: typeof import("../storage")
 let skills: typeof import("./skills")
 const original = (name: string): string =>
@@ -54,6 +55,9 @@ beforeAll(async () => {
   home = mkdtempSync(join(tmpdir(), "cmb-market-ipc-"))
   process.env.CMB_COWORK_AGENT_HOME = home
   storage = await import("../storage")
+  // Fail before registering handlers if an eager import captured the real user's data root.
+  expect(storage.getOpenworkDir()).toBe(home)
+  sourceAccessPolicy = await import("../services/market-source-access")
   skills = await import("./skills")
   const plugins = await import("./plugins")
   const files = await import("./plugin-files")
@@ -70,7 +74,60 @@ afterAll(() => {
   rmSync(home, { recursive: true, force: true })
 })
 
+afterEach(() => vi.restoreAllMocks())
+
 describe("market content IPC regression", () => {
+  it.each(["owner", "whitelist"] as const)("installs %s market plugins as editable originals and rechecks reinstalls", async (access) => {
+    const policy = vi.spyOn(sourceAccessPolicy, "resolveMarketSourceAccess").mockResolvedValue(undefined)
+    const marketplace = { name: "source-" + access, id: "source-" + access }
+    const zip = new AdmZip()
+    zip.addFile("plugin.json", Buffer.from(JSON.stringify({ name: marketplace.name })))
+    zip.addFile("skills/action/SKILL.md", Buffer.from(original(marketplace.name)))
+    zip.addFile("run.cjs", Buffer.from("console.log('plain')"))
+    const payload = { buffer: bytes(zip.toBuffer()), fileName: "source.zip", origin: "market", marketplace,
+      sourceAccess: "owner" } // Renderer claims must not bypass main's policy.
+    expect((await invoke("plugins:install", payload)).success).toBe(true)
+    expect(policy).toHaveBeenCalledWith("plugin", marketplace, payload.buffer)
+    const previous = storage.getPlugins().find((p) => p.marketplace?.id === marketplace.id)!
+    expect(previous.sourceAccess).toBeUndefined()
+    expect((await invoke("plugins:listFiles", previous.id)).success).toBe(false)
+    policy.mockResolvedValue(access)
+    expect((await invoke("plugins:install", payload)).success).toBe(true)
+    const plugin = storage.getPlugins().find((p) => p.id === previous.id)!
+    expect(plugin).toMatchObject({ origin: "market", sourceAccess: access, marketplace, path: previous.path })
+    expect(existsSync(join(plugin.path, MARKET_CONTENT_MARKER))).toBe(false)
+    const md = join(plugin.path, "skills/action/SKILL.md")
+    expect(readFileSync(md, "utf8")).toBe(original(marketplace.name))
+    expect((await invoke("plugins:listFiles", plugin.id)).success).toBe(true)
+    expect((await invoke("plugins:write", { pluginId: plugin.id, filePath: md, content: original(marketplace.name) + "\nedit" })).success).toBe(true)
+    expect((await invoke("plugins:exportForMarket", plugin.id)).success).toBe(true)
+    expect((await skills.listPluginSkills()).find((skill) => skill.pluginId === plugin.id)?.contentOrigin).toBe("local")
+    policy.mockResolvedValue(undefined)
+    expect((await invoke("plugins:install", payload)).success).toBe(true)
+    expect(storage.getPlugins().find((p) => p.id === plugin.id)?.sourceAccess).toBeUndefined()
+    expect(readFileSync(md, "utf8")).toContain(MARKET_CONTENT_PREFIX)
+    expect(readFileSync(join(plugin.path, "run.cjs"), "utf8")).toBe("console.log('plain')")
+    expect((await invoke("plugins:listFiles", plugin.id)).success).toBe(false)
+  })
+
+  it.each(["owner", "whitelist"] as const)("allows %s skill source editing after a market installation", async (access) => {
+    const policy = vi.spyOn(sourceAccessPolicy, "resolveMarketSourceAccess").mockResolvedValue(access)
+    const name = "source-skill-" + access
+    const md = original(name)
+    const zip = new AdmZip()
+    zip.addFile("SKILL.md", Buffer.from(md))
+    const buffer = access === "owner" ? Buffer.from(md) : zip.toBuffer()
+    expect((await invoke("skills:upload", { buffer: bytes(buffer), fileName: access === "owner" ? "SKILL.md" : "skill.zip",
+      options: { origin: "market", marketplace: { name } } })).success).toBe(true)
+    expect(policy).toHaveBeenCalledWith("skill", { name }, bytes(buffer))
+    const skill = (await skills.listAllSkills()).find((item) => item.name === name)!
+    expect(skill.contentOrigin).toBe("local")
+    expect(readFileSync(skill.path, "utf8")).toBe(md)
+    expect((await invoke("skills:read", skill.path)).content).toBe(md)
+    expect((await invoke("skills:write", { skillPath: skill.path, content: md + "\nedit" })).success).toBe(true)
+    expect((await invoke("skills:exportForMarket", skill.path)).success).toBe(true)
+  })
+
   it("persists market identity across renamed project plugin updates and clears it for originals", async () => {
     const marketplace = { name: "市场项目模式插件", id: "project-market-id" }
     const install = async (name: string, origin = "market") => {

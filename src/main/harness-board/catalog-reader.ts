@@ -220,6 +220,8 @@ function projectPluginMetadata(plugin: PluginMetadata): PluginMetadata {
     ...(Number.isFinite(plugin.hookCount) ? { hookCount: Math.max(0, plugin.hookCount!) } : {}),
     ...(text(plugin.hookPath, 2_048) ? { hookPath: text(plugin.hookPath, 2_048) } : {}),
     ...(plugin.origin === "market" || plugin.origin === "local" ? { origin: plugin.origin } : {}),
+    ...(plugin.sourceAccess === "owner" || plugin.sourceAccess === "whitelist"
+      ? { sourceAccess: plugin.sourceAccess } : {}),
     createdAt: text(plugin.createdAt, 128),
     updatedAt: text(plugin.updatedAt, 128)
   }

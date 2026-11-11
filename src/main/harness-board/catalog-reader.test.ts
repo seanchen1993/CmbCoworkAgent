@@ -111,6 +111,15 @@ async function makeCatalog(size: number): Promise<{ projects: string; plugins: s
 }
 
 describe("Harness catalog reader", () => {
+  it.each(["owner", "whitelist"] as const)("preserves %s source access in project contexts", async (access) => {
+    const paths = await makeCatalog(1)
+    const plugins = JSON.parse(readFileSync(paths.plugins, "utf8"))
+    plugins[0].origin = "market"
+    plugins[0].sourceAccess = access
+    writeFileSync(paths.plugins, JSON.stringify(plugins))
+    const contexts = readHarnessProjectContexts(paths.projects, paths.plugins, ["project-0"])
+    expect(contexts.projects["project-0"]?.plugin).toMatchObject({ origin: "market", sourceAccess: access })
+  })
   it.each([true, false, undefined])(
     "preserves test project selection in project lists and contexts: %j",
     async (isTestProject) => {
