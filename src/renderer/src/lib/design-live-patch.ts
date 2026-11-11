@@ -7,6 +7,7 @@ export interface DesignLiveDelta {
   }>
   styles: Array<{ id: string; css: string | null }>
   removes?: string[]
+  orders?: Array<{ parentId: string | null; ids: string[] }>
 }
 
 /** Compare canonical preview documents, never serialize or replace the running DOM. */
@@ -24,6 +25,7 @@ export function createDesignLiveDelta(before: string, after: string): DesignLive
       .map((el) => el.outerHTML)
   if (JSON.stringify(executable(old)) !== JSON.stringify(executable(fresh))) return null
   const nodes: DesignLiveDelta["nodes"] = []
+  const orders: NonNullable<DesignLiveDelta["orders"]> = []
   const previous = new Map(
     [...old.querySelectorAll("[data-design-node]")].map((e) => [
       e.getAttribute("data-design-node")!,
@@ -57,9 +59,11 @@ export function createDesignLiveDelta(before: string, after: string): DesignLive
       el.tagName !== original.tagName ||
       el.children.length !== survivingChildren.length ||
       [...el.children].some(
-        (child, i) =>
-          child.getAttribute("data-design-node") !==
-          survivingChildren[i]?.getAttribute("data-design-node")
+        (child) =>
+          !survivingChildren.some(
+            (oldChild) =>
+              child.getAttribute("data-design-node") === oldChild.getAttribute("data-design-node")
+          )
       )
     )
       return null
@@ -101,6 +105,18 @@ export function createDesignLiveDelta(before: string, after: string): DesignLive
     if (attributes.length || text !== undefined || textSlots.length)
       nodes.push({ id, attributes, text, textSlots })
   }
+  for (const parent of [fresh.body, ...next.values()]) {
+    const id = parent.getAttribute("data-design-node")
+    const prior = id ? previous.get(id)! : old.body
+    const ids = [...parent.children]
+      .map((e) => e.getAttribute("data-design-node"))
+      .filter((v): v is string => !!v)
+    const oldIds = [...prior.children]
+      .map((e) => e.getAttribute("data-design-node"))
+      .filter((v): v is string => !!v && !missing.has(v))
+    if (ids.length !== oldIds.length || ids.some((v) => !oldIds.includes(v))) return null
+    if (ids.some((v, i) => v !== oldIds[i])) orders.push({ parentId: id, ids })
+  }
   const oldStyles = new Map(
     [...old.querySelectorAll("style[data-design-patch-style]")].map((e) => [
       e.getAttribute("data-design-patch-style")!,
@@ -116,7 +132,7 @@ export function createDesignLiveDelta(before: string, after: string): DesignLive
   const styles = [...new Set([...oldStyles.keys(), ...newStyles.keys()])]
     .filter((id) => oldStyles.get(id) !== newStyles.get(id))
     .map((id) => ({ id, css: newStyles.get(id) ?? null }))
-  return { nodes, styles, removes }
+  return { nodes, styles, removes, orders }
 }
 
 /** Closure-free, host-owned runtime. It never evaluates source scripts or replaces interactive nodes. */
@@ -175,7 +191,34 @@ export function designLivePatchRuntime(): void {
     }
     const x = window.scrollX,
       y = window.scrollY
+    const reorders: Array<{ parent: Element; children: Element[] }> = []
+    for (const order of (message.delta.orders ?? []) as NonNullable<DesignLiveDelta["orders"]>) {
+      const parent = order.parentId
+        ? [...document.querySelectorAll("[data-design-node]")].find(
+            (el) => el.getAttribute("data-design-node") === order.parentId
+          )
+        : document.body
+      const children = order.ids.map(
+        (id) =>
+          parent && [...parent.children].find((el) => el.getAttribute("data-design-node") === id)
+      )
+      if (!parent || children.some((el) => !el)) {
+        reply("__design_live_resync")
+        return
+      }
+      reorders.push({ parent, children: children as Element[] })
+    }
     for (const el of removed) el!.remove()
+    for (const { parent, children } of reorders) {
+      const slots = [...parent.children]
+        .filter((el) => children.includes(el))
+        .map((el) => {
+          const slot = document.createComment("design-move")
+          el.before(slot)
+          return slot
+        })
+      slots.forEach((slot, i) => slot.replaceWith(children[i]))
+    }
     for (const { el, change } of targets) {
       for (const [name, value] of change.attributes) {
         if (value === null) el.removeAttribute(name)

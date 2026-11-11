@@ -563,6 +563,7 @@ export function createDesignState(): TabState {
     zoom: 100,
     inputValue: "",
     comments: [],
+    annotationHistory: [],
     draftComment: null,
     activeCommentId: null,
     drawStrokes: [],

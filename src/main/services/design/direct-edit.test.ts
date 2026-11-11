@@ -32,6 +32,46 @@ const command = (
 })
 
 describe("direct design source editing", () => {
+  it("moves a block between siblings, rejects stale/cross-container destinations, and saves without a hidden browser", async () => {
+    const db = new NativeSqliteAdapter(new DatabaseSync(":memory:"))
+    try {
+      const validate = vi.fn()
+      const manager = new DesignRunManager(new DesignSessionStore(db), {
+        execute: vi.fn(), abort: vi.fn(), finalize: (event) => event, publish: vi.fn(), validateDirectEdit: validate
+      })
+      manager.create({ id: "ds_move", meta: { id: "ds_move", title: "move", createdAt: 1, updatedAt: 1 }, workspacePath: null,
+        state: { ...createDesignState(), html: page('<main><article>A</article><article>B</article><article>C</article></main><aside><p>outside</p></aside>') } })
+      const doc = manager.inspectEditable("ds_move")
+      const a = doc.nodes.find((n) => n.tagName === "article" && n.label === "A")!
+      const b = doc.nodes.find((n) => n.tagName === "article" && n.label === "B")!
+      const c = doc.nodes.find((n) => n.tagName === "article" && n.label === "C")!
+      const operation = { type: "move_node" as const, nodeId: c.id, expectedHash: c.hash, targetId: b.id, targetHash: b.hash, placement: "before" as const }
+      const edit = { ...command(c, "delete_node", "", doc.revision), operations: [operation] }
+      const original = manager.get("ds_move").state.html
+      expect(() => applyDirectEdit(original, null, { ...edit, operations: [{ ...operation, targetHash: "stale" }] })).toThrow()
+      const outside = doc.nodes.find((n) => n.tagName === "p")!
+      expect(() => applyDirectEdit(original, null, { ...edit, operations: [{ ...operation, targetId: outside.id, targetHash: outside.hash }] })).toThrow("同一容器")
+      const saved = await manager.edit("ds_move", edit)
+      const order = inspectEditableSource(saved.state.html, 1).nodes.filter((n) => n.tagName === "article").map((n) => n.id)
+      expect(order).toEqual([a.id, c.id, b.id])
+      expect(validate).not.toHaveBeenCalled()
+      expect(saved.state.canUndoPatch).toBe(true)
+    } finally { db.close() }
+  })
+  it("persists a drag translation without replacing transforms, layout or child nodes", () => {
+    const html = prepareEditableSource(page('<article style="transform:rotate(5deg);padding:20px"><span>卡片</span></article><p>保留</p>'))
+    const node = inspectEditableSource(html, 0).nodes.find((n) => n.tagName === "article")!
+    const after = applyDirectEdit(html, null, {
+      ...command(node, "delete_node"),
+      operations: [{ type: "set_style", nodeId: node.id, expectedHash: node.hash,
+        declarations: { translate: "calc(0px + 50px) calc(0px + 30px) !important" } }]
+    })
+    expect(after.mode).toBe("live")
+    expect(after.html).toContain("transform:rotate(5deg)")
+    expect(after.html).toContain("padding:20px")
+    expect(after.html).toContain("translate:calc(0px + 50px) calc(0px + 30px) !important")
+    expect(inspectEditableSource(after.html, 1).nodes.map((n) => n.id)).toEqual(inspectEditableSource(html, 0).nodes.map((n) => n.id))
+  })
   it("preserves icon, scripts and unrelated source while editing a text slot", () => {
     const html = prepareEditableSource(
       page(

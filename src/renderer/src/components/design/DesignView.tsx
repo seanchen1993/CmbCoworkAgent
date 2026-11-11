@@ -38,6 +38,7 @@ import {
   TweaksBtn
 } from "./DesignControls"
 import { CommentDraftInput, CommentPin } from "./DesignComments"
+import { DesignAnnotationHistory } from "./DesignAnnotationHistory"
 import {
   DrawActionBar,
   DrawLayer,
@@ -260,6 +261,7 @@ function makeTabState(): TabState {
     zoom: 100,
     inputValue: "",
     comments: [],
+    annotationHistory: [],
     draftComment: null,
     activeCommentId: null,
     drawStrokes: [],
@@ -880,6 +882,7 @@ type PersistedTabState = {
   zoom: number
   comments: CommentItem[]
   drawStrokes?: DrawStroke[]
+  annotationHistory?: TabState["annotationHistory"]
   drawElementHints?: DrawElementHint[]
   drawNotes?: DrawNote[]
   drawToolMode?: DrawToolMode
@@ -1511,6 +1514,7 @@ export function DesignView({
     defaultName: string
   } | null>(null)
   const [exportingPackage, setExportingPackage] = useState(false)
+  const [annotationHistorySession, setAnnotationHistorySession] = useState<string | null>(null)
   const { loadModels, loadProviders } = useAppStore()
   // Toast notifications
   const [toast, setToast] = useState<{ msg: string; id: number } | null>(null)
@@ -3157,6 +3161,10 @@ ${commentLines}${variantNote}`
       )
       const cleanMsg = `📝 ${text.trim().slice(0, 60)}`
       const rollbackSnapshot = makeIterationRollbackSnapshot(state)
+
+      if (rollbackSnapshot) rollbackSnapshot.comments = rollbackSnapshot.comments.map((item) =>
+        item.id === commentId ? { ...item, text } : item
+      )
 
       updateTs(tabId, (prev) => ({
         comments: prev.comments.filter((c) => c.id !== commentId),
@@ -5223,7 +5231,7 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
                 {!visibleDraft && !isGenerating && <TweaksBtn label="编辑" icon={<EditIcon active={activeMode === "edit"} />}
                   active={activeMode === "edit"} onClick={() => setActiveMode(activeMode === "edit" ? null : "edit")} />}
                 {activeMode === "edit" && <span style={{ fontSize: 11, color: "#64748b", whiteSpace: "nowrap" }}>
-                  {directEditor.status || "单击选中 · 双击改文字 · Delete 删除"}
+                  {directEditor.status || "拖到区块之间排序 · 双击改文字 · Delete 删除"}
                 </span>}
                 <div style={S.tweaksDivider} />
                 {/* Tweaks toggle */}
@@ -5302,6 +5310,11 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
                   </div>
                   <div style={S.tweaksDivider} />
                 </>}
+                <TweaksBtn label={`注释历史${ts.annotationHistory?.length ? ` (${ts.annotationHistory.length})` : ""}`}
+                  icon={<CommentIcon active={false} />}
+                  active={annotationHistorySession === currentSessionId}
+                  onClick={() => setAnnotationHistorySession(currentSessionId)} />
+                <div style={S.tweaksDivider} />
                 {/* Zoom */}
                 <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
                   <button onClick={() => setZoom((z) => Math.max(25, z - 25))} style={S.zoomBtn}>
@@ -5340,6 +5353,9 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
             {!!ts.html && <button onClick={() => setSavedVersionSelection({ sessionId: currentSessionId, runId: ts.draftPreview?.runId, show: !showSavedVersion })}>{showSavedVersion ? "查看生成草稿" : "查看已定稿版本"}</button>}
           </div>}
           {!!ts.patchStatus && <div role="status" data-testid="design-patch-status" style={{ padding: "8px 16px", fontSize: 12, background: "#fffbeb", color: "#92400e" }}>{ts.patchStatus.message}</div>}
+          {annotationHistorySession && annotationHistorySession === currentSessionId && (
+            <DesignAnnotationHistory entries={ts.annotationHistory ?? []} onClose={() => setAnnotationHistorySession(null)} />
+          )}
           {/* Canvas Content */}
           <div style={S.canvas}>
             {ts.rightTab === "questions" && !isGenerating ? (

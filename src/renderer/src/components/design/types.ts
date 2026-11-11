@@ -163,6 +163,19 @@ export interface DrawElementHint {
   elements: string[]
 }
 
+/** Annotations belong to the version they reviewed, never to the updated canvas. */
+export interface DesignAnnotationHistoryEntry {
+  id: string
+  createdAt: number
+  revision: number
+  variationId: string | null
+  instruction: string
+  comments: CommentItem[]
+  drawStrokes: DrawStroke[]
+  drawElementHints: DrawElementHint[]
+  drawNotes: DrawNote[]
+}
+
 export type DrawToolMode = "draw" | "note"
 
 export interface DrawNote {
@@ -356,6 +369,7 @@ export interface TabState {
   zoom: number
   inputValue: string
   comments: CommentItem[]
+  annotationHistory?: DesignAnnotationHistoryEntry[]
   draftComment: {
     pageX: number
     pageY: number

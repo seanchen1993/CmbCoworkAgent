@@ -1360,6 +1360,47 @@ try {
   await editText("#icon-action", "提交申请")
   assert.equal(await directFrame.locator("#icon-action svg").count(), 1)
   assert.match(manager.get("ds_useredit").state.html, /提交申请/)
+  // Flow blocks insert between siblings and displace the following content.
+  const dragCard = directFrame.locator("#keep-card")
+  const reorder = async (cancel = false) => {
+    const from = (await dragCard.boundingBox())!
+    const to = (await directFrame.locator("#remove-card").boundingBox())!
+    await page.mouse.move(from.x + 15, from.y + 15)
+    await page.mouse.down()
+    await page.mouse.move(to.x + 20, to.y + 2, { steps: 8 })
+    await directFrame.getByRole("status").filter({ hasText: "插入" }).waitFor()
+    if (cancel) await page.keyboard.press("Escape")
+    await page.mouse.up()
+  }
+  const beforeMove = manager.get("ds_useredit").state.html
+  await reorder(true)
+  assert.equal(manager.get("ds_useredit").state.html, beforeMove)
+  await reorder()
+  await page.waitForFunction(() => {
+    const doc = document.querySelector("iframe")!.contentDocument!
+    return doc.querySelector("#keep-card")!.nextElementSibling?.id === "remove-card"
+  })
+  await directFrame.getByRole("status").filter({ hasText: "顺序已保存" }).waitFor()
+  const afterMove = manager.get("ds_useredit").state.html
+  assert.ok(afterMove.indexOf('id="keep-card"') < afterMove.indexOf('id="remove-card"'))
+  assert.equal(await directFrame.locator("html").getAttribute("data-design-preview-instance"), staticInstance)
+  await page.getByTitle("撤销局部修改").click()
+  await page.waitForFunction(() => document.querySelector("iframe")!.contentDocument!.querySelector("#remove-card")!.nextElementSibling?.id === "keep-card")
+  await page.getByTitle("重做局部修改").click()
+  await page.waitForFunction(() => document.querySelector("iframe")!.contentDocument!.querySelector("#keep-card")!.nextElementSibling?.id === "remove-card")
+  // Move back using the handle at 125% zoom.
+  await page.getByRole("button", { name: "+", exact: true }).click()
+  await page.getByText("125%", { exact: true }).waitFor()
+  await dragCard.click()
+  const handle = (await directFrame.getByRole("button", { name: "拖动", exact: true }).boundingBox())!
+  const destination = (await directFrame.locator("#remove-card").boundingBox())!
+  await page.mouse.move(handle.x + handle.width / 2, handle.y + handle.height / 2)
+  await page.mouse.down()
+  await page.mouse.move(destination.x + 20, destination.y + destination.height - 2, { steps: 8 })
+  await page.mouse.up()
+  await directFrame.getByRole("status").filter({ hasText: "顺序已保存" }).waitFor()
+  await page.waitForFunction(() => document.querySelector("iframe")!.contentDocument!.querySelector("#remove-card")!.nextElementSibling?.id === "keep-card")
+  await page.getByRole("button", { name: "−", exact: true }).click()
   await directFrame.locator("#remove-card span").click()
   await directFrame.getByRole("button", { name: "article", exact: true }).click()
   await directFrame.getByRole("button", { name: "删除", exact: true }).click()
@@ -1463,6 +1504,34 @@ try {
   }
   assert.equal(requests.length, directRunsBefore, "direct edits never invoke the model")
   console.log("PASS: direct double-click/IME text, icon retention, nested selection/deletion, history, persistence and real React rerender")
+
+  await openDirectFixture("ds_annotations", '<!doctype html><html><head></head><body><h1>历史注释测试</h1></body></html>')
+  const historicalAnnotations = {
+    comments: [{ id: "history-comment", pageX: 10, pageY: 20, text: "改成蓝色标题", elementDesc: "h1", createdAt: 1 }],
+    drawStrokes: [{ id: "history-stroke", points: [{ x: 10, y: 10 }, { x: 50, y: 30 }], color: "#cc0000", width: 3, createdAt: 2 }],
+    drawNotes: [{ id: "history-note", pageX: 20, pageY: 20, text: "标题字号加大", elements: ["h1"], strokeId: "history-stroke", createdAt: 3 }]
+  }
+  manager.patch("ds_annotations", historicalAnnotations)
+  manager.start({ requestId: "history-update", designSessionId: "ds_annotations", kind: "agent", prompt: "应用修改", isIteration: true })
+  await page.getByRole("button", { name: "■ 停止", exact: true }).waitFor()
+  emitters.at(-1)!({ type: "done", html: '<!doctype html><html><head></head><body><h1>更新后标题</h1></body></html>' })
+  completions.at(-1)!()
+  await page.frameLocator("iframe").getByText("更新后标题", { exact: true }).waitFor()
+  assert.deepEqual(manager.get("ds_annotations").state.comments, [])
+  assert.deepEqual(manager.get("ds_annotations").state.drawNotes, [])
+  await page.getByRole("button", { name: "注释历史 (1)", exact: true }).click()
+  await page.getByRole("dialog", { name: "注释历史", exact: true }).waitFor()
+  await page.getByText("改成蓝色标题", { exact: true }).waitFor()
+  await page.getByText("标题字号加大", { exact: true }).waitFor()
+  await page.getByText("1 个绘制标记", { exact: true }).click()
+  await page.getByRole("img", { name: "历史绘制标记" }).waitFor()
+  if (process.env.DESIGN_ANNOTATION_SCREENSHOT) await page.screenshot({ path: process.env.DESIGN_ANNOTATION_SCREENSHOT })
+  await page.getByRole("button", { name: "关闭注释历史", exact: true }).click()
+  await page.reload()
+  await page.getByRole("button", { name: "注释历史 (1)", exact: true }).click()
+  await page.getByText("改成蓝色标题", { exact: true }).waitFor()
+  await page.keyboard.press("Escape")
+  console.log("PASS: successful updates clear annotation overlays and preserve comments/draw notes in durable history")
 
   // Both the explicit Continue action and a follow-up must use the latest unfinished page.
   manager.create({

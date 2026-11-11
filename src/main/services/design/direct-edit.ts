@@ -329,6 +329,22 @@ export function applyDirectEdit(
       }
       push(target.surface, { start: target.start, end: target.end, value: target.deleteValue })
       removed.push({ surface: target.surface, start: target.start, end: target.end })
+    } else if (op.type === "move_node") {
+      const destination = index.targets.get(op.targetId)
+      if (!info.canDelete || info.source !== "html" || !destination ||
+        destination.info.source !== "html" || destination.surface !== target.surface ||
+        destination.info.hash !== op.targetHash || destination.info.id === info.id ||
+        destination.info.variationId !== info.variationId)
+        throw new Error("拖动目标已变化，请重新选择")
+      const dom = elements(parse(html))
+      const node = dom.find((el) => designAttr(el, "data-design-node") === info.id)
+      const neighbor = dom.find((el) => designAttr(el, "data-design-node") === op.targetId)
+      if (!node?.parentNode || node.parentNode !== neighbor?.parentNode)
+        throw new Error("请在同一容器内拖动排序")
+      const offset = op.placement === "before" ? destination.start : destination.end
+      if (offset === target.start || offset === target.end) continue
+      push(target.surface, { start: target.start, end: target.end, value: "" })
+      push(target.surface, { start: offset, end: offset, value: surface.content.slice(target.start, target.end) })
     } else {
       if (!info.canStyle) throw new Error("此动态节点的样式请通过组件属性或 AI 修改")
       const declarations = validateStyle(op.declarations)
@@ -412,7 +428,7 @@ export function applyDirectEdit(
   if (!inspection.finalizable) throw new Error(inspection.issues.join("；") || "页面结构不完整")
   indexEditableSource(candidate)
   const labels = command.operations.map((op) =>
-    op.type === "delete_node" ? "删除元素" : op.type === "set_text" ? "修改文字" : "修改样式"
+    op.type === "move_node" ? "调整区块顺序" : op.type === "delete_node" ? "删除元素" : op.type === "set_text" ? "修改文字" : "修改样式"
   )
   return {
     html: candidate,

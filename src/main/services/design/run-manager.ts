@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto"
+import type { DesignAnnotationHistoryEntry } from "../../../renderer/src/components/design/types"
 import {
   makeDesignAgentThreadId,
   DESIGN_UI_FIELDS,
@@ -52,6 +53,7 @@ interface ActiveRun {
   pending: DesignRunEvent[]
   timer?: ReturnType<typeof setTimeout>
   snapshot?: DesignSessionSnapshot
+  annotations?: DesignAnnotationHistoryEntry
 }
 
 export interface DesignRunDependencies {
@@ -193,7 +195,13 @@ export class DesignRunManager {
     this.editing.add(id)
     try {
       const candidate = applyDirectEdit(before.state.html, before.state.tweaks ?? null, command)
-      await this.deps.validateDirectEdit?.(candidate, before)
+      // Source/hash/CSS checks validate these gestures, including sibling-only
+      // moves of code-free nodes. Avoid loading a hidden page and its network
+      // resources for every drop; retain browser validation for other edits.
+      const placementOnly = candidate.mode === "live" && !candidate.touchedTweaks.length &&
+        command.operations.every((op) => op.type === "move_node" || (op.type === "set_style" &&
+          Object.keys(op.declarations).length === 1 && Object.hasOwn(op.declarations, "translate")))
+      if (!placementOnly) await this.deps.validateDirectEdit?.(candidate, before)
       const next = this.get(id)
       if (
         next.activeRunId ||
@@ -289,6 +297,7 @@ export class DesignRunManager {
     delete updates.liveOutput
     delete updates.lastCompletedRunId
     delete updates.singleVariant
+    delete updates.annotationHistory
     for (const key of [
       "artifactRevision",
       "appliedPatch",
@@ -453,6 +462,24 @@ export class DesignRunManager {
       normalize: createDesignProgressNormalizer(),
       output: new DesignLiveOutputTracker(),
       pending: []
+    }
+    if (request.kind !== "questions") {
+      // The renderer may already have cleared submitted pins. Its rollback contains
+      // the complete original annotation queue, including directly sent drafts.
+      const annotations = { ...next.state, ...request.rollback }
+      if (annotations.comments.length || annotations.drawStrokes.length || annotations.drawNotes.length) {
+        run.annotations = clone({
+          id: run.id,
+          createdAt: Date.now(),
+          revision: next.state.artifactRevision ?? 0,
+          variationId: next.state.activeVariationId,
+          instruction: request.cleanUserMsg ?? request.prompt,
+          comments: annotations.comments,
+          drawStrokes: annotations.drawStrokes,
+          drawElementHints: annotations.drawElementHints,
+          drawNotes: annotations.drawNotes
+        })
+      }
     }
     if (next.state.singleVariant && request.kind !== "questions" && !run.request.prompt.includes(SINGLE_DESIGN_VARIANT_PROMPT))
       run.request.prompt += `\n\n${SINGLE_DESIGN_VARIANT_PROMPT}`
@@ -782,6 +809,18 @@ export class DesignRunManager {
             )
               throw new Error("页面还有未完成区块，已保留草稿")
             state.html = event.html
+            if (run.annotations) {
+              state.annotationHistory = [...(state.annotationHistory ?? []), run.annotations]
+            }
+            // Invalidate overlays only after finalization succeeds. Failed or
+            // cancelled iterations retain their editable annotations for retry.
+            state.comments = []
+            state.draftComment = null
+            state.activeCommentId = null
+            state.drawStrokes = []
+            state.drawElementHints = []
+            state.drawNotes = []
+            state.draftDrawNote = null
             if (!run.request.isIteration) state.activeMode = "edit"
             state.artifactRevision = (state.artifactRevision ?? 0) + 1
             state.appliedPatch = event.patchResult?.patch ?? null

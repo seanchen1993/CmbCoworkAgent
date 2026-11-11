@@ -63,6 +63,43 @@ function harness(options: Partial<DesignRunDependencies> = {}) {
 }
 
 describe("background design conversations", () => {
+  it("archives annotations only after a successful update, clears overlays and persists history across reopen", async () => {
+    const h = harness()
+    h.create()
+    const annotations = {
+      comments: [{ id: "comment-a", pageX: 10, pageY: 20, text: "标题改蓝色", elementDesc: "h1", createdAt: 1 }],
+      drawStrokes: [{ id: "stroke-a", points: [{ x: 1, y: 2 }, { x: 3, y: 4 }], color: "#cc0000", width: 3, createdAt: 2 }],
+      drawElementHints: [{ strokeId: "stroke-a", elements: ["h1"] }],
+      drawNotes: [{ id: "note-a", pageX: 2, pageY: 3, text: "加大字号", elements: ["h1"], strokeId: "stroke-a", createdAt: 3 }]
+    }
+    h.manager.patch("ds_a", { html: html(), ...annotations })
+    // Reproduce the renderer clearing the submitted queue before starting a run.
+    h.manager.patch("ds_a", { comments: [], drawStrokes: [], drawNotes: [], drawElementHints: [] })
+    h.manager.start({ requestId: "annotation-fail", designSessionId: "ds_a", kind: "agent", prompt: "修改", isIteration: true, rollback: annotations })
+    await Promise.resolve()
+    h.emitters.get("annotation-fail")!({ type: "error", error: "模拟失败" })
+    expect(h.manager.get("ds_a").state.comments).toEqual(annotations.comments)
+    expect(h.manager.get("ds_a").state.annotationHistory).toEqual([])
+    h.finishes.get("annotation-fail")!()
+    await Promise.resolve()
+    h.manager.start({ requestId: "annotation-success", designSessionId: "ds_a", kind: "agent", prompt: "修改", cleanUserMsg: "应用注释", isIteration: true })
+    await Promise.resolve()
+    h.emitters.get("annotation-success")!({ type: "done", html: html() })
+    const state = h.manager.get("ds_a").state
+    expect(state.comments).toEqual([])
+    expect(state.drawStrokes).toEqual([])
+    expect(state.drawNotes).toEqual([])
+    expect(state.drawElementHints).toEqual([])
+    expect(state.draftComment).toBeNull()
+    expect(state.draftDrawNote).toBeNull()
+    expect(state.annotationHistory).toHaveLength(1)
+    expect(state.annotationHistory![0]).toMatchObject({ ...annotations, instruction: "应用注释" })
+    h.finishes.get("annotation-success")!()
+    const reopened = new DesignRunManager(h.store, h.deps)
+    expect(reopened.get("ds_a").state.annotationHistory).toEqual(state.annotationHistory)
+    expect(reopened.get("ds_a").state.comments).toEqual([])
+  })
+
   it("persists reasoning-only output across reopening, stop and a fresh retry without mixing it into the artifact", async () => {
     const h = harness()
     h.create()

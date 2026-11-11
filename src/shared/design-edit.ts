@@ -28,6 +28,14 @@ export type DesignEditOperation =
   | { type: "set_text"; nodeId: string; expectedHash: string; textSlotId: string; value: string }
   | { type: "delete_node"; nodeId: string; expectedHash: string }
   | {
+      type: "move_node"
+      nodeId: string
+      expectedHash: string
+      targetId: string
+      targetHash: string
+      placement: "before" | "after"
+    }
+  | {
       type: "set_style"
       nodeId: string
       expectedHash: string
@@ -94,6 +102,16 @@ export function parseDesignEditCommand(value: unknown): DesignEditCommand {
     )
       continue
     if (op.type === "delete_node") continue
+    if (
+      op.type === "move_node" &&
+      c.operations.length === 1 &&
+      typeof op.targetId === "string" &&
+      op.targetId.length <= 160 &&
+      typeof op.targetHash === "string" &&
+      op.targetHash.length <= 100 &&
+      (op.placement === "before" || op.placement === "after")
+    )
+      continue
     if (
       op.type === "set_style" &&
       op.declarations &&
