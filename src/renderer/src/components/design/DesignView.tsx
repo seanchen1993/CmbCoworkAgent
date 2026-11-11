@@ -10,7 +10,7 @@ import {
 import { isSingleDesignVariant } from "../../../../shared/design-variation-policy"
 import React, { useState, useRef, useCallback, useEffect } from "react"
 import { v4 as uuid } from "uuid"
-import { ChevronDown, LayoutTemplate, Redo2, Undo2, X } from "lucide-react"
+import { ChevronDown, LayoutTemplate, Move, Redo2, Undo2, X } from "lucide-react"
 import { buildDesignHtmlPreviewDocument } from "@/lib/design-html-srcdoc"
 import { DESIGN_PREVIEW_NAVIGATION_SCRIPT } from "@/lib/design-preview-navigation"
 import { buildDesignVariationDocument } from "@/lib/design-variation-document"
@@ -1589,7 +1589,7 @@ export function DesignView({
     updateTs(activeTabId, (prev) => ({
       tweaksOn: typeof val === "function" ? val(prev.tweaksOn) : val
     }))
-  const setActiveMode = (val: "comment" | "edit" | "draw" | null) => {
+  const setActiveMode = (val: TabState["activeMode"]) => {
     void directEditor.flush().then(() => updateTs(activeTabId, (prev) => ({
       activeMode: visibleDraft || prev.generationState === "generating" ? null : val,
       draftDrawNote: val === "draw" ? prev.draftDrawNote : null
@@ -1636,7 +1636,8 @@ export function DesignView({
 
   const directEditor = useDesignDirectEdit({
     id: currentSessionId,
-    active: activeMode === "edit" && !sessionOpening,
+    active: (activeMode === "edit" || activeMode === "move") && !sessionOpening,
+    mode: activeMode === "move" ? "move" : "edit",
     html: ts.html,
     revision: ts.artifactRevision ?? 0,
     tweakRevision: ts.tweaks?.revision,
@@ -2661,6 +2662,9 @@ export function DesignView({
     } else if (activeMode === "edit") {
       injectIntoIframe(iframeRef.current, COMMENT_CLEANUP)
       if (!window.api.design.sessions.inspectEditable) injectIntoIframe(iframeRef.current, EDIT_SELECT_INJECT)
+    } else if (activeMode === "move") {
+      injectIntoIframe(iframeRef.current, COMMENT_CLEANUP)
+      injectIntoIframe(iframeRef.current, EDIT_SELECT_CLEANUP)
     } else if (activeMode === "draw") {
       injectIntoIframe(iframeRef.current, COMMENT_CLEANUP)
       injectIntoIframe(iframeRef.current, EDIT_SELECT_CLEANUP)
@@ -5230,8 +5234,10 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
                 />
                 {!visibleDraft && !isGenerating && <TweaksBtn label="编辑" icon={<EditIcon active={activeMode === "edit"} />}
                   active={activeMode === "edit"} onClick={() => setActiveMode(activeMode === "edit" ? null : "edit")} />}
-                {activeMode === "edit" && <span style={{ fontSize: 11, color: "#64748b", whiteSpace: "nowrap" }}>
-                  {directEditor.status || "拖到区块之间排序 · 双击改文字 · Delete 删除"}
+                {!visibleDraft && !isGenerating && window.api.design.sessions.inspectEditable && <TweaksBtn label="移动" icon={<Move size={13} />}
+                  active={activeMode === "move"} onClick={() => setActiveMode(activeMode === "move" ? null : "move")} />}
+                {(activeMode === "edit" || activeMode === "move") && <span style={{ fontSize: 11, color: "#64748b", whiteSpace: "nowrap" }}>
+                  {directEditor.status || (activeMode === "move" ? "拖到区块之间排序 · Esc 取消" : "单击选中 · 双击改文字 · Delete 删除")}
                 </span>}
                 <div style={S.tweaksDivider} />
                 {/* Tweaks toggle */}
@@ -5558,7 +5564,8 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
                                   pointerEvents:
                                     activeMode === null ||
                                     activeMode === "comment" ||
-                                    activeMode === "edit"
+                                    activeMode === "edit" ||
+                                    activeMode === "move"
                                       ? "auto"
                                       : "none"
                                 }}
@@ -5798,7 +5805,7 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
                           )}
                         </div>
 
-                        {tweaksOn && tweakEditor.state && activeMode !== "edit" && (
+                        {tweaksOn && tweakEditor.state && activeMode !== "edit" && activeMode !== "move" && (
                           <TweaksParameterPanel state={tweakEditor.state}
                             disabled={visibleDraft?.phase === "validating" || ts.patchStatus?.phase === "validating" || (isGenerating && !visibleDraft && !ts.patchStatus)}
                             availableKeys={visibleDraft ? readyTweakKeys(visibleDraft.html, tweakEditor.state.declaration) : undefined}

@@ -365,7 +365,7 @@ export interface TabState {
   activeVariationId: string | null
   selectedModelId: string | null
   tweaksOn: boolean
-  activeMode: "comment" | "edit" | "draw" | null
+  activeMode: "comment" | "edit" | "move" | "draw" | null
   zoom: number
   inputValue: string
   comments: CommentItem[]

@@ -1362,6 +1362,33 @@ try {
   assert.match(manager.get("ds_useredit").state.html, /提交申请/)
   // Flow blocks insert between siblings and displace the following content.
   const dragCard = directFrame.locator("#keep-card")
+  const switchEditorMode = async (mode: "编辑" | "移动") => {
+    await page.getByRole("button", { name: mode, exact: true }).click()
+    await directFrame.locator(`[data-design-editor-mode="${mode === "编辑" ? "edit" : "move"}"]`).waitFor()
+  }
+  // Editing gestures must never move a block, and move gestures must never edit it.
+  await dragCard.click()
+  assert.equal(await directFrame.getByRole("button", { name: "拖动", exact: true }).count(), 0)
+  const editOnlySource = manager.get("ds_useredit").state.html
+  const editStart = (await dragCard.boundingBox())!
+  const editDestination = (await directFrame.locator("#remove-card").boundingBox())!
+  await page.mouse.move(editStart.x + 15, editStart.y + 15)
+  await page.mouse.down()
+  await page.mouse.move(editDestination.x + 20, editDestination.y + 2, { steps: 8 })
+  await page.mouse.up()
+  assert.equal(manager.get("ds_useredit").state.html, editOnlySource)
+  await directFrame.locator("h1").dblclick()
+  await directFrame.getByRole("textbox", { name: "编辑文字" }).fill("切换模式前保存")
+  await switchEditorMode("移动")
+  await directFrame.locator("h1").filter({ hasText: "切换模式前保存" }).waitFor()
+  await dragCard.dblclick()
+  assert.equal(await directFrame.getByRole("textbox", { name: "编辑文字" }).count(), 0)
+  assert.equal(await directFrame.getByRole("button", { name: "删除", exact: true }).count(), 0)
+  await page.keyboard.press("Delete")
+  assert.equal(await dragCard.count(), 1)
+  await switchEditorMode("编辑")
+  await editText("h1", "中文直接编辑")
+  await switchEditorMode("移动")
   const reorder = async (cancel = false) => {
     const from = (await dragCard.boundingBox())!
     const to = (await directFrame.locator("#remove-card").boundingBox())!
@@ -1401,6 +1428,7 @@ try {
   await directFrame.getByRole("status").filter({ hasText: "顺序已保存" }).waitFor()
   await page.waitForFunction(() => document.querySelector("iframe")!.contentDocument!.querySelector("#remove-card")!.nextElementSibling?.id === "keep-card")
   await page.getByRole("button", { name: "−", exact: true }).click()
+  await switchEditorMode("编辑")
   await directFrame.locator("#remove-card span").click()
   await directFrame.getByRole("button", { name: "article", exact: true }).click()
   await directFrame.getByRole("button", { name: "删除", exact: true }).click()

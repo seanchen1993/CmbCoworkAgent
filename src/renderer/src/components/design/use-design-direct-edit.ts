@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type RefObject } from "react"
 import {
   designDirectEditRuntime,
+  type DesignEditorMode,
   type DesignEditorController
 } from "@/lib/design-direct-edit-runtime"
 import type {
@@ -14,6 +15,7 @@ import { getDesignSessionClient } from "./session-client"
 interface Options {
   id: string | null
   active: boolean
+  mode: DesignEditorMode
   html: string
   revision: number
   tweakRevision?: number
@@ -38,7 +40,7 @@ export function useDesignDirectEdit(options: Options) {
   const [load, setLoad] = useState(0)
   const onLoad = useCallback(() => setLoad((n) => n + 1), [])
   const install = useCallback((config: DesignEditableDocument) => {
-    const { iframe, active } = latest.current
+    const { iframe, active, mode } = latest.current
     const w = iframe.current?.contentWindow as EditorWindow | undefined
     if (
       !w ||
@@ -50,7 +52,7 @@ export function useDesignDirectEdit(options: Options) {
       return false
     const script = w.document.createElement("script")
     script.setAttribute("data-design-host-runtime", "editor-installer")
-    script.textContent = `(${designDirectEditRuntime.toString()})(${JSON.stringify(config).replace(/</g, "\\u003c")})`
+    script.textContent = `(${designDirectEditRuntime.toString()})(${JSON.stringify(config).replace(/</g, "\\u003c")},${JSON.stringify(mode)})`
     w.document.documentElement.appendChild(script)
     script.remove()
     controller.current = w.__designEditor ?? null
@@ -84,6 +86,7 @@ export function useDesignDirectEdit(options: Options) {
   }, [
     options.id,
     options.active,
+    options.mode,
     options.html,
     options.revision,
     options.tweakRevision,

@@ -5,8 +5,10 @@ import type {
   DesignEditCommand
 } from "../../../shared/design-edit"
 
+export type DesignEditorMode = "edit" | "move"
+
 export interface DesignEditorController {
-  update: (document: DesignEditableDocument) => void
+  update: (document: DesignEditableDocument, mode?: DesignEditorMode) => void
   cleanup: () => void
   flush: () => Promise<void>
   editSelected: () => void
@@ -15,14 +17,18 @@ export interface DesignEditorController {
 }
 
 /** Stringified into the iframe. All editor DOM lives in a host-owned shadow root. */
-export function designDirectEditRuntime(initial: DesignEditableDocument): void {
+export function designDirectEditRuntime(
+  initial: DesignEditableDocument,
+  initialMode: DesignEditorMode = "edit"
+): void {
   if (!document.body) return
   const w = window as unknown as { __designEditor?: DesignEditorController }
   if (w.__designEditor) {
-    w.__designEditor.update(initial)
+    w.__designEditor.update(initial, initialMode)
     return
   }
   let config = initial
+  let mode = initialMode
   let selected: Element | null = null
   let fallbackSelection: Element | null = null
   let hovered: Element | null = null
@@ -76,6 +82,7 @@ export function designDirectEditRuntime(initial: DesignEditableDocument): void {
   const instance = document.documentElement.dataset.designPreviewInstance
   const root = document.createElement("div")
   root.setAttribute("data-design-host-runtime", "editor")
+  root.dataset.designEditorMode = mode
   root.tabIndex = -1
   root.style.cssText = "position:fixed;inset:0;pointer-events:none;z-index:2147483646"
   const shadow = root.attachShadow({ mode: "open" })
@@ -166,7 +173,9 @@ export function designDirectEditRuntime(initial: DesignEditableDocument): void {
     position(hovered, hoverBox)
     if (selected?.isConnected && !tools.hidden) {
       const r = selected.getBoundingClientRect()
-      tools.style.left = Math.max(8, Math.min(r.right - tools.offsetWidth, innerWidth - tools.offsetWidth - 8)) + "px"
+      tools.style.left =
+        Math.max(8, Math.min(r.right - tools.offsetWidth, innerWidth - tools.offsetWidth - 8)) +
+        "px"
       tools.style.top =
         Math.max(
           4,
@@ -231,14 +240,17 @@ export function designDirectEditRuntime(initial: DesignEditableDocument): void {
       label.className = "label"
       label.textContent = info.label
       tools.appendChild(label)
-      const move = addButton("拖动", () => undefined, !info.canStyle)
-      move.className = "move"
-      move.title = info.canStyle
-        ? "按住拖动调整位置，Esc 取消"
-        : info.reason || "此动态节点暂不支持拖动"
-      move.addEventListener("pointerdown", (event) => startDrag(event, el))
-      addButton("改文字", () => beginText(), !info.text.length)
-      addButton("删除", () => removeSelected(), !info.canDelete)
+      if (mode === "move") {
+        const move = addButton("拖动", () => undefined, !info.canStyle)
+        move.className = "move"
+        move.title = info.canStyle
+          ? "按住拖动调整位置，Esc 取消"
+          : info.reason || "此动态节点暂不支持拖动"
+        move.addEventListener("pointerdown", (event) => startDrag(event, el))
+      } else {
+        addButton("改文字", () => beginText(), !info.text.length)
+        addButton("删除", () => removeSelected(), !info.canDelete)
+      }
       if (info.reason) tools.title = info.reason
       post("__design_editor_select", {
         nodeId: info.id,
@@ -310,7 +322,7 @@ export function designDirectEditRuntime(initial: DesignEditableDocument): void {
     )
   }
   function beginText(event?: MouseEvent) {
-    if (editing || pending || !selected) return
+    if (mode !== "edit" || editing || pending || !selected) return
     const info = describe(selected)
     if (!info?.text.length) return
     let slot = info.text[0]
@@ -379,14 +391,15 @@ export function designDirectEditRuntime(initial: DesignEditableDocument): void {
   }
   function removeSelected() {
     const info = describe(selected)
-    if (!info?.canDelete || editing || pending) return
+    if (mode !== "edit" || !info?.canDelete || editing || pending) return
     fallbackSelection = target(selected?.parentElement ?? null)
     void issue({ type: "delete_node", nodeId: info.id, expectedHash: info.hash }).catch(
       () => undefined
     )
   }
   function startDrag(event: PointerEvent, el: Element | null) {
-    if (event.button !== 0 || !event.isPrimary || editing || pending || drag) return
+    if (mode !== "move" || event.button !== 0 || !event.isPrimary || editing || pending || drag)
+      return
     const node = describe(el)
     if (!node?.canStyle || !(el instanceof HTMLElement || el instanceof SVGElement)) return
     event.preventDefault()
@@ -739,8 +752,16 @@ export function designDirectEditRuntime(initial: DesignEditableDocument): void {
   })
   observer.observe(document.documentElement, { childList: true, subtree: true })
   w.__designEditor = {
-    update(value) {
+    update(value, nextMode = mode) {
       if (value.revision < config.revision) return
+      if (nextMode !== mode) {
+        finishDrag(true)
+        closeText()
+        clearTimeout(feedbackTimer)
+        feedback.hidden = true
+        mode = nextMode
+        root.dataset.designEditorMode = mode
+      }
       if (
         (value.revision !== config.revision || value.tweakRevision !== config.tweakRevision) &&
         editing &&
