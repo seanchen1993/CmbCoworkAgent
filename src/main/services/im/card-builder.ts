@@ -124,6 +124,7 @@ function textModeHintComponent(group = false): CardComponent {
 }
 
 export interface ApprovalCardInput {
+  group?: boolean
   /** Where this gate came from — the reader must never have to guess. */
   targetLabel: string
   operation: string
@@ -168,7 +169,8 @@ export function buildApprovalCard(input: ApprovalCardInput): CardComponent[] {
       { title: KV_SOURCE_TITLE, value: input.targetLabel },
       { title: "操作", value: input.operation }
     ]),
-    textModeHintComponent(),
+    textModeHintComponent(input.group),
+    ...(input.group ? [contentComponent(["仅绑定 Bot 的本人可批准或拒绝本次操作。"], 1)] : []),
     contentComponent(input.detail.split("\n").filter((line) => line.length > 0))
   ]
   if (buttons.length > 0) {
@@ -476,6 +478,7 @@ export const BIZ_RETRY_CHOICE_KEY = "choice"
 export const BIZ_RETRY_MESSAGE_KEY = "message"
 
 export interface BizRetryCardInput extends HarnessDecisionCardContext {
+  group?: boolean
   reason: string
   stageName: string
   stageStatus: string
@@ -490,7 +493,7 @@ export function buildBizRetryCard(input: BizRetryCardInput): CardComponent[] {
     titleComponent("托管运行需要介入"),
     statusComponent("待选择", STATUS_STYLE.orange),
     harnessDecisionContext(input),
-    textModeHintComponent(),
+    textModeHintComponent(input.group),
     kvComponent([
       { title: "当前阶段", value: input.stageName },
       { title: "阶段状态", value: input.stageStatus },

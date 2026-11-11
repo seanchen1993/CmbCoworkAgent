@@ -40,6 +40,10 @@ const io = vi.hoisted(() => ({
   pending: vi.fn(),
   active: vi.fn(),
   workflowBusy: vi.fn(),
+  workflowActive: vi.fn(),
+  workersRunning: vi.fn(),
+  workerResultPending: vi.fn(),
+  teamNotifications: vi.fn(),
   approval: vi.fn(),
   snapshot: vi.fn(),
   access: vi.fn(),
@@ -103,7 +107,14 @@ vi.mock("../agent/agent-run-service", () => ({
   hasActiveTopLevelAgentRun: io.active
 }))
 vi.mock("../agent/workflow/run-manager", () => ({
-  workflowRunManager: { isBusyForThreadAsync: io.workflowBusy }
+  workflowRunManager: { isBusyForThreadAsync: io.workflowBusy, isActive: io.workflowActive }
+}))
+vi.mock("../agent/coordinator-worker-manager", () => ({
+  coordinatorWorkerManager: {
+    hasRunningWorkersForThread: io.workersRunning,
+    hasTerminalWorkerAwaitingNotificationForThread: io.workerResultPending,
+    hasAutoRunnableNotifications: io.teamNotifications
+  }
 }))
 vi.mock("../services/im/remote-access-service", () => ({
   imRemoteAccessService: { getThreadGrant: io.grant }
@@ -227,6 +238,7 @@ beforeEach(() => {
   })
   io.active.mockImplementation((id) => !!host.featureTurns.operation(id))
   io.pending.mockReturnValue({ count: 0, questions: [] })
+  io.workflowBusy.mockResolvedValue(false)
   io.start.mockImplementation(async (request, _delivery, ctx) => {
     context = ctx
     return {
@@ -341,13 +353,13 @@ it("creates one native project thread per instruction, sends its questions and a
   ).rejects.toThrow("请求标识")
   const owner = host.featureStore.follow(groupScope, feature)
   io.pending.mockReturnValue({ count: 1, questions: ["请选择字段"] })
-  expect(featureDetail(host, owner).sessions[0]).toMatchObject({
+  expect((await featureDetail(host, owner)).sessions[0]).toMatchObject({
     phase: "question",
     questions: ["请选择字段"]
   })
   io.pending.mockReturnValue({ count: 0 })
   io.approval.mockReturnValue(true)
-  expect(featureDetail(host, owner).sessions[0].phase).toBe("approval")
+  expect((await featureDetail(host, owner)).sessions[0].phase).toBe("approval")
   io.approval.mockReturnValue(false)
   expect(botInteractionRoutes.get("child-1")).toMatchObject({
     realm: "test",
@@ -373,7 +385,7 @@ it("creates one native project thread per instruction, sends its questions and a
   expect(notice.mock.calls[0][0]).toBe(incoming)
   expect(notice.mock.calls[0][2]).toContain("字段已核对")
   expect(botInteractionRoutes.get("child-1")).toBeNull()
-  expect(featureDetail(host, owner).sessions[0].phase).toBe("idle")
+  expect((await featureDetail(host, owner)).sessions[0].phase).toBe("idle")
   await runBotFeatureCommand(host, "job", {
     action: "continue",
     ...feature,
@@ -455,7 +467,11 @@ it("projects persisted Feature links to the exact private and group conversation
   expect(store.features.follow(newScope, feature).id).toBe(first.id)
   const otherGroup = { ...group, id: "different-room", conversationKey: "room-3" }
   const otherRoute = store.imGateway.register("realm", "owner", otherGroup)
-  store.im.importImBinding({ ...otherGroup, id: otherRoute.id, channelKey: otherGroup.conversationKey })
+  store.im.importImBinding({
+    ...otherGroup,
+    id: otherRoute.id,
+    channelKey: otherGroup.conversationKey
+  })
   expect(store.features.targets(feature).filter((t) => t.groupId)).toMatchObject([
     { groupId: newRoute.id, label: "项目群", linked: true },
     { groupId: otherRoute.id, label: "项目群", linked: false }
@@ -464,7 +480,10 @@ it("projects persisted Feature links to the exact private and group conversation
   expect(store.features.list(newScope)).toHaveLength(1)
   store.update({ ...bot, expectedVersion: bot.version, archived: true })
   expect(store.features.targets()).toEqual([])
-  expect(store.features.targets(feature).map((t) => t.unavailable)).toEqual(["archived", "archived"])
+  expect(store.features.targets(feature).map((t) => t.unavailable)).toEqual([
+    "archived",
+    "archived"
+  ])
 })
 
 it("reuses the same group task for concurrent Bot follow requests and desktop retries", async () => {
@@ -490,7 +509,7 @@ it("keeps two groups and private follows separate even when they follow the same
   await expect(
     runBotFeatureCommand(host, "job", { action: "read", followId: other.id, threadId: "shared" })
   ).rejects.toThrow("当前对话")
-  expect(featureDetail(host, other).sessions).toEqual([])
+  expect((await featureDetail(host, other)).sessions).toEqual([])
   io.page.mockReturnValue({
     messages: [
       { role: "assistant", content: "<think>private</think>approved" },
@@ -505,14 +524,14 @@ it("keeps two groups and private follows separate even when they follow the same
     })
   ).toMatchObject({ history: [{ role: "assistant", text: "approved" }] })
   rows.get("shared")!.status = "error"
-  expect(featureDetail(host, own).sessions[0].phase).toBe("failed")
+  expect((await featureDetail(host, own)).sessions[0].phase).toBe("failed")
   rows.get("shared")!.status = "interrupted"
-  expect(featureDetail(host, own).sessions[0].phase).toBe("interrupted")
+  expect((await featureDetail(host, own)).sessions[0].phase).toBe("interrupted")
   io.grant.mockReturnValue({ state: "active" })
-  expect(featureDetail(host, own).sessions[0].phase).toBe("unavailable")
+  expect((await featureDetail(host, own)).sessions[0].phase).toBe("unavailable")
   io.grant.mockReturnValue(null)
   rows.get("shared")!.created_at++
-  expect(featureDetail(host, own).sessions[0].phase).toBe("unavailable")
+  expect((await featureDetail(host, own)).sessions[0].phase).toBe("unavailable")
 })
 
 it("discovers native sessions before and after following, and reserves a session only when a Bot continues it", async () => {
@@ -538,7 +557,9 @@ it("discovers native sessions before and after following, and reserves a session
     runBotFeatureCommand(host, "job", { action: "read", followId: owner.id, threadId })
   for (const threadId of ["prior-review", "new-review"]) {
     expect(await read(threadId)).toMatchObject({ history: [{ text: "验收范围" }] })
-    expect(featureDetail(host, personal).sessions.map((s) => s.threadId)).toContain(threadId)
+    expect((await featureDetail(host, personal)).sessions.map((s) => s.threadId)).toContain(
+      threadId
+    )
   }
   for (const threadId of [
     "another-feature",
@@ -573,13 +594,160 @@ it("discovers native sessions before and after following, and reserves a session
   expect(host.featureStore.sessions(owner.id)).toEqual([])
   await runBotFeatureCommand(host, "job", { ...resume, requestKey: "continue" })
   expect(io.start.mock.calls[0][0].threadId).toBe("prior-review")
-  expect(featureDetail(host, personal).sessions.map((s) => s.threadId)).toEqual(["new-review"])
+  expect((await featureDetail(host, personal)).sessions.map((s) => s.threadId)).toEqual([
+    "new-review"
+  ])
   context.onRunTerminated?.({ outcome: "success", code: "normal" })
   resolveTurn()
   await vi.waitFor(() => expect(host.featureTurns.activity(owner.id)).toBeUndefined())
   host.featureStore.deleteScope(owner.botId, owner.audience)
-  expect(featureDetail(host, personal).sessions.map((s) => s.threadId)).toEqual(["new-review"])
+  expect((await featureDetail(host, personal)).sessions.map((s) => s.threadId)).toEqual([
+    "new-review"
+  ])
 })
+
+it.each([
+  ["workersRunning", "Team 子代理执行中"],
+  ["workflowActive", "Workflow 子任务执行中"],
+  ["workerResultPending", "Team 子任务结果待汇总"],
+  ["teamNotifications", "Team 子任务结果待汇总"],
+  ["workflowBusy", "Workflow 结果待汇总"]
+] as const)("reads detached %s activity through the Bot Feature tool", async (source, activity) => {
+  const owner = host.featureStore.follow(groupScope, feature)
+  child("background")
+  rows.get("background")!.status = "interrupted"
+  // The parent turn and its lease have ended. Execution and result delivery still belong to it.
+  io[source].mockReturnValue(true)
+  const read = () => runBotFeatureCommand(host, "job", { action: "read", followId: owner.id })
+  expect(await read()).toMatchObject({
+    phase: "running",
+    sessions: [{ threadId: "background", phase: "running", activity }]
+  })
+  expect(io[source]).toHaveBeenCalledWith(
+    "background",
+    ...(source === "workflowBusy" ? [root] : [])
+  )
+  // Delivered results and historical runs must not keep the session busy forever.
+  io[source].mockReturnValue(false)
+  rows.get("background")!.status = "idle"
+  expect(await read()).toMatchObject({ sessions: [{ phase: "idle" }] })
+  expect(io.page).not.toHaveBeenCalled()
+})
+
+it("keeps pending answers and approvals ahead of detached execution", async () => {
+  const owner = host.featureStore.follow(groupScope, feature)
+  child("background")
+  io.workersRunning.mockReturnValue(true)
+  io.pending.mockReturnValue({ count: 1, questions: ["请选择方案"] })
+  expect(await featureDetail(host, owner)).toMatchObject({
+    phase: "question",
+    attentionThreadId: "background",
+    sessions: [{ phase: "question", questions: ["请选择方案"] }]
+  })
+  io.pending.mockReturnValue({ count: 0 })
+  io.approval.mockReturnValue(true)
+  expect(await featureDetail(host, owner)).toMatchObject({
+    phase: "approval",
+    attentionThreadId: "background",
+    sessions: [{ phase: "approval" }]
+  })
+})
+
+it("rechecks live waits and ownership after asynchronous Workflow inspection", async () => {
+  const owner = host.featureStore.follow(groupScope, feature)
+  child("background")
+  addFeatureSession(host, owner, "background")
+  io.workflowBusy.mockImplementationOnce(async () => {
+    io.pending.mockReturnValue({ count: 1, questions: ["确认结果？"] })
+    return false
+  })
+  expect(await featureDetail(host, owner)).toMatchObject({ sessions: [{ phase: "question" }] })
+  io.workflowBusy.mockImplementationOnce(async () => {
+    io.grant.mockReturnValue({ state: "active" })
+    return true
+  })
+  expect(await featureDetail(host, owner)).toMatchObject({
+    sessions: [{ title: "会话不可用", phase: "unavailable" }]
+  })
+})
+
+it("does not report an unreadable Workflow status as idle or stopped", async () => {
+  const owner = host.featureStore.follow(groupScope, feature)
+  child("background")
+  rows.get("background")!.status = "interrupted"
+  io.workflowBusy.mockRejectedValue(new Error("unreadable run index"))
+  expect(await featureDetail(host, owner)).toMatchObject({
+    phase: "unknown",
+    sessions: [{ phase: "unknown" }]
+  })
+})
+
+it("bounds status discovery, omits other owners, and never loads transcripts", async () => {
+  const owner = host.featureStore.follow(groupScope, feature)
+  for (let i = 0; i < 13; i++) child(`history-${i}`)
+  child("another-group")
+  const other = host.featureStore.follow({ ...groupScope, audience: "im:group-b" }, feature)
+  addFeatureSession(host, other, "another-group")
+  let inFlight = 0,
+    peak = 0
+  io.workflowBusy.mockImplementation(async () => {
+    peak = Math.max(peak, ++inFlight)
+    await new Promise<void>((done) => setImmediate(done))
+    inFlight--
+    return false
+  })
+  const detail = await featureDetail(host, owner)
+  expect(detail.sessions).toHaveLength(13)
+  expect(detail.sessions.every((s) => s.phase === "idle")).toBe(true)
+  expect(io.workflowBusy).toHaveBeenCalledTimes(13)
+  expect(io.workflowBusy.mock.calls.every(([id]) => id.startsWith("history-"))).toBe(true)
+  expect(peak).toBe(4)
+  expect(io.featureThreads).toHaveBeenCalledTimes(2)
+  expect(io.page).not.toHaveBeenCalled()
+})
+
+it("revalidates the originating group after asynchronous status reads", async () => {
+  const owner = host.featureStore.follow(groupScope, feature)
+  child("background")
+  io.workflowBusy.mockImplementationOnce(async () => {
+    host.featureToolTask = () => {
+      throw new Error("群绑定已撤销")
+    }
+    return true
+  })
+  await expect(
+    runBotFeatureCommand(host, "job", { action: "read", followId: owner.id })
+  ).rejects.toThrow("群绑定已撤销")
+})
+
+it.each(["background__worker__1", "background__wf_run_a0"])(
+  "recognizes a real %s question after the parent turn has ended",
+  async (runtimeId) => {
+    const owner = host.featureStore.follow(groupScope, feature)
+    child("background")
+    rows.get("background")!.status = "interrupted"
+    const service =
+      await vi.importActual<typeof import("../services/user-input")>("../services/user-input")
+    io.pending.mockImplementation(service.summarizePendingUserInputForRuntimeThread)
+    const controller = new AbortController()
+    const answer = requestUserInput({
+      threadId: runtimeId,
+      allowDeferredRenderer: true,
+      abortSignal: controller.signal,
+      questions: [{ id: "scope", header: "范围", question: "要包含哪些数据？", options: [] }]
+    })
+    try {
+      expect(await featureDetail(host, owner)).toMatchObject({
+        phase: "question",
+        sessions: [{ phase: "question", questions: ["要包含哪些数据？"] }]
+      })
+    } finally {
+      controller.abort()
+      await expect(answer).rejects.toThrow("cancelled")
+    }
+    expect((await featureDetail(host, owner)).sessions[0].phase).toBe("interrupted")
+  }
+)
 
 it("tracks new stage sessions under one owned managed run, distinguishes stopping progression from interrupting an owned turn", async () => {
   const owner = host.featureStore.follow(groupScope, feature)
@@ -599,11 +767,11 @@ it("tracks new stage sessions under one owned managed run, distinguishes stoppin
     currentSession: { threadId: "build" }
   }
   io.snapshot.mockImplementation(() => ({ snapshot: run }))
-  expect(featureDetail(host, owner)).toMatchObject({
+  expect(await featureDetail(host, owner)).toMatchObject({
     run: { nodeId: "build", currentThreadId: "build" },
     sessions: [{ threadId: "build" }, { threadId: "design" }]
   })
-  expect(featureDetail(host, other).run).toBeUndefined()
+  expect((await featureDetail(host, other)).run).toBeUndefined()
   await startFeatureTurn(
     op.id,
     { threadId: "build", message: "推进", userMessageId: "stage-two" },
@@ -728,7 +896,7 @@ it.each([true, false])(
         phase: "question",
         threadId: "child-1"
       })
-      expect(featureDetail(host, owner)).toMatchObject({
+      expect(await featureDetail(host, owner)).toMatchObject({
         phase: "question",
         sessions: [{ phase: "question" }]
       })
@@ -885,7 +1053,7 @@ it("notifies only the requesting group of local approval and tracks native manag
     expect(notice).not.toHaveBeenCalled()
     approve("owned", "stage__executor")
     expect(notice).toHaveBeenCalledTimes(1)
-    expect(featureDetail(host, owner)).toMatchObject({
+    expect(await featureDetail(host, owner)).toMatchObject({
       phase: "approval",
       sessions: [{ phase: "approval" }]
     })
@@ -904,6 +1072,7 @@ it("notifies only the requesting group of local approval and tracks native manag
     expect(resolve).toHaveBeenCalledTimes(1)
     expect(host.featureTurns.activity(owner.id)?.phase).toBe("running")
     for (const type of ["human_gate", "biz_retry"]) {
+      const previousNotices = notice.mock.calls.length
       const value = notificationService.create({
         kind: "decision",
         type,
@@ -918,8 +1087,12 @@ it("notifies only the requesting group of local approval and tracks native manag
         }
       })
       if (type === "biz_retry") {
-        expect(notice.mock.calls.at(-1)?.[0]).toBe(incoming)
-        expect(notice.mock.calls.at(-1)?.[2]).toContain("请在 App 的项目模式中处理")
+        const { botFeatureDecisionRoutes } = await import("../services/im/bot-interaction-route")
+        expect(botInteractionRoutes.get("stage")).toBeNull()
+        expect(botFeatureDecisionRoutes.get(value.notificationId)?.featureGate?.slug).toBe(
+          feature.slug
+        )
+        expect(notice).toHaveBeenCalledTimes(previousNotices)
       } else {
         expect(botInteractionRoutes.get("stage")?.featureGate?.slug).toBe(feature.slug)
         expect(notice).toHaveBeenCalledTimes(1)

@@ -24,7 +24,7 @@ const client={works:{create:async input=>{window.created.push(input);return {wor
   catalog:async()=>[item],
   follow:async(bot,p,slug,group)=>{scopes.set(group,[item]);return item;},
   list:async(bot,group)=>scopes.get(group)||[],
-  detail:async()=>({...item,sessions:[{threadId:"draft",title:"讨论导出范围",phase:"question"},{threadId:"review",title:"历史评审",phase:"idle"}]})
+  detail:async()=>({...item,sessions:[{threadId:"draft",title:"讨论导出范围",phase:"question"},{threadId:"review",title:"历史评审",phase:"idle"},{threadId:"team",title:"并行开发",phase:"running",activity:"Team 子代理执行中"},{threadId:"workflow",title:"生成报表",phase:"running",activity:"Workflow 结果待汇总"},{threadId:"unreadable",title:"待检查",phase:"unknown"}]})
 }};
 function Panel({group,revoked}) {
   const [query,setQuery]=useState("");
@@ -104,6 +104,10 @@ window.scope("group-a");`
     await page.getByRole("button", { name: /周会通知/ }).waitFor({ state: "detached" })
     await follow.click()
     assert.equal(await follow.getAttribute("aria-expanded"), "true")
+    await page.getByRole("button", { name: /并行开发.*Team 子代理执行中/ }).waitFor()
+    await page.getByRole("button", { name: /生成报表.*Workflow 结果待汇总/ }).waitFor()
+    await page.getByRole("button", { name: /待检查.*状态暂不可用/ }).waitFor()
+    assert.equal(await page.getByRole("button", { name: "完成任务", exact: true }).isDisabled(), true)
     await page.getByRole("button", { name: /讨论导出范围.*等待回答/ }).click()
     assert.equal(await page.evaluate(() => (window as any).destination.threadId), "draft")
     assert.equal(await page.getByRole("button", { name: "关联已有会话" }).count(), 0)

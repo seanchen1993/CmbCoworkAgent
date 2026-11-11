@@ -50,6 +50,7 @@ interface RemoteApprovalRoute {
   workspacePath: string
   prefix: string
   botEventId?: string
+  kind?: "dm" | "group"
   isCurrent?: () => boolean
 }
 
@@ -405,6 +406,18 @@ export class ImRemoteApprovalService {
     principalId: string
     conversationKey: string
   }): Promise<string> {
+    return this.resolveApproval(input, false)
+  }
+
+  private async resolveApproval(
+    input: {
+      code: string
+      decision: "approve" | "reject"
+      principalId: string
+      conversationKey: string
+    },
+    ownerVerifiedCard: boolean
+  ): Promise<string> {
     const settings = this.dependencies.getSettings()
     if (!settings.enabled || !settings.remoteApprovalEnabled) {
       return "招乎远程审批未开启，请回到桌面确认。"
@@ -422,6 +435,10 @@ export class ImRemoteApprovalService {
     }
     if (pendingCode.route.isCurrent && !pendingCode.route.isCurrent())
       return "此 Bot 连接已变化，请回到桌面确认。"
+    // Group text events identify the binding owner, not the human sender. Only
+    // the gateway's owner-checked card callback can authorize a local operation.
+    if (pendingCode.route.kind === "group" && !ownerVerifiedCard)
+      return "请由绑定 Bot 的本人点击审批卡片；卡片不可用时，请在 App 确认。"
     if (!pendingCode.allowedDecisions.includes(input.decision)) {
       return "该请求不接受这个审批决定，请使用提示中的可用指令或回到桌面确认。"
     }
@@ -520,12 +537,13 @@ export class ImRemoteApprovalService {
       // Cleared before the first await, so nothing that runs meanwhile can
       // send the same notice a second time.
       code.withheldNotice = undefined
-      if (!this.dependencies.broker.get(code.requestId)) continue
+      if (!this.dependencies.broker.get(code.requestId) || code.route.isCurrent?.() === false)
+        continue
       try {
         const outbox = await this.dependencies.events.enqueueProactiveReplies(notice)
         // The check the original text path makes: a gate decided while this
         // was being queued must not arrive afterwards looking open.
-        if (!this.dependencies.broker.get(code.requestId)) {
+        if (!this.dependencies.broker.get(code.requestId) || code.route.isCurrent?.() === false) {
           await Promise.all(
             outbox.map((record) =>
               this.dependencies.events.markOutboxFailed(
@@ -558,6 +576,11 @@ export class ImRemoteApprovalService {
     }
   }
 
+  canPublish(threadId: string): boolean {
+    const settings = this.dependencies.getSettings()
+    return !!(settings.enabled && settings.remoteApprovalEnabled && this.resolveRoute(threadId))
+  }
+
   private async handlePending(registration: Readonly<ApprovalBrokerRegistration>): Promise<void> {
     const settings = this.dependencies.getSettings()
     if (!settings.enabled || !settings.remoteApprovalEnabled) return
@@ -588,8 +611,12 @@ export class ImRemoteApprovalService {
           `${route.prefix}需要批准`,
           presentation.detail,
           "",
-          decisionCommands,
-          "短码单次有效，在本轮等待期间一直可用。"
+          route.kind === "group"
+            ? "仅绑定 Bot 的本人可点击审批卡片批准或拒绝；群内文字不用于本机审批。"
+            : decisionCommands,
+          route.kind === "group"
+            ? "处理后会同步更新 App 中的审批状态。"
+            : "短码单次有效，在本轮等待期间一直可用。"
         ].join("\n")
       : [`${route.prefix}需要在桌面确认`, presentation.detail, DESKTOP_ONLY_WAIT_NOTICE].join("\n")
     const replies = buildImProactiveReplies({
@@ -633,7 +660,7 @@ export class ImRemoteApprovalService {
       // below is the one the text path also does: publishing now happens before
       // it, so a gate that closed while the card was in flight has to be taken
       // back rather than left on screen looking live.
-      if (!this.dependencies.broker.get(registration.request.id)) {
+      if (!this.dependencies.broker.get(registration.request.id) || route.isCurrent?.() === false) {
         // Revokes the code and closes the card it addresses, which is why this
         // is the shared helper rather than a delete plus a close written again.
         this.removeRequestCodes(registration.request.id)
@@ -652,9 +679,19 @@ export class ImRemoteApprovalService {
       }
       return
     }
+    if (route.kind === "group" && code) {
+      this.codes.delete(code.code)
+      if (!this.dependencies.broker.get(registration.request.id) || route.isCurrent?.() === false)
+        return
+      return this.publishDesktopOnlyNotice(
+        registration,
+        route,
+        "群内审批卡片未能送达，请在 App 确认。若网关尚未升级，请升级后重试。"
+      )
+    }
     try {
       const outbox = await this.dependencies.events.enqueueProactiveReplies(replies)
-      if (!this.dependencies.broker.get(registration.request.id)) {
+      if (!this.dependencies.broker.get(registration.request.id) || route.isCurrent?.() === false) {
         if (code) this.codes.delete(code.code)
         await Promise.all(
           outbox.map((record) =>
@@ -698,6 +735,7 @@ export class ImRemoteApprovalService {
           operation: presentation.operation,
           detail: presentation.detail,
           tag,
+          group: code.route.kind === "group",
           allowedDecisions: code.allowedDecisions
         })
     })
@@ -707,10 +745,10 @@ export class ImRemoteApprovalService {
   /**
    * Applies a card click by replaying it as the short code it carries.
    *
-   * There is deliberately no second decision path here. A click reaches the
-   * runtime through exactly the code `resolveCode` consumes, so whichever of
-   * the two arrives first wins and the other is told the code is spent — which
-   * is also what makes clicking twice, or clicking after typing, safe.
+   * All decisions share the same single-use code, durable audit and runtime
+   * resolver. Group approvals additionally require the owner identity check
+   * performed by the gateway before it emits this card receipt; group text
+   * events do not carry that proof and cannot approve local operations.
    */
   async resolveCardClick(input: {
     interactionId: string
@@ -719,12 +757,15 @@ export class ImRemoteApprovalService {
     principalId: string
     conversationKey: string
   }): Promise<string> {
-    const message = await this.resolveCode({
-      code: input.requestRef,
-      decision: input.decision,
-      principalId: input.principalId,
-      conversationKey: input.conversationKey
-    })
+    const message = await this.resolveApproval(
+      {
+        code: input.requestRef,
+        decision: input.decision,
+        principalId: input.principalId,
+        conversationKey: input.conversationKey
+      },
+      true
+    )
     return message
   }
 
@@ -761,26 +802,34 @@ export class ImRemoteApprovalService {
     route: RemoteApprovalRoute,
     reason: string
   ): Promise<void> {
-    await this.dependencies.events.enqueueProactiveReplies(
+    const queued = await this.dependencies.events.enqueueProactiveReplies(
       buildImProactiveReplies({
         deliveryId: `approval-request:${registration.request.id}`,
         conversationKey: route.conversationKey,
         text: [`${route.prefix}需要在桌面确认`, reason, DESKTOP_ONLY_WAIT_NOTICE].join("\n")
       })
     )
+    if (!this.dependencies.broker.get(registration.request.id) || route.isCurrent?.() === false) {
+      await Promise.all(
+        queued.map((row) =>
+          this.dependencies.events.markOutboxFailed(row.outboxId, "APPROVAL_ALREADY_RESOLVED")
+        )
+      )
+      return
+    }
     this.drainReplies()
   }
 
   private resolveRoute(threadId: string): RemoteApprovalRoute | null {
-    const thread = this.dependencies.getThread(threadId)
+    const bot = botInteractionRoutes.get(threadId)
+    const thread = this.dependencies.getThread(bot?.threadId ?? threadId)
     if (!thread) return null
     const parsed = parseStandardThreadMetadata(thread.metadata)
     const workspacePath = parsed.workspacePath ? canonicalDirectory(parsed.workspacePath) : null
     if (!workspacePath) return null
     if (botInteractionRoutes.has(threadId)) {
-      const route = botInteractionRoutes.get(threadId)
-      return route?.kind === "dm"
-        ? { ...route, workspacePath, isCurrent: () => botInteractionRoutes.get(threadId) === route }
+      return bot && (bot.kind === "dm" || bot.botEventId)
+        ? { ...bot, workspacePath, isCurrent: () => botInteractionRoutes.get(threadId) === bot }
         : null
     }
 

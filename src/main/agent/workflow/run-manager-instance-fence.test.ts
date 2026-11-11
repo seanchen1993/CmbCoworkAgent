@@ -12,6 +12,7 @@ vi.mock("electron", () => ({
 }))
 
 import { workflowRunManager } from "./run-manager"
+import { readThreadBackgroundActivity } from "../thread-background-activity"
 import {
   createWorkflowRunStore,
   findUndeliveredTerminalRun,
@@ -126,6 +127,31 @@ describe("recoverFlushFailedRun instance fence", () => {
     else process.env.CMB_COWORK_AGENT_HOME = PREVIOUS_WORKFLOW_DATA_ROOT
     rmSync(workspace, { recursive: true, force: true })
     rmSync(workflowDataRoot, { recursive: true, force: true })
+  })
+
+  test("Feature and IM status distinguish pending Workflow results from retained history", async () => {
+    const runId = generateWorkflowRunId()
+    const store = createWorkflowRunStore({
+      workspacePath: workspace,
+      threadId: THREAD_ID,
+      initial: record(runId, FIRST_STARTED_AT, "completed")
+    })
+    expect(await store.flush()).toBe(true)
+    expect(workflowRunManager.isActive(THREAD_ID)).toBe(false)
+    expect(await readThreadBackgroundActivity(THREAD_ID, workspace)).toEqual({
+      phase: "pending_results",
+      label: "Workflow 结果待汇总"
+    })
+    expect(await readThreadBackgroundActivity("unrelated-thread", workspace)).toEqual({
+      phase: "idle",
+      label: "空闲"
+    })
+    expect(await markWorkflowRunNotified(workspace, THREAD_ID, runId, FIRST_STARTED_AT)).toBe(true)
+    expect(await readThreadBackgroundActivity(THREAD_ID, workspace)).toEqual({
+      phase: "idle",
+      label: "空闲"
+    })
+    expect(loadWorkflowRun(workspace, THREAD_ID, runId)?.status).toBe("completed")
   })
 
   test("a stale ack persists the resumed snapshot but never marks it delivered", async () => {

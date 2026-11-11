@@ -1315,32 +1315,45 @@ describe("authenticated IM on the existing Bot host", () => {
     expect(() => f.host.browserScope(`im-unknown--${f.bot.id}`)).toThrow()
     expect(f.errors).toEqual([])
   })
-  it("routes an IM answer around a waiting Bot run and deduplicates redelivery", async () => {
-    interactionCommand.mockClear()
-    const f = fixture(async (_task, _host, signal) => {
-      await new Promise<void>((resolve) =>
-        signal.addEventListener("abort", () => resolve(), { once: true })
+  it.each(
+    ["dm", "group"].flatMap((kind) =>
+      [
+        "/回答 A1B2C3 1",
+        "/门禁批准 A1B2C3",
+        "/在当前会话继续托管 A1B2C3 继续校验",
+        "/开启新会话继续托管 A1B2C3",
+        "/停止托管运行 A1B2C3"
+      ].map((command) => [kind, command])
+    )
+  )(
+    "routes a %s control %s around a waiting Bot run and deduplicates redelivery",
+    async (kind, command) => {
+      interactionCommand.mockClear()
+      const f = fixture(async (_task, _host, signal) => {
+        await new Promise<void>((resolve) =>
+          signal.addEventListener("abort", () => resolve(), { once: true })
+        )
+        return { state: "failed" }
+      })
+      const binding = await f.binding(kind as "dm" | "group")
+      await f.service.receive(f.event(binding, "question", "帮我安排会议"))
+      await eventually(() => f.calls.length === 1)
+      const answer = f.event(binding, "answer", command)
+      await f.service.receive(answer)
+      await f.service.receive(answer)
+      expect(interactionCommand).toHaveBeenCalledTimes(1)
+      expect(interactionCommand).toHaveBeenCalledWith(
+        answer,
+        "owner",
+        botImScopeId("realm", "owner", "answer")
       )
-      return { state: "failed" }
-    })
-    const binding = await f.binding()
-    await f.service.receive(f.event(binding, "question", "帮我安排会议"))
-    await eventually(() => f.calls.length === 1)
-    const answer = f.event(binding, "answer", "/回答 A1B2C3 1")
-    await f.service.receive(answer)
-    await f.service.receive(answer)
-    expect(interactionCommand).toHaveBeenCalledTimes(1)
-    expect(interactionCommand).toHaveBeenCalledWith(
-      answer,
-      "owner",
-      botImScopeId("realm", "owner", "answer")
-    )
-    expect(f.calls).toHaveLength(1)
-    expect(f.client.sendAcknowledgement).toHaveBeenCalledWith(
-      expect.objectContaining({ eventId: "answer", type: "completed" })
-    )
-    expect(f.errors).toEqual([])
-  })
+      expect(f.calls).toHaveLength(1)
+      expect(f.client.sendAcknowledgement).toHaveBeenCalledWith(
+        expect.objectContaining({ eventId: "answer", type: "completed" })
+      )
+      expect(f.errors).toEqual([])
+    }
+  )
   it.each(["dm", "group"] as const)(
     "sends Markdown for %s without changing segment identity on explicit downgrade",
     async (kind) => {

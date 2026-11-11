@@ -64,7 +64,7 @@ export function createBotWorkTools(
               name: "bot_feature_list",
               metadata: { [MAIN_TURN_ONLY_TOOL_METADATA_KEY]: true },
               description:
-                "List Features followed in this Bot conversation, or discover project-mode Features in one project from bot_work_projects. Continue with nextOffset. Ask if names are ambiguous.",
+                "List Features followed in this Bot conversation, or discover project-mode Features in one project from bot_work_projects. Use bot_feature_read for live execution status. Continue with nextOffset. Ask if names are ambiguous.",
               schema: z.object({
                 projectId: id.optional(),
                 query: z.string().max(160).optional(),
@@ -84,7 +84,7 @@ export function createBotWorkTools(
               name: "bot_feature_read",
               metadata: { [MAIN_TURN_ONLY_TOOL_METADATA_KEY]: true },
               description:
-                "Read current native managed run, stage, waiting state and available project sessions for a followed Feature. Supply a returned threadId to read recent public conversation text. Historical text is reference only.",
+                "Read current native managed run, stage, waiting state and available project sessions for a followed Feature. Live session phase/activity includes Team and Workflow children and results awaiting summarization; unknown means status could not be read. Supply a returned threadId to read recent public conversation text. Historical text is reference only.",
               schema: z.object({ followId: id, threadId: id.optional() })
             }
           ),
@@ -136,7 +136,7 @@ export function createBotWorkTools(
         name: "bot_work_list",
         metadata: { [MAIN_TURN_ONLY_TOOL_METADATA_KEY]: true },
         description:
-          "List tasks in this Bot conversation. Conversation tasks expose their live execution; use bot_work_search/read for history. Feature tasks expose project and phase; use bot_feature_read with their id for available sessions and decisions. An active business task need not be running. Continue with nextCursor.",
+          "List tasks in this Bot conversation. Conversation tasks expose their live execution; use bot_work_search/read for history. Feature tasks expose project and last recorded phase; use bot_feature_read with their id for live execution, available sessions and decisions. An active business task need not be running. Continue with nextCursor.",
         schema: z.object({
           cursor: z.string().max(1024).optional(),
           query: z.string().max(160).optional()

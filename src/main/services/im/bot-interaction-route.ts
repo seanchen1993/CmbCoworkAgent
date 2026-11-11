@@ -67,3 +67,28 @@ class BotInteractionRoutes {
   }
 }
 export const botInteractionRoutes = new BotInteractionRoutes()
+
+/** A managed retry waits after its execution turn has ended. Scope its route to
+ * the pending decision, not to a live runtime or to all future Feature turns. */
+class BotFeatureDecisionRoutes {
+  private routes = new Map<string, BotInteractionRoute>()
+  register(id: string, route: BotInteractionRoute): void {
+    this.routes.set(id, route)
+  }
+  remove(id: string): void {
+    this.routes.delete(id)
+  }
+  has(id: string): boolean {
+    return this.routes.has(id)
+  }
+  get(id: string): BotInteractionRoute | null {
+    const route = this.routes.get(id)
+    if (!route || !botInteractionRoutes.available(route)) return null
+    try {
+      return route.isCurrent() ? route : null
+    } catch {
+      return null
+    }
+  }
+}
+export const botFeatureDecisionRoutes = new BotFeatureDecisionRoutes()

@@ -1254,7 +1254,7 @@ export async function resolveManagedBizRetryDecision(
     if (
       !notification ||
       notification.status !== "pending" ||
-      (input.channel === "im" && notification.disabledTargets?.im)
+      (input.channel === "im" && (notification.disabledTargets?.im || input.isCurrent?.() === false))
     ) {
       return { applied: false, message: "该决策已处理或已失效。" }
     }
@@ -1355,6 +1355,7 @@ export async function resolveManagedBizRetryDecision(
       )
       const retryRun = await prepareManagedRetryAttempt(run, input.sourceEvent, "business")
       if (!retryRun) return { applied: false, message: "托管运行已停止，未执行重试。" }
+      if (input.isCurrent?.() === false) return { applied: false, message: "原招乎绑定已变化，未继续执行。" }
       try {
         await startPreparedManagedAgentRun(prepared, undefined, retryRun.botOperationId)
       } catch (error) {
@@ -1424,8 +1425,10 @@ export async function resolveManagedBizRetryDecision(
       imRoute: input.channel === "im" ? input.route : undefined
     }
     const prepared = await prepareManagedHarnessSession(sessionInput)
+    if (input.isCurrent?.() === false) return { applied: false, message: "原招乎绑定已变化，未创建新会话。" }
     const retryRun = await prepareManagedRetryAttempt(run, input.sourceEvent, "business")
     if (!retryRun) return { applied: false, message: "托管运行已停止，未执行重试。" }
+    if (input.isCurrent?.() === false) return { applied: false, message: "原招乎绑定已变化，未创建新会话。" }
     let created: Awaited<ReturnType<typeof createManagedHarnessSession>>
     try {
       created = await createManagedHarnessSession(

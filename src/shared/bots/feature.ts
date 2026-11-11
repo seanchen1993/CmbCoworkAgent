@@ -20,7 +20,8 @@ export const featureTaskLabels = {
   replied: "已回复",
   failed: "执行失败",
   stopped: "已停止",
-  completed: "已完成"
+  completed: "已完成",
+  unknown: "状态暂不可用"
 } as const
 export type FeatureTaskPhase = keyof typeof featureTaskLabels
 export interface BotFeatureTask extends BotFeatureFollow {
@@ -44,6 +45,9 @@ export interface BotFeatureSession {
     | "interrupted"
     | "failed"
     | "unavailable"
+    | "unknown"
+  /** Live child execution/result-delivery detail; never inferred from transcript text. */
+  activity?: string
   questions?: string[]
   nodeId?: string
 }

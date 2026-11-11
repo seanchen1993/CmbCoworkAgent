@@ -21,7 +21,8 @@ const phaseLabel = {
   decision: "待阶段确认",
   interrupted: "已中断",
   failed: "执行失败",
-  unavailable: "不可用"
+  unavailable: "不可用",
+  unknown: "状态暂不可用"
 }
 type Props = { client: BotClient; botId: string; groupId?: string }
 
@@ -199,6 +200,7 @@ export function FeatureRow({
       clearInterval(timer)
     }
   }, [api, feature.id, botId, groupId, open, revision])
+  const current = open && detail ? detail : feature
   return (
     <div className="bot-feature-row">
       <button
@@ -209,8 +211,8 @@ export function FeatureRow({
       >
         <span>{feature.title}</span>
         <small>
-          <span data-attention={Boolean(feature.attentionThreadId)}>
-            {featureTaskLabels[feature.phase]}
+          <span data-attention={Boolean(current.attentionThreadId)}>
+            {featureTaskLabels[current.phase]}
           </span>
           {" · Feature · "}
           {feature.projectName}
@@ -234,7 +236,7 @@ export function FeatureRow({
               onClick={() => openProject(feature, s.threadId)}
             >
               <span>{s.title}</span>
-              <small>{phaseLabel[s.phase]}</small>
+              <small>{s.activity ?? phaseLabel[s.phase]}</small>
             </button>
           ))}
           <div className="bot-feature-links">
@@ -245,7 +247,9 @@ export function FeatureRow({
               <button
                 disabled={
                   busy ||
-                  ["managed", "running", "approval", "decision", "question"].includes(feature.phase)
+                  ["managed", "running", "approval", "decision", "question", "unknown"].includes(
+                    current.phase
+                  )
                 }
                 onClick={async () => {
                   setBusy(true)
@@ -254,8 +258,8 @@ export function FeatureRow({
                     await api.lifecycle(
                       botId,
                       feature.id,
-                      feature.state === "completed" ? "reopen" : "complete",
-                      feature.version,
+                      current.state === "completed" ? "reopen" : "complete",
+                      current.version,
                       groupId
                     )
                     refresh()
@@ -266,7 +270,7 @@ export function FeatureRow({
                   }
                 }}
               >
-                {feature.state === "completed" ? "继续处理" : "完成任务"}
+                {current.state === "completed" ? "继续处理" : "完成任务"}
               </button>
             )}
           </div>

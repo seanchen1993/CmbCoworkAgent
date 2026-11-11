@@ -53,6 +53,11 @@ export async function runBotFeatureCommand(
   const store = host.featureStore
   const scope = { botId: task.botId, audience: task.mockSource?.audienceKey ?? "desktop" }
   const catalog = task.mockSource ? imFeatureBindingService : desktopFeatureCatalog
+  const readDetail = async (owner: FeatureOwner) => {
+    const detail = await featureDetail(host, owner)
+    authorize()
+    return detail
+  }
   if (input.action === "list") {
     const items = input.projectId
       ? await catalog.listRemoteFeatures(input.projectId)
@@ -78,7 +83,8 @@ export async function runBotFeatureCommand(
     const { resolveHarnessFeatureCurrentStage } = await import("../harness-board/service")
     const stage = await resolveHarnessFeatureCurrentStage(owner.projectId, owner.slug)
     authorize()
-    if (!input.threadId) return { ...featureDetail(host, owner), stage }
+    const detail = await readDetail(owner)
+    if (!input.threadId) return { ...detail, stage }
     const { getThreadMessagesPage } = await import("../db")
     authorize()
     checkFeatureThread(host, owner, input.threadId)
@@ -95,14 +101,14 @@ export async function runBotFeatureCommand(
       const visible = m.role === "assistant" ? splitBotInlineReasoning(text).body.trim() : text
       return visible ? [{ role: m.role, text: visible.slice(0, 2000) }] : []
     })
-    return { detail: featureDetail(host, owner), stage, history }
+    return { detail, stage, history }
   }
   if (input.action === "complete" || input.action === "reopen") {
     const item = store.find(scope, input.projectId, input.slug)
     if (!item || !Number.isSafeInteger(input.expectedVersion))
       throw new Error("请先查询当前任务及版本")
     host.changeFeatureState(scope, item.id, input.action, input.expectedVersion!)
-    return featureDetail(host, store.owner(item.id, scope))
+    return readDetail(store.owner(item.id, scope))
   }
   // Stopping an owned run must still work after the project is archived or its directory moves.
   const stopping = input.action === "stop" || input.action === "interrupt"
@@ -137,7 +143,7 @@ export async function runBotFeatureCommand(
       }
     )
   }
-  if (input.action === "follow") return featureDetail(host, owner)
+  if (input.action === "follow") return readDetail(owner)
   const selected = input.threadId ? checkFeatureThread(host, owner, input.threadId) : undefined
   const verifySelected = () => {
     store.owner(owner.id, scope)
@@ -154,7 +160,7 @@ export async function runBotFeatureCommand(
   ])
   if (!fresh) {
     if (receipt.error) throw new Error(receipt.error)
-    return { operation: receipt, feature: featureDetail(host, owner) }
+    return { operation: receipt, feature: await readDetail(owner) }
   }
   const { projectId, slug: featureId } = owner
   try {
@@ -226,7 +232,7 @@ export async function runBotFeatureCommand(
       })
     }
     host.featureChanged(owner)
-    return { operation: store.receipt(receipt.id), feature: featureDetail(host, owner) }
+    return { operation: store.receipt(receipt.id), feature: await readDetail(owner) }
   } catch (error) {
     store.finish(receipt.id, error instanceof Error ? error.message : "Feature 操作失败")
     host.featureChanged(owner)

@@ -10,6 +10,8 @@ export interface ManagedBizRetryDecisionInput {
   originThreadId: string
   policyResult: Extract<ManagedRunPolicyResult, { type: "biz_retry" }>
   route?: { principalId: string; conversationKey: string }
+  /** Recheck the originating IM binding after lock waits and async preparation. */
+  isCurrent?: () => boolean
   channel: "desktop" | "im"
   sourceEvent: Pick<ManagedRunEvent, "eventId" | "type">
   summary: string

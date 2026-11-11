@@ -391,7 +391,7 @@ export class BotImChannelService {
       host.imGateway.settle(receipt.id, "active", undefined, expiry)
       if (
         !receipt.taskId &&
-        /^\/(?:回答|批准|拒绝|门禁批准|门禁拒绝|文字模式)(?:\s|$)/u.test(wire.message.text.trim())
+        /^\/(?:回答|批准|拒绝|门禁批准|门禁拒绝|文字模式|停止托管运行|在当前会话继续托管|开启新会话继续托管)(?:\s|$)/u.test(wire.message.text.trim())
       ) {
         const { handleBotImInteractionCommand } = await import("./bot-interaction-command")
         await this.client.sendAcknowledgement({

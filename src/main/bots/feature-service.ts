@@ -21,14 +21,20 @@ import { hasPendingHumanGateForThread } from "../harness-board/human-gate-servic
 import { harnessNotifications } from "../harness-board/notifications"
 import { projectHarnessNotification } from "../../shared/harness-notifications"
 import { isNotificationPendingForTarget } from "../../shared/app-notifications"
-import { onNotificationChanged } from "../services/notification-service"
+import { onNotificationChanged, notificationService } from "../services/notification-service"
 import {
   summarizePendingUserInputForRuntimeThread,
   subscribePendingUserInput,
   subscribeRemovedUserInput
 } from "../services/user-input"
 import { approvalDecisionBroker } from "../agent/approval-decision-broker"
+import { imRemoteApprovalService } from "../services/im/remote-approval-service"
 import { hasPendingApprovalForRuntimeThread } from "../agent/runtime"
+import { getLocalThreadRunLease } from "../agent/thread-run-lease"
+import {
+  readThreadBackgroundActivity,
+  type ThreadBackgroundActivity
+} from "../agent/thread-background-activity"
 import {
   startAgentRun,
   hasActiveTopLevelAgentRun,
@@ -37,7 +43,11 @@ import {
   type AgentRunRequest,
   type AgentRunTerminal
 } from "../agent/agent-run-service"
-import { botInteractionRoutes } from "../services/im/bot-interaction-route"
+import {
+  botInteractionRoutes,
+  botFeatureDecisionRoutes,
+  type BotInteractionRoute
+} from "../services/im/bot-interaction-route"
 import { imRemoteAccessService } from "../services/im/remote-access-service"
 import { notifyRemoteThreadChanged } from "../agent/renderer-stream-mirror"
 import { createBotDeliveryTools } from "./tools"
@@ -148,6 +158,7 @@ export async function linkExistingFeatureSession(
 function sessionStatus(
   host: LocalBotHost,
   thread: ProjectThread,
+  background: ThreadBackgroundActivity | undefined,
   nodeId?: string
 ): BotFeatureSession {
   const threadId = thread.row.thread_id
@@ -160,24 +171,74 @@ function sessionStatus(
         ? "decision"
         : live === "approval" || hasPendingApprovalForRuntimeThread(threadId)
           ? "approval"
-          : live === "running" || hasActiveTopLevelAgentRun(threadId)
+          : live === "running" ||
+              hasActiveTopLevelAgentRun(threadId) ||
+              getLocalThreadRunLease(threadId) ||
+              (background && background.phase !== "idle")
             ? "running"
-            : thread.row.status === "error"
-              ? "failed"
-              : thread.row.status === "interrupted"
-                ? "interrupted"
-                : "idle"
+            : !background
+              ? "unknown"
+              : thread.row.status === "error"
+                ? "failed"
+                : thread.row.status === "interrupted"
+                  ? "interrupted"
+                  : "idle"
   return {
     threadId,
     title: thread.row.title || "项目会话",
     phase,
     nodeId,
+    ...(phase === "running" && background && background.phase !== "idle"
+      ? { activity: background.label }
+      : {}),
     ...(questions.count ? { questions: questions.questions } : {})
   }
 }
-export function featureDetail(host: LocalBotHost, owner: FeatureOwner): BotFeatureDetail {
+export async function featureDetail(
+  host: LocalBotHost,
+  owner: FeatureOwner
+): Promise<BotFeatureDetail> {
   host.featureStore.owner(owner.id)
   const { id, projectId, slug } = owner
+  const rows = getFeatureThreadSummaries(projectId, slug)
+  const claims = host.featureStore.sessionClaims(rows.map((row) => row.thread_id))
+  const candidates: ProjectThread[] = []
+  for (const row of rows) {
+    try {
+      candidates.push(
+        verifySessionAccess(
+          owner,
+          projectThread(owner, row),
+          claims.get(row.thread_id),
+          row.channelGrantState
+        )
+      )
+    } catch {
+      // Do not inspect another conversation's runtime or workspace.
+    }
+  }
+  const activities = new Map<
+    string,
+    { thread: ProjectThread; activity?: ThreadBackgroundActivity }
+  >()
+  // Bound local index I/O even for Features with many historical sessions. Never read messages.
+  for (let start = 0; start < candidates.length; start += 4) {
+    await Promise.all(
+      candidates.slice(start, start + 4).map(async (thread) => {
+        let activity: ThreadBackgroundActivity | undefined
+        try {
+          activity = await readThreadBackgroundActivity(thread.row.thread_id, thread.workspace)
+        } catch {
+          // Unknown is not idle: a temporarily unreadable index must not imply termination.
+        }
+        activities.set(thread.row.thread_id, { thread, activity })
+      })
+    )
+  }
+  // Recheck ownership/incarnation and live waits after the asynchronous inspection.
+  host.featureStore.owner(owner.id)
+  const currentRows = getFeatureThreadSummaries(projectId, slug)
+  const currentClaims = host.featureStore.sessionClaims(currentRows.map((row) => row.thread_id))
   const runId = host.featureStore.latestRun(id)
   const run = runId ? nativeRun(owner, runId) : null
   const decisionId =
@@ -192,19 +253,23 @@ export function featureDetail(host: LocalBotHost, owner: FeatureOwner): BotFeatu
     decision.featureId === slug
       ? decision
       : undefined
-  const rows = getFeatureThreadSummaries(projectId, slug)
-  const claims = host.featureStore.sessionClaims(rows.map((row) => row.thread_id))
   const sessions: BotFeatureSession[] = []
   const listed = new Set<string>()
-  for (const row of rows) {
-    const claim = claims.get(row.thread_id)
+  for (const row of currentRows) {
+    const claim = currentClaims.get(row.thread_id)
     let thread: ProjectThread
     try {
       thread = verifySessionAccess(owner, projectThread(owner, row), claim, row.channelGrantState)
     } catch {
       continue
     }
-    sessions.push(sessionStatus(host, thread, thread.feature.nodeId ?? claim?.nodeId))
+    const observed = activities.get(row.thread_id)
+    const background =
+      observed?.thread.incarnation === thread.incarnation &&
+      observed.thread.workspace === thread.workspace
+        ? observed.activity
+        : undefined
+    sessions.push(sessionStatus(host, thread, background, thread.feature.nodeId ?? claim?.nodeId))
     listed.add(row.thread_id)
   }
   for (const own of host.featureStore.sessions(id)) {
@@ -216,8 +281,20 @@ export function featureDetail(host: LocalBotHost, owner: FeatureOwner): BotFeatu
         nodeId: own.nodeId
       })
   }
+  const task = host.featureTasks(owner, { followId: id })[0].task
+  const livePhase = (["question", "decision", "approval", "running", "unknown"] as const).find(
+    (phase) => sessions.some((s) => s.phase === phase)
+  )
   return {
-    ...host.featureTasks(owner, { followId: id })[0].task,
+    ...task,
+    ...(task.state === "active" && livePhase
+      ? {
+          phase: livePhase === "running" && task.phase === "managed" ? "managed" : livePhase,
+          attentionThreadId: ["question", "decision", "approval"].includes(livePhase)
+            ? sessions.find((s) => s.phase === livePhase)?.threadId
+            : undefined
+        }
+      : {}),
     sessions,
     ...(runId
       ? {
@@ -335,11 +412,79 @@ export function publishFeatureRun(run: ManagedRunSummary) {
     run.status === "cancelled" ? "stopped" : undefined
   )
 }
+function featureDecisionRoute(
+  host: LocalBotHost,
+  op: FeatureReceipt,
+  decisionId: string,
+  threadId: string
+): BotInteractionRoute | undefined {
+  const { owner, task } = executionOwner(host, op)
+  const thread = checkFeatureThread(host, owner, threadId)
+  const registered = task.mockSource
+    ? host.imGateway.binding(task.mockSource.bindingId)
+    : host.imGateway.personalBinding(owner.botId, task.createdAt)
+  const event = task.mockSource?.eventId ? host.imGateway.event(task.mockSource.eventId) : undefined
+  if (!registered?.binding.conversationKey || (registered.binding.kind === "group" && !event))
+    return
+  const isCurrent = () => {
+    const currentOp = host.featureStore.findReceipt(op.id)
+    if (
+      currentOp?.state !== "active" ||
+      currentOp.runId !== op.runId ||
+      !isNotificationPendingForTarget(notificationService.get(decisionId), "im")
+    )
+      return false
+    executionOwner(host, currentOp)
+    const binding = host.imGateway.binding(registered.id)
+    if (
+      binding?.binding.state !== "active" ||
+      binding.binding.version !== registered.binding.version
+    )
+      return false
+    const current = checkFeatureThread(host, owner, threadId)
+    return (
+      current.incarnation === thread.incarnation &&
+      current.workspace === thread.workspace &&
+      current.feature.runId === op.runId
+    )
+  }
+  return {
+    threadId,
+    realm: registered.realm,
+    principalId: registered.principal,
+    kind: registered.binding.kind,
+    conversationKey: registered.binding.conversationKey,
+    prefix: `【${owner.title}】`,
+    botEventId: event?.payload.event.eventId,
+    senderId: event?.payload.route.senderId,
+    isCurrent,
+    featureGate: {
+      projectId: owner.projectId,
+      slug: owner.slug,
+      projectName: owner.projectName,
+      featureName: owner.title,
+      threadTitle: thread.row.title || "项目会话",
+      publicText: (value) => botImReplyText(value, [], [thread.workspace]),
+      onUndeliverable: () => {
+        if (isCurrent())
+          notice(
+            host,
+            owner,
+            task,
+            decisionId,
+            "托管正在等待你选择下一步。招乎提示发送失败，请在 App 的项目模式中处理。"
+          )
+      }
+    }
+  }
+}
 let observingDecisions = false
 function observeDecisions() {
   if (observingDecisions) return
   observingDecisions = true
   onNotificationChanged((value, change) => {
+    const decisionId = value.notificationId
+    if (!isNotificationPendingForTarget(value, "im")) botFeatureDecisionRoutes.remove(decisionId)
     if (change !== "created" && change !== "ended") return
     const note = projectHarnessNotification(value)
     if (!note) return
@@ -356,8 +501,14 @@ function observeDecisions() {
     const thread = checkFeatureThread(host, owner, note.sourceThreadId)
     const pending = change === "created" && note.status === "pending"
     host.featureStore.setDecision(op, note.notificationId, note.sourceThreadId, pending)
+    if (pending && note.type === "biz_retry" && isNotificationPendingForTarget(note, "im")) {
+      const route = featureDecisionRoute(host, op, note.notificationId, note.sourceThreadId)
+      if (route) botFeatureDecisionRoutes.register(note.notificationId, route)
+    }
     const remoteGate =
-      note.type === "human_gate" && botInteractionRoutes.get(note.sourceThreadId)?.featureGate
+      note.type === "human_gate"
+        ? botInteractionRoutes.get(note.sourceThreadId)?.featureGate
+        : botFeatureDecisionRoutes.get(note.notificationId)?.featureGate
     if (pending && !remoteGate && (!task.mockSource || isNotificationPendingForTarget(note, "im")))
       notice(
         host,
@@ -523,7 +674,10 @@ export async function startFeatureTurn(
       if (!owns(runtimeThreadId)) return
       approvals.add(approval.id)
       updatePhase()
-      if (registered?.binding.kind === "group") {
+      if (
+        registered?.binding.kind === "group" &&
+        !imRemoteApprovalService.canPublish(runtimeThreadId)
+      ) {
         verify()
         notice(
           host,

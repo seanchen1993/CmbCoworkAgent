@@ -19,7 +19,8 @@ const dependencies = vi.hoisted(() => ({
 vi.mock("../db", () => ({
   getDb: () => dependencies.database,
   getThread: () => ({ title: "Thread" }),
-  getThreadMessages: () => dependencies.threadMessages
+  getThreadMessages: () => dependencies.threadMessages,
+  getThreadMessagesPage: () => ({ messages: dependencies.threadMessages })
 }))
 vi.mock("./im/event-store", () => ({
   imEventStore: { enqueueProactiveReplies: dependencies.enqueue }
@@ -499,7 +500,8 @@ for (const source of ["human_gate", "biz_retry"] as const) {
     })
     const deliveryId = (id: string) =>
       source === "human_gate" ? `human-gate:${id}` : `managed-biz-retry:${id}`
-    const decisionCommand = source === "human_gate" ? /门禁批准 [A-F0-9]{6}/ : /停止托管运行 [A-F0-9]{6}/
+    const decisionCommand =
+      source === "human_gate" ? /门禁批准 [A-F0-9]{6}/ : /停止托管运行 [A-F0-9]{6}/
     async function cardAdapter() {
       dependencies.cardAccepted = true
       const gate = await import("./im/human-gate-adapter")
@@ -752,6 +754,172 @@ for (const source of ["human_gate", "biz_retry"] as const) {
     })
   })
 }
+
+describe("Bot Feature managed retry choices in the originating Zhaohu group", () => {
+  async function request(card: boolean) {
+    dependencies.cardAccepted = card
+    dependencies.enqueue.mockResolvedValue([])
+    const { botFeatureDecisionRoutes, botInteractionRoutes } =
+      await import("./im/bot-interaction-route")
+    const { initializeImBizRetryChannel, imBizRetryAdapter: adapter } =
+      await import("./im/biz-retry-adapter")
+    botInteractionRoutes.setTransport(() => true)
+    let current = true
+    const destination = { principalId: "owner", conversationKey: "bot-group" }
+    const fallback = vi.fn()
+    const route = {
+      ...destination,
+      threadId: "thread",
+      realm: "realm",
+      kind: "group" as const,
+      botEventId: "source-event",
+      prefix: "【任务】",
+      isCurrent: () => current,
+      featureGate: {
+        projectId: "project",
+        slug: "feature",
+        projectName: "项目",
+        featureName: "需求整理",
+        threadTitle: "项目会话",
+        publicText: (value: string) => value.replaceAll("/private/workspace", "项目目录"),
+        onUndeliverable: fallback
+      }
+    }
+    observe((note, change) => {
+      if (note.type !== "biz_retry") return
+      if (change === "created") botFeatureDecisionRoutes.register(note.notificationId, route)
+      if (change === "ended") botFeatureDecisionRoutes.remove(note.notificationId)
+    })
+    const handler = vi.fn(async (note, input, context) => {
+      if (context.isCurrent?.() === false) return { applied: false, message: "连接失效" }
+      service.finish(note.notificationId, {
+        status: "resolved",
+        action: input.action,
+        channel: context.channel,
+        reasonCode: "confirmed",
+        result: "已处理"
+      })
+      return { applied: true, message: "已处理" }
+    })
+    actions.registerNotificationActions("biz_retry", handler)
+    initializeImBizRetryChannel()
+    dependencies.threadMessages.push({
+      role: "assistant",
+      content: "文件保存在 /private/workspace"
+    })
+    create("biz_retry", "retry")
+    for (let i = 0; i < 8; i++) await Promise.resolve()
+    return {
+      adapter,
+      destination,
+      handler,
+      fallback,
+      revoke: () => {
+        current = false
+      },
+      route
+    }
+  }
+
+  it.each(["continue", "new_thread", "stop"] as const)(
+    "applies %s from a group card without a separate project grant",
+    async (choice) => {
+      const { adapter, destination, handler } = await request(true)
+      expect(dependencies.cardPublish.mock.calls[0][0]).toMatchObject({
+        kind: "biz_retry",
+        botEventId: "source-event",
+        conversationKey: "bot-group",
+        threadId: "thread"
+      })
+      expect(JSON.stringify(dependencies.cardInteractions.get("retry"))).not.toContain(
+        "/private/workspace"
+      )
+      expect(dependencies.enqueue).not.toHaveBeenCalled()
+      expect(
+        await adapter.resolveCardDecision({ ...destination, notificationId: "retry", choice })
+      ).toBeNull()
+      expect(handler).toHaveBeenCalledOnce()
+      expect(handler.mock.calls[0][2]).toMatchObject({
+        channel: "im",
+        context: { route: destination }
+      })
+      expect(service.get("retry")).toMatchObject({
+        status: "resolved",
+        channel: "im",
+        action: choice
+      })
+      await adapter.resolveCardDecision({ ...destination, notificationId: "retry", choice })
+      expect(handler).toHaveBeenCalledOnce()
+      expect(dependencies.cardResolveDetached).toHaveBeenCalledOnce()
+    }
+  )
+
+  it("falls back to scoped @ text commands on an old gateway, keeping the continue message", async () => {
+    const { adapter, destination, handler } = await request(false)
+    const replies = dependencies.enqueue.mock.calls[0][0]
+    expect(replies[0].conversationKey).toBe("bot-group")
+    const text = replies
+      .map((reply: { message: { content: string } }) => reply.message.content)
+      .join("\n")
+    expect(text).toContain("@机器人")
+    const code = text.match(/\/在当前会话继续托管 (\S+)/u)![1]
+    expect(
+      await adapter.resolveCode({
+        ...destination,
+        conversationKey: "private",
+        code,
+        choice: "continue"
+      })
+    ).toContain("不属于")
+    expect(
+      await adapter.resolveCode({
+        ...destination,
+        code,
+        choice: "continue",
+        message: "按已确认的方案继续"
+      })
+    ).toBe("已处理")
+    expect(handler.mock.calls[0][1]).toMatchObject({
+      action: "continue",
+      message: "按已确认的方案继续"
+    })
+  })
+
+  it("refuses another group and a revoked binding without consuming the pending native decision", async () => {
+    const { adapter, destination, handler, revoke } = await request(true)
+    expect(
+      await adapter.resolveCardDecision({
+        ...destination,
+        conversationKey: "other-group",
+        notificationId: "retry",
+        choice: "continue"
+      })
+    ).toContain("失效")
+    revoke()
+    expect(
+      await adapter.resolveCardDecision({ ...destination, notificationId: "retry", choice: "stop" })
+    ).toContain("失效")
+    expect(handler).not.toHaveBeenCalled()
+    expect(service.get("retry")?.status).toBe("pending")
+  })
+
+  it("keeps the App action available if both card and text delivery fail", async () => {
+    dependencies.cardPublish.mockRejectedValueOnce(new Error("gateway unavailable"))
+    const { fallback, adapter, destination } = await request(false)
+    // Initial card transport failure still has the normal durable text fallback.
+    expect(dependencies.enqueue).toHaveBeenCalledOnce()
+    expect(fallback).not.toHaveBeenCalled()
+    dependencies.enqueue.mockRejectedValueOnce(new Error("outbox failure"))
+    const note = service.get("retry")!
+    const { projectHarnessNotification } = await import("../../shared/harness-notifications")
+    await expect(adapter.publish(projectHarnessNotification(note)!)).rejects.toThrow(
+      "outbox failure"
+    )
+    expect(fallback).toHaveBeenCalledWith("retry")
+    expect(service.get("retry")?.status).toBe("pending")
+    expect(destination.conversationKey).toBe("bot-group")
+  })
+})
 
 describe("Bot Feature stage decisions in the originating Zhaohu group", () => {
   beforeEach(() => {
