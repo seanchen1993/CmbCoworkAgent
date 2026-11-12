@@ -147,14 +147,11 @@ export function buildRequirementDevelopmentPrompt(input: {
 }): string {
   const prototypeLines = input.prototypeFilePaths.length
     ? input.prototypeFilePaths.map((path) => `  - ${path}`).join("\n")
-    : "  - 未提供原型文件"
-  return `${input.title}
-
-请读取并理解本次需求的 PRD 与交互原型，并基于当前工作区完成对应功能的开发。
-
-- 需求名称：${input.title}
-- PRD 文件：${input.requirementFilePath}
-- 原型设计文件：${prototypeLines}
+    : "  无"
+  return `
+需求名称：${input.title}
+需求文件：${input.requirementFilePath}
+原型设计文件：${prototypeLines}
 
 `
 }

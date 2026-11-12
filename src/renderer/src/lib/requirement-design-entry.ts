@@ -56,18 +56,14 @@ export function buildRequirementDesignPrompt(
 export function buildFullPrdDesignPrompt(requirementFile: string): string {
   const prdFile = requirementFile.trim() || "完整 PRD 文档"
   return [
-    `请根据已附加的完整 PRD 文档「${prdFile}」，为整个产品设计高保真 UI 交互原型。`,
-    "",
-    "请以完整 PRD 为唯一业务依据，系统梳理信息架构、页面关系和核心用户流程，并覆盖必要的空状态、异常状态与关键交互。输出可独立运行、主要流程可交互的单页 HTML；关键信息缺失时先提问确认。"
+    `请根据已附加的需求PRD 文档「${prdFile}」，设计高保真 UI 交互原型。`
   ].join("\n")
 }
 
 export function buildSpaceRequirementDesignPrompt(requirementName: string): string {
   const target = requirementName.trim() || "当前需求"
   return [
-    `请根据已附加的需求文档，为「${target}」生成高保真交互原型。`,
-    "",
-    "需求文档是业务范围、流程和规则的唯一依据。请覆盖核心用户流程、关键页面以及必要的空状态和异常状态，输出可独立运行、主要流程可交互的单页 HTML。不要只输出说明或代码片段，必须生成完整原型文件。"
+    `请根据已附加的需求文档，为「${target}」生成高保真交互原型。`
   ].join("\n")
 }
 
