@@ -826,7 +826,7 @@ export function RequirementDetailsPanel({
               <section className="rounded-xl border border-border/80 bg-white p-4">
                 <div className="flex items-center justify-between gap-3">
                   <div>
-                    <h3 className="text-sm font-semibold text-foreground">知识库</h3>
+                    <h3 className="text-sm font-semibold text-foreground">知识库（敬请期待）</h3>
                     <p className="mt-1 text-xs text-muted-foreground">
                       当前需求未记录独立知识库引用
                     </p>
