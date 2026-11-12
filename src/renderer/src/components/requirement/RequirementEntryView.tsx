@@ -42,11 +42,7 @@ import {
   openRequirementDesign
 } from "@/lib/requirement-design-entry"
 import { createPromptDesignSession } from "@/components/design/session-client"
-import {
-  USE_LEANSTAR_REQUIREMENTS_MOCK,
-  leanstarRequirementsApi,
-  type ProductRequirement
-} from "@/api/leanstar-requirements"
+import { leanstarRequirementsApi, type ProductRequirement } from "@/api/leanstar-requirements"
 import {
   buildRequirementDevelopmentPrompt,
   findRequirementDevelopmentThreads,
@@ -54,6 +50,10 @@ import {
   REQUIREMENT_DEVELOPMENT_ONBOARDING_KEY,
   writeRequirementDevelopmentIntent
 } from "@/lib/requirement-development"
+import {
+  REQUIREMENT_SPACE_LIST_EVENT,
+  REQUIREMENT_SPACE_LIST_QUERY_KEY
+} from "./requirement-navigation"
 
 type EntryScreen = "history" | "system" | "conversation" | "space-detail"
 
@@ -95,11 +95,16 @@ function fromRequirementSpaceItem(
       ? { id: item.owner, name: item.owner }
       : item.owner
   const sourceTime = item.updateTime || item.updatedAt || item.createTime || ""
+  // Leanstar returns local wall-clock time without an offset. Keep that wall-clock value instead
+  // of letting Date reinterpret it using an environment-dependent timezone.
+  const normalizedTime = sourceTime.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})$/)
   const parsedTime = sourceTime ? new Date(sourceTime) : null
   const hasValidTime = parsedTime !== null && Number.isFinite(parsedTime.getTime())
-  const displayTime = hasValidTime
-    ? parsedTime.toLocaleString("zh-CN", { hour12: false })
-    : sourceTime
+  const displayTime = normalizedTime
+    ? `${normalizedTime[1]}/${normalizedTime[2]}/${normalizedTime[3]} ${normalizedTime[4]}:${normalizedTime[5]}:${normalizedTime[6]}`
+    : hasValidTime
+      ? parsedTime.toLocaleString("zh-CN", { hour12: false })
+      : sourceTime
   return {
     id: `space:${implementGroupDevopsOrgId}:${item.code}`,
     threadIds: [],
@@ -139,7 +144,8 @@ function fromRequirementSpaceItem(
       owner?.name || owner?.id
         ? { id: owner.id || owner.name || item.code, name: owner.name || owner.id || "需求负责人" }
         : undefined,
-    readOnly: true
+    readOnly: true,
+    functionCount: item.functionRequirements?.length ?? item.functionList?.length ?? 0
   }
 }
 
@@ -158,6 +164,7 @@ export function RequirementEntryView({
   const [requirements, setRequirements] = useState<RequirementRecord[]>([])
   const [requirementsLoaded, setRequirementsLoaded] = useState(false)
   const [requirementSpaceLoading, setRequirementSpaceLoading] = useState(false)
+  const [requirementSpaceTotal, setRequirementSpaceTotal] = useState(0)
   const [sourceFilter, setSourceFilter] = useState<RequirementSourceFilter>("local")
   const [tokenDialogOpen, setTokenDialogOpen] = useState(false)
   const [tokenDraft, setTokenDraft] = useState("")
@@ -167,6 +174,18 @@ export function RequirementEntryView({
   const [currentUserOriginOrgId, setCurrentUserOriginOrgId] = useState("")
   const [currentUserOrgName, setCurrentUserOrgName] = useState("")
   const requirementSpaceLoadedRef = useRef(false)
+
+  useEffect(() => {
+    const openSpaceList = (event: Event): void => {
+      const title = (event as CustomEvent<{ title?: string }>).detail?.title?.trim() || ""
+      window.sessionStorage.setItem(REQUIREMENT_SPACE_LIST_QUERY_KEY, title)
+      requirementSpaceLoadedRef.current = false
+      setSourceFilter("space")
+      setScreen("history")
+    }
+    window.addEventListener(REQUIREMENT_SPACE_LIST_EVENT, openSpaceList)
+    return () => window.removeEventListener(REQUIREMENT_SPACE_LIST_EVENT, openSpaceList)
+  }, [])
   const [systemDialogOpen, setSystemDialogOpen] = useState(false)
   const [requirementDialogOpen, setRequirementDialogOpen] = useState(false)
   const [quickStartDialogOpen, setQuickStartDialogOpen] = useState(false)
@@ -282,17 +301,19 @@ export function RequirementEntryView({
   }, [loadRequirements, selectThread])
 
   useEffect(() => {
+    if (sourceFilter !== "space") requirementSpaceLoadedRef.current = false
+  }, [sourceFilter])
+
+  useEffect(() => {
     if (
       screen !== "history" ||
       !requirementsLoaded ||
-      (sourceFilter !== "all" && sourceFilter !== "space") ||
+      sourceFilter !== "space" ||
       requirementSpaceLoadedRef.current
     )
       return
     requirementSpaceLoadedRef.current = true
-    const implementGroupDevopsOrgId = USE_LEANSTAR_REQUIREMENTS_MOCK
-      ? currentUserOriginOrgId || "mock-origin-org"
-      : currentUserOriginOrgId
+    const implementGroupDevopsOrgId = currentUserOriginOrgId
     if (!implementGroupDevopsOrgId) {
       requirementSpaceLoadedRef.current = false
       return
@@ -300,11 +321,12 @@ export function RequirementEntryView({
     setRequirementSpaceLoading(true)
     void leanstarRequirementsApi
       .listDeliveryRequirements(implementGroupDevopsOrgId)
-      .then((page) =>
-        (page.content ?? []).map((item) =>
+      .then((page) => {
+        setRequirementSpaceTotal(page.total ?? page.content?.length ?? 0)
+        return (page.content ?? []).map((item) =>
           fromRequirementSpaceItem(item, implementGroupDevopsOrgId, currentUserOrgName)
         )
-      )
+      })
       .then((spaceRequirements) => {
         setRequirements((current) => [
           ...current.filter((item) => item.origin !== "space"),
@@ -454,24 +476,34 @@ export function RequirementEntryView({
   }, [])
 
   const startSpaceRequirementDevelopment = useCallback(
-    (requirement: RequirementRecord): void => {
-      const requirementFilePath = `需求空间3.0：${requirement.sourceName}`
-      writeRequirementDevelopmentIntent({
-        action: "create-development",
-        requirementId: requirement.id,
-        requirementTitle: requirement.title,
-        prompt: buildRequirementDevelopmentPrompt({
-          title: requirement.title,
+    async (requirement: RequirementRecord): Promise<void> => {
+      try {
+        const requirementContent =
+          (
+            await leanstarRequirementsApi.getRequirementDocumentContent(requirement.sourceName)
+          )?.documentTextContent?.trim() || ""
+        if (!requirementContent) throw new Error("需求文档内容为空，无法开始开发")
+        const requirementFilePath = `需求空间3.0：${requirement.sourceName}`
+        writeRequirementDevelopmentIntent({
+          action: "create-development",
+          requirementId: requirement.id,
+          requirementTitle: requirement.title,
+          prompt: buildRequirementDevelopmentPrompt({
+            title: requirement.title,
+            requirementFilePath,
+            prototypeFilePaths: []
+          }),
           requirementFilePath,
-          prototypeFilePaths: []
-        }),
-        requirementFilePath,
-        prototypeFilePaths: [],
-        functionCount: 0,
-        hasPrototype: false
-      })
-      setShowHarnessBoardView(true)
-      window.dispatchEvent(new Event(REQUIREMENT_DEVELOPMENT_ONBOARDING_EVENT))
+          prototypeFilePaths: [],
+          functionCount: requirement.functionCount ?? 0,
+          hasPrototype: false,
+          requirementContent
+        })
+        setShowHarnessBoardView(true)
+        window.dispatchEvent(new Event(REQUIREMENT_DEVELOPMENT_ONBOARDING_EVENT))
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : "读取需求文件失败")
+      }
     },
     [setShowHarnessBoardView]
   )
@@ -683,6 +715,7 @@ export function RequirementEntryView({
           currentUser={currentUser}
           sourceFilter={sourceFilter}
           requirementSpaceLoading={requirementSpaceLoading}
+          requirementSpaceTotal={requirementSpaceTotal}
           onSourceFilterChange={setSourceFilter}
           onNew={() => startNewRequirement()}
           onOpenRequirement={openRequirement}

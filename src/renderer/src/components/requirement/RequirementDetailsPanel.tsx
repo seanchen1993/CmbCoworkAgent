@@ -50,10 +50,8 @@ import { RequirementFunctionWorkspace } from "./RequirementFunctionWorkspace"
 import { RequirementPrdSummaryCard } from "./RequirementPrdSummaryCard"
 import { RequirementStatusTags } from "./RequirementStatusTags"
 import { RequirementDevelopmentActions } from "./RequirementDevelopmentActions"
-import {
-  REQUIREMENT_ACTION_HINTS,
-  RequirementActionButton
-} from "./RequirementActionButton"
+import { REQUIREMENT_ACTION_HINTS, RequirementActionButton } from "./RequirementActionButton"
+import { REQUIREMENT_SPACE_LIST_EVENT } from "./requirement-navigation"
 
 export type RequirementPreviewTab = "expert-process" | "source" | "prd"
 export type RequirementPrototypeStatus = {
@@ -603,10 +601,11 @@ export function RequirementDetailsPanel({
             onBack={() => setFullPrdWorkspaceOpen(false)}
             navigationValue="full-prd"
             navigationItems={[
-              { value: "full-prd", label: "完整需求 MD" },
+              { value: "full-prd", label: "整个需求", hasPrototype: fullPrdPrototypeGenerated },
               ...requirementSpaceManifest.functions.map((functionInfo) => ({
                 value: getPrototypeFunctionKey(functionInfo),
-                label: functionInfo.name || "未命名功能"
+                label: functionInfo.name || "未命名功能",
+                hasPrototype: Boolean(functionInfo.htmlFile?.trim())
               }))
             ]}
             onNavigate={(value) => {
@@ -669,10 +668,15 @@ export function RequirementDetailsPanel({
             navigationItems={
               requirementSpaceManifest
                 ? [
-                    { value: "full-prd", label: "完整需求 MD" },
+                    {
+                      value: "full-prd",
+                      label: "整个需求",
+                      hasPrototype: fullPrdPrototypeGenerated
+                    },
                     ...requirementSpaceManifest.functions.map((functionInfo) => ({
                       value: getPrototypeFunctionKey(functionInfo),
-                      label: functionInfo.name || "未命名功能"
+                      label: functionInfo.name || "未命名功能",
+                      hasPrototype: Boolean(functionInfo.htmlFile?.trim())
                     }))
                   ]
                 : undefined
@@ -1022,10 +1026,34 @@ export function RequirementDetailsPanel({
                     <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
                       {isRequirementSpacePublished(requirementSpaceManifest)
                         ? "需求已写入需求空间3.0，可进入详情页查看。"
-                        : "发布到 需求空间3.0，发布之后，其他同事可以在【需求空间3.0Tab】里选择到你的需求～"}
+                        : "发布到之后，其他同事可在【需求空间3.0Tab】里选择到你的需求～"}
                     </p>
                   </div>
                   <div className="flex shrink-0 flex-wrap items-center justify-end gap-1.5">
+                    {isRequirementSpacePublished(requirementSpaceManifest) ? (
+                      <TooltipProvider delayDuration={180}>
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="outline"
+                              className="h-7 gap-1 rounded-md px-2 text-[11px]"
+                              onClick={() =>
+                                window.dispatchEvent(
+                                  new CustomEvent(REQUIREMENT_SPACE_LIST_EVENT, {
+                                    detail: { title: requirement.title }
+                                  })
+                                )
+                              }
+                            >
+                              去Tab查看
+                            </Button>
+                          </TooltipTrigger>
+                          <TooltipContent>前往产品模式-需求特性-需求空间3.0 Tab</TooltipContent>
+                        </Tooltip>
+                      </TooltipProvider>
+                    ) : null}
                     {!isRequirementSpacePublished(requirementSpaceManifest) ? (
                       <>
                         <TooltipProvider delayDuration={180}>
@@ -1096,12 +1124,12 @@ export function RequirementDetailsPanel({
                       </>
                     ) : null}
                     {requirementSpaceManifest.prd.prDetailUrl ? (
-                      <Button
+                      <RequirementActionButton
                         type="button"
                         size="sm"
                         variant="outline"
                         className="h-7 gap-1 rounded-md px-2 text-[11px]"
-                        title={requirementSpaceManifest.prd.prDetailUrl}
+                        hint="前往组织级需求空间3.0平台查看该特性的详情信息。"
                         onClick={() => {
                           const url = requirementSpaceManifest.prd.prDetailUrl
                           if (url) void window.electron.openExternal(url)
@@ -1109,7 +1137,7 @@ export function RequirementDetailsPanel({
                       >
                         <Eye className="size-3 shrink-0" />
                         查看需求详情
-                      </Button>
+                      </RequirementActionButton>
                     ) : null}
                   </div>
                 </div>

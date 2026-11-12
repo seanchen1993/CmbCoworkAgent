@@ -59,7 +59,7 @@ export type RequirementRecord = {
   owner?: RequirementUser
   collaborators?: RequirementUser[]
   readOnly?: boolean
-  mock?: boolean
+  functionCount?: number
 }
 
 export type RequirementUser = {

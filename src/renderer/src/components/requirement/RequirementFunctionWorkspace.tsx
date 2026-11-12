@@ -23,10 +23,7 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 import { assembleBoundedTextPreview } from "@/lib/text-preview-pages"
 import type { WorkspaceFilePreviewReadResult } from "../../../../shared/workspace-file-preview"
 import type { RequirementRecord } from "./requirement-data"
-import {
-  REQUIREMENT_ACTION_HINTS,
-  RequirementActionButton
-} from "./RequirementActionButton"
+import { REQUIREMENT_ACTION_HINTS, RequirementActionButton } from "./RequirementActionButton"
 
 const PREVIEW_MAX_BYTES = 8 * 1024 * 1024
 const PREVIEW_MAX_PAGES = 64
@@ -85,7 +82,7 @@ export function RequirementFunctionWorkspace({
   prototypePreview?: ReactNode
   reloadToken: number
   onBack: () => void
-  navigationItems?: Array<{ value: string; label: string }>
+  navigationItems?: Array<{ value: string; label: string; hasPrototype?: boolean }>
   navigationValue?: string
   onNavigate?: (value: string) => void
   onRequestPrototypeDesign?: () => void
@@ -181,6 +178,11 @@ export function RequirementFunctionWorkspace({
                 >
                   <Check className={item.value === navigationValue ? "opacity-100" : "opacity-0"} />
                   <span className="min-w-0 flex-1 truncate">{item.label}</span>
+                  {item.hasPrototype ? (
+                    <span className="shrink-0 rounded bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium text-primary">
+                      有原型
+                    </span>
+                  ) : null}
                 </DropdownMenuItem>
               ))}
             </DropdownMenuContent>

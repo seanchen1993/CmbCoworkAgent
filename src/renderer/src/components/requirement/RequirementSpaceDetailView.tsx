@@ -12,6 +12,7 @@ import {
 import { toast } from "sonner"
 import {
   leanstarRequirementsApi,
+  type RichComponent,
   type RequirementDetail,
   type RequirementDocumentContent
 } from "@/api/leanstar-requirements"
@@ -31,14 +32,61 @@ import type { RequirementRecord } from "./requirement-data"
 import { RequirementDevelopmentActions } from "./RequirementDevelopmentActions"
 import { shouldHideRequirementDevelopment } from "./requirement-persona"
 import {
-  REQUIREMENT_ACTION_HINTS,
-  RequirementActionButton
-} from "./RequirementActionButton"
+  cacheRichComponent,
+  getCachedRichComponent,
+  richComponentCacheKey
+} from "@/lib/requirement-rich-component-cache"
+import { REQUIREMENT_ACTION_HINTS, RequirementActionButton } from "./RequirementActionButton"
 
 function isPermissionDeniedError(reason: unknown): boolean {
   if ((reason as { code?: unknown })?.code === "LRDFA02") return true
   const message = reason instanceof Error ? reason.message : String(reason ?? "")
   return message.includes("无权限") || message.includes("操作无权限")
+}
+
+function normalizeLeanstarMarkdown(value: string): string {
+  const lines = value.split("\n")
+  return lines
+    .map((line, index) => {
+      if (!/^\s*\|(?:\s*:?-+:?\s*\|)+\s*$/.test(line)) return line
+      const previous = lines[index - 1]?.trim() || ""
+      if (previous.startsWith("|") && previous.endsWith("|")) return line
+      const cells = Math.max(1, (line.match(/\|/g)?.length ?? 2) - 1)
+      return `| ${Array.from({ length: cells }, () => "").join(" | ")} |\n${line}`
+    })
+    .join("\n")
+}
+
+function renderRichComponent(
+  markdown: string,
+  component: RichComponent,
+  url: string,
+  description?: string
+): string {
+  const escapedId = component.id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+  const resource = component.resourceName || "附件"
+  const isImage =
+    (component.type || "").toUpperCase().includes("IMAGE") || /图片|image/i.test(resource)
+  const rendered = isImage ? `![${resource}](${url})` : `[下载 ${resource}](${url})`
+  const withDescription = description
+    ? `${rendered}\n\n> **${resource}描述：** ${description.replace(/\n/g, " ")}`
+    : rendered
+  return markdown.replace(
+    new RegExp(`!\\[[^\\]]*\\]\\((?:pic)?${escapedId}\\)`, "g"),
+    withDescription
+  )
+}
+
+function renderRichComponentError(
+  markdown: string,
+  component: RichComponent,
+  message: string
+): string {
+  const escapedId = component.id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+  return markdown.replace(
+    new RegExp(`!\\[[^\\]]*\\]\\((?:pic)?${escapedId}\\)`, "g"),
+    `> 无法获取到本资源（${component.resourceName || "附件"}）的数据，因为：${message}`
+  )
 }
 
 export function RequirementSpaceDetailView({
@@ -61,9 +109,11 @@ export function RequirementSpaceDetailView({
   const [detail, setDetail] = useState<RequirementDetail | null>(null)
   const [document, setDocument] = useState<RequirementDocumentContent | null>(null)
   const [loading, setLoading] = useState(true)
+  const [refreshing, setRefreshing] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [permissionDenied, setPermissionDenied] = useState(false)
   const [reloadToken, setReloadToken] = useState(0)
+  const [renderedContent, setRenderedContent] = useState("")
   const [prototypeHtml, setPrototypeHtml] = useState("")
   const [designResetOpen, setDesignResetOpen] = useState(false)
   const [designResetting, setDesignResetting] = useState(false)
@@ -95,7 +145,12 @@ export function RequirementSpaceDetailView({
         )
         setPermissionDenied(denied)
         if (detailResult.status === "fulfilled") setDetail(detailResult.value)
-        if (documentResult.status === "fulfilled") setDocument(documentResult.value)
+        if (documentResult.status === "fulfilled") {
+          setDocument(documentResult.value)
+          setRenderedContent(
+            normalizeLeanstarMarkdown(documentResult.value?.documentTextContent?.trim() || "")
+          )
+        }
         const unexpectedError = [detailResult, documentResult].find(
           (result) => result.status === "rejected" && !isPermissionDeniedError(result.reason)
         )
@@ -105,15 +160,59 @@ export function RequirementSpaceDetailView({
         if (!cancelled) setError(reason instanceof Error ? reason.message : "加载需求详情失败")
       })
       .finally(() => {
-        if (!cancelled) setLoading(false)
+        if (!cancelled) {
+          setLoading(false)
+          setRefreshing(false)
+        }
       })
     return () => {
       cancelled = true
     }
   }, [requirement, reloadToken])
 
+  useEffect(() => {
+    const components = document?.richComponents ?? []
+    if (!components.length || permissionDenied) return
+    let cancelled = false
+    const code = document?.code?.trim() || requirement.sourceName.trim()
+    void (async () => {
+      let descriptions = new Map<string, string>()
+      try {
+        descriptions = await leanstarRequirementsApi.getMultimodalComponentDescriptions(components)
+      } catch {
+        // Binary resources remain useful even when multimodal descriptions are unavailable.
+      }
+      let next = normalizeLeanstarMarkdown(document?.documentTextContent?.trim() || "")
+      for (const component of components) {
+        if (cancelled) return
+        const key = richComponentCacheKey(code, component)
+        const cached = getCachedRichComponent(key)
+        try {
+          const url =
+            cached?.url ||
+            URL.createObjectURL(
+              await leanstarRequirementsApi.downloadRichComponent(component, code)
+            )
+          const description = cached?.description || descriptions.get(component.id)
+          if (!cached) cacheRichComponent(key, { url, description })
+          next = renderRichComponent(next, component, url, description)
+        } catch (reason) {
+          const message = reason instanceof Error ? reason.message : "未知错误"
+          next = renderRichComponentError(next, component, message)
+          if (!cancelled) setRenderedContent(next)
+          return
+        }
+        if (!cancelled) setRenderedContent(next)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [document, permissionDenied, requirement.sourceName])
+
   const title = document?.title?.trim() || detail?.title?.trim() || requirement.title
-  const content = document?.documentTextContent?.trim() || ""
+  const content =
+    renderedContent || normalizeLeanstarMarkdown(document?.documentTextContent?.trim() || "")
   const ownerName = requirement.owner?.name.trim()
 
   return (
@@ -134,6 +233,11 @@ export function RequirementSpaceDetailView({
           <p className="text-[11px] text-muted-foreground">
             需求空间3.0 · {requirement.sourceName}
           </p>
+          {requirement.owner ? (
+            <p className="text-[11px] text-muted-foreground">
+              需求用户：{requirement.owner.name} / {requirement.owner.id}
+            </p>
+          ) : null}
         </div>
         {!shouldHideRequirementDevelopment() ? (
           <div className="ml-auto">
@@ -142,6 +246,9 @@ export function RequirementSpaceDetailView({
               onStartDevelopment={onStartDevelopment}
               onContinueDevelopment={onContinueDevelopment}
               onResetDevelopment={onResetDevelopment}
+              disabledReason={
+                permissionDenied ? "暂无该需求文件的查看权限，无法带入项目模式开发。" : undefined
+              }
             />
           </div>
         ) : null}
@@ -215,6 +322,25 @@ export function RequirementSpaceDetailView({
                           </p>
                         </div>
                       </div>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="mt-4 w-full"
+                        disabled={refreshing}
+                        onClick={() => {
+                          setRefreshing(true)
+                          setError(null)
+                          setReloadToken((value) => value + 1)
+                        }}
+                      >
+                        {refreshing ? (
+                          <Loader2 className="mr-1.5 size-3.5 animate-spin" />
+                        ) : (
+                          <RefreshCw className="mr-1.5 size-3.5" />
+                        )}
+                        {refreshing ? "正在刷新" : "刷新需求信息"}
+                      </Button>
                     </div>
                   </div>
                 </div>
@@ -257,14 +383,17 @@ export function RequirementSpaceDetailView({
                   size="sm"
                   className="h-7 text-xs"
                   hint={
-                    designBinding?.htmlFile
-                      ? REQUIREMENT_ACTION_HINTS.continueDesign
-                      : REQUIREMENT_ACTION_HINTS.startDesign
+                    permissionDenied
+                      ? "暂无该需求文件的查看权限，无法开始或继续设计。"
+                      : designBinding?.htmlId
+                        ? REQUIREMENT_ACTION_HINTS.continueDesign
+                        : REQUIREMENT_ACTION_HINTS.startDesign
                   }
                   onClick={() => void onDesignRequirement(requirement, content)}
+                  disabled={permissionDenied}
                 >
                   <PenTool className="mr-1.5 size-3.5" />
-                  {designBinding?.htmlFile ? "继续设计" : "去设计"}
+                  {designBinding?.htmlId ? "继续设计" : "去设计"}
                 </RequirementActionButton>
               </div>
             </div>

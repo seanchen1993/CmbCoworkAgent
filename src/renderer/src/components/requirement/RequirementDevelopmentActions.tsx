@@ -14,21 +14,20 @@ import { useAppStore } from "@/lib/store"
 import { findRequirementDevelopmentThreads } from "@/lib/requirement-development"
 import type { RequirementRecord } from "./requirement-data"
 import { shouldHideRequirementDevelopment } from "./requirement-persona"
-import {
-  REQUIREMENT_ACTION_HINTS,
-  RequirementActionButton
-} from "./RequirementActionButton"
+import { REQUIREMENT_ACTION_HINTS, RequirementActionButton } from "./RequirementActionButton"
 
 export function RequirementDevelopmentActions({
   requirement,
   onStartDevelopment,
   onContinueDevelopment,
-  onResetDevelopment
+  onResetDevelopment,
+  disabledReason
 }: {
   requirement: RequirementRecord
   onStartDevelopment: () => void | Promise<void>
   onContinueDevelopment: (threadId: string) => void | Promise<void>
   onResetDevelopment: () => void | Promise<void>
+  disabledReason?: string
 }): React.JSX.Element {
   const threads = useAppStore((state) => state.threads)
   const developmentThreads = useMemo(
@@ -63,10 +62,12 @@ export function RequirementDevelopmentActions({
           size="sm"
           className="h-7 gap-1 px-2 text-[11px]"
           hint={
-            inProgress
+            disabledReason ||
+            (inProgress
               ? REQUIREMENT_ACTION_HINTS.continueDevelopment
-              : REQUIREMENT_ACTION_HINTS.startDevelopment
+              : REQUIREMENT_ACTION_HINTS.startDevelopment)
           }
+          disabled={Boolean(disabledReason)}
           onClick={() => {
             if (existingThreadId) void onContinueDevelopment(existingThreadId)
             else void onStartDevelopment()

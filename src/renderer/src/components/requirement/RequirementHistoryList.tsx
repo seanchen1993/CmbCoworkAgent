@@ -44,63 +44,6 @@ import { getRequirementDevelopmentMetadata } from "@/lib/requirement-development
 const PAGE_SIZE = 15
 export type RequirementSourceFilter = "all" | "local" | "remote" | "space"
 
-const REMOTE_MOCK_REQUIREMENT: RequirementRecord = {
-  id: "mock:remote:shared-membership-migration",
-  threadIds: [],
-  developmentThreadIds: [],
-  systemId: "mock-membership",
-  title: "【Mock 数据】远端会员等级迁移需求",
-  requirementPath: "",
-  workspaceMissing: false,
-  coreFilesMissing: false,
-  coreFilesMissingReason: null,
-  updatedAt: "2026/10/22 09:30",
-  updatedAtTimestamp: Date.now(),
-  system: "会员系统",
-  status: "开发中",
-  fileName: "",
-  link: "",
-  sourceType: "text",
-  sourceName: "远端共享需求",
-  initialDescription: "会员等级规则调整后的历史数据迁移与权益重算，覆盖存量会员。",
-  needDesign: "1",
-  prdManifest: {
-    prd: {
-      name: "【Mock 数据】远端会员等级迁移需求",
-      status: "published",
-      description: "会员等级规则调整后的历史数据迁移与权益重算，覆盖存量会员。",
-      file: "mock-prd.md",
-      currentStep: 5,
-      needDesign: "1",
-      htmlFile: "",
-      htmlId: "",
-      prDetailUrl: "https://example.invalid/requirements/mock"
-    },
-    functions: [
-      {
-        fr: "FR-001",
-        name: "等级迁移",
-        description: "迁移存量会员等级",
-        file: "FR-001.md",
-        keywords: ["会员", "迁移"],
-        htmlFile: "prototype.html",
-        htmlId: "",
-        needDesign: "1"
-      }
-    ]
-  },
-  prd: "是",
-  origin: "remote",
-  owner: { id: "01045631", name: "王倩" },
-  collaborators: [
-    { id: "01998273", name: "张伟" },
-    { id: "01028819", name: "赵磊" },
-    { id: "01010254", name: "陈晨" }
-  ],
-  readOnly: true,
-  mock: true
-}
-
 function initials(value: string): string {
   return (value.trim().slice(0, 1) || "需").toUpperCase()
 }
@@ -237,6 +180,7 @@ export function RequirementHistoryList({
   query,
   sourceFilter,
   loading,
+  serverTotal,
   mineOnly,
   systemId,
   onOpen,
@@ -247,6 +191,7 @@ export function RequirementHistoryList({
   query: string
   sourceFilter: RequirementSourceFilter
   loading: boolean
+  serverTotal?: number
   mineOnly: boolean
   systemId: string | null
   onOpen: (requirement: RequirementRecord) => void
@@ -271,7 +216,7 @@ export function RequirementHistoryList({
 
   const visibleItems = useMemo(() => {
     const normalized = query.trim().toLocaleLowerCase()
-    const items = [...requirements, REMOTE_MOCK_REQUIREMENT]
+    const items = requirements
     return items
       .filter((item) => item.origin !== "local" || !systemId || item.systemId === systemId)
       .filter((item) => sourceFilter === "all" || item.origin === sourceFilter)
@@ -455,6 +400,14 @@ export function RequirementHistoryList({
                           {owner ? `${owner.name}/${owner.id}` : "用户信息暂无"}
                         </span>
                         <span className="text-border-emphasis">·</span>
+                        {item.origin === "space" ? (
+                          <>
+                            <span className="whitespace-nowrap">
+                              功能 {item.functionCount ?? 0}
+                            </span>
+                            <span className="text-border-emphasis">·</span>
+                          </>
+                        ) : null}
                         <span className="whitespace-nowrap tabular-nums">
                           {item.updatedAt
                             ? item.origin === "space"
@@ -521,7 +474,7 @@ export function RequirementHistoryList({
         </div>
 
         <div className="flex shrink-0 items-center justify-end gap-2 pt-5 text-xs text-muted-foreground">
-          <span className="mr-2">共 {visibleItems.length} 条</span>
+          <span className="mr-2">共 {serverTotal ?? visibleItems.length} 条</span>
           <button
             type="button"
             disabled={currentPage <= 1}

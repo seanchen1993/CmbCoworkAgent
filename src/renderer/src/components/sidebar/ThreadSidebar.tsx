@@ -9,7 +9,6 @@ import {
   Loader2,
   AlertCircle,
   LayoutDashboard,
-  Workflow,
   BarChart3,
   ChevronDown,
   ChevronRight,
@@ -30,7 +29,6 @@ import { Button } from "@/components/ui/button"
 import { IconPopoverButton } from "@/components/ui/icon-popover-button"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { ScrollArea } from "@/components/ui/scroll-area"
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { UpdateActionButton } from "@/components/update/UpdateActionButton"
 import { CmbDevClawLogo } from "@/components/branding/CmbDevClawLogo"
 import {
@@ -50,7 +48,6 @@ import {
   useThreadContext
 } from "@/lib/thread-context"
 import { cn, truncate } from "@/lib/utils"
-import { useFeatureGate } from "@/lib/feature-gates"
 import {
   cleanupDeletedThreadIfResident,
   deleteThreadGroupSequentially,
@@ -64,7 +61,6 @@ import {
 } from "@/lib/thread-group-selection"
 import { isHarnessFeatureThread, isHarnessProjectModeThread } from "@/lib/thread-classification"
 import { isRemoteInboxThread, REMOTE_INBOX_WORKSPACE_NAME } from "@/lib/remote-thread-display"
-import { FEATURE_GATES } from "../../../../shared/feature-gates"
 import {
   ContextMenu,
   ContextMenuContent,
@@ -528,12 +524,10 @@ export const ThreadSidebar = memo(function ThreadSidebar(): React.JSX.Element {
     loadMoreThreads,
     touchThreadSummaries,
     mainView,
-    previousThreadId,
     setMainView,
     showKanbanView,
     setShowKanbanView,
     showHarnessBoardView,
-    setShowHarnessBoardView,
     showDashboardView,
     setShowDashboardView,
     dashboardAllowed
@@ -553,12 +547,10 @@ export const ThreadSidebar = memo(function ThreadSidebar(): React.JSX.Element {
       loadMoreThreads: state.loadMoreThreads,
       touchThreadSummaries: state.touchThreadSummaries,
       mainView: state.mainView,
-      previousThreadId: state.previousThreadId,
       setMainView: state.setMainView,
       showKanbanView: state.showKanbanView,
       setShowKanbanView: state.setShowKanbanView,
       showHarnessBoardView: state.showHarnessBoardView,
-      setShowHarnessBoardView: state.setShowHarnessBoardView,
       showDashboardView: state.showDashboardView,
       setShowDashboardView: state.setShowDashboardView,
       dashboardAllowed: state.dashboardAllowed
@@ -630,57 +622,6 @@ export const ThreadSidebar = memo(function ThreadSidebar(): React.JSX.Element {
   threadStateSummariesRef.current = threadStateSummaries
   const activeSidebarTab: SidebarTab =
     showHarnessBoardView || mainView === "harness" ? "project" : "chat"
-  const {
-    enabled: projectModeEnabled,
-    loading: projectModeLoading,
-    refresh: refreshProjectModeGate
-  } = useFeatureGate(FEATURE_GATES.projectMode)
-  const projectModeForceRefreshRef = useRef<Promise<unknown> | null>(null)
-
-  const handleSelectChatTab = useCallback(async (): Promise<void> => {
-    if (mainView === "harness" || showHarnessBoardView) {
-      const previousThread = previousThreadId
-        ? threads.find((thread) => thread.thread_id === previousThreadId)
-        : null
-      if (previousThread && !isHarnessProjectModeThread(previousThread)) {
-        setShowHarnessBoardView(false)
-        return
-      }
-
-      const firstThread = threads.find((thread) => !isHarnessProjectModeThread(thread))
-      if (firstThread) {
-        await selectThread(firstThread.thread_id)
-        return
-      }
-
-      setShowHarnessBoardView(false)
-    }
-  }, [
-    mainView,
-    previousThreadId,
-    selectThread,
-    setShowHarnessBoardView,
-    showHarnessBoardView,
-    threads
-  ])
-
-  const handleSelectProjectTab = useCallback(async (): Promise<void> => {
-    if (projectModeEnabled) {
-      setShowHarnessBoardView(true)
-      return
-    }
-
-    toast.info("敬请期待")
-    if (!projectModeForceRefreshRef.current) {
-      const refreshPromise = refreshProjectModeGate({ refresh: true }).finally(() => {
-        if (projectModeForceRefreshRef.current === refreshPromise) {
-          projectModeForceRefreshRef.current = null
-        }
-      })
-      projectModeForceRefreshRef.current = refreshPromise
-    }
-  }, [projectModeEnabled, refreshProjectModeGate, setShowHarnessBoardView])
-
   const persistUnread = useCallback((ids: Set<string>) => {
     localStorage.setItem("threads:unreadIds", JSON.stringify([...ids]))
   }, [])
@@ -1206,58 +1147,6 @@ export const ThreadSidebar = memo(function ThreadSidebar(): React.JSX.Element {
         className="p-1 pb-0.5 space-y-1.5"
         style={{ paddingTop: "max(4px, var(--sidebar-safe-padding, 0px))" }}
       >
-        <div
-          role="tablist"
-          aria-label="侧边栏模式"
-          className="mb-2 grid h-8 grid-cols-2 rounded bg-sidebar-accent p-1"
-        >
-          <button
-            type="button"
-            role="tab"
-            aria-selected={activeSidebarTab === "chat"}
-            className={cn(
-              "flex min-w-0  items-center justify-center gap-1.5 rounded px-2 text-sm font-semibold transition-all focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
-              activeSidebarTab === "chat"
-                ? "shadow border border-border/70 bg-background text-foreground"
-                : "text-muted-foreground hover:text-foreground"
-            )}
-            onClick={() => void handleSelectChatTab()}
-          >
-            <MessageSquare className="size-3 shrink-0" />
-            <span className="min-w-0 truncate">对话模式</span>
-          </button>
-          <TooltipProvider delayDuration={120}>
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <button
-                  type="button"
-                  role="tab"
-                  aria-selected={activeSidebarTab === "project"}
-                  aria-disabled={!projectModeEnabled}
-                  className={cn(
-                    "flex min-w-0  items-center justify-center gap-1.5 rounded px-2 text-sm font-semibold transition-all focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
-                    projectModeEnabled
-                      ? activeSidebarTab === "project"
-                        ? "shadow border border-border/70 bg-background text-foreground"
-                        : "text-muted-foreground hover:text-foreground"
-                      : "cursor-not-allowed text-muted-foreground/50 opacity-60 hover:text-muted-foreground/60",
-                    projectModeLoading && !projectModeEnabled && "opacity-55"
-                  )}
-                  onClick={() => void handleSelectProjectTab()}
-                >
-                  <Workflow className="size-3 shrink-0" />
-                  <span className="min-w-0 truncate">项目模式</span>
-                </button>
-              </TooltipTrigger>
-              {!projectModeEnabled && (
-                <TooltipContent side="bottom" sideOffset={6}>
-                  敬请期待
-                </TooltipContent>
-              )}
-            </Tooltip>
-          </TooltipProvider>
-        </div>
-
         {activeSidebarTab === "chat" ? (
           <>
             <Button

@@ -2,12 +2,13 @@ import { useDeferredValue, useEffect, useState } from "react"
 import { Command, Plus, Search } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
-import { TooltipProvider } from "@/components/ui/tooltip"
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { cn } from "@/lib/utils"
 import { RequirementHistoryList, type RequirementSourceFilter } from "./RequirementHistoryList"
 import type { RequirementRecord, RequirementUser } from "./requirement-data"
 import { useRequirementStore } from "./requirement-store"
 import { isRequirementMine } from "./requirement-history-filter"
+import { REQUIREMENT_SPACE_LIST_QUERY_KEY } from "./requirement-navigation"
 
 const sourceFilters: Array<{ value: RequirementSourceFilter; label: string }> = [
   { value: "all", label: "全部" },
@@ -16,11 +17,18 @@ const sourceFilters: Array<{ value: RequirementSourceFilter; label: string }> = 
   { value: "space", label: "需求空间3.0" }
 ]
 
+function takeSpaceListQuery(): string {
+  const query = window.sessionStorage.getItem(REQUIREMENT_SPACE_LIST_QUERY_KEY) || ""
+  window.sessionStorage.removeItem(REQUIREMENT_SPACE_LIST_QUERY_KEY)
+  return query
+}
+
 export function RequirementHistoryView({
   requirements,
   currentUser,
   sourceFilter,
   requirementSpaceLoading,
+  requirementSpaceTotal,
   onSourceFilterChange,
   onNew,
   onOpenRequirement,
@@ -30,13 +38,15 @@ export function RequirementHistoryView({
   currentUser: RequirementUser | null
   sourceFilter: RequirementSourceFilter
   requirementSpaceLoading: boolean
+  requirementSpaceTotal: number
   onSourceFilterChange: (filter: RequirementSourceFilter) => void
   onNew: () => void
   onOpenRequirement: (requirement: RequirementRecord) => void
   onDeleteRequirement: (requirement: RequirementRecord) => Promise<void>
 }): React.JSX.Element {
-  const [searchInput, setSearchInput] = useState("")
-  const [query, setQuery] = useState("")
+  const [initialQuery] = useState(takeSpaceListQuery)
+  const [searchInput, setSearchInput] = useState(initialQuery)
+  const [query, setQuery] = useState(initialQuery)
   const [mineOnly, setMineOnly] = useState(false)
   const deferredQuery = useDeferredValue(query)
   const selectedSystemId = useRequirementStore((state) => state.selectedSystemId)
@@ -87,29 +97,46 @@ export function RequirementHistoryView({
                   全部需求/特性
                 </h1>
                 <span className="rounded-md bg-muted px-2 py-1 text-xs font-semibold tabular-nums text-muted-foreground">
-                  {visibleCount}
+                  {sourceFilter === "space" && !query.trim() && !mineOnly
+                    ? requirementSpaceTotal
+                    : visibleCount}
                 </span>
               </div>
               <div
                 className="flex h-9 items-center rounded-lg bg-background-interactive p-1"
                 aria-label="需求来源筛选"
               >
-                {sourceFilters.map((filter) => (
-                  <button
-                    key={filter.value}
-                    type="button"
-                    aria-pressed={sourceFilter === filter.value}
-                    onClick={() => onSourceFilterChange(filter.value)}
-                    className={cn(
-                      "h-7 rounded-md px-3 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-                      sourceFilter === filter.value
-                        ? "bg-background-elevated text-foreground shadow-sm"
-                        : "text-muted-foreground hover:text-foreground"
-                    )}
-                  >
-                    {filter.label}
-                  </button>
-                ))}
+                {sourceFilters.map((filter) => {
+                  const unavailable = filter.value === "remote"
+                  const button = (
+                    <button
+                      key={filter.value}
+                      type="button"
+                      disabled={unavailable}
+                      aria-pressed={sourceFilter === filter.value}
+                      onClick={() => onSourceFilterChange(filter.value)}
+                      className={cn(
+                        "h-7 rounded-md px-3 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                        sourceFilter === filter.value
+                          ? "bg-background-elevated text-foreground shadow-sm"
+                          : "text-muted-foreground hover:text-foreground",
+                        unavailable && "cursor-not-allowed opacity-50"
+                      )}
+                    >
+                      {filter.label}
+                    </button>
+                  )
+                  return unavailable ? (
+                    <Tooltip key={filter.value}>
+                      <TooltipTrigger asChild>
+                        <span>{button}</span>
+                      </TooltipTrigger>
+                      <TooltipContent>敬请期待</TooltipContent>
+                    </Tooltip>
+                  ) : (
+                    button
+                  )
+                })}
               </div>
               <div
                 className="flex h-9 items-center rounded-lg bg-background-interactive p-1"
@@ -185,6 +212,11 @@ export function RequirementHistoryView({
                 query={deferredQuery}
                 sourceFilter={sourceFilter}
                 loading={sourceFilter === "space" && requirementSpaceLoading}
+                serverTotal={
+                  sourceFilter === "space" && !deferredQuery.trim() && !mineOnly
+                    ? requirementSpaceTotal
+                    : undefined
+                }
                 mineOnly={mineOnly}
                 systemId={selectedSystemId}
                 onOpen={onOpenRequirement}
