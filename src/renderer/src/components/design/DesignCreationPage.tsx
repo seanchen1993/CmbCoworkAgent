@@ -51,8 +51,8 @@ const CREATION_METHODS: Array<{
   },
   {
     id: "import_url",
-    label: "通过链接还原",
-    description: "抓取现有页面作为参考，补充需求后再发送。",
+    label: "通过内置浏览器打开",
+    description: "打开网页后，选择基于此页编辑或添加为页面参考。",
     icon: ExternalLink
   },
   {

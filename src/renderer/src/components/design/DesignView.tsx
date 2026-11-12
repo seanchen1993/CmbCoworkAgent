@@ -223,7 +223,7 @@ function getSessionKindLabel(
 ): string {
   switch (kind) {
     case "import_url":
-      return "链接还原"
+      return "网页来源"
     case "import_html":
       return "HTML 导入"
     case "prototype_zip":
@@ -2474,10 +2474,11 @@ export function DesignView({
     async (
       rawUrl: string,
       source: "gallery" | "session",
+      purpose: "edit" | "reference",
       allowRestrictedPage = false
     ): Promise<{ success: boolean; error?: string; restricted?: boolean }> => {
       if (importingSource) return { success: false, error: "请等待当前导入完成" }
-      const ready = await ensureWorkspaceSelected("导入链接页面")
+      const ready = await ensureWorkspaceSelected("抓取网页")
       if (!ready) return { success: false, error: "请先选择工作目录" }
       const workspace = workspacePath || (await window.api.workspace.get())
       if (!workspace) {
@@ -2495,7 +2496,7 @@ export function DesignView({
           workspacePath: workspace,
           allowRestrictedPage
         })
-        if (!captured) return { success: false, error: "页面还原已取消" }
+        if (!captured) return { success: false, error: "页面抓取已取消" }
         if (!captured.success || !captured.html || !captured.artifactPath) {
           if (captured.status !== "needs_user_action" && captured.status !== "cancelled")
             showToast(captured.error || "抓取页面失败")
@@ -2508,12 +2509,41 @@ export function DesignView({
         const requestId = captured.requestId
         const assertCurrent = () => {
           if (!urlImport.isCurrent(requestId) || currentSessionIdRef.current !== expectedSession)
-            throw new Error("页面还原已取消或会话已切换")
+            throw new Error("页面抓取已取消或会话已切换")
         }
         assertCurrent()
         const sourceUrl = captured.finalUrl || rawUrl
         const label = captured.title || new URL(sourceUrl).hostname
         const warnings = captured.warnings.map((item) => item.message)
+        if (purpose === "edit") {
+          const sessionId = `ds_${uuid().slice(0, 8)}`
+          const prepared = await window.api.design.prepareUrlImportForEditing(requestId, sessionId)
+          if (!prepared.success || !prepared.artifactPath)
+            throw new Error(prepared.error || "准备网页编辑失败")
+          assertCurrent()
+          await applyImportedDesign({
+            sessionId,
+            createNew: true,
+            html: captured.html,
+            artifactPath: prepared.artifactPath,
+            workspacePath: workspace,
+            sourceInfo: { kind: "import_url", label, detail: sourceUrl },
+            userMessage: `基于网页编辑：${label}`,
+            warnings,
+            // Keep the captured page's appearance as the editing baseline.
+            designSystemId: null,
+            assertCurrent,
+            onBeforeCommit: async () => {
+              assertCurrent()
+              await urlImport.finish(requestId, true)
+              retained = true
+            }
+          })
+          setCreationPageOpen(false)
+          showToast("网页已打开，可直接描述要修改的地方")
+          requestAnimationFrame(() => composerRef.current?.focus())
+          return { success: true }
+        }
         const attachment: FileAttachment = {
           filename: `${label.replace(/[\\/:*?"<>|]/g, "_").slice(0, 80)}.html`,
           filePath: captured.artifactPath,
@@ -2533,7 +2563,7 @@ export function DesignView({
         await urlImport.finish(requestId, true)
         retained = true
         if (currentSessionIdRef.current !== expectedSession)
-          throw new Error("设计会话已切换，请重新选择要还原的链接")
+          throw new Error("设计会话已切换，请重新打开网页")
         if (source === "gallery" || !expectedSession) {
           const id = `ds_${uuid().slice(0, 8)}`
           const system = designSystems.find((item) => item.id === createDesignSystemId)
@@ -2593,7 +2623,8 @@ export function DesignView({
       urlImport,
       showToast,
       createDesignSystemId,
-      designSystems
+      designSystems,
+      applyImportedDesign
     ]
   )
 
@@ -4146,18 +4177,22 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
       clearConfirmation()
       closeResourcePanelOverlay("browser")
     }
-    const confirm = async (allowRestrictedPage = false) => {
+    let restrictedPurpose: "edit" | "reference" = "edit"
+    const confirm = async (purpose: "edit" | "reference", allowRestrictedPage = false) => {
       if (browserConfirmationIdRef.current !== id || getBrowserPageConfirmation()?.phase !== "ready") return
       if (currentSessionIdRef.current !== expectedSession) {
         cancel()
-        showToast("设计会话已切换，请重新选择要还原的链接")
+        showToast("设计会话已切换，请重新打开网页")
         return
       }
       updateBrowserPageConfirmation(id, {
-        phase: "capturing", message: "正在抓取内置浏览器当前页面…", error: undefined, restricted: false
+        phase: "capturing", message: "正在抓取内置浏览器当前页面…", error: undefined, restricted: false,
+        activeAction: purpose === "edit" ? "primary" : "secondary",
+        busyLabel: purpose === "edit" ? "正在准备编辑…" : "正在添加参考…"
       })
+      restrictedPurpose = purpose
       try {
-        const imported = await handleImportUrl(url, source, allowRestrictedPage)
+        const imported = await handleImportUrl(url, source, purpose, allowRestrictedPage)
         if (browserConfirmationIdRef.current !== id) return
         if (imported.success) {
           clearConfirmation()
@@ -4168,24 +4203,28 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
             phase: "ready",
             message: "请在下方完成登录或调整页面，确认后重新抓取。",
             error: imported.error,
-            restricted: imported.restricted
+            restricted: imported.restricted,
+            restrictedLabel: purpose === "edit" ? "仍然基于此页面编辑" : "仍然添加为页面参考"
           })
         }
       } catch (error) {
         updateBrowserPageConfirmation(id, {
           phase: "ready",
           message: "请确认当前页面后重试。",
-          error: error instanceof Error ? error.message : "页面还原失败"
+          error: error instanceof Error ? error.message : "页面抓取失败"
         })
       }
     }
     setBrowserPageConfirmation({
       id,
-      title: "抓取当前页面作为设计参考",
+      title: "选择当前网页的用途",
+      confirmLabel: "基于此页面编辑",
+      cancelLabel: "取消抓取",
+      secondaryAction: { label: "添加为页面参考", onConfirm: () => void confirm("reference") },
       phase: "opening",
       message: "正在打开链接，请稍候…",
-      onConfirm: () => void confirm(),
-      onConfirmRestricted: () => void confirm(true),
+      onConfirm: () => void confirm("edit"),
+      onConfirmRestricted: () => void confirm(restrictedPurpose, true),
       onCancel: cancel,
       onEditUrl: () => {
         clearConfirmation()
@@ -4197,16 +4236,16 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
       const opened = await window.api.design.openImportBrowser(url)
       updateBrowserPageConfirmation(id, opened.success ? {
         phase: "ready",
-        message: "请在下方完成登录并进入目标页面，确认后抓取为参考附件，再补充需求并发送。"
+        message: "请完成登录并进入目标页面。基于此页编辑会创建新设计；添加参考会保留当前设计，补充需求后再发送。"
       } : {
         phase: "ready",
-        message: "请在地址栏重新打开目标页面，或修改链接；确认当前页面后再还原。",
+        message: "请在地址栏重新打开目标页面，或修改链接；确认后选择编辑或添加参考。",
         error: opened.error || "打开内置浏览器失败"
       })
     } catch (error) {
       updateBrowserPageConfirmation(id, {
         phase: "ready",
-        message: "请在地址栏重新打开目标页面，或修改链接；确认当前页面后再还原。",
+        message: "请在地址栏重新打开目标页面，或修改链接；确认后选择编辑或添加参考。",
         error: error instanceof Error ? error.message : "打开内置浏览器失败"
       })
     }

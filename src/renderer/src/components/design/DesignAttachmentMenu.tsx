@@ -1,4 +1,4 @@
-import type { CSSProperties } from "react"
+import { useRef, type CSSProperties } from "react"
 import { ChevronDown, Paperclip } from "lucide-react"
 import { hasOpenModalDialog } from "@/lib/modal-dialog"
 import {
@@ -53,6 +53,11 @@ export function DesignAttachmentMenu({
   onImportHtml,
   onAttachCode
 }: DesignAttachmentMenuProps) {
+  const actionAfterCloseRef = useRef<(() => void) | null>(null)
+  const selectAfterClose = (action: () => void) => () => {
+    actionAfterCloseRef.current = action
+  }
+
   return (
     <div
       role="group"
@@ -86,6 +91,15 @@ export function DesignAttachmentMenu({
           align="start"
           className="w-56"
           onCloseAutoFocus={(event) => {
+            const action = actionAfterCloseRef.current
+            actionAfterCloseRef.current = null
+            if (action) {
+              // Finish closing before opening a native picker. Restoring focus to
+              // the trigger afterward can take focus from the picker on Windows.
+              event.preventDefault()
+              action()
+              return
+            }
             if (hasOpenModalDialog()) event.preventDefault()
           }}
         >
@@ -97,19 +111,22 @@ export function DesignAttachmentMenu({
               <DropdownMenuSeparator />
             </>
           )}
-          <DropdownMenuItem onSelect={onUploadScreenshot}>
+          <DropdownMenuItem onSelect={selectAfterClose(onUploadScreenshot)}>
             <span aria-hidden="true">🖼️</span>上传截图
           </DropdownMenuItem>
-          <DropdownMenuItem disabled={importDisabled} onSelect={onImportPrototypeZip}>
+          <DropdownMenuItem
+            disabled={importDisabled}
+            onSelect={selectAfterClose(onImportPrototypeZip)}
+          >
             <span aria-hidden="true">📦</span>上传原型图压缩包
           </DropdownMenuItem>
           {showContextActions && (
             <>
               <DropdownMenuSeparator />
-              <DropdownMenuItem disabled={importDisabled} onSelect={onImportUrl}>
-                <span aria-hidden="true">🌐</span>通过链接还原页面
+              <DropdownMenuItem disabled={importDisabled} onSelect={selectAfterClose(onImportUrl)}>
+                <span aria-hidden="true">🌐</span>通过内置浏览器打开
               </DropdownMenuItem>
-              <DropdownMenuItem disabled={importDisabled} onSelect={onImportHtml}>
+              <DropdownMenuItem disabled={importDisabled} onSelect={selectAfterClose(onImportHtml)}>
                 <span aria-hidden="true">📄</span>上传 HTML 文件
               </DropdownMenuItem>
               <DropdownMenuItem onSelect={onAttachCode}>

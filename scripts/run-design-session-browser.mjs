@@ -11,6 +11,7 @@ try {
   const entries = requested.length
     ? requested
     : [
+        "tests/design-attachment-menu-browser.spec.mts",
         "tests/design-reasoning-browser.spec.ts",
         "tests/design-background-session-browser.spec.ts",
         "tests/design-validation-feedback-browser.spec.ts"

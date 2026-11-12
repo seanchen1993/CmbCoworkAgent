@@ -4925,6 +4925,12 @@ const api = {
         requestId,
         keep
       )) satisfies DesignUrlImportApi["finishUrlImport"],
+    prepareUrlImportForEditing: ((requestId, sessionId) =>
+      ipcRenderer.invoke(
+        "design:prepare-url-import-for-editing",
+        requestId,
+        sessionId
+      )) satisfies DesignUrlImportApi["prepareUrlImportForEditing"],
     openImportBrowser: ((url) =>
       ipcRenderer.invoke(
         "design:open-import-browser",

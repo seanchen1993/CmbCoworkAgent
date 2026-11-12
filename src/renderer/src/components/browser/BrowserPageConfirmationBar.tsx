@@ -18,7 +18,9 @@ export function BrowserPageConfirmationBar({ loading, url }: { loading: boolean;
       aria-label={confirmation.confirmLabel || "确认页面并还原"}
       className="shrink-0 border-b border-border bg-background-elevated px-3 py-3 text-xs"
     >
-      <p className="font-medium text-foreground">{confirmation.title || "确认当前页面后还原设计"}</p>
+      <p className="font-medium text-foreground">
+        {confirmation.title || "确认当前页面后还原设计"}
+      </p>
       <p role="status" aria-live="polite" className="mt-1 text-muted-foreground">
         {confirmation.message}
       </p>
@@ -34,8 +36,22 @@ export function BrowserPageConfirmationBar({ loading, url }: { loading: boolean;
           onClick={confirmation.onConfirm}
           className="rounded-md bg-foreground px-3 py-2 font-medium text-background disabled:opacity-50"
         >
-          {capturing ? (confirmation.busyLabel || "正在还原…") : (confirmation.confirmLabel || "确认页面并还原")}
+          {capturing && confirmation.activeAction !== "secondary"
+            ? confirmation.busyLabel || "正在还原…"
+            : confirmation.confirmLabel || "确认页面并还原"}
         </button>
+        {confirmation.secondaryAction && (
+          <button
+            type="button"
+            disabled={disabled}
+            onClick={confirmation.secondaryAction.onConfirm}
+            className="rounded-md border border-border px-3 py-2 font-medium disabled:opacity-50"
+          >
+            {capturing && confirmation.activeAction === "secondary"
+              ? confirmation.busyLabel
+              : confirmation.secondaryAction.label}
+          </button>
+        )}
         <button
           type="button"
           disabled={confirmation.phase === "opening" || capturing}
@@ -49,16 +65,16 @@ export function BrowserPageConfirmationBar({ loading, url }: { loading: boolean;
           onClick={confirmation.onCancel}
           className="rounded-md border border-border px-3 py-2"
         >
-          {capturing ? "取消还原" : "取消"}
+          {capturing ? confirmation.cancelLabel || "取消还原" : "取消"}
         </button>
         {confirmation.restricted && !capturing && (
           <button
             type="button"
-            disabled={loading}
+            disabled={disabled}
             onClick={confirmation.onConfirmRestricted}
             className="py-1 text-muted-foreground underline"
           >
-            仍然还原当前页面
+            {confirmation.restrictedLabel || "仍然还原当前页面"}
           </button>
         )}
       </div>

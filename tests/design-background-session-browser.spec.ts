@@ -282,6 +282,9 @@ try {
         saveArtifact: async (id: string) => ({ success: true, filePath: `/workspace/${id}.html` }),
         saveArtifactFile: async (filePath: string) => importFixture.mode === "save-fail"
           ? { success: false, error: "磁盘写入失败" } : { success: true, filePath },
+        prepareUrlImportForEditing: async (_requestId: string, sessionId: string) => ({
+          success: true, artifactPath: `/workspace/.cmb-design/${sessionId}_design-main/index.html`
+        }),
         cancelUrlImport: async (requestId: string) => {
           importFixture.pending?.({ success: false, requestId, status: "cancelled", warnings: [] })
           importFixture.pending = null
@@ -299,9 +302,9 @@ try {
           importFixture.opened = true
           return importFixture.mode === "open-fail" ? { success: false, error: "打开失败测试" } : { success: true }
         },
-        importFromUrl: async (request: { requestId: string; source: string }) => {
+        importFromUrl: async (request: { requestId: string; source: string; allowRestrictedPage?: boolean }) => {
           importFixture.requests.push(request)
-          if (importFixture.mode === "login") return { success: false, requestId: request.requestId,
+          if (importFixture.mode === "login" && !request.allowRestrictedPage) return { success: false, requestId: request.requestId,
             status: "needs_user_action", warnings: [], finalUrl: "https://example.com/design", error: "请先完成登录" }
           if (importFixture.mode === "waiting") {
             for (const callback of importListeners) callback({ requestId: request.requestId, stage: "waiting_render", message: "等待测试页面渲染" })
@@ -399,7 +402,7 @@ try {
   }
   const startActions = page.getByRole("group", { name: "设计开始方式", exact: true })
   assert.equal(await startActions.getByRole("button").count(), 4, "the template picker sits beside the three context actions")
-  for (const label of ["选择模板", "通过链接还原页面", "上传 HTML 文件", "关联代码"]) {
+  for (const label of ["选择模板", "通过内置浏览器打开", "上传 HTML 文件", "关联代码"]) {
     assert.equal(await startActions.getByRole("button", { name: label, exact: false }).count(), 1)
   }
   assert.equal(await page.getByRole("button", { name: "上传截图", exact: true }).count(), 0,
@@ -507,11 +510,11 @@ try {
       throw error
     })
   await page.getByRole("button", { name: "更多上传选项", exact: true }).click()
-  for (const label of ["通过链接还原页面", "上传 HTML 文件", "关联代码"]) {
+  for (const label of ["通过内置浏览器打开", "上传 HTML 文件", "关联代码"]) {
     assert.equal(await page.getByRole("menuitem", { name: label, exact: true }).count(), 1,
       "context actions stay available after the welcome actions disappear")
   }
-  for (const label of ["通过链接还原页面", "上传 HTML 文件", "上传原型图压缩包"]) {
+  for (const label of ["通过内置浏览器打开", "上传 HTML 文件", "上传原型图压缩包"]) {
     assert.equal(await page.getByRole("menuitem", { name: label, exact: true }).getAttribute("aria-disabled"), "true",
       "imports cannot replace a design while it is generating")
   }
@@ -1020,7 +1023,7 @@ try {
   await page.getByRole("button", { name: "下一页模板" }).click()
   await page.getByRole("button", { name: "选择模板 5模板预览", exact: true }).click()
   await page.getByRole("button", { name: "上一页模板" }).click()
-  await page.getByRole("button", { name: "通过链接还原", exact: false }).click()
+  await page.getByRole("button", { name: "通过内置浏览器打开", exact: false }).click()
   await page.getByPlaceholder("https://example.com/page").fill("invalid-url")
   assert.equal(await page.getByRole("button", { name: "在内置浏览器中打开", exact: true }).isDisabled(), true)
   await page.getByRole("button", { name: "×", exact: true }).click()
@@ -1134,53 +1137,53 @@ try {
   // Opening a URL requires a separate confirmation of the live browser page before capture.
   await page.getByTitle("返回历史记录").click()
   await page.getByRole("button", { name: "新建设计" }).first().click()
-  await page.getByRole("button", { name: "通过链接还原", exact: false }).click()
+  await page.getByRole("button", { name: "通过内置浏览器打开", exact: false }).click()
   await page.getByPlaceholder("https://example.com/page").fill("https://example.com/private")
   await page.evaluate(() => { (window as any).importFixture.mode = "waiting" })
   const beforeCancelledImport = manager.list().length
   const requestCountBeforeOpen = await page.evaluate(() => (window as any).importFixture.requests.length)
   await page.getByRole("button", { name: "在内置浏览器中打开", exact: true }).click()
-  await page.getByRole("dialog", { name: "通过链接还原页面" }).waitFor({ state: "detached" })
+  await page.getByRole("dialog", { name: "通过内置浏览器打开" }).waitFor({ state: "detached" })
   assert.equal(await page.evaluate(() => (window as any).importFixture.requests.length), requestCountBeforeOpen,
     "opening the browser must never start a background capture")
-  await page.getByRole("button", { name: "确认页面并还原", exact: true }).click()
+  await page.getByRole("button", { name: "添加为页面参考", exact: true }).click()
   await page.getByText("等待测试页面渲染", { exact: true }).waitFor()
-  await page.getByRole("button", { name: "取消还原", exact: true }).click()
+  await page.getByRole("button", { name: "取消抓取", exact: true }).click()
   await page.waitForFunction(() => !(window as any).importFixture.pending)
   assert.equal(manager.list().length, beforeCancelledImport, "cancelled capture creates no design")
-  await page.getByRole("button", { name: "通过链接还原", exact: false }).click()
+  await page.getByRole("button", { name: "通过内置浏览器打开", exact: false }).click()
   await page.getByPlaceholder("https://example.com/page").fill("https://example.com/private")
   await page.evaluate(() => { (window as any).importFixture.mode = "finish-fail" })
   await page.getByRole("button", { name: "在内置浏览器中打开", exact: true }).click()
-  await page.getByRole("button", { name: "确认页面并还原", exact: true }).click()
+  await page.getByRole("button", { name: "添加为页面参考", exact: true }).click()
   await page.getByRole("alert").filter({ hasText: "页面还原任务已过期" }).waitFor()
   assert.equal(manager.list().length, beforeCancelledImport, "failed persistence creates no empty design")
-  await page.getByRole("region", { name: "确认页面并还原" }).getByRole("button", { name: "取消", exact: true }).click()
+  await page.getByRole("region", { name: "基于此页面编辑" }).getByRole("button", { name: "取消", exact: true }).click()
   // Editing the URL while the browser is open hides its native view using the modal marker.
-  await page.getByRole("button", { name: "通过链接还原", exact: false }).click()
+  await page.getByRole("button", { name: "通过内置浏览器打开", exact: false }).click()
   await page.getByPlaceholder("https://example.com/page").fill("https://example.com/private")
   await page.evaluate(() => { (window as any).importFixture.mode = "open-fail" })
   await page.getByRole("button", { name: "在内置浏览器中打开", exact: true }).click()
   await page.getByRole("alert").filter({ hasText: "打开失败测试" }).waitFor()
-  assert.equal(await page.getByRole("button", { name: "确认页面并还原", exact: true }).isEnabled(), true,
+  assert.equal(await page.getByRole("button", { name: "添加为页面参考", exact: true }).isEnabled(), true,
     "the user can correct navigation in the browser after an initial open error")
   const hiddenBeforeEdit = await page.evaluate(() => (window as any).importFixture.hiddenCount)
   await page.getByRole("button", { name: "修改链接", exact: true }).click()
   await page.waitForFunction((previous) => (window as any).importFixture.hiddenCount > previous, hiddenBeforeEdit)
-  assert.equal(await page.getByRole("dialog", { name: "通过链接还原页面" }).getAttribute("data-cmb-modal-dialog"), "true")
+  assert.equal(await page.getByRole("dialog", { name: "通过内置浏览器打开" }).getAttribute("data-cmb-modal-dialog"), "true")
   await page.getByRole("button", { name: "×", exact: true }).click()
-  await page.getByRole("button", { name: "通过链接还原", exact: false }).click()
+  await page.getByRole("button", { name: "通过内置浏览器打开", exact: false }).click()
   await page.getByPlaceholder("https://example.com/page").fill("https://example.com/private")
   await page.evaluate(() => { (window as any).importFixture.mode = "login" })
   await page.getByRole("button", { name: "在内置浏览器中打开", exact: true }).click()
-  await page.getByRole("button", { name: "确认页面并还原", exact: true }).click()
+  await page.getByRole("button", { name: "添加为页面参考", exact: true }).click()
   await page.getByRole("alert").filter({ hasText: "请先完成登录" }).waitFor()
-  assert.equal(await page.getByRole("dialog", { name: "通过链接还原页面" }).count(), 0)
+  assert.equal(await page.getByRole("dialog", { name: "通过内置浏览器打开" }).count(), 0)
   assert.equal(await page.evaluate(() => (window as any).importFixture.opened), true)
-  await page.evaluate(() => { (window as any).importFixture.mode = "success" })
   const runsBeforeCapture = requests.length
-  await page.getByRole("button", { name: "确认页面并还原", exact: true }).click()
+  await page.getByRole("button", { name: "仍然添加为页面参考", exact: true }).click()
   await page.getByText("页面参考", { exact: true }).waitFor()
+  await page.evaluate(() => { (window as any).importFixture.mode = "success" })
   const referenceId = (await page.evaluate(() => localStorage.getItem("design_last_session")))!
   const referenceState = manager.get(referenceId).state
   assert.equal(referenceState.messages.length, 0, "capture does not send or fabricate a conversation turn")
@@ -1195,15 +1198,15 @@ try {
   assert.equal(await page.locator('iframe[title="Design Preview"]').count(), 0)
   assert.equal(await page.evaluate(() => (window as any).importFixture.requests.at(-1).source), "current-browser")
   assert.equal(await page.evaluate(() => (window as any).importFixture.requests.every((request: any) => request.source === "current-browser")), true)
-  assert.equal(await page.getByRole("button", { name: "确认页面并还原", exact: true }).count(), 0,
+  assert.equal(await page.getByRole("button", { name: "添加为页面参考", exact: true }).count(), 0,
     "successful capture closes the browser confirmation surface")
   console.log("PASS URL import progress, cancellation and login/current-page recovery")
 
   await page.locator("textarea").first().fill("直接生成，参考此页面制作我的产品介绍")
-  await page.getByRole("button", { name: "通过链接还原页面", exact: false }).click()
+  await page.getByRole("button", { name: "通过内置浏览器打开", exact: false }).click()
   await page.getByPlaceholder("https://example.com/page").fill("https://example.com/another")
   await page.getByRole("button", { name: "在内置浏览器中打开", exact: true }).click()
-  await page.getByRole("button", { name: "确认页面并还原", exact: true }).click()
+  await page.getByRole("button", { name: "添加为页面参考", exact: true }).click()
   await page.waitForFunction(() => document.querySelectorAll(".design-composer-box")[0]?.textContent?.includes("2/3 个文件"))
   assert.equal(await page.locator("textarea").first().inputValue(), "直接生成，参考此页面制作我的产品介绍",
     "adding another reference preserves typed requirements")
@@ -1230,10 +1233,10 @@ try {
   const existingDesign = manager.get(referenceId).state
   await page.locator("textarea").first().fill("已有设计中的未发送需求")
   await page.getByRole("button", { name: "更多上传选项", exact: true }).click()
-  await page.getByRole("menuitem", { name: "通过链接还原页面", exact: false }).click()
+  await page.getByRole("menuitem", { name: "通过内置浏览器打开", exact: false }).click()
   await page.getByPlaceholder("https://example.com/page").fill("https://example.com/design")
   await page.getByRole("button", { name: "在内置浏览器中打开", exact: true }).click()
-  await page.getByRole("button", { name: "确认页面并还原", exact: true }).click()
+  await page.getByRole("button", { name: "添加为页面参考", exact: true }).click()
   await page.locator(".design-composer-box").getByText("页面参考", { exact: true }).waitFor()
   const afterReference = manager.get(referenceId).state
   assert.equal(afterReference.html, existingDesign.html, "adding a reference preserves the existing design")
@@ -1255,6 +1258,69 @@ try {
   }), true, "each capture is finalized only once with keep=true")
   console.log("PASS captured links remain removable persistent references until explicit send, without replacing an existing design")
 
+  // The same live page can become an editable baseline in a separate session.
+  const designBeforeEditingPage = structuredClone(manager.get(referenceId))
+  const runsBeforeEditingPage = requests.length
+  const sessionsBeforeEditingPage = manager.list().length
+  for (const [mode, error] of [["save-fail", "磁盘写入失败"], ["finish-fail", "页面还原任务已过期"]]) {
+    await page.getByRole("button", { name: "更多上传选项", exact: true }).click()
+    await page.getByRole("menuitem", { name: "通过内置浏览器打开", exact: true }).click()
+    await page.getByPlaceholder("https://example.com/page").fill("https://example.com/design")
+    await page.evaluate(value => { (window as any).importFixture.mode = value }, mode)
+    await page.getByRole("button", { name: "在内置浏览器中打开", exact: true }).click()
+    await page.getByRole("button", { name: "基于此页面编辑", exact: true }).click()
+    await page.getByRole("alert").filter({ hasText: error }).waitFor()
+    assert.equal(manager.list().length, sessionsBeforeEditingPage, "failed editing imports create no empty sessions")
+    assert.equal(manager.get(referenceId).state.html, designBeforeEditingPage.state.html)
+    await page.getByRole("region", { name: "基于此页面编辑" }).getByRole("button", { name: "取消", exact: true }).click()
+  }
+  await page.evaluate(() => { (window as any).importFixture.mode = "login" })
+  await page.getByRole("button", { name: "更多上传选项", exact: true }).click()
+  await page.getByRole("menuitem", { name: "通过内置浏览器打开", exact: true }).click()
+  await page.getByPlaceholder("https://example.com/page").fill("https://example.com/design")
+  await page.getByRole("button", { name: "在内置浏览器中打开", exact: true }).click()
+  await page.getByRole("button", { name: "基于此页面编辑", exact: true }).click()
+  await page.getByRole("alert").filter({ hasText: "请先完成登录" }).waitFor()
+  await page.getByRole("button", { name: "仍然基于此页面编辑", exact: true }).click()
+  await page.frameLocator('iframe[title="Design Preview"]').getByRole("heading", { name: "链接页面", exact: true }).waitFor()
+  await page.evaluate(() => { (window as any).importFixture.mode = "success" })
+  const editingPageId = (await page.evaluate(() => localStorage.getItem("design_last_session")))!
+  assert.notEqual(editingPageId, referenceId, "editing a webpage creates a separate design")
+  const editingPage = manager.get(editingPageId)
+  assert.match(editingPage.state.html, /链接页面/)
+  assert.equal(editingPage.state.generationState, "done")
+  assert.equal(editingPage.state.attachedFiles, null, "the editing baseline is not a reference attachment")
+  assert.equal(editingPage.state.selectedDesignSystemId, null, "a new design system does not restyle the captured page")
+  assert.equal(editingPage.state.artifactPath, `/workspace/.cmb-design/${editingPageId}_design-main/index.html`)
+  assert.equal(requests.length, runsBeforeEditingPage, "opening a webpage for editing never calls a model")
+  assert.equal(manager.get(referenceId).state.html, designBeforeEditingPage.state.html)
+  assert.deepEqual(manager.get(referenceId).state.messages, designBeforeEditingPage.state.messages)
+  await page.reload()
+  await page.frameLocator('iframe[title="Design Preview"]').getByRole("heading", { name: "链接页面", exact: true }).waitFor()
+  await page.locator("textarea").first().fill("将页面标题改为我的产品，保留其他内容")
+  await page.getByRole("button", { name: "▶ 发送", exact: true }).click()
+  await page.getByRole("button", { name: "■ 停止", exact: true }).waitFor()
+  assert.equal(requests.at(-1)!.isIteration, true)
+  assert.equal(requests.at(-1)!.kind, "patch", "small edits use the existing localized patch flow")
+  assert.equal(requests.at(-1)!.designSessionId, editingPageId)
+  assert.match(manager.get(editingPageId).state.html, /链接页面/)
+  assert.equal(requests.at(-1)!.sourceArtifactPath, editingPage.state.artifactPath)
+  emitters.at(-1)!({ type: "error", error: "网页局部编辑测试结束" })
+  completions.at(-1)!()
+  await page.getByText("网页局部编辑测试结束", { exact: false }).waitFor()
+  await page.locator("textarea").first().fill("新增页面筛选交互功能，保留当前页面结构和样式")
+  await page.getByRole("button", { name: "▶ 发送", exact: true }).click()
+  await page.getByRole("button", { name: "■ 停止", exact: true }).waitFor()
+  assert.equal(requests.at(-1)!.isIteration, true)
+  assert.equal(requests.at(-1)!.kind, "agent")
+  assert.match(requests.at(-1)!.currentHtml!, /链接页面/)
+  assert.equal(requests.at(-1)!.sourceArtifactPath, editingPage.state.artifactPath)
+  emitters.at(-1)!({ type: "error", error: "网页编辑测试结束" })
+  completions.at(-1)!()
+  await page.getByText("网页编辑测试结束", { exact: false }).waitFor()
+  console.log("PASS webpage editing opens the captured HTML without a model, preserves the previous design, survives reload and iterates on its baseline")
+
+  if (process.env.DESIGN_URL_IMPORT_ONLY !== "1") {
   for (const entry of [
     { button: "导入 HTML", heading: "HTML 导入页面", kind: "import_html" },
     { button: "原型压缩包", heading: "原型页面", kind: "prototype_zip" }
@@ -1700,6 +1766,8 @@ try {
   console.log(
     "PASS: progressive previews, bounded chat/comment patches, live node/listener preservation, durable undo/redo, background recovery, full-page creation, template/requirement persistence and URL/HTML/ZIP imports"
   )
+  }
+  assert.deepEqual(errors, [])
 } finally {
   await browser.close()
   await new Promise<void>((done, reject) =>

@@ -3,6 +3,10 @@ export interface BrowserPageConfirmation {
   title?: string
   confirmLabel?: string
   busyLabel?: string
+  secondaryAction?: { label: string; onConfirm: () => void }
+  activeAction?: "primary" | "secondary"
+  restrictedLabel?: string
+  cancelLabel?: string
   phase: "opening" | "ready" | "capturing"
   message: string
   error?: string

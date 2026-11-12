@@ -46,6 +46,11 @@ export function registerDesignUrlImportHandlers(getWorkspace: () => string): voi
   ipcMain.handle("design:finish-url-import", (event, requestId: string, keep: boolean) =>
     service.finish(event.sender.id, requestId, keep === true)
   )
+  ipcMain.handle(
+    "design:prepare-url-import-for-editing",
+    (event, requestId: string, sessionId: string) =>
+      service.prepareForEditing(event.sender.id, requestId, sessionId)
+  )
   ipcMain.handle("design:open-import-browser", async (_event, url: string) => {
     try {
       const parsed = new URL(url)

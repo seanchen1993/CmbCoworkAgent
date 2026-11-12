@@ -1,7 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest"
 
 const mocks = vi.hoisted(() => ({
-  handlers: new Map<string, (...args: any[]) => any>(),
+  handlers: new Map<string, (...args: unknown[]) => unknown>(),
+  prepareForEditing: vi.fn(),
   browser: {
     prepareTarget: vi.fn(),
     requestPanel: vi.fn(),
@@ -10,14 +11,18 @@ const mocks = vi.hoisted(() => ({
 }))
 vi.mock("electron", () => ({
   ipcMain: {
-    handle: (channel: string, handler: (...args: any[]) => any) =>
+    handle: (channel: string, handler: (...args: unknown[]) => unknown) =>
       mocks.handlers.set(channel, handler)
   }
 }))
 vi.mock("../browser/core/browser-service-registry", () => ({
   getGlobalBrowserService: () => mocks.browser
 }))
-vi.mock("../services/design/url-import-service", () => ({ DesignUrlImportService: class {} }))
+vi.mock("../services/design/url-import-service", () => ({
+  DesignUrlImportService: class {
+    prepareForEditing = mocks.prepareForEditing
+  }
+}))
 
 import { registerDesignUrlImportHandlers } from "./design-url-import"
 
@@ -26,6 +31,20 @@ describe("design browser opening", () => {
     vi.clearAllMocks()
     mocks.handlers.clear()
     registerDesignUrlImportHandlers(() => "/workspace")
+  })
+
+  it("prepares an editing copy owned by the requesting renderer", async () => {
+    mocks.prepareForEditing.mockResolvedValue({
+      success: true,
+      artifactPath: "/workspace/.cmb-design/ds_1234abcd_design-main/index.html"
+    })
+    const result = await mocks.handlers.get("design:prepare-url-import-for-editing")!(
+      { sender: { id: 17 } },
+      "capture-test",
+      "ds_1234abcd"
+    )
+    expect(result).toMatchObject({ success: true })
+    expect(mocks.prepareForEditing).toHaveBeenCalledWith(17, "capture-test", "ds_1234abcd")
   })
 
   it("keeps late target preparation from reopening a panel that the user closed", async () => {

@@ -81,7 +81,13 @@ export class DesignUrlImportService {
   private readonly jobs = new Map<string, ImportJob>()
   private readonly pending = new Map<
     string,
-    { owner: number; directory: string; timer: ReturnType<typeof setTimeout> }
+    {
+      owner: number
+      directory: string
+      timer: ReturnType<typeof setTimeout>
+      preparing?: boolean
+      editingDirectory?: string
+    }
   >()
   constructor(
     private readonly dependencies = {
@@ -113,10 +119,48 @@ export class DesignUrlImportService {
   async finish(owner: number, requestId: string, keep: boolean): Promise<boolean> {
     const pending = this.pending.get(requestId)
     if (!pending || pending.owner !== owner) return false
+    if (keep && pending.preparing) return false
     clearTimeout(pending.timer)
     this.pending.delete(requestId)
-    if (!keep) await fs.rm(pending.directory, { recursive: true, force: true })
+    if (!keep || pending.editingDirectory)
+      await fs.rm(pending.directory, { recursive: true, force: true })
+    if (!keep && pending.editingDirectory)
+      await fs.rm(pending.editingDirectory, { recursive: true, force: true })
     return true
+  }
+
+  /** Copy the complete capture into a new session's canonical artifact directory. */
+  async prepareForEditing(owner: number, requestId: string, sessionId: string) {
+    const pending = this.pending.get(requestId)
+    if (!pending || pending.owner !== owner)
+      return { success: false, error: "页面抓取任务已过期，请重新抓取" }
+    if (typeof sessionId !== "string" || !/^ds_[a-f0-9]{8}$/.test(sessionId))
+      return { success: false, error: "设计会话标识无效" }
+    if (pending.preparing || pending.editingDirectory)
+      return { success: false, error: "页面已在准备编辑，请勿重复操作" }
+    pending.preparing = true
+    const directory = path.join(path.dirname(pending.directory), `${sessionId}_design-main`)
+    let created = false
+    try {
+      // Exclusive creation keeps a captured page from replacing an existing design.
+      await fs.mkdir(directory)
+      created = true
+      pending.editingDirectory = directory
+      for (const entry of await fs.readdir(pending.directory))
+        await fs.cp(path.join(pending.directory, entry), path.join(directory, entry), {
+          recursive: true,
+          force: false,
+          errorOnExist: true
+        })
+      if (this.pending.get(requestId) !== pending) throw new Error("页面抓取已取消，请重新抓取")
+      return { success: true, artifactPath: path.join(directory, "index.html") }
+    } catch (error) {
+      if (created) await fs.rm(directory, { recursive: true, force: true })
+      pending.editingDirectory = undefined
+      return { success: false, error: error instanceof Error ? error.message : "准备网页编辑失败" }
+    } finally {
+      pending.preparing = false
+    }
   }
 
   async run(

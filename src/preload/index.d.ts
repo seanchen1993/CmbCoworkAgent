@@ -2368,6 +2368,7 @@ interface CustomAPI {
     importFromUrl: DesignUrlImportApi["importFromUrl"]
     cancelUrlImport: DesignUrlImportApi["cancelUrlImport"]
     finishUrlImport: DesignUrlImportApi["finishUrlImport"]
+    prepareUrlImportForEditing: DesignUrlImportApi["prepareUrlImportForEditing"]
     onUrlImportProgress: DesignUrlImportApi["onUrlImportProgress"]
     openImportBrowser: DesignUrlImportApi["openImportBrowser"]
     importPrototypeZip: (filePath: string) => Promise<{

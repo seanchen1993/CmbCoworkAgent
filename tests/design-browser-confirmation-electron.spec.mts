@@ -52,7 +52,9 @@ try {
             rightPanelCollapsed:true,isAgentFocusActive:false,overlayModule:open?'browser':null,onRequestBrowserPanel:()=>{}});
           const close=()=>{clearBrowserPageConfirmation('layout');setOpen(false)};
           const showConfirmation=()=>setBrowserPageConfirmation({id:'layout',phase:'ready',
-            message:'请确认下方页面，完成登录后再还原。',onConfirm:()=>{},onConfirmRestricted:()=>{},
+            title:'选择当前网页的用途',confirmLabel:'基于此页面编辑',
+            secondaryAction:{label:'添加为页面参考',onConfirm:()=>{}},
+            message:'请完成登录并进入目标页面，再选择编辑或添加参考。',onConfirm:()=>{},onConfirmRestricted:()=>{},
             onCancel:close,onEditUrl:()=>setModal(true)});
           return <div style={{height:'100vh',position:'relative'}}><div style={{height:48}}>
             <button onClick={showConfirmation}>开始确认</button>
@@ -179,7 +181,9 @@ try {
     })
   )
   await page.getByRole("button", { name: "开始确认", exact: true }).click()
-  const bar = page.getByRole("region", { name: "确认页面并还原" })
+  const bar = page.getByRole("region", { name: "基于此页面编辑" })
+  assert.equal(await bar.getByRole("button", { name: "基于此页面编辑", exact: true }).count(), 1)
+  assert.equal(await bar.getByRole("button", { name: "添加为页面参考", exact: true }).count(), 1)
   const barBounds = (await bar.boundingBox())!
   let native = await nativeState()
   for (
@@ -203,7 +207,7 @@ try {
     /原生浏览器页面/
   )
   await page.getByRole("button", { name: "修改链接", exact: true }).click()
-  await page.getByRole("dialog", { name: "通过链接还原页面" }).waitFor()
+  await page.getByRole("dialog", { name: "通过内置浏览器打开" }).waitFor()
   for (let attempt = 0; attempt < 100 && (await nativeState()).visible; attempt++)
     await page.waitForTimeout(50)
   assert.equal(
@@ -256,7 +260,7 @@ try {
   assert.equal((await nativeState()).url, native.url)
   await page.getByRole("button", { name: "开始确认", exact: true }).click()
   await page
-    .getByRole("region", { name: "确认页面并还原" })
+    .getByRole("region", { name: "基于此页面编辑" })
     .getByRole("button", { name: "取消", exact: true })
     .click()
   await page

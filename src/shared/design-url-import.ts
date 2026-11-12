@@ -49,6 +49,14 @@ export interface DesignUrlImportApi {
   importFromUrl: (request: DesignImportRequest | string) => Promise<DesignImportResult>
   cancelUrlImport: (requestId: string) => Promise<boolean>
   finishUrlImport: (requestId: string, keep: boolean) => Promise<boolean>
+  prepareUrlImportForEditing: (
+    requestId: string,
+    sessionId: string
+  ) => Promise<{
+    success: boolean
+    artifactPath?: string
+    error?: string
+  }>
   onUrlImportProgress: (callback: (event: DesignImportProgress) => void) => () => void
   openImportBrowser: (url: string) => Promise<{ success: boolean; error?: string }>
 }
