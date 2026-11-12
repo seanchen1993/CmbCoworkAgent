@@ -561,6 +561,10 @@ export function RequirementEntryView({
           throw new Error(saved.error || "保存需求文件失败")
         }
         const requirementFilePath = saved.prdPath
+        const prototypeFilePaths = listAllRequirementDesignEntries(requirement.id)
+          .map((entry) => entry.htmlFile?.trim() || "")
+          .filter(Boolean)
+        const uniquePrototypeFilePaths = [...new Set(prototypeFilePaths)]
         writeRequirementDevelopmentIntent({
           action: "create-development",
           requirementId: requirement.id,
@@ -568,12 +572,12 @@ export function RequirementEntryView({
           prompt: buildRequirementDevelopmentPrompt({
             title: requirement.title,
             requirementFilePath,
-            prototypeFilePaths: []
+            prototypeFilePaths: uniquePrototypeFilePaths
           }),
           requirementFilePath,
-          prototypeFilePaths: [],
+          prototypeFilePaths: uniquePrototypeFilePaths,
           functionCount: requirement.functionCount ?? 0,
-          hasPrototype: false
+          hasPrototype: uniquePrototypeFilePaths.length > 0
         })
         setShowHarnessBoardView(true)
         window.dispatchEvent(new Event(REQUIREMENT_DEVELOPMENT_ONBOARDING_EVENT))
