@@ -27,18 +27,15 @@ export async function completeRequirementDevelopment(input: {
   if (!workspacePath) throw new Error("请先配置特性会话工作区")
 
   const defaultNextAction = getHarnessRunNextAction(runDetail)
-  const requirementContext = intent.requirementContent?.trim()
-    ? `${intent.prompt}\n\n以下为随需求携带的完整 PRD 内容：\n\n${intent.requirementContent}`
-    : intent.prompt
   const nextAction = defaultNextAction
     ? {
         ...defaultNextAction,
-        userMessage: [requirementContext, defaultNextAction.userMessage]
+        userMessage: [intent.prompt, defaultNextAction.userMessage]
           .map((item) => item?.trim())
           .filter(Boolean)
           .join("\n\n")
       }
-    : { userMessage: requirementContext }
+    : { userMessage: intent.prompt }
 
   const thread = await createHarnessFeatureThread({
     projectId,

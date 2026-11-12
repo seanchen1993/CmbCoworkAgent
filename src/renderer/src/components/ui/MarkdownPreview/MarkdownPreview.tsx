@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect, useMemo } from "react"
-import ReactMarkdown, { type Components } from "react-markdown"
+import ReactMarkdown, { defaultUrlTransform, type Components } from "react-markdown"
 import remarkGfm from "remark-gfm"
 import remarkBreaks from "remark-breaks"
 import rehypeHighlight from "rehype-highlight"
@@ -20,6 +20,8 @@ interface MarkdownPreviewProps {
    * 未提供时本地相对路径图片按原样渲染（一般会裂图）。
    */
   readBinaryFile?: (resolvedPath: string) => Promise<string | null>
+  /** 允许调用方生成的内存 Blob URL；默认仍使用 react-markdown 的安全协议白名单。 */
+  allowBlobUrls?: boolean
 }
 
 /**
@@ -187,7 +189,8 @@ export function MarkdownPreview({
   defaultExpanded = true,
   whiteBackground = false,
   viewMode,
-  readBinaryFile
+  readBinaryFile,
+  allowBlobUrls = false
 }: MarkdownPreviewProps) {
   const [copySuccess, setCopySuccess] = useState(false)
   const [isExpanded, setIsExpanded] = useState(defaultExpanded)
@@ -301,7 +304,9 @@ export function MarkdownPreview({
               Markdown{currentViewMode === "preview" ? "预览" : "源码"}
             </span>
             {path && (
-              <span className="font-mono text-xs text-muted-foreground">{path.split(/[/\\]/).pop()}</span>
+              <span className="font-mono text-xs text-muted-foreground">
+                {path.split(/[/\\]/).pop()}
+              </span>
             )}
           </div>
           <div className="flex items-center gap-1">
@@ -351,6 +356,9 @@ export function MarkdownPreview({
                 components={markdownComponents}
                 rehypePlugins={[rehypeHighlight]}
                 remarkPlugins={[remarkGfm, remarkBreaks]}
+                urlTransform={(url) =>
+                  allowBlobUrls && url.startsWith("blob:") ? url : defaultUrlTransform(url)
+                }
               >
                 {content ?? ""}
               </ReactMarkdown>

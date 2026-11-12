@@ -1,4 +1,16 @@
+import {
+  createRequirementSpaceMockImage,
+  REQUIREMENT_SPACE_MOCK,
+  REQUIREMENT_SPACE_MOCK_CODE,
+  REQUIREMENT_SPACE_MOCK_COMPONENT,
+  REQUIREMENT_SPACE_MOCK_DESCRIPTION,
+  REQUIREMENT_SPACE_MOCK_DETAIL,
+  REQUIREMENT_SPACE_MOCK_DOCUMENT,
+  REQUIREMENT_SPACE_MOCK_ENABLED
+} from "./leanstar-requirements.mock"
+
 const LEANSTAR_GATEWAY_URL = import.meta.env.VITE_LEANSTAR_REVIEW_GATEWAY_URL?.trim() || ""
+
 export type ProductRequirement = {
   id?: string | number
   code: string
@@ -193,22 +205,32 @@ export const leanstarRequirementsApi = {
   },
 
   listDeliveryRequirements(
-    implementGroupDevopsOrgId: string
+    implementGroupDevopsOrgId: string,
+    page = 0,
+    size = 15
   ): Promise<PageResponse<ProductRequirement>> {
     return request<DeliveryRequirementsResponse>("/api/delivery/requirements", {
       method: "POST",
       body: JSON.stringify({
         implementGroupDevopsOrgId,
         category: "BY_REQUIREMENT",
-        page: 0,
-        size: 15
+        page,
+        size
       })
     }).then((result) => {
       if (result.returnCode && result.returnCode !== "SUC0000") {
         throw new Error(result.errorMsg || `查询需求列表失败：${result.returnCode}`)
       }
-      const page = result.body ?? { content: [], total: 0 }
-      return { ...page, total: page.totalElements ?? page.total ?? 0 }
+      const resultPage = result.body ?? { content: [], total: 0 }
+      const total = resultPage.totalElements ?? resultPage.total ?? 0
+      return {
+        ...resultPage,
+        content:
+          REQUIREMENT_SPACE_MOCK_ENABLED && page === 0
+            ? [REQUIREMENT_SPACE_MOCK, ...(resultPage.content ?? [])]
+            : resultPage.content,
+        total: total + (REQUIREMENT_SPACE_MOCK_ENABLED ? 1 : 0)
+      }
     })
   },
 
@@ -221,6 +243,9 @@ export const leanstarRequirementsApi = {
 
   // 第三步：需求整体详情
   getRequirementDetail(code: string): Promise<RequirementDetail | null> {
+    if (REQUIREMENT_SPACE_MOCK_ENABLED && code === REQUIREMENT_SPACE_MOCK_CODE) {
+      return Promise.resolve(REQUIREMENT_SPACE_MOCK_DETAIL)
+    }
     return request<RequirementDetail | ApiDetailResponse>(
       `/api/requirement/product-requirements/${encodeURIComponent(code)}/detail`,
       { method: "GET" }
@@ -237,6 +262,9 @@ export const leanstarRequirementsApi = {
   },
 
   getRequirementDocumentContent(code: string): Promise<RequirementDocumentContent | null> {
+    if (REQUIREMENT_SPACE_MOCK_ENABLED && code === REQUIREMENT_SPACE_MOCK_CODE) {
+      return Promise.resolve(REQUIREMENT_SPACE_MOCK_DOCUMENT)
+    }
     return request<ApiDocumentContentResponse>(
       `/api/requirement/document-content/${encodeURIComponent(code)}`,
       { method: "GET" }
@@ -249,6 +277,13 @@ export const leanstarRequirementsApi = {
   },
 
   downloadRichComponent(component: RichComponent, requirementCode: string): Promise<Blob> {
+    if (
+      REQUIREMENT_SPACE_MOCK_ENABLED &&
+      requirementCode === REQUIREMENT_SPACE_MOCK_CODE &&
+      component.id === REQUIREMENT_SPACE_MOCK_COMPONENT.id
+    ) {
+      return Promise.resolve(createRequirementSpaceMockImage())
+    }
     return requestFile("/api/requirement/download-zhaohu-doc-component", {
       componentId: component.id,
       resourceName: component.resourceName,
@@ -257,6 +292,14 @@ export const leanstarRequirementsApi = {
   },
 
   getMultimodalComponentDescriptions(components: RichComponent[]): Promise<Map<string, string>> {
+    if (
+      REQUIREMENT_SPACE_MOCK_ENABLED &&
+      components.some((component) => component.id === REQUIREMENT_SPACE_MOCK_COMPONENT.id)
+    ) {
+      return Promise.resolve(
+        new Map([[REQUIREMENT_SPACE_MOCK_COMPONENT.id, REQUIREMENT_SPACE_MOCK_DESCRIPTION]])
+      )
+    }
     const typeMap: Record<string, string> = {
       IMAGE: "IMAGE",
       MIND: "MIND",

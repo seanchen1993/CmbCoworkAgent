@@ -181,6 +181,8 @@ export function RequirementHistoryList({
   sourceFilter,
   loading,
   serverTotal,
+  serverPage,
+  onServerPageChange,
   mineOnly,
   systemId,
   onOpen,
@@ -192,6 +194,8 @@ export function RequirementHistoryList({
   sourceFilter: RequirementSourceFilter
   loading: boolean
   serverTotal?: number
+  serverPage?: number
+  onServerPageChange?: (page: number) => void
   mineOnly: boolean
   systemId: string | null
   onOpen: (requirement: RequirementRecord) => void
@@ -240,9 +244,18 @@ export function RequirementHistoryList({
             .includes(normalized)
       )
   }, [currentUser, mineOnly, query, requirements, sourceFilter, systemId])
-  const totalPages = Math.max(1, Math.ceil(visibleItems.length / PAGE_SIZE))
-  const currentPage = Math.min(page, totalPages)
-  const pageItems = visibleItems.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE)
+  const usesServerPagination = serverPage !== undefined && onServerPageChange !== undefined
+  const totalPages = Math.max(
+    1,
+    Math.ceil(
+      (usesServerPagination ? (serverTotal ?? visibleItems.length) : visibleItems.length) /
+        PAGE_SIZE
+    )
+  )
+  const currentPage = usesServerPagination ? serverPage + 1 : Math.min(page, totalPages)
+  const pageItems = usesServerPagination
+    ? visibleItems
+    : visibleItems.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE)
   const confirmDelete = async (): Promise<void> => {
     if (!toDelete) return
     setIsDeleting(true)
@@ -478,7 +491,11 @@ export function RequirementHistoryList({
           <button
             type="button"
             disabled={currentPage <= 1}
-            onClick={() => setPageState({ filterKey, page: currentPage - 1 })}
+            onClick={() =>
+              usesServerPagination
+                ? onServerPageChange(currentPage - 2)
+                : setPageState({ filterKey, page: currentPage - 1 })
+            }
             className="flex size-8 items-center justify-center rounded-lg border border-border bg-background-elevated disabled:opacity-40"
             aria-label="上一页"
           >
@@ -489,7 +506,11 @@ export function RequirementHistoryList({
               key={number}
               type="button"
               aria-current={number === currentPage ? "page" : undefined}
-              onClick={() => setPageState({ filterKey, page: number })}
+              onClick={() =>
+                usesServerPagination
+                  ? onServerPageChange(number - 1)
+                  : setPageState({ filterKey, page: number })
+              }
               className={cn(
                 "size-8 rounded-lg border text-xs font-semibold",
                 number === currentPage
@@ -503,7 +524,11 @@ export function RequirementHistoryList({
           <button
             type="button"
             disabled={currentPage >= totalPages}
-            onClick={() => setPageState({ filterKey, page: currentPage + 1 })}
+            onClick={() =>
+              usesServerPagination
+                ? onServerPageChange(currentPage)
+                : setPageState({ filterKey, page: currentPage + 1 })
+            }
             className="flex size-8 items-center justify-center rounded-lg border border-border bg-background-elevated disabled:opacity-40"
             aria-label="下一页"
           >

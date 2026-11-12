@@ -18,7 +18,6 @@ export type RequirementDevelopmentIntent = {
   prototypeFilePaths: string[]
   functionCount: number
   hasPrototype: boolean
-  requirementContent?: string
 }
 
 export type RequirementDevelopmentOpenSessionIntent = {

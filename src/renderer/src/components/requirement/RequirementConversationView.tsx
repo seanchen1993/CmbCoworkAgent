@@ -10,11 +10,7 @@ import { Button } from "@/components/ui/button"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { useAppStore } from "@/lib/store"
 import { assembleBoundedTextPreview } from "@/lib/text-preview-pages"
-import {
-  useAllThreadStates,
-  useThreadState,
-  useThreadStream
-} from "@/lib/thread-context"
+import { useAllThreadStates, useThreadState, useThreadStream } from "@/lib/thread-context"
 import { cn } from "@/lib/utils"
 import {
   beginOpenResourcePreviewIntent,
@@ -247,7 +243,7 @@ function RequirementConversationSession({
   const setShowHarnessBoardView = useAppStore((state) => state.setShowHarnessBoardView)
   const openSubagentFocusView = useAppStore((state) => state.openSubagentFocusView)
   const subagentFocusView = useAppStore((state) => state.subagentFocusView)
-  const updateThread = useAppStore((state) => state.updateThread)
+  const patchThreadMetadata = useAppStore((state) => state.patchThreadMetadata)
   const [selectedThreadId, setSelectedThreadId] = useState<string | null>(
     activeThreadId && requirement.threadIds.includes(activeThreadId)
       ? activeThreadId
@@ -366,18 +362,16 @@ function RequirementConversationSession({
       .getState()
       .threads.filter((thread) => threadIds.has(thread.thread_id))
     await Promise.all(
-      linkedThreads.map((thread) => {
-        const metadata = { ...(thread.metadata ?? {}) }
-        delete metadata.requirementDevelopment
-        return updateThread(thread.thread_id, { metadata })
-      })
+      linkedThreads.map((thread) =>
+        patchThreadMetadata(thread.thread_id, { remove: ["requirementDevelopment"] })
+      )
     )
   }, [
     onRequirementUpdated,
     requirement.developmentThreadIds,
     requirement.id,
     requirement.system,
-    updateThread
+    patchThreadMetadata
   ])
   const handleFunctionWorkspaceChange = useCallback((open: boolean) => {
     setFunctionWorkspaceOpen(open)

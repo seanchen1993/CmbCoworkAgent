@@ -350,6 +350,7 @@ export function RequirementSpaceDetailView({
                   showHeader={false}
                   showModeToggle={false}
                   whiteBackground
+                  allowBlobUrls
                   className="min-h-full"
                 />
               ) : (
@@ -365,7 +366,7 @@ export function RequirementSpaceDetailView({
               <PenTool className="size-4 text-primary" />
               <h3 className="text-sm font-semibold">原型预览</h3>
               <div className="ml-auto flex items-center gap-2">
-                {designBinding?.htmlFile ? (
+                {designBinding?.htmlId ? (
                   <RequirementActionButton
                     type="button"
                     variant="outline"

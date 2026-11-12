@@ -19,7 +19,8 @@ export const RENDERER_WRITABLE_THREAD_METADATA_KEYS = new Set([
   "memoryEnabled",
   "outputStyle",
   "conciseModeEnabled",
-  "model"
+  "model",
+  "requirementDevelopment"
 ])
 
 function assertSafeMetadataKey(key: string): void {
@@ -40,9 +41,7 @@ export function parseThreadMetadata(raw: string | null | undefined): Record<stri
   }
 }
 
-export function getThreadExecutionMode(
-  metadata: Record<string, unknown>
-): ThreadExecutionMode {
+export function getThreadExecutionMode(metadata: Record<string, unknown>): ThreadExecutionMode {
   return resolveThreadExecutionModeFromMetadata(metadata)
 }
 
@@ -157,6 +156,8 @@ export function validateRendererThreadMetadataPatch(patch: ThreadMetadataPatch):
   for (const [key, value] of Object.entries(patch.set ?? {})) {
     if (value === undefined) throw new Error(`Invalid thread metadata value for ${key}`)
     switch (key) {
+      case "requirementDevelopment":
+        throw new Error("requirementDevelopment can only be removed by the renderer")
       case "agentMode":
         if (value !== "normal" && value !== "coordinator" && value !== "workflow") {
           throw new Error("Invalid agentMode")
@@ -241,7 +242,5 @@ export function patchLatestThreadMetadata(
   patch: ThreadMetadataPatch
 ): { row: ThreadRow; metadata: Record<string, unknown> } {
   validateThreadMetadataPatch(patch)
-  return mutateLatestThreadMetadata(threadId, (latest) =>
-    applyThreadMetadataPatch(latest, patch)
-  )
+  return mutateLatestThreadMetadata(threadId, (latest) => applyThreadMetadataPatch(latest, patch))
 }

@@ -29,6 +29,8 @@ export function RequirementHistoryView({
   sourceFilter,
   requirementSpaceLoading,
   requirementSpaceTotal,
+  requirementSpacePage,
+  onRequirementSpacePageChange,
   onSourceFilterChange,
   onNew,
   onOpenRequirement,
@@ -39,6 +41,8 @@ export function RequirementHistoryView({
   sourceFilter: RequirementSourceFilter
   requirementSpaceLoading: boolean
   requirementSpaceTotal: number
+  requirementSpacePage: number
+  onRequirementSpacePageChange: (page: number) => void
   onSourceFilterChange: (filter: RequirementSourceFilter) => void
   onNew: () => void
   onOpenRequirement: (requirement: RequirementRecord) => void
@@ -216,6 +220,10 @@ export function RequirementHistoryView({
                   sourceFilter === "space" && !deferredQuery.trim() && !mineOnly
                     ? requirementSpaceTotal
                     : undefined
+                }
+                serverPage={sourceFilter === "space" ? requirementSpacePage : undefined}
+                onServerPageChange={
+                  sourceFilter === "space" ? onRequirementSpacePageChange : undefined
                 }
                 mineOnly={mineOnly}
                 systemId={selectedSystemId}

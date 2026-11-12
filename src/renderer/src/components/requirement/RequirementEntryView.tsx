@@ -42,7 +42,15 @@ import {
   openRequirementDesign
 } from "@/lib/requirement-design-entry"
 import { createPromptDesignSession } from "@/components/design/session-client"
-import { leanstarRequirementsApi, type ProductRequirement } from "@/api/leanstar-requirements"
+import {
+  leanstarRequirementsApi,
+  type ProductRequirement,
+  type RichComponent
+} from "@/api/leanstar-requirements"
+import {
+  REQUIREMENT_SPACE_MOCK,
+  REQUIREMENT_SPACE_MOCK_ENABLED
+} from "@/api/leanstar-requirements.mock"
 import {
   buildRequirementDevelopmentPrompt,
   findRequirementDevelopmentThreads,
@@ -82,6 +90,24 @@ const REQUIREMENT_SPACE_STATUS_LABELS: Record<string, string> = {
   // 兼容旧接口曾返回的状态值。
   DEVELOPING: "开发中",
   CHECKING_SUCCESS: "审批通过"
+}
+
+function appendRichComponentDescriptions(
+  markdown: string,
+  components: RichComponent[],
+  descriptions: Map<string, string>
+): string {
+  let content = markdown
+  for (const component of components) {
+    const description = descriptions.get(component.id)?.trim()
+    if (!description) continue
+    const escapedId = component.id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+    content = content.replace(
+      new RegExp(`(!\\[[^\\]]*\\]\\((?:pic)?${escapedId}\\))`, "g"),
+      `$1\n\n> **${component.resourceName || "附件"}描述：** ${description.replace(/\n/g, " ")}`
+    )
+  }
+  return content
 }
 
 function fromRequirementSpaceItem(
@@ -165,6 +191,7 @@ export function RequirementEntryView({
   const [requirementsLoaded, setRequirementsLoaded] = useState(false)
   const [requirementSpaceLoading, setRequirementSpaceLoading] = useState(false)
   const [requirementSpaceTotal, setRequirementSpaceTotal] = useState(0)
+  const [requirementSpacePage, setRequirementSpacePage] = useState(0)
   const [sourceFilter, setSourceFilter] = useState<RequirementSourceFilter>("local")
   const [tokenDialogOpen, setTokenDialogOpen] = useState(false)
   const [tokenDraft, setTokenDraft] = useState("")
@@ -180,6 +207,7 @@ export function RequirementEntryView({
       const title = (event as CustomEvent<{ title?: string }>).detail?.title?.trim() || ""
       window.sessionStorage.setItem(REQUIREMENT_SPACE_LIST_QUERY_KEY, title)
       requirementSpaceLoadedRef.current = false
+      setRequirementSpacePage(0)
       setSourceFilter("space")
       setScreen("history")
     }
@@ -314,13 +342,27 @@ export function RequirementEntryView({
       return
     requirementSpaceLoadedRef.current = true
     const implementGroupDevopsOrgId = currentUserOriginOrgId
+    if (REQUIREMENT_SPACE_MOCK_ENABLED && requirementSpacePage === 0) {
+      const mockRequirement = fromRequirementSpaceItem(
+        REQUIREMENT_SPACE_MOCK,
+        implementGroupDevopsOrgId || "mock-org",
+        currentUserOrgName || "需求空间3.0"
+      )
+      setRequirementSpaceTotal((current) => Math.max(1, current))
+      setRequirements((current) => [
+        ...current.filter(
+          (item) => item.origin !== "space" || item.sourceName !== REQUIREMENT_SPACE_MOCK.code
+        ),
+        mockRequirement
+      ])
+    }
     if (!implementGroupDevopsOrgId) {
       requirementSpaceLoadedRef.current = false
       return
     }
     setRequirementSpaceLoading(true)
     void leanstarRequirementsApi
-      .listDeliveryRequirements(implementGroupDevopsOrgId)
+      .listDeliveryRequirements(implementGroupDevopsOrgId, requirementSpacePage)
       .then((page) => {
         setRequirementSpaceTotal(page.total ?? page.content?.length ?? 0)
         return (page.content ?? []).map((item) =>
@@ -358,6 +400,7 @@ export function RequirementEntryView({
     currentUserOrgName,
     currentUserOriginOrgId,
     requirementSpaceRetryToken,
+    requirementSpacePage,
     requirementsLoaded,
     screen,
     sourceFilter
@@ -478,12 +521,40 @@ export function RequirementEntryView({
   const startSpaceRequirementDevelopment = useCallback(
     async (requirement: RequirementRecord): Promise<void> => {
       try {
-        const requirementContent =
-          (
-            await leanstarRequirementsApi.getRequirementDocumentContent(requirement.sourceName)
-          )?.documentTextContent?.trim() || ""
+        const document = await leanstarRequirementsApi.getRequirementDocumentContent(
+          requirement.sourceName
+        )
+        const rawContent = document?.documentTextContent?.trim() || ""
+        const components = document?.richComponents ?? []
+        let requirementContent = rawContent
+        if (components.length) {
+          try {
+            const descriptions =
+              await leanstarRequirementsApi.getMultimodalComponentDescriptions(components)
+            requirementContent = appendRichComponentDescriptions(
+              rawContent,
+              components,
+              descriptions
+            )
+          } catch {
+            // 描述查询失败不阻断携带主 PRD 文件。
+          }
+        }
         if (!requirementContent) throw new Error("需求文档内容为空，无法开始开发")
-        const requirementFilePath = `需求空间3.0：${requirement.sourceName}`
+        const workDir = await window.api.requirements.getWorkDir()
+        if (!workDir) throw new Error("请先配置需求工作目录")
+        const saved = await window.api.requirements.saveFiles({
+          workspacePath: workDir,
+          requirementId: requirement.id,
+          prd: {
+            filename: `需求空间3.0-${requirement.sourceName}.md`,
+            content: requirementContent
+          }
+        })
+        if (!saved.success || !saved.prdPath) {
+          throw new Error(saved.error || "保存需求文件失败")
+        }
+        const requirementFilePath = saved.prdPath
         writeRequirementDevelopmentIntent({
           action: "create-development",
           requirementId: requirement.id,
@@ -496,8 +567,7 @@ export function RequirementEntryView({
           requirementFilePath,
           prototypeFilePaths: [],
           functionCount: requirement.functionCount ?? 0,
-          hasPrototype: false,
-          requirementContent
+          hasPrototype: false
         })
         setShowHarnessBoardView(true)
         window.dispatchEvent(new Event(REQUIREMENT_DEVELOPMENT_ONBOARDING_EVENT))
@@ -530,13 +600,11 @@ export function RequirementEntryView({
         requirement.id,
         useAppStore.getState().threads
       )
-      const updateThread = useAppStore.getState().updateThread
+      const patchThreadMetadata = useAppStore.getState().patchThreadMetadata
       await Promise.all(
-        threads.map((thread) => {
-          const metadata = { ...(thread.metadata ?? {}) }
-          delete metadata.requirementDevelopment
-          return updateThread(thread.thread_id, { metadata })
-        })
+        threads.map((thread) =>
+          patchThreadMetadata(thread.thread_id, { remove: ["requirementDevelopment"] })
+        )
       )
     },
     []
@@ -716,7 +784,18 @@ export function RequirementEntryView({
           sourceFilter={sourceFilter}
           requirementSpaceLoading={requirementSpaceLoading}
           requirementSpaceTotal={requirementSpaceTotal}
-          onSourceFilterChange={setSourceFilter}
+          requirementSpacePage={requirementSpacePage}
+          onRequirementSpacePageChange={(page) => {
+            requirementSpaceLoadedRef.current = false
+            setRequirementSpacePage(page)
+          }}
+          onSourceFilterChange={(filter) => {
+            if (filter === "space") {
+              requirementSpaceLoadedRef.current = false
+              setRequirementSpacePage(0)
+            }
+            setSourceFilter(filter)
+          }}
           onNew={() => startNewRequirement()}
           onOpenRequirement={openRequirement}
           onDeleteRequirement={deleteRequirement}

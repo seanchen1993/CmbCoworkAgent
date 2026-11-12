@@ -1042,7 +1042,9 @@ export function RequirementDetailsPanel({
                               onClick={() =>
                                 window.dispatchEvent(
                                   new CustomEvent(REQUIREMENT_SPACE_LIST_EVENT, {
-                                    detail: { title: requirement.title }
+                                    detail: {
+                                      title: requirementSpaceManifest.prd.name || requirement.title
+                                    }
                                   })
                                 )
                               }

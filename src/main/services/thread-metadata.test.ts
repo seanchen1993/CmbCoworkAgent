@@ -51,6 +51,12 @@ describe("thread metadata patch", () => {
       validateRendererThreadMetadataPatch({ set: { coordinatorMode: true } })
     ).toThrow(/only be removed/)
     expect(() =>
+      validateRendererThreadMetadataPatch({ set: { requirementDevelopment: {} } })
+    ).toThrow(/only be removed/)
+    expect(() =>
+      validateRendererThreadMetadataPatch({ remove: ["requirementDevelopment"] })
+    ).not.toThrow()
+    expect(() =>
       validateRendererThreadMetadataPatch({ set: { model: "x".repeat(1025) } })
     ).toThrow(/Invalid model/)
     expect(() =>
