@@ -121,7 +121,7 @@ function fromRequirementSpaceItem(
     : typeof item.owner === "string"
       ? { id: item.owner, name: item.owner }
       : item.owner
-  const sourceTime = item.updateTime || item.updatedAt || item.createTime || ""
+  const sourceTime = item.createTime || ""
   // Leanstar returns local wall-clock time without an offset. Keep that wall-clock value instead
   // of letting Date reinterpret it using an environment-dependent timezone.
   const normalizedTime = sourceTime.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})$/)

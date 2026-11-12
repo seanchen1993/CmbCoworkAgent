@@ -396,6 +396,12 @@ export function RequirementHistoryList({
                       title={description}
                     >
                       {description}
+                      {item.origin === "space" ? (
+                        <span className={'ml-2'}>
+                          <span className="whitespace-nowrap">功能 {item.functionCount ?? 0}</span>
+                          <span className="text-border-emphasis">·</span>
+                        </span>
+                      ) : null}
                     </p>
                     <div className="mt-auto pt-1">
                       <div className="flex min-w-0 items-center gap-2 text-[11px] text-muted-foreground">
@@ -413,18 +419,10 @@ export function RequirementHistoryList({
                           {owner ? `${owner.name}/${owner.id}` : "用户信息暂无"}
                         </span>
                         <span className="text-border-emphasis">·</span>
-                        {item.origin === "space" ? (
-                          <>
-                            <span className="whitespace-nowrap">
-                              功能 {item.functionCount ?? 0}
-                            </span>
-                            <span className="text-border-emphasis">·</span>
-                          </>
-                        ) : null}
                         <span className="whitespace-nowrap tabular-nums">
                           {item.updatedAt
                             ? item.origin === "space"
-                              ? item.updatedAt
+                              ? `创建 ${item.updatedAt}`
                               : `更新 ${item.updatedAt}`
                             : "时间暂无"}
                         </span>
