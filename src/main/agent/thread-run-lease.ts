@@ -69,6 +69,10 @@ export function getLocalThreadRunLease(threadId: string): LocalThreadRunLease | 
   return lease ? copyLease(lease) : undefined
 }
 
+export function getLocalThreadRunLeases(): LocalThreadRunLease[] {
+  return [...activeLeases.values()].map(copyLease)
+}
+
 export function claimLocalThreadRunLease(
   input: ClaimLocalThreadRunLeaseInput
 ): LocalThreadRunLeaseClaim {

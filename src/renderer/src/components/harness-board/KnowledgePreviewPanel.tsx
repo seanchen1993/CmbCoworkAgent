@@ -1,5 +1,4 @@
 import { lazy, Suspense, useEffect, useMemo, useRef, useState, type ReactNode } from "react"
-import { createKnowledgePreviewGrantResolver } from "@/lib/knowledge-preview-grant"
 import {
   AlertCircle,
   ChevronDown,
@@ -7,10 +6,8 @@ import {
   File,
   Folder,
   FolderOpen,
-  Loader2,
-  RefreshCw
+  Loader2
 } from "lucide-react"
-import { Button } from "@/components/ui/button"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { cn } from "@/lib/utils"
 import type { HarnessKnowledgePreviewFile, HarnessKnowledgePreviewResult } from "@/types"
@@ -20,11 +17,11 @@ const FileViewer = lazy(() =>
 )
 
 interface KnowledgePreviewPanelProps {
+  knowledgeBaseId: string
   preview: HarnessKnowledgePreviewResult | null
   loading: boolean
   selectedPath: string | null
   onSelectPath: (path: string | null) => void
-  onRefresh: () => void | Promise<void>
 }
 
 function normalizeTreePath(path: string): string {
@@ -102,21 +99,13 @@ function joinKnowledgePath(rootPath: string, relativePath: string): string {
 }
 
 export function KnowledgePreviewPanel({
+  knowledgeBaseId,
   preview,
   loading,
   selectedPath,
-  onSelectPath,
-  onRefresh
+  onSelectPath
 }: KnowledgePreviewPanelProps): React.JSX.Element {
   const [expandedDirs, setExpandedDirs] = useState<Set<string>>(new Set(["/"]))
-  const resolvePreviewGrant = useMemo(
-    () => preview
-      ? createKnowledgePreviewGrantResolver(
-          preview, (id) => window.api.harnessBoard.getKnowledgePreview(id)
-        )
-      : undefined,
-    [preview]
-  )
   const skipNextAutoSelectRef = useRef(false)
   const files = preview?.files ?? []
   const tree = useMemo(() => buildTree(files), [files])
@@ -219,27 +208,12 @@ export function KnowledgePreviewPanel({
     <div className="mt-3 overflow-hidden rounded-md border border-border bg-background">
       <div className="flex h-10 items-center justify-between border-b border-border px-3">
         <div className="min-w-0">
-          <div className="truncate text-xs font-medium text-foreground">系统约束预览</div>
           {preview?.path && (
             <div className="truncate text-[11px] text-muted-foreground" title={preview.path}>
               {preview.path}
             </div>
           )}
         </div>
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon-sm"
-          disabled={loading}
-          title="刷新系统约束预览"
-          onClick={() => void onRefresh()}
-        >
-          {loading ? (
-            <Loader2 className="size-3.5 animate-spin" />
-          ) : (
-            <RefreshCw className="size-3.5" />
-          )}
-        </Button>
       </div>
 
       {loading ? (
@@ -249,8 +223,6 @@ export function KnowledgePreviewPanel({
         </div>
       ) : !preview ? (
         <KnowledgePreviewEmpty icon={<FolderOpen className="size-5" />} text="展开后加载系统约束预览。" />
-      ) : !preview.configured ? (
-        <KnowledgePreviewEmpty icon={<AlertCircle className="size-5" />} text="暂无知识库" />
       ) : blockingError ? (
         <KnowledgePreviewEmpty icon={<AlertCircle className="size-5" />} text={preview.error ?? "知识库预览失败"} />
       ) : !preview.exists ? (
@@ -284,8 +256,7 @@ export function KnowledgePreviewPanel({
                 <FileViewer
                   filePath={selectedFile?.path ?? selectedFullPath}
                   externalFullPath={selectedFullPath}
-                  externalPreviewGrant={preview?.previewGrant}
-                  resolveExternalPreviewGrant={resolvePreviewGrant}
+                  knowledgeBaseId={knowledgeBaseId}
                 />
               </Suspense>
             ) : (
