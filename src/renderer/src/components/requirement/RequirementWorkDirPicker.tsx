@@ -104,7 +104,10 @@ export function RequirementWorkDirDialog({
         <DialogHeader>
           <DialogTitle>选择需求工作目录</DialogTitle>
           <DialogDescription>
-            首次进入项目模式前，请选择一个目录用于保存该需求的开发文件。
+            首次进入项目模式前，请选择一个目录用于保存需求开发文件。
+            <strong className="font-semibold text-foreground">
+              只需设置一次，后续需求将默认复用该目录，不再重复提示。
+            </strong>
           </DialogDescription>
         </DialogHeader>
         <RequirementWorkDirPicker
