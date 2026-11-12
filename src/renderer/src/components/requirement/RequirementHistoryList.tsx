@@ -4,6 +4,7 @@ import {
   ChevronLeft,
   ChevronRight,
   EllipsisVertical,
+  FilePlus2,
   Loader2,
   Share2,
   Trash2
@@ -175,6 +176,7 @@ export function RequirementHistoryList({
   onServerPageChange,
   mineOnly,
   systemId,
+  onCreate,
   onOpen,
   onDelete
 }: {
@@ -188,6 +190,7 @@ export function RequirementHistoryList({
   onServerPageChange?: (page: number) => void
   mineOnly: boolean
   systemId: string | null
+  onCreate: () => void
   onOpen: (requirement: RequirementRecord) => void
   onDelete: (requirement: RequirementRecord) => Promise<void>
 }): React.JSX.Element {
@@ -246,6 +249,13 @@ export function RequirementHistoryList({
   const pageItems = usesServerPagination
     ? visibleItems
     : visibleItems.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE)
+  const localListIsEmpty =
+    sourceFilter === "local" &&
+    !query.trim() &&
+    !mineOnly &&
+    !requirements.some(
+      (item) => item.origin === "local" && (!systemId || item.systemId === systemId)
+    )
   const confirmDelete = async (): Promise<void> => {
     if (!toDelete) return
     setIsDeleting(true)
@@ -462,6 +472,26 @@ export function RequirementHistoryList({
                 )
               })}
             </div>
+          ) : localListIsEmpty ? (
+            <div className="flex h-full min-h-[360px] flex-col items-center justify-center px-6 text-center">
+              <div className="flex size-16 items-center justify-center rounded-2xl bg-primary/10 text-primary">
+                <FilePlus2 className="size-7" strokeWidth={1.7} />
+              </div>
+              <h2 className="mt-5 text-lg font-semibold tracking-tight text-foreground">
+                从第一个需求特性开始
+              </h2>
+              <p className="mt-2 max-w-md text-sm leading-6 text-muted-foreground">
+                归档原始需求，与专家协作梳理 PRD、原型和功能清单，让后续设计与开发都有清晰的起点。
+              </p>
+              <Button
+                type="button"
+                className="mt-6 h-10 rounded-lg px-5 text-sm shadow-none"
+                onClick={onCreate}
+              >
+                <FilePlus2 className="size-4" />
+                创建第一个需求特性
+              </Button>
+            </div>
           ) : (
             <div className="flex min-h-[300px] flex-col items-center justify-center rounded-2xl border border-dashed border-border bg-background-elevated text-sm text-muted-foreground">
               <span className="mb-2 text-2xl">⌕</span>没有匹配的需求，试试调整筛选条件
@@ -469,7 +499,12 @@ export function RequirementHistoryList({
           )}
         </div>
 
-        <div className="flex shrink-0 items-center justify-end gap-2 pt-5 text-xs text-muted-foreground">
+        <div
+          className={cn(
+            "shrink-0 items-center justify-end gap-2 pt-5 text-xs text-muted-foreground",
+            localListIsEmpty ? "hidden" : "flex"
+          )}
+        >
           <span className="mr-2">共 {serverTotal ?? visibleItems.length} 条</span>
           <button
             type="button"

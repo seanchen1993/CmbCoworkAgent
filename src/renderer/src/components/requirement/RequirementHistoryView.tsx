@@ -227,6 +227,7 @@ export function RequirementHistoryView({
                 }
                 mineOnly={mineOnly}
                 systemId={selectedSystemId}
+                onCreate={onNew}
                 onOpen={onOpenRequirement}
                 onDelete={onDeleteRequirement}
               />
