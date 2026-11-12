@@ -1,4 +1,12 @@
 import type {
+  RunAnalysisData,
+  RunAnalysisOptions,
+  RunAnalysisRange,
+  RunAnalysisSessionRequest,
+  RunAnalysisStages,
+  RunAnalysisSessions
+} from "../shared/project-run-analysis"
+import type {
   ManagedRunSchedule,
   ManagedRunScheduleInput,
   ManagedRunScheduleUpdateInput,
@@ -2730,8 +2738,8 @@ interface CustomAPI {
       cancelled?: boolean
     }>
     knowledgeProjectStats: (
-      range: { from: string; to: string },
-      opts?: { upperOrgLv1?: string | string[] | null }
+      range: { from: string; to: string } | null,
+      opts?: { upperOrgLv1?: string | string[] | null; createdInRangeOnly?: boolean }
     ) => Promise<{
       success: boolean
       data?: KnowledgeProjectStats
@@ -2767,6 +2775,19 @@ interface CustomAPI {
       filters: ProjectMetricFilters,
       options?: ProjectMetricListOptions
     ) => Promise<{ success: boolean; data?: ProjectMetricProjectsData; error?: string }>
+    projectModeRunAnalysis: (
+      range: RunAnalysisRange,
+      options?: RunAnalysisOptions
+    ) => Promise<{ success: boolean; data?: RunAnalysisData; error?: string }>
+    projectModeRunAnalysisStages: (
+      request: RunAnalysisSessionRequest
+    ) => Promise<{ success: boolean; data?: RunAnalysisStages; error?: string }>
+    projectModeRunAnalysisTrace: (
+      request: RunAnalysisSessionRequest & { traceId: string }
+    ) => Promise<{ success: boolean; data?: DashboardTraceDetail; error?: string }>
+    projectModeRunAnalysisSessions: (
+      request: RunAnalysisSessionRequest
+    ) => Promise<{ success: boolean; data?: RunAnalysisSessions; error?: string }>
     projectModeProjects: (
       range: { from: string; to: string },
       options?: DashboardProjectModeProjectPageOptions

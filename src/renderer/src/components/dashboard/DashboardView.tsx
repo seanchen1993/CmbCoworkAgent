@@ -2836,11 +2836,13 @@ function DashboardContent({
   const [groupOptionsLoading, setGroupOptionsLoading] = useState(false)
   const [groupOptionsError, setGroupOptionsError] = useState<string | null>(null)
   const [knowledgeRefreshKey, setKnowledgeRefreshKey] = useState(0)
+  const [knowledgeCreatedInRangeOnly, setKnowledgeCreatedInRangeOnly] = useState(false)
   const knowledgeOverview = useKnowledgeOverview(
     activeMainTab === "knowledge" && projectModeAllowed,
     range,
     selectedOrgLv1List,
-    knowledgeRefreshKey
+    knowledgeRefreshKey,
+    knowledgeCreatedInRangeOnly
   )
   useEffect(() => {
     setSelectedGroupNames([])
@@ -3831,6 +3833,7 @@ function DashboardContent({
     setSkillEvalSearch(value)
   }, [])
 
+  const [runAnalysisRefreshKey, setRunAnalysisRefreshKey] = useState(0)
   const handleRefresh = useCallback(() => {
     const refreshedRange = refresh(activeMainTab !== "knowledge")
     if (activeMainTab === "skill-eval") {
@@ -3838,6 +3841,7 @@ function DashboardContent({
       clearSkillEval()
     }
     if (activeMainTab === "project-mode") {
+      setRunAnalysisRefreshKey((current) => current + 1)
       void fetchProjectMode(
         range,
         granularity,
@@ -5441,6 +5445,8 @@ function DashboardContent({
             <div className="p-6">
               <KnowledgeOverviewPanel
                 {...knowledgeOverview}
+                createdInRangeOnly={knowledgeCreatedInRangeOnly}
+                onCreatedInRangeOnlyChange={setKnowledgeCreatedInRangeOnly}
                 rooms={selectedOrgLv1List}
                 refreshKey={knowledgeRefreshKey}
                 rate={knowledgeCommitRate}
@@ -5461,6 +5467,12 @@ function DashboardContent({
                 codeStatsLoading={projectModeCodeStatsLoading}
                 onCodeSourceChange={selectProjectModeCodeSource}
                 createdInRangeProjectsOnly={createdInRangeProjectsOnly}
+                runAnalysisRange={range}
+                runAnalysisOptions={{
+                  upperOrgLv1: selectedOrgLv1List,
+                  fromLeanOnly: fromLeanProjectsOnly
+                }}
+                runAnalysisRefreshKey={runAnalysisRefreshKey}
                 headerAction={
                   <div className="flex items-center gap-2">
                     <Button

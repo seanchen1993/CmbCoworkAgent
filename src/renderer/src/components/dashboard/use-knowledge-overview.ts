@@ -10,7 +10,8 @@ export function useKnowledgeOverview(
   enabled: boolean,
   range: TimeRange,
   rooms: string[],
-  refreshKey: number
+  refreshKey: number,
+  createdInRangeOnly = false
 ) {
   const [accumulation, setAccumulation] = useState<KnowledgeAccumulationData | null>(null)
   const [accumulationLoading, setAccumulationLoading] = useState(false)
@@ -51,6 +52,7 @@ export function useKnowledgeOverview(
     }
   }, [enabled, rooms, refreshKey])
 
+  const projectRangeKey = createdInRangeOnly ? JSON.stringify(range) : "null"
   useEffect(() => {
     if (!enabled) return
     let cancelled = false
@@ -59,9 +61,13 @@ export function useKnowledgeOverview(
       setProjects(null)
       setProjectsError(null)
       try {
-        const result = await window.api.dashboard.knowledgeProjectStats(range, {
-          upperOrgLv1: rooms
-        })
+        const result = await window.api.dashboard.knowledgeProjectStats(
+          JSON.parse(projectRangeKey),
+          {
+            upperOrgLv1: rooms,
+            createdInRangeOnly
+          }
+        )
         if (cancelled || result.cancelled) return
         if (!result.success || !result.data) throw new Error(result.error ?? "获取系统约束统计失败")
         setProjects(result.data)
@@ -78,7 +84,7 @@ export function useKnowledgeOverview(
         .cancelRequests(["dashboard:knowledgeProjectStats"])
         .catch(() => undefined)
     }
-  }, [enabled, range, rooms, refreshKey])
+  }, [enabled, projectRangeKey, createdInRangeOnly, rooms, refreshKey])
 
   // Rolling 30-day metric is independent of the top date selector.
   useEffect(() => {

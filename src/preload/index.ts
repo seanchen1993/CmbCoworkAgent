@@ -1,4 +1,12 @@
 import type {
+  RunAnalysisData,
+  RunAnalysisOptions,
+  RunAnalysisRange,
+  RunAnalysisSessionRequest,
+  RunAnalysisStages,
+  RunAnalysisSessions
+} from "../shared/project-run-analysis"
+import type {
   ManagedRunSchedule,
   ManagedRunScheduleInput,
   ManagedRunScheduleUpdateInput,
@@ -3995,8 +4003,8 @@ const api = {
       cancelled?: boolean
     }> => ipcRenderer.invoke("dashboard:knowledgeReadReaders", file, opts),
     knowledgeProjectStats: (
-      range: { from: string; to: string },
-      opts?: { upperOrgLv1?: string | string[] | null }
+      range: { from: string; to: string } | null,
+      opts?: { upperOrgLv1?: string | string[] | null; createdInRangeOnly?: boolean }
     ): Promise<{
       success: boolean
       data?: KnowledgeProjectStats
@@ -4038,6 +4046,23 @@ const api = {
       options?: ProjectMetricListOptions
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:projectMetricProjects", filters, options),
+    projectModeRunAnalysis: (
+      range: RunAnalysisRange,
+      options?: RunAnalysisOptions
+    ): Promise<{ success: boolean; data?: RunAnalysisData; error?: string }> =>
+      ipcRenderer.invoke("dashboard:projectModeRunAnalysis", range, options),
+    projectModeRunAnalysisStages: (
+      request: RunAnalysisSessionRequest
+    ): Promise<{ success: boolean; data?: RunAnalysisStages; error?: string }> =>
+      ipcRenderer.invoke("dashboard:projectModeRunAnalysisStages", request),
+    projectModeRunAnalysisTrace: (
+      request: RunAnalysisSessionRequest & { traceId: string }
+    ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
+      ipcRenderer.invoke("dashboard:projectModeRunAnalysisTrace", request),
+    projectModeRunAnalysisSessions: (
+      request: RunAnalysisSessionRequest
+    ): Promise<{ success: boolean; data?: RunAnalysisSessions; error?: string }> =>
+      ipcRenderer.invoke("dashboard:projectModeRunAnalysisSessions", request),
     projectModeProjects: (
       range: { from: string; to: string },
       options?: {
