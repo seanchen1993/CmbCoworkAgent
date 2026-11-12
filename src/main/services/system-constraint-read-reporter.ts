@@ -23,10 +23,16 @@ export interface SystemConstraintReadRecord {
   constraintFile: string
 }
 
+interface FileReadSummary {
+  filePath: string
+  readCount: number
+  firstReadAt: string
+  lastReadAt: string
+}
+
 interface SummaryBucket {
   context: Omit<SystemConstraintReadRecord, "constraintFile">
-  constraintFiles: Set<string>
-  successfulReadCount: number
+  files: Map<string, FileReadSummary>
   firstReadAt: string
   lastReadAt: string
   updatedAtMs: number
@@ -50,6 +56,8 @@ function summaryBucketKey(record: SystemConstraintReadRecord): string {
 /**
  * Run-scoped accumulator. One event is emitted per trace and workflow stage,
  * regardless of how many pages or duplicate files `read_file` returned.
+ * `files` adds per-file counts and times; legacy summary fields remain available
+ * with their original meaning for existing dashboard queries and older clients.
  */
 export class SystemConstraintReadAccumulator {
   private readonly pending = new Map<string, Map<string, SummaryBucket>>()
@@ -82,8 +90,18 @@ export class SystemConstraintReadAccumulator {
     const now = nowIsoLocal()
     const existing = traceBuckets.get(key)
     if (existing) {
-      existing.constraintFiles.add(constraintFile)
-      existing.successfulReadCount += 1
+      const file = existing.files.get(constraintFile)
+      if (file) {
+        file.readCount += 1
+        file.lastReadAt = now
+      } else {
+        existing.files.set(constraintFile, {
+          filePath: constraintFile,
+          readCount: 1,
+          firstReadAt: now,
+          lastReadAt: now
+        })
+      }
       existing.lastReadAt = now
       existing.updatedAtMs = nowMs
       return
@@ -105,8 +123,12 @@ export class SystemConstraintReadAccumulator {
         harnessAdapterName: normalize(input.harnessAdapterName),
         harnessAdapterVersion: normalize(input.harnessAdapterVersion)
       },
-      constraintFiles: new Set([constraintFile]),
-      successfulReadCount: 1,
+      files: new Map([
+        [
+          constraintFile,
+          { filePath: constraintFile, readCount: 1, firstReadAt: now, lastReadAt: now }
+        ]
+      ]),
       firstReadAt: now,
       lastReadAt: now,
       updatedAtMs: nowMs
@@ -126,12 +148,13 @@ export class SystemConstraintReadAccumulator {
 
     let emitted = 0
     for (const bucket of traceBuckets.values()) {
-      const constraintFiles = [...bucket.constraintFiles].sort((a, b) => a.localeCompare(b))
+      const files = [...bucket.files.values()].sort((a, b) => a.filePath.localeCompare(b.filePath))
       emit(SYSTEM_CONSTRAINT_READ_SUMMARY_EVENT, "harness", {
         ...bucket.context,
-        constraintFiles,
-        successfulReadCount: bucket.successfulReadCount,
-        distinctFileCount: constraintFiles.length,
+        files,
+        constraintFiles: files.map((file) => file.filePath),
+        successfulReadCount: files.reduce((sum, file) => sum + file.readCount, 0),
+        distinctFileCount: files.length,
         filesTruncated: false,
         firstReadAt: bucket.firstReadAt,
         lastReadAt: bucket.lastReadAt,
