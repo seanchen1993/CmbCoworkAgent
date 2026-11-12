@@ -2136,6 +2136,7 @@ export function DesignView({
       assertCurrent?: () => void
       onBeforeCommit?: () => Promise<void>
       createNew?: boolean
+      preserveInput?: boolean
       workspacePath?: string
       warnings?: string[]
       sourceInfo: DesignSourceInfo
@@ -2214,7 +2215,7 @@ export function DesignView({
         tweaksOn: true,
         activeMode: null,
         zoom: prev.zoom,
-        inputValue: "",
+        inputValue: options.preserveInput ? prev.inputValue : "",
         comments: [],
         draftComment: null,
         activeCommentId: null,
@@ -2524,6 +2525,7 @@ export function DesignView({
           await applyImportedDesign({
             sessionId,
             createNew: true,
+            preserveInput: source === "session",
             html: captured.html,
             artifactPath: prepared.artifactPath,
             workspacePath: workspace,

@@ -1259,6 +1259,9 @@ try {
   console.log("PASS captured links remain removable persistent references until explicit send, without replacing an existing design")
 
   // The same live page can become an editable baseline in a separate session.
+  const initialWebpageDraft = "  将页面标题改为我的产品，保留其他内容\n保持其余布局。  "
+  const latestWebpageDraft = "  将页面标题改为我的产品，保留其他内容\n补充：保留原来的导航。  "
+  await page.locator("textarea").first().fill(initialWebpageDraft)
   const designBeforeEditingPage = structuredClone(manager.get(referenceId))
   const runsBeforeEditingPage = requests.length
   const sessionsBeforeEditingPage = manager.list().length
@@ -1272,6 +1275,8 @@ try {
     await page.getByRole("alert").filter({ hasText: error }).waitFor()
     assert.equal(manager.list().length, sessionsBeforeEditingPage, "failed editing imports create no empty sessions")
     assert.equal(manager.get(referenceId).state.html, designBeforeEditingPage.state.html)
+    assert.equal(await page.locator("textarea").first().inputValue(), initialWebpageDraft,
+      "a failed webpage import preserves the unsent draft")
     await page.getByRole("region", { name: "基于此页面编辑" }).getByRole("button", { name: "取消", exact: true }).click()
   }
   await page.evaluate(() => { (window as any).importFixture.mode = "login" })
@@ -1281,6 +1286,7 @@ try {
   await page.getByRole("button", { name: "在内置浏览器中打开", exact: true }).click()
   await page.getByRole("button", { name: "基于此页面编辑", exact: true }).click()
   await page.getByRole("alert").filter({ hasText: "请先完成登录" }).waitFor()
+  await page.locator("textarea").first().fill(latestWebpageDraft)
   await page.getByRole("button", { name: "仍然基于此页面编辑", exact: true }).click()
   await page.frameLocator('iframe[title="Design Preview"]').getByRole("heading", { name: "链接页面", exact: true }).waitFor()
   await page.evaluate(() => { (window as any).importFixture.mode = "success" })
@@ -1289,6 +1295,9 @@ try {
   const editingPage = manager.get(editingPageId)
   assert.match(editingPage.state.html, /链接页面/)
   assert.equal(editingPage.state.generationState, "done")
+  assert.equal(editingPage.state.inputValue, latestWebpageDraft,
+    "editing a webpage carries the latest unsent text, including whitespace, into the new session")
+  assert.equal(await page.locator("textarea").first().inputValue(), latestWebpageDraft)
   assert.equal(editingPage.state.attachedFiles, null, "the editing baseline is not a reference attachment")
   assert.equal(editingPage.state.selectedDesignSystemId, null, "a new design system does not restyle the captured page")
   assert.equal(editingPage.state.artifactPath, `/workspace/.cmb-design/${editingPageId}_design-main/index.html`)
@@ -1297,12 +1306,15 @@ try {
   assert.deepEqual(manager.get(referenceId).state.messages, designBeforeEditingPage.state.messages)
   await page.reload()
   await page.frameLocator('iframe[title="Design Preview"]').getByRole("heading", { name: "链接页面", exact: true }).waitFor()
-  await page.locator("textarea").first().fill("将页面标题改为我的产品，保留其他内容")
+  assert.equal(await page.locator("textarea").first().inputValue(), latestWebpageDraft,
+    "the unsent draft survives reopening the imported webpage")
   await page.getByRole("button", { name: "▶ 发送", exact: true }).click()
   await page.getByRole("button", { name: "■ 停止", exact: true }).waitFor()
   assert.equal(requests.at(-1)!.isIteration, true)
   assert.equal(requests.at(-1)!.kind, "patch", "small edits use the existing localized patch flow")
   assert.equal(requests.at(-1)!.designSessionId, editingPageId)
+  assert.equal(requests.at(-1)!.cleanUserMsg, latestWebpageDraft.trim(),
+    "the preserved draft is only sent when the user explicitly clicks Send")
   assert.match(manager.get(editingPageId).state.html, /链接页面/)
   assert.equal(requests.at(-1)!.sourceArtifactPath, editingPage.state.artifactPath)
   emitters.at(-1)!({ type: "error", error: "网页局部编辑测试结束" })
