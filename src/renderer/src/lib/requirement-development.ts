@@ -8,6 +8,7 @@ import { marketApi } from "@/api/market"
 export const REQUIREMENT_DEVELOPMENT_PLUGIN = "AutobizDevOps_Plugin_Kanban_fullstack"
 export const REQUIREMENT_DEVELOPMENT_ONBOARDING_KEY = "requirement-development:onboarding"
 export const REQUIREMENT_DEVELOPMENT_ONBOARDING_EVENT = "requirement-development:onboarding-change"
+export const REQUIREMENT_DEVELOPMENT_ASSOCIATIONS_KEY = "requirement-development-associations"
 
 export type RequirementDevelopmentIntent = {
   action: "create-development"
@@ -70,6 +71,89 @@ export function writeRequirementDevelopmentIntent(
 
 export function clearRequirementDevelopmentIntent(): void {
   window.sessionStorage.removeItem(REQUIREMENT_DEVELOPMENT_ONBOARDING_KEY)
+}
+
+type RequirementDevelopmentThreadStorage = Pick<Storage, "getItem" | "setItem" | "removeItem">
+
+export function requirementDevelopmentFolderFromFilePath(filePath: string): string {
+  const normalized = filePath.trim()
+  return normalized ? normalized.replace(/[\\/][^\\/]+$/, "") : ""
+}
+
+export type RequirementDevelopmentAssociation = RequirementDevelopmentMetadata & {
+  threadId: string
+}
+
+function readRequirementDevelopmentAssociations(
+  storage: RequirementDevelopmentThreadStorage = localStorage
+): Record<string, RequirementDevelopmentAssociation> {
+  try {
+    const parsed = JSON.parse(
+      storage.getItem(REQUIREMENT_DEVELOPMENT_ASSOCIATIONS_KEY) || "{}"
+    ) as Record<string, unknown>
+    return Object.fromEntries(
+      Object.entries(parsed).filter(
+        (entry): entry is [string, RequirementDevelopmentAssociation] => {
+          const value = asRecord(entry[1])
+          return Boolean(
+            entry[0] &&
+            value?.threadId === entry[0] &&
+            typeof value.requirementId === "string" &&
+            typeof value.requirementFilePath === "string"
+          )
+        }
+      )
+    )
+  } catch {
+    return {}
+  }
+}
+
+export function storeRequirementDevelopmentAssociation(
+  threadId: string,
+  metadata: RequirementDevelopmentMetadata,
+  storage: RequirementDevelopmentThreadStorage = localStorage
+): void {
+  const associations = readRequirementDevelopmentAssociations(storage)
+  associations[threadId] = {
+    ...metadata,
+    threadId
+  }
+  storage.setItem(REQUIREMENT_DEVELOPMENT_ASSOCIATIONS_KEY, JSON.stringify(associations))
+}
+
+export function removeRequirementDevelopmentAssociation(
+  requirementId: string,
+  storage: RequirementDevelopmentThreadStorage = localStorage
+): void {
+  const associations = readRequirementDevelopmentAssociations(storage)
+  for (const [threadId, association] of Object.entries(associations)) {
+    if (association.requirementId === requirementId) delete associations[threadId]
+  }
+  if (Object.keys(associations).length) {
+    storage.setItem(REQUIREMENT_DEVELOPMENT_ASSOCIATIONS_KEY, JSON.stringify(associations))
+  } else {
+    storage.removeItem(REQUIREMENT_DEVELOPMENT_ASSOCIATIONS_KEY)
+  }
+}
+
+export function findRequirementDevelopmentAssociation(
+  requirementId: string,
+  storage: RequirementDevelopmentThreadStorage = localStorage
+): RequirementDevelopmentAssociation | null {
+  return (
+    Object.values(readRequirementDevelopmentAssociations(storage)).find(
+      (association) => association.requirementId === requirementId
+    ) ?? null
+  )
+}
+
+export function getStoredRequirementDevelopmentMetadata(
+  threadId: string,
+  storage: RequirementDevelopmentThreadStorage = localStorage
+): RequirementDevelopmentMetadata | null {
+  const association = readRequirementDevelopmentAssociations(storage)[threadId]
+  return association ?? null
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {

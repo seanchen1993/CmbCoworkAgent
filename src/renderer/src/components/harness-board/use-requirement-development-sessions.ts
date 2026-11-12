@@ -5,6 +5,7 @@ import {
   clearRequirementDevelopmentIntent,
   ensureRequirementDevelopmentPlugin,
   getRequirementDevelopmentMetadata,
+  storeRequirementDevelopmentAssociation,
   REQUIREMENT_DEVELOPMENT_ONBOARDING_EVENT,
   REQUIREMENT_DEVELOPMENT_ONBOARDING_KEY,
   type RequirementDevelopmentIntent,
@@ -61,21 +62,33 @@ export function useRequirementDevelopmentOnboarding(input: {
         const intent = JSON.parse(raw) as RequirementDevelopmentOnboardingIntent
         if (intent.action === "open-session") {
           window.sessionStorage.removeItem(REQUIREMENT_DEVELOPMENT_ONBOARDING_KEY)
-          const thread = useAppStore
-            .getState()
-            .threads.find((item) => item.thread_id === intent.threadId)
-          const feature =
-            thread?.metadata?.harnessFeature &&
-            typeof thread.metadata.harnessFeature === "object" &&
-            !Array.isArray(thread.metadata.harnessFeature)
-              ? (thread.metadata.harnessFeature as Record<string, unknown>)
-              : null
-          const projectId = typeof feature?.projectId === "string" ? feature.projectId : ""
-          const featureSlug = typeof feature?.slug === "string" ? feature.slug : ""
-          callbacksRef.current.openSession(
-            intent.threadId,
-            projectId && featureSlug ? { projectId, featureSlug } : { projectId: "" }
-          )
+          void (async () => {
+            const state = useAppStore.getState()
+            let thread = state.threads.find((item) => item.thread_id === intent.threadId) ?? null
+            if (!thread) {
+              thread = await window.api.threads.get(intent.threadId)
+              if (thread) useAppStore.getState().addThreadSummary(thread)
+            }
+            if (!thread) throw new Error("未找到关联的开发会话")
+            const requirementMetadata = getRequirementDevelopmentMetadata(thread)
+            if (requirementMetadata) {
+              storeRequirementDevelopmentAssociation(thread.thread_id, requirementMetadata)
+            }
+            const feature =
+              thread.metadata?.harnessFeature &&
+              typeof thread.metadata.harnessFeature === "object" &&
+              !Array.isArray(thread.metadata.harnessFeature)
+                ? (thread.metadata.harnessFeature as Record<string, unknown>)
+                : null
+            const projectId = typeof feature?.projectId === "string" ? feature.projectId : ""
+            const featureSlug = typeof feature?.slug === "string" ? feature.slug : ""
+            callbacksRef.current.openSession(
+              intent.threadId,
+              projectId && featureSlug ? { projectId, featureSlug } : { projectId: "" }
+            )
+          })().catch((error) => {
+            toast.error(error instanceof Error ? error.message : "打开开发会话失败")
+          })
           return
         }
         if (intent.action !== "create-development" || !intent.requirementId || !intent.prompt) {

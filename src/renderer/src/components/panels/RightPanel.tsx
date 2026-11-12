@@ -2051,9 +2051,7 @@ export function RightPanel({
           onApplyPreview={applyStreamPreview}
         />
       )}
-      {moduleMode === "work" && currentThreadId && (
-        <RequirementDevelopmentBar threadId={currentThreadId} />
-      )}
+      {currentThreadId && <RequirementDevelopmentBar threadId={currentThreadId} />}
       {moduleMode === "browser" && (
         <div className="flex h-full min-h-0 flex-col bg-background">
           <Suspense fallback={<LazySectionFallback label="加载 Browser..." />}>

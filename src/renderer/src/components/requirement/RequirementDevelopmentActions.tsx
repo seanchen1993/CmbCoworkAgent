@@ -13,7 +13,10 @@ import {
 import { useAppStore } from "@/lib/store"
 import {
   findRequirementDevelopmentThreads,
-  getRequirementDevelopmentMetadata
+  findRequirementDevelopmentAssociation,
+  getRequirementDevelopmentMetadata,
+  removeRequirementDevelopmentAssociation,
+  requirementDevelopmentFolderFromFilePath
 } from "@/lib/requirement-development"
 import type { RequirementRecord } from "./requirement-data"
 import { shouldHideRequirementDevelopment } from "./requirement-persona"
@@ -37,13 +40,18 @@ export function RequirementDevelopmentActions({
     () => findRequirementDevelopmentThreads(requirement.id, threads),
     [requirement.id, threads]
   )
-  const existingThreadId = developmentThreads[0]?.thread_id ?? requirement.developmentThreadIds[0]
+  const existingThreadId =
+    developmentThreads[0]?.thread_id ??
+    requirement.developmentThreadIds.find((threadId) => threadId.trim()) ??
+    findRequirementDevelopmentAssociation(requirement.id)?.threadId ??
+    null
   const requirementFilePath = getRequirementDevelopmentMetadata(
     developmentThreads[0]
   )?.requirementFilePath.trim()
-  const requirementFolder = requirementFilePath
-    ? requirementFilePath.replace(/[\\/][^\\/]+$/, "")
-    : ""
+  const storedAssociation = findRequirementDevelopmentAssociation(requirement.id)
+  const requirementFolder = requirementDevelopmentFolderFromFilePath(
+    requirementFilePath || storedAssociation?.requirementFilePath || ""
+  )
   const inProgress = Boolean(existingThreadId)
   const [resetOpen, setResetOpen] = useState(false)
   const [resetting, setResetting] = useState(false)
@@ -140,6 +148,7 @@ export function RequirementDevelopmentActions({
                 setResetting(true)
                 void Promise.resolve(onResetDevelopment())
                   .then(() => {
+                    removeRequirementDevelopmentAssociation(requirement.id)
                     setResetOpen(false)
                     toast.success("需求开发已重置")
                   })

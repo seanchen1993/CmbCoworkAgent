@@ -2,6 +2,7 @@ import { createHarnessFeatureThread } from "@/lib/harness-feature-thread"
 import { getHarnessRunNextAction } from "@/lib/harness-run-next-action"
 import {
   clearRequirementDevelopmentIntent,
+  storeRequirementDevelopmentAssociation,
   type RequirementDevelopmentIntent
 } from "@/lib/requirement-development"
 import type { Thread } from "@/types"
@@ -52,7 +53,6 @@ export async function completeRequirementDevelopment(input: {
       hasPrototype: intent.hasPrototype
     }
   })
-
   if (!intent.requirementId.startsWith("space:") && !intent.requirementId.startsWith("quick-")) {
     const attached = await window.api.requirements.attachThread({
       reqId: intent.requirementId,
@@ -61,6 +61,14 @@ export async function completeRequirementDevelopment(input: {
     })
     if (!attached.success) throw new Error(attached.error || "开发会话未能关联需求")
   }
+  storeRequirementDevelopmentAssociation(thread.thread_id, {
+    requirementId: intent.requirementId,
+    requirementTitle: intent.requirementTitle,
+    requirementFilePath: intent.requirementFilePath,
+    prototypeFilePaths: intent.prototypeFilePaths,
+    functionCount: intent.functionCount,
+    hasPrototype: intent.hasPrototype
+  })
 
   clearRequirementDevelopmentIntent()
   return thread.thread_id

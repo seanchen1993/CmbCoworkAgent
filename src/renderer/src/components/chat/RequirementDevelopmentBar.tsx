@@ -1,6 +1,9 @@
 import { ArrowLeft, Boxes, FileText, PanelsTopLeft } from "lucide-react"
 import { useAppStore } from "@/lib/store"
-import { getRequirementDevelopmentMetadata } from "@/lib/requirement-development"
+import {
+  getRequirementDevelopmentMetadata,
+  getStoredRequirementDevelopmentMetadata
+} from "@/lib/requirement-development"
 import { returnToRequirementConversation } from "@/lib/requirement-design-entry"
 
 export function RequirementDevelopmentBar({
@@ -11,7 +14,8 @@ export function RequirementDevelopmentBar({
   const thread = useAppStore(
     (state) => state.threads.find((item) => item.thread_id === threadId) ?? null
   )
-  const metadata = getRequirementDevelopmentMetadata(thread)
+  const metadata =
+    getRequirementDevelopmentMetadata(thread) || getStoredRequirementDevelopmentMetadata(threadId)
   if (!metadata) return null
 
   return (

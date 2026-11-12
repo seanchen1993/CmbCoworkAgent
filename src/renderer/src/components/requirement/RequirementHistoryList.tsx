@@ -40,7 +40,10 @@ import { RequirementStatusTags } from "./RequirementStatusTags"
 import { RequirementListLoading } from "./RequirementListLoading"
 import { findRequirementDesignEntry } from "@/lib/requirement-design-entry"
 import { useAppStore } from "@/lib/store"
-import { getRequirementDevelopmentMetadata } from "@/lib/requirement-development"
+import {
+  findRequirementDevelopmentAssociation,
+  getRequirementDevelopmentMetadata
+} from "@/lib/requirement-development"
 import { RequirementSpaceStatusTag } from "./RequirementSpaceStatusTag"
 
 const PAGE_SIZE = 15
@@ -285,7 +288,9 @@ export function RequirementHistoryList({
                   item.origin === "space" ? findRequirementDesignEntry(item.id) : null
                 const collaborators = item.collaborators ?? []
                 const developmentStatus =
-                  item.developmentThreadIds.length > 0 || developingRequirementIds.has(item.id)
+                  item.developmentThreadIds.length > 0 ||
+                  developingRequirementIds.has(item.id) ||
+                  Boolean(findRequirementDevelopmentAssociation(item.id))
                     ? "in-progress"
                     : "not-started"
                 const description =
@@ -397,7 +402,7 @@ export function RequirementHistoryList({
                     >
                       {description}
                       {item.origin === "space" ? (
-                        <span className={'ml-2'}>
+                        <span className={"ml-2"}>
                           <span className="whitespace-nowrap">功能 {item.functionCount ?? 0}</span>
                           <span className="text-border-emphasis">·</span>
                         </span>
