@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react"
-import { Code2, Loader2, RotateCcw, Trash2 } from "lucide-react"
+import { Code2, FolderOpen, Loader2, RotateCcw, Trash2 } from "lucide-react"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import {
@@ -11,7 +11,10 @@ import {
   DialogTitle
 } from "@/components/ui/dialog"
 import { useAppStore } from "@/lib/store"
-import { findRequirementDevelopmentThreads } from "@/lib/requirement-development"
+import {
+  findRequirementDevelopmentThreads,
+  getRequirementDevelopmentMetadata
+} from "@/lib/requirement-development"
 import type { RequirementRecord } from "./requirement-data"
 import { shouldHideRequirementDevelopment } from "./requirement-persona"
 import { REQUIREMENT_ACTION_HINTS, RequirementActionButton } from "./RequirementActionButton"
@@ -35,6 +38,12 @@ export function RequirementDevelopmentActions({
     [requirement.id, threads]
   )
   const existingThreadId = developmentThreads[0]?.thread_id ?? requirement.developmentThreadIds[0]
+  const requirementFilePath = getRequirementDevelopmentMetadata(
+    developmentThreads[0]
+  )?.requirementFilePath.trim()
+  const requirementFolder = requirementFilePath
+    ? requirementFilePath.replace(/[\\/][^\\/]+$/, "")
+    : ""
   const inProgress = Boolean(existingThreadId)
   const [resetOpen, setResetOpen] = useState(false)
   const [resetting, setResetting] = useState(false)
@@ -44,6 +53,29 @@ export function RequirementDevelopmentActions({
   return (
     <>
       <div className="flex items-center gap-1.5">
+        {requirementFolder ? (
+          <RequirementActionButton
+            type="button"
+            size="icon"
+            variant="outline"
+            className="size-7"
+            hint="在文件管理器中打开当前需求的开发文件夹。"
+            aria-label="打开当前需求文件夹"
+            onClick={() => {
+              void window.electron.ipcRenderer
+                .invoke("open-folder", requirementFolder)
+                .then((value: unknown) => {
+                  const result = value as { success?: boolean; error?: string }
+                  if (!result?.success) toast.error(result?.error || "打开需求文件夹失败")
+                })
+                .catch((error: unknown) => {
+                  toast.error(error instanceof Error ? error.message : "打开需求文件夹失败")
+                })
+            }}
+          >
+            <FolderOpen className="size-3.5" />
+          </RequirementActionButton>
+        ) : null}
         {inProgress && (
           <RequirementActionButton
             type="button"

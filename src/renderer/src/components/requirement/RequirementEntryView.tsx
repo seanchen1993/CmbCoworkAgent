@@ -18,6 +18,7 @@ import { RequirementListLoading } from "./RequirementListLoading"
 import type { RequirementSourceFilter } from "./RequirementHistoryList"
 import { RequirementSpaceDetailView } from "./RequirementSpaceDetailView"
 import { SystemSelectionDialog } from "./SystemSelectionDialog"
+import { RequirementWorkDirDialog } from "./RequirementWorkDirPicker"
 import {
   fromPersistedRequirement,
   getRequirementThreadIds,
@@ -217,6 +218,8 @@ export function RequirementEntryView({
   const [systemDialogOpen, setSystemDialogOpen] = useState(false)
   const [requirementDialogOpen, setRequirementDialogOpen] = useState(false)
   const [quickStartDialogOpen, setQuickStartDialogOpen] = useState(false)
+  const [pendingDevelopmentRequirement, setPendingDevelopmentRequirement] =
+    useState<RequirementRecord | null>(null)
   const [newRequirementSource, setNewRequirementSource] = useState<UploadSource>("file")
   const [quickStartPreparation, setQuickStartPreparation] = useState<{
     source: "file" | "link"
@@ -519,8 +522,13 @@ export function RequirementEntryView({
   }, [])
 
   const startSpaceRequirementDevelopment = useCallback(
-    async (requirement: RequirementRecord): Promise<void> => {
+    async (requirement: RequirementRecord, selectedWorkDir?: string): Promise<boolean> => {
       try {
+        const workDir = selectedWorkDir || (await window.api.requirements.getWorkDir())
+        if (!workDir) {
+          setPendingDevelopmentRequirement(requirement)
+          return false
+        }
         const document = await leanstarRequirementsApi.getRequirementDocumentContent(
           requirement.sourceName
         )
@@ -541,8 +549,6 @@ export function RequirementEntryView({
           }
         }
         if (!requirementContent) throw new Error("需求文档内容为空，无法开始开发")
-        const workDir = await window.api.requirements.getWorkDir()
-        if (!workDir) throw new Error("请先配置需求工作目录")
         const saved = await window.api.requirements.saveFiles({
           workspacePath: workDir,
           requirementId: requirement.id,
@@ -571,8 +577,11 @@ export function RequirementEntryView({
         })
         setShowHarnessBoardView(true)
         window.dispatchEvent(new Event(REQUIREMENT_DEVELOPMENT_ONBOARDING_EVENT))
+        setPendingDevelopmentRequirement(null)
+        return true
       } catch (error) {
         toast.error(error instanceof Error ? error.message : "读取需求文件失败")
+        return false
       }
     },
     [setShowHarnessBoardView]
@@ -821,7 +830,9 @@ export function RequirementEntryView({
           requirement={selectedRequirement}
           onDesignRequirement={designSpaceRequirement}
           onResetDesign={() => resetSpaceRequirementDesign(selectedRequirement)}
-          onStartDevelopment={() => startSpaceRequirementDevelopment(selectedRequirement)}
+          onStartDevelopment={async () => {
+            await startSpaceRequirementDevelopment(selectedRequirement)
+          }}
           onContinueDevelopment={(threadId) =>
             continueSpaceRequirementDevelopment(selectedRequirement, threadId)
           }
@@ -829,6 +840,17 @@ export function RequirementEntryView({
           onBack={() => setScreen("history")}
         />
       )}
+
+      <RequirementWorkDirDialog
+        open={Boolean(pendingDevelopmentRequirement)}
+        onOpenChange={(open) => {
+          if (!open) setPendingDevelopmentRequirement(null)
+        }}
+        onConfirm={async (workDir) => {
+          if (!pendingDevelopmentRequirement) return
+          await startSpaceRequirementDevelopment(pendingDevelopmentRequirement, workDir)
+        }}
+      />
 
       <LeanstarTokenDialog
         open={tokenDialogOpen}

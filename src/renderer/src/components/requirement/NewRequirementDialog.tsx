@@ -4,7 +4,6 @@ import {
   BadgeCheck,
   Building2,
   FileText,
-  FolderOpen,
   Link,
   Loader2,
   Plus,
@@ -40,6 +39,7 @@ import {
   type RequirementSessionCapabilities
 } from "./requirement-session-capabilities"
 import type { DesignSystemInfo } from "../design/types"
+import { RequirementWorkDirPicker } from "./RequirementWorkDirPicker"
 
 export type UploadSource = "file" | "text" | "link"
 
@@ -148,7 +148,6 @@ export function NewRequirementDialog({
   const [url, setUrl] = useState("")
   const [initialDescription, setInitialDescription] = useState("")
   const [workDir, setWorkDir] = useState<string | null>(null)
-  const [workDirLoading, setWorkDirLoading] = useState(false)
   const [saving, setSaving] = useState(false)
   const [preparingSkill, setPreparingSkill] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
@@ -301,21 +300,6 @@ export function NewRequirementDialog({
     }
   }
 
-  const selectWorkDir = async (): Promise<void> => {
-    setWorkDirLoading(true)
-    try {
-      const result = await window.api.requirements.selectWorkDir()
-      if (!result.success) {
-        throw new Error(result.error || "选择需求工作目录失败")
-      }
-      if (result.workDir) setWorkDir(result.workDir)
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "选择需求工作目录失败")
-    } finally {
-      setWorkDirLoading(false)
-    }
-  }
-
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="flex max-h-[calc(100vh-2rem)] flex-col gap-0 overflow-hidden p-0 sm:max-w-[680px]">
@@ -352,33 +336,11 @@ export function NewRequirementDialog({
             </div>
           </div>
 
-          <div className="rounded-xl border-[1.5px] border-border bg-[#fdfbf7] p-4">
-            <div className="mb-2 flex items-center gap-2">
-              <FolderOpen className="size-4 text-primary" />
-              <span className="text-sm font-semibold text-foreground">需求工作目录</span>
-              <span className="text-sm text-muted-foreground">
-                默认使用上次选择的目录（多个需求可共用同一个根目录，无需分别设置）
-              </span>
-            </div>
-            <div className="flex items-center gap-2">
-              <div className="min-w-0 flex-1 truncate rounded-lg border border-border bg-white px-3 py-2 text-sm text-foreground">
-                {workDir || "尚未选择需求工作目录"}
-              </div>
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                disabled={workDirLoading || saving}
-                onClick={() => void selectWorkDir()}
-              >
-                <FolderOpen className="size-3.5" />
-                {workDirLoading ? "选择中..." : workDir ? "更换目录" : "选择目录"}
-              </Button>
-            </div>
-            <p className="mt-2 text-[12px] leading-5 text-muted-foreground">
-              系统会在目录下为各需求创建独立子文件夹，规范 PRD 文件将存放于对应需求的独立文件夹下。
-            </p>
-          </div>
+          <RequirementWorkDirPicker
+            workDir={workDir}
+            onWorkDirChange={setWorkDir}
+            disabled={saving}
+          />
 
           <div className="inline-flex w-fit rounded-lg bg-[#f3ede6] p-1">
             {[

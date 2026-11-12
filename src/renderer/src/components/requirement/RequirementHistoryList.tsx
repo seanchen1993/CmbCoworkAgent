@@ -40,6 +40,7 @@ import { RequirementListLoading } from "./RequirementListLoading"
 import { findRequirementDesignEntry } from "@/lib/requirement-design-entry"
 import { useAppStore } from "@/lib/store"
 import { getRequirementDevelopmentMetadata } from "@/lib/requirement-development"
+import { RequirementSpaceStatusTag } from "./RequirementSpaceStatusTag"
 
 const PAGE_SIZE = 15
 export type RequirementSourceFilter = "all" | "local" | "remote" | "space"
@@ -82,17 +83,6 @@ function sourceTagClass(origin: RequirementRecord["origin"]): string {
     return "bg-[#f1eaff] text-[#8b5cf6] dark:bg-[#8b5cf6]/16 dark:text-[#b9a0ff]"
   }
   return "bg-[#edf1ff] text-[#5570f6] dark:bg-[#5570f6]/16 dark:text-[#9eafff]"
-}
-
-function requirementSpaceStatusClass(status: string): string {
-  if (status === "审批通过")
-    return "bg-emerald-100 text-emerald-700 dark:bg-emerald-500/20 dark:text-emerald-300"
-  if (status === "审批中")
-    return "bg-amber-100 text-amber-700 dark:bg-amber-500/20 dark:text-amber-300"
-  if (status === "开发中") return "bg-blue-100 text-blue-700 dark:bg-blue-500/20 dark:text-blue-300"
-  if (status === "实施中")
-    return "bg-violet-100 text-violet-700 dark:bg-violet-500/20 dark:text-violet-300"
-  return "bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300"
 }
 
 function RequirementAvatars({ users }: { users: RequirementUser[] }): React.JSX.Element {
@@ -460,14 +450,7 @@ export function RequirementHistoryList({
                           developmentStatus={developmentStatus}
                         />
                         {item.origin === "space" && item.status ? (
-                          <span
-                            className={cn(
-                              "shrink-0 rounded-md px-2 py-1 text-[10px] font-semibold",
-                              requirementSpaceStatusClass(item.status)
-                            )}
-                          >
-                            {item.status}
-                          </span>
+                          <RequirementSpaceStatusTag status={item.status} />
                         ) : collaborators.length ? (
                           <RequirementAvatars users={collaborators} />
                         ) : (

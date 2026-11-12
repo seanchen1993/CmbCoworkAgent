@@ -37,6 +37,7 @@ import {
   richComponentCacheKey
 } from "@/lib/requirement-rich-component-cache"
 import { REQUIREMENT_ACTION_HINTS, RequirementActionButton } from "./RequirementActionButton"
+import { RequirementSpaceStatusTag } from "./RequirementSpaceStatusTag"
 
 function isPermissionDeniedError(reason: unknown): boolean {
   if ((reason as { code?: unknown })?.code === "LRDFA02") return true
@@ -230,6 +231,7 @@ export function RequirementSpaceDetailView({
         </Button>
         <div className="min-w-0 flex gap-2 items-center">
           <h2 className="truncate text-sm font-semibold text-foreground">{title}</h2>
+          {requirement.status ? <RequirementSpaceStatusTag status={requirement.status} /> : null}
           <p className="text-[11px] text-muted-foreground">
             需求空间3.0 · {requirement.sourceName}
           </p>
@@ -297,9 +299,9 @@ export function RequirementSpaceDetailView({
                         暂时无法预览该需求文件
                       </h4>
                       <p className="mt-2 max-w-md text-sm leading-6 text-muted-foreground">
-                        需求空间平台目前暂不支持
-                        <strong className="px-0.5 font-semibold text-foreground">无权限成员</strong>
-                        查看此内容，我们已向平台反馈并推动后续支持。
+                        需求空间平台目前仅支持查看
+                        <strong className="px-1 font-semibold text-foreground">“实施中”</strong>
+                        状态的需求信息。其他状态暂时无法预览，请参考下方临时解决方案。
                       </p>
                     </div>
                     <div className="px-6 py-5">
@@ -308,7 +310,7 @@ export function RequirementSpaceDetailView({
                           <UserPlus className="size-4" />
                         </span>
                         <div className="min-w-0 text-sm leading-6 text-muted-foreground">
-                          <p className="font-medium text-foreground">如何获得查看权限</p>
+                          <p className="font-medium text-foreground">临时解决方案</p>
                           <p className="mt-1">
                             请联系需求负责人
                             {ownerName ? (
