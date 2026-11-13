@@ -99,7 +99,11 @@ import type {
   DashboardStageBucketStat
 } from "../use-dashboard"
 import { formatTopUserOrgName } from "../use-dashboard"
-import { formatStageDuration } from "../project-stage-analysis-view"
+import {
+  formatStageDuration,
+  formatProjectElapsed,
+  PROJECT_ELAPSED_HINT
+} from "../project-stage-analysis-view"
 import { ProjectStageAnalysisDialog } from "../ProjectStageAnalysisDialog"
 import { ProjectCodeTraceDialog, type ProjectCodeTraceTarget } from "../ProjectCodeTraceDialog"
 import {
@@ -1734,6 +1738,9 @@ function ProjectRow({
         <td className="whitespace-nowrap px-3 py-2 text-right text-muted-foreground tabular-nums">
           {formatProjectCreatedAt(project.lastExecutedAt)}
         </td>
+        <td className="whitespace-nowrap px-3 py-2 text-right text-muted-foreground tabular-nums">
+          {formatProjectElapsed(project.elapsedMs)}
+        </td>
         <td className="whitespace-nowrap px-3 py-2 text-right">
           <div className="flex flex-col items-end gap-1">
             <button
@@ -1767,7 +1774,7 @@ function ProjectRow({
       </tr>
       {expanded && (
         <tr className="border-b border-border/50 bg-muted/20">
-          <td colSpan={showSuspectedTechnicalDetailMetric ? 21 : 20} className="px-3 py-3">
+          <td colSpan={showSuspectedTechnicalDetailMetric ? 22 : 21} className="px-3 py-3">
             <div className="w-full max-w-[1200px] min-w-0 space-y-3">
               {/* 常用技能（生成行数 / 采纳率已下沉到各特性行） */}
               <div className="flex flex-wrap items-center gap-1.5 text-xs">
@@ -2143,7 +2150,10 @@ function ProjectListSection({
     order: DashboardProjectModeProjectSortOrder
   } = { key: "createdAt", order: "desc" }
   const sortKeyApplicable = (key: DashboardProjectModeProjectSortKey): boolean =>
-    isProjectAttentionSortKey(key) || key === "featureCount" || key === "createdAt"
+    isProjectAttentionSortKey(key) ||
+    key === "featureCount" ||
+    key === "createdAt" ||
+    key === "elapsedMs"
       ? true
       : key === "archivedAt"
         ? tab === "archived"
@@ -2154,7 +2164,7 @@ function ProjectListSection({
   const pageData = projectPages[tab]
   const showSuspectedTechnicalDetailMetric = pageData?.showSuspectedTechnicalDetailMetric === true
   const attentionSort = isProjectAttentionSortKey(effectiveSortBy) ? effectiveSortBy : undefined
-  const tableColumnCount = showSuspectedTechnicalDetailMetric ? 21 : 20
+  const tableColumnCount = showSuspectedTechnicalDetailMetric ? 22 : 21
   const currentError = pageError[tab]
   const tabCount =
     tab === "archived" ? (projectCounts?.archived ?? 0) : (projectCounts?.active ?? 0)
@@ -2450,7 +2460,7 @@ function ProjectListSection({
         <table
           className={cn(
             "w-full table-fixed text-xs",
-            showSuspectedTechnicalDetailMetric ? "min-w-[3108px]" : "min-w-[2968px]"
+            showSuspectedTechnicalDetailMetric ? "min-w-[3268px]" : "min-w-[3128px]"
           )}
         >
           {/*
@@ -2487,6 +2497,7 @@ function ProjectListSection({
             <col className="w-[210px]" />
             <col className="w-[140px]" />
             <col className="w-[140px]" />
+            <col className="w-[160px]" />
             <col className="w-[94px]" />
           </colgroup>
           <thead>
@@ -2594,6 +2605,15 @@ function ProjectListSection({
               >
                 最新执行时间
               </th>
+              <SortableTh
+                label="项目历时"
+                sortKey="elapsedMs"
+                activeKey={effectiveSortBy}
+                order={effectiveSortOrder}
+                enabled
+                onSort={cycleSort}
+                hint={PROJECT_ELAPSED_HINT}
+              />
               <th className="px-3 py-2 text-right font-medium">操作</th>
             </tr>
           </thead>

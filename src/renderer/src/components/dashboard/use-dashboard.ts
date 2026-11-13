@@ -688,6 +688,8 @@ export interface DashboardStageBuckets {
 }
 
 export interface DashboardProjectModeProject {
+  /** 项目累计：最后主 Agent 执行结束时间减去创建时间；缺失或异常时为 null。 */
+  elapsedMs?: number | null
   lastExecutedAt?: string | null
   projectId: string
   name: string
@@ -774,6 +776,7 @@ export type DashboardProjectModeProjectSortKey =
   | ProjectAttentionSortKey
   | "featureCount"
   | "createdAt"
+  | "elapsedMs"
   | "conversationCount"
   | "generatedLines"
   | "archivedAt"

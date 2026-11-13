@@ -1,3 +1,4 @@
+import { PROJECT_ELAPSED_HINT } from "./project-stage-analysis-view"
 import { describe, expect, it } from "vitest"
 import type {
   DashboardCodeStats,
@@ -34,6 +35,7 @@ describe("project-mode Excel export", () => {
     const project = {
       projectId: "project-1",
       name: "示例项目",
+      elapsedMs: 86_460_000,
       lifecycleStatus: "active",
       featureCount: 5,
       conversationCount: 12,
@@ -64,6 +66,7 @@ describe("project-mode Excel export", () => {
     } as DashboardProjectModeProject
 
     const [row] = buildProjectModeProjectExportRows([project])
+    expect(row[PROJECT_MODE_PROJECT_EXPORT_HEADER.indexOf("项目历时")]).toBe("1天 1分钟")
     expect(row).toHaveLength(PROJECT_MODE_PROJECT_EXPORT_HEADER.length)
     expect(row[PROJECT_MODE_PROJECT_EXPORT_HEADER.indexOf("特性数")]).toBe(5)
     expect(row[PROJECT_MODE_PROJECT_EXPORT_HEADER.indexOf("主 Agent 主动会话数")]).toBe(12)
@@ -166,7 +169,13 @@ describe("project-mode Excel export", () => {
     } as DashboardProjectModeProject
 
     const [row] = buildProjectModeProjectExportRows([project])
-    for (const column of ["工具调用次数", "模型调用次数", "Token 总量", "输入 Token", "输出 Token"]) {
+    for (const column of [
+      "工具调用次数",
+      "模型调用次数",
+      "Token 总量",
+      "输入 Token",
+      "输出 Token"
+    ]) {
       expect(row[PROJECT_MODE_PROJECT_EXPORT_HEADER.indexOf(column)], column).toBe(0)
     }
   })
@@ -251,7 +260,8 @@ describe("project-mode Excel export", () => {
       ["统计口径", "合计", "进行中", "已归档"],
       ["匹配项目总量", 3268, 2500, 768],
       ["实际展示数量", 2000, 1600, 400],
-      ["导出提示", "项目总量超过 2,000 条，本工作表仅展示前 2,000 条。"]
+      ["导出提示", "项目总量超过 2,000 条，本工作表仅展示前 2,000 条。"],
+      ["项目历时计算说明", PROJECT_ELAPSED_HINT]
     ])
   })
 
@@ -268,7 +278,8 @@ describe("project-mode Excel export", () => {
     ).toEqual([
       ["统计口径", "合计", "进行中", "已归档"],
       ["匹配项目总量", 18, 15, 3],
-      ["实际展示数量", 18, 15, 3]
+      ["实际展示数量", 18, 15, 3],
+      ["项目历时计算说明", PROJECT_ELAPSED_HINT]
     ])
   })
 })

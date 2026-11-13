@@ -80,6 +80,7 @@ function fixture(featureCount = 1) {
   const view = {
     projectId: "p",
     name: "project",
+    lifecycleCreatedAt: "2023-11-13T22:13:20.000Z",
     features: slugs.map((slug) => ({ slug, title: slug })),
     featureCount
   }
@@ -101,6 +102,7 @@ function fixture(featureCount = 1) {
                   main_agent_conversations: {
                     doc_count: 2,
                     last_execution: { value: 1700000000000 },
+                    last_execution_end: { value: 1700000060000 },
                     by_node: { buckets: [{ key: "Dev-实现", doc_count: 1 }] },
                     by_feature: {
                       buckets: [
@@ -240,6 +242,39 @@ function fixture(featureCount = 1) {
 }
 
 describe("project list lifetime IPC flow", () => {
+  it.each(["active", "archived"])(
+    "routes elapsed sorting for %s projects through the ranking",
+    async (status) => {
+      const { api, ranking, rankedViews, hits } = fixture()
+      ranking.mockResolvedValue(new Map([["p", 12345]]))
+      rankedViews.mockResolvedValue(
+        new Map([
+          [
+            "p",
+            {
+              projectId: "p",
+              name: "project",
+              features: [],
+              lifecycleCreatedAt: "2023-11-13T22:13:20Z"
+            }
+          ]
+        ])
+      )
+      const page = await api.fetchProjectModeProjectPage(range, {
+        status,
+        sortBy: "elapsedMs",
+        sortOrder: "asc"
+      })
+      expect(ranking).toHaveBeenCalledWith(expect.anything(), "elapsedMs", expect.anything())
+      expect(hits).not.toHaveBeenCalled()
+      expect(page).toMatchObject({
+        sortBy: "elapsedMs",
+        sortOrder: "asc",
+        projects: [{ elapsedMs: 12345 }]
+      })
+    }
+  )
+
   it.each([{ timed_out: true }, { _shards: { failed: 1 } }])(
     "rejects incomplete snapshots without caching a partial page: %j",
     async (bad) => {
@@ -375,56 +410,59 @@ describe("project list lifetime IPC flow", () => {
     expect(esQuery).toHaveBeenCalledTimes(3)
   })
 
-  it("globally orders projects before paging and reuses metrics for paging, reversals and unfiltered date changes", async () => {
-    const { api, ranking, rankedViews } = fixture()
-    const values = new Map<string, number | null>(
-      Array.from({ length: 25 }, (_, i) => [`p${i}`, i])
-    )
-    values.set("unknown", null)
-    ranking.mockResolvedValue(values)
-    const options = { createdInRangeOnly: false, pageSize: 10 }
-    const first = await api.fetchProjectModeMetricSortedPage(
-      range,
-      { ...options, page: 1 },
-      {},
-      "conversationCount",
-      "desc"
-    )
-    const second = await api.fetchProjectModeMetricSortedPage(
-      range,
-      { ...options, page: 2 },
-      {},
-      "conversationCount",
-      "desc"
-    )
-    const reverse = await api.fetchProjectModeMetricSortedPage(
-      { from: "2026-09-01", to: "2026-09-30" },
-      { ...options, page: 1 },
-      {},
-      "conversationCount",
-      "asc"
-    )
-    expect(first.total).toBe(26)
-    expect(first.projects.map((project) => project.projectId)).toEqual(
-      Array.from({ length: 10 }, (_, i) => `p${24 - i}`)
-    )
-    expect(second.projects.map((project) => project.projectId)).toEqual(
-      Array.from({ length: 10 }, (_, i) => `p${14 - i}`)
-    )
-    expect(reverse.projects.map((project) => project.projectId)).toEqual(
-      Array.from({ length: 10 }, (_, i) => `p${i}`)
-    )
-    const last = await api.fetchProjectModeMetricSortedPage(
-      range,
-      { ...options, page: 3 },
-      {},
-      "conversationCount",
-      "asc"
-    )
-    expect(last.projects.at(-1)?.projectId).toBe("unknown")
-    expect(ranking).toHaveBeenCalledTimes(1)
-    expect(rankedViews.mock.calls.every(([ids]) => ids.length <= 10)).toBe(true)
-  })
+  it.each(["conversationCount", "elapsedMs"])(
+    "globally orders %s projects before paging and reuses metrics for paging, reversals and unfiltered date changes",
+    async (sortKey) => {
+      const { api, ranking, rankedViews } = fixture()
+      const values = new Map<string, number | null>(
+        Array.from({ length: 25 }, (_, i) => [`p${i}`, i])
+      )
+      values.set("unknown", null)
+      ranking.mockResolvedValue(values)
+      const options = { createdInRangeOnly: false, pageSize: 10 }
+      const first = await api.fetchProjectModeMetricSortedPage(
+        range,
+        { ...options, page: 1 },
+        {},
+        sortKey,
+        "desc"
+      )
+      const second = await api.fetchProjectModeMetricSortedPage(
+        range,
+        { ...options, page: 2 },
+        {},
+        sortKey,
+        "desc"
+      )
+      const reverse = await api.fetchProjectModeMetricSortedPage(
+        { from: "2026-09-01", to: "2026-09-30" },
+        { ...options, page: 1 },
+        {},
+        sortKey,
+        "asc"
+      )
+      expect(first.total).toBe(26)
+      expect(first.projects.map((project) => project.projectId)).toEqual(
+        Array.from({ length: 10 }, (_, i) => `p${24 - i}`)
+      )
+      expect(second.projects.map((project) => project.projectId)).toEqual(
+        Array.from({ length: 10 }, (_, i) => `p${14 - i}`)
+      )
+      expect(reverse.projects.map((project) => project.projectId)).toEqual(
+        Array.from({ length: 10 }, (_, i) => `p${i}`)
+      )
+      const last = await api.fetchProjectModeMetricSortedPage(
+        range,
+        { ...options, page: 3 },
+        {},
+        sortKey,
+        "asc"
+      )
+      expect(last.projects.at(-1)?.projectId).toBe("unknown")
+      expect(ranking).toHaveBeenCalledTimes(1)
+      expect(rankedViews.mock.calls.every(([ids]) => ids.length <= 10)).toBe(true)
+    }
+  )
 
   it("separates rankings by rooms, metrics and the created-date filter", async () => {
     const { api, ranking } = fixture()
@@ -466,6 +504,16 @@ describe("project list lifetime IPC flow", () => {
   it("keeps root-only conversations and all-agent costs while omitting dates in both index queries", async () => {
     const { api, esQuery, hits } = fixture()
     const page = await api.fetchProjectModeProjectPage(range, { createdInRangeOnly: true })
+    const traceQuery = esQuery.mock.calls.find(([index]) => index === "traces")![1]
+    expect(traceQuery.aggs).toMatchObject({
+      by_project: {
+        aggs: {
+          main_agent_conversations: {
+            aggs: { last_execution_end: { max: { field: "endedAt" } } }
+          }
+        }
+      }
+    })
     expect(hits).toHaveBeenCalledTimes(1)
     expect(esQuery).toHaveBeenCalledTimes(2)
     for (const [, body] of esQuery.mock.calls) {
@@ -473,6 +521,7 @@ describe("project list lifetime IPC flow", () => {
     }
     expect(page.projects[0]).toMatchObject({
       conversationCount: 2,
+      elapsedMs: 86_460_000,
       lastExecutedAt: "2023-11-14T22:13:20.000Z",
       devStageConversationCount: 1,
       devAssociatedFeatureCount: 1,

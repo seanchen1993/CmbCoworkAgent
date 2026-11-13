@@ -41,6 +41,7 @@ import {
   featureExecutionKey,
   readFeatureExecution,
   readLastExecution,
+  calculateProjectElapsedMs,
   fetchCompleteFeatureExecution,
   type FeatureExecutionMetrics
 } from "./project-mode-execution-metrics"
@@ -9450,6 +9451,10 @@ function makeMockProjectMode(range: TimeRange, opts?: OrgFilterOptions): Dashboa
     const lastExecution = new Date(range.to).getTime()
     project.lastExecutedAt =
       project.conversationCount > 0 ? new Date(lastExecution).toISOString() : null
+    project.elapsedMs = calculateProjectElapsedMs(
+      project.lifecycleCreatedAt,
+      project.conversationCount > 0 ? new Date(lastExecution + 60_000).toISOString() : null
+    )
     project.features.forEach((feature, idx) => {
       feature.totalDurationMs =
         project.conversationCount > 0
@@ -11498,6 +11503,8 @@ interface ProjectModeAnalytics {
 }
 
 interface ProjectModeProjectView {
+  /** Latest main-Agent end minus project creation, across project lifetime. */
+  elapsedMs?: number | null
   lastExecutedAt?: string | null
   projectId: string
   name: string
@@ -11565,6 +11572,7 @@ type ProjectModeProjectSortKey =
   | ProjectAttentionSortKey
   | "featureCount"
   | "createdAt"
+  | "elapsedMs"
   | "conversationCount"
   | "generatedLines"
   | "archivedAt"
@@ -11786,8 +11794,8 @@ function normalizeProjectModeProjectStatus(value?: string | null): ProjectModePr
 }
 
 /**
- * Resolve the requested sort. `featureCount` is always honoured; the lifetime
- * metric sorts are dropped (→ default createdAt-desc) on the archived tab, so
+ * Resolve the requested sort. Elapsed time and attention sorts apply to both tabs;
+ * conversation-count and generated-line sorts are dropped (→ default createdAt-desc) on the archived tab, so
  * callers can blindly forward the user's choice without leaking the active-only rule.
  */
 function normalizeProjectModeProjectSort(
@@ -11797,6 +11805,7 @@ function normalizeProjectModeProjectSort(
   const sortOrder: ProjectModeProjectSortOrder = options?.sortOrder === "asc" ? "asc" : "desc"
   const key = options?.sortBy
   if (isProjectAttentionSortKey(key)) return { sortBy: key, sortOrder }
+  if (key === "elapsedMs") return { sortBy: key, sortOrder }
   if (key === "featureCount") return { sortBy: "featureCount", sortOrder }
   if (key === "createdAt") return { sortBy: "createdAt", sortOrder }
   if (key === "archivedAt" && status === "archived") return { sortBy: "archivedAt", sortOrder }
@@ -12009,6 +12018,7 @@ function projectModeProjectSortValue(
       buckets.vibecoding.codeStats?.adoptedLines ?? 0
     )
   }
+  if (sortBy === "elapsedMs") return project.elapsedMs ?? null
   if (sortBy === "conversationCount") return project.conversationCount
   if (sortBy === "generatedLines") return project.codeStats?.generatedLines ?? 0
   if (sortBy === "createdAt") {
@@ -13091,6 +13101,7 @@ async function fetchProjectModePageUsage(
 ): Promise<{
   perProject: Map<string, number>
   lastExecutionByProject: Map<string, string | null>
+  lastExecutionEndByProject: Map<string, string | null>
   executionByFeature: Map<string, FeatureExecutionMetrics>
   perProjectSuspectedTechnicalDetail: Map<string, number>
   perProjectDevStage: Map<string, number>
@@ -13102,6 +13113,7 @@ async function fetchProjectModePageUsage(
   const includeSuspectedTechnicalDetail = isDashboardSuspectedTechnicalDetailAllowed(access)
   const perProject = new Map<string, number>()
   const lastExecutionByProject = new Map<string, string | null>()
+  const lastExecutionEndByProject = new Map<string, string | null>()
   const executionByFeature = new Map<string, FeatureExecutionMetrics>()
   const incompleteExecutionProjects: string[] = []
   const perProjectSuspectedTechnicalDetail = new Map<string, number>()
@@ -13115,6 +13127,7 @@ async function fetchProjectModePageUsage(
     return {
       perProject,
       lastExecutionByProject,
+      lastExecutionEndByProject,
       executionByFeature,
       perProjectSuspectedTechnicalDetail,
       perProjectDevStage,
@@ -13150,6 +13163,7 @@ async function fetchProjectModePageUsage(
           // 让「VibeCoding 对话远多于 Harness」看起来像结论，其实是口径差。
           ...buildProjectModeConversationAndCostAggs({
             last_execution: { max: { field: "startedAt" } },
+            last_execution_end: { max: { field: "endedAt" } },
             ...stageBucketTraceAggs(),
             ...(includeSuspectedTechnicalDetail
               ? {
@@ -13192,6 +13206,7 @@ async function fetchProjectModePageUsage(
     const featureAgg = asRecord(mainAgentConversations.by_feature)
     const featureBuckets = Array.isArray(featureAgg.buckets) ? featureAgg.buckets : []
     lastExecutionByProject.set(key, readLastExecution(mainAgentConversations))
+    lastExecutionEndByProject.set(key, readLastExecution(mainAgentConversations, "last_execution_end"))
     if (
       asNumber(featureAgg.sum_other_doc_count) > 0 ||
       asNumber(featureAgg.doc_count_error_upper_bound) !== 0
@@ -13268,6 +13283,7 @@ async function fetchProjectModePageUsage(
   return {
     perProject,
     lastExecutionByProject,
+    lastExecutionEndByProject,
     executionByFeature,
     perProjectSuspectedTechnicalDetail,
     perProjectDevStage,
@@ -13799,6 +13815,10 @@ async function enrichProjectModeProjectViews(
     ...project,
     conversationCount: usage.perProject.get(project.projectId) ?? 0,
     lastExecutedAt: usage.lastExecutionByProject.get(project.projectId) ?? null,
+    elapsedMs: calculateProjectElapsedMs(
+      project.lifecycleCreatedAt,
+      usage.lastExecutionEndByProject.get(project.projectId)
+    ),
     ...(includeSuspectedTechnicalDetail
       ? {
           suspectedTechnicalDetailConversationCount:
@@ -13915,7 +13935,8 @@ async function fetchProjectModeProjectPage(
 ): Promise<ProjectModeProjectPageData> {
   const status = normalizeProjectModeProjectStatus(options?.status)
   const { sortBy, sortOrder } = normalizeProjectModeProjectSort(options, status)
-  const metricSort = sortBy === "conversationCount" || sortBy === "generatedLines"
+  const metricSort =
+    sortBy === "conversationCount" || sortBy === "generatedLines" || sortBy === "elapsedMs"
 
   const visibility = isDashboardSuspectedTechnicalDetailAllowed(access)
   if (sortBy === "suspectedTechnicalDetailConversationCount" && !visibility) {
@@ -13954,7 +13975,12 @@ async function fetchProjectModeProjectPage(
     sortBy,
     sortOrder,
     showSuspectedTechnicalDetailMetric: visibility,
-    projects: await enrichProjectModeProjectViews(sliced.projects, null, options, access)
+    projects: (await enrichProjectModeProjectViews(sliced.projects, null, options, access)).map(
+      (project) =>
+        sortBy === "elapsedMs"
+          ? { ...project, elapsedMs: project.attentionMetric ?? null }
+          : project
+    )
   }
   projectModePageCache.set(cacheKey, result, generation)
   return result
