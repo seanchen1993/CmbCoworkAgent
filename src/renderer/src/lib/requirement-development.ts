@@ -239,3 +239,8 @@ export function buildRequirementDevelopmentPrompt(input: {
 
 `
 }
+
+export function isMissingRequirementThreadError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error ?? "")
+  return /(?:^|:\s*)Thread not found(?:$|\s|:)/i.test(message)
+}

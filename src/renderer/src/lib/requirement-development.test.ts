@@ -3,6 +3,7 @@ import {
   buildRequirementDevelopmentPrompt,
   findRequirementDevelopmentAssociation,
   getStoredRequirementDevelopmentMetadata,
+  isMissingRequirementThreadError,
   removeRequirementDevelopmentAssociation,
   storeRequirementDevelopmentAssociation,
   type RequirementDevelopmentMetadata
@@ -29,6 +30,15 @@ function metadata(requirementId: string): RequirementDevelopmentMetadata {
 }
 
 describe("requirement development associations", () => {
+  it("recognizes an already deleted associated thread", () => {
+    expect(
+      isMissingRequirementThreadError(
+        new Error("Error invoking remote method 'threads:delete': Error: Thread not found")
+      )
+    ).toBe(true)
+    expect(isMissingRequirementThreadError(new Error("会话仍在运行"))).toBe(false)
+  })
+
   it("formats Windows paths without Markdown escape-like backslashes", () => {
     const prompt = buildRequirementDevelopmentPrompt({
       title: "简单todolist",

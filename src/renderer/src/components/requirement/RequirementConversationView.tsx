@@ -47,6 +47,7 @@ import { LeanstarTokenDialog } from "./LeanstarTokenDialog"
 import {
   buildRequirementDevelopmentPrompt,
   getRequirementDevelopmentMetadata,
+  isMissingRequirementThreadError,
   REQUIREMENT_DEVELOPMENT_ONBOARDING_EVENT,
   REQUIREMENT_DEVELOPMENT_ONBOARDING_KEY,
   resolveRequirementDevelopmentFiles,
@@ -1011,7 +1012,11 @@ function RequirementConversationSession({
           if (!result.success) throw new Error(result.error || "更新需求会话失败")
           if (result.requirement)
             onRequirementUpdated(fromPersistedRequirement(result.requirement, requirement.system))
-          await deleteThread(id)
+          try {
+            await deleteThread(id)
+          } catch (error) {
+            if (!isMissingRequirementThreadError(error)) throw error
+          }
         }
         if (threadId && threadIds.includes(threadId)) setSelectedThreadId(null)
       },

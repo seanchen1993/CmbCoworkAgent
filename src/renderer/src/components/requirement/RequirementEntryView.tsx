@@ -58,6 +58,7 @@ import {
 import {
   buildRequirementDevelopmentPrompt,
   findRequirementDevelopmentThreads,
+  isMissingRequirementThreadError,
   REQUIREMENT_DEVELOPMENT_ONBOARDING_EVENT,
   REQUIREMENT_DEVELOPMENT_ONBOARDING_KEY,
   writeRequirementDevelopmentIntent
@@ -762,7 +763,13 @@ export function RequirementEntryView({
       screen === "conversation" && selectedRequirement?.id === requirement.id
 
     const threadIds = getRequirementThreadIds(requirement)
-    for (const threadId of threadIds) await deleteThread(threadId)
+    for (const threadId of threadIds) {
+      try {
+        await deleteThread(threadId)
+      } catch (error) {
+        if (!isMissingRequirementThreadError(error)) throw error
+      }
+    }
 
     const result = await window.api.requirements.delete(requirement.id)
     if (!result.success) {
