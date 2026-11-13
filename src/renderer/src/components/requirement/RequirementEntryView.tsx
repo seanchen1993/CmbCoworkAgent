@@ -234,7 +234,7 @@ export function RequirementEntryView({
   const selectedSystem = useRequirementStore((state) =>
     getSelectedRequirementSystem(state.selectedSystemId)
   )
-  const draftSystem = useRequirementStore((state) =>
+  const draftSystem = useRequirementStore(() =>
     getSelectedRequirementSystem(draftSystemId)
   )
   const createThread = useAppStore((state) => state.createThread)
