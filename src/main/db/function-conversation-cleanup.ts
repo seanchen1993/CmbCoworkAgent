@@ -52,6 +52,7 @@ const JOURNAL = Object.freeze([
 ])
 const PROJECTIONS = "function_conversation_projection_receipts"
 const PRESENTATIONS = "function_conversation_presentation_dispositions"
+const COMPACTION_COMMITS = "function_conversation_compaction_commits"
 const RECEIPT_FIELDS = Object.freeze(["thread_id", "incarnation", "uuid", "target_json",
   "canonical_receipt_id", "canonical_row_digest", "native_payload_digest", "projection_json",
   "projection_digest"])
@@ -318,6 +319,33 @@ function scanRetirementKeys(db: NativeSqliteAdapter, table: typeof PROJECTIONS |
     (json_valid(target_json) AND json_extract(target_json,'$.conversationId')=?)`, [owner.id, owner.id])
 }
 
+function selectedCompactionCommits(db: NativeSqliteAdapter, owners: readonly Conversation[]): SqlRow[] {
+  const result: SqlRow[] = []
+  for (const owner of owners) {
+    const selected = query(db, `SELECT intent_id,target,record_json FROM ${COMPACTION_COMMITS}
+      WHERE json_valid(target) AND json_extract(target,'$.conversationId')=?`, [owner.id])
+    for (const row of selected) {
+      const target = object(parse(text(row.target))), record = object(parse(text(row.record_json)))
+      const incarnation = object(target.incarnation)
+      const branches = query(db, `SELECT 1 FROM function_conversation_branches
+        WHERE conversation_id=? AND branch_id=?`, [owner.id, text(target.branchId)])
+      if (Object.keys(target).length !== TARGET_FIELDS.length ||
+        TARGET_FIELDS.some(field => !Object.hasOwn(target, field)) ||
+        target.threadId !== owner.session.threadId || target.workspace !== owner.session.workspace ||
+        target.logicalSessionId !== owner.session.id || target.conversationId !== owner.id ||
+        target.kind !== owner.kind || target.checkpointNamespace !== owner.namespace ||
+        functionConversationProjectionIncarnation({ token: incarnation.token === null ? null
+          : text(incarnation.token), legacyCreatedAt: integer(incarnation.legacyCreatedAt) }) !==
+          owner.session.incarnation || Object.keys(incarnation).length !== 2 || !branches.length ||
+        record.version !== 1 || record.intentId !== row.intent_id || record.target !== row.target ||
+        !["prepared", "checkpoint-committed", "ack-persisted", "ready", "abandoned", "quarantined"]
+          .includes(text(record.phase))) fail()
+      result.push(row)
+    }
+  }
+  return result
+}
+
 /** Pure data retirement inside the caller's original transaction; all ownership is preflighted. */
 export function deleteFunctionConversationThreadDataInTransaction(db: NativeSqliteAdapter,
   input: FunctionConversationCleanupInput): void {
@@ -359,6 +387,8 @@ export function deleteFunctionConversationThreadDataInTransaction(db: NativeSqli
   const ordinaryChild = child && "ordinary" in child
   if (ordinaryChild) assertOrdinaryChild(db, id, original, incarnation)
   const selected = child && "owner" in child ? [child.owner] : family
+  const compactionCommits = tables.has(COMPACTION_COMMITS)
+    ? selectedCompactionCommits(db, selected) : []
   const byConversation = new Map(selected.map(value => [value.id, value]))
   const receiptKeys: ProjectionKey[] = []
   if (tables.has(PROJECTIONS)) {
@@ -454,6 +484,11 @@ export function deleteFunctionConversationThreadDataInTransaction(db: NativeSqli
   })
   if (latestProjections.size !== byProjection.size) fail()
   if (ordinaryChild) assertOrdinaryChild(db, id, original, incarnation)
+  for (const row of compactionCommits) {
+    db.run(`DELETE FROM ${COMPACTION_COMMITS} WHERE intent_id=? AND target=? AND record_json=?`,
+      [row.intent_id, row.target, row.record_json])
+    if (db.getRowsModified() !== 1) fail()
+  }
   for (const receipt of receiptKeys) {
     if (receipt.removeRaw) {
       db.run("DELETE FROM thread_messages WHERE thread_id=? AND message_id=?",
@@ -493,6 +528,7 @@ export function deleteFunctionConversationThreadDataInTransaction(db: NativeSqli
   // A synchronous final guard cannot reinsert a selected ledger and still report retirement.
   scanRetirementKeys(db, PRESENTATIONS, id, key, selected, () => { fail() })
   scanRetirementKeys(db, PROJECTIONS, id, key, selected, () => { fail() })
+  if (tables.has(COMPACTION_COMMITS) && selectedCompactionCommits(db, selected).length) fail()
   for (const receipt of receiptKeys) {
     if (query(db, `SELECT 1 FROM ${PROJECTIONS}
       WHERE thread_id=? AND incarnation=? AND uuid=?`,

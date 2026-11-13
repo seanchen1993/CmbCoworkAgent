@@ -32,6 +32,37 @@ function matches(files, entries, side) {
     return (bytes === undefined ? null : hash(bytes)) === entry[side]
   })
 }
+function previousInstallation(manifest, paths) {
+  const previous = manifest.previousInstallation
+  if (previous === undefined) return undefined
+  exactSet(previous.files, paths)
+  const editPaths = ["js", "cjs"].flatMap(extension =>
+    Array(6).fill(`dist/pregel/index.${extension}`))
+  if (manifest.name !== "@langchain/langgraph" ||
+    previous.files.some(entry => !/^[a-f0-9]{64}$/.test(entry.sha256)) ||
+    !Array.isArray(previous.edits) || previous.edits.length !== editPaths.length ||
+    previous.edits.some((entry, index) => entry.path !== editPaths[index] ||
+      typeof entry.before !== "string" || !entry.before || typeof entry.after !== "string" || !entry.after))
+    throw Error("LANGCHAIN_INNER_PATCH_PREVIOUS_INVALID")
+  return previous
+}
+function packagePostimages(pkg) {
+  if (pkg.installed) return pkg.originals
+  if (pkg.pristine) return applyNativeTextPatch(pkg.patch.toString("utf8"), pkg.originals)
+  if (!pkg.previousInstalled) throw Error("LANGCHAIN_INNER_PATCH_MIXED_OR_UNKNOWN_FILES")
+  const outputs = new Map(pkg.originals)
+  for (const edit of pkg.previous.edits) {
+    const source = outputs.get(edit.path).toString("utf8"), offset = source.indexOf(edit.before)
+    if (offset < 0 || source.indexOf(edit.before, offset + 1) >= 0)
+      throw Error("LANGCHAIN_INNER_PATCH_PREVIOUS_LITERAL_INVALID")
+    outputs.set(edit.path, Buffer.from(source.slice(0, offset) + edit.after + source.slice(offset + edit.before.length)))
+  }
+  return outputs
+}
+function previousCohort(packages) {
+  return packages.some(pkg => pkg.previousInstalled) &&
+    packages.every(pkg => pkg.previous ? pkg.previousInstalled : pkg.installed)
+}
 async function assertLock(workspaceRoot) {
   const pkgPath = resolve(workspaceRoot, "package.json"), lockPath = resolve(workspaceRoot, "package-lock.json")
   const pkgBytes = await readFile(pkgPath), lockBytes = await readFile(lockPath)
@@ -76,7 +107,9 @@ async function preparePackage(workspaceRoot, description) {
     throw Error("LANGCHAIN_INNER_PATCH_PACKAGE_CHANGED")
   sources.push(evidence(licensePath, licenseBytes))
   const originals = await readFiles(root, paths)
-  return { description, root, paths, manifest, patch, originals, evidence: sources,
+  const previous = previousInstallation(manifest, paths)
+  return { description, root, paths, manifest, patch, originals, previous, evidence: sources,
+    previousInstalled: !!previous && matches(originals, previous.files, "sha256"),
     pristine: matches(originals, manifest.files, "beforeSha256"),
     installed: matches(originals, manifest.files, "afterSha256") }
 }
@@ -88,10 +121,10 @@ export async function prepareLangchainInnerStreamPlan({ workspaceRoot = reposito
   for (const description of innerStreamPackages)
     packages.push(await preparePackage(workspaceRoot, description))
   const installed = packages.every(pkg => pkg.installed)
-  if (!installed && !packages.every(pkg => pkg.pristine))
+  if (!installed && !packages.every(pkg => pkg.pristine) && !previousCohort(packages))
     throw Error("LANGCHAIN_INNER_PATCH_MIXED_OR_UNKNOWN_FILES")
   const prepared = packages.map(pkg => {
-    const outputs = installed ? pkg.originals : applyNativeTextPatch(pkg.patch.toString("utf8"), pkg.originals)
+    const outputs = packagePostimages(pkg)
     if (!matches(outputs, pkg.manifest.files, "afterSha256"))
       throw Error("LANGCHAIN_INNER_PATCH_POSTIMAGE_INVALID")
     return Object.freeze({ name: pkg.description.name, version: pkg.description.version, root: pkg.root,
@@ -121,10 +154,11 @@ export async function installLangchainInnerStreamOrigin({ workspaceRoot = reposi
   const packages = []
   for (const description of innerStreamPackages) packages.push(await preparePackage(workspaceRoot, description))
   if (packages.every(pkg => pkg.installed)) return { status: "installed", targets: 18 }
-  if (!packages.every(pkg => pkg.pristine)) throw Error("LANGCHAIN_INNER_PATCH_MIXED_OR_UNKNOWN_FILES")
+  if (!packages.every(pkg => pkg.pristine) && !previousCohort(packages))
+    throw Error("LANGCHAIN_INNER_PATCH_MIXED_OR_UNKNOWN_FILES")
   if (checkOnly) throw Error("LANGCHAIN_INNER_PATCH_NOT_INSTALLED")
   for (const pkg of packages) {
-    pkg.outputs = applyNativeTextPatch(pkg.patch.toString("utf8"), pkg.originals)
+    pkg.outputs = packagePostimages(pkg)
     if (!matches(pkg.outputs, pkg.manifest.files, "afterSha256"))
       throw Error("LANGCHAIN_INNER_PATCH_POSTIMAGE_INVALID")
   }
@@ -138,9 +172,15 @@ export async function installLangchainInnerStreamOrigin({ workspaceRoot = reposi
     }
     await assertLock(workspaceRoot)
     await installLangchainNativeStreamOrigin({ workspaceRoot, checkOnly: true })
-    for (const pkg of packages)
-      if (!matches(await readFiles(pkg.root, pkg.paths), pkg.manifest.files, "beforeSha256"))
+    for (const pkg of packages) {
+      for (const source of pkg.evidence)
+        if (hash(await readFile(source.absolutePath)) !== source.sha256)
+          throw Error("LANGCHAIN_INNER_PATCH_EVIDENCE_CHANGED")
+      const captured = pkg.paths.map(path => ({ path,
+        sha256: pkg.originals.get(path) === undefined ? null : hash(pkg.originals.get(path)) }))
+      if (!matches(await readFiles(pkg.root, pkg.paths), captured, "sha256"))
         throw Error("LANGCHAIN_INNER_PATCH_CHANGED_DURING_INSTALL")
+    }
     for (const entry of staged) { await rename(entry.temporary, entry.target); committed.push(entry) }
     for (const pkg of packages)
       if (!matches(await readFiles(pkg.root, pkg.paths), pkg.manifest.files, "afterSha256"))

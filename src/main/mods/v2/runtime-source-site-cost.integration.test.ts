@@ -1,6 +1,6 @@
 import * as fs from "node:fs"
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
-import { join } from "node:path"
+import { basename, dirname, join, resolve } from "node:path"
 import { tmpdir } from "node:os"
 import { afterEach, expect, it, vi } from "vitest"
 import type { ModJson } from "../../../shared/mods/types"
@@ -199,6 +199,137 @@ export function register(on) {
     }
   }
 }
+
+it("probes the legacy hooks path once and keeps actual source rejection checks", () => {
+  const root = mkdtempSync(join(tmpdir(), "mods-source-sites-"))
+  const path = join(root, "plugin"), directory = join(path, "hooks")
+  const hooks = join(directory, "hooks.json"), outside = join(root, "outside")
+  if (dirname(resolve(root)) !== resolve(tmpdir()) || !basename(root).startsWith("mods-source-sites-"))
+    throw Error("Unexpected source fixture cleanup path")
+  cleanup.push(async () => { rmSync(root, { recursive: true, force: true }) })
+  mkdirSync(directory, { recursive: true })
+  const source = { id: "legacy", name: "legacy", path, enabled: true }
+  const hasSource = () => FunctionModsManager.prototype["isSource"](source)
+  const valid = '{"modules":["register.ts"]}'
+  expect(hasSource()).toBe(false)
+  writeFileSync(hooks, valid)
+  const resolved = fs.realpathSync(hooks)
+  const exists = vi.spyOn(fs, "existsSync")
+  const stat = vi.spyOn(fs, "statSync")
+  try {
+    expect(hasSource()).toBe(true)
+    const probes = exists.mock.calls.filter(([name]) => name === hooks || name === resolved)
+    expect(probes).toEqual([[hooks]])
+    expect(stat.mock.calls.filter(([name]) => name === resolved)).toHaveLength(2)
+  } finally {
+    exists.mockRestore()
+    stat.mockRestore()
+  }
+  writeFileSync(hooks, "{")
+  expect(hasSource()).toBe(false)
+  writeFileSync(hooks, valid + " ".repeat(32768))
+  expect(hasSource()).toBe(false)
+  fs.unlinkSync(hooks)
+  mkdirSync(hooks)
+  expect(hasSource()).toBe(false)
+  fs.rmdirSync(hooks)
+  fs.rmdirSync(directory)
+  mkdirSync(outside)
+  writeFileSync(join(outside, "hooks.json"), valid)
+  fs.symlinkSync(outside, directory, process.platform === "win32" ? "junction" : "dir")
+  expect(hasSource()).toBe(false)
+})
+
+it("checks a warm classic drawing source before earlier nonexecutable packages", async () => {
+  const workspace = mkdtempSync(join(tmpdir(), "mods-source-sites-"))
+  if (dirname(resolve(workspace)) !== resolve(tmpdir()) ||
+    !basename(workspace).startsWith("mods-source-sites-"))
+    throw Error("Unexpected source fixture cleanup path")
+  cleanup.push(async () => { rmSync(workspace, { recursive: true, force: true }) })
+
+  const installed = ["first-v1", "second-v1", "legacy"].map(id => ({
+    id, name: id, path: join(workspace, id), enabled: true
+  }))
+  const v1Files = installed.slice(0, 2).map(source => {
+    mkdirSync(join(source.path, "mods"), { recursive: true })
+    const path = join(source.path, "mods/manifest.json")
+    writeFileSync(path, JSON.stringify({
+      apiVersion: "cmb.mods/v1", id: source.id, entry: "main.ts"
+    }))
+    writeFileSync(join(source.path, "mods/main.ts"), "export function register() {}")
+    return fs.realpathSync(path)
+  })
+  const legacy = installed[2]
+  mkdirSync(join(legacy.path, "hooks"), { recursive: true })
+  writeFileSync(join(legacy.path, "plugin.json"), JSON.stringify({
+    name: legacy.name, version: "1.0.0"
+  }))
+  const hooks = join(legacy.path, "hooks/hooks.json")
+  writeFileSync(hooks, '{"modules":["./register.ts"]}')
+  writeFileSync(join(legacy.path, "hooks/register.ts"), `export function register(on) {
+    on("ui.render", { component: "AbovePrompt" }, async ($, event, next) => next(event))
+  }`)
+  const hookFile = fs.realpathSync(hooks)
+  const registry = join(workspace, "plugins.json")
+  writeFileSync(registry, JSON.stringify(installed))
+
+  const store = new ModControlStore(join(workspace, "control.sqlite"))
+  cleanup.push(async () => { store.close() })
+  const guests: FunctionGuestRuntime[] = []
+  const manager = new FunctionModsManager(store, {
+    plugins: () => JSON.parse(readFileSync(registry, "utf8")) as typeof installed,
+    enabled: () => true,
+    protects: () => false,
+    clawApplicable: () => false,
+    publish: async (_workspace, value) => value,
+    changed: () => {}
+  }, () => {
+    const owned: FunctionGuestRuntime[] = []
+    return {
+      async load(code, options) {
+        const guest = await FunctionGuestRuntime.create(code, options)
+        owned.push(guest)
+        guests.push(guest)
+        return guest
+      },
+      stop() { for (const guest of owned) void guest.dispose() },
+      async stopAndDrain() { await Promise.all(owned.map(guest => guest.dispose())) }
+    }
+  })
+  cleanup.push(async () => {
+    manager.close()
+    await Promise.all(guests.map(guest => guest.dispose()))
+  })
+  const statuses = await manager.status(workspace)
+  expect(statuses.map(item => item.pluginId)).toEqual([legacy.id])
+  expect(statuses[0].digest).toBeTypeOf("string")
+  await manager.approve(workspace, legacy.id, statuses[0].digest!)
+  const mount = () => manager.siteMountOutcome(workspace, "thread", "AssistantMessage")
+  const initial = await mount()
+  if (initial.state !== "mounted") throw Error("A real classic drawing owner must be warm")
+  await manager.siteUnmount(workspace, "thread", initial.owner)
+  const guestCount = guests.length
+  expect(guests.filter(guest => !guest.stats.disposed)).toHaveLength(1)
+
+  const lstat = vi.spyOn(fs, "lstatSync")
+  const sourceReads = () => lstat.mock.calls.flatMap(([path]) =>
+    typeof path === "string" && (path === hookFile || v1Files.includes(path)) ? [path] : [])
+  try {
+    const warm = await mount()
+    if (warm.state !== "mounted") throw Error("Expected the existing classic drawing owner")
+    expect(sourceReads()).toEqual([hookFile])
+    expect(guests).toHaveLength(guestCount)
+    await manager.siteUnmount(workspace, "thread", warm.owner)
+    fs.unlinkSync(hooks)
+    lstat.mockClear()
+
+    expect(await mount()).toEqual({ state: "inactive", reason: "no-protection-or-functions" })
+    expect(sourceReads()).toEqual(v1Files)
+    expect(guests).toHaveLength(guestCount)
+  } finally {
+    lstat.mockRestore()
+  }
+})
 
 // Diagnostic only: exercise the actual retained manager, guest and source fences.
 // Counts describe costs, not a cache TTL or permission to bypass fresh validation.

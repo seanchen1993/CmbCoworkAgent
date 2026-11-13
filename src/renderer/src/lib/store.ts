@@ -32,6 +32,9 @@ import type { ThreadDeleteOptions, ThreadMetadataPatch } from "../../../main/typ
 import { chatScrollSessionStore } from "@/components/chat/chat-scroll-session-store"
 import { clearChatThreadProjectionRuntime } from "./chat-thread-projection-cache"
 import { runBestEffortCommittedDeletionCleanups } from "./thread-group-deletion"
+import { captureThreadDirectoryIncarnation, sameThreadDirectoryIncarnation,
+  canPublishThreadDirectoryReply } from "./thread-directory-mutation-scope"
+import { ThreadDirectoryReadPublishers } from "./thread-directory-read-publisher"
 
 const MAX_WORKER_FOCUS_MESSAGES = 2_000
 const MAX_WORKER_SIGNATURE_CHARS = 512
@@ -57,6 +60,7 @@ let threadDirectoryCursor: { beforeUpdatedAt: number; beforeThreadId: string } |
 let threadDirectoryLoadMorePromise: Promise<void> | null = null
 let threadDirectoryMutationEpoch = 0
 const threadDirectoryMutationEpochById = new Map<string, number>()
+const threadDirectoryReadPublishers = new ThreadDirectoryReadPublishers()
 let indexedThreadDirectorySnapshot: readonly Thread[] | null = null
 let threadDirectoryIndexById = new Map<string, number>()
 
@@ -1020,6 +1024,11 @@ interface AppState {
   // Thread actions
   loadThreads: (options?: ThreadDirectoryLoadOptions) => Promise<void>
   addThreadSummary: (thread: Thread) => void
+  captureThreadSummaryRead: (threadId: string) => {
+    isCurrent(): boolean
+    publish(thread: Thread): boolean
+    close(): void
+  }
   syncThreadWorkspaceSummary: (threadId: string, workspacePath: string | null) => void
   loadMoreThreads: () => Promise<void>
   touchThreadSummaries: (threadIds: Iterable<string>, updatedAt: Date) => void
@@ -1352,6 +1361,49 @@ export const useAppStore = create<AppState>((set, get) => ({
     }))
   },
 
+  captureThreadSummaryRead: (threadId) => {
+    const initial = get()
+    const index = getThreadDirectoryIndex(initial.threads).get(threadId)
+    const ticket = isThreadDeletionPending(threadId) ? undefined : threadDirectoryReadPublishers.begin(
+      threadId, initial.accountRevision, index === undefined ? undefined : initial.threads[index])
+    if (!ticket) return { isCurrent: () => false, publish: () => false, close: () => {} }
+    let closed = false, consumed = false
+    const unsubscribe = useAppStore.subscribe(state => {
+      const currentIndex = getThreadDirectoryIndex(state.threads).get(threadId)
+      threadDirectoryReadPublishers.observe(ticket, state.accountRevision,
+        currentIndex === undefined ? undefined : state.threads[currentIndex])
+    })
+    const close = () => {
+      if (closed) return
+      closed = true
+      unsubscribe()
+      threadDirectoryReadPublishers.close(ticket)
+    }
+    return {
+      isCurrent: () => !closed && !consumed && !isThreadDeletionPending(threadId) &&
+        threadDirectoryReadPublishers.current(ticket),
+      close,
+      publish: (thread) => {
+        if (closed || consumed) return false
+        consumed = true
+        let published = false
+        try {
+          set(state => {
+            const currentIndex = getThreadDirectoryIndex(state.threads).get(threadId)
+            if (isThreadDeletionPending(threadId) || !threadDirectoryReadPublishers.canPublish(ticket,
+              state.accountRevision, currentIndex === undefined ? undefined : state.threads[currentIndex], thread)) return state
+            markThreadDirectoryMutation(threadId)
+            published = true
+            return { threads: adoptThreadDirectorySnapshot([
+              thread, ...state.threads.filter(item => item.thread_id !== threadId)
+            ]) }
+          })
+          return published
+        } finally { close() }
+      }
+    }
+  },
+
   // The host already persisted this workspace. Update display metadata only, never write it back.
   syncThreadWorkspaceSummary: (threadId, workspacePath) => {
     if (isThreadRetired(threadId)) return
@@ -1464,6 +1516,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     options?: ThreadDeleteOptions & { deferDirectoryUpdate?: boolean }
   ) => {
     console.log("[Store] Deleting thread:", threadId)
+    threadDirectoryReadPublishers.revoke(threadId)
     rendererDeletingThreadIds.add(threadId)
     markThreadDirectoryMutation(threadId)
     try {
@@ -1518,6 +1571,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   finalizeThreadDeletions: (threadIds: Iterable<string>) => {
     const deletedIds = new Set(threadIds)
     if (deletedIds.size === 0) return
+    for (const threadId of deletedIds) threadDirectoryReadPublishers.revoke(threadId)
     set((state) => {
       const threads = state.threads.filter((thread) => !deletedIds.has(thread.thread_id))
       const directoryChanged = threads.length !== state.threads.length
@@ -1570,12 +1624,17 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   updateThread: async (threadId: string, updates: Partial<Thread>) => {
     if (isThreadDeletionPending(threadId)) return
+    const accountRevision = get().accountRevision
+    const original = captureThreadDirectoryIncarnation(
+      get().threads[getThreadDirectoryIndex(get().threads).get(threadId) ?? -1])
     markThreadDirectoryMutation(threadId)
     const updated = await window.api.threads.update(threadId, updates)
     if (isThreadDeletionPending(threadId)) return
     set((state) => {
+      if (state.accountRevision !== accountRevision) return state
       const index = getThreadDirectoryIndex(state.threads).get(threadId)
       if (index === undefined) return state
+      if (!canPublishThreadDirectoryReply(original, state.threads[index], updated)) return state
       const threads = [...state.threads]
       threads[index] = updated
       return { threads: adoptThreadDirectorySnapshot(threads) }
@@ -1583,11 +1642,16 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   patchThreadMetadata: async (threadId: string, patch: ThreadMetadataPatch) => {
+    const accountRevision = get().accountRevision
+    const original = captureThreadDirectoryIncarnation(
+      get().threads[getThreadDirectoryIndex(get().threads).get(threadId) ?? -1])
     markThreadDirectoryMutation(threadId)
     const updated = await window.api.threads.patchMetadata(threadId, patch)
     set((state) => {
+      if (state.accountRevision !== accountRevision) return state
       const index = getThreadDirectoryIndex(state.threads).get(threadId)
       if (index === undefined) return state
+      if (!canPublishThreadDirectoryReply(original, state.threads[index], updated)) return state
       const threads = [...state.threads]
       threads[index] = updated
       return { threads: adoptThreadDirectorySnapshot(threads) }
@@ -1600,12 +1664,18 @@ export const useAppStore = create<AppState>((set, get) => ({
     skillName?: string,
     skillDescription?: string
   ) => {
+    const accountRevision = get().accountRevision
+    const original = captureThreadDirectoryIncarnation(
+      get().threads[getThreadDirectoryIndex(get().threads).get(threadId) ?? -1])
     try {
       const generatedTitle = await window.api.threads.generateTitle(content, {
         threadId,
         skillName,
         skillDescription
       })
+      if (get().accountRevision !== accountRevision || !sameThreadDirectoryIncarnation(original,
+        captureThreadDirectoryIncarnation(
+          get().threads[getThreadDirectoryIndex(get().threads).get(threadId) ?? -1]))) return
       await get().updateThread(threadId, { title: generatedTitle })
     } catch (error) {
       console.error("[Store] Failed to generate title:", error)

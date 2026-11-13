@@ -8,15 +8,28 @@ import { captureConversationCheckpointRead, readFunctionConversationCheckpointMe
 import type { FunctionConversationCheckpointMembershipProof,
   FunctionConversationCheckpointMembershipSnapshot } from
   "../../checkpointer/function-conversation-checkpoint-membership"
-import type { BaseMessage } from "@langchain/core/messages"
+import { BaseMessage, HumanMessage } from "@langchain/core/messages"
+import { functionConversationState, readFunctionConversationIntakePublication,
+  type FunctionConversationIntakePublication } from "../../agent/mods-conversation"
+import { inspectFunctionConversationAdmission } from "../../agent/function-conversation-admission"
+import { captureNativeSharedOrdinaryMessageData, type NativeSharedOrdinaryMessageData } from
+  "../../agent/native-shared-ordinary-message-data"
+import { serializeFunctionConversationNativeMessage } from "../../agent/function-conversation-native-message"
+import { readFunctionConversationTranscriptStamp, sameFunctionConversationTranscriptStamp } from
+  "../../../shared/mods/v2/conversation-transcript"
+import { functionConversationCanonicalStamp, functionConversationRowDigest } from
+  "../../checkpointer/function-conversation-checkpoint-membership"
 import { SqlJsSaver } from "../../checkpointer/sqljs-saver"
 import { getDb, getThreadCore } from "../../db"
 import { readFunctionConversationNativeDestination,
   assertFunctionConversationNativeDestinationDataCurrent,
   withFunctionConversationNativeDestinationDataScope,
   type FunctionConversationNativeDestination } from "../../db/function-conversation-native-destination"
-import type { FunctionConversationRef, FunctionConversationStore } from "../../db/function-conversation-store"
-import type { NativeSqliteAdapter } from "../../db/native-sqlite-adapter"
+import { readFunctionConversationStoreReceipt,
+  captureFunctionConversationPendingReceiptDataCheck,
+  type FunctionConversationStore, type FunctionConversationRef } from "../../db/function-conversation-store"
+import { captureFunctionConversationNativeSqlitePreparedExecution,
+  type NativeSqliteAdapter } from "../../db/native-sqlite-adapter"
 import { matchesThreadIncarnation, type ThreadIncarnation } from "../../services/thread-incarnation"
 import { isModRuntimeAuthorityDataCurrent, type ModRuntimeAuthority } from "../runtime-instance"
 import { FunctionConversationSharedCheckpointScope, readFunctionConversationSharedNativeRead,
@@ -28,7 +41,7 @@ import type { FunctionConversationCoordinator,
 import { readFunctionConversationSharedNativeRegistration,
   bindFunctionConversationSharedRegistrationPostflight } from "./conversation-coordinator"
 import { readFunctionConversationSharedSourceCurrent } from "./conversation-shared-source-current"
-import type { FunctionConversationSharedNativeReadCurrent } from "./conversation-shared-checkpointer"
+
 
 const brand = Symbol("function-conversation-shared-restore")
 const activeBrand = Symbol("function-conversation-shared-active")
@@ -52,6 +65,14 @@ export interface FunctionConversationSharedReturnHistory {
   assertCurrent(): void
   assertDataCurrent(): void
 }
+/** Already-qualified ordinary tuple input addresses, never membership or publication authority. */
+export interface FunctionConversationSharedOrdinaryReturnInputs {
+  prepare(): Readonly<{
+    capture(message: BaseMessage): Readonly<{ assertDataCurrent(): void }> | undefined
+    assertDataCurrent(): void
+  }>
+  assertDataCurrent(): void
+}
 export interface FunctionConversationSharedProducerView {
   readonly coordinator: FunctionConversationCoordinator
   readonly database: NativeSqliteAdapter
@@ -68,6 +89,8 @@ export interface FunctionConversationSharedProducerView {
   readonly destination: FunctionConversationNativeDestination
   readonly signal: AbortSignal
   readonly history?: FunctionConversationSharedReturnHistory
+  readonly ordinaryReturnInputs?: FunctionConversationSharedOrdinaryReturnInputs
+  readonly intake?: FunctionConversationIntakePublication
   assertCurrent(): void
   assertDataCurrent(): void
 }
@@ -84,12 +107,13 @@ interface Active {
   readonly key: string
   readonly assertCurrent: () => void
   readonly assertDataCurrent: () => void
-  readonly sourceCurrent?: FunctionConversationSharedNativeReadCurrent
+  readonly sourceCurrent?: NonNullable<ReturnType<typeof readFunctionConversationSharedSourceCurrent>>
   retiring: boolean
   released: boolean
   completed?: { readonly target: FunctionConversationRef;
     readonly destination: FunctionConversationNativeDestination
-    readonly restored: boolean }
+    readonly restored: boolean
+    readonly restore?: FunctionConversationSharedRestore }
 }
 interface Restore {
   readonly database: NativeSqliteAdapter
@@ -105,7 +129,10 @@ interface Restore {
   readonly destination: FunctionConversationNativeDestination
   readonly active: FunctionConversationSharedActive
   readonly assertCurrent: () => void
-  readonly history: FunctionConversationSharedReturnHistory
+  readonly history?: FunctionConversationSharedReturnHistory
+  readonly admission?: Readonly<{ highWater: number }>
+  readonly pending?: Readonly<{ notes: readonly HumanMessage[];
+    ordinaryReturnInputs: FunctionConversationSharedOrdinaryReturnInputs }>
   readonly checkpointPoint: HistoricalCheckpointPoint
   retiring: boolean
   released: boolean
@@ -133,9 +160,15 @@ const historicalTargets = new WeakMap<FunctionConversationSharedHistoricalTarget
   assertDataCurrent(): void
 }>()
 const reservations = new WeakMap<NativeSqliteAdapter, Map<string, object>>()
+const originalRestoreSourceCurrent = readFunctionConversationSharedSourceCurrent
 const signalThrowIfAborted = AbortSignal.prototype.throwIfAborted
 const dataWeakGet = WeakMap.prototype.get, dataWeakSet = WeakMap.prototype.set
 const dataMapGet = Map.prototype.get
+const returnInputMap = Map, returnInputMapGet = Map.prototype.get, returnInputMapSet = Map.prototype.set
+const returnInputApply = Reflect.apply, returnInputFreeze = Object.freeze
+const returnInputDefine = Object.defineProperty, returnInputField = Object.getOwnPropertyDescriptor
+const returnInputString = String
+const originalRestoreOrdinaryData = captureNativeSharedOrdinaryMessageData
 function readData<K extends object, V>(records: WeakMap<K, V>, key: K): V | undefined {
   return Reflect.apply(dataWeakGet, records, [key]) as V | undefined
 }
@@ -200,9 +233,13 @@ export function captureFunctionConversationSharedActive(input: {
   assertInputFields?.()
   if (read.scope !== input.scope) fail()
   const incarnation = fixedIncarnation(input.checkpointIncarnation)
-  const sourceCurrent = assertInputFields && input.assertCurrent === read.assertCurrent
-    ? readFunctionConversationSharedSourceCurrent(input.assertCurrent, input.scope,
+  const candidateSource = assertInputFields && input.assertCurrent === read.assertCurrent
+    ? originalRestoreSourceCurrent(input.assertCurrent, input.scope,
       input.saver, input.authority, input.invocation, database) : undefined
+  const sourceCurrent = candidateSource &&
+    candidateSource.checkpointIncarnation.token === incarnation.token &&
+    candidateSource.checkpointIncarnation.legacyCreatedAt === incarnation.legacyCreatedAt
+    ? candidateSource : undefined
   const incarnationKey = incarnation.token === null
     ? ["legacy", incarnation.legacyCreatedAt] : ["token", incarnation.token]
   const key = JSON.stringify([input.authority.threadId, incarnationKey, read.namespace])
@@ -304,11 +341,35 @@ export function readFunctionConversationSharedCompletedActiveData(
   data.assertCurrent()
   const completed = readData(completedActiveRecords, proof)
   if (!active || !completed || active.authority !== authority || !active.sourceCurrent ||
-    completed.restored || completed.destination !== destination) return undefined
+    completed.destination !== destination) return undefined
+  const restore = completed.restore
+  const restored = restore ? readData(records, restore) : undefined
+  const pending = restored?.pending, restoredTarget = restored?.target
+  const restoredStore = restored?.store, restoredCurrent = restored?.assertCurrent
+  const restoredPoint = restored?.checkpointPoint
+  const assertPendingRestoreData = () => {
+    if (!completed.restored) {
+      if (restore) fail()
+      return
+    }
+    if (!restore || !restored || !pending || !restoredTarget || restored.history ||
+      readData(records, restore) !== restored || restored.pending !== pending ||
+      restored.target !== restoredTarget || restored.store !== restoredStore ||
+      restored.assertCurrent !== restoredCurrent || restored.checkpointPoint !== restoredPoint ||
+      restored.retiring || restored.released || restored.active !== proof ||
+      restored.nativeRead !== active.nativeRead || restored.saver !== active.saver ||
+      restored.authority !== active.authority || restored.invocation !== active.invocation ||
+      restored.database !== active.database || restored.scope !== active.scope ||
+      !sameRef(restoredTarget, completed.target)) fail()
+  }
+  // A committed historical restore remains on the original full fallback path.
+  if (completed.restored && (!restore || !restored || !pending || restored.history)) return undefined
+  assertPendingRestoreData()
   const completedField = Object.getOwnPropertyDescriptor(active, "completed")
   if (!completedField || !("value" in completedField) || completedField.value !== completed) fail()
   const assertDataCurrent = () => {
     data.assertCurrent()
+    assertPendingRestoreData()
     const field = Object.getOwnPropertyDescriptor(active, "completed")
     if (!field || !("value" in field) || field.value !== completed ||
       field.writable !== completedField.writable || field.enumerable !== completedField.enumerable ||
@@ -318,10 +379,10 @@ export function readFunctionConversationSharedCompletedActiveData(
       fail("MODS_CONVERSATION_TARGET_CLOSED")
   }
   assertDataCurrent()
-  return Object.freeze({ database: active.database, scope: active.scope, saver: active.saver,
+  return returnInputFreeze({ database: active.database, scope: active.scope, saver: active.saver,
     authority: active.authority, invocation: active.invocation, target: completed.target,
     destination, current: active.nativeView.assertCurrent, namespace: active.nativeView.namespace,
-    assertDataCurrent })
+    pendingRestore: completed.restored ? restore : undefined, assertDataCurrent })
 }
 
 function readActive(proof: FunctionConversationSharedActive, expected: {
@@ -344,6 +405,7 @@ export function completeFunctionConversationSharedActive(proof: FunctionConversa
     readonly scope: FunctionConversationSharedCheckpointScope; readonly parent: FunctionConversationRef;
     readonly target: FunctionConversationRef;
     readonly restore?: FunctionConversationSharedRestore;
+    readonly intake?: FunctionConversationIntakePublication;
     readonly producer?: { readonly coordinator: FunctionConversationCoordinator;
       readonly registration: FunctionConversationSharedNativeRegistration }
   }): FunctionConversationSharedProducer | undefined {
@@ -355,7 +417,8 @@ export function completeFunctionConversationSharedActive(proof: FunctionConversa
     expected.parent, active.assertCurrent)
   if (destination.checkpointThreadId !== expected.authority.threadId) fail()
   const completed = Object.freeze({ target: expected.target, destination,
-    restored: expected.restore !== undefined })
+    restored: expected.restore !== undefined,
+    ...(expected.restore ? { restore: expected.restore } : {}) })
   active.completed = completed
   Reflect.apply(dataWeakSet, completedActiveRecords, [proof, completed])
   active.assertCurrent(); destination.assertCurrent()
@@ -375,6 +438,18 @@ export function completeFunctionConversationSharedActive(proof: FunctionConversa
     restored.scope !== expected.scope || restored.saver !== expected.saver ||
     restored.authority !== expected.authority || restored.invocation !== expected.invocation ||
     restored.database !== active.database || !sameRef(restored.target, expected.target))) fail()
+  const intake = expected.intake
+  if (restored?.pending?.notes.length) {
+    if (!intake) fail()
+    const actual = readFunctionConversationIntakePublication(intake, restored.store, expected.target)
+    if (actual.notes.length !== restored.pending.notes.length ||
+      actual.notes.some((note, index) => note !== restored.pending!.notes[index])) fail()
+  } else if (intake) fail()
+  const pendingField = restored ? returnInputField(restored, "pending") : undefined
+  const restoredPending = pendingField && "value" in pendingField ? pendingField.value as
+    Restore["pending"] : undefined
+  const ordinaryReturnInputs = restoredPending?.ordinaryReturnInputs
+  ordinaryReturnInputs?.assertDataCurrent()
   const originalHistory = restored?.history
   const historicalTarget = originalHistory
     ? Object.freeze({ [historicalTargetBrand]: true as const }) : undefined
@@ -400,7 +475,8 @@ export function completeFunctionConversationSharedActive(proof: FunctionConversa
   }
   const assertDataCurrent = () => {
     assertActiveData()
-    if (failed || !isModRuntimeAuthorityDataCurrent(active.authority) ||
+    if (failed || view.ordinaryReturnInputs !== ordinaryReturnInputs ||
+      !isModRuntimeAuthorityDataCurrent(active.authority) ||
       getDb() !== active.database || readData(activeRecords, proof) !== active ||
       active.retiring || active.released || active.completed !== completed ||
       !reservationCurrent() ||
@@ -433,16 +509,16 @@ export function completeFunctionConversationSharedActive(proof: FunctionConversa
     } catch (error) { failed = true; throw error }
     finally { reading = false }
   }
-  const view: FunctionConversationSharedProducerView = Object.freeze({
+  const view: FunctionConversationSharedProducerView = returnInputFreeze({
     coordinator: registration.coordinator,
     database: active.database, saver: active.saver, authority: active.authority,
     invocation: active.invocation, scope: active.scope, nativeRead: active.nativeRead,
     config: active.nativeView.config, namespace: active.nativeView.namespace,
     owner: registration.owner, target: registration.target, binding: registration.binding,
-    destination, signal: active.signal, ...(history ? { history } : {}),
-    assertCurrent, assertDataCurrent
+    destination, signal: active.signal, ...(history ? { history } : {}), ordinaryReturnInputs,
+    ...(intake ? { intake } : {}), assertCurrent, assertDataCurrent
   })
-  producerRecords.set(token, Object.freeze({ authority: active.authority, view }))
+  producerRecords.set(token, returnInputFreeze({ authority: active.authority, view }))
   view.assertCurrent()
   if (restored && expected.restore && originalHistory && historicalTarget) {
     const restoreProof = expected.restore, originalTarget = restored.target
@@ -527,6 +603,321 @@ export function retireFunctionConversationSharedActive(proof: FunctionConversati
   }, () => undefined)
 }
 
+const originalRestoreDestinationReader = readFunctionConversationNativeDestination
+const originalRestorePreparedExecution = captureFunctionConversationNativeSqlitePreparedExecution
+const originalRestoreReceipt = readFunctionConversationStoreReceipt
+const originalPendingReceiptDataCheck = captureFunctionConversationPendingReceiptDataCheck
+const restoreDescriptor = Object.getOwnPropertyDescriptor, restorePrototype = Object.getPrototypeOf
+const restoreCreate = Object.create, restoreIsProxy = types.isProxy
+
+/** Fixed addresses of this Restore call, independent of Host-input field capture. */
+function capturePendingRestoreInput(value: object): (() => void) | undefined {
+  if (restoreIsProxy(value)) return undefined
+  const prototype = restorePrototype(value)
+  const keys = ["nativeRead", "saver", "authority", "invocation", "scope", "parentBinding",
+    "store", "active", "checkpointIncarnation", "signal", "assertCurrent"]
+  const fields = restoreCreate(null) as Record<string, PropertyDescriptor>
+  for (let index = 0; index < keys.length; index++) {
+    const field = restoreDescriptor(value, keys[index])
+    if (!field || !("value" in field)) return undefined
+    fields[keys[index]] = field
+  }
+  return () => {
+    if (restoreIsProxy(value) || restorePrototype(value) !== prototype) fail()
+    for (let index = 0; index < keys.length; index++) {
+      const field = restoreDescriptor(value, keys[index]), original = fields[keys[index]]
+      if (!field || !("value" in field) || field.value !== original.value ||
+        field.writable !== original.writable || field.enumerable !== original.enumerable ||
+        field.configurable !== original.configurable) fail()
+    }
+  }
+}
+
+/** Initial task updates prove an intake cut, never a committed checkpoint or delivery. */
+function preparePendingSharedRestore(
+  input: Parameters<typeof prepareFunctionConversationSharedRestore>[0], database: NativeSqliteAdapter,
+  read: ReturnType<typeof readFunctionConversationSharedNativeRead>, active: Active
+): FunctionConversationSharedRestore {
+  const assertRestoreInput = capturePendingRestoreInput(input)
+  const tuple = read.tuple, source = read.pendingNamespace, parent = input.parentBinding.target
+  if (!tuple || !source || tuple.metadata?.step !== 1) fail()
+  const initialCurrent = () => {
+    assertRestoreInput?.()
+    input.signal.throwIfAborted(); input.authority.assertLive()
+    const original = assertRestoreInput && originalRestoreSourceCurrent(read.assertCurrent, input.scope,
+      input.saver, input.authority, input.invocation, database)
+    assertRestoreInput?.()
+    const contained = assertRestoreInput && original && active.sourceCurrent &&
+      original.source === input.assertCurrent &&
+      original.parentBinding === input.parentBinding && original.signal === input.signal &&
+      original.checkpointIncarnation === input.checkpointIncarnation &&
+      active.sourceCurrent.source === original.source &&
+      active.sourceCurrent.receiver === original.receiver && active.database === database &&
+      active.saver === input.saver && active.authority === input.authority &&
+      active.invocation === input.invocation && active.nativeRead === input.nativeRead &&
+      active.scope === input.scope && active.signal === input.signal &&
+      active.nativeView.assertCurrent === read.assertCurrent
+    if (contained) active.assertCurrent()
+    else {
+      input.assertCurrent(); input.parentBinding.assertCurrent()
+      read.assertCurrent(); active.assertCurrent()
+    }
+    if (getDb() !== database || !matchesThreadIncarnation(getThreadCore(input.authority.threadId),
+      input.checkpointIncarnation)) fail("MODS_CONVERSATION_THREAD_CHANGED")
+    source.assertInputDataCurrent()
+    assertRestoreInput?.()
+  }
+  initialCurrent()
+  const selected = source.writes.filter(write => write.checkpointId === tuple.checkpoint.id)
+  const stateWrites = selected.filter(write => write.channel === "cmbFunctionConversation")
+  if (stateWrites.length !== 1) fail()
+  const readPendingState = () => {
+    const value = stateWrites[0].value
+    if (!value || typeof value !== "object" || types.isProxy(value) ||
+      ![Object.prototype, null].includes(Object.getPrototypeOf(value))) fail()
+    for (const key of Reflect.ownKeys(value)) {
+      const field = Object.getOwnPropertyDescriptor(value, key)
+      if (!field || !("value" in field)) fail()
+    }
+    return readFunctionConversationState(value)
+  }
+  const pendingState = readPendingState()
+  const highWater = pendingState.frontier
+  // The qualified zero-note form still carries its original ordinary input, not intake notes.
+  if (highWater < 0) fail("MODS_CONVERSATION_MIGRATION_REQUIRED")
+  if (selected.length !== 3 || !selected[0].taskId ||
+    selected.some(write => write.taskId !== selected[0].taskId || write.type !== "json") ||
+    selected.map(write => write.channel).sort().join("\0") !==
+      ["branch:to:model_request", "cmbFunctionConversation", "messages"].join("\0") ||
+    selected.find(write => write.channel === "branch:to:model_request")!.value !== null) fail()
+  const incoming = selected.find(write => write.channel === "messages")!.value
+  if (!Array.isArray(incoming) || types.isProxy(incoming) ||
+    Object.getPrototypeOf(incoming) !== Array.prototype || !incoming.every(HumanMessage.isInstance)) fail()
+  const rawMessages = tuple.checkpoint.channel_values.messages
+  if (rawMessages !== undefined && (!Array.isArray(rawMessages) || types.isProxy(rawMessages) ||
+    !rawMessages.every(BaseMessage.isInstance))) fail()
+  if (inspectFunctionConversationAdmission({ state: undefined,
+    messages: rawMessages as BaseMessage[] | undefined }, initialCurrent).kind !== "ordinary") fail()
+
+  for (const write of source.writes) {
+    if (write.checkpointId === tuple.checkpoint.id) continue
+    if (write.type !== "json") fail()
+    if (write.channel === "messages") {
+      if (!Array.isArray(write.value) || !write.value.every(BaseMessage.isInstance) ||
+        inspectFunctionConversationAdmission({ state: undefined, messages: write.value }, initialCurrent)
+          .kind !== "ordinary") fail()
+    } else if (!write.channel.startsWith("branch:to:") || write.value !== null) fail()
+  }
+  const candidates = database.exec(`SELECT c.conversation_id,c.root_branch_id
+    FROM function_conversations c JOIN function_logical_sessions s ON s.logical_session_id=c.logical_session_id
+    JOIN function_conversation_native_destinations d ON d.conversation_id=c.conversation_id
+      AND d.branch_id=c.root_branch_id
+    WHERE s.logical_session_id=? AND s.thread_id=? AND s.workspace=? AND c.kind='child'
+      AND c.checkpoint_namespace=? AND d.checkpoint_thread_id=? LIMIT 2`,
+    [parent.logicalSessionId, parent.threadId, parent.workspace, read.namespace, input.authority.threadId])[0]?.values ?? []
+  if (candidates.length !== 1 || candidates[0][0] !== pendingState.conversationId ||
+    candidates[0][1] !== pendingState.branchId || pendingState.logicalSessionId !== parent.logicalSessionId) fail()
+  const target: FunctionConversationRef = Object.freeze({ ...parent,
+    incarnation: Object.freeze({ ...parent.incarnation }), conversationId: pendingState.conversationId,
+    branchId: pendingState.branchId, kind: "child", checkpointNamespace: read.namespace })
+  const inbox = input.store.captureInbox(target, 0, highWater)
+  const noteCount = inbox.rows.length
+  const ordinaryInput = noteCount === 0
+  if (!ordinaryInput && incoming.length !== noteCount) fail()
+  if (ordinaryInput) {
+    if (!Array.isArray(rawMessages) || rawMessages.length === 0 ||
+      !rawMessages.every(HumanMessage.isInstance) || incoming.length !== rawMessages.length ||
+      inspectFunctionConversationAdmission({ state: undefined, messages: incoming }, initialCurrent)
+        .kind !== "ordinary") fail()
+    for (let index = 0; index < incoming.length; index++) {
+      const original = rawMessages[index], update = incoming[index]
+      if (update.id !== original.id || serializeFunctionConversationNativeMessage(update) !==
+        serializeFunctionConversationNativeMessage(original)) fail()
+    }
+  }
+  const base = () => { initialCurrent(); input.store.assertCurrent(parent); input.store.assertCurrent(target) }
+  const destinationReader = readFunctionConversationNativeDestination
+  const destination = destinationReader(database, target, parent, base)
+  if (destination.checkpointThreadId !== input.authority.threadId ||
+    destination.checkpointIncarnation.token !== input.checkpointIncarnation.token ||
+    (destination.checkpointIncarnation.token === null &&
+      destination.checkpointIncarnation.legacyCreatedAt !== input.checkpointIncarnation.legacyCreatedAt)) fail()
+  const pendingMessages = Object.freeze([...incoming] as HumanMessage[])
+  const notes = ordinaryInput ? Object.freeze([] as HumanMessage[]) : pendingMessages
+  const messageSources: NativeSharedOrdinaryMessageData[] = []
+  const rawMessageCount = (rawMessages as BaseMessage[] | undefined)?.length ?? 0
+  const incomingMessageCount = incoming.length
+  for (let group = 0; group < 2; group++) {
+    const values = group === 0 ? rawMessages as BaseMessage[] | undefined : incoming
+    if (!values) continue
+    const count = group === 0 ? rawMessageCount : incomingMessageCount
+    for (let index = 0; index < count; index++) {
+      const field = returnInputField(values, returnInputString(index))
+      if (!field || !("value" in field)) fail()
+      const message = field.value as BaseMessage
+      const baseline = originalRestoreOrdinaryData(message)
+      if (baseline.message !== message) fail()
+      const descriptor = { __proto__: null, value: baseline, enumerable: true,
+        writable: true, configurable: true }
+      returnInputDefine(messageSources, messageSources.length, descriptor)
+    }
+  }
+  const stateFields = Object.freeze({ ...pendingState })
+  const rowDigests = inbox.rows.map(functionConversationRowDigest)
+  for (let index = 0; index < inbox.rows.length; index++) {
+    const row = inbox.rows[index], note = notes[index]
+    const stamp = readFunctionConversationTranscriptStamp(note)
+    if (row.sequence <= (index === 0 ? 0 : inbox.rows[index - 1].sequence) ||
+      row.sequence > highWater || row.branchId !== target.branchId || !row.inbox ||
+      !stamp || note.id !== row.uuid ||
+      !sameFunctionConversationTranscriptStamp(stamp, functionConversationCanonicalStamp(target, row)) ||
+      serializeFunctionConversationNativeMessage(note) !== row.nativePayload) fail()
+  }
+  const assertInputs = () => {
+    source.assertInputDataCurrent()
+    const current = readPendingState()
+    if (JSON.stringify(current) !== JSON.stringify(stateFields) ||
+      incoming.length !== pendingMessages.length ||
+      pendingMessages.some((message, index) => incoming[index] !== message)) fail()
+    for (let index = 0; index < messageSources.length; index++)
+      messageSources[index].assertOriginalDataCurrent()
+  }
+  const ordinaryReturnInputs = returnInputFreeze({ assertDataCurrent: assertInputs,
+    prepare() {
+      assertInputs()
+      // Only a native domain needs this index, replacing its empty history-return index.
+      const ordinarySources = new returnInputMap<BaseMessage, NativeSharedOrdinaryMessageData>()
+      for (let group = 0; group < (ordinaryInput ? 2 : 1); group++) {
+        const values = group === 0 ? rawMessages as BaseMessage[] | undefined : incoming
+        const count = group === 0 ? rawMessageCount : incomingMessageCount
+        if (!values) continue
+        for (let index = 0; index < count; index++) {
+          const field = returnInputField(values, returnInputString(index))
+          const baseline = messageSources[(group === 0 ? 0 : rawMessageCount) + index]
+          if (!field || !("value" in field) || !baseline || baseline.message !== field.value) fail()
+          // Pending notes still require their real Intake publication, never this input index.
+          returnInputApply(returnInputMapSet, ordinarySources, [field.value, baseline])
+        }
+      }
+      assertInputs()
+      return returnInputFreeze({ assertDataCurrent: assertInputs, capture(message: BaseMessage) {
+        const baseline = returnInputApply(returnInputMapGet, ordinarySources, [message]) as
+          NativeSharedOrdinaryMessageData | undefined
+        return baseline?.captureCurrentData()
+      } })
+    } })
+  const current = () => {
+    if (destinationReader !== originalRestoreDestinationReader) base()
+    destination.assertCurrent(); assertInputs()
+    for (let index = 0; index < inbox.rows.length; index++) {
+      const row = originalRestoreReceipt(input.store, target, inbox.rows[index].uuid)
+      if (!row || functionConversationRowDigest(row) !== rowDigests[index]) fail()
+    }
+    base(); assertInputs()
+  }
+  const appExecution = originalRestorePreparedExecution(database)
+  if (!appExecution) fail()
+  const mappingKeys = ["conversation_id", "branch_id", "target_json", "parent_json", "invocation_id",
+    "checkpoint_thread_id", "checkpoint_incarnation", "destination_thread_id", "destination_incarnation",
+    "metadata_json", "metadata_digest"] as const
+  const mappingRead = appExecution.prepareReadOne(`SELECT ${mappingKeys.join(",")}
+    FROM main.function_conversation_native_destinations WHERE conversation_id=? AND branch_id=?`)
+  const originalMapping = mappingRead([target.conversationId, target.branchId])
+  if (!originalMapping) fail()
+  const threadRead = appExecution.prepareReadOne("SELECT created_at,metadata FROM main.threads WHERE thread_id=?")
+  const threadIds = [...new Set([parent.threadId, target.threadId,
+    destination.checkpointThreadId, destination.destinationThreadId])]
+  const originalThreads = threadIds.map(id => threadRead([id]))
+  if (originalThreads.some(row => !row)) fail()
+  const admittedNotes: Array<Readonly<{ uuid: string; rowDigest: string }>> = []
+  for (let index = 0; index < inbox.rows.length; index++) {
+    const value = { uuid: inbox.rows[index].uuid, rowDigest: rowDigests[index] }
+    const descriptor = { __proto__: null, value, writable: true, enumerable: true, configurable: true }
+    returnInputDefine(admittedNotes, index, descriptor)
+  }
+  const assertPendingReceiptData = originalPendingReceiptDataCheck(input.store, target, {
+    checkpointThreadId: destination.checkpointThreadId,
+    checkpointIncarnation: fixedIncarnation(input.checkpointIncarnation),
+    namespace: read.namespace, selectedCheckpointId: source.checkpointId,
+    admittedNotes })
+  const admissionFacts = appExecution.prepareReadOne(`SELECT
+      (SELECT COUNT(*) FROM main.function_conversation_deliveries WHERE conversation_id=?) AS deliveries,
+      (SELECT COUNT(*) FROM main.function_conversation_inbox WHERE conversation_id=?) AS inbox,
+      (SELECT COUNT(*) FROM main.function_conversation_rows WHERE conversation_id=?
+        AND CASE WHEN door='note' THEN json_type(payload_json,'$.inbox')='true' ELSE 0 END) AS notes,
+      (SELECT COUNT(*) FROM main.function_conversation_inbox WHERE conversation_id=? AND branch_id=?
+        AND sequence BETWEEN 1 AND ?) AS prefix,
+      (SELECT COUNT(*) FROM main.function_conversation_rows r LEFT JOIN main.function_conversation_inbox i
+        ON i.conversation_id=r.conversation_id AND i.uuid=r.uuid AND i.branch_id=r.branch_id
+          AND i.sequence=r.sequence WHERE r.conversation_id=?
+          AND i.uuid IS NULL AND CASE WHEN r.door='note'
+            THEN json_type(r.payload_json,'$.inbox')='true' ELSE 0 END) AS missingInbox,
+      (SELECT COUNT(*) FROM main.function_conversation_inbox i LEFT JOIN main.function_conversation_rows r
+        ON r.conversation_id=i.conversation_id AND r.uuid=i.uuid AND r.branch_id=i.branch_id
+          AND r.sequence=i.sequence WHERE i.conversation_id=? AND
+          (i.branch_id<>? OR CASE WHEN r.uuid IS NULL OR r.door<>'note' THEN 1
+            ELSE json_type(r.payload_json,'$.inbox') IS NOT 'true' END)) AS extraInbox,
+      (SELECT COUNT(*) FROM main.function_conversation_rows WHERE conversation_id=? AND
+        CASE WHEN door='note' THEN
+          (json_extract(payload_json,'$.message.type') NOT IN ('user','system')
+          OR json_type(payload_json,'$.message.type') IS NOT 'text'
+          OR (json_extract(payload_json,'$.message.type')='user' AND
+            (json_type(payload_json,'$.inbox') IS NOT 'true'
+              OR json_type(payload_json,'$.message.isMeta') IS NOT 'true'
+              OR (json_type(payload_json,'$.message.role') IS NOT NULL
+                AND json_extract(payload_json,'$.message.role') IS NOT 'user')))
+          OR (json_extract(payload_json,'$.message.type')='system'
+            AND json_type(payload_json,'$.inbox') IS NOT 'false')) ELSE 0 END) AS invalidNotes`)
+
+  const assertAdmissionCurrent = () => {
+    current()
+    appExecution.assertDataCurrent(true)
+    const all = input.store.captureInbox(target, 0)
+    if (all.rows.length > 64 || all.rows.some((row, index) =>
+      row.sequence <= (index === 0 ? 0 : all.rows[index - 1].sequence) ||
+      row.sequence > all.highWater || row.branchId !== target.branchId || !row.inbox || row.door !== "note" ||
+      row.message.type !== "user" || row.message.isMeta !== true ||
+      (row.message.role !== undefined && row.message.role !== "user"))) fail()
+    destination.assertCurrent()
+    current()
+    // All potentially customized guards precede the original native data-only fences.
+    source.assertAdmissionCurrent()
+    assertPendingReceiptData()
+    appExecution.assertDataCurrent(true)
+    const facts = admissionFacts([
+      target.conversationId, target.conversationId, target.conversationId,
+      target.conversationId, target.branchId, highWater, target.conversationId,
+      target.conversationId, target.branchId, target.conversationId])
+    if (!facts || facts.deliveries !== 0 || facts.inbox !== facts.notes ||
+      typeof facts.notes !== "number" || facts.notes > 64 || facts.missingInbox !== 0 ||
+      facts.extraInbox !== 0 || facts.invalidNotes !== 0 || facts.prefix !== noteCount) fail()
+    const mapping = mappingRead([target.conversationId, target.branchId])
+    if (!mapping) fail()
+    for (let index = 0; index < mappingKeys.length; index++) {
+      const key = mappingKeys[index]
+      if (mapping[key] !== originalMapping[key]) fail()
+    }
+    for (let index = 0; index < threadIds.length; index++) {
+      const row = threadRead([threadIds[index]]), original = originalThreads[index]!
+      if (!row || row.created_at !== original.created_at || row.metadata !== original.metadata) fail()
+    }
+  }
+  assertAdmissionCurrent()
+  const checkpointIncarnation = fixedIncarnation(input.checkpointIncarnation)
+  const point: HistoricalCheckpointPoint = Object.freeze({ checkpointThreadId: input.authority.threadId,
+    checkpointIncarnation, checkpointIncarnationKey: JSON.stringify(checkpointIncarnation.token === null
+      ? ["legacy", checkpointIncarnation.legacyCreatedAt] : ["token", checkpointIncarnation.token]),
+    checkpointId: tuple.checkpoint.id, namespace: read.namespace })
+  const proof = Object.freeze({ [brand]: true as const })
+  records.set(proof, { database, store: input.store, saver: input.saver, authority: input.authority,
+    invocation: input.invocation, nativeRead: input.nativeRead, scope: input.scope, parent, target,
+    state: Object.freeze(functionConversationState(target)), destination, active: input.active,
+    assertCurrent: current, checkpointPoint: point, admission: Object.freeze({ highWater }),
+    pending: returnInputFreeze({ notes, ordinaryReturnInputs }), retiring: false, released: false })
+  read.bindAdmissionCurrent(assertAdmissionCurrent)
+  return proof
+}
+
 /** Only the original router's native read, never public CM JSON, can admit this historical target. */
 export async function prepareFunctionConversationSharedRestore(input: {
   readonly nativeRead: FunctionConversationSharedNativeRead
@@ -547,6 +938,8 @@ export async function prepareFunctionConversationSharedRestore(input: {
   const active = readActive(input.active, input)
   const tuple = read.tuple
   if (!tuple) fail("MODS_CONVERSATION_MIGRATION_REQUIRED")
+  if (tuple.checkpoint.channel_values.cmbFunctionConversation === undefined && read.pendingNamespace)
+    return preparePendingSharedRestore(input, database, read, active)
   const state = readFunctionConversationState(tuple.checkpoint.channel_values.cmbFunctionConversation)
   const target: FunctionConversationRef = Object.freeze({ ...parent,
     incarnation: Object.freeze({ ...parent.incarnation }), conversationId: state.conversationId,
@@ -695,7 +1088,8 @@ export function readFunctionConversationSharedRestore(proof: FunctionConversatio
         value.destination.destinationIncarnation.legacyCreatedAt !== expected.destinationIncarnation.legacyCreatedAt))) fail()
   value.assertCurrent()
   return { target: value.target, state: value.state, destination: value.destination,
-    assertCurrent: value.assertCurrent }
+    ...(value.admission ? { admission: value.admission } : {}),
+    ...(value.pending ? { pending: value.pending } : {}), assertCurrent: value.assertCurrent }
 }
 
 /** No authority/source check is needed to retire. It cannot make an unfinished native scope idle. */

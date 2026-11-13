@@ -549,7 +549,7 @@ describe("actual native conversation run proof", () => {
     expect(appDb.getThreadCore(f.threadId)?.metadata).toBe(raw)
   })
 
-  it("fully decodes every changed text fact window without replacing its original baseline", () => {
+  it("fully decodes each workspace fact window while retaining captured incarnation interpretation", () => {
     const f = fixture(), { proof } = captureFunctionConversationNativeRun(f.input)
     const run = readFunctionConversationNativeRun(proof, f.authority)
     const metadata = JSON.parse(f.thread.metadata ?? "{}") as Record<string, unknown>
@@ -561,9 +561,14 @@ describe("actual native conversation run proof", () => {
       if (args[0] === changed) decodes++
       return Reflect.apply(originalParse, JSON, args)
     })
-    try { run.assertCurrent(); run.assertCurrent() }
-    finally { parse.mockRestore() }
-    expect(decodes).toBe(8)
+    try {
+      run.assertCurrent(); run.assertCurrent()
+      expect(decodes).toBe(4)
+      appDb.getDb().run("UPDATE threads SET metadata=? WHERE thread_id=?", [
+        JSON.stringify({ ...metadata, cmb_thread_incarnation: "actual-replacement" }), f.threadId
+      ])
+      expect(() => run.assertCurrent()).toThrow("MODS_CONVERSATION_NATIVE_RUN_CHANGED")
+    } finally { parse.mockRestore() }
   })
 
   it("rejects changed workspace text after the binding callback despite a valid first window", () => {

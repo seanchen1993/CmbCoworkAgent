@@ -382,6 +382,17 @@ describe("exact native checkpoint membership and same AppDB delivery transaction
       expect(f.pending()).toEqual([[row.uuid]])
       expect(f.database.exec("SELECT COUNT(*) FROM function_conversation_checkpoint_receipts")[0].values)
         .toEqual([[0]])
+      expect(await f.saver.getTuple(f.config(checkpoint.id))).toBeUndefined()
+      expect(f.database.exec("SELECT COUNT(*) FROM function_conversation_checkpoint_members")[0].values)
+        .toEqual([[0]])
+      await f.saver.put(f.config(), checkpoint, metadata)
+      expect((await f.saver.getTuple(f.config(checkpoint.id)))?.checkpoint.id).toBe(checkpoint.id)
+      await expect(f.bridge().bindSaver(f.saver).captureRecovery(f.config(checkpoint.id), f.binding()))
+        .rejects.toThrow("MODS_CONVERSATION_CHECKPOINT_MEMBERSHIP")
+      expect(f.pending()).toEqual([[row.uuid]])
+      for (const table of ["function_conversation_checkpoint_receipts", "function_conversation_checkpoint_members",
+        "function_conversation_deliveries"]) expect(f.database.exec(`SELECT COUNT(*) FROM ${table}`)[0].values)
+        .toEqual([[0]])
       expect((await f.saver.getTuple(f.config(checkpoint.id)))?.checkpoint.id).toBe(checkpoint.id)
     })
 
@@ -433,7 +444,7 @@ describe("exact native checkpoint membership and same AppDB delivery transaction
       .toEqual([[0]])
   })
 
-  it("rolls back members, delivery and inbox together on a native ACK write failure", async () => {
+  it("retains genuine prepared data while rolling back delivery and inbox on a native ACK write failure", async () => {
     const f = fixture(), row = f.note("retained after failed ACK")
     const checkpoint = f.checkpoint(1, [f.marked(row)])
     const run = f.database.run.bind(f.database)
@@ -441,12 +452,43 @@ describe("exact native checkpoint membership and same AppDB delivery transaction
       if (sql.startsWith("INSERT INTO function_conversation_deliveries")) throw Error("actual ACK write failed")
       return run(sql, args)
     })
-    await expect(f.bridge().wrap(f.saver).put(f.config(), checkpoint, metadata))
-      .rejects.toThrow("actual ACK write failed")
+    let preparedReceipts: unknown[][] = [], preparedMembers: unknown[][] = []
+    await expect(f.bridge().wrap(f.saver, undefined, undefined, { prepared: () => {
+      preparedReceipts = f.database.exec(`SELECT receipt_id,checkpoint_id,snapshot_digest,snapshot_json
+        FROM function_conversation_checkpoint_receipts ORDER BY receipt_id`)[0].values
+      preparedMembers = f.database.exec(`SELECT receipt_id,ordinal,uuid,member_json
+        FROM function_conversation_checkpoint_members ORDER BY receipt_id,ordinal`)[0].values
+      expect(preparedReceipts).toHaveLength(1)
+      expect(preparedReceipts[0][1]).toBe(checkpoint.id)
+      expect(preparedMembers).toHaveLength(1)
+      expect(preparedMembers[0].slice(0, 3)).toEqual([preparedReceipts[0][0], 0, row.uuid])
+    } }).put(f.config(), checkpoint, metadata)).rejects.toThrow("actual ACK write failed")
+    expect(f.pending()).toEqual([[row.uuid]])
+    expect(f.database.exec(`SELECT receipt_id,checkpoint_id,snapshot_digest,snapshot_json
+      FROM function_conversation_checkpoint_receipts ORDER BY receipt_id`)[0].values).toEqual(preparedReceipts)
+    expect(f.database.exec(`SELECT receipt_id,ordinal,uuid,member_json
+      FROM function_conversation_checkpoint_members ORDER BY receipt_id,ordinal`)[0].values).toEqual(preparedMembers)
+    expect(f.database.exec("SELECT COUNT(*) FROM function_conversation_deliveries")[0].values).toEqual([[0]])
+    expect((await f.saver.getTuple(f.config(checkpoint.id)))?.checkpoint.id).toBe(checkpoint.id)
+    expect(f.database.inTransaction).toBe(false)
+  })
+
+  it("rolls back members, delivery and inbox together on a native ACK write failure", async () => {
+    const f = fixture(), row = f.note("retained after failed ACK")
+    const checkpoint = f.checkpoint(1, [f.marked(row)])
+    const observer = f.bridge().bindSaver(f.saver), prepared = observer.prepare(f.config(), checkpoint)!
+    const run = f.database.run.bind(f.database)
+    vi.spyOn(f.database, "run").mockImplementation((sql, args) => {
+      if (sql.startsWith("INSERT INTO function_conversation_deliveries")) throw Error("actual ACK write failed")
+      return run(sql, args)
+    })
+    await expect(f.saver.putWithCommitObserver(f.config(), checkpoint, metadata,
+      receipt => { observer.observed(prepared, receipt) })).rejects.toThrow("actual ACK write failed")
     expect(f.pending()).toEqual([[row.uuid]])
     for (const table of ["function_conversation_checkpoint_receipts", "function_conversation_checkpoint_members",
       "function_conversation_deliveries"]) expect(f.database.exec(`SELECT COUNT(*) FROM ${table}`)[0].values)
       .toEqual([[0]])
+    expect((await f.saver.getTuple(f.config(checkpoint.id)))?.checkpoint.id).toBe(checkpoint.id)
     expect(f.database.inTransaction).toBe(false)
   })
 

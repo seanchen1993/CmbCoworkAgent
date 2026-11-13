@@ -293,19 +293,23 @@ export function getWorkflowRunsDir(workspacePath: string, threadId: string): str
  * active run is still settling (its abort wait timed out), its late flush is a
  * no-op and cannot recreate the directory — no need to fully settle it first.
  *
- * Fixed-id caveat (documented tradeoff, no attempt token by design): this runs
+ * Legacy callers without a source guard retain this fixed-id caveat: this runs
  * in the deletion's LATE half, after awaited cleanups — a fixed-id thread
  * (heartbeat) revived in that window gets re-tombstoned/epoch-bumped by this
  * late call. Safe today: heartbeat's per-beat revive converges it within one
  * beat, and its runtime never registers the workflow tool (isWorkflowMode
  * only), so no NEW incarnation's workflow artifacts can exist here to be
- * swept. Revisit if fixed-id threads ever gain workflow access.
+ * swept. Guarded thread deletion instead checks its captured database and row absence after
+ * every await and before disposal/sweep; a revived source stops that old cleanup.
  */
 export async function deleteWorkflowRunsForThread(
   workspacePath: string,
-  threadId: string
+  threadId: string,
+  assertCurrent: () => void = () => undefined
 ): Promise<void> {
+  assertCurrent()
   const candidates = await workflowRunsDirCandidatesAsync(workspacePath, threadId)
+  assertCurrent()
   const dirs = candidates.readDirs
   // Mark disposed FIRST: a background run still settling (e.g. cancelAndWait
   // timed out) must not recreate either directory via a late flush/persist.
@@ -328,10 +332,13 @@ export async function deleteWorkflowRunsForThread(
     const pendingMutation = workflowRunIndexMutationChains.get(indexPath)
     if (!pendingMutation) break
     await pendingMutation.catch(() => undefined)
+    assertCurrent()
   }
   workflowRunIndexCaches.delete(indexPath)
   clearWorkflowRunsDirCandidateCache(threadId)
-  await Promise.all(dirs.map((dir) => sweepRacedRunDir(dir, true)))
+  assertCurrent()
+  await Promise.all(dirs.map((dir) => sweepRacedRunDir(dir, true, assertCurrent)))
+  assertCurrent()
 }
 
 export function runFilePath(workspacePath: string, threadId: string, runId: string): string {
@@ -4327,19 +4334,27 @@ export const WORKFLOW_FLUSH_FAILURE_METADATA_RESERVATION_BYTES =
   WORKFLOW_RUN_PROJECTED_MAX_BYTES
 export const WORKFLOW_FLUSH_FAILURE_JOURNAL_RESERVATION_BYTES = WORKFLOW_JOURNAL_MAX_BYTES
 
-async function sweepRacedRunDir(dir: string, committedDeletion = false): Promise<void> {
+async function sweepRacedRunDir(
+  dir: string,
+  committedDeletion = false,
+  assertCurrent: () => void = () => undefined
+): Promise<void> {
   const previous = runDirSweepChains.get(dir) ?? Promise.resolve()
   const sweep = previous
     .catch(() => undefined)
     .then(async () => {
+      assertCurrent()
       // Revival before this queued sweep starts transfers authority to the new
       // incarnation. The earlier in-flight sweep (if any) is still awaited by
       // writers through this same chain; this queued one must no longer delete.
       if (!committedDeletion && !disposedRunDirs.has(dir)) return
       try {
         await beforeRunDirSweepForTest?.(dir)
+        assertCurrent()
         await rm(dir, { recursive: true, force: true })
+        assertCurrent()
       } catch (error) {
+        assertCurrent()
         console.warn("[Workflow] Failed to delete run artifacts for thread:", error)
       }
     })

@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs"
 import { afterEach, describe, expect, it, vi } from "vitest"
+import ts from "typescript"
 import {
   FUNCTION_DISPLAY_PROTOCOL,
   FUNCTION_DISPLAY_MAX_PENDING,
@@ -202,7 +203,18 @@ describe("host-only display rollout fence", () => {
 
   it("has no Creator or business dependencies and does not import the manager facade", () => {
     const source = readFileSync(new URL("./display-rollout.ts", import.meta.url), "utf8")
-    expect(source).not.toMatch(/^\s*import\s/m)
+    const parsed = ts.createSourceFile("display-rollout.ts", source, ts.ScriptTarget.Latest, true)
+    const imports = parsed.statements.filter(ts.isImportDeclaration)
+    const values = imports.filter(node => !node.importClause?.isTypeOnly)
+    expect(values).toHaveLength(1)
+    const protocol = values[0]
+    expect(ts.isStringLiteral(protocol.moduleSpecifier) && protocol.moduleSpecifier.text).toBe(
+      "../../../shared/mods/v2/display-read-protocol")
+    expect(protocol.importClause?.name).toBeUndefined()
+    const bindings = protocol.importClause?.namedBindings
+    expect(bindings && ts.isNamedImports(bindings) && bindings.elements.map(item => ({
+      name: item.name.text, source: item.propertyName?.text, typeOnly: item.isTypeOnly
+    }))).toEqual([{ name: "FUNCTION_DISPLAY_PROTOCOL", source: undefined, typeOnly: false }])
     expect(source).not.toMatch(/\b(?:Creator|AutoBiz|autobiz|FunctionModsManager)\b/)
   })
 })

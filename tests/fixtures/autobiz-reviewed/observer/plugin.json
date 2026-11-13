@@ -1,0 +1,5 @@
+{
+  "name": "autobiz-worktree-progress",
+  "version": "1.0.0",
+  "description": "技能作者提供的只读并行 Worktree 进度观察器；不推进任务、不运行检查、不修改工作树。"
+}

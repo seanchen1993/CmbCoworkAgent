@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto"
+import { AsyncResource } from "node:async_hooks"
 import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -264,31 +265,39 @@ describe("native post-COMMIT observer cooperation", () => {
       let proof: object | undefined, closing: Promise<void> | undefined
       vi.spyOn(receipts, "set").mockImplementation((key, value) => { proof = key; return insert(key, value) })
       let paused = false
-      const forced = duringForcedPause(() => {
-        paused = true
-        if (change === "tuple") {
-          const tuple = capture.mock.calls[0][2]
-          const messages = tuple.checkpoint.channel_values.messages as BaseMessage[]
-          messages[0].content = "changed while paused"
-        } else if (change === "cancel") f.controller.abort(Error("OBSERVER_CANCELLED"))
-        else if (change === "close") closing = f.saver.close()
-        else vi.spyOn(AIMessage.prototype, "toDict").mockImplementation(() => { throw Error("CUSTOM_SERIALIZER") })
-      })
-      const checkpoint = checkpointFor(f)
-      const config = { configurable: { thread_id: f.runtime.binding.checkpointThreadId, checkpoint_ns: "" } }
-      await expect(bridge.wrap(f.saver).put(config, checkpoint, metadata)).rejects.toThrow()
-      expect(paused).toBe(true)
-      expect(forced()).toBe(1)
-      expect(ack).not.toHaveBeenCalled()
-      expect(proof).toBeDefined()
-      expect(receipts.has(proof!)).toBe(false)
-      if (closing) await closing
-      else {
-        // No failed observer may strand the held namespace gate. Restore the test's prototype
-        // override before asking the original Saver to serialize the following checkpoint.
-        vi.restoreAllMocks()
-        const next = checkpointFor(f)
-        expect((await f.saver.put(config, next, metadata)).configurable?.checkpoint_id).toBe(next.id)
+      const closeScope = change === "close" ? new AsyncResource("native-external-close") : undefined
+      try {
+        const forced = duringForcedPause(() => {
+          paused = true
+          if (change === "tuple") {
+            const tuple = capture.mock.calls[0][2]
+            const messages = tuple.checkpoint.channel_values.messages as BaseMessage[]
+            messages[0].content = "changed while paused"
+          } else if (change === "cancel") f.controller.abort(Error("OBSERVER_CANCELLED"))
+          else if (change === "close") {
+            closing = closeScope!.runInAsyncScope(() => f.saver.close())
+            void closing.then(() => undefined, () => undefined)
+          } else vi.spyOn(AIMessage.prototype, "toDict").mockImplementation(() => { throw Error("CUSTOM_SERIALIZER") })
+        })
+        const checkpoint = checkpointFor(f)
+        const config = { configurable: { thread_id: f.runtime.binding.checkpointThreadId, checkpoint_ns: "" } }
+        await expect(bridge.wrap(f.saver).put(config, checkpoint, metadata)).rejects.toThrow()
+        expect(paused).toBe(true)
+        expect(forced()).toBe(1)
+        expect(ack).not.toHaveBeenCalled()
+        expect(proof).toBeDefined()
+        expect(receipts.has(proof!)).toBe(false)
+        if (closing) await closing
+        else {
+          // No failed observer may strand the held namespace gate. Restore the test's prototype
+          // override before asking the original Saver to serialize the following checkpoint.
+          vi.restoreAllMocks()
+          const next = checkpointFor(f)
+          expect((await f.saver.put(config, next, metadata)).configurable?.checkpoint_id).toBe(next.id)
+        }
+      } finally {
+        try { await closing }
+        finally { closeScope?.emitDestroy() }
       }
     })
 

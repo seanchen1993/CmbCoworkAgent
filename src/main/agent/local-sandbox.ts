@@ -145,7 +145,7 @@ import { currentStageDebugSourcePolicy } from "../plugins/runtime-source-scope"
 import { assertStageDebugToolCall, isStageDebugPolicyError, type StageDebugFilePolicy } from "../harness-board/project-runtime/stage-debug-policy"
 import {
   getHarnessStageAttributionForCodeGeneration,
-  markHarnessStageAttributionDirty,
+  resolveHarnessExecutionStage,
   type HarnessStageAttribution
 } from "../services/harness-stage-attribution"
 import { recordSystemConstraintRead } from "../services/system-constraint-read-reporter"
@@ -2498,7 +2498,7 @@ export class LocalSandbox
    * opens files, so a literal scan sees the REAL targets:
    *  - join adjacent quoted/unquoted parts into one word + remove quotes;
    *  - process POSIX backslash escapes (`\.` → `.`, `~/\.ssh` → `~/.ssh`);
-   *  - expand $VAR / ${VAR} from the SAME env the shell runs with (this.env), so
+   *  - expand $VAR / ${VAR} from the supplied execution env (base env by default), so
    *    $HOME, $USER, $KUBECONFIG, $AWS_SHARED_CREDENTIALS_FILE, $DOCKER_CONFIG …
    *    all resolve to their real paths (an undefined var → "", like the shell);
    *  - single quotes suppress expansion (so `'$HOME/x'` stays literal — this also
@@ -2506,9 +2506,8 @@ export class LocalSandbox
    * Tilde and globbing are handled by the caller. Best-effort: a determined
    * command can still evade a static scan — the only hard boundary is OS-level
    * sandboxing, which the chosen "block sensitive dirs" policy does not use. */
-  private expandShellWords(command: string): string[] {
+  private expandShellWords(command: string, env = this.env): string[] {
     const posix = process.platform !== "win32"
-    const env = this.env
     const lookup = (name: string): string => {
       if (env[name] != null) return String(env[name])
       // Windows env vars are case-insensitive (and PowerShell's $home).
@@ -2852,7 +2851,7 @@ export class LocalSandbox
    * `~/.ssh`, `~/x`), and we add tilde (~ / ~user) and globbing, then resolve each
    * variant against the effective cwd (so `cat ../../.ssh/id_rsa` is caught too)
    * and test isSensitivePath. */
-  private commandReadsSensitivePath(command: string, cwd: string): boolean {
+  private commandReadsSensitivePath(command: string, cwd: string, env = this.env): boolean {
     const home = homedir()
     const homeNorm = home.replace(/\\/g, "/").replace(/\/+$/, "")
     let currentUser = ""
@@ -2863,7 +2862,7 @@ export class LocalSandbox
     }
 
     const expandedWords: string[] = []
-    for (const word of this.expandShellWords(command)) {
+    for (const word of this.expandShellWords(command, env)) {
       const { words: variants, truncated } = LocalSandbox.braceExpand(word)
       // FAIL CLOSED: if a word has too many brace alternatives to fully enumerate,
       // a sensitive branch could hide past the cap while the shell still expands it.
@@ -3063,8 +3062,31 @@ export class LocalSandbox
     return `Memory storage is managed by the background summarizer. Direct ${action} to '${filePath}' is blocked; use the Memory panel or let the conversation summary persist it.`
   }
 
-  private markHarnessStageAttributionDirty(): void {
-    markHarnessStageAttributionDirty(this.harnessProjectId, this.featureId)
+  private async buildExecutionEnv(
+    signal?: AbortSignal
+  ): Promise<Record<string, string> | undefined> {
+    if (signal?.aborted) return undefined
+    if (!this.harnessProjectId || !this.featureId) return this.env
+    const stage = await LocalSandbox.raceWithAbort(
+      resolveHarnessExecutionStage(this.harnessProjectId, this.featureId),
+      signal
+    ).catch((error) => {
+      if (!LocalSandbox.isAbortError(error)) throw error
+      return undefined
+    })
+    if (signal?.aborted) return undefined
+    // Each process owns its snapshot; parallel commands must never mutate the
+    // sandbox's shared base environment or another invocation's stage.
+    const env = { ...this.env }
+    if (stage) {
+      for (const key of Object.keys(env)) {
+        const name = process.platform === "win32" ? key.toUpperCase() : key
+        if (name === "HARNESS_NODE_NAME" || name === "HARNESS_NODE_STATUS") delete env[key]
+      }
+      if (stage.nodeName) env.HARNESS_NODE_NAME = stage.nodeName
+      if (stage.nodeStatus) env.HARNESS_NODE_STATUS = stage.nodeStatus
+    }
+    return env
   }
 
   private async captureHarnessStageForCodeGeneration(
@@ -3120,12 +3142,6 @@ export class LocalSandbox
     }
   }
 
-  private commandMayMutateHarnessState(command: string, cwd: string): boolean {
-    const windowsShell =
-      process.platform === "win32" && this.windowsSandbox !== "none" ? "powershell" : "unknown"
-    return !isReadOnlyShellCommand(command, cwd, windowsShell)
-  }
-
   private async runHooks(event: HookEvent, context: HookContext): Promise<HookResult | null> {
     const executionResult = context.toolResult
     if (event !== "PreToolUse" && context.toolResult !== undefined) {
@@ -3174,18 +3190,6 @@ export class LocalSandbox
     if (executionResult !== undefined) bindHookExecutionResult(hookContext, executionResult)
     const hooks = this.resolveHooks(event, hookContext)
     let result = await runHooksEnriched(hooks, event, hookContext, this._onHookResult)
-    const hasHarnessOwnedHook = hooks.some(
-      (hook) =>
-        hook.hookSourceType === "plugin" ||
-        hook.hookSourceType === "skill" ||
-        Boolean(hook.pluginRoot)
-    )
-    if (hasHarnessOwnedHook && (result || (event !== "PreToolUse" && hooks.length > 0))) {
-      // Plugin lifecycle hooks may advance the workflow without going through
-      // LocalSandbox.execute(). Invalidation is cheap; the next code mutation
-      // performs the actual adapter refresh.
-      this.markHarnessStageAttributionDirty()
-    }
     if (result) {
       this._hookScope?.activatePersistentHooks(hooks)
     }
@@ -5261,7 +5265,6 @@ export class LocalSandbox
       publishPlatformEdit?.()
       recordTrustedToolFilePreviewSource(resolvedPath, "write")
       this._onFileMutation?.(effectiveFilePath, "write")
-      if (!isCodeFile(effectiveFilePath)) this.markHarnessStageAttributionDirty()
       // Adoption tracking (side-effect only, never throws)
       try {
         recordAdoptionGen({
@@ -5290,7 +5293,6 @@ export class LocalSandbox
       })
       return LocalSandbox.applyPostHookContext(result, postResult, "write_file")
     } catch (e) {
-      this.markHarnessStageAttributionDirty()
       if (isHookHaltError(e) || isFailureFuseHaltError(e) || isStageDebugPolicyError(e)) throw e
       console.warn("[Hooks] PostToolUse write error:", e)
       return result
@@ -5597,7 +5599,6 @@ export class LocalSandbox
         // auto-commit, Harness attribution, or generated-code adoption.
         if (!managedWorkflowScriptEdit) {
           this._onFileMutation?.(effectiveFilePath, "edit")
-          if (!isCodeFile(effectiveFilePath)) this.markHarnessStageAttributionDirty()
           // Adoption tracking (side-effect only, never throws).
           // Only successful edits should be counted as generated code adoption.
           try {
@@ -5637,8 +5638,7 @@ export class LocalSandbox
         })
         return LocalSandbox.applyPostHookContext(result, postResult, "edit_file")
       } catch (e) {
-        this.markHarnessStageAttributionDirty()
-        if (isHookHaltError(e) || isFailureFuseHaltError(e) || isStageDebugPolicyError(e)) throw e
+          if (isHookHaltError(e) || isFailureFuseHaltError(e) || isStageDebugPolicyError(e)) throw e
         console.warn("[Hooks] PostToolUse edit error:", e)
         return result
       }
@@ -7325,9 +7325,6 @@ export class LocalSandbox
           outsideShellSyntax
         )
       )
-      if (this.commandMayMutateHarnessState(effectiveCommand, effectiveCwd)) {
-        this.markHarnessStageAttributionDirty()
-      }
       return result.output || (result.exitCode === 0 ? "操作成功" : "操作失败")
     }
 
@@ -7383,9 +7380,6 @@ export class LocalSandbox
       termination: undefined as Promise<void> | undefined
     }
     LocalSandbox.backgroundTasks.set(taskId, task)
-    if (this.commandMayMutateHarnessState(effectiveCommand, effectiveCwd)) {
-      this.markHarnessStageAttributionDirty()
-    }
 
     // Fire and forget — don't await. Uses extended timeout for background execution.
     // Background tasks use their own AbortController (not the conversation's abortSignal)
@@ -7478,9 +7472,6 @@ export class LocalSandbox
             : rawResult
         if (task.completed) return
         task.result = result
-        if (this.commandMayMutateHarnessState(effectiveCommand, effectiveCwd)) {
-          this.markHarnessStageAttributionDirty()
-        }
         // Append final output to chunks for completeness
         if (result.output) task.outputChunks.push(result.output)
         task.completed = true
@@ -7491,9 +7482,6 @@ export class LocalSandbox
       .catch((err) => {
         // Guard: if already completed (e.g. cancelled via cancelBackgroundTasks), don't overwrite.
         if (task.completed) return
-        if (this.commandMayMutateHarnessState(effectiveCommand, effectiveCwd)) {
-          this.markHarnessStageAttributionDirty()
-        }
         task.result = {
           output: `Error: ${err instanceof Error ? err.message : String(err)}`,
           exitCode: 1,
@@ -7816,9 +7804,6 @@ export class LocalSandbox
           outsideShellSyntax
         )
       )
-      if (this.commandMayMutateHarnessState(effectiveCommand, effectiveCwd)) {
-        this.markHarnessStageAttributionDirty()
-      }
       // Adoption tracking: react to agent rm/mv of generated files (side-effect
       // only, never throws). Only successful commands act (exitCode === 0).
       recordAdoptionShellFileOps(effectiveCommand, effectiveCwd, result.exitCode)
@@ -7838,9 +7823,6 @@ export class LocalSandbox
         cwd: effectiveCwd
       })
     )
-    if (this.commandMayMutateHarnessState(effectiveCommand, effectiveCwd)) {
-      this.markHarnessStageAttributionDirty()
-    }
     recordAdoptionShellFileOps(effectiveCommand, effectiveCwd, result.exitCode)
     this.recordShellReadTelemetry(effectiveCommand, effectiveCwd, result, shellSyntax)
     const postResult = await this.runHooks("PostToolUse", {
@@ -8067,6 +8049,18 @@ export class LocalSandbox
     // contention). Retry up to SPAWN_RETRY_COUNT times with a short delay.
     const maxAttempts = isWindows && !getModCallContext() ? LocalSandbox.SPAWN_RETRY_COUNT + 1 : 1
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      const executionEnv = await this.buildExecutionEnv(overrideAbortSignal ?? this.abortSignal)
+      if (!executionEnv) return LocalSandbox.createAbortedExecuteResponse()
+      if (
+        (this.readOnlyShellEnforced || readOnlyShellExecutionContext.getStore() === true) &&
+        this.commandReadsSensitivePath(effectiveCommand, effectiveCwd, executionEnv)
+      ) {
+        return {
+          output: "execute blocked: reading sensitive credential directories is not allowed.",
+          exitCode: 1,
+          truncated: false
+        }
+      }
       const result = await this.executeOnce(
         effectiveCommand,
         shell,
@@ -8074,7 +8068,8 @@ export class LocalSandbox
         effectiveTimeout,
         overrideAbortSignal,
         effectiveCwd,
-        options
+        options,
+        executionEnv
       )
       const isSpawnEperm =
         result.exitCode === 1 &&
@@ -8653,7 +8648,19 @@ export class LocalSandbox
       if (effectiveAbortSignal?.aborted) {
         return LocalSandbox.createAbortedExecuteResponse()
       }
-      const sandboxEnv = await LocalSandbox.buildSandboxEnv(this.env)
+      const executionEnv = await this.buildExecutionEnv(effectiveAbortSignal)
+      if (!executionEnv) return LocalSandbox.createAbortedExecuteResponse()
+      if (
+        (this.readOnlyShellEnforced || readOnlyShellExecutionContext.getStore() === true) &&
+        this.commandReadsSensitivePath(command, executionCwd, executionEnv)
+      ) {
+        return {
+          output: "execute blocked: reading sensitive credential directories is not allowed.",
+          exitCode: 1,
+          truncated: false
+        }
+      }
+      const sandboxEnv = await LocalSandbox.buildSandboxEnv(executionEnv)
       if (this.pluginRoot && (await suppressCompositionPythonCache(this.pluginRoot)))
         sandboxEnv.PYTHONDONTWRITEBYTECODE = "1"
       const result = await new Promise<LocalExecuteResponse>((resolve) => {
@@ -8976,7 +8983,8 @@ export class LocalSandbox
     timeoutMs?: number,
     overrideAbortSignal?: AbortSignal,
     cwd?: string,
-    options?: ExecuteRawOptions
+    options?: ExecuteRawOptions,
+    executionEnv: Record<string, string> = this.env
   ): Promise<LocalExecuteResponse> {
     const onceStartMs = Date.now()
     const effectiveCwd = this.resolveExecutionCwd(cwd)
@@ -9025,8 +9033,8 @@ export class LocalSandbox
       const isBashOnWin = isWindows && ["bash", "sh", "zsh"].includes(shellBase)
       const allowInteractiveGitAuth = isWindows && LocalSandbox.isGitInteractiveAuthCommand(command)
       const spawnEnv = allowInteractiveGitAuth
-        ? LocalSandbox.buildInteractiveGitEnv(this.env)
-        : { ...this.env }
+        ? LocalSandbox.buildInteractiveGitEnv(executionEnv)
+        : { ...executionEnv }
       if (suppressPythonCache) spawnEnv.PYTHONDONTWRITEBYTECODE = "1"
 
       const useWindowsBackgroundJob =

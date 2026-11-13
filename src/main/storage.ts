@@ -144,7 +144,7 @@ export function getSubagentTranscriptContentDir(): string {
 }
 
 export function getLogsDir(): string {
-  const dir = join(getOpenworkDir(), "logs")
+  const dir = join(OPENWORK_DIR, "logs")
   if (!existsSync(dir)) {
     mkdirSync(dir, { recursive: true })
   }

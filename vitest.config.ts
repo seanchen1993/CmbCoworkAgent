@@ -1,3 +1,4 @@
+import { runtimeProjectionSourceWorkerPlugin } from "./tests/support/vitest-runtime-projection-worker"
 import { resolve } from "node:path"
 import { configDefaults, defineConfig } from "vitest/config"
 
@@ -65,6 +66,7 @@ export const VITEST_TEST_INCLUDE = [
   "src/renderer/src/components/harness-board/project-capability-controller.test.ts",
   "src/renderer/src/components/harness-board/project-runtime-message.test.ts",
   "src/renderer/src/components/harness-board/native-feature-guidance.test.ts",
+  "src/renderer/src/components/harness-board/project-thread-navigation.test.ts",
   "src/renderer/src/components/harness-board/project-check-diagnostics.test.ts",
   "src/renderer/src/components/harness-board/bounded-latest-task-queue.test.ts",
   "src/renderer/src/components/harness-board/harness-board-render-window.test.ts",
@@ -97,6 +99,7 @@ export const NATIVE_INTEGRATION_TESTS = [
 ]
 
 export default defineConfig({
+  plugins: [runtimeProjectionSourceWorkerPlugin(__dirname)],
   resolve: {
     alias: {
       "@": resolve(__dirname, "src/renderer/src"),
@@ -104,9 +107,10 @@ export default defineConfig({
     }
   },
   test: {
-    // Preserve the Node-only suite and command-line file/name filters. These
-    // native graph/OS suites need exclusive CPU while retaining their original time limits.
+    // Preserve the Node-only suite and command-line file/name filters.
+    // npm test runs native files serially, with a fresh fork for each file.
     environment: "node",
+    setupFiles: [resolve(__dirname, "tests/support/vitest-runtime-projection-worker-cleanup.ts")],
     // Vitest 3 creates Tinypool from the root config, not per-project worker limits.
     maxWorkers: 2,
     minWorkers: 1,
@@ -117,7 +121,7 @@ export default defineConfig({
           name: "native-integration",
           include: NATIVE_INTEGRATION_TESTS,
           pool: "forks",
-          poolOptions: { forks: { singleFork: true, isolate: true } },
+          poolOptions: { forks: { singleFork: false, isolate: true } },
           sequence: { groupOrder: 0 }
         }
       },

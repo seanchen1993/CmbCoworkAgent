@@ -24,10 +24,9 @@ let messages: Message[] = Array.from({ length: 200 }, (_, index) => ({
     index === 198 ? "长思考内容，检查展开后虚拟列表是否仍然稳定。\n\n".repeat(150) : undefined
 }))
 const props: ChatMessageVirtualListProps = {
-  messages,
+  projection: { messages, contentVersion: 0, structureVersion: 0 },
   visibleMessageIndexes: messages.map((_, index) => index),
   lastUserMessageIndex: -1,
-  contentVersion: 0,
   historyHasMore: false,
   historyPageLoading: false,
   historyRemainingCount: 0,
@@ -72,7 +71,7 @@ const props: ChatMessageVirtualListProps = {
   footer: <div style={{ height: 48 }}>消息列表尾部</div>
 }
 function render() {
-  flushSync(() => root.render(<ChatMessageVirtualList {...props} messages={messages} />))
+  flushSync(() => root.render(<ChatMessageVirtualList {...props} projection={{ ...props.projection, messages }} />))
 }
 const fixture = {
   seek(index: number) {
@@ -81,7 +80,7 @@ const fixture = {
   },
   stream(tick: number) {
     props.isLoading = true
-    props.contentVersion++
+    props.projection = { ...props.projection, contentVersion: props.projection.contentVersion + 1 }
     messages = messages.map((message, index) =>
       index === 199
         ? {
@@ -98,7 +97,7 @@ const fixture = {
     messages = messages.map((message, index) =>
       index === 199 ? { ...message, reasoning: "思考。".repeat(tick) } : message
     )
-    props.contentVersion++
+    props.projection = { ...props.projection, contentVersion: props.projection.contentVersion + 1 }
     render()
   },
   discardUnrelated() {
@@ -118,11 +117,11 @@ const fixture = {
     render()
   },
   resetAutomatic() {
-    props.threadId = `automatic-reasoning-${props.contentVersion}`
+    props.threadId = `automatic-reasoning-${props.projection.contentVersion}`
     fixture.stream(4)
   },
   repaint() {
-    props.contentVersion++
+    props.projection = { ...props.projection, contentVersion: props.projection.contentVersion + 1 }
     render()
   },
   answer() {
@@ -152,7 +151,7 @@ const fixture = {
           ? { ...message, reasoning: `${message.reasoning}\n旧 attempt 的追加思考。` }
           : message
       )
-      props.contentVersion++
+      props.projection = { ...props.projection, contentVersion: props.projection.contentVersion + 1 }
       render()
       props.messageAttempts = attempts
       messages = messages.slice(0, 199)
@@ -160,9 +159,9 @@ const fixture = {
       if (!batched) render()
       messages.push({ ...discarded, content: "", tool_calls: undefined, reasoning: "重试思考。" })
       props.visibleMessageIndexes = messages.map((_, index) => index)
-      props.contentVersion++
+      props.projection = { ...props.projection, contentVersion: props.projection.contentVersion + 1 }
       props.isLoading = true
-      if (batched) root.render(<ChatMessageVirtualList {...props} messages={messages} />)
+      if (batched) root.render(<ChatMessageVirtualList {...props} projection={{ ...props.projection, messages }} />)
       else render()
     }
     if (batched) flushSync(restart)

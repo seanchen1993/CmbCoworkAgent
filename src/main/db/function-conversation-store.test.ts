@@ -525,7 +525,7 @@ describe("FunctionConversationStore current identity JOIN", () => {
     expect(calls).toBe(1)
   })
 
-  it("retains JSON parse callbacks and the subsequent fresh target check", () => {
+  it("keeps captured metadata parsing independent of late Main JSON instrumentation", () => {
     const f = fixture()
     const parse = JSON.parse
     let calls = 0
@@ -534,9 +534,11 @@ describe("FunctionConversationStore current identity JOIN", () => {
       f.db.run("UPDATE function_logical_sessions SET workspace='changed'")
       return parse(text, reviver)
     })
-    try { expect(() => f.store.assertCurrent(f.ref)).toThrow("MODS_CONVERSATION_TARGET_CHANGED") }
+    try { expect(() => f.store.assertCurrent(f.ref)).not.toThrow() }
     finally { spy.mockRestore() }
-    expect(calls).toBeGreaterThan(0)
+    expect(calls).toBe(0)
+    f.db.run("UPDATE function_logical_sessions SET workspace='actually-changed'")
+    expect(() => f.store.assertCurrent(f.ref)).toThrow("MODS_CONVERSATION_TARGET_CHANGED")
   })
 
   it("does not bypass readers compiled while the public read factory was wrapped", () => {
@@ -665,4 +667,58 @@ it("keeps a fresh target read after a typed-array row-copy callback", () => {
   try { expect(() => f.store.assertCurrent(f.ref)).toThrow("MODS_CONVERSATION_TARGET_CHANGED") }
   finally { Reflect.deleteProperty(Uint8Array, Symbol.hasInstance) }
   expect(changed).toBe(true)
+})
+
+
+it("seeks physical checkpoint candidates without scanning foreign conversation receipts", () => {
+  const f = fixture(),
+    index = "idx_function_checkpoint_receipts_thread"
+  f.db.run(`DROP INDEX IF EXISTS ${index}`)
+  const incarnation = JSON.stringify(["token", f.input.incarnation.token])
+  const insert = `INSERT INTO function_conversation_checkpoint_receipts
+    (receipt_id,conversation_id,branch_id,checkpoint_thread_id,checkpoint_incarnation,
+     checkpoint_namespace,checkpoint_id,target_json,snapshot_digest,snapshot_json)
+     VALUES(?,?,?,?,?,'',?,'{}','candidate-only','{}')`
+  f.db.run("BEGIN IMMEDIATE")
+  try {
+    for (let n = 0; n < 10000; n++)
+      f.db.run(insert, [
+        `foreign-${n}`,
+        `conversation-${n}`,
+        `branch-${n}`,
+        `foreign-thread-${n}`,
+        JSON.stringify(["token", `other-${n}`]),
+        `point-${n}`
+      ])
+    // Candidate lookup supports either main or child conversation; it grants neither.
+    for (const kind of ["main", "child"])
+      f.db.run(insert, [
+        kind,
+        `conversation-${kind}`,
+        `branch-${kind}`,
+        "thread",
+        incarnation,
+        `point-${kind}`
+      ])
+    f.db.run("COMMIT")
+  } catch (error) {
+    f.db.run("ROLLBACK")
+    throw error
+  }
+  const started = performance.now()
+  new FunctionConversationStore(f.db)
+  const buildMs = performance.now() - started
+  const sql = `SELECT 1 FROM function_conversation_checkpoint_receipts
+    WHERE checkpoint_thread_id=? AND checkpoint_incarnation=? AND checkpoint_namespace='' LIMIT 1`
+  const plan = f.db
+    .exec(`EXPLAIN QUERY PLAN ${sql}`, ["thread", incarnation])[0]
+    .values.map((row) => String(row[3]))
+    .join("\n")
+  expect(plan).toContain(`USING COVERING INDEX ${index}`)
+  expect(plan).not.toContain("SCAN")
+  expect(f.db.exec(sql, ["thread", incarnation])[0].values).toEqual([[1]])
+  expect(
+    f.db.exec(sql, ["thread", JSON.stringify(["token", "new-owner"])])[0]?.values ?? []
+  ).toEqual([])
+  console.info("[CheckpointCandidateIndex] Existing 10002 receipts", { buildMs, plan })
 })

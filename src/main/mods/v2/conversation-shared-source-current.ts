@@ -39,6 +39,8 @@ interface Source {
   readonly invocation: object
   readonly config: RunnableConfig
   readonly signal: AbortSignal
+  readonly parentBinding: FunctionConversationGraphBinding
+  readonly checkpointIncarnation: ThreadIncarnation
   readonly parentNamespace: string
   readonly eligible: boolean
   readonly guard: () => void
@@ -50,6 +52,9 @@ const sources = new WeakMap<() => void, Source>()
 const constructing = new WeakMap<object, Source>()
 const sourceWeakGet = WeakMap.prototype.get, sourceWeakSet = WeakMap.prototype.set
 const sourceSignalThrow = AbortSignal.prototype.throwIfAborted
+const originalSourceScopeRead = readFunctionConversationSharedNativeReadCurrent
+const originalCompletedActiveRead = readFunctionConversationSharedCompletedActiveData
+const familyPlanFreeze = Object.freeze
 
 function fail(): never { throw new ModFunctionError("MODS_CONVERSATION_NATIVE_SOURCE_INVALID") }
 function sourceFields(value: object, keys: readonly string[]): () => void {
@@ -110,6 +115,7 @@ export function createFunctionConversationSharedSourceCurrent(input: SourceInput
   }
   const source: Source = { input, database, saver: input.task.saver, authority: input.authority,
     invocation: input.task.invocation, config: input.task.config, signal: input.signal,
+    parentBinding: input.parentBinding, checkpointIncarnation: incarnation,
     parentNamespace, eligible: !types.isProxy(originalCurrent) && !types.isProxy(originalParent),
     guard, assertFields, reading: false, failed: false }
   Reflect.apply(sourceWeakSet, constructing, [input, source])
@@ -121,8 +127,10 @@ export function createFunctionConversationSharedSourceCurrent(input: SourceInput
 export function readFunctionConversationSharedSourceCurrent(current: unknown,
   scope: FunctionConversationSharedCheckpointScope, saver: SqlJsSaver,
   authority: ModRuntimeAuthority, invocation: object, database: ReturnType<typeof getDb>):
-  FunctionConversationSharedNativeReadCurrent | undefined {
-  const read = readFunctionConversationSharedNativeReadCurrent(current, scope, saver, authority)
+  (FunctionConversationSharedNativeReadCurrent & Readonly<{
+    parentBinding: FunctionConversationGraphBinding; checkpointIncarnation: ThreadIncarnation
+    signal: AbortSignal }>) | undefined {
+  const read = originalSourceScopeRead(current, scope, saver, authority)
   if (!read?.source) return undefined
   const source = Reflect.apply(sourceWeakGet, sources, [read.source]) as Source | undefined
   if (!source || !source.eligible || source.guard !== read.source || source.saver !== saver ||
@@ -146,7 +154,9 @@ export function readFunctionConversationSharedSourceCurrent(current: unknown,
     } catch (error) { source.failed = true; throw error }
   }
   assertDataCurrent()
-  return Object.freeze({ source: read.source, receiver, assertDataCurrent })
+  return Object.freeze({ source: read.source, receiver, assertDataCurrent,
+    parentBinding: source.parentBinding, checkpointIncarnation: source.checkpointIncarnation,
+    signal: source.signal })
 }
 
 const familyPairBrand = Symbol("function-conversation-shared-family-source-pair")
@@ -259,7 +269,7 @@ export function captureFunctionConversationSharedFamilySourcePlan(
   const pair = Reflect.apply(sourceWeakGet, familyPairs, [proof]) as FamilyPair | undefined
   if (!pair || pair.authority !== authority) return undefined
   pair.assertDataCurrent()
-  const completed = readFunctionConversationSharedCompletedActiveData(active, authority, destination)
+  const completed = originalCompletedActiveRead(active, authority, destination)
   if (!completed || completed.database !== pair.database || completed.scope !== pair.scope ||
     completed.saver !== pair.saver || completed.invocation !== pair.invocation ||
     completed.current !== pair.current || completed.namespace !== namespace ||
@@ -299,5 +309,6 @@ export function captureFunctionConversationSharedFamilySourcePlan(
     finally { pair.reading = false }
   }
   assertDataCurrent()
-  return Object.freeze({ assertCurrent, assertDataCurrent, assertDestinationData })
+  return familyPlanFreeze({ assertCurrent, assertDataCurrent, assertDestinationData,
+    pendingRestore: completed.pendingRestore })
 }

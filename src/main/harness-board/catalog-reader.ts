@@ -1285,6 +1285,8 @@ export function readHarnessCatalogPage(
   }
 
   const projects: HarnessProjectListItem[] = []
+  // The compact envelope differs only by the JSON rows and commas within each array.
+  let pageBytes = Buffer.byteLength(JSON.stringify({ projects: [], registry: [] }), "utf8")
   let nextProjectOffset = projectOffset
   if (input.includeProjects !== false && !isCancelled(cancelFlag)) {
     let seen = 0
@@ -1302,8 +1304,9 @@ export function readHarnessCatalogPage(
         nextProjectOffset = seen
         continue
       }
-      const candidate = { projects: [...projects, projected], registry: [] }
-      if (Buffer.byteLength(JSON.stringify(candidate), "utf8") > maxResponseBytes / 2) break
+      const rowBytes = Buffer.byteLength(JSON.stringify(projected), "utf8") + (projects.length ? 1 : 0)
+      if (pageBytes + rowBytes > maxResponseBytes / 2) break
+      pageBytes += rowBytes
       projects.push(projected)
       seen += 1
       nextProjectOffset = seen
@@ -1326,8 +1329,9 @@ export function readHarnessCatalogPage(
       if ((index & 15) === 0 && isCancelled(cancelFlag)) break
       const plugin = boardPlugins[index]
       const projected = toRegistryItem(plugin, readConfig, observations.get(plugin.path)?.runtimeMode)
-      const candidate = { projects, registry: [...registry, projected] }
-      if (Buffer.byteLength(JSON.stringify(candidate), "utf8") > maxResponseBytes) break
+      const rowBytes = Buffer.byteLength(JSON.stringify(projected), "utf8") + (registry.length ? 1 : 0)
+      if (pageBytes + rowBytes > maxResponseBytes) break
+      pageBytes += rowBytes
       registry.push(projected)
     }
   }

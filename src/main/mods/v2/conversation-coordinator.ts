@@ -55,6 +55,7 @@ import type { FunctionConversationSharedActive } from "./conversation-shared-res
 import type { SqlJsSaver } from "../../checkpointer/sqljs-saver"
 import { functionConversationNoteMessage, functionConversationState } from
   "../../agent/mods-conversation"
+import { inspectFunctionConversationAdmission } from "../../agent/function-conversation-admission"
 import { assertFunctionConversationState, readFunctionConversationState,
   type FunctionConversationState } from "../../checkpointer/function-conversation-delivery"
 import { serializeFunctionConversationNativeMessage } from
@@ -854,6 +855,7 @@ export class FunctionConversationCoordinator implements FunctionConversationMana
         checkpointThreadId: family.input.checkpointThreadId,
         checkpointIncarnation: family.input.checkpointIncarnation,
         runtimeCheckpointNamespace: read.namespace, initialState: restored?.state ?? functionConversationState(target.ref),
+        ...(restored?.admission ? { admission: restored.admission } : {}),
         signal: family.signal, assertCurrent: () => target.assertCurrent() })
       binding.assertCurrent()
       const destination = this.destinations.get(target)
@@ -1191,14 +1193,19 @@ export class FunctionConversationCoordinator implements FunctionConversationMana
     if (owner) this.assertOwner(owner)
     const checkpoint = await this.host.readCurrentCheckpoint(threadId, signal, guard)
     guard()
+    const admission = inspectFunctionConversationAdmission({ state: checkpoint?.state,
+      messages: checkpoint?.messages }, guard)
+    if (admission.kind === "unproven-native")
+      throw new ModFunctionError("MODS_CONVERSATION_MIGRATION_REQUIRED")
     if (!ref) {
-      if (checkpoint?.state) throw new ModFunctionError("MODS_CONVERSATION_MIGRATION_REQUIRED")
+      if (admission.kind === "native")
+        throw new ModFunctionError("MODS_CONVERSATION_MIGRATION_REQUIRED")
       if (!owner) return undefined
       this.assertOwner(owner)
       ref = this.store.ensureMain(input, () => { guard(); this.assertOwner(owner) })
     }
-    const state = checkpoint?.state ?? functionConversationState(ref)
-    if (checkpoint?.state) ref = this.store.selectBranch(ref, state.branchId, guard)
+    const state = admission.kind === "native" ? admission.state : functionConversationState(ref)
+    if (admission.kind === "native") ref = this.store.selectBranch(ref, state.branchId, guard)
     assertFunctionConversationState(ref, state)
     if (state.frontier > this.store.highWater(ref))
       throw new ModFunctionError("MODS_CONVERSATION_FRONTIER_INVALID")

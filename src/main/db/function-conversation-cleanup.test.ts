@@ -25,6 +25,8 @@ import { ensureFunctionConversationNativeDestinationSchema } from
   "./function-conversation-native-destination"
 import { recordFunctionConversationPresentationDisposition,
   readFunctionConversationPresentationDisposition } from "./function-conversation-presentation-disposition"
+import { FunctionConversationCompactionJournal, type CompactionCommitRecord } from
+  "../checkpointer/function-conversation-compaction-journal"
 
 let directory = ""
 const isolated: NativeSqliteAdapter[] = []
@@ -60,6 +62,23 @@ function fixture(workspace = directory, metadataWorkspace = workspace) {
       throw Error("ACTUAL_THREAD_CHANGED")
   } }
   return { database, threadId, incarnation, store, parent, input }
+}
+
+function compaction(f: ReturnType<typeof fixture>, target = f.parent) {
+  const key = JSON.stringify(target), intentId = randomUUID()
+  const descriptor = { threadId: target.threadId, namespace: target.checkpointNamespace,
+    checkpointId: "source", parentCheckpointId: null, checkpointType: "json",
+    checkpointBytesDigest: "raw-source", metadataType: "json", metadataBytesDigest: "raw-metadata",
+    channels: { messages: "typed-source" } }
+  const value: CompactionCommitRecord = { version: 1, intentId, target: key,
+    expectedUpdateDigest: "typed-update", source: { version: 1, target: key,
+      sourceCheckpointId: "source", sourceSnapshotDigest: "members", uuid: "boundary",
+      rowDigest: "row", rowReceiptId: "row-receipt", projectionDigest: "projection" },
+    sourceDescriptor: descriptor, destination: { ...descriptor, checkpointId: "destination",
+      parentCheckpointId: "source" }, writerPid: process.pid, writerBoot: "cleanup-test",
+    phase: "prepared", createdAt: 1, updatedAt: 1 }
+  new FunctionConversationCompactionJournal(f.database, key, () => {}).prepare(value)
+  return value
 }
 
 function keep(f: ReturnType<typeof fixture>, target = f.parent, physicalThreadId = f.threadId) {
@@ -178,6 +197,33 @@ function journal(f: ReturnType<typeof fixture>, targetThreadId: string, incarnat
 }
 
 describe("actual conversation data cleanup joins the original AppSQLite transaction", () => {
+  it("deletes compaction evidence only with its exact selected native owner", () => {
+    const f = fixture(), a = child(f), b = child(f)
+    keep(f); keep(f, a.target, a.threadId); keep(f, b.target, b.threadId)
+    const parent = compaction(f), first = compaction(f, a.target), second = compaction(f, b.target)
+    appDb.deleteThread(a.threadId)
+    const ids = f.database.exec("SELECT intent_id FROM function_conversation_compaction_commits")[0]
+      .values.flat()
+    expect(ids).toContain(parent.intentId)
+    expect(ids).toContain(second.intentId)
+    expect(ids).not.toContain(first.intentId)
+    appDb.deleteThread(f.threadId)
+    expect(f.database.exec("SELECT intent_id FROM function_conversation_compaction_commits")[0]
+      ?.values ?? []).toHaveLength(0)
+  })
+
+  it("rolls back deletion rather than removing cross-scope compaction evidence", () => {
+    const f = fixture(), saved = keep(f), value = compaction(f)
+    const wrongTarget = JSON.stringify({ ...f.parent, workspace: "other-workspace" })
+    f.database.run(`UPDATE function_conversation_compaction_commits SET target=?,record_json=
+      json_set(record_json,'$.target',?) WHERE intent_id=?`, [wrongTarget, wrongTarget, value.intentId])
+    expect(() => appDb.deleteThread(f.threadId)).toThrow("CLEANUP_CONFLICT")
+    expect(appDb.getThreadCore(f.threadId)).toBeDefined()
+    expect(f.store.readReceipt(f.parent, saved.row.uuid)).toBeDefined()
+    expect(f.database.exec(`SELECT target FROM function_conversation_compaction_commits
+      WHERE intent_id=?`, [value.intentId])[0]?.values[0]?.[0]).toBe(wrongTarget)
+  })
+
   it.skipIf(process.platform !== "win32")("deletes an actual canonical child under its raw-case Windows parent workspace", () => {
     const canonical = directory.toLowerCase()
     expect(canonical).not.toBe(directory)

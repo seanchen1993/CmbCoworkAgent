@@ -1,3 +1,4 @@
+import type { PreparedNativeDataSource } from "./runtime-projection-protocol"
 import { createHash } from "node:crypto"
 import { types } from "node:util"
 import { AIMessage, HumanMessage, SystemMessage, ToolMessage, type BaseMessage } from
@@ -64,6 +65,118 @@ export interface CanonicalCheckpointDisplayOmissions {
   readonly digest: string
 }
 
+const preparedStringify = JSON.stringify,
+  preparedCreateHash = createHash
+const preparedApply = Reflect.apply
+const preparedIsUint8Array = types.isUint8Array,
+  preparedIsSharedArrayBuffer = types.isSharedArrayBuffer
+const preparedTypedArrayBuffer = Object.getOwnPropertyDescriptor(
+  Object.getPrototypeOf(Uint8Array.prototype), "buffer"
+)!.get!
+const preparedHashPrototype = Object.getPrototypeOf(preparedCreateHash("sha256"))
+const preparedHashUpdate = preparedHashPrototype.update,
+  preparedHashDigest = preparedHashPrototype.digest
+function preparedHash() {
+  const value = preparedCreateHash("sha256")
+  return {
+    update(data: string | Uint8Array) {
+      preparedApply(preparedHashUpdate, value, [data])
+    },
+    finish(): string {
+      return preparedApply(preparedHashDigest, value, ["hex"]) as string
+    }
+  }
+}
+type PreparedTuple = readonly (string | number | null | PreparedTuple)[]
+function preparedTupleDigest(value: PreparedTuple): string {
+  const digest = preparedHash()
+  // Only our fixed primitive tuples enter here. Never invoke inherited toJSON callbacks.
+  const append = (tuple: PreparedTuple): void => {
+    digest.update("[")
+    for (let index = 0; index < tuple.length; index++) {
+      if (index) digest.update(",")
+      const item = tuple[index]
+      if (item !== null && typeof item === "object") append(item)
+      else digest.update(preparedStringify(item))
+    }
+    digest.update("]")
+  }
+  append(value)
+  return digest.finish()
+}
+
+/** Exact membership JSON-array digest, shared by display and prepared storage verification. */
+export function createNativeCheckpointMessageDigest() {
+  const digest = preparedHash()
+  digest.update("[")
+  let count = 0,
+    finished = false
+  return {
+    append(payload: string): void {
+      if (finished) fail()
+      if (count++) digest.update(",")
+      digest.update(preparedStringify(payload))
+    },
+    finish(): string {
+      if (finished) fail()
+      finished = true
+      digest.update("]")
+      return digest.finish()
+    }
+  }
+}
+
+/** Same text/blob ownership distinction as the original Saver serialization seal. */
+export function preparedNativeStorageBytesDigest(value: string | Uint8Array): string {
+  if (typeof value !== "string" && (!preparedIsUint8Array(value) ||
+    preparedIsSharedArrayBuffer(preparedApply(preparedTypedArrayBuffer, value, []))))
+    throw Error("PREPARED_NATIVE_CODEC_UNSUPPORTED")
+  const digest = preparedHash()
+  digest.update(typeof value === "string" ? "text:" : "blob:")
+  digest.update(value)
+  return digest.finish()
+}
+export function preparedNativeSnapshotRowDigest(row: {
+  readonly checkpointId: string
+  readonly parentCheckpointId: string | null
+  readonly prefixLength: number
+  readonly messageCount: number
+  readonly generation: string
+  readonly type: string
+  readonly bytes: string | Uint8Array
+}): string {
+  return preparedTupleDigest([
+    row.checkpointId,
+    row.parentCheckpointId,
+    row.prefixLength,
+    row.messageCount,
+    row.generation,
+    row.type,
+    preparedNativeStorageBytesDigest(row.bytes)
+  ])
+}
+export function preparedNativeSourcePlanDigest(source: PreparedNativeDataSource): string {
+  const messages = source.messages
+  return preparedTupleDigest([
+    source.parentCheckpointId,
+    source.checkpoint.type,
+    preparedNativeStorageBytesDigest(source.checkpoint.bytes),
+    source.metadata.type,
+    preparedNativeStorageBytesDigest(source.metadata.bytes),
+    messages === null
+      ? null
+      : [
+          messages.parentCheckpointId,
+          messages.prefixLength,
+          messages.messageCount,
+          messages.expectedParentCount,
+          messages.expectedParentGeneration,
+          messages.type,
+          preparedNativeStorageBytesDigest(messages.bytes)
+        ]
+  ])
+}
+
 /** Small streaming evidence only. Its caller must authenticate every row and its real ordinal. */
 export function createCanonicalCheckpointDisplayOmissionDigest() {
   const digest = createHash("sha256").update("[")
@@ -96,21 +209,32 @@ export function canonicalCheckpointDisplayMembershipFingerprint(db: NativeSqlite
   [witness.conversationId, witness.branchId, witness.threadId,
     witness.incarnation, witness.namespace, witness.checkpointId])
   if (receipts.length !== 1) fail("MODS_CONVERSATION_CHECKPOINT_MEMBERSHIP")
-  const receipt = receipts[0], digest = createHash("sha256").update("[")
+  const { receipt_id, target_json, snapshot_digest, snapshot_json } = receipts[0]
+  if (typeof receipt_id !== "string" || typeof target_json !== "string" ||
+      typeof snapshot_digest !== "string" || typeof snapshot_json !== "string")
+    fail("MODS_CONVERSATION_CHECKPOINT_MEMBERSHIP")
+  // Raw TEXT and INTEGER fields are NOT NULL. Stringify primitives only, without toJSON.
+  const digest = preparedHash()
+  digest.update('["canonical-checkpoint-membership-v2",[' +
+    `${preparedStringify(receipt_id)},${preparedStringify(target_json)},` +
+    `${preparedStringify(snapshot_digest)},${preparedStringify(snapshot_json)}],[`)
   let cursor = -1, count = 0
   for (;;) {
     const members = query(db, `SELECT ordinal,uuid,member_json FROM function_conversation_checkpoint_members
-      WHERE receipt_id=? AND ordinal>? ORDER BY ordinal LIMIT 64`, [receipt.receipt_id, cursor])
+      WHERE receipt_id=? AND ordinal>? ORDER BY ordinal LIMIT 64`, [receipt_id, cursor])
     if (!members.length) break
     for (const member of members) {
-      if (count++) digest.update(",")
-      digest.update(JSON.stringify({ ...receipt, ...member }))
+      const { uuid, member_json } = member
+      const ordinal = integer(member.ordinal)
+      if (typeof uuid !== "string" || typeof member_json !== "string")
+        fail("MODS_CONVERSATION_CHECKPOINT_MEMBERSHIP")
+      digest.update((count++ ? "," : "") +
+        `[${preparedStringify(ordinal)},${preparedStringify(uuid)},${preparedStringify(member_json)}]`)
     }
     cursor = integer(members[members.length - 1].ordinal)
   }
-  // Preserve the exact old LEFT JOIN digest, including its one NULL-member row for an empty CP.
-  if (!count) digest.update(JSON.stringify({ ...receipt, ordinal: null, uuid: null, member_json: null }))
-  return digest.update("]").digest("hex")
+  digest.update("]]")
+  return digest.finish()
 }
 type SqlRow = Record<string, NativeSqliteValue>
 function fail(code = "MODS_CONVERSATION_DISPLAY_SOURCE_INVALID"): never {
@@ -404,7 +528,7 @@ export function createCanonicalCheckpointDisplayVerifier(db: NativeSqliteAdapter
       members.set(member.ordinal, member)
     }
   }
-  const nativeDigest = createHash("sha256").update("[")
+  const nativeDigest = createNativeCheckpointMessageDigest()
   const omissionDigest = createCanonicalCheckpointDisplayOmissionDigest()
   let finished = false, omitted: CanonicalCheckpointDisplayOmissions | undefined
   let visited = 0, visitedMembers = 0, ordinaryBytes = 0, ordinaryComplete = true
@@ -427,8 +551,7 @@ export function createCanonicalCheckpointDisplayVerifier(db: NativeSqliteAdapter
       if (copied.snapshot.executionSuppressed || hasInvalidFunctionConversationTranscriptStamp(native)) fail()
       const stamp = readFunctionConversationTranscriptStamp(native), member = members.get(ordinal)
       const payload = stamp ? serializeFunctionConversationNativeMessage(native) : JSON.stringify(native.toDict())
-      if (ordinal) nativeDigest.update(",")
-      nativeDigest.update(JSON.stringify(payload))
+      nativeDigest.append(payload)
       if (!stamp) {
         if (member) fail()
         if (ordinaryComplete) {
@@ -465,7 +588,7 @@ export function createCanonicalCheckpointDisplayVerifier(db: NativeSqliteAdapter
       if (finished) fail()
       guard()
       if (count !== visited || (snapshot && (visited !== snapshot.nativeMessageCount ||
-        visitedMembers !== snapshot.members.length || nativeDigest.update("]").digest("hex") !==
+        visitedMembers !== snapshot.members.length || nativeDigest.finish() !==
           snapshot.nativeSnapshotDigest))) fail("MODS_CONVERSATION_CHECKPOINT_MEMBERSHIP")
       omitted = omissionDigest.finish()
       finished = true

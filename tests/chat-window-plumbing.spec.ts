@@ -43,7 +43,7 @@ async function main(): Promise<void> {
   assert.match(threadProjectionCache, /mergeVisibleChatMessageIndexes\(/)
   assert.match(container, /historyMessageTotal - historyLoadedMessageCount/)
   assert.match(container, /onLoadEarlierHistoryPage=\{loadEarlierHistoryPage\}/)
-  assert.match(container, /contentVersion=\{displayMessagesContentVersion\}/)
+  assert.match(container, /projection=\{displayMessageSnapshot\}/)
   assert.doesNotMatch(container, /deriveChatMessageWindowRows\(/)
   assert.doesNotMatch(container, /messageWindow/)
   assert.match(

@@ -17,7 +17,8 @@ vi.mock("../../storage", () => ({
   peekThreadCheckpointPath: mocks.path,
   DEFAULT_MAX_TOKENS: 128000
 }))
-vi.mock("../../checkpointer/runtime-projection-client", () => ({
+vi.mock("../../checkpointer/runtime-projection-client", async importOriginal => ({
+  ...(await importOriginal<typeof import("../../checkpointer/runtime-projection-client")>()),
   readFunctionSessionTranscriptInWorker: mocks.read
 }))
 afterEach(() => vi.resetAllMocks())

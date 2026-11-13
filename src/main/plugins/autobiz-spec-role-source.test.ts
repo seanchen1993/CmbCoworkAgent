@@ -2,8 +2,9 @@ import { createHash } from "node:crypto"
 import { readFileSync } from "node:fs"
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { join, resolve } from "node:path"
-import { expect, it } from "vitest"
+import { join } from "node:path"
+import { afterAll, beforeAll, expect, it } from "vitest"
+import { createAutobizSourceFixture } from "./autobiz-source-fixture.test-helper"
 import { prepareAutobizSpecRoleSource } from "../../../scripts/prepare-autobiz-spec-role-source"
 import { snapshotDerivationSource } from "./derivation-source"
 import { isReviewedAutobizProtocol } from "./autobiz-composition-protocol"
@@ -12,8 +13,14 @@ import { isReviewedAutobizKernelIdentity } from "./autobiz-required-hooks"
 import previous from "./autobiz-business-kernel-wakeup-reviewed.json"
 import reviewed from "./autobiz-business-kernel-spec-role-reviewed.json"
 
-const source = resolve("output/deliveries/mods-creator-workflow-wakeup-20261017-v102-v2/Mods来源/AutoBiz")
-const delivered = resolve("output/deliveries/mods-creator-spec-role-20261017-v103/autobiz-complete-spec-role")
+let source: string, delivered: string
+let fixture: Awaited<ReturnType<typeof createAutobizSourceFixture>>
+beforeAll(async () => {
+  fixture = await createAutobizSourceFixture()
+  source = fixture.wakeup
+  delivered = await fixture.assemble("spec")
+}, 120000)
+afterAll(async () => { await fixture?.close() })
 const sha = (value: Buffer | string) => createHash("sha256").update(value).digest("hex")
 
 it("adds only the exact specs definition and two original role pins to a separate complete profile", () => {

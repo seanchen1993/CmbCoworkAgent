@@ -23,14 +23,10 @@ const capturedMetadata = new WeakMap<
   }
 >()
 
-const metadataGlobal = globalThis
-const metadataJson = JSON,
-  metadataParse = JSON.parse
-const metadataArray = Array,
-  metadataArrayIsArray = Array.isArray
+// Interpret persisted text with fixed primitives; parsing is not a replaceable host callback.
+const metadataParse = JSON.parse
+const metadataArrayIsArray = Array.isArray
 const metadataDescriptor = Object.getOwnPropertyDescriptor
-const metadataPrototype = Object.getPrototypeOf
-const metadataObjectPrototype = Object.prototype
 const metadataHasOwn = Object.prototype.hasOwnProperty
 const metadataApply = Reflect.apply
 interface MetadataInterpretation {
@@ -46,36 +42,10 @@ const MAX_INTERPRETATIONS = 8
 const MAX_INTERPRETATION_BYTES = 1024 * 1024
 const MAX_SINGLE_INTERPRETATION_BYTES = 512 * 1024
 
-function originalMetadataField(
-  descriptor: PropertyDescriptor | undefined,
-  value: unknown
-): boolean {
-  return (
-    !!descriptor &&
-    metadataApply(metadataHasOwn, descriptor, ["value"]) === true &&
-    descriptor.value === value
-  )
-}
-
-export function originalMetadataInterpretation(): boolean {
-  const json = metadataDescriptor(metadataGlobal, "JSON")
-  const parse = metadataDescriptor(metadataJson, "parse")
-  const array = metadataDescriptor(metadataGlobal, "Array")
-  const isArray = metadataDescriptor(metadataArray, "isArray")
-  return (
-    originalMetadataField(json, metadataJson) &&
-    originalMetadataField(parse, metadataParse) &&
-    originalMetadataField(array, metadataArray) &&
-    originalMetadataField(isArray, metadataArrayIsArray) &&
-    metadataPrototype(metadataObjectPrototype) === null &&
-    !metadataDescriptor(metadataObjectPrototype, THREAD_INCARNATION_METADATA_KEY)
-  )
-}
-
 /** Cache only a pure decoding of exact text, never a database row or an authority result. */
 function rememberMetadataInterpretation(raw: string, token: string | null): void {
   const bytes = 2 * (raw.length + (token?.length ?? 0))
-  if (bytes > MAX_SINGLE_INTERPRETATION_BYTES || !originalMetadataInterpretation()) return
+  if (bytes > MAX_SINGLE_INTERPRETATION_BYTES) return
   interpretedMetadata = { raw, token, bytes, next: interpretedMetadata }
   interpretedCount++
   interpretedBytes += bytes
@@ -102,7 +72,7 @@ export function createThreadIncarnationToken(): string {
 
 export function readThreadIncarnationToken(rawMetadata: string | null): string | null {
   if (!rawMetadata) return null
-  const ordinary = typeof rawMetadata === "string" && originalMetadataInterpretation()
+  const ordinary = typeof rawMetadata === "string"
   if (ordinary) {
     let entry = interpretedMetadata
     while (entry) {
@@ -112,9 +82,11 @@ export function readThreadIncarnationToken(rawMetadata: string | null): string |
   }
   let token: string | null = null
   try {
-    const metadata = JSON.parse(rawMetadata) as unknown
-    if (metadata && typeof metadata === "object" && !Array.isArray(metadata)) {
-      const value = (metadata as Record<string, unknown>)[THREAD_INCARNATION_METADATA_KEY]
+    const metadata = metadataParse(rawMetadata) as unknown
+    if (metadata && typeof metadata === "object" && !metadataArrayIsArray(metadata)) {
+      const field = metadataDescriptor(metadata, THREAD_INCARNATION_METADATA_KEY)
+      const value =
+        field && metadataApply(metadataHasOwn, field, ["value"]) === true ? field.value : undefined
       token = typeof value === "string" && value.length > 0 ? value : null
     }
   } catch {
@@ -136,7 +108,7 @@ export function captureThreadIncarnation(row: ThreadIncarnationRow): ThreadIncar
     legacyCreatedAt: Number(row.created_at)
   }
   if (typeof rawMetadata === "string" || rawMetadata === null) {
-    Reflect.apply(capturedMetadataSet, capturedMetadata, [incarnation, { rawMetadata, token }])
+    metadataApply(capturedMetadataSet, capturedMetadata, [incarnation, { rawMetadata, token }])
   }
   return incarnation
 }
@@ -147,7 +119,7 @@ export function matchesThreadIncarnation(
 ): boolean {
   if (!row) return false
   const rawMetadata = row.metadata
-  const captured = Reflect.apply(capturedMetadataGet, capturedMetadata, [expected]) as
+  const captured = metadataApply(capturedMetadataGet, capturedMetadata, [expected]) as
     | { rawMetadata: string | null; token: string | null }
     | undefined
   // Reuse only an interpretation of the exact initial text, never a row or match result.

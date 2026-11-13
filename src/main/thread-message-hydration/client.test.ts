@@ -7,6 +7,8 @@ import { DatabaseSync } from "node:sqlite"
 import { build } from "esbuild"
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest"
 import { NativeSqliteAdapter } from "../db/native-sqlite-adapter"
+import { canonicalDisplayValueDigest } from "../checkpointer/function-conversation-canonical-display-worker"
+import type { ThreadMessagesPage } from "../types"
 import {
   THREAD_MESSAGE_HYDRATION_MAX_ACTIVE_REQUESTS,
   THREAD_MESSAGE_HYDRATION_WORKER_RESOURCE_LIMITS,
@@ -1013,11 +1015,60 @@ describe("thread message hydration worker", () => {
   })
 })
 
+it("verifies a full canonical page using the first occurrence of each ID", async () => {
+  const worker = new FakeHydrationWorker()
+  const client = new ThreadMessageHydrationClient(async () => worker as unknown as Worker,
+    () => "C:\\fixture.db")
+  clients.push(client)
+  const messages: ThreadMessagesPage["messages"] = Array.from({ length: 1000 }, (_, index) => ({
+    id: `message-${index}`, role: "assistant", content: `body-${index}`, created_at: new Date(1)
+  }))
+  // Keep the previous Array.find semantics for malformed duplicate-ID replies.
+  messages.push({ ...messages[0], content: "later duplicate" })
+  const page = { messages, hasMore: false, total: messages.length,
+    beforeOrdinal: null, beforeMessageId: null } as ThreadMessagesPage
+  const witnesses = messages.slice(0, 1000).map(message => ({ messageId: message.id,
+    columnsDigest: "source-owned", display: { kind: "page", byteBudget: 1024,
+      digest: canonicalDisplayValueDigest(message) } }))
+  const verify = vi.fn(() => {})
+  const request = client.readPage("thread", { limit: 1000 }, undefined,
+    { assertCurrent: () => {}, verify })
+  await vi.waitFor(() => expect(worker.sent).toHaveLength(1))
+  worker.emit("message", { type: "page", requestId: 1, ok: true, page,
+    canonicalWitnesses: witnesses, stats: {
+      durationMs: 1, scannedCandidates: messages.length,
+      selectedMessages: messages.length, estimatedBytes: 100000
+    } })
+  await expect(request).resolves.toBe(page)
+  expect(verify).toHaveBeenCalledOnce()
+})
+
+it("still rejects a canonical page changed by its source verification callback", async () => {
+  const worker = new FakeHydrationWorker()
+  const client = new ThreadMessageHydrationClient(async () => worker as unknown as Worker,
+    () => "C:\\fixture.db")
+  clients.push(client)
+  const page = { messages: [{ id: "message", role: "assistant", content: "before" }],
+    hasMore: false, total: 1, beforeOrdinal: null, beforeMessageId: null } as ThreadMessagesPage
+  const digest = canonicalDisplayValueDigest(page.messages[0])
+  const request = client.readPage("thread", {}, undefined, {
+    assertCurrent: () => {}, verify: () => { page.messages[0].content = "changed" }
+  })
+  await vi.waitFor(() => expect(worker.sent).toHaveLength(1))
+  worker.emit("message", { type: "page", requestId: 1, ok: true, page,
+    canonicalWitnesses: [{ messageId: "message", columnsDigest: "source-owned",
+      display: { kind: "page", byteBudget: 1024, digest } }],
+    stats: { durationMs: 1, scannedCandidates: 1, selectedMessages: 1, estimatedBytes: 100 } })
+  await expect(request).rejects.toBeInstanceOf(ThreadMessageHydrationRequestCancelledError)
+})
+
 class FakeHydrationWorker extends EventEmitter {
   postError: Error | null = null
+  sent: unknown[] = []
 
-  postMessage(): void {
+  postMessage(message?: unknown): void {
     if (this.postError) throw this.postError
+    this.sent.push(message)
   }
 
   unref(): this {

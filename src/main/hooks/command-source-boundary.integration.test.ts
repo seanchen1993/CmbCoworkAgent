@@ -1,4 +1,6 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import {
+  existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync
+} from "node:fs"
 import { tmpdir } from "node:os"
 import { basename, join } from "node:path"
 import { afterEach, expect, it, vi } from "vitest"
@@ -13,6 +15,7 @@ import { modCallContext } from "../mods/context"
 import { registerStageCheckReceiptSink } from "./stage-check-receipts"
 import { STAGE_CHECK_RECEIPT_PREFIX } from "../../shared/project-runtime/stage-check-receipt"
 import * as workspaceLocks from "../agent/file-operation-lock"
+import { cleanupMarketRuntimeContent, protectMarketDirectory } from "../services/market-content"
 
 const held = vi.hoisted(() => ({ preference: vi.fn<() => Promise<void>>() }))
 vi.mock("../harness-board/composition-python-cache", async (original) => {
@@ -41,9 +44,21 @@ afterEach(() => {
   resetHookOnceStateForTests()
 })
 
-function fixture(required = false, withRoot = false, stdout = '{"continue":true}', exitCode = 0) {
+function fixture(required = false, withRoot = false, stdout = '{"continue":true}', exitCode = 0,
+  protectedContent = false) {
   const root = mkdtempSync(join(tmpdir(), "command-source-boundary-"))
   cleanup.push(() => rmSync(root, { recursive: true, force: true }))
+  const cacheRoot = join(root, "market-cache")
+  if (protectedContent) {
+    mkdirSync(cacheRoot)
+    for (const name of ["TEMP", "TMP", "TMPDIR"]) vi.stubEnv(name, cacheRoot)
+    cleanup.push(() => {
+      cleanupMarketRuntimeContent()
+      vi.unstubAllEnvs()
+    })
+  }
+  const cacheDirectories = () => protectedContent
+    ? readdirSync(cacheRoot).filter(name => name.startsWith("cmb-market-runtime-")) : []
   const source = join(root, "source")
   mkdirSync(source)
   writeFileSync(join(source, "plugin.json"), '{"name":"docs","version":"1.0.0"}')
@@ -59,6 +74,10 @@ function fixture(required = false, withRoot = false, stdout = '{"continue":true}
     })
   )
   writeFileSync(join(source, "rule.txt"), "original required source")
+  if (protectedContent) {
+    writeFileSync(join(source, "context.md"), "original protected context")
+    protectMarketDirectory(source)
+  }
   const snapshots = new HostPackageSnapshots(join(root, "packages")),
     snapshot = snapshots.capture(source)
   const marker = join(root, "process-starts.txt"),
@@ -84,8 +103,11 @@ function fixture(required = false, withRoot = false, stdout = '{"continue":true}
     mcpServerCount: 0
   }
   let postCommandObserved = false
+  const phases: Array<{ cacheCount: number; processStarted: boolean }> = []
   const full = vi.fn(() => {
     snapshots.read(snapshot.digest)
+    if (protectedContent)
+      phases.push({ cacheCount: cacheDirectories().length, processStarted: existsSync(marker) })
     if (existsSync(marker)) postCommandObserved = true
   })
   let authorized = true
@@ -133,6 +155,9 @@ function fixture(required = false, withRoot = false, stdout = '{"continue":true}
     hook,
     context,
     full,
+    phases,
+    cacheRoot,
+    cacheDirectories,
     revoke: () => {
       authorized = false
     },
@@ -150,7 +175,7 @@ it.each([false, true])(
       f.full.mockClear() // The original Legacy source-entry fence remains outside this runner.
       await runHooks([f.hook], "PreToolUse", f.context, observed)
       expect(readFileSync(f.marker, "utf8")).toBe("started\n")
-      expect(f.full).toHaveBeenCalledTimes(2) // Actual pre-spawn and post-command publication.
+      expect(f.full).toHaveBeenCalledTimes(3) // Preparation, actual spawn and publication.
       expect(observed).toHaveBeenCalledOnce()
       await runHooks([f.hook], "PreToolUse", f.context, observed)
       expect(readFileSync(f.marker, "utf8")).toBe("started\n")
@@ -158,6 +183,65 @@ it.each([false, true])(
     })
   }
 )
+
+it("fences protected materialization separately from actual spawn and publication", async () => {
+  const f = fixture(false, true, '{"continue":true}', 0, true), observed = vi.fn()
+  await withRuntimePluginSource(f.token, async () => {
+    f.full.mockClear()
+    f.phases.length = 0
+    await runHooks([f.hook], "PreToolUse", f.context, observed)
+    expect(f.phases).toEqual([
+      { cacheCount: 0, processStarted: false },
+      { cacheCount: 1, processStarted: false },
+      { cacheCount: 1, processStarted: true }
+    ])
+    expect(readFileSync(f.marker, "utf8")).toBe("started\n")
+    expect(observed).toHaveBeenCalledOnce()
+    const runtimeRoot = join(f.cacheRoot, f.cacheDirectories()[0])
+    const resources = readdirSync(runtimeRoot)
+    expect(resources).toHaveLength(1)
+    expect(readFileSync(join(runtimeRoot, resources[0], "context.md"), "utf8"))
+      .toBe("original protected context")
+  })
+})
+
+it("rejects changed protected source after the workspace lock before decoding or spawning", async () => {
+  const f = fixture(false, true, receipt, 0, true)
+  const entered = Promise.withResolvers<void>(), release = Promise.withResolvers<void>()
+  const holder = workspaceLocks.withWorkspaceExecution(f.root, "write", async () => {
+    entered.resolve()
+    await release.promise
+  })
+  await entered.promise
+  const queued = vi.spyOn(workspaceLocks, "withWorkspaceExecution"), sink = vi.fn()
+  cleanup.push(registerStageCheckReceiptSink(sink))
+  try {
+    await withRuntimePluginSource(f.token, async () => {
+      f.full.mockClear()
+      f.phases.length = 0
+      const observed = vi.fn()
+      const pending = runHooks([f.hook], "PreToolUse", f.context, observed)
+      try {
+        await vi.waitFor(() => expect(queued).toHaveBeenCalledOnce())
+        expect(f.full).not.toHaveBeenCalled()
+        expect(f.cacheDirectories()).toEqual([])
+        f.change()
+      } finally {
+        release.resolve()
+        await expect(pending).rejects.toThrow("PACKAGE_CHANGED")
+      }
+      expect(f.full).toHaveBeenCalledOnce()
+      expect(f.cacheDirectories()).toEqual([])
+      expect(existsSync(f.marker)).toBe(false)
+      expect(observed).not.toHaveBeenCalled()
+      expect(sink).not.toHaveBeenCalled()
+    })
+  } finally {
+    release.resolve()
+    await holder
+    queued.mockRestore()
+  }
+})
 
 it("rejects changed retained bytes after the real preference read/await and before actual spawn", async () => {
   const f = fixture(false, true),
@@ -329,8 +413,8 @@ it.each(["success", "pre-sink", "in-sink", "cancel", "halt"] as const)(
           }
           expect(sink).toHaveBeenCalledTimes(mode === "success" || mode === "in-sink" ? 1 : 0)
           expect(readFileSync(f.marker, "utf8")).toBe("started\n")
-          if (mode === "success") expect(f.full).toHaveBeenCalledTimes(5)
-          if (mode === "halt") expect(f.full).toHaveBeenCalledTimes(2)
+          if (mode === "success") expect(f.full).toHaveBeenCalledTimes(6)
+          if (mode === "halt") expect(f.full).toHaveBeenCalledTimes(3)
           if (mode !== "success")
             expect(observed.mock.calls.some((call) => call[2].decision === "approve")).toBe(false)
         }

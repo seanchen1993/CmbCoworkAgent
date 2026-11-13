@@ -34,6 +34,16 @@ export interface RunningVisibilitySample {
   phaseGeneration: number
   blankReason: "document-hidden" | "missing-viewport" | "hidden-viewport" | "no-body" | null
   visibleBodyCount: number
+  virtualRange?: {
+    itemCount: number
+    firstIndex: number | null
+    lastIndex: number | null
+    firstKnownSize: number | null
+    lastKnownSize: number | null
+    paddingTop: number | null
+    paddingBottom: number | null
+    scrollHeight: number
+  }
 }
 
 interface RunningGeometry {
@@ -77,6 +87,19 @@ export interface RunningBlankContext {
       pending: RunningGeometry[]
     }>
     rowLimitReached: boolean
+    mountedMessageRowCount: number
+    virtualList: {
+      rect: RunningGeometry
+      visibility: string
+      items: Array<{
+        index: number | null
+        knownSize: number | null
+        rect: RunningGeometry
+        hasMessageRow: boolean
+        pendingCount: number
+      }>
+      itemLimitReached: boolean
+    } | null
   }
 }
 
@@ -225,6 +248,31 @@ function installMonitor(options: {
     }
     return false
   }
+  const finiteAttribute = (element: Element | null | undefined, name: string): number | null => {
+    const raw = element?.getAttribute(name)
+    if (!raw?.trim()) return null
+    const value = Number(raw)
+    return Number.isFinite(value) ? value : null
+  }
+  const virtualRange = (viewport: Element | null | undefined): RunningVisibilitySample["virtualRange"] => {
+    const list = viewport?.querySelector<HTMLElement>('[data-testid="virtuoso-item-list"]')
+    if (!list || !viewport) return undefined
+    const items = list.querySelectorAll(":scope > [data-index]")
+    const padding = (value: string) => {
+      const parsed = Number.parseFloat(value)
+      return Number.isFinite(parsed) ? parsed : null
+    }
+    return {
+      itemCount: items.length,
+      firstIndex: finiteAttribute(items[0], "data-index"),
+      lastIndex: finiteAttribute(items[items.length - 1], "data-index"),
+      firstKnownSize: finiteAttribute(items[0], "data-known-size"),
+      lastKnownSize: finiteAttribute(items[items.length - 1], "data-known-size"),
+      paddingTop: padding(list.style.paddingTop),
+      paddingBottom: padding(list.style.paddingBottom),
+      scrollHeight: viewport.scrollHeight
+    }
+  }
   const readVisibility = (now: number, trigger: RunningVisibilitySample["trigger"]) => {
     const root = document.querySelector("[data-chat-thread-id]")
     const viewport = root?.querySelector("[data-radix-scroll-area-viewport]")
@@ -299,7 +347,8 @@ function installMonitor(options: {
       trigger,
       phaseGeneration,
       blankReason,
-      visibleBodyCount
+      visibleBodyCount,
+      virtualRange: virtualRange(viewport)
     }
     return { sample, flags }
   }
@@ -311,7 +360,8 @@ function installMonitor(options: {
       return { x: box.x, y: box.y, width: box.width, height: box.height }
     }
     const rows: RunningBlankContext["geometry"]["rows"] = []
-    if (!viewport) return { viewport: null, rows, rowLimitReached: false }
+    if (!viewport) return { viewport: null, rows, rowLimitReached: false,
+      mountedMessageRowCount: 0, virtualList: null }
     const area = viewport.getBoundingClientRect()
     const mounted = viewport.querySelectorAll("[data-chat-message-row]")
     let rowLimitReached = false
@@ -338,6 +388,27 @@ function installMonitor(options: {
         pending: childRects("[data-function-site-pending]")
       })
     }
+    const list = viewport.querySelector<HTMLElement>('[data-testid="virtuoso-item-list"]')
+    let virtualList: RunningBlankContext["geometry"]["virtualList"] = null
+    if (list) {
+      const items = list.querySelectorAll(":scope > [data-index]")
+      const positions = new Set<number>()
+      for (let index = 0; index < Math.min(8, items.length); index++) {
+        positions.add(index)
+        positions.add(items.length - index - 1)
+      }
+      virtualList = {
+        rect: rect(list), visibility: getComputedStyle(list).visibility,
+        items: [...positions].sort((left, right) => left - right).map(index => ({
+          index: finiteAttribute(items[index], "data-index"),
+          knownSize: finiteAttribute(items[index], "data-known-size"),
+          rect: rect(items[index]),
+          hasMessageRow: !!items[index].querySelector("[data-chat-message-row]"),
+          pendingCount: items[index].querySelectorAll("[data-function-site-pending]").length
+        })),
+        itemLimitReached: items.length > 16
+      }
+    }
     return {
       viewport: {
         scrollTop: viewport.scrollTop,
@@ -347,7 +418,9 @@ function installMonitor(options: {
         rect: rect(viewport)
       },
       rows,
-      rowLimitReached: rowLimitReached || mounted.length > 64
+      rowLimitReached: rowLimitReached || mounted.length > 64,
+      mountedMessageRowCount: mounted.length,
+      virtualList
     }
   }
   const observeVisibility = (

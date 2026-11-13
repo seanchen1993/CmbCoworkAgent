@@ -97,11 +97,13 @@ describe("chat thread projection cache", () => {
         }
       }
     )
-    const first = runtime.projectTimingMeta(messages, 1)
+    const snapshot = { messages, contentVersion: 1, structureVersion: 1,
+      changedMessages: messages, indexById: new Map<string, number>() }
+    const first = runtime.projectTimingMeta(snapshot)
     expect(first.userSendTimeLabelById.size).toBe(4_000)
     forbidReads = true
-    expect(runtime.projectTimingMeta(messages, 1)).toBe(first)
-    expect(getChatThreadProjectionRuntime("timestamp-history").projectTimingMeta(messages, 1)).toBe(
+    expect(runtime.projectTimingMeta(snapshot)).toBe(first)
+    expect(getChatThreadProjectionRuntime("timestamp-history").projectTimingMeta(snapshot)).toBe(
       first
     )
   })

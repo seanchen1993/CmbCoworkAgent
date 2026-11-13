@@ -1061,7 +1061,7 @@ describe("canonical Human display from actual Saver and native Worker sources", 
     }
   )
 
-  it.each(["ledger", "member"] as const)(
+  it.each(["ledger", "member", "member-json"] as const)(
     "rejects a %s changed by the last source guard after full omission summary A", async change => {
       const f = await checkpointFixture("plumbing")
       let guards = 0, changed = 0
@@ -1077,6 +1077,9 @@ describe("canonical Human display from actual Saver and native Worker sources", 
             if (++guards !== 2) return
             if (change === "ledger") f.database.run(`DELETE FROM
               function_conversation_presentation_dispositions WHERE thread_id=? AND uuid=?`, [f.threadId, f.uuid])
+            else if (change === "member-json") f.database.run(`UPDATE
+              function_conversation_checkpoint_members SET member_json=' ' || member_json
+              WHERE uuid=?`, [f.uuid])
             else f.database.run("DELETE FROM function_conversation_checkpoint_members WHERE uuid=?", [f.uuid])
             changed += f.database.getRowsModified()
           }) })).rejects.toThrow()
@@ -1085,23 +1088,70 @@ describe("canonical Human display from actual Saver and native Worker sources", 
     }
   )
 
-  it("keeps the paged membership fingerprint byte equal to the original complete LEFT JOIN", async () => {
+  it("frames exact raw membership bytes across real SQLite pages and an empty receipt", async () => {
     const f = await checkpointFixture()
-    const result = f.database.exec(`SELECT receipt.receipt_id,receipt.target_json,receipt.snapshot_digest,
-      receipt.snapshot_json,member.ordinal,member.uuid,member.member_json
+    const witness = {
+      conversationId: f.runtime.target.ref.conversationId, branchId: f.runtime.target.ref.branchId,
+      threadId: f.threadId, incarnation: JSON.stringify(["token", f.incarnation.token]),
+      namespace: "", checkpointId: f.checkpoint.id
+    }
+    const rows = () => f.database.exec(`SELECT
+      receipt.receipt_id,receipt.target_json,receipt.snapshot_digest,receipt.snapshot_json,
+      member.ordinal,member.uuid,member.member_json
       FROM function_conversation_checkpoint_receipts receipt
       LEFT JOIN function_conversation_checkpoint_members member ON member.receipt_id=receipt.receipt_id
       WHERE receipt.conversation_id=? AND receipt.branch_id=? AND receipt.checkpoint_thread_id=?
       AND receipt.checkpoint_incarnation=? AND receipt.checkpoint_namespace=? AND receipt.checkpoint_id=?
-      ORDER BY member.ordinal`, [f.runtime.target.ref.conversationId, f.runtime.target.ref.branchId,
-      f.threadId, JSON.stringify(["token", f.incarnation.token]), "", f.checkpoint.id])[0]
-    const rows = result.values.map(values => Object.fromEntries(result.columns.map((key, index) =>
-      [key, values[index]])))
-    expect(canonicalCheckpointDisplayMembershipFingerprint(f.database, {
-      conversationId: f.runtime.target.ref.conversationId, branchId: f.runtime.target.ref.branchId,
-      threadId: f.threadId, incarnation: JSON.stringify(["token", f.incarnation.token]),
-      namespace: "", checkpointId: f.checkpoint.id
-    })).toBe(createHash("sha256").update(JSON.stringify(rows)).digest("hex"))
+      ORDER BY member.ordinal`, [witness.conversationId, witness.branchId, witness.threadId,
+      witness.incarnation, witness.namespace, witness.checkpointId])[0].values
+    const fingerprint = () => canonicalCheckpointDisplayMembershipFingerprint(f.database, witness)
+    const checkFrame = (count: number) => {
+      const full = rows()
+      const members = full.filter(row => row[4] !== null).map(row => row.slice(4))
+      expect(members).toHaveLength(count)
+      const frame = ["canonical-checkpoint-membership-v2", full[0].slice(0, 4), members]
+      const expected = createHash("sha256").update(JSON.stringify(frame)).digest("hex")
+      expect(fingerprint()).toBe(expected)
+      return expected
+    }
+    checkFrame(1)
+    const [receiptId, , , snapshot, ordinal] = rows()[0]
+    if (typeof receiptId !== "string" || typeof snapshot !== "string" || typeof ordinal !== "number")
+      throw Error("ACTUAL_MEMBERSHIP_RECEIPT_REQUIRED")
+    const lastOrdinal = ordinal + 64
+    f.database.run("BEGIN")
+    try {
+      f.database.run(`WITH RECURSIVE extra(ordinal) AS (
+        SELECT CAST(? AS INTEGER) UNION ALL SELECT ordinal+1 FROM extra WHERE ordinal<?
+      ) INSERT INTO function_conversation_checkpoint_members (receipt_id,ordinal,uuid,member_json)
+        SELECT ?,ordinal,'fingerprint-only-' || ordinal,'{}' FROM extra`,
+      [ordinal + 1, lastOrdinal, receiptId])
+      const paged = checkFrame(65)
+      f.database.run(`UPDATE function_conversation_checkpoint_receipts
+        SET snapshot_json=' ' || snapshot_json WHERE receipt_id=?`, [receiptId])
+      const rawHeader = rows()[0][3]
+      if (typeof rawHeader !== "string") throw Error("ACTUAL_MEMBERSHIP_HEADER_REQUIRED")
+      expect(JSON.parse(rawHeader)).toEqual(JSON.parse(snapshot))
+      const headerChanged = checkFrame(65)
+      expect(headerChanged).not.toBe(paged)
+
+      f.database.run(`UPDATE function_conversation_checkpoint_members
+        SET member_json=' ' || member_json WHERE receipt_id=? AND ordinal=?`, [receiptId, lastOrdinal])
+      const lastMember = rows().at(-1)
+      expect(lastMember?.slice(4)).toEqual([lastOrdinal, "fingerprint-only-" + lastOrdinal, " {}"])
+      expect(checkFrame(65)).not.toBe(headerChanged)
+
+      f.database.run(`UPDATE function_conversation_checkpoint_members
+        SET member_json=? WHERE receipt_id=? AND ordinal=?`,
+      [new Uint8Array([123, 125]), receiptId, lastOrdinal])
+      expect(fingerprint).toThrow("MODS_CONVERSATION_CHECKPOINT_MEMBERSHIP")
+
+      f.database.run("DELETE FROM function_conversation_checkpoint_members WHERE receipt_id=?", [receiptId])
+      expect(rows()[0].slice(4)).toEqual([null, null, null])
+      checkFrame(0)
+    } finally {
+      f.database.run("ROLLBACK")
+    }
   })
 
   it("binds real page Worker evidence to fresh Main columns and does not expose the witness", async () => {

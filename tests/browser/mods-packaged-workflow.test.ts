@@ -2,6 +2,41 @@ import { readFileSync } from "node:fs"
 import { parse } from "yaml"
 import { expect, it } from "vitest"
 
+it("keeps long history and observed rich streaming as Windows package release gates", () => {
+  const workflow = parse(readFileSync(".github/workflows/build-electron.yml", "utf8")) as {
+    jobs: { build: { steps: Array<Record<string, unknown>> } }
+  }
+  const steps = workflow.jobs.build.steps
+  const history = steps.findIndex(
+    (step) => step.name === "Validate chat history interactions in Windows package"
+  )
+  const running = steps.findIndex(
+    (step) => step.name === "Validate chat interactions while a model is running (Windows)"
+  )
+  const upload = steps.findIndex((step) => step.name === "Upload installer")
+  for (const index of [history, running]) {
+    expect(index).toBeGreaterThan(-1)
+    expect(index).toBeLessThan(upload)
+    expect(steps[index].if).toBe("matrix.platform == 'win'")
+    expect(steps[index]["continue-on-error"]).toBeUndefined()
+  }
+  expect(steps[history].env).toMatchObject({
+    COMPOSITION_E2E_PACKAGED_DIR: "dist/win-unpacked",
+    CHAT_HISTORY_MESSAGES: "10000",
+    CHAT_HISTORY_REPETITIONS: "1"
+  })
+  expect(steps[running].env).toMatchObject({
+    COMPOSITION_E2E_PACKAGED_DIR: "dist/win-unpacked",
+    CHAT_RUNNING_DISPLAY_GUEST: "1",
+    CHAT_RUNNING_ROUNDS: "18",
+    CHAT_RUNNING_RICH_STREAM: "1",
+    CHAT_RUNNING_INTERACTION_STRESS: "1",
+    CHAT_RUNNING_OBSERVE: "1"
+  })
+  expect(steps[history].run).toBe("node --import tsx tests/chat-history-interaction-e2e.spec.ts")
+  expect(steps[running].run).toBe("node --import tsx tests/chat-running-workload-e2e.spec.ts")
+})
+
 it("installs skipped JavaScript foundations on Linux before the read-only build gate", () => {
   const workflow = parse(readFileSync(".github/workflows/build-electron.yml", "utf8")) as {
     jobs: { build: { steps: Array<Record<string, unknown>> } }
@@ -33,6 +68,42 @@ it("installs skipped JavaScript foundations on Linux before the read-only build 
   expect(pkg.scripts.prebuild).toMatch(
     /^node scripts\/apply-langchain-native-foundations\.mjs --check && /
   )
+})
+
+it("keeps downloaded artifact cancellation acceptance and its bounded native evidence", () => {
+  const workflow = parse(readFileSync(".github/workflows/build-electron.yml", "utf8")) as {
+    jobs: { build: { steps: Array<Record<string, unknown>> } }
+  }
+  const steps = workflow.jobs.build.steps
+  const validate = steps.findIndex(
+    (step) => step.name === "Validate plugins from the downloaded Windows artifact"
+  )
+  expect(validate).toBeGreaterThan(
+    steps.findIndex((step) => step.name === "Verify published Windows artifact integrity")
+  )
+  expect(validate).toBeLessThan(steps.findIndex((step) => step.name === "Upload to GitHub Release"))
+  expect(steps[validate].run).toBe(
+    'node --import tsx scripts/run-mods-packaged-e2e.ts "output/downloaded-win-unpacked" "output/mods-v2-validation/published-artifact"'
+  )
+  const evidence = steps.find(
+    (step) => step.name === "Upload published Windows validation evidence"
+  )!
+  expect(evidence.if).toBe("always() && matrix.platform == 'win'")
+  const files = String((evidence.with as Record<string, unknown>).path)
+    .trim()
+    .split(/\r?\n/)
+  expect(files).toContain("output/mods-v2-validation/published-artifact/display-cancel-result.json")
+  expect(files).toContain(
+    "output/mods-v2-validation/published-artifact/display-cancel-profiles/**/*.png"
+  )
+  expect(
+    files.every(
+      (file) =>
+        file === "output/published-artifact-integrity.json" ||
+        file.startsWith("output/mods-v2-validation/published-artifact/")
+    )
+  ).toBe(true)
+  expect(files).not.toContain("output/mods-v2-validation/published-artifact/**")
 })
 
 it("requires Windows packaged validation before upload/release and keeps diagnostic uploads bounded", () => {

@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks"
+import { join } from "node:path"
 import { captureSettledProjectSkill } from "../project-action-scope"
 import { readPackageExtensionContract } from "../../plugins/extension-contract"
 import { measureHostRuntimeSync, withHostRuntimeTiming } from "../../services/host-runtime-timing"
@@ -32,6 +33,7 @@ import { readHostPackageSkill } from "./package-skill-content"
 import { HostProjectStore } from "./host-store"
 import {
   hostGoal,
+  hostDigest,
   hostRecord,
   hostStateError,
   hostText,
@@ -49,7 +51,7 @@ import { readRuntimeScopedFile, runtimeDigest, runtimeDirectory } from "./safe-f
 import { effectiveHostResultApproval } from "../../../shared/project-runtime/import-approval-policy"
 import { normalizeWorkspacePathKey } from "../../../shared/workspace-path"
 import { assertHostPackageSupported } from "./package-preflight"
-import { withSnapshotRetention } from "./snapshot-retention"
+import { withSnapshotPathRetention, withSnapshotRetention } from "./snapshot-retention"
 import { readHostActionCheckEvidence, readHistoricalHostCheckDiagnostics } from "./action-check-evidence"
 import { inspectHostPlanMigration } from "./plan-migration"
 import { captureHostBranchInputs } from "./host-branch-inputs"
@@ -213,13 +215,16 @@ export class HostProjectService {
       authorize: async (project, operation) => {
         this.assertCommand(project, "start")
         this.assertResultFeedbackCurrent(operation)
-        const snapshot = this.snapshot(project)
-        assertHostPackageSupported(snapshot.root, project.manifest)
-        await this.prepareRuntimeInputs(project.projectId)
-        await deps.authorize(project, operation)
-        this.assertCommand(this.project(project.projectId), "start")
-        this.operationInputs.get(operation.operationId)?.()
-        this.assertResultFeedbackCurrent(operation)
+        const path = join(this.snapshots.root, hostDigest(project.pluginDigest), "package")
+        return withSnapshotPathRetention([path], async () => {
+          const snapshot = this.snapshot(project)
+          assertHostPackageSupported(snapshot.root, project.manifest)
+          await this.prepareRuntimeInputs(project.projectId)
+          await deps.authorize(project, operation)
+          this.assertCommand(this.project(project.projectId), "start")
+          this.operationInputs.get(operation.operationId)?.()
+          this.assertResultFeedbackCurrent(operation)
+        })
       },
       fingerprint: async (project) => this.fingerprint(project),
       assertCurrent: (project, operation) => {
@@ -231,117 +236,120 @@ export class HostProjectService {
       execute: async (project, ticket, signal) => {
         const operation = this.operation(ticket.operationId)
         const externalGuard = this.operationInputs.get(operation.operationId)
-        const execution = this.executionContext(project, operation, ticket)
-        const feedbackBinding = JSON.stringify(operation.resultFeedbackSource)
-        const stageInstructions = operation.stageInstructions
-        const authorityIdentity =
-          this.deps.captureInputAuthorityIdentity?.(project, execution.snapshotRoot) ??
-          captureProjectRuntimeInputAuthorityIdentity(project, execution.snapshotRoot) ??
-          (() => undefined)
-        const admittedAuthority = authorityIdentity()
-        const metadata = (state: HostProjectState) =>
-          JSON.stringify({
-            version: state.version,
-            stageIndex: state.stageIndex,
-            pluginDigest: state.pluginDigest,
-            packageId: state.packageId,
-            packageVersion: state.packageVersion,
-            workspace: state.workspace,
-            installedPluginId: state.installedPluginId,
-            goal: state.goal,
-            manifest: state.manifest
-          })
-        const admittedMetadata = metadata(project)
-        let active = true
-        const assertOperationCurrent = (settling: boolean) => {
-          if (!active) hostStateError("OPERATION_SCOPE_CHANGED")
-          const current = this.store.get(project.projectId)
-          const owned = this.store.getOperation(ticket.operationId)
-          const live = owned?.status === "started" && owned.cancelRequestedAt === null
-          const cancelling =
-            settling &&
-            signal.aborted &&
-            owned?.status === "cancel_requested" &&
-            owned.cancelRequestedAt !== null
-          if (
-            !current ||
-            metadata(current) !== admittedMetadata ||
-            (!live && !cancelling) ||
-            owned?.inputFingerprint !== ticket.inputFingerprint
-          )
-            hostStateError("OPERATION_SCOPE_CHANGED")
-          if (authorityIdentity() !== admittedAuthority) hostStateError("INPUT_CHANGED")
-          externalGuard?.()
-          if (owned?.stageInstructions !== stageInstructions)
-            hostStateError("STAGE_INSTRUCTIONS_CHANGED")
-          if (JSON.stringify(owned?.resultFeedbackSource) !== feedbackBinding)
-            hostStateError("RESULT_FEEDBACK_CHANGED")
-          if (operation.resultFeedbackSource)
-            readHostResultFeedback(operation, this.store.getOperation(operation.resultFeedbackSource.operationId))
-        }
-        const assertAuthorityCurrent = () => assertOperationCurrent(false)
-        const assertInputBytesCurrent = () => {
-          if (this.fingerprint(project) !== ticket.inputFingerprint) hostStateError("INPUT_CHANGED")
-        }
-        const assertInputsCurrent = () => {
-          assertAuthorityCurrent()
-          assertInputBytesCurrent()
-        }
-        const assertSettlementCurrent = () => {
-          assertOperationCurrent(true)
-          assertInputBytesCurrent()
-        }
-        assertInputsCurrent()
-        try {
-          const context: HostSkillExecutionContext = {
-            ...execution,
-            ...(this.importedValidations.has(operation.operationId) ? { importedValidationOnly: true } : {}),
-            importedResultApprovalRequired: effectiveHostResultApproval(
-              project.manifest.stages[project.stageIndex], this.store.importedSource(project.projectId)),
-            importedMaterialPath: this.store.importedSource(project.projectId)?.review.adaptation?.materialPath,
-            ...(this.recoveryInputs.has(operation.operationId)
-              ? { recoveryInput: this.recoveryInputs.get(operation.operationId)! } : {}),
-            assertInputResumeResourcesCurrent: this.recoveryResourceGuards.get(operation.operationId),
-            continuationIntent: this.continuationIntents.get(operation.operationId) ??
-              this.recoveryInputs.get(operation.operationId)?.continuation?.continueIntent,
-            signal,
-            assertInputsCurrent,
-            assertAuthorityCurrent,
-            assertSettlementCurrent,
-            requestCancellation: () => {
-              assertOperationCurrent(signal.aborted)
-              this.cancel(operation.operationId)
-            }
-          }
-          if (deps.beforeExecuteStage && !context.recoveryInput && !context.importedValidationOnly) {
-            await deps.beforeExecuteStage({
-              ...context,
-              inputIdentity: this.debugInputIdentity(project, execution.snapshotRoot)
+        const path = join(this.snapshots.root, hostDigest(project.pluginDigest), "package")
+        return withSnapshotPathRetention([path], async () => {
+          const execution = this.executionContext(project, operation, ticket)
+          const feedbackBinding = JSON.stringify(operation.resultFeedbackSource)
+          const stageInstructions = operation.stageInstructions
+          const authorityIdentity =
+            this.deps.captureInputAuthorityIdentity?.(project, execution.snapshotRoot) ??
+            captureProjectRuntimeInputAuthorityIdentity(project, execution.snapshotRoot) ??
+            (() => undefined)
+          const admittedAuthority = authorityIdentity()
+          const metadata = (state: HostProjectState) =>
+            JSON.stringify({
+              version: state.version,
+              stageIndex: state.stageIndex,
+              pluginDigest: state.pluginDigest,
+              packageId: state.packageId,
+              packageVersion: state.packageVersion,
+              workspace: state.workspace,
+              installedPluginId: state.installedPluginId,
+              goal: state.goal,
+              manifest: state.manifest
             })
-            assertInputsCurrent()
+          const admittedMetadata = metadata(project)
+          let active = true
+          const assertOperationCurrent = (settling: boolean) => {
+            if (!active) hostStateError("OPERATION_SCOPE_CHANGED")
+            const current = this.store.get(project.projectId)
+            const owned = this.store.getOperation(ticket.operationId)
+            const live = owned?.status === "started" && owned.cancelRequestedAt === null
+            const cancelling =
+              settling &&
+              signal.aborted &&
+              owned?.status === "cancel_requested" &&
+              owned.cancelRequestedAt !== null
+            if (
+              !current ||
+              metadata(current) !== admittedMetadata ||
+              (!live && !cancelling) ||
+              owned?.inputFingerprint !== ticket.inputFingerprint
+            )
+              hostStateError("OPERATION_SCOPE_CHANGED")
+            if (authorityIdentity() !== admittedAuthority) hostStateError("INPUT_CHANGED")
+            externalGuard?.()
+            if (owned?.stageInstructions !== stageInstructions)
+              hostStateError("STAGE_INSTRUCTIONS_CHANGED")
+            if (JSON.stringify(owned?.resultFeedbackSource) !== feedbackBinding)
+              hostStateError("RESULT_FEEDBACK_CHANGED")
+            if (operation.resultFeedbackSource)
+              readHostResultFeedback(operation, this.store.getOperation(operation.resultFeedbackSource.operationId))
           }
-          const admission = {
-            projectId: project.projectId,
-            snapshot: this.snapshot(project),
-            assertCurrent: this.snapshots.captureGuard(project.pluginDigest),
-            active: true
+          const assertAuthorityCurrent = () => assertOperationCurrent(false)
+          const assertInputBytesCurrent = () => {
+            if (this.fingerprint(project) !== ticket.inputFingerprint) hostStateError("INPUT_CHANGED")
           }
-          let outcome: HostActionResult["outcome"]
+          const assertInputsCurrent = () => {
+            assertAuthorityCurrent()
+            assertInputBytesCurrent()
+          }
+          const assertSettlementCurrent = () => {
+            assertOperationCurrent(true)
+            assertInputBytesCurrent()
+          }
+          assertInputsCurrent()
           try {
-            outcome = await withHostRuntimeTiming(() =>
-              this.admittedSnapshot.run(admission, () => deps.executeSkill(context)))
+            const context: HostSkillExecutionContext = {
+              ...execution,
+              ...(this.importedValidations.has(operation.operationId) ? { importedValidationOnly: true } : {}),
+              importedResultApprovalRequired: effectiveHostResultApproval(
+                project.manifest.stages[project.stageIndex], this.store.importedSource(project.projectId)),
+              importedMaterialPath: this.store.importedSource(project.projectId)?.review.adaptation?.materialPath,
+              ...(this.recoveryInputs.has(operation.operationId)
+                ? { recoveryInput: this.recoveryInputs.get(operation.operationId)! } : {}),
+              assertInputResumeResourcesCurrent: this.recoveryResourceGuards.get(operation.operationId),
+              continuationIntent: this.continuationIntents.get(operation.operationId) ??
+                this.recoveryInputs.get(operation.operationId)?.continuation?.continueIntent,
+              signal,
+              assertInputsCurrent,
+              assertAuthorityCurrent,
+              assertSettlementCurrent,
+              requestCancellation: () => {
+                assertOperationCurrent(signal.aborted)
+                this.cancel(operation.operationId)
+              }
+            }
+            if (deps.beforeExecuteStage && !context.recoveryInput && !context.importedValidationOnly) {
+              await deps.beforeExecuteStage({
+                ...context,
+                inputIdentity: this.debugInputIdentity(project, execution.snapshotRoot)
+              })
+              assertInputsCurrent()
+            }
+            const admission = {
+              projectId: project.projectId,
+              snapshot: this.snapshot(project),
+              assertCurrent: this.snapshots.captureGuard(project.pluginDigest),
+              active: true
+            }
+            let outcome: HostActionResult["outcome"]
+            try {
+              outcome = await withHostRuntimeTiming(() =>
+                this.admittedSnapshot.run(admission, () => deps.executeSkill(context)))
+            } finally {
+              admission.active = false
+            }
+            // Recheck the native policy after physical work, before producing an operation
+            // result. Recovery Hook uncertainty must not be laundered by an executor label.
+            this.assertCommand(project, "validate")
+            if (outcome === "cancelled") assertSettlementCurrent()
+            else assertInputsCurrent()
+            return outcome
           } finally {
-            admission.active = false
+            active = false
           }
-          // Recheck the native policy after physical work, before producing an operation
-          // result. Recovery Hook uncertainty must not be laundered by an executor label.
-          this.assertCommand(project, "validate")
-          if (outcome === "cancelled") assertSettlementCurrent()
-          else assertInputsCurrent()
-          return outcome
-        } finally {
-          active = false
-        }
+        })
       },
       validate: async (project, ticket, signal) => this.validateTicket(project, ticket, signal)
     })
@@ -681,7 +689,7 @@ export class HostProjectService {
       if (JSON.stringify(this.project(source.projectId)) !== sourceState)
         hostStateError("BRANCH_SOURCE_CHANGED")
       assertSourceSettled()
-      this.snapshots.read(source.pluginDigest)
+      if (source.pluginDigest !== snapshot.digest) this.snapshots.read(source.pluginDigest)
       this.snapshots.read(snapshot.digest)
       admission.assertCurrent()
       if (JSON.stringify(captureHostBranchInputs(candidate, source)) !== JSON.stringify(acceptedInputs))
@@ -1225,7 +1233,6 @@ export class HostProjectService {
     this.assertCommand(project, "advance")
     if (operation.status === "transitioned")
       return this.store.transition(operationId, operation.inputFingerprint)
-    this.snapshot(project)
     const fingerprint = this.fingerprint(project)
     assertHostReceiptsCurrent(
       project,
@@ -1241,7 +1248,7 @@ export class HostProjectService {
           pluginDigest: operation.pluginDigest
         },
         operation,
-        this.snapshot(project).root
+        () => this.snapshot(project).root
       ),
       this.runtimeInputIdentity(project, this.snapshot(project).root)
     )
@@ -1509,20 +1516,22 @@ export class HostProjectService {
     ticket: HostExecutionTicket,
     signal?: AbortSignal
   ) {
-    this.snapshot(project)
-    if (this.fingerprint(project) !== ticket.inputFingerprint) hostStateError("INPUT_CHANGED")
-    return validateHostStage(
-      project,
-      ticket,
-      signal,
-      () => Date.now(),
-      readHostActionCheckEvidence(
+    const path = join(this.snapshots.root, hostDigest(project.pluginDigest), "package")
+    return withSnapshotPathRetention([path], () => {
+      if (this.fingerprint(project) !== ticket.inputFingerprint) hostStateError("INPUT_CHANGED")
+      return validateHostStage(
         project,
         ticket,
-        this.operation(ticket.operationId),
-        this.snapshot(project).root
-      ),
-      this.runtimeInputIdentity(project, this.snapshot(project).root)
-    )
+        signal,
+        () => Date.now(),
+        readHostActionCheckEvidence(
+          project,
+          ticket,
+          this.operation(ticket.operationId),
+          () => this.snapshot(project).root
+        ),
+        this.runtimeInputIdentity(project, this.snapshot(project).root)
+      )
+    })
   }
 }

@@ -468,14 +468,22 @@ it("reviews missing dependency configuration and saves it through the exact nati
     pluginId: "dependency", name: "locked-rules", actionIds: ["check"],
     state: "needs-approval", configurationReady: false, hasConfiguration: true
   })])
+  const beforeRead = f.retainedChecks.count
   const view = await f.native("", {
     threadId: "project", pluginId: "dependency", expectedWorkspace: f.workspace
   })
+  const readChecks = f.retainedChecks.count - beforeRead
+  expect(readChecks).toBeGreaterThan(1)
+  expect(readChecks).toBeLessThan(16)
   expect(view.pluginId).toBe("dependency")
+  const beforeSave = f.retainedChecks.count
   await f.native("-save", {
     threadId: "project", pluginId: view.pluginId, digest: view.digest, key: "label",
     value: "project-specific", revision: view.savedRevision, workspace: view.workspace
   })
+  const saveChecks = f.retainedChecks.count - beforeSave
+  expect(saveChecks).toBeGreaterThan(1)
+  expect(saveChecks).toBeLessThan(40)
   expect(f.control.getGrant(f.workspace, "function:locked-rules")).toBeNull()
   expect(f.manager.readUserConfigIdentity(f.workspace, "locked-rules").savedRevision).toBe(1)
   expect(f.service.operations("project")).toEqual([])

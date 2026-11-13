@@ -1,4 +1,8 @@
 import { developmentNativeComponentId } from "../mods/v2/development-native-authority"
+import type { FunctionSiteReadRequest, FunctionSiteRenderRequest,
+  FunctionSiteReadCancellation } from "../../shared/mods/v2/display-read-protocol"
+import { captureThreadDirectoryChange } from "../services/thread-directory-change"
+import { FunctionSiteReadRequests } from "./function-site-read-requests"
 import { ModApprovalInbox, registerModApprovalInbox } from "./mods-approval-inbox"
 import { projectDependencyImpact, summarizeProjectDependencyImpact } from "../mods/devtools/project-dependency-impact"
 import { createDesktopGitInspectionProvider } from "../mods/v2/platform-git-desktop"
@@ -221,6 +225,7 @@ import { describeDevClawBuiltins } from "../mods/builtins/registry"
 import { readBuiltinProjectBinding, readBuiltinProjectFacts } from "../mods/builtins/project-facts"
 
 export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWindow | null): void {
+  const siteReadRequests = new FunctionSiteReadRequests()
   const approvalInbox = new ModApprovalInbox(() => {
     const owner = window()
     if (owner && !owner.isDestroyed() && !owner.webContents.isDestroyed())
@@ -521,7 +526,8 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
     changed: (threadId, uuid) => {
       const target = window()
       if (!target || target.isDestroyed()) return
-      target.webContents.send("threads:changed")
+      target.webContents.send("threads:changed", captureThreadDirectoryChange(threadId,
+        "transcript", getThreadRuntimeScope(threadId)))
       if (!uuid) return
       const thread = getThreadCore(threadId)
       const message = getThreadMessagesByIds(threadId, [uuid])[0]
@@ -901,7 +907,8 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
             for (const target of BrowserWindow.getAllWindows()) {
               try {
                 if (!target.isDestroyed() && !target.webContents.isDestroyed())
-                  target.webContents.send("threads:changed")
+                  target.webContents.send("threads:changed", captureThreadDirectoryChange(threadId,
+                    "metadata", getThreadRuntimeScope(threadId)))
               } catch {
                 console.warn("[Mods] Title committed but renderer notification was unavailable")
               }
@@ -1030,7 +1037,6 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
         try { assertStandaloneThread(threadId) } catch { return undefined }
         return captureFunctionPlacedAnchor(threadId)
       },
-      clawApplicable: (threadId) => functionClawScope(threadId) !== null,
       capabilityContext: functionCapabilityContext,
       clawScope: functionClawScope,
       publish: (workspace, value, signal) => manager.publish(workspace, value, undefined, signal),
@@ -2179,7 +2185,7 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
     return manager.listFunctionPeerMessages(scope(event, data.threadId), data.threadId)
   })
 
-  function trusted(event: IpcMainInvokeEvent): void {
+  function trusted(event: Pick<IpcMainInvokeEvent, "sender" | "senderFrame">): void {
     const rendererUrl = process.env.ELECTRON_RENDERER_URL
     const packagedUrl = pathToFileURL(join(__dirname, "../renderer/index.html")).href
     const owner = window()
@@ -2726,33 +2732,48 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
     "mods:function-site-render",
     (
       event,
-      input: {
-        threadId: string
-        owner: string
-        props: ModObject
-      }
-    ) => withDisplayExecution(event, input?.threadId, workspace =>
-      functions.siteRender(
+      input: FunctionSiteRenderRequest
+    ) => {
+      trusted(event)
+      return siteReadRequests.run(event.sender, input?.readId, signal =>
+        withDisplayExecution(event, input?.threadId, workspace => functions.siteRender(
         workspace,
         input.threadId,
         input.owner,
-        parseModJson(encodeModJson(input.props)) as ModObject
-      )
-    )
+        parseModJson(encodeModJson(input.props)) as ModObject,
+        ...(signal ? [signal] as const : [])
+      )))
+    }
   )
-  ipcMain.handle("mods:function-site-read", (event, input: {
-    threadId: string
-    component: import("../../shared/mods/v2/sites").FunctionUiSite
-    props: ModObject
-    presentationId?: string
-    messageId?: string
-    expectedRequestId?: string
-    protocol?: unknown
-    ownerRequired?: boolean
-  }) => withDisplayExecution(event, input?.threadId, workspace =>
-    functions.siteRead(workspace, input.threadId, input.component,
-      parseModJson(encodeModJson(input.props)) as ModObject, input.presentationId,
-      input.messageId, input.expectedRequestId, input.protocol, input.ownerRequired === true)))
+  ipcMain.handle("mods:function-site-read", (event, input: FunctionSiteReadRequest) => {
+    trusted(event)
+    let mounted: { workspace: string; owner: string } | undefined
+    return siteReadRequests.run(event.sender, input?.readId, signal =>
+      withDisplayExecution(event, input?.threadId, async workspace => {
+        const outcome = await functions.siteRead(workspace, input.threadId, input.component,
+          parseModJson(encodeModJson(input.props)) as ModObject, input.presentationId,
+          input.messageId, input.expectedRequestId, input.protocol, input.ownerRequired === true,
+          ...(signal ? [signal] as const : []))
+        if (outcome.state === "mounted") mounted = { workspace, owner: outcome.owner }
+        return outcome
+      }), async () => {
+        if (mounted) await functions.siteUnmount(mounted.workspace, input.threadId, mounted.owner)
+          .catch(() => {})
+      })
+  })
+  ipcMain.on("mods:function-site-read-scope", event => {
+    try {
+      trusted(event)
+      event.returnValue = siteReadRequests.documentNamespace(event.sender)
+    } catch {
+      // A synchronous IPC must always reply, including to an untrusted frame.
+      event.returnValue = null
+    }
+  })
+  ipcMain.handle("mods:function-site-read-cancel", (event, input: FunctionSiteReadCancellation) => {
+    trusted(event)
+    siteReadRequests.cancel(event.sender, input?.readId)
+  })
   ipcMain.handle(
     "mods:function-site-unmount",
     (event, input: { threadId: string; owner: string }) =>

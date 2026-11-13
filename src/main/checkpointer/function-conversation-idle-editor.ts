@@ -6,7 +6,8 @@ import { hasInvalidFunctionConversationTranscriptStamp,
 import {
   FUNCTION_CONVERSATION_CHANNEL,
   FunctionConversationDeliveryBridge,
-  type FunctionConversationDeliveryBinding
+  type FunctionConversationDeliveryBinding,
+  type FunctionConversationCheckpointCommitHooks
 } from "./function-conversation-delivery"
 import { wrapNativeLegacyHistory } from "./native-legacy-history"
 import { SqlJsSaver } from "./sqljs-saver"
@@ -16,12 +17,14 @@ export function createFunctionConversationIdleEditor(
   saver: SqlJsSaver,
   store: FunctionConversationStore,
   binding: FunctionConversationDeliveryBinding,
-  onCommitted?: () => void
+  onCommitted?: () => void,
+  hooks?: FunctionConversationCheckpointCommitHooks
 ): SqlJsSaver {
   const assertCurrent = () => {
     binding.signal.throwIfAborted()
     binding.assertCurrent()
     store.assertCurrent(binding.target)
+    hooks?.assertWriteCurrent?.()
     binding.signal.throwIfAborted()
   }
   const assertScope = (config: RunnableConfig) => {
@@ -31,9 +34,11 @@ export function createFunctionConversationIdleEditor(
       throw new ModFunctionError("MODS_CONVERSATION_CHECKPOINT_SCOPE")
   }
   assertCurrent()
-  const bridge = new FunctionConversationDeliveryBridge(store, () => binding)
+  const deliveryBinding = { ...binding, assertCurrent }
+  const bridge = new FunctionConversationDeliveryBridge(store, () => deliveryBinding, undefined,
+    hooks?.acknowledgement)
   const observer = bridge.bindSaver(saver)
-  const wrapped = wrapNativeLegacyHistory(saver, bridge.wrap(saver, assertCurrent, onCommitted), {
+  const wrapped = wrapNativeLegacyHistory(saver, bridge.wrap(saver, assertCurrent, onCommitted, hooks), {
     threadId: binding.checkpointThreadId,
     namespace: binding.target.checkpointNamespace,
     assertCurrent
@@ -42,10 +47,11 @@ export function createFunctionConversationIdleEditor(
     get(target, key) {
       if (key === "getTuple") return async (config: RunnableConfig) => {
         assertScope(config)
+        hooks?.assertReadable?.()
         let tuple = await target.getTuple(config)
         assertCurrent()
         if (tuple?.checkpoint.channel_values[FUNCTION_CONVERSATION_CHANNEL] !== undefined)
-          tuple = await observer.readVerifiedRecovery(tuple.config, binding)
+          tuple = await observer.readVerifiedRecovery(tuple.config, deliveryBinding)
         else if (Array.isArray(tuple?.checkpoint.channel_values.messages) &&
           tuple.checkpoint.channel_values.messages.some(message =>
             hasInvalidFunctionConversationTranscriptStamp(message) ||
@@ -64,7 +70,8 @@ export function createFunctionConversationIdleEditor(
       }
       if (key === "putWrites") return async (...args: Parameters<SqlJsSaver["putWrites"]>) => {
         assertScope(args[0])
-        await SqlJsSaver.prototype.putWrites.call(saver, args[0], args[1], args[2], assertCurrent)
+        if (hooks?.stageWrites) await hooks.stageWrites(args[0], args[1], args[2])
+        else await SqlJsSaver.prototype.putWrites.call(saver, args[0], args[1], args[2], assertCurrent)
         assertCurrent()
       }
       const value = Reflect.get(target, key, target)

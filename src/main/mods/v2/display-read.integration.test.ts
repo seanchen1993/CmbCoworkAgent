@@ -11,6 +11,7 @@ import { FUNCTION_DISPLAY_PROTOCOL } from "./display-rollout"
 import { FunctionGuestRuntime } from "./guest-runtime"
 import { FunctionModsManager } from "./manager"
 import { FunctionSession } from "./session"
+import { FunctionUiSites } from "./sites"
 
 const cleanup: Array<() => Promise<void>> = []
 afterEach(async () => {
@@ -21,7 +22,7 @@ async function fixture(
   body: string,
   prefix = "",
   options: {
-    publish?(value: ModJson, call: number): Promise<ModJson> | ModJson
+    publish?(value: ModJson, call: number, signal: AbortSignal): Promise<ModJson> | ModJson
     origin?: FunctionPluginPromptOrigin
     noSources?: boolean
     globallyEnabled?(): boolean
@@ -62,9 +63,9 @@ async function fixture(
     events: string[] = []
   const changed = vi.fn()
   const publish = vi.fn(
-    async (_workspace: string, value: ModJson): Promise<ModJson> =>
+    async (_workspace: string, value: ModJson, signal: AbortSignal): Promise<ModJson> =>
       options.publish
-        ? options.publish(value, publish.mock.calls.length)
+        ? options.publish(value, publish.mock.calls.length, signal)
         : (JSON.parse(JSON.stringify(value).replaceAll("PRIVATE", "SAFE")) as ModJson)
   )
   const manager = new FunctionModsManager(
@@ -781,4 +782,245 @@ it("rejects an oversized policy result at either boundary instead of returning t
     expect(f.publish).toHaveBeenCalledTimes(boundary)
     expect(f.events.filter((event) => event === "ui.render")).toHaveLength(0)
   }
+})
+
+it("cancels a real native projection publication without cancelling the next row", async () => {
+  const started = Promise.withResolvers<void>()
+  const controller = new AbortController()
+  let cancelled = false
+  const f = await fixture("", "", {
+    noSources: true,
+    publish(value, call, signal) {
+      if (call !== 1) return value
+      started.resolve()
+      return new Promise((_resolve, reject) => {
+        signal.addEventListener("abort", () => {
+          cancelled = true
+          reject(signal.reason)
+        }, { once: true })
+      })
+    }
+  })
+  const pending = f.manager.siteRead(f.root, "thread", "AssistantMessage",
+    { text: "PRIVATE", isFirstOfReply: true }, "cancelled-native", undefined,
+    undefined, FUNCTION_DISPLAY_PROTOCOL, false, controller.signal)
+  const assertion = expect(pending).rejects.toThrow("cancel-native")
+  await started.promise
+  controller.abort(Error("cancel-native"))
+  await assertion
+  expect(cancelled).toBe(true)
+  expect((await f.read("next", "fresh-native")).state).toBe("projected")
+})
+
+it.each(["projection", "legacy", "owner-required"] as const)(
+  "keeps held discovery physical and applies cold text cancellation only for %s",
+  async mode => {
+    const f = await fixture("", "", { noDisplayScope: true })
+    const entered = Promise.withResolvers<void>(), release = Promise.withResolvers<void>()
+    const controller = new AbortController()
+    const reason = Error("cancel during actual discovery")
+    const original = f.manager.effectiveStatus.bind(f.manager)
+    const status = vi.spyOn(f.manager, "effectiveStatus").mockImplementationOnce(async (...args) => {
+      const result = await original(...args)
+      expect(result.some(item => item.state === "ready")).toBe(true)
+      entered.resolve()
+      await release.promise
+      return result
+    })
+    const mountOutcome = vi.spyOn(f.manager, "siteMountOutcome")
+    const mounts = vi.spyOn(FunctionUiSites.prototype, "mount")
+    const props = { text: "PRIVATE cold", isFirstOfReply: true }
+    const read = (signal: AbortSignal, row: string, protocol: unknown, ownerRequired: boolean) =>
+      f.manager.siteRead(f.root, "thread", "AssistantMessage", props, row, undefined,
+        undefined, protocol, ownerRequired, signal)
+    const pending = read(controller.signal, "cold-cancelled",
+      mode === "legacy" ? "legacy" : FUNCTION_DISPLAY_PROTOCOL, mode === "owner-required")
+    let settled = false
+    const observed = pending.then(() => { settled = true }, () => { settled = true })
+    try {
+      await Promise.race([
+        entered.promise,
+        pending.then(() => { throw Error("Expected actual discovery to remain held") })
+      ])
+      expect(mountOutcome.mock.calls).toEqual([[
+        f.root, "thread", "AssistantMessage", undefined, undefined,
+        ...(mode === "projection" ? [controller.signal] : [])
+      ]])
+      controller.abort(reason)
+      await new Promise(resolve => setImmediate(resolve))
+      expect(settled).toBe(false)
+      expect(mounts).not.toHaveBeenCalled()
+      release.resolve()
+      await expect(pending).rejects.toBe(reason)
+      expect(mounts).toHaveBeenCalledTimes(mode === "projection" ? 0 : 1)
+      if (mode !== "projection") {
+        const owner = await mounts.mock.results[0].value
+        await expect(f.manager.siteRender(f.root, "thread", owner, props))
+          .rejects.toThrow("MODS_UI_SITE_CLOSED")
+      }
+
+      const live = await read(new AbortController().signal, "cold-live", FUNCTION_DISPLAY_PROTOCOL,
+        false)
+      expect(live.state).toBe("mounted")
+      if (live.state === "mounted") {
+        try {
+          expect(JSON.stringify(live.snapshot)).toContain("SAFE cold")
+          expect(JSON.stringify(live.snapshot)).not.toContain("PRIVATE cold")
+        } finally {
+          await f.manager.siteUnmount(f.root, "thread", live.owner)
+        }
+      }
+
+      if (mode === "projection") {
+        const mountController = new AbortController()
+        const owned = await f.manager.siteMountOutcome(f.root, "thread", "AssistantMessage",
+          undefined, undefined, mountController.signal)
+        expect(owned.state).toBe("mounted")
+        if (owned.state === "mounted") {
+          try {
+            mountController.abort(Error("cancel completed mount only"))
+            const renderSignal = new AbortController().signal
+            const rendered = await f.manager.siteRender(f.root, "thread", owned.owner, props,
+              renderSignal)
+            expect(rendered?.id).toBe(owned.owner)
+            expect(JSON.stringify(rendered)).toContain("SAFE cold")
+            expect(JSON.stringify(rendered)).not.toContain("PRIVATE cold")
+          } finally {
+            await f.manager.siteUnmount(f.root, "thread", owned.owner)
+          }
+        }
+      }
+    } finally {
+      release.resolve()
+      await observed
+      status.mockRestore()
+      mountOutcome.mockRestore()
+      mounts.mockRestore()
+    }
+  }
+)
+
+it("cancels owned guest rendering and keeps its session usable for the next protected row", async () => {
+  const f = await fixture(`on("ui.render", {component:"AssistantMessage"}, async ($,e,next)=>{
+    if (++renders===1) await $.clock.sleep(60000);
+    return next(e);
+  })`, "let renders=0;")
+  const controller = new AbortController()
+  const pending = f.manager.siteRead(f.root, "thread", "AssistantMessage",
+    { text: "PRIVATE", isFirstOfReply: true }, "cancelled-owned", undefined,
+    undefined, FUNCTION_DISPLAY_PROTOCOL, true, controller.signal)
+  const assertion = expect(pending).rejects.toThrow(/cancel-owned|MODS_CANCELLED/)
+  await vi.waitFor(() => expect(f.events).toContain("ui.render"))
+  controller.abort(Error("cancel-owned"))
+  await assertion
+  const next = await f.read("PRIVATE next", "fresh-owned")
+  expect(["mounted", "projected"]).toContain(next.state)
+  expect(JSON.stringify(next)).toContain("SAFE next")
+  expect(JSON.stringify(next)).not.toContain("PRIVATE")
+})
+
+it("propagates cancellation through an owned native drawing publication", async () => {
+  const started = Promise.withResolvers<void>(), controller = new AbortController()
+  let held = false
+  const f = await fixture("", "", {
+    noSources: true,
+    publish(value, _call, signal) {
+      if (held) return value
+      held = true
+      started.resolve()
+      return new Promise((_resolve, reject) => {
+        signal.addEventListener("abort", () => reject(signal.reason), { once: true })
+      })
+    }
+  })
+  const pending = f.manager.siteRead(f.root, "thread", "AssistantMessage",
+    { text: "PRIVATE", isFirstOfReply: true }, "cancelled-owned-native", undefined,
+    undefined, FUNCTION_DISPLAY_PROTOCOL, true, controller.signal)
+  const assertion = expect(pending).rejects.toThrow("cancel-owned-native")
+  await started.promise
+  controller.abort(Error("cancel-owned-native"))
+  await assertion
+  expect((await f.read("next", "fresh-after-owned")).state).toBe("projected")
+})
+
+it("reproduces a protected same-row follower after its cancelled physical producer ends", async () => {
+  const started = Promise.withResolvers<void>(), release = Promise.withResolvers<ModJson>()
+  const producer = new AbortController(), follower = new AbortController()
+  const f = await fixture("", "", {
+    noSources: true,
+    publish(value, call) {
+      if (call !== 1) return value
+      started.resolve()
+      // Deliberately ignore abort until the real physical producer finishes.
+      return release.promise
+    }
+  })
+  const read = (signal: AbortSignal) => f.manager.siteRead(f.root, "thread", "AssistantMessage",
+    { text: "SAFE shared", isFirstOfReply: true }, "same-row", undefined,
+    undefined, FUNCTION_DISPLAY_PROTOCOL, false, signal)
+  const first = read(producer.signal)
+  const firstAssertion = expect(first).rejects.toThrow("cancelled-producer")
+  await started.promise
+  let secondSettled = false
+  const second = read(follower.signal).finally(() => { secondSettled = true })
+  producer.abort(Error("cancelled-producer"))
+  await new Promise(resolve => setImmediate(resolve))
+  expect(secondSettled).toBe(false)
+  expect(f.publish).toHaveBeenCalledTimes(1)
+  release.resolve([{ text: "SAFE shared", isFirstOfReply: true }])
+  await firstAssertion
+  const result = await second
+  expect(result.state).toBe("projected")
+  expect(JSON.stringify(result)).toContain("SAFE shared")
+  expect(follower.signal.aborted).toBe(false)
+  expect(f.publish.mock.calls.length).toBeGreaterThan(1)
+})
+
+it("keeps a completed protected cache independent of its old reader's cancellation", async () => {
+  const f = await fixture("", "", { noSources: true })
+  const controller = new AbortController()
+  const first = await f.manager.siteRead(f.root, "thread", "AssistantMessage",
+    { text: "PRIVATE", isFirstOfReply: true }, "completed-reader", undefined,
+    undefined, FUNCTION_DISPLAY_PROTOCOL, false, controller.signal)
+  const publications = f.publish.mock.calls.length
+  controller.abort(Error("old view unmounted"))
+  const next = await f.manager.siteRead(f.root, "thread", "AssistantMessage",
+    { text: "PRIVATE", isFirstOfReply: true }, "completed-reader", undefined,
+    undefined, FUNCTION_DISPLAY_PROTOCOL, false, new AbortController().signal)
+  expect(next).toEqual(first)
+  expect(f.publish).toHaveBeenCalledTimes(publications)
+})
+
+it("keeps an uncancelled guest follower live when its coalesced producer is cancelled", async () => {
+  let hold = false, held = false
+  const started = Promise.withResolvers<void>(), release = Promise.withResolvers<ModJson>()
+  const producer = new AbortController(), follower = new AbortController()
+  const f = await fixture(`on("ui.render", {component:"AssistantMessage"}, ($,e)=>
+    ({type:"Text",props:{},children:[e.props.text]}))`, "", {
+    publish(value) {
+      if (!hold || held) return value
+      held = true
+      started.resolve()
+      return release.promise
+    }
+  })
+  await f.read("warm", "warm-up")
+  hold = true
+  const read = (signal: AbortSignal) => f.manager.siteRead(f.root, "thread", "AssistantMessage",
+    { text: "SAFE guest", isFirstOfReply: true }, "same-guest-row", undefined,
+    undefined, FUNCTION_DISPLAY_PROTOCOL, false, signal)
+  const first = read(producer.signal)
+  const firstAssertion = expect(first).rejects.toThrow("cancel-guest-producer")
+  await started.promise
+  let secondSettled = false
+  const second = read(follower.signal).finally(() => { secondSettled = true })
+  producer.abort(Error("cancel-guest-producer"))
+  await new Promise(resolve => setImmediate(resolve))
+  expect(secondSettled).toBe(false)
+  release.resolve([{ text: "SAFE guest", isFirstOfReply: true }])
+  await firstAssertion
+  const result = await second
+  expect(["mounted", "projected"]).toContain(result.state)
+  expect(JSON.stringify(result)).toContain("SAFE guest")
+  expect(follower.signal.aborted).toBe(false)
 })

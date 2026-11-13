@@ -36,6 +36,8 @@ async function main() {
           threadDirectoryHasMore:false,threadDirectoryLoadingMore:false,
           setShowHarnessBoardView(value){state.showHarnessBoardView=value;emit()},
           addThreadSummary(value){state.threads=[value];emit()},
+          captureThreadSummaryRead(){return {isCurrent:()=>true,
+            publish(value){state.addThreadSummary(value);return true},close(){}}},
           async selectThread(){state.showHarnessBoardView=false;emit()}};
         function emit(){for(const listener of listeners)listener()}
         const subscribe=listener=>{listeners.add(listener);return()=>listeners.delete(listener)};

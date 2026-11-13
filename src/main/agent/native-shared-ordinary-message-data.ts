@@ -31,6 +31,7 @@ export interface NativeSharedOrdinaryMessageData {
   captureCurrentData(): Readonly<{ assertDataCurrent(): void }>
 }
 
+const ordinaryDataFreeze = Object.freeze
 const nativeSymbol = Symbol.for("langchain.message")
 const prototypes = new Map<object, string>([
   [HumanMessage.prototype, "human"], [AIMessage.prototype, "ai"],
@@ -220,7 +221,7 @@ export function captureNativeSharedOrdinaryMessageData(message: BaseMessage):
     catch (error) { failed = true; throw error }
     finally { reading = false }
   }
-  return Object.freeze({ message,
+  return ordinaryDataFreeze({ message,
     assertOriginalDataCurrent() { read(() => assertSame(message, initial, false)) },
     assertInitialDataCurrent() { read(() => assertSame(message, initial, true)) },
     captureCurrentData() {
@@ -228,7 +229,7 @@ export function captureNativeSharedOrdinaryMessageData(message: BaseMessage):
       read(() => { assertSame(message, initial, true); current = snapshot(message) })
       const selected = current
       if (!selected) fail()
-      return Object.freeze({ assertDataCurrent() { read(() => assertSame(message, selected, false)) } })
+      return ordinaryDataFreeze({ assertDataCurrent() { read(() => assertSame(message, selected, false)) } })
     }
   })
 }

@@ -176,7 +176,7 @@ async function fixture(
       return <ModsChatScope.Provider value={${stableScope ? "stable" : "production"}}>
         <output style={{display:'none'}}>{tick}</output><Profiler id='history' onRender={(id,phase,actualDuration,baseDuration,startTime,commitTime)=>commits.push({phase,actualDuration,baseDuration,startTime,commitTime})}>
         <div style={{height:760,display:'flex',flexDirection:'column'}}><ChatMessageScrollArea scrollRef={viewport} showScrollToBottom={false} hasUnread={false} unreadCount={0} onScrollToBottom={noop}>
-        <ChatMessageVirtualList messages={messages} visibleMessageIndexes={indexes} lastUserMessageIndex={${messageCount - 5}} contentVersion={1}
+        <ChatMessageVirtualList projection={{ messages, contentVersion: 1, structureVersion: 1 }} visibleMessageIndexes={indexes} lastUserMessageIndex={${messageCount - 5}}
           historyHasMore={false} historyPageLoading={false} historyRemainingCount={0} onLoadEarlierHistoryPage={noop} historyGapBeforeMessageId={null}
           canLoadReleasedHistory={false} onLoadReleasedHistoryWindow={noop} onRestoreLatestHistoryWindow={noop} hookLoggingEnabled={false}
           hookLogBucketByTurnId={maps.hooks} detachedHookLogBuckets={detached} contentMessageRefs={refs} setMessageRef={setRef} isLoading={false}

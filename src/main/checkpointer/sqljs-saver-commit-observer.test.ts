@@ -1,4 +1,5 @@
 import { performance } from "node:perf_hooks"
+import { AsyncResource } from "node:async_hooks"
 import { randomUUID } from "node:crypto"
 import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
@@ -100,12 +101,15 @@ describe("SqlJsSaver native same-gate commit observer", () => {
     const f = await fixture(), a = checkpoint(1), b = checkpoint(2)
     vi.spyOn(performance, "now").mockReturnValue(0)
     const observer = vi.fn()
+    const externalClose = new AsyncResource("external checkpoint cancellation")
     let closing: Promise<void> | undefined
     const saving = f.first.putWithCommitObserver(config(), a, metadata, observer, undefined, () => {
-      setImmediate(() => { closing = f.first.close() })
+      // A true independent cancellation must not borrow the active observer's ALS capability.
+      externalClose.runInAsyncScope(() => setImmediate(() => { closing = f.first.close() }))
     })
     await expect(saving).rejects.toThrow("SQLJS_SAVER_COMMIT_RECEIPT_EXPIRED")
     await closing
+    externalClose.emitDestroy()
     expect(observer).not.toHaveBeenCalled()
     expect(f.ids()).toEqual([a.id])
     await f.second.put(config("", a.id), b, metadata)
@@ -251,16 +255,18 @@ describe("SqlJsSaver native same-gate commit observer", () => {
     })
     const outcome = first.then(() => undefined, (error: unknown) => error)
     const receipt = await entered.promise
+    let closed = false
+    const closing = (kind === "retire" ? f.first.retire() : f.first.close())
+      .then(() => { closed = true })
     try {
-      if (kind === "retire") await f.first.retire()
-      else {
-        await f.first.close()
-        await f.first.initialize()
-      }
+      await new Promise<void>(done => setImmediate(done))
+      expect(closed).toBe(false)
       expect(() => f.first.readCommittedCheckpoint(receipt)).toThrow("SQLJS_SAVER_COMMIT_RECEIPT_EXPIRED")
       expect(f.ids()).toEqual([a.id])
     } finally { release.resolve() }
     expect(await outcome).toMatchObject({ message: "SQLJS_SAVER_COMMIT_RECEIPT_EXPIRED" })
+    await closing
+    if (kind !== "retire") await f.first.initialize()
     expect(() => f.first.readCommittedCheckpoint(receipt)).toThrow("SQLJS_SAVER_COMMIT_RECEIPT_INVALID")
     if (kind === "retire") await expect(f.first.put(config(), checkpoint(2), metadata)).rejects.toThrow("retired")
     else await f.first.putWithCommitObserver(config(), checkpoint(2), metadata, (newReceipt) => {

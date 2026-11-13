@@ -4,7 +4,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { HumanMessage } from "@langchain/core/messages"
 import type { RunnableConfig } from "@langchain/core/runnables"
-import type { Checkpoint, CheckpointMetadata } from "@langchain/langgraph-checkpoint"
+import type { Checkpoint, CheckpointMetadata, SerializerProtocol } from "@langchain/langgraph-checkpoint"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { openNativeSqliteDatabase } from "../db/native-sqlite-adapter"
 import {
@@ -18,6 +18,7 @@ import { createFunctionConversationIdleEditor } from "./function-conversation-id
 import { wrapNativeLegacyHistory } from "./native-legacy-history"
 import { serializeFunctionConversationNativeMessage } from "../agent/function-conversation-native-message"
 import { functionConversationNoteMessage } from "../agent/mods-conversation"
+import { createDefaultCheckpointMetadataCodec } from "./checkpoint-metadata-codec"
 import {
   FUNCTION_CONVERSATION_CHANNEL,
   FunctionConversationDeliveryBridge,
@@ -39,7 +40,7 @@ function deferred<T>() {
   return { promise, resolve }
 }
 
-function fixture(namespace = "", options: SqlJsSaverOptions = {}) {
+function fixture(namespace = "", options: SqlJsSaverOptions = {}, serde?: SerializerProtocol) {
   const directory = mkdtempSync(join(tmpdir(), "cmb-conversation-delivery-"))
   const database = openNativeSqliteDatabase(join(directory, "app.sqlite")).database
   database.run("CREATE TABLE threads (thread_id TEXT PRIMARY KEY, created_at INTEGER, metadata TEXT)")
@@ -52,7 +53,7 @@ function fixture(namespace = "", options: SqlJsSaverOptions = {}) {
     incarnation: { token, legacyCreatedAt: 1000 }, checkpointNamespace: namespace },
   () => undefined)
   const graphPath = join(directory, "graph.sqlite")
-  const saver = new SqlJsSaver(graphPath, undefined, options)
+  const saver = new SqlJsSaver(graphPath, serde, options)
   const controller = new AbortController()
   let current: FunctionConversationDeliveryBinding = {
     target, checkpointThreadId: "thread", signal: controller.signal, assertCurrent: () => undefined
@@ -109,6 +110,70 @@ function fixture(namespace = "", options: SqlJsSaverOptions = {}) {
 }
 
 describe("FunctionConversationDeliveryBridge actual SqlJsSaver receipts", () => {
+  it("preserves a genuine constructor custom codec through native Bridge COMMIT, exact read and ACK", async () => {
+    const delegate = createDefaultCheckpointMetadataCodec(), prefix = "actual-custom:"
+    let dumps = 0, loads = 0
+    const serde: SerializerProtocol = {
+      async dumpsTyped(value) {
+        dumps++
+        const [type, bytes] = await delegate.dumpsTyped(value)
+        return [prefix + type, bytes]
+      },
+      async loadsTyped(type, bytes) {
+        loads++
+        if (!type.startsWith(prefix)) throw Error("ACTUAL_CUSTOM_CODEC_TAG_REQUIRED")
+        return delegate.loadsTyped(type.slice(prefix.length), bytes)
+      }
+    }
+    const f = fixture("", {}, serde), row = f.note(), checkpoint = f.checkpoint(1, row)
+    expect(f.saver.serde).toBe(serde)
+    await f.bridge.wrap(f.saver).put(f.config(), checkpoint, metadata)
+    const tuple = await f.saver.getTuple(f.config(checkpoint.id))
+    expect(tuple?.checkpoint.id).toBe(checkpoint.id)
+    expect(serializeFunctionConversationNativeMessage(
+      (tuple!.checkpoint.channel_values.messages as HumanMessage[])[0])).toBe(row.nativePayload)
+    const reader = openNativeSqliteDatabase(f.graphPath).database
+    try {
+      for (const table of ["checkpoints", "checkpoint_message_snapshots", "checkpoint_runtime_projections"])
+        expect(reader.exec(`SELECT type FROM ${table} WHERE checkpoint_id=?`, [checkpoint.id])[0].values)
+          .toEqual([[prefix + "json"]])
+    } finally { reader.close() }
+    expect(dumps).toBeGreaterThan(0)
+    expect(loads).toBeGreaterThan(0)
+    expect(f.pending()).toBe(0)
+    expect(f.database.exec("SELECT checkpoint_id,frontier FROM function_conversation_deliveries")[0].values)
+      .toEqual([[checkpoint.id, 1]])
+    expect(f.database.exec("SELECT COUNT(*) FROM function_conversation_checkpoint_receipts")[0].values)
+      .toEqual([[1]])
+    expect(f.database.exec("SELECT COUNT(*) FROM function_conversation_checkpoint_members")[0].values)
+      .toEqual([[1]])
+  })
+
+  it("never falls back after a default codec changes inside an established prepared window", async () => {
+    const f = fixture(), row = f.note(), checkpoint = f.checkpoint(1, row)
+    const serde = f.saver.serde, original = serde.loadsTyped
+    const previous = Object.getOwnPropertyDescriptor(serde, "loadsTyped")
+    let entered = false, lateCalls = 0
+    try {
+      await expect(f.bridge.wrap(f.saver, undefined, undefined, { prepared: () => {
+        entered = true
+        Object.defineProperty(serde, "loadsTyped", { configurable: true, writable: true,
+          value: function (this: SerializerProtocol, ...args: Parameters<SerializerProtocol["loadsTyped"]>) {
+            lateCalls++
+            return Reflect.apply(original, this, args)
+          } })
+      } }).put(f.config(), checkpoint, metadata)).rejects.toThrow("SQLJS_SAVER_SHARED_SOURCE_CHANGED")
+    } finally {
+      if (previous) Object.defineProperty(serde, "loadsTyped", previous)
+      else Reflect.deleteProperty(serde, "loadsTyped")
+    }
+    expect(entered).toBe(true)
+    expect(lateCalls).toBe(0)
+    expect(await f.saver.getTuple(f.config(checkpoint.id))).toBeUndefined()
+    expect(f.pending()).toBe(1)
+    expect(f.database.exec("SELECT COUNT(*) FROM function_conversation_deliveries")[0].values).toEqual([[0]])
+  })
+
   it("idle editor reads and commits with a fresh host admission without reviving the completed run", async () => {
     const f = fixture(), row = f.note(), checkpoint = f.checkpoint(1, row)
     await f.bridge.wrap(f.saver).put(f.config(), checkpoint, metadata)
@@ -450,15 +515,24 @@ describe("FunctionConversationDeliveryBridge actual SqlJsSaver receipts", () => 
     })
     const outcome = saving.then(() => undefined, (error: unknown) => error)
     const receipt = await entered.promise
+    let closing: Promise<void> | undefined, closed = false
     try {
       expect(() => f.observer.observed(prepared, { ...receipt }))
         .toThrow("SQLJS_SAVER_COMMIT_RECEIPT_INVALID")
-      await f.saver.close()
-      await f.saver.initialize()
+      closing = f.saver.close()
+      void closing.then(() => { closed = true }, () => undefined)
+      await Promise.resolve()
+      expect(closed).toBe(false)
       expect(() => f.observer.observed(prepared, receipt)).toThrow("SQLJS_SAVER_COMMIT_RECEIPT_EXPIRED")
       expect(f.pending()).toBe(1)
-    } finally { release.resolve() }
+    } finally {
+      release.resolve()
+      try { await outcome }
+      finally { await closing }
+    }
     expect(await outcome).toMatchObject({ message: "SQLJS_SAVER_COMMIT_RECEIPT_EXPIRED" })
+    await f.saver.initialize()
+    expect(() => f.observer.observed(prepared, receipt)).toThrow("SQLJS_SAVER_COMMIT_RECEIPT_INVALID")
     expect(f.database.exec("SELECT COUNT(*) FROM function_conversation_deliveries")[0].values).toEqual([[0]])
     await f.observer.recover(f.config(checkpoint.id), f.binding)
     expect(f.pending()).toBe(0)

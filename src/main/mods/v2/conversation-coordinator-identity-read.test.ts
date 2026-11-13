@@ -282,16 +282,30 @@ describe("native Coordinator fresh identity guard", () => {
   )
 
   it.each(["prepared", "read"] as const)(
-    "falls back to complete data after a parser change during native %s",
+    "keeps bounded captured interpretation after a late parser change during native %s",
     phase => {
       const f = fixture(), metadata = largeHistory(f)
+      const expected = incarnations.captureThreadIncarnation(f.thread)
+      let metadataParses = 0
       identityProbe[phase] = () => {
         const original = JSON.parse
-        vi.spyOn(JSON, "parse").mockImplementation((text, reviver) => original(text, reviver))
+        vi.spyOn(JSON, "parse").mockImplementation((text, reviver) => {
+          metadataParses++
+          return original(text, reviver)
+        })
       }
       const row = identityReads.readFunctionConversationThreadIncarnationCurrent(appDb.getDb(), f.threadId)
       expect(identityProbe.hits).toBe(1)
-      expect(row?.metadata).toBe(metadata)
+      expect(row?.metadata).toBe(f.thread.metadata)
+      expect(row?.metadata?.length).toBeLessThan(metadata.length)
+      expect(incarnations.matchesThreadIncarnation(row, expected)).toBe(true)
+      expect(metadataParses).toBe(0)
+      appDb.getDb().run("UPDATE threads SET metadata=? WHERE thread_id=?", [
+        JSON.stringify({ cmb_thread_incarnation: "actual-replacement" }), f.threadId
+      ])
+      const replaced = identityReads.readFunctionConversationThreadIncarnationCurrent(appDb.getDb(), f.threadId)
+      expect(incarnations.matchesThreadIncarnation(replaced, expected)).toBe(false)
+      expect(metadataParses).toBe(0)
     }
   )
 

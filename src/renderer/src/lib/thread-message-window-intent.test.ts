@@ -16,6 +16,16 @@ function deferred<T>(): {
 }
 
 describe("thread message window latest-intent sequencing", () => {
+  it("notifies the final busy-to-idle transition without accepting stale completion", () => {
+    const coordinator = createThreadMessageWindowIntentCoordinator(), seen: Array<string | null> = []
+    const stop = coordinator.subscribe(() => seen.push(coordinator.activeKind("a")))
+    const first = coordinator.begin("a", "older"), final = coordinator.begin("a", "target")
+    expect(coordinator.finish(first)).toBe(false)
+    coordinator.finish(final)
+    expect(seen).toEqual(["older", "target", null])
+    stop(); coordinator.begin("a", "latest")
+    expect(seen).toHaveLength(3)
+  })
   it("does not let an old durable reveal overwrite a newer return-to-bottom", async () => {
     const coordinator = createThreadMessageWindowIntentCoordinator()
     const oldTargetPage = deferred<string>()

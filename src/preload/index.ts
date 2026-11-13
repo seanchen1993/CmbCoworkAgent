@@ -1,4 +1,7 @@
 import { createNativeProjectSourceBridge } from "./native-project-source"
+import type { ThreadDirectoryChange } from "../shared/thread-directory-change"
+import { subscribeThreadDirectoryChanges } from "./thread-directory-change"
+import { createFunctionSiteReadBridge } from "./function-site-read"
 import { createPluginStartUseBridge } from "./plugin-start-use"
 import type { PluginInstallMode, PluginInstallResult } from "../shared/plugin-install"
 import { WINDOW_PRESENTATION_CHANGED, WINDOW_PRESENTATION_READ, type WindowPresentationSnapshot } from "../shared/window-presentation"
@@ -692,6 +695,7 @@ ipcRenderer.on(
 )
 
 // Custom APIs for renderer
+const functionSiteReads = createFunctionSiteReadBridge(ipcRenderer)
 const api = {
   projectComposition: {
     prepare: (input: Parameters<import("../shared/project-runtime/composition-api").ProjectCompositionApi["prepare"]>[0]) => ipcRenderer.invoke("project-composition:prepare", input),
@@ -1423,14 +1427,8 @@ const api = {
     ): Promise<string> => {
       return ipcRenderer.invoke("threads:generateTitle", message, context)
     },
-    onThreadsChanged: (callback: () => void): (() => void) => {
-      const handler = (): void => {
-        callback()
-      }
-      ipcRenderer.on("threads:changed", handler)
-      return () => {
-        ipcRenderer.removeListener("threads:changed", handler)
-      }
+    onThreadsChanged: (callback: (change?: ThreadDirectoryChange) => void): (() => void) => {
+      return subscribeThreadDirectoryChanges(ipcRenderer, callback)
     }
   },
   models: {
@@ -3430,15 +3428,10 @@ const api = {
       ipcRenderer.invoke("mods:function-site-mount", { threadId, component, messageId }),
     siteMountOutcome: (threadId: string, component: import("../shared/mods/v2/sites").FunctionUiSite, messageId?: string, expectedRequestId?: string): Promise<import("../shared/mods/v2/sites").FunctionSiteMountOutcome> =>
       ipcRenderer.invoke("mods:function-site-mount-outcome", { threadId, component, messageId, expectedRequestId }),
-    siteRender: (threadId: string, owner: string, props: import("../shared/mods/types").ModObject): Promise<import("../shared/mods/v2/ui").FunctionPaneSnapshot | null> =>
-      ipcRenderer.invoke("mods:function-site-render", { threadId, owner, props }),
-    siteRead: (threadId: string, component: import("../shared/mods/v2/sites").FunctionUiSite,
-      props: import("../shared/mods/types").ModObject, presentationId?: string, messageId?: string,
-      expectedRequestId?: string, ownerRequired?: boolean): Promise<import("../shared/mods/v2/sites").FunctionSiteReadOutcome> =>
-      ipcRenderer.invoke("mods:function-site-read", {
-        threadId, component, props, presentationId, messageId, expectedRequestId, ownerRequired,
-        protocol: "mods.display/v1"
-      }),
+    nextSiteReadId: functionSiteReads.nextSiteReadId,
+    cancelSiteRead: functionSiteReads.cancelSiteRead,
+    siteRender: functionSiteReads.siteRender,
+    siteRead: functionSiteReads.siteRead,
     siteUnmount: (threadId: string, owner: string): Promise<void> =>
       ipcRenderer.invoke("mods:function-site-unmount", { threadId, owner }),
     siteAct: (threadId: string, owner: string, action: import("../shared/mods/v2/ui").FunctionUiAction): Promise<void | import("../shared/mods/v2/ui").FunctionFocusResult> =>

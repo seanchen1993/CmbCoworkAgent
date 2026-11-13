@@ -129,7 +129,9 @@ async function main() {
     await act("window.hostMessages.hold();window.hostMessages.text('RAW_SHORT held stale')")
     await page.waitForFunction("window.hostMessages.waiting()===1")
     await act("window.hostMessages.text(window.hostMessages.long)")
-    await page.waitForFunction("window.hostMessages.waiting()===2")
+    // A stable surface waits for its actual stale physical read to end before
+    // admitting the latest replacement. It must never publish that stale body.
+    assert.equal(await act("window.hostMessages.waiting()"), 1)
     await act("window.hostMessages.release()")
     await native().waitFor()
     assert.equal(

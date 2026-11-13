@@ -44,6 +44,41 @@ async function completedChecks(output: string): Promise<number> {
   }
 }
 
+async function completedDisplayCancellation(file: string, asar: string, sha256: string) {
+  try {
+    const info = await lstat(file)
+    if (!info.isFile() || info.size > 1024 * 1024) throw Error("Invalid cancellation receipt size")
+    const value = JSON.parse(await readFile(file, "utf8"))
+    if (
+      value.passed !== true ||
+      value.candidate?.execution !== "packaged-asar" ||
+      resolve(value.candidate.path) !== resolve(asar) ||
+      value.candidate.sha256 !== sha256 ||
+      typeof value.switchMs !== "number" ||
+      !Number.isFinite(value.switchMs) ||
+      value.switchMs < 0 ||
+      value.switchMs >= 1500 ||
+      value.cancelledReads !== 4 ||
+      value.hostClockCalls !== 4 ||
+      value.observedCancelledNativeTimers !== 4 ||
+      !Number.isInteger(value.physicalPeak) ||
+      value.physicalPeak < 1 ||
+      value.physicalPeak > 4 ||
+      value.ui?.slow !== false
+    )
+      throw Error("Incomplete cancellation receipt")
+    return {
+      switchMs: value.switchMs,
+      physicalPeak: value.physicalPeak,
+      cancelledReads: value.cancelledReads,
+      hostClockCalls: value.hostClockCalls,
+      observedCancelledNativeTimers: value.observedCancelledNativeTimers
+    }
+  } catch {
+    throw Error("MODS_PACKAGED_DISPLAY_CANCEL_RECEIPT_INVALID")
+  }
+}
+
 /** Launch an existing Windows production package. Never build, install, rebuild or delete it. */
 export async function runPackagedModsValidation(
   options: PackagedValidationOptions
@@ -63,6 +98,7 @@ export async function runPackagedModsValidation(
       "Existing Windows production ASAR/Electron regression; not an installer installation or external business acceptance"
   }
   try {
+    const started = performance.now()
     const executable = join(packageDirectory, "CMBDevClaw.exe")
     const asar = join(packageDirectory, "resources/app.asar")
     const fingerprints = {
@@ -72,7 +108,12 @@ export async function runPackagedModsValidation(
     report.fingerprints = fingerprints
     const env = { ...process.env }
     for (const key of Object.keys(env))
-      if (/^CMB_MODS_(?:E2E(?:_|$)|PACKAGED_DIR$|SOAK_SMOKE$)/i.test(key)) delete env[key]
+      if (
+        /^(?:CMB_MODS_(?:E2E(?:_|$)|PACKAGED_DIR$|SOAK_SMOKE$)|COMPOSITION_E2E_|CMB_CHAT_DISPLAY_CANCEL_)/i.test(
+          key
+        )
+      )
+        delete env[key]
     Object.assign(env, {
       CMB_MODS_PACKAGED_DIR: packageDirectory,
       CMB_MODS_E2E_ARTIFACTS: output,
@@ -89,6 +130,44 @@ export async function runPackagedModsValidation(
     if (child.error || child.status !== 0)
       return child.status && child.status > 0 ? child.status : 1
     report.checks = await completedChecks(output)
+    if (
+      (await fingerprint(executable)) !== fingerprints.executable ||
+      (await fingerprint(asar)) !== fingerprints.asar
+    )
+      throw Error("MODS_PACKAGED_CHANGED")
+    // Sequential and pinned to this exact downloaded package, never a source candidate.
+    const cancellationReceipt = join(output, "display-cancel-result.json")
+    const remaining = timeout - (performance.now() - started)
+    if (remaining <= 0) throw Error("MODS_PACKAGED_TIMEOUT_EXHAUSTED")
+    const cancellation = spawnSync(
+      process.execPath,
+      [
+        join(root, "node_modules/tsx/dist/cli.mjs"),
+        join(root, "tests/chat-display-cancel-e2e.spec.ts")
+      ],
+      {
+        cwd: root,
+        env: {
+          ...env,
+          COMPOSITION_E2E_PACKAGED_DIR: packageDirectory,
+          COMPOSITION_E2E_ARTIFACT_ROOT: join(output, "display-cancel-profiles"),
+          CMB_CHAT_DISPLAY_CANCEL_RECEIPT: cancellationReceipt
+        },
+        stdio: "inherit",
+        windowsHide: true,
+        timeout: Math.max(1, Math.floor(Math.min(120000, remaining)))
+      }
+    )
+    report.displayCancelChildExitCode = cancellation.status
+    report.displayCancelChildSignal = cancellation.signal
+    report.displayCancelChildError = (cancellation.error as NodeJS.ErrnoException | undefined)?.code
+    if (cancellation.error || cancellation.status !== 0)
+      return cancellation.status && cancellation.status > 0 ? cancellation.status : 1
+    report.displayCancellation = await completedDisplayCancellation(
+      cancellationReceipt,
+      asar,
+      fingerprints.asar
+    )
     if (
       (await fingerprint(executable)) !== fingerprints.executable ||
       (await fingerprint(asar)) !== fingerprints.asar

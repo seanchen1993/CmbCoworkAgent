@@ -99,9 +99,10 @@ export class FunctionHostOnlySites {
       changed: (scope) => this.host.changed(threadId, scope),
       userMessageOrigin: (messageId) => this.host.userMessageOrigin?.(threadId, messageId),
       pendingQuestion: () => this.host.pendingQuestion?.(threadId) ?? null,
-      publish: async (value) => {
+      publish: async (value, signal) => {
         entry.assertLive()
-        const published = await this.host.publish(workspace, value, controller.signal)
+        const published = await this.host.publish(workspace, value,
+          signal ? AbortSignal.any([controller.signal, signal]) : controller.signal)
         entry.assertLive()
         return published
       },
@@ -185,10 +186,11 @@ export class FunctionHostOnlySites {
     workspace: string,
     threadId: string,
     owner: string,
-    props: ModObject
+    props: ModObject,
+    signal?: AbortSignal
   ): Promise<FunctionPaneSnapshot> {
     const entry = this.owned(workspace, threadId, owner)
-    const snapshot = await entry.sites.render(owner, props)
+    const snapshot = await entry.sites.render(owner, props, signal)
     if (this.owned(workspace, threadId, owner) !== entry)
       throw new ModFunctionError("MODS_UI_SITE_CLOSED")
     return snapshot

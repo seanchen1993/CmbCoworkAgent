@@ -2,7 +2,10 @@
 import assert from "node:assert/strict"
 import { existsSync } from "node:fs"
 import { build } from "esbuild"
+import { resolve } from "node:path"
 import { chromium } from "playwright"
+import { mount } from "./mods-flow-browser.spec"
+import { browserWorkerPlugin } from "./support/browser-worker-plugin.mjs"
 
 async function main() {
   const bundle = await build({
@@ -97,6 +100,149 @@ async function main() {
     await page.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))))
     assert.equal(await page.evaluate("window.transcriptVisibilityChanges"), 2)
     console.log("PASS actual contents/ancestor-clipping/viewport scheduling geometry")
+
+    const errors: string[] = []
+    page.on("pageerror", error => errors.push(error.message))
+    await mount(page, `
+      import {FunctionSite} from ${JSON.stringify(resolve("src/renderer/src/components/chat/FunctionSite.tsx"))};
+      import {ModsChatScope} from ${JSON.stringify(resolve("src/renderer/src/lib/mods-chat-scope.tsx"))};
+      import {functionSiteQueue} from ${JSON.stringify(resolve("src/renderer/src/lib/function-site-queue.ts"))};
+      import {observeFunctionSiteVisibility} from ${JSON.stringify(resolve("src/renderer/src/lib/function-site-visibility.ts"))};
+      const reads=[], renders=[], cancellations=[], releasedOwners=[], owners=new Map(), pending=new Map(), cardListeners=new Set();
+      let durationReadSequence=0, admissions=0, probe;
+      const originalRun=functionSiteQueue.run;
+      functionSiteQueue.run=function(...args){admissions++;return Reflect.apply(originalRun,this,args)};
+      window.api.mods.onCardsChanged=fn=>{cardListeners.add(fn);return()=>cardListeners.delete(fn)};
+      window.api.mods.onConfigurationChanged=()=>()=>{};
+      window.api.mods.nextSiteReadId=()=>String(++durationReadSequence);
+      window.api.mods.cancelSiteRead=async id=>{cancellations.push(id)};
+      window.api.mods.siteUnmount=async (_thread,owner)=>{releasedOwners.push(owner);owners.delete(owner)};
+      const snapshot=(id,component,props,owner)=>({key:owner,id:owner,plugin:"engine",
+        generation:owner,title:"label",rows:2,closeOnEscape:false,
+        tree:{type:"Text",props:{},children:["SAFE "+id]},
+        nativeContent:{component,entries:[{ref:0,props}]}});
+      window.api.mods.siteRead=async (_thread,component,props,id,_message,_expected,_ownerRequired,readId)=>{
+        reads.push([id,readId]);
+        await new Promise(resolve=>pending.set(id,resolve));
+        owners.set(readId,{id,component});
+        return {state:"mounted",owner:readId,snapshot:snapshot(id,component,props,readId)};
+      };
+      window.api.mods.siteRender=async (_thread,owner,props,readId)=>{
+        const {id,component}=owners.get(owner);
+        renders.push([id,owner,readId]);
+        await new Promise(resolve=>pending.set(id,resolve));
+        return snapshot(id,component,props,owner);
+      };
+      const row=(id,top,component="TurnDuration")=><div key={id} id={id} data-chat-message-row
+        style={{position:"absolute",top,height:32,width:300}}><FunctionSite threadId="duration"
+        component={component} presentationId={id} facts={component==="TurnDuration"?{durationMs:100,word:"time"}:{text:"body"}}
+        fallback={<span>RAW {id}</span>}/></div>;
+      function DurationFixture(){
+        const [enabled,setEnabled]=useState(true),[doomed,setDoomed]=useState(true);
+        const [lateOnly,setLateOnly]=useState(false);
+        window.duration.disable=()=>setEnabled(false);
+        window.duration.showLate=()=>{setLateOnly(true);setEnabled(true)};
+        window.duration.removeDoomed=()=>setDoomed(false);
+        return <ModsChatScope.Provider value={{threadId:"duration",enabled,ready:true,isCurrent:()=>enabled}}>
+          <div id="duration-viewport" data-radix-scroll-area-viewport style={{height:120,width:320,overflow:"auto"}}>
+            <div style={{height:740,position:"relative"}}>
+              {lateOnly?row("late-duration",0):<>
+                {row("blocker",0)}{row("queued-duration",40)}{row("deferred-duration",400)}
+                {row("ordinary-body",520,"AssistantMessage")}{doomed&&row("doomed-duration",590)}
+              </>}
+            </div>
+          </div>
+        </ModsChatScope.Provider>;
+      }
+      window.duration={reads,renders,cancellations,releasedOwners,admissions:()=>admissions,
+        held:id=>pending.has(id),release:id=>{const done=pending.get(id);pending.delete(id);done()},
+        scroll:top=>{document.getElementById("duration-viewport").scrollTop=top},
+        observeRow:id=>{probe?.close();probe=observeFunctionSiteVisibility(document.getElementById(id).querySelector("section"))},
+        observedVisible:()=>probe.visible(),
+        hidden:value=>{
+          if(value)Object.defineProperty(document,"hidden",{configurable:true,value:true});
+          else delete document.hidden;
+          document.dispatchEvent(new Event("visibilitychange"));
+        },
+        invalidate:id=>{
+          const owner=reads.filter(read=>read[0]===id).at(-1)[1];
+          for(const notify of cardListeners)notify({threadId:"duration",scope:"site-invalidated:"+owner});
+        },
+        close:()=>{probe?.close();functionSiteQueue.run=originalRun;host.unmount()}
+      };
+      host.render(<DurationFixture/>);
+    `, [browserWorkerPlugin()])
+    const reads = () => page.evaluate("window.duration.reads.map(read=>read[0])")
+    const settle = () => page.evaluate(() => new Promise<void>(done =>
+      requestAnimationFrame(() => requestAnimationFrame(() => done()))))
+    await page.waitForFunction("window.duration.held('blocker') && window.duration.admissions() >= 3")
+    assert.equal(await page.evaluate("window.duration.admissions()"), 3,
+      "Two visible labels and the ordinary offscreen body reach the queue")
+    assert.deepEqual(await reads(), ["blocker"], "The first visible duration reads immediately")
+    await page.evaluate("window.duration.observeRow('queued-duration')")
+    assert.equal(await page.evaluate("window.duration.observedVisible()"), true)
+    await page.evaluate("window.duration.scroll(200)")
+    await page.waitForFunction("!window.duration.observedVisible()")
+    await page.evaluate("window.duration.removeDoomed()")
+    await page.locator("#doomed-duration").waitFor({ state: "detached" })
+    assert.deepEqual(await page.evaluate("window.duration.cancellations"), [])
+    assert.deepEqual(await reads(), ["blocker"], "Leaving the viewport retains the started background slot")
+    await page.evaluate("window.duration.release('blocker')")
+    await page.waitForFunction("window.duration.held('ordinary-body')")
+    assert.deepEqual(await reads(), ["blocker", "ordinary-body"],
+      "The queued duration is rechecked and ordinary offscreen text still reads")
+    await page.getByText("SAFE blocker", { exact: true }).waitFor({ state: "attached" })
+    await page.evaluate("window.duration.release('ordinary-body')")
+    await page.getByText("SAFE ordinary-body", { exact: true }).waitFor({ state: "attached" })
+    await page.evaluate("window.duration.hidden(true);window.duration.scroll(0)")
+    await page.waitForFunction("window.duration.observedVisible()")
+    await settle()
+    assert.deepEqual(await reads(), ["blocker", "ordinary-body"], "A hidden document keeps the wake pending")
+    await page.evaluate("window.duration.hidden(false)")
+    await page.waitForFunction("window.duration.held('queued-duration')")
+    await page.evaluate("window.duration.release('queued-duration')")
+    await page.getByText("SAFE queued-duration", { exact: true }).waitFor()
+    await page.evaluate("window.duration.scroll(400)")
+    await page.waitForFunction("window.duration.held('deferred-duration')")
+    await page.evaluate("window.duration.release('deferred-duration')")
+    await page.getByText("SAFE deferred-duration", { exact: true }).waitFor()
+    assert.deepEqual(await reads(), ["blocker", "ordinary-body", "queued-duration", "deferred-duration"])
+    await page.evaluate("window.duration.observeRow('deferred-duration');window.duration.scroll(0)")
+    await page.waitForFunction("!window.duration.observedVisible()")
+    await page.evaluate("window.duration.invalidate('deferred-duration')")
+    await page.waitForFunction("window.duration.held('deferred-duration')")
+    const redraw = await page.evaluate("window.duration.renders.at(-1)") as [string, string, string]
+    const originalOwner = await page.evaluate("window.duration.reads.at(-1)[1]")
+    assert.equal(redraw[0], "deferred-duration")
+    assert.equal(redraw[1], originalOwner, "A started offscreen label redraws using its existing owner")
+    assert.notEqual(redraw[2], originalOwner)
+    assert.deepEqual(await reads(), ["blocker", "ordinary-body", "queued-duration", "deferred-duration"])
+    await page.evaluate("window.duration.disable()")
+    await page.getByText("RAW blocker", { exact: true }).waitFor()
+    await page.waitForFunction("window.duration.cancellations.length===1")
+    assert.deepEqual(await page.evaluate("window.duration.cancellations"), [redraw[2]])
+    const admissionCount = await page.evaluate("window.duration.admissions()") as number
+    await page.evaluate("window.duration.showLate()")
+    await page.waitForFunction(`window.duration.admissions()===${admissionCount + 1}`)
+    assert.equal(await page.evaluate("window.duration.held('deferred-duration')"), true)
+    assert.equal((await reads()).includes("late-duration"), false,
+      "The cancelled redraw holds the background slot until its physical response")
+    await page.evaluate("window.duration.release('deferred-duration')")
+    await page.waitForFunction("window.duration.held('late-duration')")
+    const lateRead = await page.evaluate("window.duration.reads.at(-1)[1]") as string
+    await page.evaluate("window.duration.disable()")
+    await page.getByText("RAW late-duration", { exact: true }).waitFor()
+    await page.waitForFunction("window.duration.cancellations.length===2")
+    assert.deepEqual(await page.evaluate("window.duration.cancellations"), [redraw[2], lateRead])
+    assert.equal(await page.evaluate("window.duration.held('late-duration')"), true)
+    assert.equal(await page.evaluate(`window.duration.releasedOwners.includes(${JSON.stringify(lateRead)})`), false)
+    await page.evaluate("window.duration.release('late-duration')")
+    await page.waitForFunction(id => (window as unknown as { duration: { releasedOwners: string[] } })
+      .duration.releasedOwners.includes(id), lateRead)
+    assert.deepEqual(await reads(), ["blocker", "ordinary-body", "queued-duration", "deferred-duration", "late-duration"])
+    await page.evaluate("window.duration.close()")
+    assert.deepEqual(errors, [])
+    console.log("PASS initial elapsed-time reads respect real row visibility and preserve physical cancellation")
   } finally {
     await browser.close()
   }

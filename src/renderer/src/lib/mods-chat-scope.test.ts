@@ -44,6 +44,7 @@ vi.mock("react", async importOriginal => {
   })
 })
 import { useModsChatState } from "./mods-chat-scope"
+import type { ThreadDirectoryScope } from "./thread-directory-scope"
 const readState = useModsChatState // Explicit hook harness; no mounted React component.
 
 function deferred<T>() {
@@ -52,10 +53,11 @@ function deferred<T>() {
   const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no })
   return { promise, resolve, reject }
 }
-function setup(withCards = false) {
+function setup(withCards = false, directoryScope?: ThreadDirectoryScope) {
   const cards = new Set<(event: { threadId: string; scope?: string }) => void>()
   const requests: ReturnType<typeof deferred<boolean>>[] = []
   const notifications = new Set<() => void>()
+  const directory = new Set<(change?: unknown) => void>()
   const read = vi.fn(() => {
     const request = deferred<boolean>()
     requests.push(request)
@@ -71,7 +73,10 @@ function setup(withCards = false) {
       notifications.add(notify)
       return () => notifications.delete(notify)
     }
-  } } }))
+  }, threads: { onThreadsChanged: (notify: (change?: unknown) => void) => {
+    directory.add(notify)
+    return () => { directory.delete(notify) }
+  } } } }))
   const render = (thread = "thread", workspace = "workspace", effects = true):
     ReturnType<typeof useModsChatState> => {
     for (const rollback of hooks.rollbacks.splice(0).reverse()) rollback()
@@ -79,7 +84,7 @@ function setup(withCards = false) {
     hooks.index = 0
     hooks.rerender = false
     hooks.rendering = true
-    const state = readState(thread, workspace)
+    const state = readState(thread, workspace, directoryScope)
     hooks.rendering = false
     if (hooks.rerender) return render(thread, workspace, effects)
     if (effects) {
@@ -89,6 +94,7 @@ function setup(withCards = false) {
     return state
   }
   return { requests, read, render, notify: () => { for (const notify of notifications) notify() },
+    notifyDirectory: (change?: unknown) => { for (const notify of directory) notify(change) },
     notifyCards: (scope: string, threadId = "thread") => {
       for (const notify of cards) notify({ threadId, scope })
     } }
@@ -101,6 +107,29 @@ afterEach(() => {
   hooks.rollbacks.length = 0
   hooks.index = 0
   vi.unstubAllGlobals()
+})
+
+it("revokes unknown active capability synchronously, while unrelated and exact transcript hints preserve it", async () => {
+  const scope = { threadId: "thread", workspacePath: "workspace",
+    incarnation: { token: "incarnation", legacyCreatedAt: 1 } }
+  const f = setup(false, scope)
+  f.render(); f.requests[0].resolve(true); await settle()
+  const original = f.render()
+  expect(original.isCurrent()).toBe(true)
+  f.notifyDirectory({ ...scope, threadId: "other", kind: "metadata" })
+  f.notifyDirectory({ ...scope, kind: "transcript" })
+  expect(f.requests).toHaveLength(1)
+  expect(original.isCurrent()).toBe(true)
+  f.notifyDirectory()
+  expect(original.isCurrent()).toBe(false)
+  expect(f.requests).toHaveLength(2)
+  f.requests[1].resolve(true); await settle()
+  const renewed = f.render()
+  expect(renewed.isCurrent()).toBe(true)
+  expect(original.isCurrent()).toBe(false)
+  f.notifyDirectory({ ...scope, kind: "transcript",
+    incarnation: { token: "old-incarnation", legacyCreatedAt: 0 } })
+  expect(renewed.isCurrent()).toBe(false)
 })
 
 it("requires one scoped host decision before admitting an inactive native display", async () => {
@@ -369,4 +398,19 @@ it("routes projection invalidation to the exact cached row without resetting the
   expect(second.current()).toBe(true)
   f.notifyCards("source-retiring:1")
   expect(second.current()).toBe(false)
+})
+
+it("does not treat a known no-workspace hint as a matching Mods display scope", async () => {
+  const scope = { threadId: "thread", workspacePath: "workspace",
+    incarnation: { token: "incarnation", legacyCreatedAt: 1 } }
+  const f = setup(false, scope)
+  f.render(); f.requests[0].resolve(true); await settle()
+  const original = f.render()
+  f.notifyDirectory({ ...scope, kind: "transcript", threadId: "unrelated", workspacePath: undefined })
+  expect(original.isCurrent()).toBe(true)
+  expect(f.requests).toHaveLength(1)
+  f.notifyDirectory({ ...scope, kind: "transcript", workspacePath: undefined })
+  expect(original.isCurrent()).toBe(false)
+  expect(f.requests).toHaveLength(2)
+  f.requests[1].resolve(true); await settle()
 })

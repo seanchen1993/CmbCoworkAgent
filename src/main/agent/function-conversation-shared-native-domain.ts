@@ -27,10 +27,10 @@ export interface FunctionConversationSharedNativeDomainView {
   readonly domain: FunctionConversationSharedNativeDomain
   readonly runtime: FunctionNativeConversationRuntime
   readonly host: FunctionConversationNativeHost
-  readonly captureReturnHistorySource?: (message: BaseMessage) =>
+  readonly captureReturnRestoredSource?: (message: BaseMessage) =>
     Readonly<{ assertDataCurrent(): void }> | undefined
   readonly assertReturnHistoryCurrent?: () => void
-  readonly assertReturnHistoryData?: () => void
+  readonly assertReturnRestoredData?: () => void
   assertCurrent(): void
   assertDataCurrent(): void
 }

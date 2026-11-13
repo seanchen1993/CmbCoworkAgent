@@ -16,7 +16,7 @@ export async function navigateProjectThread(
     read(threadId: string): Promise<Thread | null>
     isCurrent(): boolean
     isRetired(threadId: string): boolean
-    add(thread: Thread): void
+    add(thread: Thread): boolean | void
     select(threadId: string): Promise<void>
   }
 ) {
@@ -37,6 +37,6 @@ export async function navigateProjectThread(
     !isSameWorkspacePath(thread.metadata.workspacePath, target.workspace)
   )
     throw Error("PROJECT_THREAD_SCOPE_CHANGED")
-  access.add(thread)
+  if (access.add(thread) === false) return
   if (current()) await access.select(thread.thread_id)
 }

@@ -96,12 +96,12 @@ class ChatScrollRuntimeHarness {
   }
 }
 
-function makeMessages(messageCount: number): ChatMessageVirtualListProps["messages"] {
+function makeMessages(messageCount: number): ChatMessageVirtualListProps["projection"]["messages"] {
   return Array.from({ length: messageCount }, (_, index) => ({
     id: `message-${index}`,
     role: index % 2 === 0 ? "user" : "assistant",
     content: `message body ${index}`
-  })) as ChatMessageVirtualListProps["messages"]
+  })) as ChatMessageVirtualListProps["projection"]["messages"]
 }
 
 function makeVirtualListProps(
@@ -110,10 +110,9 @@ function makeVirtualListProps(
 ): ChatMessageVirtualListProps {
   const messages = makeMessages(messageCount)
   return {
-    messages,
+    projection: { messages, contentVersion: 0, structureVersion: 0 },
     visibleMessageIndexes: messages.map((_message, index) => index),
     lastUserMessageIndex: messageCount > 0 ? messageCount - 1 : -1,
-    contentVersion: 0,
     historyHasMore: false,
     historyPageLoading: false,
     historyRemainingCount: 0,

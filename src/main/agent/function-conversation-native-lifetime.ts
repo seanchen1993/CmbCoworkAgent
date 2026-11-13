@@ -3,6 +3,16 @@ import { types } from "node:util"
 import type { BaseMessage } from "@langchain/core/messages"
 import { CompiledStateGraph } from "@langchain/langgraph"
 import { ModFunctionError } from "../../shared/mods/v2/contracts"
+import {
+  createNativePregelStreamOperation,
+  executeNativePregelStreamOperation,
+  createNativePregelCheckpointIterator,
+  type NativePregelStreamOperation
+} from "@langchain/langgraph/native-stream-origin"
+import { currentSharedNativeDomainRecord,
+  type SharedNativeDomainRecord } from "./function-conversation-shared-native-domain"
+import { closeFunctionConversationSharedCheckpointScope } from
+  "../mods/v2/conversation-shared-checkpointer"
 import { captureNativePartialMetadata } from "./native-message-capture"
 import { readFunctionConversationNativeNodeCompletion,
   assertFunctionConversationNativeNodeSlotStructure,
@@ -14,6 +24,13 @@ import {
   assertFunctionConversationSharedNativeStreamPreflightDispatch,
   assertFunctionConversationSharedNativeStreamIteratorEntry
 } from "./function-conversation-shared-native-stream-state"
+
+const nativeCreateOperation = createNativePregelStreamOperation
+const nativeExecuteOperation = executeNativePregelStreamOperation
+const nativeCheckpointIterator = createNativePregelCheckpointIterator
+const nativeCurrentDomain = currentSharedNativeDomainRecord
+const nativeCloseScope = closeFunctionConversationSharedCheckpointScope
+const nativeApply = Reflect.apply, nativeThen = Promise.prototype.then
 
 export interface FunctionConversationNativeStreamShape {
   readonly modes: readonly string[]
@@ -584,11 +601,54 @@ export function installFunctionConversationNativeSourceObserver(graph: object):
   const iteratorMethod = captureObserverMethod(graph, "_streamIterator")
   const streamMethod = captureObserverMethod(graph, "stream")
   const originalStream = streamMethod.original as StreamFactory
+  // This synchronous handoff is consumed by Core's actual selected iterator. It is not authority.
+  let starting: {
+    readonly operation: NativePregelStreamOperation<unknown>
+    readonly input: unknown
+    readonly domain: SharedNativeDomainRecord
+    readonly scope: SharedNativeDomainRecord["scope"]
+    readonly source: Source | undefined
+    claimed: boolean
+    failed: boolean
+    error: unknown
+  } | undefined
+  const rejectStarting = (slot: NonNullable<typeof starting>): never => {
+    if (!slot.failed) {
+      slot.failed = true
+      slot.error = new ModFunctionError("MODS_CONVERSATION_NATIVE_STREAM_UNAVAILABLE")
+      // Close the slot's original Scope, never a later ALS domain. The existing SDK/Scope
+      // Promise and finally still perform physical settlement; this adds no cancellation layer.
+      try { nativeCloseScope(slot.scope) } catch { /* Preserve the first reentry error. */ }
+    }
+    throw slot.error
+  }
+  const dispatch = (input: unknown, options: Record<string, unknown> | undefined,
+    source: Source | undefined): Promise<unknown> => {
+    const domain = nativeCurrentDomain()
+    if (!domain || domain.factory.graph !== graph)
+      return originalStream.call(graph, input, options)
+    const configurable = options && own(options, "configurable")
+    if (!configurable || typeof configurable !== "object" ||
+      own(configurable, "__pregel_checkpointer") !== domain.scope.checkpointer) fail()
+    const slot: NonNullable<typeof starting> = {
+      operation: nativeCreateOperation(graph, input, options), input, domain, scope: domain.scope, source,
+      claimed: false, failed: false, error: undefined
+    }
+    starting = slot
+    try {
+      const pending = nativeExecuteOperation(slot.operation)
+      return nativeApply(nativeThen, pending, [
+        (value: unknown) => { if (slot.failed) throw slot.error; return value },
+        (error: unknown) => { throw slot.failed ? slot.error : error }
+      ]) as Promise<unknown>
+    } finally { starting = undefined }
+  }
   const observedStream: StreamFactory = function (input, options) {
+    if (starting) rejectStarting(starting)
     const handoff = assertFunctionConversationSharedNativeStreamPreflightDispatch(graph, input, options)
     if (handoff) return handoff.promise
     const source = scopes.getStore()
-    if (!source || source.graph !== graph) return originalStream.call(graph, input, options)
+    if (!source || source.graph !== graph) return dispatch(input, options, source)
     source.assertCurrent()
     if (source.streamCaptured || (options !== undefined && !plain(options))) fail()
     const copied: Record<string, unknown> = {}
@@ -604,30 +664,63 @@ export function installFunctionConversationNativeSourceObserver(graph: object):
     // stream shell chooses its raw encoder before _streamIterator runs, so interception must
     // happen at this exact original method. Invoke itself supplies encoding: undefined.
     copied.encoding = undefined
-    streamShape(graph, copied)
+    const requested = streamShape(graph, copied)
+    const domain = nativeCurrentDomain()
+    if (domain?.factory.graph === graph) {
+      source.shape ??= requested
+      // Core callbacks intentionally observe the expanded internal modes. Public projection
+      // still uses requested, while the exact Core config is passed unchanged to the SDK.
+      if (requested.modes.includes("messages")) {
+        const modes = [...new Set([...requested.modes, "updates"])]
+        copied.streamMode = modes
+        source.actualShape ??= Object.freeze({ ...requested, modes: Object.freeze(modes),
+          multiple: true })
+      } else source.actualShape ??= requested
+    }
     source.streamCaptured = true
     if (encoding === "text/event-stream") source.encoding = encoding
     source.assertCurrent()
-    return originalStream.call(graph, input, copied)
+    return dispatch(input, copied, source)
   }
   const original = iteratorMethod.original as IteratorFactory
   const observed: IteratorFactory = function (input, options) {
+    const slot = starting
+    if (slot) {
+      if (slot.failed || slot.claimed || slot.input !== input ||
+        nativeCurrentDomain() !== slot.domain || scopes.getStore() !== slot.source)
+        rejectStarting(slot)
+      slot.claimed = true
+    }
     assertFunctionConversationSharedNativeStreamIteratorEntry(graph, input, options)
     const source = scopes.getStore()
-    if (!source || source.graph !== graph) return original.call(graph, input, options)
+    if (!source || source.graph !== graph) {
+      if (slot) {
+        if (slot.failed) rejectStarting(slot)
+        if (!options) fail()
+        return nativeCheckpointIterator(slot.operation, graph, input, options) as ActualIterator
+      }
+      return original.call(graph, input, options)
+    }
     source.assertCurrent()
-    const shape = streamShape(graph, options)
+    const shape = slot ? source.shape! : streamShape(graph, options)
     source.shape ??= shape
     // Command[] node outputs are invisible to StreamMessagesHandler's shallow chain-end scan.
     // Observe the original writers' updates privately, without enabling child passthrough.
     const observeCompletion = shape.modes.includes("messages")
     const actualModes = [...new Set([...shape.modes, "updates"])]
-    const actualOptions = observeCompletion ? { ...options, streamMode: actualModes } : options
+    const actualOptions = !slot && observeCompletion
+      ? { ...options, streamMode: actualModes } : options
     source.actualShape ??= observeCompletion ? Object.freeze({ ...shape,
       modes: Object.freeze(actualModes), multiple: true }) : shape
     const token = Object.freeze({})
     let actual: ActualIterator
-    try { actual = original.call(graph, input, actualOptions) }
+    try {
+      if (slot?.failed) rejectStarting(slot)
+      if (slot && !actualOptions) fail()
+      actual = slot
+        ? nativeCheckpointIterator(slot.operation, graph, input, actualOptions!) as ActualIterator
+        : original.call(graph, input, actualOptions)
+    }
     catch (error) { settle(source); throw error }
     let finished = false
     const finish = () => {

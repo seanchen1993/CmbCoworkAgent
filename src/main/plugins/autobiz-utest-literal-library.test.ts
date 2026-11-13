@@ -1,13 +1,13 @@
 import { createHash } from "node:crypto"
 import { readFileSync } from "node:fs"
-import { lstat, mkdir, mkdtemp, writeFile } from "node:fs/promises"
+import { lstat, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { basename, dirname, join } from "node:path"
 import AdmZip from "adm-zip"
-import { beforeAll, expect, it } from "vitest"
+import { afterAll, beforeAll, expect, it } from "vitest"
+import { createAutobizSourceFixture } from "./autobiz-source-fixture.test-helper"
 import {
   packageAutobizUtestLiteralLibrary,
-  AUTOBIZ_UTEST_LIBRARY_DEFAULTS,
   AUTOBIZ_UTEST_LIBRARY_CONSUMER_SHA256
 } from "../../../scripts/package-autobiz-utest-literal-library"
 import { prepareAutobizKnowledgeMod } from "../../../scripts/prepare-autobiz-knowledge-mod"
@@ -22,12 +22,25 @@ import { isReviewedAutobizProtocol } from "./autobiz-composition-protocol"
 
 const hash = (value: Buffer) => createHash("sha256").update(value).digest("hex")
 let root: string, output: string
+let fixture: Awaited<ReturnType<typeof createAutobizSourceFixture>>
+let input: Awaited<ReturnType<typeof createAutobizSourceFixture>>["libraryInput"]
 let receipt: Awaited<ReturnType<typeof packageAutobizUtestLiteralLibrary>>
 beforeAll(async () => {
+  fixture = await createAutobizSourceFixture()
+  input = fixture.libraryInput
   root = await mkdtemp(join(tmpdir(), "autobiz-utest-library-"))
   output = join(root, "fresh-library")
-  receipt = await packageAutobizUtestLiteralLibrary(output)
+  receipt = await packageAutobizUtestLiteralLibrary(output, input)
 }, 120000)
+
+afterAll(async () => {
+  if (root) {
+    expect(dirname(root)).toBe(tmpdir())
+    expect(basename(root)).toMatch(/^autobiz-utest-library-/)
+    await rm(root, { recursive: true, force: true })
+  }
+  await fixture?.close()
+})
 
 it("packages both original flows under exact v104 admission with complete ZIP byte roundtrips", async () => {
   expect(receipt.kernelVersion).toBe("1.0.4")
@@ -67,10 +80,10 @@ it("packages both original flows under exact v104 admission with complete ZIP by
 }, 30000)
 
 it("retains every generic consumer ZIP byte and all observer implementation bytes", async () => {
-  const original = readFileSync(AUTOBIZ_UTEST_LIBRARY_DEFAULTS.consumerArchive)
+  const original = readFileSync(input.consumerArchive)
   expect(readFileSync(join(output, "13-通用JSON产物消费Mod.zip")).equals(original)).toBe(true)
   expect(hash(original)).toBe(AUTOBIZ_UTEST_LIBRARY_CONSUMER_SHA256)
-  const before = await snapshotDerivationSource(AUTOBIZ_UTEST_LIBRARY_DEFAULTS.observer)
+  const before = await snapshotDerivationSource(input.observer)
   const after = await snapshotDerivationSource(join(output, "Mods来源/Worktree进度Mod"))
   expect(after.files).toHaveLength(before.files.length)
   const changed = after.files.filter(
@@ -86,9 +99,9 @@ it("retains every generic consumer ZIP byte and all observer implementation byte
 
 it("does not overwrite the fresh library or touch an immutable source directory", async () => {
   const before = readFileSync(join(output, "13-通用JSON产物消费Mod.zip"))
-  await expect(packageAutobizUtestLiteralLibrary(output)).rejects.toThrow("OUTPUT_EXISTS")
+  await expect(packageAutobizUtestLiteralLibrary(output, input)).rejects.toThrow("OUTPUT_EXISTS")
   await expect(
-    packageAutobizUtestLiteralLibrary(join(AUTOBIZ_UTEST_LIBRARY_DEFAULTS.source, "invalid"))
+    packageAutobizUtestLiteralLibrary(join(input.source, "invalid"), input)
   ).rejects.toThrow("outside immutable inputs")
   expect(readFileSync(join(output, "13-通用JSON产物消费Mod.zip")).equals(before)).toBe(true)
 })
@@ -103,7 +116,7 @@ it("rejects an unreviewed source without allocating a library and retains strict
   )
   await expect(
     packageAutobizUtestLiteralLibrary(target, {
-      ...AUTOBIZ_UTEST_LIBRARY_DEFAULTS,
+      ...input,
       source: unknown
     })
   ).rejects.toThrow("Exact reviewed 1.0.4 source required")

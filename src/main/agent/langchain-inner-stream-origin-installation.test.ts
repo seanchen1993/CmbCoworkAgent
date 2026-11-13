@@ -11,10 +11,17 @@ import {
 } from "../../../scripts/apply-langchain-native-tool-invoke-origin.mjs"
 
 const renameFault = vi.hoisted(() => ({ calls: 0, at: 0 }))
+const manifestFault = vi.hoisted(() => ({ value: undefined as string | undefined }))
 vi.mock("node:fs/promises", async importOriginal => {
   const original = await importOriginal<typeof import("node:fs/promises")>()
   return {
     ...original,
+    async readFile(...args: Parameters<typeof original.readFile>) {
+      if (manifestFault.value !== undefined &&
+        String(args[0]).endsWith("langgraph-1.2.5-native-stream-origin.manifest.json"))
+        return args[1] === "utf8" ? manifestFault.value : Buffer.from(manifestFault.value)
+      return original.readFile(...args)
+    },
     async rename(...args: Parameters<typeof original.rename>) {
       renameFault.calls++
       if (renameFault.calls === renameFault.at) throw Error("ACTUAL_INNER_RENAME_FAILURE")
@@ -36,6 +43,10 @@ interface Manifest {
   patchSha256: string
   licenseSha256: string
   files: FileEntry[]
+  previousInstallation?: {
+    files: Array<{ path: string; sha256: string }>
+    edits: Array<{ path: string; before: string; after: string }>
+  }
 }
 interface PackageFixture {
   packageRoot: string
@@ -175,6 +186,7 @@ async function assertPristine(f: Awaited<ReturnType<typeof fixture>>) {
 }
 
 afterEach(async () => {
+  manifestFault.value = undefined
   renameFault.at = 0
   renameFault.calls = 0
   for (const root of roots.splice(0)) {
@@ -282,4 +294,113 @@ describe("fixed Core and Graph stream installation as one eighteen-file batch", 
     expect(renameFault.calls).toBe(18)
     await assertPristine(f)
   })
+})
+
+/** Recover the fixed previous installation from the reviewed literal upgrade, not machine bytes. */
+async function previousFixture() {
+  const f = await fixture()
+  const previous = f.packages[1].manifest.previousInstallation
+  if (!previous) throw Error("FIXED_PREVIOUS_INSTALLATION_REQUIRED")
+  for (const pkg of f.packages) {
+    const files = new Map(pkg.after)
+    if (pkg === f.packages[1]) {
+      for (const edit of [...previous.edits].reverse()) {
+        const source = files.get(edit.path)!.toString("utf8")
+        const offset = source.indexOf(edit.after)
+        expect(offset).toBeGreaterThanOrEqual(0)
+        expect(source.indexOf(edit.after, offset + 1)).toBe(-1)
+        files.set(edit.path, Buffer.from(source.slice(0, offset) + edit.before +
+          source.slice(offset + edit.after.length)))
+      }
+      for (const entry of previous.files) expect(digest(files.get(entry.path)!)).toBe(entry.sha256)
+    }
+    for (const [path, bytes] of files) await writeFile(join(pkg.packageRoot, path), bytes)
+  }
+  const captured = new Map<string, Buffer>()
+  for (const pkg of f.packages) for (const { path } of pkg.manifest.files)
+    captured.set(join(pkg.packageRoot, path), await readFile(join(pkg.packageRoot, path)))
+  return { ...f, captured }
+}
+async function assertPreviousUnchanged(f: Awaited<ReturnType<typeof previousFixture>>) {
+  for (const [path, bytes] of f.captured) expect(await readFile(path)).toEqual(bytes)
+  expect((await readdir(f.root, { recursive: true })).some(path => String(path).endsWith(".tmp")))
+    .toBe(false)
+}
+
+describe("fixed previous checkpoint-chain installation", () => {
+  it("checks the old cohort as not installed and upgrades all eighteen exact targets", async () => {
+    const f = await previousFixture()
+    await expect(installLangchainInnerStreamOrigin({ workspaceRoot: f.root, checkOnly: true }))
+      .rejects.toThrow("LANGCHAIN_INNER_PATCH_NOT_INSTALLED")
+    expect(renameFault.calls).toBe(0)
+    await assertPreviousUnchanged(f)
+    expect(await installLangchainInnerStreamOrigin({ workspaceRoot: f.root }))
+      .toEqual({ status: "patched", targets: 18 })
+    for (const pkg of f.packages) for (const [path, bytes] of pkg.after)
+      expect(await readFile(join(pkg.packageRoot, path))).toEqual(bytes)
+    expect(await installLangchainInnerStreamOrigin({ workspaceRoot: f.root, checkOnly: true }))
+      .toEqual({ status: "installed", targets: 18 })
+  })
+
+  it.each(["js", "cjs"] as const)(
+    "rejects a truly mixed old and new Graph index %s without changing it", async extension => {
+      const f = await previousFixture(), graph = f.packages[1]
+      const path = `dist/pregel/index.${extension}`
+      const other = `dist/pregel/index.${extension === "js" ? "cjs" : "js"}`
+      const selectedPath = join(graph.packageRoot, path), otherPath = join(graph.packageRoot, other)
+      const old = f.captured.get(selectedPath)!, otherOld = f.captured.get(otherPath)!
+      const after = graph.after.get(path)!, otherAfter = graph.after.get(other)!
+      expect(digest(old)).not.toBe(digest(after))
+      expect(digest(otherOld)).not.toBe(digest(otherAfter))
+      expect(await readFile(selectedPath)).toEqual(old)
+      expect(await readFile(otherPath)).toEqual(otherOld)
+      await writeFile(selectedPath, after)
+      f.captured.set(selectedPath, after)
+      expect(await readFile(selectedPath)).toEqual(after)
+      expect(await readFile(otherPath)).toEqual(otherOld)
+      await expect(installLangchainInnerStreamOrigin({ workspaceRoot: f.root }))
+        .rejects.toThrow("LANGCHAIN_INNER_PATCH_MIXED_OR_UNKNOWN_FILES")
+      expect(renameFault.calls).toBe(0)
+      await assertPreviousUnchanged(f)
+    })
+
+  it.each([1, 9, 18])("restores actual previous bytes when rename %s fails", async at => {
+    const f = await previousFixture()
+    renameFault.at = at
+    await expect(installLangchainInnerStreamOrigin({ workspaceRoot: f.root }))
+      .rejects.toThrow("ACTUAL_INNER_RENAME_FAILURE")
+    expect(renameFault.calls).toBe(at)
+    await assertPreviousUnchanged(f)
+  })
+
+  it.each(["path", "order", "sha", "zero", "multiple", "overlap", "after"])(
+    "rejects an invalid previous %s before writing targets", async kind => {
+      const f = await previousFixture(), graph = f.packages[1]
+      const manifest = structuredClone(graph.manifest), previous = manifest.previousInstallation!
+      if (kind === "path") previous.files[0].path = "../elsewhere"
+      if (kind === "order") previous.edits.reverse()
+      if (kind === "sha") previous.files[0].sha256 = "not-a-sha256"
+      if (kind === "zero") previous.edits[0].before = "ABSENT_PREVIOUS_LITERAL"
+      if (kind === "multiple") previous.edits[0].before = " "
+      if (kind === "overlap") {
+        const path = previous.edits[0].path
+        const target = join(graph.packageRoot, path)
+        const bytes = Buffer.concat([f.captured.get(target)!, Buffer.from("\naaaa\n")])
+        await writeFile(target, bytes)
+        f.captured.set(target, bytes)
+        previous.files.find(entry => entry.path === path)!.sha256 = digest(bytes)
+        previous.edits[0].before = "aaa"
+      }
+      if (kind === "after") previous.edits[0].after += "\n// wrong postimage\n"
+      manifestFault.value = JSON.stringify(manifest)
+      await expect(installLangchainInnerStreamOrigin({ workspaceRoot: f.root })).rejects.toThrow(
+        kind === "path" ? "LANGCHAIN_INNER_PATCH_FILE_SET_INVALID" :
+          kind === "order" || kind === "sha" ? "LANGCHAIN_INNER_PATCH_PREVIOUS_INVALID" :
+            kind === "after" ? "LANGCHAIN_INNER_PATCH_POSTIMAGE_INVALID" :
+              "LANGCHAIN_INNER_PATCH_PREVIOUS_LITERAL_INVALID"
+      )
+      expect(renameFault.calls).toBe(0)
+      await assertPreviousUnchanged(f)
+    }
+  )
 })

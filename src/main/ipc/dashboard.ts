@@ -9610,6 +9610,8 @@ function makeMockProjectMode(range: TimeRange, opts?: OrgFilterOptions): Dashboa
             projectCount: 1,
             featureCount: 3,
             conversationCount: 128,
+            userCount: 18,
+            allVersionsUserCount: 24,
             codeStats: makeDashboardCodeStats({
               generatedLines: 5200,
               deletedLines: 800,
@@ -9628,6 +9630,8 @@ function makeMockProjectMode(range: TimeRange, opts?: OrgFilterOptions): Dashboa
             projectCount: 1,
             featureCount: 2,
             conversationCount: 47,
+            userCount: 10,
+            allVersionsUserCount: 24,
             codeStats: makeDashboardCodeStats({
               generatedLines: 1800,
               deletedLines: 200,
@@ -9646,6 +9650,8 @@ function makeMockProjectMode(range: TimeRange, opts?: OrgFilterOptions): Dashboa
             projectCount: 1,
             featureCount: 1,
             conversationCount: 0,
+            userCount: 0,
+            allVersionsUserCount: 0,
             codeStats: null
           }
         ] as Array<Omit<ProjectModeAdapterView, "stageBuckets">>
@@ -11711,6 +11717,10 @@ interface ProjectModeAdapterView {
   projectCount: number
   featureCount: number
   conversationCount: number
+  /** 当前版本的主 Agent 主动对话用户，按非空 sapId 去重。 */
+  userCount: number
+  /** 插件名下跨版本去重的人数，不能累加各版本的 userCount。 */
+  allVersionsUserCount: number
   codeStats: DashboardCodeStats | null
   stageBuckets: DashboardStageBuckets
 }
@@ -12860,6 +12870,13 @@ async function fetchProjectModeUsage(
   adapters: Map<string, ProjectModeAdapterView>
 }> {
   const orgFilterClause = buildProjectModeOrgFilter(opts, access)
+  const adapterConversationAggs = mainAgentConversationAggs({
+    ...stageBucketTraceAggs(),
+    identified_users: {
+      filter: buildNonEmptySapIdFilter(),
+      aggs: { user_count: { cardinality: { field: "sapId" } } }
+    }
+  })
   const body = {
     size: 0,
     query: {
@@ -12903,10 +12920,10 @@ async function fetchProjectModeUsage(
         terms: { field: "harnessAdapterName", size: 200 },
         aggs: {
           by_version: {
-            terms: { field: "harnessAdapterVersion", size: 50 },
-            aggs: mainAgentConversationAggs(stageBucketTraceAggs())
+            terms: { field: "harnessAdapterVersion", size: 50, missing: "" },
+            aggs: adapterConversationAggs
           },
-          ...mainAgentConversationAggs(stageBucketTraceAggs())
+          ...adapterConversationAggs
         }
       }
     }
@@ -12929,16 +12946,21 @@ async function fetchProjectModeUsage(
       const b = asRecord(bucket)
       const name = asString(b.key)
       if (!name) continue
+      const mainAgent = readMainAgentConversations(b)
+      const allVersionsUserCount = asNumber(
+        asRecord(asRecord(mainAgent.identified_users).user_count).value
+      )
       const rawVersions = asRecord(b.by_version).buckets
       const versions = Array.isArray(rawVersions) ? rawVersions : []
       if (versions.length === 0) {
-        const mainAgent = readMainAgentConversations(b)
         adapters.set(adapterKey(name), {
           name,
           version: undefined,
           projectCount: 0,
           featureCount: 0,
           conversationCount: asNumber(mainAgent.doc_count),
+          userCount: allVersionsUserCount,
+          allVersionsUserCount,
           codeStats: null,
           stageBuckets: buildStageBuckets(parseStageBucketConversations(mainAgent), undefined)
         })
@@ -12954,6 +12976,8 @@ async function fetchProjectModeUsage(
           projectCount: 0,
           featureCount: 0,
           conversationCount: asNumber(mainAgent.doc_count),
+          userCount: asNumber(asRecord(asRecord(mainAgent.identified_users).user_count).value),
+          allVersionsUserCount,
           codeStats: null,
           stageBuckets: buildStageBuckets(parseStageBucketConversations(mainAgent), undefined)
         })
@@ -14290,6 +14314,8 @@ async function fetchProjectMode(
         projectCount: snapAdapter.projectCount,
         featureCount: snapAdapter.featureCount,
         conversationCount: 0,
+        userCount: 0,
+        allVersionsUserCount: 0,
         codeStats: null,
         stageBuckets: emptyStageBuckets()
       })

@@ -121,11 +121,11 @@ async function actualMainHistory(count = 4, register = true, unmarkedGaps = fals
   }
   const projection = createNativeConversationStreamProjection({ runtime, store })
   const saver = new SqlJsSaver(join(directory, randomUUID() + ".sqlite"))
-  cleanups.push(() => {
+  cleanups.push(async () => {
     action = undefined
     projection.close(); runtime.close(); closeOwner(); coordinator.registry.close()
     unbind(); instance.release(); releaseLocalThreadRunLease(threadId, "desktop", runId)
-    manager.close(); saver.close()
+    manager.close(); await saver.close()
   })
   const capture = async (values: BaseMessage[]) => {
     const binding = { target: ref, checkpointThreadId: threadId,

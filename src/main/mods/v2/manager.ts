@@ -1,4 +1,6 @@
 import { currentNativeConfigurationScope } from "./native-configuration-scope"
+import { FUNCTION_MANAGER_ENTRY_POLICIES, FUNCTION_MANAGER_OPERATION_METHODS,
+  FUNCTION_MANAGER_CATALOG_METHODS, FUNCTION_MANAGER_CATALOG_DISPOSE_METHODS } from "./function-manager-entry-policy"
 import type { NativeDesktopBinding, NativeDesktopChange, NativeWorktreeObserver,
   NativeWorktreeRemoval } from "./native-observer"
 import { FunctionDesktopNotifications } from "./desktop-notify"
@@ -73,12 +75,16 @@ import { validateClawActionConfig } from "./action-config"
 import { clawIssues, type ClawProfile } from "../../../shared/mods/claw"
 import { mergeClawCompletionPolicy, parseClawCompletionRules } from "../../../shared/mods/claw-completion"
 import type { FunctionAgentInfo } from "../../../shared/mods/v2/agent-list"
+import { FUNCTION_MOD_RESOURCE_BUDGETS } from "../../../shared/mods/v2/resource-budgets"
 import { ApplicationCompletionPolicies } from "./application-completion-policy"
-import { inspectAutobizRecovery } from "./autobiz-recovery"
+import { inspectAutobizCompletionRecovery, transitionAutobizCompletion,
+  validateAutobizCompletion } from "./autobiz-completion-adapter"
+import { AUTOBIZ_COMPLETION_EVIDENCE } from "../adapters/autobiz-completion-evidence"
 import {
-  AUTOBIZ_COMPLETION_EVIDENCE,
-  autobizFeatureEvidencePaths
-} from "../adapters/autobiz-completion-evidence"
+  completionBusinessEvidencePaths,
+  planCompletionApplicationEvidence,
+  planCompletionBusiness
+} from "./completion-business-plan"
 import type { FunctionSessionTitleUpdate } from "./session-title"
 import type { FunctionSessionReadMethod } from "../../../shared/mods/v2/session"
 import type { FunctionSessionAppendTicket } from "./session-append-ticket"
@@ -164,11 +170,7 @@ import {
   type BoundCompletionEvidenceRecord,
   type CompletionEvidenceRecord
 } from "./completion-evidence"
-import {
-  advanceAutobizCheckpoint,
-  runAutobizValidator,
-  type AutobizCheckpointTransition
-} from "./autobiz-validation"
+import type { AutobizCheckpointTransition } from "./autobiz-validation"
 import type { ProjectCheckResult, ProjectCheckKind } from "./project-checks"
 import {
   dispatchFunctionStream,
@@ -248,6 +250,7 @@ export interface HostCompletionOptions {
 }
 interface FunctionConnection {
   readonly stats?: { pending: number; calls: number }
+  readonly diagnostics?: readonly import("../../../shared/mods/v2/runtime-diagnostics").RuntimeLifecycleDiagnostic[]
   load(code: string, options: CompiledFunctionPlugin["options"]): Promise<FunctionGuest>
   stop(): void
   stopAndDrain?(): Promise<void>
@@ -976,64 +979,8 @@ export class FunctionModsManager {
       pendingQuestion: threadId => this.host.pendingQuestion?.(threadId) ?? null
     })
     this.installOperationGuards()
-    guardPluginCatalogOperations(this, [
-      "configList",
-      "configSet",
-      "userConfig",
-      "saveUserConfig",
-      "saveSensitiveUserConfig",
-      "migrateUserConfig",
-      "pickUserConfigPath",
-      "applyUserConfig",
-      "reloadUserConfig",
-      "releaseRuntimeSession",
-      "resumeRuntimeSession",
-      "runtimeReady",
-      "effectiveStatus",
-      "status",
-      "checkCompatibility",
-      "approve",
-      "appendConversation",
-      "independentModelPrompt",
-      "commands",
-      "inspectCheckpointRecovery",
-      "advanceAutobizCheckpoint",
-      "interceptTool",
-      "offerAgent",
-      "receivePeer",
-      "presentationEvent",
-      "classicEvent",
-      "turnStart",
-      "turnStep",
-      "prepareFlowScope",
-      "completionGate",
-      "measure",
-      "turnComplete",
-      "turnNotices",
-      "registeredTools",
-      "interceptToolCheck",
-      "hasEventHandler",
-      "logs",
-      "feedback",
-      "feedbackPresentation",
-      "panes",
-      "clearPlacedRows",
-      "markdownLink",
-      "focusAck",
-      "scrollAck",
-      "act",
-      "siteMount",
-      "siteMountOutcome",
-      "siteRead",
-      "siteRender",
-      "siteUnmount",
-      "siteAct",
-      "clientAct",
-      "actionCatalog",
-      "prepareAction",
-      "runAction",
-      "runCommand"
-    ], ["prepareFlowScope"])
+    guardPluginCatalogOperations(this, FUNCTION_MANAGER_CATALOG_METHODS,
+      FUNCTION_MANAGER_CATALOG_DISPOSE_METHODS)
 
     this.stopConfigurationIdle = this.host.onConfigurationIdle?.((threadId) => {
       this.development?.idle(threadId)
@@ -1115,25 +1062,13 @@ export class FunctionModsManager {
   }
 
   private installOperationGuards(): void {
-    // Explicit classification preserves quiet discovery and immediate revoke/close behavior.
-    const applyBefore = new Set<keyof FunctionModsManager>([
-      "commands", "interceptTool", "offerAgent", "receivePeer", "presentationEvent",
-      "classicEvent", "turnStart", "turnStep", "prepareFlowScope", "registeredTools",
-      "prepareAction", "runAction", "runCommand"
-    ])
-    const native: Array<keyof FunctionModsManager> = [
-      ...applyBefore, "configList", "configSet", "userConfig", "saveUserConfig", "saveSensitiveUserConfig", "migrateUserConfig", "runtimeReady",
-      "effectiveStatus", "inspectCheckpointRecovery", "advanceAutobizCheckpoint", "completionGate",
-      "measure", "turnComplete", "turnNotices", "interceptToolCheck", "hasEventHandler", "logs",
-      "feedback", "feedbackPresentation", "panes", "placedRows", "placedRead", "placedAct", "placedDismiss", "placedRelease", "focusAck", "scrollAck", "act", "siteMount", "siteMountOutcome", "siteRead", "siteRender", "siteUnmount",
-      "siteAct", "clientAct", "actionCatalog", "markdownLink", "appendConversation"
-    ]
-    for (const name of native) {
+    for (const name of FUNCTION_MANAGER_OPERATION_METHODS) {
+      const policy = FUNCTION_MANAGER_ENTRY_POLICIES[name]
       const method = this[name]
       if (typeof method !== "function") throw Error("MODS_ENTRY_METHOD_INVALID")
       Object.defineProperty(this, name, { configurable: true, value: (...args: unknown[]) => {
         const workspace = String(args[0]), threadId = String(args[1])
-        const terminal = name === "turnComplete"
+        const terminal = policy.operation === "terminal"
         const inherited = terminal ? this.operations.getStore() : undefined
         // A native main retains its actual start identity even when idle dispatch has no ALS.
         // A child retains its parent's exact entry before detaching that expired admission.
@@ -1146,7 +1081,7 @@ export class FunctionModsManager {
             : inherited?.workspace === workspace && inherited.threadId === threadId
               ? inherited.entry : undefined
           : undefined
-        const run = () => this.withOperation(workspace, threadId, name, applyBefore.has(name),
+        const run = () => this.withOperation(workspace, threadId, name, policy.operation === "apply-before",
           () => Reflect.apply(method, this, args), expected)
         if (!terminal) return run()
         if (!input?.agentId && !owner)
@@ -1781,8 +1716,14 @@ export class FunctionModsManager {
   private retainedRuntimeCompilation(input: {workspace:string;plugin:ModPluginSource}): CompiledFunctionPlugin | undefined {
     if (this.closed || !input.workspace || !input.plugin.enabled)
       throw new ModFunctionError("MODS_CONFIG_SOURCE_CHANGED")
-    const compiled = this.configurationSourceCache.peek(input.plugin.path) ??
-      [...this.sessions.values(), ...this.candidates]
+    const path = input.plugin.path
+    const cached = this.configurationSourceCache.peek(path)
+    if (cached) {
+      const currentPath = input.plugin.path
+      if (currentPath !== path) assertConfigurationSourcesCurrent(currentPath, cached)
+      return cached
+    }
+    const compiled = [...this.sessions.values(), ...this.candidates]
         .filter(entry => entry.workspace === input.workspace)
         .flatMap(entry => [...entry.snapshots.values()])
         .find(snapshot => snapshot.sourcePath &&
@@ -1799,7 +1740,6 @@ export class FunctionModsManager {
     if (!this.isSource(input.plugin) && !isConfigurationOnlyPackage(input.plugin.path)) return
     const compiled = this.retainedRuntimeCompilation(input)
     if (!compiled) throw new ModFunctionError("MODS_CONFIG_SOURCE_CHANGED")
-    assertConfigurationSourcesCurrent(input.plugin.path, compiled)
     if (compiled.userConfig)
       this.userConfigValues.resolve(
         input.workspace,
@@ -2547,6 +2487,12 @@ export class FunctionModsManager {
   runtimeSessions(currentThreadId?: string): FunctionRuntimeSessions {
     const sessions: FunctionRuntimeSession[] = []
     for (const [key, entry] of this.sessions) {
+      let lifecycle: FunctionRuntimeSession["lifecycle"]
+      try {
+        const observed = entry.client.diagnostics
+        if (observed) lifecycle = Object.freeze(observed.slice(-FUNCTION_MOD_RESOURCE_BUDGETS.diagnostics.retainedEvents)
+          .map(event => Object.freeze({ ...event })))
+      } catch { /* Diagnostic failure cannot change quiet session discovery. */ }
       const stopped = this.releasedSessions.get(key)
       const blocker = entry.probeRetirementError ?? (entry.execution.registrationSealed
         ? "正在回收纯登记探测" : stopped ? "组件已停用，正在清理或需核对清理结果" : this.runtimeReleaseBlocker(entry))
@@ -2554,6 +2500,7 @@ export class FunctionModsManager {
         state: entry.probeRetirementError ? "failed" : stopped?.state ?? (!entry.loaded ? "loading" : entry.session?.hasStarted ? "resident" : "discovery"),
         autoReclaimable: !this.pureProbeBlocker(entry), guestEntered: entry.execution.guestEntered,
         mountedSites: [...this.siteOwners.values()].filter(owner => owner.entry === entry).length,
+        ...(lifecycle ? { lifecycle } : {}),
         ...(entry.session && entry.loaded ? { diagnostics: { ...entry.session.platform.diagnostics(),
           backgroundResources: entry.session.ownedResourceCount } } : {}),
         ...(blocker ? { blocker } : {}), ...(stopped?.error ? { error: stopped.error } : {}),
@@ -2917,8 +2864,10 @@ export class FunctionModsManager {
     const grant = this.store.getGrant(workspace, `function:${plugin}`)
     if (!grant?.enabled) throw new ModFunctionError("MODS_PLUGIN_UNAPPROVED")
     const scope = this.host.clawScope?.(threadId)
+    const applies = this.host.clawApplicable
+      ? this.host.clawApplicable(threadId) : Boolean(scope)
     const selected =
-      this.host.clawApplicable?.(threadId) && (!this.host.clawScope || scope)
+      applies && (!this.host.clawScope || scope)
         ? new ClawStore(this.store).selection(
             workspace,
             scope?.identity ?? JSON.stringify([threadId, "legacy"])
@@ -3176,7 +3125,6 @@ export class FunctionModsManager {
       if (!existsSync(join(plugin.path, hooksPath))) return false
       const hooks = resolveModFile(plugin.path, normalizePluginRelativePath(hooksPath) ?? hooksPath)
       return (
-        existsSync(hooks) &&
         statSync(hooks).size <= 32768 &&
         Object.hasOwn(JSON.parse(readFileSync(hooks, "utf8")), "modules")
       )
@@ -3185,7 +3133,8 @@ export class FunctionModsManager {
     }
   }
 
-  private sources(selection?: ClawProfile | null, presenceOnly = false): ModPluginSource[] {
+  private sources(selection?: ClawProfile | null, presenceOnly = false,
+    preferredSiteKey?: string): ModPluginSource[] {
     const binding = currentRuntimePluginSource()
     const installed = this.host.plugins()
     const plugins = binding?.capabilitySources || binding?.mode === "host"
@@ -3200,7 +3149,19 @@ export class FunctionModsManager {
     }
     let candidates: ModPluginSource[]
     if (presenceOnly) {
-      const first = plugins.find((plugin) => this.isSource(plugin))
+      // A classic resident only suggests where to start this fresh existence check.
+      const resident = !binding && preferredSiteKey ? this.sessions.get(preferredSiteKey) : undefined
+      const snapshot = resident?.loaded && resident.session?.plugins.length &&
+        !resident.hostSourceBound && !resident.runtimeSourceToken &&
+        resident.developmentPlugins.size === 0 && resident.snapshots.size === 1
+        ? resident.snapshots.values().next().value : undefined
+      const preferred = snapshot?.sourceId && snapshot.sourcePath &&
+        !snapshot.assertRuntimeSource && !snapshot.assertRuntimeSourceContent
+        ? plugins.find(plugin => plugin.enabled && plugin.id === snapshot.sourceId &&
+          isSameWorkspacePath(plugin.path, snapshot.sourcePath))
+        : undefined
+      const first = preferred && this.isSource(preferred)
+        ? preferred : plugins.find(plugin => plugin !== preferred && this.isSource(plugin))
       candidates = first ? [first] : []
     } else candidates = plugins.filter((plugin) => this.isSource(plugin))
     const sources = candidates.sort((a, b) => a.id.localeCompare(b.id))
@@ -3211,14 +3172,15 @@ export class FunctionModsManager {
       : sources
   }
 
-  private hasSources(workspace: string, threadId: string): boolean {
+  private hasSources(workspace: string, threadId: string, preferResident = false): boolean {
     if (this.runtimeReceiptError) return false
     if (this.development?.activeFor(workspace, threadId)) return true
-    if (this.sessions.get(JSON.stringify([workspace, threadId]))?.hostSourceBound) return true
+    const key = JSON.stringify([workspace, threadId])
+    if (this.sessions.get(key)?.hostSourceBound) return true
     if (this.reloadControl.error(workspace, threadId)) return false
     const selection = this.clawSelection(workspace, threadId)
     if (selection?.capabilities.length || selection?.builtins?.contextMeter) return true
-    return this.sources(undefined, true).length > 0
+    return this.sources(undefined, true, preferResident && !selection ? key : undefined).length > 0
   }
 
   private readonly runtimeReadiness = new Set<{
@@ -3376,9 +3338,10 @@ export class FunctionModsManager {
   clawSelection(workspace: string, threadId: string): ClawProfile | null {
     if (currentRuntimePluginSource()?.mode === "host" ||
       this.sessions.get(JSON.stringify([workspace, threadId]))?.hostSourceBound) return null
-    if (!this.host.clawApplicable?.(threadId)) return null
+    const applicable = this.host.clawApplicable !== undefined
+    if (applicable && !this.host.clawApplicable?.(threadId)) return null
     const scope = this.host.clawScope?.(threadId)
-    if (this.host.clawScope && !scope) return null
+    if (this.host.clawScope ? !scope : !applicable) return null
     const preparing = this.preparingSelection.getStore()
     if (preparing?.active && preparing.workspace === workspace && preparing.threadId === threadId)
       return preparing.profile
@@ -5820,7 +5783,7 @@ export class FunctionModsManager {
       .find((row) => row.id === recordId && row.phase === "state.transition")
     const operationId = record && isModObject(record.detail) ? record.detail.operationId : undefined
     if (typeof operationId !== "string") throw new ModFunctionError("MODS_RECOVERY_RECORD_MISSING")
-    return inspectAutobizRecovery(workspace, operationId, assertLive)
+    return inspectAutobizCompletionRecovery({ workspace, operationId, assertCurrent: assertLive })
   }
 
   private async submitAutobizTransition(
@@ -5982,7 +5945,7 @@ export class FunctionModsManager {
         input,
         signal,
         (commitSignal) =>
-          advanceAutobizCheckpoint({
+          transitionAutobizCompletion({
             workspace: scope?.workspace ?? workspace,
             feature: feature as string,
             from: from as string,
@@ -6064,7 +6027,7 @@ export class FunctionModsManager {
       input,
       signal,
       (commitSignal) =>
-        advanceAutobizCheckpoint({
+        transitionAutobizCompletion({
           workspace: scope?.workspace ?? workspace,
           feature: feature as string,
           from: from as string,
@@ -6492,20 +6455,12 @@ export class FunctionModsManager {
         throw new ModFunctionError("MODS_COMPLETION_CONFIG_CHANGED")
       this.assertAppliedConfiguration(entry)
     }
-    const stages = [...entry.snapshots.keys()].flatMap((name) => {
+    const applicationPlan = planCompletionApplicationEvidence([...entry.snapshots.keys()].map((name) => {
       const app = this.applicationPolicies.hostValue(workspace, name)
-      return isModObject(app) &&
-        app.mode !== "off" &&
-        typeof app.autobizStartCheckpoint === "string" &&
-        typeof app.feature === "string"
-        ? [{ plugin: name, feature: app.feature, start: app.autobizStartCheckpoint }]
-        : []
-    })
-    const usesAutobizEvidence = stages.length > 0 || [...entry.snapshots.keys()].some((name) => {
-      const app = this.applicationPolicies.hostValue(workspace, name)
-      return isModObject(app) && app.mode !== "off" && Array.isArray(app.checks) &&
-        app.checks.includes("autobiz-validator")
-    })
+      return { plugin: name, application: isModObject(app) ? app : undefined }
+    }))
+    const stages = [...applicationPlan.stages]
+    const usesAutobizEvidence = applicationPlan.evidenceReferences
     const captureBinding = async (
       operationSignal: AbortSignal
     ): Promise<CompletionEvidenceBinding> => {
@@ -6677,28 +6632,15 @@ export class FunctionModsManager {
     )
     if (active.length === 0) return undefined
     this.assertAppliedConfiguration(entry)
-    const automaticStages = active.flatMap(([plugin]) => {
-      const app = this.applicationPolicies.hostValue(workspace, plugin)
-      return isModObject(app) &&
-        typeof app.autobizStartCheckpoint === "string" &&
-        typeof app.feature === "string"
-        ? [{ plugin, feature: app.feature, start: app.autobizStartCheckpoint }]
-        : []
+    const activePlugins = new Set(active.map(([name]) => name))
+    const businessEntries = [...configured].map(([plugin, policy]) => {
+      const app = activePlugins.has(plugin)
+        ? this.applicationPolicies.hostValue(workspace, plugin) : undefined
+      return { plugin, policy, active: activePlugins.has(plugin),
+        application: isModObject(app) ? app : undefined }
     })
-    // One snapshot cannot authorize a second state mutation after the first changes it.
-    if (
-      new Set(automaticStages.map((stage) => JSON.stringify([stage.feature, stage.start]))).size > 1
-    )
-      throw new ModFunctionError("MODS_AUTOBIZ_STAGE_CONFLICT")
-    if (
-      options.stage &&
-      automaticStages.some(
-        (stage) => stage.feature !== options.stage!.feature || stage.start !== options.stage!.start
-      )
-    )
-      throw new ModFunctionError("MODS_AUTOBIZ_STAGE_CONFLICT")
-    const automaticStage = options.stage ?? automaticStages[0]
-    const policyFor = (name: string) => configured.get(name)
+    const businessPlan = planCompletionBusiness(businessEntries, options.stage)
+    const automaticStage = businessPlan.automaticStage
     const policies = active
       .map(([, policy]) => policy)
       .filter((policy): policy is NonNullable<typeof policy> => !!policy)
@@ -6733,18 +6675,7 @@ export class FunctionModsManager {
       }
       const config = configuration()
       if (JSON.stringify(config) !== initialConfig) throw Error("COMPLETION_CONFIG_CHANGED")
-      const paths = [...entry.snapshots.keys()].flatMap((name) => {
-        const policy = policyFor(name)
-        if (!policy || policy.mode === "off") return []
-        if (policy.scope === "file") return policy.target ? [policy.target] : []
-        if (policy.scope === "feature")
-          return [
-            ...(policy.feature ? autobizFeatureEvidencePaths(policy.feature) : []),
-            ...(policy.target ? [policy.target] : [])
-          ]
-        if (policy.scope === "project") return ["."]
-        return []
-      })
+      const paths = [...completionBusinessEvidencePaths(businessEntries)]
       return captureCompletionBinding({
         workspace: scope?.workspace ?? workspace,
         threadId,
@@ -6754,7 +6685,7 @@ export class FunctionModsManager {
         runtimeGeneration: entry.generation,
         config,
         paths,
-        ...(policies.some((policy) => policy.checks.includes("autobiz-validator")) || automaticStage
+        ...(businessPlan.evidenceReferences
           ? { references: AUTOBIZ_COMPLETION_EVIDENCE } : {}),
         signal,
         excludePaths: this.store.evidenceExcludedPaths,
@@ -6985,7 +6916,7 @@ export class FunctionModsManager {
           const validatorPolicies = policies.filter((policy) =>
             policy.checks.includes("autobiz-validator")
           )
-          for (const feature of new Set(validatorPolicies.map((policy) => policy.feature))) {
+          for (const feature of businessPlan.validatorFeatures) {
             const selectedPolicies = validatorPolicies.filter(
               (policy) => policy.feature === feature
             )
@@ -7005,15 +6936,13 @@ export class FunctionModsManager {
               if (mandatoryPolicies.length) throw new ModFunctionError("MODS_COMPLETION_TIMEOUT")
               continue
             }
-            const validator = await runAutobizValidator(
-              this.host.fileScope?.(workspace, threadId)?.workspace ?? workspace,
-              feature,
-              signal,
-              remaining,
-              automaticStage && feature === automaticStage.feature
-                ? automaticStage.start
-                : undefined
-            )
+            const validator = await validateAutobizCompletion({
+              workspace: this.host.fileScope?.(workspace, threadId)?.workspace ?? workspace,
+              feature, signal, timeoutMs: remaining,
+              stageStart: automaticStage && feature === automaticStage.feature
+                ? automaticStage.start : undefined,
+              assertCurrent: assertLive
+            })
             signal.throwIfAborted()
             sharedBudget?.assert()
             if (options.strictErrors && validator.compiler !== "passed")
@@ -7631,13 +7560,15 @@ export class FunctionModsManager {
    */
   async siteRead(workspace: string, threadId: string, component: FunctionUiSite,
     props: ModObject, presentationId?: string, messageId?: string,
-    expectedRequestId?: string, ...peerProtocol: [unknown?, boolean?]):
+    expectedRequestId?: string, ...peerProtocol: [unknown?, boolean?, AbortSignal?]):
     Promise<import("../../../shared/mods/v2/sites").FunctionSiteReadOutcome> {
+    const signal = peerProtocol[2]
+    signal?.throwIfAborted()
     const lease = this.displayRollout.admit(...peerProtocol.slice(0, 1) as [unknown?])
     const supportsPassiveData = !peerProtocol.length || peerProtocol[0] === FUNCTION_DISPLAY_PROTOCOL
     const read = () => this.readSiteWithinLease(workspace, threadId, component, props,
       presentationId, messageId, expectedRequestId,
-      lease.path === "projection-v1" && peerProtocol[1] !== true, supportsPassiveData)
+      lease.path === "projection-v1" && peerProtocol[1] !== true, supportsPassiveData, signal)
     try {
       const resident = this.sessions.get(JSON.stringify([workspace, threadId]))
       const token = resident?.loaded && resident.session?.plugins.length ? resident.runtimeSourceToken : undefined
@@ -7660,9 +7591,11 @@ export class FunctionModsManager {
 
   private async readSiteWithinLease(workspace: string, threadId: string, component: FunctionUiSite,
     props: ModObject, presentationId: string | undefined, messageId: string | undefined,
-    expectedRequestId: string | undefined, projectionEnabled: boolean, supportsPassiveData: boolean):
+    expectedRequestId: string | undefined, projectionEnabled: boolean, supportsPassiveData: boolean,
+    signal?: AbortSignal):
     Promise<import("../../../shared/mods/v2/sites").FunctionSiteReadOutcome> {
     functionUiSite(component)
+    signal?.throwIfAborted()
     if (messageId !== undefined && (component !== "UserMessage" || typeof messageId !== "string" ||
       !messageId || messageId.length > 512)) throw new ModFunctionError("MODS_UI_SITE_PROPS")
     const passive = FUNCTION_PASSIVE_DISPLAY_SITES.includes(component)
@@ -7679,7 +7612,7 @@ export class FunctionModsManager {
       const admission = this.captureNativeDisplayAdmission(workspace, threadId, component, true, false)
       if (admission) return { state: "projected", snapshot:
         await this.displayProjection.readUnretainedMessage(workspace, threadId, component, props,
-          admission, presentationId, messageId) }
+          admission, presentationId, messageId, signal) }
     }
     let reusableAdmission: FunctionNativeDisplayAdmission | undefined
     if (prepared) {
@@ -7687,7 +7620,7 @@ export class FunctionModsManager {
       if (admission?.native) {
         try {
           return { state: "projected", snapshot: await this.displayProjection.readPrepared(
-            workspace, component, prepared, admission, projectionEnabled) }
+            workspace, component, prepared, admission, projectionEnabled, signal) }
         } catch (error) {
           // Tool payloads can legitimately contain fields named action/handle. A passive
           // cache refusal keeps their real protected drawing, never an unprotected fallback.
@@ -7702,11 +7635,15 @@ export class FunctionModsManager {
     }
     const readOwned = async ():
       Promise<import("../../../shared/mods/v2/sites").FunctionSiteReadOutcome> => {
+      const mountSignal = projectionEnabled &&
+        (component === "UserMessage" || component === "AssistantMessage") ? signal : undefined
       const outcome = await this.siteMountOutcome(workspace, threadId, component, messageId,
-        expectedRequestId)
+        expectedRequestId, ...(mountSignal ? [mountSignal] as const : []))
       if (outcome.state !== "mounted") return outcome
       try {
-        const snapshot = await this.siteRender(workspace, threadId, outcome.owner, props)
+        signal?.throwIfAborted()
+        const snapshot = await this.siteRender(workspace, threadId, outcome.owner, props, signal)
+        signal?.throwIfAborted()
         if (snapshot) {
           if (prepared) {
             const admission = this.captureNativeDisplayAdmission(workspace, threadId, component)
@@ -7747,7 +7684,7 @@ export class FunctionModsManager {
     }
     return prepared && reusableAdmission
       ? this.displayProjection.reuseOrRun(prepared, reusableAdmission, readOwned,
-          snapshot => ({ state: "projected", snapshot }))
+          snapshot => ({ state: "projected", snapshot }), signal)
       : readOwned()
   }
 
@@ -7836,8 +7773,13 @@ export class FunctionModsManager {
     threadId: string,
     component: FunctionUiSite,
     messageId?: string,
-    expectedRequestId?: string
+    expectedRequestId?: string,
+    signal?: AbortSignal
   ): Promise<FunctionSiteMountOutcome> {
+    if (signal) {
+      return this.mountSite(workspace, threadId, component, messageId, expectedRequestId,
+        false, undefined, signal)
+    }
     return this.mountSite(workspace, threadId, component, messageId, expectedRequestId)
   }
 
@@ -7848,7 +7790,8 @@ export class FunctionModsManager {
     messageId?: string,
     expectedRequestId?: string,
     legacyProtection = false,
-    retained?: SessionEntry
+    retained?: SessionEntry,
+    signal?: AbortSignal
   ): Promise<FunctionSiteMountOutcome> {
     if (this.closed) return { state: "retired" }
     const key = JSON.stringify([workspace, threadId])
@@ -7883,7 +7826,7 @@ export class FunctionModsManager {
         }
         assertRetained()
         const result = await this.mountSite(workspace, threadId, component, messageId,
-          expectedRequestId, legacyProtection, resident)
+          expectedRequestId, legacyProtection, resident, ...(signal ? [signal] as const : []))
         try { assertRetained() }
         catch (error) {
           if (result.state === "mounted") {
@@ -7909,7 +7852,8 @@ export class FunctionModsManager {
     // A stopped guest cannot execute again, but the original application remains usable.
     // Protected content still passes through the native-only publication pipeline.
     const stopped = Boolean(this.reloadControl.error(workspace, threadId))
-    if (this.pendingSiteMounts.size >= 32) throw new ModFunctionError("MODS_UI_SITE_MOUNT_CAPACITY")
+    if (this.pendingSiteMounts.size >= FUNCTION_MOD_RESOURCE_BUDGETS.mainDisplay.pendingMounts)
+      throw new ModFunctionError("MODS_UI_SITE_MOUNT_CAPACITY")
     const request = { workspace, threadId, valid: true }
     const epoch = this.epoch(workspace)
     const captured = this.host.captureSiteGuard?.(workspace, threadId)
@@ -7935,6 +7879,7 @@ export class FunctionModsManager {
     let delivered = false
     try {
       assertCurrent()
+      signal?.throwIfAborted()
       // A visible site is an entry point: approved modules must start without a command warmup.
       // Inspect grants before allocating a runtime, and retain cancellation during discovery.
       // The empty Host selection remains empty for native history after its execution token
@@ -7942,13 +7887,15 @@ export class FunctionModsManager {
       const emptyHost = resident?.hostSourceBound && resident.loaded &&
         resident.session?.plugins.length === 0
       let hasFunctions = enabled && !stopped && !emptyHost &&
-        (!!retained || this.hasSources(workspace, threadId))
+        (!!retained || this.hasSources(workspace, threadId, true))
+      signal?.throwIfAborted()
       // turn.step can retain a native-only session while installed functions await approval.
       // Its presence alone must not turn every ordinary transcript slot into a retired site.
       // Recheck current authority unless this exact resident has actual loaded functions.
       if (hasFunctions && !this.sessions.get(key)?.session?.plugins.length) {
         const available = await this.effectiveStatus(workspace, threadId)
         assertCurrent()
+        signal?.throwIfAborted()
         if (available.some(item => item.state === "invalid")) return { state: "retired" }
         hasFunctions = available.some(item => item.state === "ready")
       }
@@ -7963,9 +7910,11 @@ export class FunctionModsManager {
       }
       const entry = await this.session(workspace, threadId)
       assertCurrent()
+      signal?.throwIfAborted()
       if (this.sessions.get(key) !== entry || entry.session!.plugins.length === 0)
         return { state: "retired" }
-      const owner = await entry.session!.sites.mount(component, messageId, expectedRequestId)
+      const owner = await entry.session!.sites.mount(component, messageId, expectedRequestId,
+        ...(signal ? [signal] as const : []))
       allocatedOwner = owner
       allocatedSites = entry.session!.sites
       assertCurrent()
@@ -8005,18 +7954,21 @@ export class FunctionModsManager {
     workspace: string,
     threadId: string,
     owner: string,
-    props: ModObject
+    props: ModObject,
+    signal?: AbortSignal
   ): Promise<FunctionPaneSnapshot | null> {
-    if (this.hostOnlySites.has(owner)) return this.hostOnlySites.render(workspace, threadId, owner, props)
+    signal?.throwIfAborted()
+    if (this.hostOnlySites.has(owner)) return this.hostOnlySites.render(workspace, threadId, owner, props, signal)
     if (!this.host.enabled(workspace) && this.host.protects?.(workspace) !== true) return null
     const route = this.siteOwners.get(owner)
     if (!route || route.workspace !== workspace || route.threadId !== threadId)
       throw new ModFunctionError("MODS_UI_SITE_CLOSED")
     route.assertLive()
     await route.entry.loading
+    signal?.throwIfAborted()
     route.assertLive()
     let snapshot: FunctionPaneSnapshot
-    try { snapshot = await route.entry.session!.sites.render(owner, props) }
+    try { snapshot = await route.entry.session!.sites.render(owner, props, signal) }
     catch (error) {
       if (route.entry.session!.plugins.some(plugin => plugin.guest.stats.disposed))
         this.stopLostEntry(route.entry)

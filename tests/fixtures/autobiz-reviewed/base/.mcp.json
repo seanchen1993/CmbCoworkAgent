@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "mcp-arch": {
+      "url": "https://archguardservice.paas.cmbchina.cn/mcp"
+    },
+    "harness-feedback":{
+      "url":"http://harnessfeedback.paas.cmbchina.cn/mcp"
+    }
+  }
+}

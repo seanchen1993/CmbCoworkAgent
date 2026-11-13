@@ -1238,28 +1238,34 @@ export function LocalProjectRun({
                     const navigation = ++latestNavigation.current
                     const account = useAppStore.getState().accountRevision
                     void import("../../lib/store")
-                      .then(({ useAppStore, isThreadDeletionPending }) =>
-                        navigateProjectThread(
-                          {
-                            threadId: item.execution!.threadId,
-                            projectId: project.projectId,
-                            operationId: item.operationId,
-                            stageId: item.stageId,
-                            pluginDigest: item.pluginDigest,
-                            workspace: project.workspace
-                          },
-                          {
-                            read: (id) =>
-                              window.api.threads.get(id, { requestScope: "foreground-hydration" }),
-                            isCurrent: () =>
-                              active.current && navigation === latestNavigation.current &&
-                              account === useAppStore.getState().accountRevision,
-                            isRetired: isThreadDeletionPending,
-                            add: (thread) => useAppStore.getState().addThreadSummary(thread),
-                            select: (id) => useAppStore.getState().selectThread(id)
-                          }
+                      .then(async ({ useAppStore, isThreadDeletionPending }) => {
+                        const publisher = useAppStore.getState().captureThreadSummaryRead(
+                          item.execution!.threadId
                         )
-                      )
+                        try {
+                          if (!publisher.isCurrent()) return
+                          await navigateProjectThread(
+                            {
+                              threadId: item.execution!.threadId,
+                              projectId: project.projectId,
+                              operationId: item.operationId,
+                              stageId: item.stageId,
+                              pluginDigest: item.pluginDigest,
+                              workspace: project.workspace
+                            },
+                            {
+                              read: (id) =>
+                                window.api.threads.get(id, { requestScope: "foreground-hydration" }),
+                              isCurrent: () =>
+                                active.current && navigation === latestNavigation.current &&
+                                account === useAppStore.getState().accountRevision,
+                              isRetired: isThreadDeletionPending,
+                              add: (thread) => publisher.publish(thread),
+                              select: (id) => useAppStore.getState().selectThread(id)
+                            }
+                          )
+                        } finally { publisher.close() }
+                      })
                       .catch((cause) => {
                         if (active.current) setError(cause)
                       })
@@ -1445,16 +1451,20 @@ function HostProjectSessions({ projectId, workspace, operationThreadIds }: {
         <button type="button" className="underline" onClick={() => {
           const revision = ++lifecycle.current
           const account = useAppStore.getState().accountRevision
-          void import("../../lib/store").then(({ useAppStore, isThreadDeletionPending }) =>
-            navigateProjectThread(target, {
-              read: id => window.api.threads.get(id, { requestScope: "foreground-hydration" }),
-              isCurrent: () => lifecycle.current === revision &&
-                account === useAppStore.getState().accountRevision,
-              isRetired: isThreadDeletionPending,
-              add: value => useAppStore.getState().addThreadSummary(value),
-              select: id => useAppStore.getState().selectThread(id)
-            })
-          ).catch(() => setError("无法打开原阶段会话，请更新项目记录后重试。"))
+          void import("../../lib/store").then(async ({ useAppStore, isThreadDeletionPending }) => {
+            const publisher = useAppStore.getState().captureThreadSummaryRead(target.threadId)
+            try {
+              if (!publisher.isCurrent()) return
+              await navigateProjectThread(target, {
+                read: id => window.api.threads.get(id, { requestScope: "foreground-hydration" }),
+                isCurrent: () => lifecycle.current === revision &&
+                  account === useAppStore.getState().accountRevision,
+                isRetired: isThreadDeletionPending,
+                add: value => publisher.publish(value),
+                select: id => useAppStore.getState().selectThread(id)
+              })
+            } finally { publisher.close() }
+          }).catch(() => setError("无法打开原阶段会话，请更新项目记录后重试。"))
         }}>{thread.title || target.stageId}</button>
       </li>)}
     </ul>

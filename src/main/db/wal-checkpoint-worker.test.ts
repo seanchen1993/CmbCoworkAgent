@@ -1,10 +1,12 @@
-import { transformSync } from "esbuild"
-import { copyFileSync, mkdtempSync, readFileSync, rmSync } from "node:fs"
+import { build } from "esbuild"
+import { copyFileSync, mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { DatabaseSync } from "node:sqlite"
 import { Worker } from "node:worker_threads"
 import { expect, it } from "vitest"
+import { fileURLToPath } from "node:url"
+import { readCheckpointDatabaseFileIdentity } from "../checkpointer/checkpoint-database-identity"
 
 it("checkpoints committed WAL pages from a real worker while the owner connection remains open", async () => {
   const root = mkdtempSync(join(tmpdir(), "cmb-deletion-wal-"))
@@ -18,11 +20,21 @@ it("checkpoints committed WAL pages from a real worker while the owner connectio
     const insert = database.prepare("INSERT INTO messages VALUES (?, ?)")
     for (let id = 0; id < 1000; id++) insert.run(id, "x".repeat(2048))
     database.exec("DELETE FROM messages WHERE id = 0; COMMIT")
-    const code = transformSync(
-      readFileSync(new URL("./wal-checkpoint-worker.ts", import.meta.url), "utf8"),
-      { loader: "ts", format: "cjs" }
-    ).code
-    const worker = new Worker(code, { eval: true, workerData: databasePath })
+    const entry = join(root, "actual-worker.cjs")
+    await build({
+      entryPoints: [fileURLToPath(new URL("./wal-checkpoint-worker.ts", import.meta.url))],
+      outfile: entry,
+      bundle: true,
+      platform: "node",
+      format: "cjs",
+      target: "node22"
+    })
+    const worker = new Worker(entry, {
+      workerData: {
+        databasePath,
+        file: await readCheckpointDatabaseFileIdentity(databasePath)
+      }
+    })
     try {
       await new Promise<void>((resolve, reject) => {
         worker.once("error", reject)

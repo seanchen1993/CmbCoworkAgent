@@ -37,13 +37,36 @@ export interface NativeSqliteCurrentExecution {
 const currentExecutionOrigins = new WeakMap<NativeSqliteAdapter, CurrentExecutionOrigin>()
 interface NativeCurrentFactoryOrigin {
   readonly native: DatabaseSync
+  readonly nativeConstructor: typeof DatabaseSync
   readonly prototype: object | null
+  readonly isTransactionField: PropertyDescriptor
   readonly isOpenField: PropertyDescriptor
   readonly isOpen: (this: DatabaseSync) => boolean
 }
 const nativeCurrentFactoryOrigins = new WeakMap<DatabaseSync, NativeCurrentFactoryOrigin>()
 const executionWeakGet = WeakMap.prototype.get, executionWeakSet = WeakMap.prototype.set
+const executionApply = Reflect.apply
+const executionNativeConstructor = DatabaseSync
 const executionNativePrepare = DatabaseSync.prototype.prepare
+const executionStatementRun = StatementSync.prototype.run
+const executionDescriptor = Object.getOwnPropertyDescriptor
+const executionPrototype = Object.getPrototypeOf
+const executionCreate = Object.create
+const executionDefine = Object.defineProperty
+const executionFreeze = Object.freeze
+const executionIsProxy = types.isProxy
+const executionIsUint8Array = types.isUint8Array
+const executionIsSharedArrayBuffer = types.isSharedArrayBuffer
+const executionIsArray = Array.isArray
+const executionSafeInteger = Number.isSafeInteger
+const executionArray = Array
+const executionBytes = Uint8Array
+const executionTypedArrayPrototype = executionPrototype(Uint8Array.prototype)
+const executionBuffer = executionDescriptor(executionTypedArrayPrototype, "buffer")!.get!
+const executionByteLength = executionDescriptor(executionTypedArrayPrototype, "byteLength")!.get!
+const executionBytesSet = Uint8Array.prototype.set
+const executionRegExp = RegExp.prototype.exec
+const executionSelect = /^\s*SELECT\b/i
 const executionStatementGet = StatementSync.prototype.get
 const executionObjectKeys = Object.keys
 const rowCopyGlobal = globalThis
@@ -55,9 +78,21 @@ const rowCopyReflectField = rowCopyDescriptor(rowCopyGlobal, "Reflect")!
 const rowCopyEntriesField = rowCopyDescriptor(rowCopyObject, "entries")!
 const rowCopyDefineField = rowCopyDescriptor(rowCopyObject, "defineProperty")!
 const rowCopyApplyField = rowCopyDescriptor(rowCopyReflect, "apply")!
+interface FreshNativeRowTransfer {
+  readonly setPrototype: typeof Object.setPrototypeOf
+  readonly objectPrototype: object | null
+  readonly typedConstructor: object
+  readonly functionPrototype: object
+  readonly hasInstance: symbol
+  readonly instanceField: PropertyDescriptor
+  readonly arrayField: PropertyDescriptor
+  readonly arrayIsArrayField: PropertyDescriptor
+  readonly bytesField: PropertyDescriptor
+}
+const freshNativeRowTransfer = captureFreshNativeRowTransfer()
 
 function hasOriginalRowCopyField(
-  receiver: object, key: string, expected: PropertyDescriptor
+  receiver: object, key: PropertyKey, expected: PropertyDescriptor
 ): boolean {
   const field = rowCopyDescriptor(receiver, key)
   return !!field && !!rowCopyDescriptor(field, "value") && field.value === expected.value &&
@@ -65,11 +100,81 @@ function hasOriginalRowCopyField(
     field.configurable === expected.configurable
 }
 
+/** Optional performance cohort, not native identity or authority authentication. */
+function captureFreshNativeRowTransfer(): FreshNativeRowTransfer | undefined {
+  // Trusted boot may install ordinary counting wrappers. All additional captures are
+  // optional too: an initial shim/getter must not turn this optimization into a startup rule.
+  try {
+    const FunctionCtor = Function, SymbolCtor = Symbol
+    const functionSource = FunctionCtor.prototype.toString, setPrototype = Object.setPrototypeOf
+    const nativeSource = (value: unknown, name: string): boolean => typeof value === "function" &&
+      executionApply(functionSource, value, []) === `function ${name}() { [native code] }`
+    if (!nativeSource(functionSource, "toString") || !nativeSource(executionApply, "apply") ||
+      !nativeSource(executionStatementGet, "get") ||
+      !nativeSource(executionDescriptor, "getOwnPropertyDescriptor") ||
+      !nativeSource(executionPrototype, "getPrototypeOf") ||
+      !nativeSource(setPrototype, "setPrototypeOf") ||
+      !nativeSource(executionIsArray, "isArray") || !nativeSource(executionObjectKeys, "keys") ||
+      !nativeSource(executionBytes, "Uint8Array") || !nativeSource(rowCopyObject, "Object") ||
+      !nativeSource(FunctionCtor, "Function") || !nativeSource(SymbolCtor, "Symbol")) return undefined
+    // Node's util export is anonymous. This exact compatibility shape is cold-only opt-out,
+    // not authentication: deliberately forged metadata must never gain access to raw rows.
+    const proxyField = (key: string, expected: unknown): boolean => {
+      const field = rowCopyDescriptor(executionIsProxy, key)
+      return !!field && !!rowCopyDescriptor(field, "value") && field.value === expected &&
+        field.writable === false && field.enumerable === false && field.configurable === true
+    }
+    if (!nativeSource(executionIsProxy, "isProxy") &&
+      (executionApply(functionSource, executionIsProxy, []) !== "function () { [native code] }" ||
+        !proxyField("name", "") || !proxyField("length", 0) ||
+        executionPrototype(executionIsProxy) !== FunctionCtor.prototype ||
+        executionApply(executionIsProxy, undefined, [executionIsProxy]) !== false)) return undefined
+    if (executionIsProxy(executionStatementGet) ||
+      executionIsProxy(rowCopyGlobal) || executionIsProxy(rowCopyReflect) ||
+      executionIsProxy(executionArray)) return undefined
+    // Bound/Proxy/own-toString disguises opt out above. Only qualified predicates receive
+    // these additional values; the capture result stays private.
+    const functionPrototype = FunctionCtor.prototype, hasInstance = SymbolCtor.hasInstance
+    const typedConstructor = executionPrototype(executionBytes)
+    if (!nativeSource(typedConstructor, "TypedArray") || executionIsProxy(typedConstructor) ||
+      executionPrototype(typedConstructor) !== functionPrototype ||
+      rowCopyDescriptor(executionBytes, hasInstance) ||
+      rowCopyDescriptor(typedConstructor, hasInstance)) return undefined
+    const instanceField = rowCopyDescriptor(functionPrototype, hasInstance)
+    const arrayField = rowCopyDescriptor(rowCopyGlobal, "Array")
+    const arrayIsArrayField = rowCopyDescriptor(executionArray, "isArray")
+    const bytesField = rowCopyDescriptor(rowCopyGlobal, "Uint8Array")
+    if (!instanceField || !rowCopyDescriptor(instanceField, "value") ||
+      !nativeSource(instanceField.value, "[Symbol.hasInstance]") ||
+      !arrayField || !rowCopyDescriptor(arrayField, "value") || arrayField.value !== executionArray ||
+      !arrayIsArrayField || !rowCopyDescriptor(arrayIsArrayField, "value") ||
+      arrayIsArrayField.value !== executionIsArray ||
+      !bytesField || !rowCopyDescriptor(bytesField, "value") ||
+      bytesField.value !== executionBytes) return undefined
+    return { setPrototype, objectPrototype: executionPrototype({}), typedConstructor,
+      functionPrototype, hasInstance, instanceField, arrayField, arrayIsArrayField, bytesField }
+  } catch { return undefined }
+}
+
+function hasOriginalRowTransferArray(transfer: FreshNativeRowTransfer): boolean {
+  return hasOriginalRowCopyField(rowCopyGlobal, "Array", transfer.arrayField) &&
+    hasOriginalRowCopyField(executionArray, "isArray", transfer.arrayIsArrayField)
+}
+
+function hasOriginalRowTransferBytes(transfer: FreshNativeRowTransfer): boolean {
+  return hasOriginalRowCopyField(rowCopyGlobal, "Uint8Array", transfer.bytesField) &&
+    !rowCopyDescriptor(executionBytes, transfer.hasInstance) &&
+    executionPrototype(executionBytes) === transfer.typedConstructor &&
+    !rowCopyDescriptor(transfer.typedConstructor, transfer.hasInstance) &&
+    executionPrototype(transfer.typedConstructor) === transfer.functionPrototype &&
+    hasOriginalRowCopyField(transfer.functionPrototype, transfer.hasInstance, transfer.instanceField)
+}
+
 function assertCurrentExecutionOrigin(record: CurrentExecutionOrigin): void {
   const database = record.database
   if (record.failed || types.isProxy(database) ||
     Object.getPrototypeOf(database) !== record.prototype ||
-    Reflect.apply(executionWeakGet, currentExecutionOrigins, [database]) !== record)
+    executionApply(executionWeakGet, currentExecutionOrigins, [database]) !== record)
     throw new Error("[NativeSqlite] Read-one adapter changed")
   const native = Object.getOwnPropertyDescriptor(database, "native")
   const closed = Object.getOwnPropertyDescriptor(database, "closed")
@@ -82,7 +187,7 @@ function assertCurrentExecutionOrigin(record: CurrentExecutionOrigin): void {
     closed.writable !== record.closedField.writable ||
     closed.configurable !== record.closedField.configurable ||
     types.isProxy(record.native) || Object.getPrototypeOf(record.native) !== record.nativeOrigin.prototype ||
-    Reflect.apply(executionWeakGet, nativeCurrentFactoryOrigins, [record.native]) !== record.nativeOrigin)
+    executionApply(executionWeakGet, nativeCurrentFactoryOrigins, [record.native]) !== record.nativeOrigin)
     throw new Error("[NativeSqlite] Read-one adapter changed")
   const isOpen = Object.getOwnPropertyDescriptor(record.native, "isOpen")
   const expected = record.nativeOrigin.isOpenField
@@ -92,13 +197,14 @@ function assertCurrentExecutionOrigin(record: CurrentExecutionOrigin): void {
     throw new Error("[NativeSqlite] Read-one adapter changed")
   if (closed.value || Reflect.apply(record.nativeOrigin.isOpen, record.native, []) !== true)
     throw new Error("[NativeSqlite] Database is closed")
+  Reflect.apply(readOneAssertOpen, database, [])
 }
 
 /** Actual constructor/native resource facts only; no statement or business query is created here. */
 export function readFunctionConversationNativeSqliteCurrentExecution(database: unknown):
   NativeSqliteCurrentExecution | undefined {
   if (!database || typeof database !== "object" || types.isProxy(database)) return undefined
-  const record = Reflect.apply(executionWeakGet, currentExecutionOrigins, [database]) as
+  const record = executionApply(executionWeakGet, currentExecutionOrigins, [database]) as
     CurrentExecutionOrigin | undefined
   if (!record) return undefined
   record.view.assertDataCurrent()
@@ -106,7 +212,7 @@ export function readFunctionConversationNativeSqliteCurrentExecution(database: u
 }
 
 function installCurrentExecutionOrigin(database: NativeSqliteAdapter, native: DatabaseSync): void {
-  const nativeOrigin = native && Reflect.apply(executionWeakGet, nativeCurrentFactoryOrigins, [native]) as
+  const nativeOrigin = native && executionApply(executionWeakGet, nativeCurrentFactoryOrigins, [native]) as
     NativeCurrentFactoryOrigin | undefined
   if (!native || typeof native !== "object" || types.isProxy(database) || types.isProxy(native) ||
     !nativeOrigin ||
@@ -133,7 +239,190 @@ function installCurrentExecutionOrigin(database: NativeSqliteAdapter, native: Da
   const record: CurrentExecutionOrigin = { database, native,
     prototype: Object.getPrototypeOf(database), nativeField, closedField, nativeOrigin,
     view, failed: false }
-  Reflect.apply(executionWeakSet, currentExecutionOrigins, [database, record])
+  executionApply(executionWeakSet, currentExecutionOrigins, [database, record])
+}
+
+
+/** Fixed native dispatch for the prepared-data seal and its immediate transaction only. */
+export interface NativeSqlitePreparedExecution {
+  assertDataCurrent(requireAutocommit?: boolean): void
+  prepareReadOne(sql: string): NativeSqliteReadOne
+  run(sql: string, bindings?: readonly unknown[]): void
+}
+
+function executionOwnValue(receiver: object, key: PropertyKey): unknown {
+  const descriptor = executionDescriptor(receiver, key)
+  if (!descriptor || !executionDescriptor(descriptor, "value"))
+    throw new TypeError("[NativeSqlite] Prepared execution requires own data")
+  return descriptor.value
+}
+
+function executionDefineValue(receiver: object, key: PropertyKey, value: unknown): void {
+  const descriptor = executionCreate(null) as PropertyDescriptor
+  descriptor.value = value
+  descriptor.writable = true
+  descriptor.enumerable = true
+  descriptor.configurable = true
+  executionDefine(receiver, key, descriptor)
+}
+
+function executionBindings(bindings: NativeSqliteBindings | undefined): NativeSqliteValue[] {
+  if (bindings === undefined) return []
+  if (executionIsProxy(bindings) || !executionIsArray(bindings))
+    throw new TypeError("[NativeSqlite] Prepared execution requires positional bindings")
+  const length = executionOwnValue(bindings, "length")
+  if (typeof length !== "number" || !executionSafeInteger(length) || length < 0)
+    throw new TypeError("[NativeSqlite] Invalid binding length")
+  const result = new executionArray<NativeSqliteValue>(length)
+  for (let index = 0; index < length; index++) {
+    const value = executionOwnValue(bindings, index)
+    let normalized: NativeSqliteValue
+    if (value === undefined || value === null) normalized = null
+    else if (typeof value === "boolean") normalized = value ? 1 : 0
+    else if (typeof value === "string" || typeof value === "number" || typeof value === "bigint")
+      normalized = value
+    else if (value && !executionIsProxy(value) && executionIsUint8Array(value) &&
+      !executionIsSharedArrayBuffer(executionApply(executionBuffer, value, []))) normalized = value
+    else throw new TypeError("[NativeSqlite] Unsupported prepared binding")
+    executionDefineValue(result, index, normalized)
+  }
+  return result
+}
+
+function executionCopyRow(row: Record<string, NativeSqliteValue> | undefined):
+  Record<string, NativeSqliteValue> | undefined {
+  if (!row) return undefined
+  const result = executionCreate(null) as Record<string, NativeSqliteValue>
+  const keys = executionObjectKeys(row)
+  for (let index = 0; index < keys.length; index++) {
+    const key = keys[index]
+    let value = executionOwnValue(row, key) as NativeSqliteValue
+    if (value && typeof value === "object" && executionIsUint8Array(value)) {
+      const copy = new executionBytes(executionApply(executionByteLength, value, []))
+      executionApply(executionBytesSet, copy, [value])
+      value = copy
+    }
+    executionDefineValue(result, key, value)
+  }
+  return result
+}
+
+/** Reuses the actual native factory/resource records; never calls adapter methods. */
+export function captureFunctionConversationNativeSqlitePreparedExecution(database: unknown):
+  NativeSqlitePreparedExecution | undefined {
+  if (!database || typeof database !== "object" || executionIsProxy(database)) return undefined
+  const record = executionApply(executionWeakGet, currentExecutionOrigins, [database]) as
+    CurrentExecutionOrigin | undefined
+  if (!record || record.database !== database || record.nativeOrigin.nativeConstructor !== executionNativeConstructor)
+    return undefined
+  const native = record.native, origin = record.nativeOrigin
+  const unusableField = executionDescriptor(database, "unusable")
+  if (!unusableField || !executionDescriptor(unusableField, "value") ||
+    typeof unusableField.value !== "boolean") return undefined
+  const matchesDataField = (key: string, expected: PropertyDescriptor, value: unknown) => {
+    const field = executionDescriptor(database, key)
+    return !!field && !!executionDescriptor(field, "value") && field.value === value &&
+      field.writable === expected.writable && field.enumerable === expected.enumerable &&
+      field.configurable === expected.configurable
+  }
+  const matchesGetter = (key: string, expected: PropertyDescriptor) => {
+    const field = executionDescriptor(native, key)
+    return !!field && !executionDescriptor(field, "value") && field.get === expected.get &&
+      field.set === expected.set && field.enumerable === expected.enumerable &&
+      field.configurable === expected.configurable && field.configurable === false
+  }
+  const assertResourceCurrent = (requireAutocommit = false) => {
+    if (record.failed || executionIsProxy(database) || executionIsProxy(native) ||
+      executionPrototype(database) !== record.prototype ||
+      executionPrototype(native) !== origin.prototype ||
+      executionApply(executionWeakGet, currentExecutionOrigins, [database]) !== record ||
+      executionApply(executionWeakGet, nativeCurrentFactoryOrigins, [native]) !== origin ||
+      !matchesDataField("native", record.nativeField, native) ||
+      !matchesDataField("closed", record.closedField, false) ||
+      !matchesDataField("unusable", unusableField, false) ||
+      !matchesGetter("isOpen", origin.isOpenField) ||
+      !matchesGetter("isTransaction", origin.isTransactionField))
+      throw new Error("[NativeSqlite] Prepared native resource changed")
+    if (executionApply(origin.isOpen, native, []) !== true)
+      throw new Error("[NativeSqlite] Database is closed")
+    if (requireAutocommit && executionApply(origin.isTransactionField.get!, native, []) !== false)
+      throw new Error("[NativeSqlite] Prepared execution requires autocommit")
+  }
+  assertResourceCurrent()
+  // Prepared writes must not call JS through CHECK/generated columns/expression indexes.
+  // This connection policy remains OFF once the connection enters the prepared cohort;
+  // ordinary-only connections never invoke this factory. Direct SELECTs still need the
+  // limited function qualification below. No schema/data rewrite is involved.
+  const schemaTrust = executionApply(executionNativePrepare, native,
+    ["PRAGMA trusted_schema"]) as StatementSync
+  const assertSchemaTrust = () => {
+    const row = executionApply(executionStatementGet, schemaTrust, []) as
+      Record<string, NativeSqliteValue> | undefined
+    if (!row || executionOwnValue(row, "trusted_schema") !== 0)
+      throw new Error("[NativeSqlite] Prepared schema trust changed")
+  }
+  const initialTrust = executionApply(executionStatementGet, schemaTrust, []) as
+    Record<string, NativeSqliteValue> | undefined
+  if (!initialTrust || executionOwnValue(initialTrust, "trusted_schema") !== 0) {
+    const disableTrust = executionApply(executionNativePrepare, native,
+      ["PRAGMA trusted_schema=OFF"]) as StatementSync
+    executionApply(executionStatementRun, disableTrust, [])
+  }
+  assertSchemaTrust()
+  // These two queries contain no SQL functions. Qualify only the functions used by the
+  // prepared Saver/Store seals, preserving SQLite's unrelated built-in extension functions.
+  const shadow = executionApply(executionNativePrepare, native, [
+    "SELECT 1 FROM main.sqlite_schema WHERE name='pragma_function_list' COLLATE NOCASE " +
+    "AND type IN ('table','view') LIMIT 1"
+  ]) as StatementSync
+  const assertFunctionListSchema = () => {
+    if (executionApply(executionStatementGet, shadow, []))
+      throw new Error("[NativeSqlite] Function-list schema changed")
+  }
+  assertFunctionListSchema()
+  const functions = executionApply(executionNativePrepare, native, [
+    "SELECT 1 FROM main.pragma_function_list WHERE builtin=0 AND name COLLATE NOCASE " +
+    "IN ('lower','count','total_changes','length','typeof','json_extract','json_type','sum','coalesce') LIMIT 1"
+  ]) as StatementSync
+  const assertDataCurrent = (requireAutocommit = false) => {
+    assertResourceCurrent(requireAutocommit)
+    assertSchemaTrust()
+    assertFunctionListSchema()
+    if (executionApply(executionStatementGet, functions, []))
+      throw new Error("[NativeSqlite] SQL function replaced")
+    assertResourceCurrent(requireAutocommit)
+  }
+  assertDataCurrent()
+  return executionFreeze({
+    assertDataCurrent,
+    prepareReadOne(sql: string): NativeSqliteReadOne {
+      assertResourceCurrent()
+      if (typeof sql !== "string" ||
+        sql !== "PRAGMA main.data_version" && !executionApply(executionRegExp, executionSelect, [sql]))
+        throw new TypeError("[NativeSqlite] Read-one requires SELECT")
+      const statement = executionApply(executionNativePrepare, native, [sql]) as StatementSync
+      return (bindings?: NativeSqliteBindings) => {
+        assertResourceCurrent()
+        const normalized = executionBindings(bindings)
+        assertResourceCurrent()
+        const row = executionApply(executionStatementGet, statement, normalized) as
+          Record<string, NativeSqliteValue> | undefined
+        const result = executionCopyRow(row)
+        assertResourceCurrent()
+        return result
+      }
+    },
+    run(sql: string, bindings?: readonly unknown[]): void {
+      if (typeof sql !== "string") throw new TypeError("[NativeSqlite] SQL must be a string")
+      const rollback = sql === "ROLLBACK" && bindings === undefined
+      if (!rollback) assertResourceCurrent()
+      const normalized = executionBindings(bindings)
+      if (!rollback) assertResourceCurrent()
+      const statement = executionApply(executionNativePrepare, native, [sql]) as StatementSync
+      executionApply(executionStatementRun, statement, normalized)
+      if (!rollback) assertResourceCurrent()
+    }
+  })
 }
 
 export interface NativeSqliteExecResult {
@@ -186,23 +475,36 @@ function normalizeBindings(
   )
 }
 
+const readOneArray = Array
+const readOneIsArray = Array.isArray
+const readOneCreate = Object.create
+const readOneDefine = Object.defineProperty
+
+function defineReadOneBinding(receiver: object, key: PropertyKey, value: NativeSqliteValue): void {
+  const descriptor = readOneCreate(null) as PropertyDescriptor
+  descriptor.value = value
+  descriptor.enumerable = true
+  descriptor.writable = true
+  descriptor.configurable = true
+  readOneDefine(receiver, key, descriptor)
+}
+
 /** Read-one's private traversal preserves map semantics without a late Array method/iterator. */
 function normalizeReadOneBindings(
   bindings: NativeSqliteBindings
 ): NativeSqliteValue[] | Record<string, NativeSqliteValue> {
-  if (Array.isArray(bindings)) {
+  if (readOneIsArray(bindings)) {
     const length = bindings.length
-    const result = new Array<NativeSqliteValue>(length)
+    const result = new readOneArray<NativeSqliteValue>(length)
     for (let index = 0; index < length; index++) {
-      if (index in bindings) result[index] = normalizeBinding(bindings[index])
+      if (index in bindings) defineReadOneBinding(result, index, normalizeBinding(bindings[index]))
     }
     return result
   }
   const entries = Object.entries(bindings), result: Record<string, NativeSqliteValue> = {}
   for (let index = 0; index < entries.length; index++) {
     const entry = entries[index]
-    Object.defineProperty(result, entry[0], { value: normalizeBinding(entry[1]),
-      enumerable: true, writable: true, configurable: true })
+    defineReadOneBinding(result, entry[0], normalizeBinding(entry[1]))
   }
   return result
 }
@@ -248,7 +550,8 @@ export class NativeSqliteStatement {
   private currentRow: Record<string, NativeSqliteValue> | null = null
   private freed = false
 
-  constructor(private readonly statement: StatementSync) {}
+  constructor(private readonly statement: StatementSync,
+    private readonly assertDatabaseOpen?: () => void) {}
 
   bind(bindings: NativeSqliteBindings): boolean {
     this.assertUsable()
@@ -291,6 +594,7 @@ export class NativeSqliteStatement {
 
   private assertUsable(): void {
     if (this.freed) throw new Error("[NativeSqlite] Statement has been freed")
+    this.assertDatabaseOpen?.()
   }
 }
 
@@ -300,6 +604,7 @@ export class NativeSqliteStatement {
  */
 export class NativeSqliteAdapter {
   private closed = false
+  private unusable = false
   private lastRowsModified = 0
 
   constructor(private readonly native: DatabaseSync) {}
@@ -369,7 +674,8 @@ export class NativeSqliteAdapter {
 
   prepare(sql: string, bindings?: NativeSqliteBindings): NativeSqliteStatement {
     this.assertOpen()
-    const statement = new NativeSqliteStatement(this.native.prepare(sql))
+    const statement = new NativeSqliteStatement(this.native.prepare(sql), () =>
+      Reflect.apply(readOneAssertOpen, this, []))
     if (bindings !== undefined) statement.bind(bindings)
     return statement
   }
@@ -415,8 +721,14 @@ export class NativeSqliteAdapter {
     }
   }
 
+  /** Fail closed after an unclean transaction; this does not claim the handle is closed. */
+  markUnusable(): void {
+    this.unusable = true
+  }
+
   private assertOpen(): void {
     if (this.closed) throw new Error("[NativeSqlite] Database is closed")
+    if (this.unusable) throw new Error("[NativeSqlite] Database is unavailable")
   }
 }
 
@@ -445,7 +757,9 @@ function prepareReadOneData(database: NativeSqliteAdapter, sql: string,
     Reflect.apply(readOneAssertOpen, database, [])
   }
   assertReadOpen()
-  if (!/^\s*SELECT\b/i.test(sql)) throw new TypeError("[NativeSqlite] Read-one requires SELECT")
+  const mainDataVersion = fixedGet === executionStatementGet && sql === "PRAGMA main.data_version"
+  if (!/^\s*SELECT\b/i.test(sql) && !mainDataVersion)
+    throw new TypeError("[NativeSqlite] Read-one requires SELECT")
   const statement = prepare()
   const getDescriptor = fixedGet ? undefined : Object.getOwnPropertyDescriptor(statement, "get") ??
     Object.getOwnPropertyDescriptor(Object.getPrototypeOf(statement), "get")
@@ -460,11 +774,26 @@ function prepareReadOneData(database: NativeSqliteAdapter, sql: string,
     const ordinaryNativeCall = !fixedGet && originalGet === executionStatementGet &&
       hasOriginalRowCopyField(rowCopyGlobal, "Reflect", rowCopyReflectField) &&
       hasOriginalRowCopyField(rowCopyReflect, "apply", rowCopyApplyField)
+    const nativeRowCall = freshNativeRowTransfer && originalGet === executionStatementGet &&
+      (ordinaryNativeCall || !!fixedGet &&
+        hasOriginalRowCopyField(rowCopyGlobal, "Reflect", rowCopyReflectField) &&
+        hasOriginalRowCopyField(rowCopyReflect, "apply", rowCopyApplyField)) &&
+      hasOriginalRowTransferArray(freshNativeRowTransfer)
     const row = Reflect.apply(originalGet, statement, Array.isArray(normalized)
       ? normalized : [normalized]) as Record<string, NativeSqliteValue> | undefined
     let result: Record<string, NativeSqliteValue> | undefined
     if (row) {
-      if (fixedGet === executionStatementGet || ordinaryNativeCall &&
+      if (nativeRowCall && freshNativeRowTransfer &&
+        hasOriginalRowCopyField(rowCopyGlobal, "Object", rowCopyObjectField) &&
+        hasOriginalRowCopyField(rowCopyObject, "entries", rowCopyEntriesField) &&
+        hasOriginalRowCopyField(rowCopyObject, "defineProperty", rowCopyDefineField) &&
+        hasOriginalRowTransferBytes(freshNativeRowTransfer) &&
+        !executionIsArray(row) && executionPrototype(row) === null) {
+        // Actual C++ get owns a plain row (never a Proxy) and its blobs. Do not expose that
+        // row to the cold metadata predicate. Preserve the public literal Object prototype
+        // without allocating another row, key list or blob per column.
+        result = freshNativeRowTransfer.setPrototype(row, freshNativeRowTransfer.objectPrototype)
+      } else if (fixedGet === executionStatementGet || ordinaryNativeCall &&
         hasOriginalRowCopyField(rowCopyGlobal, "Object", rowCopyObjectField) &&
         hasOriginalRowCopyField(rowCopyObject, "entries", rowCopyEntriesField) &&
         hasOriginalRowCopyField(rowCopyObject, "defineProperty", rowCopyDefineField)) {
@@ -644,15 +973,19 @@ export function openNativeSqliteDatabase(
     console.warn(`[${label}] Recovered database from: ${selected.path}`)
   }
 
-  const native = new DatabaseSync(dbPath, {
+  const nativeConstructor = DatabaseSync
+  const native = new nativeConstructor(dbPath, {
     enableForeignKeyConstraints: false,
     timeout: 5_000
   })
-  const isOpen = Object.getOwnPropertyDescriptor(native, "isOpen")
-  if (isOpen && !("value" in isOpen) && typeof isOpen.get === "function" &&
+  const isOpen = executionDescriptor(native, "isOpen")
+  const isTransaction = executionDescriptor(native, "isTransaction")
+  if (isTransaction && !executionDescriptor(isTransaction, "value") &&
+    typeof isTransaction.get === "function" && !executionIsProxy(isTransaction.get) && isOpen && !("value" in isOpen) && typeof isOpen.get === "function" &&
     !types.isProxy(isOpen.get))
-    Reflect.apply(executionWeakSet, nativeCurrentFactoryOrigins, [native, {
-      native, prototype: Object.getPrototypeOf(native), isOpenField: Object.freeze(isOpen),
+    executionApply(executionWeakSet, nativeCurrentFactoryOrigins, [native, {
+      native, nativeConstructor, prototype: executionPrototype(native),
+      isTransactionField: executionFreeze(isTransaction), isOpenField: executionFreeze(isOpen),
       isOpen: isOpen.get }])
   native.exec("PRAGMA journal_mode = WAL")
   native.exec("PRAGMA synchronous = NORMAL")

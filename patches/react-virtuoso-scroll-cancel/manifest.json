@@ -10,17 +10,17 @@
   "packageSha256": "e27cdbc04ebb580df8d5a8fe1326e969ba43ea514f318bd6fb7c0ba7b1509bae",
   "sourcePullRequest": "https://github.com/petyosi/react-virtuoso/pull/1551",
   "sourceDiffSha256": "e1e37b6ab931727b708fc3383fecaed5a7badb094955e31bef30fba53ffe8085",
-  "patchSha256": "15c9bf7d40ab92cfc3073adea732a15d7b7496d9614cf7aec325a2de0a7ac17d",
+  "patchSha256": "43e5dfb464eb1da1164944e827bbd04707912d181a0be332f4e6b330c8bd9fd7",
   "files": [
     {
       "path": "dist/index.mjs",
       "beforeSha256": "e60743f5be07e88b8e5a1d02546cfc982c3902feb87b06ef512393c36dfb5b80",
-      "afterSha256": "57b9fac2e9d07ce58abb41eab4bfffc754c3798e3c16e0c17943a659e3a7ebe7"
+      "afterSha256": "e2538b8a7c81b85d352632d1152c688e5afc4955e2241e539792164972a71f6a"
     },
     {
       "path": "dist/index.cjs",
       "beforeSha256": "68f94c375366deb3f95dd65b80206deb658d6a167639c0b79f685d45bd755058",
-      "afterSha256": "d24c78ceee88ee27f70012c574aa9c864261a753f760e6b8e75ef1f9475221af"
+      "afterSha256": "55dec0a186acc1fd843541405054618adbf9287e8394df56b839602da23c5be0"
     },
     {
       "path": "dist/index.d.ts",
@@ -28,5 +28,50 @@
       "afterSha256": "5faa4cc69741ec2e81c14fa447d05c17255548ab397818bb39accd023a988532"
     }
   ],
-  "localExtension": "Cancelled initialization lifecycle; tokenized external anchor ownership with iOS/prepend provenance; explicit current-list native measurement refresh without caller-supplied indices."
+  "localExtension": "Cancelled initialization lifecycle; tokenized external anchor ownership with iOS/prepend provenance; explicit current-list native measurement refresh without caller-supplied indices. Coalesced actual scroll-container feedback after immediate native scrollBy, before paint. Vertical auto margin uses one synchronous viewport-height mirror and the existing total-height model, only when strictly shorter than its viewport; horizontal alignment is unchanged.",
+  "previousInstallation": {
+    "files": [
+      {
+        "path": "dist/index.mjs",
+        "sha256": "8e8b3b2437a093deb3034cd91fb6aff82726195338f2b47ea26cdca4164796bb",
+        "replacements": [
+          {
+            "before": "return { alignToBottom: n, paddingTopAddition: o };",
+            "after": "return { alignToBottom: n, paddingTopAddition: o, statefulViewportHeight: ht(t, 0) };"
+          },
+          {
+            "before": "V = A(\"alignToBottom\"), N = A(\"initialItemFinalLocationReached\")",
+            "after": "V = A(\"alignToBottom\"), verticalViewportHeight = A(\"statefulViewportHeight\"), verticalTotalListHeight = A(\"totalListHeight\"), N = A(\"initialItemFinalLocationReached\")"
+          },
+          {
+            "before": "marginTop: a === 0 ? V ? \"auto\" : 0 : a,",
+            "after": "marginTop: a === 0 ? V && verticalTotalListHeight < verticalViewportHeight ? \"auto\" : 0 : a,"
+          }
+        ]
+      },
+      {
+        "path": "dist/index.cjs",
+        "sha256": "29d12ea64e313b03e788bcb500012c3c5552b50849f8abf51130710d293764f1",
+        "replacements": [
+          {
+            "before": "return{alignToBottom:n,paddingTopAddition:o}",
+            "after": "return{alignToBottom:n,paddingTopAddition:o,statefulViewportHeight:ht(t,0)}"
+          },
+          {
+            "before": "W=M(\"alignToBottom\"),_=M(\"initialItemFinalLocationReached\")",
+            "after": "W=M(\"alignToBottom\"),verticalViewportHeight=M(\"statefulViewportHeight\"),verticalTotalListHeight=M(\"totalListHeight\"),_=M(\"initialItemFinalLocationReached\")"
+          },
+          {
+            "before": "marginTop:a===0?W?\"auto\":0:a,",
+            "after": "marginTop:a===0?W&&verticalTotalListHeight<verticalViewportHeight?\"auto\":0:a,"
+          }
+        ]
+      },
+      {
+        "path": "dist/index.d.ts",
+        "sha256": "5faa4cc69741ec2e81c14fa447d05c17255548ab397818bb39accd023a988532",
+        "replacements": []
+      }
+    ]
+  }
 }

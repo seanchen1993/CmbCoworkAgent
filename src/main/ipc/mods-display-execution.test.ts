@@ -24,10 +24,12 @@ import {
 } from "../services/thread-incarnation"
 import { encodeModJson, parseModJson } from "../../shared/mods/validation"
 import { nativeChildThreadReaders } from "./native-child-mods.test-helper"
+import { FunctionSiteReadRequests } from "./function-site-read-requests"
 
 const channels = ["mods:function-panes", "mods:function-site-mount",
   "mods:function-site-mount-outcome", "mods:function-site-render"] as const
-const allChannels = [...channels, "mods:commands", "mods:enqueue"] as const
+const allChannels = [...channels, "mods:commands", "mods:enqueue",
+  "mods:function-site-read", "mods:function-site-read-cancel", "mods:function-site-read-scope"] as const
 const registries: ModRuntimeAuthorities[] = []
 afterEach(() => {
   for (const registry of registries.splice(0)) registry.close()
@@ -76,7 +78,7 @@ function fixture() {
   const visit = (node: ts.Node): void => {
     if (ts.isFunctionDeclaration(node) && node.name && helperNames.has(node.name.text))
       helpers.push(node)
-    if (ts.isCallExpression(node) && node.expression.getText(source) === "ipcMain.handle") {
+    if (ts.isCallExpression(node) && ["ipcMain.handle", "ipcMain.on"].includes(node.expression.getText(source))) {
       const channel = node.arguments[0]
       if (channel && ts.isStringLiteral(channel) &&
         allChannels.some(name => name === channel.text)) handlerNodes.push(node)
@@ -85,8 +87,9 @@ function fixture() {
   }
   visit(source)
   expect(helpers).toHaveLength(7)
-  expect(handlerNodes).toHaveLength(6)
+  expect(handlerNodes).toHaveLength(9)
   const handlers = new Map<string, Handler>()
+  const syncHandlers = new Map<string, (event: DisplayEvent & { returnValue?: unknown }) => void>()
   let row: ThreadIncarnationRow | undefined = {
     created_at: 1,
     metadata: JSON.stringify({ workspacePath: "/display-project", cmb_thread_incarnation: "R1" })
@@ -127,8 +130,10 @@ function fixture() {
     queued = run
     return { job: "actual-job" }
   })
+  const siteUnmount = vi.fn(async () => undefined)
   const functions = {
     panes: operation, siteMount: operation, siteMountOutcome: operation, siteRender: operation,
+    siteRead: operation, siteUnmount,
     commands: nativeCommands, runCommand
   }
   const getThreadCore = vi.fn((id: string) => id === threadId ? row : undefined)
@@ -147,9 +152,12 @@ function fixture() {
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS }
   }).outputText
   const display: Display = runInNewContext(code, {
-    ipcMain: { handle: (channel: string, handler: Handler) => handlers.set(channel, handler) },
+    ipcMain: { handle: (channel: string, handler: Handler) => handlers.set(channel, handler),
+      on: (channel: string, handler: (event: DisplayEvent & { returnValue?: unknown }) => void) =>
+        syncHandlers.set(channel, handler) },
     process: { env: {} }, URL, __dirname: nativeDirectory, join, pathToFileURL,
     window: () => owner, getThreadCore, getThreadRuntimeScope,
+    siteReadRequests: new FunctionSiteReadRequests(),
     ...nativeChildThreadReaders(getThreadCore),
     manager: { workspaceKey: (workspace: string) => workspace, functionUserScope,
       commands: legacyCommands, isEnabled: () => true }, functions, queue: { enqueue },
@@ -162,7 +170,13 @@ function fixture() {
   const input: DisplayInput = { threadId, component: "AskUserQuestion", owner: "actual-owner",
     messageId: "actual-message", expectedRequestId: "actual-request-R1", props: { text: "safe" } }
   return { display, event, input, handlers, operation, functionUserScope, descriptor,
+    readNamespace: (event: DisplayEvent) => {
+      const request = { ...event, returnValue: undefined as unknown }
+      syncHandlers.get("mods:function-site-read-scope")!(request)
+      return request.returnValue
+    },
     nativeCommands, legacyCommands, enqueue, runCommand, getThreadCore, getThreadRuntimeScope,
+    siteUnmount,
     runQueued: () => { if (!queued) throw new Error("no actual queued callback")
       return queued(new AbortController().signal) },
     setRow: (value: ThreadIncarnationRow | undefined) => { row = value },
@@ -403,4 +417,47 @@ it("retains the real native display epoch through a subframe navigation", async 
   wake.resolve()
   expect(await result).toBe("actual native publication")
   expect(currentFunctionExecution()).toBeUndefined()
+})
+
+it("authenticates cancellation before aborting the exact current native display request", async () => {
+  const f = fixture(), wake = Promise.withResolvers<void>(), entered = Promise.withResolvers<void>()
+  let signal!: AbortSignal
+  f.operation.mockImplementationOnce(async (...args: unknown[]) => {
+    signal = args.at(-1) as AbortSignal
+    entered.resolve()
+    await wake.promise
+    return { state: "inactive" } as never
+  })
+  const readId = `${f.readNamespace(f.event)}:1`
+  const pending = f.handlers.get("mods:function-site-read")!(f.event, { ...f.input, readId })
+  const assertion = expect(pending).rejects.toThrow("MODS_DISPLAY_READ_CANCELLED")
+  await entered.promise
+  expect(() => f.handlers.get("mods:function-site-read-cancel")!(
+    { ...f.event, senderFrame: { ...f.event.senderFrame } }, { readId }))
+    .toThrow("MODS_IPC_SENDER")
+  expect(signal.aborted).toBe(false)
+  expect(f.readNamespace({ ...f.event, senderFrame: { ...f.event.senderFrame } })).toBe(null)
+  expect(f.readNamespace({ ...f.event, senderFrame: null as never })).toBe(null)
+  expect(f.readNamespace({ ...f.event, sender: {} })).toBe(null)
+  const url = f.event.senderFrame.url
+  f.event.senderFrame.url = "https://untrusted.invalid/"
+  expect(f.readNamespace(f.event)).toBe(null)
+  f.event.senderFrame.url = url
+  expect(signal.aborted).toBe(false)
+  await f.handlers.get("mods:function-site-read-cancel")!(f.event, { readId })
+  expect(signal.aborted).toBe(true)
+  wake.resolve()
+  await assertion
+})
+
+it("releases an allocated native owner when cancellation wins the final publication boundary", async () => {
+  const f = fixture(), readId = `${f.readNamespace(f.event)}:1`
+  f.operation.mockImplementationOnce(async () => {
+    await f.handlers.get("mods:function-site-read-cancel")!(f.event, { readId })
+    return { state: "mounted", owner: "fresh-undelivered-owner" } as never
+  })
+  await expect(f.handlers.get("mods:function-site-read")!(f.event, { ...f.input, readId }))
+    .rejects.toThrow("MODS_DISPLAY_READ_CANCELLED")
+  expect(f.siteUnmount).toHaveBeenCalledExactlyOnceWith(
+    f.facts.workspace, f.facts.threadId, "fresh-undelivered-owner")
 })

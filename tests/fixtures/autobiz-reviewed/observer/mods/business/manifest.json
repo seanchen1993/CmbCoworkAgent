@@ -1,0 +1,17 @@
+{
+  "apiVersion": "devclaw.business-mods/v1",
+  "kind": "catalog",
+  "kernelRef": { "id": "autobiz.python-kernel", "version": "1.0.0" },
+  "modules": [],
+  "extensions": [
+    {
+      "id": "autobiz.worktree-progress",
+      "title": "并行 Worktree 进度",
+      "kind": "function",
+      "entry": "mods/business/autobiz.worktree-progress/register.ts",
+      "resources": ["mods/business/autobiz.worktree-progress/inspect.py"],
+      "dependencies": { "required": [], "advisory": [] },
+      "usage": "universal"
+    }
+  ]
+}

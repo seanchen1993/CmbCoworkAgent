@@ -1,10 +1,18 @@
+import { BaseMessage, HumanMessage, AIMessage, AIMessageChunk, SystemMessage, ToolMessage } from "@langchain/core/messages"
+import { createDefaultCheckpointMetadataCodec } from "./checkpoint-metadata-codec"
+import { assertCheckpointDatabaseFileIdentity } from "./checkpoint-database-identity"
+import { readFunctionConversationState } from "./function-conversation-state"
+import { hasInvalidFunctionConversationTranscriptStamp, readFunctionConversationTranscriptStamp } from "../../shared/mods/v2/conversation-transcript"
+import { serializeFunctionConversationNativeMessage } from "../agent/function-conversation-native-message"
+import type { PreparedNativeDataRequest, PreparedNativeDataSource, PreparedNativeDataFacts,
+  PreparedNativeSnapshotSeal } from "./runtime-projection-protocol"
 import { DatabaseSync, type SQLInputValue } from "node:sqlite"
 import { existsSync } from "node:fs"
 import { NativeSqliteAdapter } from "../db/native-sqlite-adapter"
 import { ensureMessageSnapshotGeneration as migrateMessageSnapshotGeneration } from "./message-snapshot-schema"
 import { migrateLegacyMessageTimes } from "./legacy-message-times"
 import { isLosslessTranscriptPayload } from "../../shared/transcript-recovery-integrity"
-import { randomUUID } from "node:crypto"
+import { randomUUID, createHash } from "node:crypto"
 import type {
   CheckpointRuntimeProjectionStats,
   LegacyCheckpointTranscriptMigrationStats
@@ -25,6 +33,10 @@ import { isSerializedSummarizationMessage } from "../../shared/context-compactio
 import { extractVisibleReasoning } from "../../shared/model-reasoning"
 import { functionConversationTranscriptFields } from "../../shared/mods/v2/conversation-transcript"
 import { ModFunctionError } from "../../shared/mods/v2/contracts"
+import type {
+  LegacyTranscriptMarker, LegacyTranscriptReadState, LegacyTranscriptWriteRow
+} from "./legacy-transcript-write-protocol"
+import { captureThreadIncarnation } from "../services/thread-incarnation"
 import {
   normalizeTranscriptReasoning,
   TRANSCRIPT_REASONING_MAX_CHARS
@@ -34,7 +46,8 @@ import {
   CHECKPOINT_RUNTIME_PROJECTION_VERSION
 } from "./runtime-projection"
 import type { Checkpoint } from "@langchain/langgraph-checkpoint"
-import { canonicalDisplayColumnsDigest, canonicalDisplayValueDigest,
+import { createNativeCheckpointMessageDigest, preparedNativeSnapshotRowDigest,
+  preparedNativeSourcePlanDigest, canonicalDisplayColumnsDigest, canonicalDisplayValueDigest,
   createCanonicalCheckpointDisplayVerifier,
   type CanonicalCheckpointDisplaySelection } from "./function-conversation-canonical-display-worker"
 import { formatSealedThreadMessageColumns } from "../thread-message-hydration/page-reader"
@@ -292,6 +305,7 @@ function hasCurrentRuntimeProjection(
         AND checkpoint.checkpoint_id = projection.checkpoint_id
        WHERE projection.thread_id = ? AND projection.checkpoint_ns = ?
          AND projection.projection_version = ?
+         AND projection.checkpoint_ts = ${checkpointTimestamp}
          AND NOT EXISTS (
            SELECT 1 FROM checkpoints AS newer
            WHERE newer.thread_id = checkpoint.thread_id
@@ -384,6 +398,7 @@ function readCurrentRuntimeProjectionRow(
         AND checkpoint.checkpoint_id = projection.checkpoint_id
        WHERE projection.thread_id = ? AND projection.checkpoint_ns = ?
          AND projection.projection_version = ?
+         AND projection.checkpoint_ts = ${checkpointTimestamp}
          AND length(projection.runtime_checkpoint) <= ?
          AND NOT EXISTS (
            SELECT 1 FROM checkpoints AS newer
@@ -522,6 +537,7 @@ function exactRuntimeProjectionSourceIsStillLatest(
          FROM checkpoints AS checkpoint
          WHERE checkpoint.thread_id = ? AND checkpoint.checkpoint_ns = ?
            AND checkpoint.checkpoint_id = ?
+           AND ${checkpointTimestamp} = ?
            AND NOT EXISTS (
              SELECT 1 FROM checkpoints AS newer
              WHERE newer.thread_id = checkpoint.thread_id
@@ -536,7 +552,7 @@ function exactRuntimeProjectionSourceIsStillLatest(
            )
          LIMIT 1`
       )
-      .get(row.threadId, row.checkpointNs, row.checkpointId)
+      .get(row.threadId, row.checkpointNs, row.checkpointId, row.checkpointTs)
   )
 }
 
@@ -792,7 +808,7 @@ export function hasVisibleCheckpointTranscript(
 
 function exactSourceIsStillLatest(
   database: DatabaseSync,
-  prepared: PreparedRuntimeProjectionMigration,
+  prepared: Pick<PreparedRuntimeProjectionMigration, "row">,
   layout: CheckpointSchemaLayout = assertCheckpointSchemaIsPublished(database)
 ): boolean {
   const { row } = prepared
@@ -805,6 +821,7 @@ function exactSourceIsStillLatest(
        WHERE checkpoint.thread_id = ? AND checkpoint.checkpoint_ns = ?
          AND checkpoint.checkpoint_id = ? AND checkpoint.type IS ?
          AND checkpoint.checkpoint = ?
+         AND ${checkpointTimestamp} = ?
          AND NOT EXISTS (
            SELECT 1 FROM checkpoints AS newer
            WHERE newer.thread_id = checkpoint.thread_id
@@ -824,7 +841,8 @@ function exactSourceIsStillLatest(
       row.checkpointNs,
       row.checkpointId,
       row.type,
-      row.checkpoint as SQLInputValue
+      row.checkpoint as SQLInputValue,
+      row.checkpointTs
     )
   return Boolean(current)
 }
@@ -1157,22 +1175,8 @@ function hydrateRawCheckpointMessages(
   }
 }
 
-interface DurableLegacyCheckpointMessage {
-  recoveryIntegrity: number
-  messageId: string
-  providerSourceId: string | null
-  providerOccurrence: number | null
-  role: "user" | "assistant" | "system" | "tool"
-  contentJson: string
-  reasoning: string | null
-  toolCallsJson: string | null
-  toolCallId: string | null
-  name: string | null
-  status: string | null
-  isError: number | null
-  createdAt: number
-  estimatedBytes: number
-  contentFragments: string[] | null
+export interface DurableLegacyCheckpointMessage extends LegacyTranscriptWriteRow {
+  readonly contentFragments: string[] | null
 }
 
 export interface LegacyCheckpointTranscriptBootstrapResult {
@@ -1248,7 +1252,6 @@ function buildDurableLegacyCheckpointMessages(
 
   for (let index = 0; index < rawMessages.length; index += 1) {
     if (index % LEGACY_TRANSCRIPT_BATCH_LIMIT === 0) throwIfCancelled(cancellation)
-    if (isSerializedSummarizationMessage(rawMessages[index])) continue
     const message = objectRecord(rawMessages[index])
     if (!message) continue
     const fields = functionConversationTranscriptFields(message)
@@ -1256,6 +1259,7 @@ function buildDurableLegacyCheckpointMessages(
     // Rebuilding one of these rows from a UI projection would erase its recovery boundary.
     if (fields.function_row || fields.function_row_invalid)
       throw new ModFunctionError("MODS_CONVERSATION_MIGRATION_REQUIRED")
+    if (isSerializedSummarizationMessage(message)) continue
     const kwargs = objectRecord(message.kwargs) ?? {}
     const additionalKwargs =
       objectRecord(message.additional_kwargs) ?? objectRecord(kwargs.additional_kwargs) ?? {}
@@ -1887,126 +1891,277 @@ function checkpointTupleFromRaw(input: {
   }
 }
 
-/**
- * One-time compatibility bridge for databases whose checkpoint transcript was
- * never copied into the durable message table. The worker keeps the full array
- * local, persists it in bounded transactions, and returns only runtime state.
+/** Worker-local preparation only. The complete message array never crosses Main IPC. */
+export type PreparedLegacyCheckpointTranscriptSource =
+  | { readonly kind: "empty" }
+  | { readonly kind: "source"; readonly checkpointId: string;
+      readonly messages: readonly DurableLegacyCheckpointMessage[];
+      readonly payloadBytes: number; readonly complete: boolean }
+  | { readonly kind: "complete-readonly"; readonly checkpointId: string;
+      readonly totalMessages: number }
+
+function legacyTranscriptSourceUnavailable(): never {
+  throw new Error("LEGACY_CHECKPOINT_TRANSCRIPT_SOURCE_UNAVAILABLE")
+}
+
+function assertLegacyTranscriptMarker(marker: LegacyTranscriptMarker | null): void {
+  if (!marker) return
+  if (typeof marker.checkpointId !== "string" || !marker.checkpointId ||
+    !Number.isSafeInteger(marker.totalMessages) || marker.totalMessages < 0 ||
+    !Number.isSafeInteger(marker.nextIndex) || marker.nextIndex < 0 ||
+    marker.nextIndex > marker.totalMessages || !Number.isSafeInteger(marker.fragmentIndex) ||
+    marker.fragmentIndex < 0 || !["migrating", "complete"].includes(marker.status) ||
+    (marker.nextIndex === marker.totalMessages && marker.fragmentIndex !== 0) ||
+    (marker.status === "complete" && marker.nextIndex !== marker.totalMessages))
+    legacyTranscriptSourceUnavailable()
+}
+
+/** Legacy synchronous caller only. Production async drivers obtain the same state
+ * from the fixed Main writer, whose per-transaction scope/root checks remain mandatory.
+ */
+function readLegacyTranscriptBootstrapState(databasePath: string, threadId: string): LegacyTranscriptReadState {
+  if (!existsSync(databasePath)) return { marker: null, ordinary: true }
+  const database = new DatabaseSync(databasePath, { readOnly: true, timeout: 5000 })
+  try {
+    const columns = sqliteTableColumns(database, "legacy_checkpoint_transcript_migrations")
+    let marker: LegacyTranscriptMarker | null = null
+    if (columns.size) {
+      if (!["checkpoint_id", "total_messages", "next_index", "status"].every(key => columns.has(key)))
+        legacyTranscriptSourceUnavailable()
+      const row = database.prepare(`SELECT checkpoint_id,total_messages,next_index,status,
+        ${columns.has("current_fragment_index") ? "current_fragment_index" : "0"} AS fragment_index
+        FROM legacy_checkpoint_transcript_migrations WHERE thread_id=?`).get(threadId)
+      if (row) marker = { checkpointId: row.checkpoint_id as string,
+        totalMessages: row.total_messages as number, nextIndex: row.next_index as number,
+        fragmentIndex: row.fragment_index as number, status: row.status as LegacyTranscriptMarker["status"] }
+    }
+    assertLegacyTranscriptMarker(marker)
+    const sessions = sqliteTableColumns(database, "function_logical_sessions")
+    const destinations = sqliteTableColumns(database, "function_conversation_native_destinations")
+    if (!sessions.size && !destinations.size) return { marker, ordinary: true }
+    if ((sessions.size && !["thread_id", "incarnation_key"].every(key => sessions.has(key))) ||
+      (destinations.size && !["destination_thread_id", "destination_incarnation"]
+        .every(key => destinations.has(key))) ||
+      !sqliteTableHasColumns(database, "threads", ["thread_id", "created_at", "metadata"]))
+      return { marker, ordinary: false }
+    const row = database.prepare("SELECT created_at,metadata FROM threads WHERE thread_id=?").get(threadId)
+    if (!row) return { marker, ordinary: false }
+    const incarnation = captureThreadIncarnation({ created_at: Number(row.created_at),
+      metadata: typeof row.metadata === "string" ? row.metadata : null })
+    const key = JSON.stringify(incarnation.token === null ? ["legacy", incarnation.legacyCreatedAt] :
+      ["token", incarnation.token])
+    const session = sessions.size && database.prepare(`SELECT 1 FROM function_logical_sessions
+      WHERE thread_id=? AND incarnation_key=? LIMIT 1`).get(threadId, key)
+    const destination = destinations.size && database.prepare(`SELECT 1
+      FROM function_conversation_native_destinations
+      WHERE destination_thread_id=? AND destination_incarnation=? LIMIT 1`)
+      .get(threadId, JSON.stringify(incarnation))
+    return { marker, ordinary: !session && !destination }
+  } finally { database.close() }
+}
+
+function readLegacyTranscriptExactRow(database: DatabaseSync, threadId: string, checkpointNs: string,
+  checkpointId: string, layout: CheckpointSchemaLayout): StoredCheckpointRow | null {
+  const timestamp = checkpointTimestampExpression(layout)
+  const row = database.prepare(`SELECT thread_id,checkpoint_ns,checkpoint_id,parent_checkpoint_id,
+    ${timestamp} AS checkpoint_ts,type,checkpoint,metadata FROM checkpoints
+    WHERE thread_id=? AND checkpoint_ns=? AND checkpoint_id=?`).get(threadId, checkpointNs, checkpointId)
+  if (!row) return null
+  return { threadId, checkpointNs, checkpointId,
+    parentCheckpointId: row.parent_checkpoint_id == null ? null : String(row.parent_checkpoint_id),
+    checkpointTs: String(row.checkpoint_ts ?? checkpointId),
+    type: typeof row.type === "string" ? row.type : "json",
+    checkpoint: normalizePayload(row.checkpoint, "checkpoint"),
+    metadata: normalizePayload(row.metadata, "checkpoint metadata") }
+}
+
+function legacyTranscriptHasNativeRows(checkpoint: Record<string, unknown>,
+  cancellation: Int32Array): boolean {
+  const channels = objectRecord(checkpoint.channel_values)
+  if (channels && Object.hasOwn(channels, "cmbFunctionConversation")) return true
+  const messages = Array.isArray(channels?.messages) ? channels.messages : []
+  for (let index = 0; index < messages.length; index++) {
+    if (index % LEGACY_TRANSCRIPT_BATCH_LIMIT === 0) throwIfCancelled(cancellation)
+    const fields = functionConversationTranscriptFields(messages[index])
+    if (fields.function_row || fields.function_row_invalid) return true
+  }
+  return false
+}
+
+function parseLegacyCheckpoint(row: StoredCheckpointRow): Record<string, unknown> {
+  const parsed = parseTypedJson(row.type, row.checkpoint, "checkpoint")
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+    throw new Error("[CheckpointRuntimeWorker] Invalid checkpoint object")
+  return parsed as Record<string, unknown>
+}
+
+/** Only dense messages from JSON.parse/hydrated JSON suffixes enter this path.
+ * Count the exact JSON array representation without retaining one transcript-sized
+ * string or encoded buffer. A single legal large message remains unrestricted.
+ */
+function legacyTranscriptMessageJsonBytes(messages: readonly unknown[], cancellation: Int32Array): number {
+  let bytes = 2 // []
+  for (let index = 0; index < messages.length; index++) {
+    if (index % LEGACY_TRANSCRIPT_BATCH_LIMIT === 0) throwIfCancelled(cancellation)
+    if (index > 0) bytes++ // comma
+    bytes += Buffer.byteLength(JSON.stringify(messages[index]) ?? "null", "utf8")
+  }
+  return bytes
+}
+
+/** Resolve the one original source once, inside the Worker. Neither a new summary
+ * nor bounded runtime state may substitute for an already reserved transcript.
+ */
+export function prepareLegacyCheckpointTranscriptSource(
+  checkpointDatabasePath: string, threadId: string, checkpointNs: string,
+  state: LegacyTranscriptReadState,
+  cancellationBuffer: SharedArrayBuffer
+): PreparedLegacyCheckpointTranscriptSource {
+  const cancellation = new Int32Array(cancellationBuffer), marker = state.marker
+  throwIfCancelled(cancellation)
+  assertLegacyTranscriptMarker(marker)
+  const readonlyComplete = (): PreparedLegacyCheckpointTranscriptSource => {
+    if (!marker || marker.status !== "complete") legacyTranscriptSourceUnavailable()
+    return { kind: "complete-readonly", checkpointId: marker.checkpointId,
+      totalMessages: marker.totalMessages }
+  }
+  if (!state.ordinary) {
+    if (marker?.status === "complete") return readonlyComplete()
+    throw new ModFunctionError("MODS_CONVERSATION_MIGRATION_REQUIRED")
+  }
+  if (!existsSync(checkpointDatabasePath)) {
+    if (marker?.status === "complete") return readonlyComplete()
+    if (marker) legacyTranscriptSourceUnavailable()
+    return { kind: "empty" }
+  }
+  const database = new DatabaseSync(checkpointDatabasePath, { timeout: 5000 })
+  try {
+    database.exec("PRAGMA busy_timeout = 5000")
+    const layout = assertCheckpointSchemaIsPublished(database)
+    database.exec("BEGIN")
+    let row: StoredCheckpointRow
+    let raw: Record<string, unknown>
+    let hydrated: Record<string, unknown>
+    try {
+      const head = readLatestCheckpointRow(database, threadId, checkpointNs, true, layout)
+      if (!head) {
+        database.exec("COMMIT")
+        if (marker?.status === "complete") return readonlyComplete()
+        if (marker) legacyTranscriptSourceUnavailable()
+        return { kind: "empty" }
+      }
+      const headRaw = parseLegacyCheckpoint(head)
+      // Reject an explicit native channel before opening any potentially large chain.
+      const headChannels = objectRecord(headRaw.channel_values)
+      const headHydrated = headChannels && Object.hasOwn(headChannels, "cmbFunctionConversation") ?
+        headRaw : hydrateRawCheckpointMessages(database, head, headRaw, cancellation)
+      if (legacyTranscriptHasNativeRows(headHydrated, cancellation)) {
+        database.exec("COMMIT")
+        if (marker?.status === "complete") return readonlyComplete()
+        throw new ModFunctionError("MODS_CONVERSATION_MIGRATION_REQUIRED")
+      }
+      if (marker) {
+        // V1 has no namespace column. An ambiguous checkpoint id cannot prove its original namespace.
+        const namespaces = database.prepare(`SELECT checkpoint_ns FROM checkpoints
+          WHERE thread_id=? AND checkpoint_id=? LIMIT 2`).all(threadId, marker.checkpointId)
+        if (namespaces.length !== 1 || namespaces[0].checkpoint_ns !== checkpointNs) {
+          database.exec("COMMIT")
+          if (marker.status === "complete") return readonlyComplete()
+          legacyTranscriptSourceUnavailable()
+        }
+      }
+      const original = marker ? readLegacyTranscriptExactRow(database, threadId, checkpointNs,
+        marker.checkpointId, layout) : head
+      if (!original) legacyTranscriptSourceUnavailable()
+      row = original
+      if (row.checkpointId === head.checkpointId) { raw = headRaw; hydrated = headHydrated }
+      else {
+        raw = parseLegacyCheckpoint(row)
+        if (Object.hasOwn(objectRecord(raw.channel_values) ?? {}, "cmbFunctionConversation"))
+          throw new ModFunctionError("MODS_CONVERSATION_MIGRATION_REQUIRED")
+        hydrated = hydrateRawCheckpointMessages(database, row, raw, cancellation)
+        if (legacyTranscriptHasNativeRows(hydrated, cancellation))
+          throw new ModFunctionError("MODS_CONVERSATION_MIGRATION_REQUIRED")
+      }
+      throwIfCancelled(cancellation)
+      database.exec("COMMIT")
+    } catch (error) {
+      try { database.exec("ROLLBACK") } catch { /* Preserve the original source error. */ }
+      if (error instanceof ModFunctionError ||
+        (error instanceof Error && error.name === CHECKPOINT_RUNTIME_PROJECTION_CANCELLED)) throw error
+      if (marker?.status === "complete") return readonlyComplete()
+      if (error instanceof Error && error.name === CHECKPOINT_RUNTIME_PROJECTION_SCHEMA_NOT_READY)
+        throw error
+      if (marker) legacyTranscriptSourceUnavailable()
+      throw error
+    }
+    const messages = Array.isArray(objectRecord(hydrated.channel_values)?.messages) ?
+      objectRecord(hydrated.channel_values)!.messages as unknown[] : []
+    const durableMessages = buildDurableLegacyCheckpointMessages(messages, row.checkpointTs, cancellation)
+    if (marker && (durableMessages.length !== marker.totalMessages ||
+      (marker.fragmentIndex > 0 && (!durableMessages[marker.nextIndex]?.contentFragments ||
+        marker.fragmentIndex >= durableMessages[marker.nextIndex].contentFragments!.length)))) {
+      if (marker.status === "complete") return readonlyComplete()
+      legacyTranscriptSourceUnavailable()
+    }
+    let sourceBytes = payloadBytes(row.checkpoint)
+    if (!marker) {
+      const rawInline = Array.isArray(objectRecord(raw.channel_values)?.messages)
+      const canPersist = runtimeProjectionSchemaIsPublished(database) &&
+        (!rawInline || messageSnapshotSchemaIsPublished(database))
+      let sourceStillCurrent: boolean
+      if (canPersist) {
+        const prepared = prepareRuntimeProjectionMigrationFromCheckpoint(row, raw)
+        sourceBytes = Math.max(sourceBytes,
+          prepared.messages?.byteLength ?? legacyTranscriptMessageJsonBytes(messages, cancellation))
+        sourceStillCurrent = commitPreparedRuntimeProjection(database, prepared)
+      } else {
+        sourceBytes = Math.max(sourceBytes, legacyTranscriptMessageJsonBytes(messages, cancellation))
+        sourceStillCurrent = exactSourceIsStillLatest(database, { row }, layout)
+      }
+      if (!sourceStillCurrent)
+        throw new Error("[CheckpointRuntimeWorker] Checkpoint changed during legacy bootstrap")
+    } else {
+      // Retain the original byte statistic without constructing unused historical projections.
+      sourceBytes = Math.max(sourceBytes, legacyTranscriptMessageJsonBytes(messages, cancellation))
+      // Historical resume only checks its exact retained row. Never rewrite its projection or require latest.
+      const current = database.prepare(`SELECT 1 FROM checkpoints
+        WHERE thread_id=? AND checkpoint_ns=? AND checkpoint_id=? AND type IS ?
+        AND checkpoint=? AND ${checkpointTimestampExpression(layout)}=?
+        AND parent_checkpoint_id IS ? AND metadata IS ?`).get(threadId, checkpointNs, row.checkpointId,
+          row.type, row.checkpoint, row.checkpointTs, row.parentCheckpointId, row.metadata ?? null)
+      if (!current) {
+        if (marker.status === "complete") return readonlyComplete()
+        legacyTranscriptSourceUnavailable()
+      }
+    }
+    throwIfCancelled(cancellation)
+    return { kind: "source", checkpointId: row.checkpointId, messages: durableMessages,
+      payloadBytes: sourceBytes, complete: marker?.status === "complete" }
+  } finally { database.close() }
+}
+
+/** Legacy sync wrapper shares source preparation with the fixed async Main-port driver.
+ * It does not claim to make cross-database enrollment/write races atomic.
  */
 export function bootstrapLegacyCheckpointTranscript(
-  checkpointDatabasePath: string,
-  messageDatabasePath: string,
-  threadId: string,
-  checkpointNs: string,
-  cancellationBuffer: SharedArrayBuffer
+  checkpointDatabasePath: string, messageDatabasePath: string, threadId: string,
+  checkpointNs: string, cancellationBuffer: SharedArrayBuffer
 ): LegacyCheckpointTranscriptBootstrapResult {
   const cancellation = new Int32Array(cancellationBuffer)
   throwIfCancelled(cancellation)
-  const emptyResult = (): LegacyCheckpointTranscriptBootstrapResult => ({
-    runtimeTuple: null,
-    stats: {
-      checkpointId: null,
-      totalMessages: 0,
-      migratedMessages: 0,
-      batches: 0,
-      payloadBytes: 0
-    }
-  })
-  if (!existsSync(checkpointDatabasePath)) return emptyResult()
-  const checkpointDatabase = new DatabaseSync(checkpointDatabasePath, { timeout: 5_000 })
-  try {
-    checkpointDatabase.exec("PRAGMA busy_timeout = 5000")
-    // Bootstrap can recover an inline legacy transcript using only the base
-    // checkpoint table. Auxiliary tables are optional optimizations unless the
-    // checkpoint itself contains an external-message marker.
-    const checkpointSchema = assertCheckpointSchemaIsPublished(checkpointDatabase)
-    checkpointDatabase.exec("BEGIN")
-    let row: StoredCheckpointRow | null = null
-    let rawCheckpoint: Record<string, unknown> | null = null
-    let hydratedCheckpoint: Record<string, unknown> | null = null
-    try {
-      throwIfCancelled(cancellation)
-      row = readLatestCheckpointRow(
-        checkpointDatabase,
-        threadId,
-        checkpointNs,
-        true,
-        checkpointSchema
-      )
-      if (!row || row.metadata === undefined) {
-        checkpointDatabase.exec("COMMIT")
-        return emptyResult()
-      }
-      const parsed = parseTypedJson(row.type, row.checkpoint, "checkpoint")
-      throwIfCancelled(cancellation)
-      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-        throw new Error("[CheckpointRuntimeWorker] Invalid checkpoint object")
-      }
-      rawCheckpoint = parsed as Record<string, unknown>
-      hydratedCheckpoint = hydrateRawCheckpointMessages(
-        checkpointDatabase,
-        row,
-        rawCheckpoint,
-        cancellation
-      )
-      throwIfCancelled(cancellation)
-      checkpointDatabase.exec("COMMIT")
-    } catch (error) {
-      try {
-        checkpointDatabase.exec("ROLLBACK")
-      } catch {
-        // Preserve the checkpoint read error.
-      }
-      throw error
-    }
-
-    throwIfCancelled(cancellation)
-    const prepared = prepareRuntimeProjectionMigrationFromCheckpoint(row, rawCheckpoint)
-    const canPersistProjection =
-      runtimeProjectionSchemaIsPublished(checkpointDatabase) &&
-      (!prepared.messages || messageSnapshotSchemaIsPublished(checkpointDatabase))
-    // A base-only legacy database can still return an in-memory projection and
-    // migrate its transcript. Keep the stale-source CAS even when auxiliary
-    // projection persistence is unavailable.
-    const sourceStillCurrent = canPersistProjection
-      ? commitPreparedRuntimeProjection(checkpointDatabase, prepared)
-      : exactSourceIsStillLatest(checkpointDatabase, prepared, checkpointSchema)
-    if (!sourceStillCurrent) {
-      throw new Error("[CheckpointRuntimeWorker] Checkpoint changed during legacy bootstrap")
-    }
-    throwIfCancelled(cancellation)
-    const channelValues = objectRecord(hydratedCheckpoint.channel_values) ?? {}
-    const messages = Array.isArray(channelValues.messages) ? channelValues.messages : []
-    const runtimeCheckpoint = buildCheckpointRuntimeProjection(
-      hydratedCheckpoint as unknown as Checkpoint
-    ) as unknown as Record<string, unknown>
-    const sourceBytes = Math.max(
-      payloadBytes(row.checkpoint),
-      prepared.messages?.byteLength ?? serializeJsonPayload(messages).byteLength
-    )
-    const durableMessages = buildDurableLegacyCheckpointMessages(
-      messages,
-      row.checkpointTs,
-      cancellation
-    )
-    const stats = migrateLegacyMessagesIntoDurableRows({
-      databasePath: messageDatabasePath,
-      threadId,
-      checkpointId: row.checkpointId,
-      messages: durableMessages,
-      payloadBytes: sourceBytes,
-      cancellation
-    })
-    throwIfCancelled(cancellation)
-    return {
-      runtimeTuple: checkpointTupleFromRaw({
-        row,
-        checkpoint: runtimeCheckpoint
-      }),
-      stats
-    }
-  } finally {
-    checkpointDatabase.close()
-  }
+  const source = prepareLegacyCheckpointTranscriptSource(checkpointDatabasePath, threadId, checkpointNs,
+    readLegacyTranscriptBootstrapState(messageDatabasePath, threadId), cancellationBuffer)
+  if (source.kind === "empty") return { runtimeTuple: null, stats: { checkpointId: null,
+    totalMessages: 0, migratedMessages: 0, batches: 0, payloadBytes: 0 } }
+  const stats = source.kind === "complete-readonly" ? { checkpointId: source.checkpointId,
+    totalMessages: source.totalMessages, migratedMessages: 0, batches: 0, payloadBytes: 0 } :
+    migrateLegacyMessagesIntoDurableRows({ databasePath: messageDatabasePath, threadId,
+      checkpointId: source.checkpointId, messages: source.messages, payloadBytes: source.payloadBytes,
+      cancellation })
+  throwIfCancelled(cancellation)
+  return { stats, runtimeTuple: readLatestCheckpointRuntimeTuple(checkpointDatabasePath,
+    threadId, checkpointNs, cancellationBuffer) }
 }
 
 const CHECKPOINT_TRANSFER_DEFAULT_MESSAGE_LIMIT = 500
@@ -3237,3 +3392,363 @@ export function readLatestCheckpointTuple(
     database.close()
   }
 }
+
+
+function preparedNativeUnsupported(): never {
+  throw Error("PREPARED_NATIVE_CODEC_UNSUPPORTED")
+}
+
+/** Only the default encoder's finite safe forms reach the original isolated decoder. */
+function checkPreparedNativeJson(value: unknown, cancellation: Int32Array): void {
+  const pending: unknown[] = [value]
+  let visited = 0
+  while (pending.length) {
+    if (visited++ % 64 === 0) throwIfCancelled(cancellation)
+    const next = pending.pop()
+    if (!next || typeof next !== "object") continue
+    if (Array.isArray(next)) {
+      for (const item of next) pending.push(item)
+      continue
+    }
+    const data = next as Record<string, unknown>
+    if (Object.hasOwn(data, "__proto__")) preparedNativeUnsupported()
+    if (data.lc === 2 && data.type === "constructor") {
+      const id = data.id,
+        args = data.args
+      if (
+        !Array.isArray(id) ||
+        id.length !== 1 ||
+        !Array.isArray(args) ||
+        !data.kwargs ||
+        typeof data.kwargs !== "object" ||
+        Array.isArray(data.kwargs) ||
+        Object.keys(data.kwargs).length !== 0
+      )
+        preparedNativeUnsupported()
+      const name = id[0]
+      if (name === "Uint8Array") {
+        if (
+          data.method !== "from" ||
+          args.length !== 1 ||
+          !Array.isArray(args[0]) ||
+          !args[0].every((byte) => Number.isInteger(byte) && byte >= 0 && byte <= 255)
+        )
+          preparedNativeUnsupported()
+      } else {
+        if (data.method !== null) preparedNativeUnsupported()
+        if (name === "Set" || name === "Map") {
+          if (
+            args.length !== 1 ||
+            !Array.isArray(args[0]) ||
+            (name === "Map" && !args[0].every((pair) => Array.isArray(pair) && pair.length === 2))
+          )
+            preparedNativeUnsupported()
+        } else if (name === "RegExp") {
+          if (args.length !== 2 || typeof args[0] !== "string" || typeof args[1] !== "string")
+            preparedNativeUnsupported()
+        } else if (name === "Error") {
+          if (args.length !== 1 || typeof args[0] !== "string") preparedNativeUnsupported()
+        } else preparedNativeUnsupported()
+      }
+    } else if (data.lc === 1) {
+      const id = data.id
+      if (
+        data.type !== "constructor" ||
+        !Array.isArray(id) ||
+        id.length !== 3 ||
+        id[0] !== "langchain_core" ||
+        id[1] !== "messages" ||
+        !["HumanMessage", "AIMessage", "AIMessageChunk", "SystemMessage", "ToolMessage"].includes(
+          String(id[2])
+        ) ||
+        !data.kwargs ||
+        typeof data.kwargs !== "object" ||
+        Array.isArray(data.kwargs)
+      )
+        preparedNativeUnsupported()
+    } else if (data.lc === 2 && data.type !== "undefined") preparedNativeUnsupported()
+    // JsonPlus visits escaped children before Core unescapes them; no subtree is exempt.
+    for (const item of Object.values(data)) pending.push(item)
+  }
+}
+
+/** Readonly actual-storage witness, serialized in the existing full-body Worker lane. */
+export async function readPreparedNativeDataFacts(
+  request: PreparedNativeDataRequest,
+  source: PreparedNativeDataSource
+): Promise<PreparedNativeDataFacts> {
+  const cancellation = new Int32Array(request.cancellationBuffer)
+  const current = () => throwIfCancelled(cancellation)
+  const serde = createDefaultCheckpointMetadataCodec()
+  const decode = async (value: { type: string; bytes: string | Uint8Array }): Promise<unknown> => {
+    current()
+    if (
+      value.type !== "json" ||
+      !(typeof value.bytes === "string" || value.bytes instanceof Uint8Array)
+    )
+      preparedNativeUnsupported()
+    const text =
+      typeof value.bytes === "string" ? value.bytes : new TextDecoder().decode(value.bytes)
+    checkPreparedNativeJson(JSON.parse(text) as unknown, cancellation)
+    const decoded = await serde.loadsTyped(value.type, text)
+    current()
+    return decoded
+  }
+  const integer = (value: unknown): number => {
+    if (!Number.isSafeInteger(value) || Number(value) < 0)
+      throw Error("PREPARED_NATIVE_SOURCE_CHANGED")
+    return Number(value)
+  }
+  current()
+  await assertCheckpointDatabaseFileIdentity(request.databasePath, source.file)
+  current()
+  const database = new DatabaseSync(request.databasePath, { readOnly: true, timeout: 5000 })
+  let inTransaction = false
+  try {
+    await assertCheckpointDatabaseFileIdentity(request.databasePath, source.file)
+    current()
+    database.exec("BEGIN")
+    inTransaction = true
+    const raw = await decode(source.checkpoint)
+    await decode(source.metadata)
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) preparedNativeUnsupported()
+    const checkpoint = raw as Record<string, unknown>
+    if (
+      checkpoint.id !== request.checkpointId ||
+      typeof checkpoint.ts !== "string" ||
+      !checkpoint.ts ||
+      !checkpoint.channel_values ||
+      typeof checkpoint.channel_values !== "object" ||
+      Array.isArray(checkpoint.channel_values)
+    )
+      throw Error("PREPARED_NATIVE_SOURCE_CHANGED")
+    const channels = checkpoint.channel_values as Record<string, unknown>
+    const state = readFunctionConversationState(channels.cmbFunctionConversation)
+    const chainSeal: PreparedNativeSnapshotSeal[] = []
+    type RawSnapshot = {
+      checkpointId: string
+      parentCheckpointId: string | null
+      prefixLength: number
+      messageCount: number
+      generation: string
+      type: string
+    }
+    const chain: RawSnapshot[] = [],
+      visited = new Set<string>()
+    const digest = createNativeCheckpointMessageDigest()
+    const stamped: PreparedNativeDataFacts["stamped"][number][] = []
+    const prototypes = [HumanMessage.prototype, AIMessage.prototype, AIMessageChunk.prototype,
+      SystemMessage.prototype, ToolMessage.prototype]
+    let nativeMessageCount = 0
+    const consume = (message: unknown, ordinal: number): void => {
+      if (ordinal !== nativeMessageCount) throw Error("PREPARED_NATIVE_SOURCE_CHANGED")
+      if (!BaseMessage.isInstance(message) || !prototypes.includes(Object.getPrototypeOf(message)) ||
+        hasInvalidFunctionConversationTranscriptStamp(message)) preparedNativeUnsupported()
+      const stamp = readFunctionConversationTranscriptStamp(message)
+      digest.append(stamp ? serializeFunctionConversationNativeMessage(message) : JSON.stringify(message.toDict()))
+      if (stamp) stamped.push({ ordinal, stamp: { ...stamp, origin: { ...stamp.origin } } })
+      nativeMessageCount++
+    }
+    if (source.messages) {
+      const plan = source.messages,
+        reference = channels.messages as Record<string, unknown> | undefined
+      if (
+        !reference ||
+        reference[EXTERNAL_MESSAGES_MARKER] !== true ||
+        reference.messageCount !== plan.messageCount
+      )
+        throw Error("PREPARED_NATIVE_SOURCE_CHANGED")
+      integer(plan.prefixLength)
+      integer(plan.messageCount)
+      if (plan.prefixLength > plan.messageCount) throw Error("PREPARED_NATIVE_SOURCE_CHANGED")
+      if (plan.parentCheckpointId === null) {
+        if (
+          plan.prefixLength !== 0 ||
+          plan.expectedParentCount !== null ||
+          plan.expectedParentGeneration !== null
+        )
+          throw Error("PREPARED_NATIVE_SOURCE_CHANGED")
+      } else if (
+        !plan.parentCheckpointId ||
+        plan.prefixLength === 0 ||
+        plan.expectedParentCount === null ||
+        integer(plan.expectedParentCount) < plan.prefixLength ||
+        !plan.expectedParentGeneration
+      )
+        throw Error("PREPARED_NATIVE_SOURCE_CHANGED")
+      if (database.prepare(`SELECT 1 FROM main.sqlite_schema
+        WHERE name='json_each' COLLATE NOCASE AND type IN ('table','view') LIMIT 1`).get())
+        preparedNativeUnsupported()
+      const validation = database.prepare("SELECT json_valid(?1) AS valid")
+      const visitor = database.prepare(`SELECT key,type,
+        CASE WHEN type IN ('object','array') THEN value ELSE NULL END AS rawJson
+        FROM main.json_each(?)`)
+      const wellFormed = (String.prototype as typeof String.prototype & { isWellFormed(): boolean }).isWellFormed
+      const visitSuffix = async (value: { type: string; bytes: string | Uint8Array },
+        expectedCount: number, offset: number, selectedEnd: number): Promise<void> => {
+        current()
+        if (value.type !== "json" || !(typeof value.bytes === "string" || value.bytes instanceof Uint8Array))
+          preparedNativeUnsupported()
+        const text = typeof value.bytes === "string" ? value.bytes : new TextDecoder().decode(value.bytes)
+        // SQLite's UTF8 binding cannot preserve a literal ill-formed UTF16 string. The default
+        // encoder emits escaped lone surrogates, which remain supported without normalization.
+        if (typeof value.bytes === "string" && !wellFormed.call(text)) preparedNativeUnsupported()
+        let valid = false, validationFailed = false, validationError: unknown
+        try {
+          // JSON1's own nesting limit is part of this explicit finite storage cohort.
+          valid = validation.get(text)?.valid === 1
+        } catch (error) { validationFailed = true; validationError = error }
+        finally {
+          try { validation.get("[]") } catch (error) {
+            if (!validationFailed) { validationFailed = true; validationError = error }
+          }
+        }
+        if (validationFailed) throw validationError
+        if (!valid) preparedNativeUnsupported()
+        if (!/^[\x20\t\r\n]*\[/.test(text)) throw Error("PREPARED_NATIVE_SOURCE_CHANGED")
+        let count = 0, failed = false, failure: unknown
+        let iterator: ReturnType<typeof visitor.iterate> | undefined
+        try {
+          iterator = visitor.iterate(text)
+          for (const row of iterator) {
+            if (count % 64 === 0) current()
+            if (row.key !== count || count >= expectedCount) throw Error("PREPARED_NATIVE_SOURCE_CHANGED")
+            if (row.type === "object" || row.type === "array") {
+              if (typeof row.rawJson !== "string") throw Error("PREPARED_NATIVE_SOURCE_CHANGED")
+              // JSON1 preserves object/array parse semantics, including numeric tokens and
+              // escaped data. Never stringify a parsed item or reimplement the original reviver.
+              checkPreparedNativeJson(JSON.parse(row.rawJson) as unknown, cancellation)
+              const message = await serde.loadsTyped("json", row.rawJson)
+              current()
+              if (count < selectedEnd) consume(message, offset + count)
+            } else if (count < selectedEnd) preparedNativeUnsupported()
+            // Unselected scalars have no reviver/constructor side effect. Do not read their
+            // SQLite atom: an unused integer can exceed Node's safe numeric conversion range.
+            count++
+          }
+          if (count !== expectedCount) throw Error("PREPARED_NATIVE_SOURCE_CHANGED")
+        } catch (error) { failed = true; failure = error }
+        finally {
+          try { iterator?.return?.() } catch (error) {
+            if (!failed) { failed = true; failure = error }
+          }
+          try { visitor.get("[]") } catch (error) {
+            if (!failed) { failed = true; failure = error }
+          }
+        }
+        if (failed) throw failure
+      }
+      let cursor = plan.parentCheckpointId
+      while (cursor !== null) {
+        current()
+        if (visited.has(cursor) || visited.size >= 128)
+          throw Error("PREPARED_NATIVE_SOURCE_CHANGED")
+        visited.add(cursor)
+        const row = database
+          .prepare(
+            `SELECT checkpoint_id,parent_checkpoint_id,prefix_length,
+          message_count,generation,type FROM main.checkpoint_message_snapshots
+          WHERE thread_id=? AND checkpoint_ns=? AND checkpoint_id=?`
+          )
+          .get(request.threadId, request.checkpointNs, cursor) as
+          | Record<string, unknown>
+          | undefined
+        if (
+          !chain.length &&
+          (!row ||
+            row.message_count !== plan.expectedParentCount ||
+            row.generation !== plan.expectedParentGeneration)
+        )
+          throw Error("PREPARED_NATIVE_PREFIX_CHANGED")
+        if (
+          !row ||
+          row.checkpoint_id !== cursor ||
+          typeof row.generation !== "string" ||
+          !row.generation ||
+          !(row.parent_checkpoint_id === null || typeof row.parent_checkpoint_id === "string")
+        )
+          throw Error("PREPARED_NATIVE_SOURCE_CHANGED")
+        if (row.type !== "json") preparedNativeUnsupported()
+        const item: RawSnapshot = {
+          checkpointId: cursor,
+          parentCheckpointId: row.parent_checkpoint_id,
+          prefixLength: integer(row.prefix_length),
+          messageCount: integer(row.message_count),
+          generation: row.generation,
+          type: row.type
+        }
+        if (item.prefixLength > item.messageCount) throw Error("PREPARED_NATIVE_SOURCE_CHANGED")
+        chain.push(item)
+        cursor = item.parentCheckpointId
+      }
+      if (plan.prefixLength > (chain[0]?.messageCount ?? 0)) throw Error("PREPARED_NATIVE_SOURCE_CHANGED")
+      const selectedEnds: number[] = []
+      let requiredEnd = plan.prefixLength
+      for (let index = 0; index < chain.length; index++) {
+        const item = chain[index], parent = chain[index + 1]
+        if (parent ? item.parentCheckpointId !== parent.checkpointId || item.prefixLength > parent.messageCount :
+          item.parentCheckpointId !== null || item.prefixLength !== 0)
+          throw Error("PREPARED_NATIVE_SOURCE_CHANGED")
+        selectedEnds.push(Math.max(0, Math.min(requiredEnd, item.messageCount) - item.prefixLength))
+        requiredEnd = Math.min(requiredEnd, item.prefixLength)
+      }
+      if (requiredEnd !== 0) throw Error("PREPARED_NATIVE_SOURCE_CHANGED")
+      const rawRow = chain.length ? database.prepare(`SELECT checkpoint_id,parent_checkpoint_id,prefix_length,
+        message_count,generation,type,suffix FROM main.checkpoint_message_snapshots
+        WHERE thread_id=? AND checkpoint_ns=? AND checkpoint_id=?`) : undefined
+      for (let index = chain.length - 1; index >= 0; index--) {
+        current()
+        const item = chain[index]
+        // Only one actual suffix BLOB is read at a time, in the same readonly transaction.
+        let row = rawRow!.get(request.threadId, request.checkpointNs, item.checkpointId)
+        if (!row || row.checkpoint_id !== item.checkpointId || row.parent_checkpoint_id !== item.parentCheckpointId ||
+          row.prefix_length !== item.prefixLength || row.message_count !== item.messageCount ||
+          row.generation !== item.generation || row.type !== item.type ||
+          !(typeof row.suffix === "string" || row.suffix instanceof Uint8Array))
+          throw Error("PREPARED_NATIVE_SOURCE_CHANGED")
+        chainSeal[index] = { ...item, rawDigest: preparedNativeSnapshotRowDigest({ ...item, bytes: row.suffix }) }
+        await visitSuffix({ type: item.type, bytes: row.suffix }, item.messageCount - item.prefixLength,
+          item.prefixLength, selectedEnds[index])
+        row = undefined
+      }
+      if (nativeMessageCount !== plan.prefixLength) throw Error("PREPARED_NATIVE_SOURCE_CHANGED")
+      await visitSuffix(plan, plan.messageCount - plan.prefixLength, plan.prefixLength,
+        plan.messageCount - plan.prefixLength)
+      if (nativeMessageCount !== plan.messageCount) throw Error("PREPARED_NATIVE_SOURCE_CHANGED")
+    } else {
+      // Actual native Saver array puts always use the external-snapshot branch. Preserve this
+      // existing inline compatibility path without claiming a bound for arbitrary huge packets.
+      const inline = channels.messages ?? []
+      if (!Array.isArray(inline)) throw Error("PREPARED_NATIVE_SOURCE_CHANGED")
+      for (let ordinal = 0; ordinal < inline.length; ordinal++) {
+        if (ordinal % 64 === 0) current()
+        consume(inline[ordinal], ordinal)
+      }
+    }
+    current()
+    const facts: PreparedNativeDataFacts = {
+      checkpointId: request.checkpointId,
+      parentCheckpointId: source.parentCheckpointId,
+      checkpointTs: checkpoint.ts,
+      state,
+      stateDigest: createHash("sha256").update(JSON.stringify(state)).digest("hex"),
+      nativeMessageCount,
+      nativeSnapshotDigest: digest.finish(),
+      stamped,
+      chainSeal,
+      sealedPlanDigest: preparedNativeSourcePlanDigest(source)
+    }
+    database.exec("COMMIT")
+    inTransaction = false
+    await assertCheckpointDatabaseFileIdentity(request.databasePath, source.file)
+    current()
+    return facts
+  } finally {
+    try {
+      if (inTransaction) database.exec("ROLLBACK")
+    } finally {
+      database.close()
+    }
+  }
+}
+

@@ -14,7 +14,7 @@ import { BaseCallbackHandler } from "@langchain/core/callbacks/base"
 import type { RunnableConfig } from "@langchain/core/runnables"
 import { mergeConfigs } from "@langchain/core/runnables"
 import { tool } from "@langchain/core/tools"
-import { Annotation, Command, END, START, StateGraph } from "@langchain/langgraph"
+import { Annotation, Command, END, START, StateGraph, StateSchema } from "@langchain/langgraph"
 import { ChatOpenAI, ChatOpenAICompletions } from "@langchain/openai"
 import { createMiddleware } from "langchain"
 import { z } from "zod"
@@ -40,6 +40,9 @@ import {
 } from "./mods-conversation-shared-invocation"
 import { claimLocalThreadRunLease, releaseLocalThreadRunLease, getLocalThreadRunLease } from "./thread-run-lease"
 import * as nativeLifetime from "./function-conversation-native-lifetime"
+import { currentSharedNativeDomainRecord, runSharedNativeFactoryDomain,
+  type SharedNativeDomainRecord } from
+  "./function-conversation-shared-native-domain"
 import * as nativeTools from "./function-conversation-native-tools"
 import { FunctionConversationNativeKeeper,
   type FunctionConversationNativeKeeperAdmission } from "./function-conversation-native-keeper"
@@ -816,6 +819,331 @@ async function fixture(
 }
 
 describe("actual native Shared streams", () => {
+  it.each(["invoke", "messages", "events"] as const)(
+    "settles the real prepared checkpoint before the %s model starts",
+    async (mode) => {
+      const f = await fixture()
+      const held = deferred<void>(), release = deferred<void>()
+      const original = SqlJsSaver.prototype.putWithCommitObserver
+      let selected: { namespace: string; checkpointId: string; step: number } | undefined
+      const prepared = vi.spyOn(SqlJsSaver.prototype, "putWithCommitObserver")
+        .mockImplementation(function (this: SqlJsSaver, ...args) {
+          if (this !== f.saver || !args[7] || selected)
+            return Reflect.apply(original, this, args)
+          const callback = args[7]
+          const actual = [...args] as Parameters<SqlJsSaver["putWithCommitObserver"]>
+          actual[7] = async (receipt) => {
+            await callback(receipt)
+            if (selected) return
+            const tuple = f.saver.readPreparedConversationData(receipt)
+            const namespace: unknown = tuple.config.configurable?.checkpoint_ns
+            if (typeof namespace !== "string" || !namespace ||
+              !tuple.checkpoint.channel_values.cmbFunctionConversation)
+              throw Error("ACTUAL_SHARED_PREPARED_STATE_REQUIRED")
+            selected = { namespace, checkpointId: tuple.checkpoint.id, step: args[2].step }
+            held.resolve()
+            await release.promise
+          }
+          return Reflect.apply(original, this, actual)
+        })
+      const coreModes: unknown[] = [], completed: unknown[] = []
+      const graph = f.agent.graph
+      const inputSchema = graph.builder._inputRuntimeDefinition as unknown as { fields: object }
+      if (!StateSchema.isInstance(inputSchema as unknown))
+        throw Error("ACTUAL_SHARED_INPUT_SCHEMA_REQUIRED")
+      const fieldsPrototype = Object.getPrototypeOf(inputSchema.fields) as object
+      const constructor = Object.getOwnPropertyDescriptor(fieldsPrototype, "constructor")
+      if (!constructor || !("value" in constructor) || typeof constructor.value !== "function")
+        throw Error("ACTUAL_SHARED_SCHEMA_OBJECT_CONSTRUCTOR_REQUIRED")
+      const sdkObject = constructor.value as ObjectConstructor
+      if (sdkObject.prototype !== fieldsPrototype || typeof sdkObject.entries !== "function")
+        throw Error("ACTUAL_SHARED_SCHEMA_OBJECT_ENTRIES_REQUIRED")
+      const originalEntries = sdkObject.entries, stackLimit = Error.stackTraceLimit
+      Error.stackTraceLimit = 40
+      let coreObserved = false
+      const entries = vi.spyOn(sdkObject, "entries").mockImplementation((value) => {
+        const domain = currentSharedNativeDomainRecord()
+        if (domain?.factory.graph === graph && value && typeof value === "object" &&
+          Object.getOwnPropertyDescriptor(value, "configurable")?.value?.__pregel_checkpointer ===
+            domain.scope.checkpointer) {
+          const stack = new Error().stack ?? ""
+          if (stack.includes("executeNativePregelStreamOperation") && stack.includes("ensureConfig")) {
+            const streamMode: unknown = Object.getOwnPropertyDescriptor(value, "streamMode")?.value
+            if (streamMode !== undefined) coreModes.push(streamMode)
+            if (!coreObserved) {
+              coreObserved = true
+              console.info("ACTUAL_SHARED_CORE_CONFIG_OBSERVER", { mode,
+                sameObjectConstructor: sdkObject === Object, stack: stack.split("\n").slice(0, 24) })
+            }
+          }
+        }
+        return originalEntries(value)
+      })
+      const started: string[] = [], ended: string[] = [], metadata: unknown[] = []
+      const callbacks = new (class extends BaseCallbackHandler {
+        name = "actual-shared-barrier-callbacks"
+        constructor() { super({ _awaitHandler: true, raiseError: true }) }
+        handleChainStart(...args: Parameters<NonNullable<BaseCallbackHandler["handleChainStart"]>>) {
+          if (args[5]?.barrierRegression === mode) {
+            started.push(args[2])
+            metadata.push(args[5].barrierRegression)
+          }
+        }
+        handleChainEnd(...args: Parameters<NonNullable<BaseCallbackHandler["handleChainEnd"]>>) {
+          ended.push(args[1])
+        }
+      })()
+      const running = f.execute(async (config) => {
+        const actual = mergeConfigs(config, { callbacks: [callbacks],
+          metadata: { barrierRegression: mode } })
+        if (mode === "invoke") return f.agent.invoke(seed(), actual)
+        const output: unknown[] = []
+        if (mode === "messages") {
+          for await (const frame of await f.agent.stream(seed(),
+            { ...actual, streamMode: "messages" })) output.push(frame)
+        } else {
+          for await (const event of f.agent.streamEvents(seed(),
+            { ...actual, version: "v2" })) output.push(event)
+        }
+        return output
+      })
+      void running.catch(() => undefined)
+      try {
+        await Promise.race([held.promise, running.then(() => {
+          throw Error("ACTUAL_SHARED_PREPARED_GATE_REQUIRED")
+        })])
+        expect(selected?.step).toBeGreaterThanOrEqual(0)
+        expect(f.requests).toHaveLength(0)
+        expect(f.effects()).toBe(0)
+        const database = Object.getOwnPropertyDescriptor(f.saver, "db")?.value as {
+          exec(sql: string, params: unknown[]): Array<{ values: unknown[][] }>
+        }
+        expect(database.exec("SELECT COUNT(*) FROM main.checkpoints WHERE thread_id=? " +
+          "AND checkpoint_ns=? AND checkpoint_id=?",
+        [f.threadId, selected!.namespace, selected!.checkpointId])[0].values).toEqual([[0]])
+        release.resolve()
+        const result = await running
+        if (mode === "invoke") {
+          expect(messages(record(result).messages).at(-1)).toBeInstanceOf(AIMessage)
+        } else if (mode === "messages") {
+          expect(Array.isArray(result)).toBe(true)
+          expect((result as unknown[]).length).toBeGreaterThan(0)
+          const partials: unknown[] = []
+          for (const frame of result as unknown[]) {
+            expect(Array.isArray(frame)).toBe(true)
+            expect((frame as unknown[])).toHaveLength(2)
+            const message = (frame as unknown[])[0]
+            expect(record((frame as unknown[])[1]).langgraph_node).toBe("model_request")
+            if (AIMessageChunk.isInstance(message)) partials.push(message.content)
+            else if (AIMessage.isInstance(message)) completed.push(message)
+            else {
+              const wire = record(message)
+              expect(wire.lc).toBe(1)
+              expect(wire.type).toBe("constructor")
+              if (Array.isArray(wire.id) && wire.id.at(-1) === "AIMessageChunk") {
+                expect(wire.id).toEqual(["langchain_core", "messages", "AIMessageChunk"])
+                partials.push(record(wire.kwargs).content)
+              } else {
+                expect(wire.id).toEqual(["langchain_core", "messages", "AIMessage"])
+                completed.push(wire)
+              }
+            }
+          }
+          expect(partials).toEqual(["complete ", "shared answer"])
+          expect(partials.join("")).toBe("complete shared answer")
+          expect(completed).toHaveLength(1)
+          expect(coreObserved).toBe(true)
+          expect(coreModes).toContainEqual(["messages", "updates"])
+          expect(coreModes).not.toContain("messages")
+        } else {
+          expect((result as unknown[]).map((event) => record(event).event))
+            .toContain("on_chat_model_stream")
+          expect(record((result as unknown[]).at(-1)).event).toBe("on_chain_end")
+        }
+        expect(started.length).toBeGreaterThan(0)
+        expect(new Set(started).size).toBe(started.length)
+        for (const id of started) expect(ended.filter((value) => value === id)).toHaveLength(1)
+        expect(metadata.every((value) => value === mode)).toBe(true)
+        expect(f.requests).toHaveLength(1)
+        const saved = await f.verifySaved(1)
+        if (mode === "messages") {
+          const accepted = saved.native.filter(AIMessage.isInstance)
+          expect(accepted).toHaveLength(1)
+          if (AIMessage.isInstance(completed[0])) {
+            expect(serializeFunctionConversationNativeMessage(completed[0]))
+              .toBe(serializeFunctionConversationNativeMessage(accepted[0]))
+            expect(completed[0].additional_kwargs.function_row)
+              .toEqual(functionConversationCanonicalStamp(f.runtimes[0].target.ref, saved.rows[0]))
+          } else expect(completed[0]).toEqual(accepted[0].toJSON())
+        }
+        await f.assertDrained()
+      } finally {
+        release.resolve()
+        await Promise.allSettled([running])
+        entries.mockRestore()
+        Error.stackTraceLimit = stackLimit
+        prepared.mockRestore()
+      }
+    }
+  )
+
+  it.each(["ensureConfig", "schema.validateInput"] as const)(
+    "keeps a caught synchronous %s reentry failed until the original Scope drains",
+    async (point) => {
+      const f = await fixture()
+      const graph = f.agent.graph
+      let entered = 0, first: unknown, nested: Promise<unknown> | undefined
+      let boundScope: FunctionConversationSharedCheckpointScope | undefined
+      let childPuts = 0, validationCalls = 0
+      const put = SqlJsSaver.prototype.putWithCommitObserver
+      vi.spyOn(SqlJsSaver.prototype, "putWithCommitObserver").mockImplementation(function (this: SqlJsSaver, ...args) {
+        if (this === f.saver && args[0].configurable?.checkpoint_ns) childPuts++
+        return Reflect.apply(put, this, args)
+      })
+      const attack = () => {
+        const domain = currentSharedNativeDomainRecord()
+        if (entered || domain?.factory.graph !== graph) return
+        entered++
+        boundScope = domain.scope
+        try { nested = graph.stream(seed(), { configurable: {
+          __pregel_checkpointer: domain.scope.checkpointer } }) }
+        catch (error) { first = error }
+        void nested?.catch(() => undefined)
+      }
+      const schema = graph.builder._inputRuntimeDefinition as unknown as {
+        readonly fields: object
+        validateInput(input: unknown): Promise<unknown>
+      }
+      if (!StateSchema.isInstance(schema as unknown)) throw Error("ACTUAL_SHARED_INPUT_SCHEMA_REQUIRED")
+      const validate = schema.validateInput
+      const schemaSpy = vi.spyOn(schema, "validateInput").mockImplementation(function (this: typeof schema, input) {
+        validationCalls++
+        if (point === "schema.validateInput") attack()
+        return Reflect.apply(validate, this, [input])
+      })
+      const fieldsPrototype = Object.getPrototypeOf(schema.fields) as object
+      const constructor = Object.getOwnPropertyDescriptor(fieldsPrototype, "constructor")
+      if (!constructor || !("value" in constructor) || typeof constructor.value !== "function")
+        throw Error("ACTUAL_SHARED_SCHEMA_OBJECT_CONSTRUCTOR_REQUIRED")
+      const sdkObject = constructor.value as ObjectConstructor
+      if (sdkObject.prototype !== fieldsPrototype || typeof sdkObject.entries !== "function")
+        throw Error("ACTUAL_SHARED_SCHEMA_OBJECT_ENTRIES_REQUIRED")
+      const originalEntries = sdkObject.entries, stackLimit = Error.stackTraceLimit
+      Error.stackTraceLimit = 40
+      const entries = vi.spyOn(sdkObject, "entries").mockImplementation((value) => {
+        if (point === "ensureConfig" && !entered) {
+          const domain = currentSharedNativeDomainRecord()
+          if (domain?.factory.graph === graph && value && typeof value === "object" &&
+            Object.getOwnPropertyDescriptor(value, "configurable")?.value?.__pregel_checkpointer ===
+              domain.scope.checkpointer) {
+            const stack = new Error().stack ?? ""
+            if (stack.includes("executeNativePregelStreamOperation") && stack.includes("ensureConfig")) {
+              console.info("ACTUAL_SHARED_ENSURE_CONFIG_REENTRY", {
+                sameObjectConstructor: sdkObject === Object, stack: stack.split("\n").slice(0, 24) })
+              attack()
+            }
+          }
+        }
+        return originalEntries(value)
+      })
+      const running = f.execute((config) => f.agent.invoke(seed(), config))
+      let actual: unknown
+      try { await running } catch (error) { actual = error }
+      finally {
+        entries.mockRestore(); schemaSpy.mockRestore(); Error.stackTraceLimit = stackLimit
+      }
+      if (nested) await Promise.allSettled([nested])
+      expect(entered).toBe(1)
+      expect(first).toBeInstanceOf(Error)
+      expect(actual).toBe(first)
+      expect(boundScope).toBeDefined()
+      expect(boundScope!.isClosed()).toBe(true)
+      await boundScope!.whenDrained()
+      if (point === "schema.validateInput") expect(validationCalls).toBeGreaterThan(0)
+      expect(f.requests).toHaveLength(0)
+      expect(f.effects()).toBe(0)
+      expect(childPuts).toBe(0)
+      await f.assertDrained()
+      const database = Object.getOwnPropertyDescriptor(f.saver, "db")?.value as {
+        exec(sql: string, params: unknown[]): Array<{ values: unknown[][] }>
+      }
+      expect(database.exec("SELECT COUNT(*) FROM main.checkpoints " +
+        "WHERE thread_id=? AND checkpoint_ns<>''", [f.threadId])[0].values).toEqual([[0]])
+    }
+  )
+
+  it("closes the starting Scope rather than a different genuine reentry domain", async () => {
+    const other = await fixture(), f = await fixture()
+    const entered = deferred<void>(), release = deferred<void>()
+    let foreign: SharedNativeDomainRecord | undefined
+    const put = SqlJsSaver.prototype.putWithCommitObserver
+    const prepared = vi.spyOn(SqlJsSaver.prototype, "putWithCommitObserver")
+      .mockImplementation(function (this: SqlJsSaver, ...args) {
+        if (this !== other.saver || !args[7] || foreign) return Reflect.apply(put, this, args)
+        const callback = args[7]
+        const actual = [...args] as Parameters<SqlJsSaver["putWithCommitObserver"]>
+        actual[7] = async (receipt) => {
+          await callback(receipt)
+          foreign = currentSharedNativeDomainRecord()
+          if (!foreign || foreign.factory.graph !== other.agent.graph)
+            throw Error("ACTUAL_FOREIGN_SHARED_DOMAIN_REQUIRED")
+          entered.resolve()
+          await release.promise
+        }
+        return Reflect.apply(put, this, actual)
+      })
+    const otherRun = other.execute((config) => other.agent.invoke(seed(), config))
+    void otherRun.catch(() => undefined)
+    let first: unknown, originalScope: FunctionConversationSharedCheckpointScope | undefined
+    let calls = 0
+    const schema = f.agent.graph.builder._inputRuntimeDefinition as unknown as {
+      validateInput(input: unknown): Promise<unknown>
+    }
+    if (!StateSchema.isInstance(schema as unknown)) throw Error("ACTUAL_SHARED_INPUT_SCHEMA_REQUIRED")
+    const validate = schema.validateInput
+    const validation = vi.spyOn(schema, "validateInput").mockImplementation(function (this: typeof schema, input) {
+      if (!calls++) {
+        const original = currentSharedNativeDomainRecord()
+        if (!original || original.factory.graph !== f.agent.graph || !foreign)
+          throw Error("ACTUAL_STARTING_SHARED_DOMAIN_REQUIRED")
+        originalScope = original.scope
+        runSharedNativeFactoryDomain(foreign.factory, foreign.scope, () => {
+          try { void f.agent.graph.stream(seed(), { configurable: {
+            __pregel_checkpointer: foreign!.scope.checkpointer } }) }
+          catch (error) { first = error }
+        })
+      }
+      return Reflect.apply(validate, this, [input])
+    })
+    try {
+      await Promise.race([entered.promise, otherRun.then(() => {
+        throw Error("ACTUAL_FOREIGN_PREPARED_GATE_REQUIRED")
+      })])
+      let failure: unknown
+      try { await f.execute((config) => f.agent.invoke(seed(), config)) }
+      catch (error) { failure = error }
+      expect(calls).toBeGreaterThan(0)
+      expect(first).toBeInstanceOf(Error)
+      expect(failure).toBe(first)
+      expect(originalScope!.isClosed()).toBe(true)
+      expect(foreign!.scope.isClosed()).toBe(false)
+      expect(f.requests).toHaveLength(0)
+      expect(other.requests).toHaveLength(0)
+      await originalScope!.whenDrained()
+      release.resolve()
+      await otherRun
+      expect(other.requests).toHaveLength(1)
+      await other.verifySaved(1)
+      await other.assertDrained()
+      await f.assertDrained()
+    } finally {
+      release.resolve()
+      await Promise.allSettled([otherRun])
+      validation.mockRestore()
+      prepared.mockRestore()
+    }
+  })
+
   // Correctness coverage for three canonical receipts and 12 parent drops, not a latency benchmark.
   it("drops the real child's live and closed AI and Tool shadows only from its genuine parent", async () => {
     const f = await fixture({ tool: true, parentProjection: true, protected: true })

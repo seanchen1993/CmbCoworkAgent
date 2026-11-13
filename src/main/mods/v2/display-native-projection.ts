@@ -34,6 +34,13 @@ interface DisplayRowVersion {
   digest: string
   version: string
 }
+
+/** Private provenance: a peer's error text cannot request a fresh publication. */
+class CancelledFunctionDisplayRead extends Error {
+  constructor(reason: unknown) {
+    super(reason instanceof Error ? reason.message : "MODS_DISPLAY_READ_CANCELLED", { cause: reason })
+  }
+}
 export interface FunctionPreparedDisplayRead {
   readonly scope: FunctionDisplayScope
   readonly key: string
@@ -104,7 +111,8 @@ export class FunctionNativeDisplayProjection {
     props: ModObject,
     admission: FunctionNativeDisplayAdmission,
     presentationId?: string,
-    messageId?: string
+    messageId?: string,
+    requestSignal?: AbortSignal
   ): Promise<FunctionDisplaySnapshot> {
     if (
       presentationId !== undefined &&
@@ -112,7 +120,8 @@ export class FunctionNativeDisplayProjection {
     )
       throw new ModFunctionError("MODS_DISPLAY_KEY_INVALID")
     const operation = { workspace, threadId, controller: new AbortController() }
-    const signal = AbortSignal.any([this.lifetime.signal, operation.controller.signal])
+    const signal = AbortSignal.any([this.lifetime.signal, operation.controller.signal,
+      ...(requestSignal ? [requestSignal] : [])])
     const current = () => {
       signal.throwIfAborted()
       admission.assertCurrent()
@@ -282,16 +291,19 @@ export class FunctionNativeDisplayProjection {
     read: FunctionPreparedDisplayRead,
     admission: FunctionNativeDisplayAdmission,
     run: () => Promise<T>,
-    reuse: (snapshot: FunctionDisplaySnapshot) => T
+    reuse: (snapshot: FunctionDisplaySnapshot) => T,
+    signal?: AbortSignal
   ): Promise<T> {
     admission.assertCurrent()
     try {
       const id = JSON.stringify([read.scope.id, read.key, this.version(read, admission)])
       for (;;) {
+        signal?.throwIfAborted()
         this.guard(read.scope, read.key, read.row, admission)()
         const pending = this.guestReads.get(id)
         if (!pending) break
         await pending
+        signal?.throwIfAborted()
         // Each waiter has its own full source/permission fence after the physical producer.
         const cached = this.lookup(read, admission)
         if (cached) return reuse(cached)
@@ -396,11 +408,22 @@ export class FunctionNativeDisplayProjection {
     component: FunctionUiSite,
     read: FunctionPreparedDisplayRead,
     admission: FunctionNativeDisplayAdmission,
-    retain = true
+    retain = true,
+    requestSignal?: AbortSignal
   ): Promise<FunctionDisplaySnapshot> {
     admission.assertCurrent()
     try {
-      return await this.produce(workspace, component, read, admission, retain)
+      for (;;) {
+        try {
+          return await this.produce(workspace, component, read, admission, retain, requestSignal)
+        } catch (error) {
+          if (!(error instanceof CancelledFunctionDisplayRead) || requestSignal?.aborted) throw error
+          // A coalesced follower owns no producer effect. After that physical producer
+          // has ended, its still-current proof may produce a fresh protected result.
+          this.lifetime.signal.throwIfAborted()
+          admission.assertCurrent()
+        }
+      }
     } finally {
       admission.assertCurrent()
     }
@@ -411,17 +434,27 @@ export class FunctionNativeDisplayProjection {
     component: FunctionUiSite,
     read: FunctionPreparedDisplayRead,
     admission: FunctionNativeDisplayAdmission,
-    retain: boolean
+    retain: boolean,
+    requestSignal?: AbortSignal
   ): Promise<FunctionDisplaySnapshot> {
     const { scope, key, input, row } = read
     const version = this.version(read, admission)
-    const current = this.guard(scope, key, row, admission)
+    const signal = requestSignal ? AbortSignal.any([this.lifetime.signal, requestSignal])
+      : this.lifetime.signal
+    const assertSignal = () => {
+      if (requestSignal?.aborted) throw new CancelledFunctionDisplayRead(requestSignal.reason)
+      signal.throwIfAborted()
+    }
+    const guard = this.guard(scope, key, row, admission)
+    const current = () => { assertSignal(); guard() }
     current()
     const cached = retain ? this.cache.read(scope, key, version) : null
     if (cached) return cached
     const proof = this.cache.captureProof(scope, {
       version,
-      assertCurrent: current,
+      // Retained passive data belongs to the current host source, not the caller's
+      // short-lived wait. Unmounting a completed read must not revoke a valid cache.
+      assertCurrent: guard,
       reusable: true
     })
     if (!proof) throw new ModFunctionError("MODS_DISPLAY_PROOF_INVALID")
@@ -434,7 +467,7 @@ export class FunctionNativeDisplayProjection {
         // the row identity; check the full source, permission and scope on both sides
         // of every external publication and again before handing data to the cache.
         const assertRow = () => {
-          this.lifetime.signal.throwIfAborted()
+          assertSignal()
           if (this.rows.get(scope)?.get(key) !== row)
             throw new ModFunctionError("MODS_DISPLAY_ROW_CHANGED")
         }
@@ -445,7 +478,9 @@ export class FunctionNativeDisplayProjection {
         }
         const publish = async (value: ModJson): Promise<ModJson> => {
           assertPublication()
-          const result = await this.host.publish(workspace, value, this.lifetime.signal)
+          let result: ModJson
+          try { result = await this.host.publish(workspace, value, signal) }
+          catch (error) { assertSignal(); throw error }
           assertPublication()
           return result
         }

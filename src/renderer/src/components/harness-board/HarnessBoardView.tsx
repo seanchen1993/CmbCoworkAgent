@@ -7223,12 +7223,17 @@ function FeatureDetailPage({
             modelSelection
           })
           if (existingThreadId) {
-            void window.api.threads
-              .get(existingThreadId)
-              .then((thread) => {
-                if (thread) useAppStore.getState().addThreadSummary(thread)
-              })
-              .catch((error) => console.warn("[ManagedRun] Failed to refresh session:", error))
+            const publisher = useAppStore.getState().captureThreadSummaryRead(existingThreadId)
+            if (publisher.isCurrent()) {
+              void (async () => {
+                try {
+                  const thread = await window.api.threads.get(existingThreadId)
+                  if (thread) publisher.publish(thread)
+                } catch (error) {
+                  console.warn("[ManagedRun] Failed to refresh session:", error)
+                } finally { publisher.close() }
+              })()
+            } else publisher.close()
           }
           startStatus = startedRun.status
           startFailureReason = startedRun.failureReason

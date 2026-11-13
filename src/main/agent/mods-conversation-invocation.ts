@@ -3,23 +3,27 @@ import { SqlJsSaver } from "../checkpointer/sqljs-saver"
 import type { RunnableConfig } from "@langchain/core/runnables"
 import { ModFunctionError } from "../../shared/mods/v2/contracts"
 import type { FunctionConversationStore } from "../db/function-conversation-store"
-import { FUNCTION_CONVERSATION_CHANNEL, readFunctionConversationState } from
+import { FUNCTION_CONVERSATION_CHANNEL } from
   "../checkpointer/function-conversation-delivery"
 import { prepareFunctionConversationIntake, type FunctionConversationGraphBinding } from
   "./mods-conversation"
 import type { FunctionConversationIntakePublication } from "./mods-conversation"
-import { captureNativeMessageForOccurrence } from "./native-message-capture"
 import { preflightFunctionConversationMessage } from "./function-conversation-message-preflight"
 import { captureConversationCheckpointRead, readFunctionConversationCheckpointMembership,
   type FunctionConversationCheckpointMembershipProof } from
   "../checkpointer/function-conversation-checkpoint-membership"
 import { createNativeEventStream } from "./native-event-stream"
 import { nativeConversationFairness } from "./function-conversation-native-fairness"
+import { captureLegacyCheckpointMigration } from "./legacy-checkpoint-migration"
+import { inspectFunctionConversationAdmission } from "./function-conversation-admission"
 import { readFunctionConversationNativeAgentDerivation,
   type FunctionNativeAgentDerivation } from "./native-agent-factory"
 
 const derivations = new WeakMap<object, FunctionNativeAgentDerivation>()
 const derivationWeakGet = WeakMap.prototype.get, derivationWeakSet = WeakMap.prototype.set
+export type FunctionConversationCompactionReconciler = (
+  config: Readonly<RunnableConfig>, signal: AbortSignal, assertCurrent: () => void
+) => Promise<void>
 export function readFunctionConversationInvocationDerivation(
   invocation: object
 ): FunctionNativeAgentDerivation | undefined {
@@ -36,6 +40,7 @@ interface Host {
     register(messages: readonly BaseMessage[], proof: FunctionConversationCheckpointMembershipProof): void
     registerAsync?(messages: readonly BaseMessage[], proof: FunctionConversationCheckpointMembershipProof,
       signal: AbortSignal): void | Promise<void>
+    readonly reconcileCompaction?: FunctionConversationCompactionReconciler
   }
   onIntakeNotes?(publication: FunctionConversationIntakePublication): void
 }
@@ -89,6 +94,7 @@ export function wrapFunctionConversationInvocation<T extends object>(graph: T, h
     const admitted = ordinaryInput ? { ...input as object } : undefined
     const binding = host.binding
     const signal = config.signal ? AbortSignal.any([config.signal, binding.signal]) : binding.signal
+    let assertLegacyHistory: (() => void) | undefined
     const assertCurrent = () => {
       signal.throwIfAborted()
       host.history?.assertCurrent()
@@ -109,37 +115,52 @@ export function wrapFunctionConversationInvocation<T extends object>(graph: T, h
       throw new ModFunctionError("MODS_CONVERSATION_STATE_INVALID")
     const channels = values as Record<string, unknown>
     const previous = channels[FUNCTION_CONVERSATION_CHANNEL]
-    if (previous === undefined && config.configurable?.checkpoint_id)
-      throw new ModFunctionError("MODS_CONVERSATION_MIGRATION_REQUIRED")
-    const state = previous === undefined ? binding.initialState : readFunctionConversationState(previous)
-    if (!state) throw new ModFunctionError("MODS_CONVERSATION_MIGRATION_REQUIRED")
     const existing = channels.messages
     if (existing !== undefined && (!Array.isArray(existing) ||
       !existing.every(message => host.history
         ? BaseMessage.isInstance(preflightFunctionConversationMessage(message,
             () => signal.throwIfAborted())) : BaseMessage.isInstance(message))))
       throw new ModFunctionError("MODS_CONVERSATION_CHECKPOINT_CHANGED")
+    const admission = inspectFunctionConversationAdmission({ state: previous,
+      messages: existing as BaseMessage[] | undefined }, assertCurrent)
+    if (admission.kind === "unproven-native")
+      throw new ModFunctionError("MODS_CONVERSATION_MIGRATION_REQUIRED")
+    if (admission.kind === "ordinary" && config.configurable?.checkpoint_id) {
+      if (!host.history) throw new ModFunctionError("MODS_CONVERSATION_MIGRATION_REQUIRED")
+      assertLegacyHistory = await captureLegacyCheckpointMigration({ saver: host.history.saver,
+        config, snapshotConfig: snapshot.config, messages: (existing as BaseMessage[] | undefined) ?? [],
+        assertCurrent })
+      assertCurrent()
+    }
+    const state = admission.kind === "native" ? admission.state : binding.initialState
+    if (!state) throw new ModFunctionError("MODS_CONVERSATION_MIGRATION_REQUIRED")
+    let protectedPoint: { readonly config: Readonly<RunnableConfig>; readonly checkpointId: string } | undefined
+    if (host.history && admission.kind === "native" &&
+      (host.history.reconcileCompaction || admission.marked || admission.invalid)) {
+      const point = snapshot.config?.configurable
+      if (point?.thread_id !== binding.checkpointThreadId ||
+        (point?.checkpoint_ns ?? "") !== binding.runtimeCheckpointNamespace ||
+        typeof point?.checkpoint_id !== "string" || !point.checkpoint_id || !binding.checkpointIncarnation)
+        throw new ModFunctionError("MODS_CONVERSATION_CHECKPOINT_MEMBERSHIP")
+      protectedPoint = { checkpointId: point.checkpoint_id,
+        config: Object.freeze({ ...config, configurable: Object.freeze({ ...config.configurable,
+          thread_id: binding.checkpointThreadId, checkpoint_ns: binding.runtimeCheckpointNamespace,
+          checkpoint_id: point.checkpoint_id }) }) }
+      if (host.history.reconcileCompaction) {
+        assertCurrent()
+        await host.history.reconcileCompaction(protectedPoint.config, signal, assertCurrent)
+        assertCurrent()
+      }
+    }
     if (host.history && Array.isArray(existing) && existing.length) {
-      const marked = existing.some(message => {
-        const captured = captureNativeMessageForOccurrence(message, "history-marker-copy",
-          () => signal.throwIfAborted())
-        const additional = captured.snapshot.data.additional_kwargs
-        return !!additional && typeof additional === "object" &&
-          (Object.hasOwn(additional, "function_row") || Object.hasOwn(additional, "function_row_invalid"))
-      })
-      if (marked) {
-        const point = snapshot.config?.configurable
-        if (point?.thread_id !== binding.checkpointThreadId ||
-          (point?.checkpoint_ns ?? "") !== binding.runtimeCheckpointNamespace ||
-          typeof point?.checkpoint_id !== "string" || !point.checkpoint_id ||
-          !binding.checkpointIncarnation)
+      if (admission.marked || admission.invalid) {
+        if (!protectedPoint || !binding.checkpointIncarnation)
           throw new ModFunctionError("MODS_CONVERSATION_CHECKPOINT_MEMBERSHIP")
+        const exact = protectedPoint.config
         const recovery = host.store.readCheckpointRecoverySnapshot(binding.target, {
           checkpointThreadId: binding.checkpointThreadId,
-          checkpointIncarnation: binding.checkpointIncarnation, checkpointId: point.checkpoint_id
+          checkpointIncarnation: binding.checkpointIncarnation, checkpointId: protectedPoint.checkpointId
         }, assertCurrent).snapshot
-        const exact = { ...config, configurable: { ...config.configurable,
-          checkpoint_id: point.checkpoint_id } }
         const captured = await captureConversationCheckpointRead(host.store, host.history.saver,
           exact, () => ({ target: binding.target, checkpointThreadId: binding.checkpointThreadId,
             checkpointIncarnation: binding.checkpointIncarnation!, cut: recovery.cut,
@@ -156,7 +177,10 @@ export function wrapFunctionConversationInvocation<T extends object>(graph: T, h
       }
     }
     // Resume input belongs to the graph. Only its exact saved history is registered above.
-    if (!ordinaryInput) return input
+    if (!ordinaryInput) {
+      assertLegacyHistory?.()
+      return input
+    }
     const intake = await prepareFunctionConversationIntake({ store: host.store,
       target: binding.target, state, signal, assertCurrent,
       highWater: binding.admission?.highWater,
@@ -165,6 +189,7 @@ export function wrapFunctionConversationInvocation<T extends object>(graph: T, h
     assertCurrent()
     if (intake.publication) host.onIntakeNotes?.(intake.publication)
     assertCurrent()
+    assertLegacyHistory?.()
     return { ...admitted, messages: [...intake.notes, ...submitted],
       [FUNCTION_CONVERSATION_CHANNEL]: intake.state }
   }

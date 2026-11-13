@@ -6,7 +6,7 @@ import { expect, it } from "vitest"
 import { transformAutobizWorkflowWakeup, AUTOBIZ_WORKFLOW_TARGET_SHA256 } from "../../../scripts/prepare-autobiz-workflow-wakeup-source"
 import { createHash } from "node:crypto"
 
-const workflow = resolve("output/deliveries/mods-creator-accepted-20261017/Mods来源/AutoBiz/workflows/code-batched-execution.workflow.js")
+const workflow = resolve("tests/fixtures/autobiz-reviewed/base/workflows/code-batched-execution.workflow.js")
 
 function sourceFunctions(source: string, names: string[]) {
   const parsed = ts.createSourceFile("original-workflow.js", source, ts.ScriptTarget.ESNext, true)

@@ -33,6 +33,37 @@ function liveProjection(
   }
 }
 
+it("keeps complete version snapshots equivalent to rebuilding across content, roles and native markers", () => {
+  const project = createChatMessageProjector()
+  const baseline = [assistant({ id: "base", content: "durable" })]
+  const first = assistant({ id: "live", content: "a" })
+  let live = [first], contentVersion = 1, structureVersion = 1
+  let previous = project(baseline, live, undefined, 0,
+    { changedMessages: live, contentVersion, structureVersion })
+  for (const change of [
+    () => { live = [{ ...first, content: "ab" }]; contentVersion++ },
+    () => { live = [{ ...live[0], provider_occurrence: 2 }]; contentVersion++; structureVersion++ },
+    () => { live = [{ ...live[0], role: "user" }]; contentVersion++; structureVersion++ },
+    () => { live = [{ ...live[0], function_row_invalid: true }]; contentVersion++; structureVersion++ },
+    () => { live = [first]; contentVersion++; structureVersion++ },
+    () => { live = []; contentVersion++; structureVersion++ }
+  ]) {
+    const oldVersion = previous.contentVersion, oldStructure = previous.structureVersion
+    change()
+    const metadata = { changedMessages: live, contentVersion, structureVersion }
+    const next = project(baseline, live, undefined, 0, metadata)
+    const rebuilt = createChatMessageProjector()(baseline, live, undefined, 0, metadata)
+    expect(next.messages).toEqual(rebuilt.messages)
+    expect([...next.indexById]).toEqual([...rebuilt.indexById])
+    expect(next.contentVersion).toBeGreaterThan(oldVersion)
+    if (contentVersion === 2) {
+      expect(next.messages).toBe(previous.messages)
+      expect(next.structureVersion).toBe(oldStructure)
+    } else expect(next.structureVersion).toBeGreaterThan(oldStructure)
+    previous = next
+  }
+})
+
 describe("createChatMessageProjector tool-call reconciliation", () => {
   it("fills missing durable tool calls from the matching live assistant", () => {
     const baseline = assistant()

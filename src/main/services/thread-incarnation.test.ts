@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 import {
   captureThreadIncarnation,
   matchesThreadIncarnation,
+  readThreadIncarnationToken,
   THREAD_INCARNATION_METADATA_KEY,
   type ThreadIncarnationRow
 } from "./thread-incarnation"
@@ -48,14 +49,14 @@ describe("thread incarnation metadata interpretation", () => {
     const raw = metadata("first")
     const parse = vi.spyOn(JSON, "parse")
     const expected = captureThreadIncarnation({ metadata: raw, created_at: 77 })
-    expect(parse).toHaveBeenCalledTimes(1)
+    expect(parse).not.toHaveBeenCalled()
 
     expect(matchesThreadIncarnation({ metadata: raw, created_at: 77 }, expected)).toBe(true)
     expect(matchesThreadIncarnation({ metadata: raw, created_at: 78 }, expected)).toBe(true)
-    expect(parse).toHaveBeenCalledTimes(1)
+    expect(parse).not.toHaveBeenCalled()
   })
 
-  it("parses every changed text without replacing the initial interpretation", () => {
+  it("reads changed text without replacing the initial interpretation", () => {
     const initial = metadata("first")
     const changed = metadata("first", "C:/changed")
     const replacement = metadata("second")
@@ -64,16 +65,16 @@ describe("thread incarnation metadata interpretation", () => {
 
     expect(matchesThreadIncarnation({ metadata: changed, created_at: 77 }, expected)).toBe(true)
     expect(matchesThreadIncarnation({ metadata: changed, created_at: 77 }, expected)).toBe(true)
-    expect(parse).toHaveBeenCalledTimes(3)
+    expect(parse).not.toHaveBeenCalled()
     expect(matchesThreadIncarnation({ metadata: replacement, created_at: 77 }, expected)).toBe(
       false
     )
-    expect(parse).toHaveBeenCalledTimes(4)
+    expect(parse).not.toHaveBeenCalled()
     expect(matchesThreadIncarnation({ metadata: initial, created_at: 77 }, expected)).toBe(true)
-    expect(parse).toHaveBeenCalledTimes(4)
+    expect(parse).not.toHaveBeenCalled()
   })
 
-  it("keeps cloned and independently supplied incarnations on the original parsing path", () => {
+  it("matches cloned and independently supplied incarnations against the persisted token", () => {
     const raw = metadata("first")
     const expected = captureThreadIncarnation({ metadata: raw, created_at: 77 })
     const clone = { ...expected }
@@ -83,7 +84,7 @@ describe("thread incarnation metadata interpretation", () => {
     expect(matchesThreadIncarnation({ metadata: raw, created_at: 77 }, clone)).toBe(true)
     expect(matchesThreadIncarnation({ metadata: raw, created_at: 77 }, clone)).toBe(true)
     expect(matchesThreadIncarnation({ metadata: raw, created_at: 77 }, supplied)).toBe(true)
-    expect(parse).toHaveBeenCalledTimes(3)
+    expect(parse).not.toHaveBeenCalled()
   })
 
   it("uses the current creation timestamp for legacy rows with unchanged metadata", () => {
@@ -95,7 +96,7 @@ describe("thread incarnation metadata interpretation", () => {
     expect(matchesThreadIncarnation({ metadata: raw, created_at: 78 }, expected)).toBe(false)
     expected.legacyCreatedAt = 78
     expect(matchesThreadIncarnation({ metadata: raw, created_at: 78 }, expected)).toBe(true)
-    expect(parse).toHaveBeenCalledTimes(1)
+    expect(parse).not.toHaveBeenCalled()
   })
 
   it("preserves ordinary changes to the expected fields", () => {
@@ -154,7 +155,6 @@ describe("thread incarnation metadata interpretation", () => {
     expect(matchesThreadIncarnation(row, expected)).toBe(true)
     expect(trace).toEqual([
       "metadata",
-      "parse",
       "created_at",
       "expected.token",
       "expected.token",
@@ -173,5 +173,77 @@ describe("thread incarnation metadata interpretation", () => {
     }
     expect(matchesThreadIncarnation(null, expected)).toBe(false)
     expect(matchesThreadIncarnation(undefined, expected)).toBe(false)
+  })
+
+  it.each([
+    [null, null],
+    ["", null],
+    ["{broken", null],
+    ["null", null],
+    ["42", null],
+    ["[]", null],
+    ["{}", null],
+    ['{"cmb_thread_incarnation":""}', null],
+    ['{"cmb_thread_incarnation":"first","cmb_thread_incarnation":"last"}', "last"],
+    ['{"cmb_thread_incarnation":"first","cmb_thread_incarnation":null}', null],
+    ['{"cmb_thread_incarnati\\u006fn":"esc\\u0061ped"}', "escaped"]
+  ])("keeps JSON token semantics for %s", (raw, expected) => {
+    expect(readThreadIncarnationToken(raw)).toBe(expected)
+  })
+
+  it("uses captured parsing and only an own token when Main globals are replaced", () => {
+    const original = Object.getOwnPropertyDescriptor(
+      Object.prototype,
+      THREAD_INCARNATION_METADATA_KEY
+    )
+    let actual: Array<string | null> = []
+    const parser = vi.spyOn(JSON, "parse").mockImplementation(() => ({
+      [THREAD_INCARNATION_METADATA_KEY]: "forged"
+    }))
+    const array = vi.spyOn(Array, "isArray").mockReturnValue(true)
+    try {
+      Object.defineProperty(Object.prototype, THREAD_INCARNATION_METADATA_KEY, {
+        configurable: true,
+        get() {
+          throw Error("Inherited metadata must not execute")
+        }
+      })
+      actual = [
+        readThreadIncarnationToken('{"own":true}'),
+        readThreadIncarnationToken(metadata("actual-captured-token"))
+      ]
+    } finally {
+      if (original)
+        Object.defineProperty(Object.prototype, THREAD_INCARNATION_METADATA_KEY, original)
+      else delete (Object.prototype as Record<string, unknown>)[THREAD_INCARNATION_METADATA_KEY]
+      parser.mockRestore()
+      array.mockRestore()
+    }
+    expect(actual).toEqual([null, "actual-captured-token"])
+  })
+
+  it("bounds the exact-text decoding memo and retains no row or match verdict", async () => {
+    vi.resetModules()
+    const parser = vi.spyOn(JSON, "parse")
+    const fresh = await import("./thread-incarnation")
+    const first = metadata("memo-first")
+    expect(fresh.readThreadIncarnationToken(first)).toBe("memo-first")
+    expect(fresh.readThreadIncarnationToken(first)).toBe("memo-first")
+    expect(parser).toHaveBeenCalledTimes(1)
+    for (let index = 0; index < 8; index++)
+      fresh.readThreadIncarnationToken(metadata(`memo-${index}`))
+    const count = parser.mock.calls.length
+    fresh.readThreadIncarnationToken(first)
+    expect(parser).toHaveBeenCalledTimes(count + 1)
+    const huge = metadata("huge", "x".repeat(300_000))
+    fresh.readThreadIncarnationToken(huge)
+    fresh.readThreadIncarnationToken(huge)
+    expect(parser).toHaveBeenCalledTimes(count + 3)
+    const row = { metadata: first, created_at: 11 }
+    const captured = fresh.captureThreadIncarnation(row)
+    expect(
+      fresh.matchesThreadIncarnation({ ...row, metadata: metadata("new-incarnation") }, captured)
+    ).toBe(false)
+    expect(fresh.matchesThreadIncarnation({ ...row, created_at: 12 }, captured)).toBe(true)
   })
 })

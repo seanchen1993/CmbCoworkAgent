@@ -2409,8 +2409,8 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
   )
   assertIncludes(
     threadsIpc,
-    "await deleteCoordinatorWorkerArtifacts(threadId, workspacePath)",
-    "thread deletion atomically fences in-memory worker state and its on-disk artifacts"
+    "preparedCoordinatorRetirement.activate()",
+    "thread deletion synchronously activates the pre-commit captured worker retirement"
   )
   assertSourceOrder(
     coordinatorWorkerManagerSource,
@@ -2440,8 +2440,8 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
   )
   assertIncludes(
     threadsIpc,
-    "deleteCoordinatorWorkerArtifacts(threadId, workspacePath)",
-    "thread deletion removes coordinator worker artifacts"
+    "await coordinatorRetirement?.finalize()",
+    "thread deletion removes only captured old coordinator artifacts after real drain"
   )
   assertIncludes(
     threadsIpc,
@@ -3149,7 +3149,7 @@ async function testRuntimeKeepsNormalAndCoordinatorSeparate(): Promise<void> {
   assertSourceOrder(
     threadsIpcForRollback,
     "purgeThreadCheckpointArtifacts(threadId)",
-    "deleteCoordinatorWorkerArtifacts(threadId, workspacePath)",
+    "await coordinatorRetirement?.oldPhysicalDrained",
     "checkpoint sweeps run in the SAME sync segment as the retire settlement — an await before them would let a revived fixed-id beat flush a fresh checkpoint the old deletion then eats"
   )
   const retireCall = "await retireThreadCheckpointers(threadId)"

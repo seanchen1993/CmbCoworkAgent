@@ -40,7 +40,53 @@ export const innerStreamPackages = [
       "0b1f125ee7e92df3a629d5993131fc90bc464ce548c826809e97cf673bc6efdb"
     ],
     templates: ["langgraph-native-stream-runtime.js.inc", "langgraph-native-stream.d.ts",
-      "langgraph-native-checkpoint-loop-runtime.js.inc"]
+      "langgraph-native-checkpoint-loop-runtime.js.inc"],
+    previousFiles: [
+          {
+                "path": "dist/pregel/index.js",
+                "sha256": "7d7f6a815e5acff2ad9181b5cf6ece1d8fe134749e324353210c554fbfbfcd4a"
+          },
+          {
+                "path": "dist/pregel/index.cjs",
+                "sha256": "48220df7bb77d67dd6ba9163d48ec661eff785cc43cf48dc858c94618319f15c"
+          },
+          {
+                "path": "package.json",
+                "sha256": "ec1bee35d9a764fc8f4ccdc3c79d889652548df1549582e5d0c05a662a151d92"
+          },
+          {
+                "path": "dist/native-stream-origin.js",
+                "sha256": "610f3bb1603a6d1987295576a89a844be4ebc476204e0c163b991d30652ff25a"
+          },
+          {
+                "path": "dist/native-stream-origin.cjs",
+                "sha256": "ad7f86d56928aaddfaaa0016b8b4d650eba172fc853cab9ae934570b96e44f5e"
+          },
+          {
+                "path": "dist/native-stream-origin.d.ts",
+                "sha256": "552e60383257f4ff1d7fb6d4f30fe47c3633636dada20b952bf0e65ccf6339fa"
+          },
+          {
+                "path": "dist/native-stream-origin.d.cts",
+                "sha256": "552e60383257f4ff1d7fb6d4f30fe47c3633636dada20b952bf0e65ccf6339fa"
+          },
+          {
+                "path": "dist/pregel/loop.js",
+                "sha256": "ceb5e3e63572b6a609edb56876ecc17b41ae28d0e703ab51e2898c99648ba437"
+          },
+          {
+                "path": "dist/pregel/loop.cjs",
+                "sha256": "c8ea91465ba7628fb815174b911d09fc36e7d577688f1579d647ac7718d6db71"
+          },
+          {
+                "path": "dist/pregel/runner.js",
+                "sha256": "2be91aebdf47169cc0ac80efbc2fc45206964a956678f59c39b3c32c4c61cb62"
+          },
+          {
+                "path": "dist/pregel/runner.cjs",
+                "sha256": "ca03e0168a18a4955441ddeece6ee63f2c4bf425bfbe2bcbef1ff8d3fe414942"
+          }
+    ]
   }
 ]
 export function innerStreamPackageFiles(description) {
@@ -69,6 +115,27 @@ function addShims(outputs, module, names, types) {
     names.map(name => `Object.defineProperty(exports, "${name}", { value: origin.${name}, enumerable: true });`).join("\n") + "\n"))
   outputs.set("dist/native-stream-origin.d.ts", Buffer.from(types))
   outputs.set("dist/native-stream-origin.d.cts", Buffer.from(types))
+}
+
+function nativeCheckpointBarrierEdits(runtime) {
+  const marker = "// This is a physical write barrier, not an authority or a permission cache.\n"
+  const endMarker = "function nativePregelGet(map, key) {"
+  const from = runtime.indexOf(marker), to = runtime.indexOf(endMarker, from)
+  if (from < 0 || to <= from) throw Error("LANGGRAPH_CHECKPOINT_BARRIER_TEMPLATE_REQUIRED")
+  return [
+    { before: "const nativePregelThen = Promise.prototype.then\n",
+      after: "const nativePregelThen = Promise.prototype.then\nconst nativePregelPromise = Promise\n" },
+    { before: endMarker, after: runtime.slice(from, to) + endMarker },
+    { before: "\t\t\t\tawait this._runLoop({\n\t\t\t\t\tloop,\n\t\t\t\t\trunner,\n\t\t\t\t\tdebug,\n\t\t\t\t\tconfig\n\t\t\t\t});",
+      after: "\t\t\t\tconst runLoopParams = {\n\t\t\t\t\tloop, runner, debug, config,\n\t\t\t\t\tnativeCheckpointBarrier: nativeCheckpointBody ?\n\t\t\t\t\t\tcreateNativePregelCheckpointBarrier(nativeCheckpointBody, loop) : undefined\n\t\t\t\t};\n\t\t\t\tif (nativeCheckpointBody)\n\t\t\t\t\tawait nativePregelApply(originalNativePregelRunLoopField.value, this, [runLoopParams]);\n\t\t\t\telse await this._runLoop(runLoopParams);" },
+    { before: "\t\tconst { loop, runner, debug, config } = params;",
+      after: "\t\tconst { loop, runner, debug, config, nativeCheckpointBarrier } = params;" },
+    { before: "\t\t\twhile (await loop.tick({ inputKeys: this.inputChannels })) {",
+      after: "\t\t\twhile (await loop.tick({ inputKeys: this.inputChannels })) {\n\t\t\t\tif (nativeCheckpointBarrier) await nativeCheckpointBarrier();" },
+    { before: 'const originalNativePregelIteratorField = Object.getOwnPropertyDescriptor(Pregel.prototype, "_streamIterator");\n',
+      after: 'const originalNativePregelIteratorField = Object.getOwnPropertyDescriptor(Pregel.prototype, "_streamIterator");\n' +
+        'const originalNativePregelRunLoopField = Object.getOwnPropertyDescriptor(Pregel.prototype, "_runLoop");\n' }
+  ]
 }
 
 /** Pure postimage construction; it does not execute or install the SDK. */
@@ -140,6 +207,9 @@ export function buildInnerStreamPostimages(description, originals, runtime, type
         "\t\t\t\t\tloop = await invokeNativePregelCheckpointLoop(request, nativeParams);\n" +
         "\t\t\t\t} else {\n" + ordinary + "\n\t\t\t\t}"
       source = source.slice(0, from) + controlled + source.slice(to)
+      // Runtime edits are already present in the template; these alter only original SDK seams.
+      for (const edit of nativeCheckpointBarrierEdits(runtime).slice(2, 5))
+        source = replaceOnce(source, edit.before, edit.after)
       const iteratorBodyStart = source.indexOf("\n\t\tconst streamEncoding = ",
         source.indexOf("\tasync *_streamIterator(input, options, nativeCheckpointTicket"))
       const iteratorBodyEnd = source.indexOf("\n\t}\n\t/**\n\t* Run the graph with a single input", iteratorBodyStart)
@@ -149,7 +219,7 @@ export function buildInnerStreamPostimages(description, originals, runtime, type
         source.slice(iteratorBodyStart, iteratorBodyEnd) +
         "\n\t\t} catch (reason) {\n\t\t\tinvalidateNativePregelCheckpointBody(nativeCheckpointBody);\n\t\t\tthrow reason;\n\t\t}" +
         source.slice(iteratorBodyEnd)
-      const captures = 'const originalNativePartialStream = Object.getOwnPropertyDescriptor(PartialRunnable.prototype, "stream").value;\nconst originalNativePregelStream = Object.getOwnPropertyDescriptor(Pregel.prototype, "stream").value;\nconst originalNativePregelIteratorOwner = Pregel.prototype;\nconst originalNativePregelIteratorField = Object.getOwnPropertyDescriptor(Pregel.prototype, "_streamIterator");\nnativePregelInitialized = true;\n'
+      const captures = 'const originalNativePartialStream = Object.getOwnPropertyDescriptor(PartialRunnable.prototype, "stream").value;\nconst originalNativePregelStream = Object.getOwnPropertyDescriptor(Pregel.prototype, "stream").value;\nconst originalNativePregelIteratorOwner = Pregel.prototype;\nconst originalNativePregelIteratorField = Object.getOwnPropertyDescriptor(Pregel.prototype, "_streamIterator");\nconst originalNativePregelRunLoopField = Object.getOwnPropertyDescriptor(Pregel.prototype, "_runLoop");\nnativePregelInitialized = true;\n'
       if (cjs) source = replaceOnce(source, "exports.Channel = Channel;", captures + fixedCjsExports(names) + "\nexports.Channel = Channel;")
       else source = replaceOnce(source, "export { Channel, Pregel };", captures +
         `export { Channel, Pregel, ${names.join(", ")}, ${privateNames.join(", ")} };`)
@@ -175,6 +245,10 @@ export function buildInnerStreamPostimages(description, originals, runtime, type
       loopSource = replaceOnce(loopSource,
         "\t\tconst saved = await params.checkpointer?.getTuple(checkpointConfig) ?? {",
         "\t\tconst saved = await (nativeCheckpointLoop ? invokeNativePregelCheckpointCall(nativeCheckpointLoop, checkpointConfig) : params.checkpointer?.getTuple(checkpointConfig)) ?? {")
+      loopSource = replaceOnce(loopSource,
+        "\t\tthis.checkpointerPromises.push(this._checkpointerChainedPromise);",
+        "\t\tobserveNativePregelCheckpointChain(this._checkpointerChainedPromise);\n" +
+          "\t\tthis.checkpointerPromises.push(this._checkpointerChainedPromise);")
       const loopCapture = 'const originalNativeLoopPrototype = Object.getPrototypeOf(PregelLoop);\n' +
         'const originalNativeLoopInitializeField = Object.getOwnPropertyDescriptor(PregelLoop, "initialize");\n' +
         'nativeLoopInitialized = true;\n'
@@ -265,6 +339,14 @@ export async function generateLangchainInnerStreamOrigin() {
         beforeSha256: originals.get(path) === undefined ? null : hash(originals.get(path)),
         afterSha256: hash(outputs.get(path)) })),
       templates: description.templates.map((path, index) => ({ path, sha256: hash(templateBytes[index]) })) }
+    if (description.previousFiles) {
+      manifest.previousInstallation = {
+        files: description.previousFiles,
+        edits: ["js", "cjs"].flatMap(extension =>
+          nativeCheckpointBarrierEdits(templateBytes[0].toString("utf8")).map(edit => ({
+            path: `dist/pregel/index.${extension}`, ...edit })))
+      }
+    }
     generated.push({ description, patch, manifest })
   }
   // Both official packages and all eighteen postimages must validate before any artifact is published.

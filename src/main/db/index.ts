@@ -81,7 +81,6 @@ import {
   attachFreshThreadIncarnation,
   captureThreadIncarnation,
   matchesThreadIncarnation,
-  originalMetadataInterpretation,
   preserveThreadIncarnationMetadata
 } from "../services/thread-incarnation"
 import { assertFunctionConversationForkReady } from "./function-conversation-fork-gate"
@@ -6657,13 +6656,13 @@ const THREAD_CANONICAL_IDENTITY_QUERY = `SELECT thread_id, created_at, updated_a
   FROM threads INDEXED BY ${THREAD_RUNTIME_SCOPE_INDEX} WHERE thread_id = ?`
 const canonicalIdentityStatements = new WeakMap<NativeSqliteAdapter, NativeSqliteReadOne>()
 
-/** Fresh identity data only; custom readers/interpreters retain their full original input. */
+/** Fresh identity data only; custom readers retain their full original input. */
 export function getThreadCanonicalIdentity(threadId: string): ThreadSummaryRow | null {
   const finishTiming = startHostRuntimeTiming("threadRead")
   const database = getDb()
   const qualified = () => {
     const prior = coreApply(coreWeakGet, threadCoreStatements, [database]) as NativeSqliteReadOne | undefined
-    return originalMetadataInterpretation() && originalCoreReadDispatch(database) &&
+    return originalCoreReadDispatch(database) &&
       !coreApply(coreUseHas, threadCoreQueriesInUse, [database]) &&
       (!prior || coreApply(coreUseHas, originalCoreReaders, [prior]))
   }
@@ -6676,7 +6675,7 @@ export function getThreadCanonicalIdentity(threadId: string): ThreadSummaryRow |
       read = coreApply(coreWeakGet, canonicalIdentityStatements, [database]) as NativeSqliteReadOne | undefined
       if (!read) {
         read = database.prepareReadOne(THREAD_CANONICAL_IDENTITY_QUERY)
-        if (!originalCoreReadDispatch(database) || !originalMetadataInterpretation())
+        if (!originalCoreReadDispatch(database))
           return readThreadCore(database, threadId)
         coreApply(coreWeakSet, canonicalIdentityStatements, [database, read])
       }
@@ -6690,8 +6689,7 @@ export function getThreadCanonicalIdentity(threadId: string): ThreadSummaryRow |
       coreApply(coreUseDelete, threadCoreQueriesInUse, [database])
     }
   } finally { finishTiming() }
-  // Timing hooks are observations, but can call replaceable platform functions. A changed
-  // interpreter must still receive the complete raw metadata after that final callback.
+  // Timing hooks may replace the database or dispatch; recheck both after the final callback.
   return getDb() === database && qualified() ? result : readThreadCore(getDb(), threadId)
 }
 

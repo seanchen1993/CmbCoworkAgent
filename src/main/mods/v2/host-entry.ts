@@ -1,4 +1,5 @@
 import { FunctionTrustedWaitClock } from "./trusted-function-wait"
+import { FUNCTION_MOD_RESOURCE_BUDGETS } from "../../../shared/mods/v2/resource-budgets"
 import { prepareFunctionDisplayEnvelope } from "./display-preparation"
 import { randomUUID } from "node:crypto"
 import type { ModJson } from "../../../shared/mods/types"
@@ -122,7 +123,7 @@ async function handle(request: FunctionRequest): Promise<ModJson> {
     return { acknowledged: true }
   }
   if (request.type === "prepare-ui-resolve") {
-    if (uiAssemblies.size || frames.size >= 128 || !request.assembly ||
+    if (uiAssemblies.size || frames.size >= FUNCTION_MOD_RESOURCE_BUDGETS.utilityHost.frames || !request.assembly ||
       !runtimes.has(request.runtimeId) || request.participants.length > 16)
       throw new ModFunctionError("MODS_UI_RESOLVE_IDENTITY")
     const participants = request.participants.map(declaration => {
@@ -183,7 +184,7 @@ async function handle(request: FunctionRequest): Promise<ModJson> {
     if (
       runtimes.has(request.runtimeId) ||
       loading.has(request.runtimeId) ||
-      runtimes.size + loading.size >= 16
+      runtimes.size + loading.size >= FUNCTION_MOD_RESOURCE_BUDGETS.utilityHost.runtimes
     )
       throw new ModFunctionError("MODS_RUNTIME_LIMIT")
     if (Buffer.byteLength(request.code) > 2 * 1024 * 1024)
@@ -232,7 +233,8 @@ async function handle(request: FunctionRequest): Promise<ModJson> {
     return null
   }
   if (request.type !== "invoke") throw new ModFunctionError("MODS_REQUEST_INVALID")
-  if (frames.size >= 128) throw new ModFunctionError("MODS_HOST_CAPACITY")
+  if (frames.size >= FUNCTION_MOD_RESOURCE_BUDGETS.utilityHost.frames)
+    throw new ModFunctionError("MODS_HOST_CAPACITY")
   const controller = new AbortController()
   const waitClock = new FunctionTrustedWaitClock(functionInvocationTimeoutMs(request.metadata))
   frames.set(request.id, { runtimeId: request.runtimeId, controller, waitClock })

@@ -1,3 +1,4 @@
+import { setImmediate } from "node:timers/promises"
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
@@ -37,13 +38,15 @@ vi.mock("../../db", async (importOriginal) => ({
   getThreadCore: (id: string) => threads.get(id)
 }))
 const cleanup: Array<() => void> = []
-afterEach(() => {
+afterEach(async () => {
   cleanup
     .splice(0)
     .reverse()
     .forEach((run) => run())
   threads.clear()
   skill.mockReset()
+  // Let Vitest's fork handle queued task updates between cases.
+  await setImmediate()
 })
 
 async function fixture() {

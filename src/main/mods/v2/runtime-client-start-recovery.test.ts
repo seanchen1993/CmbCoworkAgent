@@ -58,6 +58,21 @@ function nextChild(child = new Child()): Child {
   return child
 }
 
+it("retains one sanitized terminal observation when native startup fails before a child exists", async () => {
+  const value = new FunctionRuntimeClient("fixture")
+  clients.push(value)
+  fork.mockImplementationOnce(() => { throw Error("PRIVATE_STARTUP_SOURCE_AND_PROMPT") })
+  await expect(value.load("PRIVATE_PLUGIN_SOURCE")).rejects.toMatchObject({ code: "MODS_HOST_ERROR" })
+  const logs = vi.mocked(console.warn).mock.calls.filter(([label]) =>
+    label === "[FunctionRuntimeClient] Native utility terminal")
+  expect(logs).toHaveLength(1)
+  expect(logs[0][1]).toMatchObject({ generation: 0, phase: "child-error", code: "MODS_HOST_ERROR",
+    pending: 0, hostCalls: 0, draining: 0 })
+  expect(JSON.stringify(logs)).not.toContain("PRIVATE_")
+  expect(value.diagnostics.at(-1)).toMatchObject({ generation: 0, phase: "child-error" })
+  expect(vi.getTimerCount()).toBe(0)
+})
+
 it.each(["classic", "function"] as const)(
   "%s permits an explicit retry after synchronous fork failure without a leaked watchdog",
   async (kind) => {

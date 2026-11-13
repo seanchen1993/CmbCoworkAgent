@@ -6,7 +6,7 @@ import { currentFunctionExecution } from "./execution-context"
 import { readCreatorBudgetErrorCode, readCreatorModelAccounting } from "../devtools/creator-model-accounting"
 import { ModFunctionError } from "../../../shared/mods/v2/contracts"
 import {
-  validateFunctionModelText,
+  FUNCTION_MODEL_TEXT_BYTE_LIMIT,
   assertFunctionModelEffort,
   FunctionModelProviderFailure,
   type FunctionModelReply,
@@ -17,6 +17,9 @@ import type {
   FunctionModelForkRequest,
   FunctionModelForkSnapshot
 } from "./model-operations"
+
+const modelTextByteLength = Buffer.byteLength
+const modelTextCharCodeAt = String.prototype.charCodeAt, modelTextApply = Reflect.apply
 
 export async function resolveFunctionModel(name: string): Promise<ResolvedModelConfig> {
   const registry = await import("../../models/registry")
@@ -106,7 +109,7 @@ async function invokeFunctionMessages(
       AsyncLocalStorageProviderSingleton.runWithConfig(
         { callbacks: [], tags: [], metadata: {} },
         async () => {
-          let text = ""
+          let text = "", textBytes = 0, endsInHighSurrogate = false
           let inputTokens: number | undefined
           let outputTokens: number | undefined
           let cacheReadInputTokens: number | undefined
@@ -116,11 +119,21 @@ async function invokeFunctionMessages(
             signal.throwIfAborted()
             if (chunk.tool_calls?.length || chunk.tool_call_chunks?.length)
               throw new ModFunctionError("MODS_MODEL_UNEXPECTED_TOOL")
-            if (typeof chunk.content === "string") text += chunk.content
+            let addition = ""
+            if (typeof chunk.content === "string") addition += chunk.content
             else
               for (const block of chunk.content)
-                if (block.type === "text" && typeof block.text === "string") text += block.text
-            validateFunctionModelText(text)
+                if (block.type === "text" && typeof block.text === "string") addition += block.text
+            if (addition.length) {
+              const first = modelTextApply(modelTextCharCodeAt, addition, [0]) as number
+              const last = modelTextApply(modelTextCharCodeAt, addition, [addition.length - 1]) as number
+              textBytes += modelTextByteLength(addition, "utf8")
+              if (endsInHighSurrogate && first >= 0xdc00 && first <= 0xdfff) textBytes -= 2
+              endsInHighSurrogate = last >= 0xd800 && last <= 0xdbff
+            }
+            if (textBytes > FUNCTION_MODEL_TEXT_BYTE_LIMIT)
+              throw new ModFunctionError("MODS_MODEL_RESULT_LIMIT")
+            text += addition
             if (chunk.usage_metadata) {
               inputTokens = chunk.usage_metadata.input_tokens
               outputTokens = chunk.usage_metadata.output_tokens

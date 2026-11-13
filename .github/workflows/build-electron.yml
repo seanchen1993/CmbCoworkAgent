@@ -817,6 +817,8 @@ jobs:
         env:
           COMPOSITION_E2E_PACKAGED_DIR: dist/win-unpacked
           COMPOSITION_E2E_ARTIFACT_ROOT: output/chat-history-package-validation
+          CHAT_HISTORY_MESSAGES: "10000"
+          CHAT_HISTORY_REPETITIONS: "1"
         run: node --import tsx tests/chat-history-interaction-e2e.spec.ts
 
       # Continuous HTTP output while switching and scrolling; isolated local model only.
@@ -828,6 +830,10 @@ jobs:
           COMPOSITION_E2E_PACKAGED_DIR: dist/win-unpacked
           COMPOSITION_E2E_ARTIFACT_ROOT: output/chat-running-package-validation
           CHAT_RUNNING_DISPLAY_GUEST: "1"
+          CHAT_RUNNING_ROUNDS: "18"
+          CHAT_RUNNING_RICH_STREAM: "1"
+          CHAT_RUNNING_INTERACTION_STRESS: "1"
+          CHAT_RUNNING_OBSERVE: "1"
         run: node --import tsx tests/chat-running-workload-e2e.spec.ts
 
       - name: Verify asynchronous Mods compilation and compiler lifecycle
@@ -907,6 +913,46 @@ jobs:
         with:
           name: CMBDevClaw-win-unpacked-${{ steps.pkg.outputs.version }}
           path: dist/win-unpacked/
+          # Unpacked plugin manifests live in .claude-plugin and .codex-plugin directories.
+          include-hidden-files: true
+          if-no-files-found: error
+
+      - name: Download published Windows artifact
+        if: matrix.platform == 'win'
+        uses: actions/download-artifact@v4
+        with:
+          name: CMBDevClaw-win-unpacked-${{ steps.pkg.outputs.version }}
+          path: output/downloaded-win-unpacked
+
+      - name: Verify published Windows artifact integrity
+        if: matrix.platform == 'win'
+        shell: pwsh
+        run: node --import tsx scripts/verify-packaged-artifact.ts "output/downloaded-win-unpacked" "dist/win-unpacked" "output/published-artifact-integrity.json"
+
+      - name: Validate plugins from the downloaded Windows artifact
+        if: matrix.platform == 'win'
+        timeout-minutes: 20
+        shell: pwsh
+        run: node --import tsx scripts/run-mods-packaged-e2e.ts "output/downloaded-win-unpacked" "output/mods-v2-validation/published-artifact"
+
+      - name: Upload published Windows validation evidence
+        if: always() && matrix.platform == 'win'
+        uses: actions/upload-artifact@v4
+        with:
+          name: CMBDevClaw-win-published-validation-${{ steps.pkg.outputs.version }}
+          path: |
+            output/published-artifact-integrity.json
+            output/mods-v2-validation/published-artifact/packaged-validation.json
+            output/mods-v2-validation/published-artifact/result.json
+            output/mods-v2-validation/published-artifact/display-cancel-result.json
+            output/mods-v2-validation/published-artifact/display-cancel-profiles/**/display-cancel-acceptance.json
+            output/mods-v2-validation/published-artifact/display-cancel-profiles/**/display-cancel-phases.ndjson
+            output/mods-v2-validation/published-artifact/display-cancel-profiles/**/*.png
+            output/mods-v2-validation/published-artifact/display-cancel-profiles/**/failure-ui.txt
+            output/mods-v2-validation/published-artifact/display-cancel-profiles/**/main.stdout.log
+            output/mods-v2-validation/published-artifact/display-cancel-profiles/**/main.stderr.log
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Package Linux unpacked as tar.gz (preserves file permissions)
         if: matrix.platform == 'linux'

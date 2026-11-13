@@ -24,7 +24,8 @@ export function functionSiteLayoutContainer(node: HTMLElement): HTMLElement | nu
 /** Measure mounted drawings together, outside React's interleaved deletion/layout phase. */
 export function observeFunctionSiteGeometry(
   node: HTMLElement,
-  measured: (geometry: FunctionSiteGeometry) => void
+  measured: (geometry: FunctionSiteGeometry) => void,
+  observeScroll = false
 ): () => void {
   const document = node.ownerDocument
   const view = document.defaultView
@@ -74,11 +75,14 @@ export function observeFunctionSiteGeometry(
   if (node.parentElement) resize?.observe(node.parentElement)
   const mutations = typeof MutationObserver === "undefined" ? null : new MutationObserver(schedule)
   mutations?.observe(node, { subtree: true, childList: true, characterData: true })
+  const viewport = observeScroll ? node.closest<HTMLElement>("[data-radix-scroll-area-viewport]") : null
+  viewport?.addEventListener("scroll", schedule, { passive: true })
   schedule()
   return () => {
     live = false
     resize?.disconnect()
     mutations?.disconnect()
+    viewport?.removeEventListener("scroll", schedule)
     queue.reads.delete(sample)
     if (queue.frame !== null && queue.reads.size === 0) {
       view.cancelAnimationFrame(queue.frame)

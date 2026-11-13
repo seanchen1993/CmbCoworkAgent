@@ -364,6 +364,8 @@ export interface ThreadDeleteOptions {
 }
 
 export interface ThreadMessagesPage {
+  /** Data-only identity of the same guarded host read, never display or execution authority. */
+  sourceScope?: import("../shared/thread-transcript-source-scope").ThreadTranscriptSourceScope
   /** Messages are always returned in durable ascending transcript order. */
   messages: Message[]
   /** Cursor for the next older page; explicit forward reads always return null here. */

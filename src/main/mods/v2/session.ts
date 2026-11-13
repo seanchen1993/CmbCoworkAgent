@@ -826,7 +826,8 @@ export class FunctionSession {
           matchesEventPattern(registration.pattern, event))),
       assertLive: () => this.assertLive(),
       changed: (scope) => this.host.uiChanged?.(scope),
-      publish: (value) => this.host.publish(value, this.controller.signal),
+      publish: (value, signal) => this.host.publish(value,
+        signal ? AbortSignal.any([this.controller.signal, signal]) : this.controller.signal),
       dispatch: (event, input, presentation) =>
         this.dispatch(
           event,

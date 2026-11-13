@@ -1,0 +1,63 @@
+{
+  "featureId": "alpha",
+  "batchId": "B001",
+  "title": "cap",
+  "executionLane": "backend",
+  "status": "todo",
+  "taskCount": 1,
+  "completedTaskCount": 0,
+  "completionEvidenceIds": [],
+  "deliveryKind": "single_task",
+  "startedAt": null,
+  "completedAt": null,
+  "tasks": [
+    {
+      "id": "T001",
+      "title": "deliver behavior",
+      "goal": "deliver observable behavior",
+      "status": "todo",
+      "deps": [],
+      "uiRequired": false,
+      "workspaceRef": "default",
+      "scope": {
+        "modules": [],
+        "entrypoints": [],
+        "pages": [],
+        "dataObjects": []
+      },
+      "implementationPoints": [
+        "update behavior",
+        "cover boundary"
+      ],
+      "acceptanceCriteria": [
+        {
+          "id": "AC-T001-01",
+          "text": "behavior is observable",
+          "scenarioRefs": [
+            "specs/cap/spec.md#SCN-001"
+          ]
+        }
+      ],
+      "validationBoundary": "public behavior seam",
+      "nonGoals": [
+        "do not change unrelated behavior"
+      ],
+      "specRefs": [
+        "specs/cap/spec.md#REQ-001",
+        "specs/cap/spec.md#SCN-001"
+      ],
+      "designRefs": [],
+      "apiIds": [],
+      "dataIds": [],
+      "decisionIds": [
+        "D-001"
+      ],
+      "completionPolicy": "all_required_validations_pass",
+      "expectedFiles": [],
+      "evidenceIds": [],
+      "completionEvidenceIds": [],
+      "latestPassEvidenceId": null,
+      "blockers": []
+    }
+  ]
+}

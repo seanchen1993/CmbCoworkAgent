@@ -90,6 +90,11 @@ interface Hooks {
   onCall?: (facts: NativePregelCheckpointCallCurrent, config: RunnableConfig) => void
   onIterator?: (config: object) => void
   onLookup?: () => void
+  onPut?: (original: () => ReturnType<MemorySaver["put"]>,
+    metadata: Parameters<MemorySaver["put"]>[2]) => ReturnType<MemorySaver["put"]>
+  onPutWrites?: (original: () => ReturnType<MemorySaver["putWrites"]>) =>
+    ReturnType<MemorySaver["putWrites"]>
+  onNode?: () => void
   result?: "null" | "undefined" | "reject-null" | "reject-undefined" | "held"
 }
 function fixture(native: boolean, hooks: Hooks = {}) {
@@ -100,7 +105,8 @@ function fixture(native: boolean, hooks: Hooks = {}) {
   works.push({ controller, runs, release: () => gate.resolve() })
   const saver = new MemorySaver(),
     observer = new Observer()
-  const originalGetTuple = saver.getTuple
+  const originalGetTuple = saver.getTuple,
+    originalPut = saver.put, originalPutWrites = saver.putWrites
   const tokens: NativePregelCheckpointCall[] = [],
     calls: NativePregelCheckpointCallCurrent[] = []
   let selectedCalls = 0,
@@ -115,6 +121,11 @@ function fixture(native: boolean, hooks: Hooks = {}) {
         hooks.onLookup?.()
         return getTuple
       }
+      if (key === "put" && hooks.onPut) return (...args: Parameters<MemorySaver["put"]>) =>
+        hooks.onPut!(() => Reflect.apply(originalPut, saver, args), args[2])
+      if (key === "putWrites" && hooks.onPutWrites)
+        return (...args: Parameters<MemorySaver["putWrites"]>) =>
+          hooks.onPutWrites!(() => Reflect.apply(originalPutWrites, saver, args))
       if (bound.has(key)) return bound.get(key)
       const value = Reflect.get(target, key, target)
       if (typeof value !== "function") return value
@@ -150,6 +161,7 @@ function fixture(native: boolean, hooks: Hooks = {}) {
   const graph = new StateGraph(MessagesAnnotation)
     .addNode("real_model", () => {
       nodeCalls++
+      hooks.onNode?.()
       return { messages: [new AIMessage({ content: "complete answer", id: "actual-answer" })] }
     })
     .addEdge(START, "real_model")
@@ -758,4 +770,142 @@ const config = { streamMode: "values", configurable: {
       })
     }
   )
+})
+
+describe("native checkpoint writes settle before the next actual node", () => {
+  it.each(["put", "putWrites"] as const)("waits for an original held %s", async kind => {
+    const held = Promise.withResolvers<void>()
+    let selected = false
+    const hooks: Hooks = {}
+    const hold = <T,>(original: () => Promise<T>) => {
+      if (selected) return original()
+      selected = true
+      held.resolve()
+      return f.gate.promise.then(original)
+    }
+    if (kind === "put") hooks.onPut = hold
+    else hooks.onPutWrites = hold
+    const f = fixture(true, hooks), result = f.start()
+    try {
+      await held.promise
+      await new Promise<void>(resolve => setImmediate(resolve))
+      expect(selected).toBe(true)
+      expect(f.counters().nodeCalls).toBe(0)
+      f.gate.resolve()
+      expect((await result).status).toBe("fulfilled")
+      expect(f.counters().nodeCalls).toBe(1)
+      const saved = await f.saver.getTuple(f.options)
+      expect((saved?.checkpoint.channel_values.messages as BaseMessage[]).map(message => message.id))
+        .toEqual(["actual-human", "actual-answer"])
+    } finally { f.gate.resolve() }
+  })
+
+  it("preserves the first write rejection after every captured write settles", async () => {
+    const putEntered = Promise.withResolvers<void>(), writesEntered = Promise.withResolvers<void>()
+    const firstWrite = Promise.withResolvers<void>()
+    void firstWrite.promise.catch(() => {})
+    const first = new Error("Original first putWrites rejection")
+    const later = new Error("Original later checkpoint rejection")
+    let puts = 0, writesSelected = false, finished = false
+    const putSteps: number[] = []
+    const f: ReturnType<typeof fixture> = fixture(true, {
+      onPut(original, metadata) {
+        puts++; putSteps.push(metadata.step)
+        if (puts === 1) {
+          expect(metadata.step).toBe(-1)
+          return original()
+        }
+        if (puts !== 2) return original()
+        expect(metadata.step).toBe(0)
+        putEntered.resolve()
+        return f.gate.promise.then(() => { throw later })
+      },
+      onPutWrites(original) {
+        if (writesSelected) return original()
+        writesSelected = true; writesEntered.resolve()
+        return firstWrite.promise
+      }
+    })
+    const result = f.start().then(value => { finished = true; return value })
+    try {
+      await Promise.all([putEntered.promise, writesEntered.promise])
+      expect(puts).toBe(2)
+      expect(putSteps).toEqual([-1, 0])
+      firstWrite.reject(first)
+      await new Promise<void>(resolve => setImmediate(resolve))
+      expect(finished).toBe(false)
+      expect(f.counters().nodeCalls).toBe(0)
+      f.gate.resolve()
+      expect(await result).toStrictEqual({ status: "rejected", reason: first })
+      expect(f.counters().nodeCalls).toBe(0)
+    } finally { firstWrite.reject(first); f.gate.resolve() }
+  })
+
+  it("uses the actual native run loop even if a later wrapper discards its barrier", async () => {
+    const f = fixture(true)
+    const original = method(f.graph, "_runLoop")
+    let wrappers = 0
+    Object.defineProperty(f.graph, "_runLoop", { configurable: true, value(input: object) {
+      wrappers++
+      const values = { ...input } as Record<string, unknown>
+      delete values.nativeCheckpointBarrier
+      return Reflect.apply(original, f.graph, [values])
+    } })
+    expect((await f.start()).status).toBe("fulfilled")
+    expect(wrappers).toBe(0)
+    expect(f.counters().nodeCalls).toBe(1)
+  })
+
+  it("leaves ordinary dynamic dispatch and asynchronous node scheduling unchanged", async () => {
+    const entered = Promise.withResolvers<void>(), node = Promise.withResolvers<void>()
+    let selected = false, wrappers = 0
+    const f: ReturnType<typeof fixture> = fixture(false, { onNode: () => node.resolve(), onPut(original) {
+      if (selected) return original()
+      selected = true; entered.resolve()
+      return f.gate.promise.then(original)
+    } })
+    const original = method(f.graph, "_runLoop")
+    Object.defineProperty(f.graph, "_runLoop", { configurable: true, value(input: object) {
+      wrappers++
+      expect(Object.hasOwn(input, "nativeCheckpointBarrier")).toBe(true)
+      expect((input as Record<string, unknown>).nativeCheckpointBarrier).toBeUndefined()
+      return Reflect.apply(original, f.graph, [input])
+    } })
+    const result = f.start()
+    try {
+      await entered.promise
+      await node.promise
+      expect(f.counters().nodeCalls).toBe(1)
+      expect(wrappers).toBe(1)
+      f.gate.resolve()
+      expect((await result).status).toBe("fulfilled")
+    } finally { f.gate.resolve() }
+  })
+
+  it("does not let later Promise aggregate or resolve replacements skip a held write", async () => {
+    const entered = Promise.withResolvers<void>(), OriginalPromise = Promise
+    const all = Promise.all, allSettled = Promise.allSettled, resolve = Promise.resolve
+    let selected = false, blockedNodeCalls: number | undefined
+    const f: ReturnType<typeof fixture> = fixture(true, { onPut(original) {
+      if (selected) return original()
+      selected = true
+      Promise.all = (() => new OriginalPromise(yes => yes([]))) as typeof Promise.all
+      Promise.allSettled = (() => new OriginalPromise(yes => yes([]))) as typeof Promise.allSettled
+      Promise.resolve = (() => new OriginalPromise(yes => yes(undefined))) as typeof Promise.resolve
+      entered.resolve()
+      return f.gate.promise.then(original)
+    } })
+    const result = f.start()
+    try {
+      await entered.promise
+      await new OriginalPromise<void>(yes => setImmediate(yes))
+      blockedNodeCalls = f.counters().nodeCalls
+    } finally {
+      Promise.all = all; Promise.allSettled = allSettled; Promise.resolve = resolve
+      f.gate.resolve()
+    }
+    expect(blockedNodeCalls).toBe(0)
+    expect((await result).status).toBe("fulfilled")
+    expect(f.counters().nodeCalls).toBe(1)
+  })
 })

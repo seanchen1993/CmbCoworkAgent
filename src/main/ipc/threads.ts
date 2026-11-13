@@ -1,3 +1,7 @@
+import { inspectFunctionConversationForkAdmission } from "../agent/function-conversation-admission"
+import { notifyRemoteThreadChanged } from "../agent/renderer-stream-mirror"
+import type { ThreadDirectoryChangeKind } from "../../shared/thread-directory-change"
+import { captureThreadTranscriptSourceScope } from "./thread-transcript-source-scope"
 import { getCapturedSubagentSession, subagentExportKey } from "../services/subagent-session-capture"
 import type { SubagentExportTarget as ExportScope } from "../../shared/subagent-session-export"
 import { formatHookDateTime } from "../../shared/hook-time"
@@ -108,10 +112,8 @@ import {
   markWorkflowThreadDisposed,
   rollbackWorkflowThreadDisposal
 } from "../agent/workflow/run-store"
-import {
-  coordinatorWorkerManager,
-  deleteCoordinatorWorkerArtifacts
-} from "../agent/coordinator-worker-manager"
+import { coordinatorWorkerManager } from "../agent/coordinator-worker-manager"
+import type { CoordinatorWorkerDirectoryRetirement } from "../agent/coordinator-worker-restore-index"
 import { getAgentModeFromMetadata } from "../agent/coordinator-mode"
 import { isAgentOutputStyle } from "../../shared/agent-output-style"
 import { deleteTaskMmdThread } from "../agent/task-mmd/storage"
@@ -149,6 +151,7 @@ import type {
   ThreadHydrationOptions,
   ThreadSummaryPageOptions,
   ThreadMessagesPageOptions,
+  ThreadMessagesPage,
   ThreadMetadataPatchParams,
   ThreadUpdateParams,
   ThreadValuesMergeParams
@@ -200,7 +203,8 @@ import {
 } from "../services/thread-metadata"
 import {
   captureThreadIncarnation,
-  matchesThreadIncarnation
+  matchesThreadIncarnation,
+  type ThreadIncarnationRow
 } from "../services/thread-incarnation"
 import {
   copyCheckpoint,
@@ -325,6 +329,13 @@ interface CheckpointMessage {
 }
 
 const CHECKPOINT_THREAD_ID_PATTERN = /^[A-Za-z0-9_-]+$/
+
+/** A renderer observer must not turn a committed mutation into an apparent failed write. */
+function notifyCommittedThreadChange(threadId: string, kind: ThreadDirectoryChangeKind,
+  row: ThreadIncarnationRow | undefined | null): void {
+  try { notifyRemoteThreadChanged(threadId, kind, row ?? undefined) }
+  catch { /* The next directory read still observes the authoritative committed row. */ }
+}
 
 function assertValidCheckpointThreadId(threadId: string): string {
   const normalized = threadId.trim()
@@ -1932,9 +1943,11 @@ export async function forkThread(params: ThreadForkParams): Promise<ThreadForkRe
               selectedCheckpoint: forkCheckpoint,
               selectedMetadata: checkpointMetadata
             })
-            const hasConversation = checkpointHistory.some(
-              (entry) => entry.checkpoint.channel_values.cmbFunctionConversation !== undefined
-            )
+            const hasConversation = inspectFunctionConversationForkAdmission(
+              checkpointHistory.map(entry => ({
+                state: entry.checkpoint.channel_values.cmbFunctionConversation,
+                messages: getCheckpointChannelMessages(entry.checkpoint) ?? []
+              })), assertSource) === "native"
             if (hasConversation) {
               const manager = getModsManager(),
                 store = manager?.captureFunctionConversationStore()
@@ -2102,6 +2115,7 @@ export async function forkThread(params: ThreadForkParams): Promise<ThreadForkRe
               assertForkCurrent()
               if (!nativeImport.view().ready) throw Error("MODS_CONVERSATION_FORK_PROOF")
             }
+            notifyCommittedThreadChange(targetThreadId, "created", row)
             return {
               thread: serializeThreadRow(row),
               sourceThreadId,
@@ -3347,13 +3361,15 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
         options?.requestScope === "foreground-hydration" ? event.sender : undefined,
         () => captureThreadDisplayRead(event, threadId),
         async (read) => {
+          const sourceScope = captureThreadTranscriptSourceScope(threadId, read)
           const source = {
             assertCurrent: read.assertCurrent,
             verify: (witnesses: readonly CanonicalThreadDisplayWitness[]) =>
               verifyCanonicalThreadDisplayWitnesses(threadId, witnesses, read.assertCurrent)
           }
+          let page: ThreadMessagesPage
           try {
-            return await readThreadMessagesPageInWorker(threadId, options, event.sender.id, source)
+            page = await readThreadMessagesPageInWorker(threadId, options, event.sender.id, source)
           } catch (error) {
             if (!isThreadMessageHydrationWorkerUnavailable(error)) throw error
             console.warn("[ThreadHydrationWorker] unavailable; restarting the isolated reader", error)
@@ -3362,8 +3378,10 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
             // client drops a failed worker, so one retry starts a fresh isolated
             // reader; a second failure is surfaced for the renderer to retry.
             await new Promise<void>((resolve) => setImmediate(resolve))
-            return await readThreadMessagesPageInWorker(threadId, options, event.sender.id, source)
+            page = await readThreadMessagesPageInWorker(threadId, options, event.sender.id, source)
           }
+          read.assertCurrent()
+          return { ...page, ...(sourceScope ? { sourceScope } : {}) }
         }
       )
     }
@@ -3394,6 +3412,7 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
           const count = upsertThreadMessages(threadId, messages.map(normalizeIpcThreadMessage), {
             preserveExistingOrder: true
           })
+          if (count > 0) notifyCommittedThreadChange(threadId, "transcript", getThreadCore(threadId))
           return { count }
         })
       } catch (error) {
@@ -3420,9 +3439,9 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
         // handler 并发执行；replaceThreadMessageId 内部使用 SQLite 事务保证数据库
         // 原子性。两层锁定层级不同（应用层互斥 + 数据库事务），不会导致死锁，
         // 但在高并发场景下互斥锁可能成为性能瓶颈。
-        return {
-          replaced: replaceThreadMessageId(threadId, fromId, toId, normalizeIpcMessageRole(role))
-        }
+        const replaced = replaceThreadMessageId(threadId, fromId, toId, normalizeIpcMessageRole(role))
+        if (replaced) notifyCommittedThreadChange(threadId, "transcript", getThreadCore(threadId))
+        return { replaced }
       })
     }
   )
@@ -3430,7 +3449,9 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
   // Create a new thread
   ipcMain.handle("threads:create", async (_event, metadata?: Record<string, unknown>) => {
     validateRendererThreadCreateMetadata(metadata)
-    return createThreadService(metadata)
+    const thread = await createThreadService(metadata)
+    notifyCommittedThreadChange(thread.thread_id, "created", getThreadCore(thread.thread_id))
+    return thread
   })
 
   ipcMain.handle("threads:fork", async (_event, params: ThreadForkParams) => {
@@ -3473,7 +3494,7 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
 
         const row = dbUpdateThread(threadId, updateData)
         if (!row) throw new Error("Thread not found")
-
+        notifyCommittedThreadChange(threadId, "metadata", row)
         return serializeThreadRow(row)
       })
     return mutate()
@@ -3543,6 +3564,7 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
               throw new Error("仍有动态工作流在运行，请先等待其完成或取消后再切换模式。")
             }
             const { row } = patchLatestThreadMetadata(threadId, patch)
+            notifyCommittedThreadChange(threadId, "metadata", row)
             return serializeThreadRow(row)
           }
           throw new Error("会话模式状态持续变化，请稍后重试。")
@@ -3565,7 +3587,7 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
         delete safePatch.internalGoalMessageTimeOrder
         const row = dbMergeThreadValues(threadId, safePatch)
         if (!row) throw new Error("Thread not found")
-
+        notifyCommittedThreadChange(threadId, "metadata", row)
         return serializeThreadRow(row)
       })
     }
@@ -3985,8 +4007,14 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
     // tombstone must stay, whatever the later best-effort cleanups do.
     let workspacePath: string | undefined
     let deletionCheckpoint: Promise<void> | undefined
+    let deletionCommitted = false
+    let preparedCoordinatorRetirement:
+      ReturnType<typeof coordinatorWorkerManager.prepareThreadRetirement> | undefined
+    let coordinatorRetirement: CoordinatorWorkerDirectoryRetirement | undefined
+    let deletionDatabase: ReturnType<typeof getDb> | undefined
     const modsEnd = getModsManager()?.prepareFunctionEnd("clear", threadId)
     try {
+      deletionDatabase = getDb()
       // Fallback workspace capture BEFORE cancelAndWait (which settles and
       // removes the active entry): if the thread's metadata lost its
       // workspacePath, the active run still knows where its artifacts live —
@@ -4139,14 +4167,24 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
       }
 
       // Delete from our metadata store — the point of no return.
+      if (getDb() !== deletionDatabase) throw new Error("MODS_CONVERSATION_THREAD_CHANGED")
       const previewScopeKeys = collectTrustedToolFilePreviewScopeKeysForThread(threadId)
-      if (getThreadMessageCount(threadId) >= 1_000) {
+      preparedCoordinatorRetirement = coordinatorWorkerManager.prepareThreadRetirement(threadId, workspacePath)
+      const needsDeletionCheckpoint = getThreadMessageCount(threadId) >= 1_000
+      if (needsDeletionCheckpoint) {
         getDb().withoutAutomaticCheckpoint(() => dbDeleteThread(threadId))
-        deletionCheckpoint = checkpointWalInBackground(getDbPath())
       } else {
         // Avoid a worker startup per item in batches of empty/small tasks.
         dbDeleteThread(threadId)
       }
+      deletionCommitted = true
+      coordinatorRetirement = preparedCoordinatorRetirement.activate()
+      preparedCoordinatorRetirement = undefined
+      forgetCoordinatorThreadState(threadId)
+      // Only post-commit work follows this point. Never roll a committed deletion back into
+      // a usable workflow tombstone if a background checkpoint or observer fails to start.
+      if (needsDeletionCheckpoint) deletionCheckpoint = checkpointWalInBackground(getDbPath())
+      notifyCommittedThreadChange(threadId, "deleted", latestThread)
       getModsManager()?.closeFunctionThread(threadId)
       clearTrustedToolFilePreviewSourcesForThread(threadId, previewScopeKeys)
       forgetLegacySubagentTranscriptMigration(threadId)
@@ -4170,8 +4208,12 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
       // is visible, recoverable state (re-run / re-delete both work). Only the
       // tombstone must roll back, because it alone would silently poison future
       // workflow use of the surviving thread until restart.
-      rollbackWorkflowThreadDisposal(threadId, priorDisposalMark)
-      throw e
+      preparedCoordinatorRetirement?.abort()
+      if (!deletionCommitted) {
+        rollbackWorkflowThreadDisposal(threadId, priorDisposalMark)
+        throw e
+      }
+      console.warn("[Threads] Post-commit thread teardown failed:", e)
     } finally {
       // A notified delete intent retires this exact instance even if remote/CAS deletion fails.
       // A failure before notification only releases admission and keeps the old instance.
@@ -4230,47 +4272,68 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
       console.warn("[Threads] Failed to delete workflow checkpoints:", e)
     }
 
-    forgetCoordinatorThreadState(threadId)
-    if (workspacePath) {
-      // Fence and sweep workflow runs BEFORE deleting the parent app-managed
-      // thread directory. Managed workflow storage now lives under that parent;
-      // reversing this order would leave a window where a late final flush could
-      // recreate `<thread>/workflows` before its dir tombstone is registered.
-      // The compatibility sweep also removes pre-upgrade project-local runs.
+    const coordinatorArtifactCleanup = (async () => {
       try {
-        await deleteWorkflowRunsForThread(workspacePath, threadId)
-        console.log("[Threads] Deleted workflow run artifacts")
-      } catch (e) {
-        // The metadata row is already gone. A best-effort artifact cleanup
-        // failure must not make the renderer treat this committed deletion as
-        // retryable; a retry can only fail with "Thread not found".
-        console.warn("[Threads] Failed to delete workflow run artifacts:", e)
+        await coordinatorRetirement?.oldPhysicalDrained
+        const assertDeletedSource = (): void => {
+          if (!deletionDatabase || getDb() !== deletionDatabase || getThreadCore(threadId))
+            throw new DOMException("Deleted thread source was replaced.", "AbortError")
+        }
+        assertDeletedSource()
+        if (workspacePath) {
+          // Fence and sweep workflow runs BEFORE deleting the parent app-managed
+          // thread directory. Managed workflow storage now lives under that parent;
+          // reversing this order would leave a window where a late final flush could
+          // recreate `<thread>/workflows` before its dir tombstone is registered.
+          // The compatibility sweep also removes pre-upgrade project-local runs.
+          try {
+            await deleteWorkflowRunsForThread(workspacePath, threadId, assertDeletedSource)
+            console.log("[Threads] Deleted workflow run artifacts")
+          } catch (e) {
+            // The metadata row is already gone. A best-effort artifact cleanup
+            // failure must not make the renderer treat this committed deletion as
+            // retryable; a retry can only fail with "Thread not found".
+            console.warn("[Threads] Failed to delete workflow run artifacts:", e)
+          }
+          try {
+            assertDeletedSource()
+            await deleteProjectThreadDataDirectory(
+              workspacePath,
+              threadId,
+              undefined,
+              assertDeletedSource,
+            )
+            console.log("[Threads] Deleted app-managed thread history and large results")
+          } catch (e) {
+            console.warn("[Threads] Failed to delete app-managed thread data:", e)
+          }
+        }
+      } finally {
+        await coordinatorRetirement?.finalize()
       }
-      try {
-        await deleteProjectThreadDataDirectory(workspacePath, threadId)
-        console.log("[Threads] Deleted app-managed thread history and large results")
-      } catch (e) {
-        console.warn("[Threads] Failed to delete app-managed thread data:", e)
-      }
-      try {
-        await deleteCoordinatorWorkerArtifacts(threadId, workspacePath)
-        console.log("[Threads] Deleted coordinator worker artifacts")
-      } catch (e) {
-        console.warn("[Threads] Failed to delete coordinator worker artifacts:", e)
-      }
-    } else {
-      try {
-        await coordinatorWorkerManager.forgetThreadAndDeleteArtifacts(threadId)
-      } catch (e) {
-        // As above, post-commit cleanup is best-effort. Keep the successful DB
-        // deletion as the IPC outcome even when artifact removal times out.
-        console.warn("[Threads] Failed to delete coordinator worker artifacts:", e)
-      }
+    })()
+    let coordinatorCleanupTimeout: ReturnType<typeof setTimeout> | undefined
+    try {
+      await Promise.race([
+        coordinatorArtifactCleanup,
+        new Promise<never>((_resolve, reject) => {
+          coordinatorCleanupTimeout = setTimeout(() =>
+            reject(new Error("Timed out waiting for captured thread artifact cleanup")), 5_000)
+        })
+      ])
+    } catch (error) {
+      console.warn("[Threads] Captured coordinator artifact cleanup remains fenced:", error)
+    } finally {
+      if (coordinatorCleanupTimeout) clearTimeout(coordinatorCleanupTimeout)
+      // A logical timeout does not release the old directory's barrier or select a new owner.
+      void coordinatorArtifactCleanup.catch(() => undefined)
     }
 
     try {
-      deleteTaskMmdThread(threadId)
-      console.log("[Threads] Deleted task-mmd files")
+      if (getDb() === deletionDatabase && !getThreadCore(threadId)) {
+        deleteTaskMmdThread(threadId)
+        console.log("[Threads] Deleted task-mmd files")
+      }
     } catch (e) {
       console.warn("[Threads] Failed to delete task-mmd files:", e)
     }
@@ -4434,8 +4497,8 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
   })
 
   // One-time bridge for old tasks whose transcript still lives only inside a
-  // checkpoint. The worker imports that transcript into durable rows in
-  // bounded transactions. Only the small runtime tuple and a bounded first
+  // checkpoint. The Worker prepares pages; the sole Main writer commits durable rows
+  // in bounded transactions. Only the small runtime tuple and a bounded first
   // page cross worker -> main -> renderer; the full checkpoint array never
   // enters Electron main or the renderer hydration path.
   ipcMain.handle(
@@ -4447,19 +4510,33 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
           verifyCanonicalThreadDisplayWitnesses(threadId, witnesses, read.assertCurrent) }
       try {
         const normalizedThreadId = assertValidCheckpointThreadId(threadId)
+        const sourceScope = captureThreadTranscriptSourceScope(normalizedThreadId, read)
         const workspaceValue = nativeFunctionConversationWorkspace(read.row.metadata)
         const manager = getModsManager()
         const workspace = workspaceValue ? manager?.workspaceKey(workspaceValue) ?? workspaceValue : ""
         const canonical = await readCanonicalCheckpointBootstrap({ threadId: normalizedThreadId,
           workspace, incarnation: read.incarnation, assertCurrent: read.assertCurrent,
           foregroundKey: `thread-hydration:${event.sender.id}` })
-        const bootstrap = canonical ?? await bootstrapLegacyCheckpointTranscriptInWorker(
-          getThreadCheckpointPath(normalizedThreadId),
-          getDbPath(),
-          normalizedThreadId,
-          "",
-          `thread-hydration:${event.sender.id}`
-        )
+        let bootstrap = canonical
+        if (!bootstrap) {
+          const writer = await import("../checkpointer/legacy-transcript-main-writer")
+          read.assertCurrent()
+          bootstrap = await bootstrapLegacyCheckpointTranscriptInWorker(
+            getThreadCheckpointPath(normalizedThreadId), getDbPath(), normalizedThreadId, "",
+            `thread-hydration:${event.sender.id}`, {
+              assertCurrent: read.assertCurrent,
+              createWriter(context) {
+                read.assertCurrent()
+                if (context.threadId !== normalizedThreadId || context.checkpointNamespace !== "")
+                  throw Error("LEGACY_TRANSCRIPT_WRITE_SOURCE_CHANGED")
+                return writer.createLegacyTranscriptWriter({ actualWorker: context.actualWorker,
+                  workerGeneration: context.workerGeneration, requestId: context.requestId,
+                  threadId: normalizedThreadId, checkpointNamespace: "", incarnation: read.incarnation,
+                  actualDatabase: read.database, assertCurrent: read.assertCurrent })
+              }
+            }
+          )
+        }
         const pageOptions = {
           limit: 128,
           byteBudget: 1024 * 1024,
@@ -4479,9 +4556,11 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
           await new Promise<void>((resolve) => setImmediate(resolve))
           page = await readThreadMessagesPageInWorker(normalizedThreadId, pageOptions, undefined, source)
         }
+        read.assertCurrent()
         return {
           checkpoint: bootstrap.runtimeTuple,
-          page: canonical ? { ...page, canonicalCheckpointVerified: true } : page,
+          page: { ...page, ...(sourceScope ? { sourceScope } : {}),
+            ...(canonical ? { canonicalCheckpointVerified: true } : {}) },
           migration: bootstrap.stats
         }
       } catch (error) {

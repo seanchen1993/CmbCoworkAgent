@@ -12,6 +12,8 @@ export interface FunctionRuntimeSession {
   diagnostics?: import("./platform-capabilities").PlatformCapabilityDiagnostics & {
     backgroundResources: number
   }
+  /** Bounded data-only utility observations. Reading this never starts or resumes a runtime. */
+  lifecycle?: readonly import("./runtime-diagnostics").RuntimeLifecycleDiagnostic[]
   /** Added by the trusted IPC boundary; no authority is inferred from renderer values. */
   incarnationKey?: string
   state: "loading" | "resident" | "discovery" | "releasing" | "stopped" | "failed"

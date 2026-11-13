@@ -5,12 +5,15 @@ import { join } from "node:path"
 import { DatabaseSync } from "node:sqlite"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { captureThreadIncarnation } from "../services/thread-incarnation"
-import { openNativeSqliteDatabase, type NativeSqliteAdapter } from "./native-sqlite-adapter"
+import { openNativeSqliteDatabase, type NativeSqliteAdapter,
+  type NativeSqliteReadOne } from "./native-sqlite-adapter"
 import { FunctionConversationStore } from "./function-conversation-store"
 import { assertFunctionConversationNativeDestinationCleanupInTransaction,
   recordFunctionConversationNativeDestinationInTransaction,
   readFunctionConversationNativeDestination,
-  assertFunctionConversationNativeDestinationDataCurrent } from "./function-conversation-native-destination"
+  assertFunctionConversationNativeDestinationDataCurrent,
+  assertFunctionConversationNativeDestinationScopeThread,
+  withFunctionConversationNativeDestinationDataScope } from "./function-conversation-native-destination"
 
 const cleanups: Array<() => void> = []
 afterEach(() => { for (const close of cleanups.splice(0).reverse()) close() })
@@ -48,6 +51,127 @@ function actualNative(database: NativeSqliteAdapter): DatabaseSync {
 function identifier(value: string): string { return `"${value.replace(/"/g, "\"\"")}"` }
 
 describe("original native shared destination data", () => {
+  it.each([false, true])("keeps four role identities and one fresh snapshot with separate checkpoint=%s",
+    separateCheckpoint => {
+      const f = fixture()
+      if (separateCheckpoint) {
+        const checkpointThreadId = randomUUID()
+        const checkpointMetadata = JSON.stringify({ cmb_thread_incarnation: randomUUID(),
+          workspacePath: f.parent.workspace })
+        f.db.run("INSERT INTO threads VALUES (?,1002,?)", [checkpointThreadId, checkpointMetadata])
+        f.input.checkpointThreadId = checkpointThreadId
+        f.input.checkpointIncarnation = captureThreadIncarnation({
+          created_at: 1002, metadata: checkpointMetadata })
+        f.input.originalMetadata = JSON.stringify({ ...JSON.parse(f.input.originalMetadata),
+          parentThreadId: checkpointThreadId })
+        f.db.run("UPDATE threads SET metadata=? WHERE thread_id=?",
+          [f.input.originalMetadata, f.input.destinationThreadId])
+      }
+      const child = f.create(), originalPrepare = f.db.prepareReadOne
+      let snapshots = 0
+      const prepare = vi.spyOn(f.db, "prepareReadOne")
+        .mockImplementation(function (this: NativeSqliteAdapter, sql) {
+          const read = Reflect.apply(originalPrepare, this, [sql]) as NativeSqliteReadOne
+          const snapshot = sql.includes("FROM function_conversation_native_destinations m")
+          return function (this: unknown, ...args: Parameters<NativeSqliteReadOne>) {
+            if (snapshot) snapshots++
+            return Reflect.apply(read, this, args)
+          }
+        })
+      try {
+        const original = readFunctionConversationNativeDestination(f.db, child, f.parent, f.guard)
+        expect(prepare).toHaveBeenCalledTimes(4)
+        const captured = snapshots
+        expect(captured).toBe(1)
+        original.assertCurrent()
+        expect(snapshots).toBe(captured + 1)
+        assertFunctionConversationNativeDestinationDataCurrent(original, f.db)
+        expect(snapshots).toBe(captured + 2)
+        const roles = [{ id: child.threadId, incarnation: child.incarnation },
+          { id: f.parent.threadId, incarnation: f.parent.incarnation },
+          { id: f.input.checkpointThreadId, incarnation: f.input.checkpointIncarnation },
+          { id: f.input.destinationThreadId, incarnation: f.input.destinationIncarnation }]
+        withFunctionConversationNativeDestinationDataScope(original, f.db, scope => {
+          for (const role of roles)
+            assertFunctionConversationNativeDestinationScopeThread(scope, original, f.db,
+              role.id, role.incarnation)
+        })
+        expect(snapshots).toBe(captured + 3)
+        expect(prepare).toHaveBeenCalledTimes(4)
+        const changed = JSON.stringify({ cmb_thread_incarnation: randomUUID() })
+        f.db.run("UPDATE threads SET metadata=? WHERE thread_id=?",
+          [changed, f.input.checkpointThreadId])
+        expect(() => assertFunctionConversationNativeDestinationDataCurrent(original, f.db))
+          .toThrow("MODS_CONVERSATION_DESTINATION_CHANGED")
+        expect(snapshots).toBe(captured + 4)
+        expect(prepare).toHaveBeenCalledTimes(4)
+      } finally { prepare.mockRestore() }
+    })
+
+  it("rejects a distinct checkpoint incarnation even when its thread ID shares the target alias", () => {
+    const f = fixture(), child = f.create()
+    expect(f.input.checkpointThreadId).toBe(child.threadId)
+    const original = readFunctionConversationNativeDestination(f.db, child, f.parent, f.guard)
+    assertFunctionConversationNativeDestinationDataCurrent(original, f.db)
+    const incompatible = { ...f.input.checkpointIncarnation, token: randomUUID() }
+    f.db.run("UPDATE function_conversation_native_destinations SET checkpoint_incarnation=?",
+      [JSON.stringify(incompatible)])
+    expect(() => readFunctionConversationNativeDestination(f.db, child, f.parent, f.guard))
+      .toThrow("MODS_CONVERSATION_DESTINATION_CHANGED")
+  })
+
+  it("rejects a parent conversation moved to another real logical session", () => {
+    const f = fixture(), child = f.create()
+    const original = readFunctionConversationNativeDestination(f.db, child, f.parent, f.guard)
+    const threadId = randomUUID(), metadata = JSON.stringify({ cmb_thread_incarnation: randomUUID(),
+      workspacePath: f.parent.workspace })
+    f.db.run("INSERT INTO threads VALUES (?,1002,?)", [threadId, metadata])
+    const other = f.store.ensureMain({ threadId,
+      incarnation: captureThreadIncarnation({ created_at: 1002, metadata }),
+      workspace: f.parent.workspace, checkpointNamespace: "" }, f.guard)
+    expect(other.logicalSessionId).not.toBe(f.parent.logicalSessionId)
+    expect(other.workspace).toBe(f.parent.workspace)
+    // Free its unique main slot while keeping the actual session and thread.
+    f.db.run("DELETE FROM function_conversation_branches WHERE conversation_id=? AND branch_id=?",
+      [other.conversationId, other.branchId])
+    f.db.run("DELETE FROM function_conversations WHERE conversation_id=? AND logical_session_id=?",
+      [other.conversationId, other.logicalSessionId])
+    const incarnationKey = JSON.stringify(other.incarnation.token === null
+      ? ["legacy", other.incarnation.legacyCreatedAt] : ["token", other.incarnation.token])
+    expect(f.db.exec(`SELECT thread_id,incarnation_key,workspace FROM function_logical_sessions
+      WHERE logical_session_id=?`, [other.logicalSessionId])[0].values)
+      .toEqual([[threadId, incarnationKey, f.parent.workspace]])
+    // The real schema forbids two sessions with the same physical thread and incarnation.
+    // A missing parent-session JOIN would still reuse the target session's old fields here.
+    f.db.run("UPDATE function_conversations SET logical_session_id=? WHERE conversation_id=?",
+      [other.logicalSessionId, f.parent.conversationId])
+    expect(f.db.exec("SELECT logical_session_id FROM function_conversations WHERE conversation_id=?",
+      [f.parent.conversationId])[0].values).toEqual([[other.logicalSessionId]])
+    expect(() => assertFunctionConversationNativeDestinationDataCurrent(original, f.db))
+      .toThrow("MODS_CONVERSATION_DESTINATION_CHANGED")
+    let entered = false
+    expect(() => withFunctionConversationNativeDestinationDataScope(original, f.db, () => {
+      entered = true
+    })).toThrow("MODS_CONVERSATION_DESTINATION_CHANGED")
+    expect(entered).toBe(false)
+  })
+
+  it.each(["target", "parent"] as const)("keeps the %s branch in every fresh destination snapshot",
+    kind => {
+      const f = fixture(), child = f.create()
+      const original = readFunctionConversationNativeDestination(f.db, child, f.parent, f.guard)
+      const selected = kind === "target" ? child : f.parent
+      f.db.run("DELETE FROM function_conversation_branches WHERE conversation_id=? AND branch_id=?",
+        [selected.conversationId, selected.branchId])
+      expect(() => assertFunctionConversationNativeDestinationDataCurrent(original, f.db))
+        .toThrow("MODS_CONVERSATION_DESTINATION_CHANGED")
+      let entered = false
+      expect(() => withFunctionConversationNativeDestinationDataScope(original, f.db, () => {
+        entered = true
+      })).toThrow("MODS_CONVERSATION_DESTINATION_CHANGED")
+      expect(entered).toBe(false)
+    })
+
   it("pins original statements and a complete snapshot while reading fresh data on every check", () => {
     const f = fixture(), child = f.create()
     const prepare = vi.spyOn(f.db, "prepareReadOne")
@@ -68,7 +192,7 @@ describe("original native shared destination data", () => {
     prepare.mockRestore()
   })
 
-  it("keeps every fixed thread interpretation fresh after a temporary source parser replacement", () => {
+  it("rejects a replaced physical incarnation before minting a proof despite late parser replacement", () => {
     const f = fixture(), child = f.create()
     const raw = f.db.exec("SELECT metadata FROM threads WHERE thread_id=?", [f.parent.threadId])[0]
       .values[0][0] as string
@@ -79,19 +203,14 @@ describe("original native shared destination data", () => {
     const parse = vi.spyOn(JSON, "parse").mockImplementation((text, reviver) =>
       parseOriginal(substitute && text === changed ? raw : text, reviver))
     try {
-      const original = readFunctionConversationNativeDestination(f.db, child, f.parent, () => {
+      expect(() => readFunctionConversationNativeDestination(f.db, child, f.parent, () => {
         f.guard()
         substitute = true
-      })
-      // The next data-only check has the same raw SQL text but the restored real interpretation.
-      // A callback-time private interpretation must never become a retained authority cache.
-      substitute = false
-      expect(() => assertFunctionConversationNativeDestinationDataCurrent(original, f.db)).toThrow(
-        "MODS_CONVERSATION_DESTINATION_CHANGED")
+      })).toThrow("MODS_CONVERSATION_DESTINATION_CHANGED")
     } finally { parse.mockRestore() }
   })
 
-  it("still parses each fixed thread's unchanged and changed metadata on every fresh data read", () => {
+  it("reads fresh native metadata with captured decoding and never caches a source match", () => {
     const f = fixture(), child = f.create()
     const original = readFunctionConversationNativeDestination(f.db, child, f.parent, f.guard)
     const raw = f.db.exec("SELECT metadata FROM threads WHERE thread_id=?", [f.parent.threadId])[0]
@@ -107,11 +226,15 @@ describe("original native shared destination data", () => {
     try {
       assertFunctionConversationNativeDestinationDataCurrent(original, f.db)
       assertFunctionConversationNativeDestinationDataCurrent(original, f.db)
-      expect(initialReads).toBe(6) // target, parent and checkpoint are three independent checks.
+      expect(initialReads).toBe(0)
       f.db.run("UPDATE threads SET metadata=? WHERE thread_id=?", [changed, f.parent.threadId])
       assertFunctionConversationNativeDestinationDataCurrent(original, f.db)
       assertFunctionConversationNativeDestinationDataCurrent(original, f.db)
-      expect(changedReads).toBe(6)
+      expect(changedReads).toBe(0)
+      const replaced = JSON.stringify({ ...parseOriginal(changed), cmb_thread_incarnation: randomUUID() })
+      f.db.run("UPDATE threads SET metadata=? WHERE thread_id=?", [replaced, f.parent.threadId])
+      expect(() => assertFunctionConversationNativeDestinationDataCurrent(original, f.db))
+        .toThrow("MODS_CONVERSATION_DESTINATION_CHANGED")
     } finally { parse.mockRestore() }
   })
 
@@ -185,8 +308,10 @@ describe("original native shared destination data", () => {
       expect(() => assertFunctionConversationNativeDestinationDataCurrent(original, f.db)).toThrow()
     })
 
-  it("rejects a new mapping column that collides with a captured snapshot alias", () => {
+  it("ignores a later unselected mapping alias without hiding a changed real thread", () => {
     const f = fixture(), child = f.create()
+    const originalThreadMetadata = f.db.exec("SELECT metadata FROM threads WHERE thread_id=?",
+      [f.input.checkpointThreadId])[0].values[0][0]
     let armed = false
     const original = readFunctionConversationNativeDestination(f.db, child, f.parent, () => {
       f.guard()
@@ -194,22 +319,41 @@ describe("original native shared destination data", () => {
       armed = false
       f.db.run("ALTER TABLE function_conversation_native_destinations ADD COLUMN " +
         "__cmb_native_destination_target_thread_metadata TEXT")
+      f.db.run("UPDATE function_conversation_native_destinations SET " +
+        "__cmb_native_destination_target_thread_metadata=?", [originalThreadMetadata])
     })
     armed = true
-    expect(() => original.assertCurrent()).toThrow()
-    expect(() => assertFunctionConversationNativeDestinationDataCurrent(original, f.db)).toThrow()
+    expect(() => original.assertCurrent()).not.toThrow()
+    expect(() => assertFunctionConversationNativeDestinationDataCurrent(original, f.db)).not.toThrow()
+    f.db.run("UPDATE threads SET metadata=? WHERE thread_id=?",
+      [JSON.stringify({ cmb_thread_incarnation: randomUUID() }), f.input.checkpointThreadId])
+    expect(() => original.assertCurrent()).toThrow("MODS_CONVERSATION_DESTINATION_CHANGED")
+    expect(() => assertFunctionConversationNativeDestinationDataCurrent(original, f.db))
+      .toThrow("MODS_CONVERSATION_DESTINATION_CHANGED")
   })
 
-  it("checks alias collisions in a new TEMP mapping shadow even when main schema is unchanged", () => {
+  it("ignores a TEMP mapping alias without hiding fresh destination metadata", () => {
     const f = fixture(), child = f.create()
     const original = readFunctionConversationNativeDestination(f.db, child, f.parent, f.guard)
     f.db.run("CREATE TEMP TABLE function_conversation_native_destinations AS " +
       "SELECT * FROM main.function_conversation_native_destinations")
     f.db.run("ALTER TABLE temp.function_conversation_native_destinations ADD COLUMN " +
       "__cmb_native_destination_destination_thread_metadata TEXT")
+    f.db.run("UPDATE temp.function_conversation_native_destinations SET " +
+      "__cmb_native_destination_destination_thread_metadata=?", [f.input.originalMetadata])
+    expect(() => original.assertCurrent()).not.toThrow()
+    expect(() => assertFunctionConversationNativeDestinationDataCurrent(original, f.db)).not.toThrow()
+    f.db.run("UPDATE threads SET metadata=? WHERE thread_id=?",
+      [JSON.stringify({ ...JSON.parse(f.input.originalMetadata), modsAgentRunId: randomUUID() }),
+        f.input.destinationThreadId])
     expect(() => original.assertCurrent()).toThrow("MODS_CONVERSATION_DESTINATION_CHANGED")
     expect(() => assertFunctionConversationNativeDestinationDataCurrent(original, f.db))
       .toThrow("MODS_CONVERSATION_DESTINATION_CHANGED")
+    let entered = false
+    expect(() => withFunctionConversationNativeDestinationDataScope(original, f.db, () => {
+      entered = true
+    })).toThrow("MODS_CONVERSATION_DESTINATION_CHANGED")
+    expect(entered).toBe(false)
   })
 
   it("cannot hide fresh destination changes behind writable_schema and an added alias", () => {
@@ -287,33 +431,6 @@ describe("original native shared destination data", () => {
     expect(globCalls).toBe(0); expect(countCalls).toBe(0)
   })
 
-  it("keeps all fixed ASCII prefix boundaries equal to the real SQLite GLOB predicate", () => {
-    const f = fixture(), native = actualNative(f.db)
-    f.create()
-    const compare = native.prepare(`SELECT ? GLOB ? AS original,
-      EXISTS(SELECT 1 WHERE ? COLLATE BINARY >= ? AND ? COLLATE BINARY < ?) AS candidate`)
-    let comparisons = 0
-    for (const prefix of ["__cmb_native_destination_", "__cmb_native_destination_x_",
-      "__cmb_native_destination_x_x_"]) {
-      const upper = `${prefix.slice(0, -1)}\``
-      const names: Array<[string, number]> = [["ordinary", 0], [prefix, 1],
-        [`${prefix}ascii`, 1], [`${prefix}雪🙂`, 1], [`${prefix}quote"'`, 1],
-        [`${prefix}*?[`, 1], [`${prefix}x_late`, 1], [`${prefix}_`, 1],
-        [prefix.slice(0, -1), 0], [upper, 0], [`${upper}suffix`, 0], [prefix.toUpperCase(), 0]]
-      for (const [name, expected] of names) {
-        const row = compare.get(name, `${prefix}*`, name, prefix, name, upper)
-        if (!row) throw Error("ACTUAL_ALIAS_GOLDEN_REQUIRED")
-        expect(row.original).toBe(expected); expect(row.candidate).toBe(expected)
-        comparisons++
-      }
-    }
-    expect(comparisons).toBe(36)
-    const schema = native.prepare(
-      "SELECT name FROM pragma_table_info('function_conversation_native_destinations')").all()
-    expect(schema.length).toBeGreaterThan(0)
-    for (const row of schema) expect(typeof row.name).toBe("string")
-  })
-
   it("retains Unicode, quoted and case-different ordinary mapping columns in the full snapshot", () => {
     const f = fixture(), child = f.create()
     const columns = ["普通列🙂", "quoted\"*?[", "__CMB_native_destination_case"]
@@ -348,7 +465,7 @@ describe("original native shared destination data", () => {
   })
 
   it.each(["__cmb_native_destination_", "__cmb_native_destination_雪🙂",
-    "__cmb_native_destination_quote\"*?["])("rejects a fresh normal alias-prefix column %s", column => {
+    "__cmb_native_destination_quote\"*?["])("ignores an unselected normal alias-prefix column %s while keeping real mapping checks", column => {
       const f = fixture(), child = f.create(), native = actualNative(f.db)
       let armed = false, calleeCalls = 0
       const original = readFunctionConversationNativeDestination(f.db, child, f.parent, () => {
@@ -365,25 +482,32 @@ describe("original native shared destination data", () => {
         native.function("count", () => { calleeCalls++; return 0 })
       })
       armed = true
+      expect(() => original.assertCurrent()).not.toThrow()
+      expect(() => assertFunctionConversationNativeDestinationDataCurrent(original, f.db)).not.toThrow()
+      expect(calleeCalls).toBe(0)
+      f.db.run("UPDATE function_conversation_native_destinations SET metadata_digest='actual changed mapping'")
       expect(() => original.assertCurrent()).toThrow("MODS_CONVERSATION_DESTINATION_CHANGED")
       expect(() => assertFunctionConversationNativeDestinationDataCurrent(original, f.db))
         .toThrow("MODS_CONVERSATION_DESTINATION_CHANGED")
       expect(calleeCalls).toBe(0)
     })
 
-  it("rejects a TEMP table shadow of the PRAGMA function instead of accepting zero collisions", () => {
+  it("ignores an unrelated TEMP PRAGMA shadow while retaining fresh mapping checks", () => {
     const f = fixture(), child = f.create()
     const original = readFunctionConversationNativeDestination(f.db, child, f.parent, f.guard)
     original.assertCurrent()
     f.db.run("CREATE TEMP TABLE pragma_table_info(name TEXT)")
     try {
-      expect(() => readFunctionConversationNativeDestination(f.db, child, f.parent, f.guard))
-        .toThrow("not a function")
+      const captured = readFunctionConversationNativeDestination(f.db, child, f.parent, f.guard)
+      expect(() => captured.assertCurrent()).not.toThrow()
+      expect(() => assertFunctionConversationNativeDestinationDataCurrent(original, f.db)).not.toThrow()
+      f.db.run("UPDATE function_conversation_native_destinations SET metadata_digest='real mapping mutation'")
+      expect(() => original.assertCurrent()).toThrow("MODS_CONVERSATION_DESTINATION_CHANGED")
       expect(() => assertFunctionConversationNativeDestinationDataCurrent(original, f.db))
-        .toThrow("not a function")
+        .toThrow("MODS_CONVERSATION_DESTINATION_CHANGED")
+      expect(() => assertFunctionConversationNativeDestinationDataCurrent(captured, f.db))
+        .toThrow("MODS_CONVERSATION_DESTINATION_CHANGED")
     } finally { f.db.run("DROP TABLE temp.pragma_table_info") }
-    expect(() => original.assertCurrent()).not.toThrow()
-    expect(() => assertFunctionConversationNativeDestinationDataCurrent(original, f.db)).not.toThrow()
   })
 
   it("rejects a changed child invocation in the fresh joined relation", () => {

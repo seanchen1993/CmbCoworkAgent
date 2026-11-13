@@ -4,10 +4,11 @@ import { Command } from "@langchain/langgraph"
 import { describe, expect, it, vi } from "vitest"
 import type { FunctionConversationStore } from "../db/function-conversation-store"
 import type { FunctionConversationGraphBinding } from "./mods-conversation"
-import { wrapFunctionConversationInvocation } from "./mods-conversation-invocation"
+import { wrapFunctionConversationInvocation, type FunctionConversationCompactionReconciler } from "./mods-conversation-invocation"
 import type { RunnableConfig } from "@langchain/core/runnables"
 import { IterableReadableStream } from "@langchain/core/utils/stream"
 import { FUNCTION_STREAM_TERMINAL } from "../mods/v2/host-stream-lifetime"
+import type { SqlJsSaver } from "../checkpointer/sqljs-saver"
 
 function fixture() {
   const state = { version: 1 as const, logicalSessionId: "logical", conversationId: "conversation",
@@ -36,10 +37,70 @@ function fixture() {
       })())) }
   const graph = wrapFunctionConversationInvocation(native, { store, binding })
   const config = { configurable: { thread_id: "actual-thread", checkpoint_ns: "" } }
-  return { graph, native, config, binding, expire: () => { live = false } }
+  return { graph, native, config, binding, store, expire: () => { live = false } }
 }
 
 describe("native conversation invocation admission", () => {
+  it("keeps a fixed exact native point across a host reconciliation await", async () => {
+    const f = fixture(), point = { ...f.config.configurable, checkpoint_id: "original-checkpoint" }
+    f.native.getState.mockImplementation(async () => ({ values: {
+      messages: [new HumanMessage("actual compacted summary")],
+      cmbFunctionConversation: f.binding.initialState }, config: { configurable: point } }))
+    const reconcile = vi.fn(async (config: Readonly<RunnableConfig>) => {
+      expect(config.configurable?.checkpoint_id).toBe("original-checkpoint")
+      expect(Object.isFrozen(config)).toBe(true)
+      expect(Object.isFrozen(config.configurable)).toBe(true)
+      point.checkpoint_id = "changed-after-native-capture"
+      await Promise.resolve()
+      expect(config.configurable?.checkpoint_id).toBe("original-checkpoint")
+    })
+    const graph = wrapFunctionConversationInvocation(f.native, { store: f.store, binding: {
+      ...f.binding, checkpointIncarnation: f.binding.target.incarnation }, history: {
+      saver: {} as SqlJsSaver, assertCurrent: f.binding.assertCurrent,
+      register: () => undefined, reconcileCompaction: reconcile } })
+    await graph.invoke({ messages: [new HumanMessage("next")] }, f.config)
+    expect(reconcile).toHaveBeenCalledOnce()
+    expect(f.native.invoke).toHaveBeenCalledOnce()
+  })
+
+  it("does not inspect a native compaction reconciler for an ordinary checkpoint", async () => {
+    const f = fixture()
+    const graph = wrapFunctionConversationInvocation(f.native, { store: f.store, binding: f.binding,
+      history: { saver: {} as SqlJsSaver, assertCurrent: f.binding.assertCurrent,
+        register: () => undefined, get reconcileCompaction(): FunctionConversationCompactionReconciler {
+          throw Error("ORDINARY_MUST_NOT_READ_NATIVE_RECOVERY")
+        } } })
+    await graph.invoke({ messages: [new HumanMessage("ordinary")] }, f.config)
+    expect(f.native.invoke).toHaveBeenCalledOnce()
+  })
+
+  it.each(["failed", "cancelled"])("does not fall back when exact reconciliation is %s", async mode => {
+    const f = fixture(), controller = new AbortController(), failure = Error("ACTUAL_RECONCILIATION_FAILED")
+    let release!: () => void, entered!: () => void
+    const paused = new Promise<void>(done => { release = done })
+    const started = new Promise<void>(done => { entered = done })
+    f.native.getState.mockImplementation(async () => ({ values: {
+      messages: [new HumanMessage("actual compacted summary")], cmbFunctionConversation: f.binding.initialState },
+      config: { configurable: { ...f.config.configurable, checkpoint_id: "exact-original" } } }))
+    const graph = wrapFunctionConversationInvocation(f.native, { store: f.store, binding: {
+      ...f.binding, checkpointIncarnation: f.binding.target.incarnation }, history: {
+      saver: {} as SqlJsSaver, assertCurrent: f.binding.assertCurrent, register: () => undefined,
+      reconcileCompaction: async () => { entered(); await paused; if (mode === "failed") throw failure } } })
+    let settled = false
+    const invoking = graph.invoke({ messages: [new HumanMessage("next")] },
+      { ...f.config, signal: controller.signal }).then(() => { settled = true }, error => {
+      settled = true; return error
+    })
+    await started
+    if (mode === "cancelled") controller.abort(failure)
+    await Promise.resolve()
+    expect(settled).toBe(false)
+    expect(f.native.invoke).not.toHaveBeenCalled()
+    release()
+    expect(await invoking).toBe(failure)
+    expect(f.native.invoke).not.toHaveBeenCalled()
+  })
+
   it.each(["live", "retire", "cancel"])("services pending event-loop work before admission (%s)", async mode => {
     const f = fixture()
     const cancellation = new AbortController()

@@ -496,6 +496,34 @@ describe("actual owner conversation coordinator", () => {
     expect(appDb.getDb().exec("SELECT COUNT(*) FROM function_logical_sessions")).toEqual(before)
   })
 
+  it.each([false, true])("rejects orphan native markers before enrolling history (saved root %s)",
+    async savedRoot => {
+      const f = fixture()
+      try {
+        if (savedRoot) await f.coordinator.prepareRuntime(f.context.workspace, f.threadId)
+        const before = appDb.getDb().exec("SELECT COUNT(*) FROM function_logical_sessions")
+        f.setCheckpoint({ checkpointId: randomUUID(), messages: [
+          { id: "orphan", additional_kwargs: { function_row_invalid: false } }
+        ] })
+        await expect(f.coordinator.prepareNativeRuntime(f.context.workspace, f.threadId,
+          f.context.signal, () => {})).rejects.toThrow("MODS_CONVERSATION_MIGRATION_REQUIRED")
+        expect(appDb.getDb().exec("SELECT COUNT(*) FROM function_logical_sessions")).toEqual(before)
+      } finally { f.close() }
+    })
+
+  it("does not create a missing root from a retained native checkpoint channel", async () => {
+    const f = fixture()
+    try {
+      const before = appDb.getDb().exec("SELECT COUNT(*) FROM function_logical_sessions")
+      f.setCheckpoint({ checkpointId: randomUUID(), messages: [], state: { version: 1,
+        logicalSessionId: "saved-session", conversationId: "saved-conversation",
+        branchId: "saved-branch", frontier: 0 } })
+      await expect(f.coordinator.prepareNativeRuntime(f.context.workspace, f.threadId,
+        f.context.signal, () => {})).rejects.toThrow("MODS_CONVERSATION_MIGRATION_REQUIRED")
+      expect(appDb.getDb().exec("SELECT COUNT(*) FROM function_logical_sessions")).toEqual(before)
+    } finally { f.close() }
+  })
+
   it("does not look up another chat's checkpoint on repeated ordinary sends in the same workspace", async () => {
     const active = fixture()
     const other = randomUUID()

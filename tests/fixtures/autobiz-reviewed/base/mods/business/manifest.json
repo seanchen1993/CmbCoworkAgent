@@ -1,0 +1,1287 @@
+{
+  "apiVersion": "devclaw.business-mods/v1",
+  "kind": "catalog",
+  "kernel": {
+    "id": "autobiz.python-kernel",
+    "version": "1.0.0",
+    "resources": [
+      ".mcp.json",
+      "board_core/__init__.py",
+      "board_core/artifact_paths.py",
+      "board_core/artifacts.py",
+      "board_core/contracts.py",
+      "board_core/state.py",
+      "board_core/state_store.py",
+      "board_core/workflow.py",
+      "board_core/workflow_closure.py",
+      "board_core/workflow_compiler.py",
+      "hooks/agents_repo.py",
+      "hooks/artifact_ref_validator.py",
+      "hooks/artifact_sync.py",
+      "hooks/artifact_sync_execute_hook.py",
+      "hooks/augment_explore_task_prompt.py",
+      "hooks/augment_test_engineer_task_prompt.py",
+      "hooks/batch_lease_manager.py",
+      "hooks/batch_merger.py",
+      "hooks/blocker_registry.py",
+      "hooks/business_mod_checks.py",
+      "hooks/candidate_digest.py",
+      "hooks/candidate_manager.py",
+      "hooks/check-secrets-new.py",
+      "hooks/check_plugin_read.py",
+      "hooks/check_skill_artifact_drift.py",
+      "hooks/check_state_read.py",
+      "hooks/code_execution_guard.py",
+      "hooks/code_task_context.py",
+      "hooks/collect-knowledge.js",
+      "hooks/commit_message.py",
+      "hooks/conflict_resolution_agent.py",
+      "hooks/conflict_types.py",
+      "hooks/critic_review_log_writer.py",
+      "hooks/design_contract_lock.py",
+      "hooks/e2e_quality_check.py",
+      "hooks/e2e_result_writer.py",
+      "hooks/e2e_trust_common.py",
+      "hooks/evidence_audit.py",
+      "hooks/evidence_integrity_gate.py",
+      "hooks/evidence_kernel.py",
+      "hooks/evidence_store.py",
+      "hooks/frontend_route_write_guard.py",
+      "hooks/hooks.json",
+      "hooks/human_gate_design_done.py",
+      "hooks/implementation_scope.py",
+      "hooks/init_validate.py",
+      "hooks/init_workspace.py",
+      "hooks/inspect_skill_contract.py",
+      "hooks/inspect_test_environment.py",
+      "hooks/inspect_workflow_templates.py",
+      "hooks/json_writer_common.py",
+      "hooks/mods_delivery_report.py",
+      "hooks/package.json",
+      "hooks/parallel_batch_dag.py",
+      "hooks/parallel_batch_lifecycle.py",
+      "hooks/parallel_batch_scheduler.py",
+      "hooks/parallel_batch_stage.py",
+      "hooks/parallel_evidence_aggregate.py",
+      "hooks/parallel_failure_classifier.py",
+      "hooks/parallel_final_verify.py",
+      "hooks/parallel_merge_train.py",
+      "hooks/parallel_repair.py",
+      "hooks/parallel_runtime.py",
+      "hooks/parallel_validation_ownership.py",
+      "hooks/paths.py",
+      "hooks/performance_checker.py",
+      "hooks/plan_granularity.py",
+      "hooks/plan_json.py",
+      "hooks/plan_scope.py",
+      "hooks/plan_write_ownership.py",
+      "hooks/plan_writer.py",
+      "hooks/query_json_fields.py",
+      "hooks/render_collected_session_context.py",
+      "hooks/render_frontend_test_reference.py",
+      "hooks/render_session_context.py",
+      "hooks/render_spring_test_reference.py",
+      "hooks/repository_snapshot.py",
+      "hooks/resolve_frontend_html_route.py",
+      "hooks/resolve_next_skill.py",
+      "hooks/result_writer_common.py",
+      "hooks/rollback_stage.py",
+      "hooks/route_checkpoint.py",
+      "hooks/run_advisory_smoke.py",
+      "hooks/run_e2e_command.py",
+      "hooks/run_utest_command.py",
+      "hooks/runtime_artifact_guard.py",
+      "hooks/skip_node.py",
+      "hooks/smoke_plan_writer.py",
+      "hooks/source_context.py",
+      "hooks/source_references.py",
+      "hooks/spec_contract.py",
+      "hooks/specs_hook_context.py",
+      "hooks/stage_gate.py",
+      "hooks/state_checkpoint.py",
+      "hooks/sync_agents.py",
+      "hooks/sync_artifacts.py",
+      "hooks/task_run_integrity.py",
+      "hooks/task_runner.py",
+      "hooks/ui_context.py",
+      "hooks/ui_context_writer.py",
+      "hooks/unit_test_result_writer.py",
+      "hooks/update_checkpoint.py",
+      "hooks/utest_assignment_router.py",
+      "hooks/utest_blocked_writer.py",
+      "hooks/utest_plan_contract.py",
+      "hooks/utest_workspace_binding.py",
+      "hooks/validate_utest_source_bug.py",
+      "hooks/validation_policy.py",
+      "hooks/verified_digest_guard.py",
+      "hooks/verify_decision_writer.py",
+      "hooks/workflow_launcher.py",
+      "hooks/worktree_manager.py",
+      "inspect_state.py",
+      "read_state_json.py",
+      "skills/autobiz/hooks/biz_validate.py",
+      "skills/autobiz/hooks/prd_rules.py",
+      "skills/autobiz/references/ui-context.md",
+      "skills/autodev/hooks/artifact_check.py",
+      "skills/autodev/hooks/common.py",
+      "skills/autodev/hooks/password-encrypt/SKILL.md",
+      "skills/autodev/hooks/password-encrypt/scripts/password-encrypt.py",
+      "skills/autodev/hooks/password-encrypt/scripts/password-encrypt.sh",
+      "skills/autodev/hooks/repair_registry.py",
+      "skills/references/ask-user-question.md",
+      "skills/references/domain-context.md",
+      "skills/references/review-protocol-design.md",
+      "skills/references/review-protocol-plan.md",
+      "skills/references/review-protocol-specs.md",
+      "skills/references/test-quality.md",
+      "skills/references/ui-continuation-guide.md"
+    ],
+    "boardConfigPath": "board_core/board_config.json",
+    "pluginFields": {
+      "hooks": "hooks/hooks.json",
+      "skills": "skills",
+      "mcpServers": ".mcp.json",
+      "author": {
+        "name": "CmbCowork Team",
+        "email": "cowork@example.com"
+      },
+      "license": "MIT"
+    }
+  },
+  "modules": [
+    {
+      "id": "biz.prd",
+      "title": "需求澄清与 PRD",
+      "node": {
+        "id": "biz.prd",
+        "label": "需求澄清与 PRD",
+        "group": "Biz",
+        "skill": "autobiz-requirement-discuss",
+        "order": 10,
+        "runtimePolicy": {
+          "agentMode": "multi",
+          "toolCustomConfig": {
+            "task": {
+              "enabled": true
+            }
+          }
+        },
+        "description": "澄清需求并生成正式 PRD 文档 \n 产物：PRD.md（产品需求文档：业务目标、用户场景与验收标准）、UI_CONTEXT.json（UI 范围机器事实源）",
+        "states": [
+          {
+            "nodeStatus": "not_started",
+            "label": "未开始",
+            "nextAction": {
+              "slashSkill": "autobiz-requirement-discuss",
+              "userMessage": "请使用 /autobiz-requirement-discuss 继续推进当前 Feature。",
+              "dialogTips": "当前阶段：需求澄清与 PRD。"
+            }
+          },
+          {
+            "nodeStatus": "in_progress",
+            "label": "进行中",
+            "nextAction": {
+              "slashSkill": "autobiz-requirement-discuss",
+              "userMessage": "请使用 /autobiz-requirement-discuss 继续推进当前 Feature。",
+              "dialogTips": "当前阶段：需求澄清与 PRD。"
+            }
+          },
+          {
+            "nodeStatus": "done",
+            "label": "已完成",
+            "nextAction": {
+              "slashSkill": "autodev-specs",
+              "userMessage": "请使用 /autodev-specs 继续推进当前 Feature。",
+              "dialogTips": "通过 /autodev-specs 路由到行为规格；UI 范围以 UI_CONTEXT.json 为机器事实源，前端实现后续在 /autodev-code 内部按 FRONTEND_ROUTE.json 分流。"
+            }
+          }
+        ],
+        "checkpoints": [
+          "prd_in_progress",
+          "prd_done"
+        ],
+        "artifacts": {
+          "inputs": [],
+          "outputs": [
+            {
+              "id": "prd",
+              "label": "PRD文档",
+              "artifactType": "file",
+              "path": "PRD.md",
+              "required": true
+            },
+            {
+              "id": "ui_context_json",
+              "label": "UI范围机器事实源",
+              "artifactType": "json",
+              "path": "UI_CONTEXT.json",
+              "required": true
+            }
+          ]
+        },
+        "validators": [
+          "ui_context_json"
+        ],
+        "hookDefinitions": [
+          {
+            "id": "biz-prd-validate",
+            "label": "PRD 产物校验",
+            "event": "PostSkillUse",
+            "required": true
+          }
+        ]
+      },
+      "skill": {
+        "entry": "skills/autobiz/autobiz-requirement-discuss/SKILL.md",
+        "resources": [
+          "skills/autobiz/autobiz-requirement-discuss/references/analysis-guide.md",
+          "skills/autobiz/autobiz-requirement-discuss/references/default-rules.md",
+          "skills/autobiz/autobiz-requirement-discuss/references/prd-formatter.md",
+          "skills/autobiz/autobiz-requirement-discuss/references/prd_module.md",
+          "skills/autobiz/autobiz-requirement-discuss/references/source-context.md"
+        ]
+      },
+      "resources": [],
+      "dependencies": {
+        "required": [],
+        "advisory": []
+      },
+      "checks": {
+        "validators": [
+          "ui_context_json"
+        ],
+        "guards": []
+      }
+    },
+    {
+      "id": "dev.specs",
+      "title": "行为规格",
+      "node": {
+        "id": "dev.specs",
+        "label": "行为规格",
+        "group": "Dev",
+        "skill": "autodev-specs",
+        "order": 30,
+        "runtimePolicy": {
+          "agentMode": "multi",
+          "toolCustomConfig": {
+            "task": {
+              "enabled": true
+            }
+          },
+          "subagentConfig": {
+            "disabledBuiltinSubagents": [
+              "Explore",
+              "critic"
+            ],
+            "customSubagentFiles": [
+              "agents/explore.md",
+              "agents/critic.md"
+            ]
+          }
+        },
+        "description": "生成 proposal 与行为规格 \n 产物：proposal.md（变更提案：本轮目标、范围与非目标）、specs/**/*.md（行为规格：各能力 Requirement/Scenario 契约）",
+        "states": [
+          {
+            "nodeStatus": "not_started",
+            "label": "未开始",
+            "nextAction": {
+              "slashSkill": "autodev-specs",
+              "userMessage": "请使用 /autodev-specs 继续推进当前 Feature。",
+              "dialogTips": "当前阶段：行为规格。"
+            }
+          },
+          {
+            "nodeStatus": "in_progress",
+            "label": "进行中",
+            "nextAction": {
+              "slashSkill": "autodev-specs",
+              "userMessage": "请使用 /autodev-specs 继续推进当前 Feature。",
+              "dialogTips": "当前阶段：行为规格。"
+            }
+          },
+          {
+            "nodeStatus": "done",
+            "label": "已完成",
+            "nextAction": {
+              "slashSkill": "autodev-design",
+              "userMessage": "请使用 /autodev-design 继续推进当前 Feature。",
+              "dialogTips": "当前阶段：技术设计。"
+            }
+          }
+        ],
+        "checkpoints": [
+          "specs_in_progress",
+          "specs_done"
+        ],
+        "artifacts": {
+          "inputs": [
+            {
+              "id": "prd",
+              "label": "PRD文档",
+              "artifactType": "file",
+              "path": "PRD.md",
+              "required": true,
+              "extract": {
+                "degrade": "无 PRD 时基于用户描述直接澄清行为契约，沉淀到 proposal 与 specs"
+              }
+            },
+            {
+              "id": "ui_context_json",
+              "label": "UI范围",
+              "artifactType": "json",
+              "path": "UI_CONTEXT.json",
+              "required": true,
+              "extract": {
+                "degrade": "无 UI_CONTEXT.json 时，本阶段必须基于用户已确认范围生成并锁定，不能从 PRD 正文临时推导"
+              }
+            }
+          ],
+          "outputs": [
+            {
+              "id": "proposal",
+              "label": "变更提案",
+              "artifactType": "file",
+              "path": "proposal.md",
+              "required": true
+            },
+            {
+              "id": "specs",
+              "label": "行为规格",
+              "artifactType": "file",
+              "path": "specs/**/*.md",
+              "required": true
+            },
+            {
+              "id": "ui_context_json",
+              "label": "UI范围",
+              "artifactType": "json",
+              "path": "UI_CONTEXT.json",
+              "required": true
+            }
+          ]
+        },
+        "validators": [
+          "proposal_contract",
+          "specs_contract",
+          "capability_spec_correspondence",
+          "ui_context_json"
+        ]
+      },
+      "skill": {
+        "entry": "skills/autodev/autodev-specs/SKILL.md",
+        "resources": [
+          "skills/autodev/autodev-specs/templates/proposal.md",
+          "skills/autodev/autodev-specs/templates/spec.md"
+        ]
+      },
+      "resources": [],
+      "dependencies": {
+        "required": [],
+        "advisory": [
+          "biz.prd"
+        ]
+      },
+      "checks": {
+        "validators": [
+          "proposal_contract",
+          "specs_contract",
+          "capability_spec_correspondence",
+          "ui_context_json"
+        ],
+        "guards": []
+      }
+    },
+    {
+      "id": "dev.design",
+      "title": "技术设计",
+      "node": {
+        "id": "dev.design",
+        "label": "技术设计",
+        "group": "Dev",
+        "skill": "autodev-design",
+        "order": 40,
+        "runtimePolicy": {
+          "agentMode": "multi",
+          "toolCustomConfig": {
+            "task": {
+              "enabled": true
+            }
+          },
+          "subagentConfig": {
+            "disabledBuiltinSubagents": [
+              "Explore",
+              "critic"
+            ],
+            "customSubagentFiles": [
+              "agents/explore.md",
+              "agents/critic_autodev_design_zh.md"
+            ]
+          }
+        },
+        "description": "探索并生成技术设计 \n 产物：design.md 与 .design-contract.lock.json（已校验的 API/数据/技术决策快照）",
+        "states": [
+          {
+            "nodeStatus": "not_started",
+            "label": "未开始",
+            "nextAction": {
+              "slashSkill": "autodev-design",
+              "userMessage": "请使用 /autodev-design 继续推进当前 Feature。",
+              "dialogTips": "当前阶段：技术设计。"
+            }
+          },
+          {
+            "nodeStatus": "in_progress",
+            "label": "进行中",
+            "nextAction": {
+              "slashSkill": "autodev-design",
+              "userMessage": "请使用 /autodev-design 继续推进当前 Feature。",
+              "dialogTips": "当前阶段：技术设计。"
+            }
+          },
+          {
+            "nodeStatus": "done",
+            "label": "已完成",
+            "nextAction": {
+              "slashSkill": "autodev-plan",
+              "userMessage": "请使用 /autodev-plan 继续推进当前 Feature。",
+              "dialogTips": "当前阶段：执行计划。"
+            }
+          }
+        ],
+        "checkpoints": [
+          "design_in_progress",
+          "design_done"
+        ],
+        "artifacts": {
+          "inputs": [
+            {
+              "id": "proposal",
+              "label": "变更提案",
+              "artifactType": "file",
+              "path": "proposal.md",
+              "required": true,
+              "extract": {
+                "degrade": "无 proposal 时基于用户直供需求与代码探索建立上下文，并把边界假设记入 design.md 风险"
+              }
+            },
+            {
+              "id": "specs",
+              "label": "行为规格",
+              "artifactType": "file",
+              "path": "specs/**/*.md",
+              "required": true,
+              "extract": {
+                "degrade": "无 specs 时与用户确认行为预期后再设计，未确认行为全部记为待确认风险"
+              }
+            },
+            {
+              "id": "ui_context_json",
+              "label": "UI范围",
+              "artifactType": "json",
+              "path": "UI_CONTEXT.json",
+              "required": true,
+              "extract": {
+                "degrade": "无 UI_CONTEXT.json 时回到 /autodev-specs 补齐并锁定，不能自行推断 UI 范围"
+              }
+            }
+          ],
+          "outputs": [
+            {
+              "id": "design",
+              "label": "技术设计",
+              "artifactType": "file",
+              "path": "design.md",
+              "required": true
+            },
+            {
+              "id": "design_contract_lock",
+              "label": "设计契约锁",
+              "artifactType": "json",
+              "path": ".design-contract.lock.json",
+              "required": true
+            }
+          ]
+        },
+        "validators": [
+          "design_contract",
+          "design_contract_lock",
+          "ui_context_json"
+        ]
+      },
+      "skill": {
+        "entry": "skills/autodev/autodev-design/SKILL.md",
+        "resources": [
+          "skills/autodev/autodev-design/templates/design.md"
+        ]
+      },
+      "resources": [],
+      "dependencies": {
+        "required": [],
+        "advisory": [
+          "dev.specs",
+          "biz.prd"
+        ]
+      },
+      "checks": {
+        "validators": [
+          "design_contract",
+          "design_contract_lock",
+          "ui_context_json"
+        ],
+        "guards": []
+      }
+    },
+    {
+      "id": "dev.plan",
+      "title": "执行计划",
+      "node": {
+        "id": "dev.plan",
+        "label": "执行计划",
+        "group": "Dev",
+        "skill": "autodev-plan",
+        "order": 50,
+        "runtimePolicy": {
+          "agentMode": "multi",
+          "toolCustomConfig": {
+            "task": {
+              "enabled": true
+            }
+          },
+          "subagentConfig": {
+            "disabledBuiltinSubagents": [
+              "Explore",
+              "critic"
+            ],
+            "customSubagentFiles": [
+              "agents/explore.md",
+              "agents/critic_autodev_plan_zh.md"
+            ]
+          }
+        },
+        "description": "基于已确认设计生成可执行任务计划。先生成 plan.json（任务 DAG 机器事实源）与 Batch 供 Critic 回检，回检收敛后定稿 plan.json，再投影 PLAN.md（人类执行计划视图）。",
+        "states": [
+          {
+            "nodeStatus": "not_started",
+            "label": "未开始",
+            "nextAction": {
+              "slashSkill": "autodev-plan",
+              "userMessage": "请使用 /autodev-plan 继续推进当前 Feature。",
+              "dialogTips": "当前阶段：执行计划。"
+            }
+          },
+          {
+            "nodeStatus": "in_progress",
+            "label": "进行中",
+            "nextAction": {
+              "slashSkill": "autodev-plan",
+              "userMessage": "请使用 /autodev-plan 继续推进当前 Feature。",
+              "dialogTips": "当前阶段：执行计划。"
+            }
+          },
+          {
+            "nodeStatus": "done",
+            "label": "已完成",
+            "nextAction": {
+              "slashSkill": "autodev-code",
+              "userMessage": "请使用 /autodev-code 继续推进当前 Feature。",
+              "dialogTips": "当前阶段：代码实现。如果需要code前的详细设计，可以先使用/autodev-detail-design生成详细设计方案。"
+            }
+          }
+        ],
+        "checkpoints": [
+          "plan_in_progress",
+          "plan_done"
+        ],
+        "artifacts": {
+          "inputs": [
+            {
+              "id": "proposal",
+              "label": "变更提案",
+              "artifactType": "file",
+              "path": "proposal.md",
+              "required": true,
+              "extract": {
+                "degrade": "无 proposal 时回到 /autodev-design 补齐设计依据，再重新生成计划"
+              }
+            },
+            {
+              "id": "specs",
+              "label": "行为规格",
+              "artifactType": "file",
+              "path": "specs/**/*.md",
+              "required": true,
+              "extract": {
+                "degrade": "无 specs 时回到 /autodev-specs 补齐行为契约，不能只凭 design.md 拆任务"
+              }
+            },
+            {
+              "id": "ui_context_json",
+              "label": "UI范围",
+              "artifactType": "json",
+              "path": "UI_CONTEXT.json",
+              "required": true,
+              "extract": {
+                "degrade": "无 UI_CONTEXT.json 时回到 /autodev-specs 补齐并锁定，不能自行推断 UI 任务"
+              }
+            },
+            {
+              "id": "design",
+              "label": "已确认技术设计",
+              "artifactType": "file",
+              "path": "design.md",
+              "required": true,
+              "extract": {
+                "degrade": "无 design.md 时回到 /autodev-design 生成并确认技术设计，不能直接生成计划"
+              }
+            },
+            {
+              "id": "design_contract_lock",
+              "label": "Design 已锁定契约",
+              "artifactType": "json",
+              "path": ".design-contract.lock.json",
+              "required": true,
+              "extract": {
+                "degrade": "缺少设计契约锁说明 /autodev-design 未完成；回到 Design 校验并生成锁后再进入 Plan"
+              }
+            }
+          ],
+          "outputs": [
+            {
+              "id": "plan",
+              "label": "执行计划",
+              "artifactType": "file",
+              "path": "PLAN.md",
+              "required": true
+            },
+            {
+              "id": "plan_json",
+              "label": "计划机器结构化内容",
+              "artifactType": "json",
+              "path": "plan.json",
+              "required": true
+            }
+          ]
+        },
+        "validators": [
+          "ui_context_json",
+          "plan_json_contract",
+          "plan_json_initial_tasks",
+          "parallel_batch_pipeline_contract",
+          "plan_task_granularity",
+          "plan_scenario_coverage"
+        ],
+        "rollback": {
+          "archive": [
+            "plans"
+          ]
+        }
+      },
+      "skill": {
+        "entry": "skills/autodev/autodev-plan/SKILL.md",
+        "resources": [
+          "skills/autodev/autodev-plan/references/task-planning.md",
+          "skills/autodev/autodev-plan/templates/plan.md",
+          "skills/autodev/autodev-plan/templates/task-groups.json"
+        ]
+      },
+      "resources": [],
+      "dependencies": {
+        "required": [],
+        "advisory": [
+          "dev.specs",
+          "biz.prd",
+          "dev.design"
+        ]
+      },
+      "checks": {
+        "validators": [
+          "ui_context_json",
+          "plan_json_contract",
+          "plan_json_initial_tasks",
+          "parallel_batch_pipeline_contract",
+          "plan_task_granularity",
+          "plan_scenario_coverage"
+        ],
+        "guards": []
+      }
+    },
+    {
+      "id": "dev.detail_design",
+      "title": "详细设计",
+      "node": {
+        "id": "dev.detail_design",
+        "label": "详细设计",
+        "group": "Dev",
+        "skill": "autodev-detail-design",
+        "description": "生成代码实现前的文件级详细设计 \n 产物：DETAIL_DESIGN.md（文件级详细设计：到文件的修改方案）",
+        "checkpoints": [
+          "detail_design_in_progress",
+          "detail_design_done"
+        ],
+        "artifacts": {
+          "inputs": [
+            {
+              "id": "proposal",
+              "label": "变更提案",
+              "artifactType": "file",
+              "path": "proposal.md",
+              "required": true,
+              "extract": {
+                "degrade": "无 proposal 时以 specs 与 design 界定范围"
+              }
+            },
+            {
+              "id": "specs",
+              "label": "行为规格",
+              "artifactType": "file",
+              "path": "specs/**/*.md",
+              "required": true,
+              "extract": {
+                "degrade": "无 specs 时与用户确认行为预期"
+              }
+            },
+            {
+              "id": "design",
+              "label": "技术设计",
+              "artifactType": "file",
+              "path": "design.md",
+              "required": true,
+              "extract": {
+                "degrade": "无 design 时基于现有代码模式细化方案，并记录设计基准缺失"
+              }
+            },
+            {
+              "id": "plan_json",
+              "label": "计划机器事实源",
+              "artifactType": "json",
+              "path": "plan.json",
+              "required": true,
+              "extract": {
+                "degrade": "无 plan.json 时回到 /autodev-plan 重新生成，不能只依赖 PLAN.md 推进详细设计"
+              }
+            }
+          ],
+          "outputs": [
+            {
+              "id": "detail_design",
+              "label": "详细设计",
+              "artifactType": "file",
+              "path": "DETAIL_DESIGN.md",
+              "required": true
+            }
+          ]
+        },
+        "validators": [],
+        "guards": [],
+        "hookDefinitions": [],
+        "states": [
+          {
+            "id": "not_started",
+            "label": "未开始",
+            "uiKind": "pending",
+            "nextAction": {
+              "slashSkill": "autodev-detail-design",
+              "userMessage": "请使用 /autodev-detail-design 继续推进当前 Feature。",
+              "dialogTips": "当前阶段：详细设计。"
+            }
+          },
+          {
+            "id": "in_progress",
+            "label": "进行中",
+            "uiKind": "active",
+            "nextAction": {
+              "slashSkill": "autodev-detail-design",
+              "userMessage": "请使用 /autodev-detail-design 继续推进当前 Feature。",
+              "dialogTips": "当前阶段：详细设计。"
+            }
+          },
+          {
+            "id": "done",
+            "label": "已完成",
+            "uiKind": "done",
+            "nextAction": {
+              "slashSkill": "autodev-code",
+              "userMessage": "请使用 /autodev-code 继续推进当前 Feature。",
+              "dialogTips": "当前阶段：代码实现。"
+            }
+          }
+        ],
+        "order": 50
+      },
+      "skill": {
+        "entry": "skills/autodev/autodev-detail-design/SKILL.md",
+        "resources": [
+          "skills/autodev/autodev-detail-design/reference/template.md"
+        ]
+      },
+      "resources": [],
+      "dependencies": {
+        "required": [],
+        "advisory": [
+          "dev.specs",
+          "dev.design",
+          "dev.plan"
+        ]
+      },
+      "checks": {
+        "validators": [],
+        "guards": []
+      },
+      "insertAfter": "dev.plan"
+    },
+    {
+      "id": "dev.code",
+      "title": "代码实现",
+      "node": {
+        "id": "dev.code",
+        "label": "代码实现",
+        "group": "Dev",
+        "skill": "autodev-code",
+        "order": 60,
+        "runtimePolicy": {
+          "agentMode": "workflow",
+          "toolCustomConfig": {
+            "task": {
+              "enabled": true
+            }
+          },
+          "subagentConfig": {
+            "disabledBuiltinSubagents": [
+              "verification"
+            ],
+            "customSubagentFiles": [
+              "agents/verification.md"
+            ]
+          }
+        },
+        "description": "根据规格、设计和计划实现代码 \n 产物：项目源代码；PLAN.md 任务状态与完成记录就地回写（无独立文档产物；执行协议以 autodev-code skill 正文为准）",
+        "states": [
+          {
+            "nodeStatus": "not_started",
+            "label": "未开始",
+            "nextAction": {
+              "slashSkill": "autodev-code",
+              "userMessage": "请使用 /autodev-code 继续推进当前 Feature。",
+              "dialogTips": "当前阶段：代码实现。"
+            }
+          },
+          {
+            "nodeStatus": "in_progress",
+            "label": "进行中",
+            "nextAction": {
+              "slashSkill": "autodev-code",
+              "userMessage": "请使用 /autodev-code 继续推进当前 Feature。",
+              "dialogTips": "当前阶段：代码实现。"
+            }
+          },
+          {
+            "nodeStatus": "done",
+            "label": "已完成",
+            "nextAction": {
+              "slashSkill": "autoops-cicd",
+              "userMessage": "请使用 /autoops-cicd 继续推进当前 Feature。",
+              "dialogTips": "当前阶段：CI/CD。批次内 review、test、B-E2E 与证据汇总已完成，不重复执行。"
+            }
+          }
+        ],
+        "checkpoints": [
+          "code_in_progress",
+          "code_done"
+        ],
+        "artifacts": {
+          "inputs": [
+            {
+              "id": "proposal",
+              "label": "变更提案",
+              "artifactType": "file",
+              "path": "proposal.md",
+              "required": true,
+              "extract": {
+                "degrade": "无 proposal 时以已有产物理解需求;如果都没有则根据用户直供需求作为范围依据"
+              }
+            },
+            {
+              "id": "specs",
+              "label": "行为规格",
+              "artifactType": "file",
+              "path": "specs/**/*.md",
+              "required": true,
+              "extract": {
+                "degrade": "无 specs 时以已有产物理解需求;如果都没有则根据用户直供需求作为范围依据"
+              }
+            },
+            {
+              "id": "prd_optional",
+              "label": "PRD参考",
+              "artifactType": "file",
+              "path": "PRD.md",
+              "required": false,
+              "extract": {
+                "degrade": "无 PRD 时，以已有产物理解需求;如果都没有则根据用户直供需求作为范围依据"
+              }
+            },
+            {
+              "id": "design",
+              "label": "技术设计",
+              "artifactType": "file",
+              "path": "design.md",
+              "required": true,
+              "extract": {
+                "degrade": "无 design 时基于 已有产物 与现有代码模式自行做最小实现决策，并在完成摘要中记录关键决策"
+              }
+            },
+            {
+              "id": "plan_json",
+              "label": "计划机器事实源",
+              "artifactType": "json",
+              "path": "plan.json",
+              "required": true,
+              "extract": {
+                "degrade": "无 plan.json 或结构已过时时，回到 /autodev-plan 清理并按当前唯一结构重新生成；不得建立旁路任务队列"
+              }
+            },
+            {
+              "id": "detail_design_optional",
+              "label": "详细设计参考",
+              "artifactType": "file",
+              "path": "DETAIL_DESIGN.md",
+              "required": false,
+              "extract": {
+                "degrade": "无 DETAIL_DESIGN 时按 design.md 与 PLAN.md 的任务执行包直接实现"
+              }
+            },
+            {
+              "id": "ui_context_json",
+              "label": "UI范围机器事实源",
+              "artifactType": "json",
+              "path": "UI_CONTEXT.json",
+              "required": true,
+              "extract": {
+                "degrade": "无 UI_CONTEXT.json 时先询问用户是否需要生成前端代码，再回到 /autodev-specs 或 /autodev-plan 补齐"
+              }
+            }
+          ],
+          "outputs": [
+            {
+              "id": "evidence_stream",
+              "label": "证据流",
+              "artifactType": "json",
+              "path": "evidence/EVIDENCE.jsonl",
+              "required": true,
+              "extract": {
+                "degrade": "缺失时由 task_runner 首次验证时在 Feature 产物目录原子创建；非空 evidence stream 缺少 EVIDENCE.index.json 时停止并恢复，不能重建绕过"
+              }
+            }
+          ]
+        },
+        "validators": [
+          "ui_context_json",
+          "plan_json_contract",
+          "plan_task_detail_schema",
+          "plan_ref_resolution",
+          "frontend_route_gate",
+          "evidence_detail_quality",
+          "code_done_gate",
+          "evidence_integrity"
+        ],
+        "guards": [
+          "code_compile"
+        ],
+        "rollback": {
+          "archive": [
+            ".parallel-runs",
+            ".task-runs",
+            ".runtime",
+            "evidence",
+            "FRONTEND_ROUTE.json",
+            "SMOKE_TEST_PLAN.json",
+            "SMOKE_RESULT.json",
+            "completion-proposal.json",
+            "REQUIREMENTS_EVAL.md",
+            "UNIT_TEST_REPORT.md",
+            "UNIT_TEST_RESULT.json",
+            "test-output.log",
+            "E2E_TEST_CASES.yaml",
+            "E2E_REPORT.md",
+            "E2E_RESULT.json",
+            "E2E_QUALITY_SCAN.json",
+            "e2e-run.log",
+            "e2e-diagnostics",
+            "VERIFY_REPORT.md",
+            "VERIFY_DECISION.json",
+            "FIX_REQUEST.json",
+            "FEATURE_API_DETAIL.md",
+            "ARTIFACT_CATALOG.json",
+            "sync-status.json",
+            "artifact-sync",
+            "hooks.ndjson"
+          ]
+        }
+      },
+      "skill": {
+        "entry": "skills/autodev/autodev-code/SKILL.md",
+        "resources": [
+          "skills/autodev/autodev-code/references/batch-workflow-guide.md",
+          "skills/autodev/autodev-code/references/frontend-html/references/assets-processing-guide.md",
+          "skills/autodev/autodev-code/references/frontend-html/references/html-post-review.md",
+          "skills/autodev/autodev-code/references/frontend-html/scripts/html_static_checker.py",
+          "skills/autodev/autodev-code/references/frontend-html/scripts/review_runner.py",
+          "skills/autodev/autodev-code/references/frontend-html/with-absolute-html/SKILL.md",
+          "skills/autodev/autodev-code/references/frontend-html/with-absolute-html/references/component-slot-map.md",
+          "skills/autodev/autodev-code/references/frontend-html/with-absolute-html/references/components-match-rules.md",
+          "skills/autodev/autodev-code/references/frontend-html/with-absolute-html/references/html-parser.md",
+          "skills/autodev/autodev-code/references/frontend-html/with-absolute-html/references/html-templates/llm-prompt-template.md",
+          "skills/autodev/autodev-code/references/frontend-html/with-absolute-html/references/html-templates/pure-div-converter.md",
+          "skills/autodev/autodev-code/references/frontend-html/with-absolute-html/references/html-templates/pure-div-core.md",
+          "skills/autodev/autodev-code/references/frontend-html/with-absolute-html/references/interaction-contracts.md",
+          "skills/autodev/autodev-code/references/frontend-html/with-absolute-html/references/page-archetypes.md",
+          "skills/autodev/autodev-code/references/frontend-html/with-absolute-html/scripts/analyze_absolute_html.py",
+          "skills/autodev/autodev-code/references/frontend-html/with-absolute-html/scripts/prepare_html_analysis.py",
+          "skills/autodev/autodev-code/references/frontend-html/with-absolute-html/scripts/process_assets.py",
+          "skills/autodev/autodev-code/references/frontend-html/with-absolute-html/scripts/render_react_antd_preview.py",
+          "skills/autodev/autodev-code/references/frontend-html/with-standard-html/SKILL.md",
+          "skills/autodev/autodev-code/references/frontend-html/with-standard-html/references/ant-design-conversion.md",
+          "skills/autodev/autodev-code/references/frontend-html/with-standard-html/references/standard-html-parser.md",
+          "skills/autodev/autodev-code/references/frontend-html/with-standard-html/scripts/audit_antd_coverage.py"
+        ]
+      },
+      "resources": [
+        "agents/analyst.md",
+        "agents/critic.md",
+        "agents/critic_autodev_design_zh.md",
+        "agents/critic_autodev_plan_zh.md",
+        "agents/critic_autodev_zh.md",
+        "agents/explore.md",
+        "agents/explore_spec.md",
+        "agents/reviewer.md",
+        "agents/test-engineer.md",
+        "agents/verification.md",
+        "skills/autodev/autodev-e2e/SKILL.md",
+        "skills/autodev/autodev-e2e/reference/e2e-quality-gate.md",
+        "skills/autodev/autodev-e2e/reference/test-playwright-script.md",
+        "skills/autodev/autodev-e2e/reference/testcase-generation.md",
+        "skills/autodev/autodev-e2e/templates/smoke_test_plan.json",
+        "skills/autodev/autodev-frontend/SKILL.md",
+        "skills/autodev/autodev-frontend/route/with-absolute-html/SKILL.md",
+        "skills/autodev/autodev-reviewer/SKILL.md",
+        "skills/autodev/autodev-reviewer/references/schemas.md",
+        "skills/autodev/autodev-utest/SKILL.md",
+        "skills/autodev/autodev-utest/reference/LICENSE.spring-testing-skills-Apache-2.0.txt",
+        "skills/autodev/autodev-utest/reference/LICENSE.vuejs-ai-MIT.txt",
+        "skills/autodev/autodev-utest/reference/frontend-test-patterns.md",
+        "skills/autodev/autodev-utest/reference/spring-test-patterns.md",
+        "skills/autodev/autodev-utest/reference/test-engineer-task-protocol.md",
+        "skills/autodev/autodev-utest/reference/test-environment-profiles.md",
+        "skills/autodev/autodev-verify/SKILL.md",
+        "workflows/code-batched-execution.workflow.js"
+      ],
+      "dependencies": {
+        "required": [],
+        "advisory": [
+          "dev.specs",
+          "biz.prd",
+          "dev.design",
+          "dev.plan",
+          "dev.detail_design"
+        ]
+      },
+      "checks": {
+        "validators": [
+          "ui_context_json",
+          "plan_json_contract",
+          "plan_task_detail_schema",
+          "plan_ref_resolution",
+          "frontend_route_gate",
+          "evidence_detail_quality",
+          "code_done_gate",
+          "evidence_integrity"
+        ],
+        "guards": [
+          "code_compile"
+        ]
+      }
+    },
+    {
+      "id": "ops.cicd",
+      "title": "CI/CD",
+      "node": {
+        "id": "ops.cicd",
+        "label": "CI/CD",
+        "group": "Ops",
+        "skill": "autoops-cicd",
+        "order": 100,
+        "description": "CI/CD 流水线和 PR 准备 \n 产物：CICD_CHECKLIST.md（CI/CD 清单：流水线与交付检查项）、PR_BODY.md（PR 描述正文：变更说明与风险，可选）",
+        "states": [
+          {
+            "nodeStatus": "not_started",
+            "label": "未开始",
+            "nextAction": {
+              "slashSkill": "autoops-cicd",
+              "userMessage": "请使用 /autoops-cicd 继续推进当前 Feature。",
+              "dialogTips": "当前阶段：CI/CD。"
+            }
+          },
+          {
+            "nodeStatus": "in_progress",
+            "label": "进行中",
+            "nextAction": {
+              "slashSkill": "autoops-cicd",
+              "userMessage": "请使用 /autoops-cicd 继续推进当前 Feature。",
+              "dialogTips": "当前阶段：CI/CD。"
+            }
+          },
+          {
+            "nodeStatus": "done",
+            "label": "已完成",
+            "nextAction": {
+              "slashSkill": "autoops-archive",
+              "userMessage": "请使用 /autoops-archive 继续推进当前 Feature。",
+              "dialogTips": "当前阶段：归档。"
+            }
+          }
+        ],
+        "checkpoints": [
+          "cicd_in_progress",
+          "cicd_done"
+        ],
+        "artifacts": {
+          "inputs": [
+            {
+              "id": "evidence_stream",
+              "label": "批次流水线验证证据",
+              "artifactType": "json",
+              "path": "evidence/EVIDENCE.jsonl",
+              "required": true,
+              "extract": {
+                "degrade": "缺失时回到 Code 的 Batch 流水线补齐 review、test 与 B-E2E 证据"
+              }
+            },
+            {
+              "id": "prd_optional",
+              "label": "PRD参考",
+              "artifactType": "file",
+              "path": "PRD.md",
+              "required": false,
+              "extract": {
+                "degrade": "未提供时允许继续，写明需求文档缺失或未提供"
+              }
+            },
+            {
+              "id": "design_optional",
+              "label": "技术设计参考",
+              "artifactType": "file",
+              "path": "design.md",
+              "required": false,
+              "extract": {
+                "degrade": "未提供时允许继续，写明设计文档缺失或未提供"
+              }
+            }
+          ],
+          "outputs": [
+            {
+              "id": "cicd_checklist",
+              "label": "CI/CD 清单",
+              "artifactType": "file",
+              "path": "CICD_CHECKLIST.md",
+              "required": true
+            },
+            {
+              "id": "pr_body",
+              "label": "PR 描述",
+              "artifactType": "file",
+              "path": "PR_BODY.md",
+              "required": false
+            }
+          ]
+        },
+        "validators": []
+      },
+      "skill": {
+        "entry": "skills/autoops/autoops-cicd/SKILL.md",
+        "resources": [
+          "skills/autoops/autoops-cicd/hooks/poll_pipeline_status.py"
+        ]
+      },
+      "resources": [],
+      "dependencies": {
+        "required": [],
+        "advisory": [
+          "dev.code",
+          "biz.prd",
+          "dev.design"
+        ]
+      },
+      "checks": {
+        "validators": [],
+        "guards": []
+      }
+    },
+    {
+      "id": "ops.archive",
+      "title": "归档",
+      "node": {
+        "id": "ops.archive",
+        "label": "归档",
+        "group": "Ops",
+        "skill": "autoops-archive",
+        "order": 110,
+        "description": "Feature 归档 \n 产物：归档记录（状态置为 archived，无独立文档产物）",
+        "states": [
+          {
+            "nodeStatus": "not_started",
+            "label": "未开始",
+            "nextAction": {
+              "slashSkill": "autoops-archive",
+              "userMessage": "请使用 /autoops-archive 继续推进当前 Feature。",
+              "dialogTips": "当前阶段：归档。"
+            }
+          },
+          {
+            "nodeStatus": "archived",
+            "label": "已归档",
+            "nextAction": {
+              "slashSkill": "autoops-archive",
+              "userMessage": "请使用 /autoops-archive 查看当前 Feature 的归档状态。",
+              "dialogTips": "当前阶段：归档。"
+            }
+          }
+        ],
+        "checkpoints": [
+          "archived"
+        ],
+        "artifacts": {
+          "inputs": [
+            {
+              "id": "cicd_checklist",
+              "label": "CI/CD 清单",
+              "artifactType": "file",
+              "path": "CICD_CHECKLIST.md",
+              "required": true,
+              "extract": {
+                "degrade": "无清单时按 Feature 目录现有产物核对后归档，并标注缺项"
+              }
+            }
+          ],
+          "outputs": []
+        },
+        "validators": []
+      },
+      "skill": {
+        "entry": "skills/autoops/autoops-archive/SKILL.md",
+        "resources": []
+      },
+      "resources": [],
+      "dependencies": {
+        "required": [],
+        "advisory": [
+          "ops.cicd"
+        ]
+      },
+      "checks": {
+        "validators": [],
+        "guards": []
+      }
+    }
+  ]
+}

@@ -1,0 +1,20 @@
+{
+  "apiVersion": "cmb.mods/v2",
+  "id": "autobiz-worktree-progress",
+  "modules": ["./business/autobiz.worktree-progress/register.ts"],
+  "claw": {
+    "componentsVersion": 1,
+    "components": [
+      {
+        "id": "autobiz.worktree-progress",
+        "name": "并行 Worktree 进度",
+        "description": "只读展示 AutoBiz 调度记录与现场 Git 事实；显式刷新才读取。",
+        "kind": "module",
+        "entry": "business/autobiz.worktree-progress/register.ts",
+        "dependsOn": [],
+        "actionIds": [],
+        "usage": "universal"
+      }
+    ]
+  }
+}

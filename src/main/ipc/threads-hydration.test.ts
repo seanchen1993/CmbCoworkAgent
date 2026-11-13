@@ -120,21 +120,33 @@ describe("threads:get hydration contract", () => {
     const deletion = source.slice(start, end)
     const commitIndex = deletion.indexOf("dbDeleteThread(threadId)")
     const workflowCleanupIndex = deletion.indexOf(
-      "await deleteWorkflowRunsForThread(workspacePath, threadId)"
+      "await deleteWorkflowRunsForThread(workspacePath, threadId, assertDeletedSource)"
     )
     const coordinatorCleanupIndex = deletion.indexOf(
-      "await coordinatorWorkerManager.forgetThreadAndDeleteArtifacts(threadId)"
+      "await coordinatorRetirement?.finalize()"
     )
 
     expect(commitIndex).toBeGreaterThanOrEqual(0)
     expect(workflowCleanupIndex).toBeGreaterThan(commitIndex)
     expect(coordinatorCleanupIndex).toBeGreaterThan(commitIndex)
     expect(deletion).toMatch(
-      /try\s*{\s*await deleteWorkflowRunsForThread\(workspacePath, threadId\)[\s\S]{0,400}catch \(e\)/
+      /try\s*{\s*await deleteWorkflowRunsForThread\(workspacePath, threadId, assertDeletedSource\)[\s\S]{0,400}catch \(e\)/
     )
     expect(deletion).toMatch(
-      /try\s*{\s*await coordinatorWorkerManager\.forgetThreadAndDeleteArtifacts\(threadId\)[\s\S]{0,400}catch \(e\)/
+      /try\s*{\s*await Promise\.race\([\s\S]*?coordinatorArtifactCleanup[\s\S]*?catch \(error\)/
     )
+    const prepare = deletion.indexOf("coordinatorWorkerManager.prepareThreadRetirement(")
+    const activate = deletion.indexOf("preparedCoordinatorRetirement.activate()")
+    const drained = deletion.indexOf("await coordinatorRetirement?.oldPhysicalDrained")
+    expect(prepare).toBeGreaterThanOrEqual(0)
+    expect(prepare).toBeLessThan(commitIndex)
+    expect(activate).toBeGreaterThan(deletion.lastIndexOf("dbDeleteThread(threadId)"))
+    expect(activate).toBeLessThan(drained)
+    expect(drained).toBeLessThan(workflowCleanupIndex)
+    expect(deletion).toContain("preparedCoordinatorRetirement?.abort()")
+    expect(deletion).toContain("if (!deletionCommitted)")
+    expect(deletion).toContain("void coordinatorArtifactCleanup.catch(() => undefined)")
+    expect(deletion).not.toContain("forgetThreadAndDeleteArtifacts(threadId)")
   })
 
   it("keeps background subagent refreshes out of the foreground latest-wins scope", () => {

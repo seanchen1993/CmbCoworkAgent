@@ -148,8 +148,9 @@ export function registerNativeProjectSourceHandlers(
         }
         const contentGuard = () => {
           guard()
-          context.guard()
-          dependency?.assertCurrent()
+          // The dependency verifies the same project before and after its own source.
+          if (dependency) dependency.assertCurrent()
+          else context.guard()
           guard()
         }
         return withNativeConfigurationScope(

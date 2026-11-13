@@ -1,4 +1,5 @@
 import type { Message } from "@/types"
+import type { ChatMessageProjection } from "./chat-message-projection"
 
 const padTimePart = (value: number): string => String(value).padStart(2, "0")
 
@@ -86,4 +87,102 @@ export function buildMessageBubbleTimingMeta(messages: Message[]): {
   }
 
   return { assistantDurationMsById, userSendTimeLabelById }
+}
+
+interface TimingTurn {
+  userIndex: number
+  endIndex: number
+  assistantId: string | null
+  userTime: number | null
+  endTime: number | null
+}
+
+/** Historical turns remain stable while a streaming tail changes its body and end time.
+ * All retained times are values, never mutable Date or Message references.
+ */
+export function createMessageBubbleTimingProjector() {
+  let source: Message[] | undefined, structure = -1, content = -1
+  let result: ReturnType<typeof buildMessageBubbleTimingMeta> | undefined
+  let indices = new Map<string, number[]>()
+  let byIndex: Array<TimingTurn | undefined> = []
+  let userCandidates = new Map<string, TimingTurn[]>()
+  let assistantCandidates = new Map<string, TimingTurn[]>()
+
+  const rebuild = (projection: ChatMessageProjection) => {
+    source = projection.messages; structure = projection.structureVersion
+    result = buildMessageBubbleTimingMeta(source)
+    indices = new Map(); byIndex = []; userCandidates = new Map(); assistantCandidates = new Map()
+    const turns: TimingTurn[] = []
+    let turn: TimingTurn | undefined
+    for (let index = 0; index < source.length; index++) {
+      const message = source[index], occurrences = indices.get(message.id) ?? []
+      occurrences.push(index); indices.set(message.id, occurrences)
+      if (message.role === "user") {
+        turn = { userIndex: index, endIndex: index, assistantId: null,
+          userTime: getCreatedTime(message), endTime: null }
+        turns.push(turn)
+        const candidates = userCandidates.get(message.id) ?? []
+        candidates.push(turn); userCandidates.set(message.id, candidates)
+      }
+      if (turn) {
+        turn.endIndex = index
+        if (message.role === "assistant" && turn.assistantId === null) turn.assistantId = message.id
+        byIndex[index] = turn
+      }
+    }
+    for (const turn of turns) {
+      turn.endTime = getEndTime(source[turn.endIndex])
+      if (turn.assistantId !== null) {
+        const candidates = assistantCandidates.get(turn.assistantId) ?? []
+        candidates.push(turn); assistantCandidates.set(turn.assistantId, candidates)
+      }
+    }
+  }
+  return (projection: ChatMessageProjection): ReturnType<typeof buildMessageBubbleTimingMeta> => {
+    if (!result || source !== projection.messages || structure !== projection.structureVersion) {
+      rebuild(projection)
+      content = projection.contentVersion
+      return result!
+    }
+    if (content === projection.contentVersion) return result
+    content = projection.contentVersion
+    // A legacy/incomplete producer cannot silently present stale timing. Actual chat
+    // projections publish a fresh complete changed-slot list on every content revision.
+    if (!projection.changedMessages.length) { rebuild(projection); return result! }
+    const dirtyUsers = new Set<string>(), dirtyAssistants = new Set<string>()
+    for (const changed of projection.changedMessages) {
+      for (const index of indices.get(changed.id) ?? []) {
+        const turn = byIndex[index]
+        if (!turn || (index !== turn.userIndex && index !== turn.endIndex)) continue
+        const message = projection.messages[index]
+        if (index === turn.userIndex) {
+          turn.userTime = getCreatedTime(message)
+          dirtyUsers.add(message.id)
+        }
+        if (index === turn.endIndex) turn.endTime = getEndTime(message)
+        if (turn.assistantId !== null) dirtyAssistants.add(turn.assistantId)
+      }
+    }
+    let changed = false
+    const update = <T>(map: Map<string, T>, id: string, value: T | undefined) => {
+      if (value === undefined) { changed = map.delete(id) || changed; return }
+      if (map.get(id) !== value) { map.set(id, value); changed = true }
+    }
+    for (const id of dirtyUsers) {
+      let label: string | undefined
+      for (const turn of userCandidates.get(id) ?? []) {
+        if (turn.userTime !== null) label = formatMessageTimeLabel(turn.userTime) ?? label
+      }
+      update(result.userSendTimeLabelById, id, label)
+    }
+    for (const id of dirtyAssistants) {
+      let duration: number | undefined
+      for (const turn of assistantCandidates.get(id) ?? [])
+        if (turn.userTime !== null && turn.endTime !== null)
+          duration = Math.max(0, turn.endTime - turn.userTime)
+      update(result.assistantDurationMsById, id, duration)
+    }
+    if (changed) result = { ...result }
+    return result
+  }
 }

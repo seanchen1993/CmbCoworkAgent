@@ -1,4 +1,6 @@
 import type { PluginInstallMode, PluginInstallResult } from "../shared/plugin-install"
+import type { FunctionSiteReadArguments, FunctionSiteRenderArguments } from "../shared/mods/v2/display-read-protocol"
+import type { ThreadDirectoryChange } from "../shared/thread-directory-change"
 import type { PreparePluginStartUse } from "../shared/plugin-start-use"
 import type { ReadPluginFlowDefinition } from "../shared/plugin-flow-definition"
 import type { WindowPresentationBridge } from "../shared/window-presentation"
@@ -905,6 +907,10 @@ interface DashboardProjectModeAdapter {
   projectCount: number
   featureCount: number
   conversationCount: number
+  /** 所选范围内主 Agent 主动对话按非空 sapId 去重。 */
+  userCount: number
+  /** 插件名下跨版本去重的人数，不能累加各版本的 userCount。 */
+  allVersionsUserCount: number
   codeStats: DashboardCodeStats | null
   stageBuckets: DashboardStageBuckets
 }
@@ -1137,10 +1143,10 @@ interface CustomAPI {
     ): () => void
     siteMount(threadId: string, component: import("../shared/mods/v2/sites").FunctionUiSite, messageId?: string): Promise<string | null>
     siteMountOutcome(threadId: string, component: import("../shared/mods/v2/sites").FunctionUiSite, messageId?: string, expectedRequestId?: string): Promise<import("../shared/mods/v2/sites").FunctionSiteMountOutcome>
-    siteRead(threadId: string, component: import("../shared/mods/v2/sites").FunctionUiSite,
-      props: import("../shared/mods/types").ModObject, presentationId?: string, messageId?: string,
-      expectedRequestId?: string, ownerRequired?: boolean): Promise<import("../shared/mods/v2/sites").FunctionSiteReadOutcome>
-    siteRender(threadId: string, owner: string, props: import("../shared/mods/types").ModObject): Promise<import("../shared/mods/v2/ui").FunctionPaneSnapshot | null>
+    nextSiteReadId(): string
+    cancelSiteRead(readId: string): Promise<void>
+    siteRead(...args: FunctionSiteReadArguments): Promise<import("../shared/mods/v2/sites").FunctionSiteReadOutcome>
+    siteRender(...args: FunctionSiteRenderArguments): Promise<import("../shared/mods/v2/ui").FunctionPaneSnapshot | null>
     siteUnmount(threadId: string, owner: string): Promise<void>
     siteAct(threadId: string, owner: string, action: import("../shared/mods/v2/ui").FunctionUiAction): Promise<void | import("../shared/mods/v2/ui").FunctionFocusResult>
     focusAck(
@@ -1443,7 +1449,7 @@ interface CustomAPI {
       message: string,
       context?: { threadId: string; skillName?: string; skillDescription?: string }
     ) => Promise<string>
-    onThreadsChanged: (callback: () => void) => () => void
+    onThreadsChanged: (callback: (change?: ThreadDirectoryChange) => void) => () => void
   }
   models: {
     getCatalog: () => Promise<{

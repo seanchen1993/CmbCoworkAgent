@@ -15,11 +15,18 @@ const file = ts.createSourceFile(
 )
 let enabled: ts.Expression | undefined
 let visible: ts.Expression | undefined
+function isClawSidebar(expression: ts.Expression): boolean {
+  while (ts.isParenthesizedExpression(expression)) expression = expression.expression
+  return (
+    (ts.isJsxElement(expression) &&
+      expression.openingElement.tagName.getText(file) === "ClawSidebar") ||
+    (ts.isJsxSelfClosingElement(expression) && expression.tagName.getText(file) === "ClawSidebar")
+  )
+}
 function visit(node: ts.Node) {
   if (ts.isCallExpression(node) && node.expression.getText(file) === "useChatFlow")
     enabled = node.arguments[2]
-  if (ts.isConditionalExpression(node) && node.whenTrue.getText(file).startsWith("<ClawSidebar"))
-    visible = node.condition
+  if (ts.isConditionalExpression(node) && isClawSidebar(node.whenTrue)) visible = node.condition
   ts.forEachChild(node, visit)
 }
 visit(file)

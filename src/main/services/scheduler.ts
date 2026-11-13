@@ -22,8 +22,11 @@ import { purgeThreadCheckpointArtifacts } from "../storage"
 import {
   createThread as dbCreateThread,
   deleteThread as dbDeleteThread,
+  getThreadRuntimeScope,
   upsertThreadMessages
 } from "../db"
+import { captureThreadDirectoryChange } from "./thread-directory-change"
+import type { ThreadDirectoryChange } from "../../shared/thread-directory-change"
 import { StreamConverter } from "../agent/stream-converter"
 import { notifyAlways, stripThink } from "./notify"
 import { showPetCompletedTaskNotice } from "../pet"
@@ -76,9 +79,9 @@ function recordRun(
   })
 }
 
-function notifyRenderer(channel: string): void {
+function notifyRenderer(channel: string, change?: ThreadDirectoryChange): void {
   for (const win of BrowserWindow.getAllWindows()) {
-    win.webContents.send(channel)
+    win.webContents.send(channel, ...(change ? [change] : []))
   }
 }
 
@@ -228,7 +231,9 @@ async function executeManagedInboxTask(task: ScheduledTask): Promise<void> {
     runningTasks.delete(task.id)
     activeAbortControllers.delete(task.id)
     notifyRenderer("scheduledTasks:changed")
-    notifyRenderer("threads:changed")
+    const inboxThreadId = task.imDeliveryContext!.inboxThreadId
+    notifyRenderer("threads:changed", captureThreadDirectoryChange(inboxThreadId,
+      "transcript", getThreadRuntimeScope(inboxThreadId)))
   }
 }
 
@@ -300,9 +305,9 @@ async function executeTask(taskId: string): Promise<void> {
     const now = new Date()
     const timeTag = `${String(now.getMonth() + 1).padStart(2, "0")}/${String(now.getDate()).padStart(2, "0")} ${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`
     const title = `[定时] ${task.name} · ${timeTag}`
-    dbCreateThread(threadId, { workspacePath, title, scheduledTaskId: task.id })
+    const createdThread = dbCreateThread(threadId, { workspacePath, title, scheduledTaskId: task.id })
     threadCreated = true
-    notifyRenderer("threads:changed")
+    notifyRenderer("threads:changed", captureThreadDirectoryChange(threadId, "created", createdThread))
 
     broadcastToChannel(channel, { type: "started" })
 
@@ -559,9 +564,11 @@ async function executeTask(taskId: string): Promise<void> {
       let rowDeleted = false
       try {
         const previewScopeKeys = collectTrustedToolFilePreviewScopeKeysForThread(threadId)
+        const deletedChange = captureThreadDirectoryChange(threadId, "deleted", getThreadRuntimeScope(threadId))
         dbDeleteThread(threadId)
         clearTrustedToolFilePreviewSourcesForThread(threadId, previewScopeKeys)
         rowDeleted = true
+        notifyRenderer("threads:changed", deletedChange)
       } catch {
         // ignore cleanup errors
       }
@@ -619,7 +626,8 @@ async function executeTask(taskId: string): Promise<void> {
     }
 
     notifyRenderer("scheduledTasks:changed")
-    notifyRenderer("threads:changed")
+    const thread = getThreadRuntimeScope(threadId)
+    if (thread) notifyRenderer("threads:changed", captureThreadDirectoryChange(threadId, "transcript", thread))
   }
 }
 

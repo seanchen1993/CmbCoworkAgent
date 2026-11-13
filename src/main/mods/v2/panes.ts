@@ -79,7 +79,7 @@ export interface PaneHost {
   hasEventHooks?(event: string): boolean
   assertLive(): void
   changed(scope?: ModUiChangeScope): void
-  publish(value: ModJson): Promise<ModJson>
+  publish(value: ModJson, signal?: AbortSignal): Promise<ModJson>
   /** Native slot identity after this caller's complete synchronous lifecycle fence. */
   assertSiteCurrent?(pane: FunctionPaneSnapshot): void
   site?(pane: FunctionPaneSnapshot): { component: string; props: ModObject; requestId?: string }
@@ -485,8 +485,10 @@ export class FunctionPanes {
   }
 
   /** Each native read freezes its starting inventory before drawing or retiring any callback. */
-  snapshot(select?: (plugin: string, id: string) => boolean): Promise<FunctionPaneSnapshot[]> {
+  snapshot(select?: (plugin: string, id: string) => boolean,
+    signal?: AbortSignal): Promise<FunctionPaneSnapshot[]> {
     return this.enqueue(async () => {
+      signal?.throwIfAborted()
       type Candidate = {
         pane: Pane
         epoch: object
@@ -507,6 +509,7 @@ export class FunctionPanes {
       const candidates: Candidate[] = []
       let committed = false
       const assertCurrent = (candidate: Candidate): void => {
+        signal?.throwIfAborted()
         this.host.assertLive()
         if (this.closed || this.panes.get(candidate.pane.key) !== candidate.pane ||
           candidate.pane.faultEpoch !== candidate.epoch ||
@@ -561,7 +564,7 @@ export class FunctionPanes {
             this.active.set(controller, pane.key)
             const render = () => this.host.dispatch("ui.render", input, {
               generation: candidate.generation,
-              signal: controller.signal,
+              signal: signal ? AbortSignal.any([controller.signal, signal]) : controller.signal,
               core: async (received) => input.component === "Placed"
                 ? { type: "Box", props: {}, children: [] } : candidate.drawing.keep(received)
             })
@@ -586,7 +589,7 @@ export class FunctionPanes {
           candidate.callbackTree ??= pane.callbackTree ?? candidate.tree
           candidate.drawing.beginPublication()
           // Protect actual input even when the guest never called next or uses an unknown ref.
-          await candidate.drawing.protect(candidate.tree, (value) => this.host.publish(value))
+          await candidate.drawing.protect(candidate.tree, (value) => this.host.publish(value, signal))
           assertCurrent(candidate)
         }
         const snapshots = candidates.map(({ pane, generation, tree, fresh }) =>
@@ -604,7 +607,7 @@ export class FunctionPanes {
             ...(!fresh && this.scroll.current(pane.key) ? { imperativeScroll: this.scroll.current(pane.key) } : {})
           })) as unknown as FunctionPaneSnapshot
         )
-        const published = await this.host.publish(snapshots as unknown as ModJson)
+        const published = await this.host.publish(snapshots as unknown as ModJson, signal)
         this.host.assertLive()
         if (!Array.isArray(published) || published.length !== snapshots.length)
           throw new ModFunctionError("MODS_UI_PUBLICATION")
@@ -620,7 +623,7 @@ export class FunctionPanes {
             throw new ModFunctionError("MODS_UI_PUBLICATION")
           const safeTree = checkedTree(result.tree, this.host.component ?? "Pane")
           const nativeContent = await candidate.drawing.protect(safeTree,
-            (value) => this.host.publish(value))
+            (value) => this.host.publish(value, signal))
           assertCurrent(candidate)
           candidate.tree = safeTree
           candidate.visible = { ...result, tree: safeTree, nativeContent } as unknown as FunctionPaneSnapshot

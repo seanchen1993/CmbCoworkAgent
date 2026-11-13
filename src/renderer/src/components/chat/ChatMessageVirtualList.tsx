@@ -119,10 +119,9 @@ export interface ChatMessageVirtualListProps {
   functionTurnNotices?: readonly FunctionTurnNotice[]
   messageAttempts?: MessageAttempts
   searchReveal?: ChatSearchReveal | null
-  messages: Message[]
+  projection: import("../../lib/chat-message-projection").ChatMessageProjectionSnapshot
   visibleMessageIndexes: readonly number[]
   lastUserMessageIndex: number
-  contentVersion: number
   historyHasMore: boolean
   historyPageLoading: boolean
   historyRemainingCount: number
@@ -380,10 +379,9 @@ export const ChatMessageVirtualList = React.memo(function ChatMessageVirtualList
   functionPlacedRows,
   functionTurnNotices = EMPTY_FUNCTION_NOTICES,
   messageAttempts,
-  messages,
+  projection,
   visibleMessageIndexes,
   lastUserMessageIndex,
-  contentVersion,
   historyHasMore,
   historyPageLoading,
   historyRemainingCount,
@@ -425,13 +423,14 @@ export const ChatMessageVirtualList = React.memo(function ChatMessageVirtualList
   hasPendingAnchorLayout,
   footer
 }: ChatMessageVirtualListProps): React.JSX.Element | null {
+  const { messages, contentVersion, structureVersion } = projection
   const virtualRows = useMemo(() => visibleMessageIndexes.map(messageIndex => {
     const message = messages[messageIndex]
     const identity = message ? JSON.stringify([message.role, message.id, message.tool_call_id ?? "",
       message.provider_source_id ?? "", message.provider_occurrence ?? ""])
       : `missing:${messageIndex}`
     return { identity, messageIndex }
-  }), [messages, visibleMessageIndexes])
+  }), [messages, structureVersion, visibleMessageIndexes])
   const virtualIdentities = useMemo(() => virtualRows.map(row => row.identity), [virtualRows])
   const virtualPositionByIdentity = useMemo(() =>
     new Map(virtualRows.map((row, index) => [row.identity, index])), [virtualRows])
@@ -493,7 +492,7 @@ export const ChatMessageVirtualList = React.memo(function ChatMessageVirtualList
       readLease: readDetachedAnchorLease,
       correctPendingAnchorLayout,
       hasPendingAnchorLayout,
-      acquireScrollAnchor: () => acquireChatExternalScrollAnchor(handle),
+      acquireScrollAnchor: () => acquireChatExternalScrollAnchor(handle, customScrollParent, "detached"),
       prepareCorrection: () => {
         handle?.refreshItemSizes()
         handle?.cancelScrollToIndex()
@@ -848,7 +847,7 @@ export const ChatMessageVirtualList = React.memo(function ChatMessageVirtualList
         totalListHeightChanged={onContentHeightChanged}
         context={{ header: <>{historyHeader}<FunctionPlacedRows threadId={threadId} rows={placedRows.start} /></>, footer: footerContent,
           windowKey: virtualWindow.key, firstItemIndex: virtualWindow.firstItemIndex,
-          scrollParent: customScrollParent }}
+          scrollParent: customScrollParent, virtuosoRef }}
         components={chatVirtualListComponents}
         itemContent={(_absoluteIndex, row) => {
           // Virtuoso can expose its previous measured row during the prepend transaction.

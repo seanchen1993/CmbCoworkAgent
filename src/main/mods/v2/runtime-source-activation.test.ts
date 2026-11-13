@@ -198,6 +198,12 @@ it("uses the real native identity, one proved compile and no grant or guest duri
   expect(f.manager.getRuntimeSourceFacts(f.input)).toEqual(facts)
   expect(f.loads()).toBe(0)
   expect(f.store.getGrant(f.workspace, "function:actual-native-id")).toBeNull()
+  let pathReads = 0
+  const replaced = { ...f.input, plugin: { ...f.input.plugin,
+    get path() { return ++pathReads === 2 ? f.installed : f.retained }
+  } }
+  expect(() => f.manager.getRuntimeSourceFacts(replaced)).toThrow("MODS_CONFIG_SOURCE_CHANGED")
+  expect(pathReads).toBe(2)
   writeFileSync(join(f.retained, "mods/main.ts"), "export function register(){}")
   expect(() => f.manager.getRuntimeSourceFacts(f.input)).toThrow("MODS_CONFIG_SOURCE_CHANGED")
 })

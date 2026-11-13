@@ -126,8 +126,13 @@ export class ThreadMessageHydrationClient {
     if (response.ok) {
       try {
         const fingerprint = canonicalDisplayValueDigest(response.page)
+        // Keep the original first-occurrence lookup semantics without rescanning
+        // the bounded page for each canonical witness on Electron main.
+        const messagesById = new Map<string, ThreadMessagesPage["messages"][number]>()
+        for (const message of response.page.messages)
+          if (!messagesById.has(message.id)) messagesById.set(message.id, message)
         for (const witness of response.canonicalWitnesses ?? []) {
-          const message = response.page.messages.find(message => message.id === witness.messageId)
+          const message = messagesById.get(witness.messageId)
           if (witness.presentation && witness.presentation.kind !== "visible") {
             if (message || witness.display) throw Error("MODS_CONVERSATION_DISPLAY_SOURCE_INVALID")
             continue

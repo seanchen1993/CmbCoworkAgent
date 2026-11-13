@@ -32,10 +32,8 @@ declare global {
 }
 
 const root = resolve(__dirname, "..")
-const artifacts = join(root, "output", "thread-history-revisit-browser", String(Date.now()))
-mkdirSync(artifacts, { recursive: true })
 
-const storeModule = `
+export const storeModule = `
 import { useSyncExternalStore } from "react"
 const listeners = new Set()
 let state = {
@@ -71,7 +69,13 @@ state.patchThreadMetadata = async (id, patch) => {
 }
 state.setRightModule = value => publish({ rightModule: value })
 state.setRightPanelCollapsed = value => publish({ rightPanelCollapsed: value })
-state.addThreadSummary = thread => publish({ threads: [...state.threads, thread] })
+state.addThreadSummary = thread => publish({ threads: state.threads.some(row => row.thread_id === thread.thread_id)
+  ? state.threads.map(row => row.thread_id === thread.thread_id ? thread : row) : [...state.threads, thread] })
+state.syncThreadWorkspaceSummary = (id, workspacePath) => {
+  const thread = state.threads.find(row => row.thread_id === id)
+  if (thread && thread.metadata?.workspacePath !== workspacePath) publish({ threads: state.threads.map(row =>
+    row.thread_id === id ? { ...row, metadata: { ...row.metadata, workspacePath } } : row) })
+}
 state.setCurrentThreadId = id => publish({ currentThreadId: id })
 export const useAppStore = selector => selector(useSyncExternalStore(subscribe, () => state))
 useAppStore.getState = () => state
@@ -81,8 +85,9 @@ export const isThreadDeletionPending = () => false
 export const isThreadRetired = () => false
 window.fixture.readThread = id => state.threads.find(row => row.thread_id === id) ?? null
 `
-const bootstrap = `
+export const bootstrap = `
 const listeners = new Set()
+const directoryListeners = new Set()
 const noopListener = () => () => {}
 const models = [
   { id: "custom:a", name: "Model A", source: "custom", model: "intent-a",
@@ -120,6 +125,7 @@ window.fixture = {
     window.fixture.holdDetails = false
   },
   configurationListeners: listeners,
+  emitDirectory: input => { for (const callback of directoryListeners) callback(input) },
   notifyConfiguration: () => { for (const callback of listeners) callback() }
 }
 const emptyPage = () => ({ messages: [], beforeOrdinal: null, beforeMessageId: null,
@@ -137,6 +143,7 @@ window.api = {
     setActiveThread: async () => ({ success: true, restarted: false })
   },
   threads: {
+    onThreadsChanged: callback => { directoryListeners.add(callback); return () => directoryListeners.delete(callback) },
     get: async id => {
       window.fixture.leafReads.push("threads.get")
       const thread = structuredClone(window.fixture.readThread(id))
@@ -145,9 +152,15 @@ window.api = {
     },
     getMessagesPage: async (id, options) => {
       window.fixture.pageReads.push({id, older: !!options?.beforeMessageId})
-      if (id !== "intent-a") return emptyPage()
+      if (window.fixture.pageOverride) return window.fixture.pageOverride(id, options)
+      const row = window.fixture.readThread(id)
+      const sourceScope = row ? { threadId: id, incarnation: {
+        token: row.metadata?.cmb_thread_incarnation ?? null,
+        legacyCreatedAt: new Date(row.created_at).getTime() },
+        ...(row.metadata?.workspacePath ? { workspacePath: row.metadata.workspacePath } : {}) } : undefined
+      if (id !== "intent-a") return { ...emptyPage(), sourceScope }
       const older = !!options?.beforeMessageId
-      return {...emptyPage(), messages: (older ? [0,1] : [2,3]).map(index => ({
+      return {...emptyPage(), sourceScope, messages: (older ? [0,1] : [2,3]).map(index => ({
         id: "message-"+index, role: index % 2 ? "assistant" : "user",
         content: "durable message "+index, created_at: new Date(1000+index), ordinal:index
       })), total:4, hasMore:!older, hasVisibleMessages:true,
@@ -213,7 +226,7 @@ window.api = {
   }
 }
 `
-const entry = `
+export const entry = `
 import React from "react"
 import { createRoot } from "react-dom/client"
 import { ThreadProvider, useCurrentThread, useThreadContext } from "@/lib/thread-context"
@@ -240,6 +253,8 @@ app.render(<ThreadProvider><Probe/></ThreadProvider>)
 `
 
 async function main() {
+  const artifacts = join(root, "output", "thread-history-revisit-browser", String(Date.now()))
+  mkdirSync(artifacts, { recursive: true })
   const built = await build({
     stdin: { contents: entry, resolveDir: root, loader: "tsx" },
     bundle: true,
@@ -381,7 +396,9 @@ async function main() {
     console.log(artifacts)
   }
 }
-main().catch((error) => {
-  console.error(error)
-  process.exitCode = 1
-})
+if (resolve(process.argv[1] ?? "") === resolve(__filename)) {
+  main().catch((error) => {
+    console.error(error)
+    process.exitCode = 1
+  })
+}

@@ -17,6 +17,7 @@ export interface ThreadMessageWindowIntentCoordinator {
   finish(token: ThreadMessageWindowIntentToken): boolean
   cancel(threadId: string, expectedKind?: ThreadMessageWindowIntentKind): boolean
   activeKind(threadId: string): ThreadMessageWindowIntentKind | null
+  subscribe(listener: () => void): () => void
 }
 
 /**
@@ -39,6 +40,8 @@ export function canCancelThreadMessageWindowIntent(
 export function createThreadMessageWindowIntentCoordinator(): ThreadMessageWindowIntentCoordinator {
   const sequences = new Map<string, number>()
   const activeKinds = new Map<string, ThreadMessageWindowIntentKind>()
+  const listeners = new Set<() => void>()
+  const changed = () => { for (const listener of listeners) listener() }
 
   const advance = (threadId: string): number => {
     const sequence = (sequences.get(threadId) ?? 0) + 1
@@ -54,12 +57,14 @@ export function createThreadMessageWindowIntentCoordinator(): ThreadMessageWindo
     begin(threadId, kind) {
       const token = { threadId, sequence: advance(threadId), kind }
       activeKinds.set(threadId, kind)
+      changed()
       return token
     },
     isCurrent,
     finish(token) {
       if (!isCurrent(token)) return false
       activeKinds.delete(token.threadId)
+      changed()
       return true
     },
     cancel(threadId, expectedKind) {
@@ -67,10 +72,15 @@ export function createThreadMessageWindowIntentCoordinator(): ThreadMessageWindo
       if (!activeKind || (expectedKind && activeKind !== expectedKind)) return false
       advance(threadId)
       activeKinds.delete(threadId)
+      changed()
       return true
     },
     activeKind(threadId) {
       return activeKinds.get(threadId) ?? null
+    },
+    subscribe(listener) {
+      listeners.add(listener)
+      return () => { listeners.delete(listener) }
     }
   }
 }

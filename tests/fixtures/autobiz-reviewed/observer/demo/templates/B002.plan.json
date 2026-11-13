@@ -1,0 +1,72 @@
+{
+  "featureId": "alpha",
+  "batchId": "B002",
+  "title": "next",
+  "executionLane": "backend",
+  "status": "todo",
+  "taskCount": 1,
+  "completedTaskCount": 0,
+  "completionEvidenceIds": [],
+  "deliveryKind": "single_task",
+  "startedAt": null,
+  "completedAt": null,
+  "tasks": [
+    {
+      "id": "T002",
+      "title": "deliver next behavior",
+      "goal": "deliver observable behavior",
+      "status": "todo",
+      "deps": [
+        "T001"
+      ],
+      "uiRequired": false,
+      "workspaceRef": "default",
+      "scope": {
+        "modules": [],
+        "entrypoints": [],
+        "pages": [],
+        "dataObjects": []
+      },
+      "implementationPoints": [
+        "update behavior",
+        "cover boundary"
+      ],
+      "acceptanceCriteria": [
+        {
+          "id": "AC-T002-01",
+          "text": "next behavior is observable",
+          "scenarioRefs": [
+            "specs/next/spec.md#SCN-002"
+          ]
+        }
+      ],
+      "validationBoundary": "public behavior seam",
+      "nonGoals": [
+        "do not change unrelated behavior"
+      ],
+      "specRefs": [
+        "specs/next/spec.md#REQ-002",
+        "specs/next/spec.md#SCN-002"
+      ],
+      "designRefs": [],
+      "apiIds": [],
+      "dataIds": [],
+      "decisionIds": [
+        "D-001"
+      ],
+      "completionPolicy": "all_required_validations_pass",
+      "expectedFiles": [],
+      "evidenceIds": [],
+      "completionEvidenceIds": [],
+      "latestPassEvidenceId": null,
+      "blockers": [],
+      "implementationEvidenceIds": [],
+      "latestImplementationEvidenceId": null,
+      "validationEvidenceIds": [],
+      "implementationRevision": 0
+    }
+  ],
+  "taskIds": [
+    "T002"
+  ]
+}

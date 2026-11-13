@@ -14,6 +14,8 @@ const mocks = vi.hoisted(() => {
   return {
     config,
     sentChannels: [] as string[],
+    notifications: [] as Array<{ channel: string; args: unknown[] }>,
+    getThreadRuntimeScope: vi.fn<() => { created_at: number; metadata: string } | null>(() => null),
     saveConfig: vi.fn((updates: Record<string, unknown>) => Object.assign(config, updates)),
     resetConfig: vi.fn(() => Object.assign(config, { enabled: false, workDir: null })),
     resetSession: vi.fn(),
@@ -22,7 +24,7 @@ const mocks = vi.hoisted(() => {
     running: false,
     stop: vi.fn(),
     restart: vi.fn(),
-    beginWorkspaceReset: vi.fn(() => mocks.stop()),
+    beginWorkspaceReset: vi.fn(() => { mocks.stop(); return mocks.endWorkspaceReset }),
     endWorkspaceReset: vi.fn()
   }
 })
@@ -30,7 +32,10 @@ const mocks = vi.hoisted(() => {
 vi.mock("electron", () => ({
   BrowserWindow: {
     getAllWindows: () => [
-      { webContents: { send: (channel: string) => mocks.sentChannels.push(channel) } }
+      { webContents: { send: (channel: string, ...args: unknown[]) => {
+        mocks.sentChannels.push(channel)
+        mocks.notifications.push({ channel, args })
+      } } }
     ]
   }
 }))
@@ -51,8 +56,10 @@ vi.mock("../services/heartbeat", () => ({
   beginHeartbeatWorkspaceReset: mocks.beginWorkspaceReset
 }))
 vi.mock("../services/heartbeat-session", () => ({
+  HEARTBEAT_THREAD_ID: "heartbeat",
   resetHeartbeatSessionForWorkspaceChange: mocks.resetSession
 }))
+vi.mock("../db", () => ({ getThreadRuntimeScope: mocks.getThreadRuntimeScope }))
 vi.mock("../agent/context-history-path", () => ({
   canonicalizeWorkspacePath: (value: string) =>
     Promise.resolve(value.replace("/workspace/link", "/workspace/old").replace(/\/$/, ""))
@@ -74,8 +81,10 @@ describe("heartbeat config workspace boundary", () => {
   beforeEach(() => {
     Object.assign(mocks.config, { enabled: true, workDir: "/workspace/old" })
     mocks.sentChannels.length = 0
+    mocks.notifications.length = 0
     mocks.running = false
     vi.clearAllMocks()
+    mocks.getThreadRuntimeScope.mockReturnValue(null)
     mocks.resetSession.mockResolvedValue(undefined)
     mocks.runNow.mockResolvedValue(undefined)
     mocks.beginWorkspaceReset.mockImplementation(() => {
@@ -99,6 +108,7 @@ describe("heartbeat config workspace boundary", () => {
     expect(mocks.restart).toHaveBeenCalledTimes(1)
     expect(mocks.sentChannels).toContain("threads:changed")
     expect(mocks.sentChannels).toContain("heartbeat:changed")
+    expect(mocks.notifications.find(value => value.channel === "threads:changed")?.args).toEqual([])
     expect(mocks.resetSession.mock.invocationCallOrder[0]).toBeLessThan(
       mocks.saveConfig.mock.invocationCallOrder[0]
     )
@@ -111,6 +121,23 @@ describe("heartbeat config workspace boundary", () => {
     expect(mocks.resetSession).not.toHaveBeenCalled()
     expect(mocks.saveConfig).toHaveBeenCalled()
     expect(mocks.sentChannels).not.toContain("threads:changed")
+  })
+
+  it("publishes the original heartbeat incarnation only after its successful reset", async () => {
+    const row = { created_at: 7, metadata: JSON.stringify({ workspacePath: "/workspace/old",
+      cmb_thread_incarnation: "old-heartbeat" }) }
+    mocks.getThreadRuntimeScope.mockReturnValue(row)
+    mocks.resetSession.mockImplementationOnce(async () => {
+      mocks.getThreadRuntimeScope.mockReturnValue(null)
+      expect(mocks.notifications).toEqual([])
+    })
+    await handlers().get("heartbeat:saveConfig")!(undefined, { workDir: "/workspace/new" })
+    expect(mocks.getThreadRuntimeScope).toHaveBeenCalledExactlyOnceWith("heartbeat")
+    expect(mocks.notifications.find(value => value.channel === "threads:changed")).toEqual({
+      channel: "threads:changed", args: [{ threadId: "heartbeat", kind: "deleted",
+        workspacePath: "/workspace/old", incarnation: { token: "old-heartbeat", legacyCreatedAt: 7 } }]
+    })
+    expect(mocks.endWorkspaceReset).toHaveBeenCalledTimes(1)
   })
 
   it("rejects a workspace switch while heartbeat is running", async () => {

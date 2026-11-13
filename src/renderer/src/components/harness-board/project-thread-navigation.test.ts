@@ -84,3 +84,10 @@ it("rejects another operation's thread instead of opening an ordinary writable c
   expect(add).not.toHaveBeenCalled()
   expect(select).not.toHaveBeenCalled()
 })
+
+it("does not select a thread when its captured directory publisher rejects the reply", async () => {
+  const select = vi.fn(async () => {})
+  await navigateProjectThread(target, { read: async () => thread, isCurrent: () => true,
+    isRetired: () => false, add: () => false, select })
+  expect(select).not.toHaveBeenCalled()
+})

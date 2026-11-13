@@ -1,5 +1,6 @@
 /** Host-only lifecycle fence. It does not execute, retry, cancel or reconcile any action. */
-export const FUNCTION_DISPLAY_PROTOCOL = "mods.display/v1" as const
+import { FUNCTION_DISPLAY_PROTOCOL } from "../../../shared/mods/v2/display-read-protocol"
+export { FUNCTION_DISPLAY_PROTOCOL }
 /** Includes same-key followers, not only unique producer jobs. Released on physical settlement. */
 export const FUNCTION_DISPLAY_MAX_PENDING = 256
 export type HostDisplayPath = "projection-v1" | "legacy"

@@ -1,10 +1,11 @@
 import { createHash } from "node:crypto"
 import { spawnSync } from "node:child_process"
 import { readFileSync } from "node:fs"
-import { cp, lstat, mkdir, mkdtemp, writeFile } from "node:fs/promises"
+import { chmod, cp, lstat, mkdir, mkdtemp, rm, unlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { join, resolve } from "node:path"
-import { beforeAll, expect, it } from "vitest"
+import { basename, dirname, join } from "node:path"
+import { afterAll, beforeAll, expect, it } from "vitest"
+import { createAutobizSourceFixture } from "./autobiz-source-fixture.test-helper"
 import {
   prepareAutobizUtestLiteralSource,
   AUTOBIZ_UTEST_LITERAL_FROM_SHA256,
@@ -20,7 +21,8 @@ import { isReviewedAutobizKernelIdentity } from "./autobiz-required-hooks"
 import previous from "./autobiz-business-kernel-spec-role-reviewed.json"
 import reviewed from "./autobiz-business-kernel-utest-literal-reviewed.json"
 
-const source = resolve("output/deliveries/mods-creator-spec-role-20261017-v103/Mods来源/AutoBiz")
+let source: string
+let fixture: Awaited<ReturnType<typeof createAutobizSourceFixture>>
 const hash = (bytes: Buffer | string) => createHash("sha256").update(bytes).digest("hex")
 let root: string, output: string, description: string
 let receipt: Awaited<ReturnType<typeof prepareAutobizUtestLiteralSource>>
@@ -42,6 +44,8 @@ const payload = (description: string, subagent = "test-engineer-autodev") => ({
 })
 
 beforeAll(async () => {
+  fixture = await createAutobizSourceFixture()
+  source = fixture.spec
   root = await mkdtemp(join(tmpdir(), "autobiz-utest-literal-"))
   output = join(root, "source-1.0.4")
   receipt = await prepareAutobizUtestLiteralSource(output, source)
@@ -92,6 +96,15 @@ beforeAll(async () => {
   expect(router.status, router.stderr).toBe(0)
   description = JSON.parse(router.stdout)
 }, 120000)
+
+afterAll(async () => {
+  if (root) {
+    expect(dirname(root)).toBe(tmpdir())
+    expect(basename(root)).toMatch(/^autobiz-utest-literal-/)
+    await rm(root, { recursive: true, force: true })
+  }
+  await fixture?.close()
+})
 
 it("pins the complete old profile with only the reviewed Hook SHA and version delta", () => {
   const restored = structuredClone(reviewed)
@@ -214,3 +227,27 @@ it("admits actual assembly under the new exact profile and rejects self-rehashed
   lockFile.bytes = Buffer.from(JSON.stringify(lock))
   expect(isReviewedAutobizProtocol({ files })).toBe(false)
 }, 30000)
+
+it.each(["extra", "missing", "metadata", "excluded", "mode"] as const)(
+  "rejects an unreviewed curated source with %s changes without allocating output", async variant => {
+    const unknown = join(fixture.root, "unknown-" + variant)
+    const rejected = join(fixture.root, "rejected-" + variant)
+    await cp(source, unknown, { recursive: true })
+    const modeFile = join(unknown, "plugin.json")
+    try {
+      if (variant === "extra") await writeFile(join(unknown, "unexpected.txt"), "unreviewed")
+      if (variant === "missing") await unlink(join(unknown, "agents/analyst.md"))
+      if (variant === "metadata") await writeFile(modeFile, readFileSync(modeFile, "utf8") + " ")
+      if (variant === "excluded") await mkdir(join(unknown, ".git"))
+      if (variant === "mode") await chmod(modeFile, 0o444)
+      const before = (await snapshotDerivationSource(unknown)).digest
+      await expect(prepareAutobizUtestLiteralSource(rejected, unknown))
+        .rejects.toThrow("Exact reviewed 1.0.3 source bytes required")
+      await expect(lstat(rejected)).rejects.toMatchObject({ code: "ENOENT" })
+      await expect(lstat(rejected + ".receipt.json")).rejects.toMatchObject({ code: "ENOENT" })
+      expect((await snapshotDerivationSource(unknown)).digest).toBe(before)
+    } finally {
+      if (variant === "mode") await chmod(modeFile, 0o666)
+    }
+  }
+)

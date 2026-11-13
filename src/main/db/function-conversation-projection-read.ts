@@ -228,6 +228,7 @@ export function findFunctionConversationProjectionMarkers(db: NativeSqliteAdapte
   const selected = text(threadId)
   const ids = [...new Set(candidates.filter(id => id !== "").map(id => text(id)))]
   const found = new Set<string>(), sources: string[] = []
+  if (ids.length === 0) return found
   if (hasProjectionMarkerColumn(db)) sources.push(`SELECT p.message_id AS uuid FROM thread_messages p
     JOIN wanted w ON w.uuid=p.message_id
     WHERE p.thread_id=(SELECT thread_id FROM selected) AND p.function_row_json IS NOT NULL`)

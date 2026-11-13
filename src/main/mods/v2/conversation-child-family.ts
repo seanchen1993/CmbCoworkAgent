@@ -23,6 +23,9 @@ import { readFunctionConversationSharedFamilySourcePair,
   type FunctionConversationSharedFamilySourcePair } from "./conversation-shared-source-current"
 import { readFunctionConversationNativeParentCurrent } from "./conversation-coordinator"
 
+const originalFamilyRestoreRead = readFunctionConversationSharedRestore
+const deferredRestoreDescriptor = Object.getOwnPropertyDescriptor, deferredRestoreIsProxy = types.isProxy
+
 const parentBrand = Symbol("function-conversation-child-parent")
 const childBrand = Symbol("function-conversation-child-factory")
 const sharedBrand = Symbol("function-conversation-shared-child-factory")
@@ -148,6 +151,7 @@ interface SharedFamilyExecution {
   readonly current: () => void
   readonly destinationCurrent: () => void
   plan?: Readonly<{ assertCurrent(): void; assertDataCurrent(): void
+    readonly pendingRestore?: FunctionConversationSharedRestore
     assertDestinationData(row: ThreadIncarnationRow | null): void }>
   reading: boolean
   failed: boolean
@@ -438,11 +442,18 @@ export class FunctionConversationChildFamilies<T extends object> {
         plan.assertDataCurrent()
       }
       const { input, parent } = child, authority = input.authority
+      const restoreField = plan && !deferredRestoreIsProxy(input)
+        ? deferredRestoreDescriptor(input, "restore") : undefined
+      const pendingRestore = restoreField && "value" in restoreField ? restoreField.value : undefined
+      // No result or mutation is published before the complete original Restore tail below.
+      const deferredRead = pendingRestore !== undefined && plan?.pendingRestore === pendingRestore &&
+        readFunctionConversationSharedRestore === originalFamilyRestoreRead
+        ? originalFamilyRestoreRead : undefined
       if (!child.live || this.sharedAuthorities.get(authority) !== child)
         fail("MODS_CONVERSATION_TARGET_CLOSED")
       child.signal.throwIfAborted()
       parent.assertCurrent()
-      if (plan) plan.assertCurrent()
+      if (plan) { if (!deferredRead) plan.assertCurrent() }
       else { input.assertCurrent(); input.destination.assertCurrent() }
       authority.assertLive()
       if (authority.agentId === "main" || authority.workspace !== parent.target.workspace ||
@@ -453,7 +464,17 @@ export class FunctionConversationChildFamilies<T extends object> {
           readFunctionConversationThreadIdentityCurrent(getDb(), input.destination.threadId),
           input.destination.incarnation)) fail("MODS_CONVERSATION_AUTHORITY_CHANGED")
       const row = readFunctionConversationThreadIdentityCurrent(getDb(), input.destination.threadId)
-      const restored = input.restore ? readFunctionConversationSharedRestore(input.restore, {
+      if (deferredRead) {
+        const current = deferredRestoreDescriptor(input, "restore")
+        if (!current || !("value" in current) || current.value !== pendingRestore ||
+          current.writable !== restoreField!.writable || current.enumerable !== restoreField!.enumerable ||
+          current.configurable !== restoreField!.configurable) fail()
+      }
+      const restored = deferredRead ? deferredRead(pendingRestore, {
+        authority, invocation: input.invocation, parent: parent.target,
+        destinationThreadId: input.destination.threadId,
+        destinationIncarnation: input.destination.incarnation }) :
+        input.restore ? readFunctionConversationSharedRestore(input.restore, {
         authority, invocation: input.invocation, parent: parent.target,
         destinationThreadId: input.destination.threadId,
         destinationIncarnation: input.destination.incarnation }) : undefined

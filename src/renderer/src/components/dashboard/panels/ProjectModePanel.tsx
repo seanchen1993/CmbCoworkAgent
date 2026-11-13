@@ -2765,7 +2765,7 @@ function mergeStageBuckets(items: DashboardStageBuckets[]): DashboardStageBucket
   }
 }
 
-/** 按插件名聚合：累加项目/特性/对话数，合并代码采纳明细与流程阶段三桶。 */
+/** 按插件名聚合：人数使用服务端跨版本去重值，其余指标累加或合并。 */
 function aggregateAdaptersByName(
   adapters: DashboardProjectModeAdapter[]
 ): DashboardProjectModeAdapter[] {
@@ -2777,12 +2777,16 @@ function aggregateAdaptersByName(
   }
   const result: DashboardProjectModeAdapter[] = []
   for (const [name, group] of map) {
+    // 同一名称的版本行携带同一份人数；快照独有的版本行可能为 0。
+    const userCount = Math.max(...group.map((adapter) => adapter.allVersionsUserCount))
     result.push({
       name,
       version: undefined,
       projectCount: group.reduce((acc, a) => acc + a.projectCount, 0),
       featureCount: group.reduce((acc, a) => acc + a.featureCount, 0),
       conversationCount: group.reduce((acc, a) => acc + a.conversationCount, 0),
+      userCount,
+      allVersionsUserCount: userCount,
       codeStats: mergeCodeStats(group.map((a) => a.codeStats)),
       stageBuckets: mergeStageBuckets(group.map((a) => a.stageBuckets))
     })
@@ -3058,8 +3062,8 @@ function AdapterListSection({
       <h2 className="mb-1 text-sm font-semibold text-foreground">插件列表</h2>
       <p className="mb-3 text-[11px] leading-relaxed text-muted-foreground">
         {mode === "byName"
-          ? "按插件名聚合同名插件的多个版本；优先展示能在插件市场匹配的插件，再按项目数降序排列，项目数为当前状态，对话数、提交、总量两口径采纳率按所选时间范围统计。"
-          : "按插件版本展开；优先展示能在插件市场匹配的插件，再按项目数降序排列，项目数为当前状态，对话数、提交、总量两口径采纳率按所选时间范围统计。"}
+          ? "按插件名聚合同名插件的多个版本，使用人数跨版本去重；优先展示能在插件市场匹配的插件，再按项目数降序排列，项目数为当前状态，使用人数、对话数、提交、总量两口径采纳率按所选时间范围统计。"
+          : "按插件版本展开，使用人数在各版本内去重；优先展示能在插件市场匹配的插件，再按项目数降序排列，项目数为当前状态，使用人数、对话数、提交、总量两口径采纳率按所选时间范围统计。"}
       </p>
       <div className="mb-3 flex items-center overflow-hidden rounded-md border border-border w-fit">
         {modeTabs.map((t) => (
@@ -3093,7 +3097,7 @@ function AdapterListSection({
                     key={`${adapter.name}@${adapter.version ?? ""}`}
                     className="space-y-2 px-4 py-3 text-sm"
                   >
-                    <div className="flex items-center justify-between gap-3">
+                    <div className="flex flex-wrap items-center justify-between gap-3">
                       <div className="flex min-w-0 flex-col gap-1">
                         <div className="flex min-w-0 items-center gap-2">
                           <Plug className="size-3.5 shrink-0 text-muted-foreground" />
@@ -3119,7 +3123,7 @@ function AdapterListSection({
                           <span>部门：{info?.managerDepartment || "—"}</span>
                         </div>
                       </div>
-                      <div className="flex shrink-0 items-center gap-4 text-xs text-muted-foreground">
+                      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
                         {adapter.projectCount > 0 ? (
                           <button
                             type="button"
@@ -3153,6 +3157,13 @@ function AdapterListSection({
                           <span className="font-medium text-foreground">
                             {formatNumber(adapter.featureCount)}
                           </span>
+                        </span>
+                        <span>
+                          使用人数{" "}
+                          <span className="font-medium text-foreground">
+                            {formatNumber(adapter.userCount)}
+                          </span>
+                          <InfoHint hint="所选时间和筛选范围内，发起项目主 Agent 主动对话的用户数，按 SAP ID 去重；未上报用户标识的对话不计入。按插件查看时，同一人使用多个版本只计一次。" />
                         </span>
                         <span>
                           对话{" "}

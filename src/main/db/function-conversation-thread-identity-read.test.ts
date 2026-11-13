@@ -443,7 +443,6 @@ describe("native incarnation-only reads preserve the public raw reader", () => {
   it.each([
     [RegExp.prototype, "test"], [RegExp.prototype, "exec"], [WeakMap.prototype, "get"],
     [WeakMap.prototype, "set"], [WeakSet.prototype, "has"], [WeakSet.prototype, "add"],
-    [Reflect, "apply"], [JSON, "parse"]
   ] as const)("uses complete raw metadata when a dispatch/interpreter field changes (%s.%s)", (owner, key) => {
     const inserted = insert(metadata()), database = appDb.getDb()
     readIdentity(database, inserted.threadId)
@@ -460,6 +459,27 @@ describe("native incarnation-only reads preserve the public raw reader", () => {
     expect(actual!.metadata).toBe(inserted.metadata)
     expect(readIncarnation(database, inserted.threadId)?.metadata).not.toBe(inserted.metadata)
   })
+
+  it.each([[Reflect, "apply"], [JSON, "parse"]] as const)(
+    "keeps captured projection semantics after late Main instrumentation (%s.%s)", (owner, key) => {
+      const inserted = insert(metadata()), database = appDb.getDb()
+      readIdentity(database, inserted.threadId)
+      const before = readIncarnation(database, inserted.threadId)!.metadata
+      expect(before).not.toBe(inserted.metadata)
+      const original = Object.getOwnPropertyDescriptor(owner, key)!
+      const invoke = Reflect.apply, define = Object.defineProperty
+      let actual: ReturnType<typeof readIncarnation>
+      try {
+        define(owner, key, { ...original, value: function(this: unknown, ...args: unknown[]) {
+          return invoke(original.value, this, args)
+        } })
+        actual = readIncarnation(database, inserted.threadId)
+      } finally { define(owner, key, original) }
+      expect(actual!.metadata).toBe(before)
+      database.run("UPDATE threads SET metadata='changed-source' WHERE thread_id=?", [inserted.threadId])
+      expect(readIncarnation(database, inserted.threadId)!.metadata).toBe("changed-source")
+    }
+  )
 
   it("keeps missing and dropped optional indexes on fresh raw reads without changing identity", () => {
     const inserted = insert(metadata()), database = appDb.getDb()

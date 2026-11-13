@@ -59,7 +59,8 @@ export async function mount(
   body = "host.render(<FlowsPanel threadId='a'/>);",
   plugins: Plugin[] = [],
   advanced = true,
-  url = "about:blank"
+  url = "about:blank",
+  development = false
 ) {
   const result = await build({
     stdin: {
@@ -177,7 +178,7 @@ export async function mount(
     format: "iife",
     jsx: "automatic",
     alias: { "@": renderer },
-    define: { "process.env.NODE_ENV": '"production"' },
+    define: { "process.env.NODE_ENV": JSON.stringify(development ? "development" : "production") },
     plugins: [
       ...plugins,
       {
@@ -216,6 +217,7 @@ export async function mount(
     const disclosure = page.locator("[data-diy-flows] > details")
     if (await disclosure.count()) await disclosure.evaluate(element => { (element as HTMLDetailsElement).open = true })
   }
+  return result.outputFiles[0].text
 }
 
 export async function chooseSteps(page: Page, value?: string) {

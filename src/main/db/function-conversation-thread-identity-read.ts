@@ -1,5 +1,5 @@
 import { types } from "node:util"
-import { originalMetadataInterpretation, type ThreadIncarnationRow } from
+import type { ThreadIncarnationRow } from
   "../services/thread-incarnation"
 import type { NativeSqliteAdapter, NativeSqliteReadOne } from "./native-sqlite-adapter"
 import { originalCurrentDispatch } from "./native-read-dispatch"
@@ -20,7 +20,6 @@ const descriptor = Object.getOwnPropertyDescriptor
 const isProxy = types.isProxy
 const isNativeError = types.isNativeError
 const originalDispatch = originalCurrentDispatch
-const originalInterpretation = originalMetadataInterpretation
 const pureReaders = new WeakSet<NativeSqliteReadOne>()
 const identityFields = [
   [WeakMap.prototype, "get", statementGet],
@@ -34,9 +33,7 @@ const identityFields = [
 ] as const
 
 function originalIdentityDispatch(database: NativeSqliteAdapter): boolean {
-  if (originalCurrentDispatch !== originalDispatch ||
-    originalMetadataInterpretation !== originalInterpretation ||
-    !originalDispatch(database) || !originalInterpretation()) return false
+  if (originalCurrentDispatch !== originalDispatch || !originalDispatch(database)) return false
   for (let index = 0; index < identityFields.length; index++) {
     const expected = identityFields[index]
     const field = descriptor(expected[0], expected[1])

@@ -50,8 +50,7 @@ async function main() {
         useLayoutEffect(()=>setParent(viewport.current),[]);
         return <ModsChatScope.Provider value={{threadId:"a",...state}}>
           <div ref={viewport} data-test-viewport style={{height:800,overflow:"auto",overflowAnchor:"none"}}>
-            <ChatMessageVirtualList messages={messages} visibleMessageIndexes={indexes} lastUserMessageIndex={159}
-              contentVersion={1} historyHasMore={false} historyPageLoading={false} historyRemainingCount={0}
+            <ChatMessageVirtualList projection={{ messages, contentVersion: 1, structureVersion: 1 }} visibleMessageIndexes={indexes} lastUserMessageIndex={159} historyHasMore={false} historyPageLoading={false} historyRemainingCount={0}
               onLoadEarlierHistoryPage={noop} historyGapBeforeMessageId={null} canLoadReleasedHistory={false}
               onLoadReleasedHistoryWindow={noop} onRestoreLatestHistoryWindow={noop} hookLoggingEnabled={false}
               hookLogBucketByTurnId={maps.hooks} detachedHookLogBuckets={[]} contentMessageRefs={{current:refs}}

@@ -1,6 +1,8 @@
 import { FunctionTrustedWaitClock, withTrustedFunctionWaitScope,
   FUNCTION_TRUSTED_WAIT_ACK_MS } from "./trusted-function-wait"
 import { FunctionDisplayPreparationChannel } from "./display-preparation"
+import { FUNCTION_MOD_RESOURCE_BUDGETS } from "../../../shared/mods/v2/resource-budgets"
+import { RuntimeLifecycleDiagnostics, type RuntimeLifecyclePhase } from "./runtime-lifecycle-diagnostics"
 import { randomUUID } from "node:crypto"
 import { AsyncLocalStorage, AsyncResource } from "node:async_hooks"
 import { platformQuerySignal } from "./platform-query-scope"
@@ -61,6 +63,7 @@ export class FunctionRuntimeClient {
   private child?: UtilityProcess
   private physicalLifetime?: FunctionUiResolveHostLifetime
   private readonly retirements = new Set<Promise<void>>()
+  private readonly lifecycleDiagnostics = new RuntimeLifecycleDiagnostics()
   private ready?: Promise<void>
   private rejectReady?: (error: Error) => void
   private timer?: ReturnType<typeof setInterval>
@@ -81,6 +84,17 @@ export class FunctionRuntimeClient {
   private remote = { rss: 0, runtimes: 0, frames: 0, replies: 0 }
 
   constructor(private readonly entry: string) {}
+
+  get diagnostics() { return this.lifecycleDiagnostics.snapshot() }
+
+  private observeLifetime(child: UtilityProcess, generation: number,
+    lifetime: FunctionUiResolveHostLifetime, phase: RuntimeLifecyclePhase,
+    code?: unknown, exitCode?: number): void {
+    try {
+      this.lifecycleDiagnostics.record({ phase, code, exitCode, generation, pid: child.pid,
+        pending: this.child === child ? this.pending.size : 0, ...lifetime.activity })
+    } catch { /* Observation must never prevent the native exit/host finally path. */ }
+  }
 
   get stats() {
     return {
@@ -109,6 +123,17 @@ export class FunctionRuntimeClient {
     // Publish the promise before starting native work: a synchronous fork/setup failure
     // must retire this attempt, rather than cache a rejected promise forever.
     this.ready = ready
+    const generation = this.generation
+    const loggedTerminal = new Set<RuntimeLifecyclePhase>()
+    const logTerminal = (phase: RuntimeLifecyclePhase): void => {
+      if (loggedTerminal.has(phase)) return
+      loggedTerminal.add(phase)
+      try {
+        const observed = this.lifecycleDiagnostics.snapshot().at(-1)
+        if (observed?.phase === phase && observed.generation === generation)
+          console.warn("[FunctionRuntimeClient] Native utility terminal", observed)
+      } catch { /* Terminal diagnostics cannot prevent physical retirement. */ }
+    }
     try {
       const child = utilityProcess.fork(this.entry, [], {
         env,
@@ -116,8 +141,10 @@ export class FunctionRuntimeClient {
         serviceName: "CMB Function Mods"
       })
       this.child = child
-      const lifetime = new FunctionUiResolveHostLifetime(child)
+      const lifetime: FunctionUiResolveHostLifetime = new FunctionUiResolveHostLifetime(child, undefined,
+        phase => this.observeLifetime(child, generation, lifetime, phase))
       this.physicalLifetime = lifetime
+      this.observeLifetime(child, generation, lifetime, "child-start")
       child.on("message", (message: FunctionResponse) => {
         if (this.child !== child) return
         if (message.type === "ready") {
@@ -127,11 +154,20 @@ export class FunctionRuntimeClient {
           resolveReady()
         } else this.onMessage(message)
       })
-      child.on("exit", () => {
+      child.on("exit", (exitCode: number) => {
         lifetime.confirmExit()
+        this.observeLifetime(child, generation, lifetime, "child-exit", "MODS_HOST_EXITED", exitCode)
+        if (exitCode !== 0 || this.child === child) logTerminal("child-exit")
         if (this.child === child) this.stop("MODS_HOST_EXITED")
       })
-      child.on("error", () => {
+      child.on("error", (error: unknown) => {
+        try {
+          const descriptor = error && typeof error === "object"
+            ? Object.getOwnPropertyDescriptor(error, "code") : undefined
+          this.observeLifetime(child, generation, lifetime, "child-error",
+            descriptor && "value" in descriptor ? descriptor.value : "MODS_HOST_ERROR")
+          logTerminal("child-error")
+        } catch { /* Native failure still retires the original owner. */ }
         if (this.child === child) this.stop("MODS_HOST_ERROR")
       })
       child.stdout?.resume()
@@ -146,6 +182,9 @@ export class FunctionRuntimeClient {
       }, 250)
       this.timer.unref()
     } catch {
+      this.lifecycleDiagnostics.record({ phase: "child-error", generation,
+        code: "MODS_HOST_ERROR", pending: this.pending.size, hostCalls: 0, draining: 0 })
+      logTerminal("child-error")
       this.stop("MODS_HOST_ERROR")
     }
     return ready
@@ -269,7 +308,7 @@ export class FunctionRuntimeClient {
       this.heartbeatGraceUntil = undefined
       const { rss, runtimes, frames, replies } = message
       this.remote = { rss, runtimes, frames, replies }
-      if (rss > 384 * 1024 * 1024) this.stop("MODS_HOST_MEMORY")
+      if (rss > FUNCTION_MOD_RESOURCE_BUDGETS.runtimeClient.childRssBytes) this.stop("MODS_HOST_MEMORY")
       return
     }
     if (message.type === "revoke") {
@@ -296,9 +335,9 @@ export class FunctionRuntimeClient {
         !binding ||
         binding.controller.signal.aborted ||
         this.calls.has(message.id) ||
-        this.calls.size >= 512 ||
+        this.calls.size >= FUNCTION_MOD_RESOURCE_BUDGETS.runtimeClient.hostCalls ||
         [...this.calls.values()].filter((call) => call.runtimeId === message.runtimeId).length >=
-          128
+          FUNCTION_MOD_RESOURCE_BUDGETS.runtimeClient.moduleCallsPerRuntime
       ) {
         child?.postMessage({
           type: "reply",
@@ -311,6 +350,8 @@ export class FunctionRuntimeClient {
       const controller = new AbortController()
       const call = { runtimeId: message.runtimeId, controller }
       this.calls.set(message.id, call)
+      if (child && lifetime?.owner === child)
+        this.observeLifetime(child, this.generation, lifetime, "host-queued")
       const signal = AbortSignal.any([controller.signal, binding.controller.signal])
       void Promise.resolve()
         .then(() => {
@@ -354,7 +395,8 @@ export class FunctionRuntimeClient {
       const pending = this.pending.get(message.requestId)
       const child = this.child
       const lifetime = this.physicalLifetime
-      if (!pending?.host || pending.runtimeId !== message.runtimeId || this.calls.size >= 512) {
+      if (!pending?.host || pending.runtimeId !== message.runtimeId ||
+        this.calls.size >= FUNCTION_MOD_RESOURCE_BUDGETS.runtimeClient.hostCalls) {
         child?.postMessage({
           type: "reply",
           id: message.id,
@@ -369,6 +411,8 @@ export class FunctionRuntimeClient {
         requestId: message.requestId,
         controller
       })
+      if (child && lifetime?.owner === child)
+        this.observeLifetime(child, this.generation, lifetime, "host-queued")
       const signal = AbortSignal.any([controller.signal, pending.controller.signal])
       waitCallSignals.set(signal, { pending, callId: message.id })
       void Promise.resolve()
@@ -437,7 +481,8 @@ export class FunctionRuntimeClient {
     if (signal?.aborted) throw new ModFunctionError("MODS_CANCELLED")
     await this.start()
     if (signal?.aborted) throw new ModFunctionError("MODS_CANCELLED")
-    if (this.pending.size >= 128) throw new ModFunctionError("MODS_HOST_CAPACITY")
+    if (this.pending.size >= FUNCTION_MOD_RESOURCE_BUDGETS.runtimeClient.pending)
+      throw new ModFunctionError("MODS_HOST_CAPACITY")
     const id = randomUUID()
     const clock = data.type === "invoke" ? new FunctionTrustedWaitClock(timeout) : undefined
     let pending!: Pending
@@ -490,6 +535,9 @@ export class FunctionRuntimeClient {
       this.pending.set(id, pending)
       signal?.addEventListener("abort", onAbort, { once: true })
       this.child!.postMessage({ ...data, id })
+      const lifetime = this.physicalLifetime
+      if (child && lifetime?.owner === child)
+        this.observeLifetime(child, generation, lifetime, "dispatched")
     })
     return clock ? withTrustedFunctionWaitScope({ clock, assertCurrent,
       prepare: (ticket, allowance) => control(ticket, "begin", allowance),
@@ -664,6 +712,8 @@ export class FunctionRuntimeClient {
     this.uiAssemblies.clear()
     const lifetime = this.physicalLifetime
     lifetime?.seal()
+    if (child && lifetime?.owner === child)
+      this.observeLifetime(child, this.generation, lifetime, "draining", code)
     if (lifetime) {
       const drained = Promise.all([lifetime.disposed, lifetime.hostDrained]).then(() => {})
       this.retirements.add(drained)

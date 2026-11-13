@@ -68,6 +68,72 @@ function fixture(child = false, assistant = false) {
   return { database, threadId, uuid, target, store, row, input }
 }
 
+describe("empty canonical marker candidates", () => {
+  it("keeps real empty partitions guarded without reading marker schemas", () => {
+    const database = appDb.getDb(), prepare = database.prepareReadOne.bind(database)
+    const thread = appDb.createThread(randomUUID(), { workspacePath: directory })
+    let schemaReads = 0
+    vi.spyOn(database, "prepareReadOne").mockImplementation(sql => {
+      const read = prepare(sql)
+      return bindings => {
+        if (sql.includes("AS present") && (sql.includes("pragma_table_info('thread_messages')") ||
+          sql.includes("FROM sqlite_master"))) schemaReads++
+        return read(bindings)
+      }
+    })
+    expect(appDb.partitionCanonicalThreadMessageEchoes(thread.thread_id, []))
+      .toMatchObject({ ordinary: [], canonical: [], canonicalCount: 0 })
+    expect(schemaReads).toBe(0)
+    expect(findFunctionConversationProjectionMarkers(database, thread.thread_id, [randomUUID()]))
+      .toEqual(new Set())
+    expect(schemaReads).toBe(3)
+    schemaReads = 0
+    expect(() => appDb.withCanonicalThreadMessageReadScope(thread.thread_id, reader => {
+      expect(reader.partition([]).canonicalCount).toBe(0)
+      database.run("DELETE FROM threads WHERE thread_id=?", [thread.thread_id])
+    })).toThrow("MODS_CONVERSATION_THREAD_CHANGED")
+    expect(schemaReads).toBe(0)
+    expect(() => appDb.partitionCanonicalThreadMessageEchoes(randomUUID(), []))
+      .toThrow("MODS_CONVERSATION_THREAD_CHANGED")
+  })
+
+  it.each([{ candidates: [] }, { candidates: [""] }])(
+    "does not prepare schema reads for validated empty candidates $candidates", ({ candidates }) => {
+      const database = openNativeSqliteDatabase(":memory:", "actual empty marker candidates").database
+      try {
+        const prepare = vi.spyOn(database, "prepareReadOne")
+        expect(findFunctionConversationProjectionMarkers(database, "actual-thread", candidates))
+          .toEqual(new Set())
+        expect(prepare).not.toHaveBeenCalled()
+      } finally { database.close() }
+    })
+
+  it("retains original thread validation before returning empty marker candidates", () => {
+    const database = openNativeSqliteDatabase(":memory:", "actual invalid marker thread").database
+    try {
+      const prepare = vi.spyOn(database, "prepareReadOne")
+      const invalid: unknown[] = ["", null, undefined, 0]
+      for (const threadId of invalid)
+        expect(() => findFunctionConversationProjectionMarkers(database, threadId as string, []))
+          .toThrow("MODS_CONVERSATION_PROJECTION_CONFLICT")
+      expect(prepare).not.toHaveBeenCalled()
+    } finally { database.close() }
+  })
+
+  it("validates nonempty values mixed with empty candidate strings before returning", () => {
+    const database = openNativeSqliteDatabase(":memory:", "actual invalid marker candidates").database
+    try {
+      const prepare = vi.spyOn(database, "prepareReadOne")
+      const invalid: ReadonlyArray<readonly unknown[]> = [["", null], ["", undefined, ""],
+        ["", 0], ["", {}]]
+      for (const candidates of invalid)
+        expect(() => findFunctionConversationProjectionMarkers(database, "actual-thread",
+          candidates as readonly string[])).toThrow("MODS_CONVERSATION_PROJECTION_CONFLICT")
+      expect(prepare).not.toHaveBeenCalled()
+    } finally { database.close() }
+  })
+})
+
 describe("fresh joined canonical read and exact private composition", () => {
   it("reads fresh complete A/B without exec/all or writes and shares only the explicit operation", () => {
     const database = appDb.getDb(), prepare = database.prepareReadOne.bind(database)

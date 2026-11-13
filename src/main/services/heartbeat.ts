@@ -31,6 +31,8 @@ import {
   releaseLocalThreadRunLease
 } from "../agent/thread-run-lease"
 import { HEARTBEAT_THREAD_ID } from "./heartbeat-session"
+import { captureThreadDirectoryChange } from "./thread-directory-change"
+import type { ThreadDirectoryChange } from "../../shared/thread-directory-change"
 import { createStreamDataSerializer } from "../ipc/stream-data-serialization"
 import { withThreadRunMutationLock } from "../ipc/thread-run-mutation-lock"
 import { getAgentGraphRecursionLimit } from "../../shared/agent-runtime-limits"
@@ -50,9 +52,9 @@ let abortController: AbortController | null = null
 let shuttingDown = false
 let workspaceResetInProgress = false
 
-function notifyRenderer(channel: string): void {
+function notifyRenderer(channel: string, change?: ThreadDirectoryChange): void {
   for (const win of BrowserWindow.getAllWindows()) {
-    win.webContents.send(channel)
+    win.webContents.send(channel, ...(change ? [change] : []))
   }
 }
 
@@ -396,13 +398,13 @@ async function executeHeartbeat(): Promise<void> {
         // selected model into metadata so ModelSwitcher shows the actual idle selection.
         const existing = dbGetThreadCore(threadId)
         if (!existing) {
-          dbCreateThread(threadId, {
+          const createdThread = dbCreateThread(threadId, {
             workspacePath: config.workDir,
             title: "[Heartbeat] 心跳检查",
             isHeartbeat: true,
             model: effectiveModelId
           })
-          notifyRenderer("threads:changed")
+          notifyRenderer("threads:changed", captureThreadDirectoryChange(threadId, "created", createdThread))
         } else {
           const meta = existing.metadata ? JSON.parse(existing.metadata) : {}
           if (meta.workspacePath !== config.workDir || meta.model !== effectiveModelId) {
@@ -632,6 +634,7 @@ async function executeHeartbeat(): Promise<void> {
     }
     running = false
     notifyRenderer("heartbeat:changed")
-    notifyRenderer("threads:changed")
+    const thread = dbGetThreadCore(threadId)
+    if (thread) notifyRenderer("threads:changed", captureThreadDirectoryChange(threadId, "transcript", thread))
   }
 }

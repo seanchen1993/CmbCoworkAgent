@@ -1,4 +1,5 @@
 import { ModFunctionError } from "../../../shared/mods/v2/contracts"
+import { FUNCTION_MOD_RESOURCE_BUDGETS } from "../../../shared/mods/v2/resource-budgets"
 
 export interface FunctionUiResolveQuota {
   handles: number
@@ -77,12 +78,7 @@ export class FunctionUiResolveMainQuota {
   readonly capacity: Readonly<FunctionUiResolveQuota>
 
   constructor(
-    capacity: FunctionUiResolveQuota = {
-      handles: 4096,
-      roots: 32,
-      branches: 1024,
-      reactions: 1024
-    }
+    capacity: FunctionUiResolveQuota = FUNCTION_MOD_RESOURCE_BUDGETS.uiResolveThread
   ) {
     this.capacity = quota(capacity)
   }

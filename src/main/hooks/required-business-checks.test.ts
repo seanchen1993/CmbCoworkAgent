@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import type { PluginMetadata, PluginHookMetadata } from "../types"
@@ -14,16 +14,23 @@ import { STAGE_CHECK_RECEIPT_PREFIX } from "../../shared/project-runtime/stage-c
 import { withPinnedAutobiz } from "../mods/v2/autobiz-source"
 import { readRuntimeRequiredHooks } from "../plugins/runtime-required-hooks"
 import { bindHookExecutionResult } from "./execution-result"
+import * as ownedCommands from "./owned-command"
+import * as recoveryCommands from "./stage-recovery-command"
 
 const mock = vi.hoisted(() => ({
   classic: vi.fn(),
   execute: vi.fn(),
+  stage: vi.fn(),
   hooks: [] as PluginHookMetadata[]
 }))
 vi.mock("../mods/manager", () => ({
-  getModsManager: () => ({ isEnabled: () => true, classicEvent: mock.classic })
+  getModsManager: () => ({ isEnabled: () => true, isActive: () => false, classicEvent: mock.classic })
 }))
 vi.mock("./http-runner", () => ({ executeHttpHook: mock.execute }))
+vi.mock("../services/harness-stage-attribution", async importOriginal => ({
+  ...(await importOriginal<typeof import("../services/harness-stage-attribution")>()),
+  resolveHarnessExecutionStage: mock.stage
+}))
 vi.mock("../storage", () => ({
   getHookLoggingConfig: () => ({ diagnostic: false }),
   getUserInfo: () => undefined,
@@ -38,6 +45,7 @@ import { FunctionSession, SESSION_CAPABILITIES } from "../mods/v2/session"
 const cleanup: Array<() => void | Promise<void>> = []
 beforeEach(() => {
   mock.hooks = []
+  mock.stage.mockReset().mockResolvedValue(undefined)
   mock.execute
     .mockReset()
     .mockResolvedValue({ exitCode: 0, stdout: "", stderr: "", blocked: false })
@@ -46,6 +54,7 @@ beforeEach(() => {
     .mockImplementation((_w, _t, _e, input, signal, core) => core(input, signal))
 })
 afterEach(async () => {
+  vi.restoreAllMocks()
   for (const close of cleanup.splice(0).reverse()) await close()
 })
 
@@ -130,6 +139,96 @@ async function guest(body: string, event = "PreToolUse") {
 }
 
 describe("host-owned required business checks", () => {
+  it.each([
+    ["command", "session"], ["command", "source"],
+    ["http", "session"], ["http", "source"]
+  ] as const)("starts no %s checker or receipt after %s revocation during stage lookup",
+    async (kind, revoked) => {
+      const f = fixture()
+      f.hook.type = kind
+      f.hook.command = `"${process.execPath}" --version`
+      f.context.harnessProjectId = "project"
+      f.context.featureId = "feature"
+      let reached!: () => void, release!: () => void
+      const entered = new Promise<void>(resolve => { reached = resolve })
+      const waiting = new Promise<void>(resolve => { release = resolve })
+      mock.stage.mockImplementation(async () => { reached(); await waiting; return undefined })
+      let sourceCurrent = true
+      const token = issueRuntimePluginSourceToken(f.binding, () => {
+        if (!sourceCurrent) throw Error("SOURCE_REVOKED")
+      })
+      const spawned = vi.spyOn(ownedCommands, "startOwnedHookCommand")
+      const receipt = vi.fn(async () => undefined)
+      cleanup.push(registerStageCheckReceiptSink(receipt))
+      const running = withRuntimePluginSource(token, () => runHooks([f.hook], "PreToolUse", f.context))
+      const settled = running.then(value => ({ value }), error => ({ error }))
+      await Promise.race([entered, settled.then(outcome => {
+        throw Error(`Checker did not reach stage wait: ${JSON.stringify(outcome)}`)
+      })])
+      if (revoked === "session") clearOnceStateForSession("thread")
+      else sourceCurrent = false
+      release()
+      const outcome = await settled
+      if (revoked === "session") expect("error" in outcome && outcome.error)
+        .toHaveProperty("message", "HOOK_SESSION_CHANGED")
+      else expect("value" in outcome && outcome.value).toMatchObject({
+        blocked: true, reason: expect.stringContaining("SOURCE_REVOKED")
+      })
+      expect(spawned).not.toHaveBeenCalled()
+      expect(mock.execute).not.toHaveBeenCalled()
+      expect(receipt).not.toHaveBeenCalled()
+    }
+  )
+
+  it("cleans an already prepared recovery command without spawning after session replacement", async () => {
+    const f = fixture()
+    const workspace = join(f.root, "branch")
+    const source = join(f.root, "source")
+    mkdirSync(workspace)
+    mkdirSync(source)
+    f.plugin.path = source
+    f.binding.workspace = workspace
+    f.binding.stageDebug = { workspace, baselineId: "baseline", commandHooks: {
+      readOnlyRoots: [source], networkAccess: "explicitly-approved"
+    } }
+    f.hook.type = "command"
+    delete f.hook.url
+    f.hook.command = `"${process.execPath}" --version`
+    f.hook.fallback = "block"
+    f.hook.pluginRoot = source
+    f.hook.hookSourceRoot = source
+    f.hook.hookSourcePath = join(source, "hooks/hooks.json")
+    f.context.workspacePath = workspace
+    f.context.toolArgs = { filePath: "note.md", content: "fixture" }
+    let reached!: () => void, release!: () => void
+    const entered = new Promise<void>(resolve => { reached = resolve })
+    const waiting = new Promise<void>(resolve => { release = resolve })
+    const cleanPrepared = vi.fn(async () => undefined)
+    vi.spyOn(recoveryCommands, "prepareStageRecoveryCommand").mockImplementation(async input => {
+      input.guard()
+      reached()
+      await waiting
+      // A real provider checked before returning; replacement can occur before its caller resumes.
+      return { executable: process.execPath, args: ["--version"], cwd: workspace,
+        env: input.env, cleanup: cleanPrepared }
+    })
+    const spawned = vi.spyOn(ownedCommands, "startOwnedHookCommand")
+    const receipt = vi.fn(async () => undefined)
+    cleanup.push(registerStageCheckReceiptSink(receipt))
+    const running = f.run()
+    const settled = running.then(value => ({ value }), error => ({ error }))
+    await Promise.race([entered, settled.then(outcome => {
+      throw Error(`Checker did not reach recovery wait: ${JSON.stringify(outcome)}`)
+    })])
+    clearOnceStateForSession("thread")
+    release()
+    const outcome = await settled
+    expect("error" in outcome && outcome.error).toHaveProperty("message", "HOOK_SESSION_CHANGED")
+    expect(cleanPrepared).toHaveBeenCalledOnce()
+    expect(spawned).not.toHaveBeenCalled()
+    expect(receipt).not.toHaveBeenCalled()
+  })
+
   it.each(["PreSkillUse", "PostSkillUse"] as const)(
     "keeps the original mandatory %s check authoritative despite real guest takeover",
     async (event) => {

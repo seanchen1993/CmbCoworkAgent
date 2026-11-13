@@ -324,6 +324,54 @@ describe("Harness catalog reader", () => {
     }
   )
 
+  it("keeps UTF-8 byte boundaries and cursors for project and registry rows", async () => {
+    const paths = await makeCatalog(3)
+    const sample = "项目 🚀 \"quoted\" \\ path\n"
+    const storedProjects = JSON.parse(readFileSync(paths.projects, "utf8"))
+    for (const project of storedProjects.projects) project.description = sample
+    writeFileSync(paths.projects, JSON.stringify(storedProjects))
+    const storedPlugins = JSON.parse(readFileSync(paths.plugins, "utf8"))
+    for (const plugin of storedPlugins) plugin.description = sample.repeat(40)
+    writeFileSync(paths.plugins, JSON.stringify(storedPlugins))
+
+    const full = readHarnessCatalogPage(paths.projects, paths.plugins, {})
+    expect(full.projects).toHaveLength(3)
+    expect(full.registry).toHaveLength(3)
+    const size = (projects: typeof full.projects, registry: typeof full.registry) =>
+      Buffer.byteLength(JSON.stringify({ projects, registry }), "utf8")
+    const projectBudget = 2 * size(full.projects.slice(0, 2), [])
+    const projectsAt = readHarnessCatalogPage(
+      paths.projects, paths.plugins, { includeRegistry: false }, projectBudget
+    )
+    const projectsBelow = readHarnessCatalogPage(
+      paths.projects, paths.plugins, { includeRegistry: false }, projectBudget - 1
+    )
+    expect(projectsAt.projects).toEqual(full.projects.slice(0, 2))
+    expect(projectsAt.projectNextCursor).toBe(2)
+    expect(projectsBelow.projects).toEqual(full.projects.slice(0, 1))
+    expect(projectsBelow.projectNextCursor).toBe(1)
+    expect(readHarnessCatalogPage(paths.projects, paths.plugins, {
+      includeRegistry: false, projectCursor: projectsAt.projectNextCursor!
+    }).projects).toEqual(full.projects.slice(2))
+
+    const mixedBudget = size(full.projects.slice(0, 1), full.registry.slice(0, 2))
+    const registryAt = readHarnessCatalogPage(
+      paths.projects, paths.plugins, { projectLimit: 1 }, mixedBudget
+    )
+    const registryBelow = readHarnessCatalogPage(
+      paths.projects, paths.plugins, { projectLimit: 1 }, mixedBudget - 1
+    )
+    expect(registryAt.projects).toEqual(full.projects.slice(0, 1))
+    expect(registryBelow.projects).toEqual(registryAt.projects)
+    expect(registryAt.registry).toEqual(full.registry.slice(0, 2))
+    expect(registryAt.registryNextCursor).toBe(2)
+    expect(registryBelow.registry).toEqual(full.registry.slice(0, 1))
+    expect(registryBelow.registryNextCursor).toBe(1)
+    expect(readHarnessCatalogPage(paths.projects, paths.plugins, {
+      includeProjects: false, registryCursor: registryAt.registryNextCursor!
+    }).registry).toEqual(full.registry.slice(2))
+  })
+
   it("keeps a near-limit project/plugin response paged and below the IPC byte cap", async () => {
     const paths = await makeCatalog(1_000)
     const first = readHarnessCatalogPage(paths.projects, paths.plugins, {

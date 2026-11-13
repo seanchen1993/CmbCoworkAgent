@@ -1,13 +1,28 @@
-import { NativeSqliteAdapter, openNativeSqliteDatabase } from "../db/native-sqlite-adapter"
-import {
-  ensureMessageSnapshotGeneration,
-  MESSAGE_SNAPSHOT_GENERATION_MIGRATION
-} from "./message-snapshot-schema"
+import { runCheckpointDatabaseOperation, runCheckpointDatabaseMaintenance,
+  checkpointDatabaseOperationIsCurrent, checkpointDatabaseMaintenanceIsCurrent,
+  checkpointDatabaseAdmissionIsCurrent,
+  waitForCheckpointDatabaseOperations, retainCheckpointDatabaseOperationLifetime } from "./checkpoint-database-admission"
+import { resolveCheckpointDatabaseIdentity, readCheckpointDatabaseFileIdentity,
+  assertCheckpointDatabaseFileIdentity, assertCheckpointDatabasePathCurrent,
+  type CheckpointDatabaseIdentity, type CheckpointDatabaseFileIdentity } from "./checkpoint-database-identity"
+import { captureDefaultCheckpointMetadataCodec, prepareCheckpointMetadataBackfill }
+  from "./checkpoint-metadata-codec"
+import { NativeSqliteAdapter, openNativeSqliteDatabase,
+  captureFunctionConversationNativeSqlitePreparedExecution,
+  readFunctionConversationNativeSqliteCurrentExecution } from "../db/native-sqlite-adapter"
 import { resolve } from "node:path"
-import { randomUUID } from "node:crypto"
+import { statSync as preparedStat, realpathSync as preparedRealpath } from "node:fs"
+import { types } from "node:util"
+import { randomUUID, createHash } from "node:crypto"
+import { CHECKPOINT_SCHEMA_MIGRATION_ID, checkpointStorageSchemaNeedsMaintenance,
+  checkpointStorageMaintenanceBytes, applyCheckpointStorageSchemaMaintenance, publishCheckpointStorageSchema,
+  } from "./checkpoint-storage-schema"
+import { maintainCheckpointStorageInWorker } from "./checkpoint-storage-maintenance"
 import { nativeConversationFairness } from "../utils/native-conversation-fairness"
 import { sqliteFileSize } from "../utils/sqlite-durable-file"
-import { ensureCheckpointRuntimeProjectionInWorker } from "./runtime-projection-client"
+import { ensureCheckpointRuntimeProjectionInWorker, readPreparedNativeDataInWorker } from "./runtime-projection-client"
+import type { PreparedNativeDataSource, PreparedNativeDataFacts } from "./runtime-projection-protocol"
+import { preparedNativeSourcePlanDigest, preparedNativeSnapshotRowDigest, preparedNativeStorageBytesDigest } from "./function-conversation-canonical-display-worker"
 import {
   buildCheckpointRuntimeProjection,
   CHECKPOINT_RUNTIME_PROJECTION_VERSION
@@ -22,7 +37,6 @@ const MESSAGE_SNAPSHOT_DELETE_BATCH_SIZE = 400
 const MESSAGE_PREFIX_SENTINEL_COUNT = 24
 const MESSAGE_PREFIX_TAIL_WINDOW = 16
 const MESSAGE_PREFIX_MIN_SHARED_TAIL = 4
-const CHECKPOINT_SCHEMA_MIGRATION_ID = "checkpoint-columns-and-fork-boundary-v1"
 import type { RunnableConfig } from "@langchain/core/runnables"
 import type { BaseMessage } from "@langchain/core/messages"
 import {
@@ -37,6 +51,72 @@ import {
 } from "@langchain/langgraph-checkpoint"
 
 const committedCheckpointReceiptBrand = Symbol("sqljs-saver-committed-checkpoint")
+const preparedCheckpointReceiptBrand = Symbol("sqljs-saver-prepared-checkpoint")
+const compactionWriteBatchBrand = Symbol("sqljs-saver-compaction-write-batch")
+export interface SqlJsSaverCompactionWriteBatch {
+  readonly [compactionWriteBatchBrand]: true
+}
+export interface SqlJsSaverCompactionWritesDescriptor {
+  readonly version: 1
+  readonly threadId: string
+  readonly namespace: string
+  readonly checkpointId: string
+  readonly operations: readonly {
+    readonly taskId: string
+    readonly rows: readonly { readonly idx: number; readonly channel: string
+      readonly type: string; readonly bytesDigest: string }[]
+  }[]
+  readonly digest: string
+}
+interface CompactionWriteBatchRecord {
+  readonly database: NativeSqliteAdapter
+  readonly generation: number
+  readonly source: { threadId: string; namespace: string; checkpointId: string }
+  readonly assertSource: () => void
+  readonly operations: { taskId: string; rows: { idx: number; channel: string
+    type: string; value: string | Uint8Array; bytesDigest: string }[] }[]
+  phase: "collecting" | "attached" | "committed" | "expired"
+  descriptor?: SqlJsSaverCompactionWritesDescriptor
+}
+
+/** Callback-local receipt for the exact original Saver serialization, never JSON authority. */
+export interface SqlJsSaverPreparedCheckpointReceipt {
+  readonly [preparedCheckpointReceiptBrand]: true
+}
+export interface SqlJsSaverPreparedCheckpointDescriptor {
+  readonly threadId: string
+  readonly namespace: string
+  readonly checkpointId: string
+  readonly parentCheckpointId: string | null
+  readonly checkpointType: string
+  readonly checkpointBytesDigest: string
+  readonly metadataType: string
+  readonly metadataBytesDigest: string
+  readonly channels: Readonly<Record<string, string>>
+}
+export type SqlJsSaverPreparedCheckpointObserver =
+  (receipt: SqlJsSaverPreparedCheckpointReceipt) => void | Promise<void>
+interface PreparedCheckpointRecord {
+  readonly database: NativeSqliteAdapter
+  readonly generation: number
+  readonly descriptor?: SqlJsSaverPreparedCheckpointDescriptor
+  readonly destinationExisted: boolean
+  active: boolean
+  sourceWrites?: CompactionWriteBatchRecord
+  data?: {
+    readonly tuple: CheckpointTuple
+    readonly source: PreparedNativeDataSource
+    readonly planDigest: string
+    readonly assertCurrent: () => void
+    readonly assertRaw: (facts: PreparedNativeDataFacts) => void
+    facts?: PreparedNativeDataFacts
+  }
+}
+
+function checkpointBytesDigest(value: string | Uint8Array): string {
+  return createHash("sha256").update(typeof value === "string" ? "text:" : "blob:")
+    .update(value).digest("hex")
+}
 
 /** Host-only, callback-local identity; its visible shape is never a commit proof. */
 export interface SqlJsSaverCommittedCheckpointReceipt {
@@ -53,6 +133,8 @@ interface CommittedCheckpointRecord {
   config: RunnableConfig
   tuple: CheckpointTuple
   active: boolean
+  prepared?: SqlJsSaverPreparedCheckpointDescriptor
+  sourceWrites?: SqlJsSaverCompactionWritesDescriptor
 }
 
 const functionRecoveryReceiptBrand = Symbol("sqljs-saver-function-recovery")
@@ -97,6 +179,109 @@ interface CheckpointMessageSnapshotRow {
   generation: string
   type: string | null
   suffix: string | Uint8Array
+}
+
+export interface SqlJsSaverSharedConversationRead {
+  readonly tuple: CheckpointTuple | undefined
+  readonly pendingNamespace?: {
+    readonly checkpointId: string
+    readonly rawByteCount: number
+    readonly writes: readonly { checkpointId: string; taskId: string; index: number
+      channel: string; type: string; value: unknown }[]
+    assertAdmissionCurrent(): void
+    revalidateAdmissionCurrent(): Promise<void>
+    assertInputDataCurrent(): void
+  }
+}
+interface SharedCheckpointRawRead {
+  row?: CheckpointRow
+  writes: WriteRow[]
+  snapshots: CheckpointMessageSnapshotRow[]
+  bytes: number
+  pending: boolean
+}
+const SHARED_CHECKPOINT_SOURCE_BYTES = 64 * 1024 * 1024
+function sharedCheckpointChanged(): never { throw Error("SQLJS_SAVER_SHARED_SOURCE_CHANGED") }
+function sharedRawDigest(value: object): string {
+  const hash = sharedCreateHash("sha256"), keys = sharedObjectKeys(value)
+  for (let index = 0; index < keys.length; index++) {
+    const key = keys[index], field = sharedDescriptor(value, key)
+    if (!field || !("value" in field)) sharedCheckpointChanged()
+    const data: unknown = field.value, kind = typeof data
+    sharedApply(sharedHashUpdate, hash, [key + "\0"])
+    if (sharedIsUint8Array(data)) {
+      sharedApply(sharedHashUpdate, hash, ["bytes:"])
+      sharedApply(sharedHashUpdate, hash, [data])
+    } else if (data === null || kind === "string" || kind === "number" || kind === "boolean" ||
+      kind === "bigint" || kind === "undefined")
+      sharedApply(sharedHashUpdate, hash, [kind + ":" + sharedString(data)])
+    else sharedCheckpointChanged()
+    sharedApply(sharedHashUpdate, hash, ["\0"])
+  }
+  return sharedApply(sharedHashDigest, hash, ["hex"]) as string
+}
+const sharedDescriptor = Object.getOwnPropertyDescriptor, sharedPrototype = Object.getPrototypeOf
+const sharedOwnKeys = Reflect.ownKeys, sharedIsArray = Array.isArray, sharedIsProxy = types.isProxy
+const sharedObjectKeys = Object.keys, sharedString = String
+const sharedApply = Reflect.apply, sharedIsUint8Array = types.isUint8Array
+const preparedWeakMap = WeakMap
+const preparedWeakGet = WeakMap.prototype.get, preparedWeakSet = WeakMap.prototype.set,
+  preparedWeakDelete = WeakMap.prototype.delete
+const preparedPlanDigest = preparedNativeSourcePlanDigest, preparedRowDigest = preparedNativeSnapshotRowDigest
+const preparedBytesDigest = preparedNativeStorageBytesDigest
+const preparedWorkerRead = readPreparedNativeDataInWorker
+const preparedNativeExecution = captureFunctionConversationNativeSqlitePreparedExecution
+const preparedStatSync = preparedStat, preparedRealpathSync = preparedRealpath
+const preparedLower = String.prototype.toLowerCase, preparedSafeInteger = Number.isSafeInteger
+const preparedSort = Array.prototype.sort
+const preparedWindows = process.platform === "win32"
+const preparedDefine = Object.defineProperty, preparedFreeze = Object.freeze
+function appendPreparedData<T>(array: T[], value: T): void {
+  const descriptor = { __proto__: null, value, writable: true, enumerable: true, configurable: true }
+  preparedDefine(array, array.length, descriptor)
+}
+const sharedArrayPrototype = Array.prototype, sharedCreateHash = createHash
+const sharedHashPrototype = sharedPrototype(sharedCreateHash("sha256"))
+const sharedHashUpdate = sharedDescriptor(sharedHashPrototype, "update")!.value
+const sharedHashDigest = sharedDescriptor(sharedHashPrototype, "digest")!.value
+function sharedSameField(actual: PropertyDescriptor | undefined, expected: PropertyDescriptor | undefined): boolean {
+  if (!actual || !expected) return actual === expected
+  if (actual.enumerable !== expected.enumerable || actual.configurable !== expected.configurable) return false
+  return "value" in actual ? "value" in expected && actual.value === expected.value &&
+    actual.writable === expected.writable : !("value" in expected) && actual.get === expected.get && actual.set === expected.set
+}
+function sharedContainerData(value: unknown): () => void {
+  if (!value || typeof value !== "object" || sharedIsProxy(value)) sharedCheckpointChanged()
+  const prototype = sharedPrototype(value), keys = sharedOwnKeys(value)
+  const fields: PropertyDescriptor[] = []
+  for (let index = 0; index < keys.length; index++) {
+    const field = sharedDescriptor(value, keys[index])
+    if (!field || !("value" in field)) sharedCheckpointChanged()
+    appendPreparedData(fields, field)
+  }
+  return () => {
+    if (sharedIsProxy(value) || sharedPrototype(value) !== prototype) sharedCheckpointChanged()
+    const actual = sharedOwnKeys(value)
+    if (actual.length !== keys.length) sharedCheckpointChanged()
+    for (let index = 0; index < keys.length; index++) {
+      const field = sharedDescriptor(value, keys[index]), expected = fields[index]
+      if (actual[index] !== keys[index] || !field || !("value" in field) ||
+        field.value !== expected.value || field.writable !== expected.writable ||
+        field.enumerable !== expected.enumerable || field.configurable !== expected.configurable)
+        sharedCheckpointChanged()
+    }
+  }
+}
+function sharedArrayData(value: unknown): () => void {
+  if (value === undefined) return () => undefined
+  if (!sharedIsArray(value) || sharedIsProxy(value) || sharedPrototype(value) !== sharedArrayPrototype)
+    sharedCheckpointChanged()
+  return sharedContainerData(value)
+}
+function sharedSourceBytes(raw: SharedCheckpointRawRead, bytes: number): void {
+  raw.bytes += bytes
+  if (!Number.isSafeInteger(raw.bytes) || raw.bytes > SHARED_CHECKPOINT_SOURCE_BYTES)
+    sharedCheckpointChanged()
 }
 
 interface CheckpointMessageWriteState {
@@ -179,45 +364,11 @@ const MAX_HYDRATED_MESSAGE_SNAPSHOTS = 8
  */
 const checkpointNamespaceQueues = new Map<string, Promise<void>>()
 const checkpointNamespacePendingWriteIntents = new Map<string, number>()
-const checkpointDatabaseSetupQueues = new Map<string, Promise<void>>()
-
 function canonicalCheckpointDatabaseKey(dbPath: string): string {
   const absolute = resolve(dbPath)
   return process.platform === "win32" ? absolute.toLowerCase() : absolute
 }
 
-async function acquireCheckpointDatabaseSetup(databaseKey: string): Promise<() => void> {
-  const previous = checkpointDatabaseSetupQueues.get(databaseKey) ?? Promise.resolve()
-  let releaseGate: () => void = () => {}
-  const gate = new Promise<void>((resolve) => {
-    releaseGate = resolve
-  })
-  const tail = previous.catch(() => {}).then(() => gate)
-  checkpointDatabaseSetupQueues.set(databaseKey, tail)
-  await previous.catch(() => {
-    // A failed predecessor must not poison later setup attempts for this file.
-  })
-
-  let released = false
-  return () => {
-    if (released) return
-    released = true
-    releaseGate()
-    void tail.finally(() => {
-      if (checkpointDatabaseSetupQueues.get(databaseKey) === tail) {
-        checkpointDatabaseSetupQueues.delete(databaseKey)
-      }
-    })
-  }
-}
-
-interface CheckpointForkBoundaryBackfill {
-  threadId: string
-  checkpointNs: string
-  checkpointId: string
-  metadataType: string | null
-  metadataPayload: string | Uint8Array
-}
 
 interface ExternalMessagesReference {
   [EXTERNAL_MESSAGES_MARKER]: true
@@ -457,17 +608,94 @@ function checkpointMetadataHasForkBoundaryMarker(metadata: CheckpointMetadata): 
  * SQLite checkpointer. The historical class name remains part of the public API,
  * while persistence is backed by Electron's bundled node:sqlite implementation.
  */
+function preparedOwnData(value: unknown, key: PropertyKey): unknown {
+  if (!value || typeof value !== "object" || sharedIsProxy(value))
+    throw Error("SQLJS_SAVER_COMPACTION_BATCH_INVALID")
+  const field = sharedDescriptor(value, key)
+  if (!field || !("value" in field)) throw Error("SQLJS_SAVER_COMPACTION_BATCH_INVALID")
+  return field.value
+}
+function preparedCompactionBindings(record: CompactionWriteBatchRecord,
+  expected: SqlJsSaverCompactionWritesDescriptor | undefined): readonly (readonly unknown[])[] {
+  const source = preparedOwnData(record, "source"), operations = preparedOwnData(record, "operations")
+  if (!expected || preparedOwnData(record, "phase") !== "attached" ||
+    preparedOwnData(source, "threadId") !== expected.threadId ||
+    preparedOwnData(source, "namespace") !== expected.namespace ||
+    preparedOwnData(source, "checkpointId") !== expected.checkpointId)
+    throw Error("SQLJS_SAVER_COMPACTION_BATCH_INVALID")
+  if (!sharedIsArray(operations)) throw Error("SQLJS_SAVER_COMPACTION_BATCH_INVALID")
+  const result: (readonly unknown[])[] = []
+  const operationCount = preparedOwnData(operations, "length")
+  if (typeof operationCount !== "number" || !preparedSafeInteger(operationCount) || operationCount < 0 ||
+    operationCount !== expected.operations.length)
+    throw Error("SQLJS_SAVER_COMPACTION_BATCH_INVALID")
+  for (let index = 0; index < operationCount; index++) {
+    const operation = preparedOwnData(operations, index), rows = preparedOwnData(operation, "rows")
+    const expectedOperation = expected.operations[index]
+    if (!sharedIsArray(rows) || preparedOwnData(operation, "taskId") !== expectedOperation.taskId)
+      throw Error("SQLJS_SAVER_COMPACTION_BATCH_INVALID")
+    const rowCount = preparedOwnData(rows, "length")
+    if (typeof rowCount !== "number" || !preparedSafeInteger(rowCount) || rowCount < 0 ||
+      rowCount !== expectedOperation.rows.length)
+      throw Error("SQLJS_SAVER_COMPACTION_BATCH_INVALID")
+    for (let item = 0; item < rowCount; item++) {
+      const row = preparedOwnData(rows, item), value = preparedOwnData(row, "value")
+      const expectedRow = expectedOperation.rows[item]
+      if (!(typeof value === "string" || sharedIsUint8Array(value)) ||
+        preparedOwnData(row, "idx") !== expectedRow.idx ||
+        preparedOwnData(row, "channel") !== expectedRow.channel ||
+        preparedOwnData(row, "type") !== expectedRow.type ||
+        preparedOwnData(row, "bytesDigest") !== expectedRow.bytesDigest ||
+        preparedBytesDigest(value) !== expectedRow.bytesDigest)
+        throw Error("SQLJS_SAVER_COMPACTION_BATCH_INVALID")
+      appendPreparedData(result, [preparedOwnData(source, "threadId"), preparedOwnData(source, "namespace"),
+        preparedOwnData(source, "checkpointId"), preparedOwnData(operation, "taskId"),
+        preparedOwnData(row, "idx"), preparedOwnData(row, "channel"), preparedOwnData(row, "type"),
+        value])
+    }
+  }
+  return result
+}
+
+interface PreparedDataWindow {
+  assertCurrent(): void
+  assertRaw(facts: PreparedNativeDataFacts): void
+  run(sql: string, bindings?: readonly unknown[]): void
+  readParent(checkpointId: string): { count: unknown; generation: unknown } | undefined
+}
+let originalPreparedWindow: (saver: SqlJsSaver, database: NativeSqliteAdapter,
+  threadId: string, namespace: string) => PreparedDataWindow
+let originalPreparedLifetime: (saver: SqlJsSaver) => () => void
+
+type SqlJsSaverCloseOutcome =
+  | { state: "checkpointed" | "idle" }
+  | { state: "skipped"; reason: unknown }
+
 export class SqlJsSaver extends BaseCheckpointSaver {
+  static {
+    const window = this.prototype.prepareNativeDataWindow, lifetime = this.prototype.captureReadLifetime
+    originalPreparedWindow = (saver, database, threadId, namespace) =>
+      sharedApply(window, saver, [database, threadId, namespace]) as PreparedDataWindow
+    originalPreparedLifetime = saver => sharedApply(lifetime, saver, []) as () => void
+  }
   private db: NativeSqliteAdapter | null = null
   private dbPath: string
+  private readonly logicalDbPath: string
   private isSetup = false
   private initializePromise: Promise<void> | null = null
   private flushPromise: Promise<unknown | null> | null = null
-  private closePromise: Promise<void> | null = null
+  private closePromise: Promise<SqlJsSaverCloseOutcome> | null = null
   private commitObserverGeneration = 0
   private readonly committedCheckpointReceipts = new WeakMap<
     SqlJsSaverCommittedCheckpointReceipt, CommittedCheckpointRecord
   >()
+  readonly #preparedCheckpointReceipts = new preparedWeakMap<
+    SqlJsSaverPreparedCheckpointReceipt, PreparedCheckpointRecord
+  >()
+  private readonly compactionWriteBatches = new WeakMap<
+    SqlJsSaverCompactionWriteBatch, CompactionWriteBatchRecord
+  >()
+  private activeCompactionWriteBatch?: SqlJsSaverCompactionWriteBatch
   private readonly functionRecoveryReceipts = new WeakMap<
     SqlJsSaverFunctionConversationRecoveryReceipt, FunctionRecoveryRecord
   >()
@@ -500,11 +728,19 @@ export class SqlJsSaver extends BaseCheckpointSaver {
   private maxDatabaseBytes = DEFAULT_MAX_DB_SIZE_BYTES
   private recoverMissingCheckpointMessages?: SqlJsSaverOptions["recoverMissingCheckpointMessages"]
   private recoverFunctionConversationMessages?: SqlJsSaverOptions["recoverFunctionConversationMessages"]
-  private readonly checkpointDatabaseKey: string
+  private checkpointDatabaseKey: string
+  private databaseIdentity?: CheckpointDatabaseIdentity
+  private pinnedFile?: CheckpointDatabaseFileIdentity
+  private schemaWait?: AbortController
+  private readonly defaultMetadataSerializer: SerializerProtocol
+  private readonly defaultMetadataCodec: () => boolean
 
   constructor(dbPath: string, serde?: SerializerProtocol, options: SqlJsSaverOptions = {}) {
     super(serde)
-    this.dbPath = dbPath
+    this.defaultMetadataSerializer = this.serde
+    this.defaultMetadataCodec = captureDefaultCheckpointMetadataCodec(this.serde)
+    this.dbPath = resolve(dbPath)
+    this.logicalDbPath = this.dbPath
     this.checkpointDatabaseKey = canonicalCheckpointDatabaseKey(dbPath)
     const legacyMax = options.maxCheckpointsPerNamespace
     this.maxRootCheckpoints = normalizePositiveInteger(
@@ -573,44 +809,44 @@ export class SqlJsSaver extends BaseCheckpointSaver {
    * Initialize the database asynchronously
    */
   async initialize(): Promise<void> {
-    if (this.retired) {
-      throw new Error(`[SqlJsSaver] Saver is retired (thread deleted): ${this.dbPath}`)
-    }
-    if (this.db && !this.closePromise) return
-    if (this.initializePromise) {
-      await this.initializePromise
-      if (this.closePromise) await this.closePromise
-      if (!this.db) return this.initialize()
-      return
-    }
-    if (this.closePromise) await this.closePromise
-
+    if (this.retired) throw new Error(`[SqlJsSaver] Saver is retired (thread deleted): ${this.dbPath}`)
+    if (this.closePromise) throw new Error("SQLJS_SAVER_CLOSING")
+    if (checkpointDatabaseMaintenanceIsCurrent(this.checkpointDatabaseKey))
+      throw new Error("SQLJS_SAVER_OPERATION_DURING_MAINTENANCE")
+    if (this.db && this.isSetup) return
+    if (this.initializePromise) return this.initializePromise
+    const schemaWait = new AbortController()
+    this.schemaWait = schemaWait
     const initializePromise = (async () => {
-      const releaseSetup = await acquireCheckpointDatabaseSetup(this.checkpointDatabaseKey)
-      try {
-        if (this.retired) {
-          throw new Error(`[SqlJsSaver] Saver is retired (thread deleted): ${this.dbPath}`)
+      const identity = await resolveCheckpointDatabaseIdentity(this.logicalDbPath)
+      this.databaseIdentity = identity
+      this.dbPath = identity.path
+      this.checkpointDatabaseKey = identity.key
+      await runCheckpointDatabaseMaintenance(identity.key, async () => {
+        if (this.retired) throw new Error(`[SqlJsSaver] Saver is retired (thread deleted): ${this.dbPath}`)
+        await assertCheckpointDatabasePathCurrent(identity)
+        if (identity.capturedFile) {
+          await assertCheckpointDatabaseFileIdentity(identity.path, identity.capturedFile)
         }
-
-        const { database } = openNativeSqliteDatabase(this.dbPath, "SqlJsSaver")
+        const { database, recovered } = openNativeSqliteDatabase(identity.path, "SqlJsSaver")
         this.db = database
         this.isSetup = false
         try {
+          if (identity.capturedFile && !recovered)
+            await assertCheckpointDatabaseFileIdentity(identity.path, identity.capturedFile)
+          const actual = await resolveCheckpointDatabaseIdentity(identity.path)
+          if (actual.key !== identity.key) throw new Error("SQLJS_SAVER_DATABASE_IDENTITY_CHANGED")
           await this.setup()
-          if (this.retired) {
-            throw new Error(`[SqlJsSaver] Saver is retired (thread deleted): ${this.dbPath}`)
-          }
+          await assertCheckpointDatabasePathCurrent(identity)
+          // Backup recovery may legitimately replace the original file only during initialization.
+          this.pinnedFile = await readCheckpointDatabaseFileIdentity(identity.path)
+          if (this.retired) throw new Error(`[SqlJsSaver] Saver is retired (thread deleted): ${this.dbPath}`)
         } catch (error) {
-          if (this.db === database) {
-            this.db = null
-            this.isSetup = false
-          }
+          if (this.db === database) { this.db = null; this.isSetup = false; this.pinnedFile = undefined }
           database.close({ checkpoint: false })
           throw error
         }
-      } finally {
-        releaseSetup()
-      }
+      })
     })().finally(() => {
       if (this.initializePromise === initializePromise) this.initializePromise = null
     })
@@ -618,139 +854,91 @@ export class SqlJsSaver extends BaseCheckpointSaver {
     return initializePromise
   }
 
+  /** The actual DB must be fully ready before joining any namespace's work. */
+  private async withDatabaseOperation<T>(
+    work: () => Promise<T>,
+    exclusive = false,
+    ordinaryPutNamespace?: Readonly<{ threadId: string; namespace: string }>,
+    onClosing?: (closing: Promise<SqlJsSaverCloseOutcome>) => T
+  ): Promise<T> {
+    if (exclusive && checkpointDatabaseAdmissionIsCurrent(this.checkpointDatabaseKey))
+      throw new Error("SQLJS_SAVER_MAINTENANCE_INSIDE_OPERATION")
+    if (this.retired) throw new Error("SQLJS_SAVER_OPERATION_EXPIRED: saver retired")
+    if (this.closePromise) throw new Error("SQLJS_SAVER_OPERATION_EXPIRED")
+    if (checkpointDatabaseMaintenanceIsCurrent(this.checkpointDatabaseKey))
+      throw new Error("SQLJS_SAVER_OPERATION_DURING_MAINTENANCE")
+    const entryGeneration = this.commitObserverGeneration
+    const releaseLifetime = retainCheckpointDatabaseOperationLifetime(this)
+    try {
+    await this.initialize()
+    const generation = this.commitObserverGeneration, database = this.db, file = this.pinnedFile
+    const admittedWork = async () => {
+      if (!file) throw new Error("SQLJS_SAVER_DATABASE_IDENTITY_CHANGED")
+      const releaseNamespace = ordinaryPutNamespace
+        ? await this.acquireCheckpointNamespace(ordinaryPutNamespace.threadId, ordinaryPutNamespace.namespace)
+        : undefined
+      try {
+        // The DB lease and this ordinary put's namespace must precede the final async stat.
+        // A later put in the same namespace cannot overtake this filesystem wait.
+        await assertCheckpointDatabaseFileIdentity(this.dbPath, file)
+        const closing = this.closePromise
+        if (onClosing && closing && !this.retired && database && this.db === database &&
+          this.pinnedFile === file && this.isSetup &&
+          this.commitObserverGeneration === entryGeneration + 1)
+          return onClosing(closing)
+        if (this.retired || closing || generation !== this.commitObserverGeneration ||
+          !database || this.db !== database || this.pinnedFile !== file || !this.isSetup)
+          throw new Error("SQLJS_SAVER_OPERATION_EXPIRED")
+        return await work()
+      } finally { releaseNamespace?.() }
+    }
+    return exclusive
+      ? await runCheckpointDatabaseMaintenance(this.checkpointDatabaseKey, admittedWork)
+      : await runCheckpointDatabaseOperation(this.checkpointDatabaseKey, admittedWork, this)
+    } finally { releaseLifetime() }
+  }
+
   private retentionLimitForNamespace(checkpointNs: string): number {
     return checkpointNs === "" ? this.maxRootCheckpoints : this.maxNonRootCheckpoints
   }
 
-  private async prepareCheckpointForkBoundaryMarkerBackfill(
-    database: NativeSqliteAdapter
-  ): Promise<CheckpointForkBoundaryBackfill[]> {
-    const result = database.exec(
-      `SELECT thread_id, checkpoint_ns, checkpoint_id, type, metadata FROM checkpoints`
-    )
-    const rows = result[0]?.values ?? []
-    const backfill: CheckpointForkBoundaryBackfill[] = []
-
-    for (const row of rows) {
-      try {
-        const metadataPayload = row[4]
-        if (!(typeof metadataPayload === "string" || metadataPayload instanceof Uint8Array)) {
-          continue
-        }
-        const metadataType = typeof row[3] === "string" ? row[3] : null
-        const metadata = (await this.serde.loadsTyped(
-          metadataType ?? "json",
-          metadataPayload
-        )) as CheckpointMetadata
-        if (!checkpointMetadataHasForkBoundaryMarker(metadata)) continue
-        backfill.push({
-          threadId: String(row[0] ?? ""),
-          checkpointNs: String(row[1] ?? ""),
-          checkpointId: String(row[2] ?? ""),
-          metadataType,
-          metadataPayload
-        })
-      } catch (error) {
-        console.warn("[SqlJsSaver] Failed to backfill checkpoint fork marker:", error)
+  private storageWorkerGuard(database: NativeSqliteAdapter,
+    file: import("./checkpoint-database-identity").CheckpointDatabaseFileIdentity): () => Promise<void> {
+    const generation = this.commitObserverGeneration, identity = this.databaseIdentity
+    return async () => {
+      const check = () => {
+        if (this.retired || this.closePromise || this.db !== database ||
+          generation !== this.commitObserverGeneration) throw new Error("SQLJS_SAVER_OPERATION_EXPIRED")
       }
+      check()
+      if (identity) { await assertCheckpointDatabasePathCurrent(identity); check() }
+      await assertCheckpointDatabaseFileIdentity(this.dbPath, file)
+      check()
     }
-    return backfill
   }
 
-  /**
-   * Schema upgrades and the legacy metadata decode are cold, one-time work.
-   * Keep the marker in the same transaction as the data changes so a crash can
-   * only expose either the complete migration or an empty marker that retries.
-   */
   private async migrateCheckpointSchemaOnce(database: NativeSqliteAdapter): Promise<boolean> {
-    database.run(`
-      CREATE TABLE IF NOT EXISTS checkpoint_schema_migrations (
-        migration_id TEXT PRIMARY KEY,
-        applied_at INTEGER NOT NULL
-      )
-    `)
-    const applied = database.exec(
-      `SELECT migration_id FROM checkpoint_schema_migrations WHERE migration_id IN (?, ?)`,
-      [CHECKPOINT_SCHEMA_MIGRATION_ID, MESSAGE_SNAPSHOT_GENERATION_MIGRATION]
-    )
-    const appliedIds = new Set(applied[0]?.values.map((row) => row[0]))
-    if (appliedIds.has(CHECKPOINT_SCHEMA_MIGRATION_ID)) {
-      return appliedIds.has(MESSAGE_SNAPSHOT_GENERATION_MIGRATION)
-    }
-
-    // Metadata decoding can yield. Finish it before acquiring SQLite's writer
-    // lock so another connection can never synchronously busy-wait while this
-    // main-thread continuation is unable to resume and commit.
-    const forkBoundaryBackfill = await this.prepareCheckpointForkBoundaryMarkerBackfill(database)
-
-    let migrationStarted = false
-    try {
-      database.run("BEGIN IMMEDIATE")
-      migrationStarted = true
-
-      // Another process may have completed the migration while metadata was
-      // decoded. Recheck both the marker and live schema under the writer lock.
-      const concurrentlyApplied = database.exec(
-        `SELECT 1 FROM checkpoint_schema_migrations WHERE migration_id = ? LIMIT 1`,
-        [CHECKPOINT_SCHEMA_MIGRATION_ID]
-      )
-      if (concurrentlyApplied[0]?.values.length) {
-        database.run("COMMIT")
-        migrationStarted = false
-        return false
-      }
-
-      const tableInfo = database.exec("PRAGMA table_info(checkpoints)")
-      const columns = new Set((tableInfo[0]?.values ?? []).map((row) => String(row[1] ?? "")))
-      if (!columns.has("checkpoint_ts")) {
-        database.run(`ALTER TABLE checkpoints ADD COLUMN checkpoint_ts TEXT`)
-      }
-      if (!columns.has("fork_boundary_marker")) {
-        database.run(
-          `ALTER TABLE checkpoints
-           ADD COLUMN fork_boundary_marker INTEGER NOT NULL DEFAULT 0`
-        )
-      }
-      database.run(
-        `UPDATE checkpoints SET checkpoint_ts = checkpoint_id WHERE checkpoint_ts IS NULL`
-      )
-      database.run(
-        `UPDATE checkpoints
-         SET fork_boundary_marker = 1
-         WHERE fork_boundary_marker = 0 AND metadata LIKE '%cmb_fork_boundary%'`
-      )
-      for (const candidate of forkBoundaryBackfill) {
-        database.run(
-          `UPDATE checkpoints
-           SET fork_boundary_marker = 1
-           WHERE thread_id = ? AND checkpoint_ns = ? AND checkpoint_id = ?
-             AND fork_boundary_marker = 0 AND type IS ? AND metadata = ?`,
-          [
-            candidate.threadId,
-            candidate.checkpointNs,
-            candidate.checkpointId,
-            candidate.metadataType,
-            candidate.metadataPayload
-          ]
-        )
-      }
-      database.run(
-        `INSERT INTO checkpoint_schema_migrations (migration_id, applied_at) VALUES (?, ?)`,
-        [CHECKPOINT_SCHEMA_MIGRATION_ID, Date.now()]
-      )
-      database.run("COMMIT")
-      migrationStarted = false
-    } catch (error) {
-      if (migrationStarted) {
-        try {
-          database.run("ROLLBACK")
-        } catch {
-          // Preserve the migration error; a failed BEGIN has no transaction.
-        }
-      }
-      throw error
-    }
-    return false
+    database.run(`CREATE TABLE IF NOT EXISTS checkpoint_schema_migrations (
+      migration_id TEXT PRIMARY KEY, applied_at INTEGER NOT NULL)`)
+    if (!checkpointStorageSchemaNeedsMaintenance(database)) return true
+    const applied = database.exec("SELECT 1 FROM checkpoint_schema_migrations WHERE migration_id=?",
+      [CHECKPOINT_SCHEMA_MIGRATION_ID])[0]?.values.length
+    const nativeCodec = this.serde === this.defaultMetadataSerializer && this.defaultMetadataCodec()
+    const backfill = applied || nativeCodec ? [] : await prepareCheckpointMetadataBackfill(database,
+      this.serde, () => {
+        if (this.retired) throw new Error("SQLJS_SAVER_OPERATION_EXPIRED: saver retired")
+        if (this.db !== database) throw new Error("SQLJS_SAVER_OPERATION_EXPIRED")
+      })
+    const rows = Number(database.exec("SELECT COUNT(*) FROM checkpoints")[0]?.values[0]?.[0] ?? 0)
+    if ((nativeCodec && rows > 0) || checkpointStorageMaintenanceBytes(database) > 1024 * 1024) {
+      const file = await readCheckpointDatabaseFileIdentity(this.dbPath)
+      await maintainCheckpointStorageInWorker(this.dbPath, backfill, nativeCodec && !applied, file,
+        this.storageWorkerGuard(database, file), this.schemaWait!.signal)
+      await assertCheckpointDatabaseFileIdentity(this.dbPath, file)
+      if (checkpointStorageSchemaNeedsMaintenance(database)) throw new Error("CHECKPOINT_STORAGE_MAINTENANCE_INCOMPLETE")
+    } else applyCheckpointStorageSchemaMaintenance(database, backfill)
+    if (this.retired || this.db !== database) throw new Error("SQLJS_SAVER_OPERATION_EXPIRED")
+    return true
   }
 
   private pruneAllCheckpointNamespaces(database: NativeSqliteAdapter): void {
@@ -795,8 +983,22 @@ export class SqlJsSaver extends BaseCheckpointSaver {
    * namespace scan and VACUUM are intentionally synchronous within this method.
    */
   async runMaintenance(): Promise<SqlJsSaverMaintenanceResult> {
+    if (checkpointDatabaseAdmissionIsCurrent(this.checkpointDatabaseKey))
+      throw new Error("SQLJS_SAVER_MAINTENANCE_INSIDE_OPERATION")
+    if (this.retired) throw new Error("SQLJS_SAVER_OPERATION_EXPIRED: saver retired")
+    if (this.closePromise) throw new Error("SQLJS_SAVER_CLOSING")
+    const releaseLifetime = retainCheckpointDatabaseOperationLifetime(this)
+    try {
     await this.initialize()
-    if (!this.db) throw new Error("Database not initialized")
+    const generation = this.commitObserverGeneration
+    return await runCheckpointDatabaseMaintenance(this.checkpointDatabaseKey, async () => {
+      const file = this.pinnedFile
+      if (!file) throw new Error("SQLJS_SAVER_DATABASE_IDENTITY_CHANGED")
+      await assertCheckpointDatabaseFileIdentity(this.dbPath, file)
+      if (this.retired || this.closePromise || generation !== this.commitObserverGeneration)
+        throw new Error("SQLJS_SAVER_OPERATION_EXPIRED")
+
+    if (!this.db || !this.isSetup) throw new Error("Database not initialized")
 
     const beforeBytes = sqliteFileSize(this.dbPath)
     if (beforeBytes === null || beforeBytes <= this.maxDatabaseBytes) {
@@ -815,92 +1017,28 @@ export class SqlJsSaver extends BaseCheckpointSaver {
       beforeBytes,
       afterBytes: sqliteFileSize(this.dbPath)
     }
+  
+    })
+    } finally { releaseLifetime() }
   }
 
   private async setup(): Promise<void> {
     if (this.isSetup || !this.db) return
-
-    // Create tables
-    this.db.run(`
-      CREATE TABLE IF NOT EXISTS checkpoints (
-        thread_id TEXT NOT NULL,
-        checkpoint_ns TEXT NOT NULL DEFAULT '',
-        checkpoint_id TEXT NOT NULL,
-        parent_checkpoint_id TEXT,
-        type TEXT,
-        checkpoint TEXT,
-        metadata TEXT,
-        checkpoint_ts TEXT,
-        fork_boundary_marker INTEGER NOT NULL DEFAULT 0,
-        PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id)
-      )
-    `)
-
-    this.db.run(`
-      CREATE TABLE IF NOT EXISTS writes (
-        thread_id TEXT NOT NULL,
-        checkpoint_ns TEXT NOT NULL DEFAULT '',
-        checkpoint_id TEXT NOT NULL,
-        task_id TEXT NOT NULL,
-        idx INTEGER NOT NULL,
-        channel TEXT NOT NULL,
-        type TEXT,
-        value TEXT,
-        PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id, task_id, idx)
-      )
-    `)
-
-    this.db.run(`
-      CREATE TABLE IF NOT EXISTS checkpoint_message_snapshots (
-        thread_id TEXT NOT NULL,
-        checkpoint_ns TEXT NOT NULL DEFAULT '',
-        checkpoint_id TEXT NOT NULL,
-        parent_checkpoint_id TEXT,
-        prefix_length INTEGER NOT NULL DEFAULT 0,
-        message_count INTEGER NOT NULL,
-        generation TEXT NOT NULL DEFAULT '',
-        type TEXT,
-        suffix BLOB NOT NULL,
-        PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id)
-      )
-    `)
-
-    this.db.run(`
-      CREATE INDEX IF NOT EXISTS idx_checkpoint_message_snapshot_parent
-      ON checkpoint_message_snapshots (thread_id, checkpoint_ns, parent_checkpoint_id)
-    `)
-    this.db.run(`
-      CREATE TABLE IF NOT EXISTS checkpoint_runtime_projections (
-        thread_id TEXT NOT NULL,
-        checkpoint_ns TEXT NOT NULL DEFAULT '',
-        checkpoint_id TEXT NOT NULL,
-        parent_checkpoint_id TEXT,
-        checkpoint_ts TEXT NOT NULL,
-        projection_version INTEGER NOT NULL DEFAULT 1,
-        type TEXT NOT NULL,
-        runtime_checkpoint BLOB NOT NULL,
-        PRIMARY KEY (thread_id, checkpoint_ns)
-      )
-    `)
-    const runtimeProjectionColumns = this.db.exec(
-      "PRAGMA table_info(checkpoint_runtime_projections)"
-    )
-    const hasRuntimeProjectionVersion = (runtimeProjectionColumns[0]?.values ?? []).some(
-      (column) => column[1] === "projection_version"
-    )
-    if (!hasRuntimeProjectionVersion) {
-      // Rows written by the pre-projection-version implementation are not
-      // trusted as bounded; the worker rebuilds them from the authoritative
-      // checkpoint before Electron main reads the payload.
-      this.db.run(
-        "ALTER TABLE checkpoint_runtime_projections ADD COLUMN projection_version INTEGER NOT NULL DEFAULT 0"
-      )
+    const database = this.db
+    if (!checkpointStorageSchemaNeedsMaintenance(database)) { this.isSetup = true; return }
+    const nativeCodec = this.serde === this.defaultMetadataSerializer && this.defaultMetadataCodec()
+    const hasCheckpoints = database.exec("SELECT 1 FROM sqlite_master WHERE type='table' AND name='checkpoints'")[0]?.values.length
+    const rows = hasCheckpoints ? Number(database.exec("SELECT COUNT(*) FROM checkpoints")[0]?.values[0]?.[0] ?? 0) : 0
+    if (nativeCodec && rows > 0) {
+      const file = await readCheckpointDatabaseFileIdentity(this.dbPath)
+      await maintainCheckpointStorageInWorker(this.dbPath, [], true, file,
+        this.storageWorkerGuard(database, file), this.schemaWait!.signal)
+      await assertCheckpointDatabaseFileIdentity(this.dbPath, file)
+      if (checkpointStorageSchemaNeedsMaintenance(database)) throw new Error("CHECKPOINT_STORAGE_MAINTENANCE_INCOMPLETE")
+    } else {
+      publishCheckpointStorageSchema(database)
+      await this.migrateCheckpointSchemaOnce(database)
     }
-    // Publish every table needed by the projection worker before the first
-    // asynchronous legacy decode. A worker may observe the database while that
-    // cold migration yields; at that point it must see a complete base schema.
-    const generationReady = await this.migrateCheckpointSchemaOnce(this.db)
-    if (!generationReady) ensureMessageSnapshotGeneration(this.db)
     this.isSetup = true
   }
 
@@ -937,14 +1075,15 @@ export class SqlJsSaver extends BaseCheckpointSaver {
   private async loadCheckpointMessages(
     threadId: string,
     checkpointNs: string,
-    checkpointId: string
+    checkpointId: string,
+    sharedRead?: SharedCheckpointRawRead
   ): Promise<HydratedCheckpointMessages> {
     if (!this.db) throw new Error("Database not initialized")
 
     const targetKey = checkpointMessageCacheKey(threadId, checkpointNs, checkpointId)
     const cachedTarget = this.hydratedCheckpointMessages.get(targetKey)
     if (
-      cachedTarget &&
+      !sharedRead && cachedTarget &&
       this.checkpointMessageCacheIsCurrent(threadId, checkpointNs, checkpointId, cachedTarget)
     ) {
       this.rememberHydratedCheckpointMessages(targetKey, cachedTarget)
@@ -970,13 +1109,21 @@ export class SqlJsSaver extends BaseCheckpointSaver {
 
       const cursorKey = checkpointMessageCacheKey(threadId, checkpointNs, cursor)
       const cached = this.hydratedCheckpointMessages.get(cursorKey)
-      if (cached && this.checkpointMessageCacheIsCurrent(threadId, checkpointNs, cursor, cached)) {
+      if (!sharedRead && cached && this.checkpointMessageCacheIsCurrent(threadId, checkpointNs, cursor, cached)) {
         base = cached
         this.rememberHydratedCheckpointMessages(cursorKey, cached)
         break
       }
       if (cached) this.hydratedCheckpointMessages.delete(cursorKey)
 
+      if (sharedRead) {
+        if (sharedRead.snapshots.length >= MAX_CHECKPOINT_MESSAGE_SNAPSHOT_DEPTH) sharedCheckpointChanged()
+        const header = this.db.prepareReadOne(`SELECT length(CAST(suffix AS BLOB)) AS bytes
+          FROM checkpoint_message_snapshots WHERE thread_id=? AND checkpoint_ns=? AND checkpoint_id=?`)(
+          [threadId, checkpointNs, cursor])
+        if (!header) sharedCheckpointChanged()
+        sharedSourceBytes(sharedRead, Number(header.bytes))
+      }
       const stmt = this.db.prepare(`
         SELECT checkpoint_id, parent_checkpoint_id, prefix_length, message_count,
                generation, type, suffix
@@ -991,6 +1138,7 @@ export class SqlJsSaver extends BaseCheckpointSaver {
       const row = stmt.getAsObject() as unknown as CheckpointMessageSnapshotRow
       stmt.free()
       pendingRows.push(row)
+      if (sharedRead) sharedRead.snapshots.push(row)
       cursor = row.parent_checkpoint_id
     }
 
@@ -1058,6 +1206,7 @@ export class SqlJsSaver extends BaseCheckpointSaver {
       snapshotDepth > MAX_CHECKPOINT_MESSAGE_SNAPSHOT_DEPTH ||
       deltaBytes > MAX_CHECKPOINT_MESSAGE_DELTA_BYTES
     ) {
+      if (sharedRead) sharedCheckpointChanged()
       const [type, suffix] = await this.serde.dumpsTyped(messages)
       const generation = randomUUID()
       this.db.run(
@@ -1080,7 +1229,8 @@ export class SqlJsSaver extends BaseCheckpointSaver {
   private async hydrateCheckpointMessages(
     row: CheckpointRow,
     checkpoint: Checkpoint,
-    allowBoundedHistoryRecovery = false
+    allowBoundedHistoryRecovery = false,
+    sharedRead?: SharedCheckpointRawRead
   ): Promise<Checkpoint> {
     const channelValues = checkpoint.channel_values as Record<string, unknown>
     const storedMessages = channelValues.messages
@@ -1092,10 +1242,11 @@ export class SqlJsSaver extends BaseCheckpointSaver {
       hydrated = await this.loadCheckpointMessages(
         row.thread_id,
         row.checkpoint_ns,
-        row.checkpoint_id
+        row.checkpoint_id,
+        sharedRead
       )
     } catch (error) {
-      if (!(error instanceof MissingCheckpointMessageSnapshotError)) throw error
+      if (sharedRead || !(error instanceof MissingCheckpointMessageSnapshotError)) throw error
       hydrated = await this.recoverMissingCheckpointMessageSnapshot(
         row,
         checkpoint,
@@ -1743,7 +1894,13 @@ export class SqlJsSaver extends BaseCheckpointSaver {
 
       database.run(
         `DELETE FROM writes
-         WHERE thread_id = ? AND checkpoint_ns = '' AND checkpoint_id NOT IN (${placeholders})`,
+         WHERE thread_id = ? AND checkpoint_ns = '' AND checkpoint_id NOT IN (${placeholders})
+           AND EXISTS (
+             SELECT 1 FROM checkpoints AS checkpoint
+             WHERE checkpoint.thread_id = writes.thread_id
+               AND checkpoint.checkpoint_ns = writes.checkpoint_ns
+               AND checkpoint.checkpoint_id = writes.checkpoint_id
+           )`,
         params
       )
 
@@ -1788,25 +1945,47 @@ export class SqlJsSaver extends BaseCheckpointSaver {
     return flushPromise
   }
 
-  async flush(): Promise<void> {
-    if (this.closePromise) {
-      try {
-        await this.closePromise
-      } catch {
-        // close already reported the persistence failure
-      }
-      return
-    }
-    await this.ensureFlushCheckpoint()
+  flush(): Promise<void> {
+    return this.flushCheckpoint(false)
   }
 
-  async flushStrict(): Promise<void> {
-    if (this.closePromise) await this.closePromise
-    while (this.flushPromise) {
-      await this.flushPromise
+  flushStrict(): Promise<void> {
+    return this.flushCheckpoint(true)
+  }
+
+  private async flushCheckpoint(strict: boolean): Promise<void> {
+    if (checkpointDatabaseMaintenanceIsCurrent(this.checkpointDatabaseKey))
+      throw new Error("SQLJS_SAVER_OPERATION_DURING_MAINTENANCE")
+    if (this.retired) {
+      if (!strict && !this.closePromise && !this.db && !this.initializePromise) return
+      throw new Error("SQLJS_SAVER_OPERATION_EXPIRED")
     }
-    const failure = await this.ensureFlushCheckpoint()
-    if (failure) throw failure
+    let closing = this.closePromise
+    let generation = this.commitObserverGeneration
+    if (!closing) {
+      if (!this.db && !this.initializePromise) return
+      const result = await this.withDatabaseOperation<
+        { closing: Promise<SqlJsSaverCloseOutcome>; generation: number } | undefined
+      >(async () => {
+        if (strict) while (this.flushPromise) await this.flushPromise
+        const failure = await this.ensureFlushCheckpoint()
+        if (strict && failure) throw failure
+        return undefined
+      }, true, undefined, close => ({ closing: close, generation: this.commitObserverGeneration }))
+      // The wrapper lets the exclusive gate and physical owner release before joining close.
+      if (!result) return
+      closing = result.closing
+      generation = result.generation
+    } else if (checkpointDatabaseAdmissionIsCurrent(this.checkpointDatabaseKey)) {
+      throw new Error("SQLJS_SAVER_MAINTENANCE_INSIDE_OPERATION")
+    }
+    const result = await closing.then(outcome => ({ outcome }), (error: unknown) => ({ error }))
+    if (this.retired || generation !== this.commitObserverGeneration)
+      throw new Error("SQLJS_SAVER_OPERATION_EXPIRED")
+    if ("error" in result) {
+      if (strict) throw result.error
+      // Best effort: the caller that started close still observes its actual failure.
+    } else if (result.outcome.state === "skipped") throw result.outcome.reason
   }
 
   private readLatestRuntimeProjection(
@@ -1824,6 +2003,7 @@ export class SqlJsSaver extends BaseCheckpointSaver {
        AND checkpoint.checkpoint_id = projection.checkpoint_id
       WHERE projection.thread_id = ? AND projection.checkpoint_ns = ?
         AND projection.projection_version = ?
+        AND projection.checkpoint_ts = COALESCE(checkpoint.checkpoint_ts, checkpoint.checkpoint_id)
         AND NOT EXISTS (
           SELECT 1 FROM checkpoints AS newer
           WHERE newer.thread_id = checkpoint.thread_id
@@ -1860,54 +2040,63 @@ export class SqlJsSaver extends BaseCheckpointSaver {
    * worker restore, export and fork operations.
    */
   async getLatestRuntimeTuple(config: RunnableConfig): Promise<CheckpointTuple | undefined> {
-    await this.initialize()
-    if (!this.db) throw new Error("Database not initialized")
-
     const threadId = config.configurable?.thread_id
     const checkpointNs = config.configurable?.checkpoint_ns ?? ""
-    if (typeof threadId !== "string" || !threadId) return undefined
-
-    let row = this.readLatestRuntimeProjection(threadId, checkpointNs)
-    if (!row) {
-      try {
-        await ensureCheckpointRuntimeProjectionInWorker(this.dbPath, threadId, checkpointNs)
-      } catch (error) {
-        // Never fall back to parsing the full checkpoint on Electron main. A
-        // missing legacy runtime affordance is recoverable; freezing the whole
-        // application on a multi-megabyte compatibility row is not.
-        console.warn("[SqlJsSaver] Failed to build checkpoint runtime projection:", error)
+    if (checkpointDatabaseMaintenanceIsCurrent(this.checkpointDatabaseKey))
+      throw new Error("SQLJS_SAVER_OPERATION_DURING_MAINTENANCE")
+    if (this.retired || this.closePromise) throw new Error("SQLJS_SAVER_OPERATION_EXPIRED")
+    const inheritedAdmission = checkpointDatabaseAdmissionIsCurrent(this.checkpointDatabaseKey)
+    const releaseLifetime = retainCheckpointDatabaseOperationLifetime(this)
+    const decode = async (row: CheckpointRuntimeProjectionRow): Promise<CheckpointTuple> => {
+      const assertCurrent = this.captureReadLifetime()
+      const checkpoint = await this.serde.loadsTyped(row.type ?? "json", row.runtime_checkpoint) as Checkpoint
+      assertCurrent()
+      return {
+      config: { configurable: { thread_id: row.thread_id, checkpoint_ns: row.checkpoint_ns,
+        checkpoint_id: row.checkpoint_id } },
+      checkpoint,
+      parentConfig: row.parent_checkpoint_id ? { configurable: {
+        thread_id: row.thread_id, checkpoint_ns: row.checkpoint_ns,
+        checkpoint_id: row.parent_checkpoint_id } } : undefined
       }
-      row = this.readLatestRuntimeProjection(threadId, checkpointNs)
     }
-    if (!row) return undefined
-
-    const runtimeCheckpoint = (await this.serde.loadsTyped(
-      row.type ?? "json",
-      row.runtime_checkpoint
-    )) as Checkpoint
-
-    return {
-      config: {
-        configurable: {
-          thread_id: row.thread_id,
-          checkpoint_ns: row.checkpoint_ns,
-          checkpoint_id: row.checkpoint_id
-        }
-      },
-      checkpoint: runtimeCheckpoint,
-      parentConfig: row.parent_checkpoint_id
-        ? {
-            configurable: {
-              thread_id: row.thread_id,
-              checkpoint_ns: row.checkpoint_ns,
-              checkpoint_id: row.parent_checkpoint_id
-            }
-          }
-        : undefined
-    }
+    try {
+      const selected = await this.withDatabaseOperation(async () => {
+        if (typeof threadId !== "string" || !threadId)
+          return { complete: true as const, value: undefined }
+        const row = this.readLatestRuntimeProjection(threadId, checkpointNs)
+        if (row) return { complete: true as const, value: await decode(row) }
+        const exists = this.db!.prepareReadOne(`SELECT checkpoint_id FROM checkpoints
+          WHERE thread_id=? AND checkpoint_ns=? LIMIT 1`)([threadId, checkpointNs])
+        if (!exists) return { complete: true as const, value: undefined }
+        if (!this.databaseIdentity || !this.pinnedFile)
+          throw new Error("SQLJS_SAVER_DATABASE_IDENTITY_CHANGED")
+        return { complete: false as const, threadId, checkpointNs, source: {
+          identity: this.databaseIdentity, file: this.pinnedFile,
+          assertCurrent: this.captureReadLifetime()
+        } }
+      })
+      if (selected.complete) return selected.value
+      // The caller's shared lease cannot be upgraded. Our own short read has already ended;
+      // an actual Worker build joins the exclusive database gate with the captured old source.
+      if (inheritedAdmission) throw new Error("SQLJS_SAVER_MAINTENANCE_INSIDE_OPERATION")
+      await ensureCheckpointRuntimeProjectionInWorker(this.dbPath, selected.threadId,
+        selected.checkpointNs, selected.source)
+      selected.source.assertCurrent()
+      return await this.withDatabaseOperation(async () => {
+        selected.source.assertCurrent()
+        const row = this.readLatestRuntimeProjection(selected.threadId, selected.checkpointNs)
+        if (row) return decode(row)
+        const exists = this.db!.prepareReadOne(`SELECT checkpoint_id FROM checkpoints
+          WHERE thread_id=? AND checkpoint_ns=? LIMIT 1`)([selected.threadId, selected.checkpointNs])
+        if (exists) throw new Error("CHECKPOINT_RUNTIME_PROJECTION_SCHEMA_NOT_READY")
+        return undefined
+      })
+    } finally { releaseLifetime() }
   }
 
   async getTuple(config: RunnableConfig): Promise<CheckpointTuple | undefined> {
+    return this.withDatabaseOperation(async () => {
     const threadId = config.configurable?.thread_id
     if (typeof threadId !== "string" || !threadId) return this.getTupleUnlocked(config)
     const release = await this.acquireCheckpointNamespace(
@@ -1919,6 +2108,195 @@ export class SqlJsSaver extends BaseCheckpointSaver {
     } finally {
       release()
     }
+  
+    })
+  }
+
+  /** One original SDK read plus bounded pending-source facts; these facts grant no target. */
+  async getTupleForSharedConversation(config: RunnableConfig): Promise<SqlJsSaverSharedConversationRead> {
+    const configurable = config.configurable
+    const threadId = configurable?.thread_id, namespace = configurable?.checkpoint_ns ?? ""
+    const checkpointId = configurable?.checkpoint_id
+    const fixed = { configurable: { thread_id: threadId, checkpoint_ns: namespace, checkpoint_id: checkpointId } }
+    return this.withDatabaseOperation(async () => {
+      if (typeof threadId !== "string" || !threadId || typeof namespace !== "string")
+        return { tuple: await this.getTupleUnlocked(fixed) }
+      const release = await this.acquireCheckpointNamespace(threadId, namespace)
+      try {
+        const database = this.db, file = this.pinnedFile
+        if (!database || !file) sharedCheckpointChanged()
+        const lifetime = SqlJsSaver.prototype.captureReadLifetime.call(this)
+        const fileCurrent = this.storageWorkerGuard(database, file)
+        const lifeKeys = ["db", "pinnedFile", "isSetup", "retired", "closePromise", "commitObserverGeneration", "serde"] as const
+        const lifeFields = lifeKeys.map(key => {
+          const field = sharedDescriptor(this, key)
+          if (!field || !("value" in field)) sharedCheckpointChanged()
+          return field
+        })
+        const nativeSerializer = this.serde === this.defaultMetadataSerializer && this.defaultMetadataCodec()
+        const serializerData = nativeSerializer ? sharedContainerData(this.serde) : () => undefined
+        const serializerPrototypeData = nativeSerializer
+          ? sharedContainerData(sharedPrototype(this.serde)) : () => undefined
+        const checkLifetimeData = () => {
+          for (let index = 0; index < lifeKeys.length; index++)
+            if (!sharedSameField(sharedDescriptor(this, lifeKeys[index]), lifeFields[index])) sharedCheckpointChanged()
+          lifetime()
+        }
+        const checkPendingCodec = () => {
+          if (!nativeSerializer) sharedCheckpointChanged()
+          serializerData(); serializerPrototypeData()
+        }
+        const raw: SharedCheckpointRawRead = { row: undefined, writes: [], snapshots: [], bytes: 0, pending: false }
+        const tuple = await this.getTupleUnlocked(fixed, false, raw)
+        checkLifetimeData()
+        if (!tuple || !raw.pending) return { tuple }
+        if (!raw.row) sharedCheckpointChanged()
+        checkPendingCodec()
+        const execution = preparedNativeExecution(database)
+        if (!execution) sharedCheckpointChanged()
+        execution.assertDataCurrent(true)
+        const sourceRow = raw.row, selected = tuple.checkpoint.id
+        const rowSql = `SELECT thread_id,checkpoint_ns,checkpoint_id,parent_checkpoint_id,type,
+          checkpoint,metadata,fork_boundary_marker FROM main.checkpoints
+          WHERE thread_id=? AND checkpoint_ns=? AND checkpoint_id=?`
+        const writesSql = `SELECT checkpoint_id,task_id,idx,channel,type,value FROM main.writes
+          WHERE thread_id=? AND checkpoint_ns=? ORDER BY checkpoint_id,task_id,idx`
+        const counts = execution.prepareReadOne(`SELECT
+          (SELECT COUNT(*) FROM main.checkpoints WHERE thread_id=? AND checkpoint_ns=?) AS points,
+          COUNT(*) AS count,COALESCE(SUM(length(CAST(value AS BLOB))),0) AS bytes
+          FROM main.writes WHERE thread_id=? AND checkpoint_ns=?`)
+        const summary = counts([threadId, namespace, threadId, namespace])
+        if (!summary || summary.points !== 1 || typeof summary.count !== "number" ||
+          !preparedSafeInteger(summary.count) || summary.count < 0 || summary.count > 64 ||
+          typeof summary.bytes !== "number" || !preparedSafeInteger(summary.bytes) || summary.bytes < 0)
+          sharedCheckpointChanged()
+        sharedSourceBytes(raw, summary.bytes)
+        const namespaceRead = execution.prepareReadOne(writesSql + " LIMIT 1 OFFSET ?")
+        const records: Record<string, unknown>[] = [], originalWrites: string[] = []
+        const selectedDigests: string[] = [], decodedDigests: string[] = []
+        const writeDigest = (value: Record<string, unknown>) => sharedRawDigest({
+          task_id: value.task_id, channel: value.channel, type: value.type, value: value.value })
+        for (let index = 0; index < summary.count; index++) {
+          const row = namespaceRead([threadId, namespace, index])
+          if (!row) sharedCheckpointChanged()
+          appendPreparedData(records, row)
+          appendPreparedData(originalWrites, sharedRawDigest(row))
+          if (row.checkpoint_id === selected) appendPreparedData(selectedDigests, writeDigest(row))
+        }
+        for (let index = 0; index < raw.writes.length; index++)
+          appendPreparedData(decodedDigests, writeDigest(raw.writes[index] as unknown as Record<string, unknown>))
+        sharedApply(preparedSort, selectedDigests, [])
+        sharedApply(preparedSort, decodedDigests, [])
+        if (selectedDigests.length !== decodedDigests.length) sharedCheckpointChanged()
+        for (let index = 0; index < selectedDigests.length; index++)
+          if (selectedDigests[index] !== decodedDigests[index]) sharedCheckpointChanged()
+        const rowRead = execution.prepareReadOne(rowSql)
+        const snapshotRead = execution.prepareReadOne(
+          `SELECT checkpoint_id,parent_checkpoint_id,prefix_length,message_count,generation,type,suffix
+          FROM main.checkpoint_message_snapshots WHERE thread_id=? AND checkpoint_ns=? AND checkpoint_id=?`)
+        const snapshots: { checkpointId: string; digest: string }[] = []
+        for (let index = 0; index < raw.snapshots.length; index++) {
+          const row = raw.snapshots[index]
+          appendPreparedData(snapshots, { checkpointId: row.checkpoint_id, digest: sharedRawDigest(row) })
+        }
+        const originalRowDigest = sharedRawDigest(sourceRow)
+        const assertAdmissionCurrent = () => {
+          checkLifetimeData(); checkPendingCodec()
+          execution.assertDataCurrent(true)
+          const current = rowRead([threadId, namespace, selected])
+          const currentSummary = counts([threadId, namespace, threadId, namespace])
+          if (!current || sharedRawDigest(current) !== originalRowDigest || !currentSummary ||
+            currentSummary.points !== 1 || currentSummary.count !== records.length ||
+            currentSummary.bytes !== summary.bytes) sharedCheckpointChanged()
+          for (let index = 0; index < records.length; index++) {
+            const value = namespaceRead([threadId, namespace, index])
+            if (!value || sharedRawDigest(value) !== originalWrites[index]) sharedCheckpointChanged()
+          }
+          for (let index = 0; index < snapshots.length; index++) {
+            const snapshot = snapshots[index]
+            const currentSnapshot = snapshotRead([threadId, namespace, snapshot.checkpointId])
+            if (!currentSnapshot || sharedRawDigest(currentSnapshot) !== snapshot.digest) sharedCheckpointChanged()
+          }
+          checkLifetimeData(); checkPendingCodec()
+        }
+        assertAdmissionCurrent()
+        const decoded = [] as { checkpointId: string; taskId: string; index: number
+          channel: string; type: string; value: unknown }[]
+        for (let index = 0; index < records.length; index++) {
+          const row = records[index]
+          if (typeof row.checkpoint_id !== "string" || typeof row.task_id !== "string" ||
+            typeof row.channel !== "string" || typeof row.idx !== "number" ||
+            !(typeof row.value === "string" || sharedIsUint8Array(row.value))) sharedCheckpointChanged()
+          let existing: NonNullable<CheckpointTuple["pendingWrites"]>[number] | undefined
+          if (row.checkpoint_id === selected && tuple.pendingWrites) {
+            for (let item = 0; item < tuple.pendingWrites.length; item++) {
+              const candidate = tuple.pendingWrites[item]
+              if (candidate[0] === row.task_id && candidate[1] === row.channel) { existing = candidate; break }
+            }
+          }
+          const value = existing ? existing[2] : await this.serde.loadsTyped(
+            typeof row.type === "string" ? row.type : "json", row.value)
+          appendPreparedData(decoded, preparedFreeze({ checkpointId: row.checkpoint_id,
+            taskId: row.task_id, index: row.idx, channel: row.channel,
+            type: typeof row.type === "string" ? row.type : "json", value }))
+        }
+        assertAdmissionCurrent()
+        const savedCheckpoint = tuple.checkpoint, savedChannels = savedCheckpoint.channel_values
+        const savedMessages = savedChannels.messages, pending = tuple.pendingWrites
+        const arrays = [sharedContainerData(tuple), sharedContainerData(savedCheckpoint),
+          sharedContainerData(savedChannels), sharedArrayData(savedMessages), sharedArrayData(pending)]
+        if (pending) for (let index = 0; index < pending.length; index++) {
+          const pair = pending[index]
+          appendPreparedData(arrays, sharedArrayData(pair))
+          if (sharedIsArray(pair[2])) appendPreparedData(arrays, sharedArrayData(pair[2]))
+        }
+        const assertInputDataCurrent = () => {
+          for (let index = 0; index < arrays.length; index++) arrays[index]()
+        }
+        return { tuple, pendingNamespace: preparedFreeze({ checkpointId: selected, rawByteCount: raw.bytes,
+          writes: preparedFreeze(decoded), assertAdmissionCurrent,
+          assertInputDataCurrent, revalidateAdmissionCurrent: async () => {
+            checkLifetimeData(); await fileCurrent(); assertAdmissionCurrent(); assertInputDataCurrent()
+          } }) }
+      } finally { release() }
+    })
+  }
+
+  /** Cold legacy migration must authenticate disk history, not an exposed mutable read cache. */
+  async getExactTupleForLegacyMigration(config: RunnableConfig): Promise<{
+    tuple: CheckpointTuple | undefined; assertCurrent(): void
+  }> {
+    const fixed = { ...config, configurable: { ...config.configurable } }
+    const { thread_id: threadId, checkpoint_id: checkpointId, checkpoint_ns: namespace = "" } =
+      fixed.configurable
+    if (typeof threadId !== "string" || !threadId ||
+      typeof checkpointId !== "string" || !checkpointId)
+      throw new Error("SQLJS_SAVER_LEGACY_CHECKPOINT_REQUIRED")
+    return this.withDatabaseOperation(async () => {
+    const release = await this.acquireCheckpointNamespace(threadId, namespace)
+    try {
+      await this.initialize()
+      const lifetime = SqlJsSaver.prototype.captureReadLifetime.call(this)
+      const execution = readFunctionConversationNativeSqliteCurrentExecution(this.db)
+      if (!execution) throw new Error("SQLJS_SAVER_LEGACY_CHECKPOINT_CHANGED")
+      const read = execution.prepareReadOne(`SELECT total_changes() AS changes,
+        (SELECT data_version FROM pragma_data_version) AS version`)
+      const before = read()
+      const assertCurrent = () => {
+        lifetime()
+        execution.assertDataCurrent()
+        const after = read()
+        if (!before || !after || after.changes !== before.changes || after.version !== before.version)
+          throw new Error("SQLJS_SAVER_LEGACY_CHECKPOINT_CHANGED")
+        lifetime()
+      }
+      this.hydratedCheckpointMessages.clear()
+      const tuple = await this.getTupleUnlocked(fixed)
+      assertCurrent()
+      return { tuple, assertCurrent }
+    } finally { release() }
+  
+    })
   }
 
   /**
@@ -1930,6 +2308,7 @@ export class SqlJsSaver extends BaseCheckpointSaver {
     threadId: string
   ): Promise<CheckpointTuple | undefined> {
     if (!threadId) return undefined
+    return this.withDatabaseOperation(async () => {
     const release = await this.acquireCheckpointNamespace(threadId, "")
     try {
       return await this.getTupleUnlocked(
@@ -1939,11 +2318,14 @@ export class SqlJsSaver extends BaseCheckpointSaver {
     } finally {
       release()
     }
+  
+    })
   }
 
   private async getTupleUnlocked(
     config: RunnableConfig,
-    allowBoundedHistoryRecovery = false
+    allowBoundedHistoryRecovery = false,
+    sharedRead?: SharedCheckpointRawRead
   ): Promise<CheckpointTuple | undefined> {
     await this.initialize()
     if (!this.db) throw new Error("Database not initialized")
@@ -1983,6 +2365,7 @@ export class SqlJsSaver extends BaseCheckpointSaver {
 
     const row = stmt.getAsObject() as unknown as CheckpointRow
     stmt.free()
+    if (sharedRead) sharedRead.row = row
 
     // Get pending writes
     const writesStmt = this.db.prepare(`
@@ -1995,6 +2378,7 @@ export class SqlJsSaver extends BaseCheckpointSaver {
     const pendingWrites: [string, string, unknown][] = []
     while (writesStmt.step()) {
       const write = writesStmt.getAsObject() as unknown as WriteRow
+      if (sharedRead) sharedRead.writes.push(write)
       const value = await this.serde.loadsTyped(write.type ?? "json", write.value ?? "")
       pendingWrites.push([write.task_id, write.channel, value])
     }
@@ -2007,10 +2391,19 @@ export class SqlJsSaver extends BaseCheckpointSaver {
     const hasExternalSnapshot = isExternalMessagesReference(
       (serializedCheckpoint.channel_values as Record<string, unknown>).messages
     )
+    if (sharedRead) {
+      sharedRead.pending = serializedCheckpoint.channel_values.cmbFunctionConversation === undefined &&
+        pendingWrites.some(([, channel]) => channel === "cmbFunctionConversation")
+      if (sharedRead.pending) {
+        if (this.serde !== this.defaultMetadataSerializer || !this.defaultMetadataCodec()) sharedCheckpointChanged()
+        sharedSourceBytes(sharedRead, serializedPayloadBytes(row.checkpoint) + serializedPayloadBytes(row.metadata))
+      }
+    }
     const checkpoint = await this.hydrateCheckpointMessages(
       row,
       serializedCheckpoint,
-      allowBoundedHistoryRecovery
+      allowBoundedHistoryRecovery,
+      sharedRead?.pending ? sharedRead : undefined
     )
 
     const restoredMessages = (checkpoint.channel_values as Record<string, unknown>).messages
@@ -2064,7 +2457,16 @@ export class SqlJsSaver extends BaseCheckpointSaver {
     }
   }
 
-  async *list(
+  async *list(config: RunnableConfig, options?: CheckpointListOptions): AsyncGenerator<CheckpointTuple> {
+    const tuples = await this.withDatabaseOperation(async () => {
+      const collected: CheckpointTuple[] = []
+      for await (const tuple of this.listWithinDatabaseOperation(config, options)) collected.push(tuple)
+      return collected
+    })
+    yield* tuples
+  }
+
+  private async *listWithinDatabaseOperation(
     config: RunnableConfig,
     options?: CheckpointListOptions
   ): AsyncGenerator<CheckpointTuple> {
@@ -2200,19 +2602,17 @@ export class SqlJsSaver extends BaseCheckpointSaver {
     checkpoint: Checkpoint,
     metadata: CheckpointMetadata
   ): Promise<RunnableConfig> {
-    const threadId = config.configurable?.thread_id
-    if (typeof threadId !== "string" || !threadId) {
-      return this.putUnlocked(config, checkpoint, metadata)
-    }
-    const release = await this.acquireCheckpointNamespace(
-      threadId,
-      config.configurable?.checkpoint_ns ?? ""
-    )
-    try {
-      return await this.putUnlocked(config, checkpoint, metadata)
-    } finally {
-      release()
-    }
+    const configurable = config.configurable
+    const threadId = configurable?.thread_id
+    if (typeof threadId !== "string" || !threadId)
+      return this.withDatabaseOperation(() => this.putUnlocked(config, checkpoint, metadata))
+    // The namespace lease and its SQL use the same routing fields captured before any await.
+    const namespace = configurable?.checkpoint_ns ?? ""
+    const fixedConfig: RunnableConfig = { configurable: {
+      thread_id: threadId, checkpoint_ns: namespace, checkpoint_id: configurable?.checkpoint_id
+    } }
+    return this.withDatabaseOperation(() => this.putUnlocked(fixedConfig, checkpoint, metadata),
+      false, { threadId, namespace })
   }
 
   /**
@@ -2225,7 +2625,9 @@ export class SqlJsSaver extends BaseCheckpointSaver {
     metadata: CheckpointMetadata,
     observer: SqlJsSaverCommitObserver,
     assertCurrent?: () => void,
-    onCommitted?: () => void
+    onCommitted?: () => void,
+    onPrepared?: SqlJsSaverPreparedCheckpointObserver,
+    onPreparedData?: SqlJsSaverPreparedCheckpointObserver
   ): Promise<RunnableConfig> {
     const configurable = { ...config.configurable }
     const threadId = configurable.thread_id
@@ -2249,6 +2651,9 @@ export class SqlJsSaver extends BaseCheckpointSaver {
     } }
     const fixedMetadata = { ...metadata, parents: { ...metadata.parents } }
     const generation = this.commitObserverGeneration
+    if (this.retired || this.closePromise) throw new Error("SQLJS_SAVER_COMMIT_RECEIPT_EXPIRED")
+    assertCurrent?.()
+    return this.withDatabaseOperation(async () => {
     const release = await this.acquireCheckpointNamespace(threadId, namespace)
     let receipt: SqlJsSaverCommittedCheckpointReceipt | undefined
     let record: CommittedCheckpointRecord | undefined
@@ -2264,8 +2669,18 @@ export class SqlJsSaver extends BaseCheckpointSaver {
       assertDatabase()
       const database = this.db
       if (!database) throw new Error("SQLJS_SAVER_COMMIT_RECEIPT_EXPIRED")
+      let preparedDescriptor: SqlJsSaverPreparedCheckpointDescriptor | undefined
+      let preparedWrites: SqlJsSaverCompactionWritesDescriptor | undefined
+      const preparing = onPrepared ? async (receipt: SqlJsSaverPreparedCheckpointReceipt) => {
+        const original = SqlJsSaver.prototype.readPreparedCheckpoint.call(this, receipt)
+        await onPrepared(receipt)
+        if (SqlJsSaver.prototype.readPreparedCheckpoint.call(this, receipt) !== original)
+          throw new Error("SQLJS_SAVER_PREPARED_RECEIPT_INVALID")
+        preparedDescriptor = original
+        preparedWrites = (sharedApply(preparedWeakGet, this.#preparedCheckpointReceipts, [receipt]) as PreparedCheckpointRecord | undefined)?.sourceWrites?.descriptor
+      } : undefined
       const result = await this.putUnlocked(fixedConfig, snapshot, fixedMetadata, assertCurrent,
-        onCommitted)
+        onCommitted, preparing, onPreparedData)
       // COMMIT and bookkeeping are complete. Keep the gate through the pause and observer;
       // cancellation after COMMIT must not skip its ACK. Always yield here: a fast put can
       // precede an expensive observer, whose work is outside this operation's budget check.
@@ -2287,7 +2702,8 @@ export class SqlJsSaver extends BaseCheckpointSaver {
         tuple.config.configurable?.checkpoint_id !== checkpointId)
         throw new Error("SQLJS_SAVER_COMMIT_CHECKPOINT_MISSING")
       receipt = Object.freeze({ [committedCheckpointReceiptBrand]: true as const })
-      record = { database, generation, config: exact, tuple, active: true }
+      record = { database, generation, config: exact, tuple, active: true,
+        prepared: preparedDescriptor, sourceWrites: preparedWrites }
       this.committedCheckpointReceipts.set(receipt, record)
       await observer(receipt)
       SqlJsSaver.prototype.readCommittedCheckpoint.call(this, receipt)
@@ -2297,6 +2713,8 @@ export class SqlJsSaver extends BaseCheckpointSaver {
       if (receipt) this.committedCheckpointReceipts.delete(receipt)
       release()
     }
+  
+    })
   }
 
   /** Exact cached tuple only; never accepts an ID/config or borrows a later database. */
@@ -2312,6 +2730,404 @@ export class SqlJsSaver extends BaseCheckpointSaver {
     return record.tuple
   }
 
+  /** Only the actual Saver's active pre-COMMIT callback can read its sealed serialization. */
+  readPreparedCheckpoint(receipt: SqlJsSaverPreparedCheckpointReceipt): SqlJsSaverPreparedCheckpointDescriptor {
+    const record = (sharedApply(preparedWeakGet, this.#preparedCheckpointReceipts, [receipt]) as PreparedCheckpointRecord | undefined)
+    if (!record || !record.active || this.retired || this.closePromise ||
+      this.db !== record.database || this.commitObserverGeneration !== record.generation)
+      throw new Error("SQLJS_SAVER_PREPARED_RECEIPT_INVALID")
+    if (!record.descriptor) throw new Error("SQLJS_SAVER_PREPARED_RECEIPT_INVALID")
+    return record.descriptor
+  }
+
+  /** Only the active data callback may inspect its own fixed input, never a supplied tuple. */
+  readPreparedConversationData(receipt: SqlJsSaverPreparedCheckpointReceipt): CheckpointTuple {
+    const record = (sharedApply(preparedWeakGet, this.#preparedCheckpointReceipts, [receipt]) as PreparedCheckpointRecord | undefined)
+    if (!record?.active || !record.data) throw Error("SQLJS_SAVER_PREPARED_DATA_INVALID")
+    // The original record first verifies own-data lifetime fields without invoking a getter.
+    record.data.assertCurrent()
+    if (this.db !== record.database || this.retired || this.closePromise ||
+      this.commitObserverGeneration !== record.generation) throw Error("SQLJS_SAVER_PREPARED_DATA_INVALID")
+    return record.data.tuple
+  }
+
+  /** Isolated original-codec facts; the client waits its real physical final/exit on every path. */
+  async readPreparedConversationDataFacts(receipt: SqlJsSaverPreparedCheckpointReceipt, signal?: AbortSignal):
+    Promise<PreparedNativeDataFacts> {
+    readSqlJsSaverPreparedConversationData(this, receipt)
+    const record = (sharedApply(preparedWeakGet, this.#preparedCheckpointReceipts, [receipt]) as PreparedCheckpointRecord | undefined)!, data = record.data!
+    const identity = this.databaseIdentity, file = this.pinnedFile
+    if (!identity || !file) throw Error("SQLJS_SAVER_PREPARED_DATA_INVALID")
+    const current = () => {
+      if ((sharedApply(preparedWeakGet, this.#preparedCheckpointReceipts, [receipt]) as PreparedCheckpointRecord | undefined) !== record)
+        throw Error("SQLJS_SAVER_PREPARED_DATA_INVALID")
+      readSqlJsSaverPreparedConversationData(this, receipt)
+    }
+    const config = data.tuple.config.configurable!
+    const facts = await preparedWorkerRead(identity.path, sharedString(config.thread_id),
+      sharedString(config.checkpoint_ns ?? ""), data.tuple.checkpoint.id, {
+        checkpointSource: { identity, file, assertCurrent: current }, signal,
+        readSource: () => data.source
+      })
+    current()
+    if (facts.sealedPlanDigest !== data.planDigest) throw Error("SQLJS_SAVER_PREPARED_DATA_CHANGED")
+    data.assertRaw(facts)
+    record.data!.facts = facts
+    return facts
+  }
+
+  /** The ordinary Saver still permits overwrites. Host compaction requires a fresh destination. */
+  assertPreparedCheckpointFreshDestination(receipt: SqlJsSaverPreparedCheckpointReceipt): void {
+    SqlJsSaver.prototype.readPreparedCheckpoint.call(this, receipt)
+    if ((sharedApply(preparedWeakGet, this.#preparedCheckpointReceipts, [receipt]) as PreparedCheckpointRecord | undefined)!.destinationExisted)
+      throw Error("SQLJS_SAVER_COMPACTION_DESTINATION_EXISTS")
+  }
+
+  /** One private idle SDK transaction. Ordinary putWrites never enters this staging area. */
+  createCompactionWriteBatch(config: RunnableConfig, assertSource: () => void): SqlJsSaverCompactionWriteBatch {
+    const point = config.configurable
+    if (!this.db || !this.isSetup || this.retired || this.closePromise ||
+      this.activeCompactionWriteBatch || typeof point?.thread_id !== "string" ||
+      typeof point.checkpoint_id !== "string" || !point.checkpoint_id ||
+      typeof (point.checkpoint_ns ?? "") !== "string")
+      throw Error("SQLJS_SAVER_COMPACTION_BATCH_INVALID")
+    assertSource()
+    const batch = Object.freeze({ [compactionWriteBatchBrand]: true as const })
+    this.compactionWriteBatches.set(batch, { database: this.db, generation: this.commitObserverGeneration,
+      source: { threadId: point.thread_id, namespace: point.checkpoint_ns ?? "",
+        checkpointId: point.checkpoint_id }, assertSource, operations: [], phase: "collecting", descriptor: undefined })
+    this.activeCompactionWriteBatch = batch
+    return batch
+  }
+
+  private compactionBatch(batch: SqlJsSaverCompactionWriteBatch): CompactionWriteBatchRecord {
+    const record = this.compactionWriteBatches.get(batch)
+    if (!record || record.phase === "expired" || this.activeCompactionWriteBatch !== batch ||
+      this.retired || this.closePromise || this.db !== record.database ||
+      this.commitObserverGeneration !== record.generation)
+      throw Error("SQLJS_SAVER_COMPACTION_BATCH_INVALID")
+    return record
+  }
+
+  async stageCompactionWrites(batch: SqlJsSaverCompactionWriteBatch, config: RunnableConfig,
+    writes: PendingWrite[], taskId: string): Promise<void> {
+    const point = { ...config.configurable }, fixed = writes.map(([channel, value]) => [channel, value] as const)
+    const record = this.compactionBatch(batch)
+    if (record.phase !== "collecting" || typeof taskId !== "string" ||
+      point.thread_id !== record.source.threadId || (point.checkpoint_ns ?? "") !== record.source.namespace ||
+      point.checkpoint_id !== record.source.checkpointId)
+      throw Error("SQLJS_SAVER_COMPACTION_BATCH_INVALID")
+    record.assertSource()
+    await this.withDatabaseOperation(async () => {
+      const release = await this.acquireCheckpointNamespace(record.source.threadId, record.source.namespace)
+      try {
+        const serialized = await Promise.allSettled(fixed.map(async ([channel, value], idx) => {
+          record.assertSource()
+          const [type, raw] = await this.serde.dumpsTyped(value)
+          this.compactionBatch(batch)
+          record.assertSource()
+          const owned = typeof raw === "string" ? raw : Uint8Array.from(raw)
+          return { idx, channel, type, value: owned, bytesDigest: checkpointBytesDigest(owned) }
+        }))
+        const failed = serialized.find(result => result.status === "rejected")
+        if (failed?.status === "rejected") throw failed.reason
+        const rows = serialized.map(result => {
+          if (result.status !== "fulfilled") throw Error("SQLJS_SAVER_COMPACTION_BATCH_INVALID")
+          return result.value
+        })
+        this.compactionBatch(batch)
+        record.assertSource()
+        if (record.phase !== "collecting") throw Error("SQLJS_SAVER_COMPACTION_BATCH_INVALID")
+        record.operations.push({ taskId, rows })
+      } finally { release() }
+    })
+  }
+
+  /** The installed SDK has no read between source putWrites and destination put. Fail closed
+   * if a future SDK tries to interpret staged rows as already committed native evidence. */
+  assertCompactionWriteBatchReadable(batch: SqlJsSaverCompactionWriteBatch): void {
+    const record = this.compactionWriteBatches.get(batch)
+    if (!record) throw Error("SQLJS_SAVER_COMPACTION_BATCH_INVALID")
+    if ((record.phase === "collecting" || record.phase === "attached") && record.operations.length)
+      throw Error("SQLJS_SAVER_COMPACTION_STAGED_READ")
+  }
+
+  bindPreparedCompactionWrites(receipt: SqlJsSaverPreparedCheckpointReceipt,
+    batch: SqlJsSaverCompactionWriteBatch): SqlJsSaverCompactionWritesDescriptor {
+    const checkpoint = SqlJsSaver.prototype.readPreparedCheckpoint.call(this, receipt)
+    const record = this.compactionBatch(batch)
+    if (record.phase !== "collecting" || checkpoint.threadId !== record.source.threadId ||
+      checkpoint.namespace !== record.source.namespace || checkpoint.parentCheckpointId !== record.source.checkpointId)
+      throw Error("SQLJS_SAVER_COMPACTION_BATCH_INVALID")
+    record.assertSource()
+    const actualOperations = preparedOwnData(record, "operations")
+    if (!sharedIsArray(actualOperations)) throw Error("SQLJS_SAVER_COMPACTION_BATCH_INVALID")
+    const operationCount = preparedOwnData(actualOperations, "length")
+    if (typeof operationCount !== "number" || !preparedSafeInteger(operationCount) || operationCount < 0)
+      throw Error("SQLJS_SAVER_COMPACTION_BATCH_INVALID")
+    const operations: SqlJsSaverCompactionWritesDescriptor["operations"][number][] = []
+    for (let index = 0; index < operationCount; index++) {
+      const actual = preparedOwnData(actualOperations, index), actualRows = preparedOwnData(actual, "rows")
+      const taskId = preparedOwnData(actual, "taskId")
+      if (!sharedIsArray(actualRows) || typeof taskId !== "string")
+        throw Error("SQLJS_SAVER_COMPACTION_BATCH_INVALID")
+      const rowCount = preparedOwnData(actualRows, "length")
+      if (typeof rowCount !== "number" || !preparedSafeInteger(rowCount) || rowCount < 0)
+        throw Error("SQLJS_SAVER_COMPACTION_BATCH_INVALID")
+      const rows: SqlJsSaverCompactionWritesDescriptor["operations"][number]["rows"][number][] = []
+      for (let item = 0; item < rowCount; item++) {
+        const row = preparedOwnData(actualRows, item), idx = preparedOwnData(row, "idx")
+        const channel = preparedOwnData(row, "channel"), type = preparedOwnData(row, "type")
+        const bytesDigest = preparedOwnData(row, "bytesDigest")
+        if (typeof idx !== "number" || !preparedSafeInteger(idx) || typeof channel !== "string" ||
+          typeof type !== "string" || typeof bytesDigest !== "string")
+          throw Error("SQLJS_SAVER_COMPACTION_BATCH_INVALID")
+        appendPreparedData(rows, preparedFreeze({ idx, channel, type, bytesDigest }))
+      }
+      appendPreparedData(operations, preparedFreeze({ taskId, rows: preparedFreeze(rows) }))
+    }
+    const source = preparedOwnData(record, "source"), threadId = preparedOwnData(source, "threadId")
+    const namespace = preparedOwnData(source, "namespace"), checkpointId = preparedOwnData(source, "checkpointId")
+    if (typeof threadId !== "string" || typeof namespace !== "string" || typeof checkpointId !== "string")
+      throw Error("SQLJS_SAVER_COMPACTION_BATCH_INVALID")
+    const content = { version: 1 as const, threadId, namespace, checkpointId,
+      operations: preparedFreeze(operations) }
+    record.descriptor = preparedFreeze({ ...content,
+      digest: createHash("sha256").update(JSON.stringify(content)).digest("hex") })
+    record.phase = "attached"
+    const destinationRecord = sharedApply(preparedWeakGet, this.#preparedCheckpointReceipts,
+      [receipt]) as PreparedCheckpointRecord
+    destinationRecord.sourceWrites = record
+    return record.descriptor
+  }
+
+  releaseCompactionWriteBatch(batch: SqlJsSaverCompactionWriteBatch): void {
+    const record = this.compactionWriteBatches.get(batch)
+    if (!record) throw Error("SQLJS_SAVER_COMPACTION_BATCH_INVALID")
+    record.phase = "expired"
+    record.operations.length = 0
+    if (this.activeCompactionWriteBatch === batch) this.activeCompactionWriteBatch = undefined
+  }
+
+  readCommittedCompactionWrites(receipt: SqlJsSaverCommittedCheckpointReceipt):
+    SqlJsSaverCompactionWritesDescriptor {
+    SqlJsSaver.prototype.readCommittedCheckpoint.call(this, receipt)
+    const descriptor = this.committedCheckpointReceipts.get(receipt)?.sourceWrites
+    if (!descriptor) throw Error("SQLJS_SAVER_COMPACTION_BATCH_INVALID")
+    return descriptor
+  }
+
+  captureCommittedCheckpointDataFence(receipt: SqlJsSaverCommittedCheckpointReceipt): () => void {
+    SqlJsSaver.prototype.readCommittedCheckpoint.call(this, receipt)
+    const lifetime = SqlJsSaver.prototype.captureReadLifetime.call(this)
+    const execution = readFunctionConversationNativeSqliteCurrentExecution(this.db)
+    if (!execution) throw Error("SQLJS_SAVER_COMMIT_SCOPE_INVALID")
+    const read = execution.prepareReadOne(`SELECT total_changes() AS changes,
+      (SELECT data_version FROM pragma_data_version) AS version`), before = read()
+    return () => {
+      lifetime()
+      execution.assertDataCurrent()
+      const after = read()
+      if (!before || !after || before.changes !== after.changes || before.version !== after.version)
+        throw Error("SQLJS_SAVER_COMMIT_SCOPE_INVALID")
+    }
+  }
+
+  /** Actual row readback, not a replay. A retained source must have precisely the original
+   * OR REPLACE result; legitimate retention may remove both the source and its writes. */
+  async verifyCompactionWrites(descriptor: SqlJsSaverCompactionWritesDescriptor,
+    source: SqlJsSaverPreparedCheckpointDescriptor,
+    receipt?: SqlJsSaverCommittedCheckpointReceipt): Promise<void> {
+    if (!descriptor || descriptor.version !== 1 || !Array.isArray(descriptor.operations) ||
+      descriptor.operations.some(operation => !operation || typeof operation.taskId !== "string" ||
+        !Array.isArray(operation.rows) || operation.rows.some(row => !row ||
+          !Number.isSafeInteger(row.idx) || row.idx < 0 || typeof row.channel !== "string" ||
+          typeof row.type !== "string" || typeof row.bytesDigest !== "string")))
+      throw Error("SQLJS_SAVER_COMPACTION_WRITES_CHANGED")
+    const fixed = JSON.parse(JSON.stringify(descriptor)) as SqlJsSaverCompactionWritesDescriptor
+    const sourceFixed = JSON.parse(JSON.stringify(source)) as SqlJsSaverPreparedCheckpointDescriptor
+    const { digest, ...content } = fixed
+    if (fixed.version !== 1 || fixed.threadId !== source.threadId || fixed.namespace !== source.namespace ||
+      fixed.checkpointId !== source.checkpointId || createHash("sha256").update(JSON.stringify(content))
+        .digest("hex") !== digest) throw Error("SQLJS_SAVER_COMPACTION_WRITES_CHANGED")
+    await this.withDatabaseOperation(async () => {
+      let release: (() => void) | undefined
+      if (receipt) {
+        SqlJsSaver.prototype.readCommittedCheckpoint.call(this, receipt)
+        const committed = this.committedCheckpointReceipts.get(receipt)
+        if (!committed?.prepared || committed.config.configurable?.thread_id !== fixed.threadId ||
+          (committed.config.configurable?.checkpoint_ns ?? "") !== fixed.namespace ||
+          committed.prepared.parentCheckpointId !== fixed.checkpointId ||
+          JSON.stringify(committed.sourceWrites) !== JSON.stringify(fixed))
+          throw Error("SQLJS_SAVER_COMPACTION_BATCH_INVALID")
+      } else release = await this.acquireCheckpointNamespace(fixed.threadId, fixed.namespace)
+      try {
+      const execution = readFunctionConversationNativeSqliteCurrentExecution(this.db)
+      if (!execution) throw Error("SQLJS_SAVER_COMPACTION_WRITES_CHANGED")
+      const lifetime = this.captureReadLifetime()
+      const read = execution.prepareReadOne(`SELECT total_changes() AS changes,
+        (SELECT data_version FROM pragma_data_version) AS version`), before = read()
+      const assertSource = () => {
+        lifetime()
+        execution.assertDataCurrent()
+        if (receipt) SqlJsSaver.prototype.readCommittedCheckpoint.call(this, receipt)
+        const after = read()
+        if (!before || !after || before.changes !== after.changes || before.version !== after.version)
+          throw Error("SQLJS_SAVER_COMPACTION_WRITES_CHANGED")
+      }
+      const rows = this.db!.exec(`SELECT task_id,idx,channel,type,value FROM writes
+        WHERE thread_id=? AND checkpoint_ns=? AND checkpoint_id=?`,
+      [fixed.threadId, fixed.namespace, fixed.checkpointId])[0]?.values ?? []
+      const actualSource = this.db!.exec(`SELECT parent_checkpoint_id,type,checkpoint,metadata
+        FROM checkpoints WHERE thread_id=? AND checkpoint_ns=? AND checkpoint_id=?`,
+      [fixed.threadId, fixed.namespace, fixed.checkpointId])[0]?.values[0]
+      if (!actualSource) {
+        if (rows.length) throw Error("SQLJS_SAVER_COMPACTION_WRITES_CHANGED")
+        assertSource()
+        return
+      }
+      if (actualSource[0] !== sourceFixed.parentCheckpointId || actualSource[1] !== sourceFixed.checkpointType ||
+        !(typeof actualSource[2] === "string" || actualSource[2] instanceof Uint8Array) ||
+        !(typeof actualSource[3] === "string" || actualSource[3] instanceof Uint8Array) ||
+        checkpointBytesDigest(actualSource[2] as string | Uint8Array) !== sourceFixed.checkpointBytesDigest ||
+        checkpointBytesDigest(actualSource[3] as string | Uint8Array) !== sourceFixed.metadataBytesDigest)
+        throw Error("SQLJS_SAVER_COMPACTION_WRITES_CHANGED")
+      const expected = new Map<string, { channel: string; type: string; bytesDigest: string }>()
+      for (const operation of fixed.operations) for (const row of operation.rows)
+        expected.set(JSON.stringify([operation.taskId, row.idx]), row)
+      if (rows.length !== expected.size || rows.some(row => {
+        const wanted = expected.get(JSON.stringify([row[0], row[1]]))
+        return !wanted || row[2] !== wanted.channel || row[3] !== wanted.type ||
+          !(typeof row[4] === "string" || row[4] instanceof Uint8Array) ||
+          checkpointBytesDigest(row[4] as string | Uint8Array) !== wanted.bytesDigest
+      })) throw Error("SQLJS_SAVER_COMPACTION_WRITES_CHANGED")
+      // Source pending writes are separately verified above and remain unapplied. Its
+      // external message marker alone cannot prove the original snapshot-chain bytes.
+      this.hydratedCheckpointMessages.clear()
+      const original = await this.getTupleUnlocked({ configurable: { thread_id: fixed.threadId,
+        checkpoint_ns: fixed.namespace, checkpoint_id: fixed.checkpointId } })
+      assertSource()
+      if (!original) throw Error("SQLJS_SAVER_COMPACTION_WRITES_CHANGED")
+      const channels = await this.digestCheckpointChannels(original.checkpoint.channel_values, assertSource)
+      if (Object.keys(channels).length !== Object.keys(sourceFixed.channels).length ||
+        Object.entries(channels).some(([key, value]) => value !== sourceFixed.channels[key]))
+        throw Error("SQLJS_SAVER_COMPACTION_WRITES_CHANGED")
+      assertSource()
+      } finally { release?.() }
+    })
+  }
+
+  /** Comparison data under the original codec, including its supported non-JSON values. */
+  async digestCompactionChannels(values: Readonly<Record<string, unknown>>,
+    assertCurrent?: () => void): Promise<Readonly<Record<string, string>>> {
+    const fixed = { ...values }
+    return this.withDatabaseOperation(() => this.digestCheckpointChannels(fixed, assertCurrent))
+  }
+
+  private async digestCheckpointChannels(values: Readonly<Record<string, unknown>>,
+    assertCurrent?: () => void): Promise<Readonly<Record<string, string>>> {
+    const database = this.db, generation = this.commitObserverGeneration
+    const guard = () => {
+      if (!database || this.db !== database || this.retired || this.closePromise ||
+        generation !== this.commitObserverGeneration) throw Error("SQLJS_SAVER_OPERATION_EXPIRED")
+      assertCurrent?.()
+    }
+    const entries: Array<[string, string]> = []
+    for (const [key, value] of Object.entries(values)) {
+      guard()
+      const [type, bytes] = await this.serde.dumpsTyped(value)
+      guard()
+      entries.push([key, createHash("sha256").update(JSON.stringify(type)).update("\0")
+        .update(checkpointBytesDigest(bytes)).digest("hex")])
+    }
+    guard()
+    return Object.freeze(Object.fromEntries(entries))
+  }
+
+  /** Join the original active operation, then compare actual SQL bytes before journal ACK. */
+  async readCommittedCheckpointDescriptor(receipt: SqlJsSaverCommittedCheckpointReceipt):
+    Promise<SqlJsSaverPreparedCheckpointDescriptor> {
+    SqlJsSaver.prototype.readCommittedCheckpoint.call(this, receipt)
+    return this.withDatabaseOperation(async () => {
+      const tuple = SqlJsSaver.prototype.readCommittedCheckpoint.call(this, receipt)
+      const descriptor = this.committedCheckpointReceipts.get(receipt)?.prepared
+      if (!descriptor) throw Error("SQLJS_SAVER_PREPARED_RECEIPT_INVALID")
+      const execution = readFunctionConversationNativeSqliteCurrentExecution(this.db)
+      if (!execution) throw Error("SQLJS_SAVER_COMMIT_SCOPE_INVALID")
+      const read = execution.prepareReadOne(`SELECT total_changes() AS changes,
+        (SELECT data_version FROM pragma_data_version) AS version`), before = read()
+      const assertData = () => {
+        execution.assertDataCurrent()
+        const after = read()
+        if (!before || !after || before.changes !== after.changes || before.version !== after.version)
+          throw Error("SQLJS_SAVER_COMMIT_SCOPE_INVALID")
+        SqlJsSaver.prototype.readCommittedCheckpoint.call(this, receipt)
+      }
+      const values = this.db!.exec(`SELECT parent_checkpoint_id,type,checkpoint,metadata
+        FROM checkpoints WHERE thread_id=? AND checkpoint_ns=? AND checkpoint_id=?`,
+      [descriptor.threadId, descriptor.namespace, descriptor.checkpointId])[0]?.values[0]
+      if (!values || values[0] !== descriptor.parentCheckpointId || values[1] !== descriptor.checkpointType ||
+        !(typeof values[2] === "string" || values[2] instanceof Uint8Array) ||
+        !(typeof values[3] === "string" || values[3] instanceof Uint8Array) ||
+        checkpointBytesDigest(values[2]) !== descriptor.checkpointBytesDigest ||
+        checkpointBytesDigest(values[3]) !== descriptor.metadataBytesDigest)
+        throw Error("SQLJS_SAVER_COMMIT_SCOPE_INVALID")
+      assertData()
+      const channels = await this.digestCheckpointChannels(tuple.checkpoint.channel_values, assertData)
+      if (JSON.stringify(Object.keys(channels).sort()) !== JSON.stringify(Object.keys(descriptor.channels).sort()) ||
+        Object.entries(channels).some(([key, value]) => value !== descriptor.channels[key]))
+        throw Error("SQLJS_SAVER_COMMIT_SCOPE_INVALID")
+      SqlJsSaver.prototype.readCommittedCheckpoint.call(this, receipt)
+      return descriptor
+    })
+  }
+
+  /** Exact native data for host compaction reconciliation; this does not mint a write receipt. */
+  async readCompactionCheckpoint(config: RunnableConfig): Promise<{
+    tuple: CheckpointTuple
+    descriptor: SqlJsSaverPreparedCheckpointDescriptor
+    assertCurrent(): void
+  } | undefined> {
+    const fixed = { ...config, configurable: { ...config.configurable } }
+    return this.withDatabaseOperation(async () => {
+      const captured = await SqlJsSaver.prototype.getExactTupleForLegacyMigration.call(this, fixed)
+      captured.assertCurrent()
+      if (!captured.tuple) return undefined
+      if (captured.tuple.pendingWrites?.length) throw Error("SQLJS_SAVER_COMPACTION_PENDING_WRITES")
+      const values = this.db!.exec(`SELECT parent_checkpoint_id,type,checkpoint,metadata
+        FROM checkpoints WHERE thread_id=? AND checkpoint_ns=? AND checkpoint_id=?`, [
+        String(fixed.configurable.thread_id), String(fixed.configurable.checkpoint_ns ?? ""),
+        String(fixed.configurable.checkpoint_id)
+      ])[0]?.values[0]
+      captured.assertCurrent()
+      if (!values || typeof values[1] !== "string" ||
+        !(typeof values[2] === "string" || values[2] instanceof Uint8Array) ||
+        !(typeof values[3] === "string" || values[3] instanceof Uint8Array))
+        throw Error("SQLJS_SAVER_COMPACTION_RAW_CHECKPOINT_INVALID")
+      const tuple = captured.tuple
+      const channels = await this.digestCheckpointChannels(tuple.checkpoint.channel_values, captured.assertCurrent)
+      const descriptor = Object.freeze({ threadId: String(fixed.configurable.thread_id),
+        namespace: String(fixed.configurable.checkpoint_ns ?? ""), checkpointId: tuple.checkpoint.id,
+        parentCheckpointId: typeof values[0] === "string" ? values[0] : null,
+        checkpointType: values[1], checkpointBytesDigest: checkpointBytesDigest(values[2]),
+        metadataType: values[1], metadataBytesDigest: checkpointBytesDigest(values[3]),
+        channels })
+      captured.assertCurrent()
+      return { tuple, descriptor, assertCurrent: captured.assertCurrent }
+    })
+  }
+
+  /** Metadata-only exact-current check. Never loads latest history as a recovery fallback. */
+  async isCompactionCheckpointLatest(config: RunnableConfig): Promise<boolean> {
+    const fixed = { ...config.configurable }
+    return this.withDatabaseOperation(async () => {
+      const id = this.db!.exec(`SELECT checkpoint_id FROM checkpoints
+        WHERE thread_id=? AND checkpoint_ns=? ORDER BY checkpoint_ts DESC,checkpoint_id DESC LIMIT 1`,
+      [String(fixed.thread_id), String(fixed.checkpoint_ns ?? "")])[0]?.values[0]?.[0]
+      return typeof fixed.checkpoint_id === "string" && id === fixed.checkpoint_id
+    })
+  }
+
   /** Host-only read lifecycle. Never initializes or borrows a replacement database. */
   captureReadLifetime(): () => void {
     const database = this.db, generation = this.commitObserverGeneration
@@ -2324,12 +3140,112 @@ export class SqlJsSaver extends BaseCheckpointSaver {
     }
   }
 
+  private prepareNativeDataWindow(database: NativeSqliteAdapter, threadId: string, namespace: string) {
+    if (sharedIsProxy(this)) throw Error("SQLJS_SAVER_PREPARED_DATA_INVALID")
+    const lifeKeys = ["db", "pinnedFile", "databaseIdentity", "isSetup", "retired", "closePromise",
+      "commitObserverGeneration", "serde", "defaultMetadataSerializer"] as const
+    const lifeFields: PropertyDescriptor[] = []
+    for (let index = 0; index < lifeKeys.length; index++) {
+      const field = sharedDescriptor(this, lifeKeys[index])
+      if (!field || !("value" in field)) throw Error("SQLJS_SAVER_PREPARED_DATA_INVALID")
+      appendPreparedData(lifeFields, field)
+    }
+    if (this.serde !== this.defaultMetadataSerializer || !this.defaultMetadataCodec())
+      throw Error("SQLJS_SAVER_PREPARED_CODEC_UNSUPPORTED")
+    const serializerData = sharedContainerData(this.serde)
+    const serializerPrototypeData = sharedContainerData(sharedPrototype(this.serde))
+    const generation = this.commitObserverGeneration, identity = this.databaseIdentity,
+      file = this.pinnedFile, lifetime = originalPreparedLifetime(this)
+    const execution = preparedNativeExecution(database)
+    if (!execution || !identity || !file) throw Error("SQLJS_SAVER_PREPARED_DATA_INVALID")
+    const identityData = sharedContainerData(identity), fileData = sharedContainerData(file)
+    const schema = execution.prepareReadOne("SELECT rowid,rootpage,sql,type FROM main.sqlite_schema WHERE name=? COLLATE NOCASE")
+    const temporary = execution.prepareReadOne(`SELECT COUNT(*) AS count FROM temp.sqlite_schema
+      WHERE (lower(name) IN ('checkpoints','writes','checkpoint_message_snapshots','checkpoint_runtime_projections')
+        AND type IN ('table','view')) OR (type='trigger' AND lower(tbl_name) IN
+        ('checkpoints','writes','checkpoint_message_snapshots','checkpoint_runtime_projections'))`)
+    const triggers = execution.prepareReadOne(`SELECT COUNT(*) AS count FROM main.sqlite_schema
+      WHERE type='trigger' AND lower(tbl_name) IN
+        ('checkpoints','writes','checkpoint_message_snapshots','checkpoint_runtime_projections')`)
+    const names = ["checkpoints", "writes", "checkpoint_message_snapshots", "checkpoint_runtime_projections"]
+    const definitions: NonNullable<ReturnType<typeof schema>>[] = []
+    for (let index = 0; index < names.length; index++) {
+      const row = schema([names[index]])
+      if (!row || row.type !== "table" || typeof row.sql !== "string")
+        throw Error("SQLJS_SAVER_PREPARED_SCHEMA_UNSUPPORTED")
+      appendPreparedData(definitions, row)
+    }
+    const changes = execution.prepareReadOne("SELECT total_changes() AS changes")
+    const version = execution.prepareReadOne("PRAGMA main.data_version")
+    const beforeChanges = changes()?.changes, beforeVersion = version()?.data_version
+    const row = execution.prepareReadOne(`SELECT parent_checkpoint_id,prefix_length,message_count,
+      generation,type,suffix FROM main.checkpoint_message_snapshots
+      WHERE thread_id=? AND checkpoint_ns=? AND checkpoint_id=?`)
+    const assertCurrent = () => {
+      for (let index = 0; index < lifeKeys.length; index++)
+        if (!sharedSameField(sharedDescriptor(this, lifeKeys[index]), lifeFields[index]))
+          throw Error("SQLJS_SAVER_PREPARED_DATA_CHANGED")
+      serializerData(); serializerPrototypeData(); identityData(); fileData()
+      lifetime(); execution.assertDataCurrent()
+      if (this.db !== database || this.databaseIdentity !== identity || this.pinnedFile !== file ||
+        this.commitObserverGeneration !== generation || this.serde !== this.defaultMetadataSerializer)
+        throw Error("SQLJS_SAVER_PREPARED_DATA_CHANGED")
+      const actual = preparedStatSync(identity.path, { bigint: true })
+      const path = preparedRealpathSync(identity.logicalPath)
+      const samePath = preparedWindows
+        ? sharedApply(preparedLower, path, []) === sharedApply(preparedLower, identity.path, []) : path === identity.path
+      if (!samePath || actual.nlink > 1n || sharedString(actual.dev) !== file.dev ||
+        sharedString(actual.ino) !== file.ino || sharedString(actual.birthtimeNs) !== file.birthtime)
+        throw Error("SQLJS_SAVER_DATABASE_IDENTITY_CHANGED")
+      if (temporary()?.count !== 0 || triggers()?.count !== 0)
+        throw Error("SQLJS_SAVER_PREPARED_SCHEMA_UNSUPPORTED")
+      for (let index = 0; index < names.length; index++) {
+        const value = schema([names[index]]), original = definitions[index]!
+        if (!value || value.type !== original.type || value.rowid !== original.rowid ||
+          value.rootpage !== original.rootpage || value.sql !== original.sql)
+          throw Error("SQLJS_SAVER_PREPARED_SCHEMA_UNSUPPORTED")
+      }
+      execution.assertDataCurrent(); lifetime()
+    }
+    const parent = execution.prepareReadOne(`SELECT message_count,generation
+      FROM main.checkpoint_message_snapshots WHERE thread_id=? AND checkpoint_ns=? AND checkpoint_id=?`)
+    assertCurrent()
+    return { assertCurrent,
+      run: (sql: string, bindings?: readonly unknown[]) => execution.run(sql, bindings),
+      readParent: (checkpointId: string) => {
+        execution.assertDataCurrent()
+        const actual = parent([threadId, namespace, checkpointId])
+        return actual ? { count: actual.message_count, generation: actual.generation } : undefined
+      },
+      assertRaw: (facts: PreparedNativeDataFacts) => {
+      assertCurrent()
+      if (changes()?.changes === beforeChanges && version()?.data_version === beforeVersion) return
+      for (let index = 0; index < facts.chainSeal.length; index++) {
+        const item = facts.chainSeal[index]
+        const data = row([threadId, namespace, item.checkpointId])
+        if (!data || typeof data.type !== "string" || typeof data.generation !== "string" ||
+          !(data.parent_checkpoint_id === null || typeof data.parent_checkpoint_id === "string") ||
+          typeof data.prefix_length !== "number" || !preparedSafeInteger(data.prefix_length) || data.prefix_length < 0 ||
+          typeof data.message_count !== "number" || !preparedSafeInteger(data.message_count) || data.message_count < 0 ||
+          !(typeof data.suffix === "string" || sharedIsUint8Array(data.suffix)) ||
+          preparedRowDigest({ checkpointId: item.checkpointId,
+            parentCheckpointId: data.parent_checkpoint_id, prefixLength: data.prefix_length,
+            messageCount: data.message_count, generation: data.generation,
+            type: data.type, bytes: data.suffix }) !== item.rawDigest)
+          throw Error("SQLJS_SAVER_PREPARED_SOURCE_CHANGED")
+      }
+      assertCurrent()
+    } }
+  }
+
   private async putUnlocked(
     config: RunnableConfig,
     checkpoint: Checkpoint,
     metadata: CheckpointMetadata,
     assertCurrent?: () => void,
-    onCommitted?: () => void
+    onCommitted?: () => void,
+    onPrepared?: SqlJsSaverPreparedCheckpointObserver,
+    onPreparedData?: SqlJsSaverPreparedCheckpointObserver
   ): Promise<RunnableConfig> {
     await this.initialize()
     assertCurrent?.()
@@ -2348,6 +3264,11 @@ export class SqlJsSaver extends BaseCheckpointSaver {
       throw new Error('Missing "thread_id" field in passed "config.configurable".')
     }
 
+    const dataWindow = onPreparedData && this.serde === this.defaultMetadataSerializer && this.defaultMetadataCodec()
+      ? originalPreparedWindow(this, database, sharedString(thread_id), sharedString(checkpoint_ns)) : undefined
+    const inputCheckpointData = dataWindow ? sharedContainerData(checkpoint) : undefined
+    const inputMetadataData = dataWindow ? sharedContainerData(metadata) : undefined
+    const inputMetadataParents = dataWindow ? sharedContainerData(metadata.parents) : undefined
     const preparedCheckpoint = copyCheckpoint(checkpoint)
     const namespaceKey = checkpointMessageNamespaceKey(thread_id, checkpoint_ns)
     const messages = (preparedCheckpoint.channel_values as Record<string, unknown>).messages
@@ -2435,57 +3356,200 @@ export class SqlJsSaver extends BaseCheckpointSaver {
       throw new Error("Failed to serialize checkpoint and metadata to the same type.")
     }
 
+    let dataFacts: PreparedNativeDataFacts | undefined
+    const prepareData = dataWindow && onPreparedData ? async () => {
+      if (!this.databaseIdentity || !this.pinnedFile || !dataWindow)
+        throw Error("SQLJS_SAVER_PREPARED_DATA_INVALID")
+      const source: PreparedNativeDataSource = preparedFreeze({ file: preparedFreeze({ ...this.pinnedFile }),
+        parentCheckpointId: typeof parent_checkpoint_id === "string" ? parent_checkpoint_id : null,
+        checkpoint: preparedFreeze({ type: type1, bytes: serializedCheckpoint }),
+        metadata: preparedFreeze({ type: type2, bytes: serializedMetadata }),
+        messages: serializedMessageSuffix ? preparedFreeze({ type: serializedMessageSuffix[0],
+          bytes: serializedMessageSuffix[1], parentCheckpointId: messageSnapshotParentCheckpointId,
+          prefixLength: messageSnapshotPrefixLength, messageCount: externalMessageCount!,
+          expectedParentCount: messageSnapshotExpectedParentCount,
+          expectedParentGeneration: messageSnapshotExpectedParentGeneration }) : null })
+      const exact = preparedFreeze({ configurable: preparedFreeze({ thread_id,
+        checkpoint_ns, checkpoint_id: checkpoint.id }) })
+      const tuple: CheckpointTuple = { config: exact, checkpoint, metadata,
+        ...(typeof parent_checkpoint_id === "string" ? { parentConfig: { configurable: {
+          thread_id, checkpoint_ns, checkpoint_id: parent_checkpoint_id } } } : {}) }
+      const digest = preparedPlanDigest(source)
+      const checkpointData = sharedContainerData(checkpoint)
+      const tupleData = sharedContainerData(tuple)
+      const fixedPoint = checkpoint.id, fixedTimestamp = checkpoint.ts
+      let facts: PreparedNativeDataFacts | undefined
+      const current = () => {
+        dataWindow.assertCurrent()
+        inputCheckpointData?.(); inputMetadataData?.(); inputMetadataParents?.()
+        checkpointData(); tupleData()
+        if (checkpoint.id !== fixedPoint || checkpoint.ts !== fixedTimestamp ||
+          preparedPlanDigest(source) !== digest)
+          throw Error("SQLJS_SAVER_PREPARED_DATA_CHANGED")
+      }
+      const receipt = preparedFreeze({ [preparedCheckpointReceiptBrand]: true as const })
+      const record: PreparedCheckpointRecord = { database, generation: this.commitObserverGeneration,
+        destinationExisted: false, active: true, descriptor: undefined, sourceWrites: undefined,
+        data: { tuple, source, planDigest: digest, assertCurrent: current, facts: undefined,
+          assertRaw: facts => dataWindow.assertRaw(facts) } }
+      sharedApply(preparedWeakSet, this.#preparedCheckpointReceipts, [receipt, record])
+      try {
+        await onPreparedData(receipt)
+        readSqlJsSaverPreparedConversationData(this, receipt)
+        facts = record.data!.facts
+        if (!facts) throw Error("SQLJS_SAVER_PREPARED_DATA_UNVERIFIED")
+      } finally {
+        record.active = false
+        sharedApply(preparedWeakDelete, this.#preparedCheckpointReceipts, [receipt])
+      }
+      dataFacts = facts
+      return current
+    } : undefined
+    // This seal stays owned by this put after its callback-local receipt expires.
+    let assertSealedData: (() => void) | undefined
+    let sourceWrites: CompactionWriteBatchRecord | undefined
+    let sourceWritesDescriptor: SqlJsSaverCompactionWritesDescriptor | undefined
+    let legacyPrepared = false
+    const prepareLegacy = async () => {
+    if (onPrepared && !legacyPrepared) {
+      const generation = this.commitObserverGeneration
+      const channels = await this.digestCheckpointChannels(checkpoint.channel_values, assertCurrent)
+      const descriptor: SqlJsSaverPreparedCheckpointDescriptor = Object.freeze({
+        threadId: String(thread_id), namespace: String(checkpoint_ns), checkpointId: checkpoint.id,
+        parentCheckpointId: typeof parent_checkpoint_id === "string" ? parent_checkpoint_id : null,
+        checkpointType: type1, checkpointBytesDigest: checkpointBytesDigest(serializedCheckpoint),
+        metadataType: type2, metadataBytesDigest: checkpointBytesDigest(serializedMetadata),
+        channels
+      })
+      const receipt = Object.freeze({ [preparedCheckpointReceiptBrand]: true as const })
+      const destinationExisted = Boolean(database.exec(`SELECT 1 FROM checkpoints
+        WHERE thread_id=? AND checkpoint_ns=? AND checkpoint_id=? LIMIT 1`,
+      [String(thread_id), String(checkpoint_ns), checkpoint.id])[0]?.values.length)
+      if (database.exec(`SELECT 1 FROM writes
+        WHERE thread_id=? AND checkpoint_ns=? AND checkpoint_id=? LIMIT 1`,
+      [String(thread_id), String(checkpoint_ns), checkpoint.id])[0]?.values.length)
+        throw Error("SQLJS_SAVER_COMPACTION_PENDING_WRITES")
+      const record: PreparedCheckpointRecord = { database, generation, descriptor, destinationExisted,
+        active: true, data: undefined, sourceWrites: undefined }
+      sharedApply(preparedWeakSet, this.#preparedCheckpointReceipts, [receipt, record])
+      try {
+        await onPrepared(receipt)
+        SqlJsSaver.prototype.readPreparedCheckpoint.call(this, receipt)
+        sourceWrites = record.sourceWrites
+        sourceWritesDescriptor = sourceWrites?.descriptor
+      } finally {
+        record.active = false
+        sharedApply(preparedWeakDelete, this.#preparedCheckpointReceipts, [receipt])
+      }
+      legacyPrepared = true
+    }
+    }
+
     const checkpointTs =
       typeof preparedCheckpoint.ts === "string" ? preparedCheckpoint.ts : preparedCheckpoint.id
     const forkBoundaryMarker = checkpointMetadataHasForkBoundaryMarker(metadata) ? 1 : 0
     const nextSnapshotGeneration = serializedMessageSuffix ? randomUUID() : null
 
+    const parentChanged = () => {
+      if (!messageSnapshotParentCheckpointId) return false
+      const parent = dataWindow!.readParent(messageSnapshotParentCheckpointId)
+      return !parent || parent.count !== messageSnapshotExpectedParentCount ||
+        parent.generation !== messageSnapshotExpectedParentGeneration
+    }
+    const rebaseMessages = async () => {
+      messageSnapshotParentCheckpointId = null
+      messageSnapshotExpectedParentCount = null
+      messageSnapshotExpectedParentGeneration = null
+      messageSnapshotPrefixLength = 0
+      if (!Array.isArray(messages))
+        throw Error("Checkpoint message delta parent exists without an array payload")
+      serializedMessageSuffix = await this.serde.dumpsTyped(messages)
+      nextSnapshotDepth = 1
+      nextDeltaBytes = 0
+      shouldPruneMessageSnapshots = true
+      assertSealedData = undefined
+    }
+    const transaction = dataWindow ?? database
     let committed = false
     while (!committed) {
+      if (prepareData && !assertSealedData) {
+        try { assertSealedData = await prepareData() }
+        catch (error) {
+          // Only the original stale-parent condition may use the existing base reserialization.
+          // A codec/raw/schema/data-seal error is never converted into a retry.
+          if (error instanceof Error && error.message === "PREPARED_NATIVE_PREFIX_CHANGED" && parentChanged()) {
+            await rebaseMessages()
+            continue
+          }
+          throw error
+        }
+      }
+      if (onPrepared) await prepareLegacy()
       let transactionStarted = false
       try {
         // Recheck after namespace admission and every asynchronous serialization/rebase.
         // This host-only guard must run before any durable mutation, not just its observer.
         assertCurrent?.()
-        database.run("BEGIN IMMEDIATE")
+        transaction.run("BEGIN IMMEDIATE")
         transactionStarted = true
 
         if (messageSnapshotParentCheckpointId) {
-          const parentResult = database.exec(
+          const fixedParent = dataWindow?.readParent(messageSnapshotParentCheckpointId)
+          const parentResult = dataWindow ? undefined : database.exec(
             `SELECT message_count, generation FROM checkpoint_message_snapshots
              WHERE thread_id = ? AND checkpoint_ns = ? AND checkpoint_id = ?
              LIMIT 1`,
             [thread_id, checkpoint_ns, messageSnapshotParentCheckpointId]
           )
-          const persistedParentCount = Number(parentResult[0]?.values[0]?.[0])
-          const persistedParentGeneration = parentResult[0]?.values[0]?.[1]
+          const persistedParentCount = dataWindow ? fixedParent?.count : Number(parentResult?.[0]?.values[0]?.[0])
+          const persistedParentGeneration = dataWindow ? fixedParent?.generation : parentResult?.[0]?.values[0]?.[1]
           if (
-            !Number.isSafeInteger(persistedParentCount) ||
+            !(dataWindow ? typeof persistedParentCount === "number" && preparedSafeInteger(persistedParentCount)
+              : Number.isSafeInteger(persistedParentCount)) ||
             persistedParentCount !== messageSnapshotExpectedParentCount ||
             persistedParentGeneration !== messageSnapshotExpectedParentGeneration
           ) {
             // A different saver may have rebased and collected this parent while
             // serde was suspended. Release the writer lock before the expensive
             // full serialization, then retry as an independent base snapshot.
-            database.run("ROLLBACK")
+            transaction.run("ROLLBACK")
             transactionStarted = false
-            messageSnapshotParentCheckpointId = null
-            messageSnapshotExpectedParentCount = null
-            messageSnapshotExpectedParentGeneration = null
-            messageSnapshotPrefixLength = 0
-            if (!Array.isArray(messages)) {
-              throw new Error("Checkpoint message delta parent exists without an array payload")
-            }
-            serializedMessageSuffix = await this.serde.dumpsTyped(messages)
-            nextSnapshotDepth = 1
-            nextDeltaBytes = 0
-            shouldPruneMessageSnapshots = true
+            await rebaseMessages()
             continue
           }
         }
 
+        let preparedWrites: readonly (readonly unknown[])[] | undefined
+        if (sourceWrites) {
+          if (sourceWrites.phase !== "attached" || sourceWrites.database !== database ||
+            sourceWrites.generation !== this.commitObserverGeneration || this.retired || this.closePromise)
+            throw Error("SQLJS_SAVER_COMPACTION_BATCH_INVALID")
+          // This is the final source check, after every await and after the writer lock.
+          // Parent rebase has already succeeded; no staged write precedes a retry.
+          sourceWrites.assertSource()
+          if (dataWindow) assertCurrent?.()
+        }
+        if (dataWindow) {
+          assertSealedData?.()
+          if (!dataFacts) throw Error("SQLJS_SAVER_PREPARED_DATA_UNVERIFIED")
+          dataWindow.assertRaw(dataFacts)
+          if (sourceWrites) preparedWrites = preparedCompactionBindings(sourceWrites, sourceWritesDescriptor)
+        }
+        if (preparedWrites) {
+          for (let index = 0; index < preparedWrites.length; index++)
+            transaction.run(`INSERT OR REPLACE INTO writes
+              (thread_id,checkpoint_ns,checkpoint_id,task_id,idx,channel,type,value)
+              VALUES (?,?,?,?,?,?,?,?)`, preparedWrites[index])
+        } else if (sourceWrites) {
+          for (const operation of sourceWrites.operations) for (const row of operation.rows)
+            transaction.run(`INSERT OR REPLACE INTO writes
+              (thread_id,checkpoint_ns,checkpoint_id,task_id,idx,channel,type,value)
+              VALUES (?,?,?,?,?,?,?,?)`, [sourceWrites.source.threadId, sourceWrites.source.namespace,
+              sourceWrites.source.checkpointId, operation.taskId, row.idx, row.channel, row.type, row.value])
+        }
+
         if (serializedMessageSuffix) {
-          database.run(
+          transaction.run(
             `INSERT INTO checkpoint_message_snapshots
              (thread_id, checkpoint_ns, checkpoint_id, parent_checkpoint_id, prefix_length,
               message_count, generation, type, suffix)
@@ -2510,14 +3574,14 @@ export class SqlJsSaver extends BaseCheckpointSaver {
             ]
           )
         } else {
-          database.run(
+          transaction.run(
             `DELETE FROM checkpoint_message_snapshots
              WHERE thread_id = ? AND checkpoint_ns = ? AND checkpoint_id = ?`,
             [thread_id, checkpoint_ns, checkpoint.id]
           )
         }
 
-        database.run(
+        transaction.run(
           `INSERT OR REPLACE INTO checkpoints
            (thread_id, checkpoint_ns, checkpoint_id, parent_checkpoint_id, type, checkpoint,
             metadata, checkpoint_ts, fork_boundary_marker)
@@ -2534,7 +3598,7 @@ export class SqlJsSaver extends BaseCheckpointSaver {
             forkBoundaryMarker
           ]
         )
-        database.run(
+        transaction.run(
           `INSERT INTO checkpoint_runtime_projections
            (thread_id, checkpoint_ns, checkpoint_id, parent_checkpoint_id,
             checkpoint_ts, projection_version, type, runtime_checkpoint)
@@ -2562,15 +3626,16 @@ export class SqlJsSaver extends BaseCheckpointSaver {
             serializedRuntimeCheckpoint
           ]
         )
-        database.run("COMMIT")
+        transaction.run("COMMIT")
         transactionStarted = false
         committed = true
+        if (sourceWrites) sourceWrites.phase = "committed"
         // A host mutation must retain this fact even if a post-COMMIT read/observer fails.
         onCommitted?.()
       } catch (error) {
         if (transactionStarted) {
           try {
-            database.run("ROLLBACK")
+            transaction.run("ROLLBACK")
           } catch {
             // Preserve the put/serialization failure.
           }
@@ -2620,6 +3685,7 @@ export class SqlJsSaver extends BaseCheckpointSaver {
     config: RunnableConfig,
     updater: (metadata: CheckpointMetadata) => CheckpointMetadata
   ): Promise<CheckpointMetadata | undefined> {
+    return this.withDatabaseOperation(async () => {
     const threadId = config.configurable?.thread_id
     if (typeof threadId !== "string" || !threadId) {
       return this.updateCheckpointMetadataUnlocked(config, updater)
@@ -2633,6 +3699,8 @@ export class SqlJsSaver extends BaseCheckpointSaver {
     } finally {
       release()
     }
+  
+    })
   }
 
   private async updateCheckpointMetadataUnlocked(
@@ -2757,26 +3825,45 @@ export class SqlJsSaver extends BaseCheckpointSaver {
   async putWrites(config: RunnableConfig, writes: PendingWrite[], taskId: string,
     assertCurrent?: () => void): Promise<void> {
     assertCurrent?.()
-    const threadId = config.configurable?.thread_id
+    const configurable = config.configurable
+    const threadId = configurable?.thread_id
     if (typeof threadId !== "string" || !threadId) {
-      return this.putWritesUnlocked(config, writes, taskId, assertCurrent)
+      return this.withDatabaseOperation(() => this.putWritesUnlocked(config, writes, taskId, assertCurrent))
     }
-    const checkpointNs = config.configurable?.checkpoint_ns ?? ""
-    const intentKey = this.checkpointNamespaceQueueKey(threadId, checkpointNs)
+    const checkpointNs = configurable?.checkpoint_ns ?? ""
+    // The private writer consumes only these addresses, not public config brands or extra fields.
+    const fixedConfig: RunnableConfig = { configurable: {
+      thread_id: threadId, checkpoint_ns: checkpointNs, checkpoint_id: configurable?.checkpoint_id
+    } }
+    let intentKey = this.checkpointNamespaceQueueKey(threadId, checkpointNs)
+    const releaseIntent = (key: string) => {
+      const remaining = (checkpointNamespacePendingWriteIntents.get(key) ?? 1) - 1
+      if (remaining > 0) checkpointNamespacePendingWriteIntents.set(key, remaining)
+      else checkpointNamespacePendingWriteIntents.delete(key)
+    }
+    // A warm caller's intent is visible while initialization, admission or file checks await.
     checkpointNamespacePendingWriteIntents.set(
       intentKey,
       (checkpointNamespacePendingWriteIntents.get(intentKey) ?? 0) + 1
     )
-    let release: (() => void) | null = null
     try {
-      release = await this.acquireCheckpointNamespace(threadId, checkpointNs)
-      await this.putWritesUnlocked(config, writes, taskId, assertCurrent)
-    } finally {
-      release?.()
-      const remaining = (checkpointNamespacePendingWriteIntents.get(intentKey) ?? 1) - 1
-      if (remaining > 0) checkpointNamespacePendingWriteIntents.set(intentKey, remaining)
-      else checkpointNamespacePendingWriteIntents.delete(intentKey)
-    }
+      return await this.withDatabaseOperation(async () => {
+        // Initialization may resolve a logical alias to a different physical database key.
+        const physicalKey = this.checkpointNamespaceQueueKey(threadId, checkpointNs)
+        if (physicalKey !== intentKey) {
+          checkpointNamespacePendingWriteIntents.set(
+            physicalKey,
+            (checkpointNamespacePendingWriteIntents.get(physicalKey) ?? 0) + 1
+          )
+          releaseIntent(intentKey)
+          intentKey = physicalKey
+        }
+        const release = await this.acquireCheckpointNamespace(threadId, checkpointNs)
+        try {
+          await this.putWritesUnlocked(fixedConfig, writes, taskId, assertCurrent)
+        } finally { release() }
+      })
+    } finally { releaseIntent(intentKey) }
   }
 
   private async putWritesUnlocked(
@@ -2843,6 +3930,7 @@ export class SqlJsSaver extends BaseCheckpointSaver {
   }
 
   async deleteThread(threadId: string): Promise<void> {
+    return this.withDatabaseOperation(async () => {
     await this.initialize()
     if (!this.db) throw new Error("Database not initialized")
 
@@ -2859,6 +3947,8 @@ export class SqlJsSaver extends BaseCheckpointSaver {
       if (key.startsWith(cachePrefix)) this.hydratedCheckpointMessages.delete(key)
     }
 
+  
+    })
   }
 
   /**
@@ -2869,46 +3959,76 @@ export class SqlJsSaver extends BaseCheckpointSaver {
    * initialize()/mutation is refused. Call this, not close(), whenever the backing
    * file is being removed from disk.
    */
+  private assertExternalClose(): void {
+    if (checkpointDatabaseOperationIsCurrent(this) ||
+      checkpointDatabaseAdmissionIsCurrent(this.checkpointDatabaseKey))
+      throw new Error("SQLJS_SAVER_CLOSE_INSIDE_OPERATION")
+  }
+
   async retire(): Promise<void> {
+    this.assertExternalClose()
     this.retired = true
     await this.close()
   }
 
-  /** Close the database after a final WAL checkpoint. */
+  /** First revoke continuation authority, then wait for every actual owner/worker to finish. */
   async close(): Promise<void> {
-    if (this.closePromise) return this.closePromise
-    // A still-live observer may not borrow this Saver's next initialized DB incarnation.
+    this.assertExternalClose()
+    if (this.closePromise) {
+      await this.closePromise
+      return
+    }
     this.commitObserverGeneration += 1
-    const closePromise = (async () => {
-      const pendingInitialize = this.initializePromise
-      if (pendingInitialize) {
-        try {
-          await pendingInitialize
-        } catch {
-          // The initialize caller receives the original failure; still release any handle.
-        }
+    this.schemaWait?.abort(new Error("SQLJS_SAVER_CLOSING"))
+    const closePromise = (async (): Promise<SqlJsSaverCloseOutcome> => {
+      const initializing = this.initializePromise
+      let initializationFailure: { reason: unknown } | undefined
+      if (initializing) {
+        try { await initializing }
+        catch (reason) { initializationFailure = { reason } }
       }
-      const pendingFlush = this.flushPromise
-      if (pendingFlush) await pendingFlush
-      const database = this.db
-      let failure: unknown
-      if (database) {
+      await waitForCheckpointDatabaseOperations(this)
+      if (this.flushPromise) await this.flushPromise
+      return runCheckpointDatabaseMaintenance<SqlJsSaverCloseOutcome>(this.checkpointDatabaseKey, async () => {
+        const database = this.db
+        const file = this.pinnedFile
+        let skipped = initializationFailure
+        if (database && !this.retired) {
+          try {
+            if (!file || !this.isSetup) throw new Error("SQLJS_SAVER_DATABASE_IDENTITY_CHANGED")
+            await assertCheckpointDatabaseFileIdentity(this.dbPath, file)
+          } catch (reason) { skipped = { reason } }
+        }
+        if (this.retired) skipped = { reason: new Error("SQLJS_SAVER_OPERATION_EXPIRED") }
         this.db = null
         this.isSetup = false
-        try {
-          database.close({ checkpoint: !this.retired })
-        } catch (error) {
-          failure ??= error
+        this.pinnedFile = undefined
+        this.checkpointMessageWriteStates.clear()
+        this.hydratedCheckpointMessages.clear()
+        this.checkpointMessageRecoveryRequests.clear()
+        if (database) {
+          try { if (!skipped) database.flush("TRUNCATE") }
+          finally { database.close({ checkpoint: false }) }
         }
-      }
-      this.checkpointMessageWriteStates.clear()
-      this.hydratedCheckpointMessages.clear()
-      this.checkpointMessageRecoveryRequests.clear()
-      if (failure) throw failure
+        if (skipped) return { state: "skipped", reason: skipped.reason }
+        return { state: database ? "checkpointed" : "idle" }
+      })
     })().finally(() => {
       if (this.closePromise === closePromise) this.closePromise = null
     })
     this.closePromise = closePromise
-    return closePromise
+    await closePromise
   }
+}
+
+// Fixed private-data dispatch: a host callback cannot replace the actual Saver reader.
+const originalPreparedDataReader = SqlJsSaver.prototype.readPreparedConversationData
+const originalPreparedFactsReader = SqlJsSaver.prototype.readPreparedConversationDataFacts
+export function readSqlJsSaverPreparedConversationData(saver: SqlJsSaver,
+  receipt: SqlJsSaverPreparedCheckpointReceipt): CheckpointTuple {
+  return sharedApply(originalPreparedDataReader, saver, [receipt]) as CheckpointTuple
+}
+export function readSqlJsSaverPreparedConversationDataFacts(saver: SqlJsSaver,
+  receipt: SqlJsSaverPreparedCheckpointReceipt, signal?: AbortSignal): Promise<PreparedNativeDataFacts> {
+  return sharedApply(originalPreparedFactsReader, saver, [receipt, signal]) as Promise<PreparedNativeDataFacts>
 }

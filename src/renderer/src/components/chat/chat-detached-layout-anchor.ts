@@ -1,4 +1,5 @@
 import { isChatRowPresented } from "./chat-row-presentation"
+import { canOwnDetachedChatViewport, subscribeChatViewportScrollOwners } from "./chat-viewport-scroll-owner"
 import { canChatViewportConsumeScrollGesture, isChatViewportScrollKey } from "./chat-scroll-gesture"
 import {
   CHAT_SCROLL_NAVIGATION_EVENT,
@@ -91,7 +92,7 @@ export function installChatDetachedLayoutAnchor({
 
   const enabled = (): boolean => {
     const next = readLease()
-    const navigating = isChatScrollNavigationActive(viewport)
+    const navigating = !canOwnDetachedChatViewport(viewport)
     if (next !== lease || next === null || navigating) {
       anchor = null
       releaseOwnership()
@@ -432,6 +433,11 @@ export function installChatDetachedLayoutAnchor({
   viewport.addEventListener("scroll", onScroll, { passive: true })
   viewport.addEventListener(CHAT_DETACHED_ANCHOR_OWNER_RELEASED, onOwnerReleased)
   viewport.addEventListener(CHAT_SCROLL_NAVIGATION_EVENT, onNavigationChange)
+  const stopOwners = subscribeChatViewportScrollOwners(viewport, (kind, active) => {
+    if (kind !== "session-restore" && kind !== "history-restore") return
+    if (active) onNavigationChange()
+    else onOwnerReleased()
+  })
   viewport.addEventListener("wheel", onWheel, { passive: true })
   viewport.addEventListener("touchstart", onTouchStart, { passive: true })
   viewport.addEventListener("touchmove", onTouchMove, { passive: true })
@@ -445,6 +451,7 @@ export function installChatDetachedLayoutAnchor({
   // A restoration can release before this observer mounts. Acquire its existing geometry now.
   capture()
   return () => {
+    stopOwners()
     releaseOwnership()
     if (gestureTimer !== undefined) clearTimeout(gestureTimer)
     mutation.disconnect()

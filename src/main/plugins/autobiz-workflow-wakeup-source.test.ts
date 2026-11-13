@@ -1,10 +1,11 @@
 import { createHash } from "node:crypto"
-import { existsSync, readFileSync } from "node:fs"
+import { readFileSync } from "node:fs"
 import { mkdtemp, readFile, rm } from "node:fs/promises"
 import { dirname, join, resolve } from "node:path"
 import { tmpdir } from "node:os"
 import ts from "typescript"
-import { afterEach, expect, it } from "vitest"
+import { afterAll, afterEach, beforeAll, expect, it } from "vitest"
+import { createAutobizSourceFixture } from "./autobiz-source-fixture.test-helper"
 import { prepareAutobizWorkflowWakeupSource, transformAutobizWorkflowWakeup,
   AUTOBIZ_WORKFLOW_TARGET_SHA256 } from "../../../scripts/prepare-autobiz-workflow-wakeup-source"
 import { snapshotDerivationSource } from "./derivation-source"
@@ -15,8 +16,14 @@ import reviewed from "./autobiz-business-kernel-reviewed.json"
 import mergeReviewed from "./autobiz-business-kernel-merge-reviewed.json"
 import wakeupReviewed from "./autobiz-business-kernel-wakeup-reviewed.json"
 
-const source = resolve("output/mods-s2-s5-20261017/autobiz-plan-merge-compatible-v3")
-const delivered = resolve("output/deliveries/mods-creator-workflow-wakeup-20261017-v102-v2/autobiz-complete-wakeup")
+let source: string, delivered: string
+let fixture: Awaited<ReturnType<typeof createAutobizSourceFixture>>
+beforeAll(async () => {
+  fixture = await createAutobizSourceFixture()
+  source = fixture.merge
+  delivered = await fixture.assemble("wakeup")
+}, 120000)
+afterAll(async () => { await fixture?.close() })
 const roots: string[] = []
 const sha = (value: string | Buffer) => createHash("sha256").update(value).digest("hex")
 afterEach(async () => {
@@ -42,7 +49,7 @@ it("adds only an explicit version and one exact module byte pin, preserving both
   expect(isReviewedAutobizKernelIdentity({ id: "someone-else", version: "1.0.2" })).toBe(false)
 })
 
-it.skipIf(!existsSync(source))("changes only dispatcher coordination, never original stages/gates/journal or fallback time", async () => {
+it("changes only dispatcher coordination, never original stages/gates/journal or fallback time", async () => {
   const before = await readFile(join(source, "workflows/code-batched-execution.workflow.js"))
   const after = await transformAutobizWorkflowWakeup(before)
   expect(sha(after)).toBe(AUTOBIZ_WORKFLOW_TARGET_SHA256)
@@ -61,7 +68,7 @@ it.skipIf(!existsSync(source))("changes only dispatcher coordination, never orig
   expect(after.toString("utf8")).toContain("const DISPATCH_POLL_INTERVAL_MS = 30 * 60 * 1000;")
 })
 
-it.skipIf(!existsSync(source))("creates an independent no-overwrite 1.0.2 source with exactly four declared changes", async () => {
+it("creates an independent no-overwrite 1.0.2 source with exactly four declared changes", async () => {
   const root = await mkdtemp(join(tmpdir(), "autobiz-wakeup-"))
   roots.push(root)
   const before = await snapshotDerivationSource(source)
@@ -78,7 +85,7 @@ it.skipIf(!existsSync(source))("creates an independent no-overwrite 1.0.2 source
   expect((await snapshotDerivationSource(source)).digest).toBe(before.digest)
 }, 60000)
 
-it.skipIf(!existsSync(delivered))("admits actual new native assembly and rejects rehashed Workflow/Hook/version tampering", async () => {
+it("admits actual new native assembly and rejects rehashed Workflow/Hook/version tampering", async () => {
   const snapshot = await snapshotDerivationSource(delivered)
   expect(isReviewedAutobizProtocol(snapshot)).toBe(true)
   expect(verifyReviewedBusinessAssembly(snapshot, wakeupReviewed)).toBe(true)

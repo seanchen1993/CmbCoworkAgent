@@ -258,15 +258,14 @@ function ListFixture({ count }: { count: number }): React.JSX.Element {
   const viewportRef = useRef<HTMLDivElement>(null)
   const props = useMemo<ChatMessageVirtualListProps>(
     () => ({
-      messages: Array.from({ length: count }, (_, index) => ({
+      projection: { messages: Array.from({ length: count }, (_, index) => ({
         id: `message-${index}`,
         role: "assistant",
         created_at: new Date(index),
         content: `paragraph ${index} **bold** and code.\n\n`.repeat(80)
-      })),
+      })), contentVersion: 0, structureVersion: 0 },
       visibleMessageIndexes: Array.from({ length: count }, (_, index) => index),
       lastUserMessageIndex: -1,
-      contentVersion: 0,
       historyHasMore: false,
       historyPageLoading: false,
       historyRemainingCount: 0,

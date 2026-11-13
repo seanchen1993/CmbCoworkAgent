@@ -1,0 +1,15 @@
+{
+  "name": "knowledge-collector",
+  "version": "1.0.0",
+  "description": "知识库文件收集脚本 - 解析知识库md文档头信息，筛选Product Knowledge和Service Knowledge类型文件",
+  "main": "collect-knowledge.js",
+  "scripts": {
+    "start": "node collect-knowledge.js"
+  },
+  "dependencies": {
+    "gray-matter": "^4.0.3"
+  },
+  "engines": {
+    "node": ">=12.0.0"
+  }
+}

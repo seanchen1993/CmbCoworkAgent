@@ -1,5 +1,6 @@
 import { validateFunctionDisplaySnapshot, type FunctionDisplaySnapshot } from "../../../../shared/mods/v2/display-snapshot"
 import { FunctionDisplayContent } from "./FunctionDisplayContent"
+import { functionMessageTextMode } from "../../../../shared/mods/v2/host-message"
 import { useModsChatScope, useModsChatReady, useModsChatLoadError, useModsChatCurrent,
   useModsChatPresentationCache } from "../../lib/mods-chat-scope"
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type SyntheticEvent } from "react"
@@ -25,6 +26,8 @@ import { paneFocusElement } from "../../lib/function-pane-focus"
 import { functionFocusTargets } from "../../../../shared/mods/v2/focus"
 import { FunctionSiteLifetime, type FunctionSiteTicket } from "../../lib/function-site-lifecycle"
 import { functionSitePriority, functionSiteQueue } from "../../lib/function-site-queue"
+import { readFunctionSite, renderFunctionSite } from "../../lib/function-site-read"
+import { captureFunctionMessageViewport, type FunctionMessageViewport } from "../../lib/function-message-viewport"
 import { observeFunctionSiteVisibility } from "../../lib/function-site-visibility"
 import { retainsFunctionSitePresentation } from "../../lib/function-site-transition"
 import { FunctionSiteRecovery, functionSiteErrorCode,
@@ -32,9 +35,10 @@ import { FunctionSiteRecovery, functionSiteErrorCode,
 import { validateFunctionNativeContent } from "../../../../shared/mods/v2/engine"
 import { functionInlineLabel, functionInlineTree, functionNativeHint,
   functionNativeProps } from "../../lib/function-native-content"
-import { functionSitePresentationKey,
-  type CachedFunctionSitePresentation, type FunctionSiteProgressLease,
+import { functionSitePresentationIdentity, functionSitePresentationKeyAtWidth,
   type FunctionSitePresentationCache } from "../../lib/function-site-presentation"
+import { FunctionSitePresentationController, planFunctionSiteInput,
+  type FunctionSitePresentationPlan } from "../../lib/function-site-presentation-controller"
 import { functionSiteLayoutContainer, observeFunctionSiteGeometry,
   type FunctionSiteGeometry } from "../../lib/function-site-geometry"
 import { observeFunctionSiteLayoutWidth } from "../../lib/function-site-width"
@@ -239,7 +243,6 @@ function FunctionSiteSurface({
     presentationCurrent?: () => boolean
   } | null>(null)
   const projectionRef = useRef(projection)
-  projectionRef.current = projection
   const scopeCurrent = useModsChatCurrent(threadId)
   const [inactive, setInactive] = useState<{ ticket: FunctionSiteTicket; inputKey: string; inputRevision: number } | null>(null)
   const [error, setError] = useState("")
@@ -262,112 +265,56 @@ function FunctionSiteSurface({
   const frameProgressEpoch = (value: NonNullable<typeof frame>): number =>
     committedProgressEpoch.current?.frame === value
       ? committedProgressEpoch.current.epoch : value.prefixEpoch
-  const input = isFunctionDockedSite(component) ? { ...facts, ...geometry } : facts
-  const inputKey = JSON.stringify(input)
+  const input = useMemo(() => isFunctionDockedSite(component) ? { ...facts, ...geometry } : facts,
+    [component, facts, geometry])
+  const inputKey = useMemo(() => JSON.stringify(input), [input])
   const presentationIdentity = presentationId ?? messageId
   const viewportWidth = typeof window === "undefined" ? 0 : window.innerWidth
-  const presentationKey = useMemo(
-    () =>
-      functionSitePresentationKey(threadId, component, presentationIdentity, inputKey, viewportWidth),
-    [threadId, component, presentationIdentity, inputKey, viewportWidth]
-  )
+  const inputPresentationIdentity = useMemo(() => functionSitePresentationIdentity(
+    threadId, component, presentationIdentity, inputKey), [threadId, component, presentationIdentity, inputKey])
+  const presentationKey = useMemo(() => functionSitePresentationKeyAtWidth(inputPresentationIdentity, viewportWidth),
+    [inputPresentationIdentity, viewportWidth])
   const presentationRow = presentationIdentity
     ? JSON.stringify([component, presentationIdentity]) : undefined
   const presentationKeyRef = useRef(presentationKey)
-  presentationKeyRef.current = presentationKey
   // A pending first read may finish for an earlier assistant/tool progress prefix. Any intervening
   // replacement (including A -> B -> A) irreversibly ends that prefix lineage.
   const prefixLineage = useRef({ key: inputKey, epoch: 0 })
-  if (prefixLineage.current.key !== inputKey) {
-    const append = ["AssistantMessage", "ToolGroup"].includes(component) &&
-      retainsFunctionSitePresentation(component, prefixLineage.current.key, input)
-    prefixLineage.current = { key: inputKey, epoch: prefixLineage.current.epoch + (append ? 0 : 1) }
-  }
-  const committedCached = useRef<{
-    cached: CachedFunctionSitePresentation; key: string | null; inputKey: string
-    renderer: typeof renderNative; epoch: number; width: number
-    cache: FunctionSitePresentationCache; row: string | undefined
-  } | null>(null)
-  const progressLease = useRef<{
-    lease: FunctionSiteProgressLease; inputKey: string; renderer: typeof renderNative
-    epoch: number; width: number
-  } | null>(null)
+  // A draft render compares with the last committed facts. It cannot advance the
+  // input revision or end a live prefix when React abandons its work.
+  const inputVersion = useRef({ key: inputKey, revision: 0 })
+  const draftInput = planFunctionSiteInput(component, input, inputKey,
+    { ...inputVersion.current, epoch: prefixLineage.current.epoch })
+  const inputRevision = draftInput.revision, prefixEpoch = draftInput.epoch
+  const [presentationController] = useState(() => new FunctionSitePresentationController<typeof renderNative>())
+  const progressLease = useMemo(() => ({ get current() { return presentationController.lease() ?? null } }),
+    [presentationController])
   const releaseProgressLease = (): void => {
-    progressLease.current?.lease.release()
-    progressLease.current = null
-    committedCached.current = null
+    presentationController.reset()
   }
-  const presentationInput = useRef({ inputKey, key: presentationKey, width: viewportWidth })
-  const leased = progressLease.current
-  if (leased && (!scopeCurrent() || !leased.lease.current() ||
-    leased.epoch !== prefixLineage.current.epoch ||
-    !retainsFunctionSitePresentation(component, leased.inputKey, input))) releaseProgressLease()
-  if (presentationInput.current.inputKey !== inputKey) {
-    const previous = presentationInput.current
-    const committed = committedCached.current
-    const progress = ["AssistantMessage", "ToolGroup"].includes(component) &&
-      Boolean(renderNative || fallback === undefined) &&
-      retainsFunctionSitePresentation(component, previous.inputKey, input)
-    if (!progress) releaseProgressLease()
-    if (progress && !progressLease.current && committed && scopeCurrent() &&
-      committed.cache === presentationCache && committed.row === presentationRow &&
-      committed.inputKey === previous.inputKey && committed.epoch === prefixLineage.current.epoch) {
-      const lease = presentationCache?.consumeProgress(committed.key, committed.cached, presentationRow)
-      if (lease) progressLease.current = { lease, inputKey: committed.inputKey,
-        renderer: committed.renderer, epoch: committed.epoch, width: committed.width }
-    }
-    // Consumption already revoked the old exact key and pending cache admission. Other
-    // transitions retain the original fail-closed path, including A -> B -> A.
-    if (progressLease.current?.lease.key !== previous.key)
-      presentationCache?.invalidateKey(previous.key, false, presentationRow)
-    // A committed drawing may still belong to an earlier width's exact key. Input
-    // replacement must retire that original key too, so resizing back cannot revive it.
-    if (committed && committed.key !== previous.key &&
-      progressLease.current?.lease.key !== committed.key)
-      presentationCache?.invalidateKey(committed.key, false, presentationRow)
-  }
-  presentationInput.current = { inputKey, key: presentationKey, width: viewportWidth }
   const [presentationRevision, setPresentationRevision] = useState(0)
-  const exactCachedPresentation = useMemo(() => presentationCache?.read(presentationKey) ?? null,
-    [presentationCache, presentationKey, presentationRevision])
-  // Width is renderer geometry, not a new host input for these message sites. Preserve
-  // only this mounted, already committed inert drawing while it reflows. Cold mounts
-  // still use the exact width-keyed cache; every original expiry/revocation stays live.
-  const committed = committedCached.current
-  const layoutCached = committed && committed.width !== viewportWidth &&
-    committed.cache === presentationCache && committed.row === presentationRow &&
-    committed.inputKey === inputKey && committed.epoch === prefixLineage.current.epoch &&
-    scopeCurrent() && committed.cached.current() ? committed : null
-  const cachedPresentation = progressLease.current?.lease ?? exactCachedPresentation ?? layoutCached?.cached
-  const cachedPresentationKey = progressLease.current?.lease.key ??
-    (exactCachedPresentation ? presentationKey : layoutCached?.key ?? presentationKey)
-  const cachedRenderer = progressLease.current ? progressLease.current.renderer :
-    exactCachedPresentation ? renderNative : layoutCached?.renderer ?? renderNative
-  const cachedViewportWidth = progressLease.current?.width ??
-    (exactCachedPresentation ? viewportWidth : layoutCached?.width ?? viewportWidth)
+  const presentationPlan = presentationController.plan({ component, cache: presentationCache,
+    key: presentationKey, row: presentationRow, input, inputKey, epoch: prefixEpoch,
+    width: viewportWidth, renderer: renderNative, canRetain: Boolean(renderNative || fallback === undefined),
+    current: scopeCurrent })
+  const cachedPresentation = presentationPlan.selection?.cached
+  const cachedPresentationKey = presentationPlan.selection?.key ?? presentationKey
+  const cachedRenderer = presentationPlan.selection ? presentationPlan.selection.renderer : renderNative
+  const cachedViewportWidth = presentationPlan.selection?.width ?? viewportWidth
   const cachedPresentationRef = useRef(cachedPresentation)
-  cachedPresentationRef.current = cachedPresentation
   const cachedSection = useRef<HTMLDivElement>(null)
-  const [cachedGeometry, setCachedGeometry] = useState<{ presentation: object; width: number } | null>(null)
+  const [cachedGeometry, setCachedGeometry] = useState<{
+    presentation: object; width: number; layoutWidth: number
+  } | null>(null)
   const measuredPresentation = useRef<{
     frame: NonNullable<typeof frame>
     geometry: FunctionSiteGeometry
   } | null>(null)
   const pendingPrefix = useRef<{ key: string; epoch: number } | null>(null)
   const rendererRef = useRef(renderNative)
-  rendererRef.current = renderNative
   // A -> B -> A still needs a fresh protected read; equal facts do not revive old callbacks.
-  const inputVersion = useRef({ key: inputKey, revision: 0 })
-  if (inputVersion.current.key !== inputKey) {
-    inputVersion.current = { key: inputKey, revision: inputVersion.current.revision + 1 }
-    // A facts change ends the redraw-only exemption. Ordinary progress must independently
-    // satisfy its own narrow rule; returning to an older input never restores its revision.
-    redrawPresentation.current = null
-  }
-  const inputRevision = inputVersion.current.revision
   const lastInputRevision = useRef(inputRevision)
   const frameRef = useRef(frame)
-  frameRef.current = frame
   const [, setRedrawRevision] = useState(0)
   const nativePresentation = useRef<{
     frame: NonNullable<typeof frame>
@@ -377,68 +324,127 @@ function FunctionSiteSurface({
     projection: NonNullable<typeof projection>
     renderNative: typeof renderNative
   } | null>(null)
+  // Host results may arrive before React commits their first DOM. Their delegate
+  // can render that protected result, but is never a committed continuity baseline.
+  const [pendingRenderers] = useState(() => new WeakMap<object, {
+    renderer: typeof renderNative; revision: number; epoch: number
+  }>())
+  const pendingFrame = frame && pendingRenderers.get(frame)
+  const pendingProjection = projection && pendingRenderers.get(projection)
+  const pendingFrameCurrent = pendingFrame?.revision === inputVersion.current.revision &&
+    pendingFrame?.epoch === prefixLineage.current.epoch
+  const pendingProjectionCurrent = pendingProjection?.revision === inputVersion.current.revision &&
+    pendingProjection?.epoch === prefixLineage.current.epoch
   // A nativeUnchanged delegate without renderNative would otherwise use the caller's
   // latest raw fallback. Retained presentations may only render captured protected props.
   const canRetain = Boolean(renderNative || fallback === undefined)
   const canRetainRef = useRef(canRetain)
-  canRetainRef.current = canRetain
   const snapshot = frame?.ticket.current() && frame.owner === ownerRef.current &&
     (frame.inputRevision === inputRevision || (canRetain &&
-      (!renderNative || nativePresentation.current?.frame === frame) &&
-      (redrawPresentation.current?.frame === frame
-        ? redrawPresentation.current.revision === inputRevision && redrawPresentation.current.inputKey === inputKey
+      (!renderNative || nativePresentation.current?.frame === frame || pendingFrameCurrent) &&
+      (redrawPresentation.current?.frame === frame && redrawPresentation.current.inputKey === inputKey
+        ? redrawPresentation.current.revision === inputRevision
         : (!["AssistantMessage", "ToolGroup"].includes(component) ||
-          frameProgressEpoch(frame) === prefixLineage.current.epoch) &&
-          retainsFunctionSitePresentation(component, frame.inputKey, input))))
+          frameProgressEpoch(frame) === prefixEpoch) &&
+          retainsFunctionSitePresentation(component, frame.inputKey, input, inputKey))))
     ? frame.snapshot : null
   // Cache admission is optional retention, not the authority of an already committed view.
   // Only an uninterrupted append lineage may retain protected data for an older input.
   const projected = projection?.ticket.current() && scopeCurrent() && (
     (projection.inputRevision === inputRevision && projection.inputKey === inputKey) ||
-    (canRetain && projection.prefixEpoch === prefixLineage.current.epoch &&
-      (!renderNative || projectionPresentation.current?.projection === projection) &&
-      retainsFunctionSitePresentation(component, projection.inputKey, input))) ? projection : null
-  const projectedGeometry = useRef<{ projection: NonNullable<typeof projection>; geometry: FunctionSiteGeometry } | null>(null)
+    (canRetain && projection.prefixEpoch === prefixEpoch &&
+      (!renderNative || projectionPresentation.current?.projection === projection || pendingProjectionCurrent) &&
+      retainsFunctionSitePresentation(component, projection.inputKey, input, inputKey))) ? projection : null
+  const projectedRenderer = projected?.inputRevision === inputRevision ? renderNative :
+    projectionPresentation.current?.projection === projected
+      ? projectionPresentation.current.renderNative : pendingProjectionCurrent ? pendingProjection?.renderer : undefined
+  const presentationRenderer = frame?.inputRevision === inputRevision ? renderNative :
+    nativePresentation.current?.frame === frame ? nativePresentation.current.renderNative :
+      pendingFrameCurrent ? pendingFrame?.renderer : undefined
+  const snapshotRef = useRef(snapshot)
+  const inputRef = useRef(input)
+  const committedPlan = useRef<FunctionSitePresentationPlan<typeof renderNative> | null>(null)
+  const currentLayout = (): boolean => presentationController.isCommitted(committedPlan.current)
+  const acceptedLayout = (): boolean => committedPlan.current === presentationPlan && currentLayout()
+  // Publish the actual DOM choice before measurements and passive read scheduling.
+  // All event/read callbacks keep using the committed facts during speculative renders.
+  useLayoutEffect(() => {
+    const cachedCommitted = Boolean(!snapshot && !projected && !error &&
+      !(inactive?.ticket.current() && inactive.inputRevision === inputRevision) &&
+      cachedSection.current && cachedPresentation)
+    const outcome = presentationController.commit(presentationPlan, cachedCommitted)
+    if (outcome.kind === "accepted") {
+      committedPlan.current = presentationPlan
+      if (inputVersion.current.key !== inputKey) redrawPresentation.current = null
+      inputVersion.current = { key: inputKey, revision: inputRevision }
+      prefixLineage.current = { key: inputKey, epoch: prefixEpoch }
+      presentationKeyRef.current = presentationKey
+      cachedPresentationRef.current = progressLease.current?.lease ?? cachedPresentation
+      rendererRef.current = renderNative
+      canRetainRef.current = canRetain
+      frameRef.current = snapshot ? frame : null
+      projectionRef.current = projected
+      snapshotRef.current = snapshot
+      inputRef.current = input
+      if (snapshot && frame) {
+        if (nativePresentation.current?.frame !== frame) committedProgressEpoch.current = null
+        nativePresentation.current = { frame, renderNative: presentationRenderer }
+        pendingRenderers.delete(frame)
+      }
+      if (projected) {
+        projectionPresentation.current = { projection: projected, renderNative: projectedRenderer }
+        pendingRenderers.delete(projected)
+      }
+    }
+    if (outcome.kind === "stale") committedPlan.current = null
+    if (outcome.redraw) setPresentationRevision(revision => revision + 1)
+  })
+  const projectedGeometry = useRef<{ projection: NonNullable<typeof projection>; geometry: FunctionSiteGeometry
+    viewport?: FunctionMessageViewport } | null>(null)
   useLayoutEffect(() => {
     const node = section.current
-    if (!presentationCache || !node || !projected || !presentationKey) return
+    if (!acceptedLayout() || !presentationCache || !node || !projected || !presentationKey) return
+    const protectedText = projected.snapshot.data.hostMessage?.text
+    const retainViewport = typeof protectedText === "string" && protectedText.length > 60 * 1024
     return observeFunctionSiteGeometry(node, geometry => {
-      if (projectionRef.current === projected && projected.ticket.current() &&
+      if (currentLayout() && projectionRef.current === projected && projected.ticket.current() &&
         projected.inputRevision === inputVersion.current.revision) {
-        projectedGeometry.current = { projection: projected, geometry }
+        const previous = projectedGeometry.current
+        const viewport = retainViewport ? captureFunctionMessageViewport(node, protectedText) : undefined
+        projectedGeometry.current = { projection: projected, geometry,
+          viewport: viewport ?? (previous?.projection === projected &&
+            previous.geometry.height === geometry.height &&
+            previous.geometry.layoutWidth === geometry.layoutWidth ? previous.viewport : undefined) }
         presentationCache.measure(presentationKey, component, geometry, projected.snapshot.key)
       }
-    })
-  }, [presentationCache, projected, presentationKey, component])
+    }, retainViewport)
+  }, [presentationCache, projected, presentationKey, component, presentationRevision])
   useLayoutEffect(() => () => {
     const current = projectionRef.current
-    if (!presentationCache || !current?.ticket.current() || !current.presentationCurrent ||
+    if (!currentLayout() || !presentationCache || !current?.ticket.current() || !current.presentationCurrent ||
       current.snapshot.expiresAt <= Date.now() ||
       current.inputRevision !== inputVersion.current.revision || !canRetainRef.current) return
     const measured = projectedGeometry.current
-    const bounds = measured?.projection === current ? measured.geometry : { height: 0, width: 0 }
+    let bounds = measured?.projection === current ? measured.geometry : { height: 0, width: 0 }
+    let viewport = measured?.projection === current ? measured.viewport : undefined
+    const node = section.current, protectedText = current.snapshot.data.hostMessage?.text
+    // Navigation may happen in the same task as a scroll/expand, before the batched
+    // geometry RAF. Take one final bounded reading sample while this DOM is still mounted.
+    if (node?.isConnected && typeof protectedText === "string" && protectedText.length > 60 * 1024) {
+      const latest = captureFunctionMessageViewport(node, protectedText)
+      if (latest) {
+        const range = node.ownerDocument.createRange()
+        range.selectNodeContents(node)
+        const rect = range.getBoundingClientRect()
+        range.detach()
+        bounds = { height: rect.height, width: rect.width }
+        viewport = latest
+      }
+    }
     presentationCache.saveData(presentationKeyRef.current, current.snapshot.data,
-      bounds.height, current.presentationCurrent, bounds.width, current.snapshot.key)
+      bounds.height, current.presentationCurrent, bounds.width, current.snapshot.key,
+      viewport)
   }, [presentationCache])
-  // Keep the renderer actually committed with this protected frame, including local expansion
-  // state. During a progress read, a new caller closure can contain unprotected input/results.
-  useLayoutEffect(() => {
-    if (snapshot && frame && frame.ticket.current() && frame.inputRevision === inputRevision)
-      nativePresentation.current = { frame, renderNative }
-  }, [snapshot, frame, inputRevision, renderNative])
-  useLayoutEffect(() => {
-    if (projected && projected.inputRevision === inputRevision)
-      projectionPresentation.current = { projection: projected, renderNative }
-  }, [projected, inputRevision, renderNative])
-  const projectedRenderer = projected?.inputRevision === inputRevision ? renderNative :
-    projectionPresentation.current?.projection === projected
-      ? projectionPresentation.current.renderNative : undefined
-  const presentationRenderer = frame?.inputRevision === inputRevision ? renderNative :
-    nativePresentation.current?.frame === frame ? nativePresentation.current.renderNative : undefined
-  const snapshotRef = useRef(snapshot)
-  snapshotRef.current = snapshot
-  const inputRef = useRef(input)
-  inputRef.current = input
   const refreshRef = useRef<() => void>(() => {})
   const inputRefreshRef = useRef<() => void>(() => {})
   const retryRef = useRef<() => void>(() => {})
@@ -447,17 +453,7 @@ function FunctionSiteSurface({
   const applyingFocus = useRef(false)
   const pending = useRef(0)
   useLayoutEffect(() => {
-    // Only a cached DOM branch actually committed to the screen may seed a lease.
-    committedCached.current = !snapshot && !projected && !error &&
-      !(inactive?.ticket.current() && inactive.inputRevision === inputRevision) &&
-      !progressLease.current && cachedSection.current && presentationCache &&
-      cachedPresentation?.current()
-      ? exactCachedPresentation ? { cached: exactCachedPresentation, key: presentationKey, inputKey, renderer: renderNative,
-          epoch: prefixLineage.current.epoch, width: viewportWidth, cache: presentationCache,
-          row: presentationRow } : layoutCached : null
-  })
-  useLayoutEffect(() => {
-    if (snapshot || !presentationCache || !cachedPresentation) return
+    if (!acceptedLayout() || snapshot || !presentationCache || !cachedPresentation) return
     const changed = () => {
       if (!cachedPresentation.current()) setPresentationRevision((revision) => revision + 1)
     }
@@ -465,38 +461,48 @@ function FunctionSiteSurface({
     const expiry = setTimeout(changed, Math.max(0, cachedPresentation.expiresAt - Date.now()) + 1)
     if (!cachedPresentation.current()) changed()
     return () => { stop(); clearTimeout(expiry) }
-  }, [snapshot, presentationCache, cachedPresentation, cachedPresentationKey])
+  }, [snapshot, presentationCache, cachedPresentation, cachedPresentationKey, presentationRevision])
   useLayoutEffect(() => {
     const node = cachedSection.current
     const presentation = cachedPresentation?.presentation
-    if (!node || !presentation || snapshot) return
+    if (!acceptedLayout() || !node || !presentation || snapshot) return
+    // A retained reading window is positioned only at its exact allocated width.
+    // Establish that geometry before paint, then observe subsequent reflow.
+    if (presentation.messageViewport) {
+      const width = node.getBoundingClientRect().width
+      const layoutWidth = functionSiteLayoutContainer(node)?.clientWidth ?? width
+      setCachedGeometry(previous => previous?.presentation === presentation && previous.width === width &&
+        previous.layoutWidth === layoutWidth ? previous : { presentation, width, layoutWidth })
+    }
     const observer = new ResizeObserver((entries) => {
+      if (!currentLayout() || cachedPresentationRef.current?.identity !== cachedPresentation?.identity) return
       const entry = entries.find(value => value.target === node)
       if (!entry) return
       const width = entry.borderBoxSize?.[0]?.inlineSize ?? entry.contentRect.width
+      const layoutWidth = functionSiteLayoutContainer(node)?.clientWidth ?? width
       setCachedGeometry((previous) => previous?.presentation === presentation && previous.width === width
-        ? previous : { presentation, width })
+        && previous.layoutWidth === layoutWidth ? previous : { presentation, width, layoutWidth })
     })
     observer.observe(node)
     return () => observer.disconnect()
-  }, [snapshot, cachedPresentation?.presentation])
+  }, [snapshot, cachedPresentation?.presentation, presentationRevision])
   useLayoutEffect(() => {
     const node = section.current
-    if (!presentationCache || !node || !snapshot || !frame || !presentationKey) return
+    if (!acceptedLayout() || !presentationCache || !node || !snapshot || !frame || !presentationKey) return
     return observeFunctionSiteGeometry(node, geometry => {
-      if (frameRef.current === frame && frame.ticket.current() &&
+      if (currentLayout() && frameRef.current === frame && frame.ticket.current() &&
         frame.inputRevision === inputVersion.current.revision) {
         measuredPresentation.current = { frame, geometry }
         presentationCache.measure(presentationKey, component, geometry)
       }
     })
-  }, [presentationCache, snapshot, frame, presentationKey, component])
+  }, [presentationCache, snapshot, frame, presentationKey, component, presentationRevision])
   useLayoutEffect(() => () => {
     // Deletion interleaves DOM writes across rows. Never force layout here: use the last
     // observation for this exact protected frame; a cold frame can retain its natural size.
     const current = frameRef.current
     const node = section.current
-    if (!presentationCache || !current?.ticket.current() || !current.presentationCurrent ||
+    if (!currentLayout() || !presentationCache || !current?.ticket.current() || !current.presentationCurrent ||
       current.owner !== ownerRef.current || current.inputRevision !== inputVersion.current.revision ||
       !canRetainRef.current || !node) return
     const measured = measuredPresentation.current
@@ -614,7 +620,16 @@ function FunctionSiteSurface({
     live.current = true
     const lifetime = new FunctionSiteLifetime()
     const pendingReads = new AbortController()
-    const siteVisibility = observeFunctionSiteVisibility(section.current, () => functionSiteQueue.refresh())
+    const deferInitialDurationRead = component === "TurnDuration" &&
+      typeof IntersectionObserver !== "undefined" && section.current?.isConnected === true
+    let firstReadStarted = false
+    let wakeVisibleDuration: (() => void) | undefined
+    const siteVisibility = observeFunctionSiteVisibility(section.current, () => {
+      functionSiteQueue.refresh()
+      wakeVisibleDuration?.()
+    })
+    const waitingForDurationVisibility = (): boolean =>
+      deferInitialDurationRead && !firstReadStarted && !siteVisibility.visible()
     lifetimeRef.current = lifetime
     let stopped = false
     let owner: string | null = null
@@ -653,11 +668,11 @@ function FunctionSiteSurface({
     const schedule = (delay = 0): void => {
       if (stopped || sourceRetiring) return
       queued = true
-      if (running || hidden() || timer !== undefined) return
+      if (running || hidden() || timer !== undefined || waitingForDurationVisibility()) return
       const ticket = lifetime.capture()
       timer = setTimeout(() => {
         timer = undefined
-        if (!ticket.current() || stopped || hidden()) return
+        if (!ticket.current() || stopped || hidden() || waitingForDurationVisibility()) return
         queued = false
         void refresh()
       }, delay)
@@ -673,7 +688,7 @@ function FunctionSiteSurface({
       setFailureCode("")
       const ticket = lifetime.capture()
       const capturedInput = inputRef.current
-      const capturedInputKey = JSON.stringify(capturedInput)
+      const capturedInputKey = inputVersion.current.key
       const capturedInputRevision = inputVersion.current.revision
       const capturedEpoch = prefixLineage.current.epoch
       const capturedRenderer = rendererRef.current
@@ -681,10 +696,11 @@ function FunctionSiteSurface({
       pendingPrefix.current = { key: capturedInputKey, epoch: capturedEpoch }
       const current = (): boolean => running === attempt && ticket.current() && !hidden() && !sourceRetiring && (
         (capturedInputRevision === inputVersion.current.revision &&
-          capturedInputKey === JSON.stringify(inputRef.current)) ||
+          capturedInputKey === inputVersion.current.key) ||
         (["AssistantMessage", "ToolGroup"].includes(component) && canRetainRef.current &&
           capturedEpoch === prefixLineage.current.epoch &&
-          retainsFunctionSitePresentation(component, capturedInputKey, inputRef.current)))
+          retainsFunctionSitePresentation(
+            component, capturedInputKey, inputRef.current, inputVersion.current.key)))
       let retryDelay: number | undefined
       const remount = (): void => {
         // Retirement can race with a committed source replacement. Revoke the old
@@ -706,12 +722,27 @@ function FunctionSiteSurface({
         // Keep admission and its first drawing in one fair queue job. Requeueing a mounted
         // owner behind every other cold mount needlessly delayed the first readable message.
         // Both IPC calls retain their original host checks; stale mounts are still released.
-        const drawing = await functionSiteQueue.run(current, async () => {
-          if (!owner) {
+        const mayStart = deferInitialDurationRead ? () => {
+          if (!current()) return false
+          if (!waitingForDurationVisibility()) return true
+          queued = true
+          return false
+        } : current
+        const drawing = await functionSiteQueue.run(mayStart, async () => {
+          if (deferInitialDurationRead) firstReadStarted = true
+          const hostMessage = ["UserMessage", "AssistantMessage"].includes(component) &&
+            typeof capturedInput.text === "string" &&
+            functionMessageTextMode(capturedInput.text) === "host-message"
+          // Crossing the guest input ceiling changes the host read path, not this
+          // component's identity. Keep the committed drawing until its protected
+          // host-message replacement is ready; an owned render cannot accept it.
+          if (!owner || hostMessage) {
             const projectionReadCurrent = presentationCache?.captureProjectionRead()
             const outcome = typeof window.api.mods.siteRead === "function"
-              ? await window.api.mods.siteRead(threadId, component, capturedInput,
-                  presentationId, messageId, expectedRequestId, ownerRequired || undefined)
+              ? await readFunctionSite(window.api.mods, {
+                  threadId, component, props: capturedInput, presentationId, messageId,
+                  expectedRequestId, ownerRequired: ownerRequired || undefined
+                }, pendingReads.signal)
               : await window.api.mods.siteMountOutcome(threadId, component, messageId, expectedRequestId)
                 .then(outcome => outcome.state === "mounted" ? { ...outcome, snapshot: null } : outcome)
             if (!current()) {
@@ -727,6 +758,7 @@ function FunctionSiteSurface({
               projectionRef.current = null
               setProjection(null)
               setError("")
+              releaseOwner()
               return
             }
             if (outcome.state === "retired") {
@@ -750,20 +782,24 @@ function FunctionSiteSurface({
               releaseProgressLease()
               const nextProjection = { snapshot: outcome.snapshot, ticket, inputKey: capturedInputKey,
                 inputRevision: capturedInputRevision, prefixEpoch: capturedEpoch, presentationCurrent }
-              projectionPresentation.current = { projection: nextProjection, renderNative: capturedRenderer }
-              projectionRef.current = nextProjection
+              pendingRenderers.set(nextProjection, { renderer: capturedRenderer,
+                revision: inputVersion.current.revision, epoch: prefixLineage.current.epoch })
               setProjection(nextProjection)
               setFrame(null)
+              releaseOwner()
               setInactive(null)
               setError("")
               return
             }
+            if (owner && owner !== outcome.owner) releaseOwner()
             owner = outcome.owner
             ownerRef.current = owner
             if (outcome.snapshot) return { capturedOwner: owner, result: outcome.snapshot }
           }
           const capturedOwner = owner
-          const result = await window.api.mods.siteRender(threadId, capturedOwner, capturedInput)
+          const result = await renderFunctionSite(window.api.mods, {
+            threadId, owner: capturedOwner, props: capturedInput
+          }, pendingReads.signal)
           return { capturedOwner, result }
         }, queuePriority, pendingReads.signal)
         if (!drawing) return
@@ -778,8 +814,8 @@ function FunctionSiteSurface({
             inputRevision: capturedInputRevision, prefixEpoch: capturedEpoch,
             owner: capturedOwner!, presentationCurrent }
           // Capture the delegate paired with this read, never a later raw-input closure.
-          nativePresentation.current = { frame: nextFrame, renderNative: capturedRenderer }
-          committedProgressEpoch.current = null
+          pendingRenderers.set(nextFrame, { renderer: capturedRenderer,
+            revision: inputVersion.current.revision, epoch: prefixLineage.current.epoch })
           setFrame(nextFrame)
           projectionRef.current = null
           setProjection(null)
@@ -818,7 +854,8 @@ function FunctionSiteSurface({
                 redrawPresentation.current.inputKey === capturedInputKey
               if (!currentRedraw && (!canRetainRef.current || !previous?.ticket.current() ||
                 previous.owner !== owner || previous.inputKey === capturedInputKey ||
-                !retainsFunctionSitePresentation(component, previous.inputKey, capturedInput))) invalidate()
+                !retainsFunctionSitePresentation(
+                  component, previous.inputKey, capturedInput, capturedInputKey))) invalidate()
             }
             const delay = recovery.failed(true)
             if (delay !== undefined) {
@@ -851,6 +888,10 @@ function FunctionSiteSurface({
       }
     }
     const update = (): void => schedule(recovery.notificationDelay(Date.now()))
+    // Offscreen elapsed-time labels can wait without occupying the shared background slot.
+    if (deferInitialDurationRead) wakeVisibleDuration = () => {
+      if (!firstReadStarted && queued && siteVisibility.visible()) update()
+    }
     const reset = (): void => {
       sourceRetiring = false
       ownerRequired = false
@@ -868,18 +909,22 @@ function FunctionSiteSurface({
       const previousProjection = projectionRef.current
       const retainedProjection = previousProjection?.ticket.current() && canRetainRef.current &&
         previousProjection.prefixEpoch === prefixLineage.current.epoch &&
-        retainsFunctionSitePresentation(component, previousProjection.inputKey, inputRef.current)
+        retainsFunctionSitePresentation(
+          component, previousProjection.inputKey, inputRef.current, inputVersion.current.key)
       const pending = pendingPrefix.current
       const firstPrefix = !previous && ["AssistantMessage", "ToolGroup"].includes(component) && canRetainRef.current &&
         pending && pending.epoch === prefixLineage.current.epoch &&
-        retainsFunctionSitePresentation(component, pending.key, inputRef.current)
+        retainsFunctionSitePresentation(
+          component, pending.key, inputRef.current, inputVersion.current.key)
       const retainedLease = progressLease.current && progressLease.current.lease.current() &&
         progressLease.current.epoch === prefixLineage.current.epoch &&
-        retainsFunctionSitePresentation(component, progressLease.current.inputKey, inputRef.current)
+        retainsFunctionSitePresentation(
+          component, progressLease.current.inputKey, inputRef.current, inputVersion.current.key)
       if (!retainedLease && !retainedProjection && !firstPrefix && (!canRetainRef.current || !previous?.ticket.current() || previous.owner !== owner ||
         (["AssistantMessage", "ToolGroup"].includes(component) &&
           frameProgressEpoch(previous) !== prefixLineage.current.epoch ||
-          !retainsFunctionSitePresentation(component, previous.inputKey, inputRef.current)))) invalidate()
+          !retainsFunctionSitePresentation(
+            component, previous.inputKey, inputRef.current, inputVersion.current.key)))) invalidate()
       setError("")
       update()
     }
@@ -912,12 +957,13 @@ function FunctionSiteSurface({
         if ([`site:${owner}`, `site-redraw:${owner}`, `site-invalidated:${owner}`].includes(event.scope))
           presentationCache?.invalidateKey(presentationKeyRef.current, true, presentationRow)
         if (event.scope === `site-redraw:${owner}`) {
+          presentationController.reset()
           // A redraw is a new protected presentation, not an append-only input update.
           // Even a compatible pending prefix must not publish across that revision.
           const previousEpoch = prefixLineage.current.epoch++
           const previous = frameRef.current
           const currentRevision = inputVersion.current.revision
-          const currentInputKey = JSON.stringify(inputRef.current)
+          const currentInputKey = inputVersion.current.key
           const eligible = canRetainRef.current &&
             previous?.ticket.current() && previous.owner === owner &&
             nativePresentation.current?.frame === previous &&
@@ -927,7 +973,8 @@ function FunctionSiteSurface({
                 redrawPresentation.current.inputKey === currentInputKey) ||
               ((!["AssistantMessage", "ToolGroup"].includes(component) ||
                 frameProgressEpoch(previous) === previousEpoch) &&
-                retainsFunctionSitePresentation(component, previous.inputKey, inputRef.current)))
+                retainsFunctionSitePresentation(
+                  component, previous.inputKey, inputRef.current, currentInputKey)))
           if (eligible && previous) {
             const revision = ++inputVersion.current.revision
             // This is a new drawing revision, not a facts change. Do not route it through
@@ -1032,7 +1079,7 @@ function FunctionSiteSurface({
     const owner = ownerRef.current
     if (!pane || !owner || document.hidden || !frame?.ticket.current() ||
       frame.inputRevision !== inputVersion.current.revision ||
-      frame.inputKey !== JSON.stringify(inputRef.current)) return
+      frame.inputKey !== inputVersion.current.key) return
     const ticket = lifetimeRef.current?.capture()
     if (!ticket) return
     pending.current++
@@ -1049,7 +1096,7 @@ function FunctionSiteSurface({
       })
       if (!ticket.current() || ownerRef.current !== owner ||
         frame.inputRevision !== inputVersion.current.revision ||
-      frame.inputKey !== JSON.stringify(inputRef.current)) return
+      frame.inputKey !== inputVersion.current.key) return
       if (document.hidden) {
         if (kind !== "change") refreshRef.current()
         return
@@ -1075,7 +1122,7 @@ function FunctionSiteSurface({
     } catch {
       if (ticket.current() && ownerRef.current === owner &&
         frame.inputRevision === inputVersion.current.revision &&
-        frame.inputKey === JSON.stringify(inputRef.current)) {
+        frame.inputKey === inputVersion.current.key) {
         if (!document.hidden) setError("界面已更新或操作未完成，请在当前界面重试。")
         refreshRef.current()
       }
@@ -1092,7 +1139,7 @@ function FunctionSiteSurface({
       frame.inputRevision === inputVersion.current.revision
     const currentProjection = projection?.ticket.current() && scopeCurrent() &&
       projection.inputRevision === inputVersion.current.revision &&
-      projection.inputKey === JSON.stringify(inputRef.current)
+      projection.inputKey === inputVersion.current.key
     if (document.hidden || (!currentInactive && !currentFrame && !currentProjection)) {
       event.preventDefault()
       event.stopPropagation()
@@ -1174,7 +1221,7 @@ function FunctionSiteSurface({
           owner={ownerRef.current ?? undefined}
           isCurrent={() => Boolean(frame?.ticket.current() &&
             frame.inputRevision === inputVersion.current.revision &&
-        frame.inputKey === JSON.stringify(inputRef.current))} />
+        frame.inputKey === inputVersion.current.key)} />
         </div>
       )}
       {projected && <div data-function-site-projected className="contents"
@@ -1186,16 +1233,44 @@ function FunctionSiteSurface({
       </div>}
       {!snapshot && !projected && !isInactive && !error && (cachedPresentation?.current() ?
         <div ref={cachedSection} data-function-site-cached inert aria-disabled="true"
-          style={cachedViewportWidth === viewportWidth &&
+          style={{ position: "relative", ...(cachedViewportWidth === viewportWidth &&
             cachedGeometry?.presentation === cachedPresentation.presentation &&
             Math.abs(cachedGeometry.width - cachedPresentation.presentation.width) < 1
-            ? { minHeight: cachedPresentation.presentation.height } : undefined}
+            ? { minHeight: cachedPresentation.presentation.height } : {}) }}
           onClickCapture={blockCachedInteraction} onKeyDownCapture={blockCachedInteraction}
           onSubmitCapture={blockCachedInteraction} onInputCapture={blockCachedInteraction}
           onChangeCapture={blockCachedInteraction}>
-          {cachedPresentation.presentation.hostMessage ? <FunctionDisplayContent
-            data={{ component, hostMessage: cachedPresentation.presentation.hostMessage }}
-            renderNative={cachedRenderer} /> : <Element node={cachedPresentation.presentation.tree!} busy act={async () => {}}
+          {cachedPresentation.presentation.hostMessage ? <>
+            <FunctionDisplayContent
+              data={{ component, hostMessage: cachedPresentation.presentation.hostMessage }}
+              renderNative={cachedRenderer} />
+            {cachedPresentation.presentation.hostMessagePreview && <>
+              <div data-function-message-preview data-chat-search-ignore role="status"
+                className="my-3 rounded-md border border-border/60 bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+                内容较长，已折叠中间 {cachedPresentation.presentation.hostMessagePreview.omittedCharacters.toLocaleString()} 个字符。正在读取完整内容…
+              </div>
+              <FunctionDisplayContent data={{ component, hostMessage: {
+                ...cachedPresentation.presentation.hostMessage,
+                text: cachedPresentation.presentation.hostMessagePreview.tail
+              } }} renderNative={cachedRenderer} />
+            </>}
+            {cachedPresentation.presentation.messageViewport &&
+              cachedViewportWidth === viewportWidth &&
+              cachedGeometry?.presentation === cachedPresentation.presentation &&
+              Math.abs(cachedGeometry.layoutWidth - cachedPresentation.presentation.messageViewport.layoutWidth) < 1 &&
+              <div data-function-message-viewport aria-label="上次阅读位置的受保护摘录"
+                className="bg-background text-foreground"
+                style={{ position: "absolute", left: 0, right: 0,
+                  top: cachedPresentation.presentation.messageViewport.top,
+                  height: cachedPresentation.presentation.messageViewport.height,
+                  overflow: "hidden", pointerEvents: "none" }}>
+                {cachedPresentation.presentation.messageViewport.pieces.map((piece, index) =>
+                  <div key={index} data-chat-search-text style={{ position: "absolute",
+                    top: piece.top - cachedPresentation.presentation.messageViewport!.top,
+                    left: piece.left, width: piece.width, font: piece.font,
+                    whiteSpace: "pre-wrap" }}>{piece.text}</div>)}
+              </div>}
+          </> : <Element node={cachedPresentation.presentation.tree!} busy act={async () => {}}
             renderEngine={(ref) => {
               const native = cachedPresentation.presentation.nativeContent
               const props = functionNativeProps(native, ref)

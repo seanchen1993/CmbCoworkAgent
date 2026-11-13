@@ -1,6 +1,6 @@
 --- a/dist/pregel/index.js
 +++ b/dist/pregel/index.js
-@@ -1,1173 +1,1636 @@
+@@ -1,1173 +1,1677 @@
 -import { CONFIG_KEY_CHECKPOINTER, CONFIG_KEY_CHECKPOINT_NS, CONFIG_KEY_NODE_FINISHED, CONFIG_KEY_READ, CONFIG_KEY_SEND, CONFIG_KEY_STREAM, INPUT, INTERRUPT, NULL_TASK_ID, PUSH, TASKS, isInterrupted } from "../constants.js";
 -import { GraphRecursionError, GraphValueError, InvalidUpdateError } from "../errors.js";
 -import { createCheckpoint, emptyChannels, getOnlyChannels } from "../channels/base.js";
@@ -1207,6 +1207,7 @@
 +const nativePregelWeakSet = WeakMap.prototype.set
 +const nativePregelWeakDelete = WeakMap.prototype.delete
 +const nativePregelThen = Promise.prototype.then
++const nativePregelPromise = Promise
 +const nativePregelOwnKeys = Reflect.ownKeys
 +const nativePregelBirths = new WeakMap()
 +const nativePregelOperations = new WeakMap()
@@ -1217,6 +1218,42 @@
 +const nativePregelCheckpointLoops = new WeakMap()
 +var nativePregelInitialized = false
 +
++// This is a physical write barrier, not an authority or a permission cache.
++function createNativePregelCheckpointBarrier(body, loop) {
++  "use strict"
++  nativePregelCheckpointAssertBody(body)
++  let settledPrefix = 0
++  return function awaitNativeCheckpointPrefix() {
++    "use strict"
++    const promises = loop.checkpointerPromises
++    const end = nativePregelGetOwn(promises, "length").value
++    if (end === settledPrefix) return undefined
++    if (end < settledPrefix) nativePregelInvalid(body.record)
++    const start = settledPrefix
++    return new nativePregelPromise(function observeCheckpointPrefix(resolve, reject) {
++      "use strict"
++      let remaining = end - start, failed = false, firstReason
++      function settled(rejected, reason) {
++        "use strict"
++        if (rejected && !failed) { failed = true; firstReason = reason }
++        remaining--
++        if (remaining !== 0) return
++        if (failed) reject(firstReason)
++        else { settledPrefix = end; resolve(undefined) }
++      }
++      for (let index = start; index < end; index++) {
++        try {
++          const field = nativePregelGetOwn(promises, index)
++          if (!field || !nativePregelGetOwn(field, "value")) nativePregelInvalid(body.record)
++          nativePregelApply(nativePregelThen, field.value, [
++            function checkpointFulfilled() { "use strict"; settled(false, undefined) },
++            function checkpointRejected(reason) { "use strict"; settled(true, reason) }
++          ])
++        } catch (reason) { settled(true, reason) }
++      }
++    })
++  }
++}
 +function nativePregelGet(map, key) {
 +  return nativePregelApply(nativePregelWeakGet, map, [key])
 +}
@@ -2671,12 +2708,14 @@
 +					...loop.config.configurable,
 +					[CONFIG_KEY_STREAM]: loop.stream
 +				};
-+				await this._runLoop({
-+					loop,
-+					runner,
-+					debug,
-+					config
-+				});
++				const runLoopParams = {
++					loop, runner, debug, config,
++					nativeCheckpointBarrier: nativeCheckpointBody ?
++						createNativePregelCheckpointBarrier(nativeCheckpointBody, loop) : undefined
++				};
++				if (nativeCheckpointBody)
++					await nativePregelApply(originalNativePregelRunLoopField.value, this, [runLoopParams]);
++				else await this._runLoop(runLoopParams);
 +				if (durability === "sync") await Promise.all(loop?.checkpointerPromises ?? []);
 +			} catch (e) {
 +				loopError = e;
@@ -2769,10 +2808,11 @@
 +		return chunks;
 +	}
 +	async _runLoop(params) {
-+		const { loop, runner, debug, config } = params;
++		const { loop, runner, debug, config, nativeCheckpointBarrier } = params;
 +		let tickError;
 +		try {
 +			while (await loop.tick({ inputKeys: this.inputChannels })) {
++				if (nativeCheckpointBarrier) await nativeCheckpointBarrier();
 +				for (const { task } of await loop._matchCachedWrites()) loop._outputWrites(task.id, task.writes, true);
 +				if (debug) printStepCheckpoint(loop.checkpointMetadata.step, loop.channels, this.streamChannelsList);
 +				if (debug) printStepTasks(loop.step, Object.values(loop.tasks));
@@ -2807,6 +2847,7 @@
 +const originalNativePregelStream = Object.getOwnPropertyDescriptor(Pregel.prototype, "stream").value;
 +const originalNativePregelIteratorOwner = Pregel.prototype;
 +const originalNativePregelIteratorField = Object.getOwnPropertyDescriptor(Pregel.prototype, "_streamIterator");
++const originalNativePregelRunLoopField = Object.getOwnPropertyDescriptor(Pregel.prototype, "_runLoop");
 +nativePregelInitialized = true;
 +export { Channel, Pregel, createNativePregelStreamOperation, executeNativePregelStreamOperation, readNativePregelStreamOperation, readNativePregelStreamSettlement, createNativePregelCheckpointIterator, readNativePregelCheckpointIteratorOrigin, claimNativePregelCheckpointCall, readNativePregelCheckpointCall, readNativePregelCheckpointSettlement, readNativePregelCheckpointLoopRequest, readNativePregelCheckpointExecution };
 +
@@ -2814,7 +2855,7 @@
 \ No newline at end of file
 --- a/dist/pregel/index.cjs
 +++ b/dist/pregel/index.cjs
-@@ -1,1175 +1,1657 @@
+@@ -1,1175 +1,1698 @@
 -Object.defineProperty(exports, Symbol.toStringTag, { value: "Module" });
 -const require_constants = require("../constants.cjs");
 -const require_errors = require("../errors.cjs");
@@ -4034,6 +4075,7 @@
 +const nativePregelWeakSet = WeakMap.prototype.set
 +const nativePregelWeakDelete = WeakMap.prototype.delete
 +const nativePregelThen = Promise.prototype.then
++const nativePregelPromise = Promise
 +const nativePregelOwnKeys = Reflect.ownKeys
 +const nativePregelBirths = new WeakMap()
 +const nativePregelOperations = new WeakMap()
@@ -4044,6 +4086,42 @@
 +const nativePregelCheckpointLoops = new WeakMap()
 +var nativePregelInitialized = false
 +
++// This is a physical write barrier, not an authority or a permission cache.
++function createNativePregelCheckpointBarrier(body, loop) {
++  "use strict"
++  nativePregelCheckpointAssertBody(body)
++  let settledPrefix = 0
++  return function awaitNativeCheckpointPrefix() {
++    "use strict"
++    const promises = loop.checkpointerPromises
++    const end = nativePregelGetOwn(promises, "length").value
++    if (end === settledPrefix) return undefined
++    if (end < settledPrefix) nativePregelInvalid(body.record)
++    const start = settledPrefix
++    return new nativePregelPromise(function observeCheckpointPrefix(resolve, reject) {
++      "use strict"
++      let remaining = end - start, failed = false, firstReason
++      function settled(rejected, reason) {
++        "use strict"
++        if (rejected && !failed) { failed = true; firstReason = reason }
++        remaining--
++        if (remaining !== 0) return
++        if (failed) reject(firstReason)
++        else { settledPrefix = end; resolve(undefined) }
++      }
++      for (let index = start; index < end; index++) {
++        try {
++          const field = nativePregelGetOwn(promises, index)
++          if (!field || !nativePregelGetOwn(field, "value")) nativePregelInvalid(body.record)
++          nativePregelApply(nativePregelThen, field.value, [
++            function checkpointFulfilled() { "use strict"; settled(false, undefined) },
++            function checkpointRejected(reason) { "use strict"; settled(true, reason) }
++          ])
++        } catch (reason) { settled(true, reason) }
++      }
++    })
++  }
++}
 +function nativePregelGet(map, key) {
 +  return nativePregelApply(nativePregelWeakGet, map, [key])
 +}
@@ -5498,12 +5576,14 @@
 +					...loop.config.configurable,
 +					[require_constants.CONFIG_KEY_STREAM]: loop.stream
 +				};
-+				await this._runLoop({
-+					loop,
-+					runner,
-+					debug,
-+					config
-+				});
++				const runLoopParams = {
++					loop, runner, debug, config,
++					nativeCheckpointBarrier: nativeCheckpointBody ?
++						createNativePregelCheckpointBarrier(nativeCheckpointBody, loop) : undefined
++				};
++				if (nativeCheckpointBody)
++					await nativePregelApply(originalNativePregelRunLoopField.value, this, [runLoopParams]);
++				else await this._runLoop(runLoopParams);
 +				if (durability === "sync") await Promise.all(loop?.checkpointerPromises ?? []);
 +			} catch (e) {
 +				loopError = e;
@@ -5596,10 +5676,11 @@
 +		return chunks;
 +	}
 +	async _runLoop(params) {
-+		const { loop, runner, debug, config } = params;
++		const { loop, runner, debug, config, nativeCheckpointBarrier } = params;
 +		let tickError;
 +		try {
 +			while (await loop.tick({ inputKeys: this.inputChannels })) {
++				if (nativeCheckpointBarrier) await nativeCheckpointBarrier();
 +				for (const { task } of await loop._matchCachedWrites()) loop._outputWrites(task.id, task.writes, true);
 +				if (debug) require_debug.printStepCheckpoint(loop.checkpointMetadata.step, loop.channels, this.streamChannelsList);
 +				if (debug) require_debug.printStepTasks(loop.step, Object.values(loop.tasks));
@@ -5634,6 +5715,7 @@
 +const originalNativePregelStream = Object.getOwnPropertyDescriptor(Pregel.prototype, "stream").value;
 +const originalNativePregelIteratorOwner = Pregel.prototype;
 +const originalNativePregelIteratorField = Object.getOwnPropertyDescriptor(Pregel.prototype, "_streamIterator");
++const originalNativePregelRunLoopField = Object.getOwnPropertyDescriptor(Pregel.prototype, "_runLoop");
 +nativePregelInitialized = true;
 +Object.defineProperty(exports, "createNativePregelStreamOperation", { value: createNativePregelStreamOperation, enumerable: true });
 +Object.defineProperty(exports, "executeNativePregelStreamOperation", { value: executeNativePregelStreamOperation, enumerable: true });
@@ -6253,7 +6335,7 @@
 +): NativePregelCheckpointCallSettlement | undefined
 --- a/dist/pregel/loop.js
 +++ b/dist/pregel/loop.js
-@@ -1,559 +1,810 @@
+@@ -1,559 +1,819 @@
 -import { CONFIG_KEY_CHECKPOINT_ID, CONFIG_KEY_CHECKPOINT_MAP, CONFIG_KEY_CHECKPOINT_NS, CONFIG_KEY_READ, CONFIG_KEY_RESUME_MAP, CONFIG_KEY_RESUMING, CONFIG_KEY_SCRATCHPAD, CONFIG_KEY_STREAM, INPUT, INTERRUPT, NULL_TASK_ID, PUSH, RESUME, _isSend, isCommand } from "../constants.js";
 -import { EmptyInputError, GraphInterrupt, isGraphInterrupt } from "../errors.js";
 -import { createCheckpoint, emptyChannels } from "../channels/base.js";
@@ -6843,6 +6925,14 @@
 +let nativeLoopBoundary = undefined
 +var nativeLoopInitialized = false
 +
++// Observe only settlement; the SDK keeps the original checkpoint chain for its later await.
++function observeNativePregelCheckpointChain(promise) {
++  "use strict"
++  void nativeLoopApply(nativeLoopThen, promise, [
++    function checkpointFulfilled() { "use strict"; return undefined },
++    function checkpointRejected() { "use strict"; return undefined }
++  ])
++}
 +function nativeLoopGet(map, key) {
 +  "use strict"
 +  return nativeLoopApply(nativeLoopWeakGet, map, [key])
@@ -7274,6 +7364,7 @@
 +		this._checkpointerChainedPromise = this._checkpointerChainedPromise.then(() => {
 +			return this.checkpointer?.put(input.config, input.checkpoint, input.metadata, input.newVersions);
 +		});
++		observeNativePregelCheckpointChain(this._checkpointerChainedPromise);
 +		this.checkpointerPromises.push(this._checkpointerChainedPromise);
 +	}
 +	/**
@@ -7627,7 +7718,7 @@
 \ No newline at end of file
 --- a/dist/pregel/loop.cjs
 +++ b/dist/pregel/loop.cjs
-@@ -1,559 +1,817 @@
+@@ -1,559 +1,826 @@
 -const require_constants = require("../constants.cjs");
 -const require_errors = require("../errors.cjs");
 -const require_base = require("../channels/base.cjs");
@@ -8224,6 +8315,14 @@
 +let nativeLoopBoundary = undefined
 +var nativeLoopInitialized = false
 +
++// Observe only settlement; the SDK keeps the original checkpoint chain for its later await.
++function observeNativePregelCheckpointChain(promise) {
++  "use strict"
++  void nativeLoopApply(nativeLoopThen, promise, [
++    function checkpointFulfilled() { "use strict"; return undefined },
++    function checkpointRejected() { "use strict"; return undefined }
++  ])
++}
 +function nativeLoopGet(map, key) {
 +  "use strict"
 +  return nativeLoopApply(nativeLoopWeakGet, map, [key])
@@ -8655,6 +8754,7 @@
 +		this._checkpointerChainedPromise = this._checkpointerChainedPromise.then(() => {
 +			return this.checkpointer?.put(input.config, input.checkpoint, input.metadata, input.newVersions);
 +		});
++		observeNativePregelCheckpointChain(this._checkpointerChainedPromise);
 +		this.checkpointerPromises.push(this._checkpointerChainedPromise);
 +	}
 +	/**

@@ -7,7 +7,8 @@ import { prepareAutobizKnowledgeMod } from "./prepare-autobiz-knowledge-mod"
 import {
   AUTOBIZ_UTEST_LITERAL_PATH,
   AUTOBIZ_UTEST_LITERAL_TO_SHA256,
-  AUTOBIZ_UTEST_LITERAL_WORKFLOW_SHA256
+  AUTOBIZ_UTEST_LITERAL_WORKFLOW_SHA256,
+  AUTOBIZ_UTEST_LITERAL_CURATED_TARGET_DIGEST
 } from "./prepare-autobiz-utest-literal-source"
 import {
   snapshotDerivationSource,
@@ -69,9 +70,9 @@ export async function packageAutobizUtestLiteralLibrary(
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error
   }
   const kernel = await snapshotDerivationSource(input.source)
-  assert.equal(
-    kernel.digest,
-    AUTOBIZ_UTEST_LIBRARY_SOURCE_DIGEST,
+  assert(
+    kernel.digest === AUTOBIZ_UTEST_LIBRARY_SOURCE_DIGEST ||
+      kernel.digest === AUTOBIZ_UTEST_LITERAL_CURATED_TARGET_DIGEST,
     "Exact reviewed 1.0.4 source required"
   )
   assert.equal(

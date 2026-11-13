@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto"
+import type { SqlJsSaverPreparedCheckpointReceipt } from "../checkpointer/sqljs-saver"
 import { types } from "node:util"
 import { createNativeThreadIdentityReader, createNativeJoinedThreadIdentityReader,
   NATIVE_JOINED_CURRENT_QUERY as JOINED_CURRENT_QUERY,
@@ -14,12 +15,12 @@ import { ModFunctionError } from "../../shared/mods/v2/contracts"
 import {
   captureThreadIncarnation,
   matchesThreadIncarnation,
-  originalMetadataInterpretation,
   type ThreadIncarnation
 } from "../services/thread-incarnation"
 import { deleteFunctionConversationThreadDataInTransaction } from "./function-conversation-cleanup"
 import { readFunctionConversationNativeSqliteCurrentExecution,
-  NativeSqliteAdapter, type NativeSqliteCurrentExecution,
+  captureFunctionConversationNativeSqlitePreparedExecution,
+  NativeSqliteAdapter, type NativeSqlitePreparedExecution, type NativeSqliteCurrentExecution,
   type NativeSqliteReadOne, type NativeSqliteValue } from "./native-sqlite-adapter"
 import { ensureFunctionConversationProjectionReceiptSchema } from "./function-conversation-projection-receipt"
 import { ensureFunctionConversationPresentationDispositionSchema } from
@@ -34,6 +35,7 @@ import {
   functionConversationMembershipDigest,
   functionConversationRowDigest,
   readFunctionConversationCheckpointMembership,
+  readPreparedFunctionConversationCheckpointMembership,
   type FunctionConversationCanonicalCut,
   type FunctionConversationCheckpointMembershipProof,
   type FunctionConversationCheckpointMembershipSnapshot
@@ -163,75 +165,158 @@ const CURRENT_TARGET_QUERY = `SELECT s.thread_id, s.incarnation_key, s.workspace
 const currentReads = new WeakMap<NativeSqliteAdapter, Map<string, NativeSqliteReadOne>>()
 const currentReadsInUse = new WeakMap<NativeSqliteAdapter, Set<string>>()
 const pureCurrentReaders = new WeakSet<NativeSqliteReadOne>()
-const currentDescriptor = Object.getOwnPropertyDescriptor, currentPrototype = Object.getPrototypeOf
-const currentFrozen = Object.isFrozen, currentApply = Reflect.apply
-const currentWeakHas = WeakSet.prototype.has, currentWeakAdd = WeakSet.prototype.add
-const currentJson = JSON, currentParse = JSON.parse, currentStringify = JSON.stringify
+const currentDescriptor = Object.getOwnPropertyDescriptor,
+  currentPrototype = Object.getPrototypeOf
+const currentFrozen = Object.isFrozen,
+  currentApply = Reflect.apply
+const currentWeakHas = WeakSet.prototype.has,
+  currentWeakAdd = WeakSet.prototype.add
+const currentStringify = JSON.stringify
+const originalPreparedMembershipReader = readPreparedFunctionConversationCheckpointMembership
+const originalPreparedRowDigest = functionConversationRowDigest
+const preparedNativeExecution = captureFunctionConversationNativeSqlitePreparedExecution
+let originalSharedStoreReceipt: FunctionConversationStore["readReceipt"]
+let originalPendingReceiptDataCheck: FunctionConversationStore["capturePendingCheckpointReceiptDataCheck"]
+let originalPreparedDecode: (store: FunctionConversationStore, row: SqlRow) => FunctionConversationRow
+let originalPreparedTransaction: <T>(store: FunctionConversationStore, run: () => T,
+  committing: () => void, execution: NativeSqlitePreparedExecution) => T
+let originalPreparedPersist: (store: FunctionConversationStore, target: FunctionConversationRef,
+  snapshot: FunctionConversationCheckpointMembershipSnapshot, execution: NativeSqlitePreparedExecution) => void
+const preparedRandomUUID = randomUUID
+const preparedParse = JSON.parse
+const preparedArray = Array.isArray
+const preparedCreateHash = createHash
+const preparedHashPrototype = Object.getPrototypeOf(createHash("sha256"))
+const preparedHashUpdate = preparedHashPrototype.update, preparedHashDigest = preparedHashPrototype.digest
+const preparedByteLength = Buffer.byteLength
+const preparedArrayPrototype = Array.prototype
+const preparedDefine = Object.defineProperty, preparedFreeze = Object.freeze
+function appendPreparedData<T>(array: T[], value: T): void {
+  const descriptor = { __proto__: null, value, writable: true, enumerable: true, configurable: true }
+  preparedDefine(array, array.length, descriptor)
+}
+function preparedJson(value: unknown): string {
+  if (currentDescriptor(currentObjectPrototype, "toJSON") ||
+    currentDescriptor(preparedArrayPrototype, "toJSON") ||
+    currentPrototype(preparedArrayPrototype) !== currentObjectPrototype)
+    fail("MODS_CONVERSATION_CHECKPOINT_MEMBERSHIP")
+  return currentStringify(value)
+}
+function preparedPayloadDigest(value: string): string {
+  const hash = preparedCreateHash("sha256")
+  currentApply(preparedHashUpdate, hash, [value])
+  return currentApply(preparedHashDigest, hash, ["hex"]) as string
+}
+function preparedIncarnationKey(value: ThreadIncarnation): string {
+  return value.token === null ? `["legacy",${currentStringify(value.legacyCreatedAt)}]` :
+    `["token",${currentStringify(value.token)}]`
+}
+function preparedTargetJson(target: FunctionConversationRef): string {
+  return preparedJson({ logicalSessionId: target.logicalSessionId, conversationId: target.conversationId,
+    branchId: target.branchId, threadId: target.threadId, workspace: target.workspace,
+    incarnation: preparedIncarnationKey(target.incarnation), checkpointNamespace: target.checkpointNamespace,
+    kind: target.kind })
+}
+const currentObjectPrototype = Object.prototype
 const currentNumber = Number
 const currentSafeInteger = Number.isSafeInteger
 const currentIsProxy = types.isProxy
 const originalMatches = matchesThreadIncarnation
-const incarnationRegexPrototype = RegExp.prototype
-const incarnationRegexTest = RegExp.prototype.test, incarnationRegexExec = RegExp.prototype.exec
-const currentMap = Map, currentSet = Set
+const currentMap = Map,
+  currentSet = Set
 function currentDataField(receiver: object, key: PropertyKey, value: unknown): boolean {
   const field = currentDescriptor(receiver, key)
   return !!field && "value" in field && field.value === value
 }
 
-
 function joinedCurrentTarget(target: FunctionConversationRef): boolean {
-  const parse = currentDescriptor(currentJson, "parse"), stringify = currentDescriptor(currentJson, "stringify")
-  const json = currentDescriptor(globalThis, "JSON"), number = currentDescriptor(globalThis, "Number")
-  if (!json || !("value" in json) || json.value !== currentJson ||
-    !number || !("value" in number) || number.value !== currentNumber ||
-    !parse || !("value" in parse) || parse.value !== currentParse ||
-    !stringify || !("value" in stringify) || stringify.value !== currentStringify ||
-    currentDescriptor(Object.prototype, "cmb_thread_incarnation") ||
-    currentDescriptor(Object.prototype, "toJSON") || currentDescriptor(Array.prototype, "toJSON") ||
-    !target || types.isProxy(target) || !currentFrozen(target) || currentPrototype(target) !== Object.prototype)
+  if (
+    !target ||
+    currentIsProxy(target) ||
+    !currentFrozen(target) ||
+    currentPrototype(target) !== currentObjectPrototype
+  )
     return false
-  const names = ["threadId", "conversationId", "branchId", "logicalSessionId", "workspace",
-    "checkpointNamespace", "kind"]
+  const names = [
+    "threadId",
+    "conversationId",
+    "branchId",
+    "logicalSessionId",
+    "workspace",
+    "checkpointNamespace",
+    "kind"
+  ]
   for (let index = 0; index < names.length; index++) {
     const field = currentDescriptor(target, names[index])
     if (!field || !("value" in field) || typeof field.value !== "string") return false
   }
   const incarnation = currentDescriptor(target, "incarnation")
-  if (!incarnation || !("value" in incarnation) || !incarnation.value || types.isProxy(incarnation.value) ||
-    !currentFrozen(incarnation.value) || currentPrototype(incarnation.value) !== Object.prototype) return false
+  if (
+    !incarnation ||
+    !("value" in incarnation) ||
+    !incarnation.value ||
+    currentIsProxy(incarnation.value) ||
+    !currentFrozen(incarnation.value) ||
+    currentPrototype(incarnation.value) !== currentObjectPrototype
+  )
+    return false
   const token = currentDescriptor(incarnation.value, "token")
   const time = currentDescriptor(incarnation.value, "legacyCreatedAt")
-  return !!token && "value" in token && (token.value === null || typeof token.value === "string" && !!token.value) &&
-    !!time && "value" in time && typeof time.value === "number" &&
-    currentSafeInteger(time.value) && time.value >= 0
+  return (
+    !!token &&
+    "value" in token &&
+    (token.value === null || (typeof token.value === "string" && !!token.value)) &&
+    !!time &&
+    "value" in time &&
+    typeof time.value === "number" &&
+    currentSafeInteger(time.value) &&
+    time.value >= 0
+  )
 }
 
-function assertJoinedCurrent(database: NativeSqliteAdapter, target: FunctionConversationRef,
-  execution: NativeSqliteCurrentExecution, sql = JOINED_CURRENT_QUERY): SqlRow {
-  const qualified = () => originalCurrentDispatch(database) && originalMetadataInterpretation() &&
-    matchesThreadIncarnation === originalMatches &&
-    currentDataField(incarnationRegexPrototype, "test", incarnationRegexTest) &&
-    currentDataField(incarnationRegexPrototype, "exec", incarnationRegexExec)
+function assertJoinedCurrent(
+  database: NativeSqliteAdapter,
+  target: FunctionConversationRef,
+  execution: NativeSqliteCurrentExecution,
+  sql = JOINED_CURRENT_QUERY
+): SqlRow {
+  const qualified = () => originalCurrentDispatch(database)
   const args = [target.conversationId, target.branchId, target.threadId]
   let row: SqlRow | undefined
   if (qualified()) {
-    const indexed = sql === JOINED_CURRENT_HIGH_WATER_QUERY
-      ? NATIVE_JOINED_INCARNATION_HIGH_WATER_QUERY : NATIVE_JOINED_INCARNATION_QUERY
+    const indexed =
+      sql === JOINED_CURRENT_HIGH_WATER_QUERY
+        ? NATIVE_JOINED_INCARNATION_HIGH_WATER_QUERY
+        : NATIVE_JOINED_INCARNATION_QUERY
     row = readCurrentExecution(database, execution, indexed, args)
-    // A preparation/SQLite callback may change interpretation. Only full raw metadata may
-    // cross to that replacement; do not reuse the projected row under a changed interpreter.
+    // Custom SQLite dispatch may run host callbacks. Reclassify it after the actual read.
     if (!qualified()) row = readCurrentExecution(database, execution, sql, args)
   } else row = readCurrentExecution(database, execution, sql, args)
-  if (!row || row.physical_thread_id !== target.threadId ||
-    !matchesThreadIncarnation({ created_at: currentNumber(row.physical_created_at),
-      metadata: typeof row.physical_metadata === "string" ? row.physical_metadata : null },
-    target.incarnation)) fail("MODS_CONVERSATION_THREAD_CHANGED")
-  if (row.thread_id !== target.threadId || row.workspace !== target.workspace ||
-    row.incarnation_key !== currentStringify(target.incarnation.token === null
-      ? ["legacy", target.incarnation.legacyCreatedAt] : ["token", target.incarnation.token]) ||
-    row.logical_session_id !== target.logicalSessionId || row.kind !== target.kind ||
-    row.checkpoint_namespace !== target.checkpointNamespace)
+  if (
+    !row ||
+    row.physical_thread_id !== target.threadId ||
+    !originalMatches(
+      {
+        created_at: currentNumber(row.physical_created_at),
+        metadata: typeof row.physical_metadata === "string" ? row.physical_metadata : null
+      },
+      target.incarnation
+    )
+  )
+    fail("MODS_CONVERSATION_THREAD_CHANGED")
+  if (
+    row.thread_id !== target.threadId ||
+    row.workspace !== target.workspace ||
+    row.incarnation_key !==
+      currentStringify(
+        target.incarnation.token === null
+          ? ["legacy", target.incarnation.legacyCreatedAt]
+          : ["token", target.incarnation.token]
+      ) ||
+    row.logical_session_id !== target.logicalSessionId ||
+    row.kind !== target.kind ||
+    row.checkpoint_namespace !== target.checkpointNamespace
+  )
     fail("MODS_CONVERSATION_TARGET_CHANGED")
   return row
 }
@@ -252,6 +337,24 @@ interface StoreCurrentOrigin {
   reading: boolean
 }
 const storeCurrentOrigins = new WeakMap<FunctionConversationStore, StoreCurrentOrigin>()
+const committedRecoveryBrand = Symbol("committed-function-recovery-source")
+export interface FunctionConversationCommittedRecoverySource {
+  readonly [committedRecoveryBrand]: true
+}
+const committedRecoverySources = new WeakMap<FunctionConversationCommittedRecoverySource, {
+  store: FunctionConversationStore
+  database: NativeSqliteAdapter
+  target: FunctionConversationRef
+  snapshot: FunctionConversationCheckpointMembershipSnapshot
+  guard: Guard
+}>()
+function freezeCommittedRecoveryData<T>(value: T): T {
+  if (value && typeof value === "object") {
+    for (const child of Object.values(value)) freezeCommittedRecoveryData(child)
+    Object.freeze(value)
+  }
+  return value
+}
 export interface FunctionConversationStoreCurrentExecution {
   assertCurrent(target: FunctionConversationRef): void
   assertDataCurrent(): void
@@ -505,10 +608,26 @@ export function ensureFunctionConversationSchema(db: NativeSqliteAdapter): void 
     receipt_id TEXT NOT NULL, ordinal INTEGER NOT NULL, uuid TEXT NOT NULL,
     member_json TEXT NOT NULL, PRIMARY KEY(receipt_id,ordinal), UNIQUE(receipt_id,uuid)
   )`)
+  db.run(`CREATE INDEX IF NOT EXISTS idx_function_checkpoint_receipts_thread
+    ON function_conversation_checkpoint_receipts
+      (checkpoint_thread_id, checkpoint_incarnation, checkpoint_namespace, checkpoint_id)`)
 }
 
 /** App SQLite is authoritative for kept rows; a successful graph checkpoint is a separate fact. */
 export class FunctionConversationStore {
+  static {
+    originalSharedStoreReceipt = this.prototype.readReceipt
+    originalPendingReceiptDataCheck = this.prototype.capturePendingCheckpointReceiptDataCheck
+    const decode = this.prototype.decode
+    originalPreparedDecode = (store, row) => currentApply(decode, store, [row, true]) as FunctionConversationRow
+    const transaction = this.prototype.transaction, persist = this.prototype.persistCheckpointSnapshot
+    originalPreparedTransaction = <T>(store: FunctionConversationStore, run: () => T,
+      committing: () => void, execution: NativeSqlitePreparedExecution): T =>
+      currentApply(transaction, store, [run, committing, execution]) as T
+    originalPreparedPersist = (store, target, snapshot, execution) => {
+      currentApply(persist, store, [target, snapshot, true, execution])
+    }
+  }
   private readonly deliveries = new WeakMap<FunctionConversationDeliveryProof, {
     target: FunctionConversationRef
     receipt: FunctionConversationCheckpointReceipt
@@ -531,17 +650,20 @@ export class FunctionConversationStore {
     assertFunctionConversationForkReady(this.database, input)
   }
 
-  private transaction<T>(run: () => T, committing?: () => void): T {
-    if (this.database.inTransaction) fail("MODS_CONVERSATION_NESTED_TRANSACTION")
-    this.database.run("BEGIN IMMEDIATE")
+  private transaction<T>(run: () => T, committing?: () => void,
+    preparedExecution?: NativeSqlitePreparedExecution): T {
+    if (preparedExecution) preparedExecution.assertDataCurrent(true)
+    else if (this.database.inTransaction) fail("MODS_CONVERSATION_NESTED_TRANSACTION")
+    const transaction = preparedExecution ?? this.database
+    transaction.run("BEGIN IMMEDIATE")
     try {
       const result = run()
       committing?.()
-      this.database.run("COMMIT")
+      transaction.run("COMMIT")
       return result
     } catch (error) {
       try {
-        this.database.run("ROLLBACK")
+        transaction.run("ROLLBACK")
       } catch {
         // COMMIT may have succeeded before an I/O error. Never blindly replay it.
       }
@@ -718,17 +840,31 @@ export class FunctionConversationStore {
     return selected
   }
 
-  private decode(row: SqlRow): FunctionConversationRow {
+  private decode(row: SqlRow, preparedData = false): FunctionConversationRow {
+    const readObject = preparedData ? (encoded: unknown): ModObject => {
+      const value: unknown = preparedParse(string(encoded))
+      if (!value || typeof value !== "object" || preparedArray(value))
+        fail("MODS_CONVERSATION_STORE_CORRUPT")
+      return value as ModObject
+    } : objectJson
+    const stringify = preparedData ? preparedJson : JSON.stringify
+    const readInteger = preparedData ? (value: unknown): number => {
+      if (typeof value !== "number" || !currentSafeInteger(value) || value < 0)
+        fail("MODS_CONVERSATION_STORE_CORRUPT")
+      return value
+    } : integer
     const text = string(row.payload_json)
-    if (digest(text) !== row.payload_digest || Buffer.byteLength(text) !== row.bytes)
+    if ((preparedData ? preparedPayloadDigest(text) : digest(text)) !== row.payload_digest ||
+      (preparedData ? preparedByteLength(text) : Buffer.byteLength(text)) !== row.bytes)
       fail("MODS_CONVERSATION_STORE_CORRUPT")
-    const payload = objectJson(text)
-    return Object.freeze({ uuid: string(row.uuid), sequence: integer(row.sequence),
+    const payload = readObject(text)
+    const decoded = { uuid: string(row.uuid), sequence: readInteger(row.sequence),
       receiptId: string(row.receipt_id), branchId: string(row.branch_id),
       inputDigest: string(row.input_digest), door: string(row.door),
-      origin: objectJson(JSON.stringify(payload.origin)), message: objectJson(JSON.stringify(payload.message)),
-      nativePayload: string(payload.nativePayload), orderAnchor: objectJson(JSON.stringify(payload.orderAnchor)),
-      inbox: payload.inbox === true, bytes: integer(row.bytes), createdAt: integer(row.created_at) })
+      origin: readObject(stringify(payload.origin)), message: readObject(stringify(payload.message)),
+      nativePayload: string(payload.nativePayload), orderAnchor: readObject(stringify(payload.orderAnchor)),
+      inbox: payload.inbox === true, bytes: readInteger(row.bytes), createdAt: readInteger(row.created_at) }
+    return preparedData ? preparedFreeze(decoded) : Object.freeze(decoded)
   }
 
   readReceipt(target: FunctionConversationRef, uuid: string): FunctionConversationRow | undefined {
@@ -992,6 +1128,268 @@ export class FunctionConversationStore {
     return { snapshot, rows: Object.freeze(kept) }
   }
 
+  /**
+   * Capture only an already committed original source. The private token permits its exact
+   * evidence to be rechecked inside a later ACK transaction; JSON cannot mint this token.
+   */
+  captureCommittedCheckpointRecovery(target: FunctionConversationRef, input: {
+    checkpointThreadId: string; checkpointIncarnation: ThreadIncarnation; checkpointId: string
+  }, guard: Guard): { proof: FunctionConversationCommittedRecoverySource;
+    snapshot: FunctionConversationCheckpointMembershipSnapshot } {
+    const current = () => {
+      guard()
+      if (!isFunctionConversationNativeCheckpointStore(this, target))
+        fail("MODS_CONVERSATION_CHECKPOINT_MEMBERSHIP")
+    }
+    current()
+    if (this.database.inTransaction) fail("MODS_CONVERSATION_NOT_COMMITTED")
+    const saved = FunctionConversationStore.prototype.readCheckpointRecoverySnapshot.call(this,
+      target, input, current)
+    const snapshot = freezeCommittedRecoveryData(JSON.parse(JSON.stringify(saved.snapshot)) as
+      FunctionConversationCheckpointMembershipSnapshot)
+    const fixedTarget = Object.freeze({ ...target, incarnation: Object.freeze({ ...target.incarnation }) })
+    const proof = Object.freeze({ [committedRecoveryBrand]: true as const })
+    if (!isFunctionConversationNativeCheckpointStore(this, fixedTarget) || this.database.inTransaction)
+      fail("MODS_CONVERSATION_CHECKPOINT_MEMBERSHIP")
+    committedRecoverySources.set(proof, { store: this, database: this.database,
+      target: fixedTarget, snapshot, guard })
+    return Object.freeze({ proof, snapshot })
+  }
+
+  /** This verifies existing source evidence only; it cannot acknowledge a destination. */
+  assertCommittedCheckpointRecovery(proof: FunctionConversationCommittedRecoverySource): void {
+    const source = committedRecoverySources.get(proof)
+    if (!source || source.store !== this || source.database !== this.database ||
+      !isFunctionConversationNativeCheckpointStore(this, source.target))
+      fail("MODS_CONVERSATION_CHECKPOINT_MEMBERSHIP")
+    source.guard()
+    if (!isFunctionConversationNativeCheckpointStore(this, source.target))
+      fail("MODS_CONVERSATION_CHECKPOINT_MEMBERSHIP")
+    this.assertCurrent(source.target)
+    this.verifyPersistedCheckpointSnapshot(source.target, source.snapshot)
+    source.guard()
+    if (!isFunctionConversationNativeCheckpointStore(this, source.target))
+      fail("MODS_CONVERSATION_CHECKPOINT_MEMBERSHIP")
+  }
+
+  /** Receipt/note data only: the caller separately proves the selected ordinary point is the sole CP. */
+  capturePendingCheckpointReceiptDataCheck(target: FunctionConversationRef, input: {
+    readonly checkpointThreadId: string; readonly checkpointIncarnation: ThreadIncarnation
+    readonly namespace: string; readonly selectedCheckpointId: string
+    readonly admittedNotes?: readonly Readonly<{ uuid: string; rowDigest: string }>[]
+  }): () => void {
+    if (currentIsProxy(this) || !joinedCurrentTarget(target))
+      fail("MODS_CONVERSATION_CHECKPOINT_MEMBERSHIP")
+    const database = this.database
+    const execution = preparedNativeExecution(database)
+    if (!execution) fail("MODS_CONVERSATION_CHECKPOINT_MEMBERSHIP")
+    execution.assertDataCurrent(true)
+    const targetJson = preparedTargetJson(target), incarnation = preparedIncarnationKey(input.checkpointIncarnation)
+    const values = preparedFreeze([target.conversationId, target.branchId, input.checkpointThreadId,
+      incarnation, input.namespace, targetJson, input.selectedCheckpointId])
+    if (!input.selectedCheckpointId || input.namespace !== target.checkpointNamespace)
+      fail("MODS_CONVERSATION_CHECKPOINT_MEMBERSHIP")
+    const read = execution.prepareReadOne(`SELECT COUNT(*) AS invalid FROM main.function_conversation_checkpoint_receipts
+      WHERE conversation_id=? AND (branch_id IS NOT ? OR checkpoint_thread_id IS NOT ?
+        OR checkpoint_incarnation IS NOT ? OR checkpoint_namespace IS NOT ? OR target_json IS NOT ?
+        OR typeof(checkpoint_id)<>'text' OR length(checkpoint_id)=0 OR checkpoint_id=?)`)
+    const admittedNotes = input.admittedNotes
+    if (admittedNotes !== undefined && (!preparedArray(admittedNotes) || currentIsProxy(admittedNotes) ||
+      admittedNotes.length > FUNCTION_CONVERSATION_LIMITS.inboxRows))
+      fail("MODS_CONVERSATION_CHECKPOINT_MEMBERSHIP")
+    const noteIds: string[] = [], noteDigests: string[] = []
+    for (let index = 0; index < (admittedNotes?.length ?? 0); index++) {
+      const slot = currentDescriptor(admittedNotes!, "" + index)
+      const note = slot && "value" in slot ? slot.value : undefined
+      if (!note || typeof note !== "object" || currentIsProxy(note))
+        fail("MODS_CONVERSATION_CHECKPOINT_MEMBERSHIP")
+      const uuid = currentDescriptor(note, "uuid"), rowDigest = currentDescriptor(note, "rowDigest")
+      if (!uuid || !("value" in uuid) || typeof uuid.value !== "string" || !uuid.value ||
+        !rowDigest || !("value" in rowDigest) || typeof rowDigest.value !== "string" || !rowDigest.value)
+        fail("MODS_CONVERSATION_CHECKPOINT_MEMBERSHIP")
+      appendPreparedData(noteIds, uuid.value)
+      appendPreparedData(noteDigests, rowDigest.value)
+    }
+    const columns = ["conversation_id", "uuid", "sequence", "receipt_id", "branch_id", "input_digest",
+      "door", "payload_json", "payload_digest", "bytes", "created_at"]
+    const readNote = noteIds.length ? execution.prepareReadOne(`SELECT * FROM main.function_conversation_rows
+      WHERE conversation_id=? AND uuid=?`) : undefined
+    const originalNotes: SqlRow[] = []
+    for (let index = 0; index < noteIds.length; index++) {
+      const raw = readNote!([target.conversationId, noteIds[index]])
+      if (!raw || originalPreparedRowDigest(originalPreparedDecode(this, raw)) !== noteDigests[index])
+        fail("MODS_CONVERSATION_CHECKPOINT_MEMBERSHIP")
+      appendPreparedData(originalNotes, raw)
+    }
+    return () => {
+      if (!currentDataField(this, "database", database)) fail("MODS_CONVERSATION_CHECKPOINT_MEMBERSHIP")
+      execution.assertDataCurrent(true)
+      if (read(values)?.invalid !== 0) fail("MODS_CONVERSATION_CHECKPOINT_MEMBERSHIP")
+      for (let index = 0; index < originalNotes.length; index++) {
+        const raw = readNote!([values[0], noteIds[index]]), original = originalNotes[index]
+        if (!raw) fail("MODS_CONVERSATION_CHECKPOINT_MEMBERSHIP")
+        for (let column = 0; column < columns.length; column++)
+          if (raw[columns[column]] !== original[columns[column]]) fail("MODS_CONVERSATION_CHECKPOINT_MEMBERSHIP")
+      }
+      if (!currentDataField(this, "database", database)) fail("MODS_CONVERSATION_CHECKPOINT_MEMBERSHIP")
+    }
+  }
+
+  /** Prepared DATA cannot delete inbox or create a delivery, even when the CP subsequently fails. */
+  persistPreparedCheckpointMembership(target: FunctionConversationRef,
+    receipt: SqlJsSaverPreparedCheckpointReceipt, guard: Guard): () => void {
+    if (currentIsProxy(this) || !joinedCurrentTarget(target))
+      fail("MODS_CONVERSATION_CHECKPOINT_MEMBERSHIP")
+    const snapshot = originalPreparedMembershipReader(receipt, this, target)
+    guard()
+    this.assertCurrent(target)
+    const database = this.database, execution = preparedNativeExecution(database)
+    if (!execution) fail("MODS_CONVERSATION_CHECKPOINT_MEMBERSHIP")
+    execution.assertDataCurrent(true)
+    const targetJson = preparedTargetJson(target), snapshotJson = preparedJson(snapshot)
+    const selection = preparedFreeze([target.conversationId, target.branchId, snapshot.checkpointThreadId,
+      snapshot.checkpointIncarnation, snapshot.namespace, snapshot.checkpointId])
+    const readReceipt = execution.prepareReadOne(`SELECT receipt_id,target_json,snapshot_json,snapshot_digest
+      FROM main.function_conversation_checkpoint_receipts WHERE conversation_id=? AND branch_id=?
+        AND checkpoint_thread_id=? AND checkpoint_incarnation=? AND checkpoint_namespace=? AND checkpoint_id=?`)
+    const readMember = execution.prepareReadOne(`SELECT uuid,member_json
+      FROM main.function_conversation_checkpoint_members WHERE receipt_id=? AND ordinal=?`)
+    const countMembers = execution.prepareReadOne(`SELECT COUNT(*) AS count
+      FROM main.function_conversation_checkpoint_members WHERE receipt_id=?`)
+    const readRow = execution.prepareReadOne(`SELECT * FROM main.function_conversation_rows
+      WHERE conversation_id=? AND uuid=?`)
+    const readBranch = execution.prepareReadOne(`SELECT parent_branch_id,parent_frontier,depth
+      FROM main.function_conversation_branches WHERE conversation_id=? AND branch_id=?`)
+    const readTarget = execution.prepareReadOne(`SELECT t.created_at,t.metadata,s.thread_id,s.incarnation_key,
+      s.workspace,c.logical_session_id,c.kind,c.checkpoint_namespace,c.next_sequence
+      FROM main.threads t JOIN main.function_logical_sessions s ON s.thread_id=t.thread_id
+      JOIN main.function_conversations c ON c.logical_session_id=s.logical_session_id
+      JOIN main.function_conversation_branches b ON b.conversation_id=c.conversation_id
+      WHERE t.thread_id=? AND s.logical_session_id=? AND c.conversation_id=? AND b.branch_id=?`)
+    const targetValues = preparedFreeze([target.threadId, target.logicalSessionId,
+      target.conversationId, target.branchId])
+    const targetIncarnation = preparedFreeze({ token: target.incarnation.token,
+      legacyCreatedAt: target.incarnation.legacyCreatedAt })
+    const targetIncarnationKey = preparedIncarnationKey(targetIncarnation)
+    const originalIdentity = readTarget(targetValues)
+    if (!originalIdentity || !originalMatches({ created_at: currentNumber(originalIdentity.created_at),
+      metadata: typeof originalIdentity.metadata === "string" ? originalIdentity.metadata : null }, targetIncarnation) ||
+      (targetIncarnation.token === null &&
+        currentNumber(originalIdentity.created_at) !== targetIncarnation.legacyCreatedAt))
+      fail("MODS_CONVERSATION_CHECKPOINT_MEMBERSHIP")
+    // The original incarnation interpreter may include an explicit host callback.
+    execution.assertDataCurrent(true)
+    const columns = ["conversation_id", "uuid", "sequence", "receipt_id", "branch_id", "input_digest",
+      "door", "payload_json", "payload_digest", "bytes", "created_at"]
+    // Validate canonical bytes through original native SQL and fixed interpretation BEFORE writing data.
+    const expectedRows: SqlRow[] = []
+    for (let index = 0; index < snapshot.members.length; index++) {
+      const member = snapshot.members[index]
+      const raw = readRow([target.conversationId, member.uuid])
+      if (!raw || originalPreparedRowDigest(originalPreparedDecode(this, raw)) !== member.rowDigest)
+        fail("MODS_CONVERSATION_CHECKPOINT_MEMBERSHIP")
+      appendPreparedData(expectedRows, raw)
+    }
+    const branchRows: SqlRow[] = []
+    if (snapshot.cut.lineage.length === 0 || snapshot.cut.lineage[0].branchId !== target.branchId ||
+      snapshot.cut.lineage[0].cut !== snapshot.cut.highWater)
+      fail("MODS_CONVERSATION_CHECKPOINT_MEMBERSHIP")
+    for (let index = 0; index < snapshot.cut.lineage.length; index++) {
+      const entry = snapshot.cut.lineage[index]
+      const raw = readBranch([target.conversationId, entry.branchId])
+      if (!raw || typeof raw.parent_frontier !== "number" || !currentSafeInteger(raw.parent_frontier) ||
+        raw.parent_frontier < 0) fail("MODS_CONVERSATION_CHECKPOINT_MEMBERSHIP")
+      const next = snapshot.cut.lineage[index + 1]
+      if (next ? raw.parent_branch_id !== next.branchId ||
+        next.cut !== (entry.cut < raw.parent_frontier ? entry.cut : raw.parent_frontier) :
+        raw.parent_branch_id !== null) fail("MODS_CONVERSATION_CHECKPOINT_MEMBERSHIP")
+      appendPreparedData(branchRows, raw)
+    }
+    const memberJson: string[] = []
+    for (let index = 0; index < snapshot.members.length; index++)
+      appendPreparedData(memberJson, preparedJson(snapshot.members[index]))
+    const schemaRead = execution.prepareReadOne(`SELECT rowid,rootpage,sql,type
+      FROM main.sqlite_schema WHERE name=? COLLATE NOCASE`)
+    const writeTablesUnsafe = execution.prepareReadOne(`SELECT
+      (SELECT COUNT(*) FROM main.sqlite_schema WHERE type='trigger' AND lower(tbl_name) IN
+        ('function_conversation_checkpoint_receipts','function_conversation_checkpoint_members')) +
+      (SELECT COUNT(*) FROM temp.sqlite_schema WHERE
+        (type IN ('table','view') AND lower(name) IN
+          ('function_conversation_checkpoint_receipts','function_conversation_checkpoint_members')) OR
+        (type='trigger' AND lower(tbl_name) IN
+          ('function_conversation_checkpoint_receipts','function_conversation_checkpoint_members'))) AS count`)
+    const tables = ["function_conversation_checkpoint_receipts", "function_conversation_checkpoint_members",
+      "function_conversation_rows", "threads", "function_logical_sessions", "function_conversations",
+      "function_conversation_branches"]
+    const schema: SqlRow[] = []
+    for (let index = 0; index < tables.length; index++) {
+      const row = schemaRead([tables[index]])
+      if (!row || row.type !== "table") fail("MODS_CONVERSATION_CHECKPOINT_MEMBERSHIP")
+      appendPreparedData(schema, row)
+    }
+    const assertRows = (requireAutocommit = false) => {
+      execution.assertDataCurrent(requireAutocommit)
+      if (!currentDataField(this, "database", database)) fail("MODS_CONVERSATION_CHECKPOINT_MEMBERSHIP")
+      if (writeTablesUnsafe()?.count !== 0) fail("MODS_CONVERSATION_CHECKPOINT_MEMBERSHIP")
+      for (let index = 0; index < tables.length; index++) {
+        const current = schemaRead([tables[index]]), original = schema[index]!
+        if (!current || current.rowid !== original.rowid || current.rootpage !== original.rootpage ||
+          current.sql !== original.sql || current.type !== "table") fail("MODS_CONVERSATION_CHECKPOINT_MEMBERSHIP")
+      }
+      const identity = readTarget(targetValues)
+      if (!identity || identity.thread_id !== target.threadId || identity.workspace !== target.workspace ||
+        identity.incarnation_key !== targetIncarnationKey || identity.logical_session_id !== target.logicalSessionId ||
+        identity.kind !== target.kind || identity.checkpoint_namespace !== target.checkpointNamespace ||
+        typeof identity.next_sequence !== "number" || !currentSafeInteger(identity.next_sequence) ||
+        identity.next_sequence < 1 || identity.next_sequence - 1 < snapshot.cut.highWater ||
+        identity.created_at !== originalIdentity.created_at || identity.metadata !== originalIdentity.metadata)
+        fail("MODS_CONVERSATION_CHECKPOINT_MEMBERSHIP")
+      for (let index = 0; index < snapshot.cut.lineage.length; index++) {
+        const current = readBranch([target.conversationId, snapshot.cut.lineage[index].branchId]), original = branchRows[index]
+        if (!current || current.parent_branch_id !== original.parent_branch_id ||
+          current.parent_frontier !== original.parent_frontier || current.depth !== original.depth)
+          fail("MODS_CONVERSATION_CHECKPOINT_MEMBERSHIP")
+      }
+      for (let index = 0; index < snapshot.members.length; index++) {
+        const current = readRow([target.conversationId, snapshot.members[index].uuid]), original = expectedRows[index]
+        if (!current) fail("MODS_CONVERSATION_CHECKPOINT_MEMBERSHIP")
+        for (let field = 0; field < columns.length; field++)
+          if (current[columns[field]] !== original[columns[field]]) fail("MODS_CONVERSATION_CHECKPOINT_MEMBERSHIP")
+      }
+    }
+    assertRows(true)
+    const previous = readReceipt(selection)
+    if (previous && (previous.target_json !== targetJson || previous.snapshot_json !== snapshotJson ||
+      previous.snapshot_digest !== snapshot.snapshotDigest)) fail("MODS_CONVERSATION_DELIVERY_CONFLICT")
+    if (!previous) originalPreparedTransaction(this, () => {
+      guard()
+      originalPreparedMembershipReader(receipt, this, target)
+      assertRows()
+      originalPreparedPersist(this, target, snapshot, execution)
+      guard()
+      assertRows()
+    }, () => { guard(); assertRows() }, execution)
+    guard()
+    execution.assertDataCurrent(true)
+    const first = readReceipt(selection)
+    if (!first) fail("MODS_CONVERSATION_CHECKPOINT_MEMBERSHIP")
+    const checker = () => {
+      assertRows(true)
+      const actual = readReceipt(selection)
+      if (!actual || actual.receipt_id !== first.receipt_id || actual.target_json !== targetJson ||
+        actual.snapshot_json !== snapshotJson || actual.snapshot_digest !== snapshot.snapshotDigest ||
+        countMembers([actual.receipt_id])?.count !== snapshot.members.length)
+        fail("MODS_CONVERSATION_CHECKPOINT_MEMBERSHIP")
+      for (let index = 0; index < snapshot.members.length; index++) {
+        const member = snapshot.members[index], row = readMember([actual.receipt_id, member.ordinal])
+        if (!row || row.uuid !== member.uuid || row.member_json !== memberJson[index])
+          fail("MODS_CONVERSATION_CHECKPOINT_MEMBERSHIP")
+      }
+    }
+    checker()
+    return checker
+  }
+
   private verifyCheckpointSnapshot(target: FunctionConversationRef,
     snapshot: FunctionConversationCheckpointMembershipSnapshot): void {
     this.assertCheckpointCanonicalCut(target, snapshot.cut)
@@ -1013,25 +1411,34 @@ export class FunctionConversationStore {
   }
 
   private persistCheckpointSnapshot(target: FunctionConversationRef,
-    snapshot: FunctionConversationCheckpointMembershipSnapshot): void {
-    this.verifyCheckpointSnapshot(target, snapshot)
-    const previous = this.checkpointReceipt(target, snapshot)
+    snapshot: FunctionConversationCheckpointMembershipSnapshot, preparedData = false,
+    preparedExecution?: NativeSqlitePreparedExecution): void {
+    if (!preparedData) this.verifyCheckpointSnapshot(target, snapshot)
+    const previous = preparedExecution ? undefined : this.checkpointReceipt(target, snapshot)
     if (previous) {
       const actual = this.decodeCheckpointSnapshot(target, previous)
       if (actual.snapshotDigest !== snapshot.snapshotDigest) fail("MODS_CONVERSATION_DELIVERY_CONFLICT")
     } else {
-      const receiptId = randomUUID()
-      this.database.run(`INSERT INTO function_conversation_checkpoint_receipts VALUES (?,?,?,?,?,?,?,?,?,?)`, [
+      const receiptId = preparedExecution ? preparedRandomUUID() : randomUUID()
+      const transaction = preparedExecution ?? this.database
+      transaction.run(`INSERT INTO function_conversation_checkpoint_receipts VALUES (?,?,?,?,?,?,?,?,?,?)`, [
         receiptId, target.conversationId, target.branchId, snapshot.checkpointThreadId,
         snapshot.checkpointIncarnation, snapshot.namespace, snapshot.checkpointId,
-        checkpointTargetJson(target), snapshot.snapshotDigest, JSON.stringify(snapshot)
+        preparedData ? preparedTargetJson(target) : checkpointTargetJson(target), snapshot.snapshotDigest,
+        preparedData ? preparedJson(snapshot) : JSON.stringify(snapshot)
       ])
-      for (const member of snapshot.members) this.database.run(
+      if (preparedExecution) {
+        for (let index = 0; index < snapshot.members.length; index++) {
+          const member = snapshot.members[index]
+          transaction.run("INSERT INTO function_conversation_checkpoint_members VALUES (?,?,?,?)", [
+            receiptId, member.ordinal, member.uuid, preparedJson(member)])
+        }
+      } else for (const member of snapshot.members) this.database.run(
         "INSERT INTO function_conversation_checkpoint_members VALUES (?,?,?,?)", [
-          receiptId, member.ordinal, member.uuid, JSON.stringify(member)
+          receiptId, member.ordinal, member.uuid, preparedData ? preparedJson(member) : JSON.stringify(member)
         ])
     }
-    this.verifyPersistedCheckpointSnapshot(target, snapshot)
+    if (!preparedData) this.verifyPersistedCheckpointSnapshot(target, snapshot)
   }
 
   private verifyPersistedCheckpointSnapshot(target: FunctionConversationRef,
@@ -1160,7 +1567,7 @@ export class FunctionConversationStore {
 
   /** Read a complete synchronous batch at one fixed cut, guarding both ends of the batch. */
   readRowsAtCut(target: FunctionConversationRef, uuids: readonly string[],
-    cut: FunctionConversationRowReadCut, guard: Guard
+    cut: FunctionConversationRowReadCut, guard: Guard, preparedData = false
   ): FunctionConversationRow[] {
     if (!cut || typeof cut !== "object" || Array.isArray(cut) || typeof guard !== "function")
       fail("MODS_CONVERSATION_READ_CUT_INVALID")
@@ -1197,7 +1604,7 @@ export class FunctionConversationStore {
         ...(fixedCut.notAfterCreatedAt === undefined ? [] : [fixedCut.notAfterCreatedAt])
       ])[0]
       if (!selected) fail("MODS_CONVERSATION_ROW_OUTSIDE_CUT")
-      const result = this.decode(selected)
+      const result = this.decode(selected, preparedData)
       const branch = lineage.find((entry) => entry.branchId === result.branchId)
       if (result.uuid !== uuid || !branch || result.sequence < 1 || result.sequence > branch.cut ||
         (fixedCut.notAfterCreatedAt !== undefined && result.createdAt > fixedCut.notAfterCreatedAt))
@@ -1461,3 +1868,23 @@ function currentCutHighWater(store: FunctionConversationStore, target: FunctionC
   return highWater
 }
 
+
+const originalPersistPreparedMembership = FunctionConversationStore.prototype.persistPreparedCheckpointMembership
+/** Fixed Store-only data path; it confers no committed/delivery authority. */
+export function persistPreparedFunctionConversationMembership(store: FunctionConversationStore,
+  target: FunctionConversationRef, receipt: SqlJsSaverPreparedCheckpointReceipt, guard: Guard): () => void {
+  return currentApply(originalPersistPreparedMembership, store, [target, receipt, guard]) as () => void
+}
+
+/** Fixed original row read; the function can be captured safely across module cycles. */
+export function readFunctionConversationStoreReceipt(store: FunctionConversationStore,
+  target: FunctionConversationRef, uuid: string): FunctionConversationRow | undefined {
+  return currentApply(originalSharedStoreReceipt, store, [target, uuid]) as FunctionConversationRow | undefined
+}
+
+/** Fixed original pending-data check; this data alone confers no delivery authority. */
+export function captureFunctionConversationPendingReceiptDataCheck(store: FunctionConversationStore,
+  target: FunctionConversationRef,
+  input: Parameters<FunctionConversationStore["capturePendingCheckpointReceiptDataCheck"]>[1]): () => void {
+  return currentApply(originalPendingReceiptDataCheck, store, [target, input]) as () => void
+}

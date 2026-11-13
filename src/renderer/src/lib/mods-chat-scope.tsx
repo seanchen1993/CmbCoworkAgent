@@ -4,6 +4,8 @@ import { acquireRetainedFunctionSiteCache, discardRetainedFunctionSiteCache,
   type RetainedFunctionSiteCache } from "./function-site-retained-cache"
 import { modUiChangeAffects } from "../../../shared/mods/types"
 import { createContext, useContext, useEffect, useCallback, useMemo, useRef, useState, type ComponentType } from "react"
+import { parseThreadDirectoryChange } from "../../../shared/thread-directory-change"
+import { sameThreadDirectoryScope, type ThreadDirectoryScope } from "./thread-directory-scope"
 
 export const ModsChatScope = createContext<{
   threadId: string
@@ -24,11 +26,12 @@ export function useModsChatEnabled(
 
 export function useModsChatState(
   threadId: string,
-  workspace: string | null | undefined
+  workspace: string | null | undefined,
+  directoryScope?: ThreadDirectoryScope
 ): { enabled: boolean; ready: boolean; error?: string; retry: () => void; isCurrent: () => boolean
   presentationCache?: FunctionSitePresentationCache | null } {
-  const key = JSON.stringify([threadId, workspace])
-  const [identity, setIdentity] = useState({ key })
+  const key = JSON.stringify([threadId, workspace, directoryScope?.incarnation])
+  const [identity, setIdentity] = useState({ key, directoryScope })
   const [scopeLifetime] = useState(() => new FunctionSiteLifetime())
   const [snapshot, setSnapshot] = useState<{
     identity: typeof identity; enabled?: boolean; error?: string; current: () => boolean
@@ -41,7 +44,7 @@ export function useModsChatState(
     // Revocation is conservative even if React abandons this render.
     scopeLifetime.invalidate()
     retainedCache.current?.revoke()
-    setIdentity({ key })
+    setIdentity({ key, directoryScope })
   }
   const requestRef = useRef<{ identity: typeof identity; current: () => boolean } | null>(null)
   const retryRef = useRef<() => void>(() => {})
@@ -73,7 +76,7 @@ export function useModsChatState(
           if (!current()) return
           // A remounted view still awaits this fresh host decision. Only passive drawings,
           // kept under continuous invalidation subscriptions, can survive the previous view.
-          if (enabled === true) retained = acquireRetainedFunctionSiteCache(threadId, workspace)
+          if (enabled === true) retained = acquireRetainedFunctionSiteCache(threadId, workspace, identity.directoryScope)
           else discardRetainedFunctionSiteCache(threadId)
           retainedCache.current = retained
           const cache = retained?.cache ??
@@ -105,6 +108,13 @@ export function useModsChatState(
         presentationCache.current?.invalidate()
     })
     const stopAccount = window.api.models?.onUserInfoChanged?.(refresh)
+    const stopThreads = window.api.threads?.onThreadsChanged?.(input => {
+      const change = parseThreadDirectoryChange(input)
+      if (change && change.threadId !== threadId) return
+      if (change?.kind === "transcript" && sameThreadDirectoryScope(identity.directoryScope, change)) return
+      // Do not await the directory or capability IPC before revoking the old closure.
+      refresh()
+    })
     window.addEventListener("mods:configuration-changed", refresh)
     refresh()
     return () => {
@@ -114,6 +124,7 @@ export function useModsChatState(
       stop()
       stopPresentations?.()
       stopAccount?.()
+      stopThreads?.()
       if (retained) retained.release()
       else presentationCache.current?.invalidate()
       retainedCache.current = null

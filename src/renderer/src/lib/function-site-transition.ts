@@ -5,12 +5,15 @@ import { isFunctionDockedSite, type FunctionUiSite } from "../../../shared/mods/
 export function retainsFunctionSitePresentation(
   component: FunctionUiSite,
   previousKey: string,
-  next: ModObject
+  next: ModObject,
+  nextInputKey?: string
 ): boolean {
   const previous = JSON.parse(previousKey) as ModObject
   const same = (left: unknown, right: unknown): boolean =>
     JSON.stringify(left) === JSON.stringify(right)
-  if (previousKey === JSON.stringify(next)) return false
+  // Internal callers reuse the exact serialization of this same facts snapshot.
+  // This is an equality optimization, never a host/source authority token.
+  if (previousKey === (nextInputKey ?? JSON.stringify(next))) return false
   // Resize and scrolling change presentation geometry only. Keep the protected DOM inert
   // until the latest read completes; clearing it can reset scroll and amplify resize work.
   if (isFunctionDockedSite(component) &&

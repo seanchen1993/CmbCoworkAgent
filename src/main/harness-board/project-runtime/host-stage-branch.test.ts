@@ -1,3 +1,4 @@
+import { setImmediate } from "node:timers/promises"
 import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -14,7 +15,11 @@ import { hostProjectFixture } from "./host-fixtures.test-helper"
 import { runtimeDigest } from "./safe-files"
 
 const cleanup: Array<() => void> = []
-afterEach(() => cleanup.splice(0).forEach((close) => close()))
+afterEach(async () => {
+  cleanup.splice(0).forEach((close) => close())
+  // Let Vitest's fork handle queued task updates between cases.
+  await setImmediate()
+})
 
 async function fixture(
   overrides: Partial<HostProjectServiceDependencies> = {},
@@ -132,6 +137,7 @@ async function fixture(
   return {
     service,
     store,
+    snapshots,
     source,
     root,
     workspace,
@@ -157,8 +163,16 @@ describe("native host stage branch admission", () => {
       status: "failed",
       execution: { terminal: { outcome: "error" } }
     })
+    const read = vi.spyOn(setup.snapshots, "read")
     const branch = await setup.service.createBranchAtStage(setup.input)
     expect(branch).toMatchObject({ stageIndex: 1, status: "active", version: 1 })
+    expect(branch.pluginDigest).toBe(setup.source.pluginDigest)
+    // Initial source, existing capture, and one final read of the shared retained package.
+    expect(read.mock.calls).toEqual([
+      [setup.source.pluginDigest],
+      [setup.source.pluginDigest],
+      [setup.source.pluginDigest]
+    ])
     expect(readFileSync(join(branch.workspace, "document.md"), "utf8")).toBe(
       "Actual upstream output"
     )
@@ -206,7 +220,15 @@ describe("native host stage branch admission", () => {
       "---\nname: review\n---\nRevised target implementation"
     )
     const original = setup.service.get(setup.source.projectId)
+    const read = vi.spyOn(setup.snapshots, "read")
     const branch = await setup.service.createBranchAtStage(setup.input)
+    // Initial source, candidate capture, then both distinct packages before commit.
+    expect(read.mock.calls).toEqual([
+      [setup.source.pluginDigest],
+      [branch.pluginDigest],
+      [setup.source.pluginDigest],
+      [branch.pluginDigest]
+    ])
     expect(branch).toMatchObject({
       projectId: "new-branch",
       version: 1,
@@ -284,6 +306,23 @@ describe("native host stage branch admission", () => {
     finally { db.close() }
     expect(prepare).toThrow("EVIDENCE_STALE")
     expect(setup.service.operations(branch.projectId)).toEqual([])
+  })
+
+  it("rejects a late retained package change for a branch with the same digest", async () => {
+    const setup = await fixture({}, false)
+    let tampered = 0
+    setup.dependencies.prepareInputIdentity = async (project) => {
+      expect(project.pluginDigest).toBe(setup.source.pluginDigest)
+      writeFileSync(join(setup.snapshots.root, setup.source.pluginDigest,
+        "package/skills/review/SKILL.md"), "Changed retained Skill")
+      tampered++
+    }
+    await expect(setup.service.createBranchAtStage(setup.input)).rejects.toThrow(
+      "PROJECT_HOST_PACKAGE_CHANGED"
+    )
+    expect(tampered).toBe(1)
+    expect(setup.service.get(setup.input.projectId)).toBeUndefined()
+    expect(setup.store.branchInputs(setup.input.projectId)).toBeUndefined()
   })
 
   it("does not persist a branch baseline changed during native admission preparation", async () => {

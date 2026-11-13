@@ -35,6 +35,7 @@ import type { ModObject } from "../../shared/mods/types"
 import { FunctionConversationCoordinator } from "../mods/v2/conversation-coordinator"
 import { projectFunctionSessionApiMessages } from "../mods/v2/session-api-transcript"
 import { FunctionConversationStore } from "../db/function-conversation-store"
+import { createFunctionConversationTranscriptAccess } from "../db/function-conversation-transcript"
 import { readFunctionConversationRawProjection } from "../db/function-conversation-projection-receipt"
 import { assertStoredProjectionReceipt } from "../db/function-conversation-projection-seal"
 import { captureThreadIncarnation, matchesThreadIncarnation } from
@@ -74,6 +75,8 @@ import { persistedMessageFromStreamPayload } from "../ipc/stream-transcript-payl
 import { resolveStreamTranscriptFlush } from "../ipc/stream-transcript-flush"
 import { isFunctionConversationNotice, isFunctionConversationToolSystemSide } from
   "../../shared/mods/v2/conversation-transcript"
+import { createCompactionCrashProcessFixture } from
+  "../../../tests/support/function-conversation-compaction-crash-process"
 
 const paths = vi.hoisted(() => ({ database: "" }))
 vi.mock("../storage", () => ({ getDbPath: () => paths.database,
@@ -374,6 +377,97 @@ function assertCanonical(f: Awaited<ReturnType<typeof fixture>>, messages: BaseM
 }
 
 describe("actual native host factory through graph, resident Hook, protector and AppDB", () => {
+  it.each(["source-writes-staged", "prepared", "checkpoint-committed", "observed",
+    "ack-inside-transaction", "ack-persisted", "ledger-persisted"])(
+    "reconciles an actual process crash at %s without replaying native execution", async crashStage => {
+      const original = new HumanMessage({ id: randomUUID(), content: "actual crash source" })
+      const f = await fixture({ hook: false, input: original })
+      const model = new ActualModel("generate", "missing")
+      const binding = Object.freeze({ ...f.runtime.binding, target: f.runtime.target.ref,
+        assertCurrent: f.runtime.assertCurrent.bind(f.runtime) })
+      const graph = createAgent({ model, middleware: [f.host.middleware,
+        createFunctionConversationMiddleware({ store: f.store,
+          capture: task => captureFunctionConversationTaskBinding(task, binding) })],
+        checkpointer: new FunctionConversationDeliveryBridge(f.store, () => binding).wrap(f.saver) })
+      f.host.install(graph.graph)
+      const conversation = wrapFunctionConversationInvocation(graph, { store: f.store, binding,
+        history: { saver: f.saver, assertCurrent: binding.assertCurrent,
+          register: f.host.registerHistorical }, onIntakeNotes: f.host.registerIntake })
+      await wrapFunctionConversationNativeInvocation(conversation, f.host, f.runtime)
+        .invoke({ messages: [original] }, { configurable: { thread_id: f.threadId } })
+      const before = await f.saver.getTuple({ configurable: { thread_id: f.threadId } })
+      if (!before) throw Error("ACTUAL_CRASH_CHECKPOINT_REQUIRED")
+      const boundary = f.store.readRows(f.runtime.target.ref).at(-1)?.uuid
+      const sourceCut = f.store.readCheckpointRecoverySnapshot(f.runtime.target.ref, {
+        checkpointThreadId: f.threadId, checkpointIncarnation: f.incarnation,
+        checkpointId: before.checkpoint.id }, f.guard).snapshot.cut.highWater
+      const note = new HumanMessage({ id: randomUUID(), content: "pending after original source cut",
+        additional_kwargs: { isMeta: true } })
+      const access = createFunctionConversationTranscriptAccess((_target, row) => ({
+        id: row.uuid, role: "user", content: String(note.content), created_at: new Date(row.createdAt) }))
+      f.store.commit(f.runtime.target.ref, { uuid: note.id!, inputDigest: note.id!, door: "note",
+        origin: { kind: "plugin", name: "actual-crash-note" },
+        message: { type: "user", role: "user", isMeta: true,
+          content: [{ type: "text", text: String(note.content) }] },
+        nativePayload: serializeFunctionConversationNativeMessage(note),
+        orderAnchor: { kind: "sdk-note" }, inbox: true, sdk: true },
+      f.guard, access.write, access.verify)
+      if (crashStage === "prepared") {
+        const sourceInput = { checkpointThreadId: f.threadId,
+          checkpointIncarnation: f.incarnation, checkpointId: before.checkpoint.id }
+        const captured = f.store.captureCommittedCheckpointRecovery(f.runtime.target.ref,
+          sourceInput, f.guard)
+        expect(Object.isFrozen(captured.snapshot)).toBe(true)
+        expect(Object.isFrozen(captured.snapshot.members)).toBe(true)
+        f.store.assertCommittedCheckpointRecovery(captured.proof)
+        for (const forged of [{}, { ...captured.proof }])
+          expect(() => f.store.assertCommittedCheckpointRecovery(forged as typeof captured.proof))
+            .toThrow("CHECKPOINT_MEMBERSHIP")
+        expect(() => new FunctionConversationStore(f.database)
+          .assertCommittedCheckpointRecovery(captured.proof)).toThrow("CHECKPOINT_MEMBERSHIP")
+        f.database.run("BEGIN IMMEDIATE")
+        try {
+          expect(() => f.store.captureCommittedCheckpointRecovery(f.runtime.target.ref,
+            sourceInput, f.guard)).toThrow("NOT_COMMITTED")
+          f.store.assertCommittedCheckpointRecovery(captured.proof)
+          f.database.run(`UPDATE function_conversation_rows SET payload_json=
+            json_set(payload_json,'$.message.content','changed during ACK') WHERE uuid=?`, [boundary])
+          expect(() => f.store.assertCommittedCheckpointRecovery(captured.proof)).toThrow()
+        } finally { f.database.run("ROLLBACK") }
+        f.store.assertCommittedCheckpointRecovery(captured.proof)
+      }
+      await f.saver.close()
+      const processFixture = await createCompactionCrashProcessFixture()
+      try {
+        const input = { database: paths.database, checkpoint: join(f.root, "actual-checkpoint.sqlite"),
+          control: join(f.root, "control.sqlite"), target: f.runtime.target.ref, config: before.config }
+        const crashed = await processFixture.run({ ...input, action: "write", stage: crashStage })
+        expect(crashed.exit, crashed.output).toBe(73)
+        const recovered = await processFixture.run({ ...input,
+          action: crashStage === "source-writes-staged" ? "inspect-source" : "recover", stage: "" })
+        expect(recovered.exit, recovered.output).toBe(0)
+        const result = recovered.read()
+        expect(result).toMatchObject(crashStage === "source-writes-staged"
+          ? { sourcePresent: true, pendingWriteCount: 0, journalCount: 0 } : crashStage === "prepared"
+          ? { result: "abandoned", phase: "abandoned", sourcePresent: true }
+          : { result: "ready", phase: "ready",
+            sourcePresent: crashStage === "checkpoint-committed", boundary, cutHighWater: sourceCut })
+        expect(f.database.exec(`SELECT uuid FROM function_conversation_inbox
+          WHERE conversation_id=?`, [f.runtime.target.ref.conversationId])[0]?.values.flat())
+          .toContain(note.id)
+        expect(model.requests).toHaveLength(1)
+        if (crashStage === "source-writes-staged") {
+          // This same plain Node child must finish a real Worker write and exit while idle.
+          const normal = await processFixture.run(
+            { ...input, action: "write", stage: "" },
+            AbortSignal.timeout(10_000)
+          )
+          expect(normal.exit, normal.output).toBe(0)
+          expect(normal.read()).toEqual({ result: "ready" })
+        }
+      } finally { processFixture.close() }
+    }, 30_000)
+
   it.each(["current", "reopened control store", "new ordinary tail", "new canonical tail", "same checkpoint content",
     "same checkpoint event", "same checkpoint versions", "SQL content", "SQL role", "SQL metadata",
     "other incarnation", "other branch", "public marker"])(
@@ -2371,17 +2465,45 @@ describe("actual native partial debounce and canonical commit race", () => {
     const identityReads = vi.spyOn(appDb, "getThreadCanonicalIdentity")
     try {
       if (scenario === "custom interpreter") {
-        let interpretedFullMetadata = false
+        const boundedMetadata = appDb.getThreadRuntimeScope(f.threadId)!.metadata!
+        const metadataTexts = new Set([originalMetadata, raw, boundedMetadata])
+        let metadataParses = 0
+        const changes = () => f.database.exec("SELECT total_changes()")[0].values[0][0]
+        const beforeChanges = changes()
+        const beforeRows = f.database.exec("SELECT COUNT(*) FROM function_conversation_rows")[0].values
         JSON.parse = ((value: string, reviver?: Parameters<typeof JSON.parse>[1]) => {
-          if (value === raw) {
-            interpretedFullMetadata = true
+          if (metadataTexts.has(value)) {
+            metadataParses++
             return { ...metadata, cmb_thread_incarnation: "custom-replacement" }
           }
           return parse(value, reviver)
         }) as typeof JSON.parse
+        bindNativePartialQueuedMessage(payload, message, f.threadId, f.physicalRunId)
+        expect(reconcileNativePartialQueuedMessages([message], f.threadId, f.physicalRunId))
+          .toEqual([])
+        expect(metadataParses).toBe(0)
+        const returnedMetadata = [...fullReads.mock.results, ...identityReads.mock.results]
+          .filter(result => result.type === "return" && result.value)
+          .map(result => result.value.metadata as string)
+        expect(returnedMetadata.length).toBeGreaterThan(0)
+        expect(Math.max(...returnedMetadata.map(value => value.length))).toBeLessThan(1024)
+        expect(changes()).toBe(beforeChanges)
+        expect(f.database.exec("SELECT COUNT(*) FROM function_conversation_rows")[0].values)
+          .toEqual(beforeRows)
+        expect(f.database.exec("SELECT metadata FROM threads WHERE thread_id=?", [f.threadId])[0]
+          .values).toEqual([[raw]])
+        const changed = JSON.stringify({ ...metadata, cmb_thread_incarnation: "actual-replacement" })
+        metadataTexts.add(changed)
+        f.database.run("UPDATE threads SET metadata=? WHERE thread_id=?", [changed, f.threadId])
+        const afterMutation = changes()
         expect(() => bindNativePartialQueuedMessage(payload, message, f.threadId, f.physicalRunId))
           .toThrow("MODS_NATIVE_PARTIAL_PERSISTENCE_INVALID")
-        expect(interpretedFullMetadata).toBe(true)
+        expect(() => reconcileNativePartialQueuedMessages([message], f.threadId, f.physicalRunId))
+          .toThrow("MODS_NATIVE_PARTIAL_PERSISTENCE_INVALID")
+        expect(metadataParses).toBe(0)
+        expect(changes()).toBe(afterMutation)
+        expect(f.database.exec("SELECT COUNT(*) FROM function_conversation_rows")[0].values)
+          .toEqual(beforeRows)
       } else {
         bindNativePartialQueuedMessage(payload, message, f.threadId, f.physicalRunId)
         expect(reconcileNativePartialQueuedMessages([message], f.threadId, f.physicalRunId))

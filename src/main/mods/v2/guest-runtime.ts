@@ -1,4 +1,5 @@
 import { FunctionTrustedWaitClock, withTrustedFunctionWaitScope } from "./trusted-function-wait"
+import { FUNCTION_MOD_RESOURCE_BUDGETS } from "../../../shared/mods/v2/resource-budgets"
 import { registerFunctionDirectDisplaySource } from "./display-preparation"
 import { installFunctionBase64Host } from "./guest-base64"
 import { wireError } from "./wire"
@@ -181,7 +182,7 @@ export class FunctionGuestRuntime implements FunctionUiConstructorGuest {
       guest.assertUiEffectsAllowed()
       const frame = guest.frames.get(context.getString(token))
       if (!frame || frame.controller.signal.aborted) throw Error("MODS_STALE_INVOCATION")
-      if (guest.rpcSize >= 128) throw Error("MODS_RPC_LIMIT")
+      if (guest.rpcSize >= FUNCTION_MOD_RESOURCE_BUDGETS.guest.rpc) throw Error("MODS_RPC_LIMIT")
       const op = context.getString(method)
       frame.queryMethod?.(op)
       if ((frame.platformCleanup && !PLATFORM_VIEW_CLEANUP_METHODS.includes(op)) ||
@@ -290,7 +291,7 @@ export class FunctionGuestRuntime implements FunctionUiConstructorGuest {
       const text = context.getString(json)
       const size = Buffer.byteLength(text)
       if (
-        guest.rpcSize >= 128 ||
+        guest.rpcSize >= FUNCTION_MOD_RESOURCE_BUDGETS.guest.rpc ||
         guest.moduleBytes + size > 4194304
       )
         throw Error("MODS_RPC_LIMIT")
@@ -585,7 +586,7 @@ export class FunctionGuestRuntime implements FunctionUiConstructorGuest {
       this.assertUiEffectsAllowed()
       const binding = this.uiBinding
       if (!binding || this.disposed) throw new ModFunctionError("MODS_UI_CONSTRUCTOR_SCOPE")
-      if (this.rpcSize >= 128) throw new ModFunctionError("MODS_RPC_LIMIT")
+      if (this.rpcSize >= FUNCTION_MOD_RESOURCE_BUDGETS.guest.rpc) throw new ModFunctionError("MODS_RPC_LIMIT")
       const tokenId = context.getString(token)
       const op = context.getString(method)
       let cancel: ConstructorReply["cancel"]
@@ -617,7 +618,8 @@ export class FunctionGuestRuntime implements FunctionUiConstructorGuest {
     host.dispose()
     const lower = context.newFunction("resolverNext", (token, input) => {
       const frame = this.frames.get(context.getString(token))
-      if (!frame?.resolver || this.rpcSize >= 128) throw new ModFunctionError("MODS_UI_RESOLVE_FRAME")
+      if (!frame?.resolver || this.rpcSize >= FUNCTION_MOD_RESOURCE_BUDGETS.guest.rpc)
+        throw new ModFunctionError("MODS_UI_RESOLVE_FRAME")
       this.assertFrame(frame)
       if (frame.resolver.nextCalls >= 32) throw new ModFunctionError("MODS_NEXT_LIMIT")
       const args = parseModJson(context.getString(input))
@@ -984,7 +986,8 @@ export class FunctionGuestRuntime implements FunctionUiConstructorGuest {
     if (this.promiseSettlementFailure) return Promise.reject(this.promiseSettlementFailure)
     if (this.disposed) return Promise.reject(new ModFunctionError("MODS_UNLOADED"))
     if (options.signal?.aborted) return Promise.reject(new ModFunctionError("MODS_CANCELLED"))
-    if (this.frames.size >= 32) return Promise.reject(new ModFunctionError("MODS_FRAME_LIMIT"))
+    if (this.frames.size >= FUNCTION_MOD_RESOURCE_BUDGETS.guest.frames)
+      return Promise.reject(new ModFunctionError("MODS_FRAME_LIMIT"))
     const { signal, admission, ownBudgetMs, dispatchCutNs, ...metadata } = options
     const queryMethod = platformQuerySignal() ? AsyncResource.bind(assertPlatformQueryMethod) : undefined
     const token = (queryMethod ? "query:" : "") + randomUUID()
@@ -1088,7 +1091,8 @@ export class FunctionGuestRuntime implements FunctionUiConstructorGuest {
       !Number.isFinite(absoluteExpiresAt))
       return Promise.reject(new ModFunctionError("MODS_UI_RESOLVE_FRAME"))
     if (options.signal?.aborted) return Promise.reject(new ModFunctionError("MODS_CANCELLED"))
-    if (this.frames.size >= 32) return Promise.reject(new ModFunctionError("MODS_FRAME_LIMIT"))
+    if (this.frames.size >= FUNCTION_MOD_RESOURCE_BUDGETS.guest.frames)
+      return Promise.reject(new ModFunctionError("MODS_FRAME_LIMIT"))
     const { signal, admission: _admission, ownBudgetMs, dispatchCutNs, ...metadata } = options
     void _admission
     const queryMethod = platformQuerySignal() ? AsyncResource.bind(assertPlatformQueryMethod) : undefined

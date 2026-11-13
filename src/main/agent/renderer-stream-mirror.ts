@@ -1,5 +1,9 @@
 import { BrowserWindow } from "electron"
 import type { SchedulerRendererEvent } from "./stream-converter"
+import { getThreadRuntimeScope } from "../db"
+import { captureThreadDirectoryChange } from "../services/thread-directory-change"
+import type { ThreadDirectoryChangeKind } from "../../shared/thread-directory-change"
+import type { ThreadIncarnationRow } from "../services/thread-incarnation"
 
 /**
  * Global lifecycle channel: a tiny {threadId, type} envelope for every turn
@@ -26,6 +30,9 @@ export function mirrorStandardTurnStreamToRenderer(
   }
 }
 
-export function notifyRemoteThreadChanged(): void {
-  broadcastToRenderers("threads:changed", undefined)
+export function notifyRemoteThreadChanged(threadId?: string,
+  kind: ThreadDirectoryChangeKind = "transcript", row?: ThreadIncarnationRow): void {
+  const change = threadId
+    ? captureThreadDirectoryChange(threadId, kind, row ?? getThreadRuntimeScope(threadId)) : undefined
+  broadcastToRenderers("threads:changed", change)
 }

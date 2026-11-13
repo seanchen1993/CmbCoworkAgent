@@ -1,0 +1,84 @@
+{
+  "apiVersion": "devclaw.project-runtime/v1",
+  "plugin": {
+    "id": "AutobizDevOps_Plugin_Kanban_latest",
+    "version": "1.0.87-mods.1"
+  },
+  "mode": "legacy",
+  "stateOwner": "plugin",
+  "stages": [
+    {
+      "id": "biz.prd",
+      "title": "需求澄清与 PRD",
+      "actionIds": [],
+      "artifactIds": [],
+      "checkIds": [],
+      "approval": "none"
+    },
+    {
+      "id": "dev.specs",
+      "title": "行为规格",
+      "actionIds": [],
+      "artifactIds": [],
+      "checkIds": [],
+      "approval": "none"
+    },
+    {
+      "id": "dev.design",
+      "title": "技术设计",
+      "actionIds": [],
+      "artifactIds": [],
+      "checkIds": [],
+      "approval": "none"
+    },
+    {
+      "id": "dev.plan",
+      "title": "执行计划",
+      "actionIds": [],
+      "artifactIds": [],
+      "checkIds": [],
+      "approval": "none"
+    },
+    {
+      "id": "dev.code",
+      "title": "代码实现",
+      "actionIds": [],
+      "artifactIds": [],
+      "checkIds": [],
+      "approval": "none"
+    },
+    {
+      "id": "ops.cicd",
+      "title": "CI/CD",
+      "actionIds": [],
+      "artifactIds": [],
+      "checkIds": [],
+      "approval": "none"
+    },
+    {
+      "id": "ops.archive",
+      "title": "归档",
+      "actionIds": [],
+      "artifactIds": [],
+      "checkIds": [],
+      "approval": "none"
+    }
+  ],
+  "actions": [],
+  "artifacts": [
+    {
+      "id": "verified-context",
+      "path": ".devclaw/handoffs/verified-context.json",
+      "required": true
+    }
+  ],
+  "checks": [],
+  "environment": [],
+  "capabilities": {
+    "execution": true,
+    "conditionalTransition": false,
+    "idempotency": false,
+    "reconciliation": false,
+    "cancellation": true
+  }
+}

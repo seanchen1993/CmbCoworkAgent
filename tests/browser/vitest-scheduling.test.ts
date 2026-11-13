@@ -69,7 +69,7 @@ it("collects the unchanged suite exactly once and schedules native graphs before
     expect(native?.config.sequence.groupOrder).toBe(0)
     expect(parallel?.config.sequence.groupOrder).toBe(1)
     expect(native?.config.pool).toBe("forks")
-    expect(native?.config.poolOptions?.forks).toMatchObject({ singleFork: true, isolate: true })
+    expect(native?.config.poolOptions?.forks).toMatchObject({ singleFork: false, isolate: true })
     expect(parallel?.config.poolOptions?.forks?.singleFork).not.toBe(true)
     expect(parallel?.config.maxWorkers).toBe(2)
     expect(parallel?.config.minWorkers).toBe(1)

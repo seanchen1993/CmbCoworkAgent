@@ -4,11 +4,13 @@ import {
   type ModUiChangeScope
 } from "../../../shared/mods/types"
 import { FunctionSitePresentationCache } from "./function-site-presentation"
+import { parseThreadDirectoryChange } from "../../../shared/thread-directory-change"
+import { sameThreadDirectoryScope, type ThreadDirectoryScope } from "./thread-directory-scope"
 
 interface Sources {
   configuration(listener: (event?: ModConfigurationChangeEvent) => void): () => void
   cards(listener: (event: { threadId: string; scope?: ModUiChangeScope }) => void): () => void
-  threads(listener: () => void): () => void
+  threads(listener: (change?: unknown) => void): () => void
   account(listener: () => void): () => void
   localConfiguration(listener: () => void): () => void
 }
@@ -20,6 +22,7 @@ interface Entry {
   live: boolean
   users: number
   expires: number
+  scope?: ThreadDirectoryScope
 }
 
 export interface RetainedFunctionSiteCache {
@@ -42,11 +45,12 @@ export class RetainedFunctionSiteCaches {
     private readonly idleMilliseconds = 120000
   ) {}
 
-  acquire(threadId: string, workspace: string): RetainedFunctionSiteCache {
+  acquire(threadId: string, workspace: string, scope?: ThreadDirectoryScope): RetainedFunctionSiteCache {
     this.expire()
     // A directory replacement cannot later restore a prior incarnation's drawings.
     for (const [otherKey, entry] of this.entries)
-      if (entry.threadId === threadId && entry.workspace !== workspace) this.remove(otherKey)
+      if (entry.threadId === threadId && (entry.workspace !== workspace ||
+        ((entry.scope || scope) && !sameThreadDirectoryScope(entry.scope, scope)))) this.remove(otherKey)
     // Concurrent panes must not share revocation or retry lifetimes. Reuse only an idle drawing.
     const idle = [...this.entries]
       .reverse()
@@ -59,6 +63,7 @@ export class RetainedFunctionSiteCaches {
       const created: Entry = {
         threadId,
         workspace,
+        scope,
         live: true,
         users: 0,
         expires: Infinity,
@@ -108,9 +113,15 @@ export class RetainedFunctionSiteCaches {
       }),
       this.sources.localConfiguration(revokeAll),
       this.sources.account(revokeAll),
-      this.sources.threads(() => {
-        // Mounted views already reconcile thread metadata; dormant drawings have no such owner.
-        for (const [key, entry] of this.entries) if (!entry.users) this.remove(key)
+      this.sources.threads(input => {
+        const change = parseThreadDirectoryChange(input)
+        for (const [key, entry] of this.entries) {
+          if (change && entry.threadId !== change.threadId) continue
+          // A complete current transcript hint changes rows, not display authority.
+          // Unknown/legacy and replacement hints synchronously revoke active closures too.
+          if (!change || !entry.users || change.kind !== "transcript" ||
+            !sameThreadDirectoryScope(entry.scope, change)) this.remove(key)
+        }
       }),
       this.sources.cards((event) => {
         for (const entry of this.entries.values()) {
@@ -176,7 +187,8 @@ export function discardRetainedFunctionSiteCache(threadId: string): void {
 
 export function acquireRetainedFunctionSiteCache(
   threadId: string,
-  workspace: string
+  workspace: string,
+  scope?: ThreadDirectoryScope
 ): RetainedFunctionSiteCache | null {
   const api = window.api
   // Older bridges cannot observe all invalidations, so retain their original mount-only cache.
@@ -196,5 +208,5 @@ export function acquireRetainedFunctionSiteCache(
     })
     registries.set(api, registry)
   }
-  return registry.acquire(threadId, workspace)
+  return registry.acquire(threadId, workspace, scope)
 }

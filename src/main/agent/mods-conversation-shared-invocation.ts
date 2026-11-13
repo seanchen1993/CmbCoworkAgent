@@ -50,6 +50,7 @@ export type { FunctionConversationSharedNativeFactory, FunctionConversationShare
 function fail(): never { throw new ModFunctionError("MODS_CONVERSATION_NATIVE_SOURCE_INVALID") }
 const retiringInstallations = new Set<SharedNativeFactoryRecord>()
 const returnMapGet = Map.prototype.get, returnMapSet = Map.prototype.set
+const restoredReturnFreeze = Object.freeze
 interface NativeReturnData { assertDataCurrent(): void }
 interface NativeReturnSources {
   capture(message: BaseMessage): NativeReturnData | undefined
@@ -354,21 +355,25 @@ export function admitFunctionConversationSharedNativeInvocation(
       flush: uuid => options.flush(runtime, uuid) })
     createdHost = host
     const history = original.history
-    const historySources = history ? captureNativeReturnSources({ messages: history.messages }) :
-      captureNativeReturnSources(undefined)
+    const ordinaryInputs = original.ordinaryReturnInputs
+    if (ordinaryInputs) original.assertDataCurrent()
+    const restoredSources = history ? captureNativeReturnSources({ messages: history.messages }) :
+      ordinaryInputs ? ordinaryInputs.prepare() : captureNativeReturnSources(undefined)
+    if (ordinaryInputs) original.assertDataCurrent()
+    if (original.intake) host.registerIntake(original.intake)
     if (history) {
       history.assertDataCurrent()
       host.registerHistorical(history.messages, history.membership, history.historicalTarget)
-      historySources.assertDataCurrent()
+      restoredSources.assertDataCurrent()
       history.assertDataCurrent()
     }
-    const view: FunctionConversationSharedNativeDomainView = Object.freeze({ factory: factory.token,
+    const view: FunctionConversationSharedNativeDomainView = restoredReturnFreeze({ factory: factory.token,
       domain: domain.token, runtime, host, assertCurrent, assertDataCurrent,
-      captureReturnHistorySource: historySources.capture,
+      captureReturnRestoredSource: restoredSources.capture,
       assertReturnHistoryCurrent: history ? history.assertCurrent : () => undefined,
-      assertReturnHistoryData: () => {
+      assertReturnRestoredData: () => {
         history?.assertDataCurrent()
-        historySources.assertDataCurrent()
+        restoredSources.assertDataCurrent()
       } })
     publishSharedNativeDomainView(domain, original, view)
     assertCurrent()
@@ -588,7 +593,7 @@ function wrapSharedInvocation<T extends object>(graph: T,
                       configured, scope, initial.assertOriginalDataCurrent,
                       start => running.consume(start, (frame, lifetime, view) => {
                         initial.assertDataCurrent()
-                        view.assertReturnHistoryData?.()
+                        view.assertReturnRestoredData?.()
                         const output = routeSharedNativeStreamFrame(frame, lifetime, view,
                           (selected, payload) => copySharedNativeStreamPayload(selected, payload, view, initial))
                         view.assertDataCurrent()
@@ -599,12 +604,12 @@ function wrapSharedInvocation<T extends object>(graph: T,
                     await running.consume(() => Reflect.apply(value, target, [admitted, configured, ...rest]),
                       (frame, lifetime, view) => {
                         initial.assertDataCurrent()
-                        view.assertReturnHistoryData?.()
+                        view.assertReturnRestoredData?.()
                         const output = projectSharedNativeStreamEvent(frame, view, lifetime)
                         initial.assertDataCurrent()
                         return [{ value: output, assertCurrent() {
                           initial.assertDataCurrent()
-                          view.assertReturnHistoryData?.()
+                          view.assertReturnRestoredData?.()
                           view.assertDataCurrent()
                         } }]
                       })
@@ -668,15 +673,16 @@ function wrapSharedInvocation<T extends object>(graph: T,
                   scope.quarantineNativeWork()
                   throw new ModFunctionError("MODS_CONVERSATION_NATIVE_NODE_DRAIN_UNKNOWN")
                 }
+                view.assertReturnRestoredData?.()
                 const returned = prepareNativeConversationReturn(result, message =>
                   view.host.captureReturnMessageSource(message) ?? initial.capture(message) ??
-                  view.captureReturnHistorySource?.(message))
+                  view.captureReturnRestoredSource?.(message))
                 view.assertReturnHistoryCurrent?.()
                 view.assertCurrent()
                 view.host.validate("values", result)
                 view.assertDataCurrent()
                 initial.assertDataCurrent()
-                view.assertReturnHistoryData?.()
+                view.assertReturnRestoredData?.()
                 output = returned.finish()
               }
               catch (error) { failed = true; failure = error }
@@ -741,7 +747,7 @@ async function closeSharedNativeStreamDomain(factory: SharedNativeFactoryRecord,
 function copySharedNativeStreamPayload(mode: string, value: unknown,
   view: FunctionConversationSharedNativeDomainView, initial: NativeReturnSources): unknown {
   const capture = (message: BaseMessage) => view.host.captureReturnMessageSource(message) ??
-    initial.capture(message) ?? view.captureReturnHistorySource?.(message)
+    initial.capture(message) ?? view.captureReturnRestoredSource?.(message)
   const copy = (input: unknown): unknown => {
     if (!input || typeof input !== "object" || types.isProxy(input)) return input
     if (Array.isArray(input)) return input.map(copy)
@@ -768,10 +774,11 @@ function copySharedNativeStreamPayload(mode: string, value: unknown,
   view.assertReturnHistoryCurrent?.()
   view.assertCurrent()
   view.host.validate(mode, value)
+  view.assertReturnRestoredData?.()
   const result = copy(value)
   view.assertDataCurrent()
   initial.assertDataCurrent()
-  view.assertReturnHistoryData?.()
+  view.assertReturnRestoredData?.()
   return result
 }
 

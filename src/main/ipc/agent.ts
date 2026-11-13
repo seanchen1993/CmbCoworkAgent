@@ -184,7 +184,6 @@ import { imDesktopCompletionObserver } from "../services/im/desktop-completion"
 import { showPetCompletedTaskNotice } from "../pet"
 import { trackEvent } from "../services/event-reporter"
 import { clearAdoptionContext } from "../services/adoption-tracker"
-import { markHarnessStageAttributionDirty } from "../services/harness-stage-attribution"
 import {
   GOAL_USER_MESSAGE_EVENT_PREFIX,
   RUNTIME_RESTORED_GOAL_PAUSE_NOTICE
@@ -500,23 +499,6 @@ import { isManagedTransportWindow } from "../agent/managed-transport-delivery"
 import { announceManagedTurnUserMessage } from "../agent/managed-transport-delivery"
 import { nativePluginPromptRun } from "../agent/mods-plugin-prompt-entry"
 import { functionPluginPromptModelText } from "../../shared/mods/v2/plugin-prompt"
-
-function withHarnessStageInvalidation(
-  callback: HookResultCallback,
-  projectId?: string,
-  featureSlug?: string
-): HookResultCallback {
-  return (event, hook, result): void => {
-    if (
-      hook.hookSourceType === "plugin" ||
-      hook.hookSourceType === "skill" ||
-      Boolean(hook.pluginRoot)
-    ) {
-      markHarnessStageAttributionDirty(projectId, featureSlug)
-    }
-    callback(event, hook, result)
-  }
-}
 
 const MIN_CHARS_FOR_MEMORY = 200
 const MAX_STOP_HOOK_REVISIONS = 2
@@ -1025,6 +1007,23 @@ async function readCoordinatorWorkspacePath(threadId: string): Promise<string | 
   } catch (error) {
     if (!isThreadMetadataHydrationWorkerUnavailable(error)) throw error
     return parseStandardThreadMetadata(getThreadCore(threadId)?.metadata).workspacePath
+  }
+}
+
+/** Bind the async workspace read and restore to the original host row, not just its ID. */
+function captureCoordinatorWorkerRestoreSource(threadId: string) {
+  const database = getDb(), row = getThreadRuntimeScope(threadId)
+  if (!row) return undefined
+  const incarnation = captureThreadIncarnation(row)
+  const workspacePath = parseStandardThreadMetadata(row.metadata).workspacePath
+  return {
+    workspacePath,
+    assertCurrent(): void {
+      const current = getThreadRuntimeScope(threadId)
+      if (getDb() !== database || !current || !matchesThreadIncarnation(current, incarnation) ||
+        parseStandardThreadMetadata(current.metadata).workspacePath !== workspacePath)
+        throw new DOMException("Coordinator worker source changed.", "AbortError")
+    }
   }
 }
 
@@ -5912,6 +5911,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
     ): Promise<CoordinatorWorkerSnapshot[]> => {
       const threadId = payload.threadId?.trim()
       if (!threadId) return []
+      const source = captureCoordinatorWorkerRestoreSource(threadId)
+      if (!source) return []
       const subscribeUpdates = payload.subscribeUpdates !== false
       const window = BrowserWindow.fromWebContents(event.sender)
       const restoreController =
@@ -5922,6 +5923,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       try {
         const window = BrowserWindow.fromWebContents(event.sender)
         const workspacePath = await readCoordinatorWorkspacePath(threadId)
+        source.assertCurrent()
+        if ((workspacePath?.trim() ? workspacePath : undefined) !==
+          (source.workspacePath?.trim() ? source.workspacePath : undefined))
+          throw new DOMException("Coordinator worker workspace read changed.", "AbortError")
         const updateKey =
           subscribeUpdates && window && !window.isDestroyed()
             ? trackCoordinatorWorkerUpdateBinding(window, threadId)
@@ -5935,12 +5940,14 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 notification?: string
                 suppressNotificationAutoRun?: boolean
                 stream?: { mode: "messages" | "values"; data: unknown }
-              }) =>
+              }) => {
+                try { source.assertCurrent() } catch { return }
                 sendCoordinatorWorkerEventToChannels(
                   window,
                   [`agent:stream:${threadId}`, `agent:stream:${threadId}:coordinator-internal`],
                   workerEvent
                 )
+              }
             : undefined
         if (workspacePath) {
           await coordinatorWorkerManager.restoreWorkersForThread({
@@ -5949,7 +5956,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             mode: "recent",
             onUpdate,
             onUpdateKey: updateKey,
-            signal: restoreController?.signal
+            signal: restoreController?.signal,
+            assertCurrent: source.assertCurrent
           })
         } else if (subscribeUpdates) {
           coordinatorWorkerManager.bindWorkerUpdates(threadId, onUpdate, updateKey)
@@ -5964,6 +5972,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         }
       }
 
+      try { source.assertCurrent() } catch { return [] }
       return limitCoordinatorWorkersForRenderer(coordinatorWorkerManager.readWorkers(threadId))
     }
   )
@@ -7401,11 +7410,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           threadId,
           runToken,
           abortController.signal,
-          withHarnessStageInvalidation(
-            makeHookResultCallback(window, channel, turnState.turnId),
-            harnessFeatureBinding?.projectId,
-            harnessFeatureBinding?.slug
-          )
+          makeHookResultCallback(window, channel, turnState.turnId)
         )
         const onFailureFuseNotice = guardPhysicalStreamRunCallback(
           threadId,
@@ -11335,11 +11340,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           threadId,
           runToken,
           abortController.signal,
-          withHarnessStageInvalidation(
-            makeHookResultCallback(window, channel, turnState.turnId),
-            harnessAgentContext.harnessProjectId,
-            harnessAgentContext.featureId
-          )
+          makeHookResultCallback(window, channel, turnState.turnId)
         )
         const onFailureFuseNotice = guardPhysicalStreamRunCallback(
           threadId,
@@ -12577,11 +12578,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         threadId,
         runToken,
         abortController.signal,
-        withHarnessStageInvalidation(
-          makeHookResultCallback(window, channel, turnState.turnId),
-          harnessAgentContext.harnessProjectId,
-          harnessAgentContext.featureId
-        )
+        makeHookResultCallback(window, channel, turnState.turnId)
       )
       const onFailureFuseNotice = guardPhysicalStreamRunCallback(
         threadId,

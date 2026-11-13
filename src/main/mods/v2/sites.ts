@@ -109,7 +109,12 @@ export class FunctionUiSites {
     return site
   }
 
-  async mount(component: FunctionUiSite, messageId?: string, expectedRequestId?: string): Promise<string> {
+  async mount(
+    component: FunctionUiSite,
+    messageId?: string,
+    expectedRequestId?: string,
+    signal?: AbortSignal
+  ): Promise<string> {
     functionUiSite(component)
     return this.enqueue(`mount:${component}`, async () => {
       functionUiSite(component)
@@ -148,6 +153,7 @@ export class FunctionUiSites {
         if (nativeRequest && this.host.pendingQuestion?.() !== nativeRequest)
           throw new ModFunctionError("MODS_UI_QUESTION_STALE")
       }
+      signal?.throwIfAborted()
       const owner = randomUUID()
       this.slots.set(owner, { component, messageId, owner, nativeRequest: nativeRequest ?? undefined,
         drawings: this.drawings(owner, component) })
@@ -155,8 +161,9 @@ export class FunctionUiSites {
     })
   }
 
-  render(owner: string, props: ModObject): Promise<FunctionPaneSnapshot> {
+  render(owner: string, props: ModObject, signal?: AbortSignal): Promise<FunctionPaneSnapshot> {
     return this.enqueue(`owner:${owner}`, async () => {
+      signal?.throwIfAborted()
       // enqueue has just checked the full lifecycle at execution, without an intervening await.
       const site = this.native(owner)
       // Only the mounted, immutable message ID can select a main-process durable source.
@@ -173,7 +180,8 @@ export class FunctionUiSites {
         site.fingerprint = fingerprint
         site.drawings.open("engine", { id: owner, title: site.component })
       }
-      const snapshots = await site.drawings.snapshot()
+      const snapshots = await site.drawings.snapshot(undefined, signal)
+      signal?.throwIfAborted()
       this.get(owner)
       const snapshot = snapshots.find((pane) => pane.id === owner)
       if (!snapshot) throw new ModFunctionError("MODS_UI_SITE_CLOSED")

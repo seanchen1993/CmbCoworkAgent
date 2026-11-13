@@ -682,7 +682,8 @@ it("caches bounded host message props without an empty engine frame or an intera
     300,
     cache.capture("AssistantMessage")
   )
-  expect(cache.read(key("oversize-host"))).toBeNull()
+  expect(cache.read(key("oversize-host"))?.presentation.hostMessagePreview?.omittedCharacters)
+    .toBeGreaterThan(0)
   expect(() =>
     cache.saveData(
       key(),
@@ -694,6 +695,67 @@ it("caches bounded host message props without an empty engine frame or an intera
       cache.capture("AssistantMessage")
     )
   ).toThrow("MODS_UI_SITE_PROPS")
+  cache.invalidate()
+})
+
+it("retains only protected large-message fragments within the original byte budget", () => {
+  const cache = new FunctionSitePresentationCache(() => true)
+  const original = "protected head\n\n" + "x".repeat(100000) + "\n\nprotected tail"
+  const data = { component: "AssistantMessage" as const,
+    hostMessage: { text: original, isFirstOfReply: true } }
+  cache.saveData(key("large"), data, 1200, cache.capture("AssistantMessage"), 800, "large-host")
+  const retained = cache.read(key("large"))!
+  const head = String(retained.presentation.hostMessage?.text)
+  const preview = retained.presentation.hostMessagePreview!
+  expect(original.startsWith(head)).toBe(true)
+  expect(original.endsWith(preview.tail)).toBe(true)
+  expect(head.length + preview.tail.length + preview.omittedCharacters).toBe(original.length)
+  expect(JSON.stringify(retained.presentation).length * 2 + 1024).toBeLessThan(128 * 1024)
+  expect(data.hostMessage.text).toBe(original)
+  data.hostMessage.text = "MUTATED_UNPROTECTED"
+  expect(JSON.stringify(retained.presentation)).not.toContain("MUTATED_UNPROTECTED")
+  expect(budget.stats().bytes).toBeLessThanOrEqual(budget.stats().maxBytes)
+  expect(cache.read(key("large", "raw", 801))).toBeNull()
+  cache.invalidateProjection("large-host")
+  expect(retained.current()).toBe(false)
+  expect(cache.read(key("large"))).toBeNull()
+  cache.invalidate()
+})
+
+it("accounts for JSON escaping when retaining a large protected preview", () => {
+  const cache = new FunctionSitePresentationCache(() => true)
+  // Below the normal character threshold, but still above the escaped byte cap.
+  const text = "\u0001".repeat(50000)
+  cache.saveData(key("escaped"), { component: "AssistantMessage",
+    hostMessage: { text, isFirstOfReply: true } }, 200,
+  cache.capture("AssistantMessage"), 800, "escaped-host")
+  const retained = cache.read(key("escaped"))!.presentation
+  const head = String(retained.hostMessage?.text), preview = retained.hostMessagePreview!
+  expect(head.length + preview.tail.length + preview.omittedCharacters).toBe(text.length)
+  expect(text.startsWith(head)).toBe(true)
+  expect(text.endsWith(preview.tail)).toBe(true)
+  expect(JSON.stringify(retained).length * 2 + 1024).toBeLessThan(128 * 1024)
+  cache.invalidate()
+})
+
+it("budgets an inert protected reading window with its source, TTL and authority", () => {
+  const text = "visible window ".repeat(8000), cache = new FunctionSitePresentationCache(() => true)
+  const window = { top: 5000, height: 400, layoutWidth: 800,
+    pieces: [{ text: text.slice(40000, 48000), top: 5000, left: 0, width: 800,
+      font: "14px sans-serif" }] }
+  cache.saveData(key("window"), { component: "AssistantMessage",
+    hostMessage: { text, isFirstOfReply: true } }, 9000,
+  cache.capture("AssistantMessage"), 800, "window-host", window)
+  const retained = cache.read(key("window"))!
+  expect(retained.presentation.messageViewport).toEqual(window)
+  expect(JSON.stringify(retained.presentation).length * 2 + 1024).toBeLessThan(128 * 1024)
+  expect(budget.stats().bytes).toBeLessThanOrEqual(budget.stats().maxBytes)
+  window.pieces[0].text = "RAW_CHANGE"
+  expect(JSON.stringify(retained.presentation)).not.toContain("RAW_CHANGE")
+  cache.invalidateProjection("window-host")
+  expect(retained.current()).toBe(false)
+  expect(cache.read(key("window"))).toBeNull()
+  cache.invalidate()
 })
 
 it("invalidates only entries and subscribers with the exact host projection key", () => {

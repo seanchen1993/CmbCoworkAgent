@@ -90,8 +90,10 @@ export function functionModelRequest(
   }
 }
 
+export const FUNCTION_MODEL_TEXT_BYTE_LIMIT = 64000
+
 export function validateFunctionModelText(value: unknown): asserts value is string {
-  if (typeof value !== "string" || Buffer.byteLength(value, "utf8") > 64000)
+  if (typeof value !== "string" || Buffer.byteLength(value, "utf8") > FUNCTION_MODEL_TEXT_BYTE_LIMIT)
     throw new ModFunctionError("MODS_MODEL_RESULT_LIMIT")
 }
 

@@ -38,6 +38,7 @@ interface DestinationData {
 
 const table = "function_conversation_native_destinations"
 const destinationData = new WeakMap<FunctionConversationNativeDestination, DestinationData>()
+const destinationFreeze = Object.freeze
 const destinationWeakGet = WeakMap.prototype.get, destinationWeakSet = WeakMap.prototype.set
 const destinationWeakDelete = WeakMap.prototype.delete
 function readData<K extends object, V>(records: WeakMap<K, V>, key: K): V | undefined {
@@ -78,47 +79,46 @@ function destinationSnapshot(db: NativeSqliteAdapter, original: MappingEntries,
     if (!collision) break
     prefix += "x_"
   }
-  let upper = ""
-  for (let index = 0; index < prefix.length - 1; index++) upper += prefix[index]
-  upper += "`"
   const threads = ["target_thread", "parent_thread", "checkpoint_thread", "destination_thread"]
+  const roleThreadIds = [target.threadId, parent.threadId, checkpointThreadId, destinationThreadId]
+  const uniqueThreadRoles = [0, 1, 2, 3]
+  let uniqueThreadCount = 0
+  for (let role = 0; role < threads.length; role++) {
+    let previous = 0
+    while (previous < role && roleThreadIds[previous] !== roleThreadIds[role]) previous++
+    if (previous < role) threads[role] = threads[previous]
+    else uniqueThreadRoles[uniqueThreadCount++] = role
+  }
+  uniqueThreadRoles.length = uniqueThreadCount
+  let threadJoins = ""
+  for (let index = 0; index < uniqueThreadCount; index++) {
+    const name = threads[uniqueThreadRoles[index]]
+    threadJoins += `
+    JOIN threads ${name} ON ${name}.thread_id=?`
+  }
   const refs = ["target_ref", "parent_ref"]
   const fields = ["invocation_id", "kind", "checkpoint_namespace", "thread_id",
     "incarnation_key", "workspace"]
   const schema = query(db,
     "SELECT rowid AS schema_rowid,sql FROM main.sqlite_schema WHERE type='table' AND name=?",
     [table])[0]
-  const originalSchema = text(schema?.sql), schemaRowId = schema?.schema_rowid
+  text(schema?.sql)
+  const schemaRowId = schema?.schema_rowid
   if (typeof schemaRowId !== "number" || !Number.isSafeInteger(schemaRowId)) fail()
-  const schemaLiteral = `'${originalSchema.replace(/'/g, "''")}'`
   // Pin every originally captured mapping column. A later column can never overwrite a
   // host alias, even if writable_schema conceals its declaration in sqlite_schema.sql.
   const columns = [
     ...original.map(([name]) => `m."${name.replace(/"/g, "\"\"")}"`),
-    ...threads.flatMap(name => ["created_at", "metadata"].map(field =>
-      `${name}.${field} AS "${prefix}${name}_${field}"`)),
-    ...refs.flatMap(name => fields.map(field => {
-      const relation = ["thread_id", "incarnation_key", "workspace"].includes(field)
-        ? `${name}_session` : name
-      return `${relation}.${field} AS "${prefix}${name}_${field}"`
-    })),
-    // CASE short-circuits SQLite's expensive table-info virtual table on the ordinary
-    // unchanged main schema. This is only a structural shortcut: all relation rows are
-    // still read afresh in this statement, after every original source callback.
-    // TEMP shadows and changed schemas retain the full original collision diagnostic.
-    `CASE WHEN NOT EXISTS(SELECT 1 FROM temp.sqlite_schema WHERE name='${table}')
-      AND (SELECT sql FROM main.sqlite_schema
-        WHERE rowid=${schemaRowId} AND type='table' AND name='${table}')
-        = ${schemaLiteral} THEN 0
-      ELSE EXISTS(SELECT 1 FROM pragma_table_info('${table}')
-      WHERE name COLLATE BINARY >= '${prefix}' AND name COLLATE BINARY < '${upper}')
-      END AS "${prefix}alias_collisions"`]
+    ...uniqueThreadRoles.flatMap(role => ["created_at", "metadata"].map(field =>
+      `${threads[role]}.${field} AS "${prefix}${threads[role]}_${field}"`)),
+    ...refs.flatMap(name => fields.flatMap(field => {
+      const session = ["thread_id", "incarnation_key", "workspace"].includes(field)
+      if (name === "parent_ref" && session) return []
+      const relation = session ? "target_ref_session" : name
+      return [`${relation}.${field} AS "${prefix}${name}_${field}"`]
+    }))]
   const read = db.prepareReadOne(`SELECT ${columns.join(",")}
-    FROM ${table} m
-    JOIN threads target_thread ON target_thread.thread_id=?
-    JOIN threads parent_thread ON parent_thread.thread_id=?
-    JOIN threads checkpoint_thread ON checkpoint_thread.thread_id=?
-    JOIN threads destination_thread ON destination_thread.thread_id=?
+    FROM ${table} m${threadJoins}
     JOIN function_conversations target_ref ON target_ref.conversation_id=m.conversation_id
     JOIN function_logical_sessions target_ref_session
       ON target_ref_session.logical_session_id=target_ref.logical_session_id
@@ -126,15 +126,21 @@ function destinationSnapshot(db: NativeSqliteAdapter, original: MappingEntries,
       ON target_ref_branch.conversation_id=target_ref.conversation_id
         AND target_ref_branch.branch_id=m.branch_id
     JOIN function_conversations parent_ref ON parent_ref.conversation_id=?
-    JOIN function_logical_sessions parent_ref_session
-      ON parent_ref_session.logical_session_id=parent_ref.logical_session_id
+      AND parent_ref.logical_session_id=target_ref_session.logical_session_id
     JOIN function_conversation_branches parent_ref_branch
       ON parent_ref_branch.conversation_id=parent_ref.conversation_id AND parent_ref_branch.branch_id=?
-    WHERE m.conversation_id=? AND m.branch_id=? AND target_ref_session.logical_session_id=?
-      AND parent_ref_session.logical_session_id=?`)
-  const values = Object.freeze([target.threadId, parent.threadId, checkpointThreadId,
-    destinationThreadId, parent.conversationId, parent.branchId, target.conversationId,
-    target.branchId, target.logicalSessionId, parent.logicalSessionId])
+    WHERE m.conversation_id=? AND m.branch_id=? AND target_ref_session.logical_session_id=?`)
+  const values = [target.threadId, parent.threadId, checkpointThreadId, destinationThreadId,
+    parent.conversationId, parent.branchId, target.conversationId, target.branchId, target.logicalSessionId]
+  for (let index = 0; index < uniqueThreadCount; index++)
+    values[index] = roleThreadIds[uniqueThreadRoles[index]]
+  values[uniqueThreadCount] = parent.conversationId
+  values[uniqueThreadCount + 1] = parent.branchId
+  values[uniqueThreadCount + 2] = target.conversationId
+  values[uniqueThreadCount + 3] = target.branchId
+  values[uniqueThreadCount + 4] = target.logicalSessionId
+  values.length = uniqueThreadCount + 5
+  destinationFreeze(values)
   // Only fixed SQL alias strings are reused. Every read and incarnation interpretation stays fresh.
   const createdAtKeys: string[] = [], metadataKeys: string[] = [], refKeys: string[][] = []
   for (let index = 0; index < threads.length; index++) {
@@ -144,10 +150,9 @@ function destinationSnapshot(db: NativeSqliteAdapter, original: MappingEntries,
   for (let index = 0; index < refs.length; index++) {
     const keys: string[] = []
     for (let field = 0; field < fields.length; field++)
-      keys[field] = `${prefix}${refs[index]}_${fields[field]}`
+      keys[field] = `${prefix}${index === 1 && field >= 3 ? refs[0] : refs[index]}_${fields[field]}`
     refKeys[index] = keys
   }
-  const aliasCollisionsKey = `${prefix}alias_collisions`
   const checkThread = (row: SqlRow, index: number, incarnation: ThreadIncarnation) => {
     const createdAt = row[createdAtKeys[index]], rawMetadata = row[metadataKeys[index]]
     if (typeof createdAt !== "number" ||
@@ -164,7 +169,7 @@ function destinationSnapshot(db: NativeSqliteAdapter, original: MappingEntries,
   }
   return () => {
     const row = read(values)
-    if (!row || row[aliasCollisionsKey] !== 0) fail()
+    if (!row) fail()
     for (let index = 0; index < original.length; index++) {
       const entry = original[index]
       if (row[entry[0]] !== entry[1]) fail()
@@ -181,7 +186,7 @@ function destinationSnapshot(db: NativeSqliteAdapter, original: MappingEntries,
     const result: ScopeThread[] = []
     const incarnations = [target.incarnation, parent.incarnation, checkpoint, destination]
     for (let index = 0; index < threads.length; index++) {
-      result[index] = { id: values[index], incarnation: incarnations[index],
+      result[index] = { id: roleThreadIds[index], incarnation: incarnations[index],
         createdAt: row[createdAtKeys[index]] as number,
         metadata: row[metadataKeys[index]] as string | null }
     }
@@ -341,7 +346,7 @@ export function readFunctionConversationNativeDestination(db: NativeSqliteAdapte
   if (hash(originalMetadata) !== originalDigest) fail()
   metadata(originalMetadata, parent, checkpointThreadId, invocationId)
   if (db.inTransaction) fail("MODS_CONVERSATION_NOT_COMMITTED")
-  const result = Object.freeze({ parent, invocationId, checkpointThreadId,
+  const result = destinationFreeze({ parent, invocationId, checkpointThreadId,
     checkpointIncarnation: checkpoint, destinationThreadId, destinationIncarnation: destination,
     originalMetadata, assertCurrent: current })
   Reflect.apply(destinationWeakSet, destinationData, [result, { database: db, target, parent,

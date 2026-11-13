@@ -7,6 +7,7 @@ const nativePregelWeakGet = WeakMap.prototype.get
 const nativePregelWeakSet = WeakMap.prototype.set
 const nativePregelWeakDelete = WeakMap.prototype.delete
 const nativePregelThen = Promise.prototype.then
+const nativePregelPromise = Promise
 const nativePregelOwnKeys = Reflect.ownKeys
 const nativePregelBirths = new WeakMap()
 const nativePregelOperations = new WeakMap()
@@ -17,6 +18,42 @@ const nativePregelCheckpointBodies = new WeakMap()
 const nativePregelCheckpointLoops = new WeakMap()
 var nativePregelInitialized = false
 
+// This is a physical write barrier, not an authority or a permission cache.
+function createNativePregelCheckpointBarrier(body, loop) {
+  "use strict"
+  nativePregelCheckpointAssertBody(body)
+  let settledPrefix = 0
+  return function awaitNativeCheckpointPrefix() {
+    "use strict"
+    const promises = loop.checkpointerPromises
+    const end = nativePregelGetOwn(promises, "length").value
+    if (end === settledPrefix) return undefined
+    if (end < settledPrefix) nativePregelInvalid(body.record)
+    const start = settledPrefix
+    return new nativePregelPromise(function observeCheckpointPrefix(resolve, reject) {
+      "use strict"
+      let remaining = end - start, failed = false, firstReason
+      function settled(rejected, reason) {
+        "use strict"
+        if (rejected && !failed) { failed = true; firstReason = reason }
+        remaining--
+        if (remaining !== 0) return
+        if (failed) reject(firstReason)
+        else { settledPrefix = end; resolve(undefined) }
+      }
+      for (let index = start; index < end; index++) {
+        try {
+          const field = nativePregelGetOwn(promises, index)
+          if (!field || !nativePregelGetOwn(field, "value")) nativePregelInvalid(body.record)
+          nativePregelApply(nativePregelThen, field.value, [
+            function checkpointFulfilled() { "use strict"; settled(false, undefined) },
+            function checkpointRejected(reason) { "use strict"; settled(true, reason) }
+          ])
+        } catch (reason) { settled(true, reason) }
+      }
+    })
+  }
+}
 function nativePregelGet(map, key) {
   return nativePregelApply(nativePregelWeakGet, map, [key])
 }

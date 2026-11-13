@@ -7,7 +7,6 @@ import {
 } from "../../hooks/scope"
 import type { HookConfig, HookEvent, HookResult } from "../../hooks/types"
 import type { SkillUseTracker } from "./tracker"
-import { markHarnessStageAttributionDirty } from "../../services/harness-stage-attribution"
 import { parseCompletionGateDecision, type CompletionGate } from "./completion-gate"
 import { completionGateBudget, withCompletionBudget } from "../../mods/v2/completion-budget"
 import type { HookAccountingBinder } from "../../hooks/model-accounting"
@@ -476,7 +475,6 @@ export async function runCompletionHooksWithRevision({
             onHookResult,
             onHookSkippedFactory
           }))
-      markHarnessStageAttributionDirty(harnessProjectId, featureId)
       if (abortSignal.aborted) return "failed"
       if (hasTerminalModelRefusal?.()) return "passed"
 
@@ -578,7 +576,6 @@ export async function runCompletionHooksWithRevision({
             console.warn("[Hooks] Stop hook error:", e)
             return null
           }))
-      markHarnessStageAttributionDirty(harnessProjectId, featureId)
       if (abortSignal.aborted) return "failed"
       if (hasTerminalModelRefusal?.()) return "passed"
 

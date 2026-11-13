@@ -4,7 +4,11 @@ import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "fs"
 import { tmpdir } from "os"
 import { dirname, join } from "path"
 import { afterEach, describe, expect, it } from "vitest"
-import { openNativeSqliteDatabase } from "./native-sqlite-adapter"
+import {
+  openNativeSqliteDatabase,
+  readFunctionConversationNativeSqliteCurrentExecution,
+  NativeSqliteStatement
+} from "./native-sqlite-adapter"
 import {
   forgetRegisteredSqliteQuarantineArtifact,
   listRegisteredSqliteQuarantineArtifacts
@@ -25,6 +29,51 @@ afterEach(() => {
 })
 
 describe("NativeSqliteAdapter", () => {
+  it("blocks future SQL after an unclean failure without treating unusable as closed", () => {
+    const path = temporaryDatabasePath("unusable.sqlite")
+    const { database } = openNativeSqliteDatabase(path)
+    let statement: ReturnType<typeof database.prepare> | undefined
+    try {
+      database.run("CREATE TABLE rows(id INTEGER PRIMARY KEY); INSERT INTO rows VALUES(1)")
+      const read = database.prepareReadOne("SELECT id FROM rows")
+      const origin = readFunctionConversationNativeSqliteCurrentExecution(database)!
+      statement = database.prepare("INSERT INTO rows VALUES(2) RETURNING id")
+      database.markUnusable()
+      expect(() => database.run("INSERT INTO rows VALUES(3)")).toThrow("Database is unavailable")
+      expect(() => database.exec("SELECT 1")).toThrow("Database is unavailable")
+      expect(() => read()).toThrow("Database is unavailable")
+      expect(() => origin.assertDataCurrent()).toThrow("Database is unavailable")
+      expect(() => statement!.step()).toThrow("Database is unavailable")
+      expect(() => statement!.bind([])).toThrow("Database is unavailable")
+      expect(() => statement!.reset()).toThrow("Database is unavailable")
+      expect(() => statement!.getAsObject()).toThrow("Database is unavailable")
+      expect(statement.free()).toBe(true)
+      statement = undefined
+      database.close({ checkpoint: false })
+      expect(() => database.exec("SELECT 1")).toThrow("Database is closed")
+      const reopened = openNativeSqliteDatabase(path).database
+      try { expect(reopened.exec("SELECT id FROM rows")[0].values).toEqual([[1]]) }
+      finally { reopened.close() }
+    } finally {
+      statement?.free()
+      database.close({ checkpoint: false })
+    }
+  })
+
+  it("preserves direct statement construction without a connection callback", () => {
+    const native = new DatabaseSync(":memory:")
+    const statement = new NativeSqliteStatement(native.prepare("SELECT 7 AS value"))
+    try {
+      expect(statement.bind([])).toBe(true)
+      expect(statement.step()).toBe(true)
+      expect(statement.getAsObject()).toEqual({ value: 7 })
+      statement.reset()
+    } finally {
+      statement.free()
+      native.close()
+    }
+  })
+
   it("defers checkpoint maintenance without losing the atomic deletion or connection policy", () => {
     const path = temporaryDatabasePath("deletion.sqlite")
     const { database } = openNativeSqliteDatabase(path, "DeletionTest")

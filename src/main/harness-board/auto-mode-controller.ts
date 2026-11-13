@@ -4,6 +4,7 @@ import { harnessNotifications } from "./notifications"
 import { BrowserWindow } from "electron"
 import { existsSync, statSync } from "fs"
 import { getAllThreadSummaries, getThread, getThreadCore } from "../db"
+import { captureThreadDirectoryChange } from "../services/thread-directory-change"
 import { captureThreadIncarnation, matchesThreadIncarnation } from "../services/thread-incarnation"
 import { isSameWorkspacePath } from "../../shared/workspace-path"
 import { getModsManager } from "../mods/manager"
@@ -976,7 +977,8 @@ async function inspectAndLaunch(
       if (useReservedWorkspace && session.workspacePath !== workspacePath) {
         for (const window of BrowserWindow.getAllWindows()) {
           if (!window.isDestroyed() && !window.webContents.isDestroyed()) {
-            window.webContents.send("threads:changed")
+            window.webContents.send("threads:changed", captureThreadDirectoryChange(session.thread.thread_id,
+              "metadata", getThreadCore(session.thread.thread_id)))
           }
         }
       }

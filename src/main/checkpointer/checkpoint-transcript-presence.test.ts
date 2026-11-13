@@ -346,3 +346,74 @@ describe("checkpoint transcript presence", () => {
     expect(existsSync(checkpointDatabasePath)).toBe(false)
   })
 })
+
+
+// Candidate discovery never makes a native checkpoint an ordinary legacy source.
+it.each([
+  { name: "null native channel", channel: null },
+  { name: "invalid native channel", channel: { malformed: true } },
+  {
+    name: "summary with a native stamp",
+    message: {
+      type: "ai",
+      content: "summary",
+      additional_kwargs: { lc_source: "summarization", function_row: null }
+    }
+  },
+  {
+    name: "hidden internal row with an invalid native stamp",
+    message: {
+      type: "ai",
+      content: "hidden",
+      additional_kwargs: { cmb_internal_coordinator_notification: true, function_row_invalid: true }
+    }
+  }
+])("refuses $name before projection or durable mutations", (variant) => {
+  const thread = "legacy-rejected-source"
+  const checkpointPath = createCheckpointDatabase(thread, [
+    "message" in variant ? variant.message : { type: "human", content: "ordinary-looking" }
+  ])
+  const messagePath = createMessageDatabase(thread)
+  const source = new DatabaseSync(checkpointPath),
+    messages = new DatabaseSync(messagePath)
+  try {
+    if ("channel" in variant) {
+      const row = source.prepare("SELECT checkpoint FROM checkpoints").get()!
+      const checkpoint = JSON.parse(String(row.checkpoint))
+      checkpoint.channel_values.cmbFunctionConversation = variant.channel
+      source.prepare("UPDATE checkpoints SET checkpoint=?").run(JSON.stringify(checkpoint))
+    }
+    const beforeMessages = messages.prepare("SELECT * FROM thread_messages ORDER BY ordinal").all()
+    const beforeBuckets = messages.prepare("SELECT * FROM thread_message_buckets").all()
+    let failure: unknown
+    try {
+      bootstrapLegacyCheckpointTranscript(
+        checkpointPath,
+        messagePath,
+        thread,
+        "",
+        new SharedArrayBuffer(4)
+      )
+    } catch (error) {
+      failure = error
+    }
+    expect(
+      source.prepare("SELECT COUNT(*) AS n FROM checkpoint_runtime_projections").get()?.n
+    ).toBe(0)
+    expect(messages.prepare("SELECT * FROM thread_messages ORDER BY ordinal").all()).toEqual(
+      beforeMessages
+    )
+    expect(messages.prepare("SELECT * FROM thread_message_buckets").all()).toEqual(beforeBuckets)
+    expect(
+      messages
+        .prepare(
+          "SELECT name FROM sqlite_master WHERE name='legacy_checkpoint_transcript_migrations'"
+        )
+        .all()
+    ).toEqual([])
+    expect(failure).toMatchObject({ code: "MODS_CONVERSATION_MIGRATION_REQUIRED" })
+  } finally {
+    messages.close()
+    source.close()
+  }
+})

@@ -13,17 +13,23 @@ import { compareInstructionRequest } from "../mods/builtins/instruction-request"
 import { createClawSkillPolicy } from "../mods/claw-skills"
 import { captureFunctionConversationTaskBinding,
   createFunctionConversationMiddleware } from "./mods-conversation"
-import { wrapFunctionConversationInvocation } from "./mods-conversation-invocation"
+import { createRuntimeConversationGraph } from "./native-graph-adapter"
+import type { FunctionConversationCompactionReconciler } from "./mods-conversation-invocation"
 import { createFunctionConversationNativeHost } from "./function-conversation-native-host"
 import type { FunctionConversationNativeInputReceipt } from "./function-conversation-native-input"
-import { wrapFunctionConversationNativeInvocation } from "./function-conversation-native-invocation"
-import { createFunctionConversationNativeAgent } from "./native-agent-factory"
 import { captureFunctionConversationNativeTaskConfig,
   createFunctionConversationSharedAgent } from "./mods-conversation-shared-invocation"
 import { FunctionConversationDeliveryBridge, readFunctionConversationState,
   type FunctionConversationDeliveryBinding } from "../checkpointer/function-conversation-delivery"
 import { createFunctionConversationIdleEditor } from "../checkpointer/function-conversation-idle-editor"
-import { captureFunctionConversationCompactionSource, commitFunctionConversationCompactionBoundary }
+import { captureFunctionConversationCompactionSource, commitFunctionConversationCompactionBoundary,
+  prepareFunctionConversationCompactionCommit, prepareFunctionConversationCompactionWrite,
+  observeFunctionConversationCompactionWrite, acknowledgeFunctionConversationCompactionWrite,
+  settleFunctionConversationCompactionAttempt, reconcileFunctionConversationCompaction,
+  stageFunctionConversationCompactionWrites, assertFunctionConversationCompactionReadable,
+  assertFunctionConversationCompactionWriteCurrent,
+  functionConversationCompactionCanonicalCut, functionConversationCompactionArchiveMayRollback,
+  type FunctionConversationCompactionCommit }
   from "../checkpointer/function-conversation-compaction-boundary"
 import { assertFunctionConversationForkReady } from "../db/function-conversation-fork-gate"
 import { captureThreadIncarnation, matchesThreadIncarnation } from "../services/thread-incarnation"
@@ -3785,34 +3791,54 @@ function assembleDeepAgent(
         observePromptSourceMiddleware(middleware, promptSourceIds.get(middleware)))
     ]
   }
-  const create = nativeConversationHost ? createFunctionConversationNativeAgent : createAgent
-  const agent = create(agentOptions as unknown as Parameters<typeof createAgent>[0])
-  if (modRuntimeAuthority && modManager?.isActive(modRuntimeAuthority.workspace)) {
-    modManager.bindFunctionToolCatalog(
-      {
-        ...modRuntimeAuthority,
-        runtimeAuthority: modRuntimeAuthority,
-        blockedToolNames: new Set(mainBlockedToolNames),
-        allowedToolNames: mainAllowedToolNames && new Set(mainAllowedToolNames)
-      },
-      collectRuntimeToolCatalog(agentOptions.tools, agentOptions.middleware)
-    )
+  let reconcileCompaction: FunctionConversationCompactionReconciler | undefined
+  if (nativeConversationHost && nativeConversationRuntime && checkpointer instanceof SqlJsSaver &&
+    conversation && conversationBinding && modManager) {
+    const saver = checkpointer, store = conversation.store, binding = conversationBinding,
+      manager = modManager, database = getDb(), control = modManager.store
+    reconcileCompaction = async (config, signal, assertCurrent) => {
+      const current = () => {
+        signal.throwIfAborted()
+        assertCurrent()
+        binding.assertCurrent()
+        if (getDb() !== database || getModsManager() !== manager) throw new ModError("MODS_SCOPE_CHANGED")
+      }
+      current()
+      await reconcileFunctionConversationCompaction({ saver, store, control, database,
+        binding: { target: binding.target, checkpointThreadId: binding.checkpointThreadId,
+          checkpointIncarnation: binding.checkpointIncarnation,
+          signal: AbortSignal.any([signal, binding.signal]), assertCurrent: current } }, config)
+      current()
+    }
   }
-  nativeConversationHost?.install(agent.graph)
-  const conversationAgent = conversation && conversationBinding
-    ? wrapFunctionConversationInvocation(agent, { store: conversation.store,
-        binding: conversationBinding,
-        ...(nativeConversationHost && nativeConversationRuntime && checkpointer instanceof SqlJsSaver ? {
-          history: { saver: checkpointer,
-            assertCurrent: nativeConversationRuntime.assertCurrent.bind(nativeConversationRuntime),
-            register: nativeConversationHost.registerHistorical,
-            registerAsync: nativeConversationHost.registerHistoricalAsync },
-          onIntakeNotes: nativeConversationHost.registerIntake
-        } : {}) }) : agent
-  return nativeConversationHost && nativeConversationRuntime
-    ? wrapFunctionConversationNativeInvocation(conversationAgent, nativeConversationHost,
-        nativeConversationRuntime)
-    : conversationAgent
+  return createRuntimeConversationGraph(
+    agentOptions as unknown as Parameters<typeof createAgent>[0],
+    nativeConversationHost && nativeConversationRuntime
+      ? {
+          kind: "native",
+          host: nativeConversationHost,
+          runtime: nativeConversationRuntime,
+          ...(conversation && conversationBinding
+            ? { conversation: { store: conversation.store, binding: conversationBinding } }
+            : {}),
+          ...(checkpointer instanceof SqlJsSaver ? { historySaver: checkpointer, reconcileCompaction } : {})
+        }
+      : conversation && conversationBinding
+        ? { kind: "conversation", conversation: { store: conversation.store, binding: conversationBinding } }
+        : { kind: "ordinary" },
+    () => {
+      if (!modRuntimeAuthority || !modManager?.isActive(modRuntimeAuthority.workspace)) return
+      modManager.bindFunctionToolCatalog(
+        {
+          ...modRuntimeAuthority,
+          runtimeAuthority: modRuntimeAuthority,
+          blockedToolNames: new Set(mainBlockedToolNames),
+          allowedToolNames: mainAllowedToolNames && new Set(mainAllowedToolNames)
+        },
+        collectRuntimeToolCatalog(agentOptions.tools, agentOptions.middleware)
+      )
+    }
+  )
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -8417,6 +8443,11 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
       // The override stays in this host closure; the graph and its normal Saver remain unchanged.
       let idleSaver = checkpointer
       let idleBinding: FunctionConversationDeliveryBinding | undefined
+      let compactCommit: FunctionConversationCompactionCommit | undefined
+      const requireCompactCommit = () => {
+        if (!compactCommit) throw new ModError("MODS_CONTEXT_CHANGED")
+        return compactCommit
+      }
       if (root && conversationStore) {
         const tuple = await checkpointer.getTuple({ configurable: { thread_id: threadId } })
         assertIdle()
@@ -8428,7 +8459,19 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
           signal, assertCurrent: assertIdle
         }
         idleSaver = createFunctionConversationIdleEditor(checkpointer, conversationStore,
-          idleBinding, () => { checkpointUpdated = true })
+          idleBinding, () => { checkpointUpdated = true }, {
+            canonicalCut: () => functionConversationCompactionCanonicalCut(requireCompactCommit()),
+            prepared: receipt => prepareFunctionConversationCompactionWrite(requireCompactCommit(), receipt),
+            observed: receipt => observeFunctionConversationCompactionWrite(requireCompactCommit(), receipt),
+            acknowledgement: (database, checkpointId) =>
+              acknowledgeFunctionConversationCompactionWrite(requireCompactCommit(), database, checkpointId),
+            stageWrites: (config, writes, taskId) => stageFunctionConversationCompactionWrites(
+              requireCompactCommit(), config, writes, taskId),
+            assertReadable: () => { if (compactCommit) assertFunctionConversationCompactionReadable(compactCommit) },
+            assertWriteCurrent: () => {
+              if (compactCommit) assertFunctionConversationCompactionWriteCurrent(compactCommit)
+            }
+          })
       }
       const config = { configurable: { thread_id: threadId, __pregel_checkpointer: idleSaver } }
       const beforePrepare = (await agentToUpdate.getState(config)) as unknown as {
@@ -8478,14 +8521,17 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
         const updateToCommit = committed?.update ?? plan.update
         try {
           assertIdle()
-          const updatedConfig = await agentToUpdate.updateState(
-            config,
-            {
-              messages: [new RemoveMessage({ id: "__remove_all__" }), ...messagesToCommit],
-              ...updateToCommit
-            },
-            "model_request"
-          )
+          compactCommit = await prepareFunctionConversationCompactionCommit(compactSource,
+            { messages: messagesToCommit, ...updateToCommit })
+          assertIdle()
+          let updatedConfig: Awaited<ReturnType<typeof agentToUpdate.updateState>>
+          try {
+            updatedConfig = await agentToUpdate.updateState(
+              config,
+              { messages: [new RemoveMessage({ id: "__remove_all__" }), ...messagesToCommit], ...updateToCommit },
+              "model_request"
+            )
+          } finally { settleFunctionConversationCompactionAttempt(compactCommit) }
           checkpointUpdated = true
           assertIdle()
           await checkpointer.flushStrict()
@@ -8508,10 +8554,12 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
           await commitFunctionConversationCompactionBoundary(compactSource, updatedConfig)
           assertIdle()
         } catch (error) {
+          if (compactCommit) settleFunctionConversationCompactionAttempt(compactCommit)
           // updateState can fail before a checkpoint is durable. Compensate the
           // staged archive in that case; a flush failure keeps the pointer because
           // SQLite may already have committed the checkpoint before WAL syncing.
-          if (committed && plan.rollbackArchive && !checkpointUpdated) {
+          if (committed && plan.rollbackArchive && !checkpointUpdated &&
+            (!compactCommit || await functionConversationCompactionArchiveMayRollback(compactCommit))) {
             try {
               await plan.rollbackArchive(signal)
             } catch {

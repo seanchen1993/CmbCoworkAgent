@@ -1,5 +1,6 @@
 import { ModFunctionError } from "../../../shared/mods/v2/contracts"
 import type { FunctionUiResolvePhysicalLifetime } from "./ui-resolve-main-quota"
+import { FUNCTION_MOD_RESOURCE_BUDGETS } from "../../../shared/mods/v2/resource-budgets"
 
 /** Native physical incarnation. Abort/kill-send never stand in for exit or host finally. */
 export class FunctionUiResolveHostLifetime implements FunctionUiResolvePhysicalLifetime {
@@ -13,9 +14,11 @@ export class FunctionUiResolveHostLifetime implements FunctionUiResolvePhysicalL
 
   constructor(
     readonly owner: object,
-    private readonly limit = 512
+    private readonly limit: number = FUNCTION_MOD_RESOURCE_BUDGETS.runtimeClient.hostCalls,
+    private readonly observe?: (phase: "host-enter" | "host-settled") => void
   ) {
-    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 512)
+    if (!Number.isSafeInteger(limit) || limit < 1 ||
+      limit > FUNCTION_MOD_RESOURCE_BUDGETS.runtimeClient.hostCalls)
       throw new ModFunctionError("MODS_HOST_CAPACITY")
     let exit!: () => void
     let drain!: () => void
@@ -33,15 +36,26 @@ export class FunctionUiResolveHostLifetime implements FunctionUiResolvePhysicalL
     if (this.sealed || this.exited) throw new ModFunctionError("MODS_UI_RESOLVE_RETIRED")
   }
 
+  get activity(): { hostCalls: number; draining: number } {
+    return { hostCalls: this.pending, draining: this.sealed ? this.pending : 0 }
+  }
+
+  private observation(phase: "host-enter" | "host-settled"): void {
+    try { this.observe?.(phase) }
+    catch { /* Diagnostic observers cannot alter admission or physical drain. */ }
+  }
+
   /** Count before invoking native work, including synchronous re-entry and synchronous throws. */
   async run<T>(work: () => Promise<T>): Promise<T> {
     this.assertCurrent()
     if (this.pending >= this.limit) throw new ModFunctionError("MODS_HOST_CAPACITY")
     this.pending++
+    this.observation("host-enter")
     try {
       return await work()
     } finally {
       this.pending--
+      this.observation("host-settled")
       this.finish()
     }
   }

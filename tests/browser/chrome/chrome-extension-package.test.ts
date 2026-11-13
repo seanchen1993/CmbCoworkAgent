@@ -57,8 +57,24 @@ const paths = [
   "icons/icon-48.png",
   "icons/icon-128.png"
 ]
+// Independent Git blob identities at c660e8f93200f291400c419e86e754d1638900d3.
+// The delivery audit compares bytes, including checkout line endings.
+const restoredBlobSha1 = new Map([
+  ["manifest.json", "a2821e4547ccfc83732ec57d89f12c261d11042d"],
+  ["service-worker.js", "236740c7ee36a09a2d67d0c7b644b85f9ab7ce77"],
+  ["popup.js", "994d035a09fc28c77a3980291713e45099138a09"],
+  ["popup.html", "440595df0900640f089a25f2ee3602e697c95e4a"],
+  ["popup.css", "3541f672949b497f21b1879d58c53777dd3d4a86"],
+  ["README.md", "1d53dd0e6d68f0355629422b5ad9b8da33f6e525"],
+  ["icons/icon-16.png", "f7bea3bdb62d0ffa19af79db97e2d61ab6cbe08d"],
+  ["icons/icon-32.png", "775ac4ef2c0c1306d6c96a581d31a04dccb082fc"],
+  ["icons/icon-48.png", "1d20a210435243c67a6bfffb478a6c2c8800906b"],
+  ["icons/icon-128.png", "568815997ac6416b9b728b12bf12e45f8b8ae735"]
+])
 const temporaryRoots: string[] = []
 const sha256 = (bytes: Buffer): string => createHash("sha256").update(bytes).digest("hex")
+const gitBlobSha1 = (bytes: Buffer): string => createHash("sha1")
+  .update(`blob ${bytes.length}\0`).update(bytes).digest("hex")
 
 function fixture(): { root: string; source: string; outputDirectory: string } {
   const root = mkdtempSync(join(tmpdir(), "cmb-chrome-extension-package-"))
@@ -107,8 +123,10 @@ describe("Chrome extension delivery package", () => {
       expect(file.bytes).toBe(original.length)
       expect(file.sha256).toBe(sha256(original))
       expect(file.restoredBlobSha1).toMatch(/^[0-9a-f]{40}$/)
+      expect(restoredBlobSha1.has(file.path)).toBe(true)
+      expect(file.restoredBlobSha1).toBe(restoredBlobSha1.get(file.path))
       expect(file.changedSinceRestoration).toBe(
-        ["manifest.json", "service-worker.js", "README.md"].includes(file.path)
+        gitBlobSha1(original) !== restoredBlobSha1.get(file.path)
       )
     }
     const savedEvidence = JSON.parse(
@@ -120,6 +138,28 @@ describe("Chrome extension delivery package", () => {
     )
     const originalManifest = JSON.parse(originals.get("manifest.json")!.toString())
     expect(JSON.stringify(evidence)).not.toContain(originalManifest.key)
+  })
+
+  it("audits LF and CRLF popup bytes without rewriting either delivery", async () => {
+    const { packageChromeExtension } = await packageModule
+    const original = readFileSync(resolve(process.cwd(), "chrome-extension", "popup.js"))
+    const lf = Buffer.from(original.toString("utf8").replaceAll("\r\n", "\n"))
+    const crlf = Buffer.from(lf.toString("utf8").replaceAll("\n", "\r\n"))
+    expect(gitBlobSha1(lf)).toBe(restoredBlobSha1.get("popup.js"))
+    expect(crlf.equals(lf)).toBe(false)
+    for (const bytes of [lf, crlf]) {
+      const test = fixture()
+      const popup = join(test.source, "popup.js")
+      writeFileSync(popup, bytes)
+      const evidence = packageChromeExtension(test)
+      const audit = evidence.files.find(file => file.path === "popup.js")!
+      expect(audit.changedSinceRestoration).toBe(!bytes.equals(lf))
+      expect(audit.sha256).toBe(sha256(bytes))
+      expect(audit.bytes).toBe(bytes.length)
+      expect(readFileSync(popup)).toEqual(bytes)
+      const archive = new AdmZip(readFileSync(join(test.outputDirectory, "chrome-extension.zip")))
+      expect(archive.getEntry("popup.js")!.getData()).toEqual(bytes)
+    }
   })
 
   it("refuses to overwrite any existing output directory", async () => {

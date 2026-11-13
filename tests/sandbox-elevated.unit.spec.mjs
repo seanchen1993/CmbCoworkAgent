@@ -1032,8 +1032,11 @@ test("thread delete settles the active workflow (bounded) BEFORE removing its ru
 
   // threads:delete must settle the active run (so its final flush completes)
   // BEFORE removing the run directory, or a late flush recreates it as an orphan.
-  const cancelIdx = threadsSource.indexOf("await workflowRunManager.cancelAndWait(threadId)")
-  const deleteIdx = threadsSource.indexOf("deleteWorkflowRunsForThread(workspacePath, threadId)")
+  const deletion = sectionBetween(threadsSource, "const performThreadDeletion = async", '"threads:delete"')
+  const cancelIdx = deletion.indexOf("await workflowRunManager.cancelAndWait(threadId)")
+  const deleteIdx = deletion.indexOf(
+    "await deleteWorkflowRunsForThread(workspacePath, threadId, assertDeletedSource)"
+  )
   assert.ok(cancelIdx !== -1, "threads:delete must await cancelAndWait")
   assert.ok(deleteIdx !== -1, "threads:delete must remove the workflow run dir")
   assert.ok(
@@ -1366,7 +1369,7 @@ test("unsandboxed git network commands allow Git Credential Manager UI prompts",
   )
   assert.match(
     executeOnceSection,
-    /const allowInteractiveGitAuth =[\s\S]*isWindows && LocalSandbox\.isGitInteractiveAuthCommand\(command\)[\s\S]*const spawnEnv = allowInteractiveGitAuth[\s\S]*LocalSandbox\.buildInteractiveGitEnv\(this\.env\)/,
+    /const allowInteractiveGitAuth =[\s\S]*isWindows && LocalSandbox\.isGitInteractiveAuthCommand\(command\)[\s\S]*const spawnEnv = allowInteractiveGitAuth[\s\S]*LocalSandbox\.buildInteractiveGitEnv\(executionEnv\)/,
     "executeOnce should opt Git network commands into the interactive credential environment"
   )
   assert.match(

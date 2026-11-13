@@ -1,6 +1,7 @@
 import type { RunnableConfig } from "@langchain/core/runnables"
 import { ModFunctionError } from "../../../shared/mods/v2/contracts"
-import type { FunctionConversationGraphBinding } from "../../agent/mods-conversation"
+import { prepareFunctionConversationIntake,
+  type FunctionConversationGraphBinding } from "../../agent/mods-conversation"
 import { FunctionConversationDeliveryBridge, readFunctionConversationState } from
   "../../checkpointer/function-conversation-delivery"
 import { SqlJsSaver } from "../../checkpointer/sqljs-saver"
@@ -22,6 +23,9 @@ import { captureFunctionConversationSharedActive, completeFunctionConversationSh
   type FunctionConversationSharedActive, type FunctionConversationSharedRestore,
   type FunctionConversationSharedProducer } from
   "./conversation-shared-restore"
+
+const sharedHostApply = Reflect.apply
+const originalBindDeliverySaver = FunctionConversationDeliveryBridge.prototype.bindSaver
 
 export interface FunctionConversationNativeTask {
   readonly invocation: object
@@ -74,10 +78,12 @@ export function createFunctionConversationSharedNativeHost(input: {
         parentThreadId: input.authority.threadId, modsAgentRunId: input.authority.turnId })
       if (!thread) throw new ModFunctionError("MODS_CONVERSATION_THREAD_CHANGED")
       const destinationIncarnation = restored?.destination.destinationIncarnation ?? captureThreadIncarnation(thread)
-      const familyCurrents = restored ? undefined : createFunctionConversationSharedFamilySourceCurrents({
-        current: read.assertCurrent, scope, saver: input.task.saver, authority: input.authority,
-        invocation: input.task.invocation, database: getDb(), destinationThreadId: threadId,
-        destinationIncarnation, originalMetadata: thread.metadata ?? null })
+      const familyCurrents = restored && !restored.pending
+        ? undefined
+        : createFunctionConversationSharedFamilySourceCurrents({
+            current: read.assertCurrent, scope, saver: input.task.saver, authority: input.authority,
+            invocation: input.task.invocation, database: getDb(), destinationThreadId: threadId,
+            destinationIncarnation, originalMetadata: thread.metadata ?? null })
       const destinationGuard = familyCurrents?.assertDestinationCurrent ?? (() => {
         guard()
         const current = getThreadCore(threadId)
@@ -108,14 +114,41 @@ export function createFunctionConversationSharedNativeHost(input: {
         }
       })
       retire = registered.close
+      const intake = restored?.pending?.notes.length ? await prepareFunctionConversationIntake({
+        store: input.coordinator.store, target: registered.binding.target, state: restored.state,
+        highWater: restored.admission!.highWater, signal: input.signal, publish: true,
+        assertCurrent: () => { guard(); restored.assertCurrent(); registered.binding.assertCurrent() },
+        prepareNote: async row => {
+          const note = restored.pending!.notes.find(note => note.id === row.uuid)
+          if (!note) throw new ModFunctionError("MODS_CONVERSATION_NOTE_IDENTITY")
+          return note
+        }
+      }, []) : undefined
+      guard(); restored?.assertCurrent(); registered.binding.assertCurrent()
       const producer = completeFunctionConversationSharedActive(active, {
         nativeRead: proof, saver: input.task.saver,
         authority: input.authority, invocation: input.task.invocation, scope,
         target: registered.binding.target, parent: input.parentBinding.target,
         ...(restore ? { restore } : {}),
+        ...(intake?.publication ? { intake: intake.publication } : {}),
         producer: { coordinator: input.coordinator, registration: registered.registration } })
       if (!producer) throw new ModFunctionError("MODS_CONVERSATION_NATIVE_SOURCE_INVALID")
-      try { input.admitted(registered.binding, producer); return registered.binding }
+      try {
+        input.admitted(registered.binding, producer)
+        if (restored && !restored.pending && read.tuple) {
+          // A terminal replay can return without another put. Complete its exact retained ACK
+          // only after full admission; the original recovery performs another committed read.
+          const bridge = new FunctionConversationDeliveryBridge(input.coordinator.store,
+            () => registered.binding)
+          const recovery = sharedHostApply(originalBindDeliverySaver, bridge, [input.task.saver]) as
+            ReturnType<FunctionConversationDeliveryBridge["bindSaver"]>
+          await recovery.recover({ configurable: { thread_id: input.authority.threadId,
+            checkpoint_ns: read.namespace, checkpoint_id: read.tuple.checkpoint.id } },
+            registered.binding)
+          guard(); restored.assertCurrent(); registered.binding.assertCurrent()
+        }
+        return registered.binding
+      }
       catch (error) { registered.close(); throw error }
       } catch (error) {
         scope.close()
@@ -127,8 +160,11 @@ export function createFunctionConversationSharedNativeHost(input: {
         throw error
       }
     },
-    delivery: (saver, binding) => new FunctionConversationDeliveryBridge(input.coordinator.store,
-      () => binding).wrap(saver)
+    delivery: (saver, binding) => {
+      const assertCurrent = binding.assertCurrent.bind(binding)
+      return new FunctionConversationDeliveryBridge(input.coordinator.store,
+        () => binding).wrap(saver, assertCurrent)
+    }
   }
   const scope = new FunctionConversationSharedCheckpointScope(scopeHost)
   return { scope, close: () => {

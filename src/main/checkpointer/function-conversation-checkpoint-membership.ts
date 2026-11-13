@@ -1,4 +1,7 @@
 import { createHash } from "node:crypto"
+import { createNativeCheckpointMessageDigest } from "./function-conversation-canonical-display-worker"
+import { readFunctionConversationBridgePreparation, type FunctionConversationDeliveryBridge,
+  type FunctionConversationPreparedCheckpoint } from "./function-conversation-delivery"
 import { BaseMessage, ToolMessage } from "@langchain/core/messages"
 import type { RunnableConfig } from "@langchain/core/runnables"
 import type { CheckpointTuple } from "@langchain/langgraph-checkpoint"
@@ -17,7 +20,10 @@ import type {
 } from "../db/function-conversation-store"
 import type { ThreadIncarnation } from "../services/thread-incarnation"
 import { SqlJsSaver, type SqlJsSaverCommittedCheckpointReceipt,
-  type SqlJsSaverFunctionConversationRecoveryReceipt } from "./sqljs-saver"
+  type SqlJsSaverFunctionConversationRecoveryReceipt,
+  type SqlJsSaverPreparedCheckpointReceipt,
+  readSqlJsSaverPreparedConversationData,
+  readSqlJsSaverPreparedConversationDataFacts } from "./sqljs-saver"
 import { isNativeCommittedMembershipAdmission, prepareNativeCommittedCheckpointCapture } from
   "./committed-checkpoint-native-capture"
 
@@ -58,15 +64,38 @@ export interface FunctionConversationCheckpointMembershipSnapshot {
 
 const brand = Symbol("function-conversation-native-membership")
 export interface FunctionConversationCheckpointMembershipProof { readonly [brand]: true }
-const proofs = new WeakMap<FunctionConversationCheckpointMembershipProof, {
+const proofs = new WeakMap<object, {
+  readonly role: "committed" | "prepared-data"
   store: FunctionConversationStore
   target: FunctionConversationRef
   snapshot: FunctionConversationCheckpointMembershipSnapshot
   assertCurrent: () => void
 }>()
+const originalBridgePreparation = readFunctionConversationBridgePreparation
+const originalPreparedData = readSqlJsSaverPreparedConversationData
+const originalPreparedFacts = readSqlJsSaverPreparedConversationDataFacts
+const membershipStringify = JSON.stringify, membershipKeys = Object.keys
+const membershipCreateHash = createHash, membershipApply = Reflect.apply
+const membershipHashPrototype = Object.getPrototypeOf(createHash("sha256"))
+const membershipUpdate = membershipHashPrototype.update, membershipDigest = membershipHashPrototype.digest
+const membershipOwn = Object.getOwnPropertyDescriptor
+const membershipPrototype = Object.getPrototypeOf
+const membershipFreeze = Object.freeze
+const originalNativeMessageDigest = createNativeCheckpointMessageDigest
+const membershipDefine = Object.defineProperty
+const membershipSetHas = Set.prototype.has, membershipSetAdd = Set.prototype.add
+function appendMembershipData<T>(array: T[], value: T): void {
+  const descriptor = { __proto__: null, value, writable: true, enumerable: true, configurable: true }
+  membershipDefine(array, array.length, descriptor)
+}
+const originalObjectPrototype = Object.prototype, originalArrayPrototype = Array.prototype
+function assertMembershipJsonDispatch(): void {
+  if (membershipOwn(originalObjectPrototype, "toJSON") || membershipOwn(originalArrayPrototype, "toJSON") ||
+    membershipPrototype(originalArrayPrototype) !== originalObjectPrototype) fail()
+}
 const nativeCommittedProofs = new WeakSet<FunctionConversationCheckpointMembershipProof>()
 const nativeProofHas = WeakSet.prototype.has, nativeProofAdd = WeakSet.prototype.add
-const proofGet = WeakMap.prototype.get, proofApply = Reflect.apply
+const proofGet = WeakMap.prototype.get, proofSet = WeakMap.prototype.set, proofApply = Reflect.apply
 const missingMessages = new WeakMap<FunctionConversationCheckpointMembershipProof, {
   messages: readonly BaseMessage[]
   verify: (messages?: readonly BaseMessage[]) => void
@@ -74,7 +103,10 @@ const missingMessages = new WeakMap<FunctionConversationCheckpointMembershipProo
 
 function fail(): never { throw new ModFunctionError("MODS_CONVERSATION_CHECKPOINT_MEMBERSHIP") }
 export function functionConversationMembershipDigest(value: unknown): string {
-  return createHash("sha256").update(JSON.stringify(value)).digest("hex")
+  assertMembershipJsonDispatch()
+  const hash = membershipCreateHash("sha256")
+  membershipApply(membershipUpdate, hash, [membershipStringify(value)])
+  return membershipApply(membershipDigest, hash, ["hex"]) as string
 }
 export function functionConversationRowDigest(row: FunctionConversationRow): string {
   return functionConversationMembershipDigest(row)
@@ -98,11 +130,33 @@ export interface FunctionConversationMembershipAdmission {
   readonly assertCurrent: () => void
 }
 
-function captureTuple(store: FunctionConversationStore, tuple: CheckpointTuple,
+function calculateTupleSnapshot(store: FunctionConversationStore, tuple: CheckpointTuple,
   admission: FunctionConversationMembershipAdmission, nativeGuard: () => void, batchRows = false,
-  assertNativeCopy?: () => void
-): FunctionConversationCheckpointMembershipProof {
-  const { target, cut } = admission
+  assertNativeCopy?: () => void, preparedData = false
+): { snapshot: FunctionConversationCheckpointMembershipSnapshot; assertCurrent: () => void
+  stamps: readonly FunctionConversationTranscriptStamp[] } {
+  const freeze: typeof Object.freeze = preparedData ? membershipFreeze : value => Object.freeze(value)
+  const target = admission.target
+  let cut = admission.cut
+  if (preparedData) {
+    const lineage: Array<{ readonly branchId: string; readonly cut: number }> = []
+    for (let index = 0; index < cut.lineage.length; index++) {
+      const entry = cut.lineage[index]
+      appendMembershipData(lineage, membershipFreeze({ branchId: entry.branchId, cut: entry.cut }))
+    }
+    const copied = {} as { highWater: number; lineage: FunctionConversationCanonicalCut["lineage"];
+      lineageDigest: string }
+    const keys = membershipKeys(cut)
+    if (keys.length !== 3) fail()
+    for (let index = 0; index < keys.length; index++) {
+      const key = keys[index]
+      if (key !== "highWater" && key !== "lineage" && key !== "lineageDigest") fail()
+      const value = key === "lineage" ? membershipFreeze(lineage) : cut[key]
+      const descriptor = { __proto__: null, value, writable: false, configurable: false, enumerable: true }
+      membershipDefine(copied, key, descriptor)
+    }
+    cut = membershipFreeze(copied)
+  }
   const guard = () => {
     nativeGuard(); admission.assertCurrent(); store.assertCurrent(target)
     // A real source callback may mutate the tuple or dispatch. Recheck after its final call,
@@ -127,28 +181,30 @@ function captureTuple(store: FunctionConversationStore, tuple: CheckpointTuple,
   store.assertCheckpointCanonicalCut(target, cut)
   const messages: unknown = tuple.checkpoint.channel_values.messages ?? []
   if (!Array.isArray(messages)) fail()
-  const members: FunctionConversationCheckpointMember[] = [], native: string[] = []
+  const members: FunctionConversationCheckpointMember[] = [], native = preparedData ? originalNativeMessageDigest() : createNativeCheckpointMessageDigest()
+  const stamps: FunctionConversationTranscriptStamp[] = []
   const seen = new Set<string>()
   // Full display captures verify their original tuple in the source guard. Keep that
   // expensive guard at the two boundaries of one synchronous native-row batch.
   const batch = batchRows ? new Map(store.readRowsAtCut(target, messages.flatMap(message => {
     const stamp = readFunctionConversationTranscriptStamp(message)
     return stamp ? [stamp.uuid] : []
-  }), { frontier: cut.highWater }, guard).map(row => [row.uuid, row])) : undefined
+  }), { frontier: cut.highWater }, guard, preparedData).map(row => [row.uuid, row])) : undefined
   for (let ordinal = 0; ordinal < messages.length; ordinal += 1) {
     const message: unknown = messages[ordinal]
     if (!BaseMessage.isInstance(message) || hasInvalidFunctionConversationTranscriptStamp(message)) fail()
     const stamp = readFunctionConversationTranscriptStamp(message)
-    if (!stamp) { native.push(JSON.stringify(message.toDict())); continue }
+    if (!stamp) { native.append(membershipStringify(message.toDict())); continue }
     const payload = serializeFunctionConversationNativeMessage(message)
-    native.push(payload)
+    native.append(payload)
     if (stamp.conversationId !== target.conversationId || message.id !== stamp.uuid ||
-      seen.has(stamp.uuid)) fail()
+      (preparedData ? membershipApply(membershipSetHas, seen, [stamp.uuid]) : seen.has(stamp.uuid))) fail()
     const type = message.getType()
     if ((stamp.messageType === "user" && type !== "human" && !ToolMessage.isInstance(message)) ||
       (stamp.messageType === "assistant" && type !== "ai") ||
       (stamp.messageType === "system" && type !== "system")) fail()
-    seen.add(stamp.uuid)
+    if (preparedData) membershipApply(membershipSetAdd, seen, [stamp.uuid])
+    else seen.add(stamp.uuid)
     const row = batch ? batch.get(stamp.uuid) :
       store.readRowAtCut(target, stamp.uuid, { frontier: cut.highWater }, guard)
     if (!row) fail()
@@ -161,8 +217,10 @@ function captureTuple(store: FunctionConversationStore, tuple: CheckpointTuple,
         fail()
     }
     const expected = functionConversationCanonicalStamp(target, row)
-    if (!sameFunctionConversationTranscriptStamp(stamp, expected) || payload !== row.nativePayload) fail()
-    members.push(Object.freeze({ ordinal, uuid: row.uuid, sequence: row.sequence,
+    if (!(preparedData ? samePreparedStamp(stamp, expected) :
+      sameFunctionConversationTranscriptStamp(stamp, expected)) || payload !== row.nativePayload) fail()
+    appendMembershipData(stamps, freeze({ ...expected, origin: freeze({ ...expected.origin }) }))
+    appendMembershipData(members, freeze({ ordinal, uuid: row.uuid, sequence: row.sequence,
       branchId: row.branchId, rowReceiptId: row.receiptId,
       rowDigest: functionConversationRowDigest(row), stampDigest: functionConversationMembershipDigest(expected),
       nativeDigest: functionConversationMembershipDigest(payload), createdAt: row.createdAt }))
@@ -177,13 +235,75 @@ function captureTuple(store: FunctionConversationStore, tuple: CheckpointTuple,
     parentCheckpointId: typeof tuple.parentConfig?.configurable?.checkpoint_id === "string"
       ? tuple.parentConfig.configurable.checkpoint_id : null,
     checkpointTs: tuple.checkpoint.ts, stateDigest: admission.stateDigest, frontier: admission.frontier,
-    cut, nativeSnapshotDigest: functionConversationMembershipDigest(native), nativeMessageCount: messages.length,
-    members: Object.freeze(members) }
-  const snapshot = Object.freeze({ ...values, snapshotDigest: functionConversationMembershipDigest(values) })
+    cut, nativeSnapshotDigest: native.finish(), nativeMessageCount: messages.length,
+    members: freeze(members) }
+  const snapshot = freeze({ ...values, snapshotDigest: functionConversationMembershipDigest(values) })
   guard()
+  return { snapshot, assertCurrent: guard, stamps: freeze(stamps) }
+}
+
+function captureTuple(store: FunctionConversationStore, tuple: CheckpointTuple,
+  admission: FunctionConversationMembershipAdmission, nativeGuard: () => void, batchRows = false,
+  assertNativeCopy?: () => void): FunctionConversationCheckpointMembershipProof {
+  const actual = calculateTupleSnapshot(store, tuple, admission, nativeGuard, batchRows, assertNativeCopy)
   const proof = Object.freeze({ [brand]: true as const })
-  proofs.set(proof, { store, target, snapshot, assertCurrent: guard })
+  proofApply(proofSet, proofs, [proof, { role: "committed", store, target: admission.target,
+    snapshot: actual.snapshot, assertCurrent: actual.assertCurrent }])
   return proof
+}
+
+/** Same complete stamp semantics; only the actually used key reader is fixed for this seal. */
+function samePreparedStamp(first: ReturnType<typeof functionConversationCanonicalStamp>,
+  second: ReturnType<typeof functionConversationCanonicalStamp>): boolean {
+  if (first.conversationId !== second.conversationId || first.branchId !== second.branchId ||
+    first.uuid !== second.uuid || first.sequence !== second.sequence || first.door !== second.door ||
+    first.messageType !== second.messageType || first.isMeta !== second.isMeta) return false
+  const keys = membershipKeys(first.origin), expected = membershipKeys(second.origin)
+  if (keys.length !== expected.length) return false
+  for (let index = 0; index < keys.length; index++)
+    if (first.origin[keys[index]] !== second.origin[keys[index]]) return false
+  return true
+}
+
+/** Neither an admission DTO nor a caller tuple can create a prepared membership record. */
+export async function capturePreparedConversationMembership(bridge: FunctionConversationDeliveryBridge,
+  observer: object, prepared: FunctionConversationPreparedCheckpoint, saver: SqlJsSaver,
+  receipt: SqlJsSaverPreparedCheckpointReceipt): Promise<SqlJsSaverPreparedCheckpointReceipt> {
+  const joined = originalBridgePreparation(bridge, observer, prepared, saver)
+  const tuple = originalPreparedData(saver, receipt)
+  const verify = () => {
+    const current = originalBridgePreparation(bridge, observer, prepared, saver)
+    if (current.binding !== joined.binding || current.state !== joined.state || current.cut !== joined.cut ||
+      originalPreparedData(saver, receipt) !== tuple) fail()
+  }
+  const candidate = calculateTupleSnapshot(joined.store, tuple, joined.admission, verify, true,
+    undefined, true)
+  const facts = await originalPreparedFacts(saver, receipt, joined.binding.signal)
+  verify(); candidate.assertCurrent()
+  const snapshot = candidate.snapshot
+  if (facts.checkpointId !== snapshot.checkpointId || facts.parentCheckpointId !== snapshot.parentCheckpointId ||
+    facts.checkpointTs !== snapshot.checkpointTs || facts.stateDigest !== snapshot.stateDigest ||
+    facts.state.frontier !== snapshot.frontier || facts.nativeMessageCount !== snapshot.nativeMessageCount ||
+    facts.nativeSnapshotDigest !== snapshot.nativeSnapshotDigest || facts.stamped.length !== snapshot.members.length)
+    fail()
+  for (let index = 0; index < facts.stamped.length; index++) {
+    const actual = facts.stamped[index], expected = snapshot.members[index]
+    if (actual.ordinal !== expected.ordinal || actual.stamp.uuid !== expected.uuid ||
+      !samePreparedStamp(actual.stamp, candidate.stamps[index])) fail()
+  }
+  verify(); candidate.assertCurrent()
+  proofApply(proofSet, proofs, [receipt, { role: "prepared-data", store: joined.store, target: joined.admission.target,
+    snapshot, assertCurrent: () => { verify(); candidate.assertCurrent() } }])
+  return receipt
+}
+
+/** Store-only data path. It can never mint a committed/delivery proof. */
+export function readPreparedFunctionConversationCheckpointMembership(receipt: SqlJsSaverPreparedCheckpointReceipt,
+  store: FunctionConversationStore, target: FunctionConversationRef): FunctionConversationCheckpointMembershipSnapshot {
+  const record = proofApply(proofGet, proofs, [receipt]) as ReturnType<typeof proofs.get>
+  if (!record || record.role !== "prepared-data" || record.store !== store || record.target !== target) fail()
+  record.assertCurrent()
+  return record.snapshot
 }
 
 /** Only the actual native callback token can read the cached exact committed tuple. */
@@ -215,7 +335,7 @@ export function isNativeCommittedConversationMembership(proof: FunctionConversat
   store: FunctionConversationStore, target: FunctionConversationRef): boolean {
   const actual = proofApply(proofGet, proofs, [proof]) as ReturnType<typeof proofs.get>
   return proofApply(nativeProofHas, nativeCommittedProofs, [proof]) === true &&
-    actual?.store === store && actual.target === target
+    actual?.role === "committed" && actual.store === store && actual.target === target
 }
 
 /** Exact native read only. The caller's real binding is checked on both sides of the await. */
@@ -247,8 +367,8 @@ export function readFunctionConversationCheckpointMembership(
   proof: FunctionConversationCheckpointMembershipProof, store: FunctionConversationStore,
   target: FunctionConversationRef
 ): FunctionConversationCheckpointMembershipSnapshot {
-  const actual = proofs.get(proof)
-  if (!actual || actual.store !== store || actual.target !== target) fail()
+  const actual = proofApply(proofGet, proofs, [proof]) as ReturnType<typeof proofs.get>
+  if (!actual || actual.role !== "committed" || actual.store !== store || actual.target !== target) fail()
   actual.assertCurrent()
   return actual.snapshot
 }

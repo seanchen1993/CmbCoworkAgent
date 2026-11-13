@@ -1,9 +1,12 @@
 import { createHash } from "node:crypto"
 import type { RunnableConfig } from "@langchain/core/runnables"
-import type { Checkpoint, CheckpointMetadata, CheckpointTuple } from "@langchain/langgraph-checkpoint"
+import type { Checkpoint, CheckpointMetadata, CheckpointTuple, PendingWrite } from "@langchain/langgraph-checkpoint"
 import { ModFunctionError } from "../../shared/mods/v2/contracts"
 import type { FunctionConversationRef, FunctionConversationStore } from "../db/function-conversation-store"
-import { SqlJsSaver, type SqlJsSaverCommittedCheckpointReceipt } from "./sqljs-saver"
+import { persistPreparedFunctionConversationMembership } from "../db/function-conversation-store"
+import { SqlJsSaver, type SqlJsSaverCommittedCheckpointReceipt,
+  type SqlJsSaverPreparedCheckpointObserver } from "./sqljs-saver"
+import type { NativeSqliteAdapter } from "../db/native-sqlite-adapter"
 import type { ThreadIncarnation } from "../services/thread-incarnation"
 import type { FunctionNativeConversationRuntime } from "../mods/manager"
 import { isFunctionConversationNativeMainRuntime } from "../mods/native-conversation-policy-source"
@@ -11,6 +14,7 @@ import { createNativeCommittedMembershipAdmission } from "./committed-checkpoint
 import { nativeConversationFairness } from "../utils/native-conversation-fairness"
 import {
   captureCommittedConversationMembership,
+  capturePreparedConversationMembership,
   captureConversationCheckpointRead,
   functionConversationMembershipDigest,
   isNativeCommittedConversationMembership,
@@ -19,34 +23,10 @@ import {
   type FunctionConversationCheckpointMembershipProof
 } from "./function-conversation-checkpoint-membership"
 
-export const FUNCTION_CONVERSATION_CHANNEL = "cmbFunctionConversation"
-
-export interface FunctionConversationState {
-  version: 1
-  logicalSessionId: string
-  conversationId: string
-  branchId: string
-  frontier: number
-}
-
-export function readFunctionConversationState(value: unknown): FunctionConversationState {
-  if (!value || typeof value !== "object" || Array.isArray(value))
-    throw new ModFunctionError("MODS_CONVERSATION_STATE_INVALID")
-  const data = value as Record<string, unknown>
-  if (Object.keys(data).some((key) => !["version", "logicalSessionId", "conversationId", "branchId", "frontier"].includes(key)) ||
-    data.version !== 1 || typeof data.logicalSessionId !== "string" || !data.logicalSessionId ||
-    typeof data.conversationId !== "string" || !data.conversationId ||
-    typeof data.branchId !== "string" || !data.branchId ||
-    typeof data.frontier !== "number" || !Number.isSafeInteger(data.frontier) || data.frontier < 0)
-    throw new ModFunctionError("MODS_CONVERSATION_STATE_INVALID")
-  return { version: 1, logicalSessionId: data.logicalSessionId,
-    conversationId: data.conversationId, branchId: data.branchId, frontier: data.frontier }
-}
-
-export function assertFunctionConversationState(target: FunctionConversationRef, state: FunctionConversationState): void {
-  if (state.logicalSessionId !== target.logicalSessionId || state.conversationId !== target.conversationId ||
-    state.branchId !== target.branchId) throw new ModFunctionError("MODS_CONVERSATION_STATE_CHANGED")
-}
+import { FUNCTION_CONVERSATION_CHANNEL, assertFunctionConversationState,
+  readFunctionConversationState, type FunctionConversationState } from "./function-conversation-state"
+export { FUNCTION_CONVERSATION_CHANNEL, assertFunctionConversationState,
+  readFunctionConversationState, type FunctionConversationState } from "./function-conversation-state"
 
 export interface FunctionConversationDeliveryBinding {
   readonly target: FunctionConversationRef
@@ -60,6 +40,8 @@ export interface FunctionConversationDeliveryBinding {
 const committedBrand = Symbol("function-conversation-committed-checkpoint")
 const preparedBrand = Symbol("function-conversation-prepared-checkpoint")
 const receiptDelete = WeakMap.prototype.delete, receiptApply = Reflect.apply
+const persistPreparedData = persistPreparedFunctionConversationMembership
+const deliveryFreeze = Object.freeze, deliveryWeakMap = WeakMap
 export interface FunctionConversationPreparedCheckpoint {
   readonly [preparedBrand]: true
 }
@@ -70,13 +52,36 @@ export interface FunctionConversationCommittedCheckpoint {
 type Capture = (config: RunnableConfig, state: FunctionConversationState) =>
   FunctionConversationDeliveryBinding | undefined
 
-/** Native successful put/read receipts authenticate delivery. Stream values cannot enter this path. */
-export class FunctionConversationDeliveryBridge {
-  private readonly cooperativeObservers = new WeakMap<object, {
+/** Fixed host-local compaction hooks. Never accepted from a guest or renderer payload. */
+export interface FunctionConversationCheckpointCommitHooks {
+  readonly canonicalCut?: () => FunctionConversationCanonicalCut
+  readonly prepared?: SqlJsSaverPreparedCheckpointObserver
+  readonly observed?: (receipt: SqlJsSaverCommittedCheckpointReceipt) => void | Promise<void>
+  readonly acknowledgement?: (database: NativeSqliteAdapter, checkpointId: string) => void
+  readonly stageWrites?: (config: RunnableConfig, writes: PendingWrite[], taskId: string) => Promise<void>
+  readonly assertReadable?: () => void
+  readonly assertWriteCurrent?: () => void
+}
+
+interface CooperativeObserver {
+    saver: SqlJsSaver
+    readPreparation: (prepared: FunctionConversationPreparedCheckpoint) => {
+      store: FunctionConversationStore
+      binding: FunctionConversationDeliveryBinding
+      state: FunctionConversationState
+      cut: FunctionConversationCanonicalCut
+      admission: import("./function-conversation-checkpoint-membership").FunctionConversationMembershipAdmission
+    }
+    sealPreparation: (prepared: FunctionConversationPreparedCheckpoint, seal: () => void) => void
+    assertPreparation: (prepared: FunctionConversationPreparedCheckpoint) => void
     observed: (prepared: FunctionConversationPreparedCheckpoint, receipt: SqlJsSaverCommittedCheckpointReceipt) => void
     cooperate: (prepared: FunctionConversationPreparedCheckpoint, receipt: SqlJsSaverCommittedCheckpointReceipt) =>
       void | Promise<void>
-  }>()
+  }
+
+/** Native successful put/read receipts authenticate delivery. Stream values cannot enter this path. */
+export class FunctionConversationDeliveryBridge {
+  readonly #cooperativeObservers = new deliveryWeakMap<object, CooperativeObserver>()
   private readonly receipts = new WeakMap<FunctionConversationCommittedCheckpoint, {
     binding: FunctionConversationDeliveryBinding
     state: FunctionConversationState
@@ -87,7 +92,8 @@ export class FunctionConversationDeliveryBridge {
   }>()
 
   constructor(private readonly store: FunctionConversationStore, private readonly capture: Capture,
-    private readonly nativeRuntime?: FunctionNativeConversationRuntime) {}
+    private readonly nativeRuntime?: FunctionNativeConversationRuntime,
+    private readonly writeAcknowledgement?: FunctionConversationCheckpointCommitHooks["acknowledgement"]) {}
 
   private assertBinding(binding: FunctionConversationDeliveryBinding, config: RunnableConfig,
     state: FunctionConversationState): void {
@@ -101,7 +107,7 @@ export class FunctionConversationDeliveryBridge {
   }
 
   /** Returned callback belongs to this actual saver and is suitable for its post-COMMIT hook. */
-  bindSaver(saver: SqlJsSaver): {
+  bindSaver(saver: SqlJsSaver, fixedCanonicalCut?: () => FunctionConversationCanonicalCut): {
     prepare(config: RunnableConfig, checkpoint: Checkpoint): FunctionConversationPreparedCheckpoint | undefined
     committed(prepared: FunctionConversationPreparedCheckpoint | undefined, result: RunnableConfig): Promise<void>
     observed(prepared: FunctionConversationPreparedCheckpoint, receipt: SqlJsSaverCommittedCheckpointReceipt): void
@@ -112,28 +118,29 @@ export class FunctionConversationDeliveryBridge {
       Promise<CheckpointTuple>
   } {
     if (!(saver instanceof SqlJsSaver)) throw new ModFunctionError("MODS_CONVERSATION_CHECKPOINTER_REQUIRED")
-    const preparations = new WeakMap<FunctionConversationPreparedCheckpoint, {
+    const preparations = new deliveryWeakMap<FunctionConversationPreparedCheckpoint, {
       binding: FunctionConversationDeliveryBinding
       state: FunctionConversationState
       checkpointId: string
       threadId: string
       namespace: string
       cut: FunctionConversationCanonicalCut
+      dataSeal?: () => void
     }>()
     const physicalIncarnation = (binding: FunctionConversationDeliveryBinding): ThreadIncarnation => {
       const incarnation = binding.checkpointIncarnation ??
         (binding.checkpointThreadId === binding.target.threadId ? binding.target.incarnation : undefined)
       if (!incarnation) throw new ModFunctionError("MODS_CONVERSATION_CHECKPOINT_SCOPE")
-      return Object.freeze({ ...incarnation })
+      return deliveryFreeze({ ...incarnation })
     }
     const nativeBindings = new WeakMap<FunctionConversationDeliveryBinding, FunctionConversationDeliveryBinding>()
     const freezeBinding = (actual: FunctionConversationDeliveryBinding) => {
-      const frozen = Object.freeze({ target: actual.target, checkpointThreadId: actual.checkpointThreadId,
+      const frozen = deliveryFreeze({ target: actual.target, checkpointThreadId: actual.checkpointThreadId,
         checkpointIncarnation: physicalIncarnation(actual), signal: actual.signal,
         assertCurrent: actual.assertCurrent.bind(actual) })
       const runtime = this.nativeRuntime
       if (runtime && isFunctionConversationNativeMainRuntime(runtime) && runtime.binding === actual)
-        nativeBindings.set(frozen, actual)
+        receiptApply(originalObserverSet, nativeBindings, [frozen, actual])
       return frozen
     }
     const membershipAdmission = (binding: FunctionConversationDeliveryBinding,
@@ -141,7 +148,8 @@ export class FunctionConversationDeliveryBridge {
       const data = { target: binding.target, checkpointThreadId: binding.checkpointThreadId,
         checkpointIncarnation: physicalIncarnation(binding), cut, frontier: state.frontier,
         stateDigest: functionConversationMembershipDigest(state) }
-      const original = nativeBindings.get(binding), runtime = this.nativeRuntime
+      const original = receiptApply(originalObserverGet, nativeBindings, [binding]) as
+        FunctionConversationDeliveryBinding | undefined, runtime = this.nativeRuntime
       const native = original && runtime && createNativeCommittedMembershipAdmission(runtime, original, data)
       return native ?? { ...data,
         assertCurrent: () => { binding.signal.throwIfAborted(); binding.assertCurrent() } }
@@ -217,9 +225,9 @@ export class FunctionConversationDeliveryBridge {
         membership: captured.proof }
     }
     const consume = (prepared: FunctionConversationPreparedCheckpoint, config: RunnableConfig) => {
-      const actual = preparations.get(prepared)
+      const actual = receiptApply(originalObserverGet, preparations, [prepared]) as ReturnType<typeof preparations.get>
       if (!actual) throw new ModFunctionError("MODS_CONVERSATION_CHECKPOINT_PROOF")
-      preparations.delete(prepared)
+      receiptApply(originalObserverDelete, preparations, [prepared])
       if (config.configurable?.checkpoint_id !== actual.checkpointId ||
         config.configurable?.thread_id !== actual.threadId ||
         (config.configurable?.checkpoint_ns ?? "") !== actual.namespace)
@@ -248,11 +256,16 @@ export class FunctionConversationDeliveryBridge {
         if (!original) throw new ModFunctionError("MODS_CONVERSATION_CHECKPOINT_SCOPE")
         const binding = freezeBinding(original)
         this.assertBinding(binding, config, expected)
-        const proof = Object.freeze({ [preparedBrand]: true as const })
-        const cut = this.store.captureCheckpointCanonicalCut(binding.target, () =>
-          this.assertBinding(binding, config, expected))
-        preparations.set(proof, { binding, state: expected, checkpointId: checkpoint.id,
-          threadId: binding.checkpointThreadId, namespace: binding.target.checkpointNamespace, cut })
+        const proof = deliveryFreeze({ [preparedBrand]: true as const })
+        const cut = fixedCanonicalCut ? fixedCanonicalCut() :
+          this.store.captureCheckpointCanonicalCut(binding.target, () =>
+            this.assertBinding(binding, config, expected))
+        if (fixedCanonicalCut) {
+          this.store.assertCheckpointCanonicalCut(binding.target, cut)
+          this.assertBinding(binding, config, expected)
+        }
+        receiptApply(originalObserverSet, preparations, [proof, { binding, state: expected, checkpointId: checkpoint.id,
+          threadId: binding.checkpointThreadId, namespace: binding.target.checkpointNamespace, cut, dataSeal: undefined }])
         return proof
       },
       committed: async (prepared, result) => {
@@ -263,7 +276,7 @@ export class FunctionConversationDeliveryBridge {
         this.acknowledge(captured.committed)
       },
       observed: (prepared, receipt) => {
-        this.acknowledge(prepareObserved(prepared, receipt).proof)
+        this.acknowledge(prepareObserved(prepared, receipt).proof, this.writeAcknowledgement)
       },
       recover: async (config, binding) => {
         // Ordinary checkpoints without this host channel have no conversation delivery.
@@ -287,11 +300,31 @@ export class FunctionConversationDeliveryBridge {
         return captured.tuple
       }
     }
-    this.cooperativeObservers.set(observer, { observed: observer.observed, cooperate: (prepared, receipt) => {
+    const readPreparation = (prepared: FunctionConversationPreparedCheckpoint) => {
+      const actual = receiptApply(originalObserverGet, preparations, [prepared]) as ReturnType<typeof preparations.get>
+      if (!actual) throw new ModFunctionError("MODS_CONVERSATION_CHECKPOINT_PROOF")
+      return { store: this.store, binding: actual.binding, state: actual.state, cut: actual.cut,
+        admission: membershipAdmission(actual.binding, actual.state, actual.cut) }
+    }
+    const cooperative: CooperativeObserver = { saver, readPreparation,
+      sealPreparation: (prepared, seal) => {
+        const actual = receiptApply(originalObserverGet, preparations, [prepared]) as ReturnType<typeof preparations.get>
+        if (!actual) throw new ModFunctionError("MODS_CONVERSATION_CHECKPOINT_PROOF")
+        actual.dataSeal = seal
+      },
+      assertPreparation: prepared => {
+        const actual = receiptApply(originalObserverGet, preparations, [prepared]) as ReturnType<typeof preparations.get>
+        if (!actual) throw new ModFunctionError("MODS_CONVERSATION_CHECKPOINT_PROOF")
+        actual.binding.signal.throwIfAborted()
+        actual.binding.assertCurrent()
+        this.store.assertCurrent(actual.binding.target)
+        // No authority callback is allowed after this native-only AppDB data seal.
+        actual.dataSeal?.()
+      }, observed: observer.observed, cooperate: (prepared, receipt) => {
       const actual = prepareObserved(prepared, receipt)
       if (!isNativeCommittedConversationMembership(actual.membership, this.store, actual.target)) {
         // Keep custom/unsupported observers synchronous, including their return/throw behavior.
-        this.acknowledge(actual.proof)
+        this.acknowledge(actual.proof, this.writeAcknowledgement)
         return
       }
       const settle = async () => {
@@ -304,18 +337,30 @@ export class FunctionConversationDeliveryBridge {
           // Capture/mint is finished and ACK has not started. Saver awaits this promise while
           // retaining the namespace gate and COMMIT receipt; no transaction/read scope is open.
           await nativeConversationFairness(undefined, current)(true)
-          this.acknowledge(actual.proof)
+          this.acknowledge(actual.proof, this.writeAcknowledgement)
         } finally {
           // acknowledge also deletes it, but an abort/close/mutation at the pause can fail first.
           receiptApply(receiptDelete, this.receipts, [actual.proof])
         }
       }
       return settle()
-    } })
+    } }
+    receiptApply(originalObserverSet, this.#cooperativeObservers, [observer, cooperative])
     return observer
   }
 
-  acknowledge(proof: FunctionConversationCommittedCheckpoint): void {
+  /** Only an original observer's still-live lexical preparation can supply candidate facts. */
+  readPreparedDataPreparation(observer: object, prepared: FunctionConversationPreparedCheckpoint,
+    saver: SqlJsSaver) {
+    const actual = receiptApply(originalObserverGet, this.#cooperativeObservers, [observer]) as
+      CooperativeObserver | undefined
+    if (!actual || actual.saver !== saver)
+      throw new ModFunctionError("MODS_CONVERSATION_CHECKPOINT_PROOF")
+    return actual.readPreparation(prepared)
+  }
+
+  acknowledge(proof: FunctionConversationCommittedCheckpoint,
+    writeAcknowledgement?: FunctionConversationCheckpointCommitHooks["acknowledgement"]): void {
     const actual = this.receipts.get(proof)
     if (!actual) throw new ModFunctionError("MODS_CONVERSATION_CHECKPOINT_PROOF")
     const { binding, state, checkpointId, generation, membership, assertNative } = actual
@@ -331,7 +376,8 @@ export class FunctionConversationDeliveryBridge {
       guard()
       const delivery = this.store.captureCheckpointDelivery(binding.target,
         { checkpointId, generation, frontier: state.frontier }, guard)
-      this.store.recordCheckpointDelivery(binding.target, delivery, guard, membership)
+      this.store.recordCheckpointDelivery(binding.target, delivery, guard, membership,
+        writeAcknowledgement ? database => writeAcknowledgement(database, checkpointId) : undefined)
       guard()
     } finally {
       this.receipts.delete(proof)
@@ -339,11 +385,12 @@ export class FunctionConversationDeliveryBridge {
   }
 
   /** Host convenience adapter; only the actual SqlJsSaver implementation performs put. */
-  wrap(saver: SqlJsSaver, assertCurrent?: () => void, onCommitted?: () => void): SqlJsSaver {
-    const observer = this.bindSaver(saver), methods = new Map<PropertyKey, unknown>()
+  wrap(saver: SqlJsSaver, assertCurrent?: () => void, onCommitted?: () => void,
+    hooks?: FunctionConversationCheckpointCommitHooks): SqlJsSaver {
+    const observer = this.bindSaver(saver, hooks?.canonicalCut), methods = new Map<PropertyKey, unknown>()
     const observe = (prepared: FunctionConversationPreparedCheckpoint,
       receipt: SqlJsSaverCommittedCheckpointReceipt) => {
-      const native = this.cooperativeObservers.get(observer)
+      const native = receiptApply(originalObserverGet, this.#cooperativeObservers, [observer]) as CooperativeObserver | undefined
       const field = Object.getOwnPropertyDescriptor(observer, "observed")
       return native && field && "value" in field && field.value === native.observed
         ? native.cooperate(prepared, receipt) : observer.observed(prepared, receipt)
@@ -351,8 +398,18 @@ export class FunctionConversationDeliveryBridge {
     const put = async (config: RunnableConfig, checkpoint: Checkpoint, metadata: CheckpointMetadata) => {
       const prepared = observer.prepare(config, checkpoint)
       if (!prepared) return SqlJsSaver.prototype.put.call(saver, config, checkpoint, metadata)
+      const native = receiptApply(originalObserverGet, this.#cooperativeObservers, [observer]) as CooperativeObserver
+      const current = () => { assertCurrent?.(); native.assertPreparation(prepared) }
       return SqlJsSaver.prototype.putWithCommitObserver.call(saver, config, checkpoint, metadata,
-        (receipt) => observe(prepared, receipt), assertCurrent, onCommitted)
+        hooks?.observed ? async receipt => { await hooks.observed!(receipt); return observe(prepared, receipt) }
+          : receipt => observe(prepared, receipt), current, onCommitted, hooks?.prepared,
+        async receipt => {
+          await capturePreparedConversationMembership(this, observer, prepared, saver, receipt)
+          const actual = native.readPreparation(prepared)
+          const seal = persistPreparedData(this.store, actual.binding.target, receipt, current)
+          native.sealPreparation(prepared, seal)
+          current()
+        })
     }
     return new Proxy(saver, { get(target, key) {
       if (key === "put") return put
@@ -362,4 +419,14 @@ export class FunctionConversationDeliveryBridge {
       return methods.get(key)
     } })
   }
+}
+
+const originalObserverGet = WeakMap.prototype.get, originalObserverSet = WeakMap.prototype.set,
+  originalObserverDelete = WeakMap.prototype.delete
+const originalPreparationReader = FunctionConversationDeliveryBridge.prototype.readPreparedDataPreparation
+/** A hoisted function permits the existing Delivery/Membership cycle without a mutable export dispatch. */
+export function readFunctionConversationBridgePreparation(bridge: FunctionConversationDeliveryBridge,
+  observer: object, prepared: FunctionConversationPreparedCheckpoint, saver: SqlJsSaver) {
+  return receiptApply(originalPreparationReader, bridge, [observer, prepared, saver]) as
+    ReturnType<FunctionConversationDeliveryBridge["readPreparedDataPreparation"]>
 }

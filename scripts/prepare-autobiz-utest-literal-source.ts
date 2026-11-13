@@ -10,6 +10,14 @@ import previous from "../src/main/plugins/autobiz-business-kernel-spec-role-revi
 
 export const AUTOBIZ_UTEST_LITERAL_SOURCE_DIGEST =
   "726f66acb1c275090d9059758847d9856984f396f7137bbb45fd888d2a0763bf"
+export const AUTOBIZ_UTEST_LITERAL_TARGET_DIGEST =
+  "0ea5df9b0829c854834e85ec886fa0c7d52e19b3fd5f2e086aa2fcb1e33d9f54"
+// The same reviewed executable closure, without historical generated deliveries.
+// These are fixed complete snapshots, including paths, permissions and excluded entries.
+export const AUTOBIZ_UTEST_LITERAL_CURATED_SOURCE_DIGEST =
+  "1912a7974cb9bfb82fec4600336324a052248539f7a16d121f0f95ae337521f1"
+export const AUTOBIZ_UTEST_LITERAL_CURATED_TARGET_DIGEST =
+  "bf6519ac37f5f1151d3f1a04d2404dfa76853bccef02c32661843154111c152a"
 export const AUTOBIZ_UTEST_LITERAL_FROM_SHA256 =
   "483be49a2ad837e1fb24797ffbbf8e53b47bdcbd017ffa6029d1cbfa926c2d3a"
 export const AUTOBIZ_UTEST_LITERAL_TO_SHA256 =
@@ -35,9 +43,12 @@ export async function prepareAutobizUtestLiteralSource(output: string, source: s
     }
   }
   const original = await snapshotDerivationSource(source)
-  assert.equal(
-    original.digest,
-    AUTOBIZ_UTEST_LITERAL_SOURCE_DIGEST,
+  const expectedTarget = original.digest === AUTOBIZ_UTEST_LITERAL_SOURCE_DIGEST
+    ? AUTOBIZ_UTEST_LITERAL_TARGET_DIGEST
+    : original.digest === AUTOBIZ_UTEST_LITERAL_CURATED_SOURCE_DIGEST
+      ? AUTOBIZ_UTEST_LITERAL_CURATED_TARGET_DIGEST : undefined
+  assert(
+    expectedTarget,
     "Exact reviewed 1.0.3 source bytes required; unknown sources must not be transformed"
   )
   const files = new Map(original.files.map((file) => [file.path, file]))
@@ -84,6 +95,7 @@ export async function prepareAutobizUtestLiteralSource(output: string, source: s
     )
   )
   const created = await snapshotDerivationSource(output)
+  assert.equal(created.digest, expectedTarget, "Exact reviewed 1.0.4 output bytes required")
   assert.equal(created.files.length, original.files.length)
   for (const file of original.files)
     assert.equal(

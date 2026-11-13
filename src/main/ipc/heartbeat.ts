@@ -16,12 +16,15 @@ import {
   assertHeartbeatCanStart
 } from "../services/heartbeat"
 import { canonicalizeWorkspacePath } from "../agent/context-history-path"
-import { resetHeartbeatSessionForWorkspaceChange } from "../services/heartbeat-session"
+import { HEARTBEAT_THREAD_ID, resetHeartbeatSessionForWorkspaceChange } from "../services/heartbeat-session"
+import { getThreadRuntimeScope } from "../db"
+import { captureThreadDirectoryChange } from "../services/thread-directory-change"
+import type { ThreadDirectoryChange } from "../../shared/thread-directory-change"
 import type { HeartbeatConfig } from "../types"
 
-function notifyChannel(channel: string): void {
+function notifyChannel(channel: string, change?: ThreadDirectoryChange): void {
   for (const win of BrowserWindow.getAllWindows()) {
-    win.webContents.send(channel)
+    win.webContents.send(channel, ...(change ? [change] : []))
   }
 }
 
@@ -81,6 +84,8 @@ export function registerHeartbeatHandlers(ipcMain: IpcMain): void {
         throw new Error("Heartbeat 工作目录必须是字符串或 null。")
       }
       const nextWorkDir = hasWorkDirUpdate ? (updates.workDir ?? null) : current.workDir
+      const deletedChange = captureThreadDirectoryChange(HEARTBEAT_THREAD_ID,
+        "deleted", getThreadRuntimeScope(HEARTBEAT_THREAD_ID))
       const resetSession = await persistConfigAcrossWorkspaceBoundary(current, nextWorkDir, () =>
         saveHeartbeatConfig(updates)
       )
@@ -89,7 +94,7 @@ export function registerHeartbeatHandlers(ipcMain: IpcMain): void {
       } else {
         restartHeartbeat()
       }
-      if (resetSession) notifyChannel("threads:changed")
+      if (resetSession) notifyChannel("threads:changed", deletedChange)
       notifyChanged()
     }
   )
@@ -126,12 +131,14 @@ export function registerHeartbeatHandlers(ipcMain: IpcMain): void {
 
   ipcMain.handle("heartbeat:resetConfig", async (): Promise<HeartbeatConfig> => {
     const current = getHeartbeatConfig()
+    const deletedChange = captureThreadDirectoryChange(HEARTBEAT_THREAD_ID,
+      "deleted", getThreadRuntimeScope(HEARTBEAT_THREAD_ID))
     let defaults!: HeartbeatConfig
     const resetSession = await persistConfigAcrossWorkspaceBoundary(current, null, () => {
       defaults = resetHeartbeatConfig()
     })
     restartHeartbeat()
-    if (resetSession) notifyChannel("threads:changed")
+    if (resetSession) notifyChannel("threads:changed", deletedChange)
     notifyChanged()
     return defaults
   })

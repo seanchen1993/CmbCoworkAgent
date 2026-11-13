@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs"
 import { fileURLToPath } from "node:url"
+import ts from "typescript"
 import { describe, expect, it } from "vitest"
 import { resolveChatSessionInitialLocation } from "./chat-session-initial-location"
 import {
@@ -54,7 +55,36 @@ describe("chat message virtual list initial location", () => {
     expect(source).toMatch(
       /windowKey: virtualWindow\.key,\s*firstItemIndex: virtualWindow\.firstItemIndex,/
     )
-    expect(source).toMatch(/scrollParent: customScrollParent\s*\}\}/)
+    const file = ts.createSourceFile("ChatMessageVirtualList.tsx", source,
+      ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX)
+    const contexts: ts.ObjectLiteralExpression[] = []
+    const visit = (node: ts.Node): void => {
+      if ((ts.isJsxOpeningElement(node) || ts.isJsxSelfClosingElement(node)) &&
+        node.tagName.getText(file) === "Virtuoso") {
+        const context = node.attributes.properties.filter(property =>
+          ts.isJsxAttribute(property) && property.name.getText(file) === "context")
+        expect(context).toHaveLength(1)
+        const attribute = context[0]
+        if (ts.isJsxAttribute(attribute) && attribute.initializer &&
+          ts.isJsxExpression(attribute.initializer) && attribute.initializer.expression &&
+          ts.isObjectLiteralExpression(attribute.initializer.expression))
+          contexts.push(attribute.initializer.expression)
+      }
+      ts.forEachChild(node, visit)
+    }
+    visit(file)
+    expect(contexts).toHaveLength(1)
+    const property = (name: string): ts.ObjectLiteralElementLike => {
+      const matches = contexts[0].properties.filter(value =>
+        value.name?.getText(file) === name)
+      expect(matches).toHaveLength(1)
+      return matches[0]
+    }
+    const scrollParent = property("scrollParent")
+    expect(ts.isPropertyAssignment(scrollParent)).toBe(true)
+    if (!ts.isPropertyAssignment(scrollParent)) throw Error("SCROLL_PARENT_BINDING_REQUIRED")
+    expect(scrollParent.initializer.getText(file)).toBe("customScrollParent")
+    expect(ts.isShorthandPropertyAssignment(property("virtuosoRef"))).toBe(true)
     expect(source).toMatch(/computeItemKey=\{\(_index, row\) => row\.identity\}/)
     expect(source).toMatch(/totalListHeightChanged=\{onContentHeightChanged\}/)
     expect(source).toMatch(/followOutput=\{false\}/)

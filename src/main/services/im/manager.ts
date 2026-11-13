@@ -389,8 +389,8 @@ export class BuiltinRobotManager {
           principalId: event.principalId,
           conversationKey: event.conversationKey
         })
-        await service.receiveEvent(event)
-        notifyRemoteThreadChanged()
+        const received = await service.receiveEvent(event)
+        notifyRemoteThreadChanged(received.event.targetSnapshot?.threadId, "transcript")
         this.emitStatus()
       },
       onLeaseRevoked: async (payload) => {

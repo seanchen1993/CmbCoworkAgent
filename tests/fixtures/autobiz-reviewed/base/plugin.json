@@ -1,0 +1,17 @@
+{
+  "name": "AutobizDevOps_Plugin_Kanban_latest",
+  "version": "1.0.87-mods.1",
+  "description": "(预览版特指在新特性发布期间的灰度版本）面向通用前后端应用架构，构建覆盖 Biz、Dev、Ops 三阶段的 AI Coding 交付接管机制，通过阶段化流程、技能化执行和证据化校验，将 AI 代码生成能力转化为可管控、可验证、可持续优化的稳定交付能力。",
+  "author": {
+    "name": "CmbCowork Team",
+    "email": "cowork@example.com"
+  },
+  "license": "MIT",
+  "keywords": [
+    "AUTOBIZDEVOPS",
+    "kanban"
+  ],
+  "skills": "skills",
+  "mcpServers": ".mcp.json",
+  "hooks": "hooks/hooks.json"
+}

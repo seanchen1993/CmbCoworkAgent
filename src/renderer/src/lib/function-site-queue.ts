@@ -1,4 +1,5 @@
 import type { FunctionUiSite } from "../../../shared/mods/v2/sites"
+import { FUNCTION_MOD_RESOURCE_BUDGETS } from "../../../shared/mods/v2/resource-budgets"
 
 type Priority = "ordinary" | "background" | "visible" | "interactive"
 
@@ -11,6 +12,7 @@ export function functionSitePriority(component: FunctionUiSite, visible: boolean
 
 /** Bounds UI-only IPC across virtualized rows; native tools and permission requests never use it. */
 export function createFunctionSiteQueue() {
+  const limits = FUNCTION_MOD_RESOURCE_BUDGETS.rendererDisplay
   let active = 0
   let activeInteractive = 0
   let activeBackground = 0
@@ -27,20 +29,20 @@ export function createFunctionSiteQueue() {
   function pump(): void {
     // A full physical queue cannot admit work. Read current priorities only when a
     // slot actually opens; repeated virtual mounts otherwise rescan the entire backlog.
-    if (active === 4) return
+    if (active === limits.physical) return
     // Scroll can move an overscan row on screen while it waits. Reclassify pending
     // work using observer state, without forcing layout or increasing IPC concurrency.
     for (const entry of pending)
       if (entry.readPriority) entry.priority = entry.readPriority()
-    while (active < 4 && pending.length) {
-      const interactive = activeInteractive < 3
+    while (active < limits.physical && pending.length) {
+      const interactive = activeInteractive < limits.interactive
         ? pending.findIndex((entry) => entry.priority === "interactive") : -1
       const visible = pending.findIndex((entry) => entry.priority === "visible")
       // Speculative overscan and elapsed-time reads share one lane. During a thumb
       // drag they often expire before publication; do not let them occupy the three
       // slots needed by the newly visible text and composer.
       const ordinary = pending.findIndex((entry) => entry.priority === "ordinary" ||
-        (entry.priority === "background" && activeBackground < 1))
+        (entry.priority === "background" && activeBackground < limits.background))
       const history = visible >= 0 && (visibleStreak < 2 || ordinary < 0) ? visible : ordinary
       if (interactive < 0 && history < 0) break
       const index =
@@ -74,7 +76,7 @@ export function createFunctionSiteQueue() {
     ): Promise<T | null> {
       if (signal?.aborted) return Promise.resolve(null)
       // Revoked virtualized rows do not consume admission capacity for new visible rows.
-      if (pending.length >= 256)
+      if (pending.length >= limits.pending)
         for (let index = pending.length - 1; index >= 0; index--) {
           const entry = pending[index]
           if (!entry.current()) {
@@ -82,7 +84,7 @@ export function createFunctionSiteQueue() {
             entry.stale()
           }
         }
-      if (pending.length >= 256) return Promise.reject(new Error("MODS_UI_SITE_QUEUE_LIMIT"))
+      if (pending.length >= limits.pending) return Promise.reject(new Error("MODS_UI_SITE_QUEUE_LIMIT"))
       return new Promise<T | null>((resolve, reject) => {
         const cancelPending = () => {
           const index = pending.indexOf(entry)

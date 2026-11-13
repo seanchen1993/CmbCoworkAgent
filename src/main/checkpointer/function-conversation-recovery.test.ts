@@ -315,14 +315,27 @@ describe("original native checkpoint recovery from exact persisted membership", 
       return messages
     })
     const reading = saver.getTuple(f.config(cp.id))
-    void reading.catch(() => undefined)
+    const outcome = reading.then(() => undefined, (error: unknown) => error)
     await entered.promise
-    await saver.close()
-    await saver.initialize()
     const oldReceipt = captured
+    const closing = saver.close()
+    let closed = false
+    void closing.then(() => { closed = true }, () => undefined)
+    try {
+      await Promise.resolve()
+      expect(closed).toBe(false)
+      if (!oldReceipt) throw Error("native receipt missing")
+      expect(() => saver.readFunctionConversationRecoveryCheckpoint(oldReceipt))
+        .toThrow("SQLJS_SAVER_RECOVERY_RECEIPT_EXPIRED")
+    } finally {
+      release.resolve()
+      try { await outcome }
+      finally { await closing }
+    }
+    await saver.initialize()
     if (!oldReceipt) throw Error("native receipt missing")
-    expect(() => saver.readFunctionConversationRecoveryCheckpoint(oldReceipt)).toThrow("SQLJS_SAVER_RECOVERY_RECEIPT_EXPIRED")
-    release.resolve()
+    expect(() => saver.readFunctionConversationRecoveryCheckpoint(oldReceipt))
+      .toThrow("SQLJS_SAVER_RECOVERY_RECEIPT_INVALID")
     await expect(reading).rejects.toMatchObject({ code: "LOCAL_CHECKPOINT_MESSAGE_RECOVERY_FAILED" })
     expect(f.snapshots()).toBe(0)
   })

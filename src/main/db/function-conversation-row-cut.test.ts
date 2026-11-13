@@ -88,7 +88,7 @@ function read(f: ReturnType<typeof fixture>, target: FunctionConversationRef,
 
 describe("FunctionConversationStore exact canonical row at a fixed host cut", () => {
   it.each(["parser", "matcher"] as const)(
-    "retains raw metadata when a warmed indexed identity %s is replaced", kind => {
+    "keeps captured identity interpretation when a late Main %s is replaced", kind => {
       const f = fixture(true)
       const metadata = JSON.stringify({ cmb_thread_incarnation: f.input.incarnation.token,
         llmFileHistory: "汉😀".repeat(20000) })
@@ -114,7 +114,14 @@ describe("FunctionConversationStore exact canonical row at a fixed host cut", ()
         })
       }
       f.store.assertCurrent(f.ref)
-      expect(observed).toBe(true)
+      expect(observed).toBe(false)
+      expect(f.db.exec("SELECT metadata FROM threads WHERE thread_id=?", [f.ref.threadId])[0]
+        .values).toEqual([[metadata]])
+      f.db.run("UPDATE threads SET metadata=? WHERE thread_id=?", [
+        JSON.stringify({ cmb_thread_incarnation: "actual-replacement" }), f.ref.threadId
+      ])
+      expect(() => f.store.assertCurrent(f.ref)).toThrow("MODS_CONVERSATION_THREAD_CHANGED")
+      expect(observed).toBe(false)
     })
 
   it.each(["array-fresh", "array-warm", "object-fresh", "object-warm"] as const)(

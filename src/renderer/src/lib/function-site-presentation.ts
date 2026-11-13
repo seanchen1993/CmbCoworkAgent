@@ -16,6 +16,8 @@ import {
 } from "./function-site-presentation-budget"
 import { presentationInputDigest } from "./presentation-input-digest"
 import type { FunctionSiteGeometry } from "./function-site-geometry"
+import { buildStreamingMarkdownPreview } from "../../../shared/streaming-markdown-preview"
+import { checkedFunctionMessageViewport, type FunctionMessageViewport } from "./function-message-viewport"
 
 const MAX_ENTRIES = 96
 const MAX_ENTRY_BYTES = 128 * 1024
@@ -36,6 +38,8 @@ export interface FunctionSitePresentation {
   tree?: FunctionUiElement
   nativeContent?: FunctionNativeContent
   hostMessage?: ModObject
+  hostMessagePreview?: { tail: string; omittedCharacters: number }
+  messageViewport?: FunctionMessageViewport
   height: number
   width: number
 }
@@ -54,6 +58,7 @@ interface Entry extends PresentationBudgetRecord {
 interface Admission extends PresentationBudgetRecord {
   component: FunctionUiSite
   valid: boolean
+  captureIdentity?: object
 }
 
 interface ProjectionChange extends PresentationBudgetRecord {
@@ -61,6 +66,8 @@ interface ProjectionChange extends PresentationBudgetRecord {
 }
 
 export interface CachedFunctionSitePresentation {
+  /** Private entry identity, never an execution or source authority. */
+  readonly identity: object
   hostKey?: string
   presentation: FunctionSitePresentation
   expiresAt: number
@@ -102,20 +109,33 @@ export function functionSitePresentationKey(
   inputKey: string,
   viewportWidth: number
 ): string | null {
+  return functionSitePresentationKeyAtWidth(functionSitePresentationIdentity(
+    threadId, component, presentationId, inputKey), viewportWidth)
+}
+
+/** Plain cache identity only. It contains no source, permission or publication proof. */
+export type FunctionSitePresentationIdentity = readonly [string, FunctionUiSite, string, string]
+
+export function functionSitePresentationIdentity(threadId: string, component: FunctionUiSite,
+  presentationId: string | undefined, inputKey: string): FunctionSitePresentationIdentity | null {
   if (
     !presentationId ||
     presentationId.length > 2048 ||
     !FUNCTION_PASSIVE_DISPLAY_SITES.includes(component)
   )
     return null
-  return JSON.stringify([
+  return [
     threadId,
     component,
     presentationId,
     // Preserve exact UTF-16 identity even if a caller supplies an unpaired surrogate.
-    "sha256:" + presentationInputDigest(JSON.stringify(inputKey)),
-    viewportWidth
-  ])
+    "sha256:" + presentationInputDigest(JSON.stringify(inputKey))
+  ]
+}
+
+export function functionSitePresentationKeyAtWidth(identity: FunctionSitePresentationIdentity | null,
+  viewportWidth: number): string | null {
+  return identity ? JSON.stringify([...identity, viewportWidth]) : null
 }
 
 /** Bound to one host capability decision, never an installation name or a restored owner token. */
@@ -251,6 +271,9 @@ export class FunctionSitePresentationCache {
         this.removeAdmission(oldest[0], oldest[1])
       }
       this.admissions.set(rowIdentity, admission)
+      // Cleanup identity only: reads in the current admission cohort retain the
+      // same authorization semantics, while an old view cannot retire a later capture.
+      admission.captureIdentity = {}
       if (!this.retain(admission) || this.admissions.get(rowIdentity) !== admission) {
         this.removeAdmission(rowIdentity, admission)
         this.releaseEmptyMetadata()
@@ -263,26 +286,44 @@ export class FunctionSitePresentationCache {
       this.components.get(component) === generation
   }
 
-  read(key: string | null): CachedFunctionSitePresentation | null {
+  /** React render may inspect a view, but cannot acquire leases, touch LRU or clean expired data. */
+  peek(key: string | null): CachedFunctionSitePresentation | null {
     if (!key || !this.authorized()) return null
     const entry = this.entries.get(key)
-    if (!entry) return null
-    if (!entry.valid || entry.expires <= Date.now()) {
-      this.remove(key, entry)
-      this.releaseEmptyMetadata()
-      return null
+    if (!entry?.valid || !entry.queryable || entry.expires <= Date.now()) return null
+    return {
+      identity: entry.token,
+      ...(entry.hostKey ? { hostKey: entry.hostKey } : {}),
+      presentation: entry.presentation,
+      expiresAt: entry.expires,
+      current: () => this.authorized() && this.entries.get(key) === entry && entry.valid &&
+        entry.queryable && entry.expires > Date.now()
     }
-    if (!entry.queryable) return null
+  }
+
+  /** Only a committed reader can promote the exact entry it actually displayed. */
+  touch(key: string | null, cached: CachedFunctionSitePresentation): boolean {
+    if (!key || !this.authorized() || !cached.current()) return false
+    const entry = this.entries.get(key)
+    if (!entry?.valid || !entry.queryable || entry.expires <= Date.now() ||
+      entry.token !== cached.identity || entry.presentation !== cached.presentation) return false
     this.entries.delete(key)
     this.entries.set(key, entry)
     budget.touch(entry)
     if (this.metadata) budget.touch(this.metadata)
-    return {
-      ...(entry.hostKey ? { hostKey: entry.hostKey } : {}),
-      presentation: entry.presentation,
-      expiresAt: entry.expires,
-      current: () => this.authorized() && entry.valid && entry.queryable && entry.expires > Date.now()
+    return true
+  }
+
+  read(key: string | null): CachedFunctionSitePresentation | null {
+    if (!key || !this.authorized()) return null
+    const entry = this.entries.get(key)
+    if (entry && (!entry.valid || entry.expires <= Date.now())) {
+      this.remove(key, entry)
+      this.releaseEmptyMetadata()
     }
+    const cached = this.peek(key)
+    if (cached) this.touch(key, cached)
+    return cached
   }
 
   /** Consume a committed exact view for one mounted progress lineage, never a new read authority. */
@@ -295,7 +336,7 @@ export class FunctionSitePresentationCache {
     const entry = this.entries.get(key)
     if (!entry || !entry.valid || !entry.queryable || entry.leaseToken ||
       !["AssistantMessage", "ToolGroup"].includes(entry.component) ||
-      entry.presentation !== cached.presentation || !cached.current() ||
+      entry.token !== cached.identity || entry.presentation !== cached.presentation || !cached.current() ||
       entry.expires <= Date.now()) return null
     // Revoke pending cache publication without releasing this still-valid display entry.
     this.admissionRevision++
@@ -306,6 +347,7 @@ export class FunctionSitePresentationCache {
     entry.leaseToken = token
     return {
       key,
+      identity: entry.token,
       ...(entry.hostKey ? { hostKey: entry.hostKey } : {}),
       presentation: entry.presentation,
       expiresAt: entry.expires,
@@ -425,7 +467,8 @@ export class FunctionSitePresentationCache {
     height: number,
     current: () => boolean,
     width = 0,
-    hostKey?: string
+    hostKey?: string,
+    messageViewport?: FunctionMessageViewport
   ): void {
     if (
       !budget.canRetain() ||
@@ -445,7 +488,8 @@ export class FunctionSitePresentationCache {
       current,
       width,
       hostKey,
-      data.hostMessage
+      data.hostMessage,
+      messageViewport
     )
   }
 
@@ -458,18 +502,54 @@ export class FunctionSitePresentationCache {
     current: () => boolean,
     width: number,
     hostKey?: string,
-    hostMessage?: ModObject
+    hostMessage?: ModObject,
+    messageViewport?: FunctionMessageViewport
   ): void {
     if (!budget.canRetain() || !current() || !this.authorized()) return
+    const preview = hostMessage && typeof hostMessage.text === "string"
+      ? buildStreamingMarkdownPreview(hostMessage.text, 60 * 1024) : undefined
+    const viewport = preview?.omittedCharacters && typeof hostMessage?.text === "string"
+      ? checkedFunctionMessageViewport(messageViewport, hostMessage.text) : undefined
     const presentation: FunctionSitePresentation = {
       ...(tree ? { tree: structuredClone(tree) } : {}),
       ...(nativeContent ? { nativeContent: structuredClone(nativeContent) } : {}),
-      ...(hostMessage ? { hostMessage: structuredClone(hostMessage) } : {}),
+      ...(hostMessage ? { hostMessage: structuredClone(preview?.omittedCharacters
+        ? { ...hostMessage, text: preview.head } : hostMessage) } : {}),
+      ...(preview?.omittedCharacters ? { hostMessagePreview: {
+        tail: preview.tail, omittedCharacters: preview.omittedCharacters
+      } } : {}),
+      ...(viewport ? { messageViewport: viewport } : {}),
       height: Number.isFinite(height) ? Math.max(0, Math.min(100000, height)) : 0,
       width: Number.isFinite(width) ? Math.max(0, Math.min(100000, width)) : 0
     }
-    const bytes =
+    const measureBytes = () =>
       RECORD_BYTES + (key.length + (hostKey?.length ?? 0) + JSON.stringify(presentation).length) * 2
+    let bytes = measureBytes()
+    // Escaped code/control characters may exceed the byte cap below the character
+    // threshold. Start with protected head/tail fragments, then use the same shrink loop.
+    if (bytes > MAX_ENTRY_BYTES && !presentation.hostMessagePreview &&
+      typeof presentation.hostMessage?.text === "string") {
+      const text = presentation.hostMessage.text
+      const split = Math.min(8192, Math.ceil(text.length / 2))
+      presentation.hostMessage.text = text.slice(0, split)
+      presentation.hostMessagePreview = { tail: text.slice(split), omittedCharacters: 0 }
+      bytes = measureBytes()
+    }
+    // JSON escaping can make code/control-heavy text much larger than its character
+    // count. Shorten only these already protected fragments until the original
+    // record budget is met; never retain the omitted middle or raise that budget.
+    while (bytes > MAX_ENTRY_BYTES && presentation.hostMessagePreview &&
+      typeof presentation.hostMessage?.text === "string") {
+      const message = presentation.hostMessage, retained = presentation.hostMessagePreview
+      const head = message.text as string, tail = retained.tail
+      if (head.length + tail.length <= 2) break
+      const nextHead = head.slice(0, Math.ceil(head.length / 2))
+      const nextTail = tail.slice(tail.length - Math.ceil(tail.length / 2))
+      retained.omittedCharacters += head.length + tail.length - nextHead.length - nextTail.length
+      message.text = nextHead
+      retained.tail = nextTail
+      bytes = measureBytes()
+    }
     if (bytes > MAX_ENTRY_BYTES) return
     const previous = this.entries.get(key)
     if (previous) this.remove(key, previous)
@@ -548,6 +628,25 @@ export class FunctionSitePresentationCache {
     if (measurement) this.removeMeasurement(key, measurement)
     this.releaseEmptyMetadata()
     if (notify) this.notify()
+  }
+
+  /** Capture exact records without changing admission. Abandoned renders never call the result.
+   * A delayed retirement cannot delete a replacement entry, measurement or row admission.
+   */
+  planRetirement(key: string | null, rowIdentity: string | undefined): () => void {
+    const entry = key ? this.entries.get(key) : undefined
+    const measurement = key ? this.measurements.get(key) : undefined
+    const admission = rowIdentity ? this.admissions.get(rowIdentity) : undefined
+    const captureIdentity = admission?.captureIdentity
+    return () => {
+      if (key && entry && this.entries.get(key) === entry) this.remove(key, entry)
+      if (key && measurement && this.measurements.get(key) === measurement)
+        this.removeMeasurement(key, measurement)
+      if (rowIdentity && admission && this.admissions.get(rowIdentity) === admission &&
+        admission.captureIdentity === captureIdentity)
+        this.removeAdmission(rowIdentity, admission)
+      this.releaseEmptyMetadata()
+    }
   }
 
   private remove(key: string, entry: Entry): void {

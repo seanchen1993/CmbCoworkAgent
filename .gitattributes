@@ -2,6 +2,9 @@
 resources/mods/community-originals/** -text
 tests/fixtures/mods-upstream/** -text
 tests/fixtures/autobiz-reviewed-hooks.json -text
+tests/fixtures/autobiz-reviewed/base/** -text
+tests/fixtures/autobiz-reviewed/observer/** -text
+tests/fixtures/autobiz-reviewed/archives/** -text
 # Patch, manifest and template checksums require the exact committed bytes on every OS.
 patches/** -text
 # Generated collector bytes are pinned by fixtures and must survive Windows checkout unchanged.

@@ -2,6 +2,7 @@ import { compileFunctionConfiguration, compileFunctionPlugin, type CompiledFunct
 import { isConfigurationOnlyPackage } from "./configuration-only-package"
 import { assertFunctionSourcesCurrent } from "./source-adoption-fence"
 import { realpathSync } from "node:fs"
+import { types } from "node:util"
 
 export function assertConfigurationSourcePath(
   path: string,
@@ -15,6 +16,17 @@ export function assertConfigurationSourcesCurrent(
   path: string,
   compiled: CompiledFunctionPlugin
 ): void {
+  // The complete source fence already checks the canonical root before and after
+  // every fresh content read. For its exact own data path, two extra realpath walks
+  // add no alias proof. Unknown/accessor-backed roots keep the original checks.
+  const root = !types.isProxy(compiled) && Object.getOwnPropertyDescriptor(compiled, "root")
+  if (root && "value" in root && root.value === path) {
+    assertFunctionSourcesCurrent(compiled)
+    const current = Object.getOwnPropertyDescriptor(compiled, "root")
+    if (!current || !("value" in current) || current.value !== path)
+      throw Error("MODS_CONFIG_SOURCE_CHANGED")
+    return
+  }
   assertConfigurationSourcePath(path, compiled)
   assertFunctionSourcesCurrent(compiled)
   assertConfigurationSourcePath(path, compiled)

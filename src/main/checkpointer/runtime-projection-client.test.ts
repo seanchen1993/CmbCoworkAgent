@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs"
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { EventEmitter } from "node:events"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
@@ -12,17 +12,21 @@ import type {
 } from "@langchain/langgraph-checkpoint"
 import { DatabaseSync } from "node:sqlite"
 import { build } from "esbuild"
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest"
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest"
 import {
   CheckpointRuntimeProjectionClient,
   CheckpointRuntimeProjectionWorkerUnavailableError,
-  readLatestCheckpointTupleInWorker
+  readLatestCheckpointTupleInWorker,
+  type LegacyCheckpointTranscriptHostSource
 } from "./runtime-projection-client"
 import {
   commitPreparedRuntimeProjection,
   prepareLatestRuntimeProjectionMigration
 } from "./runtime-projection-store"
 import { SqlJsSaver } from "./sqljs-saver"
+import { NativeSqliteAdapter } from "../db/native-sqlite-adapter"
+import { createLegacyTranscriptWriter } from "./legacy-transcript-main-writer"
+import { captureThreadIncarnation, matchesThreadIncarnation } from "../services/thread-incarnation"
 import {
   CHECKPOINT_RUNTIME_PROJECTION_CANCELLED,
   CHECKPOINT_RUNTIME_PROJECTION_SCHEMA_NOT_READY
@@ -34,6 +38,8 @@ import {
 
 const temporaryDirectories: string[] = []
 const clients: CheckpointRuntimeProjectionClient[] = []
+const hostDatabases: NativeSqliteAdapter[] = []
+const terminatedEmitters = new WeakSet<EventEmitter>()
 let workerBuildDirectory = ""
 let workerBundlePath = ""
 
@@ -56,10 +62,97 @@ afterAll(() => {
 
 afterEach(async () => {
   await Promise.all(clients.splice(0).map((client) => client.close()))
+  for (const database of hostDatabases.splice(0)) database.close()
   for (const directory of temporaryDirectories.splice(0)) {
     rmSync(directory, { recursive: true, force: true })
   }
 })
+
+/** Owned files supply real canonical/file identity; mock Workers never open them as SQLite. */
+function ownedCheckpointFile(name = "checkpoint.sqlite"): string {
+  const directory = mkdtempSync(join(tmpdir(), "cmb-runtime-projection-client-fixture-"))
+  temporaryDirectories.push(directory)
+  const path = join(directory, name)
+  writeFileSync(path, "owned lifecycle fixture")
+  return path
+}
+
+function terminateEmitter(emitter: EventEmitter): number {
+  if (!terminatedEmitters.has(emitter)) {
+    terminatedEmitters.add(emitter)
+    emitter.emit("exit", 0)
+  }
+  return 0
+}
+
+/** Actual Main-owned adapter/row, including legacy schemas without a metadata column. */
+function legacyHostSource(
+  databasePath: string,
+  threadId: string,
+  namespace = ""
+): LegacyCheckpointTranscriptHostSource {
+  const native = new DatabaseSync(databasePath)
+  if (!native.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='threads'").get()) {
+    native.exec(`CREATE TABLE threads (thread_id TEXT PRIMARY KEY, created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL, metadata TEXT)`)
+  }
+  const hasMetadata = native
+    .prepare("PRAGMA table_info(threads)")
+    .all()
+    .some((row) => row.name === "metadata")
+  if (!native.prepare("SELECT 1 FROM threads WHERE thread_id=?").get(threadId)) {
+    const now = Date.now()
+    native
+      .prepare("INSERT INTO threads(thread_id,created_at,updated_at) VALUES(?,?,?)")
+      .run(threadId, now, now)
+  }
+  const database = new NativeSqliteAdapter(native)
+  hostDatabases.push(database)
+  const read = () => {
+    const values = database.exec(
+      `SELECT created_at,${hasMetadata ? "metadata" : "NULL"} AS metadata
+      FROM threads WHERE thread_id=?`,
+      [threadId]
+    )[0]?.values[0]
+    if (
+      !values ||
+      typeof values[0] !== "number" ||
+      !(values[1] === null || typeof values[1] === "string")
+    )
+      throw Error("actual fixture source missing")
+    return { created_at: values[0], metadata: values[1] }
+  }
+  const row = read(),
+    incarnation = captureThreadIncarnation(row)
+  const assertCurrent = () => {
+    const current = read()
+    if (!matchesThreadIncarnation(current, incarnation) || current.metadata !== row.metadata)
+      throw Error("actual fixture source changed")
+  }
+  assertCurrent()
+  return { assertCurrent, createWriter(context) {
+    assertCurrent()
+    if (context.threadId !== threadId || context.checkpointNamespace !== namespace)
+      throw Error("actual fixture writer target changed")
+    return createLegacyTranscriptWriter({ ...context, incarnation, actualDatabase: database,
+      assertCurrent })
+  } }
+}
+
+function bootstrapLegacyTranscript(
+  client: CheckpointRuntimeProjectionClient,
+  ...args: Parameters<CheckpointRuntimeProjectionClient["bootstrapLegacyTranscript"]>
+): ReturnType<CheckpointRuntimeProjectionClient["bootstrapLegacyTranscript"]> {
+  const [checkpointPath, messagePath, threadId, namespace = "", foreground] = args
+  return client.bootstrapLegacyTranscript(
+    checkpointPath,
+    messagePath,
+    threadId,
+    namespace,
+    foreground,
+    legacyHostSource(messagePath, threadId, namespace)
+  )
+}
 
 function config(threadId: string, checkpointId?: string): RunnableConfig {
   return {
@@ -110,27 +203,37 @@ function createClient(): CheckpointRuntimeProjectionClient {
 it("returns bounded real session pages through the native worker for multi-megabyte history", async () => {
   const threadId = "owned-agent-paged-history"
   const texts = Array.from({ length: 20 }, (_, index) => `${index}:` + "原始正文".repeat(16000))
-  const { databasePath } = await seedLegacyInlineFixture({ threadId,
-    messages: texts.map(content => ({ type: "ai", content })) })
+  const { databasePath } = await seedLegacyInlineFixture({
+    threadId,
+    messages: texts.map((content) => ({ type: "ai", content }))
+  })
   const client = createClient()
   const found: string[] = []
   let offset = 0
   let checkpointId: string | undefined
   do {
-    const page = await client.readSessionTranscriptPage(databasePath, threadId,
-      new AbortController().signal, { offset, limit: 3, checkpointId })
+    const page = await client.readSessionTranscriptPage(
+      databasePath,
+      threadId,
+      new AbortController().signal,
+      { offset, limit: 3, checkpointId }
+    )
     expect(page).not.toBeNull()
     expect(Buffer.byteLength(JSON.stringify(page))).toBeLessThan(256 * 1024)
-    found.push(...page!.messages.map(message => message.text))
+    found.push(...page!.messages.map((message) => message.text))
     checkpointId = page!.checkpointId
     if (page!.nextOffset === undefined) break
     expect(page!.nextOffset).toBeGreaterThan(offset)
     offset = page!.nextOffset!
   } while (offset < texts.length)
   expect(found).toEqual(texts)
-  await expect(client.readSessionTranscriptPage(databasePath, threadId,
-    new AbortController().signal, { offset: 0, limit: 2, checkpointId: "expired" }))
-    .rejects.toThrow("MODS_AGENT_CURSOR_CHANGED")
+  await expect(
+    client.readSessionTranscriptPage(databasePath, threadId, new AbortController().signal, {
+      offset: 0,
+      limit: 2,
+      checkpointId: "expired"
+    })
+  ).rejects.toThrow("MODS_AGENT_CURSOR_CHANGED")
 }, 30_000)
 
 async function seedLegacyInlineFixture(input: {
@@ -255,20 +358,24 @@ describe("checkpoint runtime projection worker", () => {
           queueMicrotask(() => emitter.emit("message", { type: "shutdown-complete" }))
         else posted.push(message)
       },
+      ref() {
+        return fakeWorker
+      },
       unref() {
         return fakeWorker
       },
-      terminate: async () => 0
+      terminate: async () => terminateEmitter(emitter)
     }) as unknown as Worker
     const client = new CheckpointRuntimeProjectionClient(async () => fakeWorker)
     clients.push(client)
+    const databasePath = ownedCheckpointFile()
     const controllers = Array.from({ length: 129 }, () => new AbortController())
     const settled = Promise.allSettled(
       controllers.map((controller) =>
-        client.readSessionTranscript("checkpoint.sqlite", "thread", controller.signal)
+        client.readSessionTranscript(databasePath, "thread", controller.signal)
       )
     )
-    await new Promise<void>((resolve) => setImmediate(resolve))
+    await vi.waitFor(() => expect(posted).toHaveLength(128))
     expect(posted).toHaveLength(128)
     expect((client as unknown as { pending: Map<number, unknown> }).pending.size).toBe(128)
     for (const controller of controllers) controller.abort(Error("done"))
@@ -308,17 +415,21 @@ describe("checkpoint runtime projection worker", () => {
           queueMicrotask(() => emitter.emit("message", { type: "shutdown-complete" }))
         else posted.push(message)
       },
+      ref() {
+        return fakeWorker
+      },
       unref() {
         return fakeWorker
       },
-      terminate: async () => 0
+      terminate: async () => terminateEmitter(emitter)
     }) as unknown as Worker
     const client = new CheckpointRuntimeProjectionClient(async () => fakeWorker)
     clients.push(client)
     const controller = new AbortController()
-    const pending = client.readSessionTranscript("checkpoint.sqlite", "thread", controller.signal)
+    const databasePath = ownedCheckpointFile()
+    const pending = client.readSessionTranscript(databasePath, "thread", controller.signal)
     const rejected = expect(pending).rejects.toThrow("closed")
-    await new Promise<void>((resolve) => setImmediate(resolve))
+    await vi.waitFor(() => expect(posted).toHaveLength(1))
     controller.abort(Error("closed"))
     await rejected
     expect(Atomics.load(new Int32Array(posted[0].cancellationBuffer as SharedArrayBuffer), 0)).toBe(
@@ -332,7 +443,7 @@ describe("checkpoint runtime projection worker", () => {
       transcript: { turns: 999 }
     })
     await expect(
-      client.readSessionTranscript("checkpoint.sqlite", "thread", controller.signal)
+      client.readSessionTranscript(databasePath, "thread", controller.signal)
     ).rejects.toThrow("closed")
     expect(posted).toHaveLength(1)
   })
@@ -361,7 +472,8 @@ describe("checkpoint runtime projection worker", () => {
     await expect(client.readLatestTuple(databasePath, "empty-thread")).resolves.toBeNull()
     await expect(client.hasTranscript(databasePath, "empty-thread")).resolves.toBe(false)
     await expect(
-      client.bootstrapLegacyTranscript(
+      bootstrapLegacyTranscript(
+        client,
         databasePath,
         join(directory, "unused-messages.sqlite"),
         "empty-thread"
@@ -424,7 +536,8 @@ describe("checkpoint runtime projection worker", () => {
     ).resolves.toBeNull()
     await expect(client.hasTranscript(databasePath, "partial-thread")).resolves.toBe(false)
     await expect(
-      client.bootstrapLegacyTranscript(
+      bootstrapLegacyTranscript(
+        client,
         databasePath,
         join(directory, "unused-messages.sqlite"),
         "partial-thread"
@@ -471,7 +584,8 @@ describe("checkpoint runtime projection worker", () => {
       name: CHECKPOINT_RUNTIME_PROJECTION_SCHEMA_NOT_READY
     })
     await expect(
-      client.bootstrapLegacyTranscript(
+      bootstrapLegacyTranscript(
+        client,
         databasePath,
         join(directory, "unused-messages.sqlite"),
         "invalid-base"
@@ -579,7 +693,7 @@ describe("checkpoint runtime projection worker", () => {
 
     const messageDatabasePath = createMessageDatabase(databasePath, threadId)
     await expect(
-      client.bootstrapLegacyTranscript(databasePath, messageDatabasePath, threadId)
+      bootstrapLegacyTranscript(client, databasePath, messageDatabasePath, threadId)
     ).resolves.toMatchObject({
       runtimeTuple: { checkpoint: { id: legacyCheckpoint.id } },
       stats: { checkpointId: legacyCheckpoint.id, totalMessages: 1, migratedMessages: 1 }
@@ -973,25 +1087,62 @@ describe("checkpoint runtime projection worker", () => {
   })
 
   it("keeps valid and malformed Function source facts through real oversized SQL/worker projection", async () => {
-    const stamp = { conversationId: "actual", branchId: "branch", uuid: "note", sequence: 1,
-      door: "note", messageType: "user", isMeta: true, origin: { kind: "plugin", name: "P" } }
+    const stamp = {
+      conversationId: "actual",
+      branchId: "branch",
+      uuid: "note",
+      sequence: 1,
+      door: "note",
+      messageType: "user",
+      isMeta: true,
+      origin: { kind: "plugin", name: "P" }
+    }
     const threadId = "function-oversized-projection"
-    const { databasePath } = await seedLegacyInlineFixture({ threadId, messages: [
-      { id: ["langchain_core", "messages", "HumanMessage"], kwargs: { id: "note",
-        content: "[Starting active goal]\n" + "x".repeat(128 * 1024),
-        additional_kwargs: { function_row: stamp } } },
-      { id: ["langchain_core", "messages", "HumanMessage"], kwargs: { id: "corrupt",
-        content: "x".repeat(128 * 1024), additional_kwargs: { function_row: null } } },
-      { id: ["langchain_core", "messages", "HumanMessage"], kwargs: { id: "conflicting",
-        content: "x".repeat(128 * 1024), additional_kwargs: {
-          function_row: { ...stamp, uuid: "conflicting", branchId: "different" }
-        } }, additional_kwargs: { function_row: { ...stamp, uuid: "conflicting" } } }
-    ] })
-    const tuple = await createClient().readLatestTuple(databasePath, threadId, "", {
-      messageLimit: 10, messageByteBudget: 1024 * 1024
-    }) as { checkpoint: { channel_values: { messages: Array<{
-      id: string; additional_kwargs: Record<string, unknown>
-    }> } } }
+    const { databasePath } = await seedLegacyInlineFixture({
+      threadId,
+      messages: [
+        {
+          id: ["langchain_core", "messages", "HumanMessage"],
+          kwargs: {
+            id: "note",
+            content: "[Starting active goal]\n" + "x".repeat(128 * 1024),
+            additional_kwargs: { function_row: stamp }
+          }
+        },
+        {
+          id: ["langchain_core", "messages", "HumanMessage"],
+          kwargs: {
+            id: "corrupt",
+            content: "x".repeat(128 * 1024),
+            additional_kwargs: { function_row: null }
+          }
+        },
+        {
+          id: ["langchain_core", "messages", "HumanMessage"],
+          kwargs: {
+            id: "conflicting",
+            content: "x".repeat(128 * 1024),
+            additional_kwargs: {
+              function_row: { ...stamp, uuid: "conflicting", branchId: "different" }
+            }
+          },
+          additional_kwargs: { function_row: { ...stamp, uuid: "conflicting" } }
+        }
+      ]
+    })
+    const tuple = (await createClient().readLatestTuple(databasePath, threadId, "", {
+      messageLimit: 10,
+      messageByteBudget: 1024 * 1024
+    })) as {
+      checkpoint: {
+        channel_values: {
+          messages: Array<{
+            id: string
+            additional_kwargs: Record<string, unknown>
+          }>
+        }
+      }
+    }
     const messages = tuple.checkpoint.channel_values.messages
     expect(messages).toHaveLength(3)
     expect(messages[0].additional_kwargs.function_row).toEqual(stamp)
@@ -1072,7 +1223,8 @@ describe("checkpoint runtime projection worker", () => {
       })
     ).rejects.toMatchObject({ name: CHECKPOINT_RUNTIME_PROJECTION_SCHEMA_NOT_READY })
     await expect(
-      client.bootstrapLegacyTranscript(
+      bootstrapLegacyTranscript(
+        client,
         databasePath,
         join(directory, "unused-messages.sqlite"),
         "external-thread"
@@ -1152,7 +1304,7 @@ describe("checkpoint runtime projection worker", () => {
 
     const messageDatabasePath = createMessageDatabase(databasePath, threadId)
     await expect(
-      client.bootstrapLegacyTranscript(databasePath, messageDatabasePath, threadId)
+      bootstrapLegacyTranscript(client, databasePath, messageDatabasePath, threadId)
     ).resolves.toMatchObject({
       runtimeTuple: { checkpoint: { id: legacyCheckpoint.id } },
       stats: { checkpointId: legacyCheckpoint.id, totalMessages: 1, migratedMessages: 1 }
@@ -1205,11 +1357,11 @@ describe("checkpoint runtime projection worker", () => {
     expect(checkpointTimestamps).toEqual([
       {
         checkpoint_id: olderCheckpoint.id,
-        checkpoint_ts: olderCheckpoint.id
+        checkpoint_ts: olderCheckpoint.ts
       },
       {
         checkpoint_id: legacyCheckpoint.id,
-        checkpoint_ts: legacyCheckpoint.id
+        checkpoint_ts: legacyCheckpoint.ts
       }
     ])
   })
@@ -1322,14 +1474,16 @@ describe("checkpoint runtime projection worker", () => {
     const secondMessageDatabase = createMessageDatabase(second.databasePath, secondThreadId)
     const client = createClient()
 
-    const stale = client.bootstrapLegacyTranscript(
+    const stale = bootstrapLegacyTranscript(
+      client,
       first.databasePath,
       firstMessageDatabase,
       firstThreadId,
       "",
       "renderer-1"
     )
-    const current = client.bootstrapLegacyTranscript(
+    const current = bootstrapLegacyTranscript(
+      client,
       second.databasePath,
       secondMessageDatabase,
       secondThreadId,
@@ -1356,20 +1510,26 @@ describe("checkpoint runtime projection worker", () => {
         }
         posted.push(message)
       },
+      ref(): Worker {
+        return fakeWorker
+      },
       unref(): Worker {
         return fakeWorker
       },
-      terminate: async (): Promise<number> => 0
+      terminate: async (): Promise<number> => terminateEmitter(emitter)
     }) as unknown as Worker
     const client = new CheckpointRuntimeProjectionClient(async () => fakeWorker)
     clients.push(client)
 
-    const stale = client.hasTranscript("first.sqlite", "thread-1", "", "thread-1")
+    const firstPath = ownedCheckpointFile("first.sqlite"),
+      secondPath = ownedCheckpointFile("second.sqlite")
+    const stale = client.hasTranscript(firstPath, "thread-1", "", "thread-1")
     const staleResult = expect(stale).rejects.toMatchObject({
       name: CHECKPOINT_RUNTIME_PROJECTION_CANCELLED
     })
-    const current = client.hasTranscript("second.sqlite", "thread-1", "", "thread-1")
-    await new Promise<void>((resolve) => setImmediate(resolve))
+    await vi.waitFor(() => expect(posted).toHaveLength(1))
+    const current = client.hasTranscript(secondPath, "thread-1", "", "thread-1")
+    await vi.waitFor(() => expect(posted).toHaveLength(2))
 
     expect(posted).toHaveLength(2)
     const staleRequest = posted[0] as {
@@ -1405,46 +1565,53 @@ describe("checkpoint runtime projection worker", () => {
   })
 
   it("releases pending and foreground bookkeeping when postMessage throws", async () => {
-    const emitter = new EventEmitter()
     let requestAttempts = 0
-    const fakeWorker = Object.assign(emitter, {
-      postMessage(message: Record<string, unknown>): void {
-        if (message.type === "shutdown") {
-          queueMicrotask(() => emitter.emit("message", { type: "shutdown-complete" }))
-          return
-        }
-        requestAttempts += 1
-        if (requestAttempts === 1) throw new Error("worker port closed")
-        queueMicrotask(() =>
-          emitter.emit("message", {
-            type: "inspect-transcript-presence-result",
-            requestId: message.requestId,
-            ok: true,
-            hasTranscript: true
-          })
-        )
-      },
-      unref(): Worker {
-        return fakeWorker
-      },
-      terminate: async (): Promise<number> => 0
-    }) as unknown as Worker
-    const client = new CheckpointRuntimeProjectionClient(async () => fakeWorker)
+    const portError = new Error("worker port closed")
+    const firstPath = ownedCheckpointFile("first.sqlite"),
+      secondPath = ownedCheckpointFile("second.sqlite")
+    const createFakeWorker = () => {
+      const emitter = new EventEmitter()
+      const fakeWorker = Object.assign(emitter, {
+        postMessage(message: Record<string, unknown>): void {
+          if (message.type === "shutdown") {
+            queueMicrotask(() => emitter.emit("message", { type: "shutdown-complete" }))
+            return
+          }
+          requestAttempts += 1
+          if (requestAttempts === 1) throw portError
+          queueMicrotask(() =>
+            emitter.emit("message", {
+              type: "inspect-transcript-presence-result",
+              requestId: message.requestId,
+              ok: true,
+              hasTranscript: true
+            })
+          )
+        },
+        ref(): Worker {
+          return fakeWorker
+        },
+        unref(): Worker {
+          return fakeWorker
+        },
+        terminate: async (): Promise<number> => terminateEmitter(emitter)
+      }) as unknown as Worker
+      return fakeWorker
+    }
+    const client = new CheckpointRuntimeProjectionClient(async () => createFakeWorker())
     clients.push(client)
-
-    await expect(
-      client.hasTranscript("first.sqlite", "thread-1", "", "renderer-1")
-    ).rejects.toThrow("Unable to send")
+    const failed = await client
+      .hasTranscript(firstPath, "thread-1", "", "renderer-1")
+      .catch((error) => error)
+    expect(failed).toBeInstanceOf(CheckpointRuntimeProjectionWorkerUnavailableError)
+    expect(failed.cause).toBe(portError)
     const state = client as unknown as {
       pending: Map<number, unknown>
       foregroundRequests: Map<string, number>
     }
     expect(state.pending.size).toBe(0)
     expect(state.foregroundRequests.size).toBe(0)
-
-    await expect(client.hasTranscript("second.sqlite", "thread-1", "", "renderer-1")).resolves.toBe(
-      true
-    )
+    await expect(client.hasTranscript(secondPath, "thread-1", "", "renderer-1")).resolves.toBe(true)
   })
 
   it("rejects a request that resumes after shutdown has drained pending work", async () => {
@@ -1468,19 +1635,24 @@ describe("checkpoint runtime projection worker", () => {
           )
         }
       },
+      ref(): Worker {
+        return fakeWorker
+      },
       unref(): Worker {
         return fakeWorker
       },
-      terminate: async (): Promise<number> => 0
+      terminate: async (): Promise<number> => terminateEmitter(emitter)
     }) as unknown as Worker
     const client = new CheckpointRuntimeProjectionClient(async () => fakeWorker)
     clients.push(client)
 
-    await expect(client.hasTranscript("prime.sqlite", "thread-prime")).resolves.toBe(true)
+    const primePath = ownedCheckpointFile("prime.sqlite"),
+      closingPath = ownedCheckpointFile("closing.sqlite")
+    await expect(client.hasTranscript(primePath, "thread-prime")).resolves.toBe(true)
 
     // request() now yields through the already-resolved Worker promise. close()
     // drains pending work synchronously before that continuation resumes.
-    const racedRequest = client.hasTranscript("closing.sqlite", "thread-closing")
+    const racedRequest = client.hasTranscript(closingPath, "thread-closing")
     const closing = client.close()
 
     await expect(racedRequest).rejects.toBeInstanceOf(
@@ -1529,7 +1701,7 @@ describe("checkpoint runtime projection worker", () => {
     }, 1)
     let result
     try {
-      result = await client.bootstrapLegacyTranscript(databasePath, messageDatabasePath, threadId)
+      result = await bootstrapLegacyTranscript(client, databasePath, messageDatabasePath, threadId)
     } finally {
       clearInterval(ticker)
     }
@@ -1546,7 +1718,7 @@ describe("checkpoint runtime projection worker", () => {
     expect(runtimeValues).toMatchObject({
       todos: [{ id: "todo-1", content: "legacy todo", status: "pending" }]
     })
-    expect(runtimeValues && "messages" in runtimeValues).toBe(false)
+    expect(runtimeValues?.messages).toEqual([])
 
     const durableDatabase = new DatabaseSync(messageDatabasePath, { readOnly: true })
     const durableSummary = durableDatabase
@@ -1586,7 +1758,8 @@ describe("checkpoint runtime projection worker", () => {
     expect(page.messages.at(-1)).toMatchObject({ id: "live-tail", content: "live" })
     expect(Buffer.byteLength(JSON.stringify(page), "utf8")).toBeLessThan(1024 * 1024)
 
-    const repeated = await client.bootstrapLegacyTranscript(
+    const repeated = await bootstrapLegacyTranscript(
+      client,
       databasePath,
       messageDatabasePath,
       threadId
@@ -1614,7 +1787,8 @@ describe("checkpoint runtime projection worker", () => {
     const ticker = setInterval(() => {
       ticks += 1
     }, 1)
-    const result = await client.bootstrapLegacyTranscript(
+    const result = await bootstrapLegacyTranscript(
+      client,
       databasePath,
       messageDatabasePath,
       threadId
@@ -1771,6 +1945,25 @@ describe("checkpoint runtime projection worker", () => {
     expect("pendingWrites" in boundedCheckpoint).toBe(false)
     expect(Buffer.byteLength(JSON.stringify(boundedCheckpoint), "utf8")).toBeLessThan(1024 * 1024)
   }, 30_000)
+
+  it("rejects a projection prepared before the source timestamp index changed", async () => {
+    const threadId = "legacy-timestamp-cas"
+    const { databasePath } = await seedLegacyInlineFixture({
+      threadId,
+      messages: [{ id: "old", role: "user", content: "original" }]
+    })
+    const database = new DatabaseSync(databasePath)
+    database
+      .prepare("UPDATE checkpoints SET checkpoint_ts = checkpoint_id WHERE thread_id = ?")
+      .run(threadId)
+    const prepared = prepareLatestRuntimeProjectionMigration(database, threadId)
+    expect(prepared).not.toBeNull()
+    database
+      .prepare("UPDATE checkpoints SET checkpoint_ts = ? WHERE thread_id = ?")
+      .run("2026-08-28T00:00:00.001Z", threadId)
+    expect(commitPreparedRuntimeProjection(database, prepared!)).toBe(false)
+    database.close()
+  })
 
   it("does not let a prepared legacy migration overwrite a concurrent newer put", async () => {
     const threadId = "legacy-cas"

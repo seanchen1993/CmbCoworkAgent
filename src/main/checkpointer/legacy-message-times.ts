@@ -37,7 +37,7 @@ export function ensureLegacyMessageTimeArchive(database: NativeSqliteAdapter): v
     END`)
 }
 
-interface TimingTarget {
+export interface LegacyMessageTimingTarget {
   messageId: string
   providerSourceId: string | null
   providerOccurrence: number | null
@@ -96,12 +96,65 @@ function timestamp(value: unknown): number | null {
   return Number.isFinite(parsed) && Math.abs(parsed) <= 8.64e15 ? parsed : null
 }
 
+export interface LegacyMessageTimingEntry {
+  readonly messageId: string
+  readonly startAt: number | null
+  readonly endAt: number | null
+}
+
+/** One original identity/order decoder, shared by the sync reference and Worker bridge. */
+export function prepareLegacyMessageTimeEntries(
+  source: string,
+  messages: readonly LegacyMessageTimingTarget[],
+  checkCancelled: () => void
+): (index: number) => LegacyMessageTimingEntry {
+  checkCancelled()
+  const decoded = JSON.parse(source) as unknown[]
+  const byId = record(decoded[0]) ?? {}
+  const order = Array.isArray(decoded[1]) ? (decoded[1] as TimeEntry[]) : []
+  const orderById = new Map<string, TimeEntry>()
+  const duplicateIds = new Set<string>()
+  for (let index = 0; index < order.length; index += 1) {
+    if (index % 64 === 0) checkCancelled()
+    const entry = record(order[index]) as TimeEntry | undefined
+    if (!entry || typeof entry.id !== "string" || !entry.id) continue
+    if (orderById.has(entry.id)) duplicateIds.add(entry.id)
+    else orderById.set(entry.id, entry)
+  }
+  for (const id of duplicateIds) orderById.delete(id)
+  const canonicalIds = new Set(messages.map((message) => message.messageId))
+  const identityEntry = (message: LegacyMessageTimingTarget): TimeEntry | undefined => {
+    const sourceId =
+      (message.providerOccurrence ?? 1) <= 1 && !canonicalIds.has(message.providerSourceId ?? "")
+        ? message.providerSourceId
+        : null
+    return (
+      record(byId[message.messageId]) ??
+      orderById.get(message.messageId) ??
+      (sourceId ? (record(byId[sourceId]) ?? orderById.get(sourceId)) : undefined)
+    )
+  }
+  // A positional fallback is allowed only for a complete, unshifted legacy order.
+  const useOrder = order.length === messages.length && !messages.some(identityEntry)
+  return (index) => {
+    const message = messages[index]
+    const entry = identityEntry(message) ?? (useOrder ? record(order[index]) : undefined)
+    const startAt = timestamp(entry?.start_at)
+    const rawEnd = timestamp(entry?.end_at)
+    return {
+      messageId: message.messageId,
+      startAt,
+      endAt: rawEnd !== null && (startAt === null || rawEnd >= startAt) ? rawEnd : null
+    }
+  }
+}
+
 /** Runs only in the checkpoint worker's cold compatibility path, never in metadata hydration. */
 export function migrateLegacyMessageTimes(
   database: DatabaseSync,
   threadId: string,
   checkpointId: string,
-  messages: readonly TimingTarget[],
+  messages: readonly LegacyMessageTimingTarget[],
   checkCancelled: () => void
 ): void {
   checkCancelled()
@@ -164,33 +217,7 @@ export function migrateLegacyMessageTimes(
     )
   if (Number(staged.changes) === 0) return
 
-  const decoded = JSON.parse(source) as unknown[]
-  const byId = record(decoded[0]) ?? {}
-  const order = Array.isArray(decoded[1]) ? (decoded[1] as TimeEntry[]) : []
-  const orderById = new Map<string, TimeEntry>()
-  const duplicateIds = new Set<string>()
-  for (let index = 0; index < order.length; index += 1) {
-    if (index % 64 === 0) checkCancelled()
-    const entry = record(order[index]) as TimeEntry | undefined
-    if (!entry || typeof entry.id !== "string" || !entry.id) continue
-    if (orderById.has(entry.id)) duplicateIds.add(entry.id)
-    else orderById.set(entry.id, entry)
-  }
-  for (const id of duplicateIds) orderById.delete(id)
-  const canonicalIds = new Set(messages.map((message) => message.messageId))
-  const identityEntry = (message: TimingTarget): TimeEntry | undefined => {
-    const sourceId =
-      (message.providerOccurrence ?? 1) <= 1 && !canonicalIds.has(message.providerSourceId ?? "")
-        ? message.providerSourceId
-        : null
-    return (
-      record(byId[message.messageId]) ??
-      orderById.get(message.messageId) ??
-      (sourceId ? (record(byId[sourceId]) ?? orderById.get(sourceId)) : undefined)
-    )
-  }
-  // A positional fallback is allowed only for a complete, unshifted legacy order.
-  const useOrder = order.length === messages.length && !messages.some(identityEntry)
+  const timingEntry = prepareLegacyMessageTimeEntries(source, messages, checkCancelled)
   const update = database.prepare(`UPDATE thread_messages
     SET start_at = COALESCE(start_at, CASE WHEN end_at IS NULL OR ? <= end_at THEN ? END),
       end_at = COALESCE(end_at, CASE WHEN start_at IS NULL OR ? >= start_at THEN ? END),
@@ -213,11 +240,7 @@ export function migrateLegacyMessageTimes(
         return
       }
       for (let index = offset; index < Math.min(offset + 64, messages.length); index += 1) {
-        const entry =
-          identityEntry(messages[index]) ?? (useOrder ? record(order[index]) : undefined)
-        const start = timestamp(entry?.start_at)
-        const rawEnd = timestamp(entry?.end_at)
-        const end = rawEnd !== null && (start === null || rawEnd >= start) ? rawEnd : null
+        const { startAt: start, endAt: end } = timingEntry(index)
         if (start !== null || end !== null) {
           update.run(
             start,

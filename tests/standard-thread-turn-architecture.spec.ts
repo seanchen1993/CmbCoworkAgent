@@ -149,10 +149,52 @@ assertIncludes(
   'throw new Error("Harness feature binding store has an invalid bindings field")',
   "invalid feature bindings cannot silently remove Harness repository context"
 )
-assert(
-  count(desktop, "parseStandardThreadMetadata(") === 9,
-  "all nine desktop Thread metadata reads use the shared parser, including the remote inbox guard"
+function assertDesktopMetadataParser(start: string, end: string, reads: string[]): void {
+  const first = desktop.indexOf(start)
+  const last = desktop.indexOf(end, first + start.length)
+  assert(first >= 0 && last > first, `desktop metadata parser scope: ${start}`)
+  const source = desktop.slice(first, last)
+  for (const read of reads) assertIncludes(source, read, `shared metadata parser in ${start}`)
+}
+
+assertDesktopMetadataParser(
+  "async function readCoordinatorWorkspacePath(",
+  "function trackCoordinatorWorkerUpdateBinding(",
+  [
+    "parseStandardThreadMetadata(getThreadCore(threadId)?.metadata).workspacePath",
+    "parseStandardThreadMetadata(row.metadata).workspacePath",
+    "parseStandardThreadMetadata(current.metadata).workspacePath !== workspacePath"
+  ]
 )
+assertDesktopMetadataParser(
+  "function rejectDesktopRunForRemoteReadOnlyThread(",
+  "function claimDesktopThreadRunLease(",
+  [
+    "parseStandardThreadMetadata(getThread(threadId)?.metadata).metadata",
+    'metadata.targetKind === "inbox" && metadata.remoteReadOnly === true'
+  ]
+)
+assertDesktopMetadataParser(
+  "function getThreadWorkspacePath(",
+  "function startTurnStateRun(",
+  ["const { workspacePath } = parseStandardThreadMetadata(thread?.metadata, {"]
+)
+assertDesktopMetadataParser(
+  '"agent:coordinator-worker-stream-focus"',
+  '"agent:coordinator-mode-forced"',
+  ["const { workspacePath } = parseStandardThreadMetadata(thread?.metadata)"]
+)
+const invokeStart = "// Handle agent invocation with streaming"
+const resumeStart = "// Handle agent resume (after interrupt approval/rejection via useStream)"
+const interruptStart = "// Handle HITL interrupt response"
+const desktopRunMetadataRead = "const parsedThreadMetadata = parseStandardThreadMetadata(thread?.metadata, {"
+assertDesktopMetadataParser(invokeStart, resumeStart, [
+  "parseStandardThreadMetadata(initialInvokeThread?.metadata)",
+  "return modelId || parseStandardThreadMetadata(thread?.metadata).modelId",
+  desktopRunMetadataRead
+])
+assertDesktopMetadataParser(resumeStart, interruptStart, [desktopRunMetadataRead])
+assertDesktopMetadataParser(interruptStart, "// Handle cancellation", [desktopRunMetadataRead])
 for (const metadataField of [
   'typeof metadata.workspacePath === "string"',
   'typeof metadata.model === "string"',

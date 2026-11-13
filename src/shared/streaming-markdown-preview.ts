@@ -9,8 +9,17 @@ export interface StreamingMarkdownPreview {
   omittedCharacters: number
 }
 
-export function buildStreamingMarkdownPreview(text: string): StreamingMarkdownPreview {
-  if (text.length <= MAX_STREAMING_MARKDOWN_RENDER_CHARS) {
+export function buildStreamingMarkdownPreview(
+  text: string,
+  maxRenderCharacters = MAX_STREAMING_MARKDOWN_RENDER_CHARS
+): StreamingMarkdownPreview {
+  // A retained display may have less room than the live Markdown view. Only lower
+  // its full-document threshold; keep the same paragraph boundaries and fragments.
+  const threshold = Number.isFinite(maxRenderCharacters)
+    ? Math.max(HEAD_CHARS + TAIL_CHARS,
+        Math.min(MAX_STREAMING_MARKDOWN_RENDER_CHARS, maxRenderCharacters))
+    : MAX_STREAMING_MARKDOWN_RENDER_CHARS
+  if (text.length <= threshold) {
     return { head: text, tail: "", omittedCharacters: 0 }
   }
   const rawHeadEnd = text.lastIndexOf("\n\n", HEAD_CHARS)

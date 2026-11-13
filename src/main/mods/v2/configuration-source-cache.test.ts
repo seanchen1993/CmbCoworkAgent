@@ -9,11 +9,17 @@ import {
   utimes,
   writeFile
 } from "node:fs/promises"
+import * as nativeFs from "node:fs"
 import { statSync } from "node:fs"
 import { basename, dirname, join, resolve } from "node:path"
 import { tmpdir } from "node:os"
-import { afterEach, expect, it } from "vitest"
-import { FunctionConfigurationSourceCache } from "./configuration-source-cache"
+import { afterEach, expect, it, vi } from "vitest"
+import { assertConfigurationSourcesCurrent, FunctionConfigurationSourceCache } from "./configuration-source-cache"
+import { compileFunctionPlugin } from "./loader"
+
+vi.mock("node:fs", async importOriginal => ({
+  ...(await importOriginal<typeof import("node:fs")>())
+}))
 
 const roots: string[] = []
 afterEach(async () => {
@@ -98,6 +104,37 @@ it("same bytes on a replacement file identity are recompiled", async () => {
   await writeFile(path + ".replacement", await readFile(path))
   await rename(path + ".replacement", path)
   expect(await f.cache.read(f.root)).not.toBe(first)
+})
+
+it("checks canonical contents freshly without repeating the same root alias walks", async () => {
+  const f = await fixture()
+  const compiled = await f.cache.read(f.root)
+  const resolveRoot = vi.spyOn(nativeFs, "realpathSync")
+  try {
+    assertConfigurationSourcesCurrent(compiled.root, compiled)
+    // The source fence retains its original before/after root checks.
+    expect(resolveRoot).toHaveBeenCalledTimes(2)
+    const source = join(f.root, "hooks/register.ts"), previous = statSync(source)
+    await writeFile(source, "export function register()[]")
+    await utimes(source, previous.atime, previous.mtime)
+    expect(() => assertConfigurationSourcesCurrent(compiled.root, compiled))
+      .toThrow("MODS_CONFIG_SOURCE_CHANGED")
+  } finally { resolveRoot.mockRestore() }
+})
+
+it("rejects a canonical compiled root replaced during its source read", async () => {
+  const f = await fixture()
+  const compiled = await compileFunctionPlugin(f.root)
+  const original = Object.getOwnPropertyDescriptor(compiled, "root")!
+  const close = nativeFs.closeSync
+  const replaced = vi.spyOn(nativeFs, "closeSync").mockImplementation(fd => {
+    close(fd)
+    Object.defineProperty(compiled, "root", { ...original, value: join(f.root, "other") })
+  })
+  try {
+    expect(() => assertConfigurationSourcesCurrent(f.root, compiled))
+      .toThrow("MODS_CONFIG_SOURCE_CHANGED")
+  } finally { replaced.mockRestore() }
 })
 
 it("bounds code retention to sixteen source paths with true least-recently-used eviction", async () => {

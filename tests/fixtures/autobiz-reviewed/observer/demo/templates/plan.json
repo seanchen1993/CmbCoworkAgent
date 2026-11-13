@@ -1,0 +1,101 @@
+{
+  "featureId": "alpha",
+  "status": "todo",
+  "taskSetStatus": "finalized",
+  "activeBatchId": null,
+  "nextBatchId": null,
+  "taskValidationPolicy": {
+    "mode": "defer_to_test_stages",
+    "orchestration": "inline",
+    "codeGate": "review_only",
+    "maxTestStageRepairAttempts": 3
+  },
+  "batchPolicy": {
+    "maxTasks": 3,
+    "strategy": "minimal_closed_delivery_v2"
+  },
+  "batches": [
+    {
+      "id": "B001",
+      "path": "plans/B001/plan.json",
+      "title": "cap",
+      "specRoots": [
+        "specs/cap/spec.md"
+      ],
+      "executionLane": "backend",
+      "deps": [],
+      "taskIds": [
+        "T001"
+      ],
+      "deliveryKind": "single_task",
+      "status": "todo"
+    },
+    {
+      "id": "B002",
+      "path": "plans/B002/plan.json",
+      "title": "next",
+      "specRoots": [
+        "specs/next/spec.md"
+      ],
+      "executionLane": "backend",
+      "deps": [
+        "B001"
+      ],
+      "taskIds": [
+        "T002"
+      ],
+      "deliveryKind": "single_task",
+      "status": "todo"
+    }
+  ],
+  "parallelBatchPipeline": {
+    "schemaVersion": "autobiz.parallel.pipeline.v1",
+    "planRevision": "sha256:7018af49815978af14d0e89bc7f19208df4a8bd56a9bb4eee0d73e865e515c7a",
+    "deliveryStages": [
+      "prepare",
+      "implement",
+      "review",
+      "test"
+    ],
+    "validationBatches": [
+      {
+        "id": "V-E2E",
+        "type": "validation",
+        "stage": "e2e_test",
+        "dependsOn": "all_delivery",
+        "executionTarget": "merged_main"
+      }
+    ],
+    "validationOwnership": {
+      "REVIEW-B001": {
+        "ownerBatchId": "B001",
+        "stage": "review",
+        "kind": "review"
+      },
+      "UTEST-T001": {
+        "ownerBatchId": "B001",
+        "stage": "test",
+        "kind": "utest_target",
+        "taskId": "T001",
+        "sourceBatchId": "B001"
+      },
+      "REVIEW-B002": {
+        "ownerBatchId": "B002",
+        "stage": "review",
+        "kind": "review"
+      },
+      "UTEST-T002": {
+        "ownerBatchId": "B002",
+        "stage": "test",
+        "kind": "utest_target",
+        "taskId": "T002",
+        "sourceBatchId": "B002"
+      }
+    },
+    "finalization": {
+      "mode": "evidence_aggregate_only",
+      "forbidPostMergeDuplicateExecution": true
+    }
+  },
+  "taskSetDigest": "ab59ba9f290a8935d18924fbee326244aa2d3f61d2ccfc8049557f86bf3f6b9f"
+}

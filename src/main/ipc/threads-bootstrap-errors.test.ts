@@ -3,6 +3,7 @@ import { resolve } from "node:path"
 import { runInNewContext } from "node:vm"
 import ts from "typescript"
 import { describe, expect, it, vi } from "vitest"
+import type { ThreadTranscriptSourceScope } from "../../shared/thread-transcript-source-scope"
 
 /** Execute the actual registered handler without starting Electron or importing its services. */
 function bootstrapHandler(scope: object): (event: object, threadId: string) => Promise<unknown> {
@@ -25,7 +26,7 @@ function bootstrapHandler(scope: object): (event: object, threadId: string) => P
   return runInNewContext(code, scope)
 }
 
-function fixture() {
+function fixture(sourceScope?: ThreadTranscriptSourceScope) {
   const cancelled = new Error("actual hydration read retired")
   const unavailable = new Error("worker unavailable")
   const read = { assertCurrent: vi.fn(), dispose: vi.fn(), row: { metadata: "{}" },
@@ -38,8 +39,20 @@ function fixture() {
   const page = { messages: [{ id: "durable-message" }], total: 1, hasMore: false }
   const pages = vi.fn().mockResolvedValue(page)
   const warn = vi.fn()
+  const captureScope = vi.fn((_threadId: string, current: typeof read) => {
+    current.assertCurrent()
+    return sourceScope
+  })
+  const createWriter = vi.fn(() => { throw Error("Unexpected Main writer execution in IPC fixture") })
+  const loadWriter = vi.fn((name: string) => {
+    if (name !== "../checkpointer/legacy-transcript-main-writer")
+      throw Error(`Unexpected IPC fixture import: ${name}`)
+    return { createLegacyTranscriptWriter: createWriter }
+  })
   const handler = bootstrapHandler({
+    require: loadWriter,
     captureThreadDisplayRead: () => read,
+    captureThreadTranscriptSourceScope: captureScope,
     verifyCanonicalThreadDisplayWitnesses: vi.fn(),
     assertValidCheckpointThreadId: (id: string) => id,
     nativeFunctionConversationWorkspace: () => "workspace",
@@ -56,7 +69,7 @@ function fixture() {
   })
   const event = { sender: { id: 7 } }
   return { handler, event, read, canonical, legacy, pages, page, runtimeTuple, stats,
-    cancelled, unavailable, warn }
+    cancelled, unavailable, warn, captureScope, createWriter, loadWriter }
 }
 
 describe("checkpoint bootstrap IPC outcome classification", () => {
@@ -97,8 +110,27 @@ describe("checkpoint bootstrap IPC outcome classification", () => {
       checkpoint: original.runtimeTuple, page: original.page, migration: original.stats
     })
     expect(original.legacy).toHaveBeenCalledTimes(1)
+    expect(original.loadWriter).toHaveBeenCalledExactlyOnceWith(
+      "../checkpointer/legacy-transcript-main-writer")
+    expect(original.createWriter).not.toHaveBeenCalled()
+    expect(verified.loadWriter).not.toHaveBeenCalled()
     expect(verified.read.dispose).toHaveBeenCalledTimes(1)
     expect(original.read.dispose).toHaveBeenCalledTimes(1)
+  })
+
+  it("forwards only the source header captured for this bootstrap read", async () => {
+    const sourceScope: ThreadTranscriptSourceScope = {
+      threadId: "thread", incarnation: { token: "original-thread", legacyCreatedAt: 1 },
+      workspacePath: "/workspace"
+    }
+    const f = fixture(sourceScope)
+    const result = await f.handler(f.event, "thread")
+    expect(result).toEqual({ checkpoint: f.runtimeTuple,
+      page: { ...f.page, sourceScope, canonicalCheckpointVerified: true }, migration: f.stats })
+    expect(f.captureScope).toHaveBeenCalledExactlyOnceWith("thread", f.read)
+    expect(f.createWriter).not.toHaveBeenCalled()
+    expect(() => f.loadWriter("unrelated-service")).toThrow("Unexpected IPC fixture import")
+    expect(f.read.dispose).toHaveBeenCalledTimes(1)
   })
 
   it("restarts an unavailable page reader once without replaying bootstrap", async () => {

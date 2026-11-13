@@ -24,6 +24,9 @@ export default defineConfig(
       "examples/frontend-api-starter/public/vendor/**",
       // Byte-identical official compatibility fixtures; provenance hashes guard these sources.
       "tests/fixtures/mods-upstream/**",
+      // Reviewed original AutoBiz inputs retain exact bytes, checked by per-file provenance.
+      "tests/fixtures/autobiz-reviewed/base/**",
+      "tests/fixtures/autobiz-reviewed/observer/**",
       "resources/mods/community-originals/**",
       // Generated collector dependency: verified byte-for-byte by its preparation/check scripts.
       "resources/native-compositions/autobiz-lean/providers/knowledge/mods/frontmatter.cjs",

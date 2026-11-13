@@ -11,12 +11,15 @@ import type { ChatResult } from "@langchain/core/outputs"
 import type { RunnableConfig } from "@langchain/core/runnables"
 import { tool } from "@langchain/core/tools"
 import { ChatOpenAI } from "@langchain/openai"
-import { createAgent } from "langchain"
+import { createAgent, createMiddleware } from "langchain"
+import { IterableReadableStream } from "@langchain/core/utils/stream"
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest"
 import { z } from "zod"
 import type { ModObject } from "../../shared/mods/types"
 import { SqlJsSaver } from "../checkpointer/sqljs-saver"
 import { FunctionConversationDeliveryBridge } from "../checkpointer/function-conversation-delivery"
+import { functionConversationCanonicalStamp } from
+  "../checkpointer/function-conversation-checkpoint-membership"
 import { FunctionConversationStore } from "../db/function-conversation-store"
 import { assertStoredProjectionReceipt } from "../db/function-conversation-projection-seal"
 import { captureThreadIncarnation, matchesThreadIncarnation } from "../services/thread-incarnation"
@@ -155,7 +158,8 @@ function record(value: unknown): Record<string, unknown> {
 /** Real SessionEntry, approval, physical lease, Manager, native factory and same Saver. */
 async function fixture(controller: AbortController, options: { hook?: boolean;
   input?: HumanMessage; model?: BaseChatModel;
-  tools?: NonNullable<Parameters<typeof createFunctionConversationNativeAgent>[0]["tools"]> } = {}) {
+  tools?: NonNullable<Parameters<typeof createFunctionConversationNativeAgent>[0]["tools"]>
+  middleware?: NonNullable<Parameters<typeof createFunctionConversationNativeAgent>[0]["middleware"]> } = {}) {
   const ownedController = new AbortController()
   const signal = AbortSignal.any([controller.signal, ownedController.signal])
   const root = mkdtempSync(join(directory, "workspace-"))
@@ -284,11 +288,15 @@ async function fixture(controller: AbortController, options: { hook?: boolean;
       model: "actual-derived-provider", nativeInput, flush: () => guard() })
     drains.push(async () => { host.close(); await host.whenDrained() })
     const bridge = new FunctionConversationDeliveryBridge(store, () => runtime.binding)
+    const middleware: Array<
+      NonNullable<Parameters<typeof createFunctionConversationNativeAgent>[0]["middleware"]>[number]
+    > = [host.middleware,
+      createFunctionConversationMiddleware({ store,
+        capture: current => captureFunctionConversationTaskBinding(current, binding),
+        onIntakeNotes: host.registerIntake })]
+    if (options.middleware) middleware.push(...options.middleware)
     const agent = createFunctionConversationNativeAgent({ model, tools: options.tools ?? [],
-      checkpointer: bridge.wrap(saver), middleware: [host.middleware,
-        createFunctionConversationMiddleware({ store,
-          capture: current => captureFunctionConversationTaskBinding(current, binding),
-          onIntakeNotes: host.registerIntake })] })
+      checkpointer: bridge.wrap(saver), middleware })
     host.install(agent.graph)
     const inner = wrapFunctionConversationInvocation(agent, { store, binding,
       history: { saver, assertCurrent: runtime.assertCurrent, register: host.registerHistorical },
@@ -326,6 +334,114 @@ async function fixture(controller: AbortController, options: { hook?: boolean;
 }
 
 describe("actual main native derived config through both invocation layers", () => {
+  it.each(["ordinary-data", "forged-native"] as const)(
+    "keeps the original nonShared superclass return contract for %s", kind =>
+    tracked(async controller => {
+      let sourceReady = false
+      let inherited: object | undefined, original: PropertyDescriptor | undefined
+      let replaced = 0, delegated = 0, consumed = 0, forged = 0
+      let created: AIMessage | undefined
+      const probe = createMiddleware({ name: "actual-nonshared-superclass-return-source",
+        stateSchema: z.object({ sourceProbe: z.string().default(() => {
+          if (!sourceReady || inherited) return "actual original initialization"
+          let current = Object.getPrototypeOf(agent.graph) as object | null
+          while (current && !Object.hasOwn(current, "stream"))
+            current = Object.getPrototypeOf(current) as object | null
+          if (!current) throw Error("ACTUAL_PREGEL_STREAM_OWNER_REQUIRED")
+          current = Object.getPrototypeOf(current) as object | null
+          while (current && !Object.hasOwn(current, "stream"))
+            current = Object.getPrototypeOf(current) as object | null
+          if (!current) throw Error("ACTUAL_SUPERCLASS_STREAM_OWNER_REQUIRED")
+          const descriptor = Object.getOwnPropertyDescriptor(current, "stream")
+          if (!descriptor || typeof descriptor.value !== "function")
+            throw Error("ACTUAL_SUPERCLASS_STREAM_METHOD_REQUIRED")
+          inherited = current; original = descriptor
+          const graph = agent.graph
+          Object.defineProperty(current, "stream", { ...descriptor,
+            value: async function (this: object, ...args: unknown[]) {
+              const actual: unknown = await Reflect.apply(descriptor.value, this, args)
+              if (this !== graph) return actual
+              delegated++
+              for await (const frame of actual as AsyncIterable<unknown>) { void frame; consumed++ }
+              Object.defineProperty(current!, "stream", descriptor)
+              return IterableReadableStream.fromAsyncGenerator((async function* () {
+                forged++
+                const canonical = kind === "forged-native" ? captureCanonical?.() : undefined
+                if (kind === "forged-native" && !canonical)
+                  throw Error("ACTUAL_NONSHARED_CANONICAL_FORGERY_REQUIRED")
+                created = new AIMessage({ id: canonical?.uuid ?? randomUUID(),
+                  content: "unowned nonShared consumer-only AI",
+                  ...(canonical ? { additional_kwargs: { function_row: canonical.stamp } } : {}) })
+                yield { messages: [created] }
+              })())
+            } })
+          replaced++
+          return "actual source probe installed"
+        }) }) })
+      const f = await fixture(controller, { middleware: [probe] })
+      const agent: ReturnType<typeof createFunctionConversationNativeAgent> = f.agent
+      const captureCanonical: () => { uuid: string
+        stamp: ReturnType<typeof functionConversationCanonicalStamp> } = () => {
+        const rows = f.store.readRows(f.runtime.target.ref)
+        if (rows.length !== 1) throw Error("ACTUAL_NONSHARED_ORIGINAL_CANONICAL_ROW_REQUIRED")
+        return { uuid: rows[0].uuid,
+          stamp: functionConversationCanonicalStamp(f.runtime.target.ref, rows[0]) }
+      }
+      sourceReady = true
+      try {
+        const running = f.retain(f.wrapped.invoke({ messages: [new HumanMessage({
+          id: randomUUID(), content: "actual nonShared superclass input" })] }, f.fixed))
+        if (kind === "forged-native")
+          await expect(running).rejects.toThrow("MODS_CONVERSATION_STREAM_PROJECTION_INVALID")
+        else {
+          const returned = record(await running), values = returned.messages
+          expect(Array.isArray(values)).toBe(true)
+          expect(values).toHaveLength(1)
+          const message = record((values as unknown[])[0])
+          const fields = message.type === "constructor" ? record(message.kwargs) : message
+          expect(fields.id).toBe(created?.id)
+          expect(fields.content).toBe("unowned nonShared consumer-only AI")
+          expect(record(fields.additional_kwargs).function_row).toBeUndefined()
+          expect(record(fields.additional_kwargs).function_row_invalid).toBeUndefined()
+          if (!created) throw Error("ACTUAL_NONSHARED_ORIGINAL_MESSAGE_REQUIRED")
+          expect(f.host.captureReturnMessageSource(created)).toBeUndefined()
+          expect(f.store.readReceipt(f.runtime.target.ref, created.id!)).toBeUndefined()
+        }
+        expect(replaced).toBe(1); expect(delegated).toBe(1)
+        expect(consumed).toBeGreaterThan(0); expect(forged).toBe(1)
+        if (!(f.model instanceof ActualModel)) throw Error("ACTUAL_DERIVED_MODEL_REQUIRED")
+        expect(f.model.requests).toHaveLength(1)
+        const rows = f.store.readRows(f.runtime.target.ref)
+        expect(rows).toHaveLength(1)
+        expect(rows[0].nativePayload).not.toContain("unowned nonShared consumer-only AI")
+        const saved = await f.checkpoint()
+        expect(saved.snapshot.members).toHaveLength(1)
+        expect(saved.snapshot.members[0].uuid).toBe(rows[0].uuid)
+        if (!created) throw Error("ACTUAL_NONSHARED_ORIGINAL_MESSAGE_REQUIRED")
+        if (kind === "ordinary-data") {
+          expect(saved.snapshot.members.some(member => member.uuid === created!.id)).toBe(false)
+          expect(saved.messages.some(message => message.id === created!.id)).toBe(false)
+        } else {
+          expect(created.id).toBe(rows[0].uuid)
+          expect(created.additional_kwargs.function_row)
+            .toEqual(functionConversationCanonicalStamp(f.runtime.target.ref, rows[0]))
+        }
+        expect(saved.messages.some(message => message.content === "unowned nonShared consumer-only AI"))
+          .toBe(false)
+        const accepted = saved.messages.find(message => message.id === rows[0].uuid)
+        expect(accepted).toBeInstanceOf(AIMessage)
+        if (!accepted) throw Error("ACTUAL_NONSHARED_CANONICAL_MESSAGE_REQUIRED")
+        expect(created).not.toBe(accepted)
+        expect(serializeFunctionConversationNativeMessage(accepted)).toBe(rows[0].nativePayload)
+        expect(accepted.additional_kwargs.function_row)
+          .toEqual(functionConversationCanonicalStamp(f.runtime.target.ref, rows[0]))
+        expect(() => f.runtime.assertCurrent()).not.toThrow()
+      } finally {
+        if (inherited && original) Object.defineProperty(inherited, "stream", original)
+        await f.close()
+      }
+    }))
+
   it("uses default thread and namespace before prepare and merges callbacks once like the framework", () =>
     tracked(async controller => {
       const f = await fixture(controller)

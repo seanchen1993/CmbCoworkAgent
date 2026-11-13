@@ -56,6 +56,45 @@ afterEach(() => {
 })
 
 describe("passive presentation retention between mounted chat views", () => {
+  it("preserves unrelated caches and active current transcript views, while revoking target dormant views", () => {
+    const f = fixture()
+    const scope = { threadId: "A", workspacePath: "workspace",
+      incarnation: { token: "original", legacyCreatedAt: 1 } }
+    const active = f.caches.acquire("A", "workspace", scope), activeBody = f.save(active)
+    const dormant = f.caches.acquire("A", "workspace", scope), dormantBody = f.save(dormant)
+    dormant.release()
+    const other = f.caches.acquire("B", "workspace"), otherBody = f.save(other)
+    f.emit("threads", { ...scope, kind: "transcript" })
+    expect(activeBody.current()).toBe(true)
+    expect(dormantBody.current()).toBe(false)
+    expect(otherBody.current()).toBe(true)
+    active.revoke(); other.revoke()
+  })
+
+  it.each([undefined, { threadId: "other" }, "metadata", "deleted", "created", "old-incarnation"])(
+    "synchronously revokes active views for unknown or replacement hint %#", hint => {
+      const f = fixture(), scope = { threadId: "A", workspacePath: "workspace",
+        incarnation: { token: "original", legacyCreatedAt: 1 } }
+      const active = f.caches.acquire("A", "workspace", scope), body = f.save(active)
+      f.emit("threads", typeof hint === "string" ? { ...scope,
+        kind: hint === "old-incarnation" ? "transcript" : hint,
+        incarnation: hint === "old-incarnation" ? { token: "old", legacyCreatedAt: 0 } : scope.incarnation } : hint)
+      expect(body.current()).toBe(false)
+      expect(active.current()).toBe(false)
+    }
+  )
+
+  it("does not reuse a same-ID, same-workspace drawing after native incarnation replacement", () => {
+    const f = fixture(), scope = { threadId: "A", workspacePath: "workspace",
+      incarnation: { token: "original", legacyCreatedAt: 1 } }
+    const old = f.caches.acquire("A", "workspace", scope), body = f.save(old)
+    old.release()
+    const current = f.caches.acquire("A", "workspace", { ...scope,
+      incarnation: { token: "new", legacyCreatedAt: 2 } })
+    expect(current.cache).not.toBe(old.cache)
+    expect(body.current()).toBe(false)
+    current.revoke()
+  })
   it.each(FUNCTION_PASSIVE_DISPLAY_SITES)("revokes dormant %s on its component redraw", component => {
     vi.useFakeTimers()
     const f = fixture()
@@ -194,4 +233,17 @@ describe("passive presentation retention between mounted chat views", () => {
     expect(rightBody.current()).toBe(false)
     expect(f.subscribers()).toBe(0)
   })
+})
+
+it("keeps unrelated displays but revokes same-ID displays when workspace is known absent", () => {
+  const f = fixture(), scope = { threadId: "A", workspacePath: "workspace",
+    incarnation: { token: "original", legacyCreatedAt: 1 } }
+  const active = f.caches.acquire("A", "workspace", scope), body = f.save(active)
+  const other = f.caches.acquire("B", "workspace"), otherBody = f.save(other)
+  f.emit("threads", { ...scope, kind: "transcript", workspacePath: undefined })
+  expect(body.current()).toBe(false)
+  expect(otherBody.current()).toBe(true)
+  f.emit("threads")
+  expect(otherBody.current()).toBe(false)
+  active.revoke(); other.revoke()
 })

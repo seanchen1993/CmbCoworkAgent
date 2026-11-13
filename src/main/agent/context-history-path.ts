@@ -669,36 +669,44 @@ export async function getProjectThreadDataDirectory(
 export async function deleteProjectThreadDataDirectory(
   workspacePath: string,
   threadId: string,
-  userHome?: string
+  userHome?: string,
+  assertCurrent: () => void = () => undefined
 ): Promise<void> {
+  assertCurrent()
   if (userHome !== undefined) {
     const threadDataDirectory = await getProjectThreadDataDirectory(
       workspacePath,
       threadId,
       userHome
     )
+    assertCurrent()
     await rm(threadDataDirectory, { recursive: true, force: true })
+    assertCurrent()
     return
   }
   // Deletion must sweep both roots directly. Calling the normal resolver here
   // would first copy/migrate potentially gigabytes of history only to delete it
   // immediately afterwards.
   const candidates = await getProjectThreadDataDirectoryReadCandidates(workspacePath, threadId)
+  assertCurrent()
   // Let an already-started migration settle before the sweep, then forget both
   // its in-process promise and durable-marker cache. A fixed-id thread recreated
   // in this process must be allowed to migrate newly reappeared legacy data.
   await Promise.all(
     candidates.map((directory) => threadDataMigrations.get(directory)?.catch(() => undefined))
   )
+  assertCurrent()
   for (const directory of candidates) {
     threadDataMigrations.delete(directory)
     clearCompletedThreadDataMigrationsForTarget(directory)
   }
   await Promise.all(
-    Array.from(new Set(candidates), (directory) =>
-      rm(directory, { recursive: true, force: true })
-    )
+    Array.from(new Set(candidates), (directory) => {
+      assertCurrent()
+      return rm(directory, { recursive: true, force: true })
+    })
   )
+  assertCurrent()
 }
 
 export async function getConversationHistoryDirectory(

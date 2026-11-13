@@ -1,3 +1,4 @@
+import { setImmediate } from "node:timers/promises"
 import { afterEach, expect, it, vi } from "vitest"
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
@@ -13,7 +14,11 @@ import { captureProjectWorkflowEvidence } from "./project-workflow-evidence"
 import { withProjectActionScope, type SettledProjectSkillBinding } from "../../harness-board/project-action-scope"
 
 const cleanup: Array<() => void> = []
-afterEach(() => cleanup.splice(0).reverse().forEach(fn => fn()))
+afterEach(async () => {
+  cleanup.splice(0).reverse().forEach(fn => fn())
+  // Let Vitest's fork handle queued task updates between cases.
+  await setImmediate()
+})
 async function fixture() {
   const root = mkdtempSync(join(tmpdir(), "project-workflow-evidence-"))
   const workspace = join(root, "workspace"), installed = join(root, "installed")

@@ -54,7 +54,20 @@ type RestoreIndexStoreQueue = {
 
 type DirectoryDeletionState = {
   readonly barrier: Promise<void>
+  readonly incarnation?: CoordinatorWorkerRestoreDirectoryIncarnation
+  readonly retirement?: CoordinatorWorkerDirectoryRetirement
   status: "pending" | "failed"
+}
+
+export interface CoordinatorWorkerDirectoryRetirement {
+  readonly oldPhysicalDrained: Promise<void>
+  readonly completion: Promise<void>
+  finalize(): Promise<void>
+}
+
+export interface PreparedCoordinatorWorkerDirectoryRetirement {
+  activate(): CoordinatorWorkerDirectoryRetirement
+  abort(): void
 }
 
 export const COORDINATOR_WORKER_RESTORE_INDEX_FILENAME = ".restore-index-v1.json"
@@ -556,6 +569,7 @@ export class CoordinatorWorkerRestoreIndexStore {
   private readonly operationCountByDirectory = new Map<string, number>()
   private nextDirectoryIncarnationId = 1
   private readonly directoryDeletionByPath = new Map<string, DirectoryDeletionState>()
+  private readonly preparedDirectoryRetirements = new Map<string, object>()
   private readonly artifactOperations = new Map<Promise<void>, string>()
   private operationCount = 0
   private retainedBytes = 0
@@ -612,11 +626,17 @@ export class CoordinatorWorkerRestoreIndexStore {
     incarnation: CoordinatorWorkerRestoreDirectoryIncarnation,
     operation: () => Promise<void>
   ): Promise<void> {
+    if (this.preparedDirectoryRetirements.has(incarnation.workersDir))
+      throw new Error("Coordinator worker directory retirement is busy")
     const existing = this.directoryDeletionByPath.get(incarnation.workersDir)
-    if (existing?.status === "pending") return existing.barrier
+    if (existing) {
+      if (existing.incarnation !== incarnation)
+        throw new Error("Coordinator worker directory retirement is busy")
+      if (existing.retirement || existing.status === "pending") return existing.barrier
+    }
     if (
       !existing &&
-      this.directoryDeletionByPath.size >=
+      this.directoryDeletionByPath.size + this.preparedDirectoryRetirements.size >=
         COORDINATOR_WORKER_RESTORE_MAX_DIRECTORY_DELETIONS
     ) {
       throw new Error("Coordinator worker directory deletion capacity exceeded")
@@ -631,7 +651,7 @@ export class CoordinatorWorkerRestoreIndexStore {
     void barrier.catch(() => undefined)
     // Register the barrier synchronously. A same-ID incarnation created while old operations
     // are draining captures it and cannot create files until the delete has completed.
-    const deletionState: DirectoryDeletionState = { barrier, status: "pending" }
+    const deletionState: DirectoryDeletionState = { barrier, status: "pending", incarnation }
     this.directoryDeletionByPath.set(incarnation.workersDir, deletionState)
     const completion = (async () => {
       while (incarnation.pendingOperations.size > 0) {
@@ -655,6 +675,98 @@ export class CoordinatorWorkerRestoreIndexStore {
       }
     )
     return completion
+  }
+
+  /** Reserve capacity before the AppDB commit; no files or live incarnations change here. */
+  prepareDirectoryRetirement(
+    incarnation: CoordinatorWorkerRestoreDirectoryIncarnation,
+    cleanup: () => Promise<void>
+  ): PreparedCoordinatorWorkerDirectoryRetirement {
+    const key = incarnation.workersDir
+    const existing = this.directoryDeletionByPath.get(key)
+    if (existing) {
+      if (existing.incarnation !== incarnation)
+        throw new Error("Coordinator worker directory retirement is busy")
+      const retirement = existing.retirement ?? {
+        oldPhysicalDrained: existing.barrier,
+        completion: existing.barrier,
+        finalize: () => existing.barrier
+      }
+      return { activate: () => retirement, abort() {
+        // This handle joins an existing retirement and owns no reservation to release.
+      } }
+    }
+    if (this.preparedDirectoryRetirements.has(key))
+      throw new Error("Coordinator worker directory retirement is busy")
+    if (this.directoryDeletionByPath.size + this.preparedDirectoryRetirements.size >=
+      COORDINATOR_WORKER_RESTORE_MAX_DIRECTORY_DELETIONS)
+      throw new Error("Coordinator worker directory deletion capacity exceeded")
+
+    const token = {}
+    this.preparedDirectoryRetirements.set(key, token)
+    let phase: "prepared" | "active" | "aborted" = "prepared"
+    let resolveDrained!: () => void, rejectDrained!: (error: unknown) => void
+    const oldPhysicalDrained = new Promise<void>((resolve, reject) => {
+      resolveDrained = resolve; rejectDrained = reject
+    })
+    void oldPhysicalDrained.catch(() => undefined)
+    let resolveCompletion!: () => void
+    const completion = new Promise<void>(resolve => { resolveCompletion = resolve })
+    let attempt: Promise<void> | undefined
+    let failed = false
+    const deletionState: DirectoryDeletionState = {
+      barrier: completion, status: "pending", incarnation,
+      get retirement() { return retirement }
+    }
+    const retirement: CoordinatorWorkerDirectoryRetirement = Object.freeze({
+      oldPhysicalDrained,
+      completion,
+      finalize: (): Promise<void> => {
+        if (phase !== "active") return Promise.reject(new Error("Directory retirement is not active"))
+        if (attempt && !failed) return attempt
+        failed = false
+        deletionState.status = "pending"
+        attempt = (async () => {
+          await oldPhysicalDrained
+          await cleanup()
+          resolveCompletion()
+          if (this.directoryDeletionByPath.get(key) === deletionState)
+            this.directoryDeletionByPath.delete(key)
+        })().catch(error => {
+          failed = true
+          deletionState.status = "failed"
+          // Keep the physical barrier pending. Only retrying this exact captured cleanup may
+          // release it; a timeout/error must never allow a new incarnation to mix old files.
+          throw error
+        })
+        return attempt
+      }
+    })
+    return {
+      activate: () => {
+        if (phase === "active") return retirement
+        if (phase !== "prepared" || this.preparedDirectoryRetirements.get(key) !== token)
+          throw new Error("Directory retirement reservation expired")
+        this.preparedDirectoryRetirements.delete(key)
+        phase = "active"
+        this.tombstoneDirectoryIncarnation(incarnation)
+        this.directoryDeletionByPath.set(key, deletionState)
+        void (async () => {
+          await incarnation.ready
+          while (incarnation.pendingOperations.size > 0) {
+            await Promise.allSettled(Array.from(incarnation.pendingOperations))
+            await new Promise<void>(resolve => setImmediate(resolve))
+          }
+        })().then(resolveDrained, rejectDrained)
+        return retirement
+      },
+      abort: () => {
+        if (phase !== "prepared") return
+        phase = "aborted"
+        if (this.preparedDirectoryRetirements.get(key) === token)
+          this.preparedDirectoryRetirements.delete(key)
+      }
+    }
   }
 
   protected beforeWriteWorkerState(
@@ -685,10 +797,12 @@ export class CoordinatorWorkerRestoreIndexStore {
       signal?: AbortSignal
       retainedBytes?: number
       incarnation?: CoordinatorWorkerRestoreDirectoryIncarnation
+      assertSourceCurrent?: () => void
     } = {}
   ): Promise<T> {
     const key = path.resolve(workersDir)
     try {
+      options.assertSourceCurrent?.()
       this.assertCurrentIncarnation(key, options.incarnation)
     } catch (error) {
       return Promise.reject(error)
@@ -711,8 +825,10 @@ export class CoordinatorWorkerRestoreIndexStore {
     const task = previous
       .catch(() => undefined)
       .then(async () => {
+        options.assertSourceCurrent?.()
         throwIfAborted(options.signal)
         if (options.incarnation) await options.incarnation.ready
+        options.assertSourceCurrent?.()
         this.assertCurrentIncarnation(key, options.incarnation)
         return operation()
       })
@@ -776,17 +892,22 @@ export class CoordinatorWorkerRestoreIndexStore {
     workersDir: string,
     mode: "active" | "recent",
     signal?: AbortSignal,
-    incarnation?: CoordinatorWorkerRestoreDirectoryIncarnation
+    incarnation?: CoordinatorWorkerRestoreDirectoryIncarnation,
+    assertSourceCurrent?: () => void
   ): Promise<{ entries: CoordinatorWorkerRestoreIndexEntry[]; overflow: boolean }> {
     if (workersDir.length === 0 || workersDir.length > 32_768) {
       throw new Error("Coordinator worker restore index path exceeds its hard limit")
     }
     return this.enqueue(workersDir, async () => {
+      const assertCurrent = (): void => {
+        assertSourceCurrent?.()
+        this.assertCurrentIncarnation(workersDir, incarnation)
+      }
       throwIfAborted(signal)
-      this.assertCurrentIncarnation(workersDir, incarnation)
+      assertCurrent()
       const indexPath = path.join(workersDir, COORDINATOR_WORKER_RESTORE_INDEX_FILENAME)
       let index = await readBoundedIndexFile(indexPath, signal)
-      this.assertCurrentIncarnation(workersDir, incarnation)
+      assertCurrent()
       const hasBufferedUnresolved = index?.entries.some(isUnresolved) === true
       if (!index || (!index.complete && !(index.overflow && hasBufferedUnresolved))) {
         const rebuilt = await buildLegacyCoordinatorWorkerRestoreIndex(
@@ -794,21 +915,21 @@ export class CoordinatorWorkerRestoreIndexStore {
           signal,
           this.workerFactory
         )
+        assertCurrent()
         throwIfAborted(signal)
-        this.assertCurrentIncarnation(workersDir, incarnation)
         index = rebuilt.index
         try {
-          await writeIndexAtomic(indexPath, index, () =>
-            this.assertCurrentIncarnation(workersDir, incarnation)
-          )
+          await writeIndexAtomic(indexPath, index, assertCurrent)
+          assertCurrent()
         } catch (error) {
+          assertCurrent()
           if (!isMissingFile(error)) throw error
           // A missing workers directory is a valid empty restore (and can also mean deletion won
           // a race). Do not recreate it merely to persist a disposable empty secondary index.
         }
       }
       throwIfAborted(signal)
-      this.assertCurrentIncarnation(workersDir, incarnation)
+      assertCurrent()
       const entries = boundEntries(index.entries)
       return {
         entries: mode === "active" ? entries.filter(isUnresolved) : entries,
@@ -817,7 +938,8 @@ export class CoordinatorWorkerRestoreIndexStore {
     }, {
       signal,
       retainedBytes: Buffer.byteLength(workersDir, "utf8") + 256,
-      incarnation
+      incarnation,
+      assertSourceCurrent
     })
   }
 
@@ -830,7 +952,8 @@ export class CoordinatorWorkerRestoreIndexStore {
       notification_acknowledged?: boolean
       updated_at: string
     },
-    incarnation?: CoordinatorWorkerRestoreDirectoryIncarnation
+    incarnation?: CoordinatorWorkerRestoreDirectoryIncarnation,
+    assertSourceCurrent?: () => void
   ): Promise<boolean> {
     if (
       statePath.length > 32_768 ||
@@ -841,8 +964,10 @@ export class CoordinatorWorkerRestoreIndexStore {
     }
     const workersDir = path.dirname(statePath)
     return this.enqueue(workersDir, async () => {
-      const assertCurrent = (): void =>
+      const assertCurrent = (): void => {
+        assertSourceCurrent?.()
         this.assertCurrentIncarnation(workersDir, incarnation)
+      }
       assertCurrent()
       await this.beforeWriteWorkerState(statePath, incarnation)
       assertCurrent()
@@ -875,12 +1000,15 @@ export class CoordinatorWorkerRestoreIndexStore {
         assertCurrent()
         return true
       } catch {
+        assertCurrent()
         await rm(indexPath, { force: true }).catch(() => undefined)
+        assertCurrent()
         return false
       }
     }, {
       retainedBytes: Buffer.byteLength(serializedState, "utf8") + 512,
-      incarnation
+      incarnation,
+      assertSourceCurrent
     })
   }
 }

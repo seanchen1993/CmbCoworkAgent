@@ -75,6 +75,7 @@ import { ResourcePanelOverlay } from "@/components/panels/ResourcePanelOverlay"
 import { openResourcePanelOverlay } from "@/lib/resource-panel-overlay-events"
 import { PetStateBridge } from "@/components/pet/PetStateBridge"
 import { DEFAULT_BROWSER_CDP_CONFIG, useAppStore } from "@/lib/store"
+import { createLatestRefreshCoordinator } from "@/lib/latest-refresh-coordinator"
 import { useGitChangeNoticeListener } from "@/components/git/GitChangeNotice"
 import { ThreadProvider } from "@/lib/thread-context"
 import { ElectronIPCTransport } from "@/lib/electron-transport"
@@ -997,28 +998,27 @@ function App(): React.JSX.Element {
   // Reload thread list when main process signals a change (e.g. scheduled task created a thread).
   // Only update the list without auto-selecting (which would navigate away from customize view).
   useEffect(() => {
-    return window.api.threads.onThreadsChanged(async () => {
-      try {
+    let live = true, clearCompletedTasks = false
+    const refresh = createLatestRefreshCoordinator({
+      ready: () => live,
+      refresh: async () => {
         await useAppStore.getState().loadThreads()
-      } catch (err) {
-        console.error("[App] Failed to reload threads:", err)
-      }
+        if (!live) return false
+        if (clearCompletedTasks) {
+          clearCompletedTasks = false
+          window.api.pet.clearCompletedTasks()
+        }
+        return true
+      },
+      failed: error => console.error("[App] Failed to reload threads:", error)
     })
-  }, [])
-
-  // Safety net: refresh thread list when the window regains focus.
-  // On Windows, IPC messages sent while the window is minimized/background may be dropped.
-  useEffect(() => {
-    const onFocus = async (): Promise<void> => {
-      try {
-        await useAppStore.getState().loadThreads()
-        window.api.pet.clearCompletedTasks()
-      } catch {
-        // ignore
-      }
+    const stop = window.api.threads.onThreadsChanged(() => refresh.request())
+    const onFocus = (): void => {
+      clearCompletedTasks = true
+      refresh.request()
     }
     window.addEventListener("focus", onFocus)
-    return () => window.removeEventListener("focus", onFocus)
+    return () => { live = false; refresh.close(); stop(); window.removeEventListener("focus", onFocus) }
   }, [])
 
   if (isLoading) {

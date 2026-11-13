@@ -68,11 +68,11 @@ describe("fresh read-only thread runtime scope projection", () => {
     expect(appDb.withCanonicalThreadMessageReadScope(id, () => "replacement")).toBe("replacement")
   })
 
-  it("preserves the full metadata interpreter at the ordinary writer's fork gate", () => {
+  it("keeps the persisted incarnation at the ordinary writer's fork gate after late parser replacement", () => {
     const raw = JSON.stringify({ cmb_thread_incarnation: "stored", llmFileHistory: "x".repeat(50000) })
     const id = insert(raw), parse = JSON.parse
     denyFunctionConversationForkReady(appDb.getDb(), {
-      threadId: id, incarnation: { token: "custom-interpreter", legacyCreatedAt: 100 }
+      threadId: id, incarnation: { token: "stored", legacyCreatedAt: 100 }
     })
     vi.spyOn(JSON, "parse").mockImplementation((value: string) => value === raw
       ? { cmb_thread_incarnation: "custom-interpreter" } : parse(value))
@@ -103,7 +103,7 @@ describe("fresh read-only thread runtime scope projection", () => {
       .toThrow("MODS_CONVERSATION_FORK_PREPARING")
   })
 
-  it.each([1, 2])("keeps full metadata if timing callback %s changes its interpreter", turn => {
+  it.each([1, 2])("keeps captured interpretation if timing callback %s replaces JSON.parse", turn => {
     const raw = JSON.stringify({ cmb_thread_incarnation: "kept", llmFileHistory: "x".repeat(50000) })
     const id = insert(raw), parse = JSON.parse, now = performance.now.bind(performance)
     let calls = 0
@@ -114,12 +114,12 @@ describe("fresh read-only thread runtime scope projection", () => {
     })
     try {
       const identity = withHostRuntimeTiming(() => appDb.getThreadCanonicalIdentity(id))!
-      expect(identity.metadata).toBe(raw)
-      expect(captureThreadIncarnation(identity).token).toBe("custom-interpreter")
+      expect(parse(identity.metadata!)).toEqual({ cmb_thread_incarnation: "kept" })
+      expect(captureThreadIncarnation(identity).token).toBe("kept")
     } finally { JSON.parse = parse }
   })
 
-  it("keeps the original core reader when prepare's regexp callback changes interpretation", () => {
+  it("keeps the original core reader but captured parsing after a prepare regexp callback", () => {
     const raw = JSON.stringify({ cmb_thread_incarnation: "kept", llmFileHistory: "x".repeat(50000) })
     const id = insert(raw), parse = JSON.parse, test = RegExp.prototype.test
     let changed = false
@@ -135,7 +135,7 @@ describe("fresh read-only thread runtime scope projection", () => {
       const identity = appDb.getThreadCanonicalIdentity(id)!
       expect(changed).toBe(true)
       expect(identity.metadata).toBe(raw)
-      expect(captureThreadIncarnation(identity).token).toBe("prepare-interpreter")
+      expect(captureThreadIncarnation(identity).token).toBe("kept")
     } finally { JSON.parse = parse }
   })
 
@@ -162,7 +162,7 @@ describe("fresh read-only thread runtime scope projection", () => {
     }
   })
 
-  it("returns the full original input when the metadata interpreter is overridden", () => {
+  it("uses the bounded native projection and captured parser after late JSON instrumentation", () => {
     const raw = JSON.stringify({ cmb_thread_incarnation: "kept", llmFileHistory: "x".repeat(50000) })
     const id = insert(raw), original = JSON.parse
     const parse = vi.spyOn(JSON, "parse").mockImplementation((value: string) => {
@@ -171,9 +171,9 @@ describe("fresh read-only thread runtime scope projection", () => {
       return result
     })
     const identity = appDb.getThreadCanonicalIdentity(id)!
-    expect(identity.metadata).toBe(raw)
-    expect(captureThreadIncarnation(identity).token).toBe("custom-interpreter")
-    expect(parse).toHaveBeenCalledWith(raw)
+    expect(original(identity.metadata!)).toEqual({ cmb_thread_incarnation: "kept" })
+    expect(captureThreadIncarnation(identity).token).toBe("kept")
+    expect(parse).not.toHaveBeenCalled()
   })
 
   it("keeps a cached custom core reader after its public factory is restored", () => {

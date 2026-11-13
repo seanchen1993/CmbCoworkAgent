@@ -67,6 +67,17 @@ const reverse = patch
 const originals = applyNativeTextPatch(reverse, installed)
 for (const file of manifest.files) assert.equal(hash(originals.get(file.path)), file.beforeSha256)
 
+const previousInstalled = new Map(manifest.previousInstallation.files.map((file) => {
+  let text = installed.get(file.path).toString("utf8")
+  for (const edit of [...file.replacements].reverse()) {
+    const offset = text.indexOf(edit.after)
+    assert(offset >= 0 && text.indexOf(edit.after, offset + edit.after.length) < 0)
+    text = text.slice(0, offset) + edit.before + text.slice(offset + edit.after.length)
+  }
+  const bytes = Buffer.from(text, "utf8")
+  assert.equal(hash(bytes), file.sha256)
+  return [file.path, bytes]
+}))
 const fixtureRoot = mkdtempSync(resolve(tmpdir(), "virtuoso-patch-"))
 const targetRoot = resolve(fixtureRoot, "node_modules/react-virtuoso")
 mkdirSync(resolve(targetRoot, "dist"), { recursive: true })
@@ -91,6 +102,9 @@ for (const file of ["package.json", "LICENSE"])
   )
 const restoreOriginal = () => {
   for (const [path, bytes] of originals) writeFileSync(resolve(targetRoot, path), bytes)
+}
+const restorePrevious = () => {
+  for (const [path, bytes] of previousInstalled) writeFileSync(resolve(targetRoot, path), bytes)
 }
 const snapshot = () =>
   manifest.files.map((file) => hash(readFileSync(resolve(targetRoot, file.path))))
@@ -117,6 +131,51 @@ try {
   )
   assert.deepEqual(snapshot(), targetHashes, "Repeated application is byte-idempotent")
   assert.equal(checkReactVirtuosoScrollCancel({ workspaceRoot: fixtureRoot }).targets, 3)
+  restorePrevious()
+  const previousHashes = snapshot()
+  assert.throws(() => checkReactVirtuosoScrollCancel({ workspaceRoot: fixtureRoot }), /NOT_INSTALLED/)
+  assert.deepEqual(snapshot(), previousHashes, "Check does not upgrade the previous tuple")
+  assert.equal((await installReactVirtuosoScrollCancel({ workspaceRoot: fixtureRoot })).status, "applied")
+  assert.deepEqual(snapshot(), targetHashes, "The fixed previous tuple upgrades to exact new bytes")
+  assert.equal((await installReactVirtuosoScrollCancel({ workspaceRoot: fixtureRoot })).status, "installed")
+  restorePrevious()
+  writeFileSync(resolve(targetRoot, manifest.files[0].path), installed.get(manifest.files[0].path))
+  const previousMixed = snapshot()
+  await assert.rejects(installReactVirtuosoScrollCancel({ workspaceRoot: fixtureRoot }), /MIXED_OR_UNKNOWN_FILES/)
+  assert.deepEqual(snapshot(), previousMixed, "New/previous mixed tuples are not an upgrade")
+  const clonedRoot = resolve(fixtureRoot, "upgrade-installer")
+  for (const name of ["scripts/apply-react-virtuoso-scroll-cancel.mjs", "scripts/langchain-native-patch-text.mjs",
+    "patches/react-virtuoso-scroll-cancel/react-virtuoso-4.18.12.patch"]) {
+    mkdirSync(dirname(resolve(clonedRoot, name)), { recursive: true })
+    writeFileSync(resolve(clonedRoot, name), readFileSync(resolve(repository, name)))
+  }
+  const clonedManifest = resolve(clonedRoot, "patches/react-virtuoso-scroll-cancel/manifest.json")
+  const { installReactVirtuosoScrollCancel: installCloned } = await import(
+    pathToFileURL(resolve(clonedRoot, "scripts/apply-react-virtuoso-scroll-cancel.mjs")).href)
+  for (const mode of ["literal-zero", "literal-many", "literal-overlap", "new-hash", "previous-path", "previous-order", "previous-hash", "previous-edit-count", "previous-empty"]) {
+    restorePrevious()
+    const changed = structuredClone(manifest)
+    if (mode === "literal-zero") changed.previousInstallation.files[0].replacements[0].before = "NOT_PRESENT_OLD_BYTES"
+    if (mode === "literal-many") changed.previousInstallation.files[0].replacements[0].before = "auto"
+    if (mode === "literal-overlap") {
+      const overlapping = Buffer.from("aaaa")
+      writeFileSync(resolve(targetRoot, manifest.files[0].path), overlapping)
+      changed.previousInstallation.files[0].sha256 = hash(overlapping)
+      changed.previousInstallation.files[0].replacements = [{ before: "aaa", after: "b" }]
+      changed.files[0].afterSha256 = hash(Buffer.from("ba"))
+    }
+    if (mode === "new-hash") changed.files[0].afterSha256 = "0".repeat(64)
+    if (mode === "previous-path") changed.previousInstallation.files[0].path = "dist/not-index.mjs"
+    if (mode === "previous-order") changed.previousInstallation.files.reverse()
+    if (mode === "previous-hash") changed.previousInstallation.files[0].sha256 = "invalid"
+    if (mode === "previous-edit-count") changed.previousInstallation.files[0].replacements = Array(4).fill({ before: "a", after: "b" })
+    if (mode === "previous-empty") changed.previousInstallation.files[0].replacements[0].before = ""
+    writeFileSync(clonedManifest, JSON.stringify(changed))
+    const before = snapshot()
+    await assert.rejects(installCloned({ workspaceRoot: fixtureRoot }),
+      mode.startsWith("previous-") ? /MANIFEST_INVALID/ : /PATCH_TARGET_INVALID/)
+    assert.deepEqual(snapshot(), before, `${mode} rejects without touching previous installed bytes`)
+  }
   for (const mode of ["unknown", "mixed"]) {
     restoreOriginal()
     const path = manifest.files[0].path
@@ -131,7 +190,9 @@ try {
     )
     assert.deepEqual(snapshot(), before, `${mode} files must be rejected without partial patching`)
   }
-  restoreOriginal()
+  for (const [origin, restore] of [["upstream", restoreOriginal], ["previous", restorePrevious]]) {
+  restore()
+  const rollbackHashes = snapshot()
   const untouchedBefore = ["index.cjs", "index.d.ts"].map((name) => {
     const info = statSync(resolve(targetRoot, "dist", name))
     return { name, ino: info.ino, mtimeMs: info.mtimeMs }
@@ -179,7 +240,7 @@ try {
     { encoding: "utf8" }
   )
   assert.deepEqual(JSON.parse(faultResult), { injected: true, committed: true, rolledBack: true })
-  assert.deepEqual(snapshot(), originalHashes, "A mid-commit failure restores the committed target")
+  assert.deepEqual(snapshot(), rollbackHashes, `${origin} mid-commit failure restores its actual source bytes`)
   for (const before of untouchedBefore) {
     const after = statSync(resolve(targetRoot, "dist", before.name))
     assert.equal(after.ino, before.ino, `${before.name} was never replaced`)
@@ -195,6 +256,8 @@ try {
     ["react-virtuoso"],
     "Rollback removes the install lock and all temporary/rollback files"
   )
+  }
+  restoreOriginal()
   writeFileSync(
     resolve(fixtureRoot, "package.json"),
     JSON.stringify({ dependencies: { "react-virtuoso": "^4.18.12" } })
@@ -369,6 +432,131 @@ function compensationEngine(format, bytes, { ios = false } = {}) {
   return { timer, moves, send, resize, deviation: () => api.value(streams.deviation) }
 }
 
+function checkImmediateNativeScrollState(format, bytes) {
+  const require = createRequire(import.meta.url)
+  const react = require("react")
+  const queued = [],
+    events = []
+  let synchronousPublications = 0
+  const context = vm.createContext({
+    console,
+    exports: {},
+    module: { exports: {} },
+    setTimeout,
+    clearTimeout,
+    queueMicrotask: (callback) => queued.push(callback),
+    require: (name) =>
+      name === "react"
+        ? {
+            ...react,
+            useRef: (current) => ({ current }),
+            useCallback: (callback) => callback,
+            useEffect: () => {}
+          }
+        : name === "react-dom"
+          ? {
+              ...require(name),
+              flushSync: (callback) => {
+                synchronousPublications++
+                callback()
+              }
+            }
+          : require(name)
+  })
+  const source = bytes.toString() + `\nglobalThis.nativeScrollIo=${format === "esm" ? "io" : "ro"};`
+  vm.runInContext(
+    format === "esm" ? transformSync(source, { format: "cjs", platform: "node" }).code : source,
+    context
+  )
+  const hook = context.nativeScrollIo(
+    (value) => events.push(JSON.parse(JSON.stringify(value))),
+    () => {},
+    "div"
+  )
+  const scroller = () => ({
+    scrollTop: 500,
+    scrollHeight: 3000,
+    offsetHeight: 600,
+    writes: 0,
+    scrollBy(options) {
+      this.writes++
+      if (options.behavior !== "smooth") this.scrollTop += options.top
+    }
+  })
+  const first = scroller()
+  hook.scrollerRef.current = first
+  hook.scrollByCallback({ top: 120, behavior: "auto" })
+  hook.scrollByCallback({ top: 80 })
+  assert.equal(first.scrollTop, 700, `${format}: preserves the native target exactly`)
+  assert.equal(events.length, 0, "No synchronous publication inside a possible React commit")
+  assert.equal(queued.length, 1, "Immediate writes to one scroller coalesce")
+  queued.shift()()
+  assert.deepEqual(events, [{ scrollHeight: 3000, scrollTop: 700, viewportHeight: 600 }])
+  assert.equal(synchronousPublications, 1, "Actual viewport reaches the model before paint")
+  hook.scrollByCallback({ top: 200, behavior: "smooth" })
+  assert.equal(queued.length, 0, "Smooth animation remains browser-event driven")
+  hook.scrollByCallback({ top: 5 })
+  const writes = first.writes
+  first.scrollTop = 321
+  queued.shift()()
+  assert.equal(events.at(-1).scrollTop, 321, "User takeover wins before queued publication")
+  assert.equal(first.writes, writes, "Feedback does not issue another physical scroll")
+  hook.scrollByCallback({ top: 5 })
+  hook.scrollerRef.current = null
+  queued.shift()()
+  assert.equal(events.length, 2, "Unmounted scrollers cannot publish to a retired system")
+  hook.scrollerRef.current = first
+  hook.scrollByCallback({ top: 5 })
+  const replacement = scroller()
+  hook.scrollerRef.current = replacement
+  hook.scrollByCallback({ top: 10 })
+  assert.equal(queued.length, 2)
+  queued.shift()()
+  assert.equal(events.length, 2, "An old queued scroller cannot publish after replacement")
+  queued.shift()()
+  assert.equal(events.at(-1).scrollTop, 510)
+  assert.equal(synchronousPublications, 3)
+  const horizontal = context.nativeScrollIo(
+    (value) => events.push(JSON.parse(JSON.stringify(value))),
+    () => {},
+    "div",
+    undefined,
+    undefined,
+    true
+  )
+  const horizontalTarget = {
+    scrollLeft: 100,
+    scrollWidth: 4000,
+    offsetWidth: 620,
+    ownerDocument: { defaultView: { getComputedStyle: () => ({ direction: "ltr" }) } },
+    scrollBy(options) {
+      this.scrollLeft += options.left
+    }
+  }
+  horizontal.scrollerRef.current = horizontalTarget
+  horizontal.scrollByCallback({ top: 20 })
+  queued.shift()()
+  assert.deepEqual(events.at(-1), { scrollHeight: 4000, scrollTop: 120, viewportHeight: 620 })
+  const windowHook = context.nativeScrollIo(
+    (value) => events.push(JSON.parse(JSON.stringify(value))),
+    () => {},
+    "div"
+  )
+  const windowTarget = {
+    self: null,
+    scrollY: 200,
+    innerHeight: 700,
+    document: { documentElement: { scrollHeight: 5000 } },
+    scrollBy(options) {
+      this.scrollY += options.top
+    }
+  }
+  windowHook.scrollerRef.current = windowTarget
+  windowHook.scrollByCallback({ top: 20 })
+  queued.shift()()
+  assert.deepEqual(events.at(-1), { scrollHeight: 5000, scrollTop: 220, viewportHeight: 700 })
+}
+
 function checkNativeMeasurement(format, bytes) {
   const require = createRequire(import.meta.url)
   const react = require("react")
@@ -511,6 +699,7 @@ for (const [format, path] of [
   ["cjs", "dist/index.cjs"]
 ]) {
   checkNativeMeasurement(format, installed.get(path))
+  checkImmediateNativeScrollState(format, installed.get(path))
   {
     const e = compensationEngine(format, installed.get(path))
     const old = compensationEngine(format, originals.get(path))

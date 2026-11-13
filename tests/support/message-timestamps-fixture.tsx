@@ -44,10 +44,9 @@ const root = createRoot(document.getElementById("root")!)
 const noop = () => {}
 const baseProps: Omit<
   ChatMessageVirtualListProps,
-  "messages" | "visibleMessageIndexes" | "assistantDurationMsById" | "userSendTimeLabelById"
+  "projection" | "visibleMessageIndexes" | "assistantDurationMsById" | "userSendTimeLabelById"
 > = {
   lastUserMessageIndex: 0,
-  contentVersion: 0,
   historyHasMore: false,
   historyPageLoading: false,
   historyRemainingCount: 0,
@@ -90,7 +89,7 @@ function render() {
       <ChatMessageVirtualList
         {...baseProps}
         {...timing}
-        messages={messages}
+        projection={{ messages, contentVersion: 0, structureVersion: 0 }}
         visibleMessageIndexes={messages.map((_, i) => i)}
       />
     )

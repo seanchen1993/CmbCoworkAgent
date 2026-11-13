@@ -301,6 +301,51 @@ async function main() {
     const later = await observation.snapshot()
     assert.deepEqual(later.main?.phases, stopped.main?.phases)
     assert.deepEqual(later.renderer?.phases, stopped.renderer?.phases)
+    await page.locator("[data-radix-scroll-area-viewport]").evaluate(element => {
+      element.innerHTML = '<div data-testid="virtuoso-item-list" style="padding-top:0px;padding-bottom:1200px">' +
+        Array.from({ length: 20 }, (_, index) =>
+          `<div data-index="${40 + index}" data-known-size="42" style="height:42px;overflow:hidden">` +
+          '<div data-chat-message-row><p data-chat-search-text style="margin:0">PRIVATE_RANGE_TEXT</p></div></div>'
+        ).join("") + '</div>'
+      element.scrollTop = 0
+    })
+    observation = await startChatRunningObservation(app, page, { scrollDiagnostics: true })
+    await observation.setPhase("virtual-range")
+    await observation.waitForReady("controlled")
+    let virtualEvidence = await observation.snapshot()
+    assert.deepEqual(virtualEvidence.renderer?.visibilitySamples?.at(-1)?.virtualRange, {
+      itemCount: 20, firstIndex: 40, lastIndex: 59, firstKnownSize: 42, lastKnownSize: 42,
+      paddingTop: 0, paddingBottom: 1200,
+      scrollHeight: await page.locator("[data-radix-scroll-area-viewport]").evaluate(element => element.scrollHeight)
+    })
+    // An offscreen mounted range and an empty mounted range are different failures.
+    await page.locator('[data-testid="virtuoso-item-list"]').evaluate(element => {
+      (element as HTMLElement).style.paddingTop = "1000px"
+    })
+    await observation.setPhase("virtual-range-no-items", true)
+    virtualEvidence = await observation.snapshot()
+    const outside = virtualEvidence.renderer?.postReadyBlankContexts?.find(context =>
+      context.anomaly.phase === "virtual-range")
+    assert(outside)
+    assert.equal(outside.geometry.rows.length, 0)
+    assert.equal(outside.geometry.mountedMessageRowCount, 20)
+    assert.equal(outside.geometry.virtualList?.items.length, 16)
+    assert.equal(outside.geometry.virtualList?.itemLimitReached, true)
+    assert.equal(outside.geometry.virtualList?.visibility, "visible")
+    assert(outside.geometry.virtualList?.items.every(item =>
+      item.hasMessageRow && item.knownSize === 42 && item.rect.height === 42))
+    await page.locator('[data-testid="virtuoso-item-list"]').evaluate(element => { element.innerHTML = "" })
+    await observation.setPhase("after-virtual-empty", true)
+    virtualEvidence = await observation.snapshot()
+    const emptyRange = virtualEvidence.renderer?.postReadyBlankContexts?.find(context =>
+      context.anomaly.phase === "virtual-range-no-items")
+    assert(emptyRange)
+    assert.equal(emptyRange.geometry.mountedMessageRowCount, 0)
+    assert.equal(emptyRange.anomaly.virtualRange?.itemCount, 0)
+    assert.equal(emptyRange.anomaly.virtualRange?.firstIndex, null)
+    assert.equal(emptyRange.geometry.virtualList?.items.length, 0)
+    assert(!JSON.stringify(virtualEvidence).includes("PRIVATE_RANGE_TEXT"))
+    await observation.stop()
     await installChatScrollWriteDiagnostic(page)
     await page.locator("[data-radix-scroll-area-viewport]").evaluate((viewport) => {
       viewport.innerHTML = '<div style="height:1000px">PRIVATE_SCROLL_TEXT</div>'

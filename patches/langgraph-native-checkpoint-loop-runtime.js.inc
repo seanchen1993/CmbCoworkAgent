@@ -14,6 +14,14 @@ const nativeLoopCalls = new WeakMap()
 let nativeLoopBoundary = undefined
 var nativeLoopInitialized = false
 
+// Observe only settlement; the SDK keeps the original checkpoint chain for its later await.
+function observeNativePregelCheckpointChain(promise) {
+  "use strict"
+  void nativeLoopApply(nativeLoopThen, promise, [
+    function checkpointFulfilled() { "use strict"; return undefined },
+    function checkpointRejected() { "use strict"; return undefined }
+  ])
+}
 function nativeLoopGet(map, key) {
   "use strict"
   return nativeLoopApply(nativeLoopWeakGet, map, [key])

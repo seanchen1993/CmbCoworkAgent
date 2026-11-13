@@ -44,6 +44,16 @@ function prepare(workspaceRoot) {
     hash(patch) !== manifest.patchSha256
   )
     fail("MANIFEST_INVALID")
+  const previousFiles = manifest.previousInstallation?.files
+  if (
+    !Array.isArray(previousFiles) || previousFiles.length !== paths.length ||
+    previousFiles.some((file, index) => !file || typeof file !== "object" ||
+      file.path !== paths[index] ||
+      !/^[a-f0-9]{64}$/.test(file.sha256) || !Array.isArray(file.replacements) ||
+      file.replacements.length > 3 || file.replacements.some(edit =>
+        !edit || typeof edit !== "object" || typeof edit.before !== "string" || !edit.before ||
+        typeof edit.after !== "string" || !edit.after))
+  ) fail("MANIFEST_INVALID")
   const pkg = JSON.parse(readEvidence(resolve(workspaceRoot, "package.json")))
   const lock = JSON.parse(readEvidence(resolve(workspaceRoot, "package-lock.json")))
   const locked = lock.packages?.["node_modules/react-virtuoso"]
@@ -74,10 +84,24 @@ function prepare(workspaceRoot) {
     }
   })
   const installed = targets.every((target) => target.state === "after")
-  if (!installed && !targets.every((target) => target.state === "before"))
+  // The unchanged declaration file belongs to both tuples. Compare the whole
+  // previous tuple, rather than accepting a per-file mixture of old and new.
+  const previousInstalled = targets.every((target, index) =>
+    hash(target.bytes) === previousFiles[index].sha256)
+  if (!installed && !previousInstalled && !targets.every((target) => target.state === "before"))
     fail("MIXED_OR_UNKNOWN_FILES")
   if (!installed) {
-    const outputs = applyNativeTextPatch(
+    const outputs = previousInstalled ? new Map(targets.map((target, index) => {
+      let text = target.bytes.toString("utf8")
+      for (const edit of previousFiles[index].replacements) {
+        const offset = text.indexOf(edit.before)
+        if (offset < 0 || text.indexOf(edit.before, offset + 1) >= 0)
+          fail("PATCH_TARGET_INVALID")
+        // Literal slices deliberately avoid String.replace's $ replacement syntax.
+        text = text.slice(0, offset) + edit.after + text.slice(offset + edit.before.length)
+      }
+      return [target.path, Buffer.from(text, "utf8")]
+    })) : applyNativeTextPatch(
       patch.toString("utf8"),
       new Map(targets.map((target) => [target.path, target.bytes]))
     )

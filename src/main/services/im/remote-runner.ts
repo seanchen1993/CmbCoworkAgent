@@ -212,7 +212,7 @@ export interface ImRemoteRunnerDependencies {
   getThreadMessages: typeof getThreadMessages
   updateThread: typeof updateThread
   generateThreadTitle: typeof generateTitle
-  notifyThreadChanged: () => void
+  notifyThreadChanged: typeof notifyRemoteThreadChanged
   createRunId: () => string
   permitRenewIntervalMs: number
   setThreadLifecycle: (event: ImEventRecord, state: ImRemoteThreadLifecycleState) => Promise<void>
@@ -294,12 +294,12 @@ export async function setRemoteThreadLifecycle(
   if (metadata.remoteState === "historical") return
   if (state === "rejected" && metadata.remoteState === "suspended") {
     await flushStrict()
-    notifyRemoteThreadChanged()
+    notifyRemoteThreadChanged(threadId, "metadata", thread)
     return
   }
-  updateThread(threadId, { metadata: JSON.stringify({ ...metadata, remoteState: state }) })
+  const updated = updateThread(threadId, { metadata: JSON.stringify({ ...metadata, remoteState: state }) })
   await flushStrict()
-  notifyRemoteThreadChanged()
+  if (updated) notifyRemoteThreadChanged(threadId, "metadata", updated)
 }
 
 export function createImInboxRemotePolicy(
@@ -464,7 +464,7 @@ export async function executePreparedRemoteStandardTurn(
     cancel: () => localAbortController.abort()
   })
   updateThread(threadId, { status: "busy" })
-  notifyRemoteThreadChanged()
+  notifyRemoteThreadChanged(threadId, "metadata")
   mirrorStandardTurnStreamToRenderer(threadId, { type: "started" })
   const streamConsumer = new StandardTurnStreamConsumer(
     threadId,
@@ -682,7 +682,7 @@ export async function executePreparedRemoteStandardTurn(
             error: terminalError instanceof Error ? terminalError.message : "远程任务执行失败"
           }
     )
-    notifyRemoteThreadChanged()
+    notifyRemoteThreadChanged(threadId, "transcript")
   }
 }
 
@@ -1388,7 +1388,7 @@ export class ImRemoteRunner {
     } catch (error) {
       console.warn("[IM] Failed to synchronize generated remote thread title:", error)
     }
-    this.dependencies.notifyThreadChanged()
+    this.dependencies.notifyThreadChanged(decision.thread.thread_id, "metadata", updated)
   }
 
   private isGeneratedRemoteThreadTitle(title: string | null): boolean {

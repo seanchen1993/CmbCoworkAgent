@@ -272,7 +272,7 @@ async function fixture(controller: AbortController, withTool = false,
 }
 
 describe("actual shared native configured derivation", () => {
-  it("rejects an unowned superclass return after the real model and checkpoint have completed", () =>
+  it("keeps the fixed Shared superclass and its real model and checkpoint result", () =>
     tracked(async controller => {
       const f = await fixture(controller)
       let agent: ChildAgent | undefined, inherited: object | undefined
@@ -314,13 +314,16 @@ describe("actual shared native configured derivation", () => {
           }) }) })
         agent = f.makeAgent([probe])
         const actual = agent
-        await expect(f.execute((_config, invoke) => invoke(actual, "actual original model input")))
-          .rejects.toThrow("NATIVE_SOURCE_INVALID")
-        expect(replaced).toBe(1); expect(delegated).toBe(1)
-        expect(consumed).toBeGreaterThan(0); expect(forged).toBe(1)
+        const output = await f.execute((_config, invoke) =>
+          invoke(actual, "actual original model input"))
+        expect(replaced).toBe(1); expect(delegated).toBe(0)
+        expect(consumed).toBe(0); expect(forged).toBe(0)
+        expect(output.at(-1)).toBeInstanceOf(AIMessage)
         expect(f.provider).toHaveBeenCalledTimes(1)
         expect(f.effects()).toBe(0)
         const saved = await f.verifySaved(f.runtimes[0], 1)
+        expect(output.map(serializeFunctionConversationNativeMessage))
+          .toEqual(saved.native.map(serializeFunctionConversationNativeMessage))
         expect(saved.native.some(message => message.content === "unowned consumer-only AI")).toBe(false)
         expect(saved.rows[0].nativePayload).not.toContain("unowned consumer-only AI")
         expect(() => f.parent.authority.assertLive()).not.toThrow()

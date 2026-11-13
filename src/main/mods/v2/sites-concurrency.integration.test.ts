@@ -195,6 +195,30 @@ it("a callback awaiting native work cannot block protected drawing in another ow
   await acting
 })
 
+it("skips a cancelled text mount at its real queue turn without cancelling the next owner", async () => {
+  const f = await fixture()
+  const sites = f.session.sites
+  const internals = sites as unknown as { pending: number; slots: Map<string, unknown> }
+  const controller = new AbortController()
+  const reason = Error("cancel queued text mount")
+  const cancelled = sites.mount("AssistantMessage", undefined, undefined, controller.signal)
+  const live = sites.mount("AssistantMessage")
+  const settled = Promise.allSettled([cancelled, live])
+  controller.abort(reason)
+  try {
+    expect(internals.pending).toBe(2)
+    expect(internals.slots.size).toBe(0)
+    await expect(cancelled).rejects.toBe(reason)
+    const owner = await live
+    expect([...internals.slots.keys()]).toEqual([owner])
+    assertSafe(await sites.render(owner, message))
+    await sites.unmount(owner)
+    expect(internals.slots.size).toBe(0)
+  } finally {
+    await settled
+  }
+})
+
 it("bounds pending owner work and drops only physically settled exact queue tails", async () => {
   const f = await fixture()
   const owner = await f.session.sites.mount("AbovePrompt")

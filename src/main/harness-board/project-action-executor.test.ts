@@ -611,10 +611,13 @@ it("runs checks with native selected configuration and recaptures it for origina
   expect(f.calls).toEqual(["first", "disposed"])
   const operation = { ...f.context.operation, execution: { threadId: f.root,
     terminal: { outcome: "success" as const, code: "project_actions_complete", settledAt: 1 } } }
-  const evidence = () => readHostActionCheckEvidence(f.context.project, f.context.ticket, operation, f.root)
+  const readRoot = vi.fn(() => f.root)
+  const evidence = () => readHostActionCheckEvidence(f.context.project, f.context.ticket, operation, readRoot)
   expect(evidence().get("output-check")?.result).toBe("passed")
+  expect(readRoot).toHaveBeenCalledTimes(1)
   audience = "new native UI value"
   expect(() => evidence()).toThrow("PROJECT_ACTION_NATIVE_FACTS_SCOPE_CHANGED")
+  expect(readRoot).toHaveBeenCalledTimes(2)
 })
 
 it("rejects a model supplied reserved configuration field before Skill or check execution", async () => {

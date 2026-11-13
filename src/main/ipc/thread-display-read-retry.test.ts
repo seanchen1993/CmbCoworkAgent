@@ -10,6 +10,7 @@ import {
 } from "./thread-display-read-retry"
 import { ForegroundHydrationGeneration } from "../../renderer/src/lib/thread-hydration"
 import { createThreadMessageWindowIntentCoordinator } from "../../renderer/src/lib/thread-message-window-intent"
+import type { ThreadTranscriptSourceScope } from "../../shared/thread-transcript-source-scope"
 
 // Exercise the actual IPC handler and capture function without loading Electron or a worker bundle.
 const source = ts.createSourceFile(
@@ -71,7 +72,7 @@ type Handler = (
   }
 ) => Promise<Page>
 
-function fixture() {
+function fixture(sourceScope?: ThreadTranscriptSourceScope) {
   const sender = new Sender(),
     event = { sender }
   let database = {},
@@ -125,7 +126,12 @@ function fixture() {
       return { attempt, messages: [`verified-page-${attempt}`] }
     }
   )
+  const captureScope = vi.fn((_threadId: string, current: ReadScope) => {
+    current.assertCurrent()
+    return sourceScope
+  })
   const handler = runInNewContext(handlerCode, {
+    captureThreadTranscriptSourceScope: captureScope,
     captureThreadDisplayRead: (owner: { sender: Sender }, id: string) => {
       const scope = capture(owner, id)
       scopes.push(scope)
@@ -146,6 +152,7 @@ function fixture() {
     accepted,
     worker,
     verify,
+    captureScope,
     handler,
     workerUnavailable,
     warn,
@@ -173,6 +180,18 @@ function fixture() {
 }
 
 describe("thread message page metadata invalidation", () => {
+  it("forwards the source header from the actual captured page read", async () => {
+    const sourceScope: ThreadTranscriptSourceScope = {
+      threadId: "thread", incarnation: { token: "original", legacyCreatedAt: 1 },
+      workspacePath: "/project"
+    }
+    const f = fixture(sourceScope)
+    await expect(f.run()).resolves.toEqual({ attempt: 1,
+      messages: ["verified-page-1"], sourceScope })
+    expect(f.captureScope).toHaveBeenCalledExactlyOnceWith("thread", f.scopes[0])
+    expect(f.accepted).toEqual([{ attempt: 1 }])
+    expect(f.sender.eventNames()).toEqual([])
+  })
   it("returns the original verified page when its source is unchanged", async () => {
     const f = fixture()
     await expect(f.run()).resolves.toEqual({ attempt: 1, messages: ["verified-page-1"] })

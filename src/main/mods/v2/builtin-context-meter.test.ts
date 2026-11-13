@@ -5,6 +5,7 @@ import { afterEach, expect, it, vi } from "vitest"
 import type { ClawProfile } from "../../../shared/mods/claw"
 import type { ModJson } from "../../../shared/mods/types"
 import type { FunctionUiElement } from "../../../shared/mods/v2/ui"
+import { DEFAULT_COMPLETION_POLICY } from "../../../shared/mods/v2/completion-policy"
 import { ClawStore } from "../claw-store"
 import { ModControlStore } from "../control-store"
 import type { ModPluginSource } from "../manager"
@@ -29,7 +30,10 @@ const drawnText = (tree: FunctionUiElement | string): string => {
   return (tree.children ?? []).map(drawnText).join("")
 }
 
-async function fixture() {
+async function fixture(
+  scopeHost: Pick<ConstructorParameters<typeof FunctionModsManager>[1],
+    "clawApplicable" | "clawScope"> = {}
+) {
   const root = await mkdtemp(join(tmpdir(), "mods-builtin-meter-"))
   const store = new ModControlStore(join(root, "control.sqlite"))
   const claws = new ClawStore(store)
@@ -54,6 +58,7 @@ async function fixture() {
       plugins: () => sources,
       enabled: () => state.enabled,
       clawApplicable: (threadId) => threadId !== "harness",
+      ...scopeHost,
       readSession,
       publish: async (_workspace, value) => value,
       changed
@@ -100,6 +105,57 @@ async function fixture() {
   }
   return { root, manager, store, claws, state, readSession, changed, load, guests, bind, add }
 }
+
+it("reads the scope once for desktop Claw selection and mandatory completion policy", async () => {
+  const identity = JSON.stringify(["thread", "first-incarnation"])
+  const clawScope = vi.fn((_threadId: string): { threadId: string; identity: string } | null =>
+    ({ threadId: "thread", identity }))
+  const f = await fixture({ clawApplicable: undefined, clawScope })
+  f.claws.apply(f.root, identity, profile(), f.claws.read(f.root).revision)
+
+  expect(f.manager.clawSelection(f.root, "thread")).toEqual(profile())
+  expect(clawScope).toHaveBeenCalledExactlyOnceWith("thread")
+  clawScope.mockReturnValueOnce({
+    threadId: "thread", identity: JSON.stringify(["thread", "replacement-incarnation"])
+  }).mockReturnValueOnce(null)
+  expect(f.manager.clawSelection(f.root, "thread")).toBeNull()
+  expect(f.manager.clawSelection(f.root, "thread")).toBeNull()
+  expect(clawScope).toHaveBeenCalledTimes(3)
+
+  f.store.grant(f.root, "function:policy", "actual-digest", true)
+  clawScope.mockClear()
+  expect(() => f.manager.setCompletionPolicy(f.root, "thread", "policy", {
+    ...DEFAULT_COMPLETION_POLICY, mode: "check"
+  })).toThrow("请先将此能力加入当前 Claw 组合")
+  expect(clawScope).toHaveBeenCalledExactlyOnceWith("thread")
+})
+
+it("keeps the explicit Claw denial and each caller's original scope check order", async () => {
+  const calls: string[] = []
+  const identity = JSON.stringify(["thread", "incarnation"])
+  const f = await fixture({
+    clawApplicable: () => { calls.push("applicable"); return false },
+    clawScope: () => { calls.push("scope"); return { threadId: "thread", identity } }
+  })
+  f.claws.apply(f.root, identity, profile(), f.claws.read(f.root).revision)
+  expect(f.manager.clawSelection(f.root, "thread")).toBeNull()
+  expect(calls).toEqual(["applicable"])
+
+  calls.length = 0
+  f.store.grant(f.root, "function:policy", "actual-digest", true)
+  f.manager.setCompletionPolicy(f.root, "thread", "policy", DEFAULT_COMPLETION_POLICY)
+  expect(calls).toEqual(["scope", "applicable"])
+})
+
+it.each([true, undefined])("denies Claw without a usable scope (explicit adapter: %s)", async (
+  explicit
+) => {
+  const f = await fixture(explicit === undefined ? { clawApplicable: undefined } : {
+    clawApplicable: () => explicit, clawScope: () => null
+  })
+  f.bind(profile())
+  expect(f.manager.clawSelection(f.root, "thread")).toBeNull()
+})
 
 it("defaults off and discovers an opted-in builtin without allocating a guest or a fake grant", async () => {
   const f = await fixture()

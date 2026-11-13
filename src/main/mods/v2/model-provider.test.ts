@@ -15,6 +15,8 @@ import type { ResolvedModelConfig } from "../../models/registry"
 import type { FunctionModelForkSnapshot } from "./model-operations"
 import { prepareFunctionModelPrompt } from "./model-prompt"
 import { withIndependentPromptFrame } from "./model-prompt-frame"
+import { FUNCTION_MODEL_TEXT_BYTE_LIMIT, validateFunctionModelText } from "./model-sdk"
+import { ModFunctionError } from "../../../shared/mods/v2/contracts"
 
 const cleanups: Array<() => Promise<void>> = []
 beforeAll(async () => {
@@ -26,7 +28,8 @@ afterEach(async () => {
   for (const cleanup of cleanups.splice(0)) await cleanup()
 })
 
-async function endpoint(mode: "text" | "stall" | "error" | "tool" | "cache" | "empty" = "text") {
+async function endpoint(mode: "text" | "stall" | "error" | "tool" | "cache" | "empty" = "text",
+  parts?: readonly (string | null)[]) {
   const bodies: Array<Record<string, unknown>> = []
   let closed = false
   const server = createServer(async (request, response) => {
@@ -44,6 +47,17 @@ async function endpoint(mode: "text" | "stall" | "error" | "tool" | "cache" | "e
     response.writeHead(200, { "content-type": "text/event-stream" })
     response.flushHeaders()
     const event = (value: unknown) => response.write(`data: ${JSON.stringify(value)}\n\n`)
+    if (parts) {
+      for (const content of parts) event({
+        id: "fixture", object: "chat.completion.chunk", created: 1, model: "fixture",
+        choices: content === null ? [] : [{ index: 0, delta: { content }, finish_reason: null }],
+        ...(content === null ? { usage: { prompt_tokens: 12, completion_tokens: 3, total_tokens: 15 } } : {})
+      })
+      event({ id: "fixture", object: "chat.completion.chunk", created: 1, model: "fixture",
+        choices: [{ index: 0, delta: {}, finish_reason: "stop" }] })
+      response.end("data: [DONE]\n\n")
+      return
+    }
     event({
       id: "fixture",
       object: "chat.completion.chunk",
@@ -437,4 +451,98 @@ it("rejects oversized composed input before a prepared provider can be called", 
     new AbortController().signal, () => {}, async () => {}))
   expect(() => prepared.assertBudget(256)).toThrow("MODS_MODEL_INPUT_BUDGET")
   expect(f.bodies).toHaveLength(0)
+})
+
+async function withActualProviderChunks(chunks: readonly object[],
+  check: (invoke: () => ReturnType<typeof invokeFunctionModel>) => Promise<void>) {
+  const f = await endpoint(), runtime = await import("../../agent/runtime")
+  const original = runtime.getModelInstance, restores: Array<() => void> = []
+  let drained = 0
+  const factory = vi.spyOn(runtime, "getModelInstance").mockImplementation((...args) => {
+    const model = original(...args), previous = Object.getOwnPropertyDescriptor(model, "stream")
+    restores.push(() => {
+      if (previous) Object.defineProperty(model, "stream", previous)
+      else Reflect.deleteProperty(model, "stream")
+    })
+    Object.defineProperty(model, "stream", { configurable: true, writable: true,
+      value: async function* () {
+        try { for (const chunk of chunks) yield chunk }
+        finally { drained++ }
+      } })
+    return model
+  })
+  try {
+    await check(() => invokeFunctionModel(f.config, { model: "fixture", prompt: "controlled chunks" },
+      new AbortController().signal))
+    expect(factory).toHaveBeenCalledTimes(1)
+    expect(drained).toBe(1)
+    expect(f.bodies).toHaveLength(0)
+  } finally {
+    factory.mockRestore()
+    for (const restore of restores.reverse()) restore()
+  }
+}
+
+it.each([64000, 64001])("keeps the %i-byte limit over many real HTTP SSE chunks", async size => {
+  expect(FUNCTION_MODEL_TEXT_BYTE_LIMIT).toBe(64000)
+  const parts = Array.from({ length: 250 }, () => "x".repeat(256))
+  if (size === 64001) parts.push("x")
+  const f = await endpoint("text", parts)
+  const outcome = invokeFunctionModel(f.config, { model: "fixture", prompt: "many small chunks" },
+    new AbortController().signal)
+  if (size === 64000) expect((await outcome).text).toBe("x".repeat(size))
+  else await expect(outcome).rejects.toThrow("MODS_MODEL_RESULT_LIMIT")
+  expect(f.bodies).toHaveLength(1)
+})
+
+it.each([
+  { name: "pair across empty usage", parts: ["x".repeat(63996), "\ud83d", null, "\ude42"] },
+  { name: "overflowing pair across empty usage", parts: ["x".repeat(63997), "\ud83d", null, "\ude42"] },
+  { name: "lone high surrogate", parts: ["x".repeat(63997), "\ud800", null] },
+  { name: "lone low surrogate", parts: ["x".repeat(63997), "\udfff"] }
+])("matches whole-string UTF8 validation for real SSE $name", async ({ parts }) => {
+  const f = await endpoint("text", parts)
+  let expected = ""
+  for (const part of parts) if (part !== null) expected += part
+  const outcome = invokeFunctionModel(f.config, { model: "fixture", prompt: "UTF8 boundary" },
+    new AbortController().signal)
+  if (Buffer.byteLength(expected, "utf8") <= 64000) {
+    expect(() => validateFunctionModelText(expected)).not.toThrow()
+    expect((await outcome).text).toBe(expected)
+  } else {
+    expect(() => validateFunctionModelText(expected)).toThrow("MODS_MODEL_RESULT_LIMIT")
+    await expect(outcome).rejects.toThrow("MODS_MODEL_RESULT_LIMIT")
+  }
+  expect(f.bodies).toHaveLength(1)
+})
+
+it.each(["string", "blocks"] as const)(
+  "preserves actual provider %s getter order and default string-addition coercion", async kind => {
+    const reads: string[] = []
+    const value = { valueOf() { reads.push("valueOf"); return "coerced" },
+      toString() { reads.push("toString"); return "wrong string hint" } }
+    let textReads = 0
+    const block = { get type() { reads.push("type"); return "text" },
+      get text() { reads.push("text"); return ++textReads === 1 ? "narrowed" : value } }
+    let contentReads = 0
+    const chunk = { get content() {
+      reads.push("content")
+      return kind === "blocks" ? [block] : ++contentReads === 1 ? "narrowed" : value
+    } }
+    await withActualProviderChunks([chunk], async invoke => {
+      expect((await invoke()).text).toBe("coerced")
+      expect(reads).toEqual(kind === "string" ? ["content", "content", "valueOf"]
+        : ["content", "content", "type", "text", "text", "valueOf"])
+    })
+  })
+
+it("preserves a later block getter error over an earlier oversized addition in the same chunk", async () => {
+  const failure = new ModFunctionError("ACTUAL_LATE_TEXT_GETTER")
+  let getters = 0
+  const late = { type: "text", get text(): string { getters++; throw failure } }
+  await withActualProviderChunks([{ content: "x".repeat(63999) },
+    { content: [{ type: "text", text: "xx" }, late] }], async invoke => {
+    await expect(invoke()).rejects.toBe(failure)
+    expect(getters).toBe(1)
+  })
 })

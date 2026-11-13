@@ -68,6 +68,8 @@ it.each(["call", "module-call"] as const)(
     expect(host).toHaveBeenCalledTimes(1)
     client.stop()
     expect(client.stats.calls).toBe(0)
+    expect(client.diagnostics.at(-1)).toMatchObject({ phase: "draining", generation: 0,
+      hostCalls: 1, draining: 1 })
     f.child.emit("exit", 0)
     await lifetime.disposed
     await tick()
@@ -75,6 +77,8 @@ it.each(["call", "module-call"] as const)(
     finish()
     await pool.whenReleased(lease)
     expect(pool.stats.handles).toBe(0)
+    expect(client.diagnostics.at(-1)).toMatchObject({ phase: "host-settled", generation: 0,
+      hostCalls: 0, draining: 0 })
     expect(f.messages.some(row => row.type === "reply")).toBe(false)
     if (pending) await expect(pending).rejects.toMatchObject({ code: "MODS_HOST_STOPPED" })
   }
@@ -97,6 +101,8 @@ it("settles an old physical receipt after replacement without stopping its new c
   expect(() => newLife.assertCurrent()).not.toThrow()
   await expect(newGuest.matches("0", {})).resolves.toBe(true)
   expect(fresh.child.kill).not.toHaveBeenCalled()
+  expect(client.diagnostics.at(-1)).toMatchObject({ phase: "child-exit", generation: 0, exitCode: 0 })
+  expect(client.diagnostics.some(event => event.phase === "child-start" && event.generation === 1)).toBe(true)
 })
 
 it("uses exact loaded guest identity and immutable registrations across a native activity alias", async () => {

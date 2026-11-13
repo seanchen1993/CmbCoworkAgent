@@ -269,8 +269,7 @@ async function main() {
           empty:()=>setMessages([]),restore:()=>setMessages(make(2000,80)),
           snapshot:()=>({...counters,range:range.current})};
         return <ScrollArea ref={root} type='always' style={{height:600,width:650}}>
-          <ChatMessageVirtualList messages={messages} visibleMessageIndexes={messages.map((_,i)=>i)} lastUserMessageIndex={messages.length-2}
-            contentVersion={messages.length} historyHasMore={false} historyPageLoading={false} historyRemainingCount={0}
+          <ChatMessageVirtualList projection={{ messages, contentVersion: messages.length, structureVersion: messages.length }} visibleMessageIndexes={messages.map((_,i)=>i)} lastUserMessageIndex={messages.length-2} historyHasMore={false} historyPageLoading={false} historyRemainingCount={0}
             onLoadEarlierHistoryPage={noop} historyGapBeforeMessageId={null} canLoadReleasedHistory={false}
             onLoadReleasedHistoryWindow={noop} onRestoreLatestHistoryWindow={noop} hookLoggingEnabled={false}
             hookLogBucketByTurnId={maps} detachedHookLogBuckets={[]} contentMessageRefs={refs} setMessageRef={()=>noop}

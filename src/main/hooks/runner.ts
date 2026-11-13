@@ -51,6 +51,7 @@ import { assertStageRecoveryHookSupported } from "../harness-board/project-runti
 import { prepareStageRecoveryCommand } from "./stage-recovery-command"
 import { beginStageRecoveryHook, type StageRecoveryHookSettlement } from "./stage-recovery-journal"
 import { withWorkspaceExecution } from "../agent/file-operation-lock"
+import { resolveHarnessExecutionStage } from "../services/harness-stage-attribution"
 
 /**
  * Resolve the effective timeout (ms) for a hook by consulting the handler-type
@@ -67,11 +68,7 @@ const CHARDET_CONFIDENCE_THRESHOLD = 0.8
 const CHARDET_SAMPLE_BYTES = 8_192
 const MAX_HOOK_ENV_JSON_CHARS = 4_096
 const ONCE_HOOK_KEY_SEPARATOR = "\u0000"
-const INVOCATION_CONTEXT_ENV_KEYS = new Set([
-  "AGENT_ID",
-  "WORKSPACE_PATH",
-  "CLAUDE_PROJECT_DIR"
-])
+const INVOCATION_CONTEXT_ENV_KEYS = new Set(["AGENT_ID", "WORKSPACE_PATH", "CLAUDE_PROJECT_DIR"])
 const DEFAULT_USER_CONTEXT_FIELDS = [
   "sap_id",
   "yst_id",
@@ -224,7 +221,8 @@ export interface HookContext {
   harnessAdapterName?: string
   harnessAdapterVersion?: string
   /**
-   * Harness workflow node name/status current at turn start. Exposed to hooks as
+   * Harness workflow node name/status, refreshed immediately before each hook
+   * executes when project/feature identity is available. Exposed to hooks as
    * `HARNESS_NODE_NAME` / `HARNESS_NODE_STATUS` env and `harness_node_name` /
    * `harness_node_status` in stdin JSON.
    */
@@ -481,12 +479,20 @@ function addHookUserContextEnv(env: Record<string, string>, hook: HookConfig): v
   }
 }
 
-function clearInheritedInvocationContextEnv(env: Record<string, string>): void {
+function clearInheritedInvocationContextEnv(
+  env: Record<string, string>,
+  projectFeature = false
+): void {
   for (const key of Object.keys(env)) {
     // Environment names are case-insensitive on Windows. POSIX permits distinct
     // mixed-case names, so retain its exact-key behaviour.
     const comparableKey = process.platform === "win32" ? key.toUpperCase() : key
-    if (INVOCATION_CONTEXT_ENV_KEYS.has(comparableKey)) delete env[key]
+    if (
+      INVOCATION_CONTEXT_ENV_KEYS.has(comparableKey) ||
+      (projectFeature &&
+        (comparableKey === "HARNESS_NODE_NAME" || comparableKey === "HARNESS_NODE_STATUS"))
+    )
+      delete env[key]
   }
 }
 
@@ -501,7 +507,7 @@ function buildHookEnv(
   // These keys describe the current hook invocation, not the Electron host.
   // Remove inherited values first so a parent process cannot leak stale context
   // into a hook whose invocation does not provide the corresponding field.
-  clearInheritedInvocationContextEnv(env)
+  clearInheritedInvocationContextEnv(env, Boolean(context.harnessProjectId && context.featureId))
   if (currentRuntimePluginSource()?.mode === "legacy") env.PYTHONDONTWRITEBYTECODE = "1"
   env.HOOK_EVENT = event
   if (context.toolName) env.TOOL_NAME = context.toolName
@@ -790,7 +796,8 @@ async function executeCommandHook(
   env: Record<string, string>,
   stdinPayload: string,
   cwd: string,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  beforeDispatch?: () => void
 ): Promise<HookResult> {
   signal?.throwIfAborted()
   const originalRoots = [env.PLUGIN_ROOT, env.SKILL_ROOT].filter(
@@ -842,7 +849,10 @@ async function executeCommandHook(
       windowsShellCommand,
       stdin: stdinPayload,
       commandCwd: cwd,
-      guard: assertCurrentRuntimePluginSourceContent,
+      guard: () => {
+        assertCurrentRuntimePluginSourceContent()
+        beforeDispatch?.()
+      },
       signal
     })
     cmd = plan.executable
@@ -851,6 +861,15 @@ async function executeCommandHook(
     env = plan.env
     recoveryCleanup = plan.cleanup
     windowsShellCommand = undefined
+  }
+  // Recovery preparation can await. Revalidate at the actual process boundary,
+  // outside the interpreter-error fallback so revocation remains a hard stop.
+  try {
+    assertCurrentRuntimePluginSourceContent()
+    beforeDispatch?.()
+  } catch (error) {
+    await recoveryCleanup?.()
+    throw error
   }
   const stdout: Buffer[] = [], stderr: Buffer[] = []
   let outputBytes = 0, outputTruncated = false, timedOut = false
@@ -1331,7 +1350,6 @@ function accountingObserverFailure(error: unknown): HookResult | undefined {
  */
 async function executeHook(
   hook: HookConfig,
-  env: Record<string, string>,
   context: HookContext,
   event: HookEvent,
   onLateHookResult?: HookResultCallback,
@@ -1380,7 +1398,7 @@ async function executeHook(
       oncePending.add(onceKey)
       oncePendingTokens.set(onceKey, pendingToken!)
     }
-    void executeSyncHook(hook, env, context, event, undefined, undefined, accounting)
+    void executeSyncHook(hook, context, event, undefined, undefined, accounting)
       .then((late) => {
         clearPending()
         const finalLate: HookResult = tagOnceResult(
@@ -1426,7 +1444,7 @@ async function executeHook(
     oncePending.add(onceKey)
     oncePendingTokens.set(onceKey, pendingToken!)
   }
-  const execution = executeSyncHook(hook, env, context, event, undefined, undefined, accounting).then((result) =>
+  const execution = executeSyncHook(hook, context, event, undefined, undefined, accounting).then((result) =>
     onceKey ? tagOnceResult(result, getOnceSessionId(context), onceGeneration) : result
   )
   if (!onceKey) return execution
@@ -1442,7 +1460,6 @@ async function executeHook(
 
 async function executeSyncHook(
   hook: HookConfig,
-  env: Record<string, string>,
   context: HookContext,
   event: HookEvent,
   requiredBusinessCheck?: () => void,
@@ -1466,41 +1483,65 @@ async function executeSyncHook(
     if (diagnostic) value.cwd = getCommandCwd(context)
     return value
   }
+  const synchronous =
+    hook.async !== true ||
+    event === "Setup" ||
+    (context.hookSourceType === "workspace" && context.forceSyncWorkspaceHooks)
+  const signal = synchronous ? context.abortSignal : undefined
+  const refreshStage = async (): Promise<void> => {
+    // A feature binding is the runtime's project-mode identity. Ordinary chats
+    // and project sessions without a feature never enter the stage lookup path.
+    if (!context.harnessProjectId || !context.featureId) return
+    signal?.throwIfAborted()
+    const stage = await resolveHarnessExecutionStage(context.harnessProjectId, context.featureId)
+    signal?.throwIfAborted()
+    if (stage) {
+      // enrichContextFromHook creates a private object for every invocation.
+      // Keep env, stdin, diagnostics and telemetry on that same stage snapshot.
+      context.harnessNodeName = stage.nodeName ?? undefined
+      context.harnessNodeStatus = stage.nodeStatus ?? undefined
+    }
+  }
   if (hookType === "prompt") {
+    await refreshStage()
+    assertCurrentRuntimePluginSourceContent()
+    requiredAuthorityCheck?.()
     if (diagnostic) {
       const policy = hook.prompt?.trim()
       if (policy) stdinPayload = buildPromptHookUserMessage(event, policy, context, hook)
     }
     result = await executePromptHook(hook, context, event, accounting)
   } else if (hookType === "http") {
+    await refreshStage()
+    assertCurrentRuntimePluginSourceContent()
+    requiredAuthorityCheck?.()
     const builtPayload = buildHookStdinPayload(event, context, hook)
     if (diagnostic) stdinPayload = builtPayload
     result = await executeHttpHook(hook, builtPayload, getEffectiveTimeout(hook))
   } else {
-    const builtPayload = buildHookStdinPayload(event, context, hook)
-    if (diagnostic) stdinPayload = builtPayload
     const pluginRoot = (hook as ScopedHook).pluginRoot ?? context.pluginRoot
-    if (pluginRoot && (await suppressCompositionPythonCache(pluginRoot)))
-      env = { ...env, PYTHONDONTWRITEBYTECODE: "1" }
-    // The workspace queue may await. Check authority here and retained bytes once inside
-    // runCommand, after admission and immediately before preparing the actual command.
+    const suppressPythonCache = !!requiredBusinessCheck ||
+      !!pluginRoot && await suppressCompositionPythonCache(pluginRoot)
     currentRuntimePluginSource()
     const signals = [context.signal, context.abortSignal, getModCallContext()?.signal].filter(
       (signal): signal is AbortSignal => signal !== undefined
     )
     const commandSignal = signals.length ? AbortSignal.any(signals) : undefined
-    const runCommand = () => {
+    const runCommand = async (): Promise<HookResult> => {
+      await refreshStage()
+      commandSignal?.throwIfAborted()
+      const builtPayload = buildHookStdinPayload(event, context, hook)
+      if (diagnostic) stdinPayload = builtPayload
+      const env = buildHookEnv(event, context, hook)
+      if (suppressPythonCache) env.PYTHONDONTWRITEBYTECODE = "1"
       assertCurrentRuntimePluginSourceContent()
+      requiredAuthorityCheck?.()
       return executeCommandHook(hook, env, builtPayload, getCommandCwd(context),
-      commandSignal)
+        commandSignal, requiredAuthorityCheck)
     }
     // Synchronous formatters and other command hooks may read/modify any file.
     // Coordinate their actual process lifetime with tool IO, without acquiring
     // the runtime gate again. Detached hooks retain their existing async policy.
-    const synchronous =
-      hook.async !== true ||
-      event === "Setup" ||
-      (context.hookSourceType === "workspace" && context.forceSyncWorkspaceHooks)
     result =
       context.workspacePath && synchronous
         ? await withWorkspaceExecution(
@@ -2156,7 +2197,6 @@ export async function runHooks(
     try {
       checked = await executeSyncHook(
         { ...hook, fallback: "block" },
-        { ...buildHookEnv(event, hookContext, hook), PYTHONDONTWRITEBYTECODE: "1" },
         hookContext, event, () => {
           assertCurrent()
           assertCurrentRuntimePluginSourceContent()
@@ -2242,7 +2282,6 @@ async function runLegacyHooks(
       let result = applyForcedOutcome(
         await executeHook(
           hook,
-          buildHookEnv(event, hookContext, hook),
           hookContext,
           event,
           onHookResult, accounting
@@ -2405,7 +2444,6 @@ async function runLegacyHooks(
       const result = applyForcedOutcome(
         await executeHook(
           hook,
-          buildHookEnv(event, hookContext, hook),
           hookContext,
           event,
           onHookResult, accounting
@@ -2453,7 +2491,6 @@ async function runLegacyHooks(
       const result = applyForcedOutcome(
         await executeHook(
           hook,
-          buildHookEnv(event, hookContext, hook),
           hookContext,
           event,
           onHookResult, accounting
@@ -2525,7 +2562,6 @@ async function runLegacyHooks(
       const result = applyForcedOutcome(
         await executeHook(
           hook,
-          buildHookEnv(event, hookContext, hook),
           hookContext,
           event,
           onHookResult, accounting
@@ -2598,7 +2634,6 @@ async function runLegacyHooks(
       const result = applyForcedOutcome(
         await executeHook(
           hook,
-          buildHookEnv(event, hookContext, hook),
           hookContext,
           event,
           onHookResult, accounting
@@ -2668,7 +2703,6 @@ async function runLegacyHooks(
       try {
         const rawResult = await executeHook(
           hook,
-          buildHookEnv(event, hookContext, hook),
           hookContext,
           event,
           onHookResult, accounting
@@ -2762,7 +2796,7 @@ async function runLegacyHooks(
   for (const hook of matched) {
     const hookContext = enrichContextFromHook(hook, context)
     if (shouldSkipOnceHook(hook, event, hookContext)) continue
-    void executeHook(hook, buildHookEnv(event, hookContext, hook), hookContext, event, onHookResult, accounting)
+    void executeHook(hook, hookContext, event, onHookResult, accounting)
       .then((rawResult) => {
         const result = applyForcedOutcome(rawResult, hook)
         console.log(

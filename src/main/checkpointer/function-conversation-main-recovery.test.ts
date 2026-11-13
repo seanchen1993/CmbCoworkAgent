@@ -6,7 +6,8 @@ import { afterEach, describe, expect, it } from "vitest"
 import { openNativeSqliteDatabase, type NativeSqliteAdapter } from "../db/native-sqlite-adapter"
 import { FunctionConversationStore } from "../db/function-conversation-store"
 import { functionConversationState } from "../agent/mods-conversation"
-import { createMainFunctionConversationRecoveryCapture, nativeFunctionConversationWorkspace } from
+import { createMainFunctionConversationRecoveryCapture, createMainFunctionConversationRecoveryDecision,
+  requireMainFunctionConversationRecovery, nativeFunctionConversationWorkspace } from
   "./function-conversation-main-recovery"
 
 const cleanups: Array<() => void> = []
@@ -31,16 +32,18 @@ function fixture(createMain = true) {
   }
   const target = createMain ? store.ensureMain({ threadId: "thread", workspace: directory,
     incarnation: { token, legacyCreatedAt: 1000 }, checkpointNamespace: "" }, () => undefined) : undefined
-  const capture = createMainFunctionConversationRecoveryCapture({ database, store,
+  const host = { database, store,
     threadId: "thread", workspace: directory, originalThread, signal: signal.signal,
     currentDatabase: () => currentDatabase, readThread,
-    assertCurrent: () => { if (!live) throw Error("Original Saver scope retired") } })
+    assertCurrent: () => { if (!live) throw Error("Original Saver scope retired") } }
+  const capture = createMainFunctionConversationRecoveryCapture(host)
+  const decide = createMainFunctionConversationRecoveryDecision(host)
   const config = { configurable: { thread_id: "thread", checkpoint_ns: "",
     checkpoint_id: "original-exact-checkpoint" } }
   const state = target ? functionConversationState(target) : { version: 1 as const,
     logicalSessionId: "fake-session", conversationId: "fake-conversation", branchId: "fake-branch",
     frontier: 0 }
-  return { database, target, capture, config, state, signal, directory,
+  return { database, target, capture, decide, config, state, signal, directory,
     retire: () => { live = false }, replaceDatabase: () => {
       const replacement = openNativeSqliteDatabase(join(directory, "replacement.sqlite")).database
       cleanups.push(() => replacement.close())
@@ -99,4 +102,24 @@ describe("original main recovery host admission", () => {
       expect(nativeFunctionConversationWorkspace(metadata)).toBeUndefined()
     }
   )
+})
+
+
+it("explains a missing original root without inventing one or minting a recovery proof", () => {
+  const f = fixture(false)
+  const before = f.database.exec("SELECT COUNT(*) FROM function_logical_sessions")[0].values[0][0]
+  const decision = f.decide(f.config, f.state)
+  expect(decision).toEqual({ kind: "evidence-required", stage: "main-root",
+    code: "MODS_CONVERSATION_RECOVERY_REQUIRED" })
+  expect(Object.hasOwn(decision, "binding")).toBe(false)
+  expect(() => requireMainFunctionConversationRecovery(decision)).toThrow("MODS_CONVERSATION_RECOVERY_REQUIRED")
+  expect(f.database.exec("SELECT COUNT(*) FROM function_logical_sessions")[0].values[0][0]).toBe(before)
+})
+
+it("rechecks the original scope when a retained decision is used after an await", () => {
+  const f = fixture(), decision = f.decide(f.config, f.state)
+  expect(decision.kind).toBe("native-scope")
+  expect(requireMainFunctionConversationRecovery(decision).target).toEqual(f.target)
+  f.retire()
+  expect(() => requireMainFunctionConversationRecovery(decision)).toThrow("Original Saver scope retired")
 })

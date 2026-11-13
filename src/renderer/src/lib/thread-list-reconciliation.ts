@@ -1,4 +1,5 @@
 import type { Thread } from "@/types"
+import { captureThreadDirectoryIncarnation, sameThreadDirectoryIncarnation } from "./thread-directory-mutation-scope"
 
 function timestamp(value: Date): number {
   const time = value instanceof Date ? value.getTime() : new Date(value).getTime()
@@ -11,6 +12,8 @@ export function canReuseThreadSummary(previous: Thread, next: Thread): boolean {
   // metadata object again in the renderer after each focus refresh.
   return (
     previous.thread_id === next.thread_id &&
+    sameThreadDirectoryIncarnation(captureThreadDirectoryIncarnation(previous),
+      captureThreadDirectoryIncarnation(next)) &&
     timestamp(previous.created_at) === timestamp(next.created_at) &&
     timestamp(previous.updated_at) === timestamp(next.updated_at) &&
     previous.status === next.status &&

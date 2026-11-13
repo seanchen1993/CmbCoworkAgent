@@ -15,7 +15,8 @@ vi.mock("../db", () => ({
 vi.mock("../storage", () => ({
   getThreadCheckpointPath: (threadId: string) => `${threadId}.sqlite`
 }))
-vi.mock("../checkpointer/runtime-projection-client", () => ({
+vi.mock("../checkpointer/runtime-projection-client", async importOriginal => ({
+  ...(await importOriginal<typeof import("../checkpointer/runtime-projection-client")>()),
   hasVisibleCheckpointTranscriptInWorker: vi.fn(async () => {
     if (mocks.checkpointPresenceError) throw mocks.checkpointPresenceError
     return mocks.checkpointPresence

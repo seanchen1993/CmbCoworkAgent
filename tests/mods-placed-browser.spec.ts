@@ -94,8 +94,7 @@ async function main() {
         return <ModsChatScope.Provider value={{threadId:'a',...state}}><main ref={root} data-chat-thread-id='a'>
           <textarea aria-label='未发送草稿' defaultValue='原聊天草稿仍然保留'/>
           <div ref={viewport} data-test-viewport style={{height:680,overflow:'auto',overflowAnchor:'none'}}>
-            <ChatMessageVirtualList functionPlacedRows={placed} messages={messages} visibleMessageIndexes={messages.map((_,i)=>i)} lastUserMessageIndex={messages.length-1}
-              contentVersion={1} historyHasMore={false} historyPageLoading={false} historyRemainingCount={0} onLoadEarlierHistoryPage={noop}
+            <ChatMessageVirtualList functionPlacedRows={placed} projection={{ messages, contentVersion: 1, structureVersion: 1 }} visibleMessageIndexes={messages.map((_,i)=>i)} lastUserMessageIndex={messages.length-1} historyHasMore={false} historyPageLoading={false} historyRemainingCount={0} onLoadEarlierHistoryPage={noop}
               historyGapBeforeMessageId={null} canLoadReleasedHistory={false} onLoadReleasedHistoryWindow={noop} onRestoreLatestHistoryWindow={noop}
               hookLoggingEnabled={false} hookLogBucketByTurnId={maps.hooks} detachedHookLogBuckets={[]} contentMessageRefs={{current:refs}}
               setMessageRef={()=>noop} isLoading={false} toolResults={maps.tools} toolCallStates={maps.states} pendingApprovalToolCallKeys={new Set()}

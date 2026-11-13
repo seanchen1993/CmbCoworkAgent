@@ -6,7 +6,7 @@ afterEach(() => vi.restoreAllMocks())
 
 async function interpreted() {
   // Capture a counted, unchanged parser at module initialization. Late replacements
-  // remain on the dynamic path, as in the existing incarnation boundary tests.
+  // must not change this fixed text interpretation or read current database facts for it.
   const parse = vi.spyOn(JSON, "parse")
   const api = await import("./thread-incarnation")
   return {
@@ -76,10 +76,11 @@ describe("bounded exact-text incarnation interpretation", () => {
     }
   })
 
-  it("does not reuse interpretations after parser replacement or accessor installation", async () => {
+  it("uses the captured parser without invoking a late parser accessor", async () => {
     const api = await interpreted()
     const raw = JSON.stringify({ [key]: "first" })
     expect(api.readThreadIncarnationToken(raw)).toBe("first")
+    const changedRaw = JSON.stringify({ [key]: "actual-replacement" })
     const original = Object.getOwnPropertyDescriptor(JSON, "parse")!
     let parserCalls = 0
     let getterCalls = 0
@@ -94,17 +95,20 @@ describe("bounded exact-text incarnation interpretation", () => {
           }
         }
       })
-      expect(api.readThreadIncarnationToken(raw)).toBe("changed")
-      expect(api.readThreadIncarnationToken(raw)).toBe("changed")
-      expect(parserCalls).toBe(2)
-      expect(getterCalls).toBe(2)
+      expect(api.readThreadIncarnationToken(raw)).toBe("first")
+      expect(api.readThreadIncarnationToken(raw)).toBe("first")
+      expect(api.readThreadIncarnationToken(changedRaw)).toBe("actual-replacement")
+      expect(api.matchesThreadIncarnation({ created_at: 77, metadata: changedRaw },
+        { token: "first", legacyCreatedAt: 77 })).toBe(false)
+      expect(parserCalls).toBe(0)
+      expect(getterCalls).toBe(0)
     } finally {
       Object.defineProperty(JSON, "parse", original)
     }
     expect(api.readThreadIncarnationToken(raw)).toBe("first")
   })
 
-  it("keeps inherited-field and altered array classification on the original path", async () => {
+  it("uses own metadata fields and captured array classification", async () => {
     const api = await interpreted()
     const raw = '{"workspace":"local"}'
     expect(api.readThreadIncarnationToken(raw)).toBe(null)
@@ -117,20 +121,23 @@ describe("bounded exact-text incarnation interpretation", () => {
           return "inherited"
         }
       })
-      expect(api.readThreadIncarnationToken(raw)).toBe("inherited")
-      expect(reads).toBe(1)
+      expect(api.readThreadIncarnationToken(raw)).toBe(null)
+      expect(reads).toBe(0)
     } finally {
       delete (Object.prototype as Record<string, unknown>)[key]
     }
     expect(api.readThreadIncarnationToken(raw)).toBe(null)
     const tagged = JSON.stringify({ [key]: "present" })
     expect(api.readThreadIncarnationToken(tagged)).toBe("present")
+    const changedTagged = JSON.stringify({ [key]: "actual-replacement" })
     const original = Object.getOwnPropertyDescriptor(Array, "isArray")!
     try {
       Object.defineProperty(Array, "isArray", { ...original, value: () => true })
       const result = api.readThreadIncarnationToken(tagged)
+      const changedResult = api.readThreadIncarnationToken(changedTagged)
       Object.defineProperty(Array, "isArray", original)
-      expect(result).toBe(null)
+      expect(result).toBe("present")
+      expect(changedResult).toBe("actual-replacement")
     } finally {
       Object.defineProperty(Array, "isArray", original)
     }
@@ -158,8 +165,8 @@ describe("bounded exact-text incarnation interpretation", () => {
       delete (Object.prototype as Record<string, unknown>).value
       Object.defineProperty(globalThis, "JSON", original)
     }
-    expect(result).toBe("changed")
-    expect(calls).toBe(1)
+    expect(result).toBe("first")
+    expect(calls).toBe(0)
   })
 
   it("bounds retained entries and declines oversized raw text", async () => {

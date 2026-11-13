@@ -15,6 +15,22 @@ export async function runFunctionSiteCachedProgressBrowser() {
   const errors: string[] = []
   page.on("pageerror", (error) => errors.push(error.message))
   try {
+    const compiledFixtures = new Map<string, string>()
+    const mountCase = async (body: string): Promise<void> => {
+      const compiled = compiledFixtures.get(body)
+      if (compiled === undefined) {
+        compiledFixtures.set(body, await mount(page, body, [browserWorkerPlugin()]))
+        return
+      }
+      // Reuse compilation only. Every scenario still gets a new document, React
+      // root, authorization state, presentation cache and pending-read lifecycle.
+      await page.evaluate("window.previousCachedProgressDocument=true")
+      await page.goto("about:blank")
+      assert.equal(await page.evaluate("'previousCachedProgressDocument' in window"), false,
+        "Compiled fixture reuse must not reuse a prior scenario's document or globals")
+      await page.setContent('<div id="root"></div>')
+      await page.addScriptTag({ content: compiled })
+    }
     const cases = [
       ...["AssistantMessage", "ToolGroup"].flatMap((component) =>
         ["aba", "projection", "source", "takeover"].map((scenario) => [component, scenario])),
@@ -25,8 +41,7 @@ export async function runFunctionSiteCachedProgressBrowser() {
     ]
     for (const [component, scenario] of cases) {
       await page.setViewportSize({ width: 1280, height: 800 })
-      await mount(
-        page,
+      await mountCase(
         `
         import {FunctionSite} from ${JSON.stringify(resolve("src/renderer/src/components/chat/FunctionSite.tsx"))};
         import {ModsChatScope} from ${JSON.stringify(resolve("src/renderer/src/lib/mods-chat-scope.tsx"))};
@@ -62,8 +77,7 @@ export async function runFunctionSiteCachedProgressBrowser() {
               renderNative={props=><div data-safe data-delegate={label}><p>{component==='ToolGroup'?props.calls.map(c=>c.tool_use_id+':'+c.input.path).join(','):props.text}</p>
                 <button onClick={()=>clicks.push(label)}>copy</button></div>}/>}</div>
           </ModsChatScope.Provider>};host.render(<Fixture/>);}
-      `,
-        [browserWorkerPlugin()]
+      `
       )
       await page.waitForFunction(
         "window.cached.pending()===1 && !!document.querySelector('[data-safe]')"

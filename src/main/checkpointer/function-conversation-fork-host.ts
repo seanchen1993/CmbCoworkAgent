@@ -1,3 +1,5 @@
+import { createMainFunctionConversationRecoveryDecision, requireMainFunctionConversationRecovery }
+  from "./function-conversation-main-recovery"
 import { BaseMessage } from "@langchain/core/messages"
 import { copyCheckpoint, type Checkpoint } from "@langchain/langgraph-checkpoint"
 import { ModFunctionError } from "../../shared/mods/v2/contracts"
@@ -96,21 +98,17 @@ export async function prepareFunctionConversationForkNativeImport(input: {
       fail("MODS_CONVERSATION_THREAD_CHANGED")
   }
   guard()
+  const decide = createMainFunctionConversationRecoveryDecision({ database, store: input.store,
+    threadId: input.threadId, workspace: input.workspace, originalThread: input.originalThread,
+    signal: new AbortController().signal, currentDatabase: getDb,
+    readThread: () => getThreadCore(input.threadId), assertCurrent: guard })
   const sources: FunctionConversationForkSource[] = []
   for (const expected of candidates) {
     const state = readFunctionConversationState(expected.channel_values.cmbFunctionConversation)
-    const root = input.store.findMain(
-      {
-        threadId: input.threadId,
-        workspace: input.workspace,
-        incarnation,
-        checkpointNamespace: ""
-      },
-      guard
-    )
-    if (!root) fail("MODS_CONVERSATION_RECOVERY_REQUIRED")
-    const target = input.store.selectBranch(root, state.branchId, guard)
-    assertFunctionConversationState(target, state)
+    const binding = requireMainFunctionConversationRecovery(decide({ configurable: {
+      thread_id: input.threadId, checkpoint_ns: "", checkpoint_id: expected.id
+    } }, state))
+    const target = binding.target
     const persisted = input.store.readCheckpointRecoverySnapshot(
       target,
       {

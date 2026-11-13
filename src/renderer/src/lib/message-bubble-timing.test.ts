@@ -5,10 +5,90 @@ import {
   formatMessageTimeLabel,
   getAssistantStartTime
 } from "./message-bubble-timing"
+import { createMessageBubbleTimingProjector } from "./message-bubble-timing"
+import { createChatMessageProjector } from "./chat-message-projection"
 
 function message(id: string, role: Message["role"], createdAt: Date): Message {
   return { id, role, content: id, created_at: createdAt }
 }
+
+it("updates 10k snapshot rows' streaming tail body and end time without reading historical rows", () => {
+  const rows = Array.from({ length: 10000 }, (_, index) => message(String(index),
+    index % 2 ? "assistant" : "user", new Date(index * 1000)))
+  let protectedPrefix = false
+  const messages = new Proxy(rows, { get(target, key, receiver) {
+    if (protectedPrefix && (key === Symbol.iterator || (typeof key === "string" &&
+      /^\d+$/.test(key) && Number(key) < 9999))) throw Error("historical timing rescan")
+    return Reflect.get(target, key, receiver)
+  } })
+  const project = createMessageBubbleTimingProjector()
+  const base = { messages, structureVersion: 1, indexById: new Map<string, number>() }
+  project({ ...base, contentVersion: 1, changedMessages: rows })
+  protectedPrefix = true
+  for (let chunk = 0; chunk < 100; chunk++) {
+    rows[9999] = { ...rows[9999], content: "snapshot body " + chunk,
+      end_at: new Date(10000000 + chunk) }
+    const result = project({ ...base, contentVersion: chunk + 2, changedMessages: [rows[9999]] })
+    expect(result).toEqual(buildMessageBubbleTimingMeta(rows))
+  }
+})
+
+it("matches the complete oracle through same-object dates, invalid fallbacks and duplicate IDs", () => {
+  const rows = [message("same-user", "user", new Date(NaN)),
+    message("same-assistant", "assistant", new Date(1000)),
+    message("same-user", "user", new Date(2000)),
+    message("same-assistant", "assistant", new Date(3000))]
+  const project = createMessageBubbleTimingProjector()
+  let version = 0
+  const check = (changedMessages: Message[]) => expect(project({ messages: rows,
+    structureVersion: 1, contentVersion: ++version, changedMessages,
+    indexById: new Map(rows.map((item, index) => [item.id, index])) }))
+    .toEqual(buildMessageBubbleTimingMeta(rows))
+  check(rows)
+  rows[0].created_at.setTime(100); check([rows[0]])
+  rows[3].end_at = new Date(5000); check([rows[3]])
+  rows[3].end_at.setTime(6000); check([rows[3]])
+  rows[2].created_at.setTime(NaN); check([rows[2]])
+  rows[0].created_at.setTime(NaN); check([rows[0]])
+  rows[0].start_at = new Date(500); check([rows[0]])
+  rows[2].end_at = new Date(3500); check([rows[2]])
+  rows[3].created_at.setTime(NaN); rows[3].end_at = undefined; check([rows[3]])
+  rows[0].start_at = undefined; check([rows[0]])
+  rows[3].start_at = new Date(7000); check([rows[3]])
+})
+
+it("consumes actual projection same-reference changed slots without corrupting older changed snapshots", () => {
+  const baseline = [message("user", "user", new Date(1000))]
+  const tail = message("assistant", "assistant", new Date(2000))
+  const projectMessages = createChatMessageProjector(), projectTiming = createMessageBubbleTimingProjector()
+  const first = projectMessages(baseline, [tail], undefined, 0,
+    { contentVersion: 1, structureVersion: 1, changedMessages: [tail] })
+  const firstChanged = first.changedMessages.slice()
+  projectTiming(first)
+  tail.end_at = new Date(4000)
+  const second = projectMessages(baseline, [tail], undefined, 0,
+    { contentVersion: 2, structureVersion: 1, changedMessages: [tail] })
+  expect(second.contentVersion).toBeGreaterThan(first.contentVersion)
+  expect(second.structureVersion).toBe(first.structureVersion)
+  expect(second.changedMessages).toEqual([tail])
+  expect(first.changedMessages).toEqual(firstChanged)
+  expect(first.changedMessages).not.toBe(first.messages)
+  expect(projectTiming(second)).toEqual(buildMessageBubbleTimingMeta(second.messages))
+  tail.end_at.setTime(5000)
+  const third = projectMessages(baseline, [tail], undefined, 0,
+    { contentVersion: 3, structureVersion: 1, changedMessages: [tail] })
+  expect(projectTiming(third).assistantDurationMsById.get("assistant")).toBe(4000)
+})
+
+it("conservatively rebuilds timing when a content revision omits changed slots", () => {
+  const rows = [message("u", "user", new Date(0)), message("a", "assistant", new Date(10))]
+  const project = createMessageBubbleTimingProjector()
+  const base = { messages: rows, structureVersion: 1, indexById: new Map<string, number>() }
+  project({ ...base, contentVersion: 1, changedMessages: rows })
+  rows[1].end_at = new Date(20)
+  expect(project({ ...base, contentVersion: 2, changedMessages: [] }))
+    .toEqual(buildMessageBubbleTimingMeta(rows))
+})
 
 describe("message bubble timestamps", () => {
   it("shows the full local date and zero-padded 24-hour time across year boundaries", () => {

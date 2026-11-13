@@ -4,17 +4,17 @@ import { getMessageProviderOccurrenceIdentity } from "../../../shared/message-ro
 import { functionConversationTranscriptFields } from
   "../../../shared/mods/v2/conversation-transcript"
 
-export interface ChatMessageProjection {
-  /**
-   * The array identity is stable while only live content changes. Individual
-   * live slots are replaced in place; consumers that render content must also
-   * observe `contentVersion`.
-   */
-  messages: Message[]
+/** Required together at render boundaries: messages are a stable mutable projection. */
+export interface ChatMessageProjectionSnapshot {
+  /** Slots may change in place; every content reader must observe contentVersion. */
+  readonly messages: Message[]
+  readonly contentVersion: number
+  readonly structureVersion: number
+}
+
+export interface ChatMessageProjection extends ChatMessageProjectionSnapshot {
   indexById: ReadonlyMap<string, number>
   changedMessages: readonly Message[]
-  contentVersion: number
-  structureVersion: number
 }
 
 export interface ChatLiveMessageProjectionMetadata {
@@ -197,7 +197,7 @@ export function createChatMessageProjector(): (
       return {
         messages,
         indexById,
-        changedMessages: messages,
+        changedMessages: messages.slice(),
         contentVersion,
         structureVersion
       }
@@ -219,7 +219,9 @@ export function createChatMessageProjector(): (
         baselineIndex === undefined
           ? live
           : resolveBaselineLiveMessage(baseline[baselineIndex], live)
-      if (messages[displayIndex] === nextMessage) continue
+      // Explicit changed-slot metadata also covers an in-place Date/field update.
+      // A stable object identity cannot erase that producer's content publication.
+      if (messages[displayIndex] === nextMessage && !liveProjection) continue
       messages[displayIndex] = nextMessage
       changedMessages.push(nextMessage)
       contentChanged = true

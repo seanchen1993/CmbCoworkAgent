@@ -1,13 +1,14 @@
 import type { Message } from "@/types"
 import type { HookLogBucket } from "@/lib/thread-context"
-import { createChatMessageProjector } from "@/lib/chat-message-projection"
+import { createChatMessageProjector, type ChatMessageProjection,
+  type ChatMessageProjectionSnapshot } from "@/lib/chat-message-projection"
 import {
   createDynamicLiveVisibilityProjector,
   createLiveDisplayMessageProjector
 } from "@/lib/live-display-message-projection"
 import { createIncrementalToolDerivationProjector } from "@/lib/message-render-stability"
 import { messageHasVisibleRow } from "@/lib/message-display-visibility"
-import { buildMessageBubbleTimingMeta } from "@/lib/message-bubble-timing"
+import { buildMessageBubbleTimingMeta, createMessageBubbleTimingProjector } from "@/lib/message-bubble-timing"
 import { buildToolResultAssociations } from "@/lib/worker-tool-result-key"
 import { mergeVisibleChatMessageIndexes } from "@/lib/chat-visible-index"
 import { createChatScrollQuestionRevisionProjector } from "@/components/chat/ChatScrollNavigator"
@@ -37,8 +38,7 @@ export interface ChatThreadProjectionRuntime {
     hookLogEnabled: boolean
   }) => StableMessageIndexProjection
   projectDetachedHookLogBuckets: (input: {
-    displayMessages: readonly Message[]
-    structureVersion: number
+    projection: ChatMessageProjectionSnapshot
     hookLogBuckets: readonly HookLogBucket[]
   }) => HookLogBucket[]
   projectToolResults: (
@@ -46,8 +46,7 @@ export interface ChatThreadProjectionRuntime {
     projectionVersion: number
   ) => ReturnType<typeof buildToolResultAssociations>
   projectTimingMeta: (
-    messages: Message[],
-    structureVersion: number
+    projection: ChatMessageProjection
   ) => ReturnType<typeof buildMessageBubbleTimingMeta>
   projectVisibleMessageIndexes: (input: {
     stableIndexes: readonly number[]
@@ -83,8 +82,7 @@ function createChatThreadProjectionRuntime(): ChatThreadProjectionRuntime {
 
   let detachedInput:
     | {
-        displayMessages: readonly Message[]
-        structureVersion: number
+        projection: ChatMessageProjectionSnapshot
         hookLogBuckets: readonly HookLogBucket[]
       }
     | undefined
@@ -94,9 +92,7 @@ function createChatThreadProjectionRuntime(): ChatThreadProjectionRuntime {
   let previousToolVersion = -1
   let toolResults: ReturnType<typeof buildToolResultAssociations> | undefined
 
-  let previousTimingMessages: Message[] | null = null
-  let previousTimingVersion = -1
-  let timingMeta: ReturnType<typeof buildMessageBubbleTimingMeta> | undefined
+  const projectTimingMeta = createMessageBubbleTimingProjector()
 
   let previousStableIndexes: readonly number[] | null = null
   let previousDynamicVisibility: ReadonlyMap<number, boolean> | null = null
@@ -177,14 +173,14 @@ function createChatThreadProjectionRuntime(): ChatThreadProjectionRuntime {
       if (
         detachedInput &&
         detachedProjection &&
-        input.displayMessages === detachedInput.displayMessages &&
-        input.structureVersion === detachedInput.structureVersion &&
+        input.projection.messages === detachedInput.projection.messages &&
+        input.projection.structureVersion === detachedInput.projection.structureVersion &&
         input.hookLogBuckets === detachedInput.hookLogBuckets
       ) {
         return detachedProjection
       }
       const userMessageIds = new Set<string>()
-      for (const message of input.displayMessages) {
+      for (const message of input.projection.messages) {
         if (message.role === "user") userMessageIds.add(message.id)
       }
       detachedInput = input
@@ -206,19 +202,7 @@ function createChatThreadProjectionRuntime(): ChatThreadProjectionRuntime {
       toolResults = buildToolResultAssociations(messages)
       return toolResults
     },
-    projectTimingMeta: (messages, structureVersion) => {
-      if (
-        timingMeta &&
-        messages === previousTimingMessages &&
-        structureVersion === previousTimingVersion
-      ) {
-        return timingMeta
-      }
-      previousTimingMessages = messages
-      previousTimingVersion = structureVersion
-      timingMeta = buildMessageBubbleTimingMeta(messages)
-      return timingMeta
-    },
+    projectTimingMeta,
     projectVisibleMessageIndexes: (input) => {
       if (
         visibleIndexes &&

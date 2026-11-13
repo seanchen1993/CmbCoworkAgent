@@ -6,7 +6,7 @@ import { ModFunctionError } from "../../../shared/mods/v2/contracts"
 import type { FunctionConversationGraphBinding, FunctionConversationGraphRuntime } from
   "../../agent/mods-conversation"
 import type { ModRuntimeAuthority } from "../runtime-instance"
-import { SqlJsSaver } from "../../checkpointer/sqljs-saver"
+import { SqlJsSaver, type SqlJsSaverSharedConversationRead } from "../../checkpointer/sqljs-saver"
 import { types } from "node:util"
 import { isModRuntimeAuthorityDataCurrent } from "../runtime-instance"
 
@@ -19,11 +19,15 @@ interface NativeRead {
   readonly tuple?: CheckpointTuple
   readonly namespace: string
   readonly scope: FunctionConversationSharedCheckpointScope
+  readonly pendingNamespace?: SqlJsSaverSharedConversationRead["pendingNamespace"]
+  admissionCurrent?: () => void
   assertCurrent(): void
 }
 const reads = new WeakMap<FunctionConversationSharedNativeRead, NativeRead>()
+const originalSharedTupleRead = SqlJsSaver.prototype.getTupleForSharedConversation
 const scopeWeakGet = WeakMap.prototype.get
 const scopeWeakSet = WeakMap.prototype.set
+const scopeWeakDelete = WeakMap.prototype.delete
 const scopeBind = Function.prototype.bind
 const scopeSignalThrow = AbortSignal.prototype.throwIfAborted
 const scopeControllerSignal = Object.getOwnPropertyDescriptor(AbortController.prototype, "signal")!.get!
@@ -55,6 +59,8 @@ interface ScopeReadCurrent {
 const scopeSourceBases = new WeakMap<FunctionConversationSharedCheckpointScope, ScopeSourceBase>()
 const scopeReadCurrents = new WeakMap<() => void, ScopeReadCurrent>()
 let originalScopeGuard: (scope: FunctionConversationSharedCheckpointScope) => void
+let originalScopeClose: (scope: FunctionConversationSharedCheckpointScope) => void
+const originalScopeCloseApply = Reflect.apply
 
 type ScopeOpeningFields = readonly (readonly [PropertyKey, PropertyDescriptor])[]
 interface ScopeOpeningRecord {
@@ -435,6 +441,13 @@ const scopeData = new WeakMap<FunctionConversationSharedCheckpointScope, {
   closed: boolean
 }>()
 
+/** Close only this genuine Scope through its original lifecycle, including its original drain. */
+export function closeFunctionConversationSharedCheckpointScope(
+  scope: FunctionConversationSharedCheckpointScope): void {
+  if (!originalScopeCloseApply(scopeWeakGet, scopeData, [scope])) fail()
+  originalScopeClose(scope)
+}
+
 /** Original scope data only, after its full guards; unknown scopes never acquire this evidence. */
 export function isFunctionConversationSharedCheckpointScopeDataClosed(
   scope: FunctionConversationSharedCheckpointScope): boolean {
@@ -451,12 +464,20 @@ export function isFunctionConversationSharedCheckpointScopeDataClosed(
 
 /** Only the original native router can mint this read receipt. It is never an SDK value. */
 export function readFunctionConversationSharedNativeRead(proof: FunctionConversationSharedNativeRead,
-  saver: SqlJsSaver, authority: ModRuntimeAuthority): Omit<NativeRead, "saver" | "authority"> {
+  saver: SqlJsSaver, authority: ModRuntimeAuthority): Omit<NativeRead, "saver" | "authority" | "admissionCurrent"> & {
+  bindAdmissionCurrent(check: () => void): void
+} {
   const value = reads.get(proof)
   if (!value || value.saver !== saver || value.authority !== authority) fail()
   value.assertCurrent()
   return { config: value.config, tuple: value.tuple, namespace: value.namespace,
-    scope: value.scope, assertCurrent: value.assertCurrent }
+    scope: value.scope, pendingNamespace: value.pendingNamespace, assertCurrent: value.assertCurrent,
+    bindAdmissionCurrent(check: () => void) {
+      if (!value.pendingNamespace || value.admissionCurrent || reads.get(proof) !== value ||
+        typeof check !== "function") fail()
+      value.assertCurrent()
+      value.admissionCurrent = check
+    } }
 }
 
 export interface FunctionConversationSharedCheckpointHost {
@@ -682,7 +703,8 @@ export class FunctionConversationSharedCheckpointScope {
       const captured = this.validate(config, true)
       this.namespace = String(captured.configurable?.checkpoint_ns)
       this.initializing = this.tracked(async () => {
-        const tuple = await SqlJsSaver.prototype.getTuple.call(this.host.saver, captured)
+        const selected = await originalSharedTupleRead.call(this.host.saver, captured)
+        const tuple = selected.tuple
         this.entered()
         if (tuple && (tuple.config.configurable?.thread_id !== this.host.authority.threadId ||
           tuple.config.configurable?.checkpoint_ns !== this.namespace ||
@@ -690,21 +712,33 @@ export class FunctionConversationSharedCheckpointScope {
           (captured.configurable?.checkpoint_id !== undefined &&
             captured.configurable.checkpoint_id !== tuple.checkpoint.id))) fail()
         const proof = Object.freeze({ [brand]: true as const })
-        reads.set(proof, { saver: this.host.saver, authority: this.host.authority,
+        const nativeRead: NativeRead = { saver: this.host.saver, authority: this.host.authority,
           config: captured, tuple, namespace: this.namespace!, scope: this,
+          pendingNamespace: selected.pendingNamespace,
           assertCurrent: createScopeReadCurrent(this, this.host.saver,
-            this.host.authority, this.namespace!) })
+            this.host.authority, this.namespace!) }
+        reads.set(proof, nativeRead)
         try {
           const binding = await this.host.admit(proof)
           this.entered()
           binding.assertCurrent()
+          const delegated = selected.pendingNamespace ? this.host.delivery(this.host.saver, binding) : undefined
+          if (selected.pendingNamespace) {
+            if (!nativeRead.admissionCurrent) fail()
+            await selected.pendingNamespace.revalidateAdmissionCurrent()
+            this.entered()
+            binding.assertCurrent()
+            nativeRead.admissionCurrent()
+            selected.pendingNamespace.assertAdmissionCurrent()
+            selected.pendingNamespace.assertInputDataCurrent()
+          }
           if (binding.checkpointThreadId !== this.host.authority.threadId ||
             binding.target.checkpointNamespace !== this.namespace) fail()
           this.binding = binding
-          this.delegated = this.host.delivery(this.host.saver, binding)
-          if (tuple) this.planned.add(tuple.checkpoint.id)
+          this.delegated = selected.pendingNamespace ? delegated : this.host.delivery(this.host.saver, binding)
+          if (tuple) Reflect.apply(scopePendingAdd, this.planned, [tuple.checkpoint.id])
           return tuple
-        } finally { reads.delete(proof) }
+        } finally { Reflect.apply(scopeWeakDelete, reads, [proof]) }
       }).catch(error => { this.close(); throw error })
       return this.initializing
     }
@@ -791,6 +825,8 @@ export class FunctionConversationSharedCheckpointScope {
   }
 
   static {
+    const close = this.prototype.close
+    originalScopeClose = scope => { originalScopeCloseApply(close, scope, []) }
     const guard = this.prototype.guard
     originalScopeGuard = scope => { Reflect.apply(guard, scope, []) }
     originalScopeRun = <T>(execution: ScopePreflightExecution,

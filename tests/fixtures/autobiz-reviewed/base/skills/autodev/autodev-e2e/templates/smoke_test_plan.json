@@ -1,0 +1,42 @@
+{
+  "version": 1,
+  "featureId": "{feature}",
+  "flowBlocking": false,
+  "skipReason": "",
+  "tests": [
+    {
+      "id": "SMK-001",
+      "taskId": "T001",
+      "scenarioRefs": [
+        "specs/[capability]/spec.md#SCN-001"
+      ],
+      "title": "[主链路/启动/路由冒烟案例名]",
+      "smokeType": "api",
+      "seam": {
+        "type": "api",
+        "entrypoint": "[公开入口，如 POST /api/orders 或 npm run smoke:orders]",
+        "observable": "[只通过公开响应/页面/CLI 输出观察，不查内部表或私有方法]"
+      },
+      "verticalSlice": {
+        "trigger": "[单一用户动作或系统触发，如提交一个有效订单]",
+        "expectedOutcome": "[独立事实源给出的可观察结果，如返回订单号且状态为 CREATED]"
+      },
+      "mockPolicy": {
+        "externalOnly": true,
+        "allowedMocks": [
+          "[仅列系统边界 mock，如支付网关/邮件/第三方 API；无则写 []]"
+        ]
+      },
+      "sourcePath": "src/test/java/[package]/autodev_smoke/[Feature]SmokeIT.java",
+      "command": "[只运行该冒烟案例的命令，如 mvn -q -Psmoke -Dtest=[Feature]SmokeIT verify]",
+      "expectedSignals": [
+        "[可观察信号，如 HTTP 200]",
+        "[关键字段或状态断言]"
+      ],
+      "preconditions": [
+        "[E2E 阶段按实际实现选择运行该冒烟案例所需的 profile/fixture/stub]"
+      ],
+      "timeoutSeconds": 300
+    }
+  ]
+}

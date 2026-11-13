@@ -31,6 +31,7 @@ import { ProjectRunDetails } from "./ProjectRunDetails"
 import { isOrdinaryFlowMetadata } from "../../../../shared/mods/flows/scope"
 import { isDevelopmentThreadMetadata } from "../../../../shared/mods/development-scope"
 import { ModsChatScope, useModsChatState } from "../../lib/mods-chat-scope"
+import { rendererThreadDirectoryScope } from "../../lib/thread-directory-scope"
 import { projectHumanGate } from "../../../../shared/harness-notifications"
 import { useModCommands } from "../../features/slash-commands/useModCommands"
 import { ModCommandJobs } from "./ModCommandJobs"
@@ -2052,7 +2053,8 @@ export function ChatContainer({
     () => getForkWorkspacePath(currentThread),
     [currentThread]
   )
-  const modsChatState = useModsChatState(threadId, currentForkWorkspacePath)
+  const modsDirectoryScope = useMemo(() => rendererThreadDirectoryScope(currentThread), [currentThread])
+  const modsChatState = useModsChatState(threadId, currentForkWorkspacePath, modsDirectoryScope)
   const developmentScope = JSON.stringify([threadId, currentForkWorkspacePath])
   const creatorNavigation = useRef({ threadId, readOnly, workspace: currentForkWorkspacePath })
   creatorNavigation.current = { threadId, readOnly, workspace: currentForkWorkspacePath }
@@ -3540,6 +3542,10 @@ export function ChatContainer({
   const displayMessages = displayMessageProjection.messages
   const displayMessagesContentVersion = displayMessageProjection.contentVersion
   const displayMessagesStructureVersion = displayMessageProjection.structureVersion
+  // Keep the full version contract without invalidating React.memo for unchanged input.
+  const displayMessageSnapshot = useMemo(() => ({ messages: displayMessages,
+    contentVersion: displayMessagesContentVersion, structureVersion: displayMessagesStructureVersion }),
+  [displayMessages, displayMessagesContentVersion, displayMessagesStructureVersion])
   const chatScrollQuestionStructureRevision =
     threadProjectionRuntime.projectChatScrollQuestionRevision({
       scopeKey: threadId,
@@ -3592,8 +3598,7 @@ export function ChatContainer({
   }, [displayMessages.length, displayMessagesContentVersion, isLoading, searchOpen])
 
   const detachedHookLogBuckets = threadProjectionRuntime.projectDetachedHookLogBuckets({
-    displayMessages,
-    structureVersion: displayMessagesStructureVersion,
+    projection: displayMessageSnapshot,
     hookLogBuckets
   })
 
@@ -3639,7 +3644,7 @@ export function ChatContainer({
   )
 
   const { assistantDurationMsById, userSendTimeLabelById } =
-    threadProjectionRuntime.projectTimingMeta(displayMessages, displayMessagesStructureVersion)
+    threadProjectionRuntime.projectTimingMeta(displayMessageProjection)
 
   const { toolCallDisplayStates, pendingApprovalToolCallKeys } =
     threadProjectionRuntime.projectToolCallDisplayState({
@@ -4884,7 +4889,7 @@ export function ChatContainer({
       return
     }
 
-    const releaseAnchor = acquireChatExternalScrollAnchor(virtuosoRef.current)
+    const releaseAnchor = acquireChatExternalScrollAnchor(virtuosoRef.current, getViewport(), "session-restore")
     releaseSessionAnchorRef.current = releaseAnchor
     if (sessionRestorePositionRef.current?.anchor !== anchor) {
       sessionRestorePositionRef.current = { anchor, position: createChatSessionRestorePosition() }
@@ -5150,7 +5155,7 @@ export function ChatContainer({
     ) {
       return
     }
-    const releaseAnchor = acquireChatExternalScrollAnchor(virtuosoRef.current)
+    const releaseAnchor = acquireChatExternalScrollAnchor(virtuosoRef.current, getViewport(), "history-restore")
     releaseHistoryAnchorRef.current = releaseAnchor
     let frame: number | null = null
     const finishRestore = (): void => {
@@ -8938,10 +8943,9 @@ export function ChatContainer({
                     functionPlacedRows={functionPlacedRows}
                     messageAttempts={streamData.messageAttempts}
                     searchReveal={searchOpen ? searchReveal : null}
-                    messages={displayMessages}
+                    projection={displayMessageSnapshot}
                     visibleMessageIndexes={visibleMessageIndexes}
                     lastUserMessageIndex={lastUserMessageIndex}
-                    contentVersion={displayMessagesContentVersion}
                     onLoadEarlierHistoryPage={loadEarlierHistoryPage}
                     historyHasMore={historyHasMore}
                     historyPageLoading={historyPageLoading}

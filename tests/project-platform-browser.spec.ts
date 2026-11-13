@@ -33,7 +33,10 @@ async function verifyLocalProjects(root: string, browser: Browser, artifacts: st
       builder.onLoad({ filter: /.*/, namespace: "fixture" }, () => ({ loader: "js", contents: `
         const threads=[];
         export const isThreadDeletionPending=()=>false;
-        export const useAppStore={getState:()=>({addThreadSummary:thread=>{threads.push(thread);window.fixture.calls.push(['hydrated',thread.thread_id])},selectThread:async id=>{if(!threads.find(t=>t.thread_id===id)?.metadata?.hostProjectRuntime)throw Error('MISSING_HOST_METADATA');window.fixture.calls.push(['selected',id])}})};
+        const addThreadSummary=thread=>{threads.push(thread);window.fixture.calls.push(['hydrated',thread.thread_id])};
+        export const useAppStore={getState:()=>({accountRevision:0,addThreadSummary,captureThreadSummaryRead:()=>({
+          isCurrent:()=>true,publish:thread=>{addThreadSummary(thread);return true},close:()=>{}
+        }),selectThread:async id=>{if(!threads.find(t=>t.thread_id===id)?.metadata?.hostProjectRuntime)throw Error('MISSING_HOST_METADATA');window.fixture.calls.push(['selected',id])}})};
       ` }))
     } }],
     loader: { ".md": "text", ".png": "dataurl" },
@@ -53,7 +56,7 @@ async function verifyLocalProjects(root: string, browser: Browser, artifacts: st
           artifacts:[{id:'draft',path:'draft.md',required:true}],checks:[{id:'exists',artifactId:'draft',kind:'file-exists',sideEffect:'read'}],environment:[],
           capabilities:{execution:true,conditionalTransition:true,idempotency:true,reconciliation:true,cancellation:true}})},operations:[]}; }
       views.A=make('A'); views.B=make('B',true); views.E=make('E'); views.F=make('F',true);
-      views.G=make('G'); views.G.operations=[{operationId:'G-op',stageId:'draft',expectedVersion:1,status:'succeeded',updatedAt:1,receipts:[],execution:{threadId:'G-thread'}}];
+      views.G=make('G'); views.G.operations=[{operationId:'G-op',stageId:'draft',pluginDigest:'fixture-digest',expectedVersion:1,status:'succeeded',updatedAt:1,receipts:[],execution:{threadId:'G-thread'}}];
       views.D=make('D',true);
       views.D.project.manifest.stages[0].actionIds=['format-note'];
       views.D.project.manifest.actions=[{id:'format-note',ref:{pluginId:'format-plugin',plugin:'public-format-plugin',digest:'d'.repeat(64),actionId:'format-note'}}];
@@ -122,6 +125,7 @@ async function verifyLocalProjects(root: string, browser: Browser, artifacts: st
   assert.deepEqual(await page.evaluate(() => (window as unknown as ProjectFixtureWindow).fixture.calls.filter(x => ["selected", "hydrated"].includes(x[0])).map(x => x[0])), ["hydrated", "selected", "hydrated", "selected"])
   await task("D").focus()
   await page.keyboard.press("Enter")
+  await page.getByText("本步骤使用的功能（1）", { exact: true }).click()
   await page.getByText("public-format-plugin · format-note", { exact: true }).waitFor()
   assert.equal(await page.getByRole("button", { name: "只检查已有成果", exact: true }).count(), 0)
   await page.getByRole("button", { name: "开始当前阶段", exact: true }).click()
@@ -186,7 +190,7 @@ async function verifyLocalProjects(root: string, browser: Browser, artifacts: st
   await task("A").click()
   await page.evaluate(() => (window as unknown as ProjectFixtureWindow).fixture.delay(""))
   await page.getByRole("button", { name: "只检查已有成果", exact: true }).click()
-  await page.getByText(/待修复 · draft.md/).waitFor()
+  await page.getByText("待修复 · 文件检查 · draft.md：未能确认文件存在，请生成此文件后重试。", { exact: true }).waitFor()
   await page.evaluate(() => (window as unknown as ProjectFixtureWindow).fixture.valid(true))
   await page.getByRole("button", { name: "只检查已有成果", exact: true }).click()
   await page.getByRole("button", { name: "确认完成任务" }).click()
@@ -195,6 +199,7 @@ async function verifyLocalProjects(root: string, browser: Browser, artifacts: st
   await page.getByRole("button", { name: "停止本次步骤" }).click()
   await page.getByRole("button", { name: "开始当前阶段", exact: true }).click()
   await page.getByRole("button", { name: "拒绝本次执行" }).click()
+  await page.getByText("检查结果与历史", { exact: true }).click()
   await page.getByText("你已拒绝本次执行，可重新准备。").waitFor()
   await page.getByRole("button", { name: "新建项目" }).click()
   await page.getByLabel("项目名称").fill("新任务")

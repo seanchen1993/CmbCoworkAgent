@@ -65,7 +65,7 @@ export function readHostActionCheckEvidence(
   project: HostProjectState,
   ticket: HostExecutionTicket,
   operation: HostProjectOperation,
-  snapshotRoot: string,
+  snapshotRoot: string | (() => string),
   onlyCheckIds?: readonly string[]
 ): ReadonlyMap<string, HostActionCheckEvidence> {
   const stage = project.manifest.stages[project.stageIndex]
@@ -74,6 +74,7 @@ export function readHostActionCheckEvidence(
   )
   const checks = allChecks.filter((check) => !onlyCheckIds || onlyCheckIds.includes(check.id))
   if (!checks.length) return new Map()
+  const root = typeof snapshotRoot === "function" ? snapshotRoot() : snapshotRoot
   const threadId = operation.execution?.threadId
   if (
     !threadId ||
@@ -81,7 +82,7 @@ export function readHostActionCheckEvidence(
     operation.projectId !== ticket.projectId
   )
     throw Error("PROJECT_ACTION_CHECK_EXECUTION_REQUIRED")
-  const lock = readProjectActionLock(snapshotRoot, project.manifest)
+  const lock = readProjectActionLock(root, project.manifest)
   if (operation.execution?.terminal?.outcome === "success" &&
       operation.execution.terminal.code === "project_check_input_missing") {
     // Only the native settled preparation branch can omit action evidence. Recheck the
@@ -96,7 +97,7 @@ export function readHostActionCheckEvidence(
     readConfiguration: (keys) => {
       runtime ??= getProjectActionRuntime()
       if (!runtime.readPublicConfiguration) throw Error("PROJECT_CHECK_CONFIGURATION_UNAVAILABLE")
-      return runtime.readPublicConfiguration(project, snapshotRoot, keys)
+      return runtime.readPublicConfiguration(project, root, keys)
     }
   })
   const facts = readProjectActionPhaseFacts({

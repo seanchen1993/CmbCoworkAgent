@@ -20,9 +20,11 @@ import { modErrorCode } from "../mods/errors"
 import { CheckpointMessageSnapshotRecoveryError } from "../checkpointer/sqljs-saver"
 import { getModsManager } from "../mods/manager"
 import { captureThreadIncarnation, matchesThreadIncarnation } from "../services/thread-incarnation"
-import { nativeFunctionConversationWorkspace } from "../checkpointer/function-conversation-main-recovery"
+import { nativeFunctionConversationWorkspace, createMainFunctionConversationRecoveryDecision,
+  requireMainFunctionConversationRecovery } from "../checkpointer/function-conversation-main-recovery"
 import { readFunctionConversationState } from "../checkpointer/function-conversation-delivery"
-import { readFunctionConversationCompactionBoundary } from "../checkpointer/function-conversation-compaction-boundary"
+import { readFunctionConversationCompactionBoundary, reconcileFunctionConversationCompaction }
+  from "../checkpointer/function-conversation-compaction-boundary"
 
 export { persistedMessageToRuntimeMessage } from "./persisted-runtime-message"
 
@@ -72,7 +74,9 @@ async function getLatestCheckpoint(
     // A refused protected checkpoint is not an absent checkpoint. Preserve its first
     // failure instead of letting the next step attempt to start with an empty tail.
     if (modErrorCode(error).startsWith("MODS_CONVERSATION_") ||
-      error instanceof CheckpointMessageSnapshotRecoveryError) throw error
+      error instanceof CheckpointMessageSnapshotRecoveryError ||
+      (error instanceof Error && (error.name.startsWith("CHECKPOINT_STORAGE_") ||
+        error.message.startsWith("SQLJS_SAVER_")))) throw error
     console.warn("[Agent] Failed to inspect checkpoint for durable transcript tail:", error)
     return null
   }
@@ -92,18 +96,20 @@ async function compactedBoundary(threadId: string, tuple: CheckpointTuple): Prom
       !matchesThreadIncarnation(current, incarnation) || current?.metadata !== thread.metadata)
       throw new ModFunctionError("MODS_CONVERSATION_THREAD_CHANGED")
   }
-  const root = store.findMain({ threadId, workspace: manager.workspaceKey(workspace), incarnation,
-    checkpointNamespace: "" }, guard)
-  if (!root) throw new ModFunctionError("MODS_CONVERSATION_RECOVERY_REQUIRED")
+  const decide = createMainFunctionConversationRecoveryDecision({ database, store, threadId,
+    workspace: manager.workspaceKey(workspace), originalThread: thread, signal,
+    currentDatabase: getDb, readThread: () => getThreadCore(threadId), assertCurrent: guard })
   const state = readFunctionConversationState(tuple.checkpoint.channel_values.cmbFunctionConversation)
-  const target = store.selectBranch(root, state.branchId, guard)
+  const binding = requireMainFunctionConversationRecovery(decide(tuple.config, state))
   // Keep validation outside getLatestCheckpoint's legacy read-error fallback: a stale/forged
   // host anchor must fail closed, never become an empty tail or replay the compacted history.
-  return withCheckpointer(threadId, saver => readFunctionConversationCompactionBoundary({
-    saver, store, control: manager.store, database,
-    binding: { target, checkpointThreadId: threadId, checkpointIncarnation: incarnation,
-      signal, assertCurrent: guard }
-  }, tuple))
+  return withCheckpointer(threadId, async saver => {
+    const host = { saver, store, control: manager.store, database, binding }
+    guard()
+    await reconcileFunctionConversationCompaction(host, tuple.config)
+    guard()
+    return readFunctionConversationCompactionBoundary(host, tuple)
+  })
 }
 
 export async function getDurableRuntimeTail(

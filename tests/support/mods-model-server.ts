@@ -3,7 +3,7 @@ import assert from "node:assert/strict"
 import { COMPACTION_SUMMARY, isCompactionSummaryRequest } from "./mods-compaction-fixture"
 
 /** Local protocol fixture; the application still uses production model settings and client. */
-export async function startModsModelServer() {
+export async function startModsModelServer(options: { responseIdPrefix?: string } = {}) {
   const requests: Array<{
     messages: Array<{ role: string; content: string }>
     [key: string]: unknown
@@ -16,7 +16,7 @@ export async function startModsModelServer() {
     const body = JSON.parse(Buffer.concat(chunks).toString("utf8"))
     requests.push(body)
     // Each completion needs its own provider id; reusing one rewrites prior checkpoint messages.
-    const responseId = `mods-model-fixture-${requests.length}`
+    const responseId = `${options.responseIdPrefix ?? "mods-model-fixture"}-${requests.length}`
     const prompt = String(body.messages?.at(-1)?.content)
     if (!isCompactionSummaryRequest(body) && !compactionOverflowSent &&
         prompt.includes("[mods-compaction-force-overflow]")) {

@@ -82,12 +82,26 @@ bounded; there is no additional visibility gate or authorization wait. Mounted c
 use the native index model plus their in-item offset, with subpixel `itemSize` precision,
 rather than correcting against potentially stale absolute spacer geometry. Those requests cancel
 their own retry immediately; deliberate missing-item reveals keep normal navigation.
-The API is exposed on the same list/table handles; grid behavior is unchanged.
+The API is exposed on the same list/table handles; these added methods do not extend the grid API.
 
 The chat host retains native deferred ResizeObserver measurement. Its existing layout
 observer also serves active session/history anchors, correcting mounted geometry before
 the queued native range update can recycle readable rows. That path does not advance the
 restoration frame budget, issue missing-item navigation, or schedule another frame.
+
+A local scroll-state feedback correction handles immediate native `scrollBy` operations.
+Deferred upward size compensation can move the physical viewport after a range commits;
+waiting for the next browser scroll event leaves that old range entirely offscreen for a
+paint. After an immediate native scrollBy, one coalesced microtask reads the actual current
+scroller through the existing scroll callback (including its normal synchronous publication).
+It does not invent a scroll target, cancel an owner or change the resize/prepend algorithm.
+Smooth scrolling keeps the existing browser-event path. A stale or unmounted scroller is
+discarded, and multiple immediate writes to the same scroller queue only one publication.
+The exact installed ESM/CJS paths, coalescing/lifecycle tests, and real painted-frame cold
+size-model regression cover this correction. Normal layouts add no explicit item scans.
+This feedback uses the shared native scroller hook, including Grid's immediate scrollBy
+path; it preserves the physical targets and adds no Grid handle method. Element, Window
+and horizontal feedback paths are covered by the hook-level regression.
 Only current mounted rows are observed during restoration; user takeover and cleanup
 release them. Detached native anchors can refresh explicitly, so their mutation path no
 longer needs the legacy two-frame measurement barrier. DOM-only users retain that barrier.
@@ -122,3 +136,21 @@ The upstream code is MIT licensed. The original `node_modules/react-virtuoso/LIC
 is preserved and verified, including its copyright and permission notice. The upstream
 MIT license applies to this derived patch as well; `LICENSE` alongside this README is a
 verbatim copy from the verified 4.18.12 tarball.
+
+Vertical bottom alignment reads the existing stateful `totalListHeight` and one
+synchronous `statefulViewportHeight` scalar to enable automatic top margin only
+when modeled content is strictly shorter than the viewport. The native
+`viewportHeight` input is a stateless event stream, so the alignment system mirrors
+it with `ht(viewportHeight, 0)` for React's readable store snapshots. This single
+numeric mirror never writes back to the original stream or changes its subscribers. A mounted tall row can shrink before native
+ResizeObserver publishes its new size; automatic flex margin must not convert that
+old model height into an entire offscreen list. Explicit deviation, top item lists,
+horizontal inline alignment, Table/Grid, measurement and scroll ownership are unchanged.
+The browser regression observes the immediate mutation and first painted frame,
+including custom/window/element scrollers and captured user ownership.
+
+The installer also accepts exactly the previous three-file patched SHA tuple. Its
+fixed, single-occurrence literal edits run in memory, and every resulting byte
+sequence must match the new manifest before the original atomic replacement path
+runs. A failed upgrade restores the actual previous bytes. Read-only `--check`
+rejects the previous tuple as not installed; unknown and mixed tuples remain rejected.

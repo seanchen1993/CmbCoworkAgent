@@ -188,6 +188,8 @@ export class ManagedModPolicy {
   }
 
   private async invokeAdmitted(method: string, event: ModObject, signal?: AbortSignal): Promise<ModObject> {
+    const publication = method === "filter"
+    let result: ModObject | undefined
     try {
       if (this.generation !== this.client.version) this.loaded = undefined
       if (!this.loaded) {
@@ -196,23 +198,29 @@ export class ManagedModPolicy {
         })
       }
       await this.loaded
-      const result = await this.client.invoke(
-        "managed-policy",
-        method,
-        { ...event, deployment: this.deployment as unknown as ModObject },
-        async () => {
-          throw new ModError("MODS_POLICY_IO_DENIED")
-        },
-        signal
-      )
-      if (!result || typeof result !== "object" || Array.isArray(result))
-        throw new ModError("MODS_POLICY_RESULT")
-      return result
+      if (!publication || !signal?.aborted) {
+        // This application-owned filter has no host effects. Let admitted work drain
+        // before advancing the queue, then discard any cancelled publication.
+        const response = await this.client.invoke(
+          "managed-policy",
+          method,
+          { ...event, deployment: this.deployment as unknown as ModObject },
+          async () => {
+            throw new ModError("MODS_POLICY_IO_DENIED")
+          },
+          publication ? undefined : signal
+        )
+        if (!response || typeof response !== "object" || Array.isArray(response))
+          throw new ModError("MODS_POLICY_RESULT")
+        result = response
+      }
     } catch {
       this.loaded = undefined
       this.client.stop("MODS_POLICY_FAILURE")
       throw new ModError(signal?.aborted ? "MODS_CANCELLED" : "MODS_POLICY_UNAVAILABLE")
     }
+    if (result === undefined) throw new ModError("MODS_CANCELLED")
+    return result
   }
 
   async admit(
@@ -262,6 +270,7 @@ export class ManagedModPolicy {
       value: result.value,
       ruleIds: ["baseline-v1", ...(result.ruleIds as string[])]
     }
+    if (signal?.aborted) throw new ModError("MODS_CANCELLED")
     if (encodeModJson(published).length <= 32_768) {
       if (this.cache.size >= 128) this.cache.delete(this.cache.keys().next().value!)
       this.cache.set(key, published)
@@ -285,6 +294,7 @@ export class ManagedModPolicy {
       },
       toolCallId
     )
+    if (signal?.aborted) throw new ModError("MODS_CANCELLED")
     record?.(this.digest, [...rules])
     return result
   }
