@@ -200,6 +200,7 @@ try {
     const importListeners = new Set<(event: unknown) => void>()
     const importFixture = { mode: "success", requests: [] as Array<{ requestId: string; source: string }>,
       pending: null as null | ((value: unknown) => void), opened: false, hiddenCount: 0,
+      syncedContexts: [] as unknown[],
       finished: [] as Array<{ requestId: string; keep: boolean }> }
     ;(window as unknown as { importFixture: typeof importFixture }).importFixture = importFixture
     const templatePackage = { id: "fixture-template", name: "import.html", entryPath: "index.html", rootDir: "/workspace/template", html: "<h1>HTML 导入页面</h1>", files: ["index.html", "detail.html"], pages: ["index.html", "detail.html"], warnings: [], previewUrl: "about:blank", framework: "html", sourceKind: "html", importedAt: "2026-10-29", totalBytes: 25 }
@@ -327,11 +328,24 @@ try {
           html: "<h1>原型页面</h1>",
           imageCount: 2
         }),
-        syncContextFiles: async () => ({ success: true })
+        syncContextFiles: async (input: { workspacePath: string; designSessionId: string; kind: string; files: Array<{ filename: string; sourcePath?: string; content?: string }> }) => {
+          importFixture.syncedContexts.push(input)
+          const dirPath = `${input.workspacePath}/context/${input.designSessionId}/${input.kind}`
+          return { success: true, dirPath, files: input.files.map(file => ({
+            filename: file.filename, sourcePath: file.sourcePath, targetPath: `${dirPath}/${file.filename}`
+          })) }
+        }
       },
-      skills: { list: async () => [], listPlugins: async () => [], getDisabled: async () => [] },
+      skills: {
+        list: async () => [{ name: "草稿技能", description: "完整草稿回归", path: "/skills/draft/SKILL.md", source: "user" }],
+        read: async () => ({ success: true, content: "保留已有页面结构并结合附件修改" }),
+        listPlugins: async () => [], getDisabled: async () => []
+      },
       models: {
-        list: async () => [{ id: "custom:test", name: "Test", model: "test", available: true }]
+        list: async () => [
+          { id: "custom:test", name: "Test", model: "test", available: true },
+          { id: "custom:draft", name: "草稿模型", model: "draft", available: true }
+        ]
       },
       workspace: { get: async () => "/workspace", select: async () => "/workspace/selected" },
       file: {
@@ -1331,6 +1345,100 @@ try {
   completions.at(-1)!()
   await page.getByText("网页编辑测试结束", { exact: false }).waitFor()
   console.log("PASS webpage editing opens the captured HTML without a model, preserves the previous design, survives reload and iterates on its baseline")
+
+  // Preserve the complete pending composer, not just its text, when adopting another webpage.
+  const openComposerAction = async (name: string) => {
+    await page.getByRole("button", { name: "更多上传选项", exact: true }).click()
+    await page.getByRole("menuitem", { name, exact: true }).click()
+  }
+  const composer = page.locator(".design-composer-box")
+  await page.getByRole("button", { name: "上传文件", exact: true }).click()
+  await composer.getByText("requirement.md", { exact: true }).waitFor()
+  await openComposerAction("通过内置浏览器打开")
+  await page.getByPlaceholder("https://example.com/page").fill("https://example.com/reference")
+  await page.getByRole("button", { name: "在内置浏览器中打开", exact: true }).click()
+  await page.getByRole("button", { name: "添加为页面参考", exact: true }).click()
+  await composer.getByText("页面参考", { exact: true }).waitFor()
+  await openComposerAction("关联代码")
+  await page.getByRole("button", { name: "＋ 粘贴代码", exact: true }).click()
+  await page.getByPlaceholder("在这里粘贴或编辑代码...").fill("export const draftColor = 'blue'")
+  await page.getByRole("button", { name: "确认关联 (1 个文件)", exact: true }).click()
+  const attachDraftScreenshot = async () => {
+    await page.getByRole("button", { name: "更多上传选项", exact: true }).click()
+    const choosing = page.waitForEvent("filechooser")
+    await page.getByRole("menuitem", { name: "上传截图", exact: true }).click()
+    await (await choosing).setFiles({ name: "draft.png", mimeType: "image/png", buffer: Buffer.from(
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64"
+    ) })
+    await composer.getByAltText("截图预览", { exact: true }).waitFor()
+  }
+  await attachDraftScreenshot()
+  await page.locator("textarea").first().fill("/草稿技能")
+  await page.getByText("草稿技能", { exact: true }).click()
+  await composer.getByText("已加载", { exact: true }).waitFor()
+  await composer.getByRole("button", { name: /^(Test|选择模型)$/ }).click()
+  await page.getByRole("button", { name: "草稿模型", exact: true }).click()
+  const completeDraftText = "  结合文档、网页参考、代码和截图修改当前页面\n保留我的完整草稿。  "
+  await page.locator("textarea").first().fill(completeDraftText)
+  await page.waitForFunction(async id => {
+    const snapshot = await (window as any).designRpc("open", id)
+    return snapshot.state.inputValue.includes("保留我的完整草稿") && snapshot.state.selectedModelId === "custom:draft"
+  }, editingPageId)
+  const completeDraft = structuredClone(manager.get(editingPageId).state)
+  const runsBeforeDraftImport = requests.length
+  await openComposerAction("通过内置浏览器打开")
+  await page.getByPlaceholder("https://example.com/page").fill("https://example.com/edit-next")
+  await page.getByRole("button", { name: "在内置浏览器中打开", exact: true }).click()
+  await page.getByRole("button", { name: "基于此页面编辑", exact: true }).click()
+  await page.waitForFunction(sourceId => localStorage.getItem("design_last_session") !== sourceId, editingPageId)
+  await page.getByText("网页已打开，可直接描述要修改的地方", { exact: true }).waitFor()
+  const completeDraftId = (await page.evaluate(() => localStorage.getItem("design_last_session")))!
+  assert.notEqual(completeDraftId, editingPageId)
+  const draftKeys = ["inputValue", "attachedFiles", "attachedImage", "codeContext", "selectedSkill", "selectedModelId"] as const
+  for (const key of draftKeys)
+    assert.deepEqual(manager.get(completeDraftId).state[key], completeDraft[key], `${key} survives webpage adoption`)
+  assert.equal(manager.get(completeDraftId).state.attachedFiles?.length, 2,
+    "the pending document and webpage reference are retained without adding the editing baseline as an attachment")
+  assert.equal(requests.length, runsBeforeDraftImport, "adoption does not send the pending composer")
+  await page.reload()
+  await page.frameLocator('iframe[title="Design Preview"]').getByRole("heading", { name: "链接页面", exact: true }).waitFor()
+  assert.equal(await page.locator("textarea").first().inputValue(), completeDraftText)
+  await composer.getByText("requirement.md", { exact: true }).waitFor()
+  await composer.getByText("页面参考", { exact: true }).waitFor()
+  await composer.getByText("untitled-1.ts", { exact: true }).waitFor()
+  await composer.getByText("草稿技能", { exact: true }).waitFor()
+  assert.equal(await composer.getByAltText("截图预览").getAttribute("src"), completeDraft.attachedImage!.previewUrl)
+  await composer.getByRole("button", { name: "草稿模型", exact: true }).waitFor()
+  await page.getByRole("button", { name: "▶ 发送", exact: true }).click()
+  await page.getByRole("button", { name: "■ 停止", exact: true }).waitFor()
+  const completeDraftRequest = requests.at(-1)!
+  assert.equal(completeDraftRequest.isIteration, true)
+  assert.equal(completeDraftRequest.kind, "agent")
+  assert.equal(completeDraftRequest.modelId, completeDraft.selectedModelId)
+  assert.equal(completeDraftRequest.imageData, completeDraft.attachedImage!.base64)
+  assert.equal(completeDraftRequest.mimeType, completeDraft.attachedImage!.mimeType)
+  assert.equal(completeDraftRequest.skill?.path, completeDraft.selectedSkill!.path)
+  assert.match(completeDraftRequest.currentHtml!, /链接页面/)
+  assert.match(completeDraftRequest.prompt, /requirement\.md/)
+  assert.match(completeDraftRequest.prompt, /untitled-1\.ts/)
+  const syncedDraft = await page.evaluate(id => (window as any).importFixture.syncedContexts.filter((item: any) => item.designSessionId === id), completeDraftId)
+  assert.equal(syncedDraft.find((item: any) => item.kind === "attachments").files.length, 2)
+  assert.equal(syncedDraft.find((item: any) => item.kind === "code").files[0].content, completeDraft.codeContext![0].content)
+  for (const key of draftKeys)
+    assert.deepEqual(manager.get(editingPageId).state[key], completeDraft[key], "sending the new draft leaves the source draft intact")
+  emitters.at(-1)!({ type: "error", error: "完整草稿发送测试结束" })
+  completions.at(-1)!()
+  await page.getByText("完整草稿发送测试结束", { exact: false }).waitFor()
+  await attachDraftScreenshot()
+  await page.locator("textarea").first().fill("按截图调整当前网页")
+  await page.getByRole("button", { name: "▶ 发送", exact: true }).click()
+  await page.getByRole("button", { name: "■ 停止", exact: true }).waitFor()
+  assert.equal(requests.at(-1)!.isIteration, true, "screenshots without a skill also keep the current HTML baseline")
+  assert.match(requests.at(-1)!.currentHtml!, /链接页面/)
+  emitters.at(-1)!({ type: "error", error: "截图迭代测试结束" })
+  completions.at(-1)!()
+  await page.getByText("截图迭代测试结束", { exact: false }).waitFor()
+  console.log("PASS complete composer preservation: files, webpage references, screenshot, code, skill and model survive adoption/reload and send against the imported HTML")
 
   if (process.env.DESIGN_URL_IMPORT_ONLY !== "1") {
   for (const entry of [

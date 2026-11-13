@@ -2136,7 +2136,7 @@ export function DesignView({
       assertCurrent?: () => void
       onBeforeCommit?: () => Promise<void>
       createNew?: boolean
-      preserveInput?: boolean
+      preserveComposerDraft?: boolean
       workspacePath?: string
       warnings?: string[]
       sourceInfo: DesignSourceInfo
@@ -2194,6 +2194,16 @@ export function DesignView({
       options.assertCurrent?.()
       await options.onBeforeCommit?.()
       const prev = tabStatesRef.current[tabId] ?? makeTabState()
+      const composerDraft = options.preserveComposerDraft
+        ? {
+            inputValue: prev.inputValue,
+            attachedFiles: prev.attachedFiles,
+            attachedImage: prev.attachedImage,
+            codeContext: prev.codeContext,
+            selectedSkill: prev.selectedSkill,
+            selectedModelId: prev.selectedModelId
+          }
+        : {}
       const importedState: Partial<TabState> = {
         messages: [
           { role: "user" as const, content: options.userMessage },
@@ -2215,7 +2225,7 @@ export function DesignView({
         tweaksOn: true,
         activeMode: null,
         zoom: prev.zoom,
-        inputValue: options.preserveInput ? prev.inputValue : "",
+        inputValue: "",
         comments: [],
         draftComment: null,
         activeCommentId: null,
@@ -2245,7 +2255,8 @@ export function DesignView({
           { role: "user" as const, content: options.userMessage },
           { role: "assistant" as const, content: "页面已还原，可继续编辑" }
         ],
-        pendingApproval: null
+        pendingApproval: null,
+        ...composerDraft
       }
 
       const importedMeta = {
@@ -2525,7 +2536,7 @@ export function DesignView({
           await applyImportedDesign({
             sessionId,
             createNew: true,
-            preserveInput: source === "session",
+            preserveComposerDraft: source === "session",
             html: captured.html,
             artifactPath: prepared.artifactPath,
             workspacePath: workspace,
@@ -3791,9 +3802,8 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
       ? { name: selectedSkill.name, path: selectedSkill.path }
       : undefined
 
-    // If a screenshot is attached — skip questions. Skill sends still go through
-    // Agent Runtime so the selected skill is read/executed and visible in the
-    // execution panel; no-skill screenshot sends keep the lean direct vision path.
+    // Existing pages keep their HTML baseline when a screenshot is attached.
+    // New pages without a skill use the lean direct vision path.
     if (attachedImage) {
       const userContent = prompt || "请参考截图，生成改进版设计。"
       updateTs(tabId, (prev) => ({
@@ -3809,16 +3819,18 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
           }
         ]
       }))
-      if (selectedSkill) {
+      if (selectedSkill || hasExistingDesign) {
         startGeneration(
           (prompt || userContent) + contextSuffix,
           tabId,
-          false,
+          hasExistingDesign,
           selectedModelId,
           userContent,
           { base64: attachedImage.base64, mimeType: attachedImage.mimeType },
           skillReference,
-          tabStates[tabId]?.artifactPath ?? null
+          stateBeforeSend?.artifactPath ?? null,
+          false,
+          hasExistingDesign ? makeIterationRollbackSnapshot(stateBeforeSend) : undefined
         )
       } else {
         startGenerationFromImage(
