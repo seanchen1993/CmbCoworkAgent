@@ -57,3 +57,15 @@ export function stageDurationShare(stageDurationMs: number, totalDurationMs: num
   if (!Number.isFinite(share) || share < 0) return 0
   return Math.min(1, share)
 }
+
+export const PROJECT_ELAPSED_HINT =
+  "项目历时 = 最后执行结束时间 − 项目创建时间。按项目全生命周期内主动触发的主 Agent 轮次取最晚结束时间，包含成功、失败及取消的轮次，不含子 Agent、定时任务和心跳。包含空闲、人工等待及跨天间隔，不代表项目已完成，也不是累计运行耗时。运行结束并上报后更新；时间缺失或异常时显示 —。"
+
+export function formatProjectElapsed(ms: number | null | undefined): string {
+  if (ms == null || !Number.isFinite(ms) || ms < 0) return "—"
+  if (ms < 60_000) return "不足1分钟"
+  const minutes = Math.floor(ms / 60_000)
+  const days = Math.floor(minutes / 1440)
+  const hours = Math.floor((minutes % 1440) / 60)
+  return `${days ? `${days}天 ` : ""}${hours ? `${hours}小时 ` : ""}${minutes % 60}分钟`
+}

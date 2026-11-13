@@ -19,11 +19,25 @@ export function featureExecutionAggs(): Json {
   }
 }
 
-export function readLastExecution(container: unknown): string | null {
-  const value = record(record(container).last_execution).value
+export function readLastExecution(
+  container: unknown,
+  field: "last_execution" | "last_execution_end" = "last_execution"
+): string | null {
+  const value = record(record(container)[field]).value
   if (typeof value !== "number" || !Number.isFinite(value)) return null
   const date = new Date(value)
   return Number.isFinite(date.getTime()) ? date.toISOString() : null
+}
+
+/** Calendar elapsed time, including idle time; missing/invalid history stays unknown. */
+export function calculateProjectElapsedMs(
+  createdAt: string | null | undefined,
+  lastEndedAt: string | null | undefined
+): number | null {
+  if (!createdAt || !lastEndedAt) return null
+  const start = Date.parse(createdAt)
+  const end = Date.parse(lastEndedAt)
+  return Number.isFinite(start) && Number.isFinite(end) && end >= start ? end - start : null
 }
 
 export function readFeatureExecution(container: unknown): FeatureExecutionMetrics {
