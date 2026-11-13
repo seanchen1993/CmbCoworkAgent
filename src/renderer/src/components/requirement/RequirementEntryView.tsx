@@ -30,8 +30,11 @@ import {
   getRequirementSessionCapabilities,
   type RequirementSessionCapabilities
 } from "./requirement-session-capabilities"
-import { getSelectedRequirementSystem, useRequirementStore } from "./requirement-store"
-import type { DesignSystemInfo } from "../design/types"
+import {
+  getRequirementSystemName,
+  getSelectedRequirementSystem,
+  useRequirementStore
+} from "./requirement-store"
 import { useAppStore } from "@/lib/store"
 import {
   REQUIREMENT_CONVERSATION_ENTRY_KEY,
@@ -256,23 +259,20 @@ export function RequirementEntryView({
       .listSystems()
       .then((systems) => {
         setSystemList(systems)
-        return systems
       })
       .catch((error: unknown) => {
         console.error("加载系统列表失败", error)
-        return [] as DesignSystemInfo[]
       })
 
-    const [persistedRequirements, systems] = await Promise.all([
+    const [persistedRequirements] = await Promise.all([
       window.api.requirements.list(),
       systemsPromise
     ])
-    const systemNames = new Map(systems.map((system) => [system.id, system.name]))
     // 逐项容错：某条数据异常时跳过，避免整列加载失败
     const validRequirements = Array.isArray(persistedRequirements)
       ? persistedRequirements.flatMap((item) => {
           try {
-            return [fromPersistedRequirement(item, systemNames.get(item.systemId) ?? item.systemId)]
+            return [fromPersistedRequirement(item, getRequirementSystemName(item.systemId))]
           } catch (error) {
             console.error("解析需求项失败，已跳过", item?.reqId, error)
             return []

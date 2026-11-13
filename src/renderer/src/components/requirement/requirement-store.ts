@@ -116,3 +116,7 @@ export const useRequirementStore = create<RequirementStore>((set) => ({
 export function getSelectedRequirementSystem(systemId: string | null): DesignSystemInfo | null {
   return findSystem(useRequirementStore.getState().systemList, systemId)
 }
+
+export function getRequirementSystemName(systemId: string): string {
+  return findSystem(useRequirementStore.getState().systemList, systemId)?.name ?? systemId
+}

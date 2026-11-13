@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest"
 import {
+  buildRequirementDevelopmentPrompt,
   findRequirementDevelopmentAssociation,
   getStoredRequirementDevelopmentMetadata,
   removeRequirementDevelopmentAssociation,
@@ -28,6 +29,18 @@ function metadata(requirementId: string): RequirementDevelopmentMetadata {
 }
 
 describe("requirement development associations", () => {
+  it("formats Windows paths without Markdown escape-like backslashes", () => {
+    const prompt = buildRequirementDevelopmentPrompt({
+      title: "简单todolist",
+      requirementFilePath: String.raw`D:\my-projects\简单todolist\_完整版PRD.md`,
+      prototypeFilePaths: [String.raw`D:\my-projects\简单todolist\prototype_a.html`]
+    })
+
+    expect(prompt).toContain("需求文件：`D:/my-projects/简单todolist/_完整版PRD.md`")
+    expect(prompt).toContain("  - `D:/my-projects/简单todolist/prototype_a.html`")
+    expect(prompt).not.toContain(String.raw`\_完整版PRD.md`)
+  })
+
   it("stores the whole development mapping in one association", () => {
     const storage = createStorage()
     storeRequirementDevelopmentAssociation("thread-1", metadata("space:org:REQ-1"), storage)

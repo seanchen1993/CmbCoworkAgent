@@ -228,12 +228,13 @@ export function buildRequirementDevelopmentPrompt(input: {
   requirementFilePath: string
   prototypeFilePaths: string[]
 }): string {
+  const formatPath = (path: string): string => `\`${path.replace(/\\/g, "/")}\``
   const prototypeLines = input.prototypeFilePaths.length
-    ? input.prototypeFilePaths.map((path) => `  - ${path}`).join("\n")
+    ? input.prototypeFilePaths.map((path) => `  - ${formatPath(path)}`).join("\n")
     : "  无"
   return `
 需求名称：${input.title}
-需求文件：${input.requirementFilePath}
+需求文件：${formatPath(input.requirementFilePath)}
 原型设计文件：${prototypeLines}
 
 `

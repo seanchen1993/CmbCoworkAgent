@@ -1,6 +1,7 @@
 import assert from "node:assert/strict"
 import {
   ALL_REQUIREMENT_SYSTEMS_VALUE,
+  getRequirementSystemName,
   useRequirementStore
 } from "../src/renderer/src/components/requirement/requirement-store"
 
@@ -42,6 +43,11 @@ assert.equal(store.getState().selectedSystemId, null, "unknown systems fall back
 const custom = store.getState().addCustomSystem("全新业务系统")
 assert.equal(custom.name, "全新业务系统")
 assert.equal(custom.theme, "", "custom systems have an empty theme")
+assert.equal(
+  getRequirementSystemName(custom.id),
+  "全新业务系统",
+  "requirement list labels resolve custom system names instead of displaying their ids"
+)
 assert.ok(store.getState().systemList.some((system) => system.id === custom.id))
 
 store.getState().setSystemList(systems)
