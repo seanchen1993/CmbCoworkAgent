@@ -1,6 +1,9 @@
 import assert from "node:assert/strict"
 import type { RequirementRecord } from "../src/renderer/src/components/requirement/requirement-data"
-import { filterRequirementsBySystem } from "../src/renderer/src/components/requirement/requirement-history-filter"
+import {
+  filterRequirements,
+  filterRequirementsBySystem
+} from "../src/renderer/src/components/requirement/requirement-history-filter"
 
 const requirements: RequirementRecord[] = [
   {
@@ -79,6 +82,19 @@ assert.equal(
   unknownSystemRequirements.length,
   0,
   "unknown design systems should not match requirements"
+)
+
+const statusMatches = filterRequirements(requirements, {
+  currentUser: null,
+  mineOnly: false,
+  query: "已生成 v1",
+  sourceFilter: "all",
+  systemId: null
+})
+assert.deepEqual(
+  statusMatches.map((item) => item.id),
+  ["req-002"],
+  "the shared list filter should search status consistently for both count and rows"
 )
 
 console.log("requirement-history-filter: all assertions passed")

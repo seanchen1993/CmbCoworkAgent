@@ -202,13 +202,31 @@ function absoluteRequirementFilePath(workspacePath: string, filePath: string): s
   return `${base}/${relative}`
 }
 
+export function normalizeRequirementPrdFilePath(filePath: string): string {
+  const normalized = filePath.trim().replace(/\\/g, "/").replace(/^\/+/, "")
+  const prdMarker = normalized.toLowerCase().lastIndexOf("/prd/")
+  if (prdMarker >= 0) return `/${normalized.slice(prdMarker + 1)}`
+  return normalized.toLowerCase() === "prd" || normalized.toLowerCase().startsWith("prd/")
+    ? `/${normalized}`
+    : `/prd/${normalized}`
+}
+
+export function resolveRequirementPrdFilePath(
+  requirementWorkspacePath: string,
+  filePath: string
+): string {
+  if (/^(?:[a-zA-Z]:[\\/]|[/\\]{2}|\/)/.test(filePath)) return filePath
+  const prdRelativePath = normalizeRequirementPrdFilePath(filePath).replace(/^\/+/, "")
+  return absoluteRequirementFilePath(requirementWorkspacePath, prdRelativePath)
+}
+
 export function resolveRequirementDevelopmentFiles(
   requirement: RequirementRecord,
   manifest: RequirementPrdManifest | null,
   requirementWorkspacePath: string
 ): { requirementFilePath: string; prototypeFilePaths: string[] } {
   const current = manifest ?? requirement.prdManifest
-  const requirementFilePath = absoluteRequirementFilePath(
+  const requirementFilePath = resolveRequirementPrdFilePath(
     requirementWorkspacePath,
     current.prd.file
   )

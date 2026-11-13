@@ -35,7 +35,10 @@ import {
   type RequirementRecord,
   type RequirementUser
 } from "./requirement-data"
-import { isRequirementMine } from "./requirement-history-filter"
+import {
+  filterRequirements,
+  type RequirementSourceFilter
+} from "./requirement-history-filter"
 import { RequirementStatusTags } from "./RequirementStatusTags"
 import { RequirementListLoading } from "./RequirementListLoading"
 import { findRequirementDesignEntry } from "@/lib/requirement-design-entry"
@@ -48,7 +51,7 @@ import { RequirementSpaceStatusTag } from "./RequirementSpaceStatusTag"
 import { systemTagToneClass } from "@/lib/requirement-system-tag-tone"
 
 const PAGE_SIZE = 15
-export type RequirementSourceFilter = "all" | "local" | "remote" | "space"
+export type { RequirementSourceFilter } from "./requirement-history-filter"
 
 function initials(value: string): string {
   return (value.trim().slice(0, 1) || "需").toUpperCase()
@@ -216,30 +219,13 @@ export function RequirementHistoryList({
   const page = pageState.filterKey === filterKey ? pageState.page : 1
 
   const visibleItems = useMemo(() => {
-    const normalized = query.trim().toLocaleLowerCase()
-    const items = requirements
-    return items
-      .filter((item) => item.origin !== "local" || !systemId || item.systemId === systemId)
-      .filter((item) => sourceFilter === "all" || item.origin === sourceFilter)
-      .filter((item) => !mineOnly || isRequirementMine(item, currentUser))
-      .filter(
-        (item) =>
-          !normalized ||
-          [
-            item.id,
-            item.title,
-            item.system,
-            item.sourceName,
-            item.initialDescription,
-            item.status,
-            item.owner?.name,
-            ...(item.collaborators ?? []).map((user) => user.name)
-          ]
-            .filter(Boolean)
-            .join(" ")
-            .toLocaleLowerCase()
-            .includes(normalized)
-      )
+    return filterRequirements(requirements, {
+      currentUser,
+      mineOnly,
+      query,
+      sourceFilter,
+      systemId
+    })
   }, [currentUser, mineOnly, query, requirements, sourceFilter, systemId])
   const usesServerPagination = serverPage !== undefined && onServerPageChange !== undefined
   const totalPages = Math.max(

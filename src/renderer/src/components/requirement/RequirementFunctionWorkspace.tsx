@@ -20,39 +20,9 @@ import {
 } from "@/components/ui/dropdown-menu"
 import { MarkdownPreview } from "@/components/ui/MarkdownPreview/MarkdownPreview"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
-import { assembleBoundedTextPreview } from "@/lib/text-preview-pages"
-import type { WorkspaceFilePreviewReadResult } from "../../../../shared/workspace-file-preview"
+import { readRequirementWorkspaceTextFile } from "@/lib/requirement-workspace-text"
 import type { RequirementRecord } from "./requirement-data"
 import { REQUIREMENT_ACTION_HINTS, RequirementActionButton } from "./RequirementActionButton"
-
-const PREVIEW_MAX_BYTES = 8 * 1024 * 1024
-const PREVIEW_MAX_PAGES = 64
-
-async function readWorkspaceTextFile(
-  threadId: string,
-  filePath: string
-): Promise<{ success: boolean; content?: string; error?: string }> {
-  const requestToken = globalThis.crypto.randomUUID()
-  const lane = `requirement-function-workspace:${threadId}:${requestToken}`
-  const readPage = (offset: number): Promise<WorkspaceFilePreviewReadResult> =>
-    window.api.workspace.readFilePreview({
-      source: { threadId, filePath },
-      offset,
-      lane,
-      requestToken
-    })
-  const first = await readPage(0)
-  if (!first.success) return { success: false, error: first.error }
-  const assembled = await assembleBoundedTextPreview(
-    first,
-    async (offset) => {
-      const page = await readPage(offset)
-      return page.success ? page : null
-    },
-    { maxBytes: PREVIEW_MAX_BYTES, maxPages: PREVIEW_MAX_PAGES }
-  )
-  return { success: true, content: assembled.content }
-}
 
 export function RequirementFunctionWorkspace({
   requirement,
@@ -107,7 +77,9 @@ export function RequirementFunctionWorkspace({
         }
         return
       }
-      const result = await readWorkspaceTextFile(threadId, filePath)
+      const result = await readRequirementWorkspaceTextFile(threadId, filePath, {
+        lanePrefix: "requirement-function-workspace"
+      })
       if (cancelled) return
       if (!result.success) setError(result.error || "PRD 文件加载失败")
       else {

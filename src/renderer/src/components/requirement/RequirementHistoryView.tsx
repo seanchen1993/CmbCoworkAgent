@@ -4,10 +4,13 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { cn } from "@/lib/utils"
-import { RequirementHistoryList, type RequirementSourceFilter } from "./RequirementHistoryList"
+import { RequirementHistoryList } from "./RequirementHistoryList"
 import type { RequirementRecord, RequirementUser } from "./requirement-data"
 import { useRequirementStore } from "./requirement-store"
-import { isRequirementMine } from "./requirement-history-filter"
+import {
+  filterRequirements,
+  type RequirementSourceFilter
+} from "./requirement-history-filter"
 import { REQUIREMENT_SPACE_LIST_QUERY_KEY } from "./requirement-navigation"
 
 const sourceFilters: Array<{ value: RequirementSourceFilter; label: string }> = [
@@ -67,27 +70,12 @@ export function RequirementHistoryView({
   }, [])
 
   const visibleCount =
-    requirements.filter((item) => {
-      if (selectedSystemId && item.origin === "local" && item.systemId !== selectedSystemId)
-        return false
-      if (sourceFilter !== "all" && item.origin !== sourceFilter) return false
-      if (mineOnly && !isRequirementMine(item, currentUser)) return false
-      const normalized = query.trim().toLocaleLowerCase()
-      return (
-        !normalized ||
-        [
-          item.title,
-          item.system,
-          item.initialDescription,
-          item.sourceName,
-          item.id,
-          item.owner?.name
-        ]
-          .filter(Boolean)
-          .join(" ")
-          .toLocaleLowerCase()
-          .includes(normalized)
-      )
+    filterRequirements(requirements, {
+      currentUser,
+      mineOnly,
+      query,
+      sourceFilter,
+      systemId: selectedSystemId
     }).length + (!mineOnly && (sourceFilter === "all" || sourceFilter === "remote") ? 1 : 0)
 
   return (

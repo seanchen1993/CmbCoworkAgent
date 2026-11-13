@@ -154,6 +154,21 @@ export function isRequirementPublished(requirement: RequirementRecord): boolean 
   return requirement.prdManifest.prd.status.trim().toLowerCase() === "published"
 }
 
+export function isRequirementSpacePublished(
+  manifest: RequirementPrdManifest | null | undefined
+): boolean {
+  return (
+    manifest?.prd.status.toLowerCase() === "published" || Boolean(manifest?.prd.prDetailUrl?.trim())
+  )
+}
+
+export function getRequirementPrototypeFunctionKey(functionInfo: {
+  fr: string
+  file: string
+}): string {
+  return `${functionInfo.fr}:${functionInfo.file}`
+}
+
 export function isRequirementGenerated(requirement: RequirementRecord): boolean {
   const status = requirement.prdManifest.prd.status.trim().toLowerCase()
   return (

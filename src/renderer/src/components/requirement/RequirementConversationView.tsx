@@ -9,16 +9,17 @@ import {
 import { Button } from "@/components/ui/button"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { useAppStore } from "@/lib/store"
-import { assembleBoundedTextPreview } from "@/lib/text-preview-pages"
+import { readRequirementWorkspaceTextFile } from "@/lib/requirement-workspace-text"
 import { useAllThreadStates, useThreadState, useThreadStream } from "@/lib/thread-context"
 import { cn } from "@/lib/utils"
 import {
   beginOpenResourcePreviewIntent,
   emitOpenResourcePreview
 } from "@/lib/resource-preview-events"
-import type { WorkspaceFilePreviewReadResult } from "../../../../shared/workspace-file-preview"
 import {
   fromPersistedRequirement,
+  getRequirementPrototypeFunctionKey,
+  isRequirementSpacePublished,
   normalizeRequirementHtmlFilePath,
   type NeedDesignChoice,
   isRequirementGenerated,
@@ -48,6 +49,7 @@ import {
   buildRequirementDevelopmentPrompt,
   getRequirementDevelopmentMetadata,
   isMissingRequirementThreadError,
+  normalizeRequirementPrdFilePath,
   REQUIREMENT_DEVELOPMENT_ONBOARDING_EVENT,
   REQUIREMENT_DEVELOPMENT_ONBOARDING_KEY,
   resolveRequirementDevelopmentFiles,
@@ -65,19 +67,6 @@ function getPreviewTabForStep(currentStep: number): PreviewTab {
   if (currentStep >= 3) return "prd"
   if (currentStep >= 2) return "expert-process"
   return "source"
-}
-
-function getPrototypeFunctionKey(functionInfo: { fr: string; file: string }): string {
-  return `${functionInfo.fr}:${functionInfo.file}`
-}
-
-function normalizePrdFilePath(filePath: string): string {
-  const normalized = filePath.trim().replace(/\\/g, "/").replace(/^\/+/, "")
-  const prdMarker = normalized.toLowerCase().lastIndexOf("/prd/")
-  if (prdMarker >= 0) return `/${normalized.slice(prdMarker + 1)}`
-  return normalized.toLowerCase() === "prd" || normalized.toLowerCase().startsWith("prd/")
-    ? `/${normalized}`
-    : `/prd/${normalized}`
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -152,56 +141,11 @@ function normalizeRequirementSpaceManifest(value: unknown): RequirementPrdManife
   }
 }
 
-function isRequirementSpacePublished(manifest: RequirementPrdManifest | null): boolean {
-  return (
-    manifest?.prd.status.toLowerCase() === "published" || Boolean(manifest?.prd.prDetailUrl?.trim())
-  )
-}
-
 function isRequirementPrdGenerationCompleted(
   manifest: RequirementPrdManifest | null | undefined
 ): boolean {
   const status = manifest?.prd.status.trim().toLowerCase()
   return status === "generated" || status === "published"
-}
-
-const REQUIREMENT_WORKSPACE_PREVIEW_MAX_BYTES = 8 * 1024 * 1024
-const REQUIREMENT_WORKSPACE_PREVIEW_MAX_PAGES = 64
-
-// The raw workspace read channel was replaced by the bounded, cancellable preview
-// API. Requirements still need whole-file text (prd-manifest.json), so page through
-// the preview until the file is complete or the safety budget is exhausted.
-async function readRequirementWorkspaceTextFile(
-  threadId: string,
-  filePath: string,
-  lanePrefix: string
-): Promise<{ success: boolean; content?: string; notFound?: boolean; error?: string }> {
-  const requestToken = globalThis.crypto.randomUUID()
-  const lane = `${lanePrefix}:${threadId}:${requestToken}`
-  const readPage = (offset: number): Promise<WorkspaceFilePreviewReadResult> =>
-    window.api.workspace.readFilePreview({
-      source: { threadId, filePath },
-      offset,
-      lane,
-      requestToken
-    })
-
-  const first = await readPage(0)
-  if (!first.success) {
-    return { success: false, error: first.error, notFound: first.errorCode === "not-found" }
-  }
-  const assembled = await assembleBoundedTextPreview(
-    first,
-    async (offset) => {
-      const page = await readPage(offset)
-      return page.success ? page : null
-    },
-    {
-      maxBytes: REQUIREMENT_WORKSPACE_PREVIEW_MAX_BYTES,
-      maxPages: REQUIREMENT_WORKSPACE_PREVIEW_MAX_PAGES
-    }
-  )
-  return { success: true, content: assembled.content }
 }
 
 function buildRequirementInitializationMessage(requirement: RequirementRecord): string {
@@ -469,7 +413,7 @@ function RequirementConversationSession({
     const prd = requirementSpaceManifest?.prd
     if (!prd?.htmlId) return null
     const workspacePath = threadState?.workspacePath ?? requirement.requirementPath
-    const relativePrdFile = normalizePrdFilePath(prd.file).replace(/^\/+/, "")
+    const relativePrdFile = normalizeRequirementPrdFilePath(prd.file).replace(/^\/+/, "")
     const separator = workspacePath.includes("\\") ? "\\" : "/"
     const requirementFilePath = `${workspacePath.replace(/[\\/]+$/, "")}${separator}${relativePrdFile.replace(/\//g, separator)}`
     return {
@@ -506,7 +450,7 @@ function RequirementConversationSession({
         functions: prototypeFunctions.flatMap((functionInfo) => {
           if (
             changedChoice &&
-            changedChoice.functionKey !== getPrototypeFunctionKey(functionInfo)
+            changedChoice.functionKey !== getRequirementPrototypeFunctionKey(functionInfo)
           ) {
             return []
           }
@@ -517,7 +461,7 @@ function RequirementConversationSession({
             needDesign:
               route === "skip"
                 ? "0"
-                : changedChoice?.functionKey === getPrototypeFunctionKey(functionInfo)
+                : changedChoice?.functionKey === getRequirementPrototypeFunctionKey(functionInfo)
                   ? changedChoice.needDesign
                   : functionInfo.needDesign
           }
@@ -546,7 +490,7 @@ function RequirementConversationSession({
   )
   const updatePrototypeFunctionDesign = useCallback(
     (functionInfo: { fr: string; file: string }, needDesign: NeedDesignChoice): void => {
-      const functionKey = getPrototypeFunctionKey(functionInfo)
+      const functionKey = getRequirementPrototypeFunctionKey(functionInfo)
       void persistPrototypeState("design", 4, {
         functionKey,
         needDesign
@@ -567,8 +511,8 @@ function RequirementConversationSession({
     }): RequirementDesignEntry => {
       const workspacePath = threadState?.workspacePath ?? requirement.requirementPath
       const workspaceRoot = workspacePath.replace(/[\\/]+$/, "")
-      const relativeFile = normalizePrdFilePath(functionInfo.file).replace(/^\/+/, "")
-      const relativeOverviewFile = normalizePrdFilePath(
+      const relativeFile = normalizeRequirementPrdFilePath(functionInfo.file).replace(/^\/+/, "")
+      const relativeOverviewFile = normalizeRequirementPrdFilePath(
         requirementSpaceManifest?.prd.file ?? ""
       ).replace(/^\/+/, "")
       const separator = workspacePath.includes("\\") ? "\\" : "/"
@@ -638,7 +582,7 @@ function RequirementConversationSession({
         const workspacePath = threadState?.workspacePath ?? requirement.requirementPath
         const workspaceRoot = workspacePath.replace(/[\\/]+$/, "")
         if (!requirementSpaceManifest?.prd.file?.trim()) throw new Error("未找到完整 PRD 文档")
-        const relativePrdFile = normalizePrdFilePath(requirementSpaceManifest.prd.file).replace(
+        const relativePrdFile = normalizeRequirementPrdFilePath(requirementSpaceManifest.prd.file).replace(
           /^\/+/,
           ""
         )
@@ -680,7 +624,7 @@ function RequirementConversationSession({
           return
         }
       }
-      const selectedKeys = new Set(functionInfos.map(getPrototypeFunctionKey))
+      const selectedKeys = new Set(functionInfos.map(getRequirementPrototypeFunctionKey))
       const result = await window.api.requirements.saveStepState({
         reqId: requirement.id,
         needDesign: "1",
@@ -692,7 +636,7 @@ function RequirementConversationSession({
           needDesign:
             mode === "full-prd"
               ? functionInfo.needDesign
-              : selectedKeys.has(getPrototypeFunctionKey(functionInfo))
+              : selectedKeys.has(getRequirementPrototypeFunctionKey(functionInfo))
                 ? "1"
                 : "0"
         }))
@@ -793,7 +737,7 @@ function RequirementConversationSession({
     (filePath: string): void => {
       const workspacePath = threadState?.workspacePath ?? requirement.requirementPath
       const normalizedWorkspace = workspacePath.replace(/[\\/]+$/, "")
-      const normalizedFile = normalizePrdFilePath(filePath).replace(/^\/+/, "")
+      const normalizedFile = normalizeRequirementPrdFilePath(filePath).replace(/^\/+/, "")
       const absolutePath = `${normalizedWorkspace}/${normalizedFile}`
       void window.electron.ipcRenderer
         .invoke("show-item-in-folder", absolutePath)
@@ -919,7 +863,7 @@ function RequirementConversationSession({
       const readResult = await readRequirementWorkspaceTextFile(
         manifestThreadId,
         "/prd/prd-manifest.json",
-        "requirement-status"
+        { lanePrefix: "requirement-status" }
       )
       if (!readResult.success || readResult.content === undefined) {
         if (readResult.notFound) return false
@@ -1105,7 +1049,7 @@ function RequirementConversationSession({
         const result = await readRequirementWorkspaceTextFile(
           threadId,
           "/prd/prd-manifest.json",
-          "requirement-manifest"
+          { lanePrefix: "requirement-manifest" }
         )
         if (!result.success && !result.notFound) {
           throw new Error(result.error || "读取 prd-manifest.json 失败")

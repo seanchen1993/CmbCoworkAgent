@@ -4,7 +4,9 @@ import {
   findRequirementDevelopmentAssociation,
   getStoredRequirementDevelopmentMetadata,
   isMissingRequirementThreadError,
+  normalizeRequirementPrdFilePath,
   removeRequirementDevelopmentAssociation,
+  resolveRequirementPrdFilePath,
   storeRequirementDevelopmentAssociation,
   type RequirementDevelopmentMetadata
 } from "./requirement-development"
@@ -30,6 +32,26 @@ function metadata(requirementId: string): RequirementDevelopmentMetadata {
 }
 
 describe("requirement development associations", () => {
+  it("resolves a manifest PRD filename inside the requirement prd directory", () => {
+    const workspace = String.raw`D:\my-projects\requirements\req-1-简单表格`
+
+    expect(resolveRequirementPrdFilePath(workspace, "简单表格_完整版PRD.md")).toBe(
+      String.raw`D:\my-projects\requirements\req-1-简单表格/prd/简单表格_完整版PRD.md`
+    )
+    expect(resolveRequirementPrdFilePath(workspace, "prd/简单表格_完整版PRD.md")).toBe(
+      String.raw`D:\my-projects\requirements\req-1-简单表格/prd/简单表格_完整版PRD.md`
+    )
+  })
+
+  it("shares the same PRD path normalization used by file opening and project mode", () => {
+    expect(normalizeRequirementPrdFilePath("简单表格_完整版PRD.md")).toBe(
+      "/prd/简单表格_完整版PRD.md"
+    )
+    expect(normalizeRequirementPrdFilePath("prd/简单表格_完整版PRD.md")).toBe(
+      "/prd/简单表格_完整版PRD.md"
+    )
+  })
+
   it("recognizes an already deleted associated thread", () => {
     expect(
       isMissingRequirementThreadError(

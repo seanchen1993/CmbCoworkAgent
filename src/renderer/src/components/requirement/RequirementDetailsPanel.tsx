@@ -29,17 +29,23 @@ import {
 import { HtmlThumbnailPreview } from "@/components/ui/html-thumbnail-preview"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
-import { assembleBoundedTextPreview } from "@/lib/text-preview-pages"
+import { readRequirementWorkspaceTextFile } from "@/lib/requirement-workspace-text"
 import type { RequirementDesignEntry } from "@/lib/requirement-design-entry"
 import { cn } from "@/lib/utils"
 import { useAppStore } from "@/lib/store"
-import { findRequirementDevelopmentThreads } from "@/lib/requirement-development"
+import {
+  findRequirementDevelopmentThreads,
+  normalizeRequirementPrdFilePath
+} from "@/lib/requirement-development"
 import { shouldHideRequirementDevelopment } from "./requirement-persona"
-import type { WorkspaceFilePreviewReadResult } from "../../../../shared/workspace-file-preview"
 import type {
   NeedDesignChoice,
   RequirementPrdManifest,
   RequirementRecord
+} from "./requirement-data"
+import {
+  getRequirementPrototypeFunctionKey,
+  isRequirementSpacePublished
 } from "./requirement-data"
 import {
   RequirementFunctionCard,
@@ -121,61 +127,8 @@ type RequirementDetailsPanelProps = {
   onResetDevelopment: () => void | Promise<void>
 }
 
-function getPrototypeFunctionKey(functionInfo: { fr: string; file: string }): string {
-  return `${functionInfo.fr}:${functionInfo.file}`
-}
-function normalizePrdFilePath(filePath: string): string {
-  const normalized = filePath.trim().replace(/\\/g, "/").replace(/^\/+/, "")
-  const prdMarker = normalized.toLowerCase().lastIndexOf("/prd/")
-  if (prdMarker >= 0) return `/${normalized.slice(prdMarker + 1)}`
-  return normalized.toLowerCase() === "prd" || normalized.toLowerCase().startsWith("prd/")
-    ? `/${normalized}`
-    : `/prd/${normalized}`
-}
 function getDisplayFileName(filePath: string): string {
   return filePath.replace(/\\/g, "/").split("/").filter(Boolean).pop() ?? filePath
-}
-function isRequirementSpacePublished(manifest: RequirementPrdManifest | null): boolean {
-  return (
-    manifest?.prd.status.toLowerCase() === "published" || Boolean(manifest?.prd.prDetailUrl?.trim())
-  )
-}
-
-const REQUIREMENT_WORKSPACE_PREVIEW_MAX_BYTES = 8 * 1024 * 1024
-const REQUIREMENT_WORKSPACE_PREVIEW_MAX_PAGES = 64
-async function readRequirementWorkspaceTextFile(
-  threadId: string,
-  filePath: string
-): Promise<{ success: boolean; content?: string; error?: string }> {
-  const requestToken = globalThis.crypto.randomUUID()
-  const lane = `requirement-prototype-html:${threadId}:${requestToken}`
-  const readPage = (offset: number): Promise<WorkspaceFilePreviewReadResult> =>
-    window.api.workspace.readFilePreview({
-      source: {
-        threadId,
-        filePath,
-        workspacePathKind: /^(?:[a-zA-Z]:[\\/]|[/\\]{2}|\/)/.test(filePath)
-          ? "absolute"
-          : "relative"
-      },
-      offset,
-      lane,
-      requestToken
-    })
-  const first = await readPage(0)
-  if (!first.success) return { success: false, error: first.error }
-  const assembled = await assembleBoundedTextPreview(
-    first,
-    async (offset) => {
-      const page = await readPage(offset)
-      return page.success ? page : null
-    },
-    {
-      maxBytes: REQUIREMENT_WORKSPACE_PREVIEW_MAX_BYTES,
-      maxPages: REQUIREMENT_WORKSPACE_PREVIEW_MAX_PAGES
-    }
-  )
-  return { success: true, content: assembled.content }
 }
 
 function PrototypeHtmlPreview({
@@ -199,7 +152,10 @@ function PrototypeHtmlPreview({
   })
   useEffect(() => {
     let cancelled = false
-    void readRequirementWorkspaceTextFile(threadId, filePath).then((result) => {
+    void readRequirementWorkspaceTextFile(threadId, filePath, {
+      lanePrefix: "requirement-prototype-html",
+      workspacePathKind: "auto"
+    }).then((result) => {
       if (cancelled) return
       setPreview(
         !result.success || !result.content
@@ -394,7 +350,7 @@ export function RequirementDetailsPanel({
   const selectedPrototypeStatus = selectedFunction
     ? prototypeStatuses.find(
         (item) =>
-          getPrototypeFunctionKey(item.functionInfo) === getPrototypeFunctionKey(selectedFunction)
+          getRequirementPrototypeFunctionKey(item.functionInfo) === getRequirementPrototypeFunctionKey(selectedFunction)
       )
     : undefined
   const hasFullPrdDesignSession = Boolean(fullPrdDesignEntry?.htmlId)
@@ -416,7 +372,7 @@ export function RequirementDetailsPanel({
   const prototypeStatusByFunction = useMemo(
     () =>
       new Map(
-        prototypeStatuses.map((item) => [getPrototypeFunctionKey(item.functionInfo), item] as const)
+        prototypeStatuses.map((item) => [getRequirementPrototypeFunctionKey(item.functionInfo), item] as const)
       ),
     [prototypeStatuses]
   )
@@ -581,7 +537,7 @@ export function RequirementDetailsPanel({
           <RequirementFunctionWorkspace
             requirement={requirement}
             title={requirementSpaceManifest.prd.name || requirement.title}
-            filePath={normalizePrdFilePath(requirementSpaceManifest.prd.file)}
+            filePath={normalizeRequirementPrdFilePath(requirementSpaceManifest.prd.file)}
             threadId={threadId}
             prototypeGenerated={fullPrdPrototypeGenerated}
             hasPrototypeDesignSession={hasFullPrdDesignSession}
@@ -603,7 +559,7 @@ export function RequirementDetailsPanel({
             navigationItems={[
               { value: "full-prd", label: "整个需求", hasPrototype: fullPrdPrototypeGenerated },
               ...requirementSpaceManifest.functions.map((functionInfo) => ({
-                value: getPrototypeFunctionKey(functionInfo),
+                value: getRequirementPrototypeFunctionKey(functionInfo),
                 label: functionInfo.name || "未命名功能",
                 hasPrototype: Boolean(functionInfo.htmlFile?.trim())
               }))
@@ -611,7 +567,7 @@ export function RequirementDetailsPanel({
             onNavigate={(value) => {
               if (value === "full-prd") return
               const nextFunction = requirementSpaceManifest.functions.find(
-                (functionInfo) => getPrototypeFunctionKey(functionInfo) === value
+                (functionInfo) => getRequirementPrototypeFunctionKey(functionInfo) === value
               )
               if (!nextFunction) return
               setFullPrdWorkspaceOpen(false)
@@ -627,7 +583,7 @@ export function RequirementDetailsPanel({
           <RequirementFunctionWorkspace
             requirement={requirement}
             title={selectedFunction.name || "未命名功能"}
-            filePath={normalizePrdFilePath(selectedFunction.file)}
+            filePath={normalizeRequirementPrdFilePath(selectedFunction.file)}
             threadId={threadId}
             prototypeGenerated={
               (selectedPrototypeStatus?.generated ?? false) ||
@@ -664,7 +620,7 @@ export function RequirementDetailsPanel({
             }
             reloadToken={prdPreviewReloadToken}
             onBack={() => setSelectedFunction(null)}
-            navigationValue={getPrototypeFunctionKey(selectedFunction)}
+            navigationValue={getRequirementPrototypeFunctionKey(selectedFunction)}
             navigationItems={
               requirementSpaceManifest
                 ? [
@@ -674,7 +630,7 @@ export function RequirementDetailsPanel({
                       hasPrototype: fullPrdPrototypeGenerated
                     },
                     ...requirementSpaceManifest.functions.map((functionInfo) => ({
-                      value: getPrototypeFunctionKey(functionInfo),
+                      value: getRequirementPrototypeFunctionKey(functionInfo),
                       label: functionInfo.name || "未命名功能",
                       hasPrototype: Boolean(functionInfo.htmlFile?.trim())
                     }))
@@ -690,7 +646,7 @@ export function RequirementDetailsPanel({
                       return
                     }
                     const nextFunction = requirementSpaceManifest.functions.find(
-                      (functionInfo) => getPrototypeFunctionKey(functionInfo) === value
+                      (functionInfo) => getRequirementPrototypeFunctionKey(functionInfo) === value
                     )
                     if (nextFunction) setSelectedFunction(nextFunction)
                   }
@@ -894,7 +850,7 @@ export function RequirementDetailsPanel({
                 prd={requirementSpaceManifest.prd}
                 fallbackName={requirement.title}
                 onOpenFile={() =>
-                  openWorkspaceFilePreview(normalizePrdFilePath(requirementSpaceManifest.prd.file))
+                  openWorkspaceFilePreview(normalizeRequirementPrdFilePath(requirementSpaceManifest.prd.file))
                 }
                 onRevealFile={() => revealRequirementFile(requirementSpaceManifest.prd.file)}
                 onOpenDetails={() => setFullPrdWorkspaceOpen(true)}
@@ -1184,7 +1140,7 @@ export function RequirementDetailsPanel({
                   <div className="space-y-2">
                     {requirementSpaceManifest.functions.map((functionInfo) => {
                       const prototypeStatus = prototypeStatusByFunction.get(
-                        getPrototypeFunctionKey(functionInfo)
+                        getRequirementPrototypeFunctionKey(functionInfo)
                       )
                       return (
                         <RequirementFunctionCard
@@ -1192,7 +1148,7 @@ export function RequirementDetailsPanel({
                           functionInfo={functionInfo}
                           onRevealFile={revealRequirementFile}
                           onPreviewFile={(filePath) =>
-                            openWorkspaceFilePreview(normalizePrdFilePath(filePath))
+                            openWorkspaceFilePreview(normalizeRequirementPrdFilePath(filePath))
                           }
                           onOpenDetails={
                             functionInfo.file ? () => setSelectedFunction(functionInfo) : undefined
@@ -1337,7 +1293,7 @@ export function RequirementDetailsPanel({
             {batchDesignMode === "functions" ? (
               <div className="mt-3 max-h-[260px] space-y-2 overflow-y-auto pr-1">
                 {prototypeStatuses.map(({ functionInfo }) => {
-                  const functionKey = getPrototypeFunctionKey(functionInfo)
+                  const functionKey = getRequirementPrototypeFunctionKey(functionInfo)
                   const checked = batchSelection.has(functionKey)
                   const functionLabel = [functionInfo.fr, functionInfo.name]
                     .filter(Boolean)
@@ -1426,7 +1382,7 @@ export function RequirementDetailsPanel({
                 onClick={() => {
                   const selectedFunctions = prototypeStatuses
                     .filter((item) =>
-                      batchSelection.has(getPrototypeFunctionKey(item.functionInfo))
+                      batchSelection.has(getRequirementPrototypeFunctionKey(item.functionInfo))
                     )
                     .map((item) => item.functionInfo)
                   void runBatchPrototypeDesign(selectedFunctions, batchDesignMode).then(
