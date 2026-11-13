@@ -39,4 +39,15 @@ assert.equal(store.getState().selectedSystemId, "brand-vercel")
 store.getState().setSelectedSystemId("unknown-system")
 assert.equal(store.getState().selectedSystemId, null, "unknown systems fall back to all systems")
 
+const custom = store.getState().addCustomSystem("全新业务系统")
+assert.equal(custom.name, "全新业务系统")
+assert.equal(custom.theme, "", "custom systems have an empty theme")
+assert.ok(store.getState().systemList.some((system) => system.id === custom.id))
+
+store.getState().setSystemList(systems)
+assert.ok(
+  store.getState().systemList.some((system) => system.id === custom.id),
+  "custom systems remain selectable after remote systems reload"
+)
+
 console.log("requirement-store: all assertions passed")

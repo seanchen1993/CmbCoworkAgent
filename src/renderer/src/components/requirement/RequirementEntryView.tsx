@@ -216,6 +216,7 @@ export function RequirementEntryView({
     return () => window.removeEventListener(REQUIREMENT_SPACE_LIST_EVENT, openSpaceList)
   }, [])
   const [systemDialogOpen, setSystemDialogOpen] = useState(false)
+  const [draftSystemId, setDraftSystemId] = useState<string | null>(null)
   const [requirementDialogOpen, setRequirementDialogOpen] = useState(false)
   const [quickStartDialogOpen, setQuickStartDialogOpen] = useState(false)
   const [pendingDevelopmentRequirement, setPendingDevelopmentRequirement] =
@@ -226,10 +227,12 @@ export function RequirementEntryView({
     target: "design" | "development"
   } | null>(null)
   const selectedSystemId = useRequirementStore((state) => state.selectedSystemId)
-  const setSelectedSystemId = useRequirementStore((state) => state.setSelectedSystemId)
   const setSystemList = useRequirementStore((state) => state.setSystemList)
   const selectedSystem = useRequirementStore((state) =>
     getSelectedRequirementSystem(state.selectedSystemId)
+  )
+  const draftSystem = useRequirementStore((state) =>
+    getSelectedRequirementSystem(draftSystemId)
   )
   const createThread = useAppStore((state) => state.createThread)
   const deleteThread = useAppStore((state) => state.deleteThread)
@@ -252,10 +255,7 @@ export function RequirementEntryView({
     const systemsPromise = window.api.design
       .listSystems()
       .then((systems) => {
-        // 仅在 store 为空时填充，避免覆盖 SystemSelectionDialog 已加载的数据
-        if (useRequirementStore.getState().systemList.length === 0) {
-          setSystemList(systems)
-        }
+        setSystemList(systems)
         return systems
       })
       .catch((error: unknown) => {
@@ -432,6 +432,7 @@ export function RequirementEntryView({
 
   const startNewRequirement = (source: UploadSource = "file"): void => {
     setNewRequirementSource(source)
+    setDraftSystemId(selectedSystemId)
     if (!selectedSystem) {
       setSystemDialogOpen(true)
       return
@@ -887,10 +888,10 @@ export function RequirementEntryView({
 
       {systemDialogOpen && (
         <SystemSelectionDialog
-          initialSystemId={selectedSystemId}
+          initialSystemId={draftSystemId}
           onCancel={() => setSystemDialogOpen(false)}
           onConfirm={(systemId) => {
-            setSelectedSystemId(systemId)
+            setDraftSystemId(systemId)
             setSystemDialogOpen(false)
             setRequirementDialogOpen(true)
           }}
@@ -904,10 +905,10 @@ export function RequirementEntryView({
         />
       )}
 
-      {requirementDialogOpen && selectedSystem && (
+      {requirementDialogOpen && draftSystem && (
         <NewRequirementDialog
           open
-          system={selectedSystem}
+          system={draftSystem}
           initialSource={newRequirementSource}
           onChangeSystem={() => setSystemDialogOpen(true)}
           onOpenChange={setRequirementDialogOpen}

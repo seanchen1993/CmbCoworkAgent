@@ -18,8 +18,8 @@ export function SystemSelectionDialog({
   initialSystemId,
   onCancel,
   onConfirm,
-  title = "选择需求业务系统",
-  description = "本次需求将关联所选业务系统，并使用对应的系统规范。",
+  title = "选择需求系统",
+  description = "本次需求将关联所选系统，并使用对应的系统规范。",
   confirmLabel = "确认并开始需求沟通"
 }: {
   initialSystemId: string | null
@@ -31,23 +31,23 @@ export function SystemSelectionDialog({
 }): React.JSX.Element {
   const [query, setQuery] = useState("")
   const [selectedSystemId, setSelectedSystemId] = useState(initialSystemId)
+  const [customSystemName, setCustomSystemName] = useState("")
   const [loading, setLoading] = useState(false)
   const systemList = useRequirementStore((state) => state.systemList)
   const setSystemList = useRequirementStore((state) => state.setSystemList)
+  const addCustomSystem = useRequirementStore((state) => state.addCustomSystem)
 
   // 弹窗打开时加载系统列表，若 store 已有缓存则跳过请求
   useEffect(() => {
     let cancelled = false
     void (async () => {
-      // 若已有数据则不重复加载
-      if (useRequirementStore.getState().systemList.length > 0) return
       setLoading(true)
       try {
         const systems = await window.api.design.listSystems()
         if (!cancelled) setSystemList(systems)
       } catch (error) {
         if (!cancelled) {
-          toast.error(error instanceof Error ? error.message : "加载业务系统列表失败")
+          toast.error(error instanceof Error ? error.message : "加载系统列表失败")
         }
       } finally {
         if (!cancelled) setLoading(false)
@@ -77,7 +77,7 @@ export function SystemSelectionDialog({
         </DialogHeader>
         <div className="px-6 pb-3 pt-4">
           <div className="flex items-center gap-2 text-sm font-bold text-muted-foreground">
-            <span>全部业务系统</span>
+            <span>全部系统</span>
             <span className="rounded-full bg-muted px-2 py-0.5 text-[11px] font-semibold">
               {loading ? "..." : systemList.length}
             </span>
@@ -87,7 +87,7 @@ export function SystemSelectionDialog({
                 value={query}
                 onChange={(event) => setQuery(event.target.value)}
                 placeholder="搜索系统名称 / 分类"
-                aria-label="搜索业务系统"
+                aria-label="搜索系统"
                 className="h-8 w-56 bg-white pl-8 text-sm"
               />
             </label>
@@ -97,7 +97,7 @@ export function SystemSelectionDialog({
           {loading ? (
             <div className="flex items-center justify-center gap-2 px-4 py-10 text-sm text-muted-foreground">
               <Loader2 className="size-4 animate-spin" />
-              正在加载业务系统...
+              正在加载系统...
             </div>
           ) : (
             <div className="grid gap-2.5 sm:grid-cols-2 lg:grid-cols-3">
@@ -141,7 +141,7 @@ export function SystemSelectionDialog({
                       {system.description}
                     </span>
                     <span className="mt-auto rounded-md border border-[#d3e6da] bg-[#e9f2ec] px-2 py-1 text-[10px] font-semibold text-[#44715a]">
-                      系统规范
+                      主题规范design.md
                     </span>
                   </button>
                 )
@@ -150,13 +150,43 @@ export function SystemSelectionDialog({
           )}
           {!loading && visibleSystems.length === 0 && (
             <div className="px-4 py-10 text-center text-sm text-muted-foreground">
-              没有找到匹配的业务系统
+              没有找到匹配的系统
             </div>
           )}
         </div>
+        <div className="mx-6 mt-4 rounded-xl border border-dashed border-[#d7b899] bg-[#fffaf5] p-4">
+          <div className="text-sm font-semibold text-foreground">列表里没有？新增一个系统</div>
+          <p className="mt-1 text-xs text-muted-foreground">
+            无需先选择上方系统。输入新系统名称后直接选择；系统会保存在本地，主题默认为空，下次可继续选择。
+          </p>
+          <div className="mt-3 flex gap-2">
+            <Input
+              value={customSystemName}
+              onChange={(event) => setCustomSystemName(event.target.value)}
+              placeholder="输入新的系统名称"
+              aria-label="新的系统名称"
+              className="h-9 bg-white"
+            />
+            <Button
+              type="button"
+              variant="outline"
+              disabled={!customSystemName.trim()}
+              onClick={() => {
+                const system = addCustomSystem(customSystemName)
+                setSelectedSystemId(system.id)
+                setCustomSystemName("")
+                onConfirm(system.id)
+              }}
+            >
+              新增并选择
+            </Button>
+          </div>
+        </div>
         <DialogFooter className="mt-5 items-center gap-3 border-t border-border bg-[#fbf8f4] px-6 py-3 sm:justify-between">
           <p className="mr-auto text-sm text-muted-foreground">
-            {selectedSystem ? `已选：${selectedSystem.name} · 系统规范` : "请选择一个业务系统"}
+            {selectedSystem
+              ? `已选：${selectedSystem.name}${selectedSystem.theme === "" ? " · 暂无主题" : " · 系统规范"}`
+              : "请选择已有系统，或在上方新增系统"}
           </p>
           <Button type="button" variant="outline" onClick={onCancel}>
             取消
