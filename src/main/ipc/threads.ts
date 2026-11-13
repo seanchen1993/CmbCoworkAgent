@@ -237,6 +237,10 @@ import {
 import { createThreadService } from "../services/thread-service"
 import { collectReferencedTranscriptHashesFromPages } from "./thread-transcript-gc-scan"
 import { getCapturedRawApiCall } from "../services/llm-api-request-capture"
+import {
+  COMPACTION_DIAGNOSTICS_FILE,
+  readCompactionDiagnostics
+} from "../services/context-compaction-diagnostics"
 
 type ExportMessageRole = "user" | "assistant" | "system" | "tool"
 interface ExportAttachment {
@@ -4103,6 +4107,22 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
       zip.addFile("session.md", Buffer.from(formatMarkdown(payload), "utf-8"))
       zip.addFile("session.json", Buffer.from(`${JSON.stringify(payload, null, 2)}\n`, "utf-8"))
       zip.addFile("raw_api_call.json", Buffer.from(rawApiCall, "utf-8"))
+      if (!target || target.kind === "worker") {
+        let diagnosticsDirectory: string | null = null
+        try {
+          if (workspacePath)
+            diagnosticsDirectory = await getProjectThreadDataDirectory(
+              workspacePath,
+              target?.kind === "worker" ? target.workerThreadId : threadId
+            )
+        } catch (error) {
+          console.warn("[Threads] Failed to resolve compaction diagnostics:", error)
+        }
+        zip.addFile(
+          COMPACTION_DIAGNOSTICS_FILE,
+          Buffer.from(await readCompactionDiagnostics(diagnosticsDirectory), "utf8")
+        )
+      }
       zip.writeZip(result.filePath)
 
       return { success: true, filePath: result.filePath }

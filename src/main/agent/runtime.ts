@@ -57,6 +57,7 @@ import {
   subagentSessionCallbacks
 } from "../services/subagent-session-capture"
 import { withRawApiCallCapture } from "../services/llm-api-request-capture"
+import { createCompactionDiagnosticSink } from "../services/context-compaction-diagnostics"
 import { runWithTrustedToolFilePreviewContext } from "../services/trusted-tool-file-preview"
 
 import { ChatOpenAI, ChatOpenAICompletions } from "@langchain/openai"
@@ -1028,6 +1029,7 @@ export function getCapturedSystemPromptPreview(
 
 export { calculateSummarizationTriggerTokens }
 export const CONTEXT_COMPACTION_MAX_OUTPUT_TOKENS = 20_000
+const CONTEXT_COMPACTION_RECOVERY_MAX_OUTPUT_TOKENS = 1_024
 // Used only after the summary request itself reports context overflow. Normal compaction
 // sends the complete old history so user intent is not discarded before summarization.
 const SUMMARY_OVERFLOW_RETRY_TARGET_RATIO = 0.65
@@ -2074,6 +2076,10 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
     model = "claude-sonnet-4-5-20250929",
     summarizationModel = model,
     summarizationFallbackModel,
+    summarizationOverflowModel,
+    summarizationMaxOutputTokens,
+    summarizationOverflowMaxOutputTokens,
+    onCompactionDiagnostic,
     tools = [],
     systemPrompt,
     middleware: customMiddleware = [],
@@ -2225,6 +2231,9 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
   // the CmbCowork summarization middleware compute them from the model profile.
   const summarizationBaseOptions = {
     backend: filesystemBackend,
+    summaryMaxOutputTokens: summarizationMaxOutputTokens,
+    overflowMaxOutputTokens: summarizationOverflowMaxOutputTokens,
+    onDiagnostic: onCompactionDiagnostic,
     historyPathPrefix: summarizationHistoryPathPrefix ?? "/conversation_history",
     ...(summarizationLegacyHistoryPathPrefix && {
       legacyHistoryPathPrefix: summarizationLegacyHistoryPathPrefix
@@ -2246,6 +2255,12 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
   const mainSummarizationOptions = {
     ...summarizationBaseOptions,
     model: configureContextCompactionModel(summarizationModel, onContextCompaction),
+    ...(summarizationOverflowModel && {
+      overflowModel: configureContextCompactionModel(
+        summarizationOverflowModel,
+        onContextCompaction
+      )
+    }),
     ...(summarizationFallbackModel && {
       fallbackModel: configureContextCompactionModel(
         summarizationFallbackModel,
@@ -2257,6 +2272,9 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
     ...summarizationBaseOptions,
     stateOwnerConfigKey: SUBAGENT_SUMMARIZATION_OWNER_CONFIG_KEY,
     model: configureContextCompactionModel(summarizationModel),
+    ...(summarizationOverflowModel && {
+      overflowModel: configureContextCompactionModel(summarizationOverflowModel)
+    }),
     ...(summarizationFallbackModel && {
       fallbackModel: configureContextCompactionModel(summarizationFallbackModel)
     })
@@ -4197,9 +4215,6 @@ async function runWorkerStopHooksWithRevision({
   return false
 }
 
-/** Default fetch (no UI hooks) for model instances without a UI context (e.g. skill generation). */
-const defaultRetryingFetch = createRetryingFetch()
-
 type ModelInstancePurpose = "agent" | "context-compaction"
 
 function localCompactionTokenCount(content: unknown): number {
@@ -4285,12 +4300,12 @@ export function getModelInstance(
     customConfig.transport === "idle-gateway"
       ? () => getIdleModelServiceHoursRejection(customConfig)
       : undefined
-  const modelFetch =
-    purpose === "agent"
-      ? createRetryingFetch(retryHooks, maxRetryAttempts, { threadId: captureThreadId }, beforeAttempt)
-      : retryHooks || maxRetryAttempts !== undefined || beforeAttempt
-        ? createRetryingFetch(retryHooks, maxRetryAttempts, undefined, beforeAttempt)
-        : defaultRetryingFetch
+  const modelFetch = createRetryingFetch(
+    retryHooks,
+    maxRetryAttempts,
+    { threadId: captureThreadId },
+    beforeAttempt
+  )
 
   const baseFields = {
     model: resolvedModel,
@@ -4790,6 +4805,17 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   const model = getModelInstance(customConfig, retryHooks, maxRetryAttempts, "agent", threadId)
   const contextCompactionModel = getModelInstance(
     customConfig,
+    retryHooks,
+    maxRetryAttempts,
+    "context-compaction",
+    threadId
+  )
+  const recoveryMaxOutputTokens = Math.min(
+    customConfig.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS,
+    CONTEXT_COMPACTION_RECOVERY_MAX_OUTPUT_TOKENS
+  )
+  const contextCompactionOverflowModel = getModelInstance(
+    { ...customConfig, maxOutputTokens: recoveryMaxOutputTokens },
     retryHooks,
     maxRetryAttempts,
     "context-compaction",
@@ -6824,6 +6850,14 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
       : undefined,
     model,
     summarizationModel: contextCompactionModel,
+    summarizationOverflowModel: contextCompactionOverflowModel,
+    summarizationMaxOutputTokens: summaryMaxOutputTokens,
+    summarizationOverflowMaxOutputTokens: recoveryMaxOutputTokens,
+    onCompactionDiagnostic: createCompactionDiagnosticSink(projectThreadDataDirectory, {
+      threadId,
+      modelId: customConfig.id,
+      model: customConfig.model
+    }),
     tools: mainTools,
     subagentDefaultTools: workerTools,
     subagents: coordinatorSubagents,

@@ -22,6 +22,18 @@ import {
   sanitizeModelRequestMessages
 } from "./malformed-tool-call-recovery"
 import { isWorkflowNotificationPrompt } from "../../shared/internal-notification-turn"
+import {
+  CompactionDiagnostics,
+  compactionErrorDetails,
+  type CompactionDiagnosticSink
+} from "../services/context-compaction-diagnostics"
+import {
+  contextWindowFromError,
+  excerptUtf8,
+  fitSummaryRequestToBytes,
+  summaryRequestBytes,
+  summaryRetryByteBudget
+} from "./context-compaction-recovery"
 
 export interface ContextSize {
   type: "messages" | "tokens" | "fraction"
@@ -43,6 +55,11 @@ export interface CmbSummarizationMiddlewareOptions {
    * the primary compaction model's reasoning configuration.
    */
   fallbackModel?: string | BaseChatModel | BaseLanguageModel
+  /** Same provider with a small output reservation, used only after context overflow. */
+  overflowModel?: BaseChatModel | BaseLanguageModel
+  summaryMaxOutputTokens?: number
+  overflowMaxOutputTokens?: number
+  onDiagnostic?: CompactionDiagnosticSink
   backend:
     | BackendProtocol
     | BackendFactory
@@ -107,6 +124,7 @@ const PROFILE_TRUNCATE_ARGS: TruncateArgsSettings = {
 const MAX_SUMMARY_MODEL_ATTEMPTS = 4
 const MAX_SUMMARY_OVERFLOW_RETRIES = 3
 const MAX_SUMMARY_QUALITY_ATTEMPTS = 3
+type SummaryAttemptBudget = { used: number; diagnostics?: CompactionDiagnostics }
 const EMPTY_SUMMARY_QUALITY_ISSUE = "empty final content"
 const TOOL_CALL_SUMMARY_QUALITY_ISSUE = "tool call instead of final text"
 const DSML_SUMMARY_QUALITY_ISSUE = "DSML tool-call markup instead of final text"
@@ -732,7 +750,8 @@ function groupMessagesByApiRound(messages: BaseMessage[]): BaseMessage[][] {
  */
 function truncateOldestRoundsForRetry(
   messages: BaseMessage[],
-  retryTargetTokens: number
+  retryTargetTokens: number,
+  fitsRequest?: (messages: BaseMessage[]) => boolean
 ): BaseMessage[] | null {
   const withoutMarker = messages.filter((message, index) => index !== 0 || !isRetryMarker(message))
   // Consecutive user/steering messages have no AI/tool-call pairing to
@@ -745,11 +764,20 @@ function truncateOldestRoundsForRetry(
   if (groups.length <= 1) return null
 
   let groupsToDrop = Math.max(1, Math.floor(groups.length * 0.2))
-  while (
-    groupsToDrop < groups.length - 1 &&
-    countTokensApproximately(groups.slice(groupsToDrop).flat()) > retryTargetTokens
-  ) {
-    groupsToDrop += 1
+  let upper = groups.length - 1
+  // Suffix sizes decrease monotonically. Avoid repeatedly serializing a
+  // multi-megabyte conversation once for every dropped round.
+  while (groupsToDrop < upper) {
+    const middle = Math.floor((groupsToDrop + upper) / 2)
+    const remaining = groups.slice(middle).flat()
+    if (
+      countTokensApproximately(remaining) <= retryTargetTokens &&
+      (!fitsRequest || fitsRequest(remaining))
+    ) {
+      upper = middle
+    } else {
+      groupsToDrop = middle + 1
+    }
   }
 
   return [
@@ -797,6 +825,9 @@ export function createCmbSummarizationMiddleware(options: CmbSummarizationMiddle
   const {
     model,
     fallbackModel,
+    overflowModel,
+    summaryMaxOutputTokens = 0,
+    overflowMaxOutputTokens = summaryMaxOutputTokens,
     backend,
     summaryPrompt = DEFAULT_SUMMARY_PROMPT,
     trimTokensToSummarize = DEFAULT_OVERFLOW_RETRY_TARGET,
@@ -1074,7 +1105,7 @@ export function createCmbSummarizationMiddleware(options: CmbSummarizationMiddle
     return countTokensApproximately(countedMessages, toolsArray)
   }
 
-  function reportedUsageTokens(message: AIMessage): number | null {
+  function reportedUsageTokens(message: AIMessage): { total: number; input: number | null } | null {
     const responseMetadata = message.response_metadata as Record<string, unknown> | undefined
     const candidates = [
       message.usage_metadata,
@@ -1090,7 +1121,6 @@ export function createCmbSummarizationMiddleware(options: CmbSummarizationMiddle
       if (!candidate || typeof candidate !== "object") continue
       const usage = candidate as Record<string, unknown>
       const total = finiteNonNegative(usage.total_tokens ?? usage.totalTokens)
-      if (total != null && total > 0) return total
 
       const input = finiteNonNegative(
         usage.input_tokens ?? usage.inputTokens ?? usage.prompt_tokens ?? usage.promptTokens
@@ -1101,7 +1131,8 @@ export function createCmbSummarizationMiddleware(options: CmbSummarizationMiddle
           usage.completion_tokens ??
           usage.completionTokens
       )
-      if (input != null && input > 0) return input + (output ?? 0)
+      if (total != null && total > 0) return { total, input }
+      if (input != null && input > 0) return { total: input + (output ?? 0), input }
     }
     return null
   }
@@ -1112,16 +1143,34 @@ export function createCmbSummarizationMiddleware(options: CmbSummarizationMiddle
    * estimate remains a fallback for providers that omit usage metadata and a
    * guard for changed system prompts or tool schemas.
    */
-  function countTokensForTrigger(messages: BaseMessage[], approximateTotal: number): number {
+  function countTokensForTrigger(
+    messages: BaseMessage[],
+    approximateTotal: number
+  ): {
+    tokens: number
+    reportedTotalTokens: number | null
+    reportedInputTokens: number | null
+    appendedEstimatedTokens: number
+  } {
     for (let index = messages.length - 1; index >= 0; index -= 1) {
       const message = messages[index]
       if (!AIMessage.isInstance(message)) continue
       const reportedTokens = reportedUsageTokens(message)
       if (reportedTokens == null) continue
       const appendedTokens = countTokensApproximately(messages.slice(index + 1))
-      return Math.max(approximateTotal, Math.ceil(reportedTokens + appendedTokens))
+      return {
+        tokens: Math.max(approximateTotal, Math.ceil(reportedTokens.total + appendedTokens)),
+        reportedTotalTokens: reportedTokens.total,
+        reportedInputTokens: reportedTokens.input,
+        appendedEstimatedTokens: appendedTokens
+      }
     }
-    return approximateTotal
+    return {
+      tokens: approximateTotal,
+      reportedTotalTokens: null,
+      reportedInputTokens: null,
+      appendedEstimatedTokens: 0
+    }
   }
 
   function compactToolResults(
@@ -1156,78 +1205,6 @@ export function createCmbSummarizationMiddleware(options: CmbSummarizationMiddle
         tool_call_id: message.tool_call_id,
         name: message.name
       })
-      modified = true
-    }
-    return { messages: result, modified }
-  }
-
-  function compactOversizedNonToolContent(
-    messages: BaseMessage[],
-    maxInputTokens: number,
-    systemMessage?: SystemMessage | unknown,
-    tools?: (ServerTool | ClientTool)[] | unknown[]
-  ): { messages: BaseMessage[]; modified: boolean } {
-    const candidateContent = new Map<number, string>()
-    for (const [index, message] of messages.entries()) {
-      if (
-        ToolMessage.isInstance(message) ||
-        (!HumanMessage.isInstance(message) && !AIMessage.isInstance(message))
-      ) {
-        continue
-      }
-      if (typeof message.content === "string") {
-        candidateContent.set(index, message.content)
-        continue
-      }
-      if (Array.isArray(message.content)) {
-        // Emergency recovery operates only on the transient summary request.
-        // Serialising structured text/file blocks preserves their evidence while
-        // allowing the same deterministic budget used for plain message text.
-        candidateContent.set(index, JSON.stringify(message.content))
-      }
-    }
-    const candidateIndexes = [...candidateContent.keys()]
-    if (candidateIndexes.length === 0) return { messages, modified: false }
-
-    const overheadTokens = countTotalTokens(
-      messages.filter((_, index) => !candidateIndexes.includes(index)),
-      systemMessage,
-      tools
-    )
-    const adjustedMax = maxInputTokens / tokenEstimationMultiplier
-    const availableChars = Math.max((adjustedMax * 0.7 - overheadTokens) * 4, 2_000)
-    const perMessageBudgetChars = Math.max(
-      Math.floor(availableChars / candidateIndexes.length),
-      512
-    )
-    const result = [...messages]
-    let modified = false
-
-    for (const index of candidateIndexes) {
-      const message = messages[index]
-      const content = candidateContent.get(index)!
-      if (content.length <= perMessageBudgetChars) continue
-
-      // Grok Build and Codex both use a token-budgeted prefix plus an explicit
-      // omission marker for the emergency case where one ordinary message is
-      // larger than the entire summarizer window. Keep that predictable policy
-      // rather than adding a CmbCowork-specific content heuristic.
-      const marker = "\n[... truncated to fit the compaction window ...]"
-      const keptChars = Math.max(perMessageBudgetChars - marker.length, 1)
-      const droppedChars = content.length - keptChars
-      const compactedContent = `${content.slice(0, keptChars)}${marker} (${droppedChars} chars omitted)`
-      if (HumanMessage.isInstance(message)) {
-        result[index] = new HumanMessage({
-          content: compactedContent,
-          additional_kwargs: message.additional_kwargs
-        })
-      } else if (AIMessage.isInstance(message)) {
-        result[index] = new AIMessage({
-          content: compactedContent,
-          tool_calls: message.tool_calls,
-          additional_kwargs: message.additional_kwargs
-        })
-      }
       modified = true
     }
     return { messages: result, modified }
@@ -1375,7 +1352,7 @@ export function createCmbSummarizationMiddleware(options: CmbSummarizationMiddle
     messages: BaseMessage[],
     chatModel: BaseChatModel,
     fallbackChatModel: BaseChatModel | undefined,
-    attemptBudget: { used: number },
+    attemptBudget: SummaryAttemptBudget,
     initialUserRequest: string | null,
     latestUserRequest: string | null,
     signal?: AbortSignal,
@@ -1384,8 +1361,9 @@ export function createCmbSummarizationMiddleware(options: CmbSummarizationMiddle
   ): Promise<string> {
     let attemptMessages = messages
     let overflowRetries = 0
-    let compactedToolResults = false
-    let compactedNonToolContent = false
+    let retryByteBudget: number | undefined
+    let observedContextWindow: number | undefined
+    let reservedOutputTokens = summaryMaxOutputTokens
     let invalidSummaryAttempts = 0
     let previousQualityIssues: string[] = []
     let activeModel = chatModel
@@ -1395,12 +1373,8 @@ export function createCmbSummarizationMiddleware(options: CmbSummarizationMiddle
         : MAX_SUMMARY_MODEL_ATTEMPTS
 
     for (;;) {
-      const qualityCorrection =
-        previousQualityIssues.length > 0
-          ? buildSummaryQualityCorrection(previousQualityIssues)
-          : null
       const conversationTranscript = renderSummaryTranscript(attemptMessages)
-      const summaryMessages: BaseMessage[] = [
+      const buildRequest = (transcript: string, compactInstructions = false): BaseMessage[] => [
         new SystemMessage({
           content: SUMMARY_TEXT_ONLY_INSTRUCTION,
           additional_kwargs: { lc_source: "summarization_system" }
@@ -1408,13 +1382,27 @@ export function createCmbSummarizationMiddleware(options: CmbSummarizationMiddle
         new HumanMessage({
           content: [
             buildSummaryInstruction(
-              summaryPrompt,
-              initialUserRequest,
-              latestUserRequest,
+              compactInstructions
+                ? "Summarize this transcript excerpt as a concise continuation handoff. Preserve the goal, constraints, completed work, blockers, exact evidence, and next step. Earlier omitted history remains in the source conversation."
+                : summaryPrompt,
+              compactInstructions && initialUserRequest
+                ? excerptUtf8(
+                    initialUserRequest,
+                    Math.min(512, Math.floor((retryByteBudget ?? 4_096) / 8))
+                  )
+                : initialUserRequest,
+              compactInstructions && latestUserRequest
+                ? excerptUtf8(
+                    latestUserRequest,
+                    Math.min(512, Math.floor((retryByteBudget ?? 4_096) / 8))
+                  )
+                : latestUserRequest,
               targetSummaryTokens,
-              conversationTranscript
+              transcript
             ),
-            qualityCorrection
+            previousQualityIssues.length > 0
+              ? buildSummaryQualityCorrection(previousQualityIssues)
+              : null
           ]
             .filter(Boolean)
             .join("\n\n"),
@@ -1424,12 +1412,26 @@ export function createCmbSummarizationMiddleware(options: CmbSummarizationMiddle
           }
         })
       ]
+      const summaryMessages =
+        retryByteBudget === undefined
+          ? buildRequest(conversationTranscript)
+          : fitSummaryRequestToBytes(conversationTranscript, retryByteBudget, buildRequest)
+      const requestBytes = summaryRequestBytes(summaryMessages)
       try {
         if (attemptBudget.used >= attemptLimit) {
           throw new Error(`Summary model attempt limit reached (${MAX_SUMMARY_MODEL_ATTEMPTS})`)
         }
         signal?.throwIfAborted()
         attemptBudget.used += 1
+        attemptBudget.diagnostics?.record("summary_attempt", {
+          attempt: attemptBudget.used,
+          sourceMessageCount: attemptMessages.length,
+          estimatedInputTokens: countTokensApproximately(summaryMessages),
+          requestBytes,
+          retryByteBudget,
+          reservedOutputTokens,
+          observedContextWindow
+        })
         const response = await activeModel.invoke(summaryMessages, signal ? { signal } : undefined)
         signal?.throwIfAborted()
         const summary = extractSummaryText(response.content)
@@ -1441,13 +1443,24 @@ export function createCmbSummarizationMiddleware(options: CmbSummarizationMiddle
             attemptBudget.used < attemptLimit
           ) {
             previousQualityIssues = qualityIssues
-            if (!summary && fallbackChatModel) activeModel = fallbackChatModel
+            if (!summary && fallbackChatModel && activeModel !== overflowModel)
+              activeModel = fallbackChatModel
             continue
           }
           throw new Error(`Summary model returned an invalid handoff: ${qualityIssues.join(", ")}`)
         }
+        attemptBudget.diagnostics?.record("summary_completed", {
+          attempt: attemptBudget.used,
+          summaryChars: summary.length,
+          summaryBytes: Buffer.byteLength(summary)
+        })
         return summary
       } catch (error) {
+        attemptBudget.diagnostics?.record("summary_error", {
+          attempt: attemptBudget.used,
+          overflow: isCmbContextOverflow(error),
+          error: compactionErrorDetails(error)
+        })
         if (
           !isCmbContextOverflow(error) ||
           overflowRetries >= MAX_SUMMARY_OVERFLOW_RETRIES ||
@@ -1461,30 +1474,60 @@ export function createCmbSummarizationMiddleware(options: CmbSummarizationMiddle
         // sanitizing first removes that artificial boundary without mutating
         // checkpoint or archive history.
         const retryMessages = prepareSummaryModelRequest(attemptMessages)
-        const truncated = truncateOldestRoundsForRetry(retryMessages, trimTokensToSummarize)
-        if (truncated) {
-          attemptMessages = truncated
-        } else {
-          const maxInputTokens = getMaxInputTokens(activeModel)
-          if (!maxInputTokens) throw error
-          if (!compactedToolResults) {
-            const compacted = compactToolResults(retryMessages, maxInputTokens)
-            if (compacted.modified) {
-              attemptMessages = compacted.messages
-              compactedToolResults = true
-              overflowRetries += 1
-              previousQualityIssues = []
-              continue
-            }
-          }
-          if (compactedNonToolContent) throw error
-          const compacted = compactOversizedNonToolContent(retryMessages, maxInputTokens)
-          if (!compacted.modified) throw error
-          attemptMessages = compacted.messages
-          compactedNonToolContent = true
+        const beforeMessageCount = attemptMessages.length
+        const beforeEstimatedTokens = countTokensApproximately(summaryMessages)
+        if (overflowModel) {
+          activeModel = overflowModel as BaseChatModel
+          reservedOutputTokens = overflowMaxOutputTokens
         }
-        overflowRetries += 1
+        const reportedWindow = contextWindowFromError(error)
+        if (reportedWindow)
+          observedContextWindow = Math.min(observedContextWindow ?? Infinity, reportedWindow)
+        retryByteBudget = summaryRetryByteBudget({
+          previousRequestBytes: requestBytes,
+          configuredInputBudget: trimTokensToSummarize,
+          contextWindow: observedContextWindow ?? getMaxInputTokens(activeModel),
+          outputTokens: reservedOutputTokens,
+          lastAttempt: attemptBudget.used === attemptLimit - 1
+        })
         previousQualityIssues = []
+        const truncated = truncateOldestRoundsForRetry(
+          retryMessages,
+          trimTokensToSummarize,
+          (messages) =>
+            summaryRequestBytes(buildRequest(renderSummaryTranscript(messages))) <= retryByteBudget!
+        )
+        attemptMessages = truncated ?? retryMessages
+        let nextRequest: BaseMessage[]
+        try {
+          nextRequest = fitSummaryRequestToBytes(
+            renderSummaryTranscript(attemptMessages),
+            retryByteBudget,
+            buildRequest
+          )
+        } catch (fittingError) {
+          attemptBudget.diagnostics?.record("recovery_budget_exhausted", {
+            retryByteBudget,
+            error: compactionErrorDetails(fittingError)
+          })
+          throw error
+        }
+        attemptBudget.diagnostics?.record("summary_retry_trim", {
+          attempt: attemptBudget.used,
+          strategy: truncated
+            ? "oldest_rounds_then_serialized_byte_budget"
+            : "serialized_byte_budget",
+          beforeMessageCount,
+          afterMessageCount: attemptMessages.length,
+          beforeEstimatedTokens,
+          afterEstimatedTokens: countTokensApproximately(nextRequest),
+          beforeRequestBytes: requestBytes,
+          afterRequestBytes: summaryRequestBytes(nextRequest),
+          retryByteBudget,
+          observedContextWindow,
+          reservedOutputTokens
+        })
+        overflowRetries += 1
       }
     }
   }
@@ -1533,7 +1576,7 @@ ${summary}
     messagesToSummarize: BaseMessage[],
     resolvedModel: BaseChatModel,
     fallbackModel: BaseChatModel | undefined,
-    attemptBudget: { used: number },
+    attemptBudget: SummaryAttemptBudget,
     state: Record<string, unknown>,
     previousCutoffIndex: number | undefined,
     cutoffIndex: number,
@@ -1603,7 +1646,9 @@ ${summary}
     fallbackModel: BaseChatModel | undefined,
     maxInputTokens: number | undefined,
     owner?: string,
-    historySourceMessages: BaseMessage[] = truncatedMessages
+    historySourceMessages: BaseMessage[] = truncatedMessages,
+    diagnostics?: CompactionDiagnostics,
+    forceRecovery = false
   ): Promise<any> {
     const initialOwnerSessionId =
       owner &&
@@ -1613,19 +1658,29 @@ ${summary}
         ? `session_${crypto.randomUUID().substring(0, 8)}`
         : undefined
     const previousEvent = getValidSummarizationEvent(request.state, owner)
-    const cutoffIndex = determineCutoffIndex(truncatedMessages, maxInputTokens)
+    let cutoffIndex = determineCutoffIndex(truncatedMessages, maxInputTokens)
     // DeepAgents Python refuses token-based compaction when it cannot preserve
     // any message. CmbCowork intentionally still supports summarizing one
     // oversized raw user/tool message, but a chained cutoff of 1 is different:
     // effective[0] is the synthetic previous summary, so
     // previousCutoff + 1 - 1 would not advance the raw-state cutoff at all.
     // Re-summarizing it cannot evict new history and can otherwise create a
-    // compaction loop. Let the outer model use the current summary + tail; if
-    // that request genuinely overflows, surface the overflow instead of
-    // committing a no-progress summarization event.
+    // compaction loop. A real provider rejection is different: summarize the
+    // whole effective input, even if it lies entirely inside the keep budget.
     const advancesStateCutoff = previousEvent == null || cutoffIndex > 1
     if (cutoffIndex <= 0 || !advancesStateCutoff) {
-      return handler({ ...request, messages: truncatedMessages })
+      if (!forceRecovery) {
+        try {
+          return await handler({ ...request, messages: truncatedMessages })
+        } catch (error) {
+          if (!isCmbContextOverflow(error)) throw error
+        }
+      }
+      cutoffIndex = truncatedMessages.length
+      diagnostics?.record("force_whole_conversation", {
+        reason: "provider_overflow_within_keep_budget",
+        cutoffIndex
+      })
     }
 
     const messagesToSummarize = truncatedMessages.slice(0, cutoffIndex)
@@ -1661,7 +1716,7 @@ ${summary}
       }
     }
 
-    const summaryAttemptBudget = { used: 0 }
+    const summaryAttemptBudget: SummaryAttemptBudget = { used: 0, diagnostics }
     const summaryResult = await summarizeMessages(
       messagesToSummarize,
       resolvedModel,
@@ -1829,12 +1884,14 @@ ${summary}
         ? countTotalTokens(truncatedMessages, request.systemMessage, request.tools)
         : initialTokens
       const triggerTokens = countTokensForTrigger(truncatedMessages, totalTokens)
+      let triggerError: unknown
 
-      if (!shouldSummarize(truncatedMessages, triggerTokens, maxInputTokens)) {
+      if (!shouldSummarize(truncatedMessages, triggerTokens.tokens, maxInputTokens)) {
         try {
           return await handler({ ...request, messages: truncatedMessages })
         } catch (error) {
           if (!isCmbContextOverflow(error)) throw error
+          triggerError = error
           if (maxInputTokens && totalTokens > 0) {
             const observedRatio = maxInputTokens / totalTokens
             if (observedRatio > tokenEstimationMultiplier) {
@@ -1844,16 +1901,84 @@ ${summary}
         }
       }
 
-      return performSummarization(
-        request as any,
-        handler,
-        truncatedMessages,
-        resolvedModel,
-        resolvedFallbackModel,
-        maxInputTokens,
+      const previousEvent = getValidSummarizationEvent(request.state, owner)
+      const largestMessages = effectiveMessages
+        .map((message, index) => ({
+          index,
+          id: message.id,
+          type: message.getType(),
+          contentChars:
+            typeof message.content === "string"
+              ? message.content.length
+              : JSON.stringify(message.content).length,
+          estimatedTokens: countTokensApproximately([message])
+        }))
+        .sort((a, b) => b.estimatedTokens - a.estimatedTokens)
+        .slice(0, 10)
+      const diagnostics = new CompactionDiagnostics({
+        reason: triggerError ? "provider_overflow" : "threshold",
+        tokenEstimator: "characters_divided_by_4_with_provider_usage_floor",
+        retryBudgetUnit: "utf8_bytes_of_serialized_summary_messages",
         owner,
-        effectiveMessages
-      )
+        trigger,
+        keep,
+        contextWindowTokens: maxInputTokens,
+        summaryMaxOutputTokens,
+        postCompactionInputBudgetTokens,
+        rawMessageCount: request.messages.length,
+        effectiveMessageCount: effectiveMessages.length,
+        previousCutoffIndex: previousEvent?.cutoffIndex,
+        previousSummaryChars: previousEvent
+          ? String(previousEvent.summaryMessage.content).length
+          : 0,
+        initialEstimatedTokens: initialTokens,
+        systemAndToolsEstimatedTokens: countTotalTokens([], request.systemMessage, request.tools),
+        estimatedTokensAfterArgumentTrimming: totalTokens,
+        argumentTrimmingApplied: truncateModified,
+        ...triggerTokens,
+        tokenEstimationMultiplier,
+        adjustedTriggerTokens: Math.ceil(triggerTokens.tokens * tokenEstimationMultiplier),
+        largestMessages,
+        ...(triggerError ? { error: compactionErrorDetails(triggerError) } : {})
+      })
+      const observedHandler = async (next: typeof request) => {
+        diagnostics.record("agent_attempt", {
+          messageCount: next.messages.length,
+          estimatedInputTokens: countTotalTokens(next.messages, next.systemMessage, next.tools)
+        })
+        try {
+          return await handler(next)
+        } catch (error) {
+          diagnostics.record("agent_error", {
+            overflow: isCmbContextOverflow(error),
+            error: compactionErrorDetails(error)
+          })
+          throw error
+        }
+      }
+      try {
+        const result = await performSummarization(
+          request as any,
+          observedHandler,
+          truncatedMessages,
+          resolvedModel,
+          resolvedFallbackModel,
+          maxInputTokens,
+          owner,
+          effectiveMessages,
+          diagnostics,
+          triggerError !== undefined
+        )
+        await diagnostics.finish("completed", options.onDiagnostic)
+        return result
+      } catch (error) {
+        diagnostics.record("error", { error: compactionErrorDetails(error) })
+        await diagnostics.finish(
+          request.runtime?.signal?.aborted ? "cancelled" : "failed",
+          options.onDiagnostic
+        )
+        throw error
+      }
     }
   })
 }
