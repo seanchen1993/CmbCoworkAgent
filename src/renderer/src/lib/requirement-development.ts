@@ -12,6 +12,8 @@ export const REQUIREMENT_DEVELOPMENT_ASSOCIATIONS_KEY = "requirement-development
 
 export type RequirementDevelopmentIntent = {
   action: "create-development"
+  /** False when quick start only supplies development context and has no requirement conversation. */
+  linkedToRequirement?: boolean
   requirementId: string
   requirementTitle: string
   prompt: string

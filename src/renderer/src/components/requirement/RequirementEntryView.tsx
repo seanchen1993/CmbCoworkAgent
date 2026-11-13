@@ -235,9 +235,7 @@ export function RequirementEntryView({
   const selectedSystem = useRequirementStore((state) =>
     getSelectedRequirementSystem(state.selectedSystemId)
   )
-  const draftSystem = useRequirementStore(() =>
-    getSelectedRequirementSystem(draftSystemId)
-  )
+  const draftSystem = useRequirementStore(() => getSelectedRequirementSystem(draftSystemId))
   const createThread = useAppStore((state) => state.createThread)
   const deleteThread = useAppStore((state) => state.deleteThread)
   const selectThread = useAppStore((state) => state.selectThread)
@@ -497,6 +495,7 @@ export function RequirementEntryView({
       : `PRD需求文档的地址：${prepared.sourcePath || prepared.sourceName}`
     writeRequirementDevelopmentIntent({
       action: "create-development",
+      linkedToRequirement: false,
       requirementId: prepared.id,
       requirementTitle: prepared.title,
       prompt,

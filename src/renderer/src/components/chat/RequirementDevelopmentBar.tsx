@@ -16,7 +16,10 @@ export function RequirementDevelopmentBar({
   )
   const metadata =
     getRequirementDevelopmentMetadata(thread) || getStoredRequirementDevelopmentMetadata(threadId)
-  if (!metadata) return null
+  // Sessions created by the old quick-start flow used a synthetic requirement id even though
+  // no requirement conversation existed. Keep those existing sessions from exposing a broken
+  // "return to requirement" action.
+  if (!metadata || metadata.requirementId.startsWith("quick-")) return null
 
   return (
     <div className="mb-3 shrink-0 rounded-xl border border-border/70 bg-background-elevated/95 p-3 shadow-sm">

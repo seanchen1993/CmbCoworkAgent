@@ -26,6 +26,7 @@ export async function completeRequirementDevelopment(input: {
   const runDetail = await window.api.harnessBoard.getRunDetail(projectId, featureSlug)
   const workspacePath = runDetail.run.resolvedSessionWorkspacePath
   if (!workspacePath) throw new Error("请先配置特性会话工作区")
+  const linkedToRequirement = intent.linkedToRequirement !== false
 
   const defaultNextAction = getHarnessRunNextAction(runDetail)
   const nextAction = defaultNextAction
@@ -44,16 +45,24 @@ export async function completeRequirementDevelopment(input: {
     workspacePath,
     nextAction,
     createThread,
-    requirementDevelopment: {
-      requirementId: intent.requirementId,
-      requirementTitle: intent.requirementTitle,
-      requirementFilePath: intent.requirementFilePath,
-      prototypeFilePaths: intent.prototypeFilePaths,
-      functionCount: intent.functionCount,
-      hasPrototype: intent.hasPrototype
-    }
+    ...(linkedToRequirement
+      ? {
+          requirementDevelopment: {
+            requirementId: intent.requirementId,
+            requirementTitle: intent.requirementTitle,
+            requirementFilePath: intent.requirementFilePath,
+            prototypeFilePaths: intent.prototypeFilePaths,
+            functionCount: intent.functionCount,
+            hasPrototype: intent.hasPrototype
+          }
+        }
+      : {})
   })
-  if (!intent.requirementId.startsWith("space:") && !intent.requirementId.startsWith("quick-")) {
+  if (
+    linkedToRequirement &&
+    !intent.requirementId.startsWith("space:") &&
+    !intent.requirementId.startsWith("quick-")
+  ) {
     const attached = await window.api.requirements.attachThread({
       reqId: intent.requirementId,
       threadId: thread.thread_id,
@@ -61,14 +70,16 @@ export async function completeRequirementDevelopment(input: {
     })
     if (!attached.success) throw new Error(attached.error || "开发会话未能关联需求")
   }
-  storeRequirementDevelopmentAssociation(thread.thread_id, {
-    requirementId: intent.requirementId,
-    requirementTitle: intent.requirementTitle,
-    requirementFilePath: intent.requirementFilePath,
-    prototypeFilePaths: intent.prototypeFilePaths,
-    functionCount: intent.functionCount,
-    hasPrototype: intent.hasPrototype
-  })
+  if (linkedToRequirement) {
+    storeRequirementDevelopmentAssociation(thread.thread_id, {
+      requirementId: intent.requirementId,
+      requirementTitle: intent.requirementTitle,
+      requirementFilePath: intent.requirementFilePath,
+      prototypeFilePaths: intent.prototypeFilePaths,
+      functionCount: intent.functionCount,
+      hasPrototype: intent.hasPrototype
+    })
+  }
 
   clearRequirementDevelopmentIntent()
   return thread.thread_id
