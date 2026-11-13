@@ -543,7 +543,9 @@ export function NewRequirementDialog({
               <div className="mb-3 flex items-center gap-2">
                 <BadgeCheck className="size-4 text-primary" />
                 <h3 className="text-sm font-semibold text-foreground">已绑定专家</h3>
-                <span className="text-[12px] font-normal text-muted-foreground">自动启用</span>
+                <span className="text-[12px] font-normal text-muted-foreground">
+                  自动启用，无需你手动操作
+                </span>
               </div>
               {REQUIREMENT_BOUND_EXPERTS.map((expert) => {
                 const Icon = expert.icon
@@ -565,7 +567,7 @@ export function NewRequirementDialog({
                 <Sparkles className="size-4 text-primary" />
                 <h3 className="text-sm font-semibold text-foreground">已绑定技能</h3>
                 <span className="text-[12px] font-normal text-muted-foreground">
-                  自动安装或更新
+                  自动安装最新版本，无需你手动操作
                 </span>
               </div>
               {REQUIREMENT_BOUND_SKILLS.map((skill) => {

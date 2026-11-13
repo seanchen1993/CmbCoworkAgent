@@ -39,7 +39,7 @@ export function RequirementWorkDirPicker({
     <div className="rounded-xl border-[1.5px] border-border bg-[#fdfbf7] p-4 dark:bg-muted/20">
       <div className="mb-2 flex items-center gap-2">
         <FolderOpen className="size-4 text-primary" />
-        <span className="text-sm font-semibold text-foreground">需求工作目录</span>
+        <span className="text-sm font-semibold text-foreground">总需求工作目录</span>
         <span className="text-sm text-muted-foreground">
           多个需求可共用同一个根目录，无需分别设置
         </span>
