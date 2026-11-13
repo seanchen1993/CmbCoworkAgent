@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import ReactMarkdown, { type Components } from "react-markdown"
 import remarkGfm from "remark-gfm"
-import { Bot, Copy, Send, Square } from "lucide-react"
+import { Bot, Copy, Minus, Send, Square } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { ProjectAgentRunProgress } from "./ProjectAgentRunProgress"
+import { ProjectAgentMinimized } from "./ProjectAgentMinimized"
 import { useProjectAgentRun } from "./use-project-agent-run"
 import { ProjectAnalysisScope } from "./ProjectAnalysisScope"
 import type { DashboardTimeControl } from "./TimeControlBar"
@@ -129,7 +130,7 @@ export function ProjectAnalysisAgent({
   scopeSummary,
   scopeDetails,
   analysisUnavailable,
-  onClose,
+  onOpenChange,
   timeControl,
   onMembershipChange,
   onInspect
@@ -140,7 +141,7 @@ export function ProjectAnalysisAgent({
   scopeSummary: string
   scopeDetails: string[]
   analysisUnavailable?: string
-  onClose: () => void
+  onOpenChange: (open: boolean) => void
   timeControl: Omit<DashboardTimeControl, "range">
   onMembershipChange: (value: RunAnalysisMembership) => void
   onInspect: (target: ProjectAnalysisTarget) => void
@@ -155,12 +156,14 @@ export function ProjectAnalysisAgent({
   const [error, setError] = useState("")
   const [notice, setNotice] = useState("")
   const [mode, setMode] = useState<"analysis" | "report">("analysis")
+  const [minimized, setMinimized] = useState(false)
+  const restoreButton = useRef<HTMLButtonElement>(null)
   const selectedRooms = Array.isArray(context.options.upperOrgLv1)
     ? context.options.upperOrgLv1
     : context.options.upperOrgLv1
       ? [context.options.upperOrgLv1]
       : []
-  const reportContent = useProjectAnalysisReport({
+  const report = useProjectAnalysisReport({
     active: open && mode === "report",
     selectedRooms
   })
@@ -181,6 +184,7 @@ export function ProjectAnalysisAgent({
     []
   )
   const cancel = useCallback(() => {
+    if (!busy.current) return
     sequence.current++
     busy.current = false
     setLoading(false)
@@ -268,21 +272,56 @@ export function ProjectAnalysisAgent({
       setNotice("复制失败，请检查剪贴板权限")
     }
   }
+  const running = loading || report.loading
+  const minimize = () => {
+    setMinimized(true)
+    onOpenChange(false)
+  }
+  const restore = () => {
+    setMinimized(false)
+    onOpenChange(true)
+  }
   return (
     <Dialog
       open={open}
-      onOpenChange={(open) => {
-        if (!open) {
-          if (busy.current) cancel()
-          onClose()
-        }
+      onOpenChange={(nextOpen) => {
+        setMinimized(!nextOpen && running)
+        onOpenChange(nextOpen)
       }}
     >
+      {!open && minimized && (
+        <ProjectAgentMinimized
+          mode={mode}
+          state={mode === "report" ? report.state : runProgress.state}
+          running={running}
+          restoreButtonRef={restoreButton}
+          onRestore={restore}
+          onStop={mode === "report" ? report.stop : cancel}
+          onDismiss={() => setMinimized(false)}
+        />
+      )}
       <DialogContent
         className={`flex max-h-[90vh] w-[min(960px,95vw)] !max-w-[960px] flex-col gap-3 overflow-hidden transition-none ${mode === "report" ? "h-[min(850px,90vh)]" : ""}`}
+        onCloseAutoFocus={(event) => {
+          if (minimized) {
+            event.preventDefault()
+            restoreButton.current?.focus()
+          }
+        }}
       >
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          className="absolute right-10 top-2.5 size-8 text-muted-foreground"
+          aria-label="最小化项目分析 Agent"
+          title="最小化，任务继续运行"
+          onClick={minimize}
+        >
+          <Minus className="size-4" />
+        </Button>
         <DialogHeader>
-          <DialogTitle className="flex items-center gap-2">
+          <DialogTitle className="flex items-center gap-2 pr-14">
             <Bot className="size-4" />
             项目分析 Agent
           </DialogTitle>
@@ -295,15 +334,21 @@ export function ProjectAnalysisAgent({
         <Tabs
           value={mode}
           onValueChange={(value) => {
-            if (busy.current) cancel()
-            setMode(value as "analysis" | "report")
+            if (!running) setMode(value as "analysis" | "report")
           }}
           className="flex min-h-0 flex-1 flex-col overflow-hidden"
         >
-          <TabsList className="shrink-0 self-start" aria-label="项目 Agent 工作模式">
-            <TabsTrigger value="analysis">项目分析</TabsTrigger>
-            <TabsTrigger value="report">综合报告</TabsTrigger>
-          </TabsList>
+          <div className="flex shrink-0 flex-wrap items-center gap-2">
+            <TabsList className="self-start" aria-label="项目 Agent 工作模式">
+              <TabsTrigger value="analysis" disabled={report.loading}>
+                项目分析
+              </TabsTrigger>
+              <TabsTrigger value="report" disabled={loading}>
+                综合报告
+              </TabsTrigger>
+            </TabsList>
+            {running && <span className="text-xs text-muted-foreground">最小化后继续运行</span>}
+          </div>
           <TabsContent
             value="analysis"
             className="flex min-h-0 flex-1 flex-col gap-3 overflow-hidden"
@@ -333,7 +378,7 @@ export function ProjectAnalysisAgent({
                 ))}
               </ul>
               <p className="mt-2">
-                日期用于选择名单，指标为累计值。关闭后保留当前对话；更换分析对象或筛选后开始新对话。
+                日期用于选择名单，指标为累计值。最小化或关闭后任务继续运行；点击“终止任务”可停止。更换分析对象或筛选后开始新对话。
               </p>
             </details>
             {!messages.length && (
@@ -511,7 +556,7 @@ export function ProjectAnalysisAgent({
                   }}
                 >
                   <Square className="mr-1 size-3" />
-                  停止分析
+                  终止任务
                 </Button>
               ) : (
                 <Button type="submit" disabled={!input.trim() || Boolean(analysisUnavailable)}>
@@ -522,7 +567,7 @@ export function ProjectAnalysisAgent({
             </form>
           </TabsContent>
           <TabsContent value="report" className="flex min-h-0 flex-1 flex-col overflow-hidden">
-            {reportContent}
+            {report.content}
           </TabsContent>
         </Tabs>
       </DialogContent>

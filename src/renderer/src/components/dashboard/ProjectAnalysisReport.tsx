@@ -50,14 +50,14 @@ const message = (error: unknown, fallback: string) =>
   error instanceof Error ? error.message : fallback
 
 // State lives with the Agent dialog, not its unmounted tab/portal contents.
-// Closing the dialog or visiting analysis therefore preserves finished reports and drafts.
+// Visibility controls lazy loading and dialogs, never the lifetime of a generation.
 export function useProjectAnalysisReport({
   active,
   selectedRooms
 }: {
   active: boolean
   selectedRooms: string[]
-}): React.JSX.Element {
+}) {
   const runProgress = useProjectAgentRun()
   const { end: endRun, clear: clearRun } = runProgress
   const [workspace, setWorkspace] = useState<ProjectReportWorkspace | null>(null)
@@ -137,12 +137,11 @@ export function useProjectAnalysisReport({
   useEffect(() => {
     if (active && !requestedWorkspace.current) void loadWorkspace()
     if (!active) {
-      stop()
       readSequence.current++
       setReading(false)
       setDialog(null)
     }
-  }, [active, loadWorkspace, stop])
+  }, [active, loadWorkspace])
 
   useEffect(
     () => () => {
@@ -187,9 +186,9 @@ export function useProjectAnalysisReport({
     setNotice("")
     try {
       const response = await window.api.dashboard.projectReportGenerate(request, (event) => {
-        if (ticket === sequence.current && activeRef.current) runProgress.receive(event)
+        if (ticket === sequence.current) runProgress.receive(event)
       })
-      if (ticket !== sequence.current || !activeRef.current) return
+      if (ticket !== sequence.current) return
       if (response.cancelled) {
         endRun("cancelled")
         setNotice("报告生成已停止，已有成功版本仍可查看")
@@ -383,7 +382,7 @@ export function useProjectAnalysisReport({
         ? "删除我的模板"
         : "删除报告"
 
-  return (
+  const content = (
     <div className="flex min-h-0 flex-1 flex-col gap-3" aria-label="综合报告工作区">
       <div className="flex shrink-0 flex-wrap items-center gap-2">
         <div className="min-w-0 flex-1 basis-48">
@@ -762,7 +761,7 @@ export function useProjectAnalysisReport({
               }}
             >
               <Square className="mr-1 size-3.5" />
-              停止生成
+              终止任务
             </Button>
           ) : (
             <Button
@@ -846,4 +845,5 @@ export function useProjectAnalysisReport({
       </Dialog>
     </div>
   )
+  return { content, loading, stop, state: runProgress.state }
 }

@@ -461,6 +461,15 @@ try {
       (n) => window.runQA.calls.filter((c) => c.type === "agent").length === n,
       n
     )
+  const minimizedAgent = page.getByRole("region", { name: "最小化的项目分析 Agent", exact: true })
+  const cancelCount = (family) =>
+    page.evaluate(
+      (family) =>
+        window.runQA.calls.filter(
+          (call) => call.type === "cancel" && call.families.includes(family)
+        ).length,
+      family
+    )
   const agentReply = async (index, content) =>
     page.evaluate(
       ({ index, content }) => {
@@ -558,7 +567,7 @@ try {
     emit({ type: "text", stepId: "m1", text: "第一段流式回答。" })
   })
   await page.getByText("第一段流式回答。", { exact: true }).waitFor()
-  assert.equal(await page.getByRole("button", { name: "停止分析", exact: true }).isVisible(), true)
+  assert.equal(await page.getByRole("button", { name: "终止任务", exact: true }).isVisible(), true)
   await page.evaluate(() => {
     const emit = window.runQA.agentEvents[0]
     emit({ type: "text", stepId: "m1", text: "第二段流式回答。" })
@@ -606,9 +615,9 @@ try {
   await page.getByText("查询参数与结果预览", { exact: true }).first().click()
   await page.screenshot({ path: join(output, "project-agent-streaming.png") })
   await page.setViewportSize({ width: 390, height: 844 })
-  assert.ok(await page.getByRole("button", { name: "停止分析", exact: true }).isVisible())
+  assert.ok(await page.getByRole("button", { name: "终止任务", exact: true }).isVisible())
   assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= 390))
-  const stopRect = await page.getByRole("button", { name: "停止分析", exact: true }).boundingBox()
+  const stopRect = await page.getByRole("button", { name: "终止任务", exact: true }).boundingBox()
   const phoneDialog = await page
     .getByRole("dialog", { name: "项目分析 Agent", exact: true })
     .boundingBox()
@@ -654,7 +663,13 @@ try {
   await page.getByRole("textbox", { name: "项目分析问题" }).fill("会被停止的问题")
   await page.getByRole("button", { name: "发送", exact: true }).click()
   await waitAgent(4)
-  await page.getByRole("button", { name: "停止分析", exact: true }).click()
+  const beforeAnalysisStop = await cancelCount("dashboard:projectModeAnalysisAgent")
+  await page.getByRole("button", { name: "最小化项目分析 Agent", exact: true }).click()
+  await minimizedAgent.waitFor()
+  assert.equal(await cancelCount("dashboard:projectModeAnalysisAgent"), beforeAnalysisStop)
+  await minimizedAgent.getByRole("button", { name: "终止任务", exact: true }).click()
+  await minimizedAgent.getByText("任务已终止，展开继续", { exact: true }).waitFor()
+  assert.equal(await cancelCount("dashboard:projectModeAnalysisAgent"), beforeAnalysisStop + 1)
   await page.evaluate(() =>
     window.runQA.agentEvents[3]({ type: "text", stepId: "late", text: "取消后的迟到流片段" })
   )
@@ -663,6 +678,7 @@ try {
   await page.evaluate(
     () => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)))
   )
+  await minimizedAgent.getByRole("button", { name: "展开项目分析 Agent", exact: true }).click()
   assert.equal(await page.getByText("这条迟到结果不能出现", { exact: true }).count(), 0)
   await page.getByRole("textbox", { name: "项目分析问题" }).fill("会被范围切换取消的问题")
   await page.getByRole("button", { name: "发送", exact: true }).click()
@@ -765,13 +781,48 @@ try {
   )
   await page.getByRole("button", { name: "发送", exact: true }).click()
   await waitAgent(8)
+  const beforeBackgroundAnalysis = await cancelCount("dashboard:projectModeAnalysisAgent")
+  assert.ok(await page.getByRole("tab", { name: "综合报告", exact: true }).isDisabled())
+  await page.getByRole("button", { name: "最小化项目分析 Agent", exact: true }).click()
+  await analysisDialog.waitFor({ state: "hidden" })
+  await minimizedAgent.waitFor()
+  await page.getByRole("tab", { name: "项目列表", exact: true }).click()
+  await page.evaluate(() => {
+    window.runQA.agentEvents[7]({
+      type: "text",
+      stepId: "background-analysis",
+      text: "最小化期间的流式内容"
+    })
+    window.runQA.agentEvents[7]({
+      type: "step",
+      step: {
+        id: "background-analysis",
+        kind: "model",
+        title: "正在后台分析项目",
+        status: "running",
+        startedAt: Date.now()
+      }
+    })
+  })
+  await minimizedAgent.getByText("正在后台分析项目", { exact: true }).waitFor()
+  assert.equal(await cancelCount("dashboard:projectModeAnalysisAgent"), beforeBackgroundAnalysis)
+  await page.screenshot({ path: join(output, "project-agent-minimized-running.png") })
+  await minimizedAgent.getByRole("button", { name: "展开项目分析 Agent", exact: true }).click()
+  await page.getByText("最小化期间的流式内容", { exact: true }).waitFor()
+  await analysisDialog.getByRole("button", { name: "Close", exact: true }).click()
+  await analysisDialog.waitFor({ state: "hidden" })
+  assert.equal(await cancelCount("dashboard:projectModeAnalysisAgent"), beforeBackgroundAnalysis)
+  await agentReply(7, "后台完成的分析结果")
+  await minimizedAgent.getByText("分析已完成，展开查看", { exact: true }).waitFor()
+  await minimizedAgent.getByRole("button", { name: "展开项目分析 Agent", exact: true }).click()
+  await page.getByText("后台完成的分析结果", { exact: true }).waitFor()
   await page.keyboard.press("Escape")
-  await agentReply(7, "关闭后的迟到回复不能出现")
+  await page.getByRole("tab", { name: "项目分析", exact: true }).click()
   assert.equal(await tableRows.getByRole("button", { name: /^分析/ }).count(), 0)
-  await page.getByRole("button", { name: "项目分析 Agent", exact: true }).click()
-  await page.getByText("分析已停止，可以重新提问", { exact: true }).waitFor()
-  assert.equal(await page.getByText("关闭后的迟到回复不能出现", { exact: true }).count(), 0)
-  await page.keyboard.press("Escape")
+  assert.equal(
+    await page.evaluate(() => window.runQA.calls.filter((call) => call.type === "agent").length),
+    8
+  )
 
   // The sole top entry retains the current filters in both feature and project views.
   await page.getByRole("combobox", { name: "当前阶段", exact: true }).selectOption("dev-编码实现")
@@ -792,6 +843,8 @@ try {
   assert.equal(projectRequest.target, undefined)
   assert.deepEqual(projectRequest.messages, [])
   await page.screenshot({ path: join(output, "project-agent-filtered-scope.png") })
+  await agentReply(8, "当前筛选分析已完成")
+  await page.getByText("当前筛选分析已完成", { exact: true }).waitFor()
   await page.keyboard.press("Escape")
   assert.ok(
     (await page.evaluate(
@@ -923,7 +976,36 @@ try {
     },
     "Report request must not inherit project target, membership or list filters"
   )
+  const beforeBackgroundReport = await cancelCount("dashboard:projectReportGenerate")
+  assert.ok(await page.getByRole("tab", { name: "项目分析", exact: true }).last().isDisabled())
+  await page.getByRole("button", { name: "最小化项目分析 Agent", exact: true }).click()
+  await analysisDialog.waitFor({ state: "hidden" })
+  await minimizedAgent.waitFor()
+  await page.getByRole("tab", { name: "项目列表", exact: true }).click()
+  await page.evaluate(() =>
+    window.runQA.reportEvents[0]({
+      type: "step",
+      step: {
+        id: "background-report",
+        kind: "model",
+        title: "正在后台生成 HTML",
+        status: "running",
+        startedAt: Date.now()
+      }
+    })
+  )
+  await minimizedAgent.getByText("正在后台生成 HTML", { exact: true }).waitFor()
+  const dockBounds = await minimizedAgent.boundingBox()
+  assert.ok(dockBounds.x >= 0 && dockBounds.x + dockBounds.width <= 390)
+  await page.screenshot({ path: join(output, "project-report-minimized-phone.png") })
+  await page.getByRole("tab", { name: "项目分析", exact: true }).click()
+  // Filtering the underlying list must not discard the independent report task.
+  await page.getByRole("textbox", { name: "项目或特性关键词", exact: true }).fill("渠道")
+  assert.equal(await cancelCount("dashboard:projectReportGenerate"), beforeBackgroundReport)
   await replyReport(0, "report-1", 1, created.scope)
+  await minimizedAgent.getByText("报告已生成，展开查看", { exact: true }).waitFor()
+  await page.getByRole("textbox", { name: "项目或特性关键词", exact: true }).fill("")
+  await minimizedAgent.getByRole("button", { name: "展开项目分析 Agent", exact: true }).click()
   await waitReportVersion(1)
   assert.equal(await reportFrame().locator("body").getAttribute("data-isolated"), "yes")
   assert.equal(
@@ -957,7 +1039,7 @@ try {
   await page.getByRole("button", { name: "应用修改", exact: true }).click()
   await waitReport(4)
   assert.equal((await reportRequest(3)).baseVersion, 1, "Revision uses the selected older version")
-  await page.getByRole("button", { name: "停止生成", exact: true }).click()
+  await page.getByRole("button", { name: "终止任务", exact: true }).click()
   await replyReport(3, "report-1", 3, created.scope, false)
   await waitReportVersion(1)
   assert.equal(
@@ -994,11 +1076,17 @@ try {
   )
   await page.getByRole("button", { name: "应用修改", exact: true }).click()
   await waitReport(5)
+  const beforeBackgroundFailure = await cancelCount("dashboard:projectReportGenerate")
   await page.keyboard.press("Escape")
-  await replyReport(4, "report-1", 4, created.scope, false)
-  await page.getByRole("button", { name: "项目分析 Agent", exact: true }).click()
+  await analysisDialog.waitFor({ state: "hidden" })
+  assert.equal(await cancelCount("dashboard:projectReportGenerate"), beforeBackgroundFailure)
+  await page.evaluate(() =>
+    window.runQA.finishReport(4, { success: false, error: "后台报告生成失败，原版本仍可查看" })
+  )
+  await minimizedAgent.getByText("任务未完成，展开查看原因", { exact: true }).waitFor()
+  await minimizedAgent.getByRole("button", { name: "展开项目分析 Agent", exact: true }).click()
   await waitReportVersion(1)
-  await page.getByText("报告生成已停止，已有成功版本仍可查看", { exact: true }).waitFor()
+  await page.getByRole("alert").filter({ hasText: "后台报告生成失败，原版本仍可查看" }).waitFor()
 
   await page.getByRole("button", { name: "保存为我的模板", exact: true }).click()
   const templateDialog = page.getByRole("dialog", { name: "保存为我的模板", exact: true })
@@ -1143,7 +1231,7 @@ try {
           (call) =>
             call.type === "cancel" && call.families.includes("dashboard:projectReportGenerate")
         ).length
-    )) >= 4
+    )) >= 3
   )
   assert.equal(
     await page.locator("body").getAttribute("data-report-access"),
@@ -1383,6 +1471,10 @@ try {
           "diagnosis targets the refreshed scoped list",
           "wide reply table/code containment",
           "close/reopen draft preservation",
+          "minimize/close/Escape preserve running analysis and reports, streamed progress and final results",
+          "minimized tasks survive project-list tabs and report tasks survive list filters",
+          "explicit task termination ignores late stream and completion events",
+          "minimized report failure preserves the previous version and exposes the error on restore",
           "filtered project scope disclosure",
           "lazy report workspace and recoverable load failure",
           "full-room natural-week/month scope independent of filters",

@@ -148,12 +148,13 @@ export function ProjectRunAnalysis({
   const handledRefresh = useRef({ refresh, refreshKey })
   const key = JSON.stringify([range, options, membership, refresh, refreshKey])
   const data = result?.key === key ? result.data : null
-  const filterKey = JSON.stringify(filters)
-  const agentScopeKey = JSON.stringify([options, refresh, refreshKey])
+  // Keep minimized work mounted across refreshes, list filters and project-view tabs.
+  // A different room/permission scope still disposes the old workspace and its requests.
+  const agentScopeKey = JSON.stringify(options)
   useEffect(() => {
     setAgentCreated(false)
     setAgentOpen(false)
-  }, [agentScopeKey, filterKey, active])
+  }, [agentScopeKey])
   useEffect(() => {
     if (!active) return
     if (
@@ -508,9 +509,9 @@ export function ProjectRunAnalysis({
       className="min-w-0 space-y-3 rounded-lg border border-border bg-card p-4"
       aria-label="项目分析"
     >
-      {active && agentCreated && (
+      {agentCreated && (
         <ProjectAnalysisAgent
-          key={JSON.stringify([filters, options])}
+          key={agentScopeKey}
           open={agentOpen}
           context={{
             range,
@@ -538,7 +539,7 @@ export function ProjectRunAnalysis({
               : []),
             `筛选：${filterChips.map(({ label }) => label).join("；") || "无附加条件"}`
           ]}
-          onClose={() => setAgentOpen(false)}
+          onOpenChange={setAgentOpen}
           onInspect={(target) => {
             const row = matches.find(
               (m) =>
