@@ -106,7 +106,8 @@ export default defineConfig({
           "browser-native-host": "src/main/browser/chrome/browser-native-host-entry.ts",
           "pty-host": "src/main/pty-host.ts",
           "code-exec-helper": "src/main/code-exec/helper-entry.ts",
-          ...(process.env.CMB_BOTS_E2E === "1" ? { "bots-browser-e2e": "tests/support/bots-browser-e2e-entry.ts" } : {})
+          ...(process.env.CMB_BOTS_E2E === "1" ? { "bots-browser-e2e": "tests/support/bots-browser-e2e-entry.ts" } : {}),
+          ...(process.env.CMB_BOT_APP_E2E === "1" ? { "bots-app-e2e": "tests/support/bots-app-e2e-entry.ts" } : {})
         },
         formats: ["cjs"]
       },

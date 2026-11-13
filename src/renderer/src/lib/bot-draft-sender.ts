@@ -69,6 +69,7 @@ export class BotDraftSender {
   readonly sending = new Set<string>()
   private reconciling: Promise<void> | null = null
   private dispatchEpoch = 0
+  private failedDraftId: string | undefined
   constructor(
     private readonly client: Pick<BotClient, "send" | "requestReceipts">,
     private readonly botId: string,
@@ -81,6 +82,35 @@ export class BotDraftSender {
 
   stopPreparing(): void {
     this.dispatchEpoch++
+  }
+
+  private clearSettledError(): void {
+    if (this.failedDraftId && !this.queue.getQueuedMessage(this.failedDraftId)) {
+      this.failedDraftId = undefined
+      this.report(null)
+    }
+  }
+
+  private reportDraftError(draft: QueuedMessage, message: string): void {
+    // Transcript hydration can confirm and remove a draft before its IPC response
+    // arrives. A late transport error must not contradict that durable receipt.
+    if (!this.queue.getQueuedMessage(draft.id)) {
+      this.clearSettledError()
+      return
+    }
+    this.failedDraftId = draft.id
+    this.report(message)
+  }
+
+  /** Remove the local pending record only. An already accepted run has its own stop control. */
+  discard(expected: QueuedMessage): void {
+    if (this.sending.has(expected.id)) return
+    const current = this.queue.getQueuedMessage(expected.id)
+    if (!current || current.updated_at.getTime() !== expected.updated_at.getTime()) return
+    this.queue.deleteQueuedMessage(current.id, (error) => {
+      this.failedDraftId = undefined
+      this.report(error ? "待发消息删除失败，请重试。" : null)
+    })
   }
 
   private same(draft: QueuedMessage): boolean {
@@ -99,6 +129,7 @@ export class BotDraftSender {
     if (!this.same(draft)) return
     this.queue.deleteQueuedMessage(draft.id, (error) => {
       if (error) this.report("消息已接收，但本机草稿清理失败；重新打开后会再次核对回执。")
+      else this.clearSettledError()
     })
   }
   private async accepted(draft: QueuedMessage): Promise<boolean> {
@@ -123,6 +154,7 @@ export class BotDraftSender {
     this.sending.add(draft.id)
     const epoch = this.dispatchEpoch
     this.changed()
+    this.failedDraftId = undefined
     this.report(null)
     try {
       if (
@@ -182,20 +214,22 @@ export class BotDraftSender {
         try {
           if (await this.accepted(draft)) return
         } catch (receiptError) {
-          this.report(`${botErrorMessage(receiptError)} 原消息已保留。`)
+          this.reportDraftError(draft, `${botErrorMessage(receiptError)} 原消息已保留。`)
           return
         }
-        this.report(`${botErrorMessage(error)} ${UNKNOWN}`)
+        this.reportDraftError(draft, `${botErrorMessage(error)} ${UNKNOWN}`)
       }
     } catch (error) {
-      this.report(botErrorMessage(error))
+      this.reportDraftError(draft, botErrorMessage(error))
     } finally {
       this.sending.delete(draft.id)
+      this.clearSettledError()
       this.changed()
     }
   }
 
   reconcile(drafts: QueuedMessage[]): Promise<void> {
+    this.clearSettledError()
     if (this.reconciling) return this.reconciling
     const pending = drafts.filter(
       (draft) => draft.handoffRequestedAt && !this.sending.has(draft.id)
@@ -208,18 +242,22 @@ export class BotDraftSender {
         const checks = await Promise.all(batch.map(checkFor))
         const receipts = await this.client.requestReceipts(this.botId, checks)
         for (const draft of batch) {
-          if (this.sending.has(draft.id)) continue
+          if (this.sending.has(draft.id) || !this.same(draft)) continue
           const state = receipts.find((receipt) => receipt.requestId === draft.id)?.state
           if (state === "accepted") this.acknowledge(draft)
           else if (state === "conflict")
-            this.report("待确认消息与已接收记录不一致，请先核对会话记录。")
+            this.reportDraftError(draft, "待确认消息与已接收记录不一致，请先核对会话记录。")
           // Absent or unknown stays parked. Reopening a window never reruns side effects.
         }
       }
     })()
-      .catch((error) => this.report(`${botErrorMessage(error)} 原消息已保留。`))
+      .catch((error) => {
+        const retained = pending.find((draft) => this.same(draft))
+        if (retained) this.reportDraftError(retained, `${botErrorMessage(error)} 原消息已保留。`)
+      })
       .finally(() => {
         this.reconciling = null
+        this.clearSettledError()
       })
     return this.reconciling
   }

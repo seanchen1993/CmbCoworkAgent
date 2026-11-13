@@ -3161,7 +3161,7 @@ describe("private Bot handoff to a Zhaohu group", () => {
       receipt: any,
       repeated: any
     const f = fixture(async (task, host) => {
-      if (!task.mockSource && task.message === "private request with unrelated secrets") {
+      if (!task.mockSource && task.message === "@小群 private request with unrelated secrets") {
         const targets = host.groupTargets(task.id)
         expect(targets.some((item) => item.source === "zhaohu" && item.id === groupId)).toBe(true)
         receipt = host.publishGroupMessage(
@@ -3199,10 +3199,19 @@ describe("private Bot handoff to a Zhaohu group", () => {
       color: "#123456",
       modelRef: null
     })
-    f.host.send({
+    // Include the picker's structured selection at admission, before the model
+    // calls its handoff tool. Publishing the tool directly misses queue bugs.
+    const sourceTask = f.host.send({
       botId: sourceBot.id,
       requestId: "private-handoff",
-      message: "private request with unrelated secrets"
+      message: "@小群 private request with unrelated secrets",
+      mentions: [
+        { start: 0, end: 3, kind: "group", groupSource: "zhaohu", groupId, label: "小群" }
+      ]
+    })
+    expect(sourceTask.origin).toMatchObject({
+      kind: "user",
+      mentions: [{ groupSource: "zhaohu", groupId }]
     })
     await eventually(() =>
       Boolean(receipt && f.calls.some((task) => task.id === receipt.targetTaskId))

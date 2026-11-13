@@ -184,6 +184,7 @@ export function BotConversation({
         : {}),
       submit,
       submitDraft,
+      discardDraft: (draft) => sender.discard(draft),
       validateDraft: validateBotDraft,
       reconcileDrafts,
       sendingDraftIds: sender.sending,

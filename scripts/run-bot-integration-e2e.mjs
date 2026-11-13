@@ -50,7 +50,10 @@ export default Object.fromEntries(["main","preload","renderer"].map((name) => [
   )
   await run(
     ["node_modules/electron-vite/bin/electron-vite.js", "build", "--config", configPath],
-    process.argv.includes("--browser") ? { CMB_BOTS_E2E: "1" } : {}
+    {
+      ...(process.argv.includes("--browser") ? { CMB_BOTS_E2E: "1" } : {}),
+      ...(process.argv.includes("--handoff") ? { CMB_BOT_APP_E2E: "1" } : {})
+    }
   )
   for (const directory of ["resources", "skills", "main/generated"])
     await cp(join(root, "out", directory), join(out, directory), { recursive: true })
@@ -60,7 +63,11 @@ export default Object.fromEntries(["main","preload","renderer"].map((name) => [
     JSON.stringify({ repository: root, builtAt: new Date().toISOString() })
   )
   console.log("Isolated Bot test build:", out)
-  if (process.argv.includes("--browser")) {
+  if (process.argv.includes("--handoff") && !process.argv.includes("--build-only")) {
+    await run(["--import", "tsx", "tests/bots-private-group-app.spec.ts"], {
+      BOT_TEST_APP_OUT: out
+    })
+  } else if (process.argv.includes("--browser")) {
     await run(["--import", "tsx", "tests/bot-native-browser-host.spec.ts"], {
       BOT_TEST_APP_OUT: out
     })

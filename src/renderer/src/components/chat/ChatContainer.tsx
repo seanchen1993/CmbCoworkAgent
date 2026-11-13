@@ -27,6 +27,7 @@ import {
   ChatExecutionDetailsContext,
   ChatToolPresentationContext
 } from "./chat-presentation-context"
+import { QueuedMessageActions } from "./QueuedMessageActions"
 import { projectBotExecution } from "@/lib/bot-execution-visibility"
 import { botMessageHasEntranceBody } from "@/lib/bot-message-entrance"
 import { isMainBotQuestionCall, pendingBotQuestionCallId } from "@/lib/bot-question-history"
@@ -67,9 +68,7 @@ import {
   FolderOpen,
   Paperclip,
   CornerDownRight,
-  MoreHorizontal,
   GripVertical,
-  Pencil,
   ListEnd,
   Check,
   SlidersHorizontal
@@ -921,6 +920,8 @@ export interface ManagedChatTurn {
   configureModel?(): void
   /** Bot inbox transport reuses the original durable draft queue, separate from runtime guidance. */
   submitDraft?(draft: QueuedMessage): Promise<void>
+  /** Removes a retained Bot draft; does not withdraw agent guidance or cancel accepted work. */
+  discardDraft?(draft: QueuedMessage): void
   validateDraft?(draft: QueuedMessage): string | null
   reconcileDrafts?(drafts: QueuedMessage[]): Promise<void>
   draftReceiptRevision?: string
@@ -6589,6 +6590,10 @@ export function ChatContainer({
 
   const handleDeleteQueuedMessage = useCallback(
     (message: QueuedMessage): void => {
+      if (managedTurn?.submitDraft) {
+        managedTurn.discardDraft?.(message)
+        return
+      }
       // Main only needs a withdrawal tombstone for a handoff that is queued or
       // still inside async hook preparation. Ordinary local drafts never entered
       // main and deleting them must not poison the same id in another window.
@@ -6597,7 +6602,7 @@ export function ChatContainer({
       }
       deleteQueuedMessage(message.id)
     },
-    [deleteQueuedMessage, threadId]
+    [deleteQueuedMessage, threadId, managedTurn?.submitDraft, managedTurn?.discardDraft]
   )
 
   const handleGuideQueuedMessage = useCallback(
@@ -9107,53 +9112,19 @@ export function ChatContainer({
                                       {isGuided ? "已引导" : "引导"}
                                     </button>
                                   )}
-                                  <button
-                                    type="button"
-                                    onClick={() => handleDeleteQueuedMessage(queued)}
-                                    disabled={Boolean(managedTurn?.submitDraft && isGuided)}
-                                    title={
-                                      managedTurn?.submitDraft && isGuided
-                                        ? "发送结果待确认，请先重试核对回执"
-                                        : "删除"
+                                  <QueuedMessageActions
+                                    botState={
+                                      managedTurn?.submitDraft
+                                        ? managedTurn.sendingDraftIds?.has(queued.id)
+                                          ? "sending"
+                                          : isGuided
+                                            ? "unconfirmed"
+                                            : "queued"
+                                        : undefined
                                     }
-                                    className="flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground disabled:cursor-default disabled:opacity-40"
-                                  >
-                                    <Trash2 className="size-3.5" />
-                                  </button>
-                                  <Popover>
-                                    <PopoverTrigger asChild>
-                                      <button
-                                        type="button"
-                                        title={
-                                          managedTurn?.submitDraft && isGuided
-                                            ? "发送结果待确认，原消息不能修改"
-                                            : "更多"
-                                        }
-                                        disabled={Boolean(managedTurn?.submitDraft && isGuided)}
-                                        className="flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
-                                      >
-                                        <MoreHorizontal className="size-4" />
-                                      </button>
-                                    </PopoverTrigger>
-                                    <PopoverContent align="end" className="w-40 p-1">
-                                      <button
-                                        type="button"
-                                        onClick={() => startEditingQueuedMessage(queued)}
-                                        className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-sm hover:bg-muted"
-                                      >
-                                        <Pencil className="size-4" />
-                                        编辑消息
-                                      </button>
-                                      <button
-                                        type="button"
-                                        onClick={() => handleDeleteQueuedMessage(queued)}
-                                        className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-sm text-muted-foreground hover:bg-muted hover:text-foreground"
-                                      >
-                                        <ListEnd className="size-4" />
-                                        关闭排队
-                                      </button>
-                                    </PopoverContent>
-                                  </Popover>
+                                    onEdit={() => startEditingQueuedMessage(queued)}
+                                    onDelete={() => handleDeleteQueuedMessage(queued)}
+                                  />
                                 </div>
                               )}
                             </div>

@@ -145,6 +145,101 @@ function fixture() {
 }
 
 describe("Bot sends through the original durable draft queue", () => {
+  it("clears a failed-send notice when transcript hydration confirms and removes the draft", async () => {
+    const f = fixture(),
+      sender = f.sender()
+    f.client.send.mockRejectedValue(new Error("lost acknowledgement"))
+    f.client.requestReceipts.mockRejectedValue(new Error("receipt unavailable"))
+    await sender.send(f.draft())
+    expect(f.report).toHaveBeenLastCalledWith(expect.stringContaining("原消息已保留"))
+    f.queue.deleteQueuedMessage(f.draft().id)
+    await sender.reconcile([])
+    expect(f.report).toHaveBeenLastCalledWith(null)
+    expect(f.client.send).toHaveBeenCalledTimes(1)
+  })
+  it("ignores a late send failure after its draft is confirmed in the transcript", async () => {
+    const f = fixture(),
+      sender = f.sender()
+    let reject!: (error: Error) => void
+    f.client.send.mockImplementation(
+      () =>
+        new Promise((_resolve, fail) => {
+          reject = fail
+        })
+    )
+    f.client.requestReceipts.mockRejectedValue(new Error("receipt unavailable"))
+    const pending = sender.send(f.draft())
+    await vi.waitFor(() => expect(f.client.send).toHaveBeenCalledTimes(1))
+    f.queue.deleteQueuedMessage(f.draft().id)
+    reject(new Error("lost acknowledgement"))
+    await pending
+    expect(f.report.mock.calls.every(([message]) => message === null)).toBe(true)
+  })
+  it("allows removing a failed draft after reload, without retrying or deleting a received run", async () => {
+    const f = fixture()
+    f.client.send.mockRejectedValue(new Error("群聊不存在"))
+    await f.sender().send(f.draft())
+    expect(f.draft().handoffRequestedAt).toBeInstanceOf(Date)
+    f.reload()
+    f.sender().discard(f.draft())
+    expect(f.draft()).toBeUndefined()
+    expect(f.saved()).toBe("")
+    expect(f.client.send).toHaveBeenCalledTimes(1)
+    expect(f.report).toHaveBeenLastCalledWith(null)
+    f.reload()
+    expect(f.draft()).toBeUndefined()
+  })
+  it("blocks deletion only while sending, and ignores stale delete callbacks after a draft edit", async () => {
+    const f = fixture()
+    let reject!: (error: Error) => void
+    f.client.send.mockImplementation(
+      () =>
+        new Promise((_resolve, fail) => {
+          reject = fail
+        })
+    )
+    const sender = f.sender()
+    const promise = sender.send(f.draft())
+    await vi.waitFor(() => expect(f.client.send).toHaveBeenCalledTimes(1))
+    sender.discard(f.draft())
+    expect(f.draft()).toBeDefined()
+    reject(new Error("Transport failed"))
+    await promise
+    const stale = f.draft()
+    f.patch({ text: "New draft content" })
+    sender.discard(stale)
+    expect(f.draft().text).toBe("New draft content")
+    sender.discard(f.draft())
+    expect(f.draft()).toBeUndefined()
+  })
+  it("reports a local deletion failure so a retained draft is not silently lost", () => {
+    const f = fixture()
+    f.setPersistenceError("storage full")
+    f.sender().discard(f.draft())
+    expect(f.report).toHaveBeenLastCalledWith("待发消息删除失败，请重试。")
+    f.reload()
+    expect(f.draft()).toBeDefined()
+  })
+  it("does not restore an error when a deleted draft's background receipt check fails later", async () => {
+    const f = fixture()
+    f.patch({ handoffRequestedAt: new Date(1000) })
+    let reject!: (error: Error) => void
+    f.client.requestReceipts.mockImplementation(
+      () =>
+        new Promise((_resolve, fail) => {
+          reject = fail
+        })
+    )
+    const sender = f.sender()
+    const checking = sender.reconcile([f.draft()])
+    await vi.waitFor(() => expect(f.client.requestReceipts).toHaveBeenCalledTimes(1))
+    sender.discard(f.draft())
+    reject(new Error("Offline"))
+    await checking
+    expect(f.draft()).toBeUndefined()
+    expect(f.report).toHaveBeenLastCalledWith(null)
+    expect(f.client.send).not.toHaveBeenCalled()
+  })
   it.each([false, true])(
     "retains selected IDs after restart, hashes metadata and leaves a changed identity draft unacknowledged, groups=%s",
     async (groups) => {

@@ -2215,14 +2215,7 @@ export class BotStore {
         throw new BotError("INVALID_INPUT", "工作与群会话目标不能混用")
       for (const mention of mentions) {
         if (mention.kind === "group") {
-          const group = this.getGroup(mention.groupId)
-          if (
-            group.id !== mention.groupId ||
-            group.deleting ||
-            group.hostId !== bot.hostId ||
-            !group.memberIds.includes(bot.id)
-          )
-            throw new BotError("CONFLICT", "提及的群聊已不可用，请重新选择")
+          this.getGroupReference(mention.groupId, bot.id, mention.groupSource)
           continue
         }
         const peer = this.getBot(mention.botId)
@@ -4814,6 +4807,46 @@ export class BotStore {
     const row = this.rows("SELECT payload FROM bot_groups WHERE id=?", [id])[0]
     if (!row) throw new BotError("NOT_FOUND", "群聊不存在")
     return JSON.parse(String(row.payload))
+  }
+  /** Admission and runtime must resolve the same selected identity, without posting to the group. */
+  getGroupReference(groupId: string, botId: string, source: "app" | "zhaohu" = "app") {
+    const bot = this.getBot(botId)
+    if (bot.deleting) throw new BotError("CONFLICT", "Bot 正在删除，请完成删除后重试")
+    if (source === "zhaohu") {
+      const route = this.imGateway.binding(groupId)
+      if (!route || route.binding.kind !== "group" || route.binding.state !== "active")
+        throw new BotError("CONFLICT", "招乎群已解绑或不可用，请重新选择")
+      const member = this.getBot(route.binding.botId)
+      if (member.hostId !== bot.hostId || member.archived || member.deleting)
+        throw new BotError("CONFLICT", "群服务 Bot 已不可用")
+      const binding = this.im.get(member.id, groupId)
+      if (binding.revoked || !binding.online)
+        throw new BotError("CONFLICT", "招乎群已解绑或离线，请重新选择")
+      return {
+        id: groupId,
+        source,
+        currentName: route.binding.peerLabel || "招乎群聊",
+        botMembers: [{ id: member.id, currentName: member.name }]
+      }
+    }
+    const group = this.getGroup(groupId)
+    if (
+      group.id !== groupId ||
+      group.deleting ||
+      group.hostId !== bot.hostId ||
+      !group.memberIds.includes(bot.id)
+    )
+      throw new BotError("CONFLICT", "提及的群聊已不可用，请重新选择")
+    return {
+      id: group.id,
+      currentName: group.name,
+      botMembers: group.memberIds.map((id) => {
+        const member = this.getBot(id)
+        if (member.hostId !== group.hostId || member.deleting)
+          throw new BotError("CONFLICT", "提及的群聊成员已不可用，请重新选择")
+        return { id: member.id, currentName: member.name }
+      })
+    }
   }
   saveGroup(input: BotGroupInput, existing?: { id: string; version: number }): BotGroup {
     return this.transaction(() => {

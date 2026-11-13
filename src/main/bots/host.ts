@@ -262,35 +262,8 @@ export class LocalBotHost {
 
   /** Selected group identity facts only; never read history or publish a group message. */
   getGroupReference(groupId: string, botId: string, source: "app" | "zhaohu" = "app") {
-    if (source === "zhaohu") {
-      this.getBot(botId)
-      const group = this.store.imGateway.groupConversations().find(item => item.id === groupId)
-      if (!group || group.state !== "active" || !group.connected)
-        throw new BotError("CONFLICT", "招乎群已解绑或离线，请重新选择")
-      const member = this.getBot(group.botId)
-      if (member.archived || member.deleting) throw new BotError("CONFLICT", "群服务 Bot 已不可用")
-      return { id: group.id, source, currentName: group.title,
-        botMembers: [{ id: member.id, currentName: member.name }] }
-    }
-    const bot = this.getBot(botId),
-      group = this.store.getGroup(groupId)
-    if (
-      group.id !== groupId ||
-      group.deleting ||
-      group.hostId !== bot.hostId ||
-      !group.memberIds.includes(bot.id)
-    )
-      throw new BotError("CONFLICT", "提及的群聊已不可用，请重新选择")
-    return {
-      id: group.id,
-      currentName: group.name,
-      botMembers: group.memberIds.map((id) => {
-        const member = this.getBot(id)
-        if (member.hostId !== group.hostId)
-          throw new BotError("CONFLICT", "提及的群聊成员已不可用，请重新选择")
-        return { id: member.id, currentName: member.name }
-      })
-    }
+    this.requireRunning()
+    return this.store.getGroupReference(groupId, botId, source)
   }
 
   listBotIds(): string[] {

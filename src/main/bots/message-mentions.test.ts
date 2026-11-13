@@ -1,11 +1,12 @@
 import { createHash } from "node:crypto"
 import { DatabaseSync } from "node:sqlite"
-import { afterEach, describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 import { NativeSqliteAdapter } from "../db/native-sqlite-adapter"
 import { BotStore } from "./store"
 import { canonicalBotMessageInput } from "../../shared/bots/message-mentions"
 import { formatBotMessageReply } from "../../shared/bots/message-reply"
 import type { BotMessageMention } from "../../shared/bots/contracts"
+import { botImScopeId } from "./im-gateway-store"
 
 const databases: NativeSqliteAdapter[] = []
 afterEach(() => databases.splice(0).forEach((db) => db.close()))
@@ -46,6 +47,87 @@ const check = (requestId: string, message: string, mentions?: BotMessageMention[
 })
 
 describe("private Bot selected mention persistence", () => {
+  function imGroup(f: ReturnType<typeof fixture>) {
+    const id = botImScopeId("realm", "owner", "group")
+    f.store.imGateway.register("realm", "owner", {
+      id: "group",
+      botId: f.peer.id,
+      kind: "group",
+      label: "A",
+      peerLabel: "A",
+      version: 1,
+      state: "active",
+      conversationKey: "channel-group",
+      createdAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 60_000).toISOString()
+    })
+    f.store.im.importImBinding({
+      id,
+      botId: f.peer.id,
+      kind: "group",
+      label: "A",
+      channelKey: "channel-group",
+      version: 1
+    })
+    f.store.im.setOnline(f.peer.id, id, true)
+    return id
+  }
+  it("resolves same-name App and Zhaohu targets by source, without dispatch, and preserves receipts after unlink", () => {
+    const f = fixture()
+    const groupId = imGroup(f)
+    const app = f.store.saveGroup({ name: "A", memberIds: [f.bot.id, f.other.id] })
+    const mentions: BotMessageMention[] = [
+      { start: 0, end: 2, kind: "group", groupSource: "zhaohu", groupId, label: "A" }
+    ]
+    const input = { botId: f.bot.id, requestId: "im-ref", message: "@A check", mentions }
+    const task = f.store.enqueue(input)
+    expect(task.origin).toEqual({ kind: "user", mentions })
+    expect(f.store.getGroupReference(groupId, f.bot.id, "zhaohu").botMembers).toEqual([
+      { id: f.peer.id, currentName: "A" }
+    ])
+    expect(f.store.getGroupReference(app.id, f.bot.id).botMembers.map((x) => x.id)).toEqual([
+      f.bot.id,
+      f.other.id
+    ])
+    expect(() => f.store.getGroupReference(groupId, f.bot.id, "app")).toThrow("群聊不存在")
+    expect(() => f.store.getGroupReference(app.id, f.bot.id, "zhaohu")).toThrow("不可用")
+    expect(f.store.recentTasks().map((x) => x.botId)).toEqual([f.bot.id])
+    expect(f.store.groupMessages(app.id)).toEqual([])
+    f.store.im.revoke(f.peer.id, groupId, 1)
+    expect(f.store.enqueue(input).id).toBe(task.id)
+    expect(
+      f.store.requestReceipts(f.bot.id, [check(input.requestId, input.message, mentions)])[0].state
+    ).toBe("accepted")
+    expect(() => f.store.enqueue({ ...input, requestId: "revoked" })).toThrow("解绑")
+  })
+  it.each(["offline", "revoked", "foreign-host", "archived", "deleting"])(
+    "rejects unavailable Zhaohu selection before enqueue: %s",
+    (state) => {
+      const f = fixture()
+      const groupId = imGroup(f)
+      if (state === "offline") f.store.im.setOnline(f.peer.id, groupId, false)
+      else if (state === "revoked") f.store.im.revoke(f.peer.id, groupId, 1)
+      else if (state === "foreign-host") {
+        const getBot = f.store.getBot.bind(f.store)
+        vi.spyOn(f.store, "getBot").mockImplementation((id) =>
+          id === f.peer.id ? { ...getBot(id), hostId: "other" } : getBot(id)
+        )
+      } else if (state === "archived")
+        f.raw.run("UPDATE bots SET archived=1 WHERE id=?", [f.peer.id])
+      else f.raw.run("UPDATE bots SET deleting=1 WHERE id=?", [f.peer.id])
+      expect(() =>
+        f.store.enqueue({
+          botId: f.bot.id,
+          requestId: "unavailable-im",
+          message: "@A check",
+          mentions: [
+            { start: 0, end: 2, kind: "group", groupSource: "zhaohu", groupId, label: "A" }
+          ]
+        })
+      ).toThrow()
+      expect(f.store.recentTasks()).toEqual([])
+    }
+  )
   it("persists private group references by exact identity without posting or dispatching group members", () => {
     const f = fixture()
     const group = f.store.saveGroup({ name: "A", memberIds: [f.bot.id, f.peer.id] })
