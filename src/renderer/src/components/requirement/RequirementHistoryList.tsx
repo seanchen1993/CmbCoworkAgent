@@ -45,6 +45,7 @@ import {
   getRequirementDevelopmentMetadata
 } from "@/lib/requirement-development"
 import { RequirementSpaceStatusTag } from "./RequirementSpaceStatusTag"
+import { systemTagToneClass } from "@/lib/requirement-system-tag-tone"
 
 const PAGE_SIZE = 15
 export type RequirementSourceFilter = "all" | "local" | "remote" | "space"
@@ -321,7 +322,13 @@ export function RequirementHistoryList({
                     }}
                   >
                     <div className="flex items-center gap-2 pr-9">
-                      <span className="mt-0.5 shrink-0 rounded-md bg-muted px-2 py-0.5 text-[10px] font-medium text-muted-foreground">
+                      <span
+                        className="mt-0.5 inline-flex shrink-0 items-center gap-1.5 rounded-md bg-muted/70 px-2 py-0.5 text-[10px] font-medium text-muted-foreground ring-1 ring-inset ring-border/60"
+                      >
+                        <span
+                          aria-hidden
+                          className={cn("size-1.5 shrink-0 rounded-full", systemTagToneClass(item.systemId))}
+                        />
                         {item.system}
                       </span>
                       <button
