@@ -1,0 +1,6 @@
+{
+  "url": "https://api.github.com/search/repositories?q=repo%3Astagewise-io%2Fstagewise+repo%3Anextlevelbuilder%2Fui-ux-pro-max-skill+repo%3AGrapesJS%2Fgrapesjs+repo%3Ashadcn-ui%2Fui+repo%3Afabricjs%2Ffabric.js+repo%3Areg-viz%2Freg-suit&per_page=100",
+  "query": "repo:stagewise-io/stagewise repo:nextlevelbuilder/ui-ux-pro-max-skill repo:GrapesJS/grapesjs repo:shadcn-ui/ui repo:fabricjs/fabric.js repo:reg-viz/reg-suit",
+  "total_count": 6,
+  "reason": "repository endpoints returned HTTP 403 rate limit; reused search endpoint"
+}

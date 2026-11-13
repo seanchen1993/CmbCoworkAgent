@@ -45,6 +45,42 @@ function fixture() {
 }
 
 describe("design view reconnect", () => {
+  it("keeps parallel metadata updates in place and moves a session only on a new submission", async () => {
+    const h = fixture()
+    await h.client.initialize([])
+    const a = snapshot(1, "A", "ds_a")
+    a.meta.lastSubmittedAt = 10
+    const b = snapshot(1, "B", "ds_b")
+    b.meta.lastSubmittedAt = 20
+    h.emit(a)
+    h.emit(b)
+    for (const [seq, id] of [[2, "ds_a"], [3, "ds_b"], [4, "ds_a"]] as const) {
+      const next = snapshot(seq, "持续输出", id)
+      h.change({ id, seq, meta: next.meta }) // Also covers legacy metadata without the new field.
+      expect(h.client.list().map((entry) => entry.id)).toEqual(["ds_b", "ds_a"])
+    }
+    a.seq = 5
+    a.meta.lastSubmittedAt = 30
+    h.emit(a)
+    expect(h.client.list().map((entry) => entry.id)).toEqual(["ds_a", "ds_b"])
+  })
+
+  it("preserves a live submission and deletion when an older list reply arrives during initialization", async () => {
+    const h = fixture()
+    let reply!: (index: DesignSessionSnapshot["meta"][]) => void
+    vi.mocked(h.api.list).mockImplementation(() => new Promise((resolve) => { reply = resolve }))
+    const initializing = h.client.initialize([])
+    const a = snapshot(2, "刚提交", "ds_a")
+    a.meta.lastSubmittedAt = 30
+    h.emit(a)
+    const b = snapshot(1, "已删除", "ds_b")
+    h.change({ id: b.id, seq: 2, meta: b.meta, deleted: true })
+    reply([{ ...a.meta, lastSubmittedAt: 10 }, { ...b.meta, lastSubmittedAt: 20 }])
+    await initializing
+    expect(h.client.list().map((entry) => entry.id)).toEqual(["ds_a"])
+    expect(h.client.list()[0].lastSubmittedAt).toBe(30)
+  })
+
   it("reuses draft HTML for metadata-only updates and fetches a full snapshot after a missing revision", async () => {
     const h = fixture()
     await h.client.initialize([])

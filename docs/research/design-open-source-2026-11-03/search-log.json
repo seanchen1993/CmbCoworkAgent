@@ -1,0 +1,50 @@
+[
+  {
+    "query": "topic:design-tools stars:>=1000 fork:false",
+    "url": "https://api.github.com/search/repositories?q=topic%3Adesign-tools+stars%3A%3E%3D1000+fork%3Afalse&sort=stars&order=desc&per_page=75",
+    "total_count": 20,
+    "incomplete_results": false
+  },
+  {
+    "query": "topic:visual-editor stars:>=1000 fork:false",
+    "url": "https://api.github.com/search/repositories?q=topic%3Avisual-editor+stars%3A%3E%3D1000+fork%3Afalse&sort=stars&order=desc&per_page=75",
+    "total_count": 5,
+    "incomplete_results": false
+  },
+  {
+    "query": "topic:design-system stars:>=3000 fork:false",
+    "url": "https://api.github.com/search/repositories?q=topic%3Adesign-system+stars%3A%3E%3D3000+fork%3Afalse&sort=stars&order=desc&per_page=75",
+    "total_count": 54,
+    "incomplete_results": false
+  },
+  {
+    "query": "topic:ui-components stars:>=10000 fork:false",
+    "url": "https://api.github.com/search/repositories?q=topic%3Aui-components+stars%3A%3E%3D10000+fork%3Afalse&sort=stars&order=desc&per_page=75",
+    "total_count": 22,
+    "incomplete_results": false
+  },
+  {
+    "query": "topic:animation stars:>=10000 fork:false",
+    "url": "https://api.github.com/search/repositories?q=topic%3Aanimation+stars%3A%3E%3D10000+fork%3Afalse&sort=stars&order=desc&per_page=75",
+    "total_count": 43,
+    "incomplete_results": false
+  },
+  {
+    "query": "topic:design-to-code stars:>=1000 fork:false",
+    "url": "https://api.github.com/search/repositories?q=topic%3Adesign-to-code+stars%3A%3E%3D1000+fork%3Afalse&sort=stars&order=desc&per_page=75",
+    "total_count": 8,
+    "incomplete_results": false
+  },
+  {
+    "query": "topic:prototyping stars:>=1000 fork:false",
+    "url": "https://api.github.com/search/repositories?q=topic%3Aprototyping+stars%3A%3E%3D1000+fork%3Afalse&sort=stars&order=desc&per_page=75",
+    "total_count": 14,
+    "incomplete_results": false
+  },
+  {
+    "query": "topic:accessibility stars:>=5000 fork:false",
+    "url": "https://api.github.com/search/repositories?q=topic%3Aaccessibility+stars%3A%3E%3D5000+fork%3Afalse&sort=stars&order=desc&per_page=75",
+    "total_count": 30,
+    "incomplete_results": false
+  }
+]

@@ -8,6 +8,7 @@ import {
   updateBrowserPageConfirmation
 } from "@/lib/browser-page-confirmation"
 import { isSingleDesignVariant } from "../../../../shared/design-variation-policy"
+import { withDesignSessionOrder } from "../../../../shared/design-session-order"
 import React, { useState, useRef, useCallback, useEffect } from "react"
 import { v4 as uuid } from "uuid"
 import { ChevronDown, LayoutTemplate, Move, Redo2, Undo2, X } from "lucide-react"
@@ -1036,7 +1037,7 @@ function loadSessionById(id: string): ReturnType<typeof defaultSession> {
 function loadIndex(): SessionMeta[] {
   try {
     const raw = localStorage.getItem(SESSION_INDEX_KEY)
-    if (raw) return JSON.parse(raw) as SessionMeta[]
+    if (raw) return (JSON.parse(raw) as SessionMeta[]).map((meta) => withDesignSessionOrder(meta))
 
     // ── One-time migration from old single-session format ──
     const oldRaw = localStorage.getItem(DESIGN_STORAGE_KEY)
@@ -3698,6 +3699,7 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
     const tabId = activeTabId
     const stateBeforeSend = tabStates[tabId]
     const hasExistingDesign = hasExistingDesignArtifact(stateBeforeSend)
+    const hasDesignProgress = hasExistingDesign || Boolean(stateBeforeSend?.retryPrompt)
 
     // Build context suffixes — included in generation prompt but not displayed in chat
     const designOutputConstraint =
@@ -3788,7 +3790,7 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
             .map((f) => `### ${f.filename}${f.truncated ? " (truncated)" : ""}\n${f.content}`)
             .join("\n\n")
         : ""
-    const creationContext = !hasExistingDesign
+    const creationContext = !hasDesignProgress
       ? buildDesignCreationContext(stateBeforeSend?.creationSelection)
       : ""
     const contextSuffix =
@@ -3883,11 +3885,6 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
       // Subsequent messages → iterate on existing design
       const currentState = tabStates[tabId]
       const activeVarId = currentState?.activeVariationId ?? null
-      const contextHtml = activeVarId
-        ? (currentState?.variations.find((v) => v.id === activeVarId)?.html ??
-          currentState?.html ??
-          "")
-        : (currentState?.html ?? "")
 
       // ── Multi-turn iteration ──────────────────────────────
       // LangGraph checkpointing (threadId = tabId) automatically provides full
@@ -3903,7 +3900,7 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
       startGeneration(
         iterationPrompt + contextSuffix,
         tabId,
-        /* isIteration */ !!contextHtml,
+        /* isIteration */ true,
         selectedModelId,
         prompt, // clean user message for apiHistory recording
         undefined,
@@ -5112,9 +5109,11 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
                 placeholder={
                   ts.attachedImage
                     ? "补充说明，如「还原这个页面」或「修改颜色为蓝色」…（可选）"
-                    : hasPreviewContent
-                      ? "描述需要调整的地方… (输入 / 选择技能)"
-                      : "描述你想创建的页面，或输入 / 选择技能…"
+                    : ts.draftPreview?.html.trim()
+                      ? "补充修改要求，或点击继续生成…"
+                      : hasPreviewContent || ts.retryPrompt
+                        ? "描述需要调整的地方… (输入 / 选择技能)"
+                        : "描述你想创建的页面，或输入 / 选择技能…"
                 }
                 rows={isWelcome ? 3 : 2}
                 style={{ ...S.textarea, minHeight: isWelcome ? 96 : 48,

@@ -14,7 +14,7 @@ function seed(): DesignSessionSnapshot {
   return {
     id: "ds_disk",
     seq: 1,
-    meta: { id: "ds_disk", title: "持久化", createdAt: 1, updatedAt: 1 },
+    meta: { id: "ds_disk", title: "持久化", createdAt: 1, updatedAt: 1, lastSubmittedAt: 1 },
     state: {
       ...createDesignState(),
       messages: [
@@ -35,6 +35,40 @@ function seed(): DesignSessionSnapshot {
 }
 
 describe("durable design storage", () => {
+  it("backfills legacy order once on disk and preserves it through updates and repeated reopen", () => {
+    const dir = mkdtempSync(join(tmpdir(), "design-order-durable-"))
+    const path = join(dir, "design.sqlite")
+    try {
+      let db = new NativeSqliteAdapter(new DatabaseSync(path))
+      let store = new DesignSessionStore(db)
+      for (const [id, updatedAt] of [["ds_a", 40], ["ds_b", 50]] as const) {
+        const snapshot = seed()
+        snapshot.id = snapshot.meta.id = id
+        snapshot.meta.updatedAt = updatedAt
+        delete snapshot.meta.lastSubmittedAt
+        store.save(snapshot, [])
+      }
+      db.run("UPDATE design_sessions SET meta = json_remove(meta, '$.lastSubmittedAt')")
+      db.close()
+      db = new NativeSqliteAdapter(new DatabaseSync(path))
+      try {
+        store = new DesignSessionStore(db)
+        expect(store.list().map((entry) => entry.id)).toEqual(["ds_b", "ds_a"])
+        const updated = store.get("ds_a")!
+        expect(updated.meta.lastSubmittedAt).toBe(40)
+        updated.meta.updatedAt = 1000
+        delete updated.meta.lastSubmittedAt // An older metadata writer must not reset order either.
+        store.save(updated, [])
+      } finally { db.close() }
+      db = new NativeSqliteAdapter(new DatabaseSync(path))
+      try {
+        store = new DesignSessionStore(db)
+        expect(store.list().map((entry) => entry.id)).toEqual(["ds_b", "ds_a"])
+        expect(store.get("ds_a")!.meta).toMatchObject({ updatedAt: 1000, lastSubmittedAt: 40 })
+      } finally { db.close() }
+    } finally { rmSync(dir, { recursive: true, force: true }) }
+  })
+
   it("stores draft content once outside message snapshots and restores it on reopen", () => {
     const dir = mkdtempSync(join(tmpdir(), "design-draft-durable-"))
     const path = join(dir, "design.sqlite")

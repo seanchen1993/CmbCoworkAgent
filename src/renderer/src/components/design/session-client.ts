@@ -11,6 +11,7 @@ import {
 import type { DesignTweakCommand } from "../../../../shared/design-tweaks"
 import type { DesignEditCommand, DesignEditableDocument } from "../../../../shared/design-edit"
 import type { FileAttachment } from "./types"
+import { compareDesignSessionOrder, withDesignSessionOrder } from "../../../../shared/design-session-order"
 
 /** One client per renderer, not per DesignView. Sequenced snapshots make reconnect idempotent. */
 export class DesignSessionClient {
@@ -58,8 +59,9 @@ export class DesignSessionClient {
       this.metas.delete(change.id)
       this.opened.delete(change.id)
     } else {
-      this.metas.set(change.id, change.meta)
-      if (change.snapshot) this.snapshots.set(change.id, change.snapshot)
+      const meta = withDesignSessionOrder(change.meta, this.metas.get(change.id)?.lastSubmittedAt)
+      this.metas.set(change.id, meta)
+      if (change.snapshot) this.snapshots.set(change.id, { ...change.snapshot, meta })
     }
     this.notify()
   }
@@ -80,16 +82,26 @@ export class DesignSessionClient {
     return this.snapshots.get(id)
   }
   list(): SessionMeta[] {
-    return [...this.metas.values()].sort((a, b) => b.updatedAt - a.updatedAt)
+    return [...this.metas.values()].sort(compareDesignSessionOrder)
+  }
+
+  private mergeIndex(index: SessionMeta[], versionsBeforeRequest: Map<string, number>): void {
+    for (const meta of index) {
+      // A live submission or deletion received during the request is newer than its reply.
+      if (this.versions.get(meta.id) !== versionsBeforeRequest.get(meta.id)) continue
+      this.metas.set(meta.id, withDesignSessionOrder(meta, this.metas.get(meta.id)?.lastSubmittedAt))
+    }
   }
 
   async initialize(seeds: DesignSessionSeed[]): Promise<void> {
     this.connect() // Before list/migration/open: live events can race IPC replies.
+    const versionsBeforeList = new Map(this.versions)
     const index = await this.api.list()
-    for (const meta of index) this.metas.set(meta.id, meta)
+    this.mergeIndex(index, versionsBeforeList)
     if (seeds.length) {
+      const versionsBeforeMigration = new Map(this.versions)
       const migrated = await this.api.migrate(seeds)
-      for (const meta of migrated) this.metas.set(meta.id, meta)
+      this.mergeIndex(migrated, versionsBeforeMigration)
     }
     this.notify()
   }

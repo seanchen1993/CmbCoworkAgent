@@ -5,7 +5,8 @@ import {
   createDesignState,
   type DesignRunEvent,
   type DesignRunRequest,
-  type DesignSessionChange
+  type DesignSessionChange,
+  type DesignSessionSnapshot
 } from "../../../shared/managed-design-session"
 import { DesignSessionStore } from "./session-store"
 import { DesignRunManager, type DesignRunDependencies } from "./run-manager"
@@ -401,6 +402,97 @@ describe("background design conversations", () => {
     h.finishes.get("recover-legacy")!()
   })
 
+  it.each(["questions", "agent", "image"] as const)("treats a %s follow-up after stop as a supplement to the latest draft", async (kind) => {
+    const h = harness()
+    h.create()
+    const emit = await h.start()
+    const draft = preview(h.manager.get("ds_a").activeRunId!, 3, true)
+    emit({ type: "preview", preview: draft })
+    h.manager.stop("ds_a")
+    h.finishes.get("request-a")!()
+    h.manager.start({ requestId: "supplement", designSessionId: "ds_a", kind,
+      prompt: "保留当前布局，标题改成销售中心", cleanUserMsg: "标题改成销售中心",
+      imageData: kind === "image" ? "new-reference" : undefined,
+      mimeType: kind === "image" ? "image/png" : undefined,
+      currentHtml: "过期的页面" })
+    await Promise.resolve()
+    const request = h.execute.mock.calls.at(-1)![0]
+    expect(request).toMatchObject({ kind: "agent", resumeFromDraft: true, isIteration: true,
+      sourceArtifactPath: draft.draftPath, currentHtml: materializeTweaks(draft.html, draft.tweaks, false) })
+    expect(request.resumeOnly).not.toBe(true)
+    expect(request.prompt).toContain("标题改成销售中心")
+    if (kind === "image") expect(request.imageData).toBe("new-reference")
+    expect(h.manager.get("ds_a").state.draftPreview!.html).toBe(draft.html)
+    h.manager.stop("ds_a")
+    h.finishes.get("supplement")!()
+  })
+
+  it("recovers the interrupted turn before a newly persisted follow-up and keeps the new instruction", async () => {
+    const recoverDraft = vi.fn((snapshot: DesignSessionSnapshot) => {
+      expect(snapshot.state.messages.at(-1)?.role).toBe("assistant")
+      expect(snapshot.state.messages.some((message) => message.content === "新增筛选区")).toBe(false)
+      return preview("legacy", 4, true)
+    })
+    const h = harness({ recoverDraft })
+    h.create()
+    await h.start()
+    h.manager.stop("ds_a")
+    h.finishes.get("request-a")!()
+    const stopped = h.manager.get("ds_a")
+    h.manager.patch("ds_a", { messages: [...stopped.state.messages, { role: "user", content: "新增筛选区" }] })
+    h.manager.start({ requestId: "follow-up", designSessionId: "ds_a", kind: "questions", prompt: "新增筛选区" })
+    await Promise.resolve()
+    expect(recoverDraft).toHaveBeenCalledOnce()
+    const request = h.execute.mock.calls.at(-1)![0]
+    expect(request).toMatchObject({ kind: "agent", resumeFromDraft: true, isIteration: true })
+    expect(request.prompt).toContain("新增筛选区")
+    expect(request.resumeOnly).not.toBe(true)
+    expect(h.manager.get("ds_a").state.messages.some((message) => message.content === "新增筛选区")).toBe(true)
+    h.manager.stop("ds_a")
+    h.finishes.get("follow-up")!()
+  })
+
+  it.each(["questions", "image"] as const)("uses the durable finished page for a %s follow-up", async (kind) => {
+    const h = harness()
+    h.create()
+    const saved = html().replace("页面", "已定稿内容")
+    h.manager.patch("ds_a", { html: saved, artifactPath: "/design/saved.html" })
+    const baseline = materializeTweaks(saved, h.manager.get("ds_a").state.tweaks, false)
+    h.manager.start({ requestId: "follow-up", designSessionId: "ds_a", kind,
+      prompt: "新增筛选区", currentHtml: "过期的页面" })
+    await Promise.resolve()
+    expect(h.execute.mock.calls.at(-1)![0]).toMatchObject({ kind: "agent", isIteration: true,
+      currentHtml: baseline, sourceArtifactPath: "/design/saved.html", prompt: "新增筛选区" })
+    expect(h.manager.get("ds_a").state.html).toBe(saved)
+    h.manager.stop("ds_a")
+    h.finishes.get("follow-up")!()
+  })
+
+  it("retains screenshot requirements across successive supplements before the first page is saved", async () => {
+    const h = harness()
+    h.create()
+    h.manager.start({ requestId: "image", designSessionId: "ds_a", kind: "image",
+      prompt: "按截图生成销售页面", imageData: "original-reference", mimeType: "image/png" })
+    await Promise.resolve()
+    for (const [previous, id, prompt] of [
+      ["image", "first-note", "标题改成销售中心"],
+      ["first-note", "second-note", "增加月份筛选"]
+    ]) {
+      h.manager.stop("ds_a")
+      h.finishes.get(previous)!()
+      h.manager.start({ requestId: id, designSessionId: "ds_a", kind: "questions", prompt })
+      await Promise.resolve()
+    }
+    await vi.waitFor(() => expect(h.execute).toHaveBeenCalledTimes(3))
+    const request = h.execute.mock.calls.at(-1)![0]
+    expect(request).toMatchObject({ kind: "agent", imageData: "original-reference", mimeType: "image/png" })
+    expect(request.prompt).toContain("按截图生成销售页面")
+    expect(request.prompt).toContain("标题改成销售中心")
+    expect(request.prompt).toContain("增加月份筛选")
+    h.manager.stop("ds_a")
+    h.finishes.get("second-note")!()
+  })
+
   it("continues recovered drafts for a follow-up using draft values rather than the previous final page", async () => {
     const h = harness()
     h.create()
@@ -592,6 +684,85 @@ describe("background design conversations", () => {
     expect(h.manager.get("ds_b").state.html).toContain("B完成")
   })
 
+  it("keeps concurrent sessions ordered through output, completion, edits, retry and restart", async () => {
+    vi.setSystemTime(1000)
+    const h = harness()
+    h.create()
+    const a = await h.start()
+    h.create("ds_b")
+    const b = await h.start("ds_b", "request-b")
+    const submittedA = h.manager.get("ds_a").meta.lastSubmittedAt!
+    const submittedB = h.manager.get("ds_b").meta.lastSubmittedAt!
+    expect(submittedB).toBeGreaterThan(submittedA)
+    const order = () => h.manager.list().map((entry) => entry.id)
+    expect(order()).toEqual(["ds_b", "ds_a"])
+    for (const emit of [a, b, a, b, a]) {
+      emit({ type: "token", token: "持续生成中。" })
+      await vi.advanceTimersByTimeAsync(100)
+      expect(order()).toEqual(["ds_b", "ds_a"])
+    }
+    a({ type: "done", html: html() })
+    b({ type: "error", error: "请求失败" })
+    h.finishes.get("request-a")!()
+    h.finishes.get("request-b")!()
+    h.manager.patch("ds_a", { inputValue: "未发送的补充" }, { lastSubmittedAt: 999999 })
+    h.manager.markRead("ds_a", h.manager.get("ds_a").seq)
+    h.manager.tweak("ds_a", { scope: "artifact", operation: "set", key: "primary", value: "#00aa00",
+      baseRevision: h.manager.get("ds_a").state.tweaks!.revision })
+    expect(order()).toEqual(["ds_b", "ds_a"])
+    expect(h.manager.get("ds_a").meta.lastSubmittedAt).toBe(submittedA)
+    expect(h.manager.get("ds_a").meta.updatedAt).toBeGreaterThan(submittedB)
+    h.manager.retry("ds_a", "retry-a")
+    expect(order()).toEqual(["ds_a", "ds_b"])
+    const retriedAt = h.manager.get("ds_a").meta.lastSubmittedAt
+    h.manager.retry("ds_a", "retry-a")
+    expect(h.manager.get("ds_a").meta.lastSubmittedAt).toBe(retriedAt)
+    await vi.waitFor(() => expect(h.finishes.has("retry-a")).toBe(true))
+    h.manager.stop("ds_a")
+    expect(order()).toEqual(["ds_a", "ds_b"])
+    expect(h.manager.get("ds_a").meta.lastSubmittedAt).toBe(retriedAt)
+    h.finishes.get("retry-a")!()
+    h.manager.retry("ds_a", "restart-a")
+    await vi.waitFor(() => expect(h.finishes.has("restart-a")).toBe(true))
+    const beforeRestart = h.manager.get("ds_a").meta.lastSubmittedAt
+    // Simulate a process exit: abandon the old run; only the restored manager may write now.
+    const restarted = new DesignRunManager(h.store, h.deps)
+    expect(restarted.list().map((entry) => entry.id)).toEqual(["ds_a", "ds_b"])
+    expect(restarted.get("ds_a").meta.lastSubmittedAt).toBe(beforeRestart)
+    expect(h.store.list().map((entry) => entry.id)).toEqual(["ds_a", "ds_b"])
+  })
+
+  it("keeps automatic question-to-generation transitions in place", async () => {
+    const h = harness()
+    h.create()
+    h.manager.patch("ds_a", { selectedDesignSystemId: "system" })
+    const questions = await h.start("ds_a", "questions", "questions")
+    const submittedAt = h.manager.get("ds_a").meta.lastSubmittedAt
+    h.create("ds_b")
+    await h.start("ds_b", "request-b")
+    questions({ type: "done", questions: [] })
+    h.finishes.get("questions")!()
+    await vi.waitFor(() => expect(h.finishes.has("questions:generate")).toBe(true))
+    expect(h.manager.get("ds_a").meta.lastSubmittedAt).toBe(submittedAt)
+    expect(h.manager.list().map((entry) => entry.id)).toEqual(["ds_b", "ds_a"])
+    h.manager.stop("ds_a")
+    h.manager.stop("ds_b")
+    h.finishes.get("questions:generate")!()
+    h.finishes.get("request-b")!()
+  })
+
+  it("preserves historical ordering for local migrations and puts newly created designs first", () => {
+    const h = harness()
+    const seed = (id: string, updatedAt: number) => ({
+      id, meta: { id, title: id, createdAt: 1, updatedAt }, state: createDesignState(), workspacePath: null
+    })
+    h.manager.migrate([seed("ds_old_a", 20), seed("ds_old_b", 10)])
+    expect(h.manager.list().map((entry) => entry.id)).toEqual(["ds_old_a", "ds_old_b"])
+    expect(h.store.get("ds_old_a")!.meta.lastSubmittedAt).toBe(20)
+    h.create("ds_new")
+    expect(h.manager.list().map((entry) => entry.id)).toEqual(["ds_new", "ds_old_a", "ds_old_b"])
+  })
+
   it("flushes pending progress on Stop and fences late terminal events", async () => {
     const h = harness()
     h.create()
@@ -659,7 +830,7 @@ describe("background design conversations", () => {
     h.finishes.get("questions")!()
   })
 
-  it("ignores questions from cancelled runs and clears old answers when asking again", async () => {
+  it("supplements confirmed requirements before a page exists and ignores cancelled question events", async () => {
     const h = harness()
     h.create()
     const old = await h.start("ds_a", "old", "questions")
@@ -667,11 +838,17 @@ describe("background design conversations", () => {
     h.manager.patch("ds_a", { answers: { old: "旧答案" } })
     h.manager.stop("ds_a")
     h.finishes.get("old")!()
-    const emit = await h.start("ds_a", "new", "questions")
+    h.manager.start({ requestId: "new", designSessionId: "ds_a", kind: "questions", prompt: "补充：增加筛选" })
+    await Promise.resolve()
     old({ type: "question", question: { id: "late", label: "过期事件" } })
-    expect(h.manager.get("ds_a").state.questions).toEqual([])
-    expect(h.manager.get("ds_a").state.answers).toEqual({})
-    emit({ type: "done", questions: [] })
+    expect(h.manager.get("ds_a").state.questions.map((question) => question.id)).toEqual(["old"])
+    expect(h.manager.get("ds_a").state.answers).toEqual({ old: "旧答案" })
+    const request = h.execute.mock.calls.at(-1)![0]
+    expect(request.kind).toBe("agent")
+    expect(request.prompt).toContain("生成页面")
+    expect(request.prompt).toContain("旧问题：旧答案")
+    expect(request.prompt).toContain("补充：增加筛选")
+    h.manager.stop("ds_a")
     h.finishes.get("new")!()
   })
 

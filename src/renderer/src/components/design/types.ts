@@ -415,6 +415,8 @@ export interface SessionMeta {
   title: string
   createdAt: number
   updatedAt: number
+  /** List order changes only when the user creates or submits a design task. */
+  lastSubmittedAt?: number
   kind?: DesignSessionKind
   sourceLabel?: string
   thumbnailText?: string

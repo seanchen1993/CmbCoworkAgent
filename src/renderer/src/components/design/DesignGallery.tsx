@@ -1,5 +1,6 @@
 import { useState } from "react"
 import type { SessionMeta } from "./types"
+import { compareDesignSessionOrder } from "../../../../shared/design-session-order"
 
 function getPathName(filePath: string | null): string {
   if (!filePath) return ""
@@ -179,9 +180,10 @@ export function DesignGallery({
               <span style={{ fontSize: 13, fontWeight: 600 }}>新建设计</span>
             </button>
 
-            {[...sessionIndex].sort((a, b) => b.updatedAt - a.updatedAt).map((meta) => (
+            {[...sessionIndex].sort(compareDesignSessionOrder).map((meta) => (
               <div
                 key={meta.id}
+                data-design-session-id={meta.id}
                 onClick={() => onOpen(meta.id)}
                 onMouseEnter={() => setHoveredId(meta.id)}
                 onMouseLeave={() => setHoveredId(null)}

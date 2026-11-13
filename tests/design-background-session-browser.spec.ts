@@ -69,6 +69,22 @@ const bundle = await build({
           contents: `const state={loadModels:async()=>{},loadProviders:async()=>{}}; export function useAppStore(select){return select?select(state):state;}`,
           loader: "js"
         }))
+        builder.onLoad({ filter: /\/api\/leanstar-requirements\.ts$/ }, () => ({
+          contents: `
+            export const getDetailCode = (detail) => detail?.subFrCode || detail?.frCode || detail?.code || '';
+            export const leanstarRequirementsApi = {
+              getNamespaceTree: async () => ({namespaceTreeList:[{
+                pathName:'Mock 开发组 A',pathId:'mock-a',devopsOrgId:'mock-a',namespaceId:'ns-wplus'
+              }]}),
+              listProductRequirements: async () => ({content:[{
+                code:'P2603-2406',title:'Mock 需求 A-1',functionList:[]
+              }]}),
+              getImplementationDetail: async () => ({subFrs:[]}),
+              getRequirementDocumentContent: async () => ({documentTextContent:'测试需求'})
+            };
+          `,
+          loader: "js"
+        }))
       }
     }
   ]
@@ -393,6 +409,7 @@ try {
     }
   })
   await page.goto(`http://127.0.0.1:${address.port}`)
+  if (process.env.DESIGN_PARALLEL_ORDER_ONLY !== "1") {
   const input = page.locator("textarea").first()
   await input.waitFor()
   const workspace = page.getByTestId("design-workspace")
@@ -1779,6 +1796,21 @@ try {
   await page.getByRole("button", { name: "■ 停止", exact: true }).click()
   await page.getByRole("button", { name: "继续生成", exact: true }).waitFor()
   firstResumeFinish()
+  await page.locator("textarea").first().fill("保留已完成内容，统计区增加筛选")
+  await page.getByRole("button", { name: "▶ 发送", exact: true }).click()
+  await page.getByRole("button", { name: "■ 停止", exact: true }).waitFor()
+  assert.equal(requests.at(-1)!.resumeFromDraft, true)
+  assert.equal(requests.at(-1)!.isIteration, true)
+  assert.notEqual(requests.at(-1)!.resumeOnly, true)
+  assert.match(requests.at(-1)!.prompt, /统计区增加筛选/)
+  assert.doesNotMatch(requests.at(-1)!.prompt, /不应重建的初始模板|创建设计时选择的参考资料/)
+  assert.match(requests.at(-1)!.currentHtml!, /已经完成的欢迎区/)
+  await page.frameLocator("iframe").getByRole("heading", { name: "已经完成的欢迎区", exact: true }).waitFor()
+  assert.equal(await waiting.count(), 0, "a supplement immediately after stop keeps the existing preview")
+  const supplementFinish = completions.at(-1)!
+  await page.getByRole("button", { name: "■ 停止", exact: true }).click()
+  await page.getByRole("button", { name: "继续生成", exact: true }).waitFor()
+  supplementFinish()
   await page.reload()
   await page.frameLocator("iframe").getByRole("heading", { name: "已经完成的欢迎区", exact: true }).waitFor()
   await page.getByRole("button", { name: "继续生成", exact: true }).click()
@@ -1826,6 +1858,8 @@ try {
     .replace("尾部内容完成", "统计区接续完成")
   emitters.at(-1)!({ type: "done", html: resumedFinalHtml })
   completions.at(-1)!()
+  assert.equal(manager.get("ds_resume_draft").state.generationState, "done")
+  assert.match(manager.get("ds_resume_draft").state.html, /统计区接续完成/)
   await page.frameLocator("iframe").getByText("统计区接续完成", { exact: true }).waitFor()
   assert.match(manager.get("ds_resume_draft").state.html, /已经完成的欢迎区/)
   assert.equal(manager.get("ds_resume_draft").state.draftPreview, null)
@@ -1882,10 +1916,70 @@ try {
   assert.equal(manager.get("ds_stream_questions").activeRunId, null)
   completions.at(-1)!()
   console.log("PASS: questions appear before completion, accept answers while streaming, and preserve them across refresh and submission")
+
   assert.deepEqual(errors, [])
   console.log(
     "PASS: progressive previews, bounded chat/comment patches, live node/listener preservation, durable undo/redo, background recovery, full-page creation, template/requirement persistence and URL/HTML/ZIP imports"
   )
+  }
+  }
+  if (process.env.DESIGN_URL_IMPORT_ONLY !== "1") {
+  // Parallel generation must update the cards without moving them under the pointer.
+  await page.getByTitle("返回历史记录").click()
+  await page.getByText("My Designs", { exact: true }).waitFor()
+  for (const id of ["ds_order_a", "ds_order_b"]) {
+    manager.create({ id, meta: { id, title: id, createdAt: 1, updatedAt: 1 },
+      state: { ...createDesignState(), selectedModelId: "custom:test", selectedDesignSystemId: "neutral-modern" },
+      workspacePath: "/workspace" })
+    manager.start({ requestId: `${id}:first`, designSessionId: id, kind: "agent", prompt: id })
+    await Promise.resolve()
+  }
+  const parallelHtml = (complete = false) => `<!doctype html><html><body ${complete ? "" : 'data-design-build="building"'}><section data-design-section="main"><h1>并行设计内容</h1></section><section data-design-section="tail" ${complete ? "" : "data-design-pending"}>剩余内容</section></body></html>`
+  const orderCards = page.locator("[data-design-session-id]")
+  const waitForOrder = async (expected: string[]) => {
+    await page.waitForFunction((ids) => JSON.stringify(
+      [...document.querySelectorAll("[data-design-session-id]")].slice(0, ids.length)
+        .map(card => card.getAttribute("data-design-session-id"))) === JSON.stringify(ids), expected)
+    assert.deepEqual(await orderCards.evaluateAll(cards => cards.slice(0, 2)
+      .map(card => card.getAttribute("data-design-session-id"))), expected)
+  }
+  await waitForOrder(["ds_order_b", "ds_order_a"])
+  for (const [index, id] of ["ds_order_a", "ds_order_b", "ds_order_a"].entries()) {
+    const requestIndex = requests.findIndex(request => request.requestId === `${id}:first`)
+    const html = parallelHtml().replace("并行设计内容", `${id} 的新进度 ${index}`)
+    emitters[requestIndex]({ type: "preview", preview: {
+      runId: manager.get(id).activeRunId!, revision: index + 1, html, draftPath: `/workspace/${id}.html`,
+      phase: "sections", status: "building", ...inspectDesignDocument(html), tweaks: null,
+      createdAt: Date.now(), updatedAt: Date.now()
+    } })
+    await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => resolve())))
+    await waitForOrder(["ds_order_b", "ds_order_a"])
+  }
+  const aRequestIndex = requests.findIndex(request => request.requestId === "ds_order_a:first")
+  emitters[aRequestIndex]({ type: "done", html: parallelHtml(true).replace("并行设计内容", "排序设计 A 已完成") })
+  completions[aRequestIndex]()
+  assert.equal(manager.get("ds_order_a").state.generationState, "done")
+  await page.locator('[data-design-session-id="ds_order_a"]').getByText(/^已完成/).waitFor()
+  await waitForOrder(["ds_order_b", "ds_order_a"])
+  await page.locator('[data-design-session-id="ds_order_a"]').click()
+  await page.locator("textarea").first().fill("新增月份筛选交互，保留现有页面")
+  await page.getByRole("button", { name: "▶ 发送", exact: true }).click()
+  await page.getByRole("button", { name: "■ 停止", exact: true }).waitFor()
+  const aSupplementFinish = completions.at(-1)!
+  await page.getByTitle("返回历史记录").click()
+  await waitForOrder(["ds_order_a", "ds_order_b"])
+  const bRequestIndex = requests.findIndex(request => request.requestId === "ds_order_b:first")
+  emitters[bRequestIndex]({ type: "error", error: "排序测试结束" })
+  completions[bRequestIndex]()
+  await page.locator('[data-design-session-id="ds_order_b"]').getByText(/^生成失败/).waitFor()
+  await waitForOrder(["ds_order_a", "ds_order_b"])
+  manager.stop("ds_order_a")
+  aSupplementFinish()
+  await page.locator('[data-design-session-id="ds_order_a"]').getByText(/^已停止/).waitFor()
+  await page.reload()
+  await page.getByRole("button", { name: "返回设计历史", exact: true }).click()
+  await waitForOrder(["ds_order_a", "ds_order_b"])
+  console.log("PASS: parallel output and terminal events keep gallery order stable; explicit follow-ups move once and survive reload")
   }
   assert.deepEqual(errors, [])
 } finally {

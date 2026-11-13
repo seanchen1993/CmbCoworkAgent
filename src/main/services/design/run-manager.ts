@@ -34,6 +34,7 @@ import {
 import { sourceHash, verifyDesignPatchDependencies } from "./document-index"
 import { inspectDesignDocument, type DesignDraftPreview } from "../../../shared/design-progressive"
 import { DesignLiveOutputTracker } from "../../../shared/design-live-output"
+import { compareDesignSessionOrder, withDesignSessionOrder } from "../../../shared/design-session-order"
 import { isSingleDesignVariant, designVariantPolicyIssue, SINGLE_DESIGN_VARIANT_PROMPT } from "../../../shared/design-variation-policy"
 import {
   readTweakDeclaration,
@@ -90,12 +91,14 @@ export class DesignRunManager {
   private readonly queue: Array<() => void> = []
   private executing = 0
   private readonly editing = new Set<string>()
+  private lastSubmissionTime = 0
 
   constructor(
     private readonly store: DesignSessionStore,
     private readonly deps: DesignRunDependencies
   ) {
     for (const snapshot of store.list()) {
+      this.lastSubmissionTime = Math.max(this.lastSubmissionTime, snapshot.meta.lastSubmittedAt ?? 0)
       snapshot.state.singleVariant = isSingleDesignVariant(snapshot.state, snapshot.meta)
       snapshot.state.artifactRevision ??= 0
       snapshot.state.patchStatus = null
@@ -134,7 +137,7 @@ export class DesignRunManager {
 
   list(): SessionMeta[] {
     return [...this.sessions.values()]
-      .sort((a, b) => b.meta.updatedAt - a.meta.updatedAt)
+      .sort((a, b) => compareDesignSessionOrder(a.meta, b.meta))
       .map((snapshot) => ({
         ...snapshot.meta,
         generationState: snapshot.state.pendingApproval
@@ -250,7 +253,13 @@ export class DesignRunManager {
     }
   }
 
-  create(seed: DesignSessionSeed): DesignSessionSnapshot {
+  private nextSubmissionTime(): number {
+    // Keep explicit submissions ordered even in the same millisecond or after a clock rollback.
+    this.lastSubmissionTime = Math.max(Date.now(), this.lastSubmissionTime + 1)
+    return this.lastSubmissionTime
+  }
+
+  create(seed: DesignSessionSeed, migrated = false): DesignSessionSnapshot {
     if (this.sessions.has(seed.id)) return this.get(seed.id)
     if (this.store.wasDeleted(seed.id)) throw new Error("设计会话已删除")
     if (!/^ds_[a-zA-Z0-9_-]+$/.test(seed.id)) throw new Error("设计会话 ID 无效")
@@ -265,13 +274,17 @@ export class DesignRunManager {
     state.draftPreview ??= null
     state.tweaks ??=
       state.artifactMetadata?.tweaks ?? reconcileTweaks(readTweakDeclaration(state.html))
-    return this.commit({ ...clone(seed), state, seq: 0, activeRunId: null, lastSeenSeq: 0 }, [
+    const meta = migrated
+      ? withDesignSessionOrder(seed.meta)
+      : { ...clone(seed.meta), lastSubmittedAt: this.nextSubmissionTime() }
+    this.lastSubmissionTime = Math.max(this.lastSubmissionTime, meta.lastSubmittedAt ?? 0)
+    return this.commit({ ...clone(seed), meta, state, seq: 0, activeRunId: null, lastSeenSeq: 0 }, [
       { type: "created" }
     ])
   }
 
   migrate(seeds: DesignSessionSeed[]): SessionMeta[] {
-    for (const seed of seeds) if (!this.store.wasDeleted(seed.id)) this.create(seed)
+    for (const seed of seeds) if (!this.store.wasDeleted(seed.id)) this.create(seed, true)
     return this.list()
   }
 
@@ -338,7 +351,7 @@ export class DesignRunManager {
       ...message,
       id: message.id || randomUUID()
     }))
-    if (meta) next.meta = { ...next.meta, ...meta, id }
+    if (meta) next.meta = { ...next.meta, ...meta, id, lastSubmittedAt: next.meta.lastSubmittedAt }
     return this.commit(next, [{ type: "edited", fields: Object.keys(updates) }])
   }
 
@@ -408,7 +421,25 @@ export class DesignRunManager {
     this.commit(next, [{ type: "preview_visible", runId, revision }])
   }
 
-  start(request: DesignRunRequest): DesignSessionSnapshot {
+  private recoverDraft(next: DesignSessionSnapshot): void {
+    if (next.activeRunId || next.state.draftPreview?.html.trim() ||
+      !["error", "cancelled", "interrupted"].includes(next.state.generationState) ||
+      this.store.latestRequest(next.id)?.kind === "questions") return
+    // A follow-up's user bubble is persisted before start. Recover from the
+    // interrupted turn, before that new instruction, without changing history.
+    const messages = next.state.messages
+    let end = messages.length
+    while (end > 0 && messages[end - 1].role === "user") end--
+    const recovered = this.deps.recoverDraft?.({
+      ...next, state: { ...next.state, messages: messages.slice(0, end) }
+    })
+    if (recovered && inspectDesignDocument(recovered.html, recovered.sections).valid) {
+      next.state.draftPreview = recovered
+      this.commit(next, [{ type: "draft_recovered", draftPath: recovered.draftPath }])
+    }
+  }
+
+  start(request: DesignRunRequest, userInitiated = true): DesignSessionSnapshot {
     if (this.editing.has(request.designSessionId))
       throw new Error("直接编辑尚未保存，请稍后开始生成")
     const previous = this.store.findRequest(request.requestId)
@@ -420,23 +451,22 @@ export class DesignRunManager {
     const next = this.get(request.designSessionId)
     next.state.singleVariant = isSingleDesignVariant(next.state, next.meta)
     if (next.activeRunId) throw new Error("当前设计仍在运行，请先停止或等待完成")
-    const resumeDraft =
-      request.kind !== "questions" && next.state.draftPreview?.html.trim()
-        ? next.state.draftPreview
-        : null
+    this.recoverDraft(next)
+    const previousRequest = this.store.latestRequest(next.id)
+    const confirmedAnswers = next.state.questions.flatMap((question) => {
+      const value = next.state.answers[question.id]
+      if (!value || (Array.isArray(value) && !value.length)) return []
+      return [`- ${question.label}：${Array.isArray(value) ? value.join("、") : value}`]
+    }).join("\n")
+    const resumeDraft = next.state.draftPreview?.html.trim() ? next.state.draftPreview : null
+    const currentHtml = next.state.variations.find((v) => v.id === next.state.activeVariationId)?.html || next.state.html
     if (resumeDraft) {
       if (!inspectDesignDocument(resumeDraft.html, resumeDraft.sections).valid)
         throw new Error("已保存的草稿结构不完整，无法安全接续，请先检查草稿")
       const instruction = request.resumeInstruction ?? request.prompt
-      const previousRequest = this.store.latestRequest(next.id)
       const goal =
         previousRequest?.resumeGoal ?? previousRequest?.cleanUserMsg ??
         previousRequest?.resumeInstruction ?? previousRequest?.prompt ?? instruction
-      const confirmedAnswers = next.state.questions.flatMap((question) => {
-        const value = next.state.answers[question.id]
-        if (!value || (Array.isArray(value) && !value.length)) return []
-        return [`- ${question.label}：${Array.isArray(value) ? value.join("、") : value}`]
-      }).join("\n")
       request = {
         ...request,
         kind: "agent",
@@ -449,6 +479,38 @@ export class DesignRunManager {
         currentHtml: materializeTweaks(resumeDraft.html, resumeDraft.tweaks, false),
         sourceArtifactPath: resumeDraft.draftPath,
         patch: undefined
+      }
+    } else if (currentHtml.trim()) {
+      // Durable content wins even if a stale renderer requests first-time questions/image generation.
+      request = {
+        ...request,
+        kind: request.kind === "patch" ? "patch" : "agent",
+        isIteration: true,
+        currentHtml: materializeTweaks(currentHtml, next.state.tweaks, false),
+        sourceArtifactPath: next.state.artifactPath
+      }
+    } else if (request.kind !== "patch" && !request.resumeOnly && previousRequest && next.state.retryPrompt && !(
+      previousRequest.kind === "questions" && request.kind === "agent" &&
+      request.cleanUserMsg === next.state.originalPrompt
+    )) {
+      // No page yet: a new message supplements the collected requirements.
+      // Submitting the question form already supplies its complete enriched prompt.
+      const requirements = [
+        previousRequest.resumeGoal ?? previousRequest.prompt,
+        "[本次补充要求]", request.prompt
+      ].join("\n\n")
+      request = {
+        ...request,
+        kind: "agent",
+        imageData: request.imageData ?? previousRequest.imageData,
+        mimeType: request.mimeType ?? previousRequest.mimeType,
+        skill: request.skill ?? previousRequest.skill,
+        resumeGoal: requirements,
+        prompt: buildNewDesignPrompt(
+          `接着当前设计继续，保留已确认信息，无需重新开始提问。本次补充与此前要求冲突时，以本次补充为准。\n\n${requirements}` +
+            (confirmedAnswers ? `\n\n[已确认的补充要求]\n${confirmedAnswers}` : ""),
+          { designSystemId: next.state.selectedDesignSystemId, singleVariant: next.state.singleVariant }
+        )
       }
     }
     if (
@@ -522,7 +584,7 @@ export class DesignRunManager {
     next.state.rightTab = request.kind === "questions" ? "questions" : "design"
     next.state.originalPrompt =
       request.kind === "questions" ? request.prompt : next.state.originalPrompt
-    if (request.kind === "questions") {
+    if (request.kind === "questions" && !request.resumeOnly) {
       next.state.questions = []
       next.state.answers = {}
     }
@@ -538,6 +600,7 @@ export class DesignRunManager {
       isIteration: request.isIteration,
       executionEvents: []
     })
+    if (userInitiated) next.meta.lastSubmittedAt = this.nextSubmissionTime()
     // Commit the user input and placeholder before any model/tool execution.
     const result = this.commit(next, [{ type: "run_started", runId: run.id }], run.request)
     run.snapshot = clone(result)
@@ -912,7 +975,7 @@ export class DesignRunManager {
             { designSystemId: state.selectedDesignSystemId, singleVariant: state.singleVariant }
           ),
           cleanUserMsg: run.request.prompt
-        })
+        }, /* userInitiated */ false)
       }
     }
   }
@@ -1009,24 +1072,13 @@ export class DesignRunManager {
   retry(id: string, requestId: string): DesignSessionSnapshot {
     const request = this.store.latestRequest(id)
     if (!request) throw new Error("没有可重试的生成任务")
-    const next = this.get(id)
-    if (request.kind !== "questions" && !next.activeRunId && !next.state.draftPreview && ["error", "cancelled", "interrupted"].includes(next.state.generationState)) {
-      const recovered = this.deps.recoverDraft?.(next)
-      if (recovered && inspectDesignDocument(recovered.html, recovered.sections).valid) {
-        next.state.draftPreview = recovered
-        this.commit(next, [{ type: "draft_recovered", draftPath: recovered.draftPath }])
-      }
-    }
-    const hasDraft = Boolean(this.get(id).state.draftPreview?.html.trim())
     return this.start({
       ...request,
       requestId,
       freshAgentThread: request.kind === "agent",
-      resumeOnly: hasDraft,
+      resumeOnly: true,
       // Resume the page and its actual requirements, without reinjecting initial template HTML.
-      resumeInstruction: hasDraft
-        ? request.resumeInstruction ?? request.cleanUserMsg ?? request.prompt
-        : request.resumeInstruction
+      resumeInstruction: request.resumeInstruction ?? request.cleanUserMsg ?? request.prompt
     })
   }
 

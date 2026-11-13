@@ -6,6 +6,7 @@ import type {
 } from "../../../shared/managed-design-session"
 import type { DesignAppliedPatch } from "../../../shared/design-patch"
 import type { TweakValues, DesignTweaksState } from "../../../shared/design-tweaks"
+import { compareDesignSessionOrder, withDesignSessionOrder } from "../../../shared/design-session-order"
 
 export interface DesignPatchJournal {
   id: string
@@ -61,6 +62,10 @@ export class DesignSessionStore {
         revision INTEGER NOT NULL, PRIMARY KEY(session_id, command_id)
       );
     `)
+    // Persist the old order before interrupted-run recovery or new output updates updatedAt.
+    db.run(`UPDATE design_sessions SET meta = json_set(meta, '$.lastSubmittedAt',
+      COALESCE(json_extract(meta, '$.updatedAt'), json_extract(meta, '$.createdAt'), 0))
+      WHERE json_extract(meta, '$.lastSubmittedAt') IS NULL`)
   }
 
   private rows(sql: string, values: unknown[] = []): Record<string, unknown>[] {
@@ -76,9 +81,9 @@ export class DesignSessionStore {
   }
 
   list(): DesignSessionSnapshot[] {
-    return this.rows(
-      "SELECT * FROM design_sessions ORDER BY json_extract(meta, '$.updatedAt') DESC"
-    ).map((row) => this.decode(row))
+    return this.rows("SELECT * FROM design_sessions")
+      .map((row) => this.decode(row))
+      .sort((left, right) => compareDesignSessionOrder(left.meta, right.meta))
   }
 
   get(id: string): DesignSessionSnapshot | null {
@@ -127,7 +132,7 @@ export class DesignSessionStore {
     this.db.run("BEGIN IMMEDIATE")
     try {
       const previous = this.rows(
-        "SELECT json_extract(state, '$.html') AS html FROM design_sessions WHERE id=?",
+        "SELECT json_extract(state, '$.html') AS html, json_extract(meta, '$.lastSubmittedAt') AS lastSubmittedAt FROM design_sessions WHERE id=?",
         [snapshot.id]
       )[0]
       if (!patchJournal && previous && previous.html !== snapshot.state.html) {
@@ -190,7 +195,8 @@ export class DesignSessionStore {
         [
           snapshot.id,
           snapshot.seq,
-          JSON.stringify(snapshot.meta),
+          JSON.stringify(withDesignSessionOrder(snapshot.meta,
+            typeof previous?.lastSubmittedAt === "number" ? previous.lastSubmittedAt : undefined)),
           JSON.stringify(draft ? { ...state, draftPreview: { ...draft, html: "" } } : state),
           snapshot.workspacePath,
           snapshot.activeRunId,

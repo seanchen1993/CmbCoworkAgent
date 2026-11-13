@@ -1,0 +1,2000 @@
+[
+  {
+    "full_name": "donnemartin/system-design-primer",
+    "stars": 376651,
+    "license_spdx": "NOASSERTION",
+    "archived": false,
+    "pushed_at": "2026-09-15T01:10:09Z",
+    "url": "https://github.com/donnemartin/system-design-primer",
+    "selected": false
+  },
+  {
+    "full_name": "nextlevelbuilder/ui-ux-pro-max-skill",
+    "stars": 144589,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-11-02T16:10:22Z",
+    "url": "https://github.com/nextlevelbuilder/ui-ux-pro-max-skill",
+    "selected": true
+  },
+  {
+    "full_name": "excalidraw/excalidraw",
+    "stars": 135089,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-11-03T12:48:46Z",
+    "url": "https://github.com/excalidraw/excalidraw",
+    "selected": true
+  },
+  {
+    "full_name": "shadcn-ui/ui",
+    "stars": 127254,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-11-03T08:33:18Z",
+    "url": "https://github.com/shadcn-ui/ui",
+    "selected": true
+  },
+  {
+    "full_name": "VoltAgent/awesome-design-md",
+    "stars": 125384,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-10-28T15:45:40Z",
+    "url": "https://github.com/VoltAgent/awesome-design-md",
+    "selected": true
+  },
+  {
+    "full_name": "mrdoob/three.js",
+    "stars": 117476,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-11-03T10:54:45Z",
+    "url": "https://github.com/mrdoob/three.js",
+    "selected": true
+  },
+  {
+    "full_name": "d3/d3",
+    "stars": 113860,
+    "license_spdx": "ISC",
+    "archived": false,
+    "pushed_at": "2026-11-03T08:55:19Z",
+    "url": "https://github.com/d3/d3",
+    "selected": true
+  },
+  {
+    "full_name": "Leonxlnx/taste-skill",
+    "stars": 109232,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-11-03T01:53:39Z",
+    "url": "https://github.com/Leonxlnx/taste-skill",
+    "selected": true
+  },
+  {
+    "full_name": "nexu-io/open-design",
+    "stars": 105656,
+    "license_spdx": "Apache-2.0",
+    "archived": false,
+    "pushed_at": "2026-11-03T11:13:21Z",
+    "url": "https://github.com/nexu-io/open-design",
+    "selected": true
+  },
+  {
+    "full_name": "ant-design/ant-design",
+    "stars": 100059,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-11-03T09:52:06Z",
+    "url": "https://github.com/ant-design/ant-design",
+    "selected": true
+  },
+  {
+    "full_name": "mui/material-ui",
+    "stars": 99296,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-11-03T12:43:58Z",
+    "url": "https://github.com/mui/material-ui",
+    "selected": true
+  },
+  {
+    "full_name": "microsoft/playwright",
+    "stars": 99176,
+    "license_spdx": "Apache-2.0",
+    "archived": false,
+    "pushed_at": "2026-11-03T04:45:03Z",
+    "url": "https://github.com/microsoft/playwright",
+    "selected": true
+  },
+  {
+    "full_name": "tailwindlabs/tailwindcss",
+    "stars": 98056,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-11-02T18:51:41Z",
+    "url": "https://github.com/tailwindlabs/tailwindcss",
+    "selected": true
+  },
+  {
+    "full_name": "3b1b/manim",
+    "stars": 96069,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-09-09T16:23:48Z",
+    "url": "https://github.com/3b1b/manim",
+    "selected": false
+  },
+  {
+    "full_name": "storybookjs/storybook",
+    "stars": 91436,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-11-03T13:07:49Z",
+    "url": "https://github.com/storybookjs/storybook",
+    "selected": true
+  },
+  {
+    "full_name": "mermaid-js/mermaid",
+    "stars": 90992,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-11-03T13:11:15Z",
+    "url": "https://github.com/mermaid-js/mermaid",
+    "selected": true
+  },
+  {
+    "full_name": "animate-css/animate.css",
+    "stars": 82947,
+    "license_spdx": "NOASSERTION",
+    "archived": false,
+    "pushed_at": "2024-07-29T19:34:21Z",
+    "url": "https://github.com/animate-css/animate.css",
+    "selected": false
+  },
+  {
+    "full_name": "abi/screenshot-to-code",
+    "stars": 80998,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-10-27T10:48:37Z",
+    "url": "https://github.com/abi/screenshot-to-code",
+    "selected": true
+  },
+  {
+    "full_name": "heygen-com/hyperframes",
+    "stars": 78078,
+    "license_spdx": "Apache-2.0",
+    "archived": false,
+    "pushed_at": "2026-11-03T13:04:39Z",
+    "url": "https://github.com/heygen-com/hyperframes",
+    "selected": true
+  },
+  {
+    "full_name": "MisterBooo/LeetCodeAnimation",
+    "stars": 76717,
+    "license_spdx": null,
+    "archived": false,
+    "pushed_at": "2026-06-12T13:49:06Z",
+    "url": "https://github.com/MisterBooo/LeetCodeAnimation",
+    "selected": false
+  },
+  {
+    "full_name": "juliangarnier/anime",
+    "stars": 74244,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-11-02T22:25:55Z",
+    "url": "https://github.com/juliangarnier/anime",
+    "selected": true
+  },
+  {
+    "full_name": "hakimel/reveal.js",
+    "stars": 72512,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-09-30T19:38:13Z",
+    "url": "https://github.com/hakimel/reveal.js",
+    "selected": true
+  },
+  {
+    "full_name": "apache/echarts",
+    "stars": 67671,
+    "license_spdx": "Apache-2.0",
+    "archived": false,
+    "pushed_at": "2026-10-13T09:27:20Z",
+    "url": "https://github.com/apache/echarts",
+    "selected": true
+  },
+  {
+    "full_name": "penpot/penpot",
+    "stars": 62015,
+    "license_spdx": "MPL-2.0",
+    "archived": false,
+    "pushed_at": "2026-11-03T13:00:47Z",
+    "url": "https://github.com/penpot/penpot",
+    "selected": true
+  },
+  {
+    "full_name": "ionic-team/ionic-framework",
+    "stars": 52738,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-11-03T09:46:51Z",
+    "url": "https://github.com/ionic-team/ionic-framework",
+    "selected": false
+  },
+  {
+    "full_name": "tldraw/tldraw",
+    "stars": 51212,
+    "license_spdx": "NOASSERTION",
+    "archived": false,
+    "pushed_at": "2026-11-03T13:05:48Z",
+    "url": "https://github.com/tldraw/tldraw",
+    "selected": true
+  },
+  {
+    "full_name": "DavidHDev/react-bits",
+    "stars": 51134,
+    "license_spdx": "NOASSERTION",
+    "archived": false,
+    "pushed_at": "2026-10-31T00:02:43Z",
+    "url": "https://github.com/DavidHDev/react-bits",
+    "selected": true
+  },
+  {
+    "full_name": "Semantic-Org/Semantic-UI",
+    "stars": 51002,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2024-11-27T21:01:48Z",
+    "url": "https://github.com/Semantic-Org/Semantic-UI",
+    "selected": false
+  },
+  {
+    "full_name": "algorithm-visualizer/algorithm-visualizer",
+    "stars": 49388,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2024-06-09T06:54:22Z",
+    "url": "https://github.com/algorithm-visualizer/algorithm-visualizer",
+    "selected": false
+  },
+  {
+    "full_name": "pixijs/pixijs",
+    "stars": 48621,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-10-30T22:31:56Z",
+    "url": "https://github.com/pixijs/pixijs",
+    "selected": true
+  },
+  {
+    "full_name": "gradio-app/gradio",
+    "stars": 43975,
+    "license_spdx": "Apache-2.0",
+    "archived": false,
+    "pushed_at": "2026-11-03T13:08:08Z",
+    "url": "https://github.com/gradio-app/gradio",
+    "selected": false
+  },
+  {
+    "full_name": "gkd-kit/gkd",
+    "stars": 43931,
+    "license_spdx": "GPL-3.0",
+    "archived": false,
+    "pushed_at": "2026-11-02T07:56:49Z",
+    "url": "https://github.com/gkd-kit/gkd",
+    "selected": false
+  },
+  {
+    "full_name": "saadeghi/daisyui",
+    "stars": 42731,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-10-31T12:32:39Z",
+    "url": "https://github.com/saadeghi/daisyui",
+    "selected": true
+  },
+  {
+    "full_name": "goabstract/Awesome-Design-Tools",
+    "stars": 41740,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2024-07-28T19:57:31Z",
+    "url": "https://github.com/goabstract/Awesome-Design-Tools",
+    "selected": false
+  },
+  {
+    "full_name": "vuetifyjs/vuetify",
+    "stars": 41034,
+    "license_spdx": "NOASSERTION",
+    "archived": false,
+    "pushed_at": "2026-11-03T12:29:43Z",
+    "url": "https://github.com/vuetifyjs/vuetify",
+    "selected": false
+  },
+  {
+    "full_name": "chakra-ui/chakra-ui",
+    "stars": 40711,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-11-02T22:29:15Z",
+    "url": "https://github.com/chakra-ui/chakra-ui",
+    "selected": false
+  },
+  {
+    "full_name": "aseprite/aseprite",
+    "stars": 40617,
+    "license_spdx": null,
+    "archived": false,
+    "pushed_at": "2026-11-02T20:46:42Z",
+    "url": "https://github.com/aseprite/aseprite",
+    "selected": false
+  },
+  {
+    "full_name": "xyflow/xyflow",
+    "stars": 38881,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-11-03T13:11:47Z",
+    "url": "https://github.com/xyflow/xyflow",
+    "selected": true
+  },
+  {
+    "full_name": "cjpais/Handy",
+    "stars": 37264,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-11-02T23:56:50Z",
+    "url": "https://github.com/cjpais/Handy",
+    "selected": false
+  },
+  {
+    "full_name": "airbnb/lottie-android",
+    "stars": 35765,
+    "license_spdx": "Apache-2.0",
+    "archived": false,
+    "pushed_at": "2026-02-15T22:03:57Z",
+    "url": "https://github.com/airbnb/lottie-android",
+    "selected": false
+  },
+  {
+    "full_name": "motiondivision/motion",
+    "stars": 34840,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-11-03T09:44:59Z",
+    "url": "https://github.com/motiondivision/motion",
+    "selected": true
+  },
+  {
+    "full_name": "pmndrs/react-three-fiber",
+    "stars": 33456,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-10-21T15:24:39Z",
+    "url": "https://github.com/pmndrs/react-three-fiber",
+    "selected": true
+  },
+  {
+    "full_name": "airbnb/lottie-web",
+    "stars": 32339,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2025-09-01T09:01:31Z",
+    "url": "https://github.com/airbnb/lottie-web",
+    "selected": true
+  },
+  {
+    "full_name": "fabricjs/fabric.js",
+    "stars": 31537,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-11-03T05:27:41Z",
+    "url": "https://github.com/fabricjs/fabric.js",
+    "selected": true
+  },
+  {
+    "full_name": "AtsushiSakai/PythonRobotics",
+    "stars": 30850,
+    "license_spdx": "NOASSERTION",
+    "archived": false,
+    "pushed_at": "2026-11-02T20:03:27Z",
+    "url": "https://github.com/AtsushiSakai/PythonRobotics",
+    "selected": false
+  },
+  {
+    "full_name": "statelyai/xstate",
+    "stars": 30403,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-11-03T03:58:28Z",
+    "url": "https://github.com/statelyai/xstate",
+    "selected": true
+  },
+  {
+    "full_name": "AllThingsSmitty/css-protips",
+    "stars": 30299,
+    "license_spdx": "CC0-1.0",
+    "archived": false,
+    "pushed_at": "2026-09-23T01:27:44Z",
+    "url": "https://github.com/AllThingsSmitty/css-protips",
+    "selected": false
+  },
+  {
+    "full_name": "opendataloader-project/opendataloader-pdf",
+    "stars": 30162,
+    "license_spdx": "Apache-2.0",
+    "archived": false,
+    "pushed_at": "2026-11-03T10:28:05Z",
+    "url": "https://github.com/opendataloader-project/opendataloader-pdf",
+    "selected": false
+  },
+  {
+    "full_name": "greensock/GSAP",
+    "stars": 30105,
+    "license_spdx": null,
+    "archived": false,
+    "pushed_at": "2026-04-13T13:08:58Z",
+    "url": "https://github.com/greensock/GSAP",
+    "selected": true
+  },
+  {
+    "full_name": "tailwindlabs/headlessui",
+    "stars": 28805,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-04-13T16:12:31Z",
+    "url": "https://github.com/tailwindlabs/headlessui",
+    "selected": true
+  },
+  {
+    "full_name": "GraphiteEditor/Graphite",
+    "stars": 27825,
+    "license_spdx": "Apache-2.0",
+    "archived": false,
+    "pushed_at": "2026-11-03T11:35:05Z",
+    "url": "https://github.com/GraphiteEditor/Graphite",
+    "selected": true
+  },
+  {
+    "full_name": "onlook-dev/onlook",
+    "stars": 27094,
+    "license_spdx": "Apache-2.0",
+    "archived": false,
+    "pushed_at": "2026-10-21T20:42:29Z",
+    "url": "https://github.com/onlook-dev/onlook",
+    "selected": true
+  },
+  {
+    "full_name": "airbnb/lottie-ios",
+    "stars": 26926,
+    "license_spdx": "Apache-2.0",
+    "archived": false,
+    "pushed_at": "2026-10-06T17:02:33Z",
+    "url": "https://github.com/airbnb/lottie-ios",
+    "selected": false
+  },
+  {
+    "full_name": "GrapesJS/grapesjs",
+    "stars": 26370,
+    "license_spdx": "NOASSERTION",
+    "archived": false,
+    "pushed_at": "2026-11-03T11:04:51Z",
+    "url": "https://github.com/GrapesJS/grapesjs",
+    "selected": true
+  },
+  {
+    "full_name": "react-native-elements/react-native-elements",
+    "stars": 25874,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-05-21T14:17:40Z",
+    "url": "https://github.com/react-native-elements/react-native-elements",
+    "selected": false
+  },
+  {
+    "full_name": "lucide-icons/lucide",
+    "stars": 25484,
+    "license_spdx": "NOASSERTION",
+    "archived": false,
+    "pushed_at": "2026-11-03T08:41:32Z",
+    "url": "https://github.com/lucide-icons/lucide",
+    "selected": true
+  },
+  {
+    "full_name": "pedronauck/docz",
+    "stars": 23567,
+    "license_spdx": "MIT",
+    "archived": true,
+    "pushed_at": "2025-11-21T04:28:57Z",
+    "url": "https://github.com/pedronauck/docz",
+    "selected": false
+  },
+  {
+    "full_name": "magicuidesign/magicui",
+    "stars": 23063,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-11-03T00:40:44Z",
+    "url": "https://github.com/magicuidesign/magicui",
+    "selected": true
+  },
+  {
+    "full_name": "svg/svgo",
+    "stars": 22786,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-10-26T17:57:24Z",
+    "url": "https://github.com/svg/svgo",
+    "selected": true
+  },
+  {
+    "full_name": "darkreader/darkreader",
+    "stars": 22573,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-11-02T19:10:17Z",
+    "url": "https://github.com/darkreader/darkreader",
+    "selected": false
+  },
+  {
+    "full_name": "tabler/tabler-icons",
+    "stars": 22532,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-10-29T15:40:55Z",
+    "url": "https://github.com/tabler/tabler-icons",
+    "selected": true
+  },
+  {
+    "full_name": "HeroTransitions/Hero",
+    "stars": 22491,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2025-01-23T20:27:30Z",
+    "url": "https://github.com/HeroTransitions/Hero",
+    "selected": false
+  },
+  {
+    "full_name": "jlmakes/scrollreveal",
+    "stars": 22462,
+    "license_spdx": null,
+    "archived": false,
+    "pushed_at": "2024-04-05T17:55:48Z",
+    "url": "https://github.com/jlmakes/scrollreveal",
+    "selected": false
+  },
+  {
+    "full_name": "blender/blender",
+    "stars": 21574,
+    "license_spdx": "NOASSERTION",
+    "archived": false,
+    "pushed_at": "2026-11-03T12:31:49Z",
+    "url": "https://github.com/blender/blender",
+    "selected": false
+  },
+  {
+    "full_name": "rough-stuff/rough",
+    "stars": 21343,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2024-07-28T21:12:58Z",
+    "url": "https://github.com/rough-stuff/rough",
+    "selected": true
+  },
+  {
+    "full_name": "GeekyAnts/NativeBase",
+    "stars": 20368,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-01-31T17:46:33Z",
+    "url": "https://github.com/GeekyAnts/NativeBase",
+    "selected": false
+  },
+  {
+    "full_name": "Popmotion/popmotion",
+    "stars": 20149,
+    "license_spdx": null,
+    "archived": false,
+    "pushed_at": "2024-03-12T00:37:37Z",
+    "url": "https://github.com/Popmotion/popmotion",
+    "selected": false
+  },
+  {
+    "full_name": "motion-canvas/motion-canvas",
+    "stars": 19663,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-07-02T20:01:32Z",
+    "url": "https://github.com/motion-canvas/motion-canvas",
+    "selected": true
+  },
+  {
+    "full_name": "radix-ui/primitives",
+    "stars": 19466,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-10-14T21:52:47Z",
+    "url": "https://github.com/radix-ui/primitives",
+    "selected": true
+  },
+  {
+    "full_name": "mojs/mojs",
+    "stars": 18875,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-07-30T16:54:33Z",
+    "url": "https://github.com/mojs/mojs",
+    "selected": false
+  },
+  {
+    "full_name": "tusen-ai/naive-ui",
+    "stars": 18601,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-10-26T03:58:53Z",
+    "url": "https://github.com/tusen-ai/naive-ui",
+    "selected": false
+  },
+  {
+    "full_name": "gztchan/awesome-design",
+    "stars": 17729,
+    "license_spdx": null,
+    "archived": false,
+    "pushed_at": "2024-07-04T18:17:39Z",
+    "url": "https://github.com/gztchan/awesome-design",
+    "selected": false
+  },
+  {
+    "full_name": "adobe/react-spectrum",
+    "stars": 16006,
+    "license_spdx": "Apache-2.0",
+    "archived": false,
+    "pushed_at": "2026-11-03T01:56:39Z",
+    "url": "https://github.com/adobe/react-spectrum",
+    "selected": true
+  },
+  {
+    "full_name": "alibaba/lowcode-engine",
+    "stars": 15874,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2025-03-10T09:37:14Z",
+    "url": "https://github.com/alibaba/lowcode-engine",
+    "selected": true
+  },
+  {
+    "full_name": "Zulko/moviepy",
+    "stars": 15091,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-08-26T06:17:08Z",
+    "url": "https://github.com/Zulko/moviepy",
+    "selected": false
+  },
+  {
+    "full_name": "konvajs/konva",
+    "stars": 14911,
+    "license_spdx": "NOASSERTION",
+    "archived": false,
+    "pushed_at": "2026-10-31T18:27:00Z",
+    "url": "https://github.com/konvajs/konva",
+    "selected": true
+  },
+  {
+    "full_name": "Tencent/QMUI_Android",
+    "stars": 14485,
+    "license_spdx": "NOASSERTION",
+    "archived": false,
+    "pushed_at": "2024-11-05T06:18:02Z",
+    "url": "https://github.com/Tencent/QMUI_Android",
+    "selected": false
+  },
+  {
+    "full_name": "marko-js/marko",
+    "stars": 14468,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-11-03T02:46:11Z",
+    "url": "https://github.com/marko-js/marko",
+    "selected": false
+  },
+  {
+    "full_name": "BuilderIO/mitosis",
+    "stars": 14454,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-10-28T22:04:27Z",
+    "url": "https://github.com/BuilderIO/mitosis",
+    "selected": true
+  },
+  {
+    "full_name": "bootstrap-vue/bootstrap-vue",
+    "stars": 14409,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-04-02T09:36:34Z",
+    "url": "https://github.com/bootstrap-vue/bootstrap-vue",
+    "selected": false
+  },
+  {
+    "full_name": "tamagui/tamagui",
+    "stars": 14296,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-11-01T17:51:35Z",
+    "url": "https://github.com/tamagui/tamagui",
+    "selected": false
+  },
+  {
+    "full_name": "formkit/auto-animate",
+    "stars": 13955,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-07-10T16:08:00Z",
+    "url": "https://github.com/formkit/auto-animate",
+    "selected": false
+  },
+  {
+    "full_name": "pomber/git-history",
+    "stars": 13679,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2024-10-10T10:15:02Z",
+    "url": "https://github.com/pomber/git-history",
+    "selected": false
+  },
+  {
+    "full_name": "puckeditor/puck",
+    "stars": 13610,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-10-29T09:37:02Z",
+    "url": "https://github.com/puckeditor/puck",
+    "selected": true
+  },
+  {
+    "full_name": "mdbootstrap/TW-Elements",
+    "stars": 13188,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-03-27T13:59:01Z",
+    "url": "https://github.com/mdbootstrap/TW-Elements",
+    "selected": false
+  },
+  {
+    "full_name": "stenciljs/core",
+    "stars": 13150,
+    "license_spdx": "NOASSERTION",
+    "archived": false,
+    "pushed_at": "2026-10-30T01:47:10Z",
+    "url": "https://github.com/stenciljs/core",
+    "selected": false
+  },
+  {
+    "full_name": "primer/css",
+    "stars": 13050,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-11-02T21:46:07Z",
+    "url": "https://github.com/primer/css",
+    "selected": false
+  },
+  {
+    "full_name": "barbajs/barba",
+    "stars": 12996,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2024-12-02T22:33:28Z",
+    "url": "https://github.com/barbajs/barba",
+    "selected": false
+  },
+  {
+    "full_name": "taye/interact.js",
+    "stars": 12939,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-08-01T04:04:57Z",
+    "url": "https://github.com/taye/interact.js",
+    "selected": true
+  },
+  {
+    "full_name": "assistant-ui/assistant-ui",
+    "stars": 12922,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-11-03T06:36:56Z",
+    "url": "https://github.com/assistant-ui/assistant-ui",
+    "selected": false
+  },
+  {
+    "full_name": "Juanpe/SkeletonView",
+    "stars": 12890,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-06-23T17:39:57Z",
+    "url": "https://github.com/Juanpe/SkeletonView",
+    "selected": false
+  },
+  {
+    "full_name": "theatre-js/theatre",
+    "stars": 12847,
+    "license_spdx": "Apache-2.0",
+    "archived": false,
+    "pushed_at": "2024-08-14T13:20:18Z",
+    "url": "https://github.com/theatre-js/theatre",
+    "selected": true
+  },
+  {
+    "full_name": "catdad/canvas-confetti",
+    "stars": 12842,
+    "license_spdx": "ISC",
+    "archived": false,
+    "pushed_at": "2025-10-25T05:17:21Z",
+    "url": "https://github.com/catdad/canvas-confetti",
+    "selected": false
+  },
+  {
+    "full_name": "marp-team/marp",
+    "stars": 12717,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-11-02T19:56:30Z",
+    "url": "https://github.com/marp-team/marp",
+    "selected": true
+  },
+  {
+    "full_name": "antvis/G2",
+    "stars": 12651,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-10-28T15:19:33Z",
+    "url": "https://github.com/antvis/G2",
+    "selected": false
+  },
+  {
+    "full_name": "daimajia/AndroidViewAnimations",
+    "stars": 12434,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2021-08-18T23:15:07Z",
+    "url": "https://github.com/daimajia/AndroidViewAnimations",
+    "selected": false
+  },
+  {
+    "full_name": "segmentio/evergreen",
+    "stars": 12428,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-06-25T23:25:22Z",
+    "url": "https://github.com/segmentio/evergreen",
+    "selected": false
+  },
+  {
+    "full_name": "markmead/hyperui",
+    "stars": 12275,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-10-25T21:02:13Z",
+    "url": "https://github.com/markmead/hyperui",
+    "selected": true
+  },
+  {
+    "full_name": "Yalantis/uCrop",
+    "stars": 12078,
+    "license_spdx": null,
+    "archived": false,
+    "pushed_at": "2025-08-07T16:51:43Z",
+    "url": "https://github.com/Yalantis/uCrop",
+    "selected": false
+  },
+  {
+    "full_name": "CosmicMind/Material",
+    "stars": 12015,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2022-05-16T17:39:01Z",
+    "url": "https://github.com/CosmicMind/Material",
+    "selected": false
+  },
+  {
+    "full_name": "svgdotjs/svg.js",
+    "stars": 11852,
+    "license_spdx": "NOASSERTION",
+    "archived": false,
+    "pushed_at": "2026-08-04T07:48:43Z",
+    "url": "https://github.com/svgdotjs/svg.js",
+    "selected": false
+  },
+  {
+    "full_name": "tachyons-css/tachyons",
+    "stars": 11727,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-07-20T15:11:15Z",
+    "url": "https://github.com/tachyons-css/tachyons",
+    "selected": false
+  },
+  {
+    "full_name": "vercel-labs/agent-desktop",
+    "stars": 11671,
+    "license_spdx": "Apache-2.0",
+    "archived": false,
+    "pushed_at": "2026-11-03T12:24:46Z",
+    "url": "https://github.com/vercel-labs/agent-desktop",
+    "selected": false
+  },
+  {
+    "full_name": "jdan/98.css",
+    "stars": 11592,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2025-09-07T13:40:43Z",
+    "url": "https://github.com/jdan/98.css",
+    "selected": false
+  },
+  {
+    "full_name": "screetsec/TheFatRat",
+    "stars": 11573,
+    "license_spdx": "GPL-3.0",
+    "archived": false,
+    "pushed_at": "2024-03-17T12:09:38Z",
+    "url": "https://github.com/screetsec/TheFatRat",
+    "selected": false
+  },
+  {
+    "full_name": "wasabeef/recyclerview-animators",
+    "stars": 11531,
+    "license_spdx": "Apache-2.0",
+    "archived": false,
+    "pushed_at": "2023-12-30T20:00:42Z",
+    "url": "https://github.com/wasabeef/recyclerview-animators",
+    "selected": false
+  },
+  {
+    "full_name": "lemomo-ai/lemo-opuscar",
+    "stars": 11494,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-10-31T14:53:23Z",
+    "url": "https://github.com/lemomo-ai/lemo-opuscar",
+    "selected": false
+  },
+  {
+    "full_name": "material-components/material-web",
+    "stars": 11407,
+    "license_spdx": "Apache-2.0",
+    "archived": false,
+    "pushed_at": "2026-11-03T01:23:15Z",
+    "url": "https://github.com/material-components/material-web",
+    "selected": false
+  },
+  {
+    "full_name": "mui/base-ui",
+    "stars": 11289,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-11-03T11:17:02Z",
+    "url": "https://github.com/mui/base-ui",
+    "selected": false
+  },
+  {
+    "full_name": "tambo-ai/tambo",
+    "stars": 11221,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-11-01T12:29:40Z",
+    "url": "https://github.com/tambo-ai/tambo",
+    "selected": false
+  },
+  {
+    "full_name": "Ramotion/animated-tab-bar",
+    "stars": 11085,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2022-01-26T02:40:50Z",
+    "url": "https://github.com/Ramotion/animated-tab-bar",
+    "selected": false
+  },
+  {
+    "full_name": "software-mansion/react-native-reanimated",
+    "stars": 11045,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-11-03T12:07:54Z",
+    "url": "https://github.com/software-mansion/react-native-reanimated",
+    "selected": false
+  },
+  {
+    "full_name": "epicmaxco/vuestic-admin",
+    "stars": 10955,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-02-26T07:06:10Z",
+    "url": "https://github.com/epicmaxco/vuestic-admin",
+    "selected": false
+  },
+  {
+    "full_name": "mathjax/MathJax",
+    "stars": 10943,
+    "license_spdx": "Apache-2.0",
+    "archived": false,
+    "pushed_at": "2026-07-03T13:37:32Z",
+    "url": "https://github.com/mathjax/MathJax",
+    "selected": false
+  },
+  {
+    "full_name": "Orama-Interactive/Pixelorama",
+    "stars": 10930,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-11-03T10:15:10Z",
+    "url": "https://github.com/Orama-Interactive/Pixelorama",
+    "selected": false
+  },
+  {
+    "full_name": "rough-stuff/wired-elements",
+    "stars": 10849,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2023-10-07T20:59:18Z",
+    "url": "https://github.com/rough-stuff/wired-elements",
+    "selected": false
+  },
+  {
+    "full_name": "daybrush/moveable",
+    "stars": 10765,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2024-06-03T07:57:45Z",
+    "url": "https://github.com/daybrush/moveable",
+    "selected": true
+  },
+  {
+    "full_name": "ninjaprox/NVActivityIndicatorView",
+    "stars": 10702,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-03-18T02:19:26Z",
+    "url": "https://github.com/ninjaprox/NVActivityIndicatorView",
+    "selected": false
+  },
+  {
+    "full_name": "akveo/react-native-ui-kitten",
+    "stars": 10664,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-10-06T07:17:03Z",
+    "url": "https://github.com/akveo/react-native-ui-kitten",
+    "selected": false
+  },
+  {
+    "full_name": "jnsahaj/tweakcn",
+    "stars": 10513,
+    "license_spdx": "Apache-2.0",
+    "archived": false,
+    "pushed_at": "2026-09-03T17:06:07Z",
+    "url": "https://github.com/jnsahaj/tweakcn",
+    "selected": true
+  },
+  {
+    "full_name": "DouyinFE/semi-design",
+    "stars": 10460,
+    "license_spdx": "NOASSERTION",
+    "archived": false,
+    "pushed_at": "2026-11-02T22:03:50Z",
+    "url": "https://github.com/DouyinFE/semi-design",
+    "selected": false
+  },
+  {
+    "full_name": "alexfoxy/lax.js",
+    "stars": 10456,
+    "license_spdx": "MIT",
+    "archived": true,
+    "pushed_at": "2025-05-21T06:07:55Z",
+    "url": "https://github.com/alexfoxy/lax.js",
+    "selected": false
+  },
+  {
+    "full_name": "ksky521/nodeppt",
+    "stars": 10328,
+    "license_spdx": "MIT",
+    "archived": true,
+    "pushed_at": "2021-01-25T02:54:35Z",
+    "url": "https://github.com/ksky521/nodeppt",
+    "selected": false
+  },
+  {
+    "full_name": "wix/react-native-calendars",
+    "stars": 10327,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-10-17T09:51:34Z",
+    "url": "https://github.com/wix/react-native-calendars",
+    "selected": false
+  },
+  {
+    "full_name": "Ramotion/folding-cell",
+    "stars": 10169,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2024-04-28T23:42:52Z",
+    "url": "https://github.com/Ramotion/folding-cell",
+    "selected": false
+  },
+  {
+    "full_name": "tweenjs/tween.js",
+    "stars": 10149,
+    "license_spdx": "NOASSERTION",
+    "archived": false,
+    "pushed_at": "2026-10-29T06:52:22Z",
+    "url": "https://github.com/tweenjs/tween.js",
+    "selected": false
+  },
+  {
+    "full_name": "evolus/pencil",
+    "stars": 9895,
+    "license_spdx": "GPL-2.0",
+    "archived": false,
+    "pushed_at": "2026-10-27T10:24:26Z",
+    "url": "https://github.com/evolus/pencil",
+    "selected": false
+  },
+  {
+    "full_name": "bpmn-io/bpmn-js",
+    "stars": 9720,
+    "license_spdx": "NOASSERTION",
+    "archived": false,
+    "pushed_at": "2026-10-30T16:12:28Z",
+    "url": "https://github.com/bpmn-io/bpmn-js",
+    "selected": true
+  },
+  {
+    "full_name": "carbon-design-system/carbon",
+    "stars": 9600,
+    "license_spdx": "Apache-2.0",
+    "archived": false,
+    "pushed_at": "2026-11-03T12:48:09Z",
+    "url": "https://github.com/carbon-design-system/carbon",
+    "selected": true
+  },
+  {
+    "full_name": "themesberg/flowbite",
+    "stars": 9379,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-06-27T08:36:12Z",
+    "url": "https://github.com/themesberg/flowbite",
+    "selected": false
+  },
+  {
+    "full_name": "jgraph/drawio",
+    "stars": 9155,
+    "license_spdx": "Apache-2.0",
+    "archived": false,
+    "pushed_at": "2026-10-30T21:28:34Z",
+    "url": "https://github.com/jgraph/drawio",
+    "selected": true
+  },
+  {
+    "full_name": "webstudio-is/webstudio",
+    "stars": 9137,
+    "license_spdx": "AGPL-3.0",
+    "archived": false,
+    "pushed_at": "2026-11-03T13:02:04Z",
+    "url": "https://github.com/webstudio-is/webstudio",
+    "selected": true
+  },
+  {
+    "full_name": "radix-ui/themes",
+    "stars": 8812,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-04-11T18:39:15Z",
+    "url": "https://github.com/radix-ui/themes",
+    "selected": false
+  },
+  {
+    "full_name": "nuejs/nue",
+    "stars": 8807,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-02-17T17:11:56Z",
+    "url": "https://github.com/nuejs/nue",
+    "selected": false
+  },
+  {
+    "full_name": "prevwong/craft.js",
+    "stars": 8761,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2025-02-14T09:25:28Z",
+    "url": "https://github.com/prevwong/craft.js",
+    "selected": true
+  },
+  {
+    "full_name": "IBAnimatable/IBAnimatable",
+    "stars": 8634,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2023-02-21T11:14:59Z",
+    "url": "https://github.com/IBAnimatable/IBAnimatable",
+    "selected": false
+  },
+  {
+    "full_name": "ariakit/ariakit",
+    "stars": 8631,
+    "license_spdx": null,
+    "archived": false,
+    "pushed_at": "2026-11-03T12:35:09Z",
+    "url": "https://github.com/ariakit/ariakit",
+    "selected": false
+  },
+  {
+    "full_name": "mockoon/mockoon",
+    "stars": 8467,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-11-01T14:05:11Z",
+    "url": "https://github.com/mockoon/mockoon",
+    "selected": true
+  },
+  {
+    "full_name": "chinchang/hint.css",
+    "stars": 8418,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2024-10-17T14:08:37Z",
+    "url": "https://github.com/chinchang/hint.css",
+    "selected": false
+  },
+  {
+    "full_name": "grommet/grommet",
+    "stars": 8353,
+    "license_spdx": "Apache-2.0",
+    "archived": false,
+    "pushed_at": "2026-11-03T00:42:47Z",
+    "url": "https://github.com/grommet/grommet",
+    "selected": false
+  },
+  {
+    "full_name": "OpenCoworkAI/open-codesign",
+    "stars": 8153,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-11-01T22:10:21Z",
+    "url": "https://github.com/OpenCoworkAI/open-codesign",
+    "selected": true
+  },
+  {
+    "full_name": "miqdadbadjuber/anti-slop",
+    "stars": 8072,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-11-01T12:06:35Z",
+    "url": "https://github.com/miqdadbadjuber/anti-slop",
+    "selected": false
+  },
+  {
+    "full_name": "rebassjs/rebass",
+    "stars": 7894,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2023-07-27T03:42:53Z",
+    "url": "https://github.com/rebassjs/rebass",
+    "selected": false
+  },
+  {
+    "full_name": "SVG-Edit/svgedit",
+    "stars": 7894,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-08-05T17:53:30Z",
+    "url": "https://github.com/SVG-Edit/svgedit",
+    "selected": true
+  },
+  {
+    "full_name": "dequelabs/axe-core",
+    "stars": 7743,
+    "license_spdx": "MPL-2.0",
+    "archived": false,
+    "pushed_at": "2026-11-02T22:33:24Z",
+    "url": "https://github.com/dequelabs/axe-core",
+    "selected": true
+  },
+  {
+    "full_name": "andreasbm/web-skills",
+    "stars": 7670,
+    "license_spdx": "NOASSERTION",
+    "archived": false,
+    "pushed_at": "2024-04-19T03:22:28Z",
+    "url": "https://github.com/andreasbm/web-skills",
+    "selected": false
+  },
+  {
+    "full_name": "Devin-AXIS/iPolloWork",
+    "stars": 7367,
+    "license_spdx": "NOASSERTION",
+    "archived": false,
+    "pushed_at": "2026-11-03T09:31:32Z",
+    "url": "https://github.com/Devin-AXIS/iPolloWork",
+    "selected": false
+  },
+  {
+    "full_name": "react95-io/React95",
+    "stars": 7289,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2024-01-14T20:52:31Z",
+    "url": "https://github.com/react95-io/React95",
+    "selected": false
+  },
+  {
+    "full_name": "garris/BackstopJS",
+    "stars": 7194,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-10-10T21:05:23Z",
+    "url": "https://github.com/garris/BackstopJS",
+    "selected": true
+  },
+  {
+    "full_name": "plasmicapp/plasmic",
+    "stars": 7142,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-11-03T10:21:01Z",
+    "url": "https://github.com/plasmicapp/plasmic",
+    "selected": true
+  },
+  {
+    "full_name": "unovue/reka-ui",
+    "stars": 6923,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-11-02T19:49:43Z",
+    "url": "https://github.com/unovue/reka-ui",
+    "selected": false
+  },
+  {
+    "full_name": "stagewise-io/stagewise",
+    "stars": 6832,
+    "license_spdx": "AGPL-3.0",
+    "archived": false,
+    "pushed_at": "2026-11-02T08:27:44Z",
+    "url": "https://github.com/stagewise-io/stagewise",
+    "selected": true
+  },
+  {
+    "full_name": "vmware-archive/clarity",
+    "stars": 6384,
+    "license_spdx": "MIT",
+    "archived": true,
+    "pushed_at": "2023-03-16T01:37:07Z",
+    "url": "https://github.com/vmware-archive/clarity",
+    "selected": false
+  },
+  {
+    "full_name": "iconify/iconify",
+    "stars": 6382,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-11-02T19:24:53Z",
+    "url": "https://github.com/iconify/iconify",
+    "selected": true
+  },
+  {
+    "full_name": "elastic/eui",
+    "stars": 6381,
+    "license_spdx": "NOASSERTION",
+    "archived": false,
+    "pushed_at": "2026-11-03T13:08:34Z",
+    "url": "https://github.com/elastic/eui",
+    "selected": false
+  },
+  {
+    "full_name": "chakra-ui/panda",
+    "stars": 6243,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-11-02T22:19:46Z",
+    "url": "https://github.com/chakra-ui/panda",
+    "selected": false
+  },
+  {
+    "full_name": "Shopify/polaris-react-archive",
+    "stars": 6164,
+    "license_spdx": "NOASSERTION",
+    "archived": true,
+    "pushed_at": "2026-09-11T19:54:08Z",
+    "url": "https://github.com/Shopify/polaris-react-archive",
+    "selected": false
+  },
+  {
+    "full_name": "skeletonlabs/skeleton",
+    "stars": 6086,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-11-03T10:14:31Z",
+    "url": "https://github.com/skeletonlabs/skeleton",
+    "selected": false
+  },
+  {
+    "full_name": "JimLiu/baoyu-design",
+    "stars": 5949,
+    "license_spdx": "NOASSERTION",
+    "archived": false,
+    "pushed_at": "2026-11-03T08:04:14Z",
+    "url": "https://github.com/JimLiu/baoyu-design",
+    "selected": false
+  },
+  {
+    "full_name": "basscss/basscss",
+    "stars": 5897,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2022-12-30T17:37:47Z",
+    "url": "https://github.com/basscss/basscss",
+    "selected": false
+  },
+  {
+    "full_name": "wangzan101/Mika",
+    "stars": 5882,
+    "license_spdx": "Apache-2.0",
+    "archived": false,
+    "pushed_at": "2026-11-03T10:07:24Z",
+    "url": "https://github.com/wangzan101/Mika",
+    "selected": false
+  },
+  {
+    "full_name": "leongersen/noUiSlider",
+    "stars": 5803,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2024-11-26T10:42:29Z",
+    "url": "https://github.com/leongersen/noUiSlider",
+    "selected": false
+  },
+  {
+    "full_name": "steveruizok/perfect-freehand",
+    "stars": 5791,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-04-13T04:44:47Z",
+    "url": "https://github.com/steveruizok/perfect-freehand",
+    "selected": true
+  },
+  {
+    "full_name": "GoogleChromeLabs/ProjectVisBug",
+    "stars": 5765,
+    "license_spdx": "Apache-2.0",
+    "archived": true,
+    "pushed_at": "2026-08-03T01:35:42Z",
+    "url": "https://github.com/GoogleChromeLabs/ProjectVisBug",
+    "selected": true
+  },
+  {
+    "full_name": "arco-design/arco-design",
+    "stars": 5756,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-10-12T07:46:42Z",
+    "url": "https://github.com/arco-design/arco-design",
+    "selected": false
+  },
+  {
+    "full_name": "argyleink/open-props",
+    "stars": 5563,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-10-11T23:53:54Z",
+    "url": "https://github.com/argyleink/open-props",
+    "selected": true
+  },
+  {
+    "full_name": "vega/vega-lite",
+    "stars": 5539,
+    "license_spdx": "BSD-3-Clause",
+    "archived": false,
+    "pushed_at": "2026-11-02T11:36:39Z",
+    "url": "https://github.com/vega/vega-lite",
+    "selected": true
+  },
+  {
+    "full_name": "chakra-ui/ark",
+    "stars": 5451,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-11-03T07:21:33Z",
+    "url": "https://github.com/chakra-ui/ark",
+    "selected": false
+  },
+  {
+    "full_name": "system-ui/theme-ui",
+    "stars": 5408,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-06-14T11:55:43Z",
+    "url": "https://github.com/system-ui/theme-ui",
+    "selected": false
+  },
+  {
+    "full_name": "gluestack/gluestack-ui",
+    "stars": 5344,
+    "license_spdx": null,
+    "archived": false,
+    "pushed_at": "2026-09-02T09:49:00Z",
+    "url": "https://github.com/gluestack/gluestack-ui",
+    "selected": false
+  },
+  {
+    "full_name": "zfdang/Android-Touch-Helper",
+    "stars": 5338,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-10-19T12:30:43Z",
+    "url": "https://github.com/zfdang/Android-Touch-Helper",
+    "selected": false
+  },
+  {
+    "full_name": "chakra-ui/zag",
+    "stars": 5246,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-11-03T12:47:00Z",
+    "url": "https://github.com/chakra-ui/zag",
+    "selected": true
+  },
+  {
+    "full_name": "satnaing/astro-paper",
+    "stars": 5175,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-11-02T05:01:31Z",
+    "url": "https://github.com/satnaing/astro-paper",
+    "selected": false
+  },
+  {
+    "full_name": "blocks/blocks",
+    "stars": 5098,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-11-02T23:48:51Z",
+    "url": "https://github.com/blocks/blocks",
+    "selected": false
+  },
+  {
+    "full_name": "style-dictionary/style-dictionary",
+    "stars": 4875,
+    "license_spdx": "Apache-2.0",
+    "archived": false,
+    "pushed_at": "2026-10-28T15:23:20Z",
+    "url": "https://github.com/style-dictionary/style-dictionary",
+    "selected": true
+  },
+  {
+    "full_name": "alibaba-fusion/next",
+    "stars": 4683,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-11-01T21:11:00Z",
+    "url": "https://github.com/alibaba-fusion/next",
+    "selected": false
+  },
+  {
+    "full_name": "geist-org/geist-ui",
+    "stars": 4549,
+    "license_spdx": "MIT",
+    "archived": true,
+    "pushed_at": "2026-06-01T16:08:50Z",
+    "url": "https://github.com/geist-org/geist-ui",
+    "selected": false
+  },
+  {
+    "full_name": "Manavarya09/design-extract",
+    "stars": 4479,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-11-02T21:23:20Z",
+    "url": "https://github.com/Manavarya09/design-extract",
+    "selected": true
+  },
+  {
+    "full_name": "nateherkai/scroll-craft",
+    "stars": 4444,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-09-30T13:31:42Z",
+    "url": "https://github.com/nateherkai/scroll-craft",
+    "selected": false
+  },
+  {
+    "full_name": "pinterest/gestalt",
+    "stars": 4384,
+    "license_spdx": "Apache-2.0",
+    "archived": false,
+    "pushed_at": "2026-10-05T18:41:35Z",
+    "url": "https://github.com/pinterest/gestalt",
+    "selected": false
+  },
+  {
+    "full_name": "VoltAgent/awesome-claude-design",
+    "stars": 4314,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-06-20T17:54:18Z",
+    "url": "https://github.com/VoltAgent/awesome-claude-design",
+    "selected": false
+  },
+  {
+    "full_name": "Appllama/appllama-skills",
+    "stars": 3970,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-09-06T09:01:39Z",
+    "url": "https://github.com/Appllama/appllama-skills",
+    "selected": false
+  },
+  {
+    "full_name": "primer/react",
+    "stars": 3930,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-11-03T12:53:32Z",
+    "url": "https://github.com/primer/react",
+    "selected": false
+  },
+  {
+    "full_name": "sakofchit/system.css",
+    "stars": 3930,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2023-11-26T15:31:56Z",
+    "url": "https://github.com/sakofchit/system.css",
+    "selected": false
+  },
+  {
+    "full_name": "dembrandt/dembrandt",
+    "stars": 3922,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-11-01T11:47:28Z",
+    "url": "https://github.com/dembrandt/dembrandt",
+    "selected": true
+  },
+  {
+    "full_name": "youneslaaroussi/ui-buttons",
+    "stars": 3865,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2022-08-01T09:09:38Z",
+    "url": "https://github.com/youneslaaroussi/ui-buttons",
+    "selected": false
+  },
+  {
+    "full_name": "React95/React95",
+    "stars": 3845,
+    "license_spdx": "NOASSERTION",
+    "archived": false,
+    "pushed_at": "2026-10-22T08:44:57Z",
+    "url": "https://github.com/React95/React95",
+    "selected": false
+  },
+  {
+    "full_name": "plannotator/effective-html",
+    "stars": 3826,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-10-31T19:25:06Z",
+    "url": "https://github.com/plannotator/effective-html",
+    "selected": false
+  },
+  {
+    "full_name": "BuilderIO/figma-html",
+    "stars": 3713,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2025-08-19T19:28:22Z",
+    "url": "https://github.com/BuilderIO/figma-html",
+    "selected": false
+  },
+  {
+    "full_name": "heroui-inc/heroui-native",
+    "stars": 3705,
+    "license_spdx": "Apache-2.0",
+    "archived": false,
+    "pushed_at": "2026-10-31T18:05:34Z",
+    "url": "https://github.com/heroui-inc/heroui-native",
+    "selected": false
+  },
+  {
+    "full_name": "meetalva/alva",
+    "stars": 3691,
+    "license_spdx": "MIT",
+    "archived": true,
+    "pushed_at": "2022-06-24T23:01:00Z",
+    "url": "https://github.com/meetalva/alva",
+    "selected": false
+  },
+  {
+    "full_name": "puncsky/system-design-and-architecture",
+    "stars": 3616,
+    "license_spdx": null,
+    "archived": false,
+    "pushed_at": "2026-11-01T05:00:16Z",
+    "url": "https://github.com/puncsky/system-design-and-architecture",
+    "selected": false
+  },
+  {
+    "full_name": "bergside/awesome-design-skills",
+    "stars": 3463,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-06-28T10:05:22Z",
+    "url": "https://github.com/bergside/awesome-design-skills",
+    "selected": false
+  },
+  {
+    "full_name": "React-Proto/react-proto",
+    "stars": 3455,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2022-12-08T22:19:06Z",
+    "url": "https://github.com/React-Proto/react-proto",
+    "selected": false
+  },
+  {
+    "full_name": "shadcn-ui/lint",
+    "stars": 3303,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-11-02T19:18:52Z",
+    "url": "https://github.com/shadcn-ui/lint",
+    "selected": true
+  },
+  {
+    "full_name": "rafaelfgx/Architecture",
+    "stars": 3281,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-10-15T11:01:32Z",
+    "url": "https://github.com/rafaelfgx/Architecture",
+    "selected": false
+  },
+  {
+    "full_name": "Owl-Listener/designer-skills",
+    "stars": 3227,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-09-05T15:32:50Z",
+    "url": "https://github.com/Owl-Listener/designer-skills",
+    "selected": false
+  },
+  {
+    "full_name": "arco-design/arco-design-vue",
+    "stars": 3120,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-10-30T06:15:41Z",
+    "url": "https://github.com/arco-design/arco-design-vue",
+    "selected": false
+  },
+  {
+    "full_name": "megh-bari/pattern-craft",
+    "stars": 3090,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-09-02T05:34:00Z",
+    "url": "https://github.com/megh-bari/pattern-craft",
+    "selected": false
+  },
+  {
+    "full_name": "plugin87/ux-ui-agent-skills",
+    "stars": 3084,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-10-27T15:00:23Z",
+    "url": "https://github.com/plugin87/ux-ui-agent-skills",
+    "selected": false
+  },
+  {
+    "full_name": "alxpez/vuegg",
+    "stars": 2328,
+    "license_spdx": "MIT",
+    "archived": true,
+    "pushed_at": "2023-03-01T15:39:55Z",
+    "url": "https://github.com/alxpez/vuegg",
+    "selected": false
+  },
+  {
+    "full_name": "daybrush/selecto",
+    "stars": 2232,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2024-06-17T18:43:06Z",
+    "url": "https://github.com/daybrush/selecto",
+    "selected": true
+  },
+  {
+    "full_name": "bergside/typeui",
+    "stars": 2194,
+    "license_spdx": "NOASSERTION",
+    "archived": false,
+    "pushed_at": "2026-10-22T22:20:37Z",
+    "url": "https://github.com/bergside/typeui",
+    "selected": false
+  },
+  {
+    "full_name": "DWilliames/paddy-sketch-plugin",
+    "stars": 2146,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2022-08-19T11:47:51Z",
+    "url": "https://github.com/DWilliames/paddy-sketch-plugin",
+    "selected": false
+  },
+  {
+    "full_name": "danijar/handout",
+    "stars": 2035,
+    "license_spdx": "Apache-2.0",
+    "archived": false,
+    "pushed_at": "2021-08-28T07:48:24Z",
+    "url": "https://github.com/danijar/handout",
+    "selected": false
+  },
+  {
+    "full_name": "linb/CrossUI",
+    "stars": 2031,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-06-22T17:05:38Z",
+    "url": "https://github.com/linb/CrossUI",
+    "selected": false
+  },
+  {
+    "full_name": "alyssaxuu/animockup",
+    "stars": 1936,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2022-07-02T08:12:35Z",
+    "url": "https://github.com/alyssaxuu/animockup",
+    "selected": false
+  },
+  {
+    "full_name": "prikhi/pencil",
+    "stars": 1908,
+    "license_spdx": "GPL-2.0",
+    "archived": true,
+    "pushed_at": "2018-09-19T00:12:34Z",
+    "url": "https://github.com/prikhi/pencil",
+    "selected": false
+  },
+  {
+    "full_name": "imgcook/imgcook",
+    "stars": 1889,
+    "license_spdx": null,
+    "archived": false,
+    "pushed_at": "2023-10-31T07:02:53Z",
+    "url": "https://github.com/imgcook/imgcook",
+    "selected": false
+  },
+  {
+    "full_name": "Devin-AXIS/deepseek-design",
+    "stars": 1687,
+    "license_spdx": "NOASSERTION",
+    "archived": false,
+    "pushed_at": "2026-11-03T08:25:54Z",
+    "url": "https://github.com/Devin-AXIS/deepseek-design",
+    "selected": false
+  },
+  {
+    "full_name": "shanleiguang/vRain",
+    "stars": 1682,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-06-14T13:24:35Z",
+    "url": "https://github.com/shanleiguang/vRain",
+    "selected": false
+  },
+  {
+    "full_name": "dataliterate/data-populator",
+    "stars": 1655,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2024-02-16T10:14:39Z",
+    "url": "https://github.com/dataliterate/data-populator",
+    "selected": false
+  },
+  {
+    "full_name": "tokens-studio/figma-plugin",
+    "stars": 1629,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-11-02T12:24:35Z",
+    "url": "https://github.com/tokens-studio/figma-plugin",
+    "selected": true
+  },
+  {
+    "full_name": "JohnSundell/TestDrive",
+    "stars": 1575,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2020-11-23T23:46:45Z",
+    "url": "https://github.com/JohnSundell/TestDrive",
+    "selected": false
+  },
+  {
+    "full_name": "bjango/Bjango-Actions",
+    "stars": 1459,
+    "license_spdx": null,
+    "archived": false,
+    "pushed_at": "2024-01-12T12:02:43Z",
+    "url": "https://github.com/bjango/Bjango-Actions",
+    "selected": false
+  },
+  {
+    "full_name": "reg-viz/reg-suit",
+    "stars": 1306,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-10-27T00:45:38Z",
+    "url": "https://github.com/reg-viz/reg-suit",
+    "selected": true
+  },
+  {
+    "full_name": "awdr74100/figwright",
+    "stars": 1276,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2026-11-02T01:58:43Z",
+    "url": "https://github.com/awdr74100/figwright",
+    "selected": false
+  },
+  {
+    "full_name": "nevertoday/zhongguo-traditional-colors",
+    "stars": 1225,
+    "license_spdx": "GPL-3.0",
+    "archived": false,
+    "pushed_at": "2026-09-16T14:45:03Z",
+    "url": "https://github.com/nevertoday/zhongguo-traditional-colors",
+    "selected": false
+  },
+  {
+    "full_name": "bjango/Bjango-Templates",
+    "stars": 1169,
+    "license_spdx": null,
+    "archived": false,
+    "pushed_at": "2025-10-27T22:30:12Z",
+    "url": "https://github.com/bjango/Bjango-Templates",
+    "selected": false
+  },
+  {
+    "full_name": "tsx/shireframe",
+    "stars": 1085,
+    "license_spdx": "GPL-2.0",
+    "archived": false,
+    "pushed_at": "2015-12-11T09:06:21Z",
+    "url": "https://github.com/tsx/shireframe",
+    "selected": false
+  },
+  {
+    "full_name": "MohamedYoussouf/Design-Resources",
+    "stars": 1050,
+    "license_spdx": "MIT",
+    "archived": false,
+    "pushed_at": "2024-02-03T13:50:48Z",
+    "url": "https://github.com/MohamedYoussouf/Design-Resources",
+    "selected": false
+  },
+  {
+    "full_name": "nexu-io/motion-anything",
+    "stars": 1032,
+    "license_spdx": "Apache-2.0",
+    "archived": false,
+    "pushed_at": "2026-07-07T06:47:46Z",
+    "url": "https://github.com/nexu-io/motion-anything",
+    "selected": false
+  }
+]

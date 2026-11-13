@@ -40,7 +40,7 @@ export interface DesignRunRequest {
   freshAgentThread?: boolean
   /** Set by the host when continuing from its durable, unfinished page. */
   resumeFromDraft?: boolean
-  /** Resume button: a completed saved draft needs validation, without another model rewrite. */
+  /** Continue without new requirements; a completed saved draft only needs validation. */
   resumeOnly?: boolean
   /** Unwrapped instruction, so repeated stops do not nest continuation prompts. */
   resumeInstruction?: string
@@ -65,7 +65,7 @@ export function buildDesignDraftResumePrompt(
     `待完成区块：${pending.join("、") || "继续检查剩余内容和页面完整性"}。`,
     "保留已完成区块、页面结构、资源路径及用户的微调值；除本次明确要求修改的部分外，只补齐未完成内容。",
     "沿用原有 data-design-section 标识，完成对应区块后再移除 data-design-pending，整个页面完成后移除 data-design-build 并校验保存。",
-    "如果草稿内容已经完整，仅完成检查和保存，不要重建页面。当前草稿优先于本次要求中附带的初始模板示例。",
+    "先落实本次新增修改要求；与此前要求冲突时以本次要求为准。草稿完整且无需新增修改时，仅检查和保存。当前草稿优先于初始模板示例，不要重建页面。",
     "",
     ...(goal && goal !== instruction ? ["[原始生成要求]", goal, ""] : []),
     "[本次要求]",

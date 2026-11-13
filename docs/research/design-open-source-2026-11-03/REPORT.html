@@ -1,0 +1,1195 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:;"><title>GitHub 高星设计项目 · Design 融合报告</title><style>
+:root{--ink:#18232d;--muted:#65717c;--line:#dfe5e8;--paper:#fff;--accent:#155c73;--soft:#eef5f7}*{box-sizing:border-box}html{scroll-behavior:smooth;scroll-padding-top:24px}body{margin:0;color:var(--ink);background:#f5f6f7;font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;font-size:15px;line-height:1.85}a{color:var(--accent);text-decoration:none;overflow-wrap:anywhere}a:hover{text-decoration:underline}aside{position:fixed;inset:0 auto 0 0;width:238px;background:#f0f2f3;border-right:1px solid var(--line);padding:34px 23px;overflow:auto}aside .brand{font-size:13px;letter-spacing:.12em;font-weight:700;color:var(--accent)}aside .sub{font-size:12px;color:var(--muted);margin:7px 0 26px}aside a{display:block;font-size:13px;line-height:1.6;padding:9px 0;color:#475560}aside .files{margin-top:25px;border-top:1px solid var(--line);padding-top:15px}aside .files a{font-size:12px;padding:5px 0}main{max-width:1240px;margin:0 28px 0 266px;background:var(--paper);padding:48px 48px 70px;min-height:100vh}header{padding-bottom:31px;border-bottom:2px solid #263c47;margin-bottom:27px}.eyebrow{font-size:12px;letter-spacing:.14em;color:var(--accent);font-weight:700}h1{font-size:35px;line-height:1.4;letter-spacing:-.02em;font-weight:750;margin:13px 0 10px}header p{color:var(--muted);font-size:14px;margin:0}.metrics{display:flex;gap:40px;margin-top:26px}.metric b{font-size:29px;line-height:1.2;display:block;color:#254c5e}.metric span{font-size:12px;color:var(--muted)}h2{margin:46px 0 17px;font-size:24px;line-height:1.5;border-top:1px solid var(--line);padding-top:26px}h3{font-size:18px;margin:31px 0 13px;line-height:1.6}p{margin:12px 0}strong{font-weight:650}ul,ol{padding-left:23px}li{padding-left:3px;margin:7px 0}table{border-collapse:collapse;width:100%;font-size:12.5px;line-height:1.75;margin:17px 0 26px;table-layout:fixed}th,td{text-align:left;vertical-align:top;padding:12px 11px;border-bottom:1px solid var(--line);overflow-wrap:anywhere}th{background:#edf2f4;font-size:12px;font-weight:650;color:#3f5360}tbody tr:nth-child(even){background:#fafbfc}table[data-project-table] th:first-child{width:25%}table[data-project-table] th:nth-child(2){width:23%}table[data-project-table] th:nth-child(3){width:37%}table[data-project-table] th:last-child{width:15%}code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;background:#eef2f4;border-radius:3px;padding:2px 4px;font-size:.86em;overflow-wrap:anywhere}pre{background:#f1f4f6;border:1px solid #e1e7ea;padding:20px;overflow-x:auto;font-size:13px;line-height:1.7;border-radius:5px}pre code{background:transparent;padding:0;white-space:pre;overflow-wrap:normal}blockquote{margin:20px 0;border-left:3px solid var(--accent);padding:5px 20px;background:var(--soft)}.catalog-controls{padding:18px 20px;background:var(--soft);border:1px solid #d3e3e8;border-radius:6px;margin:19px 0}.catalog-controls label{font-size:12px;font-weight:650;color:#385867}.control-row{display:flex;gap:9px;margin-top:7px}input,select,button{font:inherit;font-size:13px;border:1px solid #bfd0d7;background:white;padding:8px 11px;border-radius:4px;color:var(--ink)}input{min-width:0;flex:1}button{cursor:pointer}button:hover{background:#e8f1f4}.catalog-controls p{font-size:12px;color:var(--muted);margin:9px 0 0}.flow-map{border:1px solid #d8e4e8;background:#f8fbfc;padding:22px;margin:24px 0;font-size:12px;text-align:center;border-radius:6px}.flow-band{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}.flow-band>div,.flow-core{border:1px solid #cbdce3;padding:15px 10px;background:white;border-radius:4px;font-weight:600}.flow-band span{display:block;color:var(--muted);font-weight:400;font-size:11px;margin-top:5px}.flow-core{background:#eaf3f6;color:#214f65}.flow-arrow{padding:10px;color:var(--muted);font-size:11px}footer{font-size:12px;color:var(--muted);border-top:1px solid var(--line);margin-top:50px;padding-top:18px}[hidden]{display:none!important}@media(min-width:1600px){main{margin-left:calc((100vw - 1320px)/2 + 238px);margin-right:calc((100vw - 1320px)/2);max-width:1082px}aside{width:calc((100vw - 1320px)/2 + 238px);padding-left:calc((100vw - 1320px)/2 + 23px)}}@media(max-width:1000px){aside{display:none}main{margin:0;padding:30px 24px;max-width:none}h1{font-size:29px}table{font-size:11.5px}th,td{padding:9px 7px}}@media(max-width:600px){main{padding:24px 16px}h1{font-size:27px}h2{font-size:21px}.metrics{gap:25px}.metric b{font-size:25px}.control-row{flex-wrap:wrap}input{flex-basis:100%}.flow-band{grid-template-columns:1fr}table{display:block;overflow:auto;table-layout:auto}th,td{min-width:120px}table[data-project-table] th:nth-child(3){min-width:220px}}@media print{body{background:white;font-size:10pt}aside,.catalog-controls{display:none}main{margin:0;padding:0;max-width:none}header{break-after:avoid}h2,h3{break-after:avoid}table{font-size:8pt}tr,pre,.flow-map{break-inside:avoid}h1{font-size:24pt}h2{font-size:17pt;margin-top:24pt}a{color:#244f62}a[href]::after{content:none}.flow-map{font-size:9pt}pre{white-space:pre-wrap}pre code{white-space:pre-wrap}table[data-project-table][hidden]{display:table!important}table[data-project-table] tr[hidden]{display:table-row!important}h3[data-project-heading][hidden]{display:block!important}}
+</style></head><body><aside><div class="brand">DESIGN RESEARCH</div><div class="sub">CMBDevClaw · 2026.11</div><nav><a href="#decisions">01 · 最值得做的决策</a><a href="#baseline">02 · 当前 Design 基础</a><a href="#landscape">03 · 78 个项目全景</a><a href="#opportunities">04 · 12 个融合方向</a><a href="#implementation">05 · 实现蓝图</a><a href="#roadmap">06 · 顺序与验收</a><a href="#constraints">07 · 许可与维护</a><a href="#method">08 · 方法与证据</a></nav><div class="files"><a href="REPORT.md">Markdown 原稿 ↗</a><a href="repository-data.csv">项目数据 CSV ↗</a><a href="repository-data.json">项目数据 JSON ↗</a></div></aside><main><header><div class="eyebrow">GITHUB × DESIGN ENGINEERING</div><h1>高星设计项目调研<br>与 Design 融合报告</h1><p>从开源机制到当前产品：可复用资产、可靠编辑与可验证交付</p><div class="metrics"><div class="metric"><b>222</b><span>候选仓库</span></div><div class="metric"><b>78</b><span>重点项目</span></div><div class="metric"><b>12</b><span>融合方向</span></div></div></header><article><p><strong>对象：CMBDevClaw 的 Design 模式 · 成稿：2026-11-04 · GitHub 数据快照：2026-11-03，Asia/Shanghai</strong></p>
+<p>本次通过 8 组 GitHub Topic 搜索获得 179 个不重复候选，再定向补查 43 个仓库，共形成 <strong>222 个候选、78 个重点项目、12 个融合方向</strong>。重点项目均超过 1,000 Stars。这里的“全景”覆盖与当前产品相关的主要设计工程方向，不代表穷尽 GitHub；公开源码项目与采用自定义许可的项目也单独保留作比较。</p>
+<p><strong>核心建议：先把现有 Design 做成“遵守设计规范、可复用组件、能验证结果”的工作台。优先投入结构化 Token、区块配方、质量检查；随后增强源码映射、结构编辑和多页交互。</strong></p>
+<p>本报告把上游已声明的功能与本项目的融合建议分开。星数、默认分支、最近推送与许可证识别来自公开 GitHub API；功能依据 README 和官方文档；优先级与工作量是结合本地代码作出的工程判断，没有把上游宣传数字当作本项目收益。</p>
+<h2>阅读导航</h2>
+<ul>
+<li><a href="#decisions">一、最值得做的决策</a></li>
+<li><a href="#baseline">二、你的 Design 已经具备什么</a></li>
+<li><a href="#landscape">三、78 个项目全景</a></li>
+<li><a href="#opportunities">四、12 个可融合的方向</a></li>
+<li><a href="#implementation">五、接到现有代码的实现蓝图</a></li>
+<li><a href="#roadmap">六、实施顺序与验收</a></li>
+<li><a href="#constraints">七、许可证与维护筛选</a></li>
+<li><a href="#method">八、调研方法、证据与局限</a></li>
+</ul>
+<p><a id="decisions"></a></p>
+<h2>一、最值得做的决策</h2>
+<h3>1.1 建议的产品重心</h3>
+<p>你的产品已经贯通“需求 → AI 生成 → 真实页面预览 → 人工微调 → AI 局部改稿 → 导出”。下一阶段的竞争力应来自三件事：同一设计系统下的多次生成保持一致；高频页面不用每次重新发明；生成结果能够解释哪里合格、哪里需要修复。</p>
+<p>外部项目提供了几条很清晰的实现路线：shadcn/ui 用注册表分发可编辑源码；Style Dictionary 处理 Token 转换；Puck 用组件配置约束编辑；Onlook 将页面元素映射回源码；axe-core 和 Playwright 提供可运行的检查工具。这些机制能分别接入当前链路。<a href="https://ui.shadcn.com/docs/registry">shadcn Registry</a>、<a href="https://styledictionary.com/info/tokens/">Style Dictionary</a>、<a href="https://puckeditor.com/docs/api-reference/configuration/component-config">Puck 配置</a>、<a href="https://github.com/onlook-dev/onlook#how-it-works">Onlook 架构说明</a>、<a href="https://github.com/dequelabs/axe-core">axe-core</a>、<a href="https://playwright.dev/docs/test-snapshots">Playwright 视觉比较</a>。</p>
+<h3>1.2 优先级总表</h3>
+<p>P0 表示首轮应验证；P1 表示随后增强；P2 表示有明确场景再投入。优先级针对融合方向，不等于建议整库引入。工作量为熟悉现有架构的一名工程师完成最小闭环的粗估，不含正式上线、跨平台适配与长期维护。</p>
+<table>
+<thead>
+<tr>
+<th>优先级</th>
+<th>融合方向</th>
+<th>主要参考</th>
+<th>对用户的直接价值</th>
+<th>最小闭环粗估</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>P0</td>
+<td>结构化 Token 与主题联动</td>
+<td>Style Dictionary、tweakcn、Tokens Studio</td>
+<td>改品牌色、排版和密度时，整页一致变化</td>
+<td>3–5 人日</td>
+</tr>
+<tr>
+<td>P0</td>
+<td>可复用区块配方与注册表</td>
+<td>shadcn/ui、Puck、HyperUI</td>
+<td>表格、筛选区、空状态等有可靠起点</td>
+<td>4–6 人日</td>
+</tr>
+<tr>
+<td>P0</td>
+<td>设计规则与质量报告</td>
+<td>shadcn/lint、axe-core、Playwright</td>
+<td>知道哪里违反规范，并能定向修复</td>
+<td>4–6 人日</td>
+</tr>
+<tr>
+<td>P0</td>
+<td>按产物类型选择生成策略</td>
+<td>UI UX Pro Max、Taste Skill</td>
+<td>后台、移动端、官网不再使用同一种审美套路</td>
+<td>2–3 人日</td>
+</tr>
+<tr>
+<td>P1</td>
+<td>网页规范提取升级</td>
+<td>design-extract、Dembrandt</td>
+<td>参考站点转成带证据和置信度的设计资产</td>
+<td>4–7 人日</td>
+</tr>
+<tr>
+<td>P1</td>
+<td>编辑能力声明与源码映射</td>
+<td>Onlook、Puck</td>
+<td>清楚哪些文字、样式、实例能稳定编辑</td>
+<td>5–8 人日</td>
+</tr>
+<tr>
+<td>P1</td>
+<td>受约束的结构编辑</td>
+<td>GrapesJS、Puck、Craft.js</td>
+<td>插入、排序、复制区块时保留布局和行为</td>
+<td>6–10 人日</td>
+</tr>
+<tr>
+<td>P1</td>
+<td>多状态与多页交互原型</td>
+<td>Storybook、Zag、XState、React Flow</td>
+<td>把正常、空、错、加载与跨页流程讲完整</td>
+<td>6–10 人日</td>
+</tr>
+<tr>
+<td>P1</td>
+<td>本地素材和声明式图表</td>
+<td>Lucide、Iconify、ECharts、Vega-Lite</td>
+<td>图标一致、图表可编辑、导出更可靠</td>
+<td>3–6 人日</td>
+</tr>
+<tr>
+<td>P2</td>
+<td>页面总览与需求草图</td>
+<td>Excalidraw、Mermaid、React Flow</td>
+<td>在生成前检查信息架构和页面关系</td>
+<td>5–8 人日</td>
+</tr>
+<tr>
+<td>P2</td>
+<td>动效预设与参数控制</td>
+<td>Motion、Anime.js、Lottie</td>
+<td>有节制地添加可关闭、可复用的交互反馈</td>
+<td>3–5 人日</td>
+</tr>
+<tr>
+<td>P2</td>
+<td>演示、视频与工程交付适配</td>
+<td>reveal.js、Marp、HyperFrames、Mitosis</td>
+<td>同一设计资产适配不同交付形式</td>
+<td>每类 5–10 人日起</td>
+</tr>
+</tbody></table>
+<h3>1.3 第一批最值得读的项目</h3>
+<p>建议先看 <strong>shadcn/ui、Style Dictionary、shadcn/lint、Puck、Onlook、design-extract、Dembrandt、axe-core、Playwright、UI UX Pro Max、Excalidraw、open-design</strong>。其中前九项主要影响工程机制，UI UX Pro Max 影响生成策略，Excalidraw 影响需求表达，open-design 适合做同类产品比较。下一节保留了完整项目清单及各自适用边界。</p>
+<p><a id="baseline"></a></p>
+<h2>二、你的 Design 已经具备什么</h2>
+<p>以下结论基于当前工作区中的源码与文档。本次只增加调研材料，没有改动产品实现，也没有重跑产品测试。</p>
+<table>
+<thead>
+<tr>
+<th>领域</th>
+<th>已有证据</th>
+<th>真正值得补的部分</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>AI 生成与首屏体验</td>
+<td>小型闭合 HTML 骨架、语义区块渐进补齐、草稿与定稿隔离</td>
+<td>按任务路由配方；用测量控制额外检索和校验成本</td>
+</tr>
+<tr>
+<td>参数微调</td>
+<td>声明式 defaults/schema/bindings、宿主面板、overrides、撤销重做、独立运行适配</td>
+<td>从单页参数提升为具有语义和主题关系的 Token</td>
+</tr>
+<tr>
+<td>直接编辑</td>
+<td>稳定节点 ID、文字槽、样式和删除；HTML、部分 JSX/Vue、声明式数据映射</td>
+<td>明确编辑能力、组件实例身份及受控结构命令</td>
+</tr>
+<tr>
+<td>AI 局部改稿</td>
+<td>目标上下文、CSS 依赖、hash/CAS、范围校验、事务、journal、预览 ACK</td>
+<td>区块配方和规则诊断进入同一条有界补丁链路</td>
+</tr>
+<tr>
+<td>设计系统</td>
+<td>内置和个人规范、不可变版本、网页样式提取；规范正文可包含色彩与排版定义</td>
+<td>统一机器可读模型、Token 引用、状态与断点证据</td>
+</tr>
+<tr>
+<td>模板</td>
+<td>HTML/ZIP/目录、多入口发现、静态资源复制、隔离预览和资源包导出</td>
+<td>从整页模板深入到区块与组件；声明框架、依赖和编辑能力</td>
+</tr>
+<tr>
+<td>浏览器校验</td>
+<td>控制台、结构、Tweaks、交互探针、局部样式和布局比较</td>
+<td>系统化无障碍检查、规范漂移、视口矩阵与质量展示</td>
+</tr>
+<tr>
+<td>需求表达</td>
+<td>需求上下文、追问、批注、圈画和节点锚点</td>
+<td>页面地图、业务状态矩阵、可跳转的流程关系</td>
+</tr>
+</tbody></table>
+<p>源码入口：<a href="/Users/liuxuyang/WebstormProjects/feature_design/src/main/services/design/generation-prompt.ts:29">生成提示词</a>、<a href="/Users/liuxuyang/WebstormProjects/feature_design/src/shared/design-tweaks.ts:8">Tweaks</a>、<a href="/Users/liuxuyang/WebstormProjects/feature_design/src/shared/design-edit.ts:24">编辑命令</a>、<a href="/Users/liuxuyang/WebstormProjects/feature_design/src/main/services/design/patch-context.ts:97">局部上下文</a>、<a href="/Users/liuxuyang/WebstormProjects/feature_design/src/main/services/design/system-library.ts:36">规范库</a>、<a href="/Users/liuxuyang/WebstormProjects/feature_design/src/main/services/design/system-style-snapshot.ts:27">样式提取</a>、<a href="/Users/liuxuyang/WebstormProjects/feature_design/src/main/services/design/browser-validation-feedback.ts:7">浏览器诊断</a>。</p>
+<p>两个特别影响选型的事实：</p>
+<ol>
+<li><strong>awesome-design-md 已经导入。</strong> 本地 <code>brand-*</code> 规范来自该项目，下一步应提高它们的执行一致性和可检索性。重复导入更多品牌 Markdown 的收益有限。<a href="/Users/liuxuyang/WebstormProjects/feature_design/design-systems/_awesome-src/README.md:1">本地来源记录</a></li>
+<li><strong>使用 DESIGN.md 的会话具有单方案约束。</strong> 下文的多页、状态矩阵和历史比较均围绕当前规范下的一份正式设计展开；不会默认向这种会话添加 A/B 风格分支。<a href="/Users/liuxuyang/WebstormProjects/feature_design/src/shared/design-variation-policy.ts:11">现有策略</a></li>
+</ol>
+<p><a id="landscape"></a></p>
+<h2>三、78 个项目全景</h2><div class="catalog-controls"><label for="repo-search">搜索项目与融合点</label><div class="control-row"><input id="repo-search" type="search" placeholder="例如：Token、表格、MIT、React…"><select id="repo-priority" aria-label="优先级"><option value="">全部优先级</option><option>P0</option><option>P1</option><option>P2</option></select><button id="repo-reset" type="button">重置</button></div><p id="repo-count" aria-live="polite">显示 78 / 78 项；下方筛选只影响项目全景。</p></div>
+<p>以下星数为 <strong>2026-11-03 的 API 整数快照</strong>，没有混用网页展示的四舍五入数字。“最近推送”是仓库 <code>pushed_at</code>，可能包含机器人或维护操作，不能单独证明核心维护质量。每行的“融合点/方式”是本报告判断；项目链接指向上游仓库。</p>
+<p>许可证先保留 API 识别结果，再对关键异常进行人工核对。表中带“自定义”“混合”“附加条件”的条目应结合第七节阅读。宽松许可也只描述所核对的项目主体，不自动覆盖图片、字体、品牌资产、付费组件和所有依赖。</p>
+<h3>3.1 AI 设计与参考提取（10 项）</h3>
+<table>
+<thead>
+<tr>
+<th>项目 · Stars</th>
+<th>主体许可 / 最近推送</th>
+<th>可融合的想法或实现</th>
+<th>方式与优先级</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><a href="https://github.com/nextlevelbuilder/ui-ux-pro-max-skill">nextlevelbuilder/ui-ux-pro-max-skill</a> · <strong>144,589</strong></td>
+<td>MIT<br>2026-11-02</td>
+<td>按行业、页面类型检索配色、字体、结构与反模式，遵守已选设计系统。</td>
+<td>P0 · 检索资料</td>
+</tr>
+<tr>
+<td><a href="https://github.com/VoltAgent/awesome-design-md">VoltAgent/awesome-design-md</a> · <strong>125,384</strong></td>
+<td>MIT<br>2026-10-28</td>
+<td>本地 brand-* 已引用该来源；下一步结构化、加版本和规则，避免重复导入。</td>
+<td>P0 · 已有资产</td>
+</tr>
+<tr>
+<td><a href="https://github.com/Leonxlnx/taste-skill">Leonxlnx/taste-skill</a> · <strong>109,232</strong></td>
+<td>MIT<br>2026-11-03</td>
+<td>按真实内容确定视觉方向，多宽度检查；对长流程和 Token 成本作裁剪。</td>
+<td>P0 · 提炼规则</td>
+</tr>
+<tr>
+<td><a href="https://github.com/nexu-io/open-design">nexu-io/open-design</a> · <strong>105,656</strong></td>
+<td>Apache-2.0<br>2026-11-03</td>
+<td>规范、模板、技能、资源分层为可版本化资产；你的项目已有相关基础。</td>
+<td>P1 · 产品对标</td>
+</tr>
+<tr>
+<td><a href="https://github.com/abi/screenshot-to-code">abi/screenshot-to-code</a> · <strong>80,998</strong></td>
+<td>MIT<br>2026-10-27</td>
+<td>参考截图驱动重建与迭代；借鉴输入组织，复用你已有截图生成链路。</td>
+<td>P1 · 借鉴</td>
+</tr>
+<tr>
+<td><a href="https://github.com/onlook-dev/onlook">onlook-dev/onlook</a> · <strong>27,094</strong></td>
+<td>Apache-2.0<br>2026-10-21</td>
+<td>元素插桩、源码索引与可视编辑协同，重点补强框架实例映射。</td>
+<td>P1 · 借鉴机制</td>
+</tr>
+<tr>
+<td><a href="https://github.com/OpenCoworkAI/open-codesign">OpenCoworkAI/open-codesign</a> · <strong>8,153</strong></td>
+<td>MIT<br>2026-11-01</td>
+<td>本地会话、多格式交付；README 中 UI Kit 分解标为分支功能，不能当成稳定能力。</td>
+<td>P2 · 产品对标</td>
+</tr>
+<tr>
+<td><a href="https://github.com/stagewise-io/stagewise">stagewise-io/stagewise</a> · <strong>6,832</strong></td>
+<td>AGPL-3.0<br>2026-11-02</td>
+<td>把选中元素、控制台和浏览器状态带给 Agent；整库集成另评估 AGPL。</td>
+<td>P2 · 借鉴机制</td>
+</tr>
+<tr>
+<td><a href="https://github.com/Manavarya09/design-extract">Manavarya09/design-extract</a> · <strong>4,479</strong></td>
+<td>MIT<br>2026-11-02</td>
+<td>规范提取扩展到多视口、状态、DTCG 和对照报告，先验证局部能力。</td>
+<td>P1 · 借鉴或适配</td>
+</tr>
+<tr>
+<td><a href="https://github.com/dembrandt/dembrandt">dembrandt/dembrandt</a> · <strong>3,922</strong></td>
+<td>MIT<br>2026-11-01</td>
+<td>计算样式聚类、置信度、Token 导出与漂移检查，提升现有网页提取。</td>
+<td>P1 · 借鉴或适配</td>
+</tr>
+</tbody></table>
+<h3>3.2 可视化编辑与搭建（10 项）</h3>
+<table>
+<thead>
+<tr>
+<th>项目 · Stars</th>
+<th>主体许可 / 最近推送</th>
+<th>可融合的想法或实现</th>
+<th>方式与优先级</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><a href="https://github.com/excalidraw/excalidraw">excalidraw/excalidraw</a> · <strong>135,089</strong></td>
+<td>MIT<br>2026-11-03</td>
+<td>需求草图、页面关系和反馈附件；让白板与正式 HTML 产物各司其职。</td>
+<td>P2 · 按需接入</td>
+</tr>
+<tr>
+<td><a href="https://github.com/penpot/penpot">penpot/penpot</a> · <strong>62,015</strong></td>
+<td>MPL-2.0<br>2026-11-03</td>
+<td>布局、组件与设计交付机制；优先研究导入互操作，完整平台集成成本高。</td>
+<td>P2 · 互操作参考</td>
+</tr>
+<tr>
+<td><a href="https://github.com/tldraw/tldraw">tldraw/tldraw</a> · <strong>51,212</strong></td>
+<td>自定义 tldraw license<br>2026-11-03</td>
+<td>无限画布与对象交互；当前为自定义许可，不能按宽松开源 SDK 纳入。</td>
+<td>P2 · 授权后评估</td>
+</tr>
+<tr>
+<td><a href="https://github.com/GrapesJS/grapesjs">GrapesJS/grapesjs</a> · <strong>26,370</strong></td>
+<td>BSD-3-Clause（core 条款核对）<br>2026-11-03</td>
+<td>组件模型、样式面板与区块编辑；不直接替换当前源码和事务模型。</td>
+<td>P1 · 借鉴机制</td>
+</tr>
+<tr>
+<td><a href="https://github.com/alibaba/lowcode-engine">alibaba/lowcode-engine</a> · <strong>15,874</strong></td>
+<td>MIT<br>2025-03-10 · 较早</td>
+<td>物料、属性面板与协议化搭建；完整低代码平台超出当前轻量产物路线。</td>
+<td>P2 · 机制参考</td>
+</tr>
+<tr>
+<td><a href="https://github.com/puckeditor/puck">puckeditor/puck</a> · <strong>13,610</strong></td>
+<td>MIT<br>2026-10-29</td>
+<td>用组件字段、权限、插槽与渲染配置约束区块配方，React 路线可做 PoC。</td>
+<td>P0 · 借鉴并试点</td>
+</tr>
+<tr>
+<td><a href="https://github.com/webstudio-is/webstudio">webstudio-is/webstudio</a> · <strong>9,137</strong></td>
+<td>AGPL core / 专有动画子包<br>2026-11-03</td>
+<td>CSS 属性与响应式编辑体验；核心 AGPL，可选动画包为专有许可。</td>
+<td>P2 · 机制参考</td>
+</tr>
+<tr>
+<td><a href="https://github.com/prevwong/craft.js">prevwong/craft.js</a> · <strong>8,761</strong></td>
+<td>MIT<br>2025-02-14 · 较早</td>
+<td>React 节点编辑与序列化；推送较早，作为可视搭建机制参考。</td>
+<td>P2 · 机制参考</td>
+</tr>
+<tr>
+<td><a href="https://github.com/plasmicapp/plasmic">plasmicapp/plasmic</a> · <strong>7,142</strong></td>
+<td>MIT<br>2026-11-03</td>
+<td>将现有代码组件注册给可视编辑器，供企业组件库接入设计配方。</td>
+<td>P1 · 借鉴机制</td>
+</tr>
+<tr>
+<td><a href="https://github.com/GoogleChromeLabs/ProjectVisBug">GoogleChromeLabs/ProjectVisBug</a> · <strong>5,765</strong></td>
+<td>Apache-2.0<br>2026-08-03 · <strong>已归档</strong></td>
+<td>检查、选中、排版和样式操作的交互；已归档，不作为新增长期依赖。</td>
+<td>P2 · 历史参考</td>
+</tr>
+</tbody></table>
+<h3>3.3 设计系统与工程协议（7 项）</h3>
+<table>
+<thead>
+<tr>
+<th>项目 · Stars</th>
+<th>主体许可 / 最近推送</th>
+<th>可融合的想法或实现</th>
+<th>方式与优先级</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><a href="https://github.com/shadcn-ui/ui">shadcn-ui/ui</a> · <strong>127,254</strong></td>
+<td>MIT<br>2026-11-03</td>
+<td>组件源码、区块、依赖与主题变量可分发；静态 HTML 需要相应适配。</td>
+<td>P0 · 注册表与配方</td>
+</tr>
+<tr>
+<td><a href="https://github.com/storybookjs/storybook">storybookjs/storybook</a> · <strong>91,436</strong></td>
+<td>MIT<br>2026-11-03</td>
+<td>组件变体、状态和文档；普通 HTML 先用轻量场景协议。</td>
+<td>P1 · 组件场景</td>
+</tr>
+<tr>
+<td><a href="https://github.com/BuilderIO/mitosis">BuilderIO/mitosis</a> · <strong>14,454</strong></td>
+<td>MIT<br>2026-10-28</td>
+<td>从受约束组件模型生成多框架代码，不承诺任意现有源码无损转换。</td>
+<td>P2 · 受控导出</td>
+</tr>
+<tr>
+<td><a href="https://github.com/jnsahaj/tweakcn">jnsahaj/tweakcn</a> · <strong>10,513</strong></td>
+<td>Apache-2.0<br>2026-09-03</td>
+<td>主题参数、预设与组件预览，接到现有 Tweaks，不必整体嵌入应用。</td>
+<td>P0 · 交互借鉴</td>
+</tr>
+<tr>
+<td><a href="https://github.com/style-dictionary/style-dictionary">style-dictionary/style-dictionary</a> · <strong>4,875</strong></td>
+<td>Apache-2.0<br>2026-10-28</td>
+<td>统一 Token 解析、引用与 CSS 输出，保留规范版本和页面覆盖。</td>
+<td>P0 · 工具接入</td>
+</tr>
+<tr>
+<td><a href="https://github.com/shadcn-ui/lint">shadcn-ui/lint</a> · <strong>3,303</strong></td>
+<td>MIT<br>2026-11-02</td>
+<td>规则诊断提供修复方向；Tailwind 源码可接工具，HTML 使用对应检查器。</td>
+<td>P0 · 规则借鉴</td>
+</tr>
+<tr>
+<td><a href="https://github.com/tokens-studio/figma-plugin">tokens-studio/figma-plugin</a> · <strong>1,629</strong></td>
+<td>MIT<br>2026-11-02</td>
+<td>JSON Token 的编辑、引用与同步；可优先支持格式而非整个 Figma 插件。</td>
+<td>P1 · 互操作参考</td>
+</tr>
+</tbody></table>
+<h3>3.4 组件与交互模式（11 项）</h3>
+<table>
+<thead>
+<tr>
+<th>项目 · Stars</th>
+<th>主体许可 / 最近推送</th>
+<th>可融合的想法或实现</th>
+<th>方式与优先级</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><a href="https://github.com/ant-design/ant-design">ant-design/ant-design</a> · <strong>100,059</strong></td>
+<td>MIT<br>2026-11-03</td>
+<td>中文后台表格、筛选、表单与状态，优先做已构建静态模板包。</td>
+<td>P1 · 企业配方</td>
+</tr>
+<tr>
+<td><a href="https://github.com/mui/material-ui">mui/material-ui</a> · <strong>99,296</strong></td>
+<td>MIT<br>2026-11-03</td>
+<td>成熟组件与主题机制；按用户框架提供配方，不与其他整套 UI 混装。</td>
+<td>P1 · 组件适配</td>
+</tr>
+<tr>
+<td><a href="https://github.com/DavidHDev/react-bits">DavidHDev/react-bits</a> · <strong>51,134</strong></td>
+<td>MIT + Commons Clause<br>2026-10-31</td>
+<td>创意组件与背景效果；Commons Clause 对组件/工具再分发的限制需核对。</td>
+<td>P2 · 视觉参考</td>
+</tr>
+<tr>
+<td><a href="https://github.com/saadeghi/daisyui">saadeghi/daisyui</a> · <strong>42,731</strong></td>
+<td>MIT<br>2026-10-31</td>
+<td>语义化 CSS 组件与主题，适合预构建后供静态 HTML 使用。</td>
+<td>P1 · HTML 配方</td>
+</tr>
+<tr>
+<td><a href="https://github.com/tailwindlabs/headlessui">tailwindlabs/headlessui</a> · <strong>28,805</strong></td>
+<td>MIT<br>2026-04-13</td>
+<td>无样式交互组件与可访问行为；与现有 Radix 路线择一。</td>
+<td>P1 · 按框架选用</td>
+</tr>
+<tr>
+<td><a href="https://github.com/magicuidesign/magicui">magicuidesign/magicui</a> · <strong>23,063</strong></td>
+<td>MIT<br>2026-11-03</td>
+<td>挑少量官网展示组件，检查各条依赖，避免给后台默认添加装饰动效。</td>
+<td>P2 · 精选配方</td>
+</tr>
+<tr>
+<td><a href="https://github.com/radix-ui/primitives">radix-ui/primitives</a> · <strong>19,466</strong></td>
+<td>MIT<br>2026-10-14</td>
+<td>项目壳层已有多项 Radix；补强弹窗、菜单、焦点和键盘契约。</td>
+<td>P1 · 已有基础</td>
+</tr>
+<tr>
+<td><a href="https://github.com/adobe/react-spectrum">adobe/react-spectrum</a> · <strong>16,006</strong></td>
+<td>Apache-2.0<br>2026-11-03</td>
+<td>React Aria 的键盘、触摸、无障碍及国际化模式，适合高质量交互配方。</td>
+<td>P1 · 行为参考</td>
+</tr>
+<tr>
+<td><a href="https://github.com/markmead/hyperui">markmead/hyperui</a> · <strong>12,275</strong></td>
+<td>MIT<br>2026-10-25</td>
+<td>HTML/Tailwind 区块可用于配方起点，仍需构建 CSS 并接入本地资源。</td>
+<td>P0 · 区块配方</td>
+</tr>
+<tr>
+<td><a href="https://github.com/carbon-design-system/carbon">carbon-design-system/carbon</a> · <strong>9,600</strong></td>
+<td>Apache-2.0<br>2026-11-03</td>
+<td>企业界面的密度、数据表达和组件状态，补充品牌风格之外的业务规则。</td>
+<td>P1 · 企业规范</td>
+</tr>
+<tr>
+<td><a href="https://github.com/chakra-ui/zag">chakra-ui/zag</a> · <strong>5,246</strong></td>
+<td>MIT<br>2026-11-03</td>
+<td>跨框架状态机行为，借鉴组件状态、事件和可访问性契约。</td>
+<td>P1 · 交互模型</td>
+</tr>
+</tbody></table>
+<h3>3.5 画布与图形编辑（11 项）</h3>
+<table>
+<thead>
+<tr>
+<th>项目 · Stars</th>
+<th>主体许可 / 最近推送</th>
+<th>可融合的想法或实现</th>
+<th>方式与优先级</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><a href="https://github.com/pixijs/pixijs">pixijs/pixijs</a> · <strong>48,621</strong></td>
+<td>MIT<br>2026-10-30</td>
+<td>高性能二维图形渲染，仅在图形/游戏类产物有明确需求时引入。</td>
+<td>P2 · 独立产物</td>
+</tr>
+<tr>
+<td><a href="https://github.com/fabricjs/fabric.js">fabricjs/fabric.js</a> · <strong>31,537</strong></td>
+<td>MIT<br>2026-11-03</td>
+<td>对象化 Canvas、文字和图像编辑，适合海报类产物，不替代网页 DOM。</td>
+<td>P2 · 按场景选用</td>
+</tr>
+<tr>
+<td><a href="https://github.com/GraphiteEditor/Graphite">GraphiteEditor/Graphite</a> · <strong>27,825</strong></td>
+<td>Apache-2.0<br>2026-11-03</td>
+<td>程序化二维图形与非破坏编辑，适合未来创意工具方向。</td>
+<td>P2 · 产品参考</td>
+</tr>
+<tr>
+<td><a href="https://github.com/svg/svgo">svg/svgo</a> · <strong>22,786</strong></td>
+<td>MIT<br>2026-10-26</td>
+<td>SVG 压缩和清理；为引用中的 ID、样式和交互保留必要配置。</td>
+<td>P1 · 工具接入</td>
+</tr>
+<tr>
+<td><a href="https://github.com/rough-stuff/rough">rough-stuff/rough</a> · <strong>21,343</strong></td>
+<td>MIT<br>2024-07-28 · 较早</td>
+<td>手绘风 SVG/Canvas，适合低保真草图及线框模板。</td>
+<td>P2 · 草图工具</td>
+</tr>
+<tr>
+<td><a href="https://github.com/konvajs/konva">konvajs/konva</a> · <strong>14,911</strong></td>
+<td>MIT（正文核对）<br>2026-10-31</td>
+<td>场景图、图层和图形交互，可用于专门的画布产物。</td>
+<td>P2 · 按场景选用</td>
+</tr>
+<tr>
+<td><a href="https://github.com/taye/interact.js">taye/interact.js</a> · <strong>12,939</strong></td>
+<td>MIT<br>2026-08-01</td>
+<td>拖拽、缩放、吸附与 SVG 交互，适合少量工具层能力。</td>
+<td>P2 · 按需接入</td>
+</tr>
+<tr>
+<td><a href="https://github.com/daybrush/moveable">daybrush/moveable</a> · <strong>10,765</strong></td>
+<td>MIT<br>2024-06-03 · 较早</td>
+<td>拖拽、缩放、旋转和吸附；网页编辑必须转成布局/源码命令。</td>
+<td>P2 · 交互参考</td>
+</tr>
+<tr>
+<td><a href="https://github.com/SVG-Edit/svgedit">SVG-Edit/svgedit</a> · <strong>7,894</strong></td>
+<td>MIT<br>2026-08-05</td>
+<td>矢量图形编辑，可作为图标/插图工具，不与页面编辑强行共用模型。</td>
+<td>P2 · 独立产物</td>
+</tr>
+<tr>
+<td><a href="https://github.com/steveruizok/perfect-freehand">steveruizok/perfect-freehand</a> · <strong>5,791</strong></td>
+<td>MIT<br>2026-04-13</td>
+<td>改善现有圈画笔迹，先做独立轮廓生成，不改变批注锚点模型。</td>
+<td>P1 · 小模块试点</td>
+</tr>
+<tr>
+<td><a href="https://github.com/daybrush/selecto">daybrush/selecto</a> · <strong>2,232</strong></td>
+<td>MIT<br>2024-06-17 · 较早</td>
+<td>框选和多选交互；复用现有节点身份，注意旧依赖兼容。</td>
+<td>P2 · 交互参考</td>
+</tr>
+</tbody></table>
+<h3>3.6 流程与交互原型（6 项）</h3>
+<table>
+<thead>
+<tr>
+<th>项目 · Stars</th>
+<th>主体许可 / 最近推送</th>
+<th>可融合的想法或实现</th>
+<th>方式与优先级</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><a href="https://github.com/mermaid-js/mermaid">mermaid-js/mermaid</a> · <strong>90,992</strong></td>
+<td>MIT<br>2026-11-03</td>
+<td>需求流程、状态和结构图，源文本可版本化并作为设计输入。</td>
+<td>P1 · 文本图适配</td>
+</tr>
+<tr>
+<td><a href="https://github.com/xyflow/xyflow">xyflow/xyflow</a> · <strong>38,881</strong></td>
+<td>MIT<br>2026-11-03</td>
+<td>页面缩略图、用户流程和交互跳转图；优先于泛化无限画布。</td>
+<td>P1 · 页面关系</td>
+</tr>
+<tr>
+<td><a href="https://github.com/statelyai/xstate">statelyai/xstate</a> · <strong>30,403</strong></td>
+<td>MIT<br>2026-11-03</td>
+<td>用状态和事件描述表单、加载、提交与错误，不必替换全局状态库。</td>
+<td>P1 · 状态协议</td>
+</tr>
+<tr>
+<td><a href="https://github.com/bpmn-io/bpmn-js">bpmn-io/bpmn-js</a> · <strong>9,720</strong></td>
+<td>bpmn.io 自定义条款（含水印）<br>2026-10-30</td>
+<td>需要标准 BPMN 的业务流程原型；保留 bpmn.io 要求的水印。</td>
+<td>P2 · 按业务选用</td>
+</tr>
+<tr>
+<td><a href="https://github.com/jgraph/drawio">jgraph/drawio</a> · <strong>9,155</strong></td>
+<td>Apache-2.0<br>2026-10-30</td>
+<td>已有图表资产的嵌入与交换；这是 drawio 仓库的星数，不混用桌面仓库。</td>
+<td>P2 · 格式互操作</td>
+</tr>
+<tr>
+<td><a href="https://github.com/mockoon/mockoon">mockoon/mockoon</a> · <strong>8,467</strong></td>
+<td>MIT<br>2026-11-01</td>
+<td>本地模拟接口可支撑复杂原型；简单场景先用产物内固定数据。</td>
+<td>P2 · 开发验证</td>
+</tr>
+</tbody></table>
+<h3>3.7 动效与演示（9 项）</h3>
+<table>
+<thead>
+<tr>
+<th>项目 · Stars</th>
+<th>主体许可 / 最近推送</th>
+<th>可融合的想法或实现</th>
+<th>方式与优先级</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><a href="https://github.com/heygen-com/hyperframes">heygen-com/hyperframes</a> · <strong>78,078</strong></td>
+<td>Apache-2.0<br>2026-11-03</td>
+<td>复用 HTML 制作视频；单独管理渲染任务、帧时钟与依赖许可。</td>
+<td>P2 · 交付适配</td>
+</tr>
+<tr>
+<td><a href="https://github.com/juliangarnier/anime">juliangarnier/anime</a> · <strong>74,244</strong></td>
+<td>MIT<br>2026-11-02</td>
+<td>普通 HTML/SVG 动画候选，封装为有时长与缓动参数的预设。</td>
+<td>P2 · 首选候选</td>
+</tr>
+<tr>
+<td><a href="https://github.com/hakimel/reveal.js">hakimel/reveal.js</a> · <strong>72,512</strong></td>
+<td>MIT<br>2026-09-30</td>
+<td>将现有 HTML deck 模板接入可播放演示与演讲者视图。</td>
+<td>P2 · 演示适配</td>
+</tr>
+<tr>
+<td><a href="https://github.com/motiondivision/motion">motiondivision/motion</a> · <strong>34,840</strong></td>
+<td>MIT<br>2026-11-03</td>
+<td>给受控组件添加布局和交互动画，采用按需导入和减弱动画选项。</td>
+<td>P2 · 首选候选</td>
+</tr>
+<tr>
+<td><a href="https://github.com/airbnb/lottie-web">airbnb/lottie-web</a> · <strong>32,339</strong></td>
+<td>MIT<br>2025-09-01 · 较早</td>
+<td>用 JSON 动画补充少量空状态与反馈，资源自身许可单独记录。</td>
+<td>P2 · 播放适配</td>
+</tr>
+<tr>
+<td><a href="https://github.com/greensock/GSAP">greensock/GSAP</a> · <strong>30,105</strong></td>
+<td>自定义 GSAP Standard License<br>2026-04-13</td>
+<td>滚动与时间轴能力强，但视觉动画编辑器用途需核对现行标准许可。</td>
+<td>P2 · 用途核对</td>
+</tr>
+<tr>
+<td><a href="https://github.com/motion-canvas/motion-canvas">motion-canvas/motion-canvas</a> · <strong>19,663</strong></td>
+<td>MIT<br>2026-07-02</td>
+<td>代码描述解释性动画，适合讲解视频而非一般页面编辑。</td>
+<td>P2 · 独立产物</td>
+</tr>
+<tr>
+<td><a href="https://github.com/theatre-js/theatre">theatre-js/theatre</a> · <strong>12,847</strong></td>
+<td>Apache-2.0 core / AGPL-3.0 studio<br>2024-08-14 · 较早</td>
+<td>可视时间轴与参数动画；core 和 studio 许可不同，维护日期较早。</td>
+<td>P2 · 机制参考</td>
+</tr>
+<tr>
+<td><a href="https://github.com/marp-team/marp">marp-team/marp</a> · <strong>12,717</strong></td>
+<td>MIT<br>2026-11-02</td>
+<td>Markdown 到演示的路线，可用于重内容的汇报稿；需选择具体 core/CLI。</td>
+<td>P2 · 文稿适配</td>
+</tr>
+</tbody></table>
+<h3>3.8 素材与数据表达（10 项）</h3>
+<table>
+<thead>
+<tr>
+<th>项目 · Stars</th>
+<th>主体许可 / 最近推送</th>
+<th>可融合的想法或实现</th>
+<th>方式与优先级</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><a href="https://github.com/mrdoob/three.js">mrdoob/three.js</a> · <strong>117,476</strong></td>
+<td>MIT<br>2026-11-03</td>
+<td>明确需要三维场景时作为专用模板运行时，保持普通页面轻量。</td>
+<td>P2 · 独立产物</td>
+</tr>
+<tr>
+<td><a href="https://github.com/d3/d3">d3/d3</a> · <strong>113,860</strong></td>
+<td>ISC<br>2026-11-03</td>
+<td>独特交互可视化再使用；普通统计图优先减少手写复杂度。</td>
+<td>P2 · 定制图表</td>
+</tr>
+<tr>
+<td><a href="https://github.com/tailwindlabs/tailwindcss">tailwindlabs/tailwindcss</a> · <strong>98,056</strong></td>
+<td>MIT<br>2026-11-02</td>
+<td>宿主已使用；为生成产物明确构建后的 CSS 和设计 Token 契约。</td>
+<td>P0 · 已有基础</td>
+</tr>
+<tr>
+<td><a href="https://github.com/apache/echarts">apache/echarts</a> · <strong>67,671</strong></td>
+<td>Apache-2.0<br>2026-10-13</td>
+<td>业务图表采用 spec/data/theme 分离，导出带本地运行资源。</td>
+<td>P1 · 图表适配</td>
+</tr>
+<tr>
+<td><a href="https://github.com/pmndrs/react-three-fiber">pmndrs/react-three-fiber</a> · <strong>33,456</strong></td>
+<td>MIT<br>2026-10-21</td>
+<td>React 三维场景适配，需要显式工程运行条件和性能预算。</td>
+<td>P2 · 独立产物</td>
+</tr>
+<tr>
+<td><a href="https://github.com/lucide-icons/lucide">lucide-icons/lucide</a> · <strong>25,484</strong></td>
+<td>ISC / Feather 派生部分 MIT<br>2026-11-03</td>
+<td>壳层已使用 Lucide；把同一图标风格、本地资源和语义目录扩展到产物。</td>
+<td>P0 · 扩展已有能力</td>
+</tr>
+<tr>
+<td><a href="https://github.com/tabler/tabler-icons">tabler/tabler-icons</a> · <strong>22,532</strong></td>
+<td>MIT<br>2026-10-29</td>
+<td>另一套完整图标选择，整页统一风格，避免与 Lucide 随机混用。</td>
+<td>P1 · 替代图标集</td>
+</tr>
+<tr>
+<td><a href="https://github.com/iconify/iconify">iconify/iconify</a> · <strong>6,382</strong></td>
+<td>MIT 程序 / 图标集分别许可<br>2026-11-02</td>
+<td>统一检索和使用多种图标；逐集合维护许可并按需本地化。</td>
+<td>P1 · 资源目录</td>
+</tr>
+<tr>
+<td><a href="https://github.com/argyleink/open-props">argyleink/open-props</a> · <strong>5,563</strong></td>
+<td>MIT<br>2026-10-11</td>
+<td>现成 CSS 自定义属性刻度，可补齐间距、阴影、缓动的起点。</td>
+<td>P1 · Token 参考</td>
+</tr>
+<tr>
+<td><a href="https://github.com/vega/vega-lite">vega/vega-lite</a> · <strong>5,539</strong></td>
+<td>BSD-3-Clause<br>2026-11-02</td>
+<td>让模型输出受约束图表规格，方便修改数据、主题和检查合法性。</td>
+<td>P1 · 声明式图表</td>
+</tr>
+</tbody></table>
+<h3>3.9 设计质量与回归（4 项）</h3>
+<table>
+<thead>
+<tr>
+<th>项目 · Stars</th>
+<th>主体许可 / 最近推送</th>
+<th>可融合的想法或实现</th>
+<th>方式与优先级</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><a href="https://github.com/microsoft/playwright">microsoft/playwright</a> · <strong>99,176</strong></td>
+<td>Apache-2.0<br>2026-11-03</td>
+<td>项目已依赖 Playwright；补视口/状态矩阵、截图对照和离线导出验证。</td>
+<td>P0 · 扩展已有能力</td>
+</tr>
+<tr>
+<td><a href="https://github.com/dequelabs/axe-core">dequelabs/axe-core</a> · <strong>7,743</strong></td>
+<td>MPL-2.0<br>2026-11-02</td>
+<td>补充可访问名称、对比度等自动检查，诊断映射到现有节点。</td>
+<td>P0 · 检查接入</td>
+</tr>
+<tr>
+<td><a href="https://github.com/garris/BackstopJS">garris/BackstopJS</a> · <strong>7,194</strong></td>
+<td>MIT<br>2026-10-10</td>
+<td>参考图、当前图与差异图的评审体验；已有 Playwright 不必重复引入运行器。</td>
+<td>P1 · 报告借鉴</td>
+</tr>
+<tr>
+<td><a href="https://github.com/reg-viz/reg-suit">reg-viz/reg-suit</a> · <strong>1,306</strong></td>
+<td>MIT<br>2026-10-27</td>
+<td>视觉基线与差异报告的组织机制；本地方案先不依赖其云存储链路。</td>
+<td>P2 · 报告借鉴</td>
+</tr>
+</tbody></table>
+<p><a id="opportunities"></a></p>
+<h2>四、12 个可融合的方向</h2>
+<h3>4.1 让设计系统成为可执行的资产包</h3>
+<p><strong>上游事实。</strong> shadcn 的 Registry 可以描述源码文件、依赖与主题变量；Style Dictionary 支持将 Token 转换到不同平台；open-design 的新式设计系统包在 DESIGN.md 之外加入 manifest、tokens.css、组件、资源和来源信息。<a href="https://ui.shadcn.com/docs/registry">Registry 文档</a>、<a href="https://styledictionary.com/info/tokens/">Token 文档</a>、<a href="https://github.com/nexu-io/open-design#why-opendesign">open-design</a></p>
+<p><strong>融合建议。</strong> 沿用当前设计系统的不可变版本，在每个版本旁增加经过校验的 Token 和资源清单。DESIGN.md 继续表达原则、语气和例外；Token 处理颜色、字号、间距、圆角等确定值。生成时给模型相关摘要和配方，避免把整个组件库塞进上下文。</p>
+<p><strong>最小实现。</strong> 在规范保存时产生可选的 <code>tokens.json</code> 和 <code>manifest.json</code>；主进程校验类型、引用和循环；转换成 CSS 变量供当前 HTML 使用。预览更新、导出与下一轮 AI 改稿全部引用同一份已提交版本。旧 Markdown 规范继续可用，不要求一次性迁移。</p>
+<p><strong>适用边界。</strong> 现有规范中的 YAML 可作为迁移输入，但不能把任意自然语言自动推断成确定 Token。品牌语义、Logo 和字体授权应记录来源。验收看同一规范下三个不同页面的 Token 使用情况，而不只看编辑面板是否好看。</p>
+<h3>4.2 将 Tweaks 升级为有语义的主题编辑</h3>
+<p><strong>上游事实。</strong> tweakcn 提供面向 Tailwind CSS / shadcn/ui 的可视化主题编辑；Tokens Studio 将设计 Token 保存在 JSON 中并支持同步。<a href="https://github.com/jnsahaj/tweakcn">tweakcn</a>、<a href="https://github.com/tokens-studio/figma-plugin">Tokens Studio</a></p>
+<p><strong>融合建议。</strong> 现有 Tweaks 已经能实时改参数，应继续使用它的交互和历史机制，新增“背景/表面/正文/品牌/危险”等语义槽，以及字号比例、内容密度、亮暗主题。把当前“改一个具体色值”的行为提升为“调整一种设计角色”。</p>
+<p><strong>最小实现。</strong> 建立 Token → CSS 变量 → Tweaks 控件的映射。允许页面对 Token 作局部覆盖，并在面板中区分“修改本页”“保存为规范新版本”；引用关系由宿主管理。长文本、中文字体回退和亮暗模式要随主题一起检查。</p>
+<p><strong>验收重点。</strong> 更新品牌色能联动按钮、链接和选中状态；正文色不会意外改变危险操作颜色；撤销恢复引用关系；旧会话仍解析原规范版本。tweakcn 的 UI 可借鉴，但本项目没有必要整体嵌入一个独立主题应用。</p>
+<h3>4.3 把设计原则转成能给模型纠错的规则</h3>
+<p><strong>上游事实。</strong> shadcn/lint 为 Tailwind v4 项目提供可配置设计规则，诊断中包含问题和基于组件契约的修复建议；它并不要求使用 shadcn/ui。<a href="https://github.com/shadcn-ui/lint">项目说明</a></p>
+<p><strong>融合建议。</strong> 从已有 DESIGN.md 中挑选少量可确定验证的规则：只能使用批准的颜色与间距；Button 的尺寸通过 size 变体改变；表单字段必须有可识别标签。规则应提供节点、期望值和修复方向，让局部执行器能直接使用。</p>
+<p><strong>最小实现。</strong> 增加 <code>design-rules.json</code>，先做颜色、排版和间距三类。HTML/CSS 产物通过已有 AST 和浏览器计算样式检查；将来有真正的 Tailwind 源码工程时再接 shadcn/lint，避免拿一个 JSX/Tailwind 工具直接扫描所有 HTML。</p>
+<p><strong>反馈形态。</strong> “primary-button 使用了未登记的 13px 内边距；该配方允许 compact/default/large，请选择已有尺寸”比“页面不够高级”更可执行。用户可允许局部例外，规则随规范版本固定。上游的效果数字需要在本项目复测后才能引用为收益。</p>
+<h3>4.4 从“抓取样式”走向“带证据的规范提取”</h3>
+<p><strong>上游事实。</strong> design-extract 声明支持 DTCG Token、多视口、状态样式及比较；Dembrandt 基于浏览器计算样式提取设计值，并提供置信度、Token 导出和漂移检查。<a href="https://github.com/Manavarya09/design-extract">design-extract</a>、<a href="https://github.com/dembrandt/dembrandt">Dembrandt</a></p>
+<p><strong>你的基础。</strong> 当前已经能从真实页面提取颜色、字体、间距和代表性组件；生成的文档也明确指出单一视口无法确定断点与交互规范。<a href="/Users/liuxuyang/WebstormProjects/feature_design/src/main/services/design/system-style-snapshot.ts:105">现有实现</a></p>
+<p><strong>融合建议。</strong> 每个提取值保留来源元素、视口、状态和观察次数。把高频视觉值聚类为候选刻度，再由用户确认语义名称；区分“观察到的值”和“推测的设计规则”。增加常见视口的复采样与 hover/focus 对照，先限于当前页及用户选择的相关页。</p>
+<p><strong>最小实现。</strong> 先输出 JSON 证据旁车和置信度，再增加两到三个视口采样。复用当前 capture 的登录、取消、超时和受限页面处理。页面打开的某一状态不代表完整设计系统；自动导出的品牌规范应保持草稿身份。</p>
+<h3>4.5 用源码映射和能力说明提高直接编辑的可靠性</h3>
+<p><strong>上游事实。</strong> Onlook 的架构在预览运行、代码索引与元素插桩之间建立映射，使选中元素可以回到源码；Puck 的配置允许对不同组件定义字段和权限。<a href="https://github.com/onlook-dev/onlook#how-it-works">Onlook</a>、<a href="https://puckeditor.com/docs/api-reference/configuration/component-config">Puck 配置</a></p>
+<p><strong>融合建议。</strong> 继续使用现有节点身份与 revision/hash，将 <code>canStyle</code>、<code>canDelete</code> 等能力扩展为明确的编辑操作集合。对重复组件区分“实例数据”与“共享定义”，并向用户展示限制原因。对无法可靠定位的外部脚本 DOM，提供 AI 源码改稿入口。</p>
+<p><strong>最小实现。</strong> 在编辑索引中加入映射来源、实例 key、可操作字段和限制原因；仍通过主进程生成候选并事务提交。第一阶段优先提升受控 HTML、已声明绑定的 React/Vue；真正的多文件 TSX/Vue SFC 工程作为独立适配器。</p>
+<p><strong>验收重点。</strong> 点击第二张重复卡片，只修改其文案；组件重绘、重开、撤销与导出后结果一致。对映射歧义拒绝猜测。Onlook 的云容器、账户和托管平台不必进入当前 Electron 本地链路。</p>
+<h3>4.6 建立区块配方库，再做受约束的插入与排序</h3>
+<p><strong>上游事实。</strong> Puck 用组件配置与数据进行渲染；GrapesJS 将组件模型作为导出的数据来源，并区分编辑视图；Craft.js 提供构建 React 页面编辑器的基础。<a href="https://github.com/puckeditor/puck">Puck</a>、<a href="https://grapesjs.com/docs/modules/Components.html">GrapesJS 组件模型</a>、<a href="https://github.com/prevwong/craft.js">Craft.js</a></p>
+<p><strong>融合建议。</strong> 在现有整页模板下增加“区块配方”：筛选工具栏、搜索表格、详情摘要、双栏表单、空状态、错误重试、定价区、移动底栏等。每份配方带内容槽、样式 Token、插槽约束、交互约定和导出依赖。先做 8–12 个高频区块验证，不追求庞大市场。</p>
+<p><strong>最小实现。</strong> 首先允许 Agent 检索并读取配方，产物仍写现有 HTML。然后在已识别区块之间支持插入/排序。新命令包含目标容器、插入位置、预期 hash 和依赖清单；结构调整统一经过事务、journal、校验及一次必要的预览重建。</p>
+<p><strong>实施边界。</strong> 当前 <code>design-edit/1</code> 没有插入、复制和移动操作，必须增加经过版本化的命令并处理撤销，不能让拖拽直接覆盖运行时 DOM。也不宜同时维护 GrapesJS、Puck 和当前编辑器三套页面真相。Craft.js 的最近推送较早，优先研究机制。</p>
+<h3>4.7 按任务选择设计策略，并把审美规则压到合理预算内</h3>
+<p><strong>上游事实。</strong> UI UX Pro Max 将样式、行业、配色、字体与反模式组合为检索资料；Taste Skill 从需求和素材出发选择设计方向，并进行多宽度浏览器检查。<a href="https://github.com/nextlevelbuilder/ui-ux-pro-max-skill">UI UX Pro Max</a>、<a href="https://github.com/Leonxlnx/taste-skill#how-v2-works">Taste Skill</a></p>
+<p><strong>融合建议。</strong> 先判断后台、消费产品、内容页、品牌官网、移动应用、演示文稿，再选择信息密度和内容结构。使用 DESIGN.md 时以既定规范为最高视觉输入；未指定规范时，给出一条明确方向和少量相匹配的规则即可。</p>
+<p><strong>最小实现。</strong> 生成前形成一个短的 <code>design-intent</code>：目标用户、核心动作、内容结构、密度、素材策略、禁止的套路。以检索方式附加相关配方，不把整个技能库展开。后台任务优先表格、筛选、状态和可读性；品牌任务再考虑强视觉素材。</p>
+<p><strong>成本边界。</strong> Taste Skill 的 README 自述流程可能耗时较长、Token 量较大；这不是本项目实测，也不适合作为每次生成的默认成本。借鉴任务判断和少量复检即可。当前已有宿主浏览器校验，应由宿主集中执行，避免模型再次重复跑整套浏览器流程。</p>
+<h3>4.8 增加能解释问题的质量报告与定向修复</h3>
+<p><strong>上游事实。</strong> axe-core 提供自动化无障碍检查；Playwright 可以比较截图；BackstopJS 和 reg-suit 展示了参考图、当前图和差异报告的组织方式。<a href="https://github.com/dequelabs/axe-core">axe-core</a>、<a href="https://playwright.dev/docs/test-snapshots">Playwright</a>、<a href="https://github.com/garris/BackstopJS">BackstopJS</a>、<a href="https://github.com/reg-viz/reg-suit">reg-suit</a></p>
+<p><strong>融合建议。</strong> 在已有结构、运行时和交互诊断上补充：可访问名称、对比度等自动检查；批准 Token 的使用情况；常用视口下的新溢出；改稿前后的非目标区域变化。报告区分“确定错误”“待人工确认”“设计偏好”，不合成为含义模糊的万能审美分。</p>
+<p><strong>最小实现。</strong> 保留首屏与当前快速校验链路，增加可取消的深度检查任务。每个问题带 ruleId、节点、证据、严重程度和建议操作；点击定位；用户可选择一批问题交给现有 patch executor。超时、资源加载失败等基础设施错误不交给模型无限修复。</p>
+<p><strong>验收重点。</strong> 固定浏览器、字体、视口、时间、数据和动画状态后再比较截图，降低噪声。自动检测通过不等于完成全部无障碍验证，键盘路径和真实辅助技术使用仍有人工部分。模型视觉评价单独保存，不能替代确定性错误报告。</p>
+<h3>4.9 把单页扩展为可检查的状态与页面关系</h3>
+<p><strong>上游事实。</strong> Storybook 用独立场景展示组件；Zag 将交互行为组织为状态机并支持不同框架；XState 描述状态与事件；React Flow 提供节点连接编辑。<a href="https://github.com/storybookjs/storybook">Storybook</a>、<a href="https://github.com/chakra-ui/zag">Zag</a>、<a href="https://github.com/statelyai/xstate">XState</a>、<a href="https://github.com/xyflow/xyflow">React Flow</a></p>
+<p><strong>融合建议。</strong> 为表单、表格和详情页准备正常/加载/空/错误等可选择场景；再记录页面间的导航关系。评审时能一键切换“空数据”“提交失败”，不用临时修改源码或依赖真实接口碰巧失败。</p>
+<p><strong>最小实现。</strong> 在 artifact 的旁车元数据中登记 pages、scenarios 和示例数据，复用现有模板多入口能力；页面状态通过显式适配器切换。React 组件故事可以使用 Storybook；普通 HTML 产物先使用轻量场景协议，无需启动完整 Storybook。</p>
+<p><strong>验收重点。</strong> 正常与异常状态共享相同规范；状态切换不写坏业务数据；ZIP 导出仍能演示导航。对复杂后台流程，先做状态矩阵和页面链接，再决定是否需要可视化状态机。不要因此替换现有全局 Zustand 状态。</p>
+<h3>4.10 增加需求草图与页面总览，控制画布范围</h3>
+<p><strong>上游事实。</strong> Excalidraw 提供手绘风格白板；Mermaid 用文本描述图；React Flow 支持交互式节点图；perfect-freehand 提供手写笔迹轮廓。<a href="https://github.com/excalidraw/excalidraw">Excalidraw</a>、<a href="https://github.com/mermaid-js/mermaid">Mermaid</a>、<a href="https://github.com/xyflow/xyflow">React Flow</a>、<a href="https://github.com/steveruizok/perfect-freehand">perfect-freehand</a></p>
+<p><strong>融合建议。</strong> 用页面卡片表达“列表 → 详情 → 编辑 → 成功”，节点连接携带用户动作，卡片关联当前页面、版本与批注。生成前可检查信息架构；生成后成为导航总览。草图可以作为需求附件，不必成为正式页面的数据模型。</p>
+<p><strong>最小实现。</strong> 页面总览优先使用 React Flow 或普通缩略图网格；自由草图按需嵌入 Excalidraw。当前圈画已经存在，短期仅改善笔迹、箭头和锚点体验也有价值。不要同时引入多个完整画布内核。</p>
+<p><strong>边界。</strong> tldraw 的交互和记录模型值得研究，但现行自定义许可要求生产使用满足其授权条件；不应当作 MIT 画布 SDK 直接纳入。<a href="https://github.com/tldraw/tldraw/blob/main/LICENSE.md">tldraw 许可证</a></p>
+<h3>4.11 统一图标、图表和素材的声明与本地交付</h3>
+<p><strong>上游事实。</strong> Lucide、Tabler 和 Iconify 提供图标资源或统一使用工具；ECharts 与 Vega-Lite 提供可配置或声明式数据可视化。<a href="https://github.com/lucide-icons/lucide">Lucide</a>、<a href="https://github.com/tabler/tabler-icons">Tabler</a>、<a href="https://github.com/iconify/iconify">Iconify</a>、<a href="https://github.com/apache/echarts">ECharts</a>、<a href="https://github.com/vega/vega-lite">Vega-Lite</a></p>
+<p><strong>融合建议。</strong> 产品壳层已经使用 lucide-react，应把一致性延伸到生成产物：图标用固定集合、语义名称和尺寸；图表用数据与规格分离；素材记录来源和许可。不要让模型每次编写大量重复 SVG 或从多个在线 CDN 混用图标风格。</p>
+<p><strong>最小实现。</strong> 给 Agent 一个小型可检索目录；选择的资源复制到设计目录并进入 ZIP。图表保存 <code>spec + data + theme</code>，数据修改不会重建全部页面。优先选一种图表方案验证，ECharts 适合常见业务图，Vega-Lite 适合受约束的声明式生成。</p>
+<p><strong>验收重点。</strong> 离线打开导出包仍有图标、字体回退和图表；用户能替换样例数据；未知数据不伪装成真实业务指标。Iconify 的程序许可不代表它聚合的每个图标集合都采用同一许可，应逐集合记录。</p>
+<h3>4.12 用适配器扩展动效、演示和视频交付</h3>
+<p><strong>上游事实。</strong> Motion 和 Anime.js 提供动画能力；Lottie 播放可序列化动画；reveal.js 和 Marp 面向演示文稿；HyperFrames 提供 HTML 到视频的工作流；Mitosis 将受约束的组件模型生成到不同框架。<a href="https://github.com/motiondivision/motion">Motion</a>、<a href="https://github.com/juliangarnier/anime">Anime.js</a>、<a href="https://github.com/airbnb/lottie-web">Lottie</a>、<a href="https://github.com/hakimel/reveal.js">reveal.js</a>、<a href="https://github.com/marp-team/marp">Marp</a>、<a href="https://github.com/heygen-com/hyperframes">HyperFrames</a>、<a href="https://github.com/BuilderIO/mitosis">Mitosis</a></p>
+<p><strong>融合建议。</strong> 当前 HTML 产物先获得“进入、展开、反馈、数字变化”少量动效预设，把时长、缓动和减弱动画选项纳入参数。演示与视频采用独立产物类型和渲染任务，复用规范、资源及版本，避免让所有 HTML 都承担视频时间轴或框架转换能力。</p>
+<p><strong>最小实现。</strong> 第一轮只加 CSS/WAAPI 或单一 MIT 动画库的预设；演示导出先验证现有 deck 模板与 reveal.js 的适配。需要视频时，另建可取消的渲染队列，固定帧时钟、字体和资源。HyperFrames 的 Apache 主体许可不自动解决其动画依赖、字体、音频与编码器的分发问题。</p>
+<p><strong>边界。</strong> Mitosis 的生成能力适合按其模型创作的受控组件，不应宣传为“任意 HTML/React/Vue 无损互转”。GSAP 不适合作为本轮默认视觉动画编辑器底座，具体限制见第七节。</p>
+<p><a id="implementation"></a></p>
+<h2>五、接到现有代码的实现蓝图</h2>
+<h3>5.1 建议的数据流</h3>
+<div class="flow-map" role="img" aria-label="建议架构：需求、固定规范和配方输入现有生成链路，经过事务提交、预览编辑、检查和局部修复，再导出。"><div class="flow-band"><div>需求与参考资料<span>短设计意图 · 新增</span></div><div>固定规范版本<span>DESIGN.md + Token</span></div><div>配方与资源目录<span>按需检索 · 新增</span></div></div><div class="flow-arrow">↓ 本次生成契约</div><div class="flow-core">现有渐进生成 → 已提交源码与资源 → 现有交互预览</div><div class="flow-arrow">↓</div><div class="flow-band"><div>直接编辑与 Tweaks<span>现有事务与历史</span></div><div>质量检查与诊断<span>扩展维度 · 节点定位</span></div><div>现有局部改稿<span>校验 → 事务 → 预览</span></div></div><div class="flow-arrow">↓ 统一读取已提交版本</div><div class="flow-core">HTML / ZIP 导出 · 按需增加演示、视频和工程适配</div></div><p>图中的生成、预览、事务、局部改稿和 HTML/ZIP 导出已经存在；新增部分集中在输入契约、可复用资产、诊断维度和后续交付适配器。</p>
+<h3>5.2 三种资产应有各自职责</h3>
+<table>
+<thead>
+<tr>
+<th>资产</th>
+<th>建议保存内容</th>
+<th>执行原则</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>设计系统版本</td>
+<td>DESIGN.md、结构化 Token、规则、字体/图标引用、来源</td>
+<td>会话固定版本；升级显式产生新版本</td>
+</tr>
+<tr>
+<td>区块配方版本</td>
+<td>源码/模板、插槽与属性、框架/运行条件、交互契约、资源</td>
+<td>检索后按需读入；实例化到设计目录</td>
+</tr>
+<tr>
+<td>产物版本</td>
+<td>正式源码、Tweaks overrides、所用系统/配方、场景、资源、质量报告引用</td>
+<td>延续现有数据库提交、文件投影和导出一致性</td>
+</tr>
+</tbody></table>
+<p>设计系统说明、模板说明和技能说明都是输入资料；导入公开仓库文件不应把其中的任意指令升级为宿主权限或执行许可。</p>
+<h3>5.3 一个最小设计资产包的示意</h3>
+<p>以下是<strong>建议的新结构</strong>，不是当前已经支持的目录协议，也不是 shadcn 或 DTCG 的原样 Schema：</p>
+<pre><code class="language-text">my-design-system/
+  manifest.json
+  DESIGN.md
+  tokens.json
+  rules.json
+  recipes/
+    search-table/
+      recipe.json
+      template.html
+      preview.png
+  assets/
+  LICENSES/
+</code></pre>
+<p><code>manifest.json</code> 可以最小化到以下概念字段：</p>
+<pre><code class="language-json">{
+  &quot;schemaVersion&quot;: 1,
+  &quot;id&quot;: &quot;enterprise-neutral&quot;,
+  &quot;revision&quot;: &quot;1&quot;,
+  &quot;tokens&quot;: &quot;tokens.json&quot;,
+  &quot;rules&quot;: &quot;rules.json&quot;,
+  &quot;recipes&quot;: [&quot;recipes/search-table/recipe.json&quot;],
+  &quot;provenance&quot;: {
+    &quot;repository&quot;: &quot;https://github.com/example/design-assets&quot;,
+    &quot;commit&quot;: &quot;implementation-must-resolve-an-exact-commit&quot;,
+    &quot;license&quot;: &quot;MIT&quot;
+  }
+}
+</code></pre>
+<p>这里的 URL 和 commit 是说明性占位；真正安装时必须解析并固定真实来源，不应直接采用示例值。配方需要再描述 <code>framework</code>、<code>runtime</code>、<code>editableCapabilities</code>、<code>slots</code>、<code>states</code> 和依赖；对纯静态资源可延续当前模板导入策略。</p>
+<h3>5.4 推荐改造入口</h3>
+<table>
+<thead>
+<tr>
+<th>现有入口</th>
+<th>建议新增责任</th>
+<th>关键兼容要求</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><a href="/Users/liuxuyang/WebstormProjects/feature_design/src/shared/design-system.ts:4">design-system.ts</a></td>
+<td>可选 Token/规则/配方引用和来源摘要</td>
+<td>现有 ID、libraryId、version 语义不变</td>
+</tr>
+<tr>
+<td><a href="/Users/liuxuyang/WebstormProjects/feature_design/src/main/services/design/system-library.ts:36">system-library.ts</a></td>
+<td>原子保存资产包、验证相对路径与引用</td>
+<td>Markdown-only 旧版本持续可读</td>
+</tr>
+<tr>
+<td><a href="/Users/liuxuyang/WebstormProjects/feature_design/src/main/services/design/system-style-snapshot.ts:27">system-style-snapshot.ts</a></td>
+<td>输出观察证据、置信度、多视口信息</td>
+<td>明确未知值，不把猜测写成事实</td>
+</tr>
+<tr>
+<td><a href="/Users/liuxuyang/WebstormProjects/feature_design/src/main/services/design/generation-prompt.ts:29">generation-prompt.ts</a></td>
+<td>接入短设计意图和按需配方</td>
+<td>保留首写骨架和宿主集中校验</td>
+</tr>
+<tr>
+<td><a href="/Users/liuxuyang/WebstormProjects/feature_design/src/shared/design-tweaks.ts:389">design-tweaks.ts</a></td>
+<td>Token 引用与页面覆盖的协调</td>
+<td>保留旧参数键、绑定、撤销与导出</td>
+</tr>
+<tr>
+<td><a href="/Users/liuxuyang/WebstormProjects/feature_design/src/shared/design-edit.ts:24">design-edit.ts</a></td>
+<td>版本化的结构命令与能力声明</td>
+<td>旧命令继续可用；新命令需要独立校验</td>
+</tr>
+<tr>
+<td><a href="/Users/liuxuyang/WebstormProjects/feature_design/src/main/services/design/direct-edit.ts:191">direct-edit.ts</a></td>
+<td>受控区块插入、移动与实例级约束</td>
+<td>不写回整个运行时 DOM；仍校验 hash</td>
+</tr>
+<tr>
+<td><a href="/Users/liuxuyang/WebstormProjects/feature_design/src/main/services/design/browser-validation-feedback.ts:7">browser-validation-feedback.ts</a></td>
+<td>无障碍、Token 规则、证据与严重程度</td>
+<td>扩展 issue 类型和修复路由，避免把超时当代码错误</td>
+</tr>
+<tr>
+<td><a href="/Users/liuxuyang/WebstormProjects/feature_design/src/main/services/design/patch-context.ts:97">patch-context.ts</a></td>
+<td>注入目标相关规则和配方摘要</td>
+<td>延续上下文预算、依赖 hash 和范围检查</td>
+</tr>
+<tr>
+<td><a href="/Users/liuxuyang/WebstormProjects/feature_design/src/main/services/design/artifact-package.ts:6">artifact-package.ts</a></td>
+<td>带入所需 Token、场景与许可清单</td>
+<td>导出基于已提交版本，资源离线可解析</td>
+</tr>
+</tbody></table>
+<p>建议把新规则执行器、配方注册表、素材目录和交付适配器放在 <code>services/design</code> 的独立模块中，经由现有运行编排调用，避免继续把所有逻辑堆入主 IPC 文件。</p>
+<h3>5.5 一个具体使用流程</h3>
+<p>用户输入“做一个企业客户管理后台”，选中已有企业规范。系统根据任务类型检索筛选工具栏、客户表格和状态配方，形成小型契约后交给现有渐进生成。用户看到首屏后调整密度；系统只更新对应 Token/overrides。定稿完成快速检查后，深度报告指出一个图标按钮缺少名称、移动视口有横向溢出；用户选择修复，已有局部执行器只读取对应节点和规则。最后导出包含图标、字体回退、场景数据和许可清单的资源包。</p>
+<p>这条链路每一步都有已有能力承接，新增价值可以逐项测量。</p>
+<p><a id="roadmap"></a></p>
+<h2>六、实施顺序与验收</h2>
+<h3>6.1 首轮：做一个可比较的闭环</h3>
+<p>建议第一轮用 <strong>10–15 人日</strong>验证一个企业后台场景；这是压缩后的 PoC 范围，并不包含上表全部 P0 能力的完整产品化。</p>
+<table>
+<thead>
+<tr>
+<th>顺序</th>
+<th>交付</th>
+<th>范围控制</th>
+<th>完成标准</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>1</td>
+<td>基线样本与日志</td>
+<td>选 12 个固定需求，记录模型、版本、规范与运行条件</td>
+<td>能比较生成用时、Token、检查问题和人工修改</td>
+</tr>
+<tr>
+<td>2</td>
+<td>一份结构化规范</td>
+<td>语义颜色、基础字号、间距、圆角；固定两个密度</td>
+<td>同规范的三类页面遵守同一刻度；旧版本可重开</td>
+</tr>
+<tr>
+<td>3</td>
+<td>八个区块配方</td>
+<td>先供模型检索，不做通用拖拽搭建器</td>
+<td>实例化后可用现有文字/样式编辑和导出</td>
+</tr>
+<tr>
+<td>4</td>
+<td>三类质量检查</td>
+<td>可访问名称、Token 使用、新增溢出</td>
+<td>问题可定位，修复后复检；超时不造成循环改稿</td>
+</tr>
+<tr>
+<td>5</td>
+<td>与现有链路集成</td>
+<td>一次完整生成、微调、局部修复、重开、导出</td>
+<td>源码、预览与导出保持一致，失败保留正式版本</td>
+</tr>
+</tbody></table>
+<p>实施中应优先复用当前测试夹具和浏览器工具。无需为了静态报告新增产品测试；上表描述的是后续实际实现时的验证任务。</p>
+<h3>6.2 第二轮：按收益扩展</h3>
+<p>先看首轮是否减少手工修正和规范偏差，再投入结构编辑与状态场景。推荐顺序是：参考提取证据 → 编辑能力说明 → 区块插入/排序 → 场景切换 → 页面导航。每一步保持已有 HTML 与静态模板工作方式可用。</p>
+<p>画布、视频和任意框架工程不是首轮依赖。只有真实设计任务需要时，再从第十二方向选择一种新产物类型验证。</p>
+<h3>6.3 应测量的指标</h3>
+<table>
+<thead>
+<tr>
+<th>目标</th>
+<th>指标与取法</th>
+<th>解释边界</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>首屏体验</td>
+<td>请求开始 → 首份可预览草稿的 P50/P95</td>
+<td>增加检索和检查不应无意拖慢首屏</td>
+</tr>
+<tr>
+<td>定稿效率</td>
+<td>请求开始 → 首个通过快速检查的正式版本</td>
+<td>深度质量报告另记，不混淆时间点</td>
+</tr>
+<tr>
+<td>修改效率</td>
+<td>选中操作 → 预览 ACK；本地编辑与 AI 改稿分开统计</td>
+<td>接口未报告用量时不能记作 0 成本</td>
+</tr>
+<tr>
+<td>规范一致性</td>
+<td>可映射样式中使用批准 Token 的比例；例外单独列出</td>
+<td>并非页面所有 CSS 值都应 Token 化</td>
+</tr>
+<tr>
+<td>交互完整性</td>
+<td>需求中声明的关键动作与异常场景完成数</td>
+<td>自动点击通过不能证明整个业务流程正确</td>
+</tr>
+<tr>
+<td>质量改善</td>
+<td>同一规则集的错误减少数；人工复核误报率</td>
+<td>美感偏好与确定错误分开</td>
+</tr>
+<tr>
+<td>编辑可靠性</td>
+<td>重绘/重开/撤销/导出后仍保持修改的用例数</td>
+<td>重复组件和共享绑定应单独覆盖</td>
+</tr>
+<tr>
+<td>交付可靠性</td>
+<td>离线资源解析、关键交互、源码与导出版本一致</td>
+<td>有真实后端依赖的产物单独标记</td>
+</tr>
+</tbody></table>
+<p>初始评估可先用 12 个任务分别运行现有与候选流程，共 24 次；记录真实模型用量和环境。差异受模型随机性影响明显时，再增加复跑。设计质量由独立人工判断补充，报告中不预先承诺“提升某个百分比”。</p>
+<p><a id="constraints"></a></p>
+<h2>七、许可证与维护筛选</h2>
+<h3>7.1 直接影响本项目的许可差异</h3>
+<table>
+<thead>
+<tr>
+<th>项目</th>
+<th>已核对的事实</th>
+<th>对融合的影响</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>tldraw</td>
+<td>当前主体采用自定义 tldraw license；开发与生产授权条件不同</td>
+<td>可研究交互；生产集成须匹配其授权条件，不能标成 MIT</td>
+</tr>
+<tr>
+<td>React Bits</td>
+<td>MIT + Commons Clause，限制组件、工具和某些导出物本身的售卖/再分发</td>
+<td>对设计工具的内置素材库和模板包分发尤其相关，本轮以参考为主</td>
+</tr>
+<tr>
+<td>GSAP</td>
+<td>标准许可免费覆盖许多用途，同时限制与特定可视化动画搭建能力竞争的用途；FAQ 区分 AI 生成代码</td>
+<td>不能把所有使用 GSAP 的 AI 工具都说成被禁止；本项目若做可视动画编辑器，应先核对具体用途</td>
+</tr>
+<tr>
+<td>Theatre.js</td>
+<td>core 为 Apache-2.0；studio 为 AGPL-3.0</td>
+<td>将动画播放 runtime 与内嵌时间轴编辑器分开评估</td>
+</tr>
+<tr>
+<td>Webstudio</td>
+<td>core 为 AGPL；可选动画组件包另有专有 EULA</td>
+<td>不能把仓库所有包统一视作 AGPL 或宽松许可</td>
+</tr>
+<tr>
+<td>stagewise</td>
+<td>主体为 AGPL-3.0</td>
+<td>浏览器上下文与源码协同机制可参考；整库集成需要评估分发形态</td>
+</tr>
+<tr>
+<td>bpmn-js</td>
+<td>自定义 bpmn.io 条款含水印保留条件</td>
+<td>流程建模可用，但不能当作纯 MIT 去除标识</td>
+</tr>
+<tr>
+<td>Penpot、axe-core</td>
+<td>API 识别主体为 MPL-2.0</td>
+<td>适合分别评估互操作与库集成；发布修改时核对具体文件义务</td>
+</tr>
+<tr>
+<td>GrapesJS</td>
+<td>API 为 NOASSERTION；根 LICENSE 指向 core，core 条款为 BSD 三条款式许可</td>
+<td>报告按 core 的 BSD-3-Clause 条款记录；Studio SDK 单独评估</td>
+</tr>
+<tr>
+<td>Lucide、Iconify</td>
+<td>Lucide 主体 ISC 并含 Feather 派生部分的许可；Iconify 的程序与图标集合许可不同</td>
+<td>保留来源/版权；不要用一个包许可概括所有图标素材</td>
+</tr>
+</tbody></table>
+<p>来源：<a href="https://github.com/tldraw/tldraw/blob/main/LICENSE.md">tldraw</a>、<a href="https://github.com/DavidHDev/react-bits/blob/main/LICENSE.md">React Bits</a>、<a href="https://gsap.com/community/standard-license/">GSAP</a>、<a href="https://github.com/theatre-js/theatre#license">Theatre.js</a>、<a href="https://github.com/webstudio-is/webstudio#license">Webstudio</a>、<a href="https://github.com/stagewise-io/stagewise#license">stagewise</a>、<a href="https://github.com/bpmn-io/bpmn-js/blob/develop/LICENSE">bpmn-js</a>、<a href="https://github.com/penpot/penpot">Penpot</a>、<a href="https://github.com/dequelabs/axe-core">axe-core</a>、<a href="https://github.com/GrapesJS/grapesjs/blob/dev/packages/core/LICENSE">GrapesJS core</a>、<a href="https://github.com/lucide-icons/lucide/blob/main/LICENSE">Lucide</a>、<a href="https://github.com/iconify/iconify#license">Iconify</a>。</p>
+<p>这些是选型事实和工程处理建议，不是对所有版本及分发场景作出的最终许可结论。实际引入时应固定版本，记录主体、子包和素材来源。</p>
+<h3>7.2 维护状态应怎样使用</h3>
+<p>API 快照中 ProjectVisBug 已归档，适合作为设计检查器交互的历史参考。Craft.js、Alibaba Lowcode Engine、Moveable、Selecto、Rough.js、Theatre.js、Lottie Web 等条目的最近推送明显早于其他活跃项目；这不自动等于不可用，但增加了验证 React 19、现代浏览器、Electron 与当前构建链兼容性的必要性。具体日期在全景表和数据文件中。</p>
+<p>新出现的高星技能库和生成工具也需要检查示例质量、核心贡献者、发布记录、依赖与问题响应。高星证明关注度；它不能替代兼容验证，更不能证明产品效果。</p>
+<h3>7.3 暂不建议投入的建设</h3>
+<table>
+<thead>
+<tr>
+<th>建设</th>
+<th>暂缓原因</th>
+<th>当前更合适的行动</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>重写一个完整 Figma/Penpot</td>
+<td>矢量编辑、约束布局、协作、字体与格式兼容的投入很大</td>
+<td>保持真实 HTML/源码产物，按需做导入互操作</td>
+</tr>
+<tr>
+<td>同时嵌入多套页面编辑内核</td>
+<td>会出现不同节点身份、历史、导出和数据模型</td>
+<td>每个能力选一个适配方案，保持现有事务为提交入口</td>
+</tr>
+<tr>
+<td>为所有生成结果安装 npm 工程</td>
+<td>当前模板设计为静态、隔离运行，工程预览是另一种生命周期</td>
+<td>有真实需求再提供显式 project 产物类型</td>
+</tr>
+<tr>
+<td>默认全量视觉模型反复打分</td>
+<td>成本和等待增加；审美评分容易缺少稳定依据</td>
+<td>确定性检查优先，视觉评审有界、按需执行</td>
+</tr>
+<tr>
+<td>大量追加品牌规范 Markdown</td>
+<td>已经有对应来源的品牌集合</td>
+<td>优先转成可执行资产和高频区块配方</td>
+</tr>
+<tr>
+<td>默认 3D、粒子、复杂滚动动效</td>
+<td>常见后台与原型任务收益低，影响可读性和资源成本</td>
+<td>仅在明确创意任务中启用对应模板与运行库</td>
+</tr>
+<tr>
+<td>直接出售或分发来源不清的组件集合</td>
+<td>仓库主体许可不代表每个模板和素材许可</td>
+<td>注册表记录逐项来源、版本及许可</td>
+</tr>
+</tbody></table>
+<p><a id="method"></a></p>
+<h2>八、调研方法、证据与局限</h2>
+<h3>8.1 检索方法</h3>
+<p>首先通过 GitHub Repository Search，按 Stars 降序读取以下主题：design-tools、visual-editor、design-system、ui-components、animation、design-to-code、prototyping、accessibility。不同主题阈值为 1,000 / 3,000 / 5,000 / 10,000 Stars，查询中均排除 fork；为保留维护风险样本，没有统一排除 archived。每条查询读取前 75 项，实际命中量均低于该上限。</p>
+<p>随后定向补查 43 个主题标签覆盖不足但与本产品相关的仓库，例如 shadcn/ui、Excalidraw、GrapesJS、截图转代码、图形交互、数据可视化与回归工具。八组主题得到 179 个去重候选，补查后为 222 个；精选 78 个进入正文。筛选考虑产品关联、机制可迁移性、许可及集成成本，因此不是按星数简单取前 78 名。</p>
+<p><code>design-system</code> 会混入后端“系统设计”、<code>accessibility</code> 会混入与网页设计无关的项目。此类条目只保留在候选数据中，没有作为本产品推荐。通用算法、原生移动框架及整个 3D/视频生态也未逐一展开。</p>
+<h3>8.2 证据文件</h3>
+<table>
+<thead>
+<tr>
+<th>文件</th>
+<th>内容</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><a href="repository-data.csv">repository-data.csv</a></td>
+<td>78 项的精确 Stars、许可证识别、最近推送、链接与调研判断，可筛选</td>
+</tr>
+<tr>
+<td><a href="repository-data.json">repository-data.json</a></td>
+<td>更完整的元数据、README 来源、人工许可补充、融合建议</td>
+</tr>
+<tr>
+<td><a href="candidate-catalog.json">candidate-catalog.json</a></td>
+<td>222 个去重候选及是否入选</td>
+</tr>
+<tr>
+<td><a href="search-log.json">search-log.json</a></td>
+<td>八条准确查询、API URL、命中量与 incomplete_results</td>
+</tr>
+<tr>
+<td><a href="metadata-retry-log.json">metadata-retry-log.json</a></td>
+<td>六个仓库因公开 API 限流而改用搜索接口补齐的记录</td>
+</tr>
+</tbody></table>
+<p>每个重点项目都有 API 元数据和 README 来源。关键方向另结合官方文档、许可证正文与本地模块进行比较；没有对全部上游源码逐行审计，也没有安装运行 78 个项目。所有性能、兼容性、工作量和收益仍需后续 PoC 验证。Stars 与维护信息会变化，本报告保留 2026-11-03 的统一快照，2026-11-04 成稿时未重新刷新全量数据。</p>
+<h3>8.3 可直接转入下一轮的三个课题</h3>
+<ol>
+<li><strong>设计资产包 v1</strong>：选一个现有企业规范，新增最小 Token、规则与八个配方，跑通生成、微调、保存和导出。</li>
+<li><strong>质量报告 v1</strong>：复用隐藏浏览器增加三类检查，接上节点定位和有界局部修复，用固定任务对比现有流程。</li>
+<li><strong>结构编辑 v1</strong>：基于稳定区块身份支持插入、排序和撤销，明确 HTML 与受控框架实例的支持边界。</li>
+</ol>
+<p>这三个课题分别验证资产复用、结果可信与人工控制，能作为后续是否投入多页画布和更广交付格式的依据。</p>
+</article><footer>成稿 2026-11-04 · GitHub 元数据快照 2026-11-03 · 本阅读版无需联网加载资源。</footer></main><script>
+const tables=[];for(const h of document.querySelectorAll('h3')){if(/^3\.\d/.test(h.textContent)){let t=h.nextElementSibling;while(t&&t.tagName!=='TABLE')t=t.nextElementSibling;if(t){t.dataset.projectTable='';h.dataset.projectHeading='';tables.push({h,t,rows:[...t.querySelectorAll('tbody tr')]})}}}
+const search=document.querySelector('#repo-search'),priority=document.querySelector('#repo-priority'),count=document.querySelector('#repo-count');function filter(){const q=search.value.trim().toLocaleLowerCase(),p=priority.value;let n=0;for(const group of tables){let shown=0;for(const row of group.rows){const match=(!q||row.textContent.toLocaleLowerCase().includes(q))&&(!p||row.lastElementChild.textContent.includes(p));row.hidden=!match;if(match){n++;shown++}}group.t.hidden=!shown;group.h.hidden=!shown}count.textContent='显示 '+n+' / 78 项；筛选只影响项目全景。'}search.addEventListener('input',filter);priority.addEventListener('change',filter);document.querySelector('#repo-reset').addEventListener('click',()=>{search.value='';priority.value='';filter()});
+</script></body></html>
