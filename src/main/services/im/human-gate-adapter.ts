@@ -116,6 +116,7 @@ export class ImHumanGateAdapter {
         requestRef: gate.gateId,
         targetLabel: `特性：${featureName}`,
         botEventId: bot?.botEventId,
+      botBindingRef: bot?.botBindingRef,
         build: (tag) =>
           buildHumanGateCard({ ...context, message, tag, group: bot?.kind === "group" })
       })

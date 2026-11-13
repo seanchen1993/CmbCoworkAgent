@@ -17,6 +17,7 @@ import {
   type BotSchedule,
   type BotTask
 } from "../../../../shared/bots/contracts"
+import type { BotImConversation, BotGroupTarget } from "../../../../shared/bots/im-channel"
 import type { BotWorkItem } from "../../../../shared/bots/work"
 import { botTaskPreview } from "@/lib/bot-task-view"
 import { BotConversationTools } from "./BotConversationTools"
@@ -29,6 +30,7 @@ export function BotConversation({
   work,
   bots,
   groups = [],
+  imGroups = [],
   schedules,
   tasks,
   backgroundBusy,
@@ -43,6 +45,7 @@ export function BotConversation({
   work?: BotWorkItem | null
   bots: BotDefinition[]
   groups?: readonly BotGroup[]
+  imGroups?: readonly BotImConversation[]
   schedules: BotSchedule[]
   tasks: BotTask[]
   backgroundBusy: boolean
@@ -51,16 +54,19 @@ export function BotConversation({
   onConfigureModel?(): void
   onOpenWork(workId: string): void
   onOpenBot?(botId: string): void
-  onOpenGroup?(groupId: string): void
+  onOpenGroup?(groupId: string, source?: "app" | "zhaohu"): void
 }) {
-  const mentionGroups = useMemo(
-    () =>
-      groups.filter(
-        (group) =>
-          !group.deleting && group.hostId === bot.hostId && group.memberIds.includes(bot.id)
-      ),
-    [groups, bot.hostId, bot.id]
-  )
+  const mentionGroups = useMemo<BotGroupTarget[]>(() => {
+    const activeBots = new Map(bots.filter(peer => peer.hostId === bot.hostId && !peer.archived && !peer.deleting).map(peer => [peer.id,peer]))
+    return [
+      ...groups.filter(group => !group.deleting && group.hostId === bot.hostId && group.memberIds.includes(bot.id))
+        .map(group => ({ id: group.id, source: "app" as const, name: group.name, available: true,
+          description: group.memberIds.map(id => activeBots.get(id)?.name).filter(Boolean).join("、") })),
+      ...imGroups.filter(group => group.state === "active" && activeBots.has(group.botId))
+        .map(group => ({ id: group.id, source: "zhaohu" as const, name: group.title,
+          description: `服务 Bot · ${activeBots.get(group.botId)!.name}`, available: group.connected }))
+    ]
+  }, [groups, imGroups, bots, bot.hostId, bot.id])
   const threadId = work?.threadId ?? bot.threadId
   const reactionIdsKey = useThreadStateSelector(threadId, (state) =>
     JSON.stringify(

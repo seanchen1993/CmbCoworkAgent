@@ -7,6 +7,7 @@ export interface BotInteractionRoute {
   realm: string
   kind: "dm" | "group"
   botEventId?: string
+  botBindingRef?: string
   senderId?: string
   isCurrent: () => boolean
   onQuestionUndeliverable?: (requestId: string) => void

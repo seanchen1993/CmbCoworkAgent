@@ -31,6 +31,14 @@ export interface BotImBinding {
   /** App-only receipt of automatic replacement, not a gateway protocol field. */
   replacedBindingId?: string
 }
+/** Event-backed and desktop-origin runs freeze the same audience grant. */
+export function botImCardRoute(binding: Pick<BotImBinding, "id" | "kind" | "version">, eventId?: string) {
+  if (eventId) return { botEventId: eventId }
+  return binding.kind === "group"
+    ? { botBindingRef: `binding:${binding.id}:${binding.version}` }
+    : {}
+}
+
 export type BotImCommand =
   | { action: "create"; botId: string; kind: "dm" | "group"; label: string }
   | { action: "list"; botId: string; before?: string }
@@ -211,4 +219,13 @@ export function botImBrowserScope(
   // Keep the desktop audience stable; independent peer threads own separate pages.
   if (threadId) return `${audience}--${executorId}--${threadId}`
   return executorId === botId ? audience : `${audience}--${executorId}`
+}
+
+/** Metadata for selecting a destination, never its conversation history. */
+export interface BotGroupTarget {
+  id: string
+  source: "app" | "zhaohu"
+  name: string
+  description: string
+  available: boolean
 }

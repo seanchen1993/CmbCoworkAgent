@@ -4355,6 +4355,7 @@ describe("Bot Runtime integration", () => {
       botBrowserToolsOwnFileLock: true,
       additionalTools: [
         expect.objectContaining({ name: "bot_react_to_message" }),
+        expect.objectContaining({ name: "bot_list_groups" }),
         expect.objectContaining({ name: "bot_send_message" }),
         "works",
         "delivery",

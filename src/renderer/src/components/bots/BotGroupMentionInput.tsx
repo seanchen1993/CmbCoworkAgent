@@ -19,7 +19,8 @@ import {
 } from "@tiptap/react"
 import type { EditorView } from "@tiptap/pm/view"
 import { FileText, Users } from "lucide-react"
-import type { BotDefinition, BotGroup, BotMessageMention } from "../../../../shared/bots/contracts"
+import type { BotDefinition, BotMessageMention } from "../../../../shared/bots/contracts"
+import type { BotGroupTarget } from "../../../../shared/bots/im-channel"
 import { groupMentionQuery, type BotGroupMention } from "@/lib/bot-group-mentions"
 import {
   GroupMentionNode,
@@ -45,7 +46,7 @@ const MentionMembers = createContext<readonly BotDefinition[]>([])
 function MentionView({ node, selected }: NodeViewProps) {
   const members = useContext(MentionMembers)
   const mention = node.attrs.kind === "group"
-    ? { start: 0, end: 0, kind: "group" as const, groupId: node.attrs.groupId, label: node.attrs.label }
+    ? { start: 0, end: 0, kind: "group" as const, groupId: node.attrs.groupId, groupSource: node.attrs.groupSource ?? undefined, label: node.attrs.label }
     : { start: 0, end: 0, botId: node.attrs.botId, label: node.attrs.label }
   return (
     <NodeViewWrapper
@@ -78,7 +79,7 @@ interface InputProps<M extends Mention> {
   onPasteFiles(files: File[]): void
 }
 interface PrivateInputOptions {
-  groups: readonly BotGroup[]
+  groups: readonly (Pick<BotGroupTarget, "id" | "name"> & Partial<BotGroupTarget>)[]
   disabled: boolean
   files: readonly AtFileSuggestion[]
   onSelectFile(file: AtFileSuggestion): void
@@ -171,12 +172,12 @@ function BotMentionInput<M extends Mention>({
   const query = focused && !composing ? groupMentionQuery(text, caret, mentions) : null
   const queryKey = query ? `${query.start}:${query.end}:${query.query}` : null
   const open = query !== null && queryKey !== dismissed
-  type Candidate = { key: string; id: string | null; name: string; bot?: BotDefinition; groupId?: string; file?: AtFileSuggestion }
+  type Candidate = { key: string; id: string | null; name: string; bot?: BotDefinition; groupId?: string; file?: AtFileSuggestion; source?: "app" | "zhaohu"; description?: string; available?: boolean }
   const identities: Candidate[] = [
     ...(!privateChat ? [{ key: "all", id: null, name: "所有人" }] : []),
     ...members.filter((bot) => !bot.archived && !bot.deleting)
       .map((bot) => ({ key: `bot:${bot.id}`, id: bot.id, name: bot.name, bot })),
-    ...(privateChat?.groups ?? []).map((group) => ({ key: `group:${group.id}`, id: null, groupId: group.id, name: group.name }))
+    ...(privateChat?.groups ?? []).map((group) => ({ key: `group:${group.source ?? "app"}:${group.id}`, id: null, groupId: group.id, name: group.name, source: group.source ?? "app", description: group.description, available: group.available }))
   ]
   const candidates: Candidate[] = [
     ...identities.filter((item) => !query?.query || item.name.toLocaleLowerCase().includes(query.query.toLocaleLowerCase())),
@@ -187,7 +188,7 @@ function BotMentionInput<M extends Mention>({
     mentions.length < 128 &&
     Boolean(query && text.length - (query.end - query.start) + name.length + 2 <= 30_000)
   const choose = (candidate: (typeof candidates)[number]) => {
-    if (!editor || !query || privateChat?.disabled) return
+    if (!editor || !query || privateChat?.disabled || candidate.available === false) return
     if (candidate.file) { privateChat?.onSelectFile(candidate.file); return }
     if (!canChoose(candidate.name)) return
     // Active queries contain only text: their plain length is also their PM length.
@@ -197,7 +198,7 @@ function BotMentionInput<M extends Mention>({
       .focus()
       .insertContentAt({ from: end - (query.end - query.start), to: end }, [
         { type: "groupMention", attrs: candidate.groupId
-          ? { kind: "group", groupId: candidate.groupId, label: candidate.name }
+          ? { kind: "group", groupId: candidate.groupId, groupSource: candidate.source, label: candidate.name }
           : { botId: candidate.id, label: candidate.name } },
         { type: "text", text: " " }
       ])
@@ -338,7 +339,7 @@ function BotMentionInput<M extends Mention>({
               role="option"
               ref={index === selectedIndex ? selectedRef : null}
               aria-selected={index === selectedIndex}
-              disabled={Boolean(privateChat?.disabled) || (!candidate.file && !canChoose(candidate.name))}
+              disabled={candidate.available === false || Boolean(privateChat?.disabled) || (!candidate.file && !canChoose(candidate.name))}
               onMouseDown={(event) => event.preventDefault()}
               onMouseEnter={() => setSelected(index)}
               onClick={() => choose(candidate)}
@@ -355,8 +356,11 @@ function BotMentionInput<M extends Mention>({
               ) : (
                 <Users size={24} />
               )}
-              <span>{candidate.name}</span>
-              <small>{candidate.file ? "文件" : candidate.groupId ? "群聊" : "Bot"}</small>
+              <span className="bot-mention-option-copy">
+                <span>{candidate.name}</span>
+                {candidate.description && <small>{candidate.available === false ? "离线 · " : ""}{candidate.description}</small>}
+              </span>
+              <small>{candidate.file ? "文件" : candidate.groupId ? candidate.source === "zhaohu" ? "招乎群聊" : "App 群聊" : "Bot"}</small>
             </button>
           ))}
         </div>

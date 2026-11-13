@@ -26,6 +26,9 @@ export function BotMentionLabel({
         <Users size={15} aria-hidden="true" />
       ) : null}
       <span>{mention.label}</span>
+      {"kind" in mention && mention.kind === "group" && (
+        <small className="bot-mention-source">{mention.groupSource === "zhaohu" ? "招乎" : "App"}</small>
+      )}
     </span>
   )
 }

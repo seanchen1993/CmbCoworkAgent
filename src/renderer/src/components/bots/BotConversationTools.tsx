@@ -1,3 +1,4 @@
+import { botGroupReceipt } from "@/lib/bot-group-receipt"
 import { BotHistorySources } from "./BotHistorySources"
 import { toast } from "sonner"
 import { parseBotWorkHistoryHref } from "../../../../shared/bots/work-history"
@@ -10,7 +11,6 @@ import type {
   BotClient,
   BotTask,
   BotDefinition,
-  BotGroup,
   BotMessageOrigin,
   BotSchedule
 } from "../../../../shared/bots/contracts"
@@ -57,6 +57,7 @@ import { BotActivity } from "./BotActivity"
 import { botConversationState } from "@/lib/bot-task-view"
 import { botActiveTaskCreatedAt } from "@/lib/bot-avatar-mood"
 import { projectPrivateBotMentions } from "@/lib/bot-private-mentions"
+import type { BotGroupTarget } from "../../../../shared/bots/im-channel"
 import { BotMentionLabel } from "./BotMentionLabel"
 
 export function BotConversationTools({
@@ -82,8 +83,8 @@ export function BotConversationTools({
   conversationThreadId?: string
   onOpenWork?(workId: string): void
   onOpenBot?(botId: string): void
-  onOpenGroup?(groupId: string): void
-  groups?: readonly BotGroup[]
+  onOpenGroup?(groupId: string, source?: "app" | "zhaohu"): void
+  groups?: readonly BotGroupTarget[]
   tasks: BotTask[]
   bots: BotDefinition[]
   schedules?: readonly BotSchedule[]
@@ -185,12 +186,12 @@ export function BotConversationTools({
             : bots.find((item) => item.id === mention.botId && !item.deleting)
         const mentionedGroup =
           mention.kind === "group"
-            ? groups.find((item) => item.id === mention.groupId && !item.deleting)
+            ? groups.find((item) => item.id === mention.groupId && item.source === (mention.groupSource ?? "app"))
             : undefined
         const label = <BotMentionLabel mention={mention} bot={peer} />
         const open =
           mentionedGroup && onOpenGroup
-            ? () => onOpenGroup(mentionedGroup.id)
+            ? () => onOpenGroup(mentionedGroup.id, mentionedGroup.source)
             : peer && onOpenBot
               ? () => onOpenBot(peer.id)
               : undefined
@@ -326,6 +327,15 @@ export function BotConversationTools({
             {profileEvent}
           </div>
         )
+      const groupReceipt = botGroupReceipt(tool, result)
+      if (groupReceipt && !groupId && !imConversationId) {
+        const destination = groups.find(item => item.id === groupReceipt.groupId && item.source === groupReceipt.source)
+        if (destination && onOpenGroup)
+          return <button type="button" className="bot-exchange-link" onClick={() => onOpenGroup(destination.id, destination.source)}>
+            <span>{destination.source === "zhaohu" ? "已交办到招乎群" : "已发送到 App 群"} · {destination.name}</span>
+            <ChevronRight size={14} />
+          </button>
+      }
       const history = botHistoryReceipt(tool, result)
       if (history?.entries.length && !groupId)
         return <BotHistorySources page={history} onOpen={openHistorySource} />
@@ -419,6 +429,8 @@ export function BotConversationTools({
       )
     },
     [
+      groups,
+      onOpenGroup,
       openHistorySource,
       bots,
       onOpenWork,

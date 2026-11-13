@@ -1,7 +1,7 @@
 import { useChatSourceNavigation } from "@/lib/chat-source-navigation"
 import type { BotGroupInputControl } from "@/components/bots/BotGroupMentionInput"
 import { parseBotMessageMentions } from "../../../../shared/bots/message-mentions"
-import type { BotDefinition, BotGroup, BotMessageReply } from "../../../../shared/bots/contracts"
+import type { BotDefinition, BotMessageReply } from "../../../../shared/bots/contracts"
 import { parseBotMessageReply } from "../../../../shared/bots/message-reply"
 import { projectHumanGate } from "../../../../shared/harness-notifications"
 import { IDLE_MODEL_OUTSIDE_HOURS_MESSAGE } from "../../../../shared/idle-model-service-window"
@@ -907,7 +907,7 @@ const BotPrivateMentionInput = React.lazy(() => import("@/components/bots/BotGro
 
 export interface ManagedChatTurn {
   /** Only local private Bot conversations supply a verified same-host roster. */
-  mentionOptions?: { bots: BotDefinition[]; groups: readonly BotGroup[] }
+  mentionOptions?: { bots: BotDefinition[]; groups: readonly import("../../../../shared/bots/im-channel").BotGroupTarget[] }
   /** Trusted local task: preserve the Thread's original model/mode controls. */
   ownerConversation?: boolean
   /** A trusted external work stays text-only even when opened on the desktop. */

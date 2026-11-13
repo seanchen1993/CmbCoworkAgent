@@ -311,7 +311,7 @@ export interface BotGroupMention {
 export type BotMessageMention = Omit<BotGroupMention, "botId"> &
   (
     | { botId: string; kind?: never; groupId?: never }
-    | { kind: "group"; groupId: string; botId?: never }
+    | { kind: "group"; groupId: string; groupSource?: "app" | "zhaohu"; botId?: never }
   )
 export interface SendBotGroupMessageInput {
   groupId: string

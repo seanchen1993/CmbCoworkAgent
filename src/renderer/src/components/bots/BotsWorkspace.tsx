@@ -2476,9 +2476,11 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
                   onOpenWork={(id) => selectWork(id)}
                   onOpenBot={openPrivateMain}
                   groups={snapshot?.groups ?? []}
-                  onOpenGroup={(id) =>
-                    updateView({ groupId: id, selectedId: null, groupDetailTab: "details" })
-                  }
+                  imGroups={snapshot?.imConversations ?? []}
+                  onOpenGroup={(id, source) => {
+                    if (source === "zhaohu") openImConversation(id)
+                    else updateView({ groupId: id, selectedId: null, groupDetailTab: "details" })
+                  }}
                   bots={snapshot?.bots ?? []}
                   schedules={snapshot?.schedules ?? []}
                   tasks={tasks}

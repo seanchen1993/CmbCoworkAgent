@@ -22,6 +22,14 @@ const result = (id: string, is_error = false, content = "done"): Message => ({
 })
 
 describe("Bot execution presentation", () => {
+  it("keeps a successful private handoff receipt visible in simple view", () => {
+    const message = call("forward", "bot_send_message")
+    message.tool_calls![0].args = { groupId:"room",groupSource:"zhaohu",content:"请整理清单" }
+    const returned = result("forward",false,JSON.stringify({kind:"bot-group-message",groupId:"room",groupSource:"zhaohu",messageId:"receipt"}))
+    const projection = projectBotExecution([message,returned],false,new Set())
+    expect(projection.hiddenMessages.has(message.id)).toBe(false)
+    expect(projection.foldedTools.size).toBe(0)
+  })
   it("keeps usable history sources visible and folds empty search results", () => {
     const message = call("history", "bot_work_search")
     const source = { workId: "work-id", messageId: "message-id", incarnation: "a".repeat(64) }

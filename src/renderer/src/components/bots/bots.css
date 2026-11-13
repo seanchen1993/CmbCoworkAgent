@@ -3669,3 +3669,10 @@ button.bot-inline-mention:focus-visible {
   line-height: 1.4;
   color: var(--bot-muted);
 }
+
+/* Group source stays visible without adding another picker or configuration panel. */
+.bot-mention-option-copy { display: flex; flex-direction: column; gap: 2px; }
+.bot-mention-option-copy > span,
+.bot-mention-option-copy > small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bot-mention-options button > small { flex-shrink: 0; }
+.bot-mention-source { font-size: 10px; font-weight: 400; color: var(--bot-muted); opacity: .9; }

@@ -3154,3 +3154,204 @@ it("cancels unsent browser notices on return and blocks revoked audiences", asyn
   f.host.revokeImBinding(task.botId, source.bindingId, source.grantVersion)
   expect(f.host.beginImDelivery("text")).toBeNull()
 })
+
+describe("private Bot handoff to a Zhaohu group", () => {
+  it("uses the target Bot's existing group thread, only forwards the brief, and delivers replies to that group", async () => {
+    let groupId = "",
+      receipt: any,
+      repeated: any
+    const f = fixture(async (task, host) => {
+      if (!task.mockSource && task.message === "private request with unrelated secrets") {
+        const targets = host.groupTargets(task.id)
+        expect(targets.some((item) => item.source === "zhaohu" && item.id === groupId)).toBe(true)
+        receipt = host.publishGroupMessage(
+          task.id,
+          "handoff-call",
+          "请沿用群内讨论，整理评审要点",
+          groupId,
+          "zhaohu"
+        )
+        repeated = host.publishGroupMessage(
+          task.id,
+          "handoff-call",
+          "请沿用群内讨论，整理评审要点",
+          groupId,
+          "zhaohu"
+        )
+        expect(() =>
+          host.publishGroupMessage(task.id, "handoff-call", "different", groupId, "zhaohu")
+        ).toThrow("另一条")
+        return { state: "completed", result: "已交办，请查看目标群" }
+      }
+      host.initializeMockThread(task)
+      return { state: "completed", result: `群内结果:${task.message}` }
+    })
+    const binding = await f.binding()
+    groupId = botImScopeId("realm", "owner", binding.id)
+    await f.service.receive(f.event(binding, "previous-group-context", "群内约定：周五评审"))
+    await eventually(() =>
+      f.calls.some((task) => task.mockSource && f.store.getTask(task.id).state === "completed")
+    )
+    const originalThread = f.calls.find((task) => task.mockSource)!.threadId
+    const sourceBot = f.store.create({
+      name: "私人助手",
+      instructions: "Help",
+      color: "#123456",
+      modelRef: null
+    })
+    f.host.send({
+      botId: sourceBot.id,
+      requestId: "private-handoff",
+      message: "private request with unrelated secrets"
+    })
+    await eventually(() =>
+      Boolean(receipt && f.calls.some((task) => task.id === receipt.targetTaskId))
+    )
+    await eventually(() =>
+      f.client.submitReply.mock.calls.some(([reply]) =>
+        reply.message.content.includes("群内结果:来自")
+      )
+    )
+    expect(repeated).toEqual(receipt)
+    const target = f.calls.find((task) => task.id === receipt.targetTaskId)!
+    expect(target.botId).toBe(f.bot.id)
+    expect(target.threadId).toBe(originalThread)
+    expect(target.threadId).not.toBe(f.bot.threadId)
+    expect(target.message).toBe("来自「私人助手」的交办：\n请沿用群内讨论，整理评审要点")
+    expect(target.mockSource).toMatchObject({
+      transport: "im",
+      bindingId: groupId,
+      audienceKey: `im:${groupId}`,
+      desktopMessageId: receipt.messageId
+    })
+    expect(target.mockSource?.eventId).toBeUndefined()
+    expect(botMemoryContext(target)).toMatchObject({ groupId })
+    const forwarded = f.client.submitReply.mock.calls
+      .map(([reply]) => reply)
+      .filter((reply) => reply.message.content.includes("来自「私人助手」"))
+    expect(forwarded.length).toBe(2) // one handoff + one result, no duplicate for the retry
+    expect(forwarded.every((reply) => reply.conversationKey === binding.conversationKey)).toBe(true)
+    expect(forwarded.every((reply) => !reply.message.content.includes("secrets"))).toBe(true)
+    expect(
+      f.host
+        .imConversationHistory(f.bot.id, groupId)
+        .items.some((item) => item.text.startsWith("来自「私人助手」"))
+    ).toBe(true)
+    expect(f.errors).toEqual([])
+  })
+
+  it("keeps same-Bot handoffs and subsequent independent work in the target group", async () => {
+    let groupId = "",
+      work: any
+    const f = fixture(async (task, host) => {
+      if (!task.mockSource) {
+        host.publishGroupMessage(task.id, "same-bot", "请单独整理清单", groupId, "zhaohu")
+        return { state: "completed", result: "已交办" }
+      }
+      host.initializeMockThread(task)
+      if (!task.workId) {
+        work = await host.createWork(
+          {
+            botId: task.botId,
+            operationId: "handoff-work",
+            title: "评审清单",
+            goal: "整理群内清单"
+          },
+          { taskId: task.id, callId: "work-call", key: "handoff-work" }
+        )
+      }
+      return { state: "completed", result: "整理完成" }
+    })
+    const binding = await f.binding()
+    groupId = botImScopeId("realm", "owner", binding.id)
+    f.host.send({
+      botId: f.bot.id,
+      requestId: "same-bot",
+      message: "交给群处理"
+    })
+    await eventually(() => Boolean(work))
+    expect(work.work.source.bindingId).toBe(groupId)
+    expect(work.work.audienceKey).toBe(`im:${groupId}`)
+    expect(work.work.parentThreadId).not.toBe(f.bot.threadId)
+    await eventually(() => f.calls.some((task) => task.workId === work.work.id))
+    expect(f.calls.find((task) => task.workId === work.work.id)?.mockSource?.bindingId).toBe(
+      groupId
+    )
+    expect(f.errors).toEqual([])
+  })
+
+  it("fences queued handoffs after revocation and rejects copied receipts in another thread", async () => {
+    let groupId = "",
+      targetId = ""
+    const f = fixture(async (task, host) => {
+      if (task.mockSource) throw new Error("A revoked handoff must not execute")
+      const receipt = host.publishGroupMessage(task.id, "race", "queued brief", groupId, "zhaohu")
+      if (!("targetTaskId" in receipt) || typeof receipt.targetTaskId !== "string")
+        throw new Error("Expected a Zhaohu handoff receipt")
+      targetId = receipt.targetTaskId
+      const target = f.store.getTask(targetId)
+      const source = target.mockSource
+      if (!source?.desktopMessageId) throw new Error("Expected a desktop handoff source")
+      expect(() => f.store.im.execution({ ...target, threadId: task.threadId }, false)).toThrow(
+        "回执不一致"
+      )
+      expect(() =>
+        f.store.im.execution({ ...target, mockSource: { ...source, desktopMessageId: "forged" } })
+      ).toThrow("所属群不一致")
+      const route = host.imGateway.binding(groupId)!
+      host.registerImBinding(route.realm, route.principal, {
+        ...route.binding,
+        state: "revoked",
+        version: 2
+      })
+      host.revokeImBinding(target.botId, groupId, source.grantVersion)
+      return { state: "completed", result: "The group was disconnected" }
+    })
+    const binding = await f.binding()
+    groupId = botImScopeId("realm", "owner", binding.id)
+    f.host.send({ botId: f.bot.id, requestId: "handoff-race", message: "交办" })
+    await eventually(() => Boolean(targetId && f.store.getTask(targetId).state === "cancelled"))
+    expect(f.calls.filter((task) => task.mockSource)).toHaveLength(0)
+    expect(f.client.submitReply).not.toHaveBeenCalled()
+    expect(f.errors).toEqual([])
+  })
+
+  it("rejects offline, revoked and cross-context destinations without creating a task or receipt", async () => {
+    let groupId = "",
+      checked = false
+    const f = fixture(async (task, host) => {
+      if (!task.mockSource) {
+        host.setImOnline(f.bot.id, groupId, false)
+        expect(() =>
+          host.publishGroupMessage(task.id, "offline", "brief", groupId, "zhaohu")
+        ).toThrow("离线")
+        host.setImOnline(f.bot.id, groupId, true)
+        const route = host.imGateway.binding(groupId)!
+        host.registerImBinding(route.realm, route.principal, {
+          ...route.binding,
+          state: "revoked",
+          version: 2
+        })
+        expect(() =>
+          host.publishGroupMessage(task.id, "revoked", "brief", groupId, "zhaohu")
+        ).toThrow("解绑")
+        checked = true
+      }
+      return { state: "completed", result: "done" }
+    })
+    const binding = await f.binding()
+    groupId = botImScopeId("realm", "owner", binding.id)
+    f.host.send({
+      botId: f.bot.id,
+      requestId: "blocked-handoff",
+      message: "交办"
+    })
+    await eventually(() => checked)
+    expect(f.calls.filter((task) => task.mockSource)).toHaveLength(0)
+    const query = f.db.prepare("SELECT COUNT(*) AS n FROM bot_im_handoffs")
+    query.step()
+    expect(query.getAsObject().n).toBe(0)
+    query.free()
+    expect(f.errors).toEqual([])
+  })
+})

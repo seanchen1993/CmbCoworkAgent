@@ -48,13 +48,16 @@ export function createBotGroupMessageTool(
             taskId: task.id,
             groupId: botTaskGroupId(task)
           })
-        const receipt = currentGroupId
+        const targetGroupId = "groupId" in input && typeof input.groupId === "string" ? input.groupId : undefined
+        const receipt = !currentGroupId && "groupSource" in input && input.groupSource === "zhaohu"
+          ? getHost().publishGroupMessage(task.id, config.toolCall?.id ?? "", content, targetGroupId, "zhaohu")
+          : currentGroupId
           ? getHost().publishGroupMessage(task.id, config.toolCall?.id ?? "", content)
           : getHost().publishGroupMessage(
               task.id,
               config.toolCall?.id ?? "",
               content,
-              "groupId" in input && typeof input.groupId === "string" ? input.groupId : undefined
+              targetGroupId
             )
         // A public post from private chat does not replace its private final reply.
         if (currentGroupId) sent(content)
@@ -78,10 +81,30 @@ export function createBotGroupMessageTool(
       metadata: { [MAIN_TURN_ONLY_TOOL_METADATA_KEY]: true },
       description: currentGroupId
         ? "Send a real standalone text message to the current shared group. Ordinary assistant text and private collaboration results are not posted. Use this for concise replies, meaningful progress, and text-only results; an acknowledgement is not the result. For public handoffs, address @ followed by a current member's exact name in content; the host routes that mention to its recipient. Do not also privately delegate that same public handoff. Use bot_deliver_files for real attachments and request_user_input for decisions. Do not relay a peer result already visible in the room unless the user assigned you further analysis or integration. A successful receipt means this message was posted, not that the task's acceptance criteria passed."
-        : "Post one real text message as this Bot to an existing group the user explicitly asked you to contact. Supply its exact host-confirmed groupId, never a name or Bot ID. Group posting can wake members: do not fan out or share private conversation unless the user explicitly requested that audience and content; ask first when this is missing. Only content is published, not the private request or history. For public handoffs use @ followed by a current member's exact name; do not also privately delegate the same work. A receipt confirms posting, not member answers or task completion. Report the actual result privately. This text tool does not attach files or move private question cards into the group.",
+        : "Send the user-authorized brief to a group. Use the exact groupId and groupSource (app or zhaohu) from selected references or bot_list_groups; clarify same-name destinations. Only content is forwarded, never the private history. App groups receive this Bot's public message; @ a member's exact name for a public handoff, without also privately delegating it. Zhaohu groups use their bound service Bot and existing group context, with results and questions staying in that group. Its receipt means queued, not delivered or finished. Report the receipt privately. This tool sends text, not files.",
       schema: currentGroupId
         ? z.object({ content: contentSchema }).strict()
-        : z.object({ content: contentSchema, groupId: z.string().uuid() }).strict()
+        : z.object({ content: contentSchema, groupId: z.string().regex(/^[A-Za-z0-9_-]{1,128}$/), groupSource: z.enum(["app", "zhaohu"]).optional() }).strict()
+    }
+  )
+}
+
+/** Metadata discovery for natural-language group requests; same-name destinations stay distinct. */
+export function createBotGroupListTool(
+  task: BotTask,
+  getHost: () => LocalBotHost,
+  signal: AbortSignal
+) {
+  return tool(
+    async () => {
+      signal.throwIfAborted()
+      return JSON.stringify(getHost().groupTargets(task.id))
+    },
+    {
+      name: "bot_list_groups",
+      description:
+        "List available App and Zhaohu group identities for a private-chat handoff. This reads metadata only. Use source + id with bot_send_message. If names are ambiguous, ask the user which source/group; never guess or forward private history.",
+      schema: z.object({}).strict()
     }
   )
 }

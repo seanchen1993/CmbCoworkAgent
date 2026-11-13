@@ -1691,7 +1691,23 @@ async function testAReceiptIsNotAcknowledgedUntilItsAnswerIsQueued(): Promise<vo
   console.log("PASS testAReceiptIsNotAcknowledgedUntilItsAnswerIsQueued")
 }
 
+async function testDesktopGroupBindingGrantReachesTheWire(): Promise<void> {
+  const gateway = new RecordingGateway()
+  const publisher = new ImCardPublisher({
+    gateway:gateway as never,interactions:new ImCardInteractionStore(),
+    isThreadLive:()=>true,warn:()=>undefined
+  })
+  await publisher.publish({...approvalCardInput(),botBindingRef:"binding:group:2"})
+  assert.equal(gateway.sent[0].botBindingRef,"binding:group:2")
+  assert.equal(gateway.sent[0].botEventId,undefined)
+  assertRemoteImCardSendV1(gateway.sent[0])
+  assert.throws(()=>assertRemoteImCardSendV1({...gateway.sent[0],botEventId:"another-event"}))
+  assert.throws(()=>assertRemoteImCardSendV1({...gateway.sent[0],botBindingRef:"missing"}))
+  console.log("PASS testDesktopGroupBindingGrantReachesTheWire")
+}
+
 async function main(): Promise<void> {
+  await testDesktopGroupBindingGrantReachesTheWire()
   testEveryBuiltCardSatisfiesTheContract()
   testEveryKvRowIsShapedTheWayTheClientParses()
   testEveryPendingCardPointsAtTextModeAboveItsBody()

@@ -18,7 +18,7 @@ afterEach(() =>
     .forEach((cleanup) => cleanup())
 )
 
-function setup(cardAccepted = true, enabled = true) {
+function setup(cardAccepted = true, enabled = true, desktop = false) {
   const broker = new ApprovalDecisionBroker()
   let current = true
   const resolve = vi.fn()
@@ -50,7 +50,7 @@ function setup(cardAccepted = true, enabled = true) {
     conversationKey: "group",
     prefix: "【Feature】",
     kind: "group",
-    botEventId: "trigger",
+    ...(desktop ? { botBindingRef:"binding:room:1" } : {botEventId:"trigger"}),
     senderId: "other-member",
     isCurrent: () => current
   })
@@ -174,3 +174,17 @@ it.each(["revoke", "desktop", "audit-failure"])(
     else expect(ctx.remove).toHaveBeenCalledWith("request")
   }
 )
+
+
+it("keeps desktop-origin group approvals owner-only and invalidates them on revocation", async () => {
+  const ctx = setup(true,true,true)
+  expect(ctx.service.canPublish("stage__worker")).toBe(true)
+  ctx.register()
+  await vi.waitFor(() => expect(ctx.cards.publish).toHaveBeenCalledOnce())
+  expect(ctx.cards.publish.mock.calls[0][0]).toMatchObject({botBindingRef:"binding:room:1",conversationKey:"group"})
+  await ctx.click({principalId:"other-member"})
+  expect(ctx.resolve).not.toHaveBeenCalled()
+  ctx.revoke()
+  await ctx.click()
+  expect(ctx.resolve).not.toHaveBeenCalled()
+})

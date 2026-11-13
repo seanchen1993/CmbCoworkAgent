@@ -120,6 +120,7 @@ export class ImCardPublisher {
     targetLabel: string
     expiresAt?: number
     botEventId?: string
+    botBindingRef?: string
     build: (tag: string) => CardComponent[]
   }): Promise<ImCardInteraction | null> {
     if (!this.dependencies.gateway.isAuthenticated()) return null
@@ -161,6 +162,7 @@ export class ImCardPublisher {
         tag: interaction.tag,
         kind: input.kind,
         ...(input.botEventId ? { botEventId: input.botEventId } : {}),
+        ...(input.botBindingRef ? { botBindingRef: input.botBindingRef } : {}),
         content: input.build(interaction.tag)
       }
       assertRemoteImCardSendV1(card)

@@ -94,6 +94,7 @@ export function parseBotChannelSource(input: unknown): BotMockSource {
     "transport",
     "personal",
     "desktopWorkId",
+    "desktopMessageId",
     "eventId",
     "messageId",
     "senderId"
@@ -112,6 +113,12 @@ export function parseBotChannelSource(input: unknown): BotMockSource {
     grantVersion: Number(v.grantVersion),
     conversationId: botIdentifier(v.conversationId),
     audienceKey: v.audienceKey
+  }
+  if (v.desktopMessageId !== undefined) {
+    if (v.transport !== "im" || v.personal || v.desktopWorkId !== undefined ||
+        v.eventId !== undefined || v.messageId !== undefined || v.senderId !== undefined)
+      throw new BotError("CONFLICT", "群交办来源无效")
+    return { transport: "im", ...scope, desktopMessageId: botIdentifier(v.desktopMessageId) }
   }
   if (v.desktopWorkId !== undefined) {
     if (v.transport !== "im" || v.personal || v.eventId !== undefined ||

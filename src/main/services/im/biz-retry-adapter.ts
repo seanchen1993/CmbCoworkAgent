@@ -164,6 +164,7 @@ export class ImBizRetryAdapter {
       card = await imCardPublisher.publish({
         kind: "biz_retry",
         botEventId: bot?.botEventId,
+        botBindingRef: bot?.botBindingRef,
         threadId: originThreadId,
         principalId: route.principalId,
         conversationKey: route.conversationKey,

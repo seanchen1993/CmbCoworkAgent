@@ -1,4 +1,6 @@
 export const BOT_TOOL_LABELS: Record<string, string> = {
+  bot_list_groups: "查看可交办的群聊",
+  bot_send_message: "发送群消息",
   bot_list_peers: "查看可协作的 Bot",
   bot_delegate: "交办给其他 Bot",
   bot_update_profile: "更新 Bot 资料",

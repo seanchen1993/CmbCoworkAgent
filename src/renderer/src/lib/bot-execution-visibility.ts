@@ -1,3 +1,4 @@
+import { botGroupReceipt } from "./bot-group-receipt"
 import { botHistoryReceipt } from "./bot-history-receipt"
 import type { Message, ToolCall, ToolCallState, ToolResult } from "@/types"
 import { buildToolResultAssociations, getWorkerToolUiKey } from "./worker-tool-result-key"
@@ -27,6 +28,7 @@ export function isBotExecutionTool(
   if (botToolResultStatus(tool, result)) return true
   const schedule = botScheduleReceipt(tool, result)
   return !(
+    (tool.args.groupId && botGroupReceipt(tool, result)) ||
     botQuestionHistory(tool, result) ||
     botBrowserHelpHistory(tool, result) ||
     botProfileEvent(tool, result) ||

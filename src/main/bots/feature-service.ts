@@ -1,3 +1,4 @@
+import { botImCardRoute } from "../../shared/bots/im-channel"
 import { createHash } from "node:crypto"
 import { join } from "node:path"
 import type { ManagedRunSummary, ManagedRunIdentity } from "../../shared/harness-board-types"
@@ -424,7 +425,7 @@ function featureDecisionRoute(
     ? host.imGateway.binding(task.mockSource.bindingId)
     : host.imGateway.personalBinding(owner.botId, task.createdAt)
   const event = task.mockSource?.eventId ? host.imGateway.event(task.mockSource.eventId) : undefined
-  if (!registered?.binding.conversationKey || (registered.binding.kind === "group" && !event))
+  if (!registered?.binding.conversationKey)
     return
   const isCurrent = () => {
     const currentOp = host.featureStore.findReceipt(op.id)
@@ -455,7 +456,7 @@ function featureDecisionRoute(
     kind: registered.binding.kind,
     conversationKey: registered.binding.conversationKey,
     prefix: `【${owner.title}】`,
-    botEventId: event?.payload.event.eventId,
+    ...botImCardRoute(registered.binding, event?.payload.event.eventId),
     senderId: event?.payload.route.senderId,
     isCurrent,
     featureGate: {
@@ -620,10 +621,10 @@ export async function startFeatureTurn(
         kind: registered.binding.kind,
         conversationKey: registered.binding.conversationKey,
         prefix: `【${owner.title}】`,
-        botEventId: event?.payload.event.eventId,
+        ...botImCardRoute(registered.binding, event?.payload.event.eventId),
         senderId: event?.payload.route.senderId,
         onQuestionUndeliverable: questionDesktopNotice,
-        ...(source && (registered.binding.kind !== "group" || event)
+        ...(source
           ? {
               featureGate: {
                 projectId: owner.projectId,

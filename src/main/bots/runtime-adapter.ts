@@ -1,3 +1,4 @@
+import { botImCardRoute } from "../../shared/bots/im-channel"
 import { botImBrowserScope } from "../../shared/bots/im-channel"
 import { botInteractionRoutes } from "../services/im/bot-interaction-route"
 import { botMemoryContext } from "../../shared/bots/memory-scope"
@@ -82,7 +83,7 @@ import { isBotGroupPass } from "../../shared/bots/group-discussion"
 import { withCheckpointer, hasPendingApprovalForRuntimeThread } from "../agent/runtime"
 import { botContinuationMessageId, canDeferBotTask, canSteerBotTask, canDeliverBotFeedback } from "./continuation"
 import { parseBotFileDelivery, type BotDeliveredFile } from "../../shared/bots/file-delivery"
-import { createBotGroupDeliveryCheck, createBotGroupMessageTool } from "./group-delivery"
+import { createBotGroupDeliveryCheck, createBotGroupMessageTool, createBotGroupListTool } from "./group-delivery"
 import { createBotIntroductionDeliveryCheck } from "./introduction-delivery"
 import { verifyWorkConversationThread } from "./conversation-link-authority"
 import { localBotWorkspaces } from "./workspace"
@@ -152,9 +153,9 @@ function mentionedBotContext(task: BotTask, host: LocalBotHost): string {
   const references = [...unique.values()].map((mention) => {
     if (mention.kind === "group") {
       try {
-        return { kind: "group", ...host.getGroupReference(mention.groupId, task.botId) }
+        return { kind: "group", ...(mention.groupSource === "zhaohu" ? host.getGroupReference(mention.groupId, task.botId, "zhaohu") : host.getGroupReference(mention.groupId, task.botId)) }
       } catch {
-        return { kind: "group", id: mention.groupId, available: false }
+        return { kind: "group", id: mention.groupId, ...(mention.groupSource ? { source: mention.groupSource } : {}), available: false }
       }
     }
     const id = mention.botId
@@ -174,7 +175,7 @@ function mentionedBotContext(task: BotTask, host: LocalBotHost): string {
     JSON.stringify(references) +
     "\nYou can reach these Bots with bot_delegate using their IDs to carry out the user's message, including a message addressed to a selected Bot. Selecting a reference does not itself send anything; actual communication uses the tool. If the user is only discussing a Bot or asks not to contact it, answer without contacting it. Use these exact IDs; never replace an unavailable Bot with a same-name Bot. These references grant no access to another Bot's private conversation or workspace." +
     (hasGroup
-      ? "\nGroup references identify a selected existing group, not a broadcast or permission to read its history. When the user explicitly requests a group post, use bot_send_message with its exact groupId; bot_delegate accepts Bot recipients, not groups. botMembers lists Bot members only, not a total headcount or human participants. Keep the exact selected group ID even when groups share a name."
+      ? "\nGroup references identify a selected existing group, not a broadcast or permission to read its history. When the user explicitly requests a group post, use bot_send_message with its exact groupId and groupSource (source, default app); bot_delegate accepts Bot recipients, not groups. botMembers lists Bot members only, not a total headcount or human participants. Keep the exact selected group ID even when groups share a name."
       : "")
   )
 }
@@ -781,7 +782,7 @@ export function createLocalBotRunPort(
               threadId: task.threadId,
               kind: imBinding.binding.kind,
               prefix: `【${work?.title || bot.name}】`,
-              botEventId: imEvent?.payload.event.eventId,
+              ...botImCardRoute(imBinding.binding, imEvent?.payload.event.eventId),
               senderId:
                 imBinding.binding.kind === "group" ? imEvent?.payload.route.senderId : undefined,
               isCurrent: () => {
@@ -1462,7 +1463,7 @@ export function createLocalBotRunPort(
                           (task.origin.kind === "user" ||
                             task.origin.kind === "introduction" ||
                             profileContinuationRequest)
-                            ? [createBotGroupMessageTool(task, getHost, signal, () => {})]
+                            ? [...(!work ? [createBotGroupListTool(task, getHost, signal)] : []), createBotGroupMessageTool(task, getHost, signal, () => {})]
                             : []),
                           ...createBotWorkTools(task, getHost, signal),
                           ...createBotDeliveryTools(

@@ -119,6 +119,11 @@ export class BotMockChannelStore {
       ])
         if (!this.rows(`PRAGMA table_info(${table})`).some((r) => r.name === column))
           this.run(`ALTER TABLE ${table} ADD COLUMN ${column} TEXT`)
+      if (this.transport === "im")
+        this.run(`CREATE TABLE IF NOT EXISTS bot_im_handoffs (
+          id TEXT PRIMARY KEY,source_task_id TEXT NOT NULL,call_id TEXT NOT NULL,
+          fingerprint TEXT NOT NULL,source_json TEXT NOT NULL,target_task_id TEXT,
+          receipt_json TEXT,UNIQUE(source_task_id,call_id));`)
       if (this.transport === "mock")
         this.run(
           "CREATE INDEX IF NOT EXISTS bot_mock_interrupted ON bot_tasks(state,id) WHERE mock_source_json IS NOT NULL"
@@ -414,6 +419,12 @@ export class BotMockChannelStore {
     if (!convo || binding.botId !== botId ||
         (requireActive && binding.grantVersion !== source.grantVersion))
       throw new BotError("CONFLICT", "模拟来源与冻结授权不一致")
+    if (source.desktopMessageId !== undefined) {
+      const receipt = this.rows("SELECT source_json FROM bot_im_handoffs WHERE id=?", [source.desktopMessageId])[0]
+      if (binding.kind !== "group" || !receipt || receipt.source_json !== JSON.stringify(source))
+        throw new BotError("CONFLICT", "群交办与所属群不一致")
+      return source
+    }
     if (source.desktopWorkId !== undefined) {
       const receipt = this.rows(
         `SELECT source_json FROM bot_work_items WHERE id=? AND bot_id=? AND parent_thread_id=? AND audience_key=?`,
@@ -532,6 +543,13 @@ export class BotMockChannelStore {
         threadInitialized: work.threadInitialized,
         label: binding.label
       }
+    }
+    if (source.desktopMessageId !== undefined) {
+      const receipt = this.rows("SELECT target_task_id FROM bot_im_handoffs WHERE id=?", [source.desktopMessageId])[0]
+      if (task.origin.kind !== "user" || receipt?.target_task_id !== task.id || this.thread(source) !== task.threadId)
+        throw new BotError("CONFLICT", "群交办执行与回执不一致")
+      const convo = this.rows("SELECT initialized FROM bot_mock_conversations WHERE id=?", [source.conversationId])[0]
+      return { source, threadId: task.threadId, threadInitialized: Boolean(convo?.initialized), label: binding.label }
     }
     if (!source.eventId) throw new BotError("CONFLICT", "手动群任务缺少所属任务会话")
     const convo = this.rows("SELECT * FROM bot_mock_conversations WHERE id=? AND binding_id=?", [
@@ -706,6 +724,30 @@ export class BotMockChannelStore {
       return receipt
     })
   }
+  publishHandoff(task: BotTask, text: string): void {
+    const source = task.mockSource
+    if (this.transport !== "im" || !source?.desktopMessageId)
+      throw new BotError("CONFLICT", "群交办来源缺失")
+    this.execution(task)
+    this.run(
+      "INSERT OR IGNORE INTO bot_mock_outbox(id,bot_id,binding_id,grant_version,conversation_id,reply_to_message_id,source_task_id,text,state,created_at,delivery_kind) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+      [
+        source.desktopMessageId,
+        task.botId,
+        source.bindingId,
+        source.grantVersion,
+        source.conversationId,
+        `app-${task.id}`,
+        task.id,
+        text,
+        "pending",
+        this.now(),
+        "handoff"
+      ]
+    )
+    this.changed()
+  }
+
   openingReply(taskId: string, text: string): void {
     if (this.transport !== "im" || !text.trim()) return
     const task = this.owner.getTask(taskId)
@@ -1197,6 +1239,10 @@ ${help.instruction.slice(0, 500)}
     ).map((row) => String(row.thread_id))
   }
   removeBot(botId: string): void {
+    // Other Bots' delegated work can still reference a receipt from this sender.
+    // Remove receipts only when their destination Bot is being deleted.
+    if (this.transport === "im")
+      this.run("DELETE FROM bot_im_handoffs WHERE json_extract(source_json,'$.bindingId') IN (SELECT id FROM bot_im_bindings WHERE bot_id=?)", [botId])
     for (const table of [
       "bot_mock_events",
       "bot_mock_outbox",

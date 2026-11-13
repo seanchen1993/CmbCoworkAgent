@@ -55,6 +55,7 @@ interface RemoteUserInputRoute {
   prefix: string
   kind?: "dm" | "group"
   botEventId?: string
+  botBindingRef?: string
   senderId?: string
   isCurrent?: () => boolean
   onQuestionUndeliverable?: (requestId: string) => void
@@ -648,6 +649,7 @@ export class ImRemoteUserInputService {
     const interaction = await this.dependencies.cards.publish({
       kind: "user_input",
       botEventId: session.route.botEventId,
+      botBindingRef: session.route.botBindingRef,
       threadId: session.route.threadId,
       principalId: session.route.principalId,
       conversationKey: session.route.conversationKey,

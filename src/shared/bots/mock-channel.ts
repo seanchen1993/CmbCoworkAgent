@@ -26,6 +26,7 @@ interface BotInboundSource extends BotChannelScope {
   /** Host-verified owner DM shares the personal thread and local Bot capabilities. */
   personal?: true
   desktopWorkId?: never
+  desktopMessageId?: never
   eventId: string
   messageId: string
   senderId: string
@@ -34,12 +35,23 @@ interface BotInboundSource extends BotChannelScope {
 interface BotDesktopGroupSource extends BotChannelScope {
   transport: "im"
   desktopWorkId: string
+  desktopMessageId?: never
   personal?: never
   eventId?: never
   messageId?: never
   senderId?: never
 }
-export type BotMockSource = BotInboundSource | BotDesktopGroupSource
+/** App-originated handoff, proven by a durable receipt rather than a fabricated IM event. */
+interface BotDesktopMessageSource extends BotChannelScope {
+  transport: "im"
+  desktopMessageId: string
+  desktopWorkId?: never
+  personal?: never
+  eventId?: never
+  messageId?: never
+  senderId?: never
+}
+export type BotMockSource = BotInboundSource | BotDesktopGroupSource | BotDesktopMessageSource
 export interface CreateBotMockBinding {
   simulation: true
   botId: string

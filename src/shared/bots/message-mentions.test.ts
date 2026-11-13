@@ -26,6 +26,14 @@ describe("private Bot mention identity", () => {
       canonicalBotMessageInput("@A", [{ ...selected, groupId: "group-b" }])
     )
   })
+  it("distinguishes same-name App and Zhaohu group references without altering legacy drafts", () => {
+    const base = { start:0, end:2, label:"群", kind:"group" as const, groupId:"group" }
+    const remote = { ...base, groupSource:"zhaohu" as const }
+    expect(parseBotMessageMentions("@群",[remote])).toEqual([remote])
+    expect(canonicalBotMessageInput("@群",[remote])).not.toBe(canonicalBotMessageInput("@群",[base]))
+    expect(() => parseBotMessageMentions("@群",[{...base,groupSource:"unknown"}])).toThrow()
+    expect(() => parseBotMessageMentions("@群",[{start:0,end:2,label:"群",botId:"b",groupSource:"zhaohu"}])).toThrow()
+  })
   it.each([
     { kind: "group", groupId: "g", botId: "b" },
     { kind: "group", groupId: "" },

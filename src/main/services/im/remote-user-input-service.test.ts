@@ -15,15 +15,16 @@ imRemoteUserInputService.dispose()
 const cleanups: (() => void)[] = []
 afterEach(() => cleanups.splice(0).reverse().forEach((cleanup) => cleanup()))
 
-async function pending(multiple: boolean) {
+async function pending(multiple: boolean, group = false) {
   const threadId = `im-choice-${Math.random()}`
   const submitted: UserInputResponse[] = []
   const notices: string[] = []
+  const publish = vi.fn(async () => null)
   const service = new ImRemoteUserInputService({
     getSettings: () => ({ enabled: true }) as never,
     getThread: () => null,
     createCode: () => "AABB01",
-    cards: { publish: async () => null, interactions: { findByRequestRef: () => null }, resolveDetached() {} } as never,
+    cards: { publish, interactions: { findByRequestRef: () => null }, resolveDetached() {} } as never,
     events: { enqueueProactiveReplies: async (replies) => { notices.push(JSON.stringify(replies)); return [] }, markOutboxFailed: async () => {} } as never,
     submitResponse: (response, options) => {
       const accepted = submitUserInputResponse(response, options)
@@ -33,7 +34,8 @@ async function pending(multiple: boolean) {
   })
   const releaseTransport = botInteractionRoutes.setTransport(() => true)
   const releaseRoute = botInteractionRoutes.register({
-    principalId: "p", conversationKey: "c", realm: "r", kind: "dm", prefix: "Bot", threadId, isCurrent: () => true
+    principalId: "p", conversationKey: "c", realm: "r", kind: group ? "group" : "dm", prefix: "Bot", threadId, isCurrent: () => true,
+    ...(group ? {botBindingRef:"binding:room:1"} : {})
   })
   cleanups.push(() => { service.dispose(); releaseRoute(); releaseTransport(); cancelUserInputsForThread(threadId, "cleanup") })
   const question = { id: "format", header: "格式", question: "选择格式", allowMultiple: multiple || undefined,
@@ -47,7 +49,7 @@ async function pending(multiple: boolean) {
     principalId: "p", conversationKey: "c", requestId: request.requestId,
     feedback: [{ key: "q0", value }, ...(other ? [{ key: "q0__other", value: other }] : [])]
   })
-  return { service, answer, card, result, request, submitted, question }
+  return { service, answer, card, result, request, submitted, question, publish }
 }
 
 it.each([false, true])("accepts one or several real Bot multi choices through card=%s", async (card) => {
@@ -99,4 +101,13 @@ it("uses the documented numbered input only for multi choice and retains the sin
   expect(json).toContain("1. CSV")
   expect(json).toContain("2. JSON")
   expect(json).toContain("多个编号用逗号分隔")
+})
+
+
+it.each([false,true])("answers a desktop-origin group question through card=%s with its binding grant", async card => {
+  const ctx = await pending(false,true)
+  expect(ctx.publish).toHaveBeenCalledWith(expect.objectContaining({botBindingRef:"binding:room:1",conversationKey:"c"}))
+  expect(await (card ? ctx.card("0") : ctx.answer("1"))).toContain("任务将继续")
+  expect((await ctx.result).answers.format).toMatchObject({type:"option",optionIndex:0})
+  expect(ctx.submitted).toHaveLength(1)
 })

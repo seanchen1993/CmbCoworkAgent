@@ -4975,6 +4975,90 @@ export class BotStore {
     }
   }
 
+  /** A private request forwards only its explicit brief into the target group's own thread. */
+  handoffImGroup(taskId: string, callId: string, groupId: string, text: string) {
+    if (!callId || callId.length > 512 || !text.trim() || text.length > 30_000)
+      throw new BotError("INVALID_INPUT", "群交办内容或调用标识无效")
+    return this.transaction(() => {
+      const parent = this.getTask(taskId)
+      if (
+        parent.state !== "running" ||
+        parent.workId ||
+        botTaskGroupId(parent) ||
+        parent.mockSource ||
+        (!this.hasDirectUserRequest(taskId) && !this.profileContinuationRequest(taskId))
+      )
+        throw new BotError("CONFLICT", "请从私人主对话交办群消息")
+      const fingerprint = createHash("sha256")
+        .update(JSON.stringify([groupId, text]))
+        .digest("hex")
+      const previous = this.rows(
+        "SELECT * FROM bot_im_handoffs WHERE source_task_id=? AND call_id=?",
+        [taskId, callId]
+      )[0]
+      if (previous) {
+        if (previous.fingerprint !== fingerprint)
+          throw new BotError("CONFLICT", "此交办标识已用于另一条消息或群聊")
+        return JSON.parse(String(previous.receipt_json)) as {
+          groupId: string
+          groupSource: "zhaohu"
+          messageId: string
+          targetTaskId: string
+          botId: string
+          groupName: string
+          state: "queued"
+        }
+      }
+      const route = this.imGateway.binding(groupId)
+      if (!route || route.binding.kind !== "group" || route.binding.state !== "active")
+        throw new BotError("CONFLICT", "招乎群已解绑或不可用，请重新选择")
+      const sender = this.getBot(parent.botId),
+        target = this.getBot(route.binding.botId)
+      if (
+        sender.archived ||
+        sender.deleting ||
+        target.archived ||
+        target.deleting ||
+        sender.hostId !== target.hostId
+      )
+        throw new BotError("CONFLICT", "群服务 Bot 已不可用")
+      if (!this.im.get(target.id, groupId).online)
+        throw new BotError("CONFLICT", "招乎群当前离线，请连接对应网关后重试")
+      const group = this.desktopWorkGroup(target.id, groupId)
+      const id = randomUUID()
+      const source = parseBotChannelSource({
+        ...group.scope,
+        desktopMessageId: id
+      })
+      this.db.run(
+        "INSERT INTO bot_im_handoffs(id,source_task_id,call_id,fingerprint,source_json) VALUES(?,?,?,?,?)",
+        [id, taskId, callId, fingerprint, JSON.stringify(source)]
+      )
+      const message = `来自「${sender.name}」的交办：\n${text.trim()}`
+      const task = this.enqueue(
+        { botId: target.id, requestId: `im-handoff-${id}`, message },
+        { kind: "user" },
+        source
+      )
+      const receipt = {
+        groupId,
+        groupSource: "zhaohu" as const,
+        messageId: id,
+        targetTaskId: task.id,
+        botId: target.id,
+        groupName: route.binding.peerLabel || "招乎群聊",
+        state: "queued" as const
+      }
+      this.db.run("UPDATE bot_im_handoffs SET target_task_id=?,receipt_json=? WHERE id=?", [
+        task.id,
+        JSON.stringify(receipt),
+        id
+      ])
+      this.im.publishHandoff(task, message)
+      return receipt
+    })
+  }
+
   publishGroupMessage(
     taskId: string,
     callId: string,

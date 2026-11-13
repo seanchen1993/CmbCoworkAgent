@@ -8,7 +8,7 @@ import type { BotTask } from "../../shared/bots/contracts"
 import type { LocalBotHost } from "./host"
 import { BOT_ROUTINE_SILENT } from "../../shared/bots/routine-silence"
 import { WORKFLOW_NOTIFICATION_TURN_PROMPT, WORKFLOW_NOTIFICATION_MARKER_PREFIX } from "../../shared/checkpoint-transcript"
-import { createBotGroupDeliveryCheck, createBotGroupMessageTool } from "./group-delivery"
+import { createBotGroupDeliveryCheck, createBotGroupMessageTool, createBotGroupListTool } from "./group-delivery"
 import {
   clearTurnCompletionGateState,
   createTurnCompletionGateMiddleware,
@@ -62,6 +62,20 @@ describe("formal group delivery", () => {
     }
   )
 
+  it("routes a selected Zhaohu group by source and ID without marking a private response as delivered", async () => {
+    const target = {id:"im-room",source:"zhaohu",name:"产品群",description:"服务 Bot",available:true}
+    const publishGroupMessage = vi.fn(() => ({groupId:target.id,groupSource:target.source,messageId:"handoff",state:"queued"}))
+    const host = {publishGroupMessage,groupTargets:vi.fn(()=>[target])} as unknown as LocalBotHost
+    const privateTask:BotTask = {...task,origin:{kind:"user"}}
+    const sent = vi.fn()
+    const signal = new AbortController().signal
+    expect(JSON.parse(await createBotGroupListTool(privateTask,()=>host,signal).invoke({}))).toEqual([target])
+    const send = createBotGroupMessageTool(privateTask,()=>host,signal,sent)
+    const reply = await send.invoke({type:"tool_call",id:"handoff",name:send.name,args:{groupId:"im-room",groupSource:"zhaohu",content:"请处理"}})
+    expect(publishGroupMessage).toHaveBeenCalledWith(task.id,"handoff","请处理","im-room","zhaohu")
+    expect(JSON.parse(String(reply.content))).toMatchObject({kind:"bot-group-message",state:"queued",groupSource:"zhaohu"})
+    expect(sent).not.toHaveBeenCalled()
+  })
   it("does not redrive a clean private callback final into a duplicate public delivery", async () => {
     const callback: BotTask = {
       ...task,

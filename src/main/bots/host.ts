@@ -261,7 +261,17 @@ export class LocalBotHost {
   }
 
   /** Selected group identity facts only; never read history or publish a group message. */
-  getGroupReference(groupId: string, botId: string) {
+  getGroupReference(groupId: string, botId: string, source: "app" | "zhaohu" = "app") {
+    if (source === "zhaohu") {
+      this.getBot(botId)
+      const group = this.store.imGateway.groupConversations().find(item => item.id === groupId)
+      if (!group || group.state !== "active" || !group.connected)
+        throw new BotError("CONFLICT", "招乎群已解绑或离线，请重新选择")
+      const member = this.getBot(group.botId)
+      if (member.archived || member.deleting) throw new BotError("CONFLICT", "群服务 Bot 已不可用")
+      return { id: group.id, source, currentName: group.title,
+        botMembers: [{ id: member.id, currentName: member.name }] }
+    }
     const bot = this.getBot(botId),
       group = this.store.getGroup(groupId)
     if (
@@ -1034,10 +1044,64 @@ export class LocalBotHost {
     if (!this.active.has(taskId)) return
     if (this.store.recordGroupQuestionResult(taskId, requestId, resultId)) this.changed()
   }
-  publishGroupMessage(taskId: string, callId: string, text: string, targetGroupId?: string) {
+  groupTargets(taskId: string): import("../../shared/bots/im-channel").BotGroupTarget[] {
+    this.requireRunning()
+    const task = this.store.getTask(taskId)
+    if (
+      task.workId ||
+      task.mockSource ||
+      botTaskGroupId(task) ||
+      (!this.store.hasDirectUserRequest(taskId) && !this.store.profileContinuationRequest(taskId))
+    )
+      throw new BotError("CONFLICT", "请从私人主对话选择交办群聊")
+    const bot = this.getBot(task.botId)
+    const bots = new Map(
+      this.store
+        .listBots()
+        .filter((item) => item.hostId === bot.hostId && !item.archived && !item.deleting)
+        .map((item) => [item.id, item])
+    )
+    return [
+      ...this.store
+        .groups()
+        .filter(
+          (group) =>
+            !group.deleting && group.hostId === bot.hostId && group.memberIds.includes(bot.id)
+        )
+        .map((group) => ({
+          id: group.id,
+          source: "app" as const,
+          name: group.name,
+          description: group.memberIds
+            .map((id) => bots.get(id)?.name)
+            .filter(Boolean)
+            .join("、"),
+          available: true
+        })),
+      ...this.store.imGateway
+        .groupConversations()
+        .filter((group) => group.state === "active" && bots.has(group.botId))
+        .map((group) => ({
+          id: group.id,
+          source: "zhaohu" as const,
+          name: group.title,
+          description: bots.get(group.botId)!.name,
+          available: group.connected
+        }))
+    ]
+  }
+
+  publishGroupMessage(taskId: string, callId: string, text: string, targetGroupId?: string, source: "app" | "zhaohu" = "app") {
     this.requireRunning()
     const run = this.active.get(taskId)
     if (!run || run.controller.signal.aborted) throw new BotError("CONFLICT", "当前群任务已结束")
+    if (source === "zhaohu") {
+      if (!targetGroupId) throw new BotError("INVALID_INPUT", "请选择交办的招乎群")
+      const receipt = this.store.handoffImGroup(taskId,callId,targetGroupId,text)
+      this.changed()
+      this.wake()
+      return receipt
+    }
     const receipt =
       targetGroupId === undefined
         ? this.store.publishGroupMessage(taskId, callId, text)

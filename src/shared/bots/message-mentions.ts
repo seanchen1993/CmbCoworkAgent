@@ -18,6 +18,8 @@ export function parseBotMessageMentions(
       end = Number(item.end) - leading
     const group = item.kind === "group"
     const id = group ? item.groupId : item.botId
+    if (item.groupSource !== undefined && (!group || !["app", "zhaohu"].includes(String(item.groupSource))))
+      throw new BotError("INVALID_INPUT", "群聊来源无效")
     if (
       !Number.isSafeInteger(item.start) ||
       !Number.isSafeInteger(item.end) ||
@@ -37,7 +39,7 @@ export function parseBotMessageMentions(
       throw new BotError("INVALID_INPUT", "Bot 提及与原消息不一致，请重新选择")
     previousEnd = end
     return group
-      ? { start, end, kind: "group", groupId: id, label: item.label }
+      ? { start, end, kind: "group", groupId: id, ...(item.groupSource === undefined ? {} : { groupSource: item.groupSource as "app" | "zhaohu" }), label: item.label }
       : { start, end, botId: id, label: item.label }
   })
 }

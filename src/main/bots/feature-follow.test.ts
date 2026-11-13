@@ -204,7 +204,7 @@ beforeEach(() => {
         id: "group-a",
         realm: "test",
         principal: "owner",
-        binding: { state: "active", version: 1, kind: "group", conversationKey: "conversation-a" }
+        binding: { id: "binding-a", state: "active", version: 1, kind: "group", conversationKey: "conversation-a" }
       }),
       event: () => ({ payload: { event: { eventId: "event-a" }, route: { senderId: "sender" } } })
     }
@@ -332,7 +332,20 @@ it("does not recreate a follow if deletion wins an in-flight access check", asyn
   expect(host.featureStore.list(groupScope)).toEqual([])
 })
 
-it("creates one native project thread per instruction, sends its questions and attachments to its owner, and continues that thread", async () => {
+it.each(["event", "desktop"] as const)("creates one native project thread per %s instruction, routes its questions and attachments, and continues that thread", async (origin) => {
+  const task = origin === "desktop"
+    ? {
+        ...incoming,
+        mockSource: {
+          transport: "im",
+          audienceKey: groupScope.audience,
+          bindingId: "group-a",
+          desktopMessageId: "handoff-a"
+        }
+      }
+    : incoming
+  vi.spyOn(host, "featureTask").mockReturnValue(task as ReturnType<LocalBotHost["featureTask"]>)
+  vi.spyOn(host, "featureToolTask").mockReturnValue(task as ReturnType<LocalBotHost["featureToolTask"]>)
   const command = {
     action: "session" as const,
     ...feature,
@@ -364,9 +377,13 @@ it("creates one native project thread per instruction, sends its questions and a
   expect(botInteractionRoutes.get("child-1")).toMatchObject({
     realm: "test",
     conversationKey: "conversation-a",
-    botEventId: "event-a",
-    senderId: "sender"
+    featureGate: { projectId: feature.projectId, slug: feature.slug },
+    ...(origin === "event"
+      ? { botEventId: "event-a", senderId: "sender" }
+      : { botBindingRef: "binding:binding-a:1" })
   })
+  if (origin === "desktop")
+    expect(botInteractionRoutes.get("child-1")?.botEventId).toBeUndefined()
   const file = join(root, "prd.md")
   writeFileSync(file, "approved content")
   const tool = context.additionalTools!.find((t) => t.name === "bot_deliver_files")!
@@ -382,7 +399,7 @@ it("creates one native project thread per instruction, sends its questions and a
   context.onRunTerminated?.({ outcome: "success", code: "normal" })
   resolveTurn()
   await vi.waitFor(() => expect(notice).toHaveBeenCalledTimes(1))
-  expect(notice.mock.calls[0][0]).toBe(incoming)
+  expect(notice.mock.calls[0][0]).toBe(task)
   expect(notice.mock.calls[0][2]).toContain("字段已核对")
   expect(botInteractionRoutes.get("child-1")).toBeNull()
   expect((await featureDetail(host, owner)).sessions[0].phase).toBe("idle")

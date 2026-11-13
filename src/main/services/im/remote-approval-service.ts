@@ -50,6 +50,7 @@ interface RemoteApprovalRoute {
   workspacePath: string
   prefix: string
   botEventId?: string
+  botBindingRef?: string
   kind?: "dm" | "group"
   isCurrent?: () => boolean
 }
@@ -721,6 +722,7 @@ export class ImRemoteApprovalService {
     const interaction = await this.dependencies.cards.publish({
       kind: "approval",
       botEventId: code.route.botEventId,
+      botBindingRef: code.route.botBindingRef,
       threadId: code.route.threadId,
       principalId: code.route.principalId,
       conversationKey: code.route.conversationKey,
@@ -828,7 +830,7 @@ export class ImRemoteApprovalService {
     const workspacePath = parsed.workspacePath ? canonicalDirectory(parsed.workspacePath) : null
     if (!workspacePath) return null
     if (botInteractionRoutes.has(threadId)) {
-      return bot && (bot.kind === "dm" || bot.botEventId)
+      return bot && (bot.kind === "dm" || bot.botEventId || bot.botBindingRef)
         ? { ...bot, workspacePath, isCurrent: () => botInteractionRoutes.get(threadId) === bot }
         : null
     }

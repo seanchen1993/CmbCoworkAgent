@@ -34,7 +34,7 @@ function mentionEditorContent(text: string, mentions: readonly (BotGroupMention 
     content.at(-1)!.content!.push({
       type: "groupMention",
       attrs: "kind" in mention && mention.kind === "group"
-        ? { kind: "group", groupId: mention.groupId, label: mention.label }
+        ? { kind: "group", groupId: mention.groupId, groupSource: mention.groupSource ?? null, label: mention.label }
         : { botId: mention.botId, label: mention.label }
     })
     offset = mention.end
@@ -69,7 +69,7 @@ function mentionEditorDraft(doc: JSONContent): { text: string; mentions: (BotGro
       const start = text.length
       text += `@${label}`
       if (node.attrs.kind === "group" && typeof node.attrs.groupId === "string")
-        mentions.push({ start, end: text.length, kind: "group", groupId: node.attrs.groupId, label })
+        mentions.push({ start, end: text.length, kind: "group", groupId: node.attrs.groupId, ...(node.attrs.groupSource ? { groupSource: node.attrs.groupSource } : {}), label })
       else if (botId === null || typeof botId === "string")
         mentions.push({ start, end: text.length, botId, label })
     } else node.content?.forEach(visit)
@@ -133,7 +133,7 @@ export const GroupMentionNode = Node.create({
   inline: true,
   atom: true,
   selectable: false,
-  addAttributes: () => ({ botId: { default: null }, label: { default: "" }, kind: { default: null }, groupId: { default: null } }),
+  addAttributes: () => ({ botId: { default: null }, label: { default: "" }, kind: { default: null }, groupId: { default: null }, groupSource: { default: null } }),
   // Clipboard/drag HTML is never a source of recipient authority.
   parseHTML: () => [],
   renderText: ({ node }) => `@${node.attrs.label}`,

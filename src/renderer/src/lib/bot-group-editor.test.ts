@@ -23,6 +23,11 @@ const member = { start: 0, end: 3, botId: "a", label: "甲乙" }
 afterEach(() => vi.unstubAllGlobals())
 
 describe("group editor draft projection", () => {
+  it("retains the selected channel after editing and restoring a private group mention", () => {
+    const draft = { text:"请交给 @产品群", mentions:[{start:4,end:8,kind:"group" as const,groupId:"im-room",groupSource:"zhaohu" as const,label:"产品群"}] }
+    const json = privateEditorContent(draft.text,draft.mentions)
+    expect(privateEditorDraft(schema.nodeFromJSON(json).toJSON())).toEqual(draft)
+  })
   it.each(["", "一行", "甲\n\n乙\n", "🙂\n<attachment> @普通文本"])(
     "keeps plain text unchanged: %s",
     (text) => {
