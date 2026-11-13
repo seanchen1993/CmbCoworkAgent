@@ -1,6 +1,10 @@
+import { ProjectAnalysisMembership } from "./ProjectAnalysisScope"
+import type { DashboardTimeControl } from "./TimeControlBar"
+import { ProjectAnalysisAgent } from "./ProjectAnalysisAgent"
 import { Fragment, useEffect, useMemo, useRef, useState, type ButtonHTMLAttributes } from "react"
 import {
   AlertCircle,
+  Bot,
   ChevronDown,
   ChevronRight,
   Copy,
@@ -32,6 +36,12 @@ import type {
 import { RUN_ANALYSIS_NOTES } from "../../../../shared/project-run-analysis"
 import {
   DEFAULT_RUN_ANALYSIS_FILTERS,
+  NUMERIC_FILTERS,
+  COMPARISON_LABELS,
+  runAnalysisFilterErrors,
+  type NumericFilterKey,
+  type NumericCondition,
+  type NumericOperator,
   RUN_ANALYSIS_PRESETS,
   filterRunAnalysis,
   groupRunAnalysis,
@@ -94,6 +104,7 @@ function Hint({ note }: { note: string }) {
 
 export interface ProjectRunAnalysisProps {
   range: RunAnalysisRange
+  timeControl: Omit<DashboardTimeControl, "range">
   options: RunAnalysisOptions
   active?: boolean
   refreshKey?: number
@@ -103,6 +114,7 @@ export interface ProjectRunAnalysisProps {
 }
 export function ProjectRunAnalysis({
   range,
+  timeControl,
   options,
   active = true,
   refreshKey = 0,
@@ -110,6 +122,8 @@ export function ProjectRunAnalysis({
   onOpenFeatureCommits,
   onOpenCodeTrace
 }: ProjectRunAnalysisProps): React.JSX.Element {
+  const [agentCreated, setAgentCreated] = useState(false)
+  const [agentOpen, setAgentOpen] = useState(false)
   const [membership, setMembership] = useState<RunAnalysisMembership>("active")
   const [filters, setFilters] = useState<RunAnalysisFilters>({ ...DEFAULT_RUN_ANALYSIS_FILTERS })
   const [preset, setPreset] = useState("")
@@ -134,6 +148,12 @@ export function ProjectRunAnalysis({
   const handledRefresh = useRef({ refresh, refreshKey })
   const key = JSON.stringify([range, options, membership, refresh, refreshKey])
   const data = result?.key === key ? result.data : null
+  const filterKey = JSON.stringify(filters)
+  const agentScopeKey = JSON.stringify([options, refresh, refreshKey])
+  useEffect(() => {
+    setAgentCreated(false)
+    setAgentOpen(false)
+  }, [agentScopeKey, filterKey, active])
   useEffect(() => {
     if (!active) return
     if (
@@ -160,7 +180,7 @@ export function ProjectRunAnalysis({
     const promise = loadData
       ? loadData(r, requestOptions)
       : window.api.dashboard.projectModeRunAnalysis(r, requestOptions).then((res) => {
-          if (!res.success || !res.data) throw new Error(res.error ?? "获取运行分析失败")
+          if (!res.success || !res.data) throw new Error(res.error ?? "获取项目分析失败")
           return res.data
         })
     void promise
@@ -199,6 +219,21 @@ export function ProjectRunAnalysis({
     [data, filters]
   )
   const filterChips = runAnalysisFilterChips(filters)
+  const filterErrors = runAnalysisFilterErrors(filters)
+  const agentFeatureCount = matches.filter(({ row }) => row.featureSlug !== null).length
+  const agentProjectCount = new Set(matches.map(({ row }) => row.projectId)).size
+  const agentSummary = `${agentProjectCount} 个项目 · ${agentFeatureCount} 个匹配特性`
+  const selectedRooms = Array.isArray(options.upperOrgLv1)
+    ? options.upperOrgLv1
+    : options.upperOrgLv1
+      ? [options.upperOrgLv1]
+      : []
+  const membershipLabel =
+    membership === "active"
+      ? "进行中的全部项目"
+      : membership === "executed"
+        ? "所选日期内有执行（含归档）"
+        : "所选日期内新建项目（含归档）"
   const all = mode === "feature" ? matches : groups
   const maxPage = Math.max(1, Math.ceil(all.length / 20)),
     currentPage = Math.min(page, maxPage)
@@ -279,36 +314,68 @@ export function ProjectRunAnalysis({
         ]),
         "统计口径"
       )
-      XLSX.writeFile(book, `运行分析-${new Date(data.dataAsOf).toISOString().slice(0, 10)}.xlsx`)
+      XLSX.writeFile(book, `项目分析-${new Date(data.dataAsOf).toISOString().slice(0, 10)}.xlsx`)
       setNotice(`已导出全部${matches.length}条匹配记录`)
     } catch (e) {
       setNotice(`导出失败：${e instanceof Error ? e.message : String(e)}`)
     }
   }
-  const numberFilter = (name: keyof RunAnalysisFilters, label: string, factor = 1) => {
-    const value = filters[name] as number | null
+  const numberFilter = (name: NumericFilterKey) => {
+    const { label, unit, factor } = NUMERIC_FILTERS[name]
+    const condition = filters.numeric[name] ?? { operator: "gte" as const, value: null }
+    const change = (patch: Partial<NumericCondition>) =>
+      update("numeric", {
+        ...filters.numeric,
+        [name]: { ...condition, ...patch }
+      })
+    const noValue = condition.operator === "missing" || condition.operator === "present"
+    const input = (upper = false) => (
+      <Input
+        aria-label={`${label}${upper ? "上限" : condition.operator === "between" ? "下限" : "数值"}（${unit}）`}
+        type="number"
+        min="0"
+        step="any"
+        max={factor === 100 ? 100 : undefined}
+        className="h-8 min-w-0 flex-1 text-xs"
+        value={
+          (upper ? condition.upper : condition.value) == null
+            ? ""
+            : Number(((upper ? condition.upper! : condition.value!) * factor).toFixed(8))
+        }
+        placeholder={condition.operator === "between" ? (upper ? "上限" : "下限") : "不限"}
+        onChange={(e) => {
+          const n = e.target.value === "" ? null : e.target.valueAsNumber / factor
+          change(upper ? { upper: n } : { value: n })
+        }}
+      />
+    )
     return (
-      <label className="flex min-w-0 items-center gap-2 text-xs" key={name}>
-        <span className="flex-1">{label}</span>
-        <Input
-          aria-label={label}
-          type="number"
-          min="0"
-          max={factor === 100 ? 100 : undefined}
-          className="h-8 w-24 shrink-0 text-xs"
-          value={value === null ? "" : value * factor}
-          placeholder="不限"
-          onChange={(e) =>
-            update(
-              name,
-              e.target.value === ""
-                ? null
-                : Math.min(factor === 100 ? 100 : Infinity, Math.max(0, Number(e.target.value))) /
-                    factor
-            )
-          }
-        />
-      </label>
+      <div className="min-w-0 space-y-1.5" key={name}>
+        <div className="text-xs">
+          {label}（{unit}）
+        </div>
+        <div className="flex gap-1.5">
+          <select
+            aria-label={`${label}比较方式`}
+            className={`${selectClass} w-24 shrink-0`}
+            value={condition.operator}
+            onChange={(e) => change({ operator: e.target.value as NumericOperator })}
+          >
+            {Object.entries(COMPARISON_LABELS).map(([value, label]) => (
+              <option key={value} value={value}>
+                {label}
+              </option>
+            ))}
+          </select>
+          {!noValue && input()}
+          {!noValue && condition.operator === "between" && (
+            <>
+              <span className="self-center text-xs">至</span>
+              {input(true)}
+            </>
+          )}
+        </div>
+      </div>
     )
   }
   const renderRow = (match: RunAnalysisMatch | RunAnalysisProjectMatch, group = false) => {
@@ -439,17 +506,67 @@ export function ProjectRunAnalysis({
   return (
     <section
       className="min-w-0 space-y-3 rounded-lg border border-border bg-card p-4"
-      aria-label="运行分析"
+      aria-label="项目分析"
     >
+      {active && agentCreated && (
+        <ProjectAnalysisAgent
+          key={JSON.stringify([filters, options])}
+          open={agentOpen}
+          context={{
+            range,
+            options: { ...options, membership },
+            filters
+          }}
+          scopeLabel="当前筛选范围"
+          scopeSummary={data ? agentSummary : "正在读取所选范围"}
+          timeControl={timeControl}
+          onMembershipChange={setMembership}
+          analysisUnavailable={
+            loading || !data
+              ? error || "当前分析数据尚未就绪"
+              : filterErrors.length > 0
+                ? "请先补全或修正分析筛选条件"
+                : !matches.length
+                  ? "当前筛选没有匹配结果"
+                  : undefined
+          }
+          scopeDetails={[
+            `室：${selectedRooms.join("、") || "当前权限范围"}`,
+            `名单：${membershipLabel}`,
+            ...(membership !== "active"
+              ? [`名单日期：${date(range.from)} 至 ${date(range.to)}`]
+              : []),
+            `筛选：${filterChips.map(({ label }) => label).join("；") || "无附加条件"}`
+          ]}
+          onClose={() => setAgentOpen(false)}
+          onInspect={(target) => {
+            const row = matches.find(
+              (m) =>
+                m.row.projectId === target.projectId && m.row.featureSlug === target.featureSlug
+            )?.row
+            if (row) setDiagnose(row)
+          }}
+        />
+      )}
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex items-center gap-1 text-sm font-semibold">
-          运行分析
+          项目分析
           <Hint note={Object.values(RUN_ANALYSIS_NOTES).join("\n")} />
           {import.meta.env.DEV && (
             <span className="ml-2 text-[10px] font-normal text-amber-600">开发示例数据</span>
           )}
         </div>
         <div className="flex flex-wrap gap-2">
+          <Button
+            size="sm"
+            onClick={() => {
+              setAgentCreated(true)
+              setAgentOpen(true)
+            }}
+          >
+            <Bot className="mr-1 size-3" />
+            项目分析 Agent
+          </Button>
           <Button
             size="sm"
             variant="outline"
@@ -480,19 +597,7 @@ export function ProjectRunAnalysis({
         </div>
       </div>
       <div className="flex flex-wrap items-center gap-2 text-xs">
-        <label className="flex items-center gap-2">
-          查看范围
-          <select
-            aria-label="查看范围"
-            className={selectClass}
-            value={membership}
-            onChange={(e) => setMembership(e.target.value as RunAnalysisMembership)}
-          >
-            <option value="active">进行中的全部项目</option>
-            <option value="executed">所选日期内有执行（含归档）</option>
-            <option value="created">所选日期内新建项目（含归档）</option>
-          </select>
-        </label>
+        <ProjectAnalysisMembership value={membership} onChange={setMembership} />
         {membership !== "active" && (
           <span className="text-muted-foreground">
             {date(range.from)} 至 {date(range.to)}
@@ -500,7 +605,7 @@ export function ProjectRunAnalysis({
         )}
         <span className="text-muted-foreground">
           指标为累计数据；
-          {membership === "active" ? "当前范围不受顶部日期限制" : "顶部日期仅用于筛选项目范围"}
+          {membership === "active" ? "当前范围不受顶部日期限制" : "所选日期仅用于筛选项目范围"}
         </span>
       </div>
       <div className="flex flex-wrap items-center gap-2 border-t pt-3">
@@ -605,15 +710,13 @@ export function ProjectRunAnalysis({
             结果需同时满足以下条件，留空表示不限。快捷筛选的默认条件也可以在这里调整。
           </p>
           <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-            {numberFilter("idleDays", "距最近执行至少（天）")}
-            {numberFilter("spanDays", "执行跨度至少（天）")}
-            {numberFilter("adoptionMax", "采纳率不高于（%）", 100)}
-            {numberFilter("minCodeLines", "有效生成行数至少（行）")}
-            {numberFilter("vibeMin", "Vibe采纳占比至少（%）", 100)}
-            {numberFilter("noSkillMin", "未使用 Skill 主对话不少于（轮）")}
-            {numberFilter("toolMin", "工具调用不少于（次）")}
-            {numberFilter("modelMin", "模型调用不少于（次）")}
+            {(Object.keys(NUMERIC_FILTERS) as NumericFilterKey[]).map(numberFilter)}
           </div>
+        </div>
+      )}
+      {filterErrors.length > 0 && (
+        <div role="alert" className="text-xs text-destructive">
+          {filterErrors.join("；")}
         </div>
       )}
       <div className="flex flex-wrap items-center gap-2 text-[11px]">
@@ -803,9 +906,11 @@ export function ProjectRunAnalysis({
             </table>
             {!all.length && (
               <p className="p-8 text-center text-sm text-muted-foreground">
-                {filterChips.length
-                  ? "没有符合条件的结果，试试移除部分筛选条件。"
-                  : "当前范围暂无数据，可切换查看范围。"}
+                {filterErrors.length
+                  ? "请补全或修正筛选条件后查看结果。"
+                  : filterChips.length
+                    ? "没有符合条件的结果，试试移除部分筛选条件。"
+                    : "当前范围暂无数据，可切换查看范围。"}
               </p>
             )}
           </div>
@@ -1253,7 +1358,7 @@ function RunAnalysisConversation({
     >
       <DialogContent className="flex h-[82vh] w-[95vw] max-w-[1100px] min-w-0 flex-col gap-0 p-0">
         <DialogHeader className="border-b p-4">
-          <DialogTitle>运行分析 · 完整会话</DialogTitle>
+          <DialogTitle>项目分析 · 完整会话</DialogTitle>
           <DialogDescription className="break-all">{session.traceId}</DialogDescription>
         </DialogHeader>
         <TraceExplorer

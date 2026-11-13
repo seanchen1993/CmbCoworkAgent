@@ -1,5 +1,5 @@
 import { resolve } from "path"
-import { readFileSync, copyFileSync, existsSync, mkdirSync, readdirSync, statSync } from "fs"
+import { readFileSync, copyFileSync, existsSync, mkdirSync, readdirSync, realpathSync, statSync } from "fs"
 import { defineConfig } from "electron-vite"
 import react from "@vitejs/plugin-react"
 import tailwindcss from "@tailwindcss/vite"
@@ -117,6 +117,10 @@ export default defineConfig({
     },
     plugins: [optionalMmjModule(), react(), tailwindcss()],
     server: {
+      fs: {
+        // Worktrees may share node_modules through a symlink; allow its static assets too.
+        allow: [resolve("."), realpathSync(resolve("node_modules"))]
+      },
       watch: {
         ignored: [
           "**/dist/**",

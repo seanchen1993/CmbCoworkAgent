@@ -125,6 +125,10 @@ import {
   type HarnessStageAttribution
 } from "../services/harness-stage-attribution"
 import { recordSystemConstraintRead } from "../services/system-constraint-read-reporter"
+import {
+  loadHarnessDeployUnitSnapshot,
+  harnessDeployUnitTelemetry
+} from "../services/harness-deploy-unit-attribution"
 import { recordTrustedToolFilePreviewSource } from "../services/trusted-tool-file-preview"
 import { resolvePluginSystemConstraintPath } from "./plugin-system-constraint"
 import {
@@ -702,6 +706,10 @@ export class LocalSandbox
   private readonly traceId?: string
   private readonly rootTraceId?: string
   private readonly rootThreadId?: string
+  private readonly constraintReadBindings = new Map<
+    string,
+    ReturnType<typeof loadHarnessDeployUnitSnapshot>
+  >()
   private readonly projectCode?: string
   private readonly projectDir?: string
   private readonly codexExePath: string
@@ -2852,6 +2860,15 @@ export class LocalSandbox
     try {
       const constraintFile = await resolvePluginSystemConstraintPath(this.pluginRoot, resolvedPath)
       if (!constraintFile) return
+      const bindingKey = JSON.stringify([traceId, harnessProjectId, harnessFeatureSlug])
+      let binding = this.constraintReadBindings.get(bindingKey)
+      if (!binding) {
+        if (this.constraintReadBindings.size >= 64) {
+          this.constraintReadBindings.delete(this.constraintReadBindings.keys().next().value!)
+        }
+        binding = loadHarnessDeployUnitSnapshot(harnessProjectId, harnessFeatureSlug)
+        this.constraintReadBindings.set(bindingKey, binding)
+      }
       recordSystemConstraintRead({
         traceId,
         rootTraceId,
@@ -2860,6 +2877,7 @@ export class LocalSandbox
         agentId,
         harnessProjectId,
         harnessFeatureSlug,
+        ...harnessDeployUnitTelemetry(await binding),
         // Match the existing dashboard attribution contract: one stage snapshot
         // per turn/trace, rather than running an adapter inspection on every read.
         harnessNodeName,

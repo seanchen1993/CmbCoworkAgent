@@ -23,6 +23,34 @@ const baseRecord: SystemConstraintReadRecord = {
 }
 
 describe("SystemConstraintReadAccumulator", () => {
+  it("keeps binding snapshots separate without allocating read counts to every unit", () => {
+    const accumulator = new SystemConstraintReadAccumulator()
+    const ids = ["b", "a", "a"]
+    accumulator.record({
+      ...baseRecord,
+      harnessDeployUnitIds: ids,
+      harnessSessionDeployUnitId: "a"
+    })
+    ids.push("later")
+    accumulator.record({
+      ...baseRecord,
+      harnessDeployUnitIds: ["a", "b"],
+      harnessSessionDeployUnitId: "a"
+    })
+    accumulator.record(baseRecord)
+    const emitted: Array<Record<string, unknown>> = []
+    accumulator.flushTrace("trace-1", "success", (_name, _category, properties = {}) =>
+      emitted.push(properties)
+    )
+    expect(emitted).toHaveLength(2)
+    expect(emitted[0]).toMatchObject({
+      harnessDeployUnitIds: ["a", "b"],
+      harnessSessionDeployUnitId: "a",
+      successfulReadCount: 2
+    })
+    expect(emitted[0]).not.toHaveProperty("harnessDeployUnitId")
+    expect(emitted[1]).not.toHaveProperty("harnessDeployUnitIds")
+  })
   it("emits one summary per trace and stage while preserving read/file counts", () => {
     const accumulator = new SystemConstraintReadAccumulator()
     accumulator.record(baseRecord)

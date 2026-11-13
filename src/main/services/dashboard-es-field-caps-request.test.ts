@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest"
 import { prepareDashboardFieldCapsRequest } from "./dashboard-es-field-caps-request"
-import { prepareDashboardEsQuery } from "./dashboard-es-query"
 
 describe("ES 7.x field capabilities requests", () => {
   it("puts fields in the URL and keeps index_filter in the POST body", () => {
@@ -35,31 +34,4 @@ describe("ES 7.x field capabilities requests", () => {
       expect(() => prepareDashboardFieldCapsRequest("events", { fields })).toThrow("fields")
     }
   )
-
-  it("also fixes the dashboard analysis query path without changing search requests", () => {
-    const options = { indexByAlias: { event: "events", trace: "traces" } }
-    const request = prepareDashboardEsQuery(
-      { indexAlias: "event", operation: "field_caps", body: { fields: ["eventTime"] } },
-      options
-    )
-    expect(new URL(request.path, "http://localhost").searchParams.get("fields")).toBe("eventTime")
-    expect(request.bodyText).toBeUndefined()
-    const other = prepareDashboardEsQuery(
-      { indexAlias: "event", operation: "field_caps", body: { fields: ["properties.pluginId"] } },
-      options
-    )
-    expect(other.audit.bodyHash).not.toBe(request.audit.bodyHash)
-    expect(
-      new URL(
-        prepareDashboardEsQuery({ indexAlias: "event", operation: "field_caps" }, options).path,
-        "http://localhost"
-      ).searchParams.get("fields")
-    ).toBe("*")
-    const search = prepareDashboardEsQuery(
-      { indexAlias: "trace", operation: "search", body: { size: 0 } },
-      options
-    )
-    expect(search.path).toBe("/traces/_search?timeout=10s")
-    expect(JSON.parse(search.bodyText!)).toMatchObject({ size: 0 })
-  })
 })

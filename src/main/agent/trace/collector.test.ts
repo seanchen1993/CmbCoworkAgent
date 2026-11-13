@@ -22,7 +22,8 @@ vi.mock("../../net-utils", () => ({ getLocalIP: () => "127.0.0.1" }))
 vi.mock("../../storage", () => ({ getUserInfo: () => null }))
 vi.mock("../../ipc/skills", () => ({ listAllSkills: async () => [] }))
 vi.mock("../../harness-board/service", () => ({
-  getHarnessProjectAdapterSnapshot: async () => null
+  getHarnessProjectAdapterSnapshot: async () => null,
+  getHarnessFeatureBinding: vi.fn(async () => null)
 }))
 vi.mock("../../services/adoption-tracker", () => ({
   clearAdoptionContext: () => undefined,
@@ -44,12 +45,14 @@ import {
   setTraceReporter,
   TraceCollector
 } from "./collector"
+import { getHarnessFeatureBinding } from "../../harness-board/service"
 
 let tracesDir = ""
 let previousStorageMode: string | undefined
 let previousTracesDir: string | undefined
 
 beforeEach(async () => {
+  vi.mocked(getHarnessFeatureBinding).mockResolvedValue(null)
   await flushPendingTraceReports(1_000)
   await flushTraceWriteQueue()
   tracesDir = mkdtempSync(join(tmpdir(), "trace-collector-test-"))
@@ -75,6 +78,31 @@ afterEach(async () => {
 })
 
 describe("TraceCollector completion", () => {
+  it("uploads feature-bound unit IDs without repository paths or per-unit allocation", async () => {
+    vi.mocked(getHarnessFeatureBinding).mockResolvedValueOnce({
+      projectId: "p",
+      featureId: "f",
+      sessionContextInjectionSource: "cmbdevclaw",
+      selectedDeployUnitMappings: [
+        { deployUnitIdMapping: "a", deployUnitId: "a", localRepoPath: "/private/repository-a" },
+        { deployUnitIdMapping: "b", deployUnitId: "b", localRepoPath: "/private/repository-b" }
+      ],
+      sessionWorkspace: { source: "deployUnit", deployUnitId: "b" }
+    })
+    const tracer = new TraceCollector("bound-units", "go", "test", {
+      includeSkillEval: false,
+      harnessFeature: { projectId: "p", slug: "f" }
+    })
+    const cloud = sanitizeTraceForCloudUpload(await tracer.finish("success"))
+    expect(cloud).toMatchObject({
+      harnessDeployUnitIds: ["a", "b"],
+      harnessSessionDeployUnitId: "b"
+    })
+    expect(cloud).not.toHaveProperty("harnessDeployUnitId")
+    expect(JSON.stringify(cloud)).not.toContain("/private/repository")
+    const legacy = new TraceCollector("no-binding", "go", "test", { includeSkillEval: false })
+    expect(await legacy.finish("success")).not.toHaveProperty("harnessDeployUnitIds")
+  })
   it("reports false for the initial project Skill turn and keeps later technical supplements", async () => {
     const prompt = "请调整 get_user_ids 的返回值"
     const startup = new TraceCollector("startup", prompt, "test", {

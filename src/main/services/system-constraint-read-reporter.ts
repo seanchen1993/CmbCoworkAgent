@@ -20,6 +20,9 @@ export interface SystemConstraintReadRecord {
   pluginName?: string
   harnessAdapterName?: string
   harnessAdapterVersion?: string
+  /** Feature-bound units at read time; does not assign each file to every unit. */
+  harnessDeployUnitIds?: string[]
+  harnessSessionDeployUnitId?: string
   constraintFile: string
 }
 
@@ -44,11 +47,17 @@ function normalize(value: string | undefined): string | undefined {
 }
 
 function summaryBucketKey(record: SystemConstraintReadRecord): string {
-  return record.harnessNodeName?.trim() ?? ""
+  return JSON.stringify([
+    record.harnessProjectId,
+    record.harnessFeatureSlug,
+    record.harnessNodeName?.trim() ?? "",
+    record.harnessDeployUnitIds,
+    record.harnessSessionDeployUnitId
+  ])
 }
 
 /**
- * Run-scoped accumulator. One event is emitted per trace and workflow stage,
+ * Run-scoped accumulator. One event is emitted per trace, stage and binding snapshot,
  * regardless of how many pages or duplicate files `read_file` returned.
  */
 export class SystemConstraintReadAccumulator {
@@ -76,7 +85,11 @@ export class SystemConstraintReadAccumulator {
       traceId,
       harnessProjectId,
       harnessFeatureSlug,
-      constraintFile
+      constraintFile,
+      harnessDeployUnitIds: input.harnessDeployUnitIds
+        ? [...new Set(input.harnessDeployUnitIds.map((id) => id.trim()).filter(Boolean))].sort()
+        : undefined,
+      harnessSessionDeployUnitId: normalize(input.harnessSessionDeployUnitId)
     }
     const key = summaryBucketKey(normalizedRecord)
     const now = nowIsoLocal()
@@ -103,7 +116,13 @@ export class SystemConstraintReadAccumulator {
         pluginId: normalize(input.pluginId),
         pluginName: normalize(input.pluginName),
         harnessAdapterName: normalize(input.harnessAdapterName),
-        harnessAdapterVersion: normalize(input.harnessAdapterVersion)
+        harnessAdapterVersion: normalize(input.harnessAdapterVersion),
+        ...(normalizedRecord.harnessDeployUnitIds
+          ? { harnessDeployUnitIds: normalizedRecord.harnessDeployUnitIds }
+          : {}),
+        ...(normalizedRecord.harnessSessionDeployUnitId
+          ? { harnessSessionDeployUnitId: normalizedRecord.harnessSessionDeployUnitId }
+          : {})
       },
       constraintFiles: new Set([constraintFile]),
       successfulReadCount: 1,

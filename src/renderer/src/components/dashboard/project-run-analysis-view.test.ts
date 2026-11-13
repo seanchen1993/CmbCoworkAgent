@@ -10,6 +10,9 @@ import {
   runAnalysisExportRows,
   runAnalysisPreset,
   runAnalysisPresetCounts,
+  runAnalysisFilterErrors,
+  matchesNumeric,
+  type RunAnalysisFilters,
   runAnalysisFilterChips
 } from "./project-run-analysis-view"
 const range = { from: "2026-01-01T00:00:00.000Z", to: "2026-12-31T23:59:59.999Z" }
@@ -17,7 +20,14 @@ const data = makeMockRunAnalysis(range)
 
 describe("runtime analysis full-range presentation", () => {
   it("combines configured conditions with AND and excludes missing/zero-denominator samples", () => {
-    const f = { ...DEFAULT_RUN_ANALYSIS_FILTERS, adoptionMax: 0.5, noSkillMin: 12 }
+    const f: RunAnalysisFilters = {
+      ...DEFAULT_RUN_ANALYSIS_FILTERS,
+      numeric: {
+        adoptionRate: { operator: "lte", value: 0.5 },
+        codeLines: { operator: "gte", value: 100 },
+        noSkill: { operator: "gte", value: 12 }
+      }
+    }
     const row = { ...data.rows[1], codeStats: null }
     expect(attentionReasons(row, f, data.dataAsOf)).toBeNull()
     expect(
@@ -29,7 +39,7 @@ describe("runtime analysis full-range presentation", () => {
       inclusiveAdoptionRate: 0
     }
     expect(attentionReasons({ ...row, codeStats: stats }, f, data.dataAsOf)).toBeNull()
-    expect(attentionReasons(data.rows[1], f, data.dataAsOf)).toHaveLength(2)
+    expect(attentionReasons(data.rows[1], f, data.dataAsOf)).toHaveLength(3)
   })
   it("filters, sorts and exports the entire result before any display pagination", () => {
     const all = filterRunAnalysis(data, { ...DEFAULT_RUN_ANALYSIS_FILTERS }, "noSkill", true)
@@ -90,57 +100,35 @@ describe("runtime analysis full-range presentation", () => {
           .reduce((n, r) => n + r.conversationCount, 0)
       )
   })
-  it("preset switches replace all numeric conditions and clearing restores the objective inventory", () => {
-    expect(runAnalysisPreset("noSkill")).toMatchObject({
-      noSkillMin: 12,
-      adoptionMax: null,
-      idleDays: null
-    })
-    expect(runAnalysisPreset("adoption")).toMatchObject({
-      noSkillMin: null,
-      adoptionMax: 0.3,
-      minCodeLines: 100
-    })
-    expect(runAnalysisPreset("")).toEqual(DEFAULT_RUN_ANALYSIS_FILTERS)
-  })
-  it("switches quick filters without discarding the searched project, plugin, stage or status", () => {
-    const current = {
+  it("presets replace numeric conditions while preserving basic filters", () => {
+    const current: RunAnalysisFilters = {
       ...runAnalysisPreset("adoption"),
-      keyword: "客户经营平台",
-      plugin: JSON.stringify(["codex", "1.5.5"]),
-      stage: "dev-编码实现",
+      keyword: "客户",
+      stage: "dev",
       status: "进行中",
-      minCodeLines: 300,
-      modelMin: 400
+      plugin: "[null,null]"
     }
     const next = runAnalysisPreset("noSkill", current)
-    expect(next).toMatchObject({
-      keyword: current.keyword,
-      plugin: current.plugin,
-      stage: current.stage,
-      status: current.status,
-      noSkillMin: 12,
-      adoptionMax: null,
-      modelMin: null,
-      minCodeLines: 100
-    })
+    expect(next).toEqual({ ...current, numeric: { noSkill: { operator: "gte", value: 12 } } })
     expect(runAnalysisPreset("", next)).toEqual({
       ...DEFAULT_RUN_ANALYSIS_FILTERS,
       keyword: current.keyword,
-      plugin: current.plugin,
       stage: current.stage,
-      status: current.status
+      status: current.status,
+      plugin: current.plugin
     })
-    expect(current.adoptionMax).toBe(0.3)
-    expect(RUN_ANALYSIS_PRESETS.find((p) => p.key === "adoption")).toMatchObject({
-      sort: "adoption",
-      desc: false
-    })
+    expect(current.numeric.adoptionRate).toEqual({ operator: "lte", value: 0.3 })
+    expect(runAnalysisPreset("adoption").numeric.codeLines?.value).toBe(100)
   })
-  it("quick counts cover the full range, respect basic filters and ignore selected numeric criteria", () => {
+  it("quick counts cover all pages and ignore the current numeric conditions", () => {
     const base = { ...DEFAULT_RUN_ANALYSIS_FILTERS, keyword: data.rows[30].projectId }
     const counts = runAnalysisPresetCounts(data, base)
-    expect(runAnalysisPresetCounts(data, { ...base, toolMin: 99999999 })).toEqual(counts)
+    expect(
+      runAnalysisPresetCounts(data, {
+        ...base,
+        numeric: { tools: { operator: "gt", value: 999999 } }
+      })
+    ).toEqual(counts)
     for (const preset of RUN_ANALYSIS_PRESETS) {
       const matches = filterRunAnalysis(
         data,
@@ -150,38 +138,86 @@ describe("runtime analysis full-range presentation", () => {
       )
       expect(counts[preset.key]).toBe(matches.filter((m) => m.row.featureSlug !== null).length)
     }
-    const baseCounts = runAnalysisPresetCounts(data, DEFAULT_RUN_ANALYSIS_FILTERS)
-    expect(
-      runAnalysisPresetCounts(
-        {
-          ...data,
-          rows: [...data.rows, { ...data.rows[35], featureSlug: null }]
-        },
-        DEFAULT_RUN_ANALYSIS_FILTERS
-      )
-    ).toEqual(baseCounts)
   })
-  it("exposes every effective filter, preserves zero thresholds and removes just the chosen chip", () => {
-    const filters = {
+  it("keeps sample size independent from adoption and exposes/removes each active condition", () => {
+    const filters: RunAnalysisFilters = {
       ...DEFAULT_RUN_ANALYSIS_FILTERS,
-      keyword: "客户",
-      status: "进行中",
-      noSkillMin: 0,
-      adoptionMax: 0.125,
-      minCodeLines: 500
+      numeric: {
+        adoptionRate: { operator: "lt", value: 0.125 },
+        codeLines: { operator: "gte", value: 500 },
+        noSkill: { operator: "eq", value: 0 }
+      }
     }
     const chips = runAnalysisFilterChips(filters)
-    expect(chips.find((c) => c.key === "adoptionMax")?.label).toBe(
-      "采纳率 ≤ 12.5% · 有效生成 ≥ 500 行"
-    )
-    expect(chips.find((c) => c.key === "noSkillMin")?.label).toContain("≥ 0 轮")
-    expect(chips.some((c) => c.key === "minCodeLines")).toBe(false)
-    expect(clearRunAnalysisFilter(filters, "adoptionMax")).toEqual({
-      ...filters,
-      adoptionMax: null,
-      minCodeLines: 100
+    expect(chips.find((c) => c.key === "adoptionRate")?.label).toBe("采纳率 < 12.5 %")
+    expect(chips.find((c) => c.key === "noSkill")?.label).toContain("= 0 轮")
+    expect(chips.find((c) => c.key === "codeLines")?.label).toContain("≥ 500 行")
+    expect(clearRunAnalysisFilter(filters, "adoptionRate").numeric).toEqual({
+      codeLines: filters.numeric.codeLines,
+      noSkill: filters.numeric.noSkill
     })
-    expect(clearRunAnalysisFilter(filters, "keyword")).toEqual({ ...filters, keyword: "" })
     expect(runAnalysisFilterChips(DEFAULT_RUN_ANALYSIS_FILTERS)).toEqual([])
+    const r = {
+      ...data.rows[1],
+      codeStats: { ...data.rows[1].codeStats!, inclusiveEffectiveGeneratedLines: 99 }
+    }
+    expect(
+      attentionReasons(
+        r,
+        {
+          ...DEFAULT_RUN_ANALYSIS_FILTERS,
+          numeric: { codeLines: { operator: "gte", value: 100 } }
+        },
+        data.dataAsOf
+      )
+    ).toBeNull()
+  })
+  it("handles strict and inclusive boundaries, zero and missing values", () => {
+    expect(matchesNumeric(10, { operator: "gt", value: 10 })).toBe(false)
+    expect(matchesNumeric(10, { operator: "gte", value: 10 })).toBe(true)
+    expect(matchesNumeric(10, { operator: "lt", value: 10 })).toBe(false)
+    expect(matchesNumeric(10, { operator: "lte", value: 10 })).toBe(true)
+    expect(matchesNumeric(0, { operator: "eq", value: 0 })).toBe(true)
+    expect(matchesNumeric(null, { operator: "lte", value: 10 })).toBe(false)
+    expect(matchesNumeric(null, { operator: "missing", value: null })).toBe(true)
+    expect(matchesNumeric(0, { operator: "present", value: null })).toBe(true)
+    for (const n of [10, 20])
+      expect(matchesNumeric(n, { operator: "between", value: 10, upper: 20 })).toBe(true)
+    expect(matchesNumeric(21, { operator: "between", value: 10, upper: 20 })).toBe(false)
+  })
+  it("validates incomplete/reversed ranges and invalid percentages rather than changing thresholds", () => {
+    for (const condition of [
+      { operator: "between" as const, value: 5, upper: 3 },
+      { operator: "between" as const, value: 5, upper: null },
+      { operator: "gte" as const, value: NaN }
+    ]) {
+      const f = { ...DEFAULT_RUN_ANALYSIS_FILTERS, numeric: { tools: condition } }
+      expect(runAnalysisFilterErrors(f)).not.toHaveLength(0)
+      expect(filterRunAnalysis(data, f, "tools", true)).toEqual([])
+    }
+    expect(
+      runAnalysisFilterErrors({
+        ...DEFAULT_RUN_ANALYSIS_FILTERS,
+        numeric: { adoptionRate: { operator: "lt", value: 1.01 } }
+      })
+    ).not.toHaveLength(0)
+    expect(
+      runAnalysisFilterErrors({
+        ...DEFAULT_RUN_ANALYSIS_FILTERS,
+        numeric: { tools: { operator: "between", value: null, upper: null } }
+      })
+    ).toEqual([])
+  })
+  it("applies less-than filters before pagination and exports the same rows", () => {
+    const f: RunAnalysisFilters = {
+      ...DEFAULT_RUN_ANALYSIS_FILTERS,
+      numeric: { noSkill: { operator: "lt", value: 19 } }
+    }
+    const result = filterRunAnalysis(data, f, "noSkill", false)
+    expect(result.length).toBeGreaterThan(0)
+    expect(
+      result.every((m) => m.row.noSkillConversationCount < 19 && m.row.conversationCount > 0)
+    ).toBe(true)
+    expect(runAnalysisExportRows(data, result)).toHaveLength(result.length)
   })
 })

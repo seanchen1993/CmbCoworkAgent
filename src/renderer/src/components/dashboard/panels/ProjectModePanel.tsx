@@ -1,3 +1,4 @@
+import type { DashboardTimeControl } from "../TimeControlBar"
 import type {
   RunAnalysisFeature,
   RunAnalysisOptions,
@@ -3466,6 +3467,7 @@ function ProjectModePanelContent({
   onCodeSourceChange,
   createdInRangeProjectsOnly,
   runAnalysisRange,
+  runAnalysisTimeControl,
   runAnalysisOptions,
   runAnalysisRefreshKey,
   headerAction,
@@ -3504,6 +3506,7 @@ function ProjectModePanelContent({
   onCodeSourceChange: (source: string | null) => void
   createdInRangeProjectsOnly: boolean
   runAnalysisRange: RunAnalysisRange
+  runAnalysisTimeControl: Omit<DashboardTimeControl, "range">
   runAnalysisOptions: RunAnalysisOptions
   runAnalysisRefreshKey?: number
   headerAction?: ReactNode
@@ -3595,7 +3598,8 @@ function ProjectModePanelContent({
     [adapters]
   )
 
-  if (loading && !data) {
+  // Shared date changes refresh the overview too; keep the analysis workspace mounted.
+  if (loading && !data && projectView !== "analysis") {
     return (
       <div className="flex h-64 items-center justify-center">
         <Loader2 className="size-6 animate-spin text-muted-foreground" />
@@ -3603,7 +3607,7 @@ function ProjectModePanelContent({
     )
   }
 
-  if (error) {
+  if (error && projectView !== "analysis") {
     return (
       <div className="flex items-center gap-2 rounded-lg border border-destructive/50 bg-destructive/5 px-4 py-3 text-sm text-destructive">
         <AlertCircle className="size-4 shrink-0" />
@@ -3631,6 +3635,15 @@ function ProjectModePanelContent({
 
   return (
     <div className="space-y-6">
+      {error && (
+        <div
+          role="status"
+          className="flex items-center gap-2 rounded-lg border border-destructive/50 bg-destructive/5 px-4 py-3 text-sm text-destructive"
+        >
+          <AlertCircle className="size-4 shrink-0" />
+          <span>{error}</span>
+        </div>
+      )}
       {/* 概览卡片（左）+ 代码采纳漏斗（右），与平台运营概览一致 */}
       <section>
         <div className="mb-1 flex items-center justify-between gap-3">
@@ -3917,13 +3930,14 @@ function ProjectModePanelContent({
               setProjectView("analysis")
             }}
           >
-            运行分析
+            项目分析
           </button>
         </div>
         {analysisOpened && (
           <div hidden={projectView !== "analysis"}>
             <ProjectRunAnalysis
               range={runAnalysisRange}
+              timeControl={runAnalysisTimeControl}
               options={runAnalysisOptions}
               active={projectView === "analysis"}
               refreshKey={runAnalysisRefreshKey}

@@ -1,3 +1,13 @@
+import { PROJECT_AGENT_RUN_CHANNEL, type ProjectAgentRunListener, type ProjectAgentRunEvent } from "../shared/project-agent-run"
+import type { ProjectReportApi } from "../shared/project-analysis-report"
+import type {
+  ProjectOperationsPeriodInput,
+  ProjectOperationsPeriodResponse
+} from "../shared/project-operations-period"
+import type {
+  ProjectAnalysisAgentInput,
+  ProjectAnalysisAgentResponse
+} from "../shared/project-analysis-agent"
 import type {
   RunAnalysisData,
   RunAnalysisOptions,
@@ -672,6 +682,23 @@ ipcRenderer.on(
 )
 
 // Custom APIs for renderer
+async function invokeProjectAgent<T>(
+  channel: string,
+  input: unknown,
+  onEvent?: ProjectAgentRunListener
+): Promise<T> {
+  if (!onEvent) return ipcRenderer.invoke(channel, input)
+  const runId = randomUUID()
+  const eventChannel = `${PROJECT_AGENT_RUN_CHANNEL}${runId}`
+  const handler = (_event: unknown, payload: ProjectAgentRunEvent) => onEvent(payload)
+  ipcRenderer.on(eventChannel, handler)
+  try {
+    return await ipcRenderer.invoke(channel, input, runId)
+  } finally {
+    ipcRenderer.removeListener(eventChannel, handler)
+  }
+}
+
 const api = {
   uiGuides: {
     getState: (config: UiGuideConfig): Promise<UiGuideState> =>
@@ -3103,7 +3130,13 @@ const api = {
       version?: string,
       marketplace?: PluginMetadata["marketplace"]
     ): Promise<{ success: boolean; pluginName?: string; error?: string }> =>
-      ipcRenderer.invoke("plugins:install", { buffer, fileName, origin, version, marketplace }) as Promise<{
+      ipcRenderer.invoke("plugins:install", {
+        buffer,
+        fileName,
+        origin,
+        version,
+        marketplace
+      }) as Promise<{
         success: boolean
         pluginName?: string
         error?: string
@@ -3886,14 +3919,39 @@ const api = {
       ipcRenderer.invoke("featureGates:isEnabled", name, options)
   },
   dashboard: {
+    projectReportWorkspace: (): ReturnType<ProjectReportApi["projectReportWorkspace"]> =>
+      ipcRenderer.invoke("dashboard:projectReportWorkspace"),
+    projectReportRead: (
+      input: Parameters<ProjectReportApi["projectReportRead"]>[0]
+    ): ReturnType<ProjectReportApi["projectReportRead"]> =>
+      ipcRenderer.invoke("dashboard:projectReportRead", input),
+    projectReportGenerate: (
+      input: Parameters<ProjectReportApi["projectReportGenerate"]>[0],
+      onEvent?: ProjectAgentRunListener
+    ): ReturnType<ProjectReportApi["projectReportGenerate"]> =>
+      invokeProjectAgent("dashboard:projectReportGenerate", input, onEvent),
+    projectReportSaveTemplate: (
+      input: Parameters<ProjectReportApi["projectReportSaveTemplate"]>[0]
+    ): ReturnType<ProjectReportApi["projectReportSaveTemplate"]> =>
+      ipcRenderer.invoke("dashboard:projectReportSaveTemplate", input),
+    projectReportDeleteTemplate: (
+      input: Parameters<ProjectReportApi["projectReportDeleteTemplate"]>[0]
+    ): ReturnType<ProjectReportApi["projectReportDeleteTemplate"]> =>
+      ipcRenderer.invoke("dashboard:projectReportDeleteTemplate", input),
+    projectReportDelete: (
+      input: Parameters<ProjectReportApi["projectReportDelete"]>[0]
+    ): ReturnType<ProjectReportApi["projectReportDelete"]> =>
+      ipcRenderer.invoke("dashboard:projectReportDelete", input),
+    projectReportExport: (
+      input: Parameters<ProjectReportApi["projectReportExport"]>[0]
+    ): ReturnType<ProjectReportApi["projectReportExport"]> =>
+      ipcRenderer.invoke("dashboard:projectReportExport", input),
     cancelRequests: (families?: string[]): Promise<{ cancelled: number }> =>
       ipcRenderer.invoke("dashboard:cancelRequests", families),
     isAllowed: (): Promise<boolean> => ipcRenderer.invoke("dashboard:isAllowed"),
     isProjectModeAllowed: (): Promise<boolean> =>
       ipcRenderer.invoke("dashboard:isProjectModeAllowed"),
     orgFilterDefaults: (): Promise<string[]> => ipcRenderer.invoke("dashboard:orgFilterDefaults"),
-    isAnalysisAgentAllowed: (): Promise<boolean> =>
-      ipcRenderer.invoke("dashboard:isAnalysisAgentAllowed"),
     isTraceEvolverReviewAdmin: (): Promise<boolean> =>
       ipcRenderer.invoke("dashboard:isTraceEvolverReviewAdmin"),
     isUncommittedAnalysisAllowed: (): Promise<boolean> =>
@@ -3920,31 +3978,15 @@ const api = {
       groups: Array<{ shi: string; skillNames: string[] }>
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:awardsTeamSkillCoverage", range, groups),
-    esQuery: (input: {
-      indexAlias: "event" | "trace"
-      operation: "search" | "msearch" | "count" | "mapping" | "field_caps"
-      body?: unknown
-      context?: {
-        scope?: "platform" | "project"
-        upperOrgLv1?: string | string[] | null
-        projectId?: string | null
-        featureSlug?: string | null
-      }
-    }): Promise<{ success: boolean; data?: unknown; error?: string }> =>
-      ipcRenderer.invoke("dashboard:esQuery", input),
-    analysisAgent: (input: {
-      question: string
-      messages?: Array<{ role: "user" | "assistant"; content: string }>
-      context?: {
-        scope?: "platform" | "project"
-        range?: { from: string; to: string }
-        upperOrgLv1?: string | string[] | null
-        projectId?: string | null
-        featureSlug?: string | null
-        panelSnapshot?: Record<string, unknown> | null
-      }
-    }): Promise<{ success: boolean; data?: unknown; error?: string }> =>
-      ipcRenderer.invoke("dashboard:analysisAgent", input),
+    projectModePeriodMetrics: (
+      input: ProjectOperationsPeriodInput
+    ): Promise<ProjectOperationsPeriodResponse> =>
+      ipcRenderer.invoke("dashboard:projectModePeriodMetrics", input),
+    projectModeAnalysisAgent: (
+      input: ProjectAnalysisAgentInput,
+      onEvent?: ProjectAgentRunListener
+    ): Promise<ProjectAnalysisAgentResponse> =>
+      invokeProjectAgent("dashboard:projectModeAnalysisAgent", input, onEvent),
     projectMode: (
       range: { from: string; to: string },
       granularity: "day" | "week" | "month" | "custom",

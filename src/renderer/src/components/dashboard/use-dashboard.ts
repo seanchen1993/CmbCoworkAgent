@@ -2316,7 +2316,6 @@ async function loadSkillEvalSummarySafely(
 
 const DASHBOARD_SKILL_EVAL_REQUEST_FAMILY = "dashboard:skillEvalSummary"
 const DASHBOARD_HOOK_REQUEST_FAMILIES = [
-  "dashboard:esQuery",
   "dashboard:overview",
   "dashboard:modelStats",
   "dashboard:userStats",

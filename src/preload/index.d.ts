@@ -1,3 +1,13 @@
+import type { ProjectAgentRunListener } from "../shared/project-agent-run"
+import type { ProjectReportApi } from "../shared/project-analysis-report"
+import type {
+  ProjectOperationsPeriodInput,
+  ProjectOperationsPeriodResponse
+} from "../shared/project-operations-period"
+import type {
+  ProjectAnalysisAgentInput,
+  ProjectAnalysisAgentResponse
+} from "../shared/project-analysis-agent"
 import type {
   RunAnalysisData,
   RunAnalysisOptions,
@@ -2645,12 +2655,11 @@ interface CustomAPI {
       options?: FeatureGateCheckOptions
     ) => Promise<FeatureGateCheckResult>
   }
-  dashboard: {
+  dashboard: ProjectReportApi & {
     cancelRequests: (families?: string[]) => Promise<{ cancelled: number }>
     isAllowed: () => Promise<boolean>
     isProjectModeAllowed: () => Promise<boolean>
     orgFilterDefaults: () => Promise<string[]>
-    isAnalysisAgentAllowed: () => Promise<boolean>
     isTraceEvolverReviewAdmin: () => Promise<boolean>
     isUncommittedAnalysisAllowed: () => Promise<boolean>
     isAwardsAdmin: () => Promise<boolean>
@@ -2671,29 +2680,13 @@ interface CustomAPI {
       range: { from: string; to: string },
       groups: Array<{ shi: string; skillNames: string[] }>
     ) => Promise<{ success: boolean; data?: unknown; error?: string }>
-    esQuery: (input: {
-      indexAlias: "event" | "trace"
-      operation: "search" | "msearch" | "count" | "mapping" | "field_caps"
-      body?: unknown
-      context?: {
-        scope?: "platform" | "project"
-        upperOrgLv1?: string | string[] | null
-        projectId?: string | null
-        featureSlug?: string | null
-      }
-    }) => Promise<{ success: boolean; data?: unknown; error?: string }>
-    analysisAgent: (input: {
-      question: string
-      messages?: Array<{ role: "user" | "assistant"; content: string }>
-      context?: {
-        scope?: "platform" | "project"
-        range?: { from: string; to: string }
-        upperOrgLv1?: string | string[] | null
-        projectId?: string | null
-        featureSlug?: string | null
-        panelSnapshot?: Record<string, unknown> | null
-      }
-    }) => Promise<{ success: boolean; data?: unknown; error?: string }>
+    projectModePeriodMetrics: (
+      input: ProjectOperationsPeriodInput
+    ) => Promise<ProjectOperationsPeriodResponse>
+    projectModeAnalysisAgent: (
+      input: ProjectAnalysisAgentInput,
+      onEvent?: ProjectAgentRunListener
+    ) => Promise<ProjectAnalysisAgentResponse>
     projectMode: (
       range: { from: string; to: string },
       granularity: "day" | "week" | "month" | "custom",
@@ -2711,9 +2704,7 @@ interface CustomAPI {
       data?: { codeStats: DashboardCodeStats | null; skillCodeStats: DashboardCodeStats | null }
       error?: string
     }>
-    knowledgeAccumulation: (opts?: {
-      upperOrgLv1?: string | string[] | null
-    }) => Promise<{
+    knowledgeAccumulation: (opts?: { upperOrgLv1?: string | string[] | null }) => Promise<{
       success: boolean
       data?: KnowledgeAccumulationData
       error?: string
@@ -2749,9 +2740,7 @@ interface CustomAPI {
       error?: string
       cancelled?: boolean
     }>
-    knowledgeRecentConstraintFiles: (opts?: {
-      upperOrgLv1?: string | string[] | null
-    }) => Promise<{
+    knowledgeRecentConstraintFiles: (opts?: { upperOrgLv1?: string | string[] | null }) => Promise<{
       success: boolean
       data?: KnowledgeRecentConstraintFiles
       error?: string
