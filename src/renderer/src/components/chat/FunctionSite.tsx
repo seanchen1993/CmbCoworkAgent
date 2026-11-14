@@ -248,6 +248,7 @@ function FunctionSiteSurface({
   const [error, setError] = useState("")
   const [failureCode, setFailureCode] = useState("")
   const [reading, setReading] = useState(false)
+  const [initialDurationDeferred, setInitialDurationDeferred] = useState(false)
   const [showReading, setShowReading] = useState(false)
   const [busy, setBusy] = useState(false)
   const [geometry, setGeometry] = useState({ bodyColumns: 80, maxRows: 8, offset: 0 })
@@ -729,7 +730,10 @@ function FunctionSiteSurface({
           return false
         } : current
         const drawing = await functionSiteQueue.run(mayStart, async () => {
-          if (deferInitialDurationRead) firstReadStarted = true
+          if (deferInitialDurationRead && !firstReadStarted) {
+            firstReadStarted = true
+            setInitialDurationDeferred(false)
+          }
           const hostMessage = ["UserMessage", "AssistantMessage"].includes(component) &&
             typeof capturedInput.text === "string" &&
             functionMessageTextMode(capturedInput.text) === "host-message"
@@ -882,15 +886,21 @@ function FunctionSiteSurface({
           running = null
           if (!stopped) {
             if (queued) schedule(retryDelay ?? recovery.notificationDelay(Date.now()))
-            setReading(!hidden() && (queued || timer !== undefined))
+            setReading(
+              !hidden() && !waitingForDurationVisibility() && (queued || timer !== undefined)
+            )
           }
         }
       }
     }
     const update = (): void => schedule(recovery.notificationDelay(Date.now()))
     // Offscreen elapsed-time labels can wait without occupying the shared background slot.
+    if (component === "TurnDuration") setInitialDurationDeferred(waitingForDurationVisibility())
     if (deferInitialDurationRead) wakeVisibleDuration = () => {
-      if (!firstReadStarted && queued && siteVisibility.visible()) update()
+      if (firstReadStarted) return
+      const waiting = waitingForDurationVisibility()
+      setInitialDurationDeferred(waiting)
+      if (queued && !waiting) update()
     }
     const reset = (): void => {
       sourceRetiring = false
@@ -1157,7 +1167,11 @@ function FunctionSiteSurface({
       data-function-plugin={snapshot?.plugin}
       onKeyDown={isFunctionDockedSite(component) ? event => { pressFunctionHotkey(event) } : undefined}
       data-function-site={component}
-      aria-busy={reading || (!snapshot && !projected && !isInactive && !error) || undefined}
+      aria-busy={
+        reading ||
+        (!initialDurationDeferred && !snapshot && !projected && !isInactive && !error) ||
+        undefined
+      }
       data-function-request-id={
         component === "AskUserQuestion"
           ? expectedRequestId

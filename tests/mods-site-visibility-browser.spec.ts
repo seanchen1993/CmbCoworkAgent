@@ -173,12 +173,38 @@ async function main() {
       host.render(<DurationFixture/>);
     `, [browserWorkerPlugin()])
     const reads = () => page.evaluate("window.duration.reads.map(read=>read[0])")
+    const durationSite = (id: string, busy?: boolean) => page.locator(
+      `#${id} [data-function-site="TurnDuration"]` +
+      (busy === undefined ? "" : busy ? '[aria-busy="true"]' : ":not([aria-busy])")
+    )
+    const assertParked = async (id: string) => {
+      const site = durationSite(id, false)
+      await site.waitFor({ state: "attached" })
+      assert.equal((await site.textContent())?.trim(), "", `No unverified content for ${id}`)
+      assert.equal(await site.locator("[data-function-site-pending]").count(), 0,
+        `No visual placeholder for ${id}`)
+    }
+    const assertProtectedIdle = async (id: string) => {
+      const site = durationSite(id, false)
+      await site.getByText(`SAFE ${id}`, { exact: true }).waitFor({ state: "attached" })
+      assert.equal(await site.locator("[data-function-site-pending]").count(), 0)
+    }
     const settle = () => page.evaluate(() => new Promise<void>(done =>
       requestAnimationFrame(() => requestAnimationFrame(() => done()))))
     await page.waitForFunction("window.duration.held('blocker') && window.duration.admissions() >= 3")
     assert.equal(await page.evaluate("window.duration.admissions()"), 3,
       "Two visible labels and the ordinary offscreen body reach the queue")
     assert.deepEqual(await reads(), ["blocker"], "The first visible duration reads immediately")
+    await durationSite("blocker", true).waitFor({ state: "attached" })
+    await durationSite("queued-duration", true).waitFor({ state: "attached" })
+    await settle()
+    assert.equal(
+      await durationSite("deferred-duration").getAttribute("aria-busy"),
+      null,
+      "A cold offscreen duration is idle until its row enters the viewport"
+    )
+    await assertParked("deferred-duration")
+    await assertParked("doomed-duration")
     await page.evaluate("window.duration.observeRow('queued-duration')")
     assert.equal(await page.evaluate("window.duration.observedVisible()"), true)
     await page.evaluate("window.duration.scroll(200)")
@@ -189,9 +215,11 @@ async function main() {
     assert.deepEqual(await reads(), ["blocker"], "Leaving the viewport retains the started background slot")
     await page.evaluate("window.duration.release('blocker')")
     await page.waitForFunction("window.duration.held('ordinary-body')")
+    await assertParked("queued-duration")
     assert.deepEqual(await reads(), ["blocker", "ordinary-body"],
       "The queued duration is rechecked and ordinary offscreen text still reads")
     await page.getByText("SAFE blocker", { exact: true }).waitFor({ state: "attached" })
+    await assertProtectedIdle("blocker")
     await page.evaluate("window.duration.release('ordinary-body')")
     await page.getByText("SAFE ordinary-body", { exact: true }).waitFor({ state: "attached" })
     await page.evaluate("window.duration.hidden(true);window.duration.scroll(0)")
@@ -200,17 +228,22 @@ async function main() {
     assert.deepEqual(await reads(), ["blocker", "ordinary-body"], "A hidden document keeps the wake pending")
     await page.evaluate("window.duration.hidden(false)")
     await page.waitForFunction("window.duration.held('queued-duration')")
+    await durationSite("queued-duration", true).waitFor({ state: "attached" })
     await page.evaluate("window.duration.release('queued-duration')")
     await page.getByText("SAFE queued-duration", { exact: true }).waitFor()
+    await assertProtectedIdle("queued-duration")
     await page.evaluate("window.duration.scroll(400)")
     await page.waitForFunction("window.duration.held('deferred-duration')")
+    await durationSite("deferred-duration", true).waitFor({ state: "attached" })
     await page.evaluate("window.duration.release('deferred-duration')")
     await page.getByText("SAFE deferred-duration", { exact: true }).waitFor()
+    await assertProtectedIdle("deferred-duration")
     assert.deepEqual(await reads(), ["blocker", "ordinary-body", "queued-duration", "deferred-duration"])
     await page.evaluate("window.duration.observeRow('deferred-duration');window.duration.scroll(0)")
     await page.waitForFunction("!window.duration.observedVisible()")
     await page.evaluate("window.duration.invalidate('deferred-duration')")
     await page.waitForFunction("window.duration.held('deferred-duration')")
+    await durationSite("deferred-duration", true).waitFor({ state: "attached" })
     const redraw = await page.evaluate("window.duration.renders.at(-1)") as [string, string, string]
     const originalOwner = await page.evaluate("window.duration.reads.at(-1)[1]")
     assert.equal(redraw[0], "deferred-duration")
