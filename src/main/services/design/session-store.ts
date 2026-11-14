@@ -119,6 +119,13 @@ export class DesignSessionStore {
     }
   }
 
+  markRead(id: string, lastSeenSeq: number, unread: boolean): void {
+    this.db.run(
+      "UPDATE design_sessions SET last_seen_seq = ?, meta = json_set(meta, '$.unread', json(?)) WHERE id = ?",
+      [lastSeenSeq, JSON.stringify(unread), id]
+    )
+  }
+
   /** Message projection, journal cursor and run status advance in one transaction. */
   save(
     snapshot: DesignSessionSnapshot,

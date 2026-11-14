@@ -51,6 +51,17 @@ export async function extractDesignPageSnapshot(): Promise<CapturedPageSnapshot>
   const clone = document.documentElement.cloneNode(true) as HTMLElement
   const clonedNodes = [clone, ...clone.querySelectorAll("*")]
   const extraStyles: string[] = []
+  const captureOpenLayer = (source: Element, target: Element) => {
+    // Top-layer state is not represented by cloneNode or outerHTML.
+    target.toggleAttribute(
+      "data-design-capture-modal",
+      source instanceof HTMLDialogElement && source.matches(":modal")
+    )
+    target.toggleAttribute(
+      "data-design-capture-popover",
+      source.hasAttribute("popover") && source.matches(":popover-open")
+    )
+  }
   const captureSheet = (sheet: CSSStyleSheet, target: Element) => {
     try {
       const css = absoluteCss(
@@ -71,6 +82,7 @@ export async function extractDesignPageSnapshot(): Promise<CapturedPageSnapshot>
   for (let i = 0; i < sourceNodes.length; i++) {
     const source = sourceNodes[i],
       target = clonedNodes[i]
+    captureOpenLayer(source, target)
     if (source instanceof HTMLStyleElement || source instanceof HTMLLinkElement) {
       if (source.sheet) captureSheet(source.sheet as CSSStyleSheet, target)
     }
@@ -132,6 +144,7 @@ export async function extractDesignPageSnapshot(): Promise<CapturedPageSnapshot>
       originals.forEach((node, index) => {
         const copy = copies[index]
         if (!copy) return
+        captureOpenLayer(node, copy)
         const computed = getComputedStyle(node)
         copy.setAttribute(
           "style",
@@ -240,6 +253,24 @@ export async function extractDesignPageSnapshot(): Promise<CapturedPageSnapshot>
 
 /** Host-owned behavior only, installed after removing all source scripts. */
 export function designSnapshotRuntime(): void {
+  document
+    .querySelectorAll<HTMLDialogElement>("dialog[data-design-capture-modal]")
+    .forEach((dialog) => {
+      if (dialog.matches(":modal")) return
+      dialog.removeAttribute("open")
+      try {
+        dialog.showModal()
+      } catch {
+        dialog.setAttribute("open", "")
+      }
+    })
+  document.querySelectorAll<HTMLElement>("[data-design-capture-popover]").forEach((popover) => {
+    try {
+      popover.showPopover()
+    } catch {
+      // A removed/hidden ancestor may make a captured popover unavailable.
+    }
+  })
   document.addEventListener("submit", (event) => event.preventDefault(), true)
   document.addEventListener(
     "click",

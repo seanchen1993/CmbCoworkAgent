@@ -1,4 +1,4 @@
-import { useState } from "react"
+import { memo, useState } from "react"
 import { ChevronDown, ChevronRight, Eye, Wrench } from "lucide-react"
 import { getToolLabel } from "@/lib/tool-labels"
 import type { DesignExecutionEvent, DesignModelRetryState, Message } from "./types"
@@ -335,7 +335,7 @@ function DesignExecutionPanel({
             const param = getDesignToolParam(call.args)
             const previewPath = getToolPreviewPath(call)
             const progressText = getToolProgressText(call, status, param)
-            const detailText = result?.content
+            const detailText = !isOpen ? "" : result?.content
               ? stringifyForPanel(result.content).slice(0, 1800)
               : hasUsefulArgs(call.args)
                 ? stringifyForPanel(call.args)
@@ -512,7 +512,10 @@ function DesignModelRetryNotice({ retry }: { retry: DesignModelRetryState }) {
   )
 }
 
-export function MessageBubble({ message, hasLiveOutput = false }: { message: Message; hasLiveOutput?: boolean }) {
+export const MessageBubble = memo(function MessageBubble({
+  message,
+  hasLiveOutput = false
+}: { message: Message; hasLiveOutput?: boolean }) {
   const isUser = message.role === "user"
   const isQPrompt = message.role === "questions-prompt"
   const hasAssistantExecutionEvents = !isUser && Boolean(message.executionEvents?.length)
@@ -608,4 +611,4 @@ export function MessageBubble({ message, hasLiveOutput = false }: { message: Mes
       )}
     </div>
   )
-}
+})

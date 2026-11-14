@@ -72,11 +72,15 @@ const website = createServer((request, response) => {
     return
   }
   if (pathname === "/session") {
-    response.end(`<h1 id="session-state">${""}</h1><input id="value"><script>
+    response.end(`<h1 id="session-state">${""}</h1><input id="value">
+      <dialog id="open-dialog">当前弹窗</dialog><div id="open-popover" popover="manual">当前浮层</div>
+      <dialog id="closed-dialog">未展开的弹窗</dialog><div id="closed-popover" popover>未展开的浮层</div><script>
       sessionStorage.setItem('private-state','CURRENT_TAB');
       document.getElementById('session-state').textContent=sessionStorage.getItem('private-state');
       document.getElementById('value').value='USER_EDITED';
-      window.inMemoryToken='must-not-export';</script>`)
+      window.inMemoryToken='must-not-export';
+      document.getElementById('open-dialog').showModal();
+      document.getElementById('open-popover').showPopover();</script>`)
     return
   }
   response.end(`<!doctype html><html><head><title>动态测试页面</title>
@@ -211,8 +215,28 @@ try {
   assert.match(current.html!, /CURRENT_TAB/)
   assert.match(current.html!, /USER_EDITED/)
   assert.doesNotMatch(current.html!, /inMemoryToken|must-not-export/)
+  const capturedLayers = await application.evaluate(async ({ BrowserWindow }, filePath) => {
+    const preview = new BrowserWindow({ show: false, webPreferences: {
+      contextIsolation: true, nodeIntegration: false, sandbox: true
+    } })
+    try {
+      await preview.loadFile(filePath)
+      return await preview.webContents.executeJavaScript(`({
+        modal: document.getElementById('open-dialog').matches(':modal'),
+        popover: document.getElementById('open-popover').matches(':popover-open'),
+        closedDialog: document.getElementById('closed-dialog').open,
+        closedPopover: document.getElementById('closed-popover').matches(':popover-open'),
+        sourceScript: !!document.querySelector('script:not([data-design-capture-runtime])')
+      })`)
+    } finally {
+      preview.destroy()
+    }
+  }, current.artifactPath!)
+  assert.deepEqual(capturedLayers, {
+    modal: true, popover: true, closedDialog: false, closedPopover: false, sourceScript: false
+  })
   await finish("current-page", false)
-  console.log("PASS current-page capture preserves tab storage and input state")
+  console.log("PASS current-page capture preserves tab storage, input state and open dialog/popover state")
 
   const pending = run("cancel-test", { url: origin + "/slow" })
   await new Promise((resolve) => setTimeout(resolve, 250))

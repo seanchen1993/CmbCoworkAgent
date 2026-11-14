@@ -9,7 +9,7 @@ import {
 } from "@/lib/browser-page-confirmation"
 import { isSingleDesignVariant } from "../../../../shared/design-variation-policy"
 import { withDesignSessionOrder } from "../../../../shared/design-session-order"
-import React, { useState, useRef, useCallback, useEffect } from "react"
+import React, { useState, useRef, useCallback, useEffect, useLayoutEffect } from "react"
 import { v4 as uuid } from "uuid"
 import { ChevronDown, LayoutTemplate, Move, Redo2, Undo2, X } from "lucide-react"
 import { buildDesignHtmlPreviewDocument } from "@/lib/design-html-srcdoc"
@@ -1516,7 +1516,8 @@ export function DesignView({
   } | null>(null)
   const [exportingPackage, setExportingPackage] = useState(false)
   const [annotationHistorySession, setAnnotationHistorySession] = useState<string | null>(null)
-  const { loadModels, loadProviders } = useAppStore()
+  const loadModels = useAppStore((state) => state.loadModels)
+  const loadProviders = useAppStore((state) => state.loadProviders)
   // Toast notifications
   const [toast, setToast] = useState<{ msg: string; id: number } | null>(null)
   const toastTimeoutsRef = useRef<Array<ReturnType<typeof setTimeout>>>([])
@@ -1585,7 +1586,6 @@ export function DesignView({
     getDesignSystemGroupLabel(system.category || system.source)
   )
 
-  const setInputValue = (val: string) => updateTs(activeTabId, { inputValue: val })
   const setTweaksOn = (val: boolean | ((v: boolean) => boolean)) =>
     updateTs(activeTabId, (prev) => ({
       tweaksOn: typeof val === "function" ? val(prev.tweaksOn) : val
@@ -1602,12 +1602,12 @@ export function DesignView({
   // ── helpers ──────────────────────────────────────────────
 
   const updateTs = useCallback(
-    (tabId: string, patch: Partial<TabState> | ((prev: TabState) => Partial<TabState>), meta?: Partial<SessionMeta>) => {
+    (tabId: string, patch: Partial<TabState> | ((prev: TabState) => Partial<TabState>), meta?: Partial<SessionMeta>, render = true) => {
       const current = tabStatesRef.current[tabId] ?? makeTabState()
       const updates = typeof patch === "function" ? patch(current) : patch
       const next = { ...tabStatesRef.current, [tabId]: { ...current, ...updates } }
       tabStatesRef.current = next
-      setTabStates(next)
+      if (render) setTabStates(next)
       const id = currentSessionIdRef.current
       if (id)
         void getDesignSessionClient()
@@ -1618,6 +1618,23 @@ export function DesignView({
     },
     [showToast]
   )
+
+  const setInputValue = useCallback((value: string) => {
+    const previous = tabStatesRef.current[activeTabId]?.inputValue ?? ""
+    // The native textarea keeps its caret/undo state. Only input-dependent UI
+    // (send availability and slash search) needs a full workspace render.
+    const render = Boolean(previous.trim()) !== Boolean(value.trim()) ||
+      previous.match(/^\/(\S*)$/)?.[1] !== value.match(/^\/(\S*)$/)?.[1]
+    updateTs(activeTabId, { inputValue: value }, undefined, render)
+  }, [activeTabId, updateTs])
+
+  useLayoutEffect(() => {
+    const input = composerRef.current
+    const value = tabStatesRef.current[activeTabId]?.inputValue ?? ""
+    // External updates (send, skill selection, restore or session switch) still
+    // synchronize the field, without assigning .value on ordinary keystrokes.
+    if (input && input.value !== value) input.value = value
+  })
 
   const scheduleArtifactSave = useCallback(
     (pendingSave: PendingArtifactSave) => {
@@ -1828,9 +1845,6 @@ export function DesignView({
   useEffect(() => {
     activeTabIdRef.current = activeTabId
   }, [activeTabId])
-  useEffect(() => {
-    tabStatesRef.current = tabStates
-  }, [tabStates])
   useEffect(() => {
     const messageList = messageListRef.current
     if (!messageList) return
@@ -3593,7 +3607,7 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
 
   const handleSendDrawStrokes = useCallback(() => {
     const tabId = activeTabId
-    const state = tabStates[tabId]
+    const state = tabStatesRef.current[tabId]
     const annotationCount = (state?.drawStrokes.length ?? 0) + (state?.drawNotes.length ?? 0)
     if (!state || annotationCount === 0) return
 
@@ -3636,20 +3650,21 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
       }),
         ...state.drawNotes.filter((note) => !note.strokeId).map((note) => ({ ...note.anchor, instruction: note.text }))]
     )
-  }, [activeTabId, tabStates, updateTs, startGeneration, buildDrawPrompt])
+  }, [activeTabId, updateTs, startGeneration, buildDrawPrompt])
 
   // ── Send message ──────────────────────────────────────────
 
   const handleSend = useCallback(async () => {
-    const attachedImage = tabStates[activeTabId]?.attachedImage ?? null
-    const selectedModelId = tabStates[activeTabId]?.selectedModelId ?? undefined
-    const selectedSkill = tabStates[activeTabId]?.selectedSkill ?? null
-    const codeContext = tabStates[activeTabId]?.codeContext ?? null
-    const attachedFiles = tabStates[activeTabId]?.attachedFiles ?? null
-    const prompt = (tabStates[activeTabId]?.inputValue ?? "").trim() ||
+    const draft = tabStatesRef.current[activeTabId]
+    const attachedImage = draft?.attachedImage ?? null
+    const selectedModelId = draft?.selectedModelId ?? undefined
+    const selectedSkill = draft?.selectedSkill ?? null
+    const codeContext = draft?.codeContext ?? null
+    const attachedFiles = draft?.attachedFiles ?? null
+    const prompt = (draft?.inputValue ?? "").trim() ||
       (attachedFiles?.some((file) => file.sourceUrl) ? "请参考链接页面，直接生成可编辑设计。" : "")
     if (!prompt && !attachedImage) return
-    const state = tabStates[activeTabId]?.generationState ?? "idle"
+    const state = draft?.generationState ?? "idle"
     if (state === "asking" || state === "generating") return
 
     const workspaceRequirementReason = getWorkspaceRequirementReason({
@@ -3697,7 +3712,7 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
     })
 
     const tabId = activeTabId
-    const stateBeforeSend = tabStates[tabId]
+    const stateBeforeSend = draft
     const hasExistingDesign = hasExistingDesignArtifact(stateBeforeSend)
     const hasDesignProgress = hasExistingDesign || Boolean(stateBeforeSend?.retryPrompt)
 
@@ -3841,7 +3856,7 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
           attachedImage.mimeType,
           tabId,
           selectedModelId,
-          tabStates[tabId]?.selectedDesignSystemId ?? null
+          draft?.selectedDesignSystemId ?? null
         )
       }
       return
@@ -3864,7 +3879,7 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
     // is explicitly selected. Chat history alone is not enough to count as an
     // iteration because failed or question-only runs may leave messages without HTML.
     if (!hasExistingDesign) {
-      const activeDesignSystemId = tabStates[tabId]?.selectedDesignSystemId ?? null
+      const activeDesignSystemId = draft?.selectedDesignSystemId ?? null
       if (selectedSkill || shouldSkipDesignQuestions(prompt)) {
         const generationPrompt = selectedSkill
           ? prompt + contextSuffix
@@ -3883,7 +3898,7 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
       }
     } else {
       // Subsequent messages → iterate on existing design
-      const currentState = tabStates[tabId]
+      const currentState = draft
       const activeVarId = currentState?.activeVariationId ?? null
 
       // ── Multi-turn iteration ──────────────────────────────
@@ -3912,7 +3927,6 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
     }
   }, [
     activeTabId,
-    tabStates,
     updateTs,
     startAskQuestions,
     startGeneration,
@@ -4069,6 +4083,7 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
   )
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.nativeEvent.isComposing || e.keyCode === 229) return
     if (isSlashMode) {
       if (e.key === "Escape") {
         e.preventDefault()
@@ -4774,7 +4789,7 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
             ) : (
               <div ref={messageListRef} className="design-conversation-messages" style={S.messageList}>
                 {ts.messages.map((msg, i) => (
-                  <MessageBubble key={i} message={msg} hasLiveOutput={Boolean(ts.liveOutput)} />
+                  <MessageBubble key={msg.id ?? i} message={msg} hasLiveOutput={Boolean(msg.isStreaming && ts.liveOutput)} />
                 ))}
                 {isAsking && (
                   <div
@@ -5103,7 +5118,8 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
               )}
               <textarea
                 ref={composerRef}
-                value={inputValue}
+                defaultValue={inputValue}
+                spellCheck={false}
                 onChange={(e) => setInputValue(e.target.value)}
                 onKeyDown={handleKeyDown}
                 placeholder={

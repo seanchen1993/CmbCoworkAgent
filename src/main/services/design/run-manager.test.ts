@@ -936,6 +936,38 @@ describe("background design conversations", () => {
     ])
   })
 
+  it("persists only the read cursor without rewriting history, and leaves memory intact on storage failure", async () => {
+    const h = harness()
+    h.create()
+    const emit = await h.start()
+    emit({ type: "token", token: "已生成的内容" })
+    await vi.advanceTimersByTimeAsync(100)
+    const before = h.manager.get("ds_a")
+    const persistedBefore = h.store.get("ds_a")!
+    const history = h.db.exec("SELECT payload FROM design_messages ORDER BY ordinal")
+    const write = vi.spyOn(h.db, "run")
+    write.mockImplementationOnce(() => { throw new Error("存储不可用") })
+    expect(() => h.manager.markRead("ds_a", before.seq)).toThrow("存储不可用")
+    expect(h.manager.get("ds_a").lastSeenSeq).toBe(before.lastSeenSeq)
+    write.mockClear()
+
+    h.manager.markRead("ds_a", before.seq + 100)
+    expect(write).toHaveBeenCalledOnce()
+    expect(write.mock.calls[0][0]).toMatch(/^UPDATE design_sessions SET last_seen_seq/)
+    expect(h.store.get("ds_a")).toMatchObject({
+      seq: before.seq, lastSeenSeq: before.seq, meta: { unread: false }, state: persistedBefore.state
+    })
+    expect(h.db.exec("SELECT payload FROM design_messages ORDER BY ordinal")).toEqual(history)
+    h.manager.markRead("ds_a", before.seq - 1)
+    h.manager.markRead("ds_a", before.seq)
+    expect(write).toHaveBeenCalledOnce()
+    emit({ type: "token", token: "后续输出" })
+    await vi.advanceTimersByTimeAsync(100)
+    expect(h.store.get("ds_a")!.meta.unread).toBe(true)
+    h.manager.stop("ds_a")
+    h.finishes.get("request-a")!()
+  })
+
   it("retries the original image request with its image input after leaving the page", async () => {
     const h = harness()
     h.create()

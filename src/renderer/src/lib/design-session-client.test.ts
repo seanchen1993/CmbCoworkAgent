@@ -45,6 +45,65 @@ function fixture() {
 }
 
 describe("design view reconnect", () => {
+  it("coalesces typing including clearing a draft, and flushes before closing a session", async () => {
+    vi.useFakeTimers()
+    try {
+      const h = fixture()
+      await h.client.initialize([])
+      const first = h.client.patch("ds_a", { inputValue: "草" })
+      await vi.advanceTimersByTimeAsync(200)
+      const second = h.client.patch("ds_a", { inputValue: "草稿" })
+      await vi.advanceTimersByTimeAsync(200)
+      const cleared = h.client.patch("ds_a", { inputValue: "" })
+      await vi.advanceTimersByTimeAsync(299)
+      expect(h.api.patch).not.toHaveBeenCalled()
+      await vi.advanceTimersByTimeAsync(1)
+      await Promise.all([first, second, cleared])
+      expect(h.api.patch).toHaveBeenCalledExactlyOnceWith("ds_a", { inputValue: "" })
+
+      const a = h.client.patch("ds_a", { inputValue: "切换前的草稿" })
+      const b = h.client.patch("ds_b", { inputValue: "另一个会话" })
+      h.client.close("ds_a")
+      await a
+      expect(h.api.patch).toHaveBeenCalledTimes(2)
+      expect(h.api.patch).toHaveBeenLastCalledWith("ds_a", { inputValue: "切换前的草稿" })
+      await h.client.flush("ds_b")
+      await b
+      expect(h.api.patch).toHaveBeenLastCalledWith("ds_b", { inputValue: "另一个会话" })
+      await vi.advanceTimersByTimeAsync(300)
+      expect(h.api.patch).toHaveBeenCalledTimes(3)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it("does not replay a delayed input draft after sending and clearing the composer", async () => {
+    const h = fixture()
+    await h.client.initialize([])
+    const draft = h.client.patch("ds_a", { inputValue: "发送内容" })
+    await h.client.patch("ds_a", {
+      inputValue: "",
+      messages: [{ role: "user", content: "发送内容" }]
+    })
+    await draft
+    expect(vi.mocked(h.api.patch).mock.calls.map((call) => call[1].inputValue)).toEqual(["发送内容", ""])
+  })
+
+  it("notifies once for an IPC reply matching an event and accepts same-seq full open replies", async () => {
+    const h = fixture()
+    await h.client.initialize([])
+    const notify = vi.fn()
+    h.client.subscribe(notify)
+    h.emit(snapshot(1, "已有内容"))
+    h.emit(snapshot(1, "已有内容"))
+    expect(notify).toHaveBeenCalledOnce()
+    h.change({ id: "ds_a", seq: 2, meta: snapshot(2, "后台元数据").meta })
+    vi.mocked(h.api.open).mockResolvedValue(snapshot(2, "完整内容"))
+    await h.client.open("ds_a")
+    expect(h.client.get("ds_a")!.state.messages[0].content).toBe("完整内容")
+    expect(notify).toHaveBeenCalledTimes(3)
+  })
+
   it("keeps parallel metadata updates in place and moves a session only on a new submission", async () => {
     const h = fixture()
     await h.client.initialize([])

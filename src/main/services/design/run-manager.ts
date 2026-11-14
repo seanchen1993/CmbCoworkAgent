@@ -1123,11 +1123,13 @@ export class DesignRunManager {
   }
 
   markRead(id: string, seq: number): void {
-    const next = this.get(id)
-    next.lastSeenSeq = Math.min(next.seq, Math.max(next.lastSeenSeq, seq))
-    next.meta.unread = next.lastSeenSeq < (next.meta.lastActivitySeq ?? 0)
-    this.store.save(next, [])
-    this.sessions.set(id, next)
+    const current = this.sessions.get(id)
+    if (!current) throw new Error("设计会话不存在")
+    const lastSeenSeq = Math.min(current.seq, Math.max(current.lastSeenSeq, seq))
+    if (lastSeenSeq === current.lastSeenSeq) return
+    const meta = { ...current.meta, unread: lastSeenSeq < (current.meta.lastActivitySeq ?? 0) }
+    this.store.markRead(id, lastSeenSeq, meta.unread)
+    this.sessions.set(id, { ...current, meta, lastSeenSeq })
   }
 
   remove(id: string): void {

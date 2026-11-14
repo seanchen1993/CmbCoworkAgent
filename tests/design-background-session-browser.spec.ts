@@ -66,7 +66,7 @@ const bundle = await build({
       name: "fixture-app-store",
       setup(builder) {
         builder.onLoad({ filter: /\/lib\/store\.ts$/ }, () => ({
-          contents: `const state={loadModels:async()=>{},loadProviders:async()=>{}}; export function useAppStore(select){return select?select(state):state;}`,
+          contents: `const state={loadModels:async()=>{},loadProviders:async()=>{}}; export function useAppStore(select){window.designStoreReads=(window.designStoreReads||0)+1;return select?select(state):state;}`,
           loader: "js"
         }))
         builder.onLoad({ filter: /\/api\/leanstar-requirements\.ts$/ }, () => ({
@@ -1356,6 +1356,8 @@ try {
   await page.getByRole("button", { name: "■ 停止", exact: true }).waitFor()
   assert.equal(requests.at(-1)!.isIteration, true)
   assert.equal(requests.at(-1)!.kind, "agent")
+  assert.equal(requests.at(-1)!.cleanUserMsg, "新增页面筛选交互功能，保留当前页面结构和样式",
+    "Send reads the latest input even when typing skips workspace renders")
   assert.match(requests.at(-1)!.currentHtml!, /链接页面/)
   assert.equal(requests.at(-1)!.sourceArtifactPath, editingPage.state.artifactPath)
   emitters.at(-1)!({ type: "error", error: "网页编辑测试结束" })
@@ -1395,12 +1397,34 @@ try {
   await composer.getByText("已加载", { exact: true }).waitFor()
   await composer.getByRole("button", { name: /^(Test|选择模型)$/ }).click()
   await page.getByRole("button", { name: "草稿模型", exact: true }).click()
+  const longDraftText = "长文本输入验证，保留最新草稿和光标位置。\n".repeat(2000)
+  await page.locator("textarea").first().fill(longDraftText)
+  const inputCheck = await page.evaluate(() => {
+    const input = document.querySelector("textarea")!
+    input.focus()
+    input.setSelectionRange(input.value.length, input.value.length)
+    const fixture = window as unknown as { designStoreReads: number }
+    const before = fixture.designStoreReads
+    for (let index = 0; index < 8; index++) document.execCommand("insertText", false, "测")
+    return { workspaceUpdates: fixture.designStoreReads - before, value: input.value,
+      cursor: input.selectionStart }
+  })
+  assert.equal(inputCheck.workspaceUpdates, 0, "ordinary typing does not rerender the entire workspace")
+  assert.equal(inputCheck.value, longDraftText + "测".repeat(8))
+  assert.equal(inputCheck.cursor, inputCheck.value.length, "long-text typing preserves the caret")
+  const runsBeforeComposition = requests.length
+  await page.locator("textarea").first().dispatchEvent("keydown", { key: "Enter", isComposing: true })
+  assert.equal(requests.length, runsBeforeComposition, "IME confirmation does not send the draft")
+  assert.equal(await page.locator("textarea").first().inputValue(), inputCheck.value,
+    "IME confirmation does not clear the long draft")
   const completeDraftText = "  结合文档、网页参考、代码和截图修改当前页面\n保留我的完整草稿。  "
   await page.locator("textarea").first().fill(completeDraftText)
-  await page.waitForFunction(async id => {
-    const snapshot = await (window as any).designRpc("open", id)
-    return snapshot.state.inputValue.includes("保留我的完整草稿") && snapshot.state.selectedModelId === "custom:draft"
-  }, editingPageId)
+  const draftDeadline = Date.now() + 5000
+  while (manager.get(editingPageId).state.inputValue !== completeDraftText ||
+    manager.get(editingPageId).state.selectedModelId !== "custom:draft") {
+    assert.ok(Date.now() < draftDeadline, "the debounced composer draft is persisted")
+    await new Promise<void>((resolve) => setTimeout(resolve, 20))
+  }
   const completeDraft = structuredClone(manager.get(editingPageId).state)
   const runsBeforeDraftImport = requests.length
   await openComposerAction("通过内置浏览器打开")

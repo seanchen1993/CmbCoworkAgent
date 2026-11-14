@@ -19,6 +19,16 @@ export class DesignSessionClient {
   private readonly metas = new Map<string, SessionMeta>()
   private readonly listeners = new Set<() => void>()
   private readonly pending = new Map<string, Promise<unknown>>()
+  private readonly inputDrafts = new Map<
+    string,
+    {
+      inputValue: string
+      timer: ReturnType<typeof setTimeout>
+      promise: Promise<DesignSessionSnapshot>
+      resolve: (snapshot: DesignSessionSnapshot) => void
+      reject: (error: unknown) => void
+    }
+  >()
   private readonly opened = new Set<string>()
   private connected = false
   private readonly versions = new Map<string, number>()
@@ -34,6 +44,13 @@ export class DesignSessionClient {
 
   private accept(change: DesignSessionChange): void {
     if ((this.versions.get(change.id) ?? -1) > change.seq) return
+    // A mutation can arrive through both the change event and its IPC reply.
+    // Still accept a full open reply after a metadata-only event at the same seq.
+    if (
+      this.versions.get(change.id) === change.seq &&
+      !change.deleted &&
+      (!change.snapshot || this.snapshots.get(change.id)?.seq === change.seq)
+    ) return
     if (change.draftHtmlOmitted && change.snapshot?.state.draftPreview) {
       const cached = this.snapshots.get(change.id)?.state.draftPreview
       const draft = change.snapshot.state.draftPreview
@@ -107,6 +124,7 @@ export class DesignSessionClient {
   }
 
   private enqueue<T>(id: string, action: () => Promise<T>): Promise<T> {
+    this.flushInput(id)
     const previous = this.pending.get(id) ?? Promise.resolve()
     // Failure is visible to the caller and keeps subsequent commands from silently starting a run.
     const next = previous.then(action)
@@ -129,7 +147,18 @@ export class DesignSessionClient {
     return snapshot
   }
   flush(id: string): Promise<unknown> {
+    this.flushInput(id)
     return this.pending.get(id) ?? Promise.resolve()
+  }
+
+  private flushInput(id: string): void {
+    const draft = this.inputDrafts.get(id)
+    if (!draft) return
+    clearTimeout(draft.timer)
+    this.inputDrafts.delete(id)
+    void this.enqueue(id, async () =>
+      this.apply(await this.api.patch(id, { inputValue: draft.inputValue }))
+    ).then(draft.resolve, draft.reject)
   }
   inspectEditable(id: string): Promise<DesignEditableDocument> {
     return this.enqueue(id, async () => {
@@ -171,6 +200,29 @@ export class DesignSessionClient {
     patch: Partial<TabState>,
     meta?: Partial<SessionMeta>
   ): Promise<DesignSessionSnapshot> {
+    if (!meta && Object.keys(patch).length === 1 && typeof patch.inputValue === "string") {
+      const draft = this.inputDrafts.get(id)
+      if (draft) {
+        draft.inputValue = patch.inputValue
+        clearTimeout(draft.timer)
+        draft.timer = setTimeout(() => this.flushInput(id), 300)
+        return draft.promise
+      }
+      let resolve!: (snapshot: DesignSessionSnapshot) => void
+      let reject!: (error: unknown) => void
+      const promise = new Promise<DesignSessionSnapshot>((onResolve, onReject) => {
+        resolve = onResolve
+        reject = onReject
+      })
+      this.inputDrafts.set(id, {
+        inputValue: patch.inputValue,
+        timer: setTimeout(() => this.flushInput(id), 300),
+        promise,
+        resolve,
+        reject
+      })
+      return promise
+    }
     return this.enqueue(id, async () => this.apply(await this.api.patch(id, patch, meta)))
   }
   tweak(id: string, command: DesignTweakCommand): Promise<DesignSessionSnapshot> {
@@ -223,6 +275,7 @@ export class DesignSessionClient {
     return this.apply(snapshot)
   }
   close(id: string): void {
+    this.flushInput(id)
     this.opened.delete(id)
     this.openVersions.set(id, (this.openVersions.get(id) ?? 0) + 1)
     void this.api.close(id).catch(console.error)
