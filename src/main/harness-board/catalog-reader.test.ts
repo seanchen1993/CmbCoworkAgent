@@ -25,7 +25,12 @@ import {
 import { HARNESS_WORKER_RESOURCE_LIMITS, harnessWorkerOptions } from "./worker-limits"
 import { createProjectTemplate } from "../mods/devtools/project-template"
 import { HARNESS_PROJECT_TEXT_MAX_CHARS } from "./store-limits"
-import { protectMarketDirectory } from "../services/market-content"
+import {
+  encodeMarketContent,
+  MARKET_CONTENT_MARKER,
+  MARKET_CONTENT_PREFIX,
+  protectMarketDirectory
+} from "../services/market-content"
 import {
   HARNESS_DEPLOY_UNIT_MAPPING_MAX_ENTRIES,
   HARNESS_FRAMEWORK_DEPLOY_UNIT_CONTEXT_MAX_ENTRIES
@@ -323,6 +328,40 @@ describe("Harness catalog reader", () => {
       })
     }
   )
+
+  it("keeps decoded size and malformed envelope checks for market board configs", async () => {
+    const paths = await makeCatalog(1)
+    const pluginRoot = join(paths.plugins, "..", "plugin")
+    const configPath = join(pluginRoot, "board_core", "board_config.json")
+    const max = HARNESS_BOARD_CONFIG_MAX_BYTES
+    const json = JSON.stringify({ apiVersion: 1 })
+    const atLimit = encodeMarketContent(Buffer.from(json.padEnd(max)))
+    const aboveLimit = encodeMarketContent(Buffer.from(json.padEnd(max + 1)))
+    expect(atLimit.byteLength).toBeGreaterThan(max)
+    expect(aboveLimit.byteLength).toBe(atLimit.byteLength)
+    writeFileSync(
+      join(pluginRoot, MARKET_CONTENT_MARKER),
+      JSON.stringify({ version: 1, origin: "market", complete: true })
+    )
+
+    const readConfig = (content: string | Buffer) => {
+      writeFileSync(configPath, content)
+      resetHarnessCatalogReaderCacheForTests()
+      return readHarnessProjectContexts(paths.projects, paths.plugins, ["project-0"]).projects[
+        "project-0"
+      ]?.configSnapshot
+    }
+
+    expect(readConfig(atLimit)).toMatchObject({ value: { apiVersion: 1 }, error: null })
+    expect(readConfig(aboveLimit)).toEqual({
+      value: null,
+      error: `Harness board config exceeded ${max} bytes`
+    })
+    expect(readConfig(MARKET_CONTENT_PREFIX + "!")).toEqual({
+      value: null,
+      error: "市场资源编码损坏，请重新安装"
+    })
+  })
 
   it("keeps UTF-8 byte boundaries and cursors for project and registry rows", async () => {
     const paths = await makeCatalog(3)

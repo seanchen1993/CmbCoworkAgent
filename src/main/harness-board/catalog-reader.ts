@@ -129,9 +129,10 @@ function fileSignature(path: string): string {
 function assertFileWithin(path: string, maxBytes: number, label: string): void {
   if (!existsSync(path)) return
   const size = statSync(path).size
+  if (size <= maxBytes) return
   if (
     size > getMarketContentStoredLimit(path, maxBytes) ||
-    (size > maxBytes && readContentFileSync(path).byteLength > maxBytes)
+    readContentFileSync(path).byteLength > maxBytes
   )
     throw new Error(`${label} exceeded ${maxBytes} bytes`)
 }
