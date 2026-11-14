@@ -4256,8 +4256,11 @@ export interface WorkflowRunStore {
    * Write the final state (with .bak) and wait for it to land. Call once at the
    * end of the run and AWAIT it before reporting the run done. Throttled saves
    * during the run are async and non-blocking; this guarantees durability.
+   * The optional terminal mutation runs after earlier writes, inside the same
+   * file lock, without scheduling another save. Apply it only on the first
+   * attempt, then retry a failed write by calling flush() without a mutation.
    */
-  flush(): Promise<boolean>
+  flush(applyTerminal?: (run: PersistedWorkflowRun) => void): Promise<boolean>
   /**
    * Persist (resultJson != null) or clear (null) the COMPLETE result in the
    * `<runId>.result` sidecar, serialized through the same write chain as the run
@@ -4283,11 +4286,11 @@ export interface WorkflowRunStore {
 const SAVE_THROTTLE_MS = 500
 
 /**
- * Latest store generation per run file. An abandoned engine (user aborted the
+ * Latest store identity per run file. An abandoned engine (user aborted the
  * turn but its drain is still finishing) must not overwrite the file after a
  * newer resume of the same runId has taken over.
  */
-const storeGenerations = new Map<string, number>()
+const storeGenerations = new Map<string, symbol>()
 
 /**
  * Run directories whose thread has been deleted. Any persist targeting one of
@@ -4498,7 +4501,7 @@ export function createWorkflowRunStore(options: {
     journal: initial.journal.map((entry) => ({ ...entry })),
     stats: { ...initial.stats }
   }
-  const generation = (storeGenerations.get(path) ?? 0) + 1
+  const generation = Symbol()
   storeGenerations.set(path, generation)
   // Disposal epoch at birth: if the thread gets deleted after this store was
   // created, the epochs diverge and every later write goes silent — even if a
@@ -4670,14 +4673,22 @@ export function createWorkflowRunStore(options: {
       return false
     }
   }
-  const doWrite = (withBak: boolean, isInitial = false): Promise<boolean> =>
-    withRunFileMutation(path, () => doWriteUnlocked(withBak, isInitial))
-
-  const enqueueWrite = (withBak: boolean, isInitial = false): Promise<boolean> => {
+  const enqueueWrite = (
+    withBak: boolean,
+    isInitial = false,
+    applyTerminal?: (run: PersistedWorkflowRun) => void
+  ): Promise<boolean> => {
     // Keep the serialization chain (writeChain) a VOID promise so a failed write
     // never poisons later writes, but return THIS write's success to the caller —
     // flush() / whenInitialPersisted need to know whether it actually persisted.
-    const result = writeChain.then(() => doWrite(withBak, isInitial))
+    const result = writeChain.then(() =>
+      withRunFileMutation(path, () => {
+        // Prior saves have drained. Update this store's in-memory outcome
+        // even if disposal or a replacement now forbids its disk write.
+        applyTerminal?.(state)
+        return doWriteUnlocked(withBak, isInitial)
+      })
+    )
     writeChain = result.then(
       () => undefined,
       () => undefined
@@ -4873,7 +4884,7 @@ export function createWorkflowRunStore(options: {
       )
       return result
     },
-    async flush() {
+    async flush(applyTerminal) {
       if (timer) {
         clearTimeout(timer)
         timer = null
@@ -4881,12 +4892,9 @@ export function createWorkflowRunStore(options: {
       // Chain the final write after any in-flight throttled save and AWAIT it, so
       // the caller knows the run is durably persisted (with .bak). Return whether it
       // actually reached disk so the caller can warn/retry on a final-persist failure.
-      const persisted = await enqueueWrite(true)
-      // flush() is the run's final write (called from the engine/run-manager
-      // after the engine fully drains). If we still own the generation, drop
-      // the map entry so it doesn't accumulate one stale key per run for the
-      // process lifetime. A later resume of this runId re-registers from 1,
-      // which is safe because no overlapping store exists once flush has run.
+      const persisted = await enqueueWrite(true, false, applyTerminal)
+      // Drop this exact ownership after a successful final write, even when a
+      // future resume will use the same runId and file.
       // Only drop the generation when the final write actually SUCCEEDED. On
       // failure, KEEP ownership so a retry flush() truly re-attempts the write
       // instead of hitting the stale-writer fast-path above (which returns true and

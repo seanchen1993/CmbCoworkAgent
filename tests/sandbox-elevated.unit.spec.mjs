@@ -2182,18 +2182,58 @@ test("workflow settle reports + retries a failed final persist (no stale notific
     "the original settled body executes under its captured plugin source")
   assert.match(assignment.getText(ast), /return settle\(\{ error \}\)/,
     "a synchronous source binding failure still enters the original cleanup")
-  // #4: flush() reports success now; settle must retry once and log loudly on a
-  // failed final persist instead of broadcasting a notification over a stale run.
-  assert.match(
-    workflowRunStoreSource,
-    /flush\(\): Promise<boolean>/,
-    "flush reports persist success/failure"
-  )
-  assert.match(
-    settledBody,
-    /const finalPersisted = \(await runStore\.flush\(\)\) \|\| \(await runStore\.flush\(\)\)/,
-    "settle retries the final flush once"
-  )
+  const storeAst = ts.createSourceFile("run-store.ts", workflowRunStoreSource,
+    ts.ScriptTarget.Latest, true)
+  const store = storeAst.statements.find(node =>
+    ts.isInterfaceDeclaration(node) && node.name.text === "WorkflowRunStore")
+  const flush = store?.members.find(node => ts.isMethodSignature(node) &&
+    node.name.getText(storeAst) === "flush")
+  assert(flush && flush.type?.getText(storeAst) === "Promise<boolean>",
+    "flush reports persist success/failure")
+  assert.equal(flush.parameters.length, 1)
+  const terminalParameter = flush.parameters[0]
+  assert(terminalParameter.questionToken && terminalParameter.type &&
+    ts.isFunctionTypeNode(terminalParameter.type) &&
+    terminalParameter.type.parameters.length === 1 &&
+    terminalParameter.type.parameters[0].type?.getText(storeAst) === "PersistedWorkflowRun" &&
+    terminalParameter.type.type.kind === ts.SyntaxKind.VoidKeyword,
+    "flush accepts an optional synchronous terminal mutation")
+
+  const settlement = settle.body.statements.find(ts.isTryStatement)?.finallyBlock?.statements[0]
+  assert(settlement && ts.isTryStatement(settlement), "the actual final settlement guard is present")
+  const settlementSteps = settlement.tryBlock.statements
+  const reclaim = settlementSteps.find(ts.isTryStatement)
+  const finalPersisted = settlementSteps.filter(ts.isVariableStatement)
+    .flatMap(statement => [...statement.declarationList.declarations])
+    .find(declaration => declaration.name.getText(ast) === "finalPersisted")
+  assert(reclaim && finalPersisted && reclaim.getEnd() < finalPersisted.getStart(ast),
+    "the final persist follows the guarded worktree reclaim")
+  const awaitedCall = (expression, callee) => {
+    if (expression && ts.isParenthesizedExpression(expression)) expression = expression.expression
+    assert(expression && ts.isAwaitExpression(expression) &&
+      ts.isCallExpression(expression.expression) && expression.expression.expression.getText(ast) === callee,
+      `settle awaits ${callee}`)
+    return expression.expression
+  }
+  const reclaimWork = reclaim.tryBlock.statements[0]
+  assert(reclaimWork && ts.isExpressionStatement(reclaimWork))
+  assert.equal(awaitedCall(reclaimWork.expression, "entry.worktrees.reclaimAll").arguments.length, 0)
+  const persist = finalPersisted.initializer
+  assert(persist && ts.isBinaryExpression(persist) &&
+    persist.operatorToken.kind === ts.SyntaxKind.BarBarToken,
+    "settle retries the final flush once only if the first attempt failed")
+  const initialFlush = awaitedCall(persist.left, "runStore.flush")
+  const retryFlush = awaitedCall(persist.right, "runStore.flush")
+  assert.equal(retryFlush.arguments.length, 0, "the retry persists without reapplying the terminal mutation")
+  assert.equal(initialFlush.arguments.length, 1)
+  const apply = initialFlush.arguments[0]
+  assert(ts.isArrowFunction(apply) && !apply.modifiers?.some(node => node.kind === ts.SyntaxKind.AsyncKeyword) &&
+    apply.parameters.length === 1 && apply.parameters[0].getText(ast) === "run" && ts.isBlock(apply.body),
+    "the first attempt synchronously applies the staged terminal state")
+  assert.deepEqual(apply.body.statements.map(statement => statement.getText(ast)), [
+    "completion.apply(run)",
+    "if (entry.userCancelled) run.notificationDelivered = true"
+  ])
   assert.match(
     settledBody,
     /if \(!finalPersisted\)[\s\S]*?could NOT be persisted/,

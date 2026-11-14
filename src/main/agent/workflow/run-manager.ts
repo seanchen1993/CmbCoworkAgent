@@ -10,7 +10,7 @@ import { workspacePathsOverlap } from "../../../shared/workspace-path"
 import { serializeWorkflowAgentSnapshotMessages } from "./agent-snapshot"
 import { observeWorkflowRun, type WorkflowRunObservation } from "./observation"
 import { emitWorkflowObservationChange } from "./observation-events"
-import { runWorkflowEngine, toJsonSafe } from "./engine"
+import { runWorkflowEngine, toJsonSafe, type WorkflowEngineTerminal } from "./engine"
 import { nativeWorkflowDeterministicActionRunner, nativeWorkflowDeadlineReceiptVerifier } from "./deterministic-action-native"
 import { workflowResourceDeadlineSignal } from "./resource-deadline"
 import { createWorkflowWorktreeResourceRunner } from "./worktree-resource"
@@ -1470,6 +1470,10 @@ class WorkflowRunManager {
       }
     }
     const settle = async (sourceFailure?: { error: unknown }) => {
+      let terminal: {
+        apply: WorkflowEngineTerminal["apply"]
+        event?: WorkflowEngineTerminal["event"]
+      } | undefined
       try {
         if (sourceFailure) throw sourceFailure.error
         try {
@@ -1487,9 +1491,13 @@ class WorkflowRunManager {
             workflowEvent: { kind: "log", runId: request.runId, message: request.resumeNote! }
           })
         }
+        let stagedTerminal: WorkflowEngineTerminal | undefined
         const engineResult = await runWorkflowEngine({
           parsed: request.parsed,
           runStore,
+          stageTerminal(terminal) {
+            stagedTerminal = terminal
+          },
           args: request.args,
           tokenBudget: request.tokenBudget ?? null,
           agentProfiles: request.agentProfiles,
@@ -1634,6 +1642,8 @@ class WorkflowRunManager {
           isAwaitingApproval: () =>
             request.subagentDeps.hasPendingApproval?.(request.runId) ?? false
         })
+        if (!stagedTerminal) throw Error("WORKFLOW_TERMINAL_STATE_UNAVAILABLE")
+        terminal = stagedTerminal
         console.log("[Workflow] Background run settled:", {
           threadId: request.threadId,
           runId: request.runId,
@@ -1643,16 +1653,17 @@ class WorkflowRunManager {
         // runWorkflowEngine finalizes internally for every known path; this
         // catch is a backstop against unexpected synchronous faults.
         console.error("[Workflow] Background run crashed:", error)
-        runStore.update((run) => {
-          run.status = "error"
-          run.error = error instanceof Error ? error.message : String(error)
-          run.completedAt = new Date().toISOString()
-          // The foreground tool call already receives this launch failure. Mark
-          // it delivered so hydration cannot later turn the same failed launch
-          // into a second, misleading background completion notification.
-          if (launchInitializationFailed) run.notificationDelivered = true
-        })
-        await runStore.flush()
+        const message = error instanceof Error ? error.message : String(error)
+        const completedAt = new Date().toISOString()
+        terminal = {
+          apply(run) {
+            run.status = "error"
+            run.error = message
+            run.completedAt = completedAt
+            // The foreground tool call already receives a launch failure.
+            if (launchInitializationFailed) run.notificationDelivered = true
+          }
+        }
       } finally {
         try {
           // Reclaim any worktree the run still owns. In the normal case every
@@ -1662,15 +1673,26 @@ class WorkflowRunManager {
           // Kept deliverables are untouched. Awaited (with the ledger's per-worktree
           // timeout) so a completed run never reports finished while checkouts it
           // created are still on disk.
-          await entry.worktrees.reclaimAll()
+          let reclaimFailure: { error: unknown } | undefined
+          try {
+            await entry.worktrees.reclaimAll()
+          } catch (error) {
+            reclaimFailure = { error }
+            physicalCleanupFailure = error instanceof Error ? error : Error(String(error))
+          }
+          const completion =
+            terminal ?? (await Promise.reject<never>(Error("WORKFLOW_TERMINAL_STATE_UNAVAILABLE")))
           // Final persist. If it fails (disk full / permissions) the in-memory run is
           // complete but disk is stale, so the notification (read from disk) and a
           // later resume/reload could be incomplete. Retry once for a transient fault;
           // log loudly either way. We still broadcast below so the user isn't left
           // hanging — the live panel is correct from the event stream.
-          const finalPersisted = (await runStore.flush()) || (await runStore.flush())
+          const finalPersisted = (await runStore.flush((run) => {
+            completion.apply(run)
+            if (entry.userCancelled) run.notificationDelivered = true
+          })) || (await runStore.flush())
           if (!finalPersisted) {
-            physicalCleanupFailure = Error("WORKFLOW_FINAL_PERSIST_UNCONFIRMED")
+            physicalCleanupFailure ??= Error("WORKFLOW_FINAL_PERSIST_UNCONFIRMED")
             console.error(
               `[Workflow] Run ${request.runId} completed but its final state could NOT be persisted (disk full / permissions?) — keeping an in-memory snapshot so its notification still reports the real result.`
             )
@@ -1681,6 +1703,10 @@ class WorkflowRunManager {
           if (!entry.userCancelled && !finalPersisted) {
             this.captureFlushFailedRun(request, runStore.captureFlushFailureSnapshot())
           }
+          if (completion.event) {
+            broadcast(request.threadId, { type: "workflow_progress", workflowEvent: completion.event })
+          }
+          if (reclaimFailure) await Promise.reject(reclaimFailure.error)
           // Keep the run active until its last live-store writer, manifest
           // finalization, and async history prune have settled. Besides preventing
           // UI integration from racing the final flush, this closes the new async
@@ -1718,16 +1744,15 @@ class WorkflowRunManager {
               runId: request.runId,
               notificationOwner: runStore.state.notificationOwner ?? "desktop"
             })
-          } else if (entry.userCancelled) {
-            // Mark the cancelled run delivered too: otherwise a later hydrate's
-            // findUndeliveredTerminalRun would resurface this aborted run as a
-            // pending notification and fire a model turn the user never asked for
-            // (engine finalize("aborted") leaves delivered=false). markNotified
-            // swallows IO errors, so it's safe in finally.
-            await markWorkflowRunNotified(request.workspacePath, request.threadId, request.runId)
+          } else if (entry.userCancelled && (!finalPersisted || !runStore.state.notificationDelivered)) {
+            // A late cancellation or failed final write may leave the flag unset
+            // on disk. Only acknowledge this exact instance.
+            await markWorkflowRunNotified(
+              request.workspacePath, request.threadId, request.runId, initial.startedAt
+            )
           }
         } catch (error) {
-          physicalCleanupFailure = error
+          physicalCleanupFailure ??= error instanceof Error ? error : Error(String(error))
           // Early reclaim/flush faults must not strand an admitted source owner.
           if (this.active.get(request.threadId) === entry) await retireSourceOwner()
           await Promise.reject(error)

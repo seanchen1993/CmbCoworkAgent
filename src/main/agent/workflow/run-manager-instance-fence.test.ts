@@ -1,30 +1,46 @@
-import { mkdtempSync, rmSync, writeFileSync } from "fs"
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs"
+import { rename } from "fs/promises"
 import { tmpdir } from "os"
 import { join } from "path"
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest"
 
-// run-manager pulls in electron at import time; the fence under test touches none of it.
+const electronSend = vi.hoisted(() => vi.fn())
+
+// Observe manager broadcasts without opening an Electron window.
 vi.mock("electron", () => ({
   app: { getPath: () => tmpdir(), getName: () => "cmb-test", getVersion: () => "0.0.0" },
-  BrowserWindow: { getAllWindows: () => [] },
+  BrowserWindow: {
+    getAllWindows: () => [{ isDestroyed: () => false, webContents: { send: electronSend } }]
+  },
   webContents: { getAllWebContents: () => [] },
   ipcMain: { handle: () => undefined, on: () => undefined }
 }))
 
-import { workflowRunManager } from "./run-manager"
+vi.mock("fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("fs/promises")>()
+  return { ...actual, rename: vi.fn(actual.rename) }
+})
+
+import { workflowRunManager, type WorkflowChannelPayload } from "./run-manager"
+import { validateWorkflowScript } from "./script"
+import { WorkflowWorktreeLedger } from "./worktree-lease"
 import {
   createWorkflowRunStore,
   findUndeliveredTerminalRun,
   generateWorkflowRunId,
+  getWorkflowRunsDir,
   loadWorkflowRun,
+  loadWorkflowRunAsync,
   markWorkflowRunNotified,
+  sha256Hex,
   WORKFLOW_FLUSH_FAILURE_JOURNAL_RESERVATION_BYTES,
   WORKFLOW_FLUSH_FAILURE_METADATA_RESERVATION_BYTES,
   workflowThreadDisposalEpoch
 } from "./run-store"
-import type { PersistedWorkflowRun } from "./types"
+import type { PersistedWorkflowRun, WorkflowWorktreeRecord } from "./types"
 
 const PREVIOUS_WORKFLOW_DATA_ROOT = process.env.CMB_COWORK_AGENT_HOME
+const actualFs = await vi.importActual<typeof import("fs/promises")>("fs/promises")
 
 /**
  * recoverFlushFailedRun's instance fence — the sibling of setWorkflowRunNotified's.
@@ -110,6 +126,8 @@ describe("recoverFlushFailedRun instance fence", () => {
   }
 
   beforeEach(() => {
+    electronSend.mockReset()
+    vi.mocked(rename).mockReset().mockImplementation(actualFs.rename)
     workspace = mkdtempSync(join(tmpdir(), "wf-fence-"))
     workflowDataRoot = mkdtempSync(join(tmpdir(), "cmb-workflow-fence-data-"))
     process.env.CMB_COWORK_AGENT_HOME = workflowDataRoot
@@ -127,6 +145,123 @@ describe("recoverFlushFailedRun instance fence", () => {
     rmSync(workspace, { recursive: true, force: true })
     rmSync(workflowDataRoot, { recursive: true, force: true })
   })
+
+  test.each([false, true])(
+    "publishes a managed outcome after reclaim, preserving the fallback on final write failure (%s)",
+    async (denyTerminal) => {
+      const runId = generateWorkflowRunId()
+      const script = 'export const meta={name:"finish",description:"test"}; return "engine result"'
+      const entered = Promise.withResolvers<void>()
+      const release = Promise.withResolvers<void>()
+      const directory = join(workspace, "owned-checkout")
+      await workflowRunManager.prepareLaunch(workspace, THREAD_ID)
+      const target = join(getWorkflowRunsDir(workspace, THREAD_ID), runId + ".json")
+      mkdirSync(directory)
+      writeFileSync(join(directory, "owned.txt"), "cleanup")
+      const record: WorkflowWorktreeRecord = {
+        id: "owned-checkout",
+        runId,
+        threadId: THREAD_ID,
+        branch: "owned-checkout",
+        directory,
+        workspaceDirectory: directory,
+        sourceRoot: workspace,
+        sourceRelativePath: "",
+        sourceBranch: "main",
+        gitRoot: workspace,
+        commonDir: join(workspace, ".git"),
+        baseCommit: "a".repeat(40),
+        dirty: false,
+        status: "discarded",
+        cleanupPending: true,
+        updatedAt: RESUMED_STARTED_AT
+      }
+      const reclaimAll = WorkflowWorktreeLedger.prototype.reclaimAll
+      vi.spyOn(WorkflowWorktreeLedger.prototype, "reclaimAll").mockImplementationOnce(
+        async function (this: WorkflowWorktreeLedger) {
+          entered.resolve()
+          await release.promise
+          rmSync(directory, { recursive: true })
+          const options = this as unknown as {
+            options: { onRecordChange(record: WorkflowWorktreeRecord): void }
+          }
+          options.options.onRecordChange({ ...record, cleanupPending: false })
+          await reclaimAll.call(this)
+        }
+      )
+      let terminalAttempts = 0
+      vi.mocked(rename).mockImplementation(async (from, to) => {
+        if (String(to) === target && JSON.parse(readFileSync(String(from), "utf8")).status === "completed") {
+          terminalAttempts += 1
+          if (denyTerminal) throw Object.assign(Error("controlled final write denial"), { code: "ENOSPC" })
+        }
+        return actualFs.rename(from, to)
+      })
+      vi.spyOn(console, "warn").mockImplementation(() => undefined)
+      vi.spyOn(console, "error").mockImplementation(() => undefined)
+      const sent: Array<{ phase: string; diskStatus?: string; fallbackStatus?: string }> = []
+      electronSend.mockImplementation((_channel, payload: WorkflowChannelPayload) => {
+        if (payload.workflowEvent?.kind !== "finished" && payload.type !== "workflow_notification") return
+        sent.push({
+          phase: payload.workflowEvent?.kind ?? payload.type,
+          diskStatus: JSON.parse(readFileSync(target, "utf8")).status,
+          fallbackStatus: workflowRunManager.getFlushFailedRun(runId)?.status
+        })
+      })
+      const launch = workflowRunManager.launch({
+        threadId: THREAD_ID,
+        workspacePath: workspace,
+        runId,
+        parsed: validateWorkflowScript(script),
+        script,
+        scriptSha256: sha256Hex(script),
+        existingWorktrees: [record],
+        agentProfiles: [],
+        subagentDeps: {
+          parentThreadId: THREAD_ID,
+          createRuntime: async () => { throw Error("unexpected runtime") },
+          cleanupThread: async () => undefined,
+          isRetryableApiError: () => false
+        }
+      })
+      const lifecycle = workflowRunManager.waitForRunLifecycle(THREAD_ID, runId)
+      try {
+        expect(await launch.whenInitialPersisted).toBe(true)
+        await Promise.race([
+          entered.promise,
+          lifecycle.then(() => { throw Error("workflow settled without the controlled reclaim") })
+        ])
+        expect(existsSync(directory)).toBe(true)
+        expect(terminalAttempts).toBe(0)
+        expect(sent).toEqual([])
+        expect(await loadWorkflowRunAsync(workspace, THREAD_ID, runId)).toMatchObject({
+          status: "running",
+          worktrees: [{ id: record.id, cleanupPending: true }]
+        })
+        expect(await workflowRunManager.findPendingNotificationAsync(workspace, THREAD_ID)).toBeNull()
+      } finally {
+        release.resolve()
+        await lifecycle
+      }
+
+      expect(existsSync(directory)).toBe(false)
+      expect(terminalAttempts).toBe(denyTerminal ? 2 : 1)
+      const durable = await loadWorkflowRunAsync(workspace, THREAD_ID, runId)
+      const fallback = workflowRunManager.getFlushFailedRun(runId)
+      expect(denyTerminal ? fallback : durable).toMatchObject({
+        status: "completed",
+        result: "engine result",
+        worktrees: [{ id: record.id, cleanupPending: false }]
+      })
+      if (denyTerminal) expect(durable?.status).toBe("running")
+      else expect(readFileSync(target + ".bak", "utf8")).toBe(readFileSync(target, "utf8"))
+      expect(sent).toEqual(["finished", "workflow_notification"].map((phase) => ({
+        phase,
+        diskStatus: denyTerminal ? "running" : "completed",
+        fallbackStatus: denyTerminal ? "completed" : undefined
+      })))
+    }
+  )
 
   test("a stale ack persists the resumed snapshot but never marks it delivered", async () => {
     const runId = generateWorkflowRunId()

@@ -1,12 +1,20 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises"
+import { readFileSync } from "node:fs"
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { join, resolve } from "node:path"
 import { tmpdir } from "node:os"
 import { afterEach, expect, it, vi } from "vitest"
-import { runWorkflowEngine, type WorkflowEngineOptions } from "./engine"
+import { runWorkflowEngine, type WorkflowEngineOptions, type WorkflowEngineTerminal } from "./engine"
 import { runWorkflowScriptInSandbox } from "./sandbox"
 import { validateWorkflowScript } from "./script"
-import { createWorkflowRunStore, generateWorkflowRunId, sha256Hex } from "./run-store"
+import {
+  createWorkflowRunStore,
+  generateWorkflowRunId,
+  getWorkflowRunsDir,
+  loadWorkflowRunAsync,
+  sha256Hex
+} from "./run-store"
 import type { WorkflowDeterministicActionRunner } from "./deterministic-action"
+import type { WorkflowWorktreeRecord } from "./types"
 
 const cleanup: Array<() => Promise<void>> = []
 afterEach(async () => {
@@ -106,6 +114,81 @@ it("executes a deterministic node through the real sandbox and engine without a 
     expect.any(AbortSignal)
   )
   expect(f.runStore.state.journal).toEqual([])
+})
+
+it("leaves a managed engine outcome unpublished until the owner has reclaimed the worktree", async () => {
+  const f = await fixture('return "x".repeat(70000)')
+  const { runId, threadId, startedAt } = f.runStore.state
+  const directory = join(f.workspace, "worktree")
+  await mkdir(directory)
+  await writeFile(join(directory, "outstanding.txt"), "reclaim me")
+  const worktree: WorkflowWorktreeRecord = {
+    id: "outstanding",
+    runId,
+    threadId,
+    branch: "checkout",
+    directory,
+    workspaceDirectory: directory,
+    sourceRoot: f.workspace,
+    sourceRelativePath: "",
+    sourceBranch: "main",
+    gitRoot: f.workspace,
+    commonDir: join(f.workspace, ".git"),
+    baseCommit: "a".repeat(40),
+    dirty: false,
+    status: "discarded",
+    cleanupPending: true,
+    updatedAt: startedAt
+  }
+  f.runStore.update((run) => {
+    run.worktrees = [worktree]
+  })
+  const stageTerminal = vi.fn<(terminal: WorkflowEngineTerminal) => void>()
+  const emit = vi.fn<WorkflowEngineOptions["emit"]>()
+  const result = await f.run({ stageTerminal, emit })
+  expect(result).toMatchObject({ status: "completed", result: "x".repeat(70000) })
+  expect(stageTerminal).toHaveBeenCalledOnce()
+  expect(emit.mock.calls.map(([event]) => event.kind)).toEqual(["started"])
+  expect(f.runStore.state.status).toBe("running")
+  expect(await loadWorkflowRunAsync(f.workspace, threadId, runId)).toMatchObject({
+    status: "running"
+  })
+
+  await rm(directory, { recursive: true })
+  f.runStore.update((run) => {
+    run.worktrees = [{ ...worktree, cleanupPending: false }]
+  })
+  const terminal = stageTerminal.mock.calls[0][0]
+  expect(terminal.event).toMatchObject({ kind: "finished", runId, status: result.status })
+  expect(await f.runStore.flush(terminal.apply)).toBe(true)
+
+  const persisted = await loadWorkflowRunAsync(f.workspace, threadId, runId)
+  expect(persisted).toMatchObject({
+    status: "completed",
+    resultSidecarStatus: "available",
+    stats: result.stats,
+    worktrees: [{ id: worktree.id, cleanupPending: false }]
+  })
+  const runPath = join(getWorkflowRunsDir(f.workspace, threadId), runId)
+  expect(await readFile(runPath + ".json.bak", "utf8")).toBe(await readFile(runPath + ".json", "utf8"))
+  expect(JSON.parse(await readFile(runPath + ".result", "utf8"))).toBe(result.result)
+})
+
+it("persists a standalone engine outcome before emitting its original finished event", async () => {
+  const f = await fixture('return "standalone result"')
+  const { runId, threadId } = f.runStore.state
+  const runPath = join(getWorkflowRunsDir(f.workspace, threadId), runId + ".json")
+  const readAtFinish = vi.fn(() => JSON.parse(readFileSync(runPath, "utf8")))
+  const emit = vi.fn<WorkflowEngineOptions["emit"]>((event) => {
+    if (event.kind === "finished") readAtFinish()
+  })
+  await expect(f.run({ emit })).resolves.toMatchObject({ status: "completed" })
+  expect(emit.mock.calls.map(([event]) => event.kind)).toEqual(["started", "finished"])
+  expect(readAtFinish).toHaveBeenCalledOnce()
+  expect(readAtFinish.mock.results[0].value).toMatchObject({
+    status: "completed",
+    result: "standalone result"
+  })
 })
 
 it("does not finalize a fire-and-forget action until its original native work settles", async () => {

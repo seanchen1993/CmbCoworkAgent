@@ -136,6 +136,104 @@ describe("workflow primary atomic rename", () => {
     expect(JSON.parse(readFileSync(target, "utf8")).workflowName).toBe("pending-change")
   })
 
+  test("applies the terminal mutation after preceding physical writes and only once on retry", async () => {
+    const store = createWorkflowRunStore({
+      workspacePath: workspace,
+      threadId,
+      initial: initial(threadId)
+    })
+    expect(await store.whenInitialPersisted).toBe(true)
+    const entered = Promise.withResolvers<void>()
+    const release = Promise.withResolvers<void>()
+    const attemptedStatuses: string[] = []
+    let deniedTerminal = false
+    vi.mocked(rename).mockImplementation(async (from, to) => {
+      if (String(to) === target) {
+        const { status } = JSON.parse(readFileSync(String(from), "utf8"))
+        attemptedStatuses.push(status)
+        if (status === "completed" && !deniedTerminal) {
+          deniedTerminal = true
+          throw Object.assign(new Error("controlled terminal write denial"), { code: "ENOSPC" })
+        }
+      } else if (String(to) === target.replace(/\.json$/u, ".result")) {
+        entered.resolve()
+        await release.promise
+      }
+      return actualFs.rename(from, to)
+    })
+    const preceding = store.persistFullResult(JSON.stringify("full outcome"))
+    await entered.promise
+    const clock = vi.spyOn(Date, "now").mockReturnValue(Date.now() + 1000)
+    try {
+      // A normal tail update must queue behind the held physical write and
+      // publish while the run still appears running.
+      store.update((run) => {
+        run.logs.push("worktree reclaim completed")
+      })
+    } finally {
+      clock.mockRestore()
+    }
+    const terminal = vi.fn((run: PersistedWorkflowRun) => {
+      run.status = "completed"
+      run.result = "bounded outcome"
+    })
+    const final = store.flush(terminal)
+    let statusBeforeRelease: unknown
+    const terminalCallsBeforeRelease = terminal.mock.calls.length
+    try {
+      statusBeforeRelease = JSON.parse(readFileSync(target, "utf8")).status
+    } finally {
+      release.resolve()
+    }
+    expect(await preceding).toBe(true)
+    expect(await final).toBe(false)
+    expect(terminalCallsBeforeRelease).toBe(0)
+    expect(statusBeforeRelease).toBe("running")
+    expect(terminal).toHaveBeenCalledOnce()
+    expect(JSON.parse(readFileSync(target, "utf8"))).toMatchObject({
+      status: "running",
+      logs: ["worktree reclaim completed"]
+    })
+    expect(await store.flush()).toBe(true)
+    expect(terminal).toHaveBeenCalledOnce()
+    expect(attemptedStatuses).toEqual(["running", "completed", "completed"])
+    expect(JSON.parse(readFileSync(target, "utf8"))).toMatchObject({
+      status: "completed",
+      result: "bounded outcome"
+    })
+  })
+
+  test("cannot rearm a retired writer when the same path opens its next store", async () => {
+    const oldStore = createWorkflowRunStore({
+      workspacePath: workspace,
+      threadId,
+      initial: initial(threadId, "old-owner")
+    })
+    expect(await oldStore.whenInitialPersisted).toBe(true)
+    expect(await oldStore.flush()).toBe(true)
+
+    const replacement = createWorkflowRunStore({
+      workspacePath: workspace,
+      threadId,
+      initial: {
+        ...initial(threadId, "replacement"),
+        startedAt: "2026-10-18T00:00:01.000Z"
+      }
+    })
+    expect(await replacement.whenInitialPersisted).toBe(true)
+    const published = readFileSync(target, "utf8")
+    oldStore.state.workflowName = "retired-owner-must-not-write"
+    expect(await oldStore.flush()).toBe(true)
+    expect(readFileSync(target, "utf8")).toBe(published)
+
+    replacement.state.workflowName = "replacement-still-owns-writes"
+    expect(await replacement.flush()).toBe(true)
+    expect(JSON.parse(readFileSync(target, "utf8"))).toMatchObject({
+      workflowName: "replacement-still-owns-writes",
+      startedAt: replacement.state.startedAt
+    })
+  })
+
   test("unrelated errors are not retried", async () => {
     const attempts = failPrimary("ENOSPC")
     const store = createWorkflowRunStore({

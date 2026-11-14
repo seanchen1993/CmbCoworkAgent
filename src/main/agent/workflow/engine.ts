@@ -41,10 +41,12 @@ import {
   isWorkflowFatalError,
   truncateText,
   type ParsedWorkflowScript,
+  type PersistedWorkflowRun,
   type WorkflowAgentFailureReason,
   type WorkflowAgentOptions,
   type WorkflowJournalEntry,
   type WorkflowProgressEmitter,
+  type WorkflowProgressEvent,
   type WorkflowRunStats,
   type WorkflowSubagentRunner
 } from "./types"
@@ -66,6 +68,11 @@ import {
  * this is a faithful reconstruction, not a guaranteed bit-for-bit match.)
  */
 
+export interface WorkflowEngineTerminal {
+  apply(run: PersistedWorkflowRun): void
+  event: Extract<WorkflowProgressEvent, { kind: "finished" }>
+}
+
 export interface WorkflowEngineOptions {
   parsed: ParsedWorkflowScript
   runStore: WorkflowRunStore
@@ -73,6 +80,8 @@ export interface WorkflowEngineOptions {
   tokenBudget?: number | null
   subagentRunner: WorkflowSubagentRunner
   emit: WorkflowProgressEmitter
+  /** A managed run publishes its terminal state after physical worktree settlement. */
+  stageTerminal?: (terminal: WorkflowEngineTerminal) => void
   signal: AbortSignal
   maxConcurrency?: number
   /** Immutable profile snapshot approved for this run. Direct engine callers
@@ -261,34 +270,38 @@ export async function runWorkflowEngine(
         ? "available"
         : "unavailable"
     }
-    options.runStore.update((run) => {
+    const completedAt = new Date().toISOString()
+    const apply = (run: PersistedWorkflowRun) => {
       run.status = status
       run.error = error
       run.warning = effectiveWarning
       run.result = bounded
       run.resultSidecarStatus = resultSidecarStatus
       run.stats = runStats
-      run.completedAt = new Date().toISOString()
+      run.completedAt = completedAt
       // No agent stays "running" in a settled run file.
       for (const agentRecord of run.agents) {
         if (agentRecord.status === "running") {
           agentRecord.status = status === "completed" ? "completed" : "error"
           agentRecord.error = agentRecord.error ?? (status === "completed" ? undefined : "aborted")
-          agentRecord.endedAt = new Date().toISOString()
+          agentRecord.endedAt = completedAt
         }
       }
-    })
-    // Await the final durable write before announcing the run finished, so a
-    // reader (the notification builder) always sees the persisted terminal state.
-    await options.runStore.flush()
-    options.emit({
+    }
+    const event: WorkflowEngineTerminal["event"] = {
       kind: "finished",
       runId,
       status,
       error,
       warning: effectiveWarning,
       stats: runStats
-    })
+    }
+    if (options.stageTerminal) options.stageTerminal({ apply, event })
+    else {
+      options.runStore.update(apply)
+      await options.runStore.flush()
+      options.emit(event)
+    }
     return { status, result, error, warning: effectiveWarning, stats: runStats }
   }
 
