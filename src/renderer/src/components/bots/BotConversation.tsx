@@ -164,6 +164,7 @@ export function BotConversation({
   }, [sender, client, bot.id])
   const managedTurn = useMemo<ManagedChatTurn>(
     () => ({
+      allowedSkillNames: bot.allowedSkillNames,
       ...(work?.source && work.source.transport !== "im"
         ? { textOnlyReason: "模拟渠道仅支持文字和同受众工作，不支持附件、技能或本机资源。" }
         : {}),
@@ -208,6 +209,7 @@ export function BotConversation({
       mentionGroups,
       work,
       bot.hostId,
+      bot.allowedSkillNames,
       reconcileDrafts,
       work?.source,
       work?.conversation?.state,

@@ -49,7 +49,7 @@ createRoot(document.getElementById('root')).render(<Fixture/>);
                 /(?:^@\/lib\/(?:store|thread-context)$|^\.\/use-bots$|^\.\/use-bot-read-state$|^\.\/use-bot-works$|^\.\/client$|^\.\/Bot[A-Z]|^@\/components\/chat\/CustomModelDialog$)/
             },
             (a) => {
-              if (a.path === "./BotNewChat" || a.path === "./BotChatRecipientPicker")
+              if (["./BotNewChat", "./BotChatRecipientPicker", "./BotEditor", "./BotSkillSelect"].includes(a.path))
                 return undefined
               return { path: a.path, namespace: "fixture" }
             }

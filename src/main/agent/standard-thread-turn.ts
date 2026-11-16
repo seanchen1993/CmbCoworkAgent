@@ -46,6 +46,7 @@ import type { SkillUseTracker } from "./skill-lifecycle/tracker"
 import { resolveModel, type RoutingContext, type RoutingResult } from "../routing"
 import { getAgentModeFromMetadata, type AgentMode } from "./coordinator-mode"
 import { TraceCollector, type TraceCollectorOptions } from "./trace/collector"
+import { intersectSkillNames } from "../../shared/skill-selection"
 import { createAgentRuntime, type CreateAgentRuntimeOptions, type DeepAgent } from "./runtime"
 import { assertLocalThreadRunLease, type LocalThreadRunOwner } from "./thread-run-lease"
 import { resolveHarnessExecutionStage } from "../services/harness-stage-attribution"
@@ -375,24 +376,27 @@ function isDisabledSkillMatch(skill: SkillLifecycleMatch): boolean {
 }
 
 async function buildSkillLifecycleRegistryForHooks(
-  visibilityScope?: ProjectModeSkillScope
+  visibilityScope?: ProjectModeSkillScope,
+  allowedSkillNames?: readonly string[]
 ): Promise<SkillLifecycleRegistry | null> {
+  if (allowedSkillNames?.length === 0) return null
   const rootSources = await getEnabledSkillsSources()
   const pluginSources = getEnabledPluginSkillSourceMetadata().filter(
     (source) => !visibilityScope || isSkillVisibleForProjectMode(source, visibilityScope)
   )
   const sources = [...rootSources, ...pluginSources]
-  return sources.length > 0 ? new SkillLifecycleRegistry(sources) : null
+  return sources.length > 0 ? new SkillLifecycleRegistry(sources, allowedSkillNames) : null
 }
 
 export async function validateExplicitSkillReference(
   input: { name: string; path: string },
-  visibilityScope?: ProjectModeSkillScope
+  visibilityScope?: ProjectModeSkillScope,
+  allowedSkillNames?: readonly string[]
 ): Promise<string | null> {
-  const registry = await buildSkillLifecycleRegistryForHooks(visibilityScope)
+  const registry = await buildSkillLifecycleRegistryForHooks(visibilityScope, allowedSkillNames)
   const skill = registry?.resolveExplicit({ skillName: input.name, skillPath: input.path })
   return !skill || isDisabledSkillMatch(skill)
-    ? `显式选择的技能不存在或已禁用：${input.name}`
+    ? `显式选择的技能不存在、已禁用或不在当前可用范围：${input.name}`
     : null
 }
 
@@ -418,7 +422,8 @@ async function activateExplicitSkillFromMessage({
   skillUseTracker,
   onHookResult,
   onHookSkippedFactory,
-  skillVisibility
+  skillVisibility,
+  allowedSkillNames
 }: {
   message: string
   workspacePath: string
@@ -442,11 +447,12 @@ async function activateExplicitSkillFromMessage({
   onHookResult?: HookResultCallback
   onHookSkippedFactory?: (event: HookEvent) => ScopeSkipCallback | undefined
   skillVisibility?: ProjectModeSkillScope
+  allowedSkillNames?: readonly string[]
 }): Promise<ExplicitSkillActivation | null> {
   const parsed = parseSkillUseBlock(message)
   if (!parsed) return null
 
-  const registry = await buildSkillLifecycleRegistryForHooks(skillVisibility)
+  const registry = await buildSkillLifecycleRegistryForHooks(skillVisibility, allowedSkillNames)
   const skill = registry?.resolveExplicit({
     skillName: parsed.skillName,
     skillPath: parsed.skillPath
@@ -456,7 +462,7 @@ async function activateExplicitSkillFromMessage({
     return {
       parsed,
       blocked: true,
-      reason: `显式选择的技能不存在或已禁用：${parsed.skillName}`
+      reason: `显式选择的技能不存在、已禁用或不在当前可用范围：${parsed.skillName}`
     }
   }
 
@@ -517,6 +523,7 @@ export async function prepareStandardUserPrompt({
   initialModelInput,
   trustedExplicitSkill,
   allowExplicitSkillFromMessage = true,
+  allowedSkillNames,
   threadId,
   workspacePath,
   turnState,
@@ -534,6 +541,8 @@ export async function prepareStandardUserPrompt({
    * trusting a user-authored CMBDEVCLAW-SKILL-USE block.
    */
   trustedExplicitSkill?: SkillUseBlockMetadata
+  /** Host-selected skill catalog, intersected with existing run restrictions. */
+  allowedSkillNames?: readonly string[]
   /** Desktop transport payloads are trusted by default; untrusted transports disable this. */
   allowExplicitSkillFromMessage?: boolean
   threadId: string
@@ -577,7 +586,8 @@ export async function prepareStandardUserPrompt({
     skillUseTracker: turnState.skillUseTracker,
     onHookResult,
     onHookSkippedFactory,
-    skillVisibility
+    skillVisibility,
+    allowedSkillNames
   })
   if (isPreparationCurrent && !isPreparationCurrent()) {
     return {
@@ -832,7 +842,12 @@ function applyRemoteTurnPolicy(
     ...(policy.disableMcpTools ? { disableMcpTools: true } : {}),
     ...(policy.allowedToolNames !== undefined ? { allowedToolNames: policy.allowedToolNames } : {}),
     ...(policy.allowedSkillNames !== undefined
-      ? { allowedSkillNames: policy.allowedSkillNames }
+      ? {
+          allowedSkillNames: intersectSkillNames(
+            options.allowedSkillNames,
+            policy.allowedSkillNames
+          )
+        }
       : {}),
     ...(policy.allowedExpertNames !== undefined
       ? { allowedExpertNames: policy.allowedExpertNames }

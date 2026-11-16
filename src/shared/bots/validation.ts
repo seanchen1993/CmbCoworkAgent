@@ -136,6 +136,16 @@ export function botBrowserScopeIdentifier(value: unknown): string {
   return id
 }
 
+export function parseBotSkillNames(value: unknown): string[] | null {
+  if (value === null) return null
+  if (!Array.isArray(value) || value.length > 512)
+    throw new BotError("INVALID_INPUT", "技能选择格式无效（最多 512 项）")
+  const names = value.map((name) => boundedString(name, "技能名称", 256))
+  if (new Set(names).size !== names.length)
+    throw new BotError("INVALID_INPUT", "技能名称不能重复")
+  return names
+}
+
 export function parseCreateBot(input: unknown): CreateBotInput {
   const item = record(input)
   const color = boundedString(item.color, "头像颜色", 7)
@@ -149,6 +159,9 @@ export function parseCreateBot(input: unknown): CreateBotInput {
     instructions: boundedString(item.instructions, "职责", 8_000, true),
     modelRef: item.modelRef == null ? null : boundedString(item.modelRef, "模型", 256),
     ...(item.memoryMode !== undefined ? { memoryMode: item.memoryMode as BotMemoryMode } : {}),
+    ...(item.allowedSkillNames !== undefined
+      ? { allowedSkillNames: parseBotSkillNames(item.allowedSkillNames) }
+      : {}),
     color,
     ...(item.label !== undefined ? { label: boundedString(item.label, "标签", 80, true) } : {}),
     ...(item.shape != null ? { shape: item.shape as BotAvatarShape } : {})

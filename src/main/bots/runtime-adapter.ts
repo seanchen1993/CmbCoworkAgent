@@ -66,6 +66,7 @@ import { workflowRunManager, onWorkflowNotificationBroadcast } from "../agent/wo
 import { loadWorkflowRunAsync, markWorkflowRunInterrupted } from "../agent/workflow/run-store"
 import { LocalSandbox } from "../agent/local-sandbox"
 import { getAgentModeFromMetadata, resolveCoordinatorModeRequest } from "../agent/coordinator-mode"
+import { applyBotSkillSelection } from "./skill-policy"
 import { BOT_TEAM_UNSUPPORTED } from "../../shared/bots/team-policy"
 import { getGlobalMcpCapabilityService } from "../mcp/capability-service"
 import { createBotWorkTools } from "./work-tools"
@@ -1502,19 +1503,22 @@ export function createLocalBotRunPort(
                 // Waiting for a human does not touch shared files; peers must keep working.
                 userInputWithoutToolLock: true,
                 botBrowserToolsOwnFileLock: true,
-                remotePolicy: reporting
-                  ? botTextOnlyRemotePolicy([])
-                  : simulated
-                    ? botMockRemotePolicy(isBotMemoryEnabled(bot), allowImInput)
-                    : {
-                        disableScheduler: true,
-                        // Hide new workflow launches, including on legacy workflow-mode threads.
-                        // Existing workflow receipts, recovery and cancellation keep their owners.
-                        blockedToolNames: ["workflow"],
-                        ...(mock?.source.transport === "im" && !mock.source.personal
-                          ? { sharedTaskContext: true }
-                          : {})
-                      },
+                remotePolicy: applyBotSkillSelection(
+                  bot,
+                  reporting
+                    ? botTextOnlyRemotePolicy([])
+                    : simulated
+                      ? botMockRemotePolicy(isBotMemoryEnabled(bot), allowImInput)
+                      : {
+                          disableScheduler: true,
+                          // Hide new workflow launches, including on legacy workflow-mode threads.
+                          // Existing workflow receipts, recovery and cancellation keep their owners.
+                          blockedToolNames: ["workflow"],
+                          ...(mock?.source.transport === "im" && !mock.source.personal
+                            ? { sharedTaskContext: true }
+                            : {})
+                        }
+                ),
                 verifyResolvedThread: (resolved) => {
                   const unsupportedMode = teamRefusal(message, resolved.metadata)
                   if (unsupportedMode) return unsupportedMode

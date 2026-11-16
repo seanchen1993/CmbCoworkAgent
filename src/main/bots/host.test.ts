@@ -84,6 +84,60 @@ afterEach(async () => {
 })
 
 describe("Bot control state", () => {
+  it("persists portable skill choices, preserves old-client updates, and defaults legacy rows to all", () => {
+    const raw = new NativeSqliteAdapter(new DatabaseSync(":memory:"))
+    databases.push(raw)
+    raw.run(`CREATE TABLE bots (id TEXT PRIMARY KEY, thread_id TEXT UNIQUE NOT NULL, name TEXT NOT NULL,
+        instructions TEXT NOT NULL, model_ref TEXT, color TEXT NOT NULL, archived INTEGER NOT NULL DEFAULT 0,
+        version INTEGER NOT NULL DEFAULT 1, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+        INSERT INTO bots VALUES ('legacy', 'old-thread', 'Legacy', '', NULL, '#123456', 0, 1, 1, 1)`)
+    const db = new BotStore(raw)
+    expect(db.getBot("legacy").allowedSkillNames).toBeNull()
+    expect(db.create(input).allowedSkillNames).toBeNull()
+    const configured = db.create(
+      parseCreateBot({ ...input, allowedSkillNames: ["review", "template-not-installed"] })
+    )
+    expect(new BotStore(raw).getBot(configured.id).allowedSkillNames).toEqual([
+      "review",
+      "template-not-installed"
+    ])
+    const oldClient = { ...configured }
+    delete oldClient.allowedSkillNames
+    const renamed = db.update(
+      parseUpdateBot({ ...oldClient, name: "New name", expectedVersion: configured.version })
+    )
+    expect(renamed.allowedSkillNames).toEqual(configured.allowedSkillNames)
+    const none = db.update(
+      parseUpdateBot({ ...renamed, expectedVersion: renamed.version, allowedSkillNames: [] })
+    )
+    expect(new BotStore(raw).getBot(none.id).allowedSkillNames).toEqual([])
+    expect(() =>
+      db.update({ ...none, expectedVersion: renamed.version, allowedSkillNames: null })
+    ).toThrow("已被修改")
+    const all = db.update({ ...none, expectedVersion: none.version, allowedSkillNames: null })
+    expect(new BotStore(raw).getBot(all.id).allowedSkillNames).toBeNull()
+    const running = db.enqueue({ botId: all.id, requestId: "skill-run", message: "Work" })
+    db.transition(running.id, "running")
+    expect(() =>
+      db.update({ ...all, expectedVersion: all.version, allowedSkillNames: [] })
+    ).toThrow("请先停止")
+    for (const invalid of [
+      true,
+      "review",
+      {},
+      [""],
+      ["review", " review "],
+      [12],
+      ["a\0b"],
+      Array(513).fill("a")
+    ]) {
+      expect(() => parseCreateBot({ ...input, allowedSkillNames: invalid })).toThrow("技能")
+      expect(() =>
+        parseUpdateBot({ ...all, expectedVersion: all.version, allowedSkillNames: invalid })
+      ).toThrow("技能")
+    }
+  })
+
   it.each(["queued", "running", "waiting_user"] as const)(
     "retains a file sender while its private reply is %s in another Bot's inbox",
     (state) => {

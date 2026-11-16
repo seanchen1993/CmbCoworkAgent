@@ -2300,7 +2300,9 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
     if (Runnable.isRunnable(subagent)) return subagent
     if (!("skills" in subagent) || subagent.skills?.length === 0) return subagent
     const subagentSkillsMiddleware = createRefreshingSkillsMiddleware({
-      backend: filesystemBackend,
+      backend: allowedSkillRootDirs === undefined
+        ? filesystemBackend
+        : createAllowedSkillsBackend(filesystemBackend, subagent.skills ?? [], allowedSkillRootDirs),
       sources: subagent.skills ?? []
     })
     return {
@@ -5571,6 +5573,7 @@ The workspace root is: ${fileRoot}`
       : await resolveAllowedSkillRootDirs(allSkillsSources, sessionAllowedSkillNames)
   const skillLifecycleSources = [...skillLifecycleRootSources, ...pluginSkillSourceMetadata]
   backend.setHiddenSkillDirs(getDisabledSkillDirs())
+  backend.setAllowedSkillNames(sessionAllowedSkillNames)
   backend.setSkillLifecycleRegistry(
     skillLifecycleSources.length > 0 ? new SkillLifecycleRegistry(skillLifecycleSources) : undefined
   )
@@ -5865,6 +5868,7 @@ The workspace root is: ${fileRoot}`
             const worktreeIsolation = subagentOptions.worktreeIsolation
             const subagentFileRoot = worktreeIsolation?.workspaceRoot ?? workspacePath
             const subagentRuntime = await createAgentRuntime({
+              allowedSkillNames: sessionAllowedSkillNames,
               // Snapshot at leaf creation: approved file edits should not be steered
               // into separately gated shell writes. YOLO leaves keep the preference.
               toolStrategy: resolveWorkflowToolStrategy(toolStrategy, getYoloMode()),
@@ -6508,6 +6512,7 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
         if (workerInput.abortSignal.aborted) break
         try {
           workerAgent = await createAgentRuntime({
+            allowedSkillNames: sessionAllowedSkillNames,
             threadId: workerInput.workerThreadId,
             toolStrategy,
             actionStationarityTurnId: workerActionStationarityTurnId,
@@ -6584,6 +6589,7 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
 
           const nextCandidate = remainingWorkerCandidates.shift()!
           workerAgent = await createAgentRuntime({
+            allowedSkillNames: sessionAllowedSkillNames,
             threadId: workerInput.workerThreadId,
             toolStrategy,
             actionStationarityTurnId: workerActionStationarityTurnId,
@@ -6644,6 +6650,7 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
 
 Access limits: read-only handoff continuation. Do not modify files, run commands, or call tools. Return only the concise final handoff covering files changed or inspected, commands run and results, remaining risks, and any verification still needed.`
           const handoffAgent = await createAgentRuntime({
+            allowedSkillNames: sessionAllowedSkillNames,
             toolStrategy,
             threadId: workerInput.workerThreadId,
             actionStationarityTurnId: workerActionStationarityTurnId,

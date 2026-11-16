@@ -905,6 +905,8 @@ const BotPrivateMentionInput = React.lazy(() => import("@/components/bots/BotGro
   .then((module) => ({ default: module.BotPrivateMentionInput })))
 
 export interface ManagedChatTurn {
+  /** Host-selected Bot skills; null/omitted keeps the ordinary catalog. */
+  allowedSkillNames?: string[] | null
   /** Only local private Bot conversations supply a verified same-host roster. */
   mentionOptions?: { bots: BotDefinition[]; groups: readonly import("../../../../shared/bots/im-channel").BotGroupTarget[] }
   /** Trusted local task: preserve the Thread's original model/mode controls. */
@@ -1840,12 +1842,18 @@ export function ChatContainer({
   const [initialSkillCatalogState] = useState(() =>
     createInitialChatSkillCatalogState(threadId, surface)
   )
-  const [skills, setSkills] = useState<SkillMetadata[]>(
+  const [catalogSkills, setSkills] = useState<SkillMetadata[]>(
     () => initialSkillCatalogState.projection?.skills ?? []
   )
   const [disabledSkillIds, setDisabledSkillIds] = useState<Set<string>>(
     () => initialSkillCatalogState.projection?.disabledSkillIds ?? new Set()
   )
+  const skills = useMemo(() => {
+    const allowed = managedTurn?.allowedSkillNames
+    if (allowed == null) return catalogSkills
+    const names = new Set(allowed)
+    return catalogSkills.filter((skill) => names.has(skill.name))
+  }, [catalogSkills, managedTurn?.allowedSkillNames])
   const [skillsLoading, setSkillsLoading] = useState(initialSkillCatalogState.loading)
   const [skillsHarnessProjectId, setSkillsHarnessProjectId] = useState<string | null>(
     initialSkillCatalogState.resolvedProjectId

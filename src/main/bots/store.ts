@@ -27,6 +27,7 @@ import type {
 import {
   botIdentifier,
   parseCreateBot,
+  parseBotSkillNames,
   parseBotRequestChecks,
   parseGroupMessage,
   parseGroup,
@@ -320,6 +321,12 @@ export class BotStore {
         db.run("ALTER TABLE bots ADD COLUMN deleting INTEGER NOT NULL DEFAULT 0")
       if (!this.rows("PRAGMA table_info(bots)").some((column) => column.name === "label"))
         db.run("ALTER TABLE bots ADD COLUMN label TEXT NOT NULL DEFAULT ''")
+      if (
+        !this.rows("PRAGMA table_info(bots)").some(
+          (column) => column.name === "allowed_skill_names_json"
+        )
+      )
+        db.run("ALTER TABLE bots ADD COLUMN allowed_skill_names_json TEXT")
       if (!this.rows("PRAGMA table_info(bots)").some((column) => column.name === "memory_mode"))
         db.run("ALTER TABLE bots ADD COLUMN memory_mode TEXT NOT NULL DEFAULT 'inherit'")
       if (
@@ -805,6 +812,10 @@ export class BotStore {
       instructions: String(row.instructions),
       modelRef: row.model_ref == null ? null : String(row.model_ref),
       memoryMode: (row.memory_mode ?? "inherit") as BotDefinition["memoryMode"],
+      allowedSkillNames:
+        row.allowed_skill_names_json == null
+          ? null
+          : parseBotSkillNames(JSON.parse(String(row.allowed_skill_names_json))),
       color: String(row.color),
       shape: row.shape as BotDefinition["shape"],
       label: String(row.label ?? ""),
@@ -1328,8 +1339,8 @@ export class BotStore {
       }
       const now = this.now()
       this.db.run(
-        `INSERT INTO bots (id, thread_id, name, instructions, model_ref, color, shape, label, memory_mode, created_at, updated_at, introduction_pending)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+        `INSERT INTO bots (id, thread_id, name, instructions, model_ref, color, shape, label, memory_mode, allowed_skill_names_json, created_at, updated_at, introduction_pending)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
         [
           id,
           randomUUID(),
@@ -1340,6 +1351,9 @@ export class BotStore {
           input.shape ?? "drop",
           input.label ?? "",
           input.memoryMode ?? "inherit",
+          input.allowedSkillNames == null
+            ? null
+            : JSON.stringify(parseBotSkillNames(input.allowedSkillNames)),
           now,
           now
         ]
@@ -1428,7 +1442,7 @@ export class BotStore {
       ))
         throw new BotError("CONFLICT", "请先停止关联协作和后台任务并等待退出，再归档 Bot")
       this.db.run(
-        `UPDATE bots SET name=?, instructions=?, model_ref=?, color=?, shape=?, label=?, memory_mode=?, archived=?,
+        `UPDATE bots SET name=?, instructions=?, model_ref=?, color=?, shape=?, label=?, memory_mode=?, allowed_skill_names_json=?, archived=?,
         version=version+1, updated_at=? WHERE id=?`,
         [
           input.name,
@@ -1438,6 +1452,11 @@ export class BotStore {
           input.shape ?? bot.shape ?? "drop",
           input.label ?? bot.label ?? "",
           input.memoryMode ?? bot.memoryMode ?? "inherit",
+          JSON.stringify(
+            input.allowedSkillNames === undefined
+              ? bot.allowedSkillNames ?? null
+              : parseBotSkillNames(input.allowedSkillNames)
+          ),
           input.archived,
           this.now(),
           bot.id

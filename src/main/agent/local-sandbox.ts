@@ -764,6 +764,7 @@ export class LocalSandbox
   private readonly _onFileMutation?: (filePath: string, kind: AgentFileMutationKind) => void
   private readonly _shellFileTelemetry: boolean
   private _skillLifecycleRegistry?: SkillLifecycleRegistry
+  private _allowedSkillNames?: ReadonlySet<string>
   private readonly _skillHooksFired: Set<string>
   private readonly _skillUseTracker?: SkillUseTracker
   private readonly _pendingSkillHookContexts: PendingSkillHookContext[] = []
@@ -2743,6 +2744,11 @@ export class LocalSandbox
     this._skillLifecycleRegistry = registry
   }
 
+  /** Applies to registered skill loading through file tools, not arbitrary shell access. */
+  setAllowedSkillNames(names: readonly string[] | undefined): void {
+    this._allowedSkillNames = names === undefined ? undefined : new Set(names)
+  }
+
   setHiddenSkillDirs(skillDirs: string[]): void {
     this._hiddenSkillDirKeys.clear()
     const realpathCache = new Map<string, string | null>()
@@ -2766,7 +2772,7 @@ export class LocalSandbox
     filePath: string,
     realpathCache: Map<string, string | null> = new Map()
   ): boolean {
-    if (this._hiddenSkillDirKeys.size === 0) return false
+    if (this._hiddenSkillDirKeys.size === 0 && this._allowedSkillNames === undefined) return false
     const candidates = new Set<string>()
     let resolved: string
     try {
@@ -2779,6 +2785,8 @@ export class LocalSandbox
     if (realResolved) candidates.add(realResolved)
 
     for (const candidate of candidates) {
+      const skill = this._skillLifecycleRegistry?.resolveRead(candidate, candidate)
+      if (skill && this._allowedSkillNames && !this._allowedSkillNames.has(skill.name)) return true
       const key = this.normalizeResolvedPathKey(candidate)
       if (!key) continue
       for (const hidden of this._hiddenSkillDirKeys) {
@@ -3321,7 +3329,7 @@ export class LocalSandbox
         )
 
         // Filter out matches inside disabled skills so their content cannot leak via grep.
-        if (this._hiddenSkillDirKeys.size > 0) {
+        if (this._hiddenSkillDirKeys.size > 0 || this._allowedSkillNames !== undefined) {
           results = results.filter((m) => !this.isHiddenSkillPath(m.path, realpathCache))
         }
 
@@ -3423,7 +3431,7 @@ export class LocalSandbox
     }
     let infos = await super.globInfo(effectivePattern, effectivePath)
     // Hide files that fall inside any disabled skill so the agent cannot list them.
-    if (this._hiddenSkillDirKeys.size > 0) {
+    if (this._hiddenSkillDirKeys.size > 0 || this._allowedSkillNames !== undefined) {
       infos = infos.filter((f) => !this.isHiddenSkillPath(f.path, realpathCache))
     }
     // Filter out any results that fall within sensitive directories
@@ -4904,7 +4912,12 @@ export class LocalSandbox
    * Decode SDK skill discovery downloads without exposing a renderer file-read endpoint.
    */
   async downloadFiles(paths: string[]): Promise<FileDownloadResponse[]> {
-    const files = await super.downloadFiles(paths)
+    const hidden = paths.map((filePath) => this.isHiddenSkillPath(filePath))
+    const downloaded = await super.downloadFiles(paths.filter((_filePath, i) => !hidden[i]))
+    let index = 0
+    const files: FileDownloadResponse[] = paths.map((filePath, i) =>
+      hidden[i] ? { path: filePath, content: null, error: "permission_denied" } : downloaded[index++]
+    )
     return files.map((file) => {
       if (!file.content || file.error) return file
       try {
@@ -5447,7 +5460,10 @@ export class LocalSandbox
           !micromatch.isMatch(globPath, includeGlob, { matchBase: !includeGlobUsesPath })
         )
           continue
-        if (this._hiddenSkillDirKeys.size > 0 && this.isHiddenSkillPath(fp, realpathCache)) {
+        if (
+          (this._hiddenSkillDirKeys.size > 0 || this._allowedSkillNames !== undefined) &&
+          this.isHiddenSkillPath(fp, realpathCache)
+        ) {
           continue
         }
         if (this.windowsSandbox === "elevated" && this.isSensitiveSandboxPath(fp, realpathCache)) {

@@ -58,11 +58,13 @@ function collectSkillEntriesFromSource(
 export class SkillLifecycleRegistry {
   private readonly entries: SkillLifecycleEntry[]
 
-  constructor(sources: Array<string | SkillLifecycleSource>) {
+  constructor(sources: Array<string | SkillLifecycleSource>, allowedSkillNames?: readonly string[]) {
+    const allowedNames = allowedSkillNames === undefined ? undefined : new Set(allowedSkillNames)
     const seen = new Set<string>()
     const entries: SkillLifecycleEntry[] = []
     for (const source of sources) {
       for (const entry of collectSkillEntriesFromSource(source)) {
+        if (allowedNames && !allowedNames.has(entry.name)) continue
         const key = entry.normalizedRootDir
         if (seen.has(key)) continue
         seen.add(key)
