@@ -1,6 +1,7 @@
 import { updaterLog } from "./logger"
 import { ipcMain, BrowserWindow } from "electron"
 import { unlinkSync } from "fs"
+import { supportsInAppUpdates } from "../../shared/in-app-update"
 import { checkForUpdate, type UpdateCheckResult } from "./checker"
 import { isSameStagingPayload } from "./gray-release"
 import { downloadUpdate, type DownloadProgress } from "./downloader"
@@ -167,6 +168,26 @@ async function performCheck(manual: boolean): Promise<UpdateCheckResult | null> 
  * Register all update-related IPC handlers.
  */
 export function registerUpdaterHandlers(): void {
+  if (!supportsInAppUpdates(process.platform)) {
+    const requireDmg = (): never => {
+      throw new Error("请下载并安装所需版本的 macOS DMG")
+    }
+    ipcMain.handle("update:check", () => ({ hasUpdate: false, source: null }))
+    ipcMain.handle("update:download", requireDmg)
+    ipcMain.handle("update:install", requireDmg)
+    ipcMain.handle("update:dismiss", () => ({ success: true }))
+    ipcMain.handle("update:rollback", requireDmg)
+    ipcMain.handle("update:get-status", () => ({
+      status: "idle",
+      update: null,
+      progress: null,
+      errorMessage: null,
+      canRollback: false,
+      source: null
+    }))
+    return
+  }
+
   // Manual check for updates
   ipcMain.handle("update:check", async () => {
     // If download is already in progress or done, don't hit the server again —
@@ -360,6 +381,8 @@ export function registerUpdaterHandlers(): void {
  * Waits 30s after startup, then checks every 30 minutes.
  */
 export function startUpdateChecker(): void {
+  if (!supportsInAppUpdates(process.platform)) return
+
   // Delay 5s to allow renderer to finish loading and register listeners
   initialCheckTimer = setTimeout(() => {
     initialCheckTimer = null

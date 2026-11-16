@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react"
 import { Megaphone } from "lucide-react"
 import { cn } from "@/lib/utils"
+import { supportsInAppUpdates } from "../../../../shared/in-app-update"
 import { UpdateDialog } from "./UpdateDialog"
 
 type UpdateStatus = "idle" | "available" | "downloading" | "downloaded" | "error"
@@ -23,7 +24,13 @@ function consumeAutoOpenForVersion(version: string | null | undefined): boolean 
   return true
 }
 
-export function UpdateActionButton({
+export function UpdateActionButton(props: UpdateActionButtonProps): React.JSX.Element | null {
+  if (!supportsInAppUpdates(window.electron?.process?.platform)) return null
+
+  return <UpdateActionButtonContent {...props} />
+}
+
+function UpdateActionButtonContent({
   variant = "card",
   className,
   hideWhenCurrent = false

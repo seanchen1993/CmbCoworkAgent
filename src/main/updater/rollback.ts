@@ -3,6 +3,7 @@ import { updaterLog } from "./logger"
 import { app } from "electron"
 import { existsSync, readFileSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "fs"
 import { basename, dirname, join, resolve } from "path"
+import { supportsInAppUpdates } from "../../shared/in-app-update"
 import {
   getBackupPath,
   getMarkerPath,
@@ -139,6 +140,8 @@ export interface StartupCheckResult {
 }
 
 export async function runStartupSelfCheck(): Promise<StartupCheckResult> {
+  if (!supportsInAppUpdates(process.platform)) return {}
+
   const markerPath = getMarkerPath()
   updaterLog.log("[Updater] Startup self-check:", {
     currentVersion: app.getVersion(),
@@ -373,6 +376,8 @@ function holdFullBackupCleanup(marker: UpdateMarker): void {
 }
 
 export function markFullBackupCleanupReady(startupResult: StartupCheckResult): void {
+  if (!supportsInAppUpdates(process.platform)) return
+
   const state = readFullBackupCleanupState()
   if (!state || state.state !== "hold") {
     return

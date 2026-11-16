@@ -27,7 +27,7 @@ export default defineConfig({
       "src/renderer/src/components/dashboard/thread-traces-response.test.ts",
       "src/renderer/src/components/dashboard/thread-skill-usage-metric.test.ts",
       "src/renderer/src/components/dashboard/trace-export-scope.test.ts",
-      "src/renderer/src/components/update/release-notes.test.ts",
+      "src/renderer/src/components/update/*.test.ts",
       "src/renderer/src/components/trace/TraceConversation.test.ts",
       "src/renderer/src/components/chat/chat-message-virtual-list-initial-position.test.ts",
       "src/renderer/src/components/chat/chat-scroll-regressions.test.ts",

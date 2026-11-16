@@ -16,7 +16,9 @@ vi.mock("./installer", () => ({
   launchDetachedPowerShellScript: state.launch
 }))
 
-import { runStartupSelfCheck } from "./rollback"
+import { markFullBackupCleanupReady, runStartupSelfCheck } from "./rollback"
+
+const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform")!
 
 function markerPath(): string {
   return join(state.root, "app", "resources", "update-marker.json")
@@ -27,6 +29,7 @@ function logText(): string {
 }
 
 beforeEach(() => {
+  Object.defineProperty(process, "platform", { value: "win32" })
   state.root = mkdtempSync(join(tmpdir(), "cmb-update-startup-"))
   mkdirSync(join(state.root, "app", "resources"), { recursive: true })
   mkdirSync(join(state.root, "app.bak"))
@@ -38,11 +41,39 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  Object.defineProperty(process, "platform", platformDescriptor)
   rmSync(state.root, { recursive: true, force: true })
   vi.restoreAllMocks()
 })
 
 describe("startup self-check diagnostics", () => {
+  it("leaves update and backup states untouched on macOS", async () => {
+    Object.defineProperty(process, "platform", { value: "darwin" })
+    const marker = JSON.stringify({
+      fromVersion: "1.4.10",
+      toVersion: "1.5.1",
+      releaseVersion: "1.5.1",
+      channel: "stable",
+      minVersion: "1.5.0",
+      updateType: "full"
+    })
+    writeFileSync(markerPath(), marker)
+    const updatesPath = join(state.root, "updates")
+    mkdirSync(updatesPath)
+    const cleanupPath = join(updatesPath, "full-backup-cleanup-state.json")
+    const cleanupState = JSON.stringify({ state: "hold", toVersion: state.version })
+    writeFileSync(cleanupPath, cleanupState)
+
+    const result = await runStartupSelfCheck()
+    markFullBackupCleanupReady(result)
+
+    expect(result).toEqual({})
+    expect(readFileSync(markerPath(), "utf-8")).toBe(marker)
+    expect(readFileSync(cleanupPath, "utf-8")).toBe(cleanupState)
+    expect(state.launch).not.toHaveBeenCalled()
+    expect(state.quit).not.toHaveBeenCalled()
+  })
+
   it.each(["stable", "staging"])(
     "logs a successful %s intermediate ZIP and preserves its chain",
     async (channel) => {

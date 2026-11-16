@@ -138,6 +138,26 @@ npm run build
 npm run dist
 ```
 
+### macOS ARM64 打包与验证
+
+当前 macOS 目标为 Apple Silicon（ARM64），系统要求 macOS 13 或更高。使用 Node.js 22 和 npm 10 以上版本。macOS 通过重新下载安装 DMG 升级。
+
+在 GitHub Actions 中手动运行 **Build Electron App**，选择目标分支和 `macos-arm64`。工作流会从 DMG 中复制应用，验证签名并运行打包冒烟测试，再上传 DMG。默认使用临时签名供构建验证。分发给用户时启用 `sign_macos`，由工作流使用 Developer ID 签名并提交公证。签名需要 GitHub Secrets `CSC_LINK`（Base64 编码的 `.p12`）和 `CSC_KEY_PASSWORD`，公证需要 `APPLE_API_KEY_BASE64`（Base64 编码的 `.p8`）、`APPLE_API_KEY_ID` 和 `APPLE_API_ISSUER`。
+
+公开仓库的工作流使用空 `.env` 构建，并用本地测试数据验证应用启动。连接企业 UAT 的安装包应在受控 Mac 或私有 Actions 环境中使用已获授权的配置构建。按 [环境变量加密指南](docs/env-encryption-guide.md) 配置解密密钥，随后在 Mac 上执行下面的命令。解密配置及其构建产物应保存在受控环境中。
+
+```bash
+npm ci --include=optional
+npm run env:decrypt
+npm run dist:mac -- --arm64 --publish=never
+```
+
+要在 Mac 上复跑同一冒烟测试，将 DMG 内的应用复制到可写目录，再执行以下命令。测试会验证内置 `rg`、终端宿主启动命令、主窗口及 preload。
+
+```bash
+node scripts/smoke-macos-package.mjs "/path/to/CMBDevClaw.app"
+```
+
 ## 常用脚本
 
 | 命令 | 说明 |

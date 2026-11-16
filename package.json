@@ -108,7 +108,13 @@
       "node_modules/node-pty/**"
     ],
     "mac": {
-      "target": "dmg"
+      "minimumSystemVersion": "13.0",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": ["arm64"]
+        }
+      ]
     },
     "win": {
       "target": "nsis",

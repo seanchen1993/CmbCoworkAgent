@@ -4,7 +4,19 @@ on:
   push:
     tags:
       - "v*"
-  workflow_dispatch: # 支持手动触发
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: Installer to build
+        type: choice
+        options:
+          - windows-and-linux
+          - macos-arm64
+        default: windows-and-linux
+      sign_macos:
+        description: Sign the macOS installer with Developer ID and notarize it
+        type: boolean
+        default: false
 
 concurrency:
   group: build-electron-${{ github.ref }}
@@ -50,6 +62,7 @@ jobs:
   # 下限的 tarball,但它还依赖 GITHUB_WORKSPACE 权限和 node_modules 缓存的路径
   # 假设,在 container 里不稳。手动下 tarball 最可控。
   rebuild-node-pty-linux:
+    if: github.event_name != 'workflow_dispatch' || inputs.platform != 'macos-arm64'
     name: Rebuild node-pty (manylinux_2_28 / glibc 2.28)
     runs-on: ubuntu-latest
     container:
@@ -574,3 +587,107 @@ jobs:
           draft: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  build-macos:
+    if: github.event_name == 'workflow_dispatch' && inputs.platform == 'macos-arm64'
+    name: Build (macOS arm64)
+    runs-on: macos-15
+    timeout-minutes: 45
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: |
+          test "$(node -p process.arch)" = arm64
+          npm ci --include=optional
+
+      - name: Build with public artifact configuration
+        run: |
+          # Vite embeds referenced env values in the app. Keep the private .env out of the artifact.
+          : > .env
+          npm run build
+
+      - name: Package DMG
+        id: pkg
+        shell: bash
+        env:
+          SIGN_MACOS: ${{ inputs.sign_macos }}
+          CSC_LINK: ${{ inputs.sign_macos && secrets.CSC_LINK || '' }}
+          CSC_KEY_PASSWORD: ${{ inputs.sign_macos && secrets.CSC_KEY_PASSWORD || '' }}
+        run: |
+          set -euo pipefail
+          args=(--mac dmg --arm64 --publish=never --config.mac.notarize=false)
+          if [[ "$SIGN_MACOS" == "true" ]]; then
+            : "${CSC_LINK:?Set the CSC_LINK secret to the base64 Developer ID Application certificate (.p12)}"
+            : "${CSC_KEY_PASSWORD:?Set the CSC_KEY_PASSWORD secret to the certificate password}"
+            args+=(--config.forceCodeSigning=true --config.dmg.sign=true)
+          else
+            args+=(--config.mac.identity=-)
+          fi
+          npx electron-builder "${args[@]}"
+
+          images=(dist/*.dmg)
+          if [[ ${#images[@]} -ne 1 || ! -f "${images[0]}" ]]; then
+            echo "::error::Expected one macOS disk image under dist/"
+            exit 1
+          fi
+          echo "dmg=${images[0]}" >> "$GITHUB_OUTPUT"
+          echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
+
+      - name: Verify and smoke-test the packaged app
+        shell: bash
+        env:
+          DMG_PATH: ${{ steps.pkg.outputs.dmg }}
+        run: |
+          set -euo pipefail
+          hdiutil verify "$DMG_PATH"
+          smoke_dir="$(mktemp -d "${RUNNER_TEMP}/cmbdevclaw-macos.XXXXXX")"
+          mount_point="$smoke_dir/volume"
+          mkdir "$mount_point"
+          hdiutil attach -readonly -nobrowse -mountpoint "$mount_point" "$DMG_PATH"
+          trap 'hdiutil detach "$mount_point"' EXIT
+          app_path="$smoke_dir/CMBDevClaw.app"
+          ditto "$mount_point/CMBDevClaw.app" "$app_path"
+          codesign --verify --deep --strict --verbose=2 "$app_path"
+          node scripts/smoke-macos-package.mjs "$app_path"
+
+      - name: Notarize and staple the signed DMG
+        if: inputs.sign_macos
+        shell: bash
+        env:
+          DMG_PATH: ${{ steps.pkg.outputs.dmg }}
+          APPLE_API_KEY_BASE64: ${{ secrets.APPLE_API_KEY_BASE64 }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+        run: |
+          set -euo pipefail
+          : "${APPLE_API_KEY_BASE64:?Set the APPLE_API_KEY_BASE64 secret to the base64 App Store Connect API key (.p8)}"
+          : "${APPLE_API_KEY_ID:?Set the APPLE_API_KEY_ID secret}"
+          : "${APPLE_API_ISSUER:?Set the APPLE_API_ISSUER secret}"
+          codesign --verify --strict --verbose=2 "$DMG_PATH"
+          key_path="$(mktemp "${RUNNER_TEMP}/cmbdevclaw-notary-key.XXXXXX")"
+          trap 'rm -f "$key_path"' EXIT
+          printf '%s' "$APPLE_API_KEY_BASE64" | base64 -D > "$key_path"
+          result="$(xcrun notarytool submit "$DMG_PATH" --key "$key_path" \
+            --key-id "$APPLE_API_KEY_ID" --issuer "$APPLE_API_ISSUER" --wait --timeout 20m \
+            --output-format json)"
+          printf '%s\n' "$result"
+          jq -e '.status == "Accepted"' <<< "$result"
+          xcrun stapler staple "$DMG_PATH"
+          xcrun stapler validate "$DMG_PATH"
+
+      - name: Upload macOS installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: CMBDevClaw-macos-arm64-${{ steps.pkg.outputs.version }}-${{ inputs.sign_macos && 'notarized' || 'adhoc' }}-installer
+          path: ${{ steps.pkg.outputs.dmg }}
+          if-no-files-found: error
+          compression-level: 0
