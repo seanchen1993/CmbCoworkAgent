@@ -18,6 +18,7 @@ import {
   CONTEXT_COMPACTION_MAX_OUTPUT_TOKENS,
   getModelInstance
 } from "./runtime"
+import { getCapturedRawApiCall } from "../services/llm-api-request-capture"
 
 class FakeConfigurableModel {
   withConfig(config: RunnableConfig): { config: RunnableConfig } {
@@ -31,6 +32,51 @@ afterEach(() => {
 })
 
 describe("context compaction model binding", () => {
+  it("captures failed compaction requests with the configured recovery output budget", async () => {
+    const bodies: unknown[] = []
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_input, init) => {
+        bodies.push(JSON.parse(String(init?.body)))
+        return new Response(
+          JSON.stringify({
+            error: { message: "This model's maximum context length is 1048576 tokens." }
+          }),
+          {
+            status: 485,
+            headers: { "content-type": "application/json" }
+          }
+        )
+      })
+    )
+    const threadId = "compaction-capture-on-error"
+    const model = configureContextCompactionModel(
+      getModelInstance(
+        {
+          id: "test",
+          model: "deepseek-v4-flash",
+          baseUrl: "https://example.test/v1",
+          apiKey: "test-key",
+          maxOutputTokens: 1_024,
+          enableThinking: true
+        },
+        undefined,
+        1,
+        "context-compaction",
+        threadId
+      )
+    ) as ReturnType<typeof getModelInstance>
+    await expect(model.invoke([new HumanMessage("recover")])).rejects.toThrow(
+      "maximum context length"
+    )
+    expect(bodies).toHaveLength(1)
+    expect(bodies[0]).toMatchObject({
+      max_tokens: 1_024,
+      stream: true,
+      thinking: { type: "disabled" }
+    })
+    expect(JSON.parse(getCapturedRawApiCall(threadId))).toEqual(bodies[0])
+  })
   it("reserves configured model output space when calculating the compaction trigger", () => {
     expect(calculateSummarizationTriggerTokens(128_000, 8_192)).toBe(96_000)
     expect(calculateSummarizationTriggerTokens(32_000, 8_192)).toBe(22_808)

@@ -70,7 +70,8 @@ describe("plugin run artifact isolation", () => {
 
     expect(resourceStart).toBeGreaterThanOrEqual(0)
     expect(revealStart).toBeGreaterThanOrEqual(0)
-    expect(reveal).toContain("if (externalPreviewGrant)")
+    expect(reveal).toContain("if (!resolved.inWorkspace)")
+    expect(reveal).toContain("if (!grant)")
     expect(reveal).toContain("await resolveExternalPreviewGrant()")
     expect(reveal).toContain("window.api.harnessBoard.revealRunArtifact({")
     expect(reveal.indexOf("revealRunArtifact({")).toBeLessThan(

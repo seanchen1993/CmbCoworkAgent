@@ -143,7 +143,6 @@ import type {
   HarnessPipelineQueryInput,
   HarnessPipelineQueryResult,
   HarnessProjectCreateInput,
-  HarnessProjectConstraintSyncResult,
   HarnessKnowledgePreviewResult,
   HarnessProjectReviewInput,
   HarnessProjectReviewResult,
@@ -184,6 +183,11 @@ import type {
   HarnessBoardCatalogPageInput,
   HarnessBoardCatalogPageResult
 } from "../shared/harness-board-types"
+import type {
+  KnowledgeBaseListResult,
+  KnowledgeBaseSyncResult,
+  KnowledgeDepositionWorkspace
+} from "../shared/knowledge-base-types"
 import type {
   ProjectMetricFilters,
   ProjectMetricListOptions,
@@ -1877,7 +1881,7 @@ interface CustomAPI {
     upload: (
       buffer: ArrayBuffer,
       fileName: string,
-      options?: { allowNestedNameDuplicates?: boolean; origin?: "market" | "local" }
+      options?: { allowNestedNameDuplicates?: boolean; origin?: "market" | "local"; marketplace?: { name: string; id?: string } }
     ) => Promise<{
       success: boolean
       skillName?: string
@@ -2248,6 +2252,7 @@ interface CustomAPI {
     onStatus: (callback: (status: BuiltinRobotStatus) => void) => () => void
   }
   plugins: {
+    marketSourceAccess: (type: "skill" | "plugin", name: string, id?: string) => Promise<"owner" | "whitelist" | undefined>
     list: () => Promise<PluginMetadata[]>
     install: (
       buffer: ArrayBuffer,
@@ -3065,8 +3070,15 @@ interface CustomAPI {
       mappings: HarnessDeployUnitConfig[]
     ) => Promise<HarnessDeployUnitConfig[]>
     saveLeanTokenConfig: (input: HarnessLeanTokenConfig) => Promise<HarnessLeanTokenConfig>
-    syncProjectConstraints: (adapterId: string) => Promise<HarnessProjectConstraintSyncResult>
-    getKnowledgePreview: (adapterId: string) => Promise<HarnessKnowledgePreviewResult>
+    listKnowledgeBases: () => Promise<KnowledgeBaseListResult>
+    refreshKnowledgeBases: () => Promise<KnowledgeBaseListResult>
+    deleteKnowledgeBase: (idKey: string) => Promise<void>
+    prepareKnowledgeDeposition: (
+      projectId: string,
+      targetId?: string
+    ) => Promise<KnowledgeDepositionWorkspace>
+    syncKnowledgeBase: (idKey: string) => Promise<KnowledgeBaseSyncResult>
+    getKnowledgePreview: (idKey: string) => Promise<HarnessKnowledgePreviewResult>
     cancelKnowledgePreviewRequests: () => Promise<void>
     selectProjectDirectory: () => Promise<{
       workspacePath: string

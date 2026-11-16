@@ -21,7 +21,7 @@ import { randomUUID } from "node:crypto"
 export const MARKET_CONTENT_PREFIX = "CMB-MARKET-BASE64-V1\n"
 export const MARKET_CONTENT_MARKER = ".cmb-market-content.json"
 export const MARKET_CONTENT_DENIED =
-  "市场下载的技能和插件受保护，仅自己上传的原始内容可查看、编辑或导出"
+  "该市场资源受保护，仅上传者或原文白名单用户可在授权安装后查看、编辑或导出"
 const prefix = Buffer.from(MARKET_CONTENT_PREFIX)
 // Version 1 encoded every asset; version 2 encodes Markdown only.
 const protectionVersion = 2

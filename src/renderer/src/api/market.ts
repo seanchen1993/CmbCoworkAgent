@@ -632,7 +632,10 @@ export const marketApi = {
   ): Promise<DownloadResponse> {
     void _isFeatured
     if (downloadToLocal && ["skill", "orgSkill", "plugin"].includes(type)) {
-      return { success: false, error: "受保护资源仅支持安装到平台使用" }
+      const access = type === "skill" || type === "plugin"
+        ? await window.api.plugins.marketSourceAccess(type, name, item?.id).catch(() => undefined)
+        : undefined
+      if (!access) return { success: false, error: "受保护资源仅支持安装到平台使用" }
     }
     console.log(`Downloading ${type} item: ${name}`)
     const orgSkillFile =
@@ -659,7 +662,8 @@ export const marketApi = {
         const arrayBuffer = await getBuffer()
         if (typeof window.api?.skills?.upload === "function") {
           const uploadResult = await window.api.skills.upload(arrayBuffer, filename, {
-            origin: "market"
+            origin: "market",
+            ...(type === "skill" ? { marketplace: { name, id: item?.id } } : {})
           })
           return {
             success: uploadResult.success,

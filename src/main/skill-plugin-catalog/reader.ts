@@ -1,3 +1,4 @@
+import { canReadPluginSource } from "../../shared/market-source-access"
 import {
   decodeMarketContent,
   MARKET_CONTENT_PREFIX,
@@ -390,6 +391,8 @@ function normalizePlugin(row: unknown, context: BuildContext): PluginMetadata | 
     ...(typeof row.hookCount === "number" ? { hookCount: normalizeCount(row.hookCount) } : {}),
     ...(boundedString(context, row.hookPath, MAX_PATH) ? { hookPath: boundedString(context, row.hookPath, MAX_PATH) } : {}),
     ...(origin ? { origin } : {}),
+    ...(row.sourceAccess === "owner" || row.sourceAccess === "whitelist"
+      ? { sourceAccess: row.sourceAccess } : {}),
     createdAt: boundedString(context, row.createdAt, 256) ?? "",
     updatedAt: boundedString(context, row.updatedAt, 256) ?? ""
   }
@@ -469,7 +472,7 @@ function pluginSkillSources(plugin: PluginMetadata, context: BuildContext): Skil
     sources.push({
       sourceDir,
       source: "user",
-      contentOrigin: plugin.origin,
+      contentOrigin: canReadPluginSource(plugin) ? "local" : plugin.origin,
       kind: "plugin",
       maxDepth,
       pluginId: plugin.id,

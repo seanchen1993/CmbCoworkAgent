@@ -1612,8 +1612,10 @@ describe("CmbCowork context compaction middleware", () => {
     expect(renderedRequest(requests[1]!)).toContain(
       "<initial-user-request>\nEARLIEST_USER_PREAMBLE\n</initial-user-request>"
     )
-    expect(renderedRequest(requests[1]!)).toContain("ROUND_ONE_AI")
-    expect(renderedRequest(requests[1]!)).toContain("ROUND_ONE_TOOL")
+    // The serialized byte budget drops whole old rounds before clipping the
+    // remaining transcript, preserving the newer tool-call/result pair.
+    expect(renderedRequest(requests[1]!)).not.toContain("ROUND_ONE_AI")
+    expect(renderedRequest(requests[1]!)).not.toContain("ROUND_ONE_TOOL")
     expect(renderedRequest(requests[1]!)).toContain("ROUND_TWO_AI")
     expect(renderedRequest(requests[1]!)).toContain("ROUND_TWO_TOOL")
   })
@@ -1728,8 +1730,12 @@ describe("CmbCowork context compaction middleware", () => {
     )
     expect(renderedRequest(requests[1]!)).toContain("OVERSIZED_TOOL_END")
     expect(renderedRequest(requests[2]!)).toContain("OVERSIZED_TOOL_START")
-    expect(renderedRequest(requests[2]!)).toContain("...(result truncated)")
-    expect(renderedRequest(requests[2]!)).not.toContain("OVERSIZED_TOOL_END")
+    expect(renderedRequest(requests[2]!)).toContain(
+      "[... truncated to fit the compaction window ...]"
+    )
+    expect(renderedRequest(requests[2]!)).toContain("OVERSIZED_TOOL_END")
+    expect(renderedRequest(requests[2]!).length).toBeLessThan(renderedRequest(requests[1]!).length)
+    expect(messages[2].content).toBe(oversizedToolResult)
   })
 
   it("accepts a concise nonempty handoff without wasting retries", async () => {

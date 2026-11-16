@@ -836,6 +836,8 @@ export interface PluginMetadata {
   origin?: "market" | "local"
   /** Market identity may differ from the name inside the uploaded ZIP manifest. */
   marketplace?: { name: string; id?: string }
+  /** Main-verified source permission at the time of market installation. */
+  sourceAccess?: "owner" | "whitelist"
   createdAt: string
   updatedAt: string
 }
