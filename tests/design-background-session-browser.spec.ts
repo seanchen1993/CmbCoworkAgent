@@ -150,7 +150,7 @@ manager.create({
   meta: { id: "ds_browser", title: "浏览器回归", createdAt: 1, updatedAt: 1 },
   state: {
     ...createDesignState(),
-    selectedModelId: "custom:test",
+    selectedModelId: "builtin:test",
     designLink: "https://legacy-design-reference.example.com/private"
   },
   workspacePath: "/workspace"
@@ -361,6 +361,7 @@ try {
       },
       models: {
         list: async () => [
+          { id: "builtin:test", name: "内置测试模型", model: "builtin-test", available: true },
           { id: "custom:test", name: "Test", model: "test", available: true },
           { id: "custom:draft", name: "草稿模型", model: "draft", available: true }
         ]
@@ -420,6 +421,21 @@ try {
   if (process.env.DESIGN_PARALLEL_ORDER_ONLY !== "1") {
   const input = page.locator("textarea").first()
   await input.waitFor()
+  const builtinSelector = page.getByRole("button", { name: "内置测试模型", exact: true })
+  await builtinSelector.waitFor()
+  assert.equal(manager.get("ds_browser").state.selectedModelId, "builtin:test",
+    "reopening a builtin selection preserves its source")
+  await builtinSelector.click()
+  await page.getByRole("button", { name: "Test", exact: true }).click()
+  await page.getByRole("button", { name: "Test", exact: true }).click()
+  await builtinSelector.click()
+  assert.equal(await page.evaluate(() => localStorage.getItem("design_last_model_id")), "builtin:test")
+  await page.reload()
+  await builtinSelector.waitFor()
+  assert.equal(await page.getByRole("button", { name: "模型不可用", exact: true }).count(), 0)
+  await builtinSelector.click()
+  await page.getByRole("button", { name: "Test", exact: true }).click()
+  console.log("PASS builtin model selection preserves its source across selection, persistence and reload")
   const workspace = page.getByTestId("design-workspace")
   const conversation = page.getByRole("region", { name: "设计对话", exact: true })
   const canvas = page.getByRole("region", { name: "设计页面", exact: true })

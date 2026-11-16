@@ -71,6 +71,7 @@ import {
   stopBuiltinModelCatalogRefresh,
   updateBuiltinModelOverride
 } from "./registry"
+import { getDesignModelConfig } from "../services/design/model-config"
 
 beforeEach(() => {
   stopBuiltinModelCatalogRefresh()
@@ -395,5 +396,49 @@ describe("builtin model registry", () => {
     await refreshBuiltinModelCatalog(true)
 
     expect(getBuiltinModelConfigs().map((item) => item.origin)).toEqual(["fallback"])
+  })
+})
+
+describe("Design model configuration", () => {
+  beforeEach(async () => {
+    state.manifest = {
+      modelCatalog: {
+        schemaVersion: 1,
+        models: [{ id: "shared", model: "builtin-design", baseUrl: "https://builtin.example.com/v1" }]
+      }
+    }
+    state.customConfigs = [{
+      id: "shared", model: "custom-design", baseUrl: "https://custom.example.com/v1",
+      apiKey: "custom-test-key", maxTokens: 128_000
+    }]
+    await refreshBuiltinModelCatalog(true)
+  })
+
+  it("uses the selected builtin's endpoint and credential even with a same-ID custom model", () => {
+    expect(getDesignModelConfig("builtin:shared")).toMatchObject({
+      ref: "builtin:shared", model: "builtin-design",
+      baseUrl: "https://builtin.example.com/v1", apiKey: "local-test-key"
+    })
+    expect(getDesignModelConfig("custom:shared")).toMatchObject({
+      ref: "custom:shared", model: "custom-design", apiKey: "custom-test-key"
+    })
+  })
+
+  it("recovers corrupted builtin refs and legacy bare custom IDs", () => {
+    expect(getDesignModelConfig("custom:builtin:shared")?.ref).toBe("builtin:shared")
+    expect(getDesignModelConfig("shared")?.ref).toBe("custom:shared")
+  })
+
+  it("uses the saved builtin default when no model was selected", () => {
+    state.storedDefault = "builtin:shared"
+    expect(getDesignModelConfig()?.ref).toBe("builtin:shared")
+  })
+
+  it("does not silently send to another model when the selected model is missing or has no key", () => {
+    state.localApiKey = ""
+    expect(getDesignModelConfig("builtin:shared")).toBeNull()
+    expect(getDesignModelConfig("builtin:removed")).toBeNull()
+    expect(getDesignModelConfig("custom:removed")).toBeNull()
+    expect(getDesignModelConfig("custom:shared")?.ref).toBe("custom:shared")
   })
 })

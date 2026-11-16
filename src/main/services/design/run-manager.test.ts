@@ -64,6 +64,21 @@ function harness(options: Partial<DesignRunDependencies> = {}) {
 }
 
 describe("background design conversations", () => {
+  it.each([
+    ["custom:builtin:minimax", "builtin:minimax"],
+    ["builtin:minimax", "builtin:minimax"],
+    ["custom:minimax", "custom:minimax"],
+    ["legacy-custom", "custom:legacy-custom"]
+  ])("restores the model source when reopening a persisted selection %s", (saved, expected) => {
+    const h = harness()
+    h.create()
+    h.db.run("UPDATE design_sessions SET state = json_set(state, '$.selectedModelId', ?) WHERE id = ?",
+      [saved, "ds_a"])
+    expect(h.store.get("ds_a")?.state.selectedModelId).toBe(expected)
+    const reopened = new DesignRunManager(h.store, h.deps)
+    expect(reopened.get("ds_a").state.selectedModelId).toBe(expected)
+  })
+
   it("archives annotations only after a successful update, clears overlays and persists history across reopen", async () => {
     const h = harness()
     h.create()

@@ -65,6 +65,7 @@ import { MessageBubble } from "./MessageBubble"
 import { QuestionsPanel } from "./QuestionsPanel"
 import { S } from "./styles"
 import { getDesignSessionClient } from "./session-client"
+import { normalizeDesignModelId } from "../../../../shared/design-model-selection"
 import {
   buildNewDesignPrompt,
   shouldSkipDesignQuestions,
@@ -854,11 +855,6 @@ const DESIGN_MAX_ATTACHMENTS_DISPLAY = 3
 
 // Last-used model persistence
 const DESIGN_LAST_MODEL_KEY = "design_last_model_id"
-function normalizeDesignModelId(modelId: string | null | undefined): string | null {
-  const trimmed = modelId?.trim()
-  if (!trimmed) return null
-  return trimmed.startsWith("custom:") ? trimmed : `custom:${trimmed}`
-}
 function getLastModelId(): string | null {
   try {
     return normalizeDesignModelId(localStorage.getItem(DESIGN_LAST_MODEL_KEY))

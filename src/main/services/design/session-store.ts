@@ -7,6 +7,7 @@ import type {
 import type { DesignAppliedPatch } from "../../../shared/design-patch"
 import type { TweakValues, DesignTweaksState } from "../../../shared/design-tweaks"
 import { compareDesignSessionOrder, withDesignSessionOrder } from "../../../shared/design-session-order"
+import { normalizeDesignModelId } from "../../../shared/design-model-selection"
 
 export interface DesignPatchJournal {
   id: string
@@ -101,6 +102,7 @@ export class DesignSessionStore {
       [row.id]
     ).map((message) => JSON.parse(String(message.payload)) as Message)
     const state = { ...JSON.parse(String(row.state)), messages }
+    state.selectedModelId = normalizeDesignModelId(state.selectedModelId)
     if (state.draftPreview) {
       const draft = this.rows(
         "SELECT html FROM design_draft_previews WHERE session_id = ? AND run_id = ?",

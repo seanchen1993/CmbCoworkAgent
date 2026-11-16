@@ -50,6 +50,8 @@ import {
 } from "../services/design/generation-prompt"
 import { DesignQuestionStream } from "../services/design/question-stream"
 import { createDesignModel } from "../services/design/model"
+import { getDesignModelConfig } from "../services/design/model-config"
+import { normalizeDesignModelId } from "../../shared/design-model-selection"
 import { DESIGN_FILE_TOOL_DESCRIPTIONS } from "../services/design/file-tool-descriptions"
 import { createDesignRepairProgress } from "../services/design/repair-progress"
 import {
@@ -78,7 +80,7 @@ function registerDesignExecutor<P extends { sessionId: string }>(channel: string
 import AdmZip from "adm-zip"
 import type { ChatOpenAI } from "@langchain/openai"
 import { HumanMessage, SystemMessage, AIMessage } from "@langchain/core/messages"
-import { deleteThreadCheckpoint, getCustomModelConfigs, getOpenworkDir } from "../storage"
+import { deleteThreadCheckpoint, getOpenworkDir } from "../storage"
 import {
   closeCheckpointer,
   createAgentRuntime,
@@ -331,15 +333,8 @@ Your response must end with: </html>
 // ─────────────────────────────────────────────────────────
 
 function getModel(modelId?: string, retryHooks?: ModelRetryHooks): ChatOpenAI | null {
-  const configs = getCustomModelConfigs()
-  const requestedModelId = modelId?.trim()
-  const selectedModelId = requestedModelId?.startsWith("custom:")
-    ? requestedModelId.slice("custom:".length)
-    : requestedModelId
-  const config = selectedModelId
-    ? (configs.find((c) => c.id === selectedModelId) ?? configs[0])
-    : configs[0]
-  if (!config || !config.apiKey) return null
+  const config = getDesignModelConfig(modelId)
+  if (!config) return null
   return createDesignModel(
     { model: config.model, apiKey: config.apiKey, baseUrl: config.baseUrl },
     retryHooks ? createRetryingFetch(retryHooks, DESIGN_MODEL_MAX_RETRY_ATTEMPTS) : undefined
@@ -2668,10 +2663,8 @@ export function registerDesignHandlers(): void {
       }
       if (request.kind === "patch") {
         const controller = new AbortController()
-        const configs = getCustomModelConfigs()
-        const selectedId = request.modelId?.replace(/^custom:/, "")
-        const selected = configs.find((c) => c.id === selectedId) ?? configs[0]
-        const model = selected?.apiKey ? getModelInstance({ ...selected, maxOutputTokens: Math.min(selected.maxOutputTokens ?? 8192, 8192) },
+        const selected = getDesignModelConfig(request.modelId)
+        const model = selected ? getModelInstance({ ...selected, maxOutputTokens: Math.min(selected.maxOutputTokens ?? 8192, 8192) },
           buildDesignModelRetryHooks((data) => emit(data as DesignRunEvent)), 3) : null
         let localMetrics: DesignPatchMetrics | undefined
         if (!model || !request.patch) { activeSessions.delete(runId); throw new Error("未配置模型或局部修改目标无效") }
@@ -3205,8 +3198,7 @@ export function registerDesignHandlers(): void {
         return
       }
       // Log which model is being used
-      const configs = getCustomModelConfigs()
-      const usedConfig = modelId ? configs.find((c) => c.id === modelId) : configs[0]
+      const usedConfig = getDesignModelConfig(modelId)
       console.log(`[Design:Image] Using model="${usedConfig?.model}" baseURL="${usedConfig?.baseUrl}" — NOTE: model must support vision/multimodal input`)
       console.log("[Design:Image] Model obtained, preparing to stream…")
 
@@ -3271,7 +3263,7 @@ export function registerDesignHandlers(): void {
           console.error("[Design:Image] ❌ Model did not produce HTML — vision likely unsupported")
           send({
             type: "error",
-            error: `当前模型（${configs[0]?.model}）不支持图片输入。\n\n请切换到支持 Vision 的模型，如：\n• gpt-4o\n• claude-3-5-sonnet-20241022\n• gemini-1.5-pro\n\n模型实际回复：\n${fullText.slice(0, 200)}`,
+            error: `当前模型（${usedConfig?.model}）不支持图片输入。\n\n请切换到支持 Vision 的模型，如：\n• gpt-4o\n• claude-3-5-sonnet-20241022\n• gemini-1.5-pro\n\n模型实际回复：\n${fullText.slice(0, 200)}`,
           })
           return
         }
@@ -3280,7 +3272,7 @@ export function registerDesignHandlers(): void {
           console.warn(`[Design:Image] ⚠️ HTML too short (${html.length} chars) — model likely did not process the image`)
           send({
             type: "error",
-            error: `模型（${configs[0]?.model}）可能无法处理图片，生成的页面过于简单（${html.length} 字符）。\n\n请确认该模型支持 Vision 多模态输入，或切换到 gpt-4o / claude-3-5-sonnet 等模型。\n\n模型实际回复：\n${fullText.slice(0, 200)}`,
+            error: `模型（${usedConfig?.model}）可能无法处理图片，生成的页面过于简单（${html.length} 字符）。\n\n请确认该模型支持 Vision 多模态输入，或切换到 gpt-4o / claude-3-5-sonnet 等模型。\n\n模型实际回复：\n${fullText.slice(0, 200)}`,
           })
           return
         }
@@ -3682,7 +3674,7 @@ export function registerDesignHandlers(): void {
           return createAgentRuntime({
             threadId: runtimeThreadId,
             workspacePath,
-            modelId,
+            modelId: normalizeDesignModelId(modelId) ?? undefined,
             baseSystemPrompt: isExistingDesignEdit && !validationRepair
               ? buildDesignIterationBasePrompt(workspacePath)
               : buildDesignCreationBasePrompt(workspacePath),
