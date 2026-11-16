@@ -20,6 +20,7 @@ import type { ProjectModelCheckpoint } from "./model-checkpoint"
 
 export interface ProjectModelSet {
   name: string
+  selectionLabel?: string
   budget: ProjectContextBudget
   agent: ProjectAnalysisModel
   final: ProjectAnalysisModel
@@ -170,12 +171,12 @@ export class ProjectContext {
     )
     if (this.inputTokens < 1024)
       throw new ProjectContextError(
-        "默认模型的上下文与输出配置未给项目查询工具留出足够输入空间，请检查模型设置"
+        "当前模型的上下文与输出配置未给项目查询工具留出足够输入空间，请检查模型设置"
       )
     this.progress
       .begin(
         "review",
-        "采用默认模型配置",
+        `采用${model.selectionLabel ?? "默认"}模型配置`,
         `${model.name} · 上下文 ${model.budget.contextTokens} token · 最大输出 ${model.budget.outputTokens} token`
       )
       .finish()
@@ -254,7 +255,7 @@ export class ProjectContext {
       )
       if (cap < 128)
         throw new ProjectContextError(
-          "默认模型上下文配置不足以整理当前记录，请检查上下文与输出额度"
+          "当前模型上下文配置不足以整理当前记录，请检查上下文与输出额度"
         )
       const notes: string[] = []
       const responses: AIMessage[] = []
@@ -290,7 +291,7 @@ export class ProjectContext {
   async review(model: ProjectAnalysisModel, messages: BaseMessage[], title: string) {
     const estimate = estimateProjectMessages(messages)
     if (estimate > this.reviewInputTokens)
-      throw new ProjectContextError("默认模型上下文不足以完整审阅当前记录，请检查上下文与输出配置")
+      throw new ProjectContextError("当前模型上下文不足以完整审阅当前记录，请检查上下文与输出配置")
     try {
       const response = await this.request(model, messages, title, false)
       this.observe(response, estimate)
@@ -298,7 +299,7 @@ export class ProjectContext {
     } catch (error) {
       if (isContextLimit(error))
         throw new ProjectContextError(
-          "模型服务拒绝了审阅请求的上下文长度，请核对默认模型配置是否与服务端容量一致"
+          "模型服务拒绝了审阅请求的上下文长度，请核对当前模型配置是否与服务端容量一致"
         )
       throw error
     }
@@ -321,7 +322,7 @@ export class ProjectContext {
         if (!isContextLimit(error)) throw error
         if (attempt === 1)
           throw new ProjectContextError(
-            "已整理上下文，但模型服务仍返回长度超限，请核对默认模型的上下文与输出配置"
+            "已整理上下文，但模型服务仍返回长度超限，请核对当前模型的上下文与输出配置"
           )
         // Calibrate conservatively when a provider tokenizes differently; never retry the same oversized prompt.
         this.estimateMultiplier *= 1.5
@@ -383,7 +384,7 @@ export class ProjectContext {
         if (messages.includes(message)) {
           if (!withTools)
             throw new ProjectContextError(
-              "默认模型当前上下文无法容纳完整报告源文档，未覆盖原版本；请检查模型上下文与输出配置"
+              "当前模型当前上下文无法容纳完整报告源文档，未覆盖原版本；请检查模型上下文与输出配置"
             )
           message.content = this.reference(id)
         }
@@ -393,7 +394,7 @@ export class ProjectContext {
     this.lastEstimate = estimateProjectMessages(messages) + (withTools ? this.schemaTokens : 0)
     if (estimateProjectMessages(messages) > limit)
       throw new ProjectContextError(
-        "默认模型的上下文配置无法容纳当前必要指令，请检查上下文窗口与最大输出配置；完整数据未截断"
+        "当前模型的上下文配置无法容纳当前必要指令，请检查上下文窗口与最大输出配置；完整数据未截断"
       )
   }
   private observe(response: AIMessage, estimate: number) {

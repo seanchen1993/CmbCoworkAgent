@@ -27,6 +27,7 @@ const bundle = await build({
       import React, {useCallback, useState} from 'react';
       import {createRoot} from 'react-dom/client';
       import {ProjectRunAnalysis} from './components/dashboard/ProjectRunAnalysis';
+      import {ProjectAgentWorkspaceHost} from './components/dashboard/ProjectAgentWorkspaceHost';
       import {TimeControlBar} from './components/dashboard/TimeControlBar';
       import {getDefaultRange,navigateRange} from './components/dashboard/use-dashboard';
       import {ProjectModePanel} from './components/dashboard/panels/ProjectModePanel';
@@ -63,7 +64,14 @@ const bundle = await build({
         }
         qa.reportReplies[index](response);
       };
-      window.api = {dashboard:{
+      window.api = {models:{
+        getCatalog: async()=>({models:[
+          {id:'provider/default',name:'默认测试模型',model:'model-default',available:true,selectable:true},
+          {id:'provider/alternate',name:'备用测试模型',model:'model-alternate',available:true,selectable:true},
+          {id:'provider/offline',name:'不可用测试模型',model:'model-offline',available:false,selectable:false,unavailableReason:'未配置密钥'}
+        ],providers:[],defaultModelId:'provider/default',routingMode:'manual'}),
+        setDefault: ()=>{throw Error('Project Agent must not change the global default model')}
+      },dashboard:{
         projectReportWorkspace: async()=>{
           calls.push({type:'reportWorkspace'});
           if(qa.workspaceFailure)return {success:false,error:'验收工作区暂时不可用'};
@@ -116,6 +124,8 @@ const bundle = await build({
       }};
       function App() {
         const [active,setActive]=useState(false), [room,setRoom]=useState('A'), [integrated,setIntegrated]=useState(false);
+        const [menu,setMenu]=useState('project'), [accountRevision,setAccountRevision]=useState(0);
+        qa.setMenu=setMenu;qa.setAccountRevision=setAccountRevision;
         const [overviewRequest,setOverviewRequest]=useState({loading:false,error:null});
         qa.overviewRequest=overviewRequest;qa.setOverviewRequest=setOverviewRequest;
         const [currentRange,setCurrentRange]=useState(range), [granularity,setGranularity]=useState('custom');
@@ -137,7 +147,7 @@ const bundle = await build({
         qa.load=load;
         return <TooltipProvider><main style={{padding:20,minWidth:0}}>
           <div data-testid="dashboard-time-control"><TimeControlBar key={currentRange.from+currentRange.to} {...timeControl} range={currentRange}/></div>
-          {integrated ? <ProjectModePanel data={null} loading={overviewRequest.loading} error={overviewRequest.error} codeSource={null}
+          {menu!=='project' ? <div>其他菜单内容</div> : integrated ? <ProjectModePanel data={null} loading={overviewRequest.loading} error={overviewRequest.error} codeSource={null}
             codeStatsOverride={null} codeStatsLoading={false} onCodeSourceChange={()=>{}}
             createdInRangeProjectsOnly runAnalysisRange={currentRange} runAnalysisTimeControl={timeControl} runAnalysisOptions={{upperOrgLv1:[room]}}
             projectPages={{}} projectPageLoading={{active:false,archived:false}} projectPageError={{}}
@@ -146,7 +156,7 @@ const bundle = await build({
           : <ProjectRunAnalysis range={currentRange} timeControl={timeControl} options={{upperOrgLv1:[room]}} active={active} loadData={load}
             onOpenFeatureCommits={(row,pushed)=>qa.opened.push({row,pushed})}
             onOpenCodeTrace={row=>qa.opened.push({code:row.projectId})}/>}
-        </main></TooltipProvider>;
+        </main><ProjectAgentWorkspaceHost enabled accountRevision={accountRevision}/></TooltipProvider>;
       }
       createRoot(document.getElementById('root')).render(<App/>);
     `
@@ -934,9 +944,12 @@ try {
   await page.getByRole("button", { name: "项目分析 Agent", exact: true }).click()
   await page.getByRole("tab", { name: "综合报告", exact: true }).click()
   await page
-    .getByText("报告覆盖所选室在周期内的全部项目活动（含归档）。当前列表筛选不影响报告。", {
-      exact: true
-    })
+    .getByText(
+      "统计所选室在自然周／月内有活动记录的项目（含归档），覆盖对话、代码产出和知识调用。累计背景单独用于诊断；当前列表筛选不影响报告。",
+      {
+        exact: true
+      }
+    )
     .waitFor()
   assert.equal(
     await page.getByRole("textbox", { name: "报告所属室", exact: true }).inputValue(),
@@ -972,7 +985,8 @@ try {
       action: "create",
       scope: { upperOrgLv1: "E", period: { kind: "week", anchorDate: "2026-11-02" } },
       instruction: "突出个人贡献和知识调用",
-      templateId: await page.evaluate(() => window.runQA.recommendedId)
+      templateId: await page.evaluate(() => window.runQA.recommendedId),
+      modelId: "default"
     },
     "Report request must not inherit project target, membership or list filters"
   )
@@ -1021,7 +1035,8 @@ try {
     action: "revise",
     reportId: "report-1",
     baseVersion: 1,
-    instruction: "把成员贡献改成表格"
+    instruction: "把成员贡献改成表格",
+    modelId: "default"
   })
   await page.evaluate(() =>
     window.runQA.finishReport(1, { success: false, error: "验收报告模型暂时不可用" })
@@ -1442,6 +1457,7 @@ try {
   // Recover a failed report without starting over, including a remounted workspace.
   const resumeId = "0b73d4ba-245f-4ea1-a504-b9ead425d7f3"
   const reportBase = await page.evaluate(() => window.runQA.reportReplies.length)
+  await choose("项目 Agent 模型", "备用测试模型")
   await page.getByRole("button", { name: "应用修改", exact: true }).click()
   await waitReport(reportBase + 1)
   await page.evaluate(
@@ -1452,6 +1468,7 @@ try {
         dataAsOf: "2026-11-12T01:00:00Z",
         updatedAt: "2026-11-16T01:00:00Z",
         completedSteps: 1,
+        modelId: "provider/alternate",
         nextStep: "全量数据审阅 2/5"
       }
       window.runQA.reportWorkspace.pendingRun = resume
@@ -1481,7 +1498,11 @@ try {
   await page.getByRole("combobox", { name: "报告所属室", exact: true }).fill("新的草稿室")
   await page.getByRole("button", { name: "继续运行", exact: true }).click()
   await waitReport(reportBase + 2)
-  assert.deepEqual(await reportRequest(reportBase + 1), { action: "resume", runId: resumeId })
+  assert.deepEqual(await reportRequest(reportBase + 1), {
+    action: "resume",
+    runId: resumeId,
+    modelId: "provider/alternate"
+  })
   await page.evaluate(() => {
     delete window.runQA.reportWorkspace.pendingRun
   })
@@ -1489,6 +1510,116 @@ try {
   await waitReportVersion(2)
   assert.equal(await page.getByRole("button", { name: "继续运行", exact: true }).count(), 0)
   await page.keyboard.press("Escape")
+  // The app-level workspace survives complete route unmounts, independently of page tabs.
+  await page.getByRole("combobox", { name: "查看范围", exact: true }).selectOption("active")
+  await waitLoad("H:active")
+  await finish("H:active")
+  await page.getByRole("button", { name: "项目分析 Agent", exact: true }).click()
+  await page.getByRole("tab", { name: "项目分析", exact: true }).click()
+  await choose("项目 Agent 模型", "备用测试模型")
+  const menuAgentIndex = await page.evaluate(() => window.runQA.agentReplies.length)
+  await page.getByRole("textbox", { name: "项目分析问题" }).fill("切换菜单后继续分析")
+  await page.getByRole("button", { name: "发送", exact: true }).click()
+  await waitAgent(menuAgentIndex + 1)
+  assert.equal(
+    await page.evaluate(
+      (i) => window.runQA.calls.filter((c) => c.type === "agent")[i].request.modelId,
+      menuAgentIndex
+    ),
+    "provider/alternate"
+  )
+  assert.ok(await page.getByRole("combobox", { name: "项目 Agent 模型" }).isDisabled())
+  const menuAgentCancellations = await cancelCount("dashboard:projectModeAnalysisAgent")
+  await page.getByRole("button", { name: "最小化项目分析 Agent", exact: true }).click()
+  await page.evaluate(() => window.runQA.setMenu("other"))
+  await page.getByText("其他菜单内容", { exact: true }).waitFor()
+  assert.equal(await page.getByRole("region", { name: "项目分析", exact: true }).count(), 0)
+  assert.equal(await cancelCount("dashboard:projectModeAnalysisAgent"), menuAgentCancellations)
+  await page.evaluate(
+    (index) =>
+      window.runQA.agentEvents[index]({
+        type: "text",
+        stepId: "menu-analysis",
+        text: "跨菜单接收到的流式内容"
+      }),
+    menuAgentIndex
+  )
+  await minimizedAgent.getByRole("button", { name: "展开项目分析 Agent", exact: true }).click()
+  await page.getByText("跨菜单接收到的流式内容", { exact: true }).waitFor()
+  await page.getByText("沿用任务打开时的分析范围。", { exact: false }).waitFor()
+  await page.getByRole("button", { name: "最小化项目分析 Agent", exact: true }).click()
+  await agentReply(menuAgentIndex, "跨菜单分析已完成")
+  await minimizedAgent.getByText("分析已完成，展开查看", { exact: true }).waitFor()
+  await minimizedAgent.getByRole("button", { name: "展开项目分析 Agent", exact: true }).click()
+  await page.getByText("跨菜单分析已完成", { exact: true }).waitFor()
+  await page.screenshot({ path: join(output, "project-agent-cross-menu.png") })
+  await page.keyboard.press("Escape")
+  await page.evaluate(() => window.runQA.setMenu("project"))
+  await page.getByRole("tab", { name: "项目分析", exact: true }).click()
+  await waitLoad("H:active")
+  await finish("H:active")
+  await page.getByRole("button", { name: "项目分析 Agent", exact: true }).click()
+  await page.getByRole("tab", { name: "综合报告", exact: true }).click()
+  await waitReportVersion(2)
+  const menuReportIndex = await page.evaluate(() => window.runQA.reportReplies.length)
+  await page.getByRole("textbox", { name: "报告修改要求", exact: true }).fill("跨菜单继续修改报告")
+  await page.getByRole("button", { name: "应用修改", exact: true }).click()
+  await waitReport(menuReportIndex + 1)
+  assert.equal((await reportRequest(menuReportIndex)).modelId, "provider/alternate")
+  const menuReportCancellations = await cancelCount("dashboard:projectReportGenerate")
+  await page.getByRole("button", { name: "最小化项目分析 Agent", exact: true }).click()
+  await page.evaluate(() => window.runQA.setMenu("other"))
+  await page.getByText("其他菜单内容", { exact: true }).waitFor()
+  assert.equal(await cancelCount("dashboard:projectReportGenerate"), menuReportCancellations)
+  await page.evaluate(
+    (index) =>
+      window.runQA.finishReport(index, {
+        success: false,
+        error: "所选模型暂时不可用",
+        resume: {
+          runId: "1b73d4ba-245f-4ea1-a504-b9ead425d7f3",
+          title: "跨菜单报告续跑",
+          dataAsOf: "2026-11-12T01:00:00Z",
+          updatedAt: "2026-11-16T01:00:00Z",
+          completedSteps: 2,
+          modelId: "provider/alternate"
+        }
+      }),
+    menuReportIndex
+  )
+  await minimizedAgent.getByText("任务未完成，展开查看原因", { exact: true }).waitFor()
+  await minimizedAgent.getByRole("button", { name: "展开项目分析 Agent", exact: true }).click()
+  await page.getByText("自动重试不会切换模型", { exact: false }).waitFor()
+  await choose("项目 Agent 模型", "默认模型 · 默认测试模型")
+  await page.getByText("已手动选择其他模型", { exact: false }).waitFor()
+  assert.equal(await page.evaluate(() => window.runQA.reportReplies.length), menuReportIndex + 1)
+  await page.getByRole("button", { name: "继续运行", exact: true }).click()
+  await waitReport(menuReportIndex + 2)
+  assert.deepEqual(await reportRequest(menuReportIndex + 1), {
+    action: "resume",
+    runId: "1b73d4ba-245f-4ea1-a504-b9ead425d7f3",
+    modelId: "default"
+  })
+  assert.match(
+    await page.getByRole("combobox", { name: "项目 Agent 模型" }).innerText(),
+    /默认模型 · 默认测试模型/
+  )
+  await page.getByRole("button", { name: "最小化项目分析 Agent", exact: true }).click()
+  await replyReport(menuReportIndex + 1, "report-3", 3, adminRequest.scope)
+  await minimizedAgent.getByText("报告已生成，展开查看", { exact: true }).waitFor()
+  await minimizedAgent.getByRole("button", { name: "展开项目分析 Agent", exact: true }).click()
+  await waitReportVersion(3)
+  await expectReportLayout(390, "project-agent-model-mobile.png")
+  // Changing the signed-in account remains a hard boundary and cancels active work.
+  await page.getByRole("tab", { name: "项目分析", exact: true }).click()
+  await page.getByRole("textbox", { name: "项目分析问题" }).fill("账号切换后应停止")
+  await page.getByRole("button", { name: "发送", exact: true }).click()
+  await waitAgent(menuAgentIndex + 2)
+  await page.getByRole("button", { name: "最小化项目分析 Agent", exact: true }).click()
+  const beforeAccountSwitch = await cancelCount("dashboard:projectModeAnalysisAgent")
+  await page.evaluate(() => window.runQA.setAccountRevision(1))
+  await minimizedAgent.waitFor({ state: "hidden" })
+  assert.equal(await cancelCount("dashboard:projectModeAnalysisAgent"), beforeAccountSwitch + 1)
   assert.deepEqual(errors, [], "No renderer runtime errors")
   const calls = await page.evaluate(() => window.runQA.calls)
   writeFileSync(
@@ -1522,6 +1653,10 @@ try {
           "close/reopen draft preservation",
           "minimize/close/Escape preserve running analysis and reports, streamed progress and final results",
           "minimized tasks survive project-list tabs and report tasks survive list filters",
+          "analysis and report tasks survive complete menu/page unmounts and stream while away",
+          "local model selection and restored resume selection never change the global default",
+          "report continuation changes models only after manual selection and clicking continue",
+          "account switches dispose the workspace and cancel active work",
           "explicit task termination ignores late stream and completion events",
           "minimized report failure preserves the previous version and exposes the error on restore",
           "filtered project scope disclosure",
@@ -1541,7 +1676,7 @@ try {
     )
   )
   console.log(
-    "Run analysis browser acceptance passed: existing analysis checks plus full-room reports, version/retry/cancellation, templates, export, sandbox preview and 760px/390px layouts."
+    "Project Agent browser acceptance passed: cross-menu background analysis/reports, model selection and continuation, account isolation, existing report workflows and 760px/390px layouts."
   )
 } finally {
   await browser.close()

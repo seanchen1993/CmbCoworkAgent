@@ -1,3 +1,4 @@
+import { ProjectAgentWorkspaceHost } from "@/components/dashboard/ProjectAgentWorkspaceHost"
 import {
   useCallback,
   useDeferredValue,
@@ -1509,6 +1510,10 @@ function App(): React.JSX.Element {
         </div>
       </div>
       <PetStateBridge />
+      <ProjectAgentWorkspaceHost
+        accountRevision={accountRevision}
+        enabled={dashboardAllowed === true}
+      />
       <Toaster position="top-center" richColors duration={2200} theme={toastTheme} />
     </ThreadProvider>
   )

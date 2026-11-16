@@ -159,6 +159,8 @@ export function registerProjectReportHandlers(deps: ProjectReportDependencies): 
           if (activeRuns.has(run.id)) throw new Error("这份报告任务正在运行，请展开查看进度")
           if (run.snapshot.exampleData !== deps.exampleData)
             throw new Error("运行环境已变化，请新建报告获取当前环境的数据")
+          // Only an explicit resume request may change the selected model; retries never do.
+          if (request.modelId !== undefined) run.input.modelId = request.modelId
           progress
             .begin("data", "恢复报告任务", "沿用原要求、模板和数据快照，不重新查询全室数据")
             .finish(
@@ -203,7 +205,7 @@ export function registerProjectReportHandlers(deps: ProjectReportDependencies): 
           if (period.value.room !== request.scope.upperOrgLv1)
             throw new Error("查询数据与报告室范围不一致")
           readStep.finish(
-            `项目列表 ${pages.value.projectList.length} 个项目 · 项目分析 ${pages.value.analysis.rows.length} 条记录${accumulation.status === "rejected" || active.status === "rejected" ? " · 部分知识数据不可用，将注明缺失" : ""}`
+            `本期活动 ${period.value.projects.length} 个项目 · 全室累计背景 ${pages.value.projectList.length} 个项目 / ${pages.value.analysis.rows.length} 条分析记录（仅自动审阅本期相关项目）${accumulation.status === "rejected" || active.status === "rejected" ? " · 部分知识数据不可用，将注明缺失" : ""}`
           )
           const snapshot = buildReportSnapshot({
             scope: request.scope,
@@ -215,7 +217,7 @@ export function registerProjectReportHandlers(deps: ProjectReportDependencies): 
           })
           snapshot.pageData = pages.value
           snapshot.notes.push(
-            "项目列表（含归档）和项目分析（当前进行中）采用页面现有累计口径，作为当前项目诊断背景；与报告自然周/月活动指标分别展示。"
+            "自动审阅本期全部活动及本期相关项目的累计背景；全室其他项目保留供工具按需查询。页面累计指标与报告自然周/月活动指标分别展示。"
           )
           run = {
             schema: 1,
@@ -245,6 +247,7 @@ export function registerProjectReportHandlers(deps: ProjectReportDependencies): 
           store.saveRun(savedRun)
         })
         const result = await (deps.generate ?? generateProjectReport)({
+          modelId: input.modelId,
           snapshot: run.snapshot,
           instruction: input.instruction,
           template: run.template,

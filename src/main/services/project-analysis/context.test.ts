@@ -44,7 +44,7 @@ describe("project Agent context management", () => {
     expect(() => projectContextBudget({ maxTokens: 16_000, maxOutputTokens: 16_000 })).toThrow(
       "输出配置"
     )
-    expect(() => projectContextBudget({})).toThrow("默认模型")
+    expect(() => projectContextBudget({})).toThrow("当前模型")
     const messages = [new HumanMessage("证据" + "a".repeat(95_000))]
     context.pin(messages)
     await context.prepare(messages)

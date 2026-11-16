@@ -133,7 +133,8 @@ export class ProjectReportStore {
       dataAsOf: run.snapshot.periodData.dataAsOf,
       updatedAt: run.updatedAt,
       completedSteps: Object.keys(run.models.completed).length,
-      nextStep: run.models.pendingStep
+      nextStep: run.models.pendingStep,
+      modelId: run.input.modelId
     }
   }
   pendingRun(): ProjectReportResume | undefined {

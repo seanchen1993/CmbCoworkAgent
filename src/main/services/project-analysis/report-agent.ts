@@ -49,6 +49,7 @@ const generation = z.discriminatedUnion("action", [
   z
     .object({
       action: z.literal("create"),
+      modelId: z.string().trim().min(1).max(256).optional(),
       scope: z
         .object({ upperOrgLv1: z.string().trim().min(1).max(128), period: selection })
         .strict(),
@@ -59,12 +60,19 @@ const generation = z.discriminatedUnion("action", [
   z
     .object({
       action: z.literal("revise"),
+      modelId: z.string().trim().min(1).max(256).optional(),
       reportId: z.string().uuid(),
       baseVersion: z.number().int().min(1).max(20),
       instruction: z.string().trim().min(1).max(4000)
     })
     .strict(),
-  z.object({ action: z.literal("resume"), runId: z.string().uuid() }).strict()
+  z
+    .object({
+      action: z.literal("resume"),
+      runId: z.string().uuid(),
+      modelId: z.string().trim().min(1).max(256).optional()
+    })
+    .strict()
 ])
 export function parseReportGeneration(raw: unknown): ProjectReportGenerateInput {
   const result = generation.safeParse(raw)
@@ -97,6 +105,7 @@ const toolArgs = z
   .strict()
 export interface ReportAgentOptions {
   snapshot: ReportSnapshot
+  modelId?: string
   instruction: string
   previousSource?: string
   template?: SavedReportTemplate
@@ -163,15 +172,31 @@ export async function generateProjectReport(
     })
   ]
   tools.push(contextManager.readTool)
-  const model = (options.createModel ?? createProjectAnalysisModel)(tools)
+  const model = options.createModel
+    ? options.createModel(tools)
+    : createProjectAnalysisModel(tools, options.modelId)
   contextManager.configure(model, tools)
   const f = options.snapshot.facts
+  // Review every period contribution and its project background. The complete room snapshot
+  // remains available to the page tools; unrelated historical projects need not be pre-read.
+  const periodProjects = new Set(f.projects.map((row) => String(row.projectId)))
+  const reviewPages = pages && {
+    ...pages,
+    projectList: pages.projectList.filter((row) => periodProjects.has(String(row.projectId))),
+    projectFeatures: pages.projectFeatures.filter((row) =>
+      periodProjects.has(String(row.projectId))
+    ),
+    analysis: {
+      ...pages.analysis,
+      rows: pages.analysis.rows.filter((row) => periodProjects.has(row.projectId))
+    }
+  }
   const datasets: AnalysisDataset[] = [
     { name: "报告周期成员", basis: "报告自然周/月", rows: f.members },
     { name: "报告周期项目", basis: "报告自然周/月，状态为当前快照", rows: f.projects },
     { name: "报告周期特性", basis: "报告自然周/月，阶段为当前快照", rows: f.features },
     { name: "活跃知识", basis: String(f.knowledge.window), rows: f.knowledgeFiles },
-    ...(pages ? pageDatasets(pages) : [])
+    ...(reviewPages ? pageDatasets(reviewPages) : [])
   ]
   try {
     const reviewed = await reviewAllData(
@@ -196,9 +221,12 @@ export async function generateProjectReport(
     }
     const brief = {
       overview: reportDataPage(options.snapshot, "overview"),
-      projectDiagnostics: pages
+      projectDiagnostics: reviewPages
         ? (() => {
-            const result = diagnoseProjects(pages.analysis.rows, pages.analysis.dataAsOf)
+            const result = diagnoseProjects(
+              reviewPages.analysis.rows,
+              reviewPages.analysis.dataAsOf
+            )
             return {
               examinedProjects: result.examinedProjects,
               examinedFeatures: result.examinedFeatures,
@@ -208,6 +236,8 @@ export async function generateProjectReport(
             }
           })()
         : { unavailable: "历史报告没有项目分析页快照" },
+      reviewScope:
+        "自动审阅覆盖本期全部活动及本期项目的累计背景。全室其他项目仍可通过项目列表、项目分析工具完整查询，但不能算作本期活跃项目。",
       lists: Object.fromEntries(
         (["members", "projects", "features", "knowledgeFiles"] as const).map((key) => [
           key,

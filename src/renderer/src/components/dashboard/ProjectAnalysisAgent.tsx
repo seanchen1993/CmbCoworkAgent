@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { ProjectAgentRunProgress } from "./ProjectAgentRunProgress"
 import { ProjectAgentMinimized } from "./ProjectAgentMinimized"
+import { ProjectAgentModelSelect } from "./ProjectAgentModelSelect"
 import { useProjectAgentRun } from "./use-project-agent-run"
 import { ProjectAnalysisScope } from "./ProjectAnalysisScope"
 import type { DashboardTimeControl } from "./TimeControlBar"
@@ -123,18 +124,7 @@ function AnalysisMarkdown({ message }: { message: Message }) {
   )
 }
 
-export function ProjectAnalysisAgent({
-  open,
-  context,
-  scopeLabel,
-  scopeSummary,
-  scopeDetails,
-  analysisUnavailable,
-  onOpenChange,
-  timeControl,
-  onMembershipChange,
-  onInspect
-}: {
+export interface ProjectAnalysisAgentProps {
   open: boolean
   context: Omit<ProjectAnalysisAgentInput, "question" | "messages">
   scopeLabel: string
@@ -145,7 +135,23 @@ export function ProjectAnalysisAgent({
   timeControl: Omit<DashboardTimeControl, "range">
   onMembershipChange: (value: RunAnalysisMembership) => void
   onInspect: (target: ProjectAnalysisTarget) => void
-}): React.JSX.Element {
+  sourceAvailable?: boolean
+  onRunningChange?: (running: boolean) => void
+}
+export function ProjectAnalysisAgent({
+  open,
+  context,
+  scopeLabel,
+  scopeSummary,
+  scopeDetails,
+  analysisUnavailable,
+  onOpenChange,
+  timeControl,
+  onMembershipChange,
+  onInspect,
+  sourceAvailable = true,
+  onRunningChange
+}: ProjectAnalysisAgentProps): React.JSX.Element {
   const runProgress = useProjectAgentRun()
   const { end: endRun, clear: clearRun } = runProgress
   const followBottom = useRef(true)
@@ -157,6 +163,11 @@ export function ProjectAnalysisAgent({
   const [notice, setNotice] = useState("")
   const [mode, setMode] = useState<"analysis" | "report">("analysis")
   const [minimized, setMinimized] = useState(false)
+  const [modelId, setModelId] = useState("default")
+  const modelChosen = useRef(false)
+  const restoreModel = useCallback((savedModelId: string) => {
+    if (!modelChosen.current) setModelId(savedModelId)
+  }, [])
   const restoreButton = useRef<HTMLButtonElement>(null)
   const selectedRooms = Array.isArray(context.options.upperOrgLv1)
     ? context.options.upperOrgLv1
@@ -165,7 +176,9 @@ export function ProjectAnalysisAgent({
       : []
   const report = useProjectAnalysisReport({
     active: open && mode === "report",
-    selectedRooms
+    selectedRooms,
+    modelId,
+    onResumeModel: restoreModel
   })
   const sequence = useRef(0)
   const busy = useRef(false)
@@ -252,6 +265,7 @@ export function ProjectAnalysisAgent({
     if (!normalized || normalized.length > 6000 || busy.current || analysisUnavailable) return
     const request = {
       ...context,
+      modelId,
       question: normalized,
       messages: messages
         .slice(-8)
@@ -273,6 +287,9 @@ export function ProjectAnalysisAgent({
     }
   }
   const running = loading || report.loading
+  useEffect(() => {
+    onRunningChange?.(running)
+  }, [running, onRunningChange])
   const minimize = () => {
     setMinimized(true)
     onOpenChange(false)
@@ -348,6 +365,15 @@ export function ProjectAnalysisAgent({
               </TabsTrigger>
             </TabsList>
             {running && <span className="text-xs text-muted-foreground">最小化后继续运行</span>}
+            <ProjectAgentModelSelect
+              value={modelId}
+              onChange={(value) => {
+                modelChosen.current = true
+                setModelId(value)
+              }}
+              active={open}
+              disabled={running}
+            />
           </div>
           <TabsContent
             value="analysis"
@@ -364,10 +390,15 @@ export function ProjectAnalysisAgent({
             <ProjectAnalysisScope
               range={context.range}
               membership={context.options.membership ?? "active"}
-              busy={loading}
+              busy={loading || !sourceAvailable}
               timeControl={timeControl}
               onMembershipChange={onMembershipChange}
             />
+            {!sourceAvailable && (
+              <p className="text-xs text-muted-foreground">
+                沿用任务打开时的分析范围。任务结束后，可从项目分析页面顶部入口重新打开并调整范围。
+              </p>
+            )}
             <details className="shrink-0 rounded-md bg-muted/50 px-3 py-2 text-xs text-muted-foreground">
               <summary className="cursor-pointer">
                 <span>{scopeDetails[0]}</span> · 查看本次分析范围与筛选
@@ -464,6 +495,7 @@ export function ProjectAnalysisAgent({
                               {e.target && e.target.featureSlug !== undefined && (
                                 <button
                                   className="mt-1 text-primary hover:underline"
+                                  disabled={!sourceAvailable}
                                   onClick={() => onInspect(e.target!)}
                                 >
                                   查看特性诊断
@@ -518,7 +550,7 @@ export function ProjectAnalysisAgent({
                   variant="outline"
                   disabled={loading || Boolean(analysisUnavailable)}
                   onClick={() => {
-                    if (lastRequest.current) void run(lastRequest.current)
+                    if (lastRequest.current) void run({ ...lastRequest.current, modelId })
                   }}
                 >
                   重试分析

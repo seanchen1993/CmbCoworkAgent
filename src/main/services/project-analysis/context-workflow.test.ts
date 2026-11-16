@@ -11,7 +11,7 @@ import { buildReportSnapshot } from "./report-data"
 import { makeReportPeriodExample } from "./report-mock"
 import { projectListPageData } from "./page-data"
 import { createProjectRunReporter } from "./run-progress"
-import { runProjectAnalysisAgent } from "../project-analysis-agent"
+import { createProjectAnalysisModel, runProjectAnalysisAgent } from "../project-analysis-agent"
 import { recommendedReportTemplate } from "./report-builtin-template"
 
 const settings = vi.hoisted(() => ({
@@ -21,9 +21,24 @@ const settings = vi.hoisted(() => ({
     baseUrl: "",
     maxTokens: 0,
     maxOutputTokens: 0
+  },
+  alternate: {
+    model: "configured-alternate-model",
+    apiKey: "local-alternate-key",
+    baseUrl: "",
+    maxTokens: 0,
+    maxOutputTokens: 0
   }
 }))
-vi.mock("../../models/registry", () => ({ getDefaultModelConfig: () => settings.config }))
+vi.mock("../../models/registry", () => ({
+  getDefaultModelConfig: () => settings.config,
+  getModelConfigByRef: (ref: string) =>
+    ref === "provider/alternate"
+      ? settings.alternate
+      : ref === "provider/unavailable"
+        ? { ...settings.alternate, unavailableReason: "当前不在服务时段" }
+        : null
+}))
 vi.mock("../../models/connection", () => ({
   getModelClientOptions: (config: { baseUrl: string }) => ({
     configuration: { baseURL: config.baseUrl }
@@ -40,18 +55,27 @@ interface RequestBody {
 const html = (heading: string) =>
   `<!doctype html><html><head><style>body{font:16px sans-serif}</style></head><body><h1>${heading}</h1><p data-report-value="summary.projectCount"></p><p data-report-value="knowledge.window"></p><table><tbody><tr data-report-repeat="members"><td data-report-value="name"></td><td data-report-value="generatedLines"></td></tr></tbody></table><p data-report-insight>请核实待关注项目。</p></body></html>`
 
-describe("project Agent workflows with the configured default model over real SSE", () => {
+describe("project Agent workflows with configured models over real SSE", () => {
+  it("rejects unavailable or deleted selected models instead of silently falling back", () => {
+    expect(() => createProjectAnalysisModel([], "provider/missing")).toThrow("重新选择模型")
+    expect(() => createProjectAnalysisModel([], "provider/unavailable")).toThrow("不在服务时段")
+  })
   it.each([
-    [32_768, 4096],
-    [65_536, 12_288]
-  ])(
-    "runs analysis, report generation and revision with context=%s/output=%s",
-    async (contextTokens, outputTokens) => {
-      settings.config.maxTokens = contextTokens
-      settings.config.maxOutputTokens = outputTokens
-      const budget = projectContextBudget(settings.config)
+    [32_768, 4096, "default"],
+    [65_536, 12_288, "default"],
+    [49_152, 8192, "provider/alternate"]
+  ] as const)(
+    "runs analysis, report generation and revision with context=%s/output=%s/model=%s",
+    async (contextTokens, outputTokens, modelId) => {
+      const config = modelId === "default" ? settings.config : settings.alternate
+      config.maxTokens = contextTokens
+      config.maxOutputTokens = outputTokens
+      const originalDefault = JSON.stringify(settings.config)
+      const budget = projectContextBudget(config)
       const range = { from: "2026-10-01T00:00:00Z", to: "2026-11-01T00:00:00Z" }
       const analysis = makeMockRunAnalysis(range)
+      for (const row of analysis.rows)
+        row.projectId = row.projectId.replace(/^demo-([01])$/, "example-project-$1")
       const projects = [
         ...new Map(
           analysis.rows.map((row) => [
@@ -80,7 +104,7 @@ describe("project Agent workflows with the configured default model over real SS
         res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache" })
         const send = (delta: object, finish: string | null = null) =>
           res.write(
-            `data: ${JSON.stringify({ id: "local", object: "chat.completion.chunk", created: 1, model: settings.config.model, choices: [{ index: 0, delta, finish_reason: finish }] })}\n\n`
+            `data: ${JSON.stringify({ id: "local", object: "chat.completion.chunk", created: 1, model: config.model, choices: [{ index: 0, delta, finish_reason: finish }] })}\n\n`
           )
         const system = body.messages[0].content
         const isReview = system.includes("你在完整审阅") || system.includes("你在压缩")
@@ -153,11 +177,12 @@ describe("project Agent workflows with the configured default model over real SS
         res.end("data: [DONE]\n\n")
       })
       await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve))
-      settings.config.baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}/v1`
+      config.baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}/v1`
       try {
         const answer = await runProjectAnalysisAgent(
           {
             question: "诊断全部项目并分析单个项目的指标",
+            modelId,
             range,
             options: { upperOrgLv1: ["开发一室"], membership: "active" },
             filters: DEFAULT_RUN_ANALYSIS_FILTERS
@@ -174,7 +199,7 @@ describe("project Agent workflows with the configured default model over real SS
         expect(answer.content).toContain("已检查当前范围")
         expect(answer.toolCalls).toHaveLength(6)
         expect(answer.toolCalls.every((c) => c.success)).toBe(true)
-        expect(answer.modelName).toBe(settings.config.model)
+        expect(answer.modelName).toBe(config.model)
         expect(reviewBodies.join("\n")).toContain(analysis.rows.at(-1)!.projectId)
 
         const scope: ProjectReportScope = {
@@ -196,7 +221,9 @@ describe("project Agent workflows with the configured default model over real SS
         const frozen = JSON.stringify(snapshot)
         phase = "report"
         round = 0
+        reviewBodies.length = 0
         const report = await generateProjectReport({
+          modelId,
           snapshot,
           template: recommendedReportTemplate(),
           instruction: "列出所有成员产出及待关注项目",
@@ -206,9 +233,10 @@ describe("project Agent workflows with the configured default model over real SS
         expect(report.html).toContain(String(snapshot.facts.members.at(-1)!.name))
         expect(report.html).toContain("近30天")
         expect(repaired).toBe(true)
-        expect(reviewBodies.join("\n")).toContain(projects.at(-1)!.name)
-        expect(report.reviewNote).toContain("项目分析 36条")
-        expect(report.modelName).toBe(settings.config.model)
+        expect(reviewBodies.join("\n")).toContain(projects[0].name)
+        expect(reviewBodies.join("\n")).not.toContain(projects.at(-1)!.name)
+        expect(report.reviewNote).toContain("项目分析 6条")
+        expect(report.modelName).toBe(config.model)
         expect(
           requests.some((r) =>
             r.messages.some((m) => m.content?.includes("内置推荐：室级综合运营报告"))
@@ -218,6 +246,7 @@ describe("project Agent workflows with the configured default model over real SS
         phase = "revise"
         round = 0
         const revised = await generateProjectReport({
+          modelId,
           snapshot,
           previousSource: report.source,
           instruction: "保留全部成员数据，标题改成精简版综合报告",
@@ -232,7 +261,7 @@ describe("project Agent workflows with the configured default model over real SS
         expect(requests.length).toBeGreaterThan(10)
         for (const request of requests) {
           expect(request.stream).toBe(true)
-          expect(request.model).toBe(settings.config.model)
+          expect(request.model).toBe(config.model)
           expect(request.max_tokens).toBe(outputTokens)
           expect(
             estimateProjectTokens(JSON.stringify(request.messages)) +
@@ -242,6 +271,7 @@ describe("project Agent workflows with the configured default model over real SS
         expect(
           events.some((e) => e.type === "step" && e.step.detail?.includes("复用已有查询"))
         ).toBe(true)
+        if (modelId !== "default") expect(JSON.stringify(settings.config)).toBe(originalDefault)
         expect(events.some((e) => e.type === "text" && e.text.includes("已检查"))).toBe(true)
         expect(
           requests.some((r) =>

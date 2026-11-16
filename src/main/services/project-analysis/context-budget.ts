@@ -11,7 +11,7 @@ export function projectContextBudget(config: {
   maxOutputTokens?: number
 }): ProjectContextBudget {
   if (!Number.isSafeInteger(config.maxTokens) || !Number.isSafeInteger(config.maxOutputTokens))
-    throw new Error("默认模型缺少有效的上下文或最大输出配置，请检查模型设置")
+    throw new Error("当前模型缺少有效的上下文或最大输出配置，请检查模型设置")
   try {
     return {
       contextTokens: config.maxTokens!,
@@ -19,7 +19,7 @@ export function projectContextBudget(config: {
       inputTokens: calculateModelInputBudgetTokens(config.maxTokens!, config.maxOutputTokens!)
     }
   } catch {
-    throw new Error("默认模型的最大输出配置没有留出足够的输入空间，请检查模型上下文与输出配置")
+    throw new Error("当前模型的最大输出配置没有留出足够的输入空间，请检查模型上下文与输出配置")
   }
 }
 /** Conservative local estimate for mixed Chinese/JSON, without downloading a tokenizer for intranet models. */

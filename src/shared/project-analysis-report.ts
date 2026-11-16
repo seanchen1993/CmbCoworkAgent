@@ -57,10 +57,13 @@ export interface ProjectReportWorkspace {
   pendingRun?: ProjectReportResume
 }
 
-export type ProjectReportRunInput =
+export type ProjectReportRunInput = (
   | { action: "create"; scope: ProjectReportScope; instruction: string; templateId?: string }
   | { action: "revise"; reportId: string; baseVersion: number; instruction: string }
-export type ProjectReportGenerateInput = ProjectReportRunInput | { action: "resume"; runId: string }
+) & { modelId?: string }
+export type ProjectReportGenerateInput =
+  | ProjectReportRunInput
+  | { action: "resume"; runId: string; modelId?: string }
 
 export interface ProjectReportResume {
   runId: string
@@ -69,6 +72,7 @@ export interface ProjectReportResume {
   updatedAt: string
   completedSteps: number
   nextStep?: string
+  modelId?: string
 }
 
 export interface ProjectReportTemplateInput {

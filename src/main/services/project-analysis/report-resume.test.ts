@@ -24,6 +24,9 @@ describe("report continuation from private checkpoints", () => {
       from: "2026-10-01T00:00:00Z",
       to: "2026-11-01T00:00:00Z"
     })
+    // Only the first two projects had activity in this period.
+    for (const row of analysis.rows)
+      row.projectId = row.projectId.replace(/^demo-([01])$/, "example-project-$1")
     let snapshot = buildReportSnapshot({
       scope,
       data: makeReportPeriodExample(scope),
@@ -40,7 +43,7 @@ describe("report continuation from private checkpoints", () => {
             {
               projectId: row.projectId,
               name: row.projectName,
-              description: "项目完整背景数据".repeat(300),
+              description: "项目完整背景数据".repeat(500),
               features: []
             }
           ])
@@ -158,7 +161,7 @@ describe("report continuation from private checkpoints", () => {
     await expect(generate()).rejects.toThrow()
     expect(reviewed.filter((text) => text === firstBatch)).toHaveLength(1)
     expect(reviewed.length).toBeGreaterThan(1)
-    expect(reviewed.join("\n")).toContain(analysis.rows.at(-1)!.projectId)
+    expect(reviewed.join("\n")).toContain(snapshot.periodData.projects.at(-1)!.projectId)
     expect(loadStages).toHaveBeenCalledTimes(1)
     expect(loadSessions).toHaveBeenCalledTimes(1)
     expect(agentCall).toHaveBeenCalledTimes(3)

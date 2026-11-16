@@ -354,11 +354,26 @@ describe("bounded report Agent", () => {
       })
     ).toThrow()
   })
-  it("includes every page row and guards/caches stage drilldowns within the frozen scope", async () => {
+  it("reviews period-related backgrounds and keeps all room projects queryable with scoped drilldowns", async () => {
     const s = snapshot()
     const rows = makeMockRunAnalysis({ from: "2026-10-01T00:00:00Z", to: "2026-11-01T00:00:00Z" })
+    for (const row of rows.rows)
+      row.projectId = row.projectId.replace(/^demo-([01])$/, "example-project-$1")
+    const lastProject = rows.rows.at(-1)!
     s.pageData = projectListPageData(
-      [{ projectId: "project-last", name: "列表末尾项目", managedRunCount: 8, features: [] }],
+      [
+        ...new Map(
+          rows.rows.map((row) => [
+            row.projectId,
+            {
+              projectId: row.projectId,
+              name: row.projectName,
+              managedRunCount: 8,
+              features: []
+            }
+          ])
+        ).values()
+      ],
       rows
     )
     const selected = rows.rows[0]
@@ -375,6 +390,17 @@ describe("bounded report Agent", () => {
       })
     const responses = [
       call("outside"),
+      new AIMessage({
+        content: "",
+        tool_calls: [
+          { name: "project_list", id: "list", args: { view: "projects", limit: 20 } },
+          {
+            name: "project_analysis",
+            id: "analysis",
+            args: { view: "features", projectIds: [lastProject.projectId] }
+          }
+        ]
+      }),
       call(selected.projectId),
       call(selected.projectId),
       new AIMessage(source)
@@ -402,16 +428,27 @@ describe("bounded report Agent", () => {
         final: mockStreamingModel(runner)
       })
     })
-    expect(received[0].map((message) => message.content).join("\n")).toContain(
-      rows.rows.at(-1)!.projectId
+    expect(received[0].map((message) => message.content).join("\n")).not.toContain(
+      lastProject.projectId
     )
-    expect(reviewed.join("\n")).toContain(rows.rows.at(-1)!.projectId)
-    expect(reviewed.join("\n")).toContain("列表末尾项目")
+    expect(reviewed.join("\n")).toContain(selected.projectId)
+    expect(reviewed.join("\n")).not.toContain(lastProject.projectId)
+    const queried = received[2].filter((message) => message instanceof ToolMessage)
+    const listResult = JSON.parse(
+      String(queried.find((message) => message.name === "project_list")!.content)
+    )
+    const analysisResult = JSON.parse(
+      String(queried.find((message) => message.name === "project_analysis")!.content)
+    )
+    expect(listResult.total).toBe(12)
+    expect(JSON.stringify(listResult)).toContain(lastProject.projectId)
+    expect(analysisResult.total).toBe(3)
+    expect(JSON.stringify(analysisResult)).toContain(lastProject.featureSlug)
     expect(received[0].map((message) => message.content).join("\n")).not.toContain('"values":')
     expect(loadStages).toHaveBeenCalledTimes(1)
     const error = received[1].find((message) => message instanceof ToolMessage)!
     expect(String(error.content)).toContain("当前筛选与权限范围")
-    expect(output.reviewNote).toContain("项目分析 36条")
+    expect(output.reviewNote).toContain("项目分析 6条")
     expect(
       s.pageData.stages[JSON.stringify([selected.projectId, selected.featureSlug])]
     ).toBeDefined()

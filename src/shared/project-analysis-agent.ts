@@ -12,6 +12,8 @@ export interface ProjectAnalysisMessage {
 }
 export interface ProjectAnalysisAgentInput {
   question: string
+  /** A registered model ref; "default" or omission follows the default model. */
+  modelId?: string
   messages?: ProjectAnalysisMessage[]
   range: RunAnalysisRange
   options: RunAnalysisOptions

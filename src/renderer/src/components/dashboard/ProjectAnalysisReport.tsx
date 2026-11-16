@@ -54,10 +54,14 @@ const message = (error: unknown, fallback: string) =>
 // Visibility controls lazy loading and dialogs, never the lifetime of a generation.
 export function useProjectAnalysisReport({
   active,
-  selectedRooms
+  selectedRooms,
+  modelId = "default",
+  onResumeModel
 }: {
   active: boolean
   selectedRooms: string[]
+  modelId?: string
+  onResumeModel?: (modelId: string) => void
 }) {
   const runProgress = useProjectAgentRun()
   const { end: endRun, clear: clearRun } = runProgress
@@ -126,6 +130,7 @@ export function useProjectAnalysisReport({
       const next = response.data
       setWorkspace(next)
       setResume(next.pendingRun ?? null)
+      if (next.pendingRun) onResumeModel?.(next.pendingRun.modelId ?? "default")
       setRoom(
         (previous) =>
           previous ||
@@ -136,7 +141,7 @@ export function useProjectAnalysisReport({
     } finally {
       if (ticket === workspaceSequence.current) setWorkspaceLoading(false)
     }
-  }, [fallbackRoom])
+  }, [fallbackRoom, onResumeModel])
 
   useEffect(() => {
     if (active && !requestedWorkspace.current) void loadWorkspace()
@@ -179,6 +184,7 @@ export function useProjectAnalysisReport({
 
   const run = async (request: ProjectReportGenerateInput) => {
     if (busy.current) return
+    request = { ...request, modelId }
     readSequence.current++
     setReading(false)
     busy.current = true
@@ -437,7 +443,7 @@ export function useProjectAnalysisReport({
         {draft && workspace && (
           <>
             <div className="rounded-md bg-muted/50 p-3 text-xs leading-5 text-muted-foreground">
-              报告覆盖所选室在周期内的全部项目活动（含归档）。当前列表筛选不影响报告。
+              统计所选室在自然周／月内有活动记录的项目（含归档），覆盖对话、代码产出和知识调用。累计背景单独用于诊断；当前列表筛选不影响报告。
             </div>
             <div className="grid min-w-0 grid-cols-1 gap-3 sm:grid-cols-2">
               <label className="min-w-0 space-y-1 text-xs text-muted-foreground">
@@ -712,6 +718,11 @@ export function useProjectAnalysisReport({
                   </p>
                   <p className="text-muted-foreground">
                     点击“生成报告”或“应用修改”将按当前要求重新开始，并替换未完成任务。
+                  </p>
+                  <p className="text-muted-foreground">
+                    {modelId !== (resume.modelId ?? "default")
+                      ? "已手动选择其他模型；点击“继续运行”后生效，沿用原数据，部分审阅可能重新执行。"
+                      : "继续运行使用原模型。可在上方手动选择其他模型；自动重试不会切换模型。"}
                   </p>
                 </>
               )}

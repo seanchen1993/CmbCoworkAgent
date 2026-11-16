@@ -200,6 +200,42 @@ describe("project report IPC workflow", () => {
     expect((await s.call("projectReportGenerate", resume)).error).toContain("替换")
     expect(s.deps.generate).toHaveBeenCalledTimes(2)
   })
+  it.each([undefined, "provider/second"])(
+    "changes the resume model only when requested: %s",
+    async (modelId) => {
+      const s = setup()
+      s.deps.generate = vi
+        .fn(async (options) => ({
+          ...renderReportHtml(source, options.snapshot),
+          modelName: options.modelId!
+        }))
+        .mockRejectedValueOnce(new Error("HTTP 433"))
+      const first = await s.call("projectReportGenerate", {
+        action: "create",
+        scope,
+        instruction: "保留原数据",
+        modelId: "provider/first"
+      })
+      expect(first.resume?.modelId).toBe("provider/first")
+      const workspace = await s.call<ProjectReportWorkspace>("projectReportWorkspace")
+      expect(workspace.data.pendingRun?.modelId).toBe("provider/first")
+      expect(s.deps.generate).toHaveBeenCalledTimes(1)
+      const resumed = await s.call("projectReportGenerate", {
+        action: "resume",
+        runId: first.resume!.runId,
+        ...(modelId ? { modelId } : {})
+      })
+      expect(resumed.success).toBe(true)
+      expect(resumed.data.version.modelName).toBe(modelId ?? "provider/first")
+      expect(s.deps.loadPeriod).toHaveBeenCalledTimes(1)
+      expect(s.deps.loadPages).toHaveBeenCalledTimes(1)
+      const [before, after] = vi.mocked(s.deps.generate).mock.calls.map(([options]) => options)
+      expect(after.snapshot).toEqual(before.snapshot)
+      expect(before.modelId).toBe("provider/first")
+      expect(after.modelId).toBe(modelId ?? before.modelId)
+      expect(after.instruction).toBe(before.instruction)
+    }
+  )
   it("resumes a failed revision without replacing v1 and rejects concurrent resumes", async () => {
     const s = setup()
     const first = await s.call("projectReportGenerate", {

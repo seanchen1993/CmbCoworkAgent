@@ -17,7 +17,7 @@ import { ChatOpenAI } from "@langchain/openai"
 import { z } from "zod"
 import { ToolCallAwareChatOpenAICompletions } from "../agent/interleaved-thinking-completions"
 import { getModelClientOptions } from "../models/connection"
-import { getDefaultModelConfig } from "../models/registry"
+import { getDefaultModelConfig, getModelConfigByRef } from "../models/registry"
 import { samplingFields } from "../models/sampling-params"
 import {
   analysisPageRow,
@@ -98,6 +98,7 @@ const optionsSchema = z
 const inputSchema = z
   .object({
     question: z.string().trim().min(1).max(6000),
+    modelId: z.string().trim().min(1).max(256).optional(),
     messages: z
       .array(
         z.object({ role: z.enum(["user", "assistant"]), content: z.string().max(16000) }).strict()
@@ -161,10 +162,16 @@ export interface ProjectAnalysisDependencies {
   createModel?: (tools: StructuredToolInterface[]) => ProjectModelSet
 }
 
-export function createProjectAnalysisModel(tools: StructuredToolInterface[]): ProjectModelSet {
-  const config = getDefaultModelConfig()
+export function createProjectAnalysisModel(
+  tools: StructuredToolInterface[],
+  modelId?: string
+): ProjectModelSet {
+  const selected = modelId && modelId !== "default"
+  const config = selected ? getModelConfigByRef(modelId) : getDefaultModelConfig()
+  if (selected && !config) throw new Error("所选模型已不存在，请重新选择模型")
+  if (config?.unavailableReason) throw new Error(config.unavailableReason)
   if (!config?.apiKey || !config.model.trim())
-    throw new Error("请先在设置中配置可用的默认模型，再使用项目分析 Agent")
+    throw new Error("请先配置可用的模型，再使用项目分析 Agent")
   const budget = projectContextBudget(config)
   const fields = {
     model: config.model,
@@ -182,6 +189,7 @@ export function createProjectAnalysisModel(tools: StructuredToolInterface[]): Pr
   })
   return {
     name: config.model,
+    selectionLabel: selected ? "所选" : "默认",
     budget,
     agent: model.bindTools(tools),
     final: model,
@@ -223,12 +231,12 @@ export function projectAnalysisError(error: unknown): string {
   const status = projectModelStatus(error)
   const retried =
     error instanceof ProjectModelRequestError ? `，已自动重试${error.retries}次仍失败` : ""
-  if (status === 401 || status === 403) return "默认模型认证或访问失败，请检查模型配置与账号权限"
-  if (status === 429) return `默认模型请求受限${retried}，请稍后重试`
-  if (status === 433) return `默认模型输出 Token 数限流（HTTP 433）${retried}，请稍后重试`
+  if (status === 401 || status === 403) return "当前模型认证或访问失败，请检查模型配置与账号权限"
+  if (status === 429) return `当前模型请求受限${retried}，请稍后重试`
+  if (status === 433) return `当前模型输出 Token 数限流（HTTP 433）${retried}，请稍后重试`
   if (typeof status === "number")
-    return `默认模型请求失败（HTTP ${status}）${retried}，请检查模型服务后重试`
-  return `项目分析未完成${retried}，请稍后重试；若持续失败，请检查默认模型连接`
+    return `当前模型请求失败（HTTP ${status}）${retried}，请检查模型服务后重试`
+  return `项目分析未完成${retried}，请稍后重试；若持续失败，请检查当前模型连接`
 }
 
 export async function runProjectAnalysisAgent(
@@ -305,7 +313,9 @@ export async function runProjectAnalysisAgent(
     loadSessions: (request, signal) => deps.loadSessions({ ...input.options, ...request }, signal)
   })
   tools.push(context.readTool)
-  const model = (deps.createModel ?? createProjectAnalysisModel)(tools)
+  const model = deps.createModel
+    ? deps.createModel(tools)
+    : createProjectAnalysisModel(tools, input.modelId)
   context.configure(model, tools)
   const messages: BaseMessage[] = [
     new SystemMessage(

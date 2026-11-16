@@ -1,6 +1,6 @@
 import { ProjectAnalysisMembership } from "./ProjectAnalysisScope"
 import type { DashboardTimeControl } from "./TimeControlBar"
-import { ProjectAnalysisAgent } from "./ProjectAnalysisAgent"
+import { useProjectAgentLauncher } from "./project-agent-workspace"
 import { Fragment, useEffect, useMemo, useRef, useState, type ButtonHTMLAttributes } from "react"
 import {
   AlertCircle,
@@ -122,8 +122,6 @@ export function ProjectRunAnalysis({
   onOpenFeatureCommits,
   onOpenCodeTrace
 }: ProjectRunAnalysisProps): React.JSX.Element {
-  const [agentCreated, setAgentCreated] = useState(false)
-  const [agentOpen, setAgentOpen] = useState(false)
   const [membership, setMembership] = useState<RunAnalysisMembership>("active")
   const [filters, setFilters] = useState<RunAnalysisFilters>({ ...DEFAULT_RUN_ANALYSIS_FILTERS })
   const [preset, setPreset] = useState("")
@@ -148,13 +146,8 @@ export function ProjectRunAnalysis({
   const handledRefresh = useRef({ refresh, refreshKey })
   const key = JSON.stringify([range, options, membership, refresh, refreshKey])
   const data = result?.key === key ? result.data : null
-  // Keep minimized work mounted across refreshes, list filters and project-view tabs.
-  // A different room/permission scope still disposes the old workspace and its requests.
+  // Account-owned Agent state is hosted by the app shell, independently of this page.
   const agentScopeKey = JSON.stringify(options)
-  useEffect(() => {
-    setAgentCreated(false)
-    setAgentOpen(false)
-  }, [agentScopeKey])
   useEffect(() => {
     if (!active) return
     if (
@@ -504,51 +497,45 @@ export function ProjectRunAnalysis({
       </tr>
     )
   }
+  const openAgent = useProjectAgentLauncher(
+    {
+      context: {
+        range,
+        options: { ...options, membership },
+        filters
+      },
+      scopeLabel: "当前筛选范围",
+      scopeSummary: data ? agentSummary : "正在读取所选范围",
+      timeControl,
+      onMembershipChange: setMembership,
+      analysisUnavailable:
+        loading || !data
+          ? error || "当前分析数据尚未就绪"
+          : filterErrors.length > 0
+            ? "请先补全或修正分析筛选条件"
+            : !matches.length
+              ? "当前筛选没有匹配结果"
+              : undefined,
+      scopeDetails: [
+        `室：${selectedRooms.join("、") || "当前权限范围"}`,
+        `名单：${membershipLabel}`,
+        ...(membership !== "active" ? [`名单日期：${date(range.from)} 至 ${date(range.to)}`] : []),
+        `筛选：${filterChips.map(({ label }) => label).join("；") || "无附加条件"}`
+      ],
+      onInspect: (target) => {
+        const row = matches.find(
+          (m) => m.row.projectId === target.projectId && m.row.featureSlug === target.featureSlug
+        )?.row
+        if (row) setDiagnose(row)
+      }
+    },
+    agentScopeKey
+  )
   return (
     <section
       className="min-w-0 space-y-3 rounded-lg border border-border bg-card p-4"
       aria-label="项目分析"
     >
-      {agentCreated && (
-        <ProjectAnalysisAgent
-          key={agentScopeKey}
-          open={agentOpen}
-          context={{
-            range,
-            options: { ...options, membership },
-            filters
-          }}
-          scopeLabel="当前筛选范围"
-          scopeSummary={data ? agentSummary : "正在读取所选范围"}
-          timeControl={timeControl}
-          onMembershipChange={setMembership}
-          analysisUnavailable={
-            loading || !data
-              ? error || "当前分析数据尚未就绪"
-              : filterErrors.length > 0
-                ? "请先补全或修正分析筛选条件"
-                : !matches.length
-                  ? "当前筛选没有匹配结果"
-                  : undefined
-          }
-          scopeDetails={[
-            `室：${selectedRooms.join("、") || "当前权限范围"}`,
-            `名单：${membershipLabel}`,
-            ...(membership !== "active"
-              ? [`名单日期：${date(range.from)} 至 ${date(range.to)}`]
-              : []),
-            `筛选：${filterChips.map(({ label }) => label).join("；") || "无附加条件"}`
-          ]}
-          onOpenChange={setAgentOpen}
-          onInspect={(target) => {
-            const row = matches.find(
-              (m) =>
-                m.row.projectId === target.projectId && m.row.featureSlug === target.featureSlug
-            )?.row
-            if (row) setDiagnose(row)
-          }}
-        />
-      )}
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex items-center gap-1 text-sm font-semibold">
           项目分析
@@ -558,13 +545,7 @@ export function ProjectRunAnalysis({
           )}
         </div>
         <div className="flex flex-wrap gap-2">
-          <Button
-            size="sm"
-            onClick={() => {
-              setAgentCreated(true)
-              setAgentOpen(true)
-            }}
-          >
+          <Button size="sm" onClick={openAgent}>
             <Bot className="mr-1 size-3" />
             项目分析 Agent
           </Button>

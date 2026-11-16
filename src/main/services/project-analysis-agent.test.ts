@@ -233,7 +233,7 @@ describe("project analysis agent", () => {
   it("reports missing model setup and authentication failures in actionable language", async () => {
     const h = harness()
     h.deps.createModel = undefined
-    await expect(runProjectAnalysisAgent(input, h.deps)).rejects.toThrow("默认模型")
+    await expect(runProjectAnalysisAgent(input, h.deps)).rejects.toThrow("配置可用的模型")
     const auth = harness([Object.assign(new Error("secret provider details"), { status: 401 })])
     await expect(runProjectAnalysisAgent(input, auth.deps)).rejects.toThrow("认证")
   })
