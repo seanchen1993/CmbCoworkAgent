@@ -161,12 +161,12 @@ function testSelectedBrowserKeepsPopoverClosed(): void {
 }
 
 function testBuiltinBrowserPromptFormatting(): void {
-  setBuiltinBrowserScreenshotEnabled(false)
+  setBuiltinBrowserScreenshotEnabled(true)
   const formatted = formatBuiltinBrowserPrompt("打开百度并搜索 CMB")
   assertEqual(
     formatted,
-    `${BUILTIN_BROWSER_NO_SCREENSHOT_PROMPT_PREFIX}打开百度并搜索 CMB`,
-    "built-in browser prompt should block screenshots by default"
+    `${BUILTIN_BROWSER_PROMPT_PREFIX}打开百度并搜索 CMB`,
+    "built-in browser prompt should expose screenshots by default and defer eligibility to the skill"
   )
   assertEqual(
     parseBuiltinBrowserPrompt(formatted).visibleText,
@@ -179,18 +179,18 @@ function testBuiltinBrowserPromptFormatting(): void {
     "built-in browser prompt should expose the browser tag state"
   )
 
-  setBuiltinBrowserScreenshotEnabled(true)
+  setBuiltinBrowserScreenshotEnabled(false)
   assertEqual(
     getBuiltinBrowserPromptPrefix(),
-    BUILTIN_BROWSER_PROMPT_PREFIX,
-    "enabled screenshot prompt should omit the screenshot restriction"
+    BUILTIN_BROWSER_NO_SCREENSHOT_PROMPT_PREFIX,
+    "explicit screenshot disablement should keep the screenshot restriction"
   )
   assertEqual(
     formatBuiltinBrowserPrompt("打开百度并搜索 CMB"),
-    `${BUILTIN_BROWSER_PROMPT_PREFIX}打开百度并搜索 CMB`,
-    "enabled screenshot prompt should keep the original browser prefix"
+    `${BUILTIN_BROWSER_NO_SCREENSHOT_PROMPT_PREFIX}打开百度并搜索 CMB`,
+    "explicit screenshot disablement should use the restricted browser prefix"
   )
-  setBuiltinBrowserScreenshotEnabled(false)
+  setBuiltinBrowserScreenshotEnabled(true)
 }
 
 function testGoalSlashInputDetectionForRuntimeControls(): void {

@@ -5,6 +5,7 @@ import { getCurrentBrowserCdpPort } from "./browser-cdp"
 const PLAYWRIGHT_MCP_NAME = "In-app-browser"
 const MANAGED_PLAYWRIGHT_MCP_COMMAND = "npx"
 const MANAGED_PLAYWRIGHT_MCP_LAZY_LOAD = false
+const MANAGED_PLAYWRIGHT_MCP_VERSION = "0.0.85"
 
 function findManagedPlaywrightMcpConnector() {
   return getMcpConnectors().find(
@@ -13,7 +14,12 @@ function findManagedPlaywrightMcpConnector() {
 }
 
 function buildPlaywrightMcpArgs(cdpPort: number): string[] {
-  return ["-y", "@playwright/mcp@latest", `--cdp-endpoint=http://127.0.0.1:${cdpPort}`]
+  return [
+    "-y",
+    "--prefer-offline",
+    `@playwright/mcp@${MANAGED_PLAYWRIGHT_MCP_VERSION}`,
+    `--cdp-endpoint=http://127.0.0.1:${cdpPort}`
+  ]
 }
 
 function sameArgs(left: string[], right: string[]): boolean {
