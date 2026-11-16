@@ -142,9 +142,17 @@ npm run dist
 
 当前 macOS 目标为 Apple Silicon（ARM64），系统要求 macOS 13 或更高。使用 Node.js 22 和 npm 10 以上版本。macOS 通过重新下载安装 DMG 升级。
 
-在 GitHub Actions 中手动运行 **Build Electron App**，选择目标分支和 `macos-arm64`。工作流会从 DMG 中复制应用，验证签名并运行打包冒烟测试，再上传 DMG。默认使用临时签名供构建验证。分发给用户时启用 `sign_macos`，由工作流使用 Developer ID 签名并提交公证。签名需要 GitHub Secrets `CSC_LINK`（Base64 编码的 `.p12`）和 `CSC_KEY_PASSWORD`，公证需要 `APPLE_API_KEY_BASE64`（Base64 编码的 `.p8`）、`APPLE_API_KEY_ID` 和 `APPLE_API_ISSUER`。
+在 GitHub Actions 中手动运行 **Build Electron App**，选择目标分支和 `macos-arm64`。
+默认 `macos_configuration=uat`，与 Windows/UOS 共用 `ENV_ENCRYPTION_KEY`，解密同一份 `.env` 后打包。
+UAT 配置可能使用内网渲染地址，Actions 检查 DMG、应用签名和内置 `rg`，企业登录在内网验收。
+选择 `smoke` 时使用空 `.env`，离线验证应用主窗口和终端。
 
-公开仓库的工作流使用空 `.env` 构建，并用本地测试数据验证应用启动。连接企业 UAT 的安装包应在受控 Mac 或私有 Actions 环境中使用已获授权的配置构建。按 [环境变量加密指南](docs/env-encryption-guide.md) 配置解密密钥，随后在 Mac 上执行下面的命令。解密配置及其构建产物应保存在受控环境中。
+Vite 会将应用引用的环境变量打进安装包。如果配置包含客户端凭据，请使用私有 Actions 仓库或受控 Mac 交付产物。
+公开 Actions 的 UAT 构建会在上传前检查凭据。启用 `sign_macos` 可让用户按 macOS 默认信任策略安装下载的应用。
+签名需要 GitHub Secrets `CSC_LINK`（Base64 编码的 `.p12`）和 `CSC_KEY_PASSWORD`，
+公证需要 `APPLE_API_KEY_BASE64`（Base64 编码的 `.p8`）、`APPLE_API_KEY_ID` 和 `APPLE_API_ISSUER`。
+
+在受控 Mac 上，按 [环境变量加密指南](docs/env-encryption-guide.md) 配置解密密钥后执行以下命令。
 
 ```bash
 npm ci --include=optional

@@ -88,11 +88,12 @@ async function verifyApp(executable, isolated, workspace, env) {
 
 async function main() {
   assert.equal(process.platform, "darwin", "Run this smoke test on macOS")
+  const [, , appPath, mode] = process.argv
   assert.ok(
-    process.argv[2],
-    "Usage: node scripts/smoke-macos-package.mjs </path/to/CMBDevClaw.app>"
+    appPath && (mode === undefined || mode === "--bundle-only"),
+    "Usage: node scripts/smoke-macos-package.mjs </path/to/CMBDevClaw.app> [--bundle-only]"
   )
-  const contents = join(resolve(process.argv[2]), "Contents")
+  const contents = join(resolve(appPath), "Contents")
   const resources = join(contents, "Resources")
   const plist = join(contents, "Info.plist")
   const executableName = run("/usr/libexec/PlistBuddy", ["-c", "Print :CFBundleExecutable", plist])
@@ -113,9 +114,7 @@ async function main() {
     const home = join(isolated, "home")
     const workspace = join(isolated, "workspace 演示")
     const bin = join(isolated, "bin")
-    await Promise.all([mkdir(dataRoot), mkdir(home), mkdir(workspace), mkdir(bin)])
-    // The packaged terminal expects a Claude CLI on PATH. Its usage is outside this smoke test.
-    await writeFile(join(bin, "claude"), "#!/bin/sh\nexit 0\n", { mode: 0o755 })
+    await mkdir(workspace)
     const fixture = join(workspace, "sample.txt")
     await writeFile(fixture, "packaged ripgrep fixture\n")
     assert.equal(
@@ -123,7 +122,11 @@ async function main() {
       "packaged ripgrep fixture"
     )
     console.log("PASS bundled ARM64 ripgrep")
+    if (mode === "--bundle-only") return
 
+    await Promise.all([mkdir(dataRoot), mkdir(home), mkdir(bin)])
+    // The packaged terminal expects a Claude CLI on PATH. Its usage is outside this smoke test.
+    await writeFile(join(bin, "claude"), "#!/bin/sh\nexit 0\n", { mode: 0o755 })
     await writeFile(
       join(dataRoot, "userinfo-models.json"),
       JSON.stringify({ sapId: "localhost-fixture", userName: "Local fixture" })

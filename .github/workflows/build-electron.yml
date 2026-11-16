@@ -13,6 +13,13 @@ on:
           - windows-and-linux
           - macos-arm64
         default: windows-and-linux
+      macos_configuration:
+        description: Configuration for the macOS installer
+        type: choice
+        options:
+          - uat
+          - smoke
+        default: uat
       sign_macos:
         description: Sign the macOS installer with Developer ID and notarize it
         type: boolean
@@ -609,11 +616,36 @@ jobs:
           test "$(node -p process.arch)" = arm64
           npm ci --include=optional
 
-      - name: Build with public artifact configuration
+      - name: Decrypt .env for build
+        if: inputs.macos_configuration == 'uat'
+        run: node scripts/env-crypt.mjs decrypt-file .env
+        env:
+          ENV_ENCRYPTION_KEY: ${{ secrets.ENV_ENCRYPTION_KEY }}
+
+      - name: Check configuration before public upload
+        if: inputs.macos_configuration == 'uat' && !github.event.repository.private
         run: |
-          # Vite embeds referenced env values in the app. Keep the private .env out of the artifact.
-          : > .env
-          npm run build
+          node --input-type=module <<'NODE'
+          import { readFileSync } from "node:fs"
+          import { parseEnv } from "node:util"
+
+          const fields = Object.entries(parseEnv(readFileSync(".env", "utf8")))
+          const carriesCredentials = fields.some(([name, value]) =>
+            /^(?:MAIN_|PRELOAD_|RENDERER_)?VITE_(?:.*_)?(?:API_KEY|PASSWORD|TOKEN|SECRET|PRIVATE_KEY)$/.test(name) &&
+            value.trim()
+          )
+          if (carriesCredentials) {
+            console.error("::error::This UAT configuration contains client credentials. Use a private Actions artifact destination.")
+            process.exitCode = 1
+          }
+          NODE
+
+      - name: Prepare offline smoke configuration
+        if: inputs.macos_configuration == 'smoke'
+        run: ': > .env'
+
+      - name: Build
+        run: npm run build
 
       - name: Package DMG
         id: pkg
@@ -647,6 +679,7 @@ jobs:
         shell: bash
         env:
           DMG_PATH: ${{ steps.pkg.outputs.dmg }}
+          MACOS_CONFIGURATION: ${{ inputs.macos_configuration }}
         run: |
           set -euo pipefail
           hdiutil verify "$DMG_PATH"
@@ -658,7 +691,11 @@ jobs:
           app_path="$smoke_dir/CMBDevClaw.app"
           ditto "$mount_point/CMBDevClaw.app" "$app_path"
           codesign --verify --deep --strict --verbose=2 "$app_path"
-          node scripts/smoke-macos-package.mjs "$app_path"
+          if [[ "$MACOS_CONFIGURATION" == "uat" ]]; then
+            node scripts/smoke-macos-package.mjs "$app_path" --bundle-only
+          else
+            node scripts/smoke-macos-package.mjs "$app_path"
+          fi
 
       - name: Notarize and staple the signed DMG
         if: inputs.sign_macos
@@ -688,7 +725,7 @@ jobs:
       - name: Upload macOS installer
         uses: actions/upload-artifact@v4
         with:
-          name: CMBDevClaw-macos-arm64-${{ steps.pkg.outputs.version }}-${{ inputs.sign_macos && 'notarized' || 'adhoc' }}-installer
+          name: CMBDevClaw-macos-arm64-${{ steps.pkg.outputs.version }}-${{ inputs.macos_configuration }}-${{ inputs.sign_macos && 'notarized' || 'adhoc' }}-installer
           path: ${{ steps.pkg.outputs.dmg }}
           if-no-files-found: error
           compression-level: 0
