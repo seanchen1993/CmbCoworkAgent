@@ -67,7 +67,7 @@ describe("stripUserInputTransportDecorations", () => {
 
 describe("built-in browser prefixes", () => {
   it("routes browser operations through the local skill", () => {
-    expect(BUILTIN_BROWSER_PROMPT_PREFIX).toContain("cmbdevclaw-in-app-browser 技能")
+    expect(BUILTIN_BROWSER_PROMPT_PREFIX).toContain("in-app-browser 技能")
     expect(BUILTIN_BROWSER_PROMPT_PREFIX).not.toContain("inAppBrowser_extract_iframes")
     expect(BUILTIN_BROWSER_PROMPT_PREFIX).not.toContain("WPS 在线文档")
   })

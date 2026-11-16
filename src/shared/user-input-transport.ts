@@ -16,7 +16,7 @@ export const LEGACY_BUILTIN_BROWSER_PROMPT_PREFIX = "使用内置浏览器 brows
 export const LEGACY_BUILTIN_BROWSER_NO_SCREENSHOT_PROMPT_PREFIX =
   "使用内置浏览器 browser_*工具（不允许使用截图功能）："
 const BROWSER_SKILL_ROUTING_PROMPT =
-  "请使用 cmbdevclaw-in-app-browser 技能，并按照该技能中的工具选择、网页操作、安全限制和故障排查说明执行。"
+  "请使用 in-app-browser 技能，并按照该技能中的工具选择、网页操作、安全限制和故障排查说明执行。"
 export const BUILTIN_BROWSER_INSTRUCTIONS_OPEN = "<builtin-browser-instructions>"
 export const BUILTIN_BROWSER_INSTRUCTIONS_CLOSE = "</builtin-browser-instructions>"
 
