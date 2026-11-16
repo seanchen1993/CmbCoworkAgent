@@ -1903,10 +1903,17 @@ try {
   assert.equal(await waiting.count(), 0, "questions remain visible without the waiting card")
   const questionEmit = emitters.at(-1)!
   const questionFinish = completions.at(-1)!
+  const questionProgress = page.getByTestId("design-live-output")
+  await questionProgress.getByLabel("模型响应状态").filter({ hasText: "等待模型响应" }).waitFor()
+  assert.equal(await questionProgress.getByLabel("问题生成进度").innerText(), "已生成 0 个问题")
+  questionEmit({ type: "model_activity", activity: { scope: "questions", reasoning: "先确认看板的信息范围" } })
+  await questionProgress.getByLabel("模型响应状态").filter({ hasText: "已收到响应" }).waitFor()
+  await questionProgress.getByLabel("模型思考内容").filter({ hasText: "先确认看板的信息范围" }).waitFor()
   const nameQuestion = { id: "product_name", type: "text", label: "看板名称" }
   const scopeQuestion = { id: "scope", type: "chips", label: "主要指标", options: ["收入", "客户"] }
   questionEmit({ type: "question", question: nameQuestion })
   await page.getByText("看板名称", { exact: true }).waitFor()
+  await questionProgress.getByLabel("问题生成进度").filter({ hasText: "已生成 1 个问题" }).waitFor()
   await page.getByPlaceholder("输入你的回答...", { exact: true }).fill("华东销售中心")
   assert.equal(await page.getByRole("button", { name: "继续 →", exact: true }).isDisabled(), true)
   await page.waitForFunction(async () => {
@@ -1916,9 +1923,12 @@ try {
   // Reopening mid-stream must restore editable questions and their saved answers.
   await page.reload()
   await page.getByText("看板名称", { exact: true }).waitFor()
+  assert.equal(await questionProgress.getByLabel("模型响应状态").innerText(), "已收到响应")
+  assert.equal(await questionProgress.getByLabel("问题生成进度").innerText(), "已生成 1 个问题")
   assert.equal(await canvas.count(), 0, "requirement questions stay in the wide conversation")
   assert.equal(await page.getByPlaceholder("输入你的回答...", { exact: true }).inputValue(), "华东销售中心")
   questionEmit({ type: "question", question: scopeQuestion })
+  await questionProgress.getByLabel("问题生成进度").filter({ hasText: "已生成 2 个问题" }).waitFor()
   await page.getByRole("button", { name: "收入", exact: true }).click()
   questionEmit({ type: "done", questions: [nameQuestion, scopeQuestion] })
   questionFinish()

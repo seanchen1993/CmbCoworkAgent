@@ -24,7 +24,8 @@ const bundle = await build({
         return <main style={{width:420,padding:20}}>
           {state?.messages.map((message, index) => <MessageBubble key={message.id || index}
             message={message} hasLiveOutput={Boolean(state.liveOutput)}/>)}
-          {state?.liveOutput && <DesignLiveOutput output={state.liveOutput}/>}
+          {state?.liveOutput && <DesignLiveOutput output={state.liveOutput}
+            questionCount={state.generationState === 'asking' ? state.questions.length : undefined}/>}
         </main>;
       }
       createRoot(document.getElementById('root')).render(<Fixture/>);
@@ -104,8 +105,47 @@ try {
   assert.equal(await history.getByLabel("模型思考内容").count(), 0, "history starts collapsed")
   await history.getByRole("button", { name: "思考", exact: true }).click()
   await history.getByLabel("模型思考内容").filter({ hasText: "继续检查配色" }).waitFor()
+
+  manager.create({ id: "ds_questions", meta: { id: "ds_questions", title: "提问思考", createdAt: 1, updatedAt: 1 }, state: createDesignState(), workspacePath: null })
+  manager.start({ requestId: "questions", designSessionId: "ds_questions", kind: "questions", prompt: "创建销售看板" })
+  await Promise.resolve()
+  await live.getByLabel("模型响应状态").filter({ hasText: "等待模型响应" }).waitFor()
+  assert.equal(await live.getByLabel("问题生成进度").innerText(), "已生成 0 个问题")
+  emit({ type: "model_activity", activity: { scope: "questions-ai" } })
+  await live.getByLabel("模型响应状态").filter({ hasText: "已收到响应" }).waitFor()
+  assert.match(await live.getByLabel("模型实时输出").innerText(), /正在整理需求/)
+  assert.equal(await live.getByLabel("问题生成进度").innerText(), "已生成 0 个问题")
+  sendReasoning("先梳理需求中的信息缺口，")
+  sendReasoning("再生成与业务相关的问题。")
+  await reasoning.getByLabel("模型思考内容").filter({ hasText: "先梳理需求中的信息缺口，再生成与业务相关的问题。" }).waitFor()
+  const firstQuestion = { id: "scope", type: "text", label: "需要哪些页面？" }
+  const secondQuestion = { id: "audience", type: "text", label: "面向哪些用户？" }
+  emit({ type: "token", token: '<question-form>{"questions":[{"id":"scope"' })
+  await live.getByText("正在生成问题", { exact: true }).waitFor()
+  assert.equal(await live.getByLabel("问题生成进度").innerText(), "已生成 0 个问题", "partial JSON is not a generated question")
+  emit({ type: "question", question: firstQuestion })
+  await live.getByLabel("问题生成进度").filter({ hasText: "已生成 1 个问题" }).waitFor()
+  emit({ type: "question", question: firstQuestion })
+  emit({ type: "question", question: secondQuestion })
+  await live.getByLabel("问题生成进度").filter({ hasText: "已生成 2 个问题" }).waitFor()
+  assert.doesNotMatch(await live.innerText(), /question-form|等待可显示的模型输出/)
+  const questionsSnapshot = store.get("ds_questions")!
+  await page.evaluate(() => (window as any).renderDesignState(null))
+  await live.waitFor({ state: "detached" })
+  await page.evaluate((state) => (window as any).renderDesignState(state), questionsSnapshot.state)
+  await live.getByLabel("模型响应状态").filter({ hasText: "已收到响应" }).waitFor()
+  assert.equal(await live.getByLabel("问题生成进度").innerText(), "已生成 2 个问题")
+  await reasoning.getByRole("button", { name: "思考", exact: true }).click()
+  await reasoning.getByLabel("模型思考内容").filter({ hasText: "先梳理需求中的信息缺口" }).waitFor()
+  if (process.env.DESIGN_QUESTIONS_SCREENSHOT) await page.screenshot({ path: process.env.DESIGN_QUESTIONS_SCREENSHOT })
+  emit({ type: "done", questions: [firstQuestion, secondQuestion] })
+  finish()
+  await live.waitFor({ state: "detached" })
+  await page.getByTestId("design-reasoning").getByRole("button", { name: "思考", exact: true }).click()
+  await page.getByLabel("模型思考内容").filter({ hasText: "先梳理需求中的信息缺口" }).waitFor()
+  assert.equal(store.get("ds_questions")!.state.messages.at(-1)!.reasoning, "先梳理需求中的信息缺口，再生成与业务相关的问题。")
   assert.deepEqual(errors, [])
-  console.log("PASS: Design streams provider/inline reasoning, respects manual and automatic collapse, preserves history and isolates HTML")
+  console.log("PASS: Design streams provider/inline reasoning, shows question response/count progress, preserves history and isolates HTML")
 } finally {
   await browser.close()
   db.close()

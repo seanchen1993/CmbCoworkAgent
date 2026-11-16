@@ -4,6 +4,23 @@ import { DesignLiveOutputTracker, DESIGN_LIVE_OUTPUT_LIMIT, createDesignModelAct
 import { TRANSCRIPT_REASONING_MAX_CHARS } from "./transcript-reasoning"
 
 describe("Design recent public output", () => {
+  it("distinguishes receiving a response from receiving visible output", () => {
+    let now = 0
+    const tracker = new DesignLiveOutputTracker(() => now)
+    tracker.phase("retry")
+    expect(tracker.snapshot().responseReceivedAt).toBeUndefined()
+    tracker.activity({ scope: "questions" })
+    expect(tracker.snapshot()).toMatchObject({ responseReceivedAt: 0, text: "", chars: 0 })
+    expect(tracker.snapshot().outputAt).toBeUndefined()
+    now = 1000
+    tracker.activity({ scope: "questions", reasoning: "梳理需求" })
+    tracker.text('{"questions":[', false)
+    expect(tracker.snapshot()).toMatchObject({ responseReceivedAt: 0, outputAt: 1000, text: "", chars: 0 })
+    const tokenOnly = new DesignLiveOutputTracker(() => now)
+    tokenOnly.text("<thi", false)
+    expect(tokenOnly.snapshot().responseReceivedAt).toBe(1000)
+    expect(tokenOnly.snapshot().outputAt).toBeUndefined()
+  })
   it("keeps a bounded tail while counting actual output and last activity", () => {
     let now = 10
     const tracker = new DesignLiveOutputTracker(() => now)

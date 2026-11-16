@@ -4821,7 +4821,7 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
 
           {/* Bottom Input */}
           <div className="design-composer-area">
-            {(isGenerating || isAsking) && ts.liveOutput && <DesignLiveOutput output={ts.liveOutput} />}
+            {(isGenerating || isAsking) && ts.liveOutput && <DesignLiveOutput output={ts.liveOutput} questionCount={isAsking ? ts.questions.length : undefined} />}
             {/* Skill picker popup — shown when input is "/" + optional filter text */}
             {isSlashMode && filteredSkills.length > 0 && (
               <div

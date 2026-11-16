@@ -48,6 +48,7 @@ import {
   DESIGN_ARTIFACT_CONTINUATION_MAX_ATTEMPTS, DESIGN_ARTIFACT_CONTINUATION_STALL_ATTEMPTS
 } from "../services/design/generation-prompt"
 import { DesignQuestionStream } from "../services/design/question-stream"
+import { createDesignModel } from "../services/design/model"
 import { DESIGN_FILE_TOOL_DESCRIPTIONS } from "../services/design/file-tool-descriptions"
 import { createDesignRepairProgress } from "../services/design/repair-progress"
 import {
@@ -74,7 +75,7 @@ function registerDesignExecutor<P extends { sessionId: string }>(channel: string
 }
 
 import AdmZip from "adm-zip"
-import { ChatOpenAI } from "@langchain/openai"
+import type { ChatOpenAI } from "@langchain/openai"
 import { HumanMessage, SystemMessage, AIMessage } from "@langchain/core/messages"
 import { deleteThreadCheckpoint, getCustomModelConfigs, getOpenworkDir } from "../storage"
 import {
@@ -338,18 +339,10 @@ function getModel(modelId?: string, retryHooks?: ModelRetryHooks): ChatOpenAI | 
     ? (configs.find((c) => c.id === selectedModelId) ?? configs[0])
     : configs[0]
   if (!config || !config.apiKey) return null
-  return new ChatOpenAI({
-    model: config.model,
-    apiKey: config.apiKey,
-    configuration: {
-      baseURL: config.baseUrl,
-      fetch: retryHooks ? createRetryingFetch(retryHooks, DESIGN_MODEL_MAX_RETRY_ATTEMPTS) : undefined,
-    },
-    maxRetries: 0,
-    maxTokens: 8192,
-    temperature: 0.7,
-    streaming: true,
-  })
+  return createDesignModel(
+    { model: config.model, apiKey: config.apiKey, baseUrl: config.baseUrl },
+    retryHooks ? createRetryingFetch(retryHooks, DESIGN_MODEL_MAX_RETRY_ATTEMPTS) : undefined
+  )
 }
 
 // ─────────────────────────────────────────────────────────

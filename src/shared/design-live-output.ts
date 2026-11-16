@@ -13,6 +13,7 @@ export interface DesignLiveOutput {
   reasoningScope?: string
   startedAt: number
   updatedAt: number
+  responseReceivedAt?: number
   outputAt?: number
   toolName?: string
 }
@@ -170,6 +171,7 @@ export class DesignLiveOutputTracker {
     this.state.outputAt = this.now()
   }
   text(token: string, includePublicText = true): void {
+    if (token) this.state.responseReceivedAt ??= this.now()
     const text = this.publicText(token)
     if (text) {
       if (text.trim()) this.phase("model")
@@ -177,6 +179,7 @@ export class DesignLiveOutputTracker {
     }
   }
   activity(activity: DesignModelActivity): void {
+    this.state.responseReceivedAt ??= this.now()
     if (activity.completed) {
       if (activity.reasoning !== undefined) this.appendReasoning(activity.reasoning, "snapshot", true, activity.scope, true)
       return
