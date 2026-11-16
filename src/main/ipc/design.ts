@@ -2708,6 +2708,7 @@ export function registerDesignHandlers(): void {
               }
               return normalizeDesignPatchReply(reply)
             },
+            onProposal: (summary) => emit({ type: "token", token: `候选修改：${summary}\n` }),
             validate: async (candidate) => {
               if (controller.signal.aborted) throw createDesignAbortError()
               const policyIssue = designVariantPolicyIssue(candidate.html, isSingleDesignVariant(snapshot.state, snapshot.meta))

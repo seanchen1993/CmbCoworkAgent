@@ -2,6 +2,8 @@ export interface DesignLayoutProbe {
   horizontalOverflow: string[]
   styles: Record<string, string[]>
   expectations: string[]
+  viewportWidth?: number
+  overflowDetails?: Record<string, string>
 }
 export function withDesignValidationDeadline<T>(
   work: Promise<T>,
@@ -144,6 +146,7 @@ export function designPatchStyleProbe(checks: DesignStyleCheck[]): string[] {
 /** Executed in a complete hidden document; comparison excludes authorized descendants. */
 export function designPatchLayoutProbe(): DesignLayoutProbe {
   const horizontalOverflow: string[] = []
+  const overflowDetails: Record<string, string> = {}
   const styles: Record<string, string[]> = {}
   for (const el of [...document.querySelectorAll<HTMLElement>("[data-design-node]")]) {
     const id = el.dataset.designNode!
@@ -152,21 +155,23 @@ export function designPatchLayoutProbe(): DesignLayoutProbe {
     if (
       el.clientWidth > 0 &&
       el.scrollWidth > el.clientWidth + 3 &&
-      ["visible", "clip"].includes(s.overflowX)
-    )
+      s.overflowX === "visible"
+    ) {
       horizontalOverflow.push(id)
+      overflowDetails[id] = `内容宽 ${el.scrollWidth}px，可用宽 ${el.clientWidth}px，white-space:${s.whiteSpace}，min-width:${s.minWidth}，flex-wrap:${s.flexWrap}`
+    }
     const box = el.getBoundingClientRect(),
       parentBox = el.parentElement?.getBoundingClientRect()
     if (
       parentBox &&
       parentBox.width > 0 &&
-      parentBox.height > 0 &&
+      getComputedStyle(el.parentElement!).overflowX === "visible" &&
       !["fixed", "absolute"].includes(s.position) &&
-      (box.right > parentBox.right + 3 ||
-        box.bottom > parentBox.bottom + 3 ||
-        box.left < parentBox.left - 3)
-    )
+      (box.right > parentBox.right + 3 || box.left < parentBox.left - 3)
+    ) {
       horizontalOverflow.push(`parent:${id}`)
+      overflowDetails[`parent:${id}`] = `元素宽 ${Math.round(box.width)}px，父容器 ${el.parentElement?.dataset.designNode || el.parentElement?.tagName.toLowerCase()} 宽 ${Math.round(parentBox.width)}px，左侧越界 ${Math.max(0, Math.round(parentBox.left - box.left))}px，右侧越界 ${Math.max(0, Math.round(box.right - parentBox.right))}px`
+    }
     styles[id] = [
       s.color,
       s.backgroundColor,
@@ -177,9 +182,11 @@ export function designPatchLayoutProbe(): DesignLayoutProbe {
       s.position
     ]
   }
-  if (document.documentElement.scrollWidth > window.innerWidth + 3)
+  if (document.documentElement.scrollWidth > window.innerWidth + 3) {
     horizontalOverflow.push("document")
-  return { horizontalOverflow, styles, expectations: [] }
+    overflowDetails.document = `页面内容宽 ${document.documentElement.scrollWidth}px，可用宽 ${window.innerWidth}px`
+  }
+  return { horizontalOverflow, overflowDetails, styles, expectations: [], viewportWidth: window.innerWidth }
 }
 
 export function compareDesignPatchLayouts(
@@ -189,7 +196,13 @@ export function compareDesignPatchLayouts(
 ): string[] {
   const issues: string[] = []
   for (const id of after.horizontalOverflow)
-    if (!before.horizontalOverflow.includes(id)) issues.push(`修改产生横向溢出：${id}`)
+    if (!before.horizontalOverflow.includes(id)) {
+      const detail = [
+        after.viewportWidth ? `视口 ${after.viewportWidth}px` : "",
+        after.overflowDetails?.[id]
+      ].filter(Boolean).join("；")
+      issues.push(`修改产生横向溢出：${id}${detail ? `（${detail}）` : ""}`)
+    }
   for (const [id, values] of Object.entries(after.styles)) {
     if (!allowed.has(id) && before.styles[id] && values.join("|") !== before.styles[id].join("|"))
       issues.push(`修改影响了目标范围外的样式：${id}`)

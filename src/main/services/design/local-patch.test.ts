@@ -397,8 +397,15 @@ describe("bounded patch model executor", () => {
   })
   it("submits only local context, repairs bounded failures, and reports token usage", async () => {
     const seen: string[] = []
+    const onProposal = vi.fn()
+    const validate = vi.fn(async () => {
+      expect(onProposal).toHaveBeenCalledWith("已修改目标")
+      return []
+    })
     const result = await executeDesignPatch({
       ...options(),
+      onProposal,
+      validate,
       complete: async (messages) => {
         seen.push(JSON.stringify(messages))
         const c = JSON.parse(messages[1].content.split("\nHost validation feedback:")[0])
@@ -418,10 +425,98 @@ describe("bounded patch model executor", () => {
       }
     })
     expect(result.metrics.repairs).toBe(1)
+    expect(onProposal).toHaveBeenCalledOnce()
     expect(result.metrics.inputTokens).toBe(246)
     expect(
       seen.every((s) => !s.includes("window.businessRuns") && !s.includes("<!doctype html>"))
     ).toBe(true)
+  })
+  it("publishes each candidate before a failed validation without declaring it applied", async () => {
+    const onProposal = vi.fn()
+    const validate = vi.fn(async () => {
+      expect(onProposal).toHaveBeenCalledTimes(validate.mock.calls.length)
+      return ["修改产生横向溢出：document（视口 390px）"]
+    })
+    await expect(executeDesignPatch({
+      ...options(),
+      onProposal,
+      validate,
+      complete: async (messages) => ({ content: JSON.stringify({
+        ...proposal(context(), [op("cta", { op: "set_style", declarations: { width: "1200px" } })]),
+        contextId: JSON.parse(messages[1].content.split("\nHost validation feedback:")[0]).contextId
+      }) })
+    })).rejects.toThrow("视口 390px")
+    expect(onProposal).toHaveBeenCalledTimes(3)
+    expect(validate).toHaveBeenCalledTimes(3)
+  })
+  it("automatically repairs overflow with the rejected change and responsive guidance", async () => {
+    const status = vi.fn()
+    const validate = vi.fn()
+      .mockResolvedValueOnce(["修改产生横向溢出：document（视口 390px；页面内容宽 1200px，可用宽 390px）"])
+      .mockResolvedValueOnce([])
+    let calls = 0
+    const result = await executeDesignPatch({
+      ...options(), status, validate,
+      complete: async (messages) => {
+        const current = JSON.parse(messages[1].content.split("\nHost validation feedback:")[0])
+        calls++
+        if (calls === 2) {
+          expect(messages[1].content).toContain("min-width:0")
+          expect(messages[1].content).toContain("overflow-wrap:anywhere")
+          expect(messages[1].content).toContain("Do not hide or delete content")
+          expect(messages[1].content).toContain('"text":"保留用户要求的新文案"')
+          expect(messages[1].content).toContain("NOT applied")
+        }
+        return { content: JSON.stringify({
+          ...proposal(context(), [
+            op("label", { op: "set_text", text: "保留用户要求的新文案" }),
+            op("cta", { op: "set_style", declarations: calls === 1
+              ? { width: "1200px" }
+              : { "max-width": "100%", "white-space": "normal", "overflow-wrap": "anywhere" } })
+          ]), contextId: current.contextId
+        }) }
+      }
+    })
+    expect(result.metrics.repairs).toBe(1)
+    expect(result.candidate.html).toContain("保留用户要求的新文案")
+    expect(result.candidate.html).not.toContain("1200px")
+    expect(status.mock.calls.some(([value]) => value.message.includes("正在自动调整宽度与换行"))).toBe(true)
+  })
+  it("keeps overflow feedback and other annotation targets when expanding to a parent", async () => {
+    let calls = 0
+    const validate = vi.fn().mockResolvedValueOnce(["修改产生横向溢出：document（视口 390px）"]).mockResolvedValueOnce([])
+    const operations = [
+      op("label", { op: "set_text", text: "新文案" }),
+      op("other", { op: "set_style", declarations: { color: "red" } })
+    ]
+    const result = await executeDesignPatch({
+      ...options(), validate,
+      request: { artifactRevision: 2, variationId: null, targets: [
+        { nodeId: byBusinessId("label").id, instruction: "新文案" },
+        { nodeId: byBusinessId("other").id, instruction: "改红色" }
+      ] },
+      complete: async (messages) => {
+        calls++
+        const current = JSON.parse(messages[1].content.split("\nHost validation feedback:")[0])
+        if (calls === 2) return { content: JSON.stringify({ action: "target", targetIds: [byBusinessId("cta").id] }) }
+        if (calls === 3) {
+          expect(messages[1].content).toContain("视口 390px")
+          expect(messages[1].content).toContain("complete combined patch")
+          expect(current.targets.map((target: { targetId: string }) => target.targetId)).toEqual([
+            byBusinessId("other").id, byBusinessId("cta").id
+          ])
+          expect(current.targets.find((target: { targetId: string }) => target.targetId === byBusinessId("other").id).instruction).toBe("改红色")
+        }
+        return { content: JSON.stringify({
+          ...proposal(context(), calls === 3 ? [...operations, op("cta", { op: "set_style", declarations: { "flex-wrap": "wrap" } })] : operations),
+          contextId: current.contextId
+        }) }
+      }
+    })
+    expect(calls).toBe(3)
+    expect(result.metrics).toMatchObject({ repairs: 1, expansions: 1 })
+    expect(result.candidate.html).toContain("新文案")
+    expect(result.candidate.html).toContain("color:red")
   })
   it("selects a target from a bounded directory without loading old model history", async () => {
     let calls = 0

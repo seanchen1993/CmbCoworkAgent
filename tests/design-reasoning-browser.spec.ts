@@ -144,8 +144,37 @@ try {
   await page.getByTestId("design-reasoning").getByRole("button", { name: "思考", exact: true }).click()
   await page.getByLabel("模型思考内容").filter({ hasText: "先梳理需求中的信息缺口" }).waitFor()
   assert.equal(store.get("ds_questions")!.state.messages.at(-1)!.reasoning, "先梳理需求中的信息缺口，再生成与业务相关的问题。")
+
+  for (const mode of ["Comment", "Draw"]) {
+    const id = `ds_patch_${mode}`
+    manager.create({ id, meta: { id, title: mode, createdAt: 1, updatedAt: 1 },
+      state: { ...createDesignState(), html }, workspacePath: null })
+    manager.start({ requestId: id, designSessionId: id, kind: "patch", prompt: "放大标题",
+      patch: { targets: [], variationId: null, artifactRevision: 0 } })
+    await Promise.resolve()
+    emit({ type: "model_activity", activity: { scope: id, reasoning: "先检查标题与容器尺寸" } })
+    await reasoning.getByLabel("模型思考内容").filter({ hasText: "先检查标题与容器尺寸" }).waitFor()
+    emit({ type: "token", token: '{"protocol":"design-patch/1"}', displayText: false })
+    emit({ type: "token", token: "候选修改：将标题字号调整为 24px\n" })
+    emit({ type: "patch_status", patchStatus: { phase: "validating", message: "正在校验局部修改与页面交互" } })
+    await live.getByLabel("模型实时输出").filter({ hasText: "候选修改：将标题字号调整为 24px" }).waitFor()
+    assert.match(await live.innerText(), /正在检查页面/)
+    assert.doesNotMatch(await live.innerText(), /design-patch\/1/)
+    assert.equal(await reasoning.getByLabel("模型思考内容").count(), 0, `${mode} response collapses thinking`)
+    emit({ type: "error", error: "修改产生横向溢出：document（视口 390px）" })
+    finish()
+    await live.waitFor({ state: "detached" })
+    await delivery
+    const rejected = store.get(id)!
+    assert.equal(rejected.state.html, html)
+    await page.evaluate(() => (window as any).renderDesignState(null))
+    await page.getByText("候选修改：将标题字号调整为 24px", { exact: true }).waitFor({ state: "detached" })
+    await page.evaluate((state) => (window as any).renderDesignState(state), rejected.state)
+    await page.getByText("候选修改：将标题字号调整为 24px", { exact: true }).waitFor()
+    await page.getByText(/修改产生横向溢出.*视口 390px/).waitFor()
+  }
   assert.deepEqual(errors, [])
-  console.log("PASS: Design streams provider/inline reasoning, shows question response/count progress, preserves history and isolates HTML")
+  console.log("PASS: Design shows reasoning, question progress and Comment/Draw responses, preserving rejected candidates in history")
 } finally {
   await browser.close()
   db.close()

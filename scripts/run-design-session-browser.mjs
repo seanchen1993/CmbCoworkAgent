@@ -14,6 +14,7 @@ try {
         "tests/design-attachment-menu-browser.spec.mts",
         "tests/design-reasoning-browser.spec.ts",
         "tests/design-background-session-browser.spec.ts",
+        "tests/design-patch-layout-browser.spec.ts",
         "tests/design-validation-feedback-browser.spec.ts"
       ]
   for (const [index, entry] of entries.entries()) {

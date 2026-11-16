@@ -13,6 +13,7 @@ import type {
 import type { createAgentRuntime } from "../agent/runtime"
 import { LocalSandbox } from "../agent/local-sandbox"
 import { DesignPatchScopeError } from "../services/design/patch-context"
+import type { PatchExecutorOptions } from "../services/design/patch-executor"
 import {
   DESIGN_CREATION_SYSTEM_PROMPT,
   DESIGN_ITERATION_SYSTEM_PROMPT
@@ -57,6 +58,9 @@ vi.mock("../agent/runtime", () => ({
   closeCheckpointer: vi.fn(),
   getModelInstance: () => ({}),
   createRetryingFetch: vi.fn()
+}))
+vi.mock("../services/design/model-config", () => ({
+  getDesignModelConfig: () => ({ model: "test", apiKey: "test", baseUrl: "http://mock.invalid/v1" })
 }))
 vi.mock("../agent/approval-decision-broker", () => ({
   approvalDecisionBroker: { subscribePending: vi.fn(), subscribeRemoved: vi.fn() }
@@ -170,6 +174,23 @@ async function run(
 }
 
 describe("existing page generation", () => {
+  it("shows the model's candidate summary before local patch validation", async () => {
+    mocks.patch.mockImplementationOnce(async (options: PatchExecutorOptions) => {
+      options.onProposal!("将标题字号调整为 24px")
+      options.status({ phase: "validating", message: "正在校验局部修改与页面交互" })
+      return { candidate: { html: baseline, patch: { summary: "将标题字号调整为 24px" } } }
+    })
+    const events = await run({
+      kind: "patch",
+      patch: { targets: [], variationId: null, artifactRevision: 0 }
+    })
+    const responseIndex = events.findIndex((event) => event.type === "token")
+    expect(events[responseIndex]).toMatchObject({ token: "候选修改：将标题字号调整为 24px\n" })
+    expect(events[responseIndex].displayText).not.toBe(false)
+    expect(responseIndex).toBeLessThan(events.findIndex((event) => event.patchStatus?.phase === "validating"))
+    expect(events.some((event) => event.type === "done")).toBe(true)
+  })
+
   it("edits a restored page through the sandbox without loading creation guidance", async () => {
     onTurn = async (turn) => {
       expect(fs.readFileSync(turn.draft, "utf8")).toBe(baseline)

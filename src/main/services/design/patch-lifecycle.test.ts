@@ -100,6 +100,27 @@ function setup(project: (snapshot: DesignSessionSnapshot) => void = vi.fn()) {
 }
 
 describe("durable local patch lifecycle", () => {
+  it("keeps the generated summary visible during validation and after a rejected patch is reopened", async () => {
+    const h = setup()
+    await h.start()
+    h.send({ type: "model_activity", activity: { scope: "patch", reasoning: "先检查标题" } })
+    h.send({ type: "token", token: '{"protocol":"design-patch/1"}', displayText: false })
+    h.send({ type: "token", token: "候选修改：将标题字号调整为 24px\n" })
+    h.send({ type: "patch_status", patchStatus: { phase: "validating", message: "正在校验局部修改与页面交互" } })
+    expect(h.get().state.liveOutput).toMatchObject({
+      phase: "validation", text: "候选修改：将标题字号调整为 24px\n", reasoning: "先检查标题"
+    })
+    h.send({ type: "error", error: "修改产生横向溢出：document（视口 390px）" })
+    const reopened = new DesignRunManager(h.store, h.dependencies).get("ds_patch").state
+    expect(reopened.html).toBe(html)
+    expect(reopened.artifactRevision).toBe(0)
+    expect(reopened.messages.at(-1)).toMatchObject({
+      reasoning: "先检查标题", content: expect.stringContaining("视口 390px"),
+      executionEvents: [expect.objectContaining({ content: "候选修改：将标题字号调整为 24px\n" })]
+    })
+    expect(reopened.liveOutput).toBeNull()
+  })
+
   it("excludes renderer full HTML, commits journal/state/outbox and supports undo/redo", async () => {
     const h = setup()
     await h.start()
