@@ -43,9 +43,9 @@ export class ProjectModelCheckpoint {
       .digest("hex")
     const existing = this.state.completed[key]
     if (existing) {
-      progress
-        .begin("review", `恢复已完成步骤 · ${title}`)
-        .finish("复用已保存结果，本步骤不再次调用模型")
+      const step = progress.begin("review", `恢复已完成步骤 · ${title}`)
+      progress.text(step.id, projectMessageText(existing.response.content), true, false)
+      step.finish("复用已保存结果，本步骤不再次调用模型")
       const response = new AIMessage(existing.response)
       this.responses.set(response, key)
       this.restored.add(response)

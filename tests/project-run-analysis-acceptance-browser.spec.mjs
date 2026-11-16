@@ -577,6 +577,12 @@ try {
     emit({ type: "text", stepId: "m1", text: "第一段流式回答。" })
   })
   await page.getByText("第一段流式回答。", { exact: true }).waitFor()
+  await page.getByRole("button", { name: /^模型回复/ }).click()
+  assert.equal(
+    await page.getByLabel("模型回复正文", { exact: true }).textContent(),
+    "第一段流式回答。"
+  )
+  await page.getByRole("button", { name: /^模型回复/ }).click()
   assert.equal(await page.getByRole("button", { name: "终止任务", exact: true }).isVisible(), true)
   await page.evaluate(() => {
     const emit = window.runQA.agentEvents[0]
@@ -978,6 +984,82 @@ try {
   await expectReportLayout(390, "project-report-create-mobile.png")
   await page.getByRole("button", { name: "生成报告", exact: true }).click()
   await waitReport(1)
+  await page.evaluate(() => {
+    const emit = window.runQA.reportEvents[0]
+    emit({
+      type: "step",
+      step: {
+        id: "review-reply",
+        kind: "model",
+        title: "全量数据审阅 1/1",
+        status: "completed",
+        startedAt: Date.now()
+      }
+    })
+    emit({
+      type: "text",
+      stepId: "review-reply",
+      text: "已审阅全部项目，发现两项需要核实。",
+      reset: true,
+      answer: false
+    })
+    emit({
+      type: "step",
+      step: {
+        id: "html-reply",
+        kind: "model",
+        title: "报告生成 · 第 1 轮",
+        status: "running",
+        startedAt: Date.now()
+      }
+    })
+    emit({
+      type: "text",
+      stepId: "html-reply",
+      text: "<html><body><h1>综合报告</h1>",
+      reset: true,
+      answer: false
+    })
+  })
+  await page.getByRole("button", { name: /^模型回复/ }).click()
+  const replyBody = page.getByLabel("模型回复正文", { exact: true })
+  const replyRound = page.getByRole("combobox", { name: "查看模型回复轮次" })
+  assert.equal(await replyBody.textContent(), "<html><body><h1>综合报告</h1>")
+  assert.equal(
+    await replyBody.locator("h1").count(),
+    0,
+    "Model HTML is displayed as text, never executed"
+  )
+  await replyRound.selectOption("review-reply")
+  await page.evaluate(() =>
+    window.runQA.reportEvents[0]({
+      type: "text",
+      stepId: "html-reply",
+      text: "<p>成员贡献</p>",
+      answer: false
+    })
+  )
+  assert.equal(
+    await replyBody.textContent(),
+    "已审阅全部项目，发现两项需要核实。",
+    "Streaming must not switch away from the selected older reply"
+  )
+  await replyRound.selectOption("latest")
+  assert.equal(await replyBody.textContent(), "<html><body><h1>综合报告</h1><p>成员贡献</p>")
+  const reportDialogBounds = await analysisDialog.boundingBox()
+  const stopReportBounds = await page
+    .getByRole("button", { name: "终止任务", exact: true })
+    .boundingBox()
+  assert.ok(
+    stopReportBounds.y + stopReportBounds.height <=
+      reportDialogBounds.y + reportDialogBounds.height,
+    "Expanded model replies keep report controls visible on mobile"
+  )
+  await page.screenshot({ path: join(output, "project-report-model-replies-phone.png") })
+  await page.setViewportSize({ width: 1536, height: 960 })
+  await page.screenshot({ path: join(output, "project-report-model-replies.png") })
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.getByRole("button", { name: /^模型回复/ }).click()
   const created = await reportRequest(0)
   assert.deepEqual(
     created,
@@ -1021,6 +1103,13 @@ try {
   await page.getByRole("textbox", { name: "项目或特性关键词", exact: true }).fill("")
   await minimizedAgent.getByRole("button", { name: "展开项目分析 Agent", exact: true }).click()
   await waitReportVersion(1)
+  await page.getByRole("button", { name: /^模型回复/ }).click()
+  assert.equal(
+    await replyBody.textContent(),
+    "<html><body><h1>综合报告</h1><p>成员贡献</p>",
+    "Completed replies survive minimizing and completion"
+  )
+  await page.getByRole("button", { name: /^模型回复/ }).click()
   assert.equal(await reportFrame().locator("body").getAttribute("data-isolated"), "yes")
   assert.equal(
     await page.locator('[aria-label="报告 HTML 预览"] iframe').getAttribute("sandbox"),
@@ -1055,7 +1144,8 @@ try {
   await waitReport(4)
   assert.equal((await reportRequest(3)).baseVersion, 1, "Revision uses the selected older version")
   await page.getByRole("button", { name: "终止任务", exact: true }).click()
-  await replyReport(3, "report-1", 3, created.scope, false)
+  await page.evaluate(() => window.runQA.finishReport(3, { success: false, cancelled: true }))
+  await page.getByText("报告任务已停止，可以继续运行", { exact: true }).waitFor()
   await waitReportVersion(1)
   assert.equal(
     await page.getByRole("textbox", { name: "报告修改要求", exact: true }).isEnabled(),
@@ -1610,6 +1700,83 @@ try {
   await minimizedAgent.getByRole("button", { name: "展开项目分析 Agent", exact: true }).click()
   await waitReportVersion(3)
   await expectReportLayout(390, "project-agent-model-mobile.png")
+  // An explicit stop keeps its checkpoint even when the cancellation response carries no metadata.
+  const stoppedReportIndex = await page.evaluate(() => window.runQA.reportReplies.length)
+  await page
+    .getByRole("textbox", { name: "报告修改要求", exact: true })
+    .fill("手动停止后继续的修改")
+  await page.getByRole("button", { name: "应用修改", exact: true }).click()
+  await waitReport(stoppedReportIndex + 1)
+  const pausedId = "2b73d4ba-245f-4ea1-a504-b9ead425d7f3"
+  await page.evaluate(
+    ({ index, runId }) =>
+      window.runQA.reportEvents[index]({
+        type: "report-checkpoint",
+        resume: {
+          runId,
+          title: "停止的报告修改",
+          dataAsOf: "2026-11-12T01:00:00Z",
+          updatedAt: "2026-11-16T01:00:00Z",
+          completedSteps: 2,
+          nextStep: "报告生成第 3 轮",
+          modelId: "default"
+        }
+      }),
+    { index: stoppedReportIndex, runId: pausedId }
+  )
+  await page.getByRole("button", { name: "终止任务", exact: true }).click()
+  assert.ok(await page.getByRole("button", { name: "正在停止…", exact: true }).isDisabled())
+  await page.evaluate(
+    (index) => window.runQA.finishReport(index, { success: false, cancelled: true }),
+    stoppedReportIndex
+  )
+  await page.getByText("报告任务已停止，可以继续运行", { exact: true }).waitFor()
+  await page.getByText("停止的报告修改 · 已保留 2 个完成步骤", { exact: true }).waitFor()
+  await waitReportVersion(3)
+  const continueBounds = await page
+    .getByRole("button", { name: "继续运行", exact: true })
+    .boundingBox()
+  const reportBodyBounds = await page.getByTestId("project-report-body").boundingBox()
+  assert.ok(
+    continueBounds.y >= reportBodyBounds.y &&
+      continueBounds.y + continueBounds.height <= reportBodyBounds.y + reportBodyBounds.height,
+    "Stopping brings the continue action into view without searching below the HTML preview"
+  )
+  await page.screenshot({ path: join(output, "project-report-stopped-resume.png") })
+  await page.getByRole("button", { name: "继续运行", exact: true }).click()
+  await waitReport(stoppedReportIndex + 2)
+  assert.deepEqual(await reportRequest(stoppedReportIndex + 1), {
+    action: "resume",
+    runId: pausedId,
+    modelId: "default"
+  })
+  await replyReport(stoppedReportIndex + 1, "report-3", 4, adminRequest.scope)
+  await waitReportVersion(4)
+  // If stopped before a snapshot exists, continue retries the original scope/requirements.
+  await page.getByRole("button", { name: "新报告", exact: true }).click()
+  await page.getByRole("textbox", { name: "报告生成要求", exact: true }).fill("查询阶段停止")
+  await page.getByRole("button", { name: "生成报告", exact: true }).click()
+  await waitReport(stoppedReportIndex + 3)
+  const earlyRequest = await reportRequest(stoppedReportIndex + 2)
+  await page.getByRole("button", { name: "终止任务", exact: true }).click()
+  await page.evaluate(
+    (index) => window.runQA.finishReport(index, { success: false, cancelled: true }),
+    stoppedReportIndex + 2
+  )
+  await page.getByText("数据准备尚未完成", { exact: false }).waitFor()
+  await page.getByRole("button", { name: "继续运行", exact: true }).click()
+  await waitReport(stoppedReportIndex + 4)
+  assert.deepEqual(await reportRequest(stoppedReportIndex + 3), earlyRequest)
+  await replyReport(stoppedReportIndex + 3, "report-4", 1, earlyRequest.scope)
+  await waitReportVersion(1)
+  // A report saved just before cancellation wins must remain available, not offer a stale resume.
+  await page.getByRole("textbox", { name: "报告修改要求", exact: true }).fill("完成与停止同时发生")
+  await page.getByRole("button", { name: "应用修改", exact: true }).click()
+  await waitReport(stoppedReportIndex + 5)
+  await page.getByRole("button", { name: "终止任务", exact: true }).click()
+  await replyReport(stoppedReportIndex + 4, "report-4", 2, earlyRequest.scope)
+  await waitReportVersion(2)
+  assert.equal(await page.getByRole("button", { name: "继续运行", exact: true }).count(), 0)
   // Changing the signed-in account remains a hard boundary and cancels active work.
   await page.getByRole("tab", { name: "项目分析", exact: true }).click()
   await page.getByRole("textbox", { name: "项目分析问题" }).fill("账号切换后应停止")

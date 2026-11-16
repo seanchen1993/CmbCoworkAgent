@@ -1,3 +1,5 @@
+import type { ProjectReportResume } from "./project-analysis-report"
+
 export const PROJECT_AGENT_RUN_CHANNEL = "dashboard:projectAgentRun:"
 
 export interface ProjectAgentStep {
@@ -13,5 +15,13 @@ export interface ProjectAgentStep {
 }
 export type ProjectAgentRunEvent =
   | { type: "step"; step: ProjectAgentStep }
-  | { type: "text"; stepId: string; text: string; reset?: boolean }
+  | { type: "report-checkpoint"; resume: ProjectReportResume }
+  | {
+      type: "text"
+      stepId: string
+      text: string
+      reset?: boolean
+      /** False for review/report output, which belongs in run details, not the analysis answer. */
+      answer?: boolean
+    }
 export type ProjectAgentRunListener = (event: ProjectAgentRunEvent) => void

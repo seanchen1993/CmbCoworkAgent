@@ -192,9 +192,9 @@ export async function generateProjectReport(
         options.snapshot
       )
       signal.throwIfAborted()
-      progress
-        .begin("render", "恢复已保存的报告 HTML")
-        .finish("数据引用与完整性校验通过，沿用原数据；无需再次调用模型")
+      const restored = progress.begin("render", "恢复已保存的报告 HTML")
+      progress.text(restored.id, contentText(new AIMessage(savedOutput.response)), true, false)
+      restored.finish("数据引用与完整性校验通过，沿用原数据；无需再次调用模型")
       return { ...output, modelName: model.name }
     } catch {
       signal.throwIfAborted()

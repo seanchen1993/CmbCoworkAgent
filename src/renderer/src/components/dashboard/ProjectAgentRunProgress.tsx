@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react"
 import { CheckCircle2, CircleAlert, Loader2, Square } from "lucide-react"
 import type { ProjectAgentRunState } from "./use-project-agent-run"
+import { ProjectAgentModelReplies } from "./ProjectAgentModelReplies"
 
 const duration = (ms: number) => `${Math.max(0, ms / 1000).toFixed(1)} 秒`
 export function ProjectAgentRunProgress({
@@ -51,6 +52,7 @@ export function ProjectAgentRunProgress({
           {current.detail}
         </p>
       )}
+      <ProjectAgentModelReplies key={state.startedAt} state={state} />
       <details className="mt-2 min-w-0">
         <summary className="cursor-pointer text-muted-foreground">
           运行明细 · {models} 次模型调用 · {queries} 次工具查询

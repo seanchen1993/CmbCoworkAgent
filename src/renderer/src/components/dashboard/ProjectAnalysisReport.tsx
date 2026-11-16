@@ -75,9 +75,11 @@ export function useProjectAnalysisReport({
   const [draft, setDraft] = useState(true)
   const [input, setInput] = useState("")
   const [loading, setLoading] = useState(false)
+  const [stopping, setStopping] = useState(false)
   const [reading, setReading] = useState(false)
   const [error, setError] = useState("")
   const [resume, setResume] = useState<ProjectReportResume | null>(null)
+  const [stoppedRequest, setStoppedRequest] = useState<ProjectReportGenerateInput | null>(null)
   const [notice, setNotice] = useState("")
   const [actionBusy, setActionBusy] = useState(false)
   const [dialog, setDialog] = useState<"template" | "delete-report" | "delete-template" | null>(
@@ -91,6 +93,9 @@ export function useProjectAnalysisReport({
   const workspaceSequence = useRef(0)
   const mutationSequence = useRef(0)
   const busy = useRef(false)
+  const stopRequested = useRef(false)
+  const savedProgress = useRef<ProjectReportResume | null>(null)
+  const resumeNotice = useRef<HTMLDivElement>(null)
   const requestedWorkspace = useRef(false)
   const lastRequest = useRef<ProjectReportGenerateInput | null>(null)
   const activeRef = useRef(active)
@@ -103,19 +108,38 @@ export function useProjectAnalysisReport({
   const personalTemplates =
     workspace?.templates.filter((template) => template.kind !== "builtin") ?? []
 
+  useEffect(() => {
+    if (active && stoppedRequest) resumeNotice.current?.scrollIntoView({ block: "nearest" })
+  }, [active, stoppedRequest])
+
   const stop = useCallback(() => {
-    sequence.current++
-    if (busy.current) {
-      busy.current = false
-      setLoading(false)
-      setResume(null)
-      endRun("cancelled")
-      setNotice("报告生成已停止，已有成功版本仍可查看")
-      void window.api.dashboard
-        .cancelRequests([PROJECT_REPORT_GENERATION_FAMILY])
-        .catch(() => undefined)
+    if (busy.current && !stopRequested.current) {
+      stopRequested.current = true
+      setStopping(true)
+      setNotice("正在停止报告任务，已完成步骤会保留…")
+      const ticket = sequence.current
+      void window.api.dashboard.cancelRequests([PROJECT_REPORT_GENERATION_FAMILY]).catch(() => {
+        if (ticket !== sequence.current || !busy.current) return
+        stopRequested.current = false
+        setStopping(false)
+        setNotice("停止请求未送达，请再次点击终止任务")
+      })
     }
-  }, [endRun])
+  }, [])
+
+  // Switching reports/scopes dismisses the current view; a late response must not overwrite it.
+  const leaveRun = () => {
+    if (busy.current) {
+      setResume(null)
+      setStoppedRequest(null)
+    }
+    stop()
+    sequence.current++
+    busy.current = false
+    stopRequested.current = false
+    setLoading(false)
+    setStopping(false)
+  }
 
   const loadWorkspace = useCallback(async () => {
     requestedWorkspace.current = true
@@ -188,21 +212,33 @@ export function useProjectAnalysisReport({
     readSequence.current++
     setReading(false)
     busy.current = true
+    stopRequested.current = false
+    savedProgress.current = request.action === "resume" ? resume : null
     const ticket = ++sequence.current
     lastRequest.current = request
     runProgress.begin()
     setLoading(true)
+    setStopping(false)
     setResume(null)
+    setStoppedRequest(null)
     setError("")
     setNotice("")
+    const finishStopped = () => {
+      endRun("cancelled")
+      setResume(savedProgress.current)
+      setStoppedRequest(request)
+      setNotice("")
+    }
     try {
       const response = await window.api.dashboard.projectReportGenerate(request, (event) => {
-        if (ticket === sequence.current) runProgress.receive(event)
+        if (ticket !== sequence.current) return
+        if (event.type === "report-checkpoint") savedProgress.current = event.resume
+        else runProgress.receive(event)
       })
       if (ticket !== sequence.current) return
-      if (response.cancelled) {
-        endRun("cancelled")
-        setNotice("报告生成已停止，已有成功版本仍可查看")
+      // A successfully saved report may win the race with the stop request.
+      if (response.cancelled || (stopRequested.current && !response.success)) {
+        finishStopped()
         return
       }
       if (!response.success || !response.data) {
@@ -216,19 +252,23 @@ export function useProjectAnalysisReport({
       setNotice(`已保存版本 v${response.data.version.version}`)
     } catch (e) {
       if (ticket === sequence.current) {
-        endRun("failed")
-        setError(message(e, "报告生成失败，请重试"))
+        if (stopRequested.current) finishStopped()
+        else {
+          endRun("failed")
+          setError(message(e, "报告生成失败，请重试"))
+        }
       }
     } finally {
       if (ticket === sequence.current) {
         busy.current = false
         setLoading(false)
+        setStopping(false)
       }
     }
   }
 
   const openReport = async (reportId: string, version?: number) => {
-    stop()
+    leaveRun()
     clearRun()
     lastRequest.current = null
     const ticket = ++readSequence.current
@@ -252,7 +292,7 @@ export function useProjectAnalysisReport({
   }
 
   const changeScope = (change: () => void) => {
-    stop()
+    leaveRun()
     readSequence.current++
     setReading(false)
     lastRequest.current = null
@@ -699,13 +739,26 @@ export function useProjectAnalysisReport({
             正在打开报告…
           </p>
         )}
-        {(error || resume) && (
+        {(error || resume || stoppedRequest) && (
           <div
+            ref={resumeNotice}
             role={error ? "alert" : "status"}
             className={`flex flex-wrap items-center justify-between gap-2 rounded border p-3 text-xs ${error ? "border-destructive/30 text-destructive" : "border-border bg-muted/25"}`}
           >
             <div className="min-w-0 flex-1 space-y-1 break-words">
-              <span>{error || "有一份未完成的报告，可以继续运行"}</span>
+              <span>
+                {error ||
+                  (stoppedRequest
+                    ? "报告任务已停止，可以继续运行"
+                    : "有一份未完成的报告，可以继续运行")}
+              </span>
+              {stoppedRequest && (
+                <p className="text-muted-foreground">
+                  {resume
+                    ? "已完成步骤保留；停止时尚未完成的那一轮会重新执行。已有成功版本仍可查看。"
+                    : "数据准备尚未完成；继续时会沿用原要求和范围重新读取数据。已有成功版本仍可查看。"}
+                </p>
+              )}
               {resume && (
                 <>
                   <p className="text-foreground">
@@ -733,6 +786,15 @@ export function useProjectAnalysisReport({
                 variant="outline"
                 disabled={loading || reading}
                 onClick={() => void run({ action: "resume", runId: resume.runId })}
+              >
+                继续运行
+              </Button>
+            ) : stoppedRequest ? (
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={loading || reading}
+                onClick={() => void run(stoppedRequest)}
               >
                 继续运行
               </Button>
@@ -800,6 +862,7 @@ export function useProjectAnalysisReport({
             <Button
               type="button"
               variant="outline"
+              disabled={stopping}
               onClick={(event) => {
                 // React replaces this control with a submit button during the click.
                 // Cancel its default action so stopping cannot submit the draft again.
@@ -808,7 +871,7 @@ export function useProjectAnalysisReport({
               }}
             >
               <Square className="mr-1 size-3.5" />
-              终止任务
+              {stopping ? "正在停止…" : "终止任务"}
             </Button>
           ) : (
             <Button

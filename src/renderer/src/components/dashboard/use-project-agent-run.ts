@@ -5,6 +5,7 @@ type Outcome = "running" | "completed" | "failed" | "cancelled"
 export interface ProjectAgentRunState {
   steps: ProjectAgentStep[]
   text: string
+  replies: Record<string, string>
   startedAt: number
   finishedAt?: number
   outcome: Outcome
@@ -12,6 +13,7 @@ export interface ProjectAgentRunState {
 const empty = (): ProjectAgentRunState => ({
   steps: [],
   text: "",
+  replies: {},
   startedAt: 0,
   outcome: "completed"
 })
@@ -25,8 +27,27 @@ export function useProjectAgentRun() {
     (event: ProjectAgentRunEvent) =>
       setState((current) => {
         if (current.outcome !== "running") return current
-        if (event.type === "text")
-          return { ...current, text: event.reset ? event.text : current.text + event.text }
+        if (event.type === "report-checkpoint") return current
+        if (event.type === "text") {
+          const replies = current.steps.some((step) => step.id === event.stepId)
+            ? {
+                ...current.replies,
+                [event.stepId]: event.reset
+                  ? event.text
+                  : (current.replies[event.stepId] ?? "") + event.text
+              }
+            : current.replies
+          return {
+            ...current,
+            replies,
+            text:
+              event.answer === false
+                ? current.text
+                : event.reset
+                  ? event.text
+                  : current.text + event.text
+          }
+        }
         const index = current.steps.findIndex((step) => step.id === event.step.id)
         const steps = [...current.steps]
         if (index >= 0) steps[index] = event.step

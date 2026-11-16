@@ -2,6 +2,8 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 import { mkdtempSync, readFileSync, rmSync } from "node:fs"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
+import { randomUUID } from "node:crypto"
+import type { ProjectAgentRunEvent } from "../../shared/project-agent-run"
 import type { IpcMainInvokeEvent } from "electron"
 import type {
   ProjectReportDocument,
@@ -49,7 +51,11 @@ function setup() {
   roots.push(root)
   let access: ReportAccess = { ownerId: "sap:1", ownRoom: "开发一室", canChooseRoom: false }
   const controller = new AbortController()
-  const handlers = new Map<string, (event: IpcMainInvokeEvent, raw?: unknown) => Promise<unknown>>()
+  const handlers = new Map<
+    string,
+    (event: IpcMainInvokeEvent, raw?: unknown, runId?: unknown) => Promise<unknown>
+  >()
+  const events: ProjectAgentRunEvent[] = []
   const latest: string[] = []
   const deps: ProjectReportDependencies = {
     register: (name, handler, isLatest) => {
@@ -88,7 +94,16 @@ function setup() {
   }
   registerProjectReportHandlers(deps)
   const call = async <T = ProjectReportDocument>(name: string, raw?: unknown) =>
-    (await handlers.get(`dashboard:${name}`)!({ sender: {} } as IpcMainInvokeEvent, raw)) as {
+    (await handlers.get(`dashboard:${name}`)!(
+      {
+        sender: {
+          isDestroyed: () => false,
+          send: (_channel: string, event: ProjectAgentRunEvent) => events.push(event)
+        }
+      } as unknown as IpcMainInvokeEvent,
+      raw,
+      randomUUID()
+    )) as {
       success: boolean
       data: T
       error?: string
@@ -100,6 +115,7 @@ function setup() {
     deps,
     call,
     latest,
+    events,
     controller,
     setAccess: (value: ReportAccess) => {
       access = value
@@ -108,6 +124,87 @@ function setup() {
 }
 
 describe("project report IPC workflow", () => {
+  it.each([false, true])(
+    "keeps a manually stopped task and resumes complete steps after restart (revision: %s)",
+    async (revision) => {
+      const s = setup()
+      const original = revision
+        ? await s.call("projectReportGenerate", { action: "create", scope, instruction: "原报告" })
+        : undefined
+      const input = original
+        ? {
+            action: "revise",
+            reportId: original.data.summary.id,
+            baseVersion: 1,
+            instruction: "保留原要求"
+          }
+        : { action: "create", scope, instruction: "保留原要求" }
+      const complete = vi.fn(async () => new AIMessage("已审阅数据"))
+      const firstMessages = [new HumanMessage("审阅第一批")]
+      const secondMessages = [new HumanMessage("生成报告")]
+      s.deps.generate = vi.fn(async (options) => {
+        await options.checkpoint!.run(
+          "same-model",
+          firstMessages,
+          "第一批审阅",
+          options.signal!,
+          options.progress!,
+          complete
+        )
+        await options.checkpoint!.run(
+          "same-model",
+          secondMessages,
+          "报告生成",
+          options.signal!,
+          options.progress!,
+          async () => {
+            s.controller.abort()
+            options.signal!.throwIfAborted()
+            return new AIMessage("不应保存的半份报告")
+          }
+        )
+        throw new Error("must stop")
+      })
+      expect((await s.call("projectReportGenerate", input)).cancelled).toBe(true)
+      const event = s.events.filter((item) => item.type === "report-checkpoint").at(-1)!
+      expect(event.resume).toMatchObject({ completedSteps: 1, nextStep: "报告生成" })
+      s.deps.signal = () => undefined
+      s.deps.generate = vi.fn(async (options) => {
+        expect(options.instruction).toBe("保留原要求")
+        expect(options.snapshot.periodData.dataAsOf).toBe(event.resume.dataAsOf)
+        await options.checkpoint!.run(
+          "same-model",
+          firstMessages,
+          "第一批审阅",
+          options.signal!,
+          options.progress!,
+          complete
+        )
+        return { ...renderReportHtml(source, options.snapshot), modelName: "same-model" }
+      })
+      registerProjectReportHandlers(s.deps)
+      const workspace = await s.call<ProjectReportWorkspace>("projectReportWorkspace")
+      expect(workspace.data.pendingRun).toMatchObject({
+        runId: event.resume.runId,
+        completedSteps: 1,
+        nextStep: "报告生成",
+        dataAsOf: event.resume.dataAsOf
+      })
+      expect(workspace.data.reports).toHaveLength(revision ? 1 : 0)
+      const continued = await s.call("projectReportGenerate", {
+        action: "resume",
+        runId: event.resume.runId
+      })
+      expect(continued.success).toBe(true)
+      expect(continued.data.version.version).toBe(revision ? 2 : 1)
+      expect(complete).toHaveBeenCalledTimes(1)
+      expect(s.deps.loadPeriod).toHaveBeenCalledTimes(1)
+      expect(s.deps.loadPages).toHaveBeenCalledTimes(1)
+      expect(
+        (await s.call<ProjectReportWorkspace>("projectReportWorkspace")).data.pendingRun
+      ).toBeUndefined()
+    }
+  )
   it("recovers a legacy invalid binding after restart and saves the original frozen report", async () => {
     const s = setup()
     s.deps.generate = vi.fn(async (options) => {
@@ -433,7 +530,7 @@ describe("project report IPC workflow", () => {
     registerProjectReportHandlers({ ...s.deps, signal: () => undefined })
     expect(
       (await s.call<ProjectReportWorkspace>("projectReportWorkspace")).data.pendingRun
-    ).toBeUndefined()
+    ).toMatchObject({ completedSteps: 0 })
     const other = setup()
     other.deps.generate = vi.fn(async (options) => {
       other.setAccess({ ownerId: "sap:2", ownRoom: "开发一室", canChooseRoom: false })

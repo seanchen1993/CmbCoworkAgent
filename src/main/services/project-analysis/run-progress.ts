@@ -1,4 +1,5 @@
 import type { ProjectAgentRunListener, ProjectAgentStep } from "../../../shared/project-agent-run"
+import type { ProjectReportResume } from "../../../shared/project-analysis-report"
 
 /** Only operational steps and answer text are emitted, never prompts or model reasoning fields. */
 export function createProjectRunReporter(listener?: ProjectAgentRunListener) {
@@ -11,8 +12,9 @@ export function createProjectRunReporter(listener?: ProjectAgentRunListener) {
     }
   }
   return {
-    text: (stepId: string, text: string, reset = false) =>
-      emit({ type: "text", stepId, text, reset }),
+    checkpoint: (resume: ProjectReportResume) => emit({ type: "report-checkpoint", resume }),
+    text: (stepId: string, text: string, reset = false, answer = true) =>
+      emit({ type: "text", stepId, text, reset, answer }),
     begin(kind: ProjectAgentStep["kind"], title: string, detail?: string, input?: string) {
       const step: ProjectAgentStep = {
         id: `step-${++sequence}`,

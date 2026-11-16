@@ -78,7 +78,7 @@ export function registerProjectReportHandlers(deps: ProjectReportDependencies): 
       access: ReportAccess,
       event: IpcMainInvokeEvent,
       raw: unknown,
-      checkAccess: () => void,
+      checkAccess: (checkSignal?: boolean) => void,
       runId?: unknown
     ) => Promise<unknown>,
     latest = false
@@ -91,7 +91,7 @@ export function registerProjectReportHandlers(deps: ProjectReportDependencies): 
           const canReadRoom = (room: string) =>
             access.canChooseRoom || (!!access.ownRoom && room === access.ownRoom)
           const store = new ProjectReportStore(deps.appDirectory(), access.ownerId, canReadRoom)
-          const checkAccess = () => {
+          const checkAccess = (checkSignal = true) => {
             const current = deps.access()
             if (
               current.ownerId !== access.ownerId ||
@@ -99,7 +99,7 @@ export function registerProjectReportHandlers(deps: ProjectReportDependencies): 
               current.canChooseRoom !== access.canChooseRoom
             )
               throw new Error("登录身份或室权限已变化，请重新打开报告")
-            deps.signal()?.throwIfAborted()
+            if (checkSignal) deps.signal()?.throwIfAborted()
           }
           const data = await action(store, access, event, raw, checkAccess, runId)
           return { success: true, data }
@@ -240,11 +240,13 @@ export function registerProjectReportHandlers(deps: ProjectReportDependencies): 
         store.saveRun(run, request.action !== "resume")
         activeRuns.add(run.id)
         acquired = true
+        progress.checkpoint(store.runSummary(run))
         const savedRun = run
         const checkpoint = new ProjectModelCheckpoint(run.models, () => {
           check()
           signal.throwIfAborted()
           store.saveRun(savedRun)
+          progress.checkpoint(store.runSummary(savedRun))
         })
         const result = await (deps.generate ?? generateProjectReport)({
           modelId: input.modelId,
@@ -293,7 +295,10 @@ export function registerProjectReportHandlers(deps: ProjectReportDependencies): 
         return document
       } catch (error) {
         if (parent?.aborted) {
-          if (run && acquired) store.clearRun(run.id)
+          // Stopping a request pauses this private task. Keep complete model calls and
+          // fetched details; an incomplete stream is never a completed checkpoint.
+          check(false)
+          if (run && acquired) store.saveRun(run)
           throw error
         }
         check()

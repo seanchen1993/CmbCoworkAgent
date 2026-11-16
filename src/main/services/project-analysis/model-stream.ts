@@ -110,14 +110,14 @@ async function streamAttempt(
   visibleText: boolean
 ): Promise<AIMessage> {
   const step = reporter.begin("model", title, "正在建立流式连接…")
-  if (visibleText) reporter.text(step.id, "", true)
+  reporter.text(step.id, "", true, visibleText)
   let combined: AIMessageChunk | undefined
   let pending = "",
     chars = 0,
     chunks = 0,
     lastEmit = 0
   const flush = () => {
-    if (visibleText && pending) reporter.text(step.id, pending)
+    if (pending) reporter.text(step.id, pending, false, visibleText)
     pending = ""
     lastEmit = Date.now()
     step.update(`正在接收模型输出 · ${chunks} 个片段 · ${chars} 字`)
@@ -132,7 +132,7 @@ async function streamAttempt(
       const delta = projectMessageText(chunk.content)
       chars += delta.length
       chunks++
-      if (visibleText) pending += delta
+      pending += delta
       if (Date.now() - lastEmit >= 100 || pending.length >= 256) flush()
     }
     signal.throwIfAborted()
@@ -163,6 +163,7 @@ async function streamAttempt(
     )
     return response
   } catch (error) {
+    if (pending) flush()
     const status = projectModelStatus(error)
     step.finish(
       signal.aborted

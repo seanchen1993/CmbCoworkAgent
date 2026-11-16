@@ -176,6 +176,11 @@ describe("report continuation from private checkpoints", () => {
     expect(loadStages).toHaveBeenCalledTimes(1)
     expect(loadSessions).toHaveBeenCalledTimes(1)
     expect(JSON.stringify(events)).toContain("恢复已完成步骤")
+    expect(
+      events.some(
+        (event) => event.type === "text" && event.answer === false && event.text.length > 0
+      )
+    ).toBe(true)
     expect(state.pendingStep).toBeUndefined()
   })
 
@@ -299,6 +304,12 @@ describe("report continuation from private checkpoints", () => {
         expect(invoke).not.toHaveBeenCalled()
         expect(onReview).not.toHaveBeenCalled()
         expect(JSON.stringify(events)).toContain("恢复已保存的报告 HTML")
+        expect(
+          events.some(
+            (event) =>
+              event.type === "text" && event.answer === false && event.text.includes("旧任务报告")
+          )
+        ).toBe(true)
       }
     }
   )
