@@ -72,7 +72,6 @@ const PROJECT_CONTEXT_COMMAND_KEYS = [
   "project_status",
   "feature_status",
   "skip_node",
-  "knowledge_path",
   "session_context_inject",
   "system_prompt_inject",
   "plugin_dir_hook"
@@ -238,6 +237,8 @@ function projectPluginMetadata(plugin: PluginMetadata): PluginMetadata {
     ...(Number.isFinite(plugin.hookCount) ? { hookCount: Math.max(0, plugin.hookCount!) } : {}),
     ...(text(plugin.hookPath, 2_048) ? { hookPath: text(plugin.hookPath, 2_048) } : {}),
     ...(plugin.origin === "market" || plugin.origin === "local" ? { origin: plugin.origin } : {}),
+    ...(plugin.sourceAccess === "owner" || plugin.sourceAccess === "whitelist"
+      ? { sourceAccess: plugin.sourceAccess } : {}),
     createdAt: text(plugin.createdAt, 128),
     updatedAt: text(plugin.updatedAt, 128)
   }
@@ -571,6 +572,17 @@ function supportsSessionContext(
   return isRecord(platform) && Boolean(text(platform.session_context_inject).trim())
 }
 
+function supportsKnowledgeBaseContext(
+  plugin: PluginMetadata | null,
+  readConfig: BoardConfigReader
+): boolean {
+  if (!plugin) return false
+  const config = readConfig(plugin.path)
+  if (config.error || !config.value || !isRecord(config.value.inspectCommands)) return false
+  const platform = config.value.inspectCommands[process.platform]
+  return isRecord(platform) && text(platform.session_context_inject).includes("${knowledgePath}")
+}
+
 function creator(value: unknown): HarnessProjectCreatorMetadata | undefined {
   if (!isRecord(value)) return undefined
   const result: HarnessProjectCreatorMetadata = {
@@ -695,6 +707,11 @@ function toProjectMetadata(value: unknown): HarnessProjectMetadata | null {
         HARNESS_PROJECT_PATH_MAX_CHARS,
         "Harness legacy project workspace path"
       ),
+    knowledgeBaseIds: Array.isArray(value.knowledgeBaseIds)
+      ? value.knowledgeBaseIds
+          .filter((id): id is string => typeof id === "string" && Boolean(id.trim()))
+          .map((id) => id.trim())
+      : [],
     ...(systemConstraintFirstLoadedAt ? { systemConstraintFirstLoadedAt } : {}),
     ...(managedRunFirstStartedAt ? { managedRunFirstStartedAt } : {}),
     "harness-adapter": {
@@ -1148,6 +1165,7 @@ function toProjectListItem(
     systemId: project.systemId,
     systemName: project.systemName,
     workspacePath: project.workspacePath,
+    knowledgeBaseIds: project.knowledgeBaseIds ?? [],
     ...(project.systemConstraintFirstLoadedAt
       ? { systemConstraintFirstLoadedAt: project.systemConstraintFirstLoadedAt }
       : {}),
@@ -1167,6 +1185,8 @@ function toProjectListItem(
     supportsDeployUnits: boardCompatibility.compatible && !project.nativeBinding,
     supportsSessionContextInjection:
       boardCompatibility.compatible && !project.nativeBinding && supportsSessionContext(plugin, readConfig),
+    supportsKnowledgeBaseContext:
+      boardCompatibility.compatible && !project.nativeBinding && supportsKnowledgeBaseContext(plugin, readConfig),
     lifecycle: project.lifecycle
   }
 }
@@ -1195,7 +1215,8 @@ function toRegistryItem(
     enabled: plugin.enabled === true,
     description: text(plugin.description, MAX_REGISTRY_TEXT),
     ...(text(plugin.useScenario, 512) ? { useScenario: text(plugin.useScenario, 512) } : {}),
-    pullKnowledgeAvailable: isRecord(commands) && Boolean(text(commands.pull_knowledge).trim()),
+    supportsKnowledgeBaseContext:
+      isRecord(commands) && text(commands.session_context_inject).includes("${knowledgePath}"),
     boardCompatibility
   }
 }

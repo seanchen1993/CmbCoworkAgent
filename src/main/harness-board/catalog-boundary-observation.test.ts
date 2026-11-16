@@ -57,7 +57,7 @@ it("reobserves protocols on every page even when the board config bytes remain c
   fs.writeFileSync(join(f.plugin, "devclaw.project-runtime.json"), f.host)
   expect(read(first.registryNextCursor!).registry).toMatchObject([
     { runtimeMode: "host", boardCompatibility: { status: "host-runtime", compatible: true },
-      pullKnowledgeAvailable: false }
+      supportsKnowledgeBaseContext: false }
   ])
   fs.rmSync(join(f.plugin, "devclaw.project-runtime.json"))
   expect(read(first.registryNextCursor!).registry[0].boardCompatibility.compatible).toBe(true)
@@ -159,7 +159,7 @@ it.each(["host", "unknown"])(
     expect(result.registry.every((row) =>
       kind === "host" && row.runtimeMode === "host"
         ? row.boardCompatibility.status === "host-runtime" &&
-          row.boardCompatibility.compatible && !row.pullKnowledgeAvailable
+          row.boardCompatibility.compatible && !row.supportsKnowledgeBaseContext
         : !row.boardCompatibility.compatible
     )).toBe(true)
   }
@@ -189,9 +189,9 @@ it("bounds root enumeration and falls back to exact safe reads instead of inferr
     readHarnessCatalogPage(f.projects, f.plugins, { includeProjects: false }).registry
   ).toMatchObject([
     { runtimeMode: "host", boardCompatibility: { status: "host-runtime", compatible: true },
-      pullKnowledgeAvailable: false },
+      supportsKnowledgeBaseContext: false },
     { runtimeMode: "host", boardCompatibility: { status: "host-runtime", compatible: true },
-      pullKnowledgeAvailable: false }
+      supportsKnowledgeBaseContext: false }
   ])
   expect(reads).toBe(HOST_PACKAGE_LIMITS.files + HOST_PACKAGE_LIMITS.directories + 1)
 })

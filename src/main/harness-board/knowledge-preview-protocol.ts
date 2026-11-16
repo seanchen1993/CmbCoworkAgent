@@ -7,19 +7,28 @@ export const HARNESS_KNOWLEDGE_PREVIEW_MAX_DEPTH = 64
 export const HARNESS_KNOWLEDGE_PREVIEW_MAX_DIRECTORY_ENTRIES = 2_000
 export const HARNESS_KNOWLEDGE_PREVIEW_MAX_DIRENTS = 10_000
 
+export interface HarnessKnowledgeBasePreviewTarget {
+  idKey: string
+  name: string
+  path: string
+}
+
+/** Scoped compatibility preview. Only main supplies the resolved plugin and cache paths. */
 export interface HarnessKnowledgePreviewSource {
   openworkDir: string
   pluginStorePath: string
   leanTokenStorePath: string
-  /** Main-only original configuration/host-cache authority; never accepted from renderer IPC. */
   authorizedKnowledge?: { pluginId: string; pluginPath: string; root: string }
 }
+
+export type HarnessKnowledgePreviewTarget =
+  | HarnessKnowledgeBasePreviewTarget
+  | { adapterId: string; source: HarnessKnowledgePreviewSource }
 
 export interface HarnessKnowledgePreviewReadRequest {
   type: "read"
   requestId: number
-  adapterId: string
-  source: HarnessKnowledgePreviewSource
+  target: HarnessKnowledgePreviewTarget
   maxResponseBytes: number
   cancelBuffer: SharedArrayBuffer
 }

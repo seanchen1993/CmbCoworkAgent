@@ -97,7 +97,7 @@ export interface HarnessAdapterRegistryItem extends HarnessAdapterSnapshot {
   developerName?: string
   developerSapId?: string
   organizationName?: string
-  pullKnowledgeAvailable?: boolean
+  supportsKnowledgeBaseContext?: boolean
   boardCompatibility: HarnessBoardCompatibility
 }
 
@@ -132,15 +132,14 @@ export interface HarnessKnowledgePreviewFile {
 }
 
 export interface HarnessKnowledgePreviewResult {
-  adapterId: string
-  adapterName: string
-  configured: boolean
+  adapterId?: string
+  adapterName?: string
+  configured?: boolean
   exists: boolean
   path?: string
-  /** Sender-bound capability for previewing descendants of `path`. */
+  files: HarnessKnowledgePreviewFile[]
   previewGrant?: string
   previewGrantExpiresAt?: number
-  files: HarnessKnowledgePreviewFile[]
   error?: string
 }
 
@@ -267,6 +266,7 @@ export interface HarnessProjectMetadata {
   systemId: string
   systemName: string
   workspacePath: string
+  knowledgeBaseIds?: string[]
   /** First feature-session run whose complete system-constraint set loaded successfully. */
   systemConstraintFirstLoadedAt?: string
   /** 该项目第一次开启托管运行的时间。与上面那个约束标记同样是单调的，只写一次。 */
@@ -294,6 +294,7 @@ export interface HarnessProjectCreateInput {
   systemId: string
   systemName: string
   workspacePath: string
+  knowledgeBaseIds?: string[]
 }
 
 export interface HarnessEnterpriseProjectSearchInput {
@@ -516,6 +517,7 @@ export interface HarnessProjectMetadataUpdateInput {
   systemId: string
   systemName: string
   workspacePath: string
+  knowledgeBaseIds?: string[]
 }
 
 export interface HarnessProjectListItem {
@@ -530,6 +532,7 @@ export interface HarnessProjectListItem {
   systemId: string
   systemName: string
   workspacePath: string
+  knowledgeBaseIds: string[]
   systemConstraintFirstLoadedAt?: string
   managedRunFirstStartedAt?: string
   harnessAdapter: {
@@ -543,6 +546,7 @@ export interface HarnessProjectListItem {
   boardCompatibility: HarnessBoardCompatibility
   supportsDeployUnits: boolean
   supportsSessionContextInjection: boolean
+  supportsKnowledgeBaseContext?: boolean
   lifecycle: {
     status: "active" | "archived"
     createAt: string
@@ -894,6 +898,7 @@ export interface HarnessProjectDetailViewModel {
     syncType: "invoke_session"
     nextAction: HarnessWorkflowNextAction
     knowledgePath?: string
+    knowledgeUnavailableReason?: string
   }
   watchRefs: HarnessWatchRef[]
   loading: boolean

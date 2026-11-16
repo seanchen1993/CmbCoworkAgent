@@ -6,6 +6,10 @@ type Query = (index: string, body: Record<string, unknown>) => Promise<unknown>
 type Filter = Record<string, unknown>
 export const TEST_PROJECT_PAGE_SIZE = 500
 const TERMS_BATCH_SIZE = 10_000
+const testProjectFlags = [
+  { term: { "properties.isTestProject": true } },
+  { term: { "properties.manuallyMarkedTestProject": true } }
+]
 
 interface Scope {
   eventIndex: string
@@ -95,7 +99,7 @@ export async function fetchTestProjectIds(
         bool: {
           filter: [
             { term: { eventName: "harness.project.snapshot" } },
-            { term: { "properties.isTestProject": true } },
+            { bool: { should: testProjectFlags, minimum_should_match: 1 } },
             ...accessFilters
           ]
         }
@@ -171,7 +175,7 @@ export function excludeTestProjectsFromQuery(
       ? ["harnessProjectId"]
       : ["properties.harnessProjectId", "properties.projectId"]
   const mustNot: Filter[] =
-    index === scope.eventIndex ? [{ term: { "properties.isTestProject": true } }] : []
+    index === scope.eventIndex ? [...testProjectFlags] : []
   for (let start = 0; start < scope.projectIds.length; start += TERMS_BATCH_SIZE) {
     const ids = scope.projectIds.slice(start, start + TERMS_BATCH_SIZE)
     for (const field of fields) mustNot.push({ terms: { [field]: ids } })

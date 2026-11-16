@@ -79,18 +79,19 @@ async function main() {
           localProjects:{get:async id=>{calls.push(['get',id]);return structuredClone(views[id])},mods:{read:async id=>({projectId:id,projectVersion:1,packageDigest:'a'.repeat(64),workspace:'C:/fixture/project'}),approve:async()=>{throw Error('NO_AUTO_APPROVAL')}},
             create:async input=>{calls.push(['host-create',input]);if(JSON.stringify(input.expectedPlugin??input.expectedTemplate)!==JSON.stringify(installedIdentity))throw Error('PROJECT_HOST_PACKAGE_IDENTITY_MISMATCH');const result=make(input);views[result.project.projectId]=result;if(holdCreate)await new Promise(resolve=>finishCreate=resolve);return structuredClone(result)},
             command:async()=>{throw Error('NO_AUTO_START')}}}};
+      const knowledgeBases={ready:true,knowledgeBases:[{idKey:'fixture-rules',name:'工程约束',gitRef:'main',visibility:'visible',workspaces:[{role:'read',status:'success',localValid:true}]}]};
       const blank=()=>({name:'既有项目',description:'独立目标',projectCode:'P001',systemId:'S1',systemName:'系统',projectDir:'legacy',workspacePath:'C:/fixture',adapterType:'plugin',adapterId:'',projectFromLean:false,isTestProject:true});
       function Fixture(){const[open,setOpen]=useState(false),[editing,setEditing]=useState(false),[form,setForm]=useState(blank),[selected,setSelected]=useState(),[items,setItems]=useState([]),[startUse,setStartUse]=useState(),[workspaceError,setWorkspaceError]=useState(null),[workspaceValidating,setWorkspaceValidating]=useState(false);
         window.startSaved=()=>{setStartUse({id:'saved-intent',accountRevision:0,input:{threadId:'creator',expectedWorkspace:'C:/author',pluginId:'host',expected:installedIdentity},report:{kind:'host-project',canOpen:true,identity:installedIdentity,issues:[]}});setForm({...blank(),adapterId:'host'});setOpen(true)};
-        window.editSaved=()=>{setForm({...blank(),adapterId:'host'});setEditing(true)};
+        window.editSaved=()=>{setForm({...blank(),adapterId:'host',knowledgeBaseIds:['fixture-rules']});setEditing(true)};
         window.fixture={calls,reviews,setWorkspaceState:(error,pending)=>{setWorkspaceError(error);setWorkspaceValidating(pending)},refreshTemplate:()=>{templates[0].expectedTemplate={...installedIdentity};setForm(value=>({...value}))},missingTemplate:()=>delete templates[0].expectedTemplate,remount:()=>{setSelected(undefined);setItems(Object.values(views).map(v=>v.project))}};
         if(selected)return <><button onClick={()=>setSelected(undefined)}>项目列表</button><LocalProjectRun key={selected} projectId={selected} onChanged={()=>{}}/></>;
         return <><button onClick={()=>{setStartUse(undefined);setForm(blank());setOpen(true)}}>新建项目</button><HostProjectListItems projects={items} onSelect={setSelected}/>
-          <ProjectFormDialog open={open} creating={false} form={form} registry={registry} hostTemplates={templates} hostStartUse={startUse}
+          <ProjectFormDialog open={open} creating={false} form={form} registry={registry} knowledgeBases={knowledgeBases} onOpenSystemConstraints={()=>{}} hostTemplates={templates} hostStartUse={startUse}
             workspaceError={workspaceError} workspaceValidating={workspaceValidating} installingPluginNames={new Set()} error={null} verification={{pending:false,error:null}} onOpenChange={setOpen} onChange={setForm}
             onInstallPlugin={()=>{throw Error('NO_AUTO_INSTALL')}} onPickWorkspace={()=>{}} onSubmit={async approval=>{await window.api.harnessBoard.createProject({...form,...(approval?{projectUseApproval:approval}:{})});setOpen(false)}}
             onHostCreated={view=>{setItems(Object.values(views).map(v=>v.project));setOpen(false);setSelected(view.project.projectId)}}/>
-          <ProjectEditDialog projectId="existing-owner" open={editing} saving={false} form={form} registry={registry}
+          <ProjectEditDialog projectId="existing-owner" open={editing} saving={false} form={form} registry={registry} knowledgeBases={knowledgeBases} onOpenSystemConstraints={()=>{}}
             installingPluginNames={new Set()} error={null} verification={{pending:false,error:null}} onOpenChange={setEditing} onChange={setForm}
             onInstallPlugin={()=>{throw Error('NO_AUTO_INSTALL')}} onSubmit={approval=>{calls.push(['edit',{...form,...(approval?{projectUseApproval:approval}:{})}]);setEditing(false)}}/></>}
       root.render(<Fixture/>);
@@ -128,7 +129,7 @@ async function main() {
     await page.addStyleTag({ content: compiler.build(candidates) })
     await page.addScriptTag({ content: bundled.outputFiles[0].text })
     await page.getByRole("button", { name: "新建项目", exact: true }).click()
-    for (const name of ["项目编号 *", "项目名称 *", "系统编号 *", "系统名称 *", "插件配置"])
+    for (const name of ["项目编号 *", "项目名称 *", "系统编号 *", "系统名称 *", "项目开发配置"])
       assert.equal(
         await page.getByText(name, { exact: true }).count(),
         1,
@@ -178,7 +179,7 @@ async function main() {
     assert(await page.getByRole("option", { name: /停用项目插件/ }).isDisabled())
     assert(await page.getByRole("option", { name: /不兼容插件/ }).isDisabled())
     await page.getByRole("option", { name: /既有项目插件/ }).click()
-    for (const name of ["项目编号 *", "项目名称 *", "系统编号 *", "系统名称 *", "插件配置"])
+    for (const name of ["项目编号 *", "项目名称 *", "系统编号 *", "系统名称 *", "项目开发配置"])
       await page.getByText(name, { exact: true }).waitFor()
     const systemId = page.getByRole("textbox", { name: /系统编号/ })
     await systemId.fill("")
@@ -212,7 +213,7 @@ async function main() {
     await page.getByRole("textbox", { name: "搜索插件", exact: true }).fill("四阶段项目插件")
     await page.getByRole("option", { name: /四阶段项目插件/ }).click()
     await page.setViewportSize({ width: 1100, height: 900 })
-    for (const name of ["项目编号 *", "项目名称 *", "系统编号 *", "系统名称 *", "插件配置"])
+    for (const name of ["项目编号 *", "项目名称 *", "系统编号 *", "系统名称 *", "项目开发配置"])
       await page.getByText(name, { exact: true }).waitFor()
     assert.equal(await page.getByRole("textbox", { name: "希望完成什么", exact: true }).count(), 0)
     assert.equal(
@@ -224,6 +225,9 @@ async function main() {
     await page.getByRole("textbox", { name: /系统编号/ }).fill("")
     assert(await page.getByRole("button", { name: /^(创建|创建并授权)$/ }).isDisabled())
     await page.getByRole("textbox", { name: /系统编号/ }).fill("S1")
+    await page.getByRole("button", { name: "选择系统约束", exact: true }).click()
+    await page.getByRole("option", { name: "工程约束（main）", exact: true }).click()
+    await page.getByRole("button", { name: "选择系统约束，当前：工程约束（main）", exact: true }).waitFor()
     await page.screenshot({ path: resolve(output, "native-original-project-form.png") })
     await page.getByRole("button", { name: "创建并授权", exact: true }).click()
     const first = (await page.evaluate("window.fixture.calls[0]")) as [
@@ -234,6 +238,7 @@ async function main() {
     assert.equal(first[1].adapterId, "host")
     assert.equal(first[1].projectCode, "P001")
     assert.equal(first[1].systemId, "S1")
+    assert.deepEqual(first[1].knowledgeBaseIds, ["fixture-rules"])
     assert.deepEqual(first[1].projectUseApproval, {
       reviewId: "review-legacy",
       reviewDigest: "c".repeat(64)
@@ -241,7 +246,7 @@ async function main() {
     assert(!Object.hasOwn(first[1], "goal"), "project creation does not create a feature goal/run")
     assert.equal(await page.getByText("当前：转换", { exact: true }).count(), 0)
     await page.evaluate("window.startSaved()")
-    for (const name of ["项目编号 *", "项目名称 *", "系统编号 *", "系统名称 *", "插件配置"])
+    for (const name of ["项目编号 *", "项目名称 *", "系统编号 *", "系统名称 *", "项目开发配置"])
       await page.getByText(name, { exact: true }).waitFor()
     await page.screenshot({ path: resolve(output, "saved-original-project-form.png") })
     await page.getByRole("button", { name: "创建并授权", exact: true }).click()
@@ -258,11 +263,13 @@ async function main() {
     await page.evaluate("window.editSaved()")
     const editing = page.getByRole("dialog", { name: "编辑项目", exact: true })
     await editing.getByText("已沿用创建项目时的授权。", { exact: false }).waitFor()
+    await editing.getByRole("button", { name: "选择系统约束，当前：工程约束（main）", exact: true }).waitFor()
     await editing.getByRole("textbox", { name: "项目名称 *", exact: true }).fill("仅修改项目名称")
     assert.equal(await editing.getByRole("button", { name: "保存并授权", exact: true }).count(), 0)
     await editing.getByRole("button", { name: "保存", exact: true }).click()
     const saved = await page.evaluate("window.fixture.calls[3][1]")
     assert.equal(saved.name, "仅修改项目名称")
+    assert.deepEqual(saved.knowledgeBaseIds, ["fixture-rules"])
     assert(
       !Object.hasOwn(saved, "projectUseApproval"),
       "metadata edit does not authorize or enable again"
@@ -304,6 +311,7 @@ async function main() {
             "Actual original project form/CSS; controlled harness create callback, no runtime execution",
           checks: [
             "original metadata and validation for all plugins",
+            "selected knowledge base and Host authorization coexist on project create and edit",
             "no goal/stage standalone create page",
             "same harness create endpoint",
             "saved/manual same original form",

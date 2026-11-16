@@ -3,7 +3,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { serialize } from "node:v8"
 import { afterEach, describe, expect, it } from "vitest"
-import { readHarnessKnowledgePreview } from "./knowledge-preview-reader"
+import { readHarnessKnowledgePreview, readKnowledgeBasePreview } from "./knowledge-preview-reader"
 import { HARNESS_KNOWLEDGE_PREVIEW_MAX_RESPONSE_BYTES } from "./knowledge-preview-protocol"
 import { createProjectTemplate } from "../mods/devtools/project-template"
 import { CONTEXT_HANDOFF_PROTOCOL, parseProjectRuntimeManifest, wrapProjectRuntimeManifest } from "../../shared/project-runtime"
@@ -184,5 +184,43 @@ describe("Harness knowledge preview reader", () => {
     expect(result).toMatchObject({ configured: true, exists: false, files: [] })
     expect(result.error).toContain("未经用户授权")
     expect(result.path).toBeUndefined()
+  })
+
+  it("scans a framework knowledge directory directly by idKey", async () => {
+    const root = await mkdtemp(join(tmpdir(), "framework-knowledge-preview-"))
+    roots.push(root)
+    await mkdir(join(root, "docs"), { recursive: true })
+    await writeFile(join(root, "docs", "AGENTS.md"), "knowledge", "utf8")
+
+    const result = readKnowledgeBasePreview(
+      { idKey: "kb-payment", name: "支付知识库", path: root },
+      HARNESS_KNOWLEDGE_PREVIEW_MAX_RESPONSE_BYTES
+    )
+
+    expect(result).toMatchObject({
+      exists: true,
+      path: root
+    })
+    expect(result.files).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ path: "/docs", is_dir: true }),
+        expect.objectContaining({ path: "/docs/AGENTS.md", is_dir: false })
+      ])
+    )
+  })
+
+  it("honors cancellation before filesystem traversal", async () => {
+    const root = await mkdtemp(join(tmpdir(), "framework-knowledge-cancel-"))
+    roots.push(root)
+    const flag = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT))
+    Atomics.store(flag, 0, 1)
+
+    expect(() =>
+      readKnowledgeBasePreview(
+        { idKey: "kb-payment", name: "支付知识库", path: root },
+        HARNESS_KNOWLEDGE_PREVIEW_MAX_RESPONSE_BYTES,
+        flag
+      )
+    ).toThrow(expect.objectContaining({ name: "AbortError" }))
   })
 })

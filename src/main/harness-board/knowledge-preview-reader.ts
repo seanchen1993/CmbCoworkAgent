@@ -17,6 +17,7 @@ import {
   HARNESS_KNOWLEDGE_PREVIEW_MAX_DIRECTORIES,
   HARNESS_KNOWLEDGE_PREVIEW_MAX_DIRECTORY_ENTRIES,
   HARNESS_KNOWLEDGE_PREVIEW_MAX_FILES,
+  type HarnessKnowledgeBasePreviewTarget,
   type HarnessKnowledgePreviewSource
 } from "./knowledge-preview-protocol"
 
@@ -396,6 +397,51 @@ export function readHarnessKnowledgePreview(
     {
       ...resultBase,
       configured: true,
+      exists: true,
+      path: knowledgePath,
+      files: scanned.files,
+      ...(scanned.error ? { error: scanned.error } : {})
+    },
+    maxResponseBytes
+  )
+}
+
+export function readKnowledgeBasePreview(
+  target: HarnessKnowledgeBasePreviewTarget,
+  maxResponseBytes: number,
+  cancelFlag?: Int32Array
+): HarnessKnowledgePreviewResult {
+  throwIfCancelled(cancelFlag)
+  const idKey = boundedText(target.idKey, 512).trim()
+  const name = boundedText(target.name, 1_024).trim()
+  const knowledgePath = resolve(target.path)
+  if (!idKey || !name || !isAbsolute(target.path)) {
+    throw new Error("知识库预览目标无效")
+  }
+  if (!existsSync(knowledgePath)) {
+    return { exists: false, path: knowledgePath, files: [] }
+  }
+  try {
+    if (!statSync(knowledgePath).isDirectory()) {
+      return {
+        exists: false,
+        path: knowledgePath,
+        files: [],
+        error: "知识库路径不是目录"
+      }
+    }
+  } catch (error) {
+    return {
+      exists: false,
+      path: knowledgePath,
+      files: [],
+      error: `无法读取知识库路径：${formatError(error)}`
+    }
+  }
+  const scanned = scanKnowledgeFiles(knowledgePath, cancelFlag)
+  throwIfCancelled(cancelFlag)
+  return boundResponse(
+    {
       exists: true,
       path: knowledgePath,
       files: scanned.files,

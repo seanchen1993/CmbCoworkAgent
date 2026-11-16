@@ -1,4 +1,4 @@
-import type React from "react"
+import { useEffect, useState } from "react"
 import {
   BarChart3,
   Calendar,
@@ -114,6 +114,22 @@ export function MarketDetailView(props: MarketDetailViewProps): React.JSX.Elemen
     onDelete,
     onOpenSkillTraceDialog
   } = props
+
+  const [sourceAccessKey, setSourceAccessKey] = useState<string | null>(null)
+  const sourceKey = JSON.stringify([activeTab, selectedItem.name, selectedItem.id])
+  useEffect(() => {
+    let active = true
+    if (activeTab === "skill" || activeTab === "plugin") {
+      void window.api.plugins.marketSourceAccess(activeTab, selectedItem.name, selectedItem.id)
+        .then((access) => {
+          if (active) setSourceAccessKey(access ? sourceKey : null)
+        })
+        .catch(() => {
+          if (active) setSourceAccessKey(null)
+        })
+    }
+    return () => { active = false }
+  }, [activeTab, selectedItem.name, selectedItem.id, selectedItem.extra_json, sourceKey])
 
   const subscribeUrl =
     activeTab === "orgSkill" ? buildOrgSkillSubscribeUrl(selectedItem) : null
@@ -364,6 +380,17 @@ export function MarketDetailView(props: MarketDetailViewProps): React.JSX.Elemen
                   >
                     <Zap className="size-3" />
                     安装
+                  </Button>
+                )}
+                {sourceAccessKey === sourceKey && (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="h-8 text-xs"
+                    onClick={() => onDownload(selectedItem, true)}
+                    disabled={downloadingItems.has(getItemKey(selectedItem))}
+                  >
+                    下载原始文件
                   </Button>
                 )}
                 {selectedItem.installed &&

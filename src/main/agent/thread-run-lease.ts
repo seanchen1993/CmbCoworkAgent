@@ -92,6 +92,8 @@ export function captureLocalThreadRunLease(threadId: string): (() => boolean) | 
   return lease ? () => Reflect.apply(capturedLeaseGet, activeLeases, [threadId]) === lease : undefined
 }
 
+export const getLocalThreadRunLeases = listLocalThreadRunLeases
+
 export function claimLocalThreadRunLease(
   input: ClaimLocalThreadRunLeaseInput
 ): LocalThreadRunLeaseClaim {

@@ -214,6 +214,11 @@ import type {
   ManagedRunSummary,
   ManagedRunThreadCreatedEvent
 } from "../shared/harness-board-types"
+import type {
+  KnowledgeBaseListResult,
+  KnowledgeBaseSyncResult,
+  KnowledgeDepositionWorkspace
+} from "../shared/knowledge-base-types"
 import {
   AUTO_MODE_MANAGED_STREAM_STARTED_CHANNEL,
   type ManagedAutoSendStreamStartEvent
@@ -2493,7 +2498,7 @@ const api = {
     upload: (
       buffer: ArrayBuffer,
       fileName: string,
-      options?: { allowNestedNameDuplicates?: boolean; origin?: "market" | "local" }
+      options?: { allowNestedNameDuplicates?: boolean; origin?: "market" | "local"; marketplace?: { name: string; id?: string } }
     ): Promise<{
       success: boolean
       skillName?: string
@@ -3503,6 +3508,8 @@ const api = {
     }
   },
   plugins: {
+    marketSourceAccess: (type: "skill" | "plugin", name: string, id?: string): Promise<"owner" | "whitelist" | undefined> =>
+      ipcRenderer.invoke("plugins:marketSourceAccess", { type, name, id }),
     ...createPluginStartUseBridge((channel, input) => ipcRenderer.invoke(channel, input)),
     flowDefinition: ((input) => ipcRenderer.invoke("plugins:flowDefinition", input)) as
       import("../shared/plugin-flow-definition").ReadPluginFlowDefinition,
@@ -4933,6 +4940,22 @@ const api = {
         input
       ) as Promise<HarnessLeanTokenConfig>,
     ...createHarnessKnowledgeApi((channel, ...args) => ipcRenderer.invoke(channel, ...args)),
+    listKnowledgeBases: (): Promise<KnowledgeBaseListResult> =>
+      ipcRenderer.invoke("harnessBoard:listKnowledgeBases") as Promise<KnowledgeBaseListResult>,
+    refreshKnowledgeBases: (): Promise<KnowledgeBaseListResult> =>
+      ipcRenderer.invoke("harnessBoard:refreshKnowledgeBases") as Promise<KnowledgeBaseListResult>,
+    deleteKnowledgeBase: (idKey: string): Promise<void> =>
+      ipcRenderer.invoke("harnessBoard:deleteKnowledgeBase", idKey),
+    prepareKnowledgeDeposition: (
+      projectId: string,
+      targetId?: string
+    ): Promise<KnowledgeDepositionWorkspace> =>
+      ipcRenderer.invoke("harnessBoard:prepareKnowledgeDeposition", projectId, targetId),
+    syncKnowledgeBase: (idKey: string): Promise<KnowledgeBaseSyncResult> =>
+      ipcRenderer.invoke(
+        "harnessBoard:syncKnowledgeBase",
+        idKey
+      ) as Promise<KnowledgeBaseSyncResult>,
     cancelKnowledgePreviewRequests: (): Promise<void> =>
       ipcRenderer.invoke("harnessBoard:cancelKnowledgePreviewRequests") as Promise<void>,
     selectProjectDirectory: (): Promise<{

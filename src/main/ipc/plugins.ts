@@ -4,6 +4,8 @@ import { readProjectDependencyIds } from "../plugins/project-dependency-metadata
 import { isCreatorVersionSource } from "../plugins/creator-path"
 import { isLegacyProjectModePluginRoot } from "../harness-board/plugin-mode"
 import { isPluginInstallMode, type PluginInstallMode, type PluginInstallResult } from "../../shared/plugin-install"
+import { canReadPluginSource } from "../../shared/market-source-access"
+import { resolveMarketSourceAccess } from "../services/market-source-access"
 import {
   readContentFile,
   assertOriginalContent,
@@ -440,7 +442,8 @@ async function installPluginFromDirLocked(
     dependencyOnly?: true
     verifyCopied: (directory: string) => Promise<void>
   },
-  marketplace?: PluginMetadata["marketplace"]
+  marketplace?: PluginMetadata["marketplace"],
+  sourceAccess?: PluginMetadata["sourceAccess"]
 ): Promise<PluginInstallResult> {
   try {
     assertOriginalDirectory(dirPath)
@@ -554,9 +557,10 @@ async function installPluginFromDirLocked(
     }
     let resolvedVersion = resolvePluginInstallVersion(parsed.manifest?.version, versionOverride)
     const shouldSyncManifestVersion = Boolean(normalizePluginVersion(versionOverride))
+    const shouldProtect = !sourceAccess && (origin ?? existing?.origin) === "market"
     const syncCopiedManifestVersion = async (): Promise<void> => {
       if (!shouldSyncManifestVersion) {
-        if (origin === "market" || (origin === undefined && existing?.origin === "market"))
+        if (shouldProtect)
           protectMarketDirectory(destDir)
         return
       }
@@ -567,7 +571,7 @@ async function installPluginFromDirLocked(
         useScenario: parsed.manifest?.useScenario,
         author: parsed.manifest?.author
       })
-      if (origin === "market" || (origin === undefined && existing?.origin === "market"))
+      if (shouldProtect)
         protectMarketDirectory(destDir)
     }
 
@@ -645,6 +649,7 @@ async function installPluginFromDirLocked(
       ...(parsed.businessModCount ? { businessModCount: parsed.businessModCount } : {}),
       ...(parsed.businessExtensionCount ? { businessExtensionCount: parsed.businessExtensionCount } : {}),
       origin: resolvedOrigin,
+      ...(resolvedOrigin === "market" && sourceAccess ? { sourceAccess } : {}),
       ...(resolvedOrigin === "market" && (marketplace ?? existing?.marketplace)
         ? { marketplace: marketplace ?? existing?.marketplace }
         : {}),
@@ -901,7 +906,8 @@ async function installPluginFromZip(
   origin?: "market" | "local",
   versionOverride?: string,
   requireMods: PluginInstallMode = false,
-  marketplace?: PluginMetadata["marketplace"]
+  marketplace?: PluginMetadata["marketplace"],
+  sourceAccess?: PluginMetadata["sourceAccess"]
 ): Promise<PluginInstallResult> {
   try {
     const extracted = await extractZipToTemp(buffer, getPluginsDir(), "_temp_")
@@ -920,7 +926,7 @@ async function installPluginFromZip(
 
       // Parse and install (the real copy lands in getPluginsDir() via installPluginFromDir)
       return await installPluginFromDirLocked(
-        pluginRoot, fallbackName, origin, versionOverride, requireMods, undefined, undefined, marketplace
+        pluginRoot, fallbackName, origin, versionOverride, requireMods, undefined, undefined, marketplace, sourceAccess
       )
     } finally {
       // Clean up temp directory regardless of install outcome
@@ -938,7 +944,7 @@ export async function exportPluginForMarketZip(
   options?: { version?: string | null }
 ): Promise<{ fileName: string; buffer: ArrayBuffer }> {
   assertOriginalContent(plugin.path)
-  if (plugin.origin !== "local") throw new Error(MARKET_CONTENT_DENIED)
+  if (!canReadPluginSource(plugin)) throw new Error(MARKET_CONTENT_DENIED)
   const zip = new AdmZip()
   await addDirToZip(zip, plugin.path, plugin.path)
   await upsertVersionedPluginManifestInZip(zip, plugin, options?.version)
@@ -953,6 +959,16 @@ export async function exportPluginForMarketZip(
 }
 
 export function registerPluginHandlers(ipcMain: IpcMain): void {
+  ipcMain.handle("plugins:marketSourceAccess", async (_event, payload: unknown) => {
+    if (!payload || typeof payload !== "object") return undefined
+    const { type, name, id } = payload as Record<string, unknown>
+    if (
+      (type !== "skill" && type !== "plugin") ||
+      typeof name !== "string" || !name.trim() || name.length > 512 ||
+      (id !== undefined && (typeof id !== "string" || id.length > 512))
+    ) return undefined
+    return resolveMarketSourceAccess(type, { name, id: id as string | undefined })
+  })
   if (upgradeMarkedMarketDirectories(getPlugins().map((plugin) => plugin.path))) {
     invalidateEnabledSkillsCache()
   }
@@ -1048,10 +1064,13 @@ export function registerPluginHandlers(ipcMain: IpcMain): void {
           ...(marketplace.id?.trim() ? { id: marketplace.id.trim() } : {})
         }
       }
+      const sourceAccess = sanitizedOrigin === "market"
+        ? await resolveMarketSourceAccess("plugin", marketIdentity, buffer)
+        : undefined
       await pluginMutex.acquire()
       try {
         return await installPluginFromZip(
-          buffer, fileName, sanitizedOrigin, version, payload.requireMods, marketIdentity
+          buffer, fileName, sanitizedOrigin, version, payload.requireMods, marketIdentity, sourceAccess
         )
       } finally {
         pluginMutex.release()
@@ -1224,12 +1243,12 @@ export function registerPluginHandlers(ipcMain: IpcMain): void {
       return {
         skills: parsed.skillNames,
         mcpServers: Object.keys(parsed.mcpConfigs),
-        mcpServerDetails: plugin.origin === "local" ? parsed.mcpServerDetails : [],
+        mcpServerDetails: canReadPluginSource(plugin) ? parsed.mcpServerDetails : [],
         hookCount: parsed.hookCount,
         modCount: parsed.modCount,
         businessModCount: parsed.businessModCount,
         businessExtensionCount: parsed.businessExtensionCount,
-        hooks: plugin.origin === "local" ? getPluginHooks(plugin.id) : [],
+        hooks: canReadPluginSource(plugin) ? getPluginHooks(plugin.id) : [],
         manifest: parsed.manifest
       }
     }
@@ -1254,7 +1273,7 @@ export function registerPluginHandlers(ipcMain: IpcMain): void {
   ipcMain.handle("plugins:listHooks", async (): Promise<PluginHookMetadata[]> => {
     const localIds = new Set(
       getPlugins()
-        .filter((plugin) => plugin.origin === "local")
+        .filter((plugin) => canReadPluginSource(plugin))
         .map((plugin) => plugin.id)
     )
     return getEnabledPluginHookMetadata().filter((hook) => localIds.has(hook.pluginId))

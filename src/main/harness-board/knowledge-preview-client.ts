@@ -1,10 +1,12 @@
-import { join } from "node:path"
 import type { Worker } from "node:worker_threads"
-import type { HarnessKnowledgePreviewResult } from "../../shared/harness-board-types"
+import { join } from "node:path"
 import { getOpenworkDir } from "../storage"
+import type { HarnessKnowledgePreviewResult } from "../../shared/harness-board-types"
 import {
   HARNESS_KNOWLEDGE_PREVIEW_MAX_RESPONSE_BYTES,
+  type HarnessKnowledgeBasePreviewTarget,
   type HarnessKnowledgePreviewSource,
+  type HarnessKnowledgePreviewTarget,
   type HarnessKnowledgePreviewWorkerResponse
 } from "./knowledge-preview-protocol"
 import { harnessWorkerOptions } from "./worker-limits"
@@ -30,15 +32,6 @@ export class HarnessKnowledgePreviewCancelledError extends Error {
 async function createBundledWorker(): Promise<Worker> {
   const module = await import("./knowledge-preview-worker?nodeWorker")
   return module.default(harnessWorkerOptions("harness-knowledge-preview"))
-}
-
-function defaultSource(): HarnessKnowledgePreviewSource {
-  const openworkDir = getOpenworkDir()
-  return {
-    openworkDir,
-    pluginStorePath: join(openworkDir, "plugins.json"),
-    leanTokenStorePath: join(openworkDir, "leanstar-config.json")
-  }
 }
 
 export class HarnessKnowledgePreviewClient {
@@ -67,9 +60,8 @@ export class HarnessKnowledgePreviewClient {
   }
 
   async read(
-    adapterId: string,
-    scope: string,
-    source: HarnessKnowledgePreviewSource = defaultSource()
+    target: HarnessKnowledgePreviewTarget,
+    scope: string
   ): Promise<HarnessKnowledgePreviewResult> {
     if (this.closing) throw new Error("Harness knowledge preview client is closing")
     this.cancelScope(scope)
@@ -119,7 +111,8 @@ export class HarnessKnowledgePreviewClient {
         }
         const onMessage = (message: HarnessKnowledgePreviewWorkerResponse): void => {
           if (message.requestId !== requestId) return
-          if (message.ok) settle((value) => resolve(value as HarnessKnowledgePreviewResult), message.result)
+          if (message.ok)
+            settle((value) => resolve(value as HarnessKnowledgePreviewResult), message.result)
           else {
             settle(
               (value) => reject(value as Error),
@@ -142,8 +135,7 @@ export class HarnessKnowledgePreviewClient {
       worker.postMessage({
         type: "read",
         requestId,
-        adapterId,
-        source,
+        target,
         maxResponseBytes: HARNESS_KNOWLEDGE_PREVIEW_MAX_RESPONSE_BYTES,
         cancelBuffer
       })
@@ -174,13 +166,28 @@ function getDefaultClient(): HarnessKnowledgePreviewClient {
   return defaultClient
 }
 
+export function readKnowledgeBasePreviewInWorker(
+  target: HarnessKnowledgeBasePreviewTarget,
+  scope: string
+): Promise<HarnessKnowledgePreviewResult> {
+  return getDefaultClient().read(target, scope)
+}
+
 export function readHarnessKnowledgePreviewInWorker(
   adapterId: string,
   scope: string,
   authorizedKnowledge?: HarnessKnowledgePreviewSource["authorizedKnowledge"]
 ): Promise<HarnessKnowledgePreviewResult> {
-  return getDefaultClient().read(adapterId, scope, { ...defaultSource(),
-    ...(authorizedKnowledge ? { authorizedKnowledge } : {}) })
+  const openworkDir = getOpenworkDir()
+  return getDefaultClient().read({
+    adapterId,
+    source: {
+      openworkDir,
+      pluginStorePath: join(openworkDir, "plugins.json"),
+      leanTokenStorePath: join(openworkDir, "leanstar-config.json"),
+      authorizedKnowledge
+    }
+  }, scope)
 }
 
 export function cancelHarnessKnowledgePreviewScope(scope: string): void {

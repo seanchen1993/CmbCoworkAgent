@@ -1,3 +1,5 @@
+import { canReadPluginSource, type MarketSourceIdentity } from "../../shared/market-source-access"
+import { resolveMarketSourceAccess } from "../services/market-source-access"
 import {
   readContentFile,
   assertOriginalContent,
@@ -139,7 +141,7 @@ async function assertUserOriginalContent(filePath: string): Promise<void> {
   const custom = await fs.realpath(getCustomSkillsDir()).catch(() => null)
   if (custom && isPathUnderDir(real, custom)) return
   for (const plugin of getPlugins()) {
-    if (plugin.origin !== "local") continue
+    if (!canReadPluginSource(plugin)) continue
     const root = await fs.realpath(plugin.path).catch(() => null)
     if (root && isPathUnderDir(real, root)) return
   }
@@ -480,6 +482,7 @@ interface MarketplaceSkillMetadata {
 
 interface SkillUploadOptions {
   origin?: "market" | "local"
+  marketplace?: MarketSourceIdentity
   allowNestedNameDuplicates?: boolean
 }
 
@@ -692,7 +695,8 @@ async function loadSkills(
           contentOrigin: findProtectedMarketRoot(skill.skillMdPath)
             ? "market"
             : options.pluginId
-              ? (getPlugins().find((plugin) => plugin.id === options.pluginId)?.origin ?? "builtin")
+              ? (canReadPluginSource(getPlugins().find((plugin) => plugin.id === options.pluginId))
+                  ? "local" : "market")
               : source === "user"
                 ? "local"
                 : "builtin",
@@ -1546,6 +1550,9 @@ export function registerSkillsHandlers(ipcMain: IpcMain): void {
       }
 
       try {
+        const sourceAccess = options.origin === "market"
+          ? await resolveMarketSourceAccess("skill", options.marketplace, buffer)
+          : undefined
         assertOriginalUpload(Buffer.from(buffer), fileName)
         if (ext === ".md") {
           const content = Buffer.from(buffer).toString("utf-8")
@@ -1569,7 +1576,7 @@ export function registerSkillsHandlers(ipcMain: IpcMain): void {
             createdSkillDir = true
             await fs.writeFile(path.join(skillDir, "SKILL.md"), content, "utf-8")
             clearDisabledSkillsForSkillDir(skillDir)
-            if (options.origin === "market") protectMarketDirectory(skillDir)
+            if (options.origin === "market" && !sourceAccess) protectMarketDirectory(skillDir)
             else await fs.writeFile(path.join(skillDir, ".cmb-original-upload.json"), "{}")
             invalidateEnabledSkillsCache()
             notifyHooksChanged("skill-uploaded")
@@ -1669,7 +1676,7 @@ export function registerSkillsHandlers(ipcMain: IpcMain): void {
               await fs.writeFile(destPath, entry.getData())
             }
             clearDisabledSkillsForSkillDir(skillDir)
-            if (options.origin === "market") protectMarketDirectory(skillDir)
+            if (options.origin === "market" && !sourceAccess) protectMarketDirectory(skillDir)
             else await fs.writeFile(path.join(skillDir, ".cmb-original-upload.json"), "{}")
             invalidateEnabledSkillsCache()
             notifyHooksChanged("skill-uploaded")

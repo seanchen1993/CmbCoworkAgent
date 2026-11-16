@@ -40,6 +40,7 @@ interface FileViewerProps {
   filePath: string
   threadId?: string
   externalFullPath?: string
+  knowledgeBaseId?: string
   /** How main should interpret an ungranted workspace path. Absolute remains workspace-bounded. */
   workspacePathKind?: WorkspaceFilePreviewWorkspacePathKind
   /** Opaque capability issued by a trusted main-process source. */
@@ -81,6 +82,7 @@ export function FileViewer({
   filePath,
   threadId,
   externalFullPath,
+  knowledgeBaseId,
   workspacePathKind,
   externalPreviewGrant,
   resolveExternalPreviewGrant,
@@ -92,9 +94,11 @@ export function FileViewer({
   const generatedLane = useId().replace(/[^a-zA-Z\d_-]/g, "")
   const lane = requestLane ?? `file-viewer-${generatedLane}`
   const displayPath = externalFullPath || filePath
-  const sourceCachePrefix = externalFullPath
-    ? `external:${externalFullPath}\u0000`
-    : `workspace:${threadId ?? ""}:${workspacePathKind ?? "relative"}:${filePath}\u0000`
+  const sourceCachePrefix = knowledgeBaseId
+    ? `knowledge:${knowledgeBaseId}:${displayPath}\u0000`
+    : externalFullPath
+      ? `external:${externalFullPath}\u0000`
+      : `workspace:${threadId ?? ""}:${workspacePathKind ?? "relative"}:${filePath}\u0000`
 
   const fileName = displayPath.split(/[/\\]/).pop() || displayPath
   const ext = fileName.includes(".") ? (fileName.split(".").pop()?.toLowerCase() ?? "") : ""
@@ -127,6 +131,7 @@ export function FileViewer({
 
   const previewSourceForPath = useCallback(
     async (resolvedPath: string): Promise<WorkspaceFilePreviewSource> => {
+      if (knowledgeBaseId) return { knowledgeBaseId, filePath: resolvedPath }
       if (externalFullPath) {
         const grant = resolveExternalPreviewGrant
           ? await resolveExternalPreviewGrant()
@@ -144,6 +149,7 @@ export function FileViewer({
     },
     [
       externalFullPath,
+      knowledgeBaseId,
       externalPreviewGrant,
       resolveExternalPreviewGrant,
       threadId,

@@ -1,5 +1,5 @@
 import { parentPort } from "node:worker_threads"
-import { readHarnessKnowledgePreview } from "./knowledge-preview-reader"
+import { readHarnessKnowledgePreview, readKnowledgeBasePreview } from "./knowledge-preview-reader"
 import type {
   HarnessKnowledgePreviewWorkerRequest,
   HarnessKnowledgePreviewWorkerResponse
@@ -10,12 +10,11 @@ if (!workerPort) throw new Error("Harness knowledge preview worker requires a pa
 
 workerPort.on("message", (request: HarnessKnowledgePreviewWorkerRequest) => {
   try {
-    const result = readHarnessKnowledgePreview(
-      request.adapterId,
-      request.source,
-      request.maxResponseBytes,
-      new Int32Array(request.cancelBuffer)
-    )
+    const cancelFlag = new Int32Array(request.cancelBuffer)
+    const { target, maxResponseBytes } = request
+    const result = "adapterId" in target
+      ? readHarnessKnowledgePreview(target.adapterId, target.source, maxResponseBytes, cancelFlag)
+      : readKnowledgeBasePreview(target, maxResponseBytes, cancelFlag)
     workerPort.postMessage({
       type: "read-result",
       requestId: request.requestId,

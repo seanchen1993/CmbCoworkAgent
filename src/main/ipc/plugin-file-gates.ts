@@ -1,3 +1,4 @@
+import { canReadPluginSource } from "../../shared/market-source-access"
 import * as path from "path"
 
 /**
@@ -186,16 +187,14 @@ export function isPathInsideDir(targetPath: string, dirPath: string): boolean {
 }
 
 export interface PluginOriginCheck {
+  sourceAccess?: "owner" | "whitelist"
   origin?: "market" | "local"
 }
 
 /**
- * Only user-uploaded plugins (origin === "local") are editable. Plugins from
- * the market are read-only by policy — they have an upstream we must not
- * silently diverge from. Pre-origin legacy installs (origin === undefined)
- * are treated as non-local for safety; once the renderer migration writes a
- * concrete value to disk they get re-evaluated.
+ * Local originals and market copies authorized by main at installation are editable.
+ * Unknown legacy origins and ordinary market installs remain protected.
  */
 export function isPluginEditable(plugin: PluginOriginCheck | null | undefined): boolean {
-  return !!plugin && plugin.origin === "local"
+  return canReadPluginSource(plugin)
 }

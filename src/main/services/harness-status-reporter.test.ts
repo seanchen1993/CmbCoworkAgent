@@ -135,9 +135,12 @@ describe("test-project snapshot reporting", () => {
     fetchMock.mockResolvedValueOnce(new Response("{}", { status: 404 }))
     await reportProjectSnapshotNow("p1")
     const [url, request] = fetchMock.mock.calls[1] as unknown as [string, RequestInit]
-    expect(url).toContain("/_doc/harness_project_p1")
-    expect(request.method).toBe("PUT")
-    const properties = JSON.parse(request.body as string).properties
+    expect(url).toContain("/_update/harness_project_p1?retry_on_conflict=3")
+    expect(request.method).toBe("POST")
+    const body = JSON.parse(request.body as string)
+    expect(body.scripted_upsert).toBe(true)
+    expect(body.upsert).toEqual({})
+    const properties = body.script.params.snapshot.properties
     expect(properties).toMatchObject({
       isTestProject: true,
       lifecycleUpdatedAt: "2026-11-04T07:19:16.000Z",

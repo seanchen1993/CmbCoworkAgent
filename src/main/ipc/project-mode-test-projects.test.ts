@@ -73,7 +73,15 @@ describe("project overview test-project scope", () => {
     expect(body.track_total_hits).toBe(false)
     expect(body.query.bool.filter).toEqual([
       { term: { eventName: "harness.project.snapshot" } },
-      { term: { "properties.isTestProject": true } },
+      {
+        bool: {
+          should: [
+            { term: { "properties.isTestProject": true } },
+            { term: { "properties.manuallyMarkedTestProject": true } }
+          ],
+          minimum_should_match: 1
+        }
+      },
       ...opts.accessFilters
     ])
     expect(body).not.toHaveProperty("_source")
@@ -129,6 +137,7 @@ describe("project overview test-project scope", () => {
           filter: [],
           must_not: [
             { term: { "properties.isTestProject": true } },
+            { term: { "properties.manuallyMarkedTestProject": true } },
             { terms: { "properties.harnessProjectId": ["test-project"] } },
             { terms: { "properties.projectId": ["test-project"] } }
           ]
