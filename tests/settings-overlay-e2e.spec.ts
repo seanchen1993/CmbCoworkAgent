@@ -1191,6 +1191,15 @@ async function main(): Promise<void> {
     const showRightPanel = page.getByRole("button", { name: "显示右侧面板", exact: true })
     if (await showRightPanel.count()) await showRightPanel.click()
     await page.getByRole("button", { name: "内置浏览器", exact: true }).click()
+    const browserConfigCard = page
+      .getByText("开启进阶自动化能力", { exact: false })
+      .locator("..")
+      .locator("..")
+    await browserConfigCard.getByRole("switch").first().click()
+    await page
+      .getByRole("dialog", { name: "确认开启 Agent 操控", exact: true })
+      .getByRole("button", { name: "确认开启", exact: true })
+      .click()
     const completeBrowserRequestBehindSettings = async (): Promise<void> => {
       for (let attempt = 0; attempt < 100; attempt++) {
         if (await app!.evaluate(() => Boolean((globalThis as GitFixtureMain).releaseBrowserRequest))) break
