@@ -39,6 +39,7 @@ export function BrowserCdpConfigCard({
   const [savedCdpConfig, setSavedCdpConfig] = useState<BrowserCdpConfig | null>(null)
   const [isSavingCdpConfig, setIsSavingCdpConfig] = useState(false)
   const [isEditingCdpConfig, setIsEditingCdpConfig] = useState(false)
+  const [restartRequired, setRestartRequired] = useState(false)
   const [restartDialogOpen, setRestartDialogOpen] = useState(false)
   const [isRestartingApp, setIsRestartingApp] = useState(false)
   const [pendingSwitchConfirmation, setPendingSwitchConfirmation] = useState<
@@ -80,6 +81,15 @@ export function BrowserCdpConfigCard({
     (cdpConfig.enabled !== savedCdpConfig.enabled ||
       cdpConfig.profileImportEnabled !== savedCdpConfig.profileImportEnabled)
   )
+
+  useEffect(() => {
+    if (!restartRequired || showCustomizeView) return
+
+    // Open the restart confirmation in a fresh render so the successful save state and
+    // Radix Dialog's controlled open transition cannot collapse into the same commit.
+    const frame = window.requestAnimationFrame(() => setRestartDialogOpen(true))
+    return () => window.cancelAnimationFrame(frame)
+  }, [restartRequired, showCustomizeView])
 
   const handleCdpEnabledChange = useCallback((enabled: boolean) => {
     if (enabled) {
@@ -125,7 +135,7 @@ export function BrowserCdpConfigCard({
       setSavedCdpConfig(saved)
       setIsEditingCdpConfig(!(saved.enabled && saved.profileImportEnabled))
       setIsRestartingApp(false)
-      setRestartDialogOpen(true)
+      setRestartRequired(true)
     } catch (error) {
       console.error(
         `${BROWSER_CDP_CONFIG_LOG_PREFIX} Failed to save Browser CDP config: ${formatError(error)}`
@@ -147,6 +157,7 @@ export function BrowserCdpConfigCard({
     (open: boolean) => {
       if (isRestartingApp) return
       setRestartDialogOpen(open)
+      if (!open) setRestartRequired(false)
     },
     [isRestartingApp]
   )
@@ -163,7 +174,9 @@ export function BrowserCdpConfigCard({
     }
   }, [])
 
-  const isFullyEnabled = Boolean(cdpConfig?.enabled && cdpConfig.profileImportEnabled)
+  const isFullyEnabled = Boolean(
+    savedCdpConfig?.enabled && savedCdpConfig.profileImportEnabled && !hasCdpConfigChanges
+  )
   const canReturnFromEditing = Boolean(
     isEditingCdpConfig && savedCdpConfig?.enabled && savedCdpConfig.profileImportEnabled
   )
@@ -205,7 +218,7 @@ export function BrowserCdpConfigCard({
           <p className="mt-0.5 text-[11px] text-muted-foreground">{description}</p>
         </div>
 
-        {isFullyEnabled && !isEditingCdpConfig ? (
+        {isFullyEnabled && !isEditingCdpConfig && !restartRequired ? (
           <div className="flex items-center justify-between gap-3 px-4 py-3">
             <div className="flex min-w-0 items-center gap-2">
               <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-emerald-500/15 text-emerald-600 dark:text-emerald-400">
@@ -323,7 +336,7 @@ export function BrowserCdpConfigCard({
                 <DialogDescription>新配置将在应用重启后生效。是否现在立刻重启？</DialogDescription>
               </DialogHeader>
               <DialogFooter>
-                <Button variant="outline" onClick={() => setRestartDialogOpen(false)}>
+                <Button variant="outline" onClick={() => handleRestartDialogOpenChange(false)}>
                   取消
                 </Button>
                 <Button onClick={handleRestartAppNow}>立刻重启</Button>
