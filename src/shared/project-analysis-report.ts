@@ -54,11 +54,22 @@ export interface ProjectReportWorkspace {
   ownRoom: string
   canChooseRoom: boolean
   rooms: string[]
+  pendingRun?: ProjectReportResume
 }
 
-export type ProjectReportGenerateInput =
+export type ProjectReportRunInput =
   | { action: "create"; scope: ProjectReportScope; instruction: string; templateId?: string }
   | { action: "revise"; reportId: string; baseVersion: number; instruction: string }
+export type ProjectReportGenerateInput = ProjectReportRunInput | { action: "resume"; runId: string }
+
+export interface ProjectReportResume {
+  runId: string
+  title: string
+  dataAsOf: string
+  updatedAt: string
+  completedSteps: number
+  nextStep?: string
+}
 
 export interface ProjectReportTemplateInput {
   reportId: string
@@ -72,6 +83,7 @@ export interface ProjectReportResponse<T> {
   data?: T
   error?: string
   cancelled?: boolean
+  resume?: ProjectReportResume
 }
 
 export interface ProjectReportApi {

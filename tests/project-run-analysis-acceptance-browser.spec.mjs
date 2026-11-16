@@ -1439,6 +1439,55 @@ try {
     await page.getByRole("textbox", { name: "报告修改要求", exact: true }).inputValue(),
     "修改日期后也要保留的报告草稿"
   )
+  // Recover a failed report without starting over, including a remounted workspace.
+  const resumeId = "0b73d4ba-245f-4ea1-a504-b9ead425d7f3"
+  const reportBase = await page.evaluate(() => window.runQA.reportReplies.length)
+  await page.getByRole("button", { name: "应用修改", exact: true }).click()
+  await waitReport(reportBase + 1)
+  await page.evaluate(
+    ({ index, runId }) => {
+      const resume = {
+        runId,
+        title: "手动输入的研发室 · 原报告周期 · 修改 v1",
+        dataAsOf: "2026-11-12T01:00:00Z",
+        updatedAt: "2026-11-16T01:00:00Z",
+        completedSteps: 1,
+        nextStep: "全量数据审阅 2/5"
+      }
+      window.runQA.reportWorkspace.pendingRun = resume
+      window.runQA.finishReport(index, {
+        success: false,
+        error: "默认模型请求失败（HTTP 433），已自动重试3次仍失败",
+        resume
+      })
+    },
+    { index: reportBase, runId: resumeId }
+  )
+  await page.getByRole("button", { name: "继续运行", exact: true }).waitFor()
+  await waitReportVersion(1)
+  await page.getByRole("alert").filter({ hasText: "已保留 1 个完成步骤" }).waitFor()
+  assert.equal(await page.getByRole("button", { name: "重试生成", exact: true }).count(), 0)
+  await page.setViewportSize({ width: 1280, height: 900 })
+  await page.getByRole("button", { name: "继续运行", exact: true }).scrollIntoViewIfNeeded()
+  await page.screenshot({ path: join(output, "project-report-resume.png") })
+  await page.keyboard.press("Escape")
+  await page.evaluate(() => window.runQA.setRoom("H"))
+  await waitLoad("H:executed")
+  await finish("H:executed")
+  await page.getByRole("button", { name: "项目分析 Agent", exact: true }).click()
+  await page.getByRole("tab", { name: "综合报告", exact: true }).click()
+  await page.getByRole("button", { name: "继续运行", exact: true }).waitFor()
+  // Editing the new draft must not silently change the saved task's request.
+  await page.getByRole("combobox", { name: "报告所属室", exact: true }).fill("新的草稿室")
+  await page.getByRole("button", { name: "继续运行", exact: true }).click()
+  await waitReport(reportBase + 2)
+  assert.deepEqual(await reportRequest(reportBase + 1), { action: "resume", runId: resumeId })
+  await page.evaluate(() => {
+    delete window.runQA.reportWorkspace.pendingRun
+  })
+  await replyReport(reportBase + 1, "report-3", 2, adminRequest.scope)
+  await waitReportVersion(2)
+  assert.equal(await page.getByRole("button", { name: "继续运行", exact: true }).count(), 0)
   await page.keyboard.press("Escape")
   assert.deepEqual(errors, [], "No renderer runtime errors")
   const calls = await page.evaluate(() => window.runQA.calls)
@@ -1479,6 +1528,7 @@ try {
           "lazy report workspace and recoverable load failure",
           "full-room natural-week/month scope independent of filters",
           "frozen-data report revision/version/retry/cancellation",
+          "failed-report continuation preserves completed steps, restores after remount, uses the original scope and keeps previous versions",
           "report close/reopen draft and successful version preservation",
           "HTML sandbox preview at 760px/390px",
           "template save/reuse/delete without model calls",

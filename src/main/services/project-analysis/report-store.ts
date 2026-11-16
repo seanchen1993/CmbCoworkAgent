@@ -5,10 +5,13 @@ import { z } from "zod"
 import { RECOMMENDED_REPORT_TEMPLATE_ID } from "../../../shared/project-analysis-report"
 import type {
   ProjectReportDocument,
+  ProjectReportResume,
+  ProjectReportRunInput,
   ProjectReportSummary,
   ProjectReportTemplate,
   ProjectReportVersion
 } from "../../../shared/project-analysis-report"
+import type { ProjectModelCheckpointState } from "./model-checkpoint"
 import type { ReportSnapshot } from "./report-data"
 import { extractReportTemplate } from "./report-html"
 import { recommendedReportTemplate } from "./report-builtin-template"
@@ -25,6 +28,16 @@ interface VersionFile {
 }
 export interface SavedReportTemplate extends ProjectReportTemplate {
   layout: string
+}
+export interface SavedReportRun {
+  schema: 1
+  id: string
+  input: ProjectReportRunInput
+  snapshot: ReportSnapshot
+  template?: SavedReportTemplate
+  previousSource?: string
+  models: ProjectModelCheckpointState
+  updatedAt: string
 }
 
 function privateDirectory(path: string) {
@@ -88,6 +101,56 @@ export class ProjectReportStore {
   private templatePath(id: string) {
     if (!idSchema.safeParse(id).success) throw new Error("无效的模板标识")
     return join(this.root, "templates", `${id}.json`)
+  }
+  saveRun(run: SavedReportRun, create = false): void {
+    if (!idSchema.safeParse(run.id).success || !this.canReadRoom(run.snapshot.scope.upperOrgLv1))
+      throw new Error("无该报告续跑权限")
+    // One unfinished report per private workspace. A new generation intentionally replaces it.
+    if (!create) this.readRun(run.id)
+    run.updatedAt = new Date().toISOString()
+    writeJson(join(this.root, "pending-report.json"), run)
+  }
+  readRun(id?: string): SavedReportRun {
+    if (id !== undefined && !idSchema.safeParse(id).success) throw new Error("无效的报告任务标识")
+    try {
+      const run = readJson<SavedReportRun>(join(this.root, "pending-report.json"))
+      if (
+        run.schema === 1 &&
+        idSchema.safeParse(run.id).success &&
+        (!id || run.id === id) &&
+        this.canReadRoom(run.snapshot.scope.upperOrgLv1)
+      )
+        return run
+    } catch {
+      /* Missing, invalid or inaccessible checkpoints cannot be resumed. */
+    }
+    throw new Error("报告任务不存在、已被新任务替换或无访问权限")
+  }
+  runSummary(run: SavedReportRun): ProjectReportResume {
+    return {
+      runId: run.id,
+      title: `${run.snapshot.scope.upperOrgLv1} · ${run.snapshot.periodData.period.label}${run.input.action === "revise" ? ` · 修改 v${run.input.baseVersion}` : ""}`,
+      dataAsOf: run.snapshot.periodData.dataAsOf,
+      updatedAt: run.updatedAt,
+      completedSteps: Object.keys(run.models.completed).length,
+      nextStep: run.models.pendingStep
+    }
+  }
+  pendingRun(): ProjectReportResume | undefined {
+    try {
+      return this.runSummary(this.readRun())
+    } catch {
+      return undefined
+    }
+  }
+  clearRun(id: string): void {
+    // A late completion/cancellation must not remove a newer report's checkpoint.
+    try {
+      this.readRun(id)
+      fs.unlinkSync(join(this.root, "pending-report.json"))
+    } catch {
+      /* No checkpoint, or another generation already owns it. */
+    }
   }
   listReports(): ProjectReportSummary[] {
     return fs

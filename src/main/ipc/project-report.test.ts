@@ -5,6 +5,7 @@ import { tmpdir } from "node:os"
 import type { IpcMainInvokeEvent } from "electron"
 import type {
   ProjectReportDocument,
+  ProjectReportResume,
   ProjectReportTemplate,
   ProjectReportWorkspace
 } from "../../shared/project-analysis-report"
@@ -25,6 +26,7 @@ import { makeReportPeriodExample } from "../services/project-analysis/report-moc
 import { projectListPageData } from "../services/project-analysis/page-data"
 import { makeMockRunAnalysis } from "./project-run-analysis-mock"
 import { renderReportHtml } from "../services/project-analysis/report-html"
+import { AIMessage, HumanMessage } from "@langchain/core/messages"
 
 const roots: string[] = []
 afterEach(() => {
@@ -86,6 +88,7 @@ function setup() {
       data: T
       error?: string
       cancelled?: boolean
+      resume?: ProjectReportResume
     }
   return {
     root,
@@ -100,6 +103,150 @@ function setup() {
 }
 
 describe("project report IPC workflow", () => {
+  it("persists completed steps across restart and resumes the original scope, template and instruction", async () => {
+    const s = setup()
+    const firstReview = vi.fn(async () => new AIMessage("第一批审阅完成"))
+    let interrupted = true
+    s.deps.generate = vi.fn(async (options) => {
+      await options.checkpoint!.run(
+        "default",
+        [new HumanMessage(JSON.stringify(options.snapshot.facts))],
+        "全量数据审阅 1/5",
+        options.signal!,
+        options.progress!,
+        firstReview
+      )
+      if (interrupted) {
+        await options.checkpoint!.run(
+          "default",
+          [new HumanMessage("第二批")],
+          "全量数据审阅 2/5",
+          options.signal!,
+          options.progress!,
+          async () => {
+            throw new Error("默认模型请求失败（HTTP 433），已自动重试3次仍失败")
+          }
+        )
+      }
+      return { ...renderReportHtml(source, options.snapshot), modelName: "test" }
+    })
+    const result = await s.call("projectReportGenerate", {
+      action: "create",
+      scope,
+      instruction: "请按项目分析",
+      templateId: RECOMMENDED_REPORT_TEMPLATE_ID
+    })
+    expect(result.success).toBe(false)
+    expect(result.error).toContain("HTTP 433")
+    expect(result.resume).toMatchObject({ completedSteps: 1, nextStep: "全量数据审阅 2/5" })
+    expect(firstReview).toHaveBeenCalledTimes(1)
+    registerProjectReportHandlers(s.deps)
+    const workspace = await s.call<ProjectReportWorkspace>("projectReportWorkspace")
+    expect(workspace.data.pendingRun).toEqual(result.resume)
+    expect(workspace.data.reports).toHaveLength(0)
+    interrupted = false
+    const resumed = await s.call("projectReportGenerate", {
+      action: "resume",
+      runId: result.resume!.runId
+    })
+    expect(resumed.success).toBe(true)
+    expect(firstReview).toHaveBeenCalledTimes(1)
+    expect(s.deps.loadPeriod).toHaveBeenCalledTimes(1)
+    expect(s.deps.loadPages).toHaveBeenCalledTimes(1)
+    expect(s.deps.loadAccumulation).toHaveBeenCalledTimes(1)
+    const [first, second] = vi.mocked(s.deps.generate!).mock.calls.map(([options]) => options)
+    expect(second.snapshot).toEqual(first.snapshot)
+    expect(second.template).toEqual(first.template)
+    expect(second.instruction).toBe("请按项目分析")
+    expect(
+      (await s.call<ProjectReportWorkspace>("projectReportWorkspace")).data.pendingRun
+    ).toBeUndefined()
+    expect(
+      (await s.call("projectReportGenerate", { action: "resume", runId: result.resume!.runId }))
+        .error
+    ).toContain("不存在")
+  })
+  it("isolates resume state by owner, room and environment; new generation replaces the unfinished task", async () => {
+    const s = setup()
+    s.deps.generate = vi.fn(async () => {
+      throw new Error("HTTP 433")
+    })
+    const first = await s.call("projectReportGenerate", {
+      action: "create",
+      scope,
+      instruction: ""
+    })
+    const resume = { action: "resume", runId: first.resume!.runId }
+    for (const access of [
+      { ownerId: "sap:2", ownRoom: "开发一室", canChooseRoom: false },
+      { ownerId: "sap:1", ownRoom: "开发二室", canChooseRoom: false }
+    ]) {
+      s.setAccess(access)
+      expect(
+        (await s.call<ProjectReportWorkspace>("projectReportWorkspace")).data.pendingRun
+      ).toBeUndefined()
+      expect((await s.call("projectReportGenerate", resume)).success).toBe(false)
+    }
+    s.setAccess({ ownerId: "sap:1", ownRoom: "开发一室", canChooseRoom: false })
+    s.deps.exampleData = true
+    expect((await s.call("projectReportGenerate", resume)).error).toContain("运行环境已变化")
+    s.deps.exampleData = false
+    const newer = await s.call("projectReportGenerate", {
+      action: "create",
+      scope,
+      instruction: "新要求"
+    })
+    expect(newer.resume!.runId).not.toBe(first.resume!.runId)
+    expect((await s.call("projectReportGenerate", resume)).error).toContain("替换")
+    expect(s.deps.generate).toHaveBeenCalledTimes(2)
+  })
+  it("resumes a failed revision without replacing v1 and rejects concurrent resumes", async () => {
+    const s = setup()
+    const first = await s.call("projectReportGenerate", {
+      action: "create",
+      scope,
+      instruction: ""
+    })
+    s.deps.generate = vi.fn(async () => {
+      throw new Error("HTTP 433")
+    })
+    const failed = await s.call("projectReportGenerate", {
+      action: "revise",
+      reportId: first.data.summary.id,
+      baseVersion: 1,
+      instruction: "换布局"
+    })
+    expect(
+      (await s.call("projectReportRead", { reportId: first.data.summary.id })).data.versions
+    ).toHaveLength(1)
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    s.deps.generate = vi.fn(async (options) => {
+      expect(options.previousSource).toContain('data-report-value="meta.room"')
+      expect(options.loadStages).toBeUndefined()
+      await gate
+      return { ...renderReportHtml(source, options.snapshot), modelName: "test" }
+    })
+    const request = { action: "resume", runId: failed.resume!.runId }
+    const running = s.call("projectReportGenerate", request)
+    try {
+      expect((await s.call("projectReportGenerate", request)).error).toContain("正在运行")
+      expect(
+        (await s.call<ProjectReportWorkspace>("projectReportWorkspace")).data.pendingRun
+      ).toBeUndefined()
+    } finally {
+      release()
+    }
+    const resumed = await running
+    expect(resumed.success).toBe(true)
+    expect(resumed.data.version.version).toBe(2)
+    expect(
+      (await s.call("projectReportRead", { reportId: first.data.summary.id, version: 1 })).data.html
+    ).toBe(first.data.html)
+    expect(s.deps.loadPeriod).toHaveBeenCalledTimes(1)
+  })
   it("uses local lazy workspace without fetching period data, locks non-admin rooms", async () => {
     const s = setup()
     const workspace = await s.call<ProjectReportWorkspace>("projectReportWorkspace")
@@ -188,6 +335,10 @@ describe("project report IPC workflow", () => {
       instruction: ""
     })
     expect(cancelled.cancelled).toBe(true)
+    registerProjectReportHandlers({ ...s.deps, signal: () => undefined })
+    expect(
+      (await s.call<ProjectReportWorkspace>("projectReportWorkspace")).data.pendingRun
+    ).toBeUndefined()
     const other = setup()
     other.deps.generate = vi.fn(async (options) => {
       other.setAccess({ ownerId: "sap:2", ownRoom: "开发一室", canChooseRoom: false })

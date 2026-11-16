@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto"
+import { createHash } from "node:crypto"
 import type { StructuredToolInterface } from "@langchain/core/tools"
 import { tool } from "langchain"
 import { z } from "zod"
@@ -480,7 +480,11 @@ export function createProjectTools(options: ProjectToolOptions): StructuredToolI
           : result.after
             ? { query, after: result.after, offset: 0 }
             : null
-      const nextCursor = next ? randomUUID() : null
+      // Stable for the same frozen page so report continuation can replay completed model steps.
+      // A cursor is still usable only after this invocation has issued it for the scoped query.
+      const nextCursor = next
+        ? createHash("sha256").update(JSON.stringify(next)).digest("hex")
+        : null
       if (nextCursor && next) cursors.set(nextCursor, next)
       return JSON.stringify({
         basis:

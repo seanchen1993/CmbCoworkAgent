@@ -30,6 +30,7 @@ import {
   toolResultPreview
 } from "./project-analysis/run-progress"
 import type { ProjectAnalysisModel } from "./project-analysis/model-stream"
+import { ProjectModelRequestError, projectModelStatus } from "./project-analysis/model-stream"
 import type { ProjectAgentRunListener } from "../../shared/project-agent-run"
 export type { ProjectAnalysisModel } from "./project-analysis/model-stream"
 import { reviewAllData } from "./project-analysis/full-data-review"
@@ -170,7 +171,8 @@ export function createProjectAnalysisModel(tools: StructuredToolInterface[]): Pr
     apiKey: config.apiKey,
     maxTokens: budget.outputTokens,
     timeout: 60_000,
-    maxRetries: 1,
+    // The isolated streaming transport owns retry/backoff and exposes it in run progress.
+    maxRetries: 0,
     ...samplingFields(config.model, { temperature: config.temperature, topP: config.topP }),
     ...getModelClientOptions(config)
   }
@@ -218,11 +220,15 @@ function responseText(message: AIMessage): string {
 }
 
 export function projectAnalysisError(error: unknown): string {
-  const status = error && typeof error === "object" && "status" in error ? error.status : undefined
+  const status = projectModelStatus(error)
+  const retried =
+    error instanceof ProjectModelRequestError ? `，已自动重试${error.retries}次仍失败` : ""
   if (status === 401 || status === 403) return "默认模型认证或访问失败，请检查模型配置与账号权限"
-  if (status === 429) return "默认模型请求受限，请稍后重试"
-  if (typeof status === "number") return `默认模型请求失败（HTTP ${status}），请检查模型服务后重试`
-  return "项目分析未完成，请稍后重试；若持续失败，请检查默认模型连接"
+  if (status === 429) return `默认模型请求受限${retried}，请稍后重试`
+  if (status === 433) return `默认模型输出 Token 数限流（HTTP 433）${retried}，请稍后重试`
+  if (typeof status === "number")
+    return `默认模型请求失败（HTTP ${status}）${retried}，请检查模型服务后重试`
+  return `项目分析未完成${retried}，请稍后重试；若持续失败，请检查默认模型连接`
 }
 
 export async function runProjectAnalysisAgent(

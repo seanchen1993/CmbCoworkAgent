@@ -39,6 +39,7 @@ import {
 } from "./run-progress"
 import { pageDatasets } from "./page-data"
 import { diagnoseProjects } from "./project-diagnostics"
+import type { ProjectModelCheckpoint } from "./model-checkpoint"
 
 const selection = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("week"), anchorDate: z.string().max(10) }).strict(),
@@ -62,7 +63,8 @@ const generation = z.discriminatedUnion("action", [
       baseVersion: z.number().int().min(1).max(20),
       instruction: z.string().trim().min(1).max(4000)
     })
-    .strict()
+    .strict(),
+  z.object({ action: z.literal("resume"), runId: z.string().uuid() }).strict()
 ])
 export function parseReportGeneration(raw: unknown): ProjectReportGenerateInput {
   const result = generation.safeParse(raw)
@@ -107,6 +109,7 @@ export interface ReportAgentOptions {
   ) => Promise<RunAnalysisStages>
   loadSessions?: ProjectToolOptions["loadSessions"]
   createModel?: (tools: StructuredToolInterface[]) => ProjectModelSet
+  checkpoint?: ProjectModelCheckpoint
 }
 const contentText = (message: AIMessage) =>
   typeof message.content === "string"
@@ -119,11 +122,12 @@ const contentText = (message: AIMessage) =>
 export async function generateProjectReport(
   options: ReportAgentOptions
 ): Promise<{ source: string; html: string; modelName: string; reviewNote?: string }> {
-  const timeout = AbortSignal.timeout(840_000)
+  // Full-room review can take several ten-minute streamed batches on the intranet model.
+  const timeout = AbortSignal.timeout(3_600_000)
   const signal = options.signal ? AbortSignal.any([options.signal, timeout]) : timeout
   signal.throwIfAborted()
   const progress = options.progress ?? createProjectRunReporter()
-  const contextManager = new ProjectContext(progress, signal)
+  const contextManager = new ProjectContext(progress, signal, options.checkpoint)
   const query = tool(
     async (args) =>
       JSON.stringify(reportDataPage(options.snapshot, args.section, args.offset, args.projectId)),
@@ -350,23 +354,31 @@ export async function generateProjectReport(
       contextManager.pin([repairMessages[3], repairMessages[5]])
       const repaired = await invoke(model.final, repairMessages)
       signal.throwIfAborted()
-      output = renderReportHtml(contentText(repaired), snapshot)
+      try {
+        output = renderReportHtml(contentText(repaired), snapshot)
+      } catch (error) {
+        options.checkpoint?.discard(repaired)
+        throw error
+      }
     }
     signal.throwIfAborted()
     renderStep.finish("HTML 校验完成，可以预览和保存")
     return { ...output, modelName: model.name, reviewNote: reviewed.note }
   } catch (error) {
     if (error instanceof ProjectContextError || options.signal?.aborted) throw error
-    if (timeout.aborted) throw new Error("全量审阅或生成超时，已停止且保留原版本；请缩小范围后重试")
+    if (timeout.aborted) throw new Error("本轮报告运行超时；已完成步骤及原版本保留，可继续运行")
     if (
       error instanceof Error &&
       /完整审阅|全量数据审阅|完整快照|数据量|未截断/.test(error.message)
     )
       throw error
-    if (error instanceof Error && /HTML|数据引用|列表|节点|报告文件|上下文/.test(error.message))
+    if (
+      error instanceof Error &&
+      /HTML|data-report-|数据引用|列表|节点|报告文件|上下文/.test(error.message)
+    )
       throw new Error(
         `报告生成未完成：${error.message}。请重试${options.previousSource ? "；原版本已保留" : ""}。`
       )
-    throw new Error(projectAnalysisError(error))
+    throw new Error(projectAnalysisError(error), { cause: error })
   }
 }

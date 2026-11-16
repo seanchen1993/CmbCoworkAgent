@@ -29,6 +29,7 @@ import {
   RECOMMENDED_REPORT_TEMPLATE_ID,
   type ProjectReportDocument,
   type ProjectReportGenerateInput,
+  type ProjectReportResume,
   type ProjectReportWorkspace
 } from "../../../../shared/project-analysis-report"
 import {
@@ -72,6 +73,7 @@ export function useProjectAnalysisReport({
   const [loading, setLoading] = useState(false)
   const [reading, setReading] = useState(false)
   const [error, setError] = useState("")
+  const [resume, setResume] = useState<ProjectReportResume | null>(null)
   const [notice, setNotice] = useState("")
   const [actionBusy, setActionBusy] = useState(false)
   const [dialog, setDialog] = useState<"template" | "delete-report" | "delete-template" | null>(
@@ -102,6 +104,7 @@ export function useProjectAnalysisReport({
     if (busy.current) {
       busy.current = false
       setLoading(false)
+      setResume(null)
       endRun("cancelled")
       setNotice("报告生成已停止，已有成功版本仍可查看")
       void window.api.dashboard
@@ -122,6 +125,7 @@ export function useProjectAnalysisReport({
         throw new Error(response.error || "无法加载报告工作区")
       const next = response.data
       setWorkspace(next)
+      setResume(next.pendingRun ?? null)
       setRoom(
         (previous) =>
           previous ||
@@ -182,6 +186,7 @@ export function useProjectAnalysisReport({
     lastRequest.current = request
     runProgress.begin()
     setLoading(true)
+    setResume(null)
     setError("")
     setNotice("")
     try {
@@ -194,8 +199,11 @@ export function useProjectAnalysisReport({
         setNotice("报告生成已停止，已有成功版本仍可查看")
         return
       }
-      if (!response.success || !response.data)
+      if (!response.success || !response.data) {
+        setResume(response.resume ?? null)
+        if (request.action === "resume" && !response.resume) lastRequest.current = null
         throw new Error(response.error || "报告生成失败，请重试")
+      }
       endRun("completed")
       acceptDocument(response.data)
       setInput("")
@@ -685,21 +693,49 @@ export function useProjectAnalysisReport({
             正在打开报告…
           </p>
         )}
-        {error && (
+        {(error || resume) && (
           <div
-            role="alert"
-            className="flex flex-wrap items-center justify-between gap-2 rounded border border-destructive/30 p-2 text-xs text-destructive"
+            role={error ? "alert" : "status"}
+            className={`flex flex-wrap items-center justify-between gap-2 rounded border p-3 text-xs ${error ? "border-destructive/30 text-destructive" : "border-border bg-muted/25"}`}
           >
-            <span className="min-w-0 break-words">{error}</span>
-            {lastRequest.current && (
+            <div className="min-w-0 flex-1 space-y-1 break-words">
+              <span>{error || "有一份未完成的报告，可以继续运行"}</span>
+              {resume && (
+                <>
+                  <p className="text-foreground">
+                    {resume.title} · 已保留 {resume.completedSteps} 个完成步骤
+                  </p>
+                  <p className="text-muted-foreground">
+                    {resume.nextStep ? `继续：${resume.nextStep}。` : ""}
+                    沿用该任务的原要求和数据（截至 {dateTime(resume.dataAsOf)}
+                    ），不重新查询全室数据。
+                  </p>
+                  <p className="text-muted-foreground">
+                    点击“生成报告”或“应用修改”将按当前要求重新开始，并替换未完成任务。
+                  </p>
+                </>
+              )}
+            </div>
+            {resume ? (
               <Button
                 size="sm"
                 variant="outline"
                 disabled={loading || reading}
-                onClick={() => lastRequest.current && void run(lastRequest.current)}
+                onClick={() => void run({ action: "resume", runId: resume.runId })}
               >
-                重试生成
+                继续运行
               </Button>
+            ) : (
+              lastRequest.current && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={loading || reading}
+                  onClick={() => lastRequest.current && void run(lastRequest.current)}
+                >
+                  重试生成
+                </Button>
+              )
             )}
           </div>
         )}

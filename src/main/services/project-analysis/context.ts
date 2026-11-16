@@ -16,6 +16,7 @@ import {
 } from "./context-budget"
 import { projectMessageText, streamProjectModel, type ProjectAnalysisModel } from "./model-stream"
 import type { ProjectRunReporter } from "./run-progress"
+import type { ProjectModelCheckpoint } from "./model-checkpoint"
 
 export interface ProjectModelSet {
   name: string
@@ -64,9 +65,11 @@ export class ProjectContext {
   private budget?: ProjectContextBudget
   private reviewer?: ProjectAnalysisModel
   private lastEstimate = 0
+  private modelIdentity = ""
   constructor(
     private progress: ProjectRunReporter,
-    private signal: AbortSignal
+    private signal: AbortSignal,
+    private checkpoint?: ProjectModelCheckpoint
   ) {}
 
   readonly readTool = tool(
@@ -155,6 +158,11 @@ export class ProjectContext {
   )
 
   configure(model: ProjectModelSet, tools: StructuredToolInterface[]) {
+    this.modelIdentity = JSON.stringify({
+      name: model.name,
+      budget: model.budget,
+      tools: tools.map((item) => convertToOpenAITool(item))
+    })
     this.budget = model.budget
     this.reviewer = model.reviewer
     this.schemaTokens = estimateProjectTokens(
@@ -249,6 +257,7 @@ export class ProjectContext {
           "默认模型上下文配置不足以整理当前记录，请检查上下文与输出额度"
         )
       const notes: string[] = []
+      const responses: AIMessage[] = []
       let start = 0
       while (start < current.length) {
         let end = Math.min(current.length, start + cap)
@@ -262,14 +271,17 @@ export class ProjectContext {
         )
         const note = projectMessageText(response.content).trim()
         if (!note) throw new ProjectContextError("上下文整理未返回有效内容，请重试")
+        responses.push(response)
         this.save("上下文整理记录", note)
         notes.push(note)
         start = end
       }
       const merged = notes.join("\n")
       stalled = estimateProjectTokens(merged) >= estimateProjectTokens(current) ? stalled + 1 : 0
-      if (stalled >= 3)
+      if (stalled >= 3) {
+        responses.forEach((response) => this.checkpoint?.discard(response))
         throw new ProjectContextError("模型未能将工作记录压缩到配置容量内，请重试；完整数据未截断")
+      }
       current = merged
     } while (estimateProjectTokens(current) > target)
     return current + suffix
@@ -280,7 +292,7 @@ export class ProjectContext {
     if (estimate > this.reviewInputTokens)
       throw new ProjectContextError("默认模型上下文不足以完整审阅当前记录，请检查上下文与输出配置")
     try {
-      const response = await streamProjectModel(model, messages, this.signal, this.progress, title)
+      const response = await this.request(model, messages, title, false)
       this.observe(response, estimate)
       return response
     } catch (error) {
@@ -302,14 +314,7 @@ export class ProjectContext {
     for (let attempt = 0; attempt < 2; attempt++) {
       await this.prepare(messages, withTools, attempt > 0)
       try {
-        const response = await streamProjectModel(
-          model,
-          messages,
-          this.signal,
-          this.progress,
-          title,
-          visibleText
-        )
+        const response = await this.request(model, messages, title, withTools, visibleText)
         this.observe(response, this.lastEstimate)
         return response
       } catch (error) {
@@ -395,5 +400,25 @@ export class ProjectContext {
     const actual = response.usage_metadata?.input_tokens
     if (actual && estimate)
       this.estimateMultiplier = Math.max(this.estimateMultiplier, (actual / estimate) * 1.1)
+  }
+  private request(
+    model: ProjectAnalysisModel,
+    messages: BaseMessage[],
+    title: string,
+    withTools: boolean,
+    visibleText = false
+  ) {
+    const request = () =>
+      streamProjectModel(model, messages, this.signal, this.progress, title, visibleText)
+    return this.checkpoint
+      ? this.checkpoint.run(
+          `${this.modelIdentity}:${withTools}`,
+          messages,
+          title,
+          this.signal,
+          this.progress,
+          request
+        )
+      : request()
   }
 }

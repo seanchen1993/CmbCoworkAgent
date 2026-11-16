@@ -8,7 +8,7 @@ import { streamProjectModel } from "./model-stream"
 import { createProjectRunReporter } from "./run-progress"
 
 describe("project Agent streaming transport", () => {
-  it("requests real SSE and delivers answer text before the model response completes", async () => {
+  it("retries a real HTTP 433 response over SSE and delivers text before completion", async () => {
     let release!: () => void
     let sawFirst!: () => void
     const gate = new Promise<void>((resolve) => {
@@ -18,10 +18,17 @@ describe("project Agent streaming transport", () => {
       sawFirst = resolve
     })
     let body: Record<string, unknown> = {}
+    const streamingRequests: unknown[] = []
     const server = createServer(async (request, response) => {
       let input = ""
       for await (const chunk of request) input += chunk.toString()
       body = JSON.parse(input)
+      streamingRequests.push(body.stream)
+      if (streamingRequests.length === 1) {
+        response.writeHead(433, { "Content-Type": "application/json" })
+        response.end(JSON.stringify({ error: { message: "temporary gateway failure" } }))
+        return
+      }
       response.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache" })
       const send = (text: string, end = false) =>
         response.write(
@@ -60,6 +67,7 @@ describe("project Agent streaming transport", () => {
       })
       await first
       expect(body.stream).toBe(true)
+      expect(streamingRequests).toEqual([true, true])
       expect(finished).toBe(false)
       release()
       expect((await result).content).toBe("先收到第一段。再收到第二段。")
