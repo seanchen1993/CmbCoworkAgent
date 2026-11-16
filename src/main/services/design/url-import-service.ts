@@ -1,6 +1,7 @@
 import fs from "node:fs/promises"
 import path from "node:path"
 import { randomUUID } from "node:crypto"
+import { setTimeout as delay } from "node:timers/promises"
 import { BrowserWindow } from "electron"
 import { getBuiltinBrowserSession } from "../../browser/core/browser-profile-session"
 import { captureDesignPage, abortableCapture, type DesignCapturedPage } from "./page-capture"
@@ -16,6 +17,30 @@ import { pathToFileURL } from "node:url"
 interface ImportJob {
   owner: number
   controller: AbortController
+}
+
+async function renameCaptureDirectory(
+  source: string,
+  target: string,
+  signal: AbortSignal
+): Promise<void> {
+  // Antivirus scanners and Windows file handles can briefly block a directory rename.
+  for (let attempt = 0; ; attempt++) {
+    signal.throwIfAborted()
+    try {
+      await fs.rename(source, target)
+      return
+    } catch (error) {
+      const code = error && typeof error === "object" && "code" in error ? String(error.code) : ""
+      if (attempt >= 6 || !["EPERM", "EACCES", "EBUSY"].includes(code)) throw error
+      await delay(50 * 2 ** attempt, undefined, { signal })
+    }
+  }
+}
+
+function removeCaptureDirectory(directory: string): Promise<void> {
+  // Chromium may still be releasing local files after its validation window closes.
+  return fs.rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
 }
 
 export async function validateCapturedArtifact(
@@ -122,10 +147,8 @@ export class DesignUrlImportService {
     if (keep && pending.preparing) return false
     clearTimeout(pending.timer)
     this.pending.delete(requestId)
-    if (!keep || pending.editingDirectory)
-      await fs.rm(pending.directory, { recursive: true, force: true })
-    if (!keep && pending.editingDirectory)
-      await fs.rm(pending.editingDirectory, { recursive: true, force: true })
+    if (!keep || pending.editingDirectory) await removeCaptureDirectory(pending.directory)
+    if (!keep && pending.editingDirectory) await removeCaptureDirectory(pending.editingDirectory)
     return true
   }
 
@@ -155,7 +178,7 @@ export class DesignUrlImportService {
       if (this.pending.get(requestId) !== pending) throw new Error("页面抓取已取消，请重新抓取")
       return { success: true, artifactPath: path.join(directory, "index.html") }
     } catch (error) {
-      if (created) await fs.rm(directory, { recursive: true, force: true })
+      if (created) await removeCaptureDirectory(directory)
       pending.editingDirectory = undefined
       return { success: false, error: error instanceof Error ? error.message : "准备网页编辑失败" }
     } finally {
@@ -271,13 +294,17 @@ export class DesignUrlImportService {
         ),
         { signal }
       )
-      progress("validating", "验证页面快照和本地资源")
-      await this.dependencies.validate(filePath, signal)
-      page.assertCurrent()
-      signal.throwIfAborted()
-      installed = path.join(root, `capture-${randomUUID()}`)
-      await fs.rename(staging, installed)
+      // Move before opening local assets in Chromium: its font/image handles can
+      // outlive window.destroy() on Windows and prevent renaming the parent directory.
+      // The final path is only returned to the renderer after validation succeeds.
+      const directory = path.join(root, `capture-${randomUUID()}`)
+      await renameCaptureDirectory(staging, directory, signal)
+      installed = directory
       staging = undefined
+      signal.throwIfAborted()
+      progress("validating", "验证页面快照和本地资源")
+      await this.dependencies.validate(path.join(installed, "index.html"), signal)
+      page.assertCurrent()
       signal.throwIfAborted()
       progress("completed", "页面和资源已还原")
       signal.throwIfAborted()
@@ -294,7 +321,10 @@ export class DesignUrlImportService {
         warnings
       })
     } catch (error) {
-      if (installed) await fs.rm(installed, { recursive: true, force: true })
+      if (installed)
+        await removeCaptureDirectory(installed).catch((cleanupError) => {
+          console.warn("[DesignUrlImport] Failed to remove capture directory:", cleanupError)
+        })
       const cancelled =
         signal.aborted &&
         signal.reason instanceof Error &&
@@ -310,7 +340,7 @@ export class DesignUrlImportService {
     } finally {
       clearTimeout(deadline)
       page?.dispose()
-      if (staging) await fs.rm(staging, { recursive: true, force: true }).catch(() => {})
+      if (staging) await removeCaptureDirectory(staging).catch(() => {})
       this.jobs.delete(request.requestId)
     }
   }

@@ -11,6 +11,7 @@ import { NativeSqliteAdapter } from "../src/main/db/native-sqlite-adapter"
 import { DesignSessionStore } from "../src/main/services/design/session-store"
 import { DesignRunManager } from "../src/main/services/design/run-manager"
 import { inspectDesignDocument } from "../src/shared/design-progressive"
+import type { RequirementDesignEntry } from "../src/renderer/src/lib/requirement-design-entry"
 import { executeDesignPatch } from "../src/main/services/design/patch-executor"
 import {
   designPatchStyleProbe,
@@ -217,6 +218,7 @@ try {
     const importFixture = { mode: "success", requests: [] as Array<{ requestId: string; source: string }>,
       pending: null as null | ((value: unknown) => void), opened: false, hiddenCount: 0,
       syncedContexts: [] as unknown[],
+      requirementSyncs: [] as unknown[],
       finished: [] as Array<{ requestId: string; keep: boolean }> }
     ;(window as unknown as { importFixture: typeof importFixture }).importFixture = importFixture
     const templatePackage = { id: "fixture-template", name: "import.html", entryPath: "index.html", rootDir: "/workspace/template", html: "<h1>HTML 导入页面</h1>", files: ["index.html", "detail.html"], pages: ["index.html", "detail.html"], warnings: [], previewUrl: "about:blank", framework: "html", sourceKind: "html", importedAt: "2026-10-29", totalBytes: 25 }
@@ -364,6 +366,12 @@ try {
         ]
       },
       workspace: { get: async () => "/workspace", select: async () => "/workspace/selected" },
+      requirements: {
+        updateFunctionHtml: async (payload: unknown) => {
+          importFixture.requirementSyncs.push(payload)
+          return { success: true }
+        }
+      },
       file: {
         parseSelected: async () => ({
           success: true,
@@ -1480,6 +1488,115 @@ try {
   completions.at(-1)!()
   await page.getByText("截图迭代测试结束", { exact: false }).waitFor()
   console.log("PASS complete composer preservation: files, webpage references, screenshot, code, skill and model survive adoption/reload and send against the imported HTML")
+
+  // Enter from requirement mode, then adopt a webpage without losing the requirement context.
+  const requirementCases: RequirementDesignEntry[] = [
+    {
+      source: "local", scope: "function", requirementId: "req-url-local",
+      requirementName: "链接还原关联需求", functionName: "FR1 页面改版", workspacePath: "/workspace",
+      requirementFilePath: "/workspace/requirements/FR1.md", prompt: "根据需求调整链接页面", htmlId: ""
+    },
+    {
+      source: "space", scope: "full-prd", requirementId: "space:req-url",
+      requirementName: "空间需求链接还原", functionName: "完整 PRD 原型", workspacePath: "/workspace",
+      requirementFilePath: "space://REQ-URL", requirementContent: "保留需求关联并调整页面",
+      prompt: "根据空间需求调整链接页面", htmlId: "ds_req_url_space", htmlFile: "/workspace/previous.html"
+    }
+  ]
+  manager.create({
+    id: "ds_req_url_space", meta: { id: "ds_req_url_space", title: "已有需求原型", createdAt: 1, updatedAt: 1 },
+    state: {
+      ...createDesignState(), html: "<h1>已有需求原型</h1>", generationState: "done", artifactPath: "/workspace/previous.html",
+      messages: [{ role: "user", content: "生成需求原型" }, { role: "assistant", content: "已生成需求原型" }]
+    },
+    workspacePath: "/workspace"
+  })
+  const readRequirementAssociations = () => page.evaluate(() =>
+    JSON.parse(localStorage.getItem("requirement-design-associations") || "{}")
+  )
+  const readRequirementSyncs = () => page.evaluate(() =>
+    (window as unknown as { importFixture: { requirementSyncs: Array<{
+      reqId: string; htmlId: string; htmlFile?: string
+    }> } }).importFixture.requirementSyncs
+  )
+  const openRequirementWebpage = async () => {
+    await page.locator("textarea").first().waitFor()
+    if (await page.getByRole("button", { name: "通过内置浏览器打开", exact: false }).count()) {
+      await page.getByRole("button", { name: "通过内置浏览器打开", exact: false }).click()
+    } else {
+      await page.getByRole("button", { name: "更多上传选项", exact: true }).click()
+      await page.getByRole("menu").waitFor()
+      const action = page.getByRole("menuitem", { name: "通过内置浏览器打开", exact: true })
+      assert.equal(await action.count(), 1, `webpage entry is missing: ${await page.locator("body").innerText()}`)
+      await action.click()
+    }
+    await page.getByPlaceholder("https://example.com/page").fill("https://example.com/requirement")
+    await page.getByRole("button", { name: "在内置浏览器中打开", exact: true }).click()
+  }
+  for (const requirement of requirementCases) {
+    await page.locator("#toggle-mode").click()
+    await page.evaluate(entry => localStorage.setItem("pending-requirement-design", JSON.stringify(entry)), requirement)
+    await page.locator("#toggle-mode").click()
+    await page.getByText(requirement.requirementName!, { exact: true }).waitFor()
+    await page.getByRole("button", { name: "同步到需求", exact: true }).waitFor()
+    const sourceId = (await page.evaluate(() => localStorage.getItem("design_last_session")))!
+    await page.waitForFunction(id => Boolean(
+      JSON.parse(localStorage.getItem("requirement-design-associations") || "{}")[id]
+    ), sourceId)
+    const sourceAssociation = (await readRequirementAssociations())[sourceId]
+    const originalDesign = structuredClone(manager.get(sourceId))
+    if (requirement.source === "local") {
+      await openRequirementWebpage()
+      await page.getByRole("button", { name: "添加为页面参考", exact: true }).click()
+      await composer.getByText("页面参考", { exact: true }).waitFor()
+      assert.equal(await page.evaluate(() => localStorage.getItem("design_last_session")), sourceId)
+      await page.getByText(requirement.requirementName!, { exact: true }).waitFor()
+    }
+    await page.locator("textarea").first().fill(requirement.prompt)
+    const runsBeforeRequirementImport = requests.length
+    await openRequirementWebpage()
+    await page.getByRole("button", { name: "基于此页面编辑", exact: true }).click()
+    await page.waitForFunction(id => localStorage.getItem("design_last_session") !== id, sourceId)
+    await page.frameLocator('iframe[title="Design Preview"]').getByRole("heading", { name: "链接页面", exact: true }).waitFor()
+    await page.getByText(requirement.requirementName!, { exact: true }).waitFor()
+    const importedId = (await page.evaluate(() => localStorage.getItem("design_last_session")))!
+    const importedAssociation = (await readRequirementAssociations())[importedId]
+    assert.equal(importedAssociation.requirementId, requirement.requirementId)
+    assert.equal(importedAssociation.requirementFilePath, requirement.requirementFilePath)
+    assert.equal(importedAssociation.scope, requirement.scope)
+    assert.equal(importedAssociation.htmlId, importedId)
+    assert.equal(importedAssociation.htmlFile, undefined, "a new webpage is pending synchronization")
+    assert.deepEqual((await readRequirementAssociations())[sourceId], sourceAssociation,
+      "the source design retains its requirement association")
+    assert.equal(manager.get(sourceId).state.html, originalDesign.state.html)
+    assert.deepEqual(manager.get(sourceId).state.messages, originalDesign.state.messages)
+    assert.equal(requests.length, runsBeforeRequirementImport)
+    assert.equal(await page.locator("textarea").first().inputValue(), requirement.prompt)
+    await page.reload()
+    await page.getByText(requirement.requirementName!, { exact: true }).waitFor()
+    await page.frameLocator('iframe[title="Design Preview"]').getByRole("heading", { name: "链接页面", exact: true }).waitFor()
+    assert.equal(await page.getByRole("button", { name: "同步到需求", exact: true }).isEnabled(), true)
+    const syncsBefore = (await readRequirementSyncs()).length
+    await page.getByRole("button", { name: "同步到需求", exact: true }).click()
+    await page.getByText(requirement.scope === "full-prd" ? "整个需求原型已保存" : "功能原型已保存", { exact: true }).waitFor()
+    const syncs = await readRequirementSyncs()
+    assert.equal(syncs.length, syncsBefore + (requirement.source === "space" ? 0 : 1))
+    if (requirement.source !== "space") {
+      assert.equal(syncs.at(-1).reqId, requirement.requirementId)
+      assert.equal(syncs.at(-1).htmlId, importedId)
+      assert.equal(syncs.at(-1).htmlFile, manager.get(importedId).state.artifactPath)
+    }
+    assert.equal((await readRequirementAssociations())[importedId].htmlFile, manager.get(importedId).state.artifactPath)
+    await page.getByRole("button", { name: "返回需求", exact: true }).click()
+    assert.equal(await page.evaluate(() => localStorage.getItem("pending-requirement-conversation")), requirement.requirementId)
+    console.log(`PASS ${requirement.source} requirement context survives webpage adoption, reload and synchronization`)
+  }
+  await page.evaluate(id => localStorage.setItem("design_last_session", id), completeDraftId)
+  await page.reload()
+  await page.locator("textarea").first().waitFor()
+  assert.equal(await page.getByRole("button", { name: "返回需求", exact: true }).count(), 0,
+    "requirement associations never leak into unrelated designs")
+  console.log("PASS local and space requirements survive webpage adoption/reload, keep the original design, sync the new artifact and return to the correct requirement")
 
   if (process.env.DESIGN_URL_IMPORT_ONLY !== "1") {
   for (const entry of [

@@ -8,6 +8,7 @@ import type { DesignImportProgress, DesignImportRequest } from "../../../shared/
 
 const directories: string[] = []
 afterEach(async () => {
+  vi.restoreAllMocks()
   for (const directory of directories.splice(0))
     await fs.rm(directory, { recursive: true, force: true })
 })
@@ -37,7 +38,7 @@ async function fixture(restrictedReason?: string) {
       warnings: [],
       resources: []
     })),
-    validate: vi.fn(async () => {}),
+    validate: vi.fn<(filePath: string, signal: AbortSignal) => Promise<void>>().mockResolvedValue(),
     fetch: vi.fn()
   }
   const request: DesignImportRequest = {
@@ -88,6 +89,145 @@ describe("design URL import lifecycle", () => {
     expect(service.cancel(1, request.requestId)).toBe(false)
     expect(progress.at(-1)?.stage).toBe("completed")
     expect(dispose).toHaveBeenCalledOnce()
+  })
+
+  it("validates the final path without renaming files already opened by the validation browser", async () => {
+    const { service, request, dependencies } = await fixture()
+    let validatedPath: string | undefined
+    dependencies.validate.mockImplementation(async (filePath) => {
+      validatedPath = filePath
+      expect(path.basename(path.dirname(filePath))).toMatch(/^capture-/)
+      expect(await fs.readFile(filePath, "utf8")).toContain("data-design-capture-runtime")
+      expect((await fs.readdir(path.dirname(filePath))).sort()).toEqual([
+        "capture-manifest.json",
+        "index.html",
+        "source-preview.png"
+      ])
+    })
+    const result = await service.run(1, request, vi.fn())
+    expect(result.success, result.error).toBe(true)
+    expect(result.artifactPath).toBe(validatedPath)
+    await service.finish(1, request.requestId, false)
+  })
+
+  it.each(["EPERM", "EACCES", "EBUSY"])(
+    "recovers from transient %s directory locks before validating the capture",
+    async (code) => {
+      const { service, request, dependencies } = await fixture()
+      const rename = fs.rename.bind(fs)
+      const locked = Object.assign(new Error("directory temporarily locked"), { code })
+      const spy = vi
+        .spyOn(fs, "rename")
+        .mockRejectedValueOnce(locked)
+        .mockRejectedValueOnce(locked)
+        .mockImplementation(async (source, target) => {
+          expect(dependencies.validate).not.toHaveBeenCalled()
+          return rename(source, target)
+        })
+      const result = await service.run(1, request, vi.fn())
+      expect(result.success, result.error).toBe(true)
+      expect(spy).toHaveBeenCalledTimes(3)
+      expect(dependencies.capture).toHaveBeenCalledOnce()
+      expect(dependencies.localize).toHaveBeenCalledOnce()
+      expect(dependencies.validate).toHaveBeenCalledOnce()
+      expect(await fs.readdir(path.join(request.workspacePath, ".cmb-design"))).toEqual([
+        path.basename(path.dirname(result.artifactPath!))
+      ])
+      await service.finish(1, request.requestId, false)
+    }
+  )
+
+  it("stops retrying a persistent directory lock and cleans the uncommitted package", async () => {
+    const { service, request, dependencies, dispose } = await fixture()
+    const spy = vi
+      .spyOn(fs, "rename")
+      .mockRejectedValue(Object.assign(new Error("directory remains locked"), { code: "EPERM" }))
+    const progress: DesignImportProgress[] = []
+    const result = await service.run(1, request, (event) => progress.push(event))
+    expect(result.status).toBe("failed")
+    expect(result.error).toBe("directory remains locked")
+    expect(spy.mock.calls.length).toBeGreaterThan(1)
+    expect(spy.mock.calls.length).toBeLessThanOrEqual(7)
+    expect(dependencies.validate).not.toHaveBeenCalled()
+    expect(progress.at(-1)?.stage).toBe("failed")
+    expect(await fs.readdir(path.join(request.workspacePath, ".cmb-design"))).toEqual([])
+    expect(dispose).toHaveBeenCalledOnce()
+    expect(service.cancel(1, request.requestId)).toBe(false)
+  })
+
+  it("does not retry unrelated rename failures", async () => {
+    const { service, request, dependencies } = await fixture()
+    const spy = vi
+      .spyOn(fs, "rename")
+      .mockRejectedValue(Object.assign(new Error("storage unavailable"), { code: "EIO" }))
+    const result = await service.run(1, request, vi.fn())
+    expect(result.status).toBe("failed")
+    expect(result.error).toBe("storage unavailable")
+    expect(spy).toHaveBeenCalledOnce()
+    expect(dependencies.validate).not.toHaveBeenCalled()
+    expect(await fs.readdir(path.join(request.workspacePath, ".cmb-design"))).toEqual([])
+  })
+
+  it("cancels during a directory-lock retry without validating or publishing the capture", async () => {
+    const { service, request, dependencies } = await fixture()
+    let cancellation: ReturnType<typeof setTimeout> | undefined
+    const spy = vi.spyOn(fs, "rename").mockImplementation(async () => {
+      cancellation = setTimeout(() => service.cancel(1, request.requestId), 10)
+      throw Object.assign(new Error("directory temporarily locked"), { code: "EPERM" })
+    })
+    try {
+      const progress: DesignImportProgress[] = []
+      const result = await service.run(1, request, (event) => progress.push(event))
+      expect(result.status).toBe("cancelled")
+      expect(spy).toHaveBeenCalledOnce()
+      expect(dependencies.validate).not.toHaveBeenCalled()
+      expect(progress.at(-1)?.stage).toBe("cancelled")
+      expect(progress.some((event) => event.stage === "completed")).toBe(false)
+      expect(await fs.readdir(path.join(request.workspacePath, ".cmb-design"))).toEqual([])
+    } finally {
+      clearTimeout(cancellation)
+    }
+  })
+
+  it("cleans an installed capture cancelled before validation", async () => {
+    const { service, request, dependencies } = await fixture()
+    const rename = fs.rename.bind(fs)
+    vi.spyOn(fs, "rename").mockImplementation(async (source, target) => {
+      await rename(source, target)
+      service.cancel(1, request.requestId)
+    })
+    const result = await service.run(1, request, vi.fn())
+    expect(result.status).toBe("cancelled")
+    expect(dependencies.validate).not.toHaveBeenCalled()
+    expect(await fs.readdir(path.join(request.workspacePath, ".cmb-design"))).toEqual([])
+  })
+
+  it("removes the installed package when validation fails and never publishes it", async () => {
+    const { service, request, dependencies } = await fixture()
+    dependencies.validate.mockRejectedValue(new Error("snapshot validation failed"))
+    const progress: DesignImportProgress[] = []
+    const result = await service.run(1, request, (event) => progress.push(event))
+    expect(result.status).toBe("failed")
+    expect(result.error).toBe("snapshot validation failed")
+    expect(progress.some((event) => event.stage === "completed")).toBe(false)
+    expect(await service.finish(1, request.requestId, true)).toBe(false)
+    expect(await fs.readdir(path.join(request.workspacePath, ".cmb-design"))).toEqual([])
+  })
+
+  it("preserves the validation failure and releases the job if cleanup is also blocked", async () => {
+    const { service, request, dependencies, dispose } = await fixture()
+    dependencies.validate.mockRejectedValue(new Error("snapshot validation failed"))
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
+    vi.spyOn(fs, "rm").mockRejectedValueOnce(
+      Object.assign(new Error("capture is still locked"), { code: "EPERM" })
+    )
+    const result = await service.run(1, request, vi.fn())
+    expect(result.status).toBe("failed")
+    expect(result.error).toBe("snapshot validation failed")
+    expect(warn).toHaveBeenCalledOnce()
+    expect(dispose).toHaveBeenCalledOnce()
+    expect(service.cancel(1, request.requestId)).toBe(false)
+    expect(await service.finish(1, request.requestId, true)).toBe(false)
   })
 
   it("requests user action and releases the capture browser without saving a login page", async () => {

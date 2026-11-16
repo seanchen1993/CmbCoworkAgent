@@ -2516,6 +2516,8 @@ export function DesignView({
       let captured: DesignImportResult | null = null
       let retained = false
       const expectedSession = currentSessionIdRef.current
+      const sourceRequirementEntry =
+        source === "session" ? loadActiveRequirementDesignEntry(expectedSession) : null
       try {
         captured = await urlImport.capture({
           source: "current-browser",
@@ -2567,6 +2569,16 @@ export function DesignView({
               retained = true
             }
           })
+          if (sourceRequirementEntry) {
+            // The imported baseline belongs to the same requirement, but has not
+            // been synchronized yet. Keep the original session's binding intact.
+            setRequirementEntry({
+              ...sourceRequirementEntry,
+              htmlId: sessionId,
+              htmlFile: undefined,
+              bindingReady: true
+            })
+          }
           setCreationPageOpen(false)
           showToast("网页已打开，可直接描述要修改的地方")
           requestAnimationFrame(() => composerRef.current?.focus())
@@ -2652,7 +2664,8 @@ export function DesignView({
       showToast,
       createDesignSystemId,
       designSystems,
-      applyImportedDesign
+      applyImportedDesign,
+      setRequirementEntry
     ]
   )
 
