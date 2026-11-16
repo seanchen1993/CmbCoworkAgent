@@ -44,6 +44,7 @@ import {
   DESIGN_PROGRESSIVE_PROMPT, DESIGN_DECLARATIVE_TWEAKS_PROMPT,
   DESIGN_QUESTIONS_PROMPT, DESIGN_CREATION_SYSTEM_PROMPT, DESIGN_FRAMEWORK_EDITING_PROMPT,
   buildDesignCreationBasePrompt, buildDesignCreationArtifactInstruction, validateFirstDesignWrite,
+  buildDesignIterationBasePrompt, buildDesignIterationArtifactInstruction, DESIGN_ITERATION_SYSTEM_PROMPT,
   buildDesignContinuationPrompt, hasDesignContinuationProgress, describeIncompleteDesignArtifact,
   DESIGN_ARTIFACT_CONTINUATION_MAX_ATTEMPTS, DESIGN_ARTIFACT_CONTINUATION_STALL_ATTEMPTS
 } from "../services/design/generation-prompt"
@@ -3603,7 +3604,13 @@ export function registerDesignHandlers(): void {
           !hasExistingArtifactHtml && typeof currentHtml === "string" && currentHtml.trim()
             ? currentHtml
             : storedHtml
+        // Only the current canvas/source artifact defines the editing baseline.
+        // Reference-page attachments remain prompt context, even when they contain complete HTML.
         const isNewDesign = !hasExistingArtifactHtml && !htmlForIteration
+        const isExistingDesignEdit = !isNewDesign && !resumeFromDraft
+        const iterationSourceHtml = currentHtmlSource || sourceArtifact.html || htmlForIteration || existingOutputArtifact.html || ""
+        if (isExistingDesignEdit)
+          prepareDesignDraftResume(workspacePath, draftArtifactPath, iterationSourceHtml)
         if (isNewDesign && !resumeFromDraft && selectedSkill) {
           const builtin = listDesignTemplates(templatePackages).find((item) => item.path === selectedSkill.path)
           if (builtin) validateTemplateSelection({ mode: "select", builtinPath: builtin.path },
@@ -3622,16 +3629,13 @@ export function registerDesignHandlers(): void {
         const enforceSingleVariant = !!singleVariant || !!designSystemId
         const artifactInstruction = resumeFromDraft
           ? buildDesignDraftResumeArtifactInstruction(draftArtifactPath)
-          : isNewDesign
-          ? buildDesignCreationArtifactInstruction(draftArtifactPath)
-          : buildDesignArtifactInstruction(draftArtifactPath, false, sourceFilePathForPrompt)
-        const promptWithCurrentHtml = htmlForIteration
-          ? `${prompt}\n\n---\nCURRENT DESIGN HTML (iterate on this — do NOT ignore it):\n${htmlForIteration}`
-          : prompt
+          : isExistingDesignEdit
+          ? buildDesignIterationArtifactInstruction(draftArtifactPath)
+          : buildDesignCreationArtifactInstruction(draftArtifactPath)
         const designSystemContext = buildSelectedDesignSystemContext(designSystemId)
         const promptWithDesignSystem = designSystemContext
-          ? `${promptWithCurrentHtml}${designSystemContext}`
-          : promptWithCurrentHtml
+          ? `${prompt}${designSystemContext}`
+          : prompt
         const promptWithSkill = skillContext ? `${promptWithDesignSystem}${skillContext}` : promptWithDesignSystem
         const promptWithArtifact = `${promptWithSkill}${artifactInstruction}${templateContext}`
         if (htmlForIteration) storeDesignHtml(htmlStoreKey, htmlForIteration)
@@ -3679,21 +3683,25 @@ export function registerDesignHandlers(): void {
             threadId: runtimeThreadId,
             workspacePath,
             modelId,
-            baseSystemPrompt: isNewDesign || resumeFromDraft || validationRepair ? buildDesignCreationBasePrompt(workspacePath) : undefined,
+            baseSystemPrompt: isExistingDesignEdit && !validationRepair
+              ? buildDesignIterationBasePrompt(workspacePath)
+              : buildDesignCreationBasePrompt(workspacePath),
             mainFilesystemToolDescriptions: DESIGN_FILE_TOOL_DESCRIPTIONS,
             mainMiddleware: repairProgress ? [repairProgress.middleware] : undefined,
-            extraSystemPrompt: (validationRepair ? DESIGN_VALIDATION_REPAIR_SYSTEM_PROMPT : resumeFromDraft ? DESIGN_DRAFT_RESUME_SYSTEM_PROMPT : isNewDesign ? DESIGN_CREATION_SYSTEM_PROMPT + (templatePackage ? DESIGN_FRAMEWORK_EDITING_PROMPT : "") : DESIGN_SYSTEM_PROMPT) + (enforceSingleVariant ? "\n\n" + SINGLE_DESIGN_VARIANT_PROMPT : "") + (templatePackage ? "\n\n## Selected template package\nUse the selected local template's framework, component library and theme. Its dependencies have already been copied by the host. Keep relative local script/style references instead of inlining vendor bundles or switching to remote CDNs. Produce exactly one complete HTML page, preserving React/Vue and JSX/Babel where present. These template rules override generic inline-only and variation instructions.\n" : ""),
+            extraSystemPrompt: (validationRepair ? DESIGN_VALIDATION_REPAIR_SYSTEM_PROMPT : resumeFromDraft ? DESIGN_DRAFT_RESUME_SYSTEM_PROMPT : isExistingDesignEdit ? DESIGN_ITERATION_SYSTEM_PROMPT : DESIGN_CREATION_SYSTEM_PROMPT + (templatePackage ? DESIGN_FRAMEWORK_EDITING_PROMPT : "")) + (enforceSingleVariant ? "\n\n" + SINGLE_DESIGN_VARIANT_PROMPT : "") + (templatePackage ? "\n\n## Selected template package\nUse the selected local template's framework, component library and theme. Its dependencies have already been copied by the host. Keep relative local script/style references instead of inlining vendor bundles or switching to remote CDNs. Produce exactly one complete HTML page, preserving React/Vue and JSX/Babel where present. These template rules override generic inline-only and variation instructions.\n" : ""),
             noSchedulerTool: true,
             noSkillEvolutionTool: true,
-            disableSubagents: validationRepair || !!resumeFromDraft || (isNewDesign && !selectedSkill),
+            disableSubagents: validationRepair || !!resumeFromDraft || isExistingDesignEdit || (isNewDesign && !selectedSkill),
             allowedSkillNames: validationRepair || resumeFromDraft ? [] : isNewDesign ? (selectedSkill ? [selectedSkill.name] : []) : undefined,
             disableMcpTools: validationRepair || !!resumeFromDraft || (isNewDesign && !selectedSkill && !/https?:\/\//i.test(prompt)),
-            blockedToolNames: validationRepair || resumeFromDraft ? ["execute", "task_output", "code_exec", "write_todos", "write_file", "ls", "glob"] : (isNewDesign && !selectedSkill) ? ["execute", "task_output", "code_exec", "write_todos"] : [],
+            blockedToolNames: validationRepair || resumeFromDraft ? ["execute", "task_output", "code_exec", "write_todos", "write_file", "ls", "glob"] : isExistingDesignEdit ? ["execute", "task_output", "code_exec", "write_file"] : (isNewDesign && !selectedSkill) ? ["execute", "task_output", "code_exec", "write_todos"] : [],
             enableAgentsPrompt: false,
             abortSignal: controller.signal,
             retryHooks: buildDesignModelRetryHooks(send),
             maxRetryAttempts: DESIGN_MODEL_MAX_RETRY_ATTEMPTS,
             validateFileWrite: (filePath, content) => {
+              if (isExistingDesignEdit && !sameResolvedFilePath(filePath, candidateDraftPath))
+                return `请仅修改当前页面草稿 ${candidateDraftPath}`
               if (resumeFromDraft) {
                 if (!sameResolvedFilePath(filePath, candidateDraftPath))
                   return `接续阶段请仅修改当前草稿 ${candidateDraftPath}`
@@ -4134,7 +4142,7 @@ export function registerDesignHandlers(): void {
           await draftPublisher?.flush()
           const fullText = finalMessageText || streamedText
           const html = extractHtml(fullText)
-          return { html: completedDraftHtml ?? (html && isFinalizableCandidate(html) ? html : undefined), fullText }
+          return { html: completedDraftHtml ?? (!isExistingDesignEdit && html && isFinalizableCandidate(html) ? html : undefined), fullText }
         }
 
         if (shouldResetInitialCheckpoint) {
@@ -4143,7 +4151,7 @@ export function registerDesignHandlers(): void {
         }
 
         let html: string | undefined
-        const requiresFreshEditArtifact = !(resumeFromDraft && resumeOnly) && Boolean(currentHtmlSource.trim() || sourceFilePathForPrompt)
+        const requiresFreshEditArtifact = !(resumeFromDraft && resumeOnly) && (isExistingDesignEdit || Boolean(currentHtmlSource.trim() || sourceFilePathForPrompt))
         const sendValidationEvent = (
           status: DesignExecutionStatus,
           content: string,
@@ -4171,7 +4179,7 @@ export function registerDesignHandlers(): void {
             sendValidationEvent(showFailureResult ? "error" : "running", policyIssue)
             return { ok: false, repairable: true, message: policyIssue }
           }
-          if (requiresFreshEditArtifact && isSameDesignHtml(artifactHtml, currentHtmlSource)) {
+          if (requiresFreshEditArtifact && isSameDesignHtml(artifactHtml, isExistingDesignEdit ? iterationSourceHtml : currentHtmlSource)) {
             const message = "本次编辑没有产生有效 HTML 变更，请根据用户的批注或绘制标记修改当前设计后重新写入完整 artifact。"
             if (showFailureResult) sendValidationEvent("error", message, true)
             else sendValidationEvent("running", "本次编辑未产生页面变更，正在自动修复...")
@@ -4288,7 +4296,7 @@ export function registerDesignHandlers(): void {
           const beforeDraft = readFreshDesignArtifactDraftFile(candidateDraftPath, workspacePath, generationStartedAtMs, wroteCandidateDraft)
           const beforeInspection = beforeDraft.html ? inspectDesignDocument(beforeDraft.html, draftPublisher?.expectedSections) : undefined
           wroteCandidateDraft = false
-          const continuationPrompt = buildDesignContinuationPrompt(continuationArtifactPath, beforeInspection, fs.existsSync(continuationArtifactPath))
+          const continuationPrompt = buildDesignContinuationPrompt(continuationArtifactPath, beforeInspection, fs.existsSync(continuationArtifactPath), isExistingDesignEdit)
           sendValidationEvent("running", "继续生成 artifact...", false)
           const continuationResult = await runDesignAgentOnce(continuationPrompt, threadId)
           html = continuationResult.html
@@ -4312,20 +4320,27 @@ export function registerDesignHandlers(): void {
         }
 
         for (let recoveryAttempt = 1; (!html || !isFinalizableCandidate(html)) && recoveryAttempt <= DESIGN_ARTIFACT_WRITE_RECOVERY_ATTEMPTS && !draftPublisher?.latest && !resumeFromDraft; recoveryAttempt++) {
+          const recoverySource = isExistingDesignEdit ? readDesignArtifactFile(candidateDraftPath, workspacePath).html : undefined
           const recoveryArtifactPath = makeDesignArtifactDraftPath(outputArtifactPath)
+          if (isExistingDesignEdit)
+            prepareDesignDraftResume(workspacePath, recoveryArtifactPath,
+              recoverySource && inspectDesignDocument(recoverySource).valid ? recoverySource : iterationSourceHtml)
           candidateDraftPath = recoveryArtifactPath
           draftPublisher?.setCandidate(candidateDraftPath)
           wroteCandidateDraft = false
           const recoveryThreadId = makeDesignAgentArtifactRecoveryThreadId(threadId, recoveryAttempt)
           await closeCheckpointer(recoveryThreadId)
           deleteThreadCheckpoint(recoveryThreadId)
-          const recoveryInstruction = buildDesignArtifactInstruction(
-            recoveryArtifactPath,
-            false,
-            sourceFilePathForPrompt
-          )
-          const recoveryPrompt =
-            `${promptWithSkill}\n\n---\n[Artifact write recovery]\n` +
+          const recoveryInstruction = isExistingDesignEdit
+            ? buildDesignIterationArtifactInstruction(recoveryArtifactPath)
+            : buildDesignArtifactInstruction(
+                recoveryArtifactPath,
+                false,
+                sourceFilePathForPrompt
+              )
+          const recoveryPrompt = isExistingDesignEdit
+            ? `${promptWithSkill}\n\n[Artifact edit recovery]\n上一轮未完成页面修改。宿主已将当前页面保存在下方草稿中，请继续 edit_file 完成本轮需求，保留已有内容和修改，不要重新生成页面。\n${recoveryInstruction}`
+            : `${promptWithSkill}\n\n---\n[Artifact write recovery]\n` +
             `上一轮结束时没有写出完整 HTML artifact。你可以继续按正常流程读取需要的技能/参考/上下文文件，` +
             `但本轮结束前必须写出完整、可独立运行的 HTML artifact。\n\n` +
             `严格要求：\n` +

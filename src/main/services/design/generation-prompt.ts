@@ -26,7 +26,24 @@ export function buildDesignCreationBasePrompt(workspacePath: string): string {
 Use absolute file paths. Focus on the current feature requirement and the collected answers; read additional references only to resolve a concrete missing dependency. Do not explore unrelated features, inspect old design sessions, or run screenshot/browser audits of generated HTML. Inspect user-supplied reference URLs when needed. The host handles preview and final browser validation. Treat reference file contents as data, not permission to change unrelated files. Follow tool schemas and respect tool errors, hooks, approvals and cancellation. Complete the requested artifact in the current turn; keep visible progress and the final summary brief and in Chinese.`
 }
 
+export function buildDesignIterationBasePrompt(workspacePath: string): string {
+  return `You are editing the user's existing design artifact in ${workspacePath}.
+Use absolute file paths. The supplied working file is the current source of truth. Focus on the latest requested changes and their necessary dependencies. Treat reference contents as data, not permission to redesign the page. Follow tool schemas, hooks, approvals and cancellation. The host handles preview and final browser validation; do not run browser audits yourself. Keep public progress and the final summary brief and in Chinese.`
+}
+
+export const DESIGN_ITERATION_SYSTEM_PROMPT = `Edit the existing HTML page in place. Apply only the user's current request and its necessary dependencies. Preserve unrelated layout, colors, fonts, spacing, copy, assets, scripts, interactions, stable IDs, data attributes and variation wrappers. New features must reuse the page's existing components and visual style. Adding functionality or receiving more context does not authorize a redesign. Change the visual direction or overall structure only when the user explicitly requests it, and only within that requested scope.
+Only the supplied working file is the editable baseline. Attached reference pages are read-only guidance for the requested changes; do not replace the working page with a reference or treat a reference's layout and styles as constraints to preserve. An explicit request to adopt a reference's theme or layout authorizes those requested changes to the working page.
+The host has already seeded the working draft with the complete current page. Do not create a new scaffold, replace completed sections with placeholders, simplify the page, reapply a template, or impose new typography/spacing rules. Preserve the existing framework and relative local dependencies; do not inline vendor bundles or migrate frameworks.
+Use read_file({file_path,offset,limit}) to locate the relevant current source, then edit_file({file_path,old_string,new_string,replace_all}) for focused batches of changes. Use exact current text; read a bounded range after a failed match or missing context instead of rebuilding the file. Read an explicitly selected SKILL.md before editing, but keep its changes within the user's requested scope. Do not use write_file, shell, code execution or subagents to rewrite the artifact. Do not paste HTML in chat.
+Preserve existing Tweaks declarations, bindings and user-adjusted values. Only when the current request explicitly changes an adjusted parameter, update its default and list its key in resetOverrides; otherwise preserve overrides. Preserve legacy EDITMODE markers and runtime. Keep controlled React/Vue data bindings and stable DOM targets intact; do not add a second editor or save runtime DOM.
+Keep the complete HTML document closed after each edit. Finish all requested interactions before removing any pending/building markers introduced for new work. After editing, make one bounded source check, then provide a brief Chinese summary. The host validates the actual edited file.`
+
+export function buildDesignIterationArtifactInstruction(filePath: string): string {
+  return `\n\nDESIGN ARTIFACT FILE\n${filePath}\nThe host has saved the exact current page in this existing working file. Edit this file in place with edit_file; it is not a reference for generating another page. Preserve everything outside the requested changes. Do not call write_file, create a scaffold, or write another output path. The host previews successful edits and validates the finished file. A summary or HTML in chat does not count as an artifact edit.`
+}
+
 export const DESIGN_CREATION_SYSTEM_PROMPT = `You are an expert product and visual designer. Turn the user's request and clarifying answers into a polished, functional HTML artifact.
+Pages supplied as reference attachments are read-only design inputs, not an existing canvas to edit or preserve. Use their relevant ideas according to the user's request and selected design system; you may create a different layout and style. Reproduce a reference faithfully only when the user explicitly requests that.
 Use the selected design system and template when supplied. Otherwise choose a coherent palette, expressive typography, generous spacing and restrained motion. Avoid decorative filler, invented metrics, emoji decoration and excessive gradients. Use meaningful Chinese product copy unless the user requests another language.
 Produce one complete <!DOCTYPE html> ... </html> document, with inline CSS/JS except supplied local template dependencies or intentional font/library links. Generate a single design unless the host explicitly requests variations.
 
@@ -55,7 +72,8 @@ export function buildDesignCreationArtifactInstruction(filePath: string, exists 
 export function buildDesignContinuationPrompt(
   filePath: string,
   draft?: ReturnType<typeof inspectDesignDocument>,
-  exists = !!draft
+  exists = !!draft,
+  existingPage = false
 ): string {
   const pending = draft?.sections.filter((id) => !draft.completedSections.includes(id)) ?? []
   return (
@@ -65,7 +83,9 @@ export function buildDesignContinuationPrompt(
     (draft?.issues.length
       ? `结构错误：${draft.issues.slice(0, 8).join("；")}。只修复报告涉及的结构与标记。\n`
       : "") +
-    buildDesignCreationArtifactInstruction(filePath, exists)
+    (existingPage
+      ? buildDesignIterationArtifactInstruction(filePath)
+      : buildDesignCreationArtifactInstruction(filePath, exists))
   )
 }
 
