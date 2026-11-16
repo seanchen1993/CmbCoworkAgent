@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest"
 import { DesignQuestionStream, readCompleteDesignQuestions } from "./question-stream"
+import { normalizeQuestionDef } from "../../../shared/managed-design-session"
 
 describe("incremental design questions", () => {
   it("publishes closed questions across arbitrary chunks without waiting for the form to close", () => {
@@ -47,5 +48,15 @@ describe("incremental design questions", () => {
     expect(
       readCompleteDesignQuestions('{"questions":[{"label":"missing id"},' + JSON.stringify(q) + ",")
     ).toEqual([q])
+  })
+
+  it("keeps a malformed choice question answerable without publishing its incomplete JSON", () => {
+    const stream = new DesignQuestionStream()
+    const broken = { id: "page_type", type: "chips", label: "页面类型？", required: true, options: [] }
+    const text = JSON.stringify({ questions: [broken] })
+    expect(stream.push(text.slice(0, -3))).toEqual([])
+    expect(stream.push(text.slice(-3))).toEqual([broken])
+    // Normalization at the session boundary retains the question rather than creating an empty choice group.
+    expect(normalizeQuestionDef(stream.questions[0])).toMatchObject({ type: "text", required: true })
   })
 })

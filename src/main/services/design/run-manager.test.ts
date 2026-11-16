@@ -858,6 +858,26 @@ describe("background design conversations", () => {
     expect(recovered.get("ds_a").state.answers).toEqual({ name: "销售中心" })
   })
 
+  it("repairs empty choice questions in both streamed and final-only responses and retains answers on reopen", async () => {
+    const h = harness()
+    h.create()
+    const emit = await h.start("ds_a", "empty-options", "questions")
+    const missing = { id: "page_type", type: "chips", label: "页面类型？", required: true, options: [] }
+    const finalOnly = { id: "scope", type: "chips", label: "核心模块？", required: true, choices: ["概览", "详情"] }
+    emit({ type: "question", question: missing })
+    expect(h.manager.get("ds_a").state.questions[0]).toMatchObject({ type: "text", required: true })
+    h.manager.patch("ds_a", { answers: { page_type: "数据看板" } })
+    emit({ type: "done", questions: [missing, finalOnly] })
+    h.finishes.get("empty-options")!()
+    const reopened = new DesignRunManager(h.store, h.deps).get("ds_a").state
+    expect(reopened.questions).toMatchObject([
+      { id: "page_type", type: "text", required: true },
+      { id: "scope", type: "chips", options: ["概览", "详情"] }
+    ])
+    expect(reopened.answers).toEqual({ page_type: "数据看板" })
+    expect(reopened.generationState).toBe("questions_ready")
+  })
+
   it("keeps a single necessary question even when a design system is selected", async () => {
     const h = harness()
     h.create()

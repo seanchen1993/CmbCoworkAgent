@@ -325,20 +325,29 @@ export function normalizeQuestionDef(raw: unknown): QuestionDef | null {
     default:
       type = "text"
   }
-  const options = Array.isArray(item.options)
-    ? item.options
-        .map((option) => {
-          if (typeof option === "string") return { value: option, label: option }
-          if (option && typeof option === "object") {
-            const obj = option as Record<string, unknown>
-            const label = typeof obj.label === "string" ? obj.label : ""
-            const value = typeof obj.value === "string" ? obj.value : label
-            return value ? { value, label: label || value } : null
-          }
-          return null
-        })
-        .filter((option): option is { value: string; label: string } => Boolean(option))
-    : []
+  const savedLabels = item.optionLabels && typeof item.optionLabels === "object"
+    ? item.optionLabels as Record<string, unknown> : {}
+  const readOptions = (rawOptions: unknown): Array<{ value: string; label: string }> => {
+    const unique = new Map<string, string>()
+    for (const option of Array.isArray(rawOptions) ? rawOptions : []) {
+      let value = "", label = ""
+      if (typeof option === "string") {
+        value = option.trim()
+        const savedLabel = savedLabels[value]
+        label = typeof savedLabel === "string" ? savedLabel.trim() : value
+      } else if (option && typeof option === "object") {
+        const obj = option as Record<string, unknown>
+        label = typeof obj.label === "string" ? obj.label.trim() : ""
+        value = (typeof obj.value === "string" ? obj.value.trim() : "") || label
+      }
+      if (value && !unique.has(value)) unique.set(value, label || value)
+    }
+    return [...unique].map(([value, label]) => ({ value, label }))
+  }
+  let options = readOptions(item.options)
+  if (!options.length) options = readOptions(item.choices)
+  // A choice question without choices must still be answerable, including when required.
+  if ((type === "chips" || type === "direction-cards") && !options.length) type = "text"
   const optionLabels = Object.fromEntries(options.map((option) => [option.value, option.label]))
   return {
     id,
@@ -353,7 +362,7 @@ export function normalizeQuestionDef(raw: unknown): QuestionDef | null {
     options: options.map((option) => option.value),
     optionLabels,
     cards: Array.isArray(item.cards) ? (item.cards as QuestionDef["cards"]) : undefined,
-    multi: item.multi === true || rawType === "checkbox",
+    multi: type === "chips" && (item.multi === true || rawType === "checkbox"),
     required: item.required === true,
     maxSelections: typeof item.maxSelections === "number" ? item.maxSelections : undefined,
     placeholder: typeof item.placeholder === "string" ? item.placeholder : undefined

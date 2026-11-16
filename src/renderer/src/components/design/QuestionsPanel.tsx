@@ -79,11 +79,18 @@ export function QuestionsPanel({
 
         {questions.map((q) => {
           const answered = isAnswered(q)
+          // Old saved sessions may still contain choice questions with no usable options.
+          const options = Array.isArray(q.options)
+            ? q.options.filter((option) => typeof option === "string" && option.trim()) : []
+          const inputId = `design-question-${q.id}`
+          const labelId = `${inputId}-label`
+          const answer = answers[q.id]
+          const textAnswer = Array.isArray(answer) ? answer.join("、") : answer ?? ""
           return (
             <div key={q.id} style={{ ...S.questionBlock, opacity: 1 }}>
               <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
-                <label style={S.questionLabel}>{q.label}</label>
-                {q.type === "chips" && q.multi && (
+                <label id={labelId} htmlFor={inputId} style={S.questionLabel}>{q.label}</label>
+                {q.type === "chips" && q.multi && options.length > 0 && (
                   <span style={{ fontSize: 11, color: "#8a8a8a", background: "#f0efeb", padding: "2px 7px", borderRadius: 999, fontWeight: 500 }}>
                     可多选
                   </span>
@@ -94,9 +101,9 @@ export function QuestionsPanel({
               </div>
               {q.hint && <p style={S.questionHint}>{q.hint}</p>}
 
-              {q.type === "direction-cards" && q.options ? (
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))", gap: 10 }}>
-                  {q.options.map((opt) => {
+              {q.type === "direction-cards" && options.length > 0 ? (
+                <div role="group" aria-labelledby={labelId} style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))", gap: 10 }}>
+                  {options.map((opt) => {
                     const selected = isChipSelected(q.id, opt)
                     const card = q.cards?.find((item) => item.id === opt)
                     return (
@@ -138,9 +145,9 @@ export function QuestionsPanel({
                     )
                   })}
                 </div>
-              ) : q.type === "chips" && q.options ? (
-                <div style={S.chipsRow}>
-                  {q.options.map((opt) => {
+              ) : q.type === "chips" && options.length > 0 ? (
+                <div role="group" aria-labelledby={labelId} style={S.chipsRow}>
+                  {options.map((opt) => {
                     const selected = isChipSelected(q.id, opt)
                     return (
                       <button
@@ -162,7 +169,8 @@ export function QuestionsPanel({
                 </div>
               ) : q.type === "textarea" ? (
                 <textarea
-                  value={(answers[q.id] as string) ?? ""}
+                  id={inputId}
+                  value={textAnswer}
                   onChange={(e) => onAnswer(q.id, e.target.value)}
                   placeholder="输入你的回答..."
                   rows={3}
@@ -170,8 +178,9 @@ export function QuestionsPanel({
                 />
               ) : (
                 <input
+                  id={inputId}
                   type="text"
-                  value={(answers[q.id] as string) ?? ""}
+                  value={textAnswer}
                   onChange={(e) => onAnswer(q.id, e.target.value)}
                   placeholder="输入你的回答..."
                   style={S.questionInput}
