@@ -201,6 +201,13 @@ export class ProjectContext {
   pin(messages: BaseMessage[]) {
     for (const message of messages) this.pinned.add(message)
   }
+  unpin(message: BaseMessage) {
+    this.pinned.delete(message)
+  }
+  releaseDocument(message: BaseMessage) {
+    // Older drafts may be compacted; their full source remains in read_context.
+    this.documents.delete(message)
+  }
   document(message: BaseMessage, title: string) {
     this.documents.set(message, this.save(title, projectMessageText(message.content)))
     return message

@@ -26,6 +26,11 @@ import { makeReportPeriodExample } from "../services/project-analysis/report-moc
 import { projectListPageData } from "../services/project-analysis/page-data"
 import { makeMockRunAnalysis } from "./project-run-analysis-mock"
 import { renderReportHtml } from "../services/project-analysis/report-html"
+import { generateProjectReport } from "../services/project-analysis/report-agent"
+import {
+  mockStreamingModel,
+  TEST_PROJECT_BUDGET
+} from "../services/project-analysis/streaming-model-test-fixture"
 import { AIMessage, HumanMessage } from "@langchain/core/messages"
 
 const roots: string[] = []
@@ -103,6 +108,60 @@ function setup() {
 }
 
 describe("project report IPC workflow", () => {
+  it("recovers a legacy invalid binding after restart and saves the original frozen report", async () => {
+    const s = setup()
+    s.deps.generate = vi.fn(async (options) => {
+      await options.checkpoint!.run(
+        "legacy-context",
+        [new HumanMessage("原会话")],
+        "报告生成 · legacy-model · 第 4 轮",
+        options.signal!,
+        options.progress!,
+        async () => new AIMessage(source.replace("meta.room", "overview.meta.period"))
+      )
+      throw new Error("未知数据引用：overview.meta.period")
+    })
+    const failed = await s.call("projectReportGenerate", {
+      action: "create",
+      scope,
+      instruction: "原要求"
+    })
+    expect(failed.success).toBe(false)
+    expect(failed.resume?.completedSteps).toBe(1)
+    const invoke = vi.fn(async () => {
+      throw new Error("Recovery must not invoke the model")
+    })
+    const model = mockStreamingModel({ invoke })
+    s.deps.generate = (options) =>
+      generateProjectReport({
+        ...options,
+        createModel: () => ({
+          name: "legacy-model",
+          budget: TEST_PROJECT_BUDGET,
+          agent: model,
+          final: model,
+          reviewer: model
+        })
+      })
+    registerProjectReportHandlers(s.deps)
+    const recovered = await s.call("projectReportGenerate", {
+      action: "resume",
+      runId: failed.resume!.runId
+    })
+    expect(recovered.success).toBe(true)
+    expect(recovered.data.html).toContain("2026-10-26 — 2026-11-01")
+    expect(recovered.data.summary.dataAsOf).toBe(failed.resume!.dataAsOf)
+    expect(recovered.data.version.modelName).toBe("legacy-model")
+    expect(invoke).not.toHaveBeenCalled()
+    expect(s.deps.loadPeriod).toHaveBeenCalledTimes(1)
+    expect(s.deps.loadPages).toHaveBeenCalledTimes(1)
+    expect(
+      (await s.call("projectReportRead", { reportId: recovered.data.summary.id })).data.html
+    ).toBe(recovered.data.html)
+    expect(
+      (await s.call<ProjectReportWorkspace>("projectReportWorkspace")).data.pendingRun
+    ).toBeUndefined()
+  })
   it("persists completed steps across restart and resumes the original scope, template and instruction", async () => {
     const s = setup()
     const firstReview = vi.fn(async () => new AIMessage("第一批审阅完成"))

@@ -123,6 +123,41 @@ describe("report snapshot and HTML", () => {
       renderReportHtml(source.replace('data-report-value="name"', 'data-report-value="salary"'), s)
     ).toThrow("未知")
   })
+  it("normalizes only known overview aliases and persists canonical bindings", () => {
+    const s = snapshot()
+    const original = source
+      .replace("<h1>综合报告</h1>", '<h1 data-report-value="overview.meta.period"></h1>')
+      .replace("summary.projectCount", "overview.summary.projectCount")
+      .replace("knowledge.window", "overview.knowledge.window")
+    const result = renderReportHtml(original, s)
+    expect(result.html).toContain(String(s.facts.meta.period))
+    expect(result.html).toContain(String(s.facts.summary.projectCount))
+    expect(result.html).toContain(String(s.facts.knowledge.window))
+    expect(result.source).not.toContain('data-report-value="overview.')
+    expect(result.source).toContain('data-report-value="meta.period"')
+    expect(renderReportHtml(result.source, s)).toEqual(result)
+    for (const invalid of [
+      "overview.meta.unknown",
+      "overview.summary.missing",
+      "overview.meta.__proto__",
+      "overview.members.name",
+      "overview.meta.period..extra",
+      "meta.period.extra"
+    ])
+      expect(() => renderReportHtml(source.replace("summary.projectCount", invalid), s)).toThrow(
+        "未知数据引用"
+      )
+  })
+  it("reports all unknown value bindings in one validation observation", () => {
+    expect(() =>
+      renderReportHtml(
+        source
+          .replace("summary.projectCount", "summary.missing")
+          .replace("knowledge.window", "knowledge.missing"),
+        snapshot()
+      )
+    ).toThrow("summary.missing、knowledge.missing")
+  })
   it("retains layout/references but removes old narrative, names and hard-coded figures from templates", () => {
     const layout = extractReportTemplate(source)
     expect(layout).toContain("body{color:#123}")
@@ -306,6 +341,75 @@ describe("bounded report Agent", () => {
         .html
     ).toContain("综合报告")
     expect(m.final.invoke).toHaveBeenCalledTimes(2)
+  })
+  it("continues the same conversation through validation errors, further queries and corrections", async () => {
+    const firstDraft = source
+      .replace("summary.projectCount", "summary.invalidCount")
+      .replace("knowledge.window", "knowledge.invalidWindow")
+    const secondDraft = source
+      .replace("综合报告", "第二版草稿")
+      .replace("summary.projectCount", "summary.stillInvalid")
+    const query = (section: string) =>
+      new AIMessage({
+        content: "",
+        tool_calls: [{ name: "report_data", args: { section }, id: section }]
+      })
+    const responses = [
+      query("members"),
+      new AIMessage(firstDraft),
+      query("overview"),
+      new AIMessage(secondDraft),
+      new AIMessage(source)
+    ]
+    const seen: BaseMessage[][] = []
+    const agent = mockStreamingModel({
+      invoke: vi.fn(async (messages: BaseMessage[]) => {
+        seen.push([...messages])
+        return responses.shift()!
+      })
+    })
+    const final = mockStreamingModel({
+      invoke: vi.fn(async () => {
+        throw new Error("Unexpected separate repair call")
+      })
+    })
+    const result = await generateProjectReport({
+      snapshot: snapshot(),
+      instruction: "保留我的暖色版式和全部成员",
+      template: {
+        id: "template",
+        name: "我的暖色模板",
+        preferences: "项目活动放在最后",
+        layout: source,
+        createdAt: "2026-11-01T00:00:00Z",
+        updatedAt: "2026-11-01T00:00:00Z"
+      },
+      createModel: () => ({
+        name: "model",
+        budget: TEST_PROJECT_BUDGET,
+        reviewer: testReviewer(),
+        agent,
+        final
+      })
+    })
+    expect(result.html).toContain("综合报告")
+    for (const index of [2, 4]) {
+      const text = seen[index].map((message) => String(message.content)).join("\n")
+      expect(text).toContain("保留我的暖色版式和全部成员")
+      expect(text).toContain("项目活动放在最后")
+      expect(text).toContain("HTML 校验未通过")
+      expect(text).toContain("htmlBindings")
+      expect(
+        seen[index].some(
+          (message) => message instanceof ToolMessage && message.name === "report_data"
+        )
+      ).toBe(true)
+    }
+    expect(seen[2].map((message) => String(message.content)).join("\n")).toContain(
+      "summary.invalidCount、knowledge.invalidWindow"
+    )
+    expect(seen[4].map((message) => String(message.content)).join("\n")).toContain("第二版草稿")
+    expect(final.invoke).not.toHaveBeenCalled()
   })
   it("caps tool rounds and calls, returns errors for unsupported tool arguments", async () => {
     const call = (name: string, args: Record<string, unknown>) =>

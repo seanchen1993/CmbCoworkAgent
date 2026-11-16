@@ -179,7 +179,7 @@ describe("report continuation from private checkpoints", () => {
     expect(state.pendingStep).toBeUndefined()
   })
 
-  it("retries invalid HTML repair instead of replaying a permanently invalid result", async () => {
+  it("resumes after saved validation observations and continues from the latest draft", async () => {
     const scope = {
       upperOrgLv1: "开发一室",
       period: { kind: "week" as const, anchorDate: "2026-10-27" }
@@ -193,19 +193,26 @@ describe("report continuation from private checkpoints", () => {
       exampleData: true
     })
     let state: ProjectModelCheckpointState = { completed: {} }
-    const agentCall = vi.fn(async () => new AIMessage("初稿不是HTML"))
-    const repairCall = vi
-      .fn(
-        async () =>
-          new AIMessage(
-            '<html><body><h1>修正后的报告</h1><p data-report-value="summary.projectCount"></p></body></html>'
-          )
-      )
-      .mockResolvedValueOnce(new AIMessage("修正依然不是HTML"))
+    const agentCall = vi
+      .fn(async (messages: BaseMessage[]) => {
+        const history = messages.map((message) => String(message.content)).join("\n")
+        expect(history).toContain("第三稿仍需修正")
+        expect(history).toContain("HTML 校验未通过")
+        return new AIMessage(
+          '<html><body><h1>修正后的报告</h1><p data-report-value="summary.projectCount"></p></body></html>'
+        )
+      })
+      .mockResolvedValueOnce(new AIMessage("初稿不是HTML"))
+      .mockResolvedValueOnce(new AIMessage("第二稿仍需修正"))
+      .mockResolvedValueOnce(new AIMessage("第三稿仍需修正"))
     const onReview = vi.fn()
     const reviewer = testReviewer(onReview)
     const agent = mockStreamingModel({ invoke: agentCall })
-    const final = mockStreamingModel({ invoke: repairCall })
+    const final = mockStreamingModel({
+      invoke: vi.fn(async () => {
+        throw new Error("Unexpected separate repair request")
+      })
+    })
     const generate = () =>
       generateProjectReport({
         snapshot,
@@ -220,13 +227,81 @@ describe("report continuation from private checkpoints", () => {
         })
       })
     await expect(generate()).rejects.toThrow("报告生成未完成")
+    expect(agentCall).toHaveBeenCalledTimes(3)
+    expect(state.pendingStep).toContain("校验反馈")
     const reviews = onReview.mock.calls.length
     state = JSON.parse(JSON.stringify(state))
     expect((await generate()).html).toContain("修正后的报告")
-    expect(agentCall).toHaveBeenCalledTimes(1)
-    expect(repairCall).toHaveBeenCalledTimes(2)
+    expect(agentCall).toHaveBeenCalledTimes(4)
+    expect(final.invoke).not.toHaveBeenCalled()
     expect(onReview).toHaveBeenCalledTimes(reviews)
   })
+
+  it.each([false, true])(
+    "recovers legacy saved HTML without replaying model requests unless the model changed: %s",
+    async (changeModel) => {
+      const scope = {
+        upperOrgLv1: "开发一室",
+        period: { kind: "week" as const, anchorDate: "2026-10-27" }
+      }
+      const snapshot = buildReportSnapshot({
+        scope,
+        data: makeReportPeriodExample(scope),
+        accumulation: null,
+        active: null,
+        knowledgeAsOf: "2026-11-12T00:00:00Z",
+        exampleData: true
+      })
+      const state: ProjectModelCheckpointState = { completed: {} }
+      const old = new ProjectModelCheckpoint(state, () => undefined)
+      await old.run(
+        "previous-release-prompt",
+        [new HumanMessage("旧版生成上下文")],
+        "报告生成 · original-model · 第 4 轮",
+        new AbortController().signal,
+        createProjectRunReporter(),
+        async () =>
+          new AIMessage(
+            '<html><body><h1>旧任务报告</h1><p data-report-value="overview.meta.period"></p><b data-report-value="overview.summary.projectCount"></b></body></html>'
+          )
+      )
+      old.markPending("报告生成 · original-model · 第 5 轮")
+      const invoke = vi.fn(
+        async () =>
+          new AIMessage(
+            '<html><body><h1>新模型报告</h1><p data-report-value="meta.period"></p></body></html>'
+          )
+      )
+      const model = mockStreamingModel({ invoke })
+      const onReview = vi.fn()
+      const events: ProjectAgentRunEvent[] = []
+      const result = await generateProjectReport({
+        snapshot,
+        instruction: "原报告要求",
+        checkpoint: new ProjectModelCheckpoint(JSON.parse(JSON.stringify(state)), () => undefined),
+        progress: createProjectRunReporter((event) => events.push(event)),
+        createModel: () => ({
+          name: changeModel ? "new-model" : "original-model",
+          budget: projectContextBudget({ maxTokens: 32768, maxOutputTokens: 4096 }),
+          agent: model,
+          final: model,
+          reviewer: testReviewer(onReview)
+        })
+      })
+      expect(result.html).toContain(String(snapshot.facts.meta.period))
+      expect(result.source).not.toContain("overview.meta")
+      if (changeModel) {
+        expect(result.html).toContain("新模型报告")
+        expect(invoke).toHaveBeenCalledTimes(1)
+        expect(onReview).toHaveBeenCalled()
+      } else {
+        expect(result.html).toContain("旧任务报告")
+        expect(invoke).not.toHaveBeenCalled()
+        expect(onReview).not.toHaveBeenCalled()
+        expect(JSON.stringify(events)).toContain("恢复已保存的报告 HTML")
+      }
+    }
+  )
 
   it("does not reuse responses for different data or model/context configuration", async () => {
     const state: ProjectModelCheckpointState = { completed: {} }

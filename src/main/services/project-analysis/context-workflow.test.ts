@@ -95,6 +95,7 @@ describe("project Agent workflows with configured models over real SSE", () => {
       let phase: "analysis" | "report" | "revise" = "analysis"
       let round = 0
       let repaired = false
+      let repairSawTemplate = false
       let revisionSawOriginal = false
       const server = createServer(async (req, res) => {
         let raw = ""
@@ -112,8 +113,13 @@ describe("project Agent workflows with configured models over real SSE", () => {
           reviewBodies.push(body.messages.map((m) => m.content).join("\n"))
           send({ role: "assistant", content: "本批已审阅。" })
           send({ content: "阶段是当前快照，累计指标不当作周期增量；完整明细可回查。" }, "stop")
-        } else if (!body.tools?.length) {
+        } else if (
+          body.messages.some((message) => message.content?.startsWith("HTML 校验未通过"))
+        ) {
           repaired = true
+          repairSawTemplate = body.messages.some((message) =>
+            message.content?.includes("内置推荐：室级综合运营报告")
+          )
           send({ role: "assistant", content: html("本室综合报告") }, "stop")
         } else {
           if (phase === "revise" && round === 0)
@@ -233,6 +239,7 @@ describe("project Agent workflows with configured models over real SSE", () => {
         expect(report.html).toContain(String(snapshot.facts.members.at(-1)!.name))
         expect(report.html).toContain("近30天")
         expect(repaired).toBe(true)
+        expect(repairSawTemplate).toBe(true)
         expect(reviewBodies.join("\n")).toContain(projects[0].name)
         expect(reviewBodies.join("\n")).not.toContain(projects.at(-1)!.name)
         expect(report.reviewNote).toContain("项目分析 6条")

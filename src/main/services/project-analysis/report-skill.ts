@@ -12,8 +12,8 @@ Commit采纳率=已采纳行/有效生成行；Push采纳率=已推送采纳行/
 区分事实、可能原因和建议；不从调用或代码数量推导个人绩效、完成交付或因果关系。没有对照周期数据不得编造环比。
 HTML 输出约定（只是数据填充规则，不限制布局）：
 1. 只输出完整 <!doctype html><html><head>…</head><body>…</body></html>；无 Markdown 解释。CSS 写在 style 内，自主设计响应式版式和打印样式。可用静态 SVG、表格、details，不用脚本、CDN、图片外链、表单或 iframe。
-2. 本期汇总指标用空文本元素引用，例如 <span data-report-value="summary.projectCount"></span>；支持 meta、summary、knowledge 的字段。项目列表/项目分析的补充字段和异常诊断正文可引用已审阅或工具核实的原始值，明确累计口径；这些补充字段没有同名数据绑定路径，不能编造引用，也不能用本期summary指标替代累计值。
-3. 完整明细使用 data-report-repeat="members|projects|features|knowledgeFiles" 放在要重复的一行/卡片上。内部 data-report-value="name" 等直接引用该行字段。可同时引用全局 summary 等。不嵌套 repeat。不手写30份成员行；程序将自动填充完整快照列表。
+2. 本期汇总指标用空文本元素引用，例如 <span data-report-value="summary.projectCount"></span>；支持 meta、summary、knowledge 的字段。合法引用见 htmlBindings.globalValues，报告周期写 meta.period。overview 只是输入数据的包装层，不写进 data-report-value；例如 overview.meta.period 应写为 meta.period。项目列表/项目分析的补充字段和异常诊断正文可引用已审阅或工具核实的原始值，明确累计口径；这些补充字段没有同名数据绑定路径，不能编造引用，也不能用本期summary指标替代累计值。
+3. 完整明细使用 data-report-repeat="members|projects|features|knowledgeFiles" 放在要重复的一行/卡片上。内部 data-report-value="name" 等直接引用该行字段，合法字段见 htmlBindings.repeat 对应列表的 fields。可同时引用全局 summary 等。不嵌套 repeat。不手写30份成员行；程序将自动填充完整快照列表。
 4. 分析正文放在 data-report-insight 元素，基于已读证据写少量结论和建议；数字可嵌入上述引用。缺失字段显示为未记录。不要捏造数据引用字段。
 5. 参考内置推荐或个人模板时沿用版式、模块和偏好，根据用户要求调整；所有业务数字、日期、图形数值和结论必须按本期重写。模板中的【按本期重新撰写】不能出现在最终报告中。
 6. 修改模式保留未被要求修改的内容和样式，继续使用同一快照。用户如果要求新周期或最新数据，请在报告中注明需新建报告，不能自行更换数据。

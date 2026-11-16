@@ -22,6 +22,7 @@ export interface ProjectModelCheckpointState {
 /** Replay successful model calls against the same frozen data to rebuild context without paying for them again. */
 export class ProjectModelCheckpoint {
   private readonly responses = new WeakMap<AIMessage, string>()
+  private readonly restored = new WeakSet<AIMessage>()
   constructor(
     readonly state: ProjectModelCheckpointState,
     private readonly save: () => void
@@ -47,6 +48,7 @@ export class ProjectModelCheckpoint {
         .finish("复用已保存结果，本步骤不再次调用模型")
       const response = new AIMessage(existing.response)
       this.responses.set(response, key)
+      this.restored.add(response)
       return response
     }
     this.state.pendingStep = title
@@ -71,6 +73,15 @@ export class ProjectModelCheckpoint {
       this.save()
     }
     return response
+  }
+
+  wasRestored(response: AIMessage): boolean {
+    return this.restored.has(response)
+  }
+
+  markPending(title: string): void {
+    this.state.pendingStep = title
+    this.save()
   }
 
   /** A completed stream may still fail downstream validation; retry that output on continuation. */

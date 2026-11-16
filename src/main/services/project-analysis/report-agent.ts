@@ -25,7 +25,7 @@ import {
   type ProjectAnalysisModel
 } from "../project-analysis-agent"
 import { reportDataPage, type ReportSnapshot } from "./report-data"
-import { emptyReportRow, renderReportHtml } from "./report-html"
+import { reportHtmlBindings, renderReportHtml } from "./report-html"
 import { PROJECT_REPORT_SKILL } from "./report-skill"
 import type { SavedReportTemplate } from "./report-store"
 import type { RunAnalysisStages } from "../../../shared/project-run-analysis"
@@ -177,6 +177,31 @@ export async function generateProjectReport(
     : createProjectAnalysisModel(tools, options.modelId)
   contextManager.configure(model, tools)
   const f = options.snapshot.facts
+  // Older checkpoints can already contain a complete report with an envelope-path mistake.
+  // Revalidate that output first, even when newer prompts/review batching changed cache keys.
+  const savedOutput = Object.values(options.checkpoint?.state.completed ?? {}).findLast(
+    (step) =>
+      step.title.startsWith(`报告生成 · ${model.name} · `) &&
+      !step.response.tool_calls?.length &&
+      !step.response.invalid_tool_calls?.length
+  )
+  if (savedOutput) {
+    try {
+      const output = renderReportHtml(
+        contentText(new AIMessage(savedOutput.response)),
+        options.snapshot
+      )
+      signal.throwIfAborted()
+      progress
+        .begin("render", "恢复已保存的报告 HTML")
+        .finish("数据引用与完整性校验通过，沿用原数据；无需再次调用模型")
+      return { ...output, modelName: model.name }
+    } catch {
+      signal.throwIfAborted()
+      // Still-invalid output goes through the normal streamed repair path below.
+    }
+  }
+  const bindings = reportHtmlBindings(f)
   // Review every period contribution and its project background. The complete room snapshot
   // remains available to the page tools; unrelated historical projects need not be pre-read.
   const periodProjects = new Set(f.projects.map((row) => String(row.projectId)))
@@ -238,15 +263,7 @@ export async function generateProjectReport(
         : { unavailable: "历史报告没有项目分析页快照" },
       reviewScope:
         "自动审阅覆盖本期全部活动及本期项目的累计背景。全室其他项目仍可通过项目列表、项目分析工具完整查询，但不能算作本期活跃项目。",
-      lists: Object.fromEntries(
-        (["members", "projects", "features", "knowledgeFiles"] as const).map((key) => [
-          key,
-          {
-            total: f[key].length,
-            fields: Object.keys(f[key][0] ?? emptyReportRow(key))
-          }
-        ])
-      )
+      htmlBindings: bindings
     }
     const messages: BaseMessage[] = [
       new SystemMessage(`${PROJECT_REPORT_SKILL}\n${PROJECT_CONTEXT_GUIDE}`),
@@ -289,110 +306,124 @@ export async function generateProjectReport(
         runner === model.agent
       )
     }
-    let response: AIMessage | undefined
     let calls = 0
-    for (let round = 0; round < 5; round++) {
-      signal.throwIfAborted()
-      try {
-        response = await invoke(model.agent)
-      } catch (error) {
-        const status = error && typeof error === "object" && "status" in error ? error.status : null
-        if (status === 400 || status === 422) {
-          response = undefined
+    let toolRounds = 0
+    let finalInstructionSent = false
+    const nextResponse = async (): Promise<AIMessage> => {
+      while (toolRounds < 5 && calls < 10) {
+        const round = toolRounds++
+        signal.throwIfAborted()
+        let response: AIMessage
+        try {
+          response = await invoke(model.agent)
+        } catch (error) {
+          const status =
+            error && typeof error === "object" && "status" in error ? error.status : null
+          if (status === 400 || status === 422) {
+            toolRounds = 5
+            break
+          }
+          throw error
+        }
+        signal.throwIfAborted()
+        if (
+          response.invalid_tool_calls?.length ||
+          (response.tool_calls?.length ?? 0) > 10 - calls
+        ) {
+          toolRounds = 5
           break
         }
-        throw error
-      }
-      signal.throwIfAborted()
-      if (response.invalid_tool_calls?.length || (response.tool_calls?.length ?? 0) > 10 - calls) {
-        response = undefined
-        break
-      }
-      if (!response.tool_calls?.length) break
-      for (const [i, call] of response.tool_calls.entries()) call.id ??= `report-${round}-${i}`
-      messages.push(response)
-      for (const call of response.tool_calls) {
-        calls++
-        const step = progress.begin(
-          "tool",
-          PROJECT_TOOL_LABELS[call.name] ?? call.name,
-          "正在执行查询…",
-          JSON.stringify(call.args, null, 2).slice(0, 4000)
-        )
-        let content: string
-        let success = false
-        let resultId: string | undefined
-        let cached = false
-        try {
-          const selected = tools.find((tool) => tool.name === call.name)
-          if (!selected) throw new Error("只支持已提供的页面查询工具")
-          const result = await contextManager.query(selected, call.args)
-          content = result.content
-          resultId = result.resultId
-          cached = result.cached
-          signal.throwIfAborted()
-          success = true
-        } catch (error) {
-          signal.throwIfAborted()
-          content = JSON.stringify({
-            error: error instanceof Error ? error.message : "查询失败；不要重复失败查询"
-          })
+        if (!response.tool_calls?.length) return response
+        for (const [i, call] of response.tool_calls.entries()) call.id ??= `report-${round}-${i}`
+        messages.push(response)
+        for (const call of response.tool_calls) {
+          calls++
+          const step = progress.begin(
+            "tool",
+            PROJECT_TOOL_LABELS[call.name] ?? call.name,
+            "正在执行查询…",
+            JSON.stringify(call.args, null, 2).slice(0, 4000)
+          )
+          let content: string
+          let success = false
+          let resultId: string | undefined
+          let cached = false
+          try {
+            const selected = tools.find((tool) => tool.name === call.name)
+            if (!selected) throw new Error("只支持已提供的页面查询工具")
+            const result = await contextManager.query(selected, call.args)
+            content = result.content
+            resultId = result.resultId
+            cached = result.cached
+            signal.throwIfAborted()
+            success = true
+          } catch (error) {
+            signal.throwIfAborted()
+            content = JSON.stringify({
+              error: error instanceof Error ? error.message : "查询失败；不要重复失败查询"
+            })
+          }
+          const preview = toolResultPreview(content)
+          step.finish(
+            success
+              ? `${cached ? "复用已有查询 · " : ""}${preview.detail}`
+              : "工具查询失败，可修正条件重试",
+            preview.output,
+            !success
+          )
+          messages.push(
+            contextManager.toolMessage(
+              new ToolMessage({ content, tool_call_id: call.id!, name: call.name }),
+              resultId
+            )
+          )
         }
-        const preview = toolResultPreview(content)
-        step.finish(
-          success
-            ? `${cached ? "复用已有查询 · " : ""}${preview.detail}`
-            : "工具查询失败，可修正条件重试",
-          preview.output,
-          !success
-        )
+      }
+      if (!finalInstructionSent) {
+        finalInstructionSent = true
         messages.push(
-          contextManager.toolMessage(
-            new ToolMessage({ content, tool_call_id: call.id!, name: call.name }),
-            resultId
+          new HumanMessage(
+            "工具查询结束。根据已有事实直接输出完整HTML，明细列表由程序填充；不要编造未查询到的结论。"
           )
         )
       }
-      response = undefined
-      if (calls >= 10) break
+      return invoke(model.final)
     }
-    if (!response) {
-      messages.push(
-        new HumanMessage(
-          "工具查询结束。根据已有事实直接输出完整HTML，明细列表由程序填充；不要编造未查询到的结论。"
-        )
-      )
-      response = await invoke(model.final)
-    }
-    signal.throwIfAborted()
-    const renderStep = progress.begin("render", "检查报告 HTML", "校验数据引用、静态内容与完整性")
     let output: ReturnType<typeof renderReportHtml>
-    try {
-      output = renderReportHtml(contentText(response), snapshot)
-    } catch (error) {
-      renderStep.update("HTML 需要修正，正在通过流式模型请求修复")
-      const repairMessages: BaseMessage[] = [
-        messages[0],
-        messages[1],
-        messages[2],
-        new HumanMessage(`本次要求：${options.instruction}`),
-        contextManager.document(response, "待修正的报告 HTML"),
-        new HumanMessage(
-          `HTML未通过检查：${error instanceof Error ? error.message : "格式错误"}。只修正输出格式和数据引用，精简样式，重新输出完整HTML。`
-        )
-      ]
-      contextManager.pin([repairMessages[3], repairMessages[5]])
-      const repaired = await invoke(model.final, repairMessages)
+    let freshInvalidOutputs = 0
+    let previousDraft: AIMessage | undefined
+    let previousFeedback: HumanMessage | undefined
+    for (;;) {
+      const response = await nextResponse()
       signal.throwIfAborted()
+      const renderStep = progress.begin("render", "检查报告 HTML", "校验数据引用、静态内容与完整性")
       try {
-        output = renderReportHtml(contentText(repaired), snapshot)
+        output = renderReportHtml(contentText(response), snapshot)
+        renderStep.finish("HTML 校验完成，可以预览和保存")
+        break
       } catch (error) {
-        options.checkpoint?.discard(repaired)
-        throw error
+        const issue = error instanceof Error ? error.message : "格式错误"
+        renderStep.finish(`校验未通过：${issue}；已反馈到当前会话`, undefined, true)
+        // Keep the generated draft and validator observation in this same conversation.
+        // Only the latest draft must stay verbatim; older drafts can be compacted as usual.
+        if (previousDraft) contextManager.releaseDocument(previousDraft)
+        if (previousFeedback) contextManager.unpin(previousFeedback)
+        previousDraft = response
+        previousFeedback = new HumanMessage(
+          `HTML 校验未通过（校验结果，不是新的用户要求）：${issue}。合法绑定 htmlBindings：${JSON.stringify(bindings)}。请在当前会话继续修正最新草稿，逐项处理上述问题；保留用户要求、模板偏好和已核实的分析内容，不得创造字段或手写缺失值；overview 不是绑定路径的一部分。修正后重新输出完整 HTML，系统会再次校验。`
+        )
+        messages.push(contextManager.document(response, "最新报告 HTML 草稿"), previousFeedback)
+        contextManager.pin([previousFeedback])
+        // Replaying saved observations must advance to the next turn instead of exhausting
+        // the new run's repair budget on the very same outputs again.
+        if (!options.checkpoint?.wasRestored(response)) freshInvalidOutputs++
+        if (freshInvalidOutputs >= 3) {
+          options.checkpoint?.markPending("根据校验反馈继续修正报告 HTML")
+          throw error
+        }
       }
     }
     signal.throwIfAborted()
-    renderStep.finish("HTML 校验完成，可以预览和保存")
     return { ...output, modelName: model.name, reviewNote: reviewed.note }
   } catch (error) {
     if (error instanceof ProjectContextError || options.signal?.aborted) throw error
@@ -407,7 +438,7 @@ export async function generateProjectReport(
       /HTML|data-report-|数据引用|列表|节点|报告文件|上下文/.test(error.message)
     )
       throw new Error(
-        `报告生成未完成：${error.message}。请重试${options.previousSource ? "；原版本已保留" : ""}。`
+        `报告生成未完成：${error.message}。${options.checkpoint ? "会话进度和数据已保留，可点击“继续运行”接着修正" : "请重试"}${options.previousSource ? "；原版本已保留" : ""}。`
       )
     throw new Error(projectAnalysisError(error), { cause: error })
   }

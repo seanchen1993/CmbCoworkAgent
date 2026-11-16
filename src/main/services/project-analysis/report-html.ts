@@ -16,9 +16,33 @@ const allowed = new Set(
   )
 )
 const repeatKeys = ["members", "projects", "features", "knowledgeFiles"] as const
+const valueGroups = ["meta", "summary", "knowledge"] as const
 const CSP =
   "default-src 'none'; script-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src 'none'; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'"
 export const REPORT_SOURCE_LIMIT = 100_000
+
+/** Binding paths are rooted at facts, not at the overview envelope used by model inputs. */
+export function reportHtmlBindings(facts: ReportFacts) {
+  return {
+    globalValues: valueGroups.flatMap((group) =>
+      Object.keys(facts[group]).map((field) => `${group}.${field}`)
+    ),
+    repeat: Object.fromEntries(
+      repeatKeys.map((key) => [
+        key,
+        {
+          total: facts[key].length,
+          fields: Object.keys(facts[key][0] ?? emptyReportRow(key))
+        }
+      ])
+    )
+  }
+}
+
+function canonicalValuePath(path: string): string {
+  // This is an unambiguous envelope alias, never a fuzzy match or an invented metric.
+  return path.trim().replace(/^overview\.(?=(?:meta|summary|knowledge)\.)/, "")
+}
 
 function clean(source: string) {
   source = source
@@ -96,8 +120,9 @@ function getValue(facts: ReportFacts, path: string, row?: ReportRow): string {
   let value: unknown
   if (/^[a-zA-Z][a-zA-Z0-9]*$/.test(path) && row && Object.hasOwn(row, path)) value = row[path]
   else {
-    const [group, field, extra] = path.split(".")
-    if (extra || !["meta", "summary", "knowledge"].includes(group))
+    const parts = path.split(".")
+    const [group, field] = parts
+    if (parts.length !== 2 || !valueGroups.includes(group as (typeof valueGroups)[number]))
       throw new Error(`未知数据引用：${path}`)
     const values = facts[group as "meta"]
     if (!field || !Object.hasOwn(values, field)) throw new Error(`未知数据引用：${path}`)
@@ -131,11 +156,13 @@ export function renderReportHtml(
     throw new Error("HTML仍含模板占位内容，请按本期数据重写文字和图表并移除占位标记")
   const doc = clean(source)
   const refs = new Set<string>()
+  const invalidRefs = new Set<string>()
   function validate(parent: Parent, row?: ReportRow) {
     for (const node of parent.childNodes) {
       if (!isElement(node)) continue
       const repeat = attr(node, "data-report-repeat")
-      const ref = attr(node, "data-report-value")
+      const rawRef = attr(node, "data-report-value")
+      const ref = rawRef === undefined ? undefined : canonicalValuePath(rawRef)
       if (
         (repeat || ref) &&
         ["html", "head", "body", "style", "title", "svg", "defs"].includes(node.tagName)
@@ -149,14 +176,21 @@ export function renderReportHtml(
         // Empty lists still validate their field names against the stable schema.
         nextRow = snapshot.facts[repeat as "members"][0] ?? emptyReportRow(repeat)
       }
-      if (ref) {
-        getValue(snapshot.facts, ref, nextRow)
-        refs.add(ref)
+      if (ref !== undefined) {
+        try {
+          getValue(snapshot.facts, ref, nextRow)
+          refs.add(ref)
+          node.attrs.find((a) => a.name === "data-report-value")!.value = ref
+        } catch {
+          invalidRefs.add(rawRef!)
+        }
         text(node, "")
       } else validate(node, nextRow)
     }
   }
   validate(doc)
+  if (invalidRefs.size)
+    throw new Error(`未知数据引用：${[...invalidRefs].join("、")}。请使用 htmlBindings 中的字段`)
   if (refs.size === 0)
     throw new Error("报告须使用 data-report-value 绑定真实数据，不要手写指标数字")
   const normalized = serialize(doc)
