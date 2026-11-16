@@ -9,9 +9,24 @@ Use the product's built-in browser for browser-related tasks while preserving th
 
 ## Choose the browser capability
 
+The built-in browser is disabled by default.
+
+### Mandatory first gate for every browser-access failure
+
+If a browser request cannot start, navigation fails because the browser service is unavailable, or the expected page-control tools are missing, follow this gate before doing anything else:
+
+1. Tell the user that the built-in browser is disabled by default.
+2. Ask the user to confirm both of the following: the built-in browser has been enabled by opening the **“浏览器”** tab in the upper-right corner and clicking its enable button, and the App has been restarted after enablement.
+3. Wait for the user's explicit answer covering both conditions. Tool presence, an earlier App session, or an assumption that it was enabled does not count as confirmation for the current App session.
+4. If it is not enabled, tell the user to open the upper-right **“浏览器”** tab, click the enable button, and then restart the App. Stop troubleshooting until they complete those actions.
+5. If it is enabled but the App has not been restarted afterward, tell the user to restart the App and open a new conversation. Stop troubleshooting until they do so.
+6. Only if the user explicitly confirms both enablement and the subsequent App restart may you continue to Node.js, npm registry, or Playwright MCP diagnostics.
+
+Do not run `node --version`, `npm config get registry`, `npx`, or any other diagnostic command before this gate is satisfied. Do not combine the enablement question with shell diagnostics in the same step.
+
 1. Inspect the tools available in the current conversation for `inAppBrowser` capabilities. Page-control tools normally begin with `mcp__inAppBrowser__browser_`; product helpers include `inAppBrowser_list_recordings`, `inAppBrowser_execute_recording`, `inAppBrowser_extract_iframes`, and `inAppBrowser_read_wps_document`.
 2. Treat the built-in browser as usable only when at least one relevant page-control tool is available. A product helper by itself does not prove that the agent can open or operate a page. When usable page-control tools are available, prefer them over external browser tools and follow the operating guidance below.
-3. When no usable in-app browser page-control tools are available, tell the user that the built-in browser tool is unavailable and may not be enabled. Ask whether they want to enable it, and give these UI directions: open the **“浏览器”** tab in the upper-right corner, then use the enable button at the bottom.
+3. When no usable in-app browser page-control tools are available, tell the user that the built-in browser is disabled by default. Ask whether it has been enabled from the upper-right **“浏览器”** tab and whether the App was restarted afterward. If either condition is unmet, give the corresponding enablement/restart directions from the mandatory gate above.
 4. If the user does not want to enable the built-in browser, look for another available browser-related skill or tool and offer or use that alternative. Do not imply that the built-in browser was used.
 
 ## Operate the built-in browser
@@ -43,17 +58,18 @@ Do not enter credentials, bypass authentication, or treat the login page as perm
 
 ## Troubleshoot tools still missing after enablement
 
-If the user says they enabled the built-in browser but the current conversation still has no `inAppBrowser` tools, check or guide these causes in order:
+Enter this section only after the mandatory gate above has been satisfied. If the user has not explicitly confirmed both that the built-in browser is enabled and that the App was restarted afterward, return to that gate and do not execute commands.
 
-1. The app was not restarted, or the user did not open a new conversation after enabling the feature. Ask them to restart the app and create a new conversation, then check again.
-2. The Node.js version is below 20. Check with `node --version` when command execution is available. Parse the major version rather than comparing version strings lexically. The required version is Node.js 20 or newer.
-3. The npm registry is misconfigured. Check with `npm config get registry`. The expected value is the official npm registry. If it is `https://registry.npmmirror.com/`, tell the user that this mirror is unsupported for the built-in-browser setup and ask them to switch:
+After confirmation, if the current conversation still has no usable `inAppBrowser` page-control tools or browser access still cannot start, check these causes strictly in order:
+
+1. The Node.js version is below 20. Check with `node --version` when command execution is available. Parse the major version rather than comparing version strings lexically. The required version is Node.js 20 or newer.
+2. The npm registry is misconfigured. Check with `npm config get registry`. The expected value is the official npm registry. If it is `https://registry.npmmirror.com/`, tell the user that this mirror is unsupported for the built-in-browser setup and ask them to switch:
 
    ```bash
    npm config set registry https://registry.npmjs.org/
    ```
 
-4. If none of the above explains the issue and command execution is available, run this diagnostic command, following any environment approval requirements:
+3. If none of the above explains the issue and command execution is available, run this diagnostic command, following any environment approval requirements:
 
    ```bash
    npx -y --prefer-offline @playwright/mcp@0.0.85
