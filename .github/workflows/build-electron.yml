@@ -630,6 +630,7 @@ jobs:
             : "${CSC_KEY_PASSWORD:?Set the CSC_KEY_PASSWORD secret to the certificate password}"
             args+=(--config.forceCodeSigning=true --config.dmg.sign=true)
           else
+            unset CSC_LINK CSC_KEY_PASSWORD
             args+=(--config.mac.identity=-)
           fi
           npx electron-builder "${args[@]}"

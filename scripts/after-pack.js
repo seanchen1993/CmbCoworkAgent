@@ -3,6 +3,34 @@ const fs = require("fs")
 const path = require("path")
 
 module.exports = async function (context) {
+  if (context?.electronPlatformName === "darwin") {
+    const { Arch } = require("electron-builder")
+    const arch = Arch[context.arch]
+    const productName = context.packager.appInfo.productFilename
+    const ptyRoot = path.join(
+      context.appOutDir,
+      `${productName}.app`,
+      "Contents",
+      "Resources",
+      "app.asar.unpacked",
+      "node_modules",
+      "node-pty"
+    )
+    const helpers = [
+      path.join(ptyRoot, "build", "Release", "spawn-helper"),
+      path.join(ptyRoot, "prebuilds", `darwin-${arch}`, "spawn-helper")
+    ].filter((helper) => fs.existsSync(helper))
+
+    if (helpers.length === 0) {
+      throw new Error(`after-pack: macOS spawn-helper missing from ${ptyRoot} (${arch})`)
+    }
+    // node-pty ships the prebuilt helper without execute permission.
+    for (const helper of helpers) {
+      fs.chmodSync(helper, 0o755)
+    }
+    return
+  }
+
   try {
     const isLinux = process.platform === "linux" || process.env.FORCE_AFTER_PACK_LINUX === "1"
     if (!isLinux) {
